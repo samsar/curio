@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/go-chi/chi/v5 v5.3.0
+	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/spf13/cobra v1.10.2
