@@ -332,6 +332,25 @@ connection time, so the migration PRAGMA was redundant *and* breaking.
 
 ---
 
+## Job queue claim via atomic UPDATE ... RETURNING
+
+**Decision:** `ClaimNext` uses a single `UPDATE jobs SET status='running' WHERE
+id = (SELECT id ... LIMIT 1) RETURNING ...` statement, not a `BEGIN; SELECT;
+UPDATE; COMMIT;` transaction.
+
+**Why:** The transaction approach deadlocks under concurrent workers. The
+initial SELECT takes a SHARED lock; when each worker tries to upgrade to a
+RESERVED lock for the UPDATE, they all block on each other and SQLite's
+busy_timeout doesn't save us under load. The single-statement form acquires
+the write lock immediately, serializes cleanly across workers, and is also
+shorter code.
+
+Tested with 20 jobs / 8 workers / `-race`: every job claimed exactly once,
+no duplicates, no errors. The test lives in jobs_test.go specifically so the
+multi-worker semantics are locked in before the M1 worker-pool expansion.
+
+---
+
 ## What's deferred from the v1 API
 
 These are intentionally omitted from `api/openapi.yaml`. Each is additive when
