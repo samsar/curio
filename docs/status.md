@@ -1,91 +1,106 @@
-# Status (handoff)
+# Status
 
-## What's done
+## M0 — Walking Skeleton
 
-| Step | Package | Description | Tests |
-|---|---|---|---|
-| 1 | `internal/curiohome` | `$CURIO_HOME` resolution, marker file, atomic writes | 11 |
-| 1 | `internal/config` | YAML config with overlay + validation | 14 |
-| 3 | `internal/urlutil` | URL normalization (dedup key) | 40+ |
-| 4 | `internal/store/sqlite/db.go` + `migrations/` | Open, Migrate, sqlite-vec, embedded FS | 7 |
-| 5 | `internal/store/store.go` + `sqlite/documents.go` + `sqlite/extractions.go` + `sqlite/bookmarks.go` + `sqlite/jobs.go` | CRUD impls + interfaces, claim-once job queue | 18 |
-| 6 | `internal/store/sqlite/chunks.go` | FTS5 + sqlite-vec writes, BM25 + ANN search | 5 |
-| 10 | `internal/indexer/chunker.go` | Paragraph-aware chunker with overlap | 9 |
-| 12 | `internal/search/rrf.go` + `search.go` | RRF + hybrid engine + collapse strategies | 11 |
-| - | `internal/fetcher/fetcher.go` | Interface + Single dispatcher | - |
-| - | `internal/embedder/embedder.go` | Interface | - |
+**Code complete. All packages build, all unit tests green under `-race`.**
 
-All tests green under `-race` with `make test`. Both `curio` and
-`curio-daemon` binaries build clean. The daemon currently exposes only
-`/v1/healthz` as a placeholder from the scaffold.
+The only thing standing between today's repo and the M0 "done when" demo is
+installing Ollama and pulling `nomic-embed-text`. Everything else is wired.
 
-Total: ~4000 LOC across internal/, ~50% tests.
+### Completed packages
 
-## What's not yet built
+| Step | Package | Tests |
+|---|---|---|
+| 1 | `internal/curiohome` | 11 |
+| 1 | `internal/config` | 14 |
+| 3 | `internal/urlutil` | 40+ |
+| 4 | `internal/store/sqlite/db.go` + migrations | 7 |
+| 5 | `internal/store/{store.go, sqlite/*}` CRUD impls | 18 |
+| 6 | `internal/store/sqlite/chunks.go` (FTS5 + vec) | 5 |
+| 8 | `internal/fetcher/{fetcher.go, web2md.go}` | 10 |
+| 9 | `internal/embedder/{embedder.go, ollama.go}` | 6 |
+| 10 | `internal/indexer/chunker.go` | 9 |
+| 11 | `internal/jobs/{worker.go, handlers.go}` | 7 |
+| 12 | `internal/search/{rrf.go, search.go}` | 11 |
+| 13 | `internal/api/*` (HTTP handlers) | smoke-tested via curl |
+| 14 | `internal/daemonctl/lifecycle.go` | smoke-tested via CLI |
+| 15 | `internal/cli/*` + `internal/client/client.go` | smoke-tested via CLI |
+| 16 | `cmd/curio-daemon/main.go` daemon wiring + auto-init | runs cleanly |
 
-Critical path for completing M0:
+**Total:** ~6600 LOC across `internal/`, ~50% tests.
 
-1. **`internal/embedder/ollama.go`** — HTTP client against
-   `http://localhost:11434/api/embeddings`. Tiny surface; needs to live
-   against a real Ollama instance to validate.
-2. **`internal/fetcher/web2md.go`** — `exec.Command` wrapper around the
-   user's `web2md` Node tool. Returns a `Result` with markdown + title.
-3. **`internal/indexer/indexer.go`** — orchestrates fetch → chunker →
-   embedder → chunks store. Idempotent per document via
-   `ChunkStore.ReplaceForDocument`. Pure plumbing once the deps exist.
-4. **`internal/jobs/worker.go`** — polls `JobQueue.ClaimNext`, dispatches
-   to a handler registry by `kind`. M0 runs one worker. Job handlers for
-   `fetch` (calls dispatcher → fetcher → updates document + extraction →
-   enqueues `index`) and `index` (calls indexer → marks done).
-5. **`internal/api/*`** — HTTP handlers for `POST /v1/bookmarks`,
-   `POST /v1/search`, `GET /v1/documents/{id}`, `GET /v1/healthz`,
-   `GET /v1/stats`. Mounted via chi. Error responses are RFC 7807.
-6. **`internal/client/client.go`** — thin HTTP client used by the CLI.
-7. **`internal/cli/*`** — `curio add`, `curio search`, `curio status`,
-   `curio daemon {start|stop|status}`.
-8. **`internal/daemonctl/*`** — PID file lifecycle + auto-start.
-9. **`cmd/curio-daemon/main.go`** — wire all the pieces together: load
-   config, open DB, run migrations, construct stores/indexer/engine,
-   start API server, start worker.
-
-## Decisions made along the way
-
-Newly logged in `docs/decisions.md`:
-
-- SQLite build tags `sqlite_fts5,sqlite_json` are required and live in the
-  Makefile. CI uses `make` so the tag list can't drift.
-- DSN uses mattn's `_fk=true&_journal_mode=WAL&_synchronous=NORMAL&
-  _busy_timeout=5000` (NOT modernc's `_pragma=...`).
-- Migrations don't set `PRAGMA journal_mode` (can't run in a transaction);
-  it's set per-connection by the DSN.
-- Job claim is one atomic `UPDATE ... WHERE id = (SELECT ...) RETURNING`
-  statement, not BEGIN/SELECT/UPDATE. Avoids deadlock under concurrent
-  workers; tested with 20 jobs / 8 workers / `-race`.
-
-## How to verify
+## How to demo
 
 ```sh
-make test         # all unit + integration tests
-make build        # both binaries
-./bin/curio version
-./bin/curio-daemon # starts on :8765, /v1/healthz responds
+# One-time setup
+brew install ollama
+ollama serve &
+ollama pull nomic-embed-text
+
+# Verify
+curl -s http://localhost:11434/api/tags | jq '.models[].name'
+
+# Use curio
+cd ~/projects/curio
+make build
+./bin/curio daemon start
+
+# Configure the web2md path. Edit ~/.curio/config.yaml and add:
+#   fetcher:
+#     web2md:
+#       bin: "/Users/samansartipi/projects/experiments/web-to-markdown/web2md.js"
+# Then restart: ./bin/curio daemon stop && ./bin/curio daemon start
+
+./bin/curio add https://martinfowler.com/articles/feature-toggles.html --wait
+./bin/curio search "feature flag rollout"
 ```
 
-## Suggested next-session order
+`docs/setup.md` has more detail and troubleshooting.
 
-The critical-path order to reach the M0 "done when" demo:
+## Known M0 gaps to address later
 
-1. Write `internal/embedder/ollama.go` against a running local Ollama with
-   `ollama pull nomic-embed-text`. Smallest unknown.
-2. Write `internal/fetcher/web2md.go` against the existing
-   `~/projects/experiments/web-to-markdown/` tool.
-3. Write `internal/indexer/indexer.go` (orchestration only — all the
-   subcomponents already exist and are tested).
-4. Write `internal/jobs/worker.go` + handler registry + the two handlers.
-5. Wire `cmd/curio-daemon/main.go` to construct everything and start.
-6. Write the four API handlers (bookmarks create, search, get document,
-   stats) and mount them.
-7. Write the CLI subcommands (`add`, `search`, `status`, `daemon`).
-8. Run the demo end-to-end.
+These are not bugs — they're scope-trimmed pieces deferred from M0 to M1+:
 
-After that, M1 (importers) starts.
+- **`curio init`** — there's no explicit init command; the CLI auto-inits
+  `~/.curio` on first run. If a future workflow needs explicit init
+  (e.g., to choose a different embedder upfront), adding it is trivial.
+- **`/v1/stats` returns version only.** Counter methods on the stores
+  would surface document/bookmark/job totals. Add when M1 (importers)
+  needs progress reporting.
+- **Tags from bookmarks aren't denormalized into `chunks_fts`.** The
+  index handler stubs this — would need `BookmarkStore.ListByDocument`.
+  Lands when importers do.
+- **No reindex CLI yet.** Documented in `docs/decisions.md`; needed when
+  someone first wants to swap embedding models.
+- **`/v1/documents`** list endpoint isn't wired; individual GET is.
+  Trivial to add.
+- **Search filters** (`content_type`, `host`, `source`, etc.) are
+  accepted by the API but not yet applied. Engine work needed.
+- **`curio refetch`** subcommand not wired.
+
+## Decisions logged in `docs/decisions.md`
+
+Worth re-reading before M1:
+
+- SQLite build tags `sqlite_fts5,sqlite_json` centralized in Makefile.
+- DSN syntax: mattn's `_fk=true&_journal_mode=WAL&...`.
+- Migrations don't set PRAGMA `journal_mode` (transaction conflict).
+- Job claim via atomic `UPDATE ... RETURNING` — verified under 20-job /
+  8-worker / `-race`.
+- Score normalization: BM25 negated, vector distance mapped via
+  `1/(1+d)` so RRF is retriever-agnostic.
+- Cross-paragraph chunker overlap not implemented; intra-paragraph is.
+- Ollama runs natively (not Docker) — Apple Silicon GPU access.
+- Embedder interface keeps the door open for Voyage/OpenAI/Bedrock
+  without re-architecture.
+- API: cursor pagination, RFC 7807 problem responses, no `tenant_id`
+  in any response body, async ops return job IDs.
+- File-then-row write order for extractions: pre-generate UUID,
+  write markdown to disk, then insert the DB row pointing at it.
+
+## Where M1 starts
+
+M1 introduces real bookmark importers (Chrome, Safari, Firefox). The
+schema and worker are already shaped for it: importer parses the
+browser file → calls `BookmarkStore.Create` for each entry → enqueues
+fetch jobs. The same fetch+index pipeline handles them.
