@@ -351,26 +351,21 @@ multi-worker semantics are locked in before the M1 worker-pool expansion.
 
 ---
 
-## Ollama: host install on Mac, Docker Compose on Linux
+## Ollama: native install, not containerized
 
-**Decision:** Ship a `docker-compose.dev.yml` that runs Ollama in a container.
-The daemon connects via `OLLAMA_BASE_URL` so it doesn't care whether Ollama
-is host-installed or containerized.
+**Decision:** Curio expects Ollama to run on the host (`brew install ollama`
+on macOS, package or systemd on Linux). No `docker-compose.dev.yml`.
 
-**Why:** Same image works in dev and (eventually) hosted prod. One config
-knob. But on macOS, Docker Desktop's Linux VM cannot expose the Apple
-Silicon GPU to containers, so dockered Ollama runs CPU-only. The native
-`brew install ollama` is materially faster on Mac because it uses Metal.
+**Why:** Docker Desktop on macOS can't expose the Apple Silicon GPU to
+containers, so dockered Ollama is materially slower than native. Since
+this is a local-first tool and dev/prod for v1 are both single-user host
+installs, the native path is plainly better. If hosted deployment ever
+needs containerized Ollama, we'll add a compose/Helm chart at that point
+with GPU passthrough for the relevant platform.
 
-**Practical guidance documented in compose file:**
-
-- Mac dev → `brew install ollama && ollama serve` (Metal-accelerated).
-- Linux dev/prod → compose with `deploy.resources` for NVIDIA passthrough.
-- Either way, the daemon points at `http://localhost:11434`.
-
-We don't containerize curio-daemon itself in dev — cgo + sqlite-vec
-rebuilds are faster natively, and content lives on the host filesystem
-under `~/.curio/content/` where it stays grep-able.
+The daemon connects via `embedding.base_url` in config; default
+`http://localhost:11434` works for any native Ollama install on the same
+host.
 
 ---
 
