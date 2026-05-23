@@ -1,0 +1,58 @@
+# golangci-lint v2 config
+# See: https://golangci-lint.run/usage/configuration/
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck      # find unchecked errors
+    - govet         # vet
+    - ineffassign   # unused assignments
+    - staticcheck   # advanced static analysis (includes stylecheck, gosimple)
+    - unused        # find unused code
+    - gosec         # security issues
+    - revive        # configurable replacement for golint
+    - misspell      # spelling
+    - unconvert     # unnecessary type conversions
+    - prealloc      # suggest slice prealloc
+    - bodyclose     # http.Response.Body close
+    - rowserrcheck  # sql.Rows.Err
+    - sqlclosecheck # closing rows/stmt
+    - errorlint     # errors.Is/As correctness
+    - nilerr        # returning nil when err != nil
+    - copyloopvar   # loop variable copying
+    - gocritic      # diagnostics
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true  # too noisy for internal/
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - ifElseChain
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
