@@ -1,0 +1,30 @@
+# Build output
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Go
+vendor/
+.go/
+
+# Local config / state (never commit user state)
+.curio/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+
+# Generated
+api/gen/
