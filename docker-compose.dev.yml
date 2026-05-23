@@ -1,0 +1,59 @@
+# Local development stack for curio.
+#
+# Brings up the external services curio's daemon depends on:
+#   - ollama: serves embeddings (and optional local LLMs) on :11434
+#
+# The daemon itself runs on the host via `make run-daemon` — we don't
+# containerize it during dev because cgo + sqlite-vec + on-disk content
+# rewards quick rebuild loops, and bind-mounting the source for hot rebuild
+# is more friction than running natively.
+#
+# Caveat on macOS: Docker Desktop's Linux VM does NOT see the Apple Silicon
+# GPU. Ollama in this compose runs CPU-only. For Mac, `brew install ollama`
+# and `ollama serve` is faster (uses Metal). The compose is still useful if
+# you want reproducible / nukable state.
+#
+# On Linux with NVIDIA: uncomment the `deploy:` block to attach the GPU.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml exec ollama ollama pull nomic-embed-text
+#   docker compose -f docker-compose.dev.yml down            # stop
+#   docker compose -f docker-compose.dev.yml down -v         # stop + wipe models
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: curio-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    # Uncomment on Linux with an NVIDIA GPU:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # Optional: self-hosted Jina Reader for the `jina` fetcher fallback.
+  # Disabled by default — most pages work via web2md. Uncomment to enable.
+  # jina-reader:
+  #   image: jinaai/reader:latest
+  #   container_name: curio-jina-reader
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3000:3000"
+
+volumes:
+  ollama-models:
+    name: curio-ollama-models
