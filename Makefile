@@ -25,6 +25,14 @@ LDFLAGS := -s -w \
 # rather than silently producing a binary missing SQLite.
 export CGO_ENABLED=1
 
+# Build tags required by mattn/go-sqlite3:
+#   sqlite_fts5     — enables FTS5 for BM25 search
+#   sqlite_json     — JSON1 functions used in CHECK constraints (json_valid)
+# sqlite-vec is loaded as a runtime extension via sqlite-vec-go-bindings; no
+# build tag needed for that.
+GOTAGS := sqlite_fts5,sqlite_json
+GOFLAGS_BUILD := -tags=$(GOTAGS)
+
 .DEFAULT_GOAL := help
 
 ## help: show available targets
@@ -38,26 +46,26 @@ build: $(CURIO_BIN) $(DAEMON_BIN)
 
 $(CURIO_BIN): $(shell find cmd/curio internal -name '*.go' 2>/dev/null) go.mod go.sum
 	@mkdir -p $(BIN_DIR)
-	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/curio
+	$(GO) build -trimpath $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)" -o $@ ./cmd/curio
 
 $(DAEMON_BIN): $(shell find cmd/curio-daemon internal -name '*.go' 2>/dev/null) go.mod go.sum
 	@mkdir -p $(BIN_DIR)
-	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $@ ./cmd/curio-daemon
+	$(GO) build -trimpath $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)" -o $@ ./cmd/curio-daemon
 
 ## test: run unit tests (fast; no external services required)
 .PHONY: test
 test:
-	$(GO) test -race -count=1 ./...
+	$(GO) test -race -count=1 -tags=$(GOTAGS) ./...
 
 ## test-integration: run integration tests (requires local SQLite + Ollama + web2md)
 .PHONY: test-integration
 test-integration:
-	$(GO) test -race -count=1 -tags=integration ./...
+	$(GO) test -race -count=1 -tags=$(GOTAGS),integration ./...
 
 ## test-e2e: run end-to-end tests (boots full daemon)
 .PHONY: test-e2e
 test-e2e: build
-	$(GO) test -race -count=1 -tags=e2e ./test/e2e/...
+	$(GO) test -race -count=1 -tags=$(GOTAGS),e2e ./test/e2e/...
 
 ## lint: run golangci-lint
 .PHONY: lint
@@ -73,7 +81,7 @@ fmt:
 ## vet: go vet
 .PHONY: vet
 vet:
-	$(GO) vet ./...
+	$(GO) vet -tags=$(GOTAGS) ./...
 
 ## clean: remove build output
 .PHONY: clean

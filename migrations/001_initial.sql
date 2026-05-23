@@ -12,9 +12,11 @@
 --     SQLite has no timestamp type; this is the standard convention and
 --     sorts correctly lexicographically.
 --   * JSON columns are TEXT validated with `CHECK(json_valid(col))`.
-
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
+--
+-- NOTE: PRAGMA foreign_keys and journal_mode are set per-connection by the
+-- daemon (via DSN params), not here. PRAGMA journal_mode = WAL cannot run
+-- inside goose's migration transaction; setting it via DSN is also more
+-- correct because connections in the pool need consistent state.
 
 -- ============================================================================
 -- documents: universal content table, deduplicated by (tenant_id, url)
