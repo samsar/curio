@@ -1,0 +1,173 @@
+// Package config loads and validates the curio daemon configuration.
+//
+// The config file lives at $CURIO_HOME/config.yaml. Missing or partial files
+// are valid — unspecified fields fall back to documented defaults.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config is the top-level configuration loaded from config.yaml.
+type Config struct {
+	Daemon    Daemon    `yaml:"daemon"`
+	Embedding Embedding `yaml:"embedding"`
+	Fetcher   Fetcher   `yaml:"fetcher"`
+	Search    Search    `yaml:"search"`
+	Chunking  Chunking  `yaml:"chunking"`
+}
+
+type Daemon struct {
+	Listen   string `yaml:"listen"`
+	LogLevel string `yaml:"log_level"`
+}
+
+type Embedding struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+	Dim      int    `yaml:"dim"`
+	BaseURL  string `yaml:"base_url"`
+}
+
+type Fetcher struct {
+	Web2MD Web2MD `yaml:"web2md"`
+}
+
+type Web2MD struct {
+	Bin            string `yaml:"bin"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+}
+
+type Search struct {
+	DefaultK     int     `yaml:"default_k"`
+	RRFK         int     `yaml:"rrf_k"`
+	BM25Weight   float64 `yaml:"bm25_weight"`
+	VectorWeight float64 `yaml:"vector_weight"`
+	Collapse     string  `yaml:"collapse"` // max | sum | top3_avg
+}
+
+type Chunking struct {
+	SizeTokens    int `yaml:"size_tokens"`
+	OverlapTokens int `yaml:"overlap_tokens"`
+}
+
+// Default returns the baseline config. The loader applies these first, then
+// overlays whatever the user's config.yaml specifies.
+func Default() Config {
+	return Config{
+		Daemon: Daemon{
+			Listen:   "127.0.0.1:8765",
+			LogLevel: "info",
+		},
+		Embedding: Embedding{
+			Provider: "ollama",
+			Model:    "nomic-embed-text",
+			Dim:      768,
+			BaseURL:  "http://localhost:11434",
+		},
+		Fetcher: Fetcher{
+			Web2MD: Web2MD{
+				Bin:            "web2md",
+				TimeoutSeconds: 30,
+			},
+		},
+		Search: Search{
+			DefaultK:     10,
+			RRFK:         60,
+			BM25Weight:   1.0,
+			VectorWeight: 1.0,
+			Collapse:     "max",
+		},
+		Chunking: Chunking{
+			SizeTokens:    512,
+			OverlapTokens: 64,
+		},
+	}
+}
+
+// Load reads config.yaml from path. A missing file is not an error; the
+// defaults are returned. An empty or partial file overlays onto defaults.
+// A malformed or invalid file is an error.
+func Load(path string) (Config, error) {
+	cfg := Default()
+
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return cfg, nil
+	}
+	if err != nil {
+		return Config{}, fmt.Errorf("read config %q: %w", path, err)
+	}
+
+	// Decode on top of defaults: fields the user omits keep their default.
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("invalid config %q: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// Validate checks invariants that the YAML schema can't enforce. Called by
+// Load; can also be called directly when constructing Config in tests.
+func (c Config) Validate() error {
+	if c.Daemon.Listen == "" {
+		return errors.New("daemon.listen must not be empty")
+	}
+	if !validLogLevel(c.Daemon.LogLevel) {
+		return fmt.Errorf("daemon.log_level %q must be one of: debug, info, warn, error", c.Daemon.LogLevel)
+	}
+	if c.Embedding.Model == "" {
+		return errors.New("embedding.model must not be empty")
+	}
+	if c.Embedding.Dim <= 0 {
+		return fmt.Errorf("embedding.dim must be positive, got %d", c.Embedding.Dim)
+	}
+	if c.Embedding.BaseURL == "" {
+		return errors.New("embedding.base_url must not be empty")
+	}
+	if c.Chunking.SizeTokens <= 0 {
+		return fmt.Errorf("chunking.size_tokens must be positive, got %d", c.Chunking.SizeTokens)
+	}
+	if c.Chunking.OverlapTokens < 0 || c.Chunking.OverlapTokens >= c.Chunking.SizeTokens {
+		return fmt.Errorf("chunking.overlap_tokens must be in [0, %d), got %d",
+			c.Chunking.SizeTokens, c.Chunking.OverlapTokens)
+	}
+	if c.Search.DefaultK <= 0 {
+		return fmt.Errorf("search.default_k must be positive, got %d", c.Search.DefaultK)
+	}
+	if c.Search.RRFK <= 0 {
+		return fmt.Errorf("search.rrf_k must be positive, got %d", c.Search.RRFK)
+	}
+	if !validCollapse(c.Search.Collapse) {
+		return fmt.Errorf("search.collapse %q must be one of: max, sum, top3_avg", c.Search.Collapse)
+	}
+	if c.Fetcher.Web2MD.TimeoutSeconds <= 0 {
+		return fmt.Errorf("fetcher.web2md.timeout_seconds must be positive, got %d",
+			c.Fetcher.Web2MD.TimeoutSeconds)
+	}
+	return nil
+}
+
+func validLogLevel(s string) bool {
+	switch s {
+	case "debug", "info", "warn", "error":
+		return true
+	}
+	return false
+}
+
+func validCollapse(s string) bool {
+	switch s {
+	case "max", "sum", "top3_avg":
+		return true
+	}
+	return false
+}
