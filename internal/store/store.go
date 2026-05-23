@@ -155,6 +155,54 @@ type ListBookmarksOpts struct {
 	Cursor     string // opaque, from a previous result's NextCursor
 }
 
+// Chunk is the indexed text segment unit. Each chunk owns one row in the
+// chunks table, one in chunks_fts (BM25), and one in chunks_vec (vector ANN).
+type Chunk struct {
+	ID           string
+	DocumentID   string
+	ExtractionID string
+	Ord          int
+	Text         string
+	TokenCount   int
+}
+
+// ChunkInput is the writer-side struct for ReplaceForDocument. The store
+// generates the ID and persists text + embedding atomically.
+type ChunkInput struct {
+	Text       string
+	TokenCount int
+	Embedding  []float32 // length must match the configured embedding.Dim
+}
+
+// ChunkHit is a single search result, surfaced before fusion. Score is
+// normalized so higher = better regardless of retriever — callers don't
+// need to know whether BM25 or vec-distance produced it.
+type ChunkHit struct {
+	ChunkID    string
+	DocumentID string
+	Score      float64
+	Snippet    string // BM25 only; empty for vector hits
+}
+
+// ChunkStore writes and queries the chunks tables + FTS5 + vec virtual tables.
+type ChunkStore interface {
+	// ReplaceForDocument atomically deletes all existing chunks for the
+	// document and inserts the new set. Idempotent — safe to retry after
+	// crashes or refetches.
+	ReplaceForDocument(ctx context.Context, documentID, extractionID, title string, tags []string, chunks []ChunkInput) error
+
+	// BM25Search runs FTS5 MATCH against chunk text and returns the top
+	// matches for the given tenant. Snippet is populated.
+	BM25Search(ctx context.Context, tenantID, query string, limit int) ([]ChunkHit, error)
+
+	// VectorSearch runs an approximate-nearest-neighbor query against
+	// chunks_vec. The embedding length must match the schema's vec
+	// dimension; mismatched lengths return an error.
+	VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int) ([]ChunkHit, error)
+
+	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
+}
+
 // JobQueue is the SQLite-backed work queue.
 type JobQueue interface {
 	Enqueue(ctx context.Context, j *Job) error
