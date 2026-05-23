@@ -1,5 +1,13 @@
 # M0 — Walking Skeleton
 
+> **Progress** (updated 2026-05-23):
+> Steps 1–6 and 10, 12 are complete. The dependency-light packages — storage,
+> chunker, search engine — are landed and tested. Concrete fetcher/embedder
+> impls (Ollama HTTP, web2md subprocess), the indexer orchestration, the job
+> worker, HTTP handlers, and CLI commands are the remaining work.
+> See `docs/status.md` for the handoff details.
+
+
 **Goal:** one URL goes in, searchable text comes out, end to end.
 
 **Done when:**
