@@ -288,6 +288,50 @@ existing clients ignore unknown reference kinds without breaking.
 
 ---
 
+## SQLite build tags
+
+**Decision:** All `go build` and `go test` invocations pass
+`-tags=sqlite_fts5,sqlite_json` to `mattn/go-sqlite3`.
+
+**Why:** FTS5 (`CREATE VIRTUAL TABLE ... USING fts5`) is not compiled into
+mattn's default SQLite build; it requires the `sqlite_fts5` build tag.
+`sqlite_json` ensures the `json_valid()` function used in our CHECK
+constraints is always available. The Makefile centralizes this so every
+build/test/vet invocation gets the same tags; CI uses `make` targets rather
+than re-spelling the tag list.
+
+`sqlite-vec` does NOT need a build tag — it's loaded as a runtime extension
+via `sqlite_vec.Auto()` from the sqlite-vec-go-bindings package.
+
+---
+
+## SQLite DSN: per-connection pragmas via mattn's query params
+
+**Decision:** `Open()` builds a DSN like
+`file:/path/curio.db?_fk=true&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000`.
+
+**Why:** SQLite's `foreign_keys` PRAGMA is *per-connection* and defaults to
+OFF — every connection in `database/sql`'s pool must turn it on, or FK
+constraints are silently unenforced. Running `PRAGMA foreign_keys = ON` in
+migrations only affects that one connection. The DSN-level params apply to
+every new pooled connection.
+
+Note: `_pragma=foreign_keys(1)` syntax is for `modernc.org/sqlite`, NOT
+`mattn/go-sqlite3`. They look similar; mixing them silently no-ops.
+
+---
+
+## Migrations do not set PRAGMA journal_mode
+
+**Decision:** Removed `PRAGMA journal_mode = WAL;` from the initial migration.
+
+**Why:** Goose wraps SQL migrations in a transaction, and SQLite refuses to
+change journal modes inside a transaction (errors with "cannot change into
+wal mode from within a transaction"). The DSN already sets journal_mode at
+connection time, so the migration PRAGMA was redundant *and* breaking.
+
+---
+
 ## What's deferred from the v1 API
 
 These are intentionally omitted from `api/openapi.yaml`. Each is additive when
