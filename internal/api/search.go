@@ -25,11 +25,16 @@ type Filters struct {
 	Tag         []string `json:"tag,omitempty"`
 }
 
-// SearchHitResponse mirrors the openapi SearchHit schema.
+// SearchHitResponse mirrors the openapi SearchHit schema. MarkdownPath
+// is the absolute on-disk path to the extracted markdown, populated from
+// the doc's current extraction. Empty when there's no extraction yet.
+// Surfaced here so CLI consumers can `cat` / open the file without a
+// second round-trip to /v1/documents/{id}.
 type SearchHitResponse struct {
-	Document DocumentResponse `json:"document"`
-	Score    float64          `json:"score"`
-	Matches  []ChunkMatchJSON `json:"matches,omitempty"`
+	Document     DocumentResponse `json:"document"`
+	Score        float64          `json:"score"`
+	MarkdownPath string           `json:"markdown_path,omitempty"`
+	Matches      []ChunkMatchJSON `json:"matches,omitempty"`
 }
 
 // ChunkMatchJSON mirrors the openapi schema; pointer scores let us emit
@@ -88,10 +93,23 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 				VectorScore: cm.VectorScore,
 			})
 		}
+
+		// One extra DB hit per result to surface the markdown path.
+		// For typical K (10–50) this is negligible; if it ever shows
+		// up in latency, batch via a single SELECT IN (...) instead.
+		var mdPath string
+		if hit.Document.CurrentExtractionID != nil {
+			if ext, err := d.Extractions.GetByID(r.Context(), *hit.Document.CurrentExtractionID); err == nil &&
+				ext.MarkdownPath != nil {
+				mdPath = d.Home.ContentDir() + "/" + *ext.MarkdownPath
+			}
+		}
+
 		resp.Items = append(resp.Items, SearchHitResponse{
-			Document: documentToResponse(hit.Document),
-			Score:    hit.Score,
-			Matches:  matches,
+			Document:     documentToResponse(hit.Document),
+			Score:        hit.Score,
+			MarkdownPath: mdPath,
+			Matches:      matches,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)

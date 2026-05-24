@@ -142,9 +142,13 @@ func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit i
 		limit = 50
 	}
 
+	// snippet() args: column index, open mark, close mark, ellipsis,
+	// max tokens. 32 tokens gives ~200-300 char snippets — enough to
+	// see the match in context without flooding the CLI. The CLI's
+	// wrapLines breaks them across lines on word boundaries.
 	const q = `
 	SELECT fts.chunk_id, fts.document_id, bm25(chunks_fts) AS bm25_score,
-	       snippet(chunks_fts, 0, '<em>', '</em>', '...', 12)
+	       snippet(chunks_fts, 0, '<em>', '</em>', '…', 32)
 	FROM chunks_fts fts
 	JOIN documents d ON d.id = fts.document_id
 	WHERE chunks_fts MATCH ?

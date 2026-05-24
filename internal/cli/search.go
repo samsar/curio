@@ -54,9 +54,13 @@ func renderSearchResults(res *client.SearchResponse) {
 		}
 		fmt.Printf("%2d. %s\n", i+1, title)
 		fmt.Printf("    %s   (score %.4f)\n", hit.Document.URL, hit.Score)
-		// Document ID so users can immediately `curio docs show <id>`
-		// or `curio refetch <id>` on a hit without going hunting.
-		fmt.Printf("    id: %s\n", hit.Document.ID)
+		// Doc ID and on-disk path for direct follow-up: open the file,
+		// run `curio docs show <id>`, or `curio refetch <id>` without
+		// going hunting.
+		fmt.Printf("    doc_id: %s\n", hit.Document.ID)
+		if hit.MarkdownPath != "" {
+			fmt.Printf("    path:   %s\n", hit.MarkdownPath)
+		}
 		if len(hit.Matches) > 0 {
 			m := hit.Matches[0]
 			snippet := m.Snippet
