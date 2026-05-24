@@ -35,16 +35,43 @@ Time budget: with 4 workers (default) and the native fetcher, expect roughly
 ## More commands
 
 ```sh
-curio status                        # daemon health + queue depth
-curio jobs --failed                 # what didn't fetch/index, with errors
-curio refetch <doc-id>              # re-fetch a single document
-curio refetch --all --state failed  # retry every failure
+curio doctor                        # verify Ollama + DB + config + paths
+curio status                        # daemon health + corpus counts + queue depth
+
+# Inspecting the corpus
+curio docs                          # successfully-fetched documents (the happy path)
+curio docs --failed                 # docs whose fetch or index gave up
+curio docs --all                    # every state
+curio docs show <doc-id>            # full metadata + on-disk path
+curio docs show <doc-id> --content  # also streams the extracted markdown
+
+# Inspecting work history
+curio jobs                          # done jobs (default; the audit view)
+curio jobs --failed                 # failures with full error + retry count
+curio jobs --all                    # every status
+curio jobs --kind index             # filter by job kind
+
+# Recovery
+curio refetch <doc-id>              # try one URL again
+curio refetch --all --state failed  # retry every failed doc
+
+# Maintenance
+curio jobs prune --older-than 30d   # trim the audit table
+curio jobs delete --status failed   # purge a specific status
+
+# Daemon lifecycle
 curio daemon {start|stop|status|logs}
 
+# Import variations
 curio import chrome [--profile X | --all-profiles | --list-profiles]
 curio import html --dry-run         # parse + filter without sending
 curio import html --limit 200       # try a slice first
+curio import html --follow          # poll progress until queue drains
 ```
+
+Both `curio docs` and `curio jobs` print URL + doc_id + on-disk path under
+each row, so the three usual follow-ups are copy/paste-ready:
+`cat <path>`, `curio docs show <doc_id>`, `curio refetch <doc_id>`.
 
 `curio --help` lists everything.
 

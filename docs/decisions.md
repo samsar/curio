@@ -557,6 +557,137 @@ the conservative word-based heuristic.
 
 ---
 
+## Document state follows job outcome via OnPermanentFailure hook
+
+**Decision:** Documents have their own state machine
+(`pending → fetched | failed`) and the failed transition is driven by the
+worker's `OnPermanentFailure` hook firing after a fetch or index job hits
+`MaxAttempts`. `JobQueue.MarkFailed` returns `(permanent bool, error)` so
+the worker can distinguish retry-going-back-to-pending from
+terminal-failed.
+
+**Why:** Before this, jobs went to `failed` cleanly but docs stayed
+`pending` forever once their job gave up. `curio status` couldn't
+distinguish "still in flight" from "permanently broken." Now the doc
+state mirrors job outcome:
+
+- `pending`: just created OR has an in-flight job
+- `fetched`: fetch + index both succeeded
+- `failed`: a fetch or index job for this doc permanently failed
+
+`refetch` flips a doc back to `pending` and enqueues a new fetch job.
+The old failed job stays in the history table as audit; the new run is
+a fresh attempts counter.
+
+`dead` is reserved in the constants but unused. Eventually it'd mean
+"don't even allow refetch" — saved for when we have a retention or
+give-up-permanently policy.
+
+---
+
+## Fallback strategy: only Jina for content-came-back cases
+
+**Decision:** The Native fetcher's pass-2 Jina fallback fires only when
+the original error wraps `ErrLoginWall` or `ErrAntiBot`. For 404, DNS
+failures, timeouts, and other 4xx/5xx-other, we return the original
+error directly.
+
+**Why:** The first real import showed 88% of Jina fallbacks were on URLs
+Jina couldn't fix either (mostly dead links and DNS failures). The
+fallback was burning rate-limit budget on hopeless URLs and getting us
+429'd on the calls that *would* have benefited. The classification:
+
+- `ErrLoginWall` — readability got real content but it was thin /
+  paywalled / login-walled. Jina's infrastructure often beats this.
+- `ErrAntiBot` — origin returned HTTP 403 or 503; commonly Cloudflare /
+  WAF bot blocks. Jina's residential infra often gets through.
+- Everything else — page truly missing, network broken, or origin
+  reachable but rejecting for non-bot reasons. Jina won't help.
+
+After this fix the Jina fallback rate dropped ~10×.
+
+---
+
+## Anti-bot mitigation: browser-thorough headers, not just User-Agent
+
+**Decision:** The Native fetcher sends a Chrome-like header set covering
+`Sec-Fetch-*`, `Sec-Ch-Ua-*`, `Upgrade-Insecure-Requests`, and a richer
+`Accept` value — not just the UA string.
+
+**Why:** CDNs like Cloudflare cross-check the UA against several other
+headers; a Chrome UA without `Sec-Fetch-User`, `Sec-Ch-Ua-Platform`, etc.
+is a known automation fingerprint and triggers 403/503. Won't beat JS
+challenges or TLS-fingerprint checks, but eliminates the cheapest
+blocks. Sites that were 403-ing for us in the first import (inc.com
+style) start returning 200 with this change.
+
+If we need more, the next escalation is a headless-Chrome fetcher (via
+chromedp) — deferred until the cheap fixes stop being enough.
+
+---
+
+## CLI defaults: happy-path views; debug paths are opt-in
+
+**Decision:** `curio docs` defaults to `state=fetched`, `curio jobs`
+defaults to `status=done`. `--failed` is a shortcut for the debug view;
+`--all` shows everything. Explicit `--state` / `--status` flags always
+win.
+
+**Why:** Once a corpus has a few thousand bookmarks, the table is
+dominated by audit rows (every fetch + every index becomes a row,
+mostly `done`). Showing all of them by default buries the signal in
+noise. The "happy-path corpus view" is what users want most often; the
+debug view is opt-in.
+
+Precedence: `--status`/`--state` > `--failed` > `--all` > default
+(`fetched` / `done`). The explicit flag always wins so scripts that
+already passed `--state=""` continue working.
+
+---
+
+## Jobs lifecycle: prune/delete, no nuke-all path
+
+**Decision:** Two operations for managing the jobs table:
+
+- `curio jobs prune --older-than 30d` — time-based retention; deletes
+  any job whose `updated_at` is older than the duration. Accepts Go
+  duration syntax plus `Nd` for days.
+- `curio jobs delete --status failed` — exact-status delete; status is
+  required.
+
+There is deliberately **no "delete all jobs"** path. If that's what's
+wanted, `rm ~/.curio/curio.db` is faster and more explicit.
+
+**Why:** The jobs table accumulates monotonically: every fetch + index
+attempt leaves a row, retries multiply it. After a real corpus import
+you'll have 10k+ rows where 99% are stale `done` entries. Without a
+prune story the audit trail eventually crowds out the debugging signal.
+Splitting into two commands (one time-based, one status-based) keeps
+the intent visible at the CLI; a unified `--all` flag would be too easy
+to misuse.
+
+**Important:** Deleting jobs does NOT change document state. A failed
+doc stays failed (still visible in `curio docs --failed`, still
+refetchable). The jobs table is audit/history; doc state is current
+truth.
+
+---
+
+## CLI hides `next_attempt` for terminal-status jobs
+
+**Decision:** `curio jobs` only prints the `next attempt:` line when
+status is `pending` or `running`. For `done` / `failed`, the row is
+omitted.
+
+**Why:** `MarkFailed` updates `status` and `last_error` when the job
+hits terminal-failed but leaves `run_after` alone. The stored value is
+"the time the next retry *would have* happened" — but it'll never fire
+because the status is now terminal. Displaying it as "next attempt" on
+a failed row is misleading. Also: timestamps now include the timezone
+abbreviation so `11:54 EDT` is unambiguous.
+
+---
+
 ## What's deferred from the v1 API
 
 These are intentionally omitted from `api/openapi.yaml`. Each is additive when
@@ -589,3 +720,13 @@ it lands — no `/v1` → `/v2` bump required.
   domain-rule-driven (news daily, docs monthly, static essays never).
 - **Highlight / read-later importers:** schema is ready; importer code is not
   in v1.
+- **"Page Not Found" detection:** many old bookmarks now resolve to a
+  generic 404 / squatted-domain page that returns HTTP 200. The fetch +
+  index succeed and the doc lands in `fetched` state, but the content
+  is junk (titles like "Page Not Found | Sunwin 2026" caught in a
+  recent test). A heuristic — title prefix patterns, content similarity
+  to known 404 templates, redirect-to-root detection, or
+  embedding-based "this isn't really an article" classifier — could
+  flag these. Deferred until the false-positive rate from anti-bot
+  fixes settles; mixing the two cleanup paths makes both harder to
+  evaluate.
