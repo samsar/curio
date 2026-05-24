@@ -493,6 +493,35 @@ The DB is authoritative; the marker mirrors it.
 
 ---
 
+## Embedder passes num_ctx=8192 to Ollama, chunker defaults to 384 words
+
+**Decision:** The Ollama embedder sets `options.num_ctx = 8192` on every
+`/api/embed` request (configurable via `embedding.num_ctx` later). The
+chunker's default `size_tokens` drops from 512 → 384 words with a
+proportionally smaller overlap (48 instead of 64).
+
+**Why:** During the first real import we saw Ollama return
+`HTTP 400: input length exceeds the context length` on ~30% of index
+jobs. Two factors compounded:
+
+1. Ollama defaults `num_ctx` to 2048 even for models like
+   `nomic-embed-text` whose declared context is 8192.
+2. The chunker counts whitespace-words, not BPE tokens. For prose,
+   words≈tokens, but dense markdown (long URLs, code blocks, dense
+   tables) tokenizes 2-5x. A 512-word chunk with many URLs could be
+   well over 2048 BPE tokens.
+
+Setting `num_ctx=8192` gives us the model's full window. Dropping to
+384 words gives a safety margin even for the worst content
+(384 × 5 = 1920 tokens, still under 2048; comfortably under 8192).
+
+**Real tokenizer later:** the proper fix is to count BPE tokens before
+chunking. Costs a tokenizer dep (e.g., tiktoken-go or sugarme/tokenizer)
+and adds latency. Not worth it until we see chunk-quality issues from
+the conservative word-based heuristic.
+
+---
+
 ## What's deferred from the v1 API
 
 These are intentionally omitted from `api/openapi.yaml`. Each is additive when
