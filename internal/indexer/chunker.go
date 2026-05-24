@@ -6,6 +6,7 @@
 package indexer
 
 import (
+	"regexp"
 	"strings"
 )
 
@@ -44,6 +45,10 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	if strings.TrimSpace(markdown) == "" {
 		return nil
 	}
+	// Strip embed-poisoning content (inline base64 image data URLs) before
+	// splitting. The on-disk markdown is untouched — this only affects what
+	// goes to the embedder. See sanitizeForEmbedding for rationale.
+	markdown = sanitizeForEmbedding(markdown)
 	size := opts.SizeTokens
 	if size <= 0 {
 		size = 384
@@ -140,9 +145,54 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	return enforceCharLimit(chunks, maxChars)
 }
 
+// sanitizeForEmbedding removes content that's useless to the embedder and
+// dangerous to chunk: inline base64 image data URLs.
+//
+//   - `![alt](data:image/...;base64,...)` becomes `![alt](image)` — we keep
+//     the alt text (often meaningful) and a placeholder so the chunk still
+//     reads as "this paragraph had an image here," but drop the bytes.
+//   - Bare `data:image/...;base64,...` outside markdown image syntax (rare,
+//     happens when readability mangles HTML) is dropped.
+//
+// We only touch the input to the chunker — the on-disk markdown keeps the
+// original data URLs, so if a future feature wants the image bytes (vision
+// embeddings, OCR, image search), they're still recoverable from disk.
+//
+// Embedding base64 bytes is pure noise: the BPE tokenizer treats random
+// base64 as high-entropy garbage, blowing up token counts (a 100KB inline
+// PNG → ~30K tokens, vs. nomic-embed-text's 2048-token hard ceiling) AND
+// poisoning the semantic vector with content that has zero retrieval value.
+func sanitizeForEmbedding(s string) string {
+	if !strings.Contains(s, "data:") {
+		return s
+	}
+	s = markdownDataImageRE.ReplaceAllString(s, "![${1}](image)")
+	s = bareDataURLRE.ReplaceAllString(s, "")
+	return s
+}
+
+var (
+	// markdownDataImageRE matches `![alt](data:...)` capturing the alt text.
+	// Uses [^)]* for the URL body because data URLs never contain ')'
+	// unencoded.
+	markdownDataImageRE = regexp.MustCompile(`!\[([^\]]*)\]\(data:[^)]*\)`)
+
+	// bareDataURLRE matches a data URL not enclosed in markdown image syntax.
+	// Stops at whitespace or markdown punctuation that wouldn't appear in
+	// base64. Conservative: it's better to leave a stray data URL fragment
+	// than to over-strip legitimate text containing the literal "data:".
+	bareDataURLRE = regexp.MustCompile(`data:[a-zA-Z0-9/+.-]+;base64,[A-Za-z0-9+/=]+`)
+)
+
 // enforceCharLimit splits chunks whose Text exceeds maxChars into smaller
 // chunks at word boundaries. Sub-chunks share a small overlap (maxChars/16)
 // so semantic continuity is preserved across the split.
+//
+// Backstop: if a single "word" (no whitespace) is itself longer than
+// maxChars — long URL, base64 string that escaped sanitization, unbroken
+// identifier — it gets hard-truncated to maxChars. Without this, oversized
+// tokens silently bypass the byte budget and trigger embedder failures
+// downstream.
 func enforceCharLimit(in []Chunk, maxChars int) []Chunk {
 	if maxChars <= 0 {
 		return in
@@ -184,6 +234,20 @@ func enforceCharLimit(in []Chunk, maxChars int) []Chunk {
 			}
 		}
 		for _, w := range words {
+			// Backstop: any single word longer than maxChars gets emitted
+			// as its own truncated chunk and skips the normal packing
+			// path entirely. Folding it into `buf` doesn't work because
+			// even after flushing, the overlap-seed leaves bytes in `buf`
+			// that would make `buf + oversized_word > maxChars`.
+			if len(w) > maxChars {
+				if buf.Len() > 0 {
+					out = append(out, Chunk{Text: buf.String(), TokenCount: len(bufWords)})
+					buf.Reset()
+					bufWords = nil
+				}
+				out = append(out, Chunk{Text: w[:maxChars], TokenCount: 1})
+				continue
+			}
 			projected := buf.Len()
 			if projected > 0 {
 				projected++ // space
