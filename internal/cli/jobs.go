@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -69,6 +70,9 @@ func renderJobList(resp *client.JobList) {
 			if j.DocTitle != "" && j.DocTitle != j.DocURL {
 				fmt.Printf("  title: %s\n", truncate(j.DocTitle, 100))
 			}
+			if docID := extractDocID(j.Payload); docID != "" {
+				fmt.Printf("  doc_id: %s\n", docID)
+			}
 		}
 		if j.LastError != nil && *j.LastError != "" {
 			for _, line := range wrapLines(*j.LastError, 100) {
@@ -117,6 +121,22 @@ func wrapLines(s string, width int) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// extractDocID pulls a document_id field from a job's payload JSON.
+// Returns "" if absent or the payload isn't parseable. We don't care
+// about other fields — this is purely for printing the next-step hint.
+func extractDocID(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var p struct {
+		DocumentID string `json:"document_id"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return p.DocumentID
 }
 
 // condense flattens JSON whitespace so a job's payload renders on one line.
