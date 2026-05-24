@@ -278,8 +278,10 @@ func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 	claimed, err := q.ClaimNext(ctx, nil)
 	require.NoError(t, err)
 
-	// First failure with retry → goes back to pending, attempts=1.
-	require.NoError(t, q.MarkFailed(ctx, claimed.ID, "transient", true))
+// First failure with retry → goes back to pending, attempts=1.
+	permanent, err := q.MarkFailed(ctx, claimed.ID, "transient", true)
+	require.NoError(t, err)
+	assert.False(t, permanent, "first attempt isn't permanent")
 	got, _ := q.GetByID(ctx, claimed.ID)
 	assert.Equal(t, store.JobStatusPending, got.Status)
 	assert.Equal(t, 1, got.Attempts)
@@ -293,7 +295,9 @@ func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 	// Second attempt, fails again → status=failed because attempts (2) >= MaxAttempts (2).
 	claimed2, err := q.ClaimNext(ctx, nil)
 	require.NoError(t, err)
-	require.NoError(t, q.MarkFailed(ctx, claimed2.ID, "permanent", true))
+	permanent, err = q.MarkFailed(ctx, claimed2.ID, "permanent", true)
+	require.NoError(t, err)
+	assert.True(t, permanent, "exhausted attempts should be reported permanent")
 	got, _ = q.GetByID(ctx, claimed2.ID)
 	assert.Equal(t, store.JobStatusFailed, got.Status)
 }

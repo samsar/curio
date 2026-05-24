@@ -30,6 +30,7 @@ var ErrPermanent = errors.New("permanent failure")
 type Worker struct {
 	queue        store.JobQueue
 	handlers     map[string]HandlerFunc
+	onPermFail   map[string]HandlerFunc
 	pollInterval time.Duration
 	log          *slog.Logger
 }
@@ -44,6 +45,7 @@ func NewWorker(q store.JobQueue, opts WorkerOptions) *Worker {
 	w := &Worker{
 		queue:        q,
 		handlers:     map[string]HandlerFunc{},
+		onPermFail:   map[string]HandlerFunc{},
 		pollInterval: opts.PollInterval,
 		log:          opts.Log,
 	}
@@ -60,6 +62,15 @@ func NewWorker(q store.JobQueue, opts WorkerOptions) *Worker {
 // the same kind — caller's responsibility to not do that.
 func (w *Worker) Register(kind string, h HandlerFunc) {
 	w.handlers[kind] = h
+}
+
+// OnPermanentFailure attaches a hook that fires after MarkFailed reports a
+// job has hit terminal-failed state (retries exhausted, or wrapped with
+// ErrPermanent). The hook is best-effort: errors are logged but don't
+// re-fail the job. Use to clean up associated state, e.g., transition a
+// parent document to state=failed.
+func (w *Worker) OnPermanentFailure(kind string, h HandlerFunc) {
+	w.onPermFail[kind] = h
 }
 
 // Run loops until ctx is cancelled. Returns ctx.Err() on shutdown.
@@ -112,7 +123,7 @@ func (w *Worker) tryOne(ctx context.Context) bool {
 	h := w.handlers[job.Kind]
 	if h == nil {
 		log.Warn("no handler registered, marking failed permanently")
-		_ = w.queue.MarkFailed(ctx, job.ID, "no handler for kind", false)
+		_, _ = w.queue.MarkFailed(ctx, job.ID, "no handler for kind", false)
 		return true
 	}
 
@@ -130,8 +141,16 @@ func (w *Worker) tryOne(ctx context.Context) bool {
 
 	retry := !errors.Is(err, ErrPermanent)
 	log.Warn("job failed", "err", err, "retry", retry, "duration_ms", dur.Milliseconds())
-	if mfErr := w.queue.MarkFailed(ctx, job.ID, err.Error(), retry); mfErr != nil {
+	permanent, mfErr := w.queue.MarkFailed(ctx, job.ID, err.Error(), retry)
+	if mfErr != nil {
 		log.Error("mark failed errored", "err", mfErr)
+	}
+	if permanent {
+		if hook := w.onPermFail[job.Kind]; hook != nil {
+			if hookErr := hook(ctx, job); hookErr != nil {
+				log.Warn("permanent-failure hook errored", "err", hookErr)
+			}
+		}
 	}
 	return true
 }
