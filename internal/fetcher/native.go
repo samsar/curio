@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -32,6 +33,7 @@ type Native struct {
 	jinaFallback bool
 	jinaBaseURL  string // override for tests
 	log          *slog.Logger
+	hostCache    *hostFailureCache
 }
 
 // NativeOptions configures Native. Zero-value fields use defaults.
@@ -41,6 +43,12 @@ type NativeOptions struct {
 	JinaFallback bool
 	JinaBaseURL  string // default https://r.jina.ai/
 	Log          *slog.Logger
+	// HostFailureTTL is how long a cached host-wide failure is honored
+	// before we try the host again. Default 15 minutes — long enough
+	// to drain an import without re-trying hopeless hosts, short
+	// enough that a transient outage doesn't permanently blacklist
+	// the site for a long-running daemon.
+	HostFailureTTL time.Duration
 }
 
 const defaultUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
@@ -69,6 +77,7 @@ func NewNative(opts NativeOptions) *Native {
 		jinaFallback: opts.JinaFallback,
 		jinaBaseURL:  opts.JinaBaseURL,
 		log:          opts.Log,
+		hostCache:    newHostFailureCache(opts.HostFailureTTL),
 	}
 }
 
@@ -79,22 +88,56 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		return nil, errors.New("native: url is empty")
 	}
 
+	// Fast-fail by domain: if this host had a host-wide failure recently,
+	// short-circuit instead of burning the full retry/Jina budget.
+	// Three reasons this matters in practice:
+	//   1. ~17% of import failures concentrate in <15 hosts (LinkedIn,
+	//      NYT, Inc.com, dribbble, etc.) — same fail signature every time.
+	//   2. Each origin failure costs ~30s of HTTP timeout + retries;
+	//      Jina fallback adds another ~30s of its own retries.
+	//   3. Hammering Jina with hopeless lookups gets us 429'd on the
+	//      cases where it would have helped.
+	// Cache is in-memory only — survives goroutines, not daemon restarts.
+	// That's fine: it re-warms within minutes of resuming.
+	host := hostOf(target)
+	if cached, ok := n.hostCache.Get(host); ok {
+		n.log.Info("fast-fail from host cache",
+			"url", target, "host", host, "kind", cached.kind.String(),
+			"age_seconds", int(time.Since(cached.seenAt).Seconds()))
+		switch cached.kind {
+		case HostFailUnreachable:
+			return nil, fmt.Errorf("native: %w (cached: %s)", ErrHostUnreachable, cached.originalErr)
+		case HostFailAntiBot:
+			return nil, fmt.Errorf("native: %w (cached: %s)", ErrAntiBot, cached.originalErr)
+		case HostFailLoginWall:
+			return nil, fmt.Errorf("native: %w (cached: %s)", ErrLoginWall, cached.originalErr)
+		}
+	}
+
 	// Pass 1: direct fetch + Readability.
 	direct, directErr := n.tryReadability(ctx, target)
 	if directErr == nil {
 		return direct, nil
 	}
 
+	// Unreachable hosts don't get Jina — Jina hits origin too and will
+	// fail the same way, just slower.
+	if errors.Is(directErr, ErrHostUnreachable) {
+		n.recordHostFailure(host, directErr)
+		return nil, directErr
+	}
+
 	if !n.jinaFallback {
+		n.recordHostFailure(host, directErr)
 		return nil, directErr
 	}
 
 	// Fall back to Jina only for cases it can plausibly help with:
 	//   ErrLoginWall — page came back but was paywalled/thin
 	//   ErrAntiBot   — 403/503 from origin, likely a WAF block
-	// Skip for 404, DNS failures, 5xx-other, and timeouts: Jina can't
-	// conjure a page that doesn't exist, and wasting its rate limit on
-	// dead links gets us 429'd on the calls that *would* benefit.
+	// Skip for 404, 5xx-other, and timeouts: Jina can't conjure a page
+	// that doesn't exist, and wasting its rate limit on dead links gets
+	// us 429'd on the calls that *would* benefit.
 	if !errors.Is(directErr, ErrLoginWall) && !errors.Is(directErr, ErrAntiBot) {
 		return nil, directErr
 	}
@@ -104,10 +147,28 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 
 	jina, err := n.tryJina(ctx, target)
 	if err != nil {
+		// Both origin AND Jina failed for this host — strong signal it's
+		// a host-wide block. Cache so the next N jobs for this host
+		// short-circuit.
+		n.recordHostFailure(host, directErr)
 		return nil, fmt.Errorf("both readability and jina failed (readability: %v) (jina: %w)",
 			directErr, err)
 	}
 	return jina, nil
+}
+
+// recordHostFailure stores the failure in the host cache if its kind is
+// host-wide. Path-specific errors (404, plain 500s) are ignored — they
+// don't predict the next path on the same host.
+func (n *Native) recordHostFailure(host string, err error) {
+	if host == "" || err == nil {
+		return
+	}
+	kind, ok := hostFailureFromError(err)
+	if !ok {
+		return
+	}
+	n.hostCache.Put(host, kind, err.Error())
 }
 
 // tryReadability does pass 1: fetch HTML, run Readability, render to
@@ -139,6 +200,14 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 
 	resp, err := n.client.Do(req)
 	if err != nil {
+		// Distinguish dead-host (DNS, connection refused) from generic
+		// transport errors. Dead hosts shouldn't trigger Jina fallback
+		// (Jina can't reach a host that doesn't exist either) and they're
+		// the right thing to cache for the longest — they're not coming
+		// back in the next 15 minutes.
+		if isHostUnreachable(err) {
+			return nil, fmt.Errorf("native: fetch: %w: %v", ErrHostUnreachable, err)
+		}
 		return nil, fmt.Errorf("native: fetch: %w", err)
 	}
 	defer resp.Body.Close()
@@ -252,6 +321,48 @@ var (
 	loginTitleRE = regexp.MustCompile(`(?i)^(sign in|log in|join now|join linkedin)`)
 	loginPathRE  = regexp.MustCompile(`(?i)/(login|authwall|signin|signup)\b`)
 )
+
+// isHostUnreachable returns true when err represents the host being
+// genuinely unreachable (DNS lookup failed, connection refused, no route).
+// Anything else — TLS errors, timeouts, EOFs mid-body — is treated as
+// generic transient so retries get a chance.
+func isHostUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		// Connection refused / no route shows up here as Op="dial" with
+		// the underlying syscall error in opErr.Err. Match by message
+		// because syscall.Errno values are platform-specific.
+		msg := opErr.Err.Error()
+		if strings.Contains(msg, "connection refused") ||
+			strings.Contains(msg, "no route to host") ||
+			strings.Contains(msg, "network is unreachable") {
+			return true
+		}
+	}
+	return false
+}
+
+// hostFailureFromError classifies a Fetch error into a HostFailureKind
+// suitable for caching, or returns false if the error isn't host-wide
+// (e.g. 404, generic timeout, 5xx that might recover quickly).
+func hostFailureFromError(err error) (HostFailureKind, bool) {
+	switch {
+	case errors.Is(err, ErrHostUnreachable):
+		return HostFailUnreachable, true
+	case errors.Is(err, ErrAntiBot):
+		return HostFailAntiBot, true
+	case errors.Is(err, ErrLoginWall):
+		return HostFailLoginWall, true
+	}
+	return 0, false
+}
 
 // utf8Trimmed returns the character count after trimming whitespace at
 // both ends. The JS impl uses .trim() + .length; this mirrors that.
