@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store"
+	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 )
 
 // fakeEmbedder returns a fixed-size vector for every text. The value is

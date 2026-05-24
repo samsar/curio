@@ -96,11 +96,11 @@ var browserInternalPrefixes = []string{
 // the daemon endpoint and the CLI to report counts.
 type Result struct {
 	Source    Source
-	Created   int      // bookmarks newly inserted; fetch job enqueued for each
-	Skipped   int      // bookmarks that already existed (UNIQUE conflict)
-	Filtered  int      // URLs dropped by Indexable
+	Created   int // bookmarks newly inserted; fetch job enqueued for each
+	Skipped   int // bookmarks that already existed (UNIQUE conflict)
+	Filtered  int // URLs dropped by Indexable
 	FilterBy  map[FilterReason]int
-	JobsAdded int      // count of fetch jobs enqueued (==Created in v1)
+	JobsAdded int // count of fetch jobs enqueued (==Created in v1)
 }
 
 // ErrEmpty is returned when a parse produces zero bookmarks.

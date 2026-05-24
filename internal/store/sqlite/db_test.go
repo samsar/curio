@@ -68,6 +68,7 @@ func TestChunksVecTableExists(t *testing.T) {
 	require.True(t, rows.Next())
 	var n int
 	require.NoError(t, rows.Scan(&n))
+	require.NoError(t, rows.Err())
 	assert.Equal(t, 0, n)
 }
 

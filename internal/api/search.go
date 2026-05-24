@@ -10,9 +10,9 @@ import (
 
 // SearchRequest is the POST /v1/search body.
 type SearchRequest struct {
-	Query   string   `json:"query"`
-	K       int      `json:"k,omitempty"`
-	Filters Filters  `json:"filters,omitempty"`
+	Query   string  `json:"query"`
+	K       int     `json:"k,omitempty"`
+	Filters Filters `json:"filters,omitempty"`
 }
 
 // Filters mirrors the openapi filters block. M0 honors none of these yet —
@@ -27,9 +27,9 @@ type Filters struct {
 
 // SearchHitResponse mirrors the openapi SearchHit schema.
 type SearchHitResponse struct {
-	Document DocumentResponse  `json:"document"`
-	Score    float64           `json:"score"`
-	Matches  []ChunkMatchJSON  `json:"matches,omitempty"`
+	Document DocumentResponse `json:"document"`
+	Score    float64          `json:"score"`
+	Matches  []ChunkMatchJSON `json:"matches,omitempty"`
 }
 
 // ChunkMatchJSON mirrors the openapi schema; pointer scores let us emit

@@ -27,8 +27,10 @@ type fakeFetcher struct {
 	err  error
 }
 
-func (f *fakeFetcher) Name() string                                              { return f.name }
-func (f *fakeFetcher) Fetch(_ context.Context, _ string) (*fetcher.Result, error) { return f.res, f.err }
+func (f *fakeFetcher) Name() string { return f.name }
+func (f *fakeFetcher) Fetch(_ context.Context, _ string) (*fetcher.Result, error) {
+	return f.res, f.err
+}
 
 type fakeEmbedder struct{ dim int }
 
@@ -261,4 +263,3 @@ func TestWorker_PermanentFailureDoesNotRetry(t *testing.T) {
 
 	assert.Equal(t, int32(1), calls.Load(), "permanent failures should not be retried")
 }
-

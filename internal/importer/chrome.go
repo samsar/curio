@@ -18,8 +18,8 @@ import (
 // ChromeProfile describes one discovered Chrome profile, suitable for
 // presenting to the user via `curio import chrome --list-profiles`.
 type ChromeProfile struct {
-	Dir         string // e.g. "Default", "Profile 1"
-	Name        string // display name from Local State; falls back to Dir
+	Dir          string // e.g. "Default", "Profile 1"
+	Name         string // display name from Local State; falls back to Dir
 	BookmarkFile string // absolute path
 }
 
@@ -200,11 +200,11 @@ func chromeRootLabel(rootKey string) string {
 }
 
 type chromeNode struct {
-	Type      string        `json:"type"`
-	Name      string        `json:"name"`
-	URL       string        `json:"url,omitempty"`
-	DateAdded string        `json:"date_added,omitempty"`
-	Children  []chromeNode  `json:"children,omitempty"`
+	Type      string       `json:"type"`
+	Name      string       `json:"name"`
+	URL       string       `json:"url,omitempty"`
+	DateAdded string       `json:"date_added,omitempty"`
+	Children  []chromeNode `json:"children,omitempty"`
 }
 
 func walkChromeNode(n chromeNode, folderStack []string, out *[]ParsedBookmark) {

@@ -24,10 +24,10 @@ var (
 // State / kind / status constants. Keep in sync with CHECK constraints in
 // migrations/001_initial.sql.
 const (
-	DocStatePending  = "pending"
-	DocStateFetched  = "fetched"
-	DocStateFailed   = "failed"
-	DocStateDead     = "dead"
+	DocStatePending = "pending"
+	DocStateFetched = "fetched"
+	DocStateFailed  = "failed"
+	DocStateDead    = "dead"
 
 	ContentTypeArticle = "article"
 	ContentTypeRepo    = "repo"

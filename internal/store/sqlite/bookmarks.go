@@ -145,9 +145,9 @@ const bookmarkSelectCols = `SELECT id, tenant_id, document_id, url, title, saved
 
 func scanBookmark(row interface{ Scan(...any) error }) (*store.Bookmark, error) {
 	var (
-		b                                              store.Bookmark
-		docID, title, folderPath, tags                 sql.NullString
-		savedAt, createdAt, updatedAt                  string
+		b                              store.Bookmark
+		docID, title, folderPath, tags sql.NullString
+		savedAt, createdAt, updatedAt  string
 	)
 	err := row.Scan(
 		&b.ID, &b.TenantID, &docID, &b.URL, &title,

@@ -106,10 +106,10 @@ func (s *Extractions) ListByDocument(ctx context.Context, documentID string) ([]
 
 func scanExtraction(row interface{ Scan(...any) error }) (*store.DocumentExtraction, error) {
 	var (
-		e                                store.DocumentExtraction
-		fetchedAt                        string
-		markdownPath, rawPath, errMsg    sql.NullString
-		extractionMeta                   sql.NullString
+		e                             store.DocumentExtraction
+		fetchedAt                     string
+		markdownPath, rawPath, errMsg sql.NullString
+		extractionMeta                sql.NullString
 	)
 	err := row.Scan(
 		&e.ID, &e.DocumentID, &fetchedAt, &e.Fetcher, &e.Status,

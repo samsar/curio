@@ -48,13 +48,13 @@ func Register(w *Worker, d Deps) {
 }
 
 // FetchHandler builds the closure that runs one fetch job:
-//   1. Load document; look up the right Fetcher via the dispatcher.
-//   2. Call Fetcher.Fetch(ctx, document.URL).
-//   3. Write the resulting markdown to $CURIO_HOME/content/<doc>/<ext>.md.
-//   4. Create a document_extractions row pointing at that file.
-//   5. Update document with extracted title/author/content_type and set
-//      current_extraction_id.
-//   6. Enqueue an index job for the same document.
+//  1. Load document; look up the right Fetcher via the dispatcher.
+//  2. Call Fetcher.Fetch(ctx, document.URL).
+//  3. Write the resulting markdown to $CURIO_HOME/content/<doc>/<ext>.md.
+//  4. Create a document_extractions row pointing at that file.
+//  5. Update document with extracted title/author/content_type and set
+//     current_extraction_id.
+//  6. Enqueue an index job for the same document.
 //
 // Idempotent on retry: each attempt creates a new extraction row (history)
 // and rewrites current_extraction_id. The previous extraction's file stays
@@ -134,15 +134,15 @@ func FetchHandler(d Deps) HandlerFunc {
 			langPtr = &res.Language
 		}
 		updated := &store.Document{
-			ID:           doc.ID,
-			TenantID:     doc.TenantID,
-			URL:          doc.URL,
-			ContentType:  defaultStr(res.ContentType, doc.ContentType),
-			Title:        titlePtr,
-			Author:       authorPtr,
-			Language:     langPtr,
-			PublishedAt:  res.PublishedAt,
-			State:        store.DocStatePending, // still pending until index step
+			ID:                  doc.ID,
+			TenantID:            doc.TenantID,
+			URL:                 doc.URL,
+			ContentType:         defaultStr(res.ContentType, doc.ContentType),
+			Title:               titlePtr,
+			Author:              authorPtr,
+			Language:            langPtr,
+			PublishedAt:         res.PublishedAt,
+			State:               store.DocStatePending, // still pending until index step
 			CurrentExtractionID: &ext.ID,
 		}
 		if res.FinalURL != "" && res.FinalURL != doc.URL {
@@ -167,11 +167,11 @@ func FetchHandler(d Deps) HandlerFunc {
 }
 
 // IndexHandler builds the closure that runs one index job:
-//   1. Load document + its current extraction.
-//   2. Read the markdown file off disk.
-//   3. Pull the bookmark's tags (if any) for FTS boosting — best-effort.
-//   4. Run the Indexer.
-//   5. Mark document state=fetched.
+//  1. Load document + its current extraction.
+//  2. Read the markdown file off disk.
+//  3. Pull the bookmark's tags (if any) for FTS boosting — best-effort.
+//  4. Run the Indexer.
+//  5. Mark document state=fetched.
 func IndexHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
 		var payload IndexPayload

@@ -170,7 +170,7 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 				}
 				match := pickChromeProfile(profiles, want)
 				if match == nil {
-					return fmt.Errorf("Chrome profile %q not found (use --list-profiles to see available)", want)
+					return fmt.Errorf("chrome profile %q not found (use --list-profiles to see available)", want)
 				}
 				files = []string{match.BookmarkFile}
 			}
@@ -258,7 +258,7 @@ func followProgress(httpCtx context.Context, c *Context) error {
 		}
 		var eta time.Duration
 		if rate > 0 && pending+running > 0 {
-			eta = time.Duration(float64(pending+running)/rate*float64(time.Second)).Round(time.Second)
+			eta = time.Duration(float64(pending+running) / rate * float64(time.Second)).Round(time.Second)
 		}
 		fmt.Printf("  done=%d  pending=%d  running=%d  failed=%d  fetched=%d   rate≈%.1f/s   eta≈%s\n",
 			done, pending, running, failed, fetched, rate, eta)

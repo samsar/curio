@@ -11,11 +11,11 @@ import (
 
 // Engine runs hybrid search.
 //
-//	1. BM25 over chunks_fts
-//	2. Vector ANN over chunks_vec
-//	3. RRF fuse the two ranked chunk lists
-//	4. Collapse chunks → documents (best chunk per doc, configurable)
-//	5. Return top-K documents with their best chunk snippets
+//  1. BM25 over chunks_fts
+//  2. Vector ANN over chunks_vec
+//  3. RRF fuse the two ranked chunk lists
+//  4. Collapse chunks → documents (best chunk per doc, configurable)
+//  5. Return top-K documents with their best chunk snippets
 //
 // The Embedder dependency is used only on the query side — to vectorize
 // the user's query before VectorSearch. Documents are embedded by the
@@ -168,7 +168,6 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 
 	// Collapse fused chunks → documents.
 	type docAgg struct {
-		score      float64
 		chunkIDs   []string
 		chunkScore map[string]float64 // chunk_id -> fused score (post-RRF)
 	}

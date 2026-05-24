@@ -57,8 +57,8 @@ func ParseHTML(r io.Reader) ([]ParsedBookmark, error) {
 // Rules:
 //   - <a>:  emit one bookmark using the current folderStack.
 //   - <dt>: if it contains an <h3>, the H3 text is the folder name for
-//           any nested <dl>; recurse into all children, pushing that name
-//           onto the stack only for the <dl> path.
+//     any nested <dl>; recurse into all children, pushing that name
+//     onto the stack only for the <dl> path.
 //   - default: recurse into children unchanged.
 func walkNode(n *html.Node, folderStack []string, out *[]ParsedBookmark) {
 	if n == nil {
