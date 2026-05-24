@@ -256,6 +256,17 @@ func enforceCharLimit(in []Chunk, maxChars int) []Chunk {
 			if projected > maxChars && buf.Len() > 0 {
 				flush()
 			}
+			// Even after flushing, the overlap-seed leaves the tail of the
+			// previous chunk in `buf`. If that seed plus the next word
+			// would itself blow past maxChars, drop the seed entirely —
+			// preserving overlap is a nice-to-have, not worth producing
+			// an oversized chunk that breaks the embedder. Happens when
+			// the previous chunk's tail word(s) were near-maxChars and
+			// the next word is also large (e.g. two long URLs in a row).
+			if buf.Len()+1+len(w) > maxChars {
+				buf.Reset()
+				bufWords = nil
+			}
 			if buf.Len() > 0 {
 				buf.WriteByte(' ')
 			}

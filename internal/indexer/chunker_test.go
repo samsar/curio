@@ -136,3 +136,20 @@ func TestSanitizeForEmbedding_NoOpWithoutDataURLs(t *testing.T) {
 	in := "Plain markdown with [a link](https://example.com/page) and no images."
 	assert.Equal(t, in, sanitizeForEmbedding(in))
 }
+
+func TestChunkText_AdjacentLargeWordsStayUnderCap(t *testing.T) {
+	// Two near-cap "words" (e.g. tracking pixel URLs ~2KB each) packed
+	// in the same paragraph. Both fit under the per-word truncation
+	// threshold but together exceed maxChars; the overlap seed used to
+	// keep the first word in the buffer when the second arrived,
+	// producing a single 4KB+ chunk that overflowed the embedder.
+	w1 := strings.Repeat("a", 2100)
+	w2 := strings.Repeat("b", 2100)
+	md := "intro " + w1 + " " + w2 + " outro"
+
+	chunks := ChunkText(md, ChunkOptions{SizeChars: 3500})
+	for i, c := range chunks {
+		assert.LessOrEqual(t, len(c.Text), 3500,
+			"chunk[%d] exceeded cap: len=%d", i, len(c.Text))
+	}
+}
