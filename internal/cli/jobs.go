@@ -56,16 +56,54 @@ func renderJobList(resp *client.JobList) {
 		fmt.Println("no jobs match")
 		return
 	}
-	fmt.Printf("%-36s  %-9s  %-7s  %-3s  %s\n", "ID", "KIND", "STATUS", "ATT", "DETAIL")
-	for _, j := range resp.Items {
-		detail := ""
-		if j.LastError != nil {
-			detail = truncate(*j.LastError, 80)
-		} else if len(j.Payload) > 0 {
-			detail = truncate(condense(string(j.Payload)), 80)
+	// One header line per job + indented detail. No truncation — full
+	// error messages are the whole point of looking at this list. If
+	// terminal width is the concern, pipe to less or use --limit.
+	for i, j := range resp.Items {
+		if i > 0 {
+			fmt.Println()
 		}
-		fmt.Printf("%-36s  %-9s  %-7s  %-3d  %s\n", j.ID, j.Kind, j.Status, j.Attempts, detail)
+		fmt.Printf("%-7s  %-9s  attempts=%-2d  %s\n", j.Status, j.Kind, j.Attempts, j.ID)
+		if j.LastError != nil && *j.LastError != "" {
+			for _, line := range wrapLines(*j.LastError, 100) {
+				fmt.Printf("  err: %s\n", line)
+			}
+		}
+		if len(j.Payload) > 0 {
+			fmt.Printf("  payload: %s\n", condense(string(j.Payload)))
+		}
+		if !j.RunAfter.IsZero() {
+			fmt.Printf("  next attempt: %s\n", j.RunAfter.Local().Format("2006-01-02 15:04:05"))
+		}
 	}
+	fmt.Printf("\n%d job(s)\n", len(resp.Items))
+}
+
+// wrapLines breaks s on word boundaries so a long error message renders
+// across multiple indented lines instead of one runaway. The first slice
+// element has no leading whitespace; the caller indents each line itself.
+func wrapLines(s string, width int) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	if len(s) <= width {
+		return []string{s}
+	}
+	var out []string
+	for len(s) > width {
+		// Try to break at the last space before width; fall back to a hard cut.
+		cut := strings.LastIndex(s[:width], " ")
+		if cut < width/2 {
+			cut = width
+		}
+		out = append(out, s[:cut])
+		s = strings.TrimLeft(s[cut:], " ")
+	}
+	if s != "" {
+		out = append(out, s)
+	}
+	return out
 }
 
 // condense flattens JSON whitespace so a job's payload renders on one line.

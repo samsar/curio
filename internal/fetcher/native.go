@@ -89,18 +89,17 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		return nil, directErr
 	}
 
-	// Only fall back to Jina when the *content* came back but extraction
-	// failed (login wall, thin content). For hard HTTP errors (404, 403,
-	// 5xx) and DNS failures, Jina can't conjure a page that doesn't
-	// exist — and burning rate-limit budget on hopeless URLs gets us
-	// 429'd on the calls that would actually benefit. Production import
-	// logs showed 88% of fallbacks were on dead links; this fix returns
-	// the original error for those instead of escalating to Jina.
-	if !errors.Is(directErr, ErrLoginWall) {
+	// Fall back to Jina only for cases it can plausibly help with:
+	//   ErrLoginWall — page came back but was paywalled/thin
+	//   ErrAntiBot   — 403/503 from origin, likely a WAF block
+	// Skip for 404, DNS failures, 5xx-other, and timeouts: Jina can't
+	// conjure a page that doesn't exist, and wasting its rate limit on
+	// dead links gets us 429'd on the calls that *would* benefit.
+	if !errors.Is(directErr, ErrLoginWall) && !errors.Is(directErr, ErrAntiBot) {
 		return nil, directErr
 	}
 
-	n.log.Info("readability hit login wall, falling back to jina",
+	n.log.Info("native fetch needs help, falling back to jina",
 		"url", target, "err", directErr.Error())
 
 	jina, err := n.tryJina(ctx, target)
@@ -120,9 +119,23 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	if err != nil {
 		return nil, fmt.Errorf("native: build request: %w", err)
 	}
+	// Mimic Chrome more thoroughly than just the UA string. CDNs like
+	// Cloudflare cross-check several headers (Sec-Fetch-*, Sec-Ch-Ua,
+	// Upgrade-Insecure-Requests) against the UA; mismatches trigger
+	// 403/503 even with a plausible UA. Won't beat sophisticated JS
+	// challenges, but removes the cheapest blocks.
 	req.Header.Set("User-Agent", n.userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`)
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
 
 	resp, err := n.client.Do(req)
 	if err != nil {
@@ -133,6 +146,13 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Drain a bit so the connection can be reused.
 		_, _ = io.CopyN(io.Discard, resp.Body, 1024)
+		// 403 and 503 are commonly Cloudflare / WAF bot blocks rather
+		// than genuine "page missing" or "server down" — Jina's
+		// infrastructure often gets through where we don't. Tag with
+		// ErrAntiBot so Fetch falls back instead of giving up.
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusServiceUnavailable {
+			return nil, fmt.Errorf("native: HTTP %d: %w", resp.StatusCode, ErrAntiBot)
+		}
 		return nil, fmt.Errorf("native: HTTP %d", resp.StatusCode)
 	}
 
@@ -182,6 +202,13 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 // the response is a login/paywall placeholder rather than article content.
 // Exported so tests can match it.
 var ErrLoginWall = errors.New("login wall or thin content")
+
+// ErrAntiBot is wrapped by tryReadability when the origin returned an HTTP
+// status that suggests bot detection rather than a missing or
+// auth-required page. Used by Fetch to decide whether Jina might succeed
+// where direct fetch failed. Distinct from ErrLoginWall so callers can
+// log the two cases separately.
+var ErrAntiBot = errors.New("origin blocked the request (likely anti-bot)")
 
 // looksLikeLoginWall mirrors the JS impl's heuristics in samsar/web-to-markdown:
 //   - missing article entirely
