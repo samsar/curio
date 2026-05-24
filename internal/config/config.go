@@ -78,7 +78,15 @@ func Default() Config {
 		Daemon: Daemon{
 			Listen:   "127.0.0.1:8765",
 			LogLevel: "info",
-			Workers:  4,
+			// 16 workers covers the fetch-bound case (most jobs are
+			// network-blocked, plenty of headroom). Ollama serializes
+			// index work naturally so adding more workers doesn't
+			// pile on the embedding queue. Split fetch/index pools
+			// would be tidier but the single pool works fine — measured
+			// fetch p95 ~5s, index p95 <1s, so the indexer keeps up
+			// when fetches finally land. Tune via daemon.workers in
+			// ~/.curio/config.yaml.
+			Workers: 16,
 		},
 		Embedding: Embedding{
 			Provider: "ollama",
