@@ -81,8 +81,12 @@ func renderJobList(resp *client.JobList) {
 		if j.DocURL == "" && len(j.Payload) > 0 {
 			fmt.Printf("  payload: %s\n", condense(string(j.Payload)))
 		}
-		if !j.RunAfter.IsZero() {
-			fmt.Printf("  next attempt: %s\n", j.RunAfter.Local().Format("2006-01-02 15:04:05"))
+		// next attempt only makes sense while the job can still run. For
+		// terminal status (done, failed) the run_after field carries
+		// stale data from the last retry cycle — display would be
+		// confusing.
+		if (j.Status == "pending" || j.Status == "running") && !j.RunAfter.IsZero() {
+			fmt.Printf("  next attempt: %s\n", j.RunAfter.Local().Format("2006-01-02 15:04:05 MST"))
 		}
 	}
 	fmt.Printf("\n%d job(s)\n", len(resp.Items))
