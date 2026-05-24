@@ -18,8 +18,19 @@ type Chunk struct {
 
 // ChunkOptions controls splitting behavior.
 type ChunkOptions struct {
-	SizeTokens    int // target chunk size; default 512
-	OverlapTokens int // overlap between consecutive chunks; default 64
+	SizeTokens    int // target chunk size in whitespace-words; default 384
+	OverlapTokens int // overlap between consecutive chunks; default 48
+	// SizeChars is a hard upper bound on chunk length in bytes,
+	// applied AFTER word-count splitting. Acts as a safety net for
+	// dense markdown (long URLs, code blocks, tables) where BPE
+	// tokens-per-word is high and a "word-correct" chunk still
+	// overflows the embedder's context window.
+	//
+	// Rule of thumb: ~4 chars per BPE token for English. nomic-embed-text
+	// v1 caps at 2048 tokens regardless of what Ollama's modelfile sets,
+	// so 6000 chars ≈ 1500 tokens leaves a comfortable margin.
+	// Default 6000.
+	SizeChars int
 }
 
 // Chunk splits markdown into chunks. The split is paragraph-aware: a single
@@ -35,7 +46,7 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	}
 	size := opts.SizeTokens
 	if size <= 0 {
-		size = 512
+		size = 384
 	}
 	overlap := opts.OverlapTokens
 	if overlap < 0 {
@@ -43,6 +54,13 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	}
 	if overlap >= size {
 		overlap = size / 8
+	}
+	maxChars := opts.SizeChars
+	if maxChars <= 0 {
+		// 3500 chars ≈ 875 BPE tokens on plain English prose, ≈ 1500-1800
+		// on URL/code-dense markdown (URLs tokenize at ~30 tokens each).
+		// Both well under nomic-embed-text's 2048-token hard ceiling.
+		maxChars = 3500
 	}
 
 	paragraphs := splitParagraphs(markdown)
@@ -118,7 +136,73 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	}
 	flush()
 
-	return chunks
+	// Safety net: split anything still over the char cap.
+	return enforceCharLimit(chunks, maxChars)
+}
+
+// enforceCharLimit splits chunks whose Text exceeds maxChars into smaller
+// chunks at word boundaries. Sub-chunks share a small overlap (maxChars/16)
+// so semantic continuity is preserved across the split.
+func enforceCharLimit(in []Chunk, maxChars int) []Chunk {
+	if maxChars <= 0 {
+		return in
+	}
+	overlapChars := maxChars / 16
+	if overlapChars < 100 {
+		overlapChars = 100
+	}
+
+	var out []Chunk
+	for _, c := range in {
+		if len(c.Text) <= maxChars {
+			out = append(out, c)
+			continue
+		}
+		// Walk word boundaries, packing into byte-budgeted sub-chunks.
+		words := strings.Fields(c.Text)
+		var buf strings.Builder
+		var bufWords []string
+		flush := func() {
+			if buf.Len() == 0 {
+				return
+			}
+			out = append(out, Chunk{Text: buf.String(), TokenCount: len(bufWords)})
+			// Seed next chunk with the tail of this one for continuity.
+			buf.Reset()
+			seedBytes := 0
+			start := len(bufWords)
+			for ; start > 0 && seedBytes < overlapChars; start-- {
+				seedBytes += len(bufWords[start-1]) + 1
+			}
+			seed := bufWords[start:]
+			bufWords = append([]string{}, seed...)
+			for i, w := range seed {
+				if i > 0 {
+					buf.WriteByte(' ')
+				}
+				buf.WriteString(w)
+			}
+		}
+		for _, w := range words {
+			projected := buf.Len()
+			if projected > 0 {
+				projected++ // space
+			}
+			projected += len(w)
+			if projected > maxChars && buf.Len() > 0 {
+				flush()
+			}
+			if buf.Len() > 0 {
+				buf.WriteByte(' ')
+			}
+			buf.WriteString(w)
+			bufWords = append(bufWords, w)
+		}
+		if buf.Len() > 0 {
+			out = append(out, Chunk{Text: buf.String(), TokenCount: len(bufWords)})
+		}
+	}
+	return out
 }
 
 // splitParagraphs splits on blank lines but preserves leading markdown
