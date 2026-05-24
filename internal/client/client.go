@@ -175,15 +175,62 @@ func (c *Client) ImportBookmarks(ctx context.Context, req ImportRequest) (*Impor
 	return &out, nil
 }
 
-// Document mirrors api.DocumentResponse (subset used by CLI).
+// Document mirrors api.DocumentResponse.
 type Document struct {
-	ID          string    `json:"id"`
-	URL         string    `json:"url"`
-	ContentType string    `json:"content_type"`
-	Title       *string   `json:"title,omitempty"`
-	Author      *string   `json:"author,omitempty"`
-	State       string    `json:"state"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID                string      `json:"id"`
+	URL               string      `json:"url"`
+	URLCanonical      *string     `json:"url_canonical,omitempty"`
+	ContentType       string      `json:"content_type"`
+	Title             *string     `json:"title,omitempty"`
+	Author            *string     `json:"author,omitempty"`
+	PublishedAt       *time.Time  `json:"published_at,omitempty"`
+	Language          *string     `json:"language,omitempty"`
+	State             string      `json:"state"`
+	CurrentExtraction *Extraction `json:"current_extraction,omitempty"`
+	CreatedAt         time.Time   `json:"created_at"`
+	UpdatedAt         time.Time   `json:"updated_at"`
+}
+
+// Extraction mirrors api.ExtractionResponse. MarkdownPath is relative to
+// the daemon's content directory; the CLI joins them when displaying.
+type Extraction struct {
+	ID             string         `json:"id"`
+	FetchedAt      time.Time      `json:"fetched_at"`
+	Fetcher        string         `json:"fetcher"`
+	Status         string         `json:"status"`
+	MarkdownPath   string         `json:"markdown_path,omitempty"`
+	ErrorMessage   *string        `json:"error_message,omitempty"`
+	ExtractionMeta map[string]any `json:"extraction_meta,omitempty"`
+}
+
+func (c *Client) GetDocument(ctx context.Context, id string) (*Document, error) {
+	var out Document
+	if err := c.do(ctx, http.MethodGet, "/v1/documents/"+id, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetDocumentContent returns the raw markdown body for a document.
+func (c *Client) GetDocumentContent(ctx context.Context, id string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/v1/documents/"+id+"/content", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrDaemonUnreachable, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 // SearchRequest body.

@@ -37,6 +37,7 @@ type ExtractionResponse struct {
 	FetchedAt      time.Time      `json:"fetched_at"`
 	Fetcher        string         `json:"fetcher"`
 	Status         string         `json:"status"`
+	MarkdownPath   string         `json:"markdown_path,omitempty"`
 	ErrorMessage   *string        `json:"error_message,omitempty"`
 	ExtractionMeta map[string]any `json:"extraction_meta,omitempty"`
 }
@@ -58,6 +59,9 @@ func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 				Fetcher:      ext.Fetcher,
 				Status:       ext.Status,
 				ErrorMessage: ext.ErrorMessage,
+			}
+			if ext.MarkdownPath != nil {
+				er.MarkdownPath = *ext.MarkdownPath
 			}
 			if len(ext.ExtractionMeta) > 0 {
 				// Best-effort; ignore decode failures so the request still succeeds.
