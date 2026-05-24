@@ -278,7 +278,7 @@ func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 	claimed, err := q.ClaimNext(ctx, nil)
 	require.NoError(t, err)
 
-// First failure with retry → goes back to pending, attempts=1.
+	// First failure with retry → goes back to pending, attempts=1.
 	permanent, err := q.MarkFailed(ctx, claimed.ID, "transient", true)
 	require.NoError(t, err)
 	assert.False(t, permanent, "first attempt isn't permanent")
