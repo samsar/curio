@@ -136,3 +136,29 @@ func TestEngine_PerHitScoresExposed(t *testing.T) {
 	cm := hit.Chunks[0]
 	assert.True(t, cm.BM25Score != nil || cm.VectorScore != nil)
 }
+
+func TestSanitizeBM25Query(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{
+			// Real failing query from the field: punctuation no longer
+			// crashes FTS5, stopwords dropped, content terms OR'd.
+			"Find me all the best articles about computer science, data structures, and algorithms",
+			`"articles" OR "computer" OR "science" OR "data" OR "structures" OR "algorithms"`,
+		},
+		{"", ""},
+		{"   ,,,   ???   ", ""},
+		{"the and of for", ""}, // all stopwords → empty (caller skips BM25)
+		{"don't break apostrophes", `"don't" OR "break" OR "apostrophes"`},
+		{"state-of-the-art", `"state-of-the-art"`},
+		{`he said "hi"`, `"said" OR "hi"`}, // "he" stopworded, inner quotes stripped
+		{"AND OR NOT", ""},                 // case-insensitive stopword match
+	}
+	for _, c := range cases {
+		got := sanitizeBM25Query(c.in)
+		if got != c.want {
+			t.Errorf("sanitizeBM25Query(%q):\n  got:  %q\n  want: %q", c.in, got, c.want)
+		}
+	}
+}
