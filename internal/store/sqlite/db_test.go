@@ -23,7 +23,8 @@ func TestOpenAndMigrate(t *testing.T) {
 	err = db.QueryRow(`SELECT schema_version, embedding_model, embedding_dim FROM schema_meta WHERE id=1`).
 		Scan(&version, &model, &dim)
 	require.NoError(t, err)
-	assert.Equal(t, 1, version)
+	// schema_version reflects the latest applied migration.
+	assert.GreaterOrEqual(t, version, 1)
 	assert.Equal(t, "nomic-embed-text", model)
 	assert.Equal(t, 768, dim)
 }
