@@ -155,6 +155,91 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (b
 	return permanent, nil
 }
 
+// JobWithDoc pairs a Job with the URL + title of its target document, if
+// the job's payload carries a document_id and that doc exists. Empty
+// strings on both fields when the join misses (import / cluster /
+// summarize jobs don't reference a doc, and dropped docs from failed
+// imports also won't join).
+type JobWithDoc struct {
+	*store.Job
+	URL   string
+	Title string
+}
+
+// ListWithDoc is the debug-friendly variant of List: same filters, but
+// each row carries the URL + title of its target document so the CLI
+// doesn't have to do an N+1 round-trip. The join matches via
+// json_extract(payload, '$.document_id'), so it works for any job kind
+// that uses the same payload convention (fetch + index in v1).
+func (s *Jobs) ListWithDoc(ctx context.Context, tenantID, status, kind string, limit int) ([]JobWithDoc, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	const jobCols = `j.id, j.tenant_id, j.kind, j.payload, j.status, j.attempts, j.run_after, j.last_error, j.created_at, j.updated_at`
+
+	q := "SELECT " + jobCols + ", COALESCE(d.url, '') AS doc_url, COALESCE(d.title, '') AS doc_title " +
+		"FROM jobs j " +
+		"LEFT JOIN documents d ON d.id = json_extract(j.payload, '$.document_id') " +
+		"WHERE j.tenant_id = ?"
+	args := []any{tenantID}
+	if status != "" {
+		q += " AND j.status = ?"
+		args = append(args, status)
+	}
+	if kind != "" {
+		q += " AND j.kind = ?"
+		args = append(args, kind)
+	}
+	q += " ORDER BY j.created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs with doc: %w", err)
+	}
+	defer rows.Close()
+	var out []JobWithDoc
+	for rows.Next() {
+		job, url, title, err := scanJobWithDoc(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, JobWithDoc{Job: job, URL: url, Title: title})
+	}
+	return out, rows.Err()
+}
+
+func scanJobWithDoc(row interface{ Scan(...any) error }) (*store.Job, string, string, error) {
+	var (
+		j                              store.Job
+		payload                        string
+		lastErr                        sql.NullString
+		runAfter, createdAt, updatedAt string
+		url, title                     string
+	)
+	err := row.Scan(
+		&j.ID, &j.TenantID, &j.Kind, &payload, &j.Status,
+		&j.Attempts, &runAfter, &lastErr,
+		&createdAt, &updatedAt,
+		&url, &title,
+	)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("scan job with doc: %w", err)
+	}
+	j.Payload = []byte(payload)
+	j.LastError = nullableString(lastErr)
+	if j.RunAfter, err = parseTime(runAfter); err != nil {
+		return nil, "", "", err
+	}
+	if j.CreatedAt, err = parseTime(createdAt); err != nil {
+		return nil, "", "", err
+	}
+	if j.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return nil, "", "", err
+	}
+	return &j, url, title, nil
+}
+
 // List returns recent jobs for a tenant, optionally filtered by status
 // and/or kind. Ordered most-recently-created first.
 func (s *Jobs) List(ctx context.Context, tenantID, status, kind string, limit int) ([]*store.Job, error) {

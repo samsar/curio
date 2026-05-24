@@ -300,6 +300,8 @@ type Job struct {
 	RunAfter  time.Time       `json:"run_after"`
 	CreatedAt time.Time       `json:"created_at"`
 	UpdatedAt time.Time       `json:"updated_at"`
+	DocURL    string          `json:"doc_url,omitempty"`
+	DocTitle  string          `json:"doc_title,omitempty"`
 }
 
 // JobList mirrors api.JobListResponse.

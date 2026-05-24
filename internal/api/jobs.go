@@ -11,7 +11,9 @@ import (
 )
 
 // JobResponse mirrors store.Job with timestamps as time.Time. Payload is
-// passed through as raw JSON.
+// passed through as raw JSON. DocURL and DocTitle come from a left-join
+// on documents; they're empty for jobs that don't reference a doc
+// (import, cluster, summarize) or when the doc was dropped.
 type JobResponse struct {
 	ID        string          `json:"id"`
 	Kind      string          `json:"kind"`
@@ -22,6 +24,8 @@ type JobResponse struct {
 	RunAfter  time.Time       `json:"run_after"`
 	CreatedAt time.Time       `json:"created_at"`
 	UpdatedAt time.Time       `json:"updated_at"`
+	DocURL    string          `json:"doc_url,omitempty"`
+	DocTitle  string          `json:"doc_title,omitempty"`
 }
 
 // JobListResponse is the body of GET /v1/jobs.
@@ -46,7 +50,7 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			"JobQueue impl does not expose listing")
 		return
 	}
-	jobs, err := jq.List(r.Context(), d.TenantID, status, kind, limit)
+	jobs, err := jq.ListWithDoc(r.Context(), d.TenantID, status, kind, limit)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -64,6 +68,8 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			RunAfter:  j.RunAfter,
 			CreatedAt: j.CreatedAt,
 			UpdatedAt: j.UpdatedAt,
+			DocURL:    j.URL,
+			DocTitle:  j.Title,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
