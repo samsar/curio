@@ -146,6 +146,111 @@ func (s *Documents) UpdateState(ctx context.Context, id, state string) error {
 	return ensureRow(res, "document")
 }
 
+// DocumentWithError pairs a Document with the most recent failed-job error
+// message that targeted it. Used by the debug-listing endpoint so users
+// can see in one query which docs are broken and why, without cross-
+// referencing the jobs table by hand.
+type DocumentWithError struct {
+	*store.Document
+	LastError string // empty if no failed job is associated
+}
+
+// ListWithLastError returns documents for a tenant, optionally filtered by
+// state, paired with the last_error of their most recent failed fetch or
+// index job. Ordered most-recently-updated first.
+//
+// The subquery uses json_extract on jobs.payload to find jobs whose
+// document_id matches; the payload format is set by the handlers in
+// internal/jobs/handlers.go. If we add more job kinds that carry
+// document_id later, those errors will surface here automatically.
+func (s *Documents) ListWithLastError(ctx context.Context, tenantID, state string, limit int) ([]DocumentWithError, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	const cols = `d.id, d.tenant_id, d.url, d.url_canonical, d.content_type, d.title, d.author,
+		d.published_at, d.language, d.word_count, d.current_extraction_id, d.state,
+		d.created_at, d.updated_at`
+
+	q := `SELECT ` + cols + `, COALESCE(j.last_error, '') AS last_error
+		FROM documents d
+		LEFT JOIN jobs j ON j.id = (
+			SELECT id FROM jobs
+			WHERE status = 'failed'
+			  AND json_extract(payload, '$.document_id') = d.id
+			ORDER BY updated_at DESC
+			LIMIT 1
+		)
+		WHERE d.tenant_id = ?`
+	args := []any{tenantID}
+	if state != "" {
+		q += ` AND d.state = ?`
+		args = append(args, state)
+	}
+	q += ` ORDER BY d.updated_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list documents with error: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DocumentWithError
+	for rows.Next() {
+		doc, lastErr, err := scanDocumentWithError(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, DocumentWithError{Document: doc, LastError: lastErr})
+	}
+	return out, rows.Err()
+}
+
+// scanDocumentWithError mirrors scanDocument but adds the joined last_error
+// column at the end.
+func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document, string, error) {
+	var (
+		d                                            store.Document
+		urlCanonical, title, author, language, curEx sql.NullString
+		publishedAt                                  sql.NullString
+		wordCount                                    sql.NullInt64
+		createdAt, updatedAt                         string
+		lastErr                                      string
+	)
+	err := row.Scan(
+		&d.ID, &d.TenantID, &d.URL,
+		&urlCanonical, &d.ContentType,
+		&title, &author,
+		&publishedAt, &language,
+		&wordCount, &curEx, &d.State,
+		&createdAt, &updatedAt,
+		&lastErr,
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("scan document with error: %w", err)
+	}
+	d.URLCanonical = nullableString(urlCanonical)
+	d.Title = nullableString(title)
+	d.Author = nullableString(author)
+	d.Language = nullableString(language)
+	d.CurrentExtractionID = nullableString(curEx)
+	d.WordCount = nullableInt(wordCount)
+	if publishedAt.Valid {
+		pt, perr := parseTime(publishedAt.String)
+		if perr != nil {
+			return nil, "", perr
+		}
+		d.PublishedAt = &pt
+	}
+	if d.CreatedAt, err = parseTime(createdAt); err != nil {
+		return nil, "", err
+	}
+	if d.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return nil, "", err
+	}
+	return &d, lastErr, nil
+}
+
 // ListIDs returns all document IDs for a tenant, optionally restricted
 // to a particular state. Used by the bulk refetch path.
 func (s *Documents) ListIDs(ctx context.Context, tenantID, state string) ([]string, error) {
