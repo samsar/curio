@@ -126,13 +126,15 @@ func (s *Jobs) MarkDone(ctx context.Context, id string) error {
 	return ensureRow(res, "job")
 }
 
-func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) error {
+func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (bool, error) {
 	job, err := s.GetByID(ctx, id)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	if retry && job.Attempts < s.MaxAttempts {
+	permanent := !retry || job.Attempts >= s.MaxAttempts
+
+	if !permanent {
 		// Exponential backoff: 2^attempts seconds, capped at 1 hour.
 		backoff := time.Duration(math.Pow(2, float64(job.Attempts))) * time.Second
 		if backoff > time.Hour {
@@ -148,9 +150,9 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) er
 			store.JobStatusFailed, errMsg, id)
 	}
 	if err != nil {
-		return fmt.Errorf("mark failed: %w", err)
+		return false, fmt.Errorf("mark failed: %w", err)
 	}
-	return nil
+	return permanent, nil
 }
 
 // List returns recent jobs for a tenant, optionally filtered by status

@@ -41,10 +41,39 @@ type IndexPayload struct {
 	DocumentID string `json:"document_id"`
 }
 
-// Register wires the M0 handlers onto a worker.
+// Register wires the M0 handlers onto a worker. Also attaches
+// permanent-failure hooks so when a fetch or index job exhausts its
+// retries, the parent document transitions to state=failed instead of
+// staying stuck in pending forever. Without this, `curio status`
+// overstates how much work is actually in flight — a doc whose fetch
+// gave up still shows as "pending" indistinguishable from one whose
+// job is genuinely about to run.
 func Register(w *Worker, d Deps) {
 	w.Register(store.JobKindFetch, FetchHandler(d))
 	w.Register(store.JobKindIndex, IndexHandler(d))
+	w.OnPermanentFailure(store.JobKindFetch, markDocFailed(d))
+	w.OnPermanentFailure(store.JobKindIndex, markDocFailed(d))
+}
+
+// markDocFailed is a kind-agnostic hook: read document_id from the job
+// payload, set its state to failed. Used for both fetch and index since
+// both payloads carry document_id under the same JSON key.
+func markDocFailed(d Deps) HandlerFunc {
+	return func(ctx context.Context, job *store.Job) error {
+		var payload struct {
+			DocumentID string `json:"document_id"`
+		}
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return fmt.Errorf("decode payload to mark doc failed: %w", err)
+		}
+		if payload.DocumentID == "" {
+			return nil // nothing to clean up
+		}
+		if err := d.Documents.UpdateState(ctx, payload.DocumentID, store.DocStateFailed); err != nil {
+			return fmt.Errorf("update doc %s to failed: %w", payload.DocumentID, err)
+		}
+		return nil
+	}
 }
 
 // FetchHandler builds the closure that runs one fetch job:

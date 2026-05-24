@@ -216,7 +216,10 @@ type JobQueue interface {
 	MarkDone(ctx context.Context, id string) error
 	// MarkFailed bumps attempts, sets status=failed (or pending with a
 	// future run_after if retrying), and records the error. The retry
-	// policy lives in the queue impl, not in the caller.
-	MarkFailed(ctx context.Context, id string, errMsg string, retry bool) error
+	// policy lives in the queue impl, not in the caller. Returns
+	// permanent=true when the job hit the terminal failed state (either
+	// retry=false or attempts exhausted) so callers can do kind-specific
+	// cleanup, e.g. updating a parent document's state.
+	MarkFailed(ctx context.Context, id string, errMsg string, retry bool) (permanent bool, err error)
 	GetByID(ctx context.Context, id string) (*Job, error)
 }
