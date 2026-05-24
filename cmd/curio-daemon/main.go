@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/samansartipi/curio/internal/api"
 	"github.com/samansartipi/curio/internal/config"
@@ -103,14 +105,31 @@ func run() error {
 		return err
 	}
 
-	// Fetcher dispatcher (M0: single web2md).
-	w2m, err := fetcher.NewWeb2MD(fetcher.Web2MDOptions{
-		Bin: cfg.Fetcher.Web2MD.Bin,
-	})
-	if err != nil {
-		return err
+	// Fetcher dispatcher (M0: single backend selected by config).
+	var defaultFetcher fetcher.Fetcher
+	switch cfg.Fetcher.Default {
+	case "native":
+		defaultFetcher = fetcher.NewNative(fetcher.NativeOptions{
+			Timeout:      time.Duration(cfg.Fetcher.Native.TimeoutSeconds) * time.Second,
+			UserAgent:    cfg.Fetcher.Native.UserAgent,
+			JinaFallback: cfg.Fetcher.Native.JinaFallback,
+			JinaBaseURL:  cfg.Fetcher.Native.JinaBaseURL,
+			Log:          slog.Default(),
+		})
+	case "web2md":
+		w2m, err := fetcher.NewWeb2MD(fetcher.Web2MDOptions{
+			Bin:     cfg.Fetcher.Web2MD.Bin,
+			NodeBin: cfg.Fetcher.Web2MD.NodeBin,
+			Timeout: time.Duration(cfg.Fetcher.Web2MD.TimeoutSeconds) * time.Second,
+		})
+		if err != nil {
+			return err
+		}
+		defaultFetcher = w2m
+	default:
+		return fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
 	}
-	dispatcher := &fetcher.Single{F: w2m}
+	dispatcher := &fetcher.Single{F: defaultFetcher}
 
 	// Indexer + search engine.
 	idx := indexer.New(chunks, emb, indexer.Options{

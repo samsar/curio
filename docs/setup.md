@@ -1,14 +1,17 @@
 # Setup
 
-Curio depends on two external pieces of infrastructure at runtime:
+Curio has **one** runtime dependency: Ollama, for embeddings. The fetcher
+that extracts article content from URLs is Go-native (a port of
+[samsar/web-to-markdown](https://github.com/samsar/web-to-markdown)) and
+needs nothing external.
 
-1. **Ollama** — for embeddings (`nomic-embed-text`) and, later, local LLM
-   calls. Required.
-2. **web2md** — the Node.js extractor at `~/projects/experiments/web-to-markdown/`.
-   Required for the v1 fetcher.
+Optionally, you can switch to the Node-based `web2md` fetcher (set
+`fetcher.default: web2md` in config). It produces slightly different
+extraction results — the Mozilla Readability source-of-truth — and is
+useful as a fallback / comparison backend.
 
-This document covers installing both on macOS. Linux / Windows users follow
-the same shape but with platform-appropriate package managers.
+This document covers macOS. Linux / Windows users follow the same shape
+but with platform-appropriate package managers.
 
 ## Ollama (native)
 
@@ -37,29 +40,26 @@ curl -s http://localhost:11434/api/embed \
 # Should print 768
 ```
 
-## web2md (Node)
+## Fetcher options
 
-The tool already lives in your repo at `~/projects/experiments/web-to-markdown/`.
-One-time setup:
+The default fetcher (`fetcher.default: native`) needs no setup — it's
+built into the curio binary. You can switch to `web2md` if you want the
+Mozilla Readability source-of-truth extraction:
 
 ```sh
-cd ~/projects/experiments/web-to-markdown
-node --version            # 18+ recommended; the tool uses native fetch
+git clone https://github.com/samsar/web-to-markdown ~/code/web-to-markdown
+cd ~/code/web-to-markdown
+node --version            # 18+ required; uses native fetch
 npm install               # installs JSDOM, Readability, Turndown
-./web2md.js https://example.com --stdout | head -20
 ```
 
-The curio daemon will invoke `node /path/to/web2md.js <url> --stdout` via the
-`Web2MD` fetcher. Set `fetcher.web2md.bin` in `~/.curio/config.yaml` to the
-absolute path of `web2md.js`. If you ever publish a `web2md` shim to your
-PATH, you can set `bin` to just `"web2md"` instead.
-
-Example config snippet:
+Then in `~/.curio/config.yaml`:
 
 ```yaml
 fetcher:
+  default: "web2md"
   web2md:
-    bin: "/Users/you/projects/experiments/web-to-markdown/web2md.js"
+    bin: "/Users/you/code/web-to-markdown/web2md.js"
     timeout_seconds: 30
 ```
 

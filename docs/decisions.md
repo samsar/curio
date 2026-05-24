@@ -369,6 +369,45 @@ host.
 
 ---
 
+## Default fetcher is Go-native, not a Node subprocess
+
+**Decision:** The default `Fetcher` impl is `Native` — Go code using
+`codeberg.org/readeck/go-readability/v2` for article extraction and
+`github.com/JohannesKaufmann/html-to-markdown/v2` for HTML→Markdown. The
+existing `Web2MD` fetcher stays as an opt-in backend
+(`fetcher.default: web2md` in config).
+
+**Why:** "Baked in" means users don't think about runtime deps. Requiring
+Node + an `npm install` step to use curio is real install friction; a
+single Go binary is the standard for tools in this space. The Go
+Readability port is mature and produces extraction that's close enough
+to Mozilla Readability for our use case.
+
+**What was preserved verbatim from the JS impl:**
+- Login-wall heuristics: extracted text < 500 chars, title matching
+  "sign in"/"log in"/"join now"/"join linkedin", redirect to a different
+  host, or redirect to a `/login`, `/authwall`, `/signin`, `/signup`
+  path. Each condition produces a distinct diagnostic reason.
+- Jina Reader fallback: same retry policy (4 attempts, exponential
+  backoff on 429/5xx), same response parser (`Title:`, `URL Source:`,
+  `Published Time:`, `Markdown Content:` block format), same 200-char
+  minimum body length to consider the fallback successful.
+- User-Agent header matching the JS version.
+- `via: readability` vs `via: jina` metadata key.
+
+**Operator note:** to compare extraction quality between the two
+backends on a specific URL, point your config at `web2md` and refetch.
+We don't yet have an A/B comparison mode but it'd be a natural M2 add.
+
+**Internal abstraction:** we deliberately did NOT add nested interfaces
+for the Readability impl or the HTML→Markdown converter. We have one Go
+lib for each in production use; abstracting them now would be the
+classic "interface with one implementation" trap. The `Fetcher`
+interface at the pipeline level is the right place to swap behavior;
+the rest is direct lib calls.
+
+---
+
 ## What's deferred from the v1 API
 
 These are intentionally omitted from `api/openapi.yaml`. Each is additive when
