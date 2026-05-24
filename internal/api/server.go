@@ -60,6 +60,7 @@ func NewServer(addr string, deps Deps) *Server {
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/healthz", deps.handleHealth)
 		r.Get("/stats", deps.handleStats)
+		r.Get("/metrics", deps.handleMetrics)
 
 		r.Route("/bookmarks", func(r chi.Router) {
 			r.Post("/", deps.handleCreateBookmark)

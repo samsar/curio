@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -84,7 +85,9 @@ func (s *Jobs) Enqueue(ctx context.Context, j *store.Job) error {
 func (s *Jobs) ClaimNext(ctx context.Context, kinds []string) (*store.Job, error) {
 	now := formatTime(time.Now().UTC())
 
-	args := []any{store.JobStatusRunning, store.JobStatusPending, now}
+	// args: 3 for the SET clause (status, started_at, eligibility now),
+	// 2 for the SELECT predicate (status, run_after), optional kinds.
+	args := []any{store.JobStatusRunning, now, store.JobStatusPending, now}
 	kindSQL := ""
 	if len(kinds) > 0 {
 		placeholders := strings.Repeat("?,", len(kinds))
@@ -97,7 +100,7 @@ func (s *Jobs) ClaimNext(ctx context.Context, kinds []string) (*store.Job, error
 
 	const cols = `id, tenant_id, kind, payload, status, attempts, run_after, last_error, created_at, updated_at`
 
-	q := `UPDATE jobs SET status = ?, attempts = attempts + 1
+	q := `UPDATE jobs SET status = ?, started_at = ?, attempts = attempts + 1
 	      WHERE id = (
 	          SELECT id FROM jobs
 	          WHERE status = ? AND run_after <= ?` + kindSQL + `
@@ -305,6 +308,138 @@ func (s *Jobs) PruneOlderThan(ctx context.Context, tenantID string, before time.
 		return 0, fmt.Errorf("prune jobs: %w", err)
 	}
 	return res.RowsAffected()
+}
+
+// KindMetrics is the aggregated performance picture for one job kind
+// over a rolling window. Times are in milliseconds (computed from
+// updated_at - created_at). Failed is the count of jobs in that kind
+// whose terminal status was 'failed' in the window.
+type KindMetrics struct {
+	Kind                 string
+	Count                int
+	MeanMS               float64
+	P50MS                float64
+	P95MS                float64
+	P99MS                float64
+	Failed               int
+	Running              int // currently in-flight (status='running'); not bounded by window
+	OldestRunningSeconds int // age of the oldest running job
+}
+
+// MetricsByKind returns one KindMetrics per job kind for the given
+// window. Uses window functions to compute percentiles; SQLite 3.25+ is
+// fine (we're on much newer). Counts cover done+failed jobs whose
+// updated_at falls in the window; Running counts ignore the window (it's
+// "right now").
+//
+// Cost: O(N rows in window) — well-indexed via (status, run_after,
+// created_at). Becomes slow only if the jobs table grows huge without
+// pruning; users can `curio jobs prune` to mitigate.
+func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.Duration) ([]KindMetrics, error) {
+	cutoff := time.Now().UTC().Add(-window)
+
+	// Two CTEs:
+	//   durations: every terminal job in the window with its run duration
+	//   done_ranked: durations of successful jobs ranked within their kind
+	// Per-kind aggregation does scalar subqueries against done_ranked for
+	// mean / p50 / p95 / p99. We compute percentiles only over successful
+	// runs because failed-job durations are dominated by retry backoff and
+	// MaxAttempts × timeout, not actual work time.
+	const q = `
+	WITH durations AS (
+		SELECT kind, status,
+		       (julianday(updated_at) - julianday(started_at)) * 86400000.0 AS ms
+		FROM jobs
+		WHERE tenant_id = ?
+		  AND status IN ('done','failed')
+		  AND updated_at > ?
+		  AND started_at IS NOT NULL  -- pre-migration rows lack this
+	),
+	done_ranked AS (
+		SELECT kind, ms,
+		       percent_rank() OVER (PARTITION BY kind ORDER BY ms) AS pct
+		FROM durations WHERE status = 'done'
+	)
+	SELECT d.kind,
+	       count(*) AS total,
+	       sum(CASE WHEN d.status='failed' THEN 1 ELSE 0 END) AS failed,
+	       coalesce((SELECT avg(ms) FROM done_ranked WHERE kind = d.kind), 0) AS mean_ms,
+	       coalesce((SELECT min(ms) FROM done_ranked WHERE kind = d.kind AND pct >= 0.50), 0) AS p50,
+	       coalesce((SELECT min(ms) FROM done_ranked WHERE kind = d.kind AND pct >= 0.95), 0) AS p95,
+	       coalesce((SELECT min(ms) FROM done_ranked WHERE kind = d.kind AND pct >= 0.99), 0) AS p99
+	FROM durations d
+	GROUP BY d.kind`
+
+	rows, err := s.db.QueryContext(ctx, q, tenantID, formatTime(cutoff))
+	if err != nil {
+		return nil, fmt.Errorf("metrics by kind: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]*KindMetrics{}
+	for rows.Next() {
+		var m KindMetrics
+		if err := rows.Scan(&m.Kind, &m.Count, &m.Failed, &m.MeanMS, &m.P50MS, &m.P95MS, &m.P99MS); err != nil {
+			return nil, fmt.Errorf("scan metrics: %w", err)
+		}
+		out[m.Kind] = &m
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Layer in-flight info on top via a second cheap query. "Running"
+	// rows aren't bounded by the window — they're "right now."
+	// "Oldest running" is the time since started_at, not updated_at,
+	// because updated_at isn't touched once the job goes running (the
+	// trigger fires on UPDATE but ClaimNext is the only writer that
+	// gets it there). started_at is the truthful "running since" time.
+	const inflightQ = `
+	SELECT kind,
+	       count(*) AS running,
+	       coalesce(
+	         max((julianday('now') - julianday(coalesce(started_at, updated_at))) * 86400),
+	         0
+	       ) AS oldest_running_seconds
+	FROM jobs
+	WHERE tenant_id = ? AND status = 'running'
+	GROUP BY kind`
+
+	iRows, err := s.db.QueryContext(ctx, inflightQ, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("metrics in-flight: %w", err)
+	}
+	defer iRows.Close()
+	for iRows.Next() {
+		var kind string
+		var running int
+		var oldest float64
+		if err := iRows.Scan(&kind, &running, &oldest); err != nil {
+			return nil, fmt.Errorf("scan in-flight: %w", err)
+		}
+		m, ok := out[kind]
+		if !ok {
+			m = &KindMetrics{Kind: kind}
+			out[kind] = m
+		}
+		m.Running = running
+		m.OldestRunningSeconds = int(oldest)
+	}
+	if err := iRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Sort by kind for deterministic output.
+	kinds := make([]string, 0, len(out))
+	for k := range out {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	result := make([]KindMetrics, 0, len(kinds))
+	for _, k := range kinds {
+		result = append(result, *out[k])
+	}
+	return result, nil
 }
 
 // CountByStatus returns the number of jobs in each status for a tenant.
