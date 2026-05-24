@@ -2,8 +2,6 @@ module github.com/samsar/curio
 
 go 1.25.7
 
-toolchain go1.26.3
-
 require (
 	codeberg.org/readeck/go-readability/v2 v2.1.1
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.1
