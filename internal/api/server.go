@@ -61,6 +61,7 @@ func NewServer(addr string, deps Deps) *Server {
 
 		r.Route("/bookmarks", func(r chi.Router) {
 			r.Post("/", deps.handleCreateBookmark)
+			r.Post("/import", deps.handleImportBookmarks)
 			r.Get("/", deps.handleListBookmarks)
 			r.Get("/{id}", deps.handleGetBookmark)
 			r.Delete("/{id}", deps.handleDeleteBookmark)

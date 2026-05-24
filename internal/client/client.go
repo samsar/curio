@@ -121,6 +121,41 @@ func (c *Client) ListBookmarks(ctx context.Context, opts BookmarkListOpts) (*Boo
 	return &out, nil
 }
 
+// ImportBookmark mirrors api.ImportBookmark.
+type ImportBookmark struct {
+	URL        string    `json:"url"`
+	Title      string    `json:"title,omitempty"`
+	FolderPath string    `json:"folder_path,omitempty"`
+	Tags       []string  `json:"tags,omitempty"`
+	SavedAt    time.Time `json:"saved_at,omitempty"`
+}
+
+// ImportRequest mirrors api.ImportRequest.
+type ImportRequest struct {
+	Source    string           `json:"source"`
+	Bookmarks []ImportBookmark `json:"bookmarks"`
+}
+
+// ImportResponse mirrors api.ImportResponse.
+type ImportResponse struct {
+	Source       string         `json:"source"`
+	Total        int            `json:"total"`
+	Created      int            `json:"created"`
+	Skipped      int            `json:"skipped"`
+	Filtered     int            `json:"filtered"`
+	JobsEnqueued int            `json:"jobs_enqueued"`
+	FilteredBy   map[string]int `json:"filtered_by,omitempty"`
+	Errors       []string       `json:"errors,omitempty"`
+}
+
+func (c *Client) ImportBookmarks(ctx context.Context, req ImportRequest) (*ImportResponse, error) {
+	var out ImportResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/bookmarks/import", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Document mirrors api.DocumentResponse (subset used by CLI).
 type Document struct {
 	ID          string    `json:"id"`

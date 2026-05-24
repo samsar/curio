@@ -65,6 +65,7 @@ over HTTP; auto-starts the daemon if it's not running.`,
 	root.AddCommand(
 		newVersionCmd(),
 		newAddCmd(),
+		newImportCmd(),
 		newSearchCmd(),
 		newStatusCmd(),
 		newDaemonCmd(),

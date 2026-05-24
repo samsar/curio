@@ -45,6 +45,7 @@ const (
 	SourceSafari  = "safari"
 	SourceFirefox = "firefox"
 	SourceManual  = "manual"
+	SourceHTML    = "html" // Netscape HTML export, any browser
 
 	JobKindFetch     = "fetch"
 	JobKindIndex     = "index"
