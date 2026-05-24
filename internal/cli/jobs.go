@@ -64,12 +64,21 @@ func renderJobList(resp *client.JobList) {
 			fmt.Println()
 		}
 		fmt.Printf("%-7s  %-9s  attempts=%-2d  %s\n", j.Status, j.Kind, j.Attempts, j.ID)
+		if j.DocURL != "" {
+			fmt.Printf("  url: %s\n", j.DocURL)
+			if j.DocTitle != "" && j.DocTitle != j.DocURL {
+				fmt.Printf("  title: %s\n", truncate(j.DocTitle, 100))
+			}
+		}
 		if j.LastError != nil && *j.LastError != "" {
 			for _, line := range wrapLines(*j.LastError, 100) {
 				fmt.Printf("  err: %s\n", line)
 			}
 		}
-		if len(j.Payload) > 0 {
+		// Payload is debugging signal when no DocURL was joined (import,
+		// cluster, summarize jobs). For fetch/index it's redundant with
+		// the URL we just printed.
+		if j.DocURL == "" && len(j.Payload) > 0 {
 			fmt.Printf("  payload: %s\n", condense(string(j.Payload)))
 		}
 		if !j.RunAfter.IsZero() {
