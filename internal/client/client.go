@@ -46,6 +46,23 @@ func (c *Client) Healthz(ctx context.Context) (*Health, error) {
 	return &h, nil
 }
 
+// Stats mirrors api.Stats.
+type Stats struct {
+	Version          string         `json:"version"`
+	BookmarksTotal   int            `json:"bookmarks_total"`
+	DocumentsTotal   int            `json:"documents_total"`
+	DocumentsByState map[string]int `json:"documents_by_state,omitempty"`
+	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
+}
+
+func (c *Client) Stats(ctx context.Context) (*Stats, error) {
+	var s Stats
+	if err := c.do(ctx, http.MethodGet, "/v1/stats", nil, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 // Bookmark mirrors api.BookmarkResponse.
 type Bookmark struct {
 	ID            string    `json:"id"`

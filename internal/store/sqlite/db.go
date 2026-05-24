@@ -71,6 +71,15 @@ func Migrate(db *DB) error {
 // Path returns the path Open was called with.
 func (d *DB) Path() string { return d.path }
 
+// ReadSchemaVersion returns the schema_version recorded in the
+// schema_meta table. Used to sync the marker file (.curio-meta.json)
+// after migrations run.
+func ReadSchemaVersion(db *DB) (int, error) {
+	var v int
+	err := db.QueryRow(`SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&v)
+	return v, err
+}
+
 // buildDSN produces a connection string that sets curio's required pragmas
 // on every pooled connection. Without this, foreign_keys defaults to OFF
 // per connection and the schema's FK constraints silently aren't enforced.
