@@ -49,9 +49,10 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        # v7 of the action pulls golangci-lint v2.x (built with newer Go).
-        # v6 was pinning v1.64.x which was built with go1.24 and rejects
-        # modules whose `go` directive is >= 1.25.
+        # Pin a recent v2.x — older v2 releases (v2.0.x) were built with
+        # Go 1.24 and reject modules whose `go` directive is ≥ 1.25.
+        # Multiple deps (pressly/goose, html-to-markdown, ...) require
+        # 1.25, so we need a lint binary built against ≥1.25 too.
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.0.2
+          version: v2.12.2
