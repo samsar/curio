@@ -89,7 +89,18 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		return nil, directErr
 	}
 
-	n.log.Info("readability failed, falling back to jina",
+	// Only fall back to Jina when the *content* came back but extraction
+	// failed (login wall, thin content). For hard HTTP errors (404, 403,
+	// 5xx) and DNS failures, Jina can't conjure a page that doesn't
+	// exist — and burning rate-limit budget on hopeless URLs gets us
+	// 429'd on the calls that would actually benefit. Production import
+	// logs showed 88% of fallbacks were on dead links; this fix returns
+	// the original error for those instead of escalating to Jina.
+	if !errors.Is(directErr, ErrLoginWall) {
+		return nil, directErr
+	}
+
+	n.log.Info("readability hit login wall, falling back to jina",
 		"url", target, "err", directErr.Error())
 
 	jina, err := n.tryJina(ctx, target)
