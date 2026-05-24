@@ -208,6 +208,50 @@ type ChunkMatch struct {
 	VectorScore *float64 `json:"vector_score,omitempty"`
 }
 
+// Document mirrors api.DocumentListItem. (Single-doc get returns more
+// fields; the list endpoint only carries the debug-relevant subset plus
+// last_error.)
+type DocumentListItem struct {
+	ID          string    `json:"id"`
+	URL         string    `json:"url"`
+	Title       *string   `json:"title,omitempty"`
+	ContentType string    `json:"content_type"`
+	State       string    `json:"state"`
+	LastError   string    `json:"last_error,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// DocumentList mirrors api.DocumentListResponse.
+type DocumentList struct {
+	Items []DocumentListItem `json:"items"`
+}
+
+// ListDocumentsOpts filters for ListDocuments.
+type ListDocumentsOpts struct {
+	State string // pending | fetched | failed | dead
+	Limit int
+}
+
+func (c *Client) ListDocuments(ctx context.Context, opts ListDocumentsOpts) (*DocumentList, error) {
+	q := url.Values{}
+	if opts.State != "" {
+		q.Set("state", opts.State)
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	path := "/v1/documents"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	var out DocumentList
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // RefetchResponse is the body of a successful refetch.
 type RefetchResponse struct {
 	JobID string `json:"job_id"`

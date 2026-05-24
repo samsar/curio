@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -69,6 +70,63 @@ func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// DocumentListItem is one row in the list response. Mirrors DocumentResponse
+// but adds LastError from the join-with-jobs query so debugging failed
+// docs is one API call.
+type DocumentListItem struct {
+	ID          string    `json:"id"`
+	URL         string    `json:"url"`
+	Title       *string   `json:"title,omitempty"`
+	ContentType string    `json:"content_type"`
+	State       string    `json:"state"`
+	LastError   string    `json:"last_error,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// DocumentListResponse is the body of GET /v1/documents.
+type DocumentListResponse struct {
+	Items []DocumentListItem `json:"items"`
+}
+
+func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	state := q.Get("state")
+	limit := 50
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+
+	ds, ok := d.Documents.(*sqlite.Documents)
+	if !ok {
+		writeProblem(w, http.StatusNotImplemented, "not supported",
+			"DocumentStore impl does not expose listing")
+		return
+	}
+	docs, err := ds.ListWithLastError(r.Context(), d.TenantID, state, limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	out := DocumentListResponse{Items: make([]DocumentListItem, 0, len(docs))}
+	for _, doc := range docs {
+		out.Items = append(out.Items, DocumentListItem{
+			ID:          doc.ID,
+			URL:         doc.URL,
+			Title:       doc.Title,
+			ContentType: doc.ContentType,
+			State:       doc.State,
+			LastError:   doc.LastError,
+			CreatedAt:   doc.CreatedAt,
+			UpdatedAt:   doc.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleRefetchDocument enqueues a fresh fetch job for the document. The
