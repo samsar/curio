@@ -85,3 +85,54 @@ func TestChunkText_OverlapClampedIfLargerThanSize(t *testing.T) {
 	got := ChunkText(strings.Join(words, " "), ChunkOptions{SizeTokens: 10, OverlapTokens: 100})
 	assert.Greater(t, len(got), 1)
 }
+
+func TestChunkText_StripsBase64ImageDataURL(t *testing.T) {
+	// A 50KB base64 blob would normally survive into one chunk and
+	// blow up the embedder. After sanitization, the chunk should be
+	// small and contain the placeholder.
+	bigBlob := strings.Repeat("A", 50000)
+	md := "Some intro text here, plenty of words to form a real paragraph.\n\n" +
+		"![diagram](data:image/png;base64," + bigBlob + ")\n\n" +
+		"More body after the image."
+
+	chunks := ChunkText(md, ChunkOptions{SizeChars: 3500})
+	for _, c := range chunks {
+		assert.LessOrEqual(t, len(c.Text), 3500, "chunk exceeded char cap: len=%d", len(c.Text))
+		assert.NotContains(t, c.Text, bigBlob[:200], "base64 content leaked into chunk")
+	}
+	combined := strings.Join(func() []string {
+		out := make([]string, len(chunks))
+		for i, c := range chunks {
+			out[i] = c.Text
+		}
+		return out
+	}(), "\n")
+	assert.Contains(t, combined, "diagram", "alt text should be preserved")
+	assert.Contains(t, combined, "intro text", "surrounding prose preserved")
+}
+
+func TestChunkText_HardTruncatesOversizedSingleWord(t *testing.T) {
+	// A pathological case the sanitizer can't catch — e.g. a hex blob
+	// or unbroken identifier. The char-limit backstop must truncate it.
+	monster := strings.Repeat("z", 20000)
+	md := "preamble word word word " + monster + " trailing words"
+
+	chunks := ChunkText(md, ChunkOptions{SizeChars: 1000})
+	for _, c := range chunks {
+		assert.LessOrEqual(t, len(c.Text), 1000,
+			"chunk exceeded char cap: len=%d", len(c.Text))
+	}
+}
+
+func TestSanitizeForEmbedding_PreservesAltText(t *testing.T) {
+	in := "before ![important caption](data:image/png;base64,AAAA) after"
+	out := sanitizeForEmbedding(in)
+	assert.Contains(t, out, "important caption")
+	assert.NotContains(t, out, "base64")
+	assert.NotContains(t, out, "AAAA")
+}
+
+func TestSanitizeForEmbedding_NoOpWithoutDataURLs(t *testing.T) {
+	in := "Plain markdown with [a link](https://example.com/page) and no images."
+	assert.Equal(t, in, sanitizeForEmbedding(in))
+}
