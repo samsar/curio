@@ -13,6 +13,12 @@ import (
 )
 
 func newJobsCmd() *cobra.Command {
+	cmd := newJobsListCmd()
+	cmd.AddCommand(newJobsPruneCmd(), newJobsDeleteCmd())
+	return cmd
+}
+
+func newJobsListCmd() *cobra.Command {
 	var (
 		failedOnly bool
 		status     string
@@ -121,6 +127,85 @@ func wrapLines(s string, width int) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+func newJobsPruneCmd() *cobra.Command {
+	var olderThan string
+	cmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Delete jobs older than a duration (use to keep the jobs table from growing without bound)",
+		Long: `Delete any job — regardless of status — whose updated_at is older
+than the given duration. Useful for periodic cleanup so the jobs table
+doesn't accumulate forever as you re-import and refetch.
+
+Duration accepts standard Go syntax plus "Nd" (days):
+
+  curio jobs prune --older-than 30d
+  curio jobs prune --older-than 24h
+  curio jobs prune --older-than 2h30m
+
+Deleting a job doesn't change any document state. A failed doc stays
+failed (still visible in 'curio docs --failed') and can still be
+refetched. This command only trims the audit/history table.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, ok := getCtx(cmd.Context())
+			if !ok {
+				return errors.New("no context")
+			}
+			if olderThan == "" {
+				return errors.New("--older-than is required (e.g. 30d, 24h, 2h30m)")
+			}
+			if err := ensureDaemon(ctx); err != nil {
+				return err
+			}
+			resp, err := ctx.Client.PruneJobsOlderThan(cmd.Context(), olderThan)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("pruned %d job(s) older than %s\n", resp.Deleted, olderThan)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&olderThan, "older-than", "", "Duration like 30d, 24h, 2h30m")
+	return cmd
+}
+
+func newJobsDeleteCmd() *cobra.Command {
+	var status string
+	cmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete jobs in a given status (no all-status nuke path on purpose)",
+		Long: `Remove every job in a specific status. Useful after you've triaged
+failures and decided "these are real, I'm not going to recover them"
+to keep 'curio jobs --failed' output focused.
+
+  curio jobs delete --status failed
+  curio jobs delete --status done
+
+Deleting a job doesn't change any document state. A failed doc stays
+failed (still visible in 'curio docs --failed') and can still be
+refetched.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, ok := getCtx(cmd.Context())
+			if !ok {
+				return errors.New("no context")
+			}
+			if status == "" {
+				return errors.New("--status is required (pending|running|done|failed)")
+			}
+			if err := ensureDaemon(ctx); err != nil {
+				return err
+			}
+			resp, err := ctx.Client.DeleteJobsByStatus(cmd.Context(), status)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("deleted %d job(s) in status=%s\n", resp.Deleted, status)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&status, "status", "", "pending|running|done|failed")
+	return cmd
 }
 
 // extractDocID pulls a document_id field from a job's payload JSON.

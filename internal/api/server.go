@@ -80,6 +80,7 @@ func NewServer(addr string, deps Deps) *Server {
 		r.Post("/search", deps.handleSearch)
 
 		r.Get("/jobs", deps.handleListJobs)
+		r.Delete("/jobs", deps.handleDeleteJobs)
 	})
 
 	return &Server{

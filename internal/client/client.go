@@ -356,6 +356,35 @@ type JobList struct {
 	Items []Job `json:"items"`
 }
 
+// DeleteJobsResponse mirrors api.DeleteJobsResponse.
+type DeleteJobsResponse struct {
+	Deleted int64  `json:"deleted"`
+	Mode    string `json:"mode"`
+}
+
+// DeleteJobsByStatus removes jobs in a specific status. Server-side rejects
+// empty status — there's no "delete all" path on purpose.
+func (c *Client) DeleteJobsByStatus(ctx context.Context, status string) (*DeleteJobsResponse, error) {
+	var out DeleteJobsResponse
+	path := "/v1/jobs?status=" + url.QueryEscape(status)
+	if err := c.do(ctx, http.MethodDelete, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PruneJobsOlderThan removes jobs whose updated_at is older than the
+// given duration string. Accepts standard Go duration syntax plus "Nd"
+// (days), e.g. "30d", "24h", "2h30m".
+func (c *Client) PruneJobsOlderThan(ctx context.Context, duration string) (*DeleteJobsResponse, error) {
+	var out DeleteJobsResponse
+	path := "/v1/jobs?older_than=" + url.QueryEscape(duration)
+	if err := c.do(ctx, http.MethodDelete, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) ListJobs(ctx context.Context, opts JobListOpts) (*JobList, error) {
 	q := url.Values{}
 	if opts.Status != "" {
