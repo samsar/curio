@@ -9,8 +9,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/samansartipi/curio/internal/store"
-	"github.com/samansartipi/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/store/sqlite"
 )
 
 // DocumentResponse mirrors the openapi Document schema. tenant_id omitted.

@@ -17,9 +17,9 @@ COMMIT        ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE          ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 LDFLAGS := -s -w \
-	-X github.com/samansartipi/curio/internal/version.Version=$(VERSION) \
-	-X github.com/samansartipi/curio/internal/version.Commit=$(COMMIT) \
-	-X github.com/samansartipi/curio/internal/version.Date=$(DATE)
+	-X github.com/samsar/curio/internal/version.Version=$(VERSION) \
+	-X github.com/samsar/curio/internal/version.Commit=$(COMMIT) \
+	-X github.com/samsar/curio/internal/version.Date=$(DATE)
 
 # Cgo is required (sqlite, sqlite-vec). Force it on so builds fail loudly
 # rather than silently producing a binary missing SQLite.

@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/samansartipi/curio/internal/store"
+	"github.com/samsar/curio/internal/store"
 )
 
 const vecDim = 768

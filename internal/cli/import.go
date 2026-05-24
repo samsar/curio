@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/samansartipi/curio/internal/client"
-	"github.com/samansartipi/curio/internal/importer"
+	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/importer"
 )
 
 // Batch size when POSTing to /v1/bookmarks/import. 500 keeps each HTTP

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samansartipi/curio/internal/urlutil"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // ChromeProfile describes one discovered Chrome profile, suitable for

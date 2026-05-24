@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/samansartipi/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
 func newDaemonCmd() *cobra.Command {

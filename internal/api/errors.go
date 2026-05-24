@@ -8,7 +8,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/samansartipi/curio/internal/store"
+	"github.com/samsar/curio/internal/store"
 )
 
 // Problem is RFC 7807's "Problem Details" shape.

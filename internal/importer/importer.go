@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samansartipi/curio/internal/urlutil"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // ParsedBookmark is the common shape every parser emits.

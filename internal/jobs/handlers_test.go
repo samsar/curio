@@ -12,11 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/samansartipi/curio/internal/curiohome"
-	"github.com/samansartipi/curio/internal/fetcher"
-	"github.com/samansartipi/curio/internal/indexer"
-	"github.com/samansartipi/curio/internal/store"
-	sqlitestore "github.com/samansartipi/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/indexer"
+	"github.com/samsar/curio/internal/store"
+	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 )
 
 // --- fakes ---

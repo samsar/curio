@@ -9,7 +9,7 @@ import (
 
 	"golang.org/x/net/html"
 
-	"github.com/samansartipi/curio/internal/urlutil"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // ParseHTML reads a Netscape Bookmark File Format document and returns

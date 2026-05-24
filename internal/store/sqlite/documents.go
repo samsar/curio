@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/samansartipi/curio/internal/store"
+	"github.com/samsar/curio/internal/store"
 )
 
 // Documents implements store.DocumentStore on top of a *DB.

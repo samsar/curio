@@ -38,11 +38,11 @@ But every interface that we know we'll swap is wired through interfaces from day
 
 ## Module setup
 
-Module path: `github.com/samansartipi/curio` (or whatever the repo URL ends up being).
+Module path: `github.com/samsar/curio` (or whatever the repo URL ends up being).
 
 ```sh
 cd ~/projects/curio
-go mod init github.com/samansartipi/curio
+go mod init github.com/samsar/curio
 ```
 
 ### Direct dependencies

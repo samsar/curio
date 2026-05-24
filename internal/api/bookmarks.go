@@ -9,8 +9,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/samansartipi/curio/internal/store"
-	"github.com/samansartipi/curio/internal/urlutil"
+	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // BookmarkResponse mirrors the openapi Bookmark schema. tenant_id is

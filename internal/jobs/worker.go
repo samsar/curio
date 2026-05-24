@@ -12,7 +12,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/samansartipi/curio/internal/store"
+	"github.com/samsar/curio/internal/store"
 )
 
 // HandlerFunc executes one job. Return nil for success; return an error for

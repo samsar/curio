@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/samansartipi/curio/internal/embedder"
-	"github.com/samansartipi/curio/internal/store"
+	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/store"
 )
 
 // Indexer orchestrates the chunk → embed → write step for one extraction.

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/samansartipi/curio/internal/cli"
+	"github.com/samsar/curio/internal/cli"
 )
 
 func main() {

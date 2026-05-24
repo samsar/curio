@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/samansartipi/curio/internal/client"
-	"github.com/samansartipi/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/curiohome"
 )
 
 // Status describes the daemon's run state.

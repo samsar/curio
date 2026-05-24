@@ -12,7 +12,7 @@ import (
 	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/google/uuid"
 
-	"github.com/samansartipi/curio/internal/store"
+	"github.com/samsar/curio/internal/store"
 )
 
 // Chunks implements store.ChunkStore. Owns three coupled tables:

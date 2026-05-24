@@ -11,11 +11,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/samansartipi/curio/internal/curiohome"
-	"github.com/samansartipi/curio/internal/embedder"
-	"github.com/samansartipi/curio/internal/search"
-	"github.com/samansartipi/curio/internal/store"
-	"github.com/samansartipi/curio/internal/version"
+	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/version"
 )
 
 // Deps bundles everything the API handlers need. The daemon constructs this

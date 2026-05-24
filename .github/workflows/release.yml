@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # cgo is required (sqlite-vec + mattn/go-sqlite3). macos-14 is an
+    # Apple Silicon runner, which can natively build darwin/arm64. Adding
+    # darwin/amd64 or linux/amd64 means a matrix runner + goreleaser
+    # split/merge; deferred until there's demand.
+    runs-on: macos-14
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # goreleaser wants tags + full history
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same secret already used by the git-repos release workflow;
+          # PAT with `repo` scope on samsar/homebrew-tap.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

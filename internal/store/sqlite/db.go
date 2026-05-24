@@ -16,7 +16,7 @@ import (
 	_ "github.com/mattn/go-sqlite3" // sqlite3 driver
 	"github.com/pressly/goose/v3"
 
-	"github.com/samansartipi/curio/migrations"
+	"github.com/samsar/curio/migrations"
 )
 
 // vecOnce makes sure sqlite_vec.Auto() runs exactly once per process.

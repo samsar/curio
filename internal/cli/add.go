@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/samansartipi/curio/internal/client"
+	"github.com/samsar/curio/internal/client"
 )
 
 func newAddCmd() *cobra.Command {

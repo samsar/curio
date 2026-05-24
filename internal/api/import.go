@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/samansartipi/curio/internal/importer"
-	"github.com/samansartipi/curio/internal/store"
-	"github.com/samansartipi/curio/internal/urlutil"
+	"github.com/samsar/curio/internal/importer"
+	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // ImportRequest is the body of POST /v1/bookmarks/import.

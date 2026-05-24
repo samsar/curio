@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/samansartipi/curio/internal/store"
+	"github.com/samsar/curio/internal/store"
 )
 
 // Engine runs hybrid search.

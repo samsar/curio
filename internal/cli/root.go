@@ -11,10 +11,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/samansartipi/curio/internal/client"
-	"github.com/samansartipi/curio/internal/config"
-	"github.com/samansartipi/curio/internal/curiohome"
-	"github.com/samansartipi/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
 // Context is the bag of state the subcommands read from.

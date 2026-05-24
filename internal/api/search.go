@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/samansartipi/curio/internal/search"
+	"github.com/samsar/curio/internal/search"
 )
 
 // SearchRequest is the POST /v1/search body.

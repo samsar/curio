@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/samansartipi/curio/internal/store"
-	sqlitestore "github.com/samansartipi/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store"
+	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 )
 
 // JobResponse mirrors store.Job with timestamps as time.Time. Payload is

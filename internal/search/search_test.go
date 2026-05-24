@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	sqlitestore "github.com/samansartipi/curio/internal/store/sqlite"
-	"github.com/samansartipi/curio/internal/store"
+	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store"
 )
 
 // fakeEmbedder returns canned vectors keyed on input text. Tests control

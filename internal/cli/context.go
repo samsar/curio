@@ -3,7 +3,7 @@ package cli
 import (
 	"context"
 
-	"github.com/samansartipi/curio/internal/version"
+	"github.com/samsar/curio/internal/version"
 )
 
 type ctxKey struct{}

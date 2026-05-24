@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/samansartipi/curio/internal/embedder"
-	"github.com/samansartipi/curio/internal/store"
-	sqlitestore "github.com/samansartipi/curio/internal/store/sqlite"
-	"github.com/samansartipi/curio/internal/version"
+	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/store"
+	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/version"
 )
 
 // Health is the /v1/healthz response.

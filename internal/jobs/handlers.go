@@ -11,10 +11,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/samansartipi/curio/internal/curiohome"
-	"github.com/samansartipi/curio/internal/fetcher"
-	"github.com/samansartipi/curio/internal/indexer"
-	"github.com/samansartipi/curio/internal/store"
+	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/indexer"
+	"github.com/samsar/curio/internal/store"
 )
 
 // Deps bundles the dependencies the job handlers need. Bundled so the

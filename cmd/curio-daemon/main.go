@@ -10,16 +10,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/samansartipi/curio/internal/api"
-	"github.com/samansartipi/curio/internal/config"
-	"github.com/samansartipi/curio/internal/curiohome"
-	"github.com/samansartipi/curio/internal/embedder"
-	"github.com/samansartipi/curio/internal/fetcher"
-	"github.com/samansartipi/curio/internal/indexer"
-	"github.com/samansartipi/curio/internal/jobs"
-	"github.com/samansartipi/curio/internal/search"
-	sqlitestore "github.com/samansartipi/curio/internal/store/sqlite"
-	"github.com/samansartipi/curio/internal/version"
+	"github.com/samsar/curio/internal/api"
+	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/indexer"
+	"github.com/samsar/curio/internal/jobs"
+	"github.com/samsar/curio/internal/search"
+	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/version"
 )
 
 func main() {
