@@ -19,15 +19,22 @@ func newDocsCmd() *cobra.Command {
 func newDocsListCmd() *cobra.Command {
 	var (
 		failedOnly bool
+		showAll    bool
 		state      string
 		limit      int
 	)
 	cmd := &cobra.Command{
 		Use:   "docs",
-		Short: "List indexed documents (filter with --failed, --state, --limit)",
-		Long: `Show recent documents in the corpus. Each row carries the most recent
-error from a failed job that targeted it, so 'curio docs --failed' is
-the one-stop debug view for stuck content.
+		Short: "List indexed documents (defaults to successfully fetched; --failed / --all to widen)",
+		Long: `Show documents in the corpus. By default lists only state=fetched —
+the "happy path" view, what's actually searchable. Add --failed to
+debug stuck content, --all to see every state, or --state for
+exact filtering.
+
+Each row carries the most recent error from a failed job that
+targeted it AND the on-disk markdown path (when present), so most
+follow-ups (cat the file, run curio refetch, etc.) don't need
+another lookup.
 
 Cross-reference: 'curio jobs --failed' shows the underlying job rows
 with full error messages and attempt counts.`,
@@ -39,10 +46,7 @@ with full error messages and attempt counts.`,
 			if err := ensureDaemon(ctx); err != nil {
 				return err
 			}
-			s := state
-			if failedOnly {
-				s = "failed"
-			}
+			s := resolveDocsState(state, failedOnly, showAll)
 
 			resp, err := ctx.Client.ListDocuments(cmd.Context(), client.ListDocumentsOpts{
 				State: s, Limit: limit,
@@ -55,9 +59,25 @@ with full error messages and attempt counts.`,
 		},
 	}
 	cmd.Flags().BoolVar(&failedOnly, "failed", false, "Shortcut for --state=failed")
-	cmd.Flags().StringVar(&state, "state", "", "pending|fetched|failed|dead")
+	cmd.Flags().BoolVar(&showAll, "all", false, "Show every state instead of just fetched")
+	cmd.Flags().StringVar(&state, "state", "", "pending|fetched|failed|dead (overrides defaults)")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Max rows (server caps at 500)")
 	return cmd
+}
+
+// resolveDocsState resolves the three flags into a single state filter.
+// Precedence: --state > --failed > --all > default(fetched).
+func resolveDocsState(state string, failedOnly, all bool) string {
+	switch {
+	case state != "":
+		return state
+	case failedOnly:
+		return "failed"
+	case all:
+		return ""
+	default:
+		return "fetched"
+	}
 }
 
 func newDocsShowCmd() *cobra.Command {
@@ -145,7 +165,11 @@ func renderDocList(resp *client.DocumentList) {
 		if d.LastError != "" {
 			fmt.Printf("         err: %s\n", truncate(strings.TrimSpace(d.LastError), 200))
 		}
-		fmt.Printf("         id: %s\n\n", d.ID)
+		fmt.Printf("         doc_id: %s\n", d.ID)
+		if d.MarkdownPath != "" {
+			fmt.Printf("         path:   %s\n", d.MarkdownPath)
+		}
+		fmt.Println()
 	}
 	fmt.Printf("%d document(s)\n", len(resp.Items))
 }

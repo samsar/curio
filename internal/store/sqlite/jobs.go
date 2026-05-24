@@ -155,31 +155,32 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (b
 	return permanent, nil
 }
 
-// JobWithDoc pairs a Job with the URL + title of its target document, if
-// the job's payload carries a document_id and that doc exists. Empty
-// strings on both fields when the join misses (import / cluster /
-// summarize jobs don't reference a doc, and dropped docs from failed
-// imports also won't join).
+// JobWithDoc pairs a Job with its target document's URL, title, and
+// current-extraction markdown_path (when present). Two LEFT JOINs:
+// jobs → documents via json_extract(payload, '$.document_id'), and
+// documents → document_extractions via current_extraction_id. All three
+// fields are empty when the join misses (no doc, or doc has no extraction).
 type JobWithDoc struct {
 	*store.Job
-	URL   string
-	Title string
+	URL          string
+	Title        string
+	MarkdownPath string
 }
 
 // ListWithDoc is the debug-friendly variant of List: same filters, but
-// each row carries the URL + title of its target document so the CLI
-// doesn't have to do an N+1 round-trip. The join matches via
-// json_extract(payload, '$.document_id'), so it works for any job kind
-// that uses the same payload convention (fetch + index in v1).
+// each row carries the doc URL + title + markdown_path so the CLI
+// doesn't have to do an N+1 round-trip.
 func (s *Jobs) ListWithDoc(ctx context.Context, tenantID, status, kind string, limit int) ([]JobWithDoc, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	const jobCols = `j.id, j.tenant_id, j.kind, j.payload, j.status, j.attempts, j.run_after, j.last_error, j.created_at, j.updated_at`
 
-	q := "SELECT " + jobCols + ", COALESCE(d.url, '') AS doc_url, COALESCE(d.title, '') AS doc_title " +
+	q := "SELECT " + jobCols + ", COALESCE(d.url, '') AS doc_url, COALESCE(d.title, '') AS doc_title, " +
+		"COALESCE(e.markdown_path, '') AS markdown_path " +
 		"FROM jobs j " +
 		"LEFT JOIN documents d ON d.id = json_extract(j.payload, '$.document_id') " +
+		"LEFT JOIN document_extractions e ON e.id = d.current_extraction_id " +
 		"WHERE j.tenant_id = ?"
 	args := []any{tenantID}
 	if status != "" {
@@ -200,44 +201,44 @@ func (s *Jobs) ListWithDoc(ctx context.Context, tenantID, status, kind string, l
 	defer rows.Close()
 	var out []JobWithDoc
 	for rows.Next() {
-		job, url, title, err := scanJobWithDoc(rows)
+		job, url, title, mdPath, err := scanJobWithDoc(rows)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, JobWithDoc{Job: job, URL: url, Title: title})
+		out = append(out, JobWithDoc{Job: job, URL: url, Title: title, MarkdownPath: mdPath})
 	}
 	return out, rows.Err()
 }
 
-func scanJobWithDoc(row interface{ Scan(...any) error }) (*store.Job, string, string, error) {
+func scanJobWithDoc(row interface{ Scan(...any) error }) (*store.Job, string, string, string, error) {
 	var (
 		j                              store.Job
 		payload                        string
 		lastErr                        sql.NullString
 		runAfter, createdAt, updatedAt string
-		url, title                     string
+		url, title, mdPath             string
 	)
 	err := row.Scan(
 		&j.ID, &j.TenantID, &j.Kind, &payload, &j.Status,
 		&j.Attempts, &runAfter, &lastErr,
 		&createdAt, &updatedAt,
-		&url, &title,
+		&url, &title, &mdPath,
 	)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("scan job with doc: %w", err)
+		return nil, "", "", "", fmt.Errorf("scan job with doc: %w", err)
 	}
 	j.Payload = []byte(payload)
 	j.LastError = nullableString(lastErr)
 	if j.RunAfter, err = parseTime(runAfter); err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", err
 	}
 	if j.CreatedAt, err = parseTime(createdAt); err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", err
 	}
 	if j.UpdatedAt, err = parseTime(updatedAt); err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", err
 	}
-	return &j, url, title, nil
+	return &j, url, title, mdPath, nil
 }
 
 // List returns recent jobs for a tenant, optionally filtered by status

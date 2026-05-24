@@ -147,22 +147,25 @@ func (s *Documents) UpdateState(ctx context.Context, id, state string) error {
 }
 
 // DocumentWithError pairs a Document with the most recent failed-job error
-// message that targeted it. Used by the debug-listing endpoint so users
-// can see in one query which docs are broken and why, without cross-
-// referencing the jobs table by hand.
+// message that targeted it AND the markdown path of its current extraction
+// (when one exists). Used by the debug-listing endpoint so users can see
+// in one query which docs are broken/healthy and where their content lives.
 type DocumentWithError struct {
 	*store.Document
-	LastError string // empty if no failed job is associated
+	LastError    string // empty if no failed job is associated
+	MarkdownPath string // empty if no current extraction
 }
 
 // ListWithLastError returns documents for a tenant, optionally filtered by
 // state, paired with the last_error of their most recent failed fetch or
-// index job. Ordered most-recently-updated first.
+// index job AND the markdown path of their current extraction. Ordered
+// most-recently-updated first.
 //
-// The subquery uses json_extract on jobs.payload to find jobs whose
-// document_id matches; the payload format is set by the handlers in
-// internal/jobs/handlers.go. If we add more job kinds that carry
-// document_id later, those errors will surface here automatically.
+// Three joins:
+//   - Self-subquery on jobs to find the most recent failed job per doc
+//     (json_extract on payload.document_id).
+//   - LEFT JOIN on document_extractions for the current extraction's
+//     markdown_path. Empty when state=pending.
 func (s *Documents) ListWithLastError(ctx context.Context, tenantID, state string, limit int) ([]DocumentWithError, error) {
 	if limit <= 0 {
 		limit = 50
@@ -171,7 +174,9 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID, state strin
 		d.published_at, d.language, d.word_count, d.current_extraction_id, d.state,
 		d.created_at, d.updated_at`
 
-	q := `SELECT ` + cols + `, COALESCE(j.last_error, '') AS last_error
+	q := `SELECT ` + cols + `,
+		COALESCE(j.last_error, '') AS last_error,
+		COALESCE(e.markdown_path, '') AS markdown_path
 		FROM documents d
 		LEFT JOIN jobs j ON j.id = (
 			SELECT id FROM jobs
@@ -180,6 +185,7 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID, state strin
 			ORDER BY updated_at DESC
 			LIMIT 1
 		)
+		LEFT JOIN document_extractions e ON e.id = d.current_extraction_id
 		WHERE d.tenant_id = ?`
 	args := []any{tenantID}
 	if state != "" {
@@ -197,25 +203,25 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID, state strin
 
 	var out []DocumentWithError
 	for rows.Next() {
-		doc, lastErr, err := scanDocumentWithError(rows)
+		doc, lastErr, mdPath, err := scanDocumentWithError(rows)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, DocumentWithError{Document: doc, LastError: lastErr})
+		out = append(out, DocumentWithError{Document: doc, LastError: lastErr, MarkdownPath: mdPath})
 	}
 	return out, rows.Err()
 }
 
-// scanDocumentWithError mirrors scanDocument but adds the joined last_error
-// column at the end.
-func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document, string, error) {
+// scanDocumentWithError mirrors scanDocument but adds the joined
+// last_error + markdown_path columns at the end.
+func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document, string, string, error) {
 	var (
 		d                                            store.Document
 		urlCanonical, title, author, language, curEx sql.NullString
 		publishedAt                                  sql.NullString
 		wordCount                                    sql.NullInt64
 		createdAt, updatedAt                         string
-		lastErr                                      string
+		lastErr, mdPath                              string
 	)
 	err := row.Scan(
 		&d.ID, &d.TenantID, &d.URL,
@@ -224,10 +230,10 @@ func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document
 		&publishedAt, &language,
 		&wordCount, &curEx, &d.State,
 		&createdAt, &updatedAt,
-		&lastErr,
+		&lastErr, &mdPath,
 	)
 	if err != nil {
-		return nil, "", fmt.Errorf("scan document with error: %w", err)
+		return nil, "", "", fmt.Errorf("scan document with error: %w", err)
 	}
 	d.URLCanonical = nullableString(urlCanonical)
 	d.Title = nullableString(title)
@@ -238,17 +244,17 @@ func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document
 	if publishedAt.Valid {
 		pt, perr := parseTime(publishedAt.String)
 		if perr != nil {
-			return nil, "", perr
+			return nil, "", "", perr
 		}
 		d.PublishedAt = &pt
 	}
 	if d.CreatedAt, err = parseTime(createdAt); err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 	if d.UpdatedAt, err = parseTime(updatedAt); err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
-	return &d, lastErr, nil
+	return &d, lastErr, mdPath, nil
 }
 
 // ListIDs returns all document IDs for a tenant, optionally restricted

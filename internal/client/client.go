@@ -260,14 +260,15 @@ type ChunkMatch struct {
 // fields; the list endpoint only carries the debug-relevant subset plus
 // last_error.)
 type DocumentListItem struct {
-	ID          string    `json:"id"`
-	URL         string    `json:"url"`
-	Title       *string   `json:"title,omitempty"`
-	ContentType string    `json:"content_type"`
-	State       string    `json:"state"`
-	LastError   string    `json:"last_error,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	URL          string    `json:"url"`
+	Title        *string   `json:"title,omitempty"`
+	ContentType  string    `json:"content_type"`
+	State        string    `json:"state"`
+	LastError    string    `json:"last_error,omitempty"`
+	MarkdownPath string    `json:"markdown_path,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // DocumentList mirrors api.DocumentListResponse.
@@ -339,17 +340,18 @@ type JobListOpts struct {
 
 // Job mirrors api.JobResponse.
 type Job struct {
-	ID        string          `json:"id"`
-	Kind      string          `json:"kind"`
-	Status    string          `json:"status"`
-	Attempts  int             `json:"attempts"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
-	LastError *string         `json:"last_error,omitempty"`
-	RunAfter  time.Time       `json:"run_after"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	DocURL    string          `json:"doc_url,omitempty"`
-	DocTitle  string          `json:"doc_title,omitempty"`
+	ID           string          `json:"id"`
+	Kind         string          `json:"kind"`
+	Status       string          `json:"status"`
+	Attempts     int             `json:"attempts"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
+	LastError    *string         `json:"last_error,omitempty"`
+	RunAfter     time.Time       `json:"run_after"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+	DocURL       string          `json:"doc_url,omitempty"`
+	DocTitle     string          `json:"doc_title,omitempty"`
+	MarkdownPath string          `json:"markdown_path,omitempty"`
 }
 
 // JobList mirrors api.JobListResponse.
