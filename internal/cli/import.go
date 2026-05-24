@@ -25,11 +25,13 @@ const importBatchSize = 500
 type importFlags struct {
 	limit  int
 	dryRun bool
+	follow bool
 }
 
 func attachImportFlags(cmd *cobra.Command, f *importFlags) {
 	cmd.Flags().IntVar(&f.limit, "limit", 0, "Stop after N bookmarks (0 = no limit)")
 	cmd.Flags().BoolVar(&f.dryRun, "dry-run", false, "Parse + filter only; don't POST to the daemon")
+	cmd.Flags().BoolVar(&f.follow, "follow", false, "After import, poll /v1/stats until the fetch/index queue drains")
 }
 
 // applyLimit trims a parsed slice to flags.limit if set.
@@ -84,7 +86,13 @@ func newImportHTMLCmd() *cobra.Command {
 			if flags.dryRun {
 				return reportDryRun(bms)
 			}
-			return sendBatches(cmd.Context(), ctx, "html", bms)
+			if err := sendBatches(cmd.Context(), ctx, "html", bms); err != nil {
+				return err
+			}
+			if flags.follow {
+				return followProgress(cmd.Context(), ctx)
+			}
+			return nil
 		},
 	}
 	attachImportFlags(cmd, &flags)
@@ -172,6 +180,9 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 					return err
 				}
 			}
+			if flags.follow {
+				return followProgress(cmd.Context(), ctx)
+			}
 			return nil
 		},
 	}
@@ -202,6 +213,63 @@ func importChromeFile(httpCtx context.Context, c *Context, path string, flags *i
 		return reportDryRun(bms)
 	}
 	return sendBatches(httpCtx, c, "chrome", bms)
+}
+
+// followProgress polls /v1/stats every 2 seconds and prints a one-line
+// progress update until the queue is drained (zero pending + zero running).
+// Returns nil on quiet shutdown via ctrl-c; prints an interrupt notice.
+func followProgress(httpCtx context.Context, c *Context) error {
+	fmt.Println("\nwatching queue drain — ctrl-c to exit")
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+
+	startedAt := time.Now()
+	var (
+		lastDone int
+		prevETA  time.Duration
+	)
+	for {
+		select {
+		case <-httpCtx.Done():
+			fmt.Println("\ninterrupted")
+			return nil
+		case <-tick.C:
+		}
+		stats, err := c.Client.Stats(httpCtx)
+		if err != nil {
+			fmt.Printf("  (stats unavailable: %v)\n", err)
+			continue
+		}
+		pending := stats.JobsByStatus["pending"]
+		running := stats.JobsByStatus["running"]
+		done := stats.JobsByStatus["done"]
+		failed := stats.JobsByStatus["failed"]
+		fetched := stats.DocumentsByState["fetched"]
+
+		// Throughput estimate: docs done since the previous tick.
+		dt := time.Since(startedAt)
+		var rate float64
+		if dt.Seconds() > 0 {
+			rate = float64(done-lastDone) / 2.0 // per second since last tick
+		}
+		eta := prevETA
+		if rate > 0 && pending+running > 0 {
+			eta = time.Duration(float64(pending+running)/rate*float64(time.Second)).Round(time.Second)
+			prevETA = eta
+		}
+		fmt.Printf("  done=%d  pending=%d  running=%d  failed=%d  fetched=%d   rate≈%.1f/s   eta≈%s\n",
+			done, pending, running, failed, fetched, rate, eta)
+		lastDone = done
+
+		if pending == 0 && running == 0 {
+			fmt.Printf("\nqueue drained after %s   (%d done, %d failed)\n",
+				time.Since(startedAt).Round(time.Second), done, failed)
+			if failed > 0 {
+				fmt.Println("  see failures: curio jobs --failed")
+			}
+			return nil
+		}
+	}
 }
 
 // reportDryRun prints the same summary sendBatches would, computed
