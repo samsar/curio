@@ -146,6 +146,28 @@ func (s *Documents) UpdateState(ctx context.Context, id, state string) error {
 	return ensureRow(res, "document")
 }
 
+// CountByState returns (total, perStateMap) for one tenant.
+func (s *Documents) CountByState(ctx context.Context, tenantID string) (int, map[string]int, error) {
+	const q = `SELECT state, count(*) FROM documents WHERE tenant_id = ? GROUP BY state`
+	rows, err := s.db.QueryContext(ctx, q, tenantID)
+	if err != nil {
+		return 0, nil, fmt.Errorf("count documents: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	total := 0
+	for rows.Next() {
+		var state string
+		var n int
+		if err := rows.Scan(&state, &n); err != nil {
+			return 0, nil, err
+		}
+		out[state] = n
+		total += n
+	}
+	return total, out, rows.Err()
+}
+
 func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionID string) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE documents SET current_extraction_id = ? WHERE id = ?`,

@@ -36,6 +36,21 @@ func newStatusCmd() *cobra.Command {
 			fmt.Printf("home:    %s\n", ctx.Home.Path)
 			fmt.Printf("schema:  v%d\n", health.SchemaVersion)
 			fmt.Printf("embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
+
+			// Also pull /v1/stats for queue depth and bookmark counts.
+			sctx, scancel := context.WithTimeout(cmd.Context(), 1*time.Second)
+			defer scancel()
+			stats, err := ctx.Client.Stats(sctx)
+			if err == nil && stats != nil {
+				fmt.Printf("bookmarks: %d\n", stats.BookmarksTotal)
+				fmt.Printf("documents: %d\n", stats.DocumentsTotal)
+				if len(stats.DocumentsByState) > 0 {
+					fmt.Printf("           by state: %v\n", stats.DocumentsByState)
+				}
+				if len(stats.JobsByStatus) > 0 {
+					fmt.Printf("jobs:      %v\n", stats.JobsByStatus)
+				}
+			}
 			return nil
 		},
 	}

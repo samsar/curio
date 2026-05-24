@@ -408,6 +408,91 @@ the rest is direct lib calls.
 
 ---
 
+## Importers: CLI parses, daemon receives lists
+
+**Decision:** Bookmark file parsing happens in the `curio` CLI. The daemon
+exposes `POST /v1/bookmarks/import` which accepts an array of
+`{url, title, folder_path, tags, saved_at}` objects + a source label,
+dedups, and enqueues fetch jobs.
+
+**Why:**
+- The daemon never needs filesystem access to user-owned files
+  (browser bookmark paths, exports, etc.). Hosted mode falls out free.
+- Profile discovery is a per-user concern; the CLI is where user-side
+  context lives.
+- Easier to test: parser-and-poster vs. file-reading-daemon-endpoint.
+- Network payload is bounded: even 10k bookmarks is a few MB JSON, and
+  we batch in 500s.
+
+**Implication:** when hosted mode wants browser-side imports without
+shipping a CLI, a small JS shim can do the same parsing client-side and
+POST to the same endpoint.
+
+---
+
+## HTML export is a first-class importer source
+
+**Decision:** `curio import html <file>` accepts the Netscape Bookmark
+File Format that every major browser (and most read-later tools) exports
+to. The schema's `source` column gets a new value `html` via migration 002.
+
+**Why:**
+- Cross-browser by default — one parser, all browsers via export.
+- No "is the browser running?" concern, no TCC permission prompts (Safari).
+- Same format as Pocket/Instapaper/Raindrop exports; future read-later
+  ingestion comes free.
+- User curation: they can edit the file before importing.
+
+Live browser readers (Chrome JSON, future Safari plist, future Firefox
+SQLite) are convenience layers on top of this. HTML is the workhorse.
+
+---
+
+## HTML parser walks recursively, finds <DL> inside <DT>
+
+**Decision:** The Netscape format implies sibling layout
+(`<DT><H3>Folder</H3>` then `<DL>...</DL>` as a sibling DT), but HTML5
+parsers nest aggressively — they put the `<DL>` *inside* the `<DT>`
+containing the preceding `<H3>`, alongside the `<H3>`. The parser walks
+pre-order and, when entering a `<DT>`, looks for an `<H3>` child to use
+as the folder name for any nested `<DL>`.
+
+**Why:** Discovered the hard way when tests with deeply-nested input
+returned zero bookmarks while the sample with one nesting level worked
+partially. The sample worked only because the top-level URLs were
+sibling-of-folder, which my walker handled by accident.
+
+---
+
+## Worker pool: N workers via the same atomic ClaimNext
+
+**Decision:** `daemon.workers` config (default 4) spawns N goroutines all
+calling `Worker.Run` on the same Worker struct. The JobQueue's
+`UPDATE ... WHERE id = (SELECT ...) RETURNING` claim already guarantees
+one worker per job; tested at 20 jobs / 8 workers under `-race`.
+
+**Why not more?** Embedding throughput is usually the bottleneck. Ollama
+on Metal handles ~4 concurrent embed requests well; cranking workers
+higher just makes them sit in `Embed`. If the user runs on GPU-heavy
+hardware or switches to a cloud embedder, raising the config is one
+edit.
+
+---
+
+## Marker file's schema_version is synced from the DB after migrations
+
+**Decision:** On daemon startup, after running migrations, we read the
+current `schema_meta.schema_version` and write it back to
+`.curio-meta.json` so `/v1/healthz` reflects the actual schema state.
+
+**Why:** The marker file is set at `curiohome.Init` time using the
+"current" schema version (a constant). Migrations bump
+`schema_meta.schema_version` but the marker doesn't update on its own,
+so after migration 002 ran, `curio status` still reported "schema: v1".
+The DB is authoritative; the marker mirrors it.
+
+---
+
 ## What's deferred from the v1 API
 
 These are intentionally omitted from `api/openapi.yaml`. Each is additive when

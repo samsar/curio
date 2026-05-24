@@ -153,6 +153,27 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) er
 	return nil
 }
 
+// CountByStatus returns the number of jobs in each status for a tenant.
+// Surfaces queue depth via /v1/stats so import progress is visible.
+func (s *Jobs) CountByStatus(ctx context.Context, tenantID string) (map[string]int, error) {
+	const q = `SELECT status, count(*) FROM jobs WHERE tenant_id = ? GROUP BY status`
+	rows, err := s.db.QueryContext(ctx, q, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("count jobs: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, err
+		}
+		out[status] = n
+	}
+	return out, rows.Err()
+}
+
 func (s *Jobs) GetByID(ctx context.Context, id string) (*store.Job, error) {
 	const cols = `id, tenant_id, kind, payload, status, attempts, run_after, last_error, created_at, updated_at`
 	row := s.db.QueryRowContext(ctx, "SELECT "+cols+" FROM jobs WHERE id = ?", id)

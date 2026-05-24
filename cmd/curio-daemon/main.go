@@ -88,6 +88,16 @@ func run() error {
 	}
 	slog.Info("database ready", "path", home.DBPath())
 
+	// Sync the marker file's schema_version with whatever the migration
+	// run landed at, so /v1/healthz reflects reality after every upgrade.
+	if v, err := sqlitestore.ReadSchemaVersion(db); err == nil && v > 0 && v != meta.SchemaVersion {
+		updated := meta
+		updated.SchemaVersion = v
+		if err := home.WriteMeta(updated); err != nil {
+			slog.Warn("failed to update marker schema_version", "err", err)
+		}
+	}
+
 	// Construct stores.
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
@@ -173,14 +183,27 @@ func run() error {
 
 	slog.Info("curio-daemon starting", "version", version.String())
 
-	// Run worker + server concurrently. First to error cancels both.
-	errCh := make(chan error, 2)
-	go func() { errCh <- worker.Run(ctx) }()
+	// Run N workers + API server concurrently. First to error cancels all.
+	//
+	// Each worker calls Run on the same Worker struct — the JobQueue's
+	// atomic ClaimNext means workers race for jobs cleanly. Tested at
+	// 20 jobs / 8 workers in store/sqlite/stores_test.go.
+	n := cfg.Daemon.Workers
+	if n <= 0 {
+		n = 1
+	}
+	errCh := make(chan error, n+1)
+	for i := 0; i < n; i++ {
+		go func() { errCh <- worker.Run(ctx) }()
+	}
 	go func() { errCh <- srv.Run(ctx) }()
 
 	err = <-errCh
 	stop()
-	<-errCh // drain the second goroutine
+	// Drain the remaining goroutines so we don't leak on shutdown.
+	for i := 0; i < n; i++ {
+		<-errCh
+	}
 
 	if errors.Is(err, context.Canceled) {
 		return nil

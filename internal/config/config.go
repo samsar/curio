@@ -25,6 +25,11 @@ type Config struct {
 type Daemon struct {
 	Listen   string `yaml:"listen"`
 	LogLevel string `yaml:"log_level"`
+	// Workers is the number of background goroutines draining the job
+	// queue concurrently. Each worker fetches and indexes one job at a
+	// time; the bottleneck is usually Ollama embedding throughput rather
+	// than Go concurrency, so don't crank this too high. Default 4.
+	Workers int `yaml:"workers"`
 }
 
 type Embedding struct {
@@ -73,6 +78,7 @@ func Default() Config {
 		Daemon: Daemon{
 			Listen:   "127.0.0.1:8765",
 			LogLevel: "info",
+			Workers:  4,
 		},
 		Embedding: Embedding{
 			Provider: "ollama",
@@ -138,6 +144,9 @@ func (c Config) Validate() error {
 	}
 	if !validLogLevel(c.Daemon.LogLevel) {
 		return fmt.Errorf("daemon.log_level %q must be one of: debug, info, warn, error", c.Daemon.LogLevel)
+	}
+	if c.Daemon.Workers <= 0 {
+		return fmt.Errorf("daemon.workers must be positive, got %d", c.Daemon.Workers)
 	}
 	if c.Embedding.Model == "" {
 		return errors.New("embedding.model must not be empty")
