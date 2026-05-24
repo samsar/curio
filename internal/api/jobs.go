@@ -16,17 +16,18 @@ import (
 // on documents; they're empty for jobs that don't reference a doc
 // (import, cluster, summarize) or when the doc was dropped.
 type JobResponse struct {
-	ID        string          `json:"id"`
-	Kind      string          `json:"kind"`
-	Status    string          `json:"status"`
-	Attempts  int             `json:"attempts"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
-	LastError *string         `json:"last_error,omitempty"`
-	RunAfter  time.Time       `json:"run_after"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	DocURL    string          `json:"doc_url,omitempty"`
-	DocTitle  string          `json:"doc_title,omitempty"`
+	ID           string          `json:"id"`
+	Kind         string          `json:"kind"`
+	Status       string          `json:"status"`
+	Attempts     int             `json:"attempts"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
+	LastError    *string         `json:"last_error,omitempty"`
+	RunAfter     time.Time       `json:"run_after"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+	DocURL       string          `json:"doc_url,omitempty"`
+	DocTitle     string          `json:"doc_title,omitempty"`
+	MarkdownPath string          `json:"markdown_path,omitempty"`
 }
 
 // JobListResponse is the body of GET /v1/jobs.
@@ -139,9 +140,10 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	contentDir := d.Home.ContentDir()
 	resp := JobListResponse{Items: make([]JobResponse, 0, len(jobs))}
 	for _, j := range jobs {
-		resp.Items = append(resp.Items, JobResponse{
+		item := JobResponse{
 			ID:        j.ID,
 			Kind:      j.Kind,
 			Status:    j.Status,
@@ -153,7 +155,11 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt: j.UpdatedAt,
 			DocURL:    j.URL,
 			DocTitle:  j.Title,
-		})
+		}
+		if j.MarkdownPath != "" {
+			item.MarkdownPath = contentDir + "/" + j.MarkdownPath
+		}
+		resp.Items = append(resp.Items, item)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

@@ -21,13 +21,21 @@ func newJobsCmd() *cobra.Command {
 func newJobsListCmd() *cobra.Command {
 	var (
 		failedOnly bool
+		showAll    bool
 		status     string
 		kind       string
 		limit      int
 	)
 	cmd := &cobra.Command{
 		Use:   "jobs",
-		Short: "List recent background jobs (filter with --failed, --status, --kind)",
+		Short: "List recent background jobs (defaults to status=done; --failed / --all to widen)",
+		Long: `Show recent background jobs. By default lists only status=done —
+the audit of work that succeeded. Add --failed to debug failures,
+--all to see every status, or --status for exact filtering.
+
+Each row carries the target doc's URL, title, doc_id, and on-disk
+markdown path (when applicable), so jumping to the underlying file
+or running curio refetch is one copy/paste away.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, ok := getCtx(cmd.Context())
 			if !ok {
@@ -36,10 +44,7 @@ func newJobsListCmd() *cobra.Command {
 			if err := ensureDaemon(ctx); err != nil {
 				return err
 			}
-			s := status
-			if failedOnly {
-				s = "failed"
-			}
+			s := resolveJobsStatus(status, failedOnly, showAll)
 
 			resp, err := ctx.Client.ListJobs(cmd.Context(), client.JobListOpts{
 				Status: s, Kind: kind, Limit: limit,
@@ -52,10 +57,24 @@ func newJobsListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&failedOnly, "failed", false, "Shortcut for --status=failed")
-	cmd.Flags().StringVar(&status, "status", "", "pending|running|done|failed")
+	cmd.Flags().BoolVar(&showAll, "all", false, "Show every status instead of just done")
+	cmd.Flags().StringVar(&status, "status", "", "pending|running|done|failed (overrides defaults)")
 	cmd.Flags().StringVar(&kind, "kind", "", "fetch|index|import|cluster|summarize")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Max rows to return (server caps at 500)")
 	return cmd
+}
+
+func resolveJobsStatus(status string, failedOnly, all bool) string {
+	switch {
+	case status != "":
+		return status
+	case failedOnly:
+		return "failed"
+	case all:
+		return ""
+	default:
+		return "done"
+	}
 }
 
 func renderJobList(resp *client.JobList) {
@@ -78,6 +97,9 @@ func renderJobList(resp *client.JobList) {
 			}
 			if docID := extractDocID(j.Payload); docID != "" {
 				fmt.Printf("  doc_id: %s\n", docID)
+			}
+			if j.MarkdownPath != "" {
+				fmt.Printf("  path: %s\n", j.MarkdownPath)
 			}
 		}
 		if j.LastError != nil && *j.LastError != "" {

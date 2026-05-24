@@ -77,17 +77,21 @@ func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 // DocumentListItem is one row in the list response. Mirrors DocumentResponse
-// but adds LastError from the join-with-jobs query so debugging failed
-// docs is one API call.
+// but adds LastError from the join-with-jobs query AND MarkdownPath from
+// the join-with-extractions query so debugging is one API call.
+//
+// MarkdownPath is the absolute on-disk path (content_dir + relative path)
+// so the CLI can print something `cat`-friendly directly.
 type DocumentListItem struct {
-	ID          string    `json:"id"`
-	URL         string    `json:"url"`
-	Title       *string   `json:"title,omitempty"`
-	ContentType string    `json:"content_type"`
-	State       string    `json:"state"`
-	LastError   string    `json:"last_error,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	URL          string    `json:"url"`
+	Title        *string   `json:"title,omitempty"`
+	ContentType  string    `json:"content_type"`
+	State        string    `json:"state"`
+	LastError    string    `json:"last_error,omitempty"`
+	MarkdownPath string    `json:"markdown_path,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // DocumentListResponse is the body of GET /v1/documents.
@@ -117,9 +121,10 @@ func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	contentDir := d.Home.ContentDir()
 	out := DocumentListResponse{Items: make([]DocumentListItem, 0, len(docs))}
 	for _, doc := range docs {
-		out.Items = append(out.Items, DocumentListItem{
+		item := DocumentListItem{
 			ID:          doc.ID,
 			URL:         doc.URL,
 			Title:       doc.Title,
@@ -128,7 +133,11 @@ func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 			LastError:   doc.LastError,
 			CreatedAt:   doc.CreatedAt,
 			UpdatedAt:   doc.UpdatedAt,
-		})
+		}
+		if doc.MarkdownPath != "" {
+			item.MarkdownPath = contentDir + "/" + doc.MarkdownPath
+		}
+		out.Items = append(out.Items, item)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
