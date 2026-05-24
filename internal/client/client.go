@@ -236,6 +236,53 @@ func (c *Client) RefetchAll(ctx context.Context, state string) (*RefetchAllRespo
 	return &out, nil
 }
 
+// JobListOpts filters for ListJobs.
+type JobListOpts struct {
+	Status string
+	Kind   string
+	Limit  int
+}
+
+// Job mirrors api.JobResponse.
+type Job struct {
+	ID        string          `json:"id"`
+	Kind      string          `json:"kind"`
+	Status    string          `json:"status"`
+	Attempts  int             `json:"attempts"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	LastError *string         `json:"last_error,omitempty"`
+	RunAfter  time.Time       `json:"run_after"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+// JobList mirrors api.JobListResponse.
+type JobList struct {
+	Items []Job `json:"items"`
+}
+
+func (c *Client) ListJobs(ctx context.Context, opts JobListOpts) (*JobList, error) {
+	q := url.Values{}
+	if opts.Status != "" {
+		q.Set("status", opts.Status)
+	}
+	if opts.Kind != "" {
+		q.Set("kind", opts.Kind)
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	path := "/v1/jobs"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	var out JobList
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 type SearchResponse struct {
 	Query      string      `json:"query"`
 	TookMS     int64       `json:"took_ms"`
