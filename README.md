@@ -1,21 +1,52 @@
 # Curio
 
-A personal context layer built from your bookmarks.
-
-Curio imports your browser bookmarks, fetches and indexes the content of every
-page, and provides hybrid BM25 + vector search over the corpus. On top of that,
-it builds a model of your interests — what you're learning, what's trending in
-your reading, what you might want to follow up on — and exposes the whole thing
-to LLMs (Claude, ChatGPT, etc.) via an MCP server.
+A personal context layer built from your bookmarks. Hybrid BM25 + vector search
+over the full text of every page you've ever bookmarked, with an MCP server so
+your LLM tools can pull that context automatically.
 
 The problem it solves: your accumulated curiosity is invisible to the tools you
 think with. When you ask an LLM a question, it has no idea what you've been
 reading. Curio makes that context queryable.
 
-## Status
+## Quickstart
 
-Early design phase. No code yet. See [`docs/`](./docs) for architecture,
-decisions, and roadmap.
+```sh
+# 1. Install
+brew install samsar/tap/curio          # or `make build` from a clone
+brew install ollama                    # required for embeddings
+brew services start ollama
+ollama pull nomic-embed-text
+
+# 2. Verify
+curio doctor                            # six green checks = ready
+
+# 3. Use
+curio import html ~/Downloads/bookmarks.html --follow
+curio search "feature flag rollout"
+```
+
+Export your bookmarks from any browser as HTML (Chrome → Bookmark Manager →
+⋮ → Export bookmarks). The HTML export works across all browsers and is the
+fastest way to load your corpus.
+
+Time budget: with 4 workers (default) and the native fetcher, expect roughly
+1–2 seconds per bookmark — so 1000 bookmarks ≈ 4–8 minutes.
+
+## More commands
+
+```sh
+curio status                        # daemon health + queue depth
+curio jobs --failed                 # what didn't fetch/index, with errors
+curio refetch <doc-id>              # re-fetch a single document
+curio refetch --all --state failed  # retry every failure
+curio daemon {start|stop|status|logs}
+
+curio import chrome [--profile X | --all-profiles | --list-profiles]
+curio import html --dry-run         # parse + filter without sending
+curio import html --limit 200       # try a slice first
+```
+
+`curio --help` lists everything.
 
 ## High-level architecture
 
@@ -41,10 +72,9 @@ decisions, and roadmap.
               └───────────┘  └────────────┘
 ```
 
-See [`docs/architecture.md`](./docs/architecture.md) for the full breakdown.
-
 ## Documentation
 
+- [Setup](./docs/setup.md) — full install + troubleshooting
 - [Architecture](./docs/architecture.md) — components, transports, data flow
 - [Data model](./docs/data-model.md) — schemas and storage layout
 - [Decisions](./docs/decisions.md) — running log of design choices and why
@@ -52,6 +82,20 @@ See [`docs/architecture.md`](./docs/architecture.md) for the full breakdown.
 - [M0 plan](./docs/m0-plan.md) — walking-skeleton implementation plan
 - [API](./api/openapi.yaml) — daemon HTTP contract
 - [Migrations](./migrations) — SQLite schema
+
+## Building from source
+
+Requires Go 1.23+ (will use 1.26 toolchain via go.mod), Node not required (the
+default fetcher is Go-native).
+
+```sh
+git clone https://github.com/samsar/curio
+cd curio
+make build      # produces bin/curio and bin/curio-daemon
+make test       # unit tests
+```
+
+cgo is required (sqlite + sqlite-vec). The Makefile forces `CGO_ENABLED=1`.
 
 ## Naming
 

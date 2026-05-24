@@ -1,0 +1,106 @@
+version: 2
+
+# curio depends on cgo for sqlite + sqlite-vec, so cross-compiling is
+# painful. We start with the platforms a single macos-14 runner can
+# produce natively (darwin/arm64) and grow when there's demand.
+#
+# Adding darwin/amd64 later: easiest path is a second matrix runner on
+# macos-13 (intel), then `goreleaser release --split` + merge. Adding
+# linux/amd64 later: ubuntu runner, same split-merge pattern. Both
+# deferred until v1.
+
+project_name: curio
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: curio
+    main: ./cmd/curio
+    binary: curio
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    tags:
+      - sqlite_fts5
+      - sqlite_json
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/samsar/curio/internal/version.Version={{.Version}}
+      - -X github.com/samsar/curio/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/samsar/curio/internal/version.Date={{.Date}}
+
+  - id: curio-daemon
+    main: ./cmd/curio-daemon
+    binary: curio-daemon
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    tags:
+      - sqlite_fts5
+      - sqlite_json
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/samsar/curio/internal/version.Version={{.Version}}
+      - -X github.com/samsar/curio/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/samsar/curio/internal/version.Date={{.Date}}
+
+archives:
+  - id: curio
+    ids:
+      - curio
+      - curio-daemon
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+brews:
+  - name: curio
+    directory: Formula
+    repository:
+      owner: samsar
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/samsar/curio"
+    description: "Personal context layer built from your bookmarks — hybrid BM25 + vector search"
+    license: "Apache-2.0"
+    # Ollama is required at runtime for embeddings. We don't depends_on
+    # because some users prefer the menu-bar app from ollama.com over
+    # the brew formula; either works.
+    caveats: |
+      curio needs Ollama for embeddings. If you don't have it yet:
+
+        brew install ollama
+        brew services start ollama
+        ollama pull nomic-embed-text
+
+      Then run:
+
+        curio doctor          # verify your setup
+        curio import html ~/Downloads/bookmarks.html --follow
+        curio search "..."
+    install: |
+      bin.install "curio"
+      bin.install "curio-daemon"
+    test: |
+      system "#{bin}/curio", "version"
+
+release:
+  github:
+    owner: samsar
+    name: curio
+  prerelease: auto
