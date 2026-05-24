@@ -276,6 +276,36 @@ func (s *Jobs) List(ctx context.Context, tenantID, status, kind string, limit in
 	return out, rows.Err()
 }
 
+// DeleteByStatus removes every job for the tenant in the given status.
+// Returns how many rows were deleted. status="" is rejected — there's no
+// safe "delete all jobs" path; callers must opt into a specific status.
+func (s *Jobs) DeleteByStatus(ctx context.Context, tenantID, status string) (int64, error) {
+	if status == "" {
+		return 0, fmt.Errorf("delete jobs: status is required (no nuke-all path)")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM jobs WHERE tenant_id = ? AND status = ?`,
+		tenantID, status)
+	if err != nil {
+		return 0, fmt.Errorf("delete jobs by status: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// PruneOlderThan deletes every job for the tenant whose updated_at is
+// before the given cutoff. Used by the retention path so the jobs table
+// doesn't grow without bound — even successful runs leave a row per fetch
+// + per index, so a corpus of 5k bookmarks adds 10k rows per pass.
+func (s *Jobs) PruneOlderThan(ctx context.Context, tenantID string, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM jobs WHERE tenant_id = ? AND updated_at < ?`,
+		tenantID, formatTime(before.UTC()))
+	if err != nil {
+		return 0, fmt.Errorf("prune jobs: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // CountByStatus returns the number of jobs in each status for a tenant.
 // Surfaces queue depth via /v1/stats so import progress is visible.
 func (s *Jobs) CountByStatus(ctx context.Context, tenantID string) (map[string]int, error) {

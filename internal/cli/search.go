@@ -54,13 +54,22 @@ func renderSearchResults(res *client.SearchResponse) {
 		}
 		fmt.Printf("%2d. %s\n", i+1, title)
 		fmt.Printf("    %s   (score %.4f)\n", hit.Document.URL, hit.Score)
+		// Document ID so users can immediately `curio docs show <id>`
+		// or `curio refetch <id>` on a hit without going hunting.
+		fmt.Printf("    id: %s\n", hit.Document.ID)
 		if len(hit.Matches) > 0 {
 			m := hit.Matches[0]
 			snippet := m.Snippet
 			if snippet == "" {
-				snippet = truncate(m.Text, 180)
+				snippet = m.Text
 			}
-			fmt.Printf("    %s\n", snippet)
+			// Wrap on word boundaries so long matches aren't cut off
+			// at 180 chars. 100 cols keeps it readable in narrow
+			// terminals; the `--content` flag on `curio docs show`
+			// is the right tool for the full body.
+			for _, line := range wrapLines(snippet, 100) {
+				fmt.Printf("    %s\n", line)
+			}
 		}
 		fmt.Println()
 	}
