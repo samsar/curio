@@ -88,6 +88,22 @@ func run() error {
 	}
 	slog.Info("database ready", "path", home.DBPath())
 
+	// Reset orphaned 'running' jobs. Any row in that status at startup
+	// belonged to a previous daemon that died (SIGKILL, SIGTERM mid-
+	// handler, crash, laptop sleep). Single-daemon assumption holds for
+	// v1; multi-daemon would need leasing here instead.
+	if res, err := db.ExecContext(ctx, `
+		UPDATE jobs SET status = 'pending',
+		                started_at = NULL,
+		                run_after = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		WHERE status = 'running'`); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			slog.Info("reset orphaned running jobs", "count", n)
+		}
+	} else {
+		slog.Warn("could not reset orphaned running jobs", "err", err)
+	}
+
 	// Sync the marker file's schema_version with whatever the migration
 	// run landed at, so /v1/healthz reflects reality after every upgrade.
 	if v, err := sqlitestore.ReadSchemaVersion(db); err == nil && v > 0 && v != meta.SchemaVersion {

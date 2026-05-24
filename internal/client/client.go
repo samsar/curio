@@ -57,6 +57,36 @@ type Stats struct {
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
 }
 
+// Metrics mirrors api.MetricsResponse.
+type Metrics struct {
+	WindowSeconds int           `json:"window_seconds"`
+	ByKind        []KindMetrics `json:"by_kind"`
+}
+
+type KindMetrics struct {
+	Kind                 string  `json:"kind"`
+	Count                int     `json:"count"`
+	Failed               int     `json:"failed"`
+	MeanMS               float64 `json:"mean_ms"`
+	P50MS                float64 `json:"p50_ms"`
+	P95MS                float64 `json:"p95_ms"`
+	P99MS                float64 `json:"p99_ms"`
+	Running              int     `json:"running"`
+	OldestRunningSeconds int     `json:"oldest_running_seconds"`
+}
+
+func (c *Client) Metrics(ctx context.Context, windowSeconds int) (*Metrics, error) {
+	path := "/v1/metrics"
+	if windowSeconds > 0 {
+		path += "?window=" + strconv.Itoa(windowSeconds)
+	}
+	var m Metrics
+	if err := c.do(ctx, http.MethodGet, path, nil, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 func (c *Client) Stats(ctx context.Context) (*Stats, error) {
 	var s Stats
 	if err := c.do(ctx, http.MethodGet, "/v1/stats", nil, &s); err != nil {
