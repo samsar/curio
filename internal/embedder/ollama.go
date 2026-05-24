@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -73,6 +74,52 @@ func NewOllama(opts OllamaOptions) (*Ollama, error) {
 
 func (o *Ollama) Dimensions() int { return o.dim }
 func (o *Ollama) Model() string   { return o.model }
+
+// Ping is a cheap reachability check against /api/tags. Returns nil if
+// Ollama is reachable AND the configured model is loaded; otherwise
+// returns a wrapped sentinel so callers can distinguish the failure
+// modes. Caller controls timeout via ctx.
+func (o *Ollama) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/api/tags", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := o.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrOllamaUnreachable, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: HTTP %d", ErrOllamaUnreachable, resp.StatusCode)
+	}
+
+	var parsed struct {
+		Models []struct {
+			Name  string `json:"name"`
+			Model string `json:"model"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return fmt.Errorf("decode /api/tags: %w", err)
+	}
+	wanted := o.model
+	for _, m := range parsed.Models {
+		// Ollama returns "nomic-embed-text:latest" or similar; accept
+		// any prefix match.
+		if m.Name == wanted || m.Model == wanted ||
+			strings.HasPrefix(m.Name, wanted+":") ||
+			strings.HasPrefix(m.Model, wanted+":") {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s", ErrModelNotLoaded, wanted)
+}
+
+// Sentinel errors so callers can format actionable messages.
+var (
+	ErrOllamaUnreachable = errors.New("ollama unreachable")
+	ErrModelNotLoaded    = errors.New("model not loaded")
+)
 
 // Embed posts texts to /api/embed in a single batched call. Verifies the
 // returned vectors have the expected dimension on first call — if Ollama
