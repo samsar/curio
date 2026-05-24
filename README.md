@@ -19,7 +19,7 @@ decisions, and roadmap.
 
 ## High-level architecture
 
-```
+```text
 ┌──────────────┐  ┌─────────────┐  ┌──────────────┐
 │   curio CLI  │  │ curio-mcp   │  │  Future Web  │
 │  (cobra)     │  │ (sidecar)   │  │     UI / API │
@@ -32,13 +32,13 @@ decisions, and roadmap.
                   │  importer/crawler │
                   │  indexer/search   │
                   │  insight          │
-                  └──┬──────────┬─────┘
-                     │          │
-              ┌──────▼───┐  ┌───▼────────┐
-              │ SQLite   │  │ Ollama     │
-              │ FTS5 +   │  │ (embed +   │
-              │ sqlite-vec│  │ local LLM)│
-              └──────────┘  └────────────┘
+                  └──┬───────────┬────┘
+                     │           │
+              ┌──────▼────┐  ┌───▼────────┐
+              │ SQLite    │  │ Ollama     │
+              │ FTS5 +    │  │ (embed +   │
+              │ sqlite-vec│  │ local LLM) │
+              └───────────┘  └────────────┘
 ```
 
 See [`docs/architecture.md`](./docs/architecture.md) for the full breakdown.
