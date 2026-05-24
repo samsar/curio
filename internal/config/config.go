@@ -35,11 +35,21 @@ type Embedding struct {
 }
 
 type Fetcher struct {
-	Web2MD Web2MD `yaml:"web2md"`
+	Default string `yaml:"default"` // "native" | "web2md"
+	Native  Native `yaml:"native"`
+	Web2MD  Web2MD `yaml:"web2md"`
+}
+
+type Native struct {
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+	JinaFallback   bool   `yaml:"jina_fallback"`
+	JinaBaseURL    string `yaml:"jina_base_url"` // override for offline tests
+	UserAgent      string `yaml:"user_agent"`
 }
 
 type Web2MD struct {
 	Bin            string `yaml:"bin"`
+	NodeBin        string `yaml:"node_bin"` // override; defaults to "node" in PATH
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
 }
 
@@ -71,6 +81,11 @@ func Default() Config {
 			BaseURL:  "http://localhost:11434",
 		},
 		Fetcher: Fetcher{
+			Default: "native",
+			Native: Native{
+				TimeoutSeconds: 30,
+				JinaFallback:   true,
+			},
 			Web2MD: Web2MD{
 				Bin:            "web2md",
 				TimeoutSeconds: 30,
@@ -152,6 +167,17 @@ func (c Config) Validate() error {
 	if c.Fetcher.Web2MD.TimeoutSeconds <= 0 {
 		return fmt.Errorf("fetcher.web2md.timeout_seconds must be positive, got %d",
 			c.Fetcher.Web2MD.TimeoutSeconds)
+	}
+	if c.Fetcher.Native.TimeoutSeconds <= 0 {
+		return fmt.Errorf("fetcher.native.timeout_seconds must be positive, got %d",
+			c.Fetcher.Native.TimeoutSeconds)
+	}
+	switch c.Fetcher.Default {
+	case "native", "web2md":
+	case "":
+		return errors.New("fetcher.default must be set (native or web2md)")
+	default:
+		return fmt.Errorf("fetcher.default %q must be one of: native, web2md", c.Fetcher.Default)
 	}
 	return nil
 }
