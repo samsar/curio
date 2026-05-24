@@ -153,6 +153,42 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) er
 	return nil
 }
 
+// List returns recent jobs for a tenant, optionally filtered by status
+// and/or kind. Ordered most-recently-created first.
+func (s *Jobs) List(ctx context.Context, tenantID, status, kind string, limit int) ([]*store.Job, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	const cols = `id, tenant_id, kind, payload, status, attempts, run_after, last_error, created_at, updated_at`
+	q := "SELECT " + cols + " FROM jobs WHERE tenant_id = ?"
+	args := []any{tenantID}
+	if status != "" {
+		q += " AND status = ?"
+		args = append(args, status)
+	}
+	if kind != "" {
+		q += " AND kind = ?"
+		args = append(args, kind)
+	}
+	q += " ORDER BY created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs: %w", err)
+	}
+	defer rows.Close()
+	var out []*store.Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
 // CountByStatus returns the number of jobs in each status for a tenant.
 // Surfaces queue depth via /v1/stats so import progress is visible.
 func (s *Jobs) CountByStatus(ctx context.Context, tenantID string) (map[string]int, error) {

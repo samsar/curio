@@ -75,6 +75,8 @@ func NewServer(addr string, deps Deps) *Server {
 		})
 
 		r.Post("/search", deps.handleSearch)
+
+		r.Get("/jobs", deps.handleListJobs)
 	})
 
 	return &Server{
