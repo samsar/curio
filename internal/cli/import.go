@@ -20,6 +20,26 @@ import (
 // folders and gives progress updates that feel responsive.
 const importBatchSize = 500
 
+// importFlags are the shared flags across all `curio import` subcommands.
+// Attached via attachImportFlags so adding flags later only needs one edit.
+type importFlags struct {
+	limit  int
+	dryRun bool
+}
+
+func attachImportFlags(cmd *cobra.Command, f *importFlags) {
+	cmd.Flags().IntVar(&f.limit, "limit", 0, "Stop after N bookmarks (0 = no limit)")
+	cmd.Flags().BoolVar(&f.dryRun, "dry-run", false, "Parse + filter only; don't POST to the daemon")
+}
+
+// applyLimit trims a parsed slice to flags.limit if set.
+func (f *importFlags) applyLimit(bms []importer.ParsedBookmark) []importer.ParsedBookmark {
+	if f.limit > 0 && len(bms) > f.limit {
+		return bms[:f.limit]
+	}
+	return bms
+}
+
 func newImportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import",
@@ -30,7 +50,8 @@ func newImportCmd() *cobra.Command {
 }
 
 func newImportHTMLCmd() *cobra.Command {
-	return &cobra.Command{
+	var flags importFlags
+	cmd := &cobra.Command{
 		Use:   "html <file>",
 		Short: "Import a Netscape HTML bookmark export (works for any browser)",
 		Args:  cobra.ExactArgs(1),
@@ -39,8 +60,10 @@ func newImportHTMLCmd() *cobra.Command {
 			if !ok {
 				return errors.New("no context")
 			}
-			if err := ensureDaemon(ctx); err != nil {
-				return err
+			if !flags.dryRun {
+				if err := ensureDaemon(ctx); err != nil {
+					return err
+				}
 			}
 
 			f, err := os.Open(args[0])
@@ -54,9 +77,18 @@ func newImportHTMLCmd() *cobra.Command {
 				return fmt.Errorf("parse: %w", err)
 			}
 			fmt.Printf("parsed %d bookmarks from %s\n", len(bms), filepath.Base(args[0]))
+			bms = flags.applyLimit(bms)
+			if flags.limit > 0 {
+				fmt.Printf("  limited to first %d\n", len(bms))
+			}
+			if flags.dryRun {
+				return reportDryRun(bms)
+			}
 			return sendBatches(cmd.Context(), ctx, "html", bms)
 		},
 	}
+	attachImportFlags(cmd, &flags)
+	return cmd
 }
 
 func newImportChromeCmd() *cobra.Command {
@@ -65,6 +97,7 @@ func newImportChromeCmd() *cobra.Command {
 		allProfiles  bool
 		listProfiles bool
 		filePath     string
+		flags        importFlags
 	)
 	cmd := &cobra.Command{
 		Use:   "chrome",
@@ -97,8 +130,10 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 				return nil
 			}
 
-			if err := ensureDaemon(ctx); err != nil {
-				return err
+			if !flags.dryRun {
+				if err := ensureDaemon(ctx); err != nil {
+					return err
+				}
 			}
 
 			var files []string
@@ -133,7 +168,7 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 			}
 
 			for _, fp := range files {
-				if err := importChromeFile(cmd.Context(), ctx, fp); err != nil {
+				if err := importChromeFile(cmd.Context(), ctx, fp, &flags); err != nil {
 					return err
 				}
 			}
@@ -144,10 +179,11 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 	cmd.Flags().BoolVar(&allProfiles, "all-profiles", false, "Import every discovered Chrome profile")
 	cmd.Flags().BoolVar(&listProfiles, "list-profiles", false, "List Chrome profiles and exit")
 	cmd.Flags().StringVar(&filePath, "file", "", "Path to an arbitrary Chrome Bookmarks JSON file")
+	attachImportFlags(cmd, &flags)
 	return cmd
 }
 
-func importChromeFile(httpCtx context.Context, c *Context, path string) error {
+func importChromeFile(httpCtx context.Context, c *Context, path string, flags *importFlags) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
@@ -158,7 +194,41 @@ func importChromeFile(httpCtx context.Context, c *Context, path string) error {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
 	fmt.Printf("parsed %d bookmarks from %s\n", len(bms), profileLabelFromPath(path))
+	bms = flags.applyLimit(bms)
+	if flags.limit > 0 {
+		fmt.Printf("  limited to first %d\n", len(bms))
+	}
+	if flags.dryRun {
+		return reportDryRun(bms)
+	}
 	return sendBatches(httpCtx, c, "chrome", bms)
+}
+
+// reportDryRun prints the same summary sendBatches would, computed
+// locally from the parsed list without contacting the daemon.
+func reportDryRun(bms []importer.ParsedBookmark) error {
+	filtered := 0
+	by := map[importer.FilterReason]int{}
+	for _, b := range bms {
+		if ok, why := importer.Indexable(b.URL); !ok {
+			filtered++
+			by[why]++
+		}
+	}
+	fmt.Println("\ndry-run — nothing sent to the daemon")
+	fmt.Printf("  would import:  %d\n", len(bms)-filtered)
+	fmt.Printf("  would filter:  %d\n", filtered)
+	if len(by) > 0 {
+		keys := make([]importer.FilterReason, 0, len(by))
+		for k := range by {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+		for _, k := range keys {
+			fmt.Printf("    %s: %d\n", k, by[k])
+		}
+	}
+	return nil
 }
 
 // profileLabelFromPath turns ".../Chrome/Default/Bookmarks" into "Default".
