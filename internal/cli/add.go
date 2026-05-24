@@ -89,9 +89,7 @@ func waitForFetch(ctx context.Context, c *Context, bookmarkID string, timeout ti
 
 func ensureDaemon(c *Context) error {
 	if c.Controller == nil {
-		// No home yet; the daemon will init on first launch.
-	}
-	if c.Controller == nil {
+		// No $CURIO_HOME yet, so we can't manage the daemon process.
 		// Try a direct healthz first; if daemon is up, no need to start.
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()

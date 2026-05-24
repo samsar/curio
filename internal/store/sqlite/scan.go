@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 )
@@ -30,51 +29,6 @@ func parseTime(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("unrecognized time %q", s)
-}
-
-// scanTime helps Scan into time.Time when the column is a TEXT timestamp.
-// SQLite drivers expose TEXT timestamps as string; we parse them on the way out.
-type scanTime struct{ t *time.Time }
-
-func (s scanTime) Scan(src any) error {
-	if src == nil {
-		return errors.New("scan: time column was NULL")
-	}
-	var raw string
-	switch v := src.(type) {
-	case string:
-		raw = v
-	case []byte:
-		raw = string(v)
-	case time.Time:
-		*s.t = v.UTC()
-		return nil
-	default:
-		return fmt.Errorf("scan: unexpected time type %T", src)
-	}
-	parsed, err := parseTime(raw)
-	if err != nil {
-		return err
-	}
-	*s.t = parsed
-	return nil
-}
-
-// scanNullableTime is the same but writes nil into a *time.Time pointer
-// when the column is NULL.
-type scanNullableTime struct{ t **time.Time }
-
-func (s scanNullableTime) Scan(src any) error {
-	if src == nil {
-		*s.t = nil
-		return nil
-	}
-	var v time.Time
-	if err := (scanTime{t: &v}).Scan(src); err != nil {
-		return err
-	}
-	*s.t = &v
-	return nil
 }
 
 // nullableString turns sql.NullString into *string.

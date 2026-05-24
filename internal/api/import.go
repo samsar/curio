@@ -34,12 +34,12 @@ type ImportBookmark struct {
 // ImportResponse summarizes what happened. Counts always present, errors
 // only when non-empty.
 type ImportResponse struct {
-	Source       string                       `json:"source"`
-	Total        int                          `json:"total"`
-	Created      int                          `json:"created"`
-	Skipped      int                          `json:"skipped"`  // unique-conflict on existing bookmark
-	Filtered     int                          `json:"filtered"` // dropped by Indexable
-	JobsEnqueued int                          `json:"jobs_enqueued"`
+	Source       string                        `json:"source"`
+	Total        int                           `json:"total"`
+	Created      int                           `json:"created"`
+	Skipped      int                           `json:"skipped"`  // unique-conflict on existing bookmark
+	Filtered     int                           `json:"filtered"` // dropped by Indexable
+	JobsEnqueued int                           `json:"jobs_enqueued"`
 	FilteredBy   map[importer.FilterReason]int `json:"filtered_by,omitempty"`
 	Errors       []string                      `json:"errors,omitempty"` // first ~10
 }

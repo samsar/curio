@@ -326,7 +326,6 @@ func parseJina(text string) jinaParsed {
 		line := lines[i]
 		if strings.TrimSpace(line) == "Markdown Content:" {
 			i++
-			sawHeader = true
 			break
 		}
 		m := headerRE.FindStringSubmatch(line)

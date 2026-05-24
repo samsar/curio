@@ -66,9 +66,9 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	paragraphs := splitParagraphs(markdown)
 
 	var (
-		chunks      []Chunk
-		curWords    []string
-		curTokens   int
+		chunks    []Chunk
+		curWords  []string
+		curTokens int
 	)
 	flush := func() {
 		if curTokens == 0 {

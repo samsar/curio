@@ -15,19 +15,19 @@ import (
 
 // DocumentResponse mirrors the openapi Document schema. tenant_id omitted.
 type DocumentResponse struct {
-	ID                 string                `json:"id"`
-	URL                string                `json:"url"`
-	URLCanonical       *string               `json:"url_canonical,omitempty"`
-	ContentType        string                `json:"content_type"`
-	Title              *string               `json:"title,omitempty"`
-	Author             *string               `json:"author,omitempty"`
-	PublishedAt        *time.Time            `json:"published_at,omitempty"`
-	Language           *string               `json:"language,omitempty"`
-	WordCount          *int                  `json:"word_count,omitempty"`
-	State              string                `json:"state"`
-	CurrentExtraction  *ExtractionResponse   `json:"current_extraction,omitempty"`
-	CreatedAt          time.Time             `json:"created_at"`
-	UpdatedAt          time.Time             `json:"updated_at"`
+	ID                string              `json:"id"`
+	URL               string              `json:"url"`
+	URLCanonical      *string             `json:"url_canonical,omitempty"`
+	ContentType       string              `json:"content_type"`
+	Title             *string             `json:"title,omitempty"`
+	Author            *string             `json:"author,omitempty"`
+	PublishedAt       *time.Time          `json:"published_at,omitempty"`
+	Language          *string             `json:"language,omitempty"`
+	WordCount         *int                `json:"word_count,omitempty"`
+	State             string              `json:"state"`
+	CurrentExtraction *ExtractionResponse `json:"current_extraction,omitempty"`
+	CreatedAt         time.Time           `json:"created_at"`
+	UpdatedAt         time.Time           `json:"updated_at"`
 }
 
 // ExtractionResponse mirrors the Extraction schema.

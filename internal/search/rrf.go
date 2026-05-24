@@ -51,7 +51,7 @@ func Fuse(rankedLists [][]RankedItem, weights []float64, k int) []ScoredID {
 
 	scores := make(map[string]float64)
 	for li, list := range rankedLists {
-		var w float64 = 1.0
+		w := 1.0
 		if li < len(weights) {
 			w = weights[li]
 		}

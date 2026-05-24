@@ -62,10 +62,10 @@ func TestParseHTML_Basic(t *testing.T) {
 
 func TestIndexable(t *testing.T) {
 	cases := []struct {
-		name     string
-		url      string
-		want     bool
-		wantWhy  FilterReason
+		name    string
+		url     string
+		want    bool
+		wantWhy FilterReason
 	}{
 		{"normal https", "https://example.com/x", true, ""},
 		{"normal http", "http://example.com/x", true, ""},

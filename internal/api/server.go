@@ -52,7 +52,9 @@ func NewServer(addr string, deps Deps) *Server {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// middleware.RealIP is intentionally NOT used — it's deprecated due to
+	// X-Forwarded-For spoofing risk and we listen on 127.0.0.1 only, so
+	// remote addrs are always loopback anyway.
 	r.Use(loggingMiddleware(deps.Log))
 
 	r.Route("/v1", func(r chi.Router) {

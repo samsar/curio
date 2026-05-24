@@ -28,9 +28,9 @@ const (
 
 // Controller is the CLI-side daemon manager.
 type Controller struct {
-	Home       *curiohome.Home
-	DaemonBin  string // absolute path to the curio-daemon executable
-	BaseURL    string // for healthz probing
+	Home         *curiohome.Home
+	DaemonBin    string        // absolute path to the curio-daemon executable
+	BaseURL      string        // for healthz probing
 	StartTimeout time.Duration // how long to wait for daemon to become ready
 }
 

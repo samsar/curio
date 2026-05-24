@@ -1,5 +1,10 @@
-# golangci-lint v2 config
-# See: https://golangci-lint.run/usage/configuration/
+# golangci-lint v2 config — see https://golangci-lint.run/usage/configuration/
+#
+# Lint philosophy for curio: catch real bugs (staticcheck, unused, ineffassign,
+# rowserrcheck, errorlint) but don't get in the way of standard Go idioms
+# (defer Close errors, sentinel error wrapping with %w/%v). gocritic and
+# gosec are turned off — they're high-noise relative to signal for a tool
+# of this scope.
 
 version: "2"
 
@@ -10,42 +15,52 @@ run:
 linters:
   default: none
   enable:
-    - errcheck      # find unchecked errors
-    - govet         # vet
-    - ineffassign   # unused assignments
-    - staticcheck   # advanced static analysis (includes stylecheck, gosimple)
-    - unused        # find unused code
-    - gosec         # security issues
-    - revive        # configurable replacement for golint
-    - misspell      # spelling
-    - unconvert     # unnecessary type conversions
-    - prealloc      # suggest slice prealloc
-    - bodyclose     # http.Response.Body close
-    - rowserrcheck  # sql.Rows.Err
-    - sqlclosecheck # closing rows/stmt
-    - errorlint     # errors.Is/As correctness
-    - nilerr        # returning nil when err != nil
-    - copyloopvar   # loop variable copying
-    - gocritic      # diagnostics
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - unconvert
+    - prealloc
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    - errorlint
+    - nilerr
+    - copyloopvar
 
   settings:
-    revive:
-      rules:
-        - name: exported
-          disabled: true  # too noisy for internal/
-
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - performance
-      disabled-checks:
-        - ifElseChain
+    errcheck:
+      # Don't flag the idiomatic patterns where the error is genuinely
+      # uninteresting: deferred Close on rows / bodies / files, and explicit
+      # _ = on best-effort writers.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*database/sql.Rows).Close
+        - (io.ReadCloser).Close
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+        - os.Setenv
+    errorlint:
+      # We deliberately use `fmt.Errorf("%w: %v", sentinel, err)` to wrap
+      # the sentinel for errors.Is matching while keeping the wrapped err
+      # readable. Go forbids two %w; this is the standard workaround.
+      errorf: false
+    misspell:
+      ignore-rules:
+        - strat   # intentional abbreviation of "strategy" (CollapseStrategy)
 
   exclusions:
     rules:
       - path: _test\.go
         linters:
-          - gosec
+          - errcheck
+          - bodyclose
+      - path: cmd/
+        linters:
           - errcheck
 
 formatters:

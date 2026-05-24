@@ -23,10 +23,9 @@ import (
 // configurable so the daemon can use either the local checkout or a
 // globally-installed `web2md` shim.
 type Web2MD struct {
-	bin      string        // path to web2md executable (or "web2md" if in PATH)
-	nodeBin  string        // optional explicit node binary; empty = "node"
-	timeout  time.Duration // per-fetch wall clock
-	useStdin bool          // reserved for future; currently always passes URL as arg
+	bin     string        // path to web2md executable (or "web2md" if in PATH)
+	nodeBin string        // optional explicit node binary; empty = "node"
+	timeout time.Duration // per-fetch wall clock
 }
 
 // Web2MDOptions configures the fetcher.

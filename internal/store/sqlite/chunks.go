@@ -16,9 +16,10 @@ import (
 )
 
 // Chunks implements store.ChunkStore. Owns three coupled tables:
-//   chunks      — canonical text rows, FK to document + extraction
-//   chunks_fts  — FTS5 virtual table for BM25 search
-//   chunks_vec  — sqlite-vec virtual table for ANN search
+//
+//	chunks      — canonical text rows, FK to document + extraction
+//	chunks_fts  — FTS5 virtual table for BM25 search
+//	chunks_vec  — sqlite-vec virtual table for ANN search
 //
 // All three are kept in sync transactionally by ReplaceForDocument; queries
 // read from one virtual table at a time and JOIN to documents for tenant
@@ -160,9 +161,9 @@ func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit i
 	var out []store.ChunkHit
 	for rows.Next() {
 		var (
-			h        store.ChunkHit
-			bm25Neg  float64
-			snippet  sql.NullString
+			h       store.ChunkHit
+			bm25Neg float64
+			snippet sql.NullString
 		)
 		if err := rows.Scan(&h.ChunkID, &h.DocumentID, &bm25Neg, &snippet); err != nil {
 			return nil, fmt.Errorf("scan bm25 hit: %w", err)
