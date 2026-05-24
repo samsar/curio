@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/samsar/curio/internal/store"
 )
@@ -130,9 +132,20 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		req.K = 10
 	}
 
-	bm25Hits, err := e.chunks.BM25Search(ctx, req.TenantID, req.Query, e.preFanout)
-	if err != nil {
-		return nil, fmt.Errorf("bm25: %w", err)
+	// FTS5 has its own MATCH grammar — bare punctuation (commas, slashes,
+	// etc.) is a syntax error, and tokens like AND/OR/NOT/NEAR are reserved.
+	// Real user queries are natural language ("articles about X, Y, and Z"),
+	// so we tokenize down to safe terms before handing to FTS5. The vector
+	// path keeps the original text since the embedder handles language fine.
+	// Empty after sanitization (e.g. query was all punctuation) means BM25
+	// contributes nothing; vector search still runs.
+	var bm25Hits []store.ChunkHit
+	if ftsQuery := sanitizeBM25Query(req.Query); ftsQuery != "" {
+		hits, err := e.chunks.BM25Search(ctx, req.TenantID, ftsQuery, e.preFanout)
+		if err != nil {
+			return nil, fmt.Errorf("bm25: %w", err)
+		}
+		bm25Hits = hits
 	}
 
 	queryVec, err := e.embedder.Embed(ctx, []string{req.Query})
@@ -338,4 +351,88 @@ func topChunkIDs(perChunk map[string]float64, n int) []string {
 
 func sortFloatsDesc(s []float64) {
 	sort.Sort(sort.Reverse(sort.Float64Slice(s)))
+}
+
+// sanitizeBM25Query turns an arbitrary user query into something safe AND
+// useful to pass to FTS5's MATCH operator:
+//
+//   - Extracts word-like tokens (letters/digits/apostrophes/hyphens).
+//   - Drops common English stopwords ("the", "and", "is", ...). Without this,
+//     a natural-language query like "Find me articles about X" would AND
+//     every token together — no real chunk has all 13 words, BM25 returns
+//     zero, and the lexical leg of hybrid search dies on every long query.
+//   - Wraps each remaining token in double quotes so FTS5 treats it as a
+//     literal phrase, escaping any reserved punctuation or keywords.
+//   - Joins with OR so any content-bearing term can contribute. BM25's role
+//     in hybrid retrieval is to catch exact lexical matches that vector
+//     misses (names, identifiers, jargon) — OR semantics maximize that.
+//
+// Returns empty string when no tokens survive (e.g. query was all
+// punctuation or all stopwords); callers should skip BM25 in that case,
+// vector search still works.
+//
+// We don't try to support advanced FTS5 syntax (operators, prefix wildcards,
+// column filters) here — if the search surface ever exposes that, it
+// should be a separate code path that the caller opts into.
+//
+// See docs/decisions.md "BM25 query sanitization: OR + stopwords" for the
+// design rationale and the natural-language-search work we may revisit.
+func sanitizeBM25Query(q string) string {
+	tokens := wordTokenRE.FindAllString(q, -1)
+	if len(tokens) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		// Strip any embedded double quotes — FTS5 has no escape for `"`
+		// inside a quoted phrase, the only safe move is to drop them.
+		t = strings.ReplaceAll(t, `"`, "")
+		if t == "" {
+			continue
+		}
+		if _, stop := bm25Stopwords[strings.ToLower(t)]; stop {
+			continue
+		}
+		parts = append(parts, `"`+t+`"`)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " OR ")
+}
+
+// wordTokenRE matches runs of letters, digits, apostrophes, and hyphens —
+// the latter two so words like "don't" and "state-of-the-art" stay whole.
+// Everything else (whitespace, punctuation, symbols) acts as a separator.
+var wordTokenRE = regexp.MustCompile(`[\p{L}\p{N}'\-]+`)
+
+// bm25Stopwords is a small English stopword list. Intentionally short:
+// covers the high-frequency function words that flood natural-language
+// queries ("Find me articles about ...") without trying to be exhaustive.
+// We err on the side of keeping words — over-aggressive stopwording hurts
+// recall on technical terms that happen to overlap with English words
+// ("set", "map", "list" in CS contexts).
+var bm25Stopwords = map[string]struct{}{
+	"a": {}, "an": {}, "the": {},
+	"and": {}, "or": {}, "but": {}, "nor": {}, "so": {}, "yet": {},
+	"is": {}, "are": {}, "was": {}, "were": {}, "be": {}, "been": {}, "being": {},
+	"am": {}, "do": {}, "does": {}, "did": {}, "doing": {},
+	"have": {}, "has": {}, "had": {}, "having": {},
+	"of": {}, "in": {}, "on": {}, "at": {}, "to": {}, "from": {}, "by": {},
+	"for": {}, "with": {}, "about": {}, "against": {}, "between": {}, "into": {},
+	"through": {}, "during": {}, "before": {}, "after": {}, "above": {},
+	"below": {}, "up": {}, "down": {}, "out": {}, "off": {}, "over": {},
+	"under": {}, "again": {}, "further": {}, "then": {}, "once": {},
+	"i": {}, "me": {}, "my": {}, "we": {}, "us": {}, "our": {},
+	"you": {}, "your": {}, "he": {}, "him": {}, "his": {}, "she": {},
+	"her": {}, "it": {}, "its": {}, "they": {}, "them": {}, "their": {},
+	"this": {}, "that": {}, "these": {}, "those": {},
+	"what": {}, "which": {}, "who": {}, "whom": {}, "whose": {},
+	"all": {}, "any": {}, "some": {}, "no": {}, "not": {}, "only": {},
+	"own": {}, "same": {}, "than": {}, "too": {}, "very": {}, "just": {},
+	"can": {}, "will": {}, "would": {}, "should": {}, "could": {},
+	"may": {}, "might": {}, "must": {}, "shall": {},
+	"find": {}, "show": {}, "give": {}, "tell": {}, "want": {}, "need": {},
+	"please": {}, "best": {}, "good": {}, "bad": {},
+	"how": {}, "why": {}, "when": {}, "where": {},
 }

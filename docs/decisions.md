@@ -197,6 +197,58 @@ strategy.
 
 ---
 
+## BM25 query sanitization: OR + stopwords
+
+**Decision:** Before handing a user query to FTS5's `MATCH`, run it through
+`sanitizeBM25Query` in `internal/search/search.go`:
+
+  1. Extract word-like tokens (letters, digits, apostrophes, hyphens).
+  2. Drop common English stopwords (small curated list, ~80 entries).
+  3. Wrap each remaining token in `"..."` so FTS5 treats it as a literal
+     phrase — escapes punctuation and reserved keywords (AND, OR, NOT, NEAR).
+  4. Join with ` OR ` so any content-bearing token can hit.
+  5. If nothing survives, return empty; caller skips BM25 and runs only the
+     vector leg.
+
+**Why:** Two real failures on natural-language queries forced this.
+
+  - **Crash:** "Find me articles about computer science, data structures, and
+    algorithms" — bare commas are an FTS5 syntax error, raw query went
+    straight to MATCH, daemon returned HTTP 500.
+  - **Zero results:** even after wrapping tokens in quotes, FTS5's default
+    AND semantics required every token to be present. No real chunk has all
+    13 words of a long query, so BM25 returned 0 on every long query —
+    silently halving the hybrid pipeline.
+
+OR + stopwords mirrors what Elasticsearch / OpenSearch / Vespa ship by default
+for natural-language queries. BM25's role in hybrid search is to catch exact
+lexical hits the vector misses (proper names, identifiers, jargon, version
+numbers); it does not need to "understand" the query — that's the vector
+leg's job.
+
+**Stopword list is intentionally short.** Over-aggressive stopwording hurts
+recall on technical terms that overlap English ("set", "map", "list" in CS
+contexts). We drop only obvious function words plus a handful of
+query-framing verbs ("find", "show", "tell", "give") that flood
+natural-language queries without carrying retrieval signal.
+
+**What we deliberately did NOT add:**
+
+  - **Stemming / lemmatization.** Would need a stemmer dependency and the
+    FTS5 index would need to be rebuilt with a stemming tokenizer. Defer
+    until evidence of "I searched for `algorithms` and missed docs that say
+    `algorithm`" actually matters.
+  - **Synonym expansion.** Same reason: not worth the complexity for v1.
+  - **`minimum_should_match` tuning.** FTS5 doesn't expose it natively; would
+    need post-filtering. Pure OR is the simplest thing that could work.
+
+**Trade-off acknowledged:** OR over many tokens can surface noisy results
+(any chunk with "data" ranks). The RRF fusion with vector search and the
+stopword filter together keep this manageable. See "Natural-language search
+is provisional" in the deferred section for what we may revisit.
+
+---
+
 ## API: cursor pagination, not offset
 
 **Decision:** List endpoints use opaque cursors (`?cursor=...` + `next_cursor`
@@ -730,3 +782,46 @@ it lands — no `/v1` → `/v2` bump required.
   flag these. Deferred until the false-positive rate from anti-bot
   fixes settles; mixing the two cleanup paths makes both harder to
   evaluate.
+
+- **Natural-language search is provisional.** Current BM25 sanitization
+  (OR + small stopword list — see decision above) is the production
+  default of mid-2010s search engines, not the leading edge. We should
+  revisit when retrieval quality starts feeling weak or when corpus
+  size makes the noise from pure-OR matching surface. Options in rough
+  order of effort:
+
+    1. **Stemming + `minimum_should_match` post-filter.** Add a Porter
+       or Snowball stemmer to the tokenizer side AND require ~50-75% of
+       non-stopword tokens to match (FTS5 doesn't support this natively,
+       so we'd post-filter in Go). Cheap; modest recall + precision
+       boost.
+
+    2. **LLM query rewriting via Ollama.** Send the natural-language
+       query to a small local model with a system prompt like "extract
+       3-7 keyword phrases from this query." Use those for BM25 (vector
+       still uses the original). This is the "Perplexity / You.com"
+       pattern. Adds ~200-1000ms per query; quality jump can be big.
+       We already have Ollama running so the infrastructure cost is
+       zero. Right move if a search-quality eval shows BM25 is dragging
+       the hybrid score down.
+
+    3. **Learned sparse retrieval (SPLADE / ColBERT).** Replace BM25
+       entirely with a transformer-produced sparse vector indexed in an
+       inverted index. This is what Vespa, Qdrant, Weaviate are pushing
+       as "the next BM25." Best-in-class for natural-language queries,
+       but requires deploying another model, embedding every chunk at
+       index time, and embedding queries at search time. Massive
+       complexity jump for what's still a single-user local system.
+       Only worth it if curio outgrows hobby scale.
+
+  **Prerequisite for any of these:** a tiny eval harness — 10-20
+  representative queries with expected docs, scored on NDCG@10 or
+  recall@10. Without it we'll be guessing about whether each change
+  actually moved retrieval quality. Build the eval BEFORE the
+  improvement.
+
+  **What's NOT under consideration:** building our own tokenizer,
+  custom synonym dictionaries, query-classification pipelines. The
+  hybrid retriever + RRF was chosen specifically to keep retrieval
+  simple; any "smartness" should live in the query-rewriting layer
+  above the retriever, not inside it.
