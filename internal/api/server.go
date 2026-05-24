@@ -70,6 +70,8 @@ func NewServer(addr string, deps Deps) *Server {
 		r.Route("/documents", func(r chi.Router) {
 			r.Get("/{id}", deps.handleGetDocument)
 			r.Get("/{id}/content", deps.handleGetDocumentContent)
+			r.Post("/{id}/refetch", deps.handleRefetchDocument)
+			r.Post("/refetch-all", deps.handleRefetchAll)
 		})
 
 		r.Post("/search", deps.handleSearch)

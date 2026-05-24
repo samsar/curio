@@ -206,6 +206,36 @@ type ChunkMatch struct {
 	VectorScore *float64 `json:"vector_score,omitempty"`
 }
 
+// RefetchResponse is the body of a successful refetch.
+type RefetchResponse struct {
+	JobID string `json:"job_id"`
+}
+
+func (c *Client) RefetchDocument(ctx context.Context, docID string) (*RefetchResponse, error) {
+	var out RefetchResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/documents/"+docID+"/refetch", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RefetchAllResponse is the body of a bulk refetch.
+type RefetchAllResponse struct {
+	JobsEnqueued int `json:"jobs_enqueued"`
+}
+
+func (c *Client) RefetchAll(ctx context.Context, state string) (*RefetchAllResponse, error) {
+	path := "/v1/documents/refetch-all"
+	if state != "" {
+		path += "?state=" + url.QueryEscape(state)
+	}
+	var out RefetchAllResponse
+	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 type SearchResponse struct {
 	Query      string      `json:"query"`
 	TookMS     int64       `json:"took_ms"`

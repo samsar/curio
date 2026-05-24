@@ -146,6 +146,31 @@ func (s *Documents) UpdateState(ctx context.Context, id, state string) error {
 	return ensureRow(res, "document")
 }
 
+// ListIDs returns all document IDs for a tenant, optionally restricted
+// to a particular state. Used by the bulk refetch path.
+func (s *Documents) ListIDs(ctx context.Context, tenantID, state string) ([]string, error) {
+	q := `SELECT id FROM documents WHERE tenant_id = ?`
+	args := []any{tenantID}
+	if state != "" {
+		q += ` AND state = ?`
+		args = append(args, state)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list document ids: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // CountByState returns (total, perStateMap) for one tenant.
 func (s *Documents) CountByState(ctx context.Context, tenantID string) (int, map[string]int, error) {
 	const q = `SELECT state, count(*) FROM documents WHERE tenant_id = ? GROUP BY state`
