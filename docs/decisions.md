@@ -493,6 +493,41 @@ The DB is authoritative; the marker mirrors it.
 
 ---
 
+## Chunker enforces a 3500-char hard cap (not just 384 words)
+
+**Decision:** `ChunkOptions.SizeChars` (default 3500) is a hard upper bound
+on chunk byte length applied AFTER the word-count chunking pass. Chunks
+that exceed the limit are split at word boundaries with a small overlap.
+
+**Why:** Word count is a bad proxy for BPE token count on URL- or
+code-heavy content. A single URL like
+`https://ontariocourtforms.on.ca/static/media/uploads/courtforms/scc/01a/scr-1a-jan21-en-fil.docx`
+counts as one whitespace-word but tokenizes into 30+ BPE pieces.
+During the first real import, an Ontario court forms page with ~6 URLs
+per KB blew past the 2048-token model context even with 384-word
+chunks. The 6000-char first attempt was still too loose for URL-dense
+content. 3500 keeps even worst-case content under the limit:
+
+| Content type      | 3500 chars ≈ tokens | Safe under 2048? |
+|---|---|---|
+| Plain prose       | ~875                | Yes (huge margin) |
+| Code-heavy        | ~1200               | Yes |
+| URL-heavy markdown | ~1500-1800         | Yes |
+| Pathological (all URLs) | ~2000          | Borderline; rare |
+
+**Hard model context:** Ollama's `nomic-embed-text` clamps at 2048 tokens
+regardless of the modelfile's `PARAMETER num_ctx 8192` — the GGUF model
+metadata declares `nomic-bert.context_length: 2048`. Verified by reading
+`/api/show`. The `num_ctx` option we send is therefore advisory only;
+the char cap is what actually saves us.
+
+**Real tokenizer later:** counting BPE tokens directly (via
+huggingface-tokenizers or similar) would let us pack closer to the
+limit and produce fewer, more semantic chunks. Defer until quality
+issues from the conservative byte heuristic surface.
+
+---
+
 ## Embedder passes num_ctx=8192 to Ollama, chunker defaults to 384 words
 
 **Decision:** The Ollama embedder sets `options.num_ctx = 8192` on every

@@ -63,6 +63,46 @@ fetcher:
     timeout_seconds: 30
 ```
 
+## Demo: import and search your bookmarks
+
+End-to-end flow using a Chrome HTML export. Substitute your own browser/path.
+
+```sh
+# 1. Export your bookmarks: Chrome → Bookmark Manager → ⋮ → Export bookmarks
+#    Saves a .html file (Netscape Bookmark format).
+
+# 2. Start the curio daemon (auto-creates ~/.curio on first run).
+curio daemon start
+
+# 3. Dry-run first to see what'd happen without actually importing.
+curio import html --dry-run ~/Downloads/bookmarks.html
+
+# 4. Import a slice incrementally to make sure your setup works.
+curio import html --limit 50 --follow ~/Downloads/bookmarks.html
+
+# 5. If happy, import the full file.
+curio import html --follow ~/Downloads/bookmarks.html
+
+# 6. Search the corpus.
+curio search "feature flag rollout"
+
+# 7. See failures (404s, paywalls, embedding errors).
+curio jobs --failed
+
+# 8. Retry failures after fixing whatever caused them.
+curio refetch --all --state failed
+
+# 9. Check overall state.
+curio status
+
+# 10. Stop the daemon when done.
+curio daemon stop
+```
+
+Time budget: with 4 workers (default) and the Native fetcher, expect roughly
+1-2 seconds per bookmark — so 1000 bookmarks ≈ 4-8 minutes wall-clock. Larger
+files scale linearly. Use `--limit` to test in chunks.
+
 ## Curio itself
 
 Once Ollama and web2md work, build curio:
