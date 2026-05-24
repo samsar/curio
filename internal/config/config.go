@@ -25,11 +25,20 @@ type Config struct {
 type Daemon struct {
 	Listen   string `yaml:"listen"`
 	LogLevel string `yaml:"log_level"`
-	// Workers is the number of background goroutines draining the job
-	// queue concurrently. Each worker fetches and indexes one job at a
-	// time; the bottleneck is usually Ollama embedding throughput rather
-	// than Go concurrency, so don't crank this too high. Default 4.
-	Workers int `yaml:"workers"`
+	// FetchWorkers handles fetch jobs — mostly network-bound. Can run
+	// high (16+) without breaking a sweat since each worker is mostly
+	// blocked on remote HTTP. Default 16.
+	FetchWorkers int `yaml:"fetch_workers"`
+	// IndexWorkers handles index jobs — Ollama embedding throughput is
+	// the bottleneck. nomic-embed-text on Metal saturates around 4
+	// concurrent embed requests; more workers just queue up inside
+	// Ollama. Default 4.
+	IndexWorkers int `yaml:"index_workers"`
+	// Workers is the legacy single-pool count. Kept for migration:
+	// when set and the new fields are zero, we split it 75/25
+	// fetch/index. New configs should use FetchWorkers + IndexWorkers
+	// directly.
+	Workers int `yaml:"workers,omitempty"`
 }
 
 type Embedding struct {
@@ -76,17 +85,10 @@ type Chunking struct {
 func Default() Config {
 	return Config{
 		Daemon: Daemon{
-			Listen:   "127.0.0.1:8765",
-			LogLevel: "info",
-			// 16 workers covers the fetch-bound case (most jobs are
-			// network-blocked, plenty of headroom). Ollama serializes
-			// index work naturally so adding more workers doesn't
-			// pile on the embedding queue. Split fetch/index pools
-			// would be tidier but the single pool works fine — measured
-			// fetch p95 ~5s, index p95 <1s, so the indexer keeps up
-			// when fetches finally land. Tune via daemon.workers in
-			// ~/.curio/config.yaml.
-			Workers: 16,
+			Listen:       "127.0.0.1:8765",
+			LogLevel:     "info",
+			FetchWorkers: 16,
+			IndexWorkers: 4,
 		},
 		Embedding: Embedding{
 			Provider: "ollama",
@@ -158,8 +160,25 @@ func (c Config) Validate() error {
 	if !validLogLevel(c.Daemon.LogLevel) {
 		return fmt.Errorf("daemon.log_level %q must be one of: debug, info, warn, error", c.Daemon.LogLevel)
 	}
-	if c.Daemon.Workers <= 0 {
-		return fmt.Errorf("daemon.workers must be positive, got %d", c.Daemon.Workers)
+	// Resolve legacy single-pool field. When daemon.workers is set and
+	// the new fields are zero, split 75/25 fetch/index. Done as a
+	// best-effort migration; the user should switch to the explicit
+	// fields.
+	if c.Daemon.Workers > 0 && c.Daemon.FetchWorkers == 0 && c.Daemon.IndexWorkers == 0 {
+		c.Daemon.FetchWorkers = (c.Daemon.Workers * 3) / 4
+		if c.Daemon.FetchWorkers < 1 {
+			c.Daemon.FetchWorkers = 1
+		}
+		c.Daemon.IndexWorkers = c.Daemon.Workers - c.Daemon.FetchWorkers
+		if c.Daemon.IndexWorkers < 1 {
+			c.Daemon.IndexWorkers = 1
+		}
+	}
+	if c.Daemon.FetchWorkers <= 0 {
+		return fmt.Errorf("daemon.fetch_workers must be positive, got %d", c.Daemon.FetchWorkers)
+	}
+	if c.Daemon.IndexWorkers <= 0 {
+		return fmt.Errorf("daemon.index_workers must be positive, got %d", c.Daemon.IndexWorkers)
 	}
 	if c.Embedding.Model == "" {
 		return errors.New("embedding.model must not be empty")

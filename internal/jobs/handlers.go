@@ -51,14 +51,16 @@ type IndexPayload struct {
 func Register(w *Worker, d Deps) {
 	w.Register(store.JobKindFetch, FetchHandler(d))
 	w.Register(store.JobKindIndex, IndexHandler(d))
-	w.OnPermanentFailure(store.JobKindFetch, markDocFailed(d))
-	w.OnPermanentFailure(store.JobKindIndex, markDocFailed(d))
+	w.OnPermanentFailure(store.JobKindFetch, MarkDocFailed(d))
+	w.OnPermanentFailure(store.JobKindIndex, MarkDocFailed(d))
 }
 
-// markDocFailed is a kind-agnostic hook: read document_id from the job
+// MarkDocFailed is a kind-agnostic hook: read document_id from the job
 // payload, set its state to failed. Used for both fetch and index since
-// both payloads carry document_id under the same JSON key.
-func markDocFailed(d Deps) HandlerFunc {
+// both payloads carry document_id under the same JSON key. Exported so
+// callers wiring split pools (cmd/curio-daemon/main.go) can register it
+// per kind without going through jobs.Register.
+func MarkDocFailed(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
 		var payload struct {
 			DocumentID string `json:"document_id"`
