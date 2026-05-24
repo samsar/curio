@@ -20,6 +20,7 @@ type Ollama struct {
 	baseURL string
 	model   string
 	dim     int
+	numCtx  int
 	client  *http.Client
 }
 
@@ -29,6 +30,12 @@ type OllamaOptions struct {
 	Model   string        // e.g. "nomic-embed-text"
 	Dim     int           // expected output dimension; validated on first call
 	Timeout time.Duration // per-request; default 60s
+
+	// NumCtx overrides the model's context window for embed calls. Ollama
+	// defaults to 2048 even for models like nomic-embed-text that support
+	// 8192; without this override, large chunks fail with HTTP 400
+	// "input length exceeds the context length". Default 8192.
+	NumCtx int
 }
 
 // NewOllama constructs an Ollama embedder. Does NOT contact the server; the
@@ -51,10 +58,15 @@ func NewOllama(opts OllamaOptions) (*Ollama, error) {
 	if timeout == 0 {
 		timeout = 60 * time.Second
 	}
+	numCtx := opts.NumCtx
+	if numCtx == 0 {
+		numCtx = 8192
+	}
 	return &Ollama{
 		baseURL: strings.TrimRight(opts.BaseURL, "/"),
 		model:   opts.Model,
 		dim:     opts.Dim,
+		numCtx:  numCtx,
 		client:  &http.Client{Timeout: timeout},
 	}, nil
 }
@@ -72,8 +84,9 @@ func (o *Ollama) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	}
 
 	body, err := json.Marshal(ollamaEmbedRequest{
-		Model: o.model,
-		Input: texts,
+		Model:   o.model,
+		Input:   texts,
+		Options: ollamaOptions{NumCtx: o.numCtx},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ollama: encode request: %w", err)
@@ -119,8 +132,13 @@ func (o *Ollama) Embed(ctx context.Context, texts []string) ([][]float32, error)
 }
 
 type ollamaEmbedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model   string        `json:"model"`
+	Input   []string      `json:"input"`
+	Options ollamaOptions `json:"options,omitempty"`
+}
+
+type ollamaOptions struct {
+	NumCtx int `json:"num_ctx,omitempty"`
 }
 
 type ollamaEmbedResponse struct {

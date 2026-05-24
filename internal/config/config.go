@@ -105,8 +105,13 @@ func Default() Config {
 			Collapse:     "max",
 		},
 		Chunking: Chunking{
-			SizeTokens:    512,
-			OverlapTokens: 64,
+			// 384 words is conservative: nomic-embed-text supports 8192
+			// tokens, but dense markdown (URLs, code blocks, tables) can
+			// have far more BPE tokens than whitespace-words. 384 words
+			// stays comfortably under 8192 tokens even for the worst
+			// content. See decisions.md.
+			SizeTokens:    384,
+			OverlapTokens: 48,
 		},
 	}
 }

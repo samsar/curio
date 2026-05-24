@@ -225,8 +225,8 @@ func followProgress(httpCtx context.Context, c *Context) error {
 
 	startedAt := time.Now()
 	var (
-		lastDone int
-		prevETA  time.Duration
+		lastFinished int // done + failed (terminal counters)
+		lastTick     = startedAt
 	)
 	for {
 		select {
@@ -246,20 +246,24 @@ func followProgress(httpCtx context.Context, c *Context) error {
 		failed := stats.JobsByStatus["failed"]
 		fetched := stats.DocumentsByState["fetched"]
 
-		// Throughput estimate: docs done since the previous tick.
-		dt := time.Since(startedAt)
+		// Rate = jobs that finished (succeeded OR failed) per second since
+		// the previous tick. We compute against the previous tick's
+		// timestamp, not startedAt, so the rate doesn't smear over the
+		// whole run.
+		finished := done + failed
+		elapsed := time.Since(lastTick).Seconds()
 		var rate float64
-		if dt.Seconds() > 0 {
-			rate = float64(done-lastDone) / 2.0 // per second since last tick
+		if elapsed > 0 {
+			rate = float64(finished-lastFinished) / elapsed
 		}
-		eta := prevETA
+		var eta time.Duration
 		if rate > 0 && pending+running > 0 {
 			eta = time.Duration(float64(pending+running)/rate*float64(time.Second)).Round(time.Second)
-			prevETA = eta
 		}
 		fmt.Printf("  done=%d  pending=%d  running=%d  failed=%d  fetched=%d   rate≈%.1f/s   eta≈%s\n",
 			done, pending, running, failed, fetched, rate, eta)
-		lastDone = done
+		lastFinished = finished
+		lastTick = time.Now()
 
 		if pending == 0 && running == 0 {
 			fmt.Printf("\nqueue drained after %s   (%d done, %d failed)\n",

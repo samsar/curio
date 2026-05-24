@@ -39,7 +39,7 @@ embedding:
 	assert.Equal(t, "voyage-3", got.Embedding.Model)
 	assert.Equal(t, 1024, got.Embedding.Dim)
 	assert.Equal(t, "ollama", got.Embedding.Provider, "untouched field keeps default")
-	assert.Equal(t, 512, got.Chunking.SizeTokens, "untouched section keeps default")
+	assert.Equal(t, Default().Chunking.SizeTokens, got.Chunking.SizeTokens, "untouched section keeps default")
 }
 
 func TestLoad_FullConfig(t *testing.T) {
