@@ -1,8 +1,12 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"time"
 
+	"github.com/samansartipi/curio/internal/embedder"
 	"github.com/samansartipi/curio/internal/store"
 	sqlitestore "github.com/samansartipi/curio/internal/store/sqlite"
 	"github.com/samansartipi/curio/internal/version"
@@ -10,25 +14,53 @@ import (
 
 // Health is the /v1/healthz response.
 type Health struct {
-	Status         string `json:"status"`
-	Version        string `json:"version"`
-	SchemaVersion  int    `json:"schema_version"`
-	EmbeddingModel string `json:"embedding_model"`
-	EmbeddingDim   int    `json:"embedding_dim"`
+	Status          string `json:"status"`
+	Version         string `json:"version"`
+	SchemaVersion   int    `json:"schema_version"`
+	EmbeddingModel  string `json:"embedding_model"`
+	EmbeddingDim    int    `json:"embedding_dim"`
+	OllamaReachable bool   `json:"ollama_reachable"`
+	OllamaDetail    string `json:"ollama_detail,omitempty"`
 }
 
-func (d Deps) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	meta, err := d.Home.Meta()
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+
+	// Cheap ollama ping with a tight timeout so /healthz stays fast.
+	// Fail-open: an unreachable Ollama doesn't make the whole daemon
+	// unhealthy (the user can still list bookmarks, browse docs, etc.).
+	reachable := true
+	detail := ""
+	if pinger, ok := d.Embedder.(interface {
+		Ping(context.Context) error
+	}); ok {
+		pctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+		defer cancel()
+		if err := pinger.Ping(pctx); err != nil {
+			reachable = false
+			switch {
+			case errors.Is(err, embedder.ErrModelNotLoaded):
+				detail = "model not pulled (try `ollama pull " + meta.EmbeddingModel + "`)"
+			case errors.Is(err, embedder.ErrOllamaUnreachable):
+				detail = "ollama unreachable (start it with `ollama serve` or `brew services start ollama`)"
+			default:
+				detail = err.Error()
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, Health{
-		Status:         "ok",
-		Version:        version.String(),
-		SchemaVersion:  meta.SchemaVersion,
-		EmbeddingModel: meta.EmbeddingModel,
-		EmbeddingDim:   meta.EmbeddingDim,
+		Status:          "ok",
+		Version:         version.String(),
+		SchemaVersion:   meta.SchemaVersion,
+		EmbeddingModel:  meta.EmbeddingModel,
+		EmbeddingDim:    meta.EmbeddingDim,
+		OllamaReachable: reachable,
+		OllamaDetail:    detail,
 	})
 }
 

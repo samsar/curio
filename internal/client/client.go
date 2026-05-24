@@ -31,11 +31,13 @@ func New(baseURL string) *Client {
 
 // Healthz returns the daemon health blob.
 type Health struct {
-	Status         string `json:"status"`
-	Version        string `json:"version"`
-	SchemaVersion  int    `json:"schema_version"`
-	EmbeddingModel string `json:"embedding_model"`
-	EmbeddingDim   int    `json:"embedding_dim"`
+	Status          string `json:"status"`
+	Version         string `json:"version"`
+	SchemaVersion   int    `json:"schema_version"`
+	EmbeddingModel  string `json:"embedding_model"`
+	EmbeddingDim    int    `json:"embedding_dim"`
+	OllamaReachable bool   `json:"ollama_reachable"`
+	OllamaDetail    string `json:"ollama_detail,omitempty"`
 }
 
 func (c *Client) Healthz(ctx context.Context) (*Health, error) {
