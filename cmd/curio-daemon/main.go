@@ -18,6 +18,7 @@ import (
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/version"
 )
@@ -169,9 +170,12 @@ func run() error {
 		Collapse:     search.CollapseStrategy(cfg.Search.Collapse),
 	})
 
-	// Worker + handlers.
-	worker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	jobs.Register(worker, jobs.Deps{
+	// Two worker pools: fetch (network-bound, scale wide) and index
+	// (Ollama-bound, narrow). They share the JobQueue but each pool's
+	// workers only claim jobs of its kind. Without this split, FIFO
+	// claim order let fetch jobs starve indexing entirely — measured
+	// 3296 fetches done while only 55 index jobs completed.
+	deps := jobs.Deps{
 		Home:        home,
 		Documents:   docs,
 		Extractions: exts,
@@ -181,7 +185,14 @@ func run() error {
 		Dispatcher:  dispatcher,
 		Indexer:     idx,
 		Log:         slog.Default(),
-	})
+	}
+	fetchWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
+	fetchWorker.Register(store.JobKindFetch, jobs.FetchHandler(deps))
+	fetchWorker.OnPermanentFailure(store.JobKindFetch, jobs.MarkDocFailed(deps))
+
+	indexWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
+	indexWorker.Register(store.JobKindIndex, jobs.IndexHandler(deps))
+	indexWorker.OnPermanentFailure(store.JobKindIndex, jobs.MarkDocFailed(deps))
 
 	// HTTP API.
 	srv := api.NewServer(cfg.Daemon.Listen, api.Deps{
@@ -199,25 +210,26 @@ func run() error {
 
 	slog.Info("curio-daemon starting", "version", version.String())
 
-	// Run N workers + API server concurrently. First to error cancels all.
-	//
-	// Each worker calls Run on the same Worker struct — the JobQueue's
-	// atomic ClaimNext means workers race for jobs cleanly. Tested at
-	// 20 jobs / 8 workers in store/sqlite/stores_test.go.
-	n := cfg.Daemon.Workers
-	if n <= 0 {
-		n = 1
+	// Spawn the fetch and index pools + API server. First error from any
+	// goroutine cancels the shared ctx.
+	nFetch := cfg.Daemon.FetchWorkers
+	nIndex := cfg.Daemon.IndexWorkers
+	total := nFetch + nIndex + 1
+	slog.Info("starting worker pools", "fetch", nFetch, "index", nIndex)
+
+	errCh := make(chan error, total)
+	for i := 0; i < nFetch; i++ {
+		go func() { errCh <- fetchWorker.Run(ctx) }()
 	}
-	errCh := make(chan error, n+1)
-	for i := 0; i < n; i++ {
-		go func() { errCh <- worker.Run(ctx) }()
+	for i := 0; i < nIndex; i++ {
+		go func() { errCh <- indexWorker.Run(ctx) }()
 	}
 	go func() { errCh <- srv.Run(ctx) }()
 
 	err = <-errCh
 	stop()
 	// Drain the remaining goroutines so we don't leak on shutdown.
-	for i := 0; i < n; i++ {
+	for i := 0; i < total-1; i++ {
 		<-errCh
 	}
 
