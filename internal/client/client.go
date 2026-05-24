@@ -241,9 +241,10 @@ type SearchRequest struct {
 
 // SearchHit mirrors api.SearchHitResponse.
 type SearchHit struct {
-	Document Document     `json:"document"`
-	Score    float64      `json:"score"`
-	Matches  []ChunkMatch `json:"matches,omitempty"`
+	Document     Document     `json:"document"`
+	Score        float64      `json:"score"`
+	MarkdownPath string       `json:"markdown_path,omitempty"`
+	Matches      []ChunkMatch `json:"matches,omitempty"`
 }
 
 // ChunkMatch mirrors api.ChunkMatchJSON.
