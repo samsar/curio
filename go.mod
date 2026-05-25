@@ -14,6 +14,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/net v0.55.0
 	gopkg.in/yaml.v3 v3.0.1
+	howett.net/plist v1.0.1
 )
 
 require (
