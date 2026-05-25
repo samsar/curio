@@ -64,19 +64,14 @@ These are not bugs — they're scope-trimmed pieces deferred from M0 to M1+:
 - **`curio init`** — there's no explicit init command; the CLI auto-inits
   `~/.curio` on first run. If a future workflow needs explicit init
   (e.g., to choose a different embedder upfront), adding it is trivial.
-- **`/v1/stats` returns version only.** Counter methods on the stores
-  would surface document/bookmark/job totals. Add when M1 (importers)
-  needs progress reporting.
-- **Tags from bookmarks aren't denormalized into `chunks_fts`.** The
-  index handler stubs this — would need `BookmarkStore.ListByDocument`.
-  Lands when importers do.
+- **Tags from bookmarks not fully wired.** Tags are denormalized into
+  `chunks_fts` at index time, but there's no `BookmarkStore.ListByDocument`
+  on the store interface — so the indexer can't look up a document's
+  bookmark tags to feed them in. Lands when M1 importers do.
 - **No reindex CLI yet.** Documented in `docs/decisions.md`; needed when
   someone first wants to swap embedding models.
-- **`/v1/documents`** list endpoint isn't wired; individual GET is.
-  Trivial to add.
 - **Search filters** (`content_type`, `host`, `source`, etc.) are
   accepted by the API but not yet applied. Engine work needed.
-- **`curio refetch`** subcommand not wired.
 
 ## Decisions logged in `docs/decisions.md`
 
@@ -98,9 +93,28 @@ Worth re-reading before M1:
 - File-then-row write order for extractions: pre-generate UUID,
   write markdown to disk, then insert the DB row pointing at it.
 
-## Where M1 starts
+## M1 — Bookmark importers
 
-M1 introduces real bookmark importers (Chrome, Safari, Firefox). The
-schema and worker are already shaped for it: importer parses the
-browser file → calls `BookmarkStore.Create` for each entry → enqueues
-fetch jobs. The same fetch+index pipeline handles them.
+### Completed
+
+| Feature | Package / file | Notes |
+|---|---|---|
+| Chrome parser | `internal/importer/chrome.go` | Profile discovery, multi-profile, `--file` override |
+| HTML export parser | `internal/importer/html.go` | Generic Netscape format; works for any browser |
+| `curio import chrome` | `internal/cli/import.go` | `--profile`, `--all-profiles`, `--list-profiles`, `--file` |
+| `curio import html` | `internal/cli/import.go` | Takes any exported bookmarks HTML file |
+| URL dedup | daemon import endpoint | Reports `skipped` count for existing URLs |
+| URL filtering | `internal/importer/importer.go` | Drops `javascript:`, `file://`, browser-internal schemes |
+| Progress reporting | `internal/cli/import.go` | `--follow` polls `/v1/stats`, prints live rate + ETA |
+| Batched import | `internal/cli/import.go` | 500-bookmark batches with running totals |
+| Safari parser | `internal/importer/safari.go` | Reads binary/XML plist, skips Reading List, `--file` override |
+| `curio import safari` | `internal/cli/import_safari.go` | Auto-discovers `~/Library/Safari/Bookmarks.plist`, Full Disk Access guidance |
+| Worker concurrency | daemon config | Split fetch + index pools, tunable via config |
+| `/v1/stats` | `internal/api/system.go` | Doc/job/bookmark totals + breakdowns by state |
+| `/v1/documents` list | `internal/api/documents.go` | `?state` and `?limit` filtering |
+| `curio refetch` | `internal/cli/refetch.go` | Single-doc, `--all`, `--state` filtering |
+
+### Remaining
+
+- **Firefox parser** (`places.sqlite`) — read-only open of the browser's SQLite DB
+- **`curio status`** standalone command — `/v1/stats` and `--follow` cover most of the ground but a dedicated `curio status` showing overall system health is planned
