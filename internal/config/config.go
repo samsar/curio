@@ -53,12 +53,18 @@ type Fetcher struct {
 	Native  Native  `yaml:"native"`
 	Web2MD  Web2MD  `yaml:"web2md"`
 	YouTube YouTube `yaml:"youtube"`
+	GitHub  GitHub  `yaml:"github"`
 }
 
 type YouTube struct {
 	Bin            string `yaml:"bin"`             // default "yt-dlp"
 	TimeoutSeconds int    `yaml:"timeout_seconds"` // default 60
 	SubLangs       string `yaml:"sub_langs"`       // default "en.*,en"
+}
+
+type GitHub struct {
+	Token          string `yaml:"token"`           // optional; also reads CURIO_GITHUB_TOKEN env
+	TimeoutSeconds int    `yaml:"timeout_seconds"` // default 30
 }
 
 type Native struct {
@@ -117,6 +123,9 @@ func Default() Config {
 				Bin:            "yt-dlp",
 				TimeoutSeconds: 60,
 				SubLangs:       "en.*,en",
+			},
+			GitHub: GitHub{
+				TimeoutSeconds: 30,
 			},
 		},
 		Search: Search{

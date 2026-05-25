@@ -190,6 +190,75 @@ func YouTubeVideoID(u *url.URL) (string, bool) {
 	return "", false
 }
 
+// GitHubURLInfo describes the components of a parsed GitHub URL.
+type GitHubURLInfo struct {
+	Owner string // e.g. "kubernetes"
+	Repo  string // e.g. "kubernetes"
+	Type  string // "repo", "file", "tree", "issue", "pull", "other"
+	Ref   string // branch or tag for file/tree URLs
+	Path  string // file path within repo
+}
+
+// ParseGitHubURL extracts structured info from a GitHub URL.
+// Returns false for non-GitHub URLs or URLs that don't match a
+// recognized pattern (e.g. github.com/settings).
+func ParseGitHubURL(u *url.URL) (GitHubURLInfo, bool) {
+	host := strings.ToLower(u.Hostname())
+	if host != "github.com" {
+		return GitHubURLInfo{}, false
+	}
+
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	// Filter empty parts from trailing slashes
+	var clean []string
+	for _, p := range parts {
+		if p != "" {
+			clean = append(clean, p)
+		}
+	}
+	parts = clean
+
+	if len(parts) < 2 {
+		return GitHubURLInfo{}, false
+	}
+
+	owner, repo := parts[0], parts[1]
+	// Skip non-repo paths like /settings, /marketplace, /explore
+	if owner == "settings" || owner == "marketplace" || owner == "explore" ||
+		owner == "topics" || owner == "trending" || owner == "login" || owner == "signup" {
+		return GitHubURLInfo{}, false
+	}
+
+	info := GitHubURLInfo{Owner: owner, Repo: repo, Type: "repo"}
+
+	if len(parts) >= 4 {
+		switch parts[2] {
+		case "blob":
+			info.Type = "file"
+			info.Ref = parts[3]
+			if len(parts) > 4 {
+				info.Path = strings.Join(parts[4:], "/")
+			}
+		case "tree":
+			info.Type = "repo"
+			info.Ref = parts[3]
+		case "issues":
+			info.Type = "issue"
+		case "pull":
+			info.Type = "pull"
+		default:
+			info.Type = "other"
+		}
+	} else if len(parts) == 3 {
+		switch parts[2] {
+		case "issues", "pulls", "actions", "wiki", "releases", "tags":
+			info.Type = "other"
+		}
+	}
+
+	return info, true
+}
+
 func isDefaultPort(scheme, port string) bool {
 	switch {
 	case scheme == "http" && port == "80":

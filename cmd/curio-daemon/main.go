@@ -157,7 +157,16 @@ func run() error {
 	default:
 		return fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
 	}
-	var dispatcher fetcher.Dispatcher
+	// Content-type-specific fetchers, routed by hostname.
+	var rules []fetcher.Rule
+
+	ghFetcher := fetcher.NewGitHub(fetcher.GitHubOptions{
+		Token:   cfg.Fetcher.GitHub.Token,
+		Timeout: time.Duration(cfg.Fetcher.GitHub.TimeoutSeconds) * time.Second,
+		Log:     slog.Default(),
+	})
+	rules = append(rules, fetcher.Rule{Hosts: fetcher.GitHubHosts, Fetcher: ghFetcher})
+
 	if _, err := exec.LookPath(cfg.Fetcher.YouTube.Bin); err == nil {
 		ytFetcher := fetcher.NewYouTube(fetcher.YouTubeOptions{
 			Bin:      cfg.Fetcher.YouTube.Bin,
@@ -165,16 +174,11 @@ func run() error {
 			SubLangs: cfg.Fetcher.YouTube.SubLangs,
 			Log:      slog.Default(),
 		})
-		dispatcher = &fetcher.PatternDispatcher{
-			Rules: []fetcher.Rule{
-				{Hosts: fetcher.YouTubeHosts, Fetcher: ytFetcher},
-			},
-			Fallback: defaultFetcher,
-		}
+		rules = append(rules, fetcher.Rule{Hosts: fetcher.YouTubeHosts, Fetcher: ytFetcher})
 		slog.Info("youtube fetcher enabled", "bin", cfg.Fetcher.YouTube.Bin)
-	} else {
-		dispatcher = &fetcher.Single{F: defaultFetcher}
 	}
+
+	dispatcher := &fetcher.PatternDispatcher{Rules: rules, Fallback: defaultFetcher}
 
 	// Indexer + search engine.
 	idx := indexer.New(chunks, emb, indexer.Options{
