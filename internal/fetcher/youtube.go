@@ -141,7 +141,7 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlp
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
+		msg := extractYTDLPError(stderr.String())
 		if msg == "" {
 			msg = err.Error()
 		}
@@ -183,6 +183,24 @@ var permanentPatterns = []string{
 	"this video is not available",
 	"copyright claim",
 	"account associated with this video has been terminated",
+}
+
+// extractYTDLPError filters yt-dlp stderr to only ERROR lines,
+// dropping WARNING lines that are noisy but harmless (e.g. "ffmpeg
+// not found", impersonation warnings). Falls back to full stderr
+// if no ERROR lines are found.
+func extractYTDLPError(stderr string) string {
+	var errors []string
+	for _, line := range strings.Split(stderr, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "ERROR:") {
+			errors = append(errors, trimmed)
+		}
+	}
+	if len(errors) > 0 {
+		return strings.Join(errors, "; ")
+	}
+	return strings.TrimSpace(stderr)
 }
 
 func isYTDLPPermanent(msg string) bool {
