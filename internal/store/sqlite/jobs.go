@@ -194,7 +194,7 @@ func (s *Jobs) ListWithDoc(ctx context.Context, tenantID, status, kind string, l
 		q += " AND j.kind = ?"
 		args = append(args, kind)
 	}
-	q += " ORDER BY j.created_at DESC LIMIT ?"
+	q += " ORDER BY j.updated_at DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
