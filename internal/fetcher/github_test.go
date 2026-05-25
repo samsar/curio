@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/time/rate"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,6 +20,7 @@ func newTestGitHub(t *testing.T, srv *httptest.Server) *GitHub {
 		baseURL: srv.URL,
 		client:  srv.Client(),
 		timeout: 5_000_000_000,
+		limiter: rate.NewLimiter(rate.Inf, 1),
 		log:     slog.Default(),
 	}
 }
@@ -196,7 +199,7 @@ func TestFormatRepoMarkdown_Archived(t *testing.T) {
 }
 
 func TestGitHubFetch_UnsupportedType(t *testing.T) {
-	g := &GitHub{baseURL: "https://api.github.com", client: http.DefaultClient, log: slog.Default()}
+	g := &GitHub{baseURL: "https://api.github.com", client: http.DefaultClient, limiter: rate.NewLimiter(rate.Inf, 1), log: slog.Default()}
 	_, err := g.Fetch(t.Context(), "https://github.com/owner/repo/issues/123")
 	require.Error(t, err)
 
