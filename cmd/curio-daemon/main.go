@@ -160,14 +160,11 @@ func run() error {
 	// Content-type-specific fetchers, routed by hostname.
 	var rules []fetcher.Rule
 
-	ghFetcher := fetcher.NewRateLimited(
-		fetcher.NewGitHub(fetcher.GitHubOptions{
-			Token:   cfg.Fetcher.GitHub.Token,
-			Timeout: time.Duration(cfg.Fetcher.GitHub.TimeoutSeconds) * time.Second,
-			Log:     slog.Default(),
-		}),
-		1.5, 5, // 1.5 req/s, burst of 5 — stays under GitHub's 100 req/min secondary limit
-	)
+	ghFetcher := fetcher.NewGitHub(fetcher.GitHubOptions{
+		Token:   cfg.Fetcher.GitHub.Token,
+		Timeout: time.Duration(cfg.Fetcher.GitHub.TimeoutSeconds) * time.Second,
+		Log:     slog.Default(),
+	})
 	rules = append(rules, fetcher.Rule{Hosts: fetcher.GitHubHosts, Fetcher: ghFetcher})
 
 	if _, err := exec.LookPath(cfg.Fetcher.YouTube.Bin); err == nil {

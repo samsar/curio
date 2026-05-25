@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/samsar/curio/internal/urlutil"
 )
 
@@ -26,6 +28,7 @@ type GitHub struct {
 	timeout time.Duration
 	baseURL string
 	client  *http.Client
+	limiter *rate.Limiter
 	log     *slog.Logger
 }
 
@@ -45,6 +48,7 @@ func NewGitHub(opts GitHubOptions) *GitHub {
 		timeout: opts.Timeout,
 		baseURL: "https://api.github.com",
 		client:  &http.Client{Timeout: opts.Timeout},
+		limiter: rate.NewLimiter(1.5, 1), // 1.5 API calls/s, no burst — stays under GitHub's 100 req/min
 		log:     opts.Log,
 	}
 }
@@ -203,6 +207,9 @@ func (g *GitHub) fileContent(ctx context.Context, owner, repo, path, ref string)
 }
 
 func (g *GitHub) apiGet(ctx context.Context, url, accept string) ([]byte, error) {
+	if err := g.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("github: rate limiter: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("github: build request: %w", err)
