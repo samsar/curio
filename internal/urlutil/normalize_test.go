@@ -73,6 +73,42 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+func TestNormalize_YouTube(t *testing.T) {
+	canonical := "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+	cases := []struct {
+		name string
+		in   string
+		out  string
+	}{
+		{"standard", "https://www.youtube.com/watch?v=dQw4w9WgXcQ", canonical},
+		{"no www", "https://youtube.com/watch?v=dQw4w9WgXcQ", canonical},
+		{"mobile", "https://m.youtube.com/watch?v=dQw4w9WgXcQ", canonical},
+		{"short link", "https://youtu.be/dQw4w9WgXcQ", canonical},
+		{"with tracking", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=abc&list=PL123&t=42&pp=xyz", canonical},
+		{"with feature", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&feature=youtu.be", canonical},
+		{"shorts", "https://www.youtube.com/shorts/dQw4w9WgXcQ", canonical},
+		{"live", "https://www.youtube.com/live/dQw4w9WgXcQ", canonical},
+		{"embed", "https://www.youtube.com/embed/dQw4w9WgXcQ", canonical},
+		{"short link with tracking", "https://youtu.be/dQw4w9WgXcQ?si=abc123", canonical},
+		{"http scheme", "http://www.youtube.com/watch?v=dQw4w9WgXcQ", "http://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Normalize(tc.in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.out, got)
+		})
+	}
+}
+
+func TestNormalize_YouTube_PlaylistOnly(t *testing.T) {
+	// Playlist-only URLs don't have a video ID — should pass through
+	// without YouTube canonicalization.
+	got, err := Normalize("https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf")
+	require.NoError(t, err)
+	assert.Equal(t, "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf", got)
+}
+
 func TestNormalize_Errors(t *testing.T) {
 	cases := []struct {
 		name string
