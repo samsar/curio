@@ -3,12 +3,14 @@ package fetcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -206,10 +208,54 @@ func (g *GitHub) fileContent(ctx context.Context, owner, repo, path, ref string)
 	return string(body), nil
 }
 
+const maxAPIRetries = 3
+
 func (g *GitHub) apiGet(ctx context.Context, url, accept string) ([]byte, error) {
-	if err := g.limiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("github: rate limiter: %w", err)
+	var lastErr error
+	for attempt := range maxAPIRetries {
+		if err := g.limiter.Wait(ctx); err != nil {
+			return nil, fmt.Errorf("github: rate limiter: %w", err)
+		}
+
+		body, err := g.doRequest(ctx, url, accept)
+		if err == nil {
+			return body, nil
+		}
+
+		var re *retryableError
+		if !errors.As(err, &re) {
+			return nil, err
+		}
+
+		lastErr = re.Err
+		if attempt == maxAPIRetries-1 {
+			break
+		}
+
+		delay := re.RetryAfter
+		if delay <= 0 {
+			delay = 60 * time.Second
+		}
+		g.log.Info("github: rate limited, waiting", "delay", delay, "url", url, "attempt", attempt+1)
+		t := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil, ctx.Err()
+		case <-t.C:
+		}
 	}
+	return nil, lastErr
+}
+
+type retryableError struct {
+	Err        error
+	RetryAfter time.Duration
+}
+
+func (e *retryableError) Error() string { return e.Err.Error() }
+
+func (g *GitHub) doRequest(ctx context.Context, url, accept string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("github: build request: %w", err)
@@ -236,16 +282,36 @@ func (g *GitHub) apiGet(ctx context.Context, url, accept string) ([]byte, error)
 		return body, nil
 	case http.StatusNotFound:
 		return nil, &PermanentError{Err: fmt.Errorf("github: 404 not found: %s", url)}
-	case http.StatusForbidden:
-		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
-			return nil, fmt.Errorf("github: rate limited (resets at %s)", resp.Header.Get("X-RateLimit-Reset"))
+	case http.StatusTooManyRequests, http.StatusForbidden:
+		if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") != "0" {
+			return nil, &PermanentError{Err: fmt.Errorf("github: 403 forbidden: %s", string(body))}
 		}
-		return nil, &PermanentError{Err: fmt.Errorf("github: 403 forbidden: %s", string(body))}
+		return nil, &retryableError{
+			Err:        fmt.Errorf("github: rate limited: %s", url),
+			RetryAfter: parseRetryAfter(resp.Header),
+		}
 	case http.StatusUnauthorized:
 		return nil, &PermanentError{Err: fmt.Errorf("github: 401 unauthorized")}
 	default:
 		return nil, fmt.Errorf("github: HTTP %d: %s", resp.StatusCode, string(body))
 	}
+}
+
+func parseRetryAfter(h http.Header) time.Duration {
+	if v := h.Get("Retry-After"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	if v := h.Get("X-RateLimit-Reset"); v != "" {
+		if epoch, err := strconv.ParseInt(v, 10, 64); err == nil {
+			d := time.Until(time.Unix(epoch, 0))
+			if d > 0 {
+				return d
+			}
+		}
+	}
+	return 0
 }
 
 func formatRepoMarkdown(meta *ghRepoMeta, readme string) string {
