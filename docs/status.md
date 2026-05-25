@@ -114,7 +114,9 @@ Worth re-reading before M1:
 | `/v1/documents` list | `internal/api/documents.go` | `?state` and `?limit` filtering |
 | `curio refetch` | `internal/cli/refetch.go` | Single-doc, `--all`, `--state` filtering |
 
-### Remaining
+| `curio status` | `internal/cli/status.go` | CLI + daemon version, embed info, counts, disk usage |
+| Jobs timestamp + sort | `internal/cli/jobs.go`, `internal/store/sqlite/jobs.go` | Shows `updated_at`, sorts most-recent-first |
 
-- **Firefox parser** (`places.sqlite`) — read-only open of the browser's SQLite DB
-- **`curio status`** standalone command — `/v1/stats` and `--follow` cover most of the ground but a dedicated `curio status` showing overall system health is planned
+### Deferred
+
+- **Firefox parser** (`places.sqlite`) — deferred; no Firefox installed on dev machine. Schema and CLI patterns are ready; add when needed.
