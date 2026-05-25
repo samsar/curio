@@ -725,6 +725,72 @@ truth.
 
 ---
 
+## Safari importer: skip Reading List, require Full Disk Access
+
+**Decision:** The Safari parser reads `~/Library/Safari/Bookmarks.plist`
+(binary or XML plist via `howett.net/plist`), walks the bookmark tree,
+and emits `ParsedBookmark`s. Reading List entries
+(`com.apple.ReadingList`) are excluded. The CLI surfaces a clear error
+with remediation when macOS denies access due to TCC restrictions.
+
+**Why:**
+- Reading List is ephemeral by design — items are saved temporarily for
+  offline reading, not curated bookmarks. Including them would inflate
+  the corpus with transient content the user may have already dismissed.
+- macOS requires Full Disk Access for any process reading Safari data.
+  Rather than silently failing or producing a confusing `os.Open` error,
+  the CLI detects permission errors and tells the user exactly which
+  System Settings pane to visit.
+
+**Structure mirrors Chrome:** `SafariBookmarksPath()` auto-discovers the
+plist (with `CURIO_SAFARI_DIR` env override for tests), `ParseSafari()`
+accepts an `io.ReadSeeker`, folder hierarchy is preserved in
+`FolderPath`. Root folders are labeled "Favorites" (BookmarksBar) and
+"Bookmarks Menu" rather than their internal identifiers.
+
+---
+
+## Jobs list: sort by updated_at, show timestamp
+
+**Decision:** `ListWithDoc` sorts by `j.updated_at DESC` (not
+`created_at DESC`). The CLI prints the `updated_at` timestamp on every
+job row.
+
+**Why:** For terminal-status jobs (done, failed), `updated_at` is when
+the job actually completed or failed — the timestamp the user cares
+about when triaging. `created_at` is when the job was enqueued, which
+can be minutes or hours earlier for large imports. Sorting by
+`updated_at` puts the most recently resolved jobs first regardless of
+when they were originally queued.
+
+**Trade-off:** for pending jobs, `updated_at` and `created_at` are
+usually identical (or nearly so), so sorting by either produces the same
+order. No status-conditional ORDER BY needed.
+
+---
+
+## `curio status`: CLI version, daemon version, disk usage
+
+**Decision:** `curio status` shows the CLI binary's version (from
+`internal/version`, stamped at build time) independently of the daemon's
+version (from `/v1/healthz`). It also shows disk usage: database size,
+WAL size, content directory size + file count, and logs directory size.
+
+**Why:**
+- CLI and daemon can be different versions if the user rebuilt one but
+  not the other, or if a release upgraded the CLI first. Showing both
+  makes version drift visible immediately.
+- Disk usage gives the user a feel for corpus growth without running
+  `du -sh` manually. The database, WAL, and content directory are the
+  three things that grow with import volume; surfacing them in status
+  makes "how big is my curio" a zero-effort question.
+
+**Formatting:** map breakdowns (documents by state, jobs by status) are
+rendered as `key=val  key=val` sorted alphabetically, not Go's default
+`map[...]` representation.
+
+---
+
 ## CLI hides `next_attempt` for terminal-status jobs
 
 **Decision:** `curio jobs` only prints the `next attempt:` line when
