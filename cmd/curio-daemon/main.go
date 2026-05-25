@@ -160,20 +160,26 @@ func run() error {
 	// Content-type-specific fetchers, routed by hostname.
 	var rules []fetcher.Rule
 
-	ghFetcher := fetcher.NewGitHub(fetcher.GitHubOptions{
-		Token:   cfg.Fetcher.GitHub.Token,
-		Timeout: time.Duration(cfg.Fetcher.GitHub.TimeoutSeconds) * time.Second,
-		Log:     slog.Default(),
-	})
+	ghFetcher := fetcher.NewRateLimited(
+		fetcher.NewGitHub(fetcher.GitHubOptions{
+			Token:   cfg.Fetcher.GitHub.Token,
+			Timeout: time.Duration(cfg.Fetcher.GitHub.TimeoutSeconds) * time.Second,
+			Log:     slog.Default(),
+		}),
+		1.5, 5, // 1.5 req/s, burst of 5 — stays under GitHub's 100 req/min secondary limit
+	)
 	rules = append(rules, fetcher.Rule{Hosts: fetcher.GitHubHosts, Fetcher: ghFetcher})
 
 	if _, err := exec.LookPath(cfg.Fetcher.YouTube.Bin); err == nil {
-		ytFetcher := fetcher.NewYouTube(fetcher.YouTubeOptions{
-			Bin:      cfg.Fetcher.YouTube.Bin,
-			Timeout:  time.Duration(cfg.Fetcher.YouTube.TimeoutSeconds) * time.Second,
-			SubLangs: cfg.Fetcher.YouTube.SubLangs,
-			Log:      slog.Default(),
-		})
+		ytFetcher := fetcher.NewRateLimited(
+			fetcher.NewYouTube(fetcher.YouTubeOptions{
+				Bin:      cfg.Fetcher.YouTube.Bin,
+				Timeout:  time.Duration(cfg.Fetcher.YouTube.TimeoutSeconds) * time.Second,
+				SubLangs: cfg.Fetcher.YouTube.SubLangs,
+				Log:      slog.Default(),
+			}),
+			2, 3, // 2 req/s, burst of 3 — yt-dlp is slow per-call, this mostly limits concurrent starts
+		)
 		rules = append(rules, fetcher.Rule{Hosts: fetcher.YouTubeHosts, Fetcher: ytFetcher})
 		slog.Info("youtube fetcher enabled", "bin", cfg.Fetcher.YouTube.Bin)
 	}

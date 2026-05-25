@@ -10,9 +10,12 @@ package fetcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 // Result is the per-fetch output the indexer needs.
@@ -101,4 +104,29 @@ func (d *PatternDispatcher) For(rawURL string) (Fetcher, error) {
 		return d.Fallback, nil
 	}
 	return nil, ErrFetcherNotFound
+}
+
+// RateLimited wraps a Fetcher with a token-bucket rate limiter.
+// Each call to Fetch blocks until a token is available.
+type RateLimited struct {
+	Inner   Fetcher
+	limiter *rate.Limiter
+}
+
+// NewRateLimited returns a Fetcher that allows at most rps requests
+// per second, with a burst of up to burst concurrent requests.
+func NewRateLimited(f Fetcher, rps float64, burst int) *RateLimited {
+	return &RateLimited{
+		Inner:   f,
+		limiter: rate.NewLimiter(rate.Limit(rps), burst),
+	}
+}
+
+func (r *RateLimited) Name() string { return r.Inner.Name() }
+
+func (r *RateLimited) Fetch(ctx context.Context, url string) (*Result, error) {
+	if err := r.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("%s: rate limiter: %w", r.Inner.Name(), err)
+	}
+	return r.Inner.Fetch(ctx, url)
 }
