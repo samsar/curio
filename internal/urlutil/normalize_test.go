@@ -1,6 +1,7 @@
 package urlutil
 
 import (
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -107,6 +108,46 @@ func TestNormalize_YouTube_PlaylistOnly(t *testing.T) {
 	got, err := Normalize("https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf")
 	require.NoError(t, err)
 	assert.Equal(t, "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf", got)
+}
+
+func TestParseGitHubURL(t *testing.T) {
+	cases := []struct {
+		name  string
+		url   string
+		ok    bool
+		typ   string
+		owner string
+		repo  string
+		ref   string
+		path  string
+	}{
+		{"repo", "https://github.com/kubernetes/kubernetes", true, "repo", "kubernetes", "kubernetes", "", ""},
+		{"repo trailing slash", "https://github.com/kubernetes/kubernetes/", true, "repo", "kubernetes", "kubernetes", "", ""},
+		{"file", "https://github.com/owner/repo/blob/main/docs/arch.md", true, "file", "owner", "repo", "main", "docs/arch.md"},
+		{"file root", "https://github.com/owner/repo/blob/main/README.md", true, "file", "owner", "repo", "main", "README.md"},
+		{"tree", "https://github.com/owner/repo/tree/main/src", true, "repo", "owner", "repo", "main", ""},
+		{"issue", "https://github.com/owner/repo/issues/123", true, "issue", "owner", "repo", "", ""},
+		{"pull", "https://github.com/owner/repo/pull/456", true, "pull", "owner", "repo", "", ""},
+		{"issues list", "https://github.com/owner/repo/issues", true, "other", "owner", "repo", "", ""},
+		{"not github", "https://example.com/owner/repo", false, "", "", "", "", ""},
+		{"settings page", "https://github.com/settings/profile", false, "", "", "", "", ""},
+		{"owner only", "https://github.com/kubernetes", false, "", "", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.url)
+			require.NoError(t, err)
+			info, ok := ParseGitHubURL(u)
+			assert.Equal(t, tc.ok, ok)
+			if ok {
+				assert.Equal(t, tc.typ, info.Type)
+				assert.Equal(t, tc.owner, info.Owner)
+				assert.Equal(t, tc.repo, info.Repo)
+				assert.Equal(t, tc.ref, info.Ref)
+				assert.Equal(t, tc.path, info.Path)
+			}
+		})
+	}
 }
 
 func TestNormalize_Errors(t *testing.T) {
