@@ -49,9 +49,16 @@ type Embedding struct {
 }
 
 type Fetcher struct {
-	Default string `yaml:"default"` // "native" | "web2md"
-	Native  Native `yaml:"native"`
-	Web2MD  Web2MD `yaml:"web2md"`
+	Default string  `yaml:"default"` // "native" | "web2md"
+	Native  Native  `yaml:"native"`
+	Web2MD  Web2MD  `yaml:"web2md"`
+	YouTube YouTube `yaml:"youtube"`
+}
+
+type YouTube struct {
+	Bin            string `yaml:"bin"`             // default "yt-dlp"
+	TimeoutSeconds int    `yaml:"timeout_seconds"` // default 60
+	SubLangs       string `yaml:"sub_langs"`       // default "en.*,en"
 }
 
 type Native struct {
@@ -105,6 +112,11 @@ func Default() Config {
 			Web2MD: Web2MD{
 				Bin:            "web2md",
 				TimeoutSeconds: 30,
+			},
+			YouTube: YouTube{
+				Bin:            "yt-dlp",
+				TimeoutSeconds: 60,
+				SubLangs:       "en.*,en",
 			},
 		},
 		Search: Search{

@@ -10,6 +10,8 @@ package fetcher
 import (
 	"context"
 	"errors"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -63,4 +65,40 @@ func (s *Single) For(_ string) (Fetcher, error) {
 		return nil, ErrFetcherNotFound
 	}
 	return s.F, nil
+}
+
+// Rule maps a set of hostnames to a fetcher.
+type Rule struct {
+	Hosts   []string
+	Fetcher Fetcher
+}
+
+// PatternDispatcher selects a fetcher by matching the URL's hostname
+// against registered rules. First match wins; unmatched URLs go to
+// Fallback.
+type PatternDispatcher struct {
+	Rules    []Rule
+	Fallback Fetcher
+}
+
+func (d *PatternDispatcher) For(rawURL string) (Fetcher, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		if d.Fallback != nil {
+			return d.Fallback, nil
+		}
+		return nil, ErrFetcherNotFound
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, r := range d.Rules {
+		for _, h := range r.Hosts {
+			if host == h {
+				return r.Fetcher, nil
+			}
+		}
+	}
+	if d.Fallback != nil {
+		return d.Fallback, nil
+	}
+	return nil, ErrFetcherNotFound
 }

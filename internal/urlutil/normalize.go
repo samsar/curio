@@ -102,6 +102,17 @@ func Normalize(raw string) (string, error) {
 	u.Fragment = ""
 	u.RawFragment = ""
 
+	// YouTube canonicalization: youtu.be/ID → youtube.com/watch?v=ID,
+	// and strip YouTube-specific tracking params.
+	if id, ok := YouTubeVideoID(u); ok {
+		u.Host = "www.youtube.com"
+		u.Path = "/watch"
+		u.RawQuery = "v=" + id
+		u.Fragment = ""
+		u.RawFragment = ""
+		return u.String(), nil
+	}
+
 	// Filter and rebuild query (url.Values.Encode sorts keys alphabetically).
 	if u.RawQuery != "" {
 		q := u.Query()
@@ -133,6 +144,50 @@ func Hostname(raw string) (string, error) {
 		return "", fmt.Errorf("%w: %v", ErrInvalidURL, err)
 	}
 	return strings.ToLower(u.Hostname()), nil
+}
+
+var youtubeHosts = map[string]bool{
+	"youtube.com":     true,
+	"www.youtube.com": true,
+	"m.youtube.com":   true,
+	"youtu.be":        true,
+}
+
+// YouTubeVideoID extracts the video ID from a parsed YouTube URL.
+// Returns ("", false) for non-YouTube URLs or playlist-only URLs.
+func YouTubeVideoID(u *url.URL) (string, bool) {
+	host := strings.ToLower(u.Hostname())
+	if !youtubeHosts[host] {
+		return "", false
+	}
+
+	// youtu.be/ID
+	if host == "youtu.be" {
+		id := strings.TrimPrefix(u.Path, "/")
+		id = strings.SplitN(id, "/", 2)[0]
+		if id != "" {
+			return id, true
+		}
+		return "", false
+	}
+
+	// youtube.com/watch?v=ID
+	if v := u.Query().Get("v"); v != "" {
+		return v, true
+	}
+
+	// youtube.com/shorts/ID, /live/ID, /embed/ID, /v/ID
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(parts) == 2 {
+		switch parts[0] {
+		case "shorts", "live", "embed", "v":
+			if parts[1] != "" {
+				return parts[1], true
+			}
+		}
+	}
+
+	return "", false
 }
 
 func isDefaultPort(scheme, port string) bool {

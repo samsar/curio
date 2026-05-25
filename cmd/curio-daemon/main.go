@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -156,7 +157,24 @@ func run() error {
 	default:
 		return fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
 	}
-	dispatcher := &fetcher.Single{F: defaultFetcher}
+	var dispatcher fetcher.Dispatcher
+	if _, err := exec.LookPath(cfg.Fetcher.YouTube.Bin); err == nil {
+		ytFetcher := fetcher.NewYouTube(fetcher.YouTubeOptions{
+			Bin:      cfg.Fetcher.YouTube.Bin,
+			Timeout:  time.Duration(cfg.Fetcher.YouTube.TimeoutSeconds) * time.Second,
+			SubLangs: cfg.Fetcher.YouTube.SubLangs,
+			Log:      slog.Default(),
+		})
+		dispatcher = &fetcher.PatternDispatcher{
+			Rules: []fetcher.Rule{
+				{Hosts: fetcher.YouTubeHosts, Fetcher: ytFetcher},
+			},
+			Fallback: defaultFetcher,
+		}
+		slog.Info("youtube fetcher enabled", "bin", cfg.Fetcher.YouTube.Bin)
+	} else {
+		dispatcher = &fetcher.Single{F: defaultFetcher}
+	}
 
 	// Indexer + search engine.
 	idx := indexer.New(chunks, emb, indexer.Options{
