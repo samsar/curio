@@ -120,3 +120,27 @@ Worth re-reading before M1:
 ### Deferred
 
 - **Firefox parser** (`places.sqlite`) — deferred; no Firefox installed on dev machine. Schema and CLI patterns are ready; add when needed.
+
+## M2 — Multiple fetchers + rules engine
+
+### Completed
+
+| Feature | Package / file | Notes |
+|---|---|---|
+| PatternDispatcher | `internal/fetcher/fetcher.go` | Host-based routing; first match wins, fallback to Native |
+| YouTube fetcher | `internal/fetcher/youtube.go` | yt-dlp for metadata + captions; VTT parser; auto/manual subs |
+| YouTube URL normalization | `internal/urlutil/normalize.go` | `youtu.be`, shorts, mobile, embed → canonical `watch?v=ID` |
+| YouTube config | `internal/config/config.go` | `bin`, `timeout_seconds`, `sub_langs` |
+| GitHub fetcher | `internal/fetcher/github.go` | REST API for repo metadata + README; file URLs fetch specific files |
+| GitHub URL parsing | `internal/urlutil/normalize.go` | `ParseGitHubURL` extracts owner/repo/type/ref/path |
+| GitHub config | `internal/config/config.go` | `token` (optional, also `CURIO_GITHUB_TOKEN` env), `timeout_seconds` |
+| Per-fetcher rate limiting | `internal/fetcher/fetcher.go` | `RateLimited` wrapper using `golang.org/x/time/rate` token bucket |
+| GitHub internal rate limiting | `internal/fetcher/github.go` | 1.5 API calls/s at `apiGet` level; inline retry with `Retry-After` support |
+| yt-dlp stderr fix | `internal/fetcher/youtube.go` | Extract ERROR lines only; ignore WARNING lines on failure |
+
+### Remaining
+
+- **PDF fetcher** — extract text from PDF URLs
+- **`fetcher_rules.yaml`** — user-configurable fetcher routing (deferred until 3+ fetchers justify the config complexity)
+- **Dead-link detection** — soft 404s that return HTTP 200 with junk content
+- **GitHub issues/PRs/wiki** — currently unsupported URL types; fall through to Native or add dedicated handling

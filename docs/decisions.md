@@ -891,3 +891,154 @@ it lands — no `/v1` → `/v2` bump required.
   hybrid retriever + RRF was chosen specifically to keep retrieval
   simple; any "smartness" should live in the query-rewriting layer
   above the retriever, not inside it.
+
+---
+
+## PatternDispatcher: host-based fetcher routing
+
+**Decision:** Replace the M0 `Single` dispatcher with
+`PatternDispatcher` — a list of `Rule{Hosts, Fetcher}` checked
+top-to-bottom, with a fallback to the default (Native) fetcher.
+
+**Why:** M2 introduces YouTube and GitHub fetchers that only make
+sense for their respective hostnames. A code-based dispatcher is
+simpler than the roadmap's `fetcher_rules.yaml` while there are
+only 2-3 content-type-specific fetchers. The YAML rules file adds
+parsing, hot-reload, and a config schema — worthy work but not
+needed until there are enough fetchers to justify user-facing config.
+
+**Wiring:** The daemon always registers GitHub (pure Go, no external
+dep). YouTube is registered conditionally on `exec.LookPath("yt-dlp")`.
+Unmatched URLs fall through to Native.
+
+---
+
+## YouTube fetcher: yt-dlp over API/scraping
+
+**Decision:** Shell out to `yt-dlp` for YouTube metadata and
+transcript extraction. No YouTube API key required.
+
+**Why:**
+- YouTube Data API v3's `captions.download` requires OAuth 2.0 and
+  video ownership — useless for indexing third-party bookmarked
+  videos.
+- `yt-dlp` handles both manual and auto-generated captions, manages
+  YouTube's anti-bot measures, and is maintained by 400+ contributors.
+- Same shell-out pattern as Web2MD, but yt-dlp is a single binary
+  (no Node runtime), so install friction is lower.
+- Innertube API (undocumented, used by `youtube-transcript-api` in
+  Python) deferred — no Go library, maintenance burden of tracking
+  YouTube's internal API changes.
+
+**`--write-info-json` not `--dump-json`:** `--dump-json` suppresses
+all file downloads including subtitles. Discovered during first real
+test — metadata came back but no VTT file was written. Switched to
+`--write-info-json` which writes JSON to disk alongside the subtitle
+files.
+
+**VTT parsing:** Inline (~60 lines) rather than a dependency.
+Strips timestamps, `<c>` tags, cue IDs; deduplicates rolling-window
+lines from auto-captions; groups into paragraphs by line count.
+
+**No inline timestamps in markdown:** Timestamps waste BPE tokens
+without adding semantic value for embedding/search. Stored in the
+Meta map if needed later (e.g., deep-linking into videos).
+
+**Transcript fallback chain:** manual English → auto English → any
+language → description-only (`status=partial`). When no yt-dlp is
+installed, YouTube URLs fall through to Native (extracts whatever
+the page HTML yields).
+
+**yt-dlp stderr handling:** On failure (`cmd.Run` returns error),
+extract only `ERROR:` lines from stderr. Ignore `WARNING:` lines
+(e.g., "ffmpeg not found", impersonation warnings) that are noisy
+but harmless.
+
+---
+
+## GitHub fetcher: REST API, no clone
+
+**Decision:** Fetch GitHub repos via the REST API (`/repos/{owner}/{repo}`
+for metadata, `/repos/{owner}/{repo}/readme` for README content). No
+`git clone`, no GraphQL.
+
+**Why:** For bookmarked repos, what you want to recall is *what the
+project is and why you saved it*, not grep through source code. The
+README is the primary content (it's what you read when you bookmarked
+it). Repo metadata (description, topics, stars, language, license)
+provides rich search signals without storing megabytes of source per
+repo.
+
+**File URLs** (`github.com/owner/repo/blob/main/docs/arch.md`):
+fetch the specific file as primary content, plus repo metadata in
+the markdown header for context. The ref (branch/tag) is extracted
+from the URL path.
+
+**Auth:** Optional `CURIO_GITHUB_TOKEN` env var or config field.
+Without a token: 60 req/hr (anonymous). With a fine-grained PAT
+(no scopes needed): 5,000 req/hr. The token is resolved at startup:
+config value → env var → empty.
+
+**What's not supported yet:** issues, PRs, wiki pages, gist URLs,
+org-level pages (`github.com/bitwarden`). These return a
+`PermanentError` with a clear message. Future work can add handlers
+or fall through to Native.
+
+**Native fetcher produced garbage for GitHub:** Verified on
+`perplexityai/bumblebee` — the Native fetcher got binary/encoded
+data from GitHub's page (likely compressed response). This was the
+motivating failure for the dedicated fetcher.
+
+---
+
+## Per-fetcher rate limiting
+
+**Decision:** Two layers of rate limiting for API-backed fetchers.
+
+1. **`RateLimited` wrapper** (`internal/fetcher/fetcher.go`): a
+   generic `Fetcher` decorator using `golang.org/x/time/rate` token
+   bucket. Applied to YouTube (2 req/s, burst 3 — limits concurrent
+   yt-dlp starts).
+
+2. **Internal `apiGet` limiter** (GitHub fetcher): 1.5 API calls/s,
+   burst 1. Applied at the individual HTTP call level, not the
+   Fetch level, because each GitHub fetch makes 2 API calls (repo
+   metadata + README). An outer-only limiter under-counts by 2×.
+
+**Why two layers:** The outer wrapper is generic and works for any
+fetcher. But GitHub's abuse detection counts individual API calls,
+not logical "fetch a repo" operations. The first real bulk refetch
+(251 repos, 16 workers) hit GitHub's secondary rate limit (~100
+req/min) despite the outer limiter pacing fetches at 1.5/s — because
+each fetch was 2 calls, the actual API rate was 3/s.
+
+**Retry-After support** (GitHub): When the API returns HTTP 429 or
+403-with-rate-limit, the fetcher parses the `Retry-After` header
+(or falls back to `X-RateLimit-Reset` epoch) and sleeps internally
+before retrying — up to 3 attempts per API call. This prevents
+transient rate limits from burning through the job system's 5-attempt
+retry budget, where the exponential backoff (2^N seconds, max 32s)
+is too short for GitHub's 60-second rate limit windows.
+
+---
+
+## YouTube URL normalization
+
+**Decision:** `Normalize()` canonicalizes all YouTube URL variants
+to `https://www.youtube.com/watch?v=<ID>`, stripping all other
+query parameters.
+
+**Variants collapsed:** `youtu.be/ID`, `m.youtube.com/watch?v=ID`,
+`youtube.com/shorts/ID`, `youtube.com/live/ID`,
+`youtube.com/embed/ID`, and any URL with tracking params (`si`,
+`list`, `index`, `t`, `pp`, `feature`, `ab_channel`).
+
+**Why:** A single video can be bookmarked via many URL forms
+(mobile, short link, embedded in a playlist, with share tracking).
+Without canonicalization, the same video creates multiple documents
+that compete in search results. The `YouTubeVideoID` helper is
+shared between the normalizer and the fetcher.
+
+**Playlist-only URLs** (`youtube.com/playlist?list=...`) are not
+canonicalized — they don't have a video ID and are rejected by the
+YouTube fetcher with a `PermanentError`.
