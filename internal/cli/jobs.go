@@ -89,7 +89,8 @@ func renderJobList(resp *client.JobList) {
 		if i > 0 {
 			fmt.Println()
 		}
-		fmt.Printf("%-7s  %-9s  attempts=%-2d  %s\n", j.Status, j.Kind, j.Attempts, j.ID)
+		ts := j.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
+		fmt.Printf("%-7s  %-9s  attempts=%-2d  %s  %s\n", j.Status, j.Kind, j.Attempts, ts, j.ID)
 		if j.DocURL != "" {
 			fmt.Printf("  url: %s\n", j.DocURL)
 			if j.DocTitle != "" && j.DocTitle != j.DocURL {
