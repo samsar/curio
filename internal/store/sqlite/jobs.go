@@ -138,8 +138,8 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (b
 	permanent := !retry || job.Attempts >= s.MaxAttempts
 
 	if !permanent {
-		// Exponential backoff: 2^attempts seconds, capped at 1 hour.
-		backoff := time.Duration(math.Pow(2, float64(job.Attempts))) * time.Second
+		// Exponential backoff: 30 * 2^attempts seconds, capped at 1 hour.
+		backoff := 30 * time.Duration(math.Pow(2, float64(job.Attempts))) * time.Second
 		if backoff > time.Hour {
 			backoff = time.Hour
 		}
