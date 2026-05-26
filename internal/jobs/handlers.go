@@ -115,7 +115,10 @@ func FetchHandler(d Deps) HandlerFunc {
 
 		res, err := f.Fetch(ctx, doc.URL)
 		if err != nil {
-			// Transient — let it retry with backoff.
+			var pe *fetcher.PermanentError
+			if errors.As(err, &pe) {
+				return fmt.Errorf("%w: %v", ErrPermanent, pe.Err)
+			}
 			return fmt.Errorf("fetch failed: %w", err)
 		}
 
