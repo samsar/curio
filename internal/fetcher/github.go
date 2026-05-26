@@ -239,7 +239,7 @@ func (g *GitHub) apiGet(ctx context.Context, url, accept string) ([]byte, error)
 		if delay > 2*time.Minute {
 			delay = 2 * time.Minute
 		}
-		g.log.Info("github: rate limited, waiting", "delay", delay, "url", url, "attempt", attempt+1)
+		g.log.Info("github: rate limited, waiting", "delay_s", int(delay.Seconds()), "url", url, "attempt", attempt+1)
 		t := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
