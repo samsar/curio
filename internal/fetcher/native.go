@@ -28,7 +28,7 @@ import (
 // Login-wall heuristics and Jina Reader fallback are ported faithfully —
 // the same set of pages that fail in the JS impl fail (and fall back) here.
 type Native struct {
-	client       *http.Client
+	rt           roundTripper
 	userAgent    string
 	jinaFallback bool
 	jinaBaseURL  string // override for tests
@@ -49,10 +49,19 @@ type NativeOptions struct {
 	// enough that a transient outage doesn't permanently blacklist
 	// the site for a long-running daemon.
 	HostFailureTTL time.Duration
+	// Backend selects the HTTP transport. "chrome" (default) parrots a real
+	// Chrome TLS+HTTP/2 fingerprint via uTLS to clear JA3/Akamai bot checks;
+	// "stock" uses Go's net/http (recognizable Go fingerprint, no extra
+	// network behavior to reason about). "chrome_120"/"chrome_124"/
+	// "chrome_131"/"chrome_133" pin a specific profile. See transport.go.
+	Backend string
 }
 
+// defaultUA must stay coherent with the default chrome profile (Chrome_133):
+// a JA3 that says Chrome 133 paired with a UA that says something else is a
+// mismatch some bot checks flag. Override Backend and UserAgent together.
 const defaultUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-	"(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+	"(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
 func NewNative(opts NativeOptions) *Native {
 	if opts.Timeout == 0 {
@@ -67,12 +76,17 @@ func NewNative(opts NativeOptions) *Native {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
+	rt, err := newRoundTripper(opts.Backend, opts.Timeout, opts.Log)
+	if err != nil {
+		// A fingerprint backend that won't initialize shouldn't take the
+		// fetcher down — degrade to stock net/http and carry on.
+		opts.Log.Warn("fetcher transport init failed, falling back to stock net/http",
+			"backend", opts.Backend, "err", err)
+		rt = newStockRT(opts.Timeout)
+	}
+	opts.Log.Info("native fetcher transport", "backend", rt.name())
 	return &Native{
-		client: &http.Client{
-			Timeout: opts.Timeout,
-			// Follow redirects so finalURL is what the server settled on.
-			// http.Client follows up to 10 by default; that's fine here.
-		},
+		rt:           rt,
 		userAgent:    opts.UserAgent,
 		jinaFallback: opts.JinaFallback,
 		jinaBaseURL:  opts.JinaBaseURL,
@@ -176,29 +190,30 @@ func (n *Native) recordHostFailure(host string, err error) {
 // heuristics so callers can distinguish "page is paywalled" from "page
 // failed to fetch."
 func (n *Native) tryReadability(ctx context.Context, target string) (*Result, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return nil, fmt.Errorf("native: build request: %w", err)
-	}
 	// Mimic Chrome more thoroughly than just the UA string. CDNs like
 	// Cloudflare cross-check several headers (Sec-Fetch-*, Sec-Ch-Ua,
 	// Upgrade-Insecure-Requests) against the UA; mismatches trigger
-	// 403/503 even with a plausible UA. Won't beat sophisticated JS
-	// challenges, but removes the cheapest blocks.
-	req.Header.Set("User-Agent", n.userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"macOS"`)
+	// 403/503 even with a plausible UA. With the chrome backend the TLS
+	// (JA3) and HTTP/2 fingerprints match too, and these headers are sent
+	// in Chrome's order. Won't beat sophisticated JS challenges, but
+	// removes the cheap blocks. Header order below is Chrome's navigation
+	// order; the chrome backend reproduces it on the wire.
+	headers := []header{
+		{"sec-ch-ua", `"Chromium";v="133", "Google Chrome";v="133", "Not(A:Brand";v="99"`},
+		{"sec-ch-ua-mobile", "?0"},
+		{"sec-ch-ua-platform", `"macOS"`},
+		{"upgrade-insecure-requests", "1"},
+		{"user-agent", n.userAgent},
+		{"accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"},
+		{"sec-fetch-site", "none"},
+		{"sec-fetch-mode", "navigate"},
+		{"sec-fetch-user", "?1"},
+		{"sec-fetch-dest", "document"},
+		{"accept-encoding", "gzip, deflate, br, zstd"},
+		{"accept-language", "en-US,en;q=0.9"},
+	}
 
-	resp, err := n.client.Do(req)
+	resp, err := n.rt.do(ctx, target, headers)
 	if err != nil {
 		// Distinguish dead-host (DNS, connection refused) from generic
 		// transport errors. Dead hosts shouldn't trigger Jina fallback
@@ -210,23 +225,26 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		}
 		return nil, fmt.Errorf("native: fetch: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.statusCode < 200 || resp.statusCode >= 300 {
 		// Drain a bit so the connection can be reused.
-		_, _ = io.CopyN(io.Discard, resp.Body, 1024)
+		_, _ = io.CopyN(io.Discard, resp.body, 1024)
 		// 403 and 503 are commonly Cloudflare / WAF bot blocks rather
 		// than genuine "page missing" or "server down" — Jina's
 		// infrastructure often gets through where we don't. Tag with
 		// ErrAntiBot so Fetch falls back instead of giving up.
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusServiceUnavailable {
-			return nil, fmt.Errorf("native: HTTP %d: %w", resp.StatusCode, ErrAntiBot)
+		if resp.statusCode == http.StatusForbidden || resp.statusCode == http.StatusServiceUnavailable {
+			return nil, fmt.Errorf("native: HTTP %d: %w", resp.statusCode, ErrAntiBot)
 		}
-		return nil, fmt.Errorf("native: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("native: HTTP %d", resp.statusCode)
 	}
 
-	finalURL := resp.Request.URL
-	article, err := readability.FromReader(resp.Body, finalURL)
+	finalURL := resp.finalURL
+	if finalURL == nil {
+		finalURL, _ = url.Parse(target)
+	}
+	article, err := readability.FromReader(resp.body, finalURL)
 	if err != nil {
 		return nil, fmt.Errorf("native: readability: %w", err)
 	}
@@ -257,8 +275,9 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		Author:      article.Byline(),
 		Language:    article.Language(),
 		Meta: map[string]any{
-			"via":  "readability",
-			"site": article.SiteName(),
+			"via":       "readability",
+			"site":      article.SiteName(),
+			"transport": n.rt.name(),
 		},
 	}
 	if pt, err := article.PublishedTime(); err == nil && !pt.IsZero() {
@@ -392,22 +411,18 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 			}
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, n.jinaBaseURL+target, nil)
-		if err != nil {
-			return nil, fmt.Errorf("jina: build request: %w", err)
-		}
-		req.Header.Set("User-Agent", n.userAgent)
-		req.Header.Set("Accept", "text/plain")
-
-		resp, err := n.client.Do(req)
+		resp, err := n.rt.do(ctx, n.jinaBaseURL+target, []header{
+			{"user-agent", n.userAgent},
+			{"accept", "text/plain"},
+		})
 		if err != nil {
 			lastErr = fmt.Errorf("jina: %w", err)
 			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
+		body, _ := io.ReadAll(resp.body)
+		_ = resp.body.Close()
 
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if resp.statusCode >= 200 && resp.statusCode < 300 {
 			parsed := parseJina(string(body))
 			if len(parsed.body) < 200 {
 				return nil, fmt.Errorf("jina returned too little content (%d chars)", len(parsed.body))
@@ -430,11 +445,11 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 			return result, nil
 		}
 
-		lastErr = fmt.Errorf("jina: HTTP %d", resp.StatusCode)
-		if _, ok := retryable[resp.StatusCode]; !ok {
+		lastErr = fmt.Errorf("jina: HTTP %d", resp.statusCode)
+		if _, ok := retryable[resp.statusCode]; !ok {
 			break
 		}
-		n.log.Info("jina retry", "status", resp.StatusCode, "attempt", attempt+1)
+		n.log.Info("jina retry", "status", resp.statusCode, "attempt", attempt+1)
 	}
 	if lastErr == nil {
 		lastErr = errors.New("jina: unknown error")

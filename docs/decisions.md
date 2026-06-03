@@ -673,8 +673,70 @@ challenges or TLS-fingerprint checks, but eliminates the cheapest
 blocks. Sites that were 403-ing for us in the first import (inc.com
 style) start returning 200 with this change.
 
-If we need more, the next escalation is a headless-Chrome fetcher (via
-chromedp) — deferred until the cheap fixes stop being enough.
+If we need more, the next escalation is the TLS/HTTP2 fingerprint backend
+(see below), and beyond that a headless-Chrome fetcher (via chromedp) for
+JS challenges — deferred until the cheap fixes stop being enough.
+
+---
+
+## Anti-bot mitigation: pluggable TLS/HTTP2 fingerprint backend (uTLS)
+
+**Decision:** The Native fetcher issues requests through a `roundTripper`
+abstraction (`internal/fetcher/transport.go`) with two backends, selected
+by `fetcher.native.backend`:
+
+- `chrome` (default) — uTLS + a forked HTTP/2 stack
+  (`github.com/bogdanfinn/tls-client`, which wraps `bogdanfinn/utls` and
+  `bogdanfinn/fhttp`). Parrots a real Chrome TLS ClientHello and HTTP/2
+  SETTINGS/pseudo-header order. `chrome_120|124|131|133` pin a profile;
+  default is the latest (`Chrome_133`).
+- `stock` — Go's `net/http`. Zero extra network behavior to reason about,
+  but trivially fingerprinted as a bot.
+
+**Why:** The browser-thorough headers above only address the L0 (header)
+layer. Go's `crypto/tls` emits a *fixed* ClientHello — no GREASE,
+distinctive cipher/extension ordering — that Cloudflare/Akamai/DataDome
+JA3/JA4-blocklist on sight, and its HTTP/2 stack has an equally
+distinctive Akamai fingerprint. Both are checked *before* a single header
+byte is read, so no amount of header spoofing helps. uTLS + the forked h2
+stack make the whole network footprint Chrome's.
+
+Measured against a reflector (`tls.peet.ws`), the two backends are night
+and day:
+
+| | JA4 | Akamai h2 (pseudo-header order) | GREASE |
+|---|---|---|---|
+| `chrome` | `t13d1516h2_8daaf6152771_…` | `…\|m,a,s,p` (Chrome) | yes |
+| `stock` | `t13d1312h2_f57a46bbacb6_…` | `…\|a,m,p,s` (Go) | no |
+
+**Design notes:**
+- `tryReadability` / `tryJina` are backend-agnostic — they build an ordered
+  `[]header` and call `rt.do`. `fhttp.Header.Add` records header order as
+  it goes, so the chrome backend reproduces Chrome's header order;
+  pseudo-header order and H2 SETTINGS come from the profile.
+- `NewNative` never errors: if the chrome backend fails to initialize it
+  logs and degrades to `stock`. That's the "fallback if the dep is
+  unavailable" path.
+- The default UA and `sec-ch-ua` were bumped to Chrome 133 to stay
+  coherent with the default profile — a JA3 that says 133 paired with a UA
+  that says something else is itself a tell. **Override `backend` and
+  `user_agent` together.**
+- This also fixed a latent `net/http` gotcha: setting `Accept-Encoding` by
+  hand *disables* net/http's transparent gzip (it only decompresses when
+  the transport added the header). The `stock` backend now omits
+  `Accept-Encoding` (auto-gzip); the `chrome` backend can send a faithful
+  `gzip, deflate, br, zstd` because fhttp's h2 transport always
+  decompresses by `Content-Encoding`.
+
+**Limits / next escalations:** still won't beat JS challenges
+(Turnstile/managed challenge), canvas/behavioral fingerprinting, or IP
+reputation. Those need a headless browser (chromedp) and/or residential
+proxies respectively — both deferred. The Jina fallback (above) still
+mops up the stubborn `ErrAntiBot` / `ErrLoginWall` tail.
+
+**Cost:** pulls in `bogdanfinn/{tls-client,fhttp,utls}` plus brotli, circl,
+and a quic-utls dep. Pinned at `tls-client v1.11.0`. Acceptable for the
+block-rate win; revisit if it bloats build time or the dep goes stale.
 
 ---
 
