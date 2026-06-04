@@ -750,6 +750,48 @@ block-rate win; revisit if it bloats build time or the dep goes stale.
 
 ---
 
+## PDF fetcher: two-tier, pure-Go local then Jina
+
+**Decision:** The Native fetcher detects PDFs by Content-Type
+(`application/pdf`, or a `.pdf` URL when the server is vague) and handles
+them in two tiers: **(1)** pure-Go local extraction on the downloaded bytes
+(`github.com/ledongthuc/pdf`); **(2)** if that yields too little text,
+errors, or panics, fall back to **Jina** (which renders PDFs server-side).
+Other non-HTML, non-PDF content (images, octet-stream) is a permanent
+failure — see the content-type guard above.
+
+**Why pure-Go for tier 1 (not pdftotext/MuPDF/UniDoc):** keeping curio a
+single binary with no runtime deps is the whole reason we left the Node
+`web2md` behind — a `pdftotext`/poppler subprocess would reintroduce that
+friction. The two genuinely high-quality embeddable options, `go-fitz`
+(MuPDF, cgo) and `unidoc/unipdf` (pure Go), are both **AGPL-or-commercial** —
+a problem for a Homebrew-distributed binary. `ledongthuc/pdf` (BSD-3,
+descended from `rsc.io/pdf`) is mediocre but permissive and dependency-free.
+
+**Why that mediocrity is acceptable:** tier 2 is the quality backstop. Jina
+uses a high-quality server-side extractor, so tier 1 only needs to cheaply
+nail the easy PDFs locally (avoiding a network round-trip + Jina rate
+limit); anything it botches falls back. The arXiv "Attention Is All You
+Need" PDF extracts cleanly via tier 1 (~33k chars); messier PDFs route to
+Jina. If local quality ever matters more, an optional `pdftotext` tier
+(used only when poppler is present) is the cleanest upgrade — no hard dep,
+no AGPL.
+
+**Robustness:** `ledongthuc` can panic on malformed input — recovered into
+an error so the caller falls back. A `minPDFChars` floor catches the
+"parsed but produced garbage" case. PDFs over 32 MiB skip local extraction
+(memory) and go straight to Jina.
+
+**Gotcha (cost me a retry loop):** `Result.ContentType` must be one of the
+values the `documents` CHECK constraint allows —
+`article | repo | video | pdf | thread | unknown`. PDFs use `pdf`. An
+out-of-set value (I first used `"document"`) fails the DB write *after* a
+successful fetch+extract, and that write error is retryable — so it loops
+silently re-fetching. The fetcher's content-type vocabulary is coupled to
+the migration's CHECK; keep them in sync.
+
+---
+
 ## CLI defaults: happy-path views; debug paths are opt-in
 
 **Decision:** `curio docs` defaults to `state=fetched`, `curio jobs`

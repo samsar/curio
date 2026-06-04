@@ -43,3 +43,21 @@ func TestNative_LiveSites_RenderMarkdown(t *testing.T) {
 		})
 	}
 }
+
+// TestNative_LivePDF exercises the two-tier PDF path end to end against a
+// real PDF: pure-Go local extraction first, Jina as fallback. Asserts we get
+// readable markdown regardless of which tier handled it; logs the tier.
+func TestNative_LivePDF(t *testing.T) {
+	n := NewNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	// "Attention Is All You Need" — stable, content-rich.
+	res, err := n.Fetch(ctx, "https://arxiv.org/pdf/1706.03762")
+	require.NoError(t, err)
+	assertReadableMarkdown(t, res.Markdown)
+	assert.Greater(t, len(res.Markdown), 1000, "suspiciously short PDF extraction")
+	assert.Contains(t, res.Markdown, "Transformer")
+	assert.Equal(t, "pdf", res.ContentType)
+	t.Logf("PDF extracted via=%v, %d chars", res.Meta["via"], len(res.Markdown))
+}

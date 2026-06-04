@@ -240,14 +240,18 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		return nil, fmt.Errorf("native: HTTP %d", resp.statusCode)
 	}
 
-	// Content-type guard: Readability only understands HTML. If this URL
-	// serves a PDF, image, or other binary, feeding its bytes to the HTML
-	// parser blows x/net/html's nesting limit ("open stack of elements
-	// exceeds 512 nodes") — and because that failure is deterministic, the
-	// job would otherwise re-download the (often large) file on every retry.
-	// Fail permanently with a clear reason. Closing the body here without
-	// reading it avoids pulling down the whole file. (Real PDF extraction is
-	// a separate, planned fetcher; this just stops the misrouting + retries.)
+	// PDFs: extract locally (pure-Go), then fall back to Jina. Detected by
+	// Content-Type, or a .pdf URL when the server is vague about the type.
+	if isPDFResponse(resp.contentType, target) {
+		return n.fetchPDF(ctx, target, resp.body)
+	}
+
+	// Other non-HTML content (images, octet-stream, …) can't be read as
+	// HTML. Feeding its bytes to the parser blows x/net/html's nesting limit
+	// ("open stack of elements exceeds 512 nodes"), and the failure is
+	// deterministic — so fail permanently (no retry) with a clear reason
+	// instead of re-downloading the file each attempt. Closing the body
+	// unread avoids pulling down the whole file.
 	if !isReadableContentType(resp.contentType) {
 		return nil, &PermanentError{Err: fmt.Errorf(
 			"native: unsupported content type %q (not HTML); URL: %s", resp.contentType, target)}
@@ -354,22 +358,41 @@ var (
 	loginPathRE  = regexp.MustCompile(`(?i)/(login|authwall|signin|signup)\b`)
 )
 
-// isReadableContentType reports whether a Content-Type is something the HTML
-// Readability path can handle. Empty/missing is allowed (many servers omit
-// or mislabel it, and genuine HTML still parses); text/* and XHTML are
-// allowed; everything explicit and non-text (application/pdf, image/*,
-// application/octet-stream, …) is rejected so binary bodies never reach the
-// HTML parser.
-func isReadableContentType(ct string) bool {
+// mediaType returns the lowercased media type from a Content-Type header,
+// dropping any "; charset=..." parameters.
+func mediaType(ct string) string {
 	ct = strings.ToLower(strings.TrimSpace(ct))
-	if ct == "" {
-		return true
-	}
-	// Drop parameters like "; charset=utf-8".
 	if i := strings.IndexByte(ct, ';'); i >= 0 {
 		ct = strings.TrimSpace(ct[:i])
 	}
-	return strings.HasPrefix(ct, "text/") || ct == "application/xhtml+xml"
+	return ct
+}
+
+// isReadableContentType reports whether a Content-Type is something the HTML
+// Readability path can handle. Empty/missing is allowed (many servers omit
+// or mislabel it, and genuine HTML still parses); text/* and XHTML are
+// allowed; everything explicit and non-text (image/*, octet-stream, …) is
+// rejected so binary bodies never reach the HTML parser. (PDFs are handled
+// separately, before this is consulted.)
+func isReadableContentType(ct string) bool {
+	mt := mediaType(ct)
+	return mt == "" || strings.HasPrefix(mt, "text/") || mt == "application/xhtml+xml"
+}
+
+// isPDFResponse reports whether a response should be treated as a PDF: it
+// either declares application/pdf, or the URL path ends in .pdf and the
+// server was vague about the type (octet-stream or none).
+func isPDFResponse(ct, rawURL string) bool {
+	mt := mediaType(ct)
+	if mt == "application/pdf" {
+		return true
+	}
+	if mt == "" || mt == "application/octet-stream" {
+		if u, err := url.Parse(rawURL); err == nil && strings.HasSuffix(strings.ToLower(u.Path), ".pdf") {
+			return true
+		}
+	}
+	return false
 }
 
 // isHostUnreachable returns true when err represents the host being
@@ -418,6 +441,58 @@ func hostFailureFromError(err error) (HostFailureKind, bool) {
 // both ends. The JS impl uses .trim() + .length; this mirrors that.
 func utf8Trimmed(s string) int {
 	return len(strings.TrimSpace(s))
+}
+
+const (
+	// maxPDFBytes caps how much of a PDF we pull into memory for local
+	// extraction; larger PDFs skip tier 1 and go straight to Jina.
+	maxPDFBytes = 32 << 20 // 32 MiB
+	// minPDFChars is the floor below which local extraction is treated as a
+	// miss (empty / garbled output) and we fall back to Jina.
+	minPDFChars = 200
+)
+
+// fetchPDF handles a PDF response in two tiers: pure-Go local extraction
+// first (no system dependency), then Jina, which renders PDFs server-side.
+// body is the already-open response body for target.
+func (n *Native) fetchPDF(ctx context.Context, target string, body io.Reader) (*Result, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxPDFBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("native: read pdf: %w", err)
+	}
+
+	// Tier 1: local, pure-Go. Skipped for oversized PDFs.
+	switch {
+	case len(data) > maxPDFBytes:
+		n.log.Info("pdf too large for local extraction, trying jina", "url", target, "bytes", len(data))
+	default:
+		text, exErr := extractPDFText(data)
+		switch {
+		case exErr != nil:
+			n.log.Info("pdf local extraction failed, trying jina", "url", target, "err", exErr.Error())
+		case len(text) < minPDFChars:
+			n.log.Info("pdf local extraction too thin, trying jina", "url", target, "chars", len(text))
+		default:
+			return &Result{
+				Markdown:    text,
+				FinalURL:    target,
+				ContentType: "pdf",
+				Meta:        map[string]any{"via": "pdf-local", "transport": n.rt.name()},
+			}, nil
+		}
+	}
+
+	// Tier 2: Jina renders the PDF itself (we hand it the URL).
+	if n.jinaFallback {
+		res, jErr := n.tryJina(ctx, target)
+		if jErr != nil {
+			return nil, fmt.Errorf("native: pdf local extraction failed and jina fallback failed: %w", jErr)
+		}
+		res.ContentType = "pdf" // Jina defaults to "article"; this is a PDF
+		return res, nil
+	}
+	return nil, &PermanentError{Err: fmt.Errorf(
+		"native: pdf local extraction failed and jina fallback disabled; URL: %s", target)}
 }
 
 // tryJina is pass 2: hit r.jina.ai/<url> with retries. Returns parsed

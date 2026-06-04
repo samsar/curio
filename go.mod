@@ -11,6 +11,7 @@ require (
 	github.com/bogdanfinn/tls-client v1.11.0
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/google/uuid v1.6.0
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/spf13/cobra v1.10.2
