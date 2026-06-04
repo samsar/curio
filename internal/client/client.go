@@ -369,6 +369,36 @@ func (c *Client) RefetchAll(ctx context.Context, state string) (*RefetchAllRespo
 	return &out, nil
 }
 
+// ReindexResponse is the body of a single-document reindex.
+type ReindexResponse struct {
+	JobID string `json:"job_id"`
+}
+
+func (c *Client) ReindexDocument(ctx context.Context, docID string) (*ReindexResponse, error) {
+	var out ReindexResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/documents/"+docID+"/reindex", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReindexAllResponse is the body of a bulk reindex.
+type ReindexAllResponse struct {
+	JobsEnqueued int `json:"jobs_enqueued"`
+}
+
+func (c *Client) ReindexAll(ctx context.Context, state string) (*ReindexAllResponse, error) {
+	path := "/v1/documents/reindex-all"
+	if state != "" {
+		path += "?state=" + url.QueryEscape(state)
+	}
+	var out ReindexAllResponse
+	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // JobListOpts filters for ListJobs.
 type JobListOpts struct {
 	Status string

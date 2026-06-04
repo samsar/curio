@@ -73,8 +73,11 @@ These are not bugs — they're scope-trimmed pieces deferred from M0 to M1+:
 - ~~**Tags from bookmarks not wired.**~~ ✅ Done — `BookmarkStore.TagsForDocument`
   unions a doc's bookmark tags (across sources); the index handler feeds them
   into `chunks_fts`, so a tag word is searchable even when absent from the body.
-- **No reindex CLI yet.** Documented in `docs/decisions.md`; needed when
-  someone first wants to swap embedding models.
+- ~~**No reindex CLI.**~~ ✅ Done — `curio reindex <id>` / `--all` re-chunks +
+  re-embeds existing extractions (`POST /v1/documents/{id}/reindex`,
+  `/reindex-all`). Covers same-dimension model swaps, chunker changes, and
+  tag pickup; a *dimension-change* swap still needs a `chunks_vec` rebuild
+  (see `decisions.md`).
 - ~~**Search filters**~~ ✅ Done — `content_type`, `host`, and `source` are
   applied by the search engine (`store.SearchFilters` threaded through BM25 +
   vector) and exposed via `curio search --type/--source/--host`. `folder`/
