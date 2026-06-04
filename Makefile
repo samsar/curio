@@ -11,6 +11,7 @@ GOOSE         ?= goose
 BIN_DIR       := bin
 CURIO_BIN     := $(BIN_DIR)/curio
 DAEMON_BIN    := $(BIN_DIR)/curio-daemon
+MCP_BIN       := $(BIN_DIR)/curio-mcp
 
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT        ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -40,9 +41,9 @@ GOFLAGS_BUILD := -tags=$(GOTAGS)
 help:
 	@awk 'BEGIN {FS = ": "} /^## [a-zA-Z0-9_-]+:/ {sub(/^## /, ""); printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-## build: build both binaries
+## build: build all binaries (curio, curio-daemon, curio-mcp)
 .PHONY: build
-build: $(CURIO_BIN) $(DAEMON_BIN)
+build: $(CURIO_BIN) $(DAEMON_BIN) $(MCP_BIN)
 
 $(CURIO_BIN): $(shell find cmd/curio internal -name '*.go' 2>/dev/null) go.mod go.sum
 	@mkdir -p $(BIN_DIR)
@@ -51,6 +52,10 @@ $(CURIO_BIN): $(shell find cmd/curio internal -name '*.go' 2>/dev/null) go.mod g
 $(DAEMON_BIN): $(shell find cmd/curio-daemon internal -name '*.go' 2>/dev/null) go.mod go.sum
 	@mkdir -p $(BIN_DIR)
 	$(GO) build -trimpath $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)" -o $@ ./cmd/curio-daemon
+
+$(MCP_BIN): $(shell find cmd/curio-mcp internal -name '*.go' 2>/dev/null) go.mod go.sum
+	@mkdir -p $(BIN_DIR)
+	$(GO) build -trimpath $(GOFLAGS_BUILD) -ldflags "$(LDFLAGS)" -o $@ ./cmd/curio-mcp
 
 ## test: run unit tests (fast; no external services required)
 .PHONY: test
