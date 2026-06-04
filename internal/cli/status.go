@@ -93,34 +93,41 @@ func formatMap(m map[string]int) string {
 }
 
 // printDiskUsage shows the size of the database, content dir, and logs dir.
+// Labels are left-aligned to a common width and sizes are right-aligned so
+// the numbers line up in a column regardless of unit (GB/MB/KB).
 func printDiskUsage(homePath string) {
 	fmt.Println()
 	fmt.Println("disk:")
+
+	type diskRow struct{ label, size, suffix string }
+	var rows []diskRow
+
 	dbPath := filepath.Join(homePath, "curio.db")
-	printFileSize("  db", dbPath)
-
-	walPath := dbPath + "-wal"
-	if info, err := os.Stat(walPath); err == nil {
-		fmt.Printf("  db wal:     %s\n", humanSize(info.Size()))
+	if info, err := os.Stat(dbPath); err == nil {
+		rows = append(rows, diskRow{"db", humanSize(info.Size()), ""})
 	}
-
+	if info, err := os.Stat(dbPath + "-wal"); err == nil {
+		rows = append(rows, diskRow{"db wal", humanSize(info.Size()), ""})
+	}
 	contentDir := filepath.Join(homePath, "content")
 	if size, count, err := dirSize(contentDir); err == nil {
-		fmt.Printf("  content:    %s (%d files)\n", humanSize(size), count)
+		rows = append(rows, diskRow{"content", humanSize(size), fmt.Sprintf(" (%d files)", count)})
 	}
-
 	logsDir := filepath.Join(homePath, "logs")
 	if size, count, err := dirSize(logsDir); err == nil && count > 0 {
-		fmt.Printf("  logs:       %s (%d files)\n", humanSize(size), count)
+		rows = append(rows, diskRow{"logs", humanSize(size), fmt.Sprintf(" (%d files)", count)})
 	}
-}
 
-func printFileSize(label, path string) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return
+	// Width the size column to the widest value so right edges align.
+	sizeW := 0
+	for _, r := range rows {
+		if len(r.size) > sizeW {
+			sizeW = len(r.size)
+		}
 	}
-	fmt.Printf("%s:       %s\n", label, humanSize(info.Size()))
+	for _, r := range rows {
+		fmt.Printf("  %-9s%*s%s\n", r.label+":", sizeW, r.size, r.suffix)
+	}
 }
 
 func dirSize(path string) (int64, int, error) {
