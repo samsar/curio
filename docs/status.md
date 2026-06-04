@@ -109,6 +109,8 @@ Worth re-reading before M1:
 | Batched import | `internal/cli/import.go` | 500-bookmark batches with running totals |
 | Safari parser | `internal/importer/safari.go` | Reads binary/XML plist, skips Reading List, `--file` override |
 | `curio import safari` | `internal/cli/import_safari.go` | Auto-discovers `~/Library/Safari/Bookmarks.plist`, Full Disk Access guidance |
+| Firefox parser | `internal/importer/firefox.go` | Reads `places.sqlite` via a temp copy (incl. `-wal`, so a just-added bookmark is seen while Firefox runs); walks `moz_bookmarks`, skips Tags/separators; per-install profile selection |
+| `curio import firefox` | `internal/cli/import_firefox.go` | Auto-discovers the default profile via `profiles.ini`, `--file` override |
 | Worker concurrency | daemon config | Split fetch + index pools, tunable via config |
 | `/v1/stats` | `internal/api/system.go` | Doc/job/bookmark totals + breakdowns by state |
 | `/v1/documents` list | `internal/api/documents.go` | `?state` and `?limit` filtering |
@@ -119,7 +121,7 @@ Worth re-reading before M1:
 
 ### Deferred
 
-- **Firefox parser** (`places.sqlite`) — deferred; no Firefox installed on dev machine. Schema and CLI patterns are ready; add when needed.
+_None — Firefox landed (see table above). **M1 is complete.**_
 
 ## M2 — Multiple fetchers + rules engine
 
@@ -127,6 +129,8 @@ Worth re-reading before M1:
 
 | Feature | Package / file | Notes |
 |---|---|---|
+| Native fetcher (v1 default) | `internal/fetcher/native.go` | Go-native: net/http + Readability + html-to-markdown; replaced the Node `web2md` as the default. Jina Reader fallback for anti-bot / login-wall cases |
+| Chrome fingerprint backend | `internal/fetcher/transport.go` | uTLS + HTTP/2 via `bogdanfinn/tls-client` to defeat JA3/Akamai bot detection; `fetcher.native.backend` = `chrome` (default) \| `stock`. h3 (QUIC) responses decompressed defensively; live integration test under `make test-integration` |
 | PatternDispatcher | `internal/fetcher/fetcher.go` | Host-based routing; first match wins, fallback to Native |
 | YouTube fetcher | `internal/fetcher/youtube.go` | yt-dlp for metadata + captions; VTT parser; auto/manual subs |
 | YouTube URL normalization | `internal/urlutil/normalize.go` | `youtu.be`, shorts, mobile, embed → canonical `watch?v=ID` |

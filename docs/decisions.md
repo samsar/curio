@@ -822,6 +822,44 @@ accepts an `io.ReadSeeker`, folder hierarchy is preserved in
 
 ---
 
+## Firefox importer: copy the live places.sqlite, prefer the install default
+
+**Decision:** The Firefox parser reads `places.sqlite` (a SQLite DB, not a
+flat file). It **copies the DB plus its `-wal`/`-shm` sidecars to a temp
+dir and reads the copy**, walks `moz_bookmarks` (joined to `moz_places`),
+skips the Tags subtree and separators, and labels root containers by GUID.
+Profile discovery prefers the **`[Install*]` default** in `profiles.ini`.
+
+**Why copy (incl. the WAL):**
+- Firefox holds `places.sqlite` open in WAL mode while running. Opening it
+  directly fights for locks; opening with `immutable=1` avoids locks but
+  **ignores the WAL** — so a bookmark added seconds ago (still in the
+  `-wal`, not yet checkpointed) would be invisible. Copying the main file
+  *and* the sidecars lets SQLite replay the WAL on the copy, so recent
+  writes are seen and the user doesn't have to quit Firefox. The 2.4 MB WAL
+  observed on a fresh profile confirmed this isn't theoretical.
+
+**Why the `[Install*]` default:**
+- Post-67 Firefox is per-install. `profiles.ini` can list several profiles
+  (`default`, `default-release`) and a legacy `[Profile*] Default=1` that
+  is NOT what the running browser uses. The authoritative choice is the
+  `[Install<hash>]` section's `Default=`. We prefer it, then fall back to
+  `Default=1`, then the first profile.
+
+**Schema notes:** `moz_bookmarks.type` 1 = bookmark, 2 = folder, 3 =
+separator. `dateAdded` is **microseconds since the Unix epoch** (unlike
+Chrome's 1601 epoch). The Tags root (`tags________`) contains tag
+pseudo-bookmarks, not real folders — its subtree is skipped so tagged URLs
+don't double-count. Root GUIDs map to friendly labels ("Bookmarks Menu",
+"Bookmarks Toolbar", "Other Bookmarks", "Mobile Bookmarks").
+
+**Shape deviation:** `ParseFirefox` takes a *path*, not an `io.Reader` like
+the other parsers — SQLite needs a real file to open. The CLI passes the
+discovered (or `--file`) path straight through. This is the only importer
+that links the sqlite driver (already in the binary via the store).
+
+---
+
 ## Jobs list: sort by updated_at, show timestamp
 
 **Decision:** `ListWithDoc` sorts by `j.updated_at DESC` (not
