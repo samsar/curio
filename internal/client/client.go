@@ -265,8 +265,16 @@ func (c *Client) GetDocumentContent(ctx context.Context, id string) (string, err
 
 // SearchRequest body.
 type SearchRequest struct {
-	Query string `json:"query"`
-	K     int    `json:"k,omitempty"`
+	Query   string         `json:"query"`
+	K       int            `json:"k,omitempty"`
+	Filters *SearchFilters `json:"filters,omitempty"`
+}
+
+// SearchFilters scopes a search. Nil/omitted dimensions are not filtered.
+type SearchFilters struct {
+	ContentType []string `json:"content_type,omitempty"`
+	Host        []string `json:"host,omitempty"`
+	Source      []string `json:"source,omitempty"`
 }
 
 // SearchHit mirrors api.SearchHitResponse.

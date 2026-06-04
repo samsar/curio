@@ -182,7 +182,7 @@ func TestIndexHandler_HappyPath(t *testing.T) {
 	assert.Equal(t, store.DocStateFetched, got.State, "document should be fetched after index")
 
 	// Searchable via BM25.
-	hits, _ := deps.Chunks.BM25Search(ctx, "local", "MVCC", 10)
+	hits, _ := deps.Chunks.BM25Search(ctx, "local", "MVCC", 10, store.SearchFilters{})
 	require.NotEmpty(t, hits, "indexed content should be searchable")
 }
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/store"
 )
 
 // SearchRequest is the POST /v1/search body.
@@ -15,8 +16,8 @@ type SearchRequest struct {
 	Filters Filters `json:"filters,omitempty"`
 }
 
-// Filters mirrors the openapi filters block. M0 honors none of these yet —
-// they're accepted so clients can be written against the final shape.
+// Filters mirrors the openapi filters block. content_type/host/source are
+// applied by the search engine; folder/tag are accepted but not yet applied.
 type Filters struct {
 	ContentType []string `json:"content_type,omitempty"`
 	Host        []string `json:"host,omitempty"`
@@ -71,6 +72,11 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 		TenantID: d.TenantID,
 		Query:    req.Query,
 		K:        req.K,
+		Filters: store.SearchFilters{
+			ContentType: req.Filters.ContentType,
+			Host:        req.Filters.Host,
+			Source:      req.Filters.Source,
+		},
 	})
 	if err != nil {
 		writeError(w, err)

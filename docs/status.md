@@ -76,8 +76,10 @@ These are not bugs — they're scope-trimmed pieces deferred from M0 to M1+:
   bookmark tags to feed them in. Lands when M1 importers do.
 - **No reindex CLI yet.** Documented in `docs/decisions.md`; needed when
   someone first wants to swap embedding models.
-- **Search filters** (`content_type`, `host`, `source`, etc.) are
-  accepted by the API but not yet applied. Engine work needed.
+- ~~**Search filters**~~ ✅ Done — `content_type`, `host`, and `source` are
+  applied by the search engine (`store.SearchFilters` threaded through BM25 +
+  vector) and exposed via `curio search --type/--source/--host`. `folder`/
+  `tag` are accepted but not yet applied.
 
 ## Decisions logged in `docs/decisions.md`
 
