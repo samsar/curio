@@ -1,5 +1,14 @@
 # Status
 
+**Current position:** M0 ✅ · M1 ✅ (all importers, incl. Firefox) · M2
+substantially complete — Go-native default fetcher + Chrome TLS/HTTP2
+fingerprint backend, YouTube, GitHub, and a two-tier PDF fetcher all
+shipped. Remaining M2: `fetcher_rules.yaml`, dead-link detection, GitHub
+issues/PRs/wiki. **Next milestone: M3 — MCP sidecar** (`cmd/curio-mcp`):
+expose `search_bookmarks` / `get_document` / `find_related` so Claude and
+other LLM clients can query the corpus. That's the highest-leverage step
+now that ingestion is solid — the payoff for everything built so far.
+
 ## M0 — Walking Skeleton
 
 **Code complete. All packages build, all unit tests green under `-race`.**
@@ -45,11 +54,8 @@ cd ~/projects/curio
 make build
 ./bin/curio daemon start
 
-# Configure the web2md path. Edit ~/.curio/config.yaml and add:
-#   fetcher:
-#     web2md:
-#       bin: "/Users/samansartipi/projects/experiments/web-to-markdown/web2md.js"
-# Then restart: ./bin/curio daemon stop && ./bin/curio daemon start
+# Fetching works out of the box: the default fetcher is Go-native (no
+# web2md/Node setup). PDFs extract locally (pure-Go) with a Jina fallback.
 
 ./bin/curio add https://martinfowler.com/articles/feature-toggles.html --wait
 ./bin/curio search "feature flag rollout"
@@ -109,6 +115,8 @@ Worth re-reading before M1:
 | Batched import | `internal/cli/import.go` | 500-bookmark batches with running totals |
 | Safari parser | `internal/importer/safari.go` | Reads binary/XML plist, skips Reading List, `--file` override |
 | `curio import safari` | `internal/cli/import_safari.go` | Auto-discovers `~/Library/Safari/Bookmarks.plist`, Full Disk Access guidance |
+| Firefox parser | `internal/importer/firefox.go` | Reads `places.sqlite` via a temp copy (incl. `-wal`, so a just-added bookmark is seen while Firefox runs); walks `moz_bookmarks`, skips Tags/separators; per-install profile selection |
+| `curio import firefox` | `internal/cli/import_firefox.go` | Auto-discovers the default profile via `profiles.ini`, `--file` override |
 | Worker concurrency | daemon config | Split fetch + index pools, tunable via config |
 | `/v1/stats` | `internal/api/system.go` | Doc/job/bookmark totals + breakdowns by state |
 | `/v1/documents` list | `internal/api/documents.go` | `?state` and `?limit` filtering |
@@ -119,7 +127,7 @@ Worth re-reading before M1:
 
 ### Deferred
 
-- **Firefox parser** (`places.sqlite`) — deferred; no Firefox installed on dev machine. Schema and CLI patterns are ready; add when needed.
+_None — Firefox landed (see table above). **M1 is complete.**_
 
 ## M2 — Multiple fetchers + rules engine
 
@@ -127,6 +135,9 @@ Worth re-reading before M1:
 
 | Feature | Package / file | Notes |
 |---|---|---|
+| Native fetcher (v1 default) | `internal/fetcher/native.go` | Go-native: net/http + Readability + html-to-markdown; replaced the Node `web2md` as the default. Jina Reader fallback for anti-bot / login-wall cases |
+| Chrome fingerprint backend | `internal/fetcher/transport.go` | uTLS + HTTP/2 via `bogdanfinn/tls-client` to defeat JA3/Akamai bot detection; `fetcher.native.backend` = `chrome` (default) \| `stock`. h3 (QUIC) responses decompressed defensively; live integration test under `make test-integration` |
+| PDF fetcher (two-tier) | `internal/fetcher/pdf.go`, `native.go` | `application/pdf` (or a `.pdf` URL) → pure-Go local extraction (`ledongthuc/pdf`), falling back to Jina. Other non-HTML binary (images, octet-stream) rejected as a permanent failure. Content type stored as `pdf` |
 | PatternDispatcher | `internal/fetcher/fetcher.go` | Host-based routing; first match wins, fallback to Native |
 | YouTube fetcher | `internal/fetcher/youtube.go` | yt-dlp for metadata + captions; VTT parser; auto/manual subs |
 | YouTube URL normalization | `internal/urlutil/normalize.go` | `youtu.be`, shorts, mobile, embed → canonical `watch?v=ID` |
@@ -140,7 +151,6 @@ Worth re-reading before M1:
 
 ### Remaining
 
-- **PDF fetcher** — extract text from PDF URLs
 - **`fetcher_rules.yaml`** — user-configurable fetcher routing (deferred until 3+ fetchers justify the config complexity)
 - **Dead-link detection** — soft 404s that return HTTP 200 with junk content
 - **GitHub issues/PRs/wiki** — currently unsupported URL types; fall through to Native or add dedicated handling

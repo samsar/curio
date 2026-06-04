@@ -48,7 +48,10 @@ func newAddCmd() *cobra.Command {
 			}
 
 			if wait {
-				if err := waitForFetch(cmd.Context(), ctx, res.Bookmark.ID, time.Duration(waitSec)*time.Second); err != nil {
+				if res.Bookmark.DocumentID == nil {
+					return errors.New("server returned no document id to wait on")
+				}
+				if err := waitForFetch(cmd.Context(), ctx, *res.Bookmark.DocumentID, time.Duration(waitSec)*time.Second); err != nil {
 					return err
 				}
 				fmt.Println("fetched and indexed")
@@ -64,23 +67,23 @@ func newAddCmd() *cobra.Command {
 	return cmd
 }
 
-func waitForFetch(ctx context.Context, c *Context, bookmarkID string, timeout time.Duration) error {
+// waitForFetch polls the document by ID until it reaches a terminal state.
+// Polling the document directly (rather than scanning the bookmark list)
+// keeps this O(1) and correct regardless of corpus size — an earlier version
+// listed only the first 100 bookmarks and silently timed out on large
+// corpora even after the fetch had succeeded.
+func waitForFetch(ctx context.Context, c *Context, docID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		bms, err := c.Client.ListBookmarks(ctx, client.BookmarkListOpts{Limit: 100})
+		doc, err := c.Client.GetDocument(ctx, docID)
 		if err != nil {
 			return err
 		}
-		for _, b := range bms.Items {
-			if b.ID != bookmarkID {
-				continue
-			}
-			switch b.DocumentState {
-			case "fetched":
-				return nil
-			case "failed", "dead":
-				return fmt.Errorf("document state: %s", b.DocumentState)
-			}
+		switch doc.State {
+		case "fetched":
+			return nil
+		case "failed", "dead":
+			return fmt.Errorf("document state: %s", doc.State)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}

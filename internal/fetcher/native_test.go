@@ -161,3 +161,100 @@ More body.`
 	assert.Equal(t, "x", got.title)
 	assert.Contains(t, got.body, "Body without marker")
 }
+
+// TestNative_RejectsNonHTMLContentType guards the binary-misrouting fix: a
+// URL serving non-HTML, non-PDF content (images, octet-stream) must fail
+// with a PermanentError — not get its bytes fed to the HTML parser, and not
+// be retried. Regression test for "html: open stack of elements exceeds 512
+// nodes". (PDFs are handled by the PDF tier, covered separately.)
+func TestNative_RejectsNonHTMLContentType(t *testing.T) {
+	for _, ct := range []string{"image/png", "image/jpeg", "application/octet-stream"} {
+		t.Run(ct, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", ct)
+				_, _ = w.Write([]byte("%PDF-1.7\n\x00\x01\x02 binary, not html"))
+			}))
+			defer srv.Close()
+
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+			_, err := n.Fetch(context.Background(), srv.URL)
+			require.Error(t, err)
+
+			var pe *PermanentError
+			assert.ErrorAs(t, err, &pe, "non-HTML content must be a permanent (non-retryable) failure")
+			assert.Contains(t, err.Error(), "unsupported content type")
+		})
+	}
+}
+
+func TestIsReadableContentType(t *testing.T) {
+	for _, ok := range []string{"", "text/html", "text/html; charset=utf-8", "TEXT/HTML", "application/xhtml+xml", "text/plain"} {
+		assert.True(t, isReadableContentType(ok), "should allow %q", ok)
+	}
+	for _, bad := range []string{"application/pdf", "image/png", "application/octet-stream", "application/json", "video/mp4"} {
+		assert.False(t, isReadableContentType(bad), "should reject %q", bad)
+	}
+}
+
+func TestIsPDFResponse(t *testing.T) {
+	yes := []struct{ ct, url string }{
+		{"application/pdf", "https://x.com/doc"},
+		{"application/pdf; charset=binary", "https://x.com/doc"},
+		{"application/octet-stream", "https://x.com/file.pdf"}, // vague type + .pdf suffix
+		{"", "https://x.com/file.PDF"},                         // no type + .pdf suffix
+	}
+	for _, c := range yes {
+		assert.True(t, isPDFResponse(c.ct, c.url), "want PDF for %+v", c)
+	}
+	no := []struct{ ct, url string }{
+		{"text/html", "https://x.com/page.pdf"}, // declared HTML wins over .pdf suffix
+		{"application/octet-stream", "https://x.com/file.zip"},
+		{"image/png", "https://x.com/doc"},
+		{"", "https://x.com/page"},
+	}
+	for _, c := range no {
+		assert.False(t, isPDFResponse(c.ct, c.url), "want non-PDF for %+v", c)
+	}
+}
+
+// TestNative_PDF_FallsBackToJina: a PDF that local (pure-Go) extraction
+// can't read must fall through to the Jina tier rather than failing.
+func TestNative_PDF_FallsBackToJina(t *testing.T) {
+	// Source serves application/pdf bytes that ledongthuc can't extract.
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write([]byte("%PDF-1.4\nnot a parseable pdf body"))
+	}))
+	defer source.Close()
+
+	jinaBody := strings.Repeat("This is the PDF text rendered by Jina. ", 20)
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("Title: PDF via Jina\nURL Source: " + source.URL + "\n\nMarkdown Content:\n" + jinaBody))
+	}))
+	defer jina.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	res, err := n.Fetch(context.Background(), source.URL)
+	require.NoError(t, err)
+	assert.Equal(t, "jina", res.Meta["via"])
+	assert.Contains(t, res.Markdown, "rendered by Jina")
+	// Must be a content_type the documents CHECK constraint allows.
+	assert.Equal(t, "pdf", res.ContentType)
+}
+
+// TestNative_PDF_NoJinaIsPermanent: with Jina disabled, an unreadable PDF is
+// a permanent failure (no retries).
+func TestNative_PDF_NoJinaIsPermanent(t *testing.T) {
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write([]byte("%PDF-1.4\nnope"))
+	}))
+	defer source.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	_, err := n.Fetch(context.Background(), source.URL)
+	require.Error(t, err)
+	var pe *PermanentError
+	assert.ErrorAs(t, err, &pe)
+}

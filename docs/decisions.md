@@ -673,8 +673,122 @@ challenges or TLS-fingerprint checks, but eliminates the cheapest
 blocks. Sites that were 403-ing for us in the first import (inc.com
 style) start returning 200 with this change.
 
-If we need more, the next escalation is a headless-Chrome fetcher (via
-chromedp) — deferred until the cheap fixes stop being enough.
+If we need more, the next escalation is the TLS/HTTP2 fingerprint backend
+(see below), and beyond that a headless-Chrome fetcher (via chromedp) for
+JS challenges — deferred until the cheap fixes stop being enough.
+
+---
+
+## Anti-bot mitigation: pluggable TLS/HTTP2 fingerprint backend (uTLS)
+
+**Decision:** The Native fetcher issues requests through a `roundTripper`
+abstraction (`internal/fetcher/transport.go`) with two backends, selected
+by `fetcher.native.backend`:
+
+- `chrome` (default) — uTLS + a forked HTTP/2 stack
+  (`github.com/bogdanfinn/tls-client`, which wraps `bogdanfinn/utls` and
+  `bogdanfinn/fhttp`). Parrots a real Chrome TLS ClientHello and HTTP/2
+  SETTINGS/pseudo-header order. `chrome_120|124|131|133` pin a profile;
+  default is the latest (`Chrome_133`).
+- `stock` — Go's `net/http`. Zero extra network behavior to reason about,
+  but trivially fingerprinted as a bot.
+
+**Why:** The browser-thorough headers above only address the L0 (header)
+layer. Go's `crypto/tls` emits a *fixed* ClientHello — no GREASE,
+distinctive cipher/extension ordering — that Cloudflare/Akamai/DataDome
+JA3/JA4-blocklist on sight, and its HTTP/2 stack has an equally
+distinctive Akamai fingerprint. Both are checked *before* a single header
+byte is read, so no amount of header spoofing helps. uTLS + the forked h2
+stack make the whole network footprint Chrome's.
+
+Measured against a reflector (`tls.peet.ws`), the two backends are night
+and day:
+
+| | JA4 | Akamai h2 (pseudo-header order) | GREASE |
+|---|---|---|---|
+| `chrome` | `t13d1516h2_8daaf6152771_…` | `…\|m,a,s,p` (Chrome) | yes |
+| `stock` | `t13d1312h2_f57a46bbacb6_…` | `…\|a,m,p,s` (Go) | no |
+
+**Design notes:**
+- `tryReadability` / `tryJina` are backend-agnostic — they build an ordered
+  `[]header` and call `rt.do`. `fhttp.Header.Add` records header order as
+  it goes, so the chrome backend reproduces Chrome's header order;
+  pseudo-header order and H2 SETTINGS come from the profile.
+- `NewNative` never errors: if the chrome backend fails to initialize it
+  logs and degrades to `stock`. That's the "fallback if the dep is
+  unavailable" path.
+- The default UA and `sec-ch-ua` were bumped to Chrome 133 to stay
+  coherent with the default profile — a JA3 that says 133 paired with a UA
+  that says something else is itself a tell. **Override `backend` and
+  `user_agent` together.**
+- This also fixed a latent `net/http` gotcha: setting `Accept-Encoding` by
+  hand *disables* net/http's transparent gzip (it only decompresses when
+  the transport added the header). The `stock` backend now omits
+  `Accept-Encoding` (auto-gzip); the `chrome` backend sends a faithful
+  `gzip, deflate, br, zstd`.
+- **Decompression is NOT uniform across protocols in fhttp.** Its h2 and h1
+  paths auto-decompress by `Content-Encoding` (gzip/br/zstd), but its
+  **HTTP/3 (QUIC)** path does not — and the Chrome profile negotiates h3
+  with CDNs that advertise it (e.g. MDN/Cloudflare). The first cut shipped
+  binary garbage to disk for those pages. Fix: `chromeRT.do` decompresses
+  defensively when the transport left it compressed (`!resp.Uncompressed &&
+  Content-Encoding != ""`); on h2/h1-gzip `Uncompressed` is already true so
+  there's no double-decompress. Regression coverage: the live test
+  `TestNative_LiveSites_RenderMarkdown` (build tag `integration`) fetches a
+  real h3 site and asserts readable markdown — httptest can't reproduce it
+  because it's h1/h2 only.
+
+**Limits / next escalations:** still won't beat JS challenges
+(Turnstile/managed challenge), canvas/behavioral fingerprinting, or IP
+reputation. Those need a headless browser (chromedp) and/or residential
+proxies respectively — both deferred. The Jina fallback (above) still
+mops up the stubborn `ErrAntiBot` / `ErrLoginWall` tail.
+
+**Cost:** pulls in `bogdanfinn/{tls-client,fhttp,utls}` plus brotli, circl,
+and a quic-utls dep. Pinned at `tls-client v1.11.0`. Acceptable for the
+block-rate win; revisit if it bloats build time or the dep goes stale.
+
+---
+
+## PDF fetcher: two-tier, pure-Go local then Jina
+
+**Decision:** The Native fetcher detects PDFs by Content-Type
+(`application/pdf`, or a `.pdf` URL when the server is vague) and handles
+them in two tiers: **(1)** pure-Go local extraction on the downloaded bytes
+(`github.com/ledongthuc/pdf`); **(2)** if that yields too little text,
+errors, or panics, fall back to **Jina** (which renders PDFs server-side).
+Other non-HTML, non-PDF content (images, octet-stream) is a permanent
+failure — see the content-type guard above.
+
+**Why pure-Go for tier 1 (not pdftotext/MuPDF/UniDoc):** keeping curio a
+single binary with no runtime deps is the whole reason we left the Node
+`web2md` behind — a `pdftotext`/poppler subprocess would reintroduce that
+friction. The two genuinely high-quality embeddable options, `go-fitz`
+(MuPDF, cgo) and `unidoc/unipdf` (pure Go), are both **AGPL-or-commercial** —
+a problem for a Homebrew-distributed binary. `ledongthuc/pdf` (BSD-3,
+descended from `rsc.io/pdf`) is mediocre but permissive and dependency-free.
+
+**Why that mediocrity is acceptable:** tier 2 is the quality backstop. Jina
+uses a high-quality server-side extractor, so tier 1 only needs to cheaply
+nail the easy PDFs locally (avoiding a network round-trip + Jina rate
+limit); anything it botches falls back. The arXiv "Attention Is All You
+Need" PDF extracts cleanly via tier 1 (~33k chars); messier PDFs route to
+Jina. If local quality ever matters more, an optional `pdftotext` tier
+(used only when poppler is present) is the cleanest upgrade — no hard dep,
+no AGPL.
+
+**Robustness:** `ledongthuc` can panic on malformed input — recovered into
+an error so the caller falls back. A `minPDFChars` floor catches the
+"parsed but produced garbage" case. PDFs over 32 MiB skip local extraction
+(memory) and go straight to Jina.
+
+**Gotcha (cost me a retry loop):** `Result.ContentType` must be one of the
+values the `documents` CHECK constraint allows —
+`article | repo | video | pdf | thread | unknown`. PDFs use `pdf`. An
+out-of-set value (I first used `"document"`) fails the DB write *after* a
+successful fetch+extract, and that write error is retryable — so it loops
+silently re-fetching. The fetcher's content-type vocabulary is coupled to
+the migration's CHECK; keep them in sync.
 
 ---
 
@@ -747,6 +861,44 @@ plist (with `CURIO_SAFARI_DIR` env override for tests), `ParseSafari()`
 accepts an `io.ReadSeeker`, folder hierarchy is preserved in
 `FolderPath`. Root folders are labeled "Favorites" (BookmarksBar) and
 "Bookmarks Menu" rather than their internal identifiers.
+
+---
+
+## Firefox importer: copy the live places.sqlite, prefer the install default
+
+**Decision:** The Firefox parser reads `places.sqlite` (a SQLite DB, not a
+flat file). It **copies the DB plus its `-wal`/`-shm` sidecars to a temp
+dir and reads the copy**, walks `moz_bookmarks` (joined to `moz_places`),
+skips the Tags subtree and separators, and labels root containers by GUID.
+Profile discovery prefers the **`[Install*]` default** in `profiles.ini`.
+
+**Why copy (incl. the WAL):**
+- Firefox holds `places.sqlite` open in WAL mode while running. Opening it
+  directly fights for locks; opening with `immutable=1` avoids locks but
+  **ignores the WAL** — so a bookmark added seconds ago (still in the
+  `-wal`, not yet checkpointed) would be invisible. Copying the main file
+  *and* the sidecars lets SQLite replay the WAL on the copy, so recent
+  writes are seen and the user doesn't have to quit Firefox. The 2.4 MB WAL
+  observed on a fresh profile confirmed this isn't theoretical.
+
+**Why the `[Install*]` default:**
+- Post-67 Firefox is per-install. `profiles.ini` can list several profiles
+  (`default`, `default-release`) and a legacy `[Profile*] Default=1` that
+  is NOT what the running browser uses. The authoritative choice is the
+  `[Install<hash>]` section's `Default=`. We prefer it, then fall back to
+  `Default=1`, then the first profile.
+
+**Schema notes:** `moz_bookmarks.type` 1 = bookmark, 2 = folder, 3 =
+separator. `dateAdded` is **microseconds since the Unix epoch** (unlike
+Chrome's 1601 epoch). The Tags root (`tags________`) contains tag
+pseudo-bookmarks, not real folders — its subtree is skipped so tagged URLs
+don't double-count. Root GUIDs map to friendly labels ("Bookmarks Menu",
+"Bookmarks Toolbar", "Other Bookmarks", "Mobile Bookmarks").
+
+**Shape deviation:** `ParseFirefox` takes a *path*, not an `io.Reader` like
+the other parsers — SQLite needs a real file to open. The CLI passes the
+discovered (or `--file`) path straight through. This is the only importer
+that links the sqlite driver (already in the binary via the store).
 
 ---
 
