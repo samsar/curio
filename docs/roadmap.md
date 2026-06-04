@@ -3,6 +3,13 @@
 A staged plan. Each milestone is shippable on its own — the system does
 something useful at every step.
 
+> **Status (current):** M0 and M1 complete; M2 substantially complete —
+> Go-native default fetcher + Chrome fingerprint backend, YouTube, GitHub,
+> and a two-tier PDF fetcher are shipped. Remaining M2: `fetcher_rules.yaml`,
+> dead-link detection, GitHub issues/PRs/wiki. **M3 (MCP sidecar) is the
+> recommended next milestone.** See `docs/status.md` for the detailed
+> checklist.
+
 ## M0 — Walking skeleton
 
 **Goal:** one URL goes in, searchable text comes out.

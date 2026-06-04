@@ -1,5 +1,14 @@
 # Status
 
+**Current position:** M0 ✅ · M1 ✅ (all importers, incl. Firefox) · M2
+substantially complete — Go-native default fetcher + Chrome TLS/HTTP2
+fingerprint backend, YouTube, GitHub, and a two-tier PDF fetcher all
+shipped. Remaining M2: `fetcher_rules.yaml`, dead-link detection, GitHub
+issues/PRs/wiki. **Next milestone: M3 — MCP sidecar** (`cmd/curio-mcp`):
+expose `search_bookmarks` / `get_document` / `find_related` so Claude and
+other LLM clients can query the corpus. That's the highest-leverage step
+now that ingestion is solid — the payoff for everything built so far.
+
 ## M0 — Walking Skeleton
 
 **Code complete. All packages build, all unit tests green under `-race`.**
@@ -45,11 +54,8 @@ cd ~/projects/curio
 make build
 ./bin/curio daemon start
 
-# Configure the web2md path. Edit ~/.curio/config.yaml and add:
-#   fetcher:
-#     web2md:
-#       bin: "/Users/samansartipi/projects/experiments/web-to-markdown/web2md.js"
-# Then restart: ./bin/curio daemon stop && ./bin/curio daemon start
+# Fetching works out of the box: the default fetcher is Go-native (no
+# web2md/Node setup). PDFs extract locally (pure-Go) with a Jina fallback.
 
 ./bin/curio add https://martinfowler.com/articles/feature-toggles.html --wait
 ./bin/curio search "feature flag rollout"
