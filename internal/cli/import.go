@@ -47,7 +47,7 @@ func newImportCmd() *cobra.Command {
 		Use:   "import",
 		Short: "Bulk-import bookmarks from a browser or exported file",
 	}
-	cmd.AddCommand(newImportHTMLCmd(), newImportChromeCmd(), newImportSafariCmd())
+	cmd.AddCommand(newImportHTMLCmd(), newImportChromeCmd(), newImportSafariCmd(), newImportFirefoxCmd())
 	return cmd
 }
 

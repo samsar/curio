@@ -142,6 +142,7 @@ func run() error {
 			UserAgent:    cfg.Fetcher.Native.UserAgent,
 			JinaFallback: cfg.Fetcher.Native.JinaFallback,
 			JinaBaseURL:  cfg.Fetcher.Native.JinaBaseURL,
+			Backend:      cfg.Fetcher.Native.Backend,
 			Log:          slog.Default(),
 		})
 	case "web2md":

@@ -72,6 +72,11 @@ type Native struct {
 	JinaFallback   bool   `yaml:"jina_fallback"`
 	JinaBaseURL    string `yaml:"jina_base_url"` // override for offline tests
 	UserAgent      string `yaml:"user_agent"`
+	// Backend selects the HTTP transport: "chrome" (default) parrots a
+	// Chrome TLS+HTTP/2 fingerprint via uTLS to clear JA3/Akamai bot
+	// checks; "stock" uses Go's net/http. "chrome_120|124|131|133" pin a
+	// profile. See internal/fetcher/transport.go.
+	Backend string `yaml:"backend"`
 }
 
 type Web2MD struct {
@@ -114,6 +119,7 @@ func Default() Config {
 			Native: Native{
 				TimeoutSeconds: 30,
 				JinaFallback:   true,
+				Backend:        "chrome",
 			},
 			Web2MD: Web2MD{
 				Bin:            "web2md",

@@ -64,6 +64,8 @@ curio daemon {start|stop|status|logs}
 
 # Import variations
 curio import chrome [--profile X | --all-profiles | --list-profiles]
+curio import safari                 # reads ~/Library/Safari/Bookmarks.plist (needs Full Disk Access)
+curio import firefox                # reads the default profile's places.sqlite (Firefox can stay open)
 curio import html --dry-run         # parse + filter without sending
 curio import html --limit 200       # try a slice first
 curio import html --follow          # poll progress until queue drains
