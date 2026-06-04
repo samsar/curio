@@ -5,6 +5,7 @@ go 1.25.7
 require (
 	codeberg.org/readeck/go-readability/v2 v2.1.1
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.1
+	github.com/andybalholm/brotli v1.2.1
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/bogdanfinn/fhttp v0.6.0
 	github.com/bogdanfinn/tls-client v1.11.0
@@ -23,7 +24,6 @@ require (
 require (
 	github.com/Dharmey747/quic-go-utls v1.0.3-utls // indirect
 	github.com/JohannesKaufmann/dom v0.2.0 // indirect
-	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de // indirect
 	github.com/bogdanfinn/utls v1.7.3-barnius // indirect

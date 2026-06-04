@@ -154,8 +154,16 @@ func (c *chromeRT) do(ctx context.Context, target string, headers []header) (*fe
 	if err != nil {
 		return nil, err
 	}
-	// fhttp's HTTP/2 transport always decompresses by Content-Encoding
-	// (gzip/deflate/br/zstd), so a faithful Accept-Encoding is safe here.
+	// fhttp auto-decompresses by Content-Encoding on its HTTP/2 path (and
+	// gzip on HTTP/1.1), but NOT on HTTP/3 — and the Chrome profile
+	// negotiates h3 (QUIC) with CDNs that advertise it, so a faithful
+	// "gzip, deflate, br, zstd" can arrive raw. Decompress defensively when
+	// the transport didn't: Uncompressed stays false and a Content-Encoding
+	// remains. On h2/h1-gzip Uncompressed is already true, so no
+	// double-decompress.
+	if !resp.Uncompressed && resp.Header.Get("Content-Encoding") != "" {
+		resp.Body = fhttp.DecompressBody(resp)
+	}
 	return &fetchResponse{
 		statusCode: resp.StatusCode,
 		body:       resp.Body,

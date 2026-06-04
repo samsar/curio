@@ -724,9 +724,19 @@ and day:
 - This also fixed a latent `net/http` gotcha: setting `Accept-Encoding` by
   hand *disables* net/http's transparent gzip (it only decompresses when
   the transport added the header). The `stock` backend now omits
-  `Accept-Encoding` (auto-gzip); the `chrome` backend can send a faithful
-  `gzip, deflate, br, zstd` because fhttp's h2 transport always
-  decompresses by `Content-Encoding`.
+  `Accept-Encoding` (auto-gzip); the `chrome` backend sends a faithful
+  `gzip, deflate, br, zstd`.
+- **Decompression is NOT uniform across protocols in fhttp.** Its h2 and h1
+  paths auto-decompress by `Content-Encoding` (gzip/br/zstd), but its
+  **HTTP/3 (QUIC)** path does not — and the Chrome profile negotiates h3
+  with CDNs that advertise it (e.g. MDN/Cloudflare). The first cut shipped
+  binary garbage to disk for those pages. Fix: `chromeRT.do` decompresses
+  defensively when the transport left it compressed (`!resp.Uncompressed &&
+  Content-Encoding != ""`); on h2/h1-gzip `Uncompressed` is already true so
+  there's no double-decompress. Regression coverage: the live test
+  `TestNative_LiveSites_RenderMarkdown` (build tag `integration`) fetches a
+  real h3 site and asserts readable markdown — httptest can't reproduce it
+  because it's h1/h2 only.
 
 **Limits / next escalations:** still won't beat JS challenges
 (Turnstile/managed challenge), canvas/behavioral fingerprinting, or IP
