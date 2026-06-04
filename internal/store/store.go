@@ -145,6 +145,11 @@ type BookmarkStore interface {
 	List(ctx context.Context, tenantID string, opts ListBookmarksOpts) ([]*Bookmark, error)
 	Delete(ctx context.Context, id string) error
 	LinkDocument(ctx context.Context, bookmarkID, documentID string) error
+
+	// TagsForDocument returns the deduplicated set of tags across all
+	// bookmarks (any source) that reference the document. Empty if none.
+	// The indexer uses it to denormalize tags into chunks_fts for boosting.
+	TagsForDocument(ctx context.Context, tenantID, documentID string) ([]string, error)
 }
 
 // ListBookmarksOpts are filters for BookmarkStore.List. Empty fields mean

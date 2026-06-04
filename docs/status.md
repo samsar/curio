@@ -70,10 +70,9 @@ These are not bugs — they're scope-trimmed pieces deferred from M0 to M1+:
 - **`curio init`** — there's no explicit init command; the CLI auto-inits
   `~/.curio` on first run. If a future workflow needs explicit init
   (e.g., to choose a different embedder upfront), adding it is trivial.
-- **Tags from bookmarks not fully wired.** Tags are denormalized into
-  `chunks_fts` at index time, but there's no `BookmarkStore.ListByDocument`
-  on the store interface — so the indexer can't look up a document's
-  bookmark tags to feed them in. Lands when M1 importers do.
+- ~~**Tags from bookmarks not wired.**~~ ✅ Done — `BookmarkStore.TagsForDocument`
+  unions a doc's bookmark tags (across sources); the index handler feeds them
+  into `chunks_fts`, so a tag word is searchable even when absent from the body.
 - **No reindex CLI yet.** Documented in `docs/decisions.md`; needed when
   someone first wants to swap embedding models.
 - ~~**Search filters**~~ ✅ Done — `content_type`, `host`, and `source` are
