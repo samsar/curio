@@ -240,6 +240,19 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		return nil, fmt.Errorf("native: HTTP %d", resp.statusCode)
 	}
 
+	// Content-type guard: Readability only understands HTML. If this URL
+	// serves a PDF, image, or other binary, feeding its bytes to the HTML
+	// parser blows x/net/html's nesting limit ("open stack of elements
+	// exceeds 512 nodes") — and because that failure is deterministic, the
+	// job would otherwise re-download the (often large) file on every retry.
+	// Fail permanently with a clear reason. Closing the body here without
+	// reading it avoids pulling down the whole file. (Real PDF extraction is
+	// a separate, planned fetcher; this just stops the misrouting + retries.)
+	if !isReadableContentType(resp.contentType) {
+		return nil, &PermanentError{Err: fmt.Errorf(
+			"native: unsupported content type %q (not HTML); URL: %s", resp.contentType, target)}
+	}
+
 	finalURL := resp.finalURL
 	if finalURL == nil {
 		finalURL, _ = url.Parse(target)
@@ -340,6 +353,24 @@ var (
 	loginTitleRE = regexp.MustCompile(`(?i)^(sign in|log in|join now|join linkedin)`)
 	loginPathRE  = regexp.MustCompile(`(?i)/(login|authwall|signin|signup)\b`)
 )
+
+// isReadableContentType reports whether a Content-Type is something the HTML
+// Readability path can handle. Empty/missing is allowed (many servers omit
+// or mislabel it, and genuine HTML still parses); text/* and XHTML are
+// allowed; everything explicit and non-text (application/pdf, image/*,
+// application/octet-stream, …) is rejected so binary bodies never reach the
+// HTML parser.
+func isReadableContentType(ct string) bool {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if ct == "" {
+		return true
+	}
+	// Drop parameters like "; charset=utf-8".
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	return strings.HasPrefix(ct, "text/") || ct == "application/xhtml+xml"
+}
 
 // isHostUnreachable returns true when err represents the host being
 // genuinely unreachable (DNS lookup failed, connection refused, no route).

@@ -48,9 +48,10 @@ type header struct{ key, value string }
 // fetchResponse is the backend-agnostic slice of an HTTP response the
 // fetcher actually consumes.
 type fetchResponse struct {
-	statusCode int
-	body       io.ReadCloser
-	finalURL   *url.URL
+	statusCode  int
+	body        io.ReadCloser
+	finalURL    *url.URL
+	contentType string // raw Content-Type header (may include "; charset=...")
 }
 
 // newRoundTripper builds the backend named by backend:
@@ -103,9 +104,10 @@ func (s *stockRT) do(ctx context.Context, target string, headers []header) (*fet
 		return nil, err
 	}
 	return &fetchResponse{
-		statusCode: resp.StatusCode,
-		body:       resp.Body,
-		finalURL:   resp.Request.URL,
+		statusCode:  resp.StatusCode,
+		body:        resp.Body,
+		finalURL:    resp.Request.URL,
+		contentType: resp.Header.Get("Content-Type"),
 	}, nil
 }
 
@@ -165,9 +167,10 @@ func (c *chromeRT) do(ctx context.Context, target string, headers []header) (*fe
 		resp.Body = fhttp.DecompressBody(resp)
 	}
 	return &fetchResponse{
-		statusCode: resp.StatusCode,
-		body:       resp.Body,
-		finalURL:   resp.Request.URL,
+		statusCode:  resp.StatusCode,
+		body:        resp.Body,
+		finalURL:    resp.Request.URL,
+		contentType: resp.Header.Get("Content-Type"),
 	}, nil
 }
 

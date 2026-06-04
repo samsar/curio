@@ -161,3 +161,37 @@ More body.`
 	assert.Equal(t, "x", got.title)
 	assert.Contains(t, got.body, "Body without marker")
 }
+
+// TestNative_RejectsNonHTMLContentType guards the PDF-misrouting fix: a URL
+// serving application/pdf (or any non-HTML type) must fail with a
+// PermanentError — not get its bytes fed to the HTML parser, and not be
+// retried. Regression test for "html: open stack of elements exceeds 512
+// nodes" on a 6 MB PDF that re-downloaded on every attempt.
+func TestNative_RejectsNonHTMLContentType(t *testing.T) {
+	for _, ct := range []string{"application/pdf", "image/png", "application/octet-stream"} {
+		t.Run(ct, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", ct)
+				_, _ = w.Write([]byte("%PDF-1.7\n\x00\x01\x02 binary, not html"))
+			}))
+			defer srv.Close()
+
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+			_, err := n.Fetch(context.Background(), srv.URL)
+			require.Error(t, err)
+
+			var pe *PermanentError
+			assert.ErrorAs(t, err, &pe, "non-HTML content must be a permanent (non-retryable) failure")
+			assert.Contains(t, err.Error(), "unsupported content type")
+		})
+	}
+}
+
+func TestIsReadableContentType(t *testing.T) {
+	for _, ok := range []string{"", "text/html", "text/html; charset=utf-8", "TEXT/HTML", "application/xhtml+xml", "text/plain"} {
+		assert.True(t, isReadableContentType(ok), "should allow %q", ok)
+	}
+	for _, bad := range []string{"application/pdf", "image/png", "application/octet-stream", "application/json", "video/mp4"} {
+		assert.False(t, isReadableContentType(bad), "should reject %q", bad)
+	}
+}
