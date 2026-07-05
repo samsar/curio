@@ -112,26 +112,31 @@ func TestNormalize_YouTube_PlaylistOnly(t *testing.T) {
 
 func TestParseGitHubURL(t *testing.T) {
 	cases := []struct {
-		name  string
-		url   string
-		ok    bool
-		typ   string
-		owner string
-		repo  string
-		ref   string
-		path  string
+		name   string
+		url    string
+		ok     bool
+		typ    string
+		owner  string
+		repo   string
+		ref    string
+		path   string
+		number int
 	}{
-		{"repo", "https://github.com/kubernetes/kubernetes", true, "repo", "kubernetes", "kubernetes", "", ""},
-		{"repo trailing slash", "https://github.com/kubernetes/kubernetes/", true, "repo", "kubernetes", "kubernetes", "", ""},
-		{"file", "https://github.com/owner/repo/blob/main/docs/arch.md", true, "file", "owner", "repo", "main", "docs/arch.md"},
-		{"file root", "https://github.com/owner/repo/blob/main/README.md", true, "file", "owner", "repo", "main", "README.md"},
-		{"tree", "https://github.com/owner/repo/tree/main/src", true, "repo", "owner", "repo", "main", ""},
-		{"issue", "https://github.com/owner/repo/issues/123", true, "issue", "owner", "repo", "", ""},
-		{"pull", "https://github.com/owner/repo/pull/456", true, "pull", "owner", "repo", "", ""},
-		{"issues list", "https://github.com/owner/repo/issues", true, "other", "owner", "repo", "", ""},
-		{"not github", "https://example.com/owner/repo", false, "", "", "", "", ""},
-		{"settings page", "https://github.com/settings/profile", false, "", "", "", "", ""},
-		{"owner only", "https://github.com/kubernetes", false, "", "", "", "", ""},
+		{"repo", "https://github.com/kubernetes/kubernetes", true, "repo", "kubernetes", "kubernetes", "", "", 0},
+		{"repo trailing slash", "https://github.com/kubernetes/kubernetes/", true, "repo", "kubernetes", "kubernetes", "", "", 0},
+		{"file", "https://github.com/owner/repo/blob/main/docs/arch.md", true, "file", "owner", "repo", "main", "docs/arch.md", 0},
+		{"file root", "https://github.com/owner/repo/blob/main/README.md", true, "file", "owner", "repo", "main", "README.md", 0},
+		{"tree", "https://github.com/owner/repo/tree/main/src", true, "repo", "owner", "repo", "main", "", 0},
+		{"issue", "https://github.com/owner/repo/issues/123", true, "issue", "owner", "repo", "", "", 123},
+		{"issue new", "https://github.com/owner/repo/issues/new", true, "other", "owner", "repo", "", "", 0},
+		{"pull", "https://github.com/owner/repo/pull/456", true, "pull", "owner", "repo", "", "", 456},
+		{"pull files view", "https://github.com/owner/repo/pull/456/files", true, "pull", "owner", "repo", "", "", 456},
+		{"issues list", "https://github.com/owner/repo/issues", true, "other", "owner", "repo", "", "", 0},
+		{"wiki home", "https://github.com/owner/repo/wiki", true, "wiki", "owner", "repo", "", "Home", 0},
+		{"wiki page", "https://github.com/owner/repo/wiki/Getting-Started", true, "wiki", "owner", "repo", "", "Getting-Started", 0},
+		{"not github", "https://example.com/owner/repo", false, "", "", "", "", "", 0},
+		{"settings page", "https://github.com/settings/profile", false, "", "", "", "", "", 0},
+		{"owner only", "https://github.com/kubernetes", false, "", "", "", "", "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,6 +150,7 @@ func TestParseGitHubURL(t *testing.T) {
 				assert.Equal(t, tc.repo, info.Repo)
 				assert.Equal(t, tc.ref, info.Ref)
 				assert.Equal(t, tc.path, info.Path)
+				assert.Equal(t, tc.number, info.Number)
 			}
 		})
 	}

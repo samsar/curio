@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -142,15 +143,32 @@ func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// boolParam reports whether a query parameter is set to a truthy value
+// ("1" or "true", case-insensitive).
+func boolParam(r *http.Request, name string) bool {
+	v := strings.ToLower(r.URL.Query().Get(name))
+	return v == "1" || v == "true"
+}
+
 // handleRefetchDocument enqueues a fresh fetch job for the document. The
 // existing extraction stays — when the new fetch finishes, it'll create
 // a new extraction row and bump current_extraction_id. Returns 202 with
 // the new job_id so the caller can poll.
+//
+// Dead documents (confirmed dead links) are refused with 409 unless
+// ?force=1 — that's the whole point of the dead state. Force exists
+// because the soft-404 heuristic can false-positive.
 func (d Deps) handleRefetchDocument(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	doc, err := d.Documents.GetByID(r.Context(), id)
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+
+	if doc.State == store.DocStateDead && !boolParam(r, "force") {
+		writeProblem(w, http.StatusConflict, "document is dead",
+			"this document's URL was confirmed dead (404/410 or a not-found page); pass force=1 to refetch anyway")
 		return
 	}
 
@@ -174,8 +192,13 @@ func (d Deps) handleRefetchDocument(w http.ResponseWriter, r *http.Request) {
 // handleRefetchAll enqueues a fetch job for every document for the tenant
 // (or just those in a particular state, via ?state=). Useful after a
 // fetcher change to rebuild the corpus.
+//
+// The no-filter form skips dead documents — retrying confirmed dead links
+// on every bulk refetch wastes the whole retry budget per URL. Asking for
+// ?state=dead explicitly is the deliberate escape hatch (with refetch, a
+// dead doc goes back to pending and gets a fresh chance).
 func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
-	wantState := r.URL.Query().Get("state") // empty = all states
+	wantState := r.URL.Query().Get("state") // empty = all states except dead
 
 	ds, ok := d.Documents.(*sqlite.Documents)
 	if !ok {
@@ -183,10 +206,24 @@ func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
 			"DocumentStore impl does not expose bulk listing")
 		return
 	}
-	ids, err := ds.ListIDs(r.Context(), d.TenantID, wantState)
-	if err != nil {
-		writeError(w, err)
-		return
+
+	var ids []string
+	var err error
+	if wantState == "" {
+		for _, st := range []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed} {
+			stIDs, listErr := ds.ListIDs(r.Context(), d.TenantID, st)
+			if listErr != nil {
+				writeError(w, listErr)
+				return
+			}
+			ids = append(ids, stIDs...)
+		}
+	} else {
+		ids, err = ds.ListIDs(r.Context(), d.TenantID, wantState)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 
 	enqueued := 0

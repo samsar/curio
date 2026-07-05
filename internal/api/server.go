@@ -74,6 +74,7 @@ func NewServer(addr string, deps Deps) *Server {
 			r.Get("/", deps.handleListDocuments)
 			r.Get("/{id}", deps.handleGetDocument)
 			r.Get("/{id}/content", deps.handleGetDocumentContent)
+			r.Get("/{id}/related", deps.handleRelatedDocuments)
 			r.Post("/{id}/refetch", deps.handleRefetchDocument)
 			r.Post("/refetch-all", deps.handleRefetchAll)
 			r.Post("/{id}/reindex", deps.handleReindexDocument)

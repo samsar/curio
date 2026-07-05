@@ -198,11 +198,22 @@ type SearchFilters struct {
 	ContentType []string // documents.content_type IN (...)
 	Host        []string // URL host (http/https) IN (...)
 	Source      []string // EXISTS a bookmark with bookmarks.source IN (...)
+	// ExcludeDocumentID drops one document from the results. Used by
+	// find-related to exclude the source document; not exposed through
+	// the public search API.
+	ExcludeDocumentID string
 }
 
 // IsEmpty reports whether no filter dimension is set.
 func (f SearchFilters) IsEmpty() bool {
-	return len(f.ContentType) == 0 && len(f.Host) == 0 && len(f.Source) == 0
+	return len(f.ContentType) == 0 && len(f.Host) == 0 && len(f.Source) == 0 &&
+		f.ExcludeDocumentID == ""
+}
+
+// ChunkEmbedding is one stored chunk vector, read back from chunks_vec.
+type ChunkEmbedding struct {
+	ChunkID   string
+	Embedding []float32
 }
 
 // ChunkStore writes and queries the chunks tables + FTS5 + vec virtual tables.
@@ -220,6 +231,11 @@ type ChunkStore interface {
 	// chunks_vec, scoped by filters. The embedding length must match the
 	// schema's vec dimension; mismatched lengths return an error.
 	VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int, filters SearchFilters) ([]ChunkHit, error)
+
+	// EmbeddingsForDocument reads the stored chunk vectors for a document
+	// in chunk order. Returns an empty slice for documents with no indexed
+	// chunks (not yet fetched/indexed, or failed).
+	EmbeddingsForDocument(ctx context.Context, documentID string) ([]ChunkEmbedding, error)
 
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
 }

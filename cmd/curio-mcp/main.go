@@ -95,8 +95,8 @@ func registerTools(s *mcp.Server, c *client.Client) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "find_related",
-		Description: "Given a doc_id, find other saved documents related to it by semantic similarity " +
-			"to its title/content.",
+		Description: "Given a doc_id, find other saved documents related to it by embedding similarity " +
+			"over the document's indexed content (vector nearest-neighbor, not title matching).",
 	}, relatedHandler(c))
 }
 
@@ -202,22 +202,17 @@ func relatedHandler(c *client.Client) mcp.ToolHandlerFor[relatedInput, searchOut
 		if k <= 0 {
 			k = 5
 		}
-		doc, err := c.GetDocument(ctx, in.ID)
+		res, err := c.RelatedDocuments(ctx, in.ID, k)
 		if err != nil {
-			return nil, searchOutput{}, fmt.Errorf("get document: %w", err)
+			return nil, searchOutput{}, fmt.Errorf("find related: %w", err)
 		}
-		// Use the title as the similarity query; over-fetch by one so we can
-		// drop the document itself from the results.
-		query := docTitle(*doc)
-		res, err := c.Search(ctx, client.SearchRequest{Query: query, K: k + 1})
-		if err != nil {
-			return nil, searchOutput{}, fmt.Errorf("search: %w", err)
-		}
+		// The daemon already excludes the source document; keep the
+		// client-side exclusion as belt-and-braces.
 		out := toSearchOutput(res.Items, in.ID)
 		if len(out.Results) > k {
 			out.Results = out.Results[:k]
 		}
-		return textResult(formatHits("related to "+query, out.Results)), out, nil
+		return textResult(formatHits("related to "+in.ID, out.Results)), out, nil
 	}
 }
 

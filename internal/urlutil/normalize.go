@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -192,11 +193,12 @@ func YouTubeVideoID(u *url.URL) (string, bool) {
 
 // GitHubURLInfo describes the components of a parsed GitHub URL.
 type GitHubURLInfo struct {
-	Owner string // e.g. "kubernetes"
-	Repo  string // e.g. "kubernetes"
-	Type  string // "repo", "file", "tree", "issue", "pull", "other"
-	Ref   string // branch or tag for file/tree URLs
-	Path  string // file path within repo
+	Owner  string // e.g. "kubernetes"
+	Repo   string // e.g. "kubernetes"
+	Type   string // "repo", "file", "issue", "pull", "wiki", "other"
+	Ref    string // branch or tag for file/tree URLs
+	Path   string // file path within repo, or wiki page name
+	Number int    // issue or PR number for issue/pull URLs
 }
 
 // ParseGitHubURL extracts structured info from a GitHub URL.
@@ -243,15 +245,37 @@ func ParseGitHubURL(u *url.URL) (GitHubURLInfo, bool) {
 			info.Type = "repo"
 			info.Ref = parts[3]
 		case "issues":
-			info.Type = "issue"
+			// /owner/repo/issues/123 — but /issues/new and similar
+			// non-numeric paths aren't fetchable issues.
+			if n, err := strconv.Atoi(parts[3]); err == nil && n > 0 {
+				info.Type = "issue"
+				info.Number = n
+			} else {
+				info.Type = "other"
+			}
 		case "pull":
-			info.Type = "pull"
+			// /owner/repo/pull/456 (web URL is singular; the REST API
+			// path is /pulls/456). Sub-pages like /pull/456/files still
+			// identify the PR.
+			if n, err := strconv.Atoi(parts[3]); err == nil && n > 0 {
+				info.Type = "pull"
+				info.Number = n
+			} else {
+				info.Type = "other"
+			}
+		case "wiki":
+			info.Type = "wiki"
+			info.Path = strings.Join(parts[3:], "/")
 		default:
 			info.Type = "other"
 		}
 	} else if len(parts) == 3 {
 		switch parts[2] {
-		case "issues", "pulls", "actions", "wiki", "releases", "tags":
+		case "wiki":
+			// /owner/repo/wiki — the wiki home page.
+			info.Type = "wiki"
+			info.Path = "Home"
+		case "issues", "pulls", "actions", "releases", "tags":
 			info.Type = "other"
 		}
 	}

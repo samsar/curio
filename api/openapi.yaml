@@ -233,6 +233,38 @@ paths:
               schema: { type: string }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/documents/{id}/related:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      - { in: query, name: k, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 10 },
+          description: Max related documents to return. }
+    get:
+      tags: [documents]
+      operationId: findRelatedDocuments
+      summary: Find documents related to this one by embedding similarity
+      description: >
+        Ranks other documents by vector similarity to this document's stored
+        chunk embeddings (mean-pooled; no query text involved). The source
+        document is excluded. Returns an empty items list when the document
+        has no indexed chunks yet (pending/failed/dead). Scores are raw
+        vector similarities (1/(1+L2 distance), 0..1) and are NOT comparable
+        with /v1/search's RRF-fused scores.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [doc_id, items]
+                properties:
+                  doc_id: { type: string, format: uuid }
+                  took_ms: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/SearchHit" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/documents/{id}/references:
     parameters:
       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
@@ -404,7 +436,7 @@ components:
         folder_path:   { type: string, nullable: true }
         tags:          { type: array, items: { type: string } }
         document_id:   { type: string, format: uuid, nullable: true }
-        document_state:{ type: string, enum: [pending, fetched, failed, dead], description: "Derived from documents.state for convenience" }
+        document_state: { type: string, enum: [pending, fetched, failed, dead], description: "Derived from documents.state for convenience" }
         created_at:    { type: string, format: date-time }
         updated_at:    { type: string, format: date-time }
       required: [id, url, saved_at, source]
@@ -514,7 +546,7 @@ components:
               ord:         { type: integer }
               text:        { type: string, description: "Chunk text, possibly with highlight markers" }
               bm25_score:  { type: number, nullable: true }
-              vector_score:{ type: number, nullable: true }
+              vector_score: { type: number, nullable: true }
 
     SearchResponse:
       type: object

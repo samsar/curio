@@ -249,3 +249,68 @@ func TestChunks_SearchFilters(t *testing.T) {
 		})
 	}
 }
+
+func TestChunks_EmbeddingsForDocument_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	ch := NewChunks(db, vecDim)
+
+	ids := seedDocs(t, db, "local", "https://example.com/roundtrip")
+	docID := ids[0]
+	ext := latestExtractionID(t, db, docID)
+
+	inputs := []store.ChunkInput{
+		{Text: "first chunk", Embedding: fillVec(0.10)},
+		{Text: "second chunk", Embedding: fillVec(0.20)},
+		{Text: "third chunk", Embedding: fillVec(0.30)},
+	}
+	require.NoError(t, ch.ReplaceForDocument(ctx, docID, ext, "", nil, inputs))
+
+	embs, err := ch.EmbeddingsForDocument(ctx, docID)
+	require.NoError(t, err)
+	require.Len(t, embs, 3)
+
+	// Chunk order preserved, float values round-trip exactly.
+	for i, want := range []float32{0.10, 0.20, 0.30} {
+		require.Len(t, embs[i].Embedding, vecDim)
+		assert.Equal(t, want, embs[i].Embedding[0], "chunk %d first component", i)
+		assert.Equal(t, want, embs[i].Embedding[vecDim-1], "chunk %d last component", i)
+	}
+}
+
+func TestChunks_EmbeddingsForDocument_EmptyForUnindexed(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	ch := NewChunks(db, vecDim)
+
+	ids := seedDocs(t, db, "local", "https://example.com/unindexed")
+	embs, err := ch.EmbeddingsForDocument(ctx, ids[0])
+	require.NoError(t, err)
+	assert.Empty(t, embs)
+}
+
+func TestChunks_VectorSearch_ExcludeDocument(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	ch := NewChunks(db, vecDim)
+
+	ids := seedDocs(t, db, "local", "https://example.com/self", "https://example.com/other")
+	for i, docID := range ids {
+		ext := latestExtractionID(t, db, docID)
+		require.NoError(t, ch.ReplaceForDocument(ctx, docID, ext, "", nil,
+			[]store.ChunkInput{{Text: "text", Embedding: fillVec(float32(i+1) * 0.1)}}))
+	}
+
+	// Query at the excluded doc's own embedding: without exclusion its
+	// chunk would be the nearest hit. With exclusion, only the other
+	// doc's chunk may come back — this exercises the over-fetch path,
+	// since sqlite-vec applies predicates after the k cutoff.
+	hits, err := ch.VectorSearch(ctx, "local", fillVec(0.1), 10,
+		store.SearchFilters{ExcludeDocumentID: ids[0]})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits)
+	for _, h := range hits {
+		assert.NotEqual(t, ids[0], h.DocumentID, "excluded document leaked into results")
+	}
+	assert.Equal(t, ids[1], hits[0].DocumentID)
+}

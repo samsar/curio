@@ -12,6 +12,7 @@ func newRefetchCmd() *cobra.Command {
 	var (
 		all   bool
 		state string
+		force bool
 	)
 	cmd := &cobra.Command{
 		Use:   "refetch [document-id]",
@@ -32,17 +33,20 @@ func newRefetchCmd() *cobra.Command {
 			if len(args) != 1 {
 				return errors.New("provide a document ID or pass --all")
 			}
-			return refetchOne(cmd.Context(), ctx, args[0])
+			return refetchOne(cmd.Context(), ctx, args[0], force)
 		},
 	}
-	cmd.Flags().BoolVar(&all, "all", false, "Refetch every document (use --state to filter)")
+	cmd.Flags().BoolVar(&all, "all", false,
+		"Refetch every document (use --state to filter; dead documents are skipped unless --state=dead)")
 	cmd.Flags().StringVar(&state, "state", "",
 		"With --all, only refetch documents in this state (pending|fetched|failed|dead)")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"Refetch even if the document is dead (confirmed dead link)")
 	return cmd
 }
 
-func refetchOne(httpCtx context.Context, c *Context, docID string) error {
-	resp, err := c.Client.RefetchDocument(httpCtx, docID)
+func refetchOne(httpCtx context.Context, c *Context, docID string, force bool) error {
+	resp, err := c.Client.RefetchDocument(httpCtx, docID, force)
 	if err != nil {
 		return err
 	}

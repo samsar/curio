@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -154,6 +155,47 @@ func TestFetchHandler_MissingDocument_Permanent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrPermanent)
 }
 
+// TestFetchHandler_DeadLinkSentinelSurvivesBridge: the ErrPermanent bridge
+// must preserve the fetcher's sentinel chain (double-%w) so the
+// permanent-failure hook can distinguish dead links from other failures.
+func TestFetchHandler_DeadLinkSentinelSurvivesBridge(t *testing.T) {
+	deps, _, ff := newTestDeps(t)
+	ff.res = nil
+	ff.err = &fetcher.PermanentError{Err: fetcher.ErrDeadLink}
+
+	doc := &store.Document{TenantID: "local", URL: "https://x/gone", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Upsert(context.Background(), doc))
+
+	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
+	err := FetchHandler(deps)(context.Background(), &store.Job{Payload: payload})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPermanent)
+	assert.ErrorIs(t, err, fetcher.ErrDeadLink, "sentinel must survive the ErrPermanent bridge")
+}
+
+func TestMarkDocFailed_DeadLinkGoesDead(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	ctx := context.Background()
+
+	doc := &store.Document{TenantID: "local", URL: "https://x/gone", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+
+	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
+	job := &store.Job{Payload: payload}
+
+	// Dead-link cause → dead.
+	require.NoError(t, MarkDocFailed(deps)(ctx, job, &fetcher.PermanentError{Err: fetcher.ErrDeadLink}))
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateDead, got.State)
+
+	// Any other cause → failed.
+	require.NoError(t, MarkDocFailed(deps)(ctx, job, errors.New("some other permanent failure")))
+	got, err = deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateFailed, got.State)
+}
+
 func TestFetchHandler_BadPayload_Permanent(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	err := FetchHandler(deps)(context.Background(), &store.Job{Payload: []byte("not json")})
@@ -271,6 +313,53 @@ func TestWorker_FullFetchIndexChain(t *testing.T) {
 	var n int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
 	assert.Equal(t, 2, n, "fetch + index should both be done")
+}
+
+// TestWorker_DeadLinkMarksDocDead runs the real worker loop end-to-end:
+// fetcher says dead link → job permanently fails on attempt 1 → the
+// permanent-failure hook flips the document to state=dead (not failed).
+func TestWorker_DeadLinkMarksDocDead(t *testing.T) {
+	deps, db, ff := newTestDeps(t)
+	ff.res = nil
+	ff.err = &fetcher.PermanentError{Err: fmt.Errorf("native: dead link (HTTP 404): %w", fetcher.ErrDeadLink)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/gone", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+
+	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
+	require.NoError(t, deps.Queue.Enqueue(ctx, &store.Job{
+		TenantID: "local", Kind: store.JobKindFetch, Payload: payload,
+	}))
+
+	worker := NewWorker(deps.Queue, WorkerOptions{PollInterval: 10 * time.Millisecond})
+	Register(worker, deps)
+
+	done := make(chan struct{})
+	go func() { _ = worker.Run(ctx); close(done) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		d, _ := deps.Documents.GetByID(ctx, doc.ID)
+		if d != nil && d.State == store.DocStateDead {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+
+	got, err := deps.Documents.GetByID(context.Background(), doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateDead, got.State)
+
+	// One attempt only — dead links must not burn the retry budget.
+	var attempts int
+	require.NoError(t, db.QueryRow(`SELECT attempts FROM jobs WHERE kind = ?`, store.JobKindFetch).Scan(&attempts))
+	assert.Equal(t, 1, attempts)
 }
 
 func TestWorker_PermanentFailureDoesNotRetry(t *testing.T) {

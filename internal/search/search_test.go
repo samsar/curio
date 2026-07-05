@@ -162,3 +162,56 @@ func TestSanitizeBM25Query(t *testing.T) {
 		}
 	}
 }
+
+func TestEngine_Related_RanksByProximity(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, docIDs := seedCorpus(t, db)
+
+	// Related needs no embedder — it reads stored vectors. The fake is
+	// only here to satisfy the constructor.
+	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
+
+	res, err := engine.Related(context.Background(), RelatedRequest{
+		TenantID:   "local",
+		DocumentID: docIDs[0], // postgres @ 0.10
+		K:          5,
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 2, "self must be excluded")
+
+	// btree (0.20) is nearer to postgres (0.10) than llm (0.30).
+	assert.Contains(t, res.Items[0].Document.URL, "btree")
+	assert.Contains(t, res.Items[1].Document.URL, "llm")
+	for _, it := range res.Items {
+		assert.NotEqual(t, docIDs[0], it.Document.ID)
+	}
+}
+
+func TestEngine_Related_UnindexedDocIsEmpty(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+
+	// A document with no chunks: create one without indexing it.
+	ctx := context.Background()
+	d := &store.Document{TenantID: "local", URL: "https://example.com/pending", ContentType: store.ContentTypeArticle}
+	require.NoError(t, docs.Upsert(ctx, d))
+
+	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
+	res, err := engine.Related(ctx, RelatedRequest{TenantID: "local", DocumentID: d.ID, K: 5})
+	require.NoError(t, err)
+	assert.Empty(t, res.Items)
+}
+
+func TestEngine_Related_UnknownDocIsNotFound(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+
+	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
+	_, err := engine.Related(context.Background(), RelatedRequest{
+		TenantID:   "local",
+		DocumentID: "00000000-0000-0000-0000-000000000000",
+		K:          5,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, store.ErrNotFound, "unknown doc must surface ErrNotFound for the API's 404 mapping")
+}
