@@ -1274,6 +1274,12 @@ bulk escape hatch (refetch resets state to pending either way).
 `hostFailureFromError` — a dead path says nothing about the rest of
 the host.
 
+**Kill switch:** `fetcher.native.dead_link_detection: false` disables
+the whole classifier (404/410 go back to plain retryable errors, the
+soft-404 heuristics are skipped). Default true. Exists because a new
+always-on heuristic needs an escape hatch bigger than per-doc
+`--force` if a corpus turns out to false-positive systematically.
+
 **No archive.org fallback (yet):** the roadmap sketched a Wayback
 fallback for dead links; scoped out of this pass to keep detection
 observable on its own. If added later, it belongs in `Native.Fetch`

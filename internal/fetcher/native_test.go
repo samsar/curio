@@ -2,6 +2,7 @@ package fetcher
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -277,7 +278,7 @@ func TestNative_Hard404_DeadLink(t *testing.T) {
 			}))
 			defer jina.Close()
 
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", DeadLinkDetection: true})
 			_, err := n.Fetch(context.Background(), srv.URL)
 			require.Error(t, err)
 
@@ -307,7 +308,7 @@ func TestNative_Soft404_TitleDetected(t *testing.T) {
 	}))
 	defer jina.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", DeadLinkDetection: true})
 	_, err := n.Fetch(context.Background(), srv.URL)
 	require.Error(t, err)
 
@@ -331,7 +332,7 @@ func TestNative_Soft404_RedirectToHomepage(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false, DeadLinkDetection: true})
 	_, err := n.Fetch(context.Background(), srv.URL+"/blog/deleted-article")
 	require.Error(t, err)
 
@@ -339,6 +340,38 @@ func TestNative_Soft404_RedirectToHomepage(t *testing.T) {
 	assert.ErrorAs(t, err, &pe)
 	assert.ErrorIs(t, err, ErrDeadLink)
 	assert.Contains(t, err.Error(), "redirected to homepage")
+}
+
+// TestNative_DeadLinkDetectionDisabled: with the kill switch off
+// (fetcher.native.dead_link_detection: false), a 404 is the old plain
+// retryable error — no PermanentError, no ErrDeadLink — and a soft-404
+// page passes through as content.
+func TestNative_DeadLinkDetectionDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "gone", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false}) // detection off (zero value)
+	_, err := n.Fetch(context.Background(), srv.URL)
+	require.Error(t, err)
+
+	var pe *PermanentError
+	assert.False(t, errors.As(err, &pe), "404 must stay retryable with detection off")
+	assert.NotErrorIs(t, err, ErrDeadLink)
+	assert.Contains(t, err.Error(), "HTTP 404")
+
+	// Soft-404 page: with detection off it's just an article.
+	soft := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		body := strings.Repeat("The page you are looking for may have moved. Try the search box. ", 15)
+		_, _ = w.Write([]byte(`<html><head><title>404 - Page Not Found</title></head>
+			<body><article><h1>Page not found</h1><p>` + body + `</p></article></body></html>`))
+	}))
+	defer soft.Close()
+
+	res, err := n.Fetch(context.Background(), soft.URL)
+	require.NoError(t, err)
+	assert.Contains(t, res.Title, "404")
 }
 
 func TestSoft404TitleRE(t *testing.T) {

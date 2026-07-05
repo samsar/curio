@@ -137,12 +137,13 @@ func run() error {
 	// external deps, NewNative never errors) so fetcher_rules.yaml can
 	// bind "native" even when web2md is the configured default.
 	nativeFetcher := fetcher.NewNative(fetcher.NativeOptions{
-		Timeout:      time.Duration(cfg.Fetcher.Native.TimeoutSeconds) * time.Second,
-		UserAgent:    cfg.Fetcher.Native.UserAgent,
-		JinaFallback: cfg.Fetcher.Native.JinaFallback,
-		JinaBaseURL:  cfg.Fetcher.Native.JinaBaseURL,
-		Backend:      cfg.Fetcher.Native.Backend,
-		Log:          slog.Default(),
+		Timeout:           time.Duration(cfg.Fetcher.Native.TimeoutSeconds) * time.Second,
+		UserAgent:         cfg.Fetcher.Native.UserAgent,
+		JinaFallback:      cfg.Fetcher.Native.JinaFallback,
+		JinaBaseURL:       cfg.Fetcher.Native.JinaBaseURL,
+		DeadLinkDetection: cfg.Fetcher.Native.DeadLinkDetection,
+		Backend:           cfg.Fetcher.Native.Backend,
+		Log:               slog.Default(),
 	})
 	var defaultFetcher fetcher.Fetcher
 	switch cfg.Fetcher.Default {

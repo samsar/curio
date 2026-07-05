@@ -28,12 +28,13 @@ import (
 // Login-wall heuristics and Jina Reader fallback are ported faithfully —
 // the same set of pages that fail in the JS impl fail (and fall back) here.
 type Native struct {
-	rt           roundTripper
-	userAgent    string
-	jinaFallback bool
-	jinaBaseURL  string // override for tests
-	log          *slog.Logger
-	hostCache    *hostFailureCache
+	rt                roundTripper
+	userAgent         string
+	jinaFallback      bool
+	jinaBaseURL       string // override for tests
+	deadLinkDetection bool
+	log               *slog.Logger
+	hostCache         *hostFailureCache
 }
 
 // NativeOptions configures Native. Zero-value fields use defaults.
@@ -42,7 +43,12 @@ type NativeOptions struct {
 	UserAgent    string
 	JinaFallback bool
 	JinaBaseURL  string // default https://r.jina.ai/
-	Log          *slog.Logger
+	// DeadLinkDetection classifies hard 404/410 and detected soft 404s
+	// as permanent dead links (never retried, never sent to Jina).
+	// Off by default here like JinaFallback — the daemon passes the
+	// config value, which defaults to true.
+	DeadLinkDetection bool
+	Log               *slog.Logger
 	// HostFailureTTL is how long a cached host-wide failure is honored
 	// before we try the host again. Default 15 minutes — long enough
 	// to drain an import without re-trying hopeless hosts, short
@@ -86,12 +92,13 @@ func NewNative(opts NativeOptions) *Native {
 	}
 	opts.Log.Info("native fetcher transport", "backend", rt.name())
 	return &Native{
-		rt:           rt,
-		userAgent:    opts.UserAgent,
-		jinaFallback: opts.JinaFallback,
-		jinaBaseURL:  opts.JinaBaseURL,
-		log:          opts.Log,
-		hostCache:    newHostFailureCache(opts.HostFailureTTL),
+		rt:                rt,
+		userAgent:         opts.UserAgent,
+		jinaFallback:      opts.JinaFallback,
+		jinaBaseURL:       opts.JinaBaseURL,
+		deadLinkDetection: opts.DeadLinkDetection,
+		log:               opts.Log,
+		hostCache:         newHostFailureCache(opts.HostFailureTTL),
 	}
 }
 
@@ -241,7 +248,7 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		// change them and Jina can't conjure a page that doesn't exist.
 		// Permanent so the doc fails on attempt 1 instead of burning the
 		// full retry budget (5 attempts, ~7.5 min of backoff).
-		if resp.statusCode == http.StatusNotFound || resp.statusCode == http.StatusGone {
+		if n.deadLinkDetection && (resp.statusCode == http.StatusNotFound || resp.statusCode == http.StatusGone) {
 			return nil, &PermanentError{Err: fmt.Errorf("native: dead link (HTTP %d): %w", resp.statusCode, ErrDeadLink)}
 		}
 		return nil, fmt.Errorf("native: HTTP %d", resp.statusCode)
@@ -277,8 +284,10 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	// tombstone page is usually thin, and the thin-content check would
 	// misclassify it as a login wall and route it to Jina — which can't
 	// help with a page that no longer exists.
-	if reason := looksLikeSoft404(article, finalURL, target); reason != "" {
-		return nil, &PermanentError{Err: fmt.Errorf("native: dead link (%s): %w", reason, ErrDeadLink)}
+	if n.deadLinkDetection {
+		if reason := looksLikeSoft404(article, finalURL, target); reason != "" {
+			return nil, &PermanentError{Err: fmt.Errorf("native: dead link (%s): %w", reason, ErrDeadLink)}
+		}
 	}
 
 	if reason := looksLikeLoginWall(article, finalURL, target); reason != "" {
