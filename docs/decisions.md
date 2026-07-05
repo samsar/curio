@@ -991,16 +991,11 @@ it lands — no `/v1` → `/v2` bump required.
   domain-rule-driven (news daily, docs monthly, static essays never).
 - **Highlight / read-later importers:** schema is ready; importer code is not
   in v1.
-- **"Page Not Found" detection:** many old bookmarks now resolve to a
-  generic 404 / squatted-domain page that returns HTTP 200. The fetch +
-  index succeed and the doc lands in `fetched` state, but the content
-  is junk (titles like "Page Not Found | Sunwin 2026" caught in a
-  recent test). A heuristic — title prefix patterns, content similarity
-  to known 404 templates, redirect-to-root detection, or
-  embedding-based "this isn't really an article" classifier — could
-  flag these. Deferred until the false-positive rate from anti-bot
-  fixes settles; mixing the two cleanup paths makes both harder to
-  evaluate.
+- ~~**"Page Not Found" detection**~~ ✅ implemented — see the
+  "Dead-link detection: hard 404/410 + soft-404 heuristics" entry
+  below (title patterns + redirect-to-homepage; dead docs go to
+  state `dead`). The embedding-based "this isn't really an article"
+  classifier remains a possible future refinement.
 
 - **Natural-language search is provisional.** Current BM25 sanitization
   (OR + small stopword list — see decision above) is the production
@@ -1195,3 +1190,193 @@ shared between the normalizer and the fetcher.
 **Playlist-only URLs** (`youtube.com/playlist?list=...`) are not
 canonicalized — they don't have a video ID and are rejected by the
 YouTube fetcher with a `PermanentError`.
+
+---
+
+## GitHub issues, PRs, and wiki pages
+
+**Decision:** The GitHub fetcher handles three more URL shapes.
+`/owner/repo/issues/N` and `/owner/repo/pull/N` fetch via the REST
+API (issue/PR metadata + conversation comments) and store as
+content_type `thread` — the enum value that was allocated-but-unused
+since M0, so no migration. `/owner/repo/wiki[/Page]` fetches the raw
+page from `raw.githubusercontent.com/wiki/o/r/Page.md` and stores as
+`article`.
+
+**Mechanics worth remembering:**
+
+- Web URLs say `/pull/456` (singular); the REST path is
+  `/repos/o/r/pulls/456` (plural). The API path is built explicitly,
+  never echoed from the URL.
+- `GET /repos/o/r/issues/N` returns PRs too (a PR *is* an issue); a
+  `pull_request` key marks them, and `fetchIssue` delegates to
+  `fetchPull` in that case — mirroring GitHub's own browser redirect.
+- Conversation comments for BOTH issues and PRs live at
+  `/repos/o/r/issues/N/comments`. `/repos/o/r/pulls/N/comments` is
+  review (diff) comments — deliberately not fetched.
+- Comments are capped at one page of 100 (`maxIssueComments`) to keep
+  the per-fetch API call count at 2 — the apiGet limiter paces
+  individual calls (see "Per-fetcher rate limiting"), and a paginated
+  mega-thread would starve a bulk import. Truncation is recorded in
+  the markdown ("_N more comments not shown_").
+- Wikis have no REST content API (they're separate git repos). The
+  raw host serves public wikis without auth; private/disabled wikis
+  404 → PermanentError. The raw fetch still routes through apiGet,
+  so it's limiter-paced like everything else.
+- `ParseGitHubURL` gained a `Number` field; non-numeric tails
+  (`/issues/new`) classify as "other" → PermanentError.
+
+**Note for existing corpora:** issue/PR/wiki docs bookmarked before
+this feature are in state `failed` (the fetcher used to reject them
+permanently). `curio refetch --all --state=failed` gives them a
+fresh chance.
+
+---
+
+## Dead-link detection: hard 404/410 + soft-404 heuristics
+
+**Decision:** The Native fetcher now classifies dead links and the
+system records them in the (previously reserved) document state
+`dead`:
+
+1. **Hard dead:** HTTP 404 and 410 return a `PermanentError` wrapping
+   the new `ErrDeadLink` sentinel. Previously these were retryable
+   and burned all 5 attempts (~7.5 min of backoff) per dead URL.
+2. **Soft 404:** an HTTP 200 whose extracted title reads like a
+   not-found template (`soft404TitleRE`: "404 …", "Page not found",
+   "page has been removed", …) or whose request for a specific path
+   settled on the site's homepage (same host, non-trivial source
+   path, final path "/", no query). Also `ErrDeadLink`, also
+   permanent.
+
+**Ordering matters:** the soft-404 check runs BEFORE the login-wall
+heuristics in `tryReadability`. A tombstone page is usually thin, and
+the thin-content check would classify it `ErrLoginWall` → Jina
+fallback — exactly the wasted-Jina-budget failure mode the fallback
+policy exists to prevent. Dead links never touch Jina.
+
+**State plumbing:** the jobs bridge now double-wraps
+(`fmt.Errorf("%w: %w", ErrPermanent, pe.Err)`) so the fetcher's
+sentinel chain survives to the worker; `OnPermanentFailure` hooks
+receive the cause error (`PermFailHook`), and `MarkDocFailed` picks
+`dead` over `failed` when `errors.Is(cause, fetcher.ErrDeadLink)`.
+The `documents.state` CHECK constraint already allowed 'dead' — no
+migration.
+
+**Refetch policy** (the reason `dead` exists as a distinct state):
+single-doc refetch of a dead doc returns 409 unless `?force=1`
+(CLI: `curio refetch <id> --force`) — the soft-404 heuristic can
+false-positive, so the escape hatch is cheap and explicit. Bulk
+`refetch --all` *skips* dead docs; `--state=dead` is the deliberate
+bulk escape hatch (refetch resets state to pending either way).
+
+**Not host-cached:** `ErrDeadLink` is deliberately absent from
+`hostFailureFromError` — a dead path says nothing about the rest of
+the host.
+
+**Kill switch:** `fetcher.native.dead_link_detection: false` disables
+the whole classifier (404/410 go back to plain retryable errors, the
+soft-404 heuristics are skipped). Default true. Exists because a new
+always-on heuristic needs an escape hatch bigger than per-doc
+`--force` if a corpus turns out to false-positive systematically.
+
+**No archive.org fallback (yet):** the roadmap sketched a Wayback
+fallback for dead links; scoped out of this pass to keep detection
+observable on its own. If added later, it belongs in `Native.Fetch`
+next to the Jina gate, modeled on `tryJina`.
+
+---
+
+## fetcher_rules.yaml: mtime-polled hot reload, keep-last-good
+
+**Decision:** the data-driven fetcher routing designed in
+architecture.md is now real. `$CURIO_HOME/fetcher_rules.yaml` lists
+rules top-to-bottom, first match wins; matchers are `host` (exact),
+`host_suffix` (label-boundary suffix: "youtube.com" matches
+"m.youtube.com" and "youtube.com" but not "evilyoutube.com"),
+`host_in` (list of exact hosts), or `{}` (catch-all). Rules bind to
+fetchers by `Fetcher.Name()` against a registry the daemon builds at
+startup: `native` always (pure Go, constructed even when web2md is the
+default so rules can bind it), the configured default, `github`, and
+`youtube` when yt-dlp is present.
+
+**Parsing is strict** (`yaml` `KnownFields`): an unknown key anywhere in
+the file is a validation error. Non-strict decoding would turn a typo'd
+matcher key (`host_sufix:`) into an all-empty match block — which is the
+catch-all — and one misspelled rule would silently route every URL to
+the wrong fetcher on the next reload. Strict + keep-last-good turns that
+into a logged warning and no behavior change instead.
+
+**Hot reload = stat-on-dispatch, not fsnotify/SIGHUP:** the
+`RulesDispatcher` re-stats the file on `For()` calls, throttled to
+one stat per 2s. No new dependency, no signal-handling plumbing, no
+watcher goroutine to babysit — and a fetch-heavy import amortizes
+the stat to noise. Reload swaps an immutable compiled snapshot under
+a mutex, so the 16 fetch workers never see a half-applied rule set.
+
+**Failure posture (all degrade, none crash):**
+
+- file absent → built-in default rules (the pre-feature hardcoded
+  wiring); file deleted later → revert to the same.
+- file invalid (YAML error, unknown matcher combination,
+  `content_type` matcher) → keep the last good rules, log a warning.
+  The broken file's stat is recorded so it isn't re-parsed (and
+  re-warned) every 2 seconds.
+- rule names an unavailable fetcher (e.g. `youtube` without yt-dlp,
+  or a typo) → skip that rule with a logged warning listing what IS
+  available; other rules still apply.
+
+**`content_type` matching rejected explicitly:** the architecture.md
+sketch showed `match: { content_type: application/pdf }`, but
+dispatch happens before any response exists — there's nothing to
+match against. The validator names the reason; PDFs stay handled
+inside the Native fetcher. A post-fetch re-dispatch layer could
+revisit this.
+
+**Per-fetcher options stay in config.yaml** — the rules file routes;
+it does not configure fetchers.
+
+---
+
+## find_related: stored-vector mean-pooling, not title search
+
+**Decision:** `find_related` is now a real vector-neighbor lookup:
+`GET /v1/documents/{id}/related?k=N`. The M3 sidecar shipped with a
+stopgap (re-search using the doc's *title* as query text); the MCP
+tool and the new `curio related` command now hit the daemon endpoint.
+
+**Algorithm:** read the document's stored chunk vectors back out of
+`chunks_vec` (new `ChunkStore.EmbeddingsForDocument`; vec0 point-reads
+return the raw little-endian float32 blob, decoded by hand — the Go
+bindings ship no deserializer), mean-pool up to the first 64 chunks
+in float64, run ONE ANN query with the source document excluded, and
+collapse chunk hits to documents through the same
+collapse-strategy/hydration path as hybrid search (factored into
+`collapseAndHydrate`). No query text, no embedder call, no Ollama
+dependency at related-time.
+
+**Why mean-pooling over per-chunk KNN + RRF:** one ANN query instead
+of N, and for a personal corpus the doc-level topic centroid is what
+"related" should mean. Per-chunk fusion (via the existing `Fuse`)
+would surface multi-topic documents better; revisit if mean-vector
+results feel muddy on long documents.
+
+**Self-exclusion is an over-fetch problem:** sqlite-vec applies
+non-MATCH predicates AFTER the KNN k-cutoff (verified empirically on
+v0.1.6: k=1 plus `chunk_id != <nearest>` returns zero rows). The
+exclusion therefore rides through `SearchFilters.ExcludeDocumentID`,
+which makes the filter set non-empty and routes `VectorSearch`
+through its existing k×10 over-fetch path. A bespoke query would
+have to replicate that dance — don't.
+
+**Fanout scales with K:** hits are chunk-level, so the ANN pool is
+`max(preFanout, K*8)` — a fixed 50-chunk pool could be crowded out by
+one long near-duplicate document and could never yield more than 50
+distinct documents despite the API accepting k up to 100.
+
+**Contract edges:** unknown doc → 404; known doc with no indexed
+chunks (pending/failed/dead) → 200 with empty items (the document
+exists; it just has no vectors yet — kinder to MCP callers than a
+409). Scores are raw vector similarities (1/(1+L2), 0..1) and NOT
+comparable with /v1/search's RRF-fused scores; the openapi
+description says so.

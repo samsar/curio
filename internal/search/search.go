@@ -180,13 +180,8 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		vecByID[h.ChunkID] = h
 	}
 
-	// Collapse fused chunks → documents.
-	type docAgg struct {
-		chunkIDs   []string
-		chunkScore map[string]float64 // chunk_id -> fused score (post-RRF)
-	}
-	byDoc := make(map[string]*docAgg)
-
+	// Resolve each fused chunk to its parent document.
+	scored := make([]scoredChunk, 0, len(fused))
 	for _, fc := range fused {
 		var docID string
 		if h, ok := bm25ByID[fc.ID]; ok {
@@ -196,29 +191,159 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		} else {
 			continue // shouldn't happen
 		}
-		agg, ok := byDoc[docID]
-		if !ok {
-			agg = &docAgg{chunkScore: map[string]float64{}}
-			byDoc[docID] = agg
-		}
-		agg.chunkIDs = append(agg.chunkIDs, fc.ID)
-		agg.chunkScore[fc.ID] = fc.Score
+		scored = append(scored, scoredChunk{chunkID: fc.ID, documentID: docID, score: fc.Score})
 	}
 
-	// Apply collapse strategy.
+	items, err := e.collapseAndHydrate(ctx, scored, bm25ByID, vecByID, req.K)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Query:      req.Query,
+		BM25Hits:   len(bm25Hits),
+		VectorHits: len(vecHits),
+		Items:      items,
+	}, nil
+}
+
+// RelatedRequest asks for documents similar to an existing document.
+type RelatedRequest struct {
+	TenantID   string
+	DocumentID string
+	K          int // results to return; default 10
+}
+
+// maxRelatedChunks caps how many of a document's chunk vectors are
+// mean-pooled into the similarity query. Chunk count is unbounded (a
+// book-length page can have hundreds); the leading chunks carry the
+// document's topic well enough and this bounds read cost.
+const maxRelatedChunks = 64
+
+// Related finds documents similar to the given one by embedding
+// similarity over its stored chunk vectors — no query text, no embedder
+// call. The document's chunk vectors are mean-pooled into a single query
+// vector, one ANN search runs with the source document excluded, and
+// chunk hits collapse to documents exactly like Search.
+//
+// A document with no indexed chunks (still pending, or failed) returns an
+// empty result rather than an error — the document exists, it just has no
+// vectors to be similar to anything yet.
+func (e *Engine) Related(ctx context.Context, req RelatedRequest) (*Result, error) {
+	if req.DocumentID == "" {
+		return nil, errors.New("related: document_id is required")
+	}
+	if req.TenantID == "" {
+		return nil, errors.New("related: tenant_id is required")
+	}
+	if req.K <= 0 {
+		req.K = 10
+	}
+
+	// Surface store.ErrNotFound (wrapped) for unknown IDs so the API layer
+	// can map it to a 404.
+	if _, err := e.docs.GetByID(ctx, req.DocumentID); err != nil {
+		return nil, fmt.Errorf("related: load document: %w", err)
+	}
+
+	embs, err := e.chunks.EmbeddingsForDocument(ctx, req.DocumentID)
+	if err != nil {
+		return nil, fmt.Errorf("related: read embeddings: %w", err)
+	}
+	out := &Result{Query: "related:" + req.DocumentID}
+	if len(embs) == 0 {
+		return out, nil
+	}
+	if len(embs) > maxRelatedChunks {
+		embs = embs[:maxRelatedChunks]
+	}
+
+	mean := meanVector(embs)
+	// Scale the chunk fanout with the requested K: hits are chunk-level,
+	// and one long near-duplicate document can occupy dozens of the
+	// nearest slots — a fixed preFanout(50) pool could collapse to fewer
+	// than K distinct documents (and could never yield more than 50).
+	// ~8 chunk slots per hoped-for document, floored at preFanout.
+	fanout := max(e.preFanout, req.K*8)
+	// A non-empty filter (ExcludeDocumentID) routes VectorSearch through
+	// its over-fetch path — required because sqlite-vec applies non-MATCH
+	// predicates after the k cutoff.
+	vecHits, err := e.chunks.VectorSearch(ctx, req.TenantID, mean, fanout,
+		store.SearchFilters{ExcludeDocumentID: req.DocumentID})
+	if err != nil {
+		return nil, fmt.Errorf("related: vector: %w", err)
+	}
+	out.VectorHits = len(vecHits)
+
+	vecByID := make(map[string]store.ChunkHit, len(vecHits))
+	scored := make([]scoredChunk, 0, len(vecHits))
+	for _, h := range vecHits {
+		vecByID[h.ChunkID] = h
+		scored = append(scored, scoredChunk{chunkID: h.ChunkID, documentID: h.DocumentID, score: h.Score})
+	}
+
+	items, err := e.collapseAndHydrate(ctx, scored, nil, vecByID, req.K)
+	if err != nil {
+		return nil, err
+	}
+	out.Items = items
+	return out, nil
+}
+
+// meanVector mean-pools chunk embeddings in float64 to limit rounding
+// drift, then converts back to float32 for the ANN query.
+func meanVector(embs []store.ChunkEmbedding) []float32 {
+	dim := len(embs[0].Embedding)
+	acc := make([]float64, dim)
+	for _, e := range embs {
+		for i, v := range e.Embedding {
+			acc[i] += float64(v)
+		}
+	}
+	mean := make([]float32, dim)
+	for i, v := range acc {
+		mean[i] = float32(v / float64(len(embs)))
+	}
+	return mean
+}
+
+// scoredChunk is one chunk with its final score (RRF-fused for Search,
+// raw vector similarity for Related), resolved to its parent document.
+type scoredChunk struct {
+	chunkID    string
+	documentID string
+	score      float64
+}
+
+// collapseAndHydrate collapses scored chunks into ranked documents (per
+// the engine's collapse strategy), trims to k, and hydrates each hit with
+// its document row and up to 3 top chunks. bm25ByID/vecByID annotate the
+// per-chunk retriever scores; either may be nil.
+func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, bm25ByID, vecByID map[string]store.ChunkHit, k int) ([]Hit, error) {
+	type docAgg struct {
+		chunkIDs   []string
+		chunkScore map[string]float64
+	}
+	byDoc := make(map[string]*docAgg)
+	for _, sc := range scored {
+		agg, ok := byDoc[sc.documentID]
+		if !ok {
+			agg = &docAgg{chunkScore: map[string]float64{}}
+			byDoc[sc.documentID] = agg
+		}
+		agg.chunkIDs = append(agg.chunkIDs, sc.chunkID)
+		agg.chunkScore[sc.chunkID] = sc.score
+	}
+
 	type docScore struct {
 		documentID string
 		score      float64
-		chunkIDs   []string
 		chunkScore map[string]float64
 	}
 	docList := make([]docScore, 0, len(byDoc))
 	for docID, agg := range byDoc {
-		s := collapseScore(agg.chunkScore, agg.chunkIDs, e.collapse)
 		docList = append(docList, docScore{
 			documentID: docID,
-			score:      s,
-			chunkIDs:   agg.chunkIDs,
+			score:      collapseScore(agg.chunkScore, agg.chunkIDs, e.collapse),
 			chunkScore: agg.chunkScore,
 		})
 	}
@@ -228,17 +353,11 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		}
 		return docList[i].documentID < docList[j].documentID
 	})
-
-	if len(docList) > req.K {
-		docList = docList[:req.K]
+	if len(docList) > k {
+		docList = docList[:k]
 	}
 
-	// Hydrate documents + top chunks per doc.
-	out := &Result{
-		Query:      req.Query,
-		BM25Hits:   len(bm25Hits),
-		VectorHits: len(vecHits),
-	}
+	items := make([]Hit, 0, len(docList))
 	for _, d := range docList {
 		doc, err := e.docs.GetByID(ctx, d.documentID)
 		if err != nil {
@@ -272,9 +391,9 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 				}
 			}
 		}
-		out.Items = append(out.Items, hit)
+		items = append(items, hit)
 	}
-	return out, nil
+	return items, nil
 }
 
 func toRanked(hits []store.ChunkHit) []RankedItem {

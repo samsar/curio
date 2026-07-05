@@ -66,15 +66,19 @@ This catches people:
 
 **Jobs**: `pending ↔ running → done | failed`. `failed` is terminal — won't retry. The `run_after` column on a failed row is stale data from the last retry cycle (we update status + last_error but not run_after at terminal transition). The CLI hides `next_attempt` for failed/done rows for that reason.
 
-**Documents**: `pending → fetched | failed`. The `failed` transition is driven by `jobs.OnPermanentFailure` hook — when a fetch or index job permanently fails, the worker calls the hook which sets `doc.state = failed`. Without this hook, docs would stay `pending` forever even after their jobs gave up. `refetch` flips the doc back to `pending` and enqueues a fresh job (new attempts counter).
-
-`dead` exists in constants but is unused — reserved for a future "don't allow refetch" policy.
+**Documents**: `pending → fetched | failed | dead`. The `failed`/`dead` transition is driven by the `jobs.OnPermanentFailure` hook (`PermFailHook` — receives the cause error) — when a fetch or index job permanently fails, the worker calls the hook which sets `doc.state = failed`, or `dead` when the cause wraps `fetcher.ErrDeadLink` (hard 404/410 or a detected soft 404). Without this hook, docs would stay `pending` forever even after their jobs gave up. `refetch` flips the doc back to `pending` and enqueues a fresh job (new attempts counter) — but refetching a `dead` doc is refused with 409 unless `--force` (`?force=1`), and `refetch --all` skips dead docs unless `--state=dead` is explicit.
 
 ## Fetcher fallback policy
 
 `internal/fetcher/native.go` falls back to Jina Reader (`r.jina.ai`) only when the original error wraps `ErrLoginWall` or `ErrAntiBot`. Hard errors (404, DNS failures, timeouts) return directly — Jina can't help and burning rate-limit budget there gets us 429'd on the calls that would actually benefit. If you're tempted to widen the fallback, read `docs/decisions.md` under "Fallback strategy" first.
 
 `ErrAntiBot` wraps HTTP 403 and 503. The Native fetcher also sends Chrome-like headers (`Sec-Fetch-*`, `Sec-Ch-Ua-*`) to reduce false-positive bot blocks.
+
+`ErrDeadLink` (404/410, soft-404 titles, redirect-to-homepage) is always wrapped in a `PermanentError`, never goes to Jina, and is deliberately NOT host-cached (a dead path says nothing about the host). The soft-404 check runs BEFORE the login-wall heuristics in `tryReadability` — order matters, thin tombstone pages would otherwise classify as login walls and leak to Jina.
+
+## Fetcher routing
+
+`$CURIO_HOME/fetcher_rules.yaml` (optional) routes URLs to fetchers — `host` / `host_suffix` / `host_in` / `{}` catch-all matchers, first match wins, hot-reloaded via throttled stat-on-dispatch (`internal/fetcher/rules.go`). Missing file = built-in defaults (github.com → github, youtube hosts → youtube when yt-dlp exists, everything else → the config default). Invalid edits keep the last good rules; unknown fetcher names skip the rule with a warning.
 
 ## Code layout pointers
 

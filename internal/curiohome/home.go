@@ -16,13 +16,14 @@ import (
 )
 
 const (
-	DefaultDirName = ".curio"
-	MarkerFile     = ".curio-meta.json"
-	ConfigFile     = "config.yaml"
-	DBFile         = "curio.db"
-	ContentDirName = "content"
-	LogsDirName    = "logs"
-	PIDFileName    = "daemon.pid"
+	DefaultDirName   = ".curio"
+	MarkerFile       = ".curio-meta.json"
+	ConfigFile       = "config.yaml"
+	FetcherRulesFile = "fetcher_rules.yaml"
+	DBFile           = "curio.db"
+	ContentDirName   = "content"
+	LogsDirName      = "logs"
+	PIDFileName      = "daemon.pid"
 
 	// CurrentSchemaVersion is bumped when the on-disk layout or marker
 	// shape changes in an incompatible way.
@@ -142,12 +143,13 @@ func Open(path string) (*Home, error) {
 
 // Path helpers. Pure string operations; no filesystem access.
 
-func (h *Home) MarkerPath() string { return filepath.Join(h.Path, MarkerFile) }
-func (h *Home) ConfigPath() string { return filepath.Join(h.Path, ConfigFile) }
-func (h *Home) DBPath() string     { return filepath.Join(h.Path, DBFile) }
-func (h *Home) ContentDir() string { return filepath.Join(h.Path, ContentDirName) }
-func (h *Home) LogsDir() string    { return filepath.Join(h.Path, LogsDirName) }
-func (h *Home) PIDFile() string    { return filepath.Join(h.Path, PIDFileName) }
+func (h *Home) MarkerPath() string       { return filepath.Join(h.Path, MarkerFile) }
+func (h *Home) ConfigPath() string       { return filepath.Join(h.Path, ConfigFile) }
+func (h *Home) FetcherRulesPath() string { return filepath.Join(h.Path, FetcherRulesFile) }
+func (h *Home) DBPath() string           { return filepath.Join(h.Path, DBFile) }
+func (h *Home) ContentDir() string       { return filepath.Join(h.Path, ContentDirName) }
+func (h *Home) LogsDir() string          { return filepath.Join(h.Path, LogsDirName) }
+func (h *Home) PIDFile() string          { return filepath.Join(h.Path, PIDFileName) }
 
 // Meta re-reads the marker file each call. Returns the parsed struct.
 func (h *Home) Meta() (Meta, error) {

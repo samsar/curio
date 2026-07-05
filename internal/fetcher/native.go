@@ -28,12 +28,13 @@ import (
 // Login-wall heuristics and Jina Reader fallback are ported faithfully —
 // the same set of pages that fail in the JS impl fail (and fall back) here.
 type Native struct {
-	rt           roundTripper
-	userAgent    string
-	jinaFallback bool
-	jinaBaseURL  string // override for tests
-	log          *slog.Logger
-	hostCache    *hostFailureCache
+	rt                roundTripper
+	userAgent         string
+	jinaFallback      bool
+	jinaBaseURL       string // override for tests
+	deadLinkDetection bool
+	log               *slog.Logger
+	hostCache         *hostFailureCache
 }
 
 // NativeOptions configures Native. Zero-value fields use defaults.
@@ -42,7 +43,12 @@ type NativeOptions struct {
 	UserAgent    string
 	JinaFallback bool
 	JinaBaseURL  string // default https://r.jina.ai/
-	Log          *slog.Logger
+	// DeadLinkDetection classifies hard 404/410 and detected soft 404s
+	// as permanent dead links (never retried, never sent to Jina).
+	// Off by default here like JinaFallback — the daemon passes the
+	// config value, which defaults to true.
+	DeadLinkDetection bool
+	Log               *slog.Logger
 	// HostFailureTTL is how long a cached host-wide failure is honored
 	// before we try the host again. Default 15 minutes — long enough
 	// to drain an import without re-trying hopeless hosts, short
@@ -86,12 +92,13 @@ func NewNative(opts NativeOptions) *Native {
 	}
 	opts.Log.Info("native fetcher transport", "backend", rt.name())
 	return &Native{
-		rt:           rt,
-		userAgent:    opts.UserAgent,
-		jinaFallback: opts.JinaFallback,
-		jinaBaseURL:  opts.JinaBaseURL,
-		log:          opts.Log,
-		hostCache:    newHostFailureCache(opts.HostFailureTTL),
+		rt:                rt,
+		userAgent:         opts.UserAgent,
+		jinaFallback:      opts.JinaFallback,
+		jinaBaseURL:       opts.JinaBaseURL,
+		deadLinkDetection: opts.DeadLinkDetection,
+		log:               opts.Log,
+		hostCache:         newHostFailureCache(opts.HostFailureTTL),
 	}
 }
 
@@ -237,6 +244,13 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		if resp.statusCode == http.StatusForbidden || resp.statusCode == http.StatusServiceUnavailable {
 			return nil, fmt.Errorf("native: HTTP %d: %w", resp.statusCode, ErrAntiBot)
 		}
+		// 404/410 are deterministic "page is gone" answers: retrying won't
+		// change them and Jina can't conjure a page that doesn't exist.
+		// Permanent so the doc fails on attempt 1 instead of burning the
+		// full retry budget (5 attempts, ~7.5 min of backoff).
+		if n.deadLinkDetection && (resp.statusCode == http.StatusNotFound || resp.statusCode == http.StatusGone) {
+			return nil, &PermanentError{Err: fmt.Errorf("native: dead link (HTTP %d): %w", resp.statusCode, ErrDeadLink)}
+		}
 		return nil, fmt.Errorf("native: HTTP %d", resp.statusCode)
 	}
 
@@ -264,6 +278,16 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	article, err := readability.FromReader(resp.body, finalURL)
 	if err != nil {
 		return nil, fmt.Errorf("native: readability: %w", err)
+	}
+
+	// Soft-404 check must run BEFORE the login-wall heuristics: a
+	// tombstone page is usually thin, and the thin-content check would
+	// misclassify it as a login wall and route it to Jina — which can't
+	// help with a page that no longer exists.
+	if n.deadLinkDetection {
+		if reason := looksLikeSoft404(article, finalURL, target); reason != "" {
+			return nil, &PermanentError{Err: fmt.Errorf("native: dead link (%s): %w", reason, ErrDeadLink)}
+		}
 	}
 
 	if reason := looksLikeLoginWall(article, finalURL, target); reason != "" {
@@ -315,6 +339,13 @@ var ErrLoginWall = errors.New("login wall or thin content")
 // log the two cases separately.
 var ErrAntiBot = errors.New("origin blocked the request (likely anti-bot)")
 
+// ErrDeadLink marks a URL whose content is gone: a hard 404/410, or a
+// "soft 404" — HTTP 200 carrying a not-found page. Always wrapped in a
+// PermanentError (retrying is pointless) and never routed to the Jina
+// fallback. Deliberately NOT in hostFailureFromError: a dead path says
+// nothing about the rest of the host.
+var ErrDeadLink = errors.New("dead link (content is gone)")
+
 // looksLikeLoginWall mirrors the JS impl's heuristics in samsar/web-to-markdown:
 //   - missing article entirely
 //   - extracted text < 500 characters
@@ -357,6 +388,45 @@ var (
 	loginTitleRE = regexp.MustCompile(`(?i)^(sign in|log in|join now|join linkedin)`)
 	loginPathRE  = regexp.MustCompile(`(?i)/(login|authwall|signin|signup)\b`)
 )
+
+// looksLikeSoft404 detects "soft 404s": pages that answer HTTP 200 but
+// whose content says the resource is gone (CMS not-found templates,
+// deleted articles redirecting to the site root). Two signals:
+//
+//   - the extracted title reads like a not-found page
+//   - the request for a specific path settled on the site's homepage
+//     (same host; cross-host redirects are login-wall territory)
+//
+// Returns the empty string when nothing looks dead; otherwise a short
+// reason string for diagnostics.
+func looksLikeSoft404(article readability.Article, finalURL *url.URL, sourceURL string) string {
+	source, err := url.Parse(sourceURL)
+	if err == nil && finalURL != nil &&
+		source.Hostname() == finalURL.Hostname() &&
+		strings.Trim(source.Path, "/") != "" &&
+		strings.Trim(finalURL.Path, "/") == "" &&
+		finalURL.RawQuery == "" {
+		return "redirected to homepage"
+	}
+
+	if article.Node != nil && soft404TitleRE.MatchString(article.Title()) {
+		return "title looks like a not-found page: " + article.Title()
+	}
+	return ""
+}
+
+// soft404TitleRE matches titles of common not-found templates: "404 …",
+// "Error 404", a bare "Not Found", "Page not found", "This page doesn't
+// exist", "… page has been removed", etc. Curly and straight apostrophes
+// both appear in the wild.
+var soft404TitleRE = regexp.MustCompile(`(?i)(` +
+	`^\s*(error\s*)?404\b` +
+	`|^\s*not found\s*$` +
+	`|\b404\s+(error|not\s+found)\b` +
+	`|page\s+(not\s+found|doesn[’']?t\s+exist|does\s+not\s+exist|can[’']?t\s+be\s+found|cannot\s+be\s+found|could\s+not\s+be\s+found|no\s+longer\s+(exists|available)|is\s+missing)` +
+	`|page\b.{0,30}\b(has\s+been|was)\s+(removed|deleted)\b` +
+	`|couldn[’']?t\s+find\s+(this|that|the)\s+page` +
+	`)`)
 
 // mediaType returns the lowercased media type from a Content-Type header,
 // dropping any "; charset=..." parameters.

@@ -133,18 +133,22 @@ func run() error {
 		return err
 	}
 
-	// Fetcher dispatcher (M0: single backend selected by config).
+	// Fetcher dispatcher. Native is always constructed (pure Go, no
+	// external deps, NewNative never errors) so fetcher_rules.yaml can
+	// bind "native" even when web2md is the configured default.
+	nativeFetcher := fetcher.NewNative(fetcher.NativeOptions{
+		Timeout:           time.Duration(cfg.Fetcher.Native.TimeoutSeconds) * time.Second,
+		UserAgent:         cfg.Fetcher.Native.UserAgent,
+		JinaFallback:      cfg.Fetcher.Native.JinaFallback,
+		JinaBaseURL:       cfg.Fetcher.Native.JinaBaseURL,
+		DeadLinkDetection: cfg.Fetcher.Native.DeadLinkDetection,
+		Backend:           cfg.Fetcher.Native.Backend,
+		Log:               slog.Default(),
+	})
 	var defaultFetcher fetcher.Fetcher
 	switch cfg.Fetcher.Default {
 	case "native":
-		defaultFetcher = fetcher.NewNative(fetcher.NativeOptions{
-			Timeout:      time.Duration(cfg.Fetcher.Native.TimeoutSeconds) * time.Second,
-			UserAgent:    cfg.Fetcher.Native.UserAgent,
-			JinaFallback: cfg.Fetcher.Native.JinaFallback,
-			JinaBaseURL:  cfg.Fetcher.Native.JinaBaseURL,
-			Backend:      cfg.Fetcher.Native.Backend,
-			Log:          slog.Default(),
-		})
+		defaultFetcher = nativeFetcher
 	case "web2md":
 		w2m, err := fetcher.NewWeb2MD(fetcher.Web2MDOptions{
 			Bin:     cfg.Fetcher.Web2MD.Bin,
@@ -158,8 +162,14 @@ func run() error {
 	default:
 		return fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
 	}
-	// Content-type-specific fetchers, routed by hostname.
+	// Content-type-specific fetchers, routed by hostname. The built-in
+	// rules below are the defaults; a user-provided fetcher_rules.yaml
+	// under $CURIO_HOME overrides them (hot-reloaded, no restart needed).
 	var rules []fetcher.Rule
+	registry := map[string]fetcher.Fetcher{
+		nativeFetcher.Name():  nativeFetcher,
+		defaultFetcher.Name(): defaultFetcher,
+	}
 
 	ghFetcher := fetcher.NewGitHub(fetcher.GitHubOptions{
 		Token:   cfg.Fetcher.GitHub.Token,
@@ -167,6 +177,7 @@ func run() error {
 		Log:     slog.Default(),
 	})
 	rules = append(rules, fetcher.Rule{Hosts: fetcher.GitHubHosts, Fetcher: ghFetcher})
+	registry[ghFetcher.Name()] = ghFetcher
 
 	if _, err := exec.LookPath(cfg.Fetcher.YouTube.Bin); err == nil {
 		ytFetcher := fetcher.NewRateLimited(
@@ -179,10 +190,19 @@ func run() error {
 			2, 3, // 2 req/s, burst of 3 — yt-dlp is slow per-call, this mostly limits concurrent starts
 		)
 		rules = append(rules, fetcher.Rule{Hosts: fetcher.YouTubeHosts, Fetcher: ytFetcher})
+		// Registry holds the rate-limited wrapper so token-bucket state
+		// survives rule reloads.
+		registry[ytFetcher.Name()] = ytFetcher
 		slog.Info("youtube fetcher enabled", "bin", cfg.Fetcher.YouTube.Bin)
 	}
 
-	dispatcher := &fetcher.PatternDispatcher{Rules: rules, Fallback: defaultFetcher}
+	dispatcher := fetcher.NewRulesDispatcher(fetcher.RulesDispatcherOptions{
+		Path:         home.FetcherRulesPath(),
+		Registry:     registry,
+		DefaultRules: rules,
+		Fallback:     defaultFetcher,
+		Log:          slog.Default(),
+	})
 
 	// Indexer + search engine.
 	idx := indexer.New(chunks, emb, indexer.Options{

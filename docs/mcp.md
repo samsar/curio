@@ -17,7 +17,7 @@ make build      # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp
 |---|---|---|
 | `search_bookmarks` | `query`, `k?`, `content_type?[]`, `source?[]`, `host?[]` | top matching documents (title, url, doc_id, score, snippet) |
 | `get_document` | `id` (doc_id) | the document's metadata + full extracted markdown |
-| `find_related` | `id` (doc_id), `k?` | documents similar to the given one (by title), excluding itself |
+| `find_related` | `id` (doc_id), `k?` | documents similar to the given one (vector similarity over its indexed content), excluding itself |
 
 `content_type` ∈ `article|repo|video|pdf|thread|unknown`, `source` ∈
 `chrome|safari|firefox|html|manual`, `host` is a URL host like `github.com`.

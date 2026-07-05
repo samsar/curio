@@ -1,13 +1,14 @@
 # Status
 
-**Current position:** M0 ✅ · M1 ✅ · M2 substantially complete (native +
-fingerprint fetcher, YouTube, GitHub, two-tier PDF; remaining:
-`fetcher_rules.yaml`, dead-link detection, GitHub issues/PRs). A quality
-pass landed too: search filters, bookmark-tags→FTS, and `reindex`. **M3 is
-underway** — the `curio-mcp` sidecar ships, exposing `search_bookmarks` /
-`get_document` / `find_related` to Claude and other MCP clients. The corpus
-is now queryable from inside the LLM client — the payoff for everything
-built so far.
+**Current position:** M0 ✅ · M1 ✅ · M2 ✅ · M3 ✅. The M2 tail landed
+(`fetcher_rules.yaml` hot-reloadable routing, dead-link detection with the
+`dead` doc state, GitHub issues/PRs/wiki) and the M3 tail did too:
+`find_related` is now a true vector-neighbor lookup over stored chunk
+embeddings (`GET /v1/documents/{id}/related`, `curio related`), replacing
+the title-search stopgap. The corpus is queryable from inside the LLM
+client via `curio-mcp` (`search_bookmarks` / `get_document` /
+`find_related`). **Next up: M4** — the insight layer (clustering,
+`curio interests`, `list_interests`).
 
 ## M0 — Walking Skeleton
 
@@ -153,11 +154,14 @@ _None — Firefox landed (see table above). **M1 is complete.**_
 | GitHub internal rate limiting | `internal/fetcher/github.go` | 1.5 API calls/s at `apiGet` level; inline retry with `Retry-After` support |
 | yt-dlp stderr fix | `internal/fetcher/youtube.go` | Extract ERROR lines only; ignore WARNING lines on failure |
 
+| `fetcher_rules.yaml` | `internal/fetcher/rules.go` | User-configurable routing under `$CURIO_HOME/fetcher_rules.yaml`: `host` / `host_suffix` / `host_in` / catch-all matchers, first match wins. Hot-reloaded via throttled stat-on-dispatch; invalid edits keep the last good rules; unknown fetcher names skip the rule with a warning. Missing file = built-in defaults |
+| Dead-link detection | `internal/fetcher/native.go`, `internal/jobs` | Hard 404/410 → `PermanentError`+`ErrDeadLink` (fail on attempt 1, never Jina). Soft 404s (HTTP 200 + not-found title, or redirect-to-homepage) detected before the login-wall heuristics. Docs land in state `dead`; refetch of a dead doc needs `--force` (bulk `--all` skips dead unless `--state=dead`) |
+| GitHub issues/PRs | `internal/fetcher/github.go`, `internal/urlutil` | `/issues/N` + `/pull/N` via REST (`pulls` API path), body + up to 100 conversation comments, content_type `thread`. Issue URLs that are really PRs delegate to the PR path. `ParseGitHubURL` gained `Number` |
+| GitHub wiki | `internal/fetcher/github.go` | `/wiki[/Page]` via `raw.githubusercontent.com/wiki/o/r/Page.md` (no REST API exists for wikis); public wikis only; content_type `article` |
+
 ### Remaining
 
-- **`fetcher_rules.yaml`** — user-configurable fetcher routing (deferred until 3+ fetchers justify the config complexity)
-- **Dead-link detection** — soft 404s that return HTTP 200 with junk content
-- **GitHub issues/PRs/wiki** — currently unsupported URL types; fall through to Native or add dedicated handling
+_None — **M2 is complete.**_
 
 ## M3 — MCP sidecar
 
@@ -170,7 +174,10 @@ _None — Firefox landed (see table above). **M1 is complete.**_
 | Registration docs | `docs/mcp.md` | Claude Code (`claude mcp add`) + Claude Desktop config |
 | Tests | `cmd/curio-mcp/main_test.go` | In-memory client/server round-trip over a fake daemon: tool listing, each tool, error path |
 
+| Vector `find_related` | `internal/search/search.go`, `internal/api/search.go` | `GET /v1/documents/{id}/related?k=N`: mean-pools the doc's stored chunk vectors (read back from `chunks_vec`, no embedder call) into one ANN query, excludes self via `SearchFilters.ExcludeDocumentID` (rides the over-fetch path — vec0 applies predicates after the k cutoff). MCP tool + new `curio related` command use it |
+
 ### Remaining
 
 - Richer tools (e.g. `list_interests`) arrive with the M4 insight layer.
-- A proper vector-neighbor endpoint for `find_related` (currently uses the doc's title as the similarity query).
+
+_**M3 is complete.**_

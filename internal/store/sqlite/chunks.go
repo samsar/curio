@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -293,6 +294,14 @@ func buildFilterClause(f store.SearchFilters) (string, []any) {
 		}
 		sb.WriteString(" AND (" + strings.Join(conds, " OR ") + ")")
 	}
+	if f.ExcludeDocumentID != "" {
+		// NOTE: in KNN mode sqlite-vec applies this predicate AFTER the
+		// k cutoff — correctness here depends on VectorSearch's
+		// over-fetch when filters are non-empty (which a set
+		// ExcludeDocumentID guarantees via IsEmpty).
+		sb.WriteString(" AND d.id != ?")
+		args = append(args, f.ExcludeDocumentID)
+	}
 	return sb.String(), args
 }
 
@@ -302,6 +311,47 @@ func placeholders(n int) string {
 		return ""
 	}
 	return strings.TrimRight(strings.Repeat("?,", n), ",")
+}
+
+// EmbeddingsForDocument reads the stored chunk vectors for a document in
+// chunk order. Point-reads on the vec0 virtual table return the raw
+// little-endian float32 blob; the Go bindings ship no deserializer, so we
+// decode by hand (4 bytes per float, dim floats per chunk).
+func (s *Chunks) EmbeddingsForDocument(ctx context.Context, documentID string) ([]store.ChunkEmbedding, error) {
+	if documentID == "" {
+		return nil, fmt.Errorf("chunks: document_id required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT v.chunk_id, v.embedding
+		FROM chunks_vec v
+		JOIN chunks c ON c.id = v.chunk_id
+		WHERE c.document_id = ?
+		ORDER BY c.ord`, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("embeddings for document: %w", err)
+	}
+	defer rows.Close()
+
+	var out []store.ChunkEmbedding
+	for rows.Next() {
+		var (
+			ce   store.ChunkEmbedding
+			blob []byte
+		)
+		if err := rows.Scan(&ce.ChunkID, &blob); err != nil {
+			return nil, fmt.Errorf("scan embedding: %w", err)
+		}
+		if len(blob) != 4*s.dim {
+			return nil, fmt.Errorf("embedding blob for chunk %s is %d bytes, want %d (dim %d)",
+				ce.ChunkID, len(blob), 4*s.dim, s.dim)
+		}
+		ce.Embedding = make([]float32, s.dim)
+		for i := range ce.Embedding {
+			ce.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
+		}
+		out = append(out, ce)
+	}
+	return out, rows.Err()
 }
 
 // GetByIDs returns chunks in arbitrary order. Used by the search layer to

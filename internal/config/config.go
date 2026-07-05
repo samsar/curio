@@ -72,6 +72,11 @@ type Native struct {
 	JinaFallback   bool   `yaml:"jina_fallback"`
 	JinaBaseURL    string `yaml:"jina_base_url"` // override for offline tests
 	UserAgent      string `yaml:"user_agent"`
+	// DeadLinkDetection classifies hard 404/410s and detected soft 404s
+	// as permanently dead (doc state `dead`, no retries, no Jina).
+	// Default true; the kill switch exists because the soft-404 title
+	// heuristics can false-positive on unusual corpora.
+	DeadLinkDetection bool `yaml:"dead_link_detection"`
 	// Backend selects the HTTP transport: "chrome" (default) parrots a
 	// Chrome TLS+HTTP/2 fingerprint via uTLS to clear JA3/Akamai bot
 	// checks; "stock" uses Go's net/http. "chrome_120|124|131|133" pin a
@@ -117,9 +122,10 @@ func Default() Config {
 		Fetcher: Fetcher{
 			Default: "native",
 			Native: Native{
-				TimeoutSeconds: 30,
-				JinaFallback:   true,
-				Backend:        "chrome",
+				TimeoutSeconds:    30,
+				JinaFallback:      true,
+				DeadLinkDetection: true,
+				Backend:           "chrome",
 			},
 			Web2MD: Web2MD{
 				Bin:            "web2md",

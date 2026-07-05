@@ -56,12 +56,14 @@ func Register(w *Worker, d Deps) {
 }
 
 // MarkDocFailed is a kind-agnostic hook: read document_id from the job
-// payload, set its state to failed. Used for both fetch and index since
-// both payloads carry document_id under the same JSON key. Exported so
-// callers wiring split pools (cmd/curio-daemon/main.go) can register it
-// per kind without going through jobs.Register.
-func MarkDocFailed(d Deps) HandlerFunc {
-	return func(ctx context.Context, job *store.Job) error {
+// payload, set its state to failed — or dead, when the cause identifies
+// the URL itself as gone (fetcher.ErrDeadLink: hard 404/410 or a detected
+// soft 404). Used for both fetch and index since both payloads carry
+// document_id under the same JSON key. Exported so callers wiring split
+// pools (cmd/curio-daemon/main.go) can register it per kind without going
+// through jobs.Register.
+func MarkDocFailed(d Deps) PermFailHook {
+	return func(ctx context.Context, job *store.Job, cause error) error {
 		var payload struct {
 			DocumentID string `json:"document_id"`
 		}
@@ -71,8 +73,12 @@ func MarkDocFailed(d Deps) HandlerFunc {
 		if payload.DocumentID == "" {
 			return nil // nothing to clean up
 		}
-		if err := d.Documents.UpdateState(ctx, payload.DocumentID, store.DocStateFailed); err != nil {
-			return fmt.Errorf("update doc %s to failed: %w", payload.DocumentID, err)
+		state := store.DocStateFailed
+		if errors.Is(cause, fetcher.ErrDeadLink) {
+			state = store.DocStateDead
+		}
+		if err := d.Documents.UpdateState(ctx, payload.DocumentID, state); err != nil {
+			return fmt.Errorf("update doc %s to %s: %w", payload.DocumentID, state, err)
 		}
 		return nil
 	}
@@ -117,7 +123,10 @@ func FetchHandler(d Deps) HandlerFunc {
 		if err != nil {
 			var pe *fetcher.PermanentError
 			if errors.As(err, &pe) {
-				return fmt.Errorf("%w: %v", ErrPermanent, pe.Err)
+				// Double-%w keeps the fetcher's sentinel chain (e.g.
+				// fetcher.ErrDeadLink) matchable by the permanent-failure
+				// hook, which picks the document's terminal state from it.
+				return fmt.Errorf("%w: %w", ErrPermanent, pe.Err)
 			}
 			return fmt.Errorf("fetch failed: %w", err)
 		}

@@ -3,12 +3,14 @@
 A staged plan. Each milestone is shippable on its own — the system does
 something useful at every step.
 
-> **Status (current):** M0 and M1 complete; M2 substantially complete
-> (native + fingerprint fetcher, YouTube, GitHub, two-tier PDF; remaining:
-> `fetcher_rules.yaml`, dead-link detection, GitHub issues/PRs). A quality
-> pass also landed — search filters, bookmark-tags→FTS, and `reindex`.
-> **M3 is underway:** the `curio-mcp` sidecar ships (search_bookmarks /
-> get_document / find_related). See `docs/status.md` and `docs/mcp.md`.
+> **Status (current):** M0–M3 complete. M2 closed out with
+> `fetcher_rules.yaml` (hot-reloadable routing), dead-link detection
+> (hard 404/410 + soft-404 heuristics → `dead` state), and GitHub
+> issues/PRs/wiki. M3 closed out with a true vector-neighbor
+> `find_related` (`GET /v1/documents/{id}/related`, `curio related`).
+> Archive.org fallback for dead links was scoped out (see
+> `docs/decisions.md`). **Next: M4.** See `docs/status.md` and
+> `docs/mcp.md`.
 
 ## M0 — Walking skeleton
 
