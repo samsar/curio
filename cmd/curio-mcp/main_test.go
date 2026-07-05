@@ -41,6 +41,29 @@ func fakeDaemon(t *testing.T) *httptest.Server {
 			"content_type": "article", "state": "fetched",
 		})
 	})
+	mux.HandleFunc("/v1/documents/doc-1/related", func(w http.ResponseWriter, _ *http.Request) {
+		// Includes the source doc itself to exercise the sidecar's
+		// belt-and-braces exclusion (the real daemon already drops it).
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"doc_id": "doc-1",
+			"items": []map[string]any{
+				{
+					"document": map[string]any{
+						"id": "doc-1", "url": "https://example.com/a", "title": "Alpha",
+						"content_type": "article", "state": "fetched",
+					},
+					"score": 0.99,
+				},
+				{
+					"document": map[string]any{
+						"id": "doc-2", "url": "https://example.com/b", "title": "Beta",
+						"content_type": "article", "state": "fetched",
+					},
+					"score": 0.61,
+				},
+			},
+		})
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -119,8 +142,11 @@ func TestMCP_FindRelated_ExcludesSelf(t *testing.T) {
 		Arguments: map[string]any{"id": "doc-1"},
 	})
 	require.NoError(t, err)
-	// The fake daemon's only hit is doc-1 itself, which find_related drops.
-	assert.Contains(t, textOf(res), "No results")
+	txt := textOf(res)
+	// doc-2 is a real neighbor; doc-1 (the source, echoed by the fake
+	// daemon) must be dropped client-side.
+	assert.Contains(t, txt, "doc_id: doc-2")
+	assert.NotContains(t, txt, "doc_id: doc-1")
 }
 
 func TestMCP_SearchRequiresQuery(t *testing.T) {

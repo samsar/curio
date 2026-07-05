@@ -500,6 +500,28 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 	return &out, nil
 }
 
+// RelatedResponse mirrors api.RelatedResponse.
+type RelatedResponse struct {
+	DocID  string      `json:"doc_id"`
+	TookMS int64       `json:"took_ms"`
+	Items  []SearchHit `json:"items"`
+}
+
+// RelatedDocuments returns documents similar to docID, ranked by embedding
+// similarity over the document's indexed content. Empty items when the
+// document has no indexed chunks yet.
+func (c *Client) RelatedDocuments(ctx context.Context, docID string, k int) (*RelatedResponse, error) {
+	path := "/v1/documents/" + docID + "/related"
+	if k > 0 {
+		path += "?k=" + strconv.Itoa(k)
+	}
+	var out RelatedResponse
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ErrDaemonUnreachable: the daemon isn't accepting connections at base URL.
 // CLI uses this to decide whether to auto-start.
 var ErrDaemonUnreachable = errors.New("daemon unreachable")

@@ -1,9 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
@@ -87,8 +92,20 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Query:      res.Query,
 		BM25Hits:   res.BM25Hits,
 		VectorHits: res.VectorHits,
+		Items:      d.searchHitsToResponse(r.Context(), res.Items),
 	}
-	for _, hit := range res.Items {
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// searchHitsToResponse maps engine hits to wire hits, populating each
+// hit's markdown path from its current extraction.
+//
+// One extra DB hit per result to surface the markdown path. For typical K
+// (10–50) this is negligible; if it ever shows up in latency, batch via a
+// single SELECT IN (...) instead.
+func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) []SearchHitResponse {
+	out := make([]SearchHitResponse, 0, len(hits))
+	for _, hit := range hits {
 		matches := make([]ChunkMatchJSON, 0, len(hit.Chunks))
 		for _, cm := range hit.Chunks {
 			matches = append(matches, ChunkMatchJSON{
@@ -100,25 +117,61 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		// One extra DB hit per result to surface the markdown path.
-		// For typical K (10–50) this is negligible; if it ever shows
-		// up in latency, batch via a single SELECT IN (...) instead.
 		var mdPath string
 		if hit.Document.CurrentExtractionID != nil {
-			if ext, err := d.Extractions.GetByID(r.Context(), *hit.Document.CurrentExtractionID); err == nil &&
+			if ext, err := d.Extractions.GetByID(ctx, *hit.Document.CurrentExtractionID); err == nil &&
 				ext.MarkdownPath != nil {
 				mdPath = d.Home.ContentDir() + "/" + *ext.MarkdownPath
 			}
 		}
 
-		resp.Items = append(resp.Items, SearchHitResponse{
+		out = append(out, SearchHitResponse{
 			Document:     documentToResponse(hit.Document),
 			Score:        hit.Score,
 			MarkdownPath: mdPath,
 			Matches:      matches,
 		})
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return out
+}
+
+// RelatedResponse is the body of GET /v1/documents/{id}/related. Scores
+// are raw vector similarities (1/(1+L2 distance), 0..1) — not comparable
+// with /v1/search's RRF-fused scores.
+type RelatedResponse struct {
+	DocID  string              `json:"doc_id"`
+	TookMS int64               `json:"took_ms"`
+	Items  []SearchHitResponse `json:"items"`
+}
+
+// handleRelatedDocuments finds documents similar to {id} by embedding
+// similarity over its stored chunk vectors. 404 for an unknown document;
+// 200 with empty items for a document that has no indexed chunks yet.
+func (d Deps) handleRelatedDocuments(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	k := 10
+	if v := r.URL.Query().Get("k"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			k = n
+		}
+	}
+
+	start := time.Now()
+	res, err := d.Search.Related(r.Context(), search.RelatedRequest{
+		TenantID:   d.TenantID,
+		DocumentID: id,
+		K:          k,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, RelatedResponse{
+		DocID:  id,
+		TookMS: time.Since(start).Milliseconds(),
+		Items:  d.searchHitsToResponse(r.Context(), res.Items),
+	})
 }
 
 // decodeMetaJSON parses extraction_meta back into a map; tolerant of
