@@ -42,6 +42,10 @@ func TestParseRules_Errors(t *testing.T) {
 		{"missing fetcher", "rules:\n  - match: { host: \"x.com\" }\n", "missing fetcher"},
 		{"content_type unsupported", "rules:\n  - match: { content_type: \"application/pdf\" }\n    fetcher: native\n", "content_type matching is not supported"},
 		{"multiple matchers", "rules:\n  - match: { host: \"x.com\", host_suffix: \".x.com\" }\n    fetcher: native\n", "only one of"},
+		// Strict decoding: a typo'd matcher key must be an error, not a
+		// silently-empty match block (= catch-all) that hijacks routing.
+		{"typo'd matcher key", "rules:\n  - match: { host_sufix: \".youtube.com\" }\n    fetcher: youtube\n", "not found"},
+		{"typo'd rule key", "rules:\n  - match: { host: \"x.com\" }\n    fetchr: native\n", "not found"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,6 +54,16 @@ func TestParseRules_Errors(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+func TestParseRules_EmptyFile(t *testing.T) {
+	rf, err := ParseRules(nil)
+	require.NoError(t, err)
+	assert.Empty(t, rf.Rules)
+
+	rf, err = ParseRules([]byte("# just a comment\n"))
+	require.NoError(t, err)
+	assert.Empty(t, rf.Rules)
 }
 
 func TestRuleSpec_MatchesHost(t *testing.T) {

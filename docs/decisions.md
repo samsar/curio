@@ -1290,7 +1290,16 @@ rules top-to-bottom, first match wins; matchers are `host` (exact),
 "m.youtube.com" and "youtube.com" but not "evilyoutube.com"),
 `host_in` (list of exact hosts), or `{}` (catch-all). Rules bind to
 fetchers by `Fetcher.Name()` against a registry the daemon builds at
-startup (default fetcher, github, youtube-if-yt-dlp-present).
+startup: `native` always (pure Go, constructed even when web2md is the
+default so rules can bind it), the configured default, `github`, and
+`youtube` when yt-dlp is present.
+
+**Parsing is strict** (`yaml` `KnownFields`): an unknown key anywhere in
+the file is a validation error. Non-strict decoding would turn a typo'd
+matcher key (`host_sufix:`) into an all-empty match block — which is the
+catch-all — and one misspelled rule would silently route every URL to
+the wrong fetcher on the next reload. Strict + keep-last-good turns that
+into a logged warning and no behavior change instead.
 
 **Hot reload = stat-on-dispatch, not fsnotify/SIGHUP:** the
 `RulesDispatcher` re-stats the file on `For()` calls, throttled to

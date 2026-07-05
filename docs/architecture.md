@@ -178,11 +178,14 @@ rules:
 
 Matchers are URL-based: `host` (exact), `host_suffix` (label-boundary
 suffix), `host_in` (list), `{}` (catch-all). Fetcher names bind against
-what the daemon constructed at startup (`native` or `web2md`, `github`,
-`youtube` when yt-dlp is present); a rule naming an unavailable fetcher is
-skipped with a logged warning. PDFs are handled inside the Native fetcher,
-so there is no `content_type` matcher — dispatch happens before the
-response exists.
+what the daemon constructed at startup — `native` (always available),
+`web2md` (only when it is the configured default), `github`, and
+`youtube` (when yt-dlp is present); a rule naming an unavailable fetcher
+is skipped with a logged warning. Parsing is strict: an unknown key
+(e.g. a typo'd `host_sufix`) is a validation error — otherwise it would
+decode as an empty match, i.e. a catch-all. PDFs are handled inside the
+Native fetcher, so there is no `content_type` matcher — dispatch happens
+before the response exists.
 
 Hot-reloadable (stat-on-dispatch, throttled to 2s): edit the file and the
 next fetch uses the new rules — no restart. Invalid edits keep the last

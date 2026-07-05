@@ -1,7 +1,10 @@
 package fetcher
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -58,9 +61,19 @@ type RulesFile struct {
 // ParseRules parses and validates fetcher_rules.yaml content. Returns an
 // error describing the first invalid rule — callers keep the last good
 // rule set when this fails.
+//
+// Decoding is STRICT (KnownFields): an unknown key is an error, not a
+// silent no-op. Without this, a typo'd matcher key (`host_sufix:`) would
+// decode to an all-empty MatchSpec — which is the catch-all — and one
+// misspelled rule would silently hijack every URL on the next reload.
 func ParseRules(data []byte) (*RulesFile, error) {
 	var rf RulesFile
-	if err := yaml.Unmarshal(data, &rf); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&rf); err != nil {
+		if errors.Is(err, io.EOF) {
+			return &rf, nil // empty file: no rules, everything falls to the fallback
+		}
 		return nil, fmt.Errorf("fetcher rules: parse yaml: %w", err)
 	}
 	for i, r := range rf.Rules {
