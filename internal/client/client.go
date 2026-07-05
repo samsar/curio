@@ -344,9 +344,15 @@ type RefetchResponse struct {
 	JobID string `json:"job_id"`
 }
 
-func (c *Client) RefetchDocument(ctx context.Context, docID string) (*RefetchResponse, error) {
+// RefetchDocument enqueues a refetch. force overrides the daemon's refusal
+// to refetch documents in state=dead (confirmed dead links).
+func (c *Client) RefetchDocument(ctx context.Context, docID string, force bool) (*RefetchResponse, error) {
+	path := "/v1/documents/" + docID + "/refetch"
+	if force {
+		path += "?force=1"
+	}
 	var out RefetchResponse
-	if err := c.do(ctx, http.MethodPost, "/v1/documents/"+docID+"/refetch", nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -258,3 +258,115 @@ func TestNative_PDF_NoJinaIsPermanent(t *testing.T) {
 	var pe *PermanentError
 	assert.ErrorAs(t, err, &pe)
 }
+
+// TestNative_Hard404_DeadLink: 404 and 410 are deterministic "gone"
+// answers — permanent (no retries), tagged ErrDeadLink, and never routed
+// to Jina even when the fallback is enabled.
+func TestNative_Hard404_DeadLink(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusGone} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "gone", status)
+			}))
+			defer srv.Close()
+
+			jinaCalls := 0
+			jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				jinaCalls++
+				_, _ = w.Write([]byte("Title: x\n\nMarkdown Content:\n" + strings.Repeat("body ", 100)))
+			}))
+			defer jina.Close()
+
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+			_, err := n.Fetch(context.Background(), srv.URL)
+			require.Error(t, err)
+
+			var pe *PermanentError
+			assert.ErrorAs(t, err, &pe, "dead link must be permanent")
+			assert.ErrorIs(t, err, ErrDeadLink)
+			assert.Equal(t, 0, jinaCalls, "dead links must not burn Jina budget")
+		})
+	}
+}
+
+// TestNative_Soft404_TitleDetected: HTTP 200 carrying a not-found page
+// (long enough to dodge the thin-content check) is a dead link, not a
+// login wall — so it must NOT fall back to Jina.
+func TestNative_Soft404_TitleDetected(t *testing.T) {
+	body := strings.Repeat("The page you are looking for may have moved. Try the search box or browse our sitemap. ", 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html><head><title>404 - Page Not Found | Example Site</title></head>
+			<body><article><h1>Page not found</h1><p>` + body + `</p></article></body></html>`))
+	}))
+	defer srv.Close()
+
+	jinaCalls := 0
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jinaCalls++
+		_, _ = w.Write([]byte("Title: x\n\nMarkdown Content:\n" + strings.Repeat("body ", 100)))
+	}))
+	defer jina.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	_, err := n.Fetch(context.Background(), srv.URL)
+	require.Error(t, err)
+
+	var pe *PermanentError
+	assert.ErrorAs(t, err, &pe)
+	assert.ErrorIs(t, err, ErrDeadLink)
+	assert.Contains(t, err.Error(), "not-found page")
+	assert.Equal(t, 0, jinaCalls)
+}
+
+// TestNative_Soft404_RedirectToHomepage: a specific path settling on the
+// site root (same host) means the content is gone.
+func TestNative_Soft404_RedirectToHomepage(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/blog/deleted-article", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(makeArticleHTML("Example Site — all our great content", "")))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	_, err := n.Fetch(context.Background(), srv.URL+"/blog/deleted-article")
+	require.Error(t, err)
+
+	var pe *PermanentError
+	assert.ErrorAs(t, err, &pe)
+	assert.ErrorIs(t, err, ErrDeadLink)
+	assert.Contains(t, err.Error(), "redirected to homepage")
+}
+
+func TestSoft404TitleRE(t *testing.T) {
+	dead := []string{
+		"404 Not Found",
+		"404 - Page Not Found | Example",
+		"Error 404",
+		"error 404 – nothing here",
+		"Not Found",
+		"Page not found — Medium",
+		"Oops! That page can’t be found.",
+		"This page doesn't exist",
+		"Sorry, this page no longer exists",
+		"The page you requested has been removed",
+		"We couldn't find this page",
+	}
+	for _, title := range dead {
+		assert.True(t, soft404TitleRE.MatchString(title), "should match %q", title)
+	}
+
+	alive := []string{
+		"Understanding HTTP 404s and how to avoid them",
+		"How we redesigned our 404 experience", // "our 404 experience" — no boundary hit
+		"Finding lost cities: places not found on any map",
+		"The Signal and the Noise",
+		"Go 1.25 release notes",
+	}
+	for _, title := range alive {
+		assert.False(t, soft404TitleRE.MatchString(title), "should NOT match %q", title)
+	}
+}
