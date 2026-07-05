@@ -158,8 +158,13 @@ func run() error {
 	default:
 		return fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
 	}
-	// Content-type-specific fetchers, routed by hostname.
+	// Content-type-specific fetchers, routed by hostname. The built-in
+	// rules below are the defaults; a user-provided fetcher_rules.yaml
+	// under $CURIO_HOME overrides them (hot-reloaded, no restart needed).
 	var rules []fetcher.Rule
+	registry := map[string]fetcher.Fetcher{
+		defaultFetcher.Name(): defaultFetcher,
+	}
 
 	ghFetcher := fetcher.NewGitHub(fetcher.GitHubOptions{
 		Token:   cfg.Fetcher.GitHub.Token,
@@ -167,6 +172,7 @@ func run() error {
 		Log:     slog.Default(),
 	})
 	rules = append(rules, fetcher.Rule{Hosts: fetcher.GitHubHosts, Fetcher: ghFetcher})
+	registry[ghFetcher.Name()] = ghFetcher
 
 	if _, err := exec.LookPath(cfg.Fetcher.YouTube.Bin); err == nil {
 		ytFetcher := fetcher.NewRateLimited(
@@ -179,10 +185,19 @@ func run() error {
 			2, 3, // 2 req/s, burst of 3 — yt-dlp is slow per-call, this mostly limits concurrent starts
 		)
 		rules = append(rules, fetcher.Rule{Hosts: fetcher.YouTubeHosts, Fetcher: ytFetcher})
+		// Registry holds the rate-limited wrapper so token-bucket state
+		// survives rule reloads.
+		registry[ytFetcher.Name()] = ytFetcher
 		slog.Info("youtube fetcher enabled", "bin", cfg.Fetcher.YouTube.Bin)
 	}
 
-	dispatcher := &fetcher.PatternDispatcher{Rules: rules, Fallback: defaultFetcher}
+	dispatcher := fetcher.NewRulesDispatcher(fetcher.RulesDispatcherOptions{
+		Path:         home.FetcherRulesPath(),
+		Registry:     registry,
+		DefaultRules: rules,
+		Fallback:     defaultFetcher,
+		Log:          slog.Default(),
+	})
 
 	// Indexer + search engine.
 	idx := indexer.New(chunks, emb, indexer.Options{
