@@ -1,13 +1,13 @@
 # Status
 
-**Current position:** M0 ✅ · M1 ✅ (all importers, incl. Firefox) · M2
-substantially complete — Go-native default fetcher + Chrome TLS/HTTP2
-fingerprint backend, YouTube, GitHub, and a two-tier PDF fetcher all
-shipped. Remaining M2: `fetcher_rules.yaml`, dead-link detection, GitHub
-issues/PRs/wiki. **Next milestone: M3 — MCP sidecar** (`cmd/curio-mcp`):
-expose `search_bookmarks` / `get_document` / `find_related` so Claude and
-other LLM clients can query the corpus. That's the highest-leverage step
-now that ingestion is solid — the payoff for everything built so far.
+**Current position:** M0 ✅ · M1 ✅ · M2 substantially complete (native +
+fingerprint fetcher, YouTube, GitHub, two-tier PDF; remaining:
+`fetcher_rules.yaml`, dead-link detection, GitHub issues/PRs). A quality
+pass landed too: search filters, bookmark-tags→FTS, and `reindex`. **M3 is
+underway** — the `curio-mcp` sidecar ships, exposing `search_bookmarks` /
+`get_document` / `find_related` to Claude and other MCP clients. The corpus
+is now queryable from inside the LLM client — the payoff for everything
+built so far.
 
 ## M0 — Walking Skeleton
 
@@ -70,14 +70,18 @@ These are not bugs — they're scope-trimmed pieces deferred from M0 to M1+:
 - **`curio init`** — there's no explicit init command; the CLI auto-inits
   `~/.curio` on first run. If a future workflow needs explicit init
   (e.g., to choose a different embedder upfront), adding it is trivial.
-- **Tags from bookmarks not fully wired.** Tags are denormalized into
-  `chunks_fts` at index time, but there's no `BookmarkStore.ListByDocument`
-  on the store interface — so the indexer can't look up a document's
-  bookmark tags to feed them in. Lands when M1 importers do.
-- **No reindex CLI yet.** Documented in `docs/decisions.md`; needed when
-  someone first wants to swap embedding models.
-- **Search filters** (`content_type`, `host`, `source`, etc.) are
-  accepted by the API but not yet applied. Engine work needed.
+- ~~**Tags from bookmarks not wired.**~~ ✅ Done — `BookmarkStore.TagsForDocument`
+  unions a doc's bookmark tags (across sources); the index handler feeds them
+  into `chunks_fts`, so a tag word is searchable even when absent from the body.
+- ~~**No reindex CLI.**~~ ✅ Done — `curio reindex <id>` / `--all` re-chunks +
+  re-embeds existing extractions (`POST /v1/documents/{id}/reindex`,
+  `/reindex-all`). Covers same-dimension model swaps, chunker changes, and
+  tag pickup; a *dimension-change* swap still needs a `chunks_vec` rebuild
+  (see `decisions.md`).
+- ~~**Search filters**~~ ✅ Done — `content_type`, `host`, and `source` are
+  applied by the search engine (`store.SearchFilters` threaded through BM25 +
+  vector) and exposed via `curio search --type/--source/--host`. `folder`/
+  `tag` are accepted but not yet applied.
 
 ## Decisions logged in `docs/decisions.md`
 
@@ -154,3 +158,19 @@ _None — Firefox landed (see table above). **M1 is complete.**_
 - **`fetcher_rules.yaml`** — user-configurable fetcher routing (deferred until 3+ fetchers justify the config complexity)
 - **Dead-link detection** — soft 404s that return HTTP 200 with junk content
 - **GitHub issues/PRs/wiki** — currently unsupported URL types; fall through to Native or add dedicated handling
+
+## M3 — MCP sidecar
+
+### Completed
+
+| Feature | Package / file | Notes |
+|---|---|---|
+| `curio-mcp` binary | `cmd/curio-mcp/main.go` | Speaks MCP over stdio (official `modelcontextprotocol/go-sdk`); forwards to the daemon HTTP API; auto-starts the daemon. Built by `make build`. |
+| Tools | `cmd/curio-mcp/main.go` | `search_bookmarks` (query + content_type/source/host filters), `get_document` (metadata + markdown), `find_related` (by title similarity, excludes self) |
+| Registration docs | `docs/mcp.md` | Claude Code (`claude mcp add`) + Claude Desktop config |
+| Tests | `cmd/curio-mcp/main_test.go` | In-memory client/server round-trip over a fake daemon: tool listing, each tool, error path |
+
+### Remaining
+
+- Richer tools (e.g. `list_interests`) arrive with the M4 insight layer.
+- A proper vector-neighbor endpoint for `find_related` (currently uses the doc's title as the similarity query).

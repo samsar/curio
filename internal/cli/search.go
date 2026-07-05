@@ -11,7 +11,12 @@ import (
 )
 
 func newSearchCmd() *cobra.Command {
-	var k int
+	var (
+		k           int
+		contentType []string
+		source      []string
+		host        []string
+	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Hybrid BM25 + vector search across indexed bookmarks",
@@ -26,8 +31,17 @@ func newSearchCmd() *cobra.Command {
 			}
 			query := strings.Join(args, " ")
 
+			var filters *client.SearchFilters
+			if len(contentType) > 0 || len(source) > 0 || len(host) > 0 {
+				filters = &client.SearchFilters{
+					ContentType: contentType,
+					Host:        host,
+					Source:      source,
+				}
+			}
+
 			res, err := ctx.Client.Search(cmd.Context(), client.SearchRequest{
-				Query: query, K: k,
+				Query: query, K: k, Filters: filters,
 			})
 			if err != nil {
 				return err
@@ -37,6 +51,9 @@ func newSearchCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVarP(&k, "k", "k", 10, "Number of results to return")
+	cmd.Flags().StringSliceVar(&contentType, "type", nil, "Filter by content type (article|repo|video|pdf|thread|unknown); repeatable")
+	cmd.Flags().StringSliceVar(&source, "source", nil, "Filter by bookmark source (chrome|safari|firefox|html|manual); repeatable")
+	cmd.Flags().StringSliceVar(&host, "host", nil, "Filter by URL host, e.g. github.com; repeatable")
 	return cmd
 }
 

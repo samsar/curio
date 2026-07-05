@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build, test, lint
 
 ```sh
-make build               # produces ./bin/curio and ./bin/curio-daemon
+make build               # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp
 make test                # unit tests under -race
 make test-integration    # needs Ollama + web2md available
 make test-e2e            # boots the daemon end-to-end
@@ -31,17 +31,19 @@ Cgo is required (sqlite, sqlite-vec). `CGO_ENABLED=1` is forced in the Makefile.
 
 ## Architecture in one screen
 
-Two binaries:
+Three binaries:
 
 ```
-curio (CLI, cobra)  ──HTTP+JSON──►  curio-daemon  ──►  SQLite (~/.curio/curio.db)
-                                          │             ├ FTS5 (chunks_fts)
-                                          │             └ sqlite-vec (chunks_vec)
-                                          │
-                                          ├─► Ollama at http://localhost:11434  (embeddings)
-                                          ├─► Native fetcher (Go-native HTTP + Readability)
-                                          └─► Optional web2md (Node subprocess)
+curio     (CLI, cobra)   ──HTTP+JSON──►  curio-daemon  ──►  SQLite (~/.curio/curio.db)
+curio-mcp (MCP sidecar)  ──HTTP+JSON──►       │             ├ FTS5 (chunks_fts)
+                                              │             └ sqlite-vec (chunks_vec)
+                                              │
+                                              ├─► Ollama at http://localhost:11434  (embeddings)
+                                              ├─► Native fetcher (Go-native HTTP + Readability)
+                                              └─► Optional web2md (Node subprocess)
 ```
+
+`curio-mcp` (`cmd/curio-mcp`) speaks MCP over stdio to clients like Claude Code and forwards tool calls to the daemon over the same HTTP API the CLI uses; it auto-starts the daemon. See `docs/mcp.md`.
 
 - Storage state lives under `$CURIO_HOME` (default `~/.curio`): `curio.db`, `content/<doc_id>/<extraction_id>.md`, `daemon.pid`, `daemon.log`, `.curio-meta.json`.
 - The CLI auto-starts the daemon when needed via `internal/daemonctl`. PID file at `~/.curio/daemon.pid`. The auto-discovery picks `curio-daemon` from the same directory as the `curio` binary, override with `CURIO_DAEMON_BIN`.

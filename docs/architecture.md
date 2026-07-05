@@ -79,12 +79,18 @@ convention) and forwards calls to the daemon over HTTP. Why a sidecar:
 - Clean process boundary; can be restarted independently
 - Future-proofs against MCP protocol changes
 
-Initial MCP tools:
+MCP tools (implemented):
 
-- `search_bookmarks(query, k)` — hybrid search
-- `get_document(id)` — fetch a specific document's content
-- `list_interests()` — get inferred interest clusters (insight layer, later)
-- `find_related(url_or_query)` — find related items in the corpus
+- `search_bookmarks(query, k, content_type?, source?, host?)` — hybrid search
+  with optional filters
+- `get_document(id)` — fetch a document's metadata + extracted markdown
+- `find_related(id, k)` — find documents similar to a given one (by its title)
+
+Later (insight layer, M4):
+
+- `list_interests()` — inferred interest clusters
+
+Registration and usage: see `docs/mcp.md`.
 
 ## Transport: HTTP + JSON
 

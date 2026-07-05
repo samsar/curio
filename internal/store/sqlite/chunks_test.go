@@ -70,7 +70,7 @@ func TestChunks_ReplaceForDocument_FullCycle(t *testing.T) {
 	require.NoError(t, ch.ReplaceForDocument(ctx, docID, ext, "Postgres Internals", []string{"db"}, inputs))
 
 	// BM25 picks the MVCC chunk for an MVCC-flavored query.
-	hits, err := ch.BM25Search(ctx, "local", "mvcc concurrency", 10)
+	hits, err := ch.BM25Search(ctx, "local", "mvcc concurrency", 10, store.SearchFilters{})
 	require.NoError(t, err)
 	require.NotEmpty(t, hits)
 	first, err := ch.GetByIDs(ctx, []string{hits[0].ChunkID})
@@ -79,7 +79,7 @@ func TestChunks_ReplaceForDocument_FullCycle(t *testing.T) {
 	assert.NotEmpty(t, hits[0].Snippet)
 
 	// Vector search: closest vector to 0.10 is the first chunk.
-	vHits, err := ch.VectorSearch(ctx, "local", fillVec(0.10), 10)
+	vHits, err := ch.VectorSearch(ctx, "local", fillVec(0.10), 10, store.SearchFilters{})
 	require.NoError(t, err)
 	require.NotEmpty(t, vHits)
 	closest, err := ch.GetByIDs(ctx, []string{vHits[0].ChunkID})
@@ -108,11 +108,11 @@ func TestChunks_ReplaceForDocument_IsIdempotent(t *testing.T) {
 	}
 	require.NoError(t, ch.ReplaceForDocument(ctx, docID, ext, "T", nil, second))
 
-	hits, err := ch.BM25Search(ctx, "local", "alpha", 10)
+	hits, err := ch.BM25Search(ctx, "local", "alpha", 10, store.SearchFilters{})
 	require.NoError(t, err)
 	assert.Empty(t, hits, "old chunks should be gone after Replace")
 
-	hits, err = ch.BM25Search(ctx, "local", "replaced", 10)
+	hits, err = ch.BM25Search(ctx, "local", "replaced", 10, store.SearchFilters{})
 	require.NoError(t, err)
 	assert.Len(t, hits, 1)
 }
@@ -130,8 +130,8 @@ func TestChunks_BM25_FiltersByTenant(t *testing.T) {
 	require.NoError(t, ch.ReplaceForDocument(ctx, idsB[0], latestExtractionID(t, db, idsB[0]),
 		"", nil, []store.ChunkInput{{Text: "rocket science", Embedding: fillVec(0.1)}}))
 
-	hitsA, _ := ch.BM25Search(ctx, "tenant_a", "rocket", 10)
-	hitsB, _ := ch.BM25Search(ctx, "tenant_b", "rocket", 10)
+	hitsA, _ := ch.BM25Search(ctx, "tenant_a", "rocket", 10, store.SearchFilters{})
+	hitsB, _ := ch.BM25Search(ctx, "tenant_b", "rocket", 10, store.SearchFilters{})
 
 	require.Len(t, hitsA, 1)
 	require.Len(t, hitsB, 1)
@@ -150,7 +150,7 @@ func TestChunks_Vector_FiltersByTenant(t *testing.T) {
 	require.NoError(t, ch.ReplaceForDocument(ctx, idsB[0], latestExtractionID(t, db, idsB[0]),
 		"", nil, []store.ChunkInput{{Text: "y", Embedding: fillVec(0.5)}}))
 
-	hitsA, err := ch.VectorSearch(ctx, "tenant_a", fillVec(0.5), 10)
+	hitsA, err := ch.VectorSearch(ctx, "tenant_a", fillVec(0.5), 10, store.SearchFilters{})
 	require.NoError(t, err)
 	require.Len(t, hitsA, 1)
 }
@@ -172,4 +172,80 @@ func latestExtractionID(t *testing.T, db *DB, documentID string) string {
 		ORDER BY fetched_at DESC LIMIT 1`, documentID).Scan(&id)
 	require.NoError(t, err)
 	return id
+}
+
+// TestChunks_SearchFilters verifies content_type / host / source scoping on
+// both retrievers. Three docs all match the term "kubernetes"; filters must
+// narrow which documents come back.
+func TestChunks_SearchFilters(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	docsStore := NewDocuments(db)
+	exts := NewExtractions(db)
+	bms := NewBookmarks(db)
+	ch := NewChunks(db, vecDim)
+
+	seeds := []struct {
+		url, ctype, source string
+		vec                float32
+	}{
+		{"https://example.com/k8s-guide", store.ContentTypeArticle, store.SourceChrome, 0.10},
+		{"https://github.com/foo/bar", store.ContentTypeRepo, store.SourceManual, 0.20},
+		{"https://example.com/k8s.pdf", store.ContentTypePDF, store.SourceChrome, 0.30},
+	}
+	byURL := map[string]string{}
+	for _, s := range seeds {
+		d := &store.Document{TenantID: "local", URL: s.url, ContentType: s.ctype}
+		require.NoError(t, docsStore.Upsert(ctx, d))
+		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
+		require.NoError(t, exts.Create(ctx, e))
+		require.NoError(t, docsStore.SetCurrentExtraction(ctx, d.ID, e.ID))
+		require.NoError(t, ch.ReplaceForDocument(ctx, d.ID, e.ID, "", nil,
+			[]store.ChunkInput{{Text: "kubernetes deployment guide", Embedding: fillVec(s.vec), TokenCount: 3}}))
+		docID := d.ID
+		require.NoError(t, bms.Create(ctx, &store.Bookmark{
+			TenantID: "local", DocumentID: &docID, URL: s.url, Source: s.source, SavedAt: time.Now().UTC(),
+		}))
+		byURL[s.url] = d.ID
+	}
+
+	docSet := func(hits []store.ChunkHit) map[string]bool {
+		m := map[string]bool{}
+		for _, h := range hits {
+			m[h.DocumentID] = true
+		}
+		return m
+	}
+
+	cases := []struct {
+		name   string
+		filter store.SearchFilters
+		want   []string // expected URLs
+	}{
+		{"none", store.SearchFilters{}, []string{"https://example.com/k8s-guide", "https://github.com/foo/bar", "https://example.com/k8s.pdf"}},
+		{"ctype pdf", store.SearchFilters{ContentType: []string{store.ContentTypePDF}}, []string{"https://example.com/k8s.pdf"}},
+		{"ctype article+repo", store.SearchFilters{ContentType: []string{store.ContentTypeArticle, store.ContentTypeRepo}}, []string{"https://example.com/k8s-guide", "https://github.com/foo/bar"}},
+		{"source manual", store.SearchFilters{Source: []string{store.SourceManual}}, []string{"https://github.com/foo/bar"}},
+		{"host github", store.SearchFilters{Host: []string{"github.com"}}, []string{"https://github.com/foo/bar"}},
+		{"host example", store.SearchFilters{Host: []string{"example.com"}}, []string{"https://example.com/k8s-guide", "https://example.com/k8s.pdf"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bm, err := ch.BM25Search(ctx, "local", "kubernetes", 50, tc.filter)
+			require.NoError(t, err)
+			gotBM := docSet(bm)
+			assert.Len(t, gotBM, len(tc.want), "bm25 result count")
+			for _, u := range tc.want {
+				assert.True(t, gotBM[byURL[u]], "bm25 missing %s", u)
+			}
+
+			vec, err := ch.VectorSearch(ctx, "local", fillVec(0.15), 50, tc.filter)
+			require.NoError(t, err)
+			gotVec := docSet(vec)
+			assert.Len(t, gotVec, len(tc.want), "vector result count")
+			for _, u := range tc.want {
+				assert.True(t, gotVec[byURL[u]], "vector missing %s", u)
+			}
+		})
+	}
 }

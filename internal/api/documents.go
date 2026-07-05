@@ -205,6 +205,64 @@ func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": enqueued})
 }
 
+// handleReindexDocument enqueues an index job for the document — re-chunking
+// and re-embedding its current extraction's markdown. Unlike refetch it does
+// NOT re-fetch or reset state; the doc stays fetched. Useful after an
+// embedding-model or chunker change, or to pick up new bookmark tags. The
+// document must already have a current extraction.
+func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	doc, err := d.Documents.GetByID(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if doc.CurrentExtractionID == nil {
+		writeProblem(w, http.StatusConflict, "no content",
+			"document has no extraction to reindex; refetch it first")
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"document_id": doc.ID})
+	job := &store.Job{TenantID: d.TenantID, Kind: store.JobKindIndex, Payload: payload}
+	if err := d.Queue.Enqueue(r.Context(), job); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": job.ID})
+}
+
+// handleReindexAll enqueues index jobs for documents that have content.
+// Defaults to state=fetched (the already-indexed set); ?state= overrides.
+// Use after swapping the embedding model (same dimension) or the chunker.
+func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
+	wantState := r.URL.Query().Get("state")
+	if wantState == "" {
+		wantState = store.DocStateFetched // only fetched docs have content to reindex
+	}
+	ds, ok := d.Documents.(*sqlite.Documents)
+	if !ok {
+		writeProblem(w, http.StatusNotImplemented, "not supported",
+			"DocumentStore impl does not expose bulk listing")
+		return
+	}
+	ids, err := ds.ListIDs(r.Context(), d.TenantID, wantState)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	enqueued := 0
+	for _, id := range ids {
+		payload, _ := json.Marshal(map[string]string{"document_id": id})
+		if err := d.Queue.Enqueue(r.Context(), &store.Job{
+			TenantID: d.TenantID, Kind: store.JobKindIndex, Payload: payload,
+		}); err != nil {
+			continue
+		}
+		enqueued++
+	}
+	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": enqueued})
+}
+
 // handleGetDocumentContent streams the extracted markdown.
 func (d Deps) handleGetDocumentContent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")

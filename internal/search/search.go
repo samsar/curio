@@ -91,7 +91,8 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, c
 type Request struct {
 	TenantID string
 	Query    string
-	K        int // results to return after fusion + collapse
+	K        int                 // results to return after fusion + collapse
+	Filters  store.SearchFilters // content_type / host / source; empty = no filter
 }
 
 // Hit is a single document-level result with its best chunk snippets attached.
@@ -141,7 +142,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	// contributes nothing; vector search still runs.
 	var bm25Hits []store.ChunkHit
 	if ftsQuery := sanitizeBM25Query(req.Query); ftsQuery != "" {
-		hits, err := e.chunks.BM25Search(ctx, req.TenantID, ftsQuery, e.preFanout)
+		hits, err := e.chunks.BM25Search(ctx, req.TenantID, ftsQuery, e.preFanout, req.Filters)
 		if err != nil {
 			return nil, fmt.Errorf("bm25: %w", err)
 		}
@@ -155,7 +156,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	if len(queryVec) == 0 {
 		return nil, errors.New("search: embedder returned no vectors")
 	}
-	vecHits, err := e.chunks.VectorSearch(ctx, req.TenantID, queryVec[0], e.preFanout)
+	vecHits, err := e.chunks.VectorSearch(ctx, req.TenantID, queryVec[0], e.preFanout, req.Filters)
 	if err != nil {
 		return nil, fmt.Errorf("vector: %w", err)
 	}

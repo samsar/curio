@@ -94,27 +94,28 @@ posture).
 ### Embedding model swap
 
 Switching embedding models requires a full re-embed because old and new vectors
-aren't comparable. The process:
+aren't comparable.
 
-1. Update `embedding.model` and `embedding.dimensions` in `config.yaml`.
-2. Run `curio reindex --reason=model-swap`. This:
-   - Drops and recreates the `chunks_vec` virtual table at the new dimension.
-   - Enqueues `index` jobs for every document (re-embeds all chunks).
-3. `.curio-meta.json` is updated with the new model name and dimension.
-4. BM25 (FTS5) index is unaffected — keyword search keeps working through the
-   re-embed.
+**Implemented today:** `curio reindex <id>` and `curio reindex --all` enqueue
+`index` jobs that re-chunk and re-embed documents from their *existing*
+extraction — no re-fetch (`POST /v1/documents/{id}/reindex`, `/reindex-all`;
+`--all` defaults to `state=fetched`). This covers a **same-dimension** model
+swap, chunker-setting changes, and picking up newly-added bookmark tags. BM25
+(FTS5) is unaffected — keyword search keeps working through the re-embed.
 
-To make this swap safe:
+**Not yet implemented** — a *different-dimension* swap additionally needs:
 
-- All embedding access goes through the `Embedder` interface
-  (`Embed(text) ([]float32, error)` + `Dimensions() int`).
-- `chunks_vec` is rebuilt, not migrated — vector dimensions are fixed at table
-  creation.
-- The daemon refuses to start if `config.yaml`'s embedding model disagrees with
-  `.curio-meta.json` and `reindex` hasn't been run.
+1. Update `embedding.model` + `embedding.dim` in `config.yaml`.
+2. Drop and recreate the `chunks_vec` virtual table at the new dimension
+   (vec dims are fixed at table creation — rebuild, not migrate).
+3. Update `.curio-meta.json` with the new model + dimension.
+4. A startup guard that refuses to run if `config.yaml`'s model disagrees with
+   `.curio-meta.json` and a reindex hasn't happened.
 
-Future enhancement: support running two embedders side-by-side during a
-transition (write to both, read from old, then cut over). Not needed for v1.
+A `--reason` flag and steps 2–4 are future work; today `reindex` assumes the
+dimension is unchanged. All embedding access already goes through the
+`Embedder` interface, so the swap stays tractable. Future enhancement: run two
+embedders side-by-side during a transition. Not needed for v1.
 
 ---
 

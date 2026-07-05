@@ -182,8 +182,38 @@ func TestIndexHandler_HappyPath(t *testing.T) {
 	assert.Equal(t, store.DocStateFetched, got.State, "document should be fetched after index")
 
 	// Searchable via BM25.
-	hits, _ := deps.Chunks.BM25Search(ctx, "local", "MVCC", 10)
+	hits, _ := deps.Chunks.BM25Search(ctx, "local", "MVCC", 10, store.SearchFilters{})
 	require.NotEmpty(t, hits, "indexed content should be searchable")
+}
+
+// TestIndexHandler_BookmarkTagsAreSearchable proves a bookmark's tags reach
+// chunks_fts: a tag word that does NOT appear in the body is searchable
+// after indexing.
+func TestIndexHandler_BookmarkTagsAreSearchable(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	ctx := context.Background()
+
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/tagged", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+
+	// Bookmark with a distinctive tag absent from the fetched content.
+	docID := doc.ID
+	require.NoError(t, deps.Bookmarks.Create(ctx, &store.Bookmark{
+		TenantID: "local", DocumentID: &docID, URL: doc.URL, Source: store.SourceManual,
+		SavedAt: time.Now().UTC(), Tags: []string{"zorptag"},
+	}))
+
+	fp, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
+	require.NoError(t, FetchHandler(deps)(ctx, &store.Job{Payload: fp}))
+	ip, _ := json.Marshal(IndexPayload{DocumentID: doc.ID})
+	require.NoError(t, IndexHandler(deps)(ctx, &store.Job{Payload: ip}))
+
+	// Sanity: the tag is not in the body, so without denormalization this
+	// would return nothing.
+	hits, err := deps.Chunks.BM25Search(ctx, "local", "zorptag", 10, store.SearchFilters{})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits, "bookmark tag should be searchable via chunks_fts")
+	assert.Equal(t, doc.ID, hits[0].DocumentID)
 }
 
 func TestIndexHandler_MissingExtraction_Permanent(t *testing.T) {
