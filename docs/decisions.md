@@ -1369,6 +1369,11 @@ which makes the filter set non-empty and routes `VectorSearch`
 through its existing k×10 over-fetch path. A bespoke query would
 have to replicate that dance — don't.
 
+**Fanout scales with K:** hits are chunk-level, so the ANN pool is
+`max(preFanout, K*8)` — a fixed 50-chunk pool could be crowded out by
+one long near-duplicate document and could never yield more than 50
+distinct documents despite the API accepting k up to 100.
+
 **Contract edges:** unknown doc → 404; known doc with no indexed
 chunks (pending/failed/dead) → 200 with empty items (the document
 exists; it just has no vectors yet — kinder to MCP callers than a

@@ -258,10 +258,16 @@ func (e *Engine) Related(ctx context.Context, req RelatedRequest) (*Result, erro
 	}
 
 	mean := meanVector(embs)
+	// Scale the chunk fanout with the requested K: hits are chunk-level,
+	// and one long near-duplicate document can occupy dozens of the
+	// nearest slots — a fixed preFanout(50) pool could collapse to fewer
+	// than K distinct documents (and could never yield more than 50).
+	// ~8 chunk slots per hoped-for document, floored at preFanout.
+	fanout := max(e.preFanout, req.K*8)
 	// A non-empty filter (ExcludeDocumentID) routes VectorSearch through
 	// its over-fetch path — required because sqlite-vec applies non-MATCH
 	// predicates after the k cutoff.
-	vecHits, err := e.chunks.VectorSearch(ctx, req.TenantID, mean, e.preFanout,
+	vecHits, err := e.chunks.VectorSearch(ctx, req.TenantID, mean, fanout,
 		store.SearchFilters{ExcludeDocumentID: req.DocumentID})
 	if err != nil {
 		return nil, fmt.Errorf("related: vector: %w", err)
