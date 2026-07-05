@@ -145,6 +145,11 @@ type BookmarkStore interface {
 	List(ctx context.Context, tenantID string, opts ListBookmarksOpts) ([]*Bookmark, error)
 	Delete(ctx context.Context, id string) error
 	LinkDocument(ctx context.Context, bookmarkID, documentID string) error
+
+	// TagsForDocument returns the deduplicated set of tags across all
+	// bookmarks (any source) that reference the document. Empty if none.
+	// The indexer uses it to denormalize tags into chunks_fts for boosting.
+	TagsForDocument(ctx context.Context, tenantID, documentID string) ([]string, error)
 }
 
 // ListBookmarksOpts are filters for BookmarkStore.List. Empty fields mean
@@ -185,6 +190,21 @@ type ChunkHit struct {
 	Snippet    string // BM25 only; empty for vector hits
 }
 
+// SearchFilters scopes a search to documents matching all of the set
+// dimensions (values within one dimension are OR'd). An empty filter set
+// matches everything. content_type and source map to indexed columns; host
+// is matched against the document URL (there is no host column).
+type SearchFilters struct {
+	ContentType []string // documents.content_type IN (...)
+	Host        []string // URL host (http/https) IN (...)
+	Source      []string // EXISTS a bookmark with bookmarks.source IN (...)
+}
+
+// IsEmpty reports whether no filter dimension is set.
+func (f SearchFilters) IsEmpty() bool {
+	return len(f.ContentType) == 0 && len(f.Host) == 0 && len(f.Source) == 0
+}
+
 // ChunkStore writes and queries the chunks tables + FTS5 + vec virtual tables.
 type ChunkStore interface {
 	// ReplaceForDocument atomically deletes all existing chunks for the
@@ -193,13 +213,13 @@ type ChunkStore interface {
 	ReplaceForDocument(ctx context.Context, documentID, extractionID, title string, tags []string, chunks []ChunkInput) error
 
 	// BM25Search runs FTS5 MATCH against chunk text and returns the top
-	// matches for the given tenant. Snippet is populated.
-	BM25Search(ctx context.Context, tenantID, query string, limit int) ([]ChunkHit, error)
+	// matches for the given tenant, scoped by filters. Snippet is populated.
+	BM25Search(ctx context.Context, tenantID, query string, limit int, filters SearchFilters) ([]ChunkHit, error)
 
 	// VectorSearch runs an approximate-nearest-neighbor query against
-	// chunks_vec. The embedding length must match the schema's vec
-	// dimension; mismatched lengths return an error.
-	VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int) ([]ChunkHit, error)
+	// chunks_vec, scoped by filters. The embedding length must match the
+	// schema's vec dimension; mismatched lengths return an error.
+	VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int, filters SearchFilters) ([]ChunkHit, error)
 
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
 }

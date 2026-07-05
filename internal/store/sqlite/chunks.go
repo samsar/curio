@@ -134,7 +134,7 @@ func (s *Chunks) ReplaceForDocument(
 // the way out so the surfaced Score follows the "higher = better" convention
 // shared with VectorSearch — that way RRF fusion downstream doesn't have to
 // know which retriever it's mixing.
-func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit int) ([]store.ChunkHit, error) {
+func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit int, filters store.SearchFilters) ([]store.ChunkHit, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
@@ -142,21 +142,28 @@ func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit i
 		limit = 50
 	}
 
+	filterSQL, filterArgs := buildFilterClause(filters)
+
 	// snippet() args: column index, open mark, close mark, ellipsis,
 	// max tokens. 32 tokens gives ~200-300 char snippets — enough to
 	// see the match in context without flooding the CLI. The CLI's
 	// wrapLines breaks them across lines on word boundaries.
-	const q = `
+	q := `
 	SELECT fts.chunk_id, fts.document_id, bm25(chunks_fts) AS bm25_score,
 	       snippet(chunks_fts, 0, '<em>', '</em>', '…', 32)
 	FROM chunks_fts fts
 	JOIN documents d ON d.id = fts.document_id
 	WHERE chunks_fts MATCH ?
-	  AND d.tenant_id = ?
+	  AND d.tenant_id = ?` + filterSQL + `
 	ORDER BY bm25_score
 	LIMIT ?`
 
-	rows, err := s.db.QueryContext(ctx, q, query, tenantID, limit)
+	args := make([]any, 0, 3+len(filterArgs))
+	args = append(args, query, tenantID)
+	args = append(args, filterArgs...)
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("bm25 search: %w", err)
 	}
@@ -187,7 +194,7 @@ func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit i
 // sqlite-vec returns L2 distance (lower = closer). We convert to a 0..1
 // similarity-like score via 1/(1+d). Cheap monotonic transform; rank order
 // is preserved.
-func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int) ([]store.ChunkHit, error) {
+func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int, filters store.SearchFilters) ([]store.ChunkHit, error) {
 	if len(embedding) != s.dim {
 		return nil, fmt.Errorf("vector search: embedding length %d != configured dim %d", len(embedding), s.dim)
 	}
@@ -200,16 +207,32 @@ func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []
 		return nil, fmt.Errorf("serialize query embedding: %w", err)
 	}
 
-	const q = `
+	// sqlite-vec applies the k-NN cutoff at the index level BEFORE the
+	// document predicates, so with filters a naive k=limit could return
+	// almost nothing after filtering. Over-fetch neighbors and cap the
+	// returned (closest) rows to limit so the fanout stays consistent.
+	k := limit
+	if !filters.IsEmpty() {
+		if k = limit * 10; k > 1000 {
+			k = 1000
+		}
+	}
+
+	filterSQL, filterArgs := buildFilterClause(filters)
+	q := `
 	SELECT v.chunk_id, c.document_id, v.distance
 	FROM chunks_vec v
 	JOIN chunks c     ON c.id = v.chunk_id
 	JOIN documents d  ON d.id = c.document_id
 	WHERE v.embedding MATCH ? AND k = ?
-	  AND d.tenant_id = ?
+	  AND d.tenant_id = ?` + filterSQL + `
 	ORDER BY v.distance`
 
-	rows, err := s.db.QueryContext(ctx, q, serialized, limit, tenantID)
+	args := make([]any, 0, 3+len(filterArgs))
+	args = append(args, serialized, k, tenantID)
+	args = append(args, filterArgs...)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("vector search: %w", err)
 	}
@@ -217,6 +240,9 @@ func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []
 
 	var out []store.ChunkHit
 	for rows.Next() {
+		if len(out) >= limit {
+			break // cap to the closest `limit` of the (over-fetched) filtered set
+		}
 		var (
 			h        store.ChunkHit
 			distance float64
@@ -231,6 +257,51 @@ func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// buildFilterClause builds the AND-prefixed WHERE conditions and bind args to
+// scope a search by content_type / host / source. The caller's query MUST
+// alias the documents table as `d`. Returns ("", nil) for an empty filter.
+func buildFilterClause(f store.SearchFilters) (string, []any) {
+	if f.IsEmpty() {
+		return "", nil
+	}
+	var sb strings.Builder
+	var args []any
+
+	if len(f.ContentType) > 0 {
+		sb.WriteString(" AND d.content_type IN (" + placeholders(len(f.ContentType)) + ")")
+		for _, v := range f.ContentType {
+			args = append(args, v)
+		}
+	}
+	if len(f.Source) > 0 {
+		sb.WriteString(" AND EXISTS (SELECT 1 FROM bookmarks b" +
+			" WHERE b.document_id = d.id AND b.tenant_id = d.tenant_id" +
+			" AND b.source IN (" + placeholders(len(f.Source)) + "))")
+		for _, v := range f.Source {
+			args = append(args, v)
+		}
+	}
+	if len(f.Host) > 0 {
+		// No host column, so match the host segment of the URL for http(s).
+		// Exact host (the caller passes it); no port/subdomain coercion.
+		conds := make([]string, 0, len(f.Host))
+		for _, h := range f.Host {
+			conds = append(conds, "(d.url LIKE ? OR d.url LIKE ? OR d.url = ? OR d.url = ?)")
+			args = append(args, "http://"+h+"/%", "https://"+h+"/%", "http://"+h, "https://"+h)
+		}
+		sb.WriteString(" AND (" + strings.Join(conds, " OR ") + ")")
+	}
+	return sb.String(), args
+}
+
+// placeholders returns "?,?,...,?" with n marks.
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.TrimRight(strings.Repeat("?,", n), ",")
 }
 
 // GetByIDs returns chunks in arbitrary order. Used by the search layer to

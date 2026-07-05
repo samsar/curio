@@ -265,8 +265,16 @@ func (c *Client) GetDocumentContent(ctx context.Context, id string) (string, err
 
 // SearchRequest body.
 type SearchRequest struct {
-	Query string `json:"query"`
-	K     int    `json:"k,omitempty"`
+	Query   string         `json:"query"`
+	K       int            `json:"k,omitempty"`
+	Filters *SearchFilters `json:"filters,omitempty"`
+}
+
+// SearchFilters scopes a search. Nil/omitted dimensions are not filtered.
+type SearchFilters struct {
+	ContentType []string `json:"content_type,omitempty"`
+	Host        []string `json:"host,omitempty"`
+	Source      []string `json:"source,omitempty"`
 }
 
 // SearchHit mirrors api.SearchHitResponse.
@@ -355,6 +363,36 @@ func (c *Client) RefetchAll(ctx context.Context, state string) (*RefetchAllRespo
 		path += "?state=" + url.QueryEscape(state)
 	}
 	var out RefetchAllResponse
+	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReindexResponse is the body of a single-document reindex.
+type ReindexResponse struct {
+	JobID string `json:"job_id"`
+}
+
+func (c *Client) ReindexDocument(ctx context.Context, docID string) (*ReindexResponse, error) {
+	var out ReindexResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/documents/"+docID+"/reindex", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ReindexAllResponse is the body of a bulk reindex.
+type ReindexAllResponse struct {
+	JobsEnqueued int `json:"jobs_enqueued"`
+}
+
+func (c *Client) ReindexAll(ctx context.Context, state string) (*ReindexAllResponse, error) {
+	path := "/v1/documents/reindex-all"
+	if state != "" {
+		path += "?state=" + url.QueryEscape(state)
+	}
+	var out ReindexAllResponse
 	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
 		return nil, err
 	}

@@ -19,6 +19,44 @@ type Bookmarks struct {
 
 var _ store.BookmarkStore = (*Bookmarks)(nil)
 
+// TagsForDocument returns the deduplicated tags across all bookmarks that
+// reference the document, scoped to the tenant. Order is first-seen.
+// Malformed tag JSON on a row is skipped rather than failing the whole call.
+func (s *Bookmarks) TagsForDocument(ctx context.Context, tenantID, documentID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT tags FROM bookmarks WHERE tenant_id = ? AND document_id = ?`,
+		tenantID, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("tags for document: %w", err)
+	}
+	defer rows.Close()
+
+	seen := map[string]bool{}
+	var out []string
+	for rows.Next() {
+		var tagsJSON sql.NullString
+		if err := rows.Scan(&tagsJSON); err != nil {
+			return nil, fmt.Errorf("scan tags: %w", err)
+		}
+		if !tagsJSON.Valid || tagsJSON.String == "" {
+			continue
+		}
+		var tags []string
+		if err := json.Unmarshal([]byte(tagsJSON.String), &tags); err != nil {
+			continue // tolerate a single malformed row
+		}
+		for _, t := range tags {
+			t = strings.TrimSpace(t)
+			if t == "" || seen[t] {
+				continue
+			}
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out, rows.Err()
+}
+
 func NewBookmarks(db *DB) *Bookmarks { return &Bookmarks{db: db} }
 
 const bookmarkListLimitDefault = 50

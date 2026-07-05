@@ -56,11 +56,32 @@ builds:
       - -X github.com/samsar/curio/internal/version.Commit={{.ShortCommit}}
       - -X github.com/samsar/curio/internal/version.Date={{.Date}}
 
+  - id: curio-mcp
+    main: ./cmd/curio-mcp
+    binary: curio-mcp
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    tags:
+      - sqlite_fts5
+      - sqlite_json
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/samsar/curio/internal/version.Version={{.Version}}
+      - -X github.com/samsar/curio/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/samsar/curio/internal/version.Date={{.Date}}
+
 archives:
   - id: curio
     ids:
       - curio
       - curio-daemon
+      - curio-mcp
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
@@ -96,6 +117,7 @@ brews:
     install: |
       bin.install "curio"
       bin.install "curio-daemon"
+      bin.install "curio-mcp"
     test: |
       system "#{bin}/curio", "version"
 

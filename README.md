@@ -77,6 +77,20 @@ each row, so the three usual follow-ups are copy/paste-ready:
 
 `curio --help` lists everything.
 
+## Use with Claude (MCP)
+
+`curio-mcp` exposes your corpus to Claude Code / Claude Desktop over MCP —
+search and pull saved pages straight into a conversation. It auto-starts the
+daemon.
+
+```sh
+make build                              # also builds ./bin/curio-mcp
+claude mcp add curio "$PWD/bin/curio-mcp"
+```
+
+Tools: `search_bookmarks` (with `content_type`/`source`/`host` filters),
+`get_document`, `find_related`. See [docs/mcp.md](./docs/mcp.md).
+
 ## High-level architecture
 
 ```text
@@ -105,6 +119,7 @@ each row, so the three usual follow-ups are copy/paste-ready:
 
 - [Setup](./docs/setup.md) — full install + troubleshooting
 - [Architecture](./docs/architecture.md) — components, transports, data flow
+- [MCP server](./docs/mcp.md) — register `curio-mcp` with Claude, available tools
 - [Data model](./docs/data-model.md) — schemas and storage layout
 - [Decisions](./docs/decisions.md) — running log of design choices and why
 - [Roadmap](./docs/roadmap.md) — milestones and what's next

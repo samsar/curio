@@ -246,11 +246,16 @@ func IndexHandler(d Deps) HandlerFunc {
 			title = *doc.Title
 		}
 
-		// Best-effort: pull tags from the most recent bookmark that
-		// references this doc, for FTS boosting. Failures are non-fatal.
+		// Pull tags from the bookmarks referencing this doc, denormalized
+		// into chunks_fts for boosting. Best-effort: a lookup failure is
+		// non-fatal — we'd rather index without tags than fail the job.
 		var tags []string
-		// (Skipped in M0 — BookmarkStore doesn't expose a "by document_id"
-		// query yet. Add when the bookmark importer lands and tags matter.)
+		if t, terr := d.Bookmarks.TagsForDocument(ctx, doc.TenantID, doc.ID); terr != nil {
+			d.Log.Warn("index: tag lookup failed, indexing without tags",
+				"document_id", doc.ID, "err", terr)
+		} else {
+			tags = t
+		}
 
 		err = d.Indexer.Index(ctx, indexer.IndexInput{
 			DocumentID:   doc.ID,

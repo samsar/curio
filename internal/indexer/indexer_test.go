@@ -71,7 +71,7 @@ func TestIndexer_HappyPath(t *testing.T) {
 	}))
 
 	// Now BM25 + vector both work over those chunks.
-	hits, err := chunks.BM25Search(context.Background(), "local", "MVCC", 10)
+	hits, err := chunks.BM25Search(context.Background(), "local", "MVCC", 10, store.SearchFilters{})
 	require.NoError(t, err)
 	require.NotEmpty(t, hits, "MVCC should match the first chunk")
 }
@@ -86,14 +86,14 @@ func TestIndexer_EmptyMarkdown_ClearsChunks(t *testing.T) {
 	require.NoError(t, idx.Index(context.Background(), IndexInput{
 		DocumentID: docID, ExtractionID: extID, Markdown: "real content here",
 	}))
-	before, _ := chunks.BM25Search(context.Background(), "local", "real", 10)
+	before, _ := chunks.BM25Search(context.Background(), "local", "real", 10, store.SearchFilters{})
 	require.NotEmpty(t, before)
 
 	// Empty replaces away.
 	require.NoError(t, idx.Index(context.Background(), IndexInput{
 		DocumentID: docID, ExtractionID: extID, Markdown: "",
 	}))
-	after, _ := chunks.BM25Search(context.Background(), "local", "real", 10)
+	after, _ := chunks.BM25Search(context.Background(), "local", "real", 10, store.SearchFilters{})
 	assert.Empty(t, after, "empty re-index should clear previous chunks")
 }
 
@@ -110,7 +110,7 @@ func TestIndexer_Idempotent(t *testing.T) {
 		}))
 	}
 	// Same content twice produces the same single-chunk result.
-	hits, _ := chunks.BM25Search(context.Background(), "local", "content", 10)
+	hits, _ := chunks.BM25Search(context.Background(), "local", "content", 10, store.SearchFilters{})
 	assert.Len(t, hits, 1, "re-indexing identical content should still produce one chunk")
 }
 
