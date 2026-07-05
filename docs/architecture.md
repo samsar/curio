@@ -161,8 +161,8 @@ bookmark file ──► importer ──► bookmarks table ──► enqueue fet
 
 ## Fetcher strategy selection
 
-Data-driven, not hardcoded. `fetcher_rules.yaml` lists rules top-to-bottom,
-first match wins:
+Data-driven, not hardcoded. `$CURIO_HOME/fetcher_rules.yaml` lists rules
+top-to-bottom, first match wins (`internal/fetcher/rules.go`):
 
 ```yaml
 rules:
@@ -170,15 +170,24 @@ rules:
     fetcher: github
   - match: { host_suffix: ".youtube.com" }
     fetcher: youtube
-  - match: { content_type: "application/pdf" }
-    fetcher: pdf
-  - match: { host_in: ["nytimes.com", "wsj.com", "ft.com"] }
-    fetcher: jina        # paywalls; Jina handles better
+  - match: { host_in: ["news.ycombinator.com", "lobste.rs"] }
+    fetcher: native
   - match: {}             # catch-all
-    fetcher: web2md
+    fetcher: native
 ```
 
-Hot-reloadable; lets the user tune per-domain without recompiling.
+Matchers are URL-based: `host` (exact), `host_suffix` (label-boundary
+suffix), `host_in` (list), `{}` (catch-all). Fetcher names bind against
+what the daemon constructed at startup (`native` or `web2md`, `github`,
+`youtube` when yt-dlp is present); a rule naming an unavailable fetcher is
+skipped with a logged warning. PDFs are handled inside the Native fetcher,
+so there is no `content_type` matcher — dispatch happens before the
+response exists.
+
+Hot-reloadable (stat-on-dispatch, throttled to 2s): edit the file and the
+next fetch uses the new rules — no restart. Invalid edits keep the last
+good rules; deleting the file reverts to the built-in defaults. Lets the
+user tune per-domain without recompiling.
 
 ## Search: hybrid BM25 + vector
 
