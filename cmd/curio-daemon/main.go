@@ -135,6 +135,17 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Fetch the embedding model in the background if it isn't pulled yet, so a
+	// fresh install self-heals instead of failing every index job. Startup
+	// isn't blocked; index jobs retry with backoff until it's ready.
+	if cfg.Embedding.AutoPull {
+		go func() {
+			if perr := emb.EnsureModel(ctx, slog.Default()); perr != nil {
+				slog.Warn("embedding model not ready; index jobs will retry until it is",
+					"model", cfg.Embedding.Model, "err", perr)
+			}
+		}()
+	}
 
 	// Fetcher dispatcher. Native is always constructed (pure Go, no
 	// external deps, NewNative never errors) so fetcher_rules.yaml can
@@ -234,14 +245,29 @@ func run() error {
 			return gerr
 		}
 		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		if perr := gen.Ping(pingCtx); perr != nil {
-			slog.Warn("generation model unavailable; cluster labels will use term fallback",
-				"model", cfg.Generation.Model, "err", perr)
-		} else {
+		perr := gen.Ping(pingCtx)
+		cancel()
+		switch {
+		case perr == nil:
 			llmLabeler = insight.NewLLMLabeler(gen)
 			slog.Info("cluster labeling via LLM enabled", "model", cfg.Generation.Model)
+		case cfg.Generation.AutoPull && errors.Is(perr, generator.ErrModelNotLoaded):
+			// Ollama is up but the model isn't pulled yet. Fetch it in the
+			// background so startup isn't blocked; labeling uses the term
+			// fallback until it's ready, then LLM labels on the next run.
+			llmLabeler = insight.NewLLMLabeler(gen)
+			slog.Info("generation model not present; pulling in the background",
+				"model", cfg.Generation.Model)
+			go func() {
+				if err := gen.EnsureModel(ctx, slog.Default()); err != nil {
+					slog.Warn("generation model pull failed; cluster labels will use term fallback",
+						"model", cfg.Generation.Model, "err", err)
+				}
+			}()
+		default:
+			slog.Warn("generation model unavailable; cluster labels will use term fallback",
+				"model", cfg.Generation.Model, "err", perr)
 		}
-		cancel()
 	}
 	clusterer := insight.NewKNNGraphClusterer(insight.KNNGraphOptions{
 		K:              cfg.Insight.KNN,

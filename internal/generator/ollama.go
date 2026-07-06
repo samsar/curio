@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/samsar/curio/internal/ollama"
 )
 
 // Sentinel errors so callers can format actionable messages (mirrors
@@ -107,6 +110,29 @@ func (o *Ollama) Ping(ctx context.Context) error {
 		}
 	}
 	return fmt.Errorf("%w: %s", ErrModelNotLoaded, o.model)
+}
+
+// EnsureModel makes sure the model is available locally, pulling it from the
+// Ollama registry if it isn't. It blocks until the pull finishes. A no-op when
+// the model is already present; returns the underlying error when Ollama is
+// unreachable (nothing to pull to).
+func (o *Ollama) EnsureModel(ctx context.Context, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	err := o.Ping(ctx)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrOllamaUnreachable) {
+		return err
+	}
+	log.Info("pulling generation model", "model", o.model)
+	if perr := ollama.PullModel(ctx, o.baseURL, o.model, log); perr != nil {
+		return perr
+	}
+	log.Info("generation model ready", "model", o.model)
+	return nil
 }
 
 // Generate posts a single non-streaming completion request, retrying transient

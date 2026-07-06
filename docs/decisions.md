@@ -1417,10 +1417,12 @@ in real HDBSCAN later (if measurement justifies it) is a contained change.
 with a smallest-label tie-break, stable cluster ordering by size. Same corpus →
 same clusters, so runs are reproducible and unit-testable.
 
-**Labels:** deterministic term-frequency labels by default (`TermLabeler`), with
-optional LLM labels (`LLMLabeler`) when `insight.labeling = "llm"` and a
-generation model is reachable. The engine tries the LLM and falls back to terms
-on any error, so the layer works with zero extra setup.
+**Labels:** LLM labels by default (`LLMLabeler`, `insight.labeling = "llm"`) for
+richer topic names + summaries. The generation model is auto-pulled on startup
+(see below); until it's ready, unavailable, or if `generation.auto_pull` is off,
+the engine falls back to deterministic term labels (`TermLabeler`) — so the
+layer still works with zero setup. Set `insight.labeling = "terms"` to force the
+deterministic labeler.
 
 **Storage / lifecycle:** clustering fully recomputes each run. A `cluster_runs`
 row records the attempt (`running` → `done`/`failed`); the current interests are
@@ -1452,8 +1454,17 @@ and most of curio needs neither — so generation is its own small, optional
 dependency. One interface means M4 (cluster labels) and M6 (RAG synthesis + LLM
 query rewriting) share the same seam, and an Anthropic/Claude implementation can
 drop in later without touching callers. The embedding model (nomic-embed-text)
-can't generate, so a generation model must be pulled separately — hence LLM
-labeling is opt-in with a term fallback rather than a hard dependency.
+can't generate, so a generation model must be pulled separately.
+
+**Model auto-pull:** because a required model being absent is a poor
+first-run experience, the daemon pulls missing models on startup via Ollama's
+`/api/pull` (shared `internal/ollama.PullModel`; both the embedding and
+generation clients get an `EnsureModel`). It runs in the background so startup
+isn't blocked — index jobs retry until the embedding model lands, and cluster
+labeling uses the term fallback until the generation model lands. Gated by
+`embedding.auto_pull` / `generation.auto_pull` (default true; turn off for
+metered/offline setups). This is why LLM labeling can be the default without
+making a 2 GB download a hard prerequisite.
 
 ---
 

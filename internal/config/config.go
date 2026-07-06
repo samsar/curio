@@ -48,6 +48,9 @@ type Embedding struct {
 	Model    string `yaml:"model"`
 	Dim      int    `yaml:"dim"`
 	BaseURL  string `yaml:"base_url"`
+	// AutoPull downloads the embedding model via Ollama at startup if it isn't
+	// present locally. Default true. Set false on metered/offline setups.
+	AutoPull bool `yaml:"auto_pull"`
 }
 
 type Fetcher struct {
@@ -119,8 +122,8 @@ type Insight struct {
 	MinSimilarity float64 `yaml:"min_similarity"`
 	// MinClusterSize drops communities smaller than this to noise.
 	MinClusterSize int `yaml:"min_cluster_size"`
-	// Labeling selects cluster naming: "llm" (needs a generation model),
-	// "terms" (deterministic, default), or "off".
+	// Labeling selects cluster naming: "llm" (default; needs a generation
+	// model, else falls back to deterministic term labels), "terms", or "off".
 	Labeling string `yaml:"labeling"`
 }
 
@@ -133,6 +136,9 @@ type Generation struct {
 	Model          string `yaml:"model"`           // a chat/instruct model, e.g. "llama3.2"
 	BaseURL        string `yaml:"base_url"`        // Ollama server; can share the embedder's
 	TimeoutSeconds int    `yaml:"timeout_seconds"` // per-request; generation is slow
+	// AutoPull downloads the generation model via Ollama at startup if it isn't
+	// present locally. Default true. Set false on metered/offline setups.
+	AutoPull bool `yaml:"auto_pull"`
 }
 
 // Default returns the baseline config. The loader applies these first, then
@@ -150,6 +156,7 @@ func Default() Config {
 			Model:    "nomic-embed-text",
 			Dim:      768,
 			BaseURL:  "http://localhost:11434",
+			AutoPull: true,
 		},
 		Fetcher: Fetcher{
 			Default: "native",
@@ -193,16 +200,20 @@ func Default() Config {
 			KNN:            10,
 			MinSimilarity:  0.5,
 			MinClusterSize: 3,
-			// Default to deterministic term labels so the insight layer works
-			// with zero extra setup. Set "llm" (and pull a generation model)
-			// for richer names.
-			Labeling: "terms",
+			// LLM labels by default (richer topic names + summaries). This
+			// needs a generation model, but with auto-pull the daemon fetches
+			// it on first start, and if it's ever unavailable the engine falls
+			// back to deterministic term labels — so it's still safe with zero
+			// setup. Set "terms" to force the deterministic labeler, "off" to
+			// skip labeling.
+			Labeling: "llm",
 		},
 		Generation: Generation{
 			Provider:       "ollama",
 			Model:          "llama3.2",
 			BaseURL:        "http://localhost:11434",
 			TimeoutSeconds: 120,
+			AutoPull:       true,
 		},
 	}
 }

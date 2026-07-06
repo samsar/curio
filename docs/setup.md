@@ -21,9 +21,17 @@ Apple Silicon, which is noticeably faster than a containerized build.
 ```sh
 brew install ollama
 ollama serve &                    # background; or use the menu-bar app
-ollama pull nomic-embed-text      # 274 MB; one-time
+ollama pull nomic-embed-text      # 274 MB; embedding model (optional — see below)
 ollama list                       # verify
 ```
+
+You can skip the `ollama pull` step: as long as Ollama itself is running, the
+daemon **auto-pulls** the models it needs on startup — the embedding model
+(`nomic-embed-text`) and, when insight labeling is on, the generation model
+(`llama3.2`, ~2 GB). It fetches them in the background, so the first index /
+clustering run may lag until the download finishes. Disable with
+`embedding.auto_pull: false` / `generation.auto_pull: false` in `config.yaml`
+(e.g. on a metered connection), and pull manually instead.
 
 Alternative: install via the macOS app from ollama.com — same result, runs
 as a launchd service, less terminal management. Either way the daemon
