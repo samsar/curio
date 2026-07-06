@@ -26,6 +26,11 @@ type Config struct {
 	// TitlesPerCluster caps how many representative titles feed the labeler
 	// and are fetched per cluster. Default 12.
 	TitlesPerCluster int
+	// Center must match the clusterer's Center flag. When true, cohesion and
+	// per-member similarity are computed in the same mean-centered space the
+	// clusterer used, so the displayed numbers reflect the actual clustering
+	// rather than the anisotropic raw space. Wire both from the same config.
+	Center bool
 }
 
 // Engine runs the clustering pipeline: read document vectors → cluster →
@@ -162,8 +167,14 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 		}
 		sort.Ints(labelKeys)
 
+		// Summarize in the same space the clusterer used, so cohesion and
+		// member similarity are meaningful rather than saturated by anisotropy.
+		var mean []float64
+		if e.cfg.Center {
+			mean = corpusMean(points, len(points[0].Vector))
+		}
 		for _, l := range labelKeys {
-			members, cohesion := summarize(points, groups[l])
+			members, cohesion := summarize(points, groups[l], mean)
 			info := ClusterInfo{Titles: e.titlesFor(ctx, members), Size: len(members)}
 			lab := e.label(ctx, info)
 
@@ -198,15 +209,16 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 }
 
 // summarize computes the cluster centroid, each member's cosine similarity to
-// it, and the cluster cohesion (mean member similarity). Members are returned
-// ordered by similarity descending (most representative first), with a stable
-// tie-break on document ID.
-func summarize(points []Point, idxs []int) ([]store.ClusterMember, float64) {
+// it, and the cluster cohesion (mean member similarity). When mean is non-nil
+// it works in the mean-centered space (matching the clusterer), so the numbers
+// reflect the actual clustering. Members are returned ordered by similarity
+// descending (most representative first), with a stable tie-break on doc ID.
+func summarize(points []Point, idxs []int, mean []float64) ([]store.ClusterMember, float64) {
 	dim := len(points[idxs[0]].Vector)
 	centroid := make([]float64, dim)
 	units := make([][]float32, len(idxs))
 	for k, idx := range idxs {
-		u := unit(points[idx].Vector)
+		u := unitResidual(points[idx].Vector, mean)
 		units[k] = u
 		for d := range dim {
 			centroid[d] += float64(u[d])

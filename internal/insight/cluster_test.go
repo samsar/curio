@@ -82,6 +82,45 @@ func TestKNNGraphClusterer_AllNoiseBelowMinSize(t *testing.T) {
 	}
 }
 
+func TestKNNGraphClusterer_MeanCenteringSeparatesAnisotropic(t *testing.T) {
+	// A large shared component (anisotropy) dominates every vector; each group
+	// adds a small distinct signal in orthogonal dims. Raw cross-group cosine
+	// is ~0.98, so without centering everything collapses into one cluster —
+	// exactly the nomic-embed-text mega-cluster failure mode.
+	pts := []Point{
+		{ID: "a1", Vector: []float32{10.0, 10.0, 8.0, 8.0}},
+		{ID: "a2", Vector: []float32{10.1, 9.9, 8.0, 8.0}},
+		{ID: "a3", Vector: []float32{9.9, 10.1, 8.0, 8.0}},
+		{ID: "b1", Vector: []float32{8.0, 8.0, 10.0, 10.0}},
+		{ID: "b2", Vector: []float32{8.0, 8.0, 10.1, 9.9}},
+		{ID: "b3", Vector: []float32{8.0, 8.0, 9.9, 10.1}},
+	}
+
+	// Raw (no centering): one giant cluster.
+	raw, err := NewKNNGraphClusterer(KNNGraphOptions{}).Cluster(context.Background(), pts)
+	require.NoError(t, err)
+	assert.Equal(t, 1, distinctClusters(raw), "raw cosines are ~0.98, so all six collapse into one cluster")
+
+	// Centered: the two groups separate.
+	centered, err := NewKNNGraphClusterer(KNNGraphOptions{Center: true}).Cluster(context.Background(), pts)
+	require.NoError(t, err)
+	assert.Equal(t, 2, distinctClusters(centered), "centering removes the shared component and reveals two topics")
+	assert.Equal(t, centered[0], centered[1])
+	assert.Equal(t, centered[1], centered[2])
+	assert.NotEqual(t, centered[0], centered[3])
+}
+
+// distinctClusters counts unique non-noise labels.
+func distinctClusters(labels []int) int {
+	seen := map[int]bool{}
+	for _, l := range labels {
+		if l != NoiseLabel {
+			seen[l] = true
+		}
+	}
+	return len(seen)
+}
+
 func TestKNNGraphClusterer_DimMismatch(t *testing.T) {
 	c := NewKNNGraphClusterer(KNNGraphOptions{})
 	_, err := c.Cluster(context.Background(), []Point{

@@ -53,6 +53,14 @@ type KNNGraphOptions struct {
 	MinClusterSize int
 	// MaxIters caps label-propagation iterations. Default 20.
 	MaxIters int
+	// Center subtracts the corpus mean vector before clustering. Embedding
+	// models like nomic-embed-text are anisotropic (their vectors sit in a
+	// narrow cone), so raw cosines are uniformly high and everything collapses
+	// into one giant cluster; centering removes that shared component so the
+	// residual topical structure drives the graph. No default is applied here —
+	// the config layer owns it (default true) — so a zero-value options struct
+	// clusters on raw vectors.
+	Center bool
 }
 
 // KNNGraphClusterer clusters via a mutual-k-nearest-neighbor graph over cosine
@@ -63,9 +71,12 @@ type KNNGraphClusterer struct {
 	minSim         float64
 	minClusterSize int
 	maxIters       int
+	center         bool
 }
 
-// NewKNNGraphClusterer constructs the clusterer, applying defaults.
+// NewKNNGraphClusterer constructs the clusterer, applying defaults. Center is
+// taken as-is (its default is owned by the config layer), so a zero-value
+// options struct clusters on raw vectors.
 func NewKNNGraphClusterer(opts KNNGraphOptions) *KNNGraphClusterer {
 	if opts.K <= 0 {
 		opts.K = 10
@@ -84,6 +95,7 @@ func NewKNNGraphClusterer(opts KNNGraphOptions) *KNNGraphClusterer {
 		minSim:         opts.MinSimilarity,
 		minClusterSize: opts.MinClusterSize,
 		maxIters:       opts.MaxIters,
+		center:         opts.Center,
 	}
 }
 
@@ -95,6 +107,7 @@ func (c *KNNGraphClusterer) Params() map[string]any {
 		"min_similarity":   c.minSim,
 		"min_cluster_size": c.minClusterSize,
 		"max_iters":        c.maxIters,
+		"center":           c.center,
 	}
 }
 
@@ -115,17 +128,27 @@ func (c *KNNGraphClusterer) Cluster(ctx context.Context, points []Point) ([]int,
 		return labels, nil
 	}
 
-	// Normalize to unit length so a dot product is the cosine similarity.
 	dim := len(points[0].Vector)
 	if dim == 0 {
 		return nil, fmt.Errorf("insight: point %s has an empty vector", points[0].ID)
 	}
-	norm := make([][]float32, n)
-	for i, p := range points {
+	for _, p := range points {
 		if len(p.Vector) != dim {
 			return nil, fmt.Errorf("insight: point %s has dim %d, want %d", p.ID, len(p.Vector), dim)
 		}
-		norm[i] = unit(p.Vector)
+	}
+
+	// Optionally subtract the corpus mean vector to strip the shared anisotropy
+	// component before normalizing (see KNNGraphOptions.Center).
+	var mean []float64
+	if c.center {
+		mean = corpusMean(points, dim)
+	}
+
+	// Normalize to unit length so a dot product is the cosine similarity.
+	norm := make([][]float32, n)
+	for i, p := range points {
+		norm[i] = unitResidual(p.Vector, mean)
 	}
 
 	// Directed top-K neighbors per node, then unioned into an undirected,
@@ -257,6 +280,51 @@ func topKNeighbors(norm [][]float32, i, k int, minSim float64) []edge {
 		cands = cands[:k]
 	}
 	return cands
+}
+
+// corpusMean returns the element-wise mean of all point vectors (dim-length),
+// or nil for fewer than two points (nothing to center against). Shared by the
+// clusterer and the engine's cluster summarizer so both operate in the same
+// (centered) space.
+func corpusMean(points []Point, dim int) []float64 {
+	if len(points) < 2 {
+		return nil
+	}
+	mean := make([]float64, dim)
+	for _, p := range points {
+		for d, v := range p.Vector {
+			mean[d] += float64(v)
+		}
+	}
+	for d := range mean {
+		mean[d] /= float64(len(points))
+	}
+	return mean
+}
+
+// unitResidual returns the unit vector of v, first subtracting mean when it is
+// non-nil (mean-centering). A zero residual yields a zero vector, so the point
+// gets no edges and falls out as noise.
+func unitResidual(v []float32, mean []float64) []float32 {
+	if mean == nil {
+		return unit(v)
+	}
+	centered := make([]float64, len(v))
+	var sum float64
+	for i, x := range v {
+		c := float64(x) - mean[i]
+		centered[i] = c
+		sum += c * c
+	}
+	out := make([]float32, len(v))
+	if sum == 0 {
+		return out
+	}
+	inv := 1.0 / math.Sqrt(sum)
+	for i, c := range centered {
+		out[i] = float32(c * inv)
+	}
+	return out
 }
 
 // unit returns a unit-length copy of v (dot(unit(a), unit(b)) == cosine(a,b)).

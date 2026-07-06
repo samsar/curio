@@ -273,9 +273,10 @@ func run() error {
 		K:              cfg.Insight.KNN,
 		MinSimilarity:  cfg.Insight.MinSimilarity,
 		MinClusterSize: cfg.Insight.MinClusterSize,
+		Center:         cfg.Insight.CenterVectors,
 	})
 	insightEngine := insight.New(docs, chunks, insights, clusterer, llmLabeler,
-		insight.Config{Labeling: cfg.Insight.Labeling}, slog.Default())
+		insight.Config{Labeling: cfg.Insight.Labeling, Center: cfg.Insight.CenterVectors}, slog.Default())
 
 	// Two worker pools: fetch (network-bound, scale wide) and index
 	// (Ollama-bound, narrow). They share the JobQueue but each pool's

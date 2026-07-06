@@ -122,6 +122,12 @@ type Insight struct {
 	MinSimilarity float64 `yaml:"min_similarity"`
 	// MinClusterSize drops communities smaller than this to noise.
 	MinClusterSize int `yaml:"min_cluster_size"`
+	// CenterVectors subtracts the corpus mean vector before clustering. Default
+	// true: embedding models like nomic-embed-text are anisotropic (vectors in
+	// a narrow cone), so without it raw cosines are uniformly high and the
+	// corpus collapses into one giant cluster. Turn off only if your embeddings
+	// are already isotropic.
+	CenterVectors bool `yaml:"center_vectors"`
 	// Labeling selects cluster naming: "llm" (default; needs a generation
 	// model, else falls back to deterministic term labels), "terms", or "off".
 	Labeling string `yaml:"labeling"`
@@ -200,6 +206,7 @@ func Default() Config {
 			KNN:            10,
 			MinSimilarity:  0.5,
 			MinClusterSize: 3,
+			CenterVectors:  true,
 			// LLM labels by default (richer topic names + summaries). This
 			// needs a generation model, but with auto-pull the daemon fetches
 			// it on first start, and if it's ever unavailable the engine falls
