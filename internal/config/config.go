@@ -51,6 +51,15 @@ type Embedding struct {
 	// AutoPull downloads the embedding model via Ollama at startup if it isn't
 	// present locally. Default true. Set false on metered/offline setups.
 	AutoPull bool `yaml:"auto_pull"`
+	// DocumentPrefix / QueryPrefix are task-instruction prefixes prepended
+	// before embedding. nomic-embed-text is a prefixed model and REQUIRES
+	// these ("search_document: " for indexed text, "search_query: " for
+	// queries); without them its embedding space collapses. They must stay
+	// consistent — changing either requires reindexing the whole corpus (the
+	// stored doc vectors and query vectors must share the same scheme). Set
+	// both to "" for a model that takes no prefix.
+	DocumentPrefix string `yaml:"document_prefix"`
+	QueryPrefix    string `yaml:"query_prefix"`
 }
 
 type Fetcher struct {
@@ -158,11 +167,13 @@ func Default() Config {
 			IndexWorkers: 4,
 		},
 		Embedding: Embedding{
-			Provider: "ollama",
-			Model:    "nomic-embed-text",
-			Dim:      768,
-			BaseURL:  "http://localhost:11434",
-			AutoPull: true,
+			Provider:       "ollama",
+			Model:          "nomic-embed-text",
+			Dim:            768,
+			BaseURL:        "http://localhost:11434",
+			AutoPull:       true,
+			DocumentPrefix: "search_document: ",
+			QueryPrefix:    "search_query: ",
 		},
 		Fetcher: Fetcher{
 			Default: "native",

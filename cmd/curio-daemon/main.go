@@ -220,14 +220,16 @@ func run() error {
 
 	// Indexer + search engine.
 	idx := indexer.New(chunks, emb, indexer.Options{
-		ChunkSize:    cfg.Chunking.SizeTokens,
-		ChunkOverlap: cfg.Chunking.OverlapTokens,
+		ChunkSize:      cfg.Chunking.SizeTokens,
+		ChunkOverlap:   cfg.Chunking.OverlapTokens,
+		DocumentPrefix: cfg.Embedding.DocumentPrefix,
 	})
 	engine := search.New(chunks, docs, emb, search.Config{
 		BM25Weight:   cfg.Search.BM25Weight,
 		VectorWeight: cfg.Search.VectorWeight,
 		RRFK:         cfg.Search.RRFK,
 		Collapse:     search.CollapseStrategy(cfg.Search.Collapse),
+		QueryPrefix:  cfg.Embedding.QueryPrefix,
 	})
 
 	// Insight layer (M4): cluster documents into labeled interests. The

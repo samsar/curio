@@ -34,6 +34,25 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 
 const dim = 768
 
+func TestEngine_QueryPrefixApplied(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, docIDs := seedCorpus(t, db)
+
+	// The query term matches nothing in BM25, so ranking is driven purely by
+	// the vector path. The embedder only returns the postgres chunk's vector
+	// (0.10, the closest) for the PREFIXED query; without the prefix it'd get
+	// the default far vector and postgres would rank last, not first.
+	emb := &fakeEmbedder{byText: map[string][]float32{
+		"search_query: zzqterm": filledVec(0.10),
+	}}
+	eng := New(chunks, docs, emb, Config{QueryPrefix: "search_query: "})
+
+	res, err := eng.Search(context.Background(), Request{TenantID: "local", Query: "zzqterm", K: 3})
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Items)
+	assert.Equal(t, docIDs[0], res.Items[0].Document.ID, "prefixed query vector should rank the postgres doc first")
+}
+
 func filledVec(v float32) []float32 {
 	out := make([]float32, dim)
 	for i := range out {

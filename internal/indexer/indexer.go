@@ -17,15 +17,20 @@ import (
 // in BM25 and vector indices. Idempotent thanks to
 // ChunkStore.ReplaceForDocument.
 type Indexer struct {
-	chunks   store.ChunkStore
-	embedder embedder.Embedder
-	opts     ChunkOptions
+	chunks    store.ChunkStore
+	embedder  embedder.Embedder
+	opts      ChunkOptions
+	docPrefix string
 }
 
 // Options for constructing an Indexer.
 type Options struct {
 	ChunkSize    int
 	ChunkOverlap int
+	// DocumentPrefix is prepended to each chunk before embedding (not stored),
+	// to satisfy prefixed embedding models like nomic-embed-text
+	// ("search_document: "). Must match the search engine's query prefix.
+	DocumentPrefix string
 }
 
 func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer {
@@ -33,7 +38,7 @@ func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer 
 		SizeTokens:    opts.ChunkSize,
 		OverlapTokens: opts.ChunkOverlap,
 	}
-	return &Indexer{chunks: chunks, embedder: emb, opts: co}
+	return &Indexer{chunks: chunks, embedder: emb, opts: co, docPrefix: opts.DocumentPrefix}
 }
 
 // IndexInput is everything Index needs to do its work.
@@ -62,9 +67,12 @@ func (i *Indexer) Index(ctx context.Context, in IndexInput) error {
 		return i.chunks.ReplaceForDocument(ctx, in.DocumentID, in.ExtractionID, in.Title, in.Tags, nil)
 	}
 
+	// Prefix the text sent to the embedder (prefixed models like
+	// nomic-embed-text need it), but keep the STORED chunk text raw so BM25 /
+	// snippets aren't polluted by the prefix.
 	texts := make([]string, len(chunks))
 	for j, c := range chunks {
-		texts[j] = c.Text
+		texts[j] = i.docPrefix + c.Text
 	}
 
 	vectors, err := i.embedder.Embed(ctx, texts)

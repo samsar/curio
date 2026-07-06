@@ -1505,3 +1505,30 @@ taste call. Do not start building the RAG loop until this is settled.
 M6; RAG/search is the larger, more foundational body of work, and suggestions
 build on good retrieval regardless. This renumber pushed the former "Hosted
 mode" milestone to M7.
+
+---
+
+## nomic-embed-text task prefixes (`search_document:` / `search_query:`)
+
+**Decision:** Prepend nomic-embed-text's required task-instruction prefixes
+before embedding — `search_document: ` for indexed chunks, `search_query: ` for
+queries (config `embedding.document_prefix` / `embedding.query_prefix`). The
+prefix is applied ONLY to the text sent to the embedder; the stored chunk text
+stays raw, so BM25 and snippets are unaffected. find_related and clustering
+reuse the stored (already-prefixed) document vectors, so they need no prefix of
+their own.
+
+**Why:** nomic-embed-text is a *prefixed* model — it was trained with task
+instructions and its card requires them. Without prefixes its embedding space is
+badly anisotropic (vectors collapse into a narrow cone), which surfaced as a
+single "interest" swallowing ~60% of a real corpus and also drags on search
+quality. Adding the prefixes de-collapses the space at the source — higher
+leverage than any downstream clustering trick (mean-centering was a partial
+mitigation of the same anisotropy, kept as a complementary safety net).
+
+**Reindex required:** stored document vectors and query vectors must share one
+prefix scheme, so changing either prefix means re-embedding the whole corpus
+(`curio reindex`). There is no automatic marker check for the prefix yet — the
+`.curio-meta.json` cross-check covers only embedding model + dim, so a prefix
+change won't warn; enforcing it is a deliberate follow-up. For now, reindex
+after any prefix change. Set both prefixes to "" for a model that takes none.
