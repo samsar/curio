@@ -964,8 +964,11 @@ abbreviation so `11:54 EDT` is unambiguous.
 These are intentionally omitted from `api/openapi.yaml`. Each is additive when
 it lands — no `/v1` → `/v2` bump required.
 
-- **Insight layer endpoints** (`/v1/clusters`, `/v1/interests`,
-  `/v1/suggestions`) — added in milestone M4.
+- **Insight layer endpoints** — `/v1/interests` (+ `/{id}` and `/rebuild`)
+  ✅ landed in M4 (see "Insight layer: kNN-graph clustering + labeled
+  interests" below). `/v1/suggestions` arrives with M5; a separate
+  `/v1/clusters` was folded into `/v1/interests` — an interest *is* a
+  labeled cluster.
 - **Config endpoints** (`GET/PUT /v1/config`) — for now, edit
   `~/.curio/config.yaml` and `SIGHUP` the daemon.
 - **Admin reindex endpoint** (`POST /v1/admin/reindex`) — added when an
@@ -982,9 +985,11 @@ it lands — no `/v1` → `/v2` bump required.
 
 ## What's not decided yet
 
-- **Insight layer specifics:** clustering algorithm, summarization prompts,
-  trajectory analysis. Deferred until the corpus layer is working and we have
-  real data to look at.
+- **Insight layer specifics:** clustering algorithm and labeling ✅ decided
+  in M4 — kNN-graph clustering + term/LLM labels (see the entry below). Still
+  open: trajectory analysis ("new this month"), cross-cluster interest
+  merging, and a standalone `interests` table, deferred until there's real
+  usage data.
 - **Authentication for hosted mode:** middleware stub goes in early but the
   actual auth scheme (API keys vs OAuth vs SSO) is deferred.
 - **Re-crawl policy:** how often to refetch a given URL. Likely
@@ -1033,6 +1038,11 @@ it lands — no `/v1` → `/v2` bump required.
   recall@10. Without it we'll be guessing about whether each change
   actually moved retrieval quality. Build the eval BEFORE the
   improvement.
+
+  ✅ The eval harness now exists — `curio eval --queries <qrels.yaml>`
+  (`internal/eval`: recall@k / precision@k / NDCG@k / MRR). The SOTA
+  NL-search work itself is scheduled as **M6**, alongside RAG — see
+  "M6 (planned): RAG / Q&A synthesis + SOTA natural-language search" below.
 
   **What's NOT under consideration:** building our own tokenizer,
   custom synonym dictionaries, query-classification pipelines. The
@@ -1380,3 +1390,107 @@ exists; it just has no vectors yet — kinder to MCP callers than a
 409). Scores are raw vector similarities (1/(1+L2), 0..1) and NOT
 comparable with /v1/search's RRF-fused scores; the openapi
 description says so.
+
+---
+
+## Insight layer: kNN-graph clustering + labeled interests (M4)
+
+**Decision:** M4 groups documents into topic "interests" by clustering their
+mean-pooled chunk embeddings with a **kNN-graph + deterministic label
+propagation** clusterer (`internal/insight`), keeping an explicit noise bucket
+for one-off saves. The clusterer sits behind a small `insight.Clusterer`
+interface (points in → per-point label out, `-1` = noise), so the algorithm is
+swappable without touching storage, API, CLI, or MCP.
+
+**Why not HDBSCAN (which the roadmap originally named):** there is no mature,
+trustworthy pure-Go HDBSCAN, and a hand-rolled one (mutual-reachability → MST →
+condensed tree → stability) is subtle enough that a bug silently degrades
+clusters rather than failing loudly. The kNN-graph approach captures HDBSCAN's
+essentials — auto-k, tolerance of varying-density clusters (it's rank-based, not
+a single global ε), and a noise bucket — using vectors we already store, at a
+fraction of the risk. It's the standard way to cluster embeddings in, e.g.,
+single-cell genomics, so it's a different well-trodden path, not a hack. Because
+the choice lives behind the interface and we now have an eval harness, swapping
+in real HDBSCAN later (if measurement justifies it) is a contained change.
+
+**Determinism:** fully deterministic — fixed node order, weighted-majority vote
+with a smallest-label tie-break, stable cluster ordering by size. Same corpus →
+same clusters, so runs are reproducible and unit-testable.
+
+**Labels:** deterministic term-frequency labels by default (`TermLabeler`), with
+optional LLM labels (`LLMLabeler`) when `insight.labeling = "llm"` and a
+generation model is reachable. The engine tries the LLM and falls back to terms
+on any error, so the layer works with zero extra setup.
+
+**Storage / lifecycle:** clustering fully recomputes each run. A `cluster_runs`
+row records the attempt (`running` → `done`/`failed`); the current interests are
+the `clusters` of the latest done run, and older runs are pruned (keeping
+history for trajectory analysis is deferred). It runs on a dedicated
+single-worker `cluster` job pool so it neither starves nor is starved by
+fetch/index. Knobs: `insight.{enabled,knn,min_similarity,min_cluster_size,
+labeling}`. `min_similarity` is the main granularity dial and is corpus-
+dependent — tune it with the eval harness.
+
+**API surface:** an interest *is* a labeled cluster, so there is one surface —
+`GET /v1/interests`, `GET /v1/interests/{id}`, `POST /v1/interests/rebuild`
+(202 + job_id; 409 when disabled) — rather than the separately-sketched
+`/v1/clusters`.
+
+---
+
+## LLM generation client (`generator.Generator`)
+
+**Decision:** Introduce a provider-agnostic text-generation interface
+(`internal/generator`: `Generate` / `Model` / `Ping`), separate from
+`internal/embedder`. The v1 implementation targets Ollama's `/api/generate`
+(non-streaming, bounded retries, explicit `num_ctx`), configured by a new
+`generation` block (`provider`, `model` — default `llama3.2`, `base_url`,
+`timeout_seconds`).
+
+**Why:** embeddings and generation are different models on different endpoints,
+and most of curio needs neither — so generation is its own small, optional
+dependency. One interface means M4 (cluster labels) and M6 (RAG synthesis + LLM
+query rewriting) share the same seam, and an Anthropic/Claude implementation can
+drop in later without touching callers. The embedding model (nomic-embed-text)
+can't generate, so a generation model must be pulled separately — hence LLM
+labeling is opt-in with a term fallback rather than a hard dependency.
+
+---
+
+## Retrieval eval harness
+
+**Decision:** Ship `curio eval --queries <qrels.yaml>` (`internal/eval`) — a
+pure, deterministic scorer for recall@k, precision@k, NDCG@k, and MRR over a
+labeled query set. The qrels file lists, per query, the relevant document URLs
+(stable across machines); the CLI runs each through `/v1/search` and scores the
+returned ranking. Example: `docs/eval.example.yaml`.
+
+**Why:** the "Natural-language search is provisional" note makes an eval harness
+the explicit prerequisite for any search change — *build the eval before the
+improvement*. This is that harness. It also de-risks M4 (measure whether a
+`min_similarity` change helps retrieval) and is the ground truth for the M6
+build-vs-buy RAG decision. The metrics package has no HTTP or store dependency,
+so it's easy to test and reuse.
+
+---
+
+## M6 (planned): RAG / Q&A synthesis + SOTA natural-language search
+
+**Decision (direction, not yet built):** M6 will (1) answer natural-language
+questions over saved content via retrieval-augmented generation — retrieve with
+the existing hybrid engine, synthesize a cited answer through
+`generator.Generator`, likely surfaced as `curio ask` / `POST /v1/ask` — and (2)
+upgrade NL search beyond the current OR+stopword BM25 using the options logged
+above (stemming + `minimum_should_match`, LLM query rewriting via Ollama, or
+SPLADE/ColBERT), every change gated on the eval harness.
+
+**Open decision — build vs. buy (resolve before implementing RAG):** decide
+whether to build curio's own RAG loop or adopt an existing local-first tool such
+as [tobi/qmd](https://github.com/tobi/qmd). The eval harness makes this a
+measurable comparison (qmd vs. our retriever on the same qrels) rather than a
+taste call. Do not start building the RAG loop until this is settled.
+
+**Why M6, not M5:** M5 (suggestions & digest) is unchanged and stays ahead of
+M6; RAG/search is the larger, more foundational body of work, and suggestions
+build on good retrieval regardless. This renumber pushed the former "Hosted
+mode" milestone to M7.

@@ -84,11 +84,8 @@ MCP tools (implemented):
 - `search_bookmarks(query, k, content_type?, source?, host?)` — hybrid search
   with optional filters
 - `get_document(id)` — fetch a document's metadata + extracted markdown
-- `find_related(id, k)` — find documents similar to a given one (by its title)
-
-Later (insight layer, M4):
-
-- `list_interests()` — inferred interest clusters
+- `find_related(id, k)` — find documents similar to a given one (by embedding similarity over its indexed content)
+- `list_interests()` — labeled interest clusters from the latest clustering run
 
 Registration and usage: see `docs/mcp.md`.
 
@@ -247,18 +244,23 @@ mode is a deployment change, not a schema change. See
 
 External processes the daemon expects:
 
-- **Ollama** — for embeddings (and optional local LLM). Daemon talks to it on
+- **Ollama** — for embeddings and local text generation. Daemon talks to it on
   `http://localhost:11434`. Fails loudly if absent; documents how to install.
+  Generation is abstracted behind a `generator.Generator` interface (local
+  Ollama `/api/generate` impl), used for optional LLM cluster labels in the
+  insight layer.
 - **Node + web2md** (the user's existing tool) — invoked as a subprocess by the
   `web2md` fetcher. Optional if other fetchers cover all URLs.
 - **Jina Reader (optional)** — self-hostable via Docker, used by the `jina`
   fetcher.
-- **Claude API (optional)** — for heavier synthesis in the insight layer.
+- **Claude API (optional)** — a future `generator.Generator` impl for heavier
+  synthesis on the M6 RAG path (retrieve → LLM → cited answer).
 
 ## What's deliberately not in v1
 
 - Browser history ingestion (data model supports it; importer doesn't yet)
 - Read-later / highlights (Pocket, Instapaper, Readwise)
-- Interest clustering and trajectory analysis (insight layer)
+- Trajectory analysis / "new this month" detection (interest clustering itself
+  landed in M4 — see the insight layer)
 - Web UI
 - Authentication (single-tenant local; auth middleware stub for future)

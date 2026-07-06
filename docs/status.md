@@ -1,14 +1,13 @@
 # Status
 
-**Current position:** M0 ✅ · M1 ✅ · M2 ✅ · M3 ✅. The M2 tail landed
-(`fetcher_rules.yaml` hot-reloadable routing, dead-link detection with the
-`dead` doc state, GitHub issues/PRs/wiki) and the M3 tail did too:
-`find_related` is now a true vector-neighbor lookup over stored chunk
-embeddings (`GET /v1/documents/{id}/related`, `curio related`), replacing
-the title-search stopgap. The corpus is queryable from inside the LLM
-client via `curio-mcp` (`search_bookmarks` / `get_document` /
-`find_related`). **Next up: M4** — the insight layer (clustering,
-`curio interests`, `list_interests`).
+**Current position:** M0 ✅ · M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅. The insight layer
+landed: documents are clustered by embedding similarity (a kNN-graph +
+label-propagation clusterer with a noise bucket) and surfaced as labeled
+interests (`GET /v1/interests`, `curio interests`, `list_interests`), driven
+by an async `cluster` job. Cluster labels are term-frequency by default, with
+optional LLM labels behind a `generator.Generator` interface. A retrieval eval
+harness (`curio eval`) now scores recall/precision/NDCG/MRR over a labeled
+query set. **Next up: M5** — suggestions and the weekly digest.
 
 ## M0 — Walking Skeleton
 
@@ -181,3 +180,43 @@ _None — **M2 is complete.**_
 - Richer tools (e.g. `list_interests`) arrive with the M4 insight layer.
 
 _**M3 is complete.**_
+
+## M4 — Insight layer
+
+### Completed
+
+| Feature | Package / file | Notes |
+|---|---|---|
+| Clusterer | `internal/insight/{cluster.go, label.go, engine.go}` | Documents clustered by embedding similarity via a kNN-graph + deterministic label-propagation clusterer (`KNNGraphClusterer`) with a noise/unclustered bucket, behind a pluggable `insight.Clusterer` interface |
+| Cluster labels | `internal/insight`, `internal/generator` | Term-frequency labels by default (`TermLabeler`); optional LLM labels (`LLMLabeler`) via the provider-agnostic `generator.Generator` interface (Ollama `/api/generate` impl). Engine tries LLM, falls back to terms |
+| `cluster` job | `internal/jobs`, daemon | Corpus-wide recompute on its own single-worker pool (`store.JobKindCluster`); each run is a snapshot, only the latest run's clusters are kept |
+| Storage | `migrations/004_insights.sql` | `cluster_runs`, `clusters`, `cluster_documents` (schema_version → 4) |
+| API | `internal/api/*` | `GET /v1/interests` (labeled clusters of the latest completed run + run metadata), `GET /v1/interests/{id}` (interest + members), `POST /v1/interests/rebuild` (202 + job_id; 409 when `insight.enabled` is false) |
+| `DocumentVectors` | `internal/store` | New `ChunkStore.DocumentVectors` — bulk mean-pooled per-doc vectors feeding the clusterer |
+| CLI | `internal/cli` | `curio interests` (`--limit`, `--members`) and `curio interests rebuild` |
+| MCP tool | `cmd/curio-mcp/main.go` | `list_interests`, alongside `search_bookmarks` / `get_document` / `find_related` |
+| Config | `internal/config` | `insight` block (`enabled`, `knn`, `min_similarity`, `min_cluster_size`, `labeling`) + `generation` block (`provider`, `model`, `base_url`, `timeout_seconds`) |
+| Eval harness | `internal/eval`, `docs/eval.example.yaml` | `curio eval --queries <qrels.yaml>` computes recall@k / precision@k / NDCG@k / MRR over a labeled query set — the measurement rig that de-risks M6 |
+
+### Deferred
+
+- Trajectory analysis / "new this month" detection.
+- A standalone `interests` table and cross-cluster merging — M4 surfaces
+  interests directly from labeled clusters.
+- `/v1/suggestions` — arrives with M5.
+
+## M6 — RAG / Q&A synthesis + SOTA search
+
+_Planned — not started._ Answer questions over saved content and make
+natural-language search state-of-the-art:
+
+- True RAG / Q&A synthesis (retrieve → LLM → cited answer), reusing the
+  `generator.Generator` interface from M4.
+- Upgrade NL search beyond the current OR+stopword BM25 — options logged in
+  `docs/decisions.md` (stemming + `minimum_should_match`, LLM query-rewriting
+  via Ollama, SPLADE/ColBERT) — measured with the M4 eval harness.
+- **Open decision:** build vs. adopt an existing tool (e.g.
+  [tobi/qmd](https://github.com/tobi/qmd)) before implementing RAG.
+
+**Done when:** `curio ask "..."` returns a synthesized, cited answer and the
+eval harness shows measurably better retrieval than the v1 baseline.

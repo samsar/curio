@@ -57,6 +57,12 @@ const (
 	JobStatusRunning = "running"
 	JobStatusDone    = "done"
 	JobStatusFailed  = "failed"
+
+	// Insight-layer cluster run states. Keep in sync with the CHECK on
+	// cluster_runs.status in migrations/004_insights.sql.
+	ClusterRunRunning = "running"
+	ClusterRunDone    = "done"
+	ClusterRunFailed  = "failed"
 )
 
 // Document is the universal content record, deduplicated by (tenant_id, url).
@@ -216,6 +222,14 @@ type ChunkEmbedding struct {
 	Embedding []float32
 }
 
+// DocVector is a document's mean-pooled embedding — the average of its stored
+// chunk vectors, in the same 768-d space. The insight layer clusters over
+// these; find-related builds the equivalent on demand per document.
+type DocVector struct {
+	DocumentID string
+	Vector     []float32
+}
+
 // ChunkStore writes and queries the chunks tables + FTS5 + vec virtual tables.
 type ChunkStore interface {
 	// ReplaceForDocument atomically deletes all existing chunks for the
@@ -236,6 +250,12 @@ type ChunkStore interface {
 	// in chunk order. Returns an empty slice for documents with no indexed
 	// chunks (not yet fetched/indexed, or failed).
 	EmbeddingsForDocument(ctx context.Context, documentID string) ([]ChunkEmbedding, error)
+
+	// DocumentVectors returns one mean-pooled vector per fetched document in
+	// the tenant that has at least one indexed chunk, in a single pass.
+	// Documents with no chunks are omitted. Each vector has length == the
+	// configured embedding dim. This is the corpus-wide input to clustering.
+	DocumentVectors(ctx context.Context, tenantID string) ([]DocVector, error)
 
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
 }
@@ -258,4 +278,90 @@ type JobQueue interface {
 	// cleanup, e.g. updating a parent document's state.
 	MarkFailed(ctx context.Context, id string, errMsg string, retry bool) (permanent bool, err error)
 	GetByID(ctx context.Context, id string) (*Job, error)
+}
+
+// ClusterRun is one execution of the clustering job. Clustering fully
+// recomputes from the corpus, so each run is a snapshot; the "current"
+// interests are the clusters of the latest run with Status == ClusterRunDone.
+type ClusterRun struct {
+	ID           string
+	TenantID     string
+	Status       string          // running | done | failed
+	Algo         string          // clusterer name, e.g. "knn-graph"
+	Params       json.RawMessage // clusterer params; nil means absent
+	NumDocuments int             // docs considered (those with vectors)
+	NumClusters  int
+	NumNoise     int // docs left unclustered
+	Error        *string
+	StartedAt    time.Time
+	FinishedAt   *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// Cluster is one topic within a run: a labeled, sized group of documents.
+type Cluster struct {
+	ID        string
+	TenantID  string
+	RunID     string
+	Label     *string // topic name; nil until labeled
+	Summary   *string // one-line description; nil if none
+	Size      int     // member count (denormalized)
+	Cohesion  float64 // mean member cosine to the medoid, 0..1
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// ClusterMember links a cluster to one member document.
+type ClusterMember struct {
+	ClusterID  string
+	DocumentID string
+	Similarity float64 // cosine to the cluster medoid, 0..1
+}
+
+// ClusterWithMembers bundles a cluster and its members for an atomic write.
+type ClusterWithMembers struct {
+	Cluster Cluster
+	Members []ClusterMember
+}
+
+// InsightStore persists clustering results (the M4 insight layer). Clusters
+// and runs carry tenant_id; cluster_documents inherits tenant scope through
+// its parent cluster.
+type InsightStore interface {
+	// CreateRun inserts a new run (status defaults to running). Assigns ID
+	// and StartedAt if empty.
+	CreateRun(ctx context.Context, run *ClusterRun) error
+
+	// ReplaceClusters writes all clusters + memberships for a run in one
+	// transaction, replacing anything previously written for that run (so a
+	// job retry is idempotent). Does not change the run's status.
+	ReplaceClusters(ctx context.Context, runID string, clusters []ClusterWithMembers) error
+
+	// FinishRun sets the terminal status (done|failed), the counts, and
+	// finished_at. errMsg is set only for failed runs.
+	FinishRun(ctx context.Context, runID, status string, numDocuments, numClusters, numNoise int, errMsg *string) error
+
+	// LatestRun returns the most recent run for the tenant matching status
+	// (empty status matches any). ErrNotFound if there is none.
+	LatestRun(ctx context.Context, tenantID, status string) (*ClusterRun, error)
+
+	// GetRun returns a run by ID, or ErrNotFound.
+	GetRun(ctx context.Context, id string) (*ClusterRun, error)
+
+	// ListClusters returns a run's clusters ordered largest-first (size DESC,
+	// then cohesion DESC). limit <= 0 means all.
+	ListClusters(ctx context.Context, runID string, limit int) ([]*Cluster, error)
+
+	// GetCluster returns a cluster by ID, or ErrNotFound.
+	GetCluster(ctx context.Context, id string) (*Cluster, error)
+
+	// ClusterMembers returns a cluster's member documents ordered by
+	// similarity DESC. limit <= 0 means all.
+	ClusterMembers(ctx context.Context, clusterID string, limit int) ([]ClusterMember, error)
+
+	// PruneRunsExcept deletes every run for the tenant except keepRunID,
+	// cascading its clusters + memberships. Keeps storage bounded to the
+	// current snapshot.
+	PruneRunsExcept(ctx context.Context, tenantID, keepRunID string) error
 }

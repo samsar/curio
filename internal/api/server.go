@@ -21,16 +21,18 @@ import (
 // Deps bundles everything the API handlers need. The daemon constructs this
 // once at startup and passes it to NewServer.
 type Deps struct {
-	Home        *curiohome.Home
-	Documents   store.DocumentStore
-	Extractions store.ExtractionStore
-	Bookmarks   store.BookmarkStore
-	Chunks      store.ChunkStore
-	Queue       store.JobQueue
-	Embedder    embedder.Embedder
-	Search      *search.Engine
-	TenantID    string // hardcoded for single-tenant local mode; "local"
-	Log         *slog.Logger
+	Home           *curiohome.Home
+	Documents      store.DocumentStore
+	Extractions    store.ExtractionStore
+	Bookmarks      store.BookmarkStore
+	Chunks         store.ChunkStore
+	Queue          store.JobQueue
+	Embedder       embedder.Embedder
+	Search         *search.Engine
+	Insights       store.InsightStore
+	InsightEnabled bool   // gates POST /v1/interests/rebuild (config insight.enabled)
+	TenantID       string // hardcoded for single-tenant local mode; "local"
+	Log            *slog.Logger
 }
 
 // Server is the HTTP layer. Construct via NewServer, run via Run, stop by
@@ -82,6 +84,12 @@ func NewServer(addr string, deps Deps) *Server {
 		})
 
 		r.Post("/search", deps.handleSearch)
+
+		r.Route("/interests", func(r chi.Router) {
+			r.Get("/", deps.handleListInterests)
+			r.Post("/rebuild", deps.handleRebuildInterests)
+			r.Get("/{id}", deps.handleGetInterest)
+		})
 
 		r.Get("/jobs", deps.handleListJobs)
 		r.Delete("/jobs", deps.handleDeleteJobs)
