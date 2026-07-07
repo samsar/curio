@@ -88,7 +88,19 @@ This catches people:
 - `internal/cli/` — Cobra commands. Pattern: each command file (`add.go`, `docs.go`, etc.) exports `newXxxCmd()` and `root.go` adds them.
 - `internal/fetcher/` — Native (Go) and Web2MD (subprocess) backends behind the same `Fetcher` interface.
 - `internal/indexer/` — Chunker (paragraph-aware with hard char cap) + orchestrator (chunk → embed → store).
+- `internal/insight/` — M4 insight layer. Pluggable `Clusterer` (kNN-graph + label propagation), `Labeler` (term / LLM), and the `Engine` that clusters → labels → persists.
+- `internal/generator/` — provider-agnostic LLM text generation (`Generator` interface + Ollama `/api/generate`). Separate from `internal/embedder`; used for cluster labels (M4) and RAG (M6).
+- `internal/eval/` — retrieval eval harness (recall@k / NDCG@k / MRR) behind `curio eval --queries`.
 - `migrations/` — Goose SQL migrations, embedded into the binary via `embed.go`.
+
+## Insight layer (M4)
+
+Clusters documents into labeled "interests". The whole algorithm sits behind `insight.Clusterer` (points → per-point label, `-1` = noise) so the clusterer is swappable without touching storage/API/CLI/MCP — the shipped one is `KNNGraphClusterer` (kNN graph + deterministic label propagation). See `docs/decisions.md` "Insight layer: kNN-graph clustering" for why *not* HDBSCAN.
+
+- Clustering runs as a corpus-wide **`cluster` job on its own single-worker pool** (`cmd/curio-daemon/main.go`). It fully recomputes each run: a `cluster_runs` row tracks the attempt, current interests are the `clusters` of the latest `done` run, and older runs are pruned. Unlike fetch/index it has **no doc-state `OnPermanentFailure` hook** (it's corpus-global, not per-doc).
+- Cluster labels: **LLM by default** (`insight.labeling = "llm"`). Needs a generation model in Ollama — the daemon **auto-pulls it** on startup (`generation.auto_pull`, default true; the embedding model auto-pulls too via `embedding.auto_pull`). Until the model is ready (or if it's unavailable / auto_pull is off), labeling **falls back to deterministic term labels**, so it stays zero-setup-safe. Set `insight.labeling = "terms"` to force it. Pulling lives in `internal/ollama.PullModel`, shared by both Ollama clients.
+- Doc vectors for clustering come from `ChunkStore.DocumentVectors` (bulk mean-pooled per doc, single query) — do not loop `EmbeddingsForDocument`.
+- An interest *is* a labeled cluster: one API surface (`/v1/interests`, `/{id}`, `/rebuild`), not a separate `/v1/clusters`. `POST /v1/interests/rebuild` is gated by `insight.enabled` (409 when off). Config knobs: `insight.{enabled,knn,min_similarity,min_cluster_size,labeling}` + `generation.{provider,model,base_url,timeout_seconds,auto_pull}` + `embedding.auto_pull`. `min_similarity` is the granularity dial; tune with `curio eval`.
 
 ## Conventions to preserve
 

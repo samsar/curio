@@ -63,11 +63,11 @@ the system through different reference tables because the metadata about
 
 - `bookmarks`, `history_entries`, `highlights` (reference tables)
 - `jobs`
-- `clusters`, `interests`, `suggestions` (insight layer)
+- `cluster_runs`, `clusters` (insight layer)
 
-Child tables (`documents`, `chunks`, `document_extractions`) **do not** carry
-`tenant_id`. They are reached only through a parent reference, so the JOIN
-implicitly enforces tenant scoping. This keeps row size sane and avoids the
+Child tables (`documents`, `chunks`, `document_extractions`,
+`cluster_documents`) **do not** carry `tenant_id`. They are reached only
+through a parent reference, so the JOIN implicitly enforces tenant scoping. This keeps row size sane and avoids the
 redundancy of marking every chunk with a tenant when its document already
 belongs (transitively) to a tenant via its references.
 
@@ -213,15 +213,66 @@ jobs
 Worker pool polls `WHERE status='pending' AND run_after <= now ORDER BY
 created_at LIMIT N`. Failed jobs get exponential backoff via `run_after`.
 
-### Insight layer tables (not in v1)
+### `cluster_runs`
 
-Sketched for completeness; ignore until that milestone:
+One row per clustering execution. The clusters of the latest `done` run are
+what surface as interests.
 
 ```
-clusters           (tenant_id, label, summary, created_at)
-cluster_documents  (cluster_id, document_id, weight)
-interests          (tenant_id, name, summary, evidence_cluster_ids JSON, confidence)
-suggestions        (tenant_id, kind, payload JSON, created_at, dismissed_at)
+cluster_runs
+  id                UUID PK
+  tenant_id         TEXT NOT NULL
+  status            TEXT                       -- 'running' | 'done' | 'failed'
+  algo              TEXT                       -- clusterer name, e.g. 'knn-graph'
+  params            JSON                       -- clusterer parameters
+  num_documents     INTEGER
+  num_clusters      INTEGER
+  num_noise         INTEGER
+  error             TEXT                       -- nullable
+  started_at        TIMESTAMP
+  finished_at       TIMESTAMP                  -- nullable
+  created_at, updated_at
+```
+
+### `clusters`
+
+One row per cluster within a run. `cohesion` is the mean member cosine to the
+cluster medoid.
+
+```
+clusters
+  id                UUID PK
+  tenant_id         TEXT NOT NULL
+  run_id            UUID NOT NULL FK           -- → cluster_runs(id), ON DELETE CASCADE
+  label             TEXT                       -- nullable; topic name
+  summary           TEXT                       -- nullable
+  size              INTEGER
+  cohesion          REAL                       -- mean member cosine to medoid, 0..1
+  created_at, updated_at
+```
+
+### `cluster_documents`
+
+Cluster membership, one row per (cluster, document). Noise docs simply have no
+row.
+
+```
+cluster_documents
+  cluster_id        UUID NOT NULL FK           -- → clusters(id), ON DELETE CASCADE
+  document_id       UUID NOT NULL FK           -- → documents(id), ON DELETE CASCADE
+  similarity        REAL                       -- cosine to medoid, 0..1
+  PRIMARY KEY (cluster_id, document_id)
+```
+
+### Deferred insight tables (not in v1)
+
+Sketched for completeness; not yet built. In M4, interests are surfaced
+directly from labeled clusters (no standalone `interests` table), and
+suggestions arrive with M5.
+
+```
+interests    (tenant_id, name, summary, evidence_cluster_ids JSON, confidence)
+suggestions  (tenant_id, kind, payload JSON, created_at, dismissed_at)
 ```
 
 ## URL normalization

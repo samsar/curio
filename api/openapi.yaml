@@ -28,6 +28,8 @@ tags:
     description: Extracted content
   - name: search
     description: Hybrid BM25 + vector retrieval
+  - name: insight
+    description: Inferred topic clusters ("interests")
   - name: jobs
     description: Async work queue
   - name: system
@@ -305,6 +307,61 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResponse" }
 
+  # ---------- insight ----------
+
+  /v1/interests:
+    get:
+      tags: [insight]
+      operationId: listInterests
+      summary: List inferred interests (labeled topic clusters)
+      description: >
+        Returns the interests from the latest completed clustering run, largest
+        first, with run metadata. An interest is a labeled cluster. Returns an
+        empty list when clustering has not run yet.
+      parameters:
+        - { in: query, name: limit,   schema: { type: integer, default: 50, maximum: 500 }, description: Max interests to return }
+        - { in: query, name: members, schema: { type: integer, default: 5, maximum: 100 }, description: Member documents to include per interest }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InterestList" }
+
+  /v1/interests/rebuild:
+    post:
+      tags: [insight]
+      operationId: rebuildInterests
+      summary: Recompute interests from the current corpus (async)
+      description: Enqueues a clustering job. Poll the returned job id via /v1/jobs.
+      responses:
+        "202":
+          description: Clustering job enqueued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobRef" }
+        "409":
+          description: Insight layer is disabled (config insight.enabled = false)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/interests/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      - { in: query, name: members, schema: { type: integer, default: 100, maximum: 1000 }, description: Member documents to include }
+    get:
+      tags: [insight]
+      operationId: getInterest
+      summary: Get one interest with its member documents
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Interest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   # ---------- jobs ----------
 
   /v1/jobs:
@@ -558,6 +615,49 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }
+
+    # ---------- insight ----------
+
+    InterestMember:
+      type: object
+      properties:
+        doc_id:        { type: string, format: uuid }
+        title:         { type: string }
+        url:           { type: string }
+        markdown_path: { type: string, description: "Absolute on-disk path to the member's extracted markdown" }
+        similarity:    { type: number, description: "Cosine similarity to the cluster medoid (0..1)" }
+      required: [doc_id, url, similarity]
+
+    Interest:
+      type: object
+      description: A labeled topic cluster.
+      properties:
+        id:       { type: string, format: uuid }
+        label:    { type: string, description: "Topic name; omitted when unlabeled" }
+        summary:  { type: string }
+        size:     { type: integer, description: "Number of member documents" }
+        cohesion: { type: number, description: "Mean member cosine to the medoid (0..1)" }
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/InterestMember" }
+      required: [id, size, cohesion]
+
+    InterestList:
+      type: object
+      description: >
+        Not cursor-paginated — interests are a small bounded snapshot returned
+        with the metadata of the run that produced them.
+      properties:
+        run_id:        { type: string, format: uuid }
+        computed_at:   { type: string, format: date-time, nullable: true }
+        algo:          { type: string, description: "Clusterer name, e.g. knn-graph" }
+        num_documents: { type: integer, description: "Documents considered in the run" }
+        num_clusters:  { type: integer }
+        num_noise:     { type: integer, description: "Documents left unclustered" }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Interest" }
+      required: [num_documents, num_clusters, num_noise, items]
 
     # ---------- jobs ----------
 
