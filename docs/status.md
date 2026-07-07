@@ -208,6 +208,18 @@ _**M3 is complete.**_
   interests directly from labeled clusters.
 - `/v1/suggestions` — arrives with M5.
 
+### Known limitations
+
+- **Clustering produces one large "general-reading" cluster** (~60% of a real
+  corpus) alongside genuinely good niche interests. Root-caused to doc-level
+  mean-pooling of nomic embeddings — not a tunable knob (threshold,
+  mean-centering, and the nomic prefixes were all tried and ruled out; see
+  `docs/decisions.md` → "Insight clustering quality"). Candidate fixes
+  (recursive split of oversized clusters / a Leiden clusterer / a better doc
+  representation) are deferred.
+- Cluster-labeling model quality is only as good as the local generation model
+  (`llama3.2` by default); labels for coarse clusters can be generic.
+
 ## M6 — RAG / Q&A synthesis + SOTA search
 
 _Planned — not started._ Answer questions over saved content and make

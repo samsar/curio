@@ -1532,3 +1532,49 @@ prefix scheme, so changing either prefix means re-embedding the whole corpus
 `.curio-meta.json` cross-check covers only embedding model + dim, so a prefix
 change won't warn; enforcing it is a deliberate follow-up. For now, reindex
 after any prefix change. Set both prefixes to "" for a model that takes none.
+
+---
+
+## Insight clustering quality: the "general-reading" mega-cluster (known limitation)
+
+**State at M4 ship:** `curio interests` produces genuinely good *niche* interests
+(Kubernetes, Ontario regulations, remote-work tools, Canadian investment news,
+Cloudflare/web-dev, …) plus one large "general-reading" cluster that absorbs
+~60% of a real 5.6k-doc corpus. The niches are useful; the mega-cluster is the
+open problem. M4 is considered done with this documented.
+
+**What was ruled out empirically** (recorded so a future effort doesn't repeat
+the same experiments):
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| kNN threshold too low | `min_similarity` 0.5 → 0.65 | inert — byte-identical output |
+| single-axis anisotropy | mean-centering (shipped) | helped granularity + added a noise bucket, blob persists |
+| wrong embedding usage | nomic `search_document:` / `search_query:` prefixes + full reindex (shipped) | labels/cohesion shifted (embeddings did improve), blob still ~60% |
+| thin / boilerplate content | chunk-count profile of the blob | ruled out — ~90% of blob docs are substantial (>3 chunks), same profile as the good clusters |
+
+**Diagnosed cause:** doc-level **mean-pooling** of nomic embeddings. Averaging
+every chunk of a general-interest article lands it near a common "general prose"
+centroid; only documents that are *entirely* about one narrow topic keep a
+distinctive mean vector. This is a doc-representation + embedding-resolution
+limit, not a tunable parameter — which is why no threshold / centering / prefix
+change fixes it.
+
+**Candidate fixes (deferred), rough leverage/effort order:**
+1. **Recursively split oversized clusters** — re-run the clusterer on just the
+   mega-cluster's members; their own mean-centering removes *their* shared
+   direction and exposes sub-topics. Cheapest, reuses the existing `Clusterer`,
+   targets the symptom directly. Try this first.
+2. **Leiden clusterer with a resolution knob** — drop in behind the existing
+   `insight.Clusterer` interface; Leiden can subdivide dense regions where label
+   propagation collapses them into one community.
+3. **Better doc representation than mean-pooling** — lead/salient-chunk embedding
+   or TF-IDF-weighted pooling to sharpen topical signal before clustering.
+4. **Chunk-level clustering** — cluster chunks and derive doc interests; more
+   faithful, but a doc can then belong to several interests (a UX/model change).
+
+The `curio eval` harness and the swappable `Clusterer` interface exist precisely
+so any of these can be measured and swapped without touching storage / API /
+CLI / MCP. Note that the prefix fix is worthwhile regardless of clustering — it
+corrects genuinely wrong embedding usage and improves *search* quality (the
+primary use case).

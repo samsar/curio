@@ -144,3 +144,6 @@ eval harness shows measurably better retrieval than the v1 baseline.
 - Snapshot to WARC for dead-link insurance
 - Cross-source signal weighting ("read this thing, bookmarked this thing,
   highlighted this thing → strong interest")
+- Insight clustering quality: split the ~60% "general-reading" mega-cluster
+  (recursive split of oversized clusters → Leiden → better doc representation).
+  See `docs/decisions.md` → "Insight clustering quality" for the diagnosis.
