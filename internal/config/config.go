@@ -15,11 +15,13 @@ import (
 
 // Config is the top-level configuration loaded from config.yaml.
 type Config struct {
-	Daemon    Daemon    `yaml:"daemon"`
-	Embedding Embedding `yaml:"embedding"`
-	Fetcher   Fetcher   `yaml:"fetcher"`
-	Search    Search    `yaml:"search"`
-	Chunking  Chunking  `yaml:"chunking"`
+	Daemon     Daemon     `yaml:"daemon"`
+	Embedding  Embedding  `yaml:"embedding"`
+	Fetcher    Fetcher    `yaml:"fetcher"`
+	Search     Search     `yaml:"search"`
+	Chunking   Chunking   `yaml:"chunking"`
+	Insight    Insight    `yaml:"insight"`
+	Generation Generation `yaml:"generation"`
 }
 
 type Daemon struct {
@@ -46,6 +48,18 @@ type Embedding struct {
 	Model    string `yaml:"model"`
 	Dim      int    `yaml:"dim"`
 	BaseURL  string `yaml:"base_url"`
+	// AutoPull downloads the embedding model via Ollama at startup if it isn't
+	// present locally. Default true. Set false on metered/offline setups.
+	AutoPull bool `yaml:"auto_pull"`
+	// DocumentPrefix / QueryPrefix are task-instruction prefixes prepended
+	// before embedding. nomic-embed-text is a prefixed model and REQUIRES
+	// these ("search_document: " for indexed text, "search_query: " for
+	// queries); without them its embedding space collapses. They must stay
+	// consistent — changing either requires reindexing the whole corpus (the
+	// stored doc vectors and query vectors must share the same scheme). Set
+	// both to "" for a model that takes no prefix.
+	DocumentPrefix string `yaml:"document_prefix"`
+	QueryPrefix    string `yaml:"query_prefix"`
 }
 
 type Fetcher struct {
@@ -103,6 +117,45 @@ type Chunking struct {
 	OverlapTokens int `yaml:"overlap_tokens"`
 }
 
+// Insight configures the M4 insight layer (document clustering → interests).
+type Insight struct {
+	// Enabled gates clustering. When false, POST /v1/interests/rebuild is
+	// refused; reading existing interests still works.
+	Enabled bool `yaml:"enabled"`
+	// KNN is the neighbors-per-node in the clustering graph.
+	KNN int `yaml:"knn"`
+	// MinSimilarity is the cosine threshold to keep a graph edge (0..1). This
+	// is the main knob for cluster granularity — higher = tighter, more
+	// specific clusters and more noise; lower = broader clusters. The right
+	// value is corpus-dependent; tune it with the eval harness.
+	MinSimilarity float64 `yaml:"min_similarity"`
+	// MinClusterSize drops communities smaller than this to noise.
+	MinClusterSize int `yaml:"min_cluster_size"`
+	// CenterVectors subtracts the corpus mean vector before clustering. Default
+	// true: embedding models like nomic-embed-text are anisotropic (vectors in
+	// a narrow cone), so without it raw cosines are uniformly high and the
+	// corpus collapses into one giant cluster. Turn off only if your embeddings
+	// are already isotropic.
+	CenterVectors bool `yaml:"center_vectors"`
+	// Labeling selects cluster naming: "llm" (default; needs a generation
+	// model, else falls back to deterministic term labels), "terms", or "off".
+	Labeling string `yaml:"labeling"`
+}
+
+// Generation configures the LLM text-generation client used to label clusters
+// (M4) and, later, synthesize RAG answers (M6). Separate from Embedding: a
+// different model and endpoint. Only used when a feature asks for it (e.g.
+// insight.labeling = "llm").
+type Generation struct {
+	Provider       string `yaml:"provider"`        // "ollama" (only provider in v1)
+	Model          string `yaml:"model"`           // a chat/instruct model, e.g. "llama3.2"
+	BaseURL        string `yaml:"base_url"`        // Ollama server; can share the embedder's
+	TimeoutSeconds int    `yaml:"timeout_seconds"` // per-request; generation is slow
+	// AutoPull downloads the generation model via Ollama at startup if it isn't
+	// present locally. Default true. Set false on metered/offline setups.
+	AutoPull bool `yaml:"auto_pull"`
+}
+
 // Default returns the baseline config. The loader applies these first, then
 // overlays whatever the user's config.yaml specifies.
 func Default() Config {
@@ -114,10 +167,13 @@ func Default() Config {
 			IndexWorkers: 4,
 		},
 		Embedding: Embedding{
-			Provider: "ollama",
-			Model:    "nomic-embed-text",
-			Dim:      768,
-			BaseURL:  "http://localhost:11434",
+			Provider:       "ollama",
+			Model:          "nomic-embed-text",
+			Dim:            768,
+			BaseURL:        "http://localhost:11434",
+			AutoPull:       true,
+			DocumentPrefix: "search_document: ",
+			QueryPrefix:    "search_query: ",
 		},
 		Fetcher: Fetcher{
 			Default: "native",
@@ -155,6 +211,27 @@ func Default() Config {
 			// content. See decisions.md.
 			SizeTokens:    384,
 			OverlapTokens: 48,
+		},
+		Insight: Insight{
+			Enabled:        true,
+			KNN:            10,
+			MinSimilarity:  0.5,
+			MinClusterSize: 3,
+			CenterVectors:  true,
+			// LLM labels by default (richer topic names + summaries). This
+			// needs a generation model, but with auto-pull the daemon fetches
+			// it on first start, and if it's ever unavailable the engine falls
+			// back to deterministic term labels — so it's still safe with zero
+			// setup. Set "terms" to force the deterministic labeler, "off" to
+			// skip labeling.
+			Labeling: "llm",
+		},
+		Generation: Generation{
+			Provider:       "ollama",
+			Model:          "llama3.2",
+			BaseURL:        "http://localhost:11434",
+			TimeoutSeconds: 120,
+			AutoPull:       true,
 		},
 	}
 }
@@ -252,6 +329,31 @@ func (c Config) Validate() error {
 		return errors.New("fetcher.default must be set (native or web2md)")
 	default:
 		return fmt.Errorf("fetcher.default %q must be one of: native, web2md", c.Fetcher.Default)
+	}
+	if c.Insight.KNN <= 0 {
+		return fmt.Errorf("insight.knn must be positive, got %d", c.Insight.KNN)
+	}
+	if c.Insight.MinClusterSize <= 0 {
+		return fmt.Errorf("insight.min_cluster_size must be positive, got %d", c.Insight.MinClusterSize)
+	}
+	// Strictly positive: the clusterer treats a non-positive threshold as
+	// "unset" and substitutes its default, so 0 here would be silently ignored.
+	if c.Insight.MinSimilarity <= 0 || c.Insight.MinSimilarity > 1 {
+		return fmt.Errorf("insight.min_similarity must be in (0, 1], got %g", c.Insight.MinSimilarity)
+	}
+	switch c.Insight.Labeling {
+	case "llm", "terms", "off":
+	default:
+		return fmt.Errorf("insight.labeling %q must be one of: llm, terms, off", c.Insight.Labeling)
+	}
+	if c.Generation.Model == "" {
+		return errors.New("generation.model must not be empty")
+	}
+	if c.Generation.BaseURL == "" {
+		return errors.New("generation.base_url must not be empty")
+	}
+	if c.Generation.TimeoutSeconds <= 0 {
+		return fmt.Errorf("generation.timeout_seconds must be positive, got %d", c.Generation.TimeoutSeconds)
 	}
 	return nil
 }

@@ -341,17 +341,96 @@ func (s *Chunks) EmbeddingsForDocument(ctx context.Context, documentID string) (
 		if err := rows.Scan(&ce.ChunkID, &blob); err != nil {
 			return nil, fmt.Errorf("scan embedding: %w", err)
 		}
-		if len(blob) != 4*s.dim {
-			return nil, fmt.Errorf("embedding blob for chunk %s is %d bytes, want %d (dim %d)",
-				ce.ChunkID, len(blob), 4*s.dim, s.dim)
-		}
-		ce.Embedding = make([]float32, s.dim)
-		for i := range ce.Embedding {
-			ce.Embedding[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
+		ce.Embedding, err = decodeVector(blob, s.dim)
+		if err != nil {
+			return nil, fmt.Errorf("chunk %s: %w", ce.ChunkID, err)
 		}
 		out = append(out, ce)
 	}
 	return out, rows.Err()
+}
+
+// decodeVector decodes a sqlite-vec point-read blob (raw little-endian
+// float32, 4 bytes per component, dim components) into a []float32. The Go
+// bindings ship a serializer but no deserializer, so we hand-decode.
+func decodeVector(blob []byte, dim int) ([]float32, error) {
+	if len(blob) != 4*dim {
+		return nil, fmt.Errorf("embedding blob is %d bytes, want %d (dim %d)", len(blob), 4*dim, dim)
+	}
+	v := make([]float32, dim)
+	for i := range v {
+		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
+	}
+	return v, nil
+}
+
+// DocumentVectors returns one mean-pooled vector per fetched document with at
+// least one indexed chunk, in a single pass over chunks_vec. Rows are ordered
+// by document so we can average each document's chunk vectors as we stream,
+// without holding every chunk vector in memory at once.
+func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.DocVector, error) {
+	if tenantID == "" {
+		return nil, fmt.Errorf("chunks: tenant_id required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.document_id, v.embedding
+		FROM chunks_vec v
+		JOIN chunks c    ON c.id = v.chunk_id
+		JOIN documents d ON d.id = c.document_id
+		WHERE d.tenant_id = ? AND d.state = ?
+		ORDER BY c.document_id, c.ord`, tenantID, store.DocStateFetched)
+	if err != nil {
+		return nil, fmt.Errorf("document vectors: %w", err)
+	}
+	defer rows.Close()
+
+	var (
+		out     []store.DocVector
+		curDoc  string
+		acc     []float64 // running sum for the current document
+		n       int       // chunk count for the current document
+		haveDoc bool
+	)
+	flush := func() {
+		if !haveDoc || n == 0 {
+			return
+		}
+		mean := make([]float32, len(acc))
+		for i, sum := range acc {
+			mean[i] = float32(sum / float64(n))
+		}
+		out = append(out, store.DocVector{DocumentID: curDoc, Vector: mean})
+	}
+
+	for rows.Next() {
+		var (
+			docID string
+			blob  []byte
+		)
+		if err := rows.Scan(&docID, &blob); err != nil {
+			return nil, fmt.Errorf("scan document vector: %w", err)
+		}
+		vec, err := decodeVector(blob, s.dim)
+		if err != nil {
+			return nil, fmt.Errorf("document %s: %w", docID, err)
+		}
+		if docID != curDoc {
+			flush()
+			curDoc = docID
+			haveDoc = true
+			acc = make([]float64, s.dim)
+			n = 0
+		}
+		for i, f := range vec {
+			acc[i] += float64(f)
+		}
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	flush()
+	return out, nil
 }
 
 // GetByIDs returns chunks in arbitrary order. Used by the search layer to

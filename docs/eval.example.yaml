@@ -1,0 +1,27 @@
+# Example query-relevance ("qrels") file for `curio eval`.
+#
+# Each entry is a query plus the document URLs you consider relevant to it.
+# `curio eval --queries this-file.yaml` runs every query through /v1/search and
+# scores the returned ranking against these labels (recall@k, precision@k,
+# NDCG@k, MRR). Matching is by exact document URL.
+#
+# Build your own from YOUR corpus: pick 10-20 representative queries and, for
+# each, list the URLs that *should* come back near the top. Keep it in version
+# control and re-run it whenever you change search — the numbers tell you
+# whether a change actually helped. (This is the prerequisite the decisions log
+# names before any M6 search/RAG work: build the eval before the improvement.)
+
+queries:
+  - query: "how neural networks learn"
+    relevant:
+      - "https://colah.github.io/posts/2015-08-Backprop/"
+      - "https://distill.pub/2017/momentum/"
+
+  - query: "rust ownership and borrowing"
+    relevant:
+      - "https://doc.rust-lang.org/book/ch04-00-understanding-ownership.html"
+
+  - query: "designing resilient distributed systems"
+    relevant:
+      - "https://martinfowler.com/articles/microservices.html"
+      - "https://aphyr.com/posts/288-the-network-is-reliable"

@@ -37,7 +37,7 @@ func main() {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "curio", Version: version.Version}, nil)
 	registerTools(srv, c)
 
-	log.Info("curio-mcp serving over stdio", "tools", []string{"search_bookmarks", "get_document", "find_related"})
+	log.Info("curio-mcp serving over stdio", "tools", []string{"search_bookmarks", "get_document", "find_related", "list_interests"})
 	// Run blocks until the client disconnects (stdin EOF) or the session
 	// ends — normal lifecycle for a stdio sidecar, not a crash. Log the
 	// reason and exit 0 so clients (e.g. Claude Code) don't report a failure.
@@ -98,6 +98,15 @@ func registerTools(s *mcp.Server, c *client.Client) {
 		Description: "Given a doc_id, find other saved documents related to it by embedding similarity " +
 			"over the document's indexed content (vector nearest-neighbor, not title matching).",
 	}, relatedHandler(c))
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "list_interests",
+		Description: "List the user's inferred interests: topic clusters discovered across their saved " +
+			"library, each with a label, summary, size, and representative documents (with doc_ids). " +
+			"Use this to understand what the user reads about at a high level, or to pick a topic to " +
+			"drill into with search_bookmarks / get_document. If empty, clustering hasn't run yet " +
+			"(the user can run `curio interests rebuild`).",
+	}, listInterestsHandler(c))
 }
 
 // --- shared shapes ---
@@ -214,6 +223,100 @@ func relatedHandler(c *client.Client) mcp.ToolHandlerFor[relatedInput, searchOut
 		}
 		return textResult(formatHits("related to "+in.ID, out.Results)), out, nil
 	}
+}
+
+// --- list_interests ---
+
+type listInterestsInput struct {
+	Limit   int `json:"limit,omitempty" jsonschema:"max interests to return (default 20)"`
+	Members int `json:"members,omitempty" jsonschema:"documents to include per interest (default 5)"`
+}
+
+type interestMemberOut struct {
+	DocID string `json:"doc_id"`
+	Title string `json:"title,omitempty"`
+	URL   string `json:"url"`
+}
+
+type interestOut struct {
+	ID       string              `json:"id"`
+	Label    string              `json:"label,omitempty"`
+	Summary  string              `json:"summary,omitempty"`
+	Size     int                 `json:"size"`
+	Cohesion float64             `json:"cohesion"`
+	Members  []interestMemberOut `json:"members,omitempty"`
+}
+
+type listInterestsOutput struct {
+	Interests    []interestOut `json:"interests"`
+	NumDocuments int           `json:"num_documents"`
+	NumClusters  int           `json:"num_clusters"`
+	NumNoise     int           `json:"num_noise"`
+}
+
+func listInterestsHandler(c *client.Client) mcp.ToolHandlerFor[listInterestsInput, listInterestsOutput] {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in listInterestsInput) (*mcp.CallToolResult, listInterestsOutput, error) {
+		limit := in.Limit
+		if limit <= 0 {
+			limit = 20
+		}
+		members := in.Members
+		if members <= 0 {
+			members = 5
+		}
+		res, err := c.ListInterests(ctx, client.ListInterestsOpts{Limit: limit, Members: members})
+		if err != nil {
+			return nil, listInterestsOutput{}, fmt.Errorf("list interests: %w", err)
+		}
+		out := listInterestsOutput{
+			NumDocuments: res.NumDocuments,
+			NumClusters:  res.NumClusters,
+			NumNoise:     res.NumNoise,
+			Interests:    make([]interestOut, 0, len(res.Items)),
+		}
+		for _, it := range res.Items {
+			item := interestOut{
+				ID: it.ID, Label: it.Label, Summary: it.Summary,
+				Size: it.Size, Cohesion: it.Cohesion,
+			}
+			for _, m := range it.Members {
+				item.Members = append(item.Members, interestMemberOut{DocID: m.DocID, Title: m.Title, URL: m.URL})
+			}
+			out.Interests = append(out.Interests, item)
+		}
+		return textResult(formatInterests(out)), out, nil
+	}
+}
+
+func formatInterests(out listInterestsOutput) string {
+	if len(out.Interests) == 0 {
+		return "No interests computed yet. Ask the user to run `curio interests rebuild`."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d interests across %d documents", len(out.Interests), out.NumDocuments)
+	if out.NumNoise > 0 {
+		fmt.Fprintf(&b, " (%d unclustered)", out.NumNoise)
+	}
+	b.WriteString(":\n\n")
+	for i, it := range out.Interests {
+		label := it.Label
+		if label == "" {
+			label = "(unlabeled)"
+		}
+		fmt.Fprintf(&b, "%d. %s — %d docs\n", i+1, label, it.Size)
+		if it.Summary != "" {
+			fmt.Fprintf(&b, "   %s\n", it.Summary)
+		}
+		for _, m := range it.Members {
+			t := m.Title
+			if t == "" {
+				t = m.URL
+			}
+			fmt.Fprintf(&b, "   - %s (doc_id: %s)\n", t, m.DocID)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // --- helpers ---

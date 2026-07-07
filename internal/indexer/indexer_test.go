@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,52 @@ import (
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 )
+
+// capturingEmbedder records every text it's asked to embed.
+type capturingEmbedder struct {
+	dim  int
+	seen []string
+}
+
+func (c *capturingEmbedder) Dimensions() int { return c.dim }
+func (c *capturingEmbedder) Model() string   { return "fake" }
+func (c *capturingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	c.seen = append(c.seen, texts...)
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = make([]float32, c.dim)
+	}
+	return out, nil
+}
+
+func TestIndexer_DocumentPrefixOnlyOnEmbedInput(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	chunks := sqlitestore.NewChunks(db, 768)
+	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/p")
+
+	emb := &capturingEmbedder{dim: 768}
+	idx := New(chunks, emb, Options{ChunkSize: 10, ChunkOverlap: 2, DocumentPrefix: "search_document: "})
+
+	require.NoError(t, idx.Index(context.Background(), IndexInput{
+		DocumentID:   docID,
+		ExtractionID: extID,
+		Title:        "T",
+		Markdown:     "Ada Lovelace wrote the first published algorithm.",
+	}))
+
+	// Every text sent to the embedder carries the prefix.
+	require.NotEmpty(t, emb.seen)
+	for _, s := range emb.seen {
+		assert.True(t, strings.HasPrefix(s, "search_document: "), "embed input should be prefixed: %q", s)
+	}
+	// But the STORED chunk text is raw — the prefix must not pollute BM25/snippets.
+	hits, err := chunks.BM25Search(context.Background(), "local", "Lovelace algorithm", 10, store.SearchFilters{})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits)
+	stored, err := chunks.GetByIDs(context.Background(), []string{hits[0].ChunkID})
+	require.NoError(t, err)
+	assert.NotContains(t, stored[0].Text, "search_document:")
+}
 
 // fakeEmbedder returns a fixed-size vector for every text. The value is
 // derived from the text length so different chunks get different vectors.

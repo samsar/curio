@@ -522,6 +522,88 @@ func (c *Client) RelatedDocuments(ctx context.Context, docID string, k int) (*Re
 	return &out, nil
 }
 
+// InterestMember mirrors api.InterestMember. MarkdownPath is the absolute
+// on-disk path to the member document's markdown.
+type InterestMember struct {
+	DocID        string  `json:"doc_id"`
+	Title        string  `json:"title,omitempty"`
+	URL          string  `json:"url"`
+	MarkdownPath string  `json:"markdown_path,omitempty"`
+	Similarity   float64 `json:"similarity"`
+}
+
+// Interest mirrors api.InterestResponse (a labeled cluster).
+type Interest struct {
+	ID       string           `json:"id"`
+	Label    string           `json:"label,omitempty"`
+	Summary  string           `json:"summary,omitempty"`
+	Size     int              `json:"size"`
+	Cohesion float64          `json:"cohesion"`
+	Members  []InterestMember `json:"members,omitempty"`
+}
+
+// InterestList mirrors api.InterestListResponse.
+type InterestList struct {
+	RunID        string     `json:"run_id,omitempty"`
+	ComputedAt   *time.Time `json:"computed_at,omitempty"`
+	Algo         string     `json:"algo,omitempty"`
+	NumDocuments int        `json:"num_documents"`
+	NumClusters  int        `json:"num_clusters"`
+	NumNoise     int        `json:"num_noise"`
+	Items        []Interest `json:"items"`
+}
+
+// ListInterestsOpts filters GET /v1/interests.
+type ListInterestsOpts struct {
+	Limit   int // max interests
+	Members int // members to include per interest (0 = server default)
+}
+
+func (c *Client) ListInterests(ctx context.Context, opts ListInterestsOpts) (*InterestList, error) {
+	q := url.Values{}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Members > 0 {
+		q.Set("members", strconv.Itoa(opts.Members))
+	}
+	path := "/v1/interests"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	var out InterestList
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) GetInterest(ctx context.Context, id string, members int) (*Interest, error) {
+	path := "/v1/interests/" + id
+	if members > 0 {
+		path += "?members=" + strconv.Itoa(members)
+	}
+	var out Interest
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RebuildInterestsResponse is the body of POST /v1/interests/rebuild.
+type RebuildInterestsResponse struct {
+	JobID string `json:"job_id"`
+}
+
+// RebuildInterests triggers a fresh clustering run. Returns the job id to poll.
+func (c *Client) RebuildInterests(ctx context.Context) (*RebuildInterestsResponse, error) {
+	var out RebuildInterestsResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/interests/rebuild", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ErrDaemonUnreachable: the daemon isn't accepting connections at base URL.
 // CLI uses this to decide whether to auto-start.
 var ErrDaemonUnreachable = errors.New("daemon unreachable")

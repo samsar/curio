@@ -23,14 +23,15 @@ import (
 // the user's query before VectorSearch. Documents are embedded by the
 // indexer at write time.
 type Engine struct {
-	chunks    store.ChunkStore
-	docs      store.DocumentStore
-	embedder  Embedder
-	bm25W     float64
-	vectorW   float64
-	rrfK      int
-	collapse  CollapseStrategy
-	preFanout int // how many chunks to pull from each retriever before fusion
+	chunks      store.ChunkStore
+	docs        store.DocumentStore
+	embedder    Embedder
+	bm25W       float64
+	vectorW     float64
+	rrfK        int
+	collapse    CollapseStrategy
+	preFanout   int    // how many chunks to pull from each retriever before fusion
+	queryPrefix string // task prefix prepended to the query before embedding (e.g. "search_query: ")
 }
 
 // Embedder is the slice of the embedder package this engine needs.
@@ -57,6 +58,12 @@ type Config struct {
 	RRFK         int
 	Collapse     CollapseStrategy
 	PreFanout    int
+	// QueryPrefix is prepended to the query text before embedding, to match
+	// the document prefix used at index time (nomic-embed-text is a prefixed
+	// model — "search_query: " for queries, "search_document: " for docs).
+	// Empty = no prefix. Must correspond to the indexer's document prefix or
+	// vector search quality degrades.
+	QueryPrefix string
 }
 
 func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, cfg Config) *Engine {
@@ -76,14 +83,15 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, c
 		cfg.PreFanout = 50
 	}
 	return &Engine{
-		chunks:    chunks,
-		docs:      docs,
-		embedder:  embedder,
-		bm25W:     cfg.BM25Weight,
-		vectorW:   cfg.VectorWeight,
-		rrfK:      cfg.RRFK,
-		collapse:  cfg.Collapse,
-		preFanout: cfg.PreFanout,
+		chunks:      chunks,
+		docs:        docs,
+		embedder:    embedder,
+		bm25W:       cfg.BM25Weight,
+		vectorW:     cfg.VectorWeight,
+		rrfK:        cfg.RRFK,
+		collapse:    cfg.Collapse,
+		preFanout:   cfg.PreFanout,
+		queryPrefix: cfg.QueryPrefix,
 	}
 }
 
@@ -149,7 +157,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		bm25Hits = hits
 	}
 
-	queryVec, err := e.embedder.Embed(ctx, []string{req.Query})
+	queryVec, err := e.embedder.Embed(ctx, []string{e.queryPrefix + req.Query})
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
