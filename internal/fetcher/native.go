@@ -125,13 +125,25 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		n.log.Info("fast-fail from host cache",
 			"url", target, "host", host, "kind", cached.kind.String(),
 			"age_seconds", int(time.Since(cached.seenAt).Seconds()))
+		// A cache hit is a PermanentError. The verdict cannot change
+		// inside the TTL, so letting the worker back off and retry
+		// (60s → 120s → 240s → 480s, ~15 min per URL) would only re-read
+		// this cache four more times. Fail the job now; recovery once the
+		// host is healthy again is `curio refetch --all --state=failed`.
+		// The sentinel is preserved so callers can still errors.Is() the
+		// failure kind, and the "(cached: …)" suffix survives into
+		// last_error for diagnosis.
+		var sentinel error
 		switch cached.kind {
 		case HostFailUnreachable:
-			return nil, fmt.Errorf("native: %w (cached: %s)", ErrHostUnreachable, cached.originalErr)
+			sentinel = ErrHostUnreachable
 		case HostFailAntiBot:
-			return nil, fmt.Errorf("native: %w (cached: %s)", ErrAntiBot, cached.originalErr)
+			sentinel = ErrAntiBot
 		case HostFailLoginWall:
-			return nil, fmt.Errorf("native: %w (cached: %s)", ErrLoginWall, cached.originalErr)
+			sentinel = ErrLoginWall
+		}
+		if sentinel != nil {
+			return nil, &PermanentError{Err: fmt.Errorf("native: %w (cached: %s)", sentinel, cached.originalErr)}
 		}
 	}
 

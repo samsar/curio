@@ -76,6 +76,8 @@ This catches people:
 
 `ErrDeadLink` (404/410, soft-404 titles, redirect-to-homepage) is always wrapped in a `PermanentError`, never goes to Jina, and is deliberately NOT host-cached (a dead path says nothing about the host). The soft-404 check runs BEFORE the login-wall heuristics in `tryReadability` — order matters, thin tombstone pages would otherwise classify as login walls and leak to Jina.
 
+A hit on the in-memory host-failure cache (`hostFailureCache`, 15-min TTL; kinds: unreachable / anti-bot / login-wall) returns a `PermanentError` wrapping the original sentinel — the verdict can't change inside the TTL, so retrying would only re-read the cache. The *first* failure for a host stays retryable; it's what populates the cache. Recovery is `curio refetch --all --state=failed` (or per-doc `curio refetch <id>`). See `docs/decisions.md` "Host-cache hits are permanent failures".
+
 ## Fetcher routing
 
 `$CURIO_HOME/fetcher_rules.yaml` (optional) routes URLs to fetchers — `host` / `host_suffix` / `host_in` / `{}` catch-all matchers, first match wins, hot-reloaded via throttled stat-on-dispatch (`internal/fetcher/rules.go`). Missing file = built-in defaults (github.com → github, youtube hosts → youtube when yt-dlp exists, everything else → the config default). Invalid edits keep the last good rules; unknown fetcher names skip the rule with a warning.
