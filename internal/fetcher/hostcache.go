@@ -48,7 +48,9 @@ type hostCacheEntry struct {
 
 // hostFailureCache memoizes host-wide failures so repeat fetches of bad
 // domains short-circuit without burning the full 5×retry × N×backoff
-// budget. Concurrent-safe; bounded by sweeping expired entries on every
+// budget. A hit is surfaced by Native.Fetch as a PermanentError — the
+// job fails immediately rather than backing off into the same cached
+// verdict. Concurrent-safe; bounded by sweeping expired entries on every
 // Put (cheap because the population of hosts in a corpus is small —
 // hundreds, not millions).
 type hostFailureCache struct {

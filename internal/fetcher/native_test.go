@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -402,4 +403,61 @@ func TestSoft404TitleRE(t *testing.T) {
 	for _, title := range alive {
 		assert.False(t, soft404TitleRE.MatchString(title), "should NOT match %q", title)
 	}
+}
+
+// TestNative_HostCache_HitIsPermanent: the first failure on a host is a
+// plain retryable error (it populates the cache); every fetch on that host
+// within the TTL short-circuits as a PermanentError carrying the same
+// sentinel plus a "(cached: …)" suffix, and never contacts the origin.
+func TestNative_HostCache_HitIsPermanent(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = w.Write([]byte(`<html><head><title>Login</title></head>
+			<body><article><p>Please sign in.</p></article></body></html>`))
+	}))
+	defer srv.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+
+	// First attempt: real fetch, retryable login-wall error.
+	_, err := n.Fetch(context.Background(), srv.URL+"/first")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrLoginWall)
+	var pe *PermanentError
+	assert.False(t, errors.As(err, &pe), "first failure must stay retryable: %v", err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&hits))
+
+	// Second attempt, same host, different path: served from the host
+	// cache, permanent, origin not contacted.
+	_, err = n.Fetch(context.Background(), srv.URL+"/second")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrLoginWall)
+	require.True(t, errors.As(err, &pe), "cache hit must be permanent: %v", err)
+	assert.Contains(t, err.Error(), "(cached:")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&hits), "cache hit must not contact origin")
+}
+
+// Same contract for the anti-bot kind (HTTP 403 → ErrAntiBot).
+func TestNative_HostCache_AntiBotHitIsPermanent(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+
+	_, err := n.Fetch(context.Background(), srv.URL+"/a")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAntiBot)
+	var pe *PermanentError
+	assert.False(t, errors.As(err, &pe), "first 403 must stay retryable: %v", err)
+
+	_, err = n.Fetch(context.Background(), srv.URL+"/b")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAntiBot)
+	require.True(t, errors.As(err, &pe), "cached 403 must be permanent: %v", err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&hits))
 }

@@ -1578,3 +1578,44 @@ so any of these can be measured and swapped without touching storage / API /
 CLI / MCP. Note that the prefix fix is worthwhile regardless of clustering — it
 corrects genuinely wrong embedding usage and improves *search* quality (the
 primary use case).
+
+---
+
+## Host-cache hits are permanent failures
+
+**Decision:** When `Native.Fetch` short-circuits on a fresh
+`hostFailureCache` entry (unreachable / anti-bot / login-wall) it
+returns a `PermanentError` wrapping the same sentinel it always did,
+so the jobs bridge marks the job `failed` (and the doc `failed`) on
+the spot. The *first* failure for a host is unchanged — a plain
+retryable error that populates the cache.
+
+**Why:** Observed during an import: ten jobs sat `pending` for ~15
+minutes each. Attempt 1 did real work (origin, then Jina), the host
+got cached, and attempts 2–5 each hit the cache, returned a retryable
+`ErrLoginWall (cached: …)`, and slept 60 → 120 → 240 → 480s. Four
+retries that could only ever re-read a cache entry. The cache TTL
+(15 min) roughly equals the total backoff, so at best the fifth
+attempt did one more real fetch with the same result. Meanwhile
+`curio import`'s progress line showed `eta≈0s` — its rate is jobs
+finished between ticks, and nothing finishes while every remaining
+job is asleep.
+
+**Effect:** a URL on a freshly-bad host now fails after one real
+attempt plus one 60s backoff (~1 min instead of ~15). Later URLs on
+the same host inside the TTL fail instantly, with no origin request.
+
+**Tradeoff:** a transient host-wide blip (a 503 during someone's
+deploy) now fails every URL on that host for the rest of the TTL
+window without a second real attempt — previously they'd have retried
+into the same cached verdict anyway, so little is actually lost.
+Recovery is `curio refetch --all --state=failed` (or per-doc
+`curio refetch <id>`) once the host is back: cheap and explicit,
+same posture as dead links. The
+`(cached: …)` suffix survives into `last_error` so
+`curio jobs --failed` shows why.
+
+**Not changed:** the first failure stays retryable (one genuine retry
+per host after the TTL is still useful for flaky origins),
+`ErrDeadLink` is still not host-cached, and MaxAttempts / backoff are
+untouched for everything that isn't a cache hit.
