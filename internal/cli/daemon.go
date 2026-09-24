@@ -32,10 +32,10 @@ func newDaemonStartCmd() *cobra.Command {
 			if ctx.Controller == nil {
 				return errors.New("$CURIO_HOME not initialized; the daemon will create it on first run, but daemonctl needs it now")
 			}
-			if err := ctx.Controller.Start(); err != nil {
+			if err := ctx.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			fmt.Println("daemon started")
+			fmt.Println("daemon running")
 			return nil
 		},
 	}
@@ -53,7 +53,7 @@ func newDaemonStopCmd() *cobra.Command {
 			if ctx.Controller == nil {
 				return errors.New("no daemon controller available")
 			}
-			if err := ctx.Controller.Stop(); err != nil {
+			if err := ctx.Controller.Stop(cmd.Context()); err != nil {
 				return err
 			}
 			fmt.Println("daemon stopped")
@@ -65,7 +65,7 @@ func newDaemonStopCmd() *cobra.Command {
 func newDaemonStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show daemon process status (PID, alive/stale)",
+		Short: "Show whether the daemon for this $CURIO_HOME is running, and its PID",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, ok := getCtx(cmd.Context())
 			if !ok {
@@ -75,20 +75,37 @@ func newDaemonStatusCmd() *cobra.Command {
 				fmt.Println("not running (no $CURIO_HOME)")
 				return nil
 			}
-			s, pid, err := ctx.Controller.Status()
+			st, err := ctx.Controller.Status(cmd.Context())
 			if err != nil {
 				return err
 			}
-			switch s {
-			case daemonctl.StatusRunning:
-				fmt.Printf("running (pid %d)\n", pid)
-			case daemonctl.StatusStale:
-				fmt.Printf("stale PID file (pid %d, process gone)\n", pid)
-			default:
-				fmt.Println("not running")
-			}
+			fmt.Println(describeDaemonStatus(st, ctx.Home.Path))
 			return nil
 		},
+	}
+}
+
+func describeDaemonStatus(st daemonctl.Status, home string) string {
+	switch st.State {
+	case daemonctl.Running:
+		switch {
+		case st.PID == 0:
+			return "starting (lock held, pid not recorded yet)"
+		case st.Health == nil:
+			return fmt.Sprintf("running (pid %d), not answering HTTP yet", st.PID)
+		default:
+			return fmt.Sprintf("running (pid %d, home %s, version %s)", st.PID, st.Health.Home, st.Health.Version)
+		}
+	case daemonctl.Stale:
+		return fmt.Sprintf("not running (stale PID file: pid %d is left over from an earlier run and is ignored)", st.PID)
+	case daemonctl.Legacy:
+		return fmt.Sprintf("legacy daemon from an older curio is answering (version %s); "+
+			"run `curio daemon stop` for how to retire it", st.Health.Version)
+	default:
+		if st.Health != nil && st.Health.Home != "" && !daemonctl.SameHome(st.Health.Home, home) {
+			return fmt.Sprintf("not running (the port is served by the daemon for %s)", st.Health.Home)
+		}
+		return "not running"
 	}
 }
 

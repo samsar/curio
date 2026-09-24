@@ -5,12 +5,20 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"log/slog"
+	"net"
 	"os"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 // Config is the top-level configuration loaded from config.yaml.
@@ -36,10 +44,9 @@ type Daemon struct {
 	// concurrent embed requests; more workers just queue up inside
 	// Ollama. Default 4.
 	IndexWorkers int `yaml:"index_workers"`
-	// Workers is the legacy single-pool count. Kept for migration:
-	// when set and the new fields are zero, we split it 75/25
-	// fetch/index. New configs should use FetchWorkers + IndexWorkers
-	// directly.
+	// Workers is the deprecated single-pool count. Load translates it
+	// into FetchWorkers/IndexWorkers (75/25) and zeroes it, so code reading
+	// a loaded Config only ever sees the split pools.
 	Workers int `yaml:"workers,omitempty"`
 }
 
@@ -167,9 +174,9 @@ func Default() Config {
 			IndexWorkers: 4,
 		},
 		Embedding: Embedding{
-			Provider:       "ollama",
+			Provider:       providerOllama,
 			Model:          "nomic-embed-text",
-			Dim:            768,
+			Dim:            store.EmbeddingDim,
 			BaseURL:        "http://localhost:11434",
 			AutoPull:       true,
 			DocumentPrefix: "search_document: ",
@@ -227,7 +234,7 @@ func Default() Config {
 			Labeling: "llm",
 		},
 		Generation: Generation{
-			Provider:       "ollama",
+			Provider:       providerOllama,
 			Model:          "llama3.2",
 			BaseURL:        "http://localhost:11434",
 			TimeoutSeconds: 120,
@@ -236,9 +243,13 @@ func Default() Config {
 	}
 }
 
+// providerOllama is the only embedding and generation provider implemented.
+const providerOllama = "ollama"
+
 // Load reads config.yaml from path. A missing file is not an error; the
 // defaults are returned. An empty or partial file overlays onto defaults.
-// A malformed or invalid file is an error.
+// A malformed or invalid file is an error, and so is an unknown key: a
+// typo'd section would otherwise be silently ignored and its defaults used.
 func Load(path string) (Config, error) {
 	cfg := Default()
 
@@ -251,38 +262,64 @@ func Load(path string) (Config, error) {
 	}
 
 	// Decode on top of defaults: fields the user omits keep their default.
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
 
+	if err := cfg.applyLegacyWorkers(data); err != nil {
+		return Config{}, fmt.Errorf("invalid config %q: %w", path, err)
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid config %q: %w", path, err)
 	}
 	return cfg, nil
 }
 
+// applyLegacyWorkers folds the deprecated daemon.workers count into the split
+// pools. It keys off which keys the file sets, not their values: decoding on
+// top of Default() leaves fetch_workers at 16 whether or not the user wrote
+// it, so comparing against defaults can't tell a legacy config from a new one.
+func (c *Config) applyLegacyWorkers(data []byte) error {
+	var set struct {
+		Daemon struct {
+			Workers      *int `yaml:"workers"`
+			FetchWorkers *int `yaml:"fetch_workers"`
+			IndexWorkers *int `yaml:"index_workers"`
+		} `yaml:"daemon"`
+	}
+	// The strict decode in Load already accepted this document.
+	if err := yaml.Unmarshal(data, &set); err != nil {
+		return fmt.Errorf("re-read daemon worker keys: %w", err)
+	}
+	d := set.Daemon
+	if d.Workers == nil {
+		return nil
+	}
+	if d.FetchWorkers != nil || d.IndexWorkers != nil {
+		return errors.New("daemon.workers is deprecated and cannot be combined with " +
+			"daemon.fetch_workers / daemon.index_workers; remove daemon.workers")
+	}
+	if *d.Workers <= 0 {
+		return fmt.Errorf("daemon.workers must be positive, got %d "+
+			"(deprecated: prefer daemon.fetch_workers and daemon.index_workers)", *d.Workers)
+	}
+	c.Daemon.FetchWorkers = max(1, *d.Workers*3/4)
+	c.Daemon.IndexWorkers = max(1, *d.Workers-c.Daemon.FetchWorkers)
+	c.Daemon.Workers = 0
+	return nil
+}
+
 // Validate checks invariants that the YAML schema can't enforce. Called by
-// Load; can also be called directly when constructing Config in tests.
+// Load; can also be called directly when constructing Config in tests. It
+// never modifies c.
 func (c Config) Validate() error {
-	if c.Daemon.Listen == "" {
-		return errors.New("daemon.listen must not be empty")
+	if err := validateListen(c.Daemon.Listen); err != nil {
+		return err
 	}
-	if !validLogLevel(c.Daemon.LogLevel) {
+	if _, ok := logLevels[c.Daemon.LogLevel]; !ok {
 		return fmt.Errorf("daemon.log_level %q must be one of: debug, info, warn, error", c.Daemon.LogLevel)
-	}
-	// Resolve legacy single-pool field. When daemon.workers is set and
-	// the new fields are zero, split 75/25 fetch/index. Done as a
-	// best-effort migration; the user should switch to the explicit
-	// fields.
-	if c.Daemon.Workers > 0 && c.Daemon.FetchWorkers == 0 && c.Daemon.IndexWorkers == 0 {
-		c.Daemon.FetchWorkers = (c.Daemon.Workers * 3) / 4
-		if c.Daemon.FetchWorkers < 1 {
-			c.Daemon.FetchWorkers = 1
-		}
-		c.Daemon.IndexWorkers = c.Daemon.Workers - c.Daemon.FetchWorkers
-		if c.Daemon.IndexWorkers < 1 {
-			c.Daemon.IndexWorkers = 1
-		}
 	}
 	if c.Daemon.FetchWorkers <= 0 {
 		return fmt.Errorf("daemon.fetch_workers must be positive, got %d", c.Daemon.FetchWorkers)
@@ -290,11 +327,17 @@ func (c Config) Validate() error {
 	if c.Daemon.IndexWorkers <= 0 {
 		return fmt.Errorf("daemon.index_workers must be positive, got %d", c.Daemon.IndexWorkers)
 	}
+	if c.Embedding.Provider != providerOllama {
+		return fmt.Errorf("embedding.provider %q is not supported; the only provider is %q",
+			c.Embedding.Provider, providerOllama)
+	}
 	if c.Embedding.Model == "" {
 		return errors.New("embedding.model must not be empty")
 	}
-	if c.Embedding.Dim <= 0 {
-		return fmt.Errorf("embedding.dim must be positive, got %d", c.Embedding.Dim)
+	if c.Embedding.Dim != store.EmbeddingDim {
+		return fmt.Errorf("embedding.dim must be %d, got %d: the vector index is created with a fixed "+
+			"dimension and a different-dimension model swap isn't implemented yet "+
+			"(see docs/decisions.md \"Embedding model swap\")", store.EmbeddingDim, c.Embedding.Dim)
 	}
 	if c.Embedding.BaseURL == "" {
 		return errors.New("embedding.base_url must not be empty")
@@ -346,6 +389,10 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("insight.labeling %q must be one of: llm, terms, off", c.Insight.Labeling)
 	}
+	if c.Generation.Provider != providerOllama {
+		return fmt.Errorf("generation.provider %q is not supported; the only provider is %q",
+			c.Generation.Provider, providerOllama)
+	}
 	if c.Generation.Model == "" {
 		return errors.New("generation.model must not be empty")
 	}
@@ -358,12 +405,50 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func validLogLevel(s string) bool {
-	switch s {
-	case "debug", "info", "warn", "error":
+// validateListen requires a loopback host and a fixed port. The API has no
+// authentication — anything that can reach the socket can read the corpus
+// and enqueue fetches — so it must never bind a routable interface. Port 0
+// is rejected too: clients derive the daemon's URL from this setting, so an
+// ephemeral port would be unreachable.
+func validateListen(addr string) error {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("daemon.listen %q must be host:port on loopback, e.g. 127.0.0.1:8765: %w", addr, err)
+	}
+	if port, err := strconv.Atoi(portStr); err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("daemon.listen %q: port must be a fixed number in 1-65535", addr)
+	}
+	if !isLoopbackHost(host) {
+		return fmt.Errorf("daemon.listen %q: the API is unauthenticated and must stay on loopback "+
+			"(use 127.0.0.1, ::1 or localhost)", addr)
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
-	return false
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// logLevels maps daemon.log_level values to slog levels; its keys are the
+// accepted values.
+var logLevels = map[string]slog.Level{
+	"debug": slog.LevelDebug,
+	"info":  slog.LevelInfo,
+	"warn":  slog.LevelWarn,
+	"error": slog.LevelError,
+}
+
+// SlogLevel returns the slog level for LogLevel. Validate guarantees a known
+// value; an unknown one maps to info.
+func (d Daemon) SlogLevel() slog.Level {
+	if lvl, ok := logLevels[d.LogLevel]; ok {
+		return lvl
+	}
+	return slog.LevelInfo
 }
 
 func validCollapse(s string) bool {

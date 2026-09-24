@@ -57,6 +57,11 @@ func Open(path string) (*DB, error) {
 }
 
 // Migrate applies pending migrations from the embedded FS. Idempotent.
+//
+// After an error, close db and don't reuse it: a table-rebuild migration
+// runs outside goose's transaction (see migrations/README.md), and one that
+// fails leaves its pooled connection inside an open transaction with
+// foreign keys off.
 func Migrate(db *DB) error {
 	goose.SetBaseFS(migrations.FS)
 	if err := goose.SetDialect("sqlite3"); err != nil {

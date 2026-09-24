@@ -3,8 +3,9 @@ info:
   title: Curio Daemon API
   version: 0.1.0
   description: |
-    HTTP+JSON API exposed by `curio-daemon` on `127.0.0.1:8765` (configurable).
-    Consumed by `curio` CLI, `curio-mcp` sidecar, and any future client.
+    HTTP+JSON API exposed by `curio-daemon` on `127.0.0.1:8765` (the port is
+    configurable; the host must be loopback). Consumed by `curio` CLI,
+    `curio-mcp` sidecar, and any future client.
 
     Conventions:
       - All IDs are UUIDs.
@@ -12,10 +13,25 @@ info:
       - Errors follow RFC 7807 (`application/problem+json`).
       - List endpoints return `{ items: [...], total, next_cursor }`; pagination
         is cursor-based for stability under writes.
-      - Long-running operations (import, refetch, reindex) are asynchronous
-        and return a `job_id`. Poll `/v1/jobs/{id}`.
-      - Authentication is a no-op middleware stub in v1; the hook is present
-        so hosted mode can drop in real auth without API changes.
+      - Long-running operations are asynchronous and answer 202 with a
+        `job_id`, or with `jobs_enqueued` for the bulk refetch-all and
+        reindex-all, which have no parent job. Watch `GET /v1/jobs`.
+
+    Access policy: there is no authentication and no token. The daemon binds
+    loopback only and trusts every local process (and OS user) that can reach
+    it. It refuses requests a web browser could make on a page's behalf; these
+    checks run before routing and apply to every path:
+      - `Host` must be `localhost:P` (any case) or an address equal to
+        127.0.0.1, ::1 or the bound address, on `P`, the daemon's port.
+        Otherwise 403: this is what stops DNS rebinding.
+      - A request carrying `Origin` gets 403 unless the Origin is exactly
+        `http://127.0.0.1:P`, `http://localhost:P` or `http://[::1]:P`,
+        `Origin: null` included. No CORS headers are ever sent.
+      - A request with a body must send `Content-Type: application/json`
+        (415 otherwise) holding exactly one JSON value. Bodies are capped at
+        1 MiB, or 32 MiB for `POST /v1/bookmarks/import` (413 otherwise).
+        Body-less POSTs need no Content-Type.
+    Hosted-mode authentication is deferred.
 
 servers:
   - url: http://127.0.0.1:8765
@@ -234,6 +250,61 @@ paths:
             text/markdown:
               schema: { type: string }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/documents/{id}/refetch:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      - { in: query, name: force, required: false, schema: { type: string, enum: ["1", "true"] },
+          description: Refetch even if the document is dead (a confirmed dead link). }
+    post:
+      tags: [documents]
+      operationId: refetchDocument
+      summary: Reset the document to pending and enqueue a fresh fetch job
+      description: >
+        The state reset and the new job commit together: on failure the
+        document keeps its state and no job exists. The current extraction is
+        kept until the new fetch replaces it.
+      responses:
+        "202":
+          description: Fetch job enqueued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobRef" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The document is dead and force was not given
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/documents/refetch-all:
+    parameters:
+      - { in: query, name: state, required: false, schema: { type: string, enum: [pending, fetched, failed, dead] },
+          description: "Only refetch documents in this state. Default: pending, fetched and failed; dead documents only when asked for." }
+    post:
+      tags: [documents]
+      operationId: refetchAllDocuments
+      summary: Reset matching documents to pending and enqueue a fetch job for each
+      description: >
+        All-or-nothing: every matching document is reset and gets a fetch job
+        in one transaction, or nothing changes. Returns the number of jobs
+        enqueued rather than a job_id: there is no parent job to poll; watch
+        /v1/jobs or /v1/stats instead.
+      responses:
+        "202":
+          description: Fetch jobs enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobs_enqueued]
+                properties:
+                  jobs_enqueued: { type: integer }
+        "400":
+          description: Unknown state
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
 
   /v1/documents/{id}/related:
     parameters:
@@ -458,6 +529,8 @@ components:
       type: object
       properties:
         status:           { type: string, enum: [ok, degraded] }
+        pid:              { type: integer, description: "Process ID of the daemon that answered" }
+        home:             { type: string, description: "Absolute $CURIO_HOME the answering daemon serves" }
         version:          { type: string }
         schema_version:   { type: integer }
         embedding_model:  { type: string }

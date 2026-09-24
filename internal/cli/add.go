@@ -94,12 +94,10 @@ func ensureDaemon(c *Context) error {
 	if c.Controller == nil {
 		// No $CURIO_HOME yet, so we can't manage the daemon process.
 		// Try a direct healthz first; if daemon is up, no need to start.
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		defer cancel()
-		if _, err := c.Client.Healthz(ctx); err == nil {
+		if _, err := c.Client.Healthz(context.Background()); err == nil {
 			return nil
 		}
 		return errors.New("daemon not running and no $CURIO_HOME available to start it")
 	}
-	return c.Controller.EnsureRunning()
+	return c.Controller.EnsureRunning(context.Background())
 }

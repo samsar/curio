@@ -54,7 +54,7 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
 - `curio import <source> [path]` — bulk import from Chrome / Safari / Firefox
 - `curio search <query>` — hybrid search
 - `curio status` — daemon health, doc counts, job queue depth
-- `curio daemon {start|stop|status|logs}` — lifecycle management via PID file
+- `curio daemon {start|stop|status|logs}` — lifecycle management (see "Daemon lifecycle")
 - `curio refetch <id|all>` — force re-extract
 - `curio reindex` — re-embed (after model swap)
 
@@ -65,7 +65,11 @@ If a CLI command needs the daemon and it isn't running, the CLI auto-starts it.
 Long-running background process. Owns the SQLite database, the job queue, and
 all fetch/index/search/insight workflows.
 
-- HTTP+JSON API on `127.0.0.1:8765` (port configurable)
+- HTTP+JSON API on `127.0.0.1:8765` (port configurable; the host must be
+  loopback). No authentication: it trusts local processes and refuses
+  browser-originated requests (Host allowlist, Origin rejection, JSON-only
+  bodies). See `docs/decisions.md` "Local API: loopback only, no token,
+  browsers shut out".
 - OpenAPI spec is the source of truth — clients codegen from it
 - Internal worker pool processes jobs from the SQLite-backed queue
 
@@ -103,8 +107,27 @@ web UI) generate types from it.
 
 ## Daemon lifecycle
 
-V0: PID-file-based, managed via `curio daemon start|stop|status`. CLI commands
-that need the daemon will auto-start it if not running.
+One daemon per `$CURIO_HOME`, managed via `curio daemon start|stop|status`.
+CLI commands and the MCP sidecar auto-start it when it isn't running.
+
+- **Single instance.** The daemon holds an exclusive `flock` on
+  `daemon.pid` for as long as it runs and records its PID there. The kernel
+  drops the lock however the daemon dies, so "the lock is held" means "a
+  daemon is running", with no PID guesswork.
+- **Startup order.** Lock, then config, then bind the API port, and only
+  then open and migrate the DB, recover orphaned jobs and start workers. A
+  second daemon, or one whose port is taken, exits before touching the DB.
+- **Clients** probe the lock for liveness and `/v1/healthz` (which reports
+  `pid` and `home`) for identity, allowing for healthz's own bounded wait
+  on Ollama. They serialize auto-starts on
+  `daemon.start.lock`, and they only signal the PID the lock holder
+  recorded. A spawned daemon that crashes during startup is reported
+  immediately, with its exit status and the tail of `daemon.log`.
+- **Shutdown** on SIGINT, SIGTERM or SIGHUP: stop accepting work, give
+  in-flight HTTP requests 5s and running jobs 15s, record every outcome
+  (interrupted jobs are requeued with their attempt refunded), then release
+  the lock. Jobs abandoned after the grace period are recovered as orphans
+  on the next start.
 
 V1+: optional `curio service install` that drops a `launchd` plist (macOS) or
 systemd unit (Linux) for auto-start at login.
@@ -124,7 +147,8 @@ Everything under `$CURIO_HOME` (defaults to `~/.curio`).
       <document_id>.raw.html
   logs/
     daemon.log
-  daemon.pid
+  daemon.pid             # single-instance lock (flock) + the running daemon's PID
+  daemon.start.lock      # serializes clients auto-starting the daemon
 ```
 
 If `~/.curio` exists without `.curio-meta.json`, the daemon refuses to start and
@@ -263,4 +287,6 @@ External processes the daemon expects:
 - Trajectory analysis / "new this month" detection (interest clustering itself
   landed in M4 — see the insight layer)
 - Web UI
-- Authentication (single-tenant local; auth middleware stub for future)
+- Authentication (single-tenant local: the API binds loopback only and
+  refuses browser-originated requests; see decisions.md "Local API: loopback
+  only, no token, browsers shut out")

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -27,9 +28,7 @@ func newStatusCmd() *cobra.Command {
 
 			fmt.Printf("cli:     %s\n", version.String())
 
-			pctx, cancel := context.WithTimeout(cmd.Context(), 500*time.Millisecond)
-			defer cancel()
-			health, err := ctx.Client.Healthz(pctx)
+			health, err := ctx.Client.Healthz(cmd.Context())
 			if err != nil {
 				fmt.Println("daemon:  not running")
 				if ctx.Home != nil {
@@ -41,6 +40,9 @@ func newStatusCmd() *cobra.Command {
 
 			fmt.Printf("daemon:  running  (version %s)\n", health.Version)
 			fmt.Printf("home:    %s\n", ctx.Home.Path)
+			if w := homeMismatchWarning(health.Home, ctx.Home.Path); w != "" {
+				fmt.Print(w)
+			}
 			fmt.Printf("schema:  v%d\n", health.SchemaVersion)
 			fmt.Printf("embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
 
@@ -90,6 +92,18 @@ func formatMap(m map[string]int) string {
 		parts[i] = fmt.Sprintf("%s=%d", k, m[k])
 	}
 	return strings.Join(parts, "  ")
+}
+
+// homeMismatchWarning warns when the daemon answering at this address serves
+// another home, so the numbers that follow aren't this home's. It is empty
+// when the homes match or the daemon predates reporting its home.
+func homeMismatchWarning(daemonHome, localHome string) string {
+	if daemonHome == "" || daemonctl.SameHome(daemonHome, localHome) {
+		return ""
+	}
+	return fmt.Sprintf("warning: the daemon answering at this address serves %s, not %s;\n"+
+		"         results below are for that home. Give each home its own daemon.listen port.\n",
+		daemonHome, localHome)
 }
 
 // printDiskUsage shows the size of the database, content dir, and logs dir.
