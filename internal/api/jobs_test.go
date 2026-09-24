@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"testing"
 
@@ -11,12 +10,19 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// TestDeleteJobs_FinishedOnly: live work can't be deleted through the API.
+// TestDeleteJobs_FinishedOnly: live work can't be deleted through the API,
+// however old it is.
 func TestDeleteJobs_FinishedOnly(t *testing.T) {
 	s := newTestServer(t)
+	// Inserted directly with an old updated_at: timestamps are stored at
+	// millisecond precision, so a job enqueued moments before the request
+	// may not be strictly older than a "now" cutoff. The AFTER UPDATE
+	// trigger rules out backdating an existing row instead.
 	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
-		require.NoError(t, s.deps.Queue.Enqueue(context.Background(),
-			&store.Job{TenantID: "local", Kind: store.JobKindFetch, Status: status}))
+		_, err := s.db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, updated_at)
+			VALUES (?, 'local', ?, '{}', ?, '2000-01-01T00:00:00.000Z')`,
+			"job-"+status, store.JobKindFetch, status)
+		require.NoError(t, err)
 	}
 
 	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, "bogus"} {
@@ -30,8 +36,19 @@ func TestDeleteJobs_FinishedOnly(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.JSONEq(t, `{"deleted":1,"mode":"status=done"}`, resp.body)
 
-	resp = s.do(t, request{method: http.MethodDelete, path: "/v1/jobs?older_than=0s"})
+	resp = s.do(t, request{method: http.MethodDelete, path: "/v1/jobs?older_than=1d"})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
-	assert.JSONEq(t, `{"deleted":1,"mode":"older_than=0s"}`, resp.body, "prune takes only the failed job")
-	assert.Equal(t, 2, s.count(t, "jobs"))
+	assert.JSONEq(t, `{"deleted":1,"mode":"older_than=1d"}`, resp.body, "prune takes only the failed job")
+
+	var live []string
+	rows, err := s.db.Query(`SELECT status FROM jobs ORDER BY status`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var st string
+		require.NoError(t, rows.Scan(&st))
+		live = append(live, st)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{store.JobStatusPending, store.JobStatusRunning}, live)
 }
