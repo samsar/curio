@@ -8,38 +8,27 @@ import (
 // FuzzNormalize checks the two properties dedup relies on: anything
 // Normalize accepts is a fetchable http(s) URL with a host, and
 // normalizing it again changes nothing (clients normalize before the
-// daemon normalizes again). The seeds cover every table case, including
-// the inputs earlier fuzzing found.
+// daemon normalizes again). The seeds are every input of the Normalize
+// case tables, plus inputs earlier fuzzing found that no table has
+// verbatim.
 func FuzzNormalize(f *testing.F) {
-	for _, seed := range []string{
-		"https://example.com/article",
-		"HTTPS://Example.COM:443/Article#section1",
-		"https://example.com/x?utm_source=a&id=1",
-		"https://example.com/x?b=2&a=1",
-		"https://example.com/x?a=1;b=2",
-		"https://example.com/x?ref=main&x=1",
-		"https://example.com/x?flag",
-		"https://example.com",
-		"https://example.com?x=1",
-		"https://example.com/x?q=%zz&utm_source=a",
-		"https://example.com/x?q=a%20b",
-		"https://user:pass@example.com/x",
-		"https://[::1]:443/x",
-		"https://[::1]:8443/x",
-		"https://0000000::",
-		"https://youtu.be/dQw4w9WgXcQ?si=abc",
-		"https://www.youtube.com/watch?v=abc%26list%3Dx",
-		"https://www.youtube.com/watch?v=ab%20cd",
-		"http://Youtu.Be/0&0",
-		"http://Youtu.Be/&",
+	for _, tc := range normalizeCases {
+		f.Add(tc.in)
+	}
+	for _, tc := range youTubeCases {
+		f.Add(tc.in)
+	}
+	for _, tc := range invalidYouTubeIDCases {
+		f.Add(tc.in)
+	}
+	for _, tc := range invalidURLCases {
+		f.Add(tc.in)
+	}
+	for _, raw := range []string{
 		"http://0?%\x82\x82\x82\x82 #",
 		"http://0?00&0&0&0&0&0&0&0&0&0&0&0&0&0&0&\x9a0%",
-		"https:example.com/x",
-		"https:///x",
-		"javascript:alert(1)",
-		"file:///etc/passwd",
 	} {
-		f.Add(seed)
+		f.Add(raw)
 	}
 	f.Fuzz(func(t *testing.T, raw string) {
 		out, err := Normalize(raw)
