@@ -104,13 +104,16 @@ func TestNative_PageLevelVerdictsAreNotHostCached(t *testing.T) {
 	for pageName, page := range pages {
 		for _, mode := range allJinaModes {
 			t.Run(pageName+"/jina "+string(mode), func(t *testing.T) {
-				var originHits atomic.Int32
+				var aHits, bHits atomic.Int32
 				var other string
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					originHits.Add(1)
 					switch r.URL.Path {
 					case "/a":
+						aHits.Add(1)
 						page(w, r, other)
+					case "/b":
+						bHits.Add(1)
+						_, _ = w.Write([]byte(article))
 					default:
 						_, _ = w.Write([]byte(article))
 					}
@@ -126,6 +129,8 @@ func TestNative_PageLevelVerdictsAreNotHostCached(t *testing.T) {
 				res, err := n.Fetch(context.Background(), srv.URL+"/b")
 				require.NoError(t, err, "a page-level verdict must not fail the rest of the host")
 				assert.Equal(t, "readability", res.Meta["via"])
+				assert.Equal(t, int32(1), aHits.Load())
+				assert.Equal(t, int32(1), bHits.Load(), "/b must reach the origin")
 			})
 		}
 	}
