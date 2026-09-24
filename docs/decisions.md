@@ -1787,7 +1787,9 @@ database" true, and that is the assumption the queue relies on.
   any worker runs, each pool's `Worker.RecoverOrphans` requeues its kinds'
   orphans with the used attempt kept. An orphan with no attempts left is
   failed instead, and its kind's permanent-failure hook runs, so the
-  document goes `failed` rather than staying `pending`.
+  document goes `failed` rather than staying `pending`. The hook runs on
+  the detached context too: the job is already committed as failed, so a
+  stop that lands mid-startup mustn't skip it.
 - A panic in a handler or hook is recovered and logged with its stack. The
   job fails permanently with `last_error` starting `panic:`, and the
   worker moves on to the next job.

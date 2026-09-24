@@ -288,3 +288,44 @@ func TestWorker_RecoverOrphans(t *testing.T) {
 
 	assert.Equal(t, store.JobStatusRunning, getJob(t, deps.Queue, otherKind.ID).Status)
 }
+
+// shutdownAfterRecovery is a queue whose RecoverOrphans is followed at once
+// by a shutdown signal, as when `curio daemon stop` catches a daemon that is
+// still starting.
+type shutdownAfterRecovery struct {
+	store.JobQueue
+	shutdown context.CancelFunc
+}
+
+func (q shutdownAfterRecovery) RecoverOrphans(ctx context.Context, kinds []string) ([]*store.Job, int, error) {
+	defer q.shutdown()
+	return q.JobQueue.RecoverOrphans(ctx, kinds)
+}
+
+// TestWorker_RecoverOrphans_HooksOutliveShutdown: once an exhausted orphan is
+// committed as failed, its document is failed too, even if shutdown begins
+// in between; otherwise the document would stay pending with no job.
+func TestWorker_RecoverOrphans_HooksOutliveShutdown(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/crashes-the-daemon",
+		ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Upsert(context.Background(), doc))
+	payload, err := json.Marshal(FetchPayload{DocumentID: doc.ID})
+	require.NoError(t, err)
+	orphan := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload,
+		Status: store.JobStatusRunning, Attempts: 5}
+	require.NoError(t, deps.Queue.Enqueue(context.Background(), orphan))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewWorker(shutdownAfterRecovery{JobQueue: deps.Queue, shutdown: cancel}, WorkerOptions{Log: quietLog})
+	w.Register(store.JobKindFetch, FetchHandler(deps))
+	w.OnPermanentFailure(store.JobKindFetch, MarkDocFailed(deps))
+	require.NoError(t, w.RecoverOrphans(ctx))
+
+	require.Error(t, ctx.Err(), "shutdown had begun when the hook ran")
+	assert.Equal(t, store.JobStatusFailed, getJob(t, deps.Queue, orphan.ID).Status)
+	got, err := deps.Documents.GetByID(context.Background(), doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateFailed, got.State)
+}

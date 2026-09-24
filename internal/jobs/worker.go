@@ -110,8 +110,12 @@ func (w *Worker) RecoverOrphans(ctx context.Context) error {
 		w.log.Info("recovered jobs orphaned by the previous daemon",
 			"kinds", w.kinds(), "requeued", requeued, "failed", len(failed))
 	}
+	// Those jobs are committed as failed, so their hooks have to run even if
+	// shutdown begins now: a document skipped here stays pending with no job.
 	for _, job := range failed {
-		w.runPermFailHook(ctx, w.jobLog(job), job, errOrphanExhausted)
+		bctx, cancel := bookkeepingContext(ctx)
+		w.runPermFailHook(bctx, w.jobLog(job), job, errOrphanExhausted)
+		cancel()
 	}
 	return nil
 }
