@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -553,6 +554,55 @@ func TestNative_RetryAfterHTTPDate(t *testing.T) {
 	var se *HTTPStatusError
 	require.ErrorAs(t, err, &se)
 	assert.Equal(t, 90*time.Second, se.RetryAfter)
+}
+
+// TestNative_ErrorAnswerKeepsConnection: a short error page is read to its
+// end before the body is closed, so the next request to that server reuses
+// the connection; on the origin path with both backends, and on Jina's
+// retries.
+func TestNative_ErrorAnswerKeepsConnection(t *testing.T) {
+	errorPage := strings.Repeat("<p>Internal error.</p>", 50)
+	serve := func(t *testing.T, h http.HandlerFunc) (srv *httptest.Server, conns *atomic.Int32) {
+		t.Helper()
+		conns = new(atomic.Int32)
+		srv = httptest.NewUnstartedServer(h)
+		srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				conns.Add(1)
+			}
+		}
+		srv.Start()
+		t.Cleanup(srv.Close)
+		return srv, conns
+	}
+
+	for _, backend := range []string{"chrome", "stock"} {
+		t.Run("origin "+backend, func(t *testing.T) {
+			srv, conns := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(errorPage))
+			})
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
+			for _, path := range []string{"/a", "/b", "/c"} {
+				_, err := n.Fetch(context.Background(), srv.URL+path)
+				require.Error(t, err)
+			}
+			assert.Equal(t, int32(1), conns.Load())
+		})
+	}
+
+	t.Run("jina retries", func(t *testing.T) {
+		origin := serveThinPage(t)
+		defer origin.Close()
+		jina, conns := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(errorPage))
+		})
+		n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), newFakeClock())
+		_, err := n.Fetch(context.Background(), origin.URL)
+		require.Error(t, err)
+		assert.Equal(t, int32(1), conns.Load())
+	})
 }
 
 // unpaced strips n's waits for tests: an unlimited Jina limiter, and fc

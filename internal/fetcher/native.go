@@ -396,6 +396,7 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	defer resp.body.Close()
 
 	if resp.statusCode < 200 || resp.statusCode >= 300 {
+		discardErrorBody(resp.body)
 		return nil, n.statusFailure(resp)
 	}
 
@@ -500,6 +501,18 @@ func (n *Native) statusFailure(resp *fetchResponse) error {
 		return fmt.Errorf("native: %w", se)
 	}
 	return statusError(se.StatusCode, fmt.Errorf("native: %w", se))
+}
+
+// errorBodyDrain is how much of an error answer's body is read before it
+// is closed. An error page that fits is read to its end, which lets the
+// transport reuse the connection; a bigger one isn't worth downloading.
+const errorBodyDrain = 4 << 10
+
+// discardErrorBody reads and drops up to errorBodyDrain bytes of an error
+// answer's body. Only connection reuse depends on it, so a failed read
+// changes nothing and isn't reported.
+func discardErrorBody(body io.Reader) {
+	_, _ = io.CopyN(io.Discard, body, errorBodyDrain)
 }
 
 // errSiteLoginWall is the login wall a whole site sits behind: the request
@@ -781,6 +794,7 @@ func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 	defer resp.body.Close()
 
 	if resp.statusCode < 200 || resp.statusCode >= 300 {
+		discardErrorBody(resp.body)
 		se := &HTTPStatusError{StatusCode: resp.statusCode, URL: resp.finalURL.String()}
 		se.RetryAfter, _ = parseRetryAfter(resp.header, n.clock.now())
 		return nil, fmt.Errorf("jina: %w", se)
