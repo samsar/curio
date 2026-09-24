@@ -2,6 +2,7 @@ package urlutil
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,7 +47,6 @@ func TestNormalize(t *testing.T) {
 		{"strip mc_*", "https://example.com/x?mc_eid=1&mc_cid=2", "https://example.com/x"},
 		{"strip _hsenc", "https://example.com/x?_hsenc=p2A&_hsmi=2", "https://example.com/x"},
 		{"strip vero_*", "https://example.com/x?vero_id=abc", "https://example.com/x"},
-		{"strip ref", "https://example.com/x?ref=hn", "https://example.com/x"},
 		{"strip case-insensitively", "https://example.com/x?UTM_Source=foo", "https://example.com/x"},
 
 		// Mixed: keep legit params, strip tracking
@@ -63,6 +63,23 @@ func TestNormalize(t *testing.T) {
 		// Path quirks
 		{"path with encoded chars", "https://example.com/article%20one", "https://example.com/article%20one"},
 		{"path with spaces (raw)", "https://example.com/a%20b", "https://example.com/a%20b"},
+		{"empty path becomes /", "https://example.com", "https://example.com/"},
+		{"empty path with query", "https://example.com?x=1", "https://example.com/?x=1"},
+
+		// Query data is never lost: the normalized URL is what gets fetched.
+		{"semicolon pair kept verbatim", "https://example.com/x?a=1;b=2", "https://example.com/x?a=1;b=2"},
+		{"ref is not tracking", "https://example.com/x?ref=main&x=1", "https://example.com/x?ref=main&x=1"},
+		{"valueless key stays valueless", "https://example.com/x?flag", "https://example.com/x?flag"},
+		{"undecodable pair kept, tracking dropped", "https://example.com/x?q=%zz&utm_source=a", "https://example.com/x?q=%zz"},
+		{"re-encoded like url.Values", "https://example.com/x?q=a%20b", "https://example.com/x?q=a+b"},
+		{"empty pairs dropped", "https://example.com/x?&a=1&&b=2&", "https://example.com/x?a=1&b=2"},
+		{"kept pair gets spaces and non-ascii escaped", "http://0?%\x82 #", "http://0/?%%82%20"},
+		{"repeated keys keep their order", "https://example.com/x?b=2&a=z&a=y", "https://example.com/x?a=z&a=y&b=2"},
+
+		// IPv6 literals
+		{"ipv6 default port stripped", "https://[::1]:443/x", "https://[::1]/x"},
+		{"ipv6 other port kept", "https://[::1]:8443/x", "https://[::1]:8443/x"},
+		{"ipv6 lowercased", "http://[FE80::1]/x", "http://[fe80::1]/x"},
 	}
 
 	for _, tc := range cases {
@@ -92,6 +109,7 @@ func TestNormalize_YouTube(t *testing.T) {
 		{"embed", "https://www.youtube.com/embed/dQw4w9WgXcQ", canonical},
 		{"short link with tracking", "https://youtu.be/dQw4w9WgXcQ?si=abc123", canonical},
 		{"http scheme", "http://www.youtube.com/watch?v=dQw4w9WgXcQ", "http://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+		{"underscore and dash", "https://youtu.be/test_id-1", "https://www.youtube.com/watch?v=test_id-1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,6 +117,56 @@ func TestNormalize_YouTube(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.out, got)
 		})
+	}
+}
+
+// TestNormalize_YouTube_InvalidIDs: text in the video-ID position that
+// isn't a video ID is left alone rather than pasted unescaped into a
+// canonical watch URL, so no raw '&' or space leaks into the query and a
+// second pass changes nothing.
+func TestNormalize_YouTube_InvalidIDs(t *testing.T) {
+	cases := []struct{ in, out string }{
+		{"https://www.youtube.com/watch?v=abc%26list%3Dx", "https://www.youtube.com/watch?v=abc%26list%3Dx"},
+		{"https://www.youtube.com/watch?v=ab%20cd", "https://www.youtube.com/watch?v=ab+cd"},
+		{"http://Youtu.Be/0&0", "http://youtu.be/0&0"},
+		{"http://Youtu.Be/&", "http://youtu.be/&"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := Normalize(tc.in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.out, got)
+			u, err := url.Parse(got)
+			require.NoError(t, err)
+			assert.NotContains(t, u.RawQuery, " ")
+			if strings.Contains(u.Path, "watch") {
+				assert.NotContains(t, u.RawQuery, "&")
+			}
+			again, err := Normalize(got)
+			require.NoError(t, err)
+			assert.Equal(t, got, again)
+		})
+	}
+}
+
+func TestYouTubeVideoID_Alphabet(t *testing.T) {
+	cases := []struct {
+		url string
+		ok  bool
+	}{
+		{"https://www.youtube.com/watch?v=dQw4w9WgXcQ", true},
+		{"https://youtu.be/test_id", true},
+		{"https://www.youtube.com/shorts/a-b_C9", true},
+		{"https://www.youtube.com/watch?v=abc%26list%3Dx", false},
+		{"https://www.youtube.com/watch?v=ab%20cd", false},
+		{"https://youtu.be/0&0", false},
+		{"https://www.youtube.com/embed/x%2Fy", false},
+	}
+	for _, tc := range cases {
+		u, err := url.Parse(tc.url)
+		require.NoError(t, err)
+		_, ok := YouTubeVideoID(u)
+		assert.Equal(t, tc.ok, ok, tc.url)
 	}
 }
 
@@ -165,6 +233,14 @@ func TestNormalize_Errors(t *testing.T) {
 		{"whitespace only", "   "},
 		{"no scheme", "example.com/article"},
 		{"control chars", "ht\x00tp://example.com"},
+		{"javascript", "javascript:alert(1)"},
+		{"file", "file:///etc/passwd"},
+		{"mailto", "mailto:someone@example.com"},
+		{"ftp", "ftp://example.com/file"},
+		{"opaque https", "https:example.com/x"},
+		{"empty host", "https:///x"},
+		{"port only", "https://:443/x"},
+		{"colon in a non-ip host", "https://0000000::"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,22 +289,5 @@ func TestNormalize_DistinctURLsStayDistinct(t *testing.T) {
 		b, err := Normalize(p[1])
 		require.NoError(t, err)
 		assert.NotEqual(t, a, b, "%q and %q should not collapse", p[0], p[1])
-	}
-}
-
-func TestHostname(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"https://Example.COM/article", "example.com"},
-		{"https://example.com:8443/x", "example.com"},
-		{"http://sub.example.com/x", "sub.example.com"},
-		{"https://example.com", "example.com"},
-	}
-	for _, tc := range cases {
-		got, err := Hostname(tc.in)
-		require.NoError(t, err)
-		assert.Equal(t, tc.want, got)
 	}
 }

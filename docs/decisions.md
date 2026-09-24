@@ -1236,6 +1236,10 @@ shared between the normalizer and the fetcher.
 canonicalized — they don't have a video ID and are rejected by the
 YouTube fetcher with a `PermanentError`.
 
+**Revised:** only IDs matching `^[A-Za-z0-9_-]+$` are canonicalized; the
+ID used to be pasted into the query unescaped. See "URL normalization:
+fetch-equivalent and idempotent" below.
+
 ---
 
 ## GitHub issues, PRs, and wiki pages
@@ -2141,4 +2145,55 @@ instead of returning an error. Failing would spend job attempts on our own
 throttling. Only an upstream cooldown longer than the inline cap fails
 fast, because sleeping it out would hold a fetch worker. `JobQueue` can't
 take a delay yet, so the hint stays on the error.
+
+---
+
+## URL normalization: fetch-equivalent and idempotent
+
+**Decision:** `urlutil.Normalize` output is both the dedup key and the URL
+the fetcher requests, so every rule keeps the URL pointing at the same
+resource, and normalizing twice changes nothing.
+
+- Only absolute `http`/`https` URLs with a host are accepted; anything
+  else is `ErrInvalidURL`. That covers `POST /v1/bookmarks` (400), the
+  import endpoint (counted under its filter reasons) and MCP, which goes
+  through the API.
+- Host: lowercased; IPv6 literals keep their brackets; a host containing
+  `:` must be an IP literal. The default port is dropped. An empty path
+  becomes `/`. The fragment is dropped.
+- Query: split on `&` only. Empty pairs and tracking parameters are
+  dropped. Well-formed pairs are re-encoded exactly as `url.Values.Encode`
+  writes them. A pair that doesn't decode, or contains `;`, is kept as is,
+  with only its spaces and non-ASCII bytes percent-encoded the way a
+  browser sends them. A key without `=` stays without one. Pairs are
+  stable-sorted by decoded key.
+- `ref` is no longer a tracking parameter: it is also a branch or version
+  selector.
+- YouTube URLs are canonicalized only when the ID matches
+  `^[A-Za-z0-9_-]+$`; the YouTube fetcher rejects other IDs permanently.
+- `FuzzNormalize` asserts that every accepted output is an http(s) URL
+  with a host and a fixed point of `Normalize`.
+
+**Why:** the old normalizer dropped data and wasn't idempotent. `?a=1;b=2`
+lost its whole query and `?q=%zz` lost that pair, because `url.Query()`
+discards what it can't parse. `?ref=main` lost the branch, and `?flag`
+became `?flag=`. `v=abc%26list%3Dx` was pasted unescaped into the watch
+URL, and a second pass shortened it again. `https://[::1]:443/x` lost its
+brackets. `javascript:`, `file:`, `mailto:`, `https:example.com/x` and
+`https:///x` were all accepted, so `curio add` created a document whose
+fetch failed five times. The CLI importers normalize before the daemon
+does it again, so every non-idempotent step split one bookmark into two
+documents.
+
+**No original-URL column:** after these rules the stored URL requests the
+same resource as the input. The two differ only in fragment, default
+port, the case of scheme and host, parameter order, canonical
+percent-encoding and tracking parameters, none of which change what a
+server returns. So there is no schema change.
+
+**One-time key change:** a few URL shapes normalize differently now: a
+bare origin (`https://example.com` → `https://example.com/`), valueless
+parameters, queries with `;` or undecodable pairs, and `ref=`. A bookmark
+of one of those shapes that is imported again after the upgrade creates a
+second document under the new key. Every other key is unchanged.
 

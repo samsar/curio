@@ -297,3 +297,12 @@ func countOccurrences(s, sub string) int {
 	}
 	return count
 }
+
+// TestYouTubeFetch_InvalidVideoIDIsPermanent: text in the video-ID position
+// that isn't a video ID is never handed to yt-dlp.
+func TestYouTubeFetch_InvalidVideoIDIsPermanent(t *testing.T) {
+	yt := NewYouTube(YouTubeOptions{Bin: "yt-dlp-must-not-run"})
+	_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=abc%26list%3Dx")
+	var pe *PermanentError
+	require.ErrorAs(t, err, &pe)
+}

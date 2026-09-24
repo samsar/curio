@@ -49,11 +49,10 @@ const (
 // Indexable applies the import-time URL filter rules. Returns (true, "")
 // if the URL is good to bookmark + fetch, or (false, reason) if not.
 //
-// Lives here rather than urlutil because the rules are import-specific:
-// a manually-added bookmark via API could still in principle reference a
-// file:// path (debatable), but bulk-importing them from browser data
-// would surface thousands of local file references that aren't useful
-// to fetch and index.
+// urlutil.Normalize already refuses anything but http(s) URLs with a host,
+// for every entry point. This lives here for the reasons: bulk imports
+// report how many URLs were skipped and why (bookmarklets, local files,
+// browser pages), and that breakdown is import-specific.
 func Indexable(rawURL string) (bool, FilterReason) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
