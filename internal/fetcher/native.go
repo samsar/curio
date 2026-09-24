@@ -40,7 +40,7 @@ type Native struct {
 	jinaFallback      bool
 	jinaBaseURL       string // override for tests
 	jinaAPIKey        string
-	jinaLimiter       *rate.Limiter
+	jinaLimiter       rateLimiter
 	jinaCooldown      cooldown
 	deadLinkDetection bool
 	log               *slog.Logger
@@ -746,15 +746,12 @@ func jinaBackoff(attempt int) time.Duration {
 	return time.Duration(1<<attempt) * time.Second
 }
 
-// awaitJina paces a Jina call: the shared limiter first, then any cooldown
-// a 429 left, sat out inline up to maxInlineJinaWait. A longer cooldown
-// fails at once, without a request, with a retryable 429 carrying the time
-// left.
+// awaitJina paces a Jina call through the shared limiter and cooldown (see
+// pace), sitting out a cooldown a 429 left when it ends within
+// maxInlineJinaWait. A longer one fails at once, without a request, with a
+// retryable 429 carrying the time left.
 func (n *Native) awaitJina(ctx context.Context) error {
-	if err := n.jinaLimiter.Wait(ctx); err != nil {
-		return fmt.Errorf("jina: rate limiter: %w", err)
-	}
-	left, err := n.jinaCooldown.wait(ctx, n.clock, maxInlineJinaWait)
+	left, err := pace(ctx, n.jinaLimiter, &n.jinaCooldown, n.clock, maxInlineJinaWait)
 	if err != nil {
 		return fmt.Errorf("jina: %w", err)
 	}

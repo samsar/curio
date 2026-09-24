@@ -25,28 +25,123 @@ func jinaArticleBody() string {
 	return jinaArticle + strings.Repeat("Article text rendered by Jina. ", 20)
 }
 
-// TestCooldown_Wait: a short cooldown is slept through the clock, a long
-// one is reported without sleeping, and an expired one costs nothing.
-func TestCooldown_Wait(t *testing.T) {
-	fc := newFakeClock()
-	var c cooldown
+// gatedLimiter is a rateLimiter that holds every caller until the test
+// lets it through, so a test can queue callers in the limiter and decide
+// who goes when.
+type gatedLimiter struct {
+	queued chan struct{} // one receive per caller that started waiting
+	tokens chan struct{}
+}
 
-	left, err := c.wait(t.Context(), fc.clock(), time.Minute)
-	require.NoError(t, err)
-	assert.Zero(t, left)
+func newGatedLimiter(maxQueued int) *gatedLimiter {
+	return &gatedLimiter{queued: make(chan struct{}, maxQueued), tokens: make(chan struct{})}
+}
 
-	c.extend(fc.now(), 10*time.Second)
-	c.extend(fc.now(), 5*time.Second) // never shortens
-	left, err = c.wait(t.Context(), fc.clock(), time.Minute)
-	require.NoError(t, err)
-	assert.Zero(t, left)
-	assert.Equal(t, []time.Duration{10 * time.Second}, fc.slept())
+func (l *gatedLimiter) Wait(ctx context.Context) error {
+	select {
+	case l.queued <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-l.tokens:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
-	c.extend(fc.now(), 2*time.Minute)
-	left, err = c.wait(t.Context(), fc.clock(), time.Minute)
-	require.NoError(t, err)
-	assert.Equal(t, 2*time.Minute, left)
-	assert.Len(t, fc.slept(), 1, "a cooldown over the inline cap is not slept")
+// grant lets one waiting caller through.
+func (l *gatedLimiter) grant() { l.tokens <- struct{}{} }
+
+// open lets every caller through from now on.
+func (l *gatedLimiter) open() { close(l.tokens) }
+
+// awaitQueued blocks until n more callers have started waiting.
+func (l *gatedLimiter) awaitQueued(t *testing.T, n int) {
+	t.Helper()
+	hung := time.After(10 * time.Second)
+	for range n {
+		select {
+		case <-l.queued:
+		case <-hung:
+			t.Fatalf("expected %d callers queued in the limiter", n)
+		}
+	}
+}
+
+// TestPace: the cooldown is checked once the limiter grants a token, a
+// short one is slept through the clock and followed by a fresh token, a
+// long one is reported without sleeping, and an expired one costs nothing.
+func TestPace(t *testing.T) {
+	const maxInline = time.Minute
+
+	t.Run("no cooldown", func(t *testing.T) {
+		fc := newFakeClock()
+		lim := newGatedLimiter(4)
+		lim.open()
+		var c cooldown
+		left, err := pace(t.Context(), lim, &c, fc.clock(), maxInline)
+		require.NoError(t, err)
+		assert.Zero(t, left)
+		assert.Len(t, lim.queued, 1)
+		assert.Empty(t, fc.slept())
+	})
+
+	t.Run("short cooldown is slept, then queued for again", func(t *testing.T) {
+		fc := newFakeClock()
+		lim := newGatedLimiter(4)
+		lim.open()
+		var c cooldown
+		c.extend(fc.now(), 10*time.Second)
+		c.extend(fc.now(), 5*time.Second) // never shortens
+		left, err := pace(t.Context(), lim, &c, fc.clock(), maxInline)
+		require.NoError(t, err)
+		assert.Zero(t, left)
+		assert.Equal(t, []time.Duration{10 * time.Second}, fc.slept())
+		assert.Len(t, lim.queued, 2, "a caller that slept a cooldown out takes a fresh token")
+	})
+
+	t.Run("long cooldown is reported", func(t *testing.T) {
+		fc := newFakeClock()
+		lim := newGatedLimiter(4)
+		lim.open()
+		var c cooldown
+		c.extend(fc.now(), 2*time.Minute)
+		left, err := pace(t.Context(), lim, &c, fc.clock(), maxInline)
+		require.NoError(t, err)
+		assert.Equal(t, 2*time.Minute, left)
+		assert.Empty(t, fc.slept(), "a cooldown over the inline cap is not slept")
+	})
+
+	t.Run("cooldown that starts while queued", func(t *testing.T) {
+		fc := newFakeClock()
+		lim := newGatedLimiter(4)
+		var c cooldown
+		type result struct {
+			left time.Duration
+			err  error
+		}
+		done := make(chan result, 1)
+		go func() {
+			left, err := pace(t.Context(), lim, &c, fc.clock(), maxInline)
+			done <- result{left, err}
+		}()
+		lim.awaitQueued(t, 1)
+		c.extend(fc.now(), 2*time.Minute) // another caller's rate-limit answer
+		lim.grant()
+		res := <-done
+		require.NoError(t, res.err)
+		assert.Equal(t, 2*time.Minute, res.left)
+	})
+
+	t.Run("context ends while queued", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		var c cooldown
+		_, err := pace(ctx, newGatedLimiter(4), &c, newFakeClock().clock(), maxInline)
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 // TestHostGate: slots are per host, waits honor ctx, and entries go away

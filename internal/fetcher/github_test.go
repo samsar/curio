@@ -615,6 +615,54 @@ func TestGitHub_LongRetryAfterFailsFast(t *testing.T) {
 	assert.Empty(t, fc.slept(), "a long cooldown must not be slept inline")
 }
 
+// TestGitHub_CooldownHoldsQueuedCalls: calls already waiting in the shared
+// limiter when a rate-limit answer lands don't go out during the cooldown
+// it starts. With the cooldown checked before the limiter, every worker
+// queued for a token walked into the limit once it got one.
+func TestGitHub_CooldownHoldsQueuedCalls(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	const callers = 6
+	lim := newGatedLimiter(callers)
+	g := newTestGitHub(t, srv)
+	g.limiter = lim
+	fc := newFakeClock()
+	g.clock = fc.clock()
+
+	results := make(chan error, callers)
+	for i := range callers {
+		go func() {
+			_, err := g.Fetch(t.Context(), "https://github.com/owner/repo"+strconv.Itoa(i))
+			results <- err
+		}()
+	}
+	lim.awaitQueued(t, callers)
+	var errs []error
+	lim.grant() // one call goes out and is rate limited
+	errs = append(errs, <-results)
+	lim.open() // the rest get their tokens during the cooldown
+	for range callers - 1 {
+		errs = append(errs, <-results)
+	}
+
+	for _, err := range errs {
+		require.Error(t, err)
+		var pe *PermanentError
+		assert.False(t, errors.As(err, &pe), "rate limit must stay retryable: %v", err)
+		var se *HTTPStatusError
+		require.ErrorAs(t, err, &se)
+		assert.Equal(t, 600*time.Second, se.RetryAfter)
+	}
+	assert.Equal(t, int32(1), hits.Load(), "queued calls must not reach GitHub during the cooldown")
+	assert.Empty(t, fc.slept())
+}
+
 // TestGitHub_ForbiddenWithoutRateLimitIsPermanent: a 403 with no
 // rate-limit signal is a real permission answer.
 func TestGitHub_ForbiddenWithoutRateLimitIsPermanent(t *testing.T) {

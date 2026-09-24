@@ -31,7 +31,7 @@ type GitHub struct {
 	baseURL    string
 	rawBaseURL string // raw.githubusercontent.com, used for wiki pages
 	client     *http.Client
-	limiter    *rate.Limiter
+	limiter    rateLimiter
 	cooldown   cooldown // shared by every API call; see apiGet
 	maxBody    int64
 	clock      clock
@@ -496,11 +496,8 @@ var errRateLimited = errors.New("rate limited")
 // otherwise keep walking into the limit through the shared limiter.
 func (g *GitHub) apiGet(ctx context.Context, endpoint, accept string) ([]byte, error) {
 	for attempt := 1; ; attempt++ {
-		if err := g.awaitCooldown(ctx, endpoint); err != nil {
+		if err := g.awaitTurn(ctx, endpoint); err != nil {
 			return nil, err
-		}
-		if err := g.limiter.Wait(ctx); err != nil {
-			return nil, fmt.Errorf("github: rate limiter: %w", err)
 		}
 
 		body, err := g.doRequest(ctx, endpoint, accept)
@@ -517,11 +514,12 @@ func (g *GitHub) apiGet(ctx context.Context, endpoint, accept string) ([]byte, e
 	}
 }
 
-// awaitCooldown sits out the shared rate-limit cooldown when it ends within
+// awaitTurn paces one API call through the shared limiter and cooldown
+// (see pace), sitting out a cooldown that ends within
 // maxInlineRateLimitWait. A longer one fails at once, without a request,
 // with a retryable 429 carrying the time left.
-func (g *GitHub) awaitCooldown(ctx context.Context, endpoint string) error {
-	left, err := g.cooldown.wait(ctx, g.clock, maxInlineRateLimitWait)
+func (g *GitHub) awaitTurn(ctx context.Context, endpoint string) error {
+	left, err := pace(ctx, g.limiter, &g.cooldown, g.clock, maxInlineRateLimitWait)
 	if err != nil {
 		return fmt.Errorf("github: %w", err)
 	}

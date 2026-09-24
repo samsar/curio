@@ -2,6 +2,7 @@ package fetcher
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -30,8 +31,8 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 }
 
 // cooldown is a "blocked until" deadline shared by every caller of one
-// upstream. A rate-limit answer extends it, and every later call waits it
-// out first: the upstream's limit is per account or IP, so one worker's
+// upstream. A rate-limit answer extends it, and pace holds every later call
+// until it ends: the upstream's limit is per account or IP, so one worker's
 // 429 means the others would walk into the same wall. The zero value is
 // ready to use.
 type cooldown struct {
@@ -48,30 +49,40 @@ func (c *cooldown) extend(now time.Time, d time.Duration) {
 	}
 }
 
-// wait blocks until the cooldown is over, as long as that takes at most
-// maxInline. A longer cooldown returns at once with the time left, for the
-// caller to fail fast rather than hold a worker; the job queue's backoff
-// covers the rest.
-func (c *cooldown) wait(ctx context.Context, clk clock, maxInline time.Duration) (time.Duration, error) {
-	for {
-		left := c.remaining(clk.now())
-		if left <= 0 {
-			return 0, nil
-		}
-		if left > maxInline {
-			return left, nil
-		}
-		// Re-check afterwards: another caller may have extended it.
-		if err := clk.sleep(ctx, left); err != nil {
-			return 0, err
-		}
-	}
-}
-
 func (c *cooldown) remaining(now time.Time) time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return max(c.until.Sub(now), 0)
+}
+
+// rateLimiter paces calls to one upstream at a steady rate: a
+// *rate.Limiter in production, and in tests one that holds callers until
+// the test lets them through.
+type rateLimiter interface {
+	Wait(ctx context.Context) error
+}
+
+// pace clears one call to an upstream that lim paces and c cools down. The
+// cooldown is checked after lim grants a token, so a call that was already
+// queued in the limiter when a rate-limit answer arrived still sees it. A
+// caller that sits a cooldown out queues for a fresh token afterwards, so
+// the callers it held up resume at the limiter's pace rather than all at
+// once when it ends. A cooldown longer than maxInline returns the time left
+// without waiting, for the caller to fail fast rather than hold a worker;
+// the job queue's backoff covers the rest.
+func pace(ctx context.Context, lim rateLimiter, c *cooldown, clk clock, maxInline time.Duration) (time.Duration, error) {
+	for {
+		if err := lim.Wait(ctx); err != nil {
+			return 0, fmt.Errorf("rate limiter: %w", err)
+		}
+		left := c.remaining(clk.now())
+		if left == 0 || left > maxInline {
+			return left, nil
+		}
+		if err := clk.sleep(ctx, left); err != nil {
+			return 0, err
+		}
+	}
 }
 
 // hostGate bounds in-flight requests per host. A bulk import queues many

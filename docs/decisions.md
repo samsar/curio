@@ -2011,6 +2011,12 @@ errors pasted whole response bodies into `jobs.last_error`.
   retryable `*HTTPStatusError{429}` whose `RetryAfter` is the time left,
   and the job queue's backoff covers the rest. The call that got the long
   `Retry-After` fails the same way. Still at most 3 attempts per call.
+- The cooldown is checked after the shared limiter grants a call its
+  token, not before. Workers already queued in the limiter when the
+  rate-limit answer arrives would otherwise pass a check made before the
+  answer and then send their requests into the limit: 6 of 6 did in a
+  probe. A call that sat a cooldown out queues for a fresh token, so the
+  held-up calls resume at the limiter's pace instead of all at once.
 - A README or comment thread that doesn't exist (404) is left out of the
   document. Any other failure of those calls (5xx, a rate limit, a
   timeout) fails the fetch retryably. The README is a repo document's
@@ -2153,7 +2159,10 @@ Redirects to any other host are still flagged, and never host-cached.
   at once, without a request, as a retryable `*HTTPStatusError{429}`
   whose `RetryAfter` is the time left. The host cache is never written
   for it. 5xx and transport errors keep the 2/4/8 s backoff, now through
-  the injectable clock, with 4 attempts in all.
+  the injectable clock, with 4 attempts in all. Limiter and cooldown are
+  combined the same way as GitHub's (`pace`): the cooldown is checked once
+  the token is granted, and a call that sat one out queues for a fresh
+  token.
 - `fetcher.native.jina_api_key` (or `CURIO_JINA_API_KEY`) is sent as
   `Authorization: Bearer <key>`, and never appears in logs or errors.
 - At most 2 origin requests per host are in flight
