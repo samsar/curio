@@ -1,9 +1,10 @@
 package fetcher
 
 import (
-	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -11,9 +12,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/urlutil"
 )
 
@@ -21,13 +24,18 @@ type YouTubeOptions struct {
 	Bin      string
 	Timeout  time.Duration
 	SubLangs string
-	Log      *slog.Logger
+	// MaxConcurrent bounds how many yt-dlp processes run at once. Default
+	// 2: each one is slow and talks to YouTube, whose anti-bot measures
+	// punish bursts.
+	MaxConcurrent int
+	Log           *slog.Logger
 }
 
 type YouTube struct {
 	bin      string
 	timeout  time.Duration
 	subLangs string
+	slots    chan struct{} // one per running yt-dlp process
 	log      *slog.Logger
 }
 
@@ -38,6 +46,9 @@ func NewYouTube(opts YouTubeOptions) *YouTube {
 	if opts.SubLangs == "" {
 		opts.SubLangs = "en.*,en"
 	}
+	if opts.MaxConcurrent <= 0 {
+		opts.MaxConcurrent = 2
+	}
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
@@ -45,6 +56,7 @@ func NewYouTube(opts YouTubeOptions) *YouTube {
 		bin:      opts.Bin,
 		timeout:  opts.Timeout,
 		subLangs: opts.SubLangs,
+		slots:    make(chan struct{}, opts.MaxConcurrent),
 		log:      opts.Log,
 	}
 }
@@ -63,21 +75,30 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 
 	canonicalURL := "https://www.youtube.com/watch?v=" + videoID
 
+	// Queue for a process slot before the per-run timeout starts, so time
+	// spent waiting doesn't count against it.
+	select {
+	case y.slots <- struct{}{}:
+		defer func() { <-y.slots }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("youtube: wait for a yt-dlp slot: %w", ctx.Err())
+	}
+
 	tmpDir, err := os.MkdirTemp("", "curio-yt-*")
 	if err != nil {
 		return nil, fmt.Errorf("youtube: create temp dir: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	ctx, cancel := context.WithTimeout(ctx, y.timeout)
-	defer cancel()
-
 	meta, err := y.runYTDLP(ctx, canonicalURL, tmpDir)
 	if err != nil {
 		return nil, err
 	}
 
-	transcript, source := y.findTranscript(tmpDir)
+	transcript, source, err := findTranscript(tmpDir, meta)
+	if err != nil {
+		return nil, err
+	}
 
 	markdown := formatYouTubeMarkdown(meta, transcript)
 
@@ -86,10 +107,12 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	result := &Result{
 		Markdown:    markdown,
 		FinalURL:    canonicalURL,
-		ContentType: "video",
+		ContentType: store.ContentTypeVideo,
 		Title:       meta.Title,
 		Author:      meta.Channel,
 		PublishedAt: published,
+		// Without a transcript the document is only the description.
+		Partial: transcript == "",
 		Meta: map[string]any{
 			"via":               "yt-dlp",
 			"video_id":          videoID,
@@ -123,6 +146,10 @@ type ytdlpMeta struct {
 	ViewCount   int64    `json:"view_count"`
 	LikeCount   int64    `json:"like_count"`
 	Language    string   `json:"language"`
+	// Uploaded caption tracks by language. Only the keys matter: a
+	// downloaded <id>.<lang>.vtt whose language isn't listed here is
+	// YouTube's automatic track, which yt-dlp names the same way.
+	Subtitles map[string]json.RawMessage `json:"subtitles"`
 }
 
 func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlpMeta, error) {
@@ -136,22 +163,20 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlp
 		videoURL,
 	}
 
-	cmd := exec.CommandContext(ctx, y.bin, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		msg := extractYTDLPError(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		if isYTDLPPermanent(msg) {
+	stderr, err := runCapped(ctx, y.timeout, nil, y.bin, args...)
+	if err != nil {
+		msg := extractYTDLPError(stderr)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && isYTDLPPermanent(msg) {
 			return nil, &PermanentError{Err: fmt.Errorf("youtube: %s", msg)}
 		}
-		return nil, fmt.Errorf("youtube: yt-dlp: %s", msg)
+		return nil, toolError("youtube: yt-dlp", err, msg)
 	}
 
-	infoFiles, _ := filepath.Glob(filepath.Join(tmpDir, "*.info.json"))
+	infoFiles, err := filepath.Glob(filepath.Join(tmpDir, "*.info.json"))
+	if err != nil {
+		return nil, fmt.Errorf("youtube: find info.json: %w", err)
+	}
 	if len(infoFiles) == 0 {
 		return nil, fmt.Errorf("youtube: yt-dlp produced no info.json")
 	}
@@ -166,14 +191,6 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlp
 	}
 	return &meta, nil
 }
-
-// PermanentError signals the job system not to retry.
-type PermanentError struct {
-	Err error
-}
-
-func (e *PermanentError) Error() string { return e.Err.Error() }
-func (e *PermanentError) Unwrap() error { return e.Err }
 
 var permanentPatterns = []string{
 	"video unavailable",
@@ -190,15 +207,15 @@ var permanentPatterns = []string{
 // not found", impersonation warnings). Falls back to full stderr
 // if no ERROR lines are found.
 func extractYTDLPError(stderr string) string {
-	var errors []string
+	var errLines []string
 	for _, line := range strings.Split(stderr, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "ERROR:") {
-			errors = append(errors, trimmed)
+			errLines = append(errLines, trimmed)
 		}
 	}
-	if len(errors) > 0 {
-		return strings.Join(errors, "; ")
+	if len(errLines) > 0 {
+		return strings.Join(errLines, "; ")
 	}
 	return strings.TrimSpace(stderr)
 }
@@ -213,65 +230,69 @@ func isYTDLPPermanent(msg string) bool {
 	return false
 }
 
-func (y *YouTube) findTranscript(tmpDir string) (string, string) {
-	entries, err := os.ReadDir(tmpDir)
-	if err != nil {
-		return "", "none"
-	}
+// Transcript sources, recorded as the transcript_source meta value.
+const (
+	transcriptManual = "manual" // captions uploaded with the video
+	transcriptAuto   = "auto"   // YouTube's speech recognition
+	transcriptNone   = "none"
+)
 
-	// Prefer manual subs over auto-generated. Manual subs don't have
-	// the pattern ".en-orig" in the filename — yt-dlp writes them as
-	// "<id>.<lang>.vtt". Auto-generated ones are written alongside.
-	// When both --write-subs and --write-auto-subs are used, manual
-	// subs take precedence in the file naming.
-	var vttFiles []string
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".vtt") {
-			vttFiles = append(vttFiles, e.Name())
-		}
-	}
-	if len(vttFiles) == 0 {
-		return "", "none"
-	}
-
-	// Pick the best subtitle file. yt-dlp names them as:
-	// <id>.<lang>.vtt (manual) or <id>.<lang>.vtt (auto, when no manual exists)
-	// When both exist, we get both files. Prefer the shortest name
-	// (manual subs use simpler naming).
-	best := vttFiles[0]
-	for _, f := range vttFiles[1:] {
-		if len(f) < len(best) {
-			best = f
-		}
-	}
-
-	raw, err := os.ReadFile(filepath.Join(tmpDir, best))
-	if err != nil {
-		return "", "none"
-	}
-
-	transcript := parseVTT(raw)
-	if transcript == "" {
-		return "", "none"
-	}
-
-	source := "manual"
-	if len(vttFiles) > 1 {
-		source = "manual"
-	}
-	// If the only file has auto-generation markers, it's auto-generated
-	if len(vttFiles) == 1 && isAutoGenerated(raw) {
-		source = "auto"
-	}
-
-	return transcript, source
+// subtitleFile is one <id>.<lang>.vtt yt-dlp downloaded.
+type subtitleFile struct {
+	name   string
+	lang   string
+	source string // transcriptManual or transcriptAuto
 }
 
-func isAutoGenerated(vttContent []byte) bool {
-	// Auto-generated VTT files from YouTube typically contain
-	// <c> tags for word-level timing and "align:start" positioning.
-	return bytes.Contains(vttContent, []byte("<c>")) ||
-		bytes.Contains(vttContent, []byte("align:start"))
+// findTranscript picks the best caption file yt-dlp wrote into tmpDir and
+// returns its text and source. Uploaded captions beat automatic ones, then
+// the shortest language tag wins ("en" over "en-orig"), then the
+// lexicographically first. The two kinds share the <id>.<lang>.vtt naming,
+// so which is which comes from info.json. A file that parses to nothing
+// falls through to the next. No usable file yields source "none".
+func findTranscript(tmpDir string, meta *ytdlpMeta) (transcript, source string, err error) {
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		return "", "", fmt.Errorf("youtube: list subtitles: %w", err)
+	}
+	var files []subtitleFile
+	for _, e := range entries {
+		base, ok := strings.CutSuffix(e.Name(), ".vtt")
+		if !ok {
+			continue
+		}
+		_, lang, _ := strings.Cut(base, ".")
+		src := transcriptAuto
+		if _, uploaded := meta.Subtitles[lang]; uploaded {
+			src = transcriptManual
+		}
+		files = append(files, subtitleFile{name: e.Name(), lang: lang, source: src})
+	}
+	slices.SortFunc(files, func(a, b subtitleFile) int {
+		return cmp.Or(
+			cmp.Compare(sourceRank(a.source), sourceRank(b.source)),
+			cmp.Compare(len(a.lang), len(b.lang)),
+			strings.Compare(a.lang, b.lang),
+		)
+	})
+
+	for _, f := range files {
+		raw, err := os.ReadFile(filepath.Join(tmpDir, f.name))
+		if err != nil {
+			return "", "", fmt.Errorf("youtube: read subtitles: %w", err)
+		}
+		if text := parseVTT(raw); text != "" {
+			return text, f.source, nil
+		}
+	}
+	return "", transcriptNone, nil
+}
+
+func sourceRank(source string) int {
+	if source == transcriptManual {
+		return 0
+	}
+	return 1
 }
 
 var (
@@ -381,18 +402,8 @@ func formatDuration(totalSeconds int) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-// IsYouTubeURL reports whether rawURL points to a YouTube video.
-func IsYouTubeURL(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	_, ok := urlutil.YouTubeVideoID(u)
-	return ok
-}
-
-// YouTubeHosts returns the set of hostnames the PatternDispatcher
-// should route to the YouTube fetcher.
+// YouTubeHosts lists the hostnames the built-in routing sends to the
+// YouTube fetcher.
 var YouTubeHosts = []string{
 	"youtube.com",
 	"www.youtube.com",

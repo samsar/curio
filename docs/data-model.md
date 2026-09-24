@@ -277,10 +277,16 @@ suggestions  (tenant_id, kind, payload JSON, created_at, dismissed_at)
 
 ## URL normalization
 
-Critical for dedup. The normalization function lowercases the host, strips
-fragments, removes common tracking params (`utm_*`, `fbclid`, `gclid`, ...),
-and sorts remaining query params. Implementation lives in
-`internal/url/normalize.go` (one place, one impl, tested exhaustively).
+Critical for dedup. The normalized URL is both the dedup key and the URL
+that gets fetched, so normalization never changes which resource it names,
+and applying it twice changes nothing. It accepts only http(s) URLs with a
+host, lowercases scheme and host, drops default ports and fragments, turns
+an empty path into `/`, removes common tracking params (`utm_*`, `fbclid`,
+`gclid`, ...) and sorts the remaining query params; query pairs it can't
+decode are kept rather than dropped. Implementation lives in
+`internal/urlutil/normalize.go` (one place, one impl, table-tested and
+fuzzed). See `docs/decisions.md` "URL normalization: fetch-equivalent and
+idempotent".
 
 ## On-disk content layout
 

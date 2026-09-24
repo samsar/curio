@@ -3,8 +3,12 @@ package fetcher
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -12,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 )
 
 // makeArticleHTML returns a reasonably article-shaped page so Readability
@@ -64,7 +69,7 @@ func TestNative_LoginWall_TooShort(t *testing.T) {
 }
 
 func TestNative_LoginWall_TitlePattern(t *testing.T) {
-	body := strings.Repeat("Some text here. ", 50) // > 500 chars to bypass length check
+	body := strings.Repeat("Some text here. ", 50) // > minArticleBytes to bypass length check
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`<html><head><title>Sign in to read this</title></head>
 			<body><article><h1>Sign in to read this</h1><p>` + body + `</p></article></body></html>`))
@@ -405,17 +410,23 @@ func TestSoft404TitleRE(t *testing.T) {
 	}
 }
 
-// TestNative_HostCache_HitIsPermanent: the first failure on a host is a
-// plain retryable error (it populates the cache); every fetch on that host
-// within the TTL short-circuits as a PermanentError carrying the same
-// sentinel plus a "(cached: …)" suffix, and never contacts the origin.
+// TestNative_HostCache_HitIsPermanent: a redirect onto the site's own
+// login page is a host-wide verdict. The first failure is a plain retryable
+// error (it populates the cache); every fetch on that host within the TTL
+// short-circuits as a PermanentError carrying the same sentinel plus a
+// "(cached: …)" suffix, and never contacts the origin.
 func TestNative_HostCache_HitIsPermanent(t *testing.T) {
 	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login", func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&hits, 1)
-		_, _ = w.Write([]byte(`<html><head><title>Login</title></head>
-			<body><article><p>Please sign in.</p></article></body></html>`))
-	}))
+		_, _ = w.Write([]byte(`<html><head><title>Log in</title></head><body><p>Please sign in.</p></body></html>`))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Redirect(w, r, "/login?next="+r.URL.Path, http.StatusFound)
+	})
+	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
@@ -426,7 +437,7 @@ func TestNative_HostCache_HitIsPermanent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrLoginWall)
 	var pe *PermanentError
 	assert.False(t, errors.As(err, &pe), "first failure must stay retryable: %v", err)
-	assert.Equal(t, int32(1), atomic.LoadInt32(&hits))
+	assert.Equal(t, int32(2), atomic.LoadInt32(&hits), "redirect + login page")
 
 	// Second attempt, same host, different path: served from the host
 	// cache, permanent, origin not contacted.
@@ -435,7 +446,7 @@ func TestNative_HostCache_HitIsPermanent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrLoginWall)
 	require.True(t, errors.As(err, &pe), "cache hit must be permanent: %v", err)
 	assert.Contains(t, err.Error(), "(cached:")
-	assert.Equal(t, int32(1), atomic.LoadInt32(&hits), "cache hit must not contact origin")
+	assert.Equal(t, int32(2), atomic.LoadInt32(&hits), "cache hit must not contact origin")
 }
 
 // Same contract for the anti-bot kind (HTTP 403 → ErrAntiBot).
@@ -460,4 +471,285 @@ func TestNative_HostCache_AntiBotHitIsPermanent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrAntiBot)
 	require.True(t, errors.As(err, &pe), "cached 403 must be permanent: %v", err)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&hits))
+}
+
+// TestNative_StatusMatrix pins how every class of origin status is
+// classified: anti-bot statuses are retryable and Jina-eligible, dead links
+// are permanent only with detection on, transient statuses are retryable,
+// and every other status is a deterministic answer that fails permanently.
+func TestNative_StatusMatrix(t *testing.T) {
+	cases := []struct {
+		status     int
+		detection  bool
+		permanent  bool
+		antiBot    bool
+		deadLink   bool
+		retryAfter string
+		wantAfter  time.Duration
+	}{
+		{status: http.StatusForbidden, antiBot: true},
+		{status: http.StatusServiceUnavailable, antiBot: true, retryAfter: "30", wantAfter: 30 * time.Second},
+		{status: http.StatusNotFound, detection: true, permanent: true, deadLink: true},
+		{status: http.StatusGone, detection: true, permanent: true, deadLink: true},
+		{status: http.StatusNotFound},
+		{status: http.StatusGone},
+		{status: http.StatusRequestTimeout},
+		{status: http.StatusMisdirectedRequest},
+		{status: http.StatusTooEarly},
+		{status: http.StatusTooManyRequests},
+		{status: http.StatusTooManyRequests, retryAfter: "120", wantAfter: 120 * time.Second},
+		{status: http.StatusInternalServerError},
+		{status: http.StatusBadGateway},
+		{status: http.StatusGatewayTimeout},
+		{status: 520},
+		{status: http.StatusBadRequest, permanent: true},
+		{status: http.StatusUnauthorized, permanent: true},
+		{status: http.StatusPaymentRequired, permanent: true},
+		{status: http.StatusMethodNotAllowed, permanent: true},
+		{status: http.StatusUnavailableForLegalReasons, permanent: true},
+		{status: http.StatusNotImplemented, permanent: true},
+		{status: 999, permanent: true},
+	}
+	for _, tc := range cases {
+		name := fmt.Sprintf("%d detection=%v retry-after=%q", tc.status, tc.detection, tc.retryAfter)
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, DeadLinkDetection: tc.detection})
+			_, err := n.Fetch(context.Background(), srv.URL+"/page")
+			require.Error(t, err)
+
+			var pe *PermanentError
+			assert.Equal(t, tc.permanent, errors.As(err, &pe), "permanent: %v", err)
+			assert.Equal(t, tc.antiBot, errors.Is(err, ErrAntiBot), "anti-bot: %v", err)
+			assert.Equal(t, tc.deadLink, errors.Is(err, ErrDeadLink), "dead link: %v", err)
+			var se *HTTPStatusError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, tc.status, se.StatusCode)
+			assert.Equal(t, srv.URL+"/page", se.URL)
+			assert.Equal(t, tc.wantAfter, se.RetryAfter)
+		})
+	}
+}
+
+// TestNative_RetryAfterHTTPDate: an HTTP-date Retry-After is measured
+// against the fetcher's clock, not the wall clock.
+func TestNative_RetryAfterHTTPDate(t *testing.T) {
+	fc := newFakeClock()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", fc.now().Add(90*time.Second).Format(http.TimeFormat))
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+	n.clock = fc.clock()
+	_, err := n.Fetch(context.Background(), srv.URL)
+	var se *HTTPStatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, 90*time.Second, se.RetryAfter)
+}
+
+// TestNative_ErrorAnswerKeepsConnection: a short error page is read to its
+// end before the body is closed, so the next request to that server reuses
+// the connection; on the origin path with both backends, and on Jina's
+// retries.
+func TestNative_ErrorAnswerKeepsConnection(t *testing.T) {
+	errorPage := strings.Repeat("<p>Internal error.</p>", 50)
+	serve := func(t *testing.T, h http.HandlerFunc) (srv *httptest.Server, conns *atomic.Int32) {
+		t.Helper()
+		conns = new(atomic.Int32)
+		srv = httptest.NewUnstartedServer(h)
+		srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+			if state == http.StateNew {
+				conns.Add(1)
+			}
+		}
+		srv.Start()
+		t.Cleanup(srv.Close)
+		return srv, conns
+	}
+
+	for _, backend := range []string{"chrome", "stock"} {
+		t.Run("origin "+backend, func(t *testing.T) {
+			srv, conns := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(errorPage))
+			})
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
+			for _, path := range []string{"/a", "/b", "/c"} {
+				_, err := n.Fetch(context.Background(), srv.URL+path)
+				require.Error(t, err)
+			}
+			assert.Equal(t, int32(1), conns.Load())
+		})
+	}
+
+	t.Run("jina retries", func(t *testing.T) {
+		origin := serveThinPage(t)
+		defer origin.Close()
+		jina, conns := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(errorPage))
+		})
+		n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), newFakeClock())
+		_, err := n.Fetch(context.Background(), origin.URL)
+		require.Error(t, err)
+		assert.Equal(t, int32(1), conns.Load())
+	})
+}
+
+// unpaced strips n's waits for tests: an unlimited Jina limiter, and fc
+// as the clock so backoffs and cooldowns are recorded instead of slept.
+func unpaced(n *Native, fc *fakeClock) *Native {
+	n.jinaLimiter = rate.NewLimiter(rate.Inf, 1)
+	n.clock = fc.clock()
+	return n
+}
+
+// thinPage is an origin answer the login-wall heuristic rejects as thin,
+// so Fetch falls back to Jina.
+const thinPage = `<html><body><p>nope</p></body></html>`
+
+func serveThinPage(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(thinPage))
+	}))
+}
+
+// TestNative_JinaTruncatedBodyIsRetryable: a Jina answer cut off mid-body
+// (Content-Length promised more, then the connection closed) is a
+// transport failure retried with backoff, never a short article.
+func TestNative_JinaTruncatedBodyIsRetryable(t *testing.T) {
+	source := serveThinPage(t)
+	defer source.Close()
+
+	var jinaHits atomic.Int32
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jinaHits.Add(1)
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer conn.Close()
+		body := "Title: Cut off\n\nMarkdown Content:\n" + strings.Repeat("partial body text ", 40)
+		fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(body)+10_000, body)
+		assert.NoError(t, buf.Flush())
+	}))
+	defer jina.Close()
+
+	fc := newFakeClock()
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	res, err := n.Fetch(context.Background(), source.URL)
+	require.Error(t, err)
+	assert.Nil(t, res)
+	var pe *PermanentError
+	assert.False(t, errors.As(err, &pe), "a truncated transfer must be retried: %v", err)
+	assert.Equal(t, int32(4), jinaHits.Load())
+	assert.Equal(t, []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}, fc.slept())
+}
+
+// TestNative_JinaBodyOverLimitIsPermanent: a Jina answer larger than the
+// body cap fails permanently on the first attempt.
+func TestNative_JinaBodyOverLimitIsPermanent(t *testing.T) {
+	source := serveThinPage(t)
+	defer source.Close()
+
+	var jinaHits atomic.Int32
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jinaHits.Add(1)
+		_, _ = w.Write([]byte("Title: Huge\n\nMarkdown Content:\n" + strings.Repeat("x", 2*testBodyLimit)))
+	}))
+	defer jina.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	n.rt = limitBodies(n.rt, testBodyLimit)
+	_, err := n.Fetch(context.Background(), source.URL)
+	var pe *PermanentError
+	require.ErrorAs(t, err, &pe)
+	assert.ErrorIs(t, err, ErrTooLarge)
+	assert.Equal(t, int32(1), jinaHits.Load())
+}
+
+// TestNative_EventStreamRejectedUpFront: text/event-stream never ends, so
+// it is refused on its Content-Type without reading the body.
+func TestNative_EventStreamRejectedUpFront(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: hello\n\n"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	n := NewNative(NativeOptions{Timeout: 30 * time.Second})
+	start := time.Now()
+	_, err := n.Fetch(context.Background(), srv.URL)
+	assert.Less(t, time.Since(start), 5*time.Second)
+	var pe *PermanentError
+	require.ErrorAs(t, err, &pe)
+	assert.Contains(t, err.Error(), "unsupported content type")
+}
+
+// fakeRT is a roundTripper answering from a function, for tests that need
+// to see exactly what the fetcher reads.
+type fakeRT func(target string) (*fetchResponse, error)
+
+func (fakeRT) name() string { return "fake" }
+func (f fakeRT) do(_ context.Context, target string, _ []header) (*fetchResponse, error) {
+	return f(target)
+}
+
+// countingReader is an endless body that counts the bytes handed out.
+type countingReader struct{ n atomic.Int64 }
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	r.n.Add(int64(len(p)))
+	return len(p), nil
+}
+
+// TestNative_PDFOverLimit: a PDF over the body cap skips local extraction
+// after reading at most one byte past the cap, then goes to Jina. With
+// Jina off it fails permanently.
+func TestNative_PDFOverLimit(t *testing.T) {
+	const limit = 4096
+	const jinaBase = "https://jina.test/"
+	for _, jinaOn := range []bool{true, false} {
+		t.Run(fmt.Sprintf("jina=%v", jinaOn), func(t *testing.T) {
+			origin := &countingReader{}
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: jinaOn, JinaBaseURL: jinaBase})
+			n.rt = limitBodies(fakeRT(func(target string) (*fetchResponse, error) {
+				u, err := url.Parse(target)
+				require.NoError(t, err)
+				if strings.HasPrefix(target, jinaBase) {
+					body := "Title: Big PDF\n\nMarkdown Content:\n" + strings.Repeat("Rendered PDF text. ", 20)
+					return &fetchResponse{statusCode: http.StatusOK, header: http.Header{}, finalURL: u,
+						body: io.NopCloser(strings.NewReader(body)), contentType: "text/plain"}, nil
+				}
+				return &fetchResponse{statusCode: http.StatusOK, header: http.Header{}, finalURL: u,
+					body: io.NopCloser(origin), contentType: "application/pdf"}, nil
+			}), limit)
+
+			res, err := n.Fetch(context.Background(), "https://example.com/big.pdf")
+			assert.LessOrEqual(t, origin.n.Load(), int64(limit+1), "must stop reading at the cap")
+			if !jinaOn {
+				var pe *PermanentError
+				require.ErrorAs(t, err, &pe)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "jina", res.Meta["via"])
+			assert.Equal(t, "pdf", res.ContentType)
+		})
+	}
 }

@@ -6,12 +6,23 @@
 //	https://example.com/Article?utm_source=twitter
 //	https://example.com/Article
 //
-// Normalize collapses these to a single canonical string by:
-//   - Lowercasing scheme and host (paths stay case-sensitive)
-//   - Stripping default ports (:80 for http, :443 for https)
-//   - Removing fragments (#...)
-//   - Removing common tracking query parameters (utm_*, fbclid, gclid, mc_*, ...)
-//   - Sorting remaining query parameters alphabetically by key
+// The normalized URL is also the URL curio fetches, so every step must
+// keep it pointing at the same resource, and normalizing twice must change
+// nothing (clients normalize before the daemon does it again). Normalize:
+//
+//   - accepts only absolute http(s) URLs with a host
+//   - lowercases scheme and host; IPv6 hosts keep their brackets
+//   - drops the default port (:80 for http, :443 for https)
+//   - turns an empty path into "/"
+//   - drops the fragment (#...)
+//   - rewrites YouTube video URLs to https://www.youtube.com/watch?v=<ID>
+//   - splits the query on '&' only, then drops empty pairs and tracking
+//     parameters (utm_*, fbclid, gclid, mc_*, ...), re-encodes well-formed
+//     pairs the way url.Values.Encode does, keeps pairs that don't decode
+//     or contain ';' as they are (only spaces and non-ASCII bytes get
+//     percent-encoded, as a browser would send them), keeps a key without
+//     '=' without one, and sorts pairs by decoded key (stable, so repeated
+//     keys keep their order)
 //
 // Paths, trailing slashes, and userinfo are preserved verbatim — many servers
 // distinguish those, and being too aggressive risks collapsing distinct
@@ -21,16 +32,23 @@ package urlutil
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
-// ErrInvalidURL is returned for empty, unparseable, or schemeless URLs.
+// ErrInvalidURL is returned for URLs curio can't fetch: empty, unparseable,
+// not http(s), or without a host.
 var ErrInvalidURL = errors.New("invalid url")
 
 // trackingParams is the exact-match list of query parameters to strip.
 // Prefix-based families (utm_*, mc_*, vero_*, _hs*) are handled separately.
+// Generic names that sites also use for content (ref: a branch, a version)
+// don't belong here: stripping them changes what is fetched.
 var trackingParams = map[string]struct{}{
 	"fbclid":         {},
 	"gclid":          {},
@@ -43,7 +61,6 @@ var trackingParams = map[string]struct{}{
 	"_ga":            {},
 	"_gl":            {},
 	"_gid":           {},
-	"ref":            {},
 	"ref_src":        {},
 	"ref_url":        {},
 	"oly_anon_id":    {},
@@ -66,8 +83,8 @@ var trackingParams = map[string]struct{}{
 	"piwik_kwd":      {},
 }
 
-// Normalize returns the canonical form of raw. It returns ErrInvalidURL if
-// the input is empty, malformed, or missing a scheme.
+// Normalize returns the canonical form of raw. It returns ErrInvalidURL
+// unless raw is an absolute http or https URL with a host.
 func Normalize(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -76,75 +93,136 @@ func Normalize(raw string) (string, error) {
 
 	u, err := url.Parse(trimmed)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidURL, err)
+		return "", fmt.Errorf("%w: %w", ErrInvalidURL, err)
 	}
-	if u.Scheme == "" {
-		return "", fmt.Errorf("%w: missing scheme: %s", ErrInvalidURL, raw)
-	}
-
-	// Lowercase scheme.
 	u.Scheme = strings.ToLower(u.Scheme)
-
-	// Lowercase host portion (not userinfo). url.URL.Host is "host:port" or "host".
-	if u.Host != "" {
-		hostname := strings.ToLower(u.Hostname())
-		port := u.Port()
-		if isDefaultPort(u.Scheme, port) {
-			port = ""
-		}
-		if port == "" {
-			u.Host = hostname
-		} else {
-			u.Host = hostname + ":" + port
-		}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("%w: not an http(s) url: %s", ErrInvalidURL, raw)
 	}
+	// "https:example.com/x" parses as an opaque URL and "https:///x" with an
+	// empty host; neither names a host to fetch from.
+	if u.Opaque != "" || u.Hostname() == "" {
+		return "", fmt.Errorf("%w: missing host: %s", ErrInvalidURL, raw)
+	}
+	host, err := canonicalHost(u)
+	if err != nil {
+		return "", err
+	}
+	u.Host = host
 
-	// Drop fragment.
+	if u.Path == "" {
+		u.Path = "/"
+	}
 	u.Fragment = ""
 	u.RawFragment = ""
 
 	// YouTube canonicalization: youtu.be/ID → youtube.com/watch?v=ID,
-	// and strip YouTube-specific tracking params.
+	// dropping every other parameter.
 	if id, ok := YouTubeVideoID(u); ok {
 		u.Host = "www.youtube.com"
 		u.Path = "/watch"
-		u.RawQuery = "v=" + id
-		u.Fragment = ""
-		u.RawFragment = ""
+		u.RawPath = ""
+		u.RawQuery = url.Values{"v": {id}}.Encode()
 		return u.String(), nil
 	}
 
-	// Filter and rebuild query (url.Values.Encode sorts keys alphabetically).
-	if u.RawQuery != "" {
-		q := u.Query()
-		for k := range q {
-			if isTracking(k) {
-				q.Del(k)
-			}
-		}
-		u.RawQuery = q.Encode()
-	}
-
+	u.RawQuery = canonicalQuery(u.RawQuery)
 	return u.String(), nil
 }
 
-// MustNormalize is Normalize that panics on error. Test helper.
-func MustNormalize(raw string) string {
-	out, err := Normalize(raw)
-	if err != nil {
-		panic(err)
+// canonicalHost returns u's host lowercased, without a default port, and
+// with IPv6 literals bracketed. A host containing ':' must be an IP
+// literal: url.Parse accepts "0000000::" as a host with an empty port.
+func canonicalHost(u *url.URL) (string, error) {
+	hostname := strings.ToLower(u.Hostname())
+	if strings.Contains(hostname, ":") && net.ParseIP(hostname) == nil {
+		return "", fmt.Errorf("%w: bad host %q", ErrInvalidURL, u.Host)
 	}
-	return out
+	port := u.Port()
+	if isDefaultPort(u.Scheme, port) {
+		port = ""
+	}
+	if port != "" {
+		return net.JoinHostPort(hostname, port), nil
+	}
+	if strings.Contains(hostname, ":") {
+		return "[" + hostname + "]", nil
+	}
+	return hostname, nil
 }
 
-// Hostname returns the lowercased hostname of raw (no port). Returns the
-// empty string if the URL has no host. Used by fetcher rules and filters.
-func Hostname(raw string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidURL, err)
+// queryPair is one '&'-separated query element: text is what goes into the
+// normalized URL, key what it sorts by.
+type queryPair struct {
+	key  string
+	text string
+}
+
+// canonicalQuery rebuilds a raw query per the package rules. Well-formed
+// pairs come out exactly as url.Values.Encode writes them, so dedup keys of
+// ordinary URLs are unchanged; anything it can't decode it keeps verbatim
+// rather than dropping it, since the query is part of what gets fetched.
+func canonicalQuery(raw string) string {
+	var pairs []queryPair
+	for part := range strings.SplitSeq(raw, "&") {
+		if part == "" {
+			continue
+		}
+		if p, ok := canonicalPair(part); ok {
+			pairs = append(pairs, p)
+		}
 	}
-	return strings.ToLower(u.Hostname()), nil
+	slices.SortStableFunc(pairs, func(a, b queryPair) int { return strings.Compare(a.key, b.key) })
+	texts := make([]string, len(pairs))
+	for i, p := range pairs {
+		texts[i] = p.text
+	}
+	return strings.Join(texts, "&")
+}
+
+// canonicalPair normalizes one query element; ok is false for a tracking
+// parameter, which is dropped. Spaces and non-ASCII bytes are escaped
+// first, so a pair kept as is sorts the same way on the next pass.
+func canonicalPair(part string) (queryPair, bool) {
+	part = escapeLoose(part)
+	rawKey, rawValue, hasValue := strings.Cut(part, "=")
+	key, keyErr := url.QueryUnescape(rawKey)
+	if keyErr != nil {
+		return queryPair{key: rawKey, text: part}, true
+	}
+	// Servers that split on ';' see more than one parameter here; keep
+	// them all, tracking key or not.
+	if strings.Contains(part, ";") {
+		return queryPair{key: key, text: part}, true
+	}
+	if isTracking(key) {
+		return queryPair{}, false
+	}
+	value, valueErr := url.QueryUnescape(rawValue)
+	switch {
+	case valueErr != nil:
+		return queryPair{key: key, text: part}, true
+	case !hasValue:
+		return queryPair{key: key, text: url.QueryEscape(key)}, true
+	}
+	return queryPair{key: key, text: url.QueryEscape(key) + "=" + url.QueryEscape(value)}, true
+}
+
+// escapeLoose percent-encodes the spaces and non-ASCII bytes of a query
+// pair, the way a browser sends them, and leaves everything else (malformed
+// '%' sequences included) untouched. It changes nothing a decoder sees, and
+// a raw space at the end of the URL would otherwise be trimmed by the next
+// Normalize.
+func escapeLoose(s string) string {
+	var b strings.Builder
+	for i := range len(s) {
+		if c := s[i]; c == ' ' || c >= utf8.RuneSelf {
+			fmt.Fprintf(&b, "%%%02X", c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 var youtubeHosts = map[string]bool{
@@ -154,27 +232,35 @@ var youtubeHosts = map[string]bool{
 	"youtu.be":        true,
 }
 
+// videoIDRE is the alphabet of YouTube video IDs. Anything else in the ID
+// position is not a video URL, and canonicalizing it would paste
+// unescaped text into the query.
+var videoIDRE = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 // YouTubeVideoID extracts the video ID from a parsed YouTube URL.
-// Returns ("", false) for non-YouTube URLs or playlist-only URLs.
+// Returns ("", false) for non-YouTube URLs, playlist-only URLs, and IDs
+// outside the video-ID alphabet.
 func YouTubeVideoID(u *url.URL) (string, bool) {
 	host := strings.ToLower(u.Hostname())
 	if !youtubeHosts[host] {
 		return "", false
 	}
+	id := youtubeIDCandidate(host, u)
+	return id, videoIDRE.MatchString(id)
+}
 
+// youtubeIDCandidate returns what sits in the video-ID position of a
+// YouTube URL, or "" when nothing does.
+func youtubeIDCandidate(host string, u *url.URL) string {
 	// youtu.be/ID
 	if host == "youtu.be" {
-		id := strings.TrimPrefix(u.Path, "/")
-		id = strings.SplitN(id, "/", 2)[0]
-		if id != "" {
-			return id, true
-		}
-		return "", false
+		id, _, _ := strings.Cut(strings.TrimPrefix(u.Path, "/"), "/")
+		return id
 	}
 
 	// youtube.com/watch?v=ID
 	if v := u.Query().Get("v"); v != "" {
-		return v, true
+		return v
 	}
 
 	// youtube.com/shorts/ID, /live/ID, /embed/ID, /v/ID
@@ -182,13 +268,10 @@ func YouTubeVideoID(u *url.URL) (string, bool) {
 	if len(parts) == 2 {
 		switch parts[0] {
 		case "shorts", "live", "embed", "v":
-			if parts[1] != "" {
-				return parts[1], true
-			}
+			return parts[1]
 		}
 	}
-
-	return "", false
+	return ""
 }
 
 // GitHubURLInfo describes the components of a parsed GitHub URL.

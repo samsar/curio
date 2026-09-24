@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,26 +48,115 @@ type header struct{ key, value string }
 // fetcher actually consumes.
 type fetchResponse struct {
 	statusCode  int
+	header      http.Header
 	body        io.ReadCloser
-	finalURL    *url.URL
-	contentType string // raw Content-Type header (may include "; charset=...")
+	finalURL    *url.URL // never nil
+	contentType string   // raw Content-Type header (may include "; charset=...")
 }
 
-// newRoundTripper builds the backend named by backend:
-//
-//   - "stock" / "go" / "net/http" → stockRT
-//   - "" / "chrome" / "chrome_<ver>" → chromeRT with that profile
-//     (empty and unknown-but-chrome-ish names use the latest known profile)
+// maxResponseBytes caps every response body a fetcher reads, measured
+// after decompression. Nothing a bookmark points at needs more. Without a
+// cap, a gzip bomb or a never-ending text/* stream is read into memory
+// until the client timeout, once per fetch worker.
+const maxResponseBytes = 32 << 20 // 32 MiB
+
+// limitedBody is a body that fails with ErrTooLarge once more than max
+// bytes have been read, rather than quietly ending there: a cut-off body
+// must never pass for a complete one.
+type limitedBody struct {
+	io.ReadCloser
+	max      int64
+	left     int64
+	exceeded bool
+}
+
+func newLimitedBody(rc io.ReadCloser, maxBytes int64) *limitedBody {
+	return &limitedBody{ReadCloser: rc, max: maxBytes, left: maxBytes}
+}
+
+func (b *limitedBody) Read(p []byte) (int, error) {
+	if b.exceeded {
+		return 0, b.tooLarge()
+	}
+	if b.left <= 0 {
+		// At the cap, one more byte tells a body of exactly max bytes from
+		// a longer one.
+		var probe [1]byte
+		n, err := b.ReadCloser.Read(probe[:])
+		if n > 0 {
+			b.exceeded = true
+			return 0, b.tooLarge()
+		}
+		return 0, err
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.left -= int64(n)
+	return n, err
+}
+
+func (b *limitedBody) tooLarge() error {
+	return fmt.Errorf("%w (limit %d bytes)", ErrTooLarge, b.max)
+}
+
+// overflow returns the size error when body is a limitedBody that hit its
+// cap. For consumers that flatten read errors into strings: go-readability
+// wraps them with %v, so errors.Is can't see ErrTooLarge through it.
+func overflow(body io.Reader) error {
+	if b, ok := body.(*limitedBody); ok && b.exceeded {
+		return b.tooLarge()
+	}
+	return nil
+}
+
+// readLimited reads all of r, failing with ErrTooLarge past maxBytes.
+func readLimited(r io.Reader, maxBytes int64) ([]byte, error) {
+	return io.ReadAll(newLimitedBody(io.NopCloser(r), maxBytes))
+}
+
+// bodyLimitRT caps every body its roundTripper returns at max bytes. Both
+// backends hand back decompressed streams, so the cap applies to the
+// decoded bytes.
+type bodyLimitRT struct {
+	roundTripper
+	max int64
+}
+
+func limitBodies(rt roundTripper, maxBytes int64) roundTripper {
+	return bodyLimitRT{roundTripper: rt, max: maxBytes}
+}
+
+func (l bodyLimitRT) do(ctx context.Context, target string, headers []header) (*fetchResponse, error) {
+	resp, err := l.roundTripper.do(ctx, target, headers)
+	if err != nil {
+		return nil, err
+	}
+	resp.body = newLimitedBody(resp.body, l.max)
+	return resp, nil
+}
+
+// newRoundTripper builds the backend named by backend: stockRT for a stock
+// name (see isStockBackend), otherwise chromeRT with prof's fingerprint.
 //
 // Returns an error only when a chrome backend was requested and tls-client
 // init failed; callers may then fall back to stock.
-func newRoundTripper(backend string, timeout time.Duration, log *slog.Logger) (roundTripper, error) {
+func newRoundTripper(backend string, prof chromeProfileSpec, timeout time.Duration) (roundTripper, error) {
+	if isStockBackend(backend) {
+		return newStockRT(timeout), nil
+	}
+	return newChromeRT(timeout, prof)
+}
+
+// isStockBackend reports whether backend names Go's net/http transport:
+// "stock", "go" or "net/http".
+func isStockBackend(backend string) bool {
 	switch strings.ToLower(strings.TrimSpace(backend)) {
 	case "stock", "go", "net/http":
-		return newStockRT(timeout), nil
-	default:
-		return newChromeRT(timeout, backend, log)
+		return true
 	}
+	return false
 }
 
 // stockRT is the net/http backend.
@@ -105,6 +193,7 @@ func (s *stockRT) do(ctx context.Context, target string, headers []header) (*fet
 	}
 	return &fetchResponse{
 		statusCode:  resp.StatusCode,
+		header:      resp.Header,
 		body:        resp.Body,
 		finalURL:    resp.Request.URL,
 		contentType: resp.Header.Get("Content-Type"),
@@ -117,26 +206,20 @@ type chromeRT struct {
 	profile string
 }
 
-func newChromeRT(timeout time.Duration, profileName string, log *slog.Logger) (*chromeRT, error) {
-	prof, name, ok := chromeProfile(profileName)
-	if !ok {
-		if log != nil {
-			log.Warn("unknown chrome profile, using latest", "requested", profileName, "using", name)
-		}
-	}
+func newChromeRT(timeout time.Duration, prof chromeProfileSpec) (*chromeRT, error) {
 	secs := int(timeout / time.Second)
 	if secs <= 0 {
 		secs = 30
 	}
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
-		tlsclient.WithClientProfile(prof),
+		tlsclient.WithClientProfile(prof.tls),
 		tlsclient.WithTimeoutSeconds(secs),
 		// Redirects followed by default; finalURL reflects the settled URL.
 	)
 	if err != nil {
-		return nil, fmt.Errorf("tls-client init (profile %s): %w", name, err)
+		return nil, fmt.Errorf("tls-client init (profile %s): %w", prof.name, err)
 	}
-	return &chromeRT{client: client, profile: name}, nil
+	return &chromeRT{client: client, profile: prof.name}, nil
 }
 
 func (c *chromeRT) name() string { return "chrome:" + c.profile }
@@ -168,28 +251,56 @@ func (c *chromeRT) do(ctx context.Context, target string, headers []header) (*fe
 	}
 	return &fetchResponse{
 		statusCode:  resp.StatusCode,
+		header:      http.Header(resp.Header), // same map[string][]string shape
 		body:        resp.Body,
 		finalURL:    resp.Request.URL,
 		contentType: resp.Header.Get("Content-Type"),
 	}, nil
 }
 
-// chromeProfile maps a config string to a tls-client profile. The latest
-// known profile is the default for "", "chrome", and any unrecognized name
+// chromeProfileSpec is one Chrome version curio can impersonate. The
+// TLS/HTTP2 fingerprint, the User-Agent and sec-ch-ua all come from the
+// same entry: a fingerprint that says one version next to headers that say
+// another is itself a mismatch bot checks flag.
+type chromeProfileSpec struct {
+	name      string // the fetcher.native.backend value, e.g. "chrome_133"
+	tls       profiles.ClientProfile
+	major     int
+	userAgent string
+	// secChUA is the header as real Chrome of this major version sends it.
+	// The GREASE brand and the brand order change with the version, so
+	// these are copied, not generated.
+	secChUA string
+}
+
+// chromeProfiles lists the supported profiles, latest first.
+var chromeProfiles = []chromeProfileSpec{
+	{"chrome_133", profiles.Chrome_133, 133, chromeUA(133), `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`},
+	{"chrome_131", profiles.Chrome_131, 131, chromeUA(131), `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`},
+	{"chrome_124", profiles.Chrome_124, 124, chromeUA(124), `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`},
+	{"chrome_120", profiles.Chrome_120, 120, chromeUA(120), `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`},
+}
+
+// chromeUA is desktop Chrome's User-Agent on macOS. Chrome reports only
+// the major version; the rest is frozen at 0.0.0.
+func chromeUA(major int) string {
+	return fmt.Sprintf("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "+
+		"(KHTML, like Gecko) Chrome/%d.0.0.0 Safari/537.36", major)
+}
+
+// chromeProfile maps a backend name to its profile. The latest profile is
+// the answer for "", "chrome", "chrome_latest", and any unrecognized name
 // (ok=false signals the fallback so the caller can log it).
-func chromeProfile(name string) (profile profiles.ClientProfile, label string, ok bool) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+func chromeProfile(name string) (prof chromeProfileSpec, ok bool) {
+	switch n := strings.ToLower(strings.TrimSpace(name)); n {
 	case "", "chrome", "chrome_latest":
-		return profiles.Chrome_133, "chrome_133", true
-	case "chrome_133":
-		return profiles.Chrome_133, "chrome_133", true
-	case "chrome_131":
-		return profiles.Chrome_131, "chrome_131", true
-	case "chrome_124":
-		return profiles.Chrome_124, "chrome_124", true
-	case "chrome_120":
-		return profiles.Chrome_120, "chrome_120", true
+		return chromeProfiles[0], true
 	default:
-		return profiles.Chrome_133, "chrome_133", false
+		for _, p := range chromeProfiles {
+			if p.name == n {
+				return p, true
+			}
+		}
+		return chromeProfiles[0], false
 	}
 }

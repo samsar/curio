@@ -457,6 +457,15 @@ to Mozilla Readability for our use case.
 - User-Agent header matching the JS version.
 - `via: readability` vs `via: jina` metadata key.
 
+**Revised:** the thin-content threshold is 500 UTF-8 *bytes*, not
+characters, and that is deliberate: about 500 Latin or 170 CJK
+characters tracks how much a page says, and counting runes would send
+short CJK pages to Jina three times as often. The code now says so
+(`minArticleBytes`, `trimmedByteLen`). The redirect checks also moved
+first and treat `www.` as the same site; see "Host cache: only host-wide
+verdicts, under the host that gave them" and "Login-wall heuristic: www
+and apex are the same site".
+
 **Operator note:** to compare extraction quality between the two
 backends on a specific URL, point your config at `web2md` and refetch.
 We don't yet have an A/B comparison mode but it'd be a natural M2 add.
@@ -736,7 +745,9 @@ and day:
 - The default UA and `sec-ch-ua` were bumped to Chrome 133 to stay
   coherent with the default profile — a JA3 that says 133 paired with a UA
   that says something else is itself a tell. **Override `backend` and
-  `user_agent` together.**
+  `user_agent` together.** (Revised: both headers now come from the
+  selected profile; see "Chrome profiles carry their own User-Agent and
+  sec-ch-ua" below.)
 - This also fixed a latent `net/http` gotcha: setting `Accept-Encoding` by
   hand *disables* net/http's transparent gzip (it only decompresses when
   the transport added the header). The `stock` backend now omits
@@ -1097,6 +1108,11 @@ needed until there are enough fetchers to justify user-facing config.
 dep). YouTube is registered conditionally on `exec.LookPath("yt-dlp")`.
 Unmatched URLs fall through to Native.
 
+**Superseded** by `fetcher_rules.yaml` (see "fetcher_rules.yaml:
+mtime-polled hot reload, keep-last-good"). `RulesDispatcher` does the
+routing, the same host lists are its built-in defaults, and
+`PatternDispatcher` has been deleted.
+
 ---
 
 ## YouTube fetcher: yt-dlp over API/scraping
@@ -1134,6 +1150,18 @@ Meta map if needed later (e.g., deep-linking into videos).
 language → description-only (`status=partial`). When no yt-dlp is
 installed, YouTube URLs fall through to Native (extracts whatever
 the page HTML yields).
+
+**Revised:** the chain above overstated what was built. The file was
+picked by shortest name and nearly always labeled `manual`, and nothing
+ever set `status=partial`. What is implemented now: among the languages
+in `fetcher.youtube.sub_langs`, uploaded captions before automatic ones
+(both kinds are written as `<id>.<lang>.vtt`, so a track counts as
+uploaded when info.json's `subtitles` lists its language), then the
+shortest language tag. With no usable track the document is the
+description alone: `Result.Partial` is set, `transcript_source` is
+`none`, and the extraction is stored with status `partial`. There is no
+"any language" step: it would take a second yt-dlp run per video, and
+more requests to YouTube, for little gain.
 
 **yt-dlp stderr handling:** On failure (`cmd.Run` returns error),
 extract only `ERROR:` lines from stderr. Ignore `WARNING:` lines
@@ -1206,6 +1234,15 @@ transient rate limits from burning through the job system's 5-attempt
 retry budget, where the exponential backoff (2^N seconds, max 32s)
 is too short for GitHub's 60-second rate limit windows.
 
+**Revised:** the queue backoff above was misdescribed; `MarkFailed` waits
+30·2^attempts seconds (60s after the first attempt), capped at 1 hour.
+Only the primary limit (`X-RateLimit-Remaining: 0`) was treated as a rate
+limit, so the secondary-limit 403s this entry was written about failed
+permanently, and one call's back-off didn't pause the other workers. See
+"GitHub: secondary rate limits and a shared cooldown" below. The YouTube
+token bucket limits how fast yt-dlp processes start, not how many run;
+see "Subprocess fetchers: kill the process group, cap the output".
+
 ---
 
 ## YouTube URL normalization
@@ -1228,6 +1265,10 @@ shared between the normalizer and the fetcher.
 **Playlist-only URLs** (`youtube.com/playlist?list=...`) are not
 canonicalized — they don't have a video ID and are rejected by the
 YouTube fetcher with a `PermanentError`.
+
+**Revised:** only IDs matching `^[A-Za-z0-9_-]+$` are canonicalized; the
+ID used to be pasted into the query unescaped. See "URL normalization:
+fetch-equivalent and idempotent" below.
 
 ---
 
@@ -1648,6 +1689,11 @@ per host after the TTL is still useful for flaky origins),
 `ErrDeadLink` is still not host-cached, and MaxAttempts / backoff are
 untouched for everything that isn't a cache hit.
 
+**Revised:** which failures are cached, and under which host, changed.
+Thin pages and Jina-side failures are no longer cached, and a page-level
+login wall is final on its own. See "Host cache: only host-wide verdicts,
+under the host that gave them" below.
+
 ---
 
 ## Local API: loopback only, no token, browsers shut out
@@ -1915,3 +1961,341 @@ Two more traps shaped the recipe:
 A failed rebuild leaves its connection mid-transaction with foreign keys
 off. The daemon therefore never reuses the DB after a `Migrate` error; it
 exits.
+
+---
+
+## Fetcher errors: one typed status model
+
+**Decision:**
+
+- Every HTTP failure a fetcher returns carries a
+  `*fetcher.HTTPStatusError{StatusCode, URL, RetryAfter}`. `URL` is the
+  URL that answered, after redirects. `RetryAfter` comes from the
+  `Retry-After` header, as delta-seconds or an HTTP-date.
+- One rule, `retryableStatus`, decides retry vs. permanent: 408, 421, 425,
+  429 and every 5xx except 501 and 505 are retried. Every other status is
+  a `PermanentError`.
+- The Native fetcher applies its fetch policy before that rule: 403 and
+  503 are `ErrAntiBot` and stay retryable, because Jina may get through.
+  404 and 410 are `ErrDeadLink` permanents with dead-link detection on and
+  retryable with it off. GitHub treats 404 as permanent and tags rate
+  limits for `apiGet`; everything else follows the rule.
+- `PermanentError` and the sentinels live in `internal/fetcher/errors.go`.
+  Error wraps use `%w`, twice when there are two causes.
+- Error text quotes at most 512 bytes of a response body.
+
+**Why:** Native retried 401, 402 and 451 five times over about 15
+minutes, like a 500. GitHub made every status it didn't list retryable, so
+a deleted issue (410) or a DMCA-blocked repo (451) burned the whole retry
+budget. Jina kept a status map of its own. Errors built with `%v` or plain
+strings couldn't be matched with `errors.Is`/`errors.As`, and GitHub
+errors pasted whole response bodies into `jobs.last_error`.
+
+---
+
+## GitHub: secondary rate limits and a shared cooldown
+
+**Decision:**
+
+- A 429 is always a rate limit. A 403 is one when it carries
+  `Retry-After`, `X-RateLimit-Remaining: 0`, or a body mentioning
+  "secondary rate limit" or "abuse detection". Any other 403 is a real
+  permission answer and fails permanently.
+- The wait is `Retry-After` when given, else until `X-RateLimit-Reset` for
+  the primary limit, else one minute. GitHub asks for at least a minute
+  before retrying a secondary limit, and a reset time already in the past
+  is no reason to retry at once.
+- A rate-limit answer extends a cooldown shared by every GitHub call. Each
+  call waits out a remaining cooldown of up to 2 minutes before it goes
+  out. A longer one fails the call at once, without a request, as a
+  retryable `*HTTPStatusError{429}` whose `RetryAfter` is the time left,
+  and the job queue's backoff covers the rest. The call that got the long
+  `Retry-After` fails the same way. Still at most 3 attempts per call.
+- The cooldown is checked after the shared limiter grants a call its
+  token, not before. Workers already queued in the limiter when the
+  rate-limit answer arrives would otherwise pass a check made before the
+  answer and then send their requests into the limit: 6 of 6 did in a
+  probe. A call that sat a cooldown out queues for a fresh token, so the
+  held-up calls resume at the limiter's pace instead of all at once.
+- A README or comment thread that doesn't exist (404) is left out of the
+  document. Any other failure of those calls (5xx, a rate limit, a
+  timeout) fails the fetch retryably. The README is a repo document's
+  primary content, so storing the document without it hid the failure
+  for good.
+
+**Why:** The secondary limit answers 403 while `X-RateLimit-Remaining` is
+still positive, so the 251-repo refetch this was built for failed those
+repos permanently on attempt 1. When one call backed off, the other
+workers kept calling through the shared limiter, although GitHub counts
+the limit per account and IP.
+
+**Beyond 2 minutes:** sleeping longer inline would hold a fetch worker
+for the whole wait. `JobQueue.MarkFailed` takes no delay, so the queue
+can't honor the hint yet. `RetryAfter` travels on the error for when it
+can.
+
+---
+
+## Fetchers: one cap on every response body
+
+**Decision:**
+
+- Every response body a fetcher reads is capped at 32 MiB
+  (`maxResponseBytes`), counted after decompression. Past the cap a read
+  fails with `ErrTooLarge` rather than quietly ending, so a cut-off body
+  can never pass for a complete one. `ErrTooLarge` is always permanent,
+  never goes to Jina and is never host-cached.
+- For the Native fetcher the cap is one decorator around the transport
+  (`limitBodies`), so it covers both backends and both the origin and
+  Jina requests. GitHub reads through the same limiter, and Web2MD's
+  stdout has the same cap.
+- A PDF over the cap skips local extraction and goes to Jina, as before,
+  but now without reading past the cap.
+- `text/event-stream` is refused on its Content-Type: it never ends.
+- A Jina body cut off mid-transfer is a transport failure and is retried.
+  It used to be stored as a short article.
+
+**Why:** Nothing bounded a body. Readability's parser, Jina and GitHub
+all read to EOF, and decompression is lazy on both backends, so a gzip
+or brotli bomb multiplied whatever came over the wire. `text/*` let an
+endless event stream through. The only limit was the 30s client timeout,
+times 16 fetch workers. The Jina path dropped the read error, and an
+overlay probe stored a truncated Jina answer as a 629-character
+"success" that was never retried.
+
+**Detection detail:** go-readability flattens reader errors with `%v`, so
+`errors.Is` can't find `ErrTooLarge` through it. `tryReadability` asks
+the capped body whether it overflowed instead of pre-buffering, since the
+parser already copies the whole body.
+
+---
+
+## Host cache: only host-wide verdicts, under the host that gave them
+
+Builds on "Host-cache hits are permanent failures": a hit fails every URL
+on the host for 15 minutes without a request, so a wrong entry is
+expensive.
+
+**Decision:**
+
+- Only three verdicts speak for a whole host, and only they are cached:
+  - **unreachable**: the name doesn't exist (`net.DNSError.IsNotFound`),
+    or the host refuses connections (`ECONNREFUSED`) or has no route
+    (`EHOSTUNREACH`);
+  - **anti-bot**: a 403 or 503 answer;
+  - **login wall**: a redirect onto the requested site's own login page
+    (`loginPathRE`, same site ignoring a leading `www.`).
+- Everything else is about one page (thin text, no article, a login-like
+  title, a redirect to another site) or transient (DNS timeouts and
+  temporary failures, `ENETUNREACH`, which is our own network), and is
+  never cached.
+- A verdict is cached under the host that gave it: the redirect target's
+  host from `*url.Error.URL` or `HTTPStatusError.URL`, not the host that
+  was requested. Keys are lowercased hostnames.
+- Nothing is cached when Jina was tried and failed for its own reasons:
+  429, 5xx, 408, timeouts, transport errors, 401/402 (our account) or
+  its own cooldown. Only a Jina verdict about the target counts: a 2xx with
+  too little content, or another non-retryable 4xx.
+- A page-level verdict Jina could have helped with is final once every
+  configured extraction path has answered: with Jina off, or after Jina
+  gave its own verdict, the fetch fails with a `PermanentError` on
+  attempt 1. The document goes `failed`, not `dead`. If Jina only had
+  trouble, the error stays retryable.
+- The login-wall heuristics check redirects first, so a thin login page
+  reached by redirect still counts as the site-wide wall it is.
+- Error chains are kept whole. Both causes are wrapped with `%w`, so the
+  error for "origin and Jina both failed" matches the origin's sentinel
+  and Jina's `*HTTPStatusError`. Jina's failure leads the chain: a retry
+  depends on Jina now, so `errors.As` finds its status and `Retry-After`
+  before an origin 403/503. An unreachable host keeps its `*url.Error`
+  and `*net.DNSError`.
+
+**Why:** Four kinds of wrong entry, each confirmed by a probe:
+
+1. Every `ErrLoginWall` was cached as host-wide, although most are about
+   one thin page. With Jina off, one short page failed the whole site.
+2. A Jina outage or 429 cached every host that needed Jina.
+3. Verdicts were keyed by the requested host. A shortener (bit.ly, t.co,
+   lnkd.in) redirecting one link to a site that answered 403, or to a dead
+   host, got the shortener cached, and its healthy links then failed with
+   zero requests.
+4. Any `*net.DNSError`, including resolver timeouts, and "network is
+   unreachable" were cached as "unreachable", so a Wi-Fi blip mid-import
+   cached every host it touched.
+
+**Why page-level verdicts are final:** without the cache, attempts 2–5
+would each repeat the origin fetch and up to four Jina requests for the
+same thin page, spending the budget the fallback policy protects and
+bringing back the "~15 minutes pending" symptom. The page answered the
+same way on every path that exists.
+
+---
+
+## Login-wall heuristic: www and apex are the same site
+
+**Decision:** The cross-host check in `looksLikeLoginWall` and the
+same-host check in the soft-404 "redirected to homepage" rule compare
+hosts with `sameSiteHost`: case-insensitive, ignoring one leading `www.`.
+
+**Why:** `example.com` → `www.example.com` (and old `http://` bookmarks
+upgraded to `https://www.`) is canonicalization, not a login wall. The
+rule came from the JS implementation, where it was meant to catch
+redirects to login/SSO hosts. Every such full article was sent to Jina,
+which allows 20 requests a minute without a key, and failed outright
+with Jina off. A deleted post redirecting to the `www` homepage skipped
+the soft-404 check and landed in the login-wall path instead of `dead`.
+Redirects to any other host are still flagged, and never host-cached.
+
+---
+
+## Fetch politeness: shared Jina pacing, per-host origin gate
+
+**Decision:**
+
+- All Jina calls go through one limiter per Native fetcher, and all 16
+  fetch workers share that fetcher: 20 requests a minute without an API
+  key, 200 with one. Jina publishes 20 and 500.
+- A Jina 429 extends a cooldown shared by every Jina call. The wait is its
+  `Retry-After`, or the current backoff step when it gave none. A later
+  call waits out up to 30 seconds of cooldown inline. A longer one fails
+  at once, without a request, as a retryable `*HTTPStatusError{429}`
+  whose `RetryAfter` is the time left. The host cache is never written
+  for it. 5xx and transport errors keep the 2/4/8 s backoff, now through
+  the injectable clock, with 4 attempts in all. Limiter and cooldown are
+  combined the same way as GitHub's (`pace`): the cooldown is checked once
+  the token is granted, and a call that sat one out queues for a fresh
+  token.
+- `fetcher.native.jina_api_key` (or `CURIO_JINA_API_KEY`) is sent as
+  `Authorization: Bearer <key>`, and never appears in logs or errors.
+- At most 2 origin requests per host are in flight
+  (`originRequestsPerHost`). A fetch waits for a slot, honoring its
+  context. The host cache is checked again once the slot is acquired, so
+  fetches queued behind the ones that got a host cached as anti-bot fail
+  from the cache instead of sending the request. The slot is released as
+  soon as the origin has answered, and is never held while waiting on or
+  calling Jina.
+
+**Why:** Every worker called `r.jina.ai` on its own, slept 2/4/8 s
+between attempts, ignored `Retry-After` and sent no key, although Jina
+429s were the original reason for the fallback policy. Origin fetches had
+no per-host limit, so an import heavy on one site sent it up to 16
+concurrent requests. That provokes the 403/503s which then get the whole
+host cached as anti-bot.
+
+**Waiting, not failing:** local limits block, bounded by the job's context,
+instead of returning an error. Failing would spend job attempts on our own
+throttling. Only an upstream cooldown longer than the inline cap fails
+fast, because sleeping it out would hold a fetch worker. `JobQueue` can't
+take a delay yet, so the hint stays on the error.
+
+**Cost:** a worker waiting for a host slot can't pick up another job, so
+an import dominated by one site proceeds at roughly that site's pace
+(two requests at a time) instead of sixteen. That is the point for the
+site, and mixed imports barely notice.
+
+---
+
+## URL normalization: fetch-equivalent and idempotent
+
+**Decision:** `urlutil.Normalize` output is both the dedup key and the URL
+the fetcher requests, so every rule keeps the URL pointing at the same
+resource, and normalizing twice changes nothing.
+
+- Only absolute `http`/`https` URLs with a host are accepted; anything
+  else is `ErrInvalidURL`. That covers `POST /v1/bookmarks` (400), the
+  import endpoint (counted under its filter reasons) and MCP, which goes
+  through the API.
+- Host: lowercased; IPv6 literals keep their brackets; a host containing
+  `:` must be an IP literal. The default port is dropped. An empty path
+  becomes `/`. The fragment is dropped.
+- Query: split on `&` only. Empty pairs and tracking parameters are
+  dropped. Well-formed pairs are re-encoded exactly as `url.Values.Encode`
+  writes them. A pair that doesn't decode, or contains `;`, is kept as is,
+  with only its spaces and non-ASCII bytes percent-encoded the way a
+  browser sends them. A key without `=` stays without one. Pairs are
+  stable-sorted by decoded key.
+- `ref` is no longer a tracking parameter: it is also a branch or version
+  selector.
+- YouTube URLs are canonicalized only when the ID matches
+  `^[A-Za-z0-9_-]+$`; the YouTube fetcher rejects other IDs permanently.
+- `FuzzNormalize` asserts that every accepted output is an http(s) URL
+  with a host and a fixed point of `Normalize`.
+
+**Why:** the old normalizer dropped data and wasn't idempotent. `?a=1;b=2`
+lost its whole query and `?q=%zz` lost that pair, because `url.Query()`
+discards what it can't parse. `?ref=main` lost the branch, and `?flag`
+became `?flag=`. `v=abc%26list%3Dx` was pasted unescaped into the watch
+URL, and a second pass shortened it again. `https://[::1]:443/x` lost its
+brackets. `javascript:`, `file:`, `mailto:`, `https:example.com/x` and
+`https:///x` were all accepted, so `curio add` created a document whose
+fetch failed five times. The CLI importers normalize before the daemon
+does it again, so every non-idempotent step split one bookmark into two
+documents.
+
+**No original-URL column:** after these rules the stored URL requests the
+same resource as the input. The two differ only in fragment, default
+port, the case of scheme and host, parameter order, canonical
+percent-encoding and tracking parameters, none of which change what a
+server returns. So there is no schema change.
+
+**One-time key change:** a few URL shapes normalize differently now: a
+bare origin (`https://example.com` → `https://example.com/`), valueless
+parameters, queries with `;` or undecodable pairs, and `ref=`. A bookmark
+of one of those shapes that is imported again after the upgrade creates a
+second document under the new key. Every other key is unchanged.
+
+---
+
+## Subprocess fetchers: kill the process group, cap the output
+
+**Decision:**
+
+- Web2MD and YouTube run their tool through `runCapped`
+  (`internal/fetcher/exec.go`). On Unix the tool gets its own process
+  group, and when the timeout or the job's context ends the whole group
+  gets SIGKILL (`exec_unix.go`). Elsewhere only the tool is killed; the
+  package still builds there, but only darwin/arm64 ships. `WaitDelay`
+  (2 s) bounds how long a descendant that left the group can keep the
+  output pipes open.
+- A run cut short fails with an error wrapping `ctx.Err()` that names the
+  timeout, so a timeout stays retryable and a shutdown lets the worker
+  requeue the job.
+- Web2MD's stdout is capped at `maxResponseBytes`. Past the cap the pipe
+  write fails, which stops the tool, and the fetch fails permanently with
+  `ErrTooLarge`. Stderr keeps its first 64 KiB for error messages.
+- At most `YouTubeOptions.MaxConcurrent` (default 2) yt-dlp processes run
+  at once. A fetch queues for a slot, honoring its context, before its
+  timeout starts. The daemon's `RateLimited` wrapper still limits how fast
+  processes start; it never limited how many run.
+- Tests run the fakes by re-executing the test binary (`TestMain` switches
+  on `CURIO_FAKE_TOOL`) instead of writing shell scripts at test time.
+
+**Why:** `exec.CommandContext` kills only the direct child. A helper it
+spawned (yt-dlp and web2md's Node process both can) inherited the output
+pipes, and `Wait` blocked until that helper exited: a probe with a 1 s
+timeout returned after 8 s and left the helper running. That also
+stretched the daemon's bounded shutdown. Output went into unbounded
+buffers, and a timeout surfaced as `signal: killed`. The token bucket in
+front of YouTube let up to 16 yt-dlp processes run at once.
+
+---
+
+## Chrome profiles carry their own User-Agent and sec-ch-ua
+
+**Decision:** One table in `transport.go` (`chromeProfiles`) maps each
+`fetcher.native.backend` profile to its TLS/HTTP2 fingerprint, its Chrome
+major version, its User-Agent and its `sec-ch-ua`. The Native fetcher
+sends the selected profile's User-Agent and `sec-ch-ua`; the stock
+backend sends the latest profile's. A `user_agent` override is still sent
+as is, but one that doesn't name the profile's Chrome version logs a
+warning when the fetcher is built. A test checks that every entry names
+one version throughout.
+
+**Why:** The note above asked users to keep `backend` and `user_agent`
+coherent, but only prose enforced it. `sec-ch-ua` was hard-coded to Chrome
+133 and couldn't be configured at all, so `backend: chrome_120` sent a
+Chrome 120 TLS fingerprint with Chrome 133 headers. The `sec-ch-ua` values
+are copied from real Chrome of each version, because the GREASE brand and
+the brand order change from one version to the next. The old 133 value
+had its brands in the wrong order.
+

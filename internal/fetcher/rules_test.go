@@ -138,6 +138,38 @@ func TestRulesDispatcher_FileAbsentUsesDefaults(t *testing.T) {
 	assert.Equal(t, "native", f.Name())
 }
 
+// TestRulesDispatcher_BuiltinYouTubeHosts: without a rules file, every
+// YouTube host goes to the YouTube fetcher and everything else to the
+// fallback.
+func TestRulesDispatcher_BuiltinYouTubeHosts(t *testing.T) {
+	native, _, youtube, registry := newRulesTestFetchers()
+	d := NewRulesDispatcher(RulesDispatcherOptions{
+		Path:          filepath.Join(t.TempDir(), "fetcher_rules.yaml"),
+		Registry:      registry,
+		DefaultRules:  []Rule{{Hosts: YouTubeHosts, Fetcher: youtube}},
+		Fallback:      native,
+		CheckInterval: -1,
+		Log:           slog.Default(),
+	})
+
+	cases := []struct {
+		url  string
+		want string
+	}{
+		{"https://www.youtube.com/watch?v=abc", "youtube"},
+		{"https://youtube.com/watch?v=abc", "youtube"},
+		{"https://m.youtube.com/watch?v=abc", "youtube"},
+		{"https://youtu.be/abc", "youtube"},
+		{"https://example.com/article", "native"},
+		{"https://martinfowler.com/articles/feature-toggles.html", "native"},
+	}
+	for _, tc := range cases {
+		f, err := d.For(tc.url)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, f.Name(), "url=%s", tc.url)
+	}
+}
+
 func TestRulesDispatcher_FileRoutesAndReloads(t *testing.T) {
 	native, github, _, registry := newRulesTestFetchers()
 	path := filepath.Join(t.TempDir(), "fetcher_rules.yaml")

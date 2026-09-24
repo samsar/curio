@@ -6,6 +6,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
@@ -109,6 +111,71 @@ func TestNative_RendersMarkdown_Gzip(t *testing.T) {
 			require.NoError(t, err)
 			assertReadableMarkdown(t, res.Markdown)
 			assert.Contains(t, res.Markdown, "paragraph of an article")
+		})
+	}
+}
+
+// testBodyLimit is the body cap the size tests inject: small enough that
+// hitting it takes milliseconds, far below the client timeout.
+const testBodyLimit = 64 << 10
+
+// TestNative_EndlessHTMLHitsBodyCap: a page that never stops streaming
+// fails permanently at the body cap on both backends, well before the
+// client timeout. It is not sent to Jina and not host-cached.
+func TestNative_EndlessHTMLHitsBodyCap(t *testing.T) {
+	for _, backend := range []string{"chrome", "stock"} {
+		t.Run(backend, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = w.Write([]byte("<html><body><article><p>"))
+				chunk := []byte(strings.Repeat("endless words ", 1024))
+				for written := 0; written < 64<<20 && r.Context().Err() == nil; written += len(chunk) {
+					if _, err := w.Write(chunk); err != nil {
+						return
+					}
+				}
+			}))
+			defer srv.Close()
+
+			var jinaHits atomic.Int32
+			jina := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { jinaHits.Add(1) }))
+			defer jina.Close()
+
+			n := NewNative(NativeOptions{Timeout: 30 * time.Second, Backend: backend, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+			n.rt = limitBodies(n.rt, testBodyLimit)
+			start := time.Now()
+			_, err := n.Fetch(context.Background(), srv.URL+"/a")
+			assert.Less(t, time.Since(start), 10*time.Second)
+
+			var pe *PermanentError
+			require.ErrorAs(t, err, &pe)
+			assert.ErrorIs(t, err, ErrTooLarge)
+			assert.Zero(t, jinaHits.Load(), "an oversized page must not go to Jina")
+
+			_, ok := n.hostCache.Get(hostOf(srv.URL))
+			assert.False(t, ok, "an oversized page says nothing about the host")
+		})
+	}
+}
+
+// TestNative_DecompressionBombHitsBodyCap: the cap applies to decoded
+// bytes, so a small gzip body that inflates past it is rejected.
+func TestNative_DecompressionBombHitsBodyCap(t *testing.T) {
+	bomb := mustGzip(t, []byte("<html><body><p>"+strings.Repeat("a", 8<<20)+"</p></body></html>"))
+	require.Less(t, len(bomb), testBodyLimit, "the compressed body itself must fit under the cap")
+	for _, backend := range []string{"chrome", "stock"} {
+		t.Run(backend, func(t *testing.T) {
+			srv := serveEncoded(t, "gzip", bomb)
+			defer srv.Close()
+
+			n := NewNative(NativeOptions{Timeout: 30 * time.Second, Backend: backend})
+			n.rt = limitBodies(n.rt, testBodyLimit)
+			_, err := n.Fetch(context.Background(), srv.URL)
+			var pe *PermanentError
+			require.ErrorAs(t, err, &pe)
+			assert.ErrorIs(t, err, ErrTooLarge)
 		})
 	}
 }

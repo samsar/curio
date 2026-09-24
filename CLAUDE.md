@@ -76,13 +76,23 @@ This catches people:
 
 ## Fetcher fallback policy
 
-`internal/fetcher/native.go` falls back to Jina Reader (`r.jina.ai`) only when the original error wraps `ErrLoginWall` or `ErrAntiBot`. Hard errors (404, DNS failures, timeouts) return directly — Jina can't help and burning rate-limit budget there gets us 429'd on the calls that would actually benefit. If you're tempted to widen the fallback, read `docs/decisions.md` under "Fallback strategy" first.
+`internal/fetcher/native.go` falls back to Jina Reader (`r.jina.ai`) only when the original error wraps `ErrLoginWall` or `ErrAntiBot` (or a PDF the local extractor couldn't read). Hard errors (404, DNS failures, timeouts) return directly — Jina can't help and burning rate-limit budget there gets us 429'd on the calls that would actually benefit. If you're tempted to widen the fallback, read `docs/decisions.md` under "Fallback strategy" first.
+
+Jina calls from all fetch workers share one limiter (20/min, or 200/min with `fetcher.native.jina_api_key` / `CURIO_JINA_API_KEY`, sent as a bearer token) and one cooldown that a 429 extends: waited out inline up to 30s, longer ones fail fast and retryably. The GitHub fetcher pairs its limiter and cooldown the same way. Both go through `pace`, which checks the cooldown only after the limiter grants a token; checking it first lets callers already queued in the limiter walk into the limit. Origin requests are capped at 2 in flight per host (`hostGate`); the slot is never held while waiting on Jina, and the host cache is re-checked once a slot is acquired.
 
 `ErrAntiBot` wraps HTTP 403 and 503. The Native fetcher also sends Chrome-like headers (`Sec-Fetch-*`, `Sec-Ch-Ua-*`) to reduce false-positive bot blocks.
 
+Status classification is shared by all HTTP fetchers (`internal/fetcher/errors.go`): every HTTP failure carries a `*HTTPStatusError` (status, the URL that answered, `Retry-After`). 408/421/425/429 and 5xx except 501/505 are retried; every other status is a `PermanentError`. Native's policy (403/503 → `ErrAntiBot`, 404/410 → `ErrDeadLink`) runs before that rule. Error text quotes at most 512 bytes of a response body.
+
+Every response body is capped at 32 MiB after decompression (`maxResponseBytes`; Native through the `limitBodies` transport decorator, GitHub via `readLimited`, Web2MD on its stdout). Overflow is a permanent `ErrTooLarge`: never Jina, never host-cached. A PDF over the cap still goes to Jina without being read further.
+
+Subprocess fetchers (Web2MD, YouTube) run through `runCapped`: own process group, killed as a group on timeout or cancel, stderr capped at 64 KiB. At most 2 yt-dlp processes run at once (`YouTubeOptions.MaxConcurrent`). Their tests re-exec the test binary as the fake tool (`TestMain` + `CURIO_FAKE_TOOL`); don't write shell scripts.
+
 `ErrDeadLink` (404/410, soft-404 titles, redirect-to-homepage) is always wrapped in a `PermanentError`, never goes to Jina, and is deliberately NOT host-cached (a dead path says nothing about the host). The soft-404 check runs BEFORE the login-wall heuristics in `tryReadability` — order matters, thin tombstone pages would otherwise classify as login walls and leak to Jina.
 
-A hit on the in-memory host-failure cache (`hostFailureCache`, 15-min TTL; kinds: unreachable / anti-bot / login-wall) returns a `PermanentError` wrapping the original sentinel — the verdict can't change inside the TTL, so retrying would only re-read the cache. The *first* failure for a host stays retryable; it's what populates the cache. Recovery is `curio refetch --all --state=failed` (or per-doc `curio refetch <id>`). See `docs/decisions.md` "Host-cache hits are permanent failures".
+A hit on the in-memory host-failure cache (`hostFailureCache`, 15-min TTL) returns a `PermanentError` wrapping the original sentinel — the verdict can't change inside the TTL, so retrying would only re-read the cache. The *first* failure for a host stays retryable; it's what populates the cache. Recovery is `curio refetch --all --state=failed` (or per-doc `curio refetch <id>`). See `docs/decisions.md` "Host-cache hits are permanent failures".
+
+Only host-wide verdicts are cached (`hostVerdict`): unreachable (NXDOMAIN, `ECONNREFUSED`, `EHOSTUNREACH` — not DNS timeouts or `ENETUNREACH`), anti-bot (403/503), and a redirect onto the site's own login page. They are keyed by the host that *answered* (the redirect target), never cached when Jina failed for its own reasons (429/5xx/timeouts/401/402), only when Jina was off or gave a verdict about the target. Page-level login walls (thin text, no article, login title, cross-site redirect) are never cached; instead they fail permanently once every configured extraction path has answered. See "Host cache: only host-wide verdicts, under the host that gave them".
 
 ## Fetcher routing
 
