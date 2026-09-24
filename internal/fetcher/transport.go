@@ -49,9 +49,10 @@ type header struct{ key, value string }
 // fetcher actually consumes.
 type fetchResponse struct {
 	statusCode  int
+	header      http.Header
 	body        io.ReadCloser
-	finalURL    *url.URL
-	contentType string // raw Content-Type header (may include "; charset=...")
+	finalURL    *url.URL // never nil
+	contentType string   // raw Content-Type header (may include "; charset=...")
 }
 
 // newRoundTripper builds the backend named by backend:
@@ -105,6 +106,7 @@ func (s *stockRT) do(ctx context.Context, target string, headers []header) (*fet
 	}
 	return &fetchResponse{
 		statusCode:  resp.StatusCode,
+		header:      resp.Header,
 		body:        resp.Body,
 		finalURL:    resp.Request.URL,
 		contentType: resp.Header.Get("Content-Type"),
@@ -168,6 +170,7 @@ func (c *chromeRT) do(ctx context.Context, target string, headers []header) (*fe
 	}
 	return &fetchResponse{
 		statusCode:  resp.StatusCode,
+		header:      http.Header(resp.Header), // same map[string][]string shape
 		body:        resp.Body,
 		finalURL:    resp.Request.URL,
 		contentType: resp.Header.Get("Content-Type"),

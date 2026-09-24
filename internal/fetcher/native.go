@@ -35,6 +35,7 @@ type Native struct {
 	deadLinkDetection bool
 	log               *slog.Logger
 	hostCache         *hostFailureCache
+	clock             clock
 }
 
 // NativeOptions configures Native. Zero-value fields use defaults.
@@ -99,6 +100,7 @@ func NewNative(opts NativeOptions) *Native {
 		deadLinkDetection: opts.DeadLinkDetection,
 		log:               opts.Log,
 		hostCache:         newHostFailureCache(opts.HostFailureTTL),
+		clock:             realClock,
 	}
 }
 
@@ -247,23 +249,7 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	defer resp.body.Close()
 
 	if resp.statusCode < 200 || resp.statusCode >= 300 {
-		// Drain a bit so the connection can be reused.
-		_, _ = io.CopyN(io.Discard, resp.body, 1024)
-		// 403 and 503 are commonly Cloudflare / WAF bot blocks rather
-		// than genuine "page missing" or "server down" — Jina's
-		// infrastructure often gets through where we don't. Tag with
-		// ErrAntiBot so Fetch falls back instead of giving up.
-		if resp.statusCode == http.StatusForbidden || resp.statusCode == http.StatusServiceUnavailable {
-			return nil, fmt.Errorf("native: HTTP %d: %w", resp.statusCode, ErrAntiBot)
-		}
-		// 404/410 are deterministic "page is gone" answers: retrying won't
-		// change them and Jina can't conjure a page that doesn't exist.
-		// Permanent so the doc fails on attempt 1 instead of burning the
-		// full retry budget (5 attempts, ~7.5 min of backoff).
-		if n.deadLinkDetection && (resp.statusCode == http.StatusNotFound || resp.statusCode == http.StatusGone) {
-			return nil, &PermanentError{Err: fmt.Errorf("native: dead link (HTTP %d): %w", resp.statusCode, ErrDeadLink)}
-		}
-		return nil, fmt.Errorf("native: HTTP %d", resp.statusCode)
+		return nil, n.statusFailure(resp)
 	}
 
 	// PDFs: extract locally (pure-Go), then fall back to Jina. Detected by
@@ -284,9 +270,6 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	}
 
 	finalURL := resp.finalURL
-	if finalURL == nil {
-		finalURL, _ = url.Parse(target)
-	}
 	article, err := readability.FromReader(resp.body, finalURL)
 	if err != nil {
 		return nil, fmt.Errorf("native: readability: %w", err)
@@ -339,24 +322,31 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	return r, nil
 }
 
-// ErrLoginWall is wrapped by tryReadability when the heuristic suggests
-// the response is a login/paywall placeholder rather than article content.
-// Exported so tests can match it.
-var ErrLoginWall = errors.New("login wall or thin content")
-
-// ErrAntiBot is wrapped by tryReadability when the origin returned an HTTP
-// status that suggests bot detection rather than a missing or
-// auth-required page. Used by Fetch to decide whether Jina might succeed
-// where direct fetch failed. Distinct from ErrLoginWall so callers can
-// log the two cases separately.
-var ErrAntiBot = errors.New("origin blocked the request (likely anti-bot)")
-
-// ErrDeadLink marks a URL whose content is gone: a hard 404/410, or a
-// "soft 404" — HTTP 200 carrying a not-found page. Always wrapped in a
-// PermanentError (retrying is pointless) and never routed to the Jina
-// fallback. Deliberately NOT in hostFailureFromError: a dead path says
-// nothing about the rest of the host.
-var ErrDeadLink = errors.New("dead link (content is gone)")
+// statusFailure classifies a non-2xx origin answer. Two statuses get the
+// fetch policy's special handling before the generic retry rule applies:
+//
+//   - 403 and 503 are commonly Cloudflare / WAF bot blocks rather than
+//     genuine "forbidden" or "server down" answers, and Jina's
+//     infrastructure often gets through where we don't. Tagged ErrAntiBot
+//     so Fetch falls back instead of giving up.
+//   - 404 and 410 are deterministic "page is gone" answers: permanent, so
+//     the doc fails on attempt 1 instead of burning the retry budget, and
+//     never sent to Jina. With dead-link detection off they stay
+//     retryable, which is what the kill switch restores.
+func (n *Native) statusFailure(resp *fetchResponse) error {
+	se := &HTTPStatusError{StatusCode: resp.statusCode, URL: resp.finalURL.String()}
+	se.RetryAfter, _ = parseRetryAfter(resp.header, n.clock.now())
+	switch resp.statusCode {
+	case http.StatusForbidden, http.StatusServiceUnavailable:
+		return fmt.Errorf("native: %w: %w", se, ErrAntiBot)
+	case http.StatusNotFound, http.StatusGone:
+		if n.deadLinkDetection {
+			return &PermanentError{Err: fmt.Errorf("native: dead link (%w): %w", se, ErrDeadLink)}
+		}
+		return fmt.Errorf("native: %w", se)
+	}
+	return statusError(se.StatusCode, fmt.Errorf("native: %w", se))
+}
 
 // looksLikeLoginWall mirrors the JS impl's heuristics in samsar/web-to-markdown:
 //   - missing article entirely
@@ -580,22 +570,11 @@ func (n *Native) fetchPDF(ctx context.Context, target string, body io.Reader) (*
 // tryJina is pass 2: hit r.jina.ai/<url> with retries. Returns parsed
 // markdown + extracted metadata in the Result.
 func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
-	retryable := map[int]struct{}{
-		http.StatusTooManyRequests:     {},
-		http.StatusInternalServerError: {},
-		http.StatusBadGateway:          {},
-		http.StatusServiceUnavailable:  {},
-		http.StatusGatewayTimeout:      {},
-	}
-
 	var lastErr error
 	for attempt := 0; attempt < 4; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(1<<attempt) * time.Second
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
+			if err := n.clock.sleep(ctx, time.Duration(1<<attempt)*time.Second); err != nil {
+				return nil, fmt.Errorf("jina: %w", err)
 			}
 		}
 
@@ -633,8 +612,8 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 			return result, nil
 		}
 
-		lastErr = fmt.Errorf("jina: HTTP %d", resp.statusCode)
-		if _, ok := retryable[resp.statusCode]; !ok {
+		lastErr = fmt.Errorf("jina: %w", &HTTPStatusError{StatusCode: resp.statusCode, URL: resp.finalURL.String()})
+		if !retryableStatus(resp.statusCode) {
 			break
 		}
 		n.log.Info("jina retry", "status", resp.statusCode, "attempt", attempt+1)

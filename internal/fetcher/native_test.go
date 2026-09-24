@@ -3,6 +3,7 @@ package fetcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -460,4 +461,87 @@ func TestNative_HostCache_AntiBotHitIsPermanent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrAntiBot)
 	require.True(t, errors.As(err, &pe), "cached 403 must be permanent: %v", err)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&hits))
+}
+
+// TestNative_StatusMatrix pins how every class of origin status is
+// classified: anti-bot statuses are retryable and Jina-eligible, dead links
+// are permanent only with detection on, transient statuses are retryable,
+// and every other status is a deterministic answer that fails permanently.
+func TestNative_StatusMatrix(t *testing.T) {
+	cases := []struct {
+		status     int
+		detection  bool
+		permanent  bool
+		antiBot    bool
+		deadLink   bool
+		retryAfter string
+		wantAfter  time.Duration
+	}{
+		{status: http.StatusForbidden, antiBot: true},
+		{status: http.StatusServiceUnavailable, antiBot: true, retryAfter: "30", wantAfter: 30 * time.Second},
+		{status: http.StatusNotFound, detection: true, permanent: true, deadLink: true},
+		{status: http.StatusGone, detection: true, permanent: true, deadLink: true},
+		{status: http.StatusNotFound},
+		{status: http.StatusGone},
+		{status: http.StatusRequestTimeout},
+		{status: http.StatusMisdirectedRequest},
+		{status: http.StatusTooEarly},
+		{status: http.StatusTooManyRequests},
+		{status: http.StatusTooManyRequests, retryAfter: "120", wantAfter: 120 * time.Second},
+		{status: http.StatusInternalServerError},
+		{status: http.StatusBadGateway},
+		{status: http.StatusGatewayTimeout},
+		{status: 520},
+		{status: http.StatusBadRequest, permanent: true},
+		{status: http.StatusUnauthorized, permanent: true},
+		{status: http.StatusPaymentRequired, permanent: true},
+		{status: http.StatusMethodNotAllowed, permanent: true},
+		{status: http.StatusUnavailableForLegalReasons, permanent: true},
+		{status: http.StatusNotImplemented, permanent: true},
+		{status: 999, permanent: true},
+	}
+	for _, tc := range cases {
+		name := fmt.Sprintf("%d detection=%v retry-after=%q", tc.status, tc.detection, tc.retryAfter)
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, DeadLinkDetection: tc.detection})
+			_, err := n.Fetch(context.Background(), srv.URL+"/page")
+			require.Error(t, err)
+
+			var pe *PermanentError
+			assert.Equal(t, tc.permanent, errors.As(err, &pe), "permanent: %v", err)
+			assert.Equal(t, tc.antiBot, errors.Is(err, ErrAntiBot), "anti-bot: %v", err)
+			assert.Equal(t, tc.deadLink, errors.Is(err, ErrDeadLink), "dead link: %v", err)
+			var se *HTTPStatusError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, tc.status, se.StatusCode)
+			assert.Equal(t, srv.URL+"/page", se.URL)
+			assert.Equal(t, tc.wantAfter, se.RetryAfter)
+		})
+	}
+}
+
+// TestNative_RetryAfterHTTPDate: an HTTP-date Retry-After is measured
+// against the fetcher's clock, not the wall clock.
+func TestNative_RetryAfterHTTPDate(t *testing.T) {
+	fc := newFakeClock()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", fc.now().Add(90*time.Second).Format(http.TimeFormat))
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+	n.clock = fc.clock()
+	_, err := n.Fetch(context.Background(), srv.URL)
+	var se *HTTPStatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, 90*time.Second, se.RetryAfter)
 }

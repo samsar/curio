@@ -1,7 +1,6 @@
 package fetcher
 
 import (
-	"errors"
 	"net/url"
 	"sync"
 	"time"
@@ -31,11 +30,6 @@ func (k HostFailureKind) String() string {
 		return "unknown"
 	}
 }
-
-// ErrHostUnreachable is wrapped by tryReadability for DNS / dial errors.
-// Distinct from ErrAntiBot because we shouldn't bother with Jina either
-// — Jina can't reach a host that doesn't exist any more than we can.
-var ErrHostUnreachable = errors.New("host unreachable")
 
 // hostCacheEntry stores one prior failure for a host. originalErr is
 // preserved so future short-circuits can return the same diagnostic

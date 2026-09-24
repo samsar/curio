@@ -167,14 +167,6 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlp
 	return &meta, nil
 }
 
-// PermanentError signals the job system not to retry.
-type PermanentError struct {
-	Err error
-}
-
-func (e *PermanentError) Error() string { return e.Err.Error() }
-func (e *PermanentError) Unwrap() error { return e.Err }
-
 var permanentPatterns = []string{
 	"video unavailable",
 	"private video",

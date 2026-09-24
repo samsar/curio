@@ -5,8 +5,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/time/rate"
 
@@ -16,13 +19,15 @@ import (
 	"github.com/samsar/curio/internal/urlutil"
 )
 
+// newTestGitHub points a GitHub fetcher at srv with no pacing and a fake
+// clock, so rate-limit waits are recorded instead of slept.
 func newTestGitHub(t *testing.T, srv *httptest.Server) *GitHub {
 	t.Helper()
 	return &GitHub{
 		baseURL: srv.URL,
 		client:  srv.Client(),
-		timeout: 5_000_000_000,
 		limiter: rate.NewLimiter(rate.Inf, 1),
+		clock:   newFakeClock().clock(),
 		log:     slog.Default(),
 	}
 }
@@ -116,9 +121,14 @@ func TestGitHubFetch_NotFound(t *testing.T) {
 	assert.True(t, errors.As(err, &pe), "404 should be permanent")
 }
 
+// TestGitHubFetch_RateLimit: a primary rate limit whose reset time is
+// already past still waits a minute between attempts (never zero), gives up
+// after maxAPIRetries, and stays retryable for the job queue.
 func TestGitHubFetch_RateLimit(t *testing.T) {
+	var hits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
 		w.Header().Set("X-RateLimit-Remaining", "0")
 		w.Header().Set("X-RateLimit-Reset", "1700000000")
 		w.WriteHeader(http.StatusForbidden)
@@ -128,12 +138,57 @@ func TestGitHubFetch_RateLimit(t *testing.T) {
 	defer srv.Close()
 
 	g := newTestGitHub(t, srv)
+	fc := newFakeClock()
+	g.clock = fc.clock()
 	_, err := g.Fetch(t.Context(), "https://github.com/owner/repo")
 	require.Error(t, err)
 
 	var pe *PermanentError
 	assert.False(t, errors.As(err, &pe), "rate limit should be transient")
 	assert.Contains(t, err.Error(), "rate limited")
+	assert.Equal(t, int32(maxAPIRetries), hits.Load())
+	assert.Equal(t, []time.Duration{time.Minute, time.Minute}, fc.slept())
+}
+
+// TestGitHub_StatusMatrix: 404 and other deterministic 4xx answers are
+// permanent (GitHub returns 410 for deleted issues and 451 for DMCA'd
+// repos); server errors stay retryable. Error text quotes at most
+// maxErrorBody bytes of the response body.
+func TestGitHub_StatusMatrix(t *testing.T) {
+	cases := []struct {
+		status    int
+		permanent bool
+	}{
+		{http.StatusNotFound, true},
+		{http.StatusBadRequest, true},
+		{http.StatusGone, true},
+		{http.StatusUnprocessableEntity, true},
+		{http.StatusUnavailableForLegalReasons, true},
+		{http.StatusUnauthorized, true},
+		{http.StatusInternalServerError, false},
+		{http.StatusBadGateway, false},
+		{http.StatusServiceUnavailable, false},
+	}
+	bigBody := strings.Repeat("x", 10*maxErrorBody)
+	for _, tc := range cases {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(bigBody))
+			}))
+			defer srv.Close()
+
+			_, err := newTestGitHub(t, srv).Fetch(t.Context(), "https://github.com/owner/repo/issues/1")
+			require.Error(t, err)
+
+			var pe *PermanentError
+			assert.Equal(t, tc.permanent, errors.As(err, &pe), "permanent: %v", err)
+			var se *HTTPStatusError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, tc.status, se.StatusCode)
+			assert.Less(t, len(err.Error()), maxErrorBody+256, "error text must not embed the whole body")
+		})
+	}
 }
 
 func TestGitHubFetch_NoReadme(t *testing.T) {

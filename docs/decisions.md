@@ -1915,3 +1915,32 @@ Two more traps shaped the recipe:
 A failed rebuild leaves its connection mid-transaction with foreign keys
 off. The daemon therefore never reuses the DB after a `Migrate` error; it
 exits.
+
+---
+
+## Fetcher errors: one typed status model
+
+**Decision:**
+
+- Every HTTP failure a fetcher returns carries a
+  `*fetcher.HTTPStatusError{StatusCode, URL, RetryAfter}`. `URL` is the
+  URL that answered, after redirects. `RetryAfter` comes from the
+  `Retry-After` header, as delta-seconds or an HTTP-date.
+- One rule, `retryableStatus`, decides retry vs. permanent: 408, 421, 425,
+  429 and every 5xx except 501 and 505 are retried. Every other status is
+  a `PermanentError`.
+- The Native fetcher applies its fetch policy before that rule: 403 and
+  503 are `ErrAntiBot` and stay retryable, because Jina may get through.
+  404 and 410 are `ErrDeadLink` permanents with dead-link detection on and
+  retryable with it off. GitHub treats 404 as permanent and tags rate
+  limits for `apiGet`; everything else follows the rule.
+- `PermanentError` and the sentinels live in `internal/fetcher/errors.go`.
+  Error wraps use `%w`, twice when there are two causes.
+- Error text quotes at most 512 bytes of a response body.
+
+**Why:** Native retried 401, 402 and 451 five times over about 15
+minutes, like a 500. GitHub made every status it didn't list retryable, so
+a deleted issue (410) or a DMCA-blocked repo (451) burned the whole retry
+budget. Jina kept a status map of its own. Errors built with `%v` or plain
+strings couldn't be matched with `errors.Is`/`errors.As`, and GitHub
+errors pasted whole response bodies into `jobs.last_error`.
