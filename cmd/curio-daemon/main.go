@@ -27,16 +27,16 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
+	logLevel := new(slog.LevelVar)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 
-	if err := run(); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(logLevel); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("daemon exited with error", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(logLevel *slog.LevelVar) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -51,8 +51,9 @@ func run() error {
 			return err
 		}
 		slog.Info("initializing curio home", "path", homePath)
-		// Stub model + dim; will be re-checked once config loads.
-		home, err = curiohome.Init(homePath, "nomic-embed-text", 768)
+		// Default model + dim; re-checked against config once it loads.
+		defaults := config.Default().Embedding
+		home, err = curiohome.Init(homePath, defaults.Model, defaults.Dim)
 		if err != nil {
 			return err
 		}
@@ -62,6 +63,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	logLevel.Set(cfg.Daemon.SlogLevel())
 
 	// Cross-check the marker file against config; if they disagree, the
 	// user changed config without reindexing. Fail loudly.

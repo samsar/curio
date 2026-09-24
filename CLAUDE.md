@@ -87,6 +87,7 @@ A hit on the in-memory host-failure cache (`hostFailureCache`, 15-min TTL; kinds
 - `internal/store/` — interfaces (`store.go`) + sqlite impls (`sqlite/`). The interface boundary is real; other packages should never import `internal/store/sqlite` directly except `cmd/curio-daemon/main.go` and tests.
 - `internal/jobs/` — Worker loop + handlers. `OnPermanentFailure` hooks are wired in `Register`.
 - `internal/api/` — HTTP handlers, RFC 7807 errors, chi router.
+- `internal/config/` — `config.yaml` loader. Decoding is strict: an unknown key fails the load. `daemon.workers` is a deprecated alias that `Load` folds into `fetch_workers`/`index_workers`; `Validate` never mutates. `embedding.dim` must equal `store.EmbeddingDim` (768).
 - `internal/cli/` — Cobra commands. Pattern: each command file (`add.go`, `docs.go`, etc.) exports `newXxxCmd()` and `root.go` adds them.
 - `internal/fetcher/` — Native (Go) and Web2MD (subprocess) backends behind the same `Fetcher` interface.
 - `internal/indexer/` — Chunker (paragraph-aware with hard char cap) + orchestrator (chunk → embed → store).

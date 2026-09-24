@@ -21,6 +21,12 @@ var (
 	ErrConflict = errors.New("store: conflict")
 )
 
+// EmbeddingDim is the width of the vector index: chunks_vec is created as
+// FLOAT[768] in migrations/001_initial.sql. Every stored and query embedding
+// must have exactly this many components; a different width means rebuilding
+// that table.
+const EmbeddingDim = 768
+
 // State / kind / status constants. Keep in sync with CHECK constraints in
 // migrations/001_initial.sql.
 const (

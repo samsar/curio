@@ -29,8 +29,12 @@ Export your bookmarks from any browser as HTML (Chrome → Bookmark Manager →
 ⋮ → Export bookmarks). The HTML export works across all browsers and is the
 fastest way to load your corpus.
 
-Time budget: with 4 workers (default) and the native fetcher, expect roughly
-1–2 seconds per bookmark — so 1000 bookmarks ≈ 4–8 minutes.
+Time budget: with the default pools (16 fetch workers, 4 index workers; set
+`daemon.fetch_workers` / `daemon.index_workers` in `~/.curio/config.yaml`) and
+the native fetcher, expect roughly 1–2 seconds per bookmark — so 1000
+bookmarks ≈ 4–8 minutes. The older single `daemon.workers` setting is still
+read, split 75/25 between the two pools, but can't be combined with the new
+ones.
 
 ## More commands
 

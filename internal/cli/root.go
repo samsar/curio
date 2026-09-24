@@ -93,12 +93,12 @@ func buildContext(homeFlag, daemonURL string) (*Context, error) {
 	}
 
 	// Auto-init on first run so users don't have to think about it. Use
-	// the documented defaults (nomic-embed-text / 768); the daemon
-	// re-checks against config on startup and fails loudly if it
-	// disagrees.
+	// the default embedding model and dimension; the daemon re-checks
+	// against config on startup and fails loudly if it disagrees.
 	home, err := curiohome.Open(homePath)
 	if errors.Is(err, curiohome.ErrNotInitialized) {
-		home, err = curiohome.Init(homePath, "nomic-embed-text", 768)
+		defaults := config.Default().Embedding
+		home, err = curiohome.Init(homePath, defaults.Model, defaults.Dim)
 		if err != nil {
 			return nil, fmt.Errorf("initialize %s: %w", homePath, err)
 		}

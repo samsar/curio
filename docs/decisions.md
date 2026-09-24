@@ -530,6 +530,12 @@ higher just makes them sit in `Embed`. If the user runs on GPU-heavy
 hardware or switches to a cloud embedder, raising the config is one
 edit.
 
+**Revised:** the single pool was split into `daemon.fetch_workers`
+(default 16, network-bound) and `daemon.index_workers` (default 4,
+Ollama-bound) after FIFO claiming let fetches starve indexing, plus a
+one-worker cluster pool. `daemon.workers` survives only as a deprecated
+alias: see "Config: strict keys, legacy `workers` folded in at load" below.
+
 ---
 
 ## Marker file's schema_version is synced from the DB after migrations
@@ -1619,6 +1625,42 @@ same posture as dead links. The
 per host after the TTL is still useful for flaky origins),
 `ErrDeadLink` is still not host-cached, and MaxAttempts / backoff are
 untouched for everything that isn't a cache hit.
+
+---
+
+## Config: strict keys, legacy `workers` folded in at load
+
+**Decision:**
+
+- `config.yaml` is decoded strictly (`KnownFields`). An unknown key at any
+  depth is a load error that names the key. Empty and comment-only files
+  still mean "all defaults".
+- `Load` translates the deprecated `daemon.workers`, keyed on whether the
+  key is present in the file rather than on its value:
+  - On its own it splits 75/25 into fetch and index, at least 1 each
+    (`workers: 8` gives 6/2).
+  - Combined with `fetch_workers` or `index_workers` it is an error.
+  - `workers <= 0` is an error, and so are `fetch_workers <= 0` and
+    `index_workers <= 0`.
+  - `Validate` no longer mutates anything.
+- `daemon.log_level` takes effect, through a `slog.LevelVar` set right
+  after load.
+- `embedding.dim` must equal `store.EmbeddingDim` (768, the width
+  `chunks_vec` was created with). `embedding.provider` and
+  `generation.provider` must be `ollama`.
+
+**Why:**
+
+- The legacy split ran in `Validate` on a value receiver, so its result
+  was computed on a copy and thrown away.
+- `Load` decodes on top of `Default()`, so `workers: 8` alone silently ran
+  16/4, and `workers: 8, fetch_workers: 0, index_workers: 0` ran zero
+  workers.
+- A typo'd section (`embeding:`) silently fell back to defaults, the same
+  failure `fetcher_rules.yaml` already parses strictly to avoid.
+- `dim: 1024` loaded fine and then failed every insert into the 768-wide
+  vector table.
+- A provider value was never read, so any value was silently accepted.
 
 ---
 

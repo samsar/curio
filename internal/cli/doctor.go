@@ -115,8 +115,9 @@ func runDoctorChecks(httpCtx context.Context, c *Context, r *doctorReport) {
 			"edit "+c.Home.ConfigPath())
 	} else {
 		r.add("config", statusOK,
-			fmt.Sprintf("workers=%d, fetcher=%s, model=%s",
-				c.Config.Daemon.Workers, c.Config.Fetcher.Default, c.Config.Embedding.Model), "")
+			fmt.Sprintf("fetch_workers=%d, index_workers=%d, fetcher=%s, model=%s",
+				c.Config.Daemon.FetchWorkers, c.Config.Daemon.IndexWorkers,
+				c.Config.Fetcher.Default, c.Config.Embedding.Model), "")
 	}
 
 	// 3. daemon reachable

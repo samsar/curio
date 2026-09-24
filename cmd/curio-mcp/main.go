@@ -55,7 +55,8 @@ func setup() (*client.Client, error) {
 	}
 	home, err := curiohome.Open(homePath)
 	if errors.Is(err, curiohome.ErrNotInitialized) {
-		home, err = curiohome.Init(homePath, "nomic-embed-text", 768)
+		defaults := config.Default().Embedding
+		home, err = curiohome.Init(homePath, defaults.Model, defaults.Dim)
 	}
 	if err != nil {
 		return nil, err
