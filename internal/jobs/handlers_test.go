@@ -295,18 +295,17 @@ func TestWorker_FullFetchIndexChain(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = worker.Run(ctx); close(done) }()
 
-	doneJobs := func() int {
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		var n int
-		require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
-		return n
-	}
-	require.Eventually(t, func() bool { return doneJobs() == 2 }, 5*time.Second, 20*time.Millisecond,
-		"fetch + index should both be done")
+		require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
+		assert.Equal(c, 2, n, "fetch + index should both be done")
+	}, 5*time.Second, 20*time.Millisecond)
 
 	cancel()
 	<-done
 
-	got, _ := deps.Documents.GetByID(context.Background(), doc.ID)
+	got, err := deps.Documents.GetByID(context.Background(), doc.ID)
+	require.NoError(t, err)
 	require.Equal(t, store.DocStateFetched, got.State)
 }
 

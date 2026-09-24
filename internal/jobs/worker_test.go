@@ -41,6 +41,22 @@ func getJob(t *testing.T, q store.JobQueue, id string) *store.Job {
 	return j
 }
 
+// waitForJob polls until cond holds for the job's current row. Lookup
+// failures go to the per-attempt collector: require on t from the polling
+// goroutine couldn't stop the test, only hide the error until the timeout.
+func waitForJob(t *testing.T, q store.JobQueue, id string, cond func(*store.Job) bool) {
+	t.Helper()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		j, err := q.GetByID(context.Background(), id)
+		require.NoError(c, err)
+		assert.True(c, cond(j), "job %s: status %s", id, j.Status)
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func statusIs(status string) func(*store.Job) bool {
+	return func(j *store.Job) bool { return j.Status == status }
+}
+
 // TestWorker_JobFinishedDuringShutdownIsDone: a handler that completes after
 // shutdown has begun still gets its success recorded. Recording it on the
 // already-cancelled worker context used to fail with context.Canceled and
@@ -152,7 +168,7 @@ func TestWorker_RetryableFailureConsumesAttempt(t *testing.T) {
 	})
 
 	stop := startWorker(t, w)
-	require.Eventually(t, func() bool { return getJob(t, q, job.ID).LastError != nil }, 5*time.Second, 10*time.Millisecond)
+	waitForJob(t, q, job.ID, func(j *store.Job) bool { return j.LastError != nil })
 	stop()
 
 	got := getJob(t, q, job.ID)
@@ -213,10 +229,8 @@ func TestWorker_PanicIsContained(t *testing.T) {
 			})
 
 			stop := startWorker(t, w)
-			require.Eventually(t, func() bool {
-				return getJob(t, q, bad.ID).Status == store.JobStatusFailed &&
-					getJob(t, q, good.ID).Status == store.JobStatusDone
-			}, 5*time.Second, 10*time.Millisecond)
+			waitForJob(t, q, bad.ID, statusIs(store.JobStatusFailed))
+			waitForJob(t, q, good.ID, statusIs(store.JobStatusDone))
 			stop()
 
 			gotBad := getJob(t, q, bad.ID)
