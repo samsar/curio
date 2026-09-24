@@ -133,6 +133,33 @@ func TestFetchHandler_HappyPath(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+// TestFetchHandler_ExtractionStatus: a result flagged Partial (fetched,
+// but missing its primary content) is stored as a partial extraction.
+func TestFetchHandler_ExtractionStatus(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial=%v", partial), func(t *testing.T) {
+			deps, _, ff := newTestDeps(t)
+			ff.res.Partial = partial
+			ctx := context.Background()
+			doc := &store.Document{TenantID: "local", URL: "https://example.com/video", ContentType: store.ContentTypeVideo}
+			require.NoError(t, deps.Documents.Upsert(ctx, doc))
+
+			payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
+			require.NoError(t, FetchHandler(deps)(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}))
+
+			got, err := deps.Documents.GetByID(ctx, doc.ID)
+			require.NoError(t, err)
+			ext, err := deps.Extractions.GetByID(ctx, *got.CurrentExtractionID)
+			require.NoError(t, err)
+			want := store.ExtractionStatusOK
+			if partial {
+				want = store.ExtractionStatusPartial
+			}
+			assert.Equal(t, want, ext.Status)
+		})
+	}
+}
+
 func TestFetchHandler_FetcherError_Retryable(t *testing.T) {
 	deps, _, ff := newTestDeps(t)
 	ff.res = nil
@@ -192,6 +219,24 @@ func TestMarkDocFailed_DeadLinkGoesDead(t *testing.T) {
 	// Any other cause → failed.
 	require.NoError(t, MarkDocFailed(deps)(ctx, job, errors.New("some other permanent failure")))
 	got, err = deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateFailed, got.State)
+}
+
+// TestMarkDocFailed_FinalLoginWallGoesFailed: a page-level login wall that
+// the fetcher made final is a failed document, not a dead one; the page may
+// well exist behind the wall.
+func TestMarkDocFailed_FinalLoginWallGoesFailed(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	ctx := context.Background()
+
+	doc := &store.Document{TenantID: "local", URL: "https://x/thin", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
+
+	cause := &fetcher.PermanentError{Err: fmt.Errorf("native: %w (extracted text < 500 bytes)", fetcher.ErrLoginWall)}
+	require.NoError(t, MarkDocFailed(deps)(ctx, &store.Job{Payload: payload}, cause))
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFailed, got.State)
 }

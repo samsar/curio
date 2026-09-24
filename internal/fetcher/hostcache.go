@@ -1,22 +1,24 @@
 package fetcher
 
 import (
-	"errors"
+	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
 
 // HostFailureKind classifies why a host previously failed. We only cache
 // kinds that are host-wide ("this whole site rejects us") rather than
-// path-specific ("this URL was 404"). 404s and timeouts aren't cached
-// because a 404 on /foo doesn't tell us anything about /bar.
+// path-specific ("this URL was 404"). 404s, thin pages and timeouts aren't
+// cached because a failure on /foo doesn't tell us anything about /bar.
+// See hostVerdict for how a failure is classified.
 type HostFailureKind int
 
 const (
-	HostFailUnreachable HostFailureKind = iota // DNS lookup failed, connection refused
+	HostFailUnreachable HostFailureKind = iota // name doesn't exist, connection refused, no route
 	HostFailAntiBot                            // 403 / 503 — Cloudflare / WAF style
-	HostFailLoginWall                          // thin content / paywall — readability + Jina both failed
+	HostFailLoginWall                          // redirected onto the site's own login page
 )
 
 func (k HostFailureKind) String() string {
@@ -32,10 +34,18 @@ func (k HostFailureKind) String() string {
 	}
 }
 
-// ErrHostUnreachable is wrapped by tryReadability for DNS / dial errors.
-// Distinct from ErrAntiBot because we shouldn't bother with Jina either
-// — Jina can't reach a host that doesn't exist any more than we can.
-var ErrHostUnreachable = errors.New("host unreachable")
+// sentinel is the error a cache hit of this kind wraps.
+func (k HostFailureKind) sentinel() error {
+	switch k {
+	case HostFailUnreachable:
+		return ErrHostUnreachable
+	case HostFailAntiBot:
+		return ErrAntiBot
+	case HostFailLoginWall:
+		return ErrLoginWall
+	}
+	return fmt.Errorf("unknown host failure kind %d", int(k))
+}
 
 // hostCacheEntry stores one prior failure for a host. originalErr is
 // preserved so future short-circuits can return the same diagnostic
@@ -104,12 +114,13 @@ func (c *hostFailureCache) Put(host string, kind HostFailureKind, errMsg string)
 	}
 }
 
-// hostOf extracts the lowercased host from a URL string. Returns "" on
-// any parse failure; callers should treat that as "no caching."
+// hostOf extracts the lowercased hostname (no port) from a URL string, the
+// host cache's key. Returns "" on any parse failure; callers should treat
+// that as "no caching."
 func hostOf(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return ""
 	}
-	return u.Hostname()
+	return strings.ToLower(u.Hostname())
 }

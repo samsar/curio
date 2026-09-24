@@ -140,18 +140,18 @@ _None — Firefox landed (see table above). **M1 is complete.**_
 
 | Feature | Package / file | Notes |
 |---|---|---|
-| Native fetcher (v1 default) | `internal/fetcher/native.go` | Go-native: net/http + Readability + html-to-markdown; replaced the Node `web2md` as the default. Jina Reader fallback for anti-bot / login-wall cases |
+| Native fetcher (v1 default) | `internal/fetcher/native.go` | Go-native: net/http + Readability + html-to-markdown; replaced the Node `web2md` as the default. Jina Reader fallback for anti-bot / login-wall cases, paced by a shared limiter (20/min, 200/min with `jina_api_key`) and 429 cooldown. At most 2 origin requests in flight per host |
 | Chrome fingerprint backend | `internal/fetcher/transport.go` | uTLS + HTTP/2 via `bogdanfinn/tls-client` to defeat JA3/Akamai bot detection; `fetcher.native.backend` = `chrome` (default) \| `stock`. h3 (QUIC) responses decompressed defensively; live integration test under `make test-integration` |
 | PDF fetcher (two-tier) | `internal/fetcher/pdf.go`, `native.go` | `application/pdf` (or a `.pdf` URL) → pure-Go local extraction (`ledongthuc/pdf`), falling back to Jina. Other non-HTML binary (images, octet-stream) rejected as a permanent failure. Content type stored as `pdf` |
-| PatternDispatcher | `internal/fetcher/fetcher.go` | Host-based routing; first match wins, fallback to Native |
-| YouTube fetcher | `internal/fetcher/youtube.go` | yt-dlp for metadata + captions; VTT parser; auto/manual subs |
+| Host-based routing | `internal/fetcher/rules.go` | Superseded the original `PatternDispatcher`: `RulesDispatcher` with built-in host rules (GitHub, YouTube) when `fetcher_rules.yaml` is absent; first match wins, fallback to the default fetcher |
+| YouTube fetcher | `internal/fetcher/youtube.go` | yt-dlp for metadata + captions; VTT parser; uploaded captions preferred over automatic (told apart via info.json); no transcript → description-only `partial` extraction |
 | YouTube URL normalization | `internal/urlutil/normalize.go` | `youtu.be`, shorts, mobile, embed → canonical `watch?v=ID` |
 | YouTube config | `internal/config/config.go` | `bin`, `timeout_seconds`, `sub_langs` |
 | GitHub fetcher | `internal/fetcher/github.go` | REST API for repo metadata + README; file URLs fetch specific files |
 | GitHub URL parsing | `internal/urlutil/normalize.go` | `ParseGitHubURL` extracts owner/repo/type/ref/path |
 | GitHub config | `internal/config/config.go` | `token` (optional, also `CURIO_GITHUB_TOKEN` env), `timeout_seconds` |
-| Per-fetcher rate limiting | `internal/fetcher/fetcher.go` | `RateLimited` wrapper using `golang.org/x/time/rate` token bucket |
-| GitHub internal rate limiting | `internal/fetcher/github.go` | 1.5 API calls/s at `apiGet` level; inline retry with `Retry-After` support |
+| Per-fetcher rate limiting | `internal/fetcher/fetcher.go`, `youtube.go` | `RateLimited` wrapper using `golang.org/x/time/rate` token bucket (start rate); YouTube also caps concurrent yt-dlp processes at 2 |
+| GitHub internal rate limiting | `internal/fetcher/github.go` | 1.5 API calls/s at `apiGet` level; primary and secondary rate limits detected; shared cooldown waited out inline up to 2 min, longer ones fail fast and retry via the queue |
 | yt-dlp stderr fix | `internal/fetcher/youtube.go` | Extract ERROR lines only; ignore WARNING lines on failure |
 
 | `fetcher_rules.yaml` | `internal/fetcher/rules.go` | User-configurable routing under `$CURIO_HOME/fetcher_rules.yaml`: `host` / `host_suffix` / `host_in` / catch-all matchers, first match wins. Hot-reloaded via throttled stat-on-dispatch; invalid edits keep the last good rules; unknown fetcher names skip the rule with a warning. Missing file = built-in defaults |

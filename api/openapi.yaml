@@ -113,7 +113,15 @@ paths:
               type: object
               required: [url]
               properties:
-                url:         { type: string, format: uri }
+                url:
+                  type: string
+                  format: uri
+                  description: |
+                    Absolute http(s) URL with a host. It is normalized
+                    (lowercased host, default port and fragment dropped,
+                    tracking parameters removed, remaining query parameters
+                    sorted) and the normalized form is both the dedup key and
+                    the URL that gets fetched.
                 title:       { type: string }
                 folder_path: { type: string }
                 tags:        { type: array, items: { type: string } }
@@ -123,6 +131,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BookmarkCreated" }
+        "400":
+          description: url is missing, malformed, not http(s), or has no host
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
         "409":
           description: A bookmark for this normalized URL already exists for this tenant+source
           content:

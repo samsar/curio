@@ -92,7 +92,11 @@ type Native struct {
 	TimeoutSeconds int    `yaml:"timeout_seconds"`
 	JinaFallback   bool   `yaml:"jina_fallback"`
 	JinaBaseURL    string `yaml:"jina_base_url"` // override for offline tests
-	UserAgent      string `yaml:"user_agent"`
+	// JinaAPIKey raises Jina Reader's rate limit (20 → 500 requests/min
+	// upstream; curio paces keyed calls at 200/min). Optional; also read
+	// from CURIO_JINA_API_KEY.
+	JinaAPIKey string `yaml:"jina_api_key"`
+	UserAgent  string `yaml:"user_agent"`
 	// DeadLinkDetection classifies hard 404/410s and detected soft 404s
 	// as permanently dead (doc state `dead`, no retries, no Jina).
 	// Default true; the kill switch exists because the soft-404 title

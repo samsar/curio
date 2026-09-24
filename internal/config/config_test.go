@@ -53,6 +53,8 @@ embedding:
   dim: 768
   base_url: "http://192.168.1.20:11434"
 fetcher:
+  native:
+    jina_api_key: "jina_test_key"
   web2md:
     bin: "/usr/local/bin/web2md"
     timeout_seconds: 60
@@ -72,6 +74,8 @@ chunking:
 	assert.Equal(t, "127.0.0.1:7000", got.Daemon.Listen)
 	assert.Equal(t, "debug", got.Daemon.LogLevel)
 	assert.Equal(t, "http://192.168.1.20:11434", got.Embedding.BaseURL)
+	assert.Equal(t, "jina_test_key", got.Fetcher.Native.JinaAPIKey)
+	assert.True(t, got.Fetcher.Native.JinaFallback, "untouched sibling keeps default")
 	assert.Equal(t, "/usr/local/bin/web2md", got.Fetcher.Web2MD.Bin)
 	assert.Equal(t, 60, got.Fetcher.Web2MD.TimeoutSeconds)
 	assert.Equal(t, 20, got.Search.DefaultK)
@@ -231,6 +235,7 @@ func TestLoad_StrictKeys(t *testing.T) {
 	}{
 		{name: "top-level typo", yaml: "embeding:\n  model: x\n", wantKey: "embeding"},
 		{name: "nested typo", yaml: "fetcher:\n  native:\n    timeout_secs: 5\n", wantKey: "timeout_secs"},
+		{name: "jina key typo", yaml: "fetcher:\n  native:\n    jina_key: x\n", wantKey: "jina_key"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

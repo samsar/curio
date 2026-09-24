@@ -1,12 +1,18 @@
 package fetcher
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/samsar/curio/internal/urlutil"
 	"github.com/stretchr/testify/assert"
@@ -161,46 +167,7 @@ func TestFormatDuration(t *testing.T) {
 }
 
 func TestYouTubeFetch_FakeBin(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Write a fake yt-dlp script that outputs JSON and a VTT file.
-	fakeBin := filepath.Join(tmpDir, "fake-yt-dlp")
-	script := `#!/bin/sh
-# Parse the output dir from the -o flag
-OUTDIR=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -o) OUTDIR="$2"; shift 2;;
-        *) shift;;
-    esac
-done
-
-# Derive the base path (strip the template suffix)
-BASEDIR=$(dirname "$OUTDIR")
-
-# Write metadata JSON to info.json file (--write-info-json behavior)
-cat > "${BASEDIR}/test_id.info.json" <<'ENDJSON'
-{"title":"Test Video","channel":"Test Channel","channel_id":"UC123","upload_date":"20240315","duration":120.0,"description":"A test video description.","tags":["test","video"],"categories":["Education"],"view_count":1000,"like_count":50,"language":"en"}
-ENDJSON
-
-# Write a VTT file
-cat > "${BASEDIR}/test_id.en.vtt" <<'ENDVTT'
-WEBVTT
-Kind: captions
-Language: en
-
-00:00:01.000 --> 00:00:04.000
-Hello world this is a test transcript.
-
-00:00:04.500 --> 00:00:08.000
-It has multiple lines of content.
-ENDVTT
-`
-	require.NoError(t, os.WriteFile(fakeBin, []byte(script), 0o755))
-
-	yt := NewYouTube(YouTubeOptions{
-		Bin: fakeBin,
-	})
+	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
 
 	result, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
 	require.NoError(t, err)
@@ -216,21 +183,106 @@ ENDVTT
 	assert.Equal(t, "test_id", result.Meta["video_id"])
 }
 
-func TestYouTubeFetch_PermanentError(t *testing.T) {
-	tmpDir := t.TempDir()
-	fakeBin := filepath.Join(tmpDir, "fake-yt-dlp")
-	script := `#!/bin/sh
-echo "ERROR: Video unavailable" >&2
-exit 1
-`
-	require.NoError(t, os.WriteFile(fakeBin, []byte(script), 0o755))
+// TestYouTubeFetch_TranscriptSource: the transcript source comes from which
+// tracks info.json lists, uploaded captions win over automatic ones, and a
+// video without captions is stored as a partial fetch of its description.
+func TestYouTubeFetch_TranscriptSource(t *testing.T) {
+	cases := []struct {
+		subs    string
+		source  string
+		picked  string
+		partial bool
+	}{
+		{"manual:en,auto:en", "manual", "manual en", false},
+		{"auto:en", "auto", "auto en", false},
+		{"manual:en,auto:en-orig", "manual", "manual en.", false},
+		{"auto:en-orig,auto:en", "auto", "auto en.", false},
+		{"none", "none", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.subs, func(t *testing.T) {
+			t.Setenv(fakeSubsEnv, tc.subs)
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
+			res, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+			require.NoError(t, err)
 
-	yt := NewYouTube(YouTubeOptions{Bin: fakeBin})
+			assert.Equal(t, tc.source, res.Meta["transcript_source"])
+			assert.Equal(t, tc.partial, res.Partial)
+			assert.Contains(t, res.Markdown, "A test video description.")
+			if tc.picked != "" {
+				assert.Contains(t, res.Markdown, "This track is "+tc.picked)
+			} else {
+				assert.NotContains(t, res.Markdown, "## Transcript")
+			}
+		})
+	}
+}
+
+func TestYouTubeFetch_PermanentError(t *testing.T) {
+	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp-unavailable"), Timeout: 30 * time.Second})
 	_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=gone123")
 	require.Error(t, err)
 
 	var pe *PermanentError
 	assert.True(t, errors.As(err, &pe), "should be a PermanentError")
+	assert.Contains(t, err.Error(), "ERROR: Video unavailable")
+	assert.NotContains(t, err.Error(), "WARNING")
+}
+
+// TestYouTubeFetch_MaxConcurrent: no more than MaxConcurrent yt-dlp
+// processes overlap, and a fetch waiting for a slot honors its context.
+func TestYouTubeFetch_MaxConcurrent(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "runs.log")
+	t.Setenv(fakeLogEnv, logPath)
+	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second, MaxConcurrent: 2})
+
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Go(func() {
+			_, err := yt.Fetch(context.Background(), "https://www.youtube.com/watch?v=test_id")
+			assert.NoError(t, err)
+		})
+	}
+	require.Eventually(t, func() bool { return len(yt.slots) == cap(yt.slots) }, 10*time.Second, time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := yt.Fetch(ctx, "https://www.youtube.com/watch?v=test_id")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	wg.Wait()
+
+	assert.LessOrEqual(t, maxOverlap(t, logPath), 2)
+}
+
+// maxOverlap reads the fake's start/end log and returns the most runs
+// that were in progress at once.
+func maxOverlap(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	type event struct {
+		at    int64
+		delta int
+	}
+	var events []event
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		kind, at, ok := strings.Cut(line, " ")
+		require.True(t, ok, line)
+		nanos, err := strconv.ParseInt(at, 10, 64)
+		require.NoError(t, err)
+		delta := 1
+		if kind == "end" {
+			delta = -1
+		}
+		events = append(events, event{nanos, delta})
+	}
+	require.Len(t, events, 12)
+	slices.SortFunc(events, func(a, b event) int { return cmp.Compare(a.at, b.at) })
+	running, peak := 0, 0
+	for _, e := range events {
+		running += e.delta
+		peak = max(peak, running)
+	}
+	return peak
 }
 
 func TestYouTubeFetch_PlaylistRejected(t *testing.T) {
@@ -242,52 +294,6 @@ func TestYouTubeFetch_PlaylistRejected(t *testing.T) {
 	assert.True(t, errors.As(err, &pe), "playlist-only URLs should be permanent errors")
 }
 
-func TestPatternDispatcher(t *testing.T) {
-	ytFetcher := &stubFetcher{name: "youtube"}
-	defaultFetcher := &stubFetcher{name: "native"}
-
-	d := &PatternDispatcher{
-		Rules: []Rule{
-			{Hosts: YouTubeHosts, Fetcher: ytFetcher},
-		},
-		Fallback: defaultFetcher,
-	}
-
-	cases := []struct {
-		url  string
-		want string
-	}{
-		{"https://www.youtube.com/watch?v=abc", "youtube"},
-		{"https://youtube.com/watch?v=abc", "youtube"},
-		{"https://m.youtube.com/watch?v=abc", "youtube"},
-		{"https://youtu.be/abc", "youtube"},
-		{"https://example.com/article", "native"},
-		{"https://martinfowler.com/articles/feature-toggles.html", "native"},
-	}
-	for _, tc := range cases {
-		f, err := d.For(tc.url)
-		require.NoError(t, err)
-		assert.Equal(t, tc.want, f.Name(), "url=%s", tc.url)
-	}
-}
-
-func TestPatternDispatcher_NoFallback(t *testing.T) {
-	d := &PatternDispatcher{
-		Rules: []Rule{
-			{Hosts: []string{"example.com"}, Fetcher: &stubFetcher{name: "test"}},
-		},
-	}
-	_, err := d.For("https://other.com/page")
-	assert.ErrorIs(t, err, ErrFetcherNotFound)
-}
-
-type stubFetcher struct{ name string }
-
-func (s *stubFetcher) Name() string { return s.name }
-func (s *stubFetcher) Fetch(_ context.Context, _ string) (*Result, error) {
-	return nil, errors.New("stub")
-}
-
 func countOccurrences(s, sub string) int {
 	count := 0
 	for i := 0; i+len(sub) <= len(s); i++ {
@@ -296,4 +302,25 @@ func countOccurrences(s, sub string) int {
 		}
 	}
 	return count
+}
+
+// TestYouTubeFetch_InvalidVideoIDIsPermanent: text in the video-ID position
+// that isn't a video ID is never handed to yt-dlp.
+func TestYouTubeFetch_InvalidVideoIDIsPermanent(t *testing.T) {
+	yt := NewYouTube(YouTubeOptions{Bin: "yt-dlp-must-not-run"})
+	_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=abc%26list%3Dx")
+	var pe *PermanentError
+	require.ErrorAs(t, err, &pe)
+}
+
+// TestFindTranscript_IOErrors: a temp dir or subtitle file that can't be
+// read is an error, not a silent "no transcript".
+func TestFindTranscript_IOErrors(t *testing.T) {
+	_, _, err := findTranscript(filepath.Join(t.TempDir(), "missing"), &ytdlpMeta{})
+	require.Error(t, err)
+
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "vid.en.vtt"), 0o700)) // unreadable as a file
+	_, _, err = findTranscript(dir, &ytdlpMeta{})
+	require.Error(t, err)
 }

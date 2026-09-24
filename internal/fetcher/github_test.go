@@ -5,8 +5,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/time/rate"
 
@@ -16,13 +20,16 @@ import (
 	"github.com/samsar/curio/internal/urlutil"
 )
 
+// newTestGitHub points a GitHub fetcher at srv with no pacing and a fake
+// clock, so rate-limit waits are recorded instead of slept.
 func newTestGitHub(t *testing.T, srv *httptest.Server) *GitHub {
 	t.Helper()
 	return &GitHub{
 		baseURL: srv.URL,
 		client:  srv.Client(),
-		timeout: 5_000_000_000,
 		limiter: rate.NewLimiter(rate.Inf, 1),
+		maxBody: maxResponseBytes,
+		clock:   newFakeClock().clock(),
 		log:     slog.Default(),
 	}
 }
@@ -116,9 +123,14 @@ func TestGitHubFetch_NotFound(t *testing.T) {
 	assert.True(t, errors.As(err, &pe), "404 should be permanent")
 }
 
+// TestGitHubFetch_RateLimit: a primary rate limit whose reset time is
+// already past still waits a minute between attempts (never zero), gives up
+// after maxAPIRetries, and stays retryable for the job queue.
 func TestGitHubFetch_RateLimit(t *testing.T) {
+	var hits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
 		w.Header().Set("X-RateLimit-Remaining", "0")
 		w.Header().Set("X-RateLimit-Reset", "1700000000")
 		w.WriteHeader(http.StatusForbidden)
@@ -128,12 +140,57 @@ func TestGitHubFetch_RateLimit(t *testing.T) {
 	defer srv.Close()
 
 	g := newTestGitHub(t, srv)
+	fc := newFakeClock()
+	g.clock = fc.clock()
 	_, err := g.Fetch(t.Context(), "https://github.com/owner/repo")
 	require.Error(t, err)
 
 	var pe *PermanentError
 	assert.False(t, errors.As(err, &pe), "rate limit should be transient")
 	assert.Contains(t, err.Error(), "rate limited")
+	assert.Equal(t, int32(maxAPIRetries), hits.Load())
+	assert.Equal(t, []time.Duration{time.Minute, time.Minute}, fc.slept())
+}
+
+// TestGitHub_StatusMatrix: 404 and other deterministic 4xx answers are
+// permanent (GitHub returns 410 for deleted issues and 451 for DMCA'd
+// repos); server errors stay retryable. Error text quotes at most
+// maxErrorBody bytes of the response body.
+func TestGitHub_StatusMatrix(t *testing.T) {
+	cases := []struct {
+		status    int
+		permanent bool
+	}{
+		{http.StatusNotFound, true},
+		{http.StatusBadRequest, true},
+		{http.StatusGone, true},
+		{http.StatusUnprocessableEntity, true},
+		{http.StatusUnavailableForLegalReasons, true},
+		{http.StatusUnauthorized, true},
+		{http.StatusInternalServerError, false},
+		{http.StatusBadGateway, false},
+		{http.StatusServiceUnavailable, false},
+	}
+	bigBody := strings.Repeat("x", 10*maxErrorBody)
+	for _, tc := range cases {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(bigBody))
+			}))
+			defer srv.Close()
+
+			_, err := newTestGitHub(t, srv).Fetch(t.Context(), "https://github.com/owner/repo/issues/1")
+			require.Error(t, err)
+
+			var pe *PermanentError
+			assert.Equal(t, tc.permanent, errors.As(err, &pe), "permanent: %v", err)
+			var se *HTTPStatusError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, tc.status, se.StatusCode)
+			assert.Less(t, len(err.Error()), maxErrorBody+256, "error text must not embed the whole body")
+		})
+	}
 }
 
 func TestGitHubFetch_NoReadme(t *testing.T) {
@@ -451,4 +508,342 @@ func TestFormatIssueMarkdown_NoComments(t *testing.T) {
 	assert.True(t, strings.HasPrefix(md, "# Quiet issue (#5)"))
 	assert.Contains(t, md, "**State:** open")
 	assert.NotContains(t, md, "## Comments")
+}
+
+const repoMetaJSON = `{"description": "d", "default_branch": "main", "created_at": "2024-01-15T10:30:00Z"}`
+
+// TestGitHub_RateLimitDelays: each rate-limit shape is detected and waited
+// out for the right time, through the fake clock, before the call is
+// retried and succeeds.
+func TestGitHub_RateLimitDelays(t *testing.T) {
+	fc := newFakeClock()
+	cases := []struct {
+		name    string
+		status  int
+		headers map[string]string
+		body    string
+		want    time.Duration
+	}{
+		{
+			name:    "secondary limit with Retry-After",
+			status:  http.StatusForbidden,
+			headers: map[string]string{"Retry-After": "5", "X-RateLimit-Remaining": "4999"},
+			want:    5 * time.Second,
+		},
+		{
+			name:   "secondary limit by message only",
+			status: http.StatusForbidden,
+			body:   `{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`,
+			want:   time.Minute,
+		},
+		{
+			name:   "429 without headers",
+			status: http.StatusTooManyRequests,
+			want:   time.Minute,
+		},
+		{
+			name:   "primary limit waits for the reset",
+			status: http.StatusForbidden,
+			headers: map[string]string{
+				"X-RateLimit-Remaining": "0",
+				"X-RateLimit-Reset":     strconv.FormatInt(fc.now().Add(90*time.Second).Unix(), 10),
+			},
+			want: 90 * time.Second,
+		},
+		{
+			name:    "primary limit with a past reset still waits a minute",
+			status:  http.StatusForbidden,
+			headers: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1700000000"},
+			want:    time.Minute,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if hits.Add(1) == 1 {
+					for k, v := range tc.headers {
+						w.Header().Set(k, v)
+					}
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte(tc.body))
+					return
+				}
+				_, _ = w.Write([]byte(repoMetaJSON))
+			}))
+			defer srv.Close()
+
+			g := newTestGitHub(t, srv)
+			clk := newFakeClock()
+			g.clock = clk.clock()
+			meta, err := g.repoMeta(t.Context(), "owner", "repo")
+			require.NoError(t, err)
+			assert.Equal(t, "main", meta.DefaultBranch)
+			assert.Equal(t, []time.Duration{tc.want}, clk.slept())
+			assert.Equal(t, int32(2), hits.Load())
+		})
+	}
+}
+
+// TestGitHub_LongRetryAfterFailsFast: a Retry-After beyond the inline cap
+// isn't slept in the worker. The attempt fails retryably with the hint, and
+// every call during the cooldown, from any Fetch, fails the same way
+// without reaching GitHub.
+func TestGitHub_LongRetryAfterFailsFast(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	g := newTestGitHub(t, srv)
+	fc := newFakeClock()
+	g.clock = fc.clock()
+
+	for _, target := range []string{"https://github.com/owner/repo", "https://github.com/other/repo/issues/7"} {
+		_, err := g.Fetch(t.Context(), target)
+		require.Error(t, err)
+		var pe *PermanentError
+		assert.False(t, errors.As(err, &pe), "rate limit must stay retryable: %v", err)
+		var se *HTTPStatusError
+		require.ErrorAs(t, err, &se)
+		assert.Equal(t, 600*time.Second, se.RetryAfter)
+	}
+	assert.Equal(t, int32(1), hits.Load(), "calls during the cooldown must not reach GitHub")
+	assert.Empty(t, fc.slept(), "a long cooldown must not be slept inline")
+}
+
+// TestGitHub_CooldownHoldsQueuedCalls: calls already waiting in the shared
+// limiter when a rate-limit answer lands don't go out during the cooldown
+// it starts. With the cooldown checked before the limiter, every worker
+// queued for a token walked into the limit once it got one.
+func TestGitHub_CooldownHoldsQueuedCalls(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	const callers = 6
+	lim := newGatedLimiter(callers)
+	g := newTestGitHub(t, srv)
+	g.limiter = lim
+	fc := newFakeClock()
+	g.clock = fc.clock()
+
+	results := make(chan error, callers)
+	for i := range callers {
+		go func() {
+			_, err := g.Fetch(t.Context(), "https://github.com/owner/repo"+strconv.Itoa(i))
+			results <- err
+		}()
+	}
+	lim.awaitQueued(t, callers)
+	errs := make([]error, 0, callers)
+	lim.grant() // one call goes out and is rate limited
+	errs = append(errs, <-results)
+	lim.open() // the rest get their tokens during the cooldown
+	for range callers - 1 {
+		errs = append(errs, <-results)
+	}
+
+	for _, err := range errs {
+		require.Error(t, err)
+		var pe *PermanentError
+		assert.False(t, errors.As(err, &pe), "rate limit must stay retryable: %v", err)
+		var se *HTTPStatusError
+		require.ErrorAs(t, err, &se)
+		assert.Equal(t, 600*time.Second, se.RetryAfter)
+	}
+	assert.Equal(t, int32(1), hits.Load(), "queued calls must not reach GitHub during the cooldown")
+	assert.Empty(t, fc.slept())
+}
+
+// TestGitHub_ForbiddenWithoutRateLimitIsPermanent: a 403 with no
+// rate-limit signal is a real permission answer.
+func TestGitHub_ForbiddenWithoutRateLimitIsPermanent(t *testing.T) {
+	msg := `{"message":"Resource not accessible by integration"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(msg + strings.Repeat(" padding", 200)))
+	}))
+	defer srv.Close()
+
+	_, err := newTestGitHub(t, srv).Fetch(t.Context(), "https://github.com/owner/repo")
+	var pe *PermanentError
+	require.ErrorAs(t, err, &pe)
+	assert.Contains(t, err.Error(), "Resource not accessible by integration")
+	assert.Less(t, len(err.Error()), maxErrorBody+256)
+}
+
+// TestGitHubFetch_TransientSubrequestFailures: only a missing README or
+// comment thread may be stored without that section. Any other failure of
+// those calls fails the fetch retryably instead of saving a document that
+// is missing its primary content and never retried.
+func TestGitHubFetch_TransientSubrequestFailures(t *testing.T) {
+	issueJSON := `{"title": "t", "state": "open", "user": {"login": "u"}, "comments": 1, "created_at": "2025-01-01T00:00:00Z"}`
+	pullJSON := `{"title": "t", "state": "open", "user": {"login": "u"}, "comments": 1, "created_at": "2025-01-01T00:00:00Z"}`
+	cases := []struct {
+		name       string
+		target     string
+		failPath   string
+		failStatus int
+		wantErr    bool
+		absent     string
+	}{
+		{"readme 502", "https://github.com/owner/repo", "/repos/owner/repo/readme", http.StatusBadGateway, true, ""},
+		{"issue comments 500", "https://github.com/owner/repo/issues/3", "/repos/owner/repo/issues/3/comments", http.StatusInternalServerError, true, ""},
+		{"pull comments 500", "https://github.com/owner/repo/pull/4", "/repos/owner/repo/issues/4/comments", http.StatusInternalServerError, true, ""},
+		{"issue comments 404", "https://github.com/owner/repo/issues/3", "/repos/owner/repo/issues/3/comments", http.StatusNotFound, false, "## Comments"},
+		{"pull comments 404", "https://github.com/owner/repo/pull/4", "/repos/owner/repo/issues/4/comments", http.StatusNotFound, false, "## Comments"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(repoMetaJSON))
+			})
+			mux.HandleFunc("/repos/owner/repo/readme", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("# readme"))
+			})
+			mux.HandleFunc("/repos/owner/repo/issues/3", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(issueJSON))
+			})
+			mux.HandleFunc("/repos/owner/repo/pulls/4", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(pullJSON))
+			})
+			for _, p := range []string{"/repos/owner/repo/issues/3/comments", "/repos/owner/repo/issues/4/comments"} {
+				mux.HandleFunc(p, func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write([]byte(`[{"user": {"login": "a"}, "body": "hi", "created_at": "2025-01-02T00:00:00Z"}]`))
+				})
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == tc.failPath {
+					w.WriteHeader(tc.failStatus)
+					return
+				}
+				mux.ServeHTTP(w, r)
+			}))
+			defer srv.Close()
+
+			res, err := newTestGitHub(t, srv).Fetch(t.Context(), tc.target)
+			if !tc.wantErr {
+				require.NoError(t, err)
+				assert.NotContains(t, res.Markdown, tc.absent)
+				return
+			}
+			require.Error(t, err)
+			var pe *PermanentError
+			assert.False(t, errors.As(err, &pe), "a transient sub-request failure must be retried: %v", err)
+		})
+	}
+}
+
+// TestGitHubFetch_ReadmeRateLimitCooldownIsRetryable: a README call that
+// runs into a long cooldown fails the fetch retryably; it must not be
+// mistaken for "no README" and stored.
+func TestGitHubFetch_ReadmeRateLimitCooldownIsRetryable(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(repoMetaJSON))
+	})
+	mux.HandleFunc("/repos/owner/repo/readme", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "900")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err := newTestGitHub(t, srv).Fetch(t.Context(), "https://github.com/owner/repo")
+	require.Error(t, err)
+	var pe *PermanentError
+	assert.False(t, errors.As(err, &pe), "cooldown must stay retryable: %v", err)
+	var se *HTTPStatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, 900*time.Second, se.RetryAfter)
+}
+
+// TestGitHubFetch_FileEscaping: the decoded path and ref from a bookmark
+// are escaped on the way out, so a '#' in a file name or '&'/'+' in a ref
+// reach GitHub intact, and the canonical URL round-trips.
+func TestGitHubFetch_FileEscaping(t *testing.T) {
+	cases := []struct {
+		name        string
+		target      string
+		wantPath    string
+		wantRef     string
+		wantFinal   string
+		decodedPath string
+	}{
+		{
+			name:        "hash in file name",
+			target:      "https://github.com/owner/myrepo/blob/main/C%23-notes.md",
+			wantPath:    "/repos/owner/myrepo/contents/C%23-notes.md",
+			wantRef:     "main",
+			wantFinal:   "https://github.com/owner/myrepo/blob/main/C%23-notes.md",
+			decodedPath: "/owner/myrepo/blob/main/C#-notes.md",
+		},
+		{
+			name:        "reserved characters in ref, space in path",
+			target:      "https://github.com/owner/myrepo/blob/v1+2&x/a%20b.md",
+			wantPath:    "/repos/owner/myrepo/contents/a%20b.md",
+			wantRef:     "v1+2&x",
+			wantFinal:   "https://github.com/owner/myrepo/blob/v1+2&x/a%20b.md",
+			decodedPath: "/owner/myrepo/blob/v1+2&x/a b.md",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotRef string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/repos/owner/myrepo" {
+					_, _ = w.Write([]byte(repoMetaJSON))
+					return
+				}
+				gotPath, gotRef = r.URL.EscapedPath(), r.URL.Query().Get("ref")
+				_, _ = w.Write([]byte("file body"))
+			}))
+			defer srv.Close()
+
+			res, err := newTestGitHub(t, srv).Fetch(t.Context(), tc.target)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPath, gotPath)
+			assert.Equal(t, tc.wantRef, gotRef)
+			assert.Equal(t, tc.wantFinal, res.FinalURL)
+			u, err := url.Parse(res.FinalURL)
+			require.NoError(t, err)
+			assert.Equal(t, tc.decodedPath, u.Path)
+		})
+	}
+}
+
+// TestGitHubFetch_BodyOverLimit: a README or file larger than the body cap
+// fails permanently rather than being read into memory whole.
+func TestGitHubFetch_BodyOverLimit(t *testing.T) {
+	for _, target := range []string{"https://github.com/owner/repo", "https://github.com/owner/repo/blob/main/big.md"} {
+		t.Run(target, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(repoMetaJSON))
+			})
+			big := func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
+			}
+			mux.HandleFunc("/repos/owner/repo/readme", big)
+			mux.HandleFunc("/repos/owner/repo/contents/big.md", big)
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			g := newTestGitHub(t, srv)
+			g.maxBody = 1024
+			_, err := g.Fetch(t.Context(), target)
+			var pe *PermanentError
+			require.ErrorAs(t, err, &pe)
+			assert.ErrorIs(t, err, ErrTooLarge)
+		})
+	}
 }
