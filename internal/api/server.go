@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -205,20 +206,35 @@ const (
 // errBodyTooLarge marks a request body that exceeded its size limit.
 var errBodyTooLarge = errors.New("request body too large")
 
-// decodeJSON parses a request body of at most limit bytes. It returns an
-// error wrapping errBodyTooLarge when the limit is exceeded; any other error
-// is a malformed body. writeDecodeError maps both.
+// decodeJSON parses a request body of at most limit bytes holding exactly
+// one JSON value. It returns an error wrapping errBodyTooLarge when the
+// limit is exceeded; any other error is a malformed body. writeDecodeError
+// maps both.
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) error {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			return fmt.Errorf("%w: limit is %d bytes", errBodyTooLarge, tooLarge.Limit)
-		}
-		return err
+	err := dec.Decode(v)
+	if err == nil {
+		err = expectEOF(dec)
 	}
-	return nil
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return fmt.Errorf("%w: limit is %d bytes", errBodyTooLarge, tooLarge.Limit)
+	}
+	return err
+}
+
+// expectEOF checks that only whitespace follows the decoded value. Reading
+// to the end also holds bytes after the value to the size limit.
+func expectEOF(dec *json.Decoder) error {
+	switch _, err := dec.Token(); {
+	case errors.Is(err, io.EOF):
+		return nil
+	case err != nil:
+		return err
+	default:
+		return errors.New("unexpected data after the JSON value")
+	}
 }
 
 // writeDecodeError reports a decodeJSON failure: 413 for an oversized body,

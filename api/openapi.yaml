@@ -13,23 +13,24 @@ info:
       - Errors follow RFC 7807 (`application/problem+json`).
       - List endpoints return `{ items: [...], total, next_cursor }`; pagination
         is cursor-based for stability under writes.
-      - Long-running operations (import, refetch, reindex) are asynchronous
-        and return a `job_id`. Poll `/v1/jobs/{id}`.
+      - Long-running operations are asynchronous and answer 202 with a
+        `job_id`, or with `jobs_enqueued` for the bulk refetch-all and
+        reindex-all, which have no parent job. Watch `GET /v1/jobs`.
 
     Access policy: there is no authentication and no token. The daemon binds
     loopback only and trusts every local process (and OS user) that can reach
     it. It refuses requests a web browser could make on a page's behalf; these
     checks run before routing and apply to every path:
-      - `Host` must be `127.0.0.1:P`, `localhost:P` (any case), `[::1]:P` or
-        the bound host on `P`, the daemon's port. Otherwise 403: this is what
-        stops DNS rebinding.
+      - `Host` must be `localhost:P` (any case) or an address equal to
+        127.0.0.1, ::1 or the bound address, on `P`, the daemon's port.
+        Otherwise 403: this is what stops DNS rebinding.
       - A request carrying `Origin` gets 403 unless the Origin is exactly
         `http://127.0.0.1:P`, `http://localhost:P` or `http://[::1]:P`,
         `Origin: null` included. No CORS headers are ever sent.
       - A request with a body must send `Content-Type: application/json`
-        (415 otherwise). Bodies are capped at 1 MiB, or 32 MiB for
-        `POST /v1/bookmarks/import` (413 otherwise). Body-less POSTs need no
-        Content-Type.
+        (415 otherwise) holding exactly one JSON value. Bodies are capped at
+        1 MiB, or 32 MiB for `POST /v1/bookmarks/import` (413 otherwise).
+        Body-less POSTs need no Content-Type.
     Hosted-mode authentication is deferred.
 
 servers:

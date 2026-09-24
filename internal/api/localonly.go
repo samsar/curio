@@ -6,6 +6,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -29,10 +30,11 @@ import (
 // and no Origin, and pass untouched.
 
 // localOrigin is the set of names under which the daemon is its own origin:
-// the loopback names plus the host it is bound to, all on the bound port.
+// localhost, the loopback addresses and the address it is bound to, all on
+// the bound port.
 type localOrigin struct {
 	port    string
-	hosts   []string        // accepted Host names, compared case-insensitively
+	ips     []net.IP        // accepted Host addresses, compared by value
 	origins map[string]bool // accepted Origin header values, exact
 }
 
@@ -41,9 +43,13 @@ func newLocalOrigin(addr net.Addr) (localOrigin, error) {
 	if err != nil {
 		return localOrigin{}, fmt.Errorf("api: listener address %q: %w", addr, err)
 	}
+	bound := net.ParseIP(boundHost)
+	if bound == nil {
+		return localOrigin{}, fmt.Errorf("api: listener address %q is not an IP address", addr)
+	}
 	return localOrigin{
-		port:  port,
-		hosts: []string{"127.0.0.1", "localhost", "::1", boundHost},
+		port: port,
+		ips:  []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback, bound},
 		origins: map[string]bool{
 			"http://127.0.0.1:" + port: true,
 			"http://localhost:" + port: true,
@@ -53,17 +59,19 @@ func newLocalOrigin(addr net.Addr) (localOrigin, error) {
 }
 
 // allowsHost reports whether a request's Host header names this daemon.
+// Addresses compare by value, so every spelling of an allowed one matches
+// (::ffff:127.0.0.1, 0:0:0:0:0:0:0:1): clients put daemon.listen in Host
+// as the user wrote it.
 func (o localOrigin) allowsHost(hostHeader string) bool {
 	host, port, err := net.SplitHostPort(hostHeader)
 	if err != nil || port != o.port {
 		return false
 	}
-	for _, h := range o.hosts {
-		if strings.EqualFold(host, h) {
-			return true
-		}
+	if strings.EqualFold(host, "localhost") {
+		return true
 	}
-	return false
+	ip := net.ParseIP(host)
+	return ip != nil && slices.ContainsFunc(o.ips, ip.Equal)
 }
 
 // requireLocalHost refuses requests whose Host header isn't a loopback name

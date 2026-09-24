@@ -143,6 +143,9 @@ func TestServer_HostAllowlist(t *testing.T) {
 		{"localhost", "localhost:" + s.port, "/v1/healthz", true},
 		{"localhost in caps", "LOCALHOST:" + s.port, "/v1/healthz", true},
 		{"ipv6 loopback", "[::1]:" + s.port, "/v1/healthz", true},
+		{"ipv4-mapped loopback", "[::ffff:127.0.0.1]:" + s.port, "/v1/healthz", true},
+		{"ipv6 loopback spelled out", "[0:0:0:0:0:0:0:1]:" + s.port, "/v1/healthz", true},
+		{"another loopback address", "127.0.0.2:" + s.port, "/v1/healthz", false},
 		{"rebinding name", "attacker.example:" + s.port, "/v1/healthz", false},
 		{"rebinding name on an unknown route", "attacker.example:" + s.port, "/nope", false},
 		{"loopback on another port", "127.0.0.1:1", "/v1/healthz", false},
@@ -278,24 +281,53 @@ func TestServer_CSRFRefetchAllExploit(t *testing.T) {
 
 func TestServer_JSONBodies(t *testing.T) {
 	s := newTestServer(t)
-
-	resp := s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks",
-		contentType: "application/json; charset=utf-8", body: `{"url":"https://example.com/a"}`})
-	assert.Equal(t, http.StatusCreated, resp.status, resp.body)
-
-	resp = s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks",
-		contentType: "application/json", body: `{"url":"https://example.com/` + strings.Repeat("a", maxJSONBody) + `"}`})
-	assertProblem(t, resp, http.StatusRequestEntityTooLarge)
-
-	resp = s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks",
-		contentType: "application/json", body: `{"url":`})
-	assertProblem(t, resp, http.StatusBadRequest)
-
-	// Imports get the larger limit: a body past 1 MiB still decodes.
-	bigTitle := strings.Repeat("t", 2*maxJSONBody)
-	resp = s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks/import", contentType: "application/json",
-		body: `{"source":"manual","bookmarks":[{"url":"https://example.com/b","title":"` + bigTitle + `"}]}`})
-	assert.Equal(t, http.StatusOK, resp.status, resp.body)
+	cases := []struct {
+		name        string
+		path        string
+		contentType string
+		body        string
+		status      int
+	}{
+		{
+			name: "json with a charset", path: "/v1/bookmarks", contentType: "application/json; charset=utf-8",
+			body: `{"url":"https://example.com/a"}`, status: http.StatusCreated,
+		},
+		{
+			name: "value past the limit", path: "/v1/bookmarks", contentType: "application/json",
+			body:   `{"url":"https://example.com/` + strings.Repeat("a", maxJSONBody) + `"}`,
+			status: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name: "small value padded past the limit", path: "/v1/bookmarks", contentType: "application/json",
+			body:   `{"url":"https://example.com/b"}` + strings.Repeat(" ", maxJSONBody),
+			status: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name: "truncated value", path: "/v1/bookmarks", contentType: "application/json",
+			body: `{"url":`, status: http.StatusBadRequest,
+		},
+		{
+			name: "second value after the first", path: "/v1/bookmarks", contentType: "application/json",
+			body: `{"url":"https://example.com/c"} {"url":"https://example.com/d"}`, status: http.StatusBadRequest,
+		},
+		{
+			name: "import past 1 MiB gets the larger limit", path: "/v1/bookmarks/import", contentType: "application/json",
+			body: `{"source":"manual","bookmarks":[{"url":"https://example.com/e","title":"` +
+				strings.Repeat("t", 2*maxJSONBody) + `"}]}`,
+			status: http.StatusOK,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := s.do(t, request{method: http.MethodPost, path: tc.path, contentType: tc.contentType, body: tc.body})
+			if tc.status >= http.StatusBadRequest {
+				assertProblem(t, resp, tc.status)
+				return
+			}
+			assert.Equal(t, tc.status, resp.status, resp.body)
+		})
+	}
+	assert.Equal(t, 2, s.count(t, "bookmarks"), "only the accepted bodies created bookmarks")
 }
 
 // Body-less POSTs carry no Content-Type; they must keep working.

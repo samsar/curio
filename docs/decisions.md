@@ -1655,9 +1655,11 @@ perimeter instead:
   `localhost`) with a fixed port in 1–65535; anything else fails config
   validation.
 - Router-level middleware (it runs before routing, so it also covers
-  404/405) answers 403 unless `Host` is `127.0.0.1:P`, `localhost:P`
-  (any case), `[::1]:P` or the bound host on port `P`, where `P` is the
-  port the listener actually bound.
+  404/405) answers 403 unless `Host` is `localhost:P` (any case) or an
+  address equal to 127.0.0.1, ::1 or the bound address, on port `P`,
+  where `P` is the port the listener actually bound. Addresses compare
+  by value, so `[::ffff:127.0.0.1]:P` passes: clients send `daemon.listen`
+  as written.
 - A request that carries an `Origin` gets 403 unless it is exactly
   `http://127.0.0.1:P`, `http://localhost:P` or `http://[::1]:P`. That
   includes `Origin: null` and localhost on another port. The daemon never
@@ -1665,7 +1667,8 @@ perimeter instead:
 - Request bodies must be `application/json` (415 otherwise). Body-less
   POSTs (refetch, reindex, interests/rebuild) need no Content-Type. Bodies
   are capped at 1 MiB, or 32 MiB for `POST /v1/bookmarks/import`; bigger
-  ones get 413.
+  ones get 413. A body holds exactly one JSON value; the decoder reads to
+  the end, so padding after the value counts toward the cap.
 - The server sets read-header (5s), read (30s), write (2m, longer than the
   slowest synchronous handler) and idle (2m) timeouts.
 
