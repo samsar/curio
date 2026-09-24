@@ -129,7 +129,9 @@ eval harness shows measurably better retrieval than the v1 baseline.
 **Goal:** make curio runnable as a service.
 
 - Postgres + pgvector implementations behind existing interfaces
-- Authentication middleware (real, not stub)
+- Authentication (scheme still open) for deployments beyond loopback; the
+  local daemon deliberately has none (see decisions.md "Local API: loopback
+  only, no token, browsers shut out")
 - Multi-tenant deployment configs
 - Public API documentation
 
