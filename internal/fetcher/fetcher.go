@@ -1,18 +1,16 @@
 // Package fetcher abstracts content extraction from URLs.
 //
-// The Fetcher interface returns extracted markdown for a given URL; concrete
-// implementations might shell out to web2md, hit a self-hosted Jina Reader,
-// call the GitHub API, or use yt-dlp. The Dispatcher selects which Fetcher
-// to use based on URL — for M0 it always returns the only registered
-// fetcher; M2 introduces a rules engine.
+// The Fetcher interface returns extracted markdown for a given URL. The
+// implementations are Native (Go HTTP + Readability, with Jina Reader as
+// fallback), Web2MD (the Node tool as a subprocess), GitHub (REST API) and
+// YouTube (yt-dlp). A Dispatcher picks the fetcher for a URL: the daemon
+// uses RulesDispatcher, driven by fetcher_rules.yaml.
 package fetcher
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
-	"strings"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -24,7 +22,8 @@ type Result struct {
 	Markdown string
 	// FinalURL is the URL after following redirects. May equal the input.
 	FinalURL string
-	// ContentType is one of the store.ContentType* values, or "unknown".
+	// ContentType is one of the store.ContentType* constants. Anything else
+	// fails the documents CHECK constraint after a successful fetch.
 	ContentType string
 	// Title is the extracted document title; empty if the fetcher could
 	// not determine one.
@@ -49,22 +48,22 @@ type Fetcher interface {
 	// metrics layer.
 	Name() string
 
-	// Fetch extracts the resource at url. Honors ctx for cancellation
+	// Fetch extracts the resource at rawURL. Honors ctx for cancellation
 	// and deadlines.
-	Fetch(ctx context.Context, url string) (*Result, error)
+	Fetch(ctx context.Context, rawURL string) (*Result, error)
 }
 
-// Dispatcher chooses which Fetcher to use for a given URL. M0 has only one
-// fetcher and trivially returns it; M2 will replace this with a
-// rules-engine-backed impl that picks by host/content_type.
+// Dispatcher chooses which Fetcher to use for a given URL. RulesDispatcher
+// is the implementation the daemon uses.
 type Dispatcher interface {
-	For(url string) (Fetcher, error)
+	For(rawURL string) (Fetcher, error)
 }
 
 // ErrFetcherNotFound is returned by Dispatcher.For when no rule matches.
 var ErrFetcherNotFound = errors.New("fetcher: no fetcher matches url")
 
-// Single is a Dispatcher that always returns the same fetcher. Use for M0.
+// Single is a Dispatcher that always returns the same fetcher, for tests
+// that exercise the job handlers with one fake fetcher.
 type Single struct{ F Fetcher }
 
 func (s *Single) For(_ string) (Fetcher, error) {
@@ -74,40 +73,11 @@ func (s *Single) For(_ string) (Fetcher, error) {
 	return s.F, nil
 }
 
-// Rule maps a set of hostnames to a fetcher.
+// Rule maps a set of hostnames to a fetcher: the built-in routing
+// RulesDispatcher uses while fetcher_rules.yaml is absent.
 type Rule struct {
 	Hosts   []string
 	Fetcher Fetcher
-}
-
-// PatternDispatcher selects a fetcher by matching the URL's hostname
-// against registered rules. First match wins; unmatched URLs go to
-// Fallback.
-type PatternDispatcher struct {
-	Rules    []Rule
-	Fallback Fetcher
-}
-
-func (d *PatternDispatcher) For(rawURL string) (Fetcher, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		if d.Fallback != nil {
-			return d.Fallback, nil
-		}
-		return nil, ErrFetcherNotFound
-	}
-	host := strings.ToLower(u.Hostname())
-	for _, r := range d.Rules {
-		for _, h := range r.Hosts {
-			if host == h {
-				return r.Fetcher, nil
-			}
-		}
-	}
-	if d.Fallback != nil {
-		return d.Fallback, nil
-	}
-	return nil, ErrFetcherNotFound
 }
 
 // RateLimited wraps a Fetcher with a token-bucket rate limiter.
@@ -128,9 +98,9 @@ func NewRateLimited(f Fetcher, rps float64, burst int) *RateLimited {
 
 func (r *RateLimited) Name() string { return r.Inner.Name() }
 
-func (r *RateLimited) Fetch(ctx context.Context, url string) (*Result, error) {
+func (r *RateLimited) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	if err := r.limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("%s: rate limiter: %w", r.Inner.Name(), err)
 	}
-	return r.Inner.Fetch(ctx, url)
+	return r.Inner.Fetch(ctx, rawURL)
 }

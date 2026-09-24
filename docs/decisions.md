@@ -457,6 +457,15 @@ to Mozilla Readability for our use case.
 - User-Agent header matching the JS version.
 - `via: readability` vs `via: jina` metadata key.
 
+**Revised:** the thin-content threshold is 500 UTF-8 *bytes*, not
+characters, and that is deliberate: about 500 Latin or 170 CJK
+characters tracks how much a page says, and counting runes would send
+short CJK pages to Jina three times as often. The code now says so
+(`minArticleBytes`, `trimmedByteLen`). The redirect checks also moved
+first and treat `www.` as the same site; see "Host cache: only host-wide
+verdicts, under the host that gave them" and "Login-wall heuristic: www
+and apex are the same site".
+
 **Operator note:** to compare extraction quality between the two
 backends on a specific URL, point your config at `web2md` and refetch.
 We don't yet have an A/B comparison mode but it'd be a natural M2 add.
@@ -1098,6 +1107,11 @@ needed until there are enough fetchers to justify user-facing config.
 **Wiring:** The daemon always registers GitHub (pure Go, no external
 dep). YouTube is registered conditionally on `exec.LookPath("yt-dlp")`.
 Unmatched URLs fall through to Native.
+
+**Superseded** by `fetcher_rules.yaml` (see "fetcher_rules.yaml:
+mtime-polled hot reload, keep-last-good"). `RulesDispatcher` does the
+routing, the same host lists are its built-in defaults, and
+`PatternDispatcher` has been deleted.
 
 ---
 

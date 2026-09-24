@@ -333,52 +333,6 @@ func TestYouTubeFetch_PlaylistRejected(t *testing.T) {
 	assert.True(t, errors.As(err, &pe), "playlist-only URLs should be permanent errors")
 }
 
-func TestPatternDispatcher(t *testing.T) {
-	ytFetcher := &stubFetcher{name: "youtube"}
-	defaultFetcher := &stubFetcher{name: "native"}
-
-	d := &PatternDispatcher{
-		Rules: []Rule{
-			{Hosts: YouTubeHosts, Fetcher: ytFetcher},
-		},
-		Fallback: defaultFetcher,
-	}
-
-	cases := []struct {
-		url  string
-		want string
-	}{
-		{"https://www.youtube.com/watch?v=abc", "youtube"},
-		{"https://youtube.com/watch?v=abc", "youtube"},
-		{"https://m.youtube.com/watch?v=abc", "youtube"},
-		{"https://youtu.be/abc", "youtube"},
-		{"https://example.com/article", "native"},
-		{"https://martinfowler.com/articles/feature-toggles.html", "native"},
-	}
-	for _, tc := range cases {
-		f, err := d.For(tc.url)
-		require.NoError(t, err)
-		assert.Equal(t, tc.want, f.Name(), "url=%s", tc.url)
-	}
-}
-
-func TestPatternDispatcher_NoFallback(t *testing.T) {
-	d := &PatternDispatcher{
-		Rules: []Rule{
-			{Hosts: []string{"example.com"}, Fetcher: &stubFetcher{name: "test"}},
-		},
-	}
-	_, err := d.For("https://other.com/page")
-	assert.ErrorIs(t, err, ErrFetcherNotFound)
-}
-
-type stubFetcher struct{ name string }
-
-func (s *stubFetcher) Name() string { return s.name }
-func (s *stubFetcher) Fetch(_ context.Context, _ string) (*Result, error) {
-	return nil, errors.New("stub")
-}
-
 func countOccurrences(s, sub string) int {
 	count := 0
 	for i := 0; i+len(sub) <= len(s); i++ {

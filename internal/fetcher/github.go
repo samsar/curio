@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/urlutil"
 )
 
@@ -113,7 +114,7 @@ func (g *GitHub) fetchRepo(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 	return &Result{
 		Markdown:    markdown,
 		FinalURL:    canonicalURL,
-		ContentType: "repo",
+		ContentType: store.ContentTypeRepo,
 		Title:       info.Owner + "/" + info.Repo,
 		Author:      info.Owner,
 		PublishedAt: published,
@@ -155,7 +156,7 @@ func (g *GitHub) fetchFile(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 	return &Result{
 		Markdown:    markdown,
 		FinalURL:    canonicalURL,
-		ContentType: "article",
+		ContentType: store.ContentTypeArticle,
 		Title:       info.Path,
 		Author:      info.Owner + "/" + info.Repo,
 		Meta: map[string]any{
@@ -199,7 +200,7 @@ func (g *GitHub) fetchIssue(ctx context.Context, info urlutil.GitHubURLInfo) (*R
 	return &Result{
 		Markdown:    markdown,
 		FinalURL:    canonicalURL,
-		ContentType: "thread",
+		ContentType: store.ContentTypeThread,
 		Title:       fmt.Sprintf("%s/%s#%d: %s", info.Owner, info.Repo, info.Number, issue.Title),
 		Author:      issue.User.Login,
 		PublishedAt: parseGHDate(issue.CreatedAt),
@@ -233,7 +234,7 @@ func (g *GitHub) fetchPull(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 	return &Result{
 		Markdown:    markdown,
 		FinalURL:    canonicalURL,
-		ContentType: "thread",
+		ContentType: store.ContentTypeThread,
 		Title:       fmt.Sprintf("%s/%s#%d: %s", info.Owner, info.Repo, info.Number, pr.Title),
 		Author:      pr.User.Login,
 		PublishedAt: parseGHDate(pr.CreatedAt),
@@ -280,7 +281,7 @@ func (g *GitHub) fetchWiki(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 	return &Result{
 		Markdown:    markdown,
 		FinalURL:    canonicalURL,
-		ContentType: "article",
+		ContentType: store.ContentTypeArticle,
 		Title:       fmt.Sprintf("%s/%s wiki: %s", info.Owner, info.Repo, wikiPageTitle(page)),
 		Author:      info.Owner + "/" + info.Repo,
 		Meta: map[string]any{
@@ -785,6 +786,6 @@ func parseGHDate(iso string) *time.Time {
 	return &t
 }
 
-// GitHubHosts lists the hostnames the PatternDispatcher should route
-// to the GitHub fetcher.
+// GitHubHosts lists the hostnames the built-in routing sends to the GitHub
+// fetcher.
 var GitHubHosts = []string{"github.com"}

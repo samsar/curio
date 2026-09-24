@@ -20,6 +20,8 @@ import (
 	readability "codeberg.org/readeck/go-readability/v2"
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"golang.org/x/time/rate"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 // Native is the Go-native fetcher that replaces the Node `web2md` tool as
@@ -216,7 +218,7 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 	res, jinaErr := n.tryJina(ctx, target)
 	if jinaErr == nil {
 		if errors.Is(originErr, errPDFUnreadable) {
-			res.ContentType = "pdf" // Jina reports every page as an article
+			res.ContentType = store.ContentTypePDF // Jina reports every page as an article
 		}
 		return res, nil
 	}
@@ -455,7 +457,7 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	r := &Result{
 		Markdown:    md,
 		FinalURL:    finalURL.String(),
-		ContentType: "article",
+		ContentType: store.ContentTypeArticle,
 		Title:       article.Title(),
 		Author:      article.Byline(),
 		Language:    article.Language(),
@@ -506,7 +508,7 @@ var errSiteLoginWall = fmt.Errorf("site-wide %w", ErrLoginWall)
 //   - redirect to a /login, /authwall, /signin, /signup path
 //   - redirect to a different site
 //   - missing article entirely
-//   - extracted text < 500 bytes
+//   - extracted text shorter than minArticleBytes
 //   - title starts with "sign in"/"log in"/"join now"/"join linkedin"
 //
 // Returns the empty string when nothing looks suspicious; otherwise a
@@ -529,11 +531,13 @@ func looksLikeLoginWall(article readability.Article, finalURL *url.URL, sourceUR
 		return "no article extracted", false
 	}
 
-	// Length check: render the text body and count its bytes.
+	// Length check: render the text body and measure it.
 	var txtBuf bytes.Buffer
-	_ = article.RenderText(&txtBuf)
-	if utf8Trimmed(txtBuf.String()) < 500 {
-		return "extracted text < 500 chars", false
+	if err := article.RenderText(&txtBuf); err != nil {
+		return "text rendering failed: " + err.Error(), false
+	}
+	if trimmedByteLen(txtBuf.String()) < minArticleBytes {
+		return fmt.Sprintf("extracted text < %d bytes", minArticleBytes), false
 	}
 
 	if loginTitleRE.MatchString(article.Title()) {
@@ -651,9 +655,16 @@ func isHostUnreachable(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH)
 }
 
-// utf8Trimmed returns the character count after trimming whitespace at
-// both ends. The JS impl uses .trim() + .length; this mirrors that.
-func utf8Trimmed(s string) int {
+// minArticleBytes is the thin-content threshold. It is measured in UTF-8
+// bytes on purpose: about 500 Latin characters or about 170 CJK ones,
+// which tracks how much a page says better than a rune count would.
+// Counting runes would make short CJK pages three times as likely to be
+// judged thin and sent to Jina's rate-limited budget.
+const minArticleBytes = 500
+
+// trimmedByteLen returns the UTF-8 byte length of s after trimming
+// whitespace at both ends.
+func trimmedByteLen(s string) int {
 	return len(strings.TrimSpace(s))
 }
 
@@ -687,7 +698,7 @@ func (n *Native) extractPDF(target string, body io.Reader) (*Result, error) {
 	return &Result{
 		Markdown:    text,
 		FinalURL:    target,
-		ContentType: "pdf",
+		ContentType: store.ContentTypePDF,
 		Meta:        map[string]any{"via": "pdf-local", "transport": n.rt.name()},
 	}, nil
 }
@@ -788,7 +799,7 @@ func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 	result := &Result{
 		Markdown:    parsed.body,
 		FinalURL:    parsed.urlSource,
-		ContentType: "article",
+		ContentType: store.ContentTypeArticle,
 		Title:       parsed.title,
 		Meta:        map[string]any{"via": "jina"},
 	}
@@ -822,6 +833,9 @@ func isRateLimited(err error) bool {
 	return errors.As(err, &se) && se.StatusCode == http.StatusTooManyRequests
 }
 
+// jinaHeaderRE matches one "Name: value" line of a Jina Reader header block.
+var jinaHeaderRE = regexp.MustCompile(`^([A-Z][A-Za-z ]+):\s*(.*)$`)
+
 // jinaParsed mirrors the JS impl's parseJina output shape.
 type jinaParsed struct {
 	title     string
@@ -849,7 +863,6 @@ func parseJina(text string) jinaParsed {
 	)
 	lines := strings.Split(text, "\n")
 	i := 0
-	headerRE := regexp.MustCompile(`^([A-Z][A-Za-z ]+):\s*(.*)$`)
 	meta := map[string]string{}
 	for i < len(lines) {
 		line := lines[i]
@@ -857,7 +870,7 @@ func parseJina(text string) jinaParsed {
 			i++
 			break
 		}
-		m := headerRE.FindStringSubmatch(line)
+		m := jinaHeaderRE.FindStringSubmatch(line)
 		if len(m) == 3 {
 			meta[strings.TrimSpace(m[1])] = strings.TrimSpace(m[2])
 			sawHeader = true

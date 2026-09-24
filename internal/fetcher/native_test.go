@@ -68,7 +68,7 @@ func TestNative_LoginWall_TooShort(t *testing.T) {
 }
 
 func TestNative_LoginWall_TitlePattern(t *testing.T) {
-	body := strings.Repeat("Some text here. ", 50) // > 500 chars to bypass length check
+	body := strings.Repeat("Some text here. ", 50) // > minArticleBytes to bypass length check
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`<html><head><title>Sign in to read this</title></head>
 			<body><article><h1>Sign in to read this</h1><p>` + body + `</p></article></body></html>`))

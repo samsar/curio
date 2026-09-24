@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/urlutil"
 )
 
@@ -106,7 +107,7 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	result := &Result{
 		Markdown:    markdown,
 		FinalURL:    canonicalURL,
-		ContentType: "video",
+		ContentType: store.ContentTypeVideo,
 		Title:       meta.Title,
 		Author:      meta.Channel,
 		PublishedAt: published,
@@ -402,18 +403,8 @@ func formatDuration(totalSeconds int) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-// IsYouTubeURL reports whether rawURL points to a YouTube video.
-func IsYouTubeURL(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	_, ok := urlutil.YouTubeVideoID(u)
-	return ok
-}
-
-// YouTubeHosts returns the set of hostnames the PatternDispatcher
-// should route to the YouTube fetcher.
+// YouTubeHosts lists the hostnames the built-in routing sends to the
+// YouTube fetcher.
 var YouTubeHosts = []string{
 	"youtube.com",
 	"www.youtube.com",

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 // Web2MD is a Fetcher that shells out to the existing `web2md` Node tool.
@@ -16,10 +18,8 @@ import (
 // published, fetched_at, via) followed by the markdown body. We parse the
 // frontmatter into Result fields and keep the body as Markdown verbatim.
 //
-// On the user's machine the tool ships at
-// ~/projects/experiments/web-to-markdown/web2md.js but the Bin path is
-// configurable so the daemon can use either the local checkout or a
-// globally-installed `web2md` shim.
+// Bin is configurable so the daemon can run either a local checkout of
+// web2md.js (under node) or a globally-installed `web2md` shim.
 type Web2MD struct {
 	bin       string        // path to web2md executable (or "web2md" if in PATH)
 	nodeBin   string        // optional explicit node binary; empty = "node"
@@ -108,7 +108,7 @@ func parseWeb2MDOutput(raw []byte, sourceURL string) (*Result, error) {
 
 	r := &Result{
 		FinalURL:    sourceURL,
-		ContentType: "article",
+		ContentType: store.ContentTypeArticle,
 		Meta:        map[string]any{},
 	}
 
