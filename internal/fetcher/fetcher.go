@@ -36,6 +36,10 @@ type Result struct {
 	// Meta is fetcher-specific metadata; persisted as extraction_meta.
 	// JSON-serializable.
 	Meta map[string]any
+	// Partial marks a fetch that succeeded but is missing its primary
+	// content (a video without a transcript). The extraction is stored
+	// with status "partial" instead of "ok".
+	Partial bool
 }
 
 // Fetcher pulls content from a URL.

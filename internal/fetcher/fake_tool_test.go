@@ -2,6 +2,8 @@ package fetcher
 
 import (
 	"bytes"
+	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +26,10 @@ const (
 	fakeToolEnv    = "CURIO_FAKE_TOOL"
 	fakePIDFileEnv = "CURIO_FAKE_PIDFILE" // hang-with-grandchild writes the grandchild's PID here
 	fakeLogEnv     = "CURIO_FAKE_LOG"     // yt-dlp appends start/end timestamps here
+	// fakeSubsEnv lists the caption tracks the fake yt-dlp's video has, as
+	// comma-separated kind:lang pairs ("manual:en,auto:en-orig"). Unset
+	// means one uploaded English track; "none" means no captions at all.
+	fakeSubsEnv = "CURIO_FAKE_SUBS"
 )
 
 func TestMain(m *testing.M) {
@@ -93,8 +99,10 @@ func runFakeTool(mode string, args []string) int {
 	return 2
 }
 
-// fakeYTDLP writes what `yt-dlp --write-info-json --write-subs` would into
-// the directory of its -o template: an info.json and an English VTT.
+// fakeYTDLP writes what `yt-dlp --write-info-json --write-subs
+// --write-auto-subs` would into the directory of its -o template: an
+// info.json listing the caption tracks, and one VTT per language. Like
+// yt-dlp, it downloads the uploaded track when a language has both kinds.
 func fakeYTDLP(args []string) int {
 	logPath := os.Getenv(fakeLogEnv)
 	if logPath != "" {
@@ -110,15 +118,38 @@ func fakeYTDLP(args []string) int {
 			dir = filepath.Dir(args[i+1])
 		}
 	}
-	info := `{"title":"Test Video","channel":"Test Channel","channel_id":"UC123","upload_date":"20240315",` +
-		`"duration":120.0,"description":"A test video description.","tags":["test","video"],` +
-		`"categories":["Education"],"view_count":1000,"like_count":50,"language":"en",` +
-		`"subtitles":{"en":[]},"automatic_captions":{}}`
-	vtt := "WEBVTT\nKind: captions\nLanguage: en\n\n00:00:01.000 --> 00:00:04.000\n" +
-		"Hello world this is a test transcript.\n\n00:00:04.500 --> 00:00:08.000\nIt has multiple lines of content.\n"
-	if os.WriteFile(filepath.Join(dir, "test_id.info.json"), []byte(info), 0o600) != nil ||
-		os.WriteFile(filepath.Join(dir, "test_id.en.vtt"), []byte(vtt), 0o600) != nil {
+
+	spec := cmp.Or(os.Getenv(fakeSubsEnv), "manual:en")
+	tracks := map[string]map[string][]any{"manual": {}, "auto": {}}
+	files := map[string]string{} // lang → kind of the downloaded file
+	for pair := range strings.SplitSeq(spec, ",") {
+		kind, lang, ok := strings.Cut(pair, ":")
+		if !ok {
+			continue // "none"
+		}
+		tracks[kind][lang] = []any{}
+		if files[lang] != "manual" {
+			files[lang] = kind
+		}
+	}
+
+	info, err := json.Marshal(map[string]any{
+		"title": "Test Video", "channel": "Test Channel", "channel_id": "UC123",
+		"upload_date": "20240315", "duration": 120.0, "description": "A test video description.",
+		"tags": []string{"test", "video"}, "categories": []string{"Education"},
+		"view_count": 1000, "like_count": 50, "language": "en",
+		"subtitles": tracks["manual"], "automatic_captions": tracks["auto"],
+	})
+	if err != nil || os.WriteFile(filepath.Join(dir, "test_id.info.json"), info, 0o600) != nil {
 		return 2
+	}
+	for lang, kind := range files {
+		vtt := "WEBVTT\nKind: captions\nLanguage: " + lang + "\n\n00:00:01.000 --> 00:00:04.000\n" +
+			"Hello world this is a test transcript.\n\n00:00:04.500 --> 00:00:08.000\n" +
+			"This track is " + kind + " " + lang + ".\n"
+		if os.WriteFile(filepath.Join(dir, "test_id."+lang+".vtt"), []byte(vtt), 0o600) != nil {
+			return 2
+		}
 	}
 
 	if logPath != "" {

@@ -133,6 +133,33 @@ func TestFetchHandler_HappyPath(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+// TestFetchHandler_ExtractionStatus: a result flagged Partial (fetched,
+// but missing its primary content) is stored as a partial extraction.
+func TestFetchHandler_ExtractionStatus(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("partial=%v", partial), func(t *testing.T) {
+			deps, _, ff := newTestDeps(t)
+			ff.res.Partial = partial
+			ctx := context.Background()
+			doc := &store.Document{TenantID: "local", URL: "https://example.com/video", ContentType: store.ContentTypeVideo}
+			require.NoError(t, deps.Documents.Upsert(ctx, doc))
+
+			payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
+			require.NoError(t, FetchHandler(deps)(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}))
+
+			got, err := deps.Documents.GetByID(ctx, doc.ID)
+			require.NoError(t, err)
+			ext, err := deps.Extractions.GetByID(ctx, *got.CurrentExtractionID)
+			require.NoError(t, err)
+			want := store.ExtractionStatusOK
+			if partial {
+				want = store.ExtractionStatusPartial
+			}
+			assert.Equal(t, want, ext.Status)
+		})
+	}
+}
+
 func TestFetchHandler_FetcherError_Retryable(t *testing.T) {
 	deps, _, ff := newTestDeps(t)
 	ff.res = nil

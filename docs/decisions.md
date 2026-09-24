@@ -1135,6 +1135,18 @@ language → description-only (`status=partial`). When no yt-dlp is
 installed, YouTube URLs fall through to Native (extracts whatever
 the page HTML yields).
 
+**Revised:** the chain above overstated what was built. The file was
+picked by shortest name and nearly always labeled `manual`, and nothing
+ever set `status=partial`. What is implemented now: among the languages
+in `fetcher.youtube.sub_langs`, uploaded captions before automatic ones
+(which is which comes from info.json's `subtitles` and
+`automatic_captions`, since both kinds are written as `<id>.<lang>.vtt`),
+then the shortest language tag. With no usable track the document is the
+description alone: `Result.Partial` is set, `transcript_source` is
+`none`, and the extraction is stored with status `partial`. There is no
+"any language" step: it would take a second yt-dlp run per video, and
+more requests to YouTube, for little gain.
+
 **yt-dlp stderr handling:** On failure (`cmd.Run` returns error),
 extract only `ERROR:` lines from stderr. Ignore `WARNING:` lines
 (e.g., "ffmpeg not found", impersonation warnings) that are noisy

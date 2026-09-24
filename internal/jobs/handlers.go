@@ -147,11 +147,15 @@ func FetchHandler(d Deps) HandlerFunc {
 			return fmt.Errorf("write markdown: %w", err)
 		}
 
+		status := store.ExtractionStatusOK
+		if res.Partial {
+			status = store.ExtractionStatusPartial
+		}
 		ext := &store.DocumentExtraction{
 			ID:           extID,
 			DocumentID:   doc.ID,
 			Fetcher:      f.Name(),
-			Status:       store.ExtractionStatusOK,
+			Status:       status,
 			MarkdownPath: &relPath,
 		}
 		if res.Meta != nil {

@@ -184,6 +184,41 @@ func TestYouTubeFetch_FakeBin(t *testing.T) {
 	assert.Equal(t, "test_id", result.Meta["video_id"])
 }
 
+// TestYouTubeFetch_TranscriptSource: the transcript source comes from which
+// tracks info.json lists, uploaded captions win over automatic ones, and a
+// video without captions is stored as a partial fetch of its description.
+func TestYouTubeFetch_TranscriptSource(t *testing.T) {
+	cases := []struct {
+		subs    string
+		source  string
+		picked  string
+		partial bool
+	}{
+		{"manual:en,auto:en", "manual", "manual en", false},
+		{"auto:en", "auto", "auto en", false},
+		{"manual:en,auto:en-orig", "manual", "manual en.", false},
+		{"auto:en-orig,auto:en", "auto", "auto en.", false},
+		{"none", "none", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.subs, func(t *testing.T) {
+			t.Setenv(fakeSubsEnv, tc.subs)
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
+			res, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.source, res.Meta["transcript_source"])
+			assert.Equal(t, tc.partial, res.Partial)
+			assert.Contains(t, res.Markdown, "A test video description.")
+			if tc.picked != "" {
+				assert.Contains(t, res.Markdown, "This track is "+tc.picked)
+			} else {
+				assert.NotContains(t, res.Markdown, "## Transcript")
+			}
+		})
+	}
+}
+
 func TestYouTubeFetch_PermanentError(t *testing.T) {
 	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp-unavailable"), Timeout: 30 * time.Second})
 	_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=gone123")
@@ -361,4 +396,16 @@ func TestYouTubeFetch_InvalidVideoIDIsPermanent(t *testing.T) {
 	_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=abc%26list%3Dx")
 	var pe *PermanentError
 	require.ErrorAs(t, err, &pe)
+}
+
+// TestFindTranscript_IOErrors: a temp dir or subtitle file that can't be
+// read is an error, not a silent "no transcript".
+func TestFindTranscript_IOErrors(t *testing.T) {
+	_, _, err := findTranscript(filepath.Join(t.TempDir(), "missing"), &ytdlpMeta{})
+	require.Error(t, err)
+
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "vid.en.vtt"), 0o700)) // unreadable as a file
+	_, _, err = findTranscript(dir, &ytdlpMeta{})
+	require.Error(t, err)
 }

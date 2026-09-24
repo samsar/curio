@@ -144,7 +144,7 @@ _None — Firefox landed (see table above). **M1 is complete.**_
 | Chrome fingerprint backend | `internal/fetcher/transport.go` | uTLS + HTTP/2 via `bogdanfinn/tls-client` to defeat JA3/Akamai bot detection; `fetcher.native.backend` = `chrome` (default) \| `stock`. h3 (QUIC) responses decompressed defensively; live integration test under `make test-integration` |
 | PDF fetcher (two-tier) | `internal/fetcher/pdf.go`, `native.go` | `application/pdf` (or a `.pdf` URL) → pure-Go local extraction (`ledongthuc/pdf`), falling back to Jina. Other non-HTML binary (images, octet-stream) rejected as a permanent failure. Content type stored as `pdf` |
 | PatternDispatcher | `internal/fetcher/fetcher.go` | Host-based routing; first match wins, fallback to Native |
-| YouTube fetcher | `internal/fetcher/youtube.go` | yt-dlp for metadata + captions; VTT parser; auto/manual subs |
+| YouTube fetcher | `internal/fetcher/youtube.go` | yt-dlp for metadata + captions; VTT parser; uploaded captions preferred over automatic (told apart via info.json); no transcript → description-only `partial` extraction |
 | YouTube URL normalization | `internal/urlutil/normalize.go` | `youtu.be`, shorts, mobile, embed → canonical `watch?v=ID` |
 | YouTube config | `internal/config/config.go` | `bin`, `timeout_seconds`, `sub_langs` |
 | GitHub fetcher | `internal/fetcher/github.go` | REST API for repo metadata + README; file URLs fetch specific files |
