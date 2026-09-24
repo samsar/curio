@@ -1988,3 +1988,37 @@ the limit per account and IP.
 for the whole wait. `JobQueue.MarkFailed` takes no delay, so the queue
 can't honor the hint yet. `RetryAfter` travels on the error for when it
 can.
+
+---
+
+## Fetchers: one cap on every response body
+
+**Decision:**
+
+- Every response body a fetcher reads is capped at 32 MiB
+  (`maxResponseBytes`), counted after decompression. Past the cap a read
+  fails with `ErrTooLarge` rather than quietly ending, so a cut-off body
+  can never pass for a complete one. `ErrTooLarge` is always permanent,
+  never goes to Jina and is never host-cached.
+- For the Native fetcher the cap is one decorator around the transport
+  (`limitBodies`), so it covers both backends and both the origin and
+  Jina requests. GitHub reads through the same limiter.
+- A PDF over the cap skips local extraction and goes to Jina, as before,
+  but now without reading past the cap.
+- `text/event-stream` is refused on its Content-Type: it never ends.
+- A Jina body cut off mid-transfer is a transport failure and is retried.
+  It used to be stored as a short article.
+
+**Why:** Nothing bounded a body. Readability's parser, Jina and GitHub
+all read to EOF, and decompression is lazy on both backends, so a gzip
+or brotli bomb multiplied whatever came over the wire. `text/*` let an
+endless event stream through. The only limit was the 30s client timeout,
+times 16 fetch workers. The Jina path dropped the read error, and an
+overlay probe stored a truncated Jina answer as a 629-character
+"success" that was never retried.
+
+**Detection detail:** go-readability flattens reader errors with `%v`, so
+`errors.Is` can't find `ErrTooLarge` through it. `tryReadability` asks
+the capped body whether it overflowed instead of pre-buffering, since the
+parser already copies the whole body.
+

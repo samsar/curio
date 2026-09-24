@@ -55,6 +55,89 @@ type fetchResponse struct {
 	contentType string   // raw Content-Type header (may include "; charset=...")
 }
 
+// maxResponseBytes caps every response body a fetcher reads, measured
+// after decompression. Nothing a bookmark points at needs more. Without a
+// cap, a gzip bomb or a never-ending text/* stream is read into memory
+// until the client timeout, once per fetch worker.
+const maxResponseBytes = 32 << 20 // 32 MiB
+
+// limitedBody is a body that fails with ErrTooLarge once more than max
+// bytes have been read, rather than quietly ending there: a cut-off body
+// must never pass for a complete one.
+type limitedBody struct {
+	io.ReadCloser
+	max      int64
+	left     int64
+	exceeded bool
+}
+
+func newLimitedBody(rc io.ReadCloser, maxBytes int64) *limitedBody {
+	return &limitedBody{ReadCloser: rc, max: maxBytes, left: maxBytes}
+}
+
+func (b *limitedBody) Read(p []byte) (int, error) {
+	if b.exceeded {
+		return 0, b.tooLarge()
+	}
+	if b.left <= 0 {
+		// At the cap, one more byte tells a body of exactly max bytes from
+		// a longer one.
+		var probe [1]byte
+		n, err := b.ReadCloser.Read(probe[:])
+		if n > 0 {
+			b.exceeded = true
+			return 0, b.tooLarge()
+		}
+		return 0, err
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.left -= int64(n)
+	return n, err
+}
+
+func (b *limitedBody) tooLarge() error {
+	return fmt.Errorf("%w (limit %d bytes)", ErrTooLarge, b.max)
+}
+
+// overflow returns the size error when body is a limitedBody that hit its
+// cap. For consumers that flatten read errors into strings: go-readability
+// wraps them with %v, so errors.Is can't see ErrTooLarge through it.
+func overflow(body io.Reader) error {
+	if b, ok := body.(*limitedBody); ok && b.exceeded {
+		return b.tooLarge()
+	}
+	return nil
+}
+
+// readLimited reads all of r, failing with ErrTooLarge past maxBytes.
+func readLimited(r io.Reader, maxBytes int64) ([]byte, error) {
+	return io.ReadAll(newLimitedBody(io.NopCloser(r), maxBytes))
+}
+
+// bodyLimitRT caps every body its roundTripper returns at max bytes. Both
+// backends hand back decompressed streams, so the cap applies to the
+// decoded bytes.
+type bodyLimitRT struct {
+	roundTripper
+	max int64
+}
+
+func limitBodies(rt roundTripper, maxBytes int64) roundTripper {
+	return bodyLimitRT{roundTripper: rt, max: maxBytes}
+}
+
+func (l bodyLimitRT) do(ctx context.Context, target string, headers []header) (*fetchResponse, error) {
+	resp, err := l.roundTripper.do(ctx, target, headers)
+	if err != nil {
+		return nil, err
+	}
+	resp.body = newLimitedBody(resp.body, l.max)
+	return resp, nil
+}
+
 // newRoundTripper builds the backend named by backend:
 //
 //   - "stock" / "go" / "net/http" → stockRT

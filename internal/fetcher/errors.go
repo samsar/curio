@@ -42,6 +42,11 @@ var (
 	// ErrHostUnreachable marks a host that doesn't resolve or refuses
 	// connections. Jina is skipped: it can't reach the host either.
 	ErrHostUnreachable = errors.New("host unreachable")
+
+	// ErrTooLarge marks a response body over maxResponseBytes (after
+	// decompression). Always permanent: the same URL will be just as big
+	// next time.
+	ErrTooLarge = errors.New("response too large")
 )
 
 // HTTPStatusError is a non-2xx answer from an upstream. URL is the URL that

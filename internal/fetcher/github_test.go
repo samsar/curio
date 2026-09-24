@@ -28,6 +28,7 @@ func newTestGitHub(t *testing.T, srv *httptest.Server) *GitHub {
 		baseURL: srv.URL,
 		client:  srv.Client(),
 		limiter: rate.NewLimiter(rate.Inf, 1),
+		maxBody: maxResponseBytes,
 		clock:   newFakeClock().clock(),
 		log:     slog.Default(),
 	}
@@ -768,6 +769,33 @@ func TestGitHubFetch_FileEscaping(t *testing.T) {
 			u, err := url.Parse(res.FinalURL)
 			require.NoError(t, err)
 			assert.Equal(t, tc.decodedPath, u.Path)
+		})
+	}
+}
+
+// TestGitHubFetch_BodyOverLimit: a README or file larger than the body cap
+// fails permanently rather than being read into memory whole.
+func TestGitHubFetch_BodyOverLimit(t *testing.T) {
+	for _, target := range []string{"https://github.com/owner/repo", "https://github.com/owner/repo/blob/main/big.md"} {
+		t.Run(target, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(repoMetaJSON))
+			})
+			big := func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
+			}
+			mux.HandleFunc("/repos/owner/repo/readme", big)
+			mux.HandleFunc("/repos/owner/repo/contents/big.md", big)
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			g := newTestGitHub(t, srv)
+			g.maxBody = 1024
+			_, err := g.Fetch(t.Context(), target)
+			var pe *PermanentError
+			require.ErrorAs(t, err, &pe)
+			assert.ErrorIs(t, err, ErrTooLarge)
 		})
 	}
 }

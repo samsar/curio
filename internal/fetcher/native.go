@@ -91,6 +91,7 @@ func NewNative(opts NativeOptions) *Native {
 			"backend", opts.Backend, "err", err)
 		rt = newStockRT(opts.Timeout)
 	}
+	rt = limitBodies(rt, maxResponseBytes)
 	opts.Log.Info("native fetcher transport", "backend", rt.name())
 	return &Native{
 		rt:                rt,
@@ -271,6 +272,9 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 
 	finalURL := resp.finalURL
 	article, err := readability.FromReader(resp.body, finalURL)
+	if tooLarge := overflow(resp.body); tooLarge != nil {
+		return nil, &PermanentError{Err: fmt.Errorf("native: %s: %w", target, tooLarge)}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("native: readability: %w", err)
 	}
@@ -444,10 +448,14 @@ func mediaType(ct string) string {
 // Readability path can handle. Empty/missing is allowed (many servers omit
 // or mislabel it, and genuine HTML still parses); text/* and XHTML are
 // allowed; everything explicit and non-text (image/*, octet-stream, …) is
-// rejected so binary bodies never reach the HTML parser. (PDFs are handled
-// separately, before this is consulted.)
+// rejected so binary bodies never reach the HTML parser. text/event-stream
+// is rejected too: it never ends, so reading it only ends at the size cap.
+// (PDFs are handled separately, before this is consulted.)
 func isReadableContentType(ct string) bool {
 	mt := mediaType(ct)
+	if mt == "text/event-stream" {
+		return false
+	}
 	return mt == "" || strings.HasPrefix(mt, "text/") || mt == "application/xhtml+xml"
 }
 
@@ -515,28 +523,21 @@ func utf8Trimmed(s string) int {
 	return len(strings.TrimSpace(s))
 }
 
-const (
-	// maxPDFBytes caps how much of a PDF we pull into memory for local
-	// extraction; larger PDFs skip tier 1 and go straight to Jina.
-	maxPDFBytes = 32 << 20 // 32 MiB
-	// minPDFChars is the floor below which local extraction is treated as a
-	// miss (empty / garbled output) and we fall back to Jina.
-	minPDFChars = 200
-)
+// minPDFChars is the floor below which local extraction is treated as a
+// miss (empty / garbled output) and we fall back to Jina.
+const minPDFChars = 200
 
 // fetchPDF handles a PDF response in two tiers: pure-Go local extraction
 // first (no system dependency), then Jina, which renders PDFs server-side.
-// body is the already-open response body for target.
+// body is the already-open response body for target; a PDF over the body
+// cap skips tier 1 without being read any further.
 func (n *Native) fetchPDF(ctx context.Context, target string, body io.Reader) (*Result, error) {
-	data, err := io.ReadAll(io.LimitReader(body, maxPDFBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("native: read pdf: %w", err)
-	}
-
-	// Tier 1: local, pure-Go. Skipped for oversized PDFs.
+	data, err := io.ReadAll(body)
 	switch {
-	case len(data) > maxPDFBytes:
-		n.log.Info("pdf too large for local extraction, trying jina", "url", target, "bytes", len(data))
+	case errors.Is(err, ErrTooLarge):
+		n.log.Info("pdf too large for local extraction, trying jina", "url", target)
+	case err != nil:
+		return nil, fmt.Errorf("native: read pdf: %w", err)
 	default:
 		text, exErr := extractPDFText(data)
 		switch {
@@ -586,8 +587,17 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 			lastErr = fmt.Errorf("jina: %w", err)
 			continue
 		}
-		body, _ := io.ReadAll(resp.body)
+		body, err := io.ReadAll(resp.body)
 		_ = resp.body.Close()
+		if errors.Is(err, ErrTooLarge) {
+			return nil, &PermanentError{Err: fmt.Errorf("jina: %w", err)}
+		}
+		if err != nil {
+			// A body cut off mid-transfer is a transport failure, never a
+			// short article.
+			lastErr = fmt.Errorf("jina: read body: %w", err)
+			continue
+		}
 
 		if resp.statusCode >= 200 && resp.statusCode < 300 {
 			parsed := parseJina(string(body))

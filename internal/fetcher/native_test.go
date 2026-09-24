@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -544,4 +546,146 @@ func TestNative_RetryAfterHTTPDate(t *testing.T) {
 	var se *HTTPStatusError
 	require.ErrorAs(t, err, &se)
 	assert.Equal(t, 90*time.Second, se.RetryAfter)
+}
+
+// thinPage is an origin answer the login-wall heuristic rejects as thin,
+// so Fetch falls back to Jina.
+const thinPage = `<html><body><p>nope</p></body></html>`
+
+func serveThinPage(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(thinPage))
+	}))
+}
+
+// TestNative_JinaTruncatedBodyIsRetryable: a Jina answer cut off mid-body
+// (Content-Length promised more, then the connection closed) is a
+// transport failure retried with backoff, never a short article.
+func TestNative_JinaTruncatedBodyIsRetryable(t *testing.T) {
+	source := serveThinPage(t)
+	defer source.Close()
+
+	var jinaHits atomic.Int32
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jinaHits.Add(1)
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer conn.Close()
+		body := "Title: Cut off\n\nMarkdown Content:\n" + strings.Repeat("partial body text ", 40)
+		fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(body)+10_000, body)
+		assert.NoError(t, buf.Flush())
+	}))
+	defer jina.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	fc := newFakeClock()
+	n.clock = fc.clock()
+	res, err := n.Fetch(context.Background(), source.URL)
+	require.Error(t, err)
+	assert.Nil(t, res)
+	var pe *PermanentError
+	assert.False(t, errors.As(err, &pe), "a truncated transfer must be retried: %v", err)
+	assert.Equal(t, int32(4), jinaHits.Load())
+	assert.Equal(t, []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}, fc.slept())
+}
+
+// TestNative_JinaBodyOverLimitIsPermanent: a Jina answer larger than the
+// body cap fails permanently on the first attempt.
+func TestNative_JinaBodyOverLimitIsPermanent(t *testing.T) {
+	source := serveThinPage(t)
+	defer source.Close()
+
+	var jinaHits atomic.Int32
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jinaHits.Add(1)
+		_, _ = w.Write([]byte("Title: Huge\n\nMarkdown Content:\n" + strings.Repeat("x", 2*testBodyLimit)))
+	}))
+	defer jina.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	n.rt = limitBodies(n.rt, testBodyLimit)
+	_, err := n.Fetch(context.Background(), source.URL)
+	var pe *PermanentError
+	require.ErrorAs(t, err, &pe)
+	assert.ErrorIs(t, err, ErrTooLarge)
+	assert.Equal(t, int32(1), jinaHits.Load())
+}
+
+// TestNative_EventStreamRejectedUpFront: text/event-stream never ends, so
+// it is refused on its Content-Type without reading the body.
+func TestNative_EventStreamRejectedUpFront(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: hello\n\n"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	n := NewNative(NativeOptions{Timeout: 30 * time.Second})
+	start := time.Now()
+	_, err := n.Fetch(context.Background(), srv.URL)
+	assert.Less(t, time.Since(start), 5*time.Second)
+	var pe *PermanentError
+	require.ErrorAs(t, err, &pe)
+	assert.Contains(t, err.Error(), "unsupported content type")
+}
+
+// fakeRT is a roundTripper answering from a function, for tests that need
+// to see exactly what the fetcher reads.
+type fakeRT func(target string) (*fetchResponse, error)
+
+func (fakeRT) name() string { return "fake" }
+func (f fakeRT) do(_ context.Context, target string, _ []header) (*fetchResponse, error) {
+	return f(target)
+}
+
+// countingReader is an endless body that counts the bytes handed out.
+type countingReader struct{ n atomic.Int64 }
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	r.n.Add(int64(len(p)))
+	return len(p), nil
+}
+
+// TestNative_PDFOverLimit: a PDF over the body cap skips local extraction
+// after reading at most one byte past the cap, then goes to Jina. With
+// Jina off it fails permanently.
+func TestNative_PDFOverLimit(t *testing.T) {
+	const limit = 4096
+	const jinaBase = "https://jina.test/"
+	for _, jinaOn := range []bool{true, false} {
+		t.Run(fmt.Sprintf("jina=%v", jinaOn), func(t *testing.T) {
+			origin := &countingReader{}
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: jinaOn, JinaBaseURL: jinaBase})
+			n.rt = limitBodies(fakeRT(func(target string) (*fetchResponse, error) {
+				u, err := url.Parse(target)
+				require.NoError(t, err)
+				if strings.HasPrefix(target, jinaBase) {
+					body := "Title: Big PDF\n\nMarkdown Content:\n" + strings.Repeat("Rendered PDF text. ", 20)
+					return &fetchResponse{statusCode: http.StatusOK, header: http.Header{}, finalURL: u,
+						body: io.NopCloser(strings.NewReader(body)), contentType: "text/plain"}, nil
+				}
+				return &fetchResponse{statusCode: http.StatusOK, header: http.Header{}, finalURL: u,
+					body: io.NopCloser(origin), contentType: "application/pdf"}, nil
+			}), limit)
+
+			res, err := n.Fetch(context.Background(), "https://example.com/big.pdf")
+			assert.LessOrEqual(t, origin.n.Load(), int64(limit+1), "must stop reading at the cap")
+			if !jinaOn {
+				var pe *PermanentError
+				require.ErrorAs(t, err, &pe)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "jina", res.Meta["via"])
+			assert.Equal(t, "pdf", res.ContentType)
+		})
+	}
 }

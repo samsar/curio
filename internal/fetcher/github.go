@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -33,6 +32,7 @@ type GitHub struct {
 	client     *http.Client
 	limiter    *rate.Limiter
 	cooldown   cooldown // shared by every API call; see apiGet
+	maxBody    int64
 	clock      clock
 	log        *slog.Logger
 }
@@ -54,6 +54,7 @@ func NewGitHub(opts GitHubOptions) *GitHub {
 		rawBaseURL: "https://raw.githubusercontent.com",
 		client:     &http.Client{Timeout: opts.Timeout},
 		limiter:    rate.NewLimiter(1.5, 1), // 1.5 API calls/s, no burst — stays under GitHub's 100 req/min
+		maxBody:    maxResponseBytes,
 		clock:      realClock,
 		log:        opts.Log,
 	}
@@ -551,7 +552,10 @@ func (g *GitHub) doRequest(ctx context.Context, endpoint, accept string) ([]byte
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, g.maxBody)
+	if errors.Is(err, ErrTooLarge) {
+		return nil, &PermanentError{Err: fmt.Errorf("github: %s: %w", endpoint, err)}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("github: read %s: %w", endpoint, err)
 	}
