@@ -144,6 +144,16 @@ type DocumentStore interface {
 	GetByURL(ctx context.Context, tenantID, url string) (*Document, error)
 	UpdateState(ctx context.Context, id, state string) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
+
+	// RequeueFetch resets the tenant's document to pending and enqueues a
+	// fresh fetch job for it, atomically: either both happen or neither
+	// does, so a document is never left pending with no job to move it on.
+	// Returns the new job, or ErrNotFound if the tenant has no such document.
+	RequeueFetch(ctx context.Context, tenantID, documentID string) (*Job, error)
+	// RequeueFetchByStates does the same for every tenant document whose
+	// state is one of states, in one transaction. Returns how many jobs it
+	// enqueued.
+	RequeueFetchByStates(ctx context.Context, tenantID string, states []string) (int, error)
 }
 
 // ExtractionStore operates on the document_extractions table.

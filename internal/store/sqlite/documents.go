@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -312,6 +313,99 @@ func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionI
 		return fmt.Errorf("set current extraction: %w", err)
 	}
 	return ensureRow(res, "document")
+}
+
+func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID string) (*store.Job, error) {
+	job, err := newFetchJob(tenantID, documentID)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin requeue fetch: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+
+	// Write first, so the transaction takes the write lock outright instead
+	// of upgrading from a read lock (see decisions.md "Job queue claim via
+	// atomic UPDATE ... RETURNING").
+	res, err := tx.ExecContext(ctx,
+		`UPDATE documents SET state = ? WHERE tenant_id = ? AND id = ?`,
+		store.DocStatePending, tenantID, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("reset document state: %w", err)
+	}
+	if err := ensureRow(res, "document"); err != nil {
+		return nil, err
+	}
+	if err := insertJob(ctx, tx, job); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit requeue fetch: %w", err)
+	}
+	return job, nil
+}
+
+func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, states []string) (int, error) {
+	if len(states) == 0 {
+		return 0, errors.New("requeue fetch: states required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin requeue fetch: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+
+	// Write first, as in RequeueFetch. The whole corpus goes in one
+	// transaction: resetting and enqueueing 50k documents takes well under
+	// a second, far inside the 5s busy_timeout other writers wait for.
+	args := appendStrings([]any{store.DocStatePending, tenantID}, states)
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE documents SET state = ?
+		WHERE tenant_id = ? AND state IN (`+placeholders(len(states))+`)
+		RETURNING id`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("reset document states: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("reset document states: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("reset document states: %w", err)
+	}
+
+	for _, id := range ids {
+		job, err := newFetchJob(tenantID, id)
+		if err != nil {
+			return 0, err
+		}
+		if err := insertJob(ctx, tx, job); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit requeue fetch: %w", err)
+	}
+	return len(ids), nil
+}
+
+// newFetchJob builds a fetch job for a document. The payload is
+// jobs.FetchPayload's shape, which package store can't import.
+func newFetchJob(tenantID, documentID string) (*store.Job, error) {
+	payload, err := json.Marshal(struct {
+		DocumentID string `json:"document_id"`
+	}{documentID})
+	if err != nil {
+		return nil, fmt.Errorf("encode fetch payload: %w", err)
+	}
+	return &store.Job{TenantID: tenantID, Kind: store.JobKindFetch, Payload: payload}, nil
 }
 
 func ensureRow(res sql.Result, entity string) error {

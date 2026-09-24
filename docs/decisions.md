@@ -1832,6 +1832,35 @@ simply redone.
 
 ---
 
+## Refetch: state reset and fetch job in one transaction
+
+**Decision:** `DocumentStore.RequeueFetch` and `RequeueFetchByStates` reset
+the document(s) to `pending` and insert the fetch job(s) in one
+write-first transaction: the UPDATE comes first, then the INSERTs.
+Everything commits or nothing does.
+
+- `refetch-all` rejects any `?state=` other than pending, fetched, failed
+  or dead with 400. With no `?state=` it defaults to pending, fetched and
+  failed.
+- `reindex-all` stops at the first enqueue failure and reports how many
+  jobs it enqueued.
+- Every job insert goes through one helper (`insertJob` in
+  `internal/store/sqlite`), inside a transaction or not.
+
+**Why:** The handlers flipped the document to `pending` and then
+enqueued, discarding errors. A failed enqueue left the document `pending`
+with no job, the stuck state the permanent-failure hook exists to
+prevent. `refetch-all` returned 202 with a count that hid the failures.
+
+**One transaction, not batches:** 50k documents take about 1.5s
+(measured). Nearly all of that is the job INSERTs, and a prepared
+statement saved only about 8%. That is well inside the 5s busy_timeout
+other writers wait on.
+
+**Not done:** skipping documents that already have a queued fetch job.
+
+---
+
 ## Migrations: rebuilding a table other tables reference
 
 **Decision:** Table rebuilds follow the recipe in `migrations/README.md`:

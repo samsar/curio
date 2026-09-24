@@ -250,6 +250,61 @@ paths:
               schema: { type: string }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/documents/{id}/refetch:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      - { in: query, name: force, required: false, schema: { type: string, enum: ["1", "true"] },
+          description: Refetch even if the document is dead (a confirmed dead link). }
+    post:
+      tags: [documents]
+      operationId: refetchDocument
+      summary: Reset the document to pending and enqueue a fresh fetch job
+      description: >
+        The state reset and the new job commit together: on failure the
+        document keeps its state and no job exists. The current extraction is
+        kept until the new fetch replaces it.
+      responses:
+        "202":
+          description: Fetch job enqueued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobRef" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The document is dead and force was not given
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /v1/documents/refetch-all:
+    parameters:
+      - { in: query, name: state, required: false, schema: { type: string, enum: [pending, fetched, failed, dead] },
+          description: "Only refetch documents in this state. Default: pending, fetched and failed; dead documents only when asked for." }
+    post:
+      tags: [documents]
+      operationId: refetchAllDocuments
+      summary: Reset matching documents to pending and enqueue a fetch job for each
+      description: >
+        All-or-nothing: every matching document is reset and gets a fetch job
+        in one transaction, or nothing changes. Returns the number of jobs
+        enqueued rather than a job_id: there is no parent job to poll; watch
+        /v1/jobs or /v1/stats instead.
+      responses:
+        "202":
+          description: Fetch jobs enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobs_enqueued]
+                properties:
+                  jobs_enqueued: { type: integer }
+        "400":
+          description: Unknown state
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
   /v1/documents/{id}/related:
     parameters:
       - { in: path, name: id, required: true, schema: { type: string, format: uuid } }

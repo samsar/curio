@@ -34,14 +34,26 @@ func NewJobs(db *DB) *Jobs {
 }
 
 func (s *Jobs) Enqueue(ctx context.Context, j *store.Job) error {
-	if j.ID == "" {
-		j.ID = uuid.NewString()
-	}
+	return insertJob(ctx, s.db, j)
+}
+
+// rowQuerier is what insertJob needs from *sql.DB or *sql.Tx.
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// insertJob applies the queue's defaults to j (ID, payload, status,
+// run_after), inserts it through q, and fills in the timestamps the database
+// assigned. Every job insert goes through here, inside a transaction or not.
+func insertJob(ctx context.Context, q rowQuerier, j *store.Job) error {
 	if j.TenantID == "" {
 		return fmt.Errorf("jobs: tenant_id required")
 	}
 	if j.Kind == "" {
 		return fmt.Errorf("jobs: kind required")
+	}
+	if j.ID == "" {
+		j.ID = uuid.NewString()
 	}
 	if len(j.Payload) == 0 {
 		j.Payload = []byte("{}")
@@ -49,29 +61,29 @@ func (s *Jobs) Enqueue(ctx context.Context, j *store.Job) error {
 	if j.Status == "" {
 		j.Status = store.JobStatusPending
 	}
-
-	runAfter := j.RunAfter
-	if runAfter.IsZero() {
-		runAfter = time.Now().UTC()
+	if j.RunAfter.IsZero() {
+		j.RunAfter = time.Now().UTC()
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	var runAfter, createdAt, updatedAt string
+	err := q.QueryRowContext(ctx, `
 		INSERT INTO jobs (id, tenant_id, kind, payload, status, attempts, run_after)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		RETURNING run_after, created_at, updated_at`,
 		j.ID, j.TenantID, j.Kind, string(j.Payload),
-		j.Status, j.Attempts, formatTime(runAfter),
-	)
+		j.Status, j.Attempts, formatTime(j.RunAfter),
+	).Scan(&runAfter, &createdAt, &updatedAt)
 	if err != nil {
 		return fmt.Errorf("enqueue job: %w", err)
 	}
-	got, err := s.GetByID(ctx, j.ID)
-	if err != nil {
+	if j.RunAfter, err = parseTime(runAfter); err != nil {
 		return err
 	}
-	j.RunAfter = got.RunAfter
-	j.CreatedAt = got.CreatedAt
-	j.UpdatedAt = got.UpdatedAt
-	return nil
+	if j.CreatedAt, err = parseTime(createdAt); err != nil {
+		return err
+	}
+	j.UpdatedAt, err = parseTime(updatedAt)
+	return err
 }
 
 // ClaimNext claims one runnable job atomically. Pass kinds to restrict by
