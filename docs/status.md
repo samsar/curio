@@ -140,7 +140,7 @@ _None — Firefox landed (see table above). **M1 is complete.**_
 
 | Feature | Package / file | Notes |
 |---|---|---|
-| Native fetcher (v1 default) | `internal/fetcher/native.go` | Go-native: net/http + Readability + html-to-markdown; replaced the Node `web2md` as the default. Jina Reader fallback for anti-bot / login-wall cases |
+| Native fetcher (v1 default) | `internal/fetcher/native.go` | Go-native: net/http + Readability + html-to-markdown; replaced the Node `web2md` as the default. Jina Reader fallback for anti-bot / login-wall cases, paced by a shared limiter (20/min, 200/min with `jina_api_key`) and 429 cooldown. At most 2 origin requests in flight per host |
 | Chrome fingerprint backend | `internal/fetcher/transport.go` | uTLS + HTTP/2 via `bogdanfinn/tls-client` to defeat JA3/Akamai bot detection; `fetcher.native.backend` = `chrome` (default) \| `stock`. h3 (QUIC) responses decompressed defensively; live integration test under `make test-integration` |
 | PDF fetcher (two-tier) | `internal/fetcher/pdf.go`, `native.go` | `application/pdf` (or a `.pdf` URL) → pure-Go local extraction (`ledongthuc/pdf`), falling back to Jina. Other non-HTML binary (images, octet-stream) rejected as a permanent failure. Content type stored as `pdf` |
 | PatternDispatcher | `internal/fetcher/fetcher.go` | Host-based routing; first match wins, fallback to Native |

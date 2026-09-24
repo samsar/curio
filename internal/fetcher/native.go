@@ -2,6 +2,7 @@ package fetcher
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"syscall"
@@ -17,6 +19,7 @@ import (
 
 	readability "codeberg.org/readeck/go-readability/v2"
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"golang.org/x/time/rate"
 )
 
 // Native is the Go-native fetcher that replaces the Node `web2md` tool as
@@ -33,9 +36,13 @@ type Native struct {
 	userAgent         string
 	jinaFallback      bool
 	jinaBaseURL       string // override for tests
+	jinaAPIKey        string
+	jinaLimiter       *rate.Limiter
+	jinaCooldown      cooldown
 	deadLinkDetection bool
 	log               *slog.Logger
 	hostCache         *hostFailureCache
+	originSlots       *hostGate
 	clock             clock
 }
 
@@ -45,6 +52,9 @@ type NativeOptions struct {
 	UserAgent    string
 	JinaFallback bool
 	JinaBaseURL  string // default https://r.jina.ai/
+	// JinaAPIKey is sent as a bearer token and raises Jina's rate limit.
+	// Empty falls back to the CURIO_JINA_API_KEY environment variable.
+	JinaAPIKey string
 	// DeadLinkDetection classifies hard 404/410 and detected soft 404s
 	// as permanent dead links (never retried, never sent to Jina).
 	// Off by default here like JinaFallback — the daemon passes the
@@ -65,6 +75,22 @@ type NativeOptions struct {
 	Backend string
 }
 
+const (
+	// Jina's published limits are 20 requests a minute without an API key
+	// and 500 with a free one. The keyed rate stays well under the latter.
+	jinaRequestsPerMinute      = 20
+	jinaKeyedRequestsPerMinute = 200
+	// maxInlineJinaWait is the longest Jina cooldown a fetch sits out.
+	// Longer ones fail the fetch retryably and leave the wait to the job
+	// queue's backoff.
+	maxInlineJinaWait = 30 * time.Second
+	// jinaAttempts is how many times one fetch calls Jina for transient
+	// failures (5xx, 429, transport errors).
+	jinaAttempts = 4
+	// originRequestsPerHost bounds concurrent origin requests to one host.
+	originRequestsPerHost = 2
+)
+
 // defaultUA must stay coherent with the default chrome profile (Chrome_133):
 // a JA3 that says Chrome 133 paired with a UA that says something else is a
 // mismatch some bot checks flag. Override Backend and UserAgent together.
@@ -81,9 +107,20 @@ func NewNative(opts NativeOptions) *Native {
 	if opts.JinaBaseURL == "" {
 		opts.JinaBaseURL = "https://r.jina.ai/"
 	}
+	if opts.JinaAPIKey == "" {
+		opts.JinaAPIKey = os.Getenv("CURIO_JINA_API_KEY")
+	}
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
+	// Every fetch worker shares one Native, so this one limiter paces all
+	// of their Jina calls.
+	jinaPerMinute := jinaRequestsPerMinute
+	if opts.JinaAPIKey != "" {
+		jinaPerMinute = jinaKeyedRequestsPerMinute
+	}
+	jinaLimiter := rate.NewLimiter(rate.Every(time.Minute/time.Duration(jinaPerMinute)), 1)
+
 	rt, err := newRoundTripper(opts.Backend, opts.Timeout, opts.Log)
 	if err != nil {
 		// A fingerprint backend that won't initialize shouldn't take the
@@ -99,9 +136,12 @@ func NewNative(opts NativeOptions) *Native {
 		userAgent:         opts.UserAgent,
 		jinaFallback:      opts.JinaFallback,
 		jinaBaseURL:       opts.JinaBaseURL,
+		jinaAPIKey:        opts.JinaAPIKey,
+		jinaLimiter:       jinaLimiter,
 		deadLinkDetection: opts.DeadLinkDetection,
 		log:               opts.Log,
 		hostCache:         newHostFailureCache(opts.HostFailureTTL),
+		originSlots:       newHostGate(originRequestsPerHost),
 		clock:             realClock,
 	}
 }
@@ -129,6 +169,17 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		return nil, err
 	}
 
+	release, err := n.originSlots.acquire(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("native: wait for a request slot on %s: %w", host, err)
+	}
+	defer release()
+	// A verdict cached while this fetch queued for the host applies to it
+	// too; don't send the request that verdict says is hopeless.
+	if err := n.cachedFailure(target, host); err != nil {
+		return nil, err
+	}
+
 	// Pass 1: direct fetch + Readability (or local PDF extraction).
 	res, originErr := n.tryReadability(ctx, target)
 	if originErr == nil {
@@ -141,8 +192,13 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		return nil, originErr
 	}
 	if !n.jinaFallback || !jinaCanHelp(originErr) {
+		// Settled while still holding the slot, so fetches queued for this
+		// host see any verdict it caches.
 		return nil, n.settle(host, originErr, originErr)
 	}
+	// The origin's answer is in; never hold its slot while waiting on or
+	// calling Jina.
+	release()
 
 	// Pass 2: Jina.
 	n.log.Info("native fetch needs help, falling back to jina",
@@ -154,7 +210,7 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		}
 		return res, nil
 	}
-	err := fmt.Errorf("%w; %w", originErr, jinaErr)
+	err = fmt.Errorf("%w; %w", originErr, jinaErr)
 	switch {
 	case errors.Is(jinaErr, ErrTooLarge):
 		return nil, &PermanentError{Err: err}
@@ -629,70 +685,131 @@ func (n *Native) extractPDF(target string, body io.Reader) (*Result, error) {
 // errJinaThin marks a Jina answer with too little content to be the page.
 var errJinaThin = errors.New("too little content")
 
-// tryJina is pass 2: hit r.jina.ai/<url> with retries. Returns parsed
-// markdown + extracted metadata in the Result.
+// tryJina is pass 2: fetch r.jina.ai/<url>. Every call goes through the
+// shared limiter and cooldown (awaitJina). Transient failures are retried up
+// to jinaAttempts times: 5xx and transport errors after a 2/4/8s backoff,
+// 429s after the cooldown they set.
 func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
-		if attempt > 0 {
-			if err := n.clock.sleep(ctx, time.Duration(1<<attempt)*time.Second); err != nil {
+	for attempt := range jinaAttempts {
+		if attempt > 0 && !isRateLimited(lastErr) {
+			if err := n.clock.sleep(ctx, jinaBackoff(attempt)); err != nil {
 				return nil, fmt.Errorf("jina: %w", err)
 			}
 		}
-
-		resp, err := n.rt.do(ctx, n.jinaBaseURL+target, []header{
-			{"user-agent", n.userAgent},
-			{"accept", "text/plain"},
-		})
-		if err != nil {
-			lastErr = fmt.Errorf("jina: %w", err)
-			continue
-		}
-		body, err := io.ReadAll(resp.body)
-		_ = resp.body.Close()
-		if errors.Is(err, ErrTooLarge) {
-			return nil, fmt.Errorf("jina: %w", err)
-		}
-		if err != nil {
-			// A body cut off mid-transfer is a transport failure, never a
-			// short article.
-			lastErr = fmt.Errorf("jina: read body: %w", err)
-			continue
+		if err := n.awaitJina(ctx); err != nil {
+			return nil, err
 		}
 
-		if resp.statusCode >= 200 && resp.statusCode < 300 {
-			parsed := parseJina(string(body))
-			if len(parsed.body) < 200 {
-				return nil, fmt.Errorf("jina: %w (%d chars)", errJinaThin, len(parsed.body))
-			}
-			result := &Result{
-				Markdown:    parsed.body,
-				FinalURL:    parsed.urlSource,
-				ContentType: "article",
-				Title:       parsed.title,
-				Meta:        map[string]any{"via": "jina"},
-			}
-			if result.FinalURL == "" {
-				result.FinalURL = target
-			}
-			if parsed.published != "" {
-				if pt, err := time.Parse(time.RFC3339, parsed.published); err == nil {
-					result.PublishedAt = &pt
-				}
-			}
-			return result, nil
+		res, err := n.jinaOnce(ctx, target)
+		if err == nil {
+			return res, nil
 		}
-
-		lastErr = fmt.Errorf("jina: %w", &HTTPStatusError{StatusCode: resp.statusCode, URL: resp.finalURL.String()})
-		if !retryableStatus(resp.statusCode) {
-			break
+		lastErr = err
+		// Jina limits per client, so a 429 pauses every caller, not just
+		// this one.
+		var se *HTTPStatusError
+		if errors.As(err, &se) && se.StatusCode == http.StatusTooManyRequests {
+			n.jinaCooldown.extend(n.clock.now(), cmp.Or(se.RetryAfter, jinaBackoff(attempt+1)))
 		}
-		n.log.Info("jina retry", "status", resp.statusCode, "attempt", attempt+1)
-	}
-	if lastErr == nil {
-		lastErr = errors.New("jina: unknown error")
+		if !jinaRetryable(err) || ctx.Err() != nil {
+			return nil, err
+		}
+		n.log.Info("jina retry", "err", err.Error(), "attempt", attempt+1)
 	}
 	return nil, lastErr
+}
+
+// jinaBackoff is the wait before retry number attempt (1-based): 2, 4, 8s.
+func jinaBackoff(attempt int) time.Duration {
+	return time.Duration(1<<attempt) * time.Second
+}
+
+// awaitJina paces a Jina call: the shared limiter first, then any cooldown
+// a 429 left, sat out inline up to maxInlineJinaWait. A longer cooldown
+// fails at once, without a request, with a retryable 429 carrying the time
+// left.
+func (n *Native) awaitJina(ctx context.Context) error {
+	if err := n.jinaLimiter.Wait(ctx); err != nil {
+		return fmt.Errorf("jina: rate limiter: %w", err)
+	}
+	left, err := n.jinaCooldown.wait(ctx, n.clock, maxInlineJinaWait)
+	if err != nil {
+		return fmt.Errorf("jina: %w", err)
+	}
+	if left > 0 {
+		se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: n.jinaBaseURL, RetryAfter: left}
+		return fmt.Errorf("jina: not sent, rate-limit cooldown has %s left: %w", left.Round(time.Second), se)
+	}
+	return nil
+}
+
+// jinaOnce makes one Jina request and parses the answer.
+func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
+	headers := []header{
+		{"user-agent", n.userAgent},
+		{"accept", "text/plain"},
+	}
+	if n.jinaAPIKey != "" {
+		headers = append(headers, header{"authorization", "Bearer " + n.jinaAPIKey})
+	}
+	resp, err := n.rt.do(ctx, n.jinaBaseURL+target, headers)
+	if err != nil {
+		return nil, fmt.Errorf("jina: %w", err)
+	}
+	defer resp.body.Close()
+
+	if resp.statusCode < 200 || resp.statusCode >= 300 {
+		se := &HTTPStatusError{StatusCode: resp.statusCode, URL: resp.finalURL.String()}
+		se.RetryAfter, _ = parseRetryAfter(resp.header, n.clock.now())
+		return nil, fmt.Errorf("jina: %w", se)
+	}
+	body, err := io.ReadAll(resp.body)
+	if err != nil {
+		// A body cut off mid-transfer is a transport failure, never a short
+		// article. Past the size cap it is ErrTooLarge.
+		return nil, fmt.Errorf("jina: read body: %w", err)
+	}
+
+	parsed := parseJina(string(body))
+	if len(parsed.body) < 200 {
+		return nil, fmt.Errorf("jina: %w (%d chars)", errJinaThin, len(parsed.body))
+	}
+	result := &Result{
+		Markdown:    parsed.body,
+		FinalURL:    parsed.urlSource,
+		ContentType: "article",
+		Title:       parsed.title,
+		Meta:        map[string]any{"via": "jina"},
+	}
+	if result.FinalURL == "" {
+		result.FinalURL = target
+	}
+	if parsed.published != "" {
+		if pt, err := time.Parse(time.RFC3339, parsed.published); err == nil {
+			result.PublishedAt = &pt
+		}
+	}
+	return result, nil
+}
+
+// jinaRetryable reports whether a failed Jina call is worth another attempt
+// within the same fetch: transport errors and retryable statuses are; a
+// thin answer, an oversized body and deterministic statuses are not.
+func jinaRetryable(err error) bool {
+	if errors.Is(err, errJinaThin) || errors.Is(err, ErrTooLarge) {
+		return false
+	}
+	var se *HTTPStatusError
+	if errors.As(err, &se) {
+		return retryableStatus(se.StatusCode)
+	}
+	return true
+}
+
+func isRateLimited(err error) bool {
+	var se *HTTPStatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusTooManyRequests
 }
 
 // jinaParsed mirrors the JS impl's parseJina output shape.

@@ -58,9 +58,7 @@ func newNativeWithJina(t *testing.T, mode jinaMode) (*Native, func() int32) {
 		t.Cleanup(jina.Close)
 		opts.JinaFallback, opts.JinaBaseURL = true, jina.URL+"/"
 	}
-	n := NewNative(opts)
-	n.clock = newFakeClock().clock()
-	return n, hits.Load
+	return unpaced(NewNative(opts), newFakeClock()), hits.Load
 }
 
 // closedAddr returns a loopback address nothing listens on.

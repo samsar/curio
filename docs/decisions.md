@@ -2052,8 +2052,8 @@ expensive.
   host from `*url.Error.URL` or `HTTPStatusError.URL`, not the host that
   was requested. Keys are lowercased hostnames.
 - Nothing is cached when Jina was tried and failed for its own reasons:
-  429, 5xx, 408, timeouts, transport errors, or 401/402 (our account).
-  Only a Jina verdict about the target counts: a 2xx with
+  429, 5xx, 408, timeouts, transport errors, 401/402 (our account) or
+  its own cooldown. Only a Jina verdict about the target counts: a 2xx with
   too little content, or another non-retryable 4xx.
 - A page-level verdict Jina could have helped with is final once every
   configured extraction path has answered: with Jina off, or after Jina
@@ -2102,4 +2102,43 @@ which allows 20 requests a minute without a key, and failed outright
 with Jina off. A deleted post redirecting to the `www` homepage skipped
 the soft-404 check and landed in the login-wall path instead of `dead`.
 Redirects to any other host are still flagged, and never host-cached.
+
+---
+
+## Fetch politeness: shared Jina pacing, per-host origin gate
+
+**Decision:**
+
+- All Jina calls go through one limiter per Native fetcher, and all 16
+  fetch workers share that fetcher: 20 requests a minute without an API
+  key, 200 with one. Jina publishes 20 and 500.
+- A Jina 429 extends a cooldown shared by every Jina call. The wait is its
+  `Retry-After`, or the current backoff step when it gave none. A later
+  call waits out up to 30 seconds of cooldown inline. A longer one fails
+  at once, without a request, as a retryable `*HTTPStatusError{429}`
+  whose `RetryAfter` is the time left. The host cache is never written
+  for it. 5xx and transport errors keep the 2/4/8 s backoff, now through
+  the injectable clock, with 4 attempts in all.
+- `fetcher.native.jina_api_key` (or `CURIO_JINA_API_KEY`) is sent as
+  `Authorization: Bearer <key>`, and never appears in logs or errors.
+- At most 2 origin requests per host are in flight
+  (`originRequestsPerHost`). A fetch waits for a slot, honoring its
+  context. The host cache is checked again once the slot is acquired, so
+  fetches queued behind the ones that got a host cached as anti-bot fail
+  from the cache instead of sending the request. The slot is released as
+  soon as the origin has answered, and is never held while waiting on or
+  calling Jina.
+
+**Why:** Every worker called `r.jina.ai` on its own, slept 2/4/8 s
+between attempts, ignored `Retry-After` and sent no key, although Jina
+429s were the original reason for the fallback policy. Origin fetches had
+no per-host limit, so an import heavy on one site sent it up to 16
+concurrent requests. That provokes the 403/503s which then get the whole
+host cached as anti-bot.
+
+**Waiting, not failing:** local limits block, bounded by the job's context,
+instead of returning an error. Failing would spend job attempts on our own
+throttling. Only an upstream cooldown longer than the inline cap fails
+fast, because sleeping it out would hold a fetch worker. `JobQueue` can't
+take a delay yet, so the hint stays on the error.
 

@@ -73,3 +73,57 @@ func (c *cooldown) remaining(now time.Time) time.Duration {
 	defer c.mu.Unlock()
 	return max(c.until.Sub(now), 0)
 }
+
+// hostGate bounds in-flight requests per host. A bulk import queues many
+// URLs from one site, and letting every fetch worker hit it at once is what
+// provokes the 403/503s that get the host cached as anti-bot. Waiting for a
+// slot is deliberate: failing instead would spend job attempts on our own
+// throttling. Entries live only while a request holds or waits for a slot,
+// so the map is bounded by the hosts in flight.
+type hostGate struct {
+	perHost int
+	mu      sync.Mutex
+	hosts   map[string]*gateEntry
+}
+
+type gateEntry struct {
+	slots chan struct{}
+	refs  int // holders plus waiters
+}
+
+func newHostGate(perHost int) *hostGate {
+	return &hostGate{perHost: perHost, hosts: make(map[string]*gateEntry)}
+}
+
+// acquire waits for a free slot on host or for ctx to end. The returned
+// release frees the slot; calling it more than once is harmless.
+func (g *hostGate) acquire(ctx context.Context, host string) (release func(), err error) {
+	g.mu.Lock()
+	e, ok := g.hosts[host]
+	if !ok {
+		e = &gateEntry{slots: make(chan struct{}, g.perHost)}
+		g.hosts[host] = e
+	}
+	e.refs++
+	g.mu.Unlock()
+
+	select {
+	case e.slots <- struct{}{}:
+		return sync.OnceFunc(func() {
+			<-e.slots
+			g.drop(host, e)
+		}), nil
+	case <-ctx.Done():
+		g.drop(host, e)
+		return nil, ctx.Err()
+	}
+}
+
+func (g *hostGate) drop(host string, e *gateEntry) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e.refs--
+	if e.refs == 0 {
+		delete(g.hosts, host)
+	}
+}

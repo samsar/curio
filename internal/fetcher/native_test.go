@@ -15,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 )
 
 // makeArticleHTML returns a reasonably article-shaped page so Readability
@@ -554,6 +555,14 @@ func TestNative_RetryAfterHTTPDate(t *testing.T) {
 	assert.Equal(t, 90*time.Second, se.RetryAfter)
 }
 
+// unpaced strips n's waits for tests: an unlimited Jina limiter, and fc
+// as the clock so backoffs and cooldowns are recorded instead of slept.
+func unpaced(n *Native, fc *fakeClock) *Native {
+	n.jinaLimiter = rate.NewLimiter(rate.Inf, 1)
+	n.clock = fc.clock()
+	return n
+}
+
 // thinPage is an origin answer the login-wall heuristic rejects as thin,
 // so Fetch falls back to Jina.
 const thinPage = `<html><body><p>nope</p></body></html>`
@@ -586,9 +595,8 @@ func TestNative_JinaTruncatedBodyIsRetryable(t *testing.T) {
 	}))
 	defer jina.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
 	fc := newFakeClock()
-	n.clock = fc.clock()
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 	res, err := n.Fetch(context.Background(), source.URL)
 	require.Error(t, err)
 	assert.Nil(t, res)

@@ -76,7 +76,9 @@ This catches people:
 
 ## Fetcher fallback policy
 
-`internal/fetcher/native.go` falls back to Jina Reader (`r.jina.ai`) only when the original error wraps `ErrLoginWall` or `ErrAntiBot`. Hard errors (404, DNS failures, timeouts) return directly — Jina can't help and burning rate-limit budget there gets us 429'd on the calls that would actually benefit. If you're tempted to widen the fallback, read `docs/decisions.md` under "Fallback strategy" first.
+`internal/fetcher/native.go` falls back to Jina Reader (`r.jina.ai`) only when the original error wraps `ErrLoginWall` or `ErrAntiBot` (or a PDF the local extractor couldn't read). Hard errors (404, DNS failures, timeouts) return directly — Jina can't help and burning rate-limit budget there gets us 429'd on the calls that would actually benefit. If you're tempted to widen the fallback, read `docs/decisions.md` under "Fallback strategy" first.
+
+Jina calls from all fetch workers share one limiter (20/min, or 200/min with `fetcher.native.jina_api_key` / `CURIO_JINA_API_KEY`, sent as a bearer token) and one cooldown that a 429 extends: waited out inline up to 30s, longer ones fail fast and retryably. Origin requests are capped at 2 in flight per host (`hostGate`); the slot is never held while waiting on Jina, and the host cache is re-checked once a slot is acquired.
 
 `ErrAntiBot` wraps HTTP 403 and 503. The Native fetcher also sends Chrome-like headers (`Sec-Fetch-*`, `Sec-Ch-Ua-*`) to reduce false-positive bot blocks.
 
