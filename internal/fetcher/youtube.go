@@ -146,11 +146,10 @@ type ytdlpMeta struct {
 	ViewCount   int64    `json:"view_count"`
 	LikeCount   int64    `json:"like_count"`
 	Language    string   `json:"language"`
-	// Available caption tracks by language: uploaded ones and YouTube's
-	// automatic ones. Only the keys matter; they say which kind a
-	// downloaded <id>.<lang>.vtt is.
-	Subtitles         map[string]json.RawMessage `json:"subtitles"`
-	AutomaticCaptions map[string]json.RawMessage `json:"automatic_captions"`
+	// Uploaded caption tracks by language. Only the keys matter: a
+	// downloaded <id>.<lang>.vtt whose language isn't listed here is
+	// YouTube's automatic track, which yt-dlp names the same way.
+	Subtitles map[string]json.RawMessage `json:"subtitles"`
 }
 
 func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlpMeta, error) {

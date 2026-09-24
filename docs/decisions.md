@@ -1155,9 +1155,9 @@ the page HTML yields).
 picked by shortest name and nearly always labeled `manual`, and nothing
 ever set `status=partial`. What is implemented now: among the languages
 in `fetcher.youtube.sub_langs`, uploaded captions before automatic ones
-(which is which comes from info.json's `subtitles` and
-`automatic_captions`, since both kinds are written as `<id>.<lang>.vtt`),
-then the shortest language tag. With no usable track the document is the
+(both kinds are written as `<id>.<lang>.vtt`, so a track counts as
+uploaded when info.json's `subtitles` lists its language), then the
+shortest language tag. With no usable track the document is the
 description alone: `Result.Partial` is set, `transcript_source` is
 `none`, and the extraction is stored with status `partial`. There is no
 "any language" step: it would take a second yt-dlp run per video, and
