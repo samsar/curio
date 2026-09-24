@@ -2177,6 +2177,11 @@ throttling. Only an upstream cooldown longer than the inline cap fails
 fast, because sleeping it out would hold a fetch worker. `JobQueue` can't
 take a delay yet, so the hint stays on the error.
 
+**Cost:** a worker waiting for a host slot can't pick up another job, so
+an import dominated by one site proceeds at roughly that site's pace
+(two requests at a time) instead of sixteen. That is the point for the
+site, and mixed imports barely notice.
+
 ---
 
 ## URL normalization: fetch-equivalent and idempotent
