@@ -43,8 +43,17 @@ type Health struct {
 	OllamaDetail    string `json:"ollama_detail,omitempty"`
 }
 
-// Healthz returns the daemon health blob.
+// healthzTimeout bounds Healthz. A daemon answers well within it whatever
+// state Ollama is in, because the handler gives up on its Ollama check after
+// 500ms (api.ollamaPingTimeout); only a port held by something that doesn't
+// answer (a daemon still migrating, some other server) runs it out.
+const healthzTimeout = 2 * time.Second
+
+// Healthz returns the daemon health blob. Every client finds the daemon with
+// it, so it gives up after healthzTimeout rather than the client's 30s.
 func (c *Client) Healthz(ctx context.Context) (*Health, error) {
+	ctx, cancel := context.WithTimeout(ctx, healthzTimeout)
+	defer cancel()
 	var h Health
 	if err := c.do(ctx, http.MethodGet, "/v1/healthz", nil, &h); err != nil {
 		return nil, err

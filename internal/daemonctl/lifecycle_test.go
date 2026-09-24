@@ -161,16 +161,40 @@ func spawnCount(t *testing.T, c *Controller) int {
 }
 
 // serveHealth answers healthz at the controller's address with body, in
-// process: a daemon for another home, or one from before the lock protocol.
+// process: a daemon for another home, one from before the lock protocol, or
+// one whose identity disagrees with the lock.
 func serveHealth(t *testing.T, c *Controller, body map[string]any) {
+	t.Helper()
+	serveHealthAfter(t, c, 0, body)
+}
+
+// serveHealthAfter is serveHealth for a daemon that takes delay to answer.
+func serveHealthAfter(t *testing.T, c *Controller, delay time.Duration, body map[string]any) {
 	t.Helper()
 	ln, err := net.Listen("tcp", os.Getenv(fakeAddrEnv))
 	require.NoError(t, err)
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
 		_ = json.NewEncoder(w).Encode(body)
 	})}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
+}
+
+// holdLock makes the test process the daemon holding c's home lock until the
+// test ends. flock locks belong to the open file, so the controller's own
+// probes see it as held.
+func holdLock(t *testing.T, c *Controller) {
+	t.Helper()
+	lock, err := AcquireLock(c.Home)
+	require.NoError(t, err)
+	// Registered after newTestController's cleanup, so it runs first: that
+	// one kills whatever still holds the lock.
+	t.Cleanup(func() { assert.NoError(t, lock.Release()) })
 }
 
 // startBystander runs a process that has nothing to do with curio and
@@ -308,6 +332,29 @@ func TestEnsureRunning_LockHolderExitsWithoutServing(t *testing.T) {
 	require.NoError(t, <-result)
 	assert.Less(t, time.Since(start), c.StartTimeout/2, "the holder's exit ends the wait")
 	assert.Equal(t, 1, spawnCount(t, c))
+}
+
+// TestEnsureRunning_SlowHealthz: when Ollama stalls, healthz takes as long as
+// the daemon's own Ollama check (up to 500ms) to answer. A daemon that slow
+// is still the running daemon: reused at once, not waited out or replaced.
+func TestEnsureRunning_SlowHealthz(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	ctx := context.Background()
+	holdLock(t, c)
+	serveHealthAfter(t, c, 700*time.Millisecond,
+		map[string]any{"status": "ok", "pid": os.Getpid(), "home": c.Home.Path})
+
+	start := time.Now()
+	require.NoError(t, c.EnsureRunning(ctx))
+	assert.Less(t, time.Since(start), c.StartTimeout/2, "the first probe's answer is enough")
+	assert.Zero(t, spawnCount(t, c))
+
+	st, err := c.Status(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, Running, st.State)
+	assert.Equal(t, os.Getpid(), st.PID)
+	require.NotNil(t, st.Health, "a slow answer is still an answer")
+	assert.Equal(t, os.Getpid(), st.Health.PID)
 }
 
 // TestMalformedPIDFileIsIgnored: with the lock free, whatever is left in

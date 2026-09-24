@@ -28,6 +28,12 @@ type Health struct {
 	OllamaDetail    string `json:"ollama_detail,omitempty"`
 }
 
+// ollamaPingTimeout caps the Ollama check in /v1/healthz, the only part of
+// the handler that waits on another service. Clients probe healthz with a
+// much longer timeout (client.Healthz), so a slow Ollama is reported as
+// ollama_reachable=false, never mistaken for a missing daemon.
+const ollamaPingTimeout = 500 * time.Millisecond
+
 func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	meta, err := d.Home.Meta()
 	if err != nil {
@@ -35,7 +41,6 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cheap ollama ping with a tight timeout so /healthz stays fast.
 	// Fail-open: an unreachable Ollama doesn't make the whole daemon
 	// unhealthy (the user can still list bookmarks, browse docs, etc.).
 	reachable := true
@@ -43,7 +48,7 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if pinger, ok := d.Embedder.(interface {
 		Ping(context.Context) error
 	}); ok {
-		pctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+		pctx, cancel := context.WithTimeout(r.Context(), ollamaPingTimeout)
 		defer cancel()
 		if err := pinger.Ping(pctx); err != nil {
 			reachable = false

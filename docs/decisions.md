@@ -1727,6 +1727,12 @@ relied on because they don't ship everywhere.
   lock without ever answering (a `curio daemon stop` still draining).
   Whatever a free lock file contains is only informational: a PID there
   is reported as stale, and anything unparsable is ignored.
+- Every healthz probe (`client.Healthz`) waits up to 2s. The handler's
+  only wait on another service is its Ollama check, capped at 500ms, so a
+  daemon answers well inside the probe's limit whatever state Ollama is
+  in, and a stalled Ollama shows up as `ollama_reachable: false`. With
+  equal limits on both sides the probe gave up first, and clients took a
+  running daemon for a missing one.
 - SIGINT, SIGTERM and SIGHUP all shut down gracefully. Shutdown is
   bounded: 5s for in-flight HTTP requests, then 15s for running jobs.
   Jobs still running after that are logged by ID and left for orphan

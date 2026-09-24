@@ -28,9 +28,7 @@ func newStatusCmd() *cobra.Command {
 
 			fmt.Printf("cli:     %s\n", version.String())
 
-			pctx, cancel := context.WithTimeout(cmd.Context(), 500*time.Millisecond)
-			defer cancel()
-			health, err := ctx.Client.Healthz(pctx)
+			health, err := ctx.Client.Healthz(cmd.Context())
 			if err != nil {
 				fmt.Println("daemon:  not running")
 				if ctx.Home != nil {

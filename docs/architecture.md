@@ -118,7 +118,8 @@ CLI commands and the MCP sidecar auto-start it when it isn't running.
   then open and migrate the DB, recover orphaned jobs and start workers. A
   second daemon, or one whose port is taken, exits before touching the DB.
 - **Clients** probe the lock for liveness and `/v1/healthz` (which reports
-  `pid` and `home`) for identity. They serialize auto-starts on
+  `pid` and `home`) for identity, allowing for healthz's own bounded wait
+  on Ollama. They serialize auto-starts on
   `daemon.start.lock`, and they only signal the PID the lock holder
   recorded. A spawned daemon that crashes during startup is reported
   immediately, with its exit status and the tail of `daemon.log`.

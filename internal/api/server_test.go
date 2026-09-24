@@ -16,7 +16,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
 )
@@ -30,7 +32,8 @@ type testServer struct {
 	deps Deps
 }
 
-func newTestServer(t *testing.T) *testServer {
+// newTestServer starts the server; each option adjusts its Deps first.
+func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	t.Helper()
 	db := sqlite.NewEphemeralDB(t)
 	home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
@@ -46,6 +49,9 @@ func newTestServer(t *testing.T) *testServer {
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
 		Log:            slog.New(slog.DiscardHandler),
+	}
+	for _, opt := range options {
+		opt(&deps)
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -351,6 +357,30 @@ func TestServer_BodylessPostsNeedNoContentType(t *testing.T) {
 			assert.Equal(t, tc.status, resp.status, resp.body)
 		})
 	}
+}
+
+// TestServer_HealthzWithStalledOllama: healthz waits on Ollama for at most
+// ollamaPingTimeout, well inside the client's healthz probe timeout. A
+// daemon whose Ollama accepts connections but never answers must still be
+// found by the probe clients use to decide whether it is running.
+func TestServer_HealthzWithStalledOllama(t *testing.T) {
+	// Listening but never accepting: connections queue and nothing answers.
+	stalled, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, stalled.Close()) })
+	emb, err := embedder.NewOllama(embedder.OllamaOptions{
+		BaseURL: "http://" + stalled.Addr().String(),
+		Model:   "nomic-embed-text",
+		Dim:     store.EmbeddingDim,
+	})
+	require.NoError(t, err)
+	s := newTestServer(t, func(d *Deps) { d.Embedder = emb })
+
+	h, err := client.New(s.base).Healthz(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, os.Getpid(), h.PID)
+	assert.False(t, h.OllamaReachable)
+	assert.NotEmpty(t, h.OllamaDetail)
 }
 
 func TestServer_HealthIdentity(t *testing.T) {

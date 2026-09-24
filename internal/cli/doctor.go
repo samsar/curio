@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -121,9 +120,7 @@ func runDoctorChecks(httpCtx context.Context, c *Context, r *doctorReport) {
 	}
 
 	// 3. daemon reachable
-	dctx, dcancel := context.WithTimeout(httpCtx, 500*time.Millisecond)
-	defer dcancel()
-	health, err := c.Client.Healthz(dctx)
+	health, err := c.Client.Healthz(httpCtx)
 	if err != nil {
 		r.add("daemon", statusFail, "not reachable at "+c.Config.Daemon.Listen,
 			"run `curio daemon start`")

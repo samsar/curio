@@ -33,9 +33,8 @@ const (
 	// cmd/curio-daemon), so a healthy daemon always finishes first.
 	defaultStopTimeout = 30 * time.Second
 
-	healthProbeTimeout = 500 * time.Millisecond
-	pollInterval       = 100 * time.Millisecond
-	logTailLines       = 20
+	pollInterval = 100 * time.Millisecond
+	logTailLines = 20
 )
 
 // errHolderExited: the daemon being waited for released the lock without
@@ -207,11 +206,11 @@ func (c *Controller) answering(ctx context.Context) (bool, error) {
 }
 
 // probeHealth returns what answers healthz at BaseURL, or nil. An error
-// means nothing usable answered, which is an ordinary state here.
+// means nothing usable answered, which is an ordinary state here. The probe
+// is bounded by client.Healthz, which allows for the daemon's own wait on
+// Ollama.
 func (c *Controller) probeHealth(ctx context.Context) *client.Health {
-	pctx, cancel := context.WithTimeout(ctx, healthProbeTimeout)
-	defer cancel()
-	h, err := client.New(c.BaseURL).Healthz(pctx)
+	h, err := client.New(c.BaseURL).Healthz(ctx)
 	if err != nil {
 		return nil
 	}
