@@ -280,7 +280,8 @@ func TestNative_JinaLongCooldownFailsFast(t *testing.T) {
 		var pe *PermanentError
 		assert.False(t, errors.As(err, &pe), "must stay retryable: %v", err)
 		assert.NotContains(t, err.Error(), "(cached:")
-		se := jinaStatus(t, err)
+		var se *HTTPStatusError
+		require.ErrorAs(t, err, &se, "errors.As finds Jina's status, not the origin's 403")
 		assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
 		assert.Equal(t, 120*time.Second, se.RetryAfter)
 	}
@@ -288,18 +289,6 @@ func TestNative_JinaLongCooldownFailsFast(t *testing.T) {
 	assert.Empty(t, fc.slept())
 	_, cached := n.hostCache.Get(hostOf(origin.URL))
 	assert.False(t, cached)
-}
-
-// jinaStatus returns the *HTTPStatusError on Jina's side of the error Fetch
-// returns when both the origin and Jina failed.
-func jinaStatus(t *testing.T, err error) *HTTPStatusError {
-	t.Helper()
-	var joined interface{ Unwrap() []error }
-	require.ErrorAs(t, err, &joined)
-	causes := joined.Unwrap()
-	var se *HTTPStatusError
-	require.ErrorAs(t, causes[len(causes)-1], &se)
-	return se
 }
 
 // TestNative_JinaServerErrorBackoff: 5xx answers keep the 2/4/8s backoff,

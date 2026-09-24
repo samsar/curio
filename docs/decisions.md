@@ -2105,8 +2105,10 @@ expensive.
   reached by redirect still counts as the site-wide wall it is.
 - Error chains are kept whole. Both causes are wrapped with `%w`, so the
   error for "origin and Jina both failed" matches the origin's sentinel
-  and Jina's `*HTTPStatusError`. An unreachable host keeps its
-  `*url.Error` and `*net.DNSError`.
+  and Jina's `*HTTPStatusError`. Jina's failure leads the chain: a retry
+  depends on Jina now, so `errors.As` finds its status and `Retry-After`
+  before an origin 403/503. An unreachable host keeps its `*url.Error`
+  and `*net.DNSError`.
 
 **Why:** Four kinds of wrong entry, each confirmed by a probe:
 

@@ -222,7 +222,10 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		}
 		return res, nil
 	}
-	err = fmt.Errorf("%w; %w", originErr, jinaErr)
+	// Jina's failure leads the chain: it is the path a retry now depends
+	// on, so errors.As finds its status and Retry-After first. errors.Is
+	// still matches the origin's sentinel.
+	err = fmt.Errorf("%w (after %w)", jinaErr, originErr)
 	switch {
 	case errors.Is(jinaErr, ErrTooLarge):
 		return nil, &PermanentError{Err: err}

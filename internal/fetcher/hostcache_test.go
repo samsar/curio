@@ -287,17 +287,34 @@ func TestNative_PageLevelLoginWallIsFinal(t *testing.T) {
 }
 
 // TestNative_CombinedErrorKeepsBothChains: when origin and Jina both fail,
-// the returned error matches the origin's sentinel and Jina's status.
+// the returned error matches the origin's sentinel, and errors.As finds
+// Jina's status even when the origin answered with a status of its own.
 func TestNative_CombinedErrorKeepsBothChains(t *testing.T) {
-	srv := serveThinPage(t)
-	defer srv.Close()
+	thin := serveThinPage(t)
+	defer thin.Close()
+	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer forbidden.Close()
 
-	n, _ := newNativeWithJina(t, jinaRateLimited)
-	_, err := n.Fetch(context.Background(), srv.URL)
-	assert.ErrorIs(t, err, ErrLoginWall)
-	var se *HTTPStatusError
-	require.ErrorAs(t, err, &se)
-	assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
+	cases := []struct {
+		name     string
+		url      string
+		sentinel error
+	}{
+		{"thin page", thin.URL, ErrLoginWall},
+		{"anti-bot", forbidden.URL, ErrAntiBot},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n, _ := newNativeWithJina(t, jinaRateLimited)
+			_, err := n.Fetch(context.Background(), tc.url)
+			assert.ErrorIs(t, err, tc.sentinel)
+			var se *HTTPStatusError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
+		})
+	}
 }
 
 // TestNative_UnreachableClassification drives Fetch with constructed
