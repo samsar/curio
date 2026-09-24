@@ -38,6 +38,10 @@ const (
 	logTailLines       = 20
 )
 
+// errHolderExited: the daemon being waited for released the lock without
+// ever serving. It was shutting down, or failed to start.
+var errHolderExited = errors.New("the daemon holding the lock exited before it began serving")
+
 // State is the daemon's run state as seen from one home.
 type State int
 
@@ -128,7 +132,12 @@ func (c *Controller) EnsureRunning(ctx context.Context) error {
 	}
 	if held {
 		// A daemon is up but not serving yet: migrating, or started by hand.
-		return c.waitReady(ctx, 0, nil)
+		err := c.waitReady(ctx, 0, nil)
+		if !errors.Is(err, errHolderExited) {
+			return err
+		}
+		// It went away instead (a `curio daemon stop` draining, say), and
+		// we still hold the start lock: start our own.
 	}
 	return c.spawn(ctx)
 }
@@ -243,7 +252,9 @@ func (c *Controller) spawn(ctx context.Context) error {
 
 // waitReady polls healthz until the daemon for this home answers: the child
 // we spawned (childPID), or whichever daemon holds the lock. exited delivers
-// the child's exit; nil when there is no child to watch.
+// the child's exit; nil when there is no child to watch. With no child left,
+// the lock holder is what's being waited for, and its exit without serving
+// ends the wait with errHolderExited.
 func (c *Controller) waitReady(ctx context.Context, childPID int, exited <-chan error) error {
 	deadline := time.NewTimer(c.StartTimeout)
 	defer deadline.Stop()
@@ -260,19 +271,43 @@ func (c *Controller) waitReady(ctx context.Context, childPID int, exited <-chan 
 		case <-deadline.C:
 			return c.startFailed(fmt.Errorf("no healthy response at %s within %s", c.BaseURL, c.StartTimeout))
 		case exitErr := <-exited:
+			cause := childExitCause(exitErr)
 			held, _, err := probeLock(c.Home.PIDFile())
 			if err != nil {
-				return errors.Join(c.startFailed(exitErr), err)
+				return errors.Join(c.startFailed(cause), err)
 			}
 			if !held {
-				return c.startFailed(exitErr)
+				return c.startFailed(cause)
 			}
 			// The child lost the lock to a daemon that is still starting
 			// (one started by hand, say). Wait for that one instead.
 			exited = nil
 		case <-tick.C:
+			if exited != nil {
+				continue // the child's exit is reported on its own
+			}
+			held, _, err := probeLock(c.Home.PIDFile())
+			if err != nil {
+				return err
+			}
+			if !held {
+				if childPID == 0 {
+					return errHolderExited
+				}
+				return c.startFailed(errHolderExited)
+			}
 		}
 	}
+}
+
+// childExitCause describes a spawned daemon that exited before serving.
+// Wait reports a clean exit as nil: the daemon was told to stop while it
+// was still starting.
+func childExitCause(waitErr error) error {
+	if waitErr == nil {
+		return errors.New("exited with status 0 before it began serving")
+	}
+	return waitErr
 }
 
 // ready reports whether healthz is answered by a daemon for this home that is

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ const (
 
 	modeNormal        = "normal"
 	modeCrashOnStart  = "crash-on-start"
+	modeExitOnStart   = "exit-on-start"
 	modeIgnoreSIGTERM = "ignore-sigterm"
 
 	// spawnLog, in the home, gets one line per fake daemon started.
@@ -58,9 +60,13 @@ func runFakeDaemon(mode string) int {
 	if err := appendLine(filepath.Join(home.Path, spawnLog), strconv.Itoa(os.Getpid())); err != nil {
 		return fail(err)
 	}
-	if mode == modeCrashOnStart {
+	switch mode {
+	case modeCrashOnStart:
 		fmt.Fprintln(os.Stderr, "fake daemon: boom")
 		return 3
+	case modeExitOnStart:
+		fmt.Fprintln(os.Stderr, "fake daemon: told to stop while starting")
+		return 0
 	}
 
 	lock, err := AcquireLock(home)
@@ -231,16 +237,93 @@ func TestEnsureRunning_RefusesDaemonForAnotherHome(t *testing.T) {
 	assert.Zero(t, spawnCount(t, c))
 }
 
-func TestEnsureRunning_ReportsCrashOnStart(t *testing.T) {
-	c := newTestController(t, modeCrashOnStart)
+func TestEnsureRunning_ReportsEarlyExit(t *testing.T) {
+	cases := []struct {
+		mode      string
+		wantCause string
+		wantLog   string
+	}{
+		{modeCrashOnStart, "exit status 3", "fake daemon: boom"},
+		{modeExitOnStart, "exited with status 0 before it began serving", "fake daemon: told to stop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			c := newTestController(t, tc.mode)
 
+			start := time.Now()
+			err := c.EnsureRunning(context.Background())
+			require.Error(t, err)
+			assert.Less(t, time.Since(start), c.StartTimeout/2, "an early exit is reported without waiting out the timeout")
+			assert.Contains(t, err.Error(), tc.wantCause)
+			assert.Contains(t, err.Error(), filepath.Join(c.Home.LogsDir(), "daemon.log"))
+			assert.Contains(t, err.Error(), tc.wantLog)
+			assert.NotContains(t, err.Error(), "%!", "no formatting of a nil cause")
+		})
+	}
+}
+
+// TestEnsureRunning_LockHolderExitsWithoutServing: a daemon holding the lock
+// but not serving yet is waited for. If it goes away instead (a stop still
+// draining when the next command runs), a new daemon is started rather than
+// waiting out StartTimeout for one that will never answer.
+func TestEnsureRunning_LockHolderExitsWithoutServing(t *testing.T) {
+	c := newTestController(t, modeNormal)
+
+	// The test process plays the holder: flock locks belong to the open
+	// file, so the controller's own probes see this one as held.
+	lock, err := AcquireLock(c.Home)
+	require.NoError(t, err)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { assert.NoError(t, lock.Release()) }) }
+	t.Cleanup(release)
+
+	// Healthz answers "not ready" until the holder exits. EnsureRunning
+	// probes it once on each side of taking the start lock before it looks
+	// at the daemon lock, so the third probe comes from the wait.
+	var probes atomic.Int32
+	waiting := make(chan struct{})
+	ln, err := net.Listen("tcp", os.Getenv(fakeAddrEnv))
+	require.NoError(t, err)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if probes.Add(1) == 3 {
+			close(waiting)
+		}
+		http.Error(w, "starting", http.StatusServiceUnavailable)
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	result := make(chan error, 1)
 	start := time.Now()
-	err := c.EnsureRunning(context.Background())
-	require.Error(t, err)
-	assert.Less(t, time.Since(start), c.StartTimeout/2, "an early exit is reported without waiting out the timeout")
-	assert.Contains(t, err.Error(), "exit status 3")
-	assert.Contains(t, err.Error(), filepath.Join(c.Home.LogsDir(), "daemon.log"))
-	assert.Contains(t, err.Error(), "fake daemon: boom")
+	go func() { result <- c.EnsureRunning(context.Background()) }()
+
+	select {
+	case <-waiting:
+	case err := <-result:
+		t.Fatalf("EnsureRunning returned before waiting on the lock holder: %v", err)
+	}
+	require.NoError(t, srv.Close(), "free the port for the daemon that replaces the holder")
+	release()
+
+	require.NoError(t, <-result)
+	assert.Less(t, time.Since(start), c.StartTimeout/2, "the holder's exit ends the wait")
+	assert.Equal(t, 1, spawnCount(t, c))
+}
+
+// TestMalformedPIDFileIsIgnored: with the lock free, whatever is left in
+// daemon.pid is only informational. Garbage there mustn't make status or
+// auto-start fail.
+func TestMalformedPIDFileIsIgnored(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	ctx := context.Background()
+	require.NoError(t, os.WriteFile(c.Home.PIDFile(), []byte("not a pid\n"), 0o600))
+
+	st, err := c.Status(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, NotRunning, st.State)
+
+	require.NoError(t, c.EnsureRunning(ctx))
+	assert.Equal(t, 1, spawnCount(t, c))
 }
 
 // TestStalePIDFileIsNeverTrusted: after a crash or reboot daemon.pid can name

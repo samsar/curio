@@ -31,6 +31,9 @@ import (
 // the home's lock.
 var ErrAlreadyRunning = errors.New("curio-daemon is already running")
 
+// errMalformedPID marks a daemon.pid whose contents aren't a PID.
+var errMalformedPID = errors.New("malformed pid")
+
 const (
 	// lockWait is how long AcquireLock keeps retrying. A client probing
 	// status holds a shared lock for microseconds; that mustn't make a
@@ -95,7 +98,7 @@ func lockWithRetry(f *os.File) error {
 // probeLock reports whether a daemon holds the lock at path. pid is the
 // value in the file: while held, the holder's PID (0 in the instant between
 // locking and recording it); otherwise whatever a crashed daemon or an older
-// CLI left behind (0 after a clean shutdown).
+// CLI left behind (0 after a clean shutdown, or if that isn't a PID at all).
 func probeLock(path string) (held bool, pid int, err error) {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -115,6 +118,11 @@ func probeLock(path string) (held bool, pid int, err error) {
 		return false, 0, fmt.Errorf("probe daemon lock: %w", err)
 	}
 	pid, err = readPID(f)
+	if errors.Is(err, errMalformedPID) && !held {
+		// Leftovers in a free lock file are informational only, and the
+		// next daemon overwrites them; garbage mustn't block a start.
+		return false, 0, nil
+	}
 	return held, pid, err
 }
 
@@ -155,7 +163,7 @@ func readPID(f *os.File) (int, error) {
 	}
 	pid, err := strconv.Atoi(s)
 	if err != nil {
-		return 0, fmt.Errorf("malformed pid %q in %s: %w", s, f.Name(), err)
+		return 0, fmt.Errorf("%w %q in %s: %w", errMalformedPID, s, f.Name(), err)
 	}
 	return pid, nil
 }

@@ -1715,7 +1715,11 @@ relied on because they don't ship everywhere.
   `daemon.start.lock`, so the CLI and the MCP sidecar can't both spawn.
   The spawner watches the child with `cmd.Wait`. A daemon that dies during
   startup is reported at once, with its exit status and the tail of
-  `daemon.log`.
+  `daemon.log`. A starter that finds the lock held with nothing serving
+  waits for that daemon, and spawns its own if the holder releases the
+  lock without ever answering (a `curio daemon stop` still draining).
+  Whatever a free lock file contains is only informational: a PID there
+  is reported as stale, and anything unparsable is ignored.
 - SIGINT, SIGTERM and SIGHUP all shut down gracefully. Shutdown is
   bounded: 5s for in-flight HTTP requests, then 15s for running jobs.
   Jobs still running after that are logged by ID and left for orphan
