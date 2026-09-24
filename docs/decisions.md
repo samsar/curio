@@ -1619,3 +1619,38 @@ same posture as dead links. The
 per host after the TTL is still useful for flaky origins),
 `ErrDeadLink` is still not host-cached, and MaxAttempts / backoff are
 untouched for everything that isn't a cache hit.
+
+---
+
+## Migrations: rebuilding a table other tables reference
+
+**Decision:** Table rebuilds follow the recipe in `migrations/README.md`:
+
+- The file starts with `-- +goose NO TRANSACTION`.
+- The whole rebuild is one `StatementBegin` block: `PRAGMA foreign_keys =
+  OFF; BEGIN IMMEDIATE;`, then the rebuild, an enforcing foreign-key
+  guard, `COMMIT; PRAGMA foreign_keys = ON;`.
+
+Migration 002 was rewritten into this form in place. That is a narrow
+exception to "never edit an applied migration", allowed because the
+resulting schema is identical; a test compares it against the original
+file.
+
+**Why:** 002 set `PRAGMA foreign_keys = OFF` inside goose's per-migration
+transaction, where SQLite ignores it, and the README recommended that
+recipe. It was harmless for `bookmarks`, which nothing references. Used on
+`documents`, `DROP TABLE` would have run the ON DELETE actions: every
+extraction, chunk and cluster membership deleted, and every
+`bookmarks.document_id` nulled.
+
+Two more traps shaped the recipe:
+
+- goose Execs a bare `PRAGMA foreign_key_check`, and the driver discards
+  its rows, so it can't abort anything.
+- In NO TRANSACTION mode goose's global API runs each statement on an
+  arbitrary pooled connection, so the pragma, BEGIN and COMMIT must be one
+  statement.
+
+A failed rebuild leaves its connection mid-transaction with foreign keys
+off. The daemon therefore never reuses the DB after a `Migrate` error; it
+exits.

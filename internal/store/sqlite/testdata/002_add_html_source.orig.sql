@@ -1,23 +1,12 @@
--- +goose NO TRANSACTION
-
--- Add 'html' to the bookmarks.source CHECK list so the importer can record
--- HTML-export-imported bookmarks. SQLite has no ALTER TABLE ... DROP
--- CONSTRAINT, so this rebuilds the table: new table → copy → drop old →
--- rename new → restore indexes/triggers.
---
--- The rebuild follows the recipe in migrations/README.md ("Rebuilding a
--- table"). In short: PRAGMA foreign_keys only takes effect outside a
--- transaction, so the migration opts out of goose's and runs its own; the
--- whole thing is one goose statement so it runs on one pooled connection;
--- and an enforcing foreign-key guard aborts before COMMIT if the rebuild
--- broke a reference. If the process dies after COMMIT but before goose
--- records the version, the block runs again on the rebuilt table, which is
--- harmless.
-
 -- +goose Up
 -- +goose StatementBegin
+
+-- Add 'html' to the bookmarks.source CHECK list so the importer can
+-- record HTML-export-imported bookmarks. SQLite doesn't support
+-- ALTER TABLE ... DROP CONSTRAINT, so we do the standard rebuild dance:
+-- new table → copy → drop old → rename new → restore indexes/triggers.
+
 PRAGMA foreign_keys = OFF;
-BEGIN IMMEDIATE;
 
 CREATE TABLE bookmarks_new (
     id           TEXT    PRIMARY KEY,
@@ -54,25 +43,20 @@ BEGIN
     UPDATE bookmarks SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
 END;
 
--- Foreign-key guard: the CHECK fails, aborting the migration before COMMIT,
--- if the rebuild left any reference dangling.
-CREATE TEMP TABLE _fk_guard (violations INTEGER NOT NULL CHECK (violations = 0));
-INSERT INTO _fk_guard SELECT count(*) FROM pragma_foreign_key_check;
-DROP TABLE temp._fk_guard;
+PRAGMA foreign_keys = ON;
 
 UPDATE schema_meta SET schema_version = 2 WHERE id = 1;
 
-COMMIT;
-PRAGMA foreign_keys = ON;
 -- +goose StatementEnd
 
 -- +goose Down
 -- +goose StatementBegin
--- Reverses to v1's CHECK. Rows with source='html' would fail the old
--- constraint; they are deleted rather than aborting, because the
--- alternative is leaving the DB in a broken state.
+
+-- Reverses to v1's CHECK. Any rows with source='html' will fail the
+-- new constraint; the down migration deletes them rather than aborting,
+-- because the alternative is leaving the DB in a broken state.
+
 PRAGMA foreign_keys = OFF;
-BEGIN IMMEDIATE;
 
 DELETE FROM bookmarks WHERE source = 'html';
 
@@ -111,12 +95,8 @@ BEGIN
     UPDATE bookmarks SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = NEW.id;
 END;
 
-CREATE TEMP TABLE _fk_guard (violations INTEGER NOT NULL CHECK (violations = 0));
-INSERT INTO _fk_guard SELECT count(*) FROM pragma_foreign_key_check;
-DROP TABLE temp._fk_guard;
+PRAGMA foreign_keys = ON;
 
 UPDATE schema_meta SET schema_version = 1 WHERE id = 1;
 
-COMMIT;
-PRAGMA foreign_keys = ON;
 -- +goose StatementEnd
