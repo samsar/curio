@@ -736,7 +736,9 @@ and day:
 - The default UA and `sec-ch-ua` were bumped to Chrome 133 to stay
   coherent with the default profile — a JA3 that says 133 paired with a UA
   that says something else is itself a tell. **Override `backend` and
-  `user_agent` together.**
+  `user_agent` together.** (Revised: both headers now come from the
+  selected profile; see "Chrome profiles carry their own User-Agent and
+  sec-ch-ua" below.)
 - This also fixed a latent `net/http` gotcha: setting `Accept-Encoding` by
   hand *disables* net/http's transparent gzip (it only decompresses when
   the transport added the header). The `stock` backend now omits
@@ -2243,4 +2245,25 @@ timeout returned after 8 s and left the helper running. That also
 stretched the daemon's bounded shutdown. Output went into unbounded
 buffers, and a timeout surfaced as `signal: killed`. The token bucket in
 front of YouTube let up to 16 yt-dlp processes run at once.
+
+---
+
+## Chrome profiles carry their own User-Agent and sec-ch-ua
+
+**Decision:** One table in `transport.go` (`chromeProfiles`) maps each
+`fetcher.native.backend` profile to its TLS/HTTP2 fingerprint, its Chrome
+major version, its User-Agent and its `sec-ch-ua`. The Native fetcher
+sends the selected profile's User-Agent and `sec-ch-ua`; the stock
+backend sends the latest profile's. A `user_agent` override is still sent
+as is, but one that doesn't name the profile's Chrome version logs a
+warning when the fetcher is built. A test checks that every entry names
+one version throughout.
+
+**Why:** The note above asked users to keep `backend` and `user_agent`
+coherent, but only prose enforced it. `sec-ch-ua` was hard-coded to Chrome
+133 and couldn't be configured at all, so `backend: chrome_120` sent a
+Chrome 120 TLS fingerprint with Chrome 133 headers. The `sec-ch-ua` values
+are copied from real Chrome of each version, because the GREASE brand and
+the brand order change from one version to the next. The old 133 value
+had its brands in the wrong order.
 

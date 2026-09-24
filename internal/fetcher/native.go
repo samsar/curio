@@ -34,6 +34,7 @@ import (
 type Native struct {
 	rt                roundTripper
 	userAgent         string
+	secChUA           string
 	jinaFallback      bool
 	jinaBaseURL       string // override for tests
 	jinaAPIKey        string
@@ -48,7 +49,10 @@ type Native struct {
 
 // NativeOptions configures Native. Zero-value fields use defaults.
 type NativeOptions struct {
-	Timeout      time.Duration
+	Timeout time.Duration
+	// UserAgent overrides the User-Agent the Chrome profile implies. It is
+	// sent as is; one that names a different Chrome version than the
+	// profile logs a warning, since bot checks compare the two.
 	UserAgent    string
 	JinaFallback bool
 	JinaBaseURL  string // default https://r.jina.ai/
@@ -71,7 +75,8 @@ type NativeOptions struct {
 	// Chrome TLS+HTTP/2 fingerprint via uTLS to clear JA3/Akamai bot checks;
 	// "stock" uses Go's net/http (recognizable Go fingerprint, no extra
 	// network behavior to reason about). "chrome_120"/"chrome_124"/
-	// "chrome_131"/"chrome_133" pin a specific profile. See transport.go.
+	// "chrome_131"/"chrome_133" pin a specific profile, and with it the
+	// User-Agent and sec-ch-ua sent. See transport.go.
 	Backend string
 }
 
@@ -91,18 +96,9 @@ const (
 	originRequestsPerHost = 2
 )
 
-// defaultUA must stay coherent with the default chrome profile (Chrome_133):
-// a JA3 that says Chrome 133 paired with a UA that says something else is a
-// mismatch some bot checks flag. Override Backend and UserAgent together.
-const defaultUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
-	"(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-
 func NewNative(opts NativeOptions) *Native {
 	if opts.Timeout == 0 {
 		opts.Timeout = 30 * time.Second
-	}
-	if opts.UserAgent == "" {
-		opts.UserAgent = defaultUA
 	}
 	if opts.JinaBaseURL == "" {
 		opts.JinaBaseURL = "https://r.jina.ai/"
@@ -121,7 +117,20 @@ func NewNative(opts NativeOptions) *Native {
 	}
 	jinaLimiter := rate.NewLimiter(rate.Every(time.Minute/time.Duration(jinaPerMinute)), 1)
 
-	rt, err := newRoundTripper(opts.Backend, opts.Timeout, opts.Log)
+	// The stock backend has no Chrome fingerprint, but its headers still
+	// come from the latest profile.
+	prof, known := chromeProfile(opts.Backend)
+	if !known && !isStockBackend(opts.Backend) {
+		opts.Log.Warn("unknown chrome profile, using latest", "requested", opts.Backend, "using", prof.name)
+	}
+	if opts.UserAgent == "" {
+		opts.UserAgent = prof.userAgent
+	} else if !strings.Contains(opts.UserAgent, fmt.Sprintf("Chrome/%d.", prof.major)) {
+		opts.Log.Warn("user_agent doesn't name the chrome profile's version; bot checks compare the two",
+			"profile", prof.name)
+	}
+
+	rt, err := newRoundTripper(opts.Backend, prof, opts.Timeout)
 	if err != nil {
 		// A fingerprint backend that won't initialize shouldn't take the
 		// fetcher down — degrade to stock net/http and carry on.
@@ -134,6 +143,7 @@ func NewNative(opts NativeOptions) *Native {
 	return &Native{
 		rt:                rt,
 		userAgent:         opts.UserAgent,
+		secChUA:           prof.secChUA,
 		jinaFallback:      opts.JinaFallback,
 		jinaBaseURL:       opts.JinaBaseURL,
 		jinaAPIKey:        opts.JinaAPIKey,
@@ -352,7 +362,7 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	// removes the cheap blocks. Header order below is Chrome's navigation
 	// order; the chrome backend reproduces it on the wire.
 	headers := []header{
-		{"sec-ch-ua", `"Chromium";v="133", "Google Chrome";v="133", "Not(A:Brand";v="99"`},
+		{"sec-ch-ua", n.secChUA},
 		{"sec-ch-ua-mobile", "?0"},
 		{"sec-ch-ua-platform", `"macOS"`},
 		{"upgrade-insecure-requests", "1"},

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -138,21 +137,26 @@ func (l bodyLimitRT) do(ctx context.Context, target string, headers []header) (*
 	return resp, nil
 }
 
-// newRoundTripper builds the backend named by backend:
-//
-//   - "stock" / "go" / "net/http" → stockRT
-//   - "" / "chrome" / "chrome_<ver>" → chromeRT with that profile
-//     (empty and unknown-but-chrome-ish names use the latest known profile)
+// newRoundTripper builds the backend named by backend: stockRT for a stock
+// name (see isStockBackend), otherwise chromeRT with prof's fingerprint.
 //
 // Returns an error only when a chrome backend was requested and tls-client
 // init failed; callers may then fall back to stock.
-func newRoundTripper(backend string, timeout time.Duration, log *slog.Logger) (roundTripper, error) {
+func newRoundTripper(backend string, prof chromeProfileSpec, timeout time.Duration) (roundTripper, error) {
+	if isStockBackend(backend) {
+		return newStockRT(timeout), nil
+	}
+	return newChromeRT(timeout, prof)
+}
+
+// isStockBackend reports whether backend names Go's net/http transport:
+// "stock", "go" or "net/http".
+func isStockBackend(backend string) bool {
 	switch strings.ToLower(strings.TrimSpace(backend)) {
 	case "stock", "go", "net/http":
-		return newStockRT(timeout), nil
-	default:
-		return newChromeRT(timeout, backend, log)
+		return true
 	}
+	return false
 }
 
 // stockRT is the net/http backend.
@@ -202,26 +206,20 @@ type chromeRT struct {
 	profile string
 }
 
-func newChromeRT(timeout time.Duration, profileName string, log *slog.Logger) (*chromeRT, error) {
-	prof, name, ok := chromeProfile(profileName)
-	if !ok {
-		if log != nil {
-			log.Warn("unknown chrome profile, using latest", "requested", profileName, "using", name)
-		}
-	}
+func newChromeRT(timeout time.Duration, prof chromeProfileSpec) (*chromeRT, error) {
 	secs := int(timeout / time.Second)
 	if secs <= 0 {
 		secs = 30
 	}
 	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
-		tlsclient.WithClientProfile(prof),
+		tlsclient.WithClientProfile(prof.tls),
 		tlsclient.WithTimeoutSeconds(secs),
 		// Redirects followed by default; finalURL reflects the settled URL.
 	)
 	if err != nil {
-		return nil, fmt.Errorf("tls-client init (profile %s): %w", name, err)
+		return nil, fmt.Errorf("tls-client init (profile %s): %w", prof.name, err)
 	}
-	return &chromeRT{client: client, profile: name}, nil
+	return &chromeRT{client: client, profile: prof.name}, nil
 }
 
 func (c *chromeRT) name() string { return "chrome:" + c.profile }
@@ -260,22 +258,49 @@ func (c *chromeRT) do(ctx context.Context, target string, headers []header) (*fe
 	}, nil
 }
 
-// chromeProfile maps a config string to a tls-client profile. The latest
-// known profile is the default for "", "chrome", and any unrecognized name
+// chromeProfileSpec is one Chrome version curio can impersonate. The
+// TLS/HTTP2 fingerprint, the User-Agent and sec-ch-ua all come from the
+// same entry: a fingerprint that says one version next to headers that say
+// another is itself a mismatch bot checks flag.
+type chromeProfileSpec struct {
+	name      string // the fetcher.native.backend value, e.g. "chrome_133"
+	tls       profiles.ClientProfile
+	major     int
+	userAgent string
+	// secChUA is the header as real Chrome of this major version sends it.
+	// The GREASE brand and the brand order change with the version, so
+	// these are copied, not generated.
+	secChUA string
+}
+
+// chromeProfiles lists the supported profiles, latest first.
+var chromeProfiles = []chromeProfileSpec{
+	{"chrome_133", profiles.Chrome_133, 133, chromeUA(133), `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`},
+	{"chrome_131", profiles.Chrome_131, 131, chromeUA(131), `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`},
+	{"chrome_124", profiles.Chrome_124, 124, chromeUA(124), `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`},
+	{"chrome_120", profiles.Chrome_120, 120, chromeUA(120), `"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"`},
+}
+
+// chromeUA is desktop Chrome's User-Agent on macOS. Chrome reports only
+// the major version; the rest is frozen at 0.0.0.
+func chromeUA(major int) string {
+	return fmt.Sprintf("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "+
+		"(KHTML, like Gecko) Chrome/%d.0.0.0 Safari/537.36", major)
+}
+
+// chromeProfile maps a backend name to its profile. The latest profile is
+// the answer for "", "chrome", "chrome_latest", and any unrecognized name
 // (ok=false signals the fallback so the caller can log it).
-func chromeProfile(name string) (profile profiles.ClientProfile, label string, ok bool) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+func chromeProfile(name string) (prof chromeProfileSpec, ok bool) {
+	switch n := strings.ToLower(strings.TrimSpace(name)); n {
 	case "", "chrome", "chrome_latest":
-		return profiles.Chrome_133, "chrome_133", true
-	case "chrome_133":
-		return profiles.Chrome_133, "chrome_133", true
-	case "chrome_131":
-		return profiles.Chrome_131, "chrome_131", true
-	case "chrome_124":
-		return profiles.Chrome_124, "chrome_124", true
-	case "chrome_120":
-		return profiles.Chrome_120, "chrome_120", true
+		return chromeProfiles[0], true
 	default:
-		return profiles.Chrome_133, "chrome_133", false
+		for _, p := range chromeProfiles {
+			if p.name == n {
+				return p, true
+			}
+		}
+		return chromeProfiles[0], false
 	}
 }
