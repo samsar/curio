@@ -357,6 +357,21 @@ func TestEnsureRunning_SlowHealthz(t *testing.T) {
 	assert.Equal(t, os.Getpid(), st.Health.PID)
 }
 
+// TestEnsureRunning_TimesOutWaitingForAnotherDaemon: when the lock holder is
+// a daemon this caller didn't spawn and it never answers, the error says so;
+// there is no failed start of ours to report.
+func TestEnsureRunning_TimesOutWaitingForAnotherDaemon(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	holdLock(t, c)
+	c.StartTimeout = 300 * time.Millisecond
+
+	err := c.EnsureRunning(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "waiting for the curio-daemon already starting for "+c.Home.Path)
+	assert.NotContains(t, err.Error(), "failed to start")
+	assert.Zero(t, spawnCount(t, c))
+}
+
 // TestMalformedPIDFileIsIgnored: with the lock free, whatever is left in
 // daemon.pid is only informational. Garbage there mustn't make status or
 // auto-start fail.
@@ -410,6 +425,54 @@ func TestStop_DaemonIgnoringSIGTERM(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), fmt.Sprintf("pid %d", st.PID))
 	assert.Contains(t, err.Error(), "still running")
+}
+
+// TestStop_RefusesMismatchedIdentity: the lock holder's PID is signalled only
+// if healthz, when something answers it, vouches for that same daemon.
+func TestStop_RefusesMismatchedIdentity(t *testing.T) {
+	cases := []struct {
+		name   string
+		health func(holder int, home string) map[string]any
+	}{
+		{"healthz names another pid", func(holder int, home string) map[string]any {
+			return map[string]any{"status": "ok", "pid": holder + 1, "home": home}
+		}},
+		{"healthz names another home", func(holder int, _ string) map[string]any {
+			return map[string]any{"status": "ok", "pid": holder, "home": t.TempDir()}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestController(t, modeNormal)
+			holder, exited := startBystander(t)
+			holdLock(t, c)
+			writePIDFile(t, c, holder) // the lock now vouches for the bystander
+			serveHealth(t, c, tc.health(holder, c.Home.Path))
+
+			err := c.Stop(context.Background())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), fmt.Sprintf("held by pid %d; not signalling", holder))
+			select {
+			case <-exited:
+				t.Fatal("the lock holder was signalled despite the mismatch")
+			default:
+			}
+		})
+	}
+}
+
+// TestStop_WaitEndsWhenAnotherDaemonTakesOver: the lock held under a PID
+// other than the signalled one means that daemon is gone and another client
+// already started the next. Stop is done; it isn't the old daemon "still
+// running".
+func TestStop_WaitEndsWhenAnotherDaemonTakesOver(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	holdLock(t, c) // the next daemon: this process
+	signalled := os.Getpid() + 1
+
+	start := time.Now()
+	require.NoError(t, c.waitReleased(context.Background(), signalled))
+	assert.Less(t, time.Since(start), c.StopTimeout/2)
 }
 
 // TestLegacyDaemon: a daemon from before the lock protocol holds no lock and

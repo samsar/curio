@@ -1736,8 +1736,8 @@ relied on because they don't ship everywhere.
 - SIGINT, SIGTERM and SIGHUP all shut down gracefully. Shutdown is
   bounded: 5s for in-flight HTTP requests, then 15s for running jobs.
   Jobs still running after that are logged by ID and left for orphan
-  recovery. `curio daemon stop` waits up to 30s for the lock to be
-  released.
+  recovery. `curio daemon stop` waits up to 30s for the signalled daemon
+  to release the lock (or for the lock to pass to a newer daemon).
 
 **Why:** Nothing enforced one daemon per home. Startup reset every
 `running` job to `pending` with raw SQL before proving it was alone, and

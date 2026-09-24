@@ -268,7 +268,14 @@ func (c *Controller) waitReady(ctx context.Context, childPID int, exited <-chan 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return c.startFailed(fmt.Errorf("no healthy response at %s within %s", c.BaseURL, c.StartTimeout))
+			cause := fmt.Errorf("no healthy response at %s within %s", c.BaseURL, c.StartTimeout)
+			if exited == nil {
+				// The daemon being waited for isn't one we spawned, so
+				// its startup isn't ours to report on.
+				return fmt.Errorf("waiting for the curio-daemon already starting for %s: %w "+
+					"(`curio daemon status` shows its pid)", c.Home.Path, cause)
+			}
+			return c.startFailed(cause)
 		case exitErr := <-exited:
 			cause := childExitCause(exitErr)
 			held, _, err := probeLock(c.Home.PIDFile())
@@ -323,16 +330,20 @@ func (c *Controller) ready(ctx context.Context, childPID int) bool {
 	return err == nil && held && h.PID == holder
 }
 
-// waitReleased waits for a signalled daemon to drop its lock, which it does
-// only after its shutdown has finished.
+// waitReleased waits for the signalled daemon (pid) to drop its lock, which
+// it does only after its shutdown has finished. The lock held under another
+// PID means the same thing: that daemon is gone, and another client has
+// already started the next one.
 func (c *Controller) waitReleased(ctx context.Context, pid int) error {
 	deadline := time.Now().Add(c.StopTimeout)
 	for {
-		held, _, err := probeLock(c.Home.PIDFile())
+		held, holder, err := probeLock(c.Home.PIDFile())
 		if err != nil {
 			return err
 		}
-		if !held {
+		// Holder 0 is a handover in progress (the old daemon emptying
+		// the file, or the new one yet to record itself): look again.
+		if !held || (holder != pid && holder != 0) {
 			return nil
 		}
 		if time.Now().After(deadline) {
