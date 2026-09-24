@@ -480,3 +480,69 @@ func TestJobs_RecoverOrphans_RequiresKinds(t *testing.T) {
 	_, _, err := NewJobs(NewEphemeralDB(t)).RecoverOrphans(context.Background(), nil)
 	assert.Error(t, err)
 }
+
+// ---------- retention ----------
+
+// TestJobs_PruneOlderThan_KeepsLiveWork: pruning removes finished jobs only.
+// A pending or running job is work in flight; deleting it would strand its
+// document in pending with nothing left to move it on.
+func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	q := NewJobs(db)
+	docs := NewDocuments(db)
+
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/queued"}
+	require.NoError(t, docs.Upsert(ctx, doc))
+	queued := &store.Job{TenantID: "local", Kind: store.JobKindFetch,
+		Payload: json.RawMessage(`{"document_id":"` + doc.ID + `"}`)}
+	require.NoError(t, q.Enqueue(ctx, queued))
+
+	byStatus := map[string]*store.Job{}
+	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
+		byStatus[status] = enqueueWithStatus(t, q, store.JobKindIndex, status, 1)
+	}
+
+	// A cutoff in the future makes every row "old": updated_at can't be
+	// backdated, the AFTER UPDATE trigger resets it.
+	n, err := q.PruneOlderThan(ctx, "local", time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, n)
+
+	for status, j := range byStatus {
+		_, err := q.GetByID(ctx, j.ID)
+		if store.IsFinishedJobStatus(status) {
+			assert.ErrorIs(t, err, store.ErrNotFound, status)
+		} else {
+			assert.NoError(t, err, status)
+		}
+	}
+	_, err = q.GetByID(ctx, queued.ID)
+	assert.NoError(t, err, "the document's only fetch job survives")
+}
+
+func TestJobs_DeleteByStatus_FinishedOnly(t *testing.T) {
+	ctx := context.Background()
+	q := NewJobs(NewEphemeralDB(t))
+
+	byStatus := map[string]*store.Job{}
+	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
+		byStatus[status] = enqueueWithStatus(t, q, store.JobKindFetch, status, 1)
+	}
+
+	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, "bogus", ""} {
+		n, err := q.DeleteByStatus(ctx, "local", status)
+		require.Error(t, err, "status %q", status)
+		assert.Zero(t, n)
+	}
+	for _, j := range byStatus {
+		_, err := q.GetByID(ctx, j.ID)
+		require.NoError(t, err, "a refused delete removes nothing")
+	}
+
+	n, err := q.DeleteByStatus(ctx, "local", store.JobStatusDone)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n)
+	_, err = q.GetByID(ctx, byStatus[store.JobStatusDone].ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}

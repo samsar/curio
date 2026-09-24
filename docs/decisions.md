@@ -828,10 +828,17 @@ already passed `--state=""` continue working.
 **Decision:** Two operations for managing the jobs table:
 
 - `curio jobs prune --older-than 30d` — time-based retention; deletes
-  any job whose `updated_at` is older than the duration. Accepts Go
-  duration syntax plus `Nd` for days.
+  finished (`done` / `failed`) jobs whose `updated_at` is older than the
+  duration. Accepts Go duration syntax plus `Nd` for days.
 - `curio jobs delete --status failed` — exact-status delete; status is
-  required.
+  required and must be `done` or `failed`.
+
+Both only ever remove **finished** jobs. A `pending` or `running` job is
+work in flight: deleting it leaves its document in `pending` with no job
+and no permanent-failure hook to move it on — indistinguishable from real
+progress, forever — and a running job's later `MarkDone` finds no row.
+`DELETE /v1/jobs?status=pending|running` is a 400. Cancelling queued work,
+if it's ever wanted, is a separate feature that also settles the document.
 
 There is deliberately **no "delete all jobs"** path. If that's what's
 wanted, `rm ~/.curio/curio.db` is faster and more explicit.

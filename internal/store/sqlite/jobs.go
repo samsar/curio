@@ -359,12 +359,13 @@ func (s *Jobs) List(ctx context.Context, tenantID, status, kind string, limit in
 	return scanJobRows(rows)
 }
 
-// DeleteByStatus removes every job for the tenant in the given status.
-// Returns how many rows were deleted. status="" is rejected — there's no
-// safe "delete all jobs" path; callers must opt into a specific status.
+// DeleteByStatus removes every job for the tenant in the given status,
+// which must be a finished one (done or failed): deleting pending or
+// running work would leave its document in pending with no job to move it
+// on. Returns how many rows were deleted.
 func (s *Jobs) DeleteByStatus(ctx context.Context, tenantID, status string) (int64, error) {
-	if status == "" {
-		return 0, fmt.Errorf("delete jobs: status is required (no nuke-all path)")
+	if !store.IsFinishedJobStatus(status) {
+		return 0, fmt.Errorf("delete jobs: status %q is not finished; only done or failed jobs can be deleted", status)
 	}
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM jobs WHERE tenant_id = ? AND status = ?`,
@@ -375,14 +376,15 @@ func (s *Jobs) DeleteByStatus(ctx context.Context, tenantID, status string) (int
 	return res.RowsAffected()
 }
 
-// PruneOlderThan deletes every job for the tenant whose updated_at is
-// before the given cutoff. Used by the retention path so the jobs table
-// doesn't grow without bound — even successful runs leave a row per fetch
-// + per index, so a corpus of 5k bookmarks adds 10k rows per pass.
+// PruneOlderThan deletes the tenant's finished (done or failed) jobs whose
+// updated_at is before the cutoff. Used by the retention path so the jobs
+// table doesn't grow without bound — even successful runs leave a row per
+// fetch + per index, so a corpus of 5k bookmarks adds 10k rows per pass.
+// Pending and running jobs are live work and are kept however old they are.
 func (s *Jobs) PruneOlderThan(ctx context.Context, tenantID string, before time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM jobs WHERE tenant_id = ? AND updated_at < ?`,
-		tenantID, formatTime(before.UTC()))
+		`DELETE FROM jobs WHERE tenant_id = ? AND status IN (?, ?) AND updated_at < ?`,
+		tenantID, store.JobStatusDone, store.JobStatusFailed, formatTime(before.UTC()))
 	if err != nil {
 		return 0, fmt.Errorf("prune jobs: %w", err)
 	}

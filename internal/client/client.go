@@ -443,8 +443,9 @@ type DeleteJobsResponse struct {
 	Mode    string `json:"mode"`
 }
 
-// DeleteJobsByStatus removes jobs in a specific status. Server-side rejects
-// empty status — there's no "delete all" path on purpose.
+// DeleteJobsByStatus removes jobs in a finished status (done or failed).
+// The server rejects any other status — there's no "delete all" path on
+// purpose, and live work can't be deleted.
 func (c *Client) DeleteJobsByStatus(ctx context.Context, status string) (*DeleteJobsResponse, error) {
 	var out DeleteJobsResponse
 	path := "/v1/jobs?status=" + url.QueryEscape(status)
@@ -454,8 +455,8 @@ func (c *Client) DeleteJobsByStatus(ctx context.Context, status string) (*Delete
 	return &out, nil
 }
 
-// PruneJobsOlderThan removes jobs whose updated_at is older than the
-// given duration string. Accepts standard Go duration syntax plus "Nd"
+// PruneJobsOlderThan removes finished jobs whose updated_at is older than
+// the given duration string. Accepts standard Go duration syntax plus "Nd"
 // (days), e.g. "30d", "24h", "2h30m".
 func (c *Client) PruneJobsOlderThan(ctx context.Context, duration string) (*DeleteJobsResponse, error) {
 	var out DeleteJobsResponse

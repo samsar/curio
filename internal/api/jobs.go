@@ -43,9 +43,11 @@ type DeleteJobsResponse struct {
 
 // handleDeleteJobs supports two mutually exclusive modes:
 //
-//	?status=<failed|done|...>   exact-status delete; nothing else
-//	?older_than=<duration>      prune by updated_at; e.g. "30d", "24h"
+//	?status=<done|failed>   exact-status delete; nothing else
+//	?older_than=<duration>  prune finished jobs by updated_at; e.g. "30d", "24h"
 //
+// Both only ever remove finished (done/failed) jobs: a pending or running
+// job is live work, and deleting it would strand its document in pending.
 // Refusing to accept both at once avoids ambiguity. There's deliberately
 // no "delete all" path — `rm ~/.curio/curio.db` is faster if that's
 // genuinely what's wanted.
@@ -56,12 +58,18 @@ func (d Deps) handleDeleteJobs(w http.ResponseWriter, r *http.Request) {
 
 	if status == "" && olderThan == "" {
 		writeProblem(w, http.StatusBadRequest, "bad request",
-			"specify ?status=<name> or ?older_than=<duration>")
+			"specify ?status=<done|failed> or ?older_than=<duration>")
 		return
 	}
 	if status != "" && olderThan != "" {
 		writeProblem(w, http.StatusBadRequest, "bad request",
 			"specify only one of ?status or ?older_than")
+		return
+	}
+	if status != "" && !store.IsFinishedJobStatus(status) {
+		writeProblem(w, http.StatusBadRequest, "bad request",
+			fmt.Sprintf("status %q: only finished jobs (done, failed) can be deleted; "+
+				"pending and running jobs are live work", status))
 		return
 	}
 
@@ -163,6 +171,3 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
-
-// silence: store import is used via the type assertion above.
-var _ = store.JobStatusFailed

@@ -269,6 +269,13 @@ type ChunkStore interface {
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
 }
 
+// IsFinishedJobStatus reports whether status is terminal (done or failed).
+// Only finished jobs may be deleted: removing a pending or running job would
+// strand its document in pending with nothing left to move it on.
+func IsFinishedJobStatus(status string) bool {
+	return status == JobStatusDone || status == JobStatusFailed
+}
+
 // JobQueue is the SQLite-backed work queue.
 //
 // The transitions out of running (MarkDone, MarkFailed, Requeue) only apply

@@ -66,7 +66,7 @@ curio-mcp (MCP sidecar)  ──HTTP+JSON──►       │             ├ FTS5
 
 This catches people:
 
-**Jobs**: `pending ↔ running → done | failed`. `failed` is terminal — won't retry. `ClaimNext` counts the attempt. `MarkDone`, `MarkFailed` and `Requeue` only move a `running` row (`store.ErrNotRunning` otherwise). The `run_after` column on a failed row is stale data from the last retry cycle (we update status + last_error but not run_after at terminal transition). The CLI hides `next_attempt` for failed/done rows for that reason.
+**Jobs**: `pending ↔ running → done | failed`. `failed` is terminal — won't retry. `ClaimNext` counts the attempt. `MarkDone`, `MarkFailed` and `Requeue` only move a `running` row (`store.ErrNotRunning` otherwise). The `run_after` column on a failed row is stale data from the last retry cycle (we update status + last_error but not run_after at terminal transition). The CLI hides `next_attempt` for failed/done rows for that reason. Only finished (done/failed) jobs can be pruned or deleted.
 
 - **Interrupted** (the handler returned while the worker's context was cancelled, i.e. shutdown): requeued with the attempt *refunded*, whatever error the handler returned. Queue writes use a detached, 10s-bounded context, so outcomes still get recorded during shutdown. A handler that finishes during shutdown is `done`.
 - **Orphaned** (left `running` by a daemon that died): at startup `Worker.RecoverOrphans` requeues it with the attempt *kept*. Once attempts are exhausted it goes `failed` and runs the permanent-failure hook. This is what stops a job that crashes the daemon from looping forever.
