@@ -643,7 +643,7 @@ func TestGitHub_CooldownHoldsQueuedCalls(t *testing.T) {
 		}()
 	}
 	lim.awaitQueued(t, callers)
-	var errs []error
+	errs := make([]error, 0, callers)
 	lim.grant() // one call goes out and is rate limited
 	errs = append(errs, <-results)
 	lim.open() // the rest get their tokens during the cooldown
