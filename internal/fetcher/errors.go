@@ -126,3 +126,9 @@ func snippet(body []byte) string {
 	}
 	return s[:cut] + "…"
 }
+
+// isNotFound reports whether err is an HTTP 404 answer.
+func isNotFound(err error) bool {
+	var se *HTTPStatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusNotFound
+}

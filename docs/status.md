@@ -151,7 +151,7 @@ _None — Firefox landed (see table above). **M1 is complete.**_
 | GitHub URL parsing | `internal/urlutil/normalize.go` | `ParseGitHubURL` extracts owner/repo/type/ref/path |
 | GitHub config | `internal/config/config.go` | `token` (optional, also `CURIO_GITHUB_TOKEN` env), `timeout_seconds` |
 | Per-fetcher rate limiting | `internal/fetcher/fetcher.go` | `RateLimited` wrapper using `golang.org/x/time/rate` token bucket |
-| GitHub internal rate limiting | `internal/fetcher/github.go` | 1.5 API calls/s at `apiGet` level; inline retry with `Retry-After` support |
+| GitHub internal rate limiting | `internal/fetcher/github.go` | 1.5 API calls/s at `apiGet` level; primary and secondary rate limits detected; shared cooldown waited out inline up to 2 min, longer ones fail fast and retry via the queue |
 | yt-dlp stderr fix | `internal/fetcher/youtube.go` | Extract ERROR lines only; ignore WARNING lines on failure |
 
 | `fetcher_rules.yaml` | `internal/fetcher/rules.go` | User-configurable routing under `$CURIO_HOME/fetcher_rules.yaml`: `host` / `host_suffix` / `host_in` / catch-all matchers, first match wins. Hot-reloaded via throttled stat-on-dispatch; invalid edits keep the last good rules; unknown fetcher names skip the rule with a warning. Missing file = built-in defaults |

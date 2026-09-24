@@ -1206,6 +1206,13 @@ transient rate limits from burning through the job system's 5-attempt
 retry budget, where the exponential backoff (2^N seconds, max 32s)
 is too short for GitHub's 60-second rate limit windows.
 
+**Revised:** the queue backoff above was misdescribed; `MarkFailed` waits
+30·2^attempts seconds (60s after the first attempt), capped at 1 hour.
+Only the primary limit (`X-RateLimit-Remaining: 0`) was treated as a rate
+limit, so the secondary-limit 403s this entry was written about failed
+permanently, and one call's back-off didn't pause the other workers. See
+"GitHub: secondary rate limits and a shared cooldown" below.
+
 ---
 
 ## YouTube URL normalization
@@ -1944,3 +1951,40 @@ a deleted issue (410) or a DMCA-blocked repo (451) burned the whole retry
 budget. Jina kept a status map of its own. Errors built with `%v` or plain
 strings couldn't be matched with `errors.Is`/`errors.As`, and GitHub
 errors pasted whole response bodies into `jobs.last_error`.
+
+---
+
+## GitHub: secondary rate limits and a shared cooldown
+
+**Decision:**
+
+- A 429 is always a rate limit. A 403 is one when it carries
+  `Retry-After`, `X-RateLimit-Remaining: 0`, or a body mentioning
+  "secondary rate limit" or "abuse detection". Any other 403 is a real
+  permission answer and fails permanently.
+- The wait is `Retry-After` when given, else until `X-RateLimit-Reset` for
+  the primary limit, else one minute. GitHub asks for at least a minute
+  before retrying a secondary limit, and a reset time already in the past
+  is no reason to retry at once.
+- A rate-limit answer extends a cooldown shared by every GitHub call. Each
+  call waits out a remaining cooldown of up to 2 minutes before it goes
+  out. A longer one fails the call at once, without a request, as a
+  retryable `*HTTPStatusError{429}` whose `RetryAfter` is the time left,
+  and the job queue's backoff covers the rest. The call that got the long
+  `Retry-After` fails the same way. Still at most 3 attempts per call.
+- A README or comment thread that doesn't exist (404) is left out of the
+  document. Any other failure of those calls (5xx, a rate limit, a
+  timeout) fails the fetch retryably. The README is a repo document's
+  primary content, so storing the document without it hid the failure
+  for good.
+
+**Why:** The secondary limit answers 403 while `X-RateLimit-Remaining` is
+still positive, so the 251-repo refetch this was built for failed those
+repos permanently on attempt 1. When one call backed off, the other
+workers kept calling through the shared limiter, although GitHub counts
+the limit per account and IP.
+
+**Beyond 2 minutes:** sleeping longer inline would hold a fetch worker
+for the whole wait. `JobQueue.MarkFailed` takes no delay, so the queue
+can't honor the hint yet. `RetryAfter` travels on the error for when it
+can.

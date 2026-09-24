@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ type GitHub struct {
 	rawBaseURL string // raw.githubusercontent.com, used for wiki pages
 	client     *http.Client
 	limiter    *rate.Limiter
+	cooldown   cooldown // shared by every API call; see apiGet
 	clock      clock
 	log        *slog.Logger
 }
@@ -91,13 +93,19 @@ func (g *GitHub) fetchRepo(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 		return nil, err
 	}
 
+	// The README is the primary content of a repo document; only a repo
+	// that has none may be stored without it. Any other failure is
+	// returned so the job retries instead of storing a hollow document.
 	readme, err := g.repoReadme(ctx, info.Owner, info.Repo)
-	if err != nil {
-		g.log.Warn("github: no README", "repo", info.Owner+"/"+info.Repo, "err", err)
+	switch {
+	case isNotFound(err):
+		g.log.Info("github: repo has no README", "repo", info.Owner+"/"+info.Repo)
+	case err != nil:
+		return nil, fmt.Errorf("github: readme for %s/%s: %w", info.Owner, info.Repo, err)
 	}
 
 	markdown := formatRepoMarkdown(meta, readme)
-	canonicalURL := fmt.Sprintf("https://github.com/%s/%s", info.Owner, info.Repo)
+	canonicalURL := webURL(info.Owner, info.Repo, "")
 
 	published := parseGHDate(meta.CreatedAt)
 
@@ -141,7 +149,7 @@ func (g *GitHub) fetchFile(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 	}
 
 	markdown := formatFileMarkdown(meta, info, content)
-	canonicalURL := fmt.Sprintf("https://github.com/%s/%s/blob/%s/%s", info.Owner, info.Repo, ref, info.Path)
+	canonicalURL := webURL(info.Owner, info.Repo, "/blob/"+escapePath(ref)+"/"+escapePath(info.Path))
 
 	return &Result{
 		Markdown:    markdown,
@@ -179,13 +187,13 @@ func (g *GitHub) fetchIssue(ctx context.Context, info urlutil.GitHubURLInfo) (*R
 		return g.fetchPull(ctx, info)
 	}
 
-	comments, err := g.issueComments(ctx, info.Owner, info.Repo, info.Number)
+	comments, err := g.threadComments(ctx, info)
 	if err != nil {
-		g.log.Warn("github: could not fetch comments", "issue", fmt.Sprintf("%s/%s#%d", info.Owner, info.Repo, info.Number), "err", err)
+		return nil, err
 	}
 
 	markdown := formatIssueMarkdown(info, issue, comments)
-	canonicalURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", info.Owner, info.Repo, info.Number)
+	canonicalURL := webURL(info.Owner, info.Repo, fmt.Sprintf("/issues/%d", info.Number))
 
 	return &Result{
 		Markdown:    markdown,
@@ -213,15 +221,13 @@ func (g *GitHub) fetchPull(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 		return nil, err
 	}
 
-	// Conversation comments live on the issues endpoint for PRs too
-	// (/pulls/{n}/comments is diff review comments — a different thing).
-	comments, err := g.issueComments(ctx, info.Owner, info.Repo, info.Number)
+	comments, err := g.threadComments(ctx, info)
 	if err != nil {
-		g.log.Warn("github: could not fetch comments", "pull", fmt.Sprintf("%s/%s#%d", info.Owner, info.Repo, info.Number), "err", err)
+		return nil, err
 	}
 
 	markdown := formatPullMarkdown(info, pr, comments)
-	canonicalURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", info.Owner, info.Repo, info.Number)
+	canonicalURL := webURL(info.Owner, info.Repo, fmt.Sprintf("/pull/%d", info.Number))
 
 	return &Result{
 		Markdown:    markdown,
@@ -257,7 +263,7 @@ func (g *GitHub) fetchWiki(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 
 	// Wikis have no REST API (they're separate git repos); public wiki
 	// pages are served raw at raw.githubusercontent.com/wiki/o/r/Page.md.
-	rawURL := fmt.Sprintf("%s/wiki/%s/%s/%s.md", g.rawBaseURL, info.Owner, info.Repo, url.PathEscape(page))
+	rawURL := fmt.Sprintf("%s/wiki/%s/%s/%s.md", g.rawBaseURL, url.PathEscape(info.Owner), url.PathEscape(info.Repo), escapePath(page))
 	body, err := g.apiGet(ctx, rawURL, "text/plain")
 	if err != nil {
 		var pe *PermanentError
@@ -268,7 +274,7 @@ func (g *GitHub) fetchWiki(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 	}
 
 	markdown := formatWikiMarkdown(info, page, string(body))
-	canonicalURL := fmt.Sprintf("https://github.com/%s/%s/wiki/%s", info.Owner, info.Repo, url.PathEscape(page))
+	canonicalURL := webURL(info.Owner, info.Repo, "/wiki/"+escapePath(page))
 
 	return &Result{
 		Markdown:    markdown,
@@ -303,8 +309,7 @@ type ghLicenseField struct {
 }
 
 func (g *GitHub) repoMeta(ctx context.Context, owner, repo string) (*ghRepoMeta, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s", g.baseURL, owner, repo)
-	body, err := g.apiGet(ctx, url, "application/vnd.github+json")
+	body, err := g.apiGet(ctx, g.repoAPI(owner, repo, ""), "application/vnd.github+json")
 	if err != nil {
 		return nil, err
 	}
@@ -324,17 +329,19 @@ func (g *GitHub) repoMeta(ctx context.Context, owner, repo string) (*ghRepoMeta,
 }
 
 func (g *GitHub) repoReadme(ctx context.Context, owner, repo string) (string, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/readme", g.baseURL, owner, repo)
-	body, err := g.apiGet(ctx, url, "application/vnd.github.raw+json")
+	body, err := g.apiGet(ctx, g.repoAPI(owner, repo, "/readme"), "application/vnd.github.raw+json")
 	if err != nil {
 		return "", err
 	}
 	return string(body), nil
 }
 
+// fileContent fetches one file at ref. path and ref come decoded from the
+// bookmark URL, so both are escaped: a '#' in a file name or a '&' in a tag
+// would otherwise cut the request short.
 func (g *GitHub) fileContent(ctx context.Context, owner, repo, path, ref string) (string, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", g.baseURL, owner, repo, path, ref)
-	body, err := g.apiGet(ctx, url, "application/vnd.github.raw+json")
+	endpoint := g.repoAPI(owner, repo, "/contents/"+escapePath(path)+"?"+url.Values{"ref": {ref}}.Encode())
+	body, err := g.apiGet(ctx, endpoint, "application/vnd.github.raw+json")
 	if err != nil {
 		return "", err
 	}
@@ -420,8 +427,7 @@ type ghComment struct {
 }
 
 func (g *GitHub) issueMeta(ctx context.Context, owner, repo string, number int) (*ghIssue, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d", g.baseURL, owner, repo, number)
-	body, err := g.apiGet(ctx, url, "application/vnd.github+json")
+	body, err := g.apiGet(ctx, g.repoAPI(owner, repo, fmt.Sprintf("/issues/%d", number)), "application/vnd.github+json")
 	if err != nil {
 		return nil, err
 	}
@@ -435,8 +441,7 @@ func (g *GitHub) issueMeta(ctx context.Context, owner, repo string, number int) 
 // pullMeta fetches PR metadata. Note the REST path is /pulls/{n} (plural)
 // even though web URLs use /pull/{n}.
 func (g *GitHub) pullMeta(ctx context.Context, owner, repo string, number int) (*ghPull, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", g.baseURL, owner, repo, number)
-	body, err := g.apiGet(ctx, url, "application/vnd.github+json")
+	body, err := g.apiGet(ctx, g.repoAPI(owner, repo, fmt.Sprintf("/pulls/%d", number)), "application/vnd.github+json")
 	if err != nil {
 		return nil, err
 	}
@@ -447,14 +452,22 @@ func (g *GitHub) pullMeta(ctx context.Context, owner, repo string, number int) (
 	return &pr, nil
 }
 
-// issueComments fetches the first page of conversation comments (works for
-// both issues and PRs). Capped at maxIssueComments; callers detect
-// truncation by comparing against the issue's comment count.
-func (g *GitHub) issueComments(ctx context.Context, owner, repo string, number int) ([]ghComment, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments?per_page=%d", g.baseURL, owner, repo, number, maxIssueComments)
-	body, err := g.apiGet(ctx, url, "application/vnd.github+json")
-	if err != nil {
-		return nil, err
+// threadComments fetches the first page of conversation comments for an
+// issue or PR. They live on the issues endpoint for PRs too
+// (/pulls/{n}/comments is diff review comments, a different thing). Capped
+// at maxIssueComments; callers detect truncation by comparing against the
+// thread's comment count. A missing thread yields no comments; any other
+// failure is returned so the job retries rather than storing a thread with
+// its discussion silently dropped.
+func (g *GitHub) threadComments(ctx context.Context, info urlutil.GitHubURLInfo) ([]ghComment, error) {
+	endpoint := g.repoAPI(info.Owner, info.Repo, fmt.Sprintf("/issues/%d/comments?per_page=%d", info.Number, maxIssueComments))
+	body, err := g.apiGet(ctx, endpoint, "application/vnd.github+json")
+	switch {
+	case isNotFound(err):
+		g.log.Info("github: no comments", "thread", fmt.Sprintf("%s/%s#%d", info.Owner, info.Repo, info.Number))
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("github: comments for %s/%s#%d: %w", info.Owner, info.Repo, info.Number, err)
 	}
 	var comments []ghComment
 	if err := json.Unmarshal(body, &comments); err != nil {
@@ -463,15 +476,27 @@ func (g *GitHub) issueComments(ctx context.Context, owner, repo string, number i
 	return comments, nil
 }
 
-const maxAPIRetries = 3
+const (
+	maxAPIRetries = 3
+	// maxInlineRateLimitWait is the longest rate-limit pause apiGet sits
+	// out inside a job. Longer ones fail the attempt with the remaining
+	// time in RetryAfter and leave the rest to the job queue's backoff.
+	maxInlineRateLimitWait = 2 * time.Minute
+)
 
-// errRateLimited tags a rate-limit answer so apiGet can wait it out; the
-// wrapped *HTTPStatusError carries the delay in RetryAfter.
+// errRateLimited tags a rate-limit answer; the wrapped *HTTPStatusError
+// carries the back-off in RetryAfter.
 var errRateLimited = errors.New("rate limited")
 
+// apiGet makes one API call, riding out rate limits. GitHub's limits are
+// per account and IP, so a rate-limit answer pauses every caller through
+// the shared cooldown, not just this one; the other workers would
+// otherwise keep walking into the limit through the shared limiter.
 func (g *GitHub) apiGet(ctx context.Context, endpoint, accept string) ([]byte, error) {
-	var lastErr error
-	for attempt := range maxAPIRetries {
+	for attempt := 1; ; attempt++ {
+		if err := g.awaitCooldown(ctx, endpoint); err != nil {
+			return nil, err
+		}
 		if err := g.limiter.Wait(ctx); err != nil {
 			return nil, fmt.Errorf("github: rate limiter: %w", err)
 		}
@@ -481,18 +506,29 @@ func (g *GitHub) apiGet(ctx context.Context, endpoint, accept string) ([]byte, e
 		if !errors.Is(err, errRateLimited) || !errors.As(err, &se) {
 			return body, err
 		}
-
-		lastErr = err
-		if attempt == maxAPIRetries-1 {
-			break
+		g.cooldown.extend(g.clock.now(), se.RetryAfter)
+		if attempt == maxAPIRetries || se.RetryAfter > maxInlineRateLimitWait {
+			return nil, err
 		}
-		delay := min(se.RetryAfter, 2*time.Minute)
-		g.log.Info("github: rate limited, waiting", "delay_s", int(delay.Seconds()), "url", endpoint, "attempt", attempt+1)
-		if err := g.clock.sleep(ctx, delay); err != nil {
-			return nil, fmt.Errorf("github: %w", err)
-		}
+		g.log.Info("github: rate limited, waiting",
+			"delay_s", int(se.RetryAfter.Seconds()), "url", endpoint, "attempt", attempt)
 	}
-	return nil, lastErr
+}
+
+// awaitCooldown sits out the shared rate-limit cooldown when it ends within
+// maxInlineRateLimitWait. A longer one fails at once, without a request,
+// with a retryable 429 carrying the time left.
+func (g *GitHub) awaitCooldown(ctx context.Context, endpoint string) error {
+	left, err := g.cooldown.wait(ctx, g.clock, maxInlineRateLimitWait)
+	if err != nil {
+		return fmt.Errorf("github: %w", err)
+	}
+	if left > 0 {
+		se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: endpoint, RetryAfter: left}
+		return fmt.Errorf("github: %s: not sent, rate-limit cooldown has %s left: %w: %w",
+			endpoint, left.Round(time.Second), errRateLimited, se)
+	}
+	return nil
 }
 
 // doRequest makes one API call and classifies a non-200 answer: 404 is
@@ -524,30 +560,75 @@ func (g *GitHub) doRequest(ctx context.Context, endpoint, accept string) ([]byte
 	}
 
 	se := &HTTPStatusError{StatusCode: resp.StatusCode, URL: endpoint}
-	switch {
-	case resp.StatusCode == http.StatusNotFound:
+	if resp.StatusCode == http.StatusNotFound {
 		return nil, &PermanentError{Err: fmt.Errorf("github: %s: %w", endpoint, se)}
-	case resp.StatusCode == http.StatusTooManyRequests,
-		resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0":
-		se.RetryAfter = g.rateLimitDelay(resp.Header)
+	}
+	if delay, ok := g.rateLimitDelay(resp, body); ok {
+		se.RetryAfter = delay
 		return nil, fmt.Errorf("github: %s: %w: %w", endpoint, errRateLimited, se)
 	}
 	return nil, statusError(se.StatusCode, fmt.Errorf("github: %s: %w: %s", endpoint, se, snippet(body)))
 }
 
-// rateLimitDelay is how long to back off after a rate-limit answer:
-// Retry-After when given, else until X-RateLimit-Reset, else a minute.
-func (g *GitHub) rateLimitDelay(h http.Header) time.Duration {
+// secondaryLimitRE matches the messages GitHub's secondary (abuse) rate
+// limit answers with.
+var secondaryLimitRE = regexp.MustCompile(`(?i)secondary rate limit|abuse detection`)
+
+// rateLimitDelay reports whether resp is a rate-limit answer and how long to
+// back off. The primary limit answers 403 or 429 with
+// X-RateLimit-Remaining: 0; the secondary limit answers 403 or 429 with a
+// Retry-After and/or a "secondary rate limit" message while Remaining is
+// still positive. Any other 403 is a real permission answer. The delay is
+// Retry-After when given, else the primary limit's reset time, else a
+// minute: GitHub asks for at least that much before retrying a secondary
+// limit, and a reset time already past is no reason to hammer.
+func (g *GitHub) rateLimitDelay(resp *http.Response, body []byte) (time.Duration, bool) {
 	now := g.clock.now()
-	if d, ok := parseRetryAfter(h, now); ok {
-		return d
+	retryAfter, hasRetryAfter := parseRetryAfter(resp.Header, now)
+	primary := resp.Header.Get("X-RateLimit-Remaining") == "0"
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests:
+	case http.StatusForbidden:
+		if !hasRetryAfter && !primary && !secondaryLimitRE.Match(body) {
+			return 0, false
+		}
+	default:
+		return 0, false
 	}
-	if epoch, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil {
-		if d := time.Unix(epoch, 0).Sub(now); d > 0 {
-			return d
+
+	if hasRetryAfter {
+		return retryAfter, true
+	}
+	if primary {
+		if epoch, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			if d := time.Unix(epoch, 0).Sub(now); d > 0 {
+				return d, true
+			}
 		}
 	}
-	return time.Minute
+	return time.Minute, true
+}
+
+// repoAPI returns the REST URL for owner/repo followed by suffix, which the
+// caller has already escaped.
+func (g *GitHub) repoAPI(owner, repo, suffix string) string {
+	return g.baseURL + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + suffix
+}
+
+// webURL returns the github.com URL for owner/repo followed by suffix, which
+// the caller has already escaped.
+func webURL(owner, repo, suffix string) string {
+	return "https://github.com/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + suffix
+}
+
+// escapePath escapes each '/'-separated segment of p for a URL path,
+// keeping the separators.
+func escapePath(p string) string {
+	segments := strings.Split(p, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return strings.Join(segments, "/")
 }
 
 func formatRepoMarkdown(meta *ghRepoMeta, readme string) string {
