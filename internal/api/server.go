@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -16,6 +18,23 @@ import (
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/version"
+)
+
+// Server timeouts. The peers are local processes, so anything slow is either
+// a stuck client or a handler that has run away.
+const (
+	// readHeaderTimeout: a local client sends its headers immediately.
+	readHeaderTimeout = 5 * time.Second
+	// readTimeout covers the whole request; the largest body (a 32 MiB
+	// import batch) crosses loopback in well under a second.
+	readTimeout = 30 * time.Second
+	// writeTimeout must outlast the slowest synchronous handler: a search
+	// that waits on Ollama to embed the query, or a 500-bookmark import batch.
+	writeTimeout = 2 * time.Minute
+	// idleTimeout bounds keep-alive connections held by the CLI and MCP sidecar.
+	idleTimeout = 2 * time.Minute
+	// shutdownTimeout bounds the graceful drain of in-flight requests.
+	shutdownTimeout = 5 * time.Second
 )
 
 // Deps bundles everything the API handlers need. The daemon constructs this
@@ -35,29 +54,40 @@ type Deps struct {
 	Log            *slog.Logger
 }
 
-// Server is the HTTP layer. Construct via NewServer, run via Run, stop by
-// cancelling the context passed to Run.
+// Server is the HTTP layer. Construct via NewServer, run via Serve, stop by
+// cancelling the context passed to Serve.
 type Server struct {
 	deps Deps
+	ln   net.Listener
 	srv  *http.Server
 }
 
-// NewServer wires the chi router with all middleware and handlers.
-func NewServer(addr string, deps Deps) *Server {
+// NewServer wires the chi router with all middleware and handlers. ln is the
+// already-bound listener; its port is what the Host and Origin checks accept,
+// so the allowlists always match the socket actually serving.
+func NewServer(ln net.Listener, deps Deps) (*Server, error) {
 	if deps.Log == nil {
 		deps.Log = slog.Default()
 	}
 	if deps.TenantID == "" {
 		deps.TenantID = "local"
 	}
+	origin, err := newLocalOrigin(ln.Addr())
+	if err != nil {
+		return nil, err
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	// middleware.RealIP is intentionally NOT used — it's deprecated due to
-	// X-Forwarded-For spoofing risk and we listen on 127.0.0.1 only, so
+	// X-Forwarded-For spoofing risk and we listen on loopback only, so
 	// remote addrs are always loopback anyway.
 	r.Use(loggingMiddleware(deps.Log))
+	// Router-level, so they run before routing and cover 404/405 too.
+	r.Use(requireLocalHost(origin, deps.Log))
+	r.Use(rejectForeignOrigin(origin, deps.Log))
+	r.Use(requireJSONBody)
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/healthz", deps.handleHealth)
@@ -97,39 +127,41 @@ func NewServer(addr string, deps Deps) *Server {
 
 	return &Server{
 		deps: deps,
+		ln:   ln,
 		srv: &http.Server{
-			Addr:              addr,
 			Handler:           r,
-			ReadHeaderTimeout: 5 * time.Second,
+			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
 		},
-	}
+	}, nil
 }
 
-// Run starts the listener and blocks until ctx is cancelled. Performs
-// graceful shutdown with a 5s timeout.
-func (s *Server) Run(ctx context.Context) error {
+// Serve serves on the listener passed to NewServer until ctx is cancelled,
+// then shuts down gracefully, giving in-flight requests shutdownTimeout to
+// finish. Returns nil after a ctx-initiated shutdown; any other error means
+// the listener failed.
+func (s *Server) Serve(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
-		s.deps.Log.Info("api listening", "addr", s.srv.Addr, "version", version.String())
-		if err := s.srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-		close(errCh)
+		s.deps.Log.Info("api listening", "addr", s.ln.Addr().String(), "version", version.String())
+		errCh <- s.srv.Serve(s.ln)
 	}()
 
 	select {
 	case err := <-errCh:
-		return err
+		return fmt.Errorf("serve api: %w", err)
 	case <-ctx.Done():
 	}
 
 	s.deps.Log.Info("api stopping")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
 	if err := s.srv.Shutdown(shutdownCtx); err != nil {
-		return err
+		return fmt.Errorf("shut down api: %w", err)
 	}
-	return ctx.Err()
+	return nil
 }
 
 // loggingMiddleware records each request at info level with status and
@@ -159,13 +191,42 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// decodeJSON parses a request body, returning a problem-friendly error.
-func decodeJSON(r *http.Request, v any) error {
-	defer r.Body.Close()
-	dec := json.NewDecoder(r.Body)
+// Request body limits. Oversized bodies are rejected with 413 rather than
+// buffered: the daemon has no reason to hold more than this in memory.
+const (
+	// maxJSONBody covers every request except imports; the largest is a
+	// search or a single bookmark, a few KiB at most.
+	maxJSONBody = 1 << 20
+	// maxImportBody covers POST /v1/bookmarks/import. The CLI sends
+	// 500-bookmark batches, typically a few hundred KiB.
+	maxImportBody = 32 << 20
+)
+
+// errBodyTooLarge marks a request body that exceeded its size limit.
+var errBodyTooLarge = errors.New("request body too large")
+
+// decodeJSON parses a request body of at most limit bytes. It returns an
+// error wrapping errBodyTooLarge when the limit is exceeded; any other error
+// is a malformed body. writeDecodeError maps both.
+func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return fmt.Errorf("%w: limit is %d bytes", errBodyTooLarge, tooLarge.Limit)
+		}
 		return err
 	}
 	return nil
+}
+
+// writeDecodeError reports a decodeJSON failure: 413 for an oversized body,
+// 400 for anything else.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errBodyTooLarge) {
+		writeProblem(w, http.StatusRequestEntityTooLarge, "request body too large", err.Error())
+		return
+	}
+	writeProblem(w, http.StatusBadRequest, "bad request", err.Error())
 }

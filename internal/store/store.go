@@ -19,6 +19,9 @@ var (
 	ErrNotFound = errors.New("store: not found")
 	// ErrConflict: a uniqueness constraint was violated.
 	ErrConflict = errors.New("store: conflict")
+	// ErrNotRunning: a job transition that only applies to a running job
+	// found the job in another status. Nothing was changed.
+	ErrNotRunning = errors.New("store: job is not running")
 )
 
 // EmbeddingDim is the width of the vector index: chunks_vec is created as
@@ -267,22 +270,37 @@ type ChunkStore interface {
 }
 
 // JobQueue is the SQLite-backed work queue.
+//
+// The transitions out of running (MarkDone, MarkFailed, Requeue) only apply
+// to a job that is currently running. Otherwise they change nothing and
+// return ErrNotRunning, or ErrNotFound if the job doesn't exist.
 type JobQueue interface {
 	Enqueue(ctx context.Context, j *Job) error
 	// ClaimNext atomically marks the next runnable job (status=pending,
-	// run_after<=now) as running and returns it. Returns ErrNotFound if
-	// nothing is runnable.
+	// run_after<=now) as running, counts the attempt (attempts+1), and
+	// returns it. Returns ErrNotFound if nothing is runnable.
 	ClaimNext(ctx context.Context, kinds []string) (*Job, error)
-	// MarkDone sets status=done. Idempotent on the assumption that only
-	// one worker holds the claim.
+	// MarkDone sets a running job to done.
 	MarkDone(ctx context.Context, id string) error
-	// MarkFailed bumps attempts, sets status=failed (or pending with a
-	// future run_after if retrying), and records the error. The retry
-	// policy lives in the queue impl, not in the caller. Returns
-	// permanent=true when the job hit the terminal failed state (either
-	// retry=false or attempts exhausted) so callers can do kind-specific
-	// cleanup, e.g. updating a parent document's state.
+	// MarkFailed records errMsg on a running job and either sends it back to
+	// pending with a backoff run_after, or sets it failed when retry is false
+	// or its attempts (counted by ClaimNext) are exhausted. The retry policy
+	// lives in the queue impl, not in the caller. Returns permanent=true for
+	// the terminal case so callers can do kind-specific cleanup, e.g.
+	// updating a parent document's state.
 	MarkFailed(ctx context.Context, id string, errMsg string, retry bool) (permanent bool, err error)
+	// Requeue sends a running job back to pending, runnable now, and refunds
+	// the attempt its claim counted: the run was interrupted (the daemon is
+	// shutting down), so it says nothing about the job. last_error is kept.
+	Requeue(ctx context.Context, id string) error
+	// RecoverOrphans handles jobs of the given kinds left running by a daemon
+	// that exited without recording their outcome (crash, SIGKILL, a shutdown
+	// that timed out). Each goes back to pending, runnable now, keeping the
+	// attempt it used, so a job that keeps taking the daemon down runs out of
+	// attempts. One with none left is set failed instead and returned, for the
+	// caller's permanent-failure cleanup; requeued counts the rest. kinds must
+	// be non-empty; jobs of other kinds are untouched.
+	RecoverOrphans(ctx context.Context, kinds []string) (failed []*Job, requeued int, err error)
 	GetByID(ctx context.Context, id string) (*Job, error)
 }
 

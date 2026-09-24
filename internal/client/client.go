@@ -29,9 +29,12 @@ func New(baseURL string) *Client {
 	}
 }
 
-// Healthz returns the daemon health blob.
+// Health mirrors api.Health. PID and Home are zero for a daemon that
+// predates them, which also means it holds no single-instance lock.
 type Health struct {
 	Status          string `json:"status"`
+	PID             int    `json:"pid,omitempty"`
+	Home            string `json:"home,omitempty"`
 	Version         string `json:"version"`
 	SchemaVersion   int    `json:"schema_version"`
 	EmbeddingModel  string `json:"embedding_model"`
@@ -40,6 +43,7 @@ type Health struct {
 	OllamaDetail    string `json:"ollama_detail,omitempty"`
 }
 
+// Healthz returns the daemon health blob.
 func (c *Client) Healthz(ctx context.Context) (*Health, error) {
 	var h Health
 	if err := c.do(ctx, http.MethodGet, "/v1/healthz", nil, &h); err != nil {

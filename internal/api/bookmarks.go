@@ -61,8 +61,8 @@ type BookmarkCreatedResponse struct {
 
 func (d Deps) handleCreateBookmark(w http.ResponseWriter, r *http.Request) {
 	var req CreateBookmarkRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "bad request", err.Error())
+	if err := decodeJSON(w, r, maxJSONBody, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	ctx := r.Context()

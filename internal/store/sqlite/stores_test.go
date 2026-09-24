@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -344,4 +345,138 @@ func TestJobs_ClaimNext_ConcurrentClaimOnce(t *testing.T) {
 	claimed.Range(func(_, _ any) bool { got++; return true })
 	assert.Equal(t, nJobs, got, "all jobs should be claimed exactly once")
 	assert.Zero(t, dups.Load(), "no duplicate claims")
+}
+
+// enqueueWithStatus inserts a job directly in the given status, as if it had
+// already gone through the queue.
+func enqueueWithStatus(t *testing.T, q *Jobs, kind, status string, attempts int) *store.Job {
+	t.Helper()
+	j := &store.Job{TenantID: "local", Kind: kind, Status: status, Attempts: attempts}
+	require.NoError(t, q.Enqueue(context.Background(), j))
+	return j
+}
+
+func startedAt(t *testing.T, db *DB, id string) sql.NullString {
+	t.Helper()
+	var s sql.NullString
+	require.NoError(t, db.QueryRow(`SELECT started_at FROM jobs WHERE id = ?`, id).Scan(&s))
+	return s
+}
+
+func TestJobs_Requeue(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	q := NewJobs(db)
+
+	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
+	claimed, err := q.ClaimNext(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, claimed.Attempts)
+	require.True(t, startedAt(t, db, claimed.ID).Valid)
+
+	require.NoError(t, q.Requeue(ctx, claimed.ID))
+
+	got, err := q.GetByID(ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusPending, got.Status)
+	assert.Zero(t, got.Attempts, "the interrupted claim is refunded")
+	assert.False(t, got.RunAfter.After(time.Now()))
+	assert.False(t, startedAt(t, db, claimed.ID).Valid)
+
+	// A requeued job is claimable straight away.
+	again, err := q.ClaimNext(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, claimed.ID, again.ID)
+}
+
+func TestJobs_Requeue_NeverBelowZeroAttempts(t *testing.T) {
+	ctx := context.Background()
+	q := NewJobs(NewEphemeralDB(t))
+	j := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusRunning, 0)
+
+	require.NoError(t, q.Requeue(ctx, j.ID))
+	got, err := q.GetByID(ctx, j.ID)
+	require.NoError(t, err)
+	assert.Zero(t, got.Attempts)
+}
+
+// TestJobs_TransitionsRequireRunning: MarkDone, MarkFailed and Requeue only
+// move a running job. Anything else is reported and left as it was.
+func TestJobs_TransitionsRequireRunning(t *testing.T) {
+	transitions := map[string]func(q *Jobs, id string) error{
+		"MarkDone": func(q *Jobs, id string) error { return q.MarkDone(context.Background(), id) },
+		"MarkFailed": func(q *Jobs, id string) error {
+			_, err := q.MarkFailed(context.Background(), id, "boom", true)
+			return err
+		},
+		"Requeue": func(q *Jobs, id string) error { return q.Requeue(context.Background(), id) },
+	}
+	for name, transition := range transitions {
+		t.Run(name, func(t *testing.T) {
+			for _, status := range []string{store.JobStatusPending, store.JobStatusDone, store.JobStatusFailed} {
+				q := NewJobs(NewEphemeralDB(t))
+				j := enqueueWithStatus(t, q, store.JobKindFetch, status, 1)
+
+				err := transition(q, j.ID)
+				require.ErrorIs(t, err, store.ErrNotRunning, "status %s", status)
+
+				got, err := q.GetByID(context.Background(), j.ID)
+				require.NoError(t, err)
+				assert.Equal(t, status, got.Status)
+				assert.Equal(t, 1, got.Attempts)
+				assert.Nil(t, got.LastError)
+			}
+
+			q := NewJobs(NewEphemeralDB(t))
+			assert.ErrorIs(t, transition(q, uuid.NewString()), store.ErrNotFound)
+		})
+	}
+}
+
+func TestJobs_RecoverOrphans(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	q := NewJobs(db)
+	q.MaxAttempts = 3
+
+	exhausted := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusRunning, 3)
+	orphan := enqueueWithStatus(t, q, store.JobKindIndex, store.JobStatusRunning, 1)
+	otherKind := enqueueWithStatus(t, q, store.JobKindCluster, store.JobStatusRunning, 1)
+	pending := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusPending, 0)
+	_, err := db.ExecContext(ctx, `UPDATE jobs SET started_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status = 'running'`)
+	require.NoError(t, err)
+
+	failed, requeued, err := q.RecoverOrphans(ctx, []string{store.JobKindFetch, store.JobKindIndex})
+	require.NoError(t, err)
+	assert.Equal(t, 1, requeued)
+	require.Len(t, failed, 1)
+	assert.Equal(t, exhausted.ID, failed[0].ID)
+	assert.Equal(t, store.JobStatusFailed, failed[0].Status)
+
+	got, err := q.GetByID(ctx, exhausted.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusFailed, got.Status)
+	require.NotNil(t, got.LastError)
+	assert.Contains(t, *got.LastError, "daemon exited")
+
+	got, err = q.GetByID(ctx, orphan.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusPending, got.Status)
+	assert.Equal(t, 1, got.Attempts, "the orphaned attempt stays spent")
+	assert.False(t, got.RunAfter.After(time.Now()))
+	assert.False(t, startedAt(t, db, orphan.ID).Valid)
+
+	got, err = q.GetByID(ctx, otherKind.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusRunning, got.Status, "other kinds are not this caller's to recover")
+
+	got, err = q.GetByID(ctx, pending.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusPending, got.Status)
+	assert.Zero(t, got.Attempts)
+}
+
+func TestJobs_RecoverOrphans_RequiresKinds(t *testing.T) {
+	_, _, err := NewJobs(NewEphemeralDB(t)).RecoverOrphans(context.Background(), nil)
+	assert.Error(t, err)
 }

@@ -289,30 +289,25 @@ func TestWorker_FullFetchIndexChain(t *testing.T) {
 	worker := NewWorker(deps.Queue, WorkerOptions{PollInterval: 20 * time.Millisecond})
 	Register(worker, deps)
 
-	// Run worker in background; cancel after both jobs complete.
+	// Run worker in background; cancel after both jobs complete. The
+	// document turns fetched before the index job is marked done, so wait
+	// on the jobs themselves.
 	done := make(chan struct{})
 	go func() { _ = worker.Run(ctx); close(done) }()
 
-	// Poll until document is fetched OR timeout.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		d, _ := deps.Documents.GetByID(ctx, doc.ID)
-		if d != nil && d.State == store.DocStateFetched {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	doneJobs := func() int {
+		var n int
+		require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
+		return n
 	}
+	require.Eventually(t, func() bool { return doneJobs() == 2 }, 5*time.Second, 20*time.Millisecond,
+		"fetch + index should both be done")
 
 	cancel()
 	<-done
 
 	got, _ := deps.Documents.GetByID(context.Background(), doc.ID)
 	require.Equal(t, store.DocStateFetched, got.State)
-
-	// Both jobs should be done.
-	var n int
-	require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
-	assert.Equal(t, 2, n, "fetch + index should both be done")
 }
 
 // TestWorker_DeadLinkMarksDocDead runs the real worker loop end-to-end:

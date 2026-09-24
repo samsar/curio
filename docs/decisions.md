@@ -128,6 +128,11 @@ it if not running.
 **Why:** Most ergonomic for a single-user tool — user never has to think about
 it. Skip `launchd`/`systemd` complexity for v0.
 
+**Revised:** the PID file is now the daemon's own single-instance lock (an
+`flock` it holds for its lifetime), written by the daemon, not the CLI, and
+liveness is decided by the lock rather than `kill(pid, 0)`. See "Single
+daemon per home: flock on daemon.pid, bind before touching the DB" below.
+
 **Later:** `curio service install` drops a `launchd` plist (macOS) or
 `systemd` unit (Linux) for boot-time auto-start.
 
@@ -976,15 +981,19 @@ it lands — no `/v1` → `/v2` bump required.
   `/v1/clusters` was folded into `/v1/interests` — an interest *is* a
   labeled cluster.
 - **Config endpoints** (`GET/PUT /v1/config`) — for now, edit
-  `~/.curio/config.yaml` and `SIGHUP` the daemon.
+  `~/.curio/config.yaml` and restart the daemon (`curio daemon stop`; the
+  next command auto-starts it). The daemon has no reload path: SIGHUP, like
+  SIGTERM, shuts it down cleanly.
 - **Admin reindex endpoint** (`POST /v1/admin/reindex`) — added when an
   embedding model swap is an actual need. Until then, run `curio reindex` CLI.
 - **Server-Sent Events for job progress** — polling is fine for v1. If the
   CLI's progress UX gets ugly, add `/v1/jobs/{id}/stream`.
 - **Generic batch endpoints** for bookmarks, documents, or jobs. Add only
   when a real non-file source needs them.
-- **Authentication scheme** (API keys, OAuth, SSO). Middleware hook is in
-  place; the actual mechanism is deferred to hosted-mode work.
+- **Authentication scheme** (API keys, OAuth, SSO) — deferred to
+  hosted-mode work. The local daemon has no credentials at all; it binds
+  loopback only and refuses browser-originated requests. See "Local API:
+  loopback only, no token, browsers shut out" below for the threat model.
 - **WebSocket or streaming search** — current `POST /v1/search` is fine.
 
 ---
@@ -996,8 +1005,10 @@ it lands — no `/v1` → `/v2` bump required.
   open: trajectory analysis ("new this month"), cross-cluster interest
   merging, and a standalone `interests` table, deferred until there's real
   usage data.
-- **Authentication for hosted mode:** middleware stub goes in early but the
-  actual auth scheme (API keys vs OAuth vs SSO) is deferred.
+- **Authentication for hosted mode:** the scheme (API keys vs OAuth vs SSO)
+  is deferred. Nothing is stubbed in the local daemon, which trusts every
+  local process that can reach loopback (see "Local API: loopback only, no
+  token, browsers shut out").
 - **Re-crawl policy:** how often to refetch a given URL. Likely
   domain-rule-driven (news daily, docs monthly, static essays never).
 - **Highlight / read-later importers:** schema is ready; importer code is not
@@ -1625,6 +1636,156 @@ same posture as dead links. The
 per host after the TTL is still useful for flaky origins),
 `ErrDeadLink` is still not host-cached, and MaxAttempts / backoff are
 untouched for everything that isn't a cache hit.
+
+---
+
+## Local API: loopback only, no token, browsers shut out
+
+**Decision:** The daemon API stays unauthenticated and defends its
+perimeter instead:
+
+- `daemon.listen` must be a loopback host (`127.0.0.0/8`, `::1`,
+  `localhost`) with a fixed port in 1–65535; anything else fails config
+  validation.
+- Router-level middleware (it runs before routing, so it also covers
+  404/405) answers 403 unless `Host` is `127.0.0.1:P`, `localhost:P`
+  (any case), `[::1]:P` or the bound host on port `P`, where `P` is the
+  port the listener actually bound.
+- A request that carries an `Origin` gets 403 unless it is exactly
+  `http://127.0.0.1:P`, `http://localhost:P` or `http://[::1]:P`. That
+  includes `Origin: null` and localhost on another port. The daemon never
+  emits CORS headers, so no preflight is ever approved.
+- Request bodies must be `application/json` (415 otherwise). Body-less
+  POSTs (refetch, reindex, interests/rebuild) need no Content-Type. Bodies
+  are capped at 1 MiB, or 32 MiB for `POST /v1/bookmarks/import`; bigger
+  ones get 413.
+- The server sets read-header (5s), read (30s), write (2m, longer than the
+  slowest synchronous handler) and idle (2m) timeouts.
+
+**Why:** Reproduced before the change. A web page's `text/plain` POST
+to `/v1/bookmarks` created a bookmark and a fetch job for a LAN URL of the
+page's choosing (201). A body-less `refetch-all` with `Origin: null`
+returned 202. A DNS-rebinding page, whose hostname re-resolves to
+127.0.0.1, could read `/v1/search` and document content, meaning the whole
+reading history. Browsers attach `Origin` to every cross-origin POST, and
+a page can only send a JSON body after a CORS preflight. A rebinding page
+still sends its own hostname in `Host`.
+
+**Threat model:** browser-originated requests are blocked. Other local
+processes, and other OS users who can reach loopback, are trusted. There
+is no token. The long-lived MCP sidecar would have to re-read a rotating
+token after every daemon restart, and for same-user processes it adds
+nothing, because anything that can read a token file under `$CURIO_HOME`
+can read `curio.db`. A token would keep *other* OS users on the same
+machine out. That is accepted for a single-user tool and revisited with
+hosted-mode auth. Browsers' Private Network Access protections are not
+relied on because they don't ship everywhere.
+
+---
+
+## Single daemon per home: flock on daemon.pid, bind before touching the DB
+
+**Decision:**
+
+- The daemon takes an exclusive `flock(2)` on `$CURIO_HOME/daemon.pid`
+  right after resolving the home, before it loads config or opens the DB.
+  It retries non-blocking for about 2s, so a client's momentary
+  status-probe lock can't make it give up. It then writes its PID into
+  that file through the locked descriptor and truncates it on clean exit.
+  It never unlinks or replaces the file: a new daemon locking a fresh
+  inode while a prober holds the old one would break mutual exclusion.
+- It binds the API port before migrations, orphan recovery or workers.
+  A second daemon (lock held) and one that can't bind both exit without
+  writing to the DB.
+- Startup order: signals, home, lock + PID, config + log level, marker
+  check, bind, open + migrate, construct dependencies, orphan recovery
+  per pool, workers, serve.
+- Clients (`internal/daemonctl`) decide liveness with a shared-lock probe
+  and identify the daemon through `/v1/healthz`, which now reports `pid`
+  and `home`. They only ever signal the PID recorded by the current lock
+  holder, and only when healthz (if it answers) reports the same pid and
+  home. Auto-starts are serialized by an exclusive lock on
+  `daemon.start.lock`, so the CLI and the MCP sidecar can't both spawn.
+  The spawner watches the child with `cmd.Wait`. A daemon that dies during
+  startup is reported at once, with its exit status and the tail of
+  `daemon.log`.
+- SIGINT, SIGTERM and SIGHUP all shut down gracefully. Shutdown is
+  bounded: 5s for in-flight HTTP requests, then 15s for running jobs.
+  Jobs still running after that are logged by ID and left for orphan
+  recovery. `curio daemon stop` waits up to 30s for the lock to be
+  released.
+
+**Why:** Nothing enforced one daemon per home. Startup reset every
+`running` job to `pending` with raw SQL before proving it was alone, and
+started workers before binding. A second daemon therefore requeued the
+first one's in-flight jobs, which then ran twice, claimed jobs itself,
+and died on EADDRINUSE with those jobs left `running`. The CLI wrote the
+PID file and trusted `kill(pid, 0)`. After a reboot or PID reuse it
+reported an unrelated process as the daemon, refused to start one, and
+`curio daemon stop` sent that process SIGTERM.
+
+**Why flock, not fcntl:** an fcntl lock is released when the process
+closes *any* descriptor for the file. An flock belongs to one open file
+description and is released only when that is closed or the process
+dies, SIGKILL and crashes included. That is what makes the lock
+trustworthy where a PID isn't. Both darwin and linux have it in stdlib
+`syscall`.
+
+**Upgrade path:** a daemon from before this change holds no lock and
+reports no identity. Clients treat it as running, so an upgrade doesn't
+spawn a second daemon that can't bind. `curio daemon status` shows it as
+legacy, and `curio daemon stop` refuses to signal it and prints how to
+stop it by hand.
+
+**Not done:** job leases or heartbeats. The lock makes "one daemon per
+database" true, and that is the assumption the queue relies on.
+
+---
+
+## Interrupted vs. orphaned jobs
+
+**Decision:**
+
+- The worker's context decides only whether to claim another job, and it
+  bounds the handler. Every queue write after the decision to claim runs
+  on a context detached from it and bounded by 10s, longer than SQLite's
+  5s busy_timeout. That covers `ClaimNext`, `MarkDone`, `MarkFailed`,
+  `Requeue` and the permanent-failure hook.
+- **Interrupted:** a handler returns while the worker's context is done
+  (shutdown). `Requeue` puts the job back to `pending`, runnable now, with
+  the attempt refunded and `last_error` untouched. This keys off the
+  worker's context, not the error. A handler cut short by shutdown can
+  return anything: `context.Canceled`, a subprocess's `signal: killed`,
+  even an `ErrPermanent` the cancellation caused. A handler that returns
+  nil during shutdown is still marked `done`.
+- **Orphaned:** a job left `running` by a daemon that died (crash,
+  SIGKILL, drain timeout). At startup, while holding the lock and before
+  any worker runs, each pool's `Worker.RecoverOrphans` requeues its kinds'
+  orphans with the used attempt kept. An orphan with no attempts left is
+  failed instead, and its kind's permanent-failure hook runs, so the
+  document goes `failed` rather than staying `pending`.
+- A panic in a handler or hook is recovered and logged with its stack. The
+  job fails permanently with `last_error` starting `panic:`, and the
+  worker moves on to the next job.
+- `MarkDone`, `MarkFailed` and `Requeue` only transition a `running` row.
+  Otherwise they change nothing and return `store.ErrNotRunning` (or
+  `ErrNotFound`).
+
+**Why:** On SIGTERM the worker did its bookkeeping on its already-cancelled
+context, so every outcome recorded during shutdown failed with
+`context.Canceled`. Finished jobs stayed `running` and ran again, producing
+a duplicate extraction and a duplicate index job. The startup reset didn't
+refund the claim, so every restart cost a job one of its five attempts.
+Separately, a panic anywhere in a handler killed the daemon along with
+every in-flight job's bookkeeping. `ClaimNext` never checks attempts, so a
+job that crashed the daemon was re-claimed after every restart, forever.
+Keeping the attempt on orphans, but refunding it on interrupts, is what
+ends that loop. The detached claim context also sidesteps a driver quirk:
+mattn's `Rows.Next` can report cancellation for an `UPDATE ... RETURNING`
+that has already committed.
+
+**Not done:** graceful drain of in-flight handlers. Interrupted work is
+simply redone.
 
 ---
 

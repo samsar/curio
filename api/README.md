@@ -15,7 +15,15 @@ UI — codegen their request/response types from this spec.
   Clients pass `?cursor=<value>` to fetch the next page.
 - **Async work** (import, refetch, reindex) responds `202 Accepted` with a
   `{ job_id }` body. Clients poll `/v1/jobs/{id}` for status.
-- **Auth** is a no-op middleware stub in v1. Hosted mode swaps it in.
+- **Auth**: there is none, and no token. The daemon binds loopback only
+  and trusts local processes. It refuses browser-originated requests:
+  `Host` must be a loopback name on the daemon's port (403 otherwise, which
+  stops DNS rebinding), any `Origin` other than the daemon's own gets 403,
+  and request bodies must be `application/json` (415 otherwise) and at most
+  1 MiB, or 32 MiB for imports (413 otherwise). Body-less POSTs need no
+  Content-Type. Hosted-mode auth is deferred; see
+  [`../docs/decisions.md`](../docs/decisions.md) "Local API: loopback only,
+  no token, browsers shut out".
 
 ## Why HTTP+JSON and not gRPC
 

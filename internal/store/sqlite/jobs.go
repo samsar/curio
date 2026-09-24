@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -85,20 +84,14 @@ func (s *Jobs) Enqueue(ctx context.Context, j *store.Job) error {
 func (s *Jobs) ClaimNext(ctx context.Context, kinds []string) (*store.Job, error) {
 	now := formatTime(time.Now().UTC())
 
-	// args: 3 for the SET clause (status, started_at, eligibility now),
-	// 2 for the SELECT predicate (status, run_after), optional kinds.
+	// args: 2 for the SET clause (status, started_at), 2 for the SELECT
+	// predicate (status, run_after), then the optional kinds.
 	args := []any{store.JobStatusRunning, now, store.JobStatusPending, now}
 	kindSQL := ""
 	if len(kinds) > 0 {
-		placeholders := strings.Repeat("?,", len(kinds))
-		placeholders = strings.TrimRight(placeholders, ",")
-		kindSQL = " AND kind IN (" + placeholders + ")"
-		for _, k := range kinds {
-			args = append(args, k)
-		}
+		kindSQL = " AND kind IN (" + placeholders(len(kinds)) + ")"
+		args = appendStrings(args, kinds)
 	}
-
-	const cols = `id, tenant_id, kind, payload, status, attempts, run_after, last_error, created_at, updated_at`
 
 	q := `UPDATE jobs SET status = ?, started_at = ?, attempts = attempts + 1
 	      WHERE id = (
@@ -106,7 +99,7 @@ func (s *Jobs) ClaimNext(ctx context.Context, kinds []string) (*store.Job, error
 	          WHERE status = ? AND run_after <= ?` + kindSQL + `
 	          ORDER BY created_at LIMIT 1
 	      )
-	      RETURNING ` + cols
+	      RETURNING ` + jobColumns
 
 	row := s.db.QueryRowContext(ctx, q, args...)
 	job, err := scanJob(row)
@@ -121,22 +114,29 @@ func (s *Jobs) ClaimNext(ctx context.Context, kinds []string) (*store.Job, error
 
 func (s *Jobs) MarkDone(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET status = ? WHERE id = ?`,
-		store.JobStatusDone, id)
+		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
+		store.JobStatusDone, id, store.JobStatusRunning)
 	if err != nil {
 		return fmt.Errorf("mark done: %w", err)
 	}
-	return ensureRow(res, "job")
+	return s.ensureTransitioned(ctx, res, id)
 }
 
+// MarkFailed reads before it writes; that's safe because only the worker
+// holding the claim transitions a running job, and the status guard on the
+// UPDATE catches anything that slipped in between.
 func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (bool, error) {
 	job, err := s.GetByID(ctx, id)
 	if err != nil {
 		return false, err
 	}
+	if job.Status != store.JobStatusRunning {
+		return false, notRunning(job)
+	}
 
 	permanent := !retry || job.Attempts >= s.MaxAttempts
 
+	var res sql.Result
 	if !permanent {
 		// Exponential backoff: 30 * 2^attempts seconds, capped at 1 hour.
 		backoff := 30 * time.Duration(math.Pow(2, float64(job.Attempts))) * time.Second
@@ -144,18 +144,106 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (b
 			backoff = time.Hour
 		}
 		runAfter := time.Now().UTC().Add(backoff)
-		_, err = s.db.ExecContext(ctx, `
-			UPDATE jobs SET status = ?, last_error = ?, run_after = ? WHERE id = ?`,
-			store.JobStatusPending, errMsg, formatTime(runAfter), id)
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE jobs SET status = ?, last_error = ?, run_after = ? WHERE id = ? AND status = ?`,
+			store.JobStatusPending, errMsg, formatTime(runAfter), id, store.JobStatusRunning)
 	} else {
-		_, err = s.db.ExecContext(ctx, `
-			UPDATE jobs SET status = ?, last_error = ? WHERE id = ?`,
-			store.JobStatusFailed, errMsg, id)
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE jobs SET status = ?, last_error = ? WHERE id = ? AND status = ?`,
+			store.JobStatusFailed, errMsg, id, store.JobStatusRunning)
 	}
 	if err != nil {
 		return false, fmt.Errorf("mark failed: %w", err)
 	}
+	if err := s.ensureTransitioned(ctx, res, id); err != nil {
+		return false, err
+	}
 	return permanent, nil
+}
+
+func (s *Jobs) Requeue(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET status = ?, attempts = max(attempts - 1, 0), started_at = NULL, run_after = ?
+		WHERE id = ? AND status = ?`,
+		store.JobStatusPending, formatTime(time.Now().UTC()), id, store.JobStatusRunning)
+	if err != nil {
+		return fmt.Errorf("requeue job: %w", err)
+	}
+	return s.ensureTransitioned(ctx, res, id)
+}
+
+// orphanExhaustedError is the last_error of an orphan with no attempts left.
+const orphanExhaustedError = "the daemon exited while this job was running, and it has no attempts left"
+
+func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []string) ([]*store.Job, int, error) {
+	if len(kinds) == 0 {
+		return nil, 0, errors.New("recover orphaned jobs: kinds required")
+	}
+	kindSQL := "kind IN (" + placeholders(len(kinds)) + ")"
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("begin orphan recovery: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+
+	// Exhausted orphans first. The first statement writes, so the
+	// transaction takes the write lock outright instead of upgrading from a
+	// read lock (see decisions.md "Job queue claim via atomic UPDATE ...
+	// RETURNING").
+	failedArgs := appendStrings([]any{store.JobStatusFailed, orphanExhaustedError,
+		store.JobStatusRunning, s.MaxAttempts}, kinds)
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE jobs SET status = ?, last_error = ?
+		WHERE status = ? AND attempts >= ? AND `+kindSQL+`
+		RETURNING `+jobColumns, failedArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("fail exhausted orphans: %w", err)
+	}
+	defer rows.Close()
+	failed, err := scanJobRows(rows)
+	if err != nil {
+		return nil, 0, fmt.Errorf("fail exhausted orphans: %w", err)
+	}
+
+	requeueArgs := appendStrings([]any{store.JobStatusPending, formatTime(time.Now().UTC()),
+		store.JobStatusRunning}, kinds)
+	res, err := tx.ExecContext(ctx, `
+		UPDATE jobs SET status = ?, started_at = NULL, run_after = ?
+		WHERE status = ? AND `+kindSQL, requeueArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("requeue orphans: %w", err)
+	}
+	requeued, err := res.RowsAffected()
+	if err != nil {
+		return nil, 0, fmt.Errorf("requeue orphans: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, 0, fmt.Errorf("commit orphan recovery: %w", err)
+	}
+	return failed, int(requeued), nil
+}
+
+// ensureTransitioned turns a status-guarded UPDATE that matched no row into
+// the reason: the job doesn't exist, or it isn't running.
+func (s *Jobs) ensureTransitioned(ctx context.Context, res sql.Result, id string) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	job, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	return notRunning(job)
+}
+
+func notRunning(job *store.Job) error {
+	return fmt.Errorf("job %s is %s: %w", job.ID, job.Status, store.ErrNotRunning)
 }
 
 // JobWithDoc pairs a Job with its target document's URL, title, and
@@ -250,8 +338,7 @@ func (s *Jobs) List(ctx context.Context, tenantID, status, kind string, limit in
 	if limit <= 0 {
 		limit = 50
 	}
-	const cols = `id, tenant_id, kind, payload, status, attempts, run_after, last_error, created_at, updated_at`
-	q := "SELECT " + cols + " FROM jobs WHERE tenant_id = ?"
+	q := "SELECT " + jobColumns + " FROM jobs WHERE tenant_id = ?"
 	args := []any{tenantID}
 	if status != "" {
 		q += " AND status = ?"
@@ -269,15 +356,7 @@ func (s *Jobs) List(ctx context.Context, tenantID, status, kind string, limit in
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
 	defer rows.Close()
-	var out []*store.Job
-	for rows.Next() {
-		j, err := scanJob(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, j)
-	}
-	return out, rows.Err()
+	return scanJobRows(rows)
 }
 
 // DeleteByStatus removes every job for the tenant in the given status.
@@ -464,9 +543,30 @@ func (s *Jobs) CountByStatus(ctx context.Context, tenantID string) (map[string]i
 }
 
 func (s *Jobs) GetByID(ctx context.Context, id string) (*store.Job, error) {
-	const cols = `id, tenant_id, kind, payload, status, attempts, run_after, last_error, created_at, updated_at`
-	row := s.db.QueryRowContext(ctx, "SELECT "+cols+" FROM jobs WHERE id = ?", id)
+	row := s.db.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE id = ?", id)
 	return scanJob(row)
+}
+
+// jobColumns is the column list scanJob expects, in order.
+const jobColumns = `id, tenant_id, kind, payload, status, attempts, run_after, last_error, created_at, updated_at`
+
+func scanJobRows(rows *sql.Rows) ([]*store.Job, error) {
+	var out []*store.Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+func appendStrings(args []any, vals []string) []any {
+	for _, v := range vals {
+		args = append(args, v)
+	}
+	return args
 }
 
 func scanJob(row interface{ Scan(...any) error }) (*store.Job, error) {

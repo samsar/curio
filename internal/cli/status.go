@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -41,6 +42,11 @@ func newStatusCmd() *cobra.Command {
 
 			fmt.Printf("daemon:  running  (version %s)\n", health.Version)
 			fmt.Printf("home:    %s\n", ctx.Home.Path)
+			if health.Home != "" && !daemonctl.SameHome(health.Home, ctx.Home.Path) {
+				fmt.Printf("warning: the daemon answering at this address serves %s, not %s;\n"+
+					"         results below are for that home. Give each home its own daemon.listen port.\n",
+					health.Home, ctx.Home.Path)
+			}
 			fmt.Printf("schema:  v%d\n", health.SchemaVersion)
 			fmt.Printf("embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
 

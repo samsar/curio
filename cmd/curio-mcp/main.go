@@ -74,7 +74,7 @@ func setup() (*client.Client, error) {
 			daemonBin = filepath.Join(filepath.Dir(exe), "curio-daemon")
 		}
 	}
-	if err := daemonctl.New(home, daemonBin, base).EnsureRunning(); err != nil {
+	if err := daemonctl.New(home, daemonBin, base).EnsureRunning(context.Background()); err != nil {
 		return nil, fmt.Errorf("ensure daemon running: %w", err)
 	}
 	return client.New(base), nil

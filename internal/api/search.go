@@ -64,8 +64,8 @@ type SearchResponse struct {
 
 func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 	var req SearchRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "bad request", err.Error())
+	if err := decodeJSON(w, r, maxJSONBody, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if req.Query == "" {

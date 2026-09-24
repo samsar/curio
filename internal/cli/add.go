@@ -101,5 +101,5 @@ func ensureDaemon(c *Context) error {
 		}
 		return errors.New("daemon not running and no $CURIO_HOME available to start it")
 	}
-	return c.Controller.EnsureRunning()
+	return c.Controller.EnsureRunning(context.Background())
 }

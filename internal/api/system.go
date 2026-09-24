@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/samsar/curio/internal/embedder"
@@ -12,9 +13,13 @@ import (
 	"github.com/samsar/curio/internal/version"
 )
 
-// Health is the /v1/healthz response.
+// Health is the /v1/healthz response. PID and Home identify which daemon
+// answered: clients use them to confirm the process on the port is the one
+// serving their $CURIO_HOME before trusting or signalling it.
 type Health struct {
 	Status          string `json:"status"`
+	PID             int    `json:"pid"`
+	Home            string `json:"home"`
 	Version         string `json:"version"`
 	SchemaVersion   int    `json:"schema_version"`
 	EmbeddingModel  string `json:"embedding_model"`
@@ -55,6 +60,8 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, Health{
 		Status:          "ok",
+		PID:             os.Getpid(),
+		Home:            d.Home.Path,
 		Version:         version.String(),
 		SchemaVersion:   meta.SchemaVersion,
 		EmbeddingModel:  meta.EmbeddingModel,
