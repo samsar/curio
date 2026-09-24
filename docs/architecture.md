@@ -286,4 +286,6 @@ External processes the daemon expects:
 - Trajectory analysis / "new this month" detection (interest clustering itself
   landed in M4 — see the insight layer)
 - Web UI
-- Authentication (single-tenant local; auth middleware stub for future)
+- Authentication (single-tenant local: the API binds loopback only and
+  refuses browser-originated requests; see decisions.md "Local API: loopback
+  only, no token, browsers shut out")

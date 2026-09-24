@@ -358,8 +358,10 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
 	// Write first, as in RequeueFetch. The whole corpus goes in one
-	// transaction: resetting and enqueueing 50k documents takes well under
-	// a second, far inside the 5s busy_timeout other writers wait for.
+	// transaction: resetting and enqueueing 50k documents takes 1.5-2s,
+	// inside the 5s busy_timeout other writers wait for up to roughly 130k
+	// documents (docs/decisions.md "Refetch: state reset and fetch job in
+	// one transaction").
 	args := appendStrings([]any{store.DocStatePending, tenantID}, states)
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE documents SET state = ?

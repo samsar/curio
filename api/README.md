@@ -13,8 +13,10 @@ UI — codegen their request/response types from this spec.
 - **Pagination** on list endpoints is cursor-based, not offset:
   responses include `next_cursor` (opaque string) and an approximate `total`.
   Clients pass `?cursor=<value>` to fetch the next page.
-- **Async work** (import, refetch, reindex) responds `202 Accepted` with a
-  `{ job_id }` body. Clients poll `/v1/jobs/{id}` for status.
+- **Async work** responds `202 Accepted`: `{ job_id }` for single-target
+  operations (refetch, reindex, interests rebuild), `{ jobs_enqueued }` for
+  the bulk `refetch-all` and `reindex-all`, which have no parent job.
+  Clients watch `GET /v1/jobs` for progress.
 - **Auth**: there is none, and no token. The daemon binds loopback only
   and trusts local processes. It refuses browser-originated requests:
   `Host` must be a loopback name on the daemon's port (403 otherwise, which

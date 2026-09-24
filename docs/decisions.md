@@ -279,6 +279,10 @@ The CLI hides the polling from the user (`curio import chrome` blocks with a
 progress bar). The MCP sidecar can either poll or hand the `job_id` back and
 let the next turn check.
 
+The bulk `refetch-all` and `reindex-all` answer `202` with `{ jobs_enqueued }`
+instead: each document gets its own job and there is no parent job to poll
+(see "Refetch: state reset and fetch job in one transaction").
+
 ---
 
 ## API: search response exposes BM25 and vector scores per chunk
@@ -1859,10 +1863,13 @@ enqueued, discarding errors. A failed enqueue left the document `pending`
 with no job, the stuck state the permanent-failure hook exists to
 prevent. `refetch-all` returned 202 with a count that hid the failures.
 
-**One transaction, not batches:** 50k documents take about 1.5s
-(measured). Nearly all of that is the job INSERTs, and a prepared
-statement saved only about 8%. That is well inside the 5s busy_timeout
-other writers wait on.
+**One transaction, not batches:** 50k documents take 1.5–2s (measured).
+Nearly all of that is the job INSERTs, and a prepared statement saved
+only about 8%. That is inside the 5s busy_timeout other writers wait on
+up to roughly 130k documents. Past that, a worker write that lands during
+the bulk transaction fails as busy; its job stays `running` and is
+recovered as an orphan on the next start. Chunked transactions are the
+fix if corpora get there.
 
 **Not done:** skipping documents that already have a queued fetch job.
 

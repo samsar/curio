@@ -108,7 +108,9 @@ Every part of it is there for a reason:
   migration. A bare `PRAGMA foreign_key_check;` returns rows that goose
   discards, so it checks nothing. Counting `pragma_foreign_key_check` into
   a `CHECK`-constrained table fails the statement, and so the migration,
-  before `COMMIT` when a reference dangles.
+  before `COMMIT` when a reference dangles. The check covers the whole
+  database, so a dangling reference that predates the migration aborts it
+  too; repair the data first rather than narrowing the guard.
 - **It is one `StatementBegin` block.** In NO TRANSACTION mode goose runs
   each statement on whichever pooled connection it gets. The pragma, the
   `BEGIN`, the rebuild and the `COMMIT` must all land on the same one.
