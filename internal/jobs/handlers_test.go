@@ -196,6 +196,24 @@ func TestMarkDocFailed_DeadLinkGoesDead(t *testing.T) {
 	assert.Equal(t, store.DocStateFailed, got.State)
 }
 
+// TestMarkDocFailed_FinalLoginWallGoesFailed: a page-level login wall that
+// the fetcher made final is a failed document, not a dead one; the page may
+// well exist behind the wall.
+func TestMarkDocFailed_FinalLoginWallGoesFailed(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	ctx := context.Background()
+
+	doc := &store.Document{TenantID: "local", URL: "https://x/thin", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
+
+	cause := &fetcher.PermanentError{Err: fmt.Errorf("native: %w (extracted text < 500 bytes)", fetcher.ErrLoginWall)}
+	require.NoError(t, MarkDocFailed(deps)(ctx, &store.Job{Payload: payload}, cause))
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateFailed, got.State)
+}
+
 func TestFetchHandler_BadPayload_Permanent(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	err := FetchHandler(deps)(context.Background(), &store.Job{Payload: []byte("not json")})

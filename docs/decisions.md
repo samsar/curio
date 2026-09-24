@@ -1655,6 +1655,11 @@ per host after the TTL is still useful for flaky origins),
 `ErrDeadLink` is still not host-cached, and MaxAttempts / backoff are
 untouched for everything that isn't a cache hit.
 
+**Revised:** which failures are cached, and under which host, changed.
+Thin pages and Jina-side failures are no longer cached, and a page-level
+login wall is final on its own. See "Host cache: only host-wide verdicts,
+under the host that gave them" below.
+
 ---
 
 ## Local API: loopback only, no token, browsers shut out
@@ -2021,4 +2026,80 @@ overlay probe stored a truncated Jina answer as a 629-character
 `errors.Is` can't find `ErrTooLarge` through it. `tryReadability` asks
 the capped body whether it overflowed instead of pre-buffering, since the
 parser already copies the whole body.
+
+---
+
+## Host cache: only host-wide verdicts, under the host that gave them
+
+Builds on "Host-cache hits are permanent failures": a hit fails every URL
+on the host for 15 minutes without a request, so a wrong entry is
+expensive.
+
+**Decision:**
+
+- Only three verdicts speak for a whole host, and only they are cached:
+  - **unreachable**: the name doesn't exist (`net.DNSError.IsNotFound`),
+    or the host refuses connections (`ECONNREFUSED`) or has no route
+    (`EHOSTUNREACH`);
+  - **anti-bot**: a 403 or 503 answer;
+  - **login wall**: a redirect onto the requested site's own login page
+    (`loginPathRE`, same site ignoring a leading `www.`).
+- Everything else is about one page (thin text, no article, a login-like
+  title, a redirect to another site) or transient (DNS timeouts and
+  temporary failures, `ENETUNREACH`, which is our own network), and is
+  never cached.
+- A verdict is cached under the host that gave it: the redirect target's
+  host from `*url.Error.URL` or `HTTPStatusError.URL`, not the host that
+  was requested. Keys are lowercased hostnames.
+- Nothing is cached when Jina was tried and failed for its own reasons:
+  429, 5xx, 408, timeouts, transport errors, or 401/402 (our account).
+  Only a Jina verdict about the target counts: a 2xx with
+  too little content, or another non-retryable 4xx.
+- A page-level verdict Jina could have helped with is final once every
+  configured extraction path has answered: with Jina off, or after Jina
+  gave its own verdict, the fetch fails with a `PermanentError` on
+  attempt 1. The document goes `failed`, not `dead`. If Jina only had
+  trouble, the error stays retryable.
+- The login-wall heuristics check redirects first, so a thin login page
+  reached by redirect still counts as the site-wide wall it is.
+- Error chains are kept whole. Both causes are wrapped with `%w`, so the
+  error for "origin and Jina both failed" matches the origin's sentinel
+  and Jina's `*HTTPStatusError`. An unreachable host keeps its
+  `*url.Error` and `*net.DNSError`.
+
+**Why:** Four kinds of wrong entry, each confirmed by a probe:
+
+1. Every `ErrLoginWall` was cached as host-wide, although most are about
+   one thin page. With Jina off, one short page failed the whole site.
+2. A Jina outage or 429 cached every host that needed Jina.
+3. Verdicts were keyed by the requested host. A shortener (bit.ly, t.co,
+   lnkd.in) redirecting one link to a site that answered 403, or to a dead
+   host, got the shortener cached, and its healthy links then failed with
+   zero requests.
+4. Any `*net.DNSError`, including resolver timeouts, and "network is
+   unreachable" were cached as "unreachable", so a Wi-Fi blip mid-import
+   cached every host it touched.
+
+**Why page-level verdicts are final:** without the cache, attempts 2–5
+would each repeat the origin fetch and up to four Jina requests for the
+same thin page, spending the budget the fallback policy protects and
+bringing back the "~15 minutes pending" symptom. The page answered the
+same way on every path that exists.
+
+---
+
+## Login-wall heuristic: www and apex are the same site
+
+**Decision:** The cross-host check in `looksLikeLoginWall` and the
+same-host check in the soft-404 "redirected to homepage" rule compare
+hosts with `sameSiteHost`: case-insensitive, ignoring one leading `www.`.
+
+**Why:** `example.com` → `www.example.com` (and old `http://` bookmarks
+upgraded to `https://www.`) is canonicalization, not a login wall. The
+rule came from the JS implementation, where it was meant to catch
+redirects to login/SSO hosts. Every such full article was sent to Jina,
+which allows 20 requests a minute without a key, and failed outright
+with Jina off. A deleted post redirecting to the `www` homepage skipped
+the soft-404 check and landed in the login-wall path instead of `dead`.
+Redirects to any other host are still flagged, and never host-cached.
 

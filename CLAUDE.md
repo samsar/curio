@@ -86,7 +86,9 @@ Every response body is capped at 32 MiB after decompression (`maxResponseBytes`;
 
 `ErrDeadLink` (404/410, soft-404 titles, redirect-to-homepage) is always wrapped in a `PermanentError`, never goes to Jina, and is deliberately NOT host-cached (a dead path says nothing about the host). The soft-404 check runs BEFORE the login-wall heuristics in `tryReadability` — order matters, thin tombstone pages would otherwise classify as login walls and leak to Jina.
 
-A hit on the in-memory host-failure cache (`hostFailureCache`, 15-min TTL; kinds: unreachable / anti-bot / login-wall) returns a `PermanentError` wrapping the original sentinel — the verdict can't change inside the TTL, so retrying would only re-read the cache. The *first* failure for a host stays retryable; it's what populates the cache. Recovery is `curio refetch --all --state=failed` (or per-doc `curio refetch <id>`). See `docs/decisions.md` "Host-cache hits are permanent failures".
+A hit on the in-memory host-failure cache (`hostFailureCache`, 15-min TTL) returns a `PermanentError` wrapping the original sentinel — the verdict can't change inside the TTL, so retrying would only re-read the cache. The *first* failure for a host stays retryable; it's what populates the cache. Recovery is `curio refetch --all --state=failed` (or per-doc `curio refetch <id>`). See `docs/decisions.md` "Host-cache hits are permanent failures".
+
+Only host-wide verdicts are cached (`hostVerdict`): unreachable (NXDOMAIN, `ECONNREFUSED`, `EHOSTUNREACH` — not DNS timeouts or `ENETUNREACH`), anti-bot (403/503), and a redirect onto the site's own login page. They are keyed by the host that *answered* (the redirect target), never cached when Jina failed for its own reasons (429/5xx/timeouts/401/402), only when Jina was off or gave a verdict about the target. Page-level login walls (thin text, no article, login title, cross-site redirect) are never cached; instead they fail permanently once every configured extraction path has answered. See "Host cache: only host-wide verdicts, under the host that gave them".
 
 ## Fetcher routing
 

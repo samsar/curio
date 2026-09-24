@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	readability "codeberg.org/readeck/go-readability/v2"
@@ -124,87 +125,161 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 	// Cache is in-memory only — survives goroutines, not daemon restarts.
 	// That's fine: it re-warms within minutes of resuming.
 	host := hostOf(target)
-	if cached, ok := n.hostCache.Get(host); ok {
-		n.log.Info("fast-fail from host cache",
-			"url", target, "host", host, "kind", cached.kind.String(),
-			"age_seconds", int(time.Since(cached.seenAt).Seconds()))
-		// A cache hit is a PermanentError. The verdict cannot change
-		// inside the TTL, so letting the worker back off and retry
-		// (60s → 120s → 240s → 480s, ~15 min per URL) would only re-read
-		// this cache four more times. Fail the job now; recovery once the
-		// host is healthy again is `curio refetch --all --state=failed`.
-		// The sentinel is preserved so callers can still errors.Is() the
-		// failure kind, and the "(cached: …)" suffix survives into
-		// last_error for diagnosis.
-		var sentinel error
-		switch cached.kind {
-		case HostFailUnreachable:
-			sentinel = ErrHostUnreachable
-		case HostFailAntiBot:
-			sentinel = ErrAntiBot
-		case HostFailLoginWall:
-			sentinel = ErrLoginWall
-		}
-		if sentinel != nil {
-			return nil, &PermanentError{Err: fmt.Errorf("native: %w (cached: %s)", sentinel, cached.originalErr)}
-		}
+	if err := n.cachedFailure(target, host); err != nil {
+		return nil, err
 	}
 
-	// Pass 1: direct fetch + Readability.
-	direct, directErr := n.tryReadability(ctx, target)
-	if directErr == nil {
-		return direct, nil
+	// Pass 1: direct fetch + Readability (or local PDF extraction).
+	res, originErr := n.tryReadability(ctx, target)
+	if originErr == nil {
+		return res, nil
+	}
+	// Dead links, oversized or unsupported bodies, deterministic statuses:
+	// final, and nothing Jina can fix.
+	var pe *PermanentError
+	if errors.As(originErr, &pe) {
+		return nil, originErr
+	}
+	if !n.jinaFallback || !jinaCanHelp(originErr) {
+		return nil, n.settle(host, originErr, originErr)
 	}
 
-	// Unreachable hosts don't get Jina — Jina hits origin too and will
-	// fail the same way, just slower.
-	if errors.Is(directErr, ErrHostUnreachable) {
-		n.recordHostFailure(host, directErr)
-		return nil, directErr
-	}
-
-	if !n.jinaFallback {
-		n.recordHostFailure(host, directErr)
-		return nil, directErr
-	}
-
-	// Fall back to Jina only for cases it can plausibly help with:
-	//   ErrLoginWall — page came back but was paywalled/thin
-	//   ErrAntiBot   — 403/503 from origin, likely a WAF block
-	// Skip for 404, 5xx-other, and timeouts: Jina can't conjure a page
-	// that doesn't exist, and wasting its rate limit on dead links gets
-	// us 429'd on the calls that *would* benefit.
-	if !errors.Is(directErr, ErrLoginWall) && !errors.Is(directErr, ErrAntiBot) {
-		return nil, directErr
-	}
-
+	// Pass 2: Jina.
 	n.log.Info("native fetch needs help, falling back to jina",
-		"url", target, "err", directErr.Error())
-
-	jina, err := n.tryJina(ctx, target)
-	if err != nil {
-		// Both origin AND Jina failed for this host — strong signal it's
-		// a host-wide block. Cache so the next N jobs for this host
-		// short-circuit.
-		n.recordHostFailure(host, directErr)
-		return nil, fmt.Errorf("both readability and jina failed (readability: %v) (jina: %w)",
-			directErr, err)
+		"url", target, "err", originErr.Error())
+	res, jinaErr := n.tryJina(ctx, target)
+	if jinaErr == nil {
+		if errors.Is(originErr, errPDFUnreadable) {
+			res.ContentType = "pdf" // Jina reports every page as an article
+		}
+		return res, nil
 	}
-	return jina, nil
+	err := fmt.Errorf("%w; %w", originErr, jinaErr)
+	switch {
+	case errors.Is(jinaErr, ErrTooLarge):
+		return nil, &PermanentError{Err: err}
+	case !jinaAnswered(jinaErr):
+		// Jina's own trouble says nothing about the target: never cache it,
+		// and let the job retry.
+		return nil, err
+	}
+	return nil, n.settle(host, originErr, err)
 }
 
-// recordHostFailure stores the failure in the host cache if its kind is
-// host-wide. Path-specific errors (404, plain 500s) are ignored — they
-// don't predict the next path on the same host.
-func (n *Native) recordHostFailure(host string, err error) {
-	if host == "" || err == nil {
-		return
+// jinaCanHelp reports whether an origin failure is one Jina might get past:
+//
+//   - ErrLoginWall: the page came back but was paywalled or thin
+//   - ErrAntiBot: 403/503 from the origin, likely a WAF block
+//   - errPDFUnreadable: a PDF the local extractor couldn't read; Jina
+//     renders PDFs itself
+//
+// Everything else (404, other statuses, DNS failures, timeouts) goes
+// without Jina: it can't conjure a page that doesn't exist, and spending
+// its rate limit on dead links gets us 429'd on the calls that would
+// benefit.
+func jinaCanHelp(err error) bool {
+	return errors.Is(err, ErrLoginWall) || errors.Is(err, ErrAntiBot) || errors.Is(err, errPDFUnreadable)
+}
+
+// jinaAnswered reports whether a failed Jina call is a verdict about the
+// target: Jina fetched it and found too little, or refused it with a
+// deterministic 4xx. Rate limits, outages, timeouts and transport errors are
+// trouble on Jina's side, and 401/402 are about our account; none of them
+// says anything about the target.
+func jinaAnswered(err error) bool {
+	if errors.Is(err, errJinaThin) {
+		return true
 	}
-	kind, ok := hostFailureFromError(err)
+	var se *HTTPStatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.StatusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired:
+		return false
+	}
+	return se.StatusCode >= 400 && se.StatusCode < 500 && !retryableStatus(se.StatusCode)
+}
+
+// settle decides what an origin failure that no extraction path could
+// rescue becomes; err is what Fetch returns for it.
+//
+//   - A host-wide verdict is cached under the host that gave it, and err
+//     stays retryable: the first failure for a host gets one more real
+//     attempt, later URLs on the host hit the cache.
+//   - A page-level verdict Jina could have helped with is final. Every
+//     extraction path has answered, so a retry would only repeat the origin
+//     and Jina calls (up to four Jina requests each), which is the budget
+//     the fallback policy protects.
+//   - Anything else (a transient status, a transport error) is returned as
+//     is.
+func (n *Native) settle(requestedHost string, originErr, err error) error {
+	if kind, host, ok := hostVerdict(originErr, requestedHost); ok {
+		n.hostCache.Put(host, kind, err.Error())
+		return err
+	}
+	if jinaCanHelp(originErr) {
+		return &PermanentError{Err: err}
+	}
+	return err
+}
+
+// hostVerdict reports whether an origin failure speaks for a whole host, and
+// for which one: the host that gave the verdict, which after a redirect is
+// not the host requested. Caching a redirect target's verdict under the
+// requested host would fail every healthy URL on, say, a link shortener.
+// Host-wide means:
+//
+//   - unreachable: the name doesn't exist, or the host refuses connections
+//     or has no route
+//   - anti-bot: a 403/503 answer
+//   - login wall: a redirect onto the requested site's own login page
+//
+// Everything else is about one page (thin content, a cross-site redirect) or
+// transient, and caching it would fail healthy URLs without a request.
+func hostVerdict(err error, requestedHost string) (kind HostFailureKind, host string, ok bool) {
+	switch {
+	case errors.Is(err, ErrHostUnreachable):
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return HostFailUnreachable, orHost(hostOf(ue.URL), requestedHost), true
+		}
+		return HostFailUnreachable, requestedHost, true
+	case errors.Is(err, ErrAntiBot):
+		var se *HTTPStatusError
+		if errors.As(err, &se) {
+			return HostFailAntiBot, orHost(hostOf(se.URL), requestedHost), true
+		}
+		return HostFailAntiBot, requestedHost, true
+	case errors.Is(err, errSiteLoginWall):
+		return HostFailLoginWall, requestedHost, true
+	}
+	return 0, "", false
+}
+
+func orHost(host, fallback string) string {
+	if host == "" {
+		return fallback
+	}
+	return host
+}
+
+// cachedFailure returns the fresh host-cache verdict for host as a
+// PermanentError, or nil. The verdict cannot change inside the TTL, so
+// letting the worker back off and retry (60s → 120s → 240s → 480s, ~15 min
+// per URL) would only re-read the cache four more times. Recovery once the
+// host is healthy is `curio refetch --all --state=failed`. The sentinel is
+// kept so callers can still errors.Is the failure kind, and the
+// "(cached: …)" suffix survives into last_error for diagnosis.
+func (n *Native) cachedFailure(target, host string) error {
+	cached, ok := n.hostCache.Get(host)
 	if !ok {
-		return
+		return nil
 	}
-	n.hostCache.Put(host, kind, err.Error())
+	n.log.Info("fast-fail from host cache",
+		"url", target, "host", host, "kind", cached.kind.String(),
+		"age_seconds", int(time.Since(cached.seenAt).Seconds()))
+	return &PermanentError{Err: fmt.Errorf("native: %w (cached: %s)", cached.kind.sentinel(), cached.originalErr)}
 }
 
 // tryReadability does pass 1: fetch HTML, run Readability, render to
@@ -243,7 +318,7 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		// the right thing to cache for the longest — they're not coming
 		// back in the next 15 minutes.
 		if isHostUnreachable(err) {
-			return nil, fmt.Errorf("native: fetch: %w: %v", ErrHostUnreachable, err)
+			return nil, fmt.Errorf("native: fetch: %w: %w", ErrHostUnreachable, err)
 		}
 		return nil, fmt.Errorf("native: fetch: %w", err)
 	}
@@ -253,10 +328,10 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		return nil, n.statusFailure(resp)
 	}
 
-	// PDFs: extract locally (pure-Go), then fall back to Jina. Detected by
-	// Content-Type, or a .pdf URL when the server is vague about the type.
+	// PDFs: extract locally (pure-Go); Fetch falls back to Jina. Detected
+	// by Content-Type, or a .pdf URL when the server is vague about the type.
 	if isPDFResponse(resp.contentType, target) {
-		return n.fetchPDF(ctx, target, resp.body)
+		return n.extractPDF(target, resp.body)
 	}
 
 	// Other non-HTML content (images, octet-stream, …) can't be read as
@@ -289,8 +364,12 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		}
 	}
 
-	if reason := looksLikeLoginWall(article, finalURL, target); reason != "" {
-		return nil, fmt.Errorf("native: %w (%s)", ErrLoginWall, reason)
+	if reason, siteWide := looksLikeLoginWall(article, finalURL, target); reason != "" {
+		sentinel := ErrLoginWall
+		if siteWide {
+			sentinel = errSiteLoginWall
+		}
+		return nil, fmt.Errorf("native: %w (%s)", sentinel, reason)
 	}
 
 	// Render the cleaned-up HTML and convert to markdown.
@@ -352,42 +431,57 @@ func (n *Native) statusFailure(resp *fetchResponse) error {
 	return statusError(se.StatusCode, fmt.Errorf("native: %w", se))
 }
 
+// errSiteLoginWall is the login wall a whole site sits behind: the request
+// was redirected onto the site's own login page. It wraps ErrLoginWall, so
+// it gets the same Jina fallback, but unlike a thin page it is host-wide.
+var errSiteLoginWall = fmt.Errorf("site-wide %w", ErrLoginWall)
+
 // looksLikeLoginWall mirrors the JS impl's heuristics in samsar/web-to-markdown:
-//   - missing article entirely
-//   - extracted text < 500 characters
-//   - title starts with "sign in"/"log in"/"join now"/"join linkedin"
-//   - redirect to a different host
 //   - redirect to a /login, /authwall, /signin, /signup path
+//   - redirect to a different site
+//   - missing article entirely
+//   - extracted text < 500 bytes
+//   - title starts with "sign in"/"log in"/"join now"/"join linkedin"
 //
 // Returns the empty string when nothing looks suspicious; otherwise a
-// short reason string for diagnostics.
-func looksLikeLoginWall(article readability.Article, finalURL *url.URL, sourceURL string) string {
-	if article.Node == nil {
-		return "no article extracted"
+// short reason string for diagnostics. siteWide is set for a redirect onto
+// the requested site's own login page, the one verdict here that speaks for
+// every page on the host. The redirect checks run first so a thin login
+// page still counts as the site-wide wall it is.
+func looksLikeLoginWall(article readability.Article, finalURL *url.URL, sourceURL string) (reason string, siteWide bool) {
+	if source, err := url.Parse(sourceURL); err == nil {
+		if finalURL.Hostname() != "" && source.Hostname() != "" &&
+			!sameSiteHost(finalURL.Hostname(), source.Hostname()) {
+			return "redirected to a different host: " + finalURL.Hostname(), false
+		}
+		if loginPathRE.MatchString(finalURL.Path) {
+			return "redirected to a login/auth path: " + finalURL.Path, finalURL.Path != source.Path
+		}
 	}
 
-	// Length check: render the text body and count runes.
+	if article.Node == nil {
+		return "no article extracted", false
+	}
+
+	// Length check: render the text body and count its bytes.
 	var txtBuf bytes.Buffer
 	_ = article.RenderText(&txtBuf)
 	if utf8Trimmed(txtBuf.String()) < 500 {
-		return "extracted text < 500 chars"
+		return "extracted text < 500 chars", false
 	}
 
 	if loginTitleRE.MatchString(article.Title()) {
-		return "title looks like a login wall"
+		return "title looks like a login wall", false
 	}
+	return "", false
+}
 
-	source, err := url.Parse(sourceURL)
-	if err == nil && finalURL != nil {
-		if finalURL.Hostname() != "" && source.Hostname() != "" &&
-			finalURL.Hostname() != source.Hostname() {
-			return "redirected to a different host: " + finalURL.Hostname()
-		}
-		if loginPathRE.MatchString(finalURL.Path) {
-			return "redirected to a login/auth path: " + finalURL.Path
-		}
-	}
-	return ""
+// sameSiteHost reports whether two hostnames name the same site, ignoring
+// case and one leading "www.": example.com redirecting to www.example.com
+// (or back) is canonicalization, not a login wall or a new site.
+func sameSiteHost(a, b string) bool {
+	norm := func(h string) string { return strings.TrimPrefix(strings.ToLower(h), "www.") }
+	return norm(a) == norm(b)
 }
 
 var (
@@ -401,14 +495,15 @@ var (
 //
 //   - the extracted title reads like a not-found page
 //   - the request for a specific path settled on the site's homepage
-//     (same host; cross-host redirects are login-wall territory)
+//     (same site, www. or not; cross-site redirects are login-wall
+//     territory)
 //
 // Returns the empty string when nothing looks dead; otherwise a short
 // reason string for diagnostics.
 func looksLikeSoft404(article readability.Article, finalURL *url.URL, sourceURL string) string {
 	source, err := url.Parse(sourceURL)
 	if err == nil && finalURL != nil &&
-		source.Hostname() == finalURL.Hostname() &&
+		sameSiteHost(source.Hostname(), finalURL.Hostname()) &&
 		strings.Trim(source.Path, "/") != "" &&
 		strings.Trim(finalURL.Path, "/") == "" &&
 		finalURL.RawQuery == "" {
@@ -475,46 +570,19 @@ func isPDFResponse(ct, rawURL string) bool {
 	return false
 }
 
-// isHostUnreachable returns true when err represents the host being
-// genuinely unreachable (DNS lookup failed, connection refused, no route).
-// Anything else — TLS errors, timeouts, EOFs mid-body — is treated as
-// generic transient so retries get a chance.
+// isHostUnreachable reports whether a transport error means the host
+// itself is gone: its name doesn't exist, or it refuses connections or has
+// no route. A resolver timeout or temporary DNS failure is transient, and
+// "network is unreachable" (ENETUNREACH) describes our own connectivity, not
+// the host; both stay retryable and are never cached. errno matching via
+// errors.Is works through *url.Error → *net.OpError → *os.SyscallError on
+// both backends.
 func isHostUnreachable(err error) bool {
-	if err == nil {
-		return false
-	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
-		return true
+		return dnsErr.IsNotFound
 	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		// Connection refused / no route shows up here as Op="dial" with
-		// the underlying syscall error in opErr.Err. Match by message
-		// because syscall.Errno values are platform-specific.
-		msg := opErr.Err.Error()
-		if strings.Contains(msg, "connection refused") ||
-			strings.Contains(msg, "no route to host") ||
-			strings.Contains(msg, "network is unreachable") {
-			return true
-		}
-	}
-	return false
-}
-
-// hostFailureFromError classifies a Fetch error into a HostFailureKind
-// suitable for caching, or returns false if the error isn't host-wide
-// (e.g. 404, generic timeout, 5xx that might recover quickly).
-func hostFailureFromError(err error) (HostFailureKind, bool) {
-	switch {
-	case errors.Is(err, ErrHostUnreachable):
-		return HostFailUnreachable, true
-	case errors.Is(err, ErrAntiBot):
-		return HostFailAntiBot, true
-	case errors.Is(err, ErrLoginWall):
-		return HostFailLoginWall, true
-	}
-	return 0, false
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH)
 }
 
 // utf8Trimmed returns the character count after trimming whitespace at
@@ -527,46 +595,39 @@ func utf8Trimmed(s string) int {
 // miss (empty / garbled output) and we fall back to Jina.
 const minPDFChars = 200
 
-// fetchPDF handles a PDF response in two tiers: pure-Go local extraction
-// first (no system dependency), then Jina, which renders PDFs server-side.
-// body is the already-open response body for target; a PDF over the body
-// cap skips tier 1 without being read any further.
-func (n *Native) fetchPDF(ctx context.Context, target string, body io.Reader) (*Result, error) {
+// errPDFUnreadable marks a PDF the local extractor couldn't read (too large,
+// malformed, or garbled into too little text). Jina renders PDFs itself, so
+// Fetch falls back to it.
+var errPDFUnreadable = errors.New("pdf not extractable locally")
+
+// extractPDF is tier 1 of PDF handling: pure-Go local extraction, no system
+// dependency. body is the already-open response body for target; a PDF over
+// the body cap is not read any further.
+func (n *Native) extractPDF(target string, body io.Reader) (*Result, error) {
 	data, err := io.ReadAll(body)
 	switch {
 	case errors.Is(err, ErrTooLarge):
-		n.log.Info("pdf too large for local extraction, trying jina", "url", target)
+		return nil, fmt.Errorf("native: %w: %w", errPDFUnreadable, err)
 	case err != nil:
 		return nil, fmt.Errorf("native: read pdf: %w", err)
-	default:
-		text, exErr := extractPDFText(data)
-		switch {
-		case exErr != nil:
-			n.log.Info("pdf local extraction failed, trying jina", "url", target, "err", exErr.Error())
-		case len(text) < minPDFChars:
-			n.log.Info("pdf local extraction too thin, trying jina", "url", target, "chars", len(text))
-		default:
-			return &Result{
-				Markdown:    text,
-				FinalURL:    target,
-				ContentType: "pdf",
-				Meta:        map[string]any{"via": "pdf-local", "transport": n.rt.name()},
-			}, nil
-		}
 	}
-
-	// Tier 2: Jina renders the PDF itself (we hand it the URL).
-	if n.jinaFallback {
-		res, jErr := n.tryJina(ctx, target)
-		if jErr != nil {
-			return nil, fmt.Errorf("native: pdf local extraction failed and jina fallback failed: %w", jErr)
-		}
-		res.ContentType = "pdf" // Jina defaults to "article"; this is a PDF
-		return res, nil
+	text, err := extractPDFText(data)
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("native: %w: %w", errPDFUnreadable, err)
+	case len(text) < minPDFChars:
+		return nil, fmt.Errorf("native: %w: only %d chars of text", errPDFUnreadable, len(text))
 	}
-	return nil, &PermanentError{Err: fmt.Errorf(
-		"native: pdf local extraction failed and jina fallback disabled; URL: %s", target)}
+	return &Result{
+		Markdown:    text,
+		FinalURL:    target,
+		ContentType: "pdf",
+		Meta:        map[string]any{"via": "pdf-local", "transport": n.rt.name()},
+	}, nil
 }
+
+// errJinaThin marks a Jina answer with too little content to be the page.
+var errJinaThin = errors.New("too little content")
 
 // tryJina is pass 2: hit r.jina.ai/<url> with retries. Returns parsed
 // markdown + extracted metadata in the Result.
@@ -590,7 +651,7 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 		body, err := io.ReadAll(resp.body)
 		_ = resp.body.Close()
 		if errors.Is(err, ErrTooLarge) {
-			return nil, &PermanentError{Err: fmt.Errorf("jina: %w", err)}
+			return nil, fmt.Errorf("jina: %w", err)
 		}
 		if err != nil {
 			// A body cut off mid-transfer is a transport failure, never a
@@ -602,7 +663,7 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 		if resp.statusCode >= 200 && resp.statusCode < 300 {
 			parsed := parseJina(string(body))
 			if len(parsed.body) < 200 {
-				return nil, fmt.Errorf("jina returned too little content (%d chars)", len(parsed.body))
+				return nil, fmt.Errorf("jina: %w (%d chars)", errJinaThin, len(parsed.body))
 			}
 			result := &Result{
 				Markdown:    parsed.body,
