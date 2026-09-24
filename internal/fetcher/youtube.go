@@ -171,7 +171,7 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlp
 		if errors.As(err, &exitErr) && isYTDLPPermanent(msg) {
 			return nil, &PermanentError{Err: fmt.Errorf("youtube: %s", msg)}
 		}
-		return nil, toolError("youtube", err, msg)
+		return nil, toolError("youtube: yt-dlp", err, msg)
 	}
 
 	infoFiles, err := filepath.Glob(filepath.Join(tmpDir, "*.info.json"))

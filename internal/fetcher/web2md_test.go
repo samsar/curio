@@ -93,7 +93,7 @@ func TestWeb2MD_FetchPropagatesStderrOnFailure(t *testing.T) {
 	require.NoError(t, err)
 	_, err = f.Fetch(context.Background(), "https://example.com")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "login wall detected")
+	assert.Equal(t, "web2md: exit status 1: [fake] login wall detected", err.Error())
 }
 
 // TestWeb2MD_OutputOverLimit: stdout past the cap fails permanently

@@ -2251,10 +2251,12 @@ second document under the new key. Every other key is unchanged.
 **Decision:**
 
 - Web2MD and YouTube run their tool through `runCapped`
-  (`internal/fetcher/exec_unix.go`). The tool gets its own process group,
-  and when the timeout or the job's context ends the whole group gets
-  SIGKILL. `WaitDelay` (2 s) bounds how long a descendant that left the
-  group can keep the output pipes open.
+  (`internal/fetcher/exec.go`). On Unix the tool gets its own process
+  group, and when the timeout or the job's context ends the whole group
+  gets SIGKILL (`exec_unix.go`). Elsewhere only the tool is killed; the
+  package still builds there, but only darwin/arm64 ships. `WaitDelay`
+  (2 s) bounds how long a descendant that left the group can keep the
+  output pipes open.
 - A run cut short fails with an error wrapping `ctx.Err()` that names the
   timeout, so a timeout stays retryable and a shutdown lets the worker
   requeue the job.
