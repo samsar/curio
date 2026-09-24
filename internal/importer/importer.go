@@ -50,7 +50,7 @@ const (
 // if the URL is good to bookmark + fetch, or (false, reason) if not.
 //
 // urlutil.Normalize already refuses anything but http(s) URLs with a host,
-// for every entry point. This lives here for the reasons: bulk imports
+// for every entry point. Indexable filters anyway because bulk imports
 // report how many URLs were skipped and why (bookmarklets, local files,
 // browser pages), and that breakdown is import-specific.
 func Indexable(rawURL string) (bool, FilterReason) {
