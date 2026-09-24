@@ -48,8 +48,8 @@ const importErrorsCap = 10
 
 func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 	var req ImportRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "bad request", err.Error())
+	if err := decodeJSON(w, r, maxImportBody, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if !validImportSource(req.Source) {

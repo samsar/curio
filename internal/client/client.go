@@ -29,9 +29,12 @@ func New(baseURL string) *Client {
 	}
 }
 
-// Healthz returns the daemon health blob.
+// Health mirrors api.Health. PID and Home are zero for a daemon that
+// predates them, which also means it holds no single-instance lock.
 type Health struct {
 	Status          string `json:"status"`
+	PID             int    `json:"pid,omitempty"`
+	Home            string `json:"home,omitempty"`
 	Version         string `json:"version"`
 	SchemaVersion   int    `json:"schema_version"`
 	EmbeddingModel  string `json:"embedding_model"`
@@ -40,7 +43,17 @@ type Health struct {
 	OllamaDetail    string `json:"ollama_detail,omitempty"`
 }
 
+// healthzTimeout bounds Healthz. A daemon answers well within it whatever
+// state Ollama is in, because the handler gives up on its Ollama check after
+// 500ms (api.ollamaPingTimeout); only a port held by something that doesn't
+// answer (a daemon still migrating, some other server) runs it out.
+const healthzTimeout = 2 * time.Second
+
+// Healthz returns the daemon health blob. Every client finds the daemon with
+// it, so it gives up after healthzTimeout rather than the client's 30s.
 func (c *Client) Healthz(ctx context.Context) (*Health, error) {
+	ctx, cancel := context.WithTimeout(ctx, healthzTimeout)
+	defer cancel()
 	var h Health
 	if err := c.do(ctx, http.MethodGet, "/v1/healthz", nil, &h); err != nil {
 		return nil, err
@@ -439,8 +452,9 @@ type DeleteJobsResponse struct {
 	Mode    string `json:"mode"`
 }
 
-// DeleteJobsByStatus removes jobs in a specific status. Server-side rejects
-// empty status — there's no "delete all" path on purpose.
+// DeleteJobsByStatus removes jobs in a finished status (done or failed).
+// The server rejects any other status — there's no "delete all" path on
+// purpose, and live work can't be deleted.
 func (c *Client) DeleteJobsByStatus(ctx context.Context, status string) (*DeleteJobsResponse, error) {
 	var out DeleteJobsResponse
 	path := "/v1/jobs?status=" + url.QueryEscape(status)
@@ -450,8 +464,8 @@ func (c *Client) DeleteJobsByStatus(ctx context.Context, status string) (*Delete
 	return &out, nil
 }
 
-// PruneJobsOlderThan removes jobs whose updated_at is older than the
-// given duration string. Accepts standard Go duration syntax plus "Nd"
+// PruneJobsOlderThan removes finished jobs whose updated_at is older than
+// the given duration string. Accepts standard Go duration syntax plus "Nd"
 // (days), e.g. "30d", "24h", "2h30m".
 func (c *Client) PruneJobsOlderThan(ctx context.Context, duration string) (*DeleteJobsResponse, error) {
 	var out DeleteJobsResponse

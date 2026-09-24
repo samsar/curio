@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/samsar/curio/internal/embedder"
@@ -12,9 +13,13 @@ import (
 	"github.com/samsar/curio/internal/version"
 )
 
-// Health is the /v1/healthz response.
+// Health is the /v1/healthz response. PID and Home identify which daemon
+// answered: clients use them to confirm the process on the port is the one
+// serving their $CURIO_HOME before trusting or signalling it.
 type Health struct {
 	Status          string `json:"status"`
+	PID             int    `json:"pid"`
+	Home            string `json:"home"`
 	Version         string `json:"version"`
 	SchemaVersion   int    `json:"schema_version"`
 	EmbeddingModel  string `json:"embedding_model"`
@@ -23,6 +28,12 @@ type Health struct {
 	OllamaDetail    string `json:"ollama_detail,omitempty"`
 }
 
+// ollamaPingTimeout caps the Ollama check in /v1/healthz, the only part of
+// the handler that waits on another service. Clients probe healthz with a
+// much longer timeout (client.Healthz), so a slow Ollama is reported as
+// ollama_reachable=false, never mistaken for a missing daemon.
+const ollamaPingTimeout = 500 * time.Millisecond
+
 func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	meta, err := d.Home.Meta()
 	if err != nil {
@@ -30,7 +41,6 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cheap ollama ping with a tight timeout so /healthz stays fast.
 	// Fail-open: an unreachable Ollama doesn't make the whole daemon
 	// unhealthy (the user can still list bookmarks, browse docs, etc.).
 	reachable := true
@@ -38,7 +48,7 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if pinger, ok := d.Embedder.(interface {
 		Ping(context.Context) error
 	}); ok {
-		pctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+		pctx, cancel := context.WithTimeout(r.Context(), ollamaPingTimeout)
 		defer cancel()
 		if err := pinger.Ping(pctx); err != nil {
 			reachable = false
@@ -55,6 +65,8 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, Health{
 		Status:          "ok",
+		PID:             os.Getpid(),
+		Home:            d.Home.Path,
 		Version:         version.String(),
 		SchemaVersion:   meta.SchemaVersion,
 		EmbeddingModel:  meta.EmbeddingModel,

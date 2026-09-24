@@ -5,15 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/generator"
@@ -26,48 +29,119 @@ import (
 	"github.com/samsar/curio/internal/version"
 )
 
-func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
+// workerDrainTimeout bounds how long shutdown waits for running jobs after
+// the API has stopped. Handlers see the cancellation immediately; one that
+// ignores it is abandoned, and its job is recovered as an orphan on the next
+// start. With the API's 5s graceful shutdown the whole budget is 20s, which
+// daemonctl's stop timeout must exceed.
+const workerDrainTimeout = 15 * time.Second
 
-	if err := run(); err != nil && !errors.Is(err, context.Canceled) {
+func main() {
+	logLevel := new(slog.LevelVar)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+
+	// SIGHUP too: the daemon has no reload path, and a hangup should shut it
+	// down cleanly rather than kill it mid-job.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	err := run(ctx, logLevel)
+	stop()
+	if err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("daemon exited with error", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// Resolve / initialize $CURIO_HOME.
-	homePath, err := curiohome.Resolve()
+// run is the whole daemon: it returns when ctx is cancelled (nil) or when
+// startup or serving fails. The order matters. Nothing touches the database
+// until this process holds the home's single-instance lock and has bound the
+// API port, so a second daemon, or one that can't serve, exits without
+// disturbing the jobs of the one already running.
+func run(ctx context.Context, logLevel *slog.LevelVar) error {
+	home, err := openHome()
 	if err != nil {
 		return err
 	}
-	home, err := curiohome.Open(homePath)
+	lock, err := daemonctl.AcquireLock(home)
 	if err != nil {
-		if !errors.Is(err, curiohome.ErrNotInitialized) {
-			return err
-		}
-		slog.Info("initializing curio home", "path", homePath)
-		// Stub model + dim; will be re-checked once config loads.
-		home, err = curiohome.Init(homePath, "nomic-embed-text", 768)
-		if err != nil {
-			return err
-		}
+		return err
 	}
+	defer func() {
+		if err := lock.Release(); err != nil {
+			slog.Warn("release daemon lock", "err", err)
+		}
+	}()
 
 	cfg, err := config.Load(home.ConfigPath())
 	if err != nil {
 		return err
 	}
+	logLevel.Set(cfg.Daemon.SlogLevel())
 
-	// Cross-check the marker file against config; if they disagree, the
-	// user changed config without reindexing. Fail loudly.
-	meta, err := home.Meta()
+	meta, err := checkMarker(home, cfg)
 	if err != nil {
 		return err
+	}
+
+	ln, err := net.Listen("tcp", cfg.Daemon.Listen)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w (is another program using the port? "+
+			"check `curio daemon status`, or set a different daemon.listen in %s)",
+			cfg.Daemon.Listen, err, home.ConfigPath())
+	}
+	defer ln.Close()
+
+	db, err := sqlitestore.Open(home.DBPath())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := sqlitestore.Migrate(db); err != nil {
+		return err
+	}
+	slog.Info("database ready", "path", home.DBPath())
+	syncMarkerSchemaVersion(home, db, meta)
+
+	d, err := newDaemon(ctx, cfg, home, db)
+	if err != nil {
+		return err
+	}
+	// Settle the previous daemon's unfinished jobs before any worker can
+	// claim them.
+	for _, p := range d.pools {
+		if err := p.worker.RecoverOrphans(ctx); err != nil {
+			return err
+		}
+	}
+
+	srv, err := api.NewServer(ln, d.apiDeps)
+	if err != nil {
+		return err
+	}
+	slog.Info("curio-daemon starting", "version", version.String(), "home", home.Path, "pid", os.Getpid())
+	return d.serve(ctx, srv)
+}
+
+// openHome resolves $CURIO_HOME, initializing it on first run.
+func openHome() (*curiohome.Home, error) {
+	homePath, err := curiohome.Resolve()
+	if err != nil {
+		return nil, err
+	}
+	home, err := curiohome.Open(homePath)
+	if !errors.Is(err, curiohome.ErrNotInitialized) {
+		return home, err
+	}
+	slog.Info("initializing curio home", "path", homePath)
+	defaults := config.Default().Embedding
+	return curiohome.Init(homePath, defaults.Model, defaults.Dim)
+}
+
+// checkMarker cross-checks the marker file against config. If they
+// disagree, the user changed the embedding config without reindexing.
+func checkMarker(home *curiohome.Home, cfg config.Config) (curiohome.Meta, error) {
+	meta, err := home.Meta()
+	if err != nil {
+		return curiohome.Meta{}, err
 	}
 	if meta.EmbeddingModel != cfg.Embedding.Model || meta.EmbeddingDim != cfg.Embedding.Dim {
 		slog.Warn("embedding model/dim mismatch between config and marker",
@@ -77,48 +151,42 @@ func run() error {
 			"marker_dim", meta.EmbeddingDim,
 		)
 		slog.Warn("run `curio reindex --reason=model-swap` (not yet implemented) before continuing")
-		return errors.New("embedding config/marker mismatch")
+		return curiohome.Meta{}, errors.New("embedding config/marker mismatch")
 	}
+	return meta, nil
+}
 
-	// Open DB and migrate.
-	db, err := sqlitestore.Open(home.DBPath())
+// syncMarkerSchemaVersion copies the schema version the migrations landed
+// at into the marker file, so /v1/healthz reflects reality after upgrades.
+func syncMarkerSchemaVersion(home *curiohome.Home, db *sqlitestore.DB, meta curiohome.Meta) {
+	v, err := sqlitestore.ReadSchemaVersion(db)
 	if err != nil {
-		return err
+		slog.Warn("read schema version", "err", err)
+		return
 	}
-	defer db.Close()
-
-	if err := sqlitestore.Migrate(db); err != nil {
-		return err
+	if v <= 0 || v == meta.SchemaVersion {
+		return
 	}
-	slog.Info("database ready", "path", home.DBPath())
-
-	// Reset orphaned 'running' jobs. Any row in that status at startup
-	// belonged to a previous daemon that died (SIGKILL, SIGTERM mid-
-	// handler, crash, laptop sleep). Single-daemon assumption holds for
-	// v1; multi-daemon would need leasing here instead.
-	if res, err := db.ExecContext(ctx, `
-		UPDATE jobs SET status = 'pending',
-		                started_at = NULL,
-		                run_after = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-		WHERE status = 'running'`); err == nil {
-		if n, _ := res.RowsAffected(); n > 0 {
-			slog.Info("reset orphaned running jobs", "count", n)
-		}
-	} else {
-		slog.Warn("could not reset orphaned running jobs", "err", err)
+	meta.SchemaVersion = v
+	if err := home.WriteMeta(meta); err != nil {
+		slog.Warn("failed to update marker schema_version", "err", err)
 	}
+}
 
-	// Sync the marker file's schema_version with whatever the migration
-	// run landed at, so /v1/healthz reflects reality after every upgrade.
-	if v, err := sqlitestore.ReadSchemaVersion(db); err == nil && v > 0 && v != meta.SchemaVersion {
-		updated := meta
-		updated.SchemaVersion = v
-		if err := home.WriteMeta(updated); err != nil {
-			slog.Warn("failed to update marker schema_version", "err", err)
-		}
-	}
+// pool is a Worker and how many goroutines run it.
+type pool struct {
+	name   string
+	worker *jobs.Worker
+	size   int
+}
 
-	// Construct stores.
+// daemon is everything run starts once the database is ready.
+type daemon struct {
+	apiDeps api.Deps
+	pools   []pool
+}
+
+func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db *sqlitestore.DB) (*daemon, error) {
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
 	bms := sqlitestore.NewBookmarks(db)
@@ -126,14 +194,13 @@ func run() error {
 	queue := sqlitestore.NewJobs(db)
 	insights := sqlitestore.NewInsights(db)
 
-	// Embedder.
 	emb, err := embedder.NewOllama(embedder.OllamaOptions{
 		BaseURL: cfg.Embedding.BaseURL,
 		Model:   cfg.Embedding.Model,
 		Dim:     cfg.Embedding.Dim,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Fetch the embedding model in the background if it isn't pulled yet, so a
 	// fresh install self-heals instead of failing every index job. Startup
@@ -147,9 +214,86 @@ func run() error {
 		}()
 	}
 
-	// Fetcher dispatcher. Native is always constructed (pure Go, no
-	// external deps, NewNative never errors) so fetcher_rules.yaml can
-	// bind "native" even when web2md is the configured default.
+	dispatcher, err := newDispatcher(cfg, home)
+	if err != nil {
+		return nil, err
+	}
+
+	idx := indexer.New(chunks, emb, indexer.Options{
+		ChunkSize:      cfg.Chunking.SizeTokens,
+		ChunkOverlap:   cfg.Chunking.OverlapTokens,
+		DocumentPrefix: cfg.Embedding.DocumentPrefix,
+	})
+	engine := search.New(chunks, docs, emb, search.Config{
+		BM25Weight:   cfg.Search.BM25Weight,
+		VectorWeight: cfg.Search.VectorWeight,
+		RRFK:         cfg.Search.RRFK,
+		Collapse:     search.CollapseStrategy(cfg.Search.Collapse),
+		QueryPrefix:  cfg.Embedding.QueryPrefix,
+	})
+
+	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights)
+	if err != nil {
+		return nil, err
+	}
+
+	// Two worker pools: fetch (network-bound, scale wide) and index
+	// (Ollama-bound, narrow). They share the JobQueue but each pool's
+	// workers only claim jobs of its kind. Without this split, FIFO
+	// claim order let fetch jobs starve indexing entirely — measured
+	// 3296 fetches done while only 55 index jobs completed.
+	deps := jobs.Deps{
+		Home:        home,
+		Documents:   docs,
+		Extractions: exts,
+		Bookmarks:   bms,
+		Chunks:      chunks,
+		Queue:       queue,
+		Dispatcher:  dispatcher,
+		Indexer:     idx,
+		Insight:     insightEngine,
+		Log:         slog.Default(),
+	}
+	fetchWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
+	fetchWorker.Register(store.JobKindFetch, jobs.FetchHandler(deps))
+	fetchWorker.OnPermanentFailure(store.JobKindFetch, jobs.MarkDocFailed(deps))
+
+	indexWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
+	indexWorker.Register(store.JobKindIndex, jobs.IndexHandler(deps))
+	indexWorker.OnPermanentFailure(store.JobKindIndex, jobs.MarkDocFailed(deps))
+
+	// Clustering is corpus-wide and expensive; give it its own single-worker
+	// pool so it neither starves fetch/index nor runs two clusterings at once.
+	clusterWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
+	clusterWorker.Register(store.JobKindCluster, jobs.ClusterHandler(deps))
+
+	return &daemon{
+		apiDeps: api.Deps{
+			Home:           home,
+			Documents:      docs,
+			Extractions:    exts,
+			Bookmarks:      bms,
+			Chunks:         chunks,
+			Queue:          queue,
+			Embedder:       emb,
+			Search:         engine,
+			Insights:       insights,
+			InsightEnabled: cfg.Insight.Enabled,
+			TenantID:       "local",
+			Log:            slog.Default(),
+		},
+		pools: []pool{
+			{name: "fetch", worker: fetchWorker, size: cfg.Daemon.FetchWorkers},
+			{name: "index", worker: indexWorker, size: cfg.Daemon.IndexWorkers},
+			{name: "cluster", worker: clusterWorker, size: 1},
+		},
+	}, nil
+}
+
+// newDispatcher builds the fetcher registry and routing rules. Native is
+// always constructed (pure Go, no external deps) so fetcher_rules.yaml can
+// bind "native" even when web2md is the configured default.
+func newDispatcher(cfg config.Config, home *curiohome.Home) (fetcher.Dispatcher, error) {
 	nativeFetcher := fetcher.NewNative(fetcher.NativeOptions{
 		Timeout:           time.Duration(cfg.Fetcher.Native.TimeoutSeconds) * time.Second,
 		UserAgent:         cfg.Fetcher.Native.UserAgent,
@@ -170,11 +314,11 @@ func run() error {
 			Timeout: time.Duration(cfg.Fetcher.Web2MD.TimeoutSeconds) * time.Second,
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defaultFetcher = w2m
 	default:
-		return fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
+		return nil, fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
 	}
 	// Content-type-specific fetchers, routed by hostname. The built-in
 	// rules below are the defaults; a user-provided fetcher_rules.yaml
@@ -210,41 +354,30 @@ func run() error {
 		slog.Info("youtube fetcher enabled", "bin", cfg.Fetcher.YouTube.Bin)
 	}
 
-	dispatcher := fetcher.NewRulesDispatcher(fetcher.RulesDispatcherOptions{
+	return fetcher.NewRulesDispatcher(fetcher.RulesDispatcherOptions{
 		Path:         home.FetcherRulesPath(),
 		Registry:     registry,
 		DefaultRules: rules,
 		Fallback:     defaultFetcher,
 		Log:          slog.Default(),
-	})
+	}), nil
+}
 
-	// Indexer + search engine.
-	idx := indexer.New(chunks, emb, indexer.Options{
-		ChunkSize:      cfg.Chunking.SizeTokens,
-		ChunkOverlap:   cfg.Chunking.OverlapTokens,
-		DocumentPrefix: cfg.Embedding.DocumentPrefix,
-	})
-	engine := search.New(chunks, docs, emb, search.Config{
-		BM25Weight:   cfg.Search.BM25Weight,
-		VectorWeight: cfg.Search.VectorWeight,
-		RRFK:         cfg.Search.RRFK,
-		Collapse:     search.CollapseStrategy(cfg.Search.Collapse),
-		QueryPrefix:  cfg.Embedding.QueryPrefix,
-	})
-
-	// Insight layer (M4): cluster documents into labeled interests. The
-	// generation client is optional — built only when insight.labeling = "llm",
-	// and used only if the model is actually available (otherwise clustering
-	// falls back to deterministic term labels).
+// newInsightEngine builds the insight layer: cluster documents into labeled
+// interests. The generation client is optional — built only when
+// insight.labeling = "llm", and used only if the model is actually available
+// (otherwise clustering falls back to deterministic term labels).
+func newInsightEngine(ctx context.Context, cfg config.Config, docs store.DocumentStore,
+	chunks store.ChunkStore, insights store.InsightStore) (*insight.Engine, error) {
 	var llmLabeler insight.Labeler
 	if cfg.Insight.Labeling == insight.LabelingLLM {
-		gen, gerr := generator.NewOllama(generator.OllamaOptions{
+		gen, err := generator.NewOllama(generator.OllamaOptions{
 			BaseURL: cfg.Generation.BaseURL,
 			Model:   cfg.Generation.Model,
 			Timeout: time.Duration(cfg.Generation.TimeoutSeconds) * time.Second,
 		})
-		if gerr != nil {
-			return gerr
+		if err != nil {
+			return nil, err
 		}
 		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		perr := gen.Ping(pingCtx)
@@ -277,86 +410,51 @@ func run() error {
 		MinClusterSize: cfg.Insight.MinClusterSize,
 		Center:         cfg.Insight.CenterVectors,
 	})
-	insightEngine := insight.New(docs, chunks, insights, clusterer, llmLabeler,
-		insight.Config{Labeling: cfg.Insight.Labeling, Center: cfg.Insight.CenterVectors}, slog.Default())
+	return insight.New(docs, chunks, insights, clusterer, llmLabeler,
+		insight.Config{Labeling: cfg.Insight.Labeling, Center: cfg.Insight.CenterVectors}, slog.Default()), nil
+}
 
-	// Two worker pools: fetch (network-bound, scale wide) and index
-	// (Ollama-bound, narrow). They share the JobQueue but each pool's
-	// workers only claim jobs of its kind. Without this split, FIFO
-	// claim order let fetch jobs starve indexing entirely — measured
-	// 3296 fetches done while only 55 index jobs completed.
-	deps := jobs.Deps{
-		Home:        home,
-		Documents:   docs,
-		Extractions: exts,
-		Bookmarks:   bms,
-		Chunks:      chunks,
-		Queue:       queue,
-		Dispatcher:  dispatcher,
-		Indexer:     idx,
-		Insight:     insightEngine,
-		Log:         slog.Default(),
-	}
-	fetchWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	fetchWorker.Register(store.JobKindFetch, jobs.FetchHandler(deps))
-	fetchWorker.OnPermanentFailure(store.JobKindFetch, jobs.MarkDocFailed(deps))
+// serve runs the worker pools and the API until ctx is cancelled or the API
+// fails, then shuts both down within the documented budget.
+func (d *daemon) serve(ctx context.Context, srv *api.Server) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	indexWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	indexWorker.Register(store.JobKindIndex, jobs.IndexHandler(deps))
-	indexWorker.OnPermanentFailure(store.JobKindIndex, jobs.MarkDocFailed(deps))
-
-	// Clustering is corpus-wide and expensive; give it its own single-worker
-	// pool so it neither starves fetch/index nor runs two clusterings at once.
-	clusterWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	clusterWorker.Register(store.JobKindCluster, jobs.ClusterHandler(deps))
-
-	// HTTP API.
-	srv := api.NewServer(cfg.Daemon.Listen, api.Deps{
-		Home:           home,
-		Documents:      docs,
-		Extractions:    exts,
-		Bookmarks:      bms,
-		Chunks:         chunks,
-		Queue:          queue,
-		Embedder:       emb,
-		Search:         engine,
-		Insights:       insights,
-		InsightEnabled: cfg.Insight.Enabled,
-		TenantID:       "local",
-		Log:            slog.Default(),
-	})
-
-	slog.Info("curio-daemon starting", "version", version.String())
-
-	// Spawn the fetch and index pools + API server. First error from any
-	// goroutine cancels the shared ctx.
-	nFetch := cfg.Daemon.FetchWorkers
-	nIndex := cfg.Daemon.IndexWorkers
-	nCluster := 1
-	total := nFetch + nIndex + nCluster + 1
-	slog.Info("starting worker pools", "fetch", nFetch, "index", nIndex, "cluster", nCluster)
-
-	errCh := make(chan error, total)
-	for i := 0; i < nFetch; i++ {
-		go func() { errCh <- fetchWorker.Run(ctx) }()
-	}
-	for i := 0; i < nIndex; i++ {
-		go func() { errCh <- indexWorker.Run(ctx) }()
-	}
-	for i := 0; i < nCluster; i++ {
-		go func() { errCh <- clusterWorker.Run(ctx) }()
-	}
-	go func() { errCh <- srv.Run(ctx) }()
-
-	err = <-errCh
-	stop()
-	// Drain the remaining goroutines so we don't leak on shutdown.
-	for i := 0; i < total-1; i++ {
-		<-errCh
+	var workers sync.WaitGroup
+	for _, p := range d.pools {
+		for range p.size {
+			workers.Go(func() {
+				// Run only ever returns ctx.Err(); shutdown is the only exit.
+				_ = p.worker.Run(ctx)
+			})
+		}
+		slog.Info("worker pool started", "pool", p.name, "workers", p.size)
 	}
 
-	if errors.Is(err, context.Canceled) {
-		return nil
+	err := srv.Serve(ctx)
+	cancel()
+	if stuck, drained := d.drain(&workers, workerDrainTimeout); !drained {
+		slog.Warn("jobs still running after the shutdown grace period; exiting anyway "+
+			"(the next start requeues them)", "grace", workerDrainTimeout, "job_ids", stuck)
 	}
 	return err
+}
+
+// drain waits up to grace for the worker goroutines to return. If they don't
+// all make it, drained is false and stuck lists the jobs still running.
+func (d *daemon) drain(workers *sync.WaitGroup, grace time.Duration) (stuck []string, drained bool) {
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil, true
+	case <-time.After(grace):
+		for _, p := range d.pools {
+			stuck = append(stuck, p.worker.InFlight()...)
+		}
+		return stuck, false
+	}
 }

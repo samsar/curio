@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -344,4 +345,349 @@ func TestJobs_ClaimNext_ConcurrentClaimOnce(t *testing.T) {
 	claimed.Range(func(_, _ any) bool { got++; return true })
 	assert.Equal(t, nJobs, got, "all jobs should be claimed exactly once")
 	assert.Zero(t, dups.Load(), "no duplicate claims")
+}
+
+// enqueueWithStatus inserts a job directly in the given status, as if it had
+// already gone through the queue.
+func enqueueWithStatus(t *testing.T, q *Jobs, kind, status string, attempts int) *store.Job {
+	t.Helper()
+	j := &store.Job{TenantID: "local", Kind: kind, Status: status, Attempts: attempts}
+	require.NoError(t, q.Enqueue(context.Background(), j))
+	return j
+}
+
+func startedAt(t *testing.T, db *DB, id string) sql.NullString {
+	t.Helper()
+	var s sql.NullString
+	require.NoError(t, db.QueryRow(`SELECT started_at FROM jobs WHERE id = ?`, id).Scan(&s))
+	return s
+}
+
+func TestJobs_Requeue(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	q := NewJobs(db)
+
+	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
+	claimed, err := q.ClaimNext(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, claimed.Attempts)
+	require.True(t, startedAt(t, db, claimed.ID).Valid)
+
+	require.NoError(t, q.Requeue(ctx, claimed.ID))
+
+	got, err := q.GetByID(ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusPending, got.Status)
+	assert.Zero(t, got.Attempts, "the interrupted claim is refunded")
+	assert.False(t, got.RunAfter.After(time.Now()))
+	assert.False(t, startedAt(t, db, claimed.ID).Valid)
+
+	// A requeued job is claimable straight away.
+	again, err := q.ClaimNext(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, claimed.ID, again.ID)
+}
+
+func TestJobs_Requeue_NeverBelowZeroAttempts(t *testing.T) {
+	ctx := context.Background()
+	q := NewJobs(NewEphemeralDB(t))
+	j := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusRunning, 0)
+
+	require.NoError(t, q.Requeue(ctx, j.ID))
+	got, err := q.GetByID(ctx, j.ID)
+	require.NoError(t, err)
+	assert.Zero(t, got.Attempts)
+}
+
+// TestJobs_TransitionsRequireRunning: MarkDone, MarkFailed and Requeue only
+// move a running job. Anything else is reported and left as it was.
+func TestJobs_TransitionsRequireRunning(t *testing.T) {
+	transitions := map[string]func(q *Jobs, id string) error{
+		"MarkDone": func(q *Jobs, id string) error { return q.MarkDone(context.Background(), id) },
+		"MarkFailed": func(q *Jobs, id string) error {
+			_, err := q.MarkFailed(context.Background(), id, "boom", true)
+			return err
+		},
+		"Requeue": func(q *Jobs, id string) error { return q.Requeue(context.Background(), id) },
+	}
+	for name, transition := range transitions {
+		t.Run(name, func(t *testing.T) {
+			for _, status := range []string{store.JobStatusPending, store.JobStatusDone, store.JobStatusFailed} {
+				q := NewJobs(NewEphemeralDB(t))
+				j := enqueueWithStatus(t, q, store.JobKindFetch, status, 1)
+
+				err := transition(q, j.ID)
+				require.ErrorIs(t, err, store.ErrNotRunning, "status %s", status)
+
+				got, err := q.GetByID(context.Background(), j.ID)
+				require.NoError(t, err)
+				assert.Equal(t, status, got.Status)
+				assert.Equal(t, 1, got.Attempts)
+				assert.Nil(t, got.LastError)
+			}
+
+			q := NewJobs(NewEphemeralDB(t))
+			assert.ErrorIs(t, transition(q, uuid.NewString()), store.ErrNotFound)
+		})
+	}
+}
+
+func TestJobs_RecoverOrphans(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	q := NewJobs(db)
+	q.MaxAttempts = 3
+
+	exhausted := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusRunning, 3)
+	orphan := enqueueWithStatus(t, q, store.JobKindIndex, store.JobStatusRunning, 1)
+	otherKind := enqueueWithStatus(t, q, store.JobKindCluster, store.JobStatusRunning, 1)
+	pending := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusPending, 0)
+	_, err := db.ExecContext(ctx, `UPDATE jobs SET started_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status = 'running'`)
+	require.NoError(t, err)
+
+	failed, requeued, err := q.RecoverOrphans(ctx, []string{store.JobKindFetch, store.JobKindIndex})
+	require.NoError(t, err)
+	assert.Equal(t, 1, requeued)
+	require.Len(t, failed, 1)
+	assert.Equal(t, exhausted.ID, failed[0].ID)
+	assert.Equal(t, store.JobStatusFailed, failed[0].Status)
+
+	got, err := q.GetByID(ctx, exhausted.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusFailed, got.Status)
+	require.NotNil(t, got.LastError)
+	assert.Contains(t, *got.LastError, "daemon exited")
+
+	got, err = q.GetByID(ctx, orphan.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusPending, got.Status)
+	assert.Equal(t, 1, got.Attempts, "the orphaned attempt stays spent")
+	assert.False(t, got.RunAfter.After(time.Now()))
+	assert.False(t, startedAt(t, db, orphan.ID).Valid)
+
+	got, err = q.GetByID(ctx, otherKind.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusRunning, got.Status, "other kinds are not this caller's to recover")
+
+	got, err = q.GetByID(ctx, pending.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusPending, got.Status)
+	assert.Zero(t, got.Attempts)
+}
+
+func TestJobs_RecoverOrphans_RequiresKinds(t *testing.T) {
+	_, _, err := NewJobs(NewEphemeralDB(t)).RecoverOrphans(context.Background(), nil)
+	assert.Error(t, err)
+}
+
+// ---------- retention ----------
+
+// TestJobs_PruneOlderThan_KeepsLiveWork: pruning removes finished jobs only.
+// A pending or running job is work in flight; deleting it would strand its
+// document in pending with nothing left to move it on.
+func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	q := NewJobs(db)
+	docs := NewDocuments(db)
+
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/queued"}
+	require.NoError(t, docs.Upsert(ctx, doc))
+	queued := &store.Job{TenantID: "local", Kind: store.JobKindFetch,
+		Payload: json.RawMessage(`{"document_id":"` + doc.ID + `"}`)}
+	require.NoError(t, q.Enqueue(ctx, queued))
+
+	byStatus := map[string]*store.Job{}
+	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
+		byStatus[status] = enqueueWithStatus(t, q, store.JobKindIndex, status, 1)
+	}
+
+	// A cutoff in the future makes every row "old": updated_at can't be
+	// backdated, the AFTER UPDATE trigger resets it.
+	n, err := q.PruneOlderThan(ctx, "local", time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, n)
+
+	for status, j := range byStatus {
+		_, err := q.GetByID(ctx, j.ID)
+		if store.IsFinishedJobStatus(status) {
+			assert.ErrorIs(t, err, store.ErrNotFound, status)
+		} else {
+			assert.NoError(t, err, status)
+		}
+	}
+	_, err = q.GetByID(ctx, queued.ID)
+	assert.NoError(t, err, "the document's only fetch job survives")
+}
+
+func TestJobs_DeleteByStatus_FinishedOnly(t *testing.T) {
+	ctx := context.Background()
+	q := NewJobs(NewEphemeralDB(t))
+
+	byStatus := map[string]*store.Job{}
+	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
+		byStatus[status] = enqueueWithStatus(t, q, store.JobKindFetch, status, 1)
+	}
+
+	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, "bogus", ""} {
+		n, err := q.DeleteByStatus(ctx, "local", status)
+		require.Error(t, err, "status %q", status)
+		assert.Zero(t, n)
+	}
+	for _, j := range byStatus {
+		_, err := q.GetByID(ctx, j.ID)
+		require.NoError(t, err, "a refused delete removes nothing")
+	}
+
+	n, err := q.DeleteByStatus(ctx, "local", store.JobStatusDone)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n)
+	_, err = q.GetByID(ctx, byStatus[store.JobStatusDone].ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// ---------- refetch ----------
+
+func seedDoc(t *testing.T, docs *Documents, url, state string) *store.Document {
+	t.Helper()
+	d := &store.Document{TenantID: "local", URL: url, State: state}
+	require.NoError(t, docs.Upsert(context.Background(), d))
+	return d
+}
+
+func docState(t *testing.T, docs *Documents, id string) string {
+	t.Helper()
+	d, err := docs.GetByID(context.Background(), id)
+	require.NoError(t, err)
+	return d.State
+}
+
+func fetchJobsFor(t *testing.T, q *Jobs, docID string) []*store.Job {
+	t.Helper()
+	all, err := q.List(context.Background(), "local", "", store.JobKindFetch, 1000)
+	require.NoError(t, err)
+	var out []*store.Job
+	for _, j := range all {
+		var p struct {
+			DocumentID string `json:"document_id"`
+		}
+		require.NoError(t, json.Unmarshal(j.Payload, &p))
+		if p.DocumentID == docID {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
+// failJobInserts makes every INSERT into jobs abort. The trigger is
+// persistent, not TEMP: a TEMP trigger exists only on the connection that
+// created it, and the pool has several.
+func failJobInserts(t *testing.T, db *DB) {
+	t.Helper()
+	_, err := db.Exec(`CREATE TRIGGER t_fail BEFORE INSERT ON jobs BEGIN SELECT RAISE(ABORT, 'injected'); END`)
+	require.NoError(t, err)
+}
+
+func countRows(t *testing.T, db *DB, table string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow("SELECT count(*) FROM "+table).Scan(&n))
+	return n
+}
+
+func TestDocuments_RequeueFetch(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	docs, q := NewDocuments(db), NewJobs(db)
+	d := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
+
+	job, err := docs.RequeueFetch(ctx, "local", d.ID)
+	require.NoError(t, err)
+
+	assert.Equal(t, store.DocStatePending, docState(t, docs, d.ID))
+	jobs := fetchJobsFor(t, q, d.ID)
+	require.Len(t, jobs, 1)
+	got := jobs[0]
+	assert.Equal(t, job.ID, got.ID)
+	assert.Equal(t, "local", got.TenantID)
+	assert.Equal(t, store.JobStatusPending, got.Status)
+	assert.Zero(t, got.Attempts)
+	assert.JSONEq(t, `{"document_id":"`+d.ID+`"}`, string(got.Payload))
+	assert.False(t, job.CreatedAt.IsZero(), "the returned job carries its stored timestamps")
+}
+
+func TestDocuments_RequeueFetch_NotFound(t *testing.T) {
+	db := NewEphemeralDB(t)
+	docs := NewDocuments(db)
+	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs"}
+	require.NoError(t, docs.Upsert(context.Background(), other))
+
+	for _, id := range []string{uuid.NewString(), other.ID} {
+		_, err := docs.RequeueFetch(context.Background(), "local", id)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+	assert.Zero(t, countRows(t, db, "jobs"))
+	assert.Equal(t, store.DocStatePending, docState(t, docs, other.ID), "another tenant's document is untouched")
+}
+
+func TestDocuments_RequeueFetch_Atomic(t *testing.T) {
+	db := NewEphemeralDB(t)
+	docs := NewDocuments(db)
+	d := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
+	failJobInserts(t, db)
+
+	_, err := docs.RequeueFetch(context.Background(), "local", d.ID)
+	require.ErrorContains(t, err, "injected")
+	assert.Equal(t, store.DocStateFailed, docState(t, docs, d.ID), "the state reset rolled back with the insert")
+	assert.Zero(t, countRows(t, db, "jobs"))
+}
+
+func TestDocuments_RequeueFetchByStates(t *testing.T) {
+	ctx := context.Background()
+	db := NewEphemeralDB(t)
+	docs, q := NewDocuments(db), NewJobs(db)
+	byState := map[string]*store.Document{}
+	for _, st := range []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
+		byState[st] = seedDoc(t, docs, "https://example.com/"+st, st)
+	}
+	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs", State: store.DocStateFailed}
+	require.NoError(t, docs.Upsert(ctx, other))
+
+	n, err := docs.RequeueFetchByStates(ctx, "local",
+		[]string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed})
+	require.NoError(t, err)
+	assert.Equal(t, 3, n)
+	assert.Equal(t, 3, countRows(t, db, "jobs"))
+
+	for st, d := range byState {
+		if st == store.DocStateDead {
+			assert.Equal(t, store.DocStateDead, docState(t, docs, d.ID), "dead is left out unless asked for")
+			assert.Empty(t, fetchJobsFor(t, q, d.ID))
+			continue
+		}
+		assert.Equal(t, store.DocStatePending, docState(t, docs, d.ID), st)
+		assert.Len(t, fetchJobsFor(t, q, d.ID), 1, st)
+	}
+	assert.Equal(t, store.DocStateFailed, docState(t, docs, other.ID), "another tenant's document is untouched")
+
+	n, err = docs.RequeueFetchByStates(ctx, "local", []string{store.DocStateDead})
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Equal(t, store.DocStatePending, docState(t, docs, byState[store.DocStateDead].ID))
+}
+
+func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
+	db := NewEphemeralDB(t)
+	docs := NewDocuments(db)
+	a := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
+	b := seedDoc(t, docs, "https://example.com/b", store.DocStateFetched)
+	failJobInserts(t, db)
+
+	_, err := docs.RequeueFetchByStates(context.Background(), "local",
+		[]string{store.DocStateFetched, store.DocStateFailed})
+	require.ErrorContains(t, err, "injected")
+	assert.Equal(t, store.DocStateFailed, docState(t, docs, a.ID))
+	assert.Equal(t, store.DocStateFetched, docState(t, docs, b.ID))
+	assert.Zero(t, countRows(t, db, "jobs"))
 }

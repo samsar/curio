@@ -156,10 +156,14 @@ func newJobsPruneCmd() *cobra.Command {
 	var olderThan string
 	cmd := &cobra.Command{
 		Use:   "prune",
-		Short: "Delete jobs older than a duration (use to keep the jobs table from growing without bound)",
-		Long: `Delete any job — regardless of status — whose updated_at is older
-than the given duration. Useful for periodic cleanup so the jobs table
+		Short: "Delete finished jobs older than a duration (keeps the jobs table from growing without bound)",
+		Long: `Delete finished jobs (done or failed) whose updated_at is older than
+the given duration. Useful for periodic cleanup so the jobs table
 doesn't accumulate forever as you re-import and refetch.
+
+Pending and running jobs are never pruned, however old: they are work
+still in flight, and deleting one would leave its document stuck in
+pending with nothing left to fetch it.
 
 Duration accepts standard Go syntax plus "Nd" (days):
 
@@ -197,13 +201,16 @@ func newJobsDeleteCmd() *cobra.Command {
 	var status string
 	cmd := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete jobs in a given status (no all-status nuke path on purpose)",
-		Long: `Remove every job in a specific status. Useful after you've triaged
-failures and decided "these are real, I'm not going to recover them"
-to keep 'curio jobs --failed' output focused.
+		Short: "Delete finished jobs in a given status: done or failed",
+		Long: `Remove every job in a finished status (done or failed). Useful after
+you've triaged failures and decided "these are real, I'm not going to
+recover them" to keep 'curio jobs --failed' output focused.
 
   curio jobs delete --status failed
   curio jobs delete --status done
+
+Pending and running jobs can't be deleted: they are work still in
+flight, and deleting one would leave its document stuck in pending.
 
 Deleting a job doesn't change any document state. A failed doc stays
 failed (still visible in 'curio docs --failed') and can still be
@@ -214,7 +221,7 @@ refetched.`,
 				return errors.New("no context")
 			}
 			if status == "" {
-				return errors.New("--status is required (pending|running|done|failed)")
+				return errors.New("--status is required (done|failed)")
 			}
 			if err := ensureDaemon(ctx); err != nil {
 				return err
@@ -227,7 +234,7 @@ refetched.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&status, "status", "", "pending|running|done|failed")
+	cmd.Flags().StringVar(&status, "status", "", "done|failed")
 	return cmd
 }
 

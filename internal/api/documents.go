@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -172,74 +174,52 @@ func (d Deps) handleRefetchDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reset state so the next fetch starts clean and so /v1/stats reflects
-	// that this document is once again pending.
-	_ = d.Documents.UpdateState(r.Context(), doc.ID, store.DocStatePending)
-
-	payload, _ := json.Marshal(map[string]string{"document_id": doc.ID})
-	job := &store.Job{
-		TenantID: d.TenantID,
-		Kind:     store.JobKindFetch,
-		Payload:  payload,
-	}
-	if err := d.Queue.Enqueue(r.Context(), job); err != nil {
+	// The state reset and the new job commit together, so a failure can't
+	// leave the document pending with no job behind it.
+	job, err := d.Documents.RequeueFetch(r.Context(), d.TenantID, doc.ID)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": job.ID})
 }
 
-// handleRefetchAll enqueues a fetch job for every document for the tenant
-// (or just those in a particular state, via ?state=). Useful after a
-// fetcher change to rebuild the corpus.
-//
-// The no-filter form skips dead documents — retrying confirmed dead links
-// on every bulk refetch wastes the whole retry budget per URL. Asking for
-// ?state=dead explicitly is the deliberate escape hatch (with refetch, a
-// dead doc goes back to pending and gets a fresh chance).
+// refetchAllDefaultStates is what refetch-all resets when no ?state= is
+// given. Dead documents are left out: retrying confirmed dead links on every
+// bulk refetch wastes the whole retry budget per URL. Asking for ?state=dead
+// explicitly is the deliberate escape hatch.
+var refetchAllDefaultStates = []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed}
+
+// handleRefetchAll resets documents to pending and enqueues a fetch job for
+// each, all in one transaction: either every matching document is requeued
+// or none is. ?state= narrows it to one document state. Useful after a
+// fetcher change to rebuild the corpus. Returns 202 with the number of jobs
+// enqueued; there is no parent job to poll.
 func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
-	wantState := r.URL.Query().Get("state") // empty = all states except dead
-
-	ds, ok := d.Documents.(*sqlite.Documents)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"DocumentStore impl does not expose bulk listing")
-		return
-	}
-
-	var ids []string
-	var err error
-	if wantState == "" {
-		for _, st := range []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed} {
-			stIDs, listErr := ds.ListIDs(r.Context(), d.TenantID, st)
-			if listErr != nil {
-				writeError(w, listErr)
-				return
-			}
-			ids = append(ids, stIDs...)
-		}
-	} else {
-		ids, err = ds.ListIDs(r.Context(), d.TenantID, wantState)
-		if err != nil {
-			writeError(w, err)
+	states := refetchAllDefaultStates
+	if s := r.URL.Query().Get("state"); s != "" {
+		if !validDocState(s) {
+			writeProblem(w, http.StatusBadRequest, "bad request",
+				fmt.Sprintf("state %q must be one of: pending, fetched, failed, dead", s))
 			return
 		}
+		states = []string{s}
 	}
 
-	enqueued := 0
-	for _, id := range ids {
-		_ = d.Documents.UpdateState(r.Context(), id, store.DocStatePending)
-		payload, _ := json.Marshal(map[string]string{"document_id": id})
-		if err := d.Queue.Enqueue(r.Context(), &store.Job{
-			TenantID: d.TenantID,
-			Kind:     store.JobKindFetch,
-			Payload:  payload,
-		}); err != nil {
-			continue
-		}
-		enqueued++
+	n, err := d.Documents.RequeueFetchByStates(r.Context(), d.TenantID, states)
+	if err != nil {
+		writeError(w, err)
+		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": enqueued})
+	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": n})
+}
+
+func validDocState(s string) bool {
+	switch s {
+	case store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead:
+		return true
+	}
+	return false
 }
 
 // handleReindexDocument enqueues an index job for the document — re-chunking
@@ -259,9 +239,8 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 			"document has no extraction to reindex; refetch it first")
 		return
 	}
-	payload, _ := json.Marshal(map[string]string{"document_id": doc.ID})
-	job := &store.Job{TenantID: d.TenantID, Kind: store.JobKindIndex, Payload: payload}
-	if err := d.Queue.Enqueue(r.Context(), job); err != nil {
+	job, err := d.enqueueIndex(r.Context(), doc.ID)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
@@ -271,6 +250,9 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 // handleReindexAll enqueues index jobs for documents that have content.
 // Defaults to state=fetched (the already-indexed set); ?state= overrides.
 // Use after swapping the embedding model (same dimension) or the chunker.
+//
+// Index jobs change no document state, so a partial run strands nothing;
+// it stops at the first failure and reports how far it got.
 func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	wantState := r.URL.Query().Get("state")
 	if wantState == "" {
@@ -287,17 +269,28 @@ func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	enqueued := 0
-	for _, id := range ids {
-		payload, _ := json.Marshal(map[string]string{"document_id": id})
-		if err := d.Queue.Enqueue(r.Context(), &store.Job{
-			TenantID: d.TenantID, Kind: store.JobKindIndex, Payload: payload,
-		}); err != nil {
-			continue
+	for i, id := range ids {
+		if _, err := d.enqueueIndex(r.Context(), id); err != nil {
+			writeProblem(w, http.StatusInternalServerError, "internal error",
+				fmt.Sprintf("enqueued %d of %d index jobs before failing: %v", i, len(ids), err))
+			return
 		}
-		enqueued++
 	}
-	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": enqueued})
+	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": len(ids)})
+}
+
+// enqueueIndex enqueues an index job for a document. The payload is
+// jobs.IndexPayload's shape.
+func (d Deps) enqueueIndex(ctx context.Context, docID string) (*store.Job, error) {
+	payload, err := json.Marshal(map[string]string{"document_id": docID})
+	if err != nil {
+		return nil, fmt.Errorf("encode index payload: %w", err)
+	}
+	job := &store.Job{TenantID: d.TenantID, Kind: store.JobKindIndex, Payload: payload}
+	if err := d.Queue.Enqueue(ctx, job); err != nil {
+		return nil, err
+	}
+	return job, nil
 }
 
 // handleGetDocumentContent streams the extracted markdown.

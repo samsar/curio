@@ -107,9 +107,13 @@ curio status
 curio daemon stop
 ```
 
-Time budget: with 4 workers (default) and the Native fetcher, expect roughly
-1-2 seconds per bookmark — so 1000 bookmarks ≈ 4-8 minutes wall-clock. Larger
-files scale linearly. Use `--limit` to test in chunks.
+Time budget: with the default pools (16 fetch workers, 4 index workers) and
+the Native fetcher, expect roughly 1-2 seconds per bookmark — so 1000
+bookmarks ≈ 4-8 minutes wall-clock. Larger files scale linearly. Use `--limit`
+to test in chunks. Pool sizes are `daemon.fetch_workers` and
+`daemon.index_workers` in `~/.curio/config.yaml`. The deprecated
+`daemon.workers` is split 75/25 between them and can't be combined with
+either.
 
 ## Curio itself
 

@@ -45,9 +45,11 @@ curio-mcp (MCP sidecar)  ──HTTP+JSON──►       │             ├ FTS5
 
 `curio-mcp` (`cmd/curio-mcp`) speaks MCP over stdio to clients like Claude Code and forwards tool calls to the daemon over the same HTTP API the CLI uses; it auto-starts the daemon. See `docs/mcp.md`.
 
-- Storage state lives under `$CURIO_HOME` (default `~/.curio`): `curio.db`, `content/<doc_id>/<extraction_id>.md`, `daemon.pid`, `daemon.log`, `.curio-meta.json`.
-- The CLI auto-starts the daemon when needed via `internal/daemonctl`. PID file at `~/.curio/daemon.pid`. The auto-discovery picks `curio-daemon` from the same directory as the `curio` binary, override with `CURIO_DAEMON_BIN`.
-- The daemon listens on `127.0.0.1:8765` (local-only).
+- Storage state lives under `$CURIO_HOME` (default `~/.curio`): `curio.db`, `content/<doc_id>/<extraction_id>.md`, `daemon.pid`, `daemon.start.lock`, `logs/daemon.log`, `.curio-meta.json`.
+- **One daemon per home.** The daemon holds an exclusive `flock` on `daemon.pid` for its lifetime and writes its own PID there (truncated on clean exit, never unlinked). It takes the lock before loading config or opening the DB, and binds its port before migrating or starting workers, so a second daemon, or one that can't bind, exits without touching the DB. Liveness is the lock, never `kill(pid, 0)`.
+- The CLI and `curio-mcp` auto-start the daemon via `internal/daemonctl` (`EnsureRunning`), serialized by `daemon.start.lock`. They confirm identity through `/v1/healthz` (`pid`, `home`), and `curio daemon stop` only signals the PID the lock holder recorded. The auto-discovery picks `curio-daemon` from the same directory as the `curio` binary, override with `CURIO_DAEMON_BIN`.
+- The daemon listens on loopback only (`127.0.0.1:8765`; `daemon.listen` must be a loopback host). The API has no auth: it trusts local processes, and its middleware shuts out browsers. Requests are rejected unless `Host` is a loopback name on the bound port (stops DNS rebinding), rejected if they carry a foreign `Origin`, and bodies must be `application/json` (1 MiB cap, 32 MiB for import). See `docs/decisions.md` "Local API".
+- SIGINT, SIGTERM and SIGHUP all shut down gracefully (5s HTTP + 15s worker drain). There is no config reload: restart the daemon.
 
 ## Where the design lives
 
@@ -64,9 +66,13 @@ curio-mcp (MCP sidecar)  ──HTTP+JSON──►       │             ├ FTS5
 
 This catches people:
 
-**Jobs**: `pending ↔ running → done | failed`. `failed` is terminal — won't retry. The `run_after` column on a failed row is stale data from the last retry cycle (we update status + last_error but not run_after at terminal transition). The CLI hides `next_attempt` for failed/done rows for that reason.
+**Jobs**: `pending ↔ running → done | failed`. `failed` is terminal — won't retry. `ClaimNext` counts the attempt. `MarkDone`, `MarkFailed` and `Requeue` only move a `running` row (`store.ErrNotRunning` otherwise). The `run_after` column on a failed row is stale data from the last retry cycle (we update status + last_error but not run_after at terminal transition). The CLI hides `next_attempt` for failed/done rows for that reason. Only finished (done/failed) jobs can be pruned or deleted.
 
-**Documents**: `pending → fetched | failed | dead`. The `failed`/`dead` transition is driven by the `jobs.OnPermanentFailure` hook (`PermFailHook` — receives the cause error) — when a fetch or index job permanently fails, the worker calls the hook which sets `doc.state = failed`, or `dead` when the cause wraps `fetcher.ErrDeadLink` (hard 404/410 or a detected soft 404). Without this hook, docs would stay `pending` forever even after their jobs gave up. `refetch` flips the doc back to `pending` and enqueues a fresh job (new attempts counter) — but refetching a `dead` doc is refused with 409 unless `--force` (`?force=1`), and `refetch --all` skips dead docs unless `--state=dead` is explicit.
+- **Interrupted** (the handler returned while the worker's context was cancelled, i.e. shutdown): requeued with the attempt *refunded*, whatever error the handler returned. Queue writes use a detached, 10s-bounded context, so outcomes still get recorded during shutdown. A handler that finishes during shutdown is `done`.
+- **Orphaned** (left `running` by a daemon that died): at startup `Worker.RecoverOrphans` requeues it with the attempt *kept*. Once attempts are exhausted it goes `failed` and runs the permanent-failure hook. This is what stops a job that crashes the daemon from looping forever.
+- A handler or hook panic is recovered and fails the job permanently (`last_error` starts with `panic:`).
+
+**Documents**: `pending → fetched | failed | dead`. The `failed`/`dead` transition is driven by the `jobs.OnPermanentFailure` hook (`PermFailHook` — receives the cause error) — when a fetch or index job permanently fails, the worker calls the hook which sets `doc.state = failed`, or `dead` when the cause wraps `fetcher.ErrDeadLink` (hard 404/410 or a detected soft 404). Without this hook, docs would stay `pending` forever even after their jobs gave up. `refetch` flips the doc back to `pending` and enqueues a fresh job (new attempts counter) in one transaction (`DocumentStore.RequeueFetch*`), so a doc is never left pending without a job. Refetching a `dead` doc is refused with 409 unless `--force` (`?force=1`), and `refetch --all` skips dead docs unless `--state=dead` is explicit.
 
 ## Fetcher fallback policy
 
@@ -87,13 +93,14 @@ A hit on the in-memory host-failure cache (`hostFailureCache`, 15-min TTL; kinds
 - `internal/store/` — interfaces (`store.go`) + sqlite impls (`sqlite/`). The interface boundary is real; other packages should never import `internal/store/sqlite` directly except `cmd/curio-daemon/main.go` and tests.
 - `internal/jobs/` — Worker loop + handlers. `OnPermanentFailure` hooks are wired in `Register`.
 - `internal/api/` — HTTP handlers, RFC 7807 errors, chi router.
+- `internal/config/` — `config.yaml` loader. Decoding is strict: an unknown key fails the load. `daemon.workers` is a deprecated alias that `Load` folds into `fetch_workers`/`index_workers`; `Validate` never mutates. `embedding.dim` must equal `store.EmbeddingDim` (768).
 - `internal/cli/` — Cobra commands. Pattern: each command file (`add.go`, `docs.go`, etc.) exports `newXxxCmd()` and `root.go` adds them.
 - `internal/fetcher/` — Native (Go) and Web2MD (subprocess) backends behind the same `Fetcher` interface.
 - `internal/indexer/` — Chunker (paragraph-aware with hard char cap) + orchestrator (chunk → embed → store).
 - `internal/insight/` — M4 insight layer. Pluggable `Clusterer` (kNN-graph + label propagation), `Labeler` (term / LLM), and the `Engine` that clusters → labels → persists.
 - `internal/generator/` — provider-agnostic LLM text generation (`Generator` interface + Ollama `/api/generate`). Separate from `internal/embedder`; used for cluster labels (M4) and RAG (M6).
 - `internal/eval/` — retrieval eval harness (recall@k / NDCG@k / MRR) behind `curio eval --queries`.
-- `migrations/` — Goose SQL migrations, embedded into the binary via `embed.go`.
+- `migrations/` — Goose SQL migrations, embedded into the binary via `embed.go`. Rebuilding a table must follow the recipe in `migrations/README.md` (NO TRANSACTION, one StatementBegin block, enforcing FK guard). Doing it inside goose's transaction cascade-deletes child rows.
 
 ## Insight layer (M4)
 
@@ -108,7 +115,7 @@ Clusters documents into labeled "interests". The whole algorithm sits behind `in
 
 - The CLI never echoes `tenant_id` to clients; tenant scoping is server-side. Single-tenant local installs hardcode `"local"`.
 - API list endpoints use cursor pagination (`?cursor=...`), not offset. Stable under concurrent writes.
-- Long-running ops (import, refetch-all) return `202 + job_id`; clients poll.
+- Queued work returns `202`: `{job_id}` for single-target ops (refetch, reindex, interests rebuild), `{jobs_enqueued}` for the bulk refetch-all and reindex-all, which have no parent job. Import is synchronous (`200`) and enqueues fetch jobs. Clients watch `GET /v1/jobs`.
 - Errors over the wire are RFC 7807 (`application/problem+json`).
 - `curio docs` and `curio jobs` default to the happy-path view (`state=fetched`, `status=done`). `--failed`, `--all`, and explicit `--state`/`--status` widen.
 - Both list views include the on-disk markdown path under `doc_id` so `cat`, `curio docs show`, and `curio refetch` are copy/paste-ready.

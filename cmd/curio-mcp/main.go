@@ -55,7 +55,8 @@ func setup() (*client.Client, error) {
 	}
 	home, err := curiohome.Open(homePath)
 	if errors.Is(err, curiohome.ErrNotInitialized) {
-		home, err = curiohome.Init(homePath, "nomic-embed-text", 768)
+		defaults := config.Default().Embedding
+		home, err = curiohome.Init(homePath, defaults.Model, defaults.Dim)
 	}
 	if err != nil {
 		return nil, err
@@ -73,7 +74,7 @@ func setup() (*client.Client, error) {
 			daemonBin = filepath.Join(filepath.Dir(exe), "curio-daemon")
 		}
 	}
-	if err := daemonctl.New(home, daemonBin, base).EnsureRunning(); err != nil {
+	if err := daemonctl.New(home, daemonBin, base).EnsureRunning(context.Background()); err != nil {
 		return nil, fmt.Errorf("ensure daemon running: %w", err)
 	}
 	return client.New(base), nil
