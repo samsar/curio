@@ -53,8 +53,7 @@ func TestRefetchDocument(t *testing.T) {
 }
 
 // TestRefetchDocument_StoreFailure: when the job can't be enqueued, the
-// document keeps its state. It used to be flipped to pending first and left
-// there with no job.
+// document keeps its state rather than sitting in pending with no job.
 func TestRefetchDocument_StoreFailure(t *testing.T) {
 	s := newTestServer(t)
 	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFailed)

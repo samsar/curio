@@ -433,12 +433,16 @@ func (d *daemon) serve(ctx context.Context, srv *api.Server) error {
 
 	err := srv.Serve(ctx)
 	cancel()
-	d.drain(&workers)
+	if stuck, drained := d.drain(&workers, workerDrainTimeout); !drained {
+		slog.Warn("jobs still running after the shutdown grace period; exiting anyway "+
+			"(the next start requeues them)", "grace", workerDrainTimeout, "job_ids", stuck)
+	}
 	return err
 }
 
-// drain waits up to workerDrainTimeout for the worker goroutines to return.
-func (d *daemon) drain(workers *sync.WaitGroup) {
+// drain waits up to grace for the worker goroutines to return. If they don't
+// all make it, drained is false and stuck lists the jobs still running.
+func (d *daemon) drain(workers *sync.WaitGroup, grace time.Duration) (stuck []string, drained bool) {
 	done := make(chan struct{})
 	go func() {
 		workers.Wait()
@@ -446,12 +450,11 @@ func (d *daemon) drain(workers *sync.WaitGroup) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(workerDrainTimeout):
-		var stuck []string
+		return nil, true
+	case <-time.After(grace):
 		for _, p := range d.pools {
 			stuck = append(stuck, p.worker.InFlight()...)
 		}
-		slog.Warn("jobs still running after the shutdown grace period; exiting anyway "+
-			"(the next start requeues them)", "grace", workerDrainTimeout, "job_ids", stuck)
+		return stuck, false
 	}
 }

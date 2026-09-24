@@ -58,9 +58,8 @@ func statusIs(status string) func(*store.Job) bool {
 }
 
 // TestWorker_JobFinishedDuringShutdownIsDone: a handler that completes after
-// shutdown has begun still gets its success recorded. Recording it on the
-// already-cancelled worker context used to fail with context.Canceled and
-// leave the row running, to be run again on the next start.
+// shutdown has begun still gets its success recorded, so the row isn't left
+// running and the job isn't run again on the next start.
 func TestWorker_JobFinishedDuringShutdownIsDone(t *testing.T) {
 	q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
 	job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}

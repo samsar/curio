@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 )
@@ -103,8 +105,8 @@ func assertJobsUntouched(t *testing.T, home *curiohome.Home, seeded seededJobs) 
 }
 
 // TestRun_SecondDaemonLeavesJobsAlone: a daemon that finds the home locked
-// exits before touching the database. It used to requeue the running
-// daemon's in-flight jobs first, so they ran twice.
+// exits before touching the database, so the running daemon's in-flight jobs
+// are neither requeued (and run twice) nor claimed.
 func TestRun_SecondDaemonLeavesJobsAlone(t *testing.T) {
 	home := newHome(t, freeLoopbackAddr(t))
 	seeded := seedJobs(t, home)
@@ -180,4 +182,37 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 	pidFile, err = os.ReadFile(home.PIDFile())
 	require.NoError(t, err)
 	assert.Empty(t, pidFile, "a clean exit leaves the PID file empty")
+}
+
+// TestDrain: shutdown waits for the workers up to the grace period, then
+// gives up on them and names the jobs still running.
+func TestDrain(t *testing.T) {
+	q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
+	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch}
+	require.NoError(t, q.Enqueue(context.Background(), job))
+
+	claimed := make(chan struct{})
+	release := make(chan struct{})
+	w := jobs.NewWorker(q, jobs.WorkerOptions{PollInterval: 10 * time.Millisecond})
+	w.Register(store.JobKindFetch, func(context.Context, *store.Job) error {
+		close(claimed)
+		<-release // deaf to cancellation, like a handler stuck in a syscall
+		return nil
+	})
+	d := &daemon{pools: []pool{{name: "fetch", worker: w, size: 1}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	workers.Go(func() { assert.ErrorIs(t, w.Run(ctx), context.Canceled) })
+	<-claimed
+	cancel()
+
+	stuck, drained := d.drain(&workers, 50*time.Millisecond)
+	assert.False(t, drained)
+	assert.Equal(t, []string{job.ID}, stuck)
+
+	close(release)
+	stuck, drained = d.drain(&workers, 5*time.Second)
+	assert.True(t, drained)
+	assert.Empty(t, stuck)
 }

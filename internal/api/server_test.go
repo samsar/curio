@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,6 +82,7 @@ type request struct {
 	origin      string
 	contentType string
 	body        string
+	chunked     bool // send body with no Content-Length
 }
 
 type response struct {
@@ -94,6 +96,10 @@ func (s *testServer) do(t *testing.T, req request) response {
 	var body io.Reader
 	if req.body != "" {
 		body = strings.NewReader(req.body)
+	}
+	if req.chunked {
+		// A reader NewRequest can't measure goes out chunked.
+		body = io.MultiReader(body)
 	}
 	r, err := http.NewRequest(req.method, s.base+req.path, body)
 	require.NoError(t, err)
@@ -229,8 +235,8 @@ func TestServer_NoCORSHeaders(t *testing.T) {
 
 // TestServer_CSRFBookmarkExploit replays a cross-site "simple" POST: a page
 // submits a text/plain body, which browsers send without a CORS preflight.
-// Before the local-only middleware this created a bookmark and a fetch job
-// for a LAN URL of the attacker's choosing.
+// Accepted, it would create a bookmark and make the daemon fetch a LAN URL of
+// the attacker's choosing.
 func TestServer_CSRFBookmarkExploit(t *testing.T) {
 	s := newTestServer(t)
 	body := `{"url":"http://192.168.1.1/admin"}`
@@ -292,6 +298,7 @@ func TestServer_JSONBodies(t *testing.T) {
 		path        string
 		contentType string
 		body        string
+		chunked     bool
 		status      int
 	}{
 		{
@@ -317,6 +324,14 @@ func TestServer_JSONBodies(t *testing.T) {
 			body: `{"url":"https://example.com/c"} {"url":"https://example.com/d"}`, status: http.StatusBadRequest,
 		},
 		{
+			name: "chunked json", path: "/v1/bookmarks", contentType: "application/json",
+			body: `{"url":"https://example.com/f"}`, chunked: true, status: http.StatusCreated,
+		},
+		{
+			name: "chunked text/plain", path: "/v1/bookmarks", contentType: "text/plain",
+			body: `{"url":"https://example.com/g"}`, chunked: true, status: http.StatusUnsupportedMediaType,
+		},
+		{
 			name: "import past 1 MiB gets the larger limit", path: "/v1/bookmarks/import", contentType: "application/json",
 			body: `{"source":"manual","bookmarks":[{"url":"https://example.com/e","title":"` +
 				strings.Repeat("t", 2*maxJSONBody) + `"}]}`,
@@ -325,7 +340,8 @@ func TestServer_JSONBodies(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := s.do(t, request{method: http.MethodPost, path: tc.path, contentType: tc.contentType, body: tc.body})
+			resp := s.do(t, request{method: http.MethodPost, path: tc.path, contentType: tc.contentType,
+				body: tc.body, chunked: tc.chunked})
 			if tc.status >= http.StatusBadRequest {
 				assertProblem(t, resp, tc.status)
 				return
@@ -333,7 +349,7 @@ func TestServer_JSONBodies(t *testing.T) {
 			assert.Equal(t, tc.status, resp.status, resp.body)
 		})
 	}
-	assert.Equal(t, 2, s.count(t, "bookmarks"), "only the accepted bodies created bookmarks")
+	assert.Equal(t, 3, s.count(t, "bookmarks"), "only the accepted bodies created bookmarks")
 }
 
 // Body-less POSTs carry no Content-Type; they must keep working.
@@ -356,6 +372,26 @@ func TestServer_BodylessPostsNeedNoContentType(t *testing.T) {
 			resp := s.do(t, request{method: http.MethodPost, path: tc.path})
 			assert.Equal(t, tc.status, resp.status, resp.body)
 		})
+	}
+}
+
+// TestServer_ServeReturnsListenerFailure: a listener that fails ends Serve
+// with its error; nothing waits for a cancellation that may never come.
+func TestServer_ServeReturnsListenerFailure(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	srv, err := NewServer(ln, Deps{Log: slog.New(slog.DiscardHandler)})
+	require.NoError(t, err)
+	require.NoError(t, ln.Close())
+
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(context.Background()) }()
+	select {
+	case err := <-served:
+		require.ErrorIs(t, err, net.ErrClosed)
+		assert.Contains(t, err.Error(), "serve api")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve kept running on a closed listener")
 	}
 }
 
