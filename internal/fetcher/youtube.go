@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -21,13 +22,18 @@ type YouTubeOptions struct {
 	Bin      string
 	Timeout  time.Duration
 	SubLangs string
-	Log      *slog.Logger
+	// MaxConcurrent bounds how many yt-dlp processes run at once. Default
+	// 2: each one is slow and talks to YouTube, whose anti-bot measures
+	// punish bursts.
+	MaxConcurrent int
+	Log           *slog.Logger
 }
 
 type YouTube struct {
 	bin      string
 	timeout  time.Duration
 	subLangs string
+	slots    chan struct{} // one per running yt-dlp process
 	log      *slog.Logger
 }
 
@@ -38,6 +44,9 @@ func NewYouTube(opts YouTubeOptions) *YouTube {
 	if opts.SubLangs == "" {
 		opts.SubLangs = "en.*,en"
 	}
+	if opts.MaxConcurrent <= 0 {
+		opts.MaxConcurrent = 2
+	}
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
@@ -45,6 +54,7 @@ func NewYouTube(opts YouTubeOptions) *YouTube {
 		bin:      opts.Bin,
 		timeout:  opts.Timeout,
 		subLangs: opts.SubLangs,
+		slots:    make(chan struct{}, opts.MaxConcurrent),
 		log:      opts.Log,
 	}
 }
@@ -63,14 +73,20 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 
 	canonicalURL := "https://www.youtube.com/watch?v=" + videoID
 
+	// Queue for a process slot before the per-run timeout starts, so time
+	// spent waiting doesn't count against it.
+	select {
+	case y.slots <- struct{}{}:
+		defer func() { <-y.slots }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("youtube: wait for a yt-dlp slot: %w", ctx.Err())
+	}
+
 	tmpDir, err := os.MkdirTemp("", "curio-yt-*")
 	if err != nil {
 		return nil, fmt.Errorf("youtube: create temp dir: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	ctx, cancel := context.WithTimeout(ctx, y.timeout)
-	defer cancel()
 
 	meta, err := y.runYTDLP(ctx, canonicalURL, tmpDir)
 	if err != nil {
@@ -136,19 +152,14 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlp
 		videoURL,
 	}
 
-	cmd := exec.CommandContext(ctx, y.bin, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		msg := extractYTDLPError(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		if isYTDLPPermanent(msg) {
+	stderr, err := runCapped(ctx, y.timeout, nil, y.bin, args...)
+	if err != nil {
+		msg := extractYTDLPError(stderr)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && isYTDLPPermanent(msg) {
 			return nil, &PermanentError{Err: fmt.Errorf("youtube: %s", msg)}
 		}
-		return nil, fmt.Errorf("youtube: yt-dlp: %s", msg)
+		return nil, toolError("youtube", err, msg)
 	}
 
 	infoFiles, _ := filepath.Glob(filepath.Join(tmpDir, "*.info.json"))
@@ -182,15 +193,15 @@ var permanentPatterns = []string{
 // not found", impersonation warnings). Falls back to full stderr
 // if no ERROR lines are found.
 func extractYTDLPError(stderr string) string {
-	var errors []string
+	var errLines []string
 	for _, line := range strings.Split(stderr, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "ERROR:") {
-			errors = append(errors, trimmed)
+			errLines = append(errLines, trimmed)
 		}
 	}
-	if len(errors) > 0 {
-		return strings.Join(errors, "; ")
+	if len(errLines) > 0 {
+		return strings.Join(errLines, "; ")
 	}
 	return strings.TrimSpace(stderr)
 }

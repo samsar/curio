@@ -1211,7 +1211,9 @@ is too short for GitHub's 60-second rate limit windows.
 Only the primary limit (`X-RateLimit-Remaining: 0`) was treated as a rate
 limit, so the secondary-limit 403s this entry was written about failed
 permanently, and one call's back-off didn't pause the other workers. See
-"GitHub: secondary rate limits and a shared cooldown" below.
+"GitHub: secondary rate limits and a shared cooldown" below. The YouTube
+token bucket limits how fast yt-dlp processes start, not how many run;
+see "Subprocess fetchers: kill the process group, cap the output".
 
 ---
 
@@ -2011,7 +2013,8 @@ can.
   never goes to Jina and is never host-cached.
 - For the Native fetcher the cap is one decorator around the transport
   (`limitBodies`), so it covers both backends and both the origin and
-  Jina requests. GitHub reads through the same limiter.
+  Jina requests. GitHub reads through the same limiter, and Web2MD's
+  stdout has the same cap.
 - A PDF over the cap skips local extraction and goes to Jina, as before,
   but now without reading past the cap.
 - `text/event-stream` is refused on its Content-Type: it never ends.
@@ -2196,4 +2199,36 @@ bare origin (`https://example.com` → `https://example.com/`), valueless
 parameters, queries with `;` or undecodable pairs, and `ref=`. A bookmark
 of one of those shapes that is imported again after the upgrade creates a
 second document under the new key. Every other key is unchanged.
+
+---
+
+## Subprocess fetchers: kill the process group, cap the output
+
+**Decision:**
+
+- Web2MD and YouTube run their tool through `runCapped`
+  (`internal/fetcher/exec_unix.go`). The tool gets its own process group,
+  and when the timeout or the job's context ends the whole group gets
+  SIGKILL. `WaitDelay` (2 s) bounds how long a descendant that left the
+  group can keep the output pipes open.
+- A run cut short fails with an error wrapping `ctx.Err()` that names the
+  timeout, so a timeout stays retryable and a shutdown lets the worker
+  requeue the job.
+- Web2MD's stdout is capped at `maxResponseBytes`. Past the cap the pipe
+  write fails, which stops the tool, and the fetch fails permanently with
+  `ErrTooLarge`. Stderr keeps its first 64 KiB for error messages.
+- At most `YouTubeOptions.MaxConcurrent` (default 2) yt-dlp processes run
+  at once. A fetch queues for a slot, honoring its context, before its
+  timeout starts. The daemon's `RateLimited` wrapper still limits how fast
+  processes start; it never limited how many run.
+- Tests run the fakes by re-executing the test binary (`TestMain` switches
+  on `CURIO_FAKE_TOOL`) instead of writing shell scripts at test time.
+
+**Why:** `exec.CommandContext` kills only the direct child. A helper it
+spawned (yt-dlp and web2md's Node process both can) inherited the output
+pipes, and `Wait` blocked until that helper exited: a probe with a 1 s
+timeout returned after 8 s and left the helper running. That also
+stretched the daemon's bounded shutdown. Output went into unbounded
+buffers, and a timeout surfaced as `signal: killed`. The token bucket in
+front of YouTube let up to 16 yt-dlp processes run at once.
 

@@ -150,7 +150,7 @@ _None — Firefox landed (see table above). **M1 is complete.**_
 | GitHub fetcher | `internal/fetcher/github.go` | REST API for repo metadata + README; file URLs fetch specific files |
 | GitHub URL parsing | `internal/urlutil/normalize.go` | `ParseGitHubURL` extracts owner/repo/type/ref/path |
 | GitHub config | `internal/config/config.go` | `token` (optional, also `CURIO_GITHUB_TOKEN` env), `timeout_seconds` |
-| Per-fetcher rate limiting | `internal/fetcher/fetcher.go` | `RateLimited` wrapper using `golang.org/x/time/rate` token bucket |
+| Per-fetcher rate limiting | `internal/fetcher/fetcher.go`, `youtube.go` | `RateLimited` wrapper using `golang.org/x/time/rate` token bucket (start rate); YouTube also caps concurrent yt-dlp processes at 2 |
 | GitHub internal rate limiting | `internal/fetcher/github.go` | 1.5 API calls/s at `apiGet` level; primary and secondary rate limits detected; shared cooldown waited out inline up to 2 min, longer ones fail fast and retry via the queue |
 | yt-dlp stderr fix | `internal/fetcher/youtube.go` | Extract ERROR lines only; ignore WARNING lines on failure |
 

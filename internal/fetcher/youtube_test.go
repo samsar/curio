@@ -1,12 +1,19 @@
 package fetcher
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/samsar/curio/internal/urlutil"
 	"github.com/stretchr/testify/assert"
@@ -161,46 +168,7 @@ func TestFormatDuration(t *testing.T) {
 }
 
 func TestYouTubeFetch_FakeBin(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Write a fake yt-dlp script that outputs JSON and a VTT file.
-	fakeBin := filepath.Join(tmpDir, "fake-yt-dlp")
-	script := `#!/bin/sh
-# Parse the output dir from the -o flag
-OUTDIR=""
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -o) OUTDIR="$2"; shift 2;;
-        *) shift;;
-    esac
-done
-
-# Derive the base path (strip the template suffix)
-BASEDIR=$(dirname "$OUTDIR")
-
-# Write metadata JSON to info.json file (--write-info-json behavior)
-cat > "${BASEDIR}/test_id.info.json" <<'ENDJSON'
-{"title":"Test Video","channel":"Test Channel","channel_id":"UC123","upload_date":"20240315","duration":120.0,"description":"A test video description.","tags":["test","video"],"categories":["Education"],"view_count":1000,"like_count":50,"language":"en"}
-ENDJSON
-
-# Write a VTT file
-cat > "${BASEDIR}/test_id.en.vtt" <<'ENDVTT'
-WEBVTT
-Kind: captions
-Language: en
-
-00:00:01.000 --> 00:00:04.000
-Hello world this is a test transcript.
-
-00:00:04.500 --> 00:00:08.000
-It has multiple lines of content.
-ENDVTT
-`
-	require.NoError(t, os.WriteFile(fakeBin, []byte(script), 0o755))
-
-	yt := NewYouTube(YouTubeOptions{
-		Bin: fakeBin,
-	})
+	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
 
 	result, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
 	require.NoError(t, err)
@@ -217,20 +185,108 @@ ENDVTT
 }
 
 func TestYouTubeFetch_PermanentError(t *testing.T) {
-	tmpDir := t.TempDir()
-	fakeBin := filepath.Join(tmpDir, "fake-yt-dlp")
-	script := `#!/bin/sh
-echo "ERROR: Video unavailable" >&2
-exit 1
-`
-	require.NoError(t, os.WriteFile(fakeBin, []byte(script), 0o755))
-
-	yt := NewYouTube(YouTubeOptions{Bin: fakeBin})
+	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp-unavailable"), Timeout: 30 * time.Second})
 	_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=gone123")
 	require.Error(t, err)
 
 	var pe *PermanentError
 	assert.True(t, errors.As(err, &pe), "should be a PermanentError")
+	assert.Contains(t, err.Error(), "ERROR: Video unavailable")
+	assert.NotContains(t, err.Error(), "WARNING")
+}
+
+// TestYouTubeFetch_MaxConcurrent: no more than MaxConcurrent yt-dlp
+// processes overlap, and a fetch waiting for a slot honors its context.
+func TestYouTubeFetch_MaxConcurrent(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "runs.log")
+	t.Setenv(fakeLogEnv, logPath)
+	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second, MaxConcurrent: 2})
+
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Go(func() {
+			_, err := yt.Fetch(context.Background(), "https://www.youtube.com/watch?v=test_id")
+			assert.NoError(t, err)
+		})
+	}
+	require.Eventually(t, func() bool { return len(yt.slots) == cap(yt.slots) }, 10*time.Second, time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := yt.Fetch(ctx, "https://www.youtube.com/watch?v=test_id")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	wg.Wait()
+
+	assert.LessOrEqual(t, maxOverlap(t, logPath), 2)
+}
+
+// maxOverlap reads the fake's start/end log and returns the most runs
+// that were in progress at once.
+func maxOverlap(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	type event struct {
+		at    int64
+		delta int
+	}
+	var events []event
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		kind, at, ok := strings.Cut(line, " ")
+		require.True(t, ok, line)
+		nanos, err := strconv.ParseInt(at, 10, 64)
+		require.NoError(t, err)
+		delta := 1
+		if kind == "end" {
+			delta = -1
+		}
+		events = append(events, event{nanos, delta})
+	}
+	require.Len(t, events, 12)
+	slices.SortFunc(events, func(a, b event) int { return cmp.Compare(a.at, b.at) })
+	running, peak := 0, 0
+	for _, e := range events {
+		running += e.delta
+		peak = max(peak, running)
+	}
+	return peak
+}
+
+// TestSubprocess_TimeoutKillsProcessGroup: on timeout the whole process
+// group dies, helpers holding the output pipes included, and the fetch
+// returns promptly with a deadline error instead of waiting for them.
+func TestSubprocess_TimeoutKillsProcessGroup(t *testing.T) {
+	fetchers := map[string]func(bin string) Fetcher{
+		"web2md": func(bin string) Fetcher {
+			f, err := NewWeb2MD(Web2MDOptions{Bin: bin, Timeout: 200 * time.Millisecond})
+			require.NoError(t, err)
+			return f
+		},
+		"youtube": func(bin string) Fetcher {
+			return NewYouTube(YouTubeOptions{Bin: bin, Timeout: 200 * time.Millisecond})
+		},
+	}
+	for name, build := range fetchers {
+		t.Run(name, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "helper.pid")
+			t.Setenv(fakePIDFileEnv, pidFile)
+			f := build(fakeTool(t, "hang-with-grandchild"))
+
+			start := time.Now()
+			_, err := f.Fetch(context.Background(), "https://www.youtube.com/watch?v=test_id")
+			assert.Less(t, time.Since(start), 3*time.Second)
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			var pe *PermanentError
+			assert.False(t, errors.As(err, &pe), "a timeout must stay retryable")
+
+			raw, err := os.ReadFile(pidFile)
+			require.NoError(t, err, "the fake never started its helper")
+			pid, err := strconv.Atoi(string(raw))
+			require.NoError(t, err)
+			assert.Eventually(t, func() bool {
+				return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+			}, 2*time.Second, 10*time.Millisecond, "helper %d outlived the timeout", pid)
+		})
+	}
 }
 
 func TestYouTubeFetch_PlaylistRejected(t *testing.T) {

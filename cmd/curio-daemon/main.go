@@ -346,7 +346,7 @@ func newDispatcher(cfg config.Config, home *curiohome.Home) (fetcher.Dispatcher,
 				SubLangs: cfg.Fetcher.YouTube.SubLangs,
 				Log:      slog.Default(),
 			}),
-			2, 3, // 2 req/s, burst of 3 — yt-dlp is slow per-call, this mostly limits concurrent starts
+			2, 3, // start rate; concurrent yt-dlp processes are capped inside the fetcher (MaxConcurrent)
 		)
 		rules = append(rules, fetcher.Rule{Hosts: fetcher.YouTubeHosts, Fetcher: ytFetcher})
 		// Registry holds the rate-limited wrapper so token-bucket state

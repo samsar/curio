@@ -2,8 +2,6 @@ package fetcher
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -75,30 +73,10 @@ func TestParseWeb2MDOutput_EmptyInput(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestWeb2MD_FetchAgainstFakeBin uses a tiny shell script that mimics the
-// Node tool's output. This proves the exec.Cmd plumbing without depending
-// on Node + the real web2md.js being installed.
+// TestWeb2MD_FetchAgainstFakeBin runs a fake that mimics the Node tool's
+// output, proving the exec plumbing without Node or web2md.js installed.
 func TestWeb2MD_FetchAgainstFakeBin(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "fake-web2md")
-	script := `#!/usr/bin/env bash
-set -e
-URL="$1"
-cat <<EOF
----
-title: "Fake Title"
-source: "$URL"
-via: "test"
----
-
-# Fake Title
-
-This is the body.
-EOF
-`
-	require.NoError(t, os.WriteFile(bin, []byte(script), 0o755))
-
-	f, err := NewWeb2MD(Web2MDOptions{Bin: bin, Timeout: 5 * time.Second})
+	f, err := NewWeb2MD(Web2MDOptions{Bin: fakeTool(t, "web2md"), Timeout: 30 * time.Second})
 	require.NoError(t, err)
 	assert.Equal(t, "web2md", f.Name())
 
@@ -111,18 +89,35 @@ EOF
 }
 
 func TestWeb2MD_FetchPropagatesStderrOnFailure(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "fail-web2md")
-	script := `#!/usr/bin/env bash
-echo "[fake] login wall detected" >&2
-exit 1
-`
-	require.NoError(t, os.WriteFile(bin, []byte(script), 0o755))
-
-	f, _ := NewWeb2MD(Web2MDOptions{Bin: bin, Timeout: 5 * time.Second})
-	_, err := f.Fetch(context.Background(), "https://example.com")
+	f, err := NewWeb2MD(Web2MDOptions{Bin: fakeTool(t, "web2md-fail"), Timeout: 30 * time.Second})
+	require.NoError(t, err)
+	_, err = f.Fetch(context.Background(), "https://example.com")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "login wall detected")
+}
+
+// TestWeb2MD_OutputOverLimit: stdout past the cap fails permanently
+// instead of growing without bound.
+func TestWeb2MD_OutputOverLimit(t *testing.T) {
+	f, err := NewWeb2MD(Web2MDOptions{Bin: fakeTool(t, "flood-stdout"), Timeout: 30 * time.Second})
+	require.NoError(t, err)
+	f.maxOutput = 64 << 10
+
+	_, err = f.Fetch(context.Background(), "https://example.com")
+	var pe *PermanentError
+	require.ErrorAs(t, err, &pe)
+	assert.ErrorIs(t, err, ErrTooLarge)
+}
+
+// TestWeb2MD_StderrCapped: a tool that floods stderr yields an error
+// message bounded by the stderr cap, not megabytes of text.
+func TestWeb2MD_StderrCapped(t *testing.T) {
+	f, err := NewWeb2MD(Web2MDOptions{Bin: fakeTool(t, "flood-stderr"), Timeout: 30 * time.Second})
+	require.NoError(t, err)
+
+	_, err = f.Fetch(context.Background(), "https://example.com")
+	require.Error(t, err)
+	assert.Less(t, len(err.Error()), maxStderrBytes+256)
 }
 
 func TestWeb2MD_FetchEmptyURL(t *testing.T) {

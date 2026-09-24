@@ -84,7 +84,9 @@ Jina calls from all fetch workers share one limiter (20/min, or 200/min with `fe
 
 Status classification is shared by all HTTP fetchers (`internal/fetcher/errors.go`): every HTTP failure carries a `*HTTPStatusError` (status, the URL that answered, `Retry-After`). 408/421/425/429 and 5xx except 501/505 are retried; every other status is a `PermanentError`. Native's policy (403/503 → `ErrAntiBot`, 404/410 → `ErrDeadLink`) runs before that rule. Error text quotes at most 512 bytes of a response body.
 
-Every response body is capped at 32 MiB after decompression (`maxResponseBytes`; Native through the `limitBodies` transport decorator, GitHub via `readLimited`). Overflow is a permanent `ErrTooLarge`: never Jina, never host-cached. A PDF over the cap still goes to Jina without being read further.
+Every response body is capped at 32 MiB after decompression (`maxResponseBytes`; Native through the `limitBodies` transport decorator, GitHub via `readLimited`, Web2MD on its stdout). Overflow is a permanent `ErrTooLarge`: never Jina, never host-cached. A PDF over the cap still goes to Jina without being read further.
+
+Subprocess fetchers (Web2MD, YouTube) run through `runCapped`: own process group, killed as a group on timeout or cancel, stderr capped at 64 KiB. At most 2 yt-dlp processes run at once (`YouTubeOptions.MaxConcurrent`). Their tests re-exec the test binary as the fake tool (`TestMain` + `CURIO_FAKE_TOOL`); don't write shell scripts.
 
 `ErrDeadLink` (404/410, soft-404 titles, redirect-to-homepage) is always wrapped in a `PermanentError`, never goes to Jina, and is deliberately NOT host-cached (a dead path says nothing about the host). The soft-404 check runs BEFORE the login-wall heuristics in `tryReadability` — order matters, thin tombstone pages would otherwise classify as login walls and leak to Jina.
 

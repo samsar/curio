@@ -1,11 +1,9 @@
 package fetcher
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -23,9 +21,10 @@ import (
 // configurable so the daemon can use either the local checkout or a
 // globally-installed `web2md` shim.
 type Web2MD struct {
-	bin     string        // path to web2md executable (or "web2md" if in PATH)
-	nodeBin string        // optional explicit node binary; empty = "node"
-	timeout time.Duration // per-fetch wall clock
+	bin       string        // path to web2md executable (or "web2md" if in PATH)
+	nodeBin   string        // optional explicit node binary; empty = "node"
+	timeout   time.Duration // per-fetch wall clock
+	maxOutput int64         // stdout cap, maxResponseBytes outside tests
 }
 
 // Web2MDOptions configures the fetcher.
@@ -48,9 +47,10 @@ func NewWeb2MD(opts Web2MDOptions) (*Web2MD, error) {
 		timeout = 30 * time.Second
 	}
 	return &Web2MD{
-		bin:     opts.Bin,
-		nodeBin: opts.NodeBin,
-		timeout: timeout,
+		bin:       opts.Bin,
+		nodeBin:   opts.NodeBin,
+		timeout:   timeout,
+		maxOutput: maxResponseBytes,
 	}, nil
 }
 
@@ -61,38 +61,29 @@ func (w *Web2MD) Fetch(ctx context.Context, target string) (*Result, error) {
 		return nil, errors.New("web2md: url is empty")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, w.timeout)
-	defer cancel()
-
-	cmd := w.buildCmd(ctx, target)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// Surface stderr — the Node tool writes useful diagnostics there.
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return nil, fmt.Errorf("web2md exited: %s", msg)
+	stdout := &cappedBuffer{max: w.maxOutput, strict: true}
+	name, args := w.command(target)
+	stderr, err := runCapped(ctx, w.timeout, stdout, name, args...)
+	if stdout.overflowed {
+		return nil, &PermanentError{Err: fmt.Errorf("web2md: output: %w", stdout.tooLarge())}
 	}
-
+	if err != nil {
+		return nil, toolError("web2md", err, stderr)
+	}
 	return parseWeb2MDOutput(stdout.Bytes(), target)
 }
 
-// buildCmd assembles the exec.Cmd. Direct executables run as-is; .js paths
-// run under node.
-func (w *Web2MD) buildCmd(ctx context.Context, target string) *exec.Cmd {
+// command returns what to run for target. Direct executables run as-is;
+// .js paths run under node.
+func (w *Web2MD) command(target string) (name string, args []string) {
 	if strings.HasSuffix(w.bin, ".js") {
 		node := w.nodeBin
 		if node == "" {
 			node = "node"
 		}
-		return exec.CommandContext(ctx, node, w.bin, target, "--stdout")
+		return node, []string{w.bin, target, "--stdout"}
 	}
-	return exec.CommandContext(ctx, w.bin, target, "--stdout")
+	return w.bin, []string{target, "--stdout"}
 }
 
 // web2mdFrontmatter mirrors what the Node tool writes. Field names match the
