@@ -209,16 +209,11 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 	if err != nil {
 		return nil, err
 	}
-	// Fetch the embedding model in the background if it isn't pulled yet, so a
-	// fresh install self-heals instead of failing every index job. Startup
-	// isn't blocked; index jobs retry with backoff until it's ready.
+	// Pull the embedding model in the background, retrying until Ollama
+	// serves it, so a fresh install self-heals instead of failing every index
+	// job. Startup isn't blocked; index jobs retry with backoff meanwhile.
 	if cfg.Embedding.AutoPull {
-		go func() {
-			if perr := emb.EnsureModel(ctx, slog.Default()); perr != nil {
-				slog.Warn("embedding model not ready; index jobs will retry until it is",
-					"model", cfg.Embedding.Model, "err", perr)
-			}
-		}()
+		go emb.Client().KeepPulled(ctx, slog.With("used_for", "embeddings"))
 	}
 
 	dispatcher, err := newDispatcher(cfg, home)
@@ -393,15 +388,9 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 			return nil, err
 		}
 		llmLabeler = insight.NewLLMLabeler(gen)
+		// Cluster labels use the term fallback until the model is ready.
 		if cfg.Generation.AutoPull {
-			go func() {
-				// A pull cut short by daemon shutdown is not a missing model.
-				if err := gen.EnsureModel(ctx, slog.Default()); err != nil && ctx.Err() == nil {
-					slog.Warn("generation model not ready and the pull is not retried; cluster labels use "+
-						"the term fallback until Ollama serves it (run `ollama pull`, or restart the daemon)",
-						"model", cfg.Generation.Model, "err", err)
-				}
-			}()
+			go gen.Client().KeepPulled(ctx, slog.With("used_for", "cluster labels"))
 		}
 	}
 	clusterer := insight.NewKNNGraphClusterer(insight.KNNGraphOptions{

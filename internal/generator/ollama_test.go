@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/samsar/curio/internal/ollama"
 )
 
 // fakeOllama serves /api/generate with a scripted handler and counts calls.
@@ -88,8 +89,8 @@ func TestGenerate_ClientErrorsAreNotRetried(t *testing.T) {
 			_, err := newGen(t, OllamaOptions{BaseURL: f.url}).Generate(context.Background(), "p", Options{})
 			require.Error(t, err)
 			assert.Equal(t, int32(1), f.calls.Load(), "exactly one attempt")
-			assert.Equal(t, tc.notLoaded, errors.Is(err, ErrModelNotLoaded))
-			var se *StatusError
+			assert.Equal(t, tc.notLoaded, errors.Is(err, ollama.ErrModelNotLoaded))
+			var se *ollama.StatusError
 			require.ErrorAs(t, err, &se)
 			assert.Equal(t, tc.code, se.Code)
 			assert.Contains(t, err.Error(), tc.wantInError)
@@ -114,7 +115,7 @@ func TestGenerate_ServerErrorsAreRetried(t *testing.T) {
 	t.Run("gives up after the retries", func(t *testing.T) {
 		f := newFakeOllama(t, status(http.StatusInternalServerError, "boom"))
 		_, err := newGen(t, OllamaOptions{BaseURL: f.url}).Generate(context.Background(), "p", Options{})
-		var se *StatusError
+		var se *ollama.StatusError
 		require.ErrorAs(t, err, &se)
 		assert.Equal(t, http.StatusInternalServerError, se.Code)
 		assert.Equal(t, int32(3), f.calls.Load(), "the first attempt plus the default 2 retries")
@@ -127,29 +128,21 @@ func TestGenerate_ServerErrorsAreRetried(t *testing.T) {
 	})
 }
 
-// countingTransport counts round trips, for servers that never see them.
-type countingTransport struct {
-	n    atomic.Int32
-	next http.RoundTripper
-}
-
-func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	c.n.Add(1)
-	return c.next.RoundTrip(r)
-}
-
 func TestGenerate_ConnectionRefusedIsRetried(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	srv.Close() // nothing listens on the port any more
 
 	g := newGen(t, OllamaOptions{BaseURL: srv.URL})
-	ct := &countingTransport{next: http.DefaultTransport}
-	g.client.Transport = ct
+	var retries int
+	g.backoff = func(int) time.Duration {
+		retries++
+		return 0
+	}
 
 	_, err := g.Generate(context.Background(), "p", Options{})
-	require.ErrorIs(t, err, ErrOllamaUnreachable)
+	require.ErrorIs(t, err, ollama.ErrUnreachable)
 	require.ErrorIs(t, err, syscall.ECONNREFUSED, "the cause stays in the chain")
-	assert.Equal(t, int32(3), ct.n.Load())
+	assert.Equal(t, 2, retries, "the first attempt plus the default 2 retries")
 }
 
 func TestGenerate_AttemptTimeoutIsNotRetried(t *testing.T) {
@@ -196,120 +189,22 @@ func TestGenerate_CallerCancelStopsPromptly(t *testing.T) {
 	assert.Equal(t, int32(1), f.calls.Load())
 }
 
-func TestGenerate_BoundedBodies(t *testing.T) {
-	t.Run("oversized reply is rejected, not retried", func(t *testing.T) {
-		f := newFakeOllama(t, reply(strings.Repeat("a", maxResponseBody)))
-		_, err := newGen(t, OllamaOptions{BaseURL: f.url}).Generate(context.Background(), "p", Options{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "exceeds")
-		assert.Equal(t, int32(1), f.calls.Load())
-	})
-	t.Run("error body is quoted up to the cap", func(t *testing.T) {
-		f := newFakeOllama(t, status(http.StatusBadRequest, strings.Repeat("e", 10*maxErrorBody)))
-		_, err := newGen(t, OllamaOptions{BaseURL: f.url}).Generate(context.Background(), "p", Options{})
-		var se *StatusError
-		require.ErrorAs(t, err, &se)
-		assert.Len(t, se.Body, maxErrorBody)
-	})
+func TestGenerate_OversizedReplyIsRejectedNotRetried(t *testing.T) {
+	f := newFakeOllama(t, reply(strings.Repeat("a", maxReplyBytes)))
+	_, err := newGen(t, OllamaOptions{BaseURL: f.url}).Generate(context.Background(), "p", Options{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+	assert.Equal(t, int32(1), f.calls.Load())
 }
 
-func TestPing_UnreachableKeepsCause(t *testing.T) {
-	srv := httptest.NewServer(http.NotFoundHandler())
-	srv.Close()
-	err := newGen(t, OllamaOptions{BaseURL: srv.URL}).Ping(context.Background())
-	require.ErrorIs(t, err, ErrOllamaUnreachable)
-	require.ErrorIs(t, err, syscall.ECONNREFUSED)
-}
+func TestNewOllama_Validation(t *testing.T) {
+	_, err := NewOllama(OllamaOptions{})
+	require.Error(t, err, "model required")
+	_, err = NewOllama(OllamaOptions{Model: "m", BaseURL: "ftp://localhost"})
+	require.Error(t, err, "http(s) only")
 
-// fakeTags serves /api/tags with the given body and status, and counts
-// /api/pull requests, answering them with pullStatus.
-type fakeTags struct {
-	pulls atomic.Int32
-	url   string
+	g, err := NewOllama(OllamaOptions{Model: "m"})
+	require.NoError(t, err)
+	assert.Equal(t, "m", g.Model())
+	assert.Equal(t, ollama.DefaultBaseURL, g.Client().BaseURL())
 }
-
-func newFakeTags(t *testing.T, status int, body string, pullStatus int) *fakeTags {
-	t.Helper()
-	f := &fakeTags{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/tags":
-			w.WriteHeader(status)
-			fmt.Fprint(w, body)
-		case "/api/pull":
-			f.pulls.Add(1)
-			w.WriteHeader(pullStatus)
-			if pullStatus == http.StatusOK {
-				fmt.Fprint(w, `{"status":"pulling manifest"}`+"\n"+`{"status":"success"}`+"\n")
-			} else {
-				fmt.Fprint(w, `{"error":"no space left on device"}`)
-			}
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	f.url = srv.URL
-	return f
-}
-
-func TestPing(t *testing.T) {
-	cases := []struct {
-		name    string
-		status  int
-		body    string
-		wantErr error // nil: the model is there
-	}{
-		{"exact name", 200, `{"models":[{"name":"llama3.2"}]}`, nil},
-		{"tagged name", 200, `{"models":[{"name":"llama3.2:latest"}]}`, nil},
-		{"tagged model field", 200, `{"models":[{"name":"alias","model":"llama3.2:3b"}]}`, nil},
-		{"other models only", 200, `{"models":[{"name":"llama3.2-vision"},{"name":"qwen2"}]}`, ErrModelNotLoaded},
-		{"no models", 200, `{"models":[]}`, ErrModelNotLoaded},
-		{"server error", 500, `oops`, ErrOllamaUnreachable},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newFakeTags(t, tc.status, tc.body, http.StatusOK)
-			err := newGen(t, OllamaOptions{BaseURL: f.url, Model: "llama3.2"}).Ping(context.Background())
-			if tc.wantErr == nil {
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorIs(t, err, tc.wantErr)
-		})
-	}
-}
-
-func TestPing_MalformedReply(t *testing.T) {
-	f := newFakeTags(t, 200, `{"models":`, http.StatusOK)
-	err := newGen(t, OllamaOptions{BaseURL: f.url}).Ping(context.Background())
-	require.ErrorContains(t, err, "decode response")
-	assert.NotErrorIs(t, err, ErrModelNotLoaded, "an unreadable reply says nothing about the model")
-}
-
-func TestEnsureModel(t *testing.T) {
-	t.Run("present: no pull", func(t *testing.T) {
-		f := newFakeTags(t, 200, `{"models":[{"name":"llama3.2:latest"}]}`, http.StatusOK)
-		require.NoError(t, newGen(t, OllamaOptions{BaseURL: f.url}).EnsureModel(context.Background(), quietLog()))
-		assert.Zero(t, f.pulls.Load())
-	})
-	t.Run("missing: pulls it", func(t *testing.T) {
-		f := newFakeTags(t, 200, `{"models":[]}`, http.StatusOK)
-		require.NoError(t, newGen(t, OllamaOptions{BaseURL: f.url}).EnsureModel(context.Background(), quietLog()))
-		assert.Equal(t, int32(1), f.pulls.Load())
-	})
-	t.Run("pull fails: the error is returned", func(t *testing.T) {
-		f := newFakeTags(t, 200, `{"models":[]}`, http.StatusInternalServerError)
-		err := newGen(t, OllamaOptions{BaseURL: f.url}).EnsureModel(context.Background(), quietLog())
-		require.ErrorContains(t, err, "no space left on device")
-		assert.Equal(t, int32(1), f.pulls.Load())
-	})
-	t.Run("unreachable: nothing to pull to", func(t *testing.T) {
-		f := newFakeTags(t, 503, `starting`, http.StatusOK)
-		err := newGen(t, OllamaOptions{BaseURL: f.url}).EnsureModel(context.Background(), quietLog())
-		require.ErrorIs(t, err, ErrOllamaUnreachable)
-		assert.Zero(t, f.pulls.Load())
-	})
-}
-
-func quietLog() *slog.Logger { return slog.New(slog.DiscardHandler) }

@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -51,9 +51,9 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		if err := pinger.Ping(pctx); err != nil {
 			reachable = false
 			switch {
-			case errors.Is(err, embedder.ErrModelNotLoaded):
+			case errors.Is(err, ollama.ErrModelNotLoaded):
 				detail = "model not pulled (try `ollama pull " + meta.EmbeddingModel + "`)"
-			case errors.Is(err, embedder.ErrOllamaUnreachable):
+			case errors.Is(err, ollama.ErrUnreachable):
 				detail = "ollama unreachable (start it with `ollama serve` or `brew services start ollama`)"
 			default:
 				detail = err.Error()

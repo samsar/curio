@@ -3564,3 +3564,53 @@ missed members, `net.Listen` and `db.Query` without a context, a
 keys, hand-rolled min/max, C-style loops, `os.IsNotExist`, int32 atomics,
 `fmt.Errorf` with a constant message). errorlint's `errorf` check is on
 again: the last two `%v`-wrapped causes now use `%w`.
+
+---
+
+## Ollama: one client, one sentinel pair, a pull that keeps trying
+
+**Decision:** `internal/ollama.Client` is the one Ollama client.
+`embedder.Ollama` and `generator.Ollama` each hold one and keep only their
+endpoint's request shape and checks: embed batching and the dimension
+check, and generate with its retry policy (unchanged, see "LLM generation
+client"). The client owns:
+
+- base-URL validation (http or https, with a host) and trailing-slash
+  trimming;
+- `Ping`: `GET /api/tags`, matching the model by name or name plus any tag;
+- `PostJSON`, which bounds the reply it decodes: 1 MiB for tags and
+  generate, and for `/api/embed` a limit sized from the batch (32 bytes of
+  JSON per vector component plus 64 KiB);
+- `EnsureModel`, `Pull` and `KeepPulled`.
+
+There is one sentinel pair, `ollama.ErrUnreachable` and
+`ollama.ErrModelNotLoaded`. A transport failure wraps `ErrUnreachable` and
+its cause with `%w`, so `errors.Is` sees `ECONNREFUSED` or
+`context.DeadlineExceeded` too. A missing model is `ErrModelNotLoaded`
+whether `/api/tags` lacks it or `/api/embed` or `/api/generate` answers
+404. `/v1/healthz` maps the pair to advice, whichever client failed.
+Error bodies are read with `io.ReadAll` over a 2 KiB `LimitReader`.
+
+`Pull` fails when the stream ends before Ollama's `success` line: progress
+lines followed by EOF are a dropped connection or a crashed server, not a
+pulled model.
+
+`KeepPulled` replaces the one-shot background `EnsureModel`. It retries
+with capped exponential backoff (5 s, doubling to 5 min) until the model is
+ready or the daemon shuts down, and the daemon runs it for the embedding
+model and, with LLM labels, the generation model. It logs the first failure
+at WARN, saying it will retry, later ones at DEBUG, success at INFO, and
+nothing once its context is cancelled.
+
+**Why:** The two clients were copies of each other (defaults, validation,
+Ping, EnsureModel), with two sentinel pairs that didn't match under
+`errors.Is`, and healthz recognized only the embedder's. The copies had
+drifted: the embedder formatted its transport cause with `%v`, decoded
+`/api/tags` and `/api/embed` without a bound, and quoted error bodies from a
+single `Read`, which returns a partial message and leaves the connection
+unusable; the pull did the same, and treated EOF before `success` as
+success. The auto-pull ran once: with Ollama down when the daemon started,
+which is common when the CLI auto-starts the daemon first, the embedding
+model was never pulled after Ollama came up, although the log said index
+jobs "will retry until it is", and the generation path said outright that
+the pull is not retried.

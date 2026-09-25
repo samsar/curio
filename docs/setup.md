@@ -25,13 +25,17 @@ ollama pull nomic-embed-text      # 274 MB; embedding model (optional — see be
 ollama list                       # verify
 ```
 
-You can skip the `ollama pull` step: as long as Ollama itself is running, the
-daemon **auto-pulls** the models it needs on startup — the embedding model
-(`nomic-embed-text`) and, when insight labeling is on, the generation model
-(`llama3.2`, ~2 GB). It fetches them in the background, so the first index /
-clustering run may lag until the download finishes. Disable with
-`embedding.auto_pull: false` / `generation.auto_pull: false` in `config.yaml`
-(e.g. on a metered connection), and pull manually instead.
+You can skip the `ollama pull` step: the daemon **auto-pulls** the models it
+needs — the embedding model (`nomic-embed-text`) and, when insight labeling
+is on, the generation model (`llama3.2`, ~2 GB). It pulls in the background
+and keeps retrying, 5 s after a failure and doubling up to every 5 minutes,
+until Ollama answers and the pull completes, so Ollama can start before or
+after the daemon. The first failure is logged at WARN in
+`~/.curio/logs/daemon.log`; later ones only at debug. Until the model is
+ready, index jobs retry with backoff and cluster labels fall back to term
+labels. Disable with `embedding.auto_pull: false` /
+`generation.auto_pull: false` in `config.yaml` (e.g. on a metered
+connection), and pull manually instead.
 
 Alternative: install via the macOS app from ollama.com — same result, runs
 as a launchd service, less terminal management. Either way the daemon

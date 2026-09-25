@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -66,6 +69,39 @@ func TestStats_CountFailure(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newTestServer(t, fault)
 			assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/stats"}), http.StatusInternalServerError)
+		})
+	}
+}
+
+// pingingEmbedder is an embedder whose Ping fails with err.
+type pingingEmbedder struct {
+	embedder.Embedder
+	err error
+}
+
+func (p pingingEmbedder) Ping(context.Context) error { return p.err }
+
+// TestHealth_OllamaDetail: healthz turns the shared Ollama sentinels into
+// advice, whichever client produced them, and quotes anything else.
+func TestHealth_OllamaDetail(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		wantDetail string
+	}{
+		{"model not pulled", fmt.Errorf("%w: nomic-embed-text", ollama.ErrModelNotLoaded), "model not pulled"},
+		{"unreachable", fmt.Errorf("%w: dial tcp: connection refused", ollama.ErrUnreachable), "ollama unreachable"},
+		{"anything else", errors.New("decode response: unexpected EOF"), "decode response: unexpected EOF"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t, func(d *Deps) { d.Embedder = pingingEmbedder{d.Embedder, tc.err} })
+			resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+			require.Equal(t, http.StatusOK, resp.status, resp.body)
+			var h Health
+			require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+			assert.False(t, h.OllamaReachable)
+			assert.Contains(t, h.OllamaDetail, tc.wantDetail)
 		})
 	}
 }
