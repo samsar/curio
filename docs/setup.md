@@ -31,10 +31,10 @@ is on, the generation model (`llama3.2`, ~2 GB). It pulls in the background
 and keeps retrying, 5 s after a failure and doubling up to every 5 minutes,
 until Ollama answers and the pull completes, so Ollama can start before or
 after the daemon. The first failure is logged at WARN in
-`~/.curio/logs/daemon.log`; later ones only at debug. Until the model is
-ready, index jobs retry with backoff and cluster labels fall back to term
-labels. Disable with `embedding.auto_pull: false` /
-`generation.auto_pull: false` in `config.yaml` (e.g. on a metered
+`~/.curio/logs/daemon.log`; retries, and the pulls they start, only at
+debug. Until the model is ready, index jobs retry with backoff and cluster
+labels fall back to term labels. Disable with `embedding.auto_pull: false`
+/ `generation.auto_pull: false` in `config.yaml` (e.g. on a metered
 connection), and pull manually instead.
 
 Alternative: install via the macOS app from ollama.com — same result, runs

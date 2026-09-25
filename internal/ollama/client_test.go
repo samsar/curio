@@ -343,9 +343,40 @@ func TestKeepPulled_WaitsForOllamaThenPulls(t *testing.T) {
 	assert.Equal(t, []int{1, 2}, retries)
 	assert.Equal(t, 1, fake.pullCount())
 	require.NoError(t, c.Ping(context.Background()))
-	assert.Len(t, rec.messages(slog.LevelWarn), 1, "only the first failure warns")
-	assert.Len(t, rec.messages(slog.LevelDebug), 1, "later failures are debug")
-	assert.Contains(t, rec.messages(slog.LevelInfo), "ollama model ready")
+	assert.Equal(t, []string{notReady}, rec.messages(slog.LevelWarn), "only the first failure warns")
+	assert.Equal(t, []string{notReady, "pulling ollama model"}, rec.messages(slog.LevelDebug),
+		"a retry's failure and pull are debug")
+	assert.Equal(t, []string{"ollama model ready"}, rec.messages(slog.LevelInfo))
+}
+
+const notReady = "ollama model not ready; retrying in the background"
+
+// TestKeepPulled_RetriedPullsAreQuiet: Ollama is up but every pull fails,
+// as it does when Ollama can't reach its registry. Only the first attempt
+// is announced at INFO and WARN, not one INFO line per retry.
+func TestKeepPulled_RetriedPullsAreQuiet(t *testing.T) {
+	fake := &fakeOllama{pullStatus: http.StatusInternalServerError}
+	c := newClient(t, serveFake(t, fake), "m")
+	c.pullBackoff = func(retry int) time.Duration {
+		if retry == 3 {
+			fake.mu.Lock()
+			fake.pullStatus = 0 // the registry is reachable again
+			fake.mu.Unlock()
+		}
+		return time.Millisecond
+	}
+	rec := &recorder{}
+
+	c.KeepPulled(context.Background(), slog.New(rec))
+
+	assert.Equal(t, 4, fake.pullCount())
+	assert.Equal(t, []string{"pulling ollama model", "ollama model ready"}, rec.messages(slog.LevelInfo))
+	assert.Equal(t, []string{notReady}, rec.messages(slog.LevelWarn))
+	assert.Equal(t, []string{
+		"pulling ollama model", notReady, // second attempt
+		"pulling ollama model", notReady, // third attempt
+		"pulling ollama model", // fourth attempt, which succeeds
+	}, rec.messages(slog.LevelDebug))
 }
 
 // TestKeepPulled_CancelDuringBackoff: shutdown during the wait between
@@ -354,11 +385,7 @@ func TestKeepPulled_CancelDuringBackoff(t *testing.T) {
 	c := newClient(t, "http://"+closedAddr(t), "m")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	waiting := make(chan struct{})
-	c.pullBackoff = func(int) time.Duration {
-		close(waiting)
-		return time.Hour
-	}
+	c.pullBackoff = func(int) time.Duration { return time.Hour }
 	rec := &recorder{}
 	done := make(chan struct{})
 	go func() {
@@ -366,16 +393,18 @@ func TestKeepPulled_CancelDuringBackoff(t *testing.T) {
 		close(done)
 	}()
 
-	<-waiting
-	warned := rec.messages(slog.LevelWarn)
+	// The WARN is logged after the backoff is chosen and before the wait
+	// starts, so it, not the backoff hook, marks the wait as begun.
+	require.Eventually(t, func() bool { return len(rec.messages(slog.LevelWarn)) == 1 },
+		5*time.Second, time.Millisecond)
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("KeepPulled did not return after cancel")
 	}
-	assert.Len(t, warned, 1, "the failure before the wait")
-	assert.Equal(t, warned, rec.messages(slog.LevelWarn), "no WARN for the cancelled wait")
+	assert.Equal(t, []string{notReady}, rec.messages(slog.LevelWarn), "no WARN for the cancelled wait")
+	assert.Empty(t, rec.messages(slog.LevelDebug))
 	assert.Empty(t, rec.messages(slog.LevelInfo))
 }
 

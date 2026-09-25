@@ -3716,9 +3716,11 @@ pulled model.
 `KeepPulled` replaces the one-shot background `EnsureModel`. It retries
 with capped exponential backoff (5 s, doubling to 5 min) until the model is
 ready or the daemon shuts down, and the daemon runs it for the embedding
-model and, with LLM labels, the generation model. It logs the first failure
-at WARN, saying it will retry, later ones at DEBUG, success at INFO, and
-nothing once its context is cancelled.
+model and, with LLM labels, the generation model. The first attempt logs
+its pull at INFO and its failure at WARN, saying it will retry. Retries log
+both at DEBUG, so an Ollama that can't reach its registry doesn't add an
+INFO line every 5 minutes. Success is INFO, and nothing is logged once the
+context is cancelled.
 
 **Why:** The two clients were copies of each other (defaults, validation,
 Ping, EnsureModel), with two sentinel pairs that didn't match under

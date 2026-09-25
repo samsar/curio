@@ -207,23 +207,31 @@ func decodeJSON(body io.Reader, v any, maxBody int64) error {
 // reports it missing, and blocks until the pull finishes. It returns Ping's
 // error for anything else: an unreachable Ollama has nothing to pull to.
 func (c *Client) EnsureModel(ctx context.Context, log *slog.Logger) error {
+	return c.ensureModel(ctx, log, slog.LevelInfo)
+}
+
+// ensureModel is EnsureModel announcing the start of a pull at level.
+func (c *Client) ensureModel(ctx context.Context, log *slog.Logger, level slog.Level) error {
 	err := c.Ping(ctx)
 	if !errors.Is(err, ErrModelNotLoaded) {
 		return err
 	}
-	log.Info("pulling ollama model", "model", c.model)
+	log.Log(ctx, level, "pulling ollama model", "model", c.model)
 	return c.Pull(ctx, log)
 }
 
 // KeepPulled runs EnsureModel until the model is ready or ctx ends, waiting
 // between attempts with a capped exponential backoff: Ollama is often
 // started after the daemon, and a model that is never pulled leaves every
-// index job or LLM label failing. The first failure is logged at WARN,
-// later ones at DEBUG, success at INFO; nothing is logged once ctx is done,
-// since an interrupted pull is shutdown, not a missing model.
+// index job or LLM label failing. The first attempt announces its pull at
+// INFO and its failure at WARN; retries repeat both at DEBUG, so an Ollama
+// that can't reach its registry doesn't log at every retry. Success is INFO.
+// Nothing is logged once ctx is done, since an interrupted pull is shutdown,
+// not a missing model.
 func (c *Client) KeepPulled(ctx context.Context, log *slog.Logger) {
+	announce, failure := slog.LevelInfo, slog.LevelWarn
 	for retry := 1; ; retry++ {
-		err := c.EnsureModel(ctx, log)
+		err := c.ensureModel(ctx, log, announce)
 		if ctx.Err() != nil {
 			return
 		}
@@ -232,12 +240,9 @@ func (c *Client) KeepPulled(ctx context.Context, log *slog.Logger) {
 			return
 		}
 		wait := c.pullBackoff(retry)
-		level := slog.LevelDebug
-		if retry == 1 {
-			level = slog.LevelWarn
-		}
-		log.Log(ctx, level, "ollama model not ready; retrying in the background",
+		log.Log(ctx, failure, "ollama model not ready; retrying in the background",
 			"model", c.model, "err", err, "retry_in", wait)
+		announce, failure = slog.LevelDebug, slog.LevelDebug
 
 		timer := time.NewTimer(wait)
 		select {
