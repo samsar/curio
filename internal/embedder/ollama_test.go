@@ -37,7 +37,9 @@ func TestOllama_Embed_HappyPath(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 
 		var req embedRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&req)) {
+			return
+		}
 		assert.Equal(t, "nomic-embed-text", req.Model)
 		assert.Equal(t, []string{"hello", "world"}, req.Input)
 
@@ -49,7 +51,7 @@ func TestOllama_Embed_HappyPath(t *testing.T) {
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		require.NoError(t, json.NewEncoder(w).Encode(resp))
+		assert.NoError(t, json.NewEncoder(w).Encode(resp))
 	}))
 	defer srv.Close()
 
@@ -141,7 +143,9 @@ func TestOllama_Embed_ReplyBoundedByBatch(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req embedRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&req)) {
+			return
+		}
 		resp := embedResponse{}
 		for range req.Input {
 			resp.Embeddings = append(resp.Embeddings, vec)
