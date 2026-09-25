@@ -3695,3 +3695,30 @@ stored vector gets that far. One bad vector must not block everyone's
 interests; the engine already tolerates an all-zero vector (it falls out
 as noise) and a document deleted mid-run the same way. The store and
 the indexer are unchanged.
+
+---
+
+## CLI: exit 130 on interrupt, a usage hint on usage errors
+
+**Decision:** `cli.Run` returns 130 and prints nothing when the command
+failed after its context (the signal context from `cmd/curio`) was
+cancelled. A usage error (an unknown command, a flag that doesn't parse, a
+wrong number of arguments) prints `Error: <msg>` and then
+`Run '<command path> --help' for usage.`, naming the command that failed
+(`curio search`, `curio docs show`), and returns 1. Any other error prints
+only the `Error:` line and returns 1.
+
+Usage errors are told apart without matching error text: cobra returns
+them before any hook runs, so `Run` marks the root's `PersistentPreRunE`
+(the one that runs `Discover`) as reached, and an error from a run that
+never reached it is a usage error. curio declares no required flags or
+flag groups, whose checks cobra runs after the hooks; the tests pin the
+three cases. 130 is 128+SIGINT, what a shell shows for ctrl-c; SIGTERM
+gets it too, because the context only says it was cancelled.
+
+**Why:** Interrupting `curio daemon logs -f` printed
+`Error: signal: killed` (or `signal: interrupt`) and exited 1: the
+cancelled context killed `tail`, and `Run` reported that like a failure.
+With `SilenceErrors` on, cobra no longer printed its
+"Run 'curio --help' for usage." line, so a mistyped command or flag got a
+bare error with no pointer to the usage.
