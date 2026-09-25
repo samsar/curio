@@ -89,7 +89,10 @@ MCP tools (implemented):
   with optional filters
 - `get_document(id)` — fetch a document's metadata + extracted markdown
 - `find_related(id, k)` — find documents similar to a given one (by embedding similarity over its indexed content)
-- `list_interests()` — labeled interest clusters from the latest clustering run
+- `list_interests(limit?, members?)` — labeled interest clusters from the latest clustering run
+
+The sidecar starts the daemon when it starts, and again when a tool call
+finds it unreachable mid-session (one retry per call).
 
 Registration and usage: see `docs/mcp.md`.
 

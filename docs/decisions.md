@@ -3268,3 +3268,28 @@ daemon 500 or timeout reached the model as "(no extracted content
 available)". Unreachable has to mean "never connected" because the sidecar
 restarts the daemon and resends on it (see the next entry), which is safe
 only for a request no daemon received.
+
+---
+
+## MCP sidecar: restart an unreachable daemon, retry once
+
+**Decision:** `curio-mcp` keeps the controller's `EnsureRunning` next to its
+client, and every daemon call in every tool goes through one helper,
+`call`. When a call fails with `client.ErrDaemonUnreachable`, `call` runs
+`EnsureRunning` once and the call once more; if the restart fails, the tool
+error carries both the unreachable error and the restart's. Any other
+error, a 5xx included, is returned without a restart or a retry. The eager
+`EnsureRunning` at startup stays, so a port served by another home still
+fails the sidecar where the MCP client shows it.
+
+**Why:** The sidecar lives for a whole Claude session, and the daemon can
+stop underneath it: `curio daemon stop` after a config edit (the documented
+way to apply one), an upgrade, a crash. The sidecar ensured the daemon once
+at startup and then kept only the client, so every tool call failed with
+"daemon unreachable" until something else started it.
+
+**Safe to resend:** `ErrDaemonUnreachable` means the connection was never
+made (see "Client errors"), so no daemon saw the first attempt. Concurrent
+calls that find the daemon gone each ensure it; `EnsureRunning` serializes
+on `daemon.start.lock` and re-checks healthz, so one daemon starts. Each
+ensure is bounded by the start timeout and the tool call's context.

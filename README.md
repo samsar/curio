@@ -93,7 +93,8 @@ claude mcp add curio "$PWD/bin/curio-mcp"
 ```
 
 Tools: `search_bookmarks` (with `content_type`/`source`/`host` filters),
-`get_document`, `find_related`. See [docs/mcp.md](./docs/mcp.md).
+`get_document`, `find_related`, `list_interests`. If the daemon stops during
+a session, the next tool call starts it again. See [docs/mcp.md](./docs/mcp.md).
 
 ## High-level architecture
 
