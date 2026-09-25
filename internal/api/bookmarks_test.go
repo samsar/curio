@@ -132,7 +132,8 @@ func TestCreateBookmark_KnownDocument(t *testing.T) {
 	assert.Zero(t, s.count(t, "jobs"))
 
 	resp, _ = s.createBookmark(t, "https://example.com/a")
-	assertProblem(t, resp, http.StatusConflict)
+	p := assertProblem(t, resp, http.StatusConflict)
+	assert.Equal(t, "a manual bookmark for https://example.com/a already exists", p.Detail)
 }
 
 func TestImportBookmarks_EnqueueFailure(t *testing.T) {
@@ -295,8 +296,10 @@ func TestBookmarks_GetListDelete(t *testing.T) {
 
 	resp = s.do(t, request{method: http.MethodDelete, path: "/v1/bookmarks/" + b.ID})
 	assert.Equal(t, http.StatusNoContent, resp.status)
-	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/bookmarks/" + b.ID}), http.StatusNotFound)
-	assertProblem(t, s.do(t, request{method: http.MethodDelete, path: "/v1/bookmarks/" + b.ID}), http.StatusNotFound)
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		p := assertProblem(t, s.do(t, request{method: method, path: "/v1/bookmarks/" + b.ID}), http.StatusNotFound)
+		assert.Equal(t, `bookmark "`+b.ID+`" not found`, p.Detail, method)
+	}
 	assert.Equal(t, store.DocStateFetched, s.docState(t, doc.ID), "the document outlives its bookmark")
 }
 

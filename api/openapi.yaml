@@ -10,7 +10,15 @@ info:
     Conventions:
       - All IDs are UUIDs.
       - All timestamps are RFC 3339 UTC.
-      - Errors follow RFC 7807 (`application/problem+json`).
+      - Errors follow RFC 7807 (`application/problem+json`). Every response
+        carries an `X-Request-Id` header, and every problem the same value as
+        `request_id`, which is also on the daemon's log lines for the
+        request; `instance` is the request path.
+      - Unset optional fields are omitted; the API never sends `null`.
+      - Responses may gain fields and enum values within /v1: clients ignore
+        what they don't know. Requests are strict: an unknown field is a 400
+        that names it and, since it usually means a newer client talking to
+        an older daemon, says to restart the daemon.
       - List endpoints return `{ items: [...], total, next_cursor }`; pagination
         is cursor-based for stability under writes.
       - Long-running operations are asynchronous and answer 202 with a
@@ -528,11 +536,12 @@ components:
       description: RFC 7807 problem details
       type: object
       properties:
-        type:     { type: string, format: uri, default: about:blank }
-        title:    { type: string }
-        status:   { type: integer }
-        detail:   { type: string }
-        instance: { type: string }
+        type:       { type: string, format: uri, default: about:blank }
+        title:      { type: string }
+        status:     { type: integer }
+        detail:     { type: string }
+        instance:   { type: string, description: "The request path" }
+        request_id: { type: string, description: "The response's X-Request-Id; quote it against the daemon log" }
       required: [title, status]
 
     JobRef:
@@ -637,6 +646,7 @@ components:
         fetched_at:      { type: string, format: date-time }
         fetcher:         { type: string }
         status:          { type: string, enum: [ok, partial, paywalled, error] }
+        markdown_path:   { type: string, description: "Absolute on-disk path to the extracted markdown" }
         error_message:   { type: string, nullable: true }
         extraction_meta: { type: object, additionalProperties: true }
 
@@ -669,16 +679,14 @@ components:
         filters:
           type: object
           description: >
-            content_type, host and source are applied. folder and tag are
-            accepted but not applied yet. Per-request RRF weights, collapse
-            strategy and saved-date filters are not implemented; the server
-            config sets the first two, and sending any of them is a 400.
+            Every dimension given is applied. Folder and tag filters,
+            per-request RRF weights, collapse strategy and saved-date filters
+            are not implemented; the server config sets the weights and
+            collapse strategy, and sending any of them is a 400.
           properties:
             content_type: { type: array, items: { type: string, enum: [article, repo, video, pdf, thread, unknown] } }
             host:         { type: array, items: { type: string } }
             source:       { type: array, items: { type: string, enum: [chrome, safari, firefox, html, manual] } }
-            folder:       { type: string, description: "Accepted but not applied yet" }
-            tag:          { type: array, items: { type: string }, description: "Accepted but not applied yet" }
 
     SearchHit:
       type: object

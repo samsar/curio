@@ -35,7 +35,7 @@ const ollamaPingTimeout = 500 * time.Millisecond
 func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 	meta, err := d.Home.Meta()
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 
@@ -61,7 +61,7 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, Health{
+	d.writeJSON(w, r, http.StatusOK, Health{
 		Status:          "ok",
 		PID:             os.Getpid(),
 		Home:            d.Home.Path,
@@ -90,17 +90,17 @@ func (d Deps) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bookmarks, err := d.Bookmarks.Count(ctx, d.TenantID)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 	docsByState, err := d.Documents.CountByState(ctx, d.TenantID)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 	jobsByStatus, err := d.Queue.CountByStatus(ctx, d.TenantID)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 
@@ -108,7 +108,7 @@ func (d Deps) handleStats(w http.ResponseWriter, r *http.Request) {
 	for _, n := range docsByState {
 		docsTotal += n
 	}
-	writeJSON(w, http.StatusOK, Stats{
+	d.writeJSON(w, r, http.StatusOK, Stats{
 		Version:          version.String(),
 		BookmarksTotal:   bookmarks,
 		DocumentsTotal:   docsTotal,

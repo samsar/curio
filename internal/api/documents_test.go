@@ -57,7 +57,8 @@ func TestRefetchDocument(t *testing.T) {
 	assert.Equal(t, store.DocStatePending, s.docState(t, dead.ID))
 
 	resp = s.do(t, request{method: http.MethodPost, path: "/v1/documents/00000000-0000-0000-0000-000000000000/refetch"})
-	assertProblem(t, resp, http.StatusNotFound)
+	p := assertProblem(t, resp, http.StatusNotFound)
+	assert.Equal(t, `document "00000000-0000-0000-0000-000000000000" not found`, p.Detail)
 }
 
 // TestRefetchDocument_StoreFailure: when the job can't be enqueued, the
@@ -166,7 +167,8 @@ func TestGetDocument(t *testing.T) {
 	require.NotNil(t, got.CurrentExtraction)
 	assert.Equal(t, ext.ID, got.CurrentExtraction.ID)
 	assert.Equal(t, "test", got.CurrentExtraction.Fetcher)
-	assert.Equal(t, *ext.MarkdownPath, got.CurrentExtraction.MarkdownPath)
+	assert.Equal(t, filepath.Join(s.deps.Home.ContentDir(), *ext.MarkdownPath), got.CurrentExtraction.MarkdownPath,
+		"an absolute path, like every other path the API returns")
 	assert.Equal(t, map[string]any{"via": "test"}, got.CurrentExtraction.ExtractionMeta)
 
 	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
@@ -174,7 +176,31 @@ func TestGetDocument(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.NotContains(t, resp.body, "current_extraction")
 
-	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/no-such-document"}), http.StatusNotFound)
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/no-such-document"}),
+		http.StatusNotFound)
+	assert.Equal(t, `document "no-such-document" not found`, p.Detail)
+}
+
+// failingExtractionLookup fails every extraction lookup.
+type failingExtractionLookup struct{ store.ExtractionStore }
+
+func (failingExtractionLookup) GetByID(context.Context, string) (*store.DocumentExtraction, error) {
+	return nil, errInjected
+}
+
+// TestGetDocument_ExtractionLookupFailure: a document whose extraction can't
+// be read is a server error, not a document without current_extraction.
+func TestGetDocument_ExtractionLookupFailure(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Extractions = failingExtractionLookup{d.Extractions} })
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	s.seedContent(t, doc, "# A")
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + doc.ID}),
+		http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, errInjected.Error())
+	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + bare.ID})
+	assert.Equal(t, http.StatusOK, resp.status, "no extraction to look up, so no error: %s", resp.body)
 }
 
 func TestListDocuments(t *testing.T) {
@@ -225,8 +251,9 @@ func TestGetDocumentContent(t *testing.T) {
 	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
 	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + bare.ID + "/content"}),
 		http.StatusNotFound)
-	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/nope/content"}),
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/nope/content"}),
 		http.StatusNotFound)
+	assert.Equal(t, `document "nope" not found`, p.Detail)
 }
 
 func TestReindexDocument(t *testing.T) {
@@ -246,7 +273,9 @@ func TestReindexDocument(t *testing.T) {
 	assert.JSONEq(t, `{"document_id":"`+doc.ID+`"}`, string(job.Payload))
 	assert.Equal(t, store.DocStateFetched, s.docState(t, doc.ID), "reindex leaves the state alone")
 
-	assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/nope/reindex"}), http.StatusNotFound)
+	p := assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/nope/reindex"}),
+		http.StatusNotFound)
+	assert.Equal(t, `document "nope" not found`, p.Detail)
 	s.failJobInserts(t)
 	assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/" + doc.ID + "/reindex"}),
 		http.StatusInternalServerError)

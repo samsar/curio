@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 // The API is unauthenticated: it trusts every process that can reach the
@@ -81,7 +83,7 @@ func requireLocalHost(o localOrigin, log *slog.Logger) func(http.Handler) http.H
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !o.allowsHost(r.Host) {
 				logRejected(log, r, "host not allowed")
-				writeProblem(w, http.StatusForbidden, "forbidden",
+				writeProblem(w, r, http.StatusForbidden, "forbidden",
 					"the daemon only answers requests addressed to a loopback name on its own port")
 				return
 			}
@@ -99,7 +101,7 @@ func rejectForeignOrigin(o localOrigin, log *slog.Logger) func(http.Handler) htt
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if origin, sent := r.Header["Origin"]; sent && (len(origin) != 1 || !o.origins[origin[0]]) {
 				logRejected(log, r, "origin not allowed")
-				writeProblem(w, http.StatusForbidden, "forbidden",
+				writeProblem(w, r, http.StatusForbidden, "forbidden",
 					"cross-origin requests to the daemon are not allowed")
 				return
 			}
@@ -116,7 +118,7 @@ func requireJSONBody(next http.Handler) http.Handler {
 		if r.ContentLength != 0 {
 			mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 			if err != nil || mediaType != "application/json" {
-				writeProblem(w, http.StatusUnsupportedMediaType, "unsupported media type",
+				writeProblem(w, r, http.StatusUnsupportedMediaType, "unsupported media type",
 					"request bodies must be application/json")
 				return
 			}
@@ -127,6 +129,7 @@ func requireJSONBody(next http.Handler) http.Handler {
 
 func logRejected(log *slog.Logger, r *http.Request, reason string) {
 	log.Warn("request rejected: "+reason,
+		"request_id", middleware.GetReqID(r.Context()),
 		"method", r.Method,
 		"path", r.URL.Path,
 		"host", r.Host,

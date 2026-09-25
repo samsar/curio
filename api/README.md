@@ -9,7 +9,11 @@ UI — codegen their request/response types from this spec.
 
 - **IDs** are UUIDs (string, `format: uuid`).
 - **Timestamps** are RFC 3339, UTC.
-- **Errors** follow RFC 7807 with `application/problem+json`.
+- **Errors** follow RFC 7807 with `application/problem+json`. Every
+  response carries an `X-Request-Id` header; a problem repeats it as
+  `request_id` and names the request path in `instance`. The daemon logs
+  every 5xx with its request ID, so `curio daemon logs` finds the cause.
+  A 404 names what is missing (`document "…" not found`).
 - **Pagination** on list endpoints is cursor-based, not offset:
   responses include `next_cursor` (opaque string) and an approximate `total`.
   Clients pass `?cursor=<value>` to fetch the next page.
@@ -45,5 +49,18 @@ are fine to start.
 
 The path prefix `/v1` is the major version. Breaking changes bump to `/v2`
 and run side-by-side until clients migrate. Additive changes (new fields, new
-endpoints, new enum values) don't bump the version — clients are expected to
-ignore unknown fields.
+endpoints, new enum values) don't bump the version.
+
+- **Responses are read tolerantly.** Clients ignore fields and enum values
+  they don't know; the server may add them within `/v1`. Unset optional
+  fields are omitted, never `null`.
+- **Requests are strict.** The server rejects an unknown field with 400,
+  because a field it ignored would be a filter or knob silently not applied.
+  Clients send only the optional fields they set, so an older daemon rejects
+  only a request that uses a feature it lacks. That 400 names the field and
+  the daemon's version and says to restart the daemon: after an upgrade the
+  old one may still be running (`curio daemon stop`; the next command starts
+  the new one).
+- **500 details keep the raw error text.** The clients are the local
+  operator's own tools (see "Local API" in the decisions log), and every
+  problem carries `request_id`.

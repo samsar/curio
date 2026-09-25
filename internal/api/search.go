@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -22,14 +21,12 @@ type SearchRequest struct {
 	Filters Filters `json:"filters,omitempty"`
 }
 
-// Filters mirrors the openapi filters block. content_type/host/source are
-// applied by the search engine; folder/tag are accepted but not yet applied.
+// Filters mirrors the openapi filters block; the search engine applies
+// every dimension.
 type Filters struct {
 	ContentType []string `json:"content_type,omitempty"`
 	Host        []string `json:"host,omitempty"`
 	Source      []string `json:"source,omitempty"`
-	Folder      string   `json:"folder,omitempty"`
-	Tag         []string `json:"tag,omitempty"`
 }
 
 // SearchHitResponse mirrors the openapi SearchHit schema. MarkdownPath
@@ -69,15 +66,15 @@ type SearchResponse struct {
 func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 	var req SearchRequest
 	if err := decodeJSON(w, r, maxJSONBody, &req); err != nil {
-		writeDecodeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 	if req.Query == "" {
-		writeProblem(w, http.StatusBadRequest, "bad request", "query is required")
+		writeProblem(w, r, http.StatusBadRequest, "bad request", "query is required")
 		return
 	}
 	if req.K < 0 || req.K > search.MaxK {
-		writeProblem(w, http.StatusBadRequest, "bad request",
+		writeProblem(w, r, http.StatusBadRequest, "bad request",
 			fmt.Sprintf("k must be between 1 and %d (or omitted for the default), got %d", search.MaxK, req.K))
 		return
 	}
@@ -94,29 +91,33 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 
-	resp := SearchResponse{
+	items, err := d.searchHitsToResponse(r.Context(), res.Items)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	d.writeJSON(w, r, http.StatusOK, SearchResponse{
 		Query:      res.Query,
 		TookMS:     time.Since(start).Milliseconds(),
 		BM25Hits:   res.BM25Hits,
 		VectorHits: res.VectorHits,
 		Degraded:   res.Degraded,
 		Warnings:   res.Warnings,
-		Items:      d.searchHitsToResponse(r.Context(), res.Items),
-	}
-	writeJSON(w, http.StatusOK, resp)
+		Items:      items,
+	})
 }
 
 // searchHitsToResponse maps engine hits to wire hits, populating each
 // hit's markdown path from its current extraction.
 //
-// One extra DB hit per result to surface the markdown path. For typical K
-// (10–50) this is negligible; if it ever shows up in latency, batch via a
-// single SELECT IN (...) instead.
-func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) []SearchHitResponse {
+// One extra DB hit per result to surface the markdown path. K is at most
+// search.MaxK (100), so this stays small; if it ever shows up in latency,
+// batch via a single SELECT IN (...) instead.
+func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]SearchHitResponse, error) {
 	out := make([]SearchHitResponse, 0, len(hits))
 	for _, hit := range hits {
 		matches := make([]ChunkMatchJSON, 0, len(hit.Chunks))
@@ -130,14 +131,10 @@ func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) []Sea
 			})
 		}
 
-		var mdPath string
-		if hit.Document.CurrentExtractionID != nil {
-			if ext, err := d.Extractions.GetByID(ctx, *hit.Document.CurrentExtractionID); err == nil &&
-				ext.MarkdownPath != nil {
-				mdPath = d.Home.ContentDir() + "/" + *ext.MarkdownPath
-			}
+		mdPath, err := d.documentMarkdownPath(ctx, hit.Document)
+		if err != nil {
+			return nil, err
 		}
-
 		out = append(out, SearchHitResponse{
 			Document:     documentToResponse(hit.Document),
 			Score:        hit.Score,
@@ -145,7 +142,7 @@ func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) []Sea
 			Matches:      matches,
 		})
 	}
-	return out
+	return out, nil
 }
 
 // RelatedResponse is the body of GET /v1/documents/{id}/related. Scores
@@ -176,19 +173,17 @@ func (d Deps) handleRelatedDocuments(w http.ResponseWriter, r *http.Request) {
 		K:          k,
 	})
 	if err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
-
-	writeJSON(w, http.StatusOK, RelatedResponse{
+	items, err := d.searchHitsToResponse(r.Context(), res.Items)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	d.writeJSON(w, r, http.StatusOK, RelatedResponse{
 		DocID:  id,
 		TookMS: time.Since(start).Milliseconds(),
-		Items:  d.searchHitsToResponse(r.Context(), res.Items),
+		Items:  items,
 	})
-}
-
-// decodeMetaJSON parses extraction_meta back into a map; tolerant of
-// missing/invalid data.
-func decodeMetaJSON(raw []byte, out *map[string]any) error {
-	return json.Unmarshal(raw, out)
 }

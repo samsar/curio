@@ -42,7 +42,7 @@ func (d Deps) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := d.Queue.MetricsByKind(r.Context(), d.TenantID, window)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 
@@ -63,5 +63,5 @@ func (d Deps) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			OldestRunningSeconds: m.OldestRunningSeconds,
 		})
 	}
-	writeJSON(w, http.StatusOK, resp)
+	d.writeJSON(w, r, http.StatusOK, resp)
 }

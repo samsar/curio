@@ -3072,3 +3072,101 @@ finds jobs another process enqueued, which no in-process signal sees.
 **One goroutine per worker still:** a dispatcher handing jobs to a
 semaphore-bounded pool would change the shutdown and drain semantics for
 little further gain.
+
+---
+
+## API: request IDs, one error mapping, logged server errors
+
+**Decision:**
+
+- Every response carries `X-Request-Id` (chi's generator, or the ID the
+  client sent in that header), and every problem body repeats it as
+  `request_id`, an RFC 7807 extension member, with the request path as
+  `instance`. The access log and the Host/Origin rejection warnings carry
+  it too.
+- Handlers report failures through `Deps.writeError`, the one place errors
+  become statuses: a `requestError` (a parameter, cursor or body field the
+  handler refuses) is 400, an oversized body 413, `store.ErrNotFound` 404,
+  `store.ErrConflict` 409, anything else 500. A handler that loads the
+  resource its path names reports a missing one through `writeLookupError`,
+  whose 404 names it: `document "x" not found`.
+- A 5xx is logged once, at error level, with the request ID, method, path
+  and the full error. When the request's own context is done the client has
+  gone and the error is almost always that cancellation, so it is logged at
+  info with status 499 (nginx's "client closed request"), which is also
+  the status the access log records.
+- A panicking handler answers a 500 problem and is logged as one structured
+  record with the panic value and stack. `recoverProblem` replaces
+  `middleware.Recoverer`; `http.ErrAbortHandler` is re-panicked.
+- `writeJSON` encodes before it writes the status, so a value that can't be
+  encoded (a NaN) is a logged 500, not a 200 with an empty body.
+- Middleware order: request ID, its response header, access log, panic
+  recovery, then the Host, Origin and body checks, then the routes.
+
+**Why:** The cause of a 500 appeared nowhere. `writeError` logged nothing,
+the access log had no request ID, and nothing tied a client's error to a
+log line. `middleware.Recoverer` answered a panic with a bare 500 and no
+problem body, and printed a colour-coded multi-line stack into the JSON
+`daemon.log`. `writeJSON` wrote the status before encoding and discarded
+the encode error. Only two sentinels were mapped, and 404 details leaked
+wrap chains: `store: not found`, `related: load document: store: not
+found`.
+
+**500 details keep the raw error text:** the clients are the local
+operator's own tools (see "Local API: loopback only, no token, browsers
+shut out"), and the detail plus the request ID is what makes
+`curio daemon logs` searchable.
+
+---
+
+## API: tolerant responses, strict requests
+
+**Decision:** Within `/v1`:
+
+- **Responses** are read tolerantly. Clients ignore fields and enum values
+  they don't know, and the server may add them, and endpoints, without a
+  version bump. Unset optional fields are omitted; the API never sends
+  `null`. `internal/client` decodes with `encoding/json`'s defaults, which
+  ignore unknown fields.
+- **Requests** are strict. The server rejects an unknown field with 400.
+  Clients send only the optional fields they set (`omitempty`, `omitzero`),
+  so an older daemon rejects only a request that uses a feature it lacks.
+  The 400 names the field and the daemon's version and says to restart the
+  daemon: `curio daemon stop`, and the next command starts the installed
+  one.
+
+**Why:** `api/README.md` promised that clients ignore unknown fields while
+the request decoder used `DisallowUnknownFields`, and nothing said which
+rule applied to which direction. An ignored request field is a filter or
+knob silently not applied: `filters.folder` and `filters.tag` on
+`POST /v1/search` were accepted and ignored, so a folder-filtered search
+returned unfiltered results. They are gone from `api.Filters` and the
+spec, so they are 400s like `weights`. After `brew upgrade`, the new CLI
+can reach the old daemon still running; a 400 that says to restart it is
+the safe failure there, where before it said only `json: unknown field
+"x"`. encoding/json has no error type for an unknown field, so
+`decodeJSON` recognizes its message.
+
+---
+
+## API: absolute content paths, and hydration errors fail the request
+
+**Decision:** `Deps.contentPath` is the only place the API builds a file
+path, with `filepath.Join` of the content directory and the path the store
+records. Every `markdown_path` in a response is absolute, `GET
+/v1/documents/{id}`'s `current_extraction.markdown_path` included, and the
+CLI prints it as given. A lookup that fails while a response is being
+built (a document's current extraction, an interest's members or a
+member's document, a search hit's markdown path) fails the request with a
+500. So does a current extraction or member document that doesn't exist:
+the schema guarantees those rows, so their absence is an inconsistency,
+not a missing resource, as for bookmarks ("API: handler edge cases found
+by coverage").
+
+**Why:** `GET /v1/documents/{id}` returned the path relative to the
+daemon's content directory while every other endpoint returned it
+absolute, built with `+ "/"`, and the CLI joined the relative one with its
+own home, so a client had to know the daemon's layout. The same code
+discarded lookup errors, turning a database error into plausible but wrong
+data: a document without `current_extraction`, a hit without a path, an
+interest without members.

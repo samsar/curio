@@ -234,8 +234,8 @@ type Document struct {
 	UpdatedAt         time.Time   `json:"updated_at"`
 }
 
-// Extraction mirrors api.ExtractionResponse. MarkdownPath is relative to
-// the daemon's content directory; the CLI joins them when displaying.
+// Extraction mirrors api.ExtractionResponse. MarkdownPath is the absolute
+// path of the extracted markdown on the daemon's machine.
 type Extraction struct {
 	ID             string         `json:"id"`
 	FetchedAt      time.Time      `json:"fetched_at"`

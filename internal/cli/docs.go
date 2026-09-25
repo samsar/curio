@@ -105,7 +105,7 @@ directly. Pass --content to also stream the markdown to stdout.`,
 				return err
 			}
 			w := cmd.OutOrStdout()
-			renderDocShow(w, doc, ctx.Home.ContentDir())
+			renderDocShow(w, doc)
 
 			if showContent {
 				body, err := ctx.Client.GetDocumentContent(cmd.Context(), id)
@@ -122,7 +122,7 @@ directly. Pass --content to also stream the markdown to stdout.`,
 	return cmd
 }
 
-func renderDocShow(w io.Writer, d *client.Document, contentDir string) {
+func renderDocShow(w io.Writer, d *client.Document) {
 	fmt.Fprintf(w, "id:           %s\n", d.ID)
 	fmt.Fprintf(w, "url:          %s\n", d.URL)
 	if d.Title != nil && *d.Title != "" {
@@ -141,7 +141,7 @@ func renderDocShow(w io.Writer, d *client.Document, contentDir string) {
 		fmt.Fprintf(w, "  status:       %s\n", e.Status)
 		fmt.Fprintf(w, "  fetched_at:   %s\n", e.FetchedAt.Local().Format("2006-01-02 15:04:05 MST"))
 		if e.MarkdownPath != "" {
-			fmt.Fprintf(w, "  markdown:     %s/%s\n", contentDir, e.MarkdownPath)
+			fmt.Fprintf(w, "  markdown:     %s\n", e.MarkdownPath)
 		}
 		if e.ErrorMessage != nil && *e.ErrorMessage != "" {
 			fmt.Fprintf(w, "  err:          %s\n", *e.ErrorMessage)

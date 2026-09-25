@@ -124,6 +124,8 @@ func TestDocs(t *testing.T) {
 
 	out = mustRun(t, srv, "docs", "show", fetched.ID)
 	assert.Contains(t, out, "url:          https://example.com/fetched")
+	assert.Contains(t, out, "markdown:     "+filepath.Join(srv.Home.ContentDir(), fetched.ID)+"/",
+		"the daemon's absolute path, printed as given")
 	assert.Contains(t, out, "state:        fetched")
 	assert.Contains(t, out, "fetcher:      apitest")
 	assert.NotContains(t, out, "The fetched body.")

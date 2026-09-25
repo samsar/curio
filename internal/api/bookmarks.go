@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -64,27 +65,32 @@ type BookmarkCreatedResponse struct {
 func (d Deps) handleCreateBookmark(w http.ResponseWriter, r *http.Request) {
 	var req CreateBookmarkRequest
 	if err := decodeJSON(w, r, maxJSONBody, &req); err != nil {
-		writeDecodeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 	normURL, err := urlutil.Normalize(req.URL)
 	if err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid url", err.Error())
+		writeProblem(w, r, http.StatusBadRequest, "invalid url", err.Error())
 		return
 	}
 
 	b := d.bookmarkRow(ImportBookmark{URL: normURL, Title: req.Title, FolderPath: req.FolderPath, Tags: req.Tags},
 		store.SourceManual)
 	res, err := d.Bookmarks.Ingest(r.Context(), b)
+	if errors.Is(err, store.ErrConflict) {
+		writeProblem(w, r, http.StatusConflict, "conflict",
+			fmt.Sprintf("a manual bookmark for %s already exists", normURL))
+		return
+	}
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 	jobID := ""
 	if res.FetchJob != nil {
 		jobID = res.FetchJob.ID
 	}
-	writeJSON(w, http.StatusCreated, BookmarkCreatedResponse{
+	d.writeJSON(w, r, http.StatusCreated, BookmarkCreatedResponse{
 		Bookmark: bookmarkToResponse(b, string(res.DocumentState)),
 		JobID:    jobID,
 	})
@@ -136,7 +142,7 @@ func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 		Limit:      limit + 1,
 	})
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 
@@ -150,37 +156,42 @@ func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 	for _, b := range bms {
 		state, err := d.documentState(r.Context(), b)
 		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "internal error", err.Error())
+			d.writeError(w, r, err)
 			return
 		}
 		resp.Items = append(resp.Items, bookmarkToResponse(b, state))
 	}
-	writeJSON(w, http.StatusOK, resp)
+	d.writeJSON(w, r, http.StatusOK, resp)
 }
 
 func (d Deps) handleGetBookmark(w http.ResponseWriter, r *http.Request) {
-	b, err := d.Bookmarks.GetByID(r.Context(), chi.URLParam(r, "id"))
+	id := chi.URLParam(r, "id")
+	b, err := d.Bookmarks.GetByID(r.Context(), id)
 	if err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "bookmark", id, err)
 		return
 	}
 	state, err := d.documentState(r.Context(), b)
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "internal error", err.Error())
+		d.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, bookmarkToResponse(b, state))
+	d.writeJSON(w, r, http.StatusOK, bookmarkToResponse(b, state))
 }
 
 // documentState is the state of the document a bookmark links to, or "" if
 // the document was deleted (the foreign key sets document_id to NULL). Any
-// lookup failure, not-found included, is an error the caller reports as a
-// 500: a dangling document_id is an inconsistency, not a missing resource.
+// lookup failure is an error the caller reports as a 500, a missing
+// document included: a dangling document_id is an inconsistency, not a
+// missing resource.
 func (d Deps) documentState(ctx context.Context, b *store.Bookmark) (string, error) {
 	if b.DocumentID == nil {
 		return "", nil
 	}
 	doc, err := d.Documents.GetByID(ctx, *b.DocumentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", fmt.Errorf("bookmark %s links to document %s, which doesn't exist", b.ID, *b.DocumentID)
+	}
 	if err != nil {
 		return "", fmt.Errorf("bookmark %s: load document %s: %w", b.ID, *b.DocumentID, err)
 	}
@@ -190,7 +201,7 @@ func (d Deps) documentState(ctx context.Context, b *store.Bookmark) (string, err
 func (d Deps) handleDeleteBookmark(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := d.Bookmarks.Delete(r.Context(), id); err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "bookmark", id, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

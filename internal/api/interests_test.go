@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,7 +62,7 @@ func TestListInterests(t *testing.T) {
 	assert.Equal(t, a.ID, in.Members[0].DocID, "most similar first")
 	assert.Equal(t, "Post A", in.Members[0].Title)
 	assert.Equal(t, "https://example.com/a", in.Members[0].URL)
-	assert.Equal(t, s.deps.Home.ContentDir()+"/"+*ext.MarkdownPath, in.Members[0].MarkdownPath)
+	assert.Equal(t, filepath.Join(s.deps.Home.ContentDir(), *ext.MarkdownPath), in.Members[0].MarkdownPath)
 	assert.Empty(t, in.Members[1].MarkdownPath, "b has no content")
 
 	resp = s.do(t, request{method: http.MethodGet, path: "/v1/interests?members=0"})
@@ -81,8 +83,56 @@ func TestGetInterest(t *testing.T) {
 	assert.Equal(t, "Go", got.Label)
 	require.Len(t, got.Members, 1)
 
-	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/interests/no-such-interest"}), http.StatusNotFound)
-	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/interests/" + theirs.ID}), http.StatusNotFound)
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/interests/no-such-interest"}),
+		http.StatusNotFound)
+	assert.Equal(t, `interest "no-such-interest" not found`, p.Detail)
+	p = assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/interests/" + theirs.ID}),
+		http.StatusNotFound)
+	assert.Equal(t, `interest "`+theirs.ID+`" not found`, p.Detail, "another tenant's interest doesn't exist here")
+}
+
+// failingMembers fails every cluster-member lookup.
+type failingMembers struct{ store.InsightStore }
+
+func (failingMembers) ClusterMembers(context.Context, string, int) ([]store.ClusterMember, error) {
+	return nil, errInjected
+}
+
+// TestInterests_MemberLookupFailure: an interest whose members can't be read
+// is a server error, not an interest without members.
+func TestInterests_MemberLookupFailure(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Insights = failingMembers{d.Insights} })
+	c := s.seedInterest(t, "local", "Go", s.seedDocument(t, "https://example.com/a", store.DocStateFetched))
+
+	for _, path := range []string{"/v1/interests", "/v1/interests/" + c.ID} {
+		p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: path}), http.StatusInternalServerError)
+		assert.Contains(t, p.Detail, errInjected.Error(), path)
+	}
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests?members=0"})
+	assert.Equal(t, http.StatusOK, resp.status, "no members asked for, none looked up: %s", resp.body)
+}
+
+// nanCohesion reports a cluster whose cohesion JSON can't represent.
+type nanCohesion struct{ store.InsightStore }
+
+func (n nanCohesion) GetCluster(ctx context.Context, id string) (*store.Cluster, error) {
+	c, err := n.InsightStore.GetCluster(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	c.Cohesion = math.NaN()
+	return c, nil
+}
+
+// TestInterests_UnencodableResponse: a response that can't be encoded is a
+// 500 problem, not a 200 with an empty body.
+func TestInterests_UnencodableResponse(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Insights = nanCohesion{d.Insights} })
+	c := s.seedInterest(t, "local", "Go", s.seedDocument(t, "https://example.com/a", store.DocStateFetched))
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/interests/" + c.ID}),
+		http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, "NaN")
 }
 
 func TestRebuildInterests(t *testing.T) {

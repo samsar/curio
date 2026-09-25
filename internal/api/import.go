@@ -48,16 +48,16 @@ const importErrorsCap = 10
 func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 	var req ImportRequest
 	if err := decodeJSON(w, r, maxImportBody, &req); err != nil {
-		writeDecodeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 	if !validImportSource(req.Source) {
-		writeProblem(w, http.StatusBadRequest, "bad request",
+		writeProblem(w, r, http.StatusBadRequest, "bad request",
 			"source must be one of: chrome, safari, firefox, html, manual")
 		return
 	}
 	if len(req.Bookmarks) == 0 {
-		writeProblem(w, http.StatusBadRequest, "bad request", "bookmarks list is empty")
+		writeProblem(w, r, http.StatusBadRequest, "bad request", "bookmarks list is empty")
 		return
 	}
 
@@ -107,7 +107,7 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	d.writeJSON(w, r, http.StatusOK, resp)
 }
 
 func (r *ImportResponse) appendError(msg string) {

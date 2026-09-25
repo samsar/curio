@@ -55,17 +55,17 @@ func (d Deps) handleDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	olderThan := q.Get("older_than")
 
 	if status == "" && olderThan == "" {
-		writeProblem(w, http.StatusBadRequest, "bad request",
+		writeProblem(w, r, http.StatusBadRequest, "bad request",
 			"specify ?status=<done|failed> or ?older_than=<duration>")
 		return
 	}
 	if status != "" && olderThan != "" {
-		writeProblem(w, http.StatusBadRequest, "bad request",
+		writeProblem(w, r, http.StatusBadRequest, "bad request",
 			"specify only one of ?status or ?older_than")
 		return
 	}
 	if status != "" && !status.IsFinished() {
-		writeProblem(w, http.StatusBadRequest, "bad request",
+		writeProblem(w, r, http.StatusBadRequest, "bad request",
 			fmt.Sprintf("status %q: only finished jobs (done, failed) can be deleted; "+
 				"pending and running jobs are live work", status))
 		return
@@ -74,26 +74,26 @@ func (d Deps) handleDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	if status != "" {
 		n, err := d.Queue.DeleteByStatus(r.Context(), d.TenantID, status)
 		if err != nil {
-			writeError(w, err)
+			d.writeError(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, DeleteJobsResponse{Deleted: n, Mode: "status=" + string(status)})
+		d.writeJSON(w, r, http.StatusOK, DeleteJobsResponse{Deleted: n, Mode: "status=" + string(status)})
 		return
 	}
 
 	dur, err := parseExtendedDuration(olderThan)
 	if err != nil {
-		writeProblem(w, http.StatusBadRequest, "bad request",
+		writeProblem(w, r, http.StatusBadRequest, "bad request",
 			"older_than: "+err.Error())
 		return
 	}
 	cutoff := time.Now().Add(-dur)
 	n, err := d.Queue.PruneOlderThan(r.Context(), d.TenantID, cutoff)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, DeleteJobsResponse{Deleted: n, Mode: "older_than=" + olderThan})
+	d.writeJSON(w, r, http.StatusOK, DeleteJobsResponse{Deleted: n, Mode: "older_than=" + olderThan})
 }
 
 // parseExtendedDuration accepts standard Go durations plus "Nd" (days),
@@ -106,7 +106,7 @@ func parseExtendedDuration(s string) (time.Duration, error) {
 	if last := s[len(s)-1]; last == 'd' || last == 'D' {
 		var n int
 		if _, err := fmt.Sscanf(s[:len(s)-1], "%d", &n); err != nil {
-			return 0, fmt.Errorf("invalid days: %v", err)
+			return 0, fmt.Errorf("invalid days: %w", err)
 		}
 		if n < 0 {
 			return 0, fmt.Errorf("days must be non-negative")
@@ -124,30 +124,31 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		Limit:  listLimit(r),
 	})
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 
-	contentDir := d.Home.ContentDir()
 	resp := JobListResponse{Items: make([]JobResponse, 0, len(jobs))}
 	for _, j := range jobs {
-		item := JobResponse{
-			ID:        j.ID,
-			Kind:      string(j.Kind),
-			Status:    string(j.Status),
-			Attempts:  j.Attempts,
-			Payload:   j.Payload,
-			LastError: j.LastError,
-			RunAfter:  j.RunAfter,
-			CreatedAt: j.CreatedAt,
-			UpdatedAt: j.UpdatedAt,
-			DocURL:    j.URL,
-			DocTitle:  j.Title,
-		}
-		if j.MarkdownPath != "" {
-			item.MarkdownPath = contentDir + "/" + j.MarkdownPath
-		}
-		resp.Items = append(resp.Items, item)
+		resp.Items = append(resp.Items, d.jobResponse(j))
 	}
-	writeJSON(w, http.StatusOK, resp)
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// jobResponse is the wire shape of a job and its document.
+func (d Deps) jobResponse(j store.JobWithDoc) JobResponse {
+	return JobResponse{
+		ID:           j.ID,
+		Kind:         string(j.Kind),
+		Status:       string(j.Status),
+		Attempts:     j.Attempts,
+		Payload:      j.Payload,
+		LastError:    j.LastError,
+		RunAfter:     j.RunAfter,
+		CreatedAt:    j.CreatedAt,
+		UpdatedAt:    j.UpdatedAt,
+		DocURL:       j.URL,
+		DocTitle:     j.Title,
+		MarkdownPath: d.contentPath(j.MarkdownPath),
+	}
 }
