@@ -11,16 +11,17 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/textutil"
 )
 
-func newJobsCmd() *cobra.Command {
-	cmd := newJobsListCmd()
-	cmd.AddCommand(newJobsPruneCmd(), newJobsDeleteCmd())
+func newJobsCmd(env *daemonctl.Env) *cobra.Command {
+	cmd := newJobsListCmd(env)
+	cmd.AddCommand(newJobsPruneCmd(env), newJobsDeleteCmd(env))
 	return cmd
 }
 
-func newJobsListCmd() *cobra.Command {
+func newJobsListCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		failedOnly bool
 		showAll    bool
@@ -39,17 +40,13 @@ Each row carries the target doc's URL, title, doc_id, and on-disk
 markdown path (when applicable), so jumping to the underlying file
 or running curio refetch is one copy/paste away.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			s := resolveJobsStatus(status, failedOnly, showAll)
-
-			resp, err := ctx.Client.ListJobs(cmd.Context(), client.JobListOpts{
-				Status: s, Kind: kind, Limit: limit,
+			resp, err := env.Client.ListJobs(cmd.Context(), client.JobListOpts{
+				Status: resolveFilter(status, failedOnly, showAll, "done"),
+				Kind:   kind,
+				Limit:  limit,
 			})
 			if err != nil {
 				return err
@@ -64,19 +61,6 @@ or running curio refetch is one copy/paste away.`,
 	cmd.Flags().StringVar(&kind, "kind", "", "fetch|index|import|cluster|summarize")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Max rows to return (server caps at 500)")
 	return cmd
-}
-
-func resolveJobsStatus(status string, failedOnly, all bool) string {
-	switch {
-	case status != "":
-		return status
-	case failedOnly:
-		return "failed"
-	case all:
-		return ""
-	default:
-		return "done"
-	}
 }
 
 func renderJobList(w io.Writer, resp *client.JobList) {
@@ -153,7 +137,7 @@ func wrapLines(s string, width int) []string {
 	return out
 }
 
-func newJobsPruneCmd() *cobra.Command {
+func newJobsPruneCmd(env *daemonctl.Env) *cobra.Command {
 	var olderThan string
 	cmd := &cobra.Command{
 		Use:   "prune",
@@ -176,17 +160,13 @@ Deleting a job doesn't change any document state. A failed doc stays
 failed (still visible in 'curio docs --failed') and can still be
 refetched. This command only trims the audit/history table.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
 			if olderThan == "" {
 				return errors.New("--older-than is required (e.g. 30d, 24h, 2h30m)")
 			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			resp, err := ctx.Client.PruneJobsOlderThan(cmd.Context(), olderThan)
+			resp, err := env.Client.PruneJobsOlderThan(cmd.Context(), olderThan)
 			if err != nil {
 				return err
 			}
@@ -198,7 +178,7 @@ refetched. This command only trims the audit/history table.`,
 	return cmd
 }
 
-func newJobsDeleteCmd() *cobra.Command {
+func newJobsDeleteCmd(env *daemonctl.Env) *cobra.Command {
 	var status string
 	cmd := &cobra.Command{
 		Use:   "delete",
@@ -217,17 +197,13 @@ Deleting a job doesn't change any document state. A failed doc stays
 failed (still visible in 'curio docs --failed') and can still be
 refetched.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
 			if status == "" {
 				return errors.New("--status is required (done|failed)")
 			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			resp, err := ctx.Client.DeleteJobsByStatus(cmd.Context(), status)
+			resp, err := env.Client.DeleteJobsByStatus(cmd.Context(), status)
 			if err != nil {
 				return err
 			}

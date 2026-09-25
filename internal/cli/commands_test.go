@@ -19,8 +19,8 @@ import (
 
 // These tests run the real command tree against the real API (apitest). The
 // daemon they find answers healthz with this process's PID and the server's
-// home, so ensureDaemon sees it running and never spawns one. They check
-// stdout and returned errors, not cobra's "Error:" formatting.
+// home, so EnsureRunning sees it running and never spawns one. They check
+// stdout and returned errors; TestRun covers how Run prints an error.
 
 // runCLI runs curio with args against srv and returns its stdout.
 func runCLI(t *testing.T, srv *apitest.Server, args ...string) (string, error) {
@@ -31,9 +31,6 @@ func runCLI(t *testing.T, srv *apitest.Server, args ...string) (string, error) {
 // runCLIAt runs curio with args for home and daemonURL.
 func runCLIAt(t *testing.T, home, daemonURL string, args ...string) (string, error) {
 	t.Helper()
-	// buildContext exports CURIO_HOME for the daemon it may spawn; t.Setenv
-	// restores it when the test ends.
-	t.Setenv("CURIO_HOME", home)
 	var stdout, stderr bytes.Buffer
 	root := newRootCmd() // flags bind to closures made per construction
 	root.SetOut(&stdout)
@@ -55,6 +52,24 @@ func count(t *testing.T, srv *apitest.Server, query string, args ...any) int {
 	var n int
 	require.NoError(t, srv.DB.QueryRow(query, args...).Scan(&n))
 	return n
+}
+
+// TestRun: an error reaches stderr once, and a path an *os.PathError
+// already names isn't repeated.
+func TestRun(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(),
+		[]string{"--curio-home", filepath.Join(t.TempDir(), "home"), "import", "html", "/nonexistent.html", "--dry-run"},
+		&stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Equal(t, "Error: open /nonexistent.html: no such file or directory\n", stderr.String())
+	assert.Empty(t, stdout.String())
+
+	stderr.Reset()
+	assert.Zero(t, Run(context.Background(),
+		[]string{"--curio-home", filepath.Join(t.TempDir(), "home"), "version"}, &stdout, &stderr))
+	assert.Contains(t, stdout.String(), "curio ")
+	assert.Empty(t, stderr.String())
 }
 
 func TestVersion(t *testing.T) {

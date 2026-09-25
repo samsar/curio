@@ -118,7 +118,6 @@ func newTestController(t *testing.T, mode string) *Controller {
 	require.NoError(t, err)
 
 	addr := freeAddr(t)
-	t.Setenv("CURIO_HOME", dir)
 	t.Setenv(fakeAddrEnv, addr)
 	t.Setenv(fakeModeEnv, mode)
 
@@ -248,6 +247,24 @@ func TestEnsureRunning_ConcurrentStartersSpawnOnce(t *testing.T) {
 	assert.Equal(t, NotRunning, st.State, "a clean stop leaves an empty PID file")
 }
 
+// TestEnsureRunning_ServesTheControllersHome: the daemon a controller
+// starts serves the controller's home, not whatever $CURIO_HOME the calling
+// process has.
+func TestEnsureRunning_ServesTheControllersHome(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	elsewhere, err := curiohome.Init(t.TempDir(), "nomic-embed-text", 768)
+	require.NoError(t, err)
+	t.Setenv("CURIO_HOME", elsewhere.Path)
+	ctx := context.Background()
+
+	require.NoError(t, c.EnsureRunning(ctx))
+	st, err := c.Status(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, st.Health)
+	assert.True(t, SameHome(c.Home.Path, st.Health.Home), "served %s", st.Health.Home)
+	assert.Zero(t, spawnCount(t, &Controller{Home: elsewhere}), "nothing started for the other home")
+}
+
 func TestEnsureRunning_RefusesDaemonForAnotherHome(t *testing.T) {
 	c := newTestController(t, modeNormal)
 	other := t.TempDir()
@@ -279,7 +296,7 @@ func TestEnsureRunning_ReportsEarlyExit(t *testing.T) {
 			require.Error(t, err)
 			assert.Less(t, time.Since(start), c.StartTimeout/2, "an early exit is reported without waiting out the timeout")
 			assert.Contains(t, err.Error(), tc.wantCause)
-			assert.Contains(t, err.Error(), filepath.Join(c.Home.LogsDir(), "daemon.log"))
+			assert.Contains(t, err.Error(), c.Home.DaemonLogPath())
 			assert.Contains(t, err.Error(), tc.wantLog)
 			assert.NotContains(t, err.Error(), "%!", "no formatting of a nil cause")
 		})

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,32 +16,25 @@ import (
 	"github.com/samsar/curio/internal/version"
 )
 
-func newStatusCmd() *cobra.Command {
+func newStatusCmd(env *daemonctl.Env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show daemon status, embedding info, and basic counts",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "cli:     %s\n", version.String())
 
-			health, err := ctx.Client.Healthz(cmd.Context())
+			health, err := env.Client.Healthz(cmd.Context())
 			if err != nil {
 				fmt.Fprintln(w, "daemon:  not running")
-				if ctx.Home != nil {
-					fmt.Fprintf(w, "home:    %s\n", ctx.Home.Path)
-					printDiskUsage(w, ctx.Home.Path)
-				}
+				fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
+				printDiskUsage(w, env.Home.Path)
 				return nil
 			}
 
 			fmt.Fprintf(w, "daemon:  running  (version %s)\n", health.Version)
-			fmt.Fprintf(w, "home:    %s\n", ctx.Home.Path)
-			if warning := homeMismatchWarning(health.Home, ctx.Home.Path); warning != "" {
+			fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
+			if warning := homeMismatchWarning(health.Home, env.Home.Path); warning != "" {
 				fmt.Fprint(w, warning)
 			}
 			fmt.Fprintf(w, "schema:  v%d\n", health.SchemaVersion)
@@ -50,7 +42,7 @@ func newStatusCmd() *cobra.Command {
 
 			sctx, scancel := context.WithTimeout(cmd.Context(), 1*time.Second)
 			defer scancel()
-			stats, err := ctx.Client.Stats(sctx)
+			stats, err := env.Client.Stats(sctx)
 			if err == nil && stats != nil {
 				fmt.Fprintf(w, "\nbookmarks: %d\n", stats.BookmarksTotal)
 				fmt.Fprintf(w, "documents: %d\n", stats.DocumentsTotal)
@@ -62,11 +54,11 @@ func newStatusCmd() *cobra.Command {
 				}
 			}
 
-			printDiskUsage(w, ctx.Home.Path)
+			printDiskUsage(w, env.Home.Path)
 
 			mctx, mcancel := context.WithTimeout(cmd.Context(), 2*time.Second)
 			defer mcancel()
-			if m, err := ctx.Client.Metrics(mctx, 0); err == nil && m != nil && len(m.ByKind) > 0 {
+			if m, err := env.Client.Metrics(mctx, 0); err == nil && m != nil && len(m.ByKind) > 0 {
 				fmt.Fprintf(w, "\nperformance (last %ds):\n", m.WindowSeconds)
 				for _, k := range m.ByKind {
 					fmt.Fprintf(w, "  %-9s  done=%-5d  fail=%-4d  mean=%5.0fms  p50=%5.0fms  p95=%5.0fms  p99=%5.0fms",

@@ -79,7 +79,6 @@ linters:
         - fmt.Fprintf
         - fmt.Fprintln
         - fmt.Fprint
-        - os.Setenv
     errorlint:
       # Some older call sites wrap a sentinel with %w and format the cause
       # with %v. fmt.Errorf has accepted several %w verbs since Go 1.20, so new

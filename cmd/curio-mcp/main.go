@@ -13,14 +13,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/samsar/curio/internal/client"
-	"github.com/samsar/curio/internal/config"
-	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/version"
 )
@@ -28,7 +25,7 @@ import (
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	c, err := setup()
+	c, err := setup(context.Background())
 	if err != nil {
 		log.Error("curio-mcp startup failed", "err", err)
 		os.Exit(1)
@@ -46,38 +43,17 @@ func main() {
 	}
 }
 
-// setup resolves $CURIO_HOME, loads config, ensures the daemon is running,
-// and returns an HTTP client pointed at it. Mirrors the CLI's bootstrap.
-func setup() (*client.Client, error) {
-	homePath, err := curiohome.Resolve()
+// setup finds the daemon for $CURIO_HOME the way the CLI does, ensures it
+// is running, and returns a client pointed at it.
+func setup(ctx context.Context) (*client.Client, error) {
+	env, err := daemonctl.Discover("", "")
 	if err != nil {
 		return nil, err
 	}
-	home, err := curiohome.Open(homePath)
-	if errors.Is(err, curiohome.ErrNotInitialized) {
-		defaults := config.Default().Embedding
-		home, err = curiohome.Init(homePath, defaults.Model, defaults.Dim)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	cfg, err := config.Load(home.ConfigPath()) // missing file → defaults
-	if err != nil {
-		return nil, err
-	}
-	base := "http://" + cfg.Daemon.Listen
-
-	daemonBin := os.Getenv("CURIO_DAEMON_BIN")
-	if daemonBin == "" {
-		if exe, exeErr := os.Executable(); exeErr == nil {
-			daemonBin = filepath.Join(filepath.Dir(exe), "curio-daemon")
-		}
-	}
-	if err := daemonctl.New(home, daemonBin, base).EnsureRunning(context.Background()); err != nil {
+	if err := env.Controller.EnsureRunning(ctx); err != nil {
 		return nil, fmt.Errorf("ensure daemon running: %w", err)
 	}
-	return client.New(base), nil
+	return env.Client, nil
 }
 
 func registerTools(s *mcp.Server, c *client.Client) {

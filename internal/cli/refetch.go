@@ -7,9 +7,12 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
+
+	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
-func newRefetchCmd() *cobra.Command {
+func newRefetchCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		all   bool
 		state string
@@ -20,21 +23,17 @@ func newRefetchCmd() *cobra.Command {
 		Short: "Re-fetch a document (or many) to pick up content changes / fetcher fixes",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 
 			if all {
-				return refetchAll(cmd.Context(), cmd.OutOrStdout(), ctx, state)
+				return refetchAll(cmd.Context(), cmd.OutOrStdout(), env.Client, state)
 			}
 			if len(args) != 1 {
 				return errors.New("provide a document ID or pass --all")
 			}
-			return refetchOne(cmd.Context(), cmd.OutOrStdout(), ctx, args[0], force)
+			return refetchOne(cmd.Context(), cmd.OutOrStdout(), env.Client, args[0], force)
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false,
@@ -46,8 +45,8 @@ func newRefetchCmd() *cobra.Command {
 	return cmd
 }
 
-func refetchOne(httpCtx context.Context, w io.Writer, c *Context, docID string, force bool) error {
-	resp, err := c.Client.RefetchDocument(httpCtx, docID, force)
+func refetchOne(ctx context.Context, w io.Writer, c *client.Client, docID string, force bool) error {
+	resp, err := c.RefetchDocument(ctx, docID, force)
 	if err != nil {
 		return err
 	}
@@ -55,8 +54,8 @@ func refetchOne(httpCtx context.Context, w io.Writer, c *Context, docID string, 
 	return nil
 }
 
-func refetchAll(httpCtx context.Context, w io.Writer, c *Context, state string) error {
-	resp, err := c.Client.RefetchAll(httpCtx, state)
+func refetchAll(ctx context.Context, w io.Writer, c *client.Client, state string) error {
+	resp, err := c.RefetchAll(ctx, state)
 	if err != nil {
 		return err
 	}

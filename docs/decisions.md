@@ -3195,3 +3195,37 @@ it falls back. The CLI keeps no enum lists of its own: the server's problem
 detail reaches the user as it is. Three hand-written parsers had drifted
 apart: interests clamped out-of-range values (so `members=-1` meant none),
 while related and metrics fell back to their defaults.
+
+---
+
+## Clients: one discovery, an explicit daemon environment, a signal context
+
+**Decision:**
+
+- `daemonctl.Discover(homeOverride, daemonURL)` resolves the home (an
+  override is made absolute with `filepath.Abs`; otherwise `$CURIO_HOME`,
+  then `~/.curio`), initializes it on first use, loads its config, and
+  returns the client and controller for the daemon that serves it. The CLI
+  and `curio-mcp` both bootstrap through it.
+- The controller hands the daemon it spawns `CURIO_HOME=<its home>`
+  explicitly. Nothing calls `os.Setenv`, and errcheck no longer exempts it.
+- `cmd/curio` runs the CLI through `cli.Run(ctx, args, stdout, stderr)`
+  under `signal.NotifyContext` (interrupt, SIGTERM), so a command that waits
+  (`import --follow`, `add --wait`) sees ctrl-c as a cancelled context. The
+  first signal restores the default handling, so a second one kills.
+- The root command silences cobra's own error printing: `Run` prints
+  `Error: <message>` once. A file-open error is returned as the
+  `*os.PathError` it is, which already names the path.
+- Commands close over the `daemonctl.Env` the root command's
+  `PersistentPreRunE` fills in, instead of fetching a value from the
+  context and checking it on every call.
+
+**Why:** `--curio-home` reached the daemon only because the CLI exported it
+into its own environment for the child to inherit. The CLI and the sidecar
+each had a copy of the bootstrap. No signal context was ever installed, so
+the documented ctrl-c path of `followProgress` never ran and `waitForFetch`
+slept through it. Every error printed twice (cobra, then `main`), with the
+path doubled: `open /x.html: open /x.html: no such file or directory`.
+Twenty-four call sites repeated `getCtx` and a "no context" error, and
+ten checked for a nil home or controller that `buildContext` could no
+longer return.

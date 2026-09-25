@@ -1,16 +1,16 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
-func newInterestsCmd() *cobra.Command {
+func newInterestsCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		limit   int
 		members int
@@ -23,14 +23,10 @@ func newInterestsCmd() *cobra.Command {
 			"or refresh them after adding content.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			res, err := ctx.Client.ListInterests(cmd.Context(), client.ListInterestsOpts{
+			res, err := env.Client.ListInterests(cmd.Context(), client.ListInterestsOpts{
 				Limit:   limit,
 				Members: members,
 			})
@@ -43,11 +39,11 @@ func newInterestsCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&limit, "limit", 20, "Max interests to show")
 	cmd.Flags().IntVar(&members, "members", 3, "Documents to preview per interest")
-	cmd.AddCommand(newInterestsRebuildCmd())
+	cmd.AddCommand(newInterestsRebuildCmd(env))
 	return cmd
 }
 
-func newInterestsRebuildCmd() *cobra.Command {
+func newInterestsRebuildCmd(env *daemonctl.Env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "rebuild",
 		Short: "Recompute interest clusters from the current corpus",
@@ -56,14 +52,10 @@ func newInterestsRebuildCmd() *cobra.Command {
 			"`curio jobs --kind cluster` and view results with `curio interests`.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			res, err := ctx.Client.RebuildInterests(cmd.Context())
+			res, err := env.Client.RebuildInterests(cmd.Context())
 			if err != nil {
 				return err
 			}

@@ -2,13 +2,15 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
 // newDoctorCmd diagnoses the parts of curio that fail silently.
@@ -16,17 +18,13 @@ import (
 // Inspired by `brew doctor`: walk through every dependency, print a
 // status line per check, end with a one-line summary and a suggested
 // next action if anything's wrong.
-func newDoctorCmd() *cobra.Command {
+func newDoctorCmd(env *daemonctl.Env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose curio's environment: daemon, Ollama, DB, config, fetcher",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
 			r := newDoctorReport()
-			runDoctorChecks(cmd.Context(), ctx, r)
+			runDoctorChecks(cmd.Context(), env, r)
 			r.print(cmd.OutOrStdout())
 			if r.failures > 0 {
 				return fmt.Errorf("%d check(s) failed", r.failures)
@@ -91,21 +89,15 @@ func (r *doctorReport) print(w io.Writer) {
 	}
 }
 
-func runDoctorChecks(httpCtx context.Context, c *Context, r *doctorReport) {
+func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 	// 1. $CURIO_HOME and marker file
-	if c.Home == nil {
-		r.add("curio home", statusFail, "$CURIO_HOME not initialized",
-			"run any curio command to auto-init, or set CURIO_HOME")
+	if meta, err := c.Home.Meta(); err != nil {
+		r.add("curio home", statusFail, c.Home.Path+" — marker unreadable: "+err.Error(),
+			"check file perms on "+c.Home.MarkerPath())
 	} else {
-		meta, err := c.Home.Meta()
-		if err != nil {
-			r.add("curio home", statusFail, c.Home.Path+" — marker unreadable",
-				"check file perms on "+c.Home.MarkerPath())
-		} else {
-			r.add("curio home", statusOK,
-				fmt.Sprintf("%s (schema v%d, embedder %s/%d)",
-					c.Home.Path, meta.SchemaVersion, meta.EmbeddingModel, meta.EmbeddingDim), "")
-		}
+		r.add("curio home", statusOK,
+			fmt.Sprintf("%s (schema v%d, embedder %s/%d)",
+				c.Home.Path, meta.SchemaVersion, meta.EmbeddingModel, meta.EmbeddingDim), "")
 	}
 
 	// 2. config validates
@@ -120,7 +112,7 @@ func runDoctorChecks(httpCtx context.Context, c *Context, r *doctorReport) {
 	}
 
 	// 3. daemon reachable
-	health, err := c.Client.Healthz(httpCtx)
+	health, err := c.Client.Healthz(ctx)
 	if err != nil {
 		r.add("daemon", statusFail, "not reachable at "+c.Config.Daemon.Listen,
 			"run `curio daemon start`")
@@ -158,17 +150,24 @@ func runDoctorChecks(httpCtx context.Context, c *Context, r *doctorReport) {
 	}
 
 	// 6. content dir writable
-	if c.Home != nil {
-		dir := c.Home.ContentDir()
-		probe := dir + "/.doctor-probe"
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			r.add("content dir", statusFail, "cannot create "+dir+": "+err.Error(), "")
-		} else if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
-			r.add("content dir", statusFail, "not writable: "+err.Error(),
-				"fix perms on "+dir)
-		} else {
-			_ = os.Remove(probe)
-			r.add("content dir", statusOK, dir+" writable", "")
-		}
+	checkContentDir(c.Home.ContentDir(), r)
+}
+
+// checkContentDir checks that the daemon can write extracted content to dir
+// by writing, then removing, a probe file.
+func checkContentDir(dir string, r *doctorReport) {
+	probe := filepath.Join(dir, ".doctor-probe")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		r.add("content dir", statusFail, "cannot create "+dir+": "+err.Error(), "")
+		return
 	}
+	if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
+		r.add("content dir", statusFail, "not writable: "+err.Error(), "fix perms on "+dir)
+		return
+	}
+	if err := os.Remove(probe); err != nil {
+		r.add("content dir", statusWarn, dir+" writable, but the probe file stayed: "+err.Error(), "delete "+probe)
+		return
+	}
+	r.add("content dir", statusOK, dir+" writable", "")
 }

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -9,15 +8,16 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
-func newDocsCmd() *cobra.Command {
-	cmd := newDocsListCmd()
-	cmd.AddCommand(newDocsShowCmd())
+func newDocsCmd(env *daemonctl.Env) *cobra.Command {
+	cmd := newDocsListCmd(env)
+	cmd.AddCommand(newDocsShowCmd(env))
 	return cmd
 }
 
-func newDocsListCmd() *cobra.Command {
+func newDocsListCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		failedOnly bool
 		showAll    bool
@@ -40,17 +40,12 @@ another lookup.
 Cross-reference: 'curio jobs --failed' shows the underlying job rows
 with full error messages and attempt counts.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			s := resolveDocsState(state, failedOnly, showAll)
-
-			resp, err := ctx.Client.ListDocuments(cmd.Context(), client.ListDocumentsOpts{
-				State: s, Limit: limit,
+			resp, err := env.Client.ListDocuments(cmd.Context(), client.ListDocumentsOpts{
+				State: resolveFilter(state, failedOnly, showAll, "fetched"),
+				Limit: limit,
 			})
 			if err != nil {
 				return err
@@ -66,22 +61,7 @@ with full error messages and attempt counts.`,
 	return cmd
 }
 
-// resolveDocsState resolves the three flags into a single state filter.
-// Precedence: --state > --failed > --all > default(fetched).
-func resolveDocsState(state string, failedOnly, all bool) string {
-	switch {
-	case state != "":
-		return state
-	case failedOnly:
-		return "failed"
-	case all:
-		return ""
-	default:
-		return "fetched"
-	}
-}
-
-func newDocsShowCmd() *cobra.Command {
+func newDocsShowCmd(env *daemonctl.Env) *cobra.Command {
 	var showContent bool
 	cmd := &cobra.Command{
 		Use:   "show <document-id>",
@@ -91,16 +71,12 @@ extraction info, and the on-disk markdown path so you can grep/edit
 directly. Pass --content to also stream the markdown to stdout.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 
 			id := args[0]
-			doc, err := ctx.Client.GetDocument(cmd.Context(), id)
+			doc, err := env.Client.GetDocument(cmd.Context(), id)
 			if err != nil {
 				return err
 			}
@@ -108,7 +84,7 @@ directly. Pass --content to also stream the markdown to stdout.`,
 			renderDocShow(w, doc)
 
 			if showContent {
-				body, err := ctx.Client.GetDocumentContent(cmd.Context(), id)
+				body, err := env.Client.GetDocumentContent(cmd.Context(), id)
 				if err != nil {
 					return err
 				}
