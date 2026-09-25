@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -30,6 +32,9 @@ func newEvalCmd() *cobra.Command {
 			if queriesPath == "" {
 				return errors.New("--queries is required (path to a qrels YAML file)")
 			}
+			if k < 1 {
+				return fmt.Errorf("--k must be at least 1, got %d", k)
+			}
 			ctx, ok := getCtx(cmd.Context())
 			if !ok {
 				return errors.New("no context")
@@ -43,26 +48,45 @@ func newEvalCmd() *cobra.Command {
 				return err
 			}
 
-			ranked := make([][]string, len(qs.Queries))
-			for i, q := range qs.Queries {
-				res, err := ctx.Client.Search(cmd.Context(), client.SearchRequest{Query: q.Query, K: k})
-				if err != nil {
-					return fmt.Errorf("search %q: %w", q.Query, err)
-				}
-				urls := make([]string, 0, len(res.Items))
-				for _, hit := range res.Items {
-					urls = append(urls, hit.Document.URL)
-				}
-				ranked[i] = urls
+			ranked, err := rankQueries(cmd.Context(), ctx.Client, qs, k)
+			if err != nil {
+				return err
 			}
-
 			renderEvalReport(eval.Evaluate(qs, ranked, k))
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&queriesPath, "queries", "", "Path to a qrels YAML file (query + relevant URLs)")
-	cmd.Flags().IntVarP(&k, "k", "k", 10, "Rank cutoff for @k metrics")
+	cmd.Flags().IntVarP(&k, "k", "k", 10, "Rank cutoff for @k metrics, 1-100")
 	return cmd
+}
+
+// searcher is the slice of the daemon client that rankQueries needs.
+type searcher interface {
+	Search(ctx context.Context, req client.SearchRequest) (*client.SearchResponse, error)
+}
+
+// rankQueries runs every query through search and returns the URLs each one
+// ranked. A degraded (keyword-only) response is an error: scoring it would
+// report BM25 alone as if it were the hybrid pipeline being measured.
+func rankQueries(ctx context.Context, s searcher, qs *eval.QuerySet, k int) ([][]string, error) {
+	ranked := make([][]string, len(qs.Queries))
+	for i, q := range qs.Queries {
+		res, err := s.Search(ctx, client.SearchRequest{Query: q.Query, K: k})
+		if err != nil {
+			return nil, fmt.Errorf("search %q: %w", q.Query, err)
+		}
+		if res.Degraded {
+			return nil, fmt.Errorf("search %q returned keyword-only results (%s); not scoring a degraded search",
+				q.Query, strings.Join(res.Warnings, "; "))
+		}
+		urls := make([]string, 0, len(res.Items))
+		for _, hit := range res.Items {
+			urls = append(urls, hit.Document.URL)
+		}
+		ranked[i] = urls
+	}
+	return ranked, nil
 }
 
 func renderEvalReport(r eval.Report) {

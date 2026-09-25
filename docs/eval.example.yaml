@@ -3,7 +3,12 @@
 # Each entry is a query plus the document URLs you consider relevant to it.
 # `curio eval --queries this-file.yaml` runs every query through /v1/search and
 # scores the returned ranking against these labels (recall@k, precision@k,
-# NDCG@k, MRR). Matching is by exact document URL.
+# NDCG@k, MRR). Matching is by document URL after the same normalization curio
+# applies when saving a bookmark (fragment and tracking parameters dropped,
+# host lowercased, youtu.be -> youtube.com/watch?v=...), so URLs pasted from a
+# browser match. precision@k is hits / k: a query that returns fewer than k
+# results is not rewarded for it. If Ollama is down and search falls back to
+# keyword-only results, eval stops with an error instead of scoring them.
 #
 # Build your own from YOUR corpus: pick 10-20 representative queries and, for
 # each, list the URLs that *should* come back near the top. Keep it in version

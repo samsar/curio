@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // Query is one labeled evaluation query: the text and the identifiers
@@ -19,7 +21,8 @@ type QuerySet struct {
 	Queries []Query `yaml:"queries"`
 }
 
-// LoadQuerySet reads and validates a qrels YAML file.
+// LoadQuerySet reads and validates a qrels YAML file. Relevant URLs are
+// normalized the way stored document URLs are, so they compare equal.
 func LoadQuerySet(path string) (*QuerySet, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -32,7 +35,8 @@ func LoadQuerySet(path string) (*QuerySet, error) {
 	if len(qs.Queries) == 0 {
 		return nil, fmt.Errorf("qrels %q has no queries", path)
 	}
-	for i, q := range qs.Queries {
+	for i := range qs.Queries {
+		q := &qs.Queries[i]
 		if q.Query == "" {
 			return nil, fmt.Errorf("qrels %q: query %d has empty text", path, i)
 		}
@@ -42,8 +46,34 @@ func LoadQuerySet(path string) (*QuerySet, error) {
 		if len(q.Relevant) == 0 {
 			return nil, fmt.Errorf("qrels %q: query %d (%q) has no relevant documents", path, i, q.Query)
 		}
+		relevant, err := normalizeURLs(q.Relevant)
+		if err != nil {
+			return nil, fmt.Errorf("qrels %q: query %d (%q): %w", path, i, q.Query, err)
+		}
+		q.Relevant = relevant
 	}
 	return &qs, nil
+}
+
+// normalizeURLs canonicalizes relevant URLs with urlutil.Normalize, as the
+// daemon does before storing a document, so a URL pasted from a browser —
+// with a fragment, tracking parameters, or a youtu.be link — still matches.
+// Duplicates that normalization reveals are dropped, so they can't inflate a
+// query's relevant count.
+func normalizeURLs(urls []string) ([]string, error) {
+	out := make([]string, 0, len(urls))
+	seen := make(map[string]bool, len(urls))
+	for _, raw := range urls {
+		u, err := urlutil.Normalize(raw)
+		if err != nil {
+			return nil, fmt.Errorf("relevant URL %q: %w", raw, err)
+		}
+		if !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+	return out, nil
 }
 
 // QueryResult holds the metrics for a single query.

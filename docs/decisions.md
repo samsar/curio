@@ -1723,6 +1723,26 @@ improvement*. This is that harness. It also de-risks M4 (measure whether a
 build-vs-buy RAG decision. The metrics package has no HTTP or store dependency,
 so it's easy to test and reuse.
 
+**Scoring rules** (the harness approves search changes, so it must not reward
+the wrong thing):
+
+- **P@k is hits / k** (trec_eval's definition): ranks past the end of a short
+  result list count as misses. It used to divide by the number retrieved, so
+  `[a]` with `a` relevant scored 1.0 at k=10 instead of 0.1 and a change that
+  returned fewer results scored better. Precision numbers recorded before this
+  fix aren't comparable with new ones; recall, NDCG and MRR are unaffected.
+- **Relevant URLs are normalized on load** with `urlutil.Normalize`, the same
+  canonicalization stored document URLs went through, and de-duplicated
+  afterwards; an unparseable URL fails loading and names the query. Verbatim
+  comparison silently scored a browser-pasted URL (fragment, `utm_*`,
+  `youtu.be`, a bare origin without the trailing `/`) as never retrieved.
+  `urlutil` is pure, so the package still has no store/HTTP/search dependency.
+- **A degraded search is refused:** if any query's response comes back
+  keyword-only (the vector leg failed, see "Hybrid search"), `curio eval`
+  exits non-zero naming the query and the warning instead of scoring BM25 as
+  if it were the hybrid pipeline. `--k` must be at least 1 (checked locally);
+  above 100 the API's 400 surfaces.
+
 ---
 
 ## M6 (planned): RAG / Q&A synthesis + SOTA natural-language search
