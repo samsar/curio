@@ -5,12 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build, test, lint
 
 ```sh
-make build               # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp
-make test                # unit tests under -race
-make test-integration    # needs Ollama + web2md available
-make test-e2e            # boots the daemon end-to-end
-make lint                # golangci-lint v2 with the project's .golangci.yml
-make fmt                 # gofmt + go mod tidy
+make build               # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp (go build cache decides staleness)
+make test                # unit tests under -race; no network, no Ollama
+make test-integration    # needs network: fetches live sites (tag `integration`)
+make test-e2e            # builds curio-daemon, drives it through daemonctl + client against fake Ollama (tag `e2e`)
+make vet                 # go vet with the build tags
+make lint                # the pinned golangci-lint (refuses other versions; `make tools` installs it)
+make vulncheck           # govulncheck, pinned
+make tidy-check          # fails if go.mod/go.sum aren't tidy
+make fmt                 # go fmt + go mod tidy, under the go.mod toolchain
+make tools               # installs the pinned golangci-lint and goose
 make help                # full target list
 ```
 
