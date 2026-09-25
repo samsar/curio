@@ -156,3 +156,7 @@ golangci-lint and goose, and `make help` lists every target.
 ## Naming
 
 Curio: a rare or interesting object you've collected. Also: curiosity.
+
+## License
+
+Apache License 2.0; see [LICENSE](./LICENSE).
