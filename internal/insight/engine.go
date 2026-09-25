@@ -94,9 +94,13 @@ func New(
 	}
 }
 
-// Rebuild recomputes the tenant's clusters from scratch and returns the new
-// run ID. It records a cluster_runs row for the attempt regardless of outcome
-// (status done or failed), so callers/UI can always report freshness.
+// Rebuild recomputes the tenant's clusters from scratch and returns the run's
+// ID. Once clustering starts, the attempt is a cluster_runs row that ends done
+// or failed (a failed run's ID comes back with the error), so callers/UI can
+// report freshness. Two paths create no row and leave existing runs untouched:
+// with nothing to cluster and a prior done run, that run's ID is returned; a
+// failure before clustering starts (reading vectors, looking up the prior run,
+// encoding the params) returns "" and the error.
 func (e *Engine) Rebuild(ctx context.Context, tenantID string) (string, error) {
 	dvs, err := e.chunks.DocumentVectors(ctx, tenantID)
 	if err != nil {
@@ -297,8 +301,11 @@ func optional(s string) *string {
 // corpus in memory.
 func preparePoints(dvs []store.DocVector, center bool) ([]Point, error) {
 	dim := len(dvs[0].Vector)
+	if dim == 0 {
+		return nil, fmt.Errorf("document %s has an empty vector", dvs[0].DocumentID)
+	}
 	for _, dv := range dvs {
-		if dim == 0 || len(dv.Vector) != dim {
+		if len(dv.Vector) != dim {
 			return nil, fmt.Errorf("document %s has a %d-dimensional vector, want %d",
 				dv.DocumentID, len(dv.Vector), dim)
 		}
@@ -449,6 +456,10 @@ func (e *Engine) labelAll(ctx context.Context, infos []ClusterInfo) ([]Label, er
 	if e.cfg.Labeling == LabelingLLM {
 		llm = e.llmLabeler
 	}
+	// Every term label counts as a fallback when LLM labels were wanted,
+	// including the clusters never offered to the model once it was switched
+	// off, so the warning reports how many interests lack an LLM name.
+	wantLLM := llm != nil
 	budget, cancel := context.WithTimeout(ctx, e.cfg.LabelingTimeout)
 	defer cancel()
 
@@ -474,10 +485,12 @@ func (e *Engine) labelAll(ctx context.Context, infos []ClusterInfo) ([]Label, er
 			default:
 				llm = nil
 			}
-			fellBack++
 			reason = err
 		}
 		labels[i] = e.termLabeler.label(info)
+		if wantLLM {
+			fellBack++
+		}
 	}
 	if fellBack > 0 {
 		e.log.Warn("llm labeling fell back to term labels",

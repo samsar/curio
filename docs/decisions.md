@@ -1639,8 +1639,9 @@ daemon restart. Within a run:
   used, so the budget goes to the interests that matter most.
 - The first LLM failure that would repeat — unreachable, an HTTP error, a
   timeout — **switches the LLM off for the rest of that run**: the remaining
-  clusters get term labels at once, and one WARN summarizes how many fell back
-  and why. Before, every cluster waited out the same failure (with generator
+  clusters get term labels at once, and one WARN reports how many clusters got
+  term labels (counting those never offered to the model) and the last LLM
+  error. Before, every cluster waited out the same failure (with generator
   retries, ≈6 min each), so a hung Ollama could hold the single cluster worker
   for hours.
 - `insight.labeling_timeout_seconds` (default 900) caps the total time one run

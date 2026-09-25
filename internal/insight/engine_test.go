@@ -145,6 +145,20 @@ func (f *engineFixture) clustersBySize(t *testing.T, runID string) map[int]strin
 	return out
 }
 
+// logLine returns the one log line containing msg, failing unless exactly one
+// was written.
+func (f *engineFixture) logLine(t *testing.T, msg string) string {
+	t.Helper()
+	var found []string
+	for line := range strings.Lines(f.logs.String()) {
+		if strings.Contains(line, msg) {
+			found = append(found, line)
+		}
+	}
+	require.Len(t, found, 1, "log lines containing %q", msg)
+	return found[0]
+}
+
 // clusterFunc adapts a function to Clusterer.
 type clusterFunc func(ctx context.Context, points []Point) ([]int, error)
 
@@ -241,13 +255,27 @@ func TestPreparePoints_CenteringSeparatesAnisotropic(t *testing.T) {
 	assert.NotEqual(t, labels[0], labels[3])
 }
 
-func TestPreparePoints_RejectsMixedDims(t *testing.T) {
-	_, err := preparePoints([]store.DocVector{
-		{DocumentID: "a", Vector: []float32{1, 0}},
-		{DocumentID: "b", Vector: []float32{1, 0, 0}},
-	}, true)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "document b")
+func TestPreparePoints_RejectsBadDims(t *testing.T) {
+	cases := []struct {
+		name string
+		dvs  []store.DocVector
+		want string
+	}{
+		{"mixed dims", []store.DocVector{
+			{DocumentID: "a", Vector: []float32{1, 0}},
+			{DocumentID: "b", Vector: []float32{1, 0, 0}},
+		}, "document b has a 3-dimensional vector, want 2"},
+		{"empty vector", []store.DocVector{
+			{DocumentID: "a"},
+			{DocumentID: "b", Vector: []float32{1}},
+		}, "document a has an empty vector"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := preparePoints(tc.dvs, true)
+			require.EqualError(t, err, tc.want)
+		})
+	}
 }
 
 var errLocked = errors.New("database is locked")
@@ -385,9 +413,10 @@ func TestRebuild_LLMFailureFallsBackForTheWholeRun(t *testing.T) {
 	for size, label := range labels {
 		assert.True(t, strings.HasPrefix(label, "Group"), "cluster of size %d got term label %q", size, label)
 	}
-	assert.Equal(t, 1, strings.Count(f.logs.String(), "llm labeling fell back"), "one summary warning")
-	assert.Contains(t, f.logs.String(), "clusters=5")
-	assert.Contains(t, f.logs.String(), "connection refused")
+	warn := f.logLine(t, "llm labeling fell back")
+	assert.Contains(t, warn, "level=WARN")
+	assert.Contains(t, warn, "clusters=5 of=5", "clusters never offered to the model count too")
+	assert.Contains(t, warn, "connection refused")
 }
 
 func TestRebuild_UnparseableReplyFallsBackForOneCluster(t *testing.T) {
@@ -408,6 +437,7 @@ func TestRebuild_UnparseableReplyFallsBackForOneCluster(t *testing.T) {
 		assert.Equal(t, fmt.Sprintf("LLM %d", size), labels[size])
 	}
 	assert.True(t, strings.HasPrefix(labels[5], "Group2"), "got %q", labels[5])
+	assert.Contains(t, f.logLine(t, "llm labeling fell back"), "clusters=1 of=5")
 }
 
 func TestRebuild_LabelingBudget(t *testing.T) {
@@ -437,6 +467,9 @@ func TestRebuild_LabelingBudget(t *testing.T) {
 	for size, label := range f.clustersBySize(t, runID) {
 		assert.True(t, strings.HasPrefix(label, "Group"), "cluster of size %d got term label %q", size, label)
 	}
+	warn := f.logLine(t, "llm labeling fell back")
+	assert.Contains(t, warn, "clusters=3 of=3")
+	assert.Contains(t, warn, "deadline exceeded")
 }
 
 func TestRebuild_LabelsLargestClustersFirst(t *testing.T) {
@@ -448,6 +481,7 @@ func TestRebuild_LabelsLargestClustersFirst(t *testing.T) {
 	})
 	f.rebuild(t, f.engine(byAxis, llm, Config{Labeling: LabelingLLM}))
 	assert.Equal(t, []int{7, 6, 5, 4, 3}, order)
+	assert.NotContains(t, f.logs.String(), "llm labeling fell back")
 }
 
 func TestRebuild_TitleLookupErrors(t *testing.T) {
