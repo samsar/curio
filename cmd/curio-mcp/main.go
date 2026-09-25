@@ -155,11 +155,19 @@ func searchHandler(c *client.Client) mcp.ToolHandlerFor[searchInput, searchOutpu
 		out.Degraded, out.Warnings = res.Degraded, res.Warnings
 		text := formatHits(in.Query, out.Results)
 		if res.Degraded {
-			text = "Note: semantic search is unavailable, so these are keyword-only results (" +
-				strings.Join(res.Warnings, "; ") + ").\n\n" + text
+			text = degradedNote(res.Warnings) + "\n\n" + text
 		}
 		return textResult(text), out, nil
 	}
+}
+
+// degradedNote tells the model that the hits are keyword-only. The daemon's
+// warnings already say that and why, so they are quoted as they are.
+func degradedNote(warnings []string) string {
+	if len(warnings) == 0 {
+		return "Note: semantic search unavailable; keyword-only results."
+	}
+	return "Note: " + strings.Join(warnings, "; ") + "."
 }
 
 // --- get_document ---

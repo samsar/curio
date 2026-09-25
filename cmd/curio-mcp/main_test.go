@@ -202,8 +202,8 @@ func TestMCP_SearchDegraded(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, res.IsError)
 	txt := textOf(res)
-	assert.True(t, strings.HasPrefix(txt, "Note: semantic search is unavailable"), txt)
-	assert.Contains(t, txt, "connection refused")
+	assert.True(t, strings.HasPrefix(txt,
+		"Note: semantic search unavailable (connection refused); keyword-only results.\n\n"), txt)
 	assert.Contains(t, txt, "doc_id: doc-1", "the keyword results are still listed")
 
 	raw, err := json.Marshal(res.StructuredContent)
@@ -213,4 +213,10 @@ func TestMCP_SearchDegraded(t *testing.T) {
 	assert.True(t, out.Degraded)
 	assert.NotEmpty(t, out.Warnings)
 	assert.Len(t, out.Results, 1)
+}
+
+func TestDegradedNote(t *testing.T) {
+	assert.Equal(t, "Note: semantic search unavailable; keyword-only results.", degradedNote(nil),
+		"a degraded response without warnings still gets the note")
+	assert.Equal(t, "Note: first; second.", degradedNote([]string{"first", "second"}))
 }
