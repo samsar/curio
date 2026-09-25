@@ -1,14 +1,20 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/importer"
+	"github.com/samsar/curio/internal/store"
 )
 
 // unfetchableURLs are URLs curio can't fetch: not http(s), or no host.
@@ -60,4 +66,137 @@ func TestImportBookmarks_FiltersUnfetchableURLs(t *testing.T) {
 		importer.ReasonInvalidURL:        1, // https:///x
 	}, got.FilteredBy)
 	assert.Zero(t, s.count(t, "documents"))
+}
+
+func (s *testServer) createBookmark(t *testing.T, url string) (response, BookmarkCreatedResponse) {
+	t.Helper()
+	body, err := json.Marshal(CreateBookmarkRequest{URL: url})
+	require.NoError(t, err)
+	resp := s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks", contentType: "application/json", body: string(body)})
+	var got BookmarkCreatedResponse
+	if resp.status == http.StatusCreated {
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+	}
+	return resp, got
+}
+
+func (s *testServer) importBookmarks(t *testing.T, source string, urls ...string) ImportResponse {
+	t.Helper()
+	req := ImportRequest{Source: source}
+	for _, u := range urls {
+		req.Bookmarks = append(req.Bookmarks, ImportBookmark{URL: u})
+	}
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+	resp := s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks/import", contentType: "application/json", body: string(body)})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var got ImportResponse
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+	return got
+}
+
+// TestCreateBookmark_EnqueueFailure: a bookmark whose fetch job can't be
+// written isn't saved either, so the retry succeeds instead of answering 409
+// for a bookmark whose document would sit pending with no job.
+func TestCreateBookmark_EnqueueFailure(t *testing.T) {
+	s := newTestServer(t)
+	restore := s.failJobInserts(t)
+
+	resp, _ := s.createBookmark(t, "https://example.com/a")
+	assertProblem(t, resp, http.StatusInternalServerError)
+	assert.Zero(t, s.count(t, "documents"))
+	assert.Zero(t, s.count(t, "bookmarks"))
+	assert.Zero(t, s.count(t, "jobs"))
+
+	restore()
+	resp, got := s.createBookmark(t, "https://example.com/a")
+	require.Equal(t, http.StatusCreated, resp.status, resp.body)
+	assert.NotEmpty(t, got.JobID)
+	assert.Equal(t, string(store.DocStatePending), got.Bookmark.DocumentState)
+}
+
+// TestCreateBookmark_KnownDocument: a URL the corpus already has gets a
+// bookmark but no second fetch.
+func TestCreateBookmark_KnownDocument(t *testing.T) {
+	s := newTestServer(t)
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+
+	resp, got := s.createBookmark(t, "https://example.com/a")
+	require.Equal(t, http.StatusCreated, resp.status, resp.body)
+	assert.Empty(t, got.JobID)
+	assert.Equal(t, string(store.DocStateFetched), got.Bookmark.DocumentState)
+	require.NotNil(t, got.Bookmark.DocumentID)
+	assert.Equal(t, doc.ID, *got.Bookmark.DocumentID)
+	assert.Zero(t, s.count(t, "jobs"))
+
+	resp, _ = s.createBookmark(t, "https://example.com/a")
+	assertProblem(t, resp, http.StatusConflict)
+}
+
+func TestImportBookmarks_EnqueueFailure(t *testing.T) {
+	s := newTestServer(t)
+	restore := s.failJobInserts(t)
+
+	got := s.importBookmarks(t, store.SourceChrome, "https://example.com/a")
+	assert.Zero(t, got.Created)
+	assert.NotEmpty(t, got.Errors)
+	assert.Zero(t, s.count(t, "documents"))
+	assert.Zero(t, s.count(t, "bookmarks"))
+	assert.Zero(t, s.count(t, "jobs"))
+
+	restore()
+	got = s.importBookmarks(t, store.SourceChrome, "https://example.com/a")
+	assert.Equal(t, 1, got.Created, "the failed row wasn't left behind to be skipped")
+	assert.Equal(t, 1, got.JobsEnqueued)
+	assert.Empty(t, got.Errors)
+}
+
+// TestImportBookmarks_OneFetchPerDocument: the same URL from synced browsers
+// and a manual add is one document fetched once, not once per bookmark.
+func TestImportBookmarks_OneFetchPerDocument(t *testing.T) {
+	s := newTestServer(t)
+
+	got := s.importBookmarks(t, store.SourceChrome, "https://example.com/a")
+	assert.Equal(t, 1, got.Created)
+	assert.Equal(t, 1, got.JobsEnqueued)
+	for _, source := range []string{store.SourceSafari, store.SourceFirefox} {
+		got = s.importBookmarks(t, source, "https://example.com/a")
+		assert.Equal(t, 1, got.Created, source)
+		assert.Zero(t, got.JobsEnqueued, source)
+	}
+	got = s.importBookmarks(t, store.SourceFirefox, "https://example.com/a")
+	assert.Equal(t, 1, got.Skipped)
+
+	resp, created := s.createBookmark(t, "https://example.com/a")
+	require.Equal(t, http.StatusCreated, resp.status, resp.body)
+	assert.Empty(t, created.JobID)
+
+	assert.Equal(t, 1, s.count(t, "documents"))
+	assert.Equal(t, 4, s.count(t, "bookmarks"))
+	assert.Equal(t, 1, s.count(t, "jobs"))
+}
+
+// countingIngest counts the Ingest calls that reach the store.
+type countingIngest struct {
+	store.BookmarkStore
+	calls atomic.Int32
+}
+
+func (c *countingIngest) Ingest(context.Context, *store.Bookmark) (store.IngestResult, error) {
+	c.calls.Add(1)
+	return store.IngestResult{}, nil
+}
+
+// TestImportBookmarks_StopsWhenClientGone: once the client has gone, the
+// rest of the batch isn't written.
+func TestImportBookmarks_StopsWhenClientGone(t *testing.T) {
+	bms := &countingIngest{}
+	d := Deps{Bookmarks: bms, TenantID: "local", Log: slog.New(slog.DiscardHandler)}
+	body := `{"source":"chrome","bookmarks":[{"url":"https://example.com/a"},{"url":"https://example.com/b"}]}`
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/bookmarks/import", strings.NewReader(body))
+	d.handleImportBookmarks(httptest.NewRecorder(), req)
+	assert.Zero(t, bms.calls.Load())
 }

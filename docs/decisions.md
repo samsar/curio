@@ -2582,3 +2582,59 @@ had just created.
 value the new extraction lacks must not survive from the old one. Clients
 already fall back to the URL or the bookmark title when `title` is NULL.
 `word_count` is left alone because no fetcher sets it.
+
+---
+
+## Bookmark ingest: one transaction, fetch only for new documents
+
+**Decision:** `POST /v1/bookmarks` and `POST /v1/bookmarks/import` save
+each bookmark through `BookmarkStore.Ingest`, one write-first transaction
+per bookmark:
+
+1. `INSERT INTO documents ... ON CONFLICT (tenant_id, url) DO NOTHING
+   RETURNING id, state`; no row back means the document exists, so it is
+   read.
+2. The bookmark is inserted linked to that document. `ON CONFLICT
+   (tenant_id, url, source) DO NOTHING` returning no row is `ErrConflict`,
+   and the rollback takes the document insert with it.
+3. A fetch job is inserted (through `insertJob`) only when step 1 created
+   the document.
+
+Either everything commits or nothing does. The create endpoint answers
+409 for a duplicate bookmark and returns `job_id: ""` with the existing
+document's `document_state` for a known URL; the import endpoint counts a
+duplicate as skipped and only new documents in `jobs_enqueued`. Fetch and
+index payloads are one type, `store.DocumentJobPayload`, built by
+`store.NewDocumentJob`.
+
+**Why:** the handlers ran GetByURL, Upsert, bookmark insert and enqueue as
+separate autocommit writes, and enqueued whenever the document was
+`pending`. Two failures followed:
+
+- An enqueue that failed after the bookmark committed left the document
+  `pending` with no job, for good: a retry of the create answered 409
+  before reaching the enqueue, and a re-import counted the row as skipped.
+  That is the stuck state the permanent-failure hook and `RequeueFetch`
+  exist to prevent.
+- One URL imported from Chrome, Safari and Firefox and then added by hand
+  got four fetch jobs, so every bookmark shared by synced browsers was
+  fetched and embedded again.
+
+**Fetch only when created:** no lookup of queued jobs is needed. A
+`pending` document already has its fetch or index job; a `fetched` one has
+its content; a `failed` or `dead` one is left to `curio refetch`, which
+knows the dead-link rules. Documents stranded `pending` by the old path are
+healed with `curio refetch --all --state=pending`.
+
+**One transaction per bookmark, not per batch:** measured at about 145 µs
+per bookmark, the same as the five autocommit statements it replaces, and
+it lets fetch and index workers interleave with a 500-bookmark batch. The
+write comes first so concurrent ingests queue on the write lock through
+busy_timeout (see "Job queue claim via atomic UPDATE ... RETURNING"); five
+writers ingesting the same URLs produced one document and one job per URL
+and no `SQLITE_BUSY`. The import handler stops at the first bookmark after
+the client has gone; each committed bookmark stands on its own, so a
+re-import resumes.
+
+URL normalization and `importer.Indexable` filtering stay in the handlers,
+which report failures differently (400 versus `filtered_by`).

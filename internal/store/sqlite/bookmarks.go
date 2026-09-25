@@ -61,23 +61,88 @@ func NewBookmarks(db *DB) *Bookmarks { return &Bookmarks{db: db} }
 
 const bookmarkListLimitDefault = 50
 
+func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.IngestResult, error) {
+	if err := validateBookmark(b); err != nil {
+		return store.IngestResult{}, err
+	}
+	tags, err := encodeTags(b.Tags)
+	if err != nil {
+		return store.IngestResult{}, err
+	}
+	id := b.ID
+	if id == "" {
+		id = uuid.NewString()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return store.IngestResult{}, fmt.Errorf("begin ingest: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+
+	docID, state, created, err := getOrCreateDocument(ctx, tx, b.TenantID, b.URL)
+	if err != nil {
+		return store.IngestResult{}, err
+	}
+
+	var createdAt, updatedAt string
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path, tags)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (tenant_id, url, source) DO NOTHING
+		RETURNING created_at, updated_at`,
+		id, b.TenantID, docID, b.URL,
+		strPtr(b.Title), formatTime(b.SavedAt), b.Source,
+		strPtr(b.FolderPath), tags,
+	).Scan(&createdAt, &updatedAt)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// The deferred Rollback discards the document insert too.
+		return store.IngestResult{}, fmt.Errorf("%w: bookmark for (tenant, url, source) exists", store.ErrConflict)
+	case isUniqueViolation(err):
+		return store.IngestResult{}, fmt.Errorf("bookmark %s: %w", id, store.ErrConflict)
+	case err != nil:
+		return store.IngestResult{}, fmt.Errorf("insert bookmark: %w", err)
+	}
+	createdTime, err := parseTime(createdAt)
+	if err != nil {
+		return store.IngestResult{}, err
+	}
+	updatedTime, err := parseTime(updatedAt)
+	if err != nil {
+		return store.IngestResult{}, err
+	}
+
+	res := store.IngestResult{DocumentState: state, DocumentCreated: created}
+	// Only a new document needs a fetch. An existing pending document
+	// already has its fetch or index job queued, and a failed or dead one is
+	// left to `curio refetch`.
+	if created {
+		if res.FetchJob, err = store.NewDocumentJob(b.TenantID, store.JobKindFetch, docID); err != nil {
+			return store.IngestResult{}, err
+		}
+		if err := insertJob(ctx, tx, res.FetchJob); err != nil {
+			return store.IngestResult{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return store.IngestResult{}, fmt.Errorf("commit ingest: %w", err)
+	}
+
+	b.ID = id
+	b.DocumentID = &docID
+	b.CreatedAt = createdTime
+	b.UpdatedAt = updatedTime
+	return res, nil
+}
+
 func (s *Bookmarks) Create(ctx context.Context, b *store.Bookmark) error {
 	if b.ID == "" {
 		b.ID = uuid.NewString()
 	}
-	if b.TenantID == "" {
-		return fmt.Errorf("bookmarks: tenant_id required")
+	if err := validateBookmark(b); err != nil {
+		return err
 	}
-	if b.URL == "" {
-		return fmt.Errorf("bookmarks: url required")
-	}
-	if b.Source == "" {
-		return fmt.Errorf("bookmarks: source required")
-	}
-	if b.SavedAt.IsZero() {
-		return fmt.Errorf("bookmarks: saved_at required")
-	}
-
 	tagsJSON, err := encodeTags(b.Tags)
 	if err != nil {
 		return err
@@ -104,6 +169,21 @@ func (s *Bookmarks) Create(ctx context.Context, b *store.Bookmark) error {
 	}
 	b.CreatedAt = got.CreatedAt
 	b.UpdatedAt = got.UpdatedAt
+	return nil
+}
+
+// validateBookmark checks the fields every bookmark insert requires.
+func validateBookmark(b *store.Bookmark) error {
+	switch {
+	case b.TenantID == "":
+		return errors.New("bookmarks: tenant_id required")
+	case b.URL == "":
+		return errors.New("bookmarks: url required")
+	case b.Source == "":
+		return errors.New("bookmarks: source required")
+	case b.SavedAt.IsZero():
+		return errors.New("bookmarks: saved_at required")
+	}
 	return nil
 }
 

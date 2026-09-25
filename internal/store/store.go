@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -147,7 +148,7 @@ type DocumentExtraction struct {
 type Bookmark struct {
 	ID         string
 	TenantID   string
-	DocumentID *string // nil until first successful fetch
+	DocumentID *string // the document Ingest linked it to; nil if that document was deleted
 	URL        string
 	Title      *string
 	SavedAt    time.Time
@@ -254,6 +255,18 @@ type ExtractionStore interface {
 
 // BookmarkStore operates on the bookmarks table.
 type BookmarkStore interface {
+	// Ingest saves a bookmark together with its document, in one
+	// transaction: it finds the tenant's document for b.URL or creates it
+	// pending, inserts the bookmark linked to it, and enqueues a fetch job
+	// only if it created the document. Either all of that commits or none
+	// of it does. b.URL must already be normalized, since it is the
+	// document's dedup key, and b.DocumentID on input is ignored. On success
+	// b.ID (generated when empty), b.DocumentID, b.CreatedAt and b.UpdatedAt
+	// are set. A bookmark that already exists for (tenant_id, url, source)
+	// is an error wrapping ErrConflict, and nothing is written.
+	Ingest(ctx context.Context, b *Bookmark) (IngestResult, error)
+	// Create inserts the bookmark row alone, linked to b.DocumentID as
+	// given. Ingest is the API path; Create is the low-level insert.
 	Create(ctx context.Context, b *Bookmark) error
 	GetByID(ctx context.Context, id string) (*Bookmark, error)
 	List(ctx context.Context, tenantID string, opts ListBookmarksOpts) ([]*Bookmark, error)
@@ -267,6 +280,14 @@ type BookmarkStore interface {
 
 	// Count returns how many bookmarks the tenant has.
 	Count(ctx context.Context, tenantID string) (int, error)
+}
+
+// IngestResult reports what BookmarkStore.Ingest did about the bookmark's
+// document.
+type IngestResult struct {
+	DocumentState   DocState // the document's state after the ingest
+	DocumentCreated bool     // this call created the document
+	FetchJob        *Job     // enqueued for a document this call created; nil otherwise
 }
 
 // ListBookmarksOpts are filters for BookmarkStore.List. Empty fields mean
@@ -369,6 +390,21 @@ type ChunkStore interface {
 	DocumentVectors(ctx context.Context, tenantID string) ([]DocVector, error)
 
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
+}
+
+// DocumentJobPayload is the payload of a job that works on one document
+// (fetch and index).
+type DocumentJobPayload struct {
+	DocumentID string `json:"document_id"`
+}
+
+// NewDocumentJob builds a job of kind for one document, ready to enqueue.
+func NewDocumentJob(tenantID string, kind JobKind, documentID string) (*Job, error) {
+	payload, err := json.Marshal(DocumentJobPayload{DocumentID: documentID})
+	if err != nil {
+		return nil, fmt.Errorf("encode %s job payload: %w", kind, err)
+	}
+	return &Job{TenantID: tenantID, Kind: kind, Payload: payload}, nil
 }
 
 // JobQueue is the SQLite-backed work queue.

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -37,9 +36,9 @@ type ImportResponse struct {
 	Source       string                        `json:"source"`
 	Total        int                           `json:"total"`
 	Created      int                           `json:"created"`
-	Skipped      int                           `json:"skipped"`  // unique-conflict on existing bookmark
-	Filtered     int                           `json:"filtered"` // dropped by Indexable
-	JobsEnqueued int                           `json:"jobs_enqueued"`
+	Skipped      int                           `json:"skipped"`       // the bookmark already existed for this source
+	Filtered     int                           `json:"filtered"`      // dropped by Indexable
+	JobsEnqueued int                           `json:"jobs_enqueued"` // fetches for URLs new to the corpus
 	FilteredBy   map[importer.FilterReason]int `json:"filtered_by,omitempty"`
 	Errors       []string                      `json:"errors,omitempty"` // first ~10
 }
@@ -69,7 +68,15 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 		FilteredBy: map[importer.FilterReason]int{},
 	}
 
-	for _, in := range req.Bookmarks {
+	for i, in := range req.Bookmarks {
+		if err := ctx.Err(); err != nil {
+			// The client has gone: stop writing rows nobody will hear about.
+			// Each bookmark committed on its own, so a re-import picks up
+			// where this one stopped.
+			d.Log.Info("import abandoned by the client", "processed", i, "total", len(req.Bookmarks), "err", err)
+			return
+		}
+
 		// Filter first; cheaper to reject before any DB work.
 		ok, why := importer.Indexable(in.URL)
 		if !ok {
@@ -77,7 +84,6 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 			resp.FilteredBy[why]++
 			continue
 		}
-
 		normURL, err := urlutil.Normalize(in.URL)
 		if err != nil {
 			resp.Filtered++
@@ -85,70 +91,18 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Find or create the underlying document.
-		doc, err := d.Documents.GetByURL(ctx, d.TenantID, normURL)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			resp.appendError(err.Error())
+		in.URL = normURL
+		res, err := d.Bookmarks.Ingest(ctx, d.bookmarkRow(in, req.Source))
+		switch {
+		case errors.Is(err, store.ErrConflict):
+			resp.Skipped++
 			continue
-		}
-		if doc == nil {
-			doc = &store.Document{
-				TenantID:    d.TenantID,
-				URL:         normURL,
-				ContentType: store.ContentTypeUnknown,
-				State:       store.DocStatePending,
-			}
-			if err := d.Documents.Create(ctx, doc); err != nil {
-				resp.appendError(err.Error())
-				continue
-			}
-		}
-
-		// Create the bookmark; ErrConflict is the expected dedup case.
-		var titlePtr, folderPtr *string
-		if in.Title != "" {
-			t := in.Title
-			titlePtr = &t
-		}
-		if in.FolderPath != "" {
-			f := in.FolderPath
-			folderPtr = &f
-		}
-		saved := in.SavedAt
-		if saved.IsZero() {
-			saved = time.Now().UTC()
-		}
-		b := &store.Bookmark{
-			TenantID:   d.TenantID,
-			URL:        normURL,
-			Title:      titlePtr,
-			SavedAt:    saved,
-			Source:     req.Source,
-			FolderPath: folderPtr,
-			Tags:       in.Tags,
-			DocumentID: &doc.ID,
-		}
-		if err := d.Bookmarks.Create(ctx, b); err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				resp.Skipped++
-				continue
-			}
-			resp.appendError(err.Error())
+		case err != nil:
+			resp.appendError(normURL + ": " + err.Error())
 			continue
 		}
 		resp.Created++
-
-		// Only enqueue a fetch job if the document still needs one.
-		if doc.State == store.DocStatePending {
-			payload, _ := json.Marshal(map[string]string{"document_id": doc.ID})
-			if err := d.Queue.Enqueue(ctx, &store.Job{
-				TenantID: d.TenantID,
-				Kind:     store.JobKindFetch,
-				Payload:  payload,
-			}); err != nil {
-				resp.appendError(err.Error())
-				continue
-			}
+		if res.FetchJob != nil {
 			resp.JobsEnqueued++
 		}
 	}
@@ -166,7 +120,7 @@ func (r *ImportResponse) appendError(msg string) {
 func validImportSource(s string) bool {
 	switch s {
 	case store.SourceChrome, store.SourceSafari, store.SourceFirefox,
-		store.SourceManual, "html":
+		store.SourceManual, store.SourceHTML:
 		return true
 	}
 	return false

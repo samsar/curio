@@ -1,8 +1,6 @@
 package api
 
 import (
-	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -59,83 +57,63 @@ type BookmarkCreatedResponse struct {
 	JobID    string           `json:"job_id"`
 }
 
+// handleCreateBookmark saves a manual bookmark. The fetch job is created
+// only for a URL the corpus didn't have: for a known document job_id is ""
+// and document_state is that document's.
 func (d Deps) handleCreateBookmark(w http.ResponseWriter, r *http.Request) {
 	var req CreateBookmarkRequest
 	if err := decodeJSON(w, r, maxJSONBody, &req); err != nil {
 		writeDecodeError(w, err)
 		return
 	}
-	ctx := r.Context()
-
 	normURL, err := urlutil.Normalize(req.URL)
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "invalid url", err.Error())
 		return
 	}
 
-	// Find or create the underlying document.
-	doc, err := d.Documents.GetByURL(ctx, d.TenantID, normURL)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	b := d.bookmarkRow(ImportBookmark{URL: normURL, Title: req.Title, FolderPath: req.FolderPath, Tags: req.Tags},
+		store.SourceManual)
+	res, err := d.Bookmarks.Ingest(r.Context(), b)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
-	if doc == nil {
-		doc = &store.Document{
-			TenantID:    d.TenantID,
-			URL:         normURL,
-			ContentType: store.ContentTypeUnknown,
-			State:       store.DocStatePending,
-		}
-		if err := d.Documents.Create(ctx, doc); err != nil {
-			writeError(w, err)
-			return
-		}
-	}
-
-	// Create the bookmark.
-	var titlePtr *string
-	if req.Title != "" {
-		titlePtr = &req.Title
-	}
-	var folderPtr *string
-	if req.FolderPath != "" {
-		folderPtr = &req.FolderPath
-	}
-	b := &store.Bookmark{
-		TenantID:   d.TenantID,
-		URL:        normURL,
-		Title:      titlePtr,
-		SavedAt:    time.Now().UTC(),
-		Source:     store.SourceManual,
-		FolderPath: folderPtr,
-		Tags:       req.Tags,
-		DocumentID: &doc.ID,
-	}
-	if err := d.Bookmarks.Create(ctx, b); err != nil {
-		writeError(w, err)
-		return
-	}
-
-	// Enqueue a fetch job if the document doesn't already have content.
 	jobID := ""
-	if doc.State == store.DocStatePending {
-		payload, _ := json.Marshal(map[string]string{"document_id": doc.ID})
-		job := &store.Job{
-			TenantID: d.TenantID,
-			Kind:     store.JobKindFetch,
-			Payload:  payload,
-		}
-		if err := d.Queue.Enqueue(ctx, job); err != nil {
-			writeError(w, err)
-			return
-		}
-		jobID = job.ID
+	if res.FetchJob != nil {
+		jobID = res.FetchJob.ID
 	}
-
 	writeJSON(w, http.StatusCreated, BookmarkCreatedResponse{
-		Bookmark: bookmarkToResponse(b, string(doc.State)),
+		Bookmark: bookmarkToResponse(b, string(res.DocumentState)),
 		JobID:    jobID,
 	})
+}
+
+// bookmarkRow maps a requested bookmark, its URL already normalized, onto the
+// row Ingest saves. An empty title or folder is stored as NULL, and a zero
+// SavedAt means now.
+func (d Deps) bookmarkRow(in ImportBookmark, source string) *store.Bookmark {
+	savedAt := in.SavedAt
+	if savedAt.IsZero() {
+		savedAt = time.Now().UTC()
+	}
+	return &store.Bookmark{
+		TenantID:   d.TenantID,
+		URL:        in.URL,
+		Title:      nonEmpty(in.Title),
+		SavedAt:    savedAt,
+		Source:     source,
+		FolderPath: nonEmpty(in.FolderPath),
+		Tags:       in.Tags,
+	}
+}
+
+// nonEmpty is s as a nullable column value: nil when s is empty.
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // BookmarkListResponse mirrors the openapi BookmarkList schema.

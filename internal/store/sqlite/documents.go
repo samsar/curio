@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -267,7 +266,7 @@ func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionI
 }
 
 func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID string) (*store.Job, error) {
-	job, err := newFetchJob(tenantID, documentID)
+	job, err := store.NewDocumentJob(tenantID, store.JobKindFetch, documentID)
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +334,7 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	}
 
 	for _, id := range ids {
-		job, err := newFetchJob(tenantID, id)
+		job, err := store.NewDocumentJob(tenantID, store.JobKindFetch, id)
 		if err != nil {
 			return 0, err
 		}
@@ -349,16 +348,33 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	return len(ids), nil
 }
 
-// newFetchJob builds a fetch job for a document. The payload is
-// jobs.FetchPayload's shape, which package store can't import.
-func newFetchJob(tenantID, documentID string) (*store.Job, error) {
-	payload, err := json.Marshal(struct {
-		DocumentID string `json:"document_id"`
-	}{documentID})
-	if err != nil {
-		return nil, fmt.Errorf("encode fetch payload: %w", err)
+// getOrCreateDocument returns the tenant's document for url, inserting it in
+// state pending when there is none; created reports whether it did. It runs
+// inside the caller's transaction, for units of work that save a reference
+// (a bookmark today) together with its document. Its first statement is the
+// INSERT, so a transaction that starts here takes the write lock outright
+// instead of upgrading from a read lock (see decisions.md "Job queue claim
+// via atomic UPDATE ... RETURNING").
+func getOrCreateDocument(ctx context.Context, tx *sql.Tx, tenantID, url string) (id string, state store.DocState, created bool, err error) {
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO documents (id, tenant_id, url) VALUES (?, ?, ?)
+		ON CONFLICT (tenant_id, url) DO NOTHING
+		RETURNING id, state`,
+		uuid.NewString(), tenantID, url).Scan(&id, &state)
+	switch {
+	case err == nil:
+		return id, state, true, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return "", "", false, fmt.Errorf("insert document: %w", err)
 	}
-	return &store.Job{TenantID: tenantID, Kind: store.JobKindFetch, Payload: payload}, nil
+	// DO NOTHING returned no row: the document exists.
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, state FROM documents WHERE tenant_id = ? AND url = ?`,
+		tenantID, url).Scan(&id, &state)
+	if err != nil {
+		return "", "", false, fmt.Errorf("look up document: %w", err)
+	}
+	return id, state, false, nil
 }
 
 func ensureRow(res sql.Result, entity string) error {

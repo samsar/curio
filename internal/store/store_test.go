@@ -1,9 +1,11 @@
 package store_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/store"
 )
@@ -41,4 +43,17 @@ func TestClusterRunStatus_IsFinished(t *testing.T) {
 	for status, want := range cases {
 		assert.Equal(t, want, status.IsFinished(), status)
 	}
+}
+
+func TestNewDocumentJob(t *testing.T) {
+	job, err := store.NewDocumentJob("local", store.JobKindIndex, "doc-1")
+	require.NoError(t, err)
+	assert.Equal(t, "local", job.TenantID)
+	assert.Equal(t, store.JobKindIndex, job.Kind)
+	assert.Empty(t, job.ID, "the queue assigns it")
+	assert.JSONEq(t, `{"document_id":"doc-1"}`, string(job.Payload))
+
+	var p store.DocumentJobPayload
+	require.NoError(t, json.Unmarshal(job.Payload, &p))
+	assert.Equal(t, "doc-1", p.DocumentID)
 }

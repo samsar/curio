@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -260,14 +259,12 @@ func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": len(ids)})
 }
 
-// enqueueIndex enqueues an index job for a document. The payload is
-// jobs.IndexPayload's shape.
+// enqueueIndex enqueues an index job for a document.
 func (d Deps) enqueueIndex(ctx context.Context, docID string) (*store.Job, error) {
-	payload, err := json.Marshal(map[string]string{"document_id": docID})
+	job, err := store.NewDocumentJob(d.TenantID, store.JobKindIndex, docID)
 	if err != nil {
-		return nil, fmt.Errorf("encode index payload: %w", err)
+		return nil, err
 	}
-	job := &store.Job{TenantID: d.TenantID, Kind: store.JobKindIndex, Payload: payload}
 	if err := d.Queue.Enqueue(ctx, job); err != nil {
 		return nil, err
 	}

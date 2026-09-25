@@ -103,14 +103,12 @@ func TestWorker_JobInterruptedByShutdownIsRequeued(t *testing.T) {
 
 			doc := &store.Document{TenantID: "local", URL: "https://example.com/x", ContentType: store.ContentTypeArticle}
 			require.NoError(t, deps.Documents.Create(ctx, doc))
-			payload, err := json.Marshal(FetchPayload{DocumentID: doc.ID})
-			require.NoError(t, err)
-			job := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}
+			job := docJob(t, store.JobKindFetch, doc.ID)
 			require.NoError(t, deps.Queue.Enqueue(ctx, job))
 
 			// One earlier real failure, so there is an attempt and a
 			// last_error that must survive the interruption.
-			_, err = deps.Queue.ClaimNext(ctx, nil)
+			_, err := deps.Queue.ClaimNext(ctx, nil)
 			require.NoError(t, err)
 			_, err = deps.Queue.MarkFailed(ctx, job.ID, "earlier failure", true)
 			require.NoError(t, err)
@@ -250,10 +248,8 @@ func TestWorker_RecoverOrphans(t *testing.T) {
 	ctx := context.Background()
 
 	enqueueRunning := func(kind store.JobKind, attempts int, docID string) *store.Job {
-		payload, err := json.Marshal(FetchPayload{DocumentID: docID})
-		require.NoError(t, err)
-		j := &store.Job{TenantID: "local", Kind: kind, Payload: payload,
-			Status: store.JobStatusRunning, Attempts: attempts}
+		j := docJob(t, kind, docID)
+		j.Status, j.Attempts = store.JobStatusRunning, attempts
 		require.NoError(t, deps.Queue.Enqueue(ctx, j))
 		return j
 	}
@@ -310,10 +306,8 @@ func TestWorker_RecoverOrphans_HooksOutliveShutdown(t *testing.T) {
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/crashes-the-daemon",
 		ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(context.Background(), doc))
-	payload, err := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	require.NoError(t, err)
-	orphan := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload,
-		Status: store.JobStatusRunning, Attempts: 5}
+	orphan := docJob(t, store.JobKindFetch, doc.ID)
+	orphan.Status, orphan.Attempts = store.JobStatusRunning, 5
 	require.NoError(t, deps.Queue.Enqueue(context.Background(), orphan))
 
 	ctx, cancel := context.WithCancel(context.Background())

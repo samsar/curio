@@ -654,9 +654,7 @@ func fetchJobsFor(t *testing.T, q *Jobs, docID string) []*store.Job {
 	require.NoError(t, err)
 	var out []*store.Job
 	for _, j := range all {
-		var p struct {
-			DocumentID string `json:"document_id"`
-		}
+		var p store.DocumentJobPayload
 		require.NoError(t, json.Unmarshal(j.Payload, &p))
 		if p.DocumentID == docID {
 			out = append(out, j.Job)

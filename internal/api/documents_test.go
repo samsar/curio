@@ -19,12 +19,18 @@ func (s *testServer) docState(t *testing.T, id string) store.DocState {
 	return d.State
 }
 
-// failJobInserts makes every job insert abort. Persistent rather than TEMP:
-// a TEMP trigger lives on one pooled connection only.
-func (s *testServer) failJobInserts(t *testing.T) {
+// failJobInserts makes every job insert abort until the returned restore
+// is called. Persistent rather than TEMP: a TEMP trigger lives on one pooled
+// connection only.
+func (s *testServer) failJobInserts(t *testing.T) (restore func()) {
 	t.Helper()
 	_, err := s.db.Exec(`CREATE TRIGGER t_fail BEFORE INSERT ON jobs BEGIN SELECT RAISE(ABORT, 'injected'); END`)
 	require.NoError(t, err)
+	return func() {
+		t.Helper()
+		_, err := s.db.Exec(`DROP TRIGGER t_fail`)
+		require.NoError(t, err)
+	}
 }
 
 func TestRefetchDocument(t *testing.T) {

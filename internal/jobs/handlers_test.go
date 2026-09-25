@@ -2,7 +2,6 @@ package jobs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -90,7 +89,16 @@ func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 		Queue:       queue,
 		Dispatcher:  dispatcher,
 		Indexer:     idx,
+		Log:         quietLog,
 	}, db, ff
+}
+
+// docJob builds a fetch or index job for a document, as the queue holds it.
+func docJob(t *testing.T, kind store.JobKind, docID string) *store.Job {
+	t.Helper()
+	job, err := store.NewDocumentJob("local", kind, docID)
+	require.NoError(t, err)
+	return job
 }
 
 // --- fetch handler ---
@@ -103,8 +111,7 @@ func TestFetchHandler_HappyPath(t *testing.T) {
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/article", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(ctx, doc))
 
-	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}
+	job := docJob(t, store.JobKindFetch, doc.ID)
 
 	err := FetchHandler(deps)(ctx, job)
 	require.NoError(t, err)
@@ -142,9 +149,7 @@ func TestFetchHandler_RefetchClearsStaleMetadata(t *testing.T) {
 	ctx := context.Background()
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/moved"}
 	require.NoError(t, deps.Documents.Create(ctx, doc))
-	payload, err := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	require.NoError(t, err)
-	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}
+	job := docJob(t, store.JobKindFetch, doc.ID)
 
 	ff.res.Author = "Ada"
 	ff.res.FinalURL = "https://example.com/moved-here"
@@ -181,8 +186,7 @@ func TestFetchHandler_ExtractionStatus(t *testing.T) {
 			doc := &store.Document{TenantID: "local", URL: "https://example.com/video", ContentType: store.ContentTypeVideo}
 			require.NoError(t, deps.Documents.Create(ctx, doc))
 
-			payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
-			require.NoError(t, FetchHandler(deps)(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}))
+			require.NoError(t, FetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 
 			got, err := deps.Documents.GetByID(ctx, doc.ID)
 			require.NoError(t, err)
@@ -205,16 +209,14 @@ func TestFetchHandler_FetcherError_Retryable(t *testing.T) {
 	doc := &store.Document{TenantID: "local", URL: "https://x", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(context.Background(), doc))
 
-	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	err := FetchHandler(deps)(context.Background(), &store.Job{Payload: payload})
+	err := FetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, doc.ID))
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, ErrPermanent), "network failures must be retryable")
 }
 
 func TestFetchHandler_MissingDocument_Permanent(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	payload, _ := json.Marshal(FetchPayload{DocumentID: "00000000-0000-0000-0000-000000000000"})
-	err := FetchHandler(deps)(context.Background(), &store.Job{Payload: payload})
+	err := FetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, "00000000-0000-0000-0000-000000000000"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPermanent)
 }
@@ -230,8 +232,7 @@ func TestFetchHandler_DeadLinkSentinelSurvivesBridge(t *testing.T) {
 	doc := &store.Document{TenantID: "local", URL: "https://x/gone", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(context.Background(), doc))
 
-	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	err := FetchHandler(deps)(context.Background(), &store.Job{Payload: payload})
+	err := FetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, doc.ID))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPermanent)
 	assert.ErrorIs(t, err, fetcher.ErrDeadLink, "sentinel must survive the ErrPermanent bridge")
@@ -244,8 +245,7 @@ func TestMarkDocFailed_DeadLinkGoesDead(t *testing.T) {
 	doc := &store.Document{TenantID: "local", URL: "https://x/gone", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(ctx, doc))
 
-	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	job := &store.Job{Payload: payload}
+	job := docJob(t, store.JobKindFetch, doc.ID)
 
 	// Dead-link cause → dead.
 	require.NoError(t, MarkDocFailed(deps)(ctx, job, &fetcher.PermanentError{Err: fetcher.ErrDeadLink}))
@@ -269,10 +269,10 @@ func TestMarkDocFailed_FinalLoginWallGoesFailed(t *testing.T) {
 
 	doc := &store.Document{TenantID: "local", URL: "https://x/thin", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(ctx, doc))
-	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
+	job := docJob(t, store.JobKindFetch, doc.ID)
 
 	cause := &fetcher.PermanentError{Err: fmt.Errorf("native: %w (extracted text < 500 bytes)", fetcher.ErrLoginWall)}
-	require.NoError(t, MarkDocFailed(deps)(ctx, &store.Job{Payload: payload}, cause))
+	require.NoError(t, MarkDocFailed(deps)(ctx, job, cause))
 	got, err := deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFailed, got.State)
@@ -295,12 +295,10 @@ func TestIndexHandler_HappyPath(t *testing.T) {
 	require.NoError(t, deps.Documents.Create(ctx, doc))
 
 	// Run the fetch first to set everything up.
-	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	require.NoError(t, FetchHandler(deps)(ctx, &store.Job{Payload: payload}))
+	require.NoError(t, FetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 
 	// Now run index.
-	ip, _ := json.Marshal(IndexPayload{DocumentID: doc.ID})
-	require.NoError(t, IndexHandler(deps)(ctx, &store.Job{Payload: ip}))
+	require.NoError(t, IndexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)))
 
 	got, _ := deps.Documents.GetByID(ctx, doc.ID)
 	assert.Equal(t, store.DocStateFetched, got.State, "document should be fetched after index")
@@ -327,10 +325,8 @@ func TestIndexHandler_BookmarkTagsAreSearchable(t *testing.T) {
 		SavedAt: time.Now().UTC(), Tags: []string{"zorptag"},
 	}))
 
-	fp, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	require.NoError(t, FetchHandler(deps)(ctx, &store.Job{Payload: fp}))
-	ip, _ := json.Marshal(IndexPayload{DocumentID: doc.ID})
-	require.NoError(t, IndexHandler(deps)(ctx, &store.Job{Payload: ip}))
+	require.NoError(t, FetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+	require.NoError(t, IndexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)))
 
 	// Sanity: the tag is not in the body, so without denormalization this
 	// would return nothing.
@@ -347,8 +343,7 @@ func TestIndexHandler_MissingExtraction_Permanent(t *testing.T) {
 	require.NoError(t, deps.Documents.Create(ctx, doc))
 	// No extraction created.
 
-	payload, _ := json.Marshal(IndexPayload{DocumentID: doc.ID})
-	err := IndexHandler(deps)(ctx, &store.Job{Payload: payload})
+	err := IndexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPermanent)
 }
@@ -363,10 +358,7 @@ func TestWorker_FullFetchIndexChain(t *testing.T) {
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/e2e", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(ctx, doc))
 
-	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	require.NoError(t, deps.Queue.Enqueue(ctx, &store.Job{
-		TenantID: "local", Kind: store.JobKindFetch, Payload: payload,
-	}))
+	require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 
 	worker := NewWorker(deps.Queue, WorkerOptions{PollInterval: 20 * time.Millisecond})
 	Register(worker, deps)
@@ -405,10 +397,7 @@ func TestWorker_DeadLinkMarksDocDead(t *testing.T) {
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/gone", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(ctx, doc))
 
-	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	require.NoError(t, deps.Queue.Enqueue(ctx, &store.Job{
-		TenantID: "local", Kind: store.JobKindFetch, Payload: payload,
-	}))
+	require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 
 	worker := NewWorker(deps.Queue, WorkerOptions{PollInterval: 10 * time.Millisecond})
 	Register(worker, deps)
