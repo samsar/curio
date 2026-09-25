@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -20,7 +21,7 @@ func (s *testServer) seedInterest(t *testing.T, tenant, label string, docs ...*s
 	ctx := context.Background()
 	run := &store.ClusterRun{TenantID: tenant, Algo: "knn-graph"}
 	require.NoError(t, s.deps.Insights.CreateRun(ctx, run))
-	c := store.Cluster{ID: "cluster-" + tenant, TenantID: tenant, RunID: run.ID, Label: &label, Size: len(docs), Cohesion: 0.8}
+	c := store.Cluster{ID: uuid.NewString(), TenantID: tenant, RunID: run.ID, Label: &label, Size: len(docs), Cohesion: 0.8}
 	members := make([]store.ClusterMember, len(docs))
 	for i, d := range docs {
 		members[i] = store.ClusterMember{DocumentID: d.ID, Similarity: 0.9 - 0.1*float64(i)}

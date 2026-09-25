@@ -1,9 +1,20 @@
 # API
 
-`openapi.yaml` is the source of truth for the daemon's HTTP+JSON API.
+`openapi.yaml` is the contract for the daemon's HTTP+JSON API, and tests
+hold the daemon to it. `internal/api/openapi_test.go` checks that:
 
-All clients — the `curio` CLI, the `curio-mcp` sidecar, and any future web
-UI — codegen their request/response types from this spec.
+- the spec is valid OpenAPI 3.1, with none of 3.0's `nullable`;
+- the router serves exactly the operations the spec documents;
+- the request bodies the handlers decode have exactly the documented
+  fields;
+- every operation's real responses, over seeded fixtures, have a
+  documented status and content type and validate against their schemas
+  (JSON Schema 2020-12), with undeclared fields treated as errors.
+
+A route, field or status added without the spec fails those tests.
+
+The clients are written by hand: `internal/client` for the CLI and the
+`curio-mcp` sidecar. Code generation is deferred (see "Codegen").
 
 ## Conventions
 
@@ -27,6 +38,8 @@ UI — codegen their request/response types from this spec.
   the bulk `refetch-all` and `reindex-all`, which have no parent job.
   Clients poll `GET /v1/jobs/{id}` for a job's progress; the bulk
   operations are watched through `GET /v1/jobs` or `GET /v1/stats`.
+  Imports are synchronous per request (`200` with what the batch did); the
+  fetches they enqueue are jobs like any other.
 - **Auth**: there is none, and no token. The daemon binds loopback only
   and trusts local processes. It refuses browser-originated requests:
   `Host` must be a loopback name on the daemon's port (403 otherwise, which
@@ -43,13 +56,12 @@ See [`../docs/decisions.md`](../docs/decisions.md#transport-http--json).
 
 ## Codegen
 
-Recommended generators when we get there:
+Deferred. The handlers and `internal/client` are hand-written, and the
+contract tests above keep them and the spec from drifting apart. When a
+generator earns its place, the candidates are:
 
-- Go server stubs + types: `oapi-codegen` (Hugo's, MIT licensed, clean output)
+- Go server stubs + types: `oapi-codegen` (MIT licensed, clean output)
 - TypeScript client (for any future web UI): `openapi-typescript`
-
-Codegen is deferred until M0 — the spec is the contract, hand-written handlers
-are fine to start.
 
 ## Versioning
 

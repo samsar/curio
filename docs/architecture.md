@@ -70,7 +70,9 @@ all fetch/index/search/insight workflows.
   browser-originated requests (Host allowlist, Origin rejection, JSON-only
   bodies). See `docs/decisions.md` "Local API: loopback only, no token,
   browsers shut out".
-- OpenAPI spec is the source of truth — clients codegen from it
+- `api/openapi.yaml` is the contract, verified against the router and live
+  responses by tests in `internal/api`; the clients (`internal/client`) are
+  hand-written, and codegen is deferred
 - Internal worker pool processes jobs from the SQLite-backed queue
 
 ### `curio-mcp` (sidecar)
@@ -105,8 +107,10 @@ Chose HTTP+JSON over gRPC for:
 - Docker uses HTTP and it scales fine
 - No protobuf toolchain dependency
 
-OpenAPI spec lives at `api/openapi.yaml`. All clients (CLI, MCP sidecar, future
-web UI) generate types from it.
+OpenAPI spec lives at `api/openapi.yaml`. It is the contract: tests in
+`internal/api` check it against the router and validate live responses
+against it. The CLI and MCP sidecar share the hand-written client in
+`internal/client`; generating clients from the spec is deferred.
 
 ## Daemon lifecycle
 

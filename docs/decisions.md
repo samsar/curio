@@ -307,6 +307,9 @@ fetches and clients silently skip data. Cursors are stable on SQLite via
 
 ## API: all long-running operations are async with job IDs
 
+**Status:** imports are synchronous per batch, and `GET /v1/jobs/{id}` is
+routed; see "API: the spec is the contract, checked by tests" below.
+
 **Decision:** Imports, refetches, and (later) reindex operations return
 `202 Accepted` with `{ job_id }`. Clients poll `/v1/jobs/{id}` for status.
 
@@ -384,6 +387,9 @@ v1. Easy to add later; non-breaking.
 ---
 
 ## API: `/v1/documents/{id}/references` returns a shape that grows additively
+
+**Status:** not implemented; removed from the spec until a client needs it
+(see "API: the spec is the contract, checked by tests").
 
 **Decision:** The references endpoint returns
 `{ bookmarks: [...], history_entries: [...], highlights: [...] }`. v1 only
@@ -3359,3 +3365,68 @@ it. The expanded `ts < ? OR (ts = ? AND id < ?)` form only seeks
 | `idx_documents_tenant_state_updated (tenant_id, state, updated_at, id)` | `ListWithLastError` by state; `CountByState`; `ListIDsWithContent`; `DocumentVectors` (now covering); `RequeueFetchByStates` |
 | `idx_documents_tenant_updated (tenant_id, updated_at, id)` | `ListWithLastError` unfiltered |
 | `idx_bookmarks_tenant_created (tenant_id, created_at, id)` | `Bookmarks.List`, unfiltered or filtered by source or folder (checked per row) |
+
+---
+
+## API: the spec is the contract, checked by tests
+
+**Decision:** `api/openapi.yaml` documents exactly what the daemon serves,
+and `internal/api/openapi_test.go` keeps it that way:
+
+- `TestOpenAPI_Valid` loads the spec with kin-openapi, validates it, and
+  fails on 3.0's `nullable`, which OpenAPI 3.1 doesn't have. The spec stays
+  on 3.1 and marks optional fields by leaving them out of `required`: the
+  handlers omit unset fields and never send `null`.
+- `TestOpenAPI_RoutesMatchRouter` walks the router `newRouter` builds with
+  `chi.Walk` and compares its (method, path) pairs with the spec's, both
+  ways.
+- `TestOpenAPI_RequestTypesMatchSchemas` compares the JSON fields of the
+  request types the strict decoder fills with the request-body schemas,
+  recursively.
+- `TestOpenAPI_ResponsesMatchSchemas` drives every documented operation
+  through the real router over seeded fixtures (a fake embedder, UUID IDs)
+  and validates each response: a documented status and content type, and a
+  body that passes JSON Schema 2020-12 with `format: uuid` enforced and,
+  in the test only, undeclared properties refused. It fails if any
+  documented operation goes unexercised, and covers problems for 400, 404,
+  409, 405 and 415.
+- kin-openapi is a test dependency; the `no-test-deps-in-prod` depguard
+  rule denies it to production code.
+
+Reconciling the spec with the router:
+
+- `GET /v1/jobs/{id}` was documented, and it is what the async convention
+  tells clients to poll, so it was implemented (`JobStore.GetWithDoc`).
+- `POST /v1/jobs/{id}/retry` is removed: retrying a job must also reset
+  its document's state, which refetch, reindex and interests rebuild
+  already do.
+- `POST /v1/bookmarks/{id}/refetch` is removed: it duplicated
+  `POST /v1/documents/{id}/refetch`, and every bookmark carries its
+  `document_id`.
+- `GET /v1/documents/{id}/references` is removed: no client reads it, and
+  adding it later is non-breaking.
+- `GET /v1/metrics`, `POST /v1/documents/{id}/reindex`,
+  `POST /v1/documents/reindex-all` and `DELETE /v1/jobs` were routed but
+  undocumented, and are documented now.
+- Every operation declares a `default` response referencing the shared
+  Problem (403, 405, 413, 415, 500), and lists the 400, 404 and 409 its
+  handler produces.
+
+**Imports are synchronous per batch.** `POST /v1/bookmarks/import` answers
+200 with what the batch did (`created`, `skipped`, `filtered`,
+`filtered_by`, `jobs_enqueued`, the first errors) for a list of parsed
+bookmarks, as "Importers: CLI parses, daemon receives lists" decided; the
+spec described a file upload answered with 202 and a job ID. A batch (the
+CLI sends 500) takes well under a second, and the fetches it enqueues are
+jobs like any other. This supersedes "imports answer 202 with job_id" in
+"API: all long-running operations are async with job IDs".
+
+**Why:** Nothing checked the spec. Four documented operations weren't
+routed, four routed ones weren't documented, the import endpoint was
+described as a different API, and validating live responses found drift in
+Stats, Extraction, Job, SearchHit, the document list items and
+BookmarkCreated (a `job_id` of format uuid that is empty for a known URL,
+by design). Seventeen `nullable` keywords meant nothing under 3.1, and
+kin-openapi's validator accepted them silently. The docs said the clients
+were generated from the spec; they are hand-written, so a test is what
+keeps the two in step. Codegen stays deferred.

@@ -4,29 +4,43 @@ info:
   version: 0.1.0
   description: |
     HTTP+JSON API exposed by `curio-daemon` on `127.0.0.1:8765` (the port is
-    configurable; the host must be loopback). Consumed by `curio` CLI,
-    `curio-mcp` sidecar, and any future client.
+    configurable; the host must be loopback). Consumed by the `curio` CLI,
+    the `curio-mcp` sidecar, and any future client.
+
+    This file is the contract. Tests in `internal/api` check it against the
+    router (every route is documented, every documented operation is
+    routed) and against live responses (every operation's real answers
+    validate against their schemas, with undeclared fields treated as
+    errors). The clients in `internal/client` are written by hand; code
+    generation is deferred.
 
     Conventions:
-      - All IDs are UUIDs.
-      - All timestamps are RFC 3339 UTC.
-      - Errors follow RFC 7807 (`application/problem+json`). Every response
-        carries an `X-Request-Id` header, and every problem the same value as
-        `request_id`, which is also on the daemon's log lines for the
-        request; `instance` is the request path.
+      - IDs are UUIDs. Timestamps are RFC 3339, UTC.
       - Unset optional fields are omitted; the API never sends `null`.
-      - Responses may gain fields and enum values within /v1: clients ignore
-        what they don't know. Requests are strict: an unknown field is a 400
-        that names it and, since it usually means a newer client talking to
-        an older daemon, says to restart the daemon.
+      - Errors follow RFC 7807 (`application/problem+json`). Every response
+        carries an `X-Request-Id` header, and every problem repeats it as
+        `request_id`, which is also on the daemon's log lines for the
+        request; `instance` is the request path. A 404 names what is
+        missing. A 5xx detail is the raw error text.
+      - Responses are read tolerantly: they may gain fields and enum values
+        within /v1, and clients ignore what they don't know. Requests are
+        strict: an unknown field is a 400 that names it and, since it
+        usually means a newer client talking to an older daemon, says to
+        restart the daemon. Clients send only the optional fields they set.
+      - List filters outside their enum are a 400. Sizing parameters
+        (`limit`, `members`, `k`, `window`) are never refused: a value
+        outside their range, or not a number, means their default.
       - The bookmark, document and job lists return `{ items, next_cursor }`,
-        next_cursor present exactly when another page follows. Pages are
-        keyset-based: they never overlap, inserts don't shift them, and a row
-        updated mid-walk moves ahead of the cursor. Cursors are opaque; one a
-        daemon upgrade invalidated is a 400, and the walk starts again.
-      - Long-running operations are asynchronous and answer 202 with a
-        `job_id`, or with `jobs_enqueued` for the bulk refetch-all and
-        reindex-all, which have no parent job. Poll `GET /v1/jobs/{id}`.
+        `next_cursor` present exactly when another page follows. Pages are
+        keyset-based: they never overlap, inserts don't shift them, and a
+        row updated mid-walk moves ahead of the cursor. Cursors are opaque;
+        one a daemon upgrade invalidated is a 400, and the walk starts
+        again.
+      - Work that runs in the background answers 202: with a `job_id` to
+        poll at `GET /v1/jobs/{id}` (refetch, reindex, interests rebuild),
+        or with `jobs_enqueued` for the bulk refetch-all and reindex-all,
+        which have no parent job. Imports are synchronous per request; the
+        fetches they enqueue are not.
 
     Access policy: there is no authentication and no token. The daemon binds
     loopback only and trusts every local process (and OS user) that can reach
@@ -58,9 +72,9 @@ tags:
   - name: insight
     description: Inferred topic clusters ("interests")
   - name: jobs
-    description: Async work queue
+    description: Background work queue
   - name: system
-    description: Health, stats, configuration
+    description: Health, stats and metrics
 
 paths:
 
@@ -70,25 +84,54 @@ paths:
     get:
       tags: [system]
       operationId: getHealth
-      summary: Liveness/readiness probe
+      summary: Liveness probe, and which daemon answered
+      description: >
+        Answers within about half a second whatever state Ollama is in: an
+        unreachable or slow Ollama is reported in ollama_reachable and
+        ollama_detail, not as an error.
       responses:
         "200":
-          description: Daemon is up and the dependencies it has checked are reachable
+          description: The daemon is up
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/stats:
     get:
       tags: [system]
       operationId: getStats
-      summary: Corpus and queue summary
+      summary: Corpus and queue counts
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Stats" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /v1/metrics:
+    get:
+      tags: [system]
+      operationId: getMetrics
+      summary: Per-kind job durations and failures
+      description: >
+        Derived from the jobs table on demand. Counts and durations cover
+        jobs that finished within the window, and durations successful jobs
+        only; running and oldest_running_seconds describe right now,
+        whatever the window.
+      parameters:
+        - in: query
+          name: window
+          description: Seconds to look back. Out of range or malformed means the default.
+          schema: { type: integer, minimum: 1, maximum: 86400, default: 3600 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Metrics" }
+        default: { $ref: "#/components/responses/Problem" }
 
   # ---------- bookmarks ----------
 
@@ -96,135 +139,116 @@ paths:
     get:
       tags: [bookmarks]
       operationId: listBookmarks
-      summary: List bookmarks with filters
+      summary: List bookmarks, newest first
       parameters:
-        - { in: query, name: source,      schema: { type: string, enum: [chrome, safari, firefox, html, manual] } }
-        - { in: query, name: state,       schema: { type: string, enum: [pending, fetched, failed, dead] } }
-        - { in: query, name: folder,      schema: { type: string }, description: "Exact folder_path prefix match" }
-        - { in: query, name: tag,         schema: { type: string }, description: "Returns bookmarks whose tags array contains this value" }
-        - { in: query, name: has_document,schema: { type: boolean }, description: "True = filter to fetched bookmarks only" }
-        - { in: query, name: limit,       schema: { type: integer, default: 50, maximum: 500 } }
-        - { in: query, name: cursor,      schema: { type: string }, description: "Opaque pagination cursor from a previous response" }
+        - in: query
+          name: source
+          schema: { $ref: "#/components/schemas/Source" }
+        - in: query
+          name: folder
+          description: >
+            The folder and every folder under it, matched on path segments
+            and case-sensitively; a trailing "/" is ignored and "/" alone is
+            no filter.
+          schema: { type: string }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
         "200":
-          description: OK
+          description: One page of bookmarks, each with its document's state
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BookmarkList" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        default: { $ref: "#/components/responses/Problem" }
 
     post:
       tags: [bookmarks]
       operationId: createBookmark
-      summary: Manually add a single bookmark; fetch is enqueued
+      summary: Add one bookmark; a URL new to the corpus gets a fetch job
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [url]
-              properties:
-                url:
-                  type: string
-                  format: uri
-                  description: |
-                    Absolute http(s) URL with a host. It is normalized
-                    (lowercased host, default port and fragment dropped,
-                    tracking parameters removed, remaining query parameters
-                    sorted) and the normalized form is both the dedup key and
-                    the URL that gets fetched.
-                title:       { type: string }
-                folder_path: { type: string }
-                tags:        { type: array, items: { type: string } }
+            schema: { $ref: "#/components/schemas/CreateBookmarkRequest" }
       responses:
         "201":
-          description: Bookmark created; fetch job enqueued
+          description: Bookmark created
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BookmarkCreated" }
         "400":
-          description: url is missing, malformed, not http(s), or has no host
+          description: url is missing, malformed, not http(s), or has no host; or the body is malformed
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
         "409":
-          description: A bookmark for this normalized URL already exists for this tenant+source
+          description: A manual bookmark for this normalized URL already exists
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/bookmarks/import:
     post:
       tags: [bookmarks]
       operationId: importBookmarks
-      summary: Bulk import from a browser bookmark file
+      summary: Import a batch of parsed bookmarks
       description: |
-        Async. Parses the file, inserts/dedups bookmarks, enqueues fetch jobs
-        for any new URLs. Returns a job ID for the import itself.
-
-        This is the **bulk path** for ingestion. A single Chrome/Safari/Firefox
-        export with tens of thousands of bookmarks goes through one request.
-        Clients never iterate `POST /v1/bookmarks` for bulk loads.
+        Synchronous: the bookmarks are saved and counted before the
+        response, one transaction each, and a fetch job is enqueued for
+        every URL new to the corpus; the fetches run in the background. The
+        client parses the browser's bookmark file and sends the result, in
+        batches (the CLI sends 500 at a time). A bookmark that already
+        exists for this source is skipped; one curio can't fetch is
+        filtered and counted under its reason.
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [source]
-              properties:
-                source:    { type: string, enum: [chrome, safari, firefox] }
-                file_path: { type: string, description: "Absolute path to the bookmark file on the host running the daemon" }
-                content:   { type: string, description: "Inline file content (base64). Mutually exclusive with file_path." }
+            schema: { $ref: "#/components/schemas/ImportRequest" }
       responses:
-        "202":
-          description: Import job enqueued
+        "200":
+          description: What the batch did
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/JobRef" }
+              schema: { $ref: "#/components/schemas/ImportResult" }
+        "400":
+          description: Unknown source, an empty batch, or a malformed body
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "413":
+          description: The body is over 32 MiB
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/bookmarks/{id}:
     parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      - { $ref: "#/components/parameters/ID" }
     get:
       tags: [bookmarks]
       operationId: getBookmark
-      summary: Get a single bookmark by ID
+      summary: Get one bookmark
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Bookmark" }
-        "404":
-          $ref: "#/components/responses/NotFound"
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/Problem" }
     delete:
       tags: [bookmarks]
       operationId: deleteBookmark
       summary: Delete a bookmark
-      description: |
-        Removes the bookmark reference. If no other references point at the
-        underlying document, the document and its content files are also
-        removed (cascade is handled by the daemon, not the DB).
+      description: Removes the bookmark only; its document stays in the corpus.
       responses:
         "204": { description: Deleted }
         "404": { $ref: "#/components/responses/NotFound" }
-
-  /v1/bookmarks/{id}/refetch:
-    parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
-    post:
-      tags: [bookmarks]
-      operationId: refetchBookmark
-      summary: Force re-fetch and re-index of this bookmark's document
-      responses:
-        "202":
-          description: Refetch job enqueued
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/JobRef" }
-        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/Problem" }
 
   # ---------- documents ----------
 
@@ -232,28 +256,29 @@ paths:
     get:
       tags: [documents]
       operationId: listDocuments
-      summary: List documents with filters
+      summary: List documents, most recently updated first
       parameters:
-        - { in: query, name: content_type, schema: { type: string, enum: [article, repo, video, pdf, thread, unknown] } }
-        - { in: query, name: state,        schema: { type: string, enum: [pending, fetched, failed, dead] } }
-        - { in: query, name: host,         schema: { type: string }, description: "Filter by URL host (e.g. github.com)" }
-        - { in: query, name: limit,        schema: { type: integer, default: 50, maximum: 500 } }
-        - { in: query, name: cursor,       schema: { type: string } }
+        - in: query
+          name: state
+          schema: { $ref: "#/components/schemas/DocState" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
         "200":
-          description: OK
+          description: One page of documents, each with its last error and markdown path
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DocumentList" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/documents/{id}:
     parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      - { $ref: "#/components/parameters/ID" }
     get:
       tags: [documents]
       operationId: getDocument
-      summary: Get document metadata
+      summary: Get document metadata and its current extraction
       responses:
         "200":
           description: OK
@@ -261,27 +286,64 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Document" }
         "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/documents/{id}/content:
     parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      - { $ref: "#/components/parameters/ID" }
     get:
       tags: [documents]
       operationId: getDocumentContent
-      summary: Get extracted markdown content for a document
+      summary: Get the extracted markdown
       responses:
         "200":
           description: OK
           content:
             text/markdown:
               schema: { type: string }
+        "404":
+          description: >
+            No such document, or it has no content yet (never fetched, or
+            its markdown was deleted from disk).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /v1/documents/{id}/related:
+    parameters:
+      - { $ref: "#/components/parameters/ID" }
+      - in: query
+        name: k
+        description: Max related documents. Out of range or malformed means the default.
+        schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+    get:
+      tags: [documents]
+      operationId: findRelatedDocuments
+      summary: Find documents related to this one by embedding similarity
+      description: >
+        Ranks other documents by vector similarity to this document's stored
+        chunk embeddings (mean-pooled; no query text involved, so Ollama is
+        not needed). The source document is excluded. Returns an empty items
+        list when the document has no indexed chunks yet. Scores are raw
+        vector similarities (1/(1+L2 distance), 0..1) and are NOT comparable
+        with /v1/search's RRF-fused scores.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RelatedResponse" }
         "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/documents/{id}/refetch:
     parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
-      - { in: query, name: force, required: false, schema: { type: string, enum: ["1", "true"] },
-          description: Refetch even if the document is dead (a confirmed dead link). }
+      - { $ref: "#/components/parameters/ID" }
+      - in: query
+        name: force
+        description: 1 or true (any case) refetches a dead document too.
+        schema: { type: string }
     post:
       tags: [documents]
       operationId: refetchDocument
@@ -298,92 +360,81 @@ paths:
               schema: { $ref: "#/components/schemas/JobRef" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: The document is dead and force was not given
+          description: The document is dead (a confirmed dead link) and force was not given
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/documents/refetch-all:
     parameters:
-      - { in: query, name: state, required: false, schema: { type: string, enum: [pending, fetched, failed, dead] },
-          description: "Only refetch documents in this state. Default: pending, fetched and failed; dead documents only when asked for." }
+      - in: query
+        name: state
+        description: "Only refetch documents in this state. Default: pending, fetched and failed; dead documents only when asked for."
+        schema: { $ref: "#/components/schemas/DocState" }
     post:
       tags: [documents]
       operationId: refetchAllDocuments
       summary: Reset matching documents to pending and enqueue a fetch job for each
       description: >
         All-or-nothing: every matching document is reset and gets a fetch job
-        in one transaction, or nothing changes. Returns the number of jobs
-        enqueued rather than a job_id: there is no parent job to poll; watch
-        /v1/jobs or /v1/stats instead.
+        in one transaction, or nothing changes. There is no parent job to
+        poll; watch GET /v1/jobs or GET /v1/stats instead.
       responses:
         "202":
           description: Fetch jobs enqueued
           content:
             application/json:
-              schema:
-                type: object
-                required: [jobs_enqueued]
-                properties:
-                  jobs_enqueued: { type: integer }
-        "400":
-          description: Unknown state
+              schema: { $ref: "#/components/schemas/JobsEnqueued" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /v1/documents/{id}/reindex:
+    parameters:
+      - { $ref: "#/components/parameters/ID" }
+    post:
+      tags: [documents]
+      operationId: reindexDocument
+      summary: Enqueue an index job over the document's current extraction
+      description: >
+        Re-chunks and re-embeds the markdown already on disk; nothing is
+        refetched and the document's state is left alone.
+      responses:
+        "202":
+          description: Index job enqueued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobRef" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The document has no extraction to reindex; refetch it first
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
 
-  /v1/documents/{id}/related:
+  /v1/documents/reindex-all:
     parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
-      - { in: query, name: k, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 10 },
-          description: Max related documents to return. }
-    get:
+      - in: query
+        name: state
+        description: "Reindex the documents in this state that have content. Default: fetched."
+        schema: { $ref: "#/components/schemas/DocState" }
+    post:
       tags: [documents]
-      operationId: findRelatedDocuments
-      summary: Find documents related to this one by embedding similarity
+      operationId: reindexAllDocuments
+      summary: Enqueue an index job for every document in a state that has content
       description: >
-        Ranks other documents by vector similarity to this document's stored
-        chunk embeddings (mean-pooled; no query text involved). The source
-        document is excluded. Returns an empty items list when the document
-        has no indexed chunks yet (pending/failed/dead). Scores are raw
-        vector similarities (1/(1+L2 distance), 0..1) and are NOT comparable
-        with /v1/search's RRF-fused scores.
+        Index jobs change no document state, so a partial run strands
+        nothing; a failure stops the run and the 500 says how many jobs were
+        enqueued before it. There is no parent job to poll.
       responses:
-        "200":
-          description: OK
+        "202":
+          description: Index jobs enqueued
           content:
             application/json:
-              schema:
-                type: object
-                required: [doc_id, items]
-                properties:
-                  doc_id: { type: string, format: uuid }
-                  took_ms: { type: integer }
-                  items:
-                    type: array
-                    items: { $ref: "#/components/schemas/SearchHit" }
-        "404": { $ref: "#/components/responses/NotFound" }
-
-  /v1/documents/{id}/references:
-    parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
-    get:
-      tags: [documents]
-      operationId: getDocumentReferences
-      summary: List every reference (bookmark, history entry, ...) that points at this document
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  bookmarks:
-                    type: array
-                    items: { $ref: "#/components/schemas/Bookmark" }
-                  # Future reference kinds appear here as additional fields:
-                  # history_entries: [...], highlights: [...], etc.
+              schema: { $ref: "#/components/schemas/JobsEnqueued" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        default: { $ref: "#/components/responses/Problem" }
 
   # ---------- search ----------
 
@@ -397,7 +448,7 @@ paths:
         If the embedding model is unavailable (Ollama down, or slower than
         search.embed_timeout_seconds), the keyword results are still returned
         with degraded=true and a warning explaining why; a keyword-index
-        failure is a 500. Unknown request fields are rejected with 400.
+        failure is a 500.
       requestBody:
         required: true
         content:
@@ -410,10 +461,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResponse" }
         "400":
-          description: Missing query, k outside 1..100, or an unknown field
+          description: Missing query, k outside 0..100, an unknown field, or a malformed body
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
 
   # ---------- insight ----------
 
@@ -427,20 +479,27 @@ paths:
         first, with run metadata. An interest is a labeled cluster. Returns an
         empty list when clustering has not run yet.
       parameters:
-        - { in: query, name: limit,   schema: { type: integer, default: 50, maximum: 500 }, description: Max interests to return }
-        - { in: query, name: members, schema: { type: integer, default: 5, maximum: 100 }, description: Member documents to include per interest }
+        - in: query
+          name: limit
+          description: Max interests. Out of range or malformed means the default.
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: members
+          description: Member documents per interest; 0 for none. Out of range or malformed means the default.
+          schema: { type: integer, minimum: 0, maximum: 100, default: 5 }
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/InterestList" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/interests/rebuild:
     post:
       tags: [insight]
       operationId: rebuildInterests
-      summary: Recompute interests from the current corpus (async)
+      summary: Recompute interests from the current corpus
       description: Enqueues a clustering job. Poll the returned job id via /v1/jobs/{id}.
       responses:
         "202":
@@ -453,11 +512,15 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/interests/{id}:
     parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
-      - { in: query, name: members, schema: { type: integer, default: 100, maximum: 1000 }, description: Member documents to include }
+      - { $ref: "#/components/parameters/ID" }
+      - in: query
+        name: members
+        description: Member documents to include; 0 for none. Out of range or malformed means the default.
+        schema: { type: integer, minimum: 0, maximum: 1000, default: 100 }
     get:
       tags: [insight]
       operationId: getInterest
@@ -469,6 +532,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Interest" }
         "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/Problem" }
 
   # ---------- jobs ----------
 
@@ -476,23 +540,58 @@ paths:
     get:
       tags: [jobs]
       operationId: listJobs
-      summary: List background jobs
+      summary: List background jobs, most recently updated first
       parameters:
-        - { in: query, name: status, schema: { type: string, enum: [pending, running, done, failed] } }
-        - { in: query, name: kind,   schema: { type: string, enum: [fetch, index, import, cluster, summarize] } }
-        - { in: query, name: limit,  schema: { type: integer, default: 50, maximum: 500 } }
-        - { in: query, name: cursor, schema: { type: string } }
+        - in: query
+          name: status
+          schema: { $ref: "#/components/schemas/JobStatus" }
+        - in: query
+          name: kind
+          schema: { $ref: "#/components/schemas/JobKind" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
       responses:
         "200":
-          description: OK
+          description: One page of jobs, each with its document
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JobList" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        default: { $ref: "#/components/responses/Problem" }
+    delete:
+      tags: [jobs]
+      operationId: deleteJobs
+      summary: Delete finished jobs, by status or by age
+      description: >
+        Exactly one of status and older_than. Only finished (done or failed)
+        jobs are ever deleted: a pending or running job is live work. There
+        is no way to delete every job. Deleting jobs changes no document
+        state.
+      parameters:
+        - in: query
+          name: status
+          description: Delete every job in this finished status.
+          schema: { type: string, enum: [done, failed] }
+        - in: query
+          name: older_than
+          description: Delete finished jobs last updated longer ago than this Go duration, or Nd for days (30d, 24h, 2h30m).
+          schema: { type: string }
+      responses:
+        "200":
+          description: Jobs deleted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeleteJobsResult" }
+        "400":
+          description: Neither or both of status and older_than, a status that isn't finished, or a malformed duration
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
 
   /v1/jobs/{id}:
     parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      - { $ref: "#/components/parameters/ID" }
     get:
       tags: [jobs]
       operationId: getJob
@@ -508,41 +607,45 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Job" }
         "404": { $ref: "#/components/responses/NotFound" }
-
-  /v1/jobs/{id}/retry:
-    parameters:
-      - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
-    post:
-      tags: [jobs]
-      operationId: retryJob
-      summary: Re-enqueue a failed job
-      responses:
-        "202":
-          description: Job re-enqueued (status returns to `pending`)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/JobRef" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409":
-          description: Job is not in a re-runnable state (already running or done)
-          content:
-            application/problem+json:
-              schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
 
 components:
 
+  parameters:
+    ID:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      in: query
+      name: limit
+      description: Rows per page. Out of range or malformed means the default.
+      schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+    Cursor:
+      in: query
+      name: cursor
+      description: The next_cursor of the previous page.
+      schema: { type: string }
+
   responses:
-    BadRequest:
+    Problem:
       description: >
-        A filter parameter outside its enum, or a cursor this daemon didn't
-        issue. Sizing
-        parameters (limit, members, k, window) are never refused: a value
-        outside their range means their default.
+        An error. Besides the statuses an operation lists: 403 for a request
+        a browser could have made (see the access policy), 405 for a method
+        the path doesn't take (with an Allow header), 413 for an oversized
+        body, 415 for a body that isn't application/json, and 500 for a
+        failure in the daemon, logged under the request_id.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    BadRequest:
+      description: A filter parameter outside its enum, or a cursor this daemon didn't issue.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
     NotFound:
-      description: Resource not found
+      description: No such resource; the detail names it.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -566,20 +669,37 @@ components:
     JobRef:
       type: object
       properties:
-        job_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid, description: "Poll it at GET /v1/jobs/{id}" }
       required: [job_id]
 
-    Cursor:
+    JobsEnqueued:
       type: object
       properties:
-        next_cursor: { type: string, description: "Present exactly when another page follows; pass it as ?cursor" }
+        jobs_enqueued: { type: integer }
+      required: [jobs_enqueued]
+
+    DocState:
+      type: string
+      enum: [pending, fetched, failed, dead]
+
+    JobStatus:
+      type: string
+      enum: [pending, running, done, failed]
+
+    JobKind:
+      type: string
+      enum: [fetch, index, import, cluster, summarize]
+
+    Source:
+      type: string
+      enum: [chrome, safari, firefox, html, manual]
 
     # ---------- system ----------
 
     Health:
       type: object
       properties:
-        status:           { type: string, enum: [ok, degraded] }
+        status:           { type: string, enum: [ok] }
         pid:              { type: integer, description: "Process ID of the daemon that answered" }
         home:             { type: string, description: "Absolute $CURIO_HOME the answering daemon serves" }
         version:          { type: string }
@@ -587,75 +707,160 @@ components:
         embedding_model:  { type: string }
         embedding_dim:    { type: integer }
         ollama_reachable: { type: boolean }
+        ollama_detail:    { type: string, description: "Why Ollama isn't usable; present only when it isn't" }
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, ollama_reachable]
 
     Stats:
       type: object
       properties:
-        bookmarks_total:    { type: integer }
-        documents_total:    { type: integer }
+        version:         { type: string, description: "The daemon's version" }
+        bookmarks_total: { type: integer }
+        documents_total: { type: integer }
         documents_by_state:
           type: object
+          description: Documents per state; states with none are absent.
           additionalProperties: { type: integer }
-        documents_by_content_type:
+        jobs_by_status:
           type: object
+          description: Jobs per status; statuses with none are absent.
           additionalProperties: { type: integer }
-        jobs_pending:       { type: integer }
-        jobs_running:       { type: integer }
-        jobs_failed:        { type: integer }
-        last_index_at:      { type: string, format: date-time, nullable: true }
+      required: [version, bookmarks_total, documents_total]
+
+    Metrics:
+      type: object
+      properties:
+        window_seconds: { type: integer }
+        by_kind:
+          type: array
+          description: One row per job kind that finished in the window or is running, sorted by kind.
+          items: { $ref: "#/components/schemas/KindMetrics" }
+      required: [window_seconds, by_kind]
+
+    KindMetrics:
+      type: object
+      properties:
+        kind:                   { $ref: "#/components/schemas/JobKind" }
+        count:                  { type: integer, description: "Jobs that finished (done or failed) in the window" }
+        failed:                 { type: integer }
+        mean_ms:                { type: number, description: "Durations are of successful jobs only" }
+        p50_ms:                 { type: number }
+        p95_ms:                 { type: number }
+        p99_ms:                 { type: number }
+        running:                { type: integer, description: "Running now, whatever the window" }
+        oldest_running_seconds: { type: integer }
+      required: [kind, count, failed, mean_ms, p50_ms, p95_ms, p99_ms, running, oldest_running_seconds]
 
     # ---------- bookmarks ----------
 
     Bookmark:
       type: object
       properties:
-        id:            { type: string, format: uuid }
-        url:           { type: string, format: uri }
-        title:         { type: string, nullable: true }
-        saved_at:      { type: string, format: date-time }
-        source:        { type: string, enum: [chrome, safari, firefox, manual] }
-        folder_path:   { type: string, nullable: true }
-        tags:          { type: array, items: { type: string } }
-        document_id:   { type: string, format: uuid, nullable: true }
-        document_state: { type: string, enum: [pending, fetched, failed, dead], description: "Derived from documents.state for convenience" }
-        created_at:    { type: string, format: date-time }
-        updated_at:    { type: string, format: date-time }
-      required: [id, url, saved_at, source]
+        id:             { type: string, format: uuid }
+        url:            { type: string, format: uri }
+        title:          { type: string }
+        saved_at:       { type: string, format: date-time }
+        source:         { $ref: "#/components/schemas/Source" }
+        folder_path:    { type: string }
+        tags:           { type: array, items: { type: string } }
+        document_id:    { type: string, format: uuid, description: "Absent once the document is deleted" }
+        document_state: { $ref: "#/components/schemas/DocState" }
+        created_at:     { type: string, format: date-time }
+        updated_at:     { type: string, format: date-time }
+      required: [id, url, saved_at, source, created_at, updated_at]
 
     BookmarkList:
-      allOf:
-        - $ref: "#/components/schemas/Cursor"
-        - type: object
-          properties:
-            items:
-              type: array
-              items: { $ref: "#/components/schemas/Bookmark" }
+      type: object
+      properties:
+        items:       { type: array, items: { $ref: "#/components/schemas/Bookmark" } }
+        next_cursor: { type: string, description: "Present exactly when another page follows; pass it as ?cursor" }
+      required: [items]
+
+    CreateBookmarkRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: |
+            Absolute http(s) URL with a host. It is normalized (lowercased
+            host, default port and fragment dropped, tracking parameters
+            removed, remaining query parameters sorted) and the normalized
+            form is both the dedup key and the URL that gets fetched.
+        title:       { type: string }
+        folder_path: { type: string }
+        tags:        { type: array, items: { type: string } }
+      required: [url]
 
     BookmarkCreated:
       type: object
       properties:
         bookmark: { $ref: "#/components/schemas/Bookmark" }
-        job_id:   { type: string, format: uuid, description: "ID of the enqueued fetch job" }
+        job_id:
+          type: string
+          description: >
+            The fetch job enqueued for a URL new to the corpus, or empty when
+            the corpus already had the document (its state is in
+            bookmark.document_state).
+      required: [bookmark, job_id]
+
+    ImportRequest:
+      type: object
+      properties:
+        source: { $ref: "#/components/schemas/Source" }
+        bookmarks:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ImportBookmark" }
+      required: [source, bookmarks]
+
+    ImportBookmark:
+      type: object
+      properties:
+        url:         { type: string, description: "As the browser stored it; normalized, or filtered, by the daemon" }
+        title:       { type: string }
+        folder_path: { type: string }
+        tags:        { type: array, items: { type: string } }
+        saved_at:    { type: string, format: date-time, description: "Omitted when the source has no date; the daemon uses now" }
+      required: [url]
+
+    ImportResult:
+      type: object
+      properties:
+        source:        { $ref: "#/components/schemas/Source" }
+        total:         { type: integer, description: "Bookmarks in the batch" }
+        created:       { type: integer }
+        skipped:       { type: integer, description: "Already saved for this source" }
+        filtered:      { type: integer, description: "URLs curio can't fetch" }
+        jobs_enqueued: { type: integer, description: "Fetches for URLs new to the corpus" }
+        filtered_by:
+          type: object
+          description: Filtered bookmarks per reason; absent when none were.
+          additionalProperties: { type: integer }
+        errors:
+          type: array
+          description: The first few per-bookmark failures; absent when there were none.
+          items: { type: string }
+      required: [source, total, created, skipped, filtered, jobs_enqueued]
 
     # ---------- documents ----------
 
     Document:
       type: object
       properties:
-        id:                    { type: string, format: uuid }
-        url:                   { type: string, format: uri }
-        url_canonical:         { type: string, format: uri, nullable: true }
-        content_type:          { type: string, enum: [article, repo, video, pdf, thread, unknown] }
-        title:                 { type: string, nullable: true }
-        author:                { type: string, nullable: true }
-        published_at:          { type: string, format: date-time, nullable: true }
-        language:              { type: string, nullable: true }
-        word_count:            { type: integer, nullable: true }
-        state:                 { type: string, enum: [pending, fetched, failed, dead] }
-        current_extraction:    { $ref: "#/components/schemas/Extraction", nullable: true }
-        created_at:            { type: string, format: date-time }
-        updated_at:            { type: string, format: date-time }
-      required: [id, url, content_type, state]
+        id:                 { type: string, format: uuid }
+        url:                { type: string, format: uri }
+        url_canonical:      { type: string, format: uri }
+        content_type:       { type: string, enum: [article, repo, video, pdf, thread, unknown] }
+        title:              { type: string }
+        author:             { type: string }
+        published_at:       { type: string, format: date-time }
+        language:           { type: string }
+        word_count:         { type: integer }
+        state:              { $ref: "#/components/schemas/DocState" }
+        current_extraction: { $ref: "#/components/schemas/Extraction" }
+        created_at:         { type: string, format: date-time }
+        updated_at:         { type: string, format: date-time }
+      required: [id, url, content_type, state, created_at, updated_at]
 
     Extraction:
       type: object
@@ -665,23 +870,44 @@ components:
         fetcher:         { type: string }
         status:          { type: string, enum: [ok, partial, paywalled, error] }
         markdown_path:   { type: string, description: "Absolute on-disk path to the extracted markdown" }
-        error_message:   { type: string, nullable: true }
-        extraction_meta: { type: object, additionalProperties: true }
+        error_message:   { type: string }
+        extraction_meta: { type: object, additionalProperties: true, description: "What the fetcher recorded; its shape varies by fetcher" }
+      required: [id, fetched_at, fetcher, status]
+
+    DocumentListItem:
+      type: object
+      description: A document as the list shows it, for debugging a corpus in one call.
+      properties:
+        id:            { type: string, format: uuid }
+        url:           { type: string, format: uri }
+        title:         { type: string }
+        content_type:  { type: string, enum: [article, repo, video, pdf, thread, unknown] }
+        state:         { $ref: "#/components/schemas/DocState" }
+        last_error:    { type: string, description: "Of the most recent failed job for the document" }
+        markdown_path: { type: string, description: "Absolute on-disk path to the current extraction's markdown" }
+        created_at:    { type: string, format: date-time }
+        updated_at:    { type: string, format: date-time }
+      required: [id, url, content_type, state, created_at, updated_at]
 
     DocumentList:
-      allOf:
-        - $ref: "#/components/schemas/Cursor"
-        - type: object
-          properties:
-            items:
-              type: array
-              items: { $ref: "#/components/schemas/Document" }
+      type: object
+      properties:
+        items:       { type: array, items: { $ref: "#/components/schemas/DocumentListItem" } }
+        next_cursor: { type: string, description: "Present exactly when another page follows; pass it as ?cursor" }
+      required: [items]
+
+    RelatedResponse:
+      type: object
+      properties:
+        doc_id:  { type: string, format: uuid }
+        took_ms: { type: integer }
+        items:   { type: array, items: { $ref: "#/components/schemas/SearchHit" } }
+      required: [doc_id, took_ms, items]
 
     # ---------- search ----------
 
     SearchRequest:
       type: object
-      required: [query]
       properties:
         query:
           type: string
@@ -703,31 +929,37 @@ components:
             collapse strategy, and sending any of them is a 400.
           properties:
             content_type: { type: array, items: { type: string, enum: [article, repo, video, pdf, thread, unknown] } }
-            host:         { type: array, items: { type: string } }
-            source:       { type: array, items: { type: string, enum: [chrome, safari, firefox, html, manual] } }
+            host:         { type: array, items: { type: string }, description: "URL hosts, matched exactly and case-insensitively" }
+            source:       { type: array, items: { $ref: "#/components/schemas/Source" } }
+      required: [query]
 
     SearchHit:
       type: object
       properties:
-        document: { $ref: "#/components/schemas/Document" }
-        score:    { type: number, description: "Fused RRF score (higher = better)" }
+        document:      { $ref: "#/components/schemas/Document" }
+        score:         { type: number, description: "Fused RRF score for search, vector similarity for related (higher = better)" }
+        markdown_path: { type: string, description: "Absolute on-disk path to the document's current markdown" }
         matches:
           type: array
           description: Top matching chunks for this document, in score order
-          items:
-            type: object
-            properties:
-              chunk_id:    { type: string, format: uuid }
-              ord:         { type: integer }
-              text:        { type: string, description: "Chunk text, possibly with highlight markers" }
-              bm25_score:  { type: number, nullable: true }
-              vector_score: { type: number, nullable: true }
+          items: { $ref: "#/components/schemas/ChunkMatch" }
+      required: [document, score]
+
+    ChunkMatch:
+      type: object
+      properties:
+        chunk_id:     { type: string, format: uuid }
+        text:         { type: string, description: "The chunk's text" }
+        snippet:      { type: string, description: "The BM25 snippet, with <em> highlight markers; absent for vector-only matches" }
+        bm25_score:   { type: number, description: "Absent when BM25 didn't return the chunk" }
+        vector_score: { type: number, description: "Absent when vector search didn't return the chunk" }
+      required: [chunk_id, text]
 
     SearchResponse:
       type: object
       properties:
         query:       { type: string }
-        took_ms:     { type: integer, description: "Time the search engine took, in milliseconds" }
+        took_ms:     { type: integer, description: "Time the search took, in milliseconds" }
         bm25_hits:   { type: integer, description: "How many chunks BM25 returned before fusion" }
         vector_hits: { type: integer, description: "How many chunks the vector index returned before fusion (0 when degraded)" }
         degraded:
@@ -742,6 +974,7 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }
+      required: [query, took_ms, bm25_hits, vector_hits, items]
 
     # ---------- insight ----------
 
@@ -750,7 +983,7 @@ components:
       properties:
         doc_id:        { type: string, format: uuid }
         title:         { type: string }
-        url:           { type: string }
+        url:           { type: string, format: uri }
         markdown_path: { type: string, description: "Absolute on-disk path to the member's extracted markdown" }
         similarity:    { type: number, description: "Cosine similarity to the cluster centroid (0..1)" }
       required: [doc_id, url, similarity]
@@ -772,11 +1005,12 @@ components:
     InterestList:
       type: object
       description: >
-        Not cursor-paginated — interests are a small bounded snapshot returned
-        with the metadata of the run that produced them.
+        Not cursor-paginated: interests are a small bounded snapshot returned
+        with the metadata of the run that produced them. The run fields are
+        absent before the first clustering run.
       properties:
         run_id:        { type: string, format: uuid }
-        computed_at:   { type: string, format: date-time, nullable: true }
+        computed_at:   { type: string, format: date-time }
         algo:          { type: string, description: "Clusterer name, e.g. knn-graph" }
         num_documents: { type: integer, description: "Documents considered in the run" }
         num_clusters:  { type: integer }
@@ -791,22 +1025,33 @@ components:
     Job:
       type: object
       properties:
-        id:         { type: string, format: uuid }
-        kind:       { type: string, enum: [fetch, index, import, cluster, summarize] }
-        status:     { type: string, enum: [pending, running, done, failed] }
-        attempts:   { type: integer }
-        payload:    { type: object, additionalProperties: true }
-        last_error: { type: string, nullable: true }
-        run_after:  { type: string, format: date-time }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
-      required: [id, kind, status]
+        id:            { type: string, format: uuid }
+        kind:          { $ref: "#/components/schemas/JobKind" }
+        status:        { $ref: "#/components/schemas/JobStatus" }
+        attempts:      { type: integer }
+        payload:       { description: "The job's input, as stored: any JSON value" }
+        last_error:    { type: string }
+        run_after:
+          type: string
+          format: date-time
+          description: When a pending job may next run. Stale once the job is done or failed.
+        created_at:    { type: string, format: date-time }
+        updated_at:    { type: string, format: date-time }
+        doc_url:       { type: string, format: uri, description: "Of the document the job works on; absent for jobs without one" }
+        doc_title:     { type: string }
+        markdown_path: { type: string, description: "Absolute on-disk path to the document's current markdown" }
+      required: [id, kind, status, attempts, run_after, created_at, updated_at]
 
     JobList:
-      allOf:
-        - $ref: "#/components/schemas/Cursor"
-        - type: object
-          properties:
-            items:
-              type: array
-              items: { $ref: "#/components/schemas/Job" }
+      type: object
+      properties:
+        items:       { type: array, items: { $ref: "#/components/schemas/Job" } }
+        next_cursor: { type: string, description: "Present exactly when another page follows; pass it as ?cursor" }
+      required: [items]
+
+    DeleteJobsResult:
+      type: object
+      properties:
+        deleted: { type: integer }
+        mode:    { type: string, description: "The mode as given: status=<status> or older_than=<duration>" }
+      required: [deleted, mode]
