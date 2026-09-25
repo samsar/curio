@@ -323,3 +323,232 @@ func TestWorker_RecoverOrphans_HooksOutliveShutdown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFailed, got.State)
 }
+
+func TestBackoff(t *testing.T) {
+	ms := time.Millisecond
+	want := []time.Duration{50 * ms, 100 * ms, 200 * ms, 400 * ms, 800 * ms, time.Second, time.Second}
+	b := backoff{initial: 50 * time.Millisecond, max: time.Second}
+	got := make([]time.Duration, 0, len(want))
+	for range want {
+		got = append(got, b.next())
+	}
+	assert.Equal(t, want, got)
+
+	fresh := backoff{initial: 50 * time.Millisecond, max: time.Second}
+	again := fresh
+	again.next()
+	assert.Equal(t, 50*time.Millisecond, fresh.next(), "a copy has its own state")
+}
+
+// TestRetryBookkeeping: a failed queue write is retried until it lands,
+// except when retrying can't help, and gives up when its context expires.
+func TestRetryBookkeeping(t *testing.T) {
+	busy := errors.New("database is locked")
+	cases := []struct {
+		name      string
+		errs      []error // returned by successive attempts; nil after they run out
+		wantCalls int
+		wantErr   error
+	}{
+		{"succeeds at once", nil, 1, nil},
+		{"succeeds on the third attempt", []error{busy, busy}, 3, nil},
+		{"not running", []error{fmt.Errorf("job j: %w", store.ErrNotRunning)}, 1, store.ErrNotRunning},
+		{"not found", []error{store.ErrNotFound}, 1, store.ErrNotFound},
+		{"permanent", []error{fmt.Errorf("%w: panic", ErrPermanent)}, 1, ErrPermanent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewWorker(nil, WorkerOptions{Log: quietLog})
+			w.retryDelays = backoff{initial: time.Microsecond, max: time.Microsecond}
+			calls := 0
+			err := w.retryBookkeeping(context.Background(), quietLog, "write", func(context.Context) error {
+				calls++
+				if calls <= len(tc.errs) {
+					return tc.errs[calls-1]
+				}
+				return nil
+			})
+			assert.Equal(t, tc.wantCalls, calls)
+			if tc.wantErr == nil {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("gives up when the context expires", func(t *testing.T) {
+		w := NewWorker(nil, WorkerOptions{Log: quietLog})
+		w.retryDelays = backoff{initial: time.Hour, max: time.Hour}
+		ctx, cancel := context.WithCancel(context.Background())
+		calls := 0
+		err := w.retryBookkeeping(ctx, quietLog, "write", func(context.Context) error {
+			calls++
+			cancel()
+			return busy
+		})
+		assert.ErrorIs(t, err, busy, "the write's error, not the context's")
+		assert.Equal(t, 1, calls, "no attempt after the context expired")
+	})
+}
+
+// failingMarkDone is a queue whose MarkDone fails with fails[i] on attempt
+// i and then passes through.
+type failingMarkDone struct {
+	store.JobQueue
+	fails []error
+	calls atomic.Int32
+}
+
+func (q *failingMarkDone) MarkDone(ctx context.Context, id string) error {
+	n := int(q.calls.Add(1))
+	if n <= len(q.fails) {
+		return q.fails[n-1]
+	}
+	return q.JobQueue.MarkDone(ctx, id)
+}
+
+// TestWorker_MarkDoneRetried: a job whose MarkDone fails on a busy database
+// is not left running; one that isn't running any more is left alone.
+func TestWorker_MarkDoneRetried(t *testing.T) {
+	busy := errors.New("database is locked")
+	cases := []struct {
+		name       string
+		fails      []error
+		wantCalls  int32
+		wantStatus store.JobStatus
+	}{
+		{"busy twice", []error{busy, busy}, 3, store.JobStatusDone},
+		{"not running", []error{store.ErrNotRunning}, 1, store.JobStatusRunning},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &failingMarkDone{JobQueue: sqlitestore.NewJobs(sqlitetest.NewDB(t)), fails: tc.fails}
+			job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}
+			require.NoError(t, q.Enqueue(context.Background(), job))
+
+			handled := make(chan struct{})
+			w := NewWorker(q, WorkerOptions{PollInterval: time.Hour, Log: quietLog})
+			w.retryDelays = backoff{initial: time.Microsecond, max: time.Microsecond}
+			w.Register(store.JobKindSummarize, func(context.Context, *store.Job) error {
+				close(handled)
+				return nil
+			})
+			stop := startWorker(t, w)
+			<-handled
+			require.Eventually(t, func() bool { return q.calls.Load() >= tc.wantCalls },
+				5*time.Second, time.Millisecond)
+			stop() // Run returns only after the job's bookkeeping.
+
+			assert.Equal(t, tc.wantCalls, q.calls.Load())
+			assert.Equal(t, tc.wantStatus, getJob(t, q, job.ID).Status)
+		})
+	}
+}
+
+// countingQueue counts claims, and reports the first claim that finds
+// nothing, when the worker has gone idle.
+type countingQueue struct {
+	store.JobQueue
+	claims atomic.Int32
+	idle   chan struct{}
+}
+
+func newCountingQueue(t *testing.T) *countingQueue {
+	return &countingQueue{JobQueue: sqlitestore.NewJobs(sqlitetest.NewDB(t)), idle: make(chan struct{}, 1)}
+}
+
+func (q *countingQueue) ClaimNext(ctx context.Context, kinds []store.JobKind) (*store.Job, error) {
+	j, err := q.JobQueue.ClaimNext(ctx, kinds)
+	q.claims.Add(1)
+	if errors.Is(err, store.ErrNotFound) {
+		select {
+		case q.idle <- struct{}{}:
+		default:
+		}
+	}
+	return j, err
+}
+
+// fetchWorker is a fetch-only worker whose handler reports each job.
+func fetchWorker(q store.JobQueue, opts WorkerOptions) (*Worker, <-chan *store.Job) {
+	handled := make(chan *store.Job, 10)
+	opts.Log = quietLog
+	w := NewWorker(q, opts)
+	w.Register(store.JobKindFetch, func(_ context.Context, j *store.Job) error {
+		handled <- j
+		return nil
+	})
+	return w, handled
+}
+
+// TestWorker_WakesOnEnqueue: with polling slowed to ten minutes, only the
+// queue's signal can explain a job enqueued after the worker went idle
+// being claimed at once.
+func TestWorker_WakesOnEnqueue(t *testing.T) {
+	q := newCountingQueue(t)
+	w, handled := fetchWorker(q, WorkerOptions{PollInterval: 10 * time.Minute, MaxPollInterval: 10 * time.Minute})
+	stop := startWorker(t, w)
+	defer stop()
+	<-q.idle
+
+	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch}
+	require.NoError(t, q.Enqueue(context.Background(), job))
+	select {
+	case got := <-handled:
+		assert.Equal(t, job.ID, got.ID)
+	case <-time.After(time.Second):
+		t.Fatal("the enqueued job was not claimed")
+	}
+}
+
+// TestWorker_IgnoresOtherKinds: an index job doesn't wake a fetch worker,
+// which would only make a claim that takes the write lock for nothing.
+func TestWorker_IgnoresOtherKinds(t *testing.T) {
+	q := newCountingQueue(t)
+	w, _ := fetchWorker(q, WorkerOptions{PollInterval: 10 * time.Minute, MaxPollInterval: 10 * time.Minute})
+	stop := startWorker(t, w)
+	defer stop()
+	<-q.idle
+	claims := q.claims.Load()
+
+	require.NoError(t, q.Enqueue(context.Background(), &store.Job{TenantID: "local", Kind: store.JobKindIndex}))
+	assert.Never(t, func() bool { return q.claims.Load() > claims }, 100*time.Millisecond, 5*time.Millisecond)
+}
+
+// TestWorker_IdlePollsBackOff: an idle worker polls less and less often,
+// up to MaxPollInterval, instead of every PollInterval.
+func TestWorker_IdlePollsBackOff(t *testing.T) {
+	q := newCountingQueue(t)
+	w, _ := fetchWorker(q, WorkerOptions{PollInterval: 2 * time.Millisecond, MaxPollInterval: 16 * time.Millisecond})
+	stop := startWorker(t, w)
+	<-time.After(300 * time.Millisecond)
+	stop()
+
+	// Polling every 2ms would be about 150 claims; backing off to 16ms,
+	// about 20.
+	claims := q.claims.Load()
+	assert.LessOrEqual(t, claims, int32(40))
+	assert.GreaterOrEqual(t, claims, int32(5), "it still polls")
+}
+
+// TestWorker_PollsForJobsComingDue: a job that isn't runnable yet raises
+// no signal when it comes due; the idle poll finds it.
+func TestWorker_PollsForJobsComingDue(t *testing.T) {
+	q := newCountingQueue(t)
+	w, handled := fetchWorker(q, WorkerOptions{PollInterval: 10 * time.Millisecond, MaxPollInterval: 20 * time.Millisecond})
+	// run_after is stored to the millisecond.
+	due := time.Now().Add(100 * time.Millisecond).Truncate(time.Millisecond)
+	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch, RunAfter: due}
+	require.NoError(t, q.Enqueue(context.Background(), job))
+
+	stop := startWorker(t, w)
+	defer stop()
+	select {
+	case got := <-handled:
+		assert.Equal(t, job.ID, got.ID)
+		assert.False(t, time.Now().Before(due), "claimed before it was due")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the job was not claimed once due")
+	}
+}

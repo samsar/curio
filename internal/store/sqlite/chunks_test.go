@@ -404,3 +404,82 @@ func TestEscapeLike(t *testing.T) {
 		assert.Equal(t, want, escapeLike(in), in)
 	}
 }
+
+// assertDerivedRowsMatchChunks: chunks_vec holds exactly one vector per
+// chunk, and the external-content FTS index agrees with the chunks table.
+func assertDerivedRowsMatchChunks(t *testing.T, db *DB) {
+	t.Helper()
+	var chunks, vectors, orphans int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM chunks`).Scan(&chunks))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM chunks_vec`).Scan(&vectors))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM chunks_vec v
+		WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.id = v.chunk_id)`).Scan(&orphans))
+	assert.Equal(t, chunks, vectors, "one vector per chunk")
+	assert.Zero(t, orphans, "no vector outlives its chunk")
+	_, err := db.Exec(`INSERT INTO chunks_fts (chunks_fts, rank) VALUES ('integrity-check', 1)`)
+	assert.NoError(t, err, "chunks_fts matches chunks")
+}
+
+// TestChunks_DerivedRowsFollowEveryDelete: however a chunk goes (replaced by
+// a reindex, or cascaded from its extraction or document), its FTS entry
+// and vector go with it.
+func TestChunks_DerivedRowsFollowEveryDelete(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	ids := seedDocs(t, db, "local", "https://example.com/a", "https://example.com/b", "https://example.com/c")
+	index := func(docID string, texts ...string) {
+		t.Helper()
+		inputs := make([]store.ChunkInput, len(texts))
+		for i, text := range texts {
+			inputs[i] = store.ChunkInput{Text: text, Embedding: fillVec(float32(i+1) * 0.1)}
+		}
+		require.NoError(t, ch.ReplaceForDocument(ctx, docID, latestExtractionID(t, db, docID),
+			"Title", []string{"tag"}, inputs))
+	}
+	matches := func(term string) int {
+		t.Helper()
+		hits, err := ch.BM25Search(ctx, "local", term, 50, store.SearchFilters{})
+		require.NoError(t, err)
+		return len(hits)
+	}
+
+	for _, id := range ids {
+		index(id, "original alpha", "original beta")
+	}
+	index(ids[0], "replacement gamma")
+	assertDerivedRowsMatchChunks(t, db)
+	assert.Equal(t, 4, matches("original"), "only the replaced document's chunks are gone")
+	assert.Equal(t, 1, matches("replacement"))
+
+	_, err := db.Exec(`DELETE FROM document_extractions WHERE document_id = ?`, ids[1])
+	require.NoError(t, err)
+	assertDerivedRowsMatchChunks(t, db)
+	assert.Equal(t, 2, matches("original"), "an extraction's chunks cascade")
+
+	_, err = db.Exec(`DELETE FROM documents WHERE id = ?`, ids[2])
+	require.NoError(t, err)
+	assertDerivedRowsMatchChunks(t, db)
+	assert.Zero(t, matches("original"), "a document's chunks cascade")
+	assert.Equal(t, 1, matches("title"), "the chunks left keep their title")
+}
+
+// TestChunks_NothingReferencesChunks: migration 008 rebuilds chunks inside
+// goose's transaction, where foreign keys stay on. That is safe only while
+// no table's foreign key references chunks; dropping a referenced table
+// would run its ON DELETE actions (see migrations/README.md).
+func TestChunks_NothingReferencesChunks(t *testing.T) {
+	db := newTestDB(t)
+	var referencing []string
+	rows, err := db.Query(`SELECT m.name FROM sqlite_master m, pragma_foreign_key_list(m.name) f
+		WHERE m.type = 'table' AND f."table" = 'chunks'`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		referencing = append(referencing, name)
+	}
+	require.NoError(t, rows.Err())
+	assert.Empty(t, referencing)
+}

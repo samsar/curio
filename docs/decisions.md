@@ -78,7 +78,11 @@ when hosted-mode demands them.
 (asynq, NATS, Redis, ...).
 
 **Why:** One less moving part. At single-user scale, a few thousand jobs/day is
-trivial for SQLite. Polling interval ~1s is fine.
+trivial for SQLite.
+
+**Revised:** a fixed poll stopped being fine once the daemon ran 21 worker
+goroutines, each claiming every 500 ms: see "Worker wakeups: an in-process
+signal, and idle polls that back off".
 
 **Forward compatibility:** The `JobQueue` interface lets us swap to asynq or
 similar when hosted-mode demands fan-out or stronger durability guarantees.
@@ -408,7 +412,7 @@ via `sqlite_vec.Auto()` from the sqlite-vec-go-bindings package.
 ## SQLite DSN: per-connection pragmas via mattn's query params
 
 **Decision:** `Open()` builds a DSN like
-`file:/path/curio.db?_fk=true&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000`.
+`file:/path/curio.db?_busy_timeout=5000&_fk=true&_journal_mode=WAL&_synchronous=NORMAL&_txlock=immediate`.
 
 **Why:** SQLite's `foreign_keys` PRAGMA is *per-connection* and defaults to
 OFF — every connection in `database/sql`'s pool must turn it on, or FK
@@ -418,6 +422,51 @@ every new pooled connection.
 
 Note: `_pragma=foreign_keys(1)` syntax is for `modernc.org/sqlite`, NOT
 `mattn/go-sqlite3`. They look similar; mixing them silently no-ops.
+
+**Immediate transactions:** the DSN also sets `_txlock=immediate`, so every
+`BeginTx` issues `BEGIN IMMEDIATE` and takes the write lock at once.
+Without it every transaction was deferred: one that had read and then
+wrote, while another connection held the lock, got `SQLITE_BUSY` at once
+(measured 5 µs), because SQLite skips the busy handler for that upgrade,
+or `SQLITE_BUSY_SNAPSHOT` if a write had committed since its read. The
+same transaction under `_txlock=immediate` waited 372 ms and committed.
+Every transaction curio opens writes (ingest, refetch, orphan recovery,
+chunk replacement, cluster replacement, goose's migrations), so taking the
+lock at BEGIN costs nothing, busy_timeout now covers each of them whole,
+and statement order inside them no longer matters; the "write first"
+rule that comments used to carry is gone. mattn ignores
+`sql.TxOptions.ReadOnly`, so reads never open a transaction; as
+autocommit statements in WAL mode they never wait on a writer.
+
+**Pool policy:** `SetMaxOpenConns(32)`, `SetMaxIdleConns(32)`,
+`SetConnMaxIdleTime(5 * time.Minute)`. database/sql keeps two idle
+connections by default, so under the worker pools connections were closed
+and reopened constantly: 214 closed in a 0.2 s burst of 21 claimers, each
+reopen costing about 0.7 ms (open, pragmas, sqlite-vec) against 2.4 µs for
+a query on a pooled connection. A writer waiting out busy_timeout holds
+its connection, so the cap sits above the 21 default worker goroutines
+with room for the API, and reads don't queue behind waiting writers. The
+idle timeout releases connections and their page caches once the daemon
+has been idle for five minutes. `Open` rejects `":memory:"`, which would
+give each pooled connection its own database.
+
+**No split reader/writer pool:** it would add a routing decision to every
+store method and, with a one-connection writer, a self-deadlock risk for
+any nested use, for little gain at this scale. Revisit if `SQLITE_BUSY`
+shows up in the logs.
+
+**When `SQLITE_BUSY` does happen:** with immediate transactions it means
+the lock stayed held for the whole busy_timeout. Handlers' writes already
+retry through `MarkFailed`'s backoff. The worker's own bookkeeping
+(`MarkDone`, `MarkFailed`, `Requeue` and the permanent-failure hook) is
+retried with a backoff of 50 ms doubling to 1 s, within the 10 s
+bookkeeping budget, on any error except `store.ErrNotRunning`,
+`store.ErrNotFound` and `ErrPermanent`: it used to log the failure and move
+on, leaving the job `running` until the next restart. Retrying is safe
+because the transitions only move a running job and `MarkDocFailed` is
+idempotent (hooks must be). It retries any other error rather than
+classifying SQLite error codes across the store boundary; the budget
+bounds the cost.
 
 ---
 
@@ -438,16 +487,39 @@ connection time, so the migration PRAGMA was redundant *and* breaking.
 id = (SELECT id ... LIMIT 1) RETURNING ...` statement, not a `BEGIN; SELECT;
 UPDATE; COMMIT;` transaction.
 
-**Why:** The transaction approach deadlocks under concurrent workers. The
-initial SELECT takes a SHARED lock; when each worker tries to upgrade to a
-RESERVED lock for the UPDATE, they all block on each other and SQLite's
-busy_timeout doesn't save us under load. The single-statement form acquires
-the write lock immediately, serializes cleanly across workers, and is also
-shorter code.
+**Why:** The transaction approach failed under concurrent workers. The
+initial SELECT took a read lock in a deferred transaction, and upgrading it
+to a write lock for the UPDATE while another worker held the lock fails
+with `SQLITE_BUSY` at once: SQLite skips busy_timeout for that upgrade.
+The single-statement form acquires the write lock immediately, serializes
+cleanly across workers, and is also shorter code. (Transactions are now
+immediate, so a read-then-write transaction would wait instead; see
+"SQLite DSN". The single statement stays the simpler claim.)
 
 Tested with 20 jobs / 8 workers / `-race`: every job claimed exactly once,
 no duplicates, no errors. The test lives in jobs_test.go specifically so the
 multi-worker semantics are locked in before the M1 worker-pool expansion.
+
+**Claim order and index:** the claim takes the pending job that became
+runnable first: `ORDER BY run_after, created_at`, served by
+`idx_jobs_claim (status, kind, run_after, created_at)`. Every daemon pool
+claims one kind, and for one kind the subquery is a seek on
+`(status=? AND kind=? AND run_after<?)` and the first row, with no sort
+(pinned in `internal/store/sqlite/plans_test.go`). A claim for several
+kinds, or any kind, still works but sorts.
+
+The claim used to be `ORDER BY created_at` over `idx_jobs_dispatch
+(status, run_after, created_at)`, which served the `run_after` range but
+not the order, so every claim read and sorted all runnable jobs, under the
+write lock: 0.43 ms per claim with 5k runnable fetch jobs, 4.94 ms at 50k,
+so the claims of a large import cost the square of its size. A claim for a
+kind with nothing runnable (the index pool during a fetch backlog) walked
+every runnable job of the other kinds first, 3.1 ms at 50k. With
+`idx_jobs_claim` every single-kind claim measured 5-6 µs at every size.
+
+Fresh jobs are unaffected by the new order, since insert sets `run_after`
+to the insert time. A retried or requeued job is placed by when it came
+due, not by when it was first created.
 
 ---
 
@@ -603,19 +675,40 @@ Ollama-bound) after FIFO claiming let fetches starve indexing, plus a
 one-worker cluster pool. `daemon.workers` survives only as a deprecated
 alias: see "Config: strict keys, legacy `workers` folded in at load" below.
 
+**Revised again:** idle goroutines no longer poll on a fixed tick; they
+wait for the queue's enqueue signal or an idle poll that backs off. See
+"Worker wakeups: an in-process signal, and idle polls that back off".
+
 ---
 
 ## Marker file's schema_version is synced from the DB after migrations
 
-**Decision:** On daemon startup, after running migrations, we read the
-current `schema_meta.schema_version` and write it back to
-`.curio-meta.json` so `/v1/healthz` reflects the actual schema state.
+**Decision:** goose's `goose_db_version` table is the only record of the
+schema version. `sqlite.Migrate` returns the version goose leaves the
+database at (`Provider.GetDBVersion` after `Up`), and the daemon writes it
+into `.curio-meta.json` so `/v1/healthz`, `curio version` and
+`curio doctor` show it. The marker's `schema_version` is a cache;
+`curiohome.CurrentSchemaVersion` is only the placeholder `Init` writes
+before the daemon's first start.
 
-**Why:** The marker file is set at `curiohome.Init` time using the
-"current" schema version (a constant). Migrations bump
-`schema_meta.schema_version` but the marker doesn't update on its own,
-so after migration 002 ran, `curio status` still reported "schema: v1".
-The DB is authoritative; the marker mirrors it.
+**Why:** The marker is written at `curiohome.Init` time with a constant,
+so after migration 002 ran, `curio status` still reported "schema: v1";
+the daemon has to refresh it from the database.
+
+It used to refresh it from `schema_meta.schema_version`, a copy every
+migration had to bump by hand, next to goose's own record of the same
+number. A migration that forgot the bump would have made every display
+wrong. Migration 005 drops the column (its Down restores it at 4, so the
+older Downs that set it still run), and no migration records the version
+any more. Goose versions 1 through 4 equal the old `schema_version`
+values, so existing installs continue without a jump. The marker field
+stays because offline commands read it and the healthz response shape
+must not change.
+
+Returning the version from `Migrate` reads it on the same Provider after
+`Up`. A separate read function would have to be called on a database
+that may not be migrated yet, where `GetDBVersion` creates goose's table
+as a side effect.
 
 ---
 
@@ -2040,7 +2133,8 @@ database" true, and that is the assumption the queue relies on.
   bounds the handler. Every queue write after the decision to claim runs
   on a context detached from it and bounded by 10s, longer than SQLite's
   5s busy_timeout. That covers `ClaimNext`, `MarkDone`, `MarkFailed`,
-  `Requeue` and the permanent-failure hook.
+  `Requeue` and the permanent-failure hook; all but the claim are retried
+  within that bound when they fail (see "SQLite DSN").
 - **Interrupted:** a handler returns while the worker's context is done
   (shutdown). `Requeue` puts the job back to `pending`, runnable now, with
   the attempt refunded and `last_error` untouched. This keys off the
@@ -2121,8 +2215,8 @@ simply redone.
 
 **Decision:** `DocumentStore.RequeueFetch` and `RequeueFetchByStates` reset
 the document(s) to `pending` and insert the fetch job(s) in one
-write-first transaction: the UPDATE comes first, then the INSERTs.
-Everything commits or nothing does.
+transaction: the UPDATE, then the INSERTs. Everything commits or nothing
+does.
 
 - `refetch-all` rejects any `?state=` other than pending, fetched, failed
   or dead with 400. With no `?state=` it defaults to pending, fetched and
@@ -2137,13 +2231,16 @@ enqueued, discarding errors. A failed enqueue left the document `pending`
 with no job, the stuck state the permanent-failure hook exists to
 prevent. `refetch-all` returned 202 with a count that hid the failures.
 
-**One transaction, not batches:** 50k documents take 1.5–2s (measured).
-Nearly all of that is the job INSERTs, and a prepared statement saved
-only about 8%. That is inside the 5s busy_timeout other writers wait on
-up to roughly 130k documents. Past that, a worker write that lands during
-the bulk transaction fails as busy; its job stays `running` and is
-recovered as an orphan on the next start. Chunked transactions are the
-fix if corpora get there.
+**One transaction, not batches:** 50k documents took 1.5–2s (measured),
+and about 2.4s since migration 007 added the jobs indexes and the
+`document_id` check (see "Indexes follow the queries"). Nearly all of it
+is the job INSERTs, and a prepared statement saved only about 8%. That is
+inside the 5s busy_timeout other writers wait on up to roughly 100k
+documents. Past that, a worker write that waits out the whole
+busy_timeout fails as busy and is retried within the worker's 10 s
+bookkeeping budget (see "SQLite DSN"); only a bulk transaction longer than
+that leaves a job `running` until the next start recovers it as an orphan.
+Chunked transactions are the fix if corpora get there.
 
 **Not done:** skipping documents that already have a queued fetch job.
 
@@ -2588,8 +2685,8 @@ already fall back to the URL or the bookmark title when `title` is NULL.
 ## Bookmark ingest: one transaction, fetch only for new documents
 
 **Decision:** `POST /v1/bookmarks` and `POST /v1/bookmarks/import` save
-each bookmark through `BookmarkStore.Ingest`, one write-first transaction
-per bookmark:
+each bookmark through `BookmarkStore.Ingest`, one transaction per
+bookmark:
 
 1. `INSERT INTO documents ... ON CONFLICT (tenant_id, url) DO NOTHING
    RETURNING id, state`; no row back means the document exists, so it is
@@ -2629,10 +2726,11 @@ healed with `curio refetch --all --state=pending`.
 **One transaction per bookmark, not per batch:** measured at about 145 µs
 per bookmark, the same as the five autocommit statements it replaces, and
 it lets fetch and index workers interleave with a 500-bookmark batch. The
-write comes first so concurrent ingests queue on the write lock through
-busy_timeout (see "Job queue claim via atomic UPDATE ... RETURNING"); five
-writers ingesting the same URLs produced one document and one job per URL
-and no `SQLITE_BUSY`. The import handler stops at the first bookmark after
+indexes of migration 007 raised it to about 245 µs, from 190 µs on the
+machine that re-measured both. The
+transaction takes the write lock at BEGIN (see "SQLite DSN"), so concurrent
+ingests queue on it through busy_timeout; five writers ingesting the same
+URLs produced one document and one job per URL and no `SQLITE_BUSY`. The import handler stops at the first bookmark after
 the client has gone; each committed bookmark stands on its own, so a
 re-import resumes.
 
@@ -2643,9 +2741,8 @@ which report failures differently (400 versus `filtered_by`).
 
 ## Migrate: goose's Provider, and a context all the way down
 
-**Decision:** `sqlite.Open`, `Migrate` and `ReadSchemaVersion` take a
-context (`PingContext`, `QueryRowContext`, `Provider.Up(ctx)`), and the
-daemon passes its run context. `Migrate` applies the embedded migrations
+**Decision:** `sqlite.Open` and `Migrate` take a context (`PingContext`,
+`Provider.Up(ctx)`), and the daemon passes its run context. `Migrate` applies the embedded migrations
 through `goose.NewProvider`, never goose's package-level `SetBaseFS` /
 `SetDialect` / `Up`.
 
@@ -2660,6 +2757,14 @@ homes migrate unchanged.
 **Shutdown during a migration:** a cancelled context fails `Migrate`, and
 the daemon exits as on any migration error, without reusing the handle
 (see "Migrations: rebuilding a table other tables reference").
+
+**Checkpoint after migrating:** when `Migrate` applied at least one
+migration, it runs `PRAGMA wal_checkpoint(TRUNCATE)`. A migration that
+rewrites a table writes every page of it through the WAL, and SQLite's
+automatic checkpoints copy those pages back but never shrink the file:
+without this, migrations 007 and 008 would leave a WAL about the size of
+the jobs and chunks tables (580 MB after 008 on a 1 GB database), which
+`curio status` reports as the database's WAL.
 
 ---
 
@@ -2685,8 +2790,9 @@ The host filter is reachable from `curio search --host` and from the MCP
 character and a host of `%` matched every document. The obvious fix,
 `folder_path = ? OR folder_path LIKE ? ESCAPE ...`, is still wrong: `=` is
 case-sensitive and LIKE is not, so `/tech/ai` would match
-`/Tech/AI/Agents` but not `/Tech/AI`. The range needs no escaping and can
-still use `idx_bookmarks_folder (tenant_id, folder_path)`.
+`/Tech/AI/Agents` but not `/Tech/AI`. The range needs no escaping. (The OR
+keeps SQLite from seeking `idx_bookmarks_folder` on it; see "Indexes follow
+the queries" for how a filtered page is read.)
 
 ---
 
@@ -2722,3 +2828,247 @@ with no extraction fails permanently, and the permanent-failure hook then
 marks the document failed. So `curio reindex --all --state=pending` turned
 documents whose first fetch was still in flight into failed ones.
 Single-document reindex already refused such a document with 409.
+
+---
+
+## updated_at: written by each statement, not by triggers
+
+**Decision:** Every UPDATE sets `updated_at` in the same statement:
+`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')` (the `sqlNow`
+fragment in `internal/store/sqlite`, the expression the column DEFAULTs
+use), or the formatted Go time the statement already binds for another
+column (`ClaimNext`, `Requeue`, `RecoverOrphans`, `MarkFailed`'s retry).
+Migration 006 drops the `trg_*_updated_at` triggers on documents,
+bookmarks, jobs, cluster_runs and clusters; its Down recreates them
+verbatim.
+
+**Why:** Each AFTER UPDATE trigger ran a second UPDATE of the row, so every
+one-row write cost two (`total_changes()` moved by 2). Worse, RETURNING
+reports the row as the statement left it, before the trigger runs:
+`ClaimNext` handed back the enqueue time as `UpdatedAt` while the stored
+row had the claim time, and so did every job `RecoverOrphans` returned.
+The triggers also made `updated_at` impossible to pin in a test, which is
+why several tests inserted rows by hand and one comment claimed the claim
+was the last write to touch it.
+
+The triggers migration 008 adds on `chunks` are a different kind (see
+"Chunks: external-content FTS"): they keep derived tables in step with
+their source, and nothing reads those back through RETURNING.
+
+---
+
+## Jobs reference their document through a column
+
+**Decision:** `jobs.document_id TEXT REFERENCES documents(id) ON DELETE SET
+NULL` (migration 007) holds the document a fetch or index job works on.
+`insertJob` fills it in the INSERT itself with
+`json_extract(<payload>, '$.document_id')`, the rule the migration
+backfilled existing rows with. `ListWithLastError` finds a document's last
+error with `document_id = d.id AND status = 'failed' ORDER BY updated_at
+DESC LIMIT 1` on `idx_jobs_document (document_id, status, updated_at)`, and
+`ListWithDoc` joins `d.id = j.document_id`. No store read uses
+`json_extract`. Enqueueing a job whose payload names a missing document is
+an error wrapping `store.ErrNotFound`.
+
+**Why:** Jobs named their document only inside the payload JSON, which no
+index can serve. `curio docs` ran, for every document of the tenant before
+its sort and LIMIT, a correlated subquery that walked every failed job:
+59 ms at 2k documents and 200 failed jobs, 756 ms at 5k and 1k, growing
+with documents × failed jobs. `ListWithDoc` joined through `json_extract`
+for every tenant job. Nothing defined what deleting a document did to its
+jobs.
+
+**SET NULL, not CASCADE:** jobs are the audit trail. Their `last_error`
+explains a failure and their durations feed `/v1/metrics`; deleting a
+document must not erase that, the rule `bookmarks.document_id` already
+follows. SET NULL is also what `curio jobs` already showed for a vanished
+document (the job listed with an empty URL), and the state the backfill
+gives a payload naming a document that no longer exists, so existing
+databases pass `PRAGMA foreign_key_check`.
+
+**The payload keeps `document_id`:** the API returns payloads verbatim and
+the handlers decode them; the column is a projection written once at
+insert. Deriving it in SQL rather than decoding in Go keeps one rule for
+old and new rows, lets a payload that isn't a JSON object still enqueue
+(its column is NULL), and means `store.Job` needs no field no Go code
+reads.
+
+**In goose's transaction:** `ALTER TABLE ADD COLUMN` with a REFERENCES
+clause is allowed when the default is NULL, so no table is rebuilt; Down
+drops the index and then the column.
+
+---
+
+## Indexes follow the queries; plans are pinned by tests
+
+**Decision:** Migration 007 builds the index set around the queries the
+store runs:
+
+| Index | Serves |
+|---|---|
+| `idx_jobs_claim (status, kind, run_after, created_at)` | `ClaimNext`; `RecoverOrphans` |
+| `idx_jobs_document (document_id, status, updated_at)` | a document's last error (`curio docs`); the FK action when a document is deleted |
+| `idx_jobs_tenant_status_updated (tenant_id, status, updated_at)` | `ListWithDoc` by status (`curio jobs`, `--failed`); `CountByStatus`; `MetricsByKind`'s window; `PruneOlderThan`; `DeleteByStatus` |
+| `idx_jobs_tenant_updated (tenant_id, updated_at)` | `ListWithDoc` unfiltered (`--all`) or by kind only |
+| `idx_documents_tenant_state_updated (tenant_id, state, updated_at)` | `ListWithLastError` by state (`curio docs`, `--failed`); `CountByState`; `ListIDsWithContent`; `DocumentVectors`; `RequeueFetchByStates` |
+| `idx_documents_tenant_updated (tenant_id, updated_at)` | `ListWithLastError` unfiltered (`--all`) |
+| `idx_bookmarks_tenant_id (tenant_id, id)` | `Bookmarks.List` pages |
+
+They replace `idx_jobs_dispatch`, `idx_jobs_kind` and
+`idx_documents_tenant_state`. `idx_documents_tenant_ctype` and
+`idx_documents_url_canonical` are dropped: no query read them (the search
+`content_type` filter is checked on each hit's document after a
+primary-key join), and each cost a write on every document update.
+
+The lists walk their index in `updated_at` (or `id`) order and stop at the
+LIMIT, where they used to sort every tenant row first: `ListWithDoc` took
+2.3 ms at 4.2k jobs and 6.3 ms at 11k and grew until someone pruned, and a
+page of bookmarks sorted every bookmark, so paging through N cost
+O(N²/page size). `CountByStatus`, behind the `/v1/stats` that
+`curio import --follow` polls every 2 s, no longer builds a temporary
+b-tree for its GROUP BY. A bookmark page filtered by source or folder
+walks `idx_bookmarks_tenant_id` too, checking the filter per row; the
+folder filter's OR never let SQLite seek `idx_bookmarks_folder` anyway.
+
+**Pinned by tests:** curio never runs ANALYZE, so SQLite plans from its
+heuristics and the schema alone, and the plans are stable.
+`internal/store/sqlite/plans_test.go` runs EXPLAIN QUERY PLAN on the SQL
+the store runs, built by the same constants and builders, and asserts the
+index and its constraints, and the absence of a temporary b-tree wherever
+the order should come from the index. A query or index change that loses
+a plan fails there.
+
+**Write cost:** `jobs` now carries four secondary indexes, and every job
+insert checks its document. On the machine that measured 1.75 s before
+this change, `RequeueFetchByStates` over 50k documents takes 2.4 s, nearly
+all of it the job INSERTs (the `document_id` check about 0.3 s of it), and
+a bookmark `Ingest` about 245 µs instead of 190 µs. Reads that were
+proportional to the table are now proportional to the page, which is the
+trade `curio docs` and `curio jobs` need.
+
+---
+
+## Chunks: external-content FTS, derived rows kept by triggers
+
+**Decision:** Migration 008 makes `chunks_fts` an FTS5 index with `chunks`
+as its external content: `fts5(text, title, tags, content='chunks',
+content_rowid='seq', ...)`.
+
+- `chunks` gains `seq INTEGER PRIMARY KEY`, the index's rowid; `id` stays
+  the public TEXT ID, `NOT NULL UNIQUE`. It also gains `title` and `tags`,
+  exactly the strings indexed for the chunk.
+- AFTER INSERT, DELETE and UPDATE triggers on `chunks` mirror every change
+  into the index, deletes supplying the old values. The delete trigger
+  also runs `DELETE FROM chunks_vec WHERE chunk_id = old.id`.
+- `ReplaceForDocument` runs one `DELETE FROM chunks WHERE document_id = ?`
+  and inserts through two statements prepared once per transaction (chunk
+  row, vector). `BM25Search` joins `chunks c ON c.seq = chunks_fts.rowid`
+  and takes both IDs from `chunks`.
+
+**Why:** Every index job started with two deletes that read the whole
+corpus under the write lock. `DELETE FROM chunks_fts WHERE document_id = ?`
+filtered on an UNINDEXED column, a full scan. `DELETE FROM chunks_vec
+WHERE chunk_id IN (SELECT ...)` made vec0 take its full-scan plan: vec0
+only has a point plan for `chunk_id = ?` and never accepts `IN
+(subquery)` as a lookup. A 10-chunk `ReplaceForDocument` took 4.1, 7.0
+and 10.3 ms at 2k, 8k and 16k chunks, so indexing an import cost the
+square of its size. The regular FTS table also stored a second copy of
+every chunk's text (`chunks_fts_content`), a title column nothing read and
+copies of both IDs, and chunks deleted by a foreign-key cascade from
+documents or extractions left their FTS and vector rows behind.
+
+**Why `seq`:** SQLite only guarantees that an INTEGER PRIMARY KEY keeps its
+value across VACUUM; an implicit rowid may be renumbered, and so would one
+after a future table rebuild. Either would silently detach the index from
+its rows.
+
+**Why `title` and `tags` on the chunk:** an external-content delete must
+supply exactly the values that were indexed, and a document's title can
+change after its chunks are indexed. The UNINDEXED FTS columns are gone:
+nothing read `title`, and both IDs come from `chunks` through the rowid.
+bm25 only counts tokens in indexed columns, so scores are unchanged; the
+migration test compares IDs, order, snippets and scores with the old
+query, before and after, both ways.
+
+**Why triggers:** it is the pattern the FTS5 documentation gives for
+external content, and it makes every delete path clean up, cascades
+included, which the store alone could not. Unlike the `updated_at`
+triggers migration 006 dropped, these maintain derived tables, not the row
+being written. Inserting the vector stays in Go, since the embedding is
+not a `chunks` column. `plans_test.go` pins that the trigger's vector
+delete is a vec0 point lookup and that the chunk delete uses
+`idx_chunks_document`. With 250-word chunks, a 10-chunk
+`ReplaceForDocument` measured 4.4, 10.0 and 17.3 ms at 2k, 8k and 16k
+chunks before, and 4.9, 6.0 and 6.3 ms after.
+
+**Never `INSERT OR REPLACE` into `chunks`:** REPLACE deletes the
+conflicting row without firing delete triggers (`recursive_triggers` is
+off), which would leave its index entry and vector behind.
+
+**Inside goose's transaction:** no foreign key references `chunks` (a test
+checks `pragma_foreign_key_list`), so dropping the old table runs no
+ON DELETE actions even with foreign keys on, and the version bump commits
+with the rebuild. The NO TRANSACTION recipe could not meet its "safe to
+run twice" rule here anyway: a rerun would read FTS columns the first run
+dropped.
+
+**Cost:** 200k chunks of 250 words (a 1 GB database) migrate in about 9 s
+on an Apple M4 Max, most of it re-tokenizing into the new index (the FTS
+`'rebuild'` command). The daemon logs `migrating database` before it
+starts, so a migration that outlasts the CLI's 15 s auto-start wait shows
+in the log tail. The dropped copy of the text (about 400 MB there) goes to
+SQLite's freelist and is reused as the database grows. The migration does
+not VACUUM, which would rewrite the whole file; to return the space to the
+OS now, stop the daemon and run `sqlite3 ~/.curio/curio.db VACUUM`.
+
+---
+
+## Worker wakeups: an in-process signal, and idle polls that back off
+
+**Decision:** `store.JobQueue` has `Enqueued(kinds) <-chan struct{}`: a
+channel closed once a job of one of `kinds` (any kind when empty) is
+enqueued, or put back to pending, through that queue in this process, and
+committed. `Worker.Run` takes the channel before it drains, then waits for
+the channel, its context, or an idle poll timer that starts at
+`PollInterval` (500 ms) and doubles up to the new
+`WorkerOptions.MaxPollInterval` (5 s). A claimed job resets the timer; a
+failed claim backs off like an empty one.
+
+In the SQLite store the signal lives on the `*DB` that `Jobs`,
+`Documents` and `Bookmarks` share, since each enqueues. It fires after the
+commit (or after an autocommit statement returns) on `Enqueue`, `Ingest`
+when it created a fetch job, `RequeueFetch`, `RequeueFetchByStates` when it
+enqueued any, `Requeue` (the kind comes from `RETURNING`) and
+`RecoverOrphans` when it requeued any. A rollback or `ErrConflict` never
+fires it. Each set of kinds has one channel, closed and replaced when one
+of its kinds is signalled, so the goroutines of a pool share one entry and
+nothing is started per wait.
+
+**Why:** every worker goroutine ran a 500 ms ticker, and the daemon runs
+16 fetch, 4 index and 1 cluster goroutine: about 42 claims a second from
+an idle daemon. A claim is an UPDATE, which takes SQLite's write lock even
+when it matches nothing. With another connection holding the lock, a claim
+that matched nothing waited out busy_timeout and failed with
+`SQLITE_BUSY`, where the same predicate as a SELECT answered in 0.2 ms. So
+idle polling competed with real writers (ingest, index transactions) and
+kept an always-on laptop daemon waking 42 times a second, while new work
+still waited up to 500 ms to be noticed. Now new work is claimed at once,
+and idle claims fall to about 4 a second (21 goroutines at one per 5 s).
+
+**Per kind:** during an import, fetch jobs are enqueued hundreds of times a
+second; waking the index and cluster pools on each would bring the no-op
+claims back. A signal still wakes every idle goroutine of the pool it is
+for, and all but one of their claims find nothing; that is one claim per
+goroutine per signal, and busy goroutines aren't waiting.
+
+**Behind the interface:** a hosted queue can implement `Enqueued` with
+Postgres `LISTEN/NOTIFY`; the worker only needs a channel.
+
+**Polling stays for `run_after`:** a retry's backoff is at least 60 s, so
+the up to 5 s the capped poll adds to it is noise, and computing the next
+due time would cost a query and a timer every idle cycle. The poll also
+finds jobs another process enqueued, which no in-process signal sees.
+
+**One goroutine per worker still:** a dispatcher handing jobs to a
+semaphore-bounded pool would change the shutdown and drain semantics for
+little further gain.

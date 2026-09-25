@@ -129,6 +129,8 @@ Clusters documents into labeled "interests". The whole algorithm sits behind `in
 - Errors over the wire are RFC 7807 (`application/problem+json`).
 - `curio docs` and `curio jobs` default to the happy-path view (`state=fetched`, `status=done`). `--failed`, `--all`, and explicit `--state`/`--status` widen.
 - Both list views include the on-disk markdown path under `doc_id` so `cat`, `curio docs show`, and `curio refetch` are copy/paste-ready.
+- Store SQL lives in constants and builders that `internal/store/sqlite/plans_test.go` also runs, pinning each hot query's index (curio never runs ANALYZE). A query or index change must keep its plan, or update the pin and `docs/decisions.md` "Indexes follow the queries".
+- Every UPDATE sets `updated_at` itself; no trigger does. Triggers on `chunks` keep `chunks_fts` and `chunks_vec` in step, so never `INSERT OR REPLACE` into `chunks`. The schema version is goose's (`goose_db_version`); migrations don't record it.
 
 ## CI release flow
 

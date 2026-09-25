@@ -148,19 +148,34 @@ rows are kept for diff/history (could be GC'd by a future retention job).
 
 ```
 chunks
-  id                UUID PK
+  seq               INTEGER PK                 -- rowid of the chunk's chunks_fts entry
+  id                UUID NOT NULL UNIQUE       -- the chunk's ID everywhere else
   document_id       UUID NOT NULL FK
   extraction_id     UUID NOT NULL FK           -- chunks belong to a specific extraction
   ord               INTEGER NOT NULL
   text              TEXT NOT NULL
   token_count       INTEGER
+  title             TEXT NOT NULL              -- the document title, as indexed for this chunk
+  tags              TEXT NOT NULL              -- bookmark tags as indexed (a JSON array), '' for none
 ```
 
 Two virtual tables sit alongside:
 
-- `chunks_fts` — FTS5 over `chunks.text`, plus boostable columns for
-  `documents.title` and `references.tags` (denormalized at index time).
+- `chunks_fts` — FTS5 index over `chunks.text`, `title` and `tags` (title
+  and tags are denormalized at index time so they can be matched without a
+  JOIN). `chunks` is its external content (`content_rowid = seq`): the
+  index holds no copy of the text and reads it back from `chunks` for
+  snippets.
 - `chunks_vec` — sqlite-vec, keyed on `chunks.id`, holds the embedding.
+
+Triggers on `chunks` mirror every insert, update and delete into
+`chunks_fts`, and the delete trigger removes the chunk's vector too, so a
+chunk deleted any way, a foreign-key cascade from its document or
+extraction included, takes its derived rows with it. `title` and `tags`
+are stored on the chunk because an external-content delete must supply
+the values that were indexed. `seq` is an explicit INTEGER PRIMARY KEY
+because SQLite keeps those across VACUUM, where an implicit rowid could be
+renumbered and detach the index from its rows.
 
 When the embedding model changes, both virtual tables are rebuilt (see
 [embedding model swap](./decisions.md#embedding-model-swap)).
@@ -209,15 +224,36 @@ jobs
   tenant_id     TEXT NOT NULL
   kind          TEXT NOT NULL                  -- 'fetch' | 'index' | 'cluster' | 'summarize'
   payload       JSON NOT NULL
+  document_id   UUID FK                        -- → documents(id), ON DELETE SET NULL
   status        TEXT NOT NULL                  -- 'pending' | 'running' | 'done' | 'failed'
   attempts      INTEGER NOT NULL DEFAULT 0
   run_after     TIMESTAMP NOT NULL DEFAULT now
   last_error    TEXT
+  started_at    TIMESTAMP                      -- set when claimed
   created_at, updated_at
 ```
 
-Worker pool polls `WHERE status='pending' AND run_after <= now ORDER BY
-created_at LIMIT N`. Failed jobs get exponential backoff via `run_after`.
+`document_id` is the document a fetch or index job works on. It is the
+payload's `document_id`, copied into a column when the job is inserted;
+the payload keeps it, since the API returns payloads verbatim. It is NULL
+for a job that names no document (cluster), and for a job whose document
+has been deleted: the foreign key is `ON DELETE SET NULL`, so the job's
+history (its `last_error`, its durations) outlives the document. A job
+whose payload names a document that doesn't exist can't be enqueued.
+
+Workers claim with a single `UPDATE jobs SET status = 'running' ... WHERE
+id = (SELECT id FROM jobs WHERE status = 'pending' AND kind = ? AND
+run_after <= now ORDER BY run_after, created_at LIMIT 1) RETURNING ...`, so
+jobs are claimed in the order they became runnable. `idx_jobs_claim
+(status, kind, run_after, created_at)` turns a one-kind claim into an index
+seek and the first row, however many jobs are queued. Failed jobs get
+exponential backoff via `run_after`.
+
+Idle workers don't poll on a fixed tick. The store signals, per kind,
+when a job is enqueued or put back to pending in this process
+(`JobQueue.Enqueued`), and a worker wakes on that; between signals it
+polls, starting at 500 ms and backing off to 5 s, which is how it finds
+retries coming due and jobs other processes enqueued.
 
 ### `cluster_runs`
 
@@ -313,5 +349,8 @@ Keeping content on disk rather than in SQLite:
 ## Schema versioning and migrations
 
 Migrations live in `migrations/` and run via `pressly/goose` at daemon startup.
-`.curio-meta.json` records the current schema version. Downgrade is not
-supported — backup before major version bumps.
+The schema version is the highest version in goose's `goose_db_version`
+table, the one source of truth for it. The daemon copies it into
+`.curio-meta.json` after migrating, as a cache for `/v1/healthz`,
+`curio version` and `curio doctor`. Downgrade is not supported — backup
+before major version bumps.

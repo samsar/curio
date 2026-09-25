@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -199,6 +200,42 @@ func TestExtractions_CreateAndList(t *testing.T) {
 	assert.Len(t, list, 2)
 }
 
+// TestExtractions_Create_FetchedAt: the extraction comes back with the
+// fetched_at that was stored, whether the caller gave one or the column
+// defaulted it.
+func TestExtractions_Create_FetchedAt(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	exts := NewExtractions(db)
+	d := &store.Document{TenantID: "local", URL: "https://example.com/fetched-at"}
+	require.NoError(t, NewDocuments(db).Create(ctx, d))
+
+	given := time.Date(2024, 5, 1, 12, 30, 0, 123456789, time.UTC)
+	cases := []struct {
+		name      string
+		fetchedAt time.Time
+		want      func(t *testing.T, got time.Time)
+	}{
+		{"given", given, func(t *testing.T, got time.Time) {
+			assert.Equal(t, given.Truncate(time.Millisecond), got, "stored to the millisecond")
+		}},
+		{"defaulted", time.Time{}, func(t *testing.T, got time.Time) {
+			assert.WithinDuration(t, time.Now(), got, time.Minute)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
+				FetchedAt: tc.fetchedAt}
+			require.NoError(t, exts.Create(ctx, e))
+			tc.want(t, e.FetchedAt)
+			stored, err := exts.GetByID(ctx, e.ID)
+			require.NoError(t, err)
+			assert.Equal(t, stored.FetchedAt, e.FetchedAt)
+		})
+	}
+}
+
 func TestDocuments_SetCurrentExtractionTriggerEnforced(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -235,6 +272,9 @@ func TestBookmarks_CRUD(t *testing.T) {
 	got, err := bms.GetByID(ctx, b.ID)
 	require.NoError(t, err)
 	assert.Equal(t, b.URL, got.URL)
+	assert.False(t, b.CreatedAt.IsZero())
+	assert.Equal(t, got.CreatedAt, b.CreatedAt, "Create returns the stored timestamps")
+	assert.Equal(t, got.UpdatedAt, b.UpdatedAt)
 	require.NotNil(t, got.FolderPath)
 	assert.Equal(t, "/Tech/AI", *got.FolderPath)
 	assert.Equal(t, []string{"a", "b"}, got.Tags)
@@ -327,6 +367,37 @@ func TestJobs_ClaimNext_FiltersByKind(t *testing.T) {
 	assert.Equal(t, store.JobKindIndex, got.Kind)
 }
 
+// TestJobs_ClaimNext_Order: jobs are claimed in the order they became
+// runnable, and in the order they were created when that ties.
+func TestJobs_ClaimNext_Order(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	q := NewJobs(db)
+	base := time.Now().UTC().Add(-time.Hour)
+	insert := func(id string, runAfter, createdAt time.Time) {
+		t.Helper()
+		_, err := db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, run_after, created_at)
+			VALUES (?, 'local', 'fetch', '{}', ?, ?)`, id, formatTime(runAfter), formatTime(createdAt))
+		require.NoError(t, err)
+	}
+	// A retry that came due before a newer job was created goes first,
+	// though it was created long before either.
+	insert("due-later", base.Add(2*time.Minute), base.Add(2*time.Minute))
+	insert("due-first", base.Add(time.Minute), base.Add(3*time.Minute))
+	// Due together: the older one goes first.
+	insert("tie-newer", base.Add(5*time.Minute), base.Add(5*time.Minute))
+	insert("tie-older", base.Add(5*time.Minute), base.Add(4*time.Minute))
+
+	want := []string{"due-first", "due-later", "tie-older", "tie-newer"}
+	got := make([]string, 0, len(want))
+	for range want {
+		j, err := q.ClaimNext(ctx, []store.JobKind{store.JobKindFetch})
+		require.NoError(t, err)
+		got = append(got, j.ID)
+	}
+	assert.Equal(t, want, got)
+}
+
 func TestJobs_ClaimNext_NoneRunnable(t *testing.T) {
 	q := NewJobs(newTestDB(t))
 	_, err := q.ClaimNext(context.Background(), nil)
@@ -343,6 +414,48 @@ func TestJobs_ClaimNext_RespectsRunAfter(t *testing.T) {
 	}))
 	_, err := q.ClaimNext(ctx, nil)
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestJobs_Enqueue_DocumentID: jobs.document_id is derived from the
+// payload at insert, which is stored as given, and a payload naming a
+// missing document is refused.
+func TestJobs_Enqueue_DocumentID(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	q := NewJobs(db)
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/doc"}
+	require.NoError(t, NewDocuments(db).Create(ctx, doc))
+
+	cases := []struct {
+		name    string
+		payload string
+		want    sql.NullString
+	}{
+		{"document job", `{"document_id":"` + doc.ID + `"}`, sql.NullString{String: doc.ID, Valid: true}},
+		{"extra fields", `{"reason": "model-swap", "document_id":"` + doc.ID + `"}`, sql.NullString{String: doc.ID, Valid: true}},
+		{"no document", `{}`, sql.NullString{}},
+		{"not an object", `[1, 2]`, sql.NullString{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			j := &store.Job{TenantID: "local", Kind: store.JobKindIndex, Payload: json.RawMessage(tc.payload)}
+			require.NoError(t, q.Enqueue(ctx, j))
+			var got sql.NullString
+			require.NoError(t, db.QueryRow(`SELECT document_id FROM jobs WHERE id = ?`, j.ID).Scan(&got))
+			assert.Equal(t, tc.want, got)
+			stored, err := q.GetByID(ctx, j.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.payload, string(stored.Payload), "the payload is stored byte for byte")
+		})
+	}
+
+	missing, err := store.NewDocumentJob("local", store.JobKindFetch, uuid.NewString())
+	require.NoError(t, err)
+	err = q.Enqueue(ctx, missing)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	assert.Contains(t, err.Error(), "fetch job")
+	_, err = q.GetByID(ctx, missing.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "nothing was inserted")
 }
 
 func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
@@ -377,6 +490,23 @@ func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 	assert.True(t, permanent, "exhausted attempts should be reported permanent")
 	got, _ = q.GetByID(ctx, claimed2.ID)
 	assert.Equal(t, store.JobStatusFailed, got.Status)
+}
+
+// TestRetryBackoff: 30s doubled per failed attempt, capped at an hour,
+// however many attempts.
+func TestRetryBackoff(t *testing.T) {
+	s := time.Second
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{1, 60 * s}, {2, 120 * s}, {3, 240 * s}, {4, 480 * s}, {5, 960 * s}, {6, 1920 * s},
+		{7, time.Hour}, {8, time.Hour}, {9, time.Hour}, {10, time.Hour},
+		{64, time.Hour}, {math.MaxInt, time.Hour},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, retryBackoff(tc.attempts), "attempts %d", tc.attempts)
+	}
 }
 
 // TestJobs_ClaimNext_ConcurrentClaimOnce verifies the bug we'd otherwise
@@ -568,14 +698,16 @@ func TestJobs_RecoverOrphans_RequiresKinds(t *testing.T) {
 
 // ---------- retention ----------
 
-// TestJobs_PruneOlderThan_KeepsLiveWork: pruning removes finished jobs only.
-// A pending or running job is work in flight; deleting it would strand its
-// document in pending with nothing left to move it on.
+// TestJobs_PruneOlderThan_KeepsLiveWork: pruning removes finished jobs last
+// updated before the cutoff. A pending or running job is work in flight,
+// however old; deleting it would strand its document in pending with
+// nothing left to move it on.
 func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 	q := NewJobs(db)
 	docs := NewDocuments(db)
+	cutoff := time.Now().UTC().Add(-time.Hour)
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/queued"}
 	require.NoError(t, docs.Create(ctx, doc))
@@ -583,23 +715,37 @@ func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 		Payload: json.RawMessage(`{"document_id":"` + doc.ID + `"}`)}
 	require.NoError(t, q.Enqueue(ctx, queued))
 
-	byStatus := map[store.JobStatus]*store.Job{}
+	type job struct {
+		status store.JobStatus
+		old    bool
+	}
+	byJob := map[job]*store.Job{}
 	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
-		byStatus[status] = enqueueWithStatus(t, q, store.JobKindIndex, status, 1)
+		for _, old := range []bool{true, false} {
+			byJob[job{status, old}] = enqueueWithStatus(t, q, store.JobKindIndex, status, 1)
+		}
+	}
+	backdate := func(id string) {
+		_, err := db.Exec(`UPDATE jobs SET updated_at = ? WHERE id = ?`, formatTime(cutoff.Add(-time.Minute)), id)
+		require.NoError(t, err)
+	}
+	backdate(queued.ID)
+	for key, j := range byJob {
+		if key.old {
+			backdate(j.ID)
+		}
 	}
 
-	// A cutoff in the future makes every row "old": updated_at can't be
-	// backdated, the AFTER UPDATE trigger resets it.
-	n, err := q.PruneOlderThan(ctx, "local", time.Now().Add(time.Hour))
+	n, err := q.PruneOlderThan(ctx, "local", cutoff)
 	require.NoError(t, err)
 	assert.EqualValues(t, 2, n)
 
-	for status, j := range byStatus {
+	for key, j := range byJob {
 		_, err := q.GetByID(ctx, j.ID)
-		if status.IsFinished() {
-			assert.ErrorIs(t, err, store.ErrNotFound, status)
+		if key.old && key.status.IsFinished() {
+			assert.ErrorIs(t, err, store.ErrNotFound, "%+v", key)
 		} else {
-			assert.NoError(t, err, status)
+			assert.NoError(t, err, "%+v", key)
 		}
 	}
 	_, err = q.GetByID(ctx, queued.ID)

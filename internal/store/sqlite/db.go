@@ -1,8 +1,9 @@
 // Package sqlite is the SQLite implementation of curio's storage interfaces.
 //
 // Open returns a *sql.DB configured with the pragmas curio depends on
-// (foreign_keys = ON per-connection, WAL, sane busy timeout) and the
-// sqlite-vec extension auto-loaded on every connection.
+// (foreign_keys = ON per-connection, WAL, sane busy timeout), immediate
+// transactions, a pool sized for the daemon's workers, and the sqlite-vec
+// extension auto-loaded on every connection.
 package sqlite
 
 import (
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"sync"
+	"time"
 
 	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3" // sqlite3 driver
@@ -26,17 +28,39 @@ import (
 // extension's already registered.
 var vecOnce sync.Once
 
+// Pool policy. A connection is held by every transaction and by every write
+// waiting out busy_timeout, so the cap sits above the daemon's default 21
+// worker goroutines (16 fetch, 4 index, 1 cluster) with room for the API;
+// at the cap, reads would queue behind the waiting writers. Idle
+// connections are kept up to the cap because opening one (pragmas,
+// sqlite-vec) costs about 0.7 ms against a few microseconds for a query on
+// a pooled one, and database/sql's default of two idle connections had the
+// workers reopening them constantly. They close after five idle minutes,
+// releasing their page caches while the daemon has nothing to do.
+const (
+	maxOpenConns    = 32
+	maxIdleConns    = maxOpenConns
+	connMaxIdleTime = 5 * time.Minute
+)
+
 // DB is a thin wrapper around *sql.DB. Lets us attach lifecycle methods
 // without polluting the standard interface.
+//
+// Every transaction begins with BEGIN IMMEDIATE (the DSN's _txlock), taking
+// the write lock up front: busy_timeout then covers the whole transaction,
+// which can never fail upgrading a read lock to a write lock, whatever order
+// its statements run in. So BeginTx is for writing only, and every caller
+// writes. mattn/go-sqlite3 ignores sql.TxOptions.ReadOnly, so a read must
+// never open a transaction: as autocommit statements, reads in WAL mode
+// never wait on a writer.
 type DB struct {
 	*sql.DB
-	path string
+	path     string
+	enqueued *enqueueSignal // wakes workers when a job becomes claimable
 }
 
-// Open opens (or creates) a SQLite database at path. Use ":memory:" for
-// ephemeral in-memory storage in tests, but pair it with SetMaxOpenConns(1)
-// or use shared cache to avoid the "each connection is a different DB"
-// footgun.
+// Open opens (or creates) the SQLite database file at path. ":memory:" is
+// rejected: each pooled connection would open a database of its own.
 //
 // Open does NOT run migrations. Call Migrate after.
 func Open(ctx context.Context, path string) (*DB, error) {
@@ -51,13 +75,24 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("ping sqlite %q: %w", path, errors.Join(err, db.Close()))
 	}
-	return &DB{DB: db, path: path}, nil
+	return &DB{DB: db, path: path, enqueued: newEnqueueSignal()}, nil
 }
 
-// Migrate applies pending migrations from the embedded FS. Idempotent.
+// Migrate applies pending migrations from the embedded FS and returns the
+// schema version the database is left at: the highest version in goose's
+// goose_db_version table, the only record of it. Idempotent.
+//
+// After applying any migration it checkpoints the WAL and truncates it. A
+// migration that rewrites a table writes all of it through the WAL, and
+// SQLite's automatic checkpoints copy those pages back but never shrink the
+// file, so a rewrite of the chunks table would otherwise leave a WAL about
+// its size on disk, which `curio status` reports.
 //
 // It uses goose's Provider, which keeps its state per instance: goose's
 // package-level API (SetBaseFS, SetDialect, Up) reads and writes process
@@ -67,40 +102,48 @@ func Open(ctx context.Context, path string) (*DB, error) {
 // runs outside goose's transaction (see migrations/README.md), and one that
 // fails leaves its pooled connection inside an open transaction with
 // foreign keys off.
-func Migrate(ctx context.Context, db *DB) error {
+func Migrate(ctx context.Context, db *DB) (int64, error) {
 	provider, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations.FS)
 	if err != nil {
-		return fmt.Errorf("load migrations: %w", err)
+		return 0, fmt.Errorf("load migrations: %w", err)
 	}
-	if _, err := provider.Up(ctx); err != nil {
-		return fmt.Errorf("apply migrations: %w", err)
+	applied, err := provider.Up(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("apply migrations: %w", err)
 	}
-	return nil
+	version, err := provider.GetDBVersion(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	if len(applied) > 0 {
+		// The result row's busy flag is set only when a reader holds the WAL
+		// open; nothing else uses the database while it migrates, and if
+		// something did, automatic checkpoints would still catch up.
+		if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			return 0, fmt.Errorf("checkpoint after migrating: %w", err)
+		}
+	}
+	return version, nil
 }
 
 // Path returns the path Open was called with.
 func (d *DB) Path() string { return d.path }
 
-// ReadSchemaVersion returns the schema_version recorded in the
-// schema_meta table. Used to sync the marker file (.curio-meta.json)
-// after migrations run.
-func ReadSchemaVersion(ctx context.Context, db *DB) (int, error) {
-	var v int
-	if err := db.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&v); err != nil {
-		return 0, fmt.Errorf("read schema version: %w", err)
-	}
-	return v, nil
-}
-
 // buildDSN produces a connection string that sets curio's required pragmas
 // on every pooled connection. Without this, foreign_keys defaults to OFF
 // per connection and the schema's FK constraints silently aren't enforced.
+// It also makes every transaction BEGIN IMMEDIATE (see DB).
 //
 // mattn/go-sqlite3 uses `_fk`, `_journal_mode`, `_synchronous`,
-// `_busy_timeout` query params (NOT `_pragma=`, which is modernc.org/sqlite).
+// `_busy_timeout`, `_txlock` query params (NOT `_pragma=`, which is
+// modernc.org/sqlite).
 func buildDSN(path string) (string, error) {
-	if path == "" {
-		return "", fmt.Errorf("sqlite path must not be empty")
+	switch path {
+	case "":
+		return "", errors.New("sqlite path must not be empty")
+	case ":memory:":
+		return "", errors.New("sqlite: in-memory databases are not supported: " +
+			"each pooled connection would open a database of its own")
 	}
 
 	q := url.Values{}
@@ -108,11 +151,7 @@ func buildDSN(path string) (string, error) {
 	q.Set("_journal_mode", "WAL")
 	q.Set("_synchronous", "NORMAL")
 	q.Set("_busy_timeout", "5000")
-
-	// In-memory has its own form.
-	if path == ":memory:" {
-		return ":memory:?" + q.Encode(), nil
-	}
+	q.Set("_txlock", "immediate")
 
 	abs, err := filepath.Abs(path)
 	if err != nil {

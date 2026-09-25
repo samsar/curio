@@ -59,8 +59,6 @@ func (s *Bookmarks) TagsForDocument(ctx context.Context, tenantID, documentID st
 
 func NewBookmarks(db *DB) *Bookmarks { return &Bookmarks{db: db} }
 
-const bookmarkListLimitDefault = 50
-
 func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.IngestResult, error) {
 	if err := validateBookmark(b); err != nil {
 		return store.IngestResult{}, err
@@ -117,6 +115,7 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 	// Only a new document needs a fetch. An existing pending document
 	// already has its fetch or index job queued, and a failed or dead one is
 	// left to `curio refetch`.
+	var wake []store.JobKind
 	if created {
 		if res.FetchJob, err = store.NewDocumentJob(b.TenantID, store.JobKindFetch, docID); err != nil {
 			return store.IngestResult{}, err
@@ -124,8 +123,9 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 		if err := insertJob(ctx, tx, res.FetchJob); err != nil {
 			return store.IngestResult{}, err
 		}
+		wake = append(wake, store.JobKindFetch)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.db.commitNotify(tx, wake...); err != nil {
 		return store.IngestResult{}, fmt.Errorf("commit ingest: %w", err)
 	}
 
@@ -148,28 +148,27 @@ func (s *Bookmarks) Create(ctx context.Context, b *store.Bookmark) error {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	var createdAt, updatedAt string
+	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path, tags)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING created_at, updated_at`,
 		b.ID, b.TenantID,
 		strPtr(b.DocumentID), b.URL,
 		strPtr(b.Title), formatTime(b.SavedAt), b.Source,
 		strPtr(b.FolderPath), tagsJSON,
-	)
+	).Scan(&createdAt, &updatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: bookmark for (tenant, url, source) exists", store.ErrConflict)
 		}
 		return fmt.Errorf("insert bookmark: %w", err)
 	}
-
-	got, err := s.GetByID(ctx, b.ID)
-	if err != nil {
+	if b.CreatedAt, err = parseTime(createdAt); err != nil {
 		return err
 	}
-	b.CreatedAt = got.CreatedAt
-	b.UpdatedAt = got.UpdatedAt
-	return nil
+	b.UpdatedAt, err = parseTime(updatedAt)
+	return err
 }
 
 // validateBookmark checks the fields every bookmark insert requires.
@@ -193,18 +192,30 @@ func (s *Bookmarks) GetByID(ctx context.Context, id string) (*store.Bookmark, er
 }
 
 func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBookmarksOpts) ([]*store.Bookmark, error) {
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = bookmarkListLimitDefault
+	q, args := listBookmarksQuery(tenantID, opts)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list bookmarks: %w", err)
 	}
+	defer rows.Close()
 
-	var (
-		clauses []string
-		args    []any
-	)
-	clauses = append(clauses, "tenant_id = ?")
-	args = append(args, tenantID)
+	var out []*store.Bookmark
+	for rows.Next() {
+		b, err := scanBookmark(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
 
+// listBookmarksQuery builds List's query. A page walks
+// idx_bookmarks_tenant_id from the cursor, so it reads one page of rows,
+// not every bookmark the tenant has.
+func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, []any) {
+	clauses := []string{"tenant_id = ?"}
+	args := []any{tenantID}
 	if opts.Source != "" {
 		clauses = append(clauses, "source = ?")
 		args = append(args, opts.Source)
@@ -221,27 +232,10 @@ func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBo
 		clauses = append(clauses, "id > ?")
 		args = append(args, opts.Cursor)
 	}
-
 	q := bookmarkSelectCols +
 		" FROM bookmarks WHERE " + strings.Join(clauses, " AND ") +
 		" ORDER BY id LIMIT ?"
-	args = append(args, limit)
-
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list bookmarks: %w", err)
-	}
-	defer rows.Close()
-
-	var out []*store.Bookmark
-	for rows.Next() {
-		b, err := scanBookmark(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, b)
-	}
-	return out, rows.Err()
+	return q, append(args, listLimit(opts.Limit))
 }
 
 func (s *Bookmarks) Count(ctx context.Context, tenantID string) (int, error) {
@@ -263,7 +257,7 @@ func (s *Bookmarks) Delete(ctx context.Context, id string) error {
 
 func (s *Bookmarks) LinkDocument(ctx context.Context, bookmarkID, documentID string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE bookmarks SET document_id = ? WHERE id = ?`,
+		`UPDATE bookmarks SET document_id = ?, updated_at = `+sqlNow+` WHERE id = ?`,
 		documentID, bookmarkID)
 	if err != nil {
 		return fmt.Errorf("link bookmark: %w", err)

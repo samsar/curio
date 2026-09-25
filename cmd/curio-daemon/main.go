@@ -95,11 +95,15 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 		return err
 	}
 	defer db.Close()
-	if err := sqlitestore.Migrate(ctx, db); err != nil {
+	// Logged first because a migration that rewrites a large table can
+	// outlast the CLI's auto-start wait, and the log tail should say why.
+	slog.Info("migrating database", "path", home.DBPath())
+	schemaVersion, err := sqlitestore.Migrate(ctx, db)
+	if err != nil {
 		return err
 	}
-	slog.Info("database ready", "path", home.DBPath())
-	syncMarkerSchemaVersion(ctx, home, db, meta)
+	slog.Info("database ready", "path", home.DBPath(), "schema_version", schemaVersion)
+	syncMarkerSchemaVersion(home, meta, int(schemaVersion))
 
 	d, err := newDaemon(ctx, cfg, home, db)
 	if err != nil {
@@ -156,18 +160,14 @@ func checkMarker(home *curiohome.Home, cfg config.Config) (curiohome.Meta, error
 	return meta, nil
 }
 
-// syncMarkerSchemaVersion copies the schema version the migrations landed
-// at into the marker file, so /v1/healthz reflects reality after upgrades.
-func syncMarkerSchemaVersion(ctx context.Context, home *curiohome.Home, db *sqlitestore.DB, meta curiohome.Meta) {
-	v, err := sqlitestore.ReadSchemaVersion(ctx, db)
-	if err != nil {
-		slog.Warn("read schema version", "err", err)
+// syncMarkerSchemaVersion copies the schema version the migrations left the
+// database at into the marker file, which caches it for /v1/healthz and the
+// offline `curio version` and `curio doctor`.
+func syncMarkerSchemaVersion(home *curiohome.Home, meta curiohome.Meta, version int) {
+	if version == meta.SchemaVersion {
 		return
 	}
-	if v <= 0 || v == meta.SchemaVersion {
-		return
-	}
-	meta.SchemaVersion = v
+	meta.SchemaVersion = version
 	if err := home.WriteMeta(meta); err != nil {
 		slog.Warn("failed to update marker schema_version", "err", err)
 	}

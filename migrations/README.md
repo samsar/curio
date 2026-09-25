@@ -42,9 +42,14 @@ silently disables FK enforcement — every connection must turn it on.
 
 ## Schema versioning
 
-`schema_meta` table holds the current schema version, embedding model, and
-embedding dimension. The daemon cross-checks this against `~/.curio/.curio-meta.json`
-at startup and refuses to start on mismatch (suggests `curio reindex`).
+goose's `goose_db_version` table is the only record of the schema version:
+the version is the highest migration applied. `sqlite.Migrate` returns it,
+and the daemon copies it into `~/.curio/.curio-meta.json` after migrating,
+as a cache for `/v1/healthz`, `curio version` and `curio doctor`. A
+migration never records the version itself.
+
+`schema_meta` holds the embedding model and dimension the database was
+created for.
 
 ## Adding a migration
 
@@ -61,15 +66,25 @@ at startup and refuses to start on mismatch (suggests `curio reindex`).
 
 - **Adding a column**: trivial; `ALTER TABLE ADD COLUMN`.
 - **Changing a constraint or a column type, or dropping a column**: SQLite
-  can't do this in place, so the table is rebuilt. Use the recipe below,
-  and be careful about FTS5/vec table rebuilds.
+  can't do this in place, so the table is rebuilt. When another table's
+  foreign key references the table, use the recipe below. When none does
+  (check `pragma_foreign_key_list`), rebuild it inside goose's transaction
+  like an ordinary migration, as 008 does for `chunks`: dropping a table
+  nothing references runs no ON DELETE actions, and the version bump then
+  commits with the rebuild.
 - **Changing embedding dimensions**: DROP and CREATE the `chunks_vec` table;
   enqueue index jobs for every chunk. See
   [`../docs/decisions.md#embedding-model-swap`](../docs/decisions.md#embedding-model-swap).
-- **Changing the FTS5 tokenizer**: requires rebuilding `chunks_fts`. Cheap —
-  no embedder round-trips, just re-tokenization from `chunks.text`.
+- **Changing the FTS5 tokenizer**: recreate `chunks_fts` with the new
+  tokenizer and repopulate it with FTS5's rebuild command,
+  `INSERT INTO chunks_fts (chunks_fts) VALUES ('rebuild')`. It is an
+  external-content index over `chunks`, so that re-tokenizes `chunks.text`,
+  `title` and `tags`; no embedder round-trips.
+- **Writing `chunks`**: never `INSERT OR REPLACE`. The triggers that keep
+  `chunks_fts` and `chunks_vec` in step don't fire for rows REPLACE
+  deletes.
 
-## Rebuilding a table
+## Rebuilding a table other tables reference
 
 ```sql
 -- +goose NO TRANSACTION
@@ -89,7 +104,6 @@ CREATE TEMP TABLE _fk_guard (violations INTEGER NOT NULL CHECK (violations = 0))
 INSERT INTO _fk_guard SELECT count(*) FROM pragma_foreign_key_check;
 DROP TABLE temp._fk_guard;
 
-UPDATE schema_meta SET schema_version = N WHERE id = 1;
 COMMIT;
 PRAGMA foreign_keys = ON;
 -- +goose StatementEnd
