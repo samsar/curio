@@ -32,9 +32,9 @@ installing Ollama and pulling `nomic-embed-text`. Everything else is wired.
 | 10 | `internal/indexer/chunker.go` | 9 |
 | 11 | `internal/jobs/{worker.go, handlers.go}` | 7 |
 | 12 | `internal/search/{rrf.go, search.go}` | 11 |
-| 13 | `internal/api/*` (HTTP handlers) | smoke-tested via curl |
-| 14 | `internal/daemonctl/lifecycle.go` | smoke-tested via CLI |
-| 15 | `internal/cli/*` + `internal/client/client.go` | smoke-tested via CLI |
+| 13 | `internal/api/*` (HTTP handlers) | every handler through the real router over SQLite, including the RFC 7807 error paths; `internal/api/apitest` serves the same API to other packages' tests |
+| 14 | `internal/daemonctl/{lifecycle,lock}.go` | start, stop and status against a fake daemon (the re-executed test binary), plus lock contention |
+| 15 | `internal/cli/*` + `internal/client/client.go` | every client method round-trips through `apitest`; the CLI commands run end to end against it (stdout checked, no daemon binary) |
 | 16 | `cmd/curio-daemon/main.go` daemon wiring + auto-init | runs cleanly |
 
 **Total:** ~6600 LOC across `internal/`, ~50% tests.

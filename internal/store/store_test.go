@@ -57,3 +57,16 @@ func TestNewDocumentJob(t *testing.T) {
 	require.NoError(t, json.Unmarshal(job.Payload, &p))
 	assert.Equal(t, "doc-1", p.DocumentID)
 }
+
+func TestSearchFilters_IsEmpty(t *testing.T) {
+	assert.True(t, store.SearchFilters{}.IsEmpty())
+	assert.True(t, store.SearchFilters{ContentType: []string{}, Host: []string{}}.IsEmpty(), "empty slices filter nothing")
+	for name, f := range map[string]store.SearchFilters{
+		"content type": {ContentType: []string{"pdf"}},
+		"host":         {Host: []string{"example.com"}},
+		"source":       {Source: []string{"chrome"}},
+		"exclude":      {ExcludeDocumentID: "doc-1"},
+	} {
+		assert.False(t, f.IsEmpty(), name)
+	}
+}
