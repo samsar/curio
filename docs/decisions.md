@@ -1631,7 +1631,9 @@ once when it started and, if that failed, never wire the LLM labeler — and
 since the CLI auto-starts the daemon, often before the Ollama app is up, every
 rebuild quietly used term labels until a restart. Now the labeler is always
 wired with `labeling = "llm"`, and model auto-pull runs in the background
-either way. Within a run:
+either way. The pull is attempted once: if Ollama is down at startup and
+doesn't already have the model, labels stay on terms until `ollama pull` or a
+daemon restart. Within a run:
 
 - Clusters are labeled **largest first**, whatever numbering the clusterer
   used, so the budget goes to the interests that matter most.

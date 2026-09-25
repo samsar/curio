@@ -390,7 +390,8 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 		if cfg.Generation.AutoPull {
 			go func() {
 				if err := gen.EnsureModel(ctx, slog.Default()); err != nil {
-					slog.Warn("generation model not ready; cluster labels use the term fallback until it is",
+					slog.Warn("generation model not ready and the pull is not retried; cluster labels use "+
+						"the term fallback until Ollama serves it (run `ollama pull`, or restart the daemon)",
 						"model", cfg.Generation.Model, "err", err)
 				}
 			}()

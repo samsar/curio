@@ -223,7 +223,9 @@ _**M3 is complete.**_
 ## Config: time budgets for Ollama calls
 
 Each bounds how long one kind of work waits on Ollama; all are validated as
-positive. When a budget runs out the work degrades rather than failing.
+positive. When a search or labeling budget runs out, the work degrades
+(keyword-only results, term labels) rather than failing. An embed timeout
+while indexing fails that index job, and the job queue retries it.
 
 | Key | Default | Bounds |
 |---|---|---|

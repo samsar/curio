@@ -660,11 +660,12 @@ components:
           description: Natural-language or keyword query
         k:
           type: integer
-          minimum: 1
+          minimum: 0
           maximum: 100
           description: >
-            Max documents to return after RRF fusion + collapse. Omitted (or
-            0) uses the server's search.default_k (10 unless configured).
+            Max documents to return after RRF fusion + collapse, 1 to 100.
+            Omitted (or 0) uses the server's search.default_k (10 unless
+            configured).
         filters:
           type: object
           description: >
