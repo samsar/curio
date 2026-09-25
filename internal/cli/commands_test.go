@@ -352,13 +352,16 @@ func TestImport_DryRun(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	t.Cleanup(daemon.Close)
-	home := filepath.Join(t.TempDir(), "home") // curio initializes it on first use
+	srv := apitest.Start(t) // its home and database, behind a daemon URL that counts
 
-	out, err := runCLIAt(t, home, daemon.URL, "import", "html", "--dry-run", filepath.Join("testdata", "bookmarks.html"))
+	out, err := runCLIAt(t, srv.Home.Path, daemon.URL, "import", "html", "--dry-run",
+		filepath.Join("testdata", "bookmarks.html"))
 	require.NoError(t, err)
 	assert.Contains(t, out, "dry-run — nothing sent to the daemon")
 	assert.Contains(t, out, "would import:  2")
 	assert.Contains(t, out, "would filter:  1")
 	assert.Contains(t, out, "javascript: 1")
-	assert.Zero(t, requests.Load())
+	assert.Zero(t, requests.Load(), "the daemon is never contacted")
+	assert.Zero(t, count(t, srv, `SELECT count(*) FROM bookmarks`))
+	assert.Zero(t, count(t, srv, `SELECT count(*) FROM documents`))
 }
