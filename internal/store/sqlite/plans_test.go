@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -45,6 +46,9 @@ func TestQueryPlans(t *testing.T) {
 		name  string
 		query string
 		args  []any
+		// first, if set, is how the plan's first row must start: the table
+		// the query is driven from.
+		first string
 		// want are substrings the plan must contain: an index and the
 		// constraints it is searched with.
 		want []string
@@ -64,6 +68,7 @@ func TestQueryPlans(t *testing.T) {
 			want: []string{want, "SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)"}}
 	}
 	bookmarksQ, bookmarksArgs := listBookmarksQuery("local", store.ListBookmarksOpts{Cursor: "b-100"})
+	bm25Q, bm25Args := bm25Query("local", `"kafka"`, 10, store.SearchFilters{})
 
 	cases := []planCase{
 		{
@@ -143,6 +148,19 @@ func TestQueryPlans(t *testing.T) {
 			want: []string{"INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)"},
 		},
 		{
+			name:  "ReplaceForDocument delete",
+			query: deleteDocumentChunksSQL, args: []any{"doc"},
+			want: []string{"INDEX idx_chunks_document (document_id=?)"},
+		},
+		{
+			name:  "BM25Search",
+			query: bm25Q, args: bm25Args,
+			first: "SCAN chunks_fts VIRTUAL TABLE",
+			want:  []string{"SEARCH c USING INTEGER PRIMARY KEY (rowid=?)"},
+			// ORDER BY the bm25 score.
+			sorts: true,
+		},
+		{
 			name:  "document delete reaches its jobs",
 			query: deleteDocumentSQL, args: []any{"doc"},
 			want: []string{"SEARCH jobs USING COVERING INDEX idx_jobs_document (document_id=?)"},
@@ -151,6 +169,7 @@ func TestQueryPlans(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := queryPlan(t, db, tc.query, tc.args...)
+			assert.True(t, strings.HasPrefix(plan, tc.first), "plan starts with %q:\n%s", tc.first, plan)
 			for _, want := range tc.want {
 				assert.Contains(t, plan, want)
 			}
@@ -159,4 +178,20 @@ func TestQueryPlans(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestQueryPlans_ChunkVectorDeleteIsPointLookup: the chunks delete trigger
+// removes a chunk's vector by its primary key. vec0 reports its plan as
+// "INDEX <idxNum>:<idxStr>", and the first character of idxStr is the plan
+// kind (sqlite-vec v0.1.6): '1' a full scan, '2' a point lookup, '3' KNN.
+// Any other form of the delete, `chunk_id IN (subquery)` included, scans
+// every vector.
+func TestQueryPlans_ChunkVectorDeleteIsPointLookup(t *testing.T) {
+	db := newTestDB(t)
+	var trigger string
+	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'trg_chunks_delete'`).Scan(&trigger))
+	require.Contains(t, trigger, "DELETE FROM chunks_vec WHERE chunk_id = old.id")
+
+	plan := queryPlan(t, db, `DELETE FROM chunks_vec WHERE chunk_id = ?`, "chunk")
+	assert.Regexp(t, regexp.MustCompile(`SCAN chunks_vec VIRTUAL TABLE INDEX \d+:2`), plan)
 }

@@ -12,6 +12,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -533,4 +534,147 @@ func TestMigration007_BackfillsJobDocumentID(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, schemaBefore, schemaDump(t, db))
 	assert.Equal(t, jobsBefore, dumpRows(t, db, oldColumns))
+}
+
+// bm25BeforeMigration008 is BM25Search's query before migration 008, over
+// the regular six-column chunks_fts.
+const bm25BeforeMigration008 = `
+	SELECT fts.chunk_id, fts.document_id, bm25(chunks_fts) AS bm25_score,
+	       snippet(chunks_fts, 0, '<em>', '</em>', '…', 32)
+	FROM chunks_fts fts
+	JOIN documents d ON d.id = fts.document_id
+	WHERE chunks_fts MATCH ?
+	  AND d.tenant_id = ?
+	ORDER BY bm25_score
+	LIMIT ?`
+
+func bm25Before008(t *testing.T, db *DB, query string) []store.ChunkHit {
+	t.Helper()
+	rows, err := db.Query(bm25BeforeMigration008, query, "local", 50)
+	require.NoError(t, err)
+	defer rows.Close()
+	var hits []store.ChunkHit
+	for rows.Next() {
+		var h store.ChunkHit
+		var bm25 float64
+		require.NoError(t, rows.Scan(&h.ChunkID, &h.DocumentID, &bm25, &h.Snippet))
+		h.Score = -bm25
+		hits = append(hits, h)
+	}
+	require.NoError(t, rows.Err())
+	return hits
+}
+
+// assertSameHits compares two BM25 result lists: the same chunks and
+// documents in the same order with the same snippets, and scores equal to
+// within floating-point noise.
+func assertSameHits(t *testing.T, want, got []store.ChunkHit, query string) {
+	t.Helper()
+	require.Len(t, got, len(want), query)
+	for i := range want {
+		assert.Equal(t, want[i].ChunkID, got[i].ChunkID, "%s: hit %d", query, i)
+		assert.Equal(t, want[i].DocumentID, got[i].DocumentID, "%s: hit %d", query, i)
+		assert.Equal(t, want[i].Snippet, got[i].Snippet, "%s: hit %d", query, i)
+		assert.InDelta(t, want[i].Score, got[i].Score, 1e-9, "%s: hit %d", query, i)
+	}
+}
+
+// TestMigration008_ChunksFTSExternalContent seeds chunks the way the store
+// wrote them before migration 008 (chunk row, six-column FTS row, vector)
+// and checks that search is unchanged across it, in both directions.
+func TestMigration008_ChunksFTSExternalContent(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 7)
+
+	type chunk struct{ id, text string }
+	docs := []struct {
+		id, title, tags string // tags as the old writer indexed them: JSON, or "" for none
+		chunks          []chunk
+	}{
+		{"doc-pg", "Postgres Internals", `["db","postgres"]`, []chunk{
+			{"pg-0", "PostgreSQL uses MVCC for concurrency control, keeping old row versions around until vacuum removes them."},
+			{"pg-1", "The write ahead log records every change before it reaches the heap, so a crash can replay it."},
+			{"pg-2", "B-tree indexes accelerate range scans; vacuum keeps their pages tidy."},
+		}},
+		{"doc-notes", "", "", []chunk{
+			{"notes-0", "Kafka partitions let consumer groups scale reads across many brokers at once."},
+			{"notes-1", "A short note on MVCC in other databases."},
+		}},
+		{"doc-kafka", "Kafka Streams Guide", `["observability"]`, []chunk{
+			{"kafka-0", "Stream processing joins and windows over topics, with a write ahead log of its own for local state stores."},
+			{"kafka-1", "Consumer lag metrics tell you when a partition falls behind."},
+		}},
+	}
+	for d, doc := range docs {
+		_, err := db.Exec(`INSERT INTO documents (id, tenant_id, url, title, state) VALUES (?, 'local', ?, ?, 'fetched')`,
+			doc.id, "https://example.com/"+doc.id, doc.title)
+		require.NoError(t, err)
+		_, err = db.Exec(`INSERT INTO document_extractions (id, document_id, fetcher, status) VALUES (?, ?, 'test', 'ok')`,
+			"ext-"+doc.id, doc.id)
+		require.NoError(t, err)
+		for i, c := range doc.chunks {
+			_, err := db.Exec(`INSERT INTO chunks (id, document_id, extraction_id, ord, text, token_count)
+				VALUES (?, ?, ?, ?, ?, ?)`, c.id, doc.id, "ext-"+doc.id, i, c.text, len(strings.Fields(c.text)))
+			require.NoError(t, err)
+			_, err = db.Exec(`INSERT INTO chunks_fts (text, title, title_search, tags, chunk_id, document_id)
+				VALUES (?, ?, ?, ?, ?, ?)`, c.text, doc.title, doc.title, doc.tags, c.id, doc.id)
+			require.NoError(t, err)
+			vec, err := sqlitevec.SerializeFloat32(fillVec(float32(d*10+i) * 0.01))
+			require.NoError(t, err)
+			_, err = db.Exec(`INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)`, c.id, vec)
+			require.NoError(t, err)
+		}
+	}
+
+	queries := []string{
+		`mvcc`,              // body term
+		`"write ahead log"`, // phrase
+		`kafka OR vacuum`,   // OR, across body and title
+		`internals`,         // in a title only
+		`observability`,     // in tags only
+	}
+	before := map[string][]store.ChunkHit{}
+	for _, q := range queries {
+		hits := bm25Before008(t, db, q)
+		require.NotEmpty(t, hits, q)
+		for i := 1; i < len(hits); i++ {
+			require.NotEqual(t, hits[i-1].Score, hits[i].Score, "%s: the fixture must not tie, or the order is arbitrary", q)
+		}
+		before[q] = hits
+	}
+	const chunkColumns = `SELECT id, document_id, extraction_id, ord, text, token_count FROM chunks ORDER BY id`
+	const vectors = `SELECT chunk_id, embedding FROM chunks_vec ORDER BY chunk_id`
+	chunksBefore := dumpRows(t, db, chunkColumns)
+	indexedBefore := dumpRows(t, db, `SELECT chunk_id, title_search, tags FROM chunks_fts ORDER BY chunk_id`)
+	vectorsBefore := dumpRows(t, db, vectors)
+	schemaBefore := schemaDump(t, db)
+
+	_, err := p.UpTo(ctx, 8)
+	require.NoError(t, err)
+
+	ch := NewChunks(db, vecDim)
+	for _, q := range queries {
+		got, err := ch.BM25Search(ctx, "local", q, 50, store.SearchFilters{})
+		require.NoError(t, err)
+		assertSameHits(t, before[q], got, q)
+	}
+	_, err = db.Exec(`INSERT INTO chunks_fts (chunks_fts, rank) VALUES ('integrity-check', 1)`)
+	require.NoError(t, err)
+	assert.Equal(t, chunksBefore, dumpRows(t, db, chunkColumns))
+	assert.Equal(t, indexedBefore, dumpRows(t, db, `SELECT id, title, tags FROM chunks ORDER BY id`),
+		"each chunk keeps the title and tags it was indexed with")
+	assert.Equal(t, vectorsBefore, dumpRows(t, db, vectors))
+	var contentTables int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'chunks_fts_content'`).Scan(&contentTables))
+	assert.Zero(t, contentTables, "the index keeps no copy of the text")
+
+	_, err = p.DownTo(ctx, 7)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db))
+	for _, q := range queries {
+		assertSameHits(t, before[q], bm25Before008(t, db, q), q)
+	}
+	assert.Equal(t, chunksBefore, dumpRows(t, db, chunkColumns))
+	assert.Equal(t, indexedBefore, dumpRows(t, db, `SELECT chunk_id, title_search, tags FROM chunks_fts ORDER BY chunk_id`))
+	assert.Equal(t, vectorsBefore, dumpRows(t, db, vectors))
 }

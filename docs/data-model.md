@@ -148,19 +148,34 @@ rows are kept for diff/history (could be GC'd by a future retention job).
 
 ```
 chunks
-  id                UUID PK
+  seq               INTEGER PK                 -- rowid of the chunk's chunks_fts entry
+  id                UUID NOT NULL UNIQUE       -- the chunk's ID everywhere else
   document_id       UUID NOT NULL FK
   extraction_id     UUID NOT NULL FK           -- chunks belong to a specific extraction
   ord               INTEGER NOT NULL
   text              TEXT NOT NULL
   token_count       INTEGER
+  title             TEXT NOT NULL              -- the document title, as indexed for this chunk
+  tags              TEXT NOT NULL              -- bookmark tags as indexed (a JSON array), '' for none
 ```
 
 Two virtual tables sit alongside:
 
-- `chunks_fts` — FTS5 over `chunks.text`, plus boostable columns for
-  `documents.title` and `references.tags` (denormalized at index time).
+- `chunks_fts` — FTS5 index over `chunks.text`, `title` and `tags` (title
+  and tags are denormalized at index time so they can be matched without a
+  JOIN). `chunks` is its external content (`content_rowid = seq`): the
+  index holds no copy of the text and reads it back from `chunks` for
+  snippets.
 - `chunks_vec` — sqlite-vec, keyed on `chunks.id`, holds the embedding.
+
+Triggers on `chunks` mirror every insert, update and delete into
+`chunks_fts`, and the delete trigger removes the chunk's vector too, so a
+chunk deleted any way, a foreign-key cascade from its document or
+extraction included, takes its derived rows with it. `title` and `tags`
+are stored on the chunk because an external-content delete must supply
+the values that were indexed. `seq` is an explicit INTEGER PRIMARY KEY
+because SQLite keeps those across VACUUM, where an implicit rowid could be
+renumbered and detach the index from its rows.
 
 When the embedding model changes, both virtual tables are rebuilt (see
 [embedding model swap](./decisions.md#embedding-model-swap)).

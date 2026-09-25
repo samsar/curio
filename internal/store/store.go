@@ -305,7 +305,8 @@ type ListBookmarksOpts struct {
 }
 
 // Chunk is the indexed text segment unit. Each chunk owns one row in the
-// chunks table, one in chunks_fts (BM25), and one in chunks_vec (vector ANN).
+// chunks table, one entry in the chunks_fts index (BM25), and one row in
+// chunks_vec (vector ANN).
 type Chunk struct {
 	ID           string
 	DocumentID   string

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -18,12 +19,14 @@ import (
 // Chunks implements store.ChunkStore. Owns three coupled tables:
 //
 //	chunks      — canonical text rows, FK to document + extraction
-//	chunks_fts  — FTS5 virtual table for BM25 search
+//	chunks_fts  — FTS5 index over chunks (external content, rowid = seq)
 //	chunks_vec  — sqlite-vec virtual table for ANN search
 //
-// All three are kept in sync transactionally by ReplaceForDocument; queries
-// read from one virtual table at a time and JOIN to documents for tenant
-// scoping.
+// Triggers on chunks keep chunks_fts in step and delete a chunk's vector
+// with it (migration 008), so every way a chunk goes takes its derived rows
+// along. Inserting a vector is the one write left to the store, since the
+// embedding is not a chunks column. Queries read from one virtual table at
+// a time and JOIN to documents for tenant scoping.
 type Chunks struct {
 	db  *DB
 	dim int // vec dimension; must match the chunks_vec schema and the embedder
@@ -71,59 +74,58 @@ func (s *Chunks) ReplaceForDocument(
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
-	// Delete existing chunks for the document. The chunks → chunks_fts
-	// and chunks → chunks_vec relationships have no DB-level cascade
-	// (virtual tables don't support FK), so we delete from all three.
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM chunks_vec WHERE chunk_id IN
-			(SELECT id FROM chunks WHERE document_id = ?)`, documentID); err != nil {
-		return fmt.Errorf("delete chunks_vec: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM chunks_fts WHERE document_id = ?`, documentID); err != nil {
-		return fmt.Errorf("delete chunks_fts: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM chunks WHERE document_id = ?`, documentID); err != nil {
+	if _, err := tx.ExecContext(ctx, deleteDocumentChunksSQL, documentID); err != nil {
 		return fmt.Errorf("delete chunks: %w", err)
 	}
+	if err := insertChunks(ctx, tx, documentID, extractionID, title, tagsStr, chunks); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit chunks: %w", err)
+	}
+	return nil
+}
 
-	// Insert fresh chunks.
+// deleteDocumentChunksSQL deletes a document's chunks through
+// idx_chunks_document. The delete trigger takes each chunk's FTS entry and
+// vector with it by rowid and chunk ID, so nothing scans chunks_fts or
+// chunks_vec.
+const deleteDocumentChunksSQL = `DELETE FROM chunks WHERE document_id = ?`
+
+// insertChunks inserts chunks in order, each as a chunk row (which the
+// insert trigger indexes, with title and tags) and a vector, through two
+// statements prepared once.
+func insertChunks(ctx context.Context, tx *sql.Tx, documentID, extractionID, title, tags string,
+	chunks []store.ChunkInput) (err error) {
+	insChunk, err := tx.PrepareContext(ctx, `
+		INSERT INTO chunks (id, document_id, extraction_id, ord, text, token_count, title, tags)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare chunk insert: %w", err)
+	}
+	defer func() { err = errors.Join(err, insChunk.Close()) }()
+	insVec, err := tx.PrepareContext(ctx, `INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare vector insert: %w", err)
+	}
+	defer func() { err = errors.Join(err, insVec.Close()) }()
+
 	for i, c := range chunks {
 		chunkID := uuid.NewString()
-
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO chunks (id, document_id, extraction_id, ord, text, token_count)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			chunkID, documentID, extractionID, i, c.Text, c.TokenCount); err != nil {
+		if _, err := insChunk.ExecContext(ctx,
+			chunkID, documentID, extractionID, i, c.Text, c.TokenCount, title, tags); err != nil {
 			return fmt.Errorf("insert chunk[%d]: %w", i, err)
 		}
-
-		// FTS5: include the chunk text plus denormalized title/tags so the
-		// indexer can boost them without a JOIN at query time.
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO chunks_fts (text, title, title_search, tags, chunk_id, document_id)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			c.Text, title, title, tagsStr, chunkID, documentID); err != nil {
-			return fmt.Errorf("insert chunks_fts[%d]: %w", i, err)
-		}
-
 		// sqlite-vec needs the embedding in its specific binary format.
 		serialized, err := sqlitevec.SerializeFloat32(c.Embedding)
 		if err != nil {
 			return fmt.Errorf("serialize embedding[%d]: %w", i, err)
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)`,
-			chunkID, serialized); err != nil {
+		if _, err := insVec.ExecContext(ctx, chunkID, serialized); err != nil {
 			return fmt.Errorf("insert chunks_vec[%d]: %w", i, err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit chunks: %w", err)
 	}
 	return nil
 }
@@ -142,27 +144,7 @@ func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit i
 		limit = 50
 	}
 
-	filterSQL, filterArgs := buildFilterClause(filters)
-
-	// snippet() args: column index, open mark, close mark, ellipsis,
-	// max tokens. 32 tokens gives ~200-300 char snippets — enough to
-	// see the match in context without flooding the CLI. The CLI's
-	// wrapLines breaks them across lines on word boundaries.
-	q := `
-	SELECT fts.chunk_id, fts.document_id, bm25(chunks_fts) AS bm25_score,
-	       snippet(chunks_fts, 0, '<em>', '</em>', '…', 32)
-	FROM chunks_fts fts
-	JOIN documents d ON d.id = fts.document_id
-	WHERE chunks_fts MATCH ?
-	  AND d.tenant_id = ?` + filterSQL + `
-	ORDER BY bm25_score
-	LIMIT ?`
-
-	args := make([]any, 0, 3+len(filterArgs))
-	args = append(args, query, tenantID)
-	args = append(args, filterArgs...)
-	args = append(args, limit)
-
+	q, args := bm25Query(tenantID, query, limit, filters)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("bm25 search: %w", err)
@@ -187,6 +169,33 @@ func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit i
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// bm25Query builds BM25Search's query: it starts from the FTS MATCH and
+// reaches each hit's chunk by rowid (chunks.seq, the INTEGER PRIMARY KEY),
+// then its document for tenant scoping and filters.
+func bm25Query(tenantID, query string, limit int, filters store.SearchFilters) (string, []any) {
+	filterSQL, filterArgs := buildFilterClause(filters)
+
+	// snippet() args: column index, open mark, close mark, ellipsis,
+	// max tokens. 32 tokens gives ~200-300 char snippets — enough to
+	// see the match in context without flooding the CLI. The CLI's
+	// wrapLines breaks them across lines on word boundaries.
+	q := `
+	SELECT c.id, c.document_id, bm25(chunks_fts) AS bm25_score,
+	       snippet(chunks_fts, 0, '<em>', '</em>', '…', 32)
+	FROM chunks_fts
+	JOIN chunks c    ON c.seq = chunks_fts.rowid
+	JOIN documents d ON d.id = c.document_id
+	WHERE chunks_fts MATCH ?
+	  AND d.tenant_id = ?` + filterSQL + `
+	ORDER BY bm25_score
+	LIMIT ?`
+
+	args := make([]any, 0, 3+len(filterArgs))
+	args = append(args, query, tenantID)
+	args = append(args, filterArgs...)
+	return q, append(args, limit)
 }
 
 // VectorSearch runs nearest-neighbor against chunks_vec.

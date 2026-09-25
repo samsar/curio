@@ -2787,6 +2787,10 @@ The triggers also made `updated_at` impossible to pin in a test, which is
 why several tests inserted rows by hand and one comment claimed the claim
 was the last write to touch it.
 
+The triggers migration 008 adds on `chunks` are a different kind (see
+"Chunks: external-content FTS"): they keep derived tables in step with
+their source, and nothing reads those back through RETURNING.
+
 ---
 
 ## Jobs reference their document through a column
@@ -2877,3 +2881,78 @@ all of it the job INSERTs (the `document_id` check about 0.3 s of it), and
 a bookmark `Ingest` about 245 µs instead of 190 µs. Reads that were
 proportional to the table are now proportional to the page, which is the
 trade `curio docs` and `curio jobs` need.
+
+---
+
+## Chunks: external-content FTS, derived rows kept by triggers
+
+**Decision:** Migration 008 makes `chunks_fts` an FTS5 index with `chunks`
+as its external content: `fts5(text, title, tags, content='chunks',
+content_rowid='seq', ...)`.
+
+- `chunks` gains `seq INTEGER PRIMARY KEY`, the index's rowid; `id` stays
+  the public TEXT ID, `NOT NULL UNIQUE`. It also gains `title` and `tags`,
+  exactly the strings indexed for the chunk.
+- AFTER INSERT, DELETE and UPDATE triggers on `chunks` mirror every change
+  into the index, deletes supplying the old values. The delete trigger
+  also runs `DELETE FROM chunks_vec WHERE chunk_id = old.id`.
+- `ReplaceForDocument` runs one `DELETE FROM chunks WHERE document_id = ?`
+  and inserts through two statements prepared once per transaction (chunk
+  row, vector). `BM25Search` joins `chunks c ON c.seq = chunks_fts.rowid`
+  and takes both IDs from `chunks`.
+
+**Why:** Every index job started with two deletes that read the whole
+corpus under the write lock. `DELETE FROM chunks_fts WHERE document_id = ?`
+filtered on an UNINDEXED column, a full scan. `DELETE FROM chunks_vec
+WHERE chunk_id IN (SELECT ...)` made vec0 take its full-scan plan: vec0
+only has a point plan for `chunk_id = ?` and never accepts `IN
+(subquery)` as a lookup. A 10-chunk `ReplaceForDocument` took 4.1, 7.0
+and 10.3 ms at 2k, 8k and 16k chunks, so indexing an import cost the
+square of its size. The regular FTS table also stored a second copy of
+every chunk's text (`chunks_fts_content`), a title column nothing read and
+copies of both IDs, and chunks deleted by a foreign-key cascade from
+documents or extractions left their FTS and vector rows behind.
+
+**Why `seq`:** SQLite only guarantees that an INTEGER PRIMARY KEY keeps its
+value across VACUUM; an implicit rowid may be renumbered, and so would one
+after a future table rebuild. Either would silently detach the index from
+its rows.
+
+**Why `title` and `tags` on the chunk:** an external-content delete must
+supply exactly the values that were indexed, and a document's title can
+change after its chunks are indexed. The UNINDEXED FTS columns are gone:
+nothing read `title`, and both IDs come from `chunks` through the rowid.
+bm25 only counts tokens in indexed columns, so scores are unchanged; the
+migration test compares IDs, order, snippets and scores with the old
+query, before and after, both ways.
+
+**Why triggers:** it is the pattern the FTS5 documentation gives for
+external content, and it makes every delete path clean up, cascades
+included, which the store alone could not. Unlike the `updated_at`
+triggers migration 006 dropped, these maintain derived tables, not the row
+being written. Inserting the vector stays in Go, since the embedding is
+not a `chunks` column. `plans_test.go` pins that the trigger's vector
+delete is a vec0 point lookup and that the chunk delete uses
+`idx_chunks_document`. With 250-word chunks, a 10-chunk
+`ReplaceForDocument` measured 4.4, 10.0 and 17.3 ms at 2k, 8k and 16k
+chunks before, and 4.9, 6.0 and 6.3 ms after.
+
+**Never `INSERT OR REPLACE` into `chunks`:** REPLACE deletes the
+conflicting row without firing delete triggers (`recursive_triggers` is
+off), which would leave its index entry and vector behind.
+
+**Inside goose's transaction:** no foreign key references `chunks` (a test
+checks `pragma_foreign_key_list`), so dropping the old table runs no
+ON DELETE actions even with foreign keys on, and the version bump commits
+with the rebuild. The NO TRANSACTION recipe could not meet its "safe to
+run twice" rule here anyway: a rerun would read FTS columns the first run
+dropped.
+
+**Cost:** 200k chunks of 250 words (a 1 GB database) migrate in about 9 s
+on an Apple M4 Max, most of it re-tokenizing into the new index (the FTS
+`'rebuild'` command). The daemon logs `migrating database` before it
+starts, so a migration that outlasts the CLI's 15 s auto-start wait shows
+in the log tail. The dropped copy of the text (about 400 MB there) goes to
+SQLite's freelist and is reused as the database grows. The migration does
+not VACUUM, which would rewrite the whole file; to return the space to the
+OS now, stop the daemon and run `sqlite3 ~/.curio/curio.db VACUUM`.
