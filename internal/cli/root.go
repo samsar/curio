@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/version"
 )
@@ -74,10 +75,18 @@ over HTTP; auto-starts the daemon if it's not running.`,
 		SilenceUsage: true,
 		// Run prints the error, so it appears once.
 		SilenceErrors: true,
-		PersistentPreRunE: func(*cobra.Command, []string) error {
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			var err error
 			env, err = daemonctl.Discover(homeFlag, daemonURL)
-			return err
+			if err != nil {
+				return err
+			}
+			// A command waiting on a migration says once why it waits.
+			stderr := cmd.ErrOrStderr()
+			env.Controller.OnMigrating = func(s client.Startup) {
+				fmt.Fprintln(stderr, migratingNotice(s))
+			}
+			return nil
 		},
 	}
 

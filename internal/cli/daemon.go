@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
 )
 
@@ -72,6 +73,9 @@ func describeDaemonStatus(st daemonctl.Status, home string) string {
 		switch {
 		case st.PID == 0:
 			return "starting (lock held, pid not recorded yet)"
+		case st.Startup != nil:
+			return fmt.Sprintf("starting (pid %d, home %s, version %s): %s",
+				st.PID, st.Startup.Home, st.Startup.Version, st.Startup.Progress())
 		case st.Health == nil:
 			return fmt.Sprintf("running (pid %d), not answering HTTP yet", st.PID)
 		default:
@@ -84,10 +88,20 @@ func describeDaemonStatus(st daemonctl.Status, home string) string {
 			"run `curio daemon stop` for how to retire it", st.Health.Version)
 	case daemonctl.NotRunning:
 	}
-	if st.Health != nil && st.Health.Home != "" && !daemonctl.SameHome(st.Health.Home, home) {
-		return fmt.Sprintf("not running (the port is served by the daemon for %s)", st.Health.Home)
+	if _, other, answered := st.AnsweredBy(); answered && other != "" && !daemonctl.SameHome(other, home) {
+		return fmt.Sprintf("not running (the port is served by the daemon for %s)", other)
 	}
 	return "not running"
+}
+
+// migratingNotice tells the user why a command is waiting on the daemon.
+func migratingNotice(s client.Startup) string {
+	what := "the database"
+	if s.Migrations != nil {
+		what = fmt.Sprintf("the database (%d migrations)", s.Migrations.Total)
+	}
+	return "curio-daemon is migrating " + what + "; this can take a minute on a large library; " +
+		"`curio daemon logs -f` shows progress"
 }
 
 func newDaemonLogsCmd(env *daemonctl.Env) *cobra.Command {

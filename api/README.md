@@ -33,6 +33,16 @@ The clients are written by hand: `internal/client` for the CLI and the
   updated mid-walk moves ahead of the cursor and is not revisited. Cursors
   are opaque and may be invalidated by a daemon upgrade: an invalid one is
   a 400, and the client starts the walk again. There is no `total`.
+- **Startup**: the daemon answers from the moment it binds its port. Until
+  it is ready (while it migrates its database, say), every request gets
+  `503` with a `Retry-After` header and a problem of type
+  `urn:curio:problem:daemon-starting`; on `/v1/healthz` that problem also
+  carries `pid`, `home` and `version`, so a client knows the daemon is its
+  own, and `phase` (`initializing` or `migrating`) with `migrations:
+  { applied, total }` while it migrates. Nothing a starting daemon refused
+  has run, so clients send it again once healthz answers `200`. See
+  [`../docs/decisions.md`](../docs/decisions.md) "Daemon startup: a
+  starting API while migrating, clients that wait on progress".
 - **Async work** responds `202 Accepted`: `{ job_id }` for single-target
   operations (refetch, reindex, interests rebuild), `{ jobs_enqueued }` for
   the bulk `refetch-all` and `reindex-all`, which have no parent job.

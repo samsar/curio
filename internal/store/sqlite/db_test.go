@@ -3,8 +3,11 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -58,6 +61,117 @@ func TestMigrate_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before, applied(), "a second run applies nothing")
 	assert.Equal(t, latestMigration(t), version, "and still reports the version")
+}
+
+// hookLog records what MigrateWithHooks reports.
+type hookLog struct {
+	current int64
+	pending []Migration
+	events  []string // in order: "pending", "applying 5", "applied 5", ...
+	applied []Migration
+	took    []time.Duration
+}
+
+func (h *hookLog) hooks() MigrationHooks {
+	return MigrationHooks{
+		Pending: func(current int64, pending []Migration) {
+			h.current, h.pending = current, pending
+			h.events = append(h.events, "pending")
+		},
+		Applying: func(m Migration) { h.events = append(h.events, "applying "+strconv.FormatInt(m.Version, 10)) },
+		Applied: func(m Migration, took time.Duration) {
+			h.events = append(h.events, "applied "+strconv.FormatInt(m.Version, 10))
+			h.applied = append(h.applied, m)
+			h.took = append(h.took, took)
+		},
+	}
+}
+
+// TestMigrateWithHooks_ReportsEachMigration: an upgrade from version 4 is
+// announced with the version it starts from and what is pending, and each
+// migration is reported as it starts and as it finishes, with its file and
+// how long it took.
+func TestMigrateWithHooks_ReportsEachMigration(t *testing.T) {
+	db, _ := migratedTo(t, 4)
+	latest := latestMigration(t)
+	var h hookLog
+
+	version, err := MigrateWithHooks(context.Background(), db, h.hooks())
+	require.NoError(t, err)
+	assert.Equal(t, latest, version)
+
+	assert.EqualValues(t, 4, h.current)
+	require.Len(t, h.pending, int(latest-4))
+	want := make([]string, 0, 1+2*len(h.pending))
+	want = append(want, "pending")
+	for i, m := range h.pending {
+		assert.EqualValues(t, 5+i, m.Version)
+		assert.True(t, strings.HasPrefix(m.Source, fmt.Sprintf("%03d_", m.Version)), m.Source)
+		assert.True(t, strings.HasSuffix(m.Source, ".sql"), m.Source)
+		want = append(want, fmt.Sprintf("applying %d", m.Version), fmt.Sprintf("applied %d", m.Version))
+	}
+	assert.Equal(t, want, h.events)
+	assert.Equal(t, h.pending, h.applied)
+	for _, d := range h.took {
+		assert.Positive(t, d)
+	}
+
+	wal, err := os.Stat(db.Path() + "-wal")
+	require.NoError(t, err)
+	assert.Zero(t, wal.Size(), "the WAL is truncated after migrating")
+}
+
+// TestMigrateWithHooks_NothingPending: an up-to-date database reports
+// nothing, and a new one reports every migration as pending from version 0.
+func TestMigrateWithHooks_NothingPending(t *testing.T) {
+	var h hookLog
+	version, err := MigrateWithHooks(context.Background(), newTestDB(t), h.hooks())
+	require.NoError(t, err)
+	assert.Equal(t, latestMigration(t), version)
+	assert.Empty(t, h.events)
+
+	db, _ := openUnmigrated(t)
+	var fresh hookLog
+	_, err = MigrateWithHooks(context.Background(), db, fresh.hooks())
+	require.NoError(t, err)
+	assert.Zero(t, fresh.current)
+	assert.Len(t, fresh.pending, int(latestMigration(t)))
+}
+
+// TestMigrateWithHooks_FailureNamesTheMigration: a migration that fails
+// stops the run with an error naming its file and version, after it was
+// announced but never reported applied.
+func TestMigrateWithHooks_FailureNamesTheMigration(t *testing.T) {
+	db, _ := migratedTo(t, 4)
+	// 005 drops this column; without it, 005 fails.
+	_, err := db.Exec(`ALTER TABLE schema_meta DROP COLUMN schema_version`)
+	require.NoError(t, err)
+	var h hookLog
+
+	_, err = MigrateWithHooks(context.Background(), db, h.hooks())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "005_drop_schema_version.sql")
+	assert.Contains(t, err.Error(), "version:5")
+	assert.Equal(t, []string{"pending", "applying 5"}, h.events)
+}
+
+// TestMigrateWithHooks_SomethingElseMigrates: a migration applied by
+// someone else after the pending list was read fails the run, rather than
+// goose's next migration being reported as the one it listed.
+func TestMigrateWithHooks_SomethingElseMigrates(t *testing.T) {
+	db, other := migratedTo(t, 4)
+	hooks := MigrationHooks{Applying: func(m Migration) {
+		if m.Version == 5 {
+			_, err := other.UpByOne(context.Background())
+			require.NoError(t, err)
+		}
+	}}
+
+	_, err := MigrateWithHooks(context.Background(), db, hooks)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "apply migration 005_")
+	assert.Contains(t, err.Error(), "goose applied 006_")
+	assert.Contains(t, err.Error(), "is something else migrating")
 }
 
 func TestMigrate_CancelledContext(t *testing.T) {

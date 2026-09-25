@@ -1,22 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/store"
 )
 
 // fakeDaemon serves the subset of the curio HTTP API the MCP tools call and
@@ -272,6 +281,162 @@ func TestMCP_ConcurrentCallsToAStoppedDaemon(t *testing.T) {
 		assert.False(t, res.IsError, textOf(res))
 	}
 	assert.GreaterOrEqual(t, starts.Load(), int32(1))
+}
+
+// startingDaemon is the real API as a daemon that is still migrating.
+// ensure stands in for the controller's wait: it makes the daemon ready,
+// once however often it is called, and counts the calls.
+func startingDaemon(t *testing.T, ensures *atomic.Int32) (*apitest.Server, daemon) {
+	t.Helper()
+	srv := apitest.StartNotReady(t)
+	srv.Startup.SetMigrating(6)
+	doc := srv.AddDocument(t, "https://example.com/alpha", store.DocStateFetched)
+	srv.AddContent(t, doc, "alpha body")
+	ready := sync.OnceValue(srv.Ready)
+	return srv, daemon{
+		client: client.New(srv.URL),
+		ensure: func(context.Context) error {
+			ensures.Add(1)
+			return ready()
+		},
+	}
+}
+
+// TestMCP_WaitsForAStartingDaemon: a tool call that finds the daemon still
+// starting waits for it to be ready and sends the request again: nothing a
+// starting daemon refused has run.
+func TestMCP_WaitsForAStartingDaemon(t *testing.T) {
+	var ensures atomic.Int32
+	_, d := startingDaemon(t, &ensures)
+	res := search(t, connect(t, d))
+	assert.False(t, res.IsError, textOf(res))
+	assert.Contains(t, textOf(res), "https://example.com/alpha")
+	assert.EqualValues(t, 1, ensures.Load())
+}
+
+// TestMCP_ConcurrentCallsToAStartingDaemon: calls that all find the daemon
+// starting each wait for it, and each succeed.
+func TestMCP_ConcurrentCallsToAStartingDaemon(t *testing.T) {
+	var ensures atomic.Int32
+	_, d := startingDaemon(t, &ensures)
+	cs := connect(t, d)
+	var wg sync.WaitGroup
+	results := make([]*mcp.CallToolResult, 3)
+	errs := make([]error, len(results))
+	for i := range results {
+		wg.Go(func() {
+			results[i], errs[i] = cs.CallTool(context.Background(), &mcp.CallToolParams{
+				Name: "search_bookmarks", Arguments: map[string]any{"query": "alpha"},
+			})
+		})
+	}
+	wg.Wait()
+	for i, res := range results {
+		require.NoError(t, errs[i])
+		assert.False(t, res.IsError, textOf(res))
+	}
+	assert.GreaterOrEqual(t, ensures.Load(), int32(1))
+}
+
+// lockedController is a controller for srv's home whose lock the test
+// process holds, as the daemon behind srv would.
+func lockedController(t *testing.T, srv *apitest.Server) *daemonctl.Controller {
+	t.Helper()
+	lock, err := daemonctl.AcquireLock(srv.Home)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, lock.Release()) })
+	return daemonctl.New(srv.Home, "/nonexistent/curio-daemon", srv.URL)
+}
+
+// TestMCP_StillStartingIsNotARestartFailure: when the daemon is still
+// migrating after the tool call's wait, the tool error says so and when to
+// try again; nothing failed to restart.
+func TestMCP_StillStartingIsNotARestartFailure(t *testing.T) {
+	srv := apitest.StartNotReady(t)
+	srv.Startup.SetMigrating(6)
+	srv.Startup.MigrationApplied()
+	ctl := lockedController(t, srv)
+	ctl.ReadyTimeout = 200 * time.Millisecond
+
+	res := search(t, connect(t, daemon{client: client.New(srv.URL), ensure: ctl.EnsureRunning}))
+	assert.True(t, res.IsError)
+	assert.Contains(t, textOf(res), "curio-daemon is still starting")
+	assert.Contains(t, textOf(res), "migrating the database, 1 of 6 migrations applied")
+	assert.Contains(t, textOf(res), "try again in a minute")
+	assert.NotContains(t, textOf(res), "restarting the daemon failed")
+}
+
+// envFor is what daemonctl.Discover would find for the daemon behind srv,
+// without resolving the real home.
+func envFor(srv *apitest.Server, ctl *daemonctl.Controller) daemonctl.Env {
+	return daemonctl.Env{Home: srv.Home, Client: client.New(srv.URL), Controller: ctl}
+}
+
+// TestSetup_DoesNotWaitForAMigration: the sidecar starts serving MCP while
+// the daemon migrates, and says so on stderr, rather than holding the
+// client's handshake for the whole migration.
+func TestSetup_DoesNotWaitForAMigration(t *testing.T) {
+	srv := apitest.StartNotReady(t)
+	srv.Startup.SetMigrating(6)
+	ctl := lockedController(t, srv)
+	var logs bytes.Buffer
+
+	start := time.Now()
+	d, err := setup(context.Background(), envFor(srv, ctl), slog.New(slog.NewTextHandler(&logs, nil)))
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+	require.NotNil(t, d.ensure)
+	assert.Equal(t, mcpReadyWait, ctl.ReadyTimeout)
+	assert.Equal(t, 1, strings.Count(logs.String(), "migrating its database"), logs.String())
+	assert.Equal(t, 1, strings.Count(logs.String(), "tool calls will wait for it"), logs.String())
+	assert.Contains(t, logs.String(), "0 of 6 migrations applied")
+}
+
+// TestSetup_Failures: a daemon that can't serve this home still fails the
+// sidecar at startup.
+func TestSetup_Failures(t *testing.T) {
+	crashing := filepath.Join(t.TempDir(), "curio-daemon")
+	require.NoError(t, os.WriteFile(crashing, []byte("#!/bin/sh\necho boom >&2\nexit 3\n"), 0o700))
+	cases := []struct {
+		name string
+		ctl  func(t *testing.T, home *curiohome.Home, url string) *daemonctl.Controller
+		want string
+	}{
+		{"binary missing", func(t *testing.T, home *curiohome.Home, url string) *daemonctl.Controller {
+			return daemonctl.New(home, filepath.Join(t.TempDir(), "curio-daemon"), url)
+		}, "no such file"},
+		{"crash on start", func(_ *testing.T, home *curiohome.Home, url string) *daemonctl.Controller {
+			return daemonctl.New(home, crashing, url)
+		}, "exit status 3"},
+		{"port served for another home", func(t *testing.T, home *curiohome.Home, _ string) *daemonctl.Controller {
+			other := apitest.Start(t)
+			return daemonctl.New(home, crashing, other.URL)
+		}, "daemon.listen"},
+		{"silent lock holder", func(t *testing.T, home *curiohome.Home, _ string) *daemonctl.Controller {
+			lock, err := daemonctl.AcquireLock(home)
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, lock.Release()) })
+			silent, err := net.Listen("tcp", "127.0.0.1:0") // bound, never accepting
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, silent.Close()) })
+			ctl := daemonctl.New(home, crashing, "http://"+silent.Addr().String())
+			ctl.StartTimeout, ctl.StopTimeout = 200*time.Millisecond, 200*time.Millisecond
+			return ctl
+		}, "starting up or shutting down"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
+			require.NoError(t, err)
+			url := "http://" + freeAddr(t)
+			ctl := tc.ctl(t, home, url)
+			e := daemonctl.Env{Home: home, Client: client.New(ctl.BaseURL), Controller: ctl}
+
+			_, err = setup(context.Background(), e, slog.New(slog.DiscardHandler))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
 }
 
 func textOf(res *mcp.CallToolResult) string {

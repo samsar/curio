@@ -58,7 +58,16 @@ same `mcpServers` block as above, then restart Claude Desktop.
   reads `config.yaml` for `daemon.listen`, and looks for `curio-daemon` next to
   itself (override with `CURIO_DAEMON_BIN`), exactly as the CLI does. The daemon
   must be reachable or startable for tools to work: startup fails if it can't
-  be started.
+  be started, or if the port is served by another home's daemon.
+- **Startup and migrations.** `curio-mcp` doesn't wait for the daemon to
+  finish starting before it answers the MCP handshake: a first start after
+  an upgrade can migrate the database for longer than a client allows a
+  server to connect (30s by default in Claude Code). It logs to stderr
+  that the daemon is still starting, and tool calls wait for it instead:
+  a call that finds the daemon starting waits up to 30s for it to be
+  ready, then sends the request again. One still starting after that is a
+  tool error that says how far along it is and to try again in a minute;
+  the daemon carries on regardless.
 - **Daemon restarts.** The sidecar outlives the daemon when the daemon stops
   mid-session (`curio daemon stop` after a config edit, an upgrade, a crash).
   A tool call that finds the daemon unreachable starts it again and retries

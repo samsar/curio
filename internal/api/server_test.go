@@ -29,17 +29,30 @@ import (
 	"github.com/samsar/curio/internal/version"
 )
 
-// testServer runs the full router from NewServer on a real loopback listener
-// backed by real SQLite stores.
+// testServer runs NewServer on a real loopback listener backed by real
+// SQLite stores.
 type testServer struct {
-	base string // http://127.0.0.1:<port>
-	port string
-	db   *sqlite.DB
-	deps Deps
+	base    string // http://127.0.0.1:<port>
+	port    string
+	db      *sqlite.DB
+	deps    Deps
+	srv     *Server
+	startup *Startup
 }
 
-// newTestServer starts the server; each option adjusts its Deps first.
+// newTestServer starts the server with the full API; each option adjusts
+// its Deps first.
 func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
+	t.Helper()
+	s := newStartingTestServer(t, options...)
+	s.ready(t)
+	return s
+}
+
+// newStartingTestServer starts the server as a starting daemon, in the
+// initializing phase, until ready is called. Its Deps are built up front
+// so a test can seed the database first.
+func newStartingTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	t.Helper()
 	db := sqlitetest.NewDB(t)
 	home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
@@ -62,7 +75,8 @@ func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	srv, err := NewServer(ln, deps)
+	startup := NewStartup()
+	srv, err := NewServer(ln, home.Path, startup, deps.Log)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -78,7 +92,14 @@ func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 
 	_, port, err := net.SplitHostPort(ln.Addr().String())
 	require.NoError(t, err)
-	return &testServer{base: "http://" + ln.Addr().String(), port: port, db: db, deps: deps}
+	return &testServer{base: "http://" + ln.Addr().String(), port: port, db: db, deps: deps,
+		srv: srv, startup: startup}
+}
+
+// ready swaps in the full API, as the daemon does once it has started.
+func (s *testServer) ready(t *testing.T) {
+	t.Helper()
+	require.NoError(t, s.srv.Ready(s.deps))
 }
 
 // request describes one call. Zero fields mean "what a normal client sends":
@@ -419,7 +440,7 @@ func TestServer_BodylessPostsNeedNoContentType(t *testing.T) {
 func TestServer_ServeReturnsListenerFailure(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	srv, err := NewServer(ln, Deps{Log: slog.New(slog.DiscardHandler)})
+	srv, err := NewServer(ln, t.TempDir(), NewStartup(), slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.NoError(t, ln.Close())
 

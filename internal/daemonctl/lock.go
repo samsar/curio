@@ -1,6 +1,7 @@
 package daemonctl
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -126,30 +127,43 @@ func probeLock(path string) (held bool, pid int, err error) {
 	return held, pid, err
 }
 
-// lockStart takes the exclusive start lock, blocking until it is free, so
-// concurrent auto-starters (the CLI and the MCP sidecar) spawn one daemon.
-// A separate file from the daemon's own lock so the two never contend.
-// Closing the returned file releases it.
-func lockStart(path string) (*os.File, error) {
+// lockStart takes the exclusive start lock, so concurrent auto-starters
+// (the CLI and the MCP sidecar) spawn one daemon. A separate file from the
+// daemon's own lock so the two never contend. It retries every
+// pollInterval until the lock is free or ctx ends: a blocking flock can't
+// be interrupted, and would park the caller, deaf to ctrl-c, for as long
+// as another starter holds the lock. Closing the returned file releases
+// it.
+func lockStart(ctx context.Context, path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open start lock: %w", err)
 	}
-	if err := flock(f, syscall.LOCK_EX); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("take start lock: %w", err)
-	}
-	return f, nil
-}
-
-// flock retries on EINTR, which a blocking lock returns when a signal lands.
-func flock(f *os.File, how int) error {
 	for {
-		err := syscall.Flock(int(f.Fd()), how)
-		if !errors.Is(err, syscall.EINTR) {
-			return err
+		if err := ctx.Err(); err != nil {
+			f.Close()
+			return nil, err
+		}
+		err := flock(f, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			f.Close()
+			return nil, fmt.Errorf("take start lock: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(pollInterval):
 		}
 	}
+}
+
+// flock applies how to f's open file description. Every lock here is
+// taken non-blocking (LOCK_NB), so a call returns at once and a signal
+// can't interrupt it.
+func flock(f *os.File, how int) error {
+	return syscall.Flock(int(f.Fd()), how)
 }
 
 func readPID(f *os.File) (int, error) {
