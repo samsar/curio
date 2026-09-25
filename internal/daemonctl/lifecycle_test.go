@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/curiohome"
 )
 
@@ -32,11 +33,20 @@ import (
 const (
 	fakeModeEnv = "CURIO_FAKE_DAEMON_MODE"
 	fakeAddrEnv = "CURIO_FAKE_DAEMON_ADDR"
+	// fakeStartingEnv is how long the starting modes report they are
+	// migrating, as a time.Duration.
+	fakeStartingEnv = "CURIO_FAKE_DAEMON_STARTING"
 
 	modeNormal        = "normal"
 	modeCrashOnStart  = "crash-on-start"
 	modeExitOnStart   = "exit-on-start"
 	modeIgnoreSIGTERM = "ignore-sigterm"
+	// modeStartingThenReady migrates for fakeStartingEnv, then serves.
+	modeStartingThenReady = "starting-then-ready"
+	// modeStartingThenExit migrates for fakeStartingEnv, then exits 4.
+	modeStartingThenExit = "starting-then-exit"
+	// modeSilent binds its port and never answers.
+	modeSilent = "silent"
 
 	// spawnLog, in the home, gets one line per fake daemon started.
 	spawnLog = "spawned.log"
@@ -87,17 +97,64 @@ func runFakeDaemon(mode string) int {
 	if err != nil {
 		return fail(err)
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "pid": os.Getpid(), "home": home.Path})
-	})
-	go func() { _ = http.Serve(ln, mux) }()
+	if mode == modeSilent {
+		fmt.Fprintln(os.Stderr, "fake daemon: bound, not answering")
+	} else {
+		go func() { _ = http.Serve(ln, fakeHealthz(mode, home.Path)) }()
+	}
 
+	var gaveUp <-chan time.Time
+	if mode == modeStartingThenExit {
+		gaveUp = time.After(startingFor())
+	}
 	select {
 	case <-stop:
+	case <-gaveUp:
+		fmt.Fprintln(os.Stderr, "fake daemon: gave up migrating")
+		return 4
 	case <-time.After(time.Minute): // never outlive the test run
 	}
 	return 0
+}
+
+// startingFor is how long the fake reports it is starting.
+func startingFor() time.Duration {
+	d, err := time.ParseDuration(os.Getenv(fakeStartingEnv))
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// fakeHealthz answers healthz as the fake daemon, starting first in the
+// starting modes.
+func fakeHealthz(mode, home string) http.Handler {
+	readyAt := time.Now()
+	if mode == modeStartingThenReady || mode == modeStartingThenExit {
+		readyAt = readyAt.Add(startingFor())
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if time.Now().Before(readyAt) {
+			if err := writeStarting(w, os.Getpid(), home); err != nil {
+				fmt.Fprintln(os.Stderr, "fake daemon:", err)
+			}
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "pid": os.Getpid(), "home": home})
+	})
+}
+
+// writeStarting answers as the daemon with pid for home does while it
+// migrates, 2 of 6 migrations in.
+func writeStarting(w http.ResponseWriter, pid int, home string) error {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.Header().Set("Retry-After", "1")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	return json.NewEncoder(w).Encode(map[string]any{
+		"type": "urn:curio:problem:daemon-starting", "title": "daemon starting", "status": http.StatusServiceUnavailable,
+		"pid": pid, "home": home, "version": "test", "phase": "migrating",
+		"migrations": map[string]any{"applied": 2, "total": 6},
+	})
 }
 
 func appendLine(path, line string) error {
@@ -171,18 +228,75 @@ func serveHealth(t *testing.T, c *Controller, body map[string]any) {
 // serveHealthAfter is serveHealth for a daemon that takes delay to answer.
 func serveHealthAfter(t *testing.T, c *Controller, delay time.Duration, body map[string]any) {
 	t.Helper()
-	ln, err := net.Listen("tcp", strings.TrimPrefix(c.BaseURL, "http://"))
-	require.NoError(t, err)
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serveHandler(t, c, func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-time.After(delay):
 		case <-r.Context().Done():
 			return
 		}
 		assert.NoError(t, json.NewEncoder(w).Encode(body))
-	})}
+	})
+}
+
+// serveHandler serves handler at the controller's address until the test
+// ends.
+func serveHandler(t *testing.T, c *Controller, handler http.HandlerFunc) {
+	t.Helper()
+	ln, err := net.Listen("tcp", strings.TrimPrefix(c.BaseURL, "http://"))
+	require.NoError(t, err)
+	srv := &http.Server{Handler: handler}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
+}
+
+// startingDaemon is a daemon served in process that reports it is
+// migrating until ready is called, then serves.
+type startingDaemon struct {
+	requests atomic.Int32 // healthz requests answered while starting
+	isReady  atomic.Bool
+}
+
+// serveStarting answers healthz at the controller's address as the daemon
+// with pid for home.
+func serveStarting(t *testing.T, c *Controller, pid int, home string) *startingDaemon {
+	t.Helper()
+	d := &startingDaemon{}
+	serveHandler(t, c, func(w http.ResponseWriter, _ *http.Request) {
+		if d.isReady.Load() {
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"status": "ok", "pid": pid, "home": home}))
+			return
+		}
+		d.requests.Add(1)
+		assert.NoError(t, writeStarting(w, pid, home))
+	})
+	return d
+}
+
+func (d *startingDaemon) ready() { d.isReady.Store(true) }
+
+// migrations records the OnMigrating calls a controller makes.
+type migrations struct {
+	mu    sync.Mutex
+	calls []client.Startup
+}
+
+func (m *migrations) record(s client.Startup) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, s)
+}
+
+func (m *migrations) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
+// onMigrating makes c record its OnMigrating calls.
+func onMigrating(c *Controller) *migrations {
+	m := &migrations{}
+	c.OnMigrating = m.record
+	return m
 }
 
 // holdLock makes the test process the daemon holding c's home lock until the
@@ -284,17 +398,275 @@ func TestEnsureRunning_ServesTheControllersHome(t *testing.T) {
 	assert.Zero(t, spawnCount(t, &Controller{Home: elsewhere}), "nothing started for the other home")
 }
 
+// TestEnsureRunning_RefusesDaemonForAnotherHome: a daemon for another home
+// on the port, serving or starting, is an error at once: a daemon started
+// here could only fail to bind.
 func TestEnsureRunning_RefusesDaemonForAnotherHome(t *testing.T) {
-	c := newTestController(t, modeNormal)
-	other := t.TempDir()
-	serveHealth(t, c, map[string]any{"status": "ok", "pid": 4242, "home": other})
+	for _, starting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("starting=%t", starting), func(t *testing.T) {
+			c := newTestController(t, modeNormal)
+			other := t.TempDir()
+			if starting {
+				serveStarting(t, c, 4242, other)
+			} else {
+				serveHealth(t, c, map[string]any{"status": "ok", "pid": 4242, "home": other})
+			}
 
+			start := time.Now()
+			err := c.EnsureRunning(context.Background())
+			require.Error(t, err)
+			assert.Less(t, time.Since(start), c.StartTimeout/2)
+			assert.Contains(t, err.Error(), other)
+			assert.Contains(t, err.Error(), c.Home.Path)
+			assert.Contains(t, err.Error(), "daemon.listen")
+			assert.Zero(t, spawnCount(t, c))
+		})
+	}
+}
+
+// TestEnsureRunning_WaitsOutAMigratingChild: a spawned daemon that reports
+// it is migrating for longer than StartTimeout is waited for, and is told
+// about once, rather than failed for not being ready.
+func TestEnsureRunning_WaitsOutAMigratingChild(t *testing.T) {
+	c := newTestController(t, modeStartingThenReady)
+	const migrating = 1500 * time.Millisecond
+	t.Setenv(fakeStartingEnv, migrating.String())
+	c.StartTimeout = 500 * time.Millisecond
+	told := onMigrating(c)
+
+	start := time.Now()
+	require.NoError(t, c.EnsureRunning(context.Background()))
+	assert.GreaterOrEqual(t, time.Since(start), migrating)
+	assert.Equal(t, 1, spawnCount(t, c))
+	require.Equal(t, 1, told.count())
+	st, err := c.Status(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, st.PID, told.calls[0].PID, "told about the daemon it spawned")
+	assert.Equal(t, "migrating the database, 2 of 6 migrations applied", told.calls[0].Progress())
+}
+
+// TestEnsureRunning_SilentChild: a spawned daemon that binds but never
+// answers fails the start after StartTimeout, not StartTimeout plus a
+// probe's own timeout, with the tail of its log.
+func TestEnsureRunning_SilentChild(t *testing.T) {
+	c := newTestController(t, modeSilent)
+	c.StartTimeout = time.Second
+
+	start := time.Now()
 	err := c.EnsureRunning(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), other)
-	assert.Contains(t, err.Error(), c.Home.Path)
-	assert.Contains(t, err.Error(), "daemon.listen")
+	assert.Less(t, time.Since(start), c.StartTimeout+500*time.Millisecond)
+	assert.Contains(t, err.Error(), "curio-daemon failed to start: no answer at "+c.BaseURL+" within 1s")
+	assert.Contains(t, err.Error(), c.Home.DaemonLogPath())
+	assert.Contains(t, err.Error(), "fake daemon: bound, not answering")
+}
+
+// TestEnsureRunning_ChildExitsWhileMigrating: a spawned daemon that dies
+// part way through its migrations is reported as soon as it exits, not
+// when the ready ceiling runs out.
+func TestEnsureRunning_ChildExitsWhileMigrating(t *testing.T) {
+	c := newTestController(t, modeStartingThenExit)
+	const migrating = time.Second
+	t.Setenv(fakeStartingEnv, migrating.String())
+	c.ReadyTimeout = time.Minute
+	told := onMigrating(c)
+
+	start := time.Now()
+	err := c.EnsureRunning(context.Background())
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), migrating+1500*time.Millisecond, "reported when it exits")
+	assert.Contains(t, err.Error(), "curio-daemon failed to start: exit status 4")
+	assert.Contains(t, err.Error(), "fake daemon: gave up migrating")
+	assert.NotErrorIs(t, err, ErrStillStarting)
+	assert.Equal(t, 1, told.count())
+}
+
+// TestEnsureRunning_WaitsOnAMigratingHolder: a daemon this call didn't
+// spawn, holding the lock and reporting it is migrating, is waited for past
+// both StartTimeout and StopTimeout, and nothing is spawned.
+func TestEnsureRunning_WaitsOnAMigratingHolder(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	c.StartTimeout = 200 * time.Millisecond
+	c.StopTimeout = 400 * time.Millisecond
+	holdLock(t, c)
+	d := serveStarting(t, c, os.Getpid(), c.Home.Path)
+	const migrating = time.Second
+	time.AfterFunc(migrating, d.ready)
+
+	start := time.Now()
+	require.NoError(t, c.EnsureRunning(context.Background()))
+	assert.GreaterOrEqual(t, time.Since(start), migrating)
 	assert.Zero(t, spawnCount(t, c))
+}
+
+// TestEnsureRunning_UnverifiedStartingAnswer: a starting answer for this
+// home from a process that is neither our child nor the lock holder is no
+// evidence of progress, so it doesn't keep the wait going.
+func TestEnsureRunning_UnverifiedStartingAnswer(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	c.StartTimeout = 200 * time.Millisecond
+	c.StopTimeout = 400 * time.Millisecond
+	c.ReadyTimeout = time.Minute
+	holdLock(t, c)
+	serveStarting(t, c, os.Getpid()+1, c.Home.Path)
+
+	start := time.Now()
+	err := c.EnsureRunning(context.Background())
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 5*c.StopTimeout, "the silence budget, not the ready ceiling")
+	assert.NotErrorIs(t, err, ErrStillStarting)
+	assert.Contains(t, err.Error(), "(starting up or shutting down)")
+	assert.Zero(t, spawnCount(t, c))
+}
+
+// TestEnsureRunning_StillStarting: a daemon still migrating when
+// ReadyTimeout runs out is not a failed start. The error says what it is
+// doing and where to look, and the daemon is left to carry on.
+func TestEnsureRunning_StillStarting(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	c.ReadyTimeout = 300 * time.Millisecond
+	holder, exited := startBystander(t)
+	holdLock(t, c)
+	writePIDFile(t, c, holder) // the lock vouches for the bystander
+	serveStarting(t, c, holder, c.Home.Path)
+
+	err := c.EnsureRunning(context.Background())
+	require.ErrorIs(t, err, ErrStillStarting)
+	for _, want := range []string{
+		fmt.Sprintf("pid %d", holder), "migrating the database, 2 of 6 migrations applied",
+		"keeps running", "`curio daemon status`", "`curio daemon logs -f`",
+	} {
+		assert.Contains(t, err.Error(), want)
+	}
+	assert.NotContains(t, err.Error(), "failed to start")
+	assertNotSignalled(t, exited, "a daemon still starting was signalled")
+}
+
+// TestEnsureRunning_PollsAMigratingDaemonSlowly: a daemon that reports it
+// is migrating is asked at most once a second, its Retry-After, not every
+// 100ms: each request is a line in its log.
+func TestEnsureRunning_PollsAMigratingDaemonSlowly(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	holdLock(t, c)
+	d := serveStarting(t, c, os.Getpid(), c.Home.Path)
+	time.AfterFunc(2*time.Second, d.ready)
+
+	require.NoError(t, c.EnsureRunning(context.Background()))
+	assert.LessOrEqual(t, d.requests.Load(), int32(4))
+}
+
+// TestEnsureStarted: EnsureStarted returns at the first answer from our
+// daemon, starting or serving, spawning one if need be.
+func TestEnsureStarted(t *testing.T) {
+	t.Run("a migrating holder", func(t *testing.T) {
+		c := newTestController(t, modeNormal)
+		holdLock(t, c)
+		serveStarting(t, c, os.Getpid(), c.Home.Path)
+		told := onMigrating(c)
+
+		start := time.Now()
+		st, err := c.EnsureStarted(context.Background())
+		require.NoError(t, err)
+		assert.Less(t, time.Since(start), time.Second)
+		require.NotNil(t, st)
+		assert.Equal(t, client.PhaseMigrating, st.Phase)
+		assert.Equal(t, 1, told.count())
+
+		_, err = c.EnsureStarted(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, 2, told.count(), "once per call")
+	})
+
+	t.Run("a serving daemon", func(t *testing.T) {
+		c := newTestController(t, modeNormal)
+		holdLock(t, c)
+		serveHealth(t, c, map[string]any{"status": "ok", "pid": os.Getpid(), "home": c.Home.Path})
+		st, err := c.EnsureStarted(context.Background())
+		require.NoError(t, err)
+		assert.Nil(t, st)
+	})
+
+	t.Run("a spawned daemon", func(t *testing.T) {
+		c := newTestController(t, modeStartingThenReady)
+		t.Setenv(fakeStartingEnv, "30s")
+		start := time.Now()
+		st, err := c.EnsureStarted(context.Background())
+		require.NoError(t, err)
+		assert.Less(t, time.Since(start), 5*time.Second)
+		require.NotNil(t, st)
+		assert.Equal(t, 1, spawnCount(t, c))
+	})
+
+	t.Run("a daemon that can't start", func(t *testing.T) {
+		c := newTestController(t, modeCrashOnStart)
+		_, err := c.EnsureStarted(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "curio-daemon failed to start: exit status 3")
+	})
+}
+
+// TestEnsureRunning_SecondCallerIsNotParked: a caller arriving while
+// another waits on a daemon that hasn't answered yet keeps to its own
+// context, rather than blocking on the start lock until the first caller's
+// wait ends.
+func TestEnsureRunning_SecondCallerIsNotParked(t *testing.T) {
+	c := newTestController(t, modeSilent)
+	c.StartTimeout = 3 * time.Second
+	first := make(chan error, 1)
+	go func() { first <- c.EnsureRunning(context.Background()) }()
+	t.Cleanup(func() { <-first })
+	require.Eventually(t, func() bool { return spawnCount(t, c) == 1 }, 5*time.Second, 10*time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := c.EnsureRunning(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), time.Second)
+}
+
+// TestEnsureRunning_ConcurrentStartersWhileMigrating: two callers starting
+// a daemon that migrates spawn one, and both hear it is migrating before
+// it is ready: the second isn't parked on the start lock meanwhile.
+func TestEnsureRunning_ConcurrentStartersWhileMigrating(t *testing.T) {
+	c := newTestController(t, modeStartingThenReady)
+	t.Setenv(fakeStartingEnv, "2s")
+	told := onMigrating(c)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Go(func() { errs[i] = c.EnsureRunning(context.Background()) })
+	}
+	wg.Wait()
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, spawnCount(t, c))
+	assert.Equal(t, 2, told.count(), "each caller heard the daemon was migrating")
+}
+
+// TestStatus_StartingDaemon: a daemon that holds the lock and reports it is
+// starting is running, with what it reported; one that can be verified can
+// be stopped.
+func TestStatus_StartingDaemon(t *testing.T) {
+	c := newTestController(t, modeStartingThenReady)
+	t.Setenv(fakeStartingEnv, "30s")
+	ctx := context.Background()
+	_, err := c.EnsureStarted(ctx)
+	require.NoError(t, err)
+
+	st, err := c.Status(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, Running, st.State)
+	assert.Nil(t, st.Health)
+	require.NotNil(t, st.Startup)
+	assert.Equal(t, st.PID, st.Startup.PID)
+	assert.True(t, SameHome(c.Home.Path, st.Startup.Home))
+
+	stopped, err := c.Stop(ctx)
+	require.NoError(t, err)
+	assert.True(t, stopped)
 }
 
 func TestEnsureRunning_ReportsEarlyExit(t *testing.T) {
@@ -338,14 +710,14 @@ func TestEnsureRunning_LockHolderExitsWithoutServing(t *testing.T) {
 	t.Cleanup(release)
 
 	// Healthz answers "not ready" until the holder exits. EnsureRunning
-	// probes it once on each side of taking the start lock before it looks
-	// at the daemon lock, so the third probe comes from the wait.
+	// probes it once before it looks at the daemon lock, so the second
+	// probe comes from the wait.
 	var probes atomic.Int32
 	waiting := make(chan struct{})
 	ln, err := net.Listen("tcp", os.Getenv(fakeAddrEnv))
 	require.NoError(t, err)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if probes.Add(1) == 3 {
+		if probes.Add(1) == 2 {
 			close(waiting)
 		}
 		http.Error(w, "starting", http.StatusServiceUnavailable)
@@ -490,17 +862,24 @@ func TestStop_DaemonIgnoringSIGTERM(t *testing.T) {
 }
 
 // TestStop_RefusesMismatchedIdentity: the lock holder's PID is signalled only
-// if healthz, when something answers it, vouches for that same daemon.
+// if healthz, when something answers it, serving or starting, vouches for
+// that same daemon.
 func TestStop_RefusesMismatchedIdentity(t *testing.T) {
 	cases := []struct {
-		name   string
-		health func(holder int, home string) map[string]any
+		name  string
+		serve func(t *testing.T, c *Controller, holder int)
 	}{
-		{"healthz names another pid", func(holder int, home string) map[string]any {
-			return map[string]any{"status": "ok", "pid": holder + 1, "home": home}
+		{"healthz names another pid", func(t *testing.T, c *Controller, holder int) {
+			serveHealth(t, c, map[string]any{"status": "ok", "pid": holder + 1, "home": c.Home.Path})
 		}},
-		{"healthz names another home", func(holder int, _ string) map[string]any {
-			return map[string]any{"status": "ok", "pid": holder, "home": t.TempDir()}
+		{"healthz names another home", func(t *testing.T, c *Controller, holder int) {
+			serveHealth(t, c, map[string]any{"status": "ok", "pid": holder, "home": t.TempDir()})
+		}},
+		{"a starting answer names another pid", func(t *testing.T, c *Controller, holder int) {
+			serveStarting(t, c, holder+1, c.Home.Path)
+		}},
+		{"a starting answer names another home", func(t *testing.T, c *Controller, holder int) {
+			serveStarting(t, c, holder, t.TempDir())
 		}},
 	}
 	for _, tc := range cases {
@@ -509,7 +888,7 @@ func TestStop_RefusesMismatchedIdentity(t *testing.T) {
 			holder, exited := startBystander(t)
 			holdLock(t, c)
 			writePIDFile(t, c, holder) // the lock now vouches for the bystander
-			serveHealth(t, c, tc.health(holder, c.Home.Path))
+			tc.serve(t, c, holder)
 
 			_, err := c.Stop(context.Background())
 			require.Error(t, err)

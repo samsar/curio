@@ -350,7 +350,9 @@ Keeping content on disk rather than in SQLite:
 
 ## Schema versioning and migrations
 
-Migrations live in `migrations/` and run via `pressly/goose` at daemon startup.
+Migrations live in `migrations/` and run via `pressly/goose` at daemon startup,
+one at a time: while they run, the daemon answers as starting and
+`/v1/healthz` reports how many are applied.
 The schema version is the highest version in goose's `goose_db_version`
 table, the one source of truth for it. The daemon copies it into
 `.curio-meta.json` after migrating, as a cache for `/v1/healthz`,

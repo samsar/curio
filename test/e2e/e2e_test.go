@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -32,6 +33,8 @@ import (
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/store"
+	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/migrations"
 )
 
 // daemonBin is the curio-daemon TestMain builds for this run.
@@ -253,4 +256,67 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	pidFile, err := os.ReadFile(home.PIDFile())
 	require.NoError(t, err)
 	assert.Empty(t, pidFile, "a clean exit empties the PID file")
+}
+
+// migratedTo brings home's database to version, as an older curio would
+// have left it, and returns the newest version.
+func migratedTo(t *testing.T, home *curiohome.Home, version int64) (latest int) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sqlitestore.Open(ctx, home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	p, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations.FS)
+	require.NoError(t, err)
+	_, err = p.UpTo(ctx, version)
+	require.NoError(t, err)
+	sources := p.ListSources()
+	return int(sources[len(sources)-1].Version) // ListSources sorts by version
+}
+
+// TestDaemon_WaitsOutAMigration: starting a daemon whose migration takes
+// longer than StartTimeout succeeds, because the daemon answers as starting
+// throughout, and the caller hears once that it is migrating. The test
+// keeps the daemon in its first migration by holding the database's write
+// lock for 3s, within the 5s busy_timeout the migration waits for it.
+func TestDaemon_WaitsOutAMigration(t *testing.T) {
+	ctx := context.Background()
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen, "http://127.0.0.1:1")
+	latest := migratedTo(t, home, 4)
+
+	holder, err := sqlitestore.Open(ctx, home.DBPath())
+	require.NoError(t, err)
+	tx, err := holder.BeginTx(ctx, nil) // BEGIN IMMEDIATE: the write lock
+	require.NoError(t, err)
+	unlocked := make(chan struct{})
+	time.AfterFunc(3*time.Second, func() {
+		defer close(unlocked)
+		assert.NoError(t, tx.Rollback())
+		assert.NoError(t, holder.Close())
+	})
+	t.Cleanup(func() { <-unlocked })
+
+	baseURL := "http://" + listen
+	ctl := daemonctl.New(home, daemonBin, baseURL)
+	ctl.StartTimeout = time.Second
+	var told atomic.Int32
+	ctl.OnMigrating = func(client.Startup) { told.Add(1) }
+	t.Cleanup(func() {
+		if st, err := ctl.Status(context.Background()); err == nil && st.State == daemonctl.Running && st.PID > 0 {
+			_ = syscall.Kill(st.PID, syscall.SIGKILL)
+		}
+	})
+
+	start := time.Now()
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+	assert.Greater(t, time.Since(start), ctl.StartTimeout, "the migration outlasted StartTimeout")
+	assert.EqualValues(t, 1, told.Load(), "told once that the daemon is migrating")
+	health, err := client.New(baseURL).Healthz(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, latest, health.SchemaVersion)
+
+	stopped, err := ctl.Stop(ctx)
+	require.NoError(t, err)
+	assert.True(t, stopped)
 }

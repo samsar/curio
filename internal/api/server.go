@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -42,7 +43,7 @@ const (
 )
 
 // Deps bundles everything the API handlers need. The daemon constructs this
-// once at startup and passes it to NewServer.
+// once it has started and passes it to Server.Ready.
 type Deps struct {
 	Home           *curiohome.Home
 	Documents      store.DocumentStore
@@ -58,62 +59,87 @@ type Deps struct {
 	Log            *slog.Logger
 }
 
-// Server is the HTTP layer. Construct via NewServer, run via Serve, stop by
-// cancelling the context passed to Serve.
+// Server is the HTTP layer. It serves from the moment the daemon binds its
+// port: until Ready, as a starting daemon (see newStartingRouter), then the
+// full API. One listener and one http.Server serve both, so a client's
+// keep-alive connection carries on across the swap. Construct via
+// NewServer, run via Serve, stop by cancelling the context passed to Serve.
 type Server struct {
-	deps Deps
-	ln   net.Listener
-	srv  *http.Server
+	ln     net.Listener
+	origin localOrigin
+	log    *slog.Logger
+	router atomic.Pointer[http.Handler] // what serves each request
+	srv    *http.Server
 }
 
-// NewServer wires the chi router with all middleware and handlers. ln is the
-// already-bound listener; its port is what the Host and Origin checks accept,
-// so the allowlists always match the socket actually serving.
-func NewServer(ln net.Listener, deps Deps) (*Server, error) {
-	if deps.Log == nil {
-		deps.Log = slog.Default()
-	}
-	if deps.TenantID == "" {
-		deps.TenantID = store.LocalTenantID
+// NewServer builds a server that answers as a starting daemon for home,
+// reporting startup's progress, until Ready. ln is the already-bound
+// listener; its port is what the Host and Origin checks accept, so the
+// allowlists always match the socket actually serving. A nil log means
+// slog.Default().
+func NewServer(ln net.Listener, home string, startup *Startup, log *slog.Logger) (*Server, error) {
+	if log == nil {
+		log = slog.Default()
 	}
 	origin, err := newLocalOrigin(ln.Addr())
 	if err != nil {
 		return nil, err
 	}
-	router, err := newRouter(deps, origin)
-	if err != nil {
-		return nil, err
+	s := &Server{ln: ln, origin: origin, log: log}
+	s.swap(newStartingRouter(origin, home, startup, log))
+	s.srv = &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			(*s.router.Load()).ServeHTTP(w, r)
+		}),
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
-	return &Server{
-		deps: deps,
-		ln:   ln,
-		srv: &http.Server{
-			Handler:           router,
-			ReadHeaderTimeout: readHeaderTimeout,
-			ReadTimeout:       readTimeout,
-			WriteTimeout:      writeTimeout,
-			IdleTimeout:       idleTimeout,
-		},
-	}, nil
+	return s, nil
+}
+
+// Ready swaps in the full API over deps, for every request from now on.
+// The daemon calls it once, when it has started.
+func (s *Server) Ready(deps Deps) error {
+	if deps.Log == nil {
+		deps.Log = s.log
+	}
+	if deps.TenantID == "" {
+		deps.TenantID = store.LocalTenantID
+	}
+	router, err := newRouter(deps, s.origin)
+	if err != nil {
+		return err
+	}
+	s.swap(router)
+	return nil
+}
+
+func (s *Server) swap(h http.Handler) { s.router.Store(&h) }
+
+// useMiddleware installs the stack every response goes through, starting
+// or ready. Router-level, so every response, 404s and 405s included,
+// carries a request ID and is logged; the access checks after recovery
+// then run before routing.
+func useMiddleware(r chi.Router, origin localOrigin, log *slog.Logger) {
+	r.Use(middleware.RequestID)
+	r.Use(exposeRequestID)
+	// middleware.RealIP is intentionally NOT used — it's deprecated due to
+	// X-Forwarded-For spoofing risk and we listen on loopback only, so
+	// remote addrs are always loopback anyway.
+	r.Use(loggingMiddleware(log))
+	r.Use(recoverProblem(log))
+	r.Use(requireLocalHost(origin, log))
+	r.Use(rejectForeignOrigin(origin, log))
+	r.Use(requireJSONBody)
 }
 
 // newRouter builds the API's routes and middleware for a daemon that is its
 // own origin under origin. deps must have Log and TenantID set.
 func newRouter(deps Deps, origin localOrigin) (chi.Router, error) {
 	r := chi.NewRouter()
-	// Router-level, so every response, 404s and 405s included, carries a
-	// request ID and is logged; the checks after recovery then run before
-	// routing.
-	r.Use(middleware.RequestID)
-	r.Use(exposeRequestID)
-	// middleware.RealIP is intentionally NOT used — it's deprecated due to
-	// X-Forwarded-For spoofing risk and we listen on loopback only, so
-	// remote addrs are always loopback anyway.
-	r.Use(loggingMiddleware(deps.Log))
-	r.Use(recoverProblem(deps.Log))
-	r.Use(requireLocalHost(origin, deps.Log))
-	r.Use(rejectForeignOrigin(origin, deps.Log))
-	r.Use(requireJSONBody)
+	useMiddleware(r, origin, deps.Log)
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
 		writeProblem(w, req, http.StatusNotFound, "not found", "no route for "+routingPath(req))
 	})
@@ -174,11 +200,11 @@ func newRouter(deps Deps, origin localOrigin) (chi.Router, error) {
 // Serve serves on the listener passed to NewServer until ctx is cancelled,
 // then shuts down gracefully, giving in-flight requests shutdownTimeout to
 // finish. Returns nil after a ctx-initiated shutdown; any other error means
-// the listener failed.
+// the listener failed. Either way the listener is closed when it returns.
 func (s *Server) Serve(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
-		s.deps.Log.Info("api listening", "addr", s.ln.Addr().String(), "version", version.String())
+		s.log.Info("api listening", "addr", s.ln.Addr().String(), "version", version.String())
 		errCh <- s.srv.Serve(s.ln)
 	}()
 
@@ -188,10 +214,14 @@ func (s *Server) Serve(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
-	s.deps.Log.Info("api stopping")
+	s.log.Info("api stopping")
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
-	if err := s.srv.Shutdown(shutdownCtx); err != nil {
+	err := s.srv.Shutdown(shutdownCtx)
+	// http.Server.Serve returns, closing the listener, as soon as Shutdown
+	// begins, even if Shutdown got there before Serve had started.
+	<-errCh
+	if err != nil {
 		return fmt.Errorf("shut down api: %w", err)
 	}
 	return nil

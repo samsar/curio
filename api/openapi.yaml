@@ -21,7 +21,7 @@ info:
         carries an `X-Request-Id` header, and every problem repeats it as
         `request_id`, which is also on the daemon's log lines for the
         request; `instance` is the request path. A 404 names what is
-        missing. A 5xx detail is the raw error text.
+        missing. A 500's detail is the raw error text.
       - Responses are read tolerantly: they may gain fields and enum values
         within /v1, and clients ignore what they don't know. Requests are
         strict: an unknown field is a 400 that names it and, since it
@@ -41,6 +41,13 @@ info:
         or with `jobs_enqueued` for the bulk refetch-all and reindex-all,
         which have no parent job. Imports are synchronous per request; the
         fetches they enqueue are not.
+      - Startup: the daemon answers from the moment it binds its port, but
+        until it is ready (while it migrates its database, say) every
+        request gets 503 with a `Retry-After` header and a problem of type
+        `urn:curio:problem:daemon-starting`. On `/v1/healthz` that problem
+        also names the daemon (`pid`, `home`, `version`) and says how far
+        along it is (`phase`, `migrations`). Nothing a starting daemon
+        refused has run, so any request can be sent again once it is ready.
 
     Access policy: there is no authentication and no token. The daemon binds
     loopback only and trusts every local process (and OS user) that can reach
@@ -84,17 +91,30 @@ paths:
     get:
       tags: [system]
       operationId: getHealth
-      summary: Liveness probe, and which daemon answered
+      summary: Readiness probe, and which daemon answered
       description: >
-        Answers within about half a second whatever state Ollama is in: an
-        unreachable or slow Ollama is reported in ollama_reachable and
-        ollama_detail, not as an error.
+        200 once the daemon serves the full API, 503 while it is still
+        starting; both name the daemon that answered (pid, home). A ready
+        daemon answers within about half a second whatever state Ollama is
+        in: an unreachable or slow Ollama is reported in ollama_reachable
+        and ollama_detail, not as an error. A starting one answers at once.
       responses:
         "200":
-          description: The daemon is up
+          description: The daemon is ready
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: >
+            The daemon is starting and serves nothing else yet. Ask again
+            after Retry-After seconds.
+          headers:
+            Retry-After:
+              description: Seconds to wait before asking again
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Starting" }
         default: { $ref: "#/components/responses/Problem" }
 
   /v1/stats:
@@ -634,8 +654,10 @@ components:
         An error. Besides the statuses an operation lists: 403 for a request
         a browser could have made (see the access policy), 405 for a method
         the path doesn't take (with an Allow header), 413 for an oversized
-        body, 415 for a body that isn't application/json, and 500 for a
-        failure in the daemon, logged under the request_id.
+        body, 415 for a body that isn't application/json, 500 for a failure
+        in the daemon, logged under the request_id, and 503 with a
+        Retry-After header while the daemon is starting (type
+        urn:curio:problem:daemon-starting; see the Startup convention).
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -709,6 +731,38 @@ components:
         ollama_reachable: { type: boolean }
         ollama_detail:    { type: string, description: "Why Ollama isn't usable; present only when it isn't" }
       required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, ollama_reachable]
+
+    Starting:
+      description: >
+        A starting daemon's healthz answer: an RFC 7807 problem of type
+        urn:curio:problem:daemon-starting, plus which daemon answered and
+        how far along it is.
+      type: object
+      properties:
+        type:       { type: string, format: uri, enum: ["urn:curio:problem:daemon-starting"] }
+        title:      { type: string }
+        status:     { type: integer, enum: [503] }
+        detail:     { type: string, description: "What the daemon is doing, in a sentence" }
+        instance:   { type: string, description: "The request path" }
+        request_id: { type: string, description: "The response's X-Request-Id; quote it against the daemon log" }
+        pid:        { type: integer, description: "Process ID of the daemon that answered" }
+        home:       { type: string, description: "Absolute $CURIO_HOME the answering daemon serves" }
+        version:    { type: string }
+        phase:
+          type: string
+          enum: [initializing, migrating]
+          description: >
+            migrating while it applies schema migrations to an existing
+            database, which can take minutes on a large library;
+            initializing for everything else, usually milliseconds
+        migrations:
+          type: object
+          description: Present exactly while phase is migrating
+          properties:
+            applied: { type: integer }
+            total:   { type: integer }
+          required: [applied, total]
+      required: [type, title, status, pid, home, version, phase]
 
     Stats:
       type: object

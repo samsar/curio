@@ -139,6 +139,14 @@ defaults. A directory that already exists without `.curio-meta.json` is
 refused rather than adopted, so pointing `CURIO_HOME` at the wrong
 directory can't write into it: use a path that doesn't exist yet.
 
+The first start after an upgrade may migrate the database, which can take
+a minute on a large library. `curio daemon start`, or whichever command
+started the daemon, prints one line to stderr saying so and waits;
+`curio daemon logs -f` shows each migration as it runs. Meanwhile
+`/v1/healthz` answers 503 with a `Retry-After` header, the daemon's pid
+and how many migrations are applied, and every other request gets 503
+until the daemon is ready. `curio daemon status` shows the same progress.
+
 ## Config: time budgets for Ollama calls
 
 Each bounds how long one kind of work waits on Ollama; all are validated as

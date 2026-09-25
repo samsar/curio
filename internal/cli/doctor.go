@@ -123,7 +123,12 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 
 	// 3. daemon reachable
 	health, err := c.Client.Healthz(ctx)
+	starting := client.StartupOf(err)
 	switch {
+	case starting != nil:
+		r.add("daemon", statusWarn, fmt.Sprintf("starting (pid %d): %s", starting.PID, starting.Progress()),
+			"wait for it, or follow it with `curio daemon logs -f`")
+		r.add("ollama", statusWarn, "not checked while the daemon starts", "run `curio doctor` again once it is ready")
 	case errors.Is(err, client.ErrDaemonUnreachable):
 		r.add("daemon", statusFail, "not reachable at "+c.Controller.BaseURL,
 			"run `curio daemon start`")

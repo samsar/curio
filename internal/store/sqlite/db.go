@@ -85,8 +85,35 @@ func Open(ctx context.Context, path string) (*DB, error) {
 }
 
 // Migrate applies pending migrations from the embedded FS and returns the
-// schema version the database is left at: the highest version in goose's
-// goose_db_version table, the only record of it. Idempotent.
+// schema version the database is left at. It is MigrateWithHooks with no
+// hooks.
+func Migrate(ctx context.Context, db *DB) (int64, error) {
+	return MigrateWithHooks(ctx, db, MigrationHooks{})
+}
+
+// Migration is one migration file.
+type Migration struct {
+	Version int64
+	Source  string // the file name, e.g. 008_chunks_fts_external_content.sql
+}
+
+// MigrationHooks tell a caller how Migrate is getting on; a migration that
+// rewrites a large table can take minutes. Nil hooks are skipped.
+type MigrationHooks struct {
+	// Pending is called once, before the first migration, when any are
+	// pending: current is the version the database is at, 0 for a new one,
+	// and pending lists the migrations about to be applied, in order.
+	Pending func(current int64, pending []Migration)
+	// Applying is called as each migration starts.
+	Applying func(Migration)
+	// Applied is called as each migration finishes, with how long it took.
+	Applied func(m Migration, took time.Duration)
+}
+
+// MigrateWithHooks applies pending migrations from the embedded FS one at a
+// time, calling hooks around each, and returns the schema version the
+// database is left at: the highest version in goose's goose_db_version
+// table, the only record of it. Idempotent.
 //
 // After applying any migration it checkpoints the WAL and truncates it. A
 // migration that rewrites a table writes all of it through the WAL, and
@@ -102,28 +129,74 @@ func Open(ctx context.Context, path string) (*DB, error) {
 // runs outside goose's transaction (see migrations/README.md), and one that
 // fails leaves its pooled connection inside an open transaction with
 // foreign keys off.
-func Migrate(ctx context.Context, db *DB) (int64, error) {
+func MigrateWithHooks(ctx context.Context, db *DB, hooks MigrationHooks) (int64, error) {
 	provider, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations.FS)
 	if err != nil {
 		return 0, fmt.Errorf("load migrations: %w", err)
 	}
-	applied, err := provider.Up(ctx)
+	current, err := provider.GetDBVersion(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("apply migrations: %w", err)
+		return 0, fmt.Errorf("read schema version: %w", err)
 	}
+	pending, err := pendingMigrations(ctx, provider)
+	if err != nil {
+		return 0, err
+	}
+	if len(pending) == 0 {
+		return current, nil
+	}
+
+	if hooks.Pending != nil {
+		hooks.Pending(current, pending)
+	}
+	for _, m := range pending {
+		if hooks.Applying != nil {
+			hooks.Applying(m)
+		}
+		// Each migration is its own call so the hooks can report it; goose
+		// applies the lowest pending version, which is m unless something
+		// else migrated the database since it was listed.
+		res, err := provider.UpByOne(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("apply migration %s: %w", m.Source, err)
+		}
+		if res.Source.Version != m.Version {
+			return 0, fmt.Errorf("apply migration %s: goose applied %s instead; is something else migrating %s?",
+				m.Source, filepath.Base(res.Source.Path), db.path)
+		}
+		if hooks.Applied != nil {
+			hooks.Applied(m, res.Duration)
+		}
+	}
+
 	version, err := provider.GetDBVersion(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("read schema version: %w", err)
 	}
-	if len(applied) > 0 {
-		// The result row's busy flag is set only when a reader holds the WAL
-		// open; nothing else uses the database while it migrates, and if
-		// something did, automatic checkpoints would still catch up.
-		if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-			return 0, fmt.Errorf("checkpoint after migrating: %w", err)
-		}
+	// The result row's busy flag is set only when a reader holds the WAL
+	// open; nothing else uses the database while it migrates, and if
+	// something did, automatic checkpoints would still catch up.
+	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return 0, fmt.Errorf("checkpoint after migrating: %w", err)
 	}
 	return version, nil
+}
+
+// pendingMigrations lists the migrations provider has yet to apply, in
+// version order. For a database that already has a schema it only reads,
+// so it doesn't wait on a writer.
+func pendingMigrations(ctx context.Context, provider *goose.Provider) ([]Migration, error) {
+	statuses, err := provider.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list pending migrations: %w", err)
+	}
+	var pending []Migration
+	for _, s := range statuses {
+		if s.State == goose.StatePending {
+			pending = append(pending, Migration{Version: s.Source.Version, Source: filepath.Base(s.Source.Path)})
+		}
+	}
+	return pending, nil
 }
 
 // Path returns the path Open was called with.

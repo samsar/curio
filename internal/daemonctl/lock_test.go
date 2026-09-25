@@ -1,11 +1,14 @@
 package daemonctl
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,4 +42,30 @@ func TestAcquireLock_Contention(t *testing.T) {
 	again, err := AcquireLock(home)
 	require.NoError(t, err)
 	require.NoError(t, again.Release())
+}
+
+// TestLockStart_HonoursContext: waiting for the start lock ends with the
+// caller's context, within one retry, and the lock is taken once it is
+// free.
+func TestLockStart_HonoursContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.start.lock")
+	held, err := lockStart(context.Background(), path)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = lockStart(ctx, path)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), 300*time.Millisecond+2*pollInterval)
+
+	cancelled, cancelNow := context.WithCancel(context.Background())
+	cancelNow()
+	_, err = lockStart(cancelled, path)
+	require.ErrorIs(t, err, context.Canceled)
+
+	require.NoError(t, held.Close())
+	again, err := lockStart(context.Background(), path)
+	require.NoError(t, err)
+	require.NoError(t, again.Close())
 }

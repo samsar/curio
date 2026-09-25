@@ -36,12 +36,30 @@ type Server struct {
 	Home *curiohome.Home
 	DB   *sqlite.DB
 	Deps api.Deps
+	// Startup is the progress the server reports until Ready, for a server
+	// from StartNotReady: its phase is initializing until a test sets it.
+	Startup *api.Startup
+
+	srv *api.Server
 }
 
-// Start serves api.NewServer on 127.0.0.1:0 until the test ends. Each opt
+// Start serves the full API on 127.0.0.1:0 until the test ends. Each opt
 // adjusts the Deps before the server starts. The search engine embeds
 // queries with Embedder, so /v1/search and /related work without Ollama.
 func Start(t testing.TB, opts ...func(*api.Deps)) *Server {
+	t.Helper()
+	s := StartNotReady(t, opts...)
+	if err := s.Ready(); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	return s
+}
+
+// StartNotReady is Start for a daemon that is still starting: until Ready,
+// every request answers 503 with the starting problem, and /v1/healthz
+// names this process and the server's home, as a starting daemon does. The
+// database and Deps are there from the start, for seeding.
+func StartNotReady(t testing.TB, opts ...func(*api.Deps)) *Server {
 	t.Helper()
 	db := sqlitetest.NewDB(t)
 	home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
@@ -72,7 +90,8 @@ func Start(t testing.TB, opts ...func(*api.Deps)) *Server {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv, err := api.NewServer(ln, deps)
+	startup := api.NewStartup()
+	srv, err := api.NewServer(ln, home.Path, startup, deps.Log)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
@@ -87,7 +106,15 @@ func Start(t testing.TB, opts ...func(*api.Deps)) *Server {
 			t.Errorf("serve api: %v", err)
 		}
 	})
-	return &Server{URL: "http://" + ln.Addr().String(), Home: home, DB: db, Deps: deps}
+	return &Server{URL: "http://" + ln.Addr().String(), Home: home, DB: db, Deps: deps,
+		Startup: startup, srv: srv}
+}
+
+// Ready swaps in the full API, as the daemon does once it has started. It
+// returns the error rather than failing the test, so a fake daemon can call
+// it from whatever goroutine becomes ready.
+func (s *Server) Ready() error {
+	return s.srv.Ready(s.Deps)
 }
 
 // closeClientConns closes the idle connections of http.DefaultTransport,

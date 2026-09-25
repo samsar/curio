@@ -2,7 +2,8 @@
 // exposes the saved-bookmark corpus to MCP clients (Claude Code, Claude
 // Desktop, …) over stdio, talking to the curio daemon via its local HTTP
 // API. The daemon is auto-started if it isn't already running, and started
-// again if it stops during the session.
+// again if it stops during the session; a tool call that finds it still
+// starting waits for it.
 //
 // stdout is reserved for the MCP (JSON-RPC) channel; all diagnostics go to
 // stderr.
@@ -15,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -26,7 +28,12 @@ import (
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	d, err := setup(context.Background())
+	env, err := daemonctl.Discover("", "")
+	if err != nil {
+		log.Error("curio-mcp startup failed", "err", err)
+		os.Exit(1)
+	}
+	d, err := setup(context.Background(), env, log)
 	if err != nil {
 		log.Error("curio-mcp startup failed", "err", err)
 		os.Exit(1)
@@ -48,38 +55,58 @@ func main() {
 // to start the daemon when a call finds it gone.
 type daemon struct {
 	client *client.Client
-	// ensure returns once the daemon is running, starting it if need be
+	// ensure returns once the daemon is ready, starting it if need be
 	// (daemonctl.Controller.EnsureRunning).
 	ensure func(context.Context) error
 }
 
-// setup finds the daemon for $CURIO_HOME the way the CLI does and ensures
-// it is running. Starting it here rather than at the first tool call makes
+// mcpReadyWait bounds how long a tool call waits for a starting daemon to
+// become ready. MCP clients cancel a stdio tool call after about 60s (the
+// Claude desktop app does, whatever MCP_TOOL_TIMEOUT says), so this leaves
+// room for the retried request itself; a call that runs out says the
+// daemon is still starting.
+const mcpReadyWait = 30 * time.Second
+
+// setup ensures the daemon env finds is started, and returns the handle
+// the tools use. Starting it here rather than at the first tool call makes
 // a daemon that can't start, or a port served for another home, fail the
-// sidecar at startup, where the MCP client shows it.
-func setup(ctx context.Context) (daemon, error) {
-	env, err := daemonctl.Discover("", "")
+// sidecar at startup, where the MCP client shows it. It doesn't wait for a
+// starting daemon to be ready: a migration can outlast the time an MCP
+// client gives a server to connect (30s by default in Claude Code), and
+// tool calls wait for it instead.
+func setup(ctx context.Context, env daemonctl.Env, log *slog.Logger) (daemon, error) {
+	ctl := env.Controller
+	ctl.ReadyTimeout = mcpReadyWait
+	ctl.OnMigrating = func(s client.Startup) {
+		log.Info("curio-daemon is migrating its database", "pid", s.PID, "progress", s.Progress())
+	}
+	starting, err := ctl.EnsureStarted(ctx)
 	if err != nil {
-		return daemon{}, err
+		return daemon{}, fmt.Errorf("ensure daemon started: %w", err)
 	}
-	if err := env.Controller.EnsureRunning(ctx); err != nil {
-		return daemon{}, fmt.Errorf("ensure daemon running: %w", err)
+	if starting != nil {
+		log.Info("curio-daemon is still starting; tool calls will wait for it",
+			"pid", starting.PID, "progress", starting.Progress())
 	}
-	return daemon{client: env.Client, ensure: env.Controller.EnsureRunning}, nil
+	return daemon{client: env.Client, ensure: ctl.EnsureRunning}, nil
 }
 
 // call runs fn, one request to the daemon. The sidecar lives for a whole
-// client session, and the daemon may stop underneath it: `curio daemon
-// stop` after a config change, an upgrade, a crash. So when fn finds the
-// daemon unreachable, call starts it and runs fn once more, which is safe
-// for any request because unreachable means no daemon received it. Other
-// errors are returned as they are; there is no second restart.
+// client session, and the daemon may stop underneath it (`curio daemon
+// stop` after a config change, an upgrade, a crash) or still be starting.
+// So when fn finds the daemon unreachable or starting, call ensures it is
+// running and runs fn once more, which is safe for any request: an
+// unreachable daemon received nothing, and a starting one ran nothing.
+// Other errors are returned as they are; there is no second attempt.
 func call[T any](ctx context.Context, d daemon, fn func(context.Context) (T, error)) (T, error) {
 	v, err := fn(ctx)
-	if !errors.Is(err, client.ErrDaemonUnreachable) {
+	if !errors.Is(err, client.ErrDaemonUnreachable) && !errors.Is(err, client.ErrStarting) {
 		return v, err
 	}
 	if startErr := d.ensure(ctx); startErr != nil {
+		if errors.Is(startErr, daemonctl.ErrStillStarting) {
+			return v, fmt.Errorf("%w; try again in a minute", startErr)
+		}
 		return v, fmt.Errorf("%w; restarting the daemon failed: %w", err, startErr)
 	}
 	return fn(ctx)

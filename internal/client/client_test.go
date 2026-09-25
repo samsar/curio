@@ -3,6 +3,7 @@ package client_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -39,6 +40,105 @@ func TestHealthz(t *testing.T) {
 	assert.Equal(t, s.Home.Path, h.Home)
 	assert.Equal(t, store.EmbeddingDim, h.EmbeddingDim)
 	assert.Positive(t, h.SchemaVersion)
+}
+
+// TestHealthz_Starting: a starting daemon's healthz answer is an error
+// matching ErrStarting that says which daemon answered and how far along it
+// is. Any other route's starting answer matches ErrStarting too, without
+// naming the daemon.
+func TestHealthz_Starting(t *testing.T) {
+	s := apitest.StartNotReady(t)
+	c := client.New(s.URL)
+	ctx := context.Background()
+
+	h, err := c.Healthz(ctx)
+	assert.Nil(t, h)
+	require.ErrorIs(t, err, client.ErrStarting)
+	requireStatus(t, err, http.StatusServiceUnavailable)
+	st := client.StartupOf(err)
+	require.NotNil(t, st)
+	assert.Equal(t, os.Getpid(), st.PID)
+	assert.Equal(t, s.Home.Path, st.Home)
+	assert.NotEmpty(t, st.Version)
+	assert.Equal(t, client.PhaseInitializing, st.Phase)
+	assert.Nil(t, st.Migrations)
+	assert.Equal(t, "initializing", st.Progress())
+	assert.Equal(t, "curio-daemon is starting: initializing", err.Error(),
+		"a starting daemon isn't a server error to look up in the log")
+
+	s.Startup.SetMigrating(6)
+	s.Startup.MigrationApplied()
+	_, err = c.Healthz(ctx)
+	st = client.StartupOf(err)
+	require.NotNil(t, st)
+	assert.Equal(t, client.PhaseMigrating, st.Phase)
+	assert.Equal(t, &client.MigrationProgress{Applied: 1, Total: 6}, st.Migrations)
+	assert.Equal(t, "migrating the database, 1 of 6 migrations applied", st.Progress())
+
+	_, err = c.Stats(ctx)
+	require.ErrorIs(t, err, client.ErrStarting)
+	assert.Nil(t, client.StartupOf(err), "only healthz names the daemon")
+
+	require.NoError(t, s.Ready())
+	h, err = c.Healthz(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", h.Status)
+}
+
+// TestErrStarting_OnlyTheStartingProblem: a 503 is a starting daemon only
+// when it carries the starting problem type; the phase it reports needn't
+// be one this client knows.
+func TestErrStarting_OnlyTheStartingProblem(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		starting    bool
+	}{
+		{"text/plain 503", http.StatusServiceUnavailable, "text/plain", "starting", false},
+		{"another problem", http.StatusServiceUnavailable, "application/problem+json",
+			`{"type":"about:blank","title":"unavailable","status":503}`, false},
+		{"starting type on another status", http.StatusInternalServerError, "application/problem+json",
+			`{"type":"urn:curio:problem:daemon-starting","title":"daemon starting","status":500}`, false},
+		{"an unknown phase", http.StatusServiceUnavailable, "application/problem+json",
+			`{"type":"urn:curio:problem:daemon-starting","title":"daemon starting","status":503,` +
+				`"pid":42,"home":"/h","version":"v9","phase":"compacting"}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			})
+			_, err := c.Healthz(context.Background())
+			require.Error(t, err)
+			assert.Equal(t, tc.starting, errors.Is(err, client.ErrStarting))
+			if tc.starting {
+				st := client.StartupOf(err)
+				require.NotNil(t, st)
+				assert.Equal(t, 42, st.PID)
+				assert.Equal(t, "compacting", st.Progress())
+			} else {
+				assert.Nil(t, client.StartupOf(err))
+			}
+		})
+	}
+}
+
+// TestHealthz_LegacyDaemon: a daemon from before healthz named the daemon
+// still decodes, with no identity.
+func TestHealthz_LegacyDaemon(t *testing.T) {
+	c := fakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok","version":"v0.2.0"}`)
+	})
+	h, err := c.Healthz(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "v0.2.0", h.Version)
+	assert.Zero(t, h.PID)
+	assert.Empty(t, h.Home)
 }
 
 // requireStatus asserts that err is the daemon answering status, and
@@ -125,6 +225,19 @@ func TestAPIError_ServerErrors(t *testing.T) {
 		p := requireStatus(t, err, http.StatusInternalServerError)
 		assert.Equal(t, "disk full", p.Detail)
 		assert.Equal(t, "disk full (request req-7; see `curio daemon logs`)", err.Error())
+	})
+
+	t.Run("a problem's extension members are its own", func(t *testing.T) {
+		c := fakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusInternalServerError)
+			// Named like a starting daemon's members, typed otherwise.
+			fmt.Fprint(w, `{"title":"internal error","status":500,"detail":"disk full","pid":"n/a","home":7}`)
+		})
+		_, err := c.Stats(context.Background())
+		p := requireStatus(t, err, http.StatusInternalServerError)
+		assert.Equal(t, "disk full", p.Detail)
+		assert.Nil(t, client.StartupOf(err))
 	})
 
 	t.Run("a body that isn't a problem is the detail", func(t *testing.T) {

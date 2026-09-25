@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -34,12 +35,18 @@ func runCLI(t *testing.T, srv *apitest.Server, args ...string) (string, error) {
 func runCLIAt(t *testing.T, home, daemonURL string, args ...string) (string, error) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	root := newRootCmd() // flags bind to closures made per construction
-	root.SetOut(&stdout)
-	root.SetErr(&stderr)
-	root.SetArgs(append([]string{"--curio-home", home, "--daemon-url", daemonURL}, args...))
-	err := root.Execute()
+	err := runCLIStreams(home, daemonURL, &stdout, &stderr, args...)
 	return stdout.String(), err
+}
+
+// runCLIStreams runs curio with args for home and daemonURL, writing to
+// stdout and stderr.
+func runCLIStreams(home, daemonURL string, stdout, stderr io.Writer, args ...string) error {
+	root := newRootCmd() // flags bind to closures made per construction
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs(append([]string{"--curio-home", home, "--daemon-url", daemonURL}, args...))
+	return root.Execute()
 }
 
 // nextPage returns the arguments of the "next page:" line out ends with,
@@ -447,6 +454,40 @@ func TestStatus_DaemonErrors(t *testing.T) {
 	out, err = runCLIAt(t, srv.Home.Path, broken.URL, "doctor")
 	require.Error(t, err)
 	assert.Contains(t, out, "healthz failed: read marker: permission denied")
+}
+
+// TestStatus_DaemonStarting: a daemon that is still starting is reported
+// as such, with what it is doing, and status still shows what it can
+// without the full API.
+func TestStatus_DaemonStarting(t *testing.T) {
+	srv := apitest.StartNotReady(t)
+	srv.Startup.SetMigrating(6)
+	srv.Startup.MigrationApplied()
+
+	out, err := runCLI(t, srv, "status")
+	require.NoError(t, err)
+	assert.Contains(t, out, fmt.Sprintf("daemon:  starting  (pid %d, version ", os.Getpid()))
+	assert.Contains(t, out, "): migrating the database, 1 of 6 migrations applied\n")
+	assert.Contains(t, out, "home:    "+srv.Home.Path)
+	assert.Contains(t, out, "disk:")
+	assert.NotContains(t, out, "not answering healthz")
+	assert.NotContains(t, out, "not running")
+	assert.NotContains(t, out, "bookmarks:")
+}
+
+// TestDoctor_DaemonStarting: a daemon that is starting is a warning, not a
+// failed check, and Ollama, which the daemon checks, is left for later.
+func TestDoctor_DaemonStarting(t *testing.T) {
+	srv := apitest.StartNotReady(t)
+	srv.Startup.SetMigrating(6)
+
+	out, err := runCLI(t, srv, "doctor")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, fmt.Sprintf("! daemon                 starting (pid %d): migrating the database, 0 of 6 migrations applied",
+		os.Getpid()))
+	assert.Contains(t, out, "`curio daemon logs -f`")
+	assert.Contains(t, out, "! ollama                 not checked while the daemon starts")
+	assert.Contains(t, out, "0 failure(s), 2 warning(s)")
 }
 
 func TestDoctor(t *testing.T) {

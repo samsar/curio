@@ -55,8 +55,12 @@ func main() {
 // startup or serving fails. The order matters. Nothing touches the database
 // until this process holds the home's single-instance lock and has bound the
 // API port, so a second daemon, or one that can't serve, exits without
-// disturbing the jobs of the one already running.
+// disturbing the jobs of the one already running. From the bind on, the API
+// answers: as a starting daemon, reporting its progress, until everything
+// the full API needs is ready. A migration can take minutes on a large
+// library, and clients wait on those answers rather than on a silent port.
 func run(ctx context.Context, logLevel *slog.LevelVar) error {
+	began := time.Now()
 	home, err := openHome()
 	if err != nil {
 		return err
@@ -88,47 +92,118 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 			"check `curio daemon status`, or set a different daemon.listen in %s)",
 			cfg.Daemon.Listen, err, home.ConfigPath())
 	}
-	// Once serving starts, Shutdown closes the listener and this second Close
-	// only reports that; it matters when startup fails before then.
+	// Serve closes the listener when it returns; this matters only when
+	// NewServer fails, and otherwise just reports it closed already.
 	defer func() { _ = ln.Close() }()
-
-	db, err := sqlitestore.Open(ctx, home.DBPath())
+	startup := api.NewStartup()
+	srv, err := api.NewServer(ln, home.Path, startup, slog.Default())
 	if err != nil {
 		return err
 	}
+	slog.Info("curio-daemon starting", "version", version.String(), "home", home.Path, "pid", os.Getpid())
+	serving := serveAPI(ctx, srv)
+
+	db, err := sqlitestore.Open(ctx, home.DBPath())
+	if err != nil {
+		return errors.Join(err, serving.stop())
+	}
+	// Every return from here on has stopped serving first, so no handler is
+	// using the database when it closes.
 	defer func() {
 		if err := db.Close(); err != nil {
 			slog.Warn("close database", "path", home.DBPath(), "err", err)
 		}
 	}()
-	// Logged first because a migration that rewrites a large table can
-	// outlast the CLI's auto-start wait, and the log tail should say why.
-	slog.Info("migrating database", "path", home.DBPath())
-	schemaVersion, err := sqlitestore.Migrate(ctx, db)
+	d, err := start(ctx, cfg, home, meta, db, startup)
 	if err != nil {
-		return err
+		return errors.Join(err, serving.stop())
+	}
+	if err := srv.Ready(d.apiDeps); err != nil {
+		return errors.Join(err, serving.stop())
+	}
+	slog.Info("curio-daemon ready", "startup_ms", time.Since(began).Milliseconds())
+	return d.serve(ctx, serving)
+}
+
+// start brings the database up to date and builds everything the full API
+// and the workers need, reporting its progress through startup.
+func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta curiohome.Meta,
+	db *sqlitestore.DB, startup *api.Startup) (*daemon, error) {
+	schemaVersion, err := sqlitestore.MigrateWithHooks(ctx, db, migrationHooks(home, startup))
+	if err != nil {
+		return nil, err
 	}
 	slog.Info("database ready", "path", home.DBPath(), "schema_version", schemaVersion)
+	// Before the full API is up, so its first healthz reports the new
+	// version.
 	syncMarkerSchemaVersion(home, meta, int(schemaVersion))
+	startup.SetInitializing()
 
 	d, err := newDaemon(ctx, cfg, home, db)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Settle the previous daemon's unfinished jobs before any worker can
 	// claim them.
 	for _, p := range d.pools {
 		if err := p.Worker.RecoverOrphans(ctx); err != nil {
-			return err
+			return nil, err
 		}
 	}
+	return d, nil
+}
 
-	srv, err := api.NewServer(ln, d.apiDeps)
-	if err != nil {
-		return err
+// migrationHooks log each migration and report it through startup, which
+// the starting daemon's healthz answer shows. Only a database that already
+// had a schema counts as migrating: creating a new one takes milliseconds,
+// and clients would tell the user to wait for nothing.
+func migrationHooks(home *curiohome.Home, startup *api.Startup) sqlitestore.MigrationHooks {
+	return sqlitestore.MigrationHooks{
+		Pending: func(current int64, pending []sqlitestore.Migration) {
+			slog.Info("migrating database", "path", home.DBPath(), "pending", len(pending),
+				"from_version", current, "to_version", pending[len(pending)-1].Version)
+			if current > 0 {
+				startup.SetMigrating(len(pending))
+			}
+		},
+		Applying: func(m sqlitestore.Migration) {
+			slog.Info("applying migration", "version", m.Version, "source", m.Source)
+		},
+		Applied: func(m sqlitestore.Migration, took time.Duration) {
+			slog.Info("migration applied", "version", m.Version, "source", m.Source,
+				"duration_ms", took.Milliseconds())
+			startup.MigrationApplied()
+		},
 	}
-	slog.Info("curio-daemon starting", "version", version.String(), "home", home.Path, "pid", os.Getpid())
-	return d.serve(ctx, srv)
+}
+
+// servingAPI is the API serving in the background, from the bind until run
+// returns.
+type servingAPI struct {
+	cancel context.CancelFunc
+	done   <-chan error // Serve's result; received exactly once, by wait
+}
+
+// serveAPI runs srv.Serve until ctx is cancelled or stop is called.
+func serveAPI(ctx context.Context, srv *api.Server) *servingAPI {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+	return &servingAPI{cancel: cancel, done: done}
+}
+
+// wait returns once Serve has: on its own, when the listener fails, or
+// after a shutdown.
+func (s *servingAPI) wait() error {
+	defer s.cancel()
+	return <-s.done
+}
+
+// stop shuts the API down and waits for Serve to return, the listener
+// closed.
+func (s *servingAPI) stop() error {
+	s.cancel()
+	return s.wait()
 }
 
 // openHome resolves $CURIO_HOME, initializing it on first run.
@@ -386,9 +461,9 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 	}, slog.Default()), nil
 }
 
-// serve runs the worker pools and the API until ctx is cancelled or the API
-// fails, then shuts both down within the documented budget.
-func (d *daemon) serve(ctx context.Context, srv *api.Server) error {
+// serve runs the worker pools alongside the API until ctx is cancelled or
+// the API fails, then shuts both down within the documented budget.
+func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -403,7 +478,7 @@ func (d *daemon) serve(ctx context.Context, srv *api.Server) error {
 		slog.Info("worker pool started", "pool", p.Name, "workers", p.Size)
 	}
 
-	err := srv.Serve(ctx)
+	err := served.wait()
 	cancel()
 	if stuck, drained := d.drain(&workers, workerDrainTimeout); !drained {
 		slog.Warn("jobs still running after the shutdown grace period; exiting anyway "+

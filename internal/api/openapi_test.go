@@ -263,9 +263,10 @@ type exchange struct {
 }
 
 // TestOpenAPI_ResponsesMatchSchemas drives every documented operation over
-// seeded fixtures and validates each real response against the spec.
+// seeded fixtures and validates each real response against the spec: first
+// a few while the daemon is starting, then all of them once it is ready.
 func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
-	s := newTestServer(t, func(d *Deps) {
+	s := newStartingTestServer(t, func(d *Deps) {
 		// A query mentioning "offline" can't be embedded, so its search
 		// degrades to keyword results with a warning.
 		emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
@@ -287,9 +288,34 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 	get := func(path string) request { return request{method: http.MethodGet, path: path} }
 	post := func(path string) request { return request{method: http.MethodPost, path: path} }
 	unknown := uuid.NewString()
+	exercised := map[string]bool{}
+	seen := propertiesSeen{}
+	run := func(exchanges []exchange) {
+		t.Helper()
+		for _, ex := range exchanges {
+			what := ex.req.method + " " + ex.req.path
+			resp := s.do(t, ex.req)
+			require.Equal(t, ex.status, resp.status, "%s: %s", what, resp.body)
+			op := ops[ex.op]
+			require.NotNil(t, op, "%s is not in the spec", ex.op)
+			exercised[ex.op] = true
+			checkResponse(t, op, resp, what, seen)
+		}
+	}
+
+	// Starting, part way through its migrations: healthz answers with the
+	// Starting schema, and every other operation with its default problem.
+	s.startup.SetMigrating(6)
+	s.startup.MigrationApplied()
+	run([]exchange{
+		{"GET /v1/healthz", get("/v1/healthz"), http.StatusServiceUnavailable},
+		{"GET /v1/stats", get("/v1/stats"), http.StatusServiceUnavailable},
+		{"POST /v1/documents/refetch-all", post("/v1/documents/refetch-all"), http.StatusServiceUnavailable},
+	})
+	s.ready(t)
 
 	// In order: the writes come after the reads of what they change.
-	exchanges := []exchange{
+	run([]exchange{
 		{"GET /v1/healthz", get("/v1/healthz"), http.StatusOK},
 		{"GET /v1/stats", get("/v1/stats"), http.StatusOK},
 		{"GET /v1/metrics", get("/v1/metrics"), http.StatusOK},
@@ -335,19 +361,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"POST /v1/documents/{id}/reindex", post("/v1/documents/" + f.fetched + "/reindex"), http.StatusAccepted},
 		{"POST /v1/documents/reindex-all", post("/v1/documents/reindex-all"), http.StatusAccepted},
 		{"DELETE /v1/jobs", request{method: http.MethodDelete, path: "/v1/jobs?status=failed"}, http.StatusOK},
-	}
-
-	exercised := map[string]bool{}
-	seen := propertiesSeen{}
-	for _, ex := range exchanges {
-		what := ex.req.method + " " + ex.req.path
-		resp := s.do(t, ex.req)
-		require.Equal(t, ex.status, resp.status, "%s: %s", what, resp.body)
-		op := ops[ex.op]
-		require.NotNil(t, op, "%s is not in the spec", ex.op)
-		exercised[ex.op] = true
-		checkResponse(t, op, resp, what, seen)
-	}
+	})
 	assert.Equal(t, slices.Sorted(maps.Keys(ops)), slices.Sorted(maps.Keys(exercised)),
 		"every documented operation is exercised")
 	assert.Empty(t, seen.missing(doc, slices.Collect(maps.Values(ops))),
