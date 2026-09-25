@@ -23,9 +23,9 @@ import (
 	"github.com/samsar/curio/migrations"
 )
 
-// vecOnce makes sure sqlite_vec.Auto() runs exactly once per process.
-// Calling it multiple times is harmless but the bindings panic if the
-// extension's already registered.
+// vecOnce runs sqlite_vec.Auto() once per process. Running it again would be
+// harmless, since sqlite3_auto_extension ignores an entry point it already
+// has; the Once only saves the repeated cgo call on every Open.
 var vecOnce sync.Once
 
 // Pool policy. A connection is held by every transaction and by every write

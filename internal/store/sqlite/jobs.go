@@ -14,11 +14,11 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// Jobs implements store.JobStore. Single-table queue backed by SQLite.
+// Jobs implements store.JobStore: a single-table queue in SQLite.
 //
-// Claim semantics: an atomic UPDATE ... WHERE status='pending' AND id=(...)
-// inside a transaction ensures one job is claimed by exactly one worker even
-// under concurrency. Multi-worker is tested even though M0 runs only one.
+// Claim semantics: ClaimNext is one autocommit UPDATE ... WHERE id = (SELECT
+// ... LIMIT 1) RETURNING. SQLite runs it under its write lock, so each job
+// goes to exactly one of the daemon's many worker goroutines; see ClaimNext.
 type Jobs struct {
 	db *DB
 

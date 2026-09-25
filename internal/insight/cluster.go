@@ -1,5 +1,5 @@
-// Package insight implements curio's M4 insight layer: it clusters documents
-// by embedding similarity into labeled topic "interests".
+// Package insight implements curio's insight layer: it clusters documents by
+// embedding similarity into labeled topic "interests".
 //
 // The design keeps the algorithm swappable. A Clusterer takes points (a doc ID
 // + its vector) and returns a per-point label array (like scikit-learn's

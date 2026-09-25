@@ -1,15 +1,16 @@
 -- +goose Up
 -- +goose StatementBegin
 
--- jobs.started_at captures when ClaimNext first transitioned a job to
--- 'running'. Without this, the only way to compute execution time is
--- updated_at - created_at, which conflates queue wait time with actual
--- work time and produces nonsense when many jobs are enqueued at once.
+-- jobs.started_at records when ClaimNext moved a job to 'running'. Without
+-- it, the only way to compute execution time is updated_at - created_at,
+-- which conflates queue wait time with actual work time and produces
+-- nonsense when many jobs are enqueued at once.
 --
--- Nullable: old jobs from before the migration won't have it, and the
--- metrics query COALESCEs them out. ClaimNext is the only writer.
--- The trg_jobs_updated_at trigger doesn't touch this column, so it
--- stays put across subsequent UPDATEs (MarkDone, MarkFailed, etc.).
+-- Nullable: jobs from before this migration don't have it, and a job sent
+-- back to pending (Requeue, orphan recovery) has it cleared until its next
+-- claim. The durations metric skips rows without it (started_at IS NOT
+-- NULL); only the oldest-running metric falls back to updated_at. MarkDone
+-- and MarkFailed leave it as ClaimNext set it.
 
 ALTER TABLE jobs ADD COLUMN started_at TEXT;
 

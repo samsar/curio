@@ -509,9 +509,9 @@ func TestRetryBackoff(t *testing.T) {
 	}
 }
 
-// TestJobs_ClaimNext_ConcurrentClaimOnce verifies the bug we'd otherwise
-// only discover in M1 when the worker pool expands. Each pending job must
-// be claimed by exactly one worker.
+// TestJobs_ClaimNext_ConcurrentClaimOnce: with many workers claiming at
+// once, as the daemon's pools do, each pending job is claimed by exactly one
+// worker.
 func TestJobs_ClaimNext_ConcurrentClaimOnce(t *testing.T) {
 	ctx := context.Background()
 	q := NewJobs(newTestDB(t))

@@ -266,9 +266,8 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 	if err := e.insights.FinishRun(ctx, runID, res); err != nil {
 		return fmt.Errorf("finish run: %w", err)
 	}
-	// Keep only the just-completed run; older runs (and their clusters) are
-	// dropped to bound storage. Keeping history for trajectory analysis is a
-	// later milestone.
+	// Keep only the just-completed run: older runs and their clusters are
+	// dropped to bound storage, since nothing reads them.
 	if err := e.insights.PruneRunsExcept(ctx, tenantID, runID); err != nil {
 		e.log.Warn("prune old cluster runs failed", "err", err)
 	}

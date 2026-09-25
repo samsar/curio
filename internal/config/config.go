@@ -144,7 +144,7 @@ type Chunking struct {
 	OverlapTokens int `yaml:"overlap_tokens"`
 }
 
-// Insight configures the M4 insight layer (document clustering → interests).
+// Insight configures the insight layer (document clustering → interests).
 type Insight struct {
 	// Enabled gates clustering. When false, POST /v1/interests/rebuild is
 	// refused; reading existing interests still works.
@@ -173,10 +173,9 @@ type Insight struct {
 	LabelingTimeoutSeconds int `yaml:"labeling_timeout_seconds"`
 }
 
-// Generation configures the LLM text-generation client used to label clusters
-// (M4) and, later, synthesize RAG answers (M6). Separate from Embedding: a
-// different model and endpoint. Only used when a feature asks for it (e.g.
-// insight.labeling = "llm").
+// Generation configures the LLM text-generation client, which labels
+// clusters. Separate from Embedding: a different model and endpoint. Only
+// used when a feature asks for it (insight.labeling = "llm").
 type Generation struct {
 	Provider       string `yaml:"provider"`        // "ollama" (only provider in v1)
 	Model          string `yaml:"model"`           // a chat/instruct model, e.g. "llama3.2"

@@ -628,7 +628,7 @@ type ClusterWithMembers struct {
 	Members []ClusterMember
 }
 
-// InsightStore persists clustering results (the M4 insight layer). Clusters
+// InsightStore persists clustering results (the insight layer). Clusters
 // and runs carry tenant_id; cluster_documents inherits tenant scope through
 // its parent cluster.
 type InsightStore interface {

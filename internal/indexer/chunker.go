@@ -17,7 +17,7 @@ import (
 // store.ChunkInput by attaching embeddings.
 type Chunk struct {
 	Text       string
-	TokenCount int // approximate; word-count for M0
+	TokenCount int // whitespace-separated words, an approximation of model tokens
 }
 
 // ChunkOptions controls splitting behavior.
@@ -42,9 +42,9 @@ type ChunkOptions struct {
 // paragraph stays whole when possible, only falling back to word-level
 // splitting when one paragraph exceeds SizeTokens.
 //
-// Token counting is approximate (whitespace-separated words). This is close
-// enough for embedder budget planning at M0; we can swap in a real
-// tokenizer later without changing the interface.
+// Token counting is approximate: whitespace-separated words. That is close
+// enough to size chunks, because the byte cap (SizeChars), not the word
+// count, is what keeps a chunk inside the embedder's context window.
 func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	if strings.TrimSpace(markdown) == "" {
 		return nil
