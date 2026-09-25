@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,53 +27,54 @@ func newStatusCmd() *cobra.Command {
 				return errors.New("no context")
 			}
 
-			fmt.Printf("cli:     %s\n", version.String())
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "cli:     %s\n", version.String())
 
 			health, err := ctx.Client.Healthz(cmd.Context())
 			if err != nil {
-				fmt.Println("daemon:  not running")
+				fmt.Fprintln(w, "daemon:  not running")
 				if ctx.Home != nil {
-					fmt.Printf("home:    %s\n", ctx.Home.Path)
-					printDiskUsage(ctx.Home.Path)
+					fmt.Fprintf(w, "home:    %s\n", ctx.Home.Path)
+					printDiskUsage(w, ctx.Home.Path)
 				}
 				return nil
 			}
 
-			fmt.Printf("daemon:  running  (version %s)\n", health.Version)
-			fmt.Printf("home:    %s\n", ctx.Home.Path)
-			if w := homeMismatchWarning(health.Home, ctx.Home.Path); w != "" {
-				fmt.Print(w)
+			fmt.Fprintf(w, "daemon:  running  (version %s)\n", health.Version)
+			fmt.Fprintf(w, "home:    %s\n", ctx.Home.Path)
+			if warning := homeMismatchWarning(health.Home, ctx.Home.Path); warning != "" {
+				fmt.Fprint(w, warning)
 			}
-			fmt.Printf("schema:  v%d\n", health.SchemaVersion)
-			fmt.Printf("embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
+			fmt.Fprintf(w, "schema:  v%d\n", health.SchemaVersion)
+			fmt.Fprintf(w, "embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
 
 			sctx, scancel := context.WithTimeout(cmd.Context(), 1*time.Second)
 			defer scancel()
 			stats, err := ctx.Client.Stats(sctx)
 			if err == nil && stats != nil {
-				fmt.Printf("\nbookmarks: %d\n", stats.BookmarksTotal)
-				fmt.Printf("documents: %d\n", stats.DocumentsTotal)
+				fmt.Fprintf(w, "\nbookmarks: %d\n", stats.BookmarksTotal)
+				fmt.Fprintf(w, "documents: %d\n", stats.DocumentsTotal)
 				if len(stats.DocumentsByState) > 0 {
-					fmt.Printf("           %s\n", formatMap(stats.DocumentsByState))
+					fmt.Fprintf(w, "           %s\n", formatMap(stats.DocumentsByState))
 				}
 				if len(stats.JobsByStatus) > 0 {
-					fmt.Printf("jobs:      %s\n", formatMap(stats.JobsByStatus))
+					fmt.Fprintf(w, "jobs:      %s\n", formatMap(stats.JobsByStatus))
 				}
 			}
 
-			printDiskUsage(ctx.Home.Path)
+			printDiskUsage(w, ctx.Home.Path)
 
 			mctx, mcancel := context.WithTimeout(cmd.Context(), 2*time.Second)
 			defer mcancel()
 			if m, err := ctx.Client.Metrics(mctx, 0); err == nil && m != nil && len(m.ByKind) > 0 {
-				fmt.Printf("\nperformance (last %ds):\n", m.WindowSeconds)
+				fmt.Fprintf(w, "\nperformance (last %ds):\n", m.WindowSeconds)
 				for _, k := range m.ByKind {
-					fmt.Printf("  %-9s  done=%-5d  fail=%-4d  mean=%5.0fms  p50=%5.0fms  p95=%5.0fms  p99=%5.0fms",
+					fmt.Fprintf(w, "  %-9s  done=%-5d  fail=%-4d  mean=%5.0fms  p50=%5.0fms  p95=%5.0fms  p99=%5.0fms",
 						k.Kind, k.Count, k.Failed, k.MeanMS, k.P50MS, k.P95MS, k.P99MS)
 					if k.Running > 0 {
-						fmt.Printf("  running=%d (oldest %ds)", k.Running, k.OldestRunningSeconds)
+						fmt.Fprintf(w, "  running=%d (oldest %ds)", k.Running, k.OldestRunningSeconds)
 					}
-					fmt.Println()
+					fmt.Fprintln(w)
 				}
 			}
 			return nil
@@ -109,9 +111,9 @@ func homeMismatchWarning(daemonHome, localHome string) string {
 // printDiskUsage shows the size of the database, content dir, and logs dir.
 // Labels are left-aligned to a common width and sizes are right-aligned so
 // the numbers line up in a column regardless of unit (GB/MB/KB).
-func printDiskUsage(homePath string) {
-	fmt.Println()
-	fmt.Println("disk:")
+func printDiskUsage(w io.Writer, homePath string) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "disk:")
 
 	type diskRow struct{ label, size, suffix string }
 	var rows []diskRow
@@ -140,7 +142,7 @@ func printDiskUsage(homePath string) {
 		}
 	}
 	for _, r := range rows {
-		fmt.Printf("  %-9s%*s%s\n", r.label+":", sizeW, r.size, r.suffix)
+		fmt.Fprintf(w, "  %-9s%*s%s\n", r.label+":", sizeW, r.size, r.suffix)
 	}
 }
 

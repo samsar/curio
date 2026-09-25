@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "roots": {
+    "bookmark_bar": {
+      "type": "folder",
+      "name": "Bookmarks bar",
+      "children": [
+        {"type": "url", "name": "Chrome one", "url": "https://example.com/chrome/one", "date_added": "13371638400000000"},
+        {"type": "folder", "name": "Tech", "children": [
+          {"type": "url", "name": "Chrome two", "url": "https://example.com/chrome/two", "date_added": "13371638400000000"}
+        ]}
+      ]
+    },
+    "other": {"type": "folder", "name": "Other bookmarks", "children": []},
+    "synced": {"type": "folder", "name": "Mobile bookmarks", "children": []}
+  }
+}

@@ -29,8 +29,44 @@ linters:
     - errorlint
     - nilerr
     - copyloopvar
+    - depguard
 
   settings:
+    depguard:
+      rules:
+        # Consumers depend on the internal/store interfaces. Only the daemon's
+        # main wires the SQLite implementation (plus tests and the
+        # test-support packages that build real stores).
+        store-boundary:
+          list-mode: lax
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/cmd/curio-daemon/**"
+            - "!**/internal/store/sqlite/**"
+            - "!**/internal/api/apitest/**"
+          deny:
+            - pkg: github.com/samsar/curio/internal/store/sqlite
+              desc: depend on the internal/store interfaces; only cmd/curio-daemon wires the SQLite implementation
+        # Test-support packages import testing by design, so they are the
+        # only non-test files allowed to. Deny matches by import-path
+        # prefix, which also covers testing/fstest and friends.
+        no-test-deps-in-prod:
+          list-mode: lax
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/store/sqlite/sqlitetest/**"
+            - "!**/internal/api/apitest/**"
+          deny:
+            - pkg: testing
+              desc: production code must not link the testing package
+            - pkg: github.com/stretchr/testify
+              desc: testify is for _test.go files only
+            - pkg: github.com/samsar/curio/internal/store/sqlite/sqlitetest
+              desc: sqlitetest is test support; production code opens databases through internal/store/sqlite
+            - pkg: github.com/samsar/curio/internal/api/apitest
+              desc: apitest is test support; production code serves the API through internal/api
     errcheck:
       # Don't flag the idiomatic patterns where the error is genuinely
       # uninteresting: deferred Close on rows / bodies / files, and explicit

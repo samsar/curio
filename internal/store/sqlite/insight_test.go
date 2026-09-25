@@ -12,7 +12,7 @@ import (
 
 func TestInsights_RoundTrip(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	ins := NewInsights(db)
 
@@ -38,7 +38,7 @@ func TestInsights_RoundTrip(t *testing.T) {
 		},
 	}
 	require.NoError(t, ins.ReplaceClusters(ctx, run.ID, []store.ClusterWithMembers{cw}))
-	require.NoError(t, ins.FinishRun(ctx, run.ID, store.ClusterRunDone, 3, 1, 0, nil))
+	require.NoError(t, ins.FinishRun(ctx, run.ID, store.RunResult{Status: store.ClusterRunDone, NumDocuments: 3, NumClusters: 1}))
 
 	got, err := ins.LatestRun(ctx, "local", store.ClusterRunDone)
 	require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestInsights_RoundTrip(t *testing.T) {
 
 func TestChunks_DocumentVectors(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	ch := NewChunks(db, vecDim)
 
@@ -132,4 +132,21 @@ func TestChunks_DocumentVectors(t *testing.T) {
 	dvs2, err := ch.DocumentVectors(ctx, "local")
 	require.NoError(t, err)
 	assert.Len(t, dvs2, 2)
+}
+
+func TestInsights_FinishRun_RequiresTerminalStatus(t *testing.T) {
+	ctx := context.Background()
+	ins := NewInsights(newTestDB(t))
+	run := &store.ClusterRun{TenantID: "local", Algo: "knn-graph"}
+	require.NoError(t, ins.CreateRun(ctx, run))
+
+	for _, status := range []store.ClusterRunStatus{store.ClusterRunRunning, "", "bogus"} {
+		err := ins.FinishRun(ctx, run.ID, store.RunResult{Status: status, NumDocuments: 7})
+		require.Error(t, err, "status %q", status)
+	}
+	got, err := ins.GetRun(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ClusterRunRunning, got.Status, "a refused finish changes nothing")
+	assert.Zero(t, got.NumDocuments)
+	assert.Nil(t, got.FinishedAt)
 }

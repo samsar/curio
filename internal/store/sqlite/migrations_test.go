@@ -18,16 +18,15 @@ import (
 	"github.com/samsar/curio/migrations"
 )
 
-// These tests drive goose through its Provider API: it is instance-scoped
-// (no global SetBaseFS/SetDialect state shared with Migrate) and takes its
-// migrations from any fs.FS.
+// These tests drive goose's Provider directly, the way Migrate does, so they
+// can run migrations from any fs.FS and stop at a chosen version.
 
 func openUnmigrated(t *testing.T) (*DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "curio.db")
-	db, err := Open(path)
+	db, err := Open(context.Background(), path)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { assert.NoError(t, db.Close()) })
 	return db, path
 }
 
@@ -241,7 +240,7 @@ func TestRebuildRecipe_GuardAbortsBrokenRebuild(t *testing.T) {
 
 	// The failed rebuild leaves its connection mid-transaction with foreign
 	// keys off, so the handle is unusable: inspect through a fresh one.
-	fresh, err := Open(path)
+	fresh, err := Open(ctx, path)
 	require.NoError(t, err)
 	defer fresh.Close()
 
@@ -257,9 +256,8 @@ func TestRebuildRecipe_GuardAbortsBrokenRebuild(t *testing.T) {
 	require.NoError(t, poisoned.Close())
 }
 
-// TestMigration002_UpgradesLinkedBookmarks runs the real 002 through Migrate
-// (goose's global API, as the daemon does) on a v1 database whose bookmarks
-// reference documents.
+// TestMigration002_UpgradesLinkedBookmarks runs the real 002 through Migrate,
+// as the daemon does, on a v1 database whose bookmarks reference documents.
 func TestMigration002_UpgradesLinkedBookmarks(t *testing.T) {
 	ctx := context.Background()
 	db, _ := openUnmigrated(t)
@@ -276,7 +274,7 @@ func TestMigration002_UpgradesLinkedBookmarks(t *testing.T) {
 			('b3', 'local', NULL, 'https://example.com/3', '2024-01-01T00:00:00.000Z', 'manual');`)
 	require.NoError(t, err)
 
-	require.NoError(t, Migrate(db))
+	require.NoError(t, Migrate(ctx, db))
 
 	assertLinks := func(want map[string]sql.NullString) {
 		t.Helper()

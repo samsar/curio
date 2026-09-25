@@ -147,15 +147,16 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print version",
 		Run: func(cmd *cobra.Command, _ []string) {
+			w := cmd.OutOrStdout()
 			ctx, ok := getCtx(cmd.Context())
 			if ok && ctx.Home != nil {
 				if meta, err := ctx.Home.Meta(); err == nil {
-					fmt.Printf("curio %s\nschema: v%d  embedder: %s/%d\n",
+					fmt.Fprintf(w, "curio %s\nschema: v%d  embedder: %s/%d\n",
 						versionString(), meta.SchemaVersion, meta.EmbeddingModel, meta.EmbeddingDim)
 					return
 				}
 			}
-			fmt.Printf("curio %s\n", versionString())
+			fmt.Fprintf(w, "curio %s\n", versionString())
 		},
 	}
 }

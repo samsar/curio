@@ -171,7 +171,7 @@ When the embedding model changes, both virtual tables are rebuilt (see
 bookmarks
   id                UUID PK
   tenant_id         TEXT NOT NULL
-  document_id       UUID FK                    -- NULL until first successful fetch
+  document_id       UUID FK                    -- linked at ingest; NULL only if the document is deleted
   url               TEXT NOT NULL              -- denormalized for fast lookup
   title             TEXT                       -- title at save-time (from the browser)
   saved_at          TIMESTAMP NOT NULL
@@ -181,6 +181,12 @@ bookmarks
   created_at, updated_at
   UNIQUE (tenant_id, url, source)              -- one bookmark per (tenant, url, source)
 ```
+
+A bookmark is saved together with its document in one transaction
+(`BookmarkStore.Ingest`): the document is found by `(tenant_id, url)` or
+created `pending`, the bookmark is linked to it, and a fetch job is enqueued
+only when the document is new. The same URL bookmarked in several browsers
+is one document, fetched once.
 
 ### Future reference tables (not in v1)
 

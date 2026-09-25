@@ -19,59 +19,135 @@ import (
 
 // ---------- DocumentStore ----------
 
-func TestDocuments_UpsertAndGet(t *testing.T) {
+func TestDocuments_CreateAndGet(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 
-	d := &store.Document{
-		TenantID:    "local",
-		URL:         "https://example.com/x",
-		ContentType: store.ContentTypeArticle,
-		State:       store.DocStatePending,
-	}
-	require.NoError(t, docs.Upsert(ctx, d))
+	d := &store.Document{TenantID: "local", URL: "https://example.com/x"}
+	require.NoError(t, docs.Create(ctx, d))
 	assert.NotEmpty(t, d.ID)
 	assert.False(t, d.CreatedAt.IsZero())
+	assert.False(t, d.UpdatedAt.IsZero())
+	assert.Equal(t, store.DocStatePending, d.State, "defaulted on insert")
+	assert.Equal(t, store.ContentTypeUnknown, d.ContentType, "defaulted on insert")
 
 	got, err := docs.GetByID(ctx, d.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "https://example.com/x", got.URL)
 	assert.Equal(t, store.DocStatePending, got.State)
+	assert.Equal(t, store.ContentTypeUnknown, got.ContentType)
+	assert.Equal(t, d.CreatedAt, got.CreatedAt)
+
+	title := "Given"
+	explicit := &store.Document{ID: "doc-explicit", TenantID: "local", URL: "https://example.com/y",
+		State: store.DocStateDead, ContentType: store.ContentTypeRepo, Title: &title}
+	require.NoError(t, docs.Create(ctx, explicit))
+	got, err = docs.GetByID(ctx, "doc-explicit")
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateDead, got.State)
+	assert.Equal(t, store.ContentTypeRepo, got.ContentType)
+	require.NotNil(t, got.Title)
+	assert.Equal(t, "Given", *got.Title)
 }
 
-func TestDocuments_UpsertIsIdempotentOnURL(t *testing.T) {
+func TestDocuments_Create_Rejects(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
-	docs := NewDocuments(db)
+	docs := NewDocuments(newTestDB(t))
+	first := &store.Document{TenantID: "local", URL: "https://x.com/"}
+	require.NoError(t, docs.Create(ctx, first))
 
-	d1 := &store.Document{TenantID: "local", URL: "https://x.com/", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d1))
+	dup := &store.Document{TenantID: "local", URL: "https://x.com/"}
+	err := docs.Create(ctx, dup)
+	require.ErrorIs(t, err, store.ErrConflict)
+	assert.Empty(t, dup.ID, "a failed create leaves the input as it was")
 
-	title := "Updated"
-	d2 := &store.Document{TenantID: "local", URL: "https://x.com/", ContentType: store.ContentTypeArticle, Title: &title}
-	require.NoError(t, docs.Upsert(ctx, d2))
+	sameID := &store.Document{ID: first.ID, TenantID: "local", URL: "https://x.com/other"}
+	require.ErrorIs(t, docs.Create(ctx, sameID), store.ErrConflict)
 
-	// Same id should be returned for the (tenant, url) key.
-	assert.Equal(t, d1.ID, d2.ID)
+	otherTenant := &store.Document{TenantID: "other", URL: "https://x.com/"}
+	require.NoError(t, docs.Create(ctx, otherTenant), "the URL is unique per tenant")
 
-	got, err := docs.GetByURL(ctx, "local", "https://x.com/")
+	extID := uuid.NewString()
+	require.Error(t, docs.Create(ctx, &store.Document{TenantID: "local", URL: "https://x.com/e",
+		CurrentExtractionID: &extID}))
+	require.Error(t, docs.Create(ctx, &store.Document{TenantID: "local"}))
+	require.Error(t, docs.Create(ctx, &store.Document{URL: "https://x.com/t"}))
+}
+
+// TestDocuments_ApplyFetch: the fetch-derived columns describe the current
+// extraction, so a second fetch that finds no author clears the first
+// fetch's author instead of keeping it.
+func TestDocuments_ApplyFetch(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	docs, exts := NewDocuments(db), NewExtractions(db)
+
+	words := 1200
+	d := &store.Document{TenantID: "local", URL: "https://example.com/post", WordCount: &words,
+		State: store.DocStateFetched}
+	require.NoError(t, docs.Create(ctx, d))
+	newExtraction := func() string {
+		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK}
+		require.NoError(t, exts.Create(ctx, e))
+		return e.ID
+	}
+	str := func(s string) *string { return &s }
+	published := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	first := newExtraction()
+	require.NoError(t, docs.ApplyFetch(ctx, d.ID, store.FetchedMetadata{
+		ExtractionID: first, ContentType: store.ContentTypeArticle,
+		URLCanonical: str("https://example.com/post-canonical"), Title: str("Post"),
+		Author: str("Ada"), Language: str("en"), PublishedAt: &published,
+	}))
+	got, err := docs.GetByID(ctx, d.ID)
 	require.NoError(t, err)
-	require.NotNil(t, got.Title)
-	assert.Equal(t, "Updated", *got.Title)
+	assert.Equal(t, store.DocStatePending, got.State, "pending until indexed")
+	assert.Equal(t, store.ContentTypeArticle, got.ContentType)
+	assert.Equal(t, first, *got.CurrentExtractionID)
+	assert.Equal(t, "https://example.com/post-canonical", *got.URLCanonical)
+	assert.Equal(t, "Ada", *got.Author)
+	assert.Equal(t, published, *got.PublishedAt)
+
+	second := newExtraction()
+	require.NoError(t, docs.ApplyFetch(ctx, d.ID, store.FetchedMetadata{
+		ExtractionID: second, ContentType: store.ContentTypeVideo, Title: str("Post, again"),
+	}))
+	got, err = docs.GetByID(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, second, *got.CurrentExtractionID)
+	assert.Equal(t, store.ContentTypeVideo, got.ContentType)
+	assert.Equal(t, "Post, again", *got.Title)
+	assert.Nil(t, got.URLCanonical, "cleared")
+	assert.Nil(t, got.Author, "cleared")
+	assert.Nil(t, got.Language, "cleared")
+	assert.Nil(t, got.PublishedAt, "cleared")
+	require.NotNil(t, got.WordCount)
+	assert.Equal(t, 1200, *got.WordCount, "not a fetch-derived column")
+	assert.Equal(t, d.CreatedAt, got.CreatedAt)
+
+	err = docs.ApplyFetch(ctx, uuid.NewString(), store.FetchedMetadata{ExtractionID: second, ContentType: store.ContentTypeArticle})
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	err = docs.ApplyFetch(ctx, d.ID, store.FetchedMetadata{ExtractionID: uuid.NewString(), ContentType: store.ContentTypeArticle})
+	require.ErrorContains(t, err, "current_extraction_id references missing")
+	got, err = docs.GetByID(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, second, *got.CurrentExtractionID, "a rejected fetch changes nothing")
 }
 
 func TestDocuments_GetByID_NotFound(t *testing.T) {
-	docs := NewDocuments(NewEphemeralDB(t))
+	docs := NewDocuments(newTestDB(t))
 	_, err := docs.GetByID(context.Background(), uuid.NewString())
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 func TestDocuments_UpdateState(t *testing.T) {
 	ctx := context.Background()
-	docs := NewDocuments(NewEphemeralDB(t))
+	docs := NewDocuments(newTestDB(t))
 	d := &store.Document{TenantID: "local", URL: "https://example.com/y", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	require.NoError(t, docs.UpdateState(ctx, d.ID, store.DocStateFetched))
 	got, _ := docs.GetByID(ctx, d.ID)
@@ -79,7 +155,7 @@ func TestDocuments_UpdateState(t *testing.T) {
 }
 
 func TestDocuments_UpdateState_Missing(t *testing.T) {
-	docs := NewDocuments(NewEphemeralDB(t))
+	docs := NewDocuments(newTestDB(t))
 	err := docs.UpdateState(context.Background(), uuid.NewString(), store.DocStateFetched)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
@@ -88,12 +164,12 @@ func TestDocuments_UpdateState_Missing(t *testing.T) {
 
 func TestExtractions_CreateAndList(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	exts := NewExtractions(db)
 
 	d := &store.Document{TenantID: "local", URL: "https://example.com/z", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	mdPath := "z/extraction1.md"
 	e1 := &store.DocumentExtraction{
@@ -125,11 +201,11 @@ func TestExtractions_CreateAndList(t *testing.T) {
 
 func TestDocuments_SetCurrentExtractionTriggerEnforced(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 
 	d := &store.Document{TenantID: "local", URL: "https://example.com/trig", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	// Pointing at a missing extraction ID must be rejected by the trigger.
 	err := docs.SetCurrentExtraction(ctx, d.ID, uuid.NewString())
@@ -141,7 +217,7 @@ func TestDocuments_SetCurrentExtractionTriggerEnforced(t *testing.T) {
 
 func TestBookmarks_CRUD(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	bms := NewBookmarks(db)
 
 	folder := "/Tech/AI"
@@ -166,7 +242,7 @@ func TestBookmarks_CRUD(t *testing.T) {
 
 func TestBookmarks_UniqueConflict(t *testing.T) {
 	ctx := context.Background()
-	bms := NewBookmarks(NewEphemeralDB(t))
+	bms := NewBookmarks(newTestDB(t))
 
 	make := func() *store.Bookmark {
 		return &store.Bookmark{
@@ -181,7 +257,7 @@ func TestBookmarks_UniqueConflict(t *testing.T) {
 
 func TestBookmarks_ListFilters(t *testing.T) {
 	ctx := context.Background()
-	bms := NewBookmarks(NewEphemeralDB(t))
+	bms := NewBookmarks(newTestDB(t))
 
 	mkAt := time.Now().UTC()
 	for i, src := range []string{store.SourceChrome, store.SourceChrome, store.SourceSafari} {
@@ -202,12 +278,12 @@ func TestBookmarks_ListFilters(t *testing.T) {
 
 func TestBookmarks_LinkDocument(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	bms := NewBookmarks(db)
 	docs := NewDocuments(db)
 
 	d := &store.Document{TenantID: "local", URL: "https://example.com/link", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	b := &store.Bookmark{TenantID: "local", URL: "https://example.com/link", Source: store.SourceManual, SavedAt: time.Now().UTC()}
 	require.NoError(t, bms.Create(ctx, b))
@@ -222,7 +298,7 @@ func TestBookmarks_LinkDocument(t *testing.T) {
 
 func TestJobs_EnqueueClaimDone(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
 	j := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: json.RawMessage(`{"url":"x"}`)}
 	require.NoError(t, q.Enqueue(ctx, j))
@@ -240,26 +316,26 @@ func TestJobs_EnqueueClaimDone(t *testing.T) {
 
 func TestJobs_ClaimNext_FiltersByKind(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
 	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
 	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindIndex}))
 
 	// Only ask for index jobs.
-	got, err := q.ClaimNext(ctx, []string{store.JobKindIndex})
+	got, err := q.ClaimNext(ctx, []store.JobKind{store.JobKindIndex})
 	require.NoError(t, err)
 	assert.Equal(t, store.JobKindIndex, got.Kind)
 }
 
 func TestJobs_ClaimNext_NoneRunnable(t *testing.T) {
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 	_, err := q.ClaimNext(context.Background(), nil)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 func TestJobs_ClaimNext_RespectsRunAfter(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
 	future := time.Now().UTC().Add(time.Hour)
 	require.NoError(t, q.Enqueue(ctx, &store.Job{
@@ -271,7 +347,7 @@ func TestJobs_ClaimNext_RespectsRunAfter(t *testing.T) {
 
 func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	q := NewJobs(db)
 	q.MaxAttempts = 2 // make exhaustion fast
 
@@ -308,48 +384,57 @@ func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 // be claimed by exactly one worker.
 func TestJobs_ClaimNext_ConcurrentClaimOnce(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
 	const nJobs = 20
 	for i := 0; i < nJobs; i++ {
 		require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
 	}
 
+	// Workers report errors instead of asserting: require's FailNow must run
+	// on the test goroutine.
 	const nWorkers = 8
 	var (
 		wg      sync.WaitGroup
 		claimed sync.Map
 		dups    atomic.Int32
 		empties atomic.Int32
+		errs    = make(chan error, nWorkers)
 	)
-	for w := 0; w < nWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range nWorkers {
+		wg.Go(func() {
 			for {
 				j, err := q.ClaimNext(ctx, nil)
 				if errors.Is(err, store.ErrNotFound) {
 					empties.Add(1)
 					return
 				}
-				require.NoError(t, err)
+				if err != nil {
+					errs <- err
+					return
+				}
 				if _, loaded := claimed.LoadOrStore(j.ID, true); loaded {
 					dups.Add(1)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
+	close(errs)
 
+	for err := range errs {
+		assert.NoError(t, err, "claim")
+	}
 	got := 0
 	claimed.Range(func(_, _ any) bool { got++; return true })
 	assert.Equal(t, nJobs, got, "all jobs should be claimed exactly once")
 	assert.Zero(t, dups.Load(), "no duplicate claims")
+	assert.EqualValues(t, nWorkers, empties.Load(), "every worker stopped on an empty queue")
 }
 
 // enqueueWithStatus inserts a job directly in the given status, as if it had
 // already gone through the queue.
-func enqueueWithStatus(t *testing.T, q *Jobs, kind, status string, attempts int) *store.Job {
+func enqueueWithStatus(t *testing.T, q *Jobs, kind store.JobKind, status store.JobStatus, attempts int) *store.Job {
 	t.Helper()
 	j := &store.Job{TenantID: "local", Kind: kind, Status: status, Attempts: attempts}
 	require.NoError(t, q.Enqueue(context.Background(), j))
@@ -365,7 +450,7 @@ func startedAt(t *testing.T, db *DB, id string) sql.NullString {
 
 func TestJobs_Requeue(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	q := NewJobs(db)
 
 	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
@@ -391,7 +476,7 @@ func TestJobs_Requeue(t *testing.T) {
 
 func TestJobs_Requeue_NeverBelowZeroAttempts(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 	j := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusRunning, 0)
 
 	require.NoError(t, q.Requeue(ctx, j.ID))
@@ -413,8 +498,8 @@ func TestJobs_TransitionsRequireRunning(t *testing.T) {
 	}
 	for name, transition := range transitions {
 		t.Run(name, func(t *testing.T) {
-			for _, status := range []string{store.JobStatusPending, store.JobStatusDone, store.JobStatusFailed} {
-				q := NewJobs(NewEphemeralDB(t))
+			for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusDone, store.JobStatusFailed} {
+				q := NewJobs(newTestDB(t))
 				j := enqueueWithStatus(t, q, store.JobKindFetch, status, 1)
 
 				err := transition(q, j.ID)
@@ -427,7 +512,7 @@ func TestJobs_TransitionsRequireRunning(t *testing.T) {
 				assert.Nil(t, got.LastError)
 			}
 
-			q := NewJobs(NewEphemeralDB(t))
+			q := NewJobs(newTestDB(t))
 			assert.ErrorIs(t, transition(q, uuid.NewString()), store.ErrNotFound)
 		})
 	}
@@ -435,7 +520,7 @@ func TestJobs_TransitionsRequireRunning(t *testing.T) {
 
 func TestJobs_RecoverOrphans(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	q := NewJobs(db)
 	q.MaxAttempts = 3
 
@@ -446,7 +531,7 @@ func TestJobs_RecoverOrphans(t *testing.T) {
 	_, err := db.ExecContext(ctx, `UPDATE jobs SET started_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status = 'running'`)
 	require.NoError(t, err)
 
-	failed, requeued, err := q.RecoverOrphans(ctx, []string{store.JobKindFetch, store.JobKindIndex})
+	failed, requeued, err := q.RecoverOrphans(ctx, []store.JobKind{store.JobKindFetch, store.JobKindIndex})
 	require.NoError(t, err)
 	assert.Equal(t, 1, requeued)
 	require.Len(t, failed, 1)
@@ -477,7 +562,7 @@ func TestJobs_RecoverOrphans(t *testing.T) {
 }
 
 func TestJobs_RecoverOrphans_RequiresKinds(t *testing.T) {
-	_, _, err := NewJobs(NewEphemeralDB(t)).RecoverOrphans(context.Background(), nil)
+	_, _, err := NewJobs(newTestDB(t)).RecoverOrphans(context.Background(), nil)
 	assert.Error(t, err)
 }
 
@@ -488,18 +573,18 @@ func TestJobs_RecoverOrphans_RequiresKinds(t *testing.T) {
 // document in pending with nothing left to move it on.
 func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	q := NewJobs(db)
 	docs := NewDocuments(db)
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/queued"}
-	require.NoError(t, docs.Upsert(ctx, doc))
+	require.NoError(t, docs.Create(ctx, doc))
 	queued := &store.Job{TenantID: "local", Kind: store.JobKindFetch,
 		Payload: json.RawMessage(`{"document_id":"` + doc.ID + `"}`)}
 	require.NoError(t, q.Enqueue(ctx, queued))
 
-	byStatus := map[string]*store.Job{}
-	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
+	byStatus := map[store.JobStatus]*store.Job{}
+	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
 		byStatus[status] = enqueueWithStatus(t, q, store.JobKindIndex, status, 1)
 	}
 
@@ -511,7 +596,7 @@ func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 
 	for status, j := range byStatus {
 		_, err := q.GetByID(ctx, j.ID)
-		if store.IsFinishedJobStatus(status) {
+		if status.IsFinished() {
 			assert.ErrorIs(t, err, store.ErrNotFound, status)
 		} else {
 			assert.NoError(t, err, status)
@@ -523,14 +608,14 @@ func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 
 func TestJobs_DeleteByStatus_FinishedOnly(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
-	byStatus := map[string]*store.Job{}
-	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
+	byStatus := map[store.JobStatus]*store.Job{}
+	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
 		byStatus[status] = enqueueWithStatus(t, q, store.JobKindFetch, status, 1)
 	}
 
-	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, "bogus", ""} {
+	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, "bogus", ""} {
 		n, err := q.DeleteByStatus(ctx, "local", status)
 		require.Error(t, err, "status %q", status)
 		assert.Zero(t, n)
@@ -549,14 +634,14 @@ func TestJobs_DeleteByStatus_FinishedOnly(t *testing.T) {
 
 // ---------- refetch ----------
 
-func seedDoc(t *testing.T, docs *Documents, url, state string) *store.Document {
+func seedDoc(t *testing.T, docs *Documents, url string, state store.DocState) *store.Document {
 	t.Helper()
 	d := &store.Document{TenantID: "local", URL: url, State: state}
-	require.NoError(t, docs.Upsert(context.Background(), d))
+	require.NoError(t, docs.Create(context.Background(), d))
 	return d
 }
 
-func docState(t *testing.T, docs *Documents, id string) string {
+func docState(t *testing.T, docs *Documents, id string) store.DocState {
 	t.Helper()
 	d, err := docs.GetByID(context.Background(), id)
 	require.NoError(t, err)
@@ -565,16 +650,14 @@ func docState(t *testing.T, docs *Documents, id string) string {
 
 func fetchJobsFor(t *testing.T, q *Jobs, docID string) []*store.Job {
 	t.Helper()
-	all, err := q.List(context.Background(), "local", "", store.JobKindFetch, 1000)
+	all, err := q.ListWithDoc(context.Background(), "local", store.ListJobsOpts{Kind: store.JobKindFetch, Limit: 1000})
 	require.NoError(t, err)
 	var out []*store.Job
 	for _, j := range all {
-		var p struct {
-			DocumentID string `json:"document_id"`
-		}
+		var p store.DocumentJobPayload
 		require.NoError(t, json.Unmarshal(j.Payload, &p))
 		if p.DocumentID == docID {
-			out = append(out, j)
+			out = append(out, j.Job)
 		}
 	}
 	return out
@@ -598,7 +681,7 @@ func countRows(t *testing.T, db *DB, table string) int {
 
 func TestDocuments_RequeueFetch(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs, q := NewDocuments(db), NewJobs(db)
 	d := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
 
@@ -618,10 +701,10 @@ func TestDocuments_RequeueFetch(t *testing.T) {
 }
 
 func TestDocuments_RequeueFetch_NotFound(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs"}
-	require.NoError(t, docs.Upsert(context.Background(), other))
+	require.NoError(t, docs.Create(context.Background(), other))
 
 	for _, id := range []string{uuid.NewString(), other.ID} {
 		_, err := docs.RequeueFetch(context.Background(), "local", id)
@@ -632,7 +715,7 @@ func TestDocuments_RequeueFetch_NotFound(t *testing.T) {
 }
 
 func TestDocuments_RequeueFetch_Atomic(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	d := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
 	failJobInserts(t, db)
@@ -645,17 +728,17 @@ func TestDocuments_RequeueFetch_Atomic(t *testing.T) {
 
 func TestDocuments_RequeueFetchByStates(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs, q := NewDocuments(db), NewJobs(db)
-	byState := map[string]*store.Document{}
-	for _, st := range []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
-		byState[st] = seedDoc(t, docs, "https://example.com/"+st, st)
+	byState := map[store.DocState]*store.Document{}
+	for _, st := range []store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
+		byState[st] = seedDoc(t, docs, "https://example.com/"+string(st), st)
 	}
 	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs", State: store.DocStateFailed}
-	require.NoError(t, docs.Upsert(ctx, other))
+	require.NoError(t, docs.Create(ctx, other))
 
 	n, err := docs.RequeueFetchByStates(ctx, "local",
-		[]string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed})
+		[]store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed})
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
 	assert.Equal(t, 3, countRows(t, db, "jobs"))
@@ -671,21 +754,21 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 	}
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, other.ID), "another tenant's document is untouched")
 
-	n, err = docs.RequeueFetchByStates(ctx, "local", []string{store.DocStateDead})
+	n, err = docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateDead})
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 	assert.Equal(t, store.DocStatePending, docState(t, docs, byState[store.DocStateDead].ID))
 }
 
 func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	a := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
 	b := seedDoc(t, docs, "https://example.com/b", store.DocStateFetched)
 	failJobInserts(t, db)
 
 	_, err := docs.RequeueFetchByStates(context.Background(), "local",
-		[]string{store.DocStateFetched, store.DocStateFailed})
+		[]store.DocState{store.DocStateFetched, store.DocStateFailed})
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, a.ID))
 	assert.Equal(t, store.DocStateFetched, docState(t, docs, b.ID))

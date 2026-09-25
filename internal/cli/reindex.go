@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 )
@@ -20,7 +21,8 @@ func newReindexCmd() *cobra.Command {
 extraction — without re-fetching it. Use it after changing the embedding
 model (same dimension) or chunker settings, or to pick up new bookmark tags.
 
-Documents must already have content; --all targets state=fetched by default.`,
+Documents must already have content: --all targets state=fetched by default
+and, in any state, skips documents that were never fetched.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, ok := getCtx(cmd.Context())
@@ -32,30 +34,30 @@ Documents must already have content; --all targets state=fetched by default.`,
 			}
 
 			if all {
-				return reindexAll(cmd.Context(), ctx, state)
+				return reindexAll(cmd.Context(), cmd.OutOrStdout(), ctx, state)
 			}
 			if len(args) != 1 {
 				return errors.New("provide a document ID or pass --all")
 			}
-			return reindexOne(cmd.Context(), ctx, args[0])
+			return reindexOne(cmd.Context(), cmd.OutOrStdout(), ctx, args[0])
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Reindex every document with content (default state=fetched; use --state to override)")
 	cmd.Flags().StringVar(&state, "state", "",
-		"With --all, only reindex documents in this state (defaults to fetched)")
+		"With --all, reindex the documents with content in this state (pending|fetched|failed|dead; default fetched)")
 	return cmd
 }
 
-func reindexOne(httpCtx context.Context, c *Context, docID string) error {
+func reindexOne(httpCtx context.Context, w io.Writer, c *Context, docID string) error {
 	resp, err := c.Client.ReindexDocument(httpCtx, docID)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("reindex enqueued for document %s (job %s)\n", docID, resp.JobID)
+	fmt.Fprintf(w, "reindex enqueued for document %s (job %s)\n", docID, resp.JobID)
 	return nil
 }
 
-func reindexAll(httpCtx context.Context, c *Context, state string) error {
+func reindexAll(httpCtx context.Context, w io.Writer, c *Context, state string) error {
 	resp, err := c.Client.ReindexAll(httpCtx, state)
 	if err != nil {
 		return err
@@ -64,6 +66,6 @@ func reindexAll(httpCtx context.Context, c *Context, state string) error {
 	if state != "" {
 		label = "documents in state=" + state
 	}
-	fmt.Printf("reindex enqueued for %s: %d jobs\n", label, resp.JobsEnqueued)
+	fmt.Fprintf(w, "reindex enqueued for %s: %d jobs\n", label, resp.JobsEnqueued)
 	return nil
 }

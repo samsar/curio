@@ -1,11 +1,12 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/uuid"
 
@@ -22,61 +23,68 @@ var _ store.DocumentStore = (*Documents)(nil)
 
 func NewDocuments(db *DB) *Documents { return &Documents{db: db} }
 
-func (s *Documents) Upsert(ctx context.Context, d *store.Document) error {
-	if d.ID == "" {
-		d.ID = uuid.NewString()
-	}
+func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 	if d.TenantID == "" {
-		return fmt.Errorf("documents: tenant_id required")
+		return errors.New("documents: tenant_id required")
 	}
 	if d.URL == "" {
-		return fmt.Errorf("documents: url required")
+		return errors.New("documents: url required")
 	}
-	if d.ContentType == "" {
-		d.ContentType = store.ContentTypeUnknown
+	if d.CurrentExtractionID != nil {
+		return errors.New("documents: a new document has no current extraction")
 	}
-	if d.State == "" {
-		d.State = store.DocStatePending
+	doc := *d
+	if doc.ID == "" {
+		doc.ID = uuid.NewString()
 	}
+	doc.State = cmp.Or(doc.State, store.DocStatePending)
+	doc.ContentType = cmp.Or(doc.ContentType, store.ContentTypeUnknown)
 
-	const q = `
-	INSERT INTO documents (
-		id, tenant_id, url, url_canonical, content_type, title, author,
-		published_at, language, word_count, current_extraction_id, state
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT (tenant_id, url) DO UPDATE SET
-		url_canonical         = COALESCE(excluded.url_canonical, documents.url_canonical),
-		content_type          = excluded.content_type,
-		title                 = COALESCE(excluded.title, documents.title),
-		author                = COALESCE(excluded.author, documents.author),
-		published_at          = COALESCE(excluded.published_at, documents.published_at),
-		language              = COALESCE(excluded.language, documents.language),
-		word_count            = COALESCE(excluded.word_count, documents.word_count),
-		current_extraction_id = COALESCE(excluded.current_extraction_id, documents.current_extraction_id),
-		state                 = excluded.state
-	RETURNING id, created_at, updated_at`
-
-	row := s.db.QueryRowContext(ctx, q,
-		d.ID, d.TenantID, d.URL,
-		strPtr(d.URLCanonical),
-		d.ContentType,
-		strPtr(d.Title), strPtr(d.Author),
-		timePtr(d.PublishedAt),
-		strPtr(d.Language),
-		intPtr(d.WordCount),
-		strPtr(d.CurrentExtractionID),
-		d.State,
-	)
 	var createdAt, updatedAt string
-	if err := row.Scan(&d.ID, &createdAt, &updatedAt); err != nil {
-		return fmt.Errorf("upsert document: %w", err)
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO documents (
+			id, tenant_id, url, url_canonical, content_type, title, author,
+			published_at, language, word_count, state
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING created_at, updated_at`,
+		doc.ID, doc.TenantID, doc.URL,
+		strPtr(doc.URLCanonical),
+		doc.ContentType,
+		strPtr(doc.Title), strPtr(doc.Author),
+		timePtr(doc.PublishedAt),
+		strPtr(doc.Language),
+		intPtr(doc.WordCount),
+		doc.State,
+	).Scan(&createdAt, &updatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("document for (tenant, url) %s: %w", doc.URL, store.ErrConflict)
+		}
+		return fmt.Errorf("insert document: %w", err)
 	}
-	var err error
-	if d.CreatedAt, err = parseTime(createdAt); err != nil {
+	if doc.CreatedAt, err = parseTime(createdAt); err != nil {
 		return err
 	}
-	d.UpdatedAt, err = parseTime(updatedAt)
-	return err
+	if doc.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return err
+	}
+	*d = doc
+	return nil
+}
+
+func (s *Documents) ApplyFetch(ctx context.Context, id string, m store.FetchedMetadata) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE documents SET
+			content_type = ?, url_canonical = ?, title = ?, author = ?, language = ?,
+			published_at = ?, current_extraction_id = ?, state = ?
+		WHERE id = ?`,
+		m.ContentType, strPtr(m.URLCanonical), strPtr(m.Title), strPtr(m.Author), strPtr(m.Language),
+		timePtr(m.PublishedAt), m.ExtractionID, store.DocStatePending,
+		id)
+	if err != nil {
+		return fmt.Errorf("apply fetch to document %s: %w", id, err)
+	}
+	return ensureRow(res, "document")
 }
 
 func (s *Documents) GetByID(ctx context.Context, id string) (*store.Document, error) {
@@ -87,15 +95,19 @@ func (s *Documents) GetByURL(ctx context.Context, tenantID, url string) (*store.
 	return s.queryOne(ctx, "tenant_id = ? AND url = ?", tenantID, url)
 }
 
+// documentColumns is the column list scanDocument expects, in order.
+const documentColumns = `id, tenant_id, url, url_canonical, content_type, title, author,
+	published_at, language, word_count, current_extraction_id, state,
+	created_at, updated_at`
+
 func (s *Documents) queryOne(ctx context.Context, where string, args ...any) (*store.Document, error) {
-	const cols = `id, tenant_id, url, url_canonical, content_type, title, author,
-		published_at, language, word_count, current_extraction_id, state,
-		created_at, updated_at`
-	row := s.db.QueryRowContext(ctx, "SELECT "+cols+" FROM documents WHERE "+where, args...)
+	row := s.db.QueryRowContext(ctx, "SELECT "+documentColumns+" FROM documents WHERE "+where, args...)
 	return scanDocument(row)
 }
 
-func scanDocument(row interface{ Scan(...any) error }) (*store.Document, error) {
+// scanDocument scans documentColumns, then any extra columns a query
+// selects after them into extra. A missing row is store.ErrNotFound.
+func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Document, error) {
 	var (
 		d                                            store.Document
 		urlCanonical, title, author, language, curEx sql.NullString
@@ -103,14 +115,14 @@ func scanDocument(row interface{ Scan(...any) error }) (*store.Document, error) 
 		wordCount                                    sql.NullInt64
 		createdAt, updatedAt                         string
 	)
-	err := row.Scan(
+	err := row.Scan(slices.Concat([]any{
 		&d.ID, &d.TenantID, &d.URL,
 		&urlCanonical, &d.ContentType,
 		&title, &author,
 		&publishedAt, &language,
 		&wordCount, &curEx, &d.State,
 		&createdAt, &updatedAt,
-	)
+	}, extra)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -139,7 +151,7 @@ func scanDocument(row interface{ Scan(...any) error }) (*store.Document, error) 
 	return &d, nil
 }
 
-func (s *Documents) UpdateState(ctx context.Context, id, state string) error {
+func (s *Documents) UpdateState(ctx context.Context, id string, state store.DocState) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE documents SET state = ? WHERE id = ?`, state, id)
 	if err != nil {
 		return fmt.Errorf("update document state: %w", err)
@@ -147,35 +159,15 @@ func (s *Documents) UpdateState(ctx context.Context, id, state string) error {
 	return ensureRow(res, "document")
 }
 
-// DocumentWithError pairs a Document with the most recent failed-job error
-// message that targeted it AND the markdown path of its current extraction
-// (when one exists). Used by the debug-listing endpoint so users can see
-// in one query which docs are broken/healthy and where their content lives.
-type DocumentWithError struct {
-	*store.Document
-	LastError    string // empty if no failed job is associated
-	MarkdownPath string // empty if no current extraction
-}
-
-// ListWithLastError returns documents for a tenant, optionally filtered by
-// state, paired with the last_error of their most recent failed fetch or
-// index job AND the markdown path of their current extraction. Ordered
-// most-recently-updated first.
-//
-// Three joins:
-//   - Self-subquery on jobs to find the most recent failed job per doc
-//     (json_extract on payload.document_id).
-//   - LEFT JOIN on document_extractions for the current extraction's
-//     markdown_path. Empty when state=pending.
-func (s *Documents) ListWithLastError(ctx context.Context, tenantID, state string, limit int) ([]DocumentWithError, error) {
+// ListWithLastError joins each document to the most recent failed job whose
+// payload names it (json_extract on payload.document_id) and to its current
+// extraction for the markdown path.
+func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, opts store.ListDocumentsOpts) ([]store.DocumentWithError, error) {
+	limit := opts.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	const cols = `d.id, d.tenant_id, d.url, d.url_canonical, d.content_type, d.title, d.author,
-		d.published_at, d.language, d.word_count, d.current_extraction_id, d.state,
-		d.created_at, d.updated_at`
-
-	q := `SELECT ` + cols + `,
+	q := `SELECT ` + qualify("d", documentColumns) + `,
 		COALESCE(j.last_error, '') AS last_error,
 		COALESCE(e.markdown_path, '') AS markdown_path
 		FROM documents d
@@ -189,9 +181,9 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID, state strin
 		LEFT JOIN document_extractions e ON e.id = d.current_extraction_id
 		WHERE d.tenant_id = ?`
 	args := []any{tenantID}
-	if state != "" {
+	if opts.State != "" {
 		q += ` AND d.state = ?`
-		args = append(args, state)
+		args = append(args, opts.State)
 	}
 	q += ` ORDER BY d.updated_at DESC LIMIT ?`
 	args = append(args, limit)
@@ -202,107 +194,65 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID, state strin
 	}
 	defer rows.Close()
 
-	var out []DocumentWithError
+	var out []store.DocumentWithError
 	for rows.Next() {
-		doc, lastErr, mdPath, err := scanDocumentWithError(rows)
-		if err != nil {
-			return nil, err
+		var item store.DocumentWithError
+		if item.Document, err = scanDocument(rows, &item.LastError, &item.MarkdownPath); err != nil {
+			return nil, fmt.Errorf("list documents with error: %w", err)
 		}
-		out = append(out, DocumentWithError{Document: doc, LastError: lastErr, MarkdownPath: mdPath})
+		out = append(out, item)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list documents with error: %w", err)
+	}
+	return out, nil
 }
 
-// scanDocumentWithError mirrors scanDocument but adds the joined
-// last_error + markdown_path columns at the end.
-func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document, string, string, error) {
-	var (
-		d                                            store.Document
-		urlCanonical, title, author, language, curEx sql.NullString
-		publishedAt                                  sql.NullString
-		wordCount                                    sql.NullInt64
-		createdAt, updatedAt                         string
-		lastErr, mdPath                              string
-	)
-	err := row.Scan(
-		&d.ID, &d.TenantID, &d.URL,
-		&urlCanonical, &d.ContentType,
-		&title, &author,
-		&publishedAt, &language,
-		&wordCount, &curEx, &d.State,
-		&createdAt, &updatedAt,
-		&lastErr, &mdPath,
-	)
+func (s *Documents) ListIDsWithContent(ctx context.Context, tenantID string, state store.DocState) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM documents
+		WHERE tenant_id = ? AND state = ? AND current_extraction_id IS NOT NULL`,
+		tenantID, state)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("scan document with error: %w", err)
-	}
-	d.URLCanonical = nullableString(urlCanonical)
-	d.Title = nullableString(title)
-	d.Author = nullableString(author)
-	d.Language = nullableString(language)
-	d.CurrentExtractionID = nullableString(curEx)
-	d.WordCount = nullableInt(wordCount)
-	if publishedAt.Valid {
-		pt, perr := parseTime(publishedAt.String)
-		if perr != nil {
-			return nil, "", "", perr
-		}
-		d.PublishedAt = &pt
-	}
-	if d.CreatedAt, err = parseTime(createdAt); err != nil {
-		return nil, "", "", err
-	}
-	if d.UpdatedAt, err = parseTime(updatedAt); err != nil {
-		return nil, "", "", err
-	}
-	return &d, lastErr, mdPath, nil
-}
-
-// ListIDs returns all document IDs for a tenant, optionally restricted
-// to a particular state. Used by the bulk refetch path.
-func (s *Documents) ListIDs(ctx context.Context, tenantID, state string) ([]string, error) {
-	q := `SELECT id FROM documents WHERE tenant_id = ?`
-	args := []any{tenantID}
-	if state != "" {
-		q += ` AND state = ?`
-		args = append(args, state)
-	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list document ids: %w", err)
+		return nil, fmt.Errorf("list document ids with content: %w", err)
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list document ids with content: %w", err)
 		}
 		out = append(out, id)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list document ids with content: %w", err)
+	}
+	return out, nil
 }
 
-// CountByState returns (total, perStateMap) for one tenant.
-func (s *Documents) CountByState(ctx context.Context, tenantID string) (int, map[string]int, error) {
-	const q = `SELECT state, count(*) FROM documents WHERE tenant_id = ? GROUP BY state`
-	rows, err := s.db.QueryContext(ctx, q, tenantID)
+func (s *Documents) CountByState(ctx context.Context, tenantID string) (map[store.DocState]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT state, count(*) FROM documents WHERE tenant_id = ? GROUP BY state`, tenantID)
 	if err != nil {
-		return 0, nil, fmt.Errorf("count documents: %w", err)
+		return nil, fmt.Errorf("count documents: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]int{}
-	total := 0
+	out := map[store.DocState]int{}
 	for rows.Next() {
-		var state string
-		var n int
+		var (
+			state store.DocState
+			n     int
+		)
 		if err := rows.Scan(&state, &n); err != nil {
-			return 0, nil, err
+			return nil, fmt.Errorf("count documents: %w", err)
 		}
 		out[state] = n
-		total += n
 	}
-	return total, out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count documents: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionID string) error {
@@ -316,7 +266,7 @@ func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionI
 }
 
 func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID string) (*store.Job, error) {
-	job, err := newFetchJob(tenantID, documentID)
+	job, err := store.NewDocumentJob(tenantID, store.JobKindFetch, documentID)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +297,7 @@ func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID strin
 	return job, nil
 }
 
-func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, states []string) (int, error) {
+func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, states []store.DocState) (int, error) {
 	if len(states) == 0 {
 		return 0, errors.New("requeue fetch: states required")
 	}
@@ -362,7 +312,7 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	// inside the 5s busy_timeout other writers wait for up to roughly 130k
 	// documents (docs/decisions.md "Refetch: state reset and fetch job in
 	// one transaction").
-	args := appendStrings([]any{store.DocStatePending, tenantID}, states)
+	args := appendArgs([]any{store.DocStatePending, tenantID}, states)
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE documents SET state = ?
 		WHERE tenant_id = ? AND state IN (`+placeholders(len(states))+`)
@@ -384,7 +334,7 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	}
 
 	for _, id := range ids {
-		job, err := newFetchJob(tenantID, id)
+		job, err := store.NewDocumentJob(tenantID, store.JobKindFetch, id)
 		if err != nil {
 			return 0, err
 		}
@@ -398,25 +348,31 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	return len(ids), nil
 }
 
-// newFetchJob builds a fetch job for a document. The payload is
-// jobs.FetchPayload's shape, which package store can't import.
-func newFetchJob(tenantID, documentID string) (*store.Job, error) {
-	payload, err := json.Marshal(struct {
-		DocumentID string `json:"document_id"`
-	}{documentID})
+// getOrCreateDocument returns the tenant's document for url, inserting it in
+// state pending when there is none; created reports whether it did. It runs
+// inside the caller's transaction, for units of work that save a reference
+// (a bookmark today) together with its document. Its first statement is the
+// INSERT, so a transaction that starts here takes the write lock outright
+// instead of upgrading from a read lock (see decisions.md "Job queue claim
+// via atomic UPDATE ... RETURNING").
+func getOrCreateDocument(ctx context.Context, tx *sql.Tx, tenantID, url string) (id string, state store.DocState, created bool, err error) {
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO documents (id, tenant_id, url) VALUES (?, ?, ?)
+		ON CONFLICT (tenant_id, url) DO NOTHING
+		RETURNING id, state`,
+		uuid.NewString(), tenantID, url).Scan(&id, &state)
+	switch {
+	case err == nil:
+		return id, state, true, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return "", "", false, fmt.Errorf("insert document: %w", err)
+	}
+	// DO NOTHING returned no row: the document exists.
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, state FROM documents WHERE tenant_id = ? AND url = ?`,
+		tenantID, url).Scan(&id, &state)
 	if err != nil {
-		return nil, fmt.Errorf("encode fetch payload: %w", err)
+		return "", "", false, fmt.Errorf("look up document: %w", err)
 	}
-	return &store.Job{TenantID: tenantID, Kind: store.JobKindFetch, Payload: payload}, nil
-}
-
-func ensureRow(res sql.Result, entity string) error {
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return fmt.Errorf("%s: %w", entity, store.ErrNotFound)
-	}
-	return nil
+	return id, state, false, nil
 }

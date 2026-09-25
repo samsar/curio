@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -30,21 +31,55 @@ var (
 // that table.
 const EmbeddingDim = 768
 
-// State / kind / status constants. Keep in sync with CHECK constraints in
-// migrations/001_initial.sql.
+// DocState is a document's lifecycle state (documents.state).
+type DocState string
+
+// ContentType classifies a document's content (documents.content_type).
+type ContentType string
+
+// JobKind names the work a job does (jobs.kind).
+type JobKind string
+
+// JobStatus is a job's place in the queue (jobs.status).
+type JobStatus string
+
+// ClusterRunStatus is a clustering run's state (cluster_runs.status).
+type ClusterRunStatus string
+
+// State / kind / status constants. Keep in sync with the CHECK constraints
+// in migrations/.
 const (
-	DocStatePending = "pending"
-	DocStateFetched = "fetched"
-	DocStateFailed  = "failed"
-	DocStateDead    = "dead"
+	DocStatePending DocState = "pending"
+	DocStateFetched DocState = "fetched"
+	DocStateFailed  DocState = "failed"
+	DocStateDead    DocState = "dead"
 
-	ContentTypeArticle = "article"
-	ContentTypeRepo    = "repo"
-	ContentTypeVideo   = "video"
-	ContentTypePDF     = "pdf"
-	ContentTypeThread  = "thread"
-	ContentTypeUnknown = "unknown"
+	ContentTypeArticle ContentType = "article"
+	ContentTypeRepo    ContentType = "repo"
+	ContentTypeVideo   ContentType = "video"
+	ContentTypePDF     ContentType = "pdf"
+	ContentTypeThread  ContentType = "thread"
+	ContentTypeUnknown ContentType = "unknown"
 
+	JobKindFetch     JobKind = "fetch"
+	JobKindIndex     JobKind = "index"
+	JobKindImport    JobKind = "import"
+	JobKindCluster   JobKind = "cluster"
+	JobKindSummarize JobKind = "summarize"
+
+	JobStatusPending JobStatus = "pending"
+	JobStatusRunning JobStatus = "running"
+	JobStatusDone    JobStatus = "done"
+	JobStatusFailed  JobStatus = "failed"
+
+	ClusterRunRunning ClusterRunStatus = "running"
+	ClusterRunDone    ClusterRunStatus = "done"
+	ClusterRunFailed  ClusterRunStatus = "failed"
+)
+
+// Extraction statuses (document_extractions.status) and bookmark sources
+// (bookmarks.source).
+const (
 	ExtractionStatusOK        = "ok"
 	ExtractionStatusPartial   = "partial"
 	ExtractionStatusPaywalled = "paywalled"
@@ -55,24 +90,28 @@ const (
 	SourceFirefox = "firefox"
 	SourceManual  = "manual"
 	SourceHTML    = "html" // Netscape HTML export, any browser
-
-	JobKindFetch     = "fetch"
-	JobKindIndex     = "index"
-	JobKindImport    = "import"
-	JobKindCluster   = "cluster"
-	JobKindSummarize = "summarize"
-
-	JobStatusPending = "pending"
-	JobStatusRunning = "running"
-	JobStatusDone    = "done"
-	JobStatusFailed  = "failed"
-
-	// Insight-layer cluster run states. Keep in sync with the CHECK on
-	// cluster_runs.status in migrations/004_insights.sql.
-	ClusterRunRunning = "running"
-	ClusterRunDone    = "done"
-	ClusterRunFailed  = "failed"
 )
+
+// Valid reports whether s is one of the DocState constants.
+func (s DocState) Valid() bool {
+	switch s {
+	case DocStatePending, DocStateFetched, DocStateFailed, DocStateDead:
+		return true
+	}
+	return false
+}
+
+// IsFinished reports whether s is terminal (done or failed). Only finished
+// jobs may be deleted: removing a pending or running job would strand its
+// document in pending with nothing left to move it on.
+func (s JobStatus) IsFinished() bool {
+	return s == JobStatusDone || s == JobStatusFailed
+}
+
+// IsFinished reports whether s is terminal (done or failed).
+func (s ClusterRunStatus) IsFinished() bool {
+	return s == ClusterRunDone || s == ClusterRunFailed
+}
 
 // Document is the universal content record, deduplicated by (tenant_id, url).
 type Document struct {
@@ -80,14 +119,14 @@ type Document struct {
 	TenantID            string
 	URL                 string
 	URLCanonical        *string
-	ContentType         string
+	ContentType         ContentType
 	Title               *string
 	Author              *string
 	PublishedAt         *time.Time
 	Language            *string
 	WordCount           *int
 	CurrentExtractionID *string
-	State               string
+	State               DocState
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -109,7 +148,7 @@ type DocumentExtraction struct {
 type Bookmark struct {
 	ID         string
 	TenantID   string
-	DocumentID *string // nil until first successful fetch
+	DocumentID *string // the document Ingest linked it to; nil if that document was deleted
 	URL        string
 	Title      *string
 	SavedAt    time.Time
@@ -124,9 +163,9 @@ type Bookmark struct {
 type Job struct {
 	ID        string
 	TenantID  string
-	Kind      string
+	Kind      JobKind
 	Payload   json.RawMessage
-	Status    string
+	Status    JobStatus
 	Attempts  int
 	RunAfter  time.Time
 	LastError *string
@@ -136,14 +175,26 @@ type Job struct {
 
 // DocumentStore operates on the documents table.
 type DocumentStore interface {
-	// Upsert inserts a document or updates the existing one keyed by
-	// (tenant_id, url). Returns the row's ID (auto-generated if empty on
-	// input). Idempotent for the URL key.
-	Upsert(ctx context.Context, d *Document) error
+	// Create inserts a new document and fills in its ID (when empty),
+	// CreatedAt and UpdatedAt. An empty State or ContentType is stored as
+	// pending or unknown; those defaults apply on insert only. A new
+	// document has no extraction, so CurrentExtractionID must be nil. A
+	// document that already exists for (tenant_id, url) is an error
+	// wrapping ErrConflict.
+	Create(ctx context.Context, d *Document) error
 	GetByID(ctx context.Context, id string) (*Document, error)
 	GetByURL(ctx context.Context, tenantID, url string) (*Document, error)
-	UpdateState(ctx context.Context, id, state string) error
+	UpdateState(ctx context.Context, id string, state DocState) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
+
+	// ApplyFetch records a successful fetch on a document: it points
+	// current_extraction_id at m.ExtractionID, which must exist, writes the
+	// fetch-derived columns exactly as given, and sets the state to pending
+	// until the index step marks it fetched. A nil field clears its column:
+	// those columns describe the current extraction, so none may keep a
+	// value from an earlier one. word_count is left alone. ErrNotFound if
+	// there is no such document.
+	ApplyFetch(ctx context.Context, id string, m FetchedMetadata) error
 
 	// RequeueFetch resets the tenant's document to pending and enqueues a
 	// fresh fetch job for it, atomically: either both happen or neither
@@ -153,7 +204,46 @@ type DocumentStore interface {
 	// RequeueFetchByStates does the same for every tenant document whose
 	// state is one of states, in one transaction. Returns how many jobs it
 	// enqueued.
-	RequeueFetchByStates(ctx context.Context, tenantID string, states []string) (int, error)
+	RequeueFetchByStates(ctx context.Context, tenantID string, states []DocState) (int, error)
+
+	// ListWithLastError lists the tenant's documents, most recently updated
+	// first, each with the error of the most recent failed job that
+	// targeted it and the markdown path of its current extraction.
+	ListWithLastError(ctx context.Context, tenantID string, opts ListDocumentsOpts) ([]DocumentWithError, error)
+	// ListIDsWithContent returns the IDs of the tenant's documents in state
+	// that have a current extraction: the ones an index job can work on.
+	ListIDsWithContent(ctx context.Context, tenantID string, state DocState) ([]string, error)
+	// CountByState counts the tenant's documents per state. States with no
+	// documents are absent from the map.
+	CountByState(ctx context.Context, tenantID string) (map[DocState]int, error)
+}
+
+// FetchedMetadata is what a fetch learned about a document, for
+// DocumentStore.ApplyFetch.
+type FetchedMetadata struct {
+	ExtractionID string
+	ContentType  ContentType // one of the ContentType constants
+	URLCanonical *string     // the final URL after redirects, when it differs
+	Title        *string
+	Author       *string
+	Language     *string
+	PublishedAt  *time.Time
+}
+
+// ListDocumentsOpts filters DocumentStore.ListWithLastError. Empty fields
+// mean "no filter for that dimension".
+type ListDocumentsOpts struct {
+	State DocState
+	Limit int // <= 0 means the impl default (50)
+}
+
+// DocumentWithError is a document plus what a debug listing shows next to
+// it, so one query answers "which documents are broken, and where does
+// their content live".
+type DocumentWithError struct {
+	*Document
+	LastError    string // of the most recent failed job for the document; empty if none
+	MarkdownPath string // current extraction's, relative to the content dir; empty if none
 }
 
 // ExtractionStore operates on the document_extractions table.
@@ -165,6 +255,18 @@ type ExtractionStore interface {
 
 // BookmarkStore operates on the bookmarks table.
 type BookmarkStore interface {
+	// Ingest saves a bookmark together with its document, in one
+	// transaction: it finds the tenant's document for b.URL or creates it
+	// pending, inserts the bookmark linked to it, and enqueues a fetch job
+	// only if it created the document. Either all of that commits or none
+	// of it does. b.URL must already be normalized, since it is the
+	// document's dedup key, and b.DocumentID on input is ignored. On success
+	// b.ID (generated when empty), b.DocumentID, b.CreatedAt and b.UpdatedAt
+	// are set. A bookmark that already exists for (tenant_id, url, source)
+	// is an error wrapping ErrConflict, and nothing is written.
+	Ingest(ctx context.Context, b *Bookmark) (IngestResult, error)
+	// Create inserts the bookmark row alone, linked to b.DocumentID as
+	// given. Ingest is the API path; Create is the low-level insert.
 	Create(ctx context.Context, b *Bookmark) error
 	GetByID(ctx context.Context, id string) (*Bookmark, error)
 	List(ctx context.Context, tenantID string, opts ListBookmarksOpts) ([]*Bookmark, error)
@@ -175,12 +277,28 @@ type BookmarkStore interface {
 	// bookmarks (any source) that reference the document. Empty if none.
 	// The indexer uses it to denormalize tags into chunks_fts for boosting.
 	TagsForDocument(ctx context.Context, tenantID, documentID string) ([]string, error)
+
+	// Count returns how many bookmarks the tenant has.
+	Count(ctx context.Context, tenantID string) (int, error)
+}
+
+// IngestResult reports what BookmarkStore.Ingest did about the bookmark's
+// document.
+type IngestResult struct {
+	DocumentState   DocState // the document's state after the ingest
+	DocumentCreated bool     // this call created the document
+	FetchJob        *Job     // enqueued for a document this call created; nil otherwise
 }
 
 // ListBookmarksOpts are filters for BookmarkStore.List. Empty fields mean
 // "no filter for that dimension." Pagination is cursor-based.
 type ListBookmarksOpts struct {
-	Source     string
+	Source string
+	// FolderPath matches that folder and every folder under it, on path
+	// segments and case-sensitively: "/Tech/AI" matches "/Tech/AI" and
+	// "/Tech/AI/Agents" but not "/Tech/AIRPLANES" or "/tech/ai". Every
+	// character is literal, a trailing "/" is ignored, and "/" alone is no
+	// filter.
 	FolderPath string
 	Limit      int    // 0 → impl default (50)
 	Cursor     string // opaque, from a previous result's NextCursor
@@ -221,8 +339,10 @@ type ChunkHit struct {
 // is matched against the document URL (there is no host column).
 type SearchFilters struct {
 	ContentType []string // documents.content_type IN (...)
-	Host        []string // URL host (http/https) IN (...)
-	Source      []string // EXISTS a bookmark with bookmarks.source IN (...)
+	// Host matches documents whose http or https URL has exactly this host,
+	// ASCII case-insensitively as DNS names are. Every character is literal.
+	Host   []string
+	Source []string // EXISTS a bookmark with bookmarks.source IN (...)
 	// ExcludeDocumentID drops one document from the results. Used by
 	// find-related to exclude the source document; not exposed through
 	// the public search API.
@@ -276,14 +396,26 @@ type ChunkStore interface {
 	// configured embedding dim. This is the corpus-wide input to clustering.
 	DocumentVectors(ctx context.Context, tenantID string) ([]DocVector, error)
 
+	// GetByIDs returns the chunks with the given IDs, in no particular
+	// order. IDs that match no chunk (a reindex replaced it since it was
+	// retrieved, say) are left out; none matching is an empty result, not
+	// an error.
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
 }
 
-// IsFinishedJobStatus reports whether status is terminal (done or failed).
-// Only finished jobs may be deleted: removing a pending or running job would
-// strand its document in pending with nothing left to move it on.
-func IsFinishedJobStatus(status string) bool {
-	return status == JobStatusDone || status == JobStatusFailed
+// DocumentJobPayload is the payload of a job that works on one document
+// (fetch and index).
+type DocumentJobPayload struct {
+	DocumentID string `json:"document_id"`
+}
+
+// NewDocumentJob builds a job of kind for one document, ready to enqueue.
+func NewDocumentJob(tenantID string, kind JobKind, documentID string) (*Job, error) {
+	payload, err := json.Marshal(DocumentJobPayload{DocumentID: documentID})
+	if err != nil {
+		return nil, fmt.Errorf("encode %s job payload: %w", kind, err)
+	}
+	return &Job{TenantID: tenantID, Kind: kind, Payload: payload}, nil
 }
 
 // JobQueue is the SQLite-backed work queue.
@@ -296,7 +428,7 @@ type JobQueue interface {
 	// ClaimNext atomically marks the next runnable job (status=pending,
 	// run_after<=now) as running, counts the attempt (attempts+1), and
 	// returns it. Returns ErrNotFound if nothing is runnable.
-	ClaimNext(ctx context.Context, kinds []string) (*Job, error)
+	ClaimNext(ctx context.Context, kinds []JobKind) (*Job, error)
 	// MarkDone sets a running job to done.
 	MarkDone(ctx context.Context, id string) error
 	// MarkFailed records errMsg on a running job and either sends it back to
@@ -317,8 +449,63 @@ type JobQueue interface {
 	// attempts. One with none left is set failed instead and returned, for the
 	// caller's permanent-failure cleanup; requeued counts the rest. kinds must
 	// be non-empty; jobs of other kinds are untouched.
-	RecoverOrphans(ctx context.Context, kinds []string) (failed []*Job, requeued int, err error)
+	RecoverOrphans(ctx context.Context, kinds []JobKind) (failed []*Job, requeued int, err error)
 	GetByID(ctx context.Context, id string) (*Job, error)
+}
+
+// JobStore is the queue as the API sees it: the claim-and-transition
+// methods workers use (JobQueue), plus listing, counts, metrics and
+// retention. Workers depend on JobQueue alone.
+type JobStore interface {
+	JobQueue
+	// ListWithDoc lists the tenant's jobs, most recently updated first, each
+	// joined to the document its payload names.
+	ListWithDoc(ctx context.Context, tenantID string, opts ListJobsOpts) ([]JobWithDoc, error)
+	// CountByStatus counts the tenant's jobs per status. Statuses with no
+	// jobs are absent from the map.
+	CountByStatus(ctx context.Context, tenantID string) (map[JobStatus]int, error)
+	// MetricsByKind reports per-kind durations and failures over jobs that
+	// finished within window, plus what is running right now.
+	MetricsByKind(ctx context.Context, tenantID string, window time.Duration) ([]KindMetrics, error)
+	// DeleteByStatus deletes the tenant's jobs in status, which must be a
+	// finished one (see JobStatus.IsFinished). Returns how many it deleted.
+	DeleteByStatus(ctx context.Context, tenantID string, status JobStatus) (int64, error)
+	// PruneOlderThan deletes the tenant's finished jobs last updated before
+	// the cutoff. Pending and running jobs are kept however old they are.
+	PruneOlderThan(ctx context.Context, tenantID string, before time.Time) (int64, error)
+}
+
+// ListJobsOpts filters JobStore.ListWithDoc. Empty fields mean "no filter
+// for that dimension".
+type ListJobsOpts struct {
+	Status JobStatus
+	Kind   JobKind
+	Limit  int // <= 0 means the impl default (50)
+}
+
+// JobWithDoc is a job plus the URL, title and current markdown path of the
+// document its payload names. All three are empty for a job without a
+// document (cluster) or whose document is gone.
+type JobWithDoc struct {
+	*Job
+	URL          string
+	Title        string
+	MarkdownPath string // relative to the content dir
+}
+
+// KindMetrics is the performance picture for one job kind over a window.
+// Durations run from started_at to updated_at and cover successful jobs
+// only: a failed job's time is dominated by retry backoff, not work.
+type KindMetrics struct {
+	Kind                 JobKind
+	Count                int // done + failed in the window
+	Failed               int
+	MeanMS               float64
+	P50MS                float64
+	P95MS                float64
+	P99MS                float64
+	Running              int // running now; not bounded by the window
+	OldestRunningSeconds int // age of the oldest running job
 }
 
 // ClusterRun is one execution of the clustering job. Clustering fully
@@ -327,7 +514,7 @@ type JobQueue interface {
 type ClusterRun struct {
 	ID           string
 	TenantID     string
-	Status       string          // running | done | failed
+	Status       ClusterRunStatus
 	Algo         string          // clusterer name, e.g. "knn-graph"
 	Params       json.RawMessage // clusterer params + the engine's "center"; nil means absent
 	NumDocuments int             // docs considered (those with vectors)
@@ -338,6 +525,15 @@ type ClusterRun struct {
 	FinishedAt   *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+// RunResult is the outcome FinishRun records for a clustering run.
+type RunResult struct {
+	Status       ClusterRunStatus // done or failed
+	NumDocuments int              // docs considered (those with vectors)
+	NumClusters  int
+	NumNoise     int     // docs left unclustered
+	Error        *string // set only for failed runs
 }
 
 // Cluster is one topic within a run: a labeled, sized group of documents.
@@ -379,13 +575,14 @@ type InsightStore interface {
 	// job retry is idempotent). Does not change the run's status.
 	ReplaceClusters(ctx context.Context, runID string, clusters []ClusterWithMembers) error
 
-	// FinishRun sets the terminal status (done|failed), the counts, and
-	// finished_at. errMsg is set only for failed runs.
-	FinishRun(ctx context.Context, runID, status string, numDocuments, numClusters, numNoise int, errMsg *string) error
+	// FinishRun records a run's outcome and sets finished_at. res.Status
+	// must be terminal (done or failed); anything else is an error and
+	// changes nothing. ErrNotFound if there is no such run.
+	FinishRun(ctx context.Context, runID string, res RunResult) error
 
 	// LatestRun returns the most recent run for the tenant matching status
 	// (empty status matches any). ErrNotFound if there is none.
-	LatestRun(ctx context.Context, tenantID, status string) (*ClusterRun, error)
+	LatestRun(ctx context.Context, tenantID string, status ClusterRunStatus) (*ClusterRun, error)
 
 	// GetRun returns a run by ID, or ErrNotFound.
 	GetRun(ctx context.Context, id string) (*ClusterRun, error)

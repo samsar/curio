@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 // Result is the per-fetch output the indexer needs.
@@ -24,7 +26,7 @@ type Result struct {
 	FinalURL string
 	// ContentType is one of the store.ContentType* constants. Anything else
 	// fails the documents CHECK constraint after a successful fetch.
-	ContentType string
+	ContentType store.ContentType
 	// Title is the extracted document title; empty if the fetcher could
 	// not determine one.
 	Title string

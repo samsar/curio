@@ -90,16 +90,16 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 	}
 	defer ln.Close()
 
-	db, err := sqlitestore.Open(home.DBPath())
+	db, err := sqlitestore.Open(ctx, home.DBPath())
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	if err := sqlitestore.Migrate(db); err != nil {
+	if err := sqlitestore.Migrate(ctx, db); err != nil {
 		return err
 	}
 	slog.Info("database ready", "path", home.DBPath())
-	syncMarkerSchemaVersion(home, db, meta)
+	syncMarkerSchemaVersion(ctx, home, db, meta)
 
 	d, err := newDaemon(ctx, cfg, home, db)
 	if err != nil {
@@ -158,8 +158,8 @@ func checkMarker(home *curiohome.Home, cfg config.Config) (curiohome.Meta, error
 
 // syncMarkerSchemaVersion copies the schema version the migrations landed
 // at into the marker file, so /v1/healthz reflects reality after upgrades.
-func syncMarkerSchemaVersion(home *curiohome.Home, db *sqlitestore.DB, meta curiohome.Meta) {
-	v, err := sqlitestore.ReadSchemaVersion(db)
+func syncMarkerSchemaVersion(ctx context.Context, home *curiohome.Home, db *sqlitestore.DB, meta curiohome.Meta) {
+	v, err := sqlitestore.ReadSchemaVersion(ctx, db)
 	if err != nil {
 		slog.Warn("read schema version", "err", err)
 		return

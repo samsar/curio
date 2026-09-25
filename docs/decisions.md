@@ -65,9 +65,10 @@ content on disk under `~/.curio/content/`.
 **Why:** Zero ops, fast for single-user, handles the job queue too. Content on
 disk keeps the DB small and lets `ripgrep` work against the corpus directly.
 
-**Forward compatibility:** All access goes through `DocumentStore`, `BM25Index`,
-`VectorIndex` interfaces. Postgres + pgvector impls land when hosted-mode
-demands them.
+**Forward compatibility:** All access goes through the `internal/store`
+interfaces (`DocumentStore`, `ChunkStore`, `JobStore`, ...), and a lint rule
+keeps it that way (see "Store boundary" below). Postgres + pgvector impls land
+when hosted-mode demands them.
 
 ---
 
@@ -2518,3 +2519,206 @@ are copied from real Chrome of each version, because the GREASE brand and
 the brand order change from one version to the next. The old 133 value
 had its brands in the wrong order.
 
+---
+
+## Store boundary: consumers see interfaces, depguard enforces it
+
+**Decision:**
+
+- Everything the API needs from storage is on the `internal/store`
+  interfaces. `DocumentStore` has `ListWithLastError`,
+  `ListIDsWithContent` and `CountByState`; `BookmarkStore` has `Count`; and
+  `JobStore` embeds `JobQueue` and adds `ListWithDoc`, `CountByStatus`,
+  `MetricsByKind`, `DeleteByStatus` and `PruneOlderThan`.
+- The queue interface is split by role. Workers (`jobs.Worker`,
+  `jobs.Deps`) take `JobQueue`, which only claims and transitions jobs; the
+  API takes `JobStore`.
+- List methods take options structs (`ListDocumentsOpts`, `ListJobsOpts`),
+  so a cursor can be added without another signature change.
+- depguard's `store-boundary` rule denies `internal/store/sqlite` to every
+  non-test file outside `cmd/curio-daemon`, the sqlite package itself and
+  the test-support packages (`internal/store/sqlite/sqlitetest`,
+  `internal/api/apitest`). Its `no-test-deps-in-prod` rule denies
+  `testing`, testify and those test-support packages to production code.
+- `/v1/stats` counts through these methods (`SELECT count(*)`, not a
+  listing) and answers 500 when a count fails.
+
+**Why:** `internal/api` imported the SQLite package and type-asserted the
+stores to concrete types in seven places to reach methods the interfaces
+lacked. Five fell back to a 501 that the one implementation never hit, and
+`/v1/stats` silently dropped the fields it couldn't count. A second
+implementation would have compiled and then served 501s. `/v1/stats` also
+counted bookmarks by decoding up to 100000 rows, on an endpoint
+`curio import --follow` polls every 2 s. Separately, `testutil.go` was a
+non-test file, so the daemon linked testify. Nothing stopped the next
+violation; the lint rules do.
+
+**Interfaces in `store`, not consumer-side interfaces in `api`:** every
+consumer (search, insight, jobs, api) already takes `store.*` interfaces,
+and a hosted implementation has to provide these methods to serve the API
+anyway.
+
+---
+
+## Documents: explicit Create and ApplyFetch, no upsert
+
+**Decision:** `DocumentStore` has no upsert. `Create` is a plain INSERT
+that returns `ErrConflict` for an existing `(tenant_id, url)`; ingest's
+get-or-create stays private to the store (see "Bookmark ingest" below).
+`ApplyFetch` is the only way a fetch result reaches the documents row: one
+UPDATE by id that points `current_extraction_id` at the new extraction,
+writes `content_type`, `url_canonical`, `title`, `author`, `language` and
+`published_at` exactly as given (nil writes NULL), and sets the state to
+`pending` until the index step marks it `fetched`.
+
+**Why:** `Upsert` served two callers with different needs. Its ON CONFLICT
+branch COALESCEd every nullable column, so a refetch could never clear an
+author or canonical URL left by an earlier extraction, yet it always
+overwrote `content_type` and `state` and quietly defaulted empty values;
+used as get-or-create, it could rewrite the state of a row another request
+had just created.
+
+**Verbatim writes:** those columns describe `current_extraction_id`, so a
+value the new extraction lacks must not survive from the old one. Clients
+already fall back to the URL or the bookmark title when `title` is NULL.
+`word_count` is left alone because no fetcher sets it.
+
+---
+
+## Bookmark ingest: one transaction, fetch only for new documents
+
+**Decision:** `POST /v1/bookmarks` and `POST /v1/bookmarks/import` save
+each bookmark through `BookmarkStore.Ingest`, one write-first transaction
+per bookmark:
+
+1. `INSERT INTO documents ... ON CONFLICT (tenant_id, url) DO NOTHING
+   RETURNING id, state`; no row back means the document exists, so it is
+   read.
+2. The bookmark is inserted linked to that document. `ON CONFLICT
+   (tenant_id, url, source) DO NOTHING` returning no row is `ErrConflict`,
+   and the rollback takes the document insert with it.
+3. A fetch job is inserted (through `insertJob`) only when step 1 created
+   the document.
+
+Either everything commits or nothing does. The create endpoint answers
+409 for a duplicate bookmark and returns `job_id: ""` with the existing
+document's `document_state` for a known URL; the import endpoint counts a
+duplicate as skipped and only new documents in `jobs_enqueued`. Fetch and
+index payloads are one type, `store.DocumentJobPayload`, built by
+`store.NewDocumentJob`.
+
+**Why:** the handlers ran GetByURL, Upsert, bookmark insert and enqueue as
+separate autocommit writes, and enqueued whenever the document was
+`pending`. Two failures followed:
+
+- An enqueue that failed after the bookmark committed left the document
+  `pending` with no job, for good: a retry of the create answered 409
+  before reaching the enqueue, and a re-import counted the row as skipped.
+  That is the stuck state the permanent-failure hook and `RequeueFetch`
+  exist to prevent.
+- One URL imported from Chrome, Safari and Firefox and then added by hand
+  got four fetch jobs, so every bookmark shared by synced browsers was
+  fetched and embedded again.
+
+**Fetch only when created:** no lookup of queued jobs is needed. A
+`pending` document already has its fetch or index job; a `fetched` one has
+its content; a `failed` or `dead` one is left to `curio refetch`, which
+knows the dead-link rules. Documents stranded `pending` by the old path are
+healed with `curio refetch --all --state=pending`.
+
+**One transaction per bookmark, not per batch:** measured at about 145 µs
+per bookmark, the same as the five autocommit statements it replaces, and
+it lets fetch and index workers interleave with a 500-bookmark batch. The
+write comes first so concurrent ingests queue on the write lock through
+busy_timeout (see "Job queue claim via atomic UPDATE ... RETURNING"); five
+writers ingesting the same URLs produced one document and one job per URL
+and no `SQLITE_BUSY`. The import handler stops at the first bookmark after
+the client has gone; each committed bookmark stands on its own, so a
+re-import resumes.
+
+URL normalization and `importer.Indexable` filtering stay in the handlers,
+which report failures differently (400 versus `filtered_by`).
+
+---
+
+## Migrate: goose's Provider, and a context all the way down
+
+**Decision:** `sqlite.Open`, `Migrate` and `ReadSchemaVersion` take a
+context (`PingContext`, `QueryRowContext`, `Provider.Up(ctx)`), and the
+daemon passes its run context. `Migrate` applies the embedded migrations
+through `goose.NewProvider`, never goose's package-level `SetBaseFS` /
+`SetDialect` / `Up`.
+
+**Why:** the package-level API reads and writes process globals, so two
+databases migrating at once race: four parallel test subtests that each
+built a database failed under `-race`. That kept every DB-backed test
+serial. The Provider holds its state per instance and is quiet unless
+asked (`WithVerbose`), which also ends goose's per-migration `OK` lines in
+test output. Both APIs use the same `goose_db_version` table, so existing
+homes migrate unchanged.
+
+**Shutdown during a migration:** a cancelled context fails `Migrate`, and
+the daemon exits as on any migration error, without reusing the handle
+(see "Migrations: rebuilding a table other tables reference").
+
+---
+
+## Folder and host filters: literal input, segment-boundary folders
+
+**Decision:**
+
+- The bookmark folder filter matches the folder itself or any folder under
+  it, on path segments and case-sensitively. It compares BINARY ranges
+  instead of using LIKE: `folder_path = p OR (folder_path >= p || '/' AND
+  folder_path < p || '0')`, where `p` is the input without a trailing `/`.
+  `'0'` is the byte after `/`, so the half-open range holds exactly the
+  paths under `p/`. `/` alone means no folder filter.
+- The search host filter keeps LIKE, since everything after the host is a
+  wildcard and DNS names are case-insensitive, but escapes the host's `%`,
+  `_` and `\` with `ESCAPE '\'` (`escapeLike` in `internal/store/sqlite`).
+
+**Why:** both filters pasted user input into a LIKE pattern. `/Tech/AI`
+matched `/Tech/AIRPLANES`, `/Tech/AI_x` and `/Tech/AI0`, and, because LIKE
+folds ASCII case, `/tech/ai/lower`; `/100% Reading` matched `/100X Reading`.
+The host filter is reachable from `curio search --host` and from the MCP
+`search_bookmarks` tool, where a model supplies the value: `_` matched any
+character and a host of `%` matched every document. The obvious fix,
+`folder_path = ? OR folder_path LIKE ? ESCAPE ...`, is still wrong: `=` is
+case-sensitive and LIKE is not, so `/tech/ai` would match
+`/Tech/AI/Agents` but not `/Tech/AI`. The range needs no escaping and can
+still use `idx_bookmarks_folder (tenant_id, folder_path)`.
+
+---
+
+## API: handler edge cases found by coverage
+
+**Decision:**
+
+- **Paging:** bookmarks, documents and jobs share one page-size rule:
+  `?limit` of 1 to 500 is honored, anything else means 50. The bookmark
+  list asks the store for one row more than the page and sets
+  `next_cursor` only when that row exists.
+- **Router errors are problems too:** an unknown route answers 404 and a
+  wrong method 405, both `application/problem+json`; the 405 carries an
+  `Allow` header. chi fills `Allow` only in its own 405 handler, and its
+  `Match` reports every method for a mount point such as
+  `/v1/bookmarks`, so the server keeps a mount-free copy of its routes
+  (built with `chi.Walk`) to answer which methods a path takes.
+- **Bookmark document lookups fail loudly:** listing or getting a
+  bookmark whose document can't be read is a 500, not a blank
+  `document_state`. `bookmarks.document_id` is `ON DELETE SET NULL`, so a
+  dangling ID is an inconsistency.
+- **Missing content is a 404:** `GET /v1/documents/{id}/content` for a
+  markdown file deleted from disk (which docs/data-model.md presents as
+  supported) answers 404 "refetch the document" instead of a 500 carrying
+  the absolute path.
+- **reindex-all only reindexes documents with content:** it validates
+  `?state` as refetch-all does (400 for an unknown state) and enqueues index
+  jobs only for documents in that state with a current extraction
+  (`DocumentStore.ListIDsWithContent`).
+
+**Why reindex-all needed the second half:** an index job for a document
+with no extraction fails permanently, and the permanent-failure hook then
+marks the document failed. So `curio reindex --all --state=pending` turned
+documents whose first fetch was still in flight into failed ones.
+Single-document reindex already refused such a document with 409.

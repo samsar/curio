@@ -118,3 +118,36 @@ func TestSearch_UnsupportedFieldsAreRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestRelatedDocuments(t *testing.T) {
+	s := newSearchServer(t, okEmbedder(), search.Config{})
+	var ids []string
+	rows, err := s.db.Query(`SELECT id FROM documents ORDER BY url`)
+	require.NoError(t, err)
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + ids[0] + "/related?k=5"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var got RelatedResponse
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+	assert.Equal(t, ids[0], got.DocID)
+	require.Len(t, got.Items, 2, "every other indexed document")
+	for _, hit := range got.Items {
+		assert.NotEqual(t, ids[0], hit.Document.ID)
+	}
+
+	unindexed := s.seedDocument(t, "https://example.com/unindexed", store.DocStatePending)
+	resp = s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + unindexed.ID + "/related"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+	assert.Empty(t, got.Items)
+
+	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/no-such-document/related"}),
+		http.StatusNotFound)
+}

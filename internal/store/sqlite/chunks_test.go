@@ -27,7 +27,7 @@ func seedDocs(t *testing.T, db *DB, tenantID string, urls ...string) []string {
 			URL:         u,
 			ContentType: store.ContentTypeArticle,
 		}
-		require.NoError(t, docs.Upsert(ctx, d))
+		require.NoError(t, docs.Create(ctx, d))
 
 		// Each test wants a current extraction to attach chunks to.
 		e := &store.DocumentExtraction{
@@ -39,7 +39,6 @@ func seedDocs(t *testing.T, db *DB, tenantID string, urls ...string) []string {
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, docs.SetCurrentExtraction(ctx, d.ID, e.ID))
 		out = append(out, d.ID)
-		_ = e
 	}
 	return out
 }
@@ -56,7 +55,7 @@ func fillVec(v float32) []float32 {
 
 func TestChunks_ReplaceForDocument_FullCycle(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/postgres-internals")
@@ -89,7 +88,7 @@ func TestChunks_ReplaceForDocument_FullCycle(t *testing.T) {
 
 func TestChunks_ReplaceForDocument_IsIdempotent(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/idem")
@@ -119,7 +118,7 @@ func TestChunks_ReplaceForDocument_IsIdempotent(t *testing.T) {
 
 func TestChunks_BM25_FiltersByTenant(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	idsA := seedDocs(t, db, "tenant_a", "https://a.example.com/x")
@@ -140,7 +139,7 @@ func TestChunks_BM25_FiltersByTenant(t *testing.T) {
 
 func TestChunks_Vector_FiltersByTenant(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	idsA := seedDocs(t, db, "tenant_a", "https://a.example.com/v")
@@ -156,7 +155,7 @@ func TestChunks_Vector_FiltersByTenant(t *testing.T) {
 }
 
 func TestChunks_DimensionMismatch(t *testing.T) {
-	ch := NewChunks(NewEphemeralDB(t), vecDim)
+	ch := NewChunks(newTestDB(t), vecDim)
 	err := ch.ReplaceForDocument(context.Background(), "doc", "ext", "", nil,
 		[]store.ChunkInput{{Text: "short", Embedding: []float32{0.1, 0.2, 0.3}}})
 	require.Error(t, err)
@@ -179,15 +178,17 @@ func latestExtractionID(t *testing.T, db *DB, documentID string) string {
 // narrow which documents come back.
 func TestChunks_SearchFilters(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docsStore := NewDocuments(db)
 	exts := NewExtractions(db)
 	bms := NewBookmarks(db)
 	ch := NewChunks(db, vecDim)
 
 	seeds := []struct {
-		url, ctype, source string
-		vec                float32
+		url    string
+		ctype  store.ContentType
+		source string
+		vec    float32
 	}{
 		{"https://example.com/k8s-guide", store.ContentTypeArticle, store.SourceChrome, 0.10},
 		{"https://github.com/foo/bar", store.ContentTypeRepo, store.SourceManual, 0.20},
@@ -196,7 +197,7 @@ func TestChunks_SearchFilters(t *testing.T) {
 	byURL := map[string]string{}
 	for _, s := range seeds {
 		d := &store.Document{TenantID: "local", URL: s.url, ContentType: s.ctype}
-		require.NoError(t, docsStore.Upsert(ctx, d))
+		require.NoError(t, docsStore.Create(ctx, d))
 		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, docsStore.SetCurrentExtraction(ctx, d.ID, e.ID))
@@ -223,8 +224,8 @@ func TestChunks_SearchFilters(t *testing.T) {
 		want   []string // expected URLs
 	}{
 		{"none", store.SearchFilters{}, []string{"https://example.com/k8s-guide", "https://github.com/foo/bar", "https://example.com/k8s.pdf"}},
-		{"ctype pdf", store.SearchFilters{ContentType: []string{store.ContentTypePDF}}, []string{"https://example.com/k8s.pdf"}},
-		{"ctype article+repo", store.SearchFilters{ContentType: []string{store.ContentTypeArticle, store.ContentTypeRepo}}, []string{"https://example.com/k8s-guide", "https://github.com/foo/bar"}},
+		{"ctype pdf", store.SearchFilters{ContentType: []string{string(store.ContentTypePDF)}}, []string{"https://example.com/k8s.pdf"}},
+		{"ctype article+repo", store.SearchFilters{ContentType: []string{string(store.ContentTypeArticle), string(store.ContentTypeRepo)}}, []string{"https://example.com/k8s-guide", "https://github.com/foo/bar"}},
 		{"source manual", store.SearchFilters{Source: []string{store.SourceManual}}, []string{"https://github.com/foo/bar"}},
 		{"host github", store.SearchFilters{Host: []string{"github.com"}}, []string{"https://github.com/foo/bar"}},
 		{"host example", store.SearchFilters{Host: []string{"example.com"}}, []string{"https://example.com/k8s-guide", "https://example.com/k8s.pdf"}},
@@ -252,7 +253,7 @@ func TestChunks_SearchFilters(t *testing.T) {
 
 func TestChunks_EmbeddingsForDocument_RoundTrip(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/roundtrip")
@@ -280,7 +281,7 @@ func TestChunks_EmbeddingsForDocument_RoundTrip(t *testing.T) {
 
 func TestChunks_EmbeddingsForDocument_EmptyForUnindexed(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/unindexed")
@@ -291,7 +292,7 @@ func TestChunks_EmbeddingsForDocument_EmptyForUnindexed(t *testing.T) {
 
 func TestChunks_VectorSearch_ExcludeDocument(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/self", "https://example.com/other")
@@ -313,4 +314,93 @@ func TestChunks_VectorSearch_ExcludeDocument(t *testing.T) {
 		assert.NotEqual(t, ids[0], h.DocumentID, "excluded document leaked into results")
 	}
 	assert.Equal(t, ids[1], hits[0].DocumentID)
+}
+
+// TestChunks_GetByIDs_MissingIDs: IDs that match no chunk are left out, and
+// none matching is an empty result, not an error. A reindex can replace a
+// document's chunks between retrieval and hydration.
+func TestChunks_GetByIDs_MissingIDs(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	ids := seedDocs(t, db, "local", "https://example.com/doc")
+	require.NoError(t, ch.ReplaceForDocument(ctx, ids[0], latestExtractionID(t, db, ids[0]), "", nil,
+		[]store.ChunkInput{{Text: "kept", Embedding: fillVec(0.1)}}))
+	hits, err := ch.BM25Search(ctx, "local", "kept", 10, store.SearchFilters{})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+
+	got, err := ch.GetByIDs(ctx, []string{"gone-1", hits[0].ChunkID, "gone-2"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "kept", got[0].Text)
+
+	got, err = ch.GetByIDs(ctx, []string{"gone-1", "gone-2"})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// TestChunks_HostFilter: the host is matched literally, so '_' and '%' in a
+// requested host are not wildcards, and case-insensitively, as DNS names
+// are. Both retrievers share the clause.
+func TestChunks_HostFilter(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	urls := []string{
+		"https://myxsite.com/a", "https://my_site.com/b",
+		"https://example.com/c", "http://example.com/d", "https://example.com.evil/e",
+	}
+	ids := seedDocs(t, db, "local", urls...)
+	byURL := map[string]string{}
+	for i, id := range ids {
+		byURL[urls[i]] = id
+		require.NoError(t, ch.ReplaceForDocument(ctx, id, latestExtractionID(t, db, id), "", nil,
+			[]store.ChunkInput{{Text: "shared term", Embedding: fillVec(0.1)}}))
+	}
+
+	cases := []struct {
+		host string
+		want []string
+	}{
+		{"my_site.com", []string{"https://my_site.com/b"}},
+		{"%", nil},
+		{"_yxsite.com", nil},
+		{"EXAMPLE.com", []string{"https://example.com/c", "http://example.com/d"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.host, func(t *testing.T) {
+			var want []string
+			for _, u := range tc.want {
+				want = append(want, byURL[u])
+			}
+			filters := store.SearchFilters{Host: []string{tc.host}}
+
+			bm, err := ch.BM25Search(ctx, "local", "shared", 50, filters)
+			require.NoError(t, err)
+			vec, err := ch.VectorSearch(ctx, "local", fillVec(0.1), 50, filters)
+			require.NoError(t, err)
+			for name, hits := range map[string][]store.ChunkHit{"bm25": bm, "vector": vec} {
+				var got []string
+				for _, h := range hits {
+					got = append(got, h.DocumentID)
+				}
+				assert.ElementsMatch(t, want, got, name)
+			}
+		})
+	}
+}
+
+func TestEscapeLike(t *testing.T) {
+	cases := map[string]string{
+		"plain.com":      "plain.com",
+		"my_site.com":    `my\_site.com`,
+		"100%":           `100\%`,
+		`back\slash`:     `back\\slash`,
+		`\%_`:            `\\\%\_`,
+		"https://h.com/": "https://h.com/",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, escapeLike(in), in)
+	}
 }

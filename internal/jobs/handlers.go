@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,16 +34,6 @@ type Deps struct {
 	Log         *slog.Logger
 }
 
-// FetchPayload is the JSON body of a fetch job.
-type FetchPayload struct {
-	DocumentID string `json:"document_id"`
-}
-
-// IndexPayload is the JSON body of an index job.
-type IndexPayload struct {
-	DocumentID string `json:"document_id"`
-}
-
 // Register wires the M0 handlers onto a worker. Also attaches
 // permanent-failure hooks so when a fetch or index job exhausts its
 // retries, the parent document transitions to state=failed instead of
@@ -66,9 +57,7 @@ func Register(w *Worker, d Deps) {
 // through jobs.Register.
 func MarkDocFailed(d Deps) PermFailHook {
 	return func(ctx context.Context, job *store.Job, cause error) error {
-		var payload struct {
-			DocumentID string `json:"document_id"`
-		}
+		var payload store.DocumentJobPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return fmt.Errorf("decode payload to mark doc failed: %w", err)
 		}
@@ -91,8 +80,8 @@ func MarkDocFailed(d Deps) PermFailHook {
 //  2. Call Fetcher.Fetch(ctx, document.URL).
 //  3. Write the resulting markdown to $CURIO_HOME/content/<doc>/<ext>.md.
 //  4. Create a document_extractions row pointing at that file.
-//  5. Update document with extracted title/author/content_type and set
-//     current_extraction_id.
+//  5. Apply the fetched metadata to the document and point
+//     current_extraction_id at the new extraction.
 //  6. Enqueue an index job for the same document.
 //
 // Idempotent on retry: each attempt creates a new extraction row (history)
@@ -100,20 +89,9 @@ func MarkDocFailed(d Deps) PermFailHook {
 // on disk for diff/history; can be GC'd by a future retention job.
 func FetchHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
-		var payload FetchPayload
-		if err := json.Unmarshal(job.Payload, &payload); err != nil {
-			return fmt.Errorf("%w: bad payload: %v", ErrPermanent, err)
-		}
-		if payload.DocumentID == "" {
-			return fmt.Errorf("%w: document_id required", ErrPermanent)
-		}
-
-		doc, err := d.Documents.GetByID(ctx, payload.DocumentID)
+		doc, err := loadJobDocument(ctx, d, job)
 		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("%w: document %s not found", ErrPermanent, payload.DocumentID)
-			}
-			return fmt.Errorf("load document: %w", err)
+			return err
 		}
 
 		f, err := d.Dispatcher.For(doc.URL)
@@ -159,7 +137,12 @@ func FetchHandler(d Deps) HandlerFunc {
 			MarkdownPath: &relPath,
 		}
 		if res.Meta != nil {
-			if b, err := json.Marshal(res.Meta); err == nil {
+			// Meta is diagnostic; one value JSON can't hold (a NaN, say)
+			// shouldn't cost the document its content.
+			if b, err := json.Marshal(res.Meta); err != nil {
+				d.Log.Warn("fetch: dropping extraction meta that doesn't encode",
+					"document_id", doc.ID, "fetcher", f.Name(), "err", err)
+			} else {
 				ext.ExtractionMeta = b
 			}
 		}
@@ -167,52 +150,67 @@ func FetchHandler(d Deps) HandlerFunc {
 			return fmt.Errorf("create extraction: %w", err)
 		}
 
-		// Refresh the document with extracted metadata. Upsert preserves
-		// (tenant_id, url) and updates content_type/title/author/state.
-		title := res.Title
-		var titlePtr *string
-		if title != "" {
-			titlePtr = &title
-		}
-		var authorPtr *string
-		if res.Author != "" {
-			authorPtr = &res.Author
-		}
-		var langPtr *string
-		if res.Language != "" {
-			langPtr = &res.Language
-		}
-		updated := &store.Document{
-			ID:                  doc.ID,
-			TenantID:            doc.TenantID,
-			URL:                 doc.URL,
-			ContentType:         defaultStr(res.ContentType, doc.ContentType),
-			Title:               titlePtr,
-			Author:              authorPtr,
-			Language:            langPtr,
-			PublishedAt:         res.PublishedAt,
-			State:               store.DocStatePending, // still pending until index step
-			CurrentExtractionID: &ext.ID,
-		}
-		if res.FinalURL != "" && res.FinalURL != doc.URL {
-			updated.URLCanonical = &res.FinalURL
-		}
-		if err := d.Documents.Upsert(ctx, updated); err != nil {
+		if err := d.Documents.ApplyFetch(ctx, doc.ID, fetchedMetadata(doc, res, ext.ID)); err != nil {
 			return fmt.Errorf("update document: %w", err)
 		}
 
-		// Enqueue the index step.
-		indexPayload, _ := json.Marshal(IndexPayload{DocumentID: doc.ID})
-		if err := d.Queue.Enqueue(ctx, &store.Job{
-			TenantID: doc.TenantID,
-			Kind:     store.JobKindIndex,
-			Payload:  indexPayload,
-		}); err != nil {
+		indexJob, err := store.NewDocumentJob(doc.TenantID, store.JobKindIndex, doc.ID)
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrPermanent, err)
+		}
+		if err := d.Queue.Enqueue(ctx, indexJob); err != nil {
 			return fmt.Errorf("enqueue index: %w", err)
 		}
 
 		return nil
 	}
+}
+
+// loadJobDocument loads the document a fetch or index job names. A payload
+// that names none, or a document that no longer exists, fails the job
+// permanently: retrying can't change either.
+func loadJobDocument(ctx context.Context, d Deps, job *store.Job) (*store.Document, error) {
+	var payload store.DocumentJobPayload
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("%w: bad payload: %w", ErrPermanent, err)
+	}
+	if payload.DocumentID == "" {
+		return nil, fmt.Errorf("%w: document_id required", ErrPermanent)
+	}
+	doc, err := d.Documents.GetByID(ctx, payload.DocumentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("%w: document %s not found", ErrPermanent, payload.DocumentID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load document: %w", err)
+	}
+	return doc, nil
+}
+
+// fetchedMetadata maps a fetch result onto the document columns it
+// describes. A fetcher that can't tell the content type keeps the
+// document's current one.
+func fetchedMetadata(doc *store.Document, res *fetcher.Result, extractionID string) store.FetchedMetadata {
+	m := store.FetchedMetadata{
+		ExtractionID: extractionID,
+		ContentType:  cmp.Or(res.ContentType, doc.ContentType),
+		Title:        nonEmpty(res.Title),
+		Author:       nonEmpty(res.Author),
+		Language:     nonEmpty(res.Language),
+		PublishedAt:  res.PublishedAt,
+	}
+	if res.FinalURL != doc.URL {
+		m.URLCanonical = nonEmpty(res.FinalURL)
+	}
+	return m
+}
+
+// nonEmpty is s as a nullable column value: nil when s is empty.
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // IndexHandler builds the closure that runs one index job:
@@ -223,20 +221,9 @@ func FetchHandler(d Deps) HandlerFunc {
 //  5. Mark document state=fetched.
 func IndexHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
-		var payload IndexPayload
-		if err := json.Unmarshal(job.Payload, &payload); err != nil {
-			return fmt.Errorf("%w: bad payload: %v", ErrPermanent, err)
-		}
-		if payload.DocumentID == "" {
-			return fmt.Errorf("%w: document_id required", ErrPermanent)
-		}
-
-		doc, err := d.Documents.GetByID(ctx, payload.DocumentID)
+		doc, err := loadJobDocument(ctx, d, job)
 		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("%w: document %s not found", ErrPermanent, payload.DocumentID)
-			}
-			return fmt.Errorf("load document: %w", err)
+			return err
 		}
 		if doc.CurrentExtractionID == nil {
 			return fmt.Errorf("%w: document %s has no current extraction", ErrPermanent, doc.ID)
@@ -288,11 +275,4 @@ func IndexHandler(d Deps) HandlerFunc {
 		}
 		return nil
 	}
-}
-
-func defaultStr(s, fallback string) string {
-	if s == "" {
-		return fallback
-	}
-	return s
 }

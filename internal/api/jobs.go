@@ -4,11 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/samsar/curio/internal/store"
-	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 )
 
 // JobResponse mirrors store.Job with timestamps as time.Time. Payload is
@@ -53,7 +51,7 @@ type DeleteJobsResponse struct {
 // genuinely what's wanted.
 func (d Deps) handleDeleteJobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	status := q.Get("status")
+	status := store.JobStatus(q.Get("status"))
 	olderThan := q.Get("older_than")
 
 	if status == "" && olderThan == "" {
@@ -66,27 +64,20 @@ func (d Deps) handleDeleteJobs(w http.ResponseWriter, r *http.Request) {
 			"specify only one of ?status or ?older_than")
 		return
 	}
-	if status != "" && !store.IsFinishedJobStatus(status) {
+	if status != "" && !status.IsFinished() {
 		writeProblem(w, http.StatusBadRequest, "bad request",
 			fmt.Sprintf("status %q: only finished jobs (done, failed) can be deleted; "+
 				"pending and running jobs are live work", status))
 		return
 	}
 
-	jq, ok := d.Queue.(*sqlitestore.Jobs)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"JobQueue impl does not expose delete")
-		return
-	}
-
 	if status != "" {
-		n, err := jq.DeleteByStatus(r.Context(), d.TenantID, status)
+		n, err := d.Queue.DeleteByStatus(r.Context(), d.TenantID, status)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, DeleteJobsResponse{Deleted: n, Mode: "status=" + status})
+		writeJSON(w, http.StatusOK, DeleteJobsResponse{Deleted: n, Mode: "status=" + string(status)})
 		return
 	}
 
@@ -97,7 +88,7 @@ func (d Deps) handleDeleteJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cutoff := time.Now().Add(-dur)
-	n, err := jq.PruneOlderThan(r.Context(), d.TenantID, cutoff)
+	n, err := d.Queue.PruneOlderThan(r.Context(), d.TenantID, cutoff)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -127,22 +118,11 @@ func parseExtendedDuration(s string) (time.Duration, error) {
 
 func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	status := q.Get("status") // e.g. "failed", "running"
-	kind := q.Get("kind")
-	limit := 50
-	if v := q.Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
-			limit = n
-		}
-	}
-
-	jq, ok := d.Queue.(*sqlitestore.Jobs)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"JobQueue impl does not expose listing")
-		return
-	}
-	jobs, err := jq.ListWithDoc(r.Context(), d.TenantID, status, kind, limit)
+	jobs, err := d.Queue.ListWithDoc(r.Context(), d.TenantID, store.ListJobsOpts{
+		Status: store.JobStatus(q.Get("status")),
+		Kind:   store.JobKind(q.Get("kind")),
+		Limit:  listLimit(r),
+	})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -153,8 +133,8 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	for _, j := range jobs {
 		item := JobResponse{
 			ID:        j.ID,
-			Kind:      j.Kind,
-			Status:    j.Status,
+			Kind:      string(j.Kind),
+			Status:    string(j.Status),
 			Attempts:  j.Attempts,
 			Payload:   j.Payload,
 			LastError: j.LastError,

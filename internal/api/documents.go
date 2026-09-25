@@ -1,20 +1,21 @@
 package api
 
 import (
+	"cmp"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/samsar/curio/internal/store"
-	"github.com/samsar/curio/internal/store/sqlite"
 )
 
 // DocumentResponse mirrors the openapi Document schema. tenant_id omitted.
@@ -103,22 +104,10 @@ type DocumentListResponse struct {
 }
 
 func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	state := q.Get("state")
-	limit := 50
-	if v := q.Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
-			limit = n
-		}
-	}
-
-	ds, ok := d.Documents.(*sqlite.Documents)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"DocumentStore impl does not expose listing")
-		return
-	}
-	docs, err := ds.ListWithLastError(r.Context(), d.TenantID, state, limit)
+	docs, err := d.Documents.ListWithLastError(r.Context(), d.TenantID, store.ListDocumentsOpts{
+		State: store.DocState(r.URL.Query().Get("state")),
+		Limit: listLimit(r),
+	})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -131,8 +120,8 @@ func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 			ID:          doc.ID,
 			URL:         doc.URL,
 			Title:       doc.Title,
-			ContentType: doc.ContentType,
-			State:       doc.State,
+			ContentType: string(doc.ContentType),
+			State:       string(doc.State),
 			LastError:   doc.LastError,
 			CreatedAt:   doc.CreatedAt,
 			UpdatedAt:   doc.UpdatedAt,
@@ -188,7 +177,7 @@ func (d Deps) handleRefetchDocument(w http.ResponseWriter, r *http.Request) {
 // given. Dead documents are left out: retrying confirmed dead links on every
 // bulk refetch wastes the whole retry budget per URL. Asking for ?state=dead
 // explicitly is the deliberate escape hatch.
-var refetchAllDefaultStates = []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed}
+var refetchAllDefaultStates = []store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed}
 
 // handleRefetchAll resets documents to pending and enqueues a fetch job for
 // each, all in one transaction: either every matching document is requeued
@@ -196,14 +185,14 @@ var refetchAllDefaultStates = []string{store.DocStatePending, store.DocStateFetc
 // fetcher change to rebuild the corpus. Returns 202 with the number of jobs
 // enqueued; there is no parent job to poll.
 func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
+	state, err := docStateParam(r)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "bad request", err.Error())
+		return
+	}
 	states := refetchAllDefaultStates
-	if s := r.URL.Query().Get("state"); s != "" {
-		if !validDocState(s) {
-			writeProblem(w, http.StatusBadRequest, "bad request",
-				fmt.Sprintf("state %q must be one of: pending, fetched, failed, dead", s))
-			return
-		}
-		states = []string{s}
+	if state != "" {
+		states = []store.DocState{state}
 	}
 
 	n, err := d.Documents.RequeueFetchByStates(r.Context(), d.TenantID, states)
@@ -214,12 +203,14 @@ func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": n})
 }
 
-func validDocState(s string) bool {
-	switch s {
-	case store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead:
-		return true
+// docStateParam reads ?state. Empty means the caller's default; a value
+// that isn't a document state is an error for a 400.
+func docStateParam(r *http.Request) (store.DocState, error) {
+	s := store.DocState(r.URL.Query().Get("state"))
+	if s != "" && !s.Valid() {
+		return "", fmt.Errorf("state %q must be one of: pending, fetched, failed, dead", s)
 	}
-	return false
+	return s, nil
 }
 
 // handleReindexDocument enqueues an index job for the document — re-chunking
@@ -247,24 +238,23 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": job.ID})
 }
 
-// handleReindexAll enqueues index jobs for documents that have content.
-// Defaults to state=fetched (the already-indexed set); ?state= overrides.
+// handleReindexAll enqueues index jobs for the documents in one state that
+// have content. Defaults to state=fetched (the already-indexed set); ?state=
+// overrides, validated as for refetch-all.
 // Use after swapping the embedding model (same dimension) or the chunker.
 //
 // Index jobs change no document state, so a partial run strands nothing;
 // it stops at the first failure and reports how far it got.
 func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
-	wantState := r.URL.Query().Get("state")
-	if wantState == "" {
-		wantState = store.DocStateFetched // only fetched docs have content to reindex
-	}
-	ds, ok := d.Documents.(*sqlite.Documents)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"DocumentStore impl does not expose bulk listing")
+	state, err := docStateParam(r)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "bad request", err.Error())
 		return
 	}
-	ids, err := ds.ListIDs(r.Context(), d.TenantID, wantState)
+	state = cmp.Or(state, store.DocStateFetched)
+	// Only documents with an extraction: an index job for one without would
+	// fail permanently and flip it to failed while its fetch is in flight.
+	ids, err := d.Documents.ListIDsWithContent(r.Context(), d.TenantID, state)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -279,14 +269,12 @@ func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": len(ids)})
 }
 
-// enqueueIndex enqueues an index job for a document. The payload is
-// jobs.IndexPayload's shape.
+// enqueueIndex enqueues an index job for a document.
 func (d Deps) enqueueIndex(ctx context.Context, docID string) (*store.Job, error) {
-	payload, err := json.Marshal(map[string]string{"document_id": docID})
+	job, err := store.NewDocumentJob(d.TenantID, store.JobKindIndex, docID)
 	if err != nil {
-		return nil, fmt.Errorf("encode index payload: %w", err)
+		return nil, err
 	}
-	job := &store.Job{TenantID: d.TenantID, Kind: store.JobKindIndex, Payload: payload}
 	if err := d.Queue.Enqueue(ctx, job); err != nil {
 		return nil, err
 	}
@@ -314,17 +302,22 @@ func (d Deps) handleGetDocumentContent(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusNotFound, "no content", "extraction has no markdown path")
 		return
 	}
-	fullPath := filepath.Join(d.Home.ContentDir(), *ext.MarkdownPath)
-	f, err := os.Open(fullPath)
+	f, err := os.Open(filepath.Join(d.Home.ContentDir(), *ext.MarkdownPath))
+	if errors.Is(err, fs.ErrNotExist) {
+		// Deleting content from disk is supported (docs/data-model.md).
+		writeProblem(w, http.StatusNotFound, "no content",
+			"the extracted markdown is missing on disk; refetch the document")
+		return
+	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	if _, err := copyAll(w, f); err != nil {
-		// Headers already flushed; nothing useful to surface.
-		return
+	if _, err := io.Copy(w, f); err != nil {
+		// The status line is out, so the client only sees a short body.
+		d.Log.Warn("stream document content", "document_id", doc.ID, "err", err)
 	}
 }
 
@@ -333,13 +326,13 @@ func documentToResponse(doc *store.Document) DocumentResponse {
 		ID:           doc.ID,
 		URL:          doc.URL,
 		URLCanonical: doc.URLCanonical,
-		ContentType:  doc.ContentType,
+		ContentType:  string(doc.ContentType),
 		Title:        doc.Title,
 		Author:       doc.Author,
 		PublishedAt:  doc.PublishedAt,
 		Language:     doc.Language,
 		WordCount:    doc.WordCount,
-		State:        doc.State,
+		State:        string(doc.State),
 		CreatedAt:    doc.CreatedAt,
 		UpdatedAt:    doc.UpdatedAt,
 	}

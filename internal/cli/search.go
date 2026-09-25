@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -50,7 +51,7 @@ func newSearchCmd() *cobra.Command {
 			for _, w := range res.Warnings {
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
 			}
-			renderSearchResults(res)
+			renderSearchResults(cmd.OutOrStdout(), res)
 			return nil
 		},
 	}
@@ -61,26 +62,26 @@ func newSearchCmd() *cobra.Command {
 	return cmd
 }
 
-func renderSearchResults(res *client.SearchResponse) {
+func renderSearchResults(w io.Writer, res *client.SearchResponse) {
 	if len(res.Items) == 0 {
-		fmt.Printf("no results for %q\n", res.Query)
+		fmt.Fprintf(w, "no results for %q\n", res.Query)
 		return
 	}
-	fmt.Printf("%d results for %q  (BM25: %d, vector: %d)\n\n",
+	fmt.Fprintf(w, "%d results for %q  (BM25: %d, vector: %d)\n\n",
 		len(res.Items), res.Query, res.BM25Hits, res.VectorHits)
 	for i, hit := range res.Items {
 		title := hit.Document.URL
 		if hit.Document.Title != nil && *hit.Document.Title != "" {
 			title = *hit.Document.Title
 		}
-		fmt.Printf("%2d. %s\n", i+1, title)
-		fmt.Printf("    %s   (score %.4f)\n", hit.Document.URL, hit.Score)
+		fmt.Fprintf(w, "%2d. %s\n", i+1, title)
+		fmt.Fprintf(w, "    %s   (score %.4f)\n", hit.Document.URL, hit.Score)
 		// Doc ID and on-disk path for direct follow-up: open the file,
 		// run `curio docs show <id>`, or `curio refetch <id>` without
 		// going hunting.
-		fmt.Printf("    doc_id: %s\n", hit.Document.ID)
+		fmt.Fprintf(w, "    doc_id: %s\n", hit.Document.ID)
 		if hit.MarkdownPath != "" {
-			fmt.Printf("    path:   %s\n", hit.MarkdownPath)
+			fmt.Fprintf(w, "    path:   %s\n", hit.MarkdownPath)
 		}
 		if len(hit.Matches) > 0 {
 			m := hit.Matches[0]
@@ -93,10 +94,10 @@ func renderSearchResults(res *client.SearchResponse) {
 			// terminals; the `--content` flag on `curio docs show`
 			// is the right tool for the full body.
 			for _, line := range wrapLines(snippet, 100) {
-				fmt.Printf("    %s\n", line)
+				fmt.Fprintf(w, "    %s\n", line)
 			}
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -192,9 +191,4 @@ func (d Deps) handleRelatedDocuments(w http.ResponseWriter, r *http.Request) {
 // missing/invalid data.
 func decodeMetaJSON(raw []byte, out *map[string]any) error {
 	return json.Unmarshal(raw, out)
-}
-
-// copyAll wraps io.Copy and returns just the error.
-func copyAll(w io.Writer, r io.Reader) (int64, error) {
-	return io.Copy(w, r)
 }

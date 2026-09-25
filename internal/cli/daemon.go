@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 
 	"github.com/spf13/cobra"
@@ -35,7 +34,7 @@ func newDaemonStartCmd() *cobra.Command {
 			if err := ctx.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			fmt.Println("daemon running")
+			fmt.Fprintln(cmd.OutOrStdout(), "daemon running")
 			return nil
 		},
 	}
@@ -56,7 +55,7 @@ func newDaemonStopCmd() *cobra.Command {
 			if err := ctx.Controller.Stop(cmd.Context()); err != nil {
 				return err
 			}
-			fmt.Println("daemon stopped")
+			fmt.Fprintln(cmd.OutOrStdout(), "daemon stopped")
 			return nil
 		},
 	}
@@ -72,14 +71,14 @@ func newDaemonStatusCmd() *cobra.Command {
 				return errors.New("no context")
 			}
 			if ctx.Controller == nil {
-				fmt.Println("not running (no $CURIO_HOME)")
+				fmt.Fprintln(cmd.OutOrStdout(), "not running (no $CURIO_HOME)")
 				return nil
 			}
 			st, err := ctx.Controller.Status(cmd.Context())
 			if err != nil {
 				return err
 			}
-			fmt.Println(describeDaemonStatus(st, ctx.Home.Path))
+			fmt.Fprintln(cmd.OutOrStdout(), describeDaemonStatus(st, ctx.Home.Path))
 			return nil
 		},
 	}
@@ -125,9 +124,9 @@ func newDaemonLogsCmd() *cobra.Command {
 				args = append(args, "-f")
 			}
 			args = append(args, logPath)
-			c := exec.Command("tail", args...)
-			c.Stdout = os.Stdout
-			c.Stderr = os.Stderr
+			c := exec.CommandContext(cmd.Context(), "tail", args...)
+			c.Stdout = cmd.OutOrStdout()
+			c.Stderr = cmd.ErrOrStderr()
 			return c.Run()
 		},
 	}

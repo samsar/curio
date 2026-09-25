@@ -100,7 +100,7 @@ Only host-wide verdicts are cached (`hostVerdict`): unreachable (NXDOMAIN, `ECON
 
 ## Code layout pointers
 
-- `internal/store/` — interfaces (`store.go`) + sqlite impls (`sqlite/`). The interface boundary is real; other packages should never import `internal/store/sqlite` directly except `cmd/curio-daemon/main.go` and tests.
+- `internal/store/` — interfaces (`store.go`) + sqlite impls (`sqlite/`). The interface boundary is real and depguard enforces it (`.golangci.yml`): the only non-test importers of `internal/store/sqlite` besides `cmd/curio-daemon` are the test-support packages `internal/store/sqlite/sqlitetest` (`NewDB`: a migrated throwaway database) and `internal/api/apitest` (`Start`: the real API on a loopback port, for client and CLI tests). Workers take `store.JobQueue`; the API takes `store.JobStore`, which adds listing, counts, metrics and retention.
 - `internal/jobs/` — Worker loop + handlers. `OnPermanentFailure` hooks are wired in `Register`.
 - `internal/api/` — HTTP handlers, RFC 7807 errors, chi router.
 - `internal/config/` — `config.yaml` loader. Decoding is strict: an unknown key fails the load. `daemon.workers` is a deprecated alias that `Load` folds into `fetch_workers`/`index_workers`; `Validate` never mutates. `embedding.dim` must equal `store.EmbeddingDim` (768).
