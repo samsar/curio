@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"cmp"
 	"strings"
 	"testing"
 	"unicode"
@@ -223,6 +224,12 @@ func FuzzChunkText(f *testing.F) {
 	f.Add("a "+strings.Repeat("😀", 50)+" b", uint16(4), uint16(3), uint16(1))
 	f.Add("x\r\n\r\n## h\n## i\n\nbody ![a](data:image/png;base64,AAAA) end", uint16(16), uint16(2), uint16(5))
 	f.Fuzz(func(t *testing.T, md string, sizeChars, sizeTokens, overlap uint16) {
+		// With overlap close to the chunk size, each chunk advances by only
+		// a word or two, so the output grows as words × size and the fuzzer
+		// spends its time on output volume instead of new inputs. Half the
+		// size still exercises overlap.
+		size := cmp.Or(int(sizeTokens), 384)
+		overlap %= uint16(size/2 + 1)
 		chunks := ChunkText(md, ChunkOptions{
 			SizeTokens:    int(sizeTokens),
 			OverlapTokens: int(overlap),

@@ -180,9 +180,10 @@ func TestGenerate_CallerCancelStopsPromptly(t *testing.T) {
 		cancel()
 	}()
 
+	g := newGen(t, OllamaOptions{BaseURL: f.url})
 	done := make(chan error, 1)
 	go func() {
-		_, err := newGen(t, OllamaOptions{BaseURL: f.url}).Generate(ctx, "p", Options{})
+		_, err := g.Generate(ctx, "p", Options{})
 		done <- err
 	}()
 	select {
