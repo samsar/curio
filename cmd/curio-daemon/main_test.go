@@ -152,6 +152,63 @@ func TestRun_BindFailureLeavesJobsAlone(t *testing.T) {
 	require.NoError(t, lock.Release())
 }
 
+// recorder is a slog handler that keeps every record.
+type recorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (*recorder) Enabled(context.Context, slog.Level) bool { return true }
+func (r *recorder) WithAttrs([]slog.Attr) slog.Handler     { return r }
+func (r *recorder) WithGroup(string) slog.Handler          { return r }
+
+func (r *recorder) Handle(_ context.Context, rec slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, rec.Clone())
+	return nil
+}
+
+// recordLogs sends the default logger to a recorder until the test ends.
+func recordLogs(t *testing.T) *recorder {
+	t.Helper()
+	rec := &recorder{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return rec
+}
+
+// TestRun_EmbeddingMismatchRefusesToStart: a config whose embedding model
+// differs from the one the home's vectors were made with stops the daemon
+// before it touches the database, with one error that names both sides and
+// the fix, and nothing logged on the way.
+func TestRun_EmbeddingMismatchRefusesToStart(t *testing.T) {
+	home := newHome(t, freeLoopbackAddr(t))
+	cfg, err := os.ReadFile(home.ConfigPath())
+	require.NoError(t, err)
+	cfg = []byte(strings.Replace(string(cfg), "embedding:\n", "embedding:\n  model: mxbai-embed-large\n", 1))
+	require.NoError(t, os.WriteFile(home.ConfigPath(), cfg, 0o600))
+	seeded := seedJobs(t, home)
+	logs := recordLogs(t)
+
+	err = run(context.Background(), new(slog.LevelVar))
+	require.Error(t, err)
+	for _, want := range []string{
+		home.ConfigPath(), `"mxbai-embed-large" (dim 768)`,
+		home.MarkerPath(), `"nomic-embed-text" (dim 768)`,
+		"set embedding.model and embedding.dim back", "different CURIO_HOME",
+		`"Embedding model swap"`,
+	} {
+		assert.Contains(t, strings.ToLower(err.Error()), strings.ToLower(want))
+	}
+	assert.NotContains(t, err.Error(), "--reason")
+	assertJobsUntouched(t, home, seeded)
+	for _, r := range logs.records {
+		assert.Less(t, r.Level, slog.LevelWarn, "logged %q; main logs the returned error once", r.Message)
+	}
+}
+
 // runDaemon starts run in the background and waits until it answers
 // /v1/healthz. stop cancels it and waits for run to return cleanly.
 func runDaemon(t *testing.T, listen string) (health *client.Health, stop func()) {
@@ -238,6 +295,9 @@ func TestRun_SyncsMarkerSchemaVersion(t *testing.T) {
 	require.NoError(t, err)
 	meta.SchemaVersion = 4
 	require.NoError(t, home.WriteMeta(meta))
+	meta, err = home.Meta()
+	require.NoError(t, err)
+	written := meta.UpdatedAt
 
 	health, stop := runDaemon(t, listen)
 	stop()
@@ -248,6 +308,7 @@ func TestRun_SyncsMarkerSchemaVersion(t *testing.T) {
 	meta, err = home.Meta()
 	require.NoError(t, err)
 	assert.Equal(t, latest, meta.SchemaVersion)
+	assert.True(t, meta.UpdatedAt.After(written), "the sync stamps the marker")
 }
 
 // TestDrain: shutdown waits for the workers up to the grace period, then

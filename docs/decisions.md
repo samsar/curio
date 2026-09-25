@@ -122,6 +122,17 @@ dimension is unchanged. All embedding access already goes through the
 `Embedder` interface, so the swap stays tractable. Future enhancement: run two
 embedders side-by-side during a transition. Not needed for v1.
 
+**Revised (2026-09):** The startup guard exists: `checkMarker` in
+`cmd/curio-daemon` refuses to start when `config.yaml`'s `embedding.model` or
+`embedding.dim` differs from `.curio-meta.json`, with one error naming both
+files and values and the fix (set them back, or use another `CURIO_HOME`).
+It refuses *any* change, same dimension included, so `reindex` does not
+enable a swap: the daemon won't run under the new model to reindex with it.
+`reindex` re-embeds with the configured model, for chunker and prefix
+changes and new tags. A supported swap (update the marker, rebuild
+`chunks_vec`, reindex, all behind the guard) is future work, tracked in
+`docs/roadmap.md`. There is no `--reason` flag.
+
 ---
 
 ## Daemon lifecycle: PID file + auto-start

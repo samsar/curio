@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -104,11 +105,15 @@ func TestWriteMeta_AtomicAndRoundTrips(t *testing.T) {
 	h, err := Init(dir, "m1", 100)
 	require.NoError(t, err)
 
+	stale := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	updated := Meta{
 		SchemaVersion:  2,
 		EmbeddingModel: "voyage-3",
 		EmbeddingDim:   1024,
+		CreatedAt:      stale,
+		UpdatedAt:      stale,
 	}
+	before := time.Now().UTC()
 	require.NoError(t, h.WriteMeta(updated))
 
 	got, err := h.Meta()
@@ -116,7 +121,8 @@ func TestWriteMeta_AtomicAndRoundTrips(t *testing.T) {
 	assert.Equal(t, 2, got.SchemaVersion)
 	assert.Equal(t, "voyage-3", got.EmbeddingModel)
 	assert.Equal(t, 1024, got.EmbeddingDim)
-	assert.False(t, got.UpdatedAt.IsZero(), "WriteMeta should populate UpdatedAt if zero")
+	assert.Equal(t, stale, got.CreatedAt, "CreatedAt is the caller's")
+	assert.False(t, got.UpdatedAt.Before(before), "every write stamps UpdatedAt, whatever the caller passed")
 
 	// No leftover .tmp file
 	_, err = os.Stat(h.MarkerPath() + ".tmp")

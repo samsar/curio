@@ -146,24 +146,25 @@ func openHome() (*curiohome.Home, error) {
 	return curiohome.Init(homePath, defaults.Model, defaults.Dim)
 }
 
-// checkMarker cross-checks the marker file against config. If they
-// disagree, the user changed the embedding config without reindexing.
+// checkMarker refuses to start when config.yaml's embedding model or
+// dimension differs from the ones the home was created with, recorded in
+// the marker: every stored vector came from that model, and searching them
+// with another model's query vectors returns noise.
 func checkMarker(home *curiohome.Home, cfg config.Config) (curiohome.Meta, error) {
 	meta, err := home.Meta()
 	if err != nil {
 		return curiohome.Meta{}, err
 	}
-	if meta.EmbeddingModel != cfg.Embedding.Model || meta.EmbeddingDim != cfg.Embedding.Dim {
-		slog.Warn("embedding model/dim mismatch between config and marker",
-			"config_model", cfg.Embedding.Model,
-			"config_dim", cfg.Embedding.Dim,
-			"marker_model", meta.EmbeddingModel,
-			"marker_dim", meta.EmbeddingDim,
-		)
-		slog.Warn("run `curio reindex --reason=model-swap` (not yet implemented) before continuing")
-		return curiohome.Meta{}, errors.New("embedding config/marker mismatch")
+	if meta.EmbeddingModel == cfg.Embedding.Model && meta.EmbeddingDim == cfg.Embedding.Dim {
+		return meta, nil
 	}
-	return meta, nil
+	return curiohome.Meta{}, fmt.Errorf("embedding model mismatch: %s sets embedding.model %q (dim %d), "+
+		"but this home's vectors were made with %q (dim %d), as recorded in %s. "+
+		"Set embedding.model and embedding.dim back to the recorded values, or use a different CURIO_HOME; "+
+		"switching an existing home's embedding model isn't supported "+
+		`(see docs/decisions.md "Embedding model swap")`,
+		home.ConfigPath(), cfg.Embedding.Model, cfg.Embedding.Dim,
+		meta.EmbeddingModel, meta.EmbeddingDim, home.MarkerPath())
 }
 
 // syncMarkerSchemaVersion copies the schema version the migrations left the
