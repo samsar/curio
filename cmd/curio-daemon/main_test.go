@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
@@ -369,8 +370,8 @@ func waitMigrating(t *testing.T, c *client.Client) *client.Startup {
 }
 
 // rawGet sends a GET to the daemon at listen with extra headers, and
-// returns the status and body.
-func rawGet(t *testing.T, listen, path string, header http.Header) (int, string) {
+// returns the status, headers and body.
+func rawGet(t *testing.T, listen, path string, header http.Header) (status int, respHeader http.Header, body string) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, "http://"+listen+path, nil)
 	require.NoError(t, err)
@@ -381,9 +382,9 @@ func rawGet(t *testing.T, listen, path string, header http.Header) (int, string)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	return resp.StatusCode, string(body)
+	return resp.StatusCode, resp.Header, string(b)
 }
 
 // TestRun_AnswersWhileMigrating: from the bind on, a daemon migrating its
@@ -405,13 +406,14 @@ func TestRun_AnswersWhileMigrating(t *testing.T) {
 
 	_, err := c.Stats(context.Background())
 	require.ErrorIs(t, err, client.ErrStarting)
-	status, body := rawGet(t, listen, "/v1/stats", nil)
+	status, header, body := rawGet(t, listen, "/v1/stats", nil)
 	assert.Equal(t, http.StatusServiceUnavailable, status)
+	assert.Equal(t, "1", header.Get("Retry-After"))
 	assert.NotContains(t, body, `"pid"`)
-	status, body = rawGet(t, listen, "/v1/healthz", http.Header{"Host": {"attacker.example:" + strings.Split(listen, ":")[1]}})
+	status, _, body = rawGet(t, listen, "/v1/healthz", http.Header{"Host": {"attacker.example:" + strings.Split(listen, ":")[1]}})
 	assert.Equal(t, http.StatusForbidden, status)
 	assert.NotContains(t, body, `"pid"`)
-	status, body = rawGet(t, listen, "/v1/healthz", http.Header{"Origin": {"https://attacker.example"}})
+	status, _, body = rawGet(t, listen, "/v1/healthz", http.Header{"Origin": {"https://attacker.example"}})
 	assert.Equal(t, http.StatusForbidden, status)
 	assert.NotContains(t, body, `"pid"`)
 	release()
@@ -427,6 +429,69 @@ func TestRun_AnswersWhileMigrating(t *testing.T) {
 
 	r.cancel()
 	require.NoError(t, r.wait(t, 30*time.Second))
+}
+
+// TestRun_CreatingTheSchemaIsNotMigrating: a new database's schema is
+// created in the initializing phase. It takes milliseconds, and a daemon
+// reporting a migration has every waiting client tell its user to expect a
+// wait. The database starts as goose leaves a new one just before its first
+// migration, with only goose's version table, at version 0, so the held
+// write lock stops the daemon in that migration.
+func TestRun_CreatingTheSchemaIsNotMigrating(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	p, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations.FS)
+	require.NoError(t, err)
+	_, err = p.GetDBVersion(context.Background()) // creates the version table
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	logs := recordLogs(t)
+	release := holdWriteLock(t, home)
+	r := startRun(t)
+	c := client.New("http://" + listen)
+
+	require.Eventually(t, func() bool { return len(logs.messages("applying migration")) > 0 },
+		10*time.Second, 10*time.Millisecond, "the daemon reaches the first migration")
+	_, err = c.Healthz(context.Background())
+	st := client.StartupOf(err)
+	require.NotNil(t, st, "a starting daemon's answer, got %v", err)
+	assert.Equal(t, client.PhaseInitializing, st.Phase)
+	assert.Nil(t, st.Migrations)
+	release()
+
+	require.Eventually(t, func() bool {
+		_, err := c.Healthz(context.Background())
+		return err == nil
+	}, 10*time.Second, 20*time.Millisecond)
+	r.cancel()
+	require.NoError(t, r.wait(t, 30*time.Second))
+}
+
+// TestStart_InitializingOnceMigrated: once its migrations are applied, a
+// starting daemon reports it is initializing for the rest of its startup,
+// not "migrating, 6 of 6 applied", and clients go back to polling it at
+// the pace for a start that is nearly done.
+func TestStart_InitializingOnceMigrated(t *testing.T) {
+	home := newHome(t, freeLoopbackAddr(t))
+	migrateTo(t, home, 4)
+	cfg, err := config.Load(home.ConfigPath())
+	require.NoError(t, err)
+	meta, err := home.Meta()
+	require.NoError(t, err)
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	logs := recordLogs(t)
+	startup := api.NewStartup()
+
+	_, err = start(context.Background(), cfg, home, meta, db, startup)
+	require.NoError(t, err)
+	require.NotEmpty(t, logs.messages("migration applied"), "the daemon migrated")
+	phase, progress := startup.Progress()
+	assert.Equal(t, api.PhaseInitializing, phase)
+	assert.Nil(t, progress)
 }
 
 // TestRun_FailureAfterBindStopsServing: a daemon that fails after binding

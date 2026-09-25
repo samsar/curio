@@ -72,8 +72,8 @@ func (s *Startup) SetInitializing() {
 	s.phase = PhaseInitializing
 }
 
-// progress returns the phase and, while migrating, how far along it is.
-func (s *Startup) progress() (Phase, *MigrationProgress) {
+// Progress returns the phase and, while migrating, how far along it is.
+func (s *Startup) Progress() (Phase, *MigrationProgress) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.phase != PhaseMigrating {
@@ -124,7 +124,7 @@ type startingAPI struct {
 // identify answers /v1/healthz: the starting problem, with the daemon's
 // identity and progress.
 func (s startingAPI) identify(w http.ResponseWriter, r *http.Request) {
-	phase, migrations := s.startup.progress()
+	phase, migrations := s.startup.Progress()
 	p := startingProblem(r, phase, migrations)
 	w.Header().Set("Retry-After", startingRetryAfter)
 	sendProblem(w, p, Starting{
@@ -139,7 +139,7 @@ func (s startingAPI) identify(w http.ResponseWriter, r *http.Request) {
 
 // refuse answers any other request: the starting problem alone.
 func (s startingAPI) refuse(w http.ResponseWriter, r *http.Request) {
-	phase, migrations := s.startup.progress()
+	phase, migrations := s.startup.Progress()
 	p := startingProblem(r, phase, migrations)
 	w.Header().Set("Retry-After", startingRetryAfter)
 	sendProblem(w, p, p)
