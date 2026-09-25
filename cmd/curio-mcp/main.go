@@ -167,6 +167,9 @@ func getDocHandler(c *client.Client) mcp.ToolHandlerFor[getDocInput, getDocOutpu
 			return nil, getDocOutput{}, errors.New("id is required")
 		}
 		doc, err := c.GetDocument(ctx, in.ID)
+		if client.IsNotFound(err) {
+			return nil, getDocOutput{}, fmt.Errorf("document %q not found", in.ID)
+		}
 		if err != nil {
 			return nil, getDocOutput{}, fmt.Errorf("get document: %w", err)
 		}
@@ -174,15 +177,18 @@ func getDocHandler(c *client.Client) mcp.ToolHandlerFor[getDocInput, getDocOutpu
 			DocID: doc.ID, Title: docTitle(*doc), URL: doc.URL,
 			ContentType: doc.ContentType, State: doc.State,
 		}
-		// Content is best-effort: a doc may not have an extraction yet.
-		if md, cerr := c.GetDocumentContent(ctx, in.ID); cerr == nil {
-			out.Markdown = md
+		// A document that hasn't been fetched yet has no content, so a 404
+		// here is an answer. Any other failure is reported, not passed off
+		// as a document without content.
+		out.Markdown, err = c.GetDocumentContent(ctx, in.ID)
+		if err != nil && !client.IsNotFound(err) {
+			return nil, getDocOutput{}, fmt.Errorf("get the content of document %q: %w", in.ID, err)
 		}
-		text := out.Markdown
-		if text == "" {
-			text = fmt.Sprintf("# %s\n%s\n\n(no extracted content available; document state: %s)", out.Title, out.URL, out.State)
+		if out.Markdown == "" {
+			return textResult(fmt.Sprintf("# %s\n%s\n\n(no extracted content available; document state: %s)",
+				out.Title, out.URL, out.State)), out, nil
 		}
-		return textResult(text), out, nil
+		return textResult(out.Markdown), out, nil
 	}
 }
 

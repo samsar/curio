@@ -27,7 +27,7 @@ type ImportBookmark struct {
 	Title      string    `json:"title,omitempty"`
 	FolderPath string    `json:"folder_path,omitempty"`
 	Tags       []string  `json:"tags,omitempty"`
-	SavedAt    time.Time `json:"saved_at,omitempty"`
+	SavedAt    time.Time `json:"saved_at,omitzero"` // zero (absent) means now
 }
 
 // ImportResponse summarizes what happened. Counts always present, errors

@@ -3229,3 +3229,42 @@ path doubled: `open /x.html: open /x.html: no such file or directory`.
 Twenty-four call sites repeated `getCtx` and a "no context" error, and
 ten checked for a nil home or controller that `buildContext` could no
 longer return.
+
+---
+
+## Client errors: a typed APIError, and "unreachable" means never connected
+
+**Decision:**
+
+- `internal/client` returns `*client.APIError{Status, Problem}` for every
+  non-2xx answer, `GetDocumentContent` included; callers branch with
+  `errors.As` (or `client.IsNotFound`). Its message is the problem's detail,
+  or its title; a 5xx adds the request ID and a pointer to
+  `curio daemon logs`. A body that isn't `application/problem+json` becomes
+  the status text with the body as the detail. Error bodies are read
+  through a 64 KiB limit, and every body is drained before it is closed so
+  the loopback connection is reused.
+- `ErrDaemonUnreachable` wraps only a failure to connect (a `*net.OpError`
+  whose `Op` is `dial`, while the caller's context is still live), as
+  `fmt.Errorf("%w: %w", ErrDaemonUnreachable, err)`. Any other transport
+  error is returned as `http.Client`'s `*url.Error`, which names the method
+  and URL and wraps `context.DeadlineExceeded` or `context.Canceled` when
+  that is the cause.
+- Callers that used to mask errors now look at them: the MCP
+  `get_document` tool treats only a content 404 as "no extracted content";
+  `curio docs show --content` prints "(no extracted content yet)" for it;
+  `curio status` says "not running" only for `ErrDaemonUnreachable`; and
+  `curio doctor` tells an unreachable daemon from one whose healthz failed.
+- `ImportBookmark.SavedAt` is `omitzero`, so a bookmark without a date is
+  sent without `saved_at` instead of as year 1.
+
+**Why:** Every transport failure was reported as "daemon unreachable",
+timeouts included, with the cause formatted away (`%v`):
+`errors.Is(err, context.DeadlineExceeded)` was false for a deadline.
+Non-2xx answers were `HTTP 404: {"type":"about:blank",...}` strings read
+with an unbounded `io.ReadAll`, so the CLI printed raw JSON and tests
+matched on "404". The MCP sidecar discarded every content error, so a
+daemon 500 or timeout reached the model as "(no extracted content
+available)". Unreachable has to mean "never connected" because the sidecar
+restarts the daemon and resends on it (see the next entry), which is safe
+only for a request no daemon received.

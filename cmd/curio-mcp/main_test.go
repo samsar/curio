@@ -54,6 +54,24 @@ func fakeDaemon(t *testing.T, lastSearch *atomic.Value) *httptest.Server {
 			"content_type": "article", "state": "fetched",
 		})
 	})
+	// doc-unfetched has no content yet; doc-broken's content fails to load;
+	// doc-missing doesn't exist.
+	for _, id := range []string{"doc-unfetched", "doc-broken"} {
+		mux.HandleFunc("/v1/documents/"+id, func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": id, "url": "https://example.com/" + id, "content_type": "unknown", "state": "pending",
+			})
+		})
+	}
+	mux.HandleFunc("/v1/documents/doc-unfetched/content", func(w http.ResponseWriter, _ *http.Request) {
+		problem(w, http.StatusNotFound, "document has no extraction yet")
+	})
+	mux.HandleFunc("/v1/documents/doc-broken/content", func(w http.ResponseWriter, _ *http.Request) {
+		problem(w, http.StatusInternalServerError, "database is locked")
+	})
+	mux.HandleFunc("/v1/documents/doc-missing", func(w http.ResponseWriter, _ *http.Request) {
+		problem(w, http.StatusNotFound, `document "doc-missing" not found`)
+	})
 	mux.HandleFunc("/v1/documents/doc-1/related", func(w http.ResponseWriter, _ *http.Request) {
 		// Includes the source doc itself to exercise the sidecar's
 		// belt-and-braces exclusion (the real daemon already drops it).
@@ -80,6 +98,13 @@ func fakeDaemon(t *testing.T, lastSearch *atomic.Value) *httptest.Server {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// problem answers status with a problem+json body, as the daemon does.
+func problem(w http.ResponseWriter, status int, detail string) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"title": http.StatusText(status), "status": status, "detail": detail})
 }
 
 // session is a connected MCP client plus what the fake daemon behind it saw.
@@ -154,6 +179,31 @@ func TestMCP_GetDocument(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, textOf(res), "full markdown body")
+}
+
+func TestMCP_GetDocument_Failures(t *testing.T) {
+	cs := connectMCP(t)
+	call := func(id string) *mcp.CallToolResult {
+		t.Helper()
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "get_document", Arguments: map[string]any{"id": id},
+		})
+		require.NoError(t, err)
+		return res
+	}
+
+	res := call("doc-unfetched")
+	assert.False(t, res.IsError, "no content yet is an answer")
+	assert.Contains(t, textOf(res), "no extracted content available; document state: pending")
+
+	res = call("doc-broken")
+	assert.True(t, res.IsError, "a content failure is reported")
+	assert.Contains(t, textOf(res), "database is locked")
+	assert.NotContains(t, textOf(res), "no extracted content")
+
+	res = call("doc-missing")
+	assert.True(t, res.IsError)
+	assert.Contains(t, textOf(res), `document "doc-missing" not found`)
 }
 
 func TestMCP_FindRelated_ExcludesSelf(t *testing.T) {

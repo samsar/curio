@@ -83,14 +83,20 @@ directly. Pass --content to also stream the markdown to stdout.`,
 			w := cmd.OutOrStdout()
 			renderDocShow(w, doc)
 
-			if showContent {
-				body, err := env.Client.GetDocumentContent(cmd.Context(), id)
-				if err != nil {
-					return err
-				}
-				fmt.Fprintln(w, "\n--- content ---")
-				fmt.Fprintln(w, body)
+			if !showContent {
+				return nil
 			}
+			body, err := env.Client.GetDocumentContent(cmd.Context(), id)
+			if client.IsNotFound(err) {
+				// The document exists, so a 404 means nothing is extracted yet.
+				fmt.Fprintln(w, "\n(no extracted content yet)")
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(w, "\n--- content ---")
+			fmt.Fprintln(w, body)
 			return nil
 		},
 	}

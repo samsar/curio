@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -150,6 +151,10 @@ func TestDocs(t *testing.T) {
 	out = mustRun(t, srv, "docs", "show", fetched.ID, "--content")
 	assert.Contains(t, out, "--- content ---")
 	assert.Contains(t, out, "The fetched body.")
+
+	out = mustRun(t, srv, "docs", "show", failed.ID, "--content")
+	assert.Contains(t, out, "state:        failed")
+	assert.Contains(t, out, "(no extracted content yet)", "the content 404 of a known document is an answer")
 
 	_, err = runCLI(t, srv, "docs", "show", "no-such-document")
 	require.Error(t, err)
@@ -325,6 +330,27 @@ func TestStatus_DaemonNotRunning(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "daemon:  not running")
 	assert.Contains(t, out, "home:    "+srv.Home.Path)
+}
+
+// TestStatus_DaemonErrors: a daemon that answers healthz with an error is
+// not reported as "not running".
+func TestStatus_DaemonErrors(t *testing.T) {
+	srv := apitest.Start(t)
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"title":"internal error","status":500,"detail":"read marker: permission denied"}`)
+	}))
+	t.Cleanup(broken.Close)
+
+	out, err := runCLIAt(t, srv.Home.Path, broken.URL, "status")
+	require.NoError(t, err)
+	assert.Contains(t, out, "daemon:  not answering healthz: read marker: permission denied")
+	assert.NotContains(t, out, "not running")
+
+	out, err = runCLIAt(t, srv.Home.Path, broken.URL, "doctor")
+	require.Error(t, err)
+	assert.Contains(t, out, "healthz failed: read marker: permission denied")
 }
 
 func TestDoctor(t *testing.T) {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/version"
 )
@@ -26,7 +28,11 @@ func newStatusCmd(env *daemonctl.Env) *cobra.Command {
 
 			health, err := env.Client.Healthz(cmd.Context())
 			if err != nil {
-				fmt.Fprintln(w, "daemon:  not running")
+				if errors.Is(err, client.ErrDaemonUnreachable) {
+					fmt.Fprintln(w, "daemon:  not running")
+				} else {
+					fmt.Fprintf(w, "daemon:  not answering healthz: %v\n", err)
+				}
 				fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
 				printDiskUsage(w, env.Home.Path)
 				return nil
@@ -43,7 +49,9 @@ func newStatusCmd(env *daemonctl.Env) *cobra.Command {
 			sctx, scancel := context.WithTimeout(cmd.Context(), 1*time.Second)
 			defer scancel()
 			stats, err := env.Client.Stats(sctx)
-			if err == nil && stats != nil {
+			if err != nil {
+				fmt.Fprintf(w, "\ncounts:    unavailable: %v\n", err)
+			} else {
 				fmt.Fprintf(w, "\nbookmarks: %d\n", stats.BookmarksTotal)
 				fmt.Fprintf(w, "documents: %d\n", stats.DocumentsTotal)
 				if len(stats.DocumentsByState) > 0 {
@@ -58,7 +66,10 @@ func newStatusCmd(env *daemonctl.Env) *cobra.Command {
 
 			mctx, mcancel := context.WithTimeout(cmd.Context(), 2*time.Second)
 			defer mcancel()
-			if m, err := env.Client.Metrics(mctx, 0); err == nil && m != nil && len(m.ByKind) > 0 {
+			m, err := env.Client.Metrics(mctx, 0)
+			if err != nil {
+				fmt.Fprintf(w, "\nperformance: unavailable: %v\n", err)
+			} else if len(m.ByKind) > 0 {
 				fmt.Fprintf(w, "\nperformance (last %ds):\n", m.WindowSeconds)
 				for _, k := range m.ByKind {
 					fmt.Fprintf(w, "  %-9s  done=%-5d  fail=%-4d  mean=%5.0fms  p50=%5.0fms  p95=%5.0fms  p99=%5.0fms",

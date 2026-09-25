@@ -16,7 +16,7 @@ make build      # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp
 | Tool | Arguments | Returns |
 |---|---|---|
 | `search_bookmarks` | `query`, `k?` (1-100; default the daemon's `search.default_k`), `content_type?[]`, `source?[]`, `host?[]` | top matching documents (title, url, doc_id, score, snippet); `degraded`/`warnings` when keyword-only |
-| `get_document` | `id` (doc_id) | the document's metadata + full extracted markdown |
+| `get_document` | `id` (doc_id) | the document's metadata + full extracted markdown; a note instead of the markdown when nothing is extracted yet. An unknown id, or content that fails to load, is a tool error |
 | `find_related` | `id` (doc_id), `k?` | documents similar to the given one (vector similarity over its indexed content), excluding itself |
 
 `content_type` ∈ `article|repo|video|pdf|thread|unknown`, `source` ∈

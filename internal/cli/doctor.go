@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
 )
 
@@ -113,10 +115,14 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 
 	// 3. daemon reachable
 	health, err := c.Client.Healthz(ctx)
-	if err != nil {
-		r.add("daemon", statusFail, "not reachable at "+c.Config.Daemon.Listen,
+	switch {
+	case errors.Is(err, client.ErrDaemonUnreachable):
+		r.add("daemon", statusFail, "not reachable at "+c.Controller.BaseURL,
 			"run `curio daemon start`")
-	} else {
+	case err != nil:
+		r.add("daemon", statusFail, "reachable at "+c.Controller.BaseURL+", but healthz failed: "+err.Error(),
+			"check `curio daemon logs`")
+	default:
 		r.add("daemon", statusOK, fmt.Sprintf("running, version %s", health.Version), "")
 
 		// 4. ollama (via the daemon's healthz, since the daemon has the
