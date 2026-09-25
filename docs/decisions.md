@@ -2546,6 +2546,16 @@ an import dominated by one site proceeds at roughly that site's pace
 (two requests at a time) instead of sixteen. That is the point for the
 site, and mixed imports barely notice.
 
+**Revised (2026-09):** `pace` checks the cooldown twice: before queueing
+in the limiter, so a cooldown already longer than the inline cap fails
+fast, and again once the token is granted, so a 429 that arrived while
+the call was queued is still seen. Checking only after the token made
+every caller wait its turn for a token it would then not use: at the
+keyless 20 a minute the 16th fetch worker waited about 45 s just to fail,
+and each of them spent a token a later call needed. A short cooldown (up
+to the cap) still queues first, as before. GitHub's calls go through the
+same `pace`.
+
 ---
 
 ## URL normalization: fetch-equivalent and idempotent
