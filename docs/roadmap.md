@@ -38,7 +38,9 @@ doc with a relevant snippet.
   (`internal/search`), chunked and embedded by `internal/indexer` with
   Ollama's `nomic-embed-text` (`internal/embedder`, `internal/ollama`).
 - Daemon lifecycle for the CLI: auto-start, one daemon per home held by a
-  lock (`internal/daemonctl`).
+  lock (`internal/daemonctl`). The daemon answers as starting, with its
+  migration progress, from the moment it binds, and clients wait on that
+  progress rather than a fixed timeout.
 - Deviations: the default fetcher is Go-native (`internal/fetcher/native.go`),
   not the Node `web2md`, which stays as an optional backend. The job loop
   runs per-kind worker pools (`jobs.NewPools`: fetch, index, cluster), not a
@@ -125,8 +127,9 @@ responses without any manual paste.
 - `cmd/curio-mcp` speaks MCP over stdio (the official Go SDK) and forwards
   to the daemon's HTTP API: `search_bookmarks` (with content type, source
   and host filters), `get_document`, `find_related`, and `list_interests`
-  since M4. It starts the daemon when needed and restarts an unreachable
-  one once per call. Registration is in `docs/mcp.md`.
+  since M4. It starts the daemon when needed, restarts an unreachable one
+  once per call, and waits up to 30s for one still starting. Registration
+  is in `docs/mcp.md`.
 - Deviation: `find_related` ranks by the document's stored chunk vectors,
   mean-pooled into one query (`GET /v1/documents/{id}/related`,
   `curio related`), not by title similarity.

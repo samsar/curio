@@ -91,13 +91,13 @@ when the entry was first committed.
 - 2026-09-24 — [Store boundary: consumers see interfaces, depguard enforces it](#store-boundary-consumers-see-interfaces-depguard-enforces-it)
 - 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert)
 - 2026-09-24 — [Bookmark ingest: one transaction, fetch only for new documents](#bookmark-ingest-one-transaction-fetch-only-for-new-documents)
-- 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down)
+- 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down) (revised)
 - 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders)
 - 2026-09-24 — [API: handler edge cases found by coverage](#api-handler-edge-cases-found-by-coverage) (revised)
 - 2026-09-25 — [updated_at: written by each statement, not by triggers](#updated_at-written-by-each-statement-not-by-triggers)
 - 2026-09-25 — [Jobs reference their document through a column](#jobs-reference-their-document-through-a-column)
 - 2026-09-25 — [Indexes follow the queries; plans are pinned by tests](#indexes-follow-the-queries-plans-are-pinned-by-tests) (revised)
-- 2026-09-25 — [Chunks: external-content FTS, derived rows kept by triggers](#chunks-external-content-fts-derived-rows-kept-by-triggers)
+- 2026-09-25 — [Chunks: external-content FTS, derived rows kept by triggers](#chunks-external-content-fts-derived-rows-kept-by-triggers) (revised)
 - 2026-09-25 — [Worker wakeups: an in-process signal, and idle polls that back off](#worker-wakeups-an-in-process-signal-and-idle-polls-that-back-off)
 - 2026-09-25 — [API: request IDs, one error mapping, logged server errors](#api-request-ids-one-error-mapping-logged-server-errors) (revised)
 - 2026-09-25 — [API: tolerant responses, strict requests](#api-tolerant-responses-strict-requests)
@@ -105,7 +105,7 @@ when the entry was first committed.
 - 2026-09-25 — [API: filters are validated, sizing knobs default](#api-filters-are-validated-sizing-knobs-default)
 - 2026-09-25 — [Clients: one discovery, an explicit daemon environment, a signal context](#clients-one-discovery-an-explicit-daemon-environment-a-signal-context)
 - 2026-09-25 — [Client errors: a typed APIError, and "unreachable" means never connected](#client-errors-a-typed-apierror-and-unreachable-means-never-connected)
-- 2026-09-25 — [MCP sidecar: restart an unreachable daemon, retry once](#mcp-sidecar-restart-an-unreachable-daemon-retry-once)
+- 2026-09-25 — [MCP sidecar: restart an unreachable daemon, retry once](#mcp-sidecar-restart-an-unreachable-daemon-retry-once) (revised)
 - 2026-09-25 — [List pagination: keyset on (timestamp, id)](#list-pagination-keyset-on-timestamp-id)
 - 2026-09-25 — [API: the spec is the contract, checked by tests](#api-the-spec-is-the-contract-checked-by-tests) (revised)
 - 2026-09-25 — [Toolchain: the go directive is the build toolchain, govulncheck gates it](#toolchain-the-go-directive-is-the-build-toolchain-govulncheck-gates-it)
@@ -114,6 +114,7 @@ when the entry was first committed.
 - 2026-09-25 — [Ollama: one client, one sentinel pair, a pull that keeps trying](#ollama-one-client-one-sentinel-pair-a-pull-that-keeps-trying)
 - 2026-09-25 — [Insight: skip non-finite document vectors, don't fail the run](#insight-skip-non-finite-document-vectors-dont-fail-the-run)
 - 2026-09-25 — [CLI: exit 130 on interrupt, a usage hint on usage errors](#cli-exit-130-on-interrupt-a-usage-hint-on-usage-errors)
+- 2026-09-25 — [Daemon startup: a starting API while migrating, clients that wait on progress](#daemon-startup-a-starting-api-while-migrating-clients-that-wait-on-progress)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -2211,6 +2212,17 @@ max(StartTimeout, StopTimeout): the holder may be draining after a stop
 "starting up or shutting down" instead of blaming a daemon "already
 starting".
 
+**Revised (2026-09-25):** the daemon answers from the bind on, as a
+starting daemon until it is ready. Startup order is now signals, home,
+lock + PID, config + log level, marker check, bind, serve the starting
+API, open + migrate, sync the marker, construct dependencies, orphan
+recovery per pool, swap in the full API, workers; a failure after the
+bind stops serving before the lock is released. Clients no longer wait a
+fixed 15s (or 30s for a holder): they wait while the daemon reports
+progress, failing after 15s of silence or at a 30 min ceiling, and they
+hold `daemon.start.lock` only while spawning. See "Daemon startup: a
+starting API while migrating, clients that wait on progress".
+
 ---
 
 ## Interrupted vs. orphaned jobs
@@ -2864,6 +2876,16 @@ without this, migrations 007 and 008 would leave a WAL about the size of
 the jobs and chunks tables (580 MB after 008 on a 1 GB database), which
 `curio status` reports as the database's WAL.
 
+**Revised (2026-09-25):** `MigrateWithHooks` lists what is pending with
+`Provider.Status` (a read, for a database that has a schema) and applies
+it one migration at a time with `Provider.UpByOne`, calling hooks once
+before the first and around each; `Migrate` is it with no hooks. The
+daemon's hooks report progress on its starting healthz answer and log
+each migration, so nothing in the store logs on the daemon's behalf. The
+checkpoint after migrating and the returned version are unchanged, and a
+failed migration's error names its file and version. See "Daemon
+startup: a starting API while migrating, clients that wait on progress".
+
 ---
 
 ## Folder and host filters: literal input, segment-boundary folders
@@ -3136,6 +3158,15 @@ in the log tail. The dropped copy of the text (about 400 MB there) goes to
 SQLite's freelist and is reused as the database grows. The migration does
 not VACUUM, which would rewrite the whole file; to return the space to the
 OS now, stop the daemon and run `sqlite3 ~/.curio/curio.db VACUUM`.
+
+**Revised (2026-09-25):** the Cost paragraph's answer to a migration that
+outlasts the CLI's 15s auto-start wait, a `migrating database` line in
+the log tail, was not enough: on a 2.4 GB home, migrations 005 to 010
+took 37s and the CLI reported a healthy daemon as failed to start. The
+daemon now answers as starting while it migrates, clients wait on its
+progress rather than a fixed time, and the log names each migration as
+it starts and finishes. See "Daemon startup: a starting API while
+migrating, clients that wait on progress".
 
 ---
 
@@ -3425,6 +3456,20 @@ made (see "Client errors"), so no daemon saw the first attempt. Concurrent
 calls that find the daemon gone each ensure it; `EnsureRunning` serializes
 on `daemon.start.lock` and re-checks healthz, so one daemon starts. Each
 ensure is bounded by the start timeout and the tool call's context.
+
+**Revised (2026-09-25):** `call` also ensures and retries once after
+`client.ErrStarting`: a daemon still starting ran nothing, so any request
+can be sent again. The sidecar's controller has a `ReadyTimeout` of 30s,
+well under the 60s or so after which MCP clients cancel a stdio tool call
+(the Claude desktop app does, whatever `MCP_TOOL_TIMEOUT` says); a daemon
+still starting after that is a tool error that says so, with its progress,
+and to try again in a minute, not "restarting the daemon failed". The
+startup ensure is `EnsureStarted`, which returns at the first ready or
+verified starting answer: waiting out a migration there would hold the
+MCP handshake, which Claude Code gives 30s by default. Concurrent calls
+no longer queue on `daemon.start.lock` while they wait; only a spawn
+takes it. See "Daemon startup: a starting API while migrating, clients
+that wait on progress".
 
 ---
 
@@ -3795,6 +3840,119 @@ cancelled context killed `tail`, and `Run` reported that like a failure.
 With `SilenceErrors` on, cobra no longer printed its
 "Run 'curio --help' for usage." line, so a mistyped command or flag got a
 bare error with no pointer to the usage.
+
+---
+
+## Daemon startup: a starting API while migrating, clients that wait on progress
+
+**Decision:**
+
+- The daemon answers HTTP from the moment it binds. One listener and one
+  `http.Server` serve its whole life; until it is ready they route every
+  request to a starting router built with no `Deps`, and after orphan
+  recovery `api.Server.Ready` swaps in the full router atomically, so a
+  keep-alive connection carries on across the swap. The access checks
+  are the same middleware in both routers.
+- While starting, `/v1/healthz` answers 503 `application/problem+json`
+  with `Retry-After: 1`: a problem of type
+  `urn:curio:problem:daemon-starting` that also names the daemon (`pid`,
+  `home`, `version`) and says how far along it is (`phase`, `initializing`
+  or `migrating`, and `migrations: {applied, total}` exactly while
+  migrating). Every other request gets the same problem without those
+  members. Nothing a starting daemon refused has run.
+- Startup order: signals, home, lock + PID, config + log level, marker
+  check, bind, serve the starting API, open, migrate, sync the marker,
+  build dependencies, recover orphans, swap in the full API, workers. A
+  failure after the bind stops serving, which closes the listener, before
+  the lock is released.
+- `phase` is `migrating` only when the database already had a schema
+  (goose version 1 or more): creating a new one takes milliseconds.
+- Migrations are applied one at a time (`sqlite.MigrateWithHooks`,
+  `Provider.UpByOne`). The daemon's hooks drive both the healthz progress
+  and the log: `migrating database` with the pending count and versions,
+  then `applying migration` and `migration applied` (with `duration_ms`)
+  for each. Nothing is logged when nothing is pending. `curio-daemon
+  starting` is logged at the bind and `curio-daemon ready`, with
+  `startup_ms`, at the swap.
+- Clients (`daemonctl`) wait on our daemon, the child they spawned or the
+  lock holder answering for this home, with two budgets. `StartTimeout`
+  (15s) is how long it may go without answering, counted again from each
+  answer in which it reports it is starting; past it, a child is a
+  failed start with the log tail, and a holder we didn't spawn gets
+  max(StartTimeout, StopTimeout) as before. `ReadyTimeout` (30 min) caps
+  a daemon that keeps reporting it is starting; past it, `EnsureRunning`
+  returns `ErrStillStarting`, which names the pid and progress, says the
+  daemon keeps running and where to look, and never says "failed to
+  start". Nothing is signalled. Each probe is bounded by the time left,
+  so a wait can't overrun its budget by healthz's own 2s timeout.
+- A starting answer for another home is the same error as a serving one.
+  One for this home from a pid that is neither the child nor the lock
+  holder is no evidence of progress.
+- Probes are 100ms apart while nothing answers or the daemon initializes,
+  so a routine start isn't slowed, and 1s apart (its `Retry-After`) while
+  it migrates, since each is an access-log line in a log that is never
+  rotated. Either way at least two fall in every silence budget.
+- `Controller.OnMigrating` is called once per `EnsureRunning` or
+  `EnsureStarted` call, the first time our daemon reports it is
+  migrating. The CLI prints one line to stderr from it; daemonctl itself
+  prints nothing.
+- `daemon.start.lock` is held only while spawning: from the decision to
+  spawn until the child holds `daemon.pid`, exits, or runs out of silence
+  budget. From then on the daemon lock tells every other starter to wait
+  rather than spawn. Taking the start lock is a non-blocking attempt
+  every 100ms that honours the caller's context.
+- `curio-mcp` starts with `EnsureStarted`, which returns at the first
+  ready or verified starting answer, and gives each tool call a 30s
+  `ReadyTimeout` (see "MCP sidecar: restart an unreachable daemon, retry
+  once").
+- `curio daemon status`, `curio status` and `curio doctor` show a
+  starting daemon as starting, with its phase and progress. doctor makes
+  it a warning and leaves Ollama unchecked until the daemon is ready.
+
+**Why:** The daemon bound its port and only built its HTTP server after
+migrating, so for a whole migration the port accepted connections and
+answered nothing. Clients gave a spawned daemon a fixed 15s (the comment
+said it covered migrations on a large database) and a holder 30s, then
+reported `curio-daemon failed to start`: on a 2.4 GB home migrations 005
+to 010 took 37s, and the daemon was ready about 20s after the CLI gave
+up. Migration time grows with the library, so no constant covers it,
+while a daemon that has died shows itself by exiting or going silent.
+Each probe of the silent port also blocked for healthz's 2s timeout, so
+a wait overran its own deadline: a 1s budget ended after 2.1s. The start
+lock, taken with a blocking flock and held through the whole wait,
+parked a second client in the kernel, deaf to its context and to ctrl-c:
+one with a 500ms context returned after 2.7s. And `curio-mcp` ran that
+wait before answering the MCP handshake.
+
+**Why 503 problem+json, not 200 with a starting status:** the 200 Health
+shape is pinned (see "Marker file's schema_version is synced from the DB
+after migrations"). Older clients check only `pid` and `home`, so a 200
+would end their wait early and their next request would fail; a 503 keeps
+them waiting as they do today. Generic readiness checks treat any 200 as
+ready. Every non-2xx answer is RFC 7807, and older clients print a
+problem's `detail` readably ("not answering healthz: curio-daemon is
+starting: migrating the database, 2 of 6 migrations applied"), where a
+Health body on a 503 would print as raw JSON. RFC 7807 reserves `status`
+for the HTTP status, so "starting" is the problem type plus `phase`. The
+identity members ride on healthz only, so other routes send a plain
+Problem.
+
+**Rejected:**
+
+- A longer fixed timeout: whatever it is, a larger library outgrows it,
+  and it would also delay reporting a daemon that is wedged.
+- Migrating before binding: the rule that a daemon which can't serve
+  exits without touching the database would go, and clients would still
+  see only a closed port.
+- A status file beside `daemon.pid` for clients to read: a second
+  protocol to keep in step with healthz, invisible to anything that only
+  speaks HTTP, and stale after a crash.
+
+**Compatibility:** new clients talking to a daemon from before this
+change (a healthz 200, with or without `pid` and `home`, and never a 503)
+behave as before. Old clients talking to a new daemon see a starting
+daemon as "not answering healthz", the same wait and failure as before,
+never as ready.
 
 ---
 

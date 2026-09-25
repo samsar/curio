@@ -94,8 +94,10 @@ MCP tools (implemented):
 - `find_related(id, k)` — find documents similar to a given one (by embedding similarity over its indexed content)
 - `list_interests(limit?, members?)` — labeled interest clusters from the latest clustering run
 
-The sidecar starts the daemon when it starts, and again when a tool call
-finds it unreachable mid-session (one retry per call).
+The sidecar starts the daemon when it starts, without waiting for it to
+finish starting, and again when a tool call finds it unreachable
+mid-session. A tool call that finds it unreachable or still starting
+waits up to 30s for it and retries once.
 
 Registration and usage: see `docs/mcp.md`.
 
@@ -122,15 +124,27 @@ CLI commands and the MCP sidecar auto-start it when it isn't running.
   `daemon.pid` for as long as it runs and records its PID there. The kernel
   drops the lock however the daemon dies, so "the lock is held" means "a
   daemon is running", with no PID guesswork.
-- **Startup order.** Lock, then config, then bind the API port, and only
-  then open and migrate the DB, recover orphaned jobs and start workers. A
-  second daemon, or one whose port is taken, exits before touching the DB.
+- **Startup order.** Lock, then config, then bind the API port and answer
+  as a starting daemon, and only then open and migrate the DB, recover
+  orphaned jobs, swap in the full API and start workers. A second daemon,
+  or one whose port is taken, exits before touching the DB.
+- **Starting API.** Until it is ready the daemon answers every request 503
+  with `Retry-After` and a `urn:curio:problem:daemon-starting` problem;
+  on `/v1/healthz` the problem also names the daemon (`pid`, `home`) and
+  its progress (`phase`, and migrations applied of total while it
+  migrates). Migrations run one at a time, and each is logged as it
+  starts and finishes. Nothing a starting daemon refused has run, so
+  clients resend it once the daemon is ready.
 - **Clients** probe the lock for liveness and `/v1/healthz` (which reports
-  `pid` and `home`) for identity, allowing for healthz's own bounded wait
-  on Ollama. They serialize auto-starts on
-  `daemon.start.lock`, and they only signal the PID the lock holder
-  recorded. A spawned daemon that crashes during startup is reported
-  immediately, with its exit status and the tail of `daemon.log`.
+  `pid` and `home`, starting or serving) for identity, allowing for
+  healthz's own bounded wait on Ollama. They wait while their daemon
+  reports progress, failing after 15s of silence or at a 30 min ceiling
+  (which leaves the daemon running), and print one line when it is
+  migrating. `daemon.start.lock` serializes spawning and is held only
+  until the new daemon holds `daemon.pid`. They only signal the PID the
+  lock holder recorded. A spawned daemon that crashes during startup is
+  reported immediately, with its exit status and the tail of
+  `daemon.log`.
 - **Shutdown** on SIGINT, SIGTERM or SIGHUP: stop accepting work, give
   in-flight HTTP requests 5s and running jobs 15s, record every outcome
   (interrupted jobs are requeued with their attempt refunded), then release
