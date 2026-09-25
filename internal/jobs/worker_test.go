@@ -445,3 +445,110 @@ func TestWorker_MarkDoneRetried(t *testing.T) {
 		})
 	}
 }
+
+// countingQueue counts claims, and reports the first claim that finds
+// nothing, when the worker has gone idle.
+type countingQueue struct {
+	store.JobQueue
+	claims atomic.Int32
+	idle   chan struct{}
+}
+
+func newCountingQueue(t *testing.T) *countingQueue {
+	return &countingQueue{JobQueue: sqlitestore.NewJobs(sqlitetest.NewDB(t)), idle: make(chan struct{}, 1)}
+}
+
+func (q *countingQueue) ClaimNext(ctx context.Context, kinds []store.JobKind) (*store.Job, error) {
+	j, err := q.JobQueue.ClaimNext(ctx, kinds)
+	q.claims.Add(1)
+	if errors.Is(err, store.ErrNotFound) {
+		select {
+		case q.idle <- struct{}{}:
+		default:
+		}
+	}
+	return j, err
+}
+
+// fetchWorker is a fetch-only worker whose handler reports each job.
+func fetchWorker(q store.JobQueue, opts WorkerOptions) (*Worker, <-chan *store.Job) {
+	handled := make(chan *store.Job, 10)
+	opts.Log = quietLog
+	w := NewWorker(q, opts)
+	w.Register(store.JobKindFetch, func(_ context.Context, j *store.Job) error {
+		handled <- j
+		return nil
+	})
+	return w, handled
+}
+
+// TestWorker_WakesOnEnqueue: with polling slowed to ten minutes, only the
+// queue's signal can explain a job enqueued after the worker went idle
+// being claimed at once.
+func TestWorker_WakesOnEnqueue(t *testing.T) {
+	q := newCountingQueue(t)
+	w, handled := fetchWorker(q, WorkerOptions{PollInterval: 10 * time.Minute, MaxPollInterval: 10 * time.Minute})
+	stop := startWorker(t, w)
+	defer stop()
+	<-q.idle
+
+	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch}
+	require.NoError(t, q.Enqueue(context.Background(), job))
+	select {
+	case got := <-handled:
+		assert.Equal(t, job.ID, got.ID)
+	case <-time.After(time.Second):
+		t.Fatal("the enqueued job was not claimed")
+	}
+}
+
+// TestWorker_IgnoresOtherKinds: an index job doesn't wake a fetch worker,
+// which would only make a claim that takes the write lock for nothing.
+func TestWorker_IgnoresOtherKinds(t *testing.T) {
+	q := newCountingQueue(t)
+	w, _ := fetchWorker(q, WorkerOptions{PollInterval: 10 * time.Minute, MaxPollInterval: 10 * time.Minute})
+	stop := startWorker(t, w)
+	defer stop()
+	<-q.idle
+	claims := q.claims.Load()
+
+	require.NoError(t, q.Enqueue(context.Background(), &store.Job{TenantID: "local", Kind: store.JobKindIndex}))
+	assert.Never(t, func() bool { return q.claims.Load() > claims }, 100*time.Millisecond, 5*time.Millisecond)
+}
+
+// TestWorker_IdlePollsBackOff: an idle worker polls less and less often,
+// up to MaxPollInterval, instead of every PollInterval.
+func TestWorker_IdlePollsBackOff(t *testing.T) {
+	q := newCountingQueue(t)
+	w, _ := fetchWorker(q, WorkerOptions{PollInterval: 2 * time.Millisecond, MaxPollInterval: 16 * time.Millisecond})
+	stop := startWorker(t, w)
+	<-time.After(300 * time.Millisecond)
+	stop()
+
+	// Polling every 2ms would be about 150 claims; backing off to 16ms,
+	// about 20.
+	claims := q.claims.Load()
+	assert.LessOrEqual(t, claims, int32(40))
+	assert.GreaterOrEqual(t, claims, int32(5), "it still polls")
+}
+
+// TestWorker_PollsForJobsComingDue: a job that isn't runnable yet raises
+// no signal when it comes due; the idle poll finds it.
+func TestWorker_PollsForJobsComingDue(t *testing.T) {
+	q := newCountingQueue(t)
+	w, handled := fetchWorker(q, WorkerOptions{PollInterval: 10 * time.Millisecond, MaxPollInterval: 20 * time.Millisecond})
+	// run_after is stored to the millisecond.
+	due := time.Now().Add(100 * time.Millisecond).Truncate(time.Millisecond)
+	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch, RunAfter: due}
+	require.NoError(t, q.Enqueue(context.Background(), job))
+
+	stop := startWorker(t, w)
+	defer stop()
+	select {
+	case got := <-handled:
+		assert.Equal(t, job.ID, got.ID)
+		assert.False(t, time.Now().Before(due), "claimed before it was due")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the job was not claimed once due")
+	}
+}

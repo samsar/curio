@@ -296,7 +296,7 @@ func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID strin
 	if err := insertJob(ctx, tx, job); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.db.commitNotify(tx, store.JobKindFetch); err != nil {
 		return nil, fmt.Errorf("commit requeue fetch: %w", err)
 	}
 	return job, nil
@@ -343,7 +343,11 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 			return 0, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	var wake []store.JobKind
+	if len(ids) > 0 {
+		wake = []store.JobKind{store.JobKindFetch}
+	}
+	if err := s.db.commitNotify(tx, wake...); err != nil {
 		return 0, fmt.Errorf("commit requeue fetch: %w", err)
 	}
 	return len(ids), nil

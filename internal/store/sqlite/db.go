@@ -55,7 +55,8 @@ const (
 // never wait on a writer.
 type DB struct {
 	*sql.DB
-	path string
+	path     string
+	enqueued *enqueueSignal // wakes workers when a job becomes claimable
 }
 
 // Open opens (or creates) the SQLite database file at path. ":memory:" is
@@ -80,7 +81,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("ping sqlite %q: %w", path, errors.Join(err, db.Close()))
 	}
-	return &DB{DB: db, path: path}, nil
+	return &DB{DB: db, path: path, enqueued: newEnqueueSignal()}, nil
 }
 
 // Migrate applies pending migrations from the embedded FS and returns the

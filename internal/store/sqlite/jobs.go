@@ -34,7 +34,19 @@ func NewJobs(db *DB) *Jobs {
 }
 
 func (s *Jobs) Enqueue(ctx context.Context, j *store.Job) error {
-	return insertJob(ctx, s.db, j)
+	if err := insertJob(ctx, s.db, j); err != nil {
+		return err
+	}
+	if j.Status == store.JobStatusPending {
+		s.db.enqueued.notify(j.Kind)
+	}
+	return nil
+}
+
+// Enqueued implements store.JobQueue. Every enqueue path in this package
+// (Jobs, Documents, Bookmarks) signals through the *DB they share.
+func (s *Jobs) Enqueued(kinds []store.JobKind) <-chan struct{} {
+	return s.db.enqueued.wait(kinds)
 }
 
 // rowQuerier is what insertJob needs from *sql.DB or *sql.Tx.
@@ -195,15 +207,21 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (b
 
 func (s *Jobs) Requeue(ctx context.Context, id string) error {
 	now := formatTime(time.Now().UTC())
-	res, err := s.db.ExecContext(ctx, `
+	var kind store.JobKind
+	err := s.db.QueryRowContext(ctx, `
 		UPDATE jobs SET status = ?, attempts = max(attempts - 1, 0), started_at = NULL,
 		                run_after = ?, updated_at = ?
-		WHERE id = ? AND status = ?`,
-		store.JobStatusPending, now, now, id, store.JobStatusRunning)
+		WHERE id = ? AND status = ?
+		RETURNING kind`,
+		store.JobStatusPending, now, now, id, store.JobStatusRunning).Scan(&kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return s.notTransitioned(ctx, id)
+	}
 	if err != nil {
 		return fmt.Errorf("requeue job: %w", err)
 	}
-	return s.ensureTransitioned(ctx, res, id)
+	s.db.enqueued.notify(kind)
+	return nil
 }
 
 // orphanExhaustedError is the last_error of an orphan with no attempts left.
@@ -245,7 +263,11 @@ func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*st
 		return nil, 0, fmt.Errorf("requeue orphans: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	var wake []store.JobKind
+	if requeued > 0 {
+		wake = kinds
+	}
+	if err := s.db.commitNotify(tx, wake...); err != nil {
 		return nil, 0, fmt.Errorf("commit orphan recovery: %w", err)
 	}
 	return failed, int(requeued), nil
@@ -279,6 +301,12 @@ func (s *Jobs) ensureTransitioned(ctx context.Context, res sql.Result, id string
 	if n > 0 {
 		return nil
 	}
+	return s.notTransitioned(ctx, id)
+}
+
+// notTransitioned explains why a status-guarded UPDATE of job id matched no
+// row: the job doesn't exist, or it isn't running.
+func (s *Jobs) notTransitioned(ctx context.Context, id string) error {
 	job, err := s.GetByID(ctx, id)
 	if err != nil {
 		return err

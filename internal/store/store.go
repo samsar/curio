@@ -436,6 +436,14 @@ type JobQueue interface {
 	// run_after<=now) as running, counts the attempt (attempts+1), and
 	// returns it. Returns ErrNotFound if nothing is runnable.
 	ClaimNext(ctx context.Context, kinds []JobKind) (*Job, error)
+	// Enqueued returns a channel that is closed once a job of one of kinds
+	// (any kind when kinds is empty) has been enqueued, or put back to
+	// pending, through this queue in this process, and committed. Wakeups
+	// may be spurious: whoever wakes claims to find out. Take the channel
+	// before a ClaimNext that finds nothing, so a job enqueued in between
+	// still closes it. Jobs enqueued by another process, and pending jobs
+	// that come due by run_after, close nothing: find those by polling.
+	Enqueued(kinds []JobKind) <-chan struct{}
 	// MarkDone sets a running job to done.
 	MarkDone(ctx context.Context, id string) error
 	// MarkFailed records errMsg on a running job and either sends it back to

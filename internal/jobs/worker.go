@@ -1,9 +1,10 @@
 // Package jobs runs the background work loop.
 //
-// A Worker polls the JobQueue, claims one job at a time, dispatches to a
-// kind-specific HandlerFunc, and records the outcome. The daemon runs a pool
-// of goroutines per Worker; the claim-once semantics in store/sqlite/jobs.go
-// make that safe.
+// A Worker claims one job at a time from the JobQueue, dispatches to a
+// kind-specific HandlerFunc, and records the outcome. It wakes when the
+// queue signals a new job of its kinds and otherwise polls, less often the
+// longer it stays idle. The daemon runs a pool of goroutines per Worker;
+// the claim-once semantics in store/sqlite/jobs.go make that safe.
 package jobs
 
 import (
@@ -49,35 +50,47 @@ const bookkeepingTimeout = 10 * time.Second
 // bookkeepingRetry spaces the attempts of a failed bookkeeping write.
 var bookkeepingRetry = backoff{initial: 50 * time.Millisecond, max: time.Second}
 
-// Worker polls the queue and dispatches jobs.
+// Worker claims jobs from the queue and dispatches them.
 type Worker struct {
-	queue        store.JobQueue
-	handlers     map[store.JobKind]HandlerFunc
-	onPermFail   map[store.JobKind]PermFailHook
-	pollInterval time.Duration
-	log          *slog.Logger
-	retryDelays  backoff // between attempts of a failed bookkeeping write
+	queue       store.JobQueue
+	handlers    map[store.JobKind]HandlerFunc
+	onPermFail  map[store.JobKind]PermFailHook
+	idleDelays  backoff // between polls while there is nothing to claim
+	log         *slog.Logger
+	retryDelays backoff // between attempts of a failed bookkeeping write
 
 	inFlight sync.Map // job ID → struct{}, across every goroutine running this Worker
 }
 
 // WorkerOptions tunes the loop.
 type WorkerOptions struct {
-	PollInterval time.Duration // default 500ms
-	Log          *slog.Logger  // default slog.Default()
+	// PollInterval is the first wait after a claim that finds nothing. Each
+	// idle poll after it doubles the wait, up to MaxPollInterval. Default
+	// 500ms.
+	PollInterval time.Duration
+	// MaxPollInterval caps the wait between idle polls: it bounds how late a
+	// job the queue doesn't signal (a retry coming due, a job from another
+	// process) is noticed. Default 5s, and never below PollInterval.
+	MaxPollInterval time.Duration
+	Log             *slog.Logger // default slog.Default()
 }
 
 func NewWorker(q store.JobQueue, opts WorkerOptions) *Worker {
-	w := &Worker{
-		queue:        q,
-		handlers:     map[store.JobKind]HandlerFunc{},
-		onPermFail:   map[store.JobKind]PermFailHook{},
-		pollInterval: opts.PollInterval,
-		log:          opts.Log,
-		retryDelays:  bookkeepingRetry,
+	poll := opts.PollInterval
+	if poll <= 0 {
+		poll = 500 * time.Millisecond
 	}
-	if w.pollInterval <= 0 {
-		w.pollInterval = 500 * time.Millisecond
+	maxPoll := opts.MaxPollInterval
+	if maxPoll <= 0 {
+		maxPoll = 5 * time.Second
+	}
+	w := &Worker{
+		queue:       q,
+		handlers:    map[store.JobKind]HandlerFunc{},
+		onPermFail:  map[store.JobKind]PermFailHook{},
+		idleDelays:  backoff{initial: poll, max: max(maxPoll, poll)},
+		log:         opts.Log,
+		retryDelays: bookkeepingRetry,
 	}
 	if w.log == nil {
 		w.log = slog.Default()
@@ -110,13 +123,14 @@ func (w *Worker) OnPermanentFailure(kind store.JobKind, h PermFailHook) {
 // startup, while the caller is the only daemon for the database and before
 // any goroutine runs this Worker.
 func (w *Worker) RecoverOrphans(ctx context.Context) error {
-	failed, requeued, err := w.queue.RecoverOrphans(ctx, w.kinds())
+	kinds := w.kinds()
+	failed, requeued, err := w.queue.RecoverOrphans(ctx, kinds)
 	if err != nil {
-		return fmt.Errorf("recover orphaned %v jobs: %w", w.kinds(), err)
+		return fmt.Errorf("recover orphaned %v jobs: %w", kinds, err)
 	}
 	if requeued > 0 || len(failed) > 0 {
 		w.log.Info("recovered jobs orphaned by the previous daemon",
-			"kinds", w.kinds(), "requeued", requeued, "failed", len(failed))
+			"kinds", kinds, "requeued", requeued, "failed", len(failed))
 	}
 	// Those jobs are committed as failed, so their hooks have to run even if
 	// shutdown begins now: a document skipped here stays pending with no job.
@@ -141,37 +155,48 @@ func (w *Worker) InFlight() []string {
 
 // Run loops until ctx is cancelled. Returns ctx.Err() on shutdown.
 //
-// On each tick, drains all available work before sleeping again. This keeps
-// throughput high right after a burst is enqueued without driving up the
-// poll frequency during quiet periods.
+// It drains all available work, then waits until the queue signals a job of
+// its kinds or the idle poll comes due. Every claim takes SQLite's write
+// lock, even one that finds nothing, so idle polls back off from
+// PollInterval to MaxPollInterval; a claimed job resets them, and a failed
+// claim backs off the same way. Polls still find the jobs no signal
+// announces: retries whose run_after comes due, and jobs enqueued by
+// another process.
 //
 // Cancelling ctx stops new claims and is passed to the running handler; the
 // job's outcome is still recorded, and a job the shutdown interrupted goes
 // back to the queue (see finish).
 func (w *Worker) Run(ctx context.Context) error {
-	w.log.Info("worker started", "poll_interval", w.pollInterval, "kinds", w.kinds())
+	kinds := w.kinds()
+	w.log.Info("worker started", "poll_interval", w.idleDelays.initial,
+		"max_poll_interval", w.idleDelays.max, "kinds", kinds)
 
-	ticker := time.NewTicker(w.pollInterval)
-	defer ticker.Stop()
-
+	idle := w.idleDelays
 	for {
-		// Drain whatever's ready right now.
-		for w.tryOne(ctx) {
+		// Taken before the drain, so a job enqueued after its last claim
+		// found nothing still ends the wait below.
+		wake := w.queue.Enqueued(kinds)
+		for w.tryOne(ctx, kinds) {
+			idle = w.idleDelays
 		}
 
+		timer := time.NewTimer(idle.next())
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			w.log.Info("worker stopping")
 			return ctx.Err()
-		case <-ticker.C:
+		case <-wake:
+		case <-timer.C:
 		}
+		timer.Stop()
 	}
 }
 
-// tryOne claims and dispatches one job. Returns true if a job was handled
-// (success or failure), false if the queue was empty, the claim failed, or
-// ctx is done.
-func (w *Worker) tryOne(ctx context.Context) bool {
+// tryOne claims a job of kinds and dispatches it. Returns true if a job was
+// handled (success or failure), false if the queue was empty, the claim
+// failed, or ctx is done.
+func (w *Worker) tryOne(ctx context.Context, kinds []store.JobKind) bool {
 	if ctx.Err() != nil {
 		return false
 	}
@@ -180,7 +205,7 @@ func (w *Worker) tryOne(ctx context.Context) bool {
 	// failure for an UPDATE that has already committed, which would leave
 	// the job running with nobody working on it.
 	cctx, cancel := bookkeepingContext(ctx)
-	job, err := w.queue.ClaimNext(cctx, w.kinds())
+	job, err := w.queue.ClaimNext(cctx, kinds)
 	cancel()
 	if errors.Is(err, store.ErrNotFound) {
 		return false

@@ -78,7 +78,11 @@ when hosted-mode demands them.
 (asynq, NATS, Redis, ...).
 
 **Why:** One less moving part. At single-user scale, a few thousand jobs/day is
-trivial for SQLite. Polling interval ~1s is fine.
+trivial for SQLite.
+
+**Revised:** a fixed poll stopped being fine once the daemon ran 21 worker
+goroutines, each claiming every 500 ms: see "Worker wakeups: an in-process
+signal, and idle polls that back off".
 
 **Forward compatibility:** The `JobQueue` interface lets us swap to asynq or
 similar when hosted-mode demands fan-out or stronger durability guarantees.
@@ -670,6 +674,10 @@ edit.
 Ollama-bound) after FIFO claiming let fetches starve indexing, plus a
 one-worker cluster pool. `daemon.workers` survives only as a deprecated
 alias: see "Config: strict keys, legacy `workers` folded in at load" below.
+
+**Revised again:** idle goroutines no longer poll on a fixed tick; they
+wait for the queue's enqueue signal or an idle poll that backs off. See
+"Worker wakeups: an in-process signal, and idle polls that back off".
 
 ---
 
@@ -3012,3 +3020,55 @@ in the log tail. The dropped copy of the text (about 400 MB there) goes to
 SQLite's freelist and is reused as the database grows. The migration does
 not VACUUM, which would rewrite the whole file; to return the space to the
 OS now, stop the daemon and run `sqlite3 ~/.curio/curio.db VACUUM`.
+
+---
+
+## Worker wakeups: an in-process signal, and idle polls that back off
+
+**Decision:** `store.JobQueue` has `Enqueued(kinds) <-chan struct{}`: a
+channel closed once a job of one of `kinds` (any kind when empty) is
+enqueued, or put back to pending, through that queue in this process, and
+committed. `Worker.Run` takes the channel before it drains, then waits for
+the channel, its context, or an idle poll timer that starts at
+`PollInterval` (500 ms) and doubles up to the new
+`WorkerOptions.MaxPollInterval` (5 s). A claimed job resets the timer; a
+failed claim backs off like an empty one.
+
+In the SQLite store the signal lives on the `*DB` that `Jobs`,
+`Documents` and `Bookmarks` share, since each enqueues. It fires after the
+commit (or after an autocommit statement returns) on `Enqueue`, `Ingest`
+when it created a fetch job, `RequeueFetch`, `RequeueFetchByStates` when it
+enqueued any, `Requeue` (the kind comes from `RETURNING`) and
+`RecoverOrphans` when it requeued any. A rollback or `ErrConflict` never
+fires it. Each set of kinds has one channel, closed and replaced when one
+of its kinds is signalled, so the goroutines of a pool share one entry and
+nothing is started per wait.
+
+**Why:** every worker goroutine ran a 500 ms ticker, and the daemon runs
+16 fetch, 4 index and 1 cluster goroutine: about 42 claims a second from
+an idle daemon. A claim is an UPDATE, which takes SQLite's write lock even
+when it matches nothing. With another connection holding the lock, a claim
+that matched nothing waited out busy_timeout and failed with
+`SQLITE_BUSY`, where the same predicate as a SELECT answered in 0.2 ms. So
+idle polling competed with real writers (ingest, index transactions) and
+kept an always-on laptop daemon waking 42 times a second, while new work
+still waited up to 500 ms to be noticed. Now new work is claimed at once,
+and idle claims fall to about 4 a second (21 goroutines at one per 5 s).
+
+**Per kind:** during an import, fetch jobs are enqueued hundreds of times a
+second; waking the index and cluster pools on each would bring the no-op
+claims back. A signal still wakes every idle goroutine of the pool it is
+for, and all but one of their claims find nothing; that is one claim per
+goroutine per signal, and busy goroutines aren't waiting.
+
+**Behind the interface:** a hosted queue can implement `Enqueued` with
+Postgres `LISTEN/NOTIFY`; the worker only needs a channel.
+
+**Polling stays for `run_after`:** a retry's backoff is at least 60 s, so
+the up to 5 s the capped poll adds to it is noise, and computing the next
+due time would cost a query and a timer every idle cycle. The poll also
+finds jobs another process enqueued, which no in-process signal sees.
+
+**One goroutine per worker still:** a dispatcher handing jobs to a
+semaphore-bounded pool would change the shutdown and drain semantics for
+little further gain.

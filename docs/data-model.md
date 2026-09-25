@@ -249,6 +249,12 @@ jobs are claimed in the order they became runnable. `idx_jobs_claim
 seek and the first row, however many jobs are queued. Failed jobs get
 exponential backoff via `run_after`.
 
+Idle workers don't poll on a fixed tick. The store signals, per kind,
+when a job is enqueued or put back to pending in this process
+(`JobQueue.Enqueued`), and a worker wakes on that; between signals it
+polls, starting at 500 ms and backing off to 5 s, which is how it finds
+retries coming due and jobs other processes enqueued.
+
 ### `cluster_runs`
 
 One row per clustering execution. The clusters of the latest `done` run are

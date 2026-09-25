@@ -115,6 +115,7 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 	// Only a new document needs a fetch. An existing pending document
 	// already has its fetch or index job queued, and a failed or dead one is
 	// left to `curio refetch`.
+	var wake []store.JobKind
 	if created {
 		if res.FetchJob, err = store.NewDocumentJob(b.TenantID, store.JobKindFetch, docID); err != nil {
 			return store.IngestResult{}, err
@@ -122,8 +123,9 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 		if err := insertJob(ctx, tx, res.FetchJob); err != nil {
 			return store.IngestResult{}, err
 		}
+		wake = append(wake, store.JobKindFetch)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.db.commitNotify(tx, wake...); err != nil {
 		return store.IngestResult{}, fmt.Errorf("commit ingest: %w", err)
 	}
 
