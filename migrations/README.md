@@ -48,8 +48,10 @@ and the daemon copies it into `~/.curio/.curio-meta.json` after migrating,
 as a cache for `/v1/healthz`, `curio version` and `curio doctor`. A
 migration never records the version itself.
 
-`schema_meta` holds the embedding model and dimension the database was
-created for.
+`schema_meta` holds the embedding model and dimension 001 hard-coded
+(`nomic-embed-text`, 768), whatever the home was configured with. Nothing
+reads it: the daemon checks the embedding model against the marker,
+`.curio-meta.json`.
 
 ## Adding a migration
 
@@ -116,8 +118,8 @@ Every part of it is there for a reason:
   `DROP TABLE` on a table other tables reference runs their `ON DELETE`
   actions first. Rebuilding `documents` that way would delete every
   extraction, chunk and cluster membership, and null every
-  `bookmarks.document_id`. So the migration turns them off itself, then
-  opens its own transaction.
+  `bookmarks.document_id` and, since 007, every `jobs.document_id`. So the
+  migration turns them off itself, then opens its own transaction.
 - **The guard must enforce.** Only an error can abort a goose SQL
   migration. A bare `PRAGMA foreign_key_check;` returns rows that goose
   discards, so it checks nothing. Counting `pragma_foreign_key_check` into

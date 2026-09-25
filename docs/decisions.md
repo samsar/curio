@@ -2,7 +2,119 @@
 
 A running log of design decisions, what we picked, and why. New entries go at
 the bottom. When a decision is revisited, add a new entry rather than rewriting
-the old one — the history is useful.
+the old one — the history is useful. A decision that still stands but changed
+in detail gets a **Revised** note appended to its entry.
+
+Add a line to the index below with each new entry, and mark an entry's line
+"(revised)" or "(superseded)" when you append such a note to it. Dates are
+when the entry was first committed.
+
+- 2026-05-23 — [Language: Go](#language-go)
+- 2026-05-23 — [Architecture: daemon + thin clients](#architecture-daemon--thin-clients)
+- 2026-05-23 — [Transport: HTTP + JSON](#transport-http--json)
+- 2026-05-23 — [MCP server as a sidecar process](#mcp-server-as-a-sidecar-process)
+- 2026-05-23 — [Storage: SQLite for v1](#storage-sqlite-for-v1)
+- 2026-05-23 — [Job queue: SQLite-backed](#job-queue-sqlite-backed) (revised)
+- 2026-05-23 — [Embedding model: nomic-embed-text via Ollama](#embedding-model-nomic-embed-text-via-ollama) (revised)
+- 2026-05-23 — [Daemon lifecycle: PID file + auto-start](#daemon-lifecycle-pid-file--auto-start) (revised)
+- 2026-05-23 — [Storage location: `~/.curio` with marker file](#storage-location-curio-with-marker-file)
+- 2026-05-23 — [Data model: documents are universal, references are per-source](#data-model-documents-are-universal-references-are-per-source)
+- 2026-05-23 — [Multi-tenancy: `tenant_id` on reference tables, not child tables](#multi-tenancy-tenant_id-on-reference-tables-not-child-tables)
+- 2026-05-23 — [Fetcher selection: data-driven rules file](#fetcher-selection-data-driven-rules-file)
+- 2026-05-23 — [Hybrid search: BM25 + vector + RRF](#hybrid-search-bm25--vector--rrf)
+- 2026-05-24 — [BM25 query sanitization: OR + stopwords](#bm25-query-sanitization-or--stopwords)
+- 2026-05-23 — [API: cursor pagination, not offset](#api-cursor-pagination-not-offset)
+- 2026-05-23 — [API: all long-running operations are async with job IDs](#api-all-long-running-operations-are-async-with-job-ids)
+- 2026-05-23 — [API: search response exposes BM25 and vector scores per chunk](#api-search-response-exposes-bm25-and-vector-scores-per-chunk)
+- 2026-05-23 — [API: search knobs are per-request overrides](#api-search-knobs-are-per-request-overrides)
+- 2026-05-23 — [API: `tenant_id` is server-side only, never echoed to clients](#api-tenant_id-is-server-side-only-never-echoed-to-clients)
+- 2026-05-23 — [API: bulk operations live under named endpoints, not `/batch`](#api-bulk-operations-live-under-named-endpoints-not-batch)
+- 2026-05-23 — [API: `/v1/documents/{id}/references` returns a shape that grows additively](#api-v1documentsidreferences-returns-a-shape-that-grows-additively)
+- 2026-05-23 — [SQLite build tags](#sqlite-build-tags)
+- 2026-05-23 — [SQLite DSN: per-connection pragmas via mattn's query params](#sqlite-dsn-per-connection-pragmas-via-mattns-query-params)
+- 2026-05-23 — [Migrations do not set PRAGMA journal_mode](#migrations-do-not-set-pragma-journal_mode)
+- 2026-05-23 — [Job queue claim via atomic UPDATE ... RETURNING](#job-queue-claim-via-atomic-update--returning)
+- 2026-05-23 — [Ollama: native install, not containerized](#ollama-native-install-not-containerized)
+- 2026-05-23 — [Default fetcher is Go-native, not a Node subprocess](#default-fetcher-is-go-native-not-a-node-subprocess) (revised)
+- 2026-05-23 — [Importers: CLI parses, daemon receives lists](#importers-cli-parses-daemon-receives-lists)
+- 2026-05-23 — [HTML export is a first-class importer source](#html-export-is-a-first-class-importer-source)
+- 2026-05-23 — [HTML parser walks recursively, finds <DL> inside <DT>](#html-parser-walks-recursively-finds-dl-inside-dt)
+- 2026-05-23 — [Worker pool: N workers via the same atomic ClaimNext](#worker-pool-n-workers-via-the-same-atomic-claimnext) (revised)
+- 2026-05-23 — [Marker file's schema_version is synced from the DB after migrations](#marker-files-schema_version-is-synced-from-the-db-after-migrations)
+- 2026-05-23 — [Chunker enforces a 3500-char hard cap (not just 384 words)](#chunker-enforces-a-3500-char-hard-cap-not-just-384-words)
+- 2026-05-23 — [Embedder passes num_ctx=8192 to Ollama, chunker defaults to 384 words](#embedder-passes-num_ctx8192-to-ollama-chunker-defaults-to-384-words)
+- 2026-09-24 — [Indexer: embed in batches of 32; `embedding.timeout_seconds`](#indexer-embed-in-batches-of-32-embeddingtimeout_seconds)
+- 2026-05-24 — [Document state follows job outcome via OnPermanentFailure hook](#document-state-follows-job-outcome-via-onpermanentfailure-hook)
+- 2026-05-24 — [Fallback strategy: only Jina for content-came-back cases](#fallback-strategy-only-jina-for-content-came-back-cases)
+- 2026-05-24 — [Anti-bot mitigation: browser-thorough headers, not just User-Agent](#anti-bot-mitigation-browser-thorough-headers-not-just-user-agent)
+- 2026-06-04 — [Anti-bot mitigation: pluggable TLS/HTTP2 fingerprint backend (uTLS)](#anti-bot-mitigation-pluggable-tlshttp2-fingerprint-backend-utls) (revised)
+- 2026-06-04 — [PDF fetcher: two-tier, pure-Go local then Jina](#pdf-fetcher-two-tier-pure-go-local-then-jina)
+- 2026-05-24 — [CLI defaults: happy-path views; debug paths are opt-in](#cli-defaults-happy-path-views-debug-paths-are-opt-in)
+- 2026-05-24 — [Jobs lifecycle: prune/delete, no nuke-all path](#jobs-lifecycle-prunedelete-no-nuke-all-path)
+- 2026-05-24 — [Safari importer: skip Reading List, require Full Disk Access](#safari-importer-skip-reading-list-require-full-disk-access)
+- 2026-06-04 — [Firefox importer: copy the live places.sqlite, prefer the install default](#firefox-importer-copy-the-live-placessqlite-prefer-the-install-default)
+- 2026-05-24 — [Jobs list: sort by updated_at, show timestamp](#jobs-list-sort-by-updated_at-show-timestamp)
+- 2026-05-24 — [`curio status`: CLI version, daemon version, disk usage](#curio-status-cli-version-daemon-version-disk-usage)
+- 2026-05-24 — [CLI hides `next_attempt` for terminal-status jobs](#cli-hides-next_attempt-for-terminal-status-jobs)
+- 2026-05-23 — [What's deferred from the v1 API](#whats-deferred-from-the-v1-api)
+- 2026-05-25 — [PatternDispatcher: host-based fetcher routing](#patterndispatcher-host-based-fetcher-routing) (superseded)
+- 2026-05-25 — [YouTube fetcher: yt-dlp over API/scraping](#youtube-fetcher-yt-dlp-over-apiscraping) (revised)
+- 2026-05-25 — [GitHub fetcher: REST API, no clone](#github-fetcher-rest-api-no-clone)
+- 2026-05-25 — [Per-fetcher rate limiting](#per-fetcher-rate-limiting) (revised)
+- 2026-05-25 — [YouTube URL normalization](#youtube-url-normalization) (revised)
+- 2026-07-05 — [GitHub issues, PRs, and wiki pages](#github-issues-prs-and-wiki-pages)
+- 2026-07-05 — [Dead-link detection: hard 404/410 + soft-404 heuristics](#dead-link-detection-hard-404410--soft-404-heuristics)
+- 2026-07-05 — [fetcher_rules.yaml: mtime-polled hot reload, keep-last-good](#fetcher_rulesyaml-mtime-polled-hot-reload-keep-last-good)
+- 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search)
+- 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4)
+- 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator)
+- 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
+- 2026-07-06 — [M6 (planned): RAG / Q&A synthesis + SOTA natural-language search](#m6-planned-rag--qa-synthesis--sota-natural-language-search)
+- 2026-07-06 — [nomic-embed-text task prefixes (`search_document:` / `search_query:`)](#nomic-embed-text-task-prefixes-search_document--search_query)
+- 2026-07-06 — [Insight clustering quality: the "general-reading" mega-cluster (known limitation)](#insight-clustering-quality-the-general-reading-mega-cluster-known-limitation)
+- 2026-09-09 — [Host-cache hits are permanent failures](#host-cache-hits-are-permanent-failures) (revised)
+- 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out)
+- 2026-09-24 — [Single daemon per home: flock on daemon.pid, bind before touching the DB](#single-daemon-per-home-flock-on-daemonpid-bind-before-touching-the-db) (revised)
+- 2026-09-24 — [Interrupted vs. orphaned jobs](#interrupted-vs-orphaned-jobs)
+- 2026-09-24 — [Config: strict keys, legacy `workers` folded in at load](#config-strict-keys-legacy-workers-folded-in-at-load)
+- 2026-09-24 — [Refetch: state reset and fetch job in one transaction](#refetch-state-reset-and-fetch-job-in-one-transaction)
+- 2026-09-24 — [Migrations: rebuilding a table other tables reference](#migrations-rebuilding-a-table-other-tables-reference)
+- 2026-09-24 — [Fetcher errors: one typed status model](#fetcher-errors-one-typed-status-model)
+- 2026-09-24 — [GitHub: secondary rate limits and a shared cooldown](#github-secondary-rate-limits-and-a-shared-cooldown)
+- 2026-09-24 — [Fetchers: one cap on every response body](#fetchers-one-cap-on-every-response-body)
+- 2026-09-24 — [Host cache: only host-wide verdicts, under the host that gave them](#host-cache-only-host-wide-verdicts-under-the-host-that-gave-them)
+- 2026-09-24 — [Login-wall heuristic: www and apex are the same site](#login-wall-heuristic-www-and-apex-are-the-same-site)
+- 2026-09-24 — [Fetch politeness: shared Jina pacing, per-host origin gate](#fetch-politeness-shared-jina-pacing-per-host-origin-gate) (revised)
+- 2026-09-24 — [URL normalization: fetch-equivalent and idempotent](#url-normalization-fetch-equivalent-and-idempotent)
+- 2026-09-24 — [Subprocess fetchers: kill the process group, cap the output](#subprocess-fetchers-kill-the-process-group-cap-the-output)
+- 2026-09-24 — [Chrome profiles carry their own User-Agent and sec-ch-ua](#chrome-profiles-carry-their-own-user-agent-and-sec-ch-ua)
+- 2026-09-24 — [Store boundary: consumers see interfaces, depguard enforces it](#store-boundary-consumers-see-interfaces-depguard-enforces-it)
+- 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert)
+- 2026-09-24 — [Bookmark ingest: one transaction, fetch only for new documents](#bookmark-ingest-one-transaction-fetch-only-for-new-documents)
+- 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down)
+- 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders)
+- 2026-09-24 — [API: handler edge cases found by coverage](#api-handler-edge-cases-found-by-coverage) (revised)
+- 2026-09-25 — [updated_at: written by each statement, not by triggers](#updated_at-written-by-each-statement-not-by-triggers)
+- 2026-09-25 — [Jobs reference their document through a column](#jobs-reference-their-document-through-a-column)
+- 2026-09-25 — [Indexes follow the queries; plans are pinned by tests](#indexes-follow-the-queries-plans-are-pinned-by-tests) (revised)
+- 2026-09-25 — [Chunks: external-content FTS, derived rows kept by triggers](#chunks-external-content-fts-derived-rows-kept-by-triggers)
+- 2026-09-25 — [Worker wakeups: an in-process signal, and idle polls that back off](#worker-wakeups-an-in-process-signal-and-idle-polls-that-back-off)
+- 2026-09-25 — [API: request IDs, one error mapping, logged server errors](#api-request-ids-one-error-mapping-logged-server-errors) (revised)
+- 2026-09-25 — [API: tolerant responses, strict requests](#api-tolerant-responses-strict-requests)
+- 2026-09-25 — [API: absolute content paths, and hydration errors fail the request](#api-absolute-content-paths-and-hydration-errors-fail-the-request) (revised)
+- 2026-09-25 — [API: filters are validated, sizing knobs default](#api-filters-are-validated-sizing-knobs-default)
+- 2026-09-25 — [Clients: one discovery, an explicit daemon environment, a signal context](#clients-one-discovery-an-explicit-daemon-environment-a-signal-context)
+- 2026-09-25 — [Client errors: a typed APIError, and "unreachable" means never connected](#client-errors-a-typed-apierror-and-unreachable-means-never-connected)
+- 2026-09-25 — [MCP sidecar: restart an unreachable daemon, retry once](#mcp-sidecar-restart-an-unreachable-daemon-retry-once)
+- 2026-09-25 — [List pagination: keyset on (timestamp, id)](#list-pagination-keyset-on-timestamp-id)
+- 2026-09-25 — [API: the spec is the contract, checked by tests](#api-the-spec-is-the-contract-checked-by-tests) (revised)
+- 2026-09-25 — [Toolchain: the go directive is the build toolchain, govulncheck gates it](#toolchain-the-go-directive-is-the-build-toolchain-govulncheck-gates-it)
+- 2026-09-25 — [Releases: gated on CI, pinned, least privilege](#releases-gated-on-ci-pinned-least-privilege)
+- 2026-09-25 — [Lint: a measured linter set, zero issues, explained suppressions](#lint-a-measured-linter-set-zero-issues-explained-suppressions)
+- 2026-09-25 — [Ollama: one client, one sentinel pair, a pull that keeps trying](#ollama-one-client-one-sentinel-pair-a-pull-that-keeps-trying)
+- 2026-09-25 — [Insight: skip non-finite document vectors, don't fail the run](#insight-skip-non-finite-document-vectors-dont-fail-the-run)
+- 2026-09-25 — [CLI: exit 130 on interrupt, a usage hint on usage errors](#cli-exit-130-on-interrupt-a-usage-hint-on-usage-errors)
+- 2026-09-25 — [Open questions](#open-questions)
 
 ---
 
@@ -1233,77 +1345,6 @@ it lands — no `/v1` → `/v2` bump required.
   loopback only and refuses browser-originated requests. See "Local API:
   loopback only, no token, browsers shut out" below for the threat model.
 - **WebSocket or streaming search** — current `POST /v1/search` is fine.
-
----
-
-## What's not decided yet
-
-- **Insight layer specifics:** clustering algorithm and labeling ✅ decided
-  in M4 — kNN-graph clustering + term/LLM labels (see the entry below). Still
-  open: trajectory analysis ("new this month"), cross-cluster interest
-  merging, and a standalone `interests` table, deferred until there's real
-  usage data.
-- **Authentication for hosted mode:** the scheme (API keys vs OAuth vs SSO)
-  is deferred. Nothing is stubbed in the local daemon, which trusts every
-  local process that can reach loopback (see "Local API: loopback only, no
-  token, browsers shut out").
-- **Re-crawl policy:** how often to refetch a given URL. Likely
-  domain-rule-driven (news daily, docs monthly, static essays never).
-- **Highlight / read-later importers:** schema is ready; importer code is not
-  in v1.
-- ~~**"Page Not Found" detection**~~ ✅ implemented — see the
-  "Dead-link detection: hard 404/410 + soft-404 heuristics" entry
-  below (title patterns + redirect-to-homepage; dead docs go to
-  state `dead`). The embedding-based "this isn't really an article"
-  classifier remains a possible future refinement.
-
-- **Natural-language search is provisional.** Current BM25 sanitization
-  (OR + small stopword list — see decision above) is the production
-  default of mid-2010s search engines, not the leading edge. We should
-  revisit when retrieval quality starts feeling weak or when corpus
-  size makes the noise from pure-OR matching surface. Options in rough
-  order of effort:
-
-    1. **Stemming + `minimum_should_match` post-filter.** Add a Porter
-       or Snowball stemmer to the tokenizer side AND require ~50-75% of
-       non-stopword tokens to match (FTS5 doesn't support this natively,
-       so we'd post-filter in Go). Cheap; modest recall + precision
-       boost.
-
-    2. **LLM query rewriting via Ollama.** Send the natural-language
-       query to a small local model with a system prompt like "extract
-       3-7 keyword phrases from this query." Use those for BM25 (vector
-       still uses the original). This is the "Perplexity / You.com"
-       pattern. Adds ~200-1000ms per query; quality jump can be big.
-       We already have Ollama running so the infrastructure cost is
-       zero. Right move if a search-quality eval shows BM25 is dragging
-       the hybrid score down.
-
-    3. **Learned sparse retrieval (SPLADE / ColBERT).** Replace BM25
-       entirely with a transformer-produced sparse vector indexed in an
-       inverted index. This is what Vespa, Qdrant, Weaviate are pushing
-       as "the next BM25." Best-in-class for natural-language queries,
-       but requires deploying another model, embedding every chunk at
-       index time, and embedding queries at search time. Massive
-       complexity jump for what's still a single-user local system.
-       Only worth it if curio outgrows hobby scale.
-
-  **Prerequisite for any of these:** a tiny eval harness — 10-20
-  representative queries with expected docs, scored on NDCG@10 or
-  recall@10. Without it we'll be guessing about whether each change
-  actually moved retrieval quality. Build the eval BEFORE the
-  improvement.
-
-  ✅ The eval harness now exists — `curio eval --queries <qrels.yaml>`
-  (`internal/eval`: recall@k / precision@k / NDCG@k / MRR). The SOTA
-  NL-search work itself is scheduled as **M6**, alongside RAG — see
-  "M6 (planned): RAG / Q&A synthesis + SOTA natural-language search" below.
-
-  **What's NOT under consideration:** building our own tokenizer,
-  custom synonym dictionaries, query-classification pipelines. The
-  hybrid retriever + RRF was chosen specifically to keep retrieval
-  simple; any "smartness" should live in the query-rewriting layer
-  above the retriever, not inside it.
 
 ---
 
@@ -2773,12 +2814,12 @@ healed with `curio refetch --all --state=pending`.
 per bookmark, the same as the five autocommit statements it replaces, and
 it lets fetch and index workers interleave with a 500-bookmark batch. The
 indexes of migration 007 raised it to about 245 µs, from 190 µs on the
-machine that re-measured both. The
-transaction takes the write lock at BEGIN (see "SQLite DSN"), so concurrent
-ingests queue on it through busy_timeout; five writers ingesting the same
-URLs produced one document and one job per URL and no `SQLITE_BUSY`. The import handler stops at the first bookmark after
-the client has gone; each committed bookmark stands on its own, so a
-re-import resumes.
+machine that re-measured both. The transaction takes the write lock at
+BEGIN (see "SQLite DSN"), so concurrent ingests queue on it through
+busy_timeout; five writers ingesting the same URLs produced one document
+and one job per URL and no `SQLITE_BUSY`. The import handler stops at the
+first bookmark after the client has gone; each committed bookmark stands
+on its own, so a re-import resumes.
 
 URL normalization and `importer.Indexable` filtering stay in the handlers,
 which report failures differently (400 versus `filtered_by`).
@@ -2788,9 +2829,9 @@ which report failures differently (400 versus `filtered_by`).
 ## Migrate: goose's Provider, and a context all the way down
 
 **Decision:** `sqlite.Open` and `Migrate` take a context (`PingContext`,
-`Provider.Up(ctx)`), and the daemon passes its run context. `Migrate` applies the embedded migrations
-through `goose.NewProvider`, never goose's package-level `SetBaseFS` /
-`SetDialect` / `Up`.
+`Provider.Up(ctx)`), and the daemon passes its run context. `Migrate`
+applies the embedded migrations through `goose.NewProvider`, never goose's
+package-level `SetBaseFS` / `SetDialect` / `Up`.
 
 **Why:** the package-level API reads and writes process globals, so two
 databases migrating at once race: four parallel test subtests that each
@@ -3741,3 +3782,80 @@ cancelled context killed `tail`, and `Run` reported that like a failure.
 With `SilenceErrors` on, cobra no longer printed its
 "Run 'curio --help' for usage." line, so a mistyped command or flag got a
 bare error with no pointer to the usage.
+
+---
+
+## Open questions
+
+Choices still open. Those settled since this list was started are at its
+end, pointing to the entries that decided them.
+
+- **Insight layer specifics:** trajectory analysis ("new this month"),
+  cross-cluster interest merging, and a standalone `interests` table,
+  deferred until there's real usage data.
+- **Authentication for hosted mode:** the scheme (API keys vs OAuth vs SSO)
+  is deferred. Nothing is stubbed in the local daemon, which trusts every
+  local process that can reach loopback (see "Local API: loopback only, no
+  token, browsers shut out").
+- **Re-crawl policy:** how often to refetch a given URL. Likely
+  domain-rule-driven (news daily, docs monthly, static essays never).
+- **Highlight / read-later importers:** schema is ready; importer code is not
+  in v1.
+- **An embedding-based "this isn't really an article" classifier**, as a
+  refinement of dead-link detection.
+
+- **Natural-language search is provisional.** Current BM25 sanitization
+  (OR + small stopword list — see decision above) is the production
+  default of mid-2010s search engines, not the leading edge. We should
+  revisit when retrieval quality starts feeling weak or when corpus
+  size makes the noise from pure-OR matching surface. Options in rough
+  order of effort:
+
+    1. **Stemming + `minimum_should_match` post-filter.** Add a Porter
+       or Snowball stemmer to the tokenizer side AND require ~50-75% of
+       non-stopword tokens to match (FTS5 doesn't support this natively,
+       so we'd post-filter in Go). Cheap; modest recall + precision
+       boost.
+
+    2. **LLM query rewriting via Ollama.** Send the natural-language
+       query to a small local model with a system prompt like "extract
+       3-7 keyword phrases from this query." Use those for BM25 (vector
+       still uses the original). This is the "Perplexity / You.com"
+       pattern. Adds ~200-1000ms per query; quality jump can be big.
+       We already have Ollama running so the infrastructure cost is
+       zero. Right move if a search-quality eval shows BM25 is dragging
+       the hybrid score down.
+
+    3. **Learned sparse retrieval (SPLADE / ColBERT).** Replace BM25
+       entirely with a transformer-produced sparse vector indexed in an
+       inverted index. This is what Vespa, Qdrant, Weaviate are pushing
+       as "the next BM25." Best-in-class for natural-language queries,
+       but requires deploying another model, embedding every chunk at
+       index time, and embedding queries at search time. Massive
+       complexity jump for what's still a single-user local system.
+       Only worth it if curio outgrows hobby scale.
+
+  **Prerequisite for any of these:** a tiny eval harness — 10-20
+  representative queries with expected docs, scored on NDCG@10 or
+  recall@10. Without it we'll be guessing about whether each change
+  actually moved retrieval quality. Build the eval BEFORE the
+  improvement.
+
+  The SOTA NL-search work itself is scheduled as **M6**, alongside RAG —
+  see "M6 (planned): RAG / Q&A synthesis + SOTA natural-language search".
+
+  **What's NOT under consideration:** building our own tokenizer,
+  custom synonym dictionaries, query-classification pipelines. The
+  hybrid retriever + RRF was chosen specifically to keep retrieval
+  simple; any "smartness" should live in the query-rewriting layer
+  above the retriever, not inside it.
+
+Resolved since they were listed here:
+
+- The clustering algorithm and labeling: "Insight layer: kNN-graph
+  clustering + labeled interests (M4)".
+- "Page Not Found" detection: "Dead-link detection: hard 404/410 +
+  soft-404 heuristics" (title patterns and redirect-to-homepage; dead
+  documents go to state `dead`).
+- The eval harness the natural-language search options need: "Retrieval
+  eval harness" (`curio eval --queries <qrels.yaml>`).
