@@ -17,8 +17,30 @@ import (
 
 func newJobsCmd(env *daemonctl.Env) *cobra.Command {
 	cmd := newJobsListCmd(env)
-	cmd.AddCommand(newJobsPruneCmd(env), newJobsDeleteCmd(env))
+	cmd.AddCommand(newJobsShowCmd(env), newJobsPruneCmd(env), newJobsDeleteCmd(env))
 	return cmd
+}
+
+func newJobsShowCmd(env *daemonctl.Env) *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <job-id>",
+		Short: "Show one job: its status, attempts, error and document",
+		Long: `Show one background job by ID, as 'curio jobs' lists it. Refetch,
+reindex and 'curio interests rebuild' print the ID of the job they
+enqueue; run this to follow it.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
+				return err
+			}
+			job, err := env.Client.GetJob(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			renderJob(cmd.OutOrStdout(), *job)
+			return nil
+		},
+	}
 }
 
 func newJobsListCmd(env *daemonctl.Env) *cobra.Command {
@@ -79,47 +101,51 @@ func renderJobList(w io.Writer, resp *client.JobList) {
 		fmt.Fprintln(w, "no jobs match")
 		return
 	}
-	// One header line per job + indented detail. No truncation — full
-	// error messages are the whole point of looking at this list. If
-	// terminal width is the concern, pipe to less or use --limit.
 	for i, j := range resp.Items {
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		ts := j.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
-		fmt.Fprintf(w, "%-7s  %-9s  attempts=%-2d  %s  %s\n", j.Status, j.Kind, j.Attempts, ts, j.ID)
-		if j.DocURL != "" {
-			fmt.Fprintf(w, "  url: %s\n", j.DocURL)
-			if j.DocTitle != "" && j.DocTitle != j.DocURL {
-				fmt.Fprintf(w, "  title: %s\n", truncate(j.DocTitle, 100))
-			}
-			if docID := extractDocID(j.Payload); docID != "" {
-				fmt.Fprintf(w, "  doc_id: %s\n", docID)
-			}
-			if j.MarkdownPath != "" {
-				fmt.Fprintf(w, "  path: %s\n", j.MarkdownPath)
-			}
-		}
-		if j.LastError != nil && *j.LastError != "" {
-			for _, line := range wrapLines(*j.LastError, 100) {
-				fmt.Fprintf(w, "  err: %s\n", line)
-			}
-		}
-		// Payload is debugging signal when no DocURL was joined (import,
-		// cluster, summarize jobs). For fetch/index it's redundant with
-		// the URL we just printed.
-		if j.DocURL == "" && len(j.Payload) > 0 {
-			fmt.Fprintf(w, "  payload: %s\n", condense(string(j.Payload)))
-		}
-		// next attempt only makes sense while the job can still run. For
-		// terminal status (done, failed) the run_after field carries
-		// stale data from the last retry cycle — display would be
-		// confusing.
-		if (j.Status == "pending" || j.Status == "running") && !j.RunAfter.IsZero() {
-			fmt.Fprintf(w, "  next attempt: %s\n", j.RunAfter.Local().Format("2006-01-02 15:04:05 MST"))
-		}
+		renderJob(w, j)
 	}
 	fmt.Fprintf(w, "\n%d job(s)\n", len(resp.Items))
+}
+
+// renderJob prints one job: a header line and indented detail. No
+// truncation: full error messages are the whole point of looking at a
+// job. If terminal width is the concern, pipe to less.
+func renderJob(w io.Writer, j client.Job) {
+	ts := j.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
+	fmt.Fprintf(w, "%-7s  %-9s  attempts=%-2d  %s  %s\n", j.Status, j.Kind, j.Attempts, ts, j.ID)
+	if j.DocURL != "" {
+		fmt.Fprintf(w, "  url: %s\n", j.DocURL)
+		if j.DocTitle != "" && j.DocTitle != j.DocURL {
+			fmt.Fprintf(w, "  title: %s\n", truncate(j.DocTitle, 100))
+		}
+		if docID := extractDocID(j.Payload); docID != "" {
+			fmt.Fprintf(w, "  doc_id: %s\n", docID)
+		}
+		if j.MarkdownPath != "" {
+			fmt.Fprintf(w, "  path: %s\n", j.MarkdownPath)
+		}
+	}
+	if j.LastError != nil && *j.LastError != "" {
+		for _, line := range wrapLines(*j.LastError, 100) {
+			fmt.Fprintf(w, "  err: %s\n", line)
+		}
+	}
+	// Payload is debugging signal when no DocURL was joined (import,
+	// cluster, summarize jobs). For fetch/index it's redundant with
+	// the URL we just printed.
+	if j.DocURL == "" && len(j.Payload) > 0 {
+		fmt.Fprintf(w, "  payload: %s\n", condense(string(j.Payload)))
+	}
+	// next attempt only makes sense while the job can still run. For
+	// terminal status (done, failed) the run_after field carries
+	// stale data from the last retry cycle — display would be
+	// confusing.
+	if (j.Status == "pending" || j.Status == "running") && !j.RunAfter.IsZero() {
+		fmt.Fprintf(w, "  next attempt: %s\n", j.RunAfter.Local().Format("2006-01-02 15:04:05 MST"))
+	}
 }
 
 // wrapLines breaks s on word boundaries so a long error message renders

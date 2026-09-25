@@ -247,6 +247,16 @@ func TestJobs(t *testing.T) {
 
 	out = mustRun(t, srv, "jobs", "--status", "failed")
 	assert.Contains(t, out, "no jobs match")
+
+	var cluster string
+	require.NoError(t, srv.DB.QueryRow(`SELECT id FROM jobs WHERE kind = 'cluster'`).Scan(&cluster))
+	out = mustRun(t, srv, "jobs", "show", cluster)
+	assert.Contains(t, out, "pending  cluster")
+	assert.Contains(t, out, cluster)
+	assert.Contains(t, out, "payload: {}")
+	assert.NotContains(t, out, "job(s)", "one job, not a list")
+	_, err = runCLI(t, srv, "jobs", "show", "no-such-job")
+	require.EqualError(t, err, `job "no-such-job" not found`)
 }
 
 func TestRefetch(t *testing.T) {
@@ -260,6 +270,7 @@ func TestRefetch(t *testing.T) {
 
 	out := mustRun(t, srv, "refetch", dead.ID, "--force")
 	assert.Contains(t, out, "refetch enqueued for document "+dead.ID)
+	assert.Contains(t, out, "follow it: curio jobs show ")
 
 	out = mustRun(t, srv, "refetch", "--all", "--state", "failed")
 	assert.Contains(t, out, "refetch enqueued for documents in state=failed: 1 jobs")

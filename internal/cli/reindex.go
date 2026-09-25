@@ -53,6 +53,7 @@ func reindexOne(ctx context.Context, w io.Writer, c *client.Client, docID string
 		return err
 	}
 	fmt.Fprintf(w, "reindex enqueued for document %s (job %s)\n", docID, resp.JobID)
+	fmt.Fprintf(w, "  follow it: curio jobs show %s\n", resp.JobID)
 	return nil
 }
 

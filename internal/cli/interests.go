@@ -48,8 +48,8 @@ func newInterestsRebuildCmd(env *daemonctl.Env) *cobra.Command {
 		Use:   "rebuild",
 		Short: "Recompute interest clusters from the current corpus",
 		Long: "Enqueue a clustering job that recomputes interests from all fetched,\n" +
-			"indexed documents. Runs in the background; check progress with\n" +
-			"`curio jobs --kind cluster` and view results with `curio interests`.",
+			"indexed documents. Runs in the background; follow it with the\n" +
+			"`curio jobs show <job-id>` it prints, and view results with `curio interests`.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
@@ -61,7 +61,7 @@ func newInterestsRebuildCmd(env *daemonctl.Env) *cobra.Command {
 			}
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "clustering job enqueued: %s\n", res.JobID)
-			fmt.Fprintln(w, "track it with `curio jobs --kind cluster`, then run `curio interests`")
+			fmt.Fprintf(w, "follow it with `curio jobs show %s`, then run `curio interests`\n", res.JobID)
 			return nil
 		},
 	}

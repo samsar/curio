@@ -120,6 +120,7 @@ func TestQueryPlans(t *testing.T) {
 	db := newTestDB(t)
 	claimArgs := []any{store.JobStatusRunning, "now", "now", store.JobStatusPending, "now", store.JobKindFetch}
 	bm25Q, bm25Args := bm25Query("local", `"kafka"`, 10, store.SearchFilters{})
+	getJobQ, getJobArgs := getJobWithDocQuery("local", "job")
 
 	cases := []planCase{
 		{
@@ -138,6 +139,12 @@ func TestQueryPlans(t *testing.T) {
 			query: requeueOrphansSQL(2),
 			args:  []any{store.JobStatusPending, "now", "now", store.JobStatusRunning, store.JobKindFetch, store.JobKindIndex},
 			want:  []string{"INDEX idx_jobs_claim (status=? AND kind=?)"},
+		},
+		{
+			name:  "GetWithDoc",
+			query: getJobQ, args: getJobArgs,
+			first: "SEARCH j USING INDEX sqlite_autoindex_jobs_1 (id=?)",
+			want:  []string{"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)"},
 		},
 		{
 			name:  "MetricsByKind durations",

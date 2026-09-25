@@ -456,6 +456,16 @@ type JobList struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 }
 
+// GetJob returns one job, as ListJobs shows it: poll it with the job_id a
+// refetch, reindex or interests rebuild returned.
+func (c *Client) GetJob(ctx context.Context, id string) (*Job, error) {
+	var out Job
+	if err := c.do(ctx, http.MethodGet, "/v1/jobs/"+id, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // DeleteJobsResponse mirrors api.DeleteJobsResponse.
 type DeleteJobsResponse struct {
 	Deleted int64  `json:"deleted"`

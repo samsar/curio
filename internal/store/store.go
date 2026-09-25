@@ -519,6 +519,9 @@ type JobStore interface {
 	// ListWithDoc lists the tenant's jobs, most recently updated first (then
 	// by ID, descending), each joined to the document it works on.
 	ListWithDoc(ctx context.Context, tenantID string, opts ListJobsOpts) ([]JobWithDoc, error)
+	// GetWithDoc returns one of the tenant's jobs joined to its document, as
+	// ListWithDoc lists it. ErrNotFound if the tenant has no such job.
+	GetWithDoc(ctx context.Context, tenantID, id string) (*JobWithDoc, error)
 	// CountByStatus counts the tenant's jobs per status. Statuses with no
 	// jobs are absent from the map.
 	CountByStatus(ctx context.Context, tenantID string) (map[JobStatus]int, error)

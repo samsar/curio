@@ -161,6 +161,7 @@ func newRouter(deps Deps, origin localOrigin) (chi.Router, error) {
 
 		r.Get("/jobs", deps.handleListJobs)
 		r.Delete("/jobs", deps.handleDeleteJobs)
+		r.Get("/jobs/{id}", deps.handleGetJob)
 	})
 	var err error
 	if methods, err = methodIndex(r); err != nil {

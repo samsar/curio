@@ -25,7 +25,8 @@ UI — codegen their request/response types from this spec.
 - **Async work** responds `202 Accepted`: `{ job_id }` for single-target
   operations (refetch, reindex, interests rebuild), `{ jobs_enqueued }` for
   the bulk `refetch-all` and `reindex-all`, which have no parent job.
-  Clients watch `GET /v1/jobs` for progress.
+  Clients poll `GET /v1/jobs/{id}` for a job's progress; the bulk
+  operations are watched through `GET /v1/jobs` or `GET /v1/stats`.
 - **Auth**: there is none, and no token. The daemon binds loopback only
   and trusts local processes. It refuses browser-originated requests:
   `Host` must be a loopback name on the daemon's port (403 otherwise, which

@@ -26,7 +26,7 @@ info:
         daemon upgrade invalidated is a 400, and the walk starts again.
       - Long-running operations are asynchronous and answer 202 with a
         `job_id`, or with `jobs_enqueued` for the bulk refetch-all and
-        reindex-all, which have no parent job. Watch `GET /v1/jobs`.
+        reindex-all, which have no parent job. Poll `GET /v1/jobs/{id}`.
 
     Access policy: there is no authentication and no token. The daemon binds
     loopback only and trusts every local process (and OS user) that can reach
@@ -441,7 +441,7 @@ paths:
       tags: [insight]
       operationId: rebuildInterests
       summary: Recompute interests from the current corpus (async)
-      description: Enqueues a clustering job. Poll the returned job id via /v1/jobs.
+      description: Enqueues a clustering job. Poll the returned job id via /v1/jobs/{id}.
       responses:
         "202":
           description: Clustering job enqueued
@@ -497,6 +497,10 @@ paths:
       tags: [jobs]
       operationId: getJob
       summary: Get a single job
+      description: >
+        The job as the list shows it, with its document's URL, title and
+        markdown path. Poll it with the job_id a refetch, reindex or
+        interests rebuild returned.
       responses:
         "200":
           description: OK

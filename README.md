@@ -56,6 +56,7 @@ curio jobs                          # done jobs (default; the audit view)
 curio jobs --failed                 # failures with full error + retry count
 curio jobs --all                    # every status
 curio jobs --kind index             # filter by job kind
+curio jobs show <job-id>            # one job, e.g. the one refetch or reindex just enqueued
 
 # Recovery
 curio refetch <doc-id>              # try one URL again

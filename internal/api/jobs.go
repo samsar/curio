@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -149,6 +151,18 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		resp.Items = append(resp.Items, d.jobResponse(j))
 	}
 	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// handleGetJob returns one job as the list shows it: the job a 202 from
+// refetch, reindex or interests/rebuild named, for clients to poll.
+func (d Deps) handleGetJob(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	job, err := d.Queue.GetWithDoc(r.Context(), d.TenantID, id)
+	if err != nil {
+		d.writeLookupError(w, r, "job", id, err)
+		return
+	}
+	d.writeJSON(w, r, http.StatusOK, d.jobResponse(*job))
 }
 
 // jobResponse is the wire shape of a job and its document.

@@ -335,6 +335,12 @@ func TestJobs(t *testing.T) {
 	}
 	assert.Len(t, seen, 4, "every job, over two pages")
 
+	job, err := c.GetJob(ctx, failed.Items[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, failed.Items[0], *job, "one job reads as the list shows it")
+	_, err = c.GetJob(ctx, "no-such-job")
+	requireStatus(t, err, http.StatusNotFound)
+
 	deleted, err := c.DeleteJobsByStatus(ctx, "failed")
 	require.NoError(t, err)
 	assert.EqualValues(t, 2, deleted.Deleted)

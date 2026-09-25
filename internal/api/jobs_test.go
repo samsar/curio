@@ -134,6 +134,45 @@ func TestListJobs_Paging(t *testing.T) {
 	assert.Equal(t, []string{"job-4", "job-3", "job-2", "job-1", "job-0"}, ids)
 }
 
+func TestGetJob(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	_, err := s.db.Exec(`UPDATE documents SET title = 'A' WHERE id = ?`, doc.ID)
+	require.NoError(t, err)
+	ext := s.seedContent(t, doc, "# A")
+	fetch, err := store.NewDocumentJob("local", store.JobKindFetch, doc.ID)
+	require.NoError(t, err)
+	require.NoError(t, s.deps.Queue.Enqueue(ctx, fetch))
+	cluster := &store.Job{TenantID: "local", Kind: store.JobKindCluster}
+	require.NoError(t, s.deps.Queue.Enqueue(ctx, cluster))
+
+	get := func(id string) JobResponse {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/jobs/" + id})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got JobResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		return got
+	}
+
+	j := get(fetch.ID)
+	assert.Equal(t, fetch.ID, j.ID)
+	assert.Equal(t, "fetch", j.Kind)
+	assert.Equal(t, "pending", j.Status)
+	assert.Equal(t, "https://example.com/a", j.DocURL)
+	assert.Equal(t, "A", j.DocTitle)
+	assert.Equal(t, filepath.Join(s.deps.Home.ContentDir(), *ext.MarkdownPath), j.MarkdownPath)
+
+	j = get(cluster.ID)
+	assert.Equal(t, "cluster", j.Kind)
+	assert.Empty(t, j.DocURL, "a cluster job has no document")
+	assert.Empty(t, j.MarkdownPath)
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/jobs/no-such-job"}), http.StatusNotFound)
+	assert.Equal(t, `job "no-such-job" not found`, p.Detail)
+}
+
 func TestDeleteJobs_BadRequests(t *testing.T) {
 	s := newTestServer(t)
 	for _, query := range []string{"", "?status=done&older_than=1d", "?older_than=soon", "?older_than=xd", "?older_than=-2d"} {
