@@ -160,35 +160,11 @@ func (s *Documents) UpdateState(ctx context.Context, id string, state store.DocS
 	return ensureRow(res, "document")
 }
 
-// ListWithLastError joins each document to the most recent failed job whose
-// payload names it (json_extract on payload.document_id) and to its current
-// extraction for the markdown path.
+// ListWithLastError looks up, for each document, the error of the most
+// recent failed job for it, and its current extraction for the markdown
+// path.
 func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, opts store.ListDocumentsOpts) ([]store.DocumentWithError, error) {
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	q := `SELECT ` + qualify("d", documentColumns) + `,
-		COALESCE(j.last_error, '') AS last_error,
-		COALESCE(e.markdown_path, '') AS markdown_path
-		FROM documents d
-		LEFT JOIN jobs j ON j.id = (
-			SELECT id FROM jobs
-			WHERE status = 'failed'
-			  AND json_extract(payload, '$.document_id') = d.id
-			ORDER BY updated_at DESC
-			LIMIT 1
-		)
-		LEFT JOIN document_extractions e ON e.id = d.current_extraction_id
-		WHERE d.tenant_id = ?`
-	args := []any{tenantID}
-	if opts.State != "" {
-		q += ` AND d.state = ?`
-		args = append(args, opts.State)
-	}
-	q += ` ORDER BY d.updated_at DESC LIMIT ?`
-	args = append(args, limit)
-
+	q, args := listDocumentsQuery(tenantID, opts)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list documents with error: %w", err)
@@ -209,11 +185,43 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, opts
 	return out, nil
 }
 
-func (s *Documents) ListIDsWithContent(ctx context.Context, tenantID string, state store.DocState) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+// listDocumentsQuery builds ListWithLastError's query. It walks
+// idx_documents_tenant_state_updated when filtered by state, and
+// idx_documents_tenant_updated otherwise, in updated_at order, so it stops
+// at the limit, and the last-error subquery, a seek on idx_jobs_document,
+// runs only for the rows returned.
+func listDocumentsQuery(tenantID string, opts store.ListDocumentsOpts) (string, []any) {
+	q := `SELECT ` + qualify("d", documentColumns) + `,
+		COALESCE((
+			SELECT j.last_error FROM jobs j
+			WHERE j.document_id = d.id AND j.status = ?
+			ORDER BY j.updated_at DESC
+			LIMIT 1
+		), '') AS last_error,
+		COALESCE(e.markdown_path, '') AS markdown_path
+		FROM documents d
+		LEFT JOIN document_extractions e ON e.id = d.current_extraction_id
+		WHERE d.tenant_id = ?`
+	args := []any{store.JobStatusFailed, tenantID}
+	if opts.State != "" {
+		q += ` AND d.state = ?`
+		args = append(args, opts.State)
+	}
+	q += ` ORDER BY d.updated_at DESC LIMIT ?`
+	return q, append(args, listLimit(opts.Limit))
+}
+
+// Per-state reads of the tenant's documents. Both use
+// idx_documents_tenant_state_updated.
+const (
+	listIDsWithContentSQL = `
 		SELECT id FROM documents
-		WHERE tenant_id = ? AND state = ? AND current_extraction_id IS NOT NULL`,
-		tenantID, state)
+		WHERE tenant_id = ? AND state = ? AND current_extraction_id IS NOT NULL`
+	countDocumentsSQL = `SELECT state, count(*) FROM documents WHERE tenant_id = ? GROUP BY state`
+)
+
+func (s *Documents) ListIDsWithContent(ctx context.Context, tenantID string, state store.DocState) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, listIDsWithContentSQL, tenantID, state)
 	if err != nil {
 		return nil, fmt.Errorf("list document ids with content: %w", err)
 	}
@@ -233,8 +241,7 @@ func (s *Documents) ListIDsWithContent(ctx context.Context, tenantID string, sta
 }
 
 func (s *Documents) CountByState(ctx context.Context, tenantID string) (map[store.DocState]int, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT state, count(*) FROM documents WHERE tenant_id = ? GROUP BY state`, tenantID)
+	rows, err := s.db.QueryContext(ctx, countDocumentsSQL, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("count documents: %w", err)
 	}
@@ -314,10 +321,7 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	// documents (docs/decisions.md "Refetch: state reset and fetch job in
 	// one transaction").
 	args := appendArgs([]any{store.DocStatePending, tenantID}, states)
-	rows, err := tx.QueryContext(ctx, `
-		UPDATE documents SET state = ?, updated_at = `+sqlNow+`
-		WHERE tenant_id = ? AND state IN (`+placeholders(len(states))+`)
-		RETURNING id`, args...)
+	rows, err := tx.QueryContext(ctx, resetStatesSQL(len(states)), args...)
 	if err != nil {
 		return 0, fmt.Errorf("reset document states: %w", err)
 	}
@@ -347,6 +351,16 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 		return 0, fmt.Errorf("commit requeue fetch: %w", err)
 	}
 	return len(ids), nil
+}
+
+// resetStatesSQL sets the tenant's documents in nStates states to pending,
+// returning their IDs. Its args are the new state, the tenant, then the
+// states.
+func resetStatesSQL(nStates int) string {
+	return `
+	UPDATE documents SET state = ?, updated_at = ` + sqlNow + `
+	WHERE tenant_id = ? AND state IN (` + placeholders(nStates) + `)
+	RETURNING id`
 }
 
 // getOrCreateDocument returns the tenant's document for url, inserting it in

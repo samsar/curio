@@ -59,8 +59,6 @@ func (s *Bookmarks) TagsForDocument(ctx context.Context, tenantID, documentID st
 
 func NewBookmarks(db *DB) *Bookmarks { return &Bookmarks{db: db} }
 
-const bookmarkListLimitDefault = 50
-
 func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.IngestResult, error) {
 	if err := validateBookmark(b); err != nil {
 		return store.IngestResult{}, err
@@ -193,18 +191,30 @@ func (s *Bookmarks) GetByID(ctx context.Context, id string) (*store.Bookmark, er
 }
 
 func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBookmarksOpts) ([]*store.Bookmark, error) {
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = bookmarkListLimitDefault
+	q, args := listBookmarksQuery(tenantID, opts)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list bookmarks: %w", err)
 	}
+	defer rows.Close()
 
-	var (
-		clauses []string
-		args    []any
-	)
-	clauses = append(clauses, "tenant_id = ?")
-	args = append(args, tenantID)
+	var out []*store.Bookmark
+	for rows.Next() {
+		b, err := scanBookmark(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
 
+// listBookmarksQuery builds List's query. A page walks
+// idx_bookmarks_tenant_id from the cursor, so it reads one page of rows,
+// not every bookmark the tenant has.
+func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, []any) {
+	clauses := []string{"tenant_id = ?"}
+	args := []any{tenantID}
 	if opts.Source != "" {
 		clauses = append(clauses, "source = ?")
 		args = append(args, opts.Source)
@@ -221,27 +231,10 @@ func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBo
 		clauses = append(clauses, "id > ?")
 		args = append(args, opts.Cursor)
 	}
-
 	q := bookmarkSelectCols +
 		" FROM bookmarks WHERE " + strings.Join(clauses, " AND ") +
 		" ORDER BY id LIMIT ?"
-	args = append(args, limit)
-
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list bookmarks: %w", err)
-	}
-	defer rows.Close()
-
-	var out []*store.Bookmark
-	for rows.Next() {
-		b, err := scanBookmark(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, b)
-	}
-	return out, rows.Err()
+	return q, append(args, listLimit(opts.Limit))
 }
 
 func (s *Bookmarks) Count(ctx context.Context, tenantID string) (int, error) {

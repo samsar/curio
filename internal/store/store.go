@@ -335,8 +335,10 @@ type ChunkHit struct {
 
 // SearchFilters scopes a search to documents matching all of the set
 // dimensions (values within one dimension are OR'd). An empty filter set
-// matches everything. content_type and source map to indexed columns; host
-// is matched against the document URL (there is no host column).
+// matches everything. Every dimension is checked on each hit's document
+// after the search finds it, so a filter narrows the results without
+// changing what the search reads; host is matched against the document URL
+// (there is no host column).
 type SearchFilters struct {
 	ContentType []string // documents.content_type IN (...)
 	// Host matches documents whose http or https URL has exactly this host,
@@ -424,6 +426,10 @@ func NewDocumentJob(tenantID string, kind JobKind, documentID string) (*Job, err
 // to a job that is currently running. Otherwise they change nothing and
 // return ErrNotRunning, or ErrNotFound if the job doesn't exist.
 type JobQueue interface {
+	// Enqueue inserts j, filling in its ID and timestamps. A payload that
+	// names a document_id (see DocumentJobPayload) links the job to that
+	// document, which must exist: one that doesn't is an error wrapping
+	// ErrNotFound.
 	Enqueue(ctx context.Context, j *Job) error
 	// ClaimNext atomically marks the next runnable job (status=pending,
 	// run_after<=now) as running, counts the attempt (attempts+1), and
@@ -459,7 +465,7 @@ type JobQueue interface {
 type JobStore interface {
 	JobQueue
 	// ListWithDoc lists the tenant's jobs, most recently updated first, each
-	// joined to the document its payload names.
+	// joined to the document it works on.
 	ListWithDoc(ctx context.Context, tenantID string, opts ListJobsOpts) ([]JobWithDoc, error)
 	// CountByStatus counts the tenant's jobs per status. Statuses with no
 	// jobs are absent from the map.
@@ -484,8 +490,8 @@ type ListJobsOpts struct {
 }
 
 // JobWithDoc is a job plus the URL, title and current markdown path of the
-// document its payload names. All three are empty for a job without a
-// document (cluster) or whose document is gone.
+// document it works on. All three are empty for a job without a document
+// (cluster) or whose document has been deleted.
 type JobWithDoc struct {
 	*Job
 	URL          string

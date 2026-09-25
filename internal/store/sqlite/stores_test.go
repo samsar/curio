@@ -327,6 +327,37 @@ func TestJobs_ClaimNext_FiltersByKind(t *testing.T) {
 	assert.Equal(t, store.JobKindIndex, got.Kind)
 }
 
+// TestJobs_ClaimNext_Order: jobs are claimed in the order they became
+// runnable, and in the order they were created when that ties.
+func TestJobs_ClaimNext_Order(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	q := NewJobs(db)
+	base := time.Now().UTC().Add(-time.Hour)
+	insert := func(id string, runAfter, createdAt time.Time) {
+		t.Helper()
+		_, err := db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, run_after, created_at)
+			VALUES (?, 'local', 'fetch', '{}', ?, ?)`, id, formatTime(runAfter), formatTime(createdAt))
+		require.NoError(t, err)
+	}
+	// A retry that came due before a newer job was created goes first,
+	// though it was created long before either.
+	insert("due-later", base.Add(2*time.Minute), base.Add(2*time.Minute))
+	insert("due-first", base.Add(time.Minute), base.Add(3*time.Minute))
+	// Due together: the older one goes first.
+	insert("tie-newer", base.Add(5*time.Minute), base.Add(5*time.Minute))
+	insert("tie-older", base.Add(5*time.Minute), base.Add(4*time.Minute))
+
+	want := []string{"due-first", "due-later", "tie-older", "tie-newer"}
+	got := make([]string, 0, len(want))
+	for range want {
+		j, err := q.ClaimNext(ctx, []store.JobKind{store.JobKindFetch})
+		require.NoError(t, err)
+		got = append(got, j.ID)
+	}
+	assert.Equal(t, want, got)
+}
+
 func TestJobs_ClaimNext_NoneRunnable(t *testing.T) {
 	q := NewJobs(newTestDB(t))
 	_, err := q.ClaimNext(context.Background(), nil)
@@ -343,6 +374,48 @@ func TestJobs_ClaimNext_RespectsRunAfter(t *testing.T) {
 	}))
 	_, err := q.ClaimNext(ctx, nil)
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestJobs_Enqueue_DocumentID: jobs.document_id is derived from the
+// payload at insert, which is stored as given, and a payload naming a
+// missing document is refused.
+func TestJobs_Enqueue_DocumentID(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	q := NewJobs(db)
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/doc"}
+	require.NoError(t, NewDocuments(db).Create(ctx, doc))
+
+	cases := []struct {
+		name    string
+		payload string
+		want    sql.NullString
+	}{
+		{"document job", `{"document_id":"` + doc.ID + `"}`, sql.NullString{String: doc.ID, Valid: true}},
+		{"extra fields", `{"reason": "model-swap", "document_id":"` + doc.ID + `"}`, sql.NullString{String: doc.ID, Valid: true}},
+		{"no document", `{}`, sql.NullString{}},
+		{"not an object", `[1, 2]`, sql.NullString{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			j := &store.Job{TenantID: "local", Kind: store.JobKindIndex, Payload: json.RawMessage(tc.payload)}
+			require.NoError(t, q.Enqueue(ctx, j))
+			var got sql.NullString
+			require.NoError(t, db.QueryRow(`SELECT document_id FROM jobs WHERE id = ?`, j.ID).Scan(&got))
+			assert.Equal(t, tc.want, got)
+			stored, err := q.GetByID(ctx, j.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.payload, string(stored.Payload), "the payload is stored byte for byte")
+		})
+	}
+
+	missing, err := store.NewDocumentJob("local", store.JobKindFetch, uuid.NewString())
+	require.NoError(t, err)
+	err = q.Enqueue(ctx, missing)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	assert.Contains(t, err.Error(), "fetch job")
+	_, err = q.GetByID(ctx, missing.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "nothing was inserted")
 }
 
 func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {

@@ -464,3 +464,73 @@ func TestMigration006_DropsUpdatedAtTriggers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, triggers, dumpRows(t, db, triggersQ))
 }
+
+// TestMigration007_BackfillsJobDocumentID: jobs.document_id is filled in
+// from the payload when the named document exists and left NULL otherwise,
+// nothing else in the rows changes, and the lists read through it. Down
+// restores the previous schema.
+func TestMigration007_BackfillsJobDocumentID(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 6)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, title, state, updated_at) VALUES
+			('d1', 'local', 'https://example.com/1', 'One', 'fetched', '2024-01-01T00:00:01.000Z'),
+			('d2', 'local', 'https://example.com/2', 'Two', 'failed',  '2024-01-01T00:00:02.000Z');
+		INSERT INTO jobs (id, tenant_id, kind, payload, status, attempts, run_after, last_error,
+		                  created_at, updated_at, started_at) VALUES
+			('fetch-d1-done',    'local', 'fetch',     '{"document_id":"d1"}',   'done',    1,
+			 '2024-01-01T00:00:00.000Z', NULL,           '2024-01-01T00:00:00.000Z', '2024-01-01T00:01:00.000Z', '2024-01-01T00:00:30.000Z'),
+			('fetch-d2-failed',  'local', 'fetch',     '{"document_id":"d2"}',   'failed',  5,
+			 '2024-01-01T00:10:00.000Z', 'older error',  '2024-01-01T00:00:00.000Z', '2024-01-01T00:02:00.000Z', '2024-01-01T00:01:30.000Z'),
+			('index-d2-failed',  'local', 'index',     '{"document_id":"d2"}',   'failed',  1,
+			 '2024-01-01T00:00:00.000Z', 'newest error', '2024-01-01T00:00:00.000Z', '2024-01-01T00:03:00.000Z', '2024-01-01T00:02:30.000Z'),
+			('index-d1-pending', 'local', 'index',     '{"document_id":"d1"}',   'pending', 0,
+			 '2024-01-01T00:00:00.000Z', NULL,           '2024-01-01T00:00:00.000Z', '2024-01-01T00:04:00.000Z', NULL),
+			('cluster',          'local', 'cluster',   '{}',                     'done',    1,
+			 '2024-01-01T00:00:00.000Z', NULL,           '2024-01-01T00:00:00.000Z', '2024-01-01T00:05:00.000Z', '2024-01-01T00:04:30.000Z'),
+			('fetch-gone',       'local', 'fetch',     '{"document_id":"gone"}', 'failed',  5,
+			 '2024-01-01T00:00:00.000Z', 'gone error',   '2024-01-01T00:00:00.000Z', '2024-01-01T00:06:00.000Z', '2024-01-01T00:05:30.000Z'),
+			('summarize-array',  'local', 'summarize', '[1, 2]',                 'done',    1,
+			 '2024-01-01T00:00:00.000Z', NULL,           '2024-01-01T00:00:00.000Z', '2024-01-01T00:07:00.000Z', '2024-01-01T00:06:30.000Z');`)
+	require.NoError(t, err)
+	const oldColumns = `SELECT id, tenant_id, kind, payload, status, attempts, run_after, last_error,
+		created_at, updated_at, started_at FROM jobs ORDER BY id`
+	jobsBefore := dumpRows(t, db, oldColumns)
+	schemaBefore := schemaDump(t, db)
+
+	_, err = p.UpTo(ctx, 7)
+	require.NoError(t, err)
+	assert.Equal(t, jobsBefore, dumpRows(t, db, oldColumns), "the backfill changes nothing else")
+	docIDs := map[string]any{}
+	for _, row := range dumpRows(t, db, `SELECT id, document_id FROM jobs`) {
+		docIDs[row[0].(string)] = row[1]
+	}
+	assert.Equal(t, map[string]any{
+		"fetch-d1-done": "d1", "fetch-d2-failed": "d2", "index-d2-failed": "d2", "index-d1-pending": "d1",
+		"cluster": nil, "fetch-gone": nil, "summarize-array": nil,
+	}, docIDs)
+	assert.Empty(t, dumpRows(t, db, `PRAGMA foreign_key_check`))
+
+	docs, err := NewDocuments(db).ListWithLastError(ctx, "local", store.ListDocumentsOpts{})
+	require.NoError(t, err)
+	require.Len(t, docs, 2)
+	assert.Equal(t, "d2", docs[0].ID)
+	assert.Equal(t, "newest error", docs[0].LastError)
+	assert.Equal(t, "d1", docs[1].ID)
+	assert.Empty(t, docs[1].LastError)
+
+	jobs, err := NewJobs(db).ListWithDoc(ctx, "local", store.ListJobsOpts{Status: store.JobStatusFailed})
+	require.NoError(t, err)
+	require.Len(t, jobs, 3)
+	got := map[string]string{}
+	for _, j := range jobs {
+		got[j.ID] = j.URL
+	}
+	assert.Equal(t, map[string]string{"fetch-gone": "", "index-d2-failed": "https://example.com/2",
+		"fetch-d2-failed": "https://example.com/2"}, got)
+
+	_, err = p.DownTo(ctx, 6)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db))
+	assert.Equal(t, jobsBefore, dumpRows(t, db, oldColumns))
+}

@@ -23,6 +23,13 @@ func isUniqueViolation(err error) bool {
 		serr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey
 }
 
+// isForeignKeyViolation reports whether err is a foreign-key violation
+// (SQLITE_CONSTRAINT_FOREIGNKEY): the row names a parent that doesn't exist.
+func isForeignKeyViolation(err error) bool {
+	var serr sqlite3.Error
+	return errors.As(err, &serr) && serr.ExtendedCode == sqlite3.ErrConstraintForeignKey
+}
+
 // ensureRow turns a write that matched no row into an error wrapping
 // store.ErrNotFound for entity.
 func ensureRow(res sql.Result, entity string) error {

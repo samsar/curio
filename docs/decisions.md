@@ -449,6 +449,27 @@ Tested with 20 jobs / 8 workers / `-race`: every job claimed exactly once,
 no duplicates, no errors. The test lives in jobs_test.go specifically so the
 multi-worker semantics are locked in before the M1 worker-pool expansion.
 
+**Claim order and index:** the claim takes the pending job that became
+runnable first: `ORDER BY run_after, created_at`, served by
+`idx_jobs_claim (status, kind, run_after, created_at)`. Every daemon pool
+claims one kind, and for one kind the subquery is a seek on
+`(status=? AND kind=? AND run_after<?)` and the first row, with no sort
+(pinned in `internal/store/sqlite/plans_test.go`). A claim for several
+kinds, or any kind, still works but sorts.
+
+The claim used to be `ORDER BY created_at` over `idx_jobs_dispatch
+(status, run_after, created_at)`, which served the `run_after` range but
+not the order, so every claim read and sorted all runnable jobs, under the
+write lock: 0.43 ms per claim with 5k runnable fetch jobs, 4.94 ms at 50k,
+so the claims of a large import cost the square of its size. A claim for a
+kind with nothing runnable (the index pool during a fetch backlog) walked
+every runnable job of the other kinds first, 3.1 ms at 50k. With
+`idx_jobs_claim` every single-kind claim measured 5-6 µs at every size.
+
+Fresh jobs are unaffected by the new order, since insert sets `run_after`
+to the insert time. A retried or requeued job is placed by when it came
+due, not by when it was first created.
+
 ---
 
 ## Ollama: native install, not containerized
@@ -2154,10 +2175,12 @@ enqueued, discarding errors. A failed enqueue left the document `pending`
 with no job, the stuck state the permanent-failure hook exists to
 prevent. `refetch-all` returned 202 with a count that hid the failures.
 
-**One transaction, not batches:** 50k documents take 1.5–2s (measured).
-Nearly all of that is the job INSERTs, and a prepared statement saved
-only about 8%. That is inside the 5s busy_timeout other writers wait on
-up to roughly 130k documents. Past that, a worker write that lands during
+**One transaction, not batches:** 50k documents took 1.5–2s (measured),
+and about 2.4s since migration 007 added the jobs indexes and the
+`document_id` check (see "Indexes follow the queries"). Nearly all of it
+is the job INSERTs, and a prepared statement saved only about 8%. That is
+inside the 5s busy_timeout other writers wait on up to roughly 100k
+documents. Past that, a worker write that lands during
 the bulk transaction fails as busy; its job stays `running` and is
 recovered as an orphan on the next start. Chunked transactions are the
 fix if corpora get there.
@@ -2646,6 +2669,8 @@ healed with `curio refetch --all --state=pending`.
 **One transaction per bookmark, not per batch:** measured at about 145 µs
 per bookmark, the same as the five autocommit statements it replaces, and
 it lets fetch and index workers interleave with a 500-bookmark batch. The
+indexes of migration 007 raised it to about 245 µs, from 190 µs on the
+machine that re-measured both. The
 write comes first so concurrent ingests queue on the write lock through
 busy_timeout (see "Job queue claim via atomic UPDATE ... RETURNING"); five
 writers ingesting the same URLs produced one document and one job per URL
@@ -2701,8 +2726,9 @@ The host filter is reachable from `curio search --host` and from the MCP
 character and a host of `%` matched every document. The obvious fix,
 `folder_path = ? OR folder_path LIKE ? ESCAPE ...`, is still wrong: `=` is
 case-sensitive and LIKE is not, so `/tech/ai` would match
-`/Tech/AI/Agents` but not `/Tech/AI`. The range needs no escaping and can
-still use `idx_bookmarks_folder (tenant_id, folder_path)`.
+`/Tech/AI/Agents` but not `/Tech/AI`. The range needs no escaping. (The OR
+keeps SQLite from seeking `idx_bookmarks_folder` on it; see "Indexes follow
+the queries" for how a filtered page is read.)
 
 ---
 
@@ -2760,3 +2786,94 @@ row had the claim time, and so did every job `RecoverOrphans` returned.
 The triggers also made `updated_at` impossible to pin in a test, which is
 why several tests inserted rows by hand and one comment claimed the claim
 was the last write to touch it.
+
+---
+
+## Jobs reference their document through a column
+
+**Decision:** `jobs.document_id TEXT REFERENCES documents(id) ON DELETE SET
+NULL` (migration 007) holds the document a fetch or index job works on.
+`insertJob` fills it in the INSERT itself with
+`json_extract(<payload>, '$.document_id')`, the rule the migration
+backfilled existing rows with. `ListWithLastError` finds a document's last
+error with `document_id = d.id AND status = 'failed' ORDER BY updated_at
+DESC LIMIT 1` on `idx_jobs_document (document_id, status, updated_at)`, and
+`ListWithDoc` joins `d.id = j.document_id`. No store read uses
+`json_extract`. Enqueueing a job whose payload names a missing document is
+an error wrapping `store.ErrNotFound`.
+
+**Why:** Jobs named their document only inside the payload JSON, which no
+index can serve. `curio docs` ran, for every document of the tenant before
+its sort and LIMIT, a correlated subquery that walked every failed job:
+59 ms at 2k documents and 200 failed jobs, 756 ms at 5k and 1k, growing
+with documents × failed jobs. `ListWithDoc` joined through `json_extract`
+for every tenant job. Nothing defined what deleting a document did to its
+jobs.
+
+**SET NULL, not CASCADE:** jobs are the audit trail. Their `last_error`
+explains a failure and their durations feed `/v1/metrics`; deleting a
+document must not erase that, the rule `bookmarks.document_id` already
+follows. SET NULL is also what `curio jobs` already showed for a vanished
+document (the job listed with an empty URL), and the state the backfill
+gives a payload naming a document that no longer exists, so existing
+databases pass `PRAGMA foreign_key_check`.
+
+**The payload keeps `document_id`:** the API returns payloads verbatim and
+the handlers decode them; the column is a projection written once at
+insert. Deriving it in SQL rather than decoding in Go keeps one rule for
+old and new rows, lets a payload that isn't a JSON object still enqueue
+(its column is NULL), and means `store.Job` needs no field no Go code
+reads.
+
+**In goose's transaction:** `ALTER TABLE ADD COLUMN` with a REFERENCES
+clause is allowed when the default is NULL, so no table is rebuilt; Down
+drops the index and then the column.
+
+---
+
+## Indexes follow the queries; plans are pinned by tests
+
+**Decision:** Migration 007 builds the index set around the queries the
+store runs:
+
+| Index | Serves |
+|---|---|
+| `idx_jobs_claim (status, kind, run_after, created_at)` | `ClaimNext`; `RecoverOrphans` |
+| `idx_jobs_document (document_id, status, updated_at)` | a document's last error (`curio docs`); the FK action when a document is deleted |
+| `idx_jobs_tenant_status_updated (tenant_id, status, updated_at)` | `ListWithDoc` by status (`curio jobs`, `--failed`); `CountByStatus`; `MetricsByKind`'s window; `PruneOlderThan`; `DeleteByStatus` |
+| `idx_jobs_tenant_updated (tenant_id, updated_at)` | `ListWithDoc` unfiltered (`--all`) or by kind only |
+| `idx_documents_tenant_state_updated (tenant_id, state, updated_at)` | `ListWithLastError` by state (`curio docs`, `--failed`); `CountByState`; `ListIDsWithContent`; `DocumentVectors`; `RequeueFetchByStates` |
+| `idx_documents_tenant_updated (tenant_id, updated_at)` | `ListWithLastError` unfiltered (`--all`) |
+| `idx_bookmarks_tenant_id (tenant_id, id)` | `Bookmarks.List` pages |
+
+They replace `idx_jobs_dispatch`, `idx_jobs_kind` and
+`idx_documents_tenant_state`. `idx_documents_tenant_ctype` and
+`idx_documents_url_canonical` are dropped: no query read them (the search
+`content_type` filter is checked on each hit's document after a
+primary-key join), and each cost a write on every document update.
+
+The lists walk their index in `updated_at` (or `id`) order and stop at the
+LIMIT, where they used to sort every tenant row first: `ListWithDoc` took
+2.3 ms at 4.2k jobs and 6.3 ms at 11k and grew until someone pruned, and a
+page of bookmarks sorted every bookmark, so paging through N cost
+O(N²/page size). `CountByStatus`, behind the `/v1/stats` that
+`curio import --follow` polls every 2 s, no longer builds a temporary
+b-tree for its GROUP BY. A bookmark page filtered by source or folder
+walks `idx_bookmarks_tenant_id` too, checking the filter per row; the
+folder filter's OR never let SQLite seek `idx_bookmarks_folder` anyway.
+
+**Pinned by tests:** curio never runs ANALYZE, so SQLite plans from its
+heuristics and the schema alone, and the plans are stable.
+`internal/store/sqlite/plans_test.go` runs EXPLAIN QUERY PLAN on the SQL
+the store runs, built by the same constants and builders, and asserts the
+index and its constraints, and the absence of a temporary b-tree wherever
+the order should come from the index. A query or index change that loses
+a plan fails there.
+
+**Write cost:** `jobs` now carries four secondary indexes, and every job
+insert checks its document. On the machine that measured 1.75 s before
+this change, `RequeueFetchByStates` over 50k documents takes 2.4 s, nearly
+all of it the job INSERTs (the `document_id` check about 0.3 s of it), and
+a bookmark `Ingest` about 245 µs instead of 190 µs. Reads that were
+proportional to the table are now proportional to the page, which is the
+trade `curio docs` and `curio jobs` need.

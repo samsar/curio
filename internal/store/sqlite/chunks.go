@@ -366,6 +366,17 @@ func decodeVector(blob []byte, dim int) ([]float32, error) {
 	return v, nil
 }
 
+// documentVectorsSQL reads the chunk vectors of the tenant's documents in
+// a state, grouped by document in chunk order. It starts from the state's
+// documents on idx_documents_tenant_state_updated.
+const documentVectorsSQL = `
+	SELECT c.document_id, v.embedding
+	FROM chunks_vec v
+	JOIN chunks c    ON c.id = v.chunk_id
+	JOIN documents d ON d.id = c.document_id
+	WHERE d.tenant_id = ? AND d.state = ?
+	ORDER BY c.document_id, c.ord`
+
 // DocumentVectors returns one mean-pooled vector per fetched document with at
 // least one indexed chunk, in a single pass over chunks_vec. Rows are ordered
 // by document so we can average each document's chunk vectors as we stream,
@@ -374,13 +385,7 @@ func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.
 	if tenantID == "" {
 		return nil, fmt.Errorf("chunks: tenant_id required")
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT c.document_id, v.embedding
-		FROM chunks_vec v
-		JOIN chunks c    ON c.id = v.chunk_id
-		JOIN documents d ON d.id = c.document_id
-		WHERE d.tenant_id = ? AND d.state = ?
-		ORDER BY c.document_id, c.ord`, tenantID, store.DocStateFetched)
+	rows, err := s.db.QueryContext(ctx, documentVectorsSQL, tenantID, store.DocStateFetched)
 	if err != nil {
 		return nil, fmt.Errorf("document vectors: %w", err)
 	}

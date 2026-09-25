@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+// listLimitDefault is the page size of a list whose options leave it unset.
+const listLimitDefault = 50
+
+// listLimit is limit, or listLimitDefault when limit <= 0.
+func listLimit(limit int) int {
+	if limit <= 0 {
+		return listLimitDefault
+	}
+	return limit
+}
+
 // timeFormat matches the migration's strftime('%Y-%m-%dT%H:%M:%fZ','now')
 // output. Used to parse and emit timestamps everywhere.
 const timeFormat = "2006-01-02T15:04:05.000Z"

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
@@ -43,7 +44,7 @@ type jobRow struct {
 	tenantID  string
 	kind      store.JobKind
 	status    store.JobStatus
-	docID     string // payload document_id; empty for a {} payload
+	docID     string // payload and column document_id; empty for a {} payload
 	lastError string
 	startedAt time.Time // zero means NULL
 	updatedAt time.Time
@@ -53,8 +54,10 @@ func insertJobRow(t *testing.T, db *DB, j jobRow) string {
 	t.Helper()
 	id := uuid.NewString()
 	payload := "{}"
+	var docID any
 	if j.docID != "" {
 		payload = `{"document_id":"` + j.docID + `"}`
+		docID = j.docID
 	}
 	var lastErr, startedAt any
 	if j.lastError != "" {
@@ -67,9 +70,9 @@ func insertJobRow(t *testing.T, db *DB, j jobRow) string {
 	if tenantID == "" {
 		tenantID = "local"
 	}
-	_, err := db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, last_error, started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, tenantID, j.kind, payload, j.status, lastErr, startedAt, formatTime(j.updatedAt))
+	_, err := db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, document_id, status, last_error, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, tenantID, j.kind, payload, docID, j.status, lastErr, startedAt, formatTime(j.updatedAt))
 	require.NoError(t, err)
 	return id
 }
@@ -187,8 +190,15 @@ func TestJobs_ListWithDoc(t *testing.T) {
 		lastError: "embed failed", updatedAt: now.Add(-2 * time.Minute)})
 	cluster := insertJobRow(t, db, jobRow{kind: store.JobKindCluster, status: store.JobStatusDone,
 		updatedAt: now.Add(-1 * time.Minute)})
+	// A deleted document's jobs stay, with no document to join.
+	goneDoc := insertDoc(t, db, "local", "https://example.com/gone", store.DocStateFailed, now)
 	gone := insertJobRow(t, db, jobRow{kind: store.JobKindFetch, status: store.JobStatusFailed,
-		docID: uuid.NewString(), updatedAt: now.Add(-4 * time.Minute)})
+		docID: goneDoc, updatedAt: now.Add(-4 * time.Minute)})
+	_, err = db.Exec(`DELETE FROM documents WHERE id = ?`, goneDoc)
+	require.NoError(t, err)
+	var goneDocID sql.NullString
+	require.NoError(t, db.QueryRow(`SELECT document_id FROM jobs WHERE id = ?`, gone).Scan(&goneDocID))
+	assert.False(t, goneDocID.Valid, "ON DELETE SET NULL")
 	insertJobRow(t, db, jobRow{tenantID: "other", kind: store.JobKindFetch, status: store.JobStatusDone, updatedAt: now})
 
 	ids := func(items []store.JobWithDoc) []string {
