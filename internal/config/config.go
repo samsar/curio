@@ -215,11 +215,12 @@ func Default() Config {
 			Collapse:     "max",
 		},
 		Chunking: Chunking{
-			// 384 words is conservative: nomic-embed-text supports 8192
-			// tokens, but dense markdown (URLs, code blocks, tables) can
-			// have far more BPE tokens than whitespace-words. 384 words
-			// stays comfortably under 8192 tokens even for the worst
-			// content. See decisions.md.
+			// 384 words is conservative: nomic-embed-text's context is
+			// 2048 tokens (its GGUF context_length; the num_ctx we send is
+			// advisory), and dense markdown (URLs, code blocks, tables)
+			// has far more BPE tokens than whitespace-words. The chunker's
+			// 3500-byte cap backs this up for the worst content. See
+			// decisions.md.
 			SizeTokens:    384,
 			OverlapTokens: 48,
 		},

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/samsar/curio/internal/generator"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 // ClusterInfo is the labeler's view of a cluster: the titles of its most
@@ -184,16 +185,16 @@ func fieldValue(line, field string) (string, bool) {
 	return "", false
 }
 
+// maxLabelRunes caps a parsed label field, so a model that ignores the
+// format can't persist a paragraph as an interest name or summary.
+const maxLabelRunes = 200
+
 // cleanLabel trims whitespace, surrounding quotes/markdown, and caps length.
 func cleanLabel(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.Trim(s, "\"'*`_")
 	s = strings.TrimSpace(s)
-	const max = 200
-	if len(s) > max {
-		s = strings.TrimSpace(s[:max])
-	}
-	return s
+	return strings.TrimSpace(textutil.TruncateRunes(s, maxLabelRunes))
 }
 
 func tokenize(s string) []string {

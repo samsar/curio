@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,4 +56,14 @@ func TestParseLabel(t *testing.T) {
 	// Rejects a sentence-like preamble (no NAME field) so the engine falls
 	// back to deterministic term labels instead of persisting junk.
 	assert.Empty(t, parseLabel("Sure, here is the topic name you asked me for").Name)
+}
+
+func TestCleanLabel_CapsInRunes(t *testing.T) {
+	got := cleanLabel(strings.Repeat("機", 150)) // 450 bytes
+	assert.True(t, utf8.ValidString(got))
+	assert.Equal(t, 150, utf8.RuneCountInString(got), "under the rune cap, nothing is cut")
+
+	got = cleanLabel(strings.Repeat("機", 250))
+	assert.True(t, utf8.ValidString(got))
+	assert.Equal(t, maxLabelRunes, utf8.RuneCountInString(got))
 }

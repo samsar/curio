@@ -575,6 +575,19 @@ The DB is authoritative; the marker mirrors it.
 **Decision:** `ChunkOptions.SizeChars` (default 3500) is a hard upper bound
 on chunk byte length applied AFTER the word-count chunking pass. Chunks
 that exceed the limit are split at word boundaries with a small overlap.
+A single whitespace-free token longer than the cap (a long URL, a hex
+blob, or a CJK paragraph, which has no spaces at all) is split into
+consecutive pieces on rune boundaries — never truncated. Truncating it
+used to drop everything past the cut (about 60% of a 9000-byte Chinese
+paragraph never reached BM25 or the vector index) and cut multi-byte
+runes in half, producing invalid UTF-8.
+
+**Headings stay with their section:** the paragraph splitter prefixes a
+markdown heading to the paragraph that follows it (consecutive headings
+all join it; a trailing heading stands alone), so the word packer can't
+leave a heading at the tail of the previous chunk, apart from the text it
+names. Both changes apply to documents as they are next indexed; run
+`curio reindex --all` to re-chunk the existing corpus.
 
 **Why:** Word count is a bad proxy for BPE token count on URL- or
 code-heavy content. A single URL like
@@ -631,6 +644,10 @@ Setting `num_ctx=8192` gives us the model's full window. Dropping to
 chunking. Costs a tokenizer dep (e.g., tiktoken-go or sugarme/tokenizer)
 and adds latency. Not worth it until we see chunk-quality issues from
 the conservative word-based heuristic.
+
+**Later finding:** nomic-embed-text's real ceiling is 2048 tokens (its GGUF
+`context_length`), and Ollama clamps `num_ctx` to it, so the 8192 we send
+is advisory. The 3500-byte chunk cap (entry above) is what bounds inputs.
 
 ---
 
