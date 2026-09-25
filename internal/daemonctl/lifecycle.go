@@ -83,8 +83,9 @@ const (
 // Status is a snapshot of the daemon's state.
 type Status struct {
 	State State
-	// PID is the lock holder's PID when Running (0 while it is still
-	// starting), otherwise the value left in daemon.pid.
+	// PID is the lock holder's PID when Running (0 in the moment between
+	// the daemon taking the lock and recording its PID), otherwise the
+	// value left in daemon.pid.
 	PID int
 	// Health is what answered at BaseURL if it serves the full API, and
 	// Startup what answered if it is still starting. Both are nil if
@@ -96,13 +97,9 @@ type Status struct {
 // AnsweredBy is the pid and home of whatever answered at BaseURL, serving
 // or starting; answered is false if nothing did.
 func (s Status) AnsweredBy() (pid int, home string, answered bool) {
-	switch {
-	case s.Health != nil:
-		return s.Health.PID, s.Health.Home, true
-	case s.Startup != nil:
-		return s.Startup.PID, s.Startup.Home, true
-	}
-	return 0, "", false
+	a := answer{health: s.Health, startup: s.Startup}
+	pid, home = a.identity()
+	return pid, home, a.health != nil || a.startup != nil
 }
 
 // Controller manages the daemon for one home.
