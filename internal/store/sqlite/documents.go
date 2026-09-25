@@ -211,7 +211,7 @@ func listDocumentsQuery(tenantID string, opts store.ListDocumentsOpts) (string, 
 	return q, append(args, listLimit(opts.Limit))
 }
 
-// Per-state reads of the tenant's documents. Both use
+// Reads of the tenant's documents by state. Both use
 // idx_documents_tenant_state_updated.
 const (
 	listIDsWithContentSQL = `
