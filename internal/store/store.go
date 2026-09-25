@@ -329,7 +329,7 @@ type ClusterRun struct {
 	TenantID     string
 	Status       string          // running | done | failed
 	Algo         string          // clusterer name, e.g. "knn-graph"
-	Params       json.RawMessage // clusterer params; nil means absent
+	Params       json.RawMessage // clusterer params + the engine's "center"; nil means absent
 	NumDocuments int             // docs considered (those with vectors)
 	NumClusters  int
 	NumNoise     int // docs left unclustered
@@ -348,7 +348,7 @@ type Cluster struct {
 	Label     *string // topic name; nil until labeled
 	Summary   *string // one-line description; nil if none
 	Size      int     // member count (denormalized)
-	Cohesion  float64 // mean member cosine to the medoid, 0..1
+	Cohesion  float64 // mean member cosine to the centroid, 0..1
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -357,7 +357,7 @@ type Cluster struct {
 type ClusterMember struct {
 	ClusterID  string
 	DocumentID string
-	Similarity float64 // cosine to the cluster medoid, 0..1
+	Similarity float64 // cosine to the cluster centroid, 0..1
 }
 
 // ClusterWithMembers bundles a cluster and its members for an atomic write.

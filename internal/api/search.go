@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -14,7 +15,8 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// SearchRequest is the POST /v1/search body.
+// SearchRequest is the POST /v1/search body. K 0 (or omitted) means the
+// configured search.default_k.
 type SearchRequest struct {
 	Query   string  `json:"query"`
 	K       int     `json:"k,omitempty"`
@@ -53,12 +55,15 @@ type ChunkMatchJSON struct {
 	VectorScore *float64 `json:"vector_score,omitempty"`
 }
 
-// SearchResponse mirrors the openapi SearchResponse schema.
+// SearchResponse mirrors the openapi SearchResponse schema. Degraded and
+// Warnings report keyword-only results when semantic search was unavailable.
 type SearchResponse struct {
 	Query      string              `json:"query"`
 	TookMS     int64               `json:"took_ms"`
 	BM25Hits   int                 `json:"bm25_hits"`
 	VectorHits int                 `json:"vector_hits"`
+	Degraded   bool                `json:"degraded,omitempty"`
+	Warnings   []string            `json:"warnings,omitempty"`
 	Items      []SearchHitResponse `json:"items"`
 }
 
@@ -72,7 +77,13 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "bad request", "query is required")
 		return
 	}
+	if req.K < 0 || req.K > search.MaxK {
+		writeProblem(w, http.StatusBadRequest, "bad request",
+			fmt.Sprintf("k must be between 1 and %d (or omitted for the default), got %d", search.MaxK, req.K))
+		return
+	}
 
+	start := time.Now()
 	res, err := d.Search.Search(r.Context(), search.Request{
 		TenantID: d.TenantID,
 		Query:    req.Query,
@@ -90,8 +101,11 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	resp := SearchResponse{
 		Query:      res.Query,
+		TookMS:     time.Since(start).Milliseconds(),
 		BM25Hits:   res.BM25Hits,
 		VectorHits: res.VectorHits,
+		Degraded:   res.Degraded,
+		Warnings:   res.Warnings,
 		Items:      d.searchHitsToResponse(r.Context(), res.Items),
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -151,7 +165,7 @@ func (d Deps) handleRelatedDocuments(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	k := 10
 	if v := r.URL.Query().Get("k"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= search.MaxK {
 			k = n
 		}
 	}

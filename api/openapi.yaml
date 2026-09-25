@@ -379,6 +379,12 @@ paths:
       tags: [search]
       operationId: search
       summary: Hybrid BM25 + vector search
+      description: >
+        Runs BM25 and vector retrieval concurrently and fuses them with RRF.
+        If the embedding model is unavailable (Ollama down, or slower than
+        search.embed_timeout_seconds), the keyword results are still returned
+        with degraded=true and a warning explaining why; a keyword-index
+        failure is a 500. Unknown request fields are rejected with 400.
       requestBody:
         required: true
         content:
@@ -390,6 +396,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResponse" }
+        "400":
+          description: Missing query, k outside 1..100, or an unknown field
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
 
   # ---------- insight ----------
 
@@ -649,30 +660,25 @@ components:
           description: Natural-language or keyword query
         k:
           type: integer
-          default: 10
+          minimum: 0
           maximum: 100
-          description: Max documents to return after RRF fusion + collapse
+          description: >
+            Max documents to return after RRF fusion + collapse, 1 to 100.
+            Omitted (or 0) uses the server's search.default_k (10 unless
+            configured).
         filters:
           type: object
+          description: >
+            content_type, host and source are applied. folder and tag are
+            accepted but not applied yet. Per-request RRF weights, collapse
+            strategy and saved-date filters are not implemented; the server
+            config sets the first two, and sending any of them is a 400.
           properties:
             content_type: { type: array, items: { type: string, enum: [article, repo, video, pdf, thread, unknown] } }
             host:         { type: array, items: { type: string } }
-            source:       { type: array, items: { type: string, enum: [chrome, safari, firefox, manual] } }
-            folder:       { type: string, description: "Folder path prefix match" }
-            tag:          { type: array, items: { type: string } }
-            saved_after:  { type: string, format: date-time }
-            saved_before: { type: string, format: date-time }
-        weights:
-          type: object
-          description: Optional RRF weighting overrides (per-request)
-          properties:
-            bm25:   { type: number, default: 1.0 }
-            vector: { type: number, default: 1.0 }
-        collapse:
-          type: string
-          enum: [max, sum, top3_avg]
-          default: max
-          description: How per-document scores are aggregated from chunk scores
+            source:       { type: array, items: { type: string, enum: [chrome, safari, firefox, html, manual] } }
+            folder:       { type: string, description: "Accepted but not applied yet" }
+            tag:          { type: array, items: { type: string }, description: "Accepted but not applied yet" }
 
     SearchHit:
       type: object
@@ -695,9 +701,18 @@ components:
       type: object
       properties:
         query:       { type: string }
-        took_ms:     { type: integer }
+        took_ms:     { type: integer, description: "Time the search engine took, in milliseconds" }
         bm25_hits:   { type: integer, description: "How many chunks BM25 returned before fusion" }
-        vector_hits: { type: integer, description: "How many chunks the vector index returned before fusion" }
+        vector_hits: { type: integer, description: "How many chunks the vector index returned before fusion (0 when degraded)" }
+        degraded:
+          type: boolean
+          description: >
+            Present and true when semantic search was unavailable and items
+            are keyword-only (BM25) results.
+        warnings:
+          type: array
+          items: { type: string }
+          description: Why the results are degraded; present only when there is something to report.
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }
@@ -711,7 +726,7 @@ components:
         title:         { type: string }
         url:           { type: string }
         markdown_path: { type: string, description: "Absolute on-disk path to the member's extracted markdown" }
-        similarity:    { type: number, description: "Cosine similarity to the cluster medoid (0..1)" }
+        similarity:    { type: number, description: "Cosine similarity to the cluster centroid (0..1)" }
       required: [doc_id, url, similarity]
 
     Interest:
@@ -722,7 +737,7 @@ components:
         label:    { type: string, description: "Topic name; omitted when unlabeled" }
         summary:  { type: string }
         size:     { type: integer, description: "Number of member documents" }
-        cohesion: { type: number, description: "Mean member cosine to the medoid (0..1)" }
+        cohesion: { type: number, description: "Mean member cosine to the cluster centroid (0..1)" }
         members:
           type: array
           items: { $ref: "#/components/schemas/InterestMember" }

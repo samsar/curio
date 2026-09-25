@@ -3,13 +3,12 @@ package importer
 import (
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/net/html"
-
-	"github.com/samsar/curio/internal/urlutil"
 )
 
 // ParseHTML reads a Netscape Bookmark File Format document and returns
@@ -95,11 +94,7 @@ func walkNode(n *html.Node, folderStack []string, out *[]ParsedBookmark) {
 			case "h3":
 				// Already consumed for folderName; nothing to do.
 			case "dl":
-				next := folderStack
-				if folderName != "" {
-					next = append(append([]string{}, folderStack...), folderName)
-				}
-				walkNode(c, next, out)
+				walkNode(c, pushFolder(folderStack, folderName), out)
 			default:
 				walkNode(c, folderStack, out)
 			}
@@ -118,17 +113,13 @@ func emitAnchor(n *html.Node, folderStack []string, out *[]ParsedBookmark) {
 	if href == "" {
 		return
 	}
-	bm := ParsedBookmark{
-		URL:        href,
+	*out = append(*out, ParsedBookmark{
+		URL:        canonicalURL(href),
 		Title:      strings.TrimSpace(textContent(n)),
 		FolderPath: joinFolderPath(folderStack),
 		SavedAt:    parseDateAttr(attr(n, "add_date")),
 		Tags:       splitTagsAttr(attr(n, "tags")),
-	}
-	if norm, err := urlutil.Normalize(href); err == nil {
-		bm.URL = norm
-	}
-	*out = append(*out, bm)
+	})
 }
 
 // textContent returns the concatenated text under n.
@@ -157,30 +148,52 @@ func attr(n *html.Node, key string) string {
 	return ""
 }
 
-// parseDateAttr handles the ADD_DATE attribute common in HTML exports:
-// it's seconds since the Unix epoch, sometimes as a string of digits,
-// sometimes with fractional component. Returns the zero time on failure
-// so callers can omit a SavedAt downstream.
+// epochUnits infers a Unix timestamp's unit from its magnitude, finest unit
+// first: nanoseconds, microseconds (Firefox), milliseconds (several
+// read-later exporters), seconds. Each threshold is about 1973 in the finer
+// unit and about year 5138 in the coarser one, so no plausible bookmark date
+// is ambiguous.
+var epochUnits = []struct {
+	min       float64
+	perSecond int64
+}{
+	{1e17, 1e9},
+	{1e14, 1e6},
+	{1e11, 1e3},
+	{0, 1},
+}
+
+func epochPerSecond(v float64) int64 {
+	for _, u := range epochUnits {
+		if v >= u.min {
+			return u.perSecond
+		}
+	}
+	return 1
+}
+
+// parseDateAttr reads an ADD_DATE attribute: a Unix timestamp in the unit
+// epochUnits infers, written as an integer (parsed exactly) or a decimal,
+// possibly in scientific notation (sub-second precision kept). Returns the
+// zero time for anything unparseable, non-positive, or non-finite, so
+// callers can omit a SavedAt downstream.
 func parseDateAttr(s string) time.Time {
 	s = strings.TrimSpace(s)
-	if s == "" {
-		return time.Time{}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if n <= 0 {
+			return time.Time{}
+		}
+		per := epochPerSecond(float64(n))
+		return time.Unix(n/per, n%per*(1e9/per)).UTC()
 	}
-	// Some exports use scientific notation; ParseFloat handles both.
 	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
+	// Written so NaN, which fails every comparison, is rejected; the upper
+	// bound keeps the seconds within int64.
+	if err != nil || !(f > 0 && f < math.MaxInt64) {
 		return time.Time{}
 	}
-	if f <= 0 {
-		return time.Time{}
-	}
-	// Heuristic: if the value is large enough to be microseconds since
-	// 1970 (e.g. Firefox export), shift down. Threshold = year 5000 in
-	// seconds.
-	if f > 95617584000 {
-		f = f / 1_000_000
-	}
-	return time.Unix(int64(f), 0).UTC()
+	sec, frac := math.Modf(f / float64(epochPerSecond(f)))
+	return time.Unix(int64(sec), int64(math.Round(frac*1e9))).UTC()
 }
 
 func splitTagsAttr(s string) []string {

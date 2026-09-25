@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 func newSearchCmd() *cobra.Command {
@@ -46,11 +47,14 @@ func newSearchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			for _, w := range res.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
+			}
 			renderSearchResults(res)
 			return nil
 		},
 	}
-	cmd.Flags().IntVarP(&k, "k", "k", 10, "Number of results to return")
+	cmd.Flags().IntVarP(&k, "k", "k", 0, "Number of results to return, 1-100 (default: the daemon's search.default_k)")
 	cmd.Flags().StringSliceVar(&contentType, "type", nil, "Filter by content type (article|repo|video|pdf|thread|unknown); repeatable")
 	cmd.Flags().StringSliceVar(&source, "source", nil, "Filter by bookmark source (chrome|safari|firefox|html|manual); repeatable")
 	cmd.Flags().StringSliceVar(&host, "host", nil, "Filter by URL host, e.g. github.com; repeatable")
@@ -96,9 +100,12 @@ func renderSearchResults(res *client.SearchResponse) {
 	}
 }
 
+// truncate caps s at n runes, marking a cut with "...". Widths count runes,
+// not terminal cells: wide CJK glyphs still render wider than n columns.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	t := textutil.TruncateRunes(s, n)
+	if len(t) == len(s) {
 		return s
 	}
-	return s[:n] + "..."
+	return t + "..."
 }

@@ -9,8 +9,6 @@ import (
 	"strings"
 
 	"howett.net/plist"
-
-	"github.com/samsar/curio/internal/urlutil"
 )
 
 // SafariBookmarksPath returns the default path to Safari's Bookmarks.plist.
@@ -51,6 +49,8 @@ func SafariBookmarksPath() string {
 //   - "BookmarksBar"  → Favorites (confusingly named)
 //   - "BookmarksMenu" → Bookmarks Menu
 //   - "com.apple.ReadingList" → Reading List (skipped — ephemeral)
+//
+// A bookmark directly under the root is emitted with an empty FolderPath.
 func ParseSafari(r io.ReadSeeker) ([]ParsedBookmark, error) {
 	var root safariNode
 	decoder := plist.NewDecoder(r)
@@ -60,13 +60,17 @@ func ParseSafari(r io.ReadSeeker) ([]ParsedBookmark, error) {
 
 	var out []ParsedBookmark
 	for _, child := range root.Children {
-		if child.WebBookmarkIdentifier == "com.apple.ReadingList" {
-			continue
-		}
-		label := safariRootLabel(child)
-		stack := []string{label}
-		for _, c := range child.Children {
-			walkSafariNode(c, stack, &out)
+		switch {
+		case child.WebBookmarkIdentifier == "com.apple.ReadingList":
+		case child.WebBookmarkType == "WebBookmarkTypeLeaf", child.WebBookmarkType == "WebBookmarkTypeProxy":
+			// A bookmark saved at the top level belongs to no folder;
+			// walkSafariNode skips proxies (History).
+			walkSafariNode(child, nil, &out)
+		default:
+			stack := []string{safariRootLabel(child)}
+			for _, c := range child.Children {
+				walkSafariNode(c, stack, &out)
+			}
 		}
 	}
 	if len(out) == 0 {
@@ -112,22 +116,14 @@ func walkSafariNode(n safariNode, folderStack []string, out *[]ParsedBookmark) {
 		if n.URIDictionary != nil {
 			title = strings.TrimSpace(n.URIDictionary.Title)
 		}
-		bm := ParsedBookmark{
-			URL:        n.URLString,
+		*out = append(*out, ParsedBookmark{
+			URL:        canonicalURL(n.URLString),
 			Title:      title,
 			FolderPath: joinFolderPath(folderStack),
-		}
-		if norm, err := urlutil.Normalize(n.URLString); err == nil {
-			bm.URL = norm
-		}
-		*out = append(*out, bm)
+		})
 
 	case "WebBookmarkTypeList":
-		next := folderStack
-		name := strings.TrimSpace(n.Title)
-		if name != "" {
-			next = append(append([]string{}, folderStack...), name)
-		}
+		next := pushFolder(folderStack, n.Title)
 		for _, c := range n.Children {
 			walkSafariNode(c, next, out)
 		}

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -15,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/jobs"
@@ -215,4 +218,60 @@ func TestDrain(t *testing.T) {
 	stuck, drained = d.drain(&workers, 5*time.Second)
 	assert.True(t, drained)
 	assert.Empty(t, stuck)
+}
+
+// docVectors serves canned document vectors to the insight engine.
+type docVectors struct {
+	store.ChunkStore
+	dvs []store.DocVector
+}
+
+func (d *docVectors) DocumentVectors(context.Context, string) ([]store.DocVector, error) {
+	return d.dvs, nil
+}
+
+// TestNewInsightEngine_LLMComesUpAfterStart: Ollama being down when the daemon
+// starts (common: the CLI auto-starts the daemon before the Ollama app) must
+// not switch LLM labels off for the life of the process.
+func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
+	addr := freeLoopbackAddr(t) // nothing listens here yet
+	cfg := config.Default()
+	cfg.Generation.BaseURL = "http://" + addr
+	cfg.Generation.AutoPull = false
+	cfg.Insight.CenterVectors = false
+
+	db := sqlitestore.NewEphemeralDB(t)
+	docs := sqlitestore.NewDocuments(db)
+	insights := sqlitestore.NewInsights(db)
+	chunks := &docVectors{}
+	for i := range 3 {
+		title := fmt.Sprintf("Article %d", i)
+		d := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/%d", i),
+			Title: &title, State: store.DocStateFetched}
+		require.NoError(t, docs.Upsert(context.Background(), d))
+		chunks.dvs = append(chunks.dvs, store.DocVector{DocumentID: d.ID, Vector: []float32{1, 0, 0}})
+	}
+
+	eng, err := newInsightEngine(context.Background(), cfg, docs, chunks, insights)
+	require.NoError(t, err)
+
+	// Ollama starts only now.
+	ln, err := net.Listen("tcp", addr)
+	require.NoError(t, err)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/generate", r.URL.Path)
+		fmt.Fprint(w, `{"response":"NAME: Reading List\nSUMMARY: Things to read.","done":true}`)
+	}))
+	require.NoError(t, srv.Listener.Close())
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	runID, err := eng.Rebuild(context.Background(), "local")
+	require.NoError(t, err)
+	clusters, err := insights.ListClusters(context.Background(), runID, 0)
+	require.NoError(t, err)
+	require.Len(t, clusters, 1)
+	require.NotNil(t, clusters[0].Label)
+	assert.Equal(t, "Reading List", *clusters[0].Label)
 }

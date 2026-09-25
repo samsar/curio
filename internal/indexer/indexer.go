@@ -21,6 +21,7 @@ type Indexer struct {
 	embedder  embedder.Embedder
 	opts      ChunkOptions
 	docPrefix string
+	batchSize int
 }
 
 // Options for constructing an Indexer.
@@ -31,14 +32,29 @@ type Options struct {
 	// to satisfy prefixed embedding models like nomic-embed-text
 	// ("search_document: "). Must match the search engine's query prefix.
 	DocumentPrefix string
+	// EmbedBatchSize caps how many chunks go into one embed request.
+	// Default embedBatchSize.
+	EmbedBatchSize int
 }
+
+// embedBatchSize bounds one embed request to at most 32 chunks of at most
+// 3500 bytes (~112 KB), which even CPU-only Ollama embeds in a few seconds.
+// That keeps each request well inside the embedder's timeout however long the
+// document is, or however many index workers' requests are queued ahead of
+// it, and limits how long a search's query embedding waits behind index work
+// in Ollama.
+const embedBatchSize = 32
 
 func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer {
 	co := ChunkOptions{
 		SizeTokens:    opts.ChunkSize,
 		OverlapTokens: opts.ChunkOverlap,
 	}
-	return &Indexer{chunks: chunks, embedder: emb, opts: co, docPrefix: opts.DocumentPrefix}
+	batch := opts.EmbedBatchSize
+	if batch <= 0 {
+		batch = embedBatchSize
+	}
+	return &Indexer{chunks: chunks, embedder: emb, opts: co, docPrefix: opts.DocumentPrefix, batchSize: batch}
 }
 
 // IndexInput is everything Index needs to do its work.
@@ -75,12 +91,9 @@ func (i *Indexer) Index(ctx context.Context, in IndexInput) error {
 		texts[j] = i.docPrefix + c.Text
 	}
 
-	vectors, err := i.embedder.Embed(ctx, texts)
+	vectors, err := i.embed(ctx, texts)
 	if err != nil {
-		return fmt.Errorf("indexer: embed: %w", err)
-	}
-	if len(vectors) != len(chunks) {
-		return fmt.Errorf("indexer: embedder returned %d vectors for %d chunks", len(vectors), len(chunks))
+		return err
 	}
 
 	inputs := make([]store.ChunkInput, len(chunks))
@@ -92,4 +105,28 @@ func (i *Indexer) Index(ctx context.Context, in IndexInput) error {
 		}
 	}
 	return i.chunks.ReplaceForDocument(ctx, in.DocumentID, in.ExtractionID, in.Title, in.Tags, inputs)
+}
+
+// embed embeds texts in consecutive batches of at most batchSize, preserving
+// order. Nothing is written until every batch has succeeded, so a failure
+// leaves the document's previous chunks searchable; the job-level retry then
+// redoes the whole document.
+func (i *Indexer) embed(ctx context.Context, texts []string) ([][]float32, error) {
+	vectors := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += i.batchSize {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("indexer: stopped before chunk %d of %d: %w", start, len(texts), err)
+		}
+		end := min(start+i.batchSize, len(texts))
+		batch, err := i.embedder.Embed(ctx, texts[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("indexer: embed chunks %d-%d of %d: %w", start, end-1, len(texts), err)
+		}
+		if len(batch) != end-start {
+			return nil, fmt.Errorf("indexer: embedder returned %d vectors for chunks %d-%d of %d",
+				len(batch), start, end-1, len(texts))
+		}
+		vectors = append(vectors, batch...)
+	}
+	return vectors, nil
 }

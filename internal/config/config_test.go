@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -108,13 +109,29 @@ func TestValidate(t *testing.T) {
 		{"negative dim", func(c *Config) { c.Embedding.Dim = -1 }, "embedding.dim"},
 		{"dim other than the schema's", func(c *Config) { c.Embedding.Dim = 1024 }, "Embedding model swap"},
 		{"empty base_url", func(c *Config) { c.Embedding.BaseURL = "" }, "embedding.base_url"},
+		{"zero embedding timeout", func(c *Config) { c.Embedding.TimeoutSeconds = 0 }, "embedding.timeout_seconds"},
+		{"negative embedding timeout", func(c *Config) { c.Embedding.TimeoutSeconds = -5 }, "embedding.timeout_seconds"},
 		{"zero chunk size", func(c *Config) { c.Chunking.SizeTokens = 0 }, "chunking.size_tokens"},
 		{"overlap >= size", func(c *Config) { c.Chunking.OverlapTokens = 512 }, "chunking.overlap_tokens"},
 		{"negative overlap", func(c *Config) { c.Chunking.OverlapTokens = -1 }, "chunking.overlap_tokens"},
 		{"zero default_k", func(c *Config) { c.Search.DefaultK = 0 }, "search.default_k"},
+		{"default_k above the max", func(c *Config) { c.Search.DefaultK = 101 }, "search.default_k"},
+		{"NaN bm25 weight", func(c *Config) { c.Search.BM25Weight = math.NaN() }, "search.bm25_weight"},
+		{"negative bm25 weight", func(c *Config) { c.Search.BM25Weight = -1 }, "search.bm25_weight"},
+		{"infinite bm25 weight", func(c *Config) { c.Search.BM25Weight = math.Inf(1) }, "search.bm25_weight"},
+		{"NaN vector weight", func(c *Config) { c.Search.VectorWeight = math.NaN() }, "search.vector_weight"},
+		{"negative vector weight", func(c *Config) { c.Search.VectorWeight = -0.5 }, "search.vector_weight"},
+		{"infinite vector weight", func(c *Config) { c.Search.VectorWeight = math.Inf(-1) }, "search.vector_weight"},
+		{"both weights zero", func(c *Config) { c.Search.BM25Weight, c.Search.VectorWeight = 0, 0 }, "must not both be 0"},
+		{"zero embed timeout", func(c *Config) { c.Search.EmbedTimeoutSeconds = 0 }, "search.embed_timeout_seconds"},
 		{"zero rrf_k", func(c *Config) { c.Search.RRFK = 0 }, "search.rrf_k"},
 		{"bad collapse", func(c *Config) { c.Search.Collapse = "average" }, "search.collapse"},
 		{"zero web2md timeout", func(c *Config) { c.Fetcher.Web2MD.TimeoutSeconds = 0 }, "web2md.timeout_seconds"},
+		{"zero min_similarity", func(c *Config) { c.Insight.MinSimilarity = 0 }, "insight.min_similarity"},
+		{"min_similarity above 1", func(c *Config) { c.Insight.MinSimilarity = 1.5 }, "insight.min_similarity"},
+		{"NaN min_similarity", func(c *Config) { c.Insight.MinSimilarity = math.NaN() }, "insight.min_similarity"},
+		{"infinite min_similarity", func(c *Config) { c.Insight.MinSimilarity = math.Inf(1) }, "insight.min_similarity"},
+		{"zero labeling timeout", func(c *Config) { c.Insight.LabelingTimeoutSeconds = 0 }, "insight.labeling_timeout_seconds"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -273,4 +290,19 @@ func writeConfig(t *testing.T, contents string) string {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
 	return path
+}
+
+// TestLoad_NaNMinSimilarity: YAML's .nan must not slip through validation —
+// a NaN threshold rejects every graph edge and replaces the interests with an
+// empty run.
+func TestLoad_NaNMinSimilarity(t *testing.T) {
+	_, err := Load(writeConfig(t, "insight:\n  min_similarity: .nan\n"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "insight.min_similarity")
+}
+
+func TestValidate_OneZeroWeightIsAllowed(t *testing.T) {
+	cfg := Default()
+	cfg.Search.BM25Weight = 0 // vector-only ranking
+	assert.NoError(t, cfg.Validate())
 }

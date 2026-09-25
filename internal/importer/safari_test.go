@@ -222,6 +222,80 @@ func TestParseSafari_NoURIDictionary(t *testing.T) {
 	assert.Equal(t, "https://example.com/no-title", got[0].URL)
 }
 
+func TestParseSafari_TopLevelBookmark(t *testing.T) {
+	p := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>WebBookmarkType</key>
+	<string>WebBookmarkTypeList</string>
+	<key>Children</key>
+	<array>
+		<dict>
+			<key>WebBookmarkType</key>
+			<string>WebBookmarkTypeProxy</string>
+			<key>Title</key>
+			<string>History</string>
+		</dict>
+		<dict>
+			<key>WebBookmarkType</key>
+			<string>WebBookmarkTypeList</string>
+			<key>WebBookmarkIdentifier</key>
+			<string>BookmarksBar</string>
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>WebBookmarkType</key>
+					<string>WebBookmarkTypeLeaf</string>
+					<key>URLString</key>
+					<string>https://example.com/in-favorites</string>
+				</dict>
+			</array>
+		</dict>
+		<dict>
+			<key>WebBookmarkType</key>
+			<string>WebBookmarkTypeLeaf</string>
+			<key>URLString</key>
+			<string>https://example.com/top-level</string>
+			<key>URIDictionary</key>
+			<dict>
+				<key>title</key>
+				<string>Top Level</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>WebBookmarkType</key>
+			<string>WebBookmarkTypeList</string>
+			<key>WebBookmarkIdentifier</key>
+			<string>com.apple.ReadingList</string>
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>WebBookmarkType</key>
+					<string>WebBookmarkTypeLeaf</string>
+					<key>URLString</key>
+					<string>https://example.com/reading-list-item</string>
+				</dict>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>`
+	got, err := ParseSafari(strings.NewReader(p))
+	require.NoError(t, err)
+	require.Len(t, got, 2, "the proxy and the Reading List are still skipped")
+
+	byURL := map[string]ParsedBookmark{}
+	for _, b := range got {
+		byURL[b.URL] = b
+	}
+	top, ok := byURL["https://example.com/top-level"]
+	require.True(t, ok, "a bookmark directly under the root is imported")
+	assert.Equal(t, "", top.FolderPath)
+	assert.Equal(t, "Top Level", top.Title)
+	assert.Equal(t, "/Favorites", byURL["https://example.com/in-favorites"].FolderPath)
+}
+
 func TestParseSafari_MalformedPlist(t *testing.T) {
 	_, err := ParseSafari(strings.NewReader(`not a plist`))
 	assert.Error(t, err)

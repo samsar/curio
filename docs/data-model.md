@@ -224,7 +224,7 @@ cluster_runs
   tenant_id         TEXT NOT NULL
   status            TEXT                       -- 'running' | 'done' | 'failed'
   algo              TEXT                       -- clusterer name, e.g. 'knn-graph'
-  params            JSON                       -- clusterer parameters
+  params            JSON                       -- clusterer parameters + the engine's center flag
   num_documents     INTEGER
   num_clusters      INTEGER
   num_noise         INTEGER
@@ -237,7 +237,7 @@ cluster_runs
 ### `clusters`
 
 One row per cluster within a run. `cohesion` is the mean member cosine to the
-cluster medoid.
+cluster centroid (the normalized mean of its members' vectors).
 
 ```
 clusters
@@ -247,7 +247,7 @@ clusters
   label             TEXT                       -- nullable; topic name
   summary           TEXT                       -- nullable
   size              INTEGER
-  cohesion          REAL                       -- mean member cosine to medoid, 0..1
+  cohesion          REAL                       -- mean member cosine to centroid, 0..1
   created_at, updated_at
 ```
 
@@ -260,7 +260,7 @@ row.
 cluster_documents
   cluster_id        UUID NOT NULL FK           -- → clusters(id), ON DELETE CASCADE
   document_id       UUID NOT NULL FK           -- → documents(id), ON DELETE CASCADE
-  similarity        REAL                       -- cosine to medoid, 0..1
+  similarity        REAL                       -- cosine to centroid, 0..1
   PRIMARY KEY (cluster_id, document_id)
 ```
 

@@ -192,14 +192,45 @@ will want to tune this themselves (e.g., switching a paywalled domain to Jina).
 
 ## Hybrid search: BM25 + vector + RRF
 
-**Decision:** BM25 and vector run in parallel, results merged via Reciprocal
+**Decision:** BM25 and vector run concurrently, results merged via Reciprocal
 Rank Fusion (RRF, k=60), then chunks collapse to documents.
 
 **Why:** BM25 wins on rare terms and proper nouns; vector wins on conceptual
 matches; RRF is the standard, simple, parameter-light fusion method.
 
-**Knobs exposed in config:** BM25/vector weights in RRF, chunk-to-doc collapse
-strategy.
+**Degradation is asymmetric.** BM25 is local SQLite and always available, so a
+BM25 failure is a bug or corruption: the search fails (500) and the in-flight
+vector leg is canceled. The vector leg depends on an embedding model in another
+process — Ollama may be down, not started yet, or hung — which is legitimately
+optional at query time. When it fails for any reason (embed error or timeout,
+no or wrong-sized vector, ANN error), search returns the BM25 results with
+`degraded: true` and a warning ("semantic search unavailable (…); keyword-only
+results") and logs one WARN. Previously the embed error discarded the BM25 hits
+already in hand, so `curio search`, MCP `search_bookmarks` and `curio eval`
+failed outright whenever Ollama was down. Two edges: if the caller's own
+context is canceled or past its deadline, that's an error, never a degraded
+success; and if BM25 had no terms to search (all stopwords) and the vector leg
+fails, the result is empty but degraded, with the warning explaining why.
+There's no circuit breaker: a refused connection fails instantly, and the
+embed deadline bounds the hung case.
+
+**Query embed deadline:** `search.embed_timeout_seconds` (default 10) bounds
+embedding the query, separately from the embedder's per-request timeout
+(`embedding.timeout_seconds`, sized for index batches). Before, the only bound
+was that 60 s client timeout. Keep it well under 30 s: the CLI and MCP give up
+on a daemon request after 30 s, so a longer deadline turns a hung Ollama back
+into a client-side timeout instead of a degraded result.
+
+**Fanout scales with k:** each retriever returns `max(50, 8·k)` chunks, the same
+rule `find_related` uses — hits are chunk-level, and one long document can fill
+dozens of slots, so a fixed 50-chunk pool could never return k=60 documents.
+Because the fanout is a SQL LIMIT, k is bounded: 1..100 (`search.MaxK`), 400
+outside it; omitted means `search.default_k`, which is now actually applied
+(the engine used to hardcode 10, and the CLI and MCP always sent 10).
+
+**Knobs exposed in config:** BM25/vector weights in RRF (finite, not negative,
+not both zero; a single zero switches that retriever's contribution off),
+chunk-to-doc collapse strategy, `default_k`, `embed_timeout_seconds`.
 
 ---
 
@@ -299,6 +330,12 @@ precision. Without this, hybrid search becomes a black box.
 ---
 
 ## API: search knobs are per-request overrides
+
+**Status: not implemented.** Only the server config sets `weights` and
+`collapse` today, and the request decoder rejects unknown fields, so sending
+them is a 400. `api/openapi.yaml` no longer advertises them (nor the
+`saved_after`/`saved_before` filters). The design below stands for when they
+land.
 
 **Decision:** `weights` (BM25 vs vector RRF mix) and `collapse` (chunk-to-doc
 aggregation) are optional fields in the search request body. Defaults come
@@ -517,6 +554,17 @@ to. The schema's `source` column gets a new value `html` via migration 002.
 Live browser readers (Chrome JSON, future Safari plist, future Firefox
 SQLite) are convenience layers on top of this. HTML is the workhorse.
 
+**`ADD_DATE` units:** exporters disagree on the unit — seconds (browsers),
+microseconds (Firefox), milliseconds (several read-later tools), even
+nanoseconds — so the parser infers it from the magnitude: ≥ 1e17 is
+nanoseconds, ≥ 1e14 microseconds, ≥ 1e11 milliseconds, else seconds. Each
+threshold is about 1973 in the finer unit and about year 5138 in the coarser
+one, so no plausible date is ambiguous. Integers are parsed exactly; decimals
+and scientific notation keep their sub-second part. The earlier rule (divide
+by 10⁶ above ~9.6e10) turned milliseconds into 1970-01-20 and nanoseconds into
+year 55840. Bookmarks already imported with a wrong date are not corrected:
+re-import skips existing rows, and there is no data migration.
+
 ---
 
 ## HTML parser walks recursively, finds <DL> inside <DT>
@@ -575,6 +623,19 @@ The DB is authoritative; the marker mirrors it.
 **Decision:** `ChunkOptions.SizeChars` (default 3500) is a hard upper bound
 on chunk byte length applied AFTER the word-count chunking pass. Chunks
 that exceed the limit are split at word boundaries with a small overlap.
+A single whitespace-free token longer than the cap (a long URL, a hex
+blob, or a CJK paragraph, which has no spaces at all) is split into
+consecutive pieces on rune boundaries — never truncated. Truncating it
+used to drop everything past the cut (about 60% of a 9000-byte Chinese
+paragraph never reached BM25 or the vector index) and cut multi-byte
+runes in half, producing invalid UTF-8.
+
+**Headings stay with their section:** the paragraph splitter prefixes a
+markdown heading to the paragraph that follows it (consecutive headings
+all join it; a trailing heading stands alone), so the word packer can't
+leave a heading at the tail of the previous chunk, apart from the text it
+names. Both changes apply to documents as they are next indexed; run
+`curio reindex --all` to re-chunk the existing corpus.
 
 **Why:** Word count is a bad proxy for BPE token count on URL- or
 code-heavy content. A single URL like
@@ -631,6 +692,35 @@ Setting `num_ctx=8192` gives us the model's full window. Dropping to
 chunking. Costs a tokenizer dep (e.g., tiktoken-go or sugarme/tokenizer)
 and adds latency. Not worth it until we see chunk-quality issues from
 the conservative word-based heuristic.
+
+**Later finding:** nomic-embed-text's real ceiling is 2048 tokens (its GGUF
+`context_length`), and Ollama clamps `num_ctx` to it, so the 8192 we send
+is advisory. The 3500-byte chunk cap (entry above) is what bounds inputs.
+
+---
+
+## Indexer: embed in batches of 32; `embedding.timeout_seconds`
+
+**Decision:** `indexer.Index` embeds a document's chunks in consecutive
+`/api/embed` requests of at most 32 chunks (≤ 32 × 3500 B ≈ 112 KB each), in
+order, and writes nothing until every batch has succeeded. The embedder's
+per-request timeout is configurable as `embedding.timeout_seconds` (default
+60, previously a hard-coded 60 s).
+
+**Why:** one request per document let a long document — a book-length PDF, a
+long docs page, or a moderate one queued inside Ollama behind the other index
+workers' requests (`daemon.index_workers` = 4) — run past the fixed timeout.
+The job then retried from scratch up to five times and ended `failed`: never
+searchable. A 32-chunk request takes a few seconds even on CPU-only Ollama, so
+a timeout now means Ollama is in trouble, not that the document is long. It
+also stops one huge request from holding search's query embedding behind it.
+
+**Where it lives:** batching is orchestration policy, so it's in the indexer
+(`Options.EmbedBatchSize`, not a config key), independent of the embedder
+client. The job-level retry is still the recovery mechanism; batching bounds
+how much work each attempt repeats. A failure names the chunk range
+("embed chunks 64-95 of 180"), and because nothing is written until the end,
+the document's previous chunks stay searchable.
 
 ---
 
@@ -894,7 +984,12 @@ with remediation when macOS denies access due to TCC restrictions.
 plist (with `CURIO_SAFARI_DIR` env override for tests), `ParseSafari()`
 accepts an `io.ReadSeeker`, folder hierarchy is preserved in
 `FolderPath`. Root folders are labeled "Favorites" (BookmarksBar) and
-"Bookmarks Menu" rather than their internal identifiers.
+"Bookmarks Menu" rather than their internal identifiers. A bookmark saved
+directly under the root (not in any folder) is imported with an empty
+`FolderPath`; the parser used to treat every root child as a folder and
+silently drop these. Bookmarks already imported are not updated (re-import
+skips existing rows), but the ones that were dropped are new, so re-running
+`curio import safari` adds them.
 
 ---
 
@@ -925,9 +1020,16 @@ Profile discovery prefers the **`[Install*]` default** in `profiles.ini`.
 **Schema notes:** `moz_bookmarks.type` 1 = bookmark, 2 = folder, 3 =
 separator. `dateAdded` is **microseconds since the Unix epoch** (unlike
 Chrome's 1601 epoch). The Tags root (`tags________`) contains tag
-pseudo-bookmarks, not real folders — its subtree is skipped so tagged URLs
-don't double-count. Root GUIDs map to friendly labels ("Bookmarks Menu",
-"Bookmarks Toolbar", "Other Bookmarks", "Mobile Bookmarks").
+pseudo-bookmarks, not real folders — its subtree is not emitted, so tagged
+URLs don't double-count. But its tag *names* are kept: each folder directly
+under the Tags root is a tag, holding one row per tagged place, so the parser
+maps place id (`moz_bookmarks.fk`) → tags and attaches them, sorted and
+de-duplicated, to every real bookmark of that place. They then flow into
+`bookmarks.tags` and the search index like HTML-export `TAGS=`; before, Firefox
+users lost them entirely. Bookmarks imported earlier don't gain their tags:
+re-import skips existing rows, and updating them is out of scope. Root GUIDs
+map to friendly labels ("Bookmarks Menu", "Bookmarks Toolbar", "Other
+Bookmarks", "Mobile Bookmarks").
 
 **Shape deviation:** `ParseFirefox` takes a *path*, not an `io.Reader` like
 the other parsers — SQLite needs a real file to open. The CLI passes the
@@ -1482,9 +1584,42 @@ single-cell genomics, so it's a different well-trodden path, not a hack. Because
 the choice lives behind the interface and we now have an eval harness, swapping
 in real HDBSCAN later (if measurement justifies it) is a contained change.
 
-**Determinism:** fully deterministic — fixed node order, weighted-majority vote
-with a smallest-label tie-break, stable cluster ordering by size. Same corpus →
-same clusters, so runs are reproducible and unit-testable.
+**Graph:** the union of every document's top-K list — an edge joins two
+documents when *either* lists the other among its K most similar (at or above
+`min_similarity`), weighted by the larger of the two similarities. (A mutual-kNN
+graph, where both must list each other, is sparser; it isn't offered because
+nothing measures whether it would help — see the mega-cluster entry for the
+candidates that would.)
+
+**Determinism:** fully deterministic — weighted-majority vote with a
+smallest-label tie-break, stable cluster ordering by size. Label propagation is
+order-sensitive (nodes are visited in sequence, ties go to the smallest label),
+so the clusterer sorts points by document ID internally and maps labels back:
+the result depends on the set of documents, not the order they arrive in. (On
+the seeded 1200-point overlapping corpus in `cluster_test.go`, 5 of 5 shuffles
+used to change the partition; production only escaped this because
+`DocumentVectors` happens to `ORDER BY document_id`.)
+
+**Vector preparation happens once:** the engine mean-centers (when
+`insight.center_vectors`) and normalizes the document vectors, then hands the
+same unit vectors to the clusterer and to the cohesion/similarity summary, so
+both work in the same space and the corpus is held once, not three times. The
+clusterer requires unit (or zero) vectors and says so with an error rather than
+silently renormalizing. `center` is still recorded in the run's params.
+
+**Performance:** building the kNN graph is O(n²·d) and was essentially the
+whole cost (the union step and label propagation take tens of milliseconds even
+at 20k documents). Rows are independent, so they run in parallel across
+GOMAXPROCS workers that share only a row counter, and each row keeps its top K
+in a small heap instead of sorting every candidate above the threshold. Tie
+order (similarity desc, index asc) is unchanged, and a test pins the neighbor
+lists to a serial full-sort reference. `BenchmarkKNNGraphClusterer` (5000
+documents × 768 dims, Apple M4 Max, 16 cores): **15.0 s → 1.29 s**. A 4-way
+unrolled dot product would roughly halve that again, but it changes float
+summation order and so shifts similarities in the last bits; we kept the
+existing dot so an upgrade doesn't reshuffle anyone's interests. Computing
+each pair once (filling both rows from one dot product) was also left out: it
+needs cross-worker synchronization on the row heaps for at most a 2× gain.
 
 **Labels:** LLM labels by default (`LLMLabeler`, `insight.labeling = "llm"`) for
 richer topic names + summaries. The generation model is auto-pulled on startup
@@ -1493,14 +1628,61 @@ the engine falls back to deterministic term labels (`TermLabeler`) — so the
 layer still works with zero setup. Set `insight.labeling = "terms"` to force the
 deterministic labeler.
 
+The fallback is decided per run, not at startup. The daemon used to ping Ollama
+once when it started and, if that failed, never wire the LLM labeler — and
+since the CLI auto-starts the daemon, often before the Ollama app is up, every
+rebuild quietly used term labels until a restart. Now the labeler is always
+wired with `labeling = "llm"`, and model auto-pull runs in the background
+either way. The pull is attempted once: if Ollama is down at startup and
+doesn't already have the model, labels stay on terms until `ollama pull` or a
+daemon restart. Within a run:
+
+- Clusters are labeled **largest first**, whatever numbering the clusterer
+  used, so the budget goes to the interests that matter most.
+- The first LLM failure that would repeat — unreachable, an HTTP error, a
+  timeout — **switches the LLM off for the rest of that run**: the remaining
+  clusters get term labels at once, and one WARN reports how many clusters got
+  term labels (counting those never offered to the model) and the last LLM
+  error. Before, every cluster waited out the same failure (with generator
+  retries, ≈6 min each), so a hung Ollama could hold the single cluster worker
+  for hours.
+- `insight.labeling_timeout_seconds` (default 900) caps the total time one run
+  waits on the LLM; when it runs out the rest get term labels.
+- An unparseable reply (below) costs only that cluster its LLM label.
+- Labeling stays sequential: a local Ollama serializes generation anyway and
+  would compete with index embeddings, and the budget plus ordering bound the
+  wait.
+- If the run's own context ends (daemon shutdown), the run fails instead of
+  finishing with fallback labels.
+
+The model's reply must carry an explicit `NAME:` field (case-insensitive;
+`-`, `=`, en/em-dash separators and markdown emphasis are tolerated) of at most
+six words. Anything else — a preamble ("Sure! Here you go:"), a bare line, only
+a `SUMMARY:` — is rejected as `ErrUnparseableLabel` and that one cluster gets a
+term label; guessing a name from some other line used to persist preambles as
+interest names. Term labels split titles on Unicode letters and digits (not
+just ASCII), so accented and CJK titles yield whole words rather than
+fragments like "Montr Caf".
+
 **Storage / lifecycle:** clustering fully recomputes each run. A `cluster_runs`
 row records the attempt (`running` → `done`/`failed`); the current interests are
 the `clusters` of the latest done run, and older runs are pruned (keeping
 history for trajectory analysis is deferred). It runs on a dedicated
 single-worker `cluster` job pool so it neither starves nor is starved by
 fetch/index. Knobs: `insight.{enabled,knn,min_similarity,min_cluster_size,
-labeling}`. `min_similarity` is the main granularity dial and is corpus-
-dependent — tune it with the eval harness.
+labeling,labeling_timeout_seconds}`. `min_similarity` is the main granularity
+dial and is corpus-dependent — tune it with the eval harness.
+
+The guards that protect the last good run treat only `ErrNotFound` as "there is
+no prior run". An empty corpus with an unreadable `LatestRun` (say, `database
+is locked`) fails the rebuild instead of recording an empty run and pruning the
+good one; after a failed run, pruning is skipped with a WARN when the latest
+done run can't be read, because cleanup is best-effort and must not delete on a
+guess. Marking a run failed (and that cleanup) runs detached from the run's
+context with a 10 s timeout, so a run cut short by daemon shutdown still ends
+as `failed` rather than `running` forever. `min_similarity` is validated
+NaN-safely: YAML `.nan` used to pass, reject every edge, and replace the
+interests with an empty run.
 
 **API surface:** an interest *is* a labeled cluster, so there is one surface —
 `GET /v1/interests`, `GET /v1/interests/{id}`, `POST /v1/interests/rebuild`
@@ -1524,6 +1706,23 @@ dependency. One interface means M4 (cluster labels) and M6 (RAG synthesis + LLM
 query rewriting) share the same seam, and an Anthropic/Claude implementation can
 drop in later without touching callers. The embedding model (nomic-embed-text)
 can't generate, so a generation model must be pulled separately.
+
+**Retry policy:** `Generate` retries only what a retry can fix, with a short
+linear backoff (0.5 s, 1 s) and `retries` = 2 by default (negative = none):
+
+| Failure | Retried? | Why |
+|---|---|---|
+| HTTP 5xx | yes | the model may still be loading, or Ollama is restarting |
+| connection refused / reset, EOF mid-response | yes | Ollama starting or restarting |
+| per-attempt timeout (`generation.timeout_seconds`) | **no** | at 120 s per attempt a timeout isn't a blip; retrying tripled the stall (≈6 min per cluster label) |
+| HTTP 404 | no | the model isn't pulled; wraps `ErrModelNotLoaded` |
+| other 4xx, undecodable or oversized (> 1 MiB) reply | no | the same request gets the same answer |
+| caller's context done | no | returned at once, wrapping `context.Canceled` / `DeadlineExceeded` |
+
+Every non-200 is a typed `*StatusError{Code, Body}` (body capped at 2 KiB), and
+transport errors are wrapped `%w: %w` so both `ErrOllamaUnreachable` and the
+cause (e.g. `ECONNREFUSED`, `context.DeadlineExceeded`) stay matchable — the old
+`%w: %v` wrapping hid the timeout, which is why timeouts were being retried.
 
 **Model auto-pull:** because a required model being absent is a poor
 first-run experience, the daemon pulls missing models on startup via Ollama's
@@ -1551,6 +1750,26 @@ improvement*. This is that harness. It also de-risks M4 (measure whether a
 `min_similarity` change helps retrieval) and is the ground truth for the M6
 build-vs-buy RAG decision. The metrics package has no HTTP or store dependency,
 so it's easy to test and reuse.
+
+**Scoring rules** (the harness approves search changes, so it must not reward
+the wrong thing):
+
+- **P@k is hits / k** (trec_eval's definition): ranks past the end of a short
+  result list count as misses. It used to divide by the number retrieved, so
+  `[a]` with `a` relevant scored 1.0 at k=10 instead of 0.1 and a change that
+  returned fewer results scored better. Precision numbers recorded before this
+  fix aren't comparable with new ones; recall, NDCG and MRR are unaffected.
+- **Relevant URLs are normalized on load** with `urlutil.Normalize`, the same
+  canonicalization stored document URLs went through, and de-duplicated
+  afterwards; an unparseable URL fails loading and names the query. Verbatim
+  comparison silently scored a browser-pasted URL (fragment, `utm_*`,
+  `youtu.be`, a bare origin without the trailing `/`) as never retrieved.
+  `urlutil` is pure, so the package still has no store/HTTP/search dependency.
+- **A degraded search is refused:** if any query's response comes back
+  keyword-only (the vector leg failed, see "Hybrid search"), `curio eval`
+  exits non-zero naming the query and the warning instead of scoring BM25 as
+  if it were the hybrid pipeline. `--k` must be at least 1 (checked locally);
+  above 100 the API's 400 surfaces.
 
 ---
 

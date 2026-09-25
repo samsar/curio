@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -58,6 +60,10 @@ type Embedding struct {
 	// AutoPull downloads the embedding model via Ollama at startup if it isn't
 	// present locally. Default true. Set false on metered/offline setups.
 	AutoPull bool `yaml:"auto_pull"`
+	// TimeoutSeconds bounds one embed request. The indexer sends at most 32
+	// chunks per request, so the default of 60 leaves room for CPU-only
+	// Ollama and for requests queued behind the other index workers'.
+	TimeoutSeconds int `yaml:"timeout_seconds"`
 	// DocumentPrefix / QueryPrefix are task-instruction prefixes prepended
 	// before embedding. nomic-embed-text is a prefixed model and REQUIRES
 	// these ("search_document: " for indexed text, "search_query: " for
@@ -116,11 +122,21 @@ type Web2MD struct {
 }
 
 type Search struct {
-	DefaultK     int     `yaml:"default_k"`
-	RRFK         int     `yaml:"rrf_k"`
+	// DefaultK is the number of results when a request doesn't set k.
+	DefaultK int `yaml:"default_k"`
+	RRFK     int `yaml:"rrf_k"`
+	// BM25Weight and VectorWeight weigh each retriever in RRF: finite, not
+	// negative, not both zero. A zero switches that retriever's
+	// contribution off.
 	BM25Weight   float64 `yaml:"bm25_weight"`
 	VectorWeight float64 `yaml:"vector_weight"`
 	Collapse     string  `yaml:"collapse"` // max | sum | top3_avg
+	// EmbedTimeoutSeconds bounds embedding a search query. When Ollama is
+	// down or slower than this, search returns keyword-only results marked
+	// degraded instead of failing. Default 10. Keep it well under the CLI and
+	// MCP client's 30 s request timeout, or a hung Ollama surfaces there as a
+	// client timeout instead of a degraded result.
+	EmbedTimeoutSeconds int `yaml:"embed_timeout_seconds"`
 }
 
 type Chunking struct {
@@ -151,6 +167,10 @@ type Insight struct {
 	// Labeling selects cluster naming: "llm" (default; needs a generation
 	// model, else falls back to deterministic term labels), "terms", or "off".
 	Labeling string `yaml:"labeling"`
+	// LabelingTimeoutSeconds bounds the total time one clustering run waits
+	// on the LLM labeler; clusters left when it runs out get term labels.
+	// Default 900. Keeps a hung Ollama from holding the single cluster worker.
+	LabelingTimeoutSeconds int `yaml:"labeling_timeout_seconds"`
 }
 
 // Generation configures the LLM text-generation client used to label clusters
@@ -183,6 +203,7 @@ func Default() Config {
 			Dim:            store.EmbeddingDim,
 			BaseURL:        "http://localhost:11434",
 			AutoPull:       true,
+			TimeoutSeconds: 60,
 			DocumentPrefix: "search_document: ",
 			QueryPrefix:    "search_query: ",
 		},
@@ -208,18 +229,20 @@ func Default() Config {
 			},
 		},
 		Search: Search{
-			DefaultK:     10,
-			RRFK:         60,
-			BM25Weight:   1.0,
-			VectorWeight: 1.0,
-			Collapse:     "max",
+			DefaultK:            10,
+			RRFK:                60,
+			BM25Weight:          1.0,
+			VectorWeight:        1.0,
+			Collapse:            "max",
+			EmbedTimeoutSeconds: 10,
 		},
 		Chunking: Chunking{
-			// 384 words is conservative: nomic-embed-text supports 8192
-			// tokens, but dense markdown (URLs, code blocks, tables) can
-			// have far more BPE tokens than whitespace-words. 384 words
-			// stays comfortably under 8192 tokens even for the worst
-			// content. See decisions.md.
+			// 384 words is conservative: nomic-embed-text's context is
+			// 2048 tokens (its GGUF context_length; the num_ctx we send is
+			// advisory), and dense markdown (URLs, code blocks, tables)
+			// has far more BPE tokens than whitespace-words. The chunker's
+			// 3500-byte cap backs this up for the worst content. See
+			// decisions.md.
 			SizeTokens:    384,
 			OverlapTokens: 48,
 		},
@@ -235,7 +258,8 @@ func Default() Config {
 			// back to deterministic term labels — so it's still safe with zero
 			// setup. Set "terms" to force the deterministic labeler, "off" to
 			// skip labeling.
-			Labeling: "llm",
+			Labeling:               "llm",
+			LabelingTimeoutSeconds: 900,
 		},
 		Generation: Generation{
 			Provider:       providerOllama,
@@ -346,6 +370,9 @@ func (c Config) Validate() error {
 	if c.Embedding.BaseURL == "" {
 		return errors.New("embedding.base_url must not be empty")
 	}
+	if c.Embedding.TimeoutSeconds <= 0 {
+		return fmt.Errorf("embedding.timeout_seconds must be positive, got %d", c.Embedding.TimeoutSeconds)
+	}
 	if c.Chunking.SizeTokens <= 0 {
 		return fmt.Errorf("chunking.size_tokens must be positive, got %d", c.Chunking.SizeTokens)
 	}
@@ -353,14 +380,20 @@ func (c Config) Validate() error {
 		return fmt.Errorf("chunking.overlap_tokens must be in [0, %d), got %d",
 			c.Chunking.SizeTokens, c.Chunking.OverlapTokens)
 	}
-	if c.Search.DefaultK <= 0 {
-		return fmt.Errorf("search.default_k must be positive, got %d", c.Search.DefaultK)
+	if c.Search.DefaultK <= 0 || c.Search.DefaultK > search.MaxK {
+		return fmt.Errorf("search.default_k must be in [1, %d], got %d", search.MaxK, c.Search.DefaultK)
 	}
 	if c.Search.RRFK <= 0 {
 		return fmt.Errorf("search.rrf_k must be positive, got %d", c.Search.RRFK)
 	}
 	if !validCollapse(c.Search.Collapse) {
 		return fmt.Errorf("search.collapse %q must be one of: max, sum, top3_avg", c.Search.Collapse)
+	}
+	if err := validateWeights(c.Search); err != nil {
+		return err
+	}
+	if c.Search.EmbedTimeoutSeconds <= 0 {
+		return fmt.Errorf("search.embed_timeout_seconds must be positive, got %d", c.Search.EmbedTimeoutSeconds)
 	}
 	if c.Fetcher.Web2MD.TimeoutSeconds <= 0 {
 		return fmt.Errorf("fetcher.web2md.timeout_seconds must be positive, got %d",
@@ -385,13 +418,18 @@ func (c Config) Validate() error {
 	}
 	// Strictly positive: the clusterer treats a non-positive threshold as
 	// "unset" and substitutes its default, so 0 here would be silently ignored.
-	if c.Insight.MinSimilarity <= 0 || c.Insight.MinSimilarity > 1 {
+	// Written so NaN (YAML .nan), which fails every comparison, is rejected.
+	if !(c.Insight.MinSimilarity > 0 && c.Insight.MinSimilarity <= 1) {
 		return fmt.Errorf("insight.min_similarity must be in (0, 1], got %g", c.Insight.MinSimilarity)
 	}
 	switch c.Insight.Labeling {
 	case "llm", "terms", "off":
 	default:
 		return fmt.Errorf("insight.labeling %q must be one of: llm, terms, off", c.Insight.Labeling)
+	}
+	if c.Insight.LabelingTimeoutSeconds <= 0 {
+		return fmt.Errorf("insight.labeling_timeout_seconds must be positive, got %d",
+			c.Insight.LabelingTimeoutSeconds)
 	}
 	if c.Generation.Provider != providerOllama {
 		return fmt.Errorf("generation.provider %q is not supported; the only provider is %q",
@@ -453,6 +491,24 @@ func (d Daemon) SlogLevel() slog.Level {
 		return lvl
 	}
 	return slog.LevelInfo
+}
+
+// validateWeights checks the RRF weights. NaN or a negative weight corrupts
+// the fused ordering, and with both at zero every document scores zero.
+func validateWeights(s Search) error {
+	for _, w := range []struct {
+		key string
+		v   float64
+	}{{"search.bm25_weight", s.BM25Weight}, {"search.vector_weight", s.VectorWeight}} {
+		// Written so NaN, which fails every comparison, is rejected.
+		if !(w.v >= 0) || math.IsInf(w.v, 1) {
+			return fmt.Errorf("%s must be a finite number >= 0, got %g", w.key, w.v)
+		}
+	}
+	if s.BM25Weight == 0 && s.VectorWeight == 0 {
+		return errors.New("search.bm25_weight and search.vector_weight must not both be 0")
+	}
+	return nil
 }
 
 func validCollapse(s string) bool {

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFuse_SingleList(t *testing.T) {
@@ -48,9 +49,8 @@ func TestFuse_EmptyInputs(t *testing.T) {
 func TestFuse_DefaultKWhenZero(t *testing.T) {
 	// k<=0 should default to 60 rather than dividing by zero.
 	out := Fuse([][]RankedItem{{{"a", 1}}}, nil, 0)
-	require := assert.New(t)
-	require.Len(out, 1)
-	require.Greater(out[0].Score, 0.0)
+	require.Len(t, out, 1)
+	assert.Greater(t, out[0].Score, 0.0)
 }
 
 func TestFuse_DeterministicTiebreak(t *testing.T) {

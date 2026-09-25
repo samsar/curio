@@ -27,6 +27,12 @@ func TestPrecisionAtK(t *testing.T) {
 	r := rel("a", "c")
 	assert.InDelta(t, 0.5, PrecisionAtK(ranked, r, 2), 1e-9) // 1 of 2
 	assert.InDelta(t, 0.5, PrecisionAtK(ranked, r, 4), 1e-9) // 2 of 4
+
+	// Fewer results than k: the missing ranks are misses, not ignored.
+	assert.InDelta(t, 0.1, PrecisionAtK([]string{"a"}, rel("a"), 10), 1e-9)
+	assert.InDelta(t, 0.0, PrecisionAtK(nil, rel("a"), 10), 1e-9)
+	assert.InDelta(t, 0.0, PrecisionAtK(ranked, r, 0), 1e-9)
+	assert.InDelta(t, 0.0, PrecisionAtK(ranked, r, -1), 1e-9)
 }
 
 func TestNDCGAtK(t *testing.T) {
