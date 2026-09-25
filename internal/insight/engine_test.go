@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -315,6 +316,72 @@ func TestRebuild_EmptyCorpus(t *testing.T) {
 		assert.Equal(t, prior, latest.ID, "no new run row")
 		f.assertCurrentRun(t, prior)
 	})
+}
+
+// runMembers lists each cluster's member document IDs, sorted, largest
+// cluster first.
+func (f *engineFixture) runMembers(t *testing.T, runID string) [][]string {
+	t.Helper()
+	clusters, err := f.store.ListClusters(context.Background(), runID, 0)
+	require.NoError(t, err)
+	out := make([][]string, 0, len(clusters))
+	for _, c := range clusters {
+		members, err := f.store.ClusterMembers(context.Background(), c.ID, 0)
+		require.NoError(t, err)
+		ids := make([]string, 0, len(members))
+		for _, m := range members {
+			ids = append(ids, m.DocumentID)
+		}
+		slices.Sort(ids)
+		out = append(out, ids)
+	}
+	return out
+}
+
+// TestRebuild_SkipsNonFiniteVectors: one NaN or infinite document vector
+// must not fail the run (with centering on, it would make the corpus mean
+// NaN and blame a healthy document). It is left out with a warning that
+// names it, and the healthy documents cluster as they would without it.
+func TestRebuild_SkipsNonFiniteVectors(t *testing.T) {
+	for name, bad := range map[string]float32{"NaN": float32(math.NaN()), "+Inf": float32(math.Inf(1))} {
+		t.Run(name, func(t *testing.T) {
+			f := newEngineFixture(t, 3, 4)
+			cfg := Config{Center: true}
+			want := f.runMembers(t, f.rebuild(t, f.engine(nil, nil, cfg)))
+
+			title := "corrupted vector"
+			doc := &store.Document{TenantID: tenant, URL: "https://example.com/bad", Title: &title, State: store.DocStateFetched}
+			require.NoError(t, f.docs.Create(context.Background(), doc))
+			f.vectors.dvs = append(f.vectors.dvs, store.DocVector{DocumentID: doc.ID, Vector: []float32{1, bad}})
+
+			runID := f.rebuild(t, f.engine(nil, nil, cfg))
+			assert.Equal(t, want, f.runMembers(t, runID))
+			run, err := f.store.GetRun(context.Background(), runID)
+			require.NoError(t, err)
+			assert.Equal(t, 7, run.NumDocuments, "only the vectors clustered")
+			warning := f.logLine(t, "vectors have NaN or infinite values")
+			assert.Contains(t, warning, "level=WARN")
+			assert.Contains(t, warning, doc.ID)
+			assert.Contains(t, warning, "count=1")
+		})
+	}
+}
+
+// TestRebuild_AllVectorsNonFinite: with nothing finite left, a rebuild
+// behaves as for an empty corpus and keeps the prior run.
+func TestRebuild_AllVectorsNonFinite(t *testing.T) {
+	f := newEngineFixture(t, 3, 4)
+	prior := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	for i := range f.vectors.dvs {
+		f.vectors.dvs[i].Vector = []float32{float32(math.NaN()), 0}
+	}
+
+	got := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	assert.Equal(t, prior, got)
+	latest, err := f.store.LatestRun(context.Background(), tenant, "")
+	require.NoError(t, err)
+	assert.Equal(t, prior, latest.ID, "no new run row")
+	f.assertCurrentRun(t, prior)
 }
 
 func TestRebuild_Failures(t *testing.T) {

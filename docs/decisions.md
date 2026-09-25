@@ -3651,3 +3651,26 @@ which is common when the CLI auto-starts the daemon first, the embedding
 model was never pulled after Ollama came up, although the log said index
 jobs "will retry until it is", and the generation path said outright that
 the pull is not retried.
+
+---
+
+## Insight: skip non-finite document vectors, don't fail the run
+
+**Decision:** `Engine.Rebuild` drops document vectors with any NaN or
+infinite component right after reading them, before the empty-corpus
+check. It logs one WARN with the count and up to 10 document IDs,
+suggesting `curio reindex <id>`, and clusters the rest; the run's
+`num_documents` counts only the vectors clustered. If none is left, the
+rebuild behaves exactly like one with no vectors: a prior done run is
+kept, not replaced by an empty one. `checkUnitVectors` stays as the
+clusterer's backstop.
+
+**Why:** With `insight.center_vectors` on (the default), one bad vector
+makes the corpus mean NaN, so every residual is NaN and the unit-length
+check rejects the first point, a healthy document. The run failed every
+time, naming the wrong document, until someone found the real one.
+`DocumentVectors` decodes raw float32 bits, so a corrupted or unchecked
+stored vector gets that far. One bad vector must not block everyone's
+interests; the engine already tolerates an all-zero vector (it falls out
+as noise) and a document deleted mid-run the same way. The store and
+the indexer are unchanged.
