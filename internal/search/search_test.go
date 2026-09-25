@@ -394,50 +394,87 @@ func TestEngine_ChunkLookupFailureKeepsHitsAndIsLogged(t *testing.T) {
 	assert.Contains(t, logs.String(), "database is locked")
 }
 
+// legStartBound bounds how long a test leg waits for the other leg to start.
+// It only runs out when the legs don't overlap, so it is generous.
+const legStartBound = 10 * time.Second
+
+// awaitLeg blocks until the other leg has signaled started, ctx ends, or
+// legStartBound runs out.
+func awaitLeg(ctx context.Context, started <-chan struct{}, leg string) error {
+	select {
+	case <-started:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(legStartBound):
+		return fmt.Errorf("the %s leg never started while this one ran", leg)
+	}
+}
+
 func TestEngine_KeywordFailureIsFatalAndStopsTheVectorLeg(t *testing.T) {
 	db := sqlitestore.NewEphemeralDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 	errDisk := errors.New("disk I/O error")
-	broken := &hookedChunks{ChunkStore: chunks, bm25: func(context.Context) error { return errDisk }}
 
-	sawCancel := false
+	// The embed is in flight when BM25 fails, and its own timeout is far
+	// beyond the test's bound, so only BM25's failure can cancel it.
+	embedStarted := make(chan struct{})
+	markEmbedStarted := sync.OnceFunc(func() { close(embedStarted) })
+	embedEnded := make(chan error, 1)
 	emb := embedFunc(func(ctx context.Context, _ []string) ([][]float32, error) {
-		<-ctx.Done()
-		sawCancel = true
-		return nil, ctx.Err()
+		markEmbedStarted()
+		select {
+		case <-ctx.Done():
+			embedEnded <- ctx.Err()
+		case <-time.After(legStartBound):
+			embedEnded <- errors.New("the embed was never canceled")
+		}
+		return nil, errors.New("embed abandoned")
 	})
-	engine := New(broken, docs, emb, Config{Log: slog.New(slog.DiscardHandler)})
+	broken := &hookedChunks{ChunkStore: chunks, bm25: func(ctx context.Context) error {
+		if err := awaitLeg(ctx, embedStarted, "vector"); err != nil {
+			return err
+		}
+		return errDisk
+	}}
+	engine := New(broken, docs, emb, Config{EmbedTimeout: time.Hour, Log: slog.New(slog.DiscardHandler)})
 
 	_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
 	require.ErrorIs(t, err, errDisk)
-	assert.True(t, sawCancel, "the vector leg was canceled and had exited before Search returned")
+	select {
+	case embedErr := <-embedEnded:
+		assert.ErrorIs(t, embedErr, context.Canceled, "BM25's failure canceled the in-flight embed")
+	default:
+		t.Fatal("Search returned while the vector leg was still running")
+	}
 }
 
 func TestEngine_LegsRunConcurrently(t *testing.T) {
 	db := sqlitestore.NewEphemeralDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 
-	entered := make(chan struct{})
-	var once sync.Once
-	emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
-		once.Do(func() { close(entered) })
+	// Each leg signals that it started, then waits for the other. Run one
+	// after the other, in either order, the first leg would wait out the
+	// bound: BM25 would then fail the search, the vector leg degrade it.
+	embedStarted, bm25Started := make(chan struct{}), make(chan struct{})
+	markEmbedStarted := sync.OnceFunc(func() { close(embedStarted) })
+	markBM25Started := sync.OnceFunc(func() { close(bm25Started) })
+	emb := embedFunc(func(ctx context.Context, _ []string) ([][]float32, error) {
+		markEmbedStarted()
+		if err := awaitLeg(ctx, bm25Started, "BM25"); err != nil {
+			return nil, err
+		}
 		return [][]float32{filledVec(0.3)}, nil
 	})
-	// BM25 can only finish once the embedder has been called: sequential
-	// legs would wait here until the bound runs out.
-	waitForEmbed := &hookedChunks{ChunkStore: chunks, bm25: func(context.Context) error {
-		select {
-		case <-entered:
-			return nil
-		case <-time.After(10 * time.Second):
-			return errors.New("the vector leg never started while BM25 ran")
-		}
+	rendezvous := &hookedChunks{ChunkStore: chunks, bm25: func(ctx context.Context) error {
+		markBM25Started()
+		return awaitLeg(ctx, embedStarted, "vector")
 	}}
-	engine := New(waitForEmbed, docs, emb, Config{})
+	engine := New(rendezvous, docs, emb, Config{EmbedTimeout: time.Hour})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
 	require.NoError(t, err)
-	assert.False(t, res.Degraded)
+	assert.False(t, res.Degraded, "warnings: %v", res.Warnings)
 	assert.Positive(t, res.BM25Hits)
 	assert.Positive(t, res.VectorHits)
 }
