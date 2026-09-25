@@ -370,6 +370,30 @@ func (h *hookedChunks) BM25Search(ctx context.Context, tenantID, query string, l
 	return h.ChunkStore.BM25Search(ctx, tenantID, query, limit, filters)
 }
 
+// brokenChunkLookup fails GetByIDs, the snippet lookup for each hit.
+type brokenChunkLookup struct {
+	store.ChunkStore
+}
+
+func (brokenChunkLookup) GetByIDs(context.Context, []string) ([]*store.Chunk, error) {
+	return nil, errors.New("database is locked")
+}
+
+func TestEngine_ChunkLookupFailureKeepsHitsAndIsLogged(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+	var logs bytes.Buffer
+	engine := New(brokenChunkLookup{chunks}, docs, &fakeEmbedder{}, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Items)
+	assert.Empty(t, res.Items[0].Chunks, "the hit is kept without its chunks")
+	assert.Contains(t, logs.String(), "level=WARN")
+	assert.Contains(t, logs.String(), res.Items[0].Document.ID)
+	assert.Contains(t, logs.String(), "database is locked")
+}
+
 func TestEngine_KeywordFailureIsFatalAndStopsTheVectorLeg(t *testing.T) {
 	db := sqlitestore.NewEphemeralDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
