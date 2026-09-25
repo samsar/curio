@@ -2883,7 +2883,9 @@ before the first and around each; `Migrate` is it with no hooks. The
 daemon's hooks report progress on its starting healthz answer and log
 each migration, so nothing in the store logs on the daemon's behalf. The
 checkpoint after migrating and the returned version are unchanged, and a
-failed migration's error names its file and version. See "Daemon
+failed migration's error names its file and version. Should goose apply
+a different migration than the one listed (something else migrating the
+same database), that is an error too, not a misreported step. See "Daemon
 startup: a starting API while migrating, clients that wait on progress".
 
 ---

@@ -155,6 +155,25 @@ func TestMigrateWithHooks_FailureNamesTheMigration(t *testing.T) {
 	assert.Equal(t, []string{"pending", "applying 5"}, h.events)
 }
 
+// TestMigrateWithHooks_SomethingElseMigrates: a migration applied by
+// someone else after the pending list was read fails the run, rather than
+// goose's next migration being reported as the one it listed.
+func TestMigrateWithHooks_SomethingElseMigrates(t *testing.T) {
+	db, other := migratedTo(t, 4)
+	hooks := MigrationHooks{Applying: func(m Migration) {
+		if m.Version == 5 {
+			_, err := other.UpByOne(context.Background())
+			require.NoError(t, err)
+		}
+	}}
+
+	_, err := MigrateWithHooks(context.Background(), db, hooks)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "apply migration 005_")
+	assert.Contains(t, err.Error(), "goose applied 006_")
+	assert.Contains(t, err.Error(), "is something else migrating")
+}
+
 func TestMigrate_CancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

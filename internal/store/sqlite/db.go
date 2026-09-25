@@ -154,10 +154,15 @@ func MigrateWithHooks(ctx context.Context, db *DB, hooks MigrationHooks) (int64,
 			hooks.Applying(m)
 		}
 		// Each migration is its own call so the hooks can report it; goose
-		// applies the lowest pending version, which is m.
+		// applies the lowest pending version, which is m unless something
+		// else migrated the database since it was listed.
 		res, err := provider.UpByOne(ctx)
 		if err != nil {
 			return 0, fmt.Errorf("apply migration %s: %w", m.Source, err)
+		}
+		if res.Source.Version != m.Version {
+			return 0, fmt.Errorf("apply migration %s: goose applied %s instead; is something else migrating %s?",
+				m.Source, filepath.Base(res.Source.Path), db.path)
 		}
 		if hooks.Applied != nil {
 			hooks.Applied(m, res.Duration)
