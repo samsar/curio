@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -199,6 +200,42 @@ func TestExtractions_CreateAndList(t *testing.T) {
 	assert.Len(t, list, 2)
 }
 
+// TestExtractions_Create_FetchedAt: the extraction comes back with the
+// fetched_at that was stored, whether the caller gave one or the column
+// defaulted it.
+func TestExtractions_Create_FetchedAt(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	exts := NewExtractions(db)
+	d := &store.Document{TenantID: "local", URL: "https://example.com/fetched-at"}
+	require.NoError(t, NewDocuments(db).Create(ctx, d))
+
+	given := time.Date(2024, 5, 1, 12, 30, 0, 123456789, time.UTC)
+	cases := []struct {
+		name      string
+		fetchedAt time.Time
+		want      func(t *testing.T, got time.Time)
+	}{
+		{"given", given, func(t *testing.T, got time.Time) {
+			assert.Equal(t, given.Truncate(time.Millisecond), got, "stored to the millisecond")
+		}},
+		{"defaulted", time.Time{}, func(t *testing.T, got time.Time) {
+			assert.WithinDuration(t, time.Now(), got, time.Minute)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
+				FetchedAt: tc.fetchedAt}
+			require.NoError(t, exts.Create(ctx, e))
+			tc.want(t, e.FetchedAt)
+			stored, err := exts.GetByID(ctx, e.ID)
+			require.NoError(t, err)
+			assert.Equal(t, stored.FetchedAt, e.FetchedAt)
+		})
+	}
+}
+
 func TestDocuments_SetCurrentExtractionTriggerEnforced(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -235,6 +272,9 @@ func TestBookmarks_CRUD(t *testing.T) {
 	got, err := bms.GetByID(ctx, b.ID)
 	require.NoError(t, err)
 	assert.Equal(t, b.URL, got.URL)
+	assert.False(t, b.CreatedAt.IsZero())
+	assert.Equal(t, got.CreatedAt, b.CreatedAt, "Create returns the stored timestamps")
+	assert.Equal(t, got.UpdatedAt, b.UpdatedAt)
 	require.NotNil(t, got.FolderPath)
 	assert.Equal(t, "/Tech/AI", *got.FolderPath)
 	assert.Equal(t, []string{"a", "b"}, got.Tags)
@@ -450,6 +490,23 @@ func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 	assert.True(t, permanent, "exhausted attempts should be reported permanent")
 	got, _ = q.GetByID(ctx, claimed2.ID)
 	assert.Equal(t, store.JobStatusFailed, got.Status)
+}
+
+// TestRetryBackoff: 30s doubled per failed attempt, capped at an hour,
+// however many attempts.
+func TestRetryBackoff(t *testing.T) {
+	s := time.Second
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{1, 60 * s}, {2, 120 * s}, {3, 240 * s}, {4, 480 * s}, {5, 960 * s}, {6, 1920 * s},
+		{7, time.Hour}, {8, time.Hour}, {9, time.Hour}, {10, time.Hour},
+		{64, time.Hour}, {math.MaxInt, time.Hour},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, retryBackoff(tc.attempts), "attempts %d", tc.attempts)
+	}
 }
 
 // TestJobs_ClaimNext_ConcurrentClaimOnce verifies the bug we'd otherwise

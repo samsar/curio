@@ -148,28 +148,27 @@ func (s *Bookmarks) Create(ctx context.Context, b *store.Bookmark) error {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	var createdAt, updatedAt string
+	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path, tags)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING created_at, updated_at`,
 		b.ID, b.TenantID,
 		strPtr(b.DocumentID), b.URL,
 		strPtr(b.Title), formatTime(b.SavedAt), b.Source,
 		strPtr(b.FolderPath), tagsJSON,
-	)
+	).Scan(&createdAt, &updatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: bookmark for (tenant, url, source) exists", store.ErrConflict)
 		}
 		return fmt.Errorf("insert bookmark: %w", err)
 	}
-
-	got, err := s.GetByID(ctx, b.ID)
-	if err != nil {
+	if b.CreatedAt, err = parseTime(createdAt); err != nil {
 		return err
 	}
-	b.CreatedAt = got.CreatedAt
-	b.UpdatedAt = got.UpdatedAt
-	return nil
+	b.UpdatedAt, err = parseTime(updatedAt)
+	return err
 }
 
 // validateBookmark checks the fields every bookmark insert requires.

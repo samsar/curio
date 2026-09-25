@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math"
+	"maps"
 	"slices"
 	"time"
 
@@ -179,16 +179,11 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (b
 
 	var res sql.Result
 	if !permanent {
-		// Exponential backoff: 30 * 2^attempts seconds, capped at 1 hour.
-		backoff := 30 * time.Duration(math.Pow(2, float64(job.Attempts))) * time.Second
-		if backoff > time.Hour {
-			backoff = time.Hour
-		}
 		now := time.Now().UTC()
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE jobs SET status = ?, last_error = ?, run_after = ?, updated_at = ?
 			WHERE id = ? AND status = ?`,
-			store.JobStatusPending, errMsg, formatTime(now.Add(backoff)), formatTime(now),
+			store.JobStatusPending, errMsg, formatTime(now.Add(retryBackoff(job.Attempts))), formatTime(now),
 			id, store.JobStatusRunning)
 	} else {
 		res, err = s.db.ExecContext(ctx, `
@@ -203,6 +198,14 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (b
 		return false, err
 	}
 	return permanent, nil
+}
+
+// retryBackoff is how long a job that has failed attempts times waits
+// before the next: 30s doubled per attempt, capped at an hour.
+func retryBackoff(attempts int) time.Duration {
+	const base, limit = 30 * time.Second, time.Hour
+	// base<<7 is past the limit already; shifting further could overflow.
+	return min(base<<min(max(attempts, 0), 7), limit)
 }
 
 func (s *Jobs) Requeue(ctx context.Context, id string) error {
@@ -463,13 +466,8 @@ func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.D
 	}
 
 	// Sort by kind for deterministic output.
-	kinds := make([]store.JobKind, 0, len(out))
-	for k := range out {
-		kinds = append(kinds, k)
-	}
-	slices.Sort(kinds)
-	result := make([]store.KindMetrics, 0, len(kinds))
-	for _, k := range kinds {
+	result := make([]store.KindMetrics, 0, len(out))
+	for _, k := range slices.Sorted(maps.Keys(out)) {
 		result = append(result, *out[k])
 	}
 	return result, nil

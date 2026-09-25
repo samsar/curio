@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"runtime/debug"
 	"slices"
 	"sync"
@@ -360,12 +361,7 @@ func (w *Worker) jobLog(job *store.Job) *slog.Logger {
 }
 
 func (w *Worker) kinds() []store.JobKind {
-	out := make([]store.JobKind, 0, len(w.handlers))
-	for k := range w.handlers {
-		out = append(out, k)
-	}
-	slices.Sort(out)
-	return out
+	return slices.Sorted(maps.Keys(w.handlers))
 }
 
 // backoff is a delay that doubles from initial up to max. The zero state

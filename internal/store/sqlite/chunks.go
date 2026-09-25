@@ -454,17 +454,9 @@ func (s *Chunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, er
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	placeholders := strings.Repeat("?,", len(ids))
-	placeholders = strings.TrimRight(placeholders, ",")
-
 	q := `SELECT id, document_id, extraction_id, ord, text, token_count
-	      FROM chunks WHERE id IN (` + placeholders + `)`
-
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	      FROM chunks WHERE id IN (` + placeholders(len(ids)) + `)`
+	rows, err := s.db.QueryContext(ctx, q, appendArgs(nil, ids)...)
 	if err != nil {
 		return nil, fmt.Errorf("get chunks: %w", err)
 	}
