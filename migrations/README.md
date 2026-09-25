@@ -42,9 +42,14 @@ silently disables FK enforcement — every connection must turn it on.
 
 ## Schema versioning
 
-`schema_meta` table holds the current schema version, embedding model, and
-embedding dimension. The daemon cross-checks this against `~/.curio/.curio-meta.json`
-at startup and refuses to start on mismatch (suggests `curio reindex`).
+goose's `goose_db_version` table is the only record of the schema version:
+the version is the highest migration applied. `sqlite.Migrate` returns it,
+and the daemon copies it into `~/.curio/.curio-meta.json` after migrating,
+as a cache for `/v1/healthz`, `curio version` and `curio doctor`. A
+migration never records the version itself.
+
+`schema_meta` holds the embedding model and dimension the database was
+created for.
 
 ## Adding a migration
 
@@ -89,7 +94,6 @@ CREATE TEMP TABLE _fk_guard (violations INTEGER NOT NULL CHECK (violations = 0))
 INSERT INTO _fk_guard SELECT count(*) FROM pragma_foreign_key_check;
 DROP TABLE temp._fk_guard;
 
-UPDATE schema_meta SET schema_version = N WHERE id = 1;
 COMMIT;
 PRAGMA foreign_keys = ON;
 -- +goose StatementEnd

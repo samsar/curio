@@ -26,7 +26,7 @@ func NewDB(t testing.TB) *sqlite.DB {
 			t.Errorf("close test database: %v", err)
 		}
 	})
-	if err := sqlite.Migrate(context.Background(), db); err != nil {
+	if _, err := sqlite.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate test database: %v", err)
 	}
 	return db

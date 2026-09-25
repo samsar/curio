@@ -607,15 +607,32 @@ alias: see "Config: strict keys, legacy `workers` folded in at load" below.
 
 ## Marker file's schema_version is synced from the DB after migrations
 
-**Decision:** On daemon startup, after running migrations, we read the
-current `schema_meta.schema_version` and write it back to
-`.curio-meta.json` so `/v1/healthz` reflects the actual schema state.
+**Decision:** goose's `goose_db_version` table is the only record of the
+schema version. `sqlite.Migrate` returns the version goose leaves the
+database at (`Provider.GetDBVersion` after `Up`), and the daemon writes it
+into `.curio-meta.json` so `/v1/healthz`, `curio version` and
+`curio doctor` show it. The marker's `schema_version` is a cache;
+`curiohome.CurrentSchemaVersion` is only the placeholder `Init` writes
+before the daemon's first start.
 
-**Why:** The marker file is set at `curiohome.Init` time using the
-"current" schema version (a constant). Migrations bump
-`schema_meta.schema_version` but the marker doesn't update on its own,
-so after migration 002 ran, `curio status` still reported "schema: v1".
-The DB is authoritative; the marker mirrors it.
+**Why:** The marker is written at `curiohome.Init` time with a constant,
+so after migration 002 ran, `curio status` still reported "schema: v1";
+the daemon has to refresh it from the database.
+
+It used to refresh it from `schema_meta.schema_version`, a copy every
+migration had to bump by hand, next to goose's own record of the same
+number. A migration that forgot the bump would have made every display
+wrong. Migration 005 drops the column (its Down restores it at 4, so the
+older Downs that set it still run), and no migration records the version
+any more. Goose versions 1 through 4 equal the old `schema_version`
+values, so existing installs continue without a jump. The marker field
+stays because offline commands read it and the healthz response shape
+must not change.
+
+Returning the version from `Migrate` reads it on the same Provider after
+`Up`. A separate read function would have to be called on a database
+that may not be migrated yet, where `GetDBVersion` creates goose's table
+as a side effect.
 
 ---
 
@@ -2643,9 +2660,8 @@ which report failures differently (400 versus `filtered_by`).
 
 ## Migrate: goose's Provider, and a context all the way down
 
-**Decision:** `sqlite.Open`, `Migrate` and `ReadSchemaVersion` take a
-context (`PingContext`, `QueryRowContext`, `Provider.Up(ctx)`), and the
-daemon passes its run context. `Migrate` applies the embedded migrations
+**Decision:** `sqlite.Open` and `Migrate` take a context (`PingContext`,
+`Provider.Up(ctx)`), and the daemon passes its run context. `Migrate` applies the embedded migrations
 through `goose.NewProvider`, never goose's package-level `SetBaseFS` /
 `SetDialect` / `Up`.
 

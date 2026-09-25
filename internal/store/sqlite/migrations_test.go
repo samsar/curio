@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -35,6 +37,41 @@ func newProvider(t *testing.T, db *DB, fsys fs.FS) *goose.Provider {
 	p, err := goose.NewProvider(goose.DialectSQLite3, db.DB, fsys)
 	require.NoError(t, err)
 	return p
+}
+
+// migratedTo returns a database the real migrations have brought to
+// version, and the provider that can move it on.
+func migratedTo(t *testing.T, version int64) (*DB, *goose.Provider) {
+	t.Helper()
+	db, _ := openUnmigrated(t)
+	p := newProvider(t, db, migrations.FS)
+	_, err := p.UpTo(context.Background(), version)
+	require.NoError(t, err)
+	return db, p
+}
+
+// latestMigration is the highest numeric prefix among the migration files.
+func latestMigration(t *testing.T) int64 {
+	t.Helper()
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	require.NoError(t, err)
+	var latest int64
+	for _, e := range entries {
+		prefix, _, ok := strings.Cut(e.Name(), "_")
+		require.True(t, ok, e.Name())
+		n, err := strconv.ParseInt(prefix, 10, 64)
+		require.NoError(t, err, e.Name())
+		latest = max(latest, n)
+	}
+	return latest
+}
+
+func hasColumn(t *testing.T, db *DB, table, column string) bool {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`,
+		table, column).Scan(&n))
+	return n > 0
 }
 
 // realMigrations returns the embedded migrations, with 002 swapped for
@@ -274,7 +311,8 @@ func TestMigration002_UpgradesLinkedBookmarks(t *testing.T) {
 			('b3', 'local', NULL, 'https://example.com/3', '2024-01-01T00:00:00.000Z', 'manual');`)
 	require.NoError(t, err)
 
-	require.NoError(t, Migrate(ctx, db))
+	_, err = Migrate(ctx, db)
+	require.NoError(t, err)
 
 	assertLinks := func(want map[string]sql.NullString) {
 		t.Helper()
@@ -317,4 +355,40 @@ func TestMigration002_UpgradesLinkedBookmarks(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM bookmarks WHERE source = 'html'`).Scan(&html))
 	assert.Zero(t, html, "down deletes the rows v1 can't hold")
 	assertForeignKeysOnEverywhere(t, db)
+}
+
+// TestMigration005_DropsSchemaVersion: schema_meta loses its copy of the
+// version and keeps everything else. Down brings the column back at 4, so
+// the Downs of 004 through 002, which set it, still run.
+func TestMigration005_DropsSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 4)
+	_, err := db.Exec(`UPDATE schema_meta SET created_at = '2024-01-01T00:00:00.000Z',
+		updated_at = '2024-02-01T00:00:00.000Z' WHERE id = 1`)
+	require.NoError(t, err)
+	meta := func() []any {
+		var model, created, updated string
+		var dim int
+		require.NoError(t, db.QueryRow(`SELECT embedding_model, embedding_dim, created_at, updated_at
+			FROM schema_meta WHERE id = 1`).Scan(&model, &dim, &created, &updated))
+		return []any{model, dim, created, updated}
+	}
+	before := meta()
+
+	_, err = p.UpTo(ctx, 5)
+	require.NoError(t, err)
+	assert.False(t, hasColumn(t, db, "schema_meta", "schema_version"))
+	assert.Equal(t, before, meta())
+
+	_, err = p.DownTo(ctx, 4)
+	require.NoError(t, err)
+	var version int
+	require.NoError(t, db.QueryRow(`SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&version))
+	assert.Equal(t, 4, version)
+	assert.Equal(t, before, meta())
+
+	_, err = p.DownTo(ctx, 1)
+	require.NoError(t, err)
+	require.NoError(t, db.QueryRow(`SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&version))
+	assert.Equal(t, 1, version)
 }

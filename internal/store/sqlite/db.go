@@ -57,7 +57,9 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	return &DB{DB: db, path: path}, nil
 }
 
-// Migrate applies pending migrations from the embedded FS. Idempotent.
+// Migrate applies pending migrations from the embedded FS and returns the
+// schema version the database is left at: the highest version in goose's
+// goose_db_version table, the only record of it. Idempotent.
 //
 // It uses goose's Provider, which keeps its state per instance: goose's
 // package-level API (SetBaseFS, SetDialect, Up) reads and writes process
@@ -67,30 +69,23 @@ func Open(ctx context.Context, path string) (*DB, error) {
 // runs outside goose's transaction (see migrations/README.md), and one that
 // fails leaves its pooled connection inside an open transaction with
 // foreign keys off.
-func Migrate(ctx context.Context, db *DB) error {
+func Migrate(ctx context.Context, db *DB) (int64, error) {
 	provider, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations.FS)
 	if err != nil {
-		return fmt.Errorf("load migrations: %w", err)
+		return 0, fmt.Errorf("load migrations: %w", err)
 	}
 	if _, err := provider.Up(ctx); err != nil {
-		return fmt.Errorf("apply migrations: %w", err)
+		return 0, fmt.Errorf("apply migrations: %w", err)
 	}
-	return nil
+	version, err := provider.GetDBVersion(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return version, nil
 }
 
 // Path returns the path Open was called with.
 func (d *DB) Path() string { return d.path }
-
-// ReadSchemaVersion returns the schema_version recorded in the
-// schema_meta table. Used to sync the marker file (.curio-meta.json)
-// after migrations run.
-func ReadSchemaVersion(ctx context.Context, db *DB) (int, error) {
-	var v int
-	if err := db.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&v); err != nil {
-		return 0, fmt.Errorf("read schema version: %w", err)
-	}
-	return v, nil
-}
 
 // buildDSN produces a connection string that sets curio's required pragmas
 // on every pooled connection. Without this, foreign_keys defaults to OFF

@@ -18,23 +18,25 @@ func TestOpenAndMigrate(t *testing.T) {
 	defer db.Close()
 	assert.Equal(t, path, db.Path())
 
-	require.NoError(t, Migrate(ctx, db))
+	version, err := Migrate(ctx, db)
+	require.NoError(t, err)
 
-	// schema_meta should be populated by the initial migration.
-	var version int
 	var model string
 	var dim int
-	err = db.QueryRow(`SELECT schema_version, embedding_model, embedding_dim FROM schema_meta WHERE id=1`).
-		Scan(&version, &model, &dim)
+	err = db.QueryRow(`SELECT embedding_model, embedding_dim FROM schema_meta WHERE id=1`).Scan(&model, &dim)
 	require.NoError(t, err)
-	// schema_version reflects the latest applied migration.
-	assert.GreaterOrEqual(t, version, 1)
 	assert.Equal(t, "nomic-embed-text", model)
 	assert.Equal(t, 768, dim)
 
-	got, err := ReadSchemaVersion(ctx, db)
-	require.NoError(t, err)
-	assert.Equal(t, version, got)
+	// goose_db_version is the only record of the version.
+	assert.Equal(t, latestMigration(t), version, "the newest migration file")
+	var recorded int64
+	require.NoError(t, db.QueryRow(`SELECT max(version_id) FROM goose_db_version`).Scan(&recorded))
+	assert.Equal(t, recorded, version)
+	var copies int
+	require.NoError(t, db.QueryRow(
+		`SELECT count(*) FROM pragma_table_info('schema_meta') WHERE name = 'schema_version'`).Scan(&copies))
+	assert.Zero(t, copies, "schema_meta keeps no copy of the version")
 }
 
 func TestMigrate_Idempotent(t *testing.T) {
@@ -47,8 +49,10 @@ func TestMigrate_Idempotent(t *testing.T) {
 	}
 	before := applied()
 
-	require.NoError(t, Migrate(ctx, db))
+	version, err := Migrate(ctx, db)
+	require.NoError(t, err)
 	assert.Equal(t, before, applied(), "a second run applies nothing")
+	assert.Equal(t, latestMigration(t), version, "and still reports the version")
 }
 
 func TestMigrate_CancelledContext(t *testing.T) {
@@ -58,7 +62,8 @@ func TestMigrate_CancelledContext(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	require.ErrorIs(t, Migrate(ctx, db), context.Canceled)
+	_, err = Migrate(ctx, db)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // TestMigrate_Parallel: migrating separate databases at once is safe. Each
@@ -68,20 +73,14 @@ func TestMigrate_Parallel(t *testing.T) {
 	for i := range 6 {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
-			v, err := ReadSchemaVersion(context.Background(), db)
+			db, err := Open(context.Background(), filepath.Join(t.TempDir(), "curio.db"))
 			require.NoError(t, err)
-			assert.Positive(t, v)
+			defer db.Close()
+			v, err := Migrate(context.Background(), db)
+			require.NoError(t, err)
+			assert.Equal(t, latestMigration(t), v)
 		})
 	}
-}
-
-func TestReadSchemaVersion_Unmigrated(t *testing.T) {
-	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "curio.db"))
-	require.NoError(t, err)
-	defer db.Close()
-	_, err = ReadSchemaVersion(context.Background(), db)
-	require.ErrorContains(t, err, "read schema version")
 }
 
 func TestPragmasApplied(t *testing.T) {

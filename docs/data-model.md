@@ -313,5 +313,8 @@ Keeping content on disk rather than in SQLite:
 ## Schema versioning and migrations
 
 Migrations live in `migrations/` and run via `pressly/goose` at daemon startup.
-`.curio-meta.json` records the current schema version. Downgrade is not
-supported — backup before major version bumps.
+The schema version is the highest version in goose's `goose_db_version`
+table, the one source of truth for it. The daemon copies it into
+`.curio-meta.json` after migrating, as a cache for `/v1/healthz`,
+`curio version` and `curio doctor`. Downgrade is not supported — backup
+before major version bumps.
