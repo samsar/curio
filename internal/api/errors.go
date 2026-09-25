@@ -51,13 +51,14 @@ func writeProblem(w http.ResponseWriter, r *http.Request, status int, title, det
 
 // requestError is a fault in what the client sent: a parameter, cursor or
 // field the handler refuses. writeError answers it 400 with its message.
-type requestError struct{ msg string }
+type requestError struct{ err error }
 
-func (e *requestError) Error() string { return e.msg }
+func (e *requestError) Error() string { return e.err.Error() }
+func (e *requestError) Unwrap() error { return e.err }
 
-// badRequest builds a requestError.
+// badRequest builds a requestError, formatting like fmt.Errorf.
 func badRequest(format string, args ...any) error {
-	return &requestError{msg: fmt.Sprintf(format, args...)}
+	return &requestError{err: fmt.Errorf(format, args...)}
 }
 
 // errorStatus maps an error from a handler to a status and title.

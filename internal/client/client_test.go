@@ -213,11 +213,11 @@ func TestBookmarks(t *testing.T) {
 	first, err := c.ListBookmarks(ctx, client.BookmarkListOpts{Limit: 3})
 	require.NoError(t, err)
 	assert.Len(t, first.Items, 3)
-	require.NotNil(t, first.NextCursor)
-	rest, err := c.ListBookmarks(ctx, client.BookmarkListOpts{Limit: 3, Cursor: *first.NextCursor})
+	require.NotEmpty(t, first.NextCursor)
+	rest, err := c.ListBookmarks(ctx, client.BookmarkListOpts{Limit: 3, Cursor: first.NextCursor})
 	require.NoError(t, err)
 	assert.Len(t, rest.Items, 1)
-	assert.Nil(t, rest.NextCursor)
+	assert.Empty(t, rest.NextCursor)
 
 	chrome, err := c.ListBookmarks(ctx, client.BookmarkListOpts{Source: "chrome", Folder: "/Reading"})
 	require.NoError(t, err)
@@ -258,6 +258,16 @@ func TestDocuments(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, withPath.Items, 1)
 	assert.Contains(t, withPath.Items[0].MarkdownPath, s.Home.ContentDir())
+
+	first, err := c.ListDocuments(ctx, client.ListDocumentsOpts{Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, first.Items, 1)
+	require.NotEmpty(t, first.NextCursor)
+	rest, err := c.ListDocuments(ctx, client.ListDocumentsOpts{Limit: 1, Cursor: first.NextCursor})
+	require.NoError(t, err)
+	require.Len(t, rest.Items, 1)
+	assert.Empty(t, rest.NextCursor)
+	assert.ElementsMatch(t, []string{fetched.ID, pending.Items[0].ID}, []string{first.Items[0].ID, rest.Items[0].ID})
 }
 
 func TestRefetchAndReindex(t *testing.T) {
@@ -310,6 +320,20 @@ func TestJobs(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, clusters.Items, 1)
 	assert.Empty(t, clusters.Items[0].DocURL)
+
+	seen := map[string]bool{}
+	for cursor := ""; ; {
+		page, err := c.ListJobs(ctx, client.JobListOpts{Limit: 3, Cursor: cursor})
+		require.NoError(t, err)
+		for _, j := range page.Items {
+			assert.False(t, seen[j.ID], "job %s on two pages", j.ID)
+			seen[j.ID] = true
+		}
+		if cursor = page.NextCursor; cursor == "" {
+			break
+		}
+	}
+	assert.Len(t, seen, 4, "every job, over two pages")
 
 	deleted, err := c.DeleteJobsByStatus(ctx, "failed")
 	require.NoError(t, err)

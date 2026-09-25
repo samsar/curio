@@ -30,7 +30,8 @@ type JobResponse struct {
 
 // JobListResponse is the body of GET /v1/jobs.
 type JobListResponse struct {
-	Items []JobResponse `json:"items"`
+	Items      []JobResponse `json:"items"`
+	NextCursor string        `json:"next_cursor,omitempty"`
 }
 
 // DeleteJobsResponse reports how many rows the operation removed.
@@ -116,20 +117,34 @@ func parseExtendedDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
+// handleListJobs pages through the tenant's jobs, most recently updated
+// first. next_cursor is set exactly when another page follows.
 func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	opts, err := jobFilters(r)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
-	opts.Limit = listLimit(r)
+	if opts.After, err = cursorParam(r); err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	limit := listLimit(r)
+	opts.Limit = limit + 1
 	jobs, err := d.Queue.ListWithDoc(r.Context(), d.TenantID, opts)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
+	jobs, next, err := onePage(jobs, limit, func(j store.JobWithDoc) store.PageKey {
+		return store.PageKey{At: j.UpdatedAt, ID: j.ID}
+	})
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
 
-	resp := JobListResponse{Items: make([]JobResponse, 0, len(jobs))}
+	resp := JobListResponse{Items: make([]JobResponse, 0, len(jobs)), NextCursor: next}
 	for _, j := range jobs {
 		resp.Items = append(resp.Items, d.jobResponse(j))
 	}

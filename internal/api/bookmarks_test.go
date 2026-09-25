@@ -224,23 +224,40 @@ func TestListBookmarks_Paging(t *testing.T) {
 
 	first := s.listBookmarks(t, "")
 	assert.Len(t, first.Items, defaultListLimit)
-	require.NotNil(t, first.NextCursor, "more follow")
-	rest := s.listBookmarks(t, "?cursor="+*first.NextCursor)
+	require.NotEmpty(t, first.NextCursor, "more follow")
+	rest := s.listBookmarks(t, "?cursor="+first.NextCursor)
 	assert.Len(t, rest.Items, 60-defaultListLimit)
-	assert.Nil(t, rest.NextCursor, "the last page")
+	assert.Empty(t, rest.NextCursor, "the last page")
 	seen := map[string]bool{}
-	for _, b := range append(first.Items, rest.Items...) {
+	all := append(first.Items, rest.Items...)
+	for i, b := range all {
 		seen[b.ID] = true
+		if i > 0 {
+			assert.False(t, b.CreatedAt.After(all[i-1].CreatedAt), "newest first")
+		}
 	}
 	assert.Len(t, seen, 60, "the pages don't overlap")
 
 	exact := s.listBookmarks(t, "?limit=60")
 	assert.Len(t, exact.Items, 60)
-	assert.Nil(t, exact.NextCursor, "no empty page to follow")
+	assert.Empty(t, exact.NextCursor, "no empty page to follow")
 
 	for _, limit := range []string{"0", "-3", "501", "100000", "ten"} {
 		got := s.listBookmarks(t, "?limit="+limit)
 		assert.Len(t, got.Items, defaultListLimit, "limit=%s", limit)
+	}
+}
+
+// TestLists_BogusCursor: a cursor this daemon didn't issue is a 400 on every
+// list, never ignored and never a 500.
+func TestLists_BogusCursor(t *testing.T) {
+	s := newTestServer(t)
+	for _, path := range []string{"/v1/bookmarks", "/v1/documents", "/v1/jobs"} {
+		for _, cursor := range []string{"not-base64!", "bm90LWpzb24", "e30"} { // "not-json", "{}"
+			p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: path + "?cursor=" + cursor}),
+				http.StatusBadRequest)
+			assert.Contains(t, p.Detail, "invalid cursor", "%s?cursor=%s", path, cursor)
+		}
 	}
 }
 
@@ -252,14 +269,17 @@ func (failingDocLookup) GetByID(context.Context, string) (*store.Document, error
 	return nil, errInjected
 }
 
-// TestBookmarks_DocumentLookupFailure: a bookmark whose document can't be
-// read is a server error, not a bookmark with a blank document_state.
+// TestBookmarks_DocumentLookupFailure: the list reads document states in
+// its own query and needs no lookup; a single bookmark whose document can't
+// be read is a server error, not a bookmark with a blank document_state.
 func TestBookmarks_DocumentLookupFailure(t *testing.T) {
 	s := newTestServer(t, func(d *Deps) { d.Documents = failingDocLookup{d.Documents} })
 	resp, created := s.createBookmark(t, "https://example.com/a")
 	require.Equal(t, http.StatusCreated, resp.status, resp.body)
 
-	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/bookmarks"}), http.StatusInternalServerError)
+	list := s.listBookmarks(t, "")
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, string(store.DocStatePending), list.Items[0].DocumentState)
 	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/bookmarks/" + created.Bookmark.ID}),
 		http.StatusInternalServerError)
 }

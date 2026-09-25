@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -241,6 +242,36 @@ func TestListDocuments(t *testing.T) {
 		http.StatusBadRequest)
 	assert.Equal(t, `state "archived" must be one of: pending, fetched, failed, dead`, p.Detail,
 		"a mistyped filter is refused, not answered with nothing")
+}
+
+// TestListDocuments_Paging: next_cursor is set exactly when another page
+// follows, and the pages walk every document once, most recently updated
+// first.
+func TestListDocuments_Paging(t *testing.T) {
+	s := newTestServer(t)
+	for i := range 5 {
+		s.seedDocument(t, fmt.Sprintf("https://example.com/%d", i), store.DocStateFetched)
+	}
+	all := make([]DocumentListItem, 0, 5)
+	cursor := ""
+	for range 3 {
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents?limit=2&cursor=" + cursor})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var page DocumentListResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &page))
+		all = append(all, page.Items...)
+		cursor = page.NextCursor
+	}
+	assert.Empty(t, cursor, "the third page is the last")
+	require.Len(t, all, 5)
+	seen := map[string]bool{}
+	for i, doc := range all {
+		seen[doc.ID] = true
+		if i > 0 {
+			assert.False(t, doc.UpdatedAt.After(all[i-1].UpdatedAt), "most recently updated first")
+		}
+	}
+	assert.Len(t, seen, 5, "the pages don't overlap")
 }
 
 func TestGetDocumentContent(t *testing.T) {

@@ -293,6 +293,9 @@ is provisional" in the deferred section for what we may revisit.
 
 ## API: cursor pagination, not offset
 
+**Status:** implemented as keyset pages on (timestamp, id); see "List
+pagination: keyset on (timestamp, id)" below.
+
 **Decision:** List endpoints use opaque cursors (`?cursor=...` + `next_cursor`
 in the response), not offset/limit.
 
@@ -2901,6 +2904,10 @@ drops the index and then the column.
 
 ## Indexes follow the queries; plans are pinned by tests
 
+**Status:** migration 009 appended `id` to the four list indexes and
+replaced `idx_bookmarks_tenant_id`; the current table is in "List
+pagination: keyset on (timestamp, id)".
+
 **Decision:** Migration 007 builds the index set around the queries the
 store runs:
 
@@ -3293,3 +3300,62 @@ made (see "Client errors"), so no daemon saw the first attempt. Concurrent
 calls that find the daemon gone each ensure it; `EnsureRunning` serializes
 on `daemon.start.lock` and re-checks healthz, so one daemon starts. Each
 ensure is bounded by the start timeout and the tool call's context.
+
+---
+
+## List pagination: keyset on (timestamp, id)
+
+**Decision:** `GET /v1/documents`, `GET /v1/jobs` and `GET /v1/bookmarks`
+page with opaque cursors over a keyset:
+
+- Documents and jobs order by `updated_at DESC, id DESC`; bookmarks by
+  `created_at DESC, id DESC`, newest first by a key that never changes.
+- `store.PageKey{At, ID}` is the last row of a page. `ListDocumentsOpts`
+  and `ListJobsOpts` gained `After`, which replaced `ListBookmarksOpts`'
+  `Cursor`; a non-zero key restricts the list to rows strictly after it
+  with the row-value predicate `(updated_at, id) < (?, ?)`.
+- The handlers ask the store for one row more than the page, so
+  `next_cursor` is present exactly when another page follows. The cursor
+  is base64url of `{"t": <RFC 3339>, "id": ...}`. One that doesn't decode
+  to a time and an ID is a 400 "invalid cursor", never ignored.
+- `BookmarkStore.List` returns `BookmarkWithState`, the document's state
+  read through a `LEFT JOIN` in the same query, instead of the handler
+  loading each bookmark's document.
+- `curio docs` and `curio jobs` take `--cursor`, and a page that has a
+  successor ends with `next page: <the command as run> --cursor=<token>`.
+  `--limit` outside 1..500 is a usage error.
+
+**The guarantee:** pages never overlap, and rows inserted during a walk
+don't shift it. A row whose `updated_at` changes mid-walk moves ahead of
+the cursor and is not revisited, so a walk of an active list can miss a
+row that was touched while it ran; that is the cost of keeping the
+activity-feed order of "Jobs list: sort by updated_at". Cursors are opaque
+and may stop being valid across a daemon upgrade: the 400 means "start the
+walk again".
+
+**Why:** Documents and jobs ignored `?cursor` and sent no `next_cursor`,
+and their `ORDER BY updated_at DESC LIMIT ?` had no tie-break, so nothing
+past the first 500 rows could be seen (`curio docs --all` on a large
+corpus) and rows sharing a millisecond came back in no fixed order.
+`--limit 1000` silently returned 50. Bookmarks paged `id > ? ORDER BY id`,
+which for UUIDv4 is random order, and the handler read every row's
+document separately.
+
+**Why these indexes:** on SQLite 3.53, adding `id` to the ORDER BY over
+the old `(tenant_id[, state|status], updated_at)` indexes plans a
+temporary b-tree for the last term. With `id` as the indexes' last column
+(migration 009, inside goose's transaction; no table rebuild) the
+row-value predicate becomes a range on the index and the order comes from
+it. The expanded `ts < ? OR (ts = ? AND id < ?)` form only seeks
+`tenant_id`, which is why `keysetAfter` writes the row value.
+`plans_test.go` pins the first page and a cursor page of every filter.
+
+| Index | Serves |
+|---|---|
+| `idx_jobs_claim (status, kind, run_after, created_at)` | `ClaimNext`; `RecoverOrphans` |
+| `idx_jobs_document (document_id, status, updated_at)` | a document's last error (`curio docs`); the FK action when a document is deleted |
+| `idx_jobs_tenant_status_updated (tenant_id, status, updated_at, id)` | `ListWithDoc` by status, with or without kind; `CountByStatus`; `MetricsByKind`'s window; `PruneOlderThan`; `DeleteByStatus` |
+| `idx_jobs_tenant_updated (tenant_id, updated_at, id)` | `ListWithDoc` unfiltered or by kind only |
+| `idx_documents_tenant_state_updated (tenant_id, state, updated_at, id)` | `ListWithLastError` by state; `CountByState`; `ListIDsWithContent`; `DocumentVectors` (now covering); `RequeueFetchByStates` |
+| `idx_documents_tenant_updated (tenant_id, updated_at, id)` | `ListWithLastError` unfiltered |
+| `idx_bookmarks_tenant_created (tenant_id, created_at, id)` | `Bookmarks.List`, unfiltered or filtered by source or folder (checked per row) |

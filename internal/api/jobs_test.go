@@ -108,6 +108,32 @@ func TestListJobs(t *testing.T) {
 	}
 }
 
+// TestListJobs_Paging: jobs that share an updated_at still page in a fixed
+// order, each once, and next_cursor is set exactly when another page
+// follows.
+func TestListJobs_Paging(t *testing.T) {
+	s := newTestServer(t)
+	for i := range 5 {
+		_, err := s.db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, updated_at)
+			VALUES (?, 'local', 'fetch', '{}', 'done', '2024-01-01T00:00:00.000Z')`, fmt.Sprintf("job-%d", i))
+		require.NoError(t, err)
+	}
+	ids := make([]string, 0, 5)
+	cursor := ""
+	for range 3 {
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/jobs?limit=2&cursor=" + cursor})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var page JobListResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &page))
+		for _, j := range page.Items {
+			ids = append(ids, j.ID)
+		}
+		cursor = page.NextCursor
+	}
+	assert.Empty(t, cursor, "the third page is the last")
+	assert.Equal(t, []string{"job-4", "job-3", "job-2", "job-1", "job-0"}, ids)
+}
+
 func TestDeleteJobs_BadRequests(t *testing.T) {
 	s := newTestServer(t)
 	for _, query := range []string{"", "?status=done&older_than=1d", "?older_than=soon", "?older_than=xd", "?older_than=-2d"} {

@@ -46,6 +46,8 @@ curio status                        # daemon health + corpus counts + queue dept
 curio docs                          # successfully-fetched documents (the happy path)
 curio docs --failed                 # docs whose fetch or index gave up
 curio docs --all                    # every state
+curio docs --all --limit 100        # a page at a time; the last line is the next page's command
+curio docs --all --cursor <token>   # that next page (curio jobs pages the same way)
 curio docs show <doc-id>            # full metadata + on-disk path
 curio docs show <doc-id> --content  # also streams the extracted markdown
 

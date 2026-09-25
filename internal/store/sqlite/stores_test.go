@@ -920,3 +920,186 @@ func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
 	assert.Equal(t, store.DocStateFetched, docState(t, docs, b.ID))
 	assert.Zero(t, countRows(t, db, "jobs"))
 }
+
+// ---------- keyset pages ----------
+
+// pagedList is one of the store's paged lists, reduced to what the paging
+// tests need: seeding rows that share one list timestamp, walking a page,
+// and changing a row between pages.
+type pagedList struct {
+	name string
+	// seed inserts a row with id whose list timestamp is at.
+	seed func(t *testing.T, db *DB, id, at string)
+	// page lists up to limit rows after key, returning each row's key.
+	page func(db *DB, after store.PageKey, limit int) ([]store.PageKey, error)
+	// change makes a row the walk hasn't reached yet move or appear ahead
+	// of the cursor: a newer updated_at, or a newly created row.
+	change func(t *testing.T, db *DB, unvisited string)
+	// changedIsSkipped: the row change touches moves ahead of the cursor,
+	// so the walk doesn't return it.
+	changedIsSkipped bool
+}
+
+func pagedLists() []pagedList {
+	touch := func(table string) func(t *testing.T, db *DB, id string) {
+		return func(t *testing.T, db *DB, id string) {
+			t.Helper()
+			_, err := db.Exec(`UPDATE `+table+` SET updated_at = `+sqlNow+` WHERE id = ?`, id)
+			require.NoError(t, err)
+		}
+	}
+	return []pagedList{
+		{
+			name: "documents",
+			seed: func(t *testing.T, db *DB, id, at string) {
+				t.Helper()
+				_, err := db.Exec(`INSERT INTO documents (id, tenant_id, url, updated_at) VALUES (?, 'local', ?, ?)`,
+					id, "https://example.com/"+id, at)
+				require.NoError(t, err)
+			},
+			page: func(db *DB, after store.PageKey, limit int) ([]store.PageKey, error) {
+				rows, err := NewDocuments(db).ListWithLastError(context.Background(), "local",
+					store.ListDocumentsOpts{Limit: limit, After: after})
+				keys := make([]store.PageKey, len(rows))
+				for i, r := range rows {
+					keys[i] = store.PageKey{At: r.UpdatedAt, ID: r.ID}
+				}
+				return keys, err
+			},
+			change:           touch("documents"),
+			changedIsSkipped: true,
+		},
+		{
+			name: "jobs",
+			seed: func(t *testing.T, db *DB, id, at string) {
+				t.Helper()
+				_, err := db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, updated_at)
+					VALUES (?, 'local', 'fetch', '{}', 'done', ?)`, id, at)
+				require.NoError(t, err)
+			},
+			page: func(db *DB, after store.PageKey, limit int) ([]store.PageKey, error) {
+				rows, err := NewJobs(db).ListWithDoc(context.Background(), "local",
+					store.ListJobsOpts{Limit: limit, After: after})
+				keys := make([]store.PageKey, len(rows))
+				for i, r := range rows {
+					keys[i] = store.PageKey{At: r.UpdatedAt, ID: r.ID}
+				}
+				return keys, err
+			},
+			change:           touch("jobs"),
+			changedIsSkipped: true,
+		},
+		{
+			name: "bookmarks",
+			seed: func(t *testing.T, db *DB, id, at string) {
+				t.Helper()
+				_, err := db.Exec(`INSERT INTO bookmarks (id, tenant_id, url, saved_at, source, created_at)
+					VALUES (?, 'local', ?, ?, 'chrome', ?)`, id, "https://example.com/"+id, at, at)
+				require.NoError(t, err)
+			},
+			page: func(db *DB, after store.PageKey, limit int) ([]store.PageKey, error) {
+				rows, err := NewBookmarks(db).List(context.Background(), "local",
+					store.ListBookmarksOpts{Limit: limit, After: after})
+				keys := make([]store.PageKey, len(rows))
+				for i, r := range rows {
+					keys[i] = store.PageKey{At: r.CreatedAt, ID: r.ID}
+				}
+				return keys, err
+			},
+			// created_at never changes, so the change is a new bookmark.
+			change: func(t *testing.T, db *DB, _ string) {
+				t.Helper()
+				require.NoError(t, NewBookmarks(db).Create(context.Background(), &store.Bookmark{TenantID: "local",
+					URL: "https://example.com/new", Source: store.SourceChrome, SavedAt: time.Now().UTC()}))
+			},
+		},
+	}
+}
+
+// walk pages through a list two rows at a time, calling between after each
+// page, and returns every key in the order it came.
+func walk(t *testing.T, l pagedList, db *DB, between func(page int)) []store.PageKey {
+	t.Helper()
+	var all []store.PageKey
+	after := store.PageKey{}
+	for page := 0; ; page++ {
+		keys, err := l.page(db, after, 2)
+		require.NoError(t, err)
+		if len(keys) == 0 {
+			return all
+		}
+		all = append(all, keys...)
+		after = keys[len(keys)-1]
+		between(page)
+		require.Less(t, page, 100, "the walk doesn't end")
+	}
+}
+
+// TestLists_KeysetPagesOverTies: rows sharing one timestamp page in ID
+// order, each exactly once, and a row that changes mid-walk is neither
+// repeated nor makes another row repeat.
+func TestLists_KeysetPagesOverTies(t *testing.T) {
+	const at = "2024-01-01T00:00:00.000Z"
+	ids := []string{"r0", "r1", "r2", "r3", "r4", "r5", "r6"}
+	for _, l := range pagedLists() {
+		t.Run(l.name, func(t *testing.T) {
+			db := newTestDB(t)
+			for _, id := range ids {
+				l.seed(t, db, id, at)
+			}
+
+			got := walk(t, l, db, func(int) {})
+			var gotIDs []string
+			for _, k := range got {
+				gotIDs = append(gotIDs, k.ID)
+				assert.Equal(t, at, formatTime(k.At))
+			}
+			assert.Equal(t, []string{"r6", "r5", "r4", "r3", "r2", "r1", "r0"}, gotIDs,
+				"(timestamp DESC, id DESC), every row once")
+
+			got = walk(t, l, db, func(page int) {
+				if page == 0 {
+					l.change(t, db, "r1")
+				}
+			})
+			seen := map[string]bool{}
+			for _, k := range got {
+				assert.False(t, seen[k.ID], "%s came back twice", k.ID)
+				seen[k.ID] = true
+			}
+			for _, id := range []string{"r6", "r5", "r4", "r3", "r2", "r0"} {
+				assert.True(t, seen[id], "%s was skipped", id)
+			}
+			want := len(ids)
+			if l.changedIsSkipped {
+				want--
+			}
+			assert.Equal(t, !l.changedIsSkipped, seen["r1"])
+			assert.Len(t, seen, want, "nothing created mid-walk comes back either")
+		})
+	}
+}
+
+// TestBookmarks_ListDocumentState: a listed bookmark carries its document's
+// state from the same query, and none when it links to no document.
+func TestBookmarks_ListDocumentState(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	linked := &store.Bookmark{TenantID: "local", URL: "https://example.com/a", Source: store.SourceChrome,
+		SavedAt: time.Now().UTC()}
+	_, err := bms.Ingest(ctx, linked)
+	require.NoError(t, err)
+	require.NoError(t, NewDocuments(db).UpdateState(ctx, *linked.DocumentID, store.DocStateDead))
+	unlinked := &store.Bookmark{TenantID: "local", URL: "https://example.com/b", Source: store.SourceChrome,
+		SavedAt: time.Now().UTC()}
+	require.NoError(t, bms.Create(ctx, unlinked))
+
+	got, err := bms.List(ctx, "local", store.ListBookmarksOpts{})
+	require.NoError(t, err)
+	states := map[string]store.DocState{}
+	for _, b := range got {
+		states[b.ID] = b.DocumentState
+	}
+	assert.Equal(t, map[string]store.DocState{linked.ID: store.DocStateDead, unlinked.ID: ""}, states)
+}

@@ -14,9 +14,14 @@ UI — codegen their request/response types from this spec.
   `request_id` and names the request path in `instance`. The daemon logs
   every 5xx with its request ID, so `curio daemon logs` finds the cause.
   A 404 names what is missing (`document "…" not found`).
-- **Pagination** on list endpoints is cursor-based, not offset:
-  responses include `next_cursor` (opaque string) and an approximate `total`.
-  Clients pass `?cursor=<value>` to fetch the next page.
+- **Pagination** on `GET /v1/bookmarks`, `/v1/documents` and `/v1/jobs` is
+  cursor-based, not offset. A response carries `next_cursor` exactly when
+  another page follows; pass it back as `?cursor=` for that page. Documents
+  and jobs come most recently updated first, bookmarks newest first. Pages
+  never overlap and rows inserted during a walk don't shift it; a row
+  updated mid-walk moves ahead of the cursor and is not revisited. Cursors
+  are opaque and may be invalidated by a daemon upgrade: an invalid one is
+  a 400, and the client starts the walk again. There is no `total`.
 - **Async work** responds `202 Accepted`: `{ job_id }` for single-target
   operations (refetch, reindex, interests rebuild), `{ jobs_enqueued }` for
   the bulk `refetch-all` and `reindex-all`, which have no parent job.

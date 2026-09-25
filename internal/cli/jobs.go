@@ -28,6 +28,7 @@ func newJobsListCmd(env *daemonctl.Env) *cobra.Command {
 		status     string
 		kind       string
 		limit      int
+		cursor     string
 	)
 	cmd := &cobra.Command{
 		Use:   "jobs",
@@ -38,8 +39,14 @@ the audit of work that succeeded. Add --failed to debug failures,
 
 Each row carries the target doc's URL, title, doc_id, and on-disk
 markdown path (when applicable), so jumping to the underlying file
-or running curio refetch is one copy/paste away.`,
+or running curio refetch is one copy/paste away.
+
+Rows come most recently updated first, a page at a time; when more
+follow, the last line is the command that shows the next page.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := checkPageLimit(limit); err != nil {
+				return err
+			}
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
@@ -47,11 +54,14 @@ or running curio refetch is one copy/paste away.`,
 				Status: resolveFilter(status, failedOnly, showAll, "done"),
 				Kind:   kind,
 				Limit:  limit,
+				Cursor: cursor,
 			})
 			if err != nil {
 				return err
 			}
-			renderJobList(cmd.OutOrStdout(), resp)
+			w := cmd.OutOrStdout()
+			renderJobList(w, resp)
+			printNextPage(w, cmd, resp.NextCursor)
 			return nil
 		},
 	}
@@ -59,7 +69,8 @@ or running curio refetch is one copy/paste away.`,
 	cmd.Flags().BoolVar(&showAll, "all", false, "Show every status instead of just done")
 	cmd.Flags().StringVar(&status, "status", "", "pending|running|done|failed (overrides defaults)")
 	cmd.Flags().StringVar(&kind, "kind", "", "fetch|index|import|cluster|summarize")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Max rows to return (server caps at 500)")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Rows per page, 1-500")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "Token from the \"next page:\" line of a previous page")
 	return cmd
 }
 

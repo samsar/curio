@@ -154,25 +154,42 @@ type DocumentListItem struct {
 
 // DocumentListResponse is the body of GET /v1/documents.
 type DocumentListResponse struct {
-	Items []DocumentListItem `json:"items"`
+	Items      []DocumentListItem `json:"items"`
+	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
+// handleListDocuments pages through the tenant's documents, most recently
+// updated first. next_cursor is set exactly when another page follows.
 func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 	state, err := docStateParam(r)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
+	after, err := cursorParam(r)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	limit := listLimit(r)
 	docs, err := d.Documents.ListWithLastError(r.Context(), d.TenantID, store.ListDocumentsOpts{
 		State: state,
-		Limit: listLimit(r),
+		Limit: limit + 1,
+		After: after,
+	})
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	docs, next, err := onePage(docs, limit, func(doc store.DocumentWithError) store.PageKey {
+		return store.PageKey{At: doc.UpdatedAt, ID: doc.ID}
 	})
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
 
-	out := DocumentListResponse{Items: make([]DocumentListItem, 0, len(docs))}
+	out := DocumentListResponse{Items: make([]DocumentListItem, 0, len(docs)), NextCursor: next}
 	for _, doc := range docs {
 		out.Items = append(out.Items, DocumentListItem{
 			ID:           doc.ID,

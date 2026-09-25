@@ -124,7 +124,7 @@ Clusters documents into labeled "interests". The whole algorithm sits behind `in
 ## Conventions to preserve
 
 - The CLI never echoes `tenant_id` to clients; tenant scoping is server-side. Single-tenant local installs hardcode `"local"`.
-- API list endpoints use cursor pagination (`?cursor=...`), not offset. Stable under concurrent writes.
+- API list endpoints use keyset cursor pagination (`?cursor=...` / `next_cursor`), not offset: ordered by `(updated_at|created_at, id)` DESC, with `store.PageKey` in the store and the row-value predicate that the list indexes (which end in `id`) serve. New list queries get a pinned plan in `plans_test.go`.
 - Queued work returns `202`: `{job_id}` for single-target ops (refetch, reindex, interests rebuild), `{jobs_enqueued}` for the bulk refetch-all and reindex-all, which have no parent job. Import is synchronous (`200`) and enqueues fetch jobs. Clients watch `GET /v1/jobs`.
 - Errors over the wire are RFC 7807 (`application/problem+json`).
 - `curio docs` and `curio jobs` default to the happy-path view (`state=fetched`, `status=done`). `--failed`, `--all`, and explicit `--state`/`--status` widen.

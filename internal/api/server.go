@@ -368,7 +368,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) erro
 			"If the client is newer, restart the daemon: run `curio daemon stop`, and the next command starts the current one",
 			field, version.String())
 	}
-	return badRequest("malformed JSON body: %v", err)
+	return badRequest("malformed JSON body: %w", err)
 }
 
 // expectEOF checks that only whitespace follows the decoded value. Reading

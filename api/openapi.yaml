@@ -19,8 +19,11 @@ info:
         what they don't know. Requests are strict: an unknown field is a 400
         that names it and, since it usually means a newer client talking to
         an older daemon, says to restart the daemon.
-      - List endpoints return `{ items: [...], total, next_cursor }`; pagination
-        is cursor-based for stability under writes.
+      - The bookmark, document and job lists return `{ items, next_cursor }`,
+        next_cursor present exactly when another page follows. Pages are
+        keyset-based: they never overlap, inserts don't shift them, and a row
+        updated mid-walk moves ahead of the cursor. Cursors are opaque; one a
+        daemon upgrade invalidated is a 400, and the walk starts again.
       - Long-running operations are asynchronous and answer 202 with a
         `job_id`, or with `jobs_enqueued` for the bulk refetch-all and
         reindex-all, which have no parent job. Watch `GET /v1/jobs`.
@@ -527,7 +530,8 @@ components:
   responses:
     BadRequest:
       description: >
-        A filter parameter outside its enum. Sizing
+        A filter parameter outside its enum, or a cursor this daemon didn't
+        issue. Sizing
         parameters (limit, members, k, window) are never refused: a value
         outside their range means their default.
       content:
@@ -564,8 +568,7 @@ components:
     Cursor:
       type: object
       properties:
-        next_cursor: { type: string, nullable: true }
-        total:       { type: integer, description: "Total matching rows (approximate above 10k)" }
+        next_cursor: { type: string, description: "Present exactly when another page follows; pass it as ?cursor" }
 
     # ---------- system ----------
 

@@ -149,16 +149,19 @@ func (c *Client) CreateBookmark(ctx context.Context, req CreateBookmarkRequest) 
 	return &out, nil
 }
 
+// BookmarkListOpts filters and pages ListBookmarks.
 type BookmarkListOpts struct {
 	Source string
 	Folder string
 	Limit  int
-	Cursor string
+	Cursor string // a previous page's NextCursor
 }
 
+// BookmarkList mirrors api.BookmarkListResponse. NextCursor is empty on the
+// last page.
 type BookmarkList struct {
 	Items      []Bookmark `json:"items"`
-	NextCursor *string    `json:"next_cursor,omitempty"`
+	NextCursor string     `json:"next_cursor,omitempty"`
 }
 
 func (c *Client) ListBookmarks(ctx context.Context, opts BookmarkListOpts) (*BookmarkList, error) {
@@ -320,15 +323,18 @@ type DocumentListItem struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-// DocumentList mirrors api.DocumentListResponse.
+// DocumentList mirrors api.DocumentListResponse. NextCursor is empty on the
+// last page.
 type DocumentList struct {
-	Items []DocumentListItem `json:"items"`
+	Items      []DocumentListItem `json:"items"`
+	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
-// ListDocumentsOpts filters for ListDocuments.
+// ListDocumentsOpts filters and pages ListDocuments.
 type ListDocumentsOpts struct {
-	State string // pending | fetched | failed | dead
-	Limit int
+	State  string // pending | fetched | failed | dead
+	Limit  int
+	Cursor string // a previous page's NextCursor
 }
 
 func (c *Client) ListDocuments(ctx context.Context, opts ListDocumentsOpts) (*DocumentList, error) {
@@ -338,6 +344,9 @@ func (c *Client) ListDocuments(ctx context.Context, opts ListDocumentsOpts) (*Do
 	}
 	if opts.Limit > 0 {
 		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Cursor != "" {
+		q.Set("cursor", opts.Cursor)
 	}
 	path := "/v1/documents"
 	if len(q) > 0 {
@@ -416,11 +425,12 @@ func (c *Client) ReindexAll(ctx context.Context, state string) (*ReindexAllRespo
 	return &out, nil
 }
 
-// JobListOpts filters for ListJobs.
+// JobListOpts filters and pages ListJobs.
 type JobListOpts struct {
 	Status string
 	Kind   string
 	Limit  int
+	Cursor string // a previous page's NextCursor
 }
 
 // Job mirrors api.JobResponse.
@@ -439,9 +449,11 @@ type Job struct {
 	MarkdownPath string          `json:"markdown_path,omitempty"`
 }
 
-// JobList mirrors api.JobListResponse.
+// JobList mirrors api.JobListResponse. NextCursor is empty on the last
+// page.
 type JobList struct {
-	Items []Job `json:"items"`
+	Items      []Job  `json:"items"`
+	NextCursor string `json:"next_cursor,omitempty"`
 }
 
 // DeleteJobsResponse mirrors api.DeleteJobsResponse.
@@ -484,6 +496,9 @@ func (c *Client) ListJobs(ctx context.Context, opts JobListOpts) (*JobList, erro
 	}
 	if opts.Limit > 0 {
 		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Cursor != "" {
+		q.Set("cursor", opts.Cursor)
 	}
 	path := "/v1/jobs"
 	if len(q) > 0 {

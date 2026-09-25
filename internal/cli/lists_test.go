@@ -25,3 +25,16 @@ func TestResolveFilter(t *testing.T) {
 		})
 	}
 }
+
+func TestShellQuote(t *testing.T) {
+	cases := map[string]string{
+		"eyJ0IjoiMjAyNCJ9":        "eyJ0IjoiMjAyNCJ9",
+		"/Users/me/.curio":        "/Users/me/.curio",
+		"/Users/me/My Curio":      "'/Users/me/My Curio'",
+		"it's":                    `'it'\''s'`,
+		"http://127.0.0.1:8765/x": "http://127.0.0.1:8765/x",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, shellQuote(in), in)
+	}
+}

@@ -23,6 +23,7 @@ func newDocsListCmd(env *daemonctl.Env) *cobra.Command {
 		showAll    bool
 		state      string
 		limit      int
+		cursor     string
 	)
 	cmd := &cobra.Command{
 		Use:   "docs",
@@ -37,27 +38,37 @@ targeted it AND the on-disk markdown path (when present), so most
 follow-ups (cat the file, run curio refetch, etc.) don't need
 another lookup.
 
+Rows come most recently updated first, a page at a time; when more
+follow, the last line is the command that shows the next page.
+
 Cross-reference: 'curio jobs --failed' shows the underlying job rows
 with full error messages and attempt counts.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := checkPageLimit(limit); err != nil {
+				return err
+			}
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 			resp, err := env.Client.ListDocuments(cmd.Context(), client.ListDocumentsOpts{
-				State: resolveFilter(state, failedOnly, showAll, "fetched"),
-				Limit: limit,
+				State:  resolveFilter(state, failedOnly, showAll, "fetched"),
+				Limit:  limit,
+				Cursor: cursor,
 			})
 			if err != nil {
 				return err
 			}
-			renderDocList(cmd.OutOrStdout(), resp)
+			w := cmd.OutOrStdout()
+			renderDocList(w, resp)
+			printNextPage(w, cmd, resp.NextCursor)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&failedOnly, "failed", false, "Shortcut for --state=failed")
 	cmd.Flags().BoolVar(&showAll, "all", false, "Show every state instead of just fetched")
 	cmd.Flags().StringVar(&state, "state", "", "pending|fetched|failed|dead (overrides defaults)")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Max rows (server caps at 500)")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Rows per page, 1-500")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "Token from the \"next page:\" line of a previous page")
 	return cmd
 }
 

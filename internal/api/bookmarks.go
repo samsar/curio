@@ -126,10 +126,10 @@ func nonEmpty(s string) *string {
 // BookmarkListResponse mirrors the openapi BookmarkList schema.
 type BookmarkListResponse struct {
 	Items      []BookmarkResponse `json:"items"`
-	NextCursor *string            `json:"next_cursor,omitempty"`
+	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
-// handleListBookmarks pages through the tenant's bookmarks in ID order.
+// handleListBookmarks pages through the tenant's bookmarks, newest first.
 // next_cursor is set exactly when another page follows: the store is asked
 // for one row more than the page holds.
 func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
@@ -139,32 +139,33 @@ func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 		d.writeError(w, r, badRequest("source %q must be one of: %s", source, sourceList))
 		return
 	}
+	after, err := cursorParam(r)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
 	limit := listLimit(r)
 	bms, err := d.Bookmarks.List(r.Context(), d.TenantID, store.ListBookmarksOpts{
 		Source:     source,
 		FolderPath: q.Get("folder"),
-		Cursor:     q.Get("cursor"),
+		After:      after,
 		Limit:      limit + 1,
 	})
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
-
-	var resp BookmarkListResponse
-	if len(bms) > limit {
-		bms = bms[:limit]
-		next := bms[limit-1].ID
-		resp.NextCursor = &next
+	bms, next, err := onePage(bms, limit, func(b store.BookmarkWithState) store.PageKey {
+		return store.PageKey{At: b.CreatedAt, ID: b.ID}
+	})
+	if err != nil {
+		d.writeError(w, r, err)
+		return
 	}
-	resp.Items = make([]BookmarkResponse, 0, len(bms))
+
+	resp := BookmarkListResponse{Items: make([]BookmarkResponse, 0, len(bms)), NextCursor: next}
 	for _, b := range bms {
-		state, err := d.documentState(r.Context(), b)
-		if err != nil {
-			d.writeError(w, r, err)
-			return
-		}
-		resp.Items = append(resp.Items, bookmarkToResponse(b, state))
+		resp.Items = append(resp.Items, bookmarkToResponse(b.Bookmark, string(b.DocumentState)))
 	}
 	d.writeJSON(w, r, http.StatusOK, resp)
 }

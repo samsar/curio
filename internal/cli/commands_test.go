@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -39,6 +40,29 @@ func runCLIAt(t *testing.T, home, daemonURL string, args ...string) (string, err
 	root.SetArgs(append([]string{"--curio-home", home, "--daemon-url", daemonURL}, args...))
 	err := root.Execute()
 	return stdout.String(), err
+}
+
+// nextPage returns the arguments of the "next page:" line out ends with,
+// without the leading "curio".
+func nextPage(t *testing.T, out string) []string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	last := lines[len(lines)-1]
+	hint, ok := strings.CutPrefix(last, "next page: curio ")
+	require.True(t, ok, "the page ends with the next page's command:\n%s", out)
+	return strings.Fields(hint)
+}
+
+// runArgs runs curio with exactly args, as a pasted command line would.
+func runArgs(t *testing.T, args ...string) string {
+	t.Helper()
+	var stdout bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(io.Discard)
+	root.SetArgs(args)
+	require.NoError(t, root.Execute(), "curio %s", strings.Join(args, " "))
+	return stdout.String()
 }
 
 func mustRun(t *testing.T, srv *apitest.Server, args ...string) string {
@@ -137,6 +161,23 @@ func TestDocs(t *testing.T) {
 
 	out = mustRun(t, srv, "docs", "--state", "dead")
 	assert.Contains(t, out, "no documents match")
+	assert.NotContains(t, out, "next page:", "a single page has no next")
+
+	// Paging: the first page ends with the command for the second, which
+	// keeps the filters and the home the first was run with.
+	out = mustRun(t, srv, "docs", "--all", "--limit", "2")
+	assert.Contains(t, out, "2 document(s)")
+	args := nextPage(t, out)
+	assert.Contains(t, args, "--all")
+	assert.Contains(t, args, "--limit=2")
+	assert.Contains(t, args, "--curio-home="+srv.Home.Path)
+	out = runArgs(t, args...)
+	assert.Contains(t, out, "1 document(s)")
+	assert.NotContains(t, out, "next page:")
+	for _, limit := range []string{"0", "501"} {
+		_, err = runCLI(t, srv, "docs", "--limit", limit)
+		require.ErrorContains(t, err, "--limit must be between 1 and 500")
+	}
 	_, err = runCLI(t, srv, "docs", "--state", "archived")
 	require.ErrorContains(t, err, "pending, fetched, failed, dead", "a mistyped state names the valid ones")
 
@@ -186,6 +227,13 @@ func TestJobs(t *testing.T) {
 	out = mustRun(t, srv, "jobs", "--all", "--kind", "cluster")
 	assert.Contains(t, out, "payload: {}")
 	assert.Contains(t, out, "next attempt:")
+
+	out = mustRun(t, srv, "jobs", "--all", "--limit", "2")
+	assert.Contains(t, out, "2 job(s)")
+	out = runArgs(t, nextPage(t, out)...)
+	assert.Contains(t, out, "1 job(s)")
+	_, err = runCLI(t, srv, "jobs", "--limit", "501")
+	require.ErrorContains(t, err, "--limit must be between 1 and 500")
 
 	out = mustRun(t, srv, "jobs", "delete", "--status", "failed")
 	assert.Contains(t, out, "deleted 1 job(s) in status=failed")

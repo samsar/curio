@@ -347,8 +347,8 @@ func (s *Jobs) ListWithDoc(ctx context.Context, tenantID string, opts store.List
 
 // listJobsQuery builds ListWithDoc's query. It walks
 // idx_jobs_tenant_status_updated when filtered by status, and
-// idx_jobs_tenant_updated otherwise, in updated_at order, so it stops at the
-// limit instead of sorting every tenant job.
+// idx_jobs_tenant_updated otherwise, in (updated_at, id) order from
+// opts.After, so it stops at the limit instead of sorting every tenant job.
 func listJobsQuery(tenantID string, opts store.ListJobsOpts) (string, []any) {
 	q := "SELECT " + qualify("j", jobColumns) + ", COALESCE(d.url, '') AS doc_url, " +
 		"COALESCE(d.title, '') AS doc_title, COALESCE(e.markdown_path, '') AS markdown_path " +
@@ -365,7 +365,12 @@ func listJobsQuery(tenantID string, opts store.ListJobsOpts) (string, []any) {
 		q += " AND j.kind = ?"
 		args = append(args, opts.Kind)
 	}
-	q += " ORDER BY j.updated_at DESC LIMIT ?"
+	if !opts.After.IsZero() {
+		pred, predArgs := keysetAfter("j.updated_at", "j.id", opts.After)
+		q += " AND " + pred
+		args = append(args, predArgs...)
+	}
+	q += " ORDER BY j.updated_at DESC, j.id DESC LIMIT ?"
 	return q, append(args, listLimit(opts.Limit))
 }
 
