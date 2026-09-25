@@ -1,10 +1,14 @@
 package insight
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/samsar/curio/internal/generator"
 	"github.com/samsar/curio/internal/textutil"
@@ -48,7 +52,7 @@ func (l *TermLabeler) Label(_ context.Context, info ClusterInfo) (Label, error) 
 	seen := 0
 	for _, title := range info.Titles {
 		for _, tok := range tokenize(title) {
-			if len(tok) < 3 || stopwords[tok] {
+			if utf8.RuneCountInString(tok) < 3 || stopwords[tok] {
 				continue
 			}
 			if _, ok := counts[tok]; !ok {
@@ -69,11 +73,11 @@ func (l *TermLabeler) Label(_ context.Context, info ClusterInfo) (Label, error) 
 	for w, c := range counts {
 		terms = append(terms, term{w, c})
 	}
-	sort.Slice(terms, func(a, b int) bool {
-		if terms[a].count != terms[b].count {
-			return terms[a].count > terms[b].count
+	slices.SortFunc(terms, func(a, b term) int {
+		if c := cmp.Compare(b.count, a.count); c != 0 {
+			return c
 		}
-		return order[terms[a].word] < order[terms[b].word] // earlier-seen first
+		return cmp.Compare(order[a.word], order[b.word]) // earlier-seen first
 	})
 	if len(terms) > l.maxTerms {
 		terms = terms[:l.maxTerms]
@@ -84,6 +88,18 @@ func (l *TermLabeler) Label(_ context.Context, info ClusterInfo) (Label, error) 
 	}
 	return Label{Name: strings.Join(words, " ")}, nil
 }
+
+// ErrUnparseableLabel reports a model reply with no usable NAME field. It is
+// a per-cluster failure: the engine term-labels that cluster but keeps asking
+// the model about the others, unlike a transport or HTTP error.
+var ErrUnparseableLabel = errors.New("unparseable label reply")
+
+// maxLabelNameWords rejects a NAME that is really a sentence; the prompt asks
+// for 2 to 4 words.
+const maxLabelNameWords = 6
+
+// maxReplyExcerptRunes bounds how much of a rejected reply goes into the error.
+const maxReplyExcerptRunes = 120
 
 // LLMLabeler names a cluster with a local generation model. On any error the
 // engine falls back to the deterministic TermLabeler.
@@ -129,20 +145,22 @@ func (l *LLMLabeler) Label(ctx context.Context, info ClusterInfo) (Label, error)
 	if err != nil {
 		return Label{}, err
 	}
-	lab := parseLabel(out)
-	if lab.Name == "" {
-		return Label{}, fmt.Errorf("llm labeler: empty name in response %q", out)
+	lab, err := parseLabel(out)
+	if err != nil {
+		return Label{}, fmt.Errorf("llm labeler: %w in reply %q", err,
+			textutil.TruncateRunes(out, maxReplyExcerptRunes))
 	}
 	return lab, nil
 }
 
 // parseLabel extracts NAME:/SUMMARY: fields from a model response, tolerating
 // leading markdown/bullets and ":", "-", "=", en/em-dash separators (small
-// local models are inconsistent about the exact format). When there's no NAME
-// field it falls back to the first non-empty line, but rejects sentence-like
-// fallbacks — a preamble the model emitted instead of a name — so the engine
-// drops to deterministic term labels rather than persisting junk.
-func parseLabel(s string) Label {
+// local models are inconsistent about the exact format). A reply without an
+// explicit NAME field, or whose NAME reads like a sentence, is rejected with
+// ErrUnparseableLabel: any other line (a preamble, the summary, a bare name)
+// can't be told apart from junk, and a wrong interest name is worse than a
+// deterministic term label.
+func parseLabel(s string) (Label, error) {
 	var lab Label
 	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimLeft(strings.TrimSpace(line), "#*->•· \t")
@@ -153,20 +171,12 @@ func parseLabel(s string) Label {
 		}
 	}
 	if lab.Name == "" {
-		for line := range strings.SplitSeq(s, "\n") {
-			if line = strings.TrimSpace(line); line != "" {
-				lab.Name = cleanLabel(line)
-				break
-			}
-		}
+		return Label{}, fmt.Errorf("%w: no NAME field", ErrUnparseableLabel)
 	}
-	// A real topic name is a few words (the prompt asks for 2-4); a long
-	// fallback is almost always a preamble ("Sure, here is the topic ...").
-	// Drop it so the caller uses the term labeler instead.
-	if len(strings.Fields(lab.Name)) > 6 {
-		lab.Name = ""
+	if n := len(strings.Fields(lab.Name)); n > maxLabelNameWords {
+		return Label{}, fmt.Errorf("%w: NAME has %d words", ErrUnparseableLabel, n)
 	}
-	return lab
+	return lab, nil
 }
 
 // fieldValue reports whether line begins with field followed by a separator
@@ -197,20 +207,21 @@ func cleanLabel(s string) string {
 	return strings.TrimSpace(textutil.TruncateRunes(s, maxLabelRunes))
 }
 
+// tokenize lowercases s and splits it into words of letters and digits in any
+// script. Marks count as word characters too, so a decomposed accent or an
+// Indic vowel sign doesn't split a word.
 func tokenize(s string) []string {
 	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		// Split on any non-alphanumeric rune.
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r)
 	})
 }
 
 func titleCase(s string) string {
-	if s == "" {
+	r, size := utf8.DecodeRuneInString(s)
+	if size == 0 {
 		return s
 	}
-	r := []rune(s)
-	r[0] = []rune(strings.ToUpper(string(r[0])))[0]
-	return string(r)
+	return string(unicode.ToTitle(r)) + s[size:]
 }
 
 // stopwords is a small English + web stopword set for term labeling. Kept local

@@ -1510,6 +1510,15 @@ the engine falls back to deterministic term labels (`TermLabeler`) — so the
 layer still works with zero setup. Set `insight.labeling = "terms"` to force the
 deterministic labeler.
 
+The model's reply must carry an explicit `NAME:` field (case-insensitive;
+`-`, `=`, en/em-dash separators and markdown emphasis are tolerated) of at most
+six words. Anything else — a preamble ("Sure! Here you go:"), a bare line, only
+a `SUMMARY:` — is rejected as `ErrUnparseableLabel` and that one cluster gets a
+term label; guessing a name from some other line used to persist preambles as
+interest names. Term labels split titles on Unicode letters and digits (not
+just ASCII), so accented and CJK titles yield whole words rather than
+fragments like "Montr Caf".
+
 **Storage / lifecycle:** clustering fully recomputes each run. A `cluster_runs`
 row records the attempt (`running` → `done`/`failed`); the current interests are
 the `clusters` of the latest done run, and older runs are pruned (keeping
