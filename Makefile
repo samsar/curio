@@ -21,6 +21,7 @@ export GOTOOLCHAIN := go$(GO_VERSION)
 # or it cannot type-check the standard library it is handed.
 GOLANGCI_LINT_VERSION := v2.12.2
 GOVULNCHECK_VERSION   := v1.8.0
+ACTIONLINT_VERSION    := v1.7.12
 # goose's CLI tracks the library version the migrations run under.
 GOOSE_VERSION         := $(shell awk '$$1 == "github.com/pressly/goose/v3" { print $$2 }' go.mod)
 
@@ -97,6 +98,11 @@ golangci-lint-version:
 .PHONY: vulncheck
 vulncheck:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) -tags=$(GOTAGS) ./...
+
+## actionlint: check the GitHub Actions workflows
+.PHONY: actionlint
+actionlint:
+	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 
 ## fmt: gofmt the tree and tidy go.mod
 .PHONY: fmt

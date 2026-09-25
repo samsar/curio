@@ -3470,3 +3470,49 @@ golangci-lint v2.12.2 binary, built with go1.26.2, cannot load go1.27's
 standard library ("file requires newer Go version go1.27") on a machine
 whose default Go is newer than the directive. With the export it loads the
 directive's standard library everywhere.
+
+---
+
+## Releases: gated on CI, pinned, least privilege
+
+**Decision:** `release.yml` runs `ci.yml` (`workflow_call`) as a `ci` job,
+and the `release` job `needs` it. A tag whose tree fails tidy-check, build,
+vet, the unit or end-to-end tests, vulncheck or lint cannot publish. The
+workflow's token is read-only at the top level; only the `release` job gets
+`contents: write`, and `GITHUB_TOKEN` and `HOMEBREW_TAP_GITHUB_TOKEN` appear
+only in the goreleaser step's environment. The gate job inherits the
+read-only token and sees no secrets.
+
+- Every third-party action is pinned by full commit SHA with its tag in a
+  trailing comment (checkout v7.0.1, setup-go v7.0.0, goreleaser-action
+  v7.2.3, golangci-lint-action v9.3.0; all on node24, which replaces the
+  deprecated node20 runtime). The local reusable workflow is referenced by
+  path, which already means "this commit". goreleaser itself is pinned
+  exactly (v2.18.2) instead of `~> v2`.
+- The release job checks out with `persist-credentials: false` and builds
+  with setup-go's cache off, so the job holding the write token never
+  restores a module cache another run wrote.
+- CI gains a `test-macos` job on macos-14, the release runner:
+  darwin/arm64 is the only platform goreleaser ships and was never built or
+  tested before a tag. It runs `make test` with no artifacts or secrets.
+- The lint job reads its golangci-lint version from the Makefile
+  (`make -s golangci-lint-version`), so the pin lives in one place, and
+  runs actionlint over the workflows.
+- Dependabot opens one grouped PR per week for Go modules and one for
+  actions; for actions it moves the SHA and the tag comment together.
+- goreleaser's `before` hook verifies (`go mod tidy -diff`) instead of
+  running `go mod tidy` on the release checkout.
+
+**Deferred: `brews` → `homebrew_casks`.** `goreleaser check` v2.18.2 exits
+non-zero because `brews` is deprecated, so it is not part of the gate yet.
+Migrating turns the tap's Formula into a Cask, which changes how users
+install and upgrade; that is a distribution decision of its own, not a
+hygiene fix.
+
+**Why:** The release workflow published with a write token and a PAT that
+can push to the tap, on any `v*` tag, with no test, vet, lint or
+vulnerability gate and nothing requiring the tagged commit to have passed
+CI. Every action was a movable tag and goreleaser floated within v2, so the
+code holding those secrets could change without a commit here. Making
+`ci.yml` reusable instead of copying its steps keeps the gate from
+drifting away from what pull requests run.

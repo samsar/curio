@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # One PR per ecosystem per week. The go directive is not Dependabot's to
+  # move: see docs/decisions.md "Toolchain".
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns: ["*"]
+
+  # Updates the pinned SHAs and their tag comments together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
