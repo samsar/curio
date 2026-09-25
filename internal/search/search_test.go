@@ -16,6 +16,7 @@ import (
 
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
 // fakeEmbedder returns canned vectors keyed on input text. Tests control
@@ -41,7 +42,7 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 const dim = 768
 
 func TestEngine_QueryPrefixApplied(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, docIDs := seedCorpus(t, db)
 
 	// The query term matches nothing in BM25, so ranking is driven purely by
@@ -100,7 +101,7 @@ func seedCorpus(t *testing.T, db *sqlitestore.DB) (docs *sqlitestore.Documents, 
 }
 
 func TestEngine_HybridSearch(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 
 	emb := &fakeEmbedder{byText: map[string][]float32{
@@ -121,7 +122,7 @@ func TestEngine_HybridSearch(t *testing.T) {
 func TestEngine_BM25OnlyMatch(t *testing.T) {
 	// When the embedder is "lost" but BM25 has a strong match, the result
 	// still surfaces the right document.
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 
 	emb := &fakeEmbedder{byText: nil} // returns the default far-away vector
@@ -138,7 +139,7 @@ func TestEngine_BM25OnlyMatch(t *testing.T) {
 }
 
 func TestEngine_RequiresQuery(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
 
@@ -147,7 +148,7 @@ func TestEngine_RequiresQuery(t *testing.T) {
 }
 
 func TestEngine_PerHitScoresExposed(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 	emb := &fakeEmbedder{byText: map[string][]float32{"mvcc": filledVec(0.10)}}
 	engine := New(chunks, docs, emb, Config{})
@@ -189,7 +190,7 @@ func TestSanitizeBM25Query(t *testing.T) {
 }
 
 func TestEngine_Related_RanksByProximity(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, docIDs := seedCorpus(t, db)
 
 	// Related needs no embedder — it reads stored vectors. The fake is
@@ -213,7 +214,7 @@ func TestEngine_Related_RanksByProximity(t *testing.T) {
 }
 
 func TestEngine_Related_UnindexedDocIsEmpty(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 
 	// A document with no chunks: create one without indexing it.
@@ -228,7 +229,7 @@ func TestEngine_Related_UnindexedDocIsEmpty(t *testing.T) {
 }
 
 func TestEngine_Related_UnknownDocIsNotFound(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 
 	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
@@ -278,7 +279,7 @@ func TestEngine_DegradesToKeywordResults(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			db := sqlitestore.NewEphemeralDB(t)
+			db := sqlitetest.NewDB(t)
 			docs, chunks, _ := seedCorpus(t, db)
 			var logs bytes.Buffer
 			engine := New(chunks, docs, tc.emb, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
@@ -300,7 +301,7 @@ func TestEngine_DegradesToKeywordResults(t *testing.T) {
 func TestEngine_DegradedWithoutKeywordTerms(t *testing.T) {
 	// Nothing survives BM25 sanitization, so the vector leg was the only
 	// retriever: the result is empty, but still a success with a warning.
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 	engine := New(chunks, docs, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
 
@@ -312,7 +313,7 @@ func TestEngine_DegradedWithoutKeywordTerms(t *testing.T) {
 }
 
 func TestEngine_EmbedTimeoutDegrades(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 	engine := New(chunks, docs, hangingEmbedder(make(chan struct{})), Config{
 		EmbedTimeout: 50 * time.Millisecond,
@@ -330,7 +331,7 @@ func TestEngine_EmbedTimeoutDegrades(t *testing.T) {
 
 func TestEngine_CallerContextEndIsAnError(t *testing.T) {
 	t.Run("canceled", func(t *testing.T) {
-		db := sqlitestore.NewEphemeralDB(t)
+		db := sqlitetest.NewDB(t)
 		docs, chunks, _ := seedCorpus(t, db)
 		entered := make(chan struct{})
 		engine := New(chunks, docs, hangingEmbedder(entered), Config{Log: slog.New(slog.DiscardHandler)})
@@ -346,7 +347,7 @@ func TestEngine_CallerContextEndIsAnError(t *testing.T) {
 		assert.Nil(t, res)
 	})
 	t.Run("deadline", func(t *testing.T) {
-		db := sqlitestore.NewEphemeralDB(t)
+		db := sqlitetest.NewDB(t)
 		docs, chunks, _ := seedCorpus(t, db)
 		engine := New(chunks, docs, hangingEmbedder(make(chan struct{})), Config{Log: slog.New(slog.DiscardHandler)})
 
@@ -380,7 +381,7 @@ func (brokenChunkLookup) GetByIDs(context.Context, []string) ([]*store.Chunk, er
 }
 
 func TestEngine_ChunkLookupFailureKeepsHitsAndIsLogged(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 	var logs bytes.Buffer
 	engine := New(brokenChunkLookup{chunks}, docs, &fakeEmbedder{}, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
@@ -412,7 +413,7 @@ func awaitLeg(ctx context.Context, started <-chan struct{}, leg string) error {
 }
 
 func TestEngine_KeywordFailureIsFatalAndStopsTheVectorLeg(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 	errDisk := errors.New("disk I/O error")
 
@@ -450,7 +451,7 @@ func TestEngine_KeywordFailureIsFatalAndStopsTheVectorLeg(t *testing.T) {
 }
 
 func TestEngine_LegsRunConcurrently(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 
 	// Each leg signals that it started, then waits for the other. Run one
@@ -480,7 +481,7 @@ func TestEngine_LegsRunConcurrently(t *testing.T) {
 }
 
 func TestEngine_FanoutScalesWithK(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
 	chunks := sqlitestore.NewChunks(db, dim)
@@ -502,7 +503,7 @@ func TestEngine_FanoutScalesWithK(t *testing.T) {
 }
 
 func TestEngine_KContract(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
 	engine := New(chunks, docs, &fakeEmbedder{}, Config{DefaultK: 2})
 

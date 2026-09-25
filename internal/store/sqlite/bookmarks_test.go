@@ -13,7 +13,7 @@ import (
 
 func TestBookmarks_TagsForDocument(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	bms := NewBookmarks(db)
 

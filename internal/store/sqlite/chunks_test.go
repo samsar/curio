@@ -56,7 +56,7 @@ func fillVec(v float32) []float32 {
 
 func TestChunks_ReplaceForDocument_FullCycle(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/postgres-internals")
@@ -89,7 +89,7 @@ func TestChunks_ReplaceForDocument_FullCycle(t *testing.T) {
 
 func TestChunks_ReplaceForDocument_IsIdempotent(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/idem")
@@ -119,7 +119,7 @@ func TestChunks_ReplaceForDocument_IsIdempotent(t *testing.T) {
 
 func TestChunks_BM25_FiltersByTenant(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	idsA := seedDocs(t, db, "tenant_a", "https://a.example.com/x")
@@ -140,7 +140,7 @@ func TestChunks_BM25_FiltersByTenant(t *testing.T) {
 
 func TestChunks_Vector_FiltersByTenant(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	idsA := seedDocs(t, db, "tenant_a", "https://a.example.com/v")
@@ -156,7 +156,7 @@ func TestChunks_Vector_FiltersByTenant(t *testing.T) {
 }
 
 func TestChunks_DimensionMismatch(t *testing.T) {
-	ch := NewChunks(NewEphemeralDB(t), vecDim)
+	ch := NewChunks(newTestDB(t), vecDim)
 	err := ch.ReplaceForDocument(context.Background(), "doc", "ext", "", nil,
 		[]store.ChunkInput{{Text: "short", Embedding: []float32{0.1, 0.2, 0.3}}})
 	require.Error(t, err)
@@ -179,7 +179,7 @@ func latestExtractionID(t *testing.T, db *DB, documentID string) string {
 // narrow which documents come back.
 func TestChunks_SearchFilters(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docsStore := NewDocuments(db)
 	exts := NewExtractions(db)
 	bms := NewBookmarks(db)
@@ -252,7 +252,7 @@ func TestChunks_SearchFilters(t *testing.T) {
 
 func TestChunks_EmbeddingsForDocument_RoundTrip(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/roundtrip")
@@ -280,7 +280,7 @@ func TestChunks_EmbeddingsForDocument_RoundTrip(t *testing.T) {
 
 func TestChunks_EmbeddingsForDocument_EmptyForUnindexed(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/unindexed")
@@ -291,7 +291,7 @@ func TestChunks_EmbeddingsForDocument_EmptyForUnindexed(t *testing.T) {
 
 func TestChunks_VectorSearch_ExcludeDocument(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	ch := NewChunks(db, vecDim)
 
 	ids := seedDocs(t, db, "local", "https://example.com/self", "https://example.com/other")

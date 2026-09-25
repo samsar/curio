@@ -30,13 +30,13 @@ func TestOpenAndMigrate(t *testing.T) {
 }
 
 func TestMigrate_Idempotent(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	// Running migrations again should be a no-op.
 	require.NoError(t, Migrate(db))
 }
 
 func TestPragmasApplied(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 
 	// foreign_keys is per-connection; query it from a pooled conn.
 	var fk int
@@ -49,7 +49,7 @@ func TestPragmasApplied(t *testing.T) {
 }
 
 func TestSqliteVecLoaded(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 
 	// vec_version() is provided by sqlite-vec. If the extension didn't
 	// load, this query fails.
@@ -59,7 +59,7 @@ func TestSqliteVecLoaded(t *testing.T) {
 }
 
 func TestChunksVecTableExists(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 
 	// The migration creates chunks_vec; verify it's queryable.
 	rows, err := db.Query(`SELECT count(*) FROM chunks_vec`)

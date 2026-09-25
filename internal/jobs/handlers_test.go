@@ -18,6 +18,7 @@ import (
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
 // --- fakes ---
@@ -58,7 +59,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 	home, err := curiohome.Init(homeDir, "fake", 768)
 	require.NoError(t, err)
 
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
@@ -402,7 +403,7 @@ func TestWorker_DeadLinkMarksDocDead(t *testing.T) {
 }
 
 func TestWorker_PermanentFailureDoesNotRetry(t *testing.T) {
-	q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
+	q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
 	q.MaxAttempts = 5
 
 	ctx := context.Background()

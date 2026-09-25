@@ -17,6 +17,7 @@ import (
 
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
 var quietLog = slog.New(slog.DiscardHandler)
@@ -61,7 +62,7 @@ func statusIs(status string) func(*store.Job) bool {
 // shutdown has begun still gets its success recorded, so the row isn't left
 // running and the job isn't run again on the next start.
 func TestWorker_JobFinishedDuringShutdownIsDone(t *testing.T) {
-	q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
+	q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
 	job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}
 	require.NoError(t, q.Enqueue(context.Background(), job))
 
@@ -154,7 +155,7 @@ func TestWorker_JobInterruptedByShutdownIsRequeued(t *testing.T) {
 // TestWorker_RetryableFailureConsumesAttempt pins the live-context path: a
 // retryable error backs off with the attempt spent and no hook.
 func TestWorker_RetryableFailureConsumesAttempt(t *testing.T) {
-	q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
+	q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
 	job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}
 	require.NoError(t, q.Enqueue(context.Background(), job))
 
@@ -206,7 +207,7 @@ func TestWorker_PanicIsContained(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
+			q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
 			ctx := context.Background()
 			bad := &store.Job{TenantID: "local", Kind: store.JobKindSummarize, Payload: json.RawMessage(`{"bad":true}`)}
 			good := &store.Job{TenantID: "local", Kind: store.JobKindSummarize, Payload: json.RawMessage(`{"bad":false}`)}

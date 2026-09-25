@@ -17,6 +17,7 @@ import (
 
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
 const tenant = "local"
@@ -81,7 +82,7 @@ type engineFixture struct {
 
 func newEngineFixture(t *testing.T, sizes ...int) *engineFixture {
 	t.Helper()
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs := sqlitestore.NewDocuments(db)
 	f := &engineFixture{
 		docs:    &faultyDocs{DocumentStore: docs, fail: map[string]error{}},

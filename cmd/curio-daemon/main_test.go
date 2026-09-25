@@ -23,6 +23,7 @@ import (
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
 func TestMain(m *testing.M) {
@@ -190,7 +191,7 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 // TestDrain: shutdown waits for the workers up to the grace period, then
 // gives up on them and names the jobs still running.
 func TestDrain(t *testing.T) {
-	q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
+	q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
 	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch}
 	require.NoError(t, q.Enqueue(context.Background(), job))
 
@@ -240,7 +241,7 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 	cfg.Generation.AutoPull = false
 	cfg.Insight.CenterVectors = false
 
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	docs := sqlitestore.NewDocuments(db)
 	insights := sqlitestore.NewInsights(db)
 	chunks := &docVectors{}

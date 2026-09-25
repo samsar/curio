@@ -21,7 +21,7 @@ import (
 
 func TestDocuments_UpsertAndGet(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 
 	d := &store.Document{
@@ -42,7 +42,7 @@ func TestDocuments_UpsertAndGet(t *testing.T) {
 
 func TestDocuments_UpsertIsIdempotentOnURL(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 
 	d1 := &store.Document{TenantID: "local", URL: "https://x.com/", ContentType: store.ContentTypeArticle}
@@ -62,14 +62,14 @@ func TestDocuments_UpsertIsIdempotentOnURL(t *testing.T) {
 }
 
 func TestDocuments_GetByID_NotFound(t *testing.T) {
-	docs := NewDocuments(NewEphemeralDB(t))
+	docs := NewDocuments(newTestDB(t))
 	_, err := docs.GetByID(context.Background(), uuid.NewString())
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 func TestDocuments_UpdateState(t *testing.T) {
 	ctx := context.Background()
-	docs := NewDocuments(NewEphemeralDB(t))
+	docs := NewDocuments(newTestDB(t))
 	d := &store.Document{TenantID: "local", URL: "https://example.com/y", ContentType: store.ContentTypeArticle}
 	require.NoError(t, docs.Upsert(ctx, d))
 
@@ -79,7 +79,7 @@ func TestDocuments_UpdateState(t *testing.T) {
 }
 
 func TestDocuments_UpdateState_Missing(t *testing.T) {
-	docs := NewDocuments(NewEphemeralDB(t))
+	docs := NewDocuments(newTestDB(t))
 	err := docs.UpdateState(context.Background(), uuid.NewString(), store.DocStateFetched)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
@@ -88,7 +88,7 @@ func TestDocuments_UpdateState_Missing(t *testing.T) {
 
 func TestExtractions_CreateAndList(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	exts := NewExtractions(db)
 
@@ -125,7 +125,7 @@ func TestExtractions_CreateAndList(t *testing.T) {
 
 func TestDocuments_SetCurrentExtractionTriggerEnforced(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 
 	d := &store.Document{TenantID: "local", URL: "https://example.com/trig", ContentType: store.ContentTypeArticle}
@@ -141,7 +141,7 @@ func TestDocuments_SetCurrentExtractionTriggerEnforced(t *testing.T) {
 
 func TestBookmarks_CRUD(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	bms := NewBookmarks(db)
 
 	folder := "/Tech/AI"
@@ -166,7 +166,7 @@ func TestBookmarks_CRUD(t *testing.T) {
 
 func TestBookmarks_UniqueConflict(t *testing.T) {
 	ctx := context.Background()
-	bms := NewBookmarks(NewEphemeralDB(t))
+	bms := NewBookmarks(newTestDB(t))
 
 	make := func() *store.Bookmark {
 		return &store.Bookmark{
@@ -181,7 +181,7 @@ func TestBookmarks_UniqueConflict(t *testing.T) {
 
 func TestBookmarks_ListFilters(t *testing.T) {
 	ctx := context.Background()
-	bms := NewBookmarks(NewEphemeralDB(t))
+	bms := NewBookmarks(newTestDB(t))
 
 	mkAt := time.Now().UTC()
 	for i, src := range []string{store.SourceChrome, store.SourceChrome, store.SourceSafari} {
@@ -202,7 +202,7 @@ func TestBookmarks_ListFilters(t *testing.T) {
 
 func TestBookmarks_LinkDocument(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	bms := NewBookmarks(db)
 	docs := NewDocuments(db)
 
@@ -222,7 +222,7 @@ func TestBookmarks_LinkDocument(t *testing.T) {
 
 func TestJobs_EnqueueClaimDone(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
 	j := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: json.RawMessage(`{"url":"x"}`)}
 	require.NoError(t, q.Enqueue(ctx, j))
@@ -240,7 +240,7 @@ func TestJobs_EnqueueClaimDone(t *testing.T) {
 
 func TestJobs_ClaimNext_FiltersByKind(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
 	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
 	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindIndex}))
@@ -252,14 +252,14 @@ func TestJobs_ClaimNext_FiltersByKind(t *testing.T) {
 }
 
 func TestJobs_ClaimNext_NoneRunnable(t *testing.T) {
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 	_, err := q.ClaimNext(context.Background(), nil)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 func TestJobs_ClaimNext_RespectsRunAfter(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
 	future := time.Now().UTC().Add(time.Hour)
 	require.NoError(t, q.Enqueue(ctx, &store.Job{
@@ -271,7 +271,7 @@ func TestJobs_ClaimNext_RespectsRunAfter(t *testing.T) {
 
 func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	q := NewJobs(db)
 	q.MaxAttempts = 2 // make exhaustion fast
 
@@ -308,43 +308,52 @@ func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 // be claimed by exactly one worker.
 func TestJobs_ClaimNext_ConcurrentClaimOnce(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
 	const nJobs = 20
 	for i := 0; i < nJobs; i++ {
 		require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
 	}
 
+	// Workers report errors instead of asserting: require's FailNow must run
+	// on the test goroutine.
 	const nWorkers = 8
 	var (
 		wg      sync.WaitGroup
 		claimed sync.Map
 		dups    atomic.Int32
 		empties atomic.Int32
+		errs    = make(chan error, nWorkers)
 	)
-	for w := 0; w < nWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range nWorkers {
+		wg.Go(func() {
 			for {
 				j, err := q.ClaimNext(ctx, nil)
 				if errors.Is(err, store.ErrNotFound) {
 					empties.Add(1)
 					return
 				}
-				require.NoError(t, err)
+				if err != nil {
+					errs <- err
+					return
+				}
 				if _, loaded := claimed.LoadOrStore(j.ID, true); loaded {
 					dups.Add(1)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
+	close(errs)
 
+	for err := range errs {
+		assert.NoError(t, err, "claim")
+	}
 	got := 0
 	claimed.Range(func(_, _ any) bool { got++; return true })
 	assert.Equal(t, nJobs, got, "all jobs should be claimed exactly once")
 	assert.Zero(t, dups.Load(), "no duplicate claims")
+	assert.EqualValues(t, nWorkers, empties.Load(), "every worker stopped on an empty queue")
 }
 
 // enqueueWithStatus inserts a job directly in the given status, as if it had
@@ -365,7 +374,7 @@ func startedAt(t *testing.T, db *DB, id string) sql.NullString {
 
 func TestJobs_Requeue(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	q := NewJobs(db)
 
 	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
@@ -391,7 +400,7 @@ func TestJobs_Requeue(t *testing.T) {
 
 func TestJobs_Requeue_NeverBelowZeroAttempts(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 	j := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusRunning, 0)
 
 	require.NoError(t, q.Requeue(ctx, j.ID))
@@ -414,7 +423,7 @@ func TestJobs_TransitionsRequireRunning(t *testing.T) {
 	for name, transition := range transitions {
 		t.Run(name, func(t *testing.T) {
 			for _, status := range []string{store.JobStatusPending, store.JobStatusDone, store.JobStatusFailed} {
-				q := NewJobs(NewEphemeralDB(t))
+				q := NewJobs(newTestDB(t))
 				j := enqueueWithStatus(t, q, store.JobKindFetch, status, 1)
 
 				err := transition(q, j.ID)
@@ -427,7 +436,7 @@ func TestJobs_TransitionsRequireRunning(t *testing.T) {
 				assert.Nil(t, got.LastError)
 			}
 
-			q := NewJobs(NewEphemeralDB(t))
+			q := NewJobs(newTestDB(t))
 			assert.ErrorIs(t, transition(q, uuid.NewString()), store.ErrNotFound)
 		})
 	}
@@ -435,7 +444,7 @@ func TestJobs_TransitionsRequireRunning(t *testing.T) {
 
 func TestJobs_RecoverOrphans(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	q := NewJobs(db)
 	q.MaxAttempts = 3
 
@@ -477,7 +486,7 @@ func TestJobs_RecoverOrphans(t *testing.T) {
 }
 
 func TestJobs_RecoverOrphans_RequiresKinds(t *testing.T) {
-	_, _, err := NewJobs(NewEphemeralDB(t)).RecoverOrphans(context.Background(), nil)
+	_, _, err := NewJobs(newTestDB(t)).RecoverOrphans(context.Background(), nil)
 	assert.Error(t, err)
 }
 
@@ -488,7 +497,7 @@ func TestJobs_RecoverOrphans_RequiresKinds(t *testing.T) {
 // document in pending with nothing left to move it on.
 func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	q := NewJobs(db)
 	docs := NewDocuments(db)
 
@@ -523,7 +532,7 @@ func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 
 func TestJobs_DeleteByStatus_FinishedOnly(t *testing.T) {
 	ctx := context.Background()
-	q := NewJobs(NewEphemeralDB(t))
+	q := NewJobs(newTestDB(t))
 
 	byStatus := map[string]*store.Job{}
 	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
@@ -598,7 +607,7 @@ func countRows(t *testing.T, db *DB, table string) int {
 
 func TestDocuments_RequeueFetch(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs, q := NewDocuments(db), NewJobs(db)
 	d := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
 
@@ -618,7 +627,7 @@ func TestDocuments_RequeueFetch(t *testing.T) {
 }
 
 func TestDocuments_RequeueFetch_NotFound(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs"}
 	require.NoError(t, docs.Upsert(context.Background(), other))
@@ -632,7 +641,7 @@ func TestDocuments_RequeueFetch_NotFound(t *testing.T) {
 }
 
 func TestDocuments_RequeueFetch_Atomic(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	d := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
 	failJobInserts(t, db)
@@ -645,7 +654,7 @@ func TestDocuments_RequeueFetch_Atomic(t *testing.T) {
 
 func TestDocuments_RequeueFetchByStates(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs, q := NewDocuments(db), NewJobs(db)
 	byState := map[string]*store.Document{}
 	for _, st := range []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
@@ -678,7 +687,7 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 }
 
 func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	a := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
 	b := seedDoc(t, docs, "https://example.com/b", store.DocStateFetched)

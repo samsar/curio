@@ -22,6 +22,7 @@ import (
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
 // testServer runs the full router from NewServer on a real loopback listener
@@ -36,7 +37,7 @@ type testServer struct {
 // newTestServer starts the server; each option adjusts its Deps first.
 func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	t.Helper()
-	db := sqlite.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
 	require.NoError(t, err)
 

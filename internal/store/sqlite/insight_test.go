@@ -12,7 +12,7 @@ import (
 
 func TestInsights_RoundTrip(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	ins := NewInsights(db)
 
@@ -89,7 +89,7 @@ func TestInsights_RoundTrip(t *testing.T) {
 
 func TestChunks_DocumentVectors(t *testing.T) {
 	ctx := context.Background()
-	db := NewEphemeralDB(t)
+	db := newTestDB(t)
 	docs := NewDocuments(db)
 	ch := NewChunks(db, vecDim)
 
