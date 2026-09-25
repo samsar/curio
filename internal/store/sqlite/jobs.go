@@ -96,16 +96,16 @@ func insertJob(ctx context.Context, q rowQuerier, j *store.Job) error {
 func (s *Jobs) ClaimNext(ctx context.Context, kinds []store.JobKind) (*store.Job, error) {
 	now := formatTime(time.Now().UTC())
 
-	// args: 2 for the SET clause (status, started_at), 2 for the SELECT
-	// predicate (status, run_after), then the optional kinds.
-	args := []any{store.JobStatusRunning, now, store.JobStatusPending, now}
+	// args: 3 for the SET clause (status, started_at, updated_at), 2 for the
+	// SELECT predicate (status, run_after), then the optional kinds.
+	args := []any{store.JobStatusRunning, now, now, store.JobStatusPending, now}
 	kindSQL := ""
 	if len(kinds) > 0 {
 		kindSQL = " AND kind IN (" + placeholders(len(kinds)) + ")"
 		args = appendArgs(args, kinds)
 	}
 
-	q := `UPDATE jobs SET status = ?, started_at = ?, attempts = attempts + 1
+	q := `UPDATE jobs SET status = ?, started_at = ?, updated_at = ?, attempts = attempts + 1
 	      WHERE id = (
 	          SELECT id FROM jobs
 	          WHERE status = ? AND run_after <= ?` + kindSQL + `
@@ -126,7 +126,7 @@ func (s *Jobs) ClaimNext(ctx context.Context, kinds []store.JobKind) (*store.Job
 
 func (s *Jobs) MarkDone(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
+		`UPDATE jobs SET status = ?, updated_at = `+sqlNow+` WHERE id = ? AND status = ?`,
 		store.JobStatusDone, id, store.JobStatusRunning)
 	if err != nil {
 		return fmt.Errorf("mark done: %w", err)
@@ -155,13 +155,16 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (b
 		if backoff > time.Hour {
 			backoff = time.Hour
 		}
-		runAfter := time.Now().UTC().Add(backoff)
+		now := time.Now().UTC()
 		res, err = s.db.ExecContext(ctx, `
-			UPDATE jobs SET status = ?, last_error = ?, run_after = ? WHERE id = ? AND status = ?`,
-			store.JobStatusPending, errMsg, formatTime(runAfter), id, store.JobStatusRunning)
+			UPDATE jobs SET status = ?, last_error = ?, run_after = ?, updated_at = ?
+			WHERE id = ? AND status = ?`,
+			store.JobStatusPending, errMsg, formatTime(now.Add(backoff)), formatTime(now),
+			id, store.JobStatusRunning)
 	} else {
 		res, err = s.db.ExecContext(ctx, `
-			UPDATE jobs SET status = ?, last_error = ? WHERE id = ? AND status = ?`,
+			UPDATE jobs SET status = ?, last_error = ?, updated_at = `+sqlNow+`
+			WHERE id = ? AND status = ?`,
 			store.JobStatusFailed, errMsg, id, store.JobStatusRunning)
 	}
 	if err != nil {
@@ -174,10 +177,12 @@ func (s *Jobs) MarkFailed(ctx context.Context, id, errMsg string, retry bool) (b
 }
 
 func (s *Jobs) Requeue(ctx context.Context, id string) error {
+	now := formatTime(time.Now().UTC())
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE jobs SET status = ?, attempts = max(attempts - 1, 0), started_at = NULL, run_after = ?
+		UPDATE jobs SET status = ?, attempts = max(attempts - 1, 0), started_at = NULL,
+		                run_after = ?, updated_at = ?
 		WHERE id = ? AND status = ?`,
-		store.JobStatusPending, formatTime(time.Now().UTC()), id, store.JobStatusRunning)
+		store.JobStatusPending, now, now, id, store.JobStatusRunning)
 	if err != nil {
 		return fmt.Errorf("requeue job: %w", err)
 	}
@@ -203,10 +208,11 @@ func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*st
 	// transaction takes the write lock outright instead of upgrading from a
 	// read lock (see decisions.md "Job queue claim via atomic UPDATE ...
 	// RETURNING").
-	failedArgs := appendArgs([]any{store.JobStatusFailed, orphanExhaustedError,
+	now := formatTime(time.Now().UTC())
+	failedArgs := appendArgs([]any{store.JobStatusFailed, orphanExhaustedError, now,
 		store.JobStatusRunning, s.MaxAttempts}, kinds)
 	rows, err := tx.QueryContext(ctx, `
-		UPDATE jobs SET status = ?, last_error = ?
+		UPDATE jobs SET status = ?, last_error = ?, updated_at = ?
 		WHERE status = ? AND attempts >= ? AND `+kindSQL+`
 		RETURNING `+jobColumns, failedArgs...)
 	if err != nil {
@@ -218,10 +224,10 @@ func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*st
 		return nil, 0, fmt.Errorf("fail exhausted orphans: %w", err)
 	}
 
-	requeueArgs := appendArgs([]any{store.JobStatusPending, formatTime(time.Now().UTC()),
+	requeueArgs := appendArgs([]any{store.JobStatusPending, now, now,
 		store.JobStatusRunning}, kinds)
 	res, err := tx.ExecContext(ctx, `
-		UPDATE jobs SET status = ?, started_at = NULL, run_after = ?
+		UPDATE jobs SET status = ?, started_at = NULL, run_after = ?, updated_at = ?
 		WHERE status = ? AND `+kindSQL, requeueArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("requeue orphans: %w", err)
@@ -407,10 +413,9 @@ func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.D
 
 	// Layer in-flight info on top via a second cheap query. "Running"
 	// rows aren't bounded by the window — they're "right now."
-	// "Oldest running" is the time since started_at, not updated_at,
-	// because updated_at isn't touched once the job goes running (the
-	// trigger fires on UPDATE but ClaimNext is the only writer that
-	// gets it there). started_at is the truthful "running since" time.
+	// "Oldest running" is the time since started_at, which ClaimNext sets,
+	// the truthful "running since" time. updated_at is the fallback for
+	// rows from before migration 003 added started_at.
 	const inflightQ = `
 	SELECT kind,
 	       count(*) AS running,

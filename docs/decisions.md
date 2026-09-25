@@ -2738,3 +2738,25 @@ with no extraction fails permanently, and the permanent-failure hook then
 marks the document failed. So `curio reindex --all --state=pending` turned
 documents whose first fetch was still in flight into failed ones.
 Single-document reindex already refused such a document with 409.
+
+---
+
+## updated_at: written by each statement, not by triggers
+
+**Decision:** Every UPDATE sets `updated_at` in the same statement:
+`updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')` (the `sqlNow`
+fragment in `internal/store/sqlite`, the expression the column DEFAULTs
+use), or the formatted Go time the statement already binds for another
+column (`ClaimNext`, `Requeue`, `RecoverOrphans`, `MarkFailed`'s retry).
+Migration 006 drops the `trg_*_updated_at` triggers on documents,
+bookmarks, jobs, cluster_runs and clusters; its Down recreates them
+verbatim.
+
+**Why:** Each AFTER UPDATE trigger ran a second UPDATE of the row, so every
+one-row write cost two (`total_changes()` moved by 2). Worse, RETURNING
+reports the row as the statement left it, before the trigger runs:
+`ClaimNext` handed back the enqueue time as `UpdatedAt` while the stored
+row had the claim time, and so did every job `RecoverOrphans` returned.
+The triggers also made `updated_at` impossible to pin in a test, which is
+why several tests inserted rows by hand and one comment claimed the claim
+was the last write to touch it.

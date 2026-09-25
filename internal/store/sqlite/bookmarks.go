@@ -263,7 +263,7 @@ func (s *Bookmarks) Delete(ctx context.Context, id string) error {
 
 func (s *Bookmarks) LinkDocument(ctx context.Context, bookmarkID, documentID string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE bookmarks SET document_id = ? WHERE id = ?`,
+		`UPDATE bookmarks SET document_id = ?, updated_at = `+sqlNow+` WHERE id = ?`,
 		documentID, bookmarkID)
 	if err != nil {
 		return fmt.Errorf("link bookmark: %w", err)

@@ -293,8 +293,9 @@ func TestRebuildRecipe_GuardAbortsBrokenRebuild(t *testing.T) {
 	require.NoError(t, poisoned.Close())
 }
 
-// TestMigration002_UpgradesLinkedBookmarks runs the real 002 through Migrate,
-// as the daemon does, on a v1 database whose bookmarks reference documents.
+// TestMigration002_UpgradesLinkedBookmarks runs the real 002 on a v1
+// database whose bookmarks reference documents, then the rest through
+// Migrate, as the daemon does.
 func TestMigration002_UpgradesLinkedBookmarks(t *testing.T) {
 	ctx := context.Background()
 	db, _ := openUnmigrated(t)
@@ -310,6 +311,17 @@ func TestMigration002_UpgradesLinkedBookmarks(t *testing.T) {
 			('b2', 'local', 'd2', 'https://example.com/2', '2024-01-01T00:00:00.000Z', 'safari'),
 			('b3', 'local', NULL, 'https://example.com/3', '2024-01-01T00:00:00.000Z', 'manual');`)
 	require.NoError(t, err)
+
+	_, err = p.UpTo(ctx, 2)
+	require.NoError(t, err)
+	// 002 recreates what DROP TABLE took with it. Later migrations drop the
+	// trigger, so it is checked here.
+	for _, name := range []string{"idx_bookmarks_tenant_source", "idx_bookmarks_document",
+		"idx_bookmarks_folder", "trg_bookmarks_updated_at"} {
+		var n int
+		require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = ?`, name).Scan(&n))
+		assert.Equal(t, 1, n, name)
+	}
 
 	_, err = Migrate(ctx, db)
 	require.NoError(t, err)
@@ -340,12 +352,6 @@ func TestMigration002_UpgradesLinkedBookmarks(t *testing.T) {
 	require.NoError(t, bms.Create(ctx, &store.Bookmark{TenantID: "local", URL: "https://example.com/4",
 		Source: store.SourceHTML, SavedAt: time.Now().UTC()}), "source=html is accepted after 002")
 
-	for _, name := range []string{"idx_bookmarks_tenant_source", "idx_bookmarks_document",
-		"idx_bookmarks_folder", "trg_bookmarks_updated_at"} {
-		var n int
-		require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = ?`, name).Scan(&n))
-		assert.Equal(t, 1, n, name)
-	}
 	assertForeignKeysOnEverywhere(t, db)
 
 	_, err = p.DownTo(ctx, 1)
@@ -391,4 +397,70 @@ func TestMigration005_DropsSchemaVersion(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.QueryRow(`SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&version))
 	assert.Equal(t, 1, version)
+}
+
+// dumpRows reads every row query returns, as the driver hands the values
+// back, for comparing a table before and after a migration.
+func dumpRows(t *testing.T, db *DB, query string) [][]any {
+	t.Helper()
+	rows, err := db.Query(query)
+	require.NoError(t, err)
+	defer rows.Close()
+	cols, err := rows.Columns()
+	require.NoError(t, err)
+	var out [][]any
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		require.NoError(t, rows.Scan(ptrs...))
+		out = append(out, vals)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// TestMigration006_DropsUpdatedAtTriggers: the triggers go, the rows stay
+// as they were, and an UPDATE no longer rewrites updated_at behind the
+// statement's back. Down recreates the triggers exactly.
+func TestMigration006_DropsUpdatedAtTriggers(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 5)
+	const old = "2024-01-01T00:00:00.000Z"
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, updated_at) VALUES ('d1', 'local', 'https://example.com/1', '` + old + `');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, saved_at, source, updated_at)
+			VALUES ('b1', 'local', 'd1', 'https://example.com/1', '` + old + `', 'chrome', '` + old + `');
+		INSERT INTO jobs (id, tenant_id, kind, payload, status, updated_at)
+			VALUES ('j1', 'local', 'fetch', '{"document_id":"d1"}', 'done', '` + old + `');
+		INSERT INTO cluster_runs (id, tenant_id, algo, updated_at) VALUES ('r1', 'local', 'knn-graph', '` + old + `');
+		INSERT INTO clusters (id, tenant_id, run_id, label, updated_at) VALUES ('c1', 'local', 'r1', 'x', '` + old + `');`)
+	require.NoError(t, err)
+
+	tables := []string{"documents", "bookmarks", "jobs", "cluster_runs", "clusters"}
+	const triggersQ = `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg%updated_at' ORDER BY name`
+	triggers := dumpRows(t, db, triggersQ)
+	require.Len(t, triggers, len(tables))
+	before := map[string][][]any{}
+	for _, table := range tables {
+		before[table] = dumpRows(t, db, `SELECT * FROM `+table)
+	}
+
+	_, err = p.UpTo(ctx, 6)
+	require.NoError(t, err)
+	assert.Empty(t, dumpRows(t, db, triggersQ))
+	for _, table := range tables {
+		assert.Equal(t, before[table], dumpRows(t, db, `SELECT * FROM `+table), table)
+	}
+	_, err = db.Exec(`UPDATE jobs SET status = 'failed' WHERE id = 'j1'`)
+	require.NoError(t, err)
+	var updatedAt string
+	require.NoError(t, db.QueryRow(`SELECT updated_at FROM jobs WHERE id = 'j1'`).Scan(&updatedAt))
+	assert.Equal(t, old, updatedAt, "only the statement writes updated_at")
+
+	_, err = p.DownTo(ctx, 5)
+	require.NoError(t, err)
+	assert.Equal(t, triggers, dumpRows(t, db, triggersQ))
 }

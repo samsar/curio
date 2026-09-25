@@ -11,6 +11,12 @@ import (
 // output. Used to parse and emit timestamps everywhere.
 const timeFormat = "2006-01-02T15:04:05.000Z"
 
+// sqlNow is the current time in timeFormat, the expression the schema's
+// DEFAULTs use. No trigger maintains updated_at, so every UPDATE sets it in
+// the same statement: with this, or by binding formatTime of the time the
+// statement already binds for another column.
+const sqlNow = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`
+
 // formatTime turns a Go time.Time into the canonical TEXT format.
 func formatTime(t time.Time) string {
 	return t.UTC().Format(timeFormat)

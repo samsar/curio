@@ -568,14 +568,16 @@ func TestJobs_RecoverOrphans_RequiresKinds(t *testing.T) {
 
 // ---------- retention ----------
 
-// TestJobs_PruneOlderThan_KeepsLiveWork: pruning removes finished jobs only.
-// A pending or running job is work in flight; deleting it would strand its
-// document in pending with nothing left to move it on.
+// TestJobs_PruneOlderThan_KeepsLiveWork: pruning removes finished jobs last
+// updated before the cutoff. A pending or running job is work in flight,
+// however old; deleting it would strand its document in pending with
+// nothing left to move it on.
 func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 	q := NewJobs(db)
 	docs := NewDocuments(db)
+	cutoff := time.Now().UTC().Add(-time.Hour)
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/queued"}
 	require.NoError(t, docs.Create(ctx, doc))
@@ -583,23 +585,37 @@ func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 		Payload: json.RawMessage(`{"document_id":"` + doc.ID + `"}`)}
 	require.NoError(t, q.Enqueue(ctx, queued))
 
-	byStatus := map[store.JobStatus]*store.Job{}
+	type job struct {
+		status store.JobStatus
+		old    bool
+	}
+	byJob := map[job]*store.Job{}
 	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
-		byStatus[status] = enqueueWithStatus(t, q, store.JobKindIndex, status, 1)
+		for _, old := range []bool{true, false} {
+			byJob[job{status, old}] = enqueueWithStatus(t, q, store.JobKindIndex, status, 1)
+		}
+	}
+	backdate := func(id string) {
+		_, err := db.Exec(`UPDATE jobs SET updated_at = ? WHERE id = ?`, formatTime(cutoff.Add(-time.Minute)), id)
+		require.NoError(t, err)
+	}
+	backdate(queued.ID)
+	for key, j := range byJob {
+		if key.old {
+			backdate(j.ID)
+		}
 	}
 
-	// A cutoff in the future makes every row "old": updated_at can't be
-	// backdated, the AFTER UPDATE trigger resets it.
-	n, err := q.PruneOlderThan(ctx, "local", time.Now().Add(time.Hour))
+	n, err := q.PruneOlderThan(ctx, "local", cutoff)
 	require.NoError(t, err)
 	assert.EqualValues(t, 2, n)
 
-	for status, j := range byStatus {
+	for key, j := range byJob {
 		_, err := q.GetByID(ctx, j.ID)
-		if status.IsFinished() {
-			assert.ErrorIs(t, err, store.ErrNotFound, status)
+		if key.old && key.status.IsFinished() {
+			assert.ErrorIs(t, err, store.ErrNotFound, "%+v", key)
 		} else {
-			assert.NoError(t, err, status)
+			assert.NoError(t, err, "%+v", key)
 		}
 	}
 	_, err = q.GetByID(ctx, queued.ID)

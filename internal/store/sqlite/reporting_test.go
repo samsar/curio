@@ -14,8 +14,8 @@ import (
 )
 
 // The listing, count and metrics queries behind the debug endpoints. Rows are
-// inserted directly where a test needs to pin updated_at or started_at: the
-// AFTER UPDATE triggers reset updated_at on every write through the stores.
+// written with raw SQL where a test needs to pin updated_at or started_at:
+// every UPDATE through the stores sets updated_at to now.
 
 // insertDoc inserts a document with the given state and updated_at.
 func insertDoc(t *testing.T, db *DB, tenantID, url string, state store.DocState, updatedAt time.Time) string {

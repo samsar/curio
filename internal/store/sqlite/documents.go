@@ -76,7 +76,7 @@ func (s *Documents) ApplyFetch(ctx context.Context, id string, m store.FetchedMe
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE documents SET
 			content_type = ?, url_canonical = ?, title = ?, author = ?, language = ?,
-			published_at = ?, current_extraction_id = ?, state = ?
+			published_at = ?, current_extraction_id = ?, state = ?, updated_at = `+sqlNow+`
 		WHERE id = ?`,
 		m.ContentType, strPtr(m.URLCanonical), strPtr(m.Title), strPtr(m.Author), strPtr(m.Language),
 		timePtr(m.PublishedAt), m.ExtractionID, store.DocStatePending,
@@ -152,7 +152,8 @@ func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Doc
 }
 
 func (s *Documents) UpdateState(ctx context.Context, id string, state store.DocState) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE documents SET state = ? WHERE id = ?`, state, id)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE documents SET state = ?, updated_at = `+sqlNow+` WHERE id = ?`, state, id)
 	if err != nil {
 		return fmt.Errorf("update document state: %w", err)
 	}
@@ -257,7 +258,7 @@ func (s *Documents) CountByState(ctx context.Context, tenantID string) (map[stor
 
 func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionID string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE documents SET current_extraction_id = ? WHERE id = ?`,
+		`UPDATE documents SET current_extraction_id = ?, updated_at = `+sqlNow+` WHERE id = ?`,
 		extractionID, docID)
 	if err != nil {
 		return fmt.Errorf("set current extraction: %w", err)
@@ -280,7 +281,7 @@ func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID strin
 	// of upgrading from a read lock (see decisions.md "Job queue claim via
 	// atomic UPDATE ... RETURNING").
 	res, err := tx.ExecContext(ctx,
-		`UPDATE documents SET state = ? WHERE tenant_id = ? AND id = ?`,
+		`UPDATE documents SET state = ?, updated_at = `+sqlNow+` WHERE tenant_id = ? AND id = ?`,
 		store.DocStatePending, tenantID, documentID)
 	if err != nil {
 		return nil, fmt.Errorf("reset document state: %w", err)
@@ -314,7 +315,7 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	// one transaction").
 	args := appendArgs([]any{store.DocStatePending, tenantID}, states)
 	rows, err := tx.QueryContext(ctx, `
-		UPDATE documents SET state = ?
+		UPDATE documents SET state = ?, updated_at = `+sqlNow+`
 		WHERE tenant_id = ? AND state IN (`+placeholders(len(states))+`)
 		RETURNING id`, args...)
 	if err != nil {
