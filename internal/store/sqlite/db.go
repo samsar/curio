@@ -61,6 +61,12 @@ func Open(ctx context.Context, path string) (*DB, error) {
 // schema version the database is left at: the highest version in goose's
 // goose_db_version table, the only record of it. Idempotent.
 //
+// After applying any migration it checkpoints the WAL and truncates it. A
+// migration that rewrites a table writes all of it through the WAL, and
+// SQLite's automatic checkpoints copy those pages back but never shrink the
+// file, so a rewrite of the chunks table would otherwise leave a WAL about
+// its size on disk, which `curio status` reports.
+//
 // It uses goose's Provider, which keeps its state per instance: goose's
 // package-level API (SetBaseFS, SetDialect, Up) reads and writes process
 // globals, a data race when two databases migrate at once.
@@ -74,12 +80,21 @@ func Migrate(ctx context.Context, db *DB) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("load migrations: %w", err)
 	}
-	if _, err := provider.Up(ctx); err != nil {
+	applied, err := provider.Up(ctx)
+	if err != nil {
 		return 0, fmt.Errorf("apply migrations: %w", err)
 	}
 	version, err := provider.GetDBVersion(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	if len(applied) > 0 {
+		// The result row's busy flag is set only when a reader holds the WAL
+		// open; nothing else uses the database while it migrates, and if
+		// something did, automatic checkpoints would still catch up.
+		if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+			return 0, fmt.Errorf("checkpoint after migrating: %w", err)
+		}
 	}
 	return version, nil
 }

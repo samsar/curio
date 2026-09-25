@@ -2702,6 +2702,14 @@ homes migrate unchanged.
 the daemon exits as on any migration error, without reusing the handle
 (see "Migrations: rebuilding a table other tables reference").
 
+**Checkpoint after migrating:** when `Migrate` applied at least one
+migration, it runs `PRAGMA wal_checkpoint(TRUNCATE)`. A migration that
+rewrites a table writes every page of it through the WAL, and SQLite's
+automatic checkpoints copy those pages back but never shrink the file:
+without this, migrations 007 and 008 would leave a WAL about the size of
+the jobs and chunks tables (580 MB after 008 on a 1 GB database), which
+`curio status` reports as the database's WAL.
+
 ---
 
 ## Folder and host filters: literal input, segment-boundary folders

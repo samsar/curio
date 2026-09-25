@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -677,4 +678,52 @@ func TestMigration008_ChunksFTSExternalContent(t *testing.T) {
 	assert.Equal(t, chunksBefore, dumpRows(t, db, chunkColumns))
 	assert.Equal(t, indexedBefore, dumpRows(t, db, `SELECT chunk_id, title_search, tags FROM chunks_fts ORDER BY chunk_id`))
 	assert.Equal(t, vectorsBefore, dumpRows(t, db, vectors))
+}
+
+// TestMigrate_TruncatesWAL: a migration that rewrites a table leaves a WAL
+// about the table's size, which Migrate truncates. The control migrates an
+// identical database with goose alone.
+func TestMigrate_TruncatesWAL(t *testing.T) {
+	ctx := context.Background()
+	seed := func(db *DB) {
+		t.Helper()
+		_, err := db.Exec(`INSERT INTO documents (id, tenant_id, url) VALUES ('d', 'local', 'https://example.com/');
+			INSERT INTO document_extractions (id, document_id, fetcher, status) VALUES ('e', 'd', 'test', 'ok')`)
+		require.NoError(t, err)
+		text := strings.Repeat("write ahead log pages add up quickly ", 40)
+		for i := range 500 {
+			id := fmt.Sprint("c", i)
+			_, err := db.Exec(`INSERT INTO chunks (id, document_id, extraction_id, ord, text) VALUES (?, 'd', 'e', ?, ?)`,
+				id, i, text)
+			require.NoError(t, err)
+			_, err = db.Exec(`INSERT INTO chunks_fts (text, title, title_search, tags, chunk_id, document_id)
+				VALUES (?, 'T', 'T', '', ?, 'd')`, text, id)
+			require.NoError(t, err)
+		}
+		_, err = db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+		require.NoError(t, err)
+	}
+	walSize := func(path string) int64 {
+		t.Helper()
+		info, err := os.Stat(path + "-wal")
+		require.NoError(t, err)
+		return info.Size()
+	}
+
+	control, controlPath := openUnmigrated(t)
+	p := newProvider(t, control, migrations.FS)
+	_, err := p.UpTo(ctx, 7)
+	require.NoError(t, err)
+	seed(control)
+	_, err = p.Up(ctx)
+	require.NoError(t, err)
+	require.Greater(t, walSize(controlPath), int64(1<<20), "the rewrite leaves a large WAL")
+
+	db, path := openUnmigrated(t)
+	_, err = newProvider(t, db, migrations.FS).UpTo(ctx, 7)
+	require.NoError(t, err)
+	seed(db)
+	_, err = Migrate(ctx, db)
+	require.NoError(t, err)
+	assert.Zero(t, walSize(path))
 }
