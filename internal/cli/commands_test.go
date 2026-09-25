@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,8 +21,8 @@ import (
 
 // These tests run the real command tree against the real API (apitest). The
 // daemon they find answers healthz with this process's PID and the server's
-// home, so ensureDaemon sees it running and never spawns one. They check
-// stdout and returned errors, not cobra's "Error:" formatting.
+// home, so EnsureRunning sees it running and never spawns one. They check
+// stdout and returned errors; TestRun covers how Run prints an error.
 
 // runCLI runs curio with args against srv and returns its stdout.
 func runCLI(t *testing.T, srv *apitest.Server, args ...string) (string, error) {
@@ -31,9 +33,6 @@ func runCLI(t *testing.T, srv *apitest.Server, args ...string) (string, error) {
 // runCLIAt runs curio with args for home and daemonURL.
 func runCLIAt(t *testing.T, home, daemonURL string, args ...string) (string, error) {
 	t.Helper()
-	// buildContext exports CURIO_HOME for the daemon it may spawn; t.Setenv
-	// restores it when the test ends.
-	t.Setenv("CURIO_HOME", home)
 	var stdout, stderr bytes.Buffer
 	root := newRootCmd() // flags bind to closures made per construction
 	root.SetOut(&stdout)
@@ -41,6 +40,29 @@ func runCLIAt(t *testing.T, home, daemonURL string, args ...string) (string, err
 	root.SetArgs(append([]string{"--curio-home", home, "--daemon-url", daemonURL}, args...))
 	err := root.Execute()
 	return stdout.String(), err
+}
+
+// nextPage returns the arguments of the "next page:" line out ends with,
+// without the leading "curio".
+func nextPage(t *testing.T, out string) []string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	last := lines[len(lines)-1]
+	hint, ok := strings.CutPrefix(last, "next page: curio ")
+	require.True(t, ok, "the page ends with the next page's command:\n%s", out)
+	return strings.Fields(hint)
+}
+
+// runArgs runs curio with exactly args, as a pasted command line would.
+func runArgs(t *testing.T, args ...string) string {
+	t.Helper()
+	var stdout bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(io.Discard)
+	root.SetArgs(args)
+	require.NoError(t, root.Execute(), "curio %s", strings.Join(args, " "))
+	return stdout.String()
 }
 
 func mustRun(t *testing.T, srv *apitest.Server, args ...string) string {
@@ -55,6 +77,24 @@ func count(t *testing.T, srv *apitest.Server, query string, args ...any) int {
 	var n int
 	require.NoError(t, srv.DB.QueryRow(query, args...).Scan(&n))
 	return n
+}
+
+// TestRun: an error reaches stderr once, and a path an *os.PathError
+// already names isn't repeated.
+func TestRun(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(),
+		[]string{"--curio-home", filepath.Join(t.TempDir(), "home"), "import", "html", "/nonexistent.html", "--dry-run"},
+		&stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Equal(t, "Error: open /nonexistent.html: no such file or directory\n", stderr.String())
+	assert.Empty(t, stdout.String())
+
+	stderr.Reset()
+	assert.Zero(t, Run(context.Background(),
+		[]string{"--curio-home", filepath.Join(t.TempDir(), "home"), "version"}, &stdout, &stderr))
+	assert.Contains(t, stdout.String(), "curio ")
+	assert.Empty(t, stderr.String())
 }
 
 func TestVersion(t *testing.T) {
@@ -121,9 +161,30 @@ func TestDocs(t *testing.T) {
 
 	out = mustRun(t, srv, "docs", "--state", "dead")
 	assert.Contains(t, out, "no documents match")
+	assert.NotContains(t, out, "next page:", "a single page has no next")
+
+	// Paging: the first page ends with the command for the second, which
+	// keeps the filters and the home the first was run with.
+	out = mustRun(t, srv, "docs", "--all", "--limit", "2")
+	assert.Contains(t, out, "2 document(s)")
+	args := nextPage(t, out)
+	assert.Contains(t, args, "--all")
+	assert.Contains(t, args, "--limit=2")
+	assert.Contains(t, args, "--curio-home="+srv.Home.Path)
+	out = runArgs(t, args...)
+	assert.Contains(t, out, "1 document(s)")
+	assert.NotContains(t, out, "next page:")
+	for _, limit := range []string{"0", "501"} {
+		_, err = runCLI(t, srv, "docs", "--limit", limit)
+		require.ErrorContains(t, err, "--limit must be between 1 and 500")
+	}
+	_, err = runCLI(t, srv, "docs", "--state", "archived")
+	require.ErrorContains(t, err, "pending, fetched, failed, dead", "a mistyped state names the valid ones")
 
 	out = mustRun(t, srv, "docs", "show", fetched.ID)
 	assert.Contains(t, out, "url:          https://example.com/fetched")
+	assert.Contains(t, out, "markdown:     "+filepath.Join(srv.Home.ContentDir(), fetched.ID)+"/",
+		"the daemon's absolute path, printed as given")
 	assert.Contains(t, out, "state:        fetched")
 	assert.Contains(t, out, "fetcher:      apitest")
 	assert.NotContains(t, out, "The fetched body.")
@@ -131,6 +192,10 @@ func TestDocs(t *testing.T) {
 	out = mustRun(t, srv, "docs", "show", fetched.ID, "--content")
 	assert.Contains(t, out, "--- content ---")
 	assert.Contains(t, out, "The fetched body.")
+
+	out = mustRun(t, srv, "docs", "show", failed.ID, "--content")
+	assert.Contains(t, out, "state:        failed")
+	assert.Contains(t, out, "(no extracted content yet)", "the content 404 of a known document is an answer")
 
 	_, err = runCLI(t, srv, "docs", "show", "no-such-document")
 	require.Error(t, err)
@@ -163,6 +228,13 @@ func TestJobs(t *testing.T) {
 	assert.Contains(t, out, "payload: {}")
 	assert.Contains(t, out, "next attempt:")
 
+	out = mustRun(t, srv, "jobs", "--all", "--limit", "2")
+	assert.Contains(t, out, "2 job(s)")
+	out = runArgs(t, nextPage(t, out)...)
+	assert.Contains(t, out, "1 job(s)")
+	_, err = runCLI(t, srv, "jobs", "--limit", "501")
+	require.ErrorContains(t, err, "--limit must be between 1 and 500")
+
 	out = mustRun(t, srv, "jobs", "delete", "--status", "failed")
 	assert.Contains(t, out, "deleted 1 job(s) in status=failed")
 	_, err = runCLI(t, srv, "jobs", "delete")
@@ -175,6 +247,16 @@ func TestJobs(t *testing.T) {
 
 	out = mustRun(t, srv, "jobs", "--status", "failed")
 	assert.Contains(t, out, "no jobs match")
+
+	var cluster string
+	require.NoError(t, srv.DB.QueryRow(`SELECT id FROM jobs WHERE kind = 'cluster'`).Scan(&cluster))
+	out = mustRun(t, srv, "jobs", "show", cluster)
+	assert.Contains(t, out, "pending  cluster")
+	assert.Contains(t, out, cluster)
+	assert.Contains(t, out, "payload: {}")
+	assert.NotContains(t, out, "job(s)", "one job, not a list")
+	_, err = runCLI(t, srv, "jobs", "show", "no-such-job")
+	require.EqualError(t, err, `job "no-such-job" not found`)
 }
 
 func TestRefetch(t *testing.T) {
@@ -188,6 +270,7 @@ func TestRefetch(t *testing.T) {
 
 	out := mustRun(t, srv, "refetch", dead.ID, "--force")
 	assert.Contains(t, out, "refetch enqueued for document "+dead.ID)
+	assert.Contains(t, out, "follow it: curio jobs show ")
 
 	out = mustRun(t, srv, "refetch", "--all", "--state", "failed")
 	assert.Contains(t, out, "refetch enqueued for documents in state=failed: 1 jobs")
@@ -306,6 +389,27 @@ func TestStatus_DaemonNotRunning(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "daemon:  not running")
 	assert.Contains(t, out, "home:    "+srv.Home.Path)
+}
+
+// TestStatus_DaemonErrors: a daemon that answers healthz with an error is
+// not reported as "not running".
+func TestStatus_DaemonErrors(t *testing.T) {
+	srv := apitest.Start(t)
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"title":"internal error","status":500,"detail":"read marker: permission denied"}`)
+	}))
+	t.Cleanup(broken.Close)
+
+	out, err := runCLIAt(t, srv.Home.Path, broken.URL, "status")
+	require.NoError(t, err)
+	assert.Contains(t, out, "daemon:  not answering healthz: read marker: permission denied")
+	assert.NotContains(t, out, "not running")
+
+	out, err = runCLIAt(t, srv.Home.Path, broken.URL, "doctor")
+	require.Error(t, err)
+	assert.Contains(t, out, "healthz failed: read marker: permission denied")
 }
 
 func TestDoctor(t *testing.T) {

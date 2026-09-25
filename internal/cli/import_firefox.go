@@ -6,10 +6,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/importer"
 )
 
-func newImportFirefoxCmd() *cobra.Command {
+func newImportFirefoxCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		filePath string
 		flags    importFlags
@@ -27,12 +28,8 @@ Firefox keeps places.sqlite open and in WAL mode while running; curio reads
 a temporary copy (including the -wal sidecar), so you don't need to quit
 Firefox first.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
 			if !flags.dryRun {
-				if err := ensureDaemon(ctx); err != nil {
+				if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 					return err
 				}
 			}
@@ -51,7 +48,7 @@ Firefox first.`,
 			}
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "parsed %d bookmarks from Firefox\n", len(bms))
-			return importParsed(cmd.Context(), w, ctx, "firefox", bms, &flags)
+			return importParsed(cmd.Context(), w, env.Client, "firefox", bms, &flags)
 		},
 	}
 	cmd.Flags().StringVar(&filePath, "file", "", "Path to an arbitrary places.sqlite file")

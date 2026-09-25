@@ -30,19 +30,21 @@ func unitVec() []float32 {
 }
 
 // newSearchServer serves /v1/search with emb as the query embedder, over
-// three indexed documents that all mention "kafka".
-func newSearchServer(t *testing.T, emb search.Embedder, cfg search.Config) *testServer {
+// three indexed documents that all mention "kafka". Each option adjusts the
+// Deps after the search engine is set.
+func newSearchServer(t *testing.T, emb search.Embedder, cfg search.Config, options ...func(*Deps)) *testServer {
 	t.Helper()
 	cfg.Log = slog.New(slog.DiscardHandler)
-	s := newTestServer(t, func(d *Deps) {
+	s := newTestServer(t, append([]func(*Deps){func(d *Deps) {
 		d.Search = search.New(d.Chunks, d.Documents, emb, cfg)
-	})
+	}}, options...)...)
 	ctx := context.Background()
 	for i := range 3 {
 		doc := s.seedDocument(t, fmt.Sprintf("https://example.com/kafka/%d", i), store.DocStateFetched)
 		ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test",
 			Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
 		require.NoError(t, s.deps.Extractions.Create(ctx, ext))
+		require.NoError(t, s.deps.Documents.SetCurrentExtraction(ctx, doc.ID, ext.ID))
 		require.NoError(t, s.deps.Chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, "", nil,
 			[]store.ChunkInput{{Text: fmt.Sprintf("kafka partitions part %d", i), Embedding: unitVec()}}))
 	}
@@ -112,6 +114,8 @@ func TestSearch_UnsupportedFieldsAreRejected(t *testing.T) {
 		`{"query":"kafka","weights":{"bm25":2}}`,
 		`{"query":"kafka","collapse":"sum"}`,
 		`{"query":"kafka","filters":{"saved_after":"2024-01-01T00:00:00Z"}}`,
+		`{"query":"kafka","filters":{"folder":"/a"}}`,
+		`{"query":"kafka","filters":{"tag":["t"]}}`,
 	} {
 		t.Run(body, func(t *testing.T) {
 			assertProblem(t, s.search(t, body), http.StatusBadRequest)
@@ -148,6 +152,16 @@ func TestRelatedDocuments(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
 	assert.Empty(t, got.Items)
 
-	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/no-such-document/related"}),
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/no-such-document/related"}),
 		http.StatusNotFound)
+	assert.Equal(t, `document "no-such-document" not found`, p.Detail)
+}
+
+// TestSearch_ExtractionLookupFailure: a hit whose markdown path can't be
+// read fails the search rather than coming back without one.
+func TestSearch_ExtractionLookupFailure(t *testing.T) {
+	s := newSearchServer(t, okEmbedder(), search.Config{},
+		func(d *Deps) { d.Extractions = failingExtractionLookup{d.Extractions} })
+	p := assertProblem(t, s.search(t, `{"query":"kafka"}`), http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, errInjected.Error())
 }

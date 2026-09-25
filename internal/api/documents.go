@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/samsar/curio/internal/store"
 )
@@ -50,34 +52,86 @@ func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	doc, err := d.Documents.GetByID(r.Context(), id)
 	if err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
 	resp := documentToResponse(doc)
-	if doc.CurrentExtractionID != nil {
-		ext, err := d.Extractions.GetByID(r.Context(), *doc.CurrentExtractionID)
-		if err == nil {
-			er := &ExtractionResponse{
-				ID:           ext.ID,
-				FetchedAt:    ext.FetchedAt,
-				Fetcher:      ext.Fetcher,
-				Status:       ext.Status,
-				ErrorMessage: ext.ErrorMessage,
-			}
-			if ext.MarkdownPath != nil {
-				er.MarkdownPath = *ext.MarkdownPath
-			}
-			if len(ext.ExtractionMeta) > 0 {
-				// Best-effort; ignore decode failures so the request still succeeds.
-				var meta map[string]any
-				if e := decodeMetaJSON(ext.ExtractionMeta, &meta); e == nil {
-					er.ExtractionMeta = meta
-				}
-			}
-			resp.CurrentExtraction = er
+	ext, err := d.currentExtraction(r.Context(), doc)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	if ext != nil {
+		if resp.CurrentExtraction, err = d.extractionToResponse(ext); err != nil {
+			d.writeError(w, r, err)
+			return
 		}
 	}
-	writeJSON(w, http.StatusOK, resp)
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+func (d Deps) extractionToResponse(ext *store.DocumentExtraction) (*ExtractionResponse, error) {
+	out := &ExtractionResponse{
+		ID:           ext.ID,
+		FetchedAt:    ext.FetchedAt,
+		Fetcher:      ext.Fetcher,
+		Status:       ext.Status,
+		MarkdownPath: d.markdownPath(ext),
+		ErrorMessage: ext.ErrorMessage,
+	}
+	if len(ext.ExtractionMeta) > 0 {
+		if err := json.Unmarshal(ext.ExtractionMeta, &out.ExtractionMeta); err != nil {
+			return nil, fmt.Errorf("extraction %s: decode extraction_meta: %w", ext.ID, err)
+		}
+	}
+	return out, nil
+}
+
+// currentExtraction loads doc's current extraction, or nil when it has none.
+// The schema guarantees the row a current_extraction_id names, so a missing
+// one is an inconsistency, reported as an error rather than a missing
+// resource.
+func (d Deps) currentExtraction(ctx context.Context, doc *store.Document) (*store.DocumentExtraction, error) {
+	if doc.CurrentExtractionID == nil {
+		return nil, nil
+	}
+	ext, err := d.Extractions.GetByID(ctx, *doc.CurrentExtractionID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("document %s: its current extraction %s doesn't exist", doc.ID, *doc.CurrentExtractionID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("document %s: load current extraction: %w", doc.ID, err)
+	}
+	return ext, nil
+}
+
+// documentMarkdownPath is the absolute path of doc's current markdown, or
+// "" when it has none yet.
+func (d Deps) documentMarkdownPath(ctx context.Context, doc *store.Document) (string, error) {
+	ext, err := d.currentExtraction(ctx, doc)
+	if err != nil || ext == nil {
+		return "", err
+	}
+	return d.markdownPath(ext), nil
+}
+
+// markdownPath is the absolute path of ext's markdown, or "" when it has
+// none.
+func (d Deps) markdownPath(ext *store.DocumentExtraction) string {
+	if ext.MarkdownPath == nil {
+		return ""
+	}
+	return d.contentPath(*ext.MarkdownPath)
+}
+
+// contentPath is the absolute path of a file the store records relative to
+// the content directory, or "" for none. Every path the API returns is
+// built here, so no client needs to know the daemon's layout.
+func (d Deps) contentPath(rel string) string {
+	if rel == "" {
+		return ""
+	}
+	return filepath.Join(d.Home.ContentDir(), rel)
 }
 
 // DocumentListItem is one row in the list response. Mirrors DocumentResponse
@@ -100,38 +154,56 @@ type DocumentListItem struct {
 
 // DocumentListResponse is the body of GET /v1/documents.
 type DocumentListResponse struct {
-	Items []DocumentListItem `json:"items"`
+	Items      []DocumentListItem `json:"items"`
+	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
+// handleListDocuments pages through the tenant's documents, most recently
+// updated first. next_cursor is set exactly when another page follows.
 func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
+	state, err := docStateParam(r)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	after, err := cursorParam(r)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	limit := listLimit(r)
 	docs, err := d.Documents.ListWithLastError(r.Context(), d.TenantID, store.ListDocumentsOpts{
-		State: store.DocState(r.URL.Query().Get("state")),
-		Limit: listLimit(r),
+		State: state,
+		Limit: limit + 1,
+		After: after,
 	})
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
+		return
+	}
+	docs, next, err := onePage(docs, limit, func(doc store.DocumentWithError) store.PageKey {
+		return store.PageKey{At: doc.UpdatedAt, ID: doc.ID}
+	})
+	if err != nil {
+		d.writeError(w, r, err)
 		return
 	}
 
-	contentDir := d.Home.ContentDir()
-	out := DocumentListResponse{Items: make([]DocumentListItem, 0, len(docs))}
+	out := DocumentListResponse{Items: make([]DocumentListItem, 0, len(docs)), NextCursor: next}
 	for _, doc := range docs {
-		item := DocumentListItem{
-			ID:          doc.ID,
-			URL:         doc.URL,
-			Title:       doc.Title,
-			ContentType: string(doc.ContentType),
-			State:       string(doc.State),
-			LastError:   doc.LastError,
-			CreatedAt:   doc.CreatedAt,
-			UpdatedAt:   doc.UpdatedAt,
-		}
-		if doc.MarkdownPath != "" {
-			item.MarkdownPath = contentDir + "/" + doc.MarkdownPath
-		}
-		out.Items = append(out.Items, item)
+		out.Items = append(out.Items, DocumentListItem{
+			ID:           doc.ID,
+			URL:          doc.URL,
+			Title:        doc.Title,
+			ContentType:  string(doc.ContentType),
+			State:        string(doc.State),
+			LastError:    doc.LastError,
+			MarkdownPath: d.contentPath(doc.MarkdownPath),
+			CreatedAt:    doc.CreatedAt,
+			UpdatedAt:    doc.UpdatedAt,
+		})
 	}
-	writeJSON(w, http.StatusOK, out)
+	d.writeJSON(w, r, http.StatusOK, out)
 }
 
 // boolParam reports whether a query parameter is set to a truthy value
@@ -153,12 +225,12 @@ func (d Deps) handleRefetchDocument(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	doc, err := d.Documents.GetByID(r.Context(), id)
 	if err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
 
 	if doc.State == store.DocStateDead && !boolParam(r, "force") {
-		writeProblem(w, http.StatusConflict, "document is dead",
+		writeProblem(w, r, http.StatusConflict, "document is dead",
 			"this document's URL was confirmed dead (404/410 or a not-found page); pass force=1 to refetch anyway")
 		return
 	}
@@ -167,10 +239,10 @@ func (d Deps) handleRefetchDocument(w http.ResponseWriter, r *http.Request) {
 	// leave the document pending with no job behind it.
 	job, err := d.Documents.RequeueFetch(r.Context(), d.TenantID, doc.ID)
 	if err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": job.ID})
+	d.writeJSON(w, r, http.StatusAccepted, map[string]string{"job_id": job.ID})
 }
 
 // refetchAllDefaultStates is what refetch-all resets when no ?state= is
@@ -187,7 +259,7 @@ var refetchAllDefaultStates = []store.DocState{store.DocStatePending, store.DocS
 func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
 	state, err := docStateParam(r)
 	if err != nil {
-		writeProblem(w, http.StatusBadRequest, "bad request", err.Error())
+		d.writeError(w, r, err)
 		return
 	}
 	states := refetchAllDefaultStates
@@ -197,18 +269,18 @@ func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
 
 	n, err := d.Documents.RequeueFetchByStates(r.Context(), d.TenantID, states)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": n})
+	d.writeJSON(w, r, http.StatusAccepted, map[string]int{"jobs_enqueued": n})
 }
 
 // docStateParam reads ?state. Empty means the caller's default; a value
-// that isn't a document state is an error for a 400.
+// that isn't a document state is a requestError.
 func docStateParam(r *http.Request) (store.DocState, error) {
 	s := store.DocState(r.URL.Query().Get("state"))
 	if s != "" && !s.Valid() {
-		return "", fmt.Errorf("state %q must be one of: pending, fetched, failed, dead", s)
+		return "", badRequest("state %q must be one of: pending, fetched, failed, dead", s)
 	}
 	return s, nil
 }
@@ -222,20 +294,20 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	doc, err := d.Documents.GetByID(r.Context(), id)
 	if err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
 	if doc.CurrentExtractionID == nil {
-		writeProblem(w, http.StatusConflict, "no content",
+		writeProblem(w, r, http.StatusConflict, "no content",
 			"document has no extraction to reindex; refetch it first")
 		return
 	}
 	job, err := d.enqueueIndex(r.Context(), doc.ID)
 	if err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": job.ID})
+	d.writeJSON(w, r, http.StatusAccepted, map[string]string{"job_id": job.ID})
 }
 
 // handleReindexAll enqueues index jobs for the documents in one state that
@@ -248,7 +320,7 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	state, err := docStateParam(r)
 	if err != nil {
-		writeProblem(w, http.StatusBadRequest, "bad request", err.Error())
+		d.writeError(w, r, err)
 		return
 	}
 	state = cmp.Or(state, store.DocStateFetched)
@@ -256,17 +328,16 @@ func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	// fail permanently and flip it to failed while its fetch is in flight.
 	ids, err := d.Documents.ListIDsWithContent(r.Context(), d.TenantID, state)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 	for i, id := range ids {
 		if _, err := d.enqueueIndex(r.Context(), id); err != nil {
-			writeProblem(w, http.StatusInternalServerError, "internal error",
-				fmt.Sprintf("enqueued %d of %d index jobs before failing: %v", i, len(ids), err))
+			d.writeError(w, r, fmt.Errorf("enqueued %d of %d index jobs before failing: %w", i, len(ids), err))
 			return
 		}
 	}
-	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": len(ids)})
+	d.writeJSON(w, r, http.StatusAccepted, map[string]int{"jobs_enqueued": len(ids)})
 }
 
 // enqueueIndex enqueues an index job for a document.
@@ -286,38 +357,40 @@ func (d Deps) handleGetDocumentContent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	doc, err := d.Documents.GetByID(r.Context(), id)
 	if err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
-	if doc.CurrentExtractionID == nil {
-		writeProblem(w, http.StatusNotFound, "no content", "document has no extraction yet")
-		return
-	}
-	ext, err := d.Extractions.GetByID(r.Context(), *doc.CurrentExtractionID)
+	ext, err := d.currentExtraction(r.Context(), doc)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
-	if ext.MarkdownPath == nil {
-		writeProblem(w, http.StatusNotFound, "no content", "extraction has no markdown path")
+	if ext == nil {
+		writeProblem(w, r, http.StatusNotFound, "no content", "document has no extraction yet")
 		return
 	}
-	f, err := os.Open(filepath.Join(d.Home.ContentDir(), *ext.MarkdownPath))
+	path := d.markdownPath(ext)
+	if path == "" {
+		writeProblem(w, r, http.StatusNotFound, "no content", "extraction has no markdown path")
+		return
+	}
+	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Deleting content from disk is supported (docs/data-model.md).
-		writeProblem(w, http.StatusNotFound, "no content",
+		writeProblem(w, r, http.StatusNotFound, "no content",
 			"the extracted markdown is missing on disk; refetch the document")
 		return
 	}
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	if _, err := io.Copy(w, f); err != nil {
 		// The status line is out, so the client only sees a short body.
-		d.Log.Warn("stream document content", "document_id", doc.ID, "err", err)
+		d.Log.Warn("stream document content", "request_id", middleware.GetReqID(r.Context()),
+			"document_id", doc.ID, "err", err)
 	}
 }
 

@@ -537,6 +537,49 @@ func TestMigration007_BackfillsJobDocumentID(t *testing.T) {
 	assert.Equal(t, jobsBefore, dumpRows(t, db, oldColumns))
 }
 
+// TestMigration009_KeysetIndexes: the list indexes gain id as their last
+// column and bookmarks page by created_at; the rows are untouched, and Down
+// restores the schema exactly.
+func TestMigration009_KeysetIndexes(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 8)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url) VALUES ('d1', 'local', 'https://example.com/1');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, saved_at, source)
+			VALUES ('b1', 'local', 'd1', 'https://example.com/1', '2024-01-01T00:00:00.000Z', 'chrome');
+		INSERT INTO jobs (id, tenant_id, kind, payload, status) VALUES ('j1', 'local', 'fetch', '{"document_id":"d1"}', 'done');`)
+	require.NoError(t, err)
+	schemaBefore := schemaDump(t, db)
+	rowsBefore := map[string][][]any{}
+	for _, table := range []string{"documents", "bookmarks", "jobs"} {
+		rowsBefore[table] = dumpRows(t, db, `SELECT * FROM `+table)
+	}
+
+	_, err = p.UpTo(ctx, 9)
+	require.NoError(t, err)
+	indexes := map[string]string{}
+	for _, row := range dumpRows(t, db, `SELECT name, sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL`) {
+		indexes[row[0].(string)] = row[1].(string)
+	}
+	for name, columns := range map[string]string{
+		"idx_documents_tenant_updated":       "documents(tenant_id, updated_at, id)",
+		"idx_documents_tenant_state_updated": "documents(tenant_id, state, updated_at, id)",
+		"idx_jobs_tenant_updated":            "jobs(tenant_id, updated_at, id)",
+		"idx_jobs_tenant_status_updated":     "jobs(tenant_id, status, updated_at, id)",
+		"idx_bookmarks_tenant_created":       "bookmarks(tenant_id, created_at, id)",
+	} {
+		assert.Equal(t, "CREATE INDEX "+name+" ON "+columns, indexes[name])
+	}
+	assert.NotContains(t, indexes, "idx_bookmarks_tenant_id")
+	for table, rows := range rowsBefore {
+		assert.Equal(t, rows, dumpRows(t, db, `SELECT * FROM `+table), table)
+	}
+
+	_, err = p.DownTo(ctx, 8)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db))
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `

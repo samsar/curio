@@ -19,6 +19,27 @@ func TestDocState_Valid(t *testing.T) {
 	}
 }
 
+// The valid sets are the jobs table's CHECK constraints (migrations/001).
+func TestJobStatus_Valid(t *testing.T) {
+	for _, s := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone,
+		store.JobStatusFailed} {
+		assert.True(t, s.Valid(), s)
+	}
+	for _, s := range []store.JobStatus{"", "bogus", "Done", "fetched"} {
+		assert.False(t, s.Valid(), s)
+	}
+}
+
+func TestJobKind_Valid(t *testing.T) {
+	for _, k := range []store.JobKind{store.JobKindFetch, store.JobKindIndex, store.JobKindImport,
+		store.JobKindCluster, store.JobKindSummarize} {
+		assert.True(t, k.Valid(), k)
+	}
+	for _, k := range []store.JobKind{"", "bogus", "Fetch", "done"} {
+		assert.False(t, k.Valid(), k)
+	}
+}
+
 func TestJobStatus_IsFinished(t *testing.T) {
 	cases := map[store.JobStatus]bool{
 		store.JobStatusPending: false,

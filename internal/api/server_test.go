@@ -9,9 +9,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
+	"github.com/samsar/curio/internal/version"
 )
 
 // testServer runs the full router from NewServer on a real loopback listener
@@ -93,7 +96,18 @@ type request struct {
 type response struct {
 	status      int
 	contentType string
+	requestID   string // the X-Request-Id header
+	path        string // the request's, which a problem's instance names
 	body        string
+}
+
+// newResponse reads resp into a response for the request to path.
+func newResponse(t *testing.T, resp *http.Response, path string) response {
+	t.Helper()
+	b, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return response{status: resp.StatusCode, contentType: resp.Header.Get("Content-Type"),
+		requestID: resp.Header.Get("X-Request-Id"), path: path, body: string(b)}
 }
 
 func (s *testServer) do(t *testing.T, req request) response {
@@ -120,9 +134,7 @@ func (s *testServer) do(t *testing.T, req request) response {
 	resp, err := http.DefaultClient.Do(r)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	return response{status: resp.StatusCode, contentType: resp.Header.Get("Content-Type"), body: string(b)}
+	return newResponse(t, resp, r.URL.Path)
 }
 
 func (s *testServer) count(t *testing.T, table string) int {
@@ -155,13 +167,19 @@ func (s *testServer) seedContent(t *testing.T, doc *store.Document, markdown str
 	return ext
 }
 
-func assertProblem(t *testing.T, resp response, status int) {
+// assertProblem checks that resp is a problem with status, for the request
+// it answered, and returns it.
+func assertProblem(t *testing.T, resp response, status int) Problem {
 	t.Helper()
 	assert.Equal(t, status, resp.status, resp.body)
 	assert.Equal(t, "application/problem+json", resp.contentType)
 	var p Problem
 	require.NoError(t, json.Unmarshal([]byte(resp.body), &p))
 	assert.Equal(t, status, p.Status)
+	assert.Equal(t, resp.path, p.Instance)
+	assert.NotEmpty(t, p.RequestID)
+	assert.Equal(t, resp.requestID, p.RequestID, "the problem quotes the response's X-Request-Id")
+	return p
 }
 
 func TestServer_HostAllowlist(t *testing.T) {
@@ -476,11 +494,8 @@ func TestServer_RouterErrorsAreProblems(t *testing.T) {
 			resp, err := http.DefaultClient.Do(r)
 			require.NoError(t, err)
 			defer resp.Body.Close()
-			body, err := io.ReadAll(resp.Body)
-			require.NoError(t, err)
 
-			assertProblem(t, response{status: resp.StatusCode, contentType: resp.Header.Get("Content-Type"),
-				body: string(body)}, http.StatusMethodNotAllowed)
+			assertProblem(t, newResponse(t, resp, tc.path), http.StatusMethodNotAllowed)
 			assert.Equal(t, tc.allow, resp.Header.Get("Allow"))
 		})
 	}
@@ -517,4 +532,197 @@ func TestServer_ErrorsAreProblems(t *testing.T) {
 			assertProblem(t, s.do(t, tc.req), tc.status)
 		})
 	}
+}
+
+// logRecorder is a slog.Handler that keeps every record, for asserting what
+// the server logs.
+type logRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *logRecorder) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *logRecorder) WithGroup(string) slog.Handler      { return h }
+
+// at returns the attributes of every record at level, in order.
+func (h *logRecorder) at(level slog.Level) []map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []map[string]any
+	for _, r := range h.records {
+		if r.Level != level {
+			continue
+		}
+		attrs := map[string]any{"msg": r.Message}
+		r.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.Resolve().Any()
+			return true
+		})
+		out = append(out, attrs)
+	}
+	return out
+}
+
+// routerDeps are the Deps of newTestServer for a test that drives the router
+// in process, logging to rec.
+func routerDeps(t *testing.T, rec *logRecorder, options ...func(*Deps)) Deps {
+	t.Helper()
+	s := newTestServer(t, options...)
+	deps := s.deps
+	deps.TenantID = "local"
+	deps.Log = slog.New(rec)
+	return deps
+}
+
+// serveInProcess runs req through the router newRouter builds for deps, as
+// the daemon listening on 127.0.0.1:8765 would.
+func serveInProcess(t *testing.T, deps Deps, req *http.Request) response {
+	t.Helper()
+	origin, err := newLocalOrigin(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8765})
+	require.NoError(t, err)
+	router, err := newRouter(deps, origin)
+	require.NoError(t, err)
+	req.Host = "127.0.0.1:8765"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return newResponse(t, rec.Result(), req.URL.Path)
+}
+
+func TestServer_RequestIDs(t *testing.T) {
+	s := newTestServer(t)
+	for _, req := range []request{
+		{method: http.MethodGet, path: "/v1/healthz"},
+		{method: http.MethodGet, path: "/v1/nope"},
+		{method: http.MethodGet, path: "/v1/healthz", origin: "https://attacker.example"},
+	} {
+		resp := s.do(t, req)
+		assert.NotEmpty(t, resp.requestID, "%s %s", req.method, req.path)
+		if resp.status >= http.StatusBadRequest {
+			assertProblem(t, resp, resp.status)
+		}
+	}
+
+	r, err := http.NewRequest(http.MethodGet, s.base+"/v1/nope", nil)
+	require.NoError(t, err)
+	r.Header.Set("X-Request-Id", "from-the-client")
+	resp, err := http.DefaultClient.Do(r)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	p := assertProblem(t, newResponse(t, resp, "/v1/nope"), http.StatusNotFound)
+	assert.Equal(t, "from-the-client", p.RequestID, "a client's own request ID is kept")
+}
+
+// TestServer_ServerErrorsAreLogged: the cause of a 500 is in the daemon log
+// once, under the request ID the client was given.
+func TestServer_ServerErrorsAreLogged(t *testing.T) {
+	var rec logRecorder
+	deps := routerDeps(t, &rec, func(d *Deps) { d.Bookmarks = failingBookmarkCount{d.Bookmarks} })
+
+	p := assertProblem(t, serveInProcess(t, deps, httptest.NewRequest(http.MethodGet, "/v1/stats", nil)),
+		http.StatusInternalServerError)
+	errs := rec.at(slog.LevelError)
+	require.Len(t, errs, 1)
+	assert.Equal(t, p.RequestID, errs[0]["request_id"])
+	assert.Equal(t, http.MethodGet, errs[0]["method"])
+	assert.Equal(t, "/v1/stats", errs[0]["path"])
+	assert.ErrorIs(t, errs[0]["err"].(error), errInjected)
+
+	access := rec.at(slog.LevelInfo)
+	require.Len(t, access, 1)
+	assert.Equal(t, p.RequestID, access[0]["request_id"])
+	assert.EqualValues(t, http.StatusInternalServerError, access[0]["status"])
+}
+
+// cancellingCount cancels the request's context from inside the handler, as
+// a client that hangs up mid-request does, and fails the way a store does
+// on a cancelled context.
+type cancellingCount struct {
+	store.BookmarkStore
+	cancel context.CancelFunc
+}
+
+func (c cancellingCount) Count(ctx context.Context, _ string) (int, error) {
+	c.cancel()
+	return 0, fmt.Errorf("count bookmarks: %w", ctx.Err())
+}
+
+// TestServer_ClientGoneIsNotAnError: a request its client abandoned fails
+// with the cancellation, which is logged at info as a 499, not as a daemon
+// error.
+func TestServer_ClientGoneIsNotAnError(t *testing.T) {
+	var rec logRecorder
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := routerDeps(t, &rec, func(d *Deps) { d.Bookmarks = cancellingCount{d.Bookmarks, cancel} })
+
+	resp := serveInProcess(t, deps, httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/stats", nil))
+	assert.Equal(t, statusClientClosedRequest, resp.status)
+	assert.Empty(t, rec.at(slog.LevelError))
+	var failed []map[string]any
+	for _, r := range rec.at(slog.LevelInfo) {
+		if r["msg"] == "request failed" {
+			failed = append(failed, r)
+		}
+	}
+	require.Len(t, failed, 1)
+	assert.EqualValues(t, statusClientClosedRequest, failed[0]["status"])
+	assert.ErrorIs(t, failed[0]["err"].(error), context.Canceled)
+}
+
+// panickingCount panics with value from Count.
+type panickingCount struct {
+	store.BookmarkStore
+	value any
+}
+
+func (p panickingCount) Count(context.Context, string) (int, error) { panic(p.value) }
+
+func TestServer_PanicIsProblem(t *testing.T) {
+	var rec logRecorder
+	deps := routerDeps(t, &rec, func(d *Deps) { d.Bookmarks = panickingCount{d.Bookmarks, "boom"} })
+
+	p := assertProblem(t, serveInProcess(t, deps, httptest.NewRequest(http.MethodGet, "/v1/stats", nil)),
+		http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, "boom")
+	errs := rec.at(slog.LevelError)
+	require.Len(t, errs, 1)
+	assert.Equal(t, "handler panicked", errs[0]["msg"])
+	assert.Equal(t, p.RequestID, errs[0]["request_id"])
+	assert.Equal(t, "boom", errs[0]["panic"])
+	stack, ok := errs[0]["stack"].(string)
+	require.True(t, ok)
+	assert.Contains(t, stack, "panickingCount.Count")
+	assert.NotContains(t, stack, "\x1b[", "no terminal colors in the JSON log")
+}
+
+// TestServer_AbortHandlerPanicPassesThrough: http.ErrAbortHandler is how a
+// handler asks net/http to cut the response; recovery must not answer it.
+func TestServer_AbortHandlerPanicPassesThrough(t *testing.T) {
+	var rec logRecorder
+	deps := routerDeps(t, &rec, func(d *Deps) { d.Bookmarks = panickingCount{d.Bookmarks, http.ErrAbortHandler} })
+	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		serveInProcess(t, deps, httptest.NewRequest(http.MethodGet, "/v1/stats", nil))
+	})
+	assert.Empty(t, rec.at(slog.LevelError))
+}
+
+// TestServer_UnknownFieldNamesTheRemedy: a field this daemon doesn't know is
+// what a newer client sends to an older daemon, so the 400 says so.
+func TestServer_UnknownFieldNamesTheRemedy(t *testing.T) {
+	s := newTestServer(t)
+	p := assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks",
+		contentType: "application/json", body: `{"url":"https://example.com/a","pinned":true}`}), http.StatusBadRequest)
+	assert.Contains(t, p.Detail, `unknown field "pinned"`)
+	assert.Contains(t, p.Detail, version.String())
+	assert.Contains(t, p.Detail, "curio daemon stop")
+	assert.Zero(t, s.count(t, "bookmarks"))
 }

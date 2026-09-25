@@ -187,9 +187,9 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, opts
 
 // listDocumentsQuery builds ListWithLastError's query. It walks
 // idx_documents_tenant_state_updated when filtered by state, and
-// idx_documents_tenant_updated otherwise, in updated_at order, so it stops
-// at the limit, and the last-error subquery, a seek on idx_jobs_document,
-// runs only for the rows returned.
+// idx_documents_tenant_updated otherwise, in (updated_at, id) order from
+// opts.After, so it stops at the limit, and the last-error subquery, a seek
+// on idx_jobs_document, runs only for the rows returned.
 func listDocumentsQuery(tenantID string, opts store.ListDocumentsOpts) (string, []any) {
 	q := `SELECT ` + qualify("d", documentColumns) + `,
 		COALESCE((
@@ -207,7 +207,12 @@ func listDocumentsQuery(tenantID string, opts store.ListDocumentsOpts) (string, 
 		q += ` AND d.state = ?`
 		args = append(args, opts.State)
 	}
-	q += ` ORDER BY d.updated_at DESC LIMIT ?`
+	if !opts.After.IsZero() {
+		pred, predArgs := keysetAfter("d.updated_at", "d.id", opts.After)
+		q += ` AND ` + pred
+		args = append(args, predArgs...)
+	}
+	q += ` ORDER BY d.updated_at DESC, d.id DESC LIMIT ?`
 	return q, append(args, listLimit(opts.Limit))
 }
 

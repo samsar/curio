@@ -3,14 +3,16 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/importer"
 )
 
-func newImportSafariCmd() *cobra.Command {
+func newImportSafariCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		filePath string
 		flags    importFlags
@@ -27,12 +29,8 @@ Note: macOS requires Full Disk Access for the terminal app reading
 Safari data. Grant it in System Settings → Privacy & Security → Full
 Disk Access if you get a permission error.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
 			if !flags.dryRun {
-				if err := ensureDaemon(ctx); err != nil {
+				if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 					return err
 				}
 			}
@@ -45,22 +43,23 @@ Disk Access if you get a permission error.`,
 				}
 			}
 
+			// An *os.PathError already names the file.
 			f, err := os.Open(path)
+			if errors.Is(err, fs.ErrPermission) {
+				return fmt.Errorf("%w\n\nGrant Full Disk Access to your terminal in System Settings → Privacy & Security", err)
+			}
 			if err != nil {
-				if os.IsPermission(err) {
-					return fmt.Errorf("open %s: %w\n\nGrant Full Disk Access to your terminal in System Settings → Privacy & Security", path, err)
-				}
-				return fmt.Errorf("open %s: %w", path, err)
+				return err
 			}
 			defer f.Close()
 
 			bms, err := importer.ParseSafari(f)
 			if err != nil {
-				return fmt.Errorf("parse: %w", err)
+				return fmt.Errorf("parse %s: %w", path, err)
 			}
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "parsed %d bookmarks from Safari\n", len(bms))
-			return importParsed(cmd.Context(), w, ctx, "safari", bms, &flags)
+			return importParsed(cmd.Context(), w, env.Client, "safari", bms, &flags)
 		},
 	}
 	cmd.Flags().StringVar(&filePath, "file", "", "Path to an arbitrary Bookmarks.plist file")

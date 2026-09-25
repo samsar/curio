@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/importer"
 )
 
@@ -47,52 +49,49 @@ func (f *importFlags) applyLimit(w io.Writer, bms []importer.ParsedBookmark) []i
 	return bms
 }
 
-func newImportCmd() *cobra.Command {
+func newImportCmd(env *daemonctl.Env) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "import",
 		Short: "Bulk-import bookmarks from a browser or exported file",
 	}
-	cmd.AddCommand(newImportHTMLCmd(), newImportChromeCmd(), newImportSafariCmd(), newImportFirefoxCmd())
+	cmd.AddCommand(newImportHTMLCmd(env), newImportChromeCmd(env), newImportSafariCmd(env), newImportFirefoxCmd(env))
 	return cmd
 }
 
-func newImportHTMLCmd() *cobra.Command {
+func newImportHTMLCmd(env *daemonctl.Env) *cobra.Command {
 	var flags importFlags
 	cmd := &cobra.Command{
 		Use:   "html <file>",
 		Short: "Import a Netscape HTML bookmark export (works for any browser)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
 			if !flags.dryRun {
-				if err := ensureDaemon(ctx); err != nil {
+				if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 					return err
 				}
 			}
 
+			// An *os.PathError already names the file.
 			f, err := os.Open(args[0])
 			if err != nil {
-				return fmt.Errorf("open %s: %w", args[0], err)
+				return err
 			}
 			defer f.Close()
 
 			bms, err := importer.ParseHTML(f)
 			if err != nil {
-				return fmt.Errorf("parse: %w", err)
+				return fmt.Errorf("parse %s: %w", args[0], err)
 			}
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "parsed %d bookmarks from %s\n", len(bms), filepath.Base(args[0]))
-			return importParsed(cmd.Context(), w, ctx, "html", bms, &flags)
+			return importParsed(cmd.Context(), w, env.Client, "html", bms, &flags)
 		},
 	}
 	attachImportFlags(cmd, &flags)
 	return cmd
 }
 
-func newImportChromeCmd() *cobra.Command {
+func newImportChromeCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		profile      string
 		allProfiles  bool
@@ -110,11 +109,6 @@ Default behavior: reads the "Default" profile's Bookmarks file. Use
 profile, --list-profiles to see what's available, or --file to point
 at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-
 			w := cmd.OutOrStdout()
 			if listProfiles {
 				profiles, err := importer.DiscoverChromeProfiles()
@@ -133,7 +127,7 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 			}
 
 			if !flags.dryRun {
-				if err := ensureDaemon(ctx); err != nil {
+				if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 					return err
 				}
 			}
@@ -170,12 +164,12 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 			}
 
 			for _, fp := range files {
-				if err := importChromeFile(cmd.Context(), w, ctx, fp, &flags); err != nil {
+				if err := importChromeFile(cmd.Context(), w, env.Client, fp, &flags); err != nil {
 					return err
 				}
 			}
 			if flags.follow {
-				return followProgress(cmd.Context(), w, ctx)
+				return followProgress(cmd.Context(), w, env.Client)
 			}
 			return nil
 		},
@@ -188,10 +182,11 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 	return cmd
 }
 
-func importChromeFile(httpCtx context.Context, w io.Writer, c *Context, path string, flags *importFlags) error {
+func importChromeFile(ctx context.Context, w io.Writer, c *client.Client, path string, flags *importFlags) error {
+	// An *os.PathError already names the file.
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return err
 	}
 	defer f.Close()
 	bms, err := importer.ParseChrome(f)
@@ -204,31 +199,32 @@ func importChromeFile(httpCtx context.Context, w io.Writer, c *Context, path str
 		reportDryRun(w, bms)
 		return nil
 	}
-	return sendBatches(httpCtx, w, c, "chrome", bms)
+	return sendBatches(ctx, w, c, "chrome", bms)
 }
 
 // importParsed applies the shared import flags to one source's parsed
 // bookmarks: --limit, then either --dry-run's local report or the upload,
 // followed by --follow.
-func importParsed(httpCtx context.Context, w io.Writer, c *Context, source string, bms []importer.ParsedBookmark, flags *importFlags) error {
+func importParsed(ctx context.Context, w io.Writer, c *client.Client, source string, bms []importer.ParsedBookmark, flags *importFlags) error {
 	bms = flags.applyLimit(w, bms)
 	if flags.dryRun {
 		reportDryRun(w, bms)
 		return nil
 	}
-	if err := sendBatches(httpCtx, w, c, source, bms); err != nil {
+	if err := sendBatches(ctx, w, c, source, bms); err != nil {
 		return err
 	}
 	if flags.follow {
-		return followProgress(httpCtx, w, c)
+		return followProgress(ctx, w, c)
 	}
 	return nil
 }
 
 // followProgress polls /v1/stats every 2 seconds and prints a one-line
 // progress update until the queue is drained (zero pending + zero running).
-// Returns nil on quiet shutdown via ctrl-c; prints an interrupt notice.
-func followProgress(httpCtx context.Context, w io.Writer, c *Context) error {
+// Cancelling ctx (ctrl-c) is a quiet stop: it prints an interrupt notice
+// and returns nil, since the import itself has finished.
+func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 	fmt.Fprintln(w, "\nwatching queue drain — ctrl-c to exit")
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
@@ -240,14 +236,16 @@ func followProgress(httpCtx context.Context, w io.Writer, c *Context) error {
 	)
 	for {
 		select {
-		case <-httpCtx.Done():
+		case <-ctx.Done():
 			fmt.Fprintln(w, "\ninterrupted")
 			return nil
 		case <-tick.C:
 		}
-		stats, err := c.Client.Stats(httpCtx)
+		stats, err := c.Stats(ctx)
 		if err != nil {
-			fmt.Fprintf(w, "  (stats unavailable: %v)\n", err)
+			if ctx.Err() == nil { // an interrupt is reported by the select
+				fmt.Fprintf(w, "  (stats unavailable: %v)\n", err)
+			}
 			continue
 		}
 		pending := stats.JobsByStatus["pending"]
@@ -318,7 +316,8 @@ func profileLabelFromPath(p string) string {
 	return filepath.Base(dir)
 }
 
-// pickChromeProfile matches by Dir or display Name (case-insensitive on name).
+// pickChromeProfile matches want against a profile's directory exactly,
+// then against its display name, ignoring case.
 func pickChromeProfile(profiles []importer.ChromeProfile, want string) *importer.ChromeProfile {
 	for i, p := range profiles {
 		if p.Dir == want {
@@ -326,7 +325,7 @@ func pickChromeProfile(profiles []importer.ChromeProfile, want string) *importer
 		}
 	}
 	for i, p := range profiles {
-		if p.Name == want {
+		if strings.EqualFold(p.Name, want) {
 			return &profiles[i]
 		}
 	}
@@ -335,7 +334,7 @@ func pickChromeProfile(profiles []importer.ChromeProfile, want string) *importer
 
 // sendBatches POSTs the parsed list to /v1/bookmarks/import in chunks and
 // prints progress. Returns nil iff every batch succeeded.
-func sendBatches(httpCtx context.Context, w io.Writer, c *Context, source string, bms []importer.ParsedBookmark) error {
+func sendBatches(ctx context.Context, w io.Writer, c *client.Client, source string, bms []importer.ParsedBookmark) error {
 	if len(bms) == 0 {
 		fmt.Fprintln(w, "nothing to import")
 		return nil
@@ -364,7 +363,7 @@ func sendBatches(httpCtx context.Context, w io.Writer, c *Context, source string
 			}
 		}
 
-		resp, err := c.Client.ImportBookmarks(httpCtx, client.ImportRequest{
+		resp, err := c.ImportBookmarks(ctx, client.ImportRequest{
 			Source:    source,
 			Bookmarks: converted,
 		})

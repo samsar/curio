@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -187,11 +188,13 @@ func validateBookmark(b *store.Bookmark) error {
 }
 
 func (s *Bookmarks) GetByID(ctx context.Context, id string) (*store.Bookmark, error) {
-	row := s.db.QueryRowContext(ctx, bookmarkSelectCols+" FROM bookmarks WHERE id = ?", id)
+	row := s.db.QueryRowContext(ctx, "SELECT "+bookmarkColumns+" FROM bookmarks WHERE id = ?", id)
 	return scanBookmark(row)
 }
 
-func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBookmarksOpts) ([]*store.Bookmark, error) {
+// List reads each bookmark's document state through a join, so a page is
+// one query however many bookmarks it holds.
+func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBookmarksOpts) ([]store.BookmarkWithState, error) {
 	q, args := listBookmarksQuery(tenantID, opts)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -199,25 +202,29 @@ func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBo
 	}
 	defer rows.Close()
 
-	var out []*store.Bookmark
+	var out []store.BookmarkWithState
 	for rows.Next() {
-		b, err := scanBookmark(rows)
-		if err != nil {
-			return nil, err
+		var item store.BookmarkWithState
+		if item.Bookmark, err = scanBookmark(rows, &item.DocumentState); err != nil {
+			return nil, fmt.Errorf("list bookmarks: %w", err)
 		}
-		out = append(out, b)
+		out = append(out, item)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list bookmarks: %w", err)
+	}
+	return out, nil
 }
 
 // listBookmarksQuery builds List's query. A page walks
-// idx_bookmarks_tenant_id from the cursor, so it reads one page of rows,
-// not every bookmark the tenant has.
+// idx_bookmarks_tenant_created in (created_at, id) order from opts.After,
+// checking the source and folder filters per row, so it reads about one
+// page of rows, not every bookmark the tenant has.
 func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, []any) {
-	clauses := []string{"tenant_id = ?"}
+	clauses := []string{"b.tenant_id = ?"}
 	args := []any{tenantID}
 	if opts.Source != "" {
-		clauses = append(clauses, "source = ?")
+		clauses = append(clauses, "b.source = ?")
 		args = append(args, opts.Source)
 	}
 	if folder := strings.TrimRight(opts.FolderPath, "/"); folder != "" {
@@ -225,16 +232,18 @@ func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, 
 		// is the byte after '/', so [folder+"/", folder+"0") holds exactly
 		// the paths that start with folder+"/". Unlike LIKE there is nothing
 		// to escape, and it is case-sensitive like the equality.
-		clauses = append(clauses, "(folder_path = ? OR (folder_path >= ? AND folder_path < ?))")
+		clauses = append(clauses, "(b.folder_path = ? OR (b.folder_path >= ? AND b.folder_path < ?))")
 		args = append(args, folder, folder+"/", folder+"0")
 	}
-	if opts.Cursor != "" {
-		clauses = append(clauses, "id > ?")
-		args = append(args, opts.Cursor)
+	if !opts.After.IsZero() {
+		pred, predArgs := keysetAfter("b.created_at", "b.id", opts.After)
+		clauses = append(clauses, pred)
+		args = append(args, predArgs...)
 	}
-	q := bookmarkSelectCols +
-		" FROM bookmarks WHERE " + strings.Join(clauses, " AND ") +
-		" ORDER BY id LIMIT ?"
+	q := "SELECT " + qualify("b", bookmarkColumns) + ", COALESCE(d.state, '')" +
+		" FROM bookmarks b LEFT JOIN documents d ON d.id = b.document_id" +
+		" WHERE " + strings.Join(clauses, " AND ") +
+		" ORDER BY b.created_at DESC, b.id DESC LIMIT ?"
 	return q, append(args, listLimit(opts.Limit))
 }
 
@@ -265,20 +274,23 @@ func (s *Bookmarks) LinkDocument(ctx context.Context, bookmarkID, documentID str
 	return ensureRow(res, "bookmark")
 }
 
-const bookmarkSelectCols = `SELECT id, tenant_id, document_id, url, title, saved_at, source,
-		folder_path, tags, created_at, updated_at`
+// bookmarkColumns is the column list scanBookmark expects, in order.
+const bookmarkColumns = `id, tenant_id, document_id, url, title, saved_at, source,
+	folder_path, tags, created_at, updated_at`
 
-func scanBookmark(row interface{ Scan(...any) error }) (*store.Bookmark, error) {
+// scanBookmark scans bookmarkColumns, then any extra columns a query
+// selects after them into extra. A missing row is store.ErrNotFound.
+func scanBookmark(row interface{ Scan(...any) error }, extra ...any) (*store.Bookmark, error) {
 	var (
 		b                              store.Bookmark
 		docID, title, folderPath, tags sql.NullString
 		savedAt, createdAt, updatedAt  string
 	)
-	err := row.Scan(
+	err := row.Scan(slices.Concat([]any{
 		&b.ID, &b.TenantID, &docID, &b.URL, &title,
 		&savedAt, &b.Source, &folderPath, &tags,
 		&createdAt, &updatedAt,
-	)
+	}, extra)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}

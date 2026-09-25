@@ -11,22 +11,46 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/textutil"
 )
 
-func newJobsCmd() *cobra.Command {
-	cmd := newJobsListCmd()
-	cmd.AddCommand(newJobsPruneCmd(), newJobsDeleteCmd())
+func newJobsCmd(env *daemonctl.Env) *cobra.Command {
+	cmd := newJobsListCmd(env)
+	cmd.AddCommand(newJobsShowCmd(env), newJobsPruneCmd(env), newJobsDeleteCmd(env))
 	return cmd
 }
 
-func newJobsListCmd() *cobra.Command {
+func newJobsShowCmd(env *daemonctl.Env) *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <job-id>",
+		Short: "Show one job: its status, attempts, error and document",
+		Long: `Show one background job by ID, as 'curio jobs' lists it. Refetch,
+reindex and 'curio interests rebuild' print the ID of the job they
+enqueue; run this to follow it.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
+				return err
+			}
+			job, err := env.Client.GetJob(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			renderJob(cmd.OutOrStdout(), *job)
+			return nil
+		},
+	}
+}
+
+func newJobsListCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		failedOnly bool
 		showAll    bool
 		status     string
 		kind       string
 		limit      int
+		cursor     string
 	)
 	cmd := &cobra.Command{
 		Use:   "jobs",
@@ -37,24 +61,29 @@ the audit of work that succeeded. Add --failed to debug failures,
 
 Each row carries the target doc's URL, title, doc_id, and on-disk
 markdown path (when applicable), so jumping to the underlying file
-or running curio refetch is one copy/paste away.`,
+or running curio refetch is one copy/paste away.
+
+Rows come most recently updated first, a page at a time; when more
+follow, the last line is the command that shows the next page.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := checkPageLimit(limit); err != nil {
 				return err
 			}
-			s := resolveJobsStatus(status, failedOnly, showAll)
-
-			resp, err := ctx.Client.ListJobs(cmd.Context(), client.JobListOpts{
-				Status: s, Kind: kind, Limit: limit,
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
+				return err
+			}
+			resp, err := env.Client.ListJobs(cmd.Context(), client.JobListOpts{
+				Status: resolveFilter(status, failedOnly, showAll, "done"),
+				Kind:   kind,
+				Limit:  limit,
+				Cursor: cursor,
 			})
 			if err != nil {
 				return err
 			}
-			renderJobList(cmd.OutOrStdout(), resp)
+			w := cmd.OutOrStdout()
+			renderJobList(w, resp)
+			printNextPage(w, cmd, resp.NextCursor)
 			return nil
 		},
 	}
@@ -62,21 +91,9 @@ or running curio refetch is one copy/paste away.`,
 	cmd.Flags().BoolVar(&showAll, "all", false, "Show every status instead of just done")
 	cmd.Flags().StringVar(&status, "status", "", "pending|running|done|failed (overrides defaults)")
 	cmd.Flags().StringVar(&kind, "kind", "", "fetch|index|import|cluster|summarize")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Max rows to return (server caps at 500)")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Rows per page, 1-500")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "Token from the \"next page:\" line of a previous page")
 	return cmd
-}
-
-func resolveJobsStatus(status string, failedOnly, all bool) string {
-	switch {
-	case status != "":
-		return status
-	case failedOnly:
-		return "failed"
-	case all:
-		return ""
-	default:
-		return "done"
-	}
 }
 
 func renderJobList(w io.Writer, resp *client.JobList) {
@@ -84,47 +101,51 @@ func renderJobList(w io.Writer, resp *client.JobList) {
 		fmt.Fprintln(w, "no jobs match")
 		return
 	}
-	// One header line per job + indented detail. No truncation — full
-	// error messages are the whole point of looking at this list. If
-	// terminal width is the concern, pipe to less or use --limit.
 	for i, j := range resp.Items {
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		ts := j.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
-		fmt.Fprintf(w, "%-7s  %-9s  attempts=%-2d  %s  %s\n", j.Status, j.Kind, j.Attempts, ts, j.ID)
-		if j.DocURL != "" {
-			fmt.Fprintf(w, "  url: %s\n", j.DocURL)
-			if j.DocTitle != "" && j.DocTitle != j.DocURL {
-				fmt.Fprintf(w, "  title: %s\n", truncate(j.DocTitle, 100))
-			}
-			if docID := extractDocID(j.Payload); docID != "" {
-				fmt.Fprintf(w, "  doc_id: %s\n", docID)
-			}
-			if j.MarkdownPath != "" {
-				fmt.Fprintf(w, "  path: %s\n", j.MarkdownPath)
-			}
-		}
-		if j.LastError != nil && *j.LastError != "" {
-			for _, line := range wrapLines(*j.LastError, 100) {
-				fmt.Fprintf(w, "  err: %s\n", line)
-			}
-		}
-		// Payload is debugging signal when no DocURL was joined (import,
-		// cluster, summarize jobs). For fetch/index it's redundant with
-		// the URL we just printed.
-		if j.DocURL == "" && len(j.Payload) > 0 {
-			fmt.Fprintf(w, "  payload: %s\n", condense(string(j.Payload)))
-		}
-		// next attempt only makes sense while the job can still run. For
-		// terminal status (done, failed) the run_after field carries
-		// stale data from the last retry cycle — display would be
-		// confusing.
-		if (j.Status == "pending" || j.Status == "running") && !j.RunAfter.IsZero() {
-			fmt.Fprintf(w, "  next attempt: %s\n", j.RunAfter.Local().Format("2006-01-02 15:04:05 MST"))
-		}
+		renderJob(w, j)
 	}
 	fmt.Fprintf(w, "\n%d job(s)\n", len(resp.Items))
+}
+
+// renderJob prints one job: a header line and indented detail. No
+// truncation: full error messages are the whole point of looking at a
+// job. If terminal width is the concern, pipe to less.
+func renderJob(w io.Writer, j client.Job) {
+	ts := j.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
+	fmt.Fprintf(w, "%-7s  %-9s  attempts=%-2d  %s  %s\n", j.Status, j.Kind, j.Attempts, ts, j.ID)
+	if j.DocURL != "" {
+		fmt.Fprintf(w, "  url: %s\n", j.DocURL)
+		if j.DocTitle != "" && j.DocTitle != j.DocURL {
+			fmt.Fprintf(w, "  title: %s\n", truncate(j.DocTitle, 100))
+		}
+		if docID := extractDocID(j.Payload); docID != "" {
+			fmt.Fprintf(w, "  doc_id: %s\n", docID)
+		}
+		if j.MarkdownPath != "" {
+			fmt.Fprintf(w, "  path: %s\n", j.MarkdownPath)
+		}
+	}
+	if j.LastError != nil && *j.LastError != "" {
+		for _, line := range wrapLines(*j.LastError, 100) {
+			fmt.Fprintf(w, "  err: %s\n", line)
+		}
+	}
+	// Payload is debugging signal when no DocURL was joined (import,
+	// cluster, summarize jobs). For fetch/index it's redundant with
+	// the URL we just printed.
+	if j.DocURL == "" && len(j.Payload) > 0 {
+		fmt.Fprintf(w, "  payload: %s\n", condense(string(j.Payload)))
+	}
+	// next attempt only makes sense while the job can still run. For
+	// terminal status (done, failed) the run_after field carries
+	// stale data from the last retry cycle — display would be
+	// confusing.
+	if (j.Status == "pending" || j.Status == "running") && !j.RunAfter.IsZero() {
+		fmt.Fprintf(w, "  next attempt: %s\n", j.RunAfter.Local().Format("2006-01-02 15:04:05 MST"))
+	}
 }
 
 // wrapLines breaks s on word boundaries so a long error message renders
@@ -153,7 +174,7 @@ func wrapLines(s string, width int) []string {
 	return out
 }
 
-func newJobsPruneCmd() *cobra.Command {
+func newJobsPruneCmd(env *daemonctl.Env) *cobra.Command {
 	var olderThan string
 	cmd := &cobra.Command{
 		Use:   "prune",
@@ -176,17 +197,13 @@ Deleting a job doesn't change any document state. A failed doc stays
 failed (still visible in 'curio docs --failed') and can still be
 refetched. This command only trims the audit/history table.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
 			if olderThan == "" {
 				return errors.New("--older-than is required (e.g. 30d, 24h, 2h30m)")
 			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			resp, err := ctx.Client.PruneJobsOlderThan(cmd.Context(), olderThan)
+			resp, err := env.Client.PruneJobsOlderThan(cmd.Context(), olderThan)
 			if err != nil {
 				return err
 			}
@@ -198,7 +215,7 @@ refetched. This command only trims the audit/history table.`,
 	return cmd
 }
 
-func newJobsDeleteCmd() *cobra.Command {
+func newJobsDeleteCmd(env *daemonctl.Env) *cobra.Command {
 	var status string
 	cmd := &cobra.Command{
 		Use:   "delete",
@@ -217,17 +234,13 @@ Deleting a job doesn't change any document state. A failed doc stays
 failed (still visible in 'curio docs --failed') and can still be
 refetched.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
 			if status == "" {
 				return errors.New("--status is required (done|failed)")
 			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			resp, err := ctx.Client.DeleteJobsByStatus(cmd.Context(), status)
+			resp, err := env.Client.DeleteJobsByStatus(cmd.Context(), status)
 			if err != nil {
 				return err
 			}

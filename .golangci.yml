@@ -67,6 +67,8 @@ linters:
               desc: sqlitetest is test support; production code opens databases through internal/store/sqlite
             - pkg: github.com/samsar/curio/internal/api/apitest
               desc: apitest is test support; production code serves the API through internal/api
+            - pkg: github.com/getkin/kin-openapi
+              desc: kin-openapi checks the API against its spec in tests; it must never link into a binary
     errcheck:
       # Don't flag the idiomatic patterns where the error is genuinely
       # uninteresting: deferred Close on rows / bodies / files, and explicit
@@ -79,7 +81,6 @@ linters:
         - fmt.Fprintf
         - fmt.Fprintln
         - fmt.Fprint
-        - os.Setenv
     errorlint:
       # Some older call sites wrap a sentinel with %w and format the cause
       # with %v. fmt.Errorf has accepted several %w verbs since Go 1.20, so new

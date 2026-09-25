@@ -225,12 +225,16 @@ func (c *Controller) spawn(ctx context.Context) error {
 	if err := os.MkdirAll(c.Home.LogsDir(), 0o700); err != nil {
 		return fmt.Errorf("create logs dir: %w", err)
 	}
-	logFile, err := os.OpenFile(c.logPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	logFile, err := os.OpenFile(c.Home.DaemonLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open daemon log: %w", err)
 	}
 
 	cmd := exec.Command(c.DaemonBin)
+	// The daemon must serve exactly the home whose lock this controller
+	// watches, whatever this process's own $CURIO_HOME says. The last
+	// CURIO_HOME in the list is the one the child sees.
+	cmd.Env = append(os.Environ(), "CURIO_HOME="+c.Home.Path)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	// Setsid so the daemon survives the CLI exit.
@@ -347,7 +351,7 @@ func (c *Controller) waitReleased(ctx context.Context, pid int) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("daemon (pid %d) is still running %s after SIGTERM; see %s", pid, c.StopTimeout, c.logPath())
+			return fmt.Errorf("daemon (pid %d) is still running %s after SIGTERM; see %s", pid, c.StopTimeout, c.Home.DaemonLogPath())
 		}
 		select {
 		case <-ctx.Done():
@@ -373,15 +377,12 @@ func (c *Controller) legacyStopError(pid int) error {
 // startFailed builds the error for a daemon that didn't come up, with the
 // tail of its log: that's where a crashing daemon explains itself.
 func (c *Controller) startFailed(cause error) error {
-	tail, err := logTail(c.logPath(), logTailLines)
+	logPath := c.Home.DaemonLogPath()
+	tail, err := logTail(logPath, logTailLines)
 	if err != nil {
-		return fmt.Errorf("curio-daemon failed to start: %w (log %s unreadable: %w)", cause, c.logPath(), err)
+		return fmt.Errorf("curio-daemon failed to start: %w (log %s unreadable: %w)", cause, logPath, err)
 	}
-	return fmt.Errorf("curio-daemon failed to start: %w\nlast lines of %s:\n%s", cause, c.logPath(), tail)
-}
-
-func (c *Controller) logPath() string {
-	return filepath.Join(c.Home.LogsDir(), "daemon.log")
+	return fmt.Errorf("curio-daemon failed to start: %w\nlast lines of %s:\n%s", cause, logPath, tail)
 }
 
 // logTail returns the last n lines of the file at path, reading at most the

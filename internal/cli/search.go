@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -9,10 +8,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/textutil"
 )
 
-func newSearchCmd() *cobra.Command {
+func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		k           int
 		contentType []string
@@ -24,11 +24,7 @@ func newSearchCmd() *cobra.Command {
 		Short: "Hybrid BM25 + vector search across indexed bookmarks",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 			query := strings.Join(args, " ")
@@ -42,7 +38,7 @@ func newSearchCmd() *cobra.Command {
 				}
 			}
 
-			res, err := ctx.Client.Search(cmd.Context(), client.SearchRequest{
+			res, err := env.Client.Search(cmd.Context(), client.SearchRequest{
 				Query: query, K: k, Filters: filters,
 			})
 			if err != nil {

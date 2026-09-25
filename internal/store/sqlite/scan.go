@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 // listLimitDefault is the page size of a list whose options leave it unset.
@@ -91,6 +93,15 @@ func timePtr(t *time.Time) any {
 		return nil
 	}
 	return formatTime(*t)
+}
+
+// keysetAfter is the predicate for the rows strictly after key in a list
+// ordered by (tsCol DESC, idCol DESC), and its arguments. It is a row-value
+// comparison because SQLite turns that form, and not the equivalent
+// `ts < ? OR (ts = ? AND id < ?)`, into a range on an index ending in
+// (tsCol, idCol).
+func keysetAfter(tsCol, idCol string, key store.PageKey) (string, []any) {
+	return "(" + tsCol + ", " + idCol + ") < (?, ?)", []any{formatTime(key.At), key.ID}
 }
 
 // qualify prefixes every column in a comma-separated list with a table

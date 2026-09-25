@@ -333,11 +333,11 @@ func (s *Jobs) ListWithDoc(ctx context.Context, tenantID string, opts store.List
 	defer rows.Close()
 	var out []store.JobWithDoc
 	for rows.Next() {
-		var item store.JobWithDoc
-		if item.Job, err = scanJob(rows, &item.URL, &item.Title, &item.MarkdownPath); err != nil {
+		item, err := scanJobWithDoc(rows)
+		if err != nil {
 			return nil, fmt.Errorf("list jobs with doc: %w", err)
 		}
-		out = append(out, item)
+		out = append(out, *item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list jobs with doc: %w", err)
@@ -345,17 +345,50 @@ func (s *Jobs) ListWithDoc(ctx context.Context, tenantID string, opts store.List
 	return out, nil
 }
 
+// GetWithDoc reads the job through the same SELECT and joins as
+// ListWithDoc, so a job looks the same either way.
+func (s *Jobs) GetWithDoc(ctx context.Context, tenantID, id string) (*store.JobWithDoc, error) {
+	q, args := getJobWithDocQuery(tenantID, id)
+	job, err := scanJobWithDoc(s.db.QueryRowContext(ctx, q, args...))
+	if err != nil {
+		return nil, fmt.Errorf("get job %s: %w", id, err)
+	}
+	return job, nil
+}
+
+// jobWithDocSelect selects the tenant's jobs, each with its document's URL
+// and title and its current extraction's markdown path, in the columns
+// scanJobWithDoc reads. Its one argument is the tenant; callers append
+// further conditions.
+var jobWithDocSelect = "SELECT " + qualify("j", jobColumns) + ", COALESCE(d.url, '') AS doc_url, " +
+	"COALESCE(d.title, '') AS doc_title, COALESCE(e.markdown_path, '') AS markdown_path " +
+	"FROM jobs j " +
+	"LEFT JOIN documents d ON d.id = j.document_id " +
+	"LEFT JOIN document_extractions e ON e.id = d.current_extraction_id " +
+	"WHERE j.tenant_id = ?"
+
+// scanJobWithDoc scans a row of jobWithDocSelect.
+func scanJobWithDoc(row interface{ Scan(...any) error }) (*store.JobWithDoc, error) {
+	var item store.JobWithDoc
+	var err error
+	if item.Job, err = scanJob(row, &item.URL, &item.Title, &item.MarkdownPath); err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+// getJobWithDocQuery builds GetWithDoc's query: a point lookup on the jobs
+// primary key.
+func getJobWithDocQuery(tenantID, id string) (string, []any) {
+	return jobWithDocSelect + " AND j.id = ?", []any{tenantID, id}
+}
+
 // listJobsQuery builds ListWithDoc's query. It walks
 // idx_jobs_tenant_status_updated when filtered by status, and
-// idx_jobs_tenant_updated otherwise, in updated_at order, so it stops at the
-// limit instead of sorting every tenant job.
+// idx_jobs_tenant_updated otherwise, in (updated_at, id) order from
+// opts.After, so it stops at the limit instead of sorting every tenant job.
 func listJobsQuery(tenantID string, opts store.ListJobsOpts) (string, []any) {
-	q := "SELECT " + qualify("j", jobColumns) + ", COALESCE(d.url, '') AS doc_url, " +
-		"COALESCE(d.title, '') AS doc_title, COALESCE(e.markdown_path, '') AS markdown_path " +
-		"FROM jobs j " +
-		"LEFT JOIN documents d ON d.id = j.document_id " +
-		"LEFT JOIN document_extractions e ON e.id = d.current_extraction_id " +
-		"WHERE j.tenant_id = ?"
+	q := jobWithDocSelect
 	args := []any{tenantID}
 	if opts.Status != "" {
 		q += " AND j.status = ?"
@@ -365,7 +398,12 @@ func listJobsQuery(tenantID string, opts store.ListJobsOpts) (string, []any) {
 		q += " AND j.kind = ?"
 		args = append(args, opts.Kind)
 	}
-	q += " ORDER BY j.updated_at DESC LIMIT ?"
+	if !opts.After.IsZero() {
+		pred, predArgs := keysetAfter("j.updated_at", "j.id", opts.After)
+		q += " AND " + pred
+		args = append(args, predArgs...)
+	}
+	q += " ORDER BY j.updated_at DESC, j.id DESC LIMIT ?"
 	return q, append(args, listLimit(opts.Limit))
 }
 

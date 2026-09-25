@@ -101,6 +101,24 @@ func (s DocState) Valid() bool {
 	return false
 }
 
+// Valid reports whether s is one of the JobStatus constants.
+func (s JobStatus) Valid() bool {
+	switch s {
+	case JobStatusPending, JobStatusRunning, JobStatusDone, JobStatusFailed:
+		return true
+	}
+	return false
+}
+
+// Valid reports whether k is one of the JobKind constants.
+func (k JobKind) Valid() bool {
+	switch k {
+	case JobKindFetch, JobKindIndex, JobKindImport, JobKindCluster, JobKindSummarize:
+		return true
+	}
+	return false
+}
+
 // IsFinished reports whether s is terminal (done or failed). Only finished
 // jobs may be deleted: removing a pending or running job would strand its
 // document in pending with nothing left to move it on.
@@ -207,8 +225,9 @@ type DocumentStore interface {
 	RequeueFetchByStates(ctx context.Context, tenantID string, states []DocState) (int, error)
 
 	// ListWithLastError lists the tenant's documents, most recently updated
-	// first, each with the error of the most recent failed job that
-	// targeted it and the markdown path of its current extraction.
+	// first (then by ID, descending), each with the error of the most recent
+	// failed job that targeted it and the markdown path of its current
+	// extraction.
 	ListWithLastError(ctx context.Context, tenantID string, opts ListDocumentsOpts) ([]DocumentWithError, error)
 	// ListIDsWithContent returns the IDs of the tenant's documents in state
 	// that have a current extraction: the ones an index job can work on.
@@ -230,11 +249,26 @@ type FetchedMetadata struct {
 	PublishedAt  *time.Time
 }
 
+// PageKey is a position in a list ordered newest first by a timestamp and
+// then by ID: the timestamp and ID of the last row a page returned. The
+// next page is the rows strictly after it. The zero PageKey is the start of
+// the list.
+type PageKey struct {
+	At time.Time
+	ID string
+}
+
+// IsZero reports whether k is the start of a list.
+func (k PageKey) IsZero() bool {
+	return k.ID == "" && k.At.IsZero()
+}
+
 // ListDocumentsOpts filters DocumentStore.ListWithLastError. Empty fields
 // mean "no filter for that dimension".
 type ListDocumentsOpts struct {
 	State DocState
-	Limit int // <= 0 means the impl default (50)
+	Limit int     // <= 0 means the impl default (50)
+	After PageKey // updated_at and ID of the previous page's last row
 }
 
 // DocumentWithError is a document plus what a debug listing shows next to
@@ -269,7 +303,9 @@ type BookmarkStore interface {
 	// given. Ingest is the API path; Create is the low-level insert.
 	Create(ctx context.Context, b *Bookmark) error
 	GetByID(ctx context.Context, id string) (*Bookmark, error)
-	List(ctx context.Context, tenantID string, opts ListBookmarksOpts) ([]*Bookmark, error)
+	// List lists the tenant's bookmarks, newest first by CreatedAt (then by
+	// ID, descending), each with its document's state.
+	List(ctx context.Context, tenantID string, opts ListBookmarksOpts) ([]BookmarkWithState, error)
 	Delete(ctx context.Context, id string) error
 	LinkDocument(ctx context.Context, bookmarkID, documentID string) error
 
@@ -290,8 +326,15 @@ type IngestResult struct {
 	FetchJob        *Job     // enqueued for a document this call created; nil otherwise
 }
 
+// BookmarkWithState is a bookmark and the state of the document it links
+// to, read in the same query.
+type BookmarkWithState struct {
+	*Bookmark
+	DocumentState DocState // empty when the bookmark links to no document
+}
+
 // ListBookmarksOpts are filters for BookmarkStore.List. Empty fields mean
-// "no filter for that dimension." Pagination is cursor-based.
+// "no filter for that dimension."
 type ListBookmarksOpts struct {
 	Source string
 	// FolderPath matches that folder and every folder under it, on path
@@ -300,8 +343,8 @@ type ListBookmarksOpts struct {
 	// character is literal, a trailing "/" is ignored, and "/" alone is no
 	// filter.
 	FolderPath string
-	Limit      int    // 0 → impl default (50)
-	Cursor     string // opaque, from a previous result's NextCursor
+	Limit      int     // <= 0 means the impl default (50)
+	After      PageKey // created_at and ID of the previous page's last row
 }
 
 // Chunk is the indexed text segment unit. Each chunk owns one row in the
@@ -473,9 +516,12 @@ type JobQueue interface {
 // retention. Workers depend on JobQueue alone.
 type JobStore interface {
 	JobQueue
-	// ListWithDoc lists the tenant's jobs, most recently updated first, each
-	// joined to the document it works on.
+	// ListWithDoc lists the tenant's jobs, most recently updated first (then
+	// by ID, descending), each joined to the document it works on.
 	ListWithDoc(ctx context.Context, tenantID string, opts ListJobsOpts) ([]JobWithDoc, error)
+	// GetWithDoc returns one of the tenant's jobs joined to its document, as
+	// ListWithDoc lists it. ErrNotFound if the tenant has no such job.
+	GetWithDoc(ctx context.Context, tenantID, id string) (*JobWithDoc, error)
 	// CountByStatus counts the tenant's jobs per status. Statuses with no
 	// jobs are absent from the map.
 	CountByStatus(ctx context.Context, tenantID string) (map[JobStatus]int, error)
@@ -495,7 +541,8 @@ type JobStore interface {
 type ListJobsOpts struct {
 	Status JobStatus
 	Kind   JobKind
-	Limit  int // <= 0 means the impl default (50)
+	Limit  int     // <= 0 means the impl default (50)
+	After  PageKey // updated_at and ID of the previous page's last row
 }
 
 // JobWithDoc is a job plus the URL, title and current markdown path of the

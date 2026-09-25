@@ -1,7 +1,8 @@
 // Command curio-mcp is the Model Context Protocol sidecar for curio. It
 // exposes the saved-bookmark corpus to MCP clients (Claude Code, Claude
 // Desktop, …) over stdio, talking to the curio daemon via its local HTTP
-// API. The daemon is auto-started if it isn't already running.
+// API. The daemon is auto-started if it isn't already running, and started
+// again if it stops during the session.
 //
 // stdout is reserved for the MCP (JSON-RPC) channel; all diagnostics go to
 // stderr.
@@ -13,14 +14,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/samsar/curio/internal/client"
-	"github.com/samsar/curio/internal/config"
-	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/version"
 )
@@ -28,14 +26,14 @@ import (
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	c, err := setup()
+	d, err := setup(context.Background())
 	if err != nil {
 		log.Error("curio-mcp startup failed", "err", err)
 		os.Exit(1)
 	}
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "curio", Version: version.Version}, nil)
-	registerTools(srv, c)
+	registerTools(srv, d)
 
 	log.Info("curio-mcp serving over stdio", "tools", []string{"search_bookmarks", "get_document", "find_related", "list_interests"})
 	// Run blocks until the client disconnects (stdin EOF) or the session
@@ -46,59 +44,66 @@ func main() {
 	}
 }
 
-// setup resolves $CURIO_HOME, loads config, ensures the daemon is running,
-// and returns an HTTP client pointed at it. Mirrors the CLI's bootstrap.
-func setup() (*client.Client, error) {
-	homePath, err := curiohome.Resolve()
-	if err != nil {
-		return nil, err
-	}
-	home, err := curiohome.Open(homePath)
-	if errors.Is(err, curiohome.ErrNotInitialized) {
-		defaults := config.Default().Embedding
-		home, err = curiohome.Init(homePath, defaults.Model, defaults.Dim)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	cfg, err := config.Load(home.ConfigPath()) // missing file → defaults
-	if err != nil {
-		return nil, err
-	}
-	base := "http://" + cfg.Daemon.Listen
-
-	daemonBin := os.Getenv("CURIO_DAEMON_BIN")
-	if daemonBin == "" {
-		if exe, exeErr := os.Executable(); exeErr == nil {
-			daemonBin = filepath.Join(filepath.Dir(exe), "curio-daemon")
-		}
-	}
-	if err := daemonctl.New(home, daemonBin, base).EnsureRunning(context.Background()); err != nil {
-		return nil, fmt.Errorf("ensure daemon running: %w", err)
-	}
-	return client.New(base), nil
+// daemon is the sidecar's handle on the curio daemon: a client, and a way
+// to start the daemon when a call finds it gone.
+type daemon struct {
+	client *client.Client
+	// ensure returns once the daemon is running, starting it if need be
+	// (daemonctl.Controller.EnsureRunning).
+	ensure func(context.Context) error
 }
 
-func registerTools(s *mcp.Server, c *client.Client) {
+// setup finds the daemon for $CURIO_HOME the way the CLI does and ensures
+// it is running. Starting it here rather than at the first tool call makes
+// a daemon that can't start, or a port served for another home, fail the
+// sidecar at startup, where the MCP client shows it.
+func setup(ctx context.Context) (daemon, error) {
+	env, err := daemonctl.Discover("", "")
+	if err != nil {
+		return daemon{}, err
+	}
+	if err := env.Controller.EnsureRunning(ctx); err != nil {
+		return daemon{}, fmt.Errorf("ensure daemon running: %w", err)
+	}
+	return daemon{client: env.Client, ensure: env.Controller.EnsureRunning}, nil
+}
+
+// call runs fn, one request to the daemon. The sidecar lives for a whole
+// client session, and the daemon may stop underneath it: `curio daemon
+// stop` after a config change, an upgrade, a crash. So when fn finds the
+// daemon unreachable, call starts it and runs fn once more, which is safe
+// for any request because unreachable means no daemon received it. Other
+// errors are returned as they are; there is no second restart.
+func call[T any](ctx context.Context, d daemon, fn func(context.Context) (T, error)) (T, error) {
+	v, err := fn(ctx)
+	if !errors.Is(err, client.ErrDaemonUnreachable) {
+		return v, err
+	}
+	if startErr := d.ensure(ctx); startErr != nil {
+		return v, fmt.Errorf("%w; restarting the daemon failed: %w", err, startErr)
+	}
+	return fn(ctx)
+}
+
+func registerTools(s *mcp.Server, d daemon) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "search_bookmarks",
 		Description: "Hybrid keyword + semantic search over the user's saved bookmarks and articles. " +
 			"Returns the most relevant documents with snippets and their doc_id. " +
 			"Optionally filter by content type, bookmark source, or URL host.",
-	}, searchHandler(c))
+	}, searchHandler(d))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "get_document",
 		Description: "Fetch one saved document's metadata and full extracted markdown by its doc_id " +
 			"(as returned by search_bookmarks or find_related).",
-	}, getDocHandler(c))
+	}, getDocHandler(d))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "find_related",
 		Description: "Given a doc_id, find other saved documents related to it by embedding similarity " +
 			"over the document's indexed content (vector nearest-neighbor, not title matching).",
-	}, relatedHandler(c))
+	}, relatedHandler(d))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "list_interests",
@@ -107,7 +112,7 @@ func registerTools(s *mcp.Server, c *client.Client) {
 			"Use this to understand what the user reads about at a high level, or to pick a topic to " +
 			"drill into with search_bookmarks / get_document. If empty, clustering hasn't run yet " +
 			"(the user can run `curio interests rebuild`).",
-	}, listInterestsHandler(c))
+	}, listInterestsHandler(d))
 }
 
 // --- shared shapes ---
@@ -138,7 +143,7 @@ type searchInput struct {
 	Host        []string `json:"host,omitempty" jsonschema:"filter by URL host, e.g. github.com"`
 }
 
-func searchHandler(c *client.Client) mcp.ToolHandlerFor[searchInput, searchOutput] {
+func searchHandler(d daemon) mcp.ToolHandlerFor[searchInput, searchOutput] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, searchOutput, error) {
 		if strings.TrimSpace(in.Query) == "" {
 			return nil, searchOutput{}, errors.New("query is required")
@@ -147,7 +152,10 @@ func searchHandler(c *client.Client) mcp.ToolHandlerFor[searchInput, searchOutpu
 		if len(in.ContentType) > 0 || len(in.Source) > 0 || len(in.Host) > 0 {
 			filters = &client.SearchFilters{ContentType: in.ContentType, Source: in.Source, Host: in.Host}
 		}
-		res, err := c.Search(ctx, client.SearchRequest{Query: in.Query, K: in.K, Filters: filters})
+		req := client.SearchRequest{Query: in.Query, K: in.K, Filters: filters}
+		res, err := call(ctx, d, func(ctx context.Context) (*client.SearchResponse, error) {
+			return d.client.Search(ctx, req)
+		})
 		if err != nil {
 			return nil, searchOutput{}, fmt.Errorf("search: %w", err)
 		}
@@ -185,12 +193,17 @@ type getDocOutput struct {
 	Markdown    string `json:"markdown"`
 }
 
-func getDocHandler(c *client.Client) mcp.ToolHandlerFor[getDocInput, getDocOutput] {
+func getDocHandler(d daemon) mcp.ToolHandlerFor[getDocInput, getDocOutput] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in getDocInput) (*mcp.CallToolResult, getDocOutput, error) {
 		if strings.TrimSpace(in.ID) == "" {
 			return nil, getDocOutput{}, errors.New("id is required")
 		}
-		doc, err := c.GetDocument(ctx, in.ID)
+		doc, err := call(ctx, d, func(ctx context.Context) (*client.Document, error) {
+			return d.client.GetDocument(ctx, in.ID)
+		})
+		if client.IsNotFound(err) {
+			return nil, getDocOutput{}, fmt.Errorf("document %q not found", in.ID)
+		}
 		if err != nil {
 			return nil, getDocOutput{}, fmt.Errorf("get document: %w", err)
 		}
@@ -198,15 +211,20 @@ func getDocHandler(c *client.Client) mcp.ToolHandlerFor[getDocInput, getDocOutpu
 			DocID: doc.ID, Title: docTitle(*doc), URL: doc.URL,
 			ContentType: doc.ContentType, State: doc.State,
 		}
-		// Content is best-effort: a doc may not have an extraction yet.
-		if md, cerr := c.GetDocumentContent(ctx, in.ID); cerr == nil {
-			out.Markdown = md
+		// A document that hasn't been fetched yet has no content, so a 404
+		// here is an answer. Any other failure is reported, not passed off
+		// as a document without content.
+		out.Markdown, err = call(ctx, d, func(ctx context.Context) (string, error) {
+			return d.client.GetDocumentContent(ctx, in.ID)
+		})
+		if err != nil && !client.IsNotFound(err) {
+			return nil, getDocOutput{}, fmt.Errorf("get the content of document %q: %w", in.ID, err)
 		}
-		text := out.Markdown
-		if text == "" {
-			text = fmt.Sprintf("# %s\n%s\n\n(no extracted content available; document state: %s)", out.Title, out.URL, out.State)
+		if out.Markdown == "" {
+			return textResult(fmt.Sprintf("# %s\n%s\n\n(no extracted content available; document state: %s)",
+				out.Title, out.URL, out.State)), out, nil
 		}
-		return textResult(text), out, nil
+		return textResult(out.Markdown), out, nil
 	}
 }
 
@@ -217,7 +235,7 @@ type relatedInput struct {
 	K  int    `json:"k,omitempty" jsonschema:"max related documents (default 5)"`
 }
 
-func relatedHandler(c *client.Client) mcp.ToolHandlerFor[relatedInput, searchOutput] {
+func relatedHandler(d daemon) mcp.ToolHandlerFor[relatedInput, searchOutput] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in relatedInput) (*mcp.CallToolResult, searchOutput, error) {
 		if strings.TrimSpace(in.ID) == "" {
 			return nil, searchOutput{}, errors.New("id is required")
@@ -226,7 +244,9 @@ func relatedHandler(c *client.Client) mcp.ToolHandlerFor[relatedInput, searchOut
 		if k <= 0 {
 			k = 5
 		}
-		res, err := c.RelatedDocuments(ctx, in.ID, k)
+		res, err := call(ctx, d, func(ctx context.Context) (*client.RelatedResponse, error) {
+			return d.client.RelatedDocuments(ctx, in.ID, k)
+		})
 		if err != nil {
 			return nil, searchOutput{}, fmt.Errorf("find related: %w", err)
 		}
@@ -269,7 +289,7 @@ type listInterestsOutput struct {
 	NumNoise     int           `json:"num_noise"`
 }
 
-func listInterestsHandler(c *client.Client) mcp.ToolHandlerFor[listInterestsInput, listInterestsOutput] {
+func listInterestsHandler(d daemon) mcp.ToolHandlerFor[listInterestsInput, listInterestsOutput] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in listInterestsInput) (*mcp.CallToolResult, listInterestsOutput, error) {
 		limit := in.Limit
 		if limit <= 0 {
@@ -279,7 +299,9 @@ func listInterestsHandler(c *client.Client) mcp.ToolHandlerFor[listInterestsInpu
 		if members <= 0 {
 			members = 5
 		}
-		res, err := c.ListInterests(ctx, client.ListInterestsOpts{Limit: limit, Members: members})
+		res, err := call(ctx, d, func(ctx context.Context) (*client.InterestList, error) {
+			return d.client.ListInterests(ctx, client.ListInterestsOpts{Limit: limit, Members: members})
+		})
 		if err != nil {
 			return nil, listInterestsOutput{}, fmt.Errorf("list interests: %w", err)
 		}
