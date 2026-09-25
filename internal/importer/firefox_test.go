@@ -59,6 +59,11 @@ func buildFixturePlaces(t *testing.T) string {
 		{22, ffTypeBookmark, 3, 2, "Example", 0, "bm_example__"},       // menu (direct)
 		{30, 2, nil, 4, "mytag", 0, "tagcontainer"},                    // under tags
 		{31, ffTypeBookmark, 1, 30, "Go (tagged)", 0, "bm_go_tag___"},  // under tags -> skip
+		{32, 2, nil, 4, "golang", 0, "tagcontain2"},                    // second tag
+		{33, ffTypeBookmark, 1, 32, "", 0, "bm_go_tag2__"},             // go.dev tagged golang
+		{34, ffTypeBookmark, 1, 30, "", 0, "bm_go_tag3__"},             // go.dev tagged mytag again
+		{35, 2, nil, 4, " ai ", 0, "tagcontain3"},                      // tag on another place
+		{36, ffTypeBookmark, 2, 35, "", 0, "bm_anth_tag_"},             // anthropic tagged ai
 		{40, 3, nil, 2, "", 0, "separator___"},                         // separator -> skip
 	}
 	for _, r := range rows {
@@ -77,7 +82,7 @@ func TestParseFirefox(t *testing.T) {
 	bms, err := ParseFirefox(path)
 	require.NoError(t, err)
 
-	// 3 real bookmarks; the tagged entry and the separator are excluded.
+	// 3 real bookmarks; the tag entries and the separator are excluded.
 	require.Len(t, bms, 3)
 
 	byTitle := map[string]ParsedBookmark{}
@@ -103,6 +108,12 @@ func TestParseFirefox(t *testing.T) {
 		}
 	}
 	assert.Zero(t, goCount, "tag entries should be skipped")
+
+	// Tag names are attached to the real bookmark of the tagged place,
+	// sorted and de-duplicated.
+	assert.Equal(t, []string{"golang", "mytag"}, byTitle["Go"].Tags)
+	assert.Equal(t, []string{"ai"}, byTitle["Anthropic"].Tags)
+	assert.Nil(t, byTitle["Example"].Tags, "untagged bookmarks carry no tags")
 }
 
 func TestParseFirefox_Empty(t *testing.T) {

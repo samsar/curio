@@ -4,9 +4,11 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -19,7 +21,8 @@ import (
 // with parent pointers; moz_places holds the URLs. Root containers are
 // identified by stable GUIDs rather than IDs.
 const (
-	ffTypeBookmark = 1 // moz_bookmarks.type for a URL (2 = folder, 3 = separator)
+	ffTypeBookmark = 1 // moz_bookmarks.type for a URL
+	ffTypeFolder   = 2 // (3 = separator)
 
 	ffGUIDRoot    = "root________"
 	ffGUIDMenu    = "menu________"
@@ -143,7 +146,9 @@ func parseINI(path string) map[string]map[string]string {
 // places.sqlite is usually open and in WAL mode while Firefox runs, so we
 // copy it (plus its -wal/-shm sidecars, which carry un-checkpointed writes
 // like a bookmark added seconds ago) to a temp file and read that. Tag
-// entries (under the Tags root) and separators are skipped.
+// entries (under the Tags root) are not bookmarks themselves; their tag names
+// are attached to the real bookmarks of the same place. Separators are
+// skipped.
 func ParseFirefox(placesPath string) ([]ParsedBookmark, error) {
 	tmp, cleanup, err := copyDBForRead(placesPath)
 	if err != nil {
@@ -159,7 +164,8 @@ func ParseFirefox(placesPath string) ([]ParsedBookmark, error) {
 
 	rows, err := db.Query(`
 		SELECT b.id, b.type, COALESCE(b.parent, 0), COALESCE(b.title, ''),
-		       COALESCE(b.dateAdded, 0), COALESCE(b.guid, ''), COALESCE(p.url, '')
+		       COALESCE(b.dateAdded, 0), COALESCE(b.guid, ''), COALESCE(p.url, ''),
+		       COALESCE(b.fk, 0)
 		FROM moz_bookmarks b
 		LEFT JOIN moz_places p ON p.id = b.fk`)
 	if err != nil {
@@ -172,7 +178,7 @@ func ParseFirefox(placesPath string) ([]ParsedBookmark, error) {
 	var tagsRootID int64
 	for rows.Next() {
 		var n ffNode
-		if err := rows.Scan(&n.id, &n.typ, &n.parent, &n.title, &n.dateMicros, &n.guid, &n.url); err != nil {
+		if err := rows.Scan(&n.id, &n.typ, &n.parent, &n.title, &n.dateMicros, &n.guid, &n.url, &n.place); err != nil {
 			return nil, fmt.Errorf("firefox: scan: %w", err)
 		}
 		node := n
@@ -186,6 +192,7 @@ func ParseFirefox(placesPath string) ([]ParsedBookmark, error) {
 		return nil, fmt.Errorf("firefox: rows: %w", err)
 	}
 
+	tags := firefoxTags(order, byID, tagsRootID)
 	var out []ParsedBookmark
 	for _, n := range order {
 		if n.typ != ffTypeBookmark || n.url == "" {
@@ -199,6 +206,7 @@ func ParseFirefox(placesPath string) ([]ParsedBookmark, error) {
 			URL:        canonicalURL(n.url),
 			Title:      strings.TrimSpace(n.title),
 			FolderPath: path,
+			Tags:       tags[n.place],
 			SavedAt:    firefoxMicrosToTime(n.dateMicros),
 		})
 	}
@@ -216,6 +224,40 @@ type ffNode struct {
 	url        string
 	guid       string
 	dateMicros int64
+	place      int64 // moz_bookmarks.fk → moz_places.id; 0 for folders
+}
+
+// firefoxTags maps each place to its tag names, sorted and de-duplicated.
+// Firefox stores a tag as a folder directly under the Tags root holding one
+// bookmark row per tagged place; the folder's title is the tag. Keying by
+// place rather than URL string matches how Firefox links them.
+func firefoxTags(nodes []*ffNode, byID map[int64]*ffNode, tagsRootID int64) map[int64][]string {
+	if tagsRootID == 0 {
+		return nil
+	}
+	sets := make(map[int64]map[string]bool)
+	for _, n := range nodes {
+		if n.typ != ffTypeBookmark || n.place == 0 {
+			continue
+		}
+		folder, ok := byID[n.parent]
+		if !ok || folder.typ != ffTypeFolder || folder.parent != tagsRootID {
+			continue
+		}
+		tag := strings.TrimSpace(folder.title)
+		if tag == "" {
+			continue
+		}
+		if sets[n.place] == nil {
+			sets[n.place] = make(map[string]bool)
+		}
+		sets[n.place][tag] = true
+	}
+	tags := make(map[int64][]string, len(sets))
+	for place, set := range sets {
+		tags[place] = slices.Sorted(maps.Keys(set))
+	}
+	return tags
 }
 
 // firefoxFolderPath walks parent pointers up to a root container, building

@@ -982,7 +982,12 @@ with remediation when macOS denies access due to TCC restrictions.
 plist (with `CURIO_SAFARI_DIR` env override for tests), `ParseSafari()`
 accepts an `io.ReadSeeker`, folder hierarchy is preserved in
 `FolderPath`. Root folders are labeled "Favorites" (BookmarksBar) and
-"Bookmarks Menu" rather than their internal identifiers.
+"Bookmarks Menu" rather than their internal identifiers. A bookmark saved
+directly under the root (not in any folder) is imported with an empty
+`FolderPath`; the parser used to treat every root child as a folder and
+silently drop these. Bookmarks already imported are not updated (re-import
+skips existing rows), but the ones that were dropped are new, so re-running
+`curio import safari` adds them.
 
 ---
 
@@ -1013,9 +1018,16 @@ Profile discovery prefers the **`[Install*]` default** in `profiles.ini`.
 **Schema notes:** `moz_bookmarks.type` 1 = bookmark, 2 = folder, 3 =
 separator. `dateAdded` is **microseconds since the Unix epoch** (unlike
 Chrome's 1601 epoch). The Tags root (`tags________`) contains tag
-pseudo-bookmarks, not real folders — its subtree is skipped so tagged URLs
-don't double-count. Root GUIDs map to friendly labels ("Bookmarks Menu",
-"Bookmarks Toolbar", "Other Bookmarks", "Mobile Bookmarks").
+pseudo-bookmarks, not real folders — its subtree is not emitted, so tagged
+URLs don't double-count. But its tag *names* are kept: each folder directly
+under the Tags root is a tag, holding one row per tagged place, so the parser
+maps place id (`moz_bookmarks.fk`) → tags and attaches them, sorted and
+de-duplicated, to every real bookmark of that place. They then flow into
+`bookmarks.tags` and the search index like HTML-export `TAGS=`; before, Firefox
+users lost them entirely. Bookmarks imported earlier don't gain their tags:
+re-import skips existing rows, and updating them is out of scope. Root GUIDs
+map to friendly labels ("Bookmarks Menu", "Bookmarks Toolbar", "Other
+Bookmarks", "Mobile Bookmarks").
 
 **Shape deviation:** `ParseFirefox` takes a *path*, not an `io.Reader` like
 the other parsers — SQLite needs a real file to open. The CLI passes the
