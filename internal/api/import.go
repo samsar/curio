@@ -27,7 +27,7 @@ type ImportBookmark struct {
 	Title      string    `json:"title,omitempty"`
 	FolderPath string    `json:"folder_path,omitempty"`
 	Tags       []string  `json:"tags,omitempty"`
-	SavedAt    time.Time `json:"saved_at,omitempty"`
+	SavedAt    time.Time `json:"saved_at,omitzero"` // zero (absent) means now
 }
 
 // ImportResponse summarizes what happened. Counts always present, errors
@@ -48,16 +48,15 @@ const importErrorsCap = 10
 func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 	var req ImportRequest
 	if err := decodeJSON(w, r, maxImportBody, &req); err != nil {
-		writeDecodeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
-	if !validImportSource(req.Source) {
-		writeProblem(w, http.StatusBadRequest, "bad request",
-			"source must be one of: chrome, safari, firefox, html, manual")
+	if !validSource(req.Source) {
+		writeProblem(w, r, http.StatusBadRequest, "bad request", "source must be one of: "+sourceList)
 		return
 	}
 	if len(req.Bookmarks) == 0 {
-		writeProblem(w, http.StatusBadRequest, "bad request", "bookmarks list is empty")
+		writeProblem(w, r, http.StatusBadRequest, "bad request", "bookmarks list is empty")
 		return
 	}
 
@@ -107,7 +106,7 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	d.writeJSON(w, r, http.StatusOK, resp)
 }
 
 func (r *ImportResponse) appendError(msg string) {
@@ -117,7 +116,11 @@ func (r *ImportResponse) appendError(msg string) {
 	r.Errors = append(r.Errors, msg)
 }
 
-func validImportSource(s string) bool {
+// sourceList names the values validSource accepts, for error details.
+const sourceList = "chrome, safari, firefox, html, manual"
+
+// validSource reports whether s is a bookmark source (bookmarks.source).
+func validSource(s string) bool {
 	switch s {
 	case store.SourceChrome, store.SourceSafari, store.SourceFirefox,
 		store.SourceManual, store.SourceHTML:

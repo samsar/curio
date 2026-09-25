@@ -98,6 +98,79 @@ func TestListJobs(t *testing.T) {
 	require.Len(t, pending.Items, 1)
 	assert.Equal(t, "cluster", pending.Items[0].Kind)
 	assert.Empty(t, pending.Items[0].DocURL)
+
+	for query, detail := range map[string]string{
+		"?status=bogus": `status "bogus" must be one of: pending, running, done, failed`,
+		"?kind=bogus":   `kind "bogus" must be one of: fetch, index, import, cluster, summarize`,
+	} {
+		p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/jobs" + query}), http.StatusBadRequest)
+		assert.Equal(t, detail, p.Detail, query)
+	}
+}
+
+// TestListJobs_Paging: jobs that share an updated_at still page in a fixed
+// order, each once, and next_cursor is set exactly when another page
+// follows.
+func TestListJobs_Paging(t *testing.T) {
+	s := newTestServer(t)
+	for i := range 5 {
+		_, err := s.db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, updated_at)
+			VALUES (?, 'local', 'fetch', '{}', 'done', '2024-01-01T00:00:00.000Z')`, fmt.Sprintf("job-%d", i))
+		require.NoError(t, err)
+	}
+	ids := make([]string, 0, 5)
+	cursor := ""
+	for range 3 {
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/jobs?limit=2&cursor=" + cursor})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var page JobListResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &page))
+		for _, j := range page.Items {
+			ids = append(ids, j.ID)
+		}
+		cursor = page.NextCursor
+	}
+	assert.Empty(t, cursor, "the third page is the last")
+	assert.Equal(t, []string{"job-4", "job-3", "job-2", "job-1", "job-0"}, ids)
+}
+
+func TestGetJob(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	_, err := s.db.Exec(`UPDATE documents SET title = 'A' WHERE id = ?`, doc.ID)
+	require.NoError(t, err)
+	ext := s.seedContent(t, doc, "# A")
+	fetch, err := store.NewDocumentJob("local", store.JobKindFetch, doc.ID)
+	require.NoError(t, err)
+	require.NoError(t, s.deps.Queue.Enqueue(ctx, fetch))
+	cluster := &store.Job{TenantID: "local", Kind: store.JobKindCluster}
+	require.NoError(t, s.deps.Queue.Enqueue(ctx, cluster))
+
+	get := func(id string) JobResponse {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/jobs/" + id})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got JobResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		return got
+	}
+
+	j := get(fetch.ID)
+	assert.Equal(t, fetch.ID, j.ID)
+	assert.Equal(t, "fetch", j.Kind)
+	assert.Equal(t, "pending", j.Status)
+	assert.Equal(t, "https://example.com/a", j.DocURL)
+	assert.Equal(t, "A", j.DocTitle)
+	assert.Equal(t, filepath.Join(s.deps.Home.ContentDir(), *ext.MarkdownPath), j.MarkdownPath)
+
+	j = get(cluster.ID)
+	assert.Equal(t, "cluster", j.Kind)
+	assert.Empty(t, j.DocURL, "a cluster job has no document")
+	assert.Empty(t, j.MarkdownPath)
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/jobs/no-such-job"}), http.StatusNotFound)
+	assert.Equal(t, `job "no-such-job" not found`, p.Detail)
 }
 
 func TestDeleteJobs_BadRequests(t *testing.T) {

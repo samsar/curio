@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -79,20 +80,42 @@ func NewServer(ln net.Listener, deps Deps) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	router, err := newRouter(deps, origin)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{
+		deps: deps,
+		ln:   ln,
+		srv: &http.Server{
+			Handler:           router,
+			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
+		},
+	}, nil
+}
 
+// newRouter builds the API's routes and middleware for a daemon that is its
+// own origin under origin. deps must have Log and TenantID set.
+func newRouter(deps Deps, origin localOrigin) (chi.Router, error) {
 	r := chi.NewRouter()
-	r.Use(middleware.Recoverer)
+	// Router-level, so every response, 404s and 405s included, carries a
+	// request ID and is logged; the checks after recovery then run before
+	// routing.
 	r.Use(middleware.RequestID)
+	r.Use(exposeRequestID)
 	// middleware.RealIP is intentionally NOT used — it's deprecated due to
 	// X-Forwarded-For spoofing risk and we listen on loopback only, so
 	// remote addrs are always loopback anyway.
 	r.Use(loggingMiddleware(deps.Log))
-	// Router-level, so they run before routing and cover 404/405 too.
+	r.Use(recoverProblem(deps.Log))
 	r.Use(requireLocalHost(origin, deps.Log))
 	r.Use(rejectForeignOrigin(origin, deps.Log))
 	r.Use(requireJSONBody)
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-		writeProblem(w, http.StatusNotFound, "not found", "no route for "+req.URL.Path)
+		writeProblem(w, req, http.StatusNotFound, "not found", "no route for "+req.URL.Path)
 	})
 	// The index is built after the routes below; this handler only runs
 	// once the server is serving.
@@ -100,7 +123,7 @@ func NewServer(ln net.Listener, deps Deps) (*Server, error) {
 	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
 		allowed := strings.Join(allowedMethods(methods, req.URL.Path), ", ")
 		w.Header().Set("Allow", allowed)
-		writeProblem(w, http.StatusMethodNotAllowed, "method not allowed",
+		writeProblem(w, req, http.StatusMethodNotAllowed, "method not allowed",
 			fmt.Sprintf("%s %s is not supported; allowed: %s", req.Method, req.URL.Path, allowed))
 	})
 
@@ -138,22 +161,13 @@ func NewServer(ln net.Listener, deps Deps) (*Server, error) {
 
 		r.Get("/jobs", deps.handleListJobs)
 		r.Delete("/jobs", deps.handleDeleteJobs)
+		r.Get("/jobs/{id}", deps.handleGetJob)
 	})
+	var err error
 	if methods, err = methodIndex(r); err != nil {
 		return nil, err
 	}
-
-	return &Server{
-		deps: deps,
-		ln:   ln,
-		srv: &http.Server{
-			Handler:           r,
-			ReadHeaderTimeout: readHeaderTimeout,
-			ReadTimeout:       readTimeout,
-			WriteTimeout:      writeTimeout,
-			IdleTimeout:       idleTimeout,
-		},
-	}, nil
+	return r, nil
 }
 
 // Serve serves on the listener passed to NewServer until ctx is cancelled,
@@ -182,6 +196,16 @@ func (s *Server) Serve(ctx context.Context) error {
 	return nil
 }
 
+// exposeRequestID returns the request's ID (see middleware.RequestID) in
+// the X-Request-Id response header, so a client can quote it against the
+// daemon's log.
+func exposeRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(middleware.RequestIDHeader, middleware.GetReqID(r.Context()))
+		next.ServeHTTP(w, r)
+	})
+}
+
 // loggingMiddleware records each request at info level with status and
 // duration. Avoids middleware.Logger because we want structured slog output
 // instead of stdlib log.
@@ -192,12 +216,48 @@ func loggingMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			next.ServeHTTP(ww, r)
 			log.Info("http",
+				"request_id", middleware.GetReqID(r.Context()),
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", ww.Status(),
 				"bytes", ww.BytesWritten(),
 				"duration_ms", time.Since(start).Milliseconds(),
 			)
+		})
+	}
+}
+
+// recoverProblem turns a panicking handler into a logged 500 problem. It
+// replaces middleware.Recoverer, which answers with a bare 500 and prints
+// a colored stack to stderr, the daemon's JSON log. http.ErrAbortHandler
+// is re-panicked: it is how a handler asks net/http to abort the response.
+func recoverProblem(log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				v := recover()
+				if v == nil {
+					return
+				}
+				if err, ok := v.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					panic(v)
+				}
+				log.Error("handler panicked",
+					"request_id", middleware.GetReqID(r.Context()),
+					"method", r.Method,
+					"path", r.URL.Path,
+					"panic", fmt.Sprint(v),
+					"stack", string(debug.Stack()),
+				)
+				// A handler that panics after its answer has started can
+				// only have the connection cut short.
+				if ww, ok := w.(middleware.WrapResponseWriter); ok && ww.Status() != 0 {
+					return
+				}
+				writeProblem(w, r, http.StatusInternalServerError, "internal error",
+					fmt.Sprintf("the handler panicked: %v", v))
+			}()
+			next.ServeHTTP(w, r)
 		})
 	}
 }
@@ -247,22 +307,22 @@ const (
 	maxListLimit     = 500
 )
 
-// listLimit reads a list endpoint's ?limit: 1 through maxListLimit is
-// honored, and anything else (absent, malformed, out of range) means
-// defaultListLimit.
+// listLimit reads a list endpoint's ?limit.
 func listLimit(r *http.Request) int {
-	n, err := strconv.Atoi(r.URL.Query().Get("limit"))
-	if err != nil || n < 1 || n > maxListLimit {
-		return defaultListLimit
-	}
-	return n
+	return intQuery(r, "limit", defaultListLimit, 1, maxListLimit)
 }
 
-// writeJSON is a small helper to set Content-Type and encode.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+// intQuery reads a sizing parameter such as ?limit: a value in lo..hi is
+// honored, and anything else (absent, malformed, out of range) means def.
+// Filters are validated instead (docs/decisions.md "API: filters are
+// validated, sizing knobs default"): a wrong filter returns wrong rows,
+// while a wrong size still returns the right ones.
+func intQuery(r *http.Request, name string, def, lo, hi int) int {
+	n, err := strconv.Atoi(r.URL.Query().Get(name))
+	if err != nil || n < lo || n > hi {
+		return def
+	}
+	return n
 }
 
 // Request body limits. Oversized bodies are rejected with 413 rather than
@@ -276,13 +336,19 @@ const (
 	maxImportBody = 32 << 20
 )
 
-// errBodyTooLarge marks a request body that exceeded its size limit.
+// errBodyTooLarge marks a request body that exceeded its size limit;
+// writeError answers it 413.
 var errBodyTooLarge = errors.New("request body too large")
 
 // decodeJSON parses a request body of at most limit bytes holding exactly
-// one JSON value. It returns an error wrapping errBodyTooLarge when the
-// limit is exceeded; any other error is a malformed body. writeDecodeError
-// maps both.
+// one JSON value into v. An oversized body is an error wrapping
+// errBodyTooLarge, and anything else wrong with it a requestError, so
+// writeError maps both.
+//
+// Unknown fields are refused: a field the daemon ignored would be a filter
+// or knob silently not applied, and a newer client sending one to an older
+// daemon is told to restart it (docs/decisions.md "API: tolerant responses,
+// strict requests").
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) error {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	dec.DisallowUnknownFields()
@@ -291,10 +357,19 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) erro
 		err = expectEOF(dec)
 	}
 	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &tooLarge):
 		return fmt.Errorf("%w: limit is %d bytes", errBodyTooLarge, tooLarge.Limit)
 	}
-	return err
+	// encoding/json has no error type for an unknown field, only this text.
+	if field, ok := strings.CutPrefix(err.Error(), "json: unknown field "); ok {
+		return badRequest("unknown field %s: this curio-daemon (version %s) doesn't support it. "+
+			"If the client is newer, restart the daemon: run `curio daemon stop`, and the next command starts the current one",
+			field, version.String())
+	}
+	return badRequest("malformed JSON body: %w", err)
 }
 
 // expectEOF checks that only whitespace follows the decoded value. Reading
@@ -308,14 +383,4 @@ func expectEOF(dec *json.Decoder) error {
 	default:
 		return errors.New("unexpected data after the JSON value")
 	}
-}
-
-// writeDecodeError reports a decodeJSON failure: 413 for an oversized body,
-// 400 for anything else.
-func writeDecodeError(w http.ResponseWriter, err error) {
-	if errors.Is(err, errBodyTooLarge) {
-		writeProblem(w, http.StatusRequestEntityTooLarge, "request body too large", err.Error())
-		return
-	}
-	writeProblem(w, http.StatusBadRequest, "bad request", err.Error())
 }

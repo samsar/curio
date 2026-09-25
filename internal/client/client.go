@@ -5,14 +5,18 @@ package client
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -145,16 +149,19 @@ func (c *Client) CreateBookmark(ctx context.Context, req CreateBookmarkRequest) 
 	return &out, nil
 }
 
+// BookmarkListOpts filters and pages ListBookmarks.
 type BookmarkListOpts struct {
 	Source string
 	Folder string
 	Limit  int
-	Cursor string
+	Cursor string // a previous page's NextCursor
 }
 
+// BookmarkList mirrors api.BookmarkListResponse. NextCursor is empty on the
+// last page.
 type BookmarkList struct {
 	Items      []Bookmark `json:"items"`
-	NextCursor *string    `json:"next_cursor,omitempty"`
+	NextCursor string     `json:"next_cursor,omitempty"`
 }
 
 func (c *Client) ListBookmarks(ctx context.Context, opts BookmarkListOpts) (*BookmarkList, error) {
@@ -189,7 +196,7 @@ type ImportBookmark struct {
 	Title      string    `json:"title,omitempty"`
 	FolderPath string    `json:"folder_path,omitempty"`
 	Tags       []string  `json:"tags,omitempty"`
-	SavedAt    time.Time `json:"saved_at,omitempty"`
+	SavedAt    time.Time `json:"saved_at,omitzero"` // zero when the source has no date; the daemon uses now
 }
 
 // ImportRequest mirrors api.ImportRequest.
@@ -234,8 +241,8 @@ type Document struct {
 	UpdatedAt         time.Time   `json:"updated_at"`
 }
 
-// Extraction mirrors api.ExtractionResponse. MarkdownPath is relative to
-// the daemon's content directory; the CLI joins them when displaying.
+// Extraction mirrors api.ExtractionResponse. MarkdownPath is the absolute
+// path of the extracted markdown on the daemon's machine.
 type Extraction struct {
 	ID             string         `json:"id"`
 	FetchedAt      time.Time      `json:"fetched_at"`
@@ -254,24 +261,18 @@ func (c *Client) GetDocument(ctx context.Context, id string) (*Document, error) 
 	return &out, nil
 }
 
-// GetDocumentContent returns the raw markdown body for a document.
+// GetDocumentContent returns the extracted markdown of a document. A
+// document with no content yet is an *APIError with Status 404.
 func (c *Client) GetDocumentContent(ctx context.Context, id string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/v1/documents/"+id+"/content", nil)
+	path := "/v1/documents/" + id + "/content"
+	resp, err := c.send(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return "", err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrDaemonUnreachable, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("GET %s: read content: %w", path, err)
 	}
 	return string(body), nil
 }
@@ -307,9 +308,9 @@ type ChunkMatch struct {
 	VectorScore *float64 `json:"vector_score,omitempty"`
 }
 
-// Document mirrors api.DocumentListItem. (Single-doc get returns more
-// fields; the list endpoint only carries the debug-relevant subset plus
-// last_error.)
+// DocumentListItem mirrors api.DocumentListItem: the list endpoint's
+// debug-oriented subset of a document, plus its last error and absolute
+// markdown path.
 type DocumentListItem struct {
 	ID           string    `json:"id"`
 	URL          string    `json:"url"`
@@ -322,15 +323,18 @@ type DocumentListItem struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-// DocumentList mirrors api.DocumentListResponse.
+// DocumentList mirrors api.DocumentListResponse. NextCursor is empty on the
+// last page.
 type DocumentList struct {
-	Items []DocumentListItem `json:"items"`
+	Items      []DocumentListItem `json:"items"`
+	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
-// ListDocumentsOpts filters for ListDocuments.
+// ListDocumentsOpts filters and pages ListDocuments.
 type ListDocumentsOpts struct {
-	State string // pending | fetched | failed | dead
-	Limit int
+	State  string // pending | fetched | failed | dead
+	Limit  int
+	Cursor string // a previous page's NextCursor
 }
 
 func (c *Client) ListDocuments(ctx context.Context, opts ListDocumentsOpts) (*DocumentList, error) {
@@ -340,6 +344,9 @@ func (c *Client) ListDocuments(ctx context.Context, opts ListDocumentsOpts) (*Do
 	}
 	if opts.Limit > 0 {
 		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Cursor != "" {
+		q.Set("cursor", opts.Cursor)
 	}
 	path := "/v1/documents"
 	if len(q) > 0 {
@@ -418,11 +425,12 @@ func (c *Client) ReindexAll(ctx context.Context, state string) (*ReindexAllRespo
 	return &out, nil
 }
 
-// JobListOpts filters for ListJobs.
+// JobListOpts filters and pages ListJobs.
 type JobListOpts struct {
 	Status string
 	Kind   string
 	Limit  int
+	Cursor string // a previous page's NextCursor
 }
 
 // Job mirrors api.JobResponse.
@@ -441,9 +449,21 @@ type Job struct {
 	MarkdownPath string          `json:"markdown_path,omitempty"`
 }
 
-// JobList mirrors api.JobListResponse.
+// JobList mirrors api.JobListResponse. NextCursor is empty on the last
+// page.
 type JobList struct {
-	Items []Job `json:"items"`
+	Items      []Job  `json:"items"`
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
+// GetJob returns one job, as ListJobs shows it: poll it with the job_id a
+// refetch, reindex or interests rebuild returned.
+func (c *Client) GetJob(ctx context.Context, id string) (*Job, error) {
+	var out Job
+	if err := c.do(ctx, http.MethodGet, "/v1/jobs/"+id, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // DeleteJobsResponse mirrors api.DeleteJobsResponse.
@@ -486,6 +506,9 @@ func (c *Client) ListJobs(ctx context.Context, opts JobListOpts) (*JobList, erro
 	}
 	if opts.Limit > 0 {
 		q.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Cursor != "" {
+		q.Set("cursor", opts.Cursor)
 	}
 	path := "/v1/jobs"
 	if len(q) > 0 {
@@ -622,23 +645,89 @@ func (c *Client) RebuildInterests(ctx context.Context) (*RebuildInterestsRespons
 	return &out, nil
 }
 
-// ErrDaemonUnreachable: the daemon isn't accepting connections at base URL.
-// CLI uses this to decide whether to auto-start.
+// ErrDaemonUnreachable means no connection to the daemon could be made at
+// the client's base URL: nothing is listening there, or the address doesn't
+// resolve. The request never reached a daemon, so it is safe to start one
+// and send it again, which is what the MCP sidecar does. Any other
+// transport failure (a timeout, a connection cut mid-request) is returned
+// as it is, wrapping context.DeadlineExceeded or context.Canceled where
+// that is the cause.
 var ErrDaemonUnreachable = errors.New("daemon unreachable")
 
+// Problem is the RFC 7807 problem body the daemon answers errors with.
+type Problem struct {
+	Type      string `json:"type,omitempty"`
+	Title     string `json:"title"`
+	Status    int    `json:"status"`
+	Detail    string `json:"detail,omitempty"`
+	Instance  string `json:"instance,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// APIError is a non-2xx answer from the daemon. Callers branch on Status
+// with errors.As.
+type APIError struct {
+	Status  int
+	Problem Problem
+}
+
+// Error is the problem's detail, or its title when there is none. A server
+// error also names its request ID and where to look it up, since the
+// cause is in the daemon's log.
+func (e *APIError) Error() string {
+	msg := cmp.Or(e.Problem.Detail, e.Problem.Title, http.StatusText(e.Status), fmt.Sprintf("HTTP %d", e.Status))
+	if e.Status < http.StatusInternalServerError {
+		return msg
+	}
+	if e.Problem.RequestID == "" {
+		return msg + " (see `curio daemon logs`)"
+	}
+	return fmt.Sprintf("%s (request %s; see `curio daemon logs`)", msg, e.Problem.RequestID)
+}
+
+// IsNotFound reports whether err is the daemon answering 404.
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
+}
+
+// maxErrorBody bounds how much of an error response is read. A problem is
+// a few hundred bytes; anything past this is not one.
+const maxErrorBody = 64 << 10
+
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	resp, err := c.send(ctx, method, path, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	defer drain(resp.Body) // before the Close, so the connection can be reused
+	if out == nil {
+		return nil
+	}
+	// Decoding ignores fields this client doesn't know, so a newer daemon's
+	// additions don't break it.
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("%s %s: decode response: %w", method, path, err)
+	}
+	return nil
+}
+
+// send makes a request and returns a 2xx response, whose body the caller
+// closes. A non-2xx answer is an *APIError and a failure to connect wraps
+// ErrDaemonUnreachable.
+func (c *Client) send(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var buf io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("encode request: %w", err)
+			return nil, fmt.Errorf("%s %s: encode request: %w", method, path, err)
 		}
 		buf = bytes.NewReader(b)
 	}
-
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, buf)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -646,19 +735,43 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		// net.OpError, ECONNREFUSED, etc. are all "daemon down" from the
-		// CLI's perspective.
-		return fmt.Errorf("%w: %v", ErrDaemonUnreachable, err)
+		// The *url.Error already names the method and URL.
+		var opErr *net.OpError
+		if errors.As(err, &opErr) && opErr.Op == "dial" && ctx.Err() == nil {
+			return nil, fmt.Errorf("%w: %w", ErrDaemonUnreachable, err)
+		}
+		return nil, err
 	}
-	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		defer resp.Body.Close()
+		defer drain(resp.Body)
+		return nil, decodeError(resp)
+	}
+	return resp, nil
+}
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+// decodeError reads an error response into an *APIError: the problem the
+// daemon sent, or, for a body that isn't one (a proxy, an older daemon),
+// the status text with the body as the detail.
+func decodeError(resp *http.Response) *APIError {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")) // "" when unparsable
+	var problem Problem
+	switch {
+	case err != nil:
+		problem = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
+			Detail: fmt.Sprintf("reading the error response: %v", err)}
+	case mediaType != "application/problem+json" || json.Unmarshal(body, &problem) != nil:
+		problem = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
+			Detail: strings.TrimSpace(string(body))}
 	}
+	problem.RequestID = cmp.Or(problem.RequestID, resp.Header.Get("X-Request-Id"))
+	return &APIError{Status: resp.StatusCode, Problem: problem}
+}
 
-	if out == nil {
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+// drain reads what is left of a response body, up to maxErrorBody, so that
+// closing it returns the connection to the pool for the next request.
+func drain(body io.Reader) {
+	// Draining is only for connection reuse; a failure costs a new dial.
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxErrorBody))
 }

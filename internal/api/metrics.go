@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -30,19 +29,19 @@ type KindMetricsResponse struct {
 	OldestRunningSeconds int     `json:"oldest_running_seconds"`
 }
 
+// ?window, in seconds: the last hour by default, and at most a day to keep
+// the SQL bounded.
+const (
+	defaultMetricsWindow = int(time.Hour / time.Second)
+	maxMetricsWindow     = int(24 * time.Hour / time.Second)
+)
+
 func (d Deps) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	// Default window: last hour. Users can override with ?window=3600
-	// (seconds). Capped at 24h to keep the SQL bounded.
-	window := time.Hour
-	if v := r.URL.Query().Get("window"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 86400 {
-			window = time.Duration(n) * time.Second
-		}
-	}
+	window := time.Duration(intQuery(r, "window", defaultMetricsWindow, 1, maxMetricsWindow)) * time.Second
 
 	rows, err := d.Queue.MetricsByKind(r.Context(), d.TenantID, window)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 
@@ -63,5 +62,5 @@ func (d Deps) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			OldestRunningSeconds: m.OldestRunningSeconds,
 		})
 	}
-	writeJSON(w, http.StatusOK, resp)
+	d.writeJSON(w, r, http.StatusOK, resp)
 }

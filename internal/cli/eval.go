@@ -11,10 +11,11 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/eval"
 )
 
-func newEvalCmd() *cobra.Command {
+func newEvalCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		queriesPath string
 		k           int
@@ -35,11 +36,7 @@ func newEvalCmd() *cobra.Command {
 			if k < 1 {
 				return fmt.Errorf("--k must be at least 1, got %d", k)
 			}
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 
@@ -48,7 +45,7 @@ func newEvalCmd() *cobra.Command {
 				return err
 			}
 
-			ranked, err := rankQueries(cmd.Context(), ctx.Client, qs, k)
+			ranked, err := rankQueries(cmd.Context(), env.Client, qs, k)
 			if err != nil {
 				return err
 			}

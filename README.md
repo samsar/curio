@@ -46,6 +46,8 @@ curio status                        # daemon health + corpus counts + queue dept
 curio docs                          # successfully-fetched documents (the happy path)
 curio docs --failed                 # docs whose fetch or index gave up
 curio docs --all                    # every state
+curio docs --all --limit 100        # a page at a time; the last line is the next page's command
+curio docs --all --cursor <token>   # that next page (curio jobs pages the same way)
 curio docs show <doc-id>            # full metadata + on-disk path
 curio docs show <doc-id> --content  # also streams the extracted markdown
 
@@ -54,6 +56,7 @@ curio jobs                          # done jobs (default; the audit view)
 curio jobs --failed                 # failures with full error + retry count
 curio jobs --all                    # every status
 curio jobs --kind index             # filter by job kind
+curio jobs show <job-id>            # one job, e.g. the one refetch or reindex just enqueued
 
 # Recovery
 curio refetch <doc-id>              # try one URL again
@@ -93,7 +96,8 @@ claude mcp add curio "$PWD/bin/curio-mcp"
 ```
 
 Tools: `search_bookmarks` (with `content_type`/`source`/`host` filters),
-`get_document`, `find_related`. See [docs/mcp.md](./docs/mcp.md).
+`get_document`, `find_related`, `list_interests`. If the daemon stops during
+a session, the next tool call starts it again. See [docs/mcp.md](./docs/mcp.md).
 
 ## High-level architecture
 

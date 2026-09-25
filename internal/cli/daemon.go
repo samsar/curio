@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os/exec"
 
@@ -10,28 +9,21 @@ import (
 	"github.com/samsar/curio/internal/daemonctl"
 )
 
-func newDaemonCmd() *cobra.Command {
+func newDaemonCmd(env *daemonctl.Env) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Manage the curio-daemon process",
 	}
-	cmd.AddCommand(newDaemonStartCmd(), newDaemonStopCmd(), newDaemonStatusCmd(), newDaemonLogsCmd())
+	cmd.AddCommand(newDaemonStartCmd(env), newDaemonStopCmd(env), newDaemonStatusCmd(env), newDaemonLogsCmd(env))
 	return cmd
 }
 
-func newDaemonStartCmd() *cobra.Command {
+func newDaemonStartCmd(env *daemonctl.Env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
 		Short: "Start the daemon in the background",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if ctx.Controller == nil {
-				return errors.New("$CURIO_HOME not initialized; the daemon will create it on first run, but daemonctl needs it now")
-			}
-			if err := ctx.Controller.EnsureRunning(cmd.Context()); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "daemon running")
@@ -40,19 +32,12 @@ func newDaemonStartCmd() *cobra.Command {
 	}
 }
 
-func newDaemonStopCmd() *cobra.Command {
+func newDaemonStopCmd(env *daemonctl.Env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the daemon",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if ctx.Controller == nil {
-				return errors.New("no daemon controller available")
-			}
-			if err := ctx.Controller.Stop(cmd.Context()); err != nil {
+			if err := env.Controller.Stop(cmd.Context()); err != nil {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "daemon stopped")
@@ -61,24 +46,16 @@ func newDaemonStopCmd() *cobra.Command {
 	}
 }
 
-func newDaemonStatusCmd() *cobra.Command {
+func newDaemonStatusCmd(env *daemonctl.Env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show whether the daemon for this $CURIO_HOME is running, and its PID",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if ctx.Controller == nil {
-				fmt.Fprintln(cmd.OutOrStdout(), "not running (no $CURIO_HOME)")
-				return nil
-			}
-			st, err := ctx.Controller.Status(cmd.Context())
+			st, err := env.Controller.Status(cmd.Context())
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), describeDaemonStatus(st, ctx.Home.Path))
+			fmt.Fprintln(cmd.OutOrStdout(), describeDaemonStatus(st, env.Home.Path))
 			return nil
 		},
 	}
@@ -108,22 +85,17 @@ func describeDaemonStatus(st daemonctl.Status, home string) string {
 	}
 }
 
-func newDaemonLogsCmd() *cobra.Command {
+func newDaemonLogsCmd(env *daemonctl.Env) *cobra.Command {
 	var follow bool
 	cmd := &cobra.Command{
 		Use:   "logs",
 		Short: "Tail the daemon log",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok || ctx.Home == nil {
-				return errors.New("no $CURIO_HOME")
-			}
-			logPath := ctx.Home.LogsDir() + "/daemon.log"
 			args := []string{"-n", "100"}
 			if follow {
 				args = append(args, "-f")
 			}
-			args = append(args, logPath)
+			args = append(args, env.Home.DaemonLogPath())
 			c := exec.CommandContext(cmd.Context(), "tail", args...)
 			c.Stdout = cmd.OutOrStdout()
 			c.Stderr = cmd.ErrOrStderr()

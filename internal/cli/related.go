@@ -1,16 +1,16 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
-func newRelatedCmd() *cobra.Command {
+func newRelatedCmd(env *daemonctl.Env) *cobra.Command {
 	var k int
 	cmd := &cobra.Command{
 		Use:   "related <document-id>",
@@ -20,15 +20,11 @@ func newRelatedCmd() *cobra.Command {
 			"documents that haven't been fetched and indexed yet.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 
-			res, err := ctx.Client.RelatedDocuments(cmd.Context(), args[0], k)
+			res, err := env.Client.RelatedDocuments(cmd.Context(), args[0], k)
 			if err != nil {
 				return err
 			}

@@ -9,9 +9,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
-func newAddCmd() *cobra.Command {
+func newAddCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		folder  string
 		tags    []string
@@ -24,15 +25,11 @@ func newAddCmd() *cobra.Command {
 		Short: "Add a URL to your bookmarks; the daemon fetches and indexes it",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 
-			res, err := ctx.Client.CreateBookmark(cmd.Context(), client.CreateBookmarkRequest{
+			res, err := env.Client.CreateBookmark(cmd.Context(), client.CreateBookmarkRequest{
 				URL:        args[0],
 				Title:      title,
 				FolderPath: folder,
@@ -52,7 +49,7 @@ func newAddCmd() *cobra.Command {
 				if res.Bookmark.DocumentID == nil {
 					return errors.New("server returned no document id to wait on")
 				}
-				if err := waitForFetch(cmd.Context(), ctx, *res.Bookmark.DocumentID, time.Duration(waitSec)*time.Second); err != nil {
+				if err := waitForFetch(cmd.Context(), env.Client, *res.Bookmark.DocumentID, time.Duration(waitSec)*time.Second); err != nil {
 					return err
 				}
 				fmt.Fprintln(w, "fetched and indexed")
@@ -68,15 +65,24 @@ func newAddCmd() *cobra.Command {
 	return cmd
 }
 
-// waitForFetch polls the document by ID until it reaches a terminal state.
-// Polling the document directly (rather than scanning the bookmark list)
-// keeps this O(1) and correct regardless of corpus size — an earlier version
-// listed only the first 100 bookmarks and silently timed out on large
-// corpora even after the fetch had succeeded.
-func waitForFetch(ctx context.Context, c *Context, docID string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		doc, err := c.Client.GetDocument(ctx, docID)
+// fetchPollInterval is how often waitForFetch checks the document.
+const fetchPollInterval = 500 * time.Millisecond
+
+// waitForFetch polls the document until it is fetched (nil), fails (an
+// error naming its state), timeout passes, or ctx is cancelled (ctx's
+// error). Each check reads the one document, so it costs the same however
+// large the corpus is.
+func waitForFetch(ctx context.Context, c *client.Client, docID string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeoutCause(ctx, timeout,
+		fmt.Errorf("timed out after %s waiting for the fetch", timeout))
+	defer cancel()
+	tick := time.NewTicker(fetchPollInterval)
+	defer tick.Stop()
+	for {
+		doc, err := c.GetDocument(ctx, docID)
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
 		if err != nil {
 			return err
 		}
@@ -86,19 +92,10 @@ func waitForFetch(ctx context.Context, c *Context, docID string, timeout time.Du
 		case "failed", "dead":
 			return fmt.Errorf("document state: %s", doc.State)
 		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return fmt.Errorf("timed out after %s waiting for fetch", timeout)
-}
-
-func ensureDaemon(c *Context) error {
-	if c.Controller == nil {
-		// No $CURIO_HOME yet, so we can't manage the daemon process.
-		// Try a direct healthz first; if daemon is up, no need to start.
-		if _, err := c.Client.Healthz(context.Background()); err == nil {
-			return nil
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-tick.C:
 		}
-		return errors.New("daemon not running and no $CURIO_HOME available to start it")
 	}
-	return c.Controller.EnsureRunning(context.Background())
 }

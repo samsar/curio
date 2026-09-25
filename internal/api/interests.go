@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -44,32 +44,37 @@ type InterestListResponse struct {
 	Items        []InterestResponse `json:"items"`
 }
 
+// Sizes for the interest endpoints. The list previews a few members of each
+// interest; the single interest shows many more.
 const (
-	defaultInterestLimit   = 50
-	defaultInterestMembers = 5
-	maxInterestMembers     = 100
+	defaultInterestLimit      = 50
+	maxInterestLimit          = 500
+	defaultInterestMembers    = 5
+	maxInterestMembers        = 100
+	defaultOneInterestMembers = 100
+	maxOneInterestMembers     = 1000
 )
 
 // handleListInterests returns the current interests — the labeled clusters of
 // the latest completed clustering run. Returns 200 with an empty list when no
 // clustering has run yet.
 func (d Deps) handleListInterests(w http.ResponseWriter, r *http.Request) {
-	limit := intParam(r, "limit", defaultInterestLimit, 1, 500)
-	members := intParam(r, "members", defaultInterestMembers, 0, maxInterestMembers)
+	limit := intQuery(r, "limit", defaultInterestLimit, 1, maxInterestLimit)
+	members := intQuery(r, "members", defaultInterestMembers, 0, maxInterestMembers)
 
 	run, err := d.Insights.LatestRun(r.Context(), d.TenantID, store.ClusterRunDone)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeJSON(w, http.StatusOK, InterestListResponse{Items: []InterestResponse{}})
+			d.writeJSON(w, r, http.StatusOK, InterestListResponse{Items: []InterestResponse{}})
 			return
 		}
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 
 	clusters, err := d.Insights.ListClusters(r.Context(), run.ID, limit)
 	if err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
 
@@ -83,33 +88,43 @@ func (d Deps) handleListInterests(w http.ResponseWriter, r *http.Request) {
 		Items:        make([]InterestResponse, 0, len(clusters)),
 	}
 	for _, c := range clusters {
-		resp.Items = append(resp.Items, d.interestToResponse(r.Context(), c, members))
+		in, err := d.interestToResponse(r.Context(), c, members)
+		if err != nil {
+			d.writeError(w, r, err)
+			return
+		}
+		resp.Items = append(resp.Items, in)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	d.writeJSON(w, r, http.StatusOK, resp)
 }
 
 // handleGetInterest returns one interest (cluster) with its member documents.
 func (d Deps) handleGetInterest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	members := intParam(r, "members", maxInterestMembers, 0, 1000)
+	members := intQuery(r, "members", defaultOneInterestMembers, 0, maxOneInterestMembers)
 
 	c, err := d.Insights.GetCluster(r.Context(), id)
 	if err != nil {
-		writeError(w, err)
+		d.writeLookupError(w, r, "interest", id, err)
 		return
 	}
 	if c.TenantID != d.TenantID {
-		writeProblem(w, http.StatusNotFound, "not found", "interest not found")
+		notFound(w, r, "interest", id)
 		return
 	}
-	writeJSON(w, http.StatusOK, d.interestToResponse(r.Context(), c, members))
+	in, err := d.interestToResponse(r.Context(), c, members)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	d.writeJSON(w, r, http.StatusOK, in)
 }
 
 // handleRebuildInterests enqueues a clustering job and returns 202 + job_id.
 // Refused with 409 when the insight layer is disabled in config.
 func (d Deps) handleRebuildInterests(w http.ResponseWriter, r *http.Request) {
 	if !d.InsightEnabled {
-		writeProblem(w, http.StatusConflict, "insight disabled",
+		writeProblem(w, r, http.StatusConflict, "insight disabled",
 			"the insight layer is disabled; set insight.enabled: true in config.yaml")
 		return
 	}
@@ -119,16 +134,16 @@ func (d Deps) handleRebuildInterests(w http.ResponseWriter, r *http.Request) {
 		Payload:  json.RawMessage(`{}`),
 	}
 	if err := d.Queue.Enqueue(r.Context(), job); err != nil {
-		writeError(w, err)
+		d.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": job.ID})
+	d.writeJSON(w, r, http.StatusAccepted, map[string]string{"job_id": job.ID})
 }
 
 // interestToResponse maps a stored cluster + its top members to the wire shape,
 // hydrating each member with title / url / on-disk markdown path (one extra DB
 // hit per member, same pattern as search hits — fine for small member limits).
-func (d Deps) interestToResponse(ctx context.Context, c *store.Cluster, membersLimit int) InterestResponse {
+func (d Deps) interestToResponse(ctx context.Context, c *store.Cluster, membersLimit int) (InterestResponse, error) {
 	out := InterestResponse{ID: c.ID, Size: c.Size, Cohesion: c.Cohesion}
 	if c.Label != nil {
 		out.Label = *c.Label
@@ -137,47 +152,42 @@ func (d Deps) interestToResponse(ctx context.Context, c *store.Cluster, membersL
 		out.Summary = *c.Summary
 	}
 	if membersLimit <= 0 {
-		return out
+		return out, nil
 	}
 
 	members, err := d.Insights.ClusterMembers(ctx, c.ID, membersLimit)
 	if err != nil {
-		return out
+		return InterestResponse{}, fmt.Errorf("interest %s: load members: %w", c.ID, err)
 	}
 	out.Members = make([]InterestMember, 0, len(members))
 	for _, m := range members {
-		im := InterestMember{DocID: m.DocumentID, Similarity: m.Similarity}
-		if doc, derr := d.Documents.GetByID(ctx, m.DocumentID); derr == nil {
-			im.URL = doc.URL
-			if doc.Title != nil {
-				im.Title = *doc.Title
-			}
-			if doc.CurrentExtractionID != nil {
-				if ext, eerr := d.Extractions.GetByID(ctx, *doc.CurrentExtractionID); eerr == nil && ext.MarkdownPath != nil {
-					im.MarkdownPath = d.Home.ContentDir() + "/" + *ext.MarkdownPath
-				}
-			}
+		im, err := d.interestMember(ctx, m)
+		if err != nil {
+			return InterestResponse{}, fmt.Errorf("interest %s: %w", c.ID, err)
 		}
 		out.Members = append(out.Members, im)
 	}
-	return out
+	return out, nil
 }
 
-// intParam reads an int query param with a default and clamping to [lo, hi].
-func intParam(r *http.Request, name string, def, lo, hi int) int {
-	v := r.URL.Query().Get(name)
-	if v == "" {
-		return def
+// interestMember hydrates one member with its document's title, URL and
+// markdown path. Memberships cascade with their document, so a member
+// whose document is missing is an inconsistency, not a missing resource.
+func (d Deps) interestMember(ctx context.Context, m store.ClusterMember) (InterestMember, error) {
+	doc, err := d.Documents.GetByID(ctx, m.DocumentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return InterestMember{}, fmt.Errorf("member document %s doesn't exist", m.DocumentID)
 	}
-	n, err := strconv.Atoi(v)
 	if err != nil {
-		return def
+		return InterestMember{}, fmt.Errorf("load member document %s: %w", m.DocumentID, err)
 	}
-	if n < lo {
-		return lo
+	path, err := d.documentMarkdownPath(ctx, doc)
+	if err != nil {
+		return InterestMember{}, err
 	}
-	if n > hi {
-		return hi
+	im := InterestMember{DocID: doc.ID, URL: doc.URL, MarkdownPath: path, Similarity: m.Similarity}
+	if doc.Title != nil {
+		im.Title = *doc.Title
 	}
-	return n
+	return im, nil
 }

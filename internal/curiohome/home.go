@@ -23,6 +23,9 @@ const (
 	DBFile           = "curio.db"
 	ContentDirName   = "content"
 	LogsDirName      = "logs"
+	// DaemonLogFile, in the logs dir, gets the daemon's output: clients that
+	// start it point its stdout and stderr there.
+	DaemonLogFile = "daemon.log"
 	// PIDFileName is the daemon's single-instance lock; the running daemon
 	// holds an exclusive flock on it and records its PID inside.
 	PIDFileName = "daemon.pid"
@@ -159,6 +162,7 @@ func (h *Home) FetcherRulesPath() string { return filepath.Join(h.Path, FetcherR
 func (h *Home) DBPath() string           { return filepath.Join(h.Path, DBFile) }
 func (h *Home) ContentDir() string       { return filepath.Join(h.Path, ContentDirName) }
 func (h *Home) LogsDir() string          { return filepath.Join(h.Path, LogsDirName) }
+func (h *Home) DaemonLogPath() string    { return filepath.Join(h.LogsDir(), DaemonLogFile) }
 func (h *Home) PIDFile() string          { return filepath.Join(h.Path, PIDFileName) }
 func (h *Home) StartLockFile() string    { return filepath.Join(h.Path, StartLockFileName) }
 

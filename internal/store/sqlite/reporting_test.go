@@ -240,6 +240,17 @@ func TestJobs_ListWithDoc(t *testing.T) {
 	limited, err := q.ListWithDoc(ctx, "local", store.ListJobsOpts{Limit: 1})
 	require.NoError(t, err)
 	assert.Equal(t, []string{cluster}, ids(limited))
+
+	for _, listed := range all {
+		got, err := q.GetWithDoc(ctx, "local", listed.ID)
+		require.NoError(t, err)
+		assert.Equal(t, listed, *got, "a job reads the same alone as in the list")
+	}
+	other := insertJobRow(t, db, jobRow{tenantID: "other", kind: store.JobKindFetch, status: store.JobStatusDone, updatedAt: now})
+	for _, id := range []string{other, "no-such-job"} {
+		_, err := q.GetWithDoc(ctx, "local", id)
+		assert.ErrorIs(t, err, store.ErrNotFound, "%s: another tenant's job doesn't exist here", id)
+	}
 }
 
 func TestJobs_CountByStatus(t *testing.T) {

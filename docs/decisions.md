@@ -293,6 +293,9 @@ is provisional" in the deferred section for what we may revisit.
 
 ## API: cursor pagination, not offset
 
+**Status:** implemented as keyset pages on (timestamp, id); see "List
+pagination: keyset on (timestamp, id)" below.
+
 **Decision:** List endpoints use opaque cursors (`?cursor=...` + `next_cursor`
 in the response), not offset/limit.
 
@@ -303,6 +306,9 @@ fetches and clients silently skip data. Cursors are stable on SQLite via
 ---
 
 ## API: all long-running operations are async with job IDs
+
+**Status:** imports are synchronous per batch, and `GET /v1/jobs/{id}` is
+routed; see "API: the spec is the contract, checked by tests" below.
 
 **Decision:** Imports, refetches, and (later) reindex operations return
 `202 Accepted` with `{ job_id }`. Clients poll `/v1/jobs/{id}` for status.
@@ -381,6 +387,9 @@ v1. Easy to add later; non-breaking.
 ---
 
 ## API: `/v1/documents/{id}/references` returns a shape that grows additively
+
+**Status:** not implemented; removed from the spec until a client needs it
+(see "API: the spec is the contract, checked by tests").
 
 **Decision:** The references endpoint returns
 `{ bookmarks: [...], history_entries: [...], highlights: [...] }`. v1 only
@@ -2901,6 +2910,10 @@ drops the index and then the column.
 
 ## Indexes follow the queries; plans are pinned by tests
 
+**Status:** migration 009 appended `id` to the four list indexes and
+replaced `idx_bookmarks_tenant_id`; the current table is in "List
+pagination: keyset on (timestamp, id)".
+
 **Decision:** Migration 007 builds the index set around the queries the
 store runs:
 
@@ -3072,3 +3085,348 @@ finds jobs another process enqueued, which no in-process signal sees.
 **One goroutine per worker still:** a dispatcher handing jobs to a
 semaphore-bounded pool would change the shutdown and drain semantics for
 little further gain.
+
+---
+
+## API: request IDs, one error mapping, logged server errors
+
+**Decision:**
+
+- Every response carries `X-Request-Id` (chi's generator, or the ID the
+  client sent in that header), and every problem body repeats it as
+  `request_id`, an RFC 7807 extension member, with the request path as
+  `instance`. The access log and the Host/Origin rejection warnings carry
+  it too.
+- Handlers report failures through `Deps.writeError`, the one place errors
+  become statuses: a `requestError` (a parameter, cursor or body field the
+  handler refuses) is 400, an oversized body 413, `store.ErrNotFound` 404,
+  `store.ErrConflict` 409, anything else 500. A handler that loads the
+  resource its path names reports a missing one through `writeLookupError`,
+  whose 404 names it: `document "x" not found`.
+- A 5xx is logged once, at error level, with the request ID, method, path
+  and the full error. When the request's own context is done the client has
+  gone and the error is almost always that cancellation, so it is logged at
+  info with status 499 (nginx's "client closed request"), which is also
+  the status the access log records.
+- A panicking handler answers a 500 problem and is logged as one structured
+  record with the panic value and stack. `recoverProblem` replaces
+  `middleware.Recoverer`; `http.ErrAbortHandler` is re-panicked.
+- `writeJSON` encodes before it writes the status, so a value that can't be
+  encoded (a NaN) is a logged 500, not a 200 with an empty body.
+- Middleware order: request ID, its response header, access log, panic
+  recovery, then the Host, Origin and body checks, then the routes.
+
+**Why:** The cause of a 500 appeared nowhere. `writeError` logged nothing,
+the access log had no request ID, and nothing tied a client's error to a
+log line. `middleware.Recoverer` answered a panic with a bare 500 and no
+problem body, and printed a colour-coded multi-line stack into the JSON
+`daemon.log`. `writeJSON` wrote the status before encoding and discarded
+the encode error. Only two sentinels were mapped, and 404 details leaked
+wrap chains: `store: not found`, `related: load document: store: not
+found`.
+
+**500 details keep the raw error text:** the clients are the local
+operator's own tools (see "Local API: loopback only, no token, browsers
+shut out"), and the detail plus the request ID is what makes
+`curio daemon logs` searchable.
+
+---
+
+## API: tolerant responses, strict requests
+
+**Decision:** Within `/v1`:
+
+- **Responses** are read tolerantly. Clients ignore fields and enum values
+  they don't know, and the server may add them, and endpoints, without a
+  version bump. Unset optional fields are omitted; the API never sends
+  `null`. `internal/client` decodes with `encoding/json`'s defaults, which
+  ignore unknown fields.
+- **Requests** are strict. The server rejects an unknown field with 400.
+  Clients send only the optional fields they set (`omitempty`, `omitzero`),
+  so an older daemon rejects only a request that uses a feature it lacks.
+  The 400 names the field and the daemon's version and says to restart the
+  daemon: `curio daemon stop`, and the next command starts the installed
+  one.
+
+**Why:** `api/README.md` promised that clients ignore unknown fields while
+the request decoder used `DisallowUnknownFields`, and nothing said which
+rule applied to which direction. An ignored request field is a filter or
+knob silently not applied: `filters.folder` and `filters.tag` on
+`POST /v1/search` were accepted and ignored, so a folder-filtered search
+returned unfiltered results. They are gone from `api.Filters` and the
+spec, so they are 400s like `weights`. After `brew upgrade`, the new CLI
+can reach the old daemon still running; a 400 that says to restart it is
+the safe failure there, where before it said only `json: unknown field
+"x"`. encoding/json has no error type for an unknown field, so
+`decodeJSON` recognizes its message.
+
+---
+
+## API: absolute content paths, and hydration errors fail the request
+
+**Decision:** `Deps.contentPath` is the only place the API builds a file
+path, with `filepath.Join` of the content directory and the path the store
+records. Every `markdown_path` in a response is absolute, `GET
+/v1/documents/{id}`'s `current_extraction.markdown_path` included, and the
+CLI prints it as given. A lookup that fails while a response is being
+built (a document's current extraction, an interest's members or a
+member's document, a search hit's markdown path) fails the request with a
+500. So does a current extraction or member document that doesn't exist:
+the schema guarantees those rows, so their absence is an inconsistency,
+not a missing resource, as for bookmarks ("API: handler edge cases found
+by coverage").
+
+**Why:** `GET /v1/documents/{id}` returned the path relative to the
+daemon's content directory while every other endpoint returned it
+absolute, built with `+ "/"`, and the CLI joined the relative one with its
+own home, so a client had to know the daemon's layout. The same code
+discarded lookup errors, turning a database error into plausible but wrong
+data: a document without `current_extraction`, a hit without a path, an
+interest without members.
+
+---
+
+## API: filters are validated, sizing knobs default
+
+**Decision:** A list filter outside its set is a 400 naming the allowed
+values: `GET /v1/documents?state`, `GET /v1/jobs?status` and `?kind`, and
+`GET /v1/bookmarks?source` (html included), as refetch-all and reindex-all
+already did for `state`. `store.JobStatus` and `store.JobKind` gained
+`Valid()`, matching the jobs table's CHECK constraints. Sizing parameters
+keep the rule "API: handler edge cases found by coverage" set for `limit`:
+one helper, `intQuery`, honors a value in range and treats anything else
+(absent, malformed, out of range) as the default. It serves list `limit`
+(1..500, default 50), interests `limit` (1..500, 50) and `members` (0..100,
+default 5; 0..1000, default 100 on `GET /v1/interests/{id}`), related `k`
+(1..100, 10) and metrics `window` (1..86400 seconds, 3600).
+
+**Why:** A typo in a filter read as "nothing matches": `curio docs --state
+fecthed` printed "no documents match", `curio jobs --status bogus` "no jobs
+match", and `?source=bogus` answered `{"items":[]}`. A wrong filter returns
+wrong rows, so it is refused; a wrong size still returns the right rows, so
+it falls back. The CLI keeps no enum lists of its own: the server's problem
+detail reaches the user as it is. Three hand-written parsers had drifted
+apart: interests clamped out-of-range values (so `members=-1` meant none),
+while related and metrics fell back to their defaults.
+
+---
+
+## Clients: one discovery, an explicit daemon environment, a signal context
+
+**Decision:**
+
+- `daemonctl.Discover(homeOverride, daemonURL)` resolves the home (an
+  override is made absolute with `filepath.Abs`; otherwise `$CURIO_HOME`,
+  then `~/.curio`), initializes it on first use, loads its config, and
+  returns the client and controller for the daemon that serves it. The CLI
+  and `curio-mcp` both bootstrap through it.
+- The controller hands the daemon it spawns `CURIO_HOME=<its home>`
+  explicitly. Nothing calls `os.Setenv`, and errcheck no longer exempts it.
+- `cmd/curio` runs the CLI through `cli.Run(ctx, args, stdout, stderr)`
+  under `signal.NotifyContext` (interrupt, SIGTERM), so a command that waits
+  (`import --follow`, `add --wait`) sees ctrl-c as a cancelled context. The
+  first signal restores the default handling, so a second one kills.
+- The root command silences cobra's own error printing: `Run` prints
+  `Error: <message>` once. A file-open error is returned as the
+  `*os.PathError` it is, which already names the path.
+- Commands close over the `daemonctl.Env` the root command's
+  `PersistentPreRunE` fills in, instead of fetching a value from the
+  context and checking it on every call.
+
+**Why:** `--curio-home` reached the daemon only because the CLI exported it
+into its own environment for the child to inherit. The CLI and the sidecar
+each had a copy of the bootstrap. No signal context was ever installed, so
+the documented ctrl-c path of `followProgress` never ran and `waitForFetch`
+slept through it. Every error printed twice (cobra, then `main`), with the
+path doubled: `open /x.html: open /x.html: no such file or directory`.
+Twenty-four call sites repeated `getCtx` and a "no context" error, and
+ten checked for a nil home or controller that `buildContext` could no
+longer return.
+
+---
+
+## Client errors: a typed APIError, and "unreachable" means never connected
+
+**Decision:**
+
+- `internal/client` returns `*client.APIError{Status, Problem}` for every
+  non-2xx answer, `GetDocumentContent` included; callers branch with
+  `errors.As` (or `client.IsNotFound`). Its message is the problem's detail,
+  or its title; a 5xx adds the request ID and a pointer to
+  `curio daemon logs`. A body that isn't `application/problem+json` becomes
+  the status text with the body as the detail. Error bodies are read
+  through a 64 KiB limit, and every body is drained before it is closed so
+  the loopback connection is reused.
+- `ErrDaemonUnreachable` wraps only a failure to connect (a `*net.OpError`
+  whose `Op` is `dial`, while the caller's context is still live), as
+  `fmt.Errorf("%w: %w", ErrDaemonUnreachable, err)`. Any other transport
+  error is returned as `http.Client`'s `*url.Error`, which names the method
+  and URL and wraps `context.DeadlineExceeded` or `context.Canceled` when
+  that is the cause.
+- Callers that used to mask errors now look at them: the MCP
+  `get_document` tool treats only a content 404 as "no extracted content";
+  `curio docs show --content` prints "(no extracted content yet)" for it;
+  `curio status` says "not running" only for `ErrDaemonUnreachable`; and
+  `curio doctor` tells an unreachable daemon from one whose healthz failed.
+- `ImportBookmark.SavedAt` is `omitzero`, so a bookmark without a date is
+  sent without `saved_at` instead of as year 1.
+
+**Why:** Every transport failure was reported as "daemon unreachable",
+timeouts included, with the cause formatted away (`%v`):
+`errors.Is(err, context.DeadlineExceeded)` was false for a deadline.
+Non-2xx answers were `HTTP 404: {"type":"about:blank",...}` strings read
+with an unbounded `io.ReadAll`, so the CLI printed raw JSON and tests
+matched on "404". The MCP sidecar discarded every content error, so a
+daemon 500 or timeout reached the model as "(no extracted content
+available)". Unreachable has to mean "never connected" because the sidecar
+restarts the daemon and resends on it (see the next entry), which is safe
+only for a request no daemon received.
+
+---
+
+## MCP sidecar: restart an unreachable daemon, retry once
+
+**Decision:** `curio-mcp` keeps the controller's `EnsureRunning` next to its
+client, and every daemon call in every tool goes through one helper,
+`call`. When a call fails with `client.ErrDaemonUnreachable`, `call` runs
+`EnsureRunning` once and the call once more; if the restart fails, the tool
+error carries both the unreachable error and the restart's. Any other
+error, a 5xx included, is returned without a restart or a retry. The eager
+`EnsureRunning` at startup stays, so a port served by another home still
+fails the sidecar where the MCP client shows it.
+
+**Why:** The sidecar lives for a whole Claude session, and the daemon can
+stop underneath it: `curio daemon stop` after a config edit (the documented
+way to apply one), an upgrade, a crash. The sidecar ensured the daemon once
+at startup and then kept only the client, so every tool call failed with
+"daemon unreachable" until something else started it.
+
+**Safe to resend:** `ErrDaemonUnreachable` means the connection was never
+made (see "Client errors"), so no daemon saw the first attempt. Concurrent
+calls that find the daemon gone each ensure it; `EnsureRunning` serializes
+on `daemon.start.lock` and re-checks healthz, so one daemon starts. Each
+ensure is bounded by the start timeout and the tool call's context.
+
+---
+
+## List pagination: keyset on (timestamp, id)
+
+**Decision:** `GET /v1/documents`, `GET /v1/jobs` and `GET /v1/bookmarks`
+page with opaque cursors over a keyset:
+
+- Documents and jobs order by `updated_at DESC, id DESC`; bookmarks by
+  `created_at DESC, id DESC`, newest first by a key that never changes.
+- `store.PageKey{At, ID}` is the last row of a page. `ListDocumentsOpts`
+  and `ListJobsOpts` gained `After`, which replaced `ListBookmarksOpts`'
+  `Cursor`; a non-zero key restricts the list to rows strictly after it
+  with the row-value predicate `(updated_at, id) < (?, ?)`.
+- The handlers ask the store for one row more than the page, so
+  `next_cursor` is present exactly when another page follows. The cursor
+  is base64url of `{"t": <RFC 3339>, "id": ...}`. One that doesn't decode
+  to a time and an ID is a 400 "invalid cursor", never ignored.
+- `BookmarkStore.List` returns `BookmarkWithState`, the document's state
+  read through a `LEFT JOIN` in the same query, instead of the handler
+  loading each bookmark's document.
+- `curio docs` and `curio jobs` take `--cursor`, and a page that has a
+  successor ends with `next page: <the command as run> --cursor=<token>`.
+  `--limit` outside 1..500 is a usage error.
+
+**The guarantee:** pages never overlap, and rows inserted during a walk
+don't shift it. A row whose `updated_at` changes mid-walk moves ahead of
+the cursor and is not revisited, so a walk of an active list can miss a
+row that was touched while it ran; that is the cost of keeping the
+activity-feed order of "Jobs list: sort by updated_at". Cursors are opaque
+and may stop being valid across a daemon upgrade: the 400 means "start the
+walk again".
+
+**Why:** Documents and jobs ignored `?cursor` and sent no `next_cursor`,
+and their `ORDER BY updated_at DESC LIMIT ?` had no tie-break, so nothing
+past the first 500 rows could be seen (`curio docs --all` on a large
+corpus) and rows sharing a millisecond came back in no fixed order.
+`--limit 1000` silently returned 50. Bookmarks paged `id > ? ORDER BY id`,
+which for UUIDv4 is random order, and the handler read every row's
+document separately.
+
+**Why these indexes:** on SQLite 3.53, adding `id` to the ORDER BY over
+the old `(tenant_id[, state|status], updated_at)` indexes plans a
+temporary b-tree for the last term. With `id` as the indexes' last column
+(migration 009, inside goose's transaction; no table rebuild) the
+row-value predicate becomes a range on the index and the order comes from
+it. The expanded `ts < ? OR (ts = ? AND id < ?)` form only seeks
+`tenant_id`, which is why `keysetAfter` writes the row value.
+`plans_test.go` pins the first page and a cursor page of every filter.
+
+| Index | Serves |
+|---|---|
+| `idx_jobs_claim (status, kind, run_after, created_at)` | `ClaimNext`; `RecoverOrphans` |
+| `idx_jobs_document (document_id, status, updated_at)` | a document's last error (`curio docs`); the FK action when a document is deleted |
+| `idx_jobs_tenant_status_updated (tenant_id, status, updated_at, id)` | `ListWithDoc` by status, with or without kind; `CountByStatus`; `MetricsByKind`'s window; `PruneOlderThan`; `DeleteByStatus` |
+| `idx_jobs_tenant_updated (tenant_id, updated_at, id)` | `ListWithDoc` unfiltered or by kind only |
+| `idx_documents_tenant_state_updated (tenant_id, state, updated_at, id)` | `ListWithLastError` by state; `CountByState`; `ListIDsWithContent`; `DocumentVectors` (now covering); `RequeueFetchByStates` |
+| `idx_documents_tenant_updated (tenant_id, updated_at, id)` | `ListWithLastError` unfiltered |
+| `idx_bookmarks_tenant_created (tenant_id, created_at, id)` | `Bookmarks.List`, unfiltered or filtered by source or folder (checked per row) |
+
+---
+
+## API: the spec is the contract, checked by tests
+
+**Decision:** `api/openapi.yaml` documents exactly what the daemon serves,
+and `internal/api/openapi_test.go` keeps it that way:
+
+- `TestOpenAPI_Valid` loads the spec with kin-openapi, validates it, and
+  fails on 3.0's `nullable`, which OpenAPI 3.1 doesn't have. The spec stays
+  on 3.1 and marks optional fields by leaving them out of `required`: the
+  handlers omit unset fields and never send `null`.
+- `TestOpenAPI_RoutesMatchRouter` walks the router `newRouter` builds with
+  `chi.Walk` and compares its (method, path) pairs with the spec's, both
+  ways.
+- `TestOpenAPI_RequestTypesMatchSchemas` compares the JSON fields of the
+  request types the strict decoder fills with the request-body schemas,
+  recursively.
+- `TestOpenAPI_ResponsesMatchSchemas` drives every documented operation
+  through the real router over seeded fixtures (a fake embedder, UUID IDs)
+  and validates each response: a documented status and content type, and a
+  body that passes JSON Schema 2020-12 with `format: uuid` enforced and,
+  in the test only, undeclared properties refused. It fails if any
+  documented operation goes unexercised, and covers problems for 400, 404,
+  409, 405 and 415.
+- kin-openapi is a test dependency; the `no-test-deps-in-prod` depguard
+  rule denies it to production code.
+
+Reconciling the spec with the router:
+
+- `GET /v1/jobs/{id}` was documented, and it is what the async convention
+  tells clients to poll, so it was implemented (`JobStore.GetWithDoc`).
+- `POST /v1/jobs/{id}/retry` is removed: retrying a job must also reset
+  its document's state, which refetch, reindex and interests rebuild
+  already do.
+- `POST /v1/bookmarks/{id}/refetch` is removed: it duplicated
+  `POST /v1/documents/{id}/refetch`, and every bookmark carries its
+  `document_id`.
+- `GET /v1/documents/{id}/references` is removed: no client reads it, and
+  adding it later is non-breaking.
+- `GET /v1/metrics`, `POST /v1/documents/{id}/reindex`,
+  `POST /v1/documents/reindex-all` and `DELETE /v1/jobs` were routed but
+  undocumented, and are documented now.
+- Every operation declares a `default` response referencing the shared
+  Problem (403, 405, 413, 415, 500), and lists the 400, 404 and 409 its
+  handler produces.
+
+**Imports are synchronous per batch.** `POST /v1/bookmarks/import` answers
+200 with what the batch did (`created`, `skipped`, `filtered`,
+`filtered_by`, `jobs_enqueued`, the first errors) for a list of parsed
+bookmarks, as "Importers: CLI parses, daemon receives lists" decided; the
+spec described a file upload answered with 202 and a job ID. A batch (the
+CLI sends 500) takes well under a second, and the fetches it enqueues are
+jobs like any other. This supersedes "imports answer 202 with job_id" in
+"API: all long-running operations are async with job IDs".
+
+**Why:** Nothing checked the spec. Four documented operations weren't
+routed, four routed ones weren't documented, the import endpoint was
+described as a different API, and validating live responses found drift in
+Stats, Extraction, Job, SearchHit, the document list items and
+BookmarkCreated (a `job_id` of format uuid that is empty for a known URL,
+by design). Seventeen `nullable` keywords meant nothing under 3.1, and
+kin-openapi's validator accepted them silently. The docs said the clients
+were generated from the spec; they are hand-written, so a test is what
+keeps the two in step. Codegen stays deferred.

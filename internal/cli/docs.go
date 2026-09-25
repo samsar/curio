@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -9,20 +8,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
-func newDocsCmd() *cobra.Command {
-	cmd := newDocsListCmd()
-	cmd.AddCommand(newDocsShowCmd())
+func newDocsCmd(env *daemonctl.Env) *cobra.Command {
+	cmd := newDocsListCmd(env)
+	cmd.AddCommand(newDocsShowCmd(env))
 	return cmd
 }
 
-func newDocsListCmd() *cobra.Command {
+func newDocsListCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		failedOnly bool
 		showAll    bool
 		state      string
 		limit      int
+		cursor     string
 	)
 	cmd := &cobra.Command{
 		Use:   "docs",
@@ -37,51 +38,41 @@ targeted it AND the on-disk markdown path (when present), so most
 follow-ups (cat the file, run curio refetch, etc.) don't need
 another lookup.
 
+Rows come most recently updated first, a page at a time; when more
+follow, the last line is the command that shows the next page.
+
 Cross-reference: 'curio jobs --failed' shows the underlying job rows
 with full error messages and attempt counts.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := checkPageLimit(limit); err != nil {
 				return err
 			}
-			s := resolveDocsState(state, failedOnly, showAll)
-
-			resp, err := ctx.Client.ListDocuments(cmd.Context(), client.ListDocumentsOpts{
-				State: s, Limit: limit,
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
+				return err
+			}
+			resp, err := env.Client.ListDocuments(cmd.Context(), client.ListDocumentsOpts{
+				State:  resolveFilter(state, failedOnly, showAll, "fetched"),
+				Limit:  limit,
+				Cursor: cursor,
 			})
 			if err != nil {
 				return err
 			}
-			renderDocList(cmd.OutOrStdout(), resp)
+			w := cmd.OutOrStdout()
+			renderDocList(w, resp)
+			printNextPage(w, cmd, resp.NextCursor)
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&failedOnly, "failed", false, "Shortcut for --state=failed")
 	cmd.Flags().BoolVar(&showAll, "all", false, "Show every state instead of just fetched")
 	cmd.Flags().StringVar(&state, "state", "", "pending|fetched|failed|dead (overrides defaults)")
-	cmd.Flags().IntVar(&limit, "limit", 50, "Max rows (server caps at 500)")
+	cmd.Flags().IntVar(&limit, "limit", 50, "Rows per page, 1-500")
+	cmd.Flags().StringVar(&cursor, "cursor", "", "Token from the \"next page:\" line of a previous page")
 	return cmd
 }
 
-// resolveDocsState resolves the three flags into a single state filter.
-// Precedence: --state > --failed > --all > default(fetched).
-func resolveDocsState(state string, failedOnly, all bool) string {
-	switch {
-	case state != "":
-		return state
-	case failedOnly:
-		return "failed"
-	case all:
-		return ""
-	default:
-		return "fetched"
-	}
-}
-
-func newDocsShowCmd() *cobra.Command {
+func newDocsShowCmd(env *daemonctl.Env) *cobra.Command {
 	var showContent bool
 	cmd := &cobra.Command{
 		Use:   "show <document-id>",
@@ -91,30 +82,32 @@ extraction info, and the on-disk markdown path so you can grep/edit
 directly. Pass --content to also stream the markdown to stdout.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 
 			id := args[0]
-			doc, err := ctx.Client.GetDocument(cmd.Context(), id)
+			doc, err := env.Client.GetDocument(cmd.Context(), id)
 			if err != nil {
 				return err
 			}
 			w := cmd.OutOrStdout()
-			renderDocShow(w, doc, ctx.Home.ContentDir())
+			renderDocShow(w, doc)
 
-			if showContent {
-				body, err := ctx.Client.GetDocumentContent(cmd.Context(), id)
-				if err != nil {
-					return err
-				}
-				fmt.Fprintln(w, "\n--- content ---")
-				fmt.Fprintln(w, body)
+			if !showContent {
+				return nil
 			}
+			body, err := env.Client.GetDocumentContent(cmd.Context(), id)
+			if client.IsNotFound(err) {
+				// The document exists, so a 404 means nothing is extracted yet.
+				fmt.Fprintln(w, "\n(no extracted content yet)")
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(w, "\n--- content ---")
+			fmt.Fprintln(w, body)
 			return nil
 		},
 	}
@@ -122,7 +115,7 @@ directly. Pass --content to also stream the markdown to stdout.`,
 	return cmd
 }
 
-func renderDocShow(w io.Writer, d *client.Document, contentDir string) {
+func renderDocShow(w io.Writer, d *client.Document) {
 	fmt.Fprintf(w, "id:           %s\n", d.ID)
 	fmt.Fprintf(w, "url:          %s\n", d.URL)
 	if d.Title != nil && *d.Title != "" {
@@ -141,7 +134,7 @@ func renderDocShow(w io.Writer, d *client.Document, contentDir string) {
 		fmt.Fprintf(w, "  status:       %s\n", e.Status)
 		fmt.Fprintf(w, "  fetched_at:   %s\n", e.FetchedAt.Local().Format("2006-01-02 15:04:05 MST"))
 		if e.MarkdownPath != "" {
-			fmt.Fprintf(w, "  markdown:     %s/%s\n", contentDir, e.MarkdownPath)
+			fmt.Fprintf(w, "  markdown:     %s\n", e.MarkdownPath)
 		}
 		if e.ErrorMessage != nil && *e.ErrorMessage != "" {
 			fmt.Fprintf(w, "  err:          %s\n", *e.ErrorMessage)

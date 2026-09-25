@@ -7,9 +7,12 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
+
+	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
-func newReindexCmd() *cobra.Command {
+func newReindexCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		all   bool
 		state string
@@ -25,21 +28,17 @@ Documents must already have content: --all targets state=fetched by default
 and, in any state, skips documents that were never fetched.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, ok := getCtx(cmd.Context())
-			if !ok {
-				return errors.New("no context")
-			}
-			if err := ensureDaemon(ctx); err != nil {
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
 
 			if all {
-				return reindexAll(cmd.Context(), cmd.OutOrStdout(), ctx, state)
+				return reindexAll(cmd.Context(), cmd.OutOrStdout(), env.Client, state)
 			}
 			if len(args) != 1 {
 				return errors.New("provide a document ID or pass --all")
 			}
-			return reindexOne(cmd.Context(), cmd.OutOrStdout(), ctx, args[0])
+			return reindexOne(cmd.Context(), cmd.OutOrStdout(), env.Client, args[0])
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Reindex every document with content (default state=fetched; use --state to override)")
@@ -48,17 +47,18 @@ and, in any state, skips documents that were never fetched.`,
 	return cmd
 }
 
-func reindexOne(httpCtx context.Context, w io.Writer, c *Context, docID string) error {
-	resp, err := c.Client.ReindexDocument(httpCtx, docID)
+func reindexOne(ctx context.Context, w io.Writer, c *client.Client, docID string) error {
+	resp, err := c.ReindexDocument(ctx, docID)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "reindex enqueued for document %s (job %s)\n", docID, resp.JobID)
+	fmt.Fprintf(w, "  follow it: curio jobs show %s\n", resp.JobID)
 	return nil
 }
 
-func reindexAll(httpCtx context.Context, w io.Writer, c *Context, state string) error {
-	resp, err := c.Client.ReindexAll(httpCtx, state)
+func reindexAll(ctx context.Context, w io.Writer, c *client.Client, state string) error {
+	resp, err := c.ReindexAll(ctx, state)
 	if err != nil {
 		return err
 	}
