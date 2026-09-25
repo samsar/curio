@@ -142,31 +142,58 @@ func (c *Controller) EnsureRunning(ctx context.Context) error {
 }
 
 // Stop sends SIGTERM to the daemon holding this home's lock and waits for it
-// to release the lock. A daemon that isn't running is not an error.
-func (c *Controller) Stop(ctx context.Context) error {
+// to release the lock. stopped is true when a daemon for this home was
+// running when Stop began and is gone when it returns. A home with no
+// daemon, only a stale PID file, or another home's daemon on the port is
+// (false, nil): there was nothing here to stop.
+func (c *Controller) Stop(ctx context.Context) (stopped bool, err error) {
 	st, err := c.Status(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	switch st.State {
 	case NotRunning, Stale:
-		return nil
+		return false, nil
 	case Legacy:
-		return c.legacyStopError(st.PID)
+		return false, c.legacyStopError(st.PID)
 	case Running:
 	}
 
 	if st.PID == 0 {
-		return errors.New("the daemon is still starting and hasn't recorded its pid; try again in a moment")
+		return false, errors.New("the daemon is still starting and hasn't recorded its pid; try again in a moment")
 	}
 	if h := st.Health; h != nil && (h.PID != st.PID || !SameHome(h.Home, c.Home.Path)) {
-		return fmt.Errorf("%s answers as pid %d for %s, but this home's lock is held by pid %d; not signalling either",
+		return false, fmt.Errorf("%s answers as pid %d for %s, but this home's lock is held by pid %d; not signalling either",
 			c.BaseURL, h.PID, h.Home, st.PID)
 	}
-	if err := syscall.Kill(st.PID, syscall.SIGTERM); err != nil {
-		return fmt.Errorf("signal daemon (pid %d): %w", st.PID, err)
+	if err := c.signalHolder(ctx, st.PID); err != nil {
+		return false, err
 	}
-	return c.waitReleased(ctx, st.PID)
+	return true, nil
+}
+
+// signalHolder stops pid, which the lock named, and waits for the lock to be
+// released. Status probed healthz after reading the lock, which can take a
+// while, so the lock is read again right before the signal: if pid no longer
+// holds it, pid has exited or is exiting (its number may even belong to
+// another process by now), so it is not signalled, and waitReleased's rule
+// decides when it is gone. ESRCH from the signal means it already is.
+func (c *Controller) signalHolder(ctx context.Context, pid int) error {
+	held, holder, err := probeLock(c.Home.PIDFile())
+	if err != nil {
+		return err
+	}
+	if !held || holder != pid {
+		return c.waitReleased(ctx, pid)
+	}
+	err = syscall.Kill(pid, syscall.SIGTERM)
+	if errors.Is(err, syscall.ESRCH) {
+		return nil // it exited since the probe, and a process that has exited holds no lock
+	}
+	if err != nil {
+		return fmt.Errorf("signal daemon (pid %d): %w", pid, err)
+	}
+	return c.waitReleased(ctx, pid)
 }
 
 // SameHome reports whether two CURIO_HOME paths name the same directory,
@@ -261,7 +288,13 @@ func (c *Controller) spawn(ctx context.Context) error {
 // the lock holder is what's being waited for, and its exit without serving
 // ends the wait with errHolderExited.
 func (c *Controller) waitReady(ctx context.Context, childPID int, exited <-chan error) error {
-	deadline := time.NewTimer(c.StartTimeout)
+	timeout := c.StartTimeout
+	if exited == nil {
+		// Not our child: the holder may be starting up, or draining after a
+		// stop, which lasts up to the daemon's shutdown budget.
+		timeout = max(c.StartTimeout, c.StopTimeout)
+	}
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTicker(pollInterval)
 	defer tick.Stop()
@@ -274,12 +307,12 @@ func (c *Controller) waitReady(ctx context.Context, childPID int, exited <-chan 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			cause := fmt.Errorf("no healthy response at %s within %s", c.BaseURL, c.StartTimeout)
+			cause := fmt.Errorf("no healthy response at %s within %s", c.BaseURL, timeout)
 			if exited == nil {
 				// The daemon being waited for isn't one we spawned, so
 				// its startup isn't ours to report on.
-				return fmt.Errorf("waiting for the curio-daemon already starting for %s: %w "+
-					"(`curio daemon status` shows its pid)", c.Home.Path, cause)
+				return fmt.Errorf("waiting for the curio-daemon holding the lock for %s "+
+					"(starting up or shutting down): %w (`curio daemon status` shows its pid)", c.Home.Path, cause)
 			}
 			return c.startFailed(cause)
 		case exitErr := <-exited:

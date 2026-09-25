@@ -242,10 +242,15 @@ func TestEnsureRunning_ConcurrentStartersSpawnOnce(t *testing.T) {
 	assert.Equal(t, st.PID, st.Health.PID)
 	assert.True(t, SameHome(c.Home.Path, st.Health.Home))
 
-	require.NoError(t, c.Stop(ctx))
+	stopped, err := c.Stop(ctx)
+	require.NoError(t, err)
+	assert.True(t, stopped)
 	st, err = c.Status(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, NotRunning, st.State, "a clean stop leaves an empty PID file")
+	pidFile, err := os.ReadFile(c.Home.PIDFile())
+	require.NoError(t, err)
+	assert.Empty(t, pidFile)
 }
 
 // TestEnsureRunning_ServesTheControllersHome: the daemon a controller
@@ -377,17 +382,44 @@ func TestEnsureRunning_SlowHealthz(t *testing.T) {
 
 // TestEnsureRunning_TimesOutWaitingForAnotherDaemon: when the lock holder is
 // a daemon this caller didn't spawn and it never answers, the error says so;
-// there is no failed start of ours to report.
+// there is no failed start of ours to report. The wait allows for a holder
+// that is shutting down as well as one starting up.
 func TestEnsureRunning_TimesOutWaitingForAnotherDaemon(t *testing.T) {
 	c := newTestController(t, modeNormal)
 	holdLock(t, c)
-	c.StartTimeout = 300 * time.Millisecond
+	c.StartTimeout = 100 * time.Millisecond
+	c.StopTimeout = 400 * time.Millisecond
 
+	start := time.Now()
 	err := c.EnsureRunning(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "waiting for the curio-daemon already starting for "+c.Home.Path)
+	assert.GreaterOrEqual(t, time.Since(start), c.StopTimeout, "waited the longer of the two budgets")
+	assert.Contains(t, err.Error(), "waiting for the curio-daemon holding the lock for "+c.Home.Path+
+		" (starting up or shutting down)")
+	assert.Contains(t, err.Error(), "within "+c.StopTimeout.String())
 	assert.NotContains(t, err.Error(), "failed to start")
 	assert.Zero(t, spawnCount(t, c))
+}
+
+// TestEnsureRunning_WaitsOutADrainingHolder: a daemon draining after a stop
+// holds the lock for up to its shutdown budget, longer than StartTimeout.
+// EnsureRunning waits it out and then starts exactly one daemon, rather
+// than giving up on a daemon it thinks is starting.
+func TestEnsureRunning_WaitsOutADrainingHolder(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	c.StartTimeout = 300 * time.Millisecond
+	c.StopTimeout = 5 * time.Second
+	lock, err := AcquireLock(c.Home)
+	require.NoError(t, err)
+	released := time.AfterFunc(time.Second, func() { assert.NoError(t, lock.Release()) })
+	t.Cleanup(func() {
+		if released.Stop() {
+			assert.NoError(t, lock.Release())
+		}
+	})
+
+	require.NoError(t, c.EnsureRunning(context.Background()))
+	assert.Equal(t, 1, spawnCount(t, c))
 }
 
 // TestMalformedPIDFileIsIgnored: with the lock free, whatever is left in
@@ -420,7 +452,9 @@ func TestStalePIDFileIsNeverTrusted(t *testing.T) {
 	assert.Equal(t, Stale, st.State)
 	assert.Equal(t, pid, st.PID)
 
-	require.NoError(t, c.Stop(ctx))
+	stopped, err := c.Stop(ctx)
+	require.NoError(t, err)
+	assert.False(t, stopped, "a stale PID file is nothing to stop")
 	require.NoError(t, c.EnsureRunning(ctx))
 	assert.Equal(t, 1, spawnCount(t, c))
 
@@ -439,8 +473,9 @@ func TestStop_DaemonIgnoringSIGTERM(t *testing.T) {
 	require.NoError(t, err)
 
 	c.StopTimeout = 300 * time.Millisecond
-	err = c.Stop(ctx)
+	stopped, err := c.Stop(ctx)
 	require.Error(t, err)
+	assert.False(t, stopped)
 	assert.Contains(t, err.Error(), fmt.Sprintf("pid %d", st.PID))
 	assert.Contains(t, err.Error(), "still running")
 }
@@ -467,7 +502,7 @@ func TestStop_RefusesMismatchedIdentity(t *testing.T) {
 			writePIDFile(t, c, holder) // the lock now vouches for the bystander
 			serveHealth(t, c, tc.health(holder, c.Home.Path))
 
-			err := c.Stop(context.Background())
+			_, err := c.Stop(context.Background())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), fmt.Sprintf("held by pid %d; not signalling", holder))
 			select {
@@ -476,6 +511,48 @@ func TestStop_RefusesMismatchedIdentity(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+func TestStop_NotRunning(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	stopped, err := c.Stop(context.Background())
+	require.NoError(t, err)
+	assert.False(t, stopped)
+}
+
+// TestStop_DaemonGoneBeforeSignal: the daemon Status saw exits before the
+// signal lands. That is a stopped daemon, not a "no such process" error.
+// The test process holds the lock with daemon.pid naming a process that
+// has already exited, the state a signal racing the daemon's exit sees.
+func TestStop_DaemonGoneBeforeSignal(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	gone, exited := startBystander(t)
+	require.NoError(t, syscall.Kill(gone, syscall.SIGKILL))
+	<-exited // reaped: the PID now names no process
+	holdLock(t, c)
+	writePIDFile(t, c, gone)
+
+	start := time.Now()
+	stopped, err := c.Stop(context.Background())
+	require.NoError(t, err)
+	assert.True(t, stopped)
+	assert.Less(t, time.Since(start), c.StopTimeout/2)
+}
+
+// TestSignalHolder_ReprobesBeforeSignalling: when the lock is free by the
+// time of the signal, the PID Status read is gone and may already name an
+// unrelated process, so it is not signalled.
+func TestSignalHolder_ReprobesBeforeSignalling(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	pid, exited := startBystander(t)
+	writePIDFile(t, c, pid) // lock free: whoever wrote this has exited
+
+	require.NoError(t, c.signalHolder(context.Background(), pid))
+	select {
+	case <-exited:
+		t.Fatal("a PID the lock no longer vouches for was signalled")
+	default:
 	}
 }
 
@@ -510,8 +587,9 @@ func TestLegacyDaemon(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, Legacy, st.State)
 
-	err = c.Stop(ctx)
+	stopped, err := c.Stop(ctx)
 	require.Error(t, err)
+	assert.False(t, stopped)
 	assert.Contains(t, err.Error(), "older version")
 	assert.Contains(t, err.Error(), "kill "+strconv.Itoa(pid))
 

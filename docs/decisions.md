@@ -2143,6 +2143,22 @@ stop it by hand.
 **Not done:** job leases or heartbeats. The lock makes "one daemon per
 database" true, and that is the assumption the queue relies on.
 
+**Revised (2026-09):** `Controller.Stop` returns `(stopped bool, err)`.
+`stopped` is true only when a daemon for this home was running when Stop
+began and is gone when it returns; no daemon, a stale PID file or another
+home's daemon on the port is `(false, nil)`, and `curio daemon stop` then
+prints "daemon not running" instead of "daemon stopped". Status probes
+healthz after reading the lock, which can take up to the daemon's own
+Ollama check, so Stop reads the lock again right before signalling: if
+the PID it saw no longer holds it, that daemon has exited and is not
+signalled (its PID may already be reused), and `ESRCH` from the signal
+likewise means stopped, not a "no such process" error. `EnsureRunning`
+waiting on a lock holder it didn't spawn now allows
+max(StartTimeout, StopTimeout): the holder may be draining after a stop
+(up to 20s) rather than starting (15s), and the timeout error says
+"starting up or shutting down" instead of blaming a daemon "already
+starting".
+
 ---
 
 ## Interrupted vs. orphaned jobs

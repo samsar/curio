@@ -37,10 +37,15 @@ func newDaemonStopCmd(env *daemonctl.Env) *cobra.Command {
 		Use:   "stop",
 		Short: "Stop the daemon",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := env.Controller.Stop(cmd.Context()); err != nil {
+			stopped, err := env.Controller.Stop(cmd.Context())
+			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "daemon stopped")
+			if stopped {
+				fmt.Fprintln(cmd.OutOrStdout(), "daemon stopped")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "daemon not running")
+			}
 			return nil
 		},
 	}
