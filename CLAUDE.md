@@ -25,9 +25,10 @@ Cgo is required (sqlite, sqlite-vec). `CGO_ENABLED=1` is forced in the Makefile.
 
 ## Tooling traps
 
-- **Go version**: `go.mod` declares `go 1.25.7` because deps (`pressly/goose`, `html-to-markdown/v2`, others) require it. `go mod tidy` run with a different Go version produces a different `go.sum` — CI uses the version in `go.mod` via `go-version-file`. Always tidy with the matching toolchain: `GOTOOLCHAIN=go1.25.7 go mod tidy`.
-- **No `toolchain` directive**: removed because golangci-lint v2 sees it as the targeted version. Don't add it back unless you also bump the linter to a version built with a newer Go.
-- **golangci-lint v2.12.2** is the pinned version; older v2.0.x was built with go1.24 and rejected our modules. The action is `golangci/golangci-lint-action@v7` (v6 doesn't pull v2.x).
+- **Go version**: the `go` directive in `go.mod` (`go 1.26.8`) is the exact toolchain CI and releases build with. setup-go installs it from `go-version-file`, and the Makefile exports `GOTOOLCHAIN=go<directive>`, so every `make` target runs it too (the go command downloads it once). Bump the patch when `make vulncheck` flags the standard library; move to the next minor before the current line leaves support. `go mod tidy` under another Go version produces a different `go.sum`: use `make fmt` / `make tidy-check`, or `GOTOOLCHAIN=go1.26.8 go mod tidy`.
+- **No `toolchain` directive**: golangci-lint takes it as the target version, so building on a newer toolchain than the `go` line makes modernize suggest APIs that vet's stdversion check then rejects. Move the `go` line instead.
+- **golangci-lint** is pinned once, in the Makefile (`GOLANGCI_LINT_VERSION`, v2.12.2); CI reads it with `make -s golangci-lint-version`. It must be built with a Go minor at least the directive's, or it can't type-check the standard library it is handed (the official v2.12.2 binary is built with go1.26.2). `make lint` refuses any other version; `make tools` installs the pinned golangci-lint and goose.
+- **govulncheck** (`make vulncheck`, pinned v1.8.0) runs in CI on every push and PR and in the release gate. See `docs/decisions.md` "Toolchain: the go directive is the build toolchain".
 
 ## Architecture in one screen
 

@@ -3430,3 +3430,43 @@ by design). Seventeen `nullable` keywords meant nothing under 3.1, and
 kin-openapi's validator accepted them silently. The docs said the clients
 were generated from the spec; they are hand-written, so a test is what
 keeps the two in step. Codegen stays deferred.
+
+---
+
+## Toolchain: the go directive is the build toolchain, govulncheck gates it
+
+**Decision:** The `go` line in `go.mod` names the exact toolchain CI and
+releases build with (`go 1.26.8`), and there is still no `toolchain`
+directive. setup-go installs it from `go-version-file`, and the Makefile
+exports `GOTOOLCHAIN=go<directive>`, so every local target runs it too; the
+go command downloads it once when a machine's default Go differs.
+`make vulncheck` runs govulncheck v1.8.0 with the sqlite build tags. CI runs
+it on every push and pull request, and the release gate runs CI.
+
+The policy:
+
+- Bump the patch when govulncheck reports a standard-library finding.
+- Move to the next minor before the current line leaves support. Go
+  supports its two newest minors, so the release of go1.N+2 ends go1.N.
+- golangci-lint must be built with a Go minor at least the directive's, or
+  it cannot type-check the standard library it is handed.
+- No `toolchain` line. golangci-lint reads it as the target version, so a
+  toolchain newer than the language version makes modernize suggest APIs
+  that vet's stdversion check then rejects. Move the `go` line instead.
+
+**Why:** The shipped binaries were built with go1.25.7, and govulncheck
+found the code reaching 19 known vulnerabilities: 17 in the standard library
+(net/http, crypto/tls, crypto/x509, net/url and others, fixed in 1.25.8
+through 1.25.13), golang.org/x/text v0.37.0, and cloudflare/circl v1.5.0,
+which tls-client pulls in. The daemon fetches arbitrary web pages, so
+untrusted input reaches exactly those packages, and nothing ran govulncheck.
+Go 1.25 left support when go1.27.0 shipped on 2026-08-19; go1.25.14 was its
+last patch, so pinning it would only postpone the first finding with no fix
+on that line. Moving to 1.26.8 with x/text v0.39.0 and circl v1.6.3 brings
+the count to zero, and the language change from 1.25 needed no code change.
+
+Exporting GOTOOLCHAIN came from a measured failure: the official
+golangci-lint v2.12.2 binary, built with go1.26.2, cannot load go1.27's
+standard library ("file requires newer Go version go1.27") on a machine
+whose default Go is newer than the directive. With the export it loads the
+directive's standard library everywhere.

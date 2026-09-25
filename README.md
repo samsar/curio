@@ -137,17 +137,21 @@ a session, the next tool call starts it again. See [docs/mcp.md](./docs/mcp.md).
 
 ## Building from source
 
-Requires Go 1.23+ (will use 1.26 toolchain via go.mod), Node not required (the
-default fetcher is Go-native).
+Requires Go 1.26.8 or newer, the `go` line in `go.mod`: the Makefile builds
+with exactly that toolchain, and the go command downloads it once if your
+default differs. cgo is required (sqlite + sqlite-vec), so you also need a C
+toolchain: on macOS, the Xcode Command Line Tools (`xcode-select --install`).
+Node isn't needed; the default fetcher is Go-native.
 
 ```sh
 git clone https://github.com/samsar/curio
 cd curio
-make build      # produces bin/curio and bin/curio-daemon
+make build      # produces bin/curio, bin/curio-daemon and bin/curio-mcp
 make test       # unit tests
 ```
 
-cgo is required (sqlite + sqlite-vec). The Makefile forces `CGO_ENABLED=1`.
+The Makefile forces `CGO_ENABLED=1`. `make tools` installs the pinned
+golangci-lint and goose, and `make help` lists every target.
 
 ## Naming
 
