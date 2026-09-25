@@ -198,7 +198,7 @@ _**M3 is complete.**_
 | `DocumentVectors` | `internal/store` | New `ChunkStore.DocumentVectors` — bulk mean-pooled per-doc vectors feeding the clusterer |
 | CLI | `internal/cli` | `curio interests` (`--limit`, `--members`) and `curio interests rebuild` |
 | MCP tool | `cmd/curio-mcp/main.go` | `list_interests`, alongside `search_bookmarks` / `get_document` / `find_related` |
-| Config | `internal/config` | `insight` block (`enabled`, `knn`, `min_similarity`, `min_cluster_size`, `labeling`) + `generation` block (`provider`, `model`, `base_url`, `timeout_seconds`) |
+| Config | `internal/config` | `insight` block (`enabled`, `knn`, `min_similarity`, `min_cluster_size`, `labeling`, `labeling_timeout_seconds`) + `generation` block (`provider`, `model`, `base_url`, `timeout_seconds`) |
 | Eval harness | `internal/eval`, `docs/eval.example.yaml` | `curio eval --queries <qrels.yaml>` computes recall@k / precision@k / NDCG@k / MRR over a labeled query set — the measurement rig that de-risks M6 |
 
 ### Deferred
@@ -219,6 +219,16 @@ _**M3 is complete.**_
   representation) are deferred.
 - Cluster-labeling model quality is only as good as the local generation model
   (`llama3.2` by default); labels for coarse clusters can be generic.
+
+## Config: time budgets for Ollama calls
+
+Each bounds how long one kind of work waits on Ollama; all are validated as
+positive. When a budget runs out the work degrades rather than failing.
+
+| Key | Default | Bounds |
+|---|---|---|
+| `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried |
+| `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one clustering run; the rest get term labels |
 
 ## M6 — RAG / Q&A synthesis + SOTA search
 

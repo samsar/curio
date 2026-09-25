@@ -46,7 +46,12 @@ func NewTermLabeler() *TermLabeler { return &TermLabeler{maxTerms: 4} }
 
 func (l *TermLabeler) Name() string { return "terms" }
 
+// Label implements Labeler; it never fails.
 func (l *TermLabeler) Label(_ context.Context, info ClusterInfo) (Label, error) {
+	return l.label(info), nil
+}
+
+func (l *TermLabeler) label(info ClusterInfo) Label {
 	counts := make(map[string]int)
 	order := make(map[string]int) // first-seen position, for stable tie-breaking
 	seen := 0
@@ -63,7 +68,7 @@ func (l *TermLabeler) Label(_ context.Context, info ClusterInfo) (Label, error) 
 		}
 	}
 	if len(counts) == 0 {
-		return Label{}, nil
+		return Label{}
 	}
 	type term struct {
 		word  string
@@ -86,7 +91,7 @@ func (l *TermLabeler) Label(_ context.Context, info ClusterInfo) (Label, error) 
 	for i, t := range terms {
 		words[i] = titleCase(t.word)
 	}
-	return Label{Name: strings.Join(words, " ")}, nil
+	return Label{Name: strings.Join(words, " ")}
 }
 
 // ErrUnparseableLabel reports a model reply with no usable NAME field. It is

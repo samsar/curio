@@ -151,6 +151,10 @@ type Insight struct {
 	// Labeling selects cluster naming: "llm" (default; needs a generation
 	// model, else falls back to deterministic term labels), "terms", or "off".
 	Labeling string `yaml:"labeling"`
+	// LabelingTimeoutSeconds bounds the total time one clustering run waits
+	// on the LLM labeler; clusters left when it runs out get term labels.
+	// Default 900. Keeps a hung Ollama from holding the single cluster worker.
+	LabelingTimeoutSeconds int `yaml:"labeling_timeout_seconds"`
 }
 
 // Generation configures the LLM text-generation client used to label clusters
@@ -236,7 +240,8 @@ func Default() Config {
 			// back to deterministic term labels — so it's still safe with zero
 			// setup. Set "terms" to force the deterministic labeler, "off" to
 			// skip labeling.
-			Labeling: "llm",
+			Labeling:               "llm",
+			LabelingTimeoutSeconds: 900,
 		},
 		Generation: Generation{
 			Provider:       providerOllama,
@@ -386,13 +391,18 @@ func (c Config) Validate() error {
 	}
 	// Strictly positive: the clusterer treats a non-positive threshold as
 	// "unset" and substitutes its default, so 0 here would be silently ignored.
-	if c.Insight.MinSimilarity <= 0 || c.Insight.MinSimilarity > 1 {
+	// Written so NaN (YAML .nan), which fails every comparison, is rejected.
+	if !(c.Insight.MinSimilarity > 0 && c.Insight.MinSimilarity <= 1) {
 		return fmt.Errorf("insight.min_similarity must be in (0, 1], got %g", c.Insight.MinSimilarity)
 	}
 	switch c.Insight.Labeling {
 	case "llm", "terms", "off":
 	default:
 		return fmt.Errorf("insight.labeling %q must be one of: llm, terms, off", c.Insight.Labeling)
+	}
+	if c.Insight.LabelingTimeoutSeconds <= 0 {
+		return fmt.Errorf("insight.labeling_timeout_seconds must be positive, got %d",
+			c.Insight.LabelingTimeoutSeconds)
 	}
 	if c.Generation.Provider != providerOllama {
 		return fmt.Errorf("generation.provider %q is not supported; the only provider is %q",

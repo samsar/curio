@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -30,6 +31,9 @@ type Config struct {
 	// TitlesPerCluster caps how many representative titles feed the labeler
 	// and are fetched per cluster. Default 12.
 	TitlesPerCluster int
+	// LabelingTimeout bounds the total time one run spends waiting on the LLM
+	// labeler. Clusters left when it runs out get term labels. Default 15m.
+	LabelingTimeout time.Duration
 	// Center subtracts the corpus mean vector before clustering. Embedding
 	// models like nomic-embed-text are anisotropic (their vectors sit in a
 	// narrow cone), so raw cosines are uniformly high and everything collapses
@@ -50,7 +54,7 @@ type Engine struct {
 	insights    store.InsightStore
 	clusterer   Clusterer
 	llmLabeler  Labeler // may be nil (no generation model configured)
-	termLabeler Labeler
+	termLabeler *TermLabeler
 	cfg         Config
 	log         *slog.Logger
 }
@@ -68,6 +72,9 @@ func New(
 ) *Engine {
 	if cfg.TitlesPerCluster <= 0 {
 		cfg.TitlesPerCluster = 12
+	}
+	if cfg.LabelingTimeout <= 0 {
+		cfg.LabelingTimeout = 15 * time.Minute
 	}
 	if cfg.Labeling == "" {
 		cfg.Labeling = LabelingTerms
@@ -98,13 +105,17 @@ func (e *Engine) Rebuild(ctx context.Context, tenantID string) (string, error) {
 
 	// Nothing to cluster (a fresh corpus, or every doc temporarily `pending`
 	// during a `refetch --all` window): don't clobber a prior successful run's
-	// interests with an empty one. Only record an empty run when there's
-	// nothing worth keeping.
+	// interests with an empty one. Only record an empty run when there is
+	// definitely nothing worth keeping; a store error is not "no prior run".
 	if len(dvs) == 0 {
-		if prior, perr := e.insights.LatestRun(ctx, tenantID, store.ClusterRunDone); perr == nil {
+		prior, err := e.insights.LatestRun(ctx, tenantID, store.ClusterRunDone)
+		switch {
+		case err == nil:
 			e.log.Info("clustering: no document vectors; keeping prior run",
 				"tenant", tenantID, "run", prior.ID)
 			return prior.ID, nil
+		case !errors.Is(err, store.ErrNotFound):
+			return "", fmt.Errorf("look up the last completed run: %w", err)
 		}
 	}
 
@@ -118,16 +129,27 @@ func (e *Engine) Rebuild(ctx context.Context, tenantID string) (string, error) {
 	}
 
 	if err := e.run(ctx, tenantID, run.ID, dvs); err != nil {
-		msg := err.Error()
-		if ferr := e.insights.FinishRun(ctx, run.ID, store.ClusterRunFailed, len(dvs), 0, 0, &msg); ferr != nil {
-			e.log.Warn("mark cluster run failed", "run", run.ID, "err", ferr)
-		}
-		// Keep the last good run's interests; drop this failed run and any
-		// older/orphaned ones so failed attempts don't accumulate unbounded.
-		e.pruneStaleRuns(ctx, tenantID, run.ID)
+		e.recordFailure(ctx, tenantID, run.ID, len(dvs), err)
 		return run.ID, err
 	}
 	return run.ID, nil
+}
+
+// bookkeepingTimeout bounds recording a failed run. It runs detached from the
+// run's context, which is often why the run failed (daemon shutdown), so the
+// row doesn't stay "running" forever.
+const bookkeepingTimeout = 10 * time.Second
+
+// recordFailure marks the run failed and prunes stale runs, keeping the last
+// good run's interests.
+func (e *Engine) recordFailure(ctx context.Context, tenantID, runID string, numDocuments int, cause error) {
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookkeepingTimeout)
+	defer cancel()
+	msg := cause.Error()
+	if err := e.insights.FinishRun(bctx, runID, store.ClusterRunFailed, numDocuments, 0, 0, &msg); err != nil {
+		e.log.Warn("mark cluster run failed", "run", runID, "err", err)
+	}
+	e.pruneStaleRuns(bctx, tenantID, runID)
 }
 
 // runParams is the JSON recorded on a run: the clusterer's parameters plus the
@@ -143,15 +165,19 @@ func (e *Engine) runParams() ([]byte, error) {
 }
 
 // pruneStaleRuns drops every run for the tenant except the latest done run, so
-// a successful run's interests survive later failures. If there is no done run
-// yet, it keeps fallbackKeepID so a persistently-failing first run can't
-// accumulate rows without bound.
+// a successful run's interests survive later failures. If there is definitely
+// no done run yet, it keeps fallbackKeepID so a persistently-failing first run
+// can't accumulate rows without bound. If the latest done run can't be read,
+// it prunes nothing: this is best-effort cleanup, and deleting on a guess
+// could take the last good interests with it.
 func (e *Engine) pruneStaleRuns(ctx context.Context, tenantID, fallbackKeepID string) {
 	keep := fallbackKeepID
-	if done, err := e.insights.LatestRun(ctx, tenantID, store.ClusterRunDone); err == nil {
+	switch done, err := e.insights.LatestRun(ctx, tenantID, store.ClusterRunDone); {
+	case err == nil:
 		keep = done.ID
-	}
-	if keep == "" {
+	case !errors.Is(err, store.ErrNotFound):
+		e.log.Warn("skip pruning cluster runs: can't read the last completed run",
+			"tenant", tenantID, "err", err)
 		return
 	}
 	if err := e.insights.PruneRunsExcept(ctx, tenantID, keep); err != nil {
@@ -179,31 +205,11 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 		}
 		clusterDur = time.Since(start)
 
-		groups := make(map[int][]int)
-		for i, l := range labels {
-			if l == NoiseLabel {
-				numNoise++
-				continue
-			}
-			groups[l] = append(groups[l], i)
-		}
-
+		var groups [][]int
+		groups, numNoise = clusterGroups(labels)
 		start = time.Now()
-		for _, l := range slices.Sorted(maps.Keys(groups)) {
-			members, cohesion := summarize(points, groups[l])
-			info := ClusterInfo{Titles: e.titlesFor(ctx, members), Size: len(members)}
-			lab := e.label(ctx, info)
-
-			c := store.Cluster{TenantID: tenantID, Size: len(members), Cohesion: cohesion}
-			if lab.Name != "" {
-				name := lab.Name
-				c.Label = &name
-			}
-			if lab.Summary != "" {
-				sum := lab.Summary
-				c.Summary = &sum
-			}
-			cws = append(cws, store.ClusterWithMembers{Cluster: c, Members: members})
+		if cws, err = e.describe(ctx, tenantID, points, groups); err != nil {
+			return err
 		}
 		labelDur = time.Since(start)
 	}
@@ -226,6 +232,60 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 		"cluster_ms", clusterDur.Milliseconds(), "label_ms", labelDur.Milliseconds(),
 		"persist_ms", time.Since(start).Milliseconds())
 	return nil
+}
+
+// clusterGroups collects the member indexes of each cluster, largest cluster
+// first (ties: smallest label), whatever numbering the clusterer used, and
+// counts the noise points.
+func clusterGroups(labels []int) (groups [][]int, noise int) {
+	byLabel := make(map[int][]int)
+	for i, l := range labels {
+		if l == NoiseLabel {
+			noise++
+			continue
+		}
+		byLabel[l] = append(byLabel[l], i)
+	}
+	keys := slices.Sorted(maps.Keys(byLabel))
+	slices.SortStableFunc(keys, func(a, b int) int { return cmp.Compare(len(byLabel[b]), len(byLabel[a])) })
+	for _, l := range keys {
+		groups = append(groups, byLabel[l])
+	}
+	return groups, noise
+}
+
+// describe summarizes and names each cluster, keeping the order of groups.
+func (e *Engine) describe(ctx context.Context, tenantID string, points []Point, groups [][]int) ([]store.ClusterWithMembers, error) {
+	cws := make([]store.ClusterWithMembers, len(groups))
+	infos := make([]ClusterInfo, len(groups))
+	for i, g := range groups {
+		members, cohesion := summarize(points, g)
+		titles, err := e.titlesFor(ctx, members)
+		if err != nil {
+			return nil, err
+		}
+		cws[i] = store.ClusterWithMembers{
+			Cluster: store.Cluster{TenantID: tenantID, Size: len(members), Cohesion: cohesion},
+			Members: members,
+		}
+		infos[i] = ClusterInfo{Titles: titles, Size: len(members)}
+	}
+	labels, err := e.labelAll(ctx, infos)
+	if err != nil {
+		return nil, err
+	}
+	for i, lab := range labels {
+		cws[i].Cluster.Label = optional(lab.Name)
+		cws[i].Cluster.Summary = optional(lab.Summary)
+	}
+	return cws, nil
+}
+
+func optional(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // preparePoints turns document vectors into the unit vectors that both the
@@ -339,17 +399,21 @@ func summarize(points []Point, idxs []int) ([]store.ClusterMember, float64) {
 }
 
 // titlesFor fetches the titles of the most representative members (already
-// sorted most-central-first), up to the configured cap. Missing documents are
-// skipped; a document with no title falls back to its URL.
-func (e *Engine) titlesFor(ctx context.Context, members []store.ClusterMember) []string {
+// sorted most-central-first), up to the configured cap. A document with no
+// title falls back to its URL. A document deleted since its vector was read is
+// skipped; any other store error fails the run.
+func (e *Engine) titlesFor(ctx context.Context, members []store.ClusterMember) ([]string, error) {
 	var titles []string
 	for _, m := range members {
 		if len(titles) >= e.cfg.TitlesPerCluster {
 			break
 		}
 		d, err := e.docs.GetByID(ctx, m.DocumentID)
-		if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("load title of document %s: %w", m.DocumentID, err)
 		}
 		switch {
 		case d.Title != nil && *d.Title != "":
@@ -358,24 +422,63 @@ func (e *Engine) titlesFor(ctx context.Context, members []store.ClusterMember) [
 			titles = append(titles, d.URL)
 		}
 	}
-	return titles
+	return titles, nil
 }
 
-// label names a cluster, honoring cfg.Labeling with a graceful fallback: LLM
-// first (if configured), then the deterministic term labeler.
-func (e *Engine) label(ctx context.Context, info ClusterInfo) Label {
+// labelAll names the clusters in order, honoring cfg.Labeling with a graceful
+// fallback to deterministic term labels.
+//
+// The LLM is asked cluster by cluster until it fails in a way that would
+// repeat — unreachable, an HTTP error, a timeout, or the run's labeling budget
+// running out — and then isn't called again this run: every remaining cluster
+// gets a term label at once instead of waiting out the same failure N times.
+// An unparseable reply costs only that cluster its LLM label. Labeling stays
+// sequential: a local Ollama serializes generation anyway and competes with
+// index embeddings, and the budget plus largest-first order bound the wait and
+// spend it where it matters most. If ctx itself ends, the run fails rather
+// than completing with fallback labels.
+func (e *Engine) labelAll(ctx context.Context, infos []ClusterInfo) ([]Label, error) {
+	labels := make([]Label, len(infos))
 	if e.cfg.Labeling == LabelingOff {
-		return Label{}
+		return labels, nil
 	}
-	if e.cfg.Labeling == LabelingLLM && e.llmLabeler != nil {
-		lab, err := e.llmLabeler.Label(ctx, info)
-		if err == nil && lab.Name != "" {
-			return lab
-		}
-		if err != nil {
-			e.log.Warn("llm labeling failed, using term fallback", "err", err)
-		}
+	var llm Labeler
+	if e.cfg.Labeling == LabelingLLM {
+		llm = e.llmLabeler
 	}
-	lab, _ := e.termLabeler.Label(ctx, info)
-	return lab
+	budget, cancel := context.WithTimeout(ctx, e.cfg.LabelingTimeout)
+	defer cancel()
+
+	var fellBack int
+	var reason error
+	for i, info := range infos {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("label clusters: %w", err)
+		}
+		if llm != nil {
+			lab, err := llm.Label(budget, info)
+			if err == nil && lab.Name == "" {
+				err = fmt.Errorf("%w: empty name", ErrUnparseableLabel)
+			}
+			switch {
+			case err == nil:
+				labels[i] = lab
+				continue
+			case ctx.Err() != nil:
+				return nil, fmt.Errorf("label clusters: %w", ctx.Err())
+			case errors.Is(err, ErrUnparseableLabel):
+				// Only this reply was unusable; keep asking the model.
+			default:
+				llm = nil
+			}
+			fellBack++
+			reason = err
+		}
+		labels[i] = e.termLabeler.label(info)
+	}
+	if fellBack > 0 {
+		e.log.Warn("llm labeling fell back to term labels",
+			"clusters", fellBack, "of", len(infos), "reason", reason)
+	}
+	return labels, nil
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,6 +116,11 @@ func TestValidate(t *testing.T) {
 		{"zero rrf_k", func(c *Config) { c.Search.RRFK = 0 }, "search.rrf_k"},
 		{"bad collapse", func(c *Config) { c.Search.Collapse = "average" }, "search.collapse"},
 		{"zero web2md timeout", func(c *Config) { c.Fetcher.Web2MD.TimeoutSeconds = 0 }, "web2md.timeout_seconds"},
+		{"zero min_similarity", func(c *Config) { c.Insight.MinSimilarity = 0 }, "insight.min_similarity"},
+		{"min_similarity above 1", func(c *Config) { c.Insight.MinSimilarity = 1.5 }, "insight.min_similarity"},
+		{"NaN min_similarity", func(c *Config) { c.Insight.MinSimilarity = math.NaN() }, "insight.min_similarity"},
+		{"infinite min_similarity", func(c *Config) { c.Insight.MinSimilarity = math.Inf(1) }, "insight.min_similarity"},
+		{"zero labeling timeout", func(c *Config) { c.Insight.LabelingTimeoutSeconds = 0 }, "insight.labeling_timeout_seconds"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -273,4 +279,13 @@ func writeConfig(t *testing.T, contents string) string {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
 	return path
+}
+
+// TestLoad_NaNMinSimilarity: YAML's .nan must not slip through validation —
+// a NaN threshold rejects every graph edge and replaces the interests with an
+// empty run.
+func TestLoad_NaNMinSimilarity(t *testing.T) {
+	_, err := Load(writeConfig(t, "insight:\n  min_similarity: .nan\n"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "insight.min_similarity")
 }

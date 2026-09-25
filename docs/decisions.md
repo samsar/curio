@@ -1543,6 +1543,30 @@ the engine falls back to deterministic term labels (`TermLabeler`) — so the
 layer still works with zero setup. Set `insight.labeling = "terms"` to force the
 deterministic labeler.
 
+The fallback is decided per run, not at startup. The daemon used to ping Ollama
+once when it started and, if that failed, never wire the LLM labeler — and
+since the CLI auto-starts the daemon, often before the Ollama app is up, every
+rebuild quietly used term labels until a restart. Now the labeler is always
+wired with `labeling = "llm"`, and model auto-pull runs in the background
+either way. Within a run:
+
+- Clusters are labeled **largest first**, whatever numbering the clusterer
+  used, so the budget goes to the interests that matter most.
+- The first LLM failure that would repeat — unreachable, an HTTP error, a
+  timeout — **switches the LLM off for the rest of that run**: the remaining
+  clusters get term labels at once, and one WARN summarizes how many fell back
+  and why. Before, every cluster waited out the same failure (with generator
+  retries, ≈6 min each), so a hung Ollama could hold the single cluster worker
+  for hours.
+- `insight.labeling_timeout_seconds` (default 900) caps the total time one run
+  waits on the LLM; when it runs out the rest get term labels.
+- An unparseable reply (below) costs only that cluster its LLM label.
+- Labeling stays sequential: a local Ollama serializes generation anyway and
+  would compete with index embeddings, and the budget plus ordering bound the
+  wait.
+- If the run's own context ends (daemon shutdown), the run fails instead of
+  finishing with fallback labels.
+
 The model's reply must carry an explicit `NAME:` field (case-insensitive;
 `-`, `=`, en/em-dash separators and markdown emphasis are tolerated) of at most
 six words. Anything else — a preamble ("Sure! Here you go:"), a bare line, only
@@ -1558,8 +1582,19 @@ the `clusters` of the latest done run, and older runs are pruned (keeping
 history for trajectory analysis is deferred). It runs on a dedicated
 single-worker `cluster` job pool so it neither starves nor is starved by
 fetch/index. Knobs: `insight.{enabled,knn,min_similarity,min_cluster_size,
-labeling}`. `min_similarity` is the main granularity dial and is corpus-
-dependent — tune it with the eval harness.
+labeling,labeling_timeout_seconds}`. `min_similarity` is the main granularity
+dial and is corpus-dependent — tune it with the eval harness.
+
+The guards that protect the last good run treat only `ErrNotFound` as "there is
+no prior run". An empty corpus with an unreadable `LatestRun` (say, `database
+is locked`) fails the rebuild instead of recording an empty run and pruning the
+good one; after a failed run, pruning is skipped with a WARN when the latest
+done run can't be read, because cleanup is best-effort and must not delete on a
+guess. Marking a run failed (and that cleanup) runs detached from the run's
+context with a 10 s timeout, so a run cut short by daemon shutdown still ends
+as `failed` rather than `running` forever. `min_similarity` is validated
+NaN-safely: YAML `.nan` used to pass, reject every edge, and replace the
+interests with an empty run.
 
 **API surface:** an interest *is* a labeled cluster, so there is one surface —
 `GET /v1/interests`, `GET /v1/interests/{id}`, `POST /v1/interests/rebuild`
