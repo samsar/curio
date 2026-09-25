@@ -28,6 +28,16 @@ func newStatusCmd(env *daemonctl.Env) *cobra.Command {
 			fmt.Fprintf(w, "cli:     %s\n", version.String())
 
 			health, err := env.Client.Healthz(cmd.Context())
+			if starting := client.StartupOf(err); starting != nil {
+				// Counts and performance come from the full API, which
+				// isn't up yet.
+				fmt.Fprintf(w, "daemon:  starting  (pid %d, version %s): %s\n",
+					starting.PID, starting.Version, starting.Progress())
+				fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
+				fmt.Fprint(w, homeMismatchWarning(starting.Home, env.Home.Path))
+				printDiskUsage(w, env.Home.Path)
+				return nil
+			}
 			if err != nil {
 				if errors.Is(err, client.ErrDaemonUnreachable) {
 					fmt.Fprintln(w, "daemon:  not running")
