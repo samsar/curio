@@ -215,6 +215,19 @@ func startBystander(t *testing.T) (int, <-chan struct{}) {
 	return cmd.Process.Pid, exited
 }
 
+// assertNotSignalled fails the test if the bystander exits within a quarter
+// second. A signalled sleep is reaped within milliseconds, but not before the
+// call that signalled it returns, so a check that doesn't wait passes either
+// way.
+func assertNotSignalled(t *testing.T, exited <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-exited:
+		t.Error(msg)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
 func writePIDFile(t *testing.T, c *Controller, pid int) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(c.Home.PIDFile(), []byte(strconv.Itoa(pid)+"\n"), 0o600))
@@ -458,11 +471,7 @@ func TestStalePIDFileIsNeverTrusted(t *testing.T) {
 	require.NoError(t, c.EnsureRunning(ctx))
 	assert.Equal(t, 1, spawnCount(t, c))
 
-	select {
-	case <-exited:
-		t.Fatal("the unrelated process named by the stale PID file was signalled")
-	default:
-	}
+	assertNotSignalled(t, exited, "the unrelated process named by the stale PID file was signalled")
 }
 
 func TestStop_DaemonIgnoringSIGTERM(t *testing.T) {
@@ -505,11 +514,7 @@ func TestStop_RefusesMismatchedIdentity(t *testing.T) {
 			_, err := c.Stop(context.Background())
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), fmt.Sprintf("held by pid %d; not signalling", holder))
-			select {
-			case <-exited:
-				t.Fatal("the lock holder was signalled despite the mismatch")
-			default:
-			}
+			assertNotSignalled(t, exited, "the lock holder was signalled despite the mismatch")
 		})
 	}
 }
@@ -549,11 +554,7 @@ func TestSignalHolder_ReprobesBeforeSignalling(t *testing.T) {
 	writePIDFile(t, c, pid) // lock free: whoever wrote this has exited
 
 	require.NoError(t, c.signalHolder(context.Background(), pid))
-	select {
-	case <-exited:
-		t.Fatal("a PID the lock no longer vouches for was signalled")
-	default:
-	}
+	assertNotSignalled(t, exited, "a PID the lock no longer vouches for was signalled")
 }
 
 // TestStop_WaitEndsWhenAnotherDaemonTakesOver: the lock held under a PID
@@ -594,11 +595,7 @@ func TestLegacyDaemon(t *testing.T) {
 	assert.Contains(t, err.Error(), "kill "+strconv.Itoa(pid))
 
 	require.NoError(t, c.EnsureRunning(ctx), "still usable after the refused stop")
-	select {
-	case <-exited:
-		t.Fatal("the legacy PID was signalled")
-	default:
-	}
+	assertNotSignalled(t, exited, "the legacy PID was signalled")
 }
 
 func TestSameHome_ResolvesSymlinks(t *testing.T) {
