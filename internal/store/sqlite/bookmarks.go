@@ -307,27 +307,15 @@ func scanBookmark(row interface{ Scan(...any) error }) (*store.Bookmark, error) 
 	return &b, nil
 }
 
-// encodeTags serializes a tag list as JSON or returns nil for an empty list
-// so the column lands as NULL (matches the CHECK that allows NULL).
-func encodeTags(tags []string) (any, error) {
+// encodeTags serializes a tag list as JSON. An empty list is NULL, which the
+// column's CHECK allows.
+func encodeTags(tags []string) (sql.NullString, error) {
 	if len(tags) == 0 {
-		return nil, nil
+		return sql.NullString{}, nil
 	}
 	out, err := json.Marshal(tags)
 	if err != nil {
-		return nil, fmt.Errorf("encode tags: %w", err)
+		return sql.NullString{}, fmt.Errorf("encode tags: %w", err)
 	}
-	return string(out), nil
-}
-
-// isUniqueViolation returns true if err is a SQLite UNIQUE constraint error.
-// We string-match because mattn/go-sqlite3 doesn't surface a typed code that
-// distinguishes uniqueness from other constraint errors cleanly across
-// versions; the message is stable.
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed")
+	return sql.NullString{String: string(out), Valid: true}, nil
 }

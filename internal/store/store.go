@@ -389,6 +389,10 @@ type ChunkStore interface {
 	// configured embedding dim. This is the corpus-wide input to clustering.
 	DocumentVectors(ctx context.Context, tenantID string) ([]DocVector, error)
 
+	// GetByIDs returns the chunks with the given IDs, in no particular
+	// order. IDs that match no chunk (a reindex replaced it since it was
+	// retrieved, say) are left out; none matching is an empty result, not
+	// an error.
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
 }
 

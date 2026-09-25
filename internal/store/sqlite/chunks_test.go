@@ -316,3 +316,27 @@ func TestChunks_VectorSearch_ExcludeDocument(t *testing.T) {
 	}
 	assert.Equal(t, ids[1], hits[0].DocumentID)
 }
+
+// TestChunks_GetByIDs_MissingIDs: IDs that match no chunk are left out, and
+// none matching is an empty result, not an error. A reindex can replace a
+// document's chunks between retrieval and hydration.
+func TestChunks_GetByIDs_MissingIDs(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	ids := seedDocs(t, db, "local", "https://example.com/doc")
+	require.NoError(t, ch.ReplaceForDocument(ctx, ids[0], latestExtractionID(t, db, ids[0]), "", nil,
+		[]store.ChunkInput{{Text: "kept", Embedding: fillVec(0.1)}}))
+	hits, err := ch.BM25Search(ctx, "local", "kept", 10, store.SearchFilters{})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+
+	got, err := ch.GetByIDs(ctx, []string{"gone-1", hits[0].ChunkID, "gone-2"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "kept", got[0].Text)
+
+	got, err = ch.GetByIDs(ctx, []string{"gone-1", "gone-2"})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}

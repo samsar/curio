@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -433,8 +432,7 @@ func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.
 	return out, nil
 }
 
-// GetByIDs returns chunks in arbitrary order. Used by the search layer to
-// pull text for collapsed top-K results.
+// GetByIDs returns the chunks with the given IDs, in arbitrary order.
 func (s *Chunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -470,10 +468,7 @@ func (s *Chunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, er
 		out = append(out, &c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(out) == 0 {
-		return nil, errors.New("chunks: no rows for any of the given ids")
+		return nil, fmt.Errorf("get chunks: %w", err)
 	}
 	return out, nil
 }

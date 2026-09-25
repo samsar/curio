@@ -242,7 +242,7 @@ func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*st
 func (s *Jobs) ensureTransitioned(ctx context.Context, res sql.Result, id string) error {
 	n, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("job %s: rows affected: %w", id, err)
 	}
 	if n > 0 {
 		return nil
@@ -317,7 +317,11 @@ func (s *Jobs) DeleteByStatus(ctx context.Context, tenantID string, status store
 	if err != nil {
 		return 0, fmt.Errorf("delete jobs by status: %w", err)
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete jobs by status: %w", err)
+	}
+	return n, nil
 }
 
 // PruneOlderThan deletes the tenant's finished (done or failed) jobs whose
@@ -332,7 +336,11 @@ func (s *Jobs) PruneOlderThan(ctx context.Context, tenantID string, before time.
 	if err != nil {
 		return 0, fmt.Errorf("prune jobs: %w", err)
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune jobs: %w", err)
+	}
+	return n, nil
 }
 
 // MetricsByKind returns one store.KindMetrics per job kind for the given

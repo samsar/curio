@@ -376,14 +376,3 @@ func getOrCreateDocument(ctx context.Context, tx *sql.Tx, tenantID, url string) 
 	}
 	return id, state, false, nil
 }
-
-func ensureRow(res sql.Result, entity string) error {
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return fmt.Errorf("%s: %w", entity, store.ErrNotFound)
-	}
-	return nil
-}

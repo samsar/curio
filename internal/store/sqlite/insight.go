@@ -52,14 +52,19 @@ func (s *Insights) CreateRun(ctx context.Context, run *store.ClusterRun) error {
 	var started, created, updated string
 	if err := row.Scan(&started, &created, &updated); err != nil {
 		if isUniqueViolation(err) {
-			return store.ErrConflict
+			return fmt.Errorf("cluster run %s: %w", run.ID, store.ErrConflict)
 		}
 		return fmt.Errorf("insert cluster_run: %w", err)
 	}
-	run.StartedAt, _ = parseTime(started)
-	run.CreatedAt, _ = parseTime(created)
-	run.UpdatedAt, _ = parseTime(updated)
-	return nil
+	var err error
+	if run.StartedAt, err = parseTime(started); err != nil {
+		return err
+	}
+	if run.CreatedAt, err = parseTime(created); err != nil {
+		return err
+	}
+	run.UpdatedAt, err = parseTime(updated)
+	return err
 }
 
 func (s *Insights) ReplaceClusters(ctx context.Context, runID string, clusters []store.ClusterWithMembers) error {
@@ -121,11 +126,7 @@ func (s *Insights) FinishRun(ctx context.Context, runID string, res store.RunRes
 	if err != nil {
 		return fmt.Errorf("finish run: %w", err)
 	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return store.ErrNotFound
-	}
-	return nil
+	return ensureRow(result, "cluster run")
 }
 
 const clusterRunColumns = `id, tenant_id, status, algo, params, num_documents,
@@ -235,14 +236,23 @@ func scanClusterRun(sc interface{ Scan(...any) error }) (*store.ClusterRun, erro
 		r.Params = json.RawMessage(params.String)
 	}
 	r.Error = nullableString(errMsg)
-	r.StartedAt, _ = parseTime(started)
-	if finished.Valid {
-		if t, err := parseTime(finished.String); err == nil {
-			r.FinishedAt = &t
-		}
+	var err error
+	if r.StartedAt, err = parseTime(started); err != nil {
+		return nil, err
 	}
-	r.CreatedAt, _ = parseTime(created)
-	r.UpdatedAt, _ = parseTime(updated)
+	if finished.Valid {
+		t, err := parseTime(finished.String)
+		if err != nil {
+			return nil, err
+		}
+		r.FinishedAt = &t
+	}
+	if r.CreatedAt, err = parseTime(created); err != nil {
+		return nil, err
+	}
+	if r.UpdatedAt, err = parseTime(updated); err != nil {
+		return nil, err
+	}
 	return &r, nil
 }
 
@@ -264,7 +274,12 @@ func scanCluster(sc interface{ Scan(...any) error }) (*store.Cluster, error) {
 	}
 	c.Label = nullableString(label)
 	c.Summary = nullableString(summary)
-	c.CreatedAt, _ = parseTime(created)
-	c.UpdatedAt, _ = parseTime(updated)
+	var err error
+	if c.CreatedAt, err = parseTime(created); err != nil {
+		return nil, err
+	}
+	if c.UpdatedAt, err = parseTime(updated); err != nil {
+		return nil, err
+	}
 	return &c, nil
 }
