@@ -262,3 +262,70 @@ func TestBookmarks_DocumentLookupFailure(t *testing.T) {
 	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/bookmarks/" + created.Bookmark.ID}),
 		http.StatusInternalServerError)
 }
+
+func TestBookmarks_GetListDelete(t *testing.T) {
+	s := newTestServer(t)
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	folder, title := "/Reading", "A"
+	b := &store.Bookmark{TenantID: "local", URL: doc.URL, Title: &title, FolderPath: &folder,
+		Tags: []string{"go"}, Source: store.SourceSafari, SavedAt: time.Now().UTC(), DocumentID: &doc.ID}
+	require.NoError(t, s.deps.Bookmarks.Create(context.Background(), b))
+	unlinked := &store.Bookmark{TenantID: "local", URL: "https://example.com/b", Source: store.SourceChrome,
+		SavedAt: time.Now().UTC()}
+	require.NoError(t, s.deps.Bookmarks.Create(context.Background(), unlinked))
+
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/bookmarks/" + b.ID})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var got BookmarkResponse
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+	assert.Equal(t, b.ID, got.ID)
+	assert.Equal(t, "safari", got.Source)
+	assert.Equal(t, "/Reading", *got.FolderPath)
+	assert.Equal(t, []string{"go"}, got.Tags)
+	assert.Equal(t, "fetched", got.DocumentState)
+	assert.NotContains(t, resp.body, "tenant", "tenant_id is never echoed")
+
+	list := s.listBookmarks(t, "?source=chrome")
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, unlinked.ID, list.Items[0].ID)
+	assert.Empty(t, list.Items[0].DocumentState, "no document linked")
+	list = s.listBookmarks(t, "?folder=/Reading")
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, b.ID, list.Items[0].ID)
+
+	resp = s.do(t, request{method: http.MethodDelete, path: "/v1/bookmarks/" + b.ID})
+	assert.Equal(t, http.StatusNoContent, resp.status)
+	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/bookmarks/" + b.ID}), http.StatusNotFound)
+	assertProblem(t, s.do(t, request{method: http.MethodDelete, path: "/v1/bookmarks/" + b.ID}), http.StatusNotFound)
+	assert.Equal(t, store.DocStateFetched, s.docState(t, doc.ID), "the document outlives its bookmark")
+}
+
+func TestImportBookmarks_Validation(t *testing.T) {
+	s := newTestServer(t)
+	for _, body := range []string{
+		`{"source":"netscape","bookmarks":[{"url":"https://example.com/a"}]}`,
+		`{"source":"chrome","bookmarks":[]}`,
+	} {
+		resp := s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks/import",
+			contentType: "application/json", body: body})
+		assertProblem(t, resp, http.StatusBadRequest)
+	}
+
+	got := s.importBookmarks(t, store.SourceHTML, "https://example.com/a", "https://example.com/a")
+	assert.Equal(t, 1, got.Created)
+	assert.Equal(t, 1, got.Skipped, "a duplicate within one batch is skipped")
+}
+
+// TestImportBookmarks_ErrorsAreCapped: the response quotes the first few
+// errors, not one per bookmark.
+func TestImportBookmarks_ErrorsAreCapped(t *testing.T) {
+	s := newTestServer(t)
+	s.failJobInserts(t)
+	urls := make([]string, importErrorsCap+5)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://example.com/%d", i)
+	}
+	got := s.importBookmarks(t, store.SourceChrome, urls...)
+	assert.Len(t, got.Errors, importErrorsCap)
+	assert.Contains(t, got.Errors[0], "https://example.com/0: ")
+}

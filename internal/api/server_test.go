@@ -66,6 +66,9 @@ func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ctx) }()
 	t.Cleanup(func() {
+		// A spare connection the client dialed but never used would hold
+		// the graceful shutdown for 5s (see apitest's closeClientConns).
+		http.DefaultClient.CloseIdleConnections()
 		cancel()
 		require.NoError(t, <-served)
 	})
@@ -479,6 +482,39 @@ func TestServer_RouterErrorsAreProblems(t *testing.T) {
 			assertProblem(t, response{status: resp.StatusCode, contentType: resp.Header.Get("Content-Type"),
 				body: string(body)}, http.StatusMethodNotAllowed)
 			assert.Equal(t, tc.allow, resp.Header.Get("Allow"))
+		})
+	}
+}
+
+// TestServer_ErrorsAreProblems: every error path answers
+// application/problem+json whose status matches the response's.
+func TestServer_ErrorsAreProblems(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Bookmarks = failingBookmarkCount{d.Bookmarks} })
+	dead := s.seedDocument(t, "https://example.com/gone", store.DocStateDead)
+
+	cases := []struct {
+		name   string
+		req    request
+		status int
+	}{
+		{"malformed body", request{method: http.MethodPost, path: "/v1/search", contentType: "application/json",
+			body: `{"query":`}, http.StatusBadRequest},
+		{"invalid parameter", request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=bogus"},
+			http.StatusBadRequest},
+		{"unknown document", request{method: http.MethodGet, path: "/v1/documents/nope"}, http.StatusNotFound},
+		{"unknown route", request{method: http.MethodGet, path: "/v2/documents"}, http.StatusNotFound},
+		{"wrong method", request{method: http.MethodPut, path: "/v1/documents/" + dead.ID}, http.StatusMethodNotAllowed},
+		{"dead document", request{method: http.MethodPost, path: "/v1/documents/" + dead.ID + "/refetch"},
+			http.StatusConflict},
+		{"body too large", request{method: http.MethodPost, path: "/v1/bookmarks", contentType: "application/json",
+			body: `{"url":"https://example.com/` + strings.Repeat("a", maxJSONBody) + `"}`}, http.StatusRequestEntityTooLarge},
+		{"not json", request{method: http.MethodPost, path: "/v1/bookmarks", contentType: "text/plain",
+			body: `{"url":"https://example.com/a"}`}, http.StatusUnsupportedMediaType},
+		{"store failure", request{method: http.MethodGet, path: "/v1/stats"}, http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertProblem(t, s.do(t, tc.req), tc.status)
 		})
 	}
 }

@@ -150,3 +150,104 @@ func TestReindexAll_OnlyDocumentsWithContent(t *testing.T) {
 	assert.JSONEq(t, `{"document_id":"`+withContent.ID+`"}`, payload)
 	assert.Equal(t, store.DocStatePending, s.docState(t, fetching.ID))
 }
+
+func TestGetDocument(t *testing.T) {
+	s := newTestServer(t)
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	ext := s.seedContent(t, doc, "# A")
+
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + doc.ID})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var got DocumentResponse
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+	assert.Equal(t, doc.ID, got.ID)
+	assert.Equal(t, "fetched", got.State)
+	assert.Equal(t, "unknown", got.ContentType)
+	require.NotNil(t, got.CurrentExtraction)
+	assert.Equal(t, ext.ID, got.CurrentExtraction.ID)
+	assert.Equal(t, "test", got.CurrentExtraction.Fetcher)
+	assert.Equal(t, *ext.MarkdownPath, got.CurrentExtraction.MarkdownPath)
+	assert.Equal(t, map[string]any{"via": "test"}, got.CurrentExtraction.ExtractionMeta)
+
+	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
+	resp = s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + bare.ID})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	assert.NotContains(t, resp.body, "current_extraction")
+
+	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/no-such-document"}), http.StatusNotFound)
+}
+
+func TestListDocuments(t *testing.T) {
+	s := newTestServer(t)
+	fetched := s.seedDocument(t, "https://example.com/fetched", store.DocStateFetched)
+	ext := s.seedContent(t, fetched, "# Fetched")
+	failed := s.seedDocument(t, "https://example.com/failed", store.DocStateFailed)
+	job, err := store.NewDocumentJob("local", store.JobKindFetch, failed.ID)
+	require.NoError(t, err)
+	job.Status = store.JobStatusFailed
+	require.NoError(t, s.deps.Queue.Enqueue(context.Background(), job))
+	_, err = s.db.Exec(`UPDATE jobs SET last_error = 'HTTP 503' WHERE id = ?`, job.ID)
+	require.NoError(t, err)
+
+	list := func(query string) DocumentListResponse {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents" + query})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got DocumentListResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		return got
+	}
+
+	all := list("")
+	assert.Len(t, all.Items, 2)
+
+	onlyFailed := list("?state=failed")
+	require.Len(t, onlyFailed.Items, 1)
+	assert.Equal(t, failed.ID, onlyFailed.Items[0].ID)
+	assert.Equal(t, "HTTP 503", onlyFailed.Items[0].LastError)
+
+	onlyFetched := list("?state=fetched&limit=1")
+	require.Len(t, onlyFetched.Items, 1)
+	assert.Equal(t, filepath.Join(s.deps.Home.ContentDir(), *ext.MarkdownPath), onlyFetched.Items[0].MarkdownPath,
+		"an absolute path, ready to cat")
+}
+
+func TestGetDocumentContent(t *testing.T) {
+	s := newTestServer(t)
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	s.seedContent(t, doc, "# A\n\nbody")
+
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + doc.ID + "/content"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	assert.Equal(t, "text/markdown; charset=utf-8", resp.contentType)
+	assert.Equal(t, "# A\n\nbody", resp.body)
+
+	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
+	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + bare.ID + "/content"}),
+		http.StatusNotFound)
+	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/nope/content"}),
+		http.StatusNotFound)
+}
+
+func TestReindexDocument(t *testing.T) {
+	s := newTestServer(t)
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	s.seedContent(t, doc, "# A")
+
+	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/" + doc.ID + "/reindex"})
+	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+	var body struct {
+		JobID string `json:"job_id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &body))
+	job, err := s.deps.Queue.GetByID(context.Background(), body.JobID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobKindIndex, job.Kind)
+	assert.JSONEq(t, `{"document_id":"`+doc.ID+`"}`, string(job.Payload))
+	assert.Equal(t, store.DocStateFetched, s.docState(t, doc.ID), "reindex leaves the state alone")
+
+	assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/nope/reindex"}), http.StatusNotFound)
+	s.failJobInserts(t)
+	assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/" + doc.ID + "/reindex"}),
+		http.StatusInternalServerError)
+}
