@@ -18,15 +18,15 @@ func TestDeleteJobs_FinishedOnly(t *testing.T) {
 	// millisecond precision, so a job enqueued moments before the request
 	// may not be strictly older than a "now" cutoff. The AFTER UPDATE
 	// trigger rules out backdating an existing row instead.
-	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
+	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
 		_, err := s.db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, updated_at)
 			VALUES (?, 'local', ?, '{}', ?, '2000-01-01T00:00:00.000Z')`,
-			"job-"+status, store.JobKindFetch, status)
+			"job-"+string(status), store.JobKindFetch, status)
 		require.NoError(t, err)
 	}
 
-	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, "bogus"} {
-		resp := s.do(t, request{method: http.MethodDelete, path: "/v1/jobs?status=" + status})
+	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, "bogus"} {
+		resp := s.do(t, request{method: http.MethodDelete, path: "/v1/jobs?status=" + string(status)})
 		assertProblem(t, resp, http.StatusBadRequest)
 		assert.Contains(t, resp.body, "only finished jobs")
 	}
@@ -40,15 +40,15 @@ func TestDeleteJobs_FinishedOnly(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.JSONEq(t, `{"deleted":1,"mode":"older_than=1d"}`, resp.body, "prune takes only the failed job")
 
-	var live []string
+	var live []store.JobStatus
 	rows, err := s.db.Query(`SELECT status FROM jobs ORDER BY status`)
 	require.NoError(t, err)
 	defer rows.Close()
 	for rows.Next() {
-		var st string
+		var st store.JobStatus
 		require.NoError(t, rows.Scan(&st))
 		live = append(live, st)
 	}
 	require.NoError(t, rows.Err())
-	assert.Equal(t, []string{store.JobStatusPending, store.JobStatusRunning}, live)
+	assert.Equal(t, []store.JobStatus{store.JobStatusPending, store.JobStatusRunning}, live)
 }

@@ -139,7 +139,7 @@ func scanDocument(row interface{ Scan(...any) error }) (*store.Document, error) 
 	return &d, nil
 }
 
-func (s *Documents) UpdateState(ctx context.Context, id, state string) error {
+func (s *Documents) UpdateState(ctx context.Context, id string, state store.DocState) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE documents SET state = ? WHERE id = ?`, state, id)
 	if err != nil {
 		return fmt.Errorf("update document state: %w", err)
@@ -167,7 +167,7 @@ type DocumentWithError struct {
 //     (json_extract on payload.document_id).
 //   - LEFT JOIN on document_extractions for the current extraction's
 //     markdown_path. Empty when state=pending.
-func (s *Documents) ListWithLastError(ctx context.Context, tenantID, state string, limit int) ([]DocumentWithError, error) {
+func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, state store.DocState, limit int) ([]DocumentWithError, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -260,7 +260,7 @@ func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document
 
 // ListIDs returns all document IDs for a tenant, optionally restricted
 // to a particular state. Used by the bulk refetch path.
-func (s *Documents) ListIDs(ctx context.Context, tenantID, state string) ([]string, error) {
+func (s *Documents) ListIDs(ctx context.Context, tenantID string, state store.DocState) ([]string, error) {
 	q := `SELECT id FROM documents WHERE tenant_id = ?`
 	args := []any{tenantID}
 	if state != "" {
@@ -284,17 +284,17 @@ func (s *Documents) ListIDs(ctx context.Context, tenantID, state string) ([]stri
 }
 
 // CountByState returns (total, perStateMap) for one tenant.
-func (s *Documents) CountByState(ctx context.Context, tenantID string) (int, map[string]int, error) {
+func (s *Documents) CountByState(ctx context.Context, tenantID string) (int, map[store.DocState]int, error) {
 	const q = `SELECT state, count(*) FROM documents WHERE tenant_id = ? GROUP BY state`
 	rows, err := s.db.QueryContext(ctx, q, tenantID)
 	if err != nil {
 		return 0, nil, fmt.Errorf("count documents: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]int{}
+	out := map[store.DocState]int{}
 	total := 0
 	for rows.Next() {
-		var state string
+		var state store.DocState
 		var n int
 		if err := rows.Scan(&state, &n); err != nil {
 			return 0, nil, err
@@ -347,7 +347,7 @@ func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID strin
 	return job, nil
 }
 
-func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, states []string) (int, error) {
+func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, states []store.DocState) (int, error) {
 	if len(states) == 0 {
 		return 0, errors.New("requeue fetch: states required")
 	}
@@ -362,7 +362,7 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	// inside the 5s busy_timeout other writers wait for up to roughly 130k
 	// documents (docs/decisions.md "Refetch: state reset and fetch job in
 	// one transaction").
-	args := appendStrings([]any{store.DocStatePending, tenantID}, states)
+	args := appendArgs([]any{store.DocStatePending, tenantID}, states)
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE documents SET state = ?
 		WHERE tenant_id = ? AND state IN (`+placeholders(len(states))+`)

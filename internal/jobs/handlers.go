@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -186,7 +187,7 @@ func FetchHandler(d Deps) HandlerFunc {
 			ID:                  doc.ID,
 			TenantID:            doc.TenantID,
 			URL:                 doc.URL,
-			ContentType:         defaultStr(res.ContentType, doc.ContentType),
+			ContentType:         cmp.Or(res.ContentType, doc.ContentType),
 			Title:               titlePtr,
 			Author:              authorPtr,
 			Language:            langPtr,
@@ -288,11 +289,4 @@ func IndexHandler(d Deps) HandlerFunc {
 		}
 		return nil
 	}
-}
-
-func defaultStr(s, fallback string) string {
-	if s == "" {
-		return fallback
-	}
-	return s
 }

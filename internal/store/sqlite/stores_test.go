@@ -246,7 +246,7 @@ func TestJobs_ClaimNext_FiltersByKind(t *testing.T) {
 	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindIndex}))
 
 	// Only ask for index jobs.
-	got, err := q.ClaimNext(ctx, []string{store.JobKindIndex})
+	got, err := q.ClaimNext(ctx, []store.JobKind{store.JobKindIndex})
 	require.NoError(t, err)
 	assert.Equal(t, store.JobKindIndex, got.Kind)
 }
@@ -358,7 +358,7 @@ func TestJobs_ClaimNext_ConcurrentClaimOnce(t *testing.T) {
 
 // enqueueWithStatus inserts a job directly in the given status, as if it had
 // already gone through the queue.
-func enqueueWithStatus(t *testing.T, q *Jobs, kind, status string, attempts int) *store.Job {
+func enqueueWithStatus(t *testing.T, q *Jobs, kind store.JobKind, status store.JobStatus, attempts int) *store.Job {
 	t.Helper()
 	j := &store.Job{TenantID: "local", Kind: kind, Status: status, Attempts: attempts}
 	require.NoError(t, q.Enqueue(context.Background(), j))
@@ -422,7 +422,7 @@ func TestJobs_TransitionsRequireRunning(t *testing.T) {
 	}
 	for name, transition := range transitions {
 		t.Run(name, func(t *testing.T) {
-			for _, status := range []string{store.JobStatusPending, store.JobStatusDone, store.JobStatusFailed} {
+			for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusDone, store.JobStatusFailed} {
 				q := NewJobs(newTestDB(t))
 				j := enqueueWithStatus(t, q, store.JobKindFetch, status, 1)
 
@@ -455,7 +455,7 @@ func TestJobs_RecoverOrphans(t *testing.T) {
 	_, err := db.ExecContext(ctx, `UPDATE jobs SET started_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status = 'running'`)
 	require.NoError(t, err)
 
-	failed, requeued, err := q.RecoverOrphans(ctx, []string{store.JobKindFetch, store.JobKindIndex})
+	failed, requeued, err := q.RecoverOrphans(ctx, []store.JobKind{store.JobKindFetch, store.JobKindIndex})
 	require.NoError(t, err)
 	assert.Equal(t, 1, requeued)
 	require.Len(t, failed, 1)
@@ -507,8 +507,8 @@ func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 		Payload: json.RawMessage(`{"document_id":"` + doc.ID + `"}`)}
 	require.NoError(t, q.Enqueue(ctx, queued))
 
-	byStatus := map[string]*store.Job{}
-	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
+	byStatus := map[store.JobStatus]*store.Job{}
+	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
 		byStatus[status] = enqueueWithStatus(t, q, store.JobKindIndex, status, 1)
 	}
 
@@ -520,7 +520,7 @@ func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 
 	for status, j := range byStatus {
 		_, err := q.GetByID(ctx, j.ID)
-		if store.IsFinishedJobStatus(status) {
+		if status.IsFinished() {
 			assert.ErrorIs(t, err, store.ErrNotFound, status)
 		} else {
 			assert.NoError(t, err, status)
@@ -534,12 +534,12 @@ func TestJobs_DeleteByStatus_FinishedOnly(t *testing.T) {
 	ctx := context.Background()
 	q := NewJobs(newTestDB(t))
 
-	byStatus := map[string]*store.Job{}
-	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
+	byStatus := map[store.JobStatus]*store.Job{}
+	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
 		byStatus[status] = enqueueWithStatus(t, q, store.JobKindFetch, status, 1)
 	}
 
-	for _, status := range []string{store.JobStatusPending, store.JobStatusRunning, "bogus", ""} {
+	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, "bogus", ""} {
 		n, err := q.DeleteByStatus(ctx, "local", status)
 		require.Error(t, err, "status %q", status)
 		assert.Zero(t, n)
@@ -558,14 +558,14 @@ func TestJobs_DeleteByStatus_FinishedOnly(t *testing.T) {
 
 // ---------- refetch ----------
 
-func seedDoc(t *testing.T, docs *Documents, url, state string) *store.Document {
+func seedDoc(t *testing.T, docs *Documents, url string, state store.DocState) *store.Document {
 	t.Helper()
 	d := &store.Document{TenantID: "local", URL: url, State: state}
 	require.NoError(t, docs.Upsert(context.Background(), d))
 	return d
 }
 
-func docState(t *testing.T, docs *Documents, id string) string {
+func docState(t *testing.T, docs *Documents, id string) store.DocState {
 	t.Helper()
 	d, err := docs.GetByID(context.Background(), id)
 	require.NoError(t, err)
@@ -656,15 +656,15 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 	docs, q := NewDocuments(db), NewJobs(db)
-	byState := map[string]*store.Document{}
-	for _, st := range []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
-		byState[st] = seedDoc(t, docs, "https://example.com/"+st, st)
+	byState := map[store.DocState]*store.Document{}
+	for _, st := range []store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
+		byState[st] = seedDoc(t, docs, "https://example.com/"+string(st), st)
 	}
 	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs", State: store.DocStateFailed}
 	require.NoError(t, docs.Upsert(ctx, other))
 
 	n, err := docs.RequeueFetchByStates(ctx, "local",
-		[]string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed})
+		[]store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed})
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
 	assert.Equal(t, 3, countRows(t, db, "jobs"))
@@ -680,7 +680,7 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 	}
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, other.ID), "another tenant's document is untouched")
 
-	n, err = docs.RequeueFetchByStates(ctx, "local", []string{store.DocStateDead})
+	n, err = docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateDead})
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 	assert.Equal(t, store.DocStatePending, docState(t, docs, byState[store.DocStateDead].ID))
@@ -694,7 +694,7 @@ func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
 	failJobInserts(t, db)
 
 	_, err := docs.RequeueFetchByStates(context.Background(), "local",
-		[]string{store.DocStateFetched, store.DocStateFailed})
+		[]store.DocState{store.DocStateFetched, store.DocStateFailed})
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, a.ID))
 	assert.Equal(t, store.DocStateFetched, docState(t, docs, b.ID))

@@ -104,7 +104,7 @@ type DocumentListResponse struct {
 
 func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	state := q.Get("state")
+	state := store.DocState(q.Get("state"))
 	limit := 50
 	if v := q.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
@@ -131,8 +131,8 @@ func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 			ID:          doc.ID,
 			URL:         doc.URL,
 			Title:       doc.Title,
-			ContentType: doc.ContentType,
-			State:       doc.State,
+			ContentType: string(doc.ContentType),
+			State:       string(doc.State),
 			LastError:   doc.LastError,
 			CreatedAt:   doc.CreatedAt,
 			UpdatedAt:   doc.UpdatedAt,
@@ -188,7 +188,7 @@ func (d Deps) handleRefetchDocument(w http.ResponseWriter, r *http.Request) {
 // given. Dead documents are left out: retrying confirmed dead links on every
 // bulk refetch wastes the whole retry budget per URL. Asking for ?state=dead
 // explicitly is the deliberate escape hatch.
-var refetchAllDefaultStates = []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed}
+var refetchAllDefaultStates = []store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed}
 
 // handleRefetchAll resets documents to pending and enqueues a fetch job for
 // each, all in one transaction: either every matching document is requeued
@@ -197,13 +197,13 @@ var refetchAllDefaultStates = []string{store.DocStatePending, store.DocStateFetc
 // enqueued; there is no parent job to poll.
 func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
 	states := refetchAllDefaultStates
-	if s := r.URL.Query().Get("state"); s != "" {
-		if !validDocState(s) {
+	if s := store.DocState(r.URL.Query().Get("state")); s != "" {
+		if !s.Valid() {
 			writeProblem(w, http.StatusBadRequest, "bad request",
 				fmt.Sprintf("state %q must be one of: pending, fetched, failed, dead", s))
 			return
 		}
-		states = []string{s}
+		states = []store.DocState{s}
 	}
 
 	n, err := d.Documents.RequeueFetchByStates(r.Context(), d.TenantID, states)
@@ -212,14 +212,6 @@ func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]int{"jobs_enqueued": n})
-}
-
-func validDocState(s string) bool {
-	switch s {
-	case store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead:
-		return true
-	}
-	return false
 }
 
 // handleReindexDocument enqueues an index job for the document — re-chunking
@@ -254,7 +246,7 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 // Index jobs change no document state, so a partial run strands nothing;
 // it stops at the first failure and reports how far it got.
 func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
-	wantState := r.URL.Query().Get("state")
+	wantState := store.DocState(r.URL.Query().Get("state"))
 	if wantState == "" {
 		wantState = store.DocStateFetched // only fetched docs have content to reindex
 	}
@@ -333,13 +325,13 @@ func documentToResponse(doc *store.Document) DocumentResponse {
 		ID:           doc.ID,
 		URL:          doc.URL,
 		URLCanonical: doc.URLCanonical,
-		ContentType:  doc.ContentType,
+		ContentType:  string(doc.ContentType),
 		Title:        doc.Title,
 		Author:       doc.Author,
 		PublishedAt:  doc.PublishedAt,
 		Language:     doc.Language,
 		WordCount:    doc.WordCount,
-		State:        doc.State,
+		State:        string(doc.State),
 		CreatedAt:    doc.CreatedAt,
 		UpdatedAt:    doc.UpdatedAt,
 	}

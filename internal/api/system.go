@@ -94,7 +94,7 @@ func (d Deps) handleStats(w http.ResponseWriter, r *http.Request) {
 	// supports it. Falls back to zero/absent fields when it doesn't.
 	if jq, ok := d.Queue.(*sqlitestore.Jobs); ok {
 		if m, err := jq.CountByStatus(ctx, d.TenantID); err == nil {
-			out.JobsByStatus = m
+			out.JobsByStatus = stringKeys(m)
 		}
 	}
 
@@ -105,9 +105,18 @@ func (d Deps) handleStats(w http.ResponseWriter, r *http.Request) {
 	if ds, ok := d.Documents.(*sqlitestore.Documents); ok {
 		if total, by, err := ds.CountByState(ctx, d.TenantID); err == nil {
 			out.DocumentsTotal = total
-			out.DocumentsByState = by
+			out.DocumentsByState = stringKeys(by)
 		}
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+// stringKeys converts a count map keyed by a store enum to the wire shape.
+func stringKeys[K ~string](m map[K]int) map[string]int {
+	out := make(map[string]int, len(m))
+	for k, n := range m {
+		out[string(k)] = n
+	}
+	return out
 }

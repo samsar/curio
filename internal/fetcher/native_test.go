@@ -17,6 +17,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 // makeArticleHTML returns a reasonably article-shaped page so Readability
@@ -247,7 +249,7 @@ func TestNative_PDF_FallsBackToJina(t *testing.T) {
 	assert.Equal(t, "jina", res.Meta["via"])
 	assert.Contains(t, res.Markdown, "rendered by Jina")
 	// Must be a content_type the documents CHECK constraint allows.
-	assert.Equal(t, "pdf", res.ContentType)
+	assert.Equal(t, store.ContentTypePDF, res.ContentType)
 }
 
 // TestNative_PDF_NoJinaIsPermanent: with Jina disabled, an unreadable PDF is
@@ -749,7 +751,7 @@ func TestNative_PDFOverLimit(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, "jina", res.Meta["via"])
-			assert.Equal(t, "pdf", res.ContentType)
+			assert.Equal(t, store.ContentTypePDF, res.ContentType)
 		})
 	}
 }

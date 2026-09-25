@@ -38,21 +38,21 @@ func (v *vectorSource) DocumentVectors(context.Context, string) ([]store.DocVect
 type faultyInsights struct {
 	store.InsightStore
 	latestErr error
-	finished  map[string]string
+	finished  map[string]store.ClusterRunStatus
 }
 
-func (f *faultyInsights) LatestRun(ctx context.Context, tenantID, status string) (*store.ClusterRun, error) {
+func (f *faultyInsights) LatestRun(ctx context.Context, tenantID string, status store.ClusterRunStatus) (*store.ClusterRun, error) {
 	if f.latestErr != nil {
 		return nil, f.latestErr
 	}
 	return f.InsightStore.LatestRun(ctx, tenantID, status)
 }
 
-func (f *faultyInsights) FinishRun(ctx context.Context, runID, status string, docs, clusters, noise int, msg *string) error {
-	if err := f.InsightStore.FinishRun(ctx, runID, status, docs, clusters, noise, msg); err != nil {
+func (f *faultyInsights) FinishRun(ctx context.Context, runID string, res store.RunResult) error {
+	if err := f.InsightStore.FinishRun(ctx, runID, res); err != nil {
 		return err
 	}
-	f.finished[runID] = status
+	f.finished[runID] = res.Status
 	return nil
 }
 
@@ -89,7 +89,7 @@ func newEngineFixture(t *testing.T, sizes ...int) *engineFixture {
 		store:   sqlitestore.NewInsights(db),
 		vectors: &vectorSource{},
 	}
-	f.insights = &faultyInsights{InsightStore: f.store, finished: map[string]string{}}
+	f.insights = &faultyInsights{InsightStore: f.store, finished: map[string]store.ClusterRunStatus{}}
 	for g, n := range sizes {
 		for i := range n {
 			title := fmt.Sprintf("group%d topic%d item%d", g, g, i)

@@ -60,7 +60,7 @@ func (d Deps) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, m := range rows {
 		resp.ByKind = append(resp.ByKind, KindMetricsResponse{
-			Kind:                 m.Kind,
+			Kind:                 string(m.Kind),
 			Count:                m.Count,
 			Failed:               m.Failed,
 			MeanMS:               m.MeanMS,

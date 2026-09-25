@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -93,7 +93,7 @@ func insertJob(ctx context.Context, q rowQuerier, j *store.Job) error {
 // statement. SQLite serializes this as one atomic write; no separate
 // transaction is needed and concurrent workers don't deadlock on lock
 // upgrades from reader to writer.
-func (s *Jobs) ClaimNext(ctx context.Context, kinds []string) (*store.Job, error) {
+func (s *Jobs) ClaimNext(ctx context.Context, kinds []store.JobKind) (*store.Job, error) {
 	now := formatTime(time.Now().UTC())
 
 	// args: 2 for the SET clause (status, started_at), 2 for the SELECT
@@ -102,7 +102,7 @@ func (s *Jobs) ClaimNext(ctx context.Context, kinds []string) (*store.Job, error
 	kindSQL := ""
 	if len(kinds) > 0 {
 		kindSQL = " AND kind IN (" + placeholders(len(kinds)) + ")"
-		args = appendStrings(args, kinds)
+		args = appendArgs(args, kinds)
 	}
 
 	q := `UPDATE jobs SET status = ?, started_at = ?, attempts = attempts + 1
@@ -187,7 +187,7 @@ func (s *Jobs) Requeue(ctx context.Context, id string) error {
 // orphanExhaustedError is the last_error of an orphan with no attempts left.
 const orphanExhaustedError = "the daemon exited while this job was running, and it has no attempts left"
 
-func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []string) ([]*store.Job, int, error) {
+func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*store.Job, int, error) {
 	if len(kinds) == 0 {
 		return nil, 0, errors.New("recover orphaned jobs: kinds required")
 	}
@@ -203,7 +203,7 @@ func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []string) ([]*store.Job
 	// transaction takes the write lock outright instead of upgrading from a
 	// read lock (see decisions.md "Job queue claim via atomic UPDATE ...
 	// RETURNING").
-	failedArgs := appendStrings([]any{store.JobStatusFailed, orphanExhaustedError,
+	failedArgs := appendArgs([]any{store.JobStatusFailed, orphanExhaustedError,
 		store.JobStatusRunning, s.MaxAttempts}, kinds)
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE jobs SET status = ?, last_error = ?
@@ -218,7 +218,7 @@ func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []string) ([]*store.Job
 		return nil, 0, fmt.Errorf("fail exhausted orphans: %w", err)
 	}
 
-	requeueArgs := appendStrings([]any{store.JobStatusPending, formatTime(time.Now().UTC()),
+	requeueArgs := appendArgs([]any{store.JobStatusPending, formatTime(time.Now().UTC()),
 		store.JobStatusRunning}, kinds)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE jobs SET status = ?, started_at = NULL, run_after = ?
@@ -273,7 +273,7 @@ type JobWithDoc struct {
 // ListWithDoc is the debug-friendly variant of List: same filters, but
 // each row carries the doc URL + title + markdown_path so the CLI
 // doesn't have to do an N+1 round-trip.
-func (s *Jobs) ListWithDoc(ctx context.Context, tenantID, status, kind string, limit int) ([]JobWithDoc, error) {
+func (s *Jobs) ListWithDoc(ctx context.Context, tenantID string, status store.JobStatus, kind store.JobKind, limit int) ([]JobWithDoc, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -346,7 +346,7 @@ func scanJobWithDoc(row interface{ Scan(...any) error }) (*store.Job, string, st
 
 // List returns recent jobs for a tenant, optionally filtered by status
 // and/or kind. Ordered most-recently-created first.
-func (s *Jobs) List(ctx context.Context, tenantID, status, kind string, limit int) ([]*store.Job, error) {
+func (s *Jobs) List(ctx context.Context, tenantID string, status store.JobStatus, kind store.JobKind, limit int) ([]*store.Job, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -375,8 +375,8 @@ func (s *Jobs) List(ctx context.Context, tenantID, status, kind string, limit in
 // which must be a finished one (done or failed): deleting pending or
 // running work would leave its document in pending with no job to move it
 // on. Returns how many rows were deleted.
-func (s *Jobs) DeleteByStatus(ctx context.Context, tenantID, status string) (int64, error) {
-	if !store.IsFinishedJobStatus(status) {
+func (s *Jobs) DeleteByStatus(ctx context.Context, tenantID string, status store.JobStatus) (int64, error) {
+	if !status.IsFinished() {
 		return 0, fmt.Errorf("delete jobs: status %q is not finished; only done or failed jobs can be deleted", status)
 	}
 	res, err := s.db.ExecContext(ctx,
@@ -408,7 +408,7 @@ func (s *Jobs) PruneOlderThan(ctx context.Context, tenantID string, before time.
 // updated_at - created_at). Failed is the count of jobs in that kind
 // whose terminal status was 'failed' in the window.
 type KindMetrics struct {
-	Kind                 string
+	Kind                 store.JobKind
 	Count                int
 	MeanMS               float64
 	P50MS                float64
@@ -469,7 +469,7 @@ func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.D
 	}
 	defer rows.Close()
 
-	out := map[string]*KindMetrics{}
+	out := map[store.JobKind]*KindMetrics{}
 	for rows.Next() {
 		var m KindMetrics
 		if err := rows.Scan(&m.Kind, &m.Count, &m.Failed, &m.MeanMS, &m.P50MS, &m.P95MS, &m.P99MS); err != nil {
@@ -504,7 +504,7 @@ func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.D
 	}
 	defer iRows.Close()
 	for iRows.Next() {
-		var kind string
+		var kind store.JobKind
 		var running int
 		var oldest float64
 		if err := iRows.Scan(&kind, &running, &oldest); err != nil {
@@ -523,11 +523,11 @@ func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.D
 	}
 
 	// Sort by kind for deterministic output.
-	kinds := make([]string, 0, len(out))
+	kinds := make([]store.JobKind, 0, len(out))
 	for k := range out {
 		kinds = append(kinds, k)
 	}
-	sort.Strings(kinds)
+	slices.Sort(kinds)
 	result := make([]KindMetrics, 0, len(kinds))
 	for _, k := range kinds {
 		result = append(result, *out[k])
@@ -537,16 +537,16 @@ func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.D
 
 // CountByStatus returns the number of jobs in each status for a tenant.
 // Surfaces queue depth via /v1/stats so import progress is visible.
-func (s *Jobs) CountByStatus(ctx context.Context, tenantID string) (map[string]int, error) {
+func (s *Jobs) CountByStatus(ctx context.Context, tenantID string) (map[store.JobStatus]int, error) {
 	const q = `SELECT status, count(*) FROM jobs WHERE tenant_id = ? GROUP BY status`
 	rows, err := s.db.QueryContext(ctx, q, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("count jobs: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]int{}
+	out := map[store.JobStatus]int{}
 	for rows.Next() {
-		var status string
+		var status store.JobStatus
 		var n int
 		if err := rows.Scan(&status, &n); err != nil {
 			return nil, err
@@ -576,7 +576,8 @@ func scanJobRows(rows *sql.Rows) ([]*store.Job, error) {
 	return out, rows.Err()
 }
 
-func appendStrings(args []any, vals []string) []any {
+// appendArgs appends vals to a bind-argument list.
+func appendArgs[T ~string](args []any, vals []T) []any {
 	for _, v := range vals {
 		args = append(args, v)
 	}

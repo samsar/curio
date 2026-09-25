@@ -12,7 +12,7 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-func (s *testServer) docState(t *testing.T, id string) string {
+func (s *testServer) docState(t *testing.T, id string) store.DocState {
 	t.Helper()
 	d, err := s.deps.Documents.GetByID(context.Background(), id)
 	require.NoError(t, err)
@@ -66,8 +66,8 @@ func TestRefetchDocument_StoreFailure(t *testing.T) {
 
 func TestRefetchAll(t *testing.T) {
 	s := newTestServer(t)
-	for _, st := range []string{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
-		s.seedDocument(t, "https://example.com/"+st, st)
+	for _, st := range []store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
+		s.seedDocument(t, "https://example.com/"+string(st), st)
 	}
 
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=bogus"})

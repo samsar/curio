@@ -133,7 +133,7 @@ func (d Deps) handleCreateBookmark(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, BookmarkCreatedResponse{
-		Bookmark: bookmarkToResponse(b, doc.State),
+		Bookmark: bookmarkToResponse(b, string(doc.State)),
 		JobID:    jobID,
 	})
 }
@@ -167,7 +167,7 @@ func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 		state := ""
 		if b.DocumentID != nil {
 			if doc, err := d.Documents.GetByID(r.Context(), *b.DocumentID); err == nil {
-				state = doc.State
+				state = string(doc.State)
 			}
 		}
 		items = append(items, bookmarkToResponse(b, state))
@@ -191,7 +191,7 @@ func (d Deps) handleGetBookmark(w http.ResponseWriter, r *http.Request) {
 	state := ""
 	if b.DocumentID != nil {
 		if doc, err := d.Documents.GetByID(r.Context(), *b.DocumentID); err == nil {
-			state = doc.State
+			state = string(doc.State)
 		}
 	}
 	writeJSON(w, http.StatusOK, bookmarkToResponse(b, state))

@@ -14,9 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/samsar/curio/internal/urlutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 func TestExtractVideoID(t *testing.T) {
@@ -173,7 +175,7 @@ func TestYouTubeFetch_FakeBin(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "youtube", yt.Name())
-	assert.Equal(t, "video", result.ContentType)
+	assert.Equal(t, store.ContentTypeVideo, result.ContentType)
 	assert.Equal(t, "Test Video", result.Title)
 	assert.Equal(t, "Test Channel", result.Author)
 	assert.Equal(t, "https://www.youtube.com/watch?v=test_id", result.FinalURL)

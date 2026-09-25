@@ -108,17 +108,20 @@ func (s *Insights) ReplaceClusters(ctx context.Context, runID string, clusters [
 	return nil
 }
 
-func (s *Insights) FinishRun(ctx context.Context, runID, status string, numDocuments, numClusters, numNoise int, errMsg *string) error {
-	res, err := s.db.ExecContext(ctx, `
+func (s *Insights) FinishRun(ctx context.Context, runID string, res store.RunResult) error {
+	if !res.Status.IsFinished() {
+		return fmt.Errorf("finish run %s: status %q is not terminal", runID, res.Status)
+	}
+	result, err := s.db.ExecContext(ctx, `
 		UPDATE cluster_runs
 		SET status = ?, num_documents = ?, num_clusters = ?, num_noise = ?, error = ?,
 		    finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		WHERE id = ?`,
-		status, numDocuments, numClusters, numNoise, strPtr(errMsg), runID)
+		res.Status, res.NumDocuments, res.NumClusters, res.NumNoise, strPtr(res.Error), runID)
 	if err != nil {
 		return fmt.Errorf("finish run: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, _ := result.RowsAffected()
 	if n == 0 {
 		return store.ErrNotFound
 	}
@@ -128,7 +131,7 @@ func (s *Insights) FinishRun(ctx context.Context, runID, status string, numDocum
 const clusterRunColumns = `id, tenant_id, status, algo, params, num_documents,
 	num_clusters, num_noise, error, started_at, finished_at, created_at, updated_at`
 
-func (s *Insights) LatestRun(ctx context.Context, tenantID, status string) (*store.ClusterRun, error) {
+func (s *Insights) LatestRun(ctx context.Context, tenantID string, status store.ClusterRunStatus) (*store.ClusterRun, error) {
 	q := `SELECT ` + clusterRunColumns + ` FROM cluster_runs WHERE tenant_id = ?`
 	args := []any{tenantID}
 	if status != "" {

@@ -186,8 +186,10 @@ func TestChunks_SearchFilters(t *testing.T) {
 	ch := NewChunks(db, vecDim)
 
 	seeds := []struct {
-		url, ctype, source string
-		vec                float32
+		url    string
+		ctype  store.ContentType
+		source string
+		vec    float32
 	}{
 		{"https://example.com/k8s-guide", store.ContentTypeArticle, store.SourceChrome, 0.10},
 		{"https://github.com/foo/bar", store.ContentTypeRepo, store.SourceManual, 0.20},
@@ -223,8 +225,8 @@ func TestChunks_SearchFilters(t *testing.T) {
 		want   []string // expected URLs
 	}{
 		{"none", store.SearchFilters{}, []string{"https://example.com/k8s-guide", "https://github.com/foo/bar", "https://example.com/k8s.pdf"}},
-		{"ctype pdf", store.SearchFilters{ContentType: []string{store.ContentTypePDF}}, []string{"https://example.com/k8s.pdf"}},
-		{"ctype article+repo", store.SearchFilters{ContentType: []string{store.ContentTypeArticle, store.ContentTypeRepo}}, []string{"https://example.com/k8s-guide", "https://github.com/foo/bar"}},
+		{"ctype pdf", store.SearchFilters{ContentType: []string{string(store.ContentTypePDF)}}, []string{"https://example.com/k8s.pdf"}},
+		{"ctype article+repo", store.SearchFilters{ContentType: []string{string(store.ContentTypeArticle), string(store.ContentTypeRepo)}}, []string{"https://example.com/k8s-guide", "https://github.com/foo/bar"}},
 		{"source manual", store.SearchFilters{Source: []string{store.SourceManual}}, []string{"https://github.com/foo/bar"}},
 		{"host github", store.SearchFilters{Host: []string{"github.com"}}, []string{"https://github.com/foo/bar"}},
 		{"host example", store.SearchFilters{Host: []string{"example.com"}}, []string{"https://example.com/k8s-guide", "https://example.com/k8s.pdf"}},

@@ -150,7 +150,8 @@ func (e *Engine) recordFailure(ctx context.Context, tenantID, runID string, numD
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookkeepingTimeout)
 	defer cancel()
 	msg := cause.Error()
-	if err := e.insights.FinishRun(bctx, runID, store.ClusterRunFailed, numDocuments, 0, 0, &msg); err != nil {
+	res := store.RunResult{Status: store.ClusterRunFailed, NumDocuments: numDocuments, Error: &msg}
+	if err := e.insights.FinishRun(bctx, runID, res); err != nil {
 		e.log.Warn("mark cluster run failed", "run", runID, "err", err)
 	}
 	e.pruneStaleRuns(bctx, tenantID, runID)
@@ -225,7 +226,8 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 	if err := e.insights.ReplaceClusters(ctx, runID, cws); err != nil {
 		return fmt.Errorf("write clusters: %w", err)
 	}
-	if err := e.insights.FinishRun(ctx, runID, store.ClusterRunDone, n, len(cws), numNoise, nil); err != nil {
+	res := store.RunResult{Status: store.ClusterRunDone, NumDocuments: n, NumClusters: len(cws), NumNoise: numNoise}
+	if err := e.insights.FinishRun(ctx, runID, res); err != nil {
 		return fmt.Errorf("finish run: %w", err)
 	}
 	// Keep only the just-completed run; older runs (and their clusters) are

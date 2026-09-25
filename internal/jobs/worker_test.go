@@ -54,7 +54,7 @@ func waitForJob(t *testing.T, q store.JobQueue, id string, cond func(*store.Job)
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
-func statusIs(status string) func(*store.Job) bool {
+func statusIs(status store.JobStatus) func(*store.Job) bool {
 	return func(j *store.Job) bool { return j.Status == status }
 }
 
@@ -249,7 +249,7 @@ func TestWorker_RecoverOrphans(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	ctx := context.Background()
 
-	enqueueRunning := func(kind string, attempts int, docID string) *store.Job {
+	enqueueRunning := func(kind store.JobKind, attempts int, docID string) *store.Job {
 		payload, err := json.Marshal(FetchPayload{DocumentID: docID})
 		require.NoError(t, err)
 		j := &store.Job{TenantID: "local", Kind: kind, Payload: payload,
@@ -297,7 +297,7 @@ type shutdownAfterRecovery struct {
 	shutdown context.CancelFunc
 }
 
-func (q shutdownAfterRecovery) RecoverOrphans(ctx context.Context, kinds []string) ([]*store.Job, int, error) {
+func (q shutdownAfterRecovery) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*store.Job, int, error) {
 	defer q.shutdown()
 	return q.JobQueue.RecoverOrphans(ctx, kinds)
 }
