@@ -160,6 +160,15 @@ func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBo
 	return out, rows.Err()
 }
 
+func (s *Bookmarks) Count(ctx context.Context, tenantID string) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM bookmarks WHERE tenant_id = ?`, tenantID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count bookmarks: %w", err)
+	}
+	return n, nil
+}
+
 func (s *Bookmarks) Delete(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM bookmarks WHERE id = ?`, id)
 	if err != nil {

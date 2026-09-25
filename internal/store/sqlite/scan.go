@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -72,4 +73,14 @@ func timePtr(t *time.Time) any {
 		return nil
 	}
 	return formatTime(*t)
+}
+
+// qualify prefixes every column in a comma-separated list with a table
+// alias, for queries that join tables sharing column names.
+func qualify(alias, columns string) string {
+	cols := strings.Split(columns, ",")
+	for i, c := range cols {
+		cols[i] = alias + "." + strings.TrimSpace(c)
+	}
+	return strings.Join(cols, ", ")
 }

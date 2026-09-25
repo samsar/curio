@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-
-	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 )
 
 // MetricsResponse is the body of GET /v1/metrics. All numbers are derived
@@ -42,13 +40,7 @@ func (d Deps) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jq, ok := d.Queue.(*sqlitestore.Jobs)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"JobQueue impl does not expose metrics")
-		return
-	}
-	rows, err := jq.MetricsByKind(r.Context(), d.TenantID, window)
+	rows, err := d.Queue.MetricsByKind(r.Context(), d.TenantID, window)
 	if err != nil {
 		writeError(w, err)
 		return

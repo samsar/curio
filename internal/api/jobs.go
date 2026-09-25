@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/store"
-	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 )
 
 // JobResponse mirrors store.Job with timestamps as time.Time. Payload is
@@ -73,15 +72,8 @@ func (d Deps) handleDeleteJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jq, ok := d.Queue.(*sqlitestore.Jobs)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"JobQueue impl does not expose delete")
-		return
-	}
-
 	if status != "" {
-		n, err := jq.DeleteByStatus(r.Context(), d.TenantID, status)
+		n, err := d.Queue.DeleteByStatus(r.Context(), d.TenantID, status)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -97,7 +89,7 @@ func (d Deps) handleDeleteJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cutoff := time.Now().Add(-dur)
-	n, err := jq.PruneOlderThan(r.Context(), d.TenantID, cutoff)
+	n, err := d.Queue.PruneOlderThan(r.Context(), d.TenantID, cutoff)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -136,13 +128,9 @@ func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jq, ok := d.Queue.(*sqlitestore.Jobs)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"JobQueue impl does not expose listing")
-		return
-	}
-	jobs, err := jq.ListWithDoc(r.Context(), d.TenantID, status, kind, limit)
+	jobs, err := d.Queue.ListWithDoc(r.Context(), d.TenantID, store.ListJobsOpts{
+		Status: status, Kind: kind, Limit: limit,
+	})
 	if err != nil {
 		writeError(w, err)
 		return

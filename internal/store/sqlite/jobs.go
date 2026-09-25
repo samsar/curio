@@ -14,7 +14,7 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// Jobs implements store.JobQueue. Single-table queue backed by SQLite.
+// Jobs implements store.JobStore. Single-table queue backed by SQLite.
 //
 // Claim semantics: an atomic UPDATE ... WHERE status='pending' AND id=(...)
 // inside a transaction ensures one job is claimed by exactly one worker even
@@ -27,7 +27,7 @@ type Jobs struct {
 	MaxAttempts int
 }
 
-var _ store.JobQueue = (*Jobs)(nil)
+var _ store.JobStore = (*Jobs)(nil)
 
 func NewJobs(db *DB) *Jobs {
 	return &Jobs{db: db, MaxAttempts: 5}
@@ -258,41 +258,28 @@ func notRunning(job *store.Job) error {
 	return fmt.Errorf("job %s is %s: %w", job.ID, job.Status, store.ErrNotRunning)
 }
 
-// JobWithDoc pairs a Job with its target document's URL, title, and
-// current-extraction markdown_path (when present). Two LEFT JOINs:
-// jobs → documents via json_extract(payload, '$.document_id'), and
-// documents → document_extractions via current_extraction_id. All three
-// fields are empty when the join misses (no doc, or doc has no extraction).
-type JobWithDoc struct {
-	*store.Job
-	URL          string
-	Title        string
-	MarkdownPath string
-}
-
-// ListWithDoc is the debug-friendly variant of List: same filters, but
-// each row carries the doc URL + title + markdown_path so the CLI
-// doesn't have to do an N+1 round-trip.
-func (s *Jobs) ListWithDoc(ctx context.Context, tenantID string, status store.JobStatus, kind store.JobKind, limit int) ([]JobWithDoc, error) {
+// ListWithDoc joins each job to its document through
+// json_extract(payload, '$.document_id'), and the document to its current
+// extraction for the markdown path, so the CLI needs no round-trip per row.
+func (s *Jobs) ListWithDoc(ctx context.Context, tenantID string, opts store.ListJobsOpts) ([]store.JobWithDoc, error) {
+	limit := opts.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	const jobCols = `j.id, j.tenant_id, j.kind, j.payload, j.status, j.attempts, j.run_after, j.last_error, j.created_at, j.updated_at`
-
-	q := "SELECT " + jobCols + ", COALESCE(d.url, '') AS doc_url, COALESCE(d.title, '') AS doc_title, " +
-		"COALESCE(e.markdown_path, '') AS markdown_path " +
+	q := "SELECT " + qualify("j", jobColumns) + ", COALESCE(d.url, '') AS doc_url, " +
+		"COALESCE(d.title, '') AS doc_title, COALESCE(e.markdown_path, '') AS markdown_path " +
 		"FROM jobs j " +
 		"LEFT JOIN documents d ON d.id = json_extract(j.payload, '$.document_id') " +
 		"LEFT JOIN document_extractions e ON e.id = d.current_extraction_id " +
 		"WHERE j.tenant_id = ?"
 	args := []any{tenantID}
-	if status != "" {
+	if opts.Status != "" {
 		q += " AND j.status = ?"
-		args = append(args, status)
+		args = append(args, opts.Status)
 	}
-	if kind != "" {
+	if opts.Kind != "" {
 		q += " AND j.kind = ?"
-		args = append(args, kind)
+		args = append(args, opts.Kind)
 	}
 	q += " ORDER BY j.updated_at DESC LIMIT ?"
 	args = append(args, limit)
@@ -302,73 +289,18 @@ func (s *Jobs) ListWithDoc(ctx context.Context, tenantID string, status store.Jo
 		return nil, fmt.Errorf("list jobs with doc: %w", err)
 	}
 	defer rows.Close()
-	var out []JobWithDoc
+	var out []store.JobWithDoc
 	for rows.Next() {
-		job, url, title, mdPath, err := scanJobWithDoc(rows)
-		if err != nil {
-			return nil, err
+		var item store.JobWithDoc
+		if item.Job, err = scanJob(rows, &item.URL, &item.Title, &item.MarkdownPath); err != nil {
+			return nil, fmt.Errorf("list jobs with doc: %w", err)
 		}
-		out = append(out, JobWithDoc{Job: job, URL: url, Title: title, MarkdownPath: mdPath})
+		out = append(out, item)
 	}
-	return out, rows.Err()
-}
-
-func scanJobWithDoc(row interface{ Scan(...any) error }) (*store.Job, string, string, string, error) {
-	var (
-		j                              store.Job
-		payload                        string
-		lastErr                        sql.NullString
-		runAfter, createdAt, updatedAt string
-		url, title, mdPath             string
-	)
-	err := row.Scan(
-		&j.ID, &j.TenantID, &j.Kind, &payload, &j.Status,
-		&j.Attempts, &runAfter, &lastErr,
-		&createdAt, &updatedAt,
-		&url, &title, &mdPath,
-	)
-	if err != nil {
-		return nil, "", "", "", fmt.Errorf("scan job with doc: %w", err)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list jobs with doc: %w", err)
 	}
-	j.Payload = []byte(payload)
-	j.LastError = nullableString(lastErr)
-	if j.RunAfter, err = parseTime(runAfter); err != nil {
-		return nil, "", "", "", err
-	}
-	if j.CreatedAt, err = parseTime(createdAt); err != nil {
-		return nil, "", "", "", err
-	}
-	if j.UpdatedAt, err = parseTime(updatedAt); err != nil {
-		return nil, "", "", "", err
-	}
-	return &j, url, title, mdPath, nil
-}
-
-// List returns recent jobs for a tenant, optionally filtered by status
-// and/or kind. Ordered most-recently-created first.
-func (s *Jobs) List(ctx context.Context, tenantID string, status store.JobStatus, kind store.JobKind, limit int) ([]*store.Job, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	q := "SELECT " + jobColumns + " FROM jobs WHERE tenant_id = ?"
-	args := []any{tenantID}
-	if status != "" {
-		q += " AND status = ?"
-		args = append(args, status)
-	}
-	if kind != "" {
-		q += " AND kind = ?"
-		args = append(args, kind)
-	}
-	q += " ORDER BY created_at DESC LIMIT ?"
-	args = append(args, limit)
-
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list jobs: %w", err)
-	}
-	defer rows.Close()
-	return scanJobRows(rows)
+	return out, nil
 }
 
 // DeleteByStatus removes every job for the tenant in the given status,
@@ -403,23 +335,7 @@ func (s *Jobs) PruneOlderThan(ctx context.Context, tenantID string, before time.
 	return res.RowsAffected()
 }
 
-// KindMetrics is the aggregated performance picture for one job kind
-// over a rolling window. Times are in milliseconds (computed from
-// updated_at - created_at). Failed is the count of jobs in that kind
-// whose terminal status was 'failed' in the window.
-type KindMetrics struct {
-	Kind                 store.JobKind
-	Count                int
-	MeanMS               float64
-	P50MS                float64
-	P95MS                float64
-	P99MS                float64
-	Failed               int
-	Running              int // currently in-flight (status='running'); not bounded by window
-	OldestRunningSeconds int // age of the oldest running job
-}
-
-// MetricsByKind returns one KindMetrics per job kind for the given
+// MetricsByKind returns one store.KindMetrics per job kind for the given
 // window. Uses window functions to compute percentiles; SQLite 3.25+ is
 // fine (we're on much newer). Counts cover done+failed jobs whose
 // updated_at falls in the window; Running counts ignore the window (it's
@@ -428,7 +344,7 @@ type KindMetrics struct {
 // Cost: O(N rows in window) — well-indexed via (status, run_after,
 // created_at). Becomes slow only if the jobs table grows huge without
 // pruning; users can `curio jobs prune` to mitigate.
-func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.Duration) ([]KindMetrics, error) {
+func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.Duration) ([]store.KindMetrics, error) {
 	cutoff := time.Now().UTC().Add(-window)
 
 	// Two CTEs:
@@ -469,9 +385,9 @@ func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.D
 	}
 	defer rows.Close()
 
-	out := map[store.JobKind]*KindMetrics{}
+	out := map[store.JobKind]*store.KindMetrics{}
 	for rows.Next() {
-		var m KindMetrics
+		var m store.KindMetrics
 		if err := rows.Scan(&m.Kind, &m.Count, &m.Failed, &m.MeanMS, &m.P50MS, &m.P95MS, &m.P99MS); err != nil {
 			return nil, fmt.Errorf("scan metrics: %w", err)
 		}
@@ -512,7 +428,7 @@ func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.D
 		}
 		m, ok := out[kind]
 		if !ok {
-			m = &KindMetrics{Kind: kind}
+			m = &store.KindMetrics{Kind: kind}
 			out[kind] = m
 		}
 		m.Running = running
@@ -528,32 +444,35 @@ func (s *Jobs) MetricsByKind(ctx context.Context, tenantID string, window time.D
 		kinds = append(kinds, k)
 	}
 	slices.Sort(kinds)
-	result := make([]KindMetrics, 0, len(kinds))
+	result := make([]store.KindMetrics, 0, len(kinds))
 	for _, k := range kinds {
 		result = append(result, *out[k])
 	}
 	return result, nil
 }
 
-// CountByStatus returns the number of jobs in each status for a tenant.
-// Surfaces queue depth via /v1/stats so import progress is visible.
 func (s *Jobs) CountByStatus(ctx context.Context, tenantID string) (map[store.JobStatus]int, error) {
-	const q = `SELECT status, count(*) FROM jobs WHERE tenant_id = ? GROUP BY status`
-	rows, err := s.db.QueryContext(ctx, q, tenantID)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT status, count(*) FROM jobs WHERE tenant_id = ? GROUP BY status`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("count jobs: %w", err)
 	}
 	defer rows.Close()
 	out := map[store.JobStatus]int{}
 	for rows.Next() {
-		var status store.JobStatus
-		var n int
+		var (
+			status store.JobStatus
+			n      int
+		)
 		if err := rows.Scan(&status, &n); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("count jobs: %w", err)
 		}
 		out[status] = n
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count jobs: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Jobs) GetByID(ctx context.Context, id string) (*store.Job, error) {
@@ -584,18 +503,20 @@ func appendArgs[T ~string](args []any, vals []T) []any {
 	return args
 }
 
-func scanJob(row interface{ Scan(...any) error }) (*store.Job, error) {
+// scanJob scans jobColumns, then any extra columns a query selects after
+// them into extra. A missing row is store.ErrNotFound.
+func scanJob(row interface{ Scan(...any) error }, extra ...any) (*store.Job, error) {
 	var (
 		j                              store.Job
 		payload                        string
 		lastErr                        sql.NullString
 		runAfter, createdAt, updatedAt string
 	)
-	err := row.Scan(
+	err := row.Scan(slices.Concat([]any{
 		&j.ID, &j.TenantID, &j.Kind, &payload, &j.Status,
 		&j.Attempts, &runAfter, &lastErr,
 		&createdAt, &updatedAt,
-	)
+	}, extra)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}

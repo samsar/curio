@@ -99,7 +99,7 @@ func TestRefetchAll_StoreFailure(t *testing.T) {
 // TestReindexAll_StoreFailure: enqueue failures are reported, not skipped.
 func TestReindexAll_StoreFailure(t *testing.T) {
 	s := newTestServer(t)
-	s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	s.seedContent(t, s.seedDocument(t, "https://example.com/a", store.DocStateFetched), "# A")
 	s.failJobInserts(t)
 
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all"})

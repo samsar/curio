@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/embedder"
-	"github.com/samsar/curio/internal/store"
-	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -85,31 +83,38 @@ type Stats struct {
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
 }
 
+// handleStats reports corpus and queue counts. A count that can't be read
+// fails the request: `curio import --follow` and `curio status` read absent
+// fields as zero.
 func (d Deps) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	out := Stats{Version: version.String()}
-
-	// Cheap counts via the concrete SQLite stores. The interface layer
-	// doesn't expose count methods today; we type-assert when the impl
-	// supports it. Falls back to zero/absent fields when it doesn't.
-	if jq, ok := d.Queue.(*sqlitestore.Jobs); ok {
-		if m, err := jq.CountByStatus(ctx, d.TenantID); err == nil {
-			out.JobsByStatus = stringKeys(m)
-		}
+	bookmarks, err := d.Bookmarks.Count(ctx, d.TenantID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	docsByState, err := d.Documents.CountByState(ctx, d.TenantID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	jobsByStatus, err := d.Queue.CountByStatus(ctx, d.TenantID)
+	if err != nil {
+		writeError(w, err)
+		return
 	}
 
-	if list, err := d.Bookmarks.List(ctx, d.TenantID, store.ListBookmarksOpts{Limit: 100000}); err == nil {
-		out.BookmarksTotal = len(list)
+	docsTotal := 0
+	for _, n := range docsByState {
+		docsTotal += n
 	}
-	// Documents total + by-state via the stats helper if present.
-	if ds, ok := d.Documents.(*sqlitestore.Documents); ok {
-		if total, by, err := ds.CountByState(ctx, d.TenantID); err == nil {
-			out.DocumentsTotal = total
-			out.DocumentsByState = stringKeys(by)
-		}
-	}
-
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, Stats{
+		Version:          version.String(),
+		BookmarksTotal:   bookmarks,
+		DocumentsTotal:   docsTotal,
+		DocumentsByState: stringKeys(docsByState),
+		JobsByStatus:     stringKeys(jobsByStatus),
+	})
 }
 
 // stringKeys converts a count map keyed by a store enum to the wire shape.

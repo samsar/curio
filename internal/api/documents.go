@@ -14,7 +14,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/samsar/curio/internal/store"
-	"github.com/samsar/curio/internal/store/sqlite"
 )
 
 // DocumentResponse mirrors the openapi Document schema. tenant_id omitted.
@@ -112,13 +111,9 @@ func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ds, ok := d.Documents.(*sqlite.Documents)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"DocumentStore impl does not expose listing")
-		return
-	}
-	docs, err := ds.ListWithLastError(r.Context(), d.TenantID, state, limit)
+	docs, err := d.Documents.ListWithLastError(r.Context(), d.TenantID, store.ListDocumentsOpts{
+		State: state, Limit: limit,
+	})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -250,13 +245,7 @@ func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	if wantState == "" {
 		wantState = store.DocStateFetched // only fetched docs have content to reindex
 	}
-	ds, ok := d.Documents.(*sqlite.Documents)
-	if !ok {
-		writeProblem(w, http.StatusNotImplemented, "not supported",
-			"DocumentStore impl does not expose bulk listing")
-		return
-	}
-	ids, err := ds.ListIDs(r.Context(), d.TenantID, wantState)
+	ids, err := d.Documents.ListIDsWithContent(r.Context(), d.TenantID, wantState)
 	if err != nil {
 		writeError(w, err)
 		return

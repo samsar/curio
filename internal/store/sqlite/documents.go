@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/google/uuid"
 
@@ -87,15 +88,19 @@ func (s *Documents) GetByURL(ctx context.Context, tenantID, url string) (*store.
 	return s.queryOne(ctx, "tenant_id = ? AND url = ?", tenantID, url)
 }
 
+// documentColumns is the column list scanDocument expects, in order.
+const documentColumns = `id, tenant_id, url, url_canonical, content_type, title, author,
+	published_at, language, word_count, current_extraction_id, state,
+	created_at, updated_at`
+
 func (s *Documents) queryOne(ctx context.Context, where string, args ...any) (*store.Document, error) {
-	const cols = `id, tenant_id, url, url_canonical, content_type, title, author,
-		published_at, language, word_count, current_extraction_id, state,
-		created_at, updated_at`
-	row := s.db.QueryRowContext(ctx, "SELECT "+cols+" FROM documents WHERE "+where, args...)
+	row := s.db.QueryRowContext(ctx, "SELECT "+documentColumns+" FROM documents WHERE "+where, args...)
 	return scanDocument(row)
 }
 
-func scanDocument(row interface{ Scan(...any) error }) (*store.Document, error) {
+// scanDocument scans documentColumns, then any extra columns a query
+// selects after them into extra. A missing row is store.ErrNotFound.
+func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Document, error) {
 	var (
 		d                                            store.Document
 		urlCanonical, title, author, language, curEx sql.NullString
@@ -103,14 +108,14 @@ func scanDocument(row interface{ Scan(...any) error }) (*store.Document, error) 
 		wordCount                                    sql.NullInt64
 		createdAt, updatedAt                         string
 	)
-	err := row.Scan(
+	err := row.Scan(slices.Concat([]any{
 		&d.ID, &d.TenantID, &d.URL,
 		&urlCanonical, &d.ContentType,
 		&title, &author,
 		&publishedAt, &language,
 		&wordCount, &curEx, &d.State,
 		&createdAt, &updatedAt,
-	)
+	}, extra)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -147,35 +152,15 @@ func (s *Documents) UpdateState(ctx context.Context, id string, state store.DocS
 	return ensureRow(res, "document")
 }
 
-// DocumentWithError pairs a Document with the most recent failed-job error
-// message that targeted it AND the markdown path of its current extraction
-// (when one exists). Used by the debug-listing endpoint so users can see
-// in one query which docs are broken/healthy and where their content lives.
-type DocumentWithError struct {
-	*store.Document
-	LastError    string // empty if no failed job is associated
-	MarkdownPath string // empty if no current extraction
-}
-
-// ListWithLastError returns documents for a tenant, optionally filtered by
-// state, paired with the last_error of their most recent failed fetch or
-// index job AND the markdown path of their current extraction. Ordered
-// most-recently-updated first.
-//
-// Three joins:
-//   - Self-subquery on jobs to find the most recent failed job per doc
-//     (json_extract on payload.document_id).
-//   - LEFT JOIN on document_extractions for the current extraction's
-//     markdown_path. Empty when state=pending.
-func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, state store.DocState, limit int) ([]DocumentWithError, error) {
+// ListWithLastError joins each document to the most recent failed job whose
+// payload names it (json_extract on payload.document_id) and to its current
+// extraction for the markdown path.
+func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, opts store.ListDocumentsOpts) ([]store.DocumentWithError, error) {
+	limit := opts.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	const cols = `d.id, d.tenant_id, d.url, d.url_canonical, d.content_type, d.title, d.author,
-		d.published_at, d.language, d.word_count, d.current_extraction_id, d.state,
-		d.created_at, d.updated_at`
-
-	q := `SELECT ` + cols + `,
+	q := `SELECT ` + qualify("d", documentColumns) + `,
 		COALESCE(j.last_error, '') AS last_error,
 		COALESCE(e.markdown_path, '') AS markdown_path
 		FROM documents d
@@ -189,9 +174,9 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, stat
 		LEFT JOIN document_extractions e ON e.id = d.current_extraction_id
 		WHERE d.tenant_id = ?`
 	args := []any{tenantID}
-	if state != "" {
+	if opts.State != "" {
 		q += ` AND d.state = ?`
-		args = append(args, state)
+		args = append(args, opts.State)
 	}
 	q += ` ORDER BY d.updated_at DESC LIMIT ?`
 	args = append(args, limit)
@@ -202,107 +187,65 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, stat
 	}
 	defer rows.Close()
 
-	var out []DocumentWithError
+	var out []store.DocumentWithError
 	for rows.Next() {
-		doc, lastErr, mdPath, err := scanDocumentWithError(rows)
-		if err != nil {
-			return nil, err
+		var item store.DocumentWithError
+		if item.Document, err = scanDocument(rows, &item.LastError, &item.MarkdownPath); err != nil {
+			return nil, fmt.Errorf("list documents with error: %w", err)
 		}
-		out = append(out, DocumentWithError{Document: doc, LastError: lastErr, MarkdownPath: mdPath})
+		out = append(out, item)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list documents with error: %w", err)
+	}
+	return out, nil
 }
 
-// scanDocumentWithError mirrors scanDocument but adds the joined
-// last_error + markdown_path columns at the end.
-func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document, string, string, error) {
-	var (
-		d                                            store.Document
-		urlCanonical, title, author, language, curEx sql.NullString
-		publishedAt                                  sql.NullString
-		wordCount                                    sql.NullInt64
-		createdAt, updatedAt                         string
-		lastErr, mdPath                              string
-	)
-	err := row.Scan(
-		&d.ID, &d.TenantID, &d.URL,
-		&urlCanonical, &d.ContentType,
-		&title, &author,
-		&publishedAt, &language,
-		&wordCount, &curEx, &d.State,
-		&createdAt, &updatedAt,
-		&lastErr, &mdPath,
-	)
+func (s *Documents) ListIDsWithContent(ctx context.Context, tenantID string, state store.DocState) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM documents
+		WHERE tenant_id = ? AND state = ? AND current_extraction_id IS NOT NULL`,
+		tenantID, state)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("scan document with error: %w", err)
-	}
-	d.URLCanonical = nullableString(urlCanonical)
-	d.Title = nullableString(title)
-	d.Author = nullableString(author)
-	d.Language = nullableString(language)
-	d.CurrentExtractionID = nullableString(curEx)
-	d.WordCount = nullableInt(wordCount)
-	if publishedAt.Valid {
-		pt, perr := parseTime(publishedAt.String)
-		if perr != nil {
-			return nil, "", "", perr
-		}
-		d.PublishedAt = &pt
-	}
-	if d.CreatedAt, err = parseTime(createdAt); err != nil {
-		return nil, "", "", err
-	}
-	if d.UpdatedAt, err = parseTime(updatedAt); err != nil {
-		return nil, "", "", err
-	}
-	return &d, lastErr, mdPath, nil
-}
-
-// ListIDs returns all document IDs for a tenant, optionally restricted
-// to a particular state. Used by the bulk refetch path.
-func (s *Documents) ListIDs(ctx context.Context, tenantID string, state store.DocState) ([]string, error) {
-	q := `SELECT id FROM documents WHERE tenant_id = ?`
-	args := []any{tenantID}
-	if state != "" {
-		q += ` AND state = ?`
-		args = append(args, state)
-	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list document ids: %w", err)
+		return nil, fmt.Errorf("list document ids with content: %w", err)
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list document ids with content: %w", err)
 		}
 		out = append(out, id)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list document ids with content: %w", err)
+	}
+	return out, nil
 }
 
-// CountByState returns (total, perStateMap) for one tenant.
-func (s *Documents) CountByState(ctx context.Context, tenantID string) (int, map[store.DocState]int, error) {
-	const q = `SELECT state, count(*) FROM documents WHERE tenant_id = ? GROUP BY state`
-	rows, err := s.db.QueryContext(ctx, q, tenantID)
+func (s *Documents) CountByState(ctx context.Context, tenantID string) (map[store.DocState]int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT state, count(*) FROM documents WHERE tenant_id = ? GROUP BY state`, tenantID)
 	if err != nil {
-		return 0, nil, fmt.Errorf("count documents: %w", err)
+		return nil, fmt.Errorf("count documents: %w", err)
 	}
 	defer rows.Close()
 	out := map[store.DocState]int{}
-	total := 0
 	for rows.Next() {
-		var state store.DocState
-		var n int
+		var (
+			state store.DocState
+			n     int
+		)
 		if err := rows.Scan(&state, &n); err != nil {
-			return 0, nil, err
+			return nil, fmt.Errorf("count documents: %w", err)
 		}
 		out[state] = n
-		total += n
 	}
-	return total, out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count documents: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionID string) error {

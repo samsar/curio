@@ -574,7 +574,7 @@ func docState(t *testing.T, docs *Documents, id string) store.DocState {
 
 func fetchJobsFor(t *testing.T, q *Jobs, docID string) []*store.Job {
 	t.Helper()
-	all, err := q.List(context.Background(), "local", "", store.JobKindFetch, 1000)
+	all, err := q.ListWithDoc(context.Background(), "local", store.ListJobsOpts{Kind: store.JobKindFetch, Limit: 1000})
 	require.NoError(t, err)
 	var out []*store.Job
 	for _, j := range all {
@@ -583,7 +583,7 @@ func fetchJobsFor(t *testing.T, q *Jobs, docID string) []*store.Job {
 		}
 		require.NoError(t, json.Unmarshal(j.Payload, &p))
 		if p.DocumentID == docID {
-			out = append(out, j)
+			out = append(out, j.Job)
 		}
 	}
 	return out

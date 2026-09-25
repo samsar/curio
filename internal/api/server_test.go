@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -133,6 +134,22 @@ func (s *testServer) seedDocument(t *testing.T, url string, state store.DocState
 	doc := &store.Document{TenantID: "local", URL: url, State: state}
 	require.NoError(t, s.deps.Documents.Upsert(context.Background(), doc))
 	return doc
+}
+
+// seedContent gives doc a current extraction whose markdown is on disk.
+func (s *testServer) seedContent(t *testing.T, doc *store.Document, markdown string) *store.DocumentExtraction {
+	t.Helper()
+	ctx := context.Background()
+	rel := filepath.Join(doc.ID, "content.md")
+	full := filepath.Join(s.deps.Home.ContentDir(), rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o700))
+	require.NoError(t, os.WriteFile(full, []byte(markdown), 0o600))
+	ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
+		MarkdownPath: &rel, ExtractionMeta: []byte(`{"via":"test"}`)}
+	require.NoError(t, s.deps.Extractions.Create(ctx, ext))
+	require.NoError(t, s.deps.Documents.SetCurrentExtraction(ctx, doc.ID, ext.ID))
+	doc.CurrentExtractionID = &ext.ID
+	return ext
 }
 
 func assertProblem(t *testing.T, resp response, status int) {

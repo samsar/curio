@@ -46,7 +46,7 @@ type Deps struct {
 	Extractions    store.ExtractionStore
 	Bookmarks      store.BookmarkStore
 	Chunks         store.ChunkStore
-	Queue          store.JobQueue
+	Queue          store.JobStore
 	Embedder       embedder.Embedder
 	Search         *search.Engine
 	Insights       store.InsightStore

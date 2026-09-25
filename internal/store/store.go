@@ -192,6 +192,33 @@ type DocumentStore interface {
 	// state is one of states, in one transaction. Returns how many jobs it
 	// enqueued.
 	RequeueFetchByStates(ctx context.Context, tenantID string, states []DocState) (int, error)
+
+	// ListWithLastError lists the tenant's documents, most recently updated
+	// first, each with the error of the most recent failed job that
+	// targeted it and the markdown path of its current extraction.
+	ListWithLastError(ctx context.Context, tenantID string, opts ListDocumentsOpts) ([]DocumentWithError, error)
+	// ListIDsWithContent returns the IDs of the tenant's documents in state
+	// that have a current extraction: the ones an index job can work on.
+	ListIDsWithContent(ctx context.Context, tenantID string, state DocState) ([]string, error)
+	// CountByState counts the tenant's documents per state. States with no
+	// documents are absent from the map.
+	CountByState(ctx context.Context, tenantID string) (map[DocState]int, error)
+}
+
+// ListDocumentsOpts filters DocumentStore.ListWithLastError. Empty fields
+// mean "no filter for that dimension".
+type ListDocumentsOpts struct {
+	State DocState
+	Limit int // <= 0 means the impl default (50)
+}
+
+// DocumentWithError is a document plus what a debug listing shows next to
+// it, so one query answers "which documents are broken, and where does
+// their content live".
+type DocumentWithError struct {
+	*Document
+	LastError    string // of the most recent failed job for the document; empty if none
+	MarkdownPath string // current extraction's, relative to the content dir; empty if none
 }
 
 // ExtractionStore operates on the document_extractions table.
@@ -213,6 +240,9 @@ type BookmarkStore interface {
 	// bookmarks (any source) that reference the document. Empty if none.
 	// The indexer uses it to denormalize tags into chunks_fts for boosting.
 	TagsForDocument(ctx context.Context, tenantID, documentID string) ([]string, error)
+
+	// Count returns how many bookmarks the tenant has.
+	Count(ctx context.Context, tenantID string) (int, error)
 }
 
 // ListBookmarksOpts are filters for BookmarkStore.List. Empty fields mean
@@ -350,6 +380,61 @@ type JobQueue interface {
 	// be non-empty; jobs of other kinds are untouched.
 	RecoverOrphans(ctx context.Context, kinds []JobKind) (failed []*Job, requeued int, err error)
 	GetByID(ctx context.Context, id string) (*Job, error)
+}
+
+// JobStore is the queue as the API sees it: the claim-and-transition
+// methods workers use (JobQueue), plus listing, counts, metrics and
+// retention. Workers depend on JobQueue alone.
+type JobStore interface {
+	JobQueue
+	// ListWithDoc lists the tenant's jobs, most recently updated first, each
+	// joined to the document its payload names.
+	ListWithDoc(ctx context.Context, tenantID string, opts ListJobsOpts) ([]JobWithDoc, error)
+	// CountByStatus counts the tenant's jobs per status. Statuses with no
+	// jobs are absent from the map.
+	CountByStatus(ctx context.Context, tenantID string) (map[JobStatus]int, error)
+	// MetricsByKind reports per-kind durations and failures over jobs that
+	// finished within window, plus what is running right now.
+	MetricsByKind(ctx context.Context, tenantID string, window time.Duration) ([]KindMetrics, error)
+	// DeleteByStatus deletes the tenant's jobs in status, which must be a
+	// finished one (see JobStatus.IsFinished). Returns how many it deleted.
+	DeleteByStatus(ctx context.Context, tenantID string, status JobStatus) (int64, error)
+	// PruneOlderThan deletes the tenant's finished jobs last updated before
+	// the cutoff. Pending and running jobs are kept however old they are.
+	PruneOlderThan(ctx context.Context, tenantID string, before time.Time) (int64, error)
+}
+
+// ListJobsOpts filters JobStore.ListWithDoc. Empty fields mean "no filter
+// for that dimension".
+type ListJobsOpts struct {
+	Status JobStatus
+	Kind   JobKind
+	Limit  int // <= 0 means the impl default (50)
+}
+
+// JobWithDoc is a job plus the URL, title and current markdown path of the
+// document its payload names. All three are empty for a job without a
+// document (cluster) or whose document is gone.
+type JobWithDoc struct {
+	*Job
+	URL          string
+	Title        string
+	MarkdownPath string // relative to the content dir
+}
+
+// KindMetrics is the performance picture for one job kind over a window.
+// Durations run from started_at to updated_at and cover successful jobs
+// only: a failed job's time is dominated by retry backoff, not work.
+type KindMetrics struct {
+	Kind                 JobKind
+	Count                int // done + failed in the window
+	Failed               int
+	MeanMS               float64
+	P50MS                float64
+	P95MS                float64
+	P99MS                float64
+	Running              int // running now; not bounded by the window
+	OldestRunningSeconds int // age of the oldest running job
 }
 
 // ClusterRun is one execution of the clustering job. Clustering fully

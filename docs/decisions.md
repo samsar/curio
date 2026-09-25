@@ -65,9 +65,10 @@ content on disk under `~/.curio/content/`.
 **Why:** Zero ops, fast for single-user, handles the job queue too. Content on
 disk keeps the DB small and lets `ripgrep` work against the corpus directly.
 
-**Forward compatibility:** All access goes through `DocumentStore`, `BM25Index`,
-`VectorIndex` interfaces. Postgres + pgvector impls land when hosted-mode
-demands them.
+**Forward compatibility:** All access goes through the `internal/store`
+interfaces (`DocumentStore`, `ChunkStore`, `JobStore`, ...), and a lint rule
+keeps it that way (see "Store boundary" below). Postgres + pgvector impls land
+when hosted-mode demands them.
 
 ---
 
@@ -2518,3 +2519,41 @@ are copied from real Chrome of each version, because the GREASE brand and
 the brand order change from one version to the next. The old 133 value
 had its brands in the wrong order.
 
+---
+
+## Store boundary: consumers see interfaces, depguard enforces it
+
+**Decision:**
+
+- Everything the API needs from storage is on the `internal/store`
+  interfaces. `DocumentStore` has `ListWithLastError`,
+  `ListIDsWithContent` and `CountByState`; `BookmarkStore` has `Count`; and
+  `JobStore` embeds `JobQueue` and adds `ListWithDoc`, `CountByStatus`,
+  `MetricsByKind`, `DeleteByStatus` and `PruneOlderThan`.
+- The queue interface is split by role. Workers (`jobs.Worker`,
+  `jobs.Deps`) take `JobQueue`, which only claims and transitions jobs; the
+  API takes `JobStore`.
+- List methods take options structs (`ListDocumentsOpts`, `ListJobsOpts`),
+  so a cursor can be added without another signature change.
+- depguard's `store-boundary` rule denies `internal/store/sqlite` to every
+  non-test file outside `cmd/curio-daemon`, the sqlite package itself and
+  the test-support packages (`internal/store/sqlite/sqlitetest`,
+  `internal/api/apitest`). Its `no-test-deps-in-prod` rule denies
+  `testing`, testify and those test-support packages to production code.
+- `/v1/stats` counts through these methods (`SELECT count(*)`, not a
+  listing) and answers 500 when a count fails.
+
+**Why:** `internal/api` imported the SQLite package and type-asserted the
+stores to concrete types in seven places to reach methods the interfaces
+lacked. Five fell back to a 501 that the one implementation never hit, and
+`/v1/stats` silently dropped the fields it couldn't count. A second
+implementation would have compiled and then served 501s. `/v1/stats` also
+counted bookmarks by decoding up to 100000 rows, on an endpoint
+`curio import --follow` polls every 2 s. Separately, `testutil.go` was a
+non-test file, so the daemon linked testify. Nothing stopped the next
+violation; the lint rules do.
+
+**Interfaces in `store`, not consumer-side interfaces in `api`:** every
+consumer (search, insight, jobs, api) already takes `store.*` interfaces,
+and a hosted implementation has to provide these methods to serve the API
+anyway.
