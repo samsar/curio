@@ -151,8 +151,10 @@ type clusterFunc func(ctx context.Context, points []Point) ([]int, error)
 func (f clusterFunc) Cluster(ctx context.Context, points []Point) ([]int, error) {
 	return f(ctx, points)
 }
-func (clusterFunc) Name() string           { return "test" }
-func (clusterFunc) Params() map[string]any { return map[string]any{} }
+func (clusterFunc) Name() string { return "test" }
+
+// Params returns nil, which the Clusterer interface allows.
+func (clusterFunc) Params() map[string]any { return nil }
 
 // byAxis clusters each point by its largest component, so with the fixture
 // cluster g is group g: numbered smallest group first when sizes ascend.
@@ -186,6 +188,15 @@ func TestRebuild_RecordsRunParams(t *testing.T) {
 	require.NoError(t, json.Unmarshal(run.Params, &params))
 	assert.Equal(t, true, params["center"], "the engine's centering is recorded with the clusterer's params")
 	assert.InDelta(t, 0.5, params["min_similarity"], 1e-9)
+}
+
+func TestRebuild_NilClustererParams(t *testing.T) {
+	f := newEngineFixture(t, 3, 4)
+	runID := f.rebuild(t, f.engine(byAxis, nil, Config{}))
+
+	run, err := f.store.GetRun(context.Background(), runID)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"center":false}`, string(run.Params))
 }
 
 func TestRebuild_UnencodableParamsCreateNoRun(t *testing.T) {

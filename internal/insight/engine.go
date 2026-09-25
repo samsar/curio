@@ -156,6 +156,9 @@ func (e *Engine) recordFailure(ctx context.Context, tenantID, runID string, numD
 // engine's own vector preparation.
 func (e *Engine) runParams() ([]byte, error) {
 	params := maps.Clone(e.clusterer.Params())
+	if params == nil {
+		params = map[string]any{}
+	}
 	params["center"] = e.cfg.Center
 	raw, err := json.Marshal(params)
 	if err != nil {
