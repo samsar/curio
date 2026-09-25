@@ -209,9 +209,13 @@ func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBo
 		clauses = append(clauses, "source = ?")
 		args = append(args, opts.Source)
 	}
-	if opts.FolderPath != "" {
-		clauses = append(clauses, "folder_path LIKE ?")
-		args = append(args, opts.FolderPath+"%")
+	if folder := strings.TrimRight(opts.FolderPath, "/"); folder != "" {
+		// The folder itself or anything under it, compared byte-wise: '0'
+		// is the byte after '/', so [folder+"/", folder+"0") holds exactly
+		// the paths that start with folder+"/". Unlike LIKE there is nothing
+		// to escape, and it is case-sensitive like the equality.
+		clauses = append(clauses, "(folder_path = ? OR (folder_path >= ? AND folder_path < ?))")
+		args = append(args, folder, folder+"/", folder+"0")
 	}
 	if opts.Cursor != "" {
 		clauses = append(clauses, "id > ?")

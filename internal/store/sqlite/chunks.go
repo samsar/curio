@@ -284,12 +284,15 @@ func buildFilterClause(f store.SearchFilters) (string, []any) {
 		}
 	}
 	if len(f.Host) > 0 {
-		// No host column, so match the host segment of the URL for http(s).
-		// Exact host (the caller passes it); no port/subdomain coercion.
+		// No host column, so match the host segment of the URL for http(s):
+		// exactly that host, no port or subdomain coercion. The host is
+		// escaped so its '%', '_' and '\' match only themselves; LIKE's ASCII
+		// case-folding is right for host names.
 		conds := make([]string, 0, len(f.Host))
 		for _, h := range f.Host {
-			conds = append(conds, "(d.url LIKE ? OR d.url LIKE ? OR d.url = ? OR d.url = ?)")
-			args = append(args, "http://"+h+"/%", "https://"+h+"/%", "http://"+h, "https://"+h)
+			conds = append(conds, `(d.url LIKE ? ESCAPE '\' OR d.url LIKE ? ESCAPE '\' OR d.url = ? OR d.url = ?)`)
+			args = append(args, escapeLike("http://"+h+"/")+"%", escapeLike("https://"+h+"/")+"%",
+				"http://"+h, "https://"+h)
 		}
 		sb.WriteString(" AND (" + strings.Join(conds, " OR ") + ")")
 	}

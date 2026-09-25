@@ -39,7 +39,6 @@ func seedDocs(t *testing.T, db *DB, tenantID string, urls ...string) []string {
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, docs.SetCurrentExtraction(ctx, d.ID, e.ID))
 		out = append(out, d.ID)
-		_ = e
 	}
 	return out
 }
@@ -339,4 +338,69 @@ func TestChunks_GetByIDs_MissingIDs(t *testing.T) {
 	got, err = ch.GetByIDs(ctx, []string{"gone-1", "gone-2"})
 	require.NoError(t, err)
 	assert.Empty(t, got)
+}
+
+// TestChunks_HostFilter: the host is matched literally, so '_' and '%' in a
+// requested host are not wildcards, and case-insensitively, as DNS names
+// are. Both retrievers share the clause.
+func TestChunks_HostFilter(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	urls := []string{
+		"https://myxsite.com/a", "https://my_site.com/b",
+		"https://example.com/c", "http://example.com/d", "https://example.com.evil/e",
+	}
+	ids := seedDocs(t, db, "local", urls...)
+	byURL := map[string]string{}
+	for i, id := range ids {
+		byURL[urls[i]] = id
+		require.NoError(t, ch.ReplaceForDocument(ctx, id, latestExtractionID(t, db, id), "", nil,
+			[]store.ChunkInput{{Text: "shared term", Embedding: fillVec(0.1)}}))
+	}
+
+	cases := []struct {
+		host string
+		want []string
+	}{
+		{"my_site.com", []string{"https://my_site.com/b"}},
+		{"%", nil},
+		{"_yxsite.com", nil},
+		{"EXAMPLE.com", []string{"https://example.com/c", "http://example.com/d"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.host, func(t *testing.T) {
+			var want []string
+			for _, u := range tc.want {
+				want = append(want, byURL[u])
+			}
+			filters := store.SearchFilters{Host: []string{tc.host}}
+
+			bm, err := ch.BM25Search(ctx, "local", "shared", 50, filters)
+			require.NoError(t, err)
+			vec, err := ch.VectorSearch(ctx, "local", fillVec(0.1), 50, filters)
+			require.NoError(t, err)
+			for name, hits := range map[string][]store.ChunkHit{"bm25": bm, "vector": vec} {
+				var got []string
+				for _, h := range hits {
+					got = append(got, h.DocumentID)
+				}
+				assert.ElementsMatch(t, want, got, name)
+			}
+		})
+	}
+}
+
+func TestEscapeLike(t *testing.T) {
+	cases := map[string]string{
+		"plain.com":      "plain.com",
+		"my_site.com":    `my\_site.com`,
+		"100%":           `100\%`,
+		`back\slash`:     `back\\slash`,
+		`\%_`:            `\\\%\_`,
+		"https://h.com/": "https://h.com/",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, escapeLike(in), in)
+	}
 }

@@ -84,3 +84,12 @@ func qualify(alias, columns string) string {
 	}
 	return strings.Join(cols, ", ")
 }
+
+// likeEscaper backslash-escapes LIKE's wildcards and the escape character.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// escapeLike makes s match only itself in a LIKE pattern that declares
+// ESCAPE '\'.
+func escapeLike(s string) string {
+	return likeEscaper.Replace(s)
+}

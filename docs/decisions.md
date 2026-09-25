@@ -2660,3 +2660,30 @@ homes migrate unchanged.
 **Shutdown during a migration:** a cancelled context fails `Migrate`, and
 the daemon exits as on any migration error, without reusing the handle
 (see "Migrations: rebuilding a table other tables reference").
+
+---
+
+## Folder and host filters: literal input, segment-boundary folders
+
+**Decision:**
+
+- The bookmark folder filter matches the folder itself or any folder under
+  it, on path segments and case-sensitively. It compares BINARY ranges
+  instead of using LIKE: `folder_path = p OR (folder_path >= p || '/' AND
+  folder_path < p || '0')`, where `p` is the input without a trailing `/`.
+  `'0'` is the byte after `/`, so the half-open range holds exactly the
+  paths under `p/`. `/` alone means no folder filter.
+- The search host filter keeps LIKE, since everything after the host is a
+  wildcard and DNS names are case-insensitive, but escapes the host's `%`,
+  `_` and `\` with `ESCAPE '\'` (`escapeLike` in `internal/store/sqlite`).
+
+**Why:** both filters pasted user input into a LIKE pattern. `/Tech/AI`
+matched `/Tech/AIRPLANES`, `/Tech/AI_x` and `/Tech/AI0`, and, because LIKE
+folds ASCII case, `/tech/ai/lower`; `/100% Reading` matched `/100X Reading`.
+The host filter is reachable from `curio search --host` and from the MCP
+`search_bookmarks` tool, where a model supplies the value: `_` matched any
+character and a host of `%` matched every document. The obvious fix,
+`folder_path = ? OR folder_path LIKE ? ESCAPE ...`, is still wrong: `=` is
+case-sensitive and LIKE is not, so `/tech/ai` would match
+`/Tech/AI/Agents` but not `/Tech/AI`. The range needs no escaping and can
+still use `idx_bookmarks_folder (tenant_id, folder_path)`.

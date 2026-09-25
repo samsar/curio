@@ -216,3 +216,47 @@ func TestBookmarks_Ingest_Validates(t *testing.T) {
 		assert.Error(t, err, name)
 	}
 }
+
+// TestBookmarks_ListFolder: a folder filter matches the folder and its
+// descendants on path segments, case-sensitively, with every character
+// literal.
+func TestBookmarks_ListFolder(t *testing.T) {
+	ctx := context.Background()
+	bms := NewBookmarks(newTestDB(t))
+	folders := []string{
+		"/Tech/AI", "/Tech/AI/", "/Tech/AI/Agents",
+		"/Tech/AIRPLANES", "/Tech/AI_x", "/Tech/AI0", "/tech/ai/lower",
+		"/100% Reading", "/100X Reading",
+	}
+	for i, f := range folders {
+		folder := f
+		require.NoError(t, bms.Create(ctx, &store.Bookmark{TenantID: "local",
+			URL: fmt.Sprintf("https://example.com/%d", i), Source: store.SourceChrome,
+			SavedAt: time.Now().UTC(), FolderPath: &folder}))
+	}
+
+	cases := []struct {
+		filter string
+		want   []string
+	}{
+		{"/Tech/AI", []string{"/Tech/AI", "/Tech/AI/", "/Tech/AI/Agents"}},
+		{"/Tech/AI/", []string{"/Tech/AI", "/Tech/AI/", "/Tech/AI/Agents"}},
+		{"/Tech/AI/Agents", []string{"/Tech/AI/Agents"}},
+		{"/Tech", []string{"/Tech/AI", "/Tech/AI/", "/Tech/AI/Agents", "/Tech/AIRPLANES", "/Tech/AI_x", "/Tech/AI0"}},
+		{"/tech/ai", []string{"/tech/ai/lower"}},
+		{"/100% Reading", []string{"/100% Reading"}},
+		{"/Tech/AI_", nil},
+		{"/", folders},
+	}
+	for _, tc := range cases {
+		t.Run(tc.filter, func(t *testing.T) {
+			got, err := bms.List(ctx, "local", store.ListBookmarksOpts{FolderPath: tc.filter, Limit: 100})
+			require.NoError(t, err)
+			var paths []string
+			for _, b := range got {
+				paths = append(paths, *b.FolderPath)
+			}
+			assert.ElementsMatch(t, tc.want, paths)
+		})
+	}
+}

@@ -293,7 +293,12 @@ type IngestResult struct {
 // ListBookmarksOpts are filters for BookmarkStore.List. Empty fields mean
 // "no filter for that dimension." Pagination is cursor-based.
 type ListBookmarksOpts struct {
-	Source     string
+	Source string
+	// FolderPath matches that folder and every folder under it, on path
+	// segments and case-sensitively: "/Tech/AI" matches "/Tech/AI" and
+	// "/Tech/AI/Agents" but not "/Tech/AIRPLANES" or "/tech/ai". Every
+	// character is literal, a trailing "/" is ignored, and "/" alone is no
+	// filter.
 	FolderPath string
 	Limit      int    // 0 → impl default (50)
 	Cursor     string // opaque, from a previous result's NextCursor
@@ -334,8 +339,10 @@ type ChunkHit struct {
 // is matched against the document URL (there is no host column).
 type SearchFilters struct {
 	ContentType []string // documents.content_type IN (...)
-	Host        []string // URL host (http/https) IN (...)
-	Source      []string // EXISTS a bookmark with bookmarks.source IN (...)
+	// Host matches documents whose http or https URL has exactly this host,
+	// ASCII case-insensitively as DNS names are. Every character is literal.
+	Host   []string
+	Source []string // EXISTS a bookmark with bookmarks.source IN (...)
 	// ExcludeDocumentID drops one document from the results. Used by
 	// find-related to exclude the source document; not exposed through
 	// the public search API.
