@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"mime"
@@ -20,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 )
@@ -263,7 +266,17 @@ type exchange struct {
 // seeded fixtures and validates each real response against the spec.
 func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 	s := newTestServer(t, func(d *Deps) {
-		d.Search = search.New(d.Chunks, d.Documents, okEmbedder(), search.Config{Log: slog.New(slog.DiscardHandler)})
+		// A query mentioning "offline" can't be embedded, so its search
+		// degrades to keyword results with a warning.
+		emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
+			if strings.Contains(texts[0], "offline") {
+				return nil, errors.New("ollama unreachable")
+			}
+			return [][]float32{unitVec()}, nil
+		})
+		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Embedder = pingingEmbedder{err: fmt.Errorf("%w: connection refused", ollama.ErrUnreachable)}
+		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
 	})
 	f := seedContractFixtures(t, s)
 	doc := strictSpec(t)
@@ -293,10 +306,11 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			body: `{"url":"https://example.com/c"}`}, http.StatusUnsupportedMediaType},
 		{"POST /v1/bookmarks/import", jsonBody(http.MethodPost, "/v1/bookmarks/import",
 			`{"source":"html","bookmarks":[{"url":"https://example.com/imported","saved_at":"2024-01-01T00:00:00Z"},`+
-				`{"url":"javascript:alert(1)"}]}`), http.StatusOK},
+				`{"url":"javascript:alert(1)"},{"url":"https://example.com/unsavable"}]}`), http.StatusOK},
 		{"DELETE /v1/bookmarks/{id}", request{method: http.MethodDelete, path: "/v1/bookmarks/" + f.bookmark}, http.StatusNoContent},
 
 		{"GET /v1/documents", get("/v1/documents?limit=2"), http.StatusOK},
+		{"GET /v1/documents", get("/v1/documents?state=fetched"), http.StatusOK},
 		{"GET /v1/documents", get("/v1/documents?state=failed"), http.StatusOK},
 		{"GET /v1/documents", get("/v1/documents?state=bogus"), http.StatusBadRequest},
 		{"GET /v1/documents/{id}", get("/v1/documents/" + f.fetched), http.StatusOK},
@@ -304,12 +318,14 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/documents/{id}/content", get("/v1/documents/" + f.fetched + "/content"), http.StatusOK},
 		{"GET /v1/documents/{id}/related", get("/v1/documents/" + f.fetched + "/related"), http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","k":5}`), http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka offline"}`), http.StatusOK},
 
 		{"GET /v1/interests", get("/v1/interests"), http.StatusOK},
 		{"GET /v1/interests/{id}", get("/v1/interests/" + f.interest), http.StatusOK},
 		{"POST /v1/interests/rebuild", post("/v1/interests/rebuild"), http.StatusAccepted},
 
 		{"GET /v1/jobs", get("/v1/jobs?status=failed"), http.StatusOK},
+		{"GET /v1/jobs", get("/v1/jobs?status=done"), http.StatusOK},
 		{"GET /v1/jobs", get("/v1/jobs?limit=1"), http.StatusOK},
 		{"GET /v1/jobs/{id}", get("/v1/jobs/" + f.failedJob), http.StatusOK},
 
@@ -322,6 +338,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 	}
 
 	exercised := map[string]bool{}
+	seen := propertiesSeen{}
 	for _, ex := range exchanges {
 		what := ex.req.method + " " + ex.req.path
 		resp := s.do(t, ex.req)
@@ -329,10 +346,12 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		op := ops[ex.op]
 		require.NotNil(t, op, "%s is not in the spec", ex.op)
 		exercised[ex.op] = true
-		checkResponse(t, op, resp, what)
+		checkResponse(t, op, resp, what, seen)
 	}
 	assert.Equal(t, slices.Sorted(maps.Keys(ops)), slices.Sorted(maps.Keys(exercised)),
 		"every documented operation is exercised")
+	assert.Empty(t, seen.missing(doc, slices.Collect(maps.Values(ops))),
+		"every response property is sent by some exchange; seed a fixture that sets it")
 
 	// An unsupported method has no operation; its problem is still one.
 	resp := s.do(t, request{method: http.MethodPut, path: "/v1/bookmarks"})
@@ -341,9 +360,10 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 }
 
 // checkResponse checks that op documents resp's status and content type,
-// and that a JSON body validates against the documented schema. A success
-// must be listed; an error may fall to the default response.
-func checkResponse(t *testing.T, op *openapi3.Operation, resp response, what string) {
+// and that a JSON body validates against the documented schema, recording
+// in seen the properties it carried. A success must be listed; an error may
+// fall to the default response.
+func checkResponse(t *testing.T, op *openapi3.Operation, resp response, what string, seen propertiesSeen) {
 	t.Helper()
 	ref := op.Responses.Status(resp.status)
 	if ref == nil && resp.status >= http.StatusBadRequest {
@@ -360,7 +380,88 @@ func checkResponse(t *testing.T, op *openapi3.Operation, resp response, what str
 	require.NotNil(t, content, "%s: %d %s is not documented", what, resp.status, mediaType)
 	if mediaType == "application/json" || mediaType == "application/problem+json" {
 		validateJSON(t, content.Schema.Value, resp.body, what)
+		var v any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &v))
+		seen.record(content.Schema.Value, v)
 	}
+}
+
+// propertiesSeen records, per response schema, the properties that appeared
+// in validated responses. strictSpec resolves $refs in place, so every use
+// of a component schema is the same *openapi3.Schema and shares one entry.
+type propertiesSeen map[*openapi3.Schema]map[string]bool
+
+// record walks v, a decoded response, alongside schema.
+func (seen propertiesSeen) record(schema *openapi3.Schema, v any) {
+	switch v := v.(type) {
+	case map[string]any:
+		for name, value := range v {
+			prop := schema.Properties[name]
+			if prop == nil {
+				if extra := schema.AdditionalProperties.Schema; extra != nil {
+					seen.record(extra.Value, value)
+				}
+				continue
+			}
+			if seen[schema] == nil {
+				seen[schema] = map[string]bool{}
+			}
+			seen[schema][name] = true
+			seen.record(prop.Value, value)
+		}
+	case []any:
+		if schema.Items != nil {
+			for _, item := range v {
+				seen.record(schema.Items.Value, item)
+			}
+		}
+	}
+}
+
+// missing lists, as "Schema.property", every property declared by the
+// response schemas of ops that no recorded response carried. Schemas are
+// named after their component, and a nested inline one after the property
+// or items that hold it.
+func (seen propertiesSeen) missing(doc *openapi3.T, ops []*openapi3.Operation) []string {
+	names := map[*openapi3.Schema]string{}
+	for name, ref := range doc.Components.Schemas {
+		names[ref.Value] = name
+	}
+	var out []string
+	walked := map[*openapi3.Schema]bool{}
+	var walk func(s *openapi3.Schema, name string)
+	walk = func(s *openapi3.Schema, name string) {
+		if component, ok := names[s]; ok {
+			name = component
+		}
+		if walked[s] {
+			return
+		}
+		walked[s] = true
+		for _, prop := range slices.Sorted(maps.Keys(s.Properties)) {
+			if !seen[s][prop] {
+				out = append(out, name+"."+prop)
+			}
+			walk(s.Properties[prop].Value, name+"."+prop)
+		}
+		if s.Items != nil {
+			walk(s.Items.Value, name+"[]")
+		}
+		if extra := s.AdditionalProperties.Schema; extra != nil {
+			walk(extra.Value, name+"{}")
+		}
+	}
+	for _, op := range ops {
+		for status, resp := range op.Responses.Map() {
+			for mediaType, content := range resp.Value.Content {
+				if content.Schema != nil {
+					walk(content.Schema.Value, fmt.Sprintf("%s %s", status, mediaType))
+				}
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // contractFixtures are the IDs the contract test's requests name.
@@ -371,25 +472,36 @@ type contractFixtures struct {
 	interest              string
 }
 
-// seedContractFixtures fills s with a little of everything, so every
-// optional field the handlers can send shows up in some response: two
-// indexed documents with titles and content, a failed and a dead one, a
-// bookmark with a folder and tags, a failed job, a finished one for the
-// metrics, and an interest.
+// seedContractFixtures fills s with a little of everything, so that every
+// property a response schema declares shows up in some response, which
+// TestOpenAPI_ResponsesMatchSchemas enforces: two indexed documents with
+// titles and content, one of them with every optional metadata column and
+// an extraction error message, a failed and a dead document, two bookmarks
+// (one with a folder and tags), a failed job and done ones, and an interest
+// with a summary.
 func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	t.Helper()
 	ctx := context.Background()
-	indexed := func(url, title, text string) *store.Document {
+	indexed := func(url, title, text string) (*store.Document, *store.DocumentExtraction) {
 		doc := s.seedDocument(t, url, store.DocStateFetched)
 		_, err := s.db.Exec(`UPDATE documents SET title = ? WHERE id = ?`, title, doc.ID)
 		require.NoError(t, err)
 		ext := s.seedContent(t, doc, "# "+title+"\n\n"+text)
 		require.NoError(t, s.deps.Chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, title, nil,
 			[]store.ChunkInput{{Text: text, Embedding: unitVec()}}))
-		return doc
+		return doc, ext
 	}
-	a := indexed("https://example.com/a", "Kafka partitions", "kafka partitions and consumer groups")
-	indexed("https://example.com/b", "Kafka brokers", "kafka brokers and replication")
+	a, aExt := indexed("https://example.com/a", "Kafka partitions", "kafka partitions and consumer groups")
+	b, _ := indexed("https://example.com/b", "Kafka brokers", "kafka brokers and replication")
+	_, err := s.db.Exec(`UPDATE documents SET url_canonical = 'https://example.com/a/', author = 'Ada',
+		published_at = '2024-01-02T03:04:05.000Z', language = 'en', word_count = 6 WHERE id = ?`, a.ID)
+	require.NoError(t, err)
+	_, err = s.db.Exec(`UPDATE document_extractions SET error_message = 'truncated at the size cap' WHERE id = ?`, aExt.ID)
+	require.NoError(t, err)
+	done, err := store.NewDocumentJob("local", store.JobKindFetch, a.ID)
+	require.NoError(t, err)
+	done.Status = store.JobStatusDone
+	require.NoError(t, s.deps.Queue.Enqueue(ctx, done))
 
 	failed := s.seedDocument(t, "https://example.com/failed", store.DocStateFailed)
 	job, err := store.NewDocumentJob("local", store.JobKindFetch, failed.ID)
@@ -409,8 +521,28 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 		Tags: []string{"kafka"}, Source: store.SourceChrome, SavedAt: time.Now().UTC()}
 	_, err = s.deps.Bookmarks.Ingest(ctx, bookmark)
 	require.NoError(t, err)
+	// A second bookmark, so a page of one has a next page.
+	_, err = s.deps.Bookmarks.Ingest(ctx, &store.Bookmark{TenantID: "local", URL: b.URL,
+		Source: store.SourceFirefox, SavedAt: time.Now().UTC()})
+	require.NoError(t, err)
 
 	interest := s.seedInterest(t, "local", "Kafka", a)
+	_, err = s.db.Exec(`UPDATE clusters SET summary = 'Streaming with Kafka.' WHERE id = ?`, interest.ID)
+	require.NoError(t, err)
 	return contractFixtures{fetched: a.ID, failed: failed.ID, dead: dead.ID, bookmark: bookmark.ID,
 		failedJob: job.ID, interest: interest.ID}
+}
+
+// unsavableBookmark is a bookmark store that can't save url, for an import
+// that reports an error.
+type unsavableBookmark struct {
+	store.BookmarkStore
+	url string
+}
+
+func (u unsavableBookmark) Ingest(ctx context.Context, b *store.Bookmark) (store.IngestResult, error) {
+	if b.URL == u.url {
+		return store.IngestResult{}, errors.New("database is locked")
+	}
+	return u.BookmarkStore.Ingest(ctx, b)
 }

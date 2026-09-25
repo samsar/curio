@@ -3498,6 +3498,16 @@ kin-openapi's validator accepted them silently. The docs said the clients
 were generated from the spec; they are hand-written, so a test is what
 keeps the two in step. Codegen stays deferred.
 
+**Revised (2026-09):** `TestOpenAPI_ResponsesMatchSchemas` now enforces
+what its fixtures only claimed: it records, per resolved response schema,
+the properties present in the validated responses, and fails listing every
+declared property (`Schema.property`) that none carried. A mutation run had
+found 16 optional properties the strict validation never saw (among them
+`Health.ollama_detail`, `BookmarkList.next_cursor`, `ImportResult.errors`,
+`Document.author`, `SearchResponse.degraded` and `Job.doc_title`); the
+fixtures and exchanges now produce each one. Removing an optional
+property from the spec, or adding one no fixture sets, fails the test.
+
 ---
 
 ## Toolchain: the go directive is the build toolchain, govulncheck gates it
