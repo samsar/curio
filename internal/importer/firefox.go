@@ -12,8 +12,6 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3" // sqlite3 driver, for reading places.sqlite
-
-	"github.com/samsar/curio/internal/urlutil"
 )
 
 // Firefox stores bookmarks in places.sqlite (a SQLite DB), not a flat file.
@@ -197,16 +195,12 @@ func ParseFirefox(placesPath string) ([]ParsedBookmark, error) {
 		if underTags {
 			continue
 		}
-		bm := ParsedBookmark{
-			URL:        n.url,
+		out = append(out, ParsedBookmark{
+			URL:        canonicalURL(n.url),
 			Title:      strings.TrimSpace(n.title),
 			FolderPath: path,
 			SavedAt:    firefoxMicrosToTime(n.dateMicros),
-		}
-		if norm, err := urlutil.Normalize(n.url); err == nil {
-			bm.URL = norm
-		}
-		out = append(out, bm)
+		})
 	}
 	if len(out) == 0 {
 		return nil, ErrEmpty

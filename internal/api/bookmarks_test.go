@@ -54,10 +54,10 @@ func TestImportBookmarks_FiltersUnfetchableURLs(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
 	assert.Equal(t, len(unfetchableURLs), got.Filtered)
 	assert.Equal(t, map[importer.FilterReason]int{
-		importer.ReasonJavaScript:       1,
-		importer.ReasonLocalFile:        1,
-		importer.ReasonUnsupportedSchem: 3, // mailto:, ftp://, https:example.com
-		importer.ReasonInvalidURL:       1, // https:///x
+		importer.ReasonJavaScript:        1,
+		importer.ReasonLocalFile:         1,
+		importer.ReasonUnsupportedScheme: 3, // mailto:, ftp://, https:example.com
+		importer.ReasonInvalidURL:        1, // https:///x
 	}, got.FilteredBy)
 	assert.Zero(t, s.count(t, "documents"))
 }

@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"golang.org/x/net/html"
-
-	"github.com/samsar/curio/internal/urlutil"
 )
 
 // ParseHTML reads a Netscape Bookmark File Format document and returns
@@ -95,11 +93,7 @@ func walkNode(n *html.Node, folderStack []string, out *[]ParsedBookmark) {
 			case "h3":
 				// Already consumed for folderName; nothing to do.
 			case "dl":
-				next := folderStack
-				if folderName != "" {
-					next = append(append([]string{}, folderStack...), folderName)
-				}
-				walkNode(c, next, out)
+				walkNode(c, pushFolder(folderStack, folderName), out)
 			default:
 				walkNode(c, folderStack, out)
 			}
@@ -118,17 +112,13 @@ func emitAnchor(n *html.Node, folderStack []string, out *[]ParsedBookmark) {
 	if href == "" {
 		return
 	}
-	bm := ParsedBookmark{
-		URL:        href,
+	*out = append(*out, ParsedBookmark{
+		URL:        canonicalURL(href),
 		Title:      strings.TrimSpace(textContent(n)),
 		FolderPath: joinFolderPath(folderStack),
 		SavedAt:    parseDateAttr(attr(n, "add_date")),
 		Tags:       splitTagsAttr(attr(n, "tags")),
-	}
-	if norm, err := urlutil.Normalize(href); err == nil {
-		bm.URL = norm
-	}
-	*out = append(*out, bm)
+	})
 }
 
 // textContent returns the concatenated text under n.

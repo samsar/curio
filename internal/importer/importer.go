@@ -6,6 +6,7 @@ package importer
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -38,12 +39,12 @@ const (
 type FilterReason string
 
 const (
-	ReasonEmpty            FilterReason = "empty"
-	ReasonInvalidURL       FilterReason = "invalid_url"
-	ReasonBrowserInternal  FilterReason = "browser_internal" // chrome://, about:, ...
-	ReasonJavaScript       FilterReason = "javascript"       // javascript: bookmarklet
-	ReasonLocalFile        FilterReason = "local_file"       // file:// path
-	ReasonUnsupportedSchem FilterReason = "unsupported_scheme"
+	ReasonEmpty             FilterReason = "empty"
+	ReasonInvalidURL        FilterReason = "invalid_url"
+	ReasonBrowserInternal   FilterReason = "browser_internal" // chrome://, about:, ...
+	ReasonJavaScript        FilterReason = "javascript"       // javascript: bookmarklet
+	ReasonLocalFile         FilterReason = "local_file"       // file:// path
+	ReasonUnsupportedScheme FilterReason = "unsupported_scheme"
 )
 
 // Indexable applies the import-time URL filter rules. Returns (true, "")
@@ -71,7 +72,7 @@ func Indexable(rawURL string) (bool, FilterReason) {
 		}
 	}
 	if !strings.HasPrefix(low, "http://") && !strings.HasPrefix(low, "https://") {
-		return false, ReasonUnsupportedSchem
+		return false, ReasonUnsupportedScheme
 	}
 	if _, err := urlutil.Normalize(trimmed); err != nil {
 		return false, ReasonInvalidURL
@@ -91,16 +92,26 @@ var browserInternalPrefixes = []string{
 	"arc://",
 }
 
-// Result is the aggregate output of an import-and-insert flow. Used by
-// the daemon endpoint and the CLI to report counts.
-type Result struct {
-	Source    Source
-	Created   int // bookmarks newly inserted; fetch job enqueued for each
-	Skipped   int // bookmarks that already existed (UNIQUE conflict)
-	Filtered  int // URLs dropped by Indexable
-	FilterBy  map[FilterReason]int
-	JobsAdded int // count of fetch jobs enqueued (==Created in v1)
-}
-
 // ErrEmpty is returned when a parse produces zero bookmarks.
 var ErrEmpty = errors.New("importer: no bookmarks found")
+
+// canonicalURL normalizes raw with urlutil.Normalize, or returns it unchanged
+// when it isn't a fetchable URL, so Indexable can still classify (and the
+// import report count) why the bookmark is skipped.
+func canonicalURL(raw string) string {
+	if norm, err := urlutil.Normalize(raw); err == nil {
+		return norm
+	}
+	return raw
+}
+
+// pushFolder returns stack with name appended, or stack itself when name is
+// blank after trimming. The result never shares a backing array with stack,
+// so sibling folders can't overwrite each other's paths.
+func pushFolder(stack []string, name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return stack
+	}
+	return append(slices.Clip(stack), name)
+}

@@ -9,8 +9,6 @@ import (
 	"strings"
 
 	"howett.net/plist"
-
-	"github.com/samsar/curio/internal/urlutil"
 )
 
 // SafariBookmarksPath returns the default path to Safari's Bookmarks.plist.
@@ -112,22 +110,14 @@ func walkSafariNode(n safariNode, folderStack []string, out *[]ParsedBookmark) {
 		if n.URIDictionary != nil {
 			title = strings.TrimSpace(n.URIDictionary.Title)
 		}
-		bm := ParsedBookmark{
-			URL:        n.URLString,
+		*out = append(*out, ParsedBookmark{
+			URL:        canonicalURL(n.URLString),
 			Title:      title,
 			FolderPath: joinFolderPath(folderStack),
-		}
-		if norm, err := urlutil.Normalize(n.URLString); err == nil {
-			bm.URL = norm
-		}
-		*out = append(*out, bm)
+		})
 
 	case "WebBookmarkTypeList":
-		next := folderStack
-		name := strings.TrimSpace(n.Title)
-		if name != "" {
-			next = append(append([]string{}, folderStack...), name)
-		}
+		next := pushFolder(folderStack, n.Title)
 		for _, c := range n.Children {
 			walkSafariNode(c, next, out)
 		}

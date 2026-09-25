@@ -77,7 +77,7 @@ func TestIndexable(t *testing.T) {
 		{"about:", "about:blank", false, ReasonBrowserInternal},
 		{"edge://", "edge://settings", false, ReasonBrowserInternal},
 		{"chrome-extension", "chrome-extension://abc/page.html", false, ReasonBrowserInternal},
-		{"unknown scheme", "ftp://example.com", false, ReasonUnsupportedSchem},
+		{"unknown scheme", "ftp://example.com", false, ReasonUnsupportedScheme},
 		{"case insensitive", "JAVASCRIPT:x", false, ReasonJavaScript},
 	}
 	for _, tc := range cases {
