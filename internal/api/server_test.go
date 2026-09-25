@@ -541,7 +541,7 @@ type logRecorder struct {
 	records []slog.Record
 }
 
-func (h *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (*logRecorder) Enabled(context.Context, slog.Level) bool { return true }
 
 func (h *logRecorder) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()

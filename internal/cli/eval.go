@@ -29,7 +29,7 @@ func newEvalCmd(env *daemonctl.Env) *cobra.Command {
 			"docs/eval.example.yaml. This is the measurement rig for tuning search\n" +
 			"and, later, comparing RAG approaches (M6) on the same ground truth.",
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if queriesPath == "" {
 				return errors.New("--queries is required (path to a qrels YAML file)")
 			}

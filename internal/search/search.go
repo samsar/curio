@@ -516,8 +516,8 @@ func collapseScore(perChunk map[string]float64, ids []string, strat CollapseStra
 			return 0
 		}
 		var s float64
-		for i := 0; i < n; i++ {
-			s += scores[i]
+		for _, score := range scores[:n] {
+			s += score
 		}
 		return s / float64(n)
 	case CollapseMax:

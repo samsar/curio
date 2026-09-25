@@ -191,7 +191,7 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 
 	pidFile, err := os.ReadFile(home.PIDFile())
 	require.NoError(t, err)
-	assert.Equal(t, fmt.Sprint(os.Getpid()), strings.TrimSpace(string(pidFile)))
+	assert.Equal(t, strconv.Itoa(os.Getpid()), strings.TrimSpace(string(pidFile)))
 
 	stop()
 

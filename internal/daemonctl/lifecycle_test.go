@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -170,7 +171,7 @@ func serveHealth(t *testing.T, c *Controller, body map[string]any) {
 // serveHealthAfter is serveHealth for a daemon that takes delay to answer.
 func serveHealthAfter(t *testing.T, c *Controller, delay time.Duration, body map[string]any) {
 	t.Helper()
-	ln, err := net.Listen("tcp", os.Getenv(fakeAddrEnv))
+	ln, err := net.Listen("tcp", strings.TrimPrefix(c.BaseURL, "http://"))
 	require.NoError(t, err)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -178,7 +179,7 @@ func serveHealthAfter(t *testing.T, c *Controller, delay time.Duration, body map
 		case <-r.Context().Done():
 			return
 		}
-		_ = json.NewEncoder(w).Encode(body)
+		assert.NoError(t, json.NewEncoder(w).Encode(body))
 	})}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })

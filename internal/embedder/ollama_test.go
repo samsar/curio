@@ -64,7 +64,7 @@ func TestOllama_Embed_EmptyInput(t *testing.T) {
 }
 
 func TestOllama_Embed_DimensionMismatch(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Return 3-dim vectors even though caller expects 4.
 		_ = json.NewEncoder(w).Encode(ollamaEmbedResponse{
 			Embeddings: [][]float32{{1, 2, 3}},
@@ -79,7 +79,7 @@ func TestOllama_Embed_DimensionMismatch(t *testing.T) {
 }
 
 func TestOllama_Embed_CountMismatch(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(ollamaEmbedResponse{
 			Embeddings: [][]float32{{1, 2, 3, 4}}, // returns 1 for 2 inputs
 		})
@@ -93,7 +93,7 @@ func TestOllama_Embed_CountMismatch(t *testing.T) {
 }
 
 func TestOllama_Embed_ServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"error":"model not loaded"}`, http.StatusInternalServerError)
 	}))
 	defer srv.Close()

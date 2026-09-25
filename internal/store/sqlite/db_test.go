@@ -3,8 +3,8 @@ package sqlite
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -76,7 +76,7 @@ func TestMigrate_CancelledContext(t *testing.T) {
 // global state and races here.
 func TestMigrate_Parallel(t *testing.T) {
 	for i := range 6 {
-		t.Run(fmt.Sprint(i), func(t *testing.T) {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			t.Parallel()
 			db, err := Open(context.Background(), filepath.Join(t.TempDir(), "curio.db"))
 			require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestPragmasOnEveryConnection(t *testing.T) {
 	for range held {
 		c, err := db.Conn(ctx)
 		require.NoError(t, err)
-		defer c.Close()
+		t.Cleanup(func() { _ = c.Close() }) // all held until the end
 		for _, p := range []struct {
 			pragma string
 			want   any
@@ -137,7 +137,7 @@ func TestTransactions_ReadThenWrite(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		defer tx.Rollback() //nolint:errcheck // no-op after Commit
+		defer tx.Rollback()
 		var n int
 		if err := tx.QueryRowContext(ctx, `SELECT n FROM counter WHERE id = 1`).Scan(&n); err != nil {
 			return err
@@ -184,7 +184,7 @@ func TestReads_DoNotWaitForWriter(t *testing.T) {
 	defer writer.Close()
 	tx, err := writer.BeginTx(ctx, nil)
 	require.NoError(t, err)
-	defer tx.Rollback() //nolint:errcheck // the test never commits
+	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `UPDATE documents SET title = 'held' WHERE id = ?`, ids[0])
 	require.NoError(t, err)
 

@@ -3516,3 +3516,51 @@ CI. Every action was a movable tag and goreleaser floated within v2, so the
 code holding those secrets could change without a commit here. Making
 `ci.yml` reusable instead of copying its steps keeps the gate from
 drifting away from what pull requests run.
+
+---
+
+## Lint: a measured linter set, zero issues, explained suppressions
+
+**Decision:** `.golangci.yml` adds gocritic, gosec, exhaustive, noctx,
+nilnil, errchkjson, modernize, intrange, usestdlibvars, perfsprint (without
+its string-concatenation check), nolintlint and revive with an explicit
+rule list to the existing set, and lints the tag-gated files too
+(`run.build-tags`: the sqlite tags, `integration`, `e2e`). The tree stays at
+zero issues. A hit is fixed, or silenced on its line by a `//nolint` that
+names the linter and gives a reason; nolintlint enforces both and rejects
+suppressions that no longer suppress anything.
+
+The only config-level exclusions:
+
+- gosec G104 (errcheck owns unchecked errors), G304 and G703 (file paths
+  come from the operator's own arguments, config and `$CURIO_HOME`).
+- Tests skip errcheck, bodyclose, noctx and gosec.
+- `fmt.Fprint*` errors are ignored in `internal/cli/` only, where they are
+  writes to the command's own stdout/stderr. The old global exemption and
+  the blanket `cmd/` errcheck exclusion are gone (the latter hid an
+  unchecked `db.Close`).
+- errcheck ignores `(*sql.Tx).Rollback`, a no-op after Commit whose
+  failure otherwise loses to the error that caused it; the eight
+  `//nolint:errcheck` comments that said so are deleted.
+
+revive runs its defaults minus `exported` and `package-comments`, plus
+rules that catch real mistakes (datarace, waitgroup-by-value,
+modifies-value-receiver, unconditional-recursion, import-shadowing, defer
+in loops, deep-exit) or keep code current (use-any, early-return,
+unused-receiver). `redundant-import-alias` stays off: the `fhttp` alias in
+`internal/fetcher/transport.go` is required because
+github.com/bogdanfinn/fhttp's package name is `http`. exhaustive keeps
+`default-signifies-exhaustive` off, so a new enum member has to be handled
+on purpose; a default may remain for out-of-range values.
+
+**Why:** The old header dismissed gocritic and gosec as "high-noise".
+Measured on this tree, gocritic found 2 hits and gosec 21, all but two of
+them the path-taint and unchecked-error classes excluded above; the two
+real ones are the subprocess launches, which now carry a reason. The
+expanded set found real defects (a Firefox WAL copy whose failure silently
+dropped the newest bookmarks, an unchecked `db.Close`, enum switches that
+missed members, `net.Listen` and `db.Query` without a context, a
+`nil, nil` return) and replaced idioms Go has moved past (`sort` over map
+keys, hand-rolled min/max, C-style loops, `os.IsNotExist`, int32 atomics,
+`fmt.Errorf` with a constant message). errorlint's `errorf` check is on
+again: the last two `%v`-wrapped causes now use `%w`.

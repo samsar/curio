@@ -2,6 +2,7 @@ package curiohome
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -119,7 +120,7 @@ func TestWriteMeta_AtomicAndRoundTrips(t *testing.T) {
 
 	// No leftover .tmp file
 	_, err = os.Stat(h.MarkerPath() + ".tmp")
-	assert.True(t, os.IsNotExist(err), "tmp file should not remain after successful rename")
+	assert.ErrorIs(t, err, fs.ErrNotExist, "tmp file should not remain after successful rename")
 }
 
 func TestPathHelpers(t *testing.T) {

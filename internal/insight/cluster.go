@@ -101,7 +101,7 @@ func NewKNNGraphClusterer(opts KNNGraphOptions) *KNNGraphClusterer {
 	}
 }
 
-func (c *KNNGraphClusterer) Name() string { return "knn-graph" }
+func (*KNNGraphClusterer) Name() string { return "knn-graph" }
 
 func (c *KNNGraphClusterer) Params() map[string]any {
 	return map[string]any{

@@ -44,6 +44,20 @@ const (
 	statusFail
 )
 
+// marker is the status's one-character column in the report.
+func (s checkStatus) marker() string {
+	switch s {
+	case statusOK:
+		return "✓"
+	case statusWarn:
+		return "!"
+	case statusFail:
+		return "✗"
+	default:
+		return "?"
+	}
+}
+
 type checkResult struct {
 	name   string
 	status checkStatus
@@ -62,23 +76,17 @@ func newDoctorReport() *doctorReport { return &doctorReport{} }
 func (r *doctorReport) add(name string, status checkStatus, detail, hint string) {
 	r.checks = append(r.checks, checkResult{name, status, detail, hint})
 	switch status {
-	case statusFail:
-		r.failures++
+	case statusOK:
 	case statusWarn:
 		r.warns++
+	case statusFail:
+		r.failures++
 	}
 }
 
 func (r *doctorReport) print(w io.Writer) {
 	for _, c := range r.checks {
-		marker := "✓"
-		switch c.status {
-		case statusWarn:
-			marker = "!"
-		case statusFail:
-			marker = "✗"
-		}
-		fmt.Fprintf(w, "%s %-22s %s\n", marker, c.name, c.detail)
+		fmt.Fprintf(w, "%s %-22s %s\n", c.status.marker(), c.name, c.detail)
 		if c.hint != "" {
 			fmt.Fprintf(w, "  → %s\n", c.hint)
 		}

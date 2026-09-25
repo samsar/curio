@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -298,15 +299,14 @@ func reportDryRun(w io.Writer, bms []importer.ParsedBookmark) {
 	fmt.Fprintln(w, "\ndry-run — nothing sent to the daemon")
 	fmt.Fprintf(w, "  would import:  %d\n", len(bms)-filtered)
 	fmt.Fprintf(w, "  would filter:  %d\n", filtered)
-	if len(by) > 0 {
-		keys := make([]importer.FilterReason, 0, len(by))
-		for k := range by {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-		for _, k := range keys {
-			fmt.Fprintf(w, "    %s: %d\n", k, by[k])
-		}
+	printFilterReasons(w, by)
+}
+
+// printFilterReasons prints how many bookmarks each reason filtered, one
+// indented line per reason in a stable order.
+func printFilterReasons(w io.Writer, by map[importer.FilterReason]int) {
+	for _, reason := range slices.Sorted(maps.Keys(by)) {
+		fmt.Fprintf(w, "    %s: %d\n", reason, by[reason])
 	}
 }
 
@@ -347,10 +347,7 @@ func sendBatches(ctx context.Context, w io.Writer, c *client.Client, source stri
 	)
 
 	for i := 0; i < len(bms); i += importBatchSize {
-		end := i + importBatchSize
-		if end > len(bms) {
-			end = len(bms)
-		}
+		end := min(i+importBatchSize, len(bms))
 		batch := bms[i:end]
 		converted := make([]client.ImportBookmark, len(batch))
 		for j, b := range batch {
@@ -387,16 +384,7 @@ func sendBatches(ctx context.Context, w io.Writer, c *client.Client, source stri
 	fmt.Fprintf(w, "  created:       %d\n", totalCreated)
 	fmt.Fprintf(w, "  skipped (dup): %d\n", totalSkipped)
 	fmt.Fprintf(w, "  filtered:      %d\n", totalFiltered)
-	if len(filteredBy) > 0 {
-		keys := make([]importer.FilterReason, 0, len(filteredBy))
-		for k := range filteredBy {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-		for _, k := range keys {
-			fmt.Fprintf(w, "    %s: %d\n", k, filteredBy[k])
-		}
-	}
+	printFilterReasons(w, filteredBy)
 	fmt.Fprintf(w, "  fetch jobs:    %d enqueued\n", totalJobs)
 	if len(totalErrors) > 0 {
 		fmt.Fprintf(w, "  errors:        %d (first 10 shown)\n", len(totalErrors))

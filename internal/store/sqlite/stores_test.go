@@ -284,14 +284,14 @@ func TestBookmarks_UniqueConflict(t *testing.T) {
 	ctx := context.Background()
 	bms := NewBookmarks(newTestDB(t))
 
-	make := func() *store.Bookmark {
+	newDup := func() *store.Bookmark {
 		return &store.Bookmark{
 			TenantID: "local", URL: "https://example.com/dup",
 			Source: store.SourceManual, SavedAt: time.Now().UTC(),
 		}
 	}
-	require.NoError(t, bms.Create(ctx, make()))
-	err := bms.Create(ctx, make())
+	require.NoError(t, bms.Create(ctx, newDup()))
+	err := bms.Create(ctx, newDup())
 	assert.ErrorIs(t, err, store.ErrConflict)
 }
 
@@ -517,7 +517,7 @@ func TestJobs_ClaimNext_ConcurrentClaimOnce(t *testing.T) {
 	q := NewJobs(newTestDB(t))
 
 	const nJobs = 20
-	for i := 0; i < nJobs; i++ {
+	for range nJobs {
 		require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
 	}
 

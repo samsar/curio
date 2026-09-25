@@ -50,10 +50,10 @@ func NewOllama(opts OllamaOptions) (*Ollama, error) {
 		opts.BaseURL = "http://localhost:11434"
 	}
 	if opts.Model == "" {
-		return nil, fmt.Errorf("ollama: model required")
+		return nil, errors.New("ollama: model required")
 	}
 	if opts.Dim <= 0 {
-		return nil, fmt.Errorf("ollama: dim must be positive")
+		return nil, errors.New("ollama: dim must be positive")
 	}
 	if _, err := url.Parse(opts.BaseURL); err != nil {
 		return nil, fmt.Errorf("ollama: bad base_url: %w", err)
@@ -89,7 +89,7 @@ func (o *Ollama) Ping(ctx context.Context) error {
 	}
 	resp, err := o.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrOllamaUnreachable, err)
+		return fmt.Errorf("%w: %w", ErrOllamaUnreachable, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -207,7 +207,7 @@ func (o *Ollama) Embed(ctx context.Context, texts []string) ([][]float32, error)
 type ollamaEmbedRequest struct {
 	Model   string        `json:"model"`
 	Input   []string      `json:"input"`
-	Options ollamaOptions `json:"options,omitempty"`
+	Options ollamaOptions `json:"options,omitzero"`
 }
 
 type ollamaOptions struct {

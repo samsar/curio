@@ -70,10 +70,10 @@ const insertJobSQL = `
 // store.ErrNotFound.
 func insertJob(ctx context.Context, q rowQuerier, j *store.Job) error {
 	if j.TenantID == "" {
-		return fmt.Errorf("jobs: tenant_id required")
+		return errors.New("jobs: tenant_id required")
 	}
 	if j.Kind == "" {
-		return fmt.Errorf("jobs: kind required")
+		return errors.New("jobs: kind required")
 	}
 	if j.ID == "" {
 		j.ID = uuid.NewString()
@@ -238,7 +238,7 @@ func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*st
 	if err != nil {
 		return nil, 0, fmt.Errorf("begin orphan recovery: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	defer tx.Rollback()
 
 	// Exhausted orphans first: the requeue below takes every running job
 	// of these kinds that is left.

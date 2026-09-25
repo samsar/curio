@@ -69,7 +69,7 @@ type OllamaOptions struct {
 // the first Generate/Ping call surfaces connection errors.
 func NewOllama(opts OllamaOptions) (*Ollama, error) {
 	if opts.Model == "" {
-		return nil, fmt.Errorf("ollama generator: model required")
+		return nil, errors.New("ollama generator: model required")
 	}
 	if opts.BaseURL == "" {
 		opts.BaseURL = "http://localhost:11434"

@@ -96,7 +96,7 @@ func FetchHandler(d Deps) HandlerFunc {
 
 		f, err := d.Dispatcher.For(doc.URL)
 		if err != nil {
-			return fmt.Errorf("%w: no fetcher for %s: %v", ErrPermanent, doc.URL, err)
+			return fmt.Errorf("%w: no fetcher for %s: %w", ErrPermanent, doc.URL, err)
 		}
 
 		res, err := f.Fetch(ctx, doc.URL)

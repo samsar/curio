@@ -57,10 +57,7 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	if size <= 0 {
 		size = 384
 	}
-	overlap := opts.OverlapTokens
-	if overlap < 0 {
-		overlap = 0
-	}
+	overlap := max(opts.OverlapTokens, 0)
 	if overlap >= size {
 		overlap = size / 8
 	}
@@ -120,10 +117,7 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 				curTokens = 0
 			}
 			for i := 0; i < len(words); i += size - overlap {
-				end := i + size
-				if end > len(words) {
-					end = len(words)
-				}
+				end := min(i+size, len(words))
 				chunks = append(chunks, Chunk{
 					Text:       strings.Join(words[i:end], " "),
 					TokenCount: end - i,
@@ -201,10 +195,7 @@ func enforceCharLimit(in []Chunk, maxChars int) []Chunk {
 	if maxChars <= 0 {
 		return in
 	}
-	overlapChars := maxChars / 16
-	if overlapChars < 100 {
-		overlapChars = 100
-	}
+	overlapChars := max(maxChars/16, 100)
 
 	var out []Chunk
 	for _, c := range in {

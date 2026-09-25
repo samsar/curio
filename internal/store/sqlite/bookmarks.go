@@ -77,7 +77,7 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 	if err != nil {
 		return store.IngestResult{}, fmt.Errorf("begin ingest: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	defer tx.Rollback()
 
 	docID, state, created, err := getOrCreateDocument(ctx, tx, b.TenantID, b.URL)
 	if err != nil {

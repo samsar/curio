@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -79,7 +80,7 @@ func buildFixturePlaces(t *testing.T) string {
 func TestParseFirefox(t *testing.T) {
 	path := buildFixturePlaces(t)
 
-	bms, err := ParseFirefox(path)
+	bms, err := ParseFirefox(context.Background(), path)
 	require.NoError(t, err)
 
 	// 3 real bookmarks; the tag entries and the separator are excluded.
@@ -127,8 +128,50 @@ func TestParseFirefox_Empty(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	_, err = ParseFirefox(path)
+	_, err = ParseFirefox(context.Background(), path)
 	assert.ErrorIs(t, err, ErrEmpty)
+}
+
+// TestCopyDBForRead_Sidecars: a missing -wal or -shm is normal (no WAL mode,
+// or checkpointed), but one that exists and can't be copied fails the copy,
+// since reading without it would silently drop the newest bookmarks.
+func TestCopyDBForRead_Sidecars(t *testing.T) {
+	t.Run("missing sidecars are tolerated", func(t *testing.T) {
+		src := filepath.Join(t.TempDir(), "places.sqlite")
+		require.NoError(t, os.WriteFile(src, []byte("db"), 0o600))
+
+		dst, cleanup, err := copyDBForRead(src)
+		require.NoError(t, err)
+		defer cleanup()
+		got, err := os.ReadFile(dst)
+		require.NoError(t, err)
+		assert.Equal(t, "db", string(got))
+		assert.NoFileExists(t, dst+"-wal")
+	})
+
+	t.Run("sidecars are copied", func(t *testing.T) {
+		src := filepath.Join(t.TempDir(), "places.sqlite")
+		require.NoError(t, os.WriteFile(src, []byte("db"), 0o600))
+		require.NoError(t, os.WriteFile(src+"-wal", []byte("wal"), 0o600))
+
+		dst, cleanup, err := copyDBForRead(src)
+		require.NoError(t, err)
+		defer cleanup()
+		got, err := os.ReadFile(dst + "-wal")
+		require.NoError(t, err)
+		assert.Equal(t, "wal", string(got))
+	})
+
+	t.Run("an unreadable sidecar fails the copy", func(t *testing.T) {
+		src := filepath.Join(t.TempDir(), "places.sqlite")
+		require.NoError(t, os.WriteFile(src, []byte("db"), 0o600))
+		// A directory opens but can't be read as a file.
+		require.NoError(t, os.Mkdir(src+"-wal", 0o700))
+
+		_, _, err := copyDBForRead(src)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "-wal")
+	})
 }
 
 // TestFirefoxBookmarksPath_PrefersInstallDefault verifies profile selection:

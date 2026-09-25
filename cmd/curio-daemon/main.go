@@ -82,19 +82,25 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 		return err
 	}
 
-	ln, err := net.Listen("tcp", cfg.Daemon.Listen)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Daemon.Listen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w (is another program using the port? "+
 			"check `curio daemon status`, or set a different daemon.listen in %s)",
 			cfg.Daemon.Listen, err, home.ConfigPath())
 	}
-	defer ln.Close()
+	// Once serving starts, Shutdown closes the listener and this second Close
+	// only reports that; it matters when startup fails before then.
+	defer func() { _ = ln.Close() }()
 
 	db, err := sqlitestore.Open(ctx, home.DBPath())
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			slog.Warn("close database", "path", home.DBPath(), "err", err)
+		}
+	}()
 	// Logged first because a migration that rewrites a large table can
 	// outlast the CLI's auto-start wait, and the log tail should say why.
 	slog.Info("migrating database", "path", home.DBPath())
@@ -163,11 +169,11 @@ func checkMarker(home *curiohome.Home, cfg config.Config) (curiohome.Meta, error
 // syncMarkerSchemaVersion copies the schema version the migrations left the
 // database at into the marker file, which caches it for /v1/healthz and the
 // offline `curio version` and `curio doctor`.
-func syncMarkerSchemaVersion(home *curiohome.Home, meta curiohome.Meta, version int) {
-	if version == meta.SchemaVersion {
+func syncMarkerSchemaVersion(home *curiohome.Home, meta curiohome.Meta, schemaVersion int) {
+	if schemaVersion == meta.SchemaVersion {
 		return
 	}
-	meta.SchemaVersion = version
+	meta.SchemaVersion = schemaVersion
 	if err := home.WriteMeta(meta); err != nil {
 		slog.Warn("failed to update marker schema_version", "err", err)
 	}

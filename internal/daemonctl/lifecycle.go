@@ -153,6 +153,7 @@ func (c *Controller) Stop(ctx context.Context) error {
 		return nil
 	case Legacy:
 		return c.legacyStopError(st.PID)
+	case Running:
 	}
 
 	if st.PID == 0 {
@@ -230,7 +231,8 @@ func (c *Controller) spawn(ctx context.Context) error {
 		return fmt.Errorf("open daemon log: %w", err)
 	}
 
-	cmd := exec.Command(c.DaemonBin)
+	// Not CommandContext: the daemon must outlive ctx and this process.
+	cmd := exec.Command(c.DaemonBin) //nolint:gosec,noctx // G204: DaemonBin is curio-daemon beside this binary or $CURIO_DAEMON_BIN, run without a shell; noctx: see above
 	// The daemon must serve exactly the home whose lock this controller
 	// watches, whatever this process's own $CURIO_HOME says. The last
 	// CURIO_HOME in the list is the one the child sees.

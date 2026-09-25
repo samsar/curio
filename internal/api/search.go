@@ -17,7 +17,7 @@ import (
 type SearchRequest struct {
 	Query   string  `json:"query"`
 	K       int     `json:"k,omitempty"`
-	Filters Filters `json:"filters,omitempty"`
+	Filters Filters `json:"filters,omitzero"`
 }
 
 // Filters mirrors the openapi filters block; the search engine applies

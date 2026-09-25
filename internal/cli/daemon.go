@@ -77,12 +77,12 @@ func describeDaemonStatus(st daemonctl.Status, home string) string {
 	case daemonctl.Legacy:
 		return fmt.Sprintf("legacy daemon from an older curio is answering (version %s); "+
 			"run `curio daemon stop` for how to retire it", st.Health.Version)
-	default:
-		if st.Health != nil && st.Health.Home != "" && !daemonctl.SameHome(st.Health.Home, home) {
-			return fmt.Sprintf("not running (the port is served by the daemon for %s)", st.Health.Home)
-		}
-		return "not running"
+	case daemonctl.NotRunning:
 	}
+	if st.Health != nil && st.Health.Home != "" && !daemonctl.SameHome(st.Health.Home, home) {
+		return fmt.Sprintf("not running (the port is served by the daemon for %s)", st.Health.Home)
+	}
+	return "not running"
 }
 
 func newDaemonLogsCmd(env *daemonctl.Env) *cobra.Command {

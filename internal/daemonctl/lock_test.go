@@ -3,6 +3,7 @@ package daemonctl
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -23,7 +24,7 @@ func TestAcquireLock_Contention(t *testing.T) {
 	require.NoError(t, err)
 	pid, err := os.ReadFile(home.PIDFile())
 	require.NoError(t, err)
-	assert.Equal(t, fmt.Sprint(os.Getpid()), strings.TrimSpace(string(pid)), "the holder records its PID")
+	assert.Equal(t, strconv.Itoa(os.Getpid()), strings.TrimSpace(string(pid)), "the holder records its PID")
 
 	_, err = AcquireLock(home)
 	require.ErrorIs(t, err, ErrAlreadyRunning)

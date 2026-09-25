@@ -36,7 +36,7 @@ func (f *fakeFetcher) Fetch(_ context.Context, _ string) (*fetcher.Result, error
 type fakeEmbedder struct{ dim int }
 
 func (f *fakeEmbedder) Dimensions() int { return f.dim }
-func (f *fakeEmbedder) Model() string   { return "fake" }
+func (*fakeEmbedder) Model() string     { return "fake" }
 func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i := range out {

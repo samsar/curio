@@ -228,8 +228,7 @@ func TestOpenAPI_RequestTypesMatchSchemas(t *testing.T) {
 func assertFieldsMatch(t *testing.T, path string, typ reflect.Type, schema *openapi3.Schema) {
 	t.Helper()
 	fields := map[string]reflect.Type{}
-	for i := range typ.NumField() {
-		f := typ.Field(i)
+	for f := range typ.Fields() {
 		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
 		if f.IsExported() && name != "-" {
 			fields[name] = f.Type

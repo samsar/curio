@@ -114,7 +114,7 @@ func (f *engineFixture) engine(c Clusterer, llm Labeler, cfg Config) *Engine {
 }
 
 // rebuild runs a Rebuild that must succeed and returns its run ID.
-func (f *engineFixture) rebuild(t *testing.T, e *Engine) string {
+func (*engineFixture) rebuild(t *testing.T, e *Engine) string {
 	t.Helper()
 	runID, err := e.Rebuild(context.Background(), tenant)
 	require.NoError(t, err)
