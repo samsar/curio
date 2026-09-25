@@ -2687,3 +2687,38 @@ character and a host of `%` matched every document. The obvious fix,
 case-sensitive and LIKE is not, so `/tech/ai` would match
 `/Tech/AI/Agents` but not `/Tech/AI`. The range needs no escaping and can
 still use `idx_bookmarks_folder (tenant_id, folder_path)`.
+
+---
+
+## API: handler edge cases found by coverage
+
+**Decision:**
+
+- **Paging:** bookmarks, documents and jobs share one page-size rule:
+  `?limit` of 1 to 500 is honored, anything else means 50. The bookmark
+  list asks the store for one row more than the page and sets
+  `next_cursor` only when that row exists.
+- **Router errors are problems too:** an unknown route answers 404 and a
+  wrong method 405, both `application/problem+json`; the 405 carries an
+  `Allow` header. chi fills `Allow` only in its own 405 handler, and its
+  `Match` reports every method for a mount point such as
+  `/v1/bookmarks`, so the server keeps a mount-free copy of its routes
+  (built with `chi.Walk`) to answer which methods a path takes.
+- **Bookmark document lookups fail loudly:** listing or getting a
+  bookmark whose document can't be read is a 500, not a blank
+  `document_state`. `bookmarks.document_id` is `ON DELETE SET NULL`, so a
+  dangling ID is an inconsistency.
+- **Missing content is a 404:** `GET /v1/documents/{id}/content` for a
+  markdown file deleted from disk (which docs/data-model.md presents as
+  supported) answers 404 "refetch the document" instead of a 500 carrying
+  the absolute path.
+- **reindex-all only reindexes documents with content:** it validates
+  `?state` as refetch-all does (400 for an unknown state) and enqueues index
+  jobs only for documents in that state with a current extraction
+  (`DocumentStore.ListIDsWithContent`).
+
+**Why reindex-all needed the second half:** an index job for a document
+with no extraction fails permanently, and the permanent-failure hook then
+marks the document failed. So `curio reindex --all --state=pending` turned
+documents whose first fetch was still in flight into failed ones.
+Single-document reindex already refused such a document with 409.

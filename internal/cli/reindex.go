@@ -20,7 +20,8 @@ func newReindexCmd() *cobra.Command {
 extraction — without re-fetching it. Use it after changing the embedding
 model (same dimension) or chunker settings, or to pick up new bookmark tags.
 
-Documents must already have content; --all targets state=fetched by default.`,
+Documents must already have content: --all targets state=fetched by default
+and, in any state, skips documents that were never fetched.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, ok := getCtx(cmd.Context())
@@ -42,7 +43,7 @@ Documents must already have content; --all targets state=fetched by default.`,
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Reindex every document with content (default state=fetched; use --state to override)")
 	cmd.Flags().StringVar(&state, "state", "",
-		"With --all, only reindex documents in this state (defaults to fetched)")
+		"With --all, reindex the documents with content in this state (pending|fetched|failed|dead; default fetched)")
 	return cmd
 }
 

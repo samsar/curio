@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -111,4 +113,40 @@ func TestReindexAll_StoreFailure(t *testing.T) {
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all"})
 	assertProblem(t, resp, http.StatusInternalServerError)
 	assert.Contains(t, resp.body, "enqueued 0 of 1")
+}
+
+// TestGetDocumentContent_MissingFile: content deleted from disk is a 404
+// that says what to do, not a 500 carrying the absolute path.
+func TestGetDocumentContent_MissingFile(t *testing.T) {
+	s := newTestServer(t)
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	ext := s.seedContent(t, doc, "# A")
+	require.NoError(t, os.Remove(filepath.Join(s.deps.Home.ContentDir(), *ext.MarkdownPath)))
+
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + doc.ID + "/content"})
+	assertProblem(t, resp, http.StatusNotFound)
+	assert.Contains(t, resp.body, "refetch")
+	assert.NotContains(t, resp.body, s.deps.Home.Path)
+}
+
+// TestReindexAll_OnlyDocumentsWithContent: an index job for a document with
+// no extraction fails permanently and marks it failed, so reindex-all skips
+// such documents; and it validates ?state like refetch-all.
+func TestReindexAll_OnlyDocumentsWithContent(t *testing.T) {
+	s := newTestServer(t)
+	fetching := s.seedDocument(t, "https://example.com/fetching", store.DocStatePending)
+	withContent := s.seedDocument(t, "https://example.com/fetched-once", store.DocStatePending)
+	s.seedContent(t, withContent, "# Fetched once")
+
+	assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all?state=bogus"}),
+		http.StatusBadRequest)
+	assert.Zero(t, s.count(t, "jobs"))
+
+	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all?state=pending"})
+	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+	assert.JSONEq(t, `{"jobs_enqueued":1}`, resp.body)
+	var payload string
+	require.NoError(t, s.db.QueryRow(`SELECT payload FROM jobs WHERE kind = 'index'`).Scan(&payload))
+	assert.JSONEq(t, `{"document_id":"`+withContent.ID+`"}`, payload)
+	assert.Equal(t, store.DocStatePending, s.docState(t, fetching.ID))
 }

@@ -447,3 +447,38 @@ func TestServer_HealthIdentity(t *testing.T) {
 	assert.Equal(t, os.Getpid(), h.PID)
 	assert.Equal(t, s.deps.Home.Path, h.Home)
 }
+
+// TestServer_RouterErrorsAreProblems: an unknown route and an unsupported
+// method answer problem+json like every other error, and a 405 says which
+// methods the route takes.
+func TestServer_RouterErrorsAreProblems(t *testing.T) {
+	s := newTestServer(t)
+	for _, path := range []string{"/nope", "/v1/nope", "/v1/documents/x/nope"} {
+		assertProblem(t, s.do(t, request{method: http.MethodGet, path: path}), http.StatusNotFound)
+	}
+
+	cases := []struct {
+		method, path, allow string
+	}{
+		{http.MethodPut, "/v1/bookmarks", "GET, POST"},
+		{http.MethodPost, "/v1/bookmarks/some-id", "GET, DELETE"},
+		{http.MethodDelete, "/v1/documents/some-id", "GET"},
+		{http.MethodPatch, "/v1/jobs", "GET, DELETE"},
+		{http.MethodGet, "/v1/search", "POST"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			r, err := http.NewRequest(tc.method, s.base+tc.path, nil)
+			require.NoError(t, err)
+			resp, err := http.DefaultClient.Do(r)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			assertProblem(t, response{status: resp.StatusCode, contentType: resp.Header.Get("Content-Type"),
+				body: string(body)}, http.StatusMethodNotAllowed)
+			assert.Equal(t, tc.allow, resp.Header.Get("Allow"))
+		})
+	}
+}

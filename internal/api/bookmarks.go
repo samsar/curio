@@ -1,8 +1,9 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -122,57 +123,68 @@ type BookmarkListResponse struct {
 	NextCursor *string            `json:"next_cursor,omitempty"`
 }
 
+// handleListBookmarks pages through the tenant's bookmarks in ID order.
+// next_cursor is set exactly when another page follows: the store is asked
+// for one row more than the page holds.
 func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	opts := store.ListBookmarksOpts{
+	limit := listLimit(r)
+	bms, err := d.Bookmarks.List(r.Context(), d.TenantID, store.ListBookmarksOpts{
 		Source:     q.Get("source"),
 		FolderPath: q.Get("folder"),
 		Cursor:     q.Get("cursor"),
-	}
-	if v := q.Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			opts.Limit = n
-		}
-	}
-	bms, err := d.Bookmarks.List(r.Context(), d.TenantID, opts)
+		Limit:      limit + 1,
+	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 
-	items := make([]BookmarkResponse, 0, len(bms))
-	for _, b := range bms {
-		state := ""
-		if b.DocumentID != nil {
-			if doc, err := d.Documents.GetByID(r.Context(), *b.DocumentID); err == nil {
-				state = string(doc.State)
-			}
-		}
-		items = append(items, bookmarkToResponse(b, state))
-	}
-
-	resp := BookmarkListResponse{Items: items}
-	if len(items) > 0 && opts.Limit > 0 && len(items) == opts.Limit {
-		next := items[len(items)-1].ID
+	var resp BookmarkListResponse
+	if len(bms) > limit {
+		bms = bms[:limit]
+		next := bms[limit-1].ID
 		resp.NextCursor = &next
+	}
+	resp.Items = make([]BookmarkResponse, 0, len(bms))
+	for _, b := range bms {
+		state, err := d.documentState(r.Context(), b)
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "internal error", err.Error())
+			return
+		}
+		resp.Items = append(resp.Items, bookmarkToResponse(b, state))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
 func (d Deps) handleGetBookmark(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	b, err := d.Bookmarks.GetByID(r.Context(), id)
+	b, err := d.Bookmarks.GetByID(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	state := ""
-	if b.DocumentID != nil {
-		if doc, err := d.Documents.GetByID(r.Context(), *b.DocumentID); err == nil {
-			state = string(doc.State)
-		}
+	state, err := d.documentState(r.Context(), b)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "internal error", err.Error())
+		return
 	}
 	writeJSON(w, http.StatusOK, bookmarkToResponse(b, state))
+}
+
+// documentState is the state of the document a bookmark links to, or "" if
+// the document was deleted (the foreign key sets document_id to NULL). Any
+// lookup failure, not-found included, is an error the caller reports as a
+// 500: a dangling document_id is an inconsistency, not a missing resource.
+func (d Deps) documentState(ctx context.Context, b *store.Bookmark) (string, error) {
+	if b.DocumentID == nil {
+		return "", nil
+	}
+	doc, err := d.Documents.GetByID(ctx, *b.DocumentID)
+	if err != nil {
+		return "", fmt.Errorf("bookmark %s: load document %s: %w", b.ID, *b.DocumentID, err)
+	}
+	return string(doc.State), nil
 }
 
 func (d Deps) handleDeleteBookmark(w http.ResponseWriter, r *http.Request) {

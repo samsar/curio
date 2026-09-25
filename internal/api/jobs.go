@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/samsar/curio/internal/store"
@@ -119,17 +118,10 @@ func parseExtendedDuration(s string) (time.Duration, error) {
 
 func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	status := store.JobStatus(q.Get("status")) // e.g. "failed", "running"
-	kind := store.JobKind(q.Get("kind"))
-	limit := 50
-	if v := q.Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
-			limit = n
-		}
-	}
-
 	jobs, err := d.Queue.ListWithDoc(r.Context(), d.TenantID, store.ListJobsOpts{
-		Status: status, Kind: kind, Limit: limit,
+		Status: store.JobStatus(q.Get("status")),
+		Kind:   store.JobKind(q.Get("kind")),
+		Limit:  listLimit(r),
 	})
 	if err != nil {
 		writeError(w, err)
