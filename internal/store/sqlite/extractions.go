@@ -33,57 +33,40 @@ func (s *Extractions) Create(ctx context.Context, e *store.DocumentExtraction) e
 		return fmt.Errorf("extractions: status required")
 	}
 
-	if e.FetchedAt.IsZero() {
-		// Let SQLite's default apply if unset.
-		_, err := s.db.ExecContext(ctx, `
-			INSERT INTO document_extractions
-				(id, document_id, fetcher, status, markdown_path, raw_path, extraction_meta, error_message)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			e.ID, e.DocumentID, e.Fetcher, e.Status,
-			strPtr(e.MarkdownPath), strPtr(e.RawPath),
-			rawJSON(e.ExtractionMeta),
-			strPtr(e.ErrorMessage),
-		)
-		if err != nil {
-			return fmt.Errorf("insert extraction: %w", err)
-		}
-		// Read back to populate FetchedAt.
-		got, err := s.GetByID(ctx, e.ID)
-		if err != nil {
-			return err
-		}
-		e.FetchedAt = got.FetchedAt
-		return nil
+	// A zero FetchedAt takes the column's default, now.
+	var fetchedAt any
+	if !e.FetchedAt.IsZero() {
+		fetchedAt = formatTime(e.FetchedAt)
 	}
-
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO document_extractions
-			(id, document_id, fetched_at, fetcher, status, markdown_path, raw_path, extraction_meta, error_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, e.DocumentID, formatTime(e.FetchedAt), e.Fetcher, e.Status,
+	var stored string
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO document_extractions (`+extractionColumns+`)
+		VALUES (?, ?, COALESCE(?, `+sqlNow+`), ?, ?, ?, ?, ?, ?)
+		RETURNING fetched_at`,
+		e.ID, e.DocumentID, fetchedAt, e.Fetcher, e.Status,
 		strPtr(e.MarkdownPath), strPtr(e.RawPath),
 		rawJSON(e.ExtractionMeta),
 		strPtr(e.ErrorMessage),
-	)
+	).Scan(&stored)
 	if err != nil {
 		return fmt.Errorf("insert extraction: %w", err)
 	}
-	return nil
+	e.FetchedAt, err = parseTime(stored)
+	return err
 }
 
+// extractionColumns is the column list scanExtraction expects, in order.
+const extractionColumns = `id, document_id, fetched_at, fetcher, status,
+	markdown_path, raw_path, extraction_meta, error_message`
+
 func (s *Extractions) GetByID(ctx context.Context, id string) (*store.DocumentExtraction, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, document_id, fetched_at, fetcher, status,
-		       markdown_path, raw_path, extraction_meta, error_message
-		FROM document_extractions WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT `+extractionColumns+` FROM document_extractions WHERE id = ?`, id)
 	return scanExtraction(row)
 }
 
 func (s *Extractions) ListByDocument(ctx context.Context, documentID string) ([]*store.DocumentExtraction, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, document_id, fetched_at, fetcher, status,
-		       markdown_path, raw_path, extraction_meta, error_message
-		FROM document_extractions WHERE document_id = ?
+		SELECT `+extractionColumns+` FROM document_extractions WHERE document_id = ?
 		ORDER BY fetched_at DESC`, documentID)
 	if err != nil {
 		return nil, fmt.Errorf("list extractions: %w", err)

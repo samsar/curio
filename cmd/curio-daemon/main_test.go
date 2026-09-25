@@ -3,16 +3,19 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -24,6 +27,7 @@ import (
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
+	"github.com/samsar/curio/migrations"
 )
 
 func TestMain(m *testing.M) {
@@ -77,7 +81,8 @@ func seedJobs(t *testing.T, home *curiohome.Home) seededJobs {
 	db, err := sqlitestore.Open(context.Background(), home.DBPath())
 	require.NoError(t, err)
 	defer db.Close()
-	require.NoError(t, sqlitestore.Migrate(context.Background(), db))
+	_, err = sqlitestore.Migrate(context.Background(), db)
+	require.NoError(t, err)
 
 	q := sqlitestore.NewJobs(db)
 	ctx := context.Background()
@@ -147,17 +152,15 @@ func TestRun_BindFailureLeavesJobsAlone(t *testing.T) {
 	require.NoError(t, lock.Release())
 }
 
-func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
-	listen := freeLoopbackAddr(t)
-	home := newHome(t, listen)
-
+// runDaemon starts run in the background and waits until it answers
+// /v1/healthz. stop cancels it and waits for run to return cleanly.
+func runDaemon(t *testing.T, listen string) (health *client.Health, stop func()) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- run(ctx, new(slog.LevelVar)) }()
 
 	c := client.New("http://" + listen)
-	var health *client.Health
 	require.Eventually(t, func() bool {
 		hctx, hcancel := context.WithTimeout(ctx, time.Second)
 		defer hcancel()
@@ -165,6 +168,24 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 		health = h
 		return err == nil
 	}, 15*time.Second, 50*time.Millisecond)
+
+	return health, func() {
+		t.Helper()
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("run did not return after cancellation")
+		}
+	}
+}
+
+func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+
+	health, stop := runDaemon(t, listen)
 	assert.Equal(t, os.Getpid(), health.PID)
 	assert.Equal(t, home.Path, health.Home)
 
@@ -172,13 +193,7 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fmt.Sprint(os.Getpid()), strings.TrimSpace(string(pidFile)))
 
-	cancel()
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(30 * time.Second):
-		t.Fatal("run did not return after cancellation")
-	}
+	stop()
 
 	lock, err := daemonctl.AcquireLock(home)
 	require.NoError(t, err, "the lock is free after shutdown")
@@ -186,6 +201,53 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 	pidFile, err = os.ReadFile(home.PIDFile())
 	require.NoError(t, err)
 	assert.Empty(t, pidFile, "a clean exit leaves the PID file empty")
+}
+
+// latestMigration is the highest numeric prefix among the migration files.
+func latestMigration(t *testing.T) int {
+	t.Helper()
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	require.NoError(t, err)
+	var latest int
+	for _, e := range entries {
+		prefix, _, ok := strings.Cut(e.Name(), "_")
+		require.True(t, ok, e.Name())
+		n, err := strconv.Atoi(prefix)
+		require.NoError(t, err, e.Name())
+		latest = max(latest, n)
+	}
+	return latest
+}
+
+// TestRun_SyncsMarkerSchemaVersion: the marker caches the version goose
+// leaves the database at. Upgrading a database at version 4, whose marker
+// says 4, leaves both at the newest migration.
+func TestRun_SyncsMarkerSchemaVersion(t *testing.T) {
+	ctx := context.Background()
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+
+	db, err := sqlitestore.Open(ctx, home.DBPath())
+	require.NoError(t, err)
+	p, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations.FS)
+	require.NoError(t, err)
+	_, err = p.UpTo(ctx, 4)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	meta, err := home.Meta()
+	require.NoError(t, err)
+	meta.SchemaVersion = 4
+	require.NoError(t, home.WriteMeta(meta))
+
+	health, stop := runDaemon(t, listen)
+	stop()
+
+	latest := latestMigration(t)
+	require.Greater(t, latest, 4)
+	assert.Equal(t, latest, health.SchemaVersion)
+	meta, err = home.Meta()
+	require.NoError(t, err)
+	assert.Equal(t, latest, meta.SchemaVersion)
 }
 
 // TestDrain: shutdown waits for the workers up to the grace period, then

@@ -2,12 +2,17 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 func TestOpenAndMigrate(t *testing.T) {
@@ -18,23 +23,25 @@ func TestOpenAndMigrate(t *testing.T) {
 	defer db.Close()
 	assert.Equal(t, path, db.Path())
 
-	require.NoError(t, Migrate(ctx, db))
+	version, err := Migrate(ctx, db)
+	require.NoError(t, err)
 
-	// schema_meta should be populated by the initial migration.
-	var version int
 	var model string
 	var dim int
-	err = db.QueryRow(`SELECT schema_version, embedding_model, embedding_dim FROM schema_meta WHERE id=1`).
-		Scan(&version, &model, &dim)
+	err = db.QueryRow(`SELECT embedding_model, embedding_dim FROM schema_meta WHERE id=1`).Scan(&model, &dim)
 	require.NoError(t, err)
-	// schema_version reflects the latest applied migration.
-	assert.GreaterOrEqual(t, version, 1)
 	assert.Equal(t, "nomic-embed-text", model)
 	assert.Equal(t, 768, dim)
 
-	got, err := ReadSchemaVersion(ctx, db)
-	require.NoError(t, err)
-	assert.Equal(t, version, got)
+	// goose_db_version is the only record of the version.
+	assert.Equal(t, latestMigration(t), version, "the newest migration file")
+	var recorded int64
+	require.NoError(t, db.QueryRow(`SELECT max(version_id) FROM goose_db_version`).Scan(&recorded))
+	assert.Equal(t, recorded, version)
+	var copies int
+	require.NoError(t, db.QueryRow(
+		`SELECT count(*) FROM pragma_table_info('schema_meta') WHERE name = 'schema_version'`).Scan(&copies))
+	assert.Zero(t, copies, "schema_meta keeps no copy of the version")
 }
 
 func TestMigrate_Idempotent(t *testing.T) {
@@ -47,8 +54,10 @@ func TestMigrate_Idempotent(t *testing.T) {
 	}
 	before := applied()
 
-	require.NoError(t, Migrate(ctx, db))
+	version, err := Migrate(ctx, db)
+	require.NoError(t, err)
 	assert.Equal(t, before, applied(), "a second run applies nothing")
+	assert.Equal(t, latestMigration(t), version, "and still reports the version")
 }
 
 func TestMigrate_CancelledContext(t *testing.T) {
@@ -58,7 +67,8 @@ func TestMigrate_CancelledContext(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	require.ErrorIs(t, Migrate(ctx, db), context.Canceled)
+	_, err = Migrate(ctx, db)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // TestMigrate_Parallel: migrating separate databases at once is safe. Each
@@ -68,33 +78,167 @@ func TestMigrate_Parallel(t *testing.T) {
 	for i := range 6 {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
-			db := newTestDB(t)
-			v, err := ReadSchemaVersion(context.Background(), db)
+			db, err := Open(context.Background(), filepath.Join(t.TempDir(), "curio.db"))
 			require.NoError(t, err)
-			assert.Positive(t, v)
+			defer db.Close()
+			v, err := Migrate(context.Background(), db)
+			require.NoError(t, err)
+			assert.Equal(t, latestMigration(t), v)
 		})
 	}
 }
 
-func TestReadSchemaVersion_Unmigrated(t *testing.T) {
-	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "curio.db"))
-	require.NoError(t, err)
-	defer db.Close()
-	_, err = ReadSchemaVersion(context.Background(), db)
-	require.ErrorContains(t, err, "read schema version")
+// TestPragmasOnEveryConnection holds more connections at once than
+// database/sql keeps by default and checks each one: the DSN has to set
+// curio's pragmas on every connection the pool opens.
+func TestPragmasOnEveryConnection(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	const held = 8
+	for range held {
+		c, err := db.Conn(ctx)
+		require.NoError(t, err)
+		defer c.Close()
+		for _, p := range []struct {
+			pragma string
+			want   any
+		}{
+			{"busy_timeout", int64(5000)},
+			{"foreign_keys", int64(1)},
+			{"journal_mode", "wal"},
+			{"synchronous", int64(1)}, // NORMAL
+		} {
+			var got any
+			require.NoError(t, c.QueryRowContext(ctx, "PRAGMA "+p.pragma).Scan(&got))
+			if b, ok := got.([]byte); ok {
+				got = string(b)
+			}
+			assert.Equal(t, p.want, got, p.pragma)
+		}
+	}
+	assert.GreaterOrEqual(t, db.Stats().OpenConnections, held)
 }
 
-func TestPragmasApplied(t *testing.T) {
+// TestTransactions_ReadThenWrite: a transaction that reads and then writes
+// while others do the same must wait for the lock, not fail. Deferred
+// transactions get SQLITE_BUSY at once upgrading the read to a write,
+// without consulting busy_timeout; immediate ones wait at BEGIN.
+func TestTransactions_ReadThenWrite(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "curio.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	_, err = db.Exec(`CREATE TABLE counter (id INTEGER PRIMARY KEY, n INTEGER NOT NULL);
+		INSERT INTO counter (id, n) VALUES (1, 0)`)
+	require.NoError(t, err)
+
+	increment := func() error {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck // no-op after Commit
+		var n int
+		if err := tx.QueryRowContext(ctx, `SELECT n FROM counter WHERE id = 1`).Scan(&n); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE counter SET n = ? WHERE id = 1`, n+1); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	const workers, each = 8, 25
+	errs := make(chan error, workers*each)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for range each {
+				errs <- increment()
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT n FROM counter WHERE id = 1`).Scan(&n))
+	assert.Equal(t, workers*each, n, "no increment lost")
+}
+
+// TestReads_DoNotWaitForWriter: in WAL mode an autocommit read never waits
+// on the write lock, so the store's reads return promptly while a writer
+// holds it, far inside busy_timeout.
+func TestReads_DoNotWaitForWriter(t *testing.T) {
+	ctx := context.Background()
 	db := newTestDB(t)
+	docs, jobs, chunks := NewDocuments(db), NewJobs(db), NewChunks(db, vecDim)
+	ids := seedDocs(t, db, "local", "https://example.com/a")
+	require.NoError(t, chunks.ReplaceForDocument(ctx, ids[0], latestExtractionID(t, db, ids[0]), "", nil,
+		[]store.ChunkInput{{Text: "readers keep reading", Embedding: fillVec(0.1)}}))
 
-	// foreign_keys is per-connection; query it from a pooled conn.
-	var fk int
-	require.NoError(t, db.QueryRow("PRAGMA foreign_keys").Scan(&fk))
-	assert.Equal(t, 1, fk, "foreign_keys should be ON")
+	writer, err := db.Conn(ctx)
+	require.NoError(t, err)
+	defer writer.Close()
+	tx, err := writer.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer tx.Rollback() //nolint:errcheck // the test never commits
+	_, err = tx.ExecContext(ctx, `UPDATE documents SET title = 'held' WHERE id = ?`, ids[0])
+	require.NoError(t, err)
 
-	var jm string
-	require.NoError(t, db.QueryRow("PRAGMA journal_mode").Scan(&jm))
-	assert.Equal(t, "wal", jm)
+	rctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	_, err = docs.GetByID(rctx, ids[0])
+	require.NoError(t, err)
+	_, err = docs.ListWithLastError(rctx, "local", store.ListDocumentsOpts{})
+	require.NoError(t, err)
+	_, err = jobs.CountByStatus(rctx, "local")
+	require.NoError(t, err)
+	hits, err := chunks.BM25Search(rctx, "local", "readers", 10, store.SearchFilters{})
+	require.NoError(t, err)
+	assert.Len(t, hits, 1)
+}
+
+// TestPool_KeepsConnectionsForTheWorkers: the pool is capped above the
+// daemon's 21 workers and keeps what it opens, so a burst of claims closes
+// no connection only to reopen it.
+func TestPool_KeepsConnectionsForTheWorkers(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	assert.Equal(t, maxOpenConns, db.Stats().MaxOpenConnections)
+
+	q := NewJobs(db)
+	for range 200 {
+		require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
+	}
+	const workers = 21
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for {
+				j, err := q.ClaimNext(ctx, []store.JobKind{store.JobKindFetch})
+				if errors.Is(err, store.ErrNotFound) {
+					return
+				}
+				if err == nil {
+					err = q.MarkDone(ctx, j.ID)
+				}
+				if err != nil {
+					errs <- err
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	assert.Zero(t, db.Stats().MaxIdleClosed, "no connection was closed for exceeding the idle limit")
 }
 
 func TestSqliteVecLoaded(t *testing.T) {
@@ -121,7 +265,9 @@ func TestChunksVecTableExists(t *testing.T) {
 	assert.Equal(t, 0, n)
 }
 
-func TestOpen_EmptyPath(t *testing.T) {
-	_, err := Open(context.Background(), "")
-	require.Error(t, err)
+func TestOpen_RejectsPath(t *testing.T) {
+	for _, path := range []string{"", ":memory:"} {
+		_, err := Open(context.Background(), path)
+		require.Error(t, err, "%q", path)
+	}
 }

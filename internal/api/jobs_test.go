@@ -21,8 +21,7 @@ func TestDeleteJobs_FinishedOnly(t *testing.T) {
 	s := newTestServer(t)
 	// Inserted directly with an old updated_at: timestamps are stored at
 	// millisecond precision, so a job enqueued moments before the request
-	// may not be strictly older than a "now" cutoff. The AFTER UPDATE
-	// trigger rules out backdating an existing row instead.
+	// may not be strictly older than a "now" cutoff.
 	for _, status := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone, store.JobStatusFailed} {
 		_, err := s.db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, updated_at)
 			VALUES (?, 'local', ?, '{}', ?, '2000-01-01T00:00:00.000Z')`,

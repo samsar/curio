@@ -120,7 +120,7 @@ func (s *Insights) FinishRun(ctx context.Context, runID string, res store.RunRes
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE cluster_runs
 		SET status = ?, num_documents = ?, num_clusters = ?, num_noise = ?, error = ?,
-		    finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		    finished_at = `+sqlNow+`, updated_at = `+sqlNow+`
 		WHERE id = ?`,
 		res.Status, res.NumDocuments, res.NumClusters, res.NumNoise, strPtr(res.Error), runID)
 	if err != nil {

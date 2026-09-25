@@ -29,8 +29,9 @@ const (
 	// StartLockFileName serializes clients that auto-start the daemon.
 	StartLockFileName = "daemon.start.lock"
 
-	// CurrentSchemaVersion is bumped when the on-disk layout or marker
-	// shape changes in an incompatible way.
+	// CurrentSchemaVersion is the placeholder schema version Init writes
+	// into a new marker. The daemon's first start replaces it with the
+	// version its migrations leave the database at (see Meta).
 	CurrentSchemaVersion = 1
 
 	dirPerm  = 0o700
@@ -53,8 +54,13 @@ var (
 	ErrAlreadyInitialized = errors.New("curio home already initialized")
 )
 
-// Meta mirrors the on-disk .curio-meta.json file. Cross-checked against the
-// schema_meta SQL table at daemon startup; a mismatch is a startup error.
+// Meta mirrors the on-disk .curio-meta.json file.
+//
+// SchemaVersion is a cache of the database's schema version, whose source
+// of truth is goose's goose_db_version table. The daemon rewrites it after
+// migrating, so commands that don't reach the daemon can still show it.
+// The daemon refuses to start when EmbeddingModel or EmbeddingDim disagree
+// with the config.
 type Meta struct {
 	SchemaVersion  int       `json:"schema_version"`
 	EmbeddingModel string    `json:"embedding_model"`

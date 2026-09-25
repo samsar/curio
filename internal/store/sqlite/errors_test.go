@@ -15,7 +15,7 @@ import (
 
 // TestConstraintErrors: only uniqueness violations (UNIQUE and TEXT PRIMARY
 // KEY, which SQLite reports under different extended codes) become
-// ErrConflict. CHECK and foreign-key violations stay plain errors.
+// ErrConflict, and only foreign-key violations are recognized as those.
 func TestConstraintErrors(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -43,6 +43,7 @@ func TestConstraintErrors(t *testing.T) {
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, store.ErrConflict)
 		assert.False(t, isUniqueViolation(err))
+		assert.False(t, isForeignKeyViolation(err))
 	})
 	t.Run("foreign key", func(t *testing.T) {
 		b := newBookmark()
@@ -52,10 +53,13 @@ func TestConstraintErrors(t *testing.T) {
 		require.Error(t, err)
 		assert.NotErrorIs(t, err, store.ErrConflict)
 		assert.False(t, isUniqueViolation(err))
+		assert.True(t, isForeignKeyViolation(err))
 	})
 	t.Run("not a sqlite error", func(t *testing.T) {
 		assert.False(t, isUniqueViolation(nil))
 		assert.False(t, isUniqueViolation(fmt.Errorf("UNIQUE constraint failed: looks alike")))
+		assert.False(t, isForeignKeyViolation(nil))
+		assert.False(t, isForeignKeyViolation(fmt.Errorf("FOREIGN KEY constraint failed: looks alike")))
 	})
 }
 

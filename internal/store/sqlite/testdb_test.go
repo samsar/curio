@@ -19,7 +19,7 @@ func newTestDB(t testing.TB) *DB {
 			t.Errorf("close test database: %v", err)
 		}
 	})
-	if err := Migrate(context.Background(), db); err != nil {
+	if _, err := Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate test database: %v", err)
 	}
 	return db
