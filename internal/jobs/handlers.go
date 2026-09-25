@@ -19,14 +19,12 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// Deps bundles the dependencies the job handlers need. Bundled so the
-// daemon can construct them once and inject everywhere.
+// Deps bundles what the job handlers need, built once by the daemon.
 type Deps struct {
 	Home        *curiohome.Home
 	Documents   store.DocumentStore
 	Extractions store.ExtractionStore
 	Bookmarks   store.BookmarkStore
-	Chunks      store.ChunkStore
 	Queue       store.JobQueue
 	Dispatcher  fetcher.Dispatcher
 	Indexer     *indexer.Indexer
@@ -34,28 +32,13 @@ type Deps struct {
 	Log         *slog.Logger
 }
 
-// Register wires the M0 handlers onto a worker. Also attaches
-// permanent-failure hooks so when a fetch or index job exhausts its
-// retries, the parent document transitions to state=failed instead of
-// staying stuck in pending forever. Without this, `curio status`
-// overstates how much work is actually in flight — a doc whose fetch
-// gave up still shows as "pending" indistinguishable from one whose
-// job is genuinely about to run.
-func Register(w *Worker, d Deps) {
-	w.Register(store.JobKindFetch, FetchHandler(d))
-	w.Register(store.JobKindIndex, IndexHandler(d))
-	w.OnPermanentFailure(store.JobKindFetch, MarkDocFailed(d))
-	w.OnPermanentFailure(store.JobKindIndex, MarkDocFailed(d))
-}
-
-// MarkDocFailed is a kind-agnostic hook: read document_id from the job
-// payload, set its state to failed — or dead, when the cause identifies
-// the URL itself as gone (fetcher.ErrDeadLink: hard 404/410 or a detected
-// soft 404). Used for both fetch and index since both payloads carry
-// document_id under the same JSON key. Exported so callers wiring split
-// pools (cmd/curio-daemon/main.go) can register it per kind without going
-// through jobs.Register.
-func MarkDocFailed(d Deps) PermFailHook {
+// markDocFailed is the permanent-failure hook of the fetch and index pools:
+// it reads document_id from the job payload and sets the document's state to
+// failed, or dead when the cause identifies the URL itself as gone
+// (fetcher.ErrDeadLink: a hard 404/410 or a detected soft 404). Without it a
+// document whose job gave up would stay pending forever, indistinguishable
+// from one whose job is about to run.
+func markDocFailed(d Deps) PermFailHook {
 	return func(ctx context.Context, job *store.Job, cause error) error {
 		var payload store.DocumentJobPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
@@ -75,7 +58,7 @@ func MarkDocFailed(d Deps) PermFailHook {
 	}
 }
 
-// FetchHandler builds the closure that runs one fetch job:
+// fetchHandler builds the closure that runs one fetch job:
 //  1. Load document; look up the right Fetcher via the dispatcher.
 //  2. Call Fetcher.Fetch(ctx, document.URL).
 //  3. Write the resulting markdown to $CURIO_HOME/content/<doc>/<ext>.md.
@@ -87,7 +70,7 @@ func MarkDocFailed(d Deps) PermFailHook {
 // Idempotent on retry: each attempt creates a new extraction row (history)
 // and rewrites current_extraction_id. The previous extraction's file stays
 // on disk for diff/history; can be GC'd by a future retention job.
-func FetchHandler(d Deps) HandlerFunc {
+func fetchHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
 		doc, err := loadJobDocument(ctx, d, job)
 		if err != nil {
@@ -213,13 +196,13 @@ func nonEmpty(s string) *string {
 	return &s
 }
 
-// IndexHandler builds the closure that runs one index job:
+// indexHandler builds the closure that runs one index job:
 //  1. Load document + its current extraction.
 //  2. Read the markdown file off disk.
 //  3. Pull the bookmark's tags (if any) for FTS boosting — best-effort.
 //  4. Run the Indexer.
 //  5. Mark document state=fetched.
-func IndexHandler(d Deps) HandlerFunc {
+func indexHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
 		doc, err := loadJobDocument(ctx, d, job)
 		if err != nil {

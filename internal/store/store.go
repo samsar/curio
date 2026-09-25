@@ -31,6 +31,10 @@ var (
 // that table.
 const EmbeddingDim = 768
 
+// LocalTenantID is the tenant of a single-user install: the daemon scopes
+// every row to it, server-side, and never shows it to clients.
+const LocalTenantID = "local"
+
 // DocState is a document's lifecycle state (documents.state).
 type DocState string
 

@@ -54,7 +54,7 @@ type Deps struct {
 	Search         *search.Engine
 	Insights       store.InsightStore
 	InsightEnabled bool   // gates POST /v1/interests/rebuild (config insight.enabled)
-	TenantID       string // hardcoded for single-tenant local mode; "local"
+	TenantID       string // default store.LocalTenantID
 	Log            *slog.Logger
 }
 
@@ -74,7 +74,7 @@ func NewServer(ln net.Listener, deps Deps) (*Server, error) {
 		deps.Log = slog.Default()
 	}
 	if deps.TenantID == "" {
-		deps.TenantID = "local"
+		deps.TenantID = store.LocalTenantID
 	}
 	origin, err := newLocalOrigin(ln.Addr())
 	if err != nil {

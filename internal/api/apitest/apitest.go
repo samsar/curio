@@ -28,7 +28,7 @@ import (
 )
 
 // TenantID is the tenant the server serves, as a local daemon does.
-const TenantID = "local"
+const TenantID = store.LocalTenantID
 
 // Server is a running API and the state behind it.
 type Server struct {

@@ -265,7 +265,7 @@ func TestDrain(t *testing.T) {
 		<-release // deaf to cancellation, like a handler stuck in a syscall
 		return nil
 	})
-	d := &daemon{pools: []pool{{name: "fetch", worker: w, size: 1}}}
+	d := &daemon{pools: []jobs.Pool{{Name: "fetch", Worker: w, Size: 1}}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var workers sync.WaitGroup

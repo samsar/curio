@@ -118,7 +118,7 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 	// Settle the previous daemon's unfinished jobs before any worker can
 	// claim them.
 	for _, p := range d.pools {
-		if err := p.worker.RecoverOrphans(ctx); err != nil {
+		if err := p.Worker.RecoverOrphans(ctx); err != nil {
 			return err
 		}
 	}
@@ -179,17 +179,10 @@ func syncMarkerSchemaVersion(home *curiohome.Home, meta curiohome.Meta, schemaVe
 	}
 }
 
-// pool is a Worker and how many goroutines run it.
-type pool struct {
-	name   string
-	worker *jobs.Worker
-	size   int
-}
-
 // daemon is everything run starts once the database is ready.
 type daemon struct {
 	apiDeps api.Deps
-	pools   []pool
+	pools   []jobs.Pool
 }
 
 func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db *sqlitestore.DB) (*daemon, error) {
@@ -242,35 +235,18 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		return nil, err
 	}
 
-	// Two worker pools: fetch (network-bound, scale wide) and index
-	// (Ollama-bound, narrow). They share the JobQueue but each pool's
-	// workers only claim jobs of its kind. Without this split, FIFO
-	// claim order let fetch jobs starve indexing entirely — measured
-	// 3296 fetches done while only 55 index jobs completed.
-	deps := jobs.Deps{
+	pools := jobs.NewPools(jobs.Deps{
 		Home:        home,
 		Documents:   docs,
 		Extractions: exts,
 		Bookmarks:   bms,
-		Chunks:      chunks,
 		Queue:       queue,
 		Dispatcher:  dispatcher,
 		Indexer:     idx,
 		Insight:     insightEngine,
 		Log:         slog.Default(),
-	}
-	fetchWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	fetchWorker.Register(store.JobKindFetch, jobs.FetchHandler(deps))
-	fetchWorker.OnPermanentFailure(store.JobKindFetch, jobs.MarkDocFailed(deps))
-
-	indexWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	indexWorker.Register(store.JobKindIndex, jobs.IndexHandler(deps))
-	indexWorker.OnPermanentFailure(store.JobKindIndex, jobs.MarkDocFailed(deps))
-
-	// Clustering is corpus-wide and expensive; give it its own single-worker
-	// pool so it neither starves fetch/index nor runs two clusterings at once.
-	clusterWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	clusterWorker.Register(store.JobKindCluster, jobs.ClusterHandler(deps))
+	}, jobs.PoolSizes{Fetch: cfg.Daemon.FetchWorkers, Index: cfg.Daemon.IndexWorkers},
+		jobs.WorkerOptions{Log: slog.Default()})
 
 	return &daemon{
 		apiDeps: api.Deps{
@@ -284,16 +260,20 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 			Search:         engine,
 			Insights:       insights,
 			InsightEnabled: cfg.Insight.Enabled,
-			TenantID:       "local",
 			Log:            slog.Default(),
 		},
-		pools: []pool{
-			{name: "fetch", worker: fetchWorker, size: cfg.Daemon.FetchWorkers},
-			{name: "index", worker: indexWorker, size: cfg.Daemon.IndexWorkers},
-			{name: "cluster", worker: clusterWorker, size: 1},
-		},
+		pools: pools,
 	}, nil
 }
+
+// YouTube pacing: yt-dlp runs start at 2 per second, from a token bucket of
+// 3, so a few videos saved together aren't serialized but an import full of
+// them doesn't hammer YouTube. How many run at once is capped separately,
+// by YouTubeOptions.MaxConcurrent.
+const (
+	youtubeFetchesPerSecond = 2
+	youtubeBurst            = 3
+)
 
 // newDispatcher builds the fetcher registry and routing rules. Native is
 // always constructed (pure Go, no external deps) so fetcher_rules.yaml can
@@ -351,7 +331,7 @@ func newDispatcher(cfg config.Config, home *curiohome.Home) (fetcher.Dispatcher,
 				SubLangs: cfg.Fetcher.YouTube.SubLangs,
 				Log:      slog.Default(),
 			}),
-			2, 3, // start rate; concurrent yt-dlp processes are capped inside the fetcher (MaxConcurrent)
+			youtubeFetchesPerSecond, youtubeBurst,
 		)
 		rules = append(rules, fetcher.Rule{Hosts: fetcher.YouTubeHosts, Fetcher: ytFetcher})
 		// Registry holds the rate-limited wrapper so token-bucket state
@@ -413,13 +393,13 @@ func (d *daemon) serve(ctx context.Context, srv *api.Server) error {
 
 	var workers sync.WaitGroup
 	for _, p := range d.pools {
-		for range p.size {
+		for range p.Size {
 			workers.Go(func() {
 				// Run only ever returns ctx.Err(); shutdown is the only exit.
-				_ = p.worker.Run(ctx)
+				_ = p.Worker.Run(ctx)
 			})
 		}
-		slog.Info("worker pool started", "pool", p.name, "workers", p.size)
+		slog.Info("worker pool started", "pool", p.Name, "workers", p.Size)
 	}
 
 	err := srv.Serve(ctx)
@@ -444,7 +424,7 @@ func (d *daemon) drain(workers *sync.WaitGroup, grace time.Duration) (stuck []st
 		return nil, true
 	case <-time.After(grace):
 		for _, p := range d.pools {
-			stuck = append(stuck, p.worker.InFlight()...)
+			stuck = append(stuck, p.Worker.InFlight()...)
 		}
 		return stuck, false
 	}

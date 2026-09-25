@@ -125,7 +125,7 @@ func TestWorker_JobInterruptedByShutdownIsRequeued(t *testing.T) {
 			})
 			w.OnPermanentFailure(store.JobKindFetch, func(ctx context.Context, j *store.Job, cause error) error {
 				hookCalls.Add(1)
-				return MarkDocFailed(deps)(ctx, j, cause)
+				return markDocFailed(deps)(ctx, j, cause)
 			})
 
 			stop := startWorker(t, w)
@@ -266,8 +266,8 @@ func TestWorker_RecoverOrphans(t *testing.T) {
 	otherKind := enqueueRunning(store.JobKindIndex, 5, retryDoc.ID)
 
 	w := NewWorker(deps.Queue, WorkerOptions{Log: quietLog})
-	w.Register(store.JobKindFetch, FetchHandler(deps))
-	w.OnPermanentFailure(store.JobKindFetch, MarkDocFailed(deps))
+	w.Register(store.JobKindFetch, fetchHandler(deps))
+	w.OnPermanentFailure(store.JobKindFetch, markDocFailed(deps))
 	require.NoError(t, w.RecoverOrphans(ctx))
 
 	assert.Equal(t, store.JobStatusFailed, getJob(t, deps.Queue, exhausted.ID).Status)
@@ -313,8 +313,8 @@ func TestWorker_RecoverOrphans_HooksOutliveShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	w := NewWorker(shutdownAfterRecovery{JobQueue: deps.Queue, shutdown: cancel}, WorkerOptions{Log: quietLog})
-	w.Register(store.JobKindFetch, FetchHandler(deps))
-	w.OnPermanentFailure(store.JobKindFetch, MarkDocFailed(deps))
+	w.Register(store.JobKindFetch, fetchHandler(deps))
+	w.OnPermanentFailure(store.JobKindFetch, markDocFailed(deps))
 	require.NoError(t, w.RecoverOrphans(ctx))
 
 	require.Error(t, ctx.Err(), "shutdown had begun when the hook ran")
