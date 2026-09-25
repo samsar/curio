@@ -1,15 +1,15 @@
 -- +goose Up
 -- +goose StatementBegin
 
--- Insight layer (M4): clustering documents by embedding similarity into
--- labeled topic "interests".
+-- Insight layer: clustering documents by embedding similarity into labeled
+-- topic "interests".
 --
 -- Model:
 --   * A `cluster_runs` row is one execution of the clustering job. Clustering
 --     fully recomputes from the current corpus; each run is a snapshot. The
 --     "current" interests are the clusters of the latest run with status='done'.
---     Old runs are kept (cheap) so a later milestone can do trajectory analysis
---     ("what's new this month"); a prune step can trim them if they pile up.
+--     The engine prunes the rest after each run, keeping that latest done run
+--     when a later one fails.
 --   * A `clusters` row is one topic within a run: a label + summary + size +
 --     cohesion (mean member similarity to the cluster medoid).
 --   * `cluster_documents` links a cluster to its member documents. Documents

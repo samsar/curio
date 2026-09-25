@@ -44,7 +44,7 @@ type TermLabeler struct {
 // NewTermLabeler constructs a TermLabeler.
 func NewTermLabeler() *TermLabeler { return &TermLabeler{maxTerms: 4} }
 
-func (l *TermLabeler) Name() string { return "terms" }
+func (*TermLabeler) Name() string { return "terms" }
 
 // Label implements Labeler; it never fails.
 func (l *TermLabeler) Label(_ context.Context, info ClusterInfo) (Label, error) {

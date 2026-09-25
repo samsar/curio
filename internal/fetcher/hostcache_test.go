@@ -39,24 +39,26 @@ func newNativeWithJina(t *testing.T, mode jinaMode) (*Native, func() int32) {
 	t.Helper()
 	var hits atomic.Int32
 	opts := NativeOptions{Timeout: 5 * time.Second}
+	serve := func(answer func(http.ResponseWriter)) {
+		jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			answer(w)
+		}))
+		t.Cleanup(jina.Close)
+		opts.JinaFallback, opts.JinaBaseURL = true, jina.URL+"/"
+	}
 	switch mode {
 	case jinaOff:
 	case jinaUnreachable:
 		opts.JinaFallback, opts.JinaBaseURL = true, "http://"+closedAddr(t)+"/"
+	case jinaThin:
+		serve(func(w http.ResponseWriter) { _, _ = w.Write([]byte("Title: x\n\nMarkdown Content:\ntoo short")) })
+	case jinaRateLimited:
+		serve(func(w http.ResponseWriter) { w.WriteHeader(http.StatusTooManyRequests) })
+	case jinaDown:
+		serve(func(w http.ResponseWriter) { w.WriteHeader(http.StatusInternalServerError) })
 	default:
-		jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			hits.Add(1)
-			switch mode {
-			case jinaThin:
-				_, _ = w.Write([]byte("Title: x\n\nMarkdown Content:\ntoo short"))
-			case jinaRateLimited:
-				w.WriteHeader(http.StatusTooManyRequests)
-			default:
-				w.WriteHeader(http.StatusInternalServerError)
-			}
-		}))
-		t.Cleanup(jina.Close)
-		opts.JinaFallback, opts.JinaBaseURL = true, jina.URL+"/"
+		t.Fatalf("unknown jinaMode %q", mode)
 	}
 	return unpaced(NewNative(opts), newFakeClock()), hits.Load
 }

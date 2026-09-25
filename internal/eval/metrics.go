@@ -7,9 +7,8 @@
 // machines) so the package has no dependency on the store, HTTP, or search —
 // it is pure, deterministic, and trivially unit-testable.
 //
-// This is the prerequisite the decisions log names before any "smarter search"
-// work (M6): build the eval before the improvement, so a change can be shown to
-// help rather than just feel better.
+// `curio eval` runs it over the daemon's search, so a change to retrieval can
+// be shown to help rather than just feel better.
 package eval
 
 import "math"

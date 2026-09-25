@@ -26,10 +26,11 @@ func newEvalCmd(env *daemonctl.Env) *cobra.Command {
 		Long: "Run a set of queries with known-relevant documents through search and\n" +
 			"report ranking metrics (recall@k, precision@k, NDCG@k, MRR).\n\n" +
 			"The query set is a YAML file of {query, relevant: [urls]} entries; see\n" +
-			"docs/eval.example.yaml. This is the measurement rig for tuning search\n" +
-			"and, later, comparing RAG approaches (M6) on the same ground truth.",
+			"docs/eval.example.yaml. Run it before and after changing a search\n" +
+			"setting (the BM25/vector weights, say) to compare them on the same\n" +
+			"ground truth.",
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if queriesPath == "" {
 				return errors.New("--queries is required (path to a qrels YAML file)")
 			}

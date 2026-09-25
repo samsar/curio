@@ -91,10 +91,6 @@ func (s *Documents) GetByID(ctx context.Context, id string) (*store.Document, er
 	return s.queryOne(ctx, "id = ?", id)
 }
 
-func (s *Documents) GetByURL(ctx context.Context, tenantID, url string) (*store.Document, error) {
-	return s.queryOne(ctx, "tenant_id = ? AND url = ?", tenantID, url)
-}
-
 // documentColumns is the column list scanDocument expects, in order.
 const documentColumns = `id, tenant_id, url, url_canonical, content_type, title, author,
 	published_at, language, word_count, current_extraction_id, state,
@@ -287,7 +283,7 @@ func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID strin
 	if err != nil {
 		return nil, fmt.Errorf("begin requeue fetch: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx,
 		`UPDATE documents SET state = ?, updated_at = `+sqlNow+` WHERE tenant_id = ? AND id = ?`,
@@ -315,7 +311,7 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	if err != nil {
 		return 0, fmt.Errorf("begin requeue fetch: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	defer tx.Rollback()
 
 	// The whole corpus goes in one transaction: resetting and enqueueing 50k
 	// documents takes about 2.4s, inside the 5s busy_timeout other writers

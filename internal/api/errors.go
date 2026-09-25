@@ -35,11 +35,7 @@ const statusClientClosedRequest = 499
 // writeProblem emits a problem+json response for r. It logs nothing:
 // writeError logs the server errors it reports.
 func writeProblem(w http.ResponseWriter, r *http.Request, status int, title, detail string) {
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	// A Problem always encodes, so the only failure is a write to a client
-	// that has gone.
-	_ = json.NewEncoder(w).Encode(Problem{
+	body, err := json.Marshal(Problem{
 		Type:      "about:blank",
 		Title:     title,
 		Status:    status,
@@ -47,6 +43,15 @@ func writeProblem(w http.ResponseWriter, r *http.Request, status int, title, det
 		Instance:  r.URL.Path,
 		RequestID: middleware.GetReqID(r.Context()),
 	})
+	if err != nil {
+		// A Problem is strings and an int; should that change, the status
+		// and detail still reach the client.
+		http.Error(w, detail, status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_, _ = w.Write(append(body, '\n')) // fails only when the client has gone
 }
 
 // requestError is a fault in what the client sent: a parameter, cursor or

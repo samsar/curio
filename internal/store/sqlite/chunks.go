@@ -34,10 +34,9 @@ type Chunks struct {
 
 var _ store.ChunkStore = (*Chunks)(nil)
 
-// NewChunks constructs the store. dim must match the embedding dimension
-// declared at migration time (currently 768 for nomic-embed-text). Mismatches
-// produce a runtime error on insert; the daemon should fail fast at startup
-// when config disagrees with .curio-meta.json.
+// NewChunks constructs the store. dim must be store.EmbeddingDim, the width
+// chunks_vec is created with; config validation holds embedding.dim to it,
+// and ReplaceForDocument rejects an embedding of any other length.
 func NewChunks(db *DB, dim int) *Chunks {
 	return &Chunks{db: db, dim: dim}
 }
@@ -49,10 +48,10 @@ func (s *Chunks) ReplaceForDocument(
 	chunks []store.ChunkInput,
 ) error {
 	if documentID == "" {
-		return fmt.Errorf("chunks: document_id required")
+		return errors.New("chunks: document_id required")
 	}
 	if extractionID == "" {
-		return fmt.Errorf("chunks: extraction_id required")
+		return errors.New("chunks: extraction_id required")
 	}
 	for i, c := range chunks {
 		if len(c.Embedding) != s.dim {
@@ -74,7 +73,7 @@ func (s *Chunks) ReplaceForDocument(
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, deleteDocumentChunksSQL, documentID); err != nil {
 		return fmt.Errorf("delete chunks: %w", err)
@@ -330,7 +329,7 @@ func placeholders(n int) string {
 // decode by hand (4 bytes per float, dim floats per chunk).
 func (s *Chunks) EmbeddingsForDocument(ctx context.Context, documentID string) ([]store.ChunkEmbedding, error) {
 	if documentID == "" {
-		return nil, fmt.Errorf("chunks: document_id required")
+		return nil, errors.New("chunks: document_id required")
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT v.chunk_id, v.embedding
@@ -392,7 +391,7 @@ const documentVectorsSQL = `
 // without holding every chunk vector in memory at once.
 func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.DocVector, error) {
 	if tenantID == "" {
-		return nil, fmt.Errorf("chunks: tenant_id required")
+		return nil, errors.New("chunks: tenant_id required")
 	}
 	rows, err := s.db.QueryContext(ctx, documentVectorsSQL, tenantID, store.DocStateFetched)
 	if err != nil {

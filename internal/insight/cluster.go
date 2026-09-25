@@ -1,5 +1,5 @@
-// Package insight implements curio's M4 insight layer: it clusters documents
-// by embedding similarity into labeled topic "interests".
+// Package insight implements curio's insight layer: it clusters documents by
+// embedding similarity into labeled topic "interests".
 //
 // The design keeps the algorithm swappable. A Clusterer takes points (a doc ID
 // + its vector) and returns a per-point label array (like scikit-learn's
@@ -101,7 +101,7 @@ func NewKNNGraphClusterer(opts KNNGraphOptions) *KNNGraphClusterer {
 	}
 }
 
-func (c *KNNGraphClusterer) Name() string { return "knn-graph" }
+func (*KNNGraphClusterer) Name() string { return "knn-graph" }
 
 func (c *KNNGraphClusterer) Params() map[string]any {
 	return map[string]any{

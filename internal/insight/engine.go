@@ -106,6 +106,7 @@ func (e *Engine) Rebuild(ctx context.Context, tenantID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read document vectors: %w", err)
 	}
+	dvs = e.dropNonFinite(tenantID, dvs)
 
 	// Nothing to cluster (a fresh corpus, or every doc temporarily `pending`
 	// during a `refetch --all` window): don't clobber a prior successful run's
@@ -137,6 +138,41 @@ func (e *Engine) Rebuild(ctx context.Context, tenantID string) (string, error) {
 		return run.ID, err
 	}
 	return run.ID, nil
+}
+
+// maxLoggedIDs bounds how many document IDs one warning lists.
+const maxLoggedIDs = 10
+
+// dropNonFinite removes document vectors with a NaN or infinite component,
+// warning once with their count and first IDs. One such vector would make
+// the corpus mean NaN and fail every run, blaming whichever healthy
+// document the unit-length check met first. Skipping it clusters the rest,
+// the way a run already tolerates an all-zero vector (it falls out as noise)
+// and a document deleted mid-run.
+func (e *Engine) dropNonFinite(tenantID string, dvs []store.DocVector) []store.DocVector {
+	if !slices.ContainsFunc(dvs, nonFinite) {
+		return dvs
+	}
+	kept := make([]store.DocVector, 0, len(dvs))
+	var skipped []string
+	for _, dv := range dvs {
+		if nonFinite(dv) {
+			skipped = append(skipped, dv.DocumentID)
+			continue
+		}
+		kept = append(kept, dv)
+	}
+	e.log.Warn("clustering: skipping documents whose vectors have NaN or infinite values; "+
+		"re-embed them with `curio reindex <id>`",
+		"tenant", tenantID, "count", len(skipped), "document_ids", skipped[:min(len(skipped), maxLoggedIDs)])
+	return kept
+}
+
+func nonFinite(dv store.DocVector) bool {
+	return slices.ContainsFunc(dv.Vector, func(x float32) bool {
+		f := float64(x)
+		return math.IsNaN(f) || math.IsInf(f, 0)
+	})
 }
 
 // bookkeepingTimeout bounds recording a failed run. It runs detached from the
@@ -230,9 +266,8 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 	if err := e.insights.FinishRun(ctx, runID, res); err != nil {
 		return fmt.Errorf("finish run: %w", err)
 	}
-	// Keep only the just-completed run; older runs (and their clusters) are
-	// dropped to bound storage. Keeping history for trajectory analysis is a
-	// later milestone.
+	// Keep only the just-completed run: older runs and their clusters are
+	// dropped to bound storage, since nothing reads them.
 	if err := e.insights.PruneRunsExcept(ctx, tenantID, runID); err != nil {
 		e.log.Warn("prune old cluster runs failed", "err", err)
 	}
@@ -284,17 +319,10 @@ func (e *Engine) describe(ctx context.Context, tenantID string, points []Point, 
 		return nil, err
 	}
 	for i, lab := range labels {
-		cws[i].Cluster.Label = optional(lab.Name)
-		cws[i].Cluster.Summary = optional(lab.Summary)
+		cws[i].Cluster.Label = store.NullableString(lab.Name)
+		cws[i].Cluster.Summary = store.NullableString(lab.Summary)
 	}
 	return cws, nil
-}
-
-func optional(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
 }
 
 // preparePoints turns document vectors into the unit vectors that both the

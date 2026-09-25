@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,12 +57,12 @@ func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := documentToResponse(doc)
-	ext, err := d.currentExtraction(r.Context(), doc)
-	if err != nil {
-		d.writeError(w, r, err)
-		return
-	}
-	if ext != nil {
+	if doc.CurrentExtractionID != nil {
+		ext, err := d.currentExtraction(r.Context(), doc)
+		if err != nil {
+			d.writeError(w, r, err)
+			return
+		}
 		if resp.CurrentExtraction, err = d.extractionToResponse(ext); err != nil {
 			d.writeError(w, r, err)
 			return
@@ -87,14 +88,11 @@ func (d Deps) extractionToResponse(ext *store.DocumentExtraction) (*ExtractionRe
 	return out, nil
 }
 
-// currentExtraction loads doc's current extraction, or nil when it has none.
-// The schema guarantees the row a current_extraction_id names, so a missing
-// one is an inconsistency, reported as an error rather than a missing
-// resource.
+// currentExtraction loads the extraction doc.CurrentExtractionID names, which
+// the caller has checked is set. The schema guarantees the row it names, so
+// a missing one is an inconsistency, reported as an error rather than a
+// missing resource.
 func (d Deps) currentExtraction(ctx context.Context, doc *store.Document) (*store.DocumentExtraction, error) {
-	if doc.CurrentExtractionID == nil {
-		return nil, nil
-	}
 	ext, err := d.Extractions.GetByID(ctx, *doc.CurrentExtractionID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("document %s: its current extraction %s doesn't exist", doc.ID, *doc.CurrentExtractionID)
@@ -108,8 +106,11 @@ func (d Deps) currentExtraction(ctx context.Context, doc *store.Document) (*stor
 // documentMarkdownPath is the absolute path of doc's current markdown, or
 // "" when it has none yet.
 func (d Deps) documentMarkdownPath(ctx context.Context, doc *store.Document) (string, error) {
+	if doc.CurrentExtractionID == nil {
+		return "", nil
+	}
 	ext, err := d.currentExtraction(ctx, doc)
-	if err != nil || ext == nil {
+	if err != nil {
 		return "", err
 	}
 	return d.markdownPath(ext), nil
@@ -360,13 +361,13 @@ func (d Deps) handleGetDocumentContent(w http.ResponseWriter, r *http.Request) {
 		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
+	if doc.CurrentExtractionID == nil {
+		writeProblem(w, r, http.StatusNotFound, "no content", "document has no extraction yet")
+		return
+	}
 	ext, err := d.currentExtraction(r.Context(), doc)
 	if err != nil {
 		d.writeError(w, r, err)
-		return
-	}
-	if ext == nil {
-		writeProblem(w, r, http.StatusNotFound, "no content", "document has no extraction yet")
 		return
 	}
 	path := d.markdownPath(ext)
@@ -386,9 +387,16 @@ func (d Deps) handleGetDocumentContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	// Content-Length makes a copy that fails partway an error the client
+	// sees (a body shorter than promised), not a complete-looking answer.
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	if _, err := io.Copy(w, f); err != nil {
-		// The status line is out, so the client only sees a short body.
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	if _, err := io.CopyN(w, f, info.Size()); err != nil {
 		d.Log.Warn("stream document content", "request_id", middleware.GetReqID(r.Context()),
 			"document_id", doc.ID, "err", err)
 	}

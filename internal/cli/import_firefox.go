@@ -42,7 +42,7 @@ Firefox first.`,
 				}
 			}
 
-			bms, err := importer.ParseFirefox(path)
+			bms, err := importer.ParseFirefox(cmd.Context(), path)
 			if err != nil {
 				return fmt.Errorf("parse: %w", err)
 			}

@@ -395,6 +395,50 @@ func TestEngine_ChunkLookupFailureKeepsHitsAndIsLogged(t *testing.T) {
 	assert.Contains(t, logs.String(), "database is locked")
 }
 
+// vanishingDocs is a document store in which the documents in gone were
+// deleted after the retrievers read their chunks.
+type vanishingDocs struct {
+	store.DocumentStore
+	gone map[string]bool
+}
+
+func (v vanishingDocs) GetByID(ctx context.Context, id string) (*store.Document, error) {
+	if v.gone[id] {
+		return nil, fmt.Errorf("document %s: %w", id, store.ErrNotFound)
+	}
+	return v.DocumentStore.GetByID(ctx, id)
+}
+
+// TestEngine_HitDeletedMidQueryIsSkipped: a matching document deleted
+// between the chunk search and hydration drops out of the results; the
+// query doesn't fail, and Related doesn't report its source as missing.
+func TestEngine_HitDeletedMidQueryIsSkipped(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	docs, chunks, docIDs := seedCorpus(t, db) // postgres, btree, llm
+	gone := vanishingDocs{docs, map[string]bool{docIDs[1]: true}}
+	engine := New(chunks, gone, &fakeEmbedder{byText: map[string][]float32{
+		"database": filledVec(0.20), // nearest the btree chunk
+	}}, Config{})
+	ids := func(hits []Hit) []string {
+		out := make([]string, 0, len(hits))
+		for _, h := range hits {
+			out = append(out, h.Document.ID)
+		}
+		return out
+	}
+
+	t.Run("search", func(t *testing.T) {
+		res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "database", K: 2})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{docIDs[0], docIDs[2]}, ids(res.Items), "the next-ranked document fills the slot")
+	})
+	t.Run("related", func(t *testing.T) {
+		res, err := engine.Related(context.Background(), RelatedRequest{TenantID: "local", DocumentID: docIDs[0], K: 5})
+		require.NoError(t, err)
+		assert.Equal(t, []string{docIDs[2]}, ids(res.Items))
+	})
+}
+
 // legStartBound bounds how long a test leg waits for the other leg to start.
 // It only runs out when the legs don't overlap, so it is generous.
 const legStartBound = 10 * time.Second
@@ -511,7 +555,7 @@ func TestEngine_KContract(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, res.Items, 2, "K 0 uses the configured default")
 
-	for _, k := range []int{-1, MaxK + 1} {
+	for _, k := range []int{-1, store.MaxSearchK + 1} {
 		_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zzqterm", K: k})
 		assert.Error(t, err, "k=%d", k)
 	}

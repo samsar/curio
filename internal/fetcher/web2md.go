@@ -54,7 +54,7 @@ func NewWeb2MD(opts Web2MDOptions) (*Web2MD, error) {
 	}, nil
 }
 
-func (w *Web2MD) Name() string { return "web2md" }
+func (*Web2MD) Name() string { return "web2md" }
 
 func (w *Web2MD) Fetch(ctx context.Context, target string) (*Result, error) {
 	if strings.TrimSpace(target) == "" {

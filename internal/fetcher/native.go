@@ -158,7 +158,7 @@ func NewNative(opts NativeOptions) *Native {
 	}
 }
 
-func (n *Native) Name() string { return "native" }
+func (*Native) Name() string { return "native" }
 
 func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 	if strings.TrimSpace(target) == "" {
@@ -876,25 +876,25 @@ func parseJina(text string) jinaParsed {
 		sawHeader bool
 	)
 	lines := strings.Split(text, "\n")
-	i := 0
 	meta := map[string]string{}
-	for i < len(lines) {
-		line := lines[i]
-		if strings.TrimSpace(line) == "Markdown Content:" {
+	i := 0
+header:
+	for ; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "Markdown Content:" {
 			i++
 			break
 		}
-		m := jinaHeaderRE.FindStringSubmatch(line)
-		if len(m) == 3 {
+		switch m := jinaHeaderRE.FindStringSubmatch(lines[i]); {
+		case len(m) == 3:
 			meta[strings.TrimSpace(m[1])] = strings.TrimSpace(m[2])
 			sawHeader = true
-		} else if strings.TrimSpace(line) == "" {
-			// blank line in header is fine
-		} else if sawHeader {
-			// header ended without a "Markdown Content:" marker
-			break
+		case line == "":
+			// A blank line inside the header is fine.
+		case sawHeader:
+			// The header ended without a "Markdown Content:" marker.
+			break header
 		}
-		i++
 	}
 	out.title = meta["Title"]
 	out.urlSource = meta["URL Source"]

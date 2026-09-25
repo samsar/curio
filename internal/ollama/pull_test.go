@@ -3,7 +3,7 @@ package ollama
 import (
 	"context"
 	"fmt"
-	"log/slog"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,40 +12,57 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPullModel_StreamsToSuccess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// pullFrom returns a Client whose /api/pull is handled by h.
+func pullFrom(t *testing.T, h http.HandlerFunc) *Client {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return newClient(t, srv.URL, "llama3.2")
+}
+
+func TestPull_StreamsToSuccess(t *testing.T) {
+	c := pullFrom(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/pull", r.URL.Path)
 		assert.Equal(t, http.MethodPost, r.Method)
 		fmt.Fprintln(w, `{"status":"pulling manifest"}`)
 		fmt.Fprintln(w, `{"status":"downloading","total":100,"completed":50}`)
 		fmt.Fprintln(w, `{"status":"downloading","total":100,"completed":100}`)
 		fmt.Fprintln(w, `{"status":"success"}`)
-	}))
-	defer srv.Close()
-
-	require.NoError(t, PullModel(context.Background(), srv.URL, "llama3.2", slog.Default()))
+	})
+	require.NoError(t, c.Pull(context.Background(), quietLog()))
 }
 
-func TestPullModel_SurfacesStreamError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+func TestPull_SurfacesStreamError(t *testing.T) {
+	c := pullFrom(t, func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, `{"status":"pulling manifest"}`)
 		fmt.Fprintln(w, `{"error":"model 'nope' not found"}`)
-	}))
-	defer srv.Close()
-
-	err := PullModel(context.Background(), srv.URL, "nope", slog.Default())
+	})
+	err := c.Pull(context.Background(), quietLog())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
 
-func TestPullModel_HTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+func TestPull_HTTPError(t *testing.T) {
+	c := pullFrom(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintln(w, "boom")
-	}))
-	defer srv.Close()
+	})
+	err := c.Pull(context.Background(), quietLog())
+	var se *StatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusInternalServerError, se.Code)
+	assert.Contains(t, err.Error(), "HTTP 500: boom")
+}
 
-	err := PullModel(context.Background(), srv.URL, "x", slog.Default())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HTTP 500")
+// TestPull_StreamEndsBeforeSuccess: progress lines and then EOF is a pull
+// that was cut off (Ollama crashed, the connection dropped), not a model
+// that is ready.
+func TestPull_StreamEndsBeforeSuccess(t *testing.T) {
+	c := pullFrom(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, `{"status":"pulling manifest"}`)
+		fmt.Fprintln(w, `{"status":"downloading","total":100,"completed":40}`)
+	})
+	err := c.Pull(context.Background(), quietLog())
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.Contains(t, err.Error(), "stream ended before success")
 }

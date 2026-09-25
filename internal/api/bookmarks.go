@@ -107,20 +107,12 @@ func (d Deps) bookmarkRow(in ImportBookmark, source string) *store.Bookmark {
 	return &store.Bookmark{
 		TenantID:   d.TenantID,
 		URL:        in.URL,
-		Title:      nonEmpty(in.Title),
+		Title:      store.NullableString(in.Title),
 		SavedAt:    savedAt,
 		Source:     source,
-		FolderPath: nonEmpty(in.FolderPath),
+		FolderPath: store.NullableString(in.FolderPath),
 		Tags:       in.Tags,
 	}
-}
-
-// nonEmpty is s as a nullable column value: nil when s is empty.
-func nonEmpty(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
 }
 
 // BookmarkListResponse mirrors the openapi BookmarkList schema.

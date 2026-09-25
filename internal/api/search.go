@@ -17,7 +17,7 @@ import (
 type SearchRequest struct {
 	Query   string  `json:"query"`
 	K       int     `json:"k,omitempty"`
-	Filters Filters `json:"filters,omitempty"`
+	Filters Filters `json:"filters,omitzero"`
 }
 
 // Filters mirrors the openapi filters block; the search engine applies
@@ -72,9 +72,9 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusBadRequest, "bad request", "query is required")
 		return
 	}
-	if req.K < 0 || req.K > search.MaxK {
+	if req.K < 0 || req.K > store.MaxSearchK {
 		writeProblem(w, r, http.StatusBadRequest, "bad request",
-			fmt.Sprintf("k must be between 1 and %d (or omitted for the default), got %d", search.MaxK, req.K))
+			fmt.Sprintf("k must be between 1 and %d (or omitted for the default), got %d", store.MaxSearchK, req.K))
 		return
 	}
 
@@ -114,7 +114,7 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 // hit's markdown path from its current extraction.
 //
 // One extra DB hit per result to surface the markdown path. K is at most
-// search.MaxK (100), so this stays small; if it ever shows up in latency,
+// store.MaxSearchK (100), so this stays small; if it ever shows up in latency,
 // batch via a single SELECT IN (...) instead.
 func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]SearchHitResponse, error) {
 	out := make([]SearchHitResponse, 0, len(hits))
@@ -162,7 +162,7 @@ type RelatedResponse struct {
 // 200 with empty items for a document that has no indexed chunks yet.
 func (d Deps) handleRelatedDocuments(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	k := intQuery(r, "k", defaultRelatedK, 1, search.MaxK)
+	k := intQuery(r, "k", defaultRelatedK, 1, store.MaxSearchK)
 
 	start := time.Now()
 	res, err := d.Search.Related(r.Context(), search.RelatedRequest{

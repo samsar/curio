@@ -113,7 +113,7 @@ func newRulesTestFetchers() (native, github, youtube Fetcher, registry map[strin
 type fakeRuleFetcher struct{ name string }
 
 func (f *fakeRuleFetcher) Name() string { return f.name }
-func (f *fakeRuleFetcher) Fetch(_ context.Context, _ string) (*Result, error) {
+func (*fakeRuleFetcher) Fetch(context.Context, string) (*Result, error) {
 	return &Result{Markdown: "x"}, nil
 }
 

@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -52,20 +51,14 @@ func migratedTo(t *testing.T, version int64) (*DB, *goose.Provider) {
 	return db, p
 }
 
-// latestMigration is the highest numeric prefix among the migration files.
+// latestMigration is the newest version among the embedded migrations, as
+// goose reads them.
 func latestMigration(t *testing.T) int64 {
 	t.Helper()
-	entries, err := fs.ReadDir(migrations.FS, ".")
-	require.NoError(t, err)
-	var latest int64
-	for _, e := range entries {
-		prefix, _, ok := strings.Cut(e.Name(), "_")
-		require.True(t, ok, e.Name())
-		n, err := strconv.ParseInt(prefix, 10, 64)
-		require.NoError(t, err, e.Name())
-		latest = max(latest, n)
-	}
-	return latest
+	db, _ := openUnmigrated(t)
+	sources := newProvider(t, db, migrations.FS).ListSources()
+	require.NotEmpty(t, sources)
+	return sources[len(sources)-1].Version // ListSources sorts by version
 }
 
 func hasColumn(t *testing.T, db *DB, table, column string) bool {
@@ -576,6 +569,41 @@ func TestMigration009_KeysetIndexes(t *testing.T) {
 	}
 
 	_, err = p.DownTo(ctx, 8)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db))
+}
+
+// TestMigration010_DropsUnusedBookmarkIndexes: 010 drops the two bookmark
+// indexes no query reads, keeps every row, and its Down restores the
+// schema exactly.
+func TestMigration010_DropsUnusedBookmarkIndexes(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 9)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url) VALUES ('d1', 'local', 'https://example.com/1');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, saved_at, source, folder_path)
+			VALUES ('b1', 'local', 'd1', 'https://example.com/1', '2024-01-01T00:00:00.000Z', 'chrome', '/Tech');`)
+	require.NoError(t, err)
+	schemaBefore := schemaDump(t, db)
+	rowsBefore := dumpRows(t, db, `SELECT * FROM bookmarks`)
+	indexes := func() []string {
+		rows := dumpRows(t, db, `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'bookmarks'`)
+		names := make([]string, 0, len(rows))
+		for _, row := range rows {
+			names = append(names, row[0].(string))
+		}
+		return names
+	}
+	require.Subset(t, indexes(), []string{"idx_bookmarks_tenant_source", "idx_bookmarks_folder"})
+
+	_, err = p.UpTo(ctx, 10)
+	require.NoError(t, err)
+	assert.NotContains(t, indexes(), "idx_bookmarks_tenant_source")
+	assert.NotContains(t, indexes(), "idx_bookmarks_folder")
+	assert.Subset(t, indexes(), []string{"idx_bookmarks_tenant_created", "idx_bookmarks_document"})
+	assert.Equal(t, rowsBefore, dumpRows(t, db, `SELECT * FROM bookmarks`))
+
+	_, err = p.DownTo(ctx, 9)
 	require.NoError(t, err)
 	assert.Equal(t, schemaBefore, schemaDump(t, db))
 }

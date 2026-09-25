@@ -22,7 +22,7 @@ func newInterestsCmd(env *daemonctl.Env) *cobra.Command {
 			"picture of what you read about. Run `curio interests rebuild` to compute\n" +
 			"or refresh them after adding content.",
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
@@ -51,7 +51,7 @@ func newInterestsRebuildCmd(env *daemonctl.Env) *cobra.Command {
 			"indexed documents. Runs in the background; follow it with the\n" +
 			"`curio jobs show <job-id>` it prints, and view results with `curio interests`.",
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}

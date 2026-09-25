@@ -2,7 +2,119 @@
 
 A running log of design decisions, what we picked, and why. New entries go at
 the bottom. When a decision is revisited, add a new entry rather than rewriting
-the old one — the history is useful.
+the old one — the history is useful. A decision that still stands but changed
+in detail gets a **Revised** note appended to its entry.
+
+Add a line to the index below with each new entry, and mark an entry's line
+"(revised)" or "(superseded)" when you append such a note to it. Dates are
+when the entry was first committed.
+
+- 2026-05-23 — [Language: Go](#language-go)
+- 2026-05-23 — [Architecture: daemon + thin clients](#architecture-daemon--thin-clients)
+- 2026-05-23 — [Transport: HTTP + JSON](#transport-http--json)
+- 2026-05-23 — [MCP server as a sidecar process](#mcp-server-as-a-sidecar-process)
+- 2026-05-23 — [Storage: SQLite for v1](#storage-sqlite-for-v1)
+- 2026-05-23 — [Job queue: SQLite-backed](#job-queue-sqlite-backed) (revised)
+- 2026-05-23 — [Embedding model: nomic-embed-text via Ollama](#embedding-model-nomic-embed-text-via-ollama) (revised)
+- 2026-05-23 — [Daemon lifecycle: PID file + auto-start](#daemon-lifecycle-pid-file--auto-start) (revised)
+- 2026-05-23 — [Storage location: `~/.curio` with marker file](#storage-location-curio-with-marker-file)
+- 2026-05-23 — [Data model: documents are universal, references are per-source](#data-model-documents-are-universal-references-are-per-source)
+- 2026-05-23 — [Multi-tenancy: `tenant_id` on reference tables, not child tables](#multi-tenancy-tenant_id-on-reference-tables-not-child-tables)
+- 2026-05-23 — [Fetcher selection: data-driven rules file](#fetcher-selection-data-driven-rules-file)
+- 2026-05-23 — [Hybrid search: BM25 + vector + RRF](#hybrid-search-bm25--vector--rrf) (revised)
+- 2026-05-24 — [BM25 query sanitization: OR + stopwords](#bm25-query-sanitization-or--stopwords)
+- 2026-05-23 — [API: cursor pagination, not offset](#api-cursor-pagination-not-offset)
+- 2026-05-23 — [API: all long-running operations are async with job IDs](#api-all-long-running-operations-are-async-with-job-ids)
+- 2026-05-23 — [API: search response exposes BM25 and vector scores per chunk](#api-search-response-exposes-bm25-and-vector-scores-per-chunk)
+- 2026-05-23 — [API: search knobs are per-request overrides](#api-search-knobs-are-per-request-overrides)
+- 2026-05-23 — [API: `tenant_id` is server-side only, never echoed to clients](#api-tenant_id-is-server-side-only-never-echoed-to-clients)
+- 2026-05-23 — [API: bulk operations live under named endpoints, not `/batch`](#api-bulk-operations-live-under-named-endpoints-not-batch)
+- 2026-05-23 — [API: `/v1/documents/{id}/references` returns a shape that grows additively](#api-v1documentsidreferences-returns-a-shape-that-grows-additively)
+- 2026-05-23 — [SQLite build tags](#sqlite-build-tags)
+- 2026-05-23 — [SQLite DSN: per-connection pragmas via mattn's query params](#sqlite-dsn-per-connection-pragmas-via-mattns-query-params)
+- 2026-05-23 — [Migrations do not set PRAGMA journal_mode](#migrations-do-not-set-pragma-journal_mode)
+- 2026-05-23 — [Job queue claim via atomic UPDATE ... RETURNING](#job-queue-claim-via-atomic-update--returning)
+- 2026-05-23 — [Ollama: native install, not containerized](#ollama-native-install-not-containerized)
+- 2026-05-23 — [Default fetcher is Go-native, not a Node subprocess](#default-fetcher-is-go-native-not-a-node-subprocess) (revised)
+- 2026-05-23 — [Importers: CLI parses, daemon receives lists](#importers-cli-parses-daemon-receives-lists)
+- 2026-05-23 — [HTML export is a first-class importer source](#html-export-is-a-first-class-importer-source)
+- 2026-05-23 — [HTML parser walks recursively, finds <DL> inside <DT>](#html-parser-walks-recursively-finds-dl-inside-dt)
+- 2026-05-23 — [Worker pool: N workers via the same atomic ClaimNext](#worker-pool-n-workers-via-the-same-atomic-claimnext) (revised)
+- 2026-05-23 — [Marker file's schema_version is synced from the DB after migrations](#marker-files-schema_version-is-synced-from-the-db-after-migrations)
+- 2026-05-23 — [Chunker enforces a 3500-char hard cap (not just 384 words)](#chunker-enforces-a-3500-char-hard-cap-not-just-384-words)
+- 2026-05-23 — [Embedder passes num_ctx=8192 to Ollama, chunker defaults to 384 words](#embedder-passes-num_ctx8192-to-ollama-chunker-defaults-to-384-words)
+- 2026-09-24 — [Indexer: embed in batches of 32; `embedding.timeout_seconds`](#indexer-embed-in-batches-of-32-embeddingtimeout_seconds)
+- 2026-05-24 — [Document state follows job outcome via OnPermanentFailure hook](#document-state-follows-job-outcome-via-onpermanentfailure-hook)
+- 2026-05-24 — [Fallback strategy: only Jina for content-came-back cases](#fallback-strategy-only-jina-for-content-came-back-cases)
+- 2026-05-24 — [Anti-bot mitigation: browser-thorough headers, not just User-Agent](#anti-bot-mitigation-browser-thorough-headers-not-just-user-agent)
+- 2026-06-04 — [Anti-bot mitigation: pluggable TLS/HTTP2 fingerprint backend (uTLS)](#anti-bot-mitigation-pluggable-tlshttp2-fingerprint-backend-utls) (revised)
+- 2026-06-04 — [PDF fetcher: two-tier, pure-Go local then Jina](#pdf-fetcher-two-tier-pure-go-local-then-jina)
+- 2026-05-24 — [CLI defaults: happy-path views; debug paths are opt-in](#cli-defaults-happy-path-views-debug-paths-are-opt-in)
+- 2026-05-24 — [Jobs lifecycle: prune/delete, no nuke-all path](#jobs-lifecycle-prunedelete-no-nuke-all-path)
+- 2026-05-24 — [Safari importer: skip Reading List, require Full Disk Access](#safari-importer-skip-reading-list-require-full-disk-access)
+- 2026-06-04 — [Firefox importer: copy the live places.sqlite, prefer the install default](#firefox-importer-copy-the-live-placessqlite-prefer-the-install-default)
+- 2026-05-24 — [Jobs list: sort by updated_at, show timestamp](#jobs-list-sort-by-updated_at-show-timestamp)
+- 2026-05-24 — [`curio status`: CLI version, daemon version, disk usage](#curio-status-cli-version-daemon-version-disk-usage)
+- 2026-05-24 — [CLI hides `next_attempt` for terminal-status jobs](#cli-hides-next_attempt-for-terminal-status-jobs)
+- 2026-05-23 — [What's deferred from the v1 API](#whats-deferred-from-the-v1-api)
+- 2026-05-25 — [PatternDispatcher: host-based fetcher routing](#patterndispatcher-host-based-fetcher-routing) (superseded)
+- 2026-05-25 — [YouTube fetcher: yt-dlp over API/scraping](#youtube-fetcher-yt-dlp-over-apiscraping) (revised)
+- 2026-05-25 — [GitHub fetcher: REST API, no clone](#github-fetcher-rest-api-no-clone)
+- 2026-05-25 — [Per-fetcher rate limiting](#per-fetcher-rate-limiting) (revised)
+- 2026-05-25 — [YouTube URL normalization](#youtube-url-normalization) (revised)
+- 2026-07-05 — [GitHub issues, PRs, and wiki pages](#github-issues-prs-and-wiki-pages)
+- 2026-07-05 — [Dead-link detection: hard 404/410 + soft-404 heuristics](#dead-link-detection-hard-404410--soft-404-heuristics)
+- 2026-07-05 — [fetcher_rules.yaml: mtime-polled hot reload, keep-last-good](#fetcher_rulesyaml-mtime-polled-hot-reload-keep-last-good)
+- 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search)
+- 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4)
+- 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator) (revised)
+- 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
+- 2026-07-06 — [M6 (planned): RAG / Q&A synthesis + SOTA natural-language search](#m6-planned-rag--qa-synthesis--sota-natural-language-search)
+- 2026-07-06 — [nomic-embed-text task prefixes (`search_document:` / `search_query:`)](#nomic-embed-text-task-prefixes-search_document--search_query)
+- 2026-07-06 — [Insight clustering quality: the "general-reading" mega-cluster (known limitation)](#insight-clustering-quality-the-general-reading-mega-cluster-known-limitation)
+- 2026-09-09 — [Host-cache hits are permanent failures](#host-cache-hits-are-permanent-failures) (revised)
+- 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out)
+- 2026-09-24 — [Single daemon per home: flock on daemon.pid, bind before touching the DB](#single-daemon-per-home-flock-on-daemonpid-bind-before-touching-the-db) (revised)
+- 2026-09-24 — [Interrupted vs. orphaned jobs](#interrupted-vs-orphaned-jobs)
+- 2026-09-24 — [Config: strict keys, legacy `workers` folded in at load](#config-strict-keys-legacy-workers-folded-in-at-load)
+- 2026-09-24 — [Refetch: state reset and fetch job in one transaction](#refetch-state-reset-and-fetch-job-in-one-transaction)
+- 2026-09-24 — [Migrations: rebuilding a table other tables reference](#migrations-rebuilding-a-table-other-tables-reference)
+- 2026-09-24 — [Fetcher errors: one typed status model](#fetcher-errors-one-typed-status-model)
+- 2026-09-24 — [GitHub: secondary rate limits and a shared cooldown](#github-secondary-rate-limits-and-a-shared-cooldown)
+- 2026-09-24 — [Fetchers: one cap on every response body](#fetchers-one-cap-on-every-response-body)
+- 2026-09-24 — [Host cache: only host-wide verdicts, under the host that gave them](#host-cache-only-host-wide-verdicts-under-the-host-that-gave-them)
+- 2026-09-24 — [Login-wall heuristic: www and apex are the same site](#login-wall-heuristic-www-and-apex-are-the-same-site)
+- 2026-09-24 — [Fetch politeness: shared Jina pacing, per-host origin gate](#fetch-politeness-shared-jina-pacing-per-host-origin-gate) (revised)
+- 2026-09-24 — [URL normalization: fetch-equivalent and idempotent](#url-normalization-fetch-equivalent-and-idempotent)
+- 2026-09-24 — [Subprocess fetchers: kill the process group, cap the output](#subprocess-fetchers-kill-the-process-group-cap-the-output)
+- 2026-09-24 — [Chrome profiles carry their own User-Agent and sec-ch-ua](#chrome-profiles-carry-their-own-user-agent-and-sec-ch-ua)
+- 2026-09-24 — [Store boundary: consumers see interfaces, depguard enforces it](#store-boundary-consumers-see-interfaces-depguard-enforces-it)
+- 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert)
+- 2026-09-24 — [Bookmark ingest: one transaction, fetch only for new documents](#bookmark-ingest-one-transaction-fetch-only-for-new-documents)
+- 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down)
+- 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders)
+- 2026-09-24 — [API: handler edge cases found by coverage](#api-handler-edge-cases-found-by-coverage) (revised)
+- 2026-09-25 — [updated_at: written by each statement, not by triggers](#updated_at-written-by-each-statement-not-by-triggers)
+- 2026-09-25 — [Jobs reference their document through a column](#jobs-reference-their-document-through-a-column)
+- 2026-09-25 — [Indexes follow the queries; plans are pinned by tests](#indexes-follow-the-queries-plans-are-pinned-by-tests) (revised)
+- 2026-09-25 — [Chunks: external-content FTS, derived rows kept by triggers](#chunks-external-content-fts-derived-rows-kept-by-triggers)
+- 2026-09-25 — [Worker wakeups: an in-process signal, and idle polls that back off](#worker-wakeups-an-in-process-signal-and-idle-polls-that-back-off)
+- 2026-09-25 — [API: request IDs, one error mapping, logged server errors](#api-request-ids-one-error-mapping-logged-server-errors) (revised)
+- 2026-09-25 — [API: tolerant responses, strict requests](#api-tolerant-responses-strict-requests)
+- 2026-09-25 — [API: absolute content paths, and hydration errors fail the request](#api-absolute-content-paths-and-hydration-errors-fail-the-request) (revised)
+- 2026-09-25 — [API: filters are validated, sizing knobs default](#api-filters-are-validated-sizing-knobs-default)
+- 2026-09-25 — [Clients: one discovery, an explicit daemon environment, a signal context](#clients-one-discovery-an-explicit-daemon-environment-a-signal-context)
+- 2026-09-25 — [Client errors: a typed APIError, and "unreachable" means never connected](#client-errors-a-typed-apierror-and-unreachable-means-never-connected)
+- 2026-09-25 — [MCP sidecar: restart an unreachable daemon, retry once](#mcp-sidecar-restart-an-unreachable-daemon-retry-once)
+- 2026-09-25 — [List pagination: keyset on (timestamp, id)](#list-pagination-keyset-on-timestamp-id)
+- 2026-09-25 — [API: the spec is the contract, checked by tests](#api-the-spec-is-the-contract-checked-by-tests) (revised)
+- 2026-09-25 — [Toolchain: the go directive is the build toolchain, govulncheck gates it](#toolchain-the-go-directive-is-the-build-toolchain-govulncheck-gates-it)
+- 2026-09-25 — [Releases: gated on CI, pinned, least privilege](#releases-gated-on-ci-pinned-least-privilege)
+- 2026-09-25 — [Lint: a measured linter set, zero issues, explained suppressions](#lint-a-measured-linter-set-zero-issues-explained-suppressions)
+- 2026-09-25 — [Ollama: one client, one sentinel pair, a pull that keeps trying](#ollama-one-client-one-sentinel-pair-a-pull-that-keeps-trying)
+- 2026-09-25 — [Insight: skip non-finite document vectors, don't fail the run](#insight-skip-non-finite-document-vectors-dont-fail-the-run)
+- 2026-09-25 — [CLI: exit 130 on interrupt, a usage hint on usage errors](#cli-exit-130-on-interrupt-a-usage-hint-on-usage-errors)
+- 2026-09-25 — [Open questions](#open-questions)
 
 ---
 
@@ -122,6 +234,17 @@ dimension is unchanged. All embedding access already goes through the
 `Embedder` interface, so the swap stays tractable. Future enhancement: run two
 embedders side-by-side during a transition. Not needed for v1.
 
+**Revised (2026-09):** The startup guard exists: `checkMarker` in
+`cmd/curio-daemon` refuses to start when `config.yaml`'s `embedding.model` or
+`embedding.dim` differs from `.curio-meta.json`, with one error naming both
+files and values and the fix (set them back, or use another `CURIO_HOME`).
+It refuses *any* change, same dimension included, so `reindex` does not
+enable a swap: the daemon won't run under the new model to reindex with it.
+`reindex` re-embeds with the configured model, for chunker and prefix
+changes and new tags. A supported swap (update the marker, rebuild
+`chunks_vec`, reindex, all behind the guard) is future work, tracked in
+`docs/roadmap.md`. There is no `--reason` flag.
+
 ---
 
 ## Daemon lifecycle: PID file + auto-start
@@ -236,6 +359,10 @@ outside it; omitted means `search.default_k`, which is now actually applied
 **Knobs exposed in config:** BM25/vector weights in RRF (finite, not negative,
 not both zero; a single zero switches that retriever's contribution off),
 chunk-to-doc collapse strategy, `default_k`, `embed_timeout_seconds`.
+
+**Revised (2026-09):** the bound is `store.MaxSearchK` (still 100). It moved
+out of `internal/search` because config validation needs it, and importing
+the search engine for a constant linked it into the CLI and `curio-mcp`.
 
 ---
 
@@ -1225,77 +1352,6 @@ it lands — no `/v1` → `/v2` bump required.
 
 ---
 
-## What's not decided yet
-
-- **Insight layer specifics:** clustering algorithm and labeling ✅ decided
-  in M4 — kNN-graph clustering + term/LLM labels (see the entry below). Still
-  open: trajectory analysis ("new this month"), cross-cluster interest
-  merging, and a standalone `interests` table, deferred until there's real
-  usage data.
-- **Authentication for hosted mode:** the scheme (API keys vs OAuth vs SSO)
-  is deferred. Nothing is stubbed in the local daemon, which trusts every
-  local process that can reach loopback (see "Local API: loopback only, no
-  token, browsers shut out").
-- **Re-crawl policy:** how often to refetch a given URL. Likely
-  domain-rule-driven (news daily, docs monthly, static essays never).
-- **Highlight / read-later importers:** schema is ready; importer code is not
-  in v1.
-- ~~**"Page Not Found" detection**~~ ✅ implemented — see the
-  "Dead-link detection: hard 404/410 + soft-404 heuristics" entry
-  below (title patterns + redirect-to-homepage; dead docs go to
-  state `dead`). The embedding-based "this isn't really an article"
-  classifier remains a possible future refinement.
-
-- **Natural-language search is provisional.** Current BM25 sanitization
-  (OR + small stopword list — see decision above) is the production
-  default of mid-2010s search engines, not the leading edge. We should
-  revisit when retrieval quality starts feeling weak or when corpus
-  size makes the noise from pure-OR matching surface. Options in rough
-  order of effort:
-
-    1. **Stemming + `minimum_should_match` post-filter.** Add a Porter
-       or Snowball stemmer to the tokenizer side AND require ~50-75% of
-       non-stopword tokens to match (FTS5 doesn't support this natively,
-       so we'd post-filter in Go). Cheap; modest recall + precision
-       boost.
-
-    2. **LLM query rewriting via Ollama.** Send the natural-language
-       query to a small local model with a system prompt like "extract
-       3-7 keyword phrases from this query." Use those for BM25 (vector
-       still uses the original). This is the "Perplexity / You.com"
-       pattern. Adds ~200-1000ms per query; quality jump can be big.
-       We already have Ollama running so the infrastructure cost is
-       zero. Right move if a search-quality eval shows BM25 is dragging
-       the hybrid score down.
-
-    3. **Learned sparse retrieval (SPLADE / ColBERT).** Replace BM25
-       entirely with a transformer-produced sparse vector indexed in an
-       inverted index. This is what Vespa, Qdrant, Weaviate are pushing
-       as "the next BM25." Best-in-class for natural-language queries,
-       but requires deploying another model, embedding every chunk at
-       index time, and embedding queries at search time. Massive
-       complexity jump for what's still a single-user local system.
-       Only worth it if curio outgrows hobby scale.
-
-  **Prerequisite for any of these:** a tiny eval harness — 10-20
-  representative queries with expected docs, scored on NDCG@10 or
-  recall@10. Without it we'll be guessing about whether each change
-  actually moved retrieval quality. Build the eval BEFORE the
-  improvement.
-
-  ✅ The eval harness now exists — `curio eval --queries <qrels.yaml>`
-  (`internal/eval`: recall@k / precision@k / NDCG@k / MRR). The SOTA
-  NL-search work itself is scheduled as **M6**, alongside RAG — see
-  "M6 (planned): RAG / Q&A synthesis + SOTA natural-language search" below.
-
-  **What's NOT under consideration:** building our own tokenizer,
-  custom synonym dictionaries, query-classification pipelines. The
-  hybrid retriever + RRF was chosen specifically to keep retrieval
-  simple; any "smartness" should live in the query-rewriting layer
-  above the retriever, not inside it.
-
----
-
 ## PatternDispatcher: host-based fetcher routing
 
 **Decision:** Replace the M0 `Single` dispatcher with
@@ -1837,6 +1893,13 @@ labeling uses the term fallback until the generation model lands. Gated by
 metered/offline setups). This is why LLM labeling can be the default without
 making a 2 GB download a hard prerequisite.
 
+**Revised (2026-09):** the generator and the embedder now share one
+`internal/ollama.Client`: the sentinels are `ollama.ErrUnreachable` and
+`ollama.ErrModelNotLoaded`, the pull is `Client.Pull`, and the daemon runs
+`Client.KeepPulled`, which retries the pull until the model lands instead of
+trying once at startup. See "Ollama: one client, one sentinel pair, a pull
+that keeps trying".
+
 ---
 
 ## Retrieval eval harness
@@ -2131,6 +2194,22 @@ stop it by hand.
 
 **Not done:** job leases or heartbeats. The lock makes "one daemon per
 database" true, and that is the assumption the queue relies on.
+
+**Revised (2026-09):** `Controller.Stop` returns `(stopped bool, err)`.
+`stopped` is true only when a daemon for this home was running when Stop
+began and is gone when it returns; no daemon, a stale PID file or another
+home's daemon on the port is `(false, nil)`, and `curio daemon stop` then
+prints "daemon not running" instead of "daemon stopped". Status probes
+healthz after reading the lock, which can take up to the daemon's own
+Ollama check, so Stop reads the lock again right before signalling: if
+the PID it saw no longer holds it, that daemon has exited and is not
+signalled (its PID may already be reused), and `ESRCH` from the signal
+likewise means stopped, not a "no such process" error. `EnsureRunning`
+waiting on a lock holder it didn't spawn now allows
+max(StartTimeout, StopTimeout): the holder may be draining after a stop
+(up to 20s) rather than starting (15s), and the timeout error says
+"starting up or shutting down" instead of blaming a daemon "already
+starting".
 
 ---
 
@@ -2519,6 +2598,16 @@ an import dominated by one site proceeds at roughly that site's pace
 (two requests at a time) instead of sixteen. That is the point for the
 site, and mixed imports barely notice.
 
+**Revised (2026-09):** `pace` checks the cooldown twice: before queueing
+in the limiter, so a cooldown already longer than the inline cap fails
+fast, and again once the token is granted, so a 429 that arrived while
+the call was queued is still seen. Checking only after the token made
+every caller wait its turn for a token it would then not use: at the
+keyless 20 a minute the 16th fetch worker waited about 45 s just to fail,
+and each of them spent a token a later call needed. A short cooldown (up
+to the cap) still queues first, as before. GitHub's calls go through the
+same `pace`.
+
 ---
 
 ## URL normalization: fetch-equivalent and idempotent
@@ -2736,12 +2825,12 @@ healed with `curio refetch --all --state=pending`.
 per bookmark, the same as the five autocommit statements it replaces, and
 it lets fetch and index workers interleave with a 500-bookmark batch. The
 indexes of migration 007 raised it to about 245 µs, from 190 µs on the
-machine that re-measured both. The
-transaction takes the write lock at BEGIN (see "SQLite DSN"), so concurrent
-ingests queue on it through busy_timeout; five writers ingesting the same
-URLs produced one document and one job per URL and no `SQLITE_BUSY`. The import handler stops at the first bookmark after
-the client has gone; each committed bookmark stands on its own, so a
-re-import resumes.
+machine that re-measured both. The transaction takes the write lock at
+BEGIN (see "SQLite DSN"), so concurrent ingests queue on it through
+busy_timeout; five writers ingesting the same URLs produced one document
+and one job per URL and no `SQLITE_BUSY`. The import handler stops at the
+first bookmark after the client has gone; each committed bookmark stands
+on its own, so a re-import resumes.
 
 URL normalization and `importer.Indexable` filtering stay in the handlers,
 which report failures differently (400 versus `filtered_by`).
@@ -2751,9 +2840,9 @@ which report failures differently (400 versus `filtered_by`).
 ## Migrate: goose's Provider, and a context all the way down
 
 **Decision:** `sqlite.Open` and `Migrate` take a context (`PingContext`,
-`Provider.Up(ctx)`), and the daemon passes its run context. `Migrate` applies the embedded migrations
-through `goose.NewProvider`, never goose's package-level `SetBaseFS` /
-`SetDialect` / `Up`.
+`Provider.Up(ctx)`), and the daemon passes its run context. `Migrate`
+applies the embedded migrations through `goose.NewProvider`, never goose's
+package-level `SetBaseFS` / `SetDialect` / `Up`.
 
 **Why:** the package-level API reads and writes process globals, so two
 databases migrating at once race: four parallel test subtests that each
@@ -2837,6 +2926,11 @@ with no extraction fails permanently, and the permanent-failure hook then
 marks the document failed. So `curio reindex --all --state=pending` turned
 documents whose first fetch was still in flight into failed ones.
 Single-document reindex already refused such a document with 409.
+
+**Revised (2026-09):** the 405 handler probes the path chi routed on, the
+escaped one when the URL has it: `PUT /v1/bookmarks/a%2Fb` answered 405 with
+an empty `Allow`, because chi matched `a%2Fb` as one `{id}` while the probe
+used the decoded `/v1/bookmarks/a/b`, which matches nothing.
 
 ---
 
@@ -2958,6 +3052,15 @@ all of it the job INSERTs (the `document_id` check about 0.3 s of it), and
 a bookmark `Ingest` about 245 µs instead of 190 µs. Reads that were
 proportional to the table are now proportional to the page, which is the
 trade `curio docs` and `curio jobs` need.
+
+**Revised (2026-09):** Migration 010 drops `idx_bookmarks_tenant_source`
+and `idx_bookmarks_folder`, which no query reads. `Bookmarks.List` walks
+`idx_bookmarks_tenant_created` under every filter, `Count` scans it as a
+covering index, `TagsForDocument` and the search source filter use
+`idx_bookmarks_document`, and the point operations use the primary key.
+The `Count` and `TagsForDocument` plans are pinned too now. Every bookmark
+insert, and every source or folder update, no longer maintains two unused
+indexes.
 
 ---
 
@@ -3130,6 +3233,16 @@ operator's own tools (see "Local API: loopback only, no token, browsers
 shut out"), and the detail plus the request ID is what makes
 `curio daemon logs` searchable.
 
+**Revised (2026-09):** A handler that panics after its status line went out
+is logged the same way, once, and then aborted with `http.ErrAbortHandler`,
+so net/http cuts the connection. Returning instead let net/http finish the
+chunked response, and a client read a 200 with half a body and no error.
+The access-log line is skipped for such a request; the panic record
+carries its request ID, method and path. `GET /v1/documents/{id}/content`
+declares `Content-Length` from the file's size for the same reason: a copy
+that fails partway is a short body the client detects, not a complete
+answer.
+
 ---
 
 ## API: tolerant responses, strict requests
@@ -3183,6 +3296,12 @@ own home, so a client had to know the daemon's layout. The same code
 discarded lookup errors, turning a database error into plausible but wrong
 data: a document without `current_extraction`, a hit without a path, an
 interest without members.
+
+**Revised (2026-09):** one lookup is exempt: a search or related hit whose
+document was deleted after the chunk search read it is skipped, and the
+next-ranked document takes its place. That is a concurrent delete, not an
+inconsistency, and failing on it answered `POST /v1/search` with a 404 and
+`/related` with "document <source> not found" about the wrong document.
 
 ---
 
@@ -3430,3 +3549,326 @@ by design). Seventeen `nullable` keywords meant nothing under 3.1, and
 kin-openapi's validator accepted them silently. The docs said the clients
 were generated from the spec; they are hand-written, so a test is what
 keeps the two in step. Codegen stays deferred.
+
+**Revised (2026-09):** `TestOpenAPI_ResponsesMatchSchemas` now enforces
+what its fixtures only claimed: it records, per resolved response schema,
+the properties present in the validated responses, and fails listing every
+declared property (`Schema.property`) that none carried. A mutation run had
+found 16 optional properties the strict validation never saw (among them
+`Health.ollama_detail`, `BookmarkList.next_cursor`, `ImportResult.errors`,
+`Document.author`, `SearchResponse.degraded` and `Job.doc_title`); the
+fixtures and exchanges now produce each one. Removing an optional
+property from the spec, or adding one no fixture sets, fails the test.
+
+---
+
+## Toolchain: the go directive is the build toolchain, govulncheck gates it
+
+**Decision:** The `go` line in `go.mod` names the exact toolchain CI and
+releases build with (`go 1.26.8`), and there is still no `toolchain`
+directive. setup-go installs it from `go-version-file`, and the Makefile
+exports `GOTOOLCHAIN=go<directive>`, so every local target runs it too; the
+go command downloads it once when a machine's default Go differs.
+`make vulncheck` runs govulncheck v1.8.0 with the sqlite build tags. CI runs
+it on every push and pull request, and the release gate runs CI.
+
+The policy:
+
+- Bump the patch when govulncheck reports a standard-library finding.
+- Move to the next minor before the current line leaves support. Go
+  supports its two newest minors, so the release of go1.N+2 ends go1.N.
+- golangci-lint must be built with a Go minor at least the directive's, or
+  it cannot type-check the standard library it is handed.
+- No `toolchain` line. golangci-lint reads it as the target version, so a
+  toolchain newer than the language version makes modernize suggest APIs
+  that vet's stdversion check then rejects. Move the `go` line instead.
+
+**Why:** The shipped binaries were built with go1.25.7, and govulncheck
+found the code reaching 19 known vulnerabilities: 17 in the standard library
+(net/http, crypto/tls, crypto/x509, net/url and others, fixed in 1.25.8
+through 1.25.13), golang.org/x/text v0.37.0, and cloudflare/circl v1.5.0,
+which tls-client pulls in. The daemon fetches arbitrary web pages, so
+untrusted input reaches exactly those packages, and nothing ran govulncheck.
+Go 1.25 left support when go1.27.0 shipped on 2026-08-19; go1.25.14 was its
+last patch, so pinning it would only postpone the first finding with no fix
+on that line. Moving to 1.26.8 with x/text v0.39.0 and circl v1.6.3 brings
+the count to zero, and the language change from 1.25 needed no code change.
+
+Exporting GOTOOLCHAIN came from a measured failure: the official
+golangci-lint v2.12.2 binary, built with go1.26.2, cannot load go1.27's
+standard library ("file requires newer Go version go1.27") on a machine
+whose default Go is newer than the directive. With the export it loads the
+directive's standard library everywhere.
+
+---
+
+## Releases: gated on CI, pinned, least privilege
+
+**Decision:** `release.yml` runs `ci.yml` (`workflow_call`) as a `ci` job,
+and the `release` job `needs` it. A tag whose tree fails tidy-check, build,
+vet, the unit or end-to-end tests, vulncheck or lint cannot publish. The
+workflow's token is read-only at the top level; only the `release` job gets
+`contents: write`, and `GITHUB_TOKEN` and `HOMEBREW_TAP_GITHUB_TOKEN` appear
+only in the goreleaser step's environment. The gate job inherits the
+read-only token and sees no secrets.
+
+- Every third-party action is pinned by full commit SHA with its tag in a
+  trailing comment (checkout v7.0.1, setup-go v7.0.0, goreleaser-action
+  v7.2.3, golangci-lint-action v9.3.0; all on node24, which replaces the
+  deprecated node20 runtime). The local reusable workflow is referenced by
+  path, which already means "this commit". goreleaser itself is pinned
+  exactly (v2.18.2) instead of `~> v2`.
+- The release job checks out with `persist-credentials: false` and builds
+  with setup-go's cache off, so the job holding the write token never
+  restores a module cache another run wrote.
+- CI gains a `test-macos` job on macos-14, the release runner:
+  darwin/arm64 is the only platform goreleaser ships and was never built or
+  tested before a tag. It runs `make test` with no artifacts or secrets.
+- The lint job reads its golangci-lint version from the Makefile
+  (`make -s golangci-lint-version`), so the pin lives in one place, and
+  runs actionlint over the workflows.
+- Dependabot opens one grouped PR per week for Go modules and one for
+  actions; for actions it moves the SHA and the tag comment together.
+- goreleaser's `before` hook verifies (`go mod tidy -diff`) instead of
+  running `go mod tidy` on the release checkout.
+
+**Deferred: `brews` → `homebrew_casks`.** `goreleaser check` v2.18.2 exits
+non-zero because `brews` is deprecated, so it is not part of the gate yet.
+Migrating turns the tap's Formula into a Cask, which changes how users
+install and upgrade; that is a distribution decision of its own, not a
+hygiene fix.
+
+**Why:** The release workflow published with a write token and a PAT that
+can push to the tap, on any `v*` tag, with no test, vet, lint or
+vulnerability gate and nothing requiring the tagged commit to have passed
+CI. Every action was a movable tag and goreleaser floated within v2, so the
+code holding those secrets could change without a commit here. Making
+`ci.yml` reusable instead of copying its steps keeps the gate from
+drifting away from what pull requests run.
+
+---
+
+## Lint: a measured linter set, zero issues, explained suppressions
+
+**Decision:** `.golangci.yml` adds gocritic, gosec, exhaustive, noctx,
+nilnil, errchkjson, modernize, intrange, usestdlibvars, perfsprint (without
+its string-concatenation check), nolintlint and revive with an explicit
+rule list to the existing set, and lints the tag-gated files too
+(`run.build-tags`: the sqlite tags, `integration`, `e2e`). The tree stays at
+zero issues. A hit is fixed, or silenced on its line by a `//nolint` that
+names the linter and gives a reason; nolintlint enforces both and rejects
+suppressions that no longer suppress anything.
+
+The only config-level exclusions:
+
+- gosec G104 (errcheck owns unchecked errors), G304 and G703 (file paths
+  come from the operator's own arguments, config and `$CURIO_HOME`).
+- Tests skip errcheck, bodyclose, noctx and gosec.
+- `fmt.Fprint*` errors are ignored in `internal/cli/` only, where they are
+  writes to the command's own stdout/stderr. The old global exemption and
+  the blanket `cmd/` errcheck exclusion are gone (the latter hid an
+  unchecked `db.Close`).
+- errcheck ignores `(*sql.Tx).Rollback`, a no-op after Commit whose
+  failure otherwise loses to the error that caused it; the eight
+  `//nolint:errcheck` comments that said so are deleted.
+
+revive runs its defaults minus `exported` and `package-comments`, plus
+rules that catch real mistakes (datarace, waitgroup-by-value,
+modifies-value-receiver, unconditional-recursion, import-shadowing, defer
+in loops, deep-exit) or keep code current (use-any, early-return,
+unused-receiver). `redundant-import-alias` stays off: the `fhttp` alias in
+`internal/fetcher/transport.go` is required because
+github.com/bogdanfinn/fhttp's package name is `http`. exhaustive keeps
+`default-signifies-exhaustive` off, so a new enum member has to be handled
+on purpose; a default may remain for out-of-range values.
+
+**Why:** The old header dismissed gocritic and gosec as "high-noise".
+Measured on this tree, gocritic found 2 hits and gosec 21, all but two of
+them the path-taint and unchecked-error classes excluded above; the two
+real ones are the subprocess launches, which now carry a reason. The
+expanded set found real defects (a Firefox WAL copy whose failure silently
+dropped the newest bookmarks, an unchecked `db.Close`, enum switches that
+missed members, `net.Listen` and `db.Query` without a context, a
+`nil, nil` return) and replaced idioms Go has moved past (`sort` over map
+keys, hand-rolled min/max, C-style loops, `os.IsNotExist`, int32 atomics,
+`fmt.Errorf` with a constant message). errorlint's `errorf` check is on
+again: the last two `%v`-wrapped causes now use `%w`.
+
+---
+
+## Ollama: one client, one sentinel pair, a pull that keeps trying
+
+**Decision:** `internal/ollama.Client` is the one Ollama client.
+`embedder.Ollama` and `generator.Ollama` each hold one and keep only their
+endpoint's request shape and checks: embed batching and the dimension
+check, and generate with its retry policy (unchanged, see "LLM generation
+client"). The client owns:
+
+- base-URL validation (http or https, with a host) and trailing-slash
+  trimming;
+- `Ping`: `GET /api/tags`, matching the model by name or name plus any tag;
+- `PostJSON`, which bounds the reply it decodes: 1 MiB for tags and
+  generate, and for `/api/embed` a limit sized from the batch (32 bytes of
+  JSON per vector component plus 64 KiB);
+- `EnsureModel`, `Pull` and `KeepPulled`.
+
+There is one sentinel pair, `ollama.ErrUnreachable` and
+`ollama.ErrModelNotLoaded`. A transport failure wraps `ErrUnreachable` and
+its cause with `%w`, so `errors.Is` sees `ECONNREFUSED` or
+`context.DeadlineExceeded` too. A missing model is `ErrModelNotLoaded`
+whether `/api/tags` lacks it or `/api/embed` or `/api/generate` answers
+404. `/v1/healthz` maps the pair to advice, whichever client failed.
+Error bodies are read with `io.ReadAll` over a 2 KiB `LimitReader`.
+
+`Pull` fails when the stream ends before Ollama's `success` line: progress
+lines followed by EOF are a dropped connection or a crashed server, not a
+pulled model.
+
+`KeepPulled` replaces the one-shot background `EnsureModel`. It retries
+with capped exponential backoff (5 s, doubling to 5 min) until the model is
+ready or the daemon shuts down, and the daemon runs it for the embedding
+model and, with LLM labels, the generation model. The first attempt logs
+its pull at INFO and its failure at WARN, saying it will retry. Retries log
+both at DEBUG, so an Ollama that can't reach its registry doesn't add an
+INFO line every 5 minutes. Success is INFO, and nothing is logged once the
+context is cancelled.
+
+**Why:** The two clients were copies of each other (defaults, validation,
+Ping, EnsureModel), with two sentinel pairs that didn't match under
+`errors.Is`, and healthz recognized only the embedder's. The copies had
+drifted: the embedder formatted its transport cause with `%v`, decoded
+`/api/tags` and `/api/embed` without a bound, and quoted error bodies from a
+single `Read`, which returns a partial message and leaves the connection
+unusable; the pull did the same, and treated EOF before `success` as
+success. The auto-pull ran once: with Ollama down when the daemon started,
+which is common when the CLI auto-starts the daemon first, the embedding
+model was never pulled after Ollama came up, although the log said index
+jobs "will retry until it is", and the generation path said outright that
+the pull is not retried.
+
+---
+
+## Insight: skip non-finite document vectors, don't fail the run
+
+**Decision:** `Engine.Rebuild` drops document vectors with any NaN or
+infinite component right after reading them, before the empty-corpus
+check. It logs one WARN with the count and up to 10 document IDs,
+suggesting `curio reindex <id>`, and clusters the rest; the run's
+`num_documents` counts only the vectors clustered. If none is left, the
+rebuild behaves exactly like one with no vectors: a prior done run is
+kept, not replaced by an empty one. `checkUnitVectors` stays as the
+clusterer's backstop.
+
+**Why:** With `insight.center_vectors` on (the default), one bad vector
+makes the corpus mean NaN, so every residual is NaN and the unit-length
+check rejects the first point, a healthy document. The run failed every
+time, naming the wrong document, until someone found the real one.
+`DocumentVectors` decodes raw float32 bits, so a corrupted or unchecked
+stored vector gets that far. One bad vector must not block everyone's
+interests; the engine already tolerates an all-zero vector (it falls out
+as noise) and a document deleted mid-run the same way. The store and
+the indexer are unchanged.
+
+---
+
+## CLI: exit 130 on interrupt, a usage hint on usage errors
+
+**Decision:** `cli.Run` returns 130 and prints nothing when the command
+failed after its context (the signal context from `cmd/curio`) was
+cancelled. A usage error (an unknown command, a flag that doesn't parse, a
+wrong number of arguments) prints `Error: <msg>` and then
+`Run '<command path> --help' for usage.`, naming the command that failed
+(`curio search`, `curio docs show`), and returns 1. Any other error prints
+only the `Error:` line and returns 1.
+
+Usage errors are told apart without matching error text: cobra returns
+them before any hook runs, so `Run` marks the root's `PersistentPreRunE`
+(the one that runs `Discover`) as reached, and an error from a run that
+never reached it is a usage error. curio declares no required flags or
+flag groups, whose checks cobra runs after the hooks; the tests pin the
+three cases. 130 is 128+SIGINT, what a shell shows for ctrl-c; SIGTERM
+gets it too, because the context only says it was cancelled.
+
+**Why:** Interrupting `curio daemon logs -f` printed
+`Error: signal: killed` (or `signal: interrupt`) and exited 1: the
+cancelled context killed `tail`, and `Run` reported that like a failure.
+With `SilenceErrors` on, cobra no longer printed its
+"Run 'curio --help' for usage." line, so a mistyped command or flag got a
+bare error with no pointer to the usage.
+
+---
+
+## Open questions
+
+Choices still open. Those settled since this list was started are at its
+end, pointing to the entries that decided them.
+
+- **Insight layer specifics:** trajectory analysis ("new this month"),
+  cross-cluster interest merging, and a standalone `interests` table,
+  deferred until there's real usage data.
+- **Authentication for hosted mode:** the scheme (API keys vs OAuth vs SSO)
+  is deferred. Nothing is stubbed in the local daemon, which trusts every
+  local process that can reach loopback (see "Local API: loopback only, no
+  token, browsers shut out").
+- **Re-crawl policy:** how often to refetch a given URL. Likely
+  domain-rule-driven (news daily, docs monthly, static essays never).
+- **Highlight / read-later importers:** schema is ready; importer code is not
+  in v1.
+- **An embedding-based "this isn't really an article" classifier**, as a
+  refinement of dead-link detection.
+
+- **Natural-language search is provisional.** Current BM25 sanitization
+  (OR + small stopword list — see decision above) is the production
+  default of mid-2010s search engines, not the leading edge. We should
+  revisit when retrieval quality starts feeling weak or when corpus
+  size makes the noise from pure-OR matching surface. Options in rough
+  order of effort:
+
+    1. **Stemming + `minimum_should_match` post-filter.** Add a Porter
+       or Snowball stemmer to the tokenizer side AND require ~50-75% of
+       non-stopword tokens to match (FTS5 doesn't support this natively,
+       so we'd post-filter in Go). Cheap; modest recall + precision
+       boost.
+
+    2. **LLM query rewriting via Ollama.** Send the natural-language
+       query to a small local model with a system prompt like "extract
+       3-7 keyword phrases from this query." Use those for BM25 (vector
+       still uses the original). This is the "Perplexity / You.com"
+       pattern. Adds ~200-1000ms per query; quality jump can be big.
+       We already have Ollama running so the infrastructure cost is
+       zero. Right move if a search-quality eval shows BM25 is dragging
+       the hybrid score down.
+
+    3. **Learned sparse retrieval (SPLADE / ColBERT).** Replace BM25
+       entirely with a transformer-produced sparse vector indexed in an
+       inverted index. This is what Vespa, Qdrant, Weaviate are pushing
+       as "the next BM25." Best-in-class for natural-language queries,
+       but requires deploying another model, embedding every chunk at
+       index time, and embedding queries at search time. Massive
+       complexity jump for what's still a single-user local system.
+       Only worth it if curio outgrows hobby scale.
+
+  **Prerequisite for any of these:** a tiny eval harness — 10-20
+  representative queries with expected docs, scored on NDCG@10 or
+  recall@10. Without it we'll be guessing about whether each change
+  actually moved retrieval quality. Build the eval BEFORE the
+  improvement.
+
+  The SOTA NL-search work itself is scheduled as **M6**, alongside RAG —
+  see "M6 (planned): RAG / Q&A synthesis + SOTA natural-language search".
+
+  **What's NOT under consideration:** building our own tokenizer,
+  custom synonym dictionaries, query-classification pipelines. The
+  hybrid retriever + RRF was chosen specifically to keep retrieval
+  simple; any "smartness" should live in the query-rewriting layer
+  above the retriever, not inside it.
+
+Resolved since they were listed here:
+
+- The clustering algorithm and labeling: "Insight layer: kNN-graph
+  clustering + labeled interests (M4)".
+- "Page Not Found" detection: "Dead-link detection: hard 404/410 +
+  soft-404 heuristics" (title patterns and redirect-to-homepage; dead
+  documents go to state `dead`).
+- The eval harness the natural-language search options need: "Retrieval
+  eval harness" (`curio eval --queries <qrels.yaml>`).

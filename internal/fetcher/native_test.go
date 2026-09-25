@@ -41,7 +41,7 @@ func makeArticleHTML(title, body string) string {
 }
 
 func TestNative_ReadabilityHappyPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(makeArticleHTML("Test Article", "")))
 	}))
@@ -57,7 +57,7 @@ func TestNative_ReadabilityHappyPath(t *testing.T) {
 }
 
 func TestNative_LoginWall_TooShort(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html><head><title>Login</title></head>
 			<body><article><p>Please sign in.</p></article></body></html>`))
 	}))
@@ -72,7 +72,7 @@ func TestNative_LoginWall_TooShort(t *testing.T) {
 
 func TestNative_LoginWall_TitlePattern(t *testing.T) {
 	body := strings.Repeat("Some text here. ", 50) // > minArticleBytes to bypass length check
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html><head><title>Sign in to read this</title></head>
 			<body><article><h1>Sign in to read this</h1><p>` + body + `</p></article></body></html>`))
 	}))
@@ -89,7 +89,7 @@ func TestNative_LoginWall_RedirectToLoginPath(t *testing.T) {
 	mux.HandleFunc("/article", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusFound)
 	})
-	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/login", func(w http.ResponseWriter, _ *http.Request) {
 		body := strings.Repeat("Please log in to continue. ", 50)
 		_, _ = w.Write([]byte(`<html><head><title>Log in</title></head>
 			<body><article><h1>Welcome back</h1><p>` + body + `</p></article></body></html>`))
@@ -105,14 +105,14 @@ func TestNative_LoginWall_RedirectToLoginPath(t *testing.T) {
 
 func TestNative_JinaFallbackOnLoginWall(t *testing.T) {
 	// First server: a thin page that triggers the login-wall heuristic.
-	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`<html><body><p>nope</p></body></html>`))
 	}))
 	defer source.Close()
 
 	// Fake Jina: emit a header block + body.
 	jinaBody := strings.Repeat("This is the article body from Jina. ", 20)
-	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("Title: Article via Jina\nURL Source: " + source.URL + "\n\nMarkdown Content:\n" + jinaBody))
 	}))
@@ -131,7 +131,7 @@ func TestNative_JinaFallbackOnLoginWall(t *testing.T) {
 }
 
 func TestNative_HTTPError_NoFallback(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "nope", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -418,14 +418,14 @@ func TestSoft404TitleRE(t *testing.T) {
 // short-circuits as a PermanentError carrying the same sentinel plus a
 // "(cached: …)" suffix, and never contacts the origin.
 func TestNative_HostCache_HitIsPermanent(t *testing.T) {
-	var hits int32
+	var hits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		hits.Add(1)
 		_, _ = w.Write([]byte(`<html><head><title>Log in</title></head><body><p>Please sign in.</p></body></html>`))
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		hits.Add(1)
 		http.Redirect(w, r, "/login?next="+r.URL.Path, http.StatusFound)
 	})
 	srv := httptest.NewServer(mux)
@@ -439,7 +439,7 @@ func TestNative_HostCache_HitIsPermanent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrLoginWall)
 	var pe *PermanentError
 	assert.False(t, errors.As(err, &pe), "first failure must stay retryable: %v", err)
-	assert.Equal(t, int32(2), atomic.LoadInt32(&hits), "redirect + login page")
+	assert.Equal(t, int32(2), hits.Load(), "redirect + login page")
 
 	// Second attempt, same host, different path: served from the host
 	// cache, permanent, origin not contacted.
@@ -448,14 +448,14 @@ func TestNative_HostCache_HitIsPermanent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrLoginWall)
 	require.True(t, errors.As(err, &pe), "cache hit must be permanent: %v", err)
 	assert.Contains(t, err.Error(), "(cached:")
-	assert.Equal(t, int32(2), atomic.LoadInt32(&hits), "cache hit must not contact origin")
+	assert.Equal(t, int32(2), hits.Load(), "cache hit must not contact origin")
 }
 
 // Same contract for the anti-bot kind (HTTP 403 → ErrAntiBot).
 func TestNative_HostCache_AntiBotHitIsPermanent(t *testing.T) {
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
 		w.WriteHeader(http.StatusForbidden)
 	}))
 	defer srv.Close()
@@ -472,7 +472,7 @@ func TestNative_HostCache_AntiBotHitIsPermanent(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrAntiBot)
 	require.True(t, errors.As(err, &pe), "cached 403 must be permanent: %v", err)
-	assert.Equal(t, int32(1), atomic.LoadInt32(&hits))
+	assert.Equal(t, int32(1), hits.Load())
 }
 
 // TestNative_StatusMatrix pins how every class of origin status is

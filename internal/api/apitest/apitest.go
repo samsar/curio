@@ -28,7 +28,7 @@ import (
 )
 
 // TenantID is the tenant the server serves, as a local daemon does.
-const TenantID = "local"
+const TenantID = store.LocalTenantID
 
 // Server is a running API and the state behind it.
 type Server struct {
@@ -68,7 +68,7 @@ func Start(t testing.TB, opts ...func(*api.Deps)) *Server {
 		opt(&deps)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -189,7 +189,7 @@ func (Embedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 // vector for text with no words.
 func Vector(text string) []float32 {
 	v := make([]float32, store.EmbeddingDim)
-	for _, word := range strings.Fields(strings.ToLower(text)) {
+	for word := range strings.FieldsSeq(strings.ToLower(text)) {
 		v[crc32.ChecksumIEEE([]byte(word))%store.EmbeddingDim]++
 	}
 	var sum float64

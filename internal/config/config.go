@@ -19,7 +19,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -144,7 +143,7 @@ type Chunking struct {
 	OverlapTokens int `yaml:"overlap_tokens"`
 }
 
-// Insight configures the M4 insight layer (document clustering → interests).
+// Insight configures the insight layer (document clustering → interests).
 type Insight struct {
 	// Enabled gates clustering. When false, POST /v1/interests/rebuild is
 	// refused; reading existing interests still works.
@@ -173,10 +172,9 @@ type Insight struct {
 	LabelingTimeoutSeconds int `yaml:"labeling_timeout_seconds"`
 }
 
-// Generation configures the LLM text-generation client used to label clusters
-// (M4) and, later, synthesize RAG answers (M6). Separate from Embedding: a
-// different model and endpoint. Only used when a feature asks for it (e.g.
-// insight.labeling = "llm").
+// Generation configures the LLM text-generation client, which labels
+// clusters. Separate from Embedding: a different model and endpoint. Only
+// used when a feature asks for it (insight.labeling = "llm").
 type Generation struct {
 	Provider       string `yaml:"provider"`        // "ollama" (only provider in v1)
 	Model          string `yaml:"model"`           // a chat/instruct model, e.g. "llama3.2"
@@ -380,8 +378,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("chunking.overlap_tokens must be in [0, %d), got %d",
 			c.Chunking.SizeTokens, c.Chunking.OverlapTokens)
 	}
-	if c.Search.DefaultK <= 0 || c.Search.DefaultK > search.MaxK {
-		return fmt.Errorf("search.default_k must be in [1, %d], got %d", search.MaxK, c.Search.DefaultK)
+	if c.Search.DefaultK <= 0 || c.Search.DefaultK > store.MaxSearchK {
+		return fmt.Errorf("search.default_k must be in [1, %d], got %d", store.MaxSearchK, c.Search.DefaultK)
 	}
 	if c.Search.RRFK <= 0 {
 		return fmt.Errorf("search.rrf_k must be positive, got %d", c.Search.RRFK)

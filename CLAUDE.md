@@ -5,12 +5,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build, test, lint
 
 ```sh
-make build               # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp
-make test                # unit tests under -race
-make test-integration    # needs Ollama + web2md available
-make test-e2e            # boots the daemon end-to-end
-make lint                # golangci-lint v2 with the project's .golangci.yml
-make fmt                 # gofmt + go mod tidy
+make build               # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp (go build cache decides staleness)
+make test                # unit tests under -race; no network, no Ollama
+make test-integration    # needs network: fetches live sites (tag `integration`)
+make test-e2e            # builds curio-daemon, drives it through daemonctl + client against fake Ollama (tag `e2e`)
+make vet                 # go vet with the build tags
+make lint                # the pinned golangci-lint (refuses other versions; `make tools` installs it)
+make vulncheck           # govulncheck, pinned
+make tidy-check          # fails if go.mod/go.sum aren't tidy
+make fmt                 # go fmt + go mod tidy, under the go.mod toolchain
+make tools               # installs the pinned golangci-lint and goose
 make help                # full target list
 ```
 
@@ -25,9 +29,10 @@ Cgo is required (sqlite, sqlite-vec). `CGO_ENABLED=1` is forced in the Makefile.
 
 ## Tooling traps
 
-- **Go version**: `go.mod` declares `go 1.25.7` because deps (`pressly/goose`, `html-to-markdown/v2`, others) require it. `go mod tidy` run with a different Go version produces a different `go.sum` — CI uses the version in `go.mod` via `go-version-file`. Always tidy with the matching toolchain: `GOTOOLCHAIN=go1.25.7 go mod tidy`.
-- **No `toolchain` directive**: removed because golangci-lint v2 sees it as the targeted version. Don't add it back unless you also bump the linter to a version built with a newer Go.
-- **golangci-lint v2.12.2** is the pinned version; older v2.0.x was built with go1.24 and rejected our modules. The action is `golangci/golangci-lint-action@v7` (v6 doesn't pull v2.x).
+- **Go version**: the `go` directive in `go.mod` (`go 1.26.8`) is the exact toolchain CI and releases build with. setup-go installs it from `go-version-file`, and the Makefile exports `GOTOOLCHAIN=go<directive>`, so every `make` target runs it too (the go command downloads it once). Bump the patch when `make vulncheck` flags the standard library; move to the next minor before the current line leaves support. `go mod tidy` under another Go version produces a different `go.sum`: use `make fmt` / `make tidy-check`, or `GOTOOLCHAIN=go1.26.8 go mod tidy`.
+- **No `toolchain` directive**: golangci-lint takes it as the target version, so building on a newer toolchain than the `go` line makes modernize suggest APIs that vet's stdversion check then rejects. Move the `go` line instead.
+- **golangci-lint** is pinned once, in the Makefile (`GOLANGCI_LINT_VERSION`, v2.12.2); CI reads it with `make -s golangci-lint-version`. It must be built with a Go minor at least the directive's, or it can't type-check the standard library it is handed (the official v2.12.2 binary is built with go1.26.2). `make lint` refuses any other version; `make tools` installs the pinned golangci-lint and goose.
+- **govulncheck** (`make vulncheck`, pinned v1.8.0) runs in CI on every push and PR and in the release gate. See `docs/decisions.md` "Toolchain: the go directive is the build toolchain".
 
 ## Architecture in one screen
 
@@ -58,8 +63,8 @@ curio-mcp (MCP sidecar)  ──HTTP+JSON──►       │             ├ FTS5
 - `docs/decisions.md` — running log of design choices and *why*. The single most important doc; consult before second-guessing anything that looks weird (e.g., why the chunker has a 3500-char cap, why we don't use `toolchain` in go.mod, why `MarkFailed` returns `(permanent bool, error)`).
 - `docs/architecture.md` — components, transports, data flow.
 - `docs/data-model.md` — schema and the "documents vs references" split.
-- `docs/setup.md` — Ollama + web2md installation flow.
-- `docs/roadmap.md` and `docs/status.md` — what's done vs. deferred per milestone.
+- `docs/setup.md` — Ollama install and auto-pull, first run, the Ollama time budgets, the optional web2md backend, troubleshooting.
+- `docs/roadmap.md` — milestone plans and their status: what shipped, deviations, what's deferred.
 - `api/openapi.yaml` — HTTP contract, held to the router and live responses by `internal/api/openapi_test.go`: a route, request field, response field or status the spec lacks fails `make test`, so update the spec in the same change.
 
 ## State machine, briefly
@@ -78,7 +83,7 @@ This catches people:
 
 `internal/fetcher/native.go` falls back to Jina Reader (`r.jina.ai`) only when the original error wraps `ErrLoginWall` or `ErrAntiBot` (or a PDF the local extractor couldn't read). Hard errors (404, DNS failures, timeouts) return directly — Jina can't help and burning rate-limit budget there gets us 429'd on the calls that would actually benefit. If you're tempted to widen the fallback, read `docs/decisions.md` under "Fallback strategy" first.
 
-Jina calls from all fetch workers share one limiter (20/min, or 200/min with `fetcher.native.jina_api_key` / `CURIO_JINA_API_KEY`, sent as a bearer token) and one cooldown that a 429 extends: waited out inline up to 30s, longer ones fail fast and retryably. The GitHub fetcher pairs its limiter and cooldown the same way. Both go through `pace`, which checks the cooldown only after the limiter grants a token; checking it first lets callers already queued in the limiter walk into the limit. Origin requests are capped at 2 in flight per host (`hostGate`); the slot is never held while waiting on Jina, and the host cache is re-checked once a slot is acquired.
+Jina calls from all fetch workers share one limiter (20/min, or 200/min with `fetcher.native.jina_api_key` / `CURIO_JINA_API_KEY`, sent as a bearer token) and one cooldown that a 429 extends: waited out inline up to 30s, longer ones fail fast and retryably. The GitHub fetcher pairs its limiter and cooldown the same way. Both go through `pace`, which checks the cooldown twice: before queueing in the limiter, so a cooldown already past the inline cap fails fast without waiting for (and spending) a token, and again after the token is granted, so a 429 that arrived while the call was queued is still seen. Origin requests are capped at 2 in flight per host (`hostGate`); the slot is never held while waiting on Jina, and the host cache is re-checked once a slot is acquired.
 
 `ErrAntiBot` wraps HTTP 403 and 503. The Native fetcher also sends Chrome-like headers (`Sec-Fetch-*`, `Sec-Ch-Ua-*`) to reduce false-positive bot blocks.
 
@@ -101,14 +106,15 @@ Only host-wide verdicts are cached (`hostVerdict`): unreachable (NXDOMAIN, `ECON
 ## Code layout pointers
 
 - `internal/store/` — interfaces (`store.go`) + sqlite impls (`sqlite/`). The interface boundary is real and depguard enforces it (`.golangci.yml`): the only non-test importers of `internal/store/sqlite` besides `cmd/curio-daemon` are the test-support packages `internal/store/sqlite/sqlitetest` (`NewDB`: a migrated throwaway database) and `internal/api/apitest` (`Start`: the real API on a loopback port, for client and CLI tests). Workers take `store.JobQueue`; the API takes `store.JobStore`, which adds listing, counts, metrics and retention.
-- `internal/jobs/` — Worker loop + handlers. `OnPermanentFailure` hooks are wired in `Register`.
+- `internal/jobs/` — Worker loop + handlers. `jobs.NewPools` builds the daemon's three pools (fetch, index, cluster; each claims only its kind) and wires the `OnPermanentFailure` hooks; the daemon runs exactly those pools, and the worker tests run them too.
 - `internal/api/` — HTTP handlers, RFC 7807 errors, chi router.
 - `internal/config/` — `config.yaml` loader. Decoding is strict: an unknown key fails the load. `daemon.workers` is a deprecated alias that `Load` folds into `fetch_workers`/`index_workers`; `Validate` never mutates. `embedding.dim` must equal `store.EmbeddingDim` (768).
 - `internal/cli/` — Cobra commands. Pattern: each command file (`add.go`, `docs.go`, etc.) exports `newXxxCmd()` and `root.go` adds them.
 - `internal/fetcher/` — Native (Go) and Web2MD (subprocess) backends behind the same `Fetcher` interface.
 - `internal/indexer/` — Chunker (paragraph-aware with hard char cap) + orchestrator (chunk → embed → store).
 - `internal/insight/` — M4 insight layer. Pluggable `Clusterer` (kNN-graph + label propagation), `Labeler` (term / LLM), and the `Engine` that clusters → labels → persists.
-- `internal/generator/` — provider-agnostic LLM text generation (`Generator` interface + Ollama `/api/generate`). Separate from `internal/embedder`; used for cluster labels (M4) and RAG (M6).
+- `internal/generator/` — provider-agnostic LLM text generation (`Generator` interface + Ollama `/api/generate`). Separate from `internal/embedder`; used for cluster labels.
+- `internal/ollama/` — the one Ollama HTTP client both `embedder.Ollama` and `generator.Ollama` sit on (see the insight section).
 - `internal/eval/` — retrieval eval harness (recall@k / NDCG@k / MRR) behind `curio eval --queries`.
 - `migrations/` — Goose SQL migrations, embedded into the binary via `embed.go`. Rebuilding a table must follow the recipe in `migrations/README.md` (NO TRANSACTION, one StatementBegin block, enforcing FK guard). Doing it inside goose's transaction cascade-deletes child rows.
 
@@ -116,16 +122,16 @@ Only host-wide verdicts are cached (`hostVerdict`): unreachable (NXDOMAIN, `ECON
 
 Clusters documents into labeled "interests". The whole algorithm sits behind `insight.Clusterer` (points → per-point label, `-1` = noise) so the clusterer is swappable without touching storage/API/CLI/MCP — the shipped one is `KNNGraphClusterer` (kNN graph + deterministic label propagation). See `docs/decisions.md` "Insight layer: kNN-graph clustering" for why *not* HDBSCAN.
 
-- Clustering runs as a corpus-wide **`cluster` job on its own single-worker pool** (`cmd/curio-daemon/main.go`). It fully recomputes each run: a `cluster_runs` row tracks the attempt, current interests are the `clusters` of the latest `done` run, and older runs are pruned. Unlike fetch/index it has **no doc-state `OnPermanentFailure` hook** (it's corpus-global, not per-doc).
-- Cluster labels: **LLM by default** (`insight.labeling = "llm"`). Needs a generation model in Ollama — the daemon **auto-pulls it** on startup (`generation.auto_pull`, default true; the embedding model auto-pulls too via `embedding.auto_pull`). Until the model is ready (or if it's unavailable / auto_pull is off), labeling **falls back to deterministic term labels**, so it stays zero-setup-safe. The fallback is decided per run (no startup ping): the first LLM failure that would repeat term-labels the rest of that run, and `insight.labeling_timeout_seconds` caps its LLM time. Set `insight.labeling = "terms"` to force it. Pulling lives in `internal/ollama.PullModel`, shared by both Ollama clients.
+- Clustering runs as a corpus-wide **`cluster` job on its own single-worker pool** (`jobs.NewPools`). It fully recomputes each run: a `cluster_runs` row tracks the attempt, current interests are the `clusters` of the latest `done` run, and older runs are pruned. Unlike fetch/index it has **no doc-state `OnPermanentFailure` hook** (it's corpus-global, not per-doc).
+- Cluster labels: **LLM by default** (`insight.labeling = "llm"`). Needs a generation model in Ollama — the daemon **auto-pulls it** (`generation.auto_pull`, default true; the embedding model auto-pulls too via `embedding.auto_pull`), retrying with capped backoff (5s doubling to 5min) until Ollama serves it (`ollama.Client.KeepPulled`). Until the model is ready (or if it's unavailable / auto_pull is off), labeling **falls back to deterministic term labels**, so it stays zero-setup-safe. The fallback is decided per run (no startup ping): the first LLM failure that would repeat term-labels the rest of that run, and `insight.labeling_timeout_seconds` caps its LLM time. Set `insight.labeling = "terms"` to force it. Both Ollama clients (`internal/embedder`, `internal/generator`) sit on one `internal/ollama.Client`: base-URL validation, `Ping` (/api/tags model match), `EnsureModel`/`Pull`/`KeepPulled`, bounded `PostJSON`, and one sentinel pair (`ollama.ErrUnreachable`, `ollama.ErrModelNotLoaded`) that healthz maps to advice.
 - Doc vectors for clustering come from `ChunkStore.DocumentVectors` (bulk mean-pooled per doc, single query) — do not loop `EmbeddingsForDocument`.
 - An interest *is* a labeled cluster: one API surface (`/v1/interests`, `/{id}`, `/rebuild`), not a separate `/v1/clusters`. `POST /v1/interests/rebuild` is gated by `insight.enabled` (409 when off). Config knobs: `insight.{enabled,knn,min_similarity,min_cluster_size,labeling,labeling_timeout_seconds}` + `generation.{provider,model,base_url,timeout_seconds,auto_pull}` + `embedding.auto_pull`. `min_similarity` is the granularity dial; tune with `curio eval`.
 
 ## Conventions to preserve
 
-- The CLI never echoes `tenant_id` to clients; tenant scoping is server-side. Single-tenant local installs hardcode `"local"`.
+- The CLI never echoes `tenant_id` to clients; tenant scoping is server-side. Single-tenant local installs use `store.LocalTenantID` (`"local"`).
 - API list endpoints use keyset cursor pagination (`?cursor=...` / `next_cursor`), not offset: ordered by `(updated_at|created_at, id)` DESC, with `store.PageKey` in the store and the row-value predicate that the list indexes (which end in `id`) serve. New list queries get a pinned plan in `plans_test.go`.
-- Queued work returns `202`: `{job_id}` for single-target ops (refetch, reindex, interests rebuild), `{jobs_enqueued}` for the bulk refetch-all and reindex-all, which have no parent job. Import is synchronous (`200`) and enqueues fetch jobs. Clients watch `GET /v1/jobs`.
+- Queued work returns `202`: `{job_id}` for single-target ops (refetch, reindex, interests rebuild), which clients poll through `GET /v1/jobs/{id}` (`curio jobs show <id>`); `{jobs_enqueued}` for the bulk refetch-all and reindex-all, which have no parent job and are watched through `GET /v1/jobs` or `/v1/stats`. Import is synchronous (`200`) and enqueues fetch jobs.
 - Errors over the wire are RFC 7807 (`application/problem+json`).
 - `curio docs` and `curio jobs` default to the happy-path view (`state=fetched`, `status=done`). `--failed`, `--all`, and explicit `--state`/`--status` widen.
 - Both list views include the on-disk markdown path under `doc_id` so `cat`, `curio docs show`, and `curio refetch` are copy/paste-ready.
@@ -134,4 +140,4 @@ Clusters documents into labeled "interests". The whole algorithm sits behind `in
 
 ## CI release flow
 
-`v*` git tags trigger `.github/workflows/release.yml` → goreleaser → publishes a binary tarball to GitHub releases and writes `Formula/curio.rb` to `samsar/homebrew-tap`. cgo limits us to `darwin/arm64` for now (single macos-14 runner). Adding amd64 or linux means matrix runners + `goreleaser --split`/`--merge`; deliberately deferred.
+`ci.yml` runs on pushes to main and on PRs: `test` (ubuntu: tidy-check, build, vet, test, test-e2e, vulncheck), `test-macos` (macos-14, the release runner: `make test`), and `lint` (golangci-lint at the Makefile's pin, plus `make actionlint`). `v*` git tags trigger `.github/workflows/release.yml`, whose `ci` job calls `ci.yml` (`workflow_call`) as a gate: the `release` job `needs` it, so a tag whose tree fails any CI check never publishes. Only the release job gets `contents: write` and the tap PAT; it runs goreleaser (pinned exactly) → a binary tarball on GitHub releases and `Formula/curio.rb` in `samsar/homebrew-tap`. Every action is pinned by commit SHA with the tag in a trailing comment; Dependabot (`.github/dependabot.yml`) bumps them and the Go modules weekly. cgo limits us to `darwin/arm64` for now (single macos-14 runner). Adding amd64 or linux means matrix runners + `goreleaser --split`/`--merge`; deliberately deferred. See `docs/decisions.md` "Releases: gated on CI, pinned, least privilege".
