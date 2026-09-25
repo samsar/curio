@@ -114,6 +114,20 @@ func TestPace(t *testing.T) {
 		assert.Empty(t, fc.slept(), "a cooldown over the inline cap is not slept")
 	})
 
+	t.Run("long cooldown already active fails fast without queueing", func(t *testing.T) {
+		fc := newFakeClock()
+		lim := newGatedLimiter(4) // never grants: a queued caller waits for ctx
+		var c cooldown
+		c.extend(fc.now(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		left, err := pace(ctx, lim, &c, fc.clock(), maxInline)
+		require.NoError(t, err)
+		assert.Equal(t, 2*time.Minute, left)
+		assert.Empty(t, lim.queued, "no turn taken in the limiter")
+		assert.Empty(t, fc.slept())
+	})
+
 	t.Run("cooldown that starts while queued", func(t *testing.T) {
 		fc := newFakeClock()
 		lim := newGatedLimiter(4)
@@ -289,6 +303,46 @@ func TestNative_JinaLongCooldownFailsFast(t *testing.T) {
 	assert.Empty(t, fc.slept())
 	_, cached := n.hostCache.Get(hostOf(origin.URL))
 	assert.False(t, cached)
+}
+
+// TestNative_JinaLongCooldownDoesNotQueue: with a long cooldown active,
+// Jina-bound fetches fail fast without waiting their turn in the keyless
+// limiter (one token every 3s), which would hold the fifth for 12s only to
+// fail the same way.
+func TestNative_JinaLongCooldownDoesNotQueue(t *testing.T) {
+	t.Setenv("CURIO_JINA_API_KEY", "") // the keyless rate
+	var jinaHits atomic.Int32
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jinaHits.Add(1)
+		_, _ = w.Write([]byte(jinaArticleBody()))
+	}))
+	defer jina.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer origin.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	n.jinaCooldown.extend(time.Now(), 120*time.Second) // another worker's 429
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	errs := make([]error, 5)
+	for i := range errs {
+		wg.Go(func() { _, errs[i] = n.Fetch(context.Background(), origin.URL+"/"+strconv.Itoa(i)) })
+	}
+	wg.Wait()
+
+	assert.Less(t, time.Since(start), time.Second, "no fetch waited for a limiter token")
+	for _, err := range errs {
+		require.ErrorIs(t, err, ErrAntiBot)
+		var pe *PermanentError
+		assert.False(t, errors.As(err, &pe), "must stay retryable: %v", err)
+		var se *HTTPStatusError
+		require.ErrorAs(t, err, &se)
+		assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
+	}
+	assert.Zero(t, jinaHits.Load())
 }
 
 // TestNative_JinaServerErrorBackoff: 5xx answers keep the 2/4/8s backoff,

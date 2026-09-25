@@ -14,19 +14,46 @@ import (
 	"github.com/samsar/curio/internal/version"
 )
 
+// exitInterrupted is the exit code of a run that ctx cancelled: 128+SIGINT,
+// what a shell reports for a command stopped with ctrl-c. SIGTERM gets it
+// too, since the context says only that it was cancelled, not by which
+// signal.
+const exitInterrupted = 130
+
 // Run runs the CLI with args until it finishes or ctx is cancelled, and
 // returns the process exit code. A failure is printed to stderr once, as
-// "Error: <message>".
+// "Error: <message>", followed for a usage error by where to find the
+// command's usage. A run that ctx cancelled prints nothing: its error is
+// the interruption itself, which the user just caused.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	root := newRootCmd()
 	root.SetArgs(args)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
-	if err := root.ExecuteContext(ctx); err != nil {
-		fmt.Fprintf(stderr, "Error: %v\n", err)
-		return 1
+
+	// Cobra reports an unknown command, a flag it can't parse and a wrong
+	// number of arguments before any hook runs, and curio declares no
+	// required flags or flag groups, whose checks come later. So an error
+	// from a run that never reached the root's hook is a usage error.
+	started := false
+	discover := root.PersistentPreRunE
+	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		started = true
+		return discover(cmd, args)
 	}
-	return 0
+
+	cmd, err := root.ExecuteContextC(ctx)
+	switch {
+	case err == nil:
+		return 0
+	case ctx.Err() != nil:
+		return exitInterrupted
+	}
+	fmt.Fprintf(stderr, "Error: %v\n", err)
+	if !started {
+		fmt.Fprintf(stderr, "Run '%s --help' for usage.\n", cmd.CommandPath())
+	}
+	return 1
 }
 
 func newRootCmd() *cobra.Command {

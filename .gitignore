@@ -26,5 +26,3 @@ vendor/
 # Logs
 *.log
 
-# Generated
-api/gen/

@@ -168,7 +168,7 @@ func newStockRT(timeout time.Duration) *stockRT {
 	return &stockRT{client: &http.Client{Timeout: timeout}}
 }
 
-func (s *stockRT) name() string { return "stock" }
+func (*stockRT) name() string { return "stock" }
 
 func (s *stockRT) do(ctx context.Context, target string, headers []header) (*fetchResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
@@ -185,9 +185,7 @@ func (s *stockRT) do(ctx context.Context, target string, headers []header) (*fet
 		}
 		req.Header.Set(h.key, h.value)
 	}
-	// Body deliberately escapes to the caller via fetchResponse.body, which
-	// the caller closes — bodyclose can't see across the abstraction.
-	resp, err := s.client.Do(req) //nolint:bodyclose
+	resp, err := s.client.Do(req) //nolint:bodyclose // the body escapes in fetchResponse.body, which the caller closes
 	if err != nil {
 		return nil, err
 	}

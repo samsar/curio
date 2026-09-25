@@ -123,8 +123,9 @@ func TestSearch_UnsupportedFieldsAreRejected(t *testing.T) {
 	}
 }
 
-func TestRelatedDocuments(t *testing.T) {
-	s := newSearchServer(t, okEmbedder(), search.Config{})
+// documentIDsByURL lists the server's document IDs in URL order.
+func (s *testServer) documentIDsByURL(t *testing.T) []string {
+	t.Helper()
 	var ids []string
 	rows, err := s.db.Query(`SELECT id FROM documents ORDER BY url`)
 	require.NoError(t, err)
@@ -135,6 +136,12 @@ func TestRelatedDocuments(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	require.NoError(t, rows.Close())
+	return ids
+}
+
+func TestRelatedDocuments(t *testing.T) {
+	s := newSearchServer(t, okEmbedder(), search.Config{})
+	ids := s.documentIDsByURL(t)
 
 	resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + ids[0] + "/related?k=5"})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
@@ -155,6 +162,40 @@ func TestRelatedDocuments(t *testing.T) {
 	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/no-such-document/related"}),
 		http.StatusNotFound)
 	assert.Equal(t, `document "no-such-document" not found`, p.Detail)
+}
+
+// vanishingDocs is a document store in which the documents in gone were
+// deleted after search read their chunks.
+type vanishingDocs struct {
+	store.DocumentStore
+	gone map[string]bool
+}
+
+func (v *vanishingDocs) GetByID(ctx context.Context, id string) (*store.Document, error) {
+	if v.gone[id] {
+		return nil, fmt.Errorf("document %s: %w", id, store.ErrNotFound)
+	}
+	return v.DocumentStore.GetByID(ctx, id)
+}
+
+// TestRelatedDocuments_HitDeletedMidQuery: a related document deleted
+// while the query runs drops out; it is not reported as the source
+// document being missing.
+func TestRelatedDocuments_HitDeletedMidQuery(t *testing.T) {
+	docs := &vanishingDocs{gone: map[string]bool{}}
+	s := newSearchServer(t, okEmbedder(), search.Config{}, func(d *Deps) {
+		docs.DocumentStore = d.Documents
+		d.Search = search.New(d.Chunks, docs, okEmbedder(), search.Config{Log: slog.New(slog.DiscardHandler)})
+	})
+	ids := s.documentIDsByURL(t)
+	docs.gone[ids[1]] = true
+
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + ids[0] + "/related"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var got RelatedResponse
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+	require.Len(t, got.Items, 1)
+	assert.Equal(t, ids[2], got.Items[0].Document.ID)
 }
 
 // TestSearch_ExtractionLookupFailure: a hit whose markdown path can't be

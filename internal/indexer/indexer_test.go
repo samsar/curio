@@ -23,7 +23,7 @@ type capturingEmbedder struct {
 }
 
 func (c *capturingEmbedder) Dimensions() int { return c.dim }
-func (c *capturingEmbedder) Model() string   { return "fake" }
+func (*capturingEmbedder) Model() string     { return "fake" }
 func (c *capturingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	c.seen = append(c.seen, texts...)
 	out := make([][]float32, len(texts))
@@ -154,7 +154,7 @@ func TestIndexer_Idempotent(t *testing.T) {
 	idx := New(chunks, &fakeEmbedder{dim: 768}, Options{})
 
 	md := "the same content twice"
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		require.NoError(t, idx.Index(context.Background(), IndexInput{
 			DocumentID: docID, ExtractionID: extID, Markdown: md,
 		}))
@@ -183,8 +183,8 @@ type indexedEmbedder struct {
 	onCall  func()
 }
 
-func (e *indexedEmbedder) Dimensions() int { return 768 }
-func (e *indexedEmbedder) Model() string   { return "fake" }
+func (*indexedEmbedder) Dimensions() int { return 768 }
+func (*indexedEmbedder) Model() string   { return "fake" }
 func (e *indexedEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	e.batches = append(e.batches, len(texts))
 	if e.onCall != nil {

@@ -1,12 +1,17 @@
 package cli
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/store"
 )
 
 func TestDescribeDaemonStatus(t *testing.T) {
@@ -61,4 +66,17 @@ func TestDescribeDaemonStatus(t *testing.T) {
 			assert.Equal(t, tc.want, describeDaemonStatus(tc.st, home))
 		})
 	}
+}
+
+// TestDaemonStop_NotRunning: stopping a home with no daemon says so rather
+// than claiming to have stopped one.
+func TestDaemonStop_NotRunning(t *testing.T) {
+	home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
+	require.NoError(t, err)
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+
+	out, err := runCLIAt(t, home.Path, down.URL, "daemon", "stop")
+	require.NoError(t, err)
+	assert.Equal(t, "daemon not running\n", out)
 }

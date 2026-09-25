@@ -97,6 +97,43 @@ func TestRun(t *testing.T) {
 	assert.Empty(t, stderr.String())
 }
 
+// TestRun_UsageErrors: a mistake in the command line itself says where the
+// failing command's usage is; errors from running a command don't.
+func TestRun_UsageErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown command", []string{"nosuchcmd"},
+			"Error: unknown command \"nosuchcmd\" for \"curio\"\nRun 'curio --help' for usage.\n"},
+		{"unknown flag", []string{"search", "--nosuchflag"},
+			"Error: unknown flag: --nosuchflag\nRun 'curio search --help' for usage.\n"},
+		{"missing argument", []string{"docs", "show"},
+			"Error: accepts 1 arg(s), received 0\nRun 'curio docs show --help' for usage.\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"--curio-home", filepath.Join(t.TempDir(), "home")}, tc.args...)
+			assert.Equal(t, 1, Run(context.Background(), args, &stdout, &stderr))
+			assert.Equal(t, tc.want, stderr.String())
+		})
+	}
+}
+
+// TestRun_Interrupted: a run the signal context cancelled exits 130 and
+// prints nothing; the "error" is the interruption the user just caused.
+func TestRun_Interrupted(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	code := Run(ctx, []string{"--curio-home", filepath.Join(t.TempDir(), "home"), "daemon", "logs", "-f"},
+		&stdout, &stderr)
+	assert.Equal(t, 130, code)
+	assert.Empty(t, stderr.String())
+}
+
 func TestVersion(t *testing.T) {
 	srv := apitest.Start(t)
 	out := mustRun(t, srv, "version")

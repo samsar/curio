@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # One PR per ecosystem per week. A module that needs a newer Go makes the
+  # PR raise the go directive, and can add a toolchain line: review both
+  # against docs/decisions.md "Toolchain" before merging.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns: ["*"]
+
+  # Updates the pinned SHAs and their tag comments together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]

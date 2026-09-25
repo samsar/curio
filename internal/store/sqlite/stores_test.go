@@ -284,14 +284,14 @@ func TestBookmarks_UniqueConflict(t *testing.T) {
 	ctx := context.Background()
 	bms := NewBookmarks(newTestDB(t))
 
-	make := func() *store.Bookmark {
+	newDup := func() *store.Bookmark {
 		return &store.Bookmark{
 			TenantID: "local", URL: "https://example.com/dup",
 			Source: store.SourceManual, SavedAt: time.Now().UTC(),
 		}
 	}
-	require.NoError(t, bms.Create(ctx, make()))
-	err := bms.Create(ctx, make())
+	require.NoError(t, bms.Create(ctx, newDup()))
+	err := bms.Create(ctx, newDup())
 	assert.ErrorIs(t, err, store.ErrConflict)
 }
 
@@ -509,15 +509,15 @@ func TestRetryBackoff(t *testing.T) {
 	}
 }
 
-// TestJobs_ClaimNext_ConcurrentClaimOnce verifies the bug we'd otherwise
-// only discover in M1 when the worker pool expands. Each pending job must
-// be claimed by exactly one worker.
+// TestJobs_ClaimNext_ConcurrentClaimOnce: with many workers claiming at
+// once, as the daemon's pools do, each pending job is claimed by exactly one
+// worker.
 func TestJobs_ClaimNext_ConcurrentClaimOnce(t *testing.T) {
 	ctx := context.Background()
 	q := NewJobs(newTestDB(t))
 
 	const nJobs = 20
-	for i := 0; i < nJobs; i++ {
+	for range nJobs {
 		require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
 	}
 

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -229,7 +230,7 @@ func TestListBookmarks_Paging(t *testing.T) {
 	assert.Len(t, rest.Items, 60-defaultListLimit)
 	assert.Empty(t, rest.NextCursor, "the last page")
 	seen := map[string]bool{}
-	all := append(first.Items, rest.Items...)
+	all := slices.Concat(first.Items, rest.Items)
 	for i, b := range all {
 		seen[b.ID] = true
 		if i > 0 {

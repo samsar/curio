@@ -14,11 +14,11 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// Jobs implements store.JobStore. Single-table queue backed by SQLite.
+// Jobs implements store.JobStore: a single-table queue in SQLite.
 //
-// Claim semantics: an atomic UPDATE ... WHERE status='pending' AND id=(...)
-// inside a transaction ensures one job is claimed by exactly one worker even
-// under concurrency. Multi-worker is tested even though M0 runs only one.
+// Claim semantics: ClaimNext is one autocommit UPDATE ... WHERE id = (SELECT
+// ... LIMIT 1) RETURNING. SQLite runs it under its write lock, so each job
+// goes to exactly one of the daemon's many worker goroutines; see ClaimNext.
 type Jobs struct {
 	db *DB
 
@@ -70,10 +70,10 @@ const insertJobSQL = `
 // store.ErrNotFound.
 func insertJob(ctx context.Context, q rowQuerier, j *store.Job) error {
 	if j.TenantID == "" {
-		return fmt.Errorf("jobs: tenant_id required")
+		return errors.New("jobs: tenant_id required")
 	}
 	if j.Kind == "" {
-		return fmt.Errorf("jobs: kind required")
+		return errors.New("jobs: kind required")
 	}
 	if j.ID == "" {
 		j.ID = uuid.NewString()
@@ -238,7 +238,7 @@ func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*st
 	if err != nil {
 		return nil, 0, fmt.Errorf("begin orphan recovery: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	defer tx.Rollback()
 
 	// Exhausted orphans first: the requeue below takes every running job
 	// of these kinds that is left.

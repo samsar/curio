@@ -16,10 +16,6 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// MaxK is the most documents one search or related query may return. The
-// chunk fanout scales with k, so k bounds the SQL LIMIT too.
-const MaxK = 100
-
 // Engine runs hybrid search.
 //
 //  1. BM25 over chunks_fts and vector ANN over chunks_vec, concurrently
@@ -131,7 +127,7 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, c
 type Request struct {
 	TenantID string
 	Query    string
-	K        int                 // results to return after fusion + collapse; 0 = Config.DefaultK, at most MaxK
+	K        int                 // results to return after fusion + collapse; 0 = Config.DefaultK, at most store.MaxSearchK
 	Filters  store.SearchFilters // content_type / host / source; empty = no filter
 }
 
@@ -184,8 +180,8 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	switch {
 	case req.K == 0:
 		req.K = e.defaultK
-	case req.K < 0 || req.K > MaxK:
-		return nil, fmt.Errorf("search: k must be between 1 and %d, got %d", MaxK, req.K)
+	case req.K < 0 || req.K > store.MaxSearchK:
+		return nil, fmt.Errorf("search: k must be between 1 and %d, got %d", store.MaxSearchK, req.K)
 	}
 	fanout := e.chunkFanout(req.K)
 
@@ -403,8 +399,11 @@ type scoredChunk struct {
 }
 
 // collapseAndHydrate collapses scored chunks into ranked documents (per
-// the engine's collapse strategy), trims to k, and hydrates each hit with
-// its document row and up to 3 top chunks. bm25ByID/vecByID annotate the
+// the engine's collapse strategy) and hydrates the top k with their
+// document rows and up to 3 top chunks each. A document deleted since the
+// retrievers read its chunks is skipped, not an error: a concurrent delete
+// shouldn't fail the query (or make Related report its source missing), and
+// the next-ranked document takes its place. bm25ByID/vecByID annotate the
 // per-chunk retriever scores; either may be nil.
 func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, bm25ByID, vecByID map[string]store.ChunkHit, k int) ([]Hit, error) {
 	type docAgg struct {
@@ -441,13 +440,15 @@ func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, b
 		}
 		return strings.Compare(a.documentID, b.documentID)
 	})
-	if len(docList) > k {
-		docList = docList[:k]
-	}
-
-	items := make([]Hit, 0, len(docList))
+	items := make([]Hit, 0, min(k, len(docList)))
 	for _, d := range docList {
+		if len(items) == k {
+			break
+		}
 		doc, err := e.docs.GetByID(ctx, d.documentID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("hydrate document %s: %w", d.documentID, err)
 		}
@@ -516,8 +517,8 @@ func collapseScore(perChunk map[string]float64, ids []string, strat CollapseStra
 			return 0
 		}
 		var s float64
-		for i := 0; i < n; i++ {
-			s += scores[i]
+		for _, score := range scores[:n] {
+			s += score
 		}
 		return s / float64(n)
 	case CollapseMax:

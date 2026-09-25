@@ -89,8 +89,10 @@ type RateLimited struct {
 	limiter *rate.Limiter
 }
 
-// NewRateLimited returns a Fetcher that allows at most rps requests
-// per second, with a burst of up to burst concurrent requests.
+// NewRateLimited returns a Fetcher that starts at most rps fetches per
+// second on average from a token bucket holding burst tokens: after a quiet
+// spell, up to burst fetches may start back to back. It limits how often
+// fetches start, not how many run at once.
 func NewRateLimited(f Fetcher, rps float64, burst int) *RateLimited {
 	return &RateLimited{
 		Inner:   f,

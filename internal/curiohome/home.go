@@ -111,13 +111,11 @@ func Init(path, embeddingModel string, embeddingDim int) (*Home, error) {
 	}
 
 	h := &Home{Path: path}
-	now := time.Now().UTC()
 	if err := h.WriteMeta(Meta{
 		SchemaVersion:  CurrentSchemaVersion,
 		EmbeddingModel: embeddingModel,
 		EmbeddingDim:   embeddingDim,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		CreatedAt:      time.Now().UTC(),
 	}); err != nil {
 		return nil, err
 	}
@@ -179,12 +177,13 @@ func (h *Home) Meta() (Meta, error) {
 	return m, nil
 }
 
-// WriteMeta atomically replaces the marker file. Writes to a temp file and
-// renames into place so an interrupted write can't leave a half-written marker.
+// WriteMeta replaces the marker file with m, stamping UpdatedAt with the
+// current time. It writes a temp file, syncs it to disk and renames it into
+// place, so neither an interrupted write nor a power loss leaves a
+// half-written or empty marker, which would fail every command with "parse
+// marker".
 func (h *Home) WriteMeta(m Meta) error {
-	if m.UpdatedAt.IsZero() {
-		m.UpdatedAt = time.Now().UTC()
-	}
+	m.UpdatedAt = time.Now().UTC()
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode marker: %w", err)
@@ -193,7 +192,8 @@ func (h *Home) WriteMeta(m Meta) error {
 
 	final := h.MarkerPath()
 	tmp := final + ".tmp"
-	if err := os.WriteFile(tmp, data, filePerm); err != nil {
+	if err := writeSynced(tmp, data); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write marker tmp: %w", err)
 	}
 	if err := os.Rename(tmp, final); err != nil {
@@ -201,4 +201,17 @@ func (h *Home) WriteMeta(m Meta) error {
 		return fmt.Errorf("rename marker: %w", err)
 	}
 	return nil
+}
+
+// writeSynced writes data to path and flushes it to disk before closing.
+func writeSynced(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, filePerm)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	return errors.Join(err, f.Close())
 }

@@ -1,13 +1,11 @@
 // Package generator defines curio's LLM text-generation interface and its
-// implementations. It is deliberately separate from internal/embedder:
+// Ollama implementation. It is deliberately separate from internal/embedder:
 // embeddings and generation use different models and endpoints, and most of
 // curio needs neither.
 //
-// The insight layer (M4) uses a Generator to label clusters. M6 (RAG / SOTA
-// search) will reuse the same interface for answer synthesis and query
-// rewriting, so the abstraction is intentionally small and provider-agnostic —
-// a local Ollama chat model today, an Anthropic/Claude impl later, both behind
-// this interface.
+// The insight engine uses a Generator to label clusters. The interface is
+// small and provider-agnostic, so another provider can sit behind it without
+// changing its callers.
 package generator
 
 import "context"

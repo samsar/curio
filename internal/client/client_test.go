@@ -71,7 +71,7 @@ func TestDaemonUnreachable(t *testing.T) {
 // was reached; the error says the deadline passed.
 func TestTimeoutIsNotUnreachable(t *testing.T) {
 	release := make(chan struct{})
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		select {
 		case <-release:
 		case <-r.Context().Done():

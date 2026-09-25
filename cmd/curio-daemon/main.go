@@ -82,19 +82,25 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 		return err
 	}
 
-	ln, err := net.Listen("tcp", cfg.Daemon.Listen)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Daemon.Listen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w (is another program using the port? "+
 			"check `curio daemon status`, or set a different daemon.listen in %s)",
 			cfg.Daemon.Listen, err, home.ConfigPath())
 	}
-	defer ln.Close()
+	// Once serving starts, Shutdown closes the listener and this second Close
+	// only reports that; it matters when startup fails before then.
+	defer func() { _ = ln.Close() }()
 
 	db, err := sqlitestore.Open(ctx, home.DBPath())
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			slog.Warn("close database", "path", home.DBPath(), "err", err)
+		}
+	}()
 	// Logged first because a migration that rewrites a large table can
 	// outlast the CLI's auto-start wait, and the log tail should say why.
 	slog.Info("migrating database", "path", home.DBPath())
@@ -112,7 +118,7 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 	// Settle the previous daemon's unfinished jobs before any worker can
 	// claim them.
 	for _, p := range d.pools {
-		if err := p.worker.RecoverOrphans(ctx); err != nil {
+		if err := p.Worker.RecoverOrphans(ctx); err != nil {
 			return err
 		}
 	}
@@ -140,50 +146,44 @@ func openHome() (*curiohome.Home, error) {
 	return curiohome.Init(homePath, defaults.Model, defaults.Dim)
 }
 
-// checkMarker cross-checks the marker file against config. If they
-// disagree, the user changed the embedding config without reindexing.
+// checkMarker refuses to start when config.yaml's embedding model or
+// dimension differs from the ones the home was created with, recorded in
+// the marker: every stored vector came from that model, and searching them
+// with another model's query vectors returns noise.
 func checkMarker(home *curiohome.Home, cfg config.Config) (curiohome.Meta, error) {
 	meta, err := home.Meta()
 	if err != nil {
 		return curiohome.Meta{}, err
 	}
-	if meta.EmbeddingModel != cfg.Embedding.Model || meta.EmbeddingDim != cfg.Embedding.Dim {
-		slog.Warn("embedding model/dim mismatch between config and marker",
-			"config_model", cfg.Embedding.Model,
-			"config_dim", cfg.Embedding.Dim,
-			"marker_model", meta.EmbeddingModel,
-			"marker_dim", meta.EmbeddingDim,
-		)
-		slog.Warn("run `curio reindex --reason=model-swap` (not yet implemented) before continuing")
-		return curiohome.Meta{}, errors.New("embedding config/marker mismatch")
+	if meta.EmbeddingModel == cfg.Embedding.Model && meta.EmbeddingDim == cfg.Embedding.Dim {
+		return meta, nil
 	}
-	return meta, nil
+	return curiohome.Meta{}, fmt.Errorf("embedding model mismatch: %s sets embedding.model %q (dim %d), "+
+		"but this home's vectors were made with %q (dim %d), as recorded in %s. "+
+		"Set embedding.model and embedding.dim back to the recorded values, or use a different CURIO_HOME; "+
+		"switching an existing home's embedding model isn't supported "+
+		`(see docs/decisions.md "Embedding model swap")`,
+		home.ConfigPath(), cfg.Embedding.Model, cfg.Embedding.Dim,
+		meta.EmbeddingModel, meta.EmbeddingDim, home.MarkerPath())
 }
 
 // syncMarkerSchemaVersion copies the schema version the migrations left the
 // database at into the marker file, which caches it for /v1/healthz and the
 // offline `curio version` and `curio doctor`.
-func syncMarkerSchemaVersion(home *curiohome.Home, meta curiohome.Meta, version int) {
-	if version == meta.SchemaVersion {
+func syncMarkerSchemaVersion(home *curiohome.Home, meta curiohome.Meta, schemaVersion int) {
+	if schemaVersion == meta.SchemaVersion {
 		return
 	}
-	meta.SchemaVersion = version
+	meta.SchemaVersion = schemaVersion
 	if err := home.WriteMeta(meta); err != nil {
 		slog.Warn("failed to update marker schema_version", "err", err)
 	}
 }
 
-// pool is a Worker and how many goroutines run it.
-type pool struct {
-	name   string
-	worker *jobs.Worker
-	size   int
-}
-
 // daemon is everything run starts once the database is ready.
 type daemon struct {
 	apiDeps api.Deps
-	pools   []pool
+	pools   []jobs.Pool
 }
 
 func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db *sqlitestore.DB) (*daemon, error) {
@@ -203,16 +203,11 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 	if err != nil {
 		return nil, err
 	}
-	// Fetch the embedding model in the background if it isn't pulled yet, so a
-	// fresh install self-heals instead of failing every index job. Startup
-	// isn't blocked; index jobs retry with backoff until it's ready.
+	// Pull the embedding model in the background, retrying until Ollama
+	// serves it, so a fresh install self-heals instead of failing every index
+	// job. Startup isn't blocked; index jobs retry with backoff meanwhile.
 	if cfg.Embedding.AutoPull {
-		go func() {
-			if perr := emb.EnsureModel(ctx, slog.Default()); perr != nil {
-				slog.Warn("embedding model not ready; index jobs will retry until it is",
-					"model", cfg.Embedding.Model, "err", perr)
-			}
-		}()
+		go emb.Client().KeepPulled(ctx, slog.With("used_for", "embeddings"))
 	}
 
 	dispatcher, err := newDispatcher(cfg, home)
@@ -241,35 +236,18 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		return nil, err
 	}
 
-	// Two worker pools: fetch (network-bound, scale wide) and index
-	// (Ollama-bound, narrow). They share the JobQueue but each pool's
-	// workers only claim jobs of its kind. Without this split, FIFO
-	// claim order let fetch jobs starve indexing entirely — measured
-	// 3296 fetches done while only 55 index jobs completed.
-	deps := jobs.Deps{
+	pools := jobs.NewPools(jobs.Deps{
 		Home:        home,
 		Documents:   docs,
 		Extractions: exts,
 		Bookmarks:   bms,
-		Chunks:      chunks,
 		Queue:       queue,
 		Dispatcher:  dispatcher,
 		Indexer:     idx,
 		Insight:     insightEngine,
 		Log:         slog.Default(),
-	}
-	fetchWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	fetchWorker.Register(store.JobKindFetch, jobs.FetchHandler(deps))
-	fetchWorker.OnPermanentFailure(store.JobKindFetch, jobs.MarkDocFailed(deps))
-
-	indexWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	indexWorker.Register(store.JobKindIndex, jobs.IndexHandler(deps))
-	indexWorker.OnPermanentFailure(store.JobKindIndex, jobs.MarkDocFailed(deps))
-
-	// Clustering is corpus-wide and expensive; give it its own single-worker
-	// pool so it neither starves fetch/index nor runs two clusterings at once.
-	clusterWorker := jobs.NewWorker(queue, jobs.WorkerOptions{Log: slog.Default()})
-	clusterWorker.Register(store.JobKindCluster, jobs.ClusterHandler(deps))
+	}, jobs.PoolSizes{Fetch: cfg.Daemon.FetchWorkers, Index: cfg.Daemon.IndexWorkers},
+		jobs.WorkerOptions{Log: slog.Default()})
 
 	return &daemon{
 		apiDeps: api.Deps{
@@ -283,16 +261,20 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 			Search:         engine,
 			Insights:       insights,
 			InsightEnabled: cfg.Insight.Enabled,
-			TenantID:       "local",
 			Log:            slog.Default(),
 		},
-		pools: []pool{
-			{name: "fetch", worker: fetchWorker, size: cfg.Daemon.FetchWorkers},
-			{name: "index", worker: indexWorker, size: cfg.Daemon.IndexWorkers},
-			{name: "cluster", worker: clusterWorker, size: 1},
-		},
+		pools: pools,
 	}, nil
 }
+
+// YouTube pacing: yt-dlp runs start at 2 per second, from a token bucket of
+// 3, so a few videos saved together aren't serialized but an import full of
+// them doesn't hammer YouTube. How many run at once is capped separately,
+// by YouTubeOptions.MaxConcurrent.
+const (
+	youtubeFetchesPerSecond = 2
+	youtubeBurst            = 3
+)
 
 // newDispatcher builds the fetcher registry and routing rules. Native is
 // always constructed (pure Go, no external deps) so fetcher_rules.yaml can
@@ -350,7 +332,7 @@ func newDispatcher(cfg config.Config, home *curiohome.Home) (fetcher.Dispatcher,
 				SubLangs: cfg.Fetcher.YouTube.SubLangs,
 				Log:      slog.Default(),
 			}),
-			2, 3, // start rate; concurrent yt-dlp processes are capped inside the fetcher (MaxConcurrent)
+			youtubeFetchesPerSecond, youtubeBurst,
 		)
 		rules = append(rules, fetcher.Rule{Hosts: fetcher.YouTubeHosts, Fetcher: ytFetcher})
 		// Registry holds the rate-limited wrapper so token-bucket state
@@ -387,15 +369,9 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 			return nil, err
 		}
 		llmLabeler = insight.NewLLMLabeler(gen)
+		// Cluster labels use the term fallback until the model is ready.
 		if cfg.Generation.AutoPull {
-			go func() {
-				// A pull cut short by daemon shutdown is not a missing model.
-				if err := gen.EnsureModel(ctx, slog.Default()); err != nil && ctx.Err() == nil {
-					slog.Warn("generation model not ready and the pull is not retried; cluster labels use "+
-						"the term fallback until Ollama serves it (run `ollama pull`, or restart the daemon)",
-						"model", cfg.Generation.Model, "err", err)
-				}
-			}()
+			go gen.Client().KeepPulled(ctx, slog.With("used_for", "cluster labels"))
 		}
 	}
 	clusterer := insight.NewKNNGraphClusterer(insight.KNNGraphOptions{
@@ -418,13 +394,13 @@ func (d *daemon) serve(ctx context.Context, srv *api.Server) error {
 
 	var workers sync.WaitGroup
 	for _, p := range d.pools {
-		for range p.size {
+		for range p.Size {
 			workers.Go(func() {
 				// Run only ever returns ctx.Err(); shutdown is the only exit.
-				_ = p.worker.Run(ctx)
+				_ = p.Worker.Run(ctx)
 			})
 		}
-		slog.Info("worker pool started", "pool", p.name, "workers", p.size)
+		slog.Info("worker pool started", "pool", p.Name, "workers", p.Size)
 	}
 
 	err := srv.Serve(ctx)
@@ -449,7 +425,7 @@ func (d *daemon) drain(workers *sync.WaitGroup, grace time.Duration) (stuck []st
 		return nil, true
 	case <-time.After(grace):
 		for _, p := range d.pools {
-			stuck = append(stuck, p.worker.InFlight()...)
+			stuck = append(stuck, p.Worker.InFlight()...)
 		}
 		return stuck, false
 	}

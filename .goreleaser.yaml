@@ -11,9 +11,10 @@ version: 2
 
 project_name: curio
 
+# Verify, don't mutate: a release builds exactly the tagged tree.
 before:
   hooks:
-    - go mod tidy
+    - go mod tidy -diff
 
 builds:
   - id: curio

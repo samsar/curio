@@ -24,13 +24,13 @@ func (s *Extractions) Create(ctx context.Context, e *store.DocumentExtraction) e
 		e.ID = uuid.NewString()
 	}
 	if e.DocumentID == "" {
-		return fmt.Errorf("extractions: document_id required")
+		return errors.New("extractions: document_id required")
 	}
 	if e.Fetcher == "" {
-		return fmt.Errorf("extractions: fetcher required")
+		return errors.New("extractions: fetcher required")
 	}
 	if e.Status == "" {
-		return fmt.Errorf("extractions: status required")
+		return errors.New("extractions: status required")
 	}
 
 	// A zero FetchedAt takes the column's default, now.

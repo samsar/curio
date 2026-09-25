@@ -1,15 +1,17 @@
 package importer
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -82,11 +84,7 @@ func firefoxRoot() string {
 // then fall back to a [Profile*] marked Default=1, then the first profile.
 func firefoxDefaultProfileRel(root string) string {
 	ini := parseINI(filepath.Join(root, "profiles.ini"))
-	sections := make([]string, 0, len(ini))
-	for s := range ini {
-		sections = append(sections, s)
-	}
-	sort.Strings(sections) // deterministic
+	sections := slices.Sorted(maps.Keys(ini)) // deterministic
 
 	for _, s := range sections {
 		if strings.HasPrefix(s, "Install") {
@@ -121,7 +119,7 @@ func parseINI(path string) map[string]map[string]string {
 		return out
 	}
 	section := ""
-	for _, line := range strings.Split(string(b), "\n") {
+	for line := range strings.SplitSeq(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "#") {
 			continue
@@ -149,7 +147,7 @@ func parseINI(path string) map[string]map[string]string {
 // entries (under the Tags root) are not bookmarks themselves; their tag names
 // are attached to the real bookmarks of the same place. Separators are
 // skipped.
-func ParseFirefox(placesPath string) ([]ParsedBookmark, error) {
+func ParseFirefox(ctx context.Context, placesPath string) ([]ParsedBookmark, error) {
 	tmp, cleanup, err := copyDBForRead(placesPath)
 	if err != nil {
 		return nil, fmt.Errorf("firefox: copy places.sqlite: %w", err)
@@ -160,9 +158,11 @@ func ParseFirefox(placesPath string) ([]ParsedBookmark, error) {
 	if err != nil {
 		return nil, fmt.Errorf("firefox: open places.sqlite: %w", err)
 	}
-	defer db.Close() //nolint:errcheck
+	// A read-only temp copy that cleanup deletes next: its Close has nothing
+	// to report.
+	defer func() { _ = db.Close() }()
 
-	rows, err := db.Query(`
+	rows, err := db.QueryContext(ctx, `
 		SELECT b.id, b.type, COALESCE(b.parent, 0), COALESCE(b.title, ''),
 		       COALESCE(b.dateAdded, 0), COALESCE(b.guid, ''), COALESCE(p.url, ''),
 		       COALESCE(b.fk, 0)
@@ -330,10 +330,14 @@ func copyDBForRead(src string) (string, func(), error) {
 		cleanup()
 		return "", nil, err
 	}
-	// Sidecars are best-effort: absence is fine (DB not in WAL mode, or
-	// already checkpointed).
+	// A missing sidecar is fine: the DB isn't in WAL mode, or is fully
+	// checkpointed. A sidecar that exists but can't be copied is an error:
+	// reading without it would silently drop the newest bookmarks.
 	for _, suffix := range []string{"-wal", "-shm"} {
-		_ = copyFile(src+suffix, dst+suffix)
+		if err := copyFile(src+suffix, dst+suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			cleanup()
+			return "", nil, fmt.Errorf("copy %s sidecar: %w", suffix, err)
+		}
 	}
 	return dst, cleanup, nil
 }

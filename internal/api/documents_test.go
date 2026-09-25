@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -277,12 +278,22 @@ func TestListDocuments_Paging(t *testing.T) {
 func TestGetDocumentContent(t *testing.T) {
 	s := newTestServer(t)
 	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
-	s.seedContent(t, doc, "# A\n\nbody")
+	// Larger than net/http's chunking buffer: for a body that fits in it,
+	// net/http computes a Content-Length whether or not the handler sets one.
+	content := "# A\n\n" + strings.Repeat("a line of body text\n", 64<<10/20)
+	s.seedContent(t, doc, content)
 
 	resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + doc.ID + "/content"})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.Equal(t, "text/markdown; charset=utf-8", resp.contentType)
-	assert.Equal(t, "# A\n\nbody", resp.body)
+	assert.Equal(t, content, resp.body)
+	// A declared length is what lets a client tell a copy that failed
+	// partway from a complete answer.
+	raw, err := http.Get(s.base + "/v1/documents/" + doc.ID + "/content")
+	require.NoError(t, err)
+	defer raw.Body.Close()
+	assert.Equal(t, int64(len(content)), raw.ContentLength)
+	assert.Empty(t, raw.TransferEncoding, "not chunked")
 
 	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
 	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + bare.ID + "/content"}),

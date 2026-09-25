@@ -130,25 +130,32 @@ a session, the next tool call starts it again. See [docs/mcp.md](./docs/mcp.md).
 - [MCP server](./docs/mcp.md) — register `curio-mcp` with Claude, available tools
 - [Data model](./docs/data-model.md) — schemas and storage layout
 - [Decisions](./docs/decisions.md) — running log of design choices and why
-- [Roadmap](./docs/roadmap.md) — milestones and what's next
-- [M0 plan](./docs/m0-plan.md) — walking-skeleton implementation plan
+- [Roadmap](./docs/roadmap.md) — milestones, what shipped, and what's next
 - [API](./api/openapi.yaml) — daemon HTTP contract
 - [Migrations](./migrations) — SQLite schema
 
 ## Building from source
 
-Requires Go 1.23+ (will use 1.26 toolchain via go.mod), Node not required (the
-default fetcher is Go-native).
+Requires Go 1.26.8 or newer, the `go` line in `go.mod`: the Makefile builds
+with exactly that toolchain, and the go command downloads it once if your
+default differs. cgo is required (sqlite + sqlite-vec), so you also need a C
+toolchain: on macOS, the Xcode Command Line Tools (`xcode-select --install`).
+Node isn't needed; the default fetcher is Go-native.
 
 ```sh
 git clone https://github.com/samsar/curio
 cd curio
-make build      # produces bin/curio and bin/curio-daemon
+make build      # produces bin/curio, bin/curio-daemon and bin/curio-mcp
 make test       # unit tests
 ```
 
-cgo is required (sqlite + sqlite-vec). The Makefile forces `CGO_ENABLED=1`.
+The Makefile forces `CGO_ENABLED=1`. `make tools` installs the pinned
+golangci-lint and goose, and `make help` lists every target.
 
 ## Naming
 
 Curio: a rare or interesting object you've collected. Also: curiosity.
+
+## License
+
+Apache License 2.0; see [LICENSE](./LICENSE).

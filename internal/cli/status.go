@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -87,14 +88,9 @@ func newStatusCmd(env *daemonctl.Env) *cobra.Command {
 
 // formatMap renders a map[string]int as "key=val  key=val" sorted by key.
 func formatMap(m map[string]int) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = fmt.Sprintf("%s=%d", k, m[k])
+	parts := make([]string, 0, len(m))
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, m[k]))
 	}
 	return strings.Join(parts, "  ")
 }

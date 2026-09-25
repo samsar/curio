@@ -70,8 +70,8 @@ func nullableInt(n sql.NullInt64) *int {
 	return &v
 }
 
-// strPtr returns the value pointed to or "" if nil. For binding *string
-// columns into a non-nullable context.
+// strPtr is the bind value of a nullable text column: the string s points
+// to, or nil (SQL NULL) when s is nil.
 func strPtr(s *string) any {
 	if s == nil {
 		return nil

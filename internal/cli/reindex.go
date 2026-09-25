@@ -21,8 +21,10 @@ func newReindexCmd(env *daemonctl.Env) *cobra.Command {
 		Use:   "reindex [document-id]",
 		Short: "Re-chunk and re-embed already-fetched documents (no re-fetch)",
 		Long: `Reindex re-runs chunking + embedding over a document's existing
-extraction — without re-fetching it. Use it after changing the embedding
-model (same dimension) or chunker settings, or to pick up new bookmark tags.
+extraction — without re-fetching it. Use it after changing chunker settings
+or the embedding prefixes, or to pick up new bookmark tags. (It doesn't
+switch embedding models: the daemon refuses a model that differs from the
+one the home was created with.)
 
 Documents must already have content: --all targets state=fetched by default
 and, in any state, skips documents that were never fetched.`,

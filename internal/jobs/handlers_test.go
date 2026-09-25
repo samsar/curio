@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +39,7 @@ func (f *fakeFetcher) Fetch(_ context.Context, _ string) (*fetcher.Result, error
 type fakeEmbedder struct{ dim int }
 
 func (f *fakeEmbedder) Dimensions() int { return f.dim }
-func (f *fakeEmbedder) Model() string   { return "fake" }
+func (*fakeEmbedder) Model() string     { return "fake" }
 func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i := range out {
@@ -85,7 +88,6 @@ func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 		Documents:   docs,
 		Extractions: exts,
 		Bookmarks:   bms,
-		Chunks:      chunks,
 		Queue:       queue,
 		Dispatcher:  dispatcher,
 		Indexer:     idx,
@@ -113,7 +115,7 @@ func TestFetchHandler_HappyPath(t *testing.T) {
 
 	job := docJob(t, store.JobKindFetch, doc.ID)
 
-	err := FetchHandler(deps)(ctx, job)
+	err := fetchHandler(deps)(ctx, job)
 	require.NoError(t, err)
 
 	// Document should have title, extraction, etc.
@@ -153,7 +155,7 @@ func TestFetchHandler_RefetchClearsStaleMetadata(t *testing.T) {
 
 	ff.res.Author = "Ada"
 	ff.res.FinalURL = "https://example.com/moved-here"
-	require.NoError(t, FetchHandler(deps)(ctx, job))
+	require.NoError(t, fetchHandler(deps)(ctx, job))
 	got, err := deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got.Author)
@@ -164,7 +166,7 @@ func TestFetchHandler_RefetchClearsStaleMetadata(t *testing.T) {
 
 	ff.res.Author = ""
 	ff.res.FinalURL = ""
-	require.NoError(t, FetchHandler(deps)(ctx, job))
+	require.NoError(t, fetchHandler(deps)(ctx, job))
 	got, err = deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	assert.NotEqual(t, first, *got.CurrentExtractionID)
@@ -186,7 +188,7 @@ func TestFetchHandler_ExtractionStatus(t *testing.T) {
 			doc := &store.Document{TenantID: "local", URL: "https://example.com/video", ContentType: store.ContentTypeVideo}
 			require.NoError(t, deps.Documents.Create(ctx, doc))
 
-			require.NoError(t, FetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+			require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 
 			got, err := deps.Documents.GetByID(ctx, doc.ID)
 			require.NoError(t, err)
@@ -209,14 +211,14 @@ func TestFetchHandler_FetcherError_Retryable(t *testing.T) {
 	doc := &store.Document{TenantID: "local", URL: "https://x", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(context.Background(), doc))
 
-	err := FetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, doc.ID))
+	err := fetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, doc.ID))
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, ErrPermanent), "network failures must be retryable")
 }
 
 func TestFetchHandler_MissingDocument_Permanent(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	err := FetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, "00000000-0000-0000-0000-000000000000"))
+	err := fetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, "00000000-0000-0000-0000-000000000000"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPermanent)
 }
@@ -232,7 +234,7 @@ func TestFetchHandler_DeadLinkSentinelSurvivesBridge(t *testing.T) {
 	doc := &store.Document{TenantID: "local", URL: "https://x/gone", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(context.Background(), doc))
 
-	err := FetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, doc.ID))
+	err := fetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, doc.ID))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPermanent)
 	assert.ErrorIs(t, err, fetcher.ErrDeadLink, "sentinel must survive the ErrPermanent bridge")
@@ -248,13 +250,13 @@ func TestMarkDocFailed_DeadLinkGoesDead(t *testing.T) {
 	job := docJob(t, store.JobKindFetch, doc.ID)
 
 	// Dead-link cause → dead.
-	require.NoError(t, MarkDocFailed(deps)(ctx, job, &fetcher.PermanentError{Err: fetcher.ErrDeadLink}))
+	require.NoError(t, markDocFailed(deps)(ctx, job, &fetcher.PermanentError{Err: fetcher.ErrDeadLink}))
 	got, err := deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateDead, got.State)
 
 	// Any other cause → failed.
-	require.NoError(t, MarkDocFailed(deps)(ctx, job, errors.New("some other permanent failure")))
+	require.NoError(t, markDocFailed(deps)(ctx, job, errors.New("some other permanent failure")))
 	got, err = deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFailed, got.State)
@@ -272,7 +274,7 @@ func TestMarkDocFailed_FinalLoginWallGoesFailed(t *testing.T) {
 	job := docJob(t, store.JobKindFetch, doc.ID)
 
 	cause := &fetcher.PermanentError{Err: fmt.Errorf("native: %w (extracted text < 500 bytes)", fetcher.ErrLoginWall)}
-	require.NoError(t, MarkDocFailed(deps)(ctx, job, cause))
+	require.NoError(t, markDocFailed(deps)(ctx, job, cause))
 	got, err := deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFailed, got.State)
@@ -280,7 +282,7 @@ func TestMarkDocFailed_FinalLoginWallGoesFailed(t *testing.T) {
 
 func TestFetchHandler_BadPayload_Permanent(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
-	err := FetchHandler(deps)(context.Background(), &store.Job{Payload: []byte("not json")})
+	err := fetchHandler(deps)(context.Background(), &store.Job{Payload: []byte("not json")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPermanent)
 }
@@ -288,23 +290,24 @@ func TestFetchHandler_BadPayload_Permanent(t *testing.T) {
 // --- index handler ---
 
 func TestIndexHandler_HappyPath(t *testing.T) {
-	deps, _, _ := newTestDeps(t)
+	deps, db, _ := newTestDeps(t)
 	ctx := context.Background()
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/idx", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(ctx, doc))
 
 	// Run the fetch first to set everything up.
-	require.NoError(t, FetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+	require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 
 	// Now run index.
-	require.NoError(t, IndexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)))
+	require.NoError(t, indexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)))
 
 	got, _ := deps.Documents.GetByID(ctx, doc.ID)
 	assert.Equal(t, store.DocStateFetched, got.State, "document should be fetched after index")
 
 	// Searchable via BM25.
-	hits, _ := deps.Chunks.BM25Search(ctx, "local", "MVCC", 10, store.SearchFilters{})
+	hits, err := sqlitestore.NewChunks(db, store.EmbeddingDim).BM25Search(ctx, "local", "MVCC", 10, store.SearchFilters{})
+	require.NoError(t, err)
 	require.NotEmpty(t, hits, "indexed content should be searchable")
 }
 
@@ -312,7 +315,7 @@ func TestIndexHandler_HappyPath(t *testing.T) {
 // chunks_fts: a tag word that does NOT appear in the body is searchable
 // after indexing.
 func TestIndexHandler_BookmarkTagsAreSearchable(t *testing.T) {
-	deps, _, _ := newTestDeps(t)
+	deps, db, _ := newTestDeps(t)
 	ctx := context.Background()
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/tagged", ContentType: store.ContentTypeArticle}
@@ -325,12 +328,12 @@ func TestIndexHandler_BookmarkTagsAreSearchable(t *testing.T) {
 		SavedAt: time.Now().UTC(), Tags: []string{"zorptag"},
 	}))
 
-	require.NoError(t, FetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
-	require.NoError(t, IndexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)))
+	require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+	require.NoError(t, indexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)))
 
 	// Sanity: the tag is not in the body, so without denormalization this
 	// would return nothing.
-	hits, err := deps.Chunks.BM25Search(ctx, "local", "zorptag", 10, store.SearchFilters{})
+	hits, err := sqlitestore.NewChunks(db, store.EmbeddingDim).BM25Search(ctx, "local", "zorptag", 10, store.SearchFilters{})
 	require.NoError(t, err)
 	require.NotEmpty(t, hits, "bookmark tag should be searchable via chunks_fts")
 	assert.Equal(t, doc.ID, hits[0].DocumentID)
@@ -343,83 +346,101 @@ func TestIndexHandler_MissingExtraction_Permanent(t *testing.T) {
 	require.NoError(t, deps.Documents.Create(ctx, doc))
 	// No extraction created.
 
-	err := IndexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID))
+	err := indexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPermanent)
 }
 
-// --- worker integration ---
+// --- pools ---
 
+// TestNewPools: the daemon's pools each claim one kind, and only the
+// per-document ones mark their document when a job gives up.
+func TestNewPools(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	type shape struct {
+		name         string
+		kinds, hooks []store.JobKind
+		size         int
+	}
+	pools := NewPools(deps, PoolSizes{Fetch: 16, Index: 4}, WorkerOptions{})
+	got := make([]shape, 0, len(pools))
+	for _, p := range pools {
+		got = append(got, shape{p.Name, p.Worker.kinds(), slices.Sorted(maps.Keys(p.Worker.onPermFail)), p.Size})
+	}
+	assert.Equal(t, []shape{
+		{"fetch", []store.JobKind{store.JobKindFetch}, []store.JobKind{store.JobKindFetch}, 16},
+		{"index", []store.JobKind{store.JobKindIndex}, []store.JobKind{store.JobKindIndex}, 4},
+		{"cluster", []store.JobKind{store.JobKindCluster}, nil, 1},
+	}, got)
+}
+
+// runPools runs every goroutine of pools until the returned stop is called.
+func runPools(pools []Pool) (stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for _, p := range pools {
+		for range p.Size {
+			wg.Go(func() { _ = p.Worker.Run(ctx) })
+		}
+	}
+	return func() {
+		cancel()
+		wg.Wait()
+	}
+}
+
+// TestWorker_FullFetchIndexChain runs a document through the pools the
+// daemon runs: the fetch pool fetches and enqueues the index job, which only
+// the index pool claims.
 func TestWorker_FullFetchIndexChain(t *testing.T) {
 	deps, db, _ := newTestDeps(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/e2e", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(ctx, doc))
-
 	require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 
-	worker := NewWorker(deps.Queue, WorkerOptions{PollInterval: 20 * time.Millisecond})
-	Register(worker, deps)
+	stop := runPools(NewPools(deps, PoolSizes{Fetch: 1, Index: 1},
+		WorkerOptions{PollInterval: 20 * time.Millisecond, Log: quietLog}))
+	defer stop()
 
-	// Run worker in background; cancel after both jobs complete. The
-	// document turns fetched before the index job is marked done, so wait
-	// on the jobs themselves.
-	done := make(chan struct{})
-	go func() { _ = worker.Run(ctx); close(done) }()
-
+	// The document turns fetched before the index job is marked done, so
+	// wait on the jobs themselves.
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		var n int
 		require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
 		assert.Equal(c, 2, n, "fetch + index should both be done")
 	}, 5*time.Second, 20*time.Millisecond)
+	stop()
 
-	cancel()
-	<-done
-
-	got, err := deps.Documents.GetByID(context.Background(), doc.ID)
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	require.Equal(t, store.DocStateFetched, got.State)
 }
 
-// TestWorker_DeadLinkMarksDocDead runs the real worker loop end-to-end:
-// fetcher says dead link → job permanently fails on attempt 1 → the
-// permanent-failure hook flips the document to state=dead (not failed).
+// TestWorker_DeadLinkMarksDocDead runs the pools end to end: the fetcher
+// says dead link, the job fails permanently on attempt 1, and the fetch
+// pool's permanent-failure hook flips the document to dead (not failed).
 func TestWorker_DeadLinkMarksDocDead(t *testing.T) {
 	deps, db, ff := newTestDeps(t)
 	ff.res = nil
 	ff.err = &fetcher.PermanentError{Err: fmt.Errorf("native: dead link (HTTP 404): %w", fetcher.ErrDeadLink)}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/gone", ContentType: store.ContentTypeArticle}
 	require.NoError(t, deps.Documents.Create(ctx, doc))
-
 	require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 
-	worker := NewWorker(deps.Queue, WorkerOptions{PollInterval: 10 * time.Millisecond})
-	Register(worker, deps)
+	stop := runPools(NewPools(deps, PoolSizes{Fetch: 1, Index: 1},
+		WorkerOptions{PollInterval: 10 * time.Millisecond, Log: quietLog}))
+	defer stop()
 
-	done := make(chan struct{})
-	go func() { _ = worker.Run(ctx); close(done) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		d, _ := deps.Documents.GetByID(ctx, doc.ID)
-		if d != nil && d.State == store.DocStateDead {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	cancel()
-	<-done
-
-	got, err := deps.Documents.GetByID(context.Background(), doc.ID)
-	require.NoError(t, err)
-	assert.Equal(t, store.DocStateDead, got.State)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		got, err := deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(c, err)
+		assert.Equal(c, store.DocStateDead, got.State)
+	}, 5*time.Second, 10*time.Millisecond)
+	stop()
 
 	// One attempt only — dead links must not burn the retry budget.
 	var attempts int

@@ -61,7 +61,7 @@ func NewGitHub(opts GitHubOptions) *GitHub {
 	}
 }
 
-func (g *GitHub) Name() string { return "github" }
+func (*GitHub) Name() string { return "github" }
 
 func (g *GitHub) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	u, err := url.Parse(rawURL)

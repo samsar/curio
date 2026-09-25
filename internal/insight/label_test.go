@@ -93,8 +93,8 @@ func (f *fakeGenerator) Generate(context.Context, string, generator.Options) (st
 	f.calls++
 	return f.reply, f.err
 }
-func (f *fakeGenerator) Model() string              { return "fake" }
-func (f *fakeGenerator) Ping(context.Context) error { return nil }
+func (*fakeGenerator) Model() string              { return "fake" }
+func (*fakeGenerator) Ping(context.Context) error { return nil }
 
 func TestLLMLabeler_UnparseableReply(t *testing.T) {
 	reply := "Sure! Here you go:\n" + strings.Repeat("機", 300)
@@ -116,7 +116,7 @@ func TestTermLabeler_UnicodeWords(t *testing.T) {
 	lab, err = l.Label(context.Background(), ClusterInfo{Titles: []string{"機械学習 入門", "深層学習 入門"}})
 	require.NoError(t, err)
 	require.NotEmpty(t, lab.Name)
-	for _, word := range strings.Fields(lab.Name) {
+	for word := range strings.FieldsSeq(lab.Name) {
 		assert.Contains(t, []string{"機械学習", "深層学習"}, word, "labels are built from whole tokens")
 	}
 }

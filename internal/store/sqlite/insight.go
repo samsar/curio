@@ -26,10 +26,10 @@ func NewInsights(db *DB) *Insights { return &Insights{db: db} }
 
 func (s *Insights) CreateRun(ctx context.Context, run *store.ClusterRun) error {
 	if run.TenantID == "" {
-		return fmt.Errorf("insights: tenant_id required")
+		return errors.New("insights: tenant_id required")
 	}
 	if run.Algo == "" {
-		return fmt.Errorf("insights: algo required")
+		return errors.New("insights: algo required")
 	}
 	if run.ID == "" {
 		run.ID = uuid.NewString()
@@ -69,13 +69,13 @@ func (s *Insights) CreateRun(ctx context.Context, run *store.ClusterRun) error {
 
 func (s *Insights) ReplaceClusters(ctx context.Context, runID string, clusters []store.ClusterWithMembers) error {
 	if runID == "" {
-		return fmt.Errorf("insights: run_id required")
+		return errors.New("insights: run_id required")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer tx.Rollback()
 
 	// Idempotent for job retries: drop anything previously written for the
 	// run (cascade removes memberships) before re-inserting.
@@ -89,7 +89,7 @@ func (s *Insights) ReplaceClusters(ctx context.Context, runID string, clusters [
 			c.ID = uuid.NewString()
 		}
 		if c.TenantID == "" {
-			return fmt.Errorf("insights: cluster tenant_id required")
+			return errors.New("insights: cluster tenant_id required")
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO clusters (id, tenant_id, run_id, label, summary, size, cohesion)

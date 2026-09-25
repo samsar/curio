@@ -20,13 +20,15 @@ type Bookmarks struct {
 
 var _ store.BookmarkStore = (*Bookmarks)(nil)
 
+// tagsForDocumentSQL reads the tags of a document's bookmarks. Its args are
+// the tenant and the document.
+const tagsForDocumentSQL = `SELECT tags FROM bookmarks WHERE tenant_id = ? AND document_id = ?`
+
 // TagsForDocument returns the deduplicated tags across all bookmarks that
 // reference the document, scoped to the tenant. Order is first-seen.
 // Malformed tag JSON on a row is skipped rather than failing the whole call.
 func (s *Bookmarks) TagsForDocument(ctx context.Context, tenantID, documentID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT tags FROM bookmarks WHERE tenant_id = ? AND document_id = ?`,
-		tenantID, documentID)
+	rows, err := s.db.QueryContext(ctx, tagsForDocumentSQL, tenantID, documentID)
 	if err != nil {
 		return nil, fmt.Errorf("tags for document: %w", err)
 	}
@@ -77,7 +79,7 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 	if err != nil {
 		return store.IngestResult{}, fmt.Errorf("begin ingest: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	defer tx.Rollback()
 
 	docID, state, created, err := getOrCreateDocument(ctx, tx, b.TenantID, b.URL)
 	if err != nil {
@@ -247,10 +249,12 @@ func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, 
 	return q, append(args, listLimit(opts.Limit))
 }
 
+// countBookmarksSQL counts a tenant's bookmarks. Its arg is the tenant.
+const countBookmarksSQL = `SELECT count(*) FROM bookmarks WHERE tenant_id = ?`
+
 func (s *Bookmarks) Count(ctx context.Context, tenantID string) (int, error) {
 	var n int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM bookmarks WHERE tenant_id = ?`, tenantID).Scan(&n); err != nil {
+	if err := s.db.QueryRowContext(ctx, countBookmarksSQL, tenantID).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count bookmarks: %w", err)
 	}
 	return n, nil

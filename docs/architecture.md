@@ -39,10 +39,10 @@
                      │          │  │
               ┌──────▼───┐  ┌───▼──▼─────┐  ┌──────────┐
               │ SQLite   │  │ Ollama     │  │ Fetchers │
-              │ FTS5 +   │  │ (embed +   │  │ web2md / │
-              │ sqlite-vec│  │  LLM)     │  │ Jina /   │
-              └──────────┘  └────────────┘  │ GitHub / │
-                                            │ yt-dlp   │
+              │ FTS5 +   │  │ (embed +   │  │ native / │
+              │ sqlite-vec│  │  LLM)     │  │ GitHub / │
+              └──────────┘  └────────────┘  │ yt-dlp / │
+                                            │ web2md   │
                                             └──────────┘
 ```
 
@@ -56,7 +56,8 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
 - `curio status` — daemon health, doc counts, job queue depth
 - `curio daemon {start|stop|status|logs}` — lifecycle management (see "Daemon lifecycle")
 - `curio refetch <id|all>` — force re-extract
-- `curio reindex` — re-embed (after model swap)
+- `curio reindex <id|--all>` — re-chunk and re-embed existing extractions
+  (after chunker or embedding-prefix changes, or to pick up new tags)
 
 If a CLI command needs the daemon and it isn't running, the CLI auto-starts it.
 
@@ -149,9 +150,8 @@ Everything under `$CURIO_HOME` (defaults to `~/.curio`).
   config.yaml            # user config
   curio.db               # SQLite database (metadata, jobs, FTS5, vectors)
   content/               # extracted markdown, on disk
-    <bookmark_id>/
-      <document_id>.md
-      <document_id>.raw.html
+    <document_id>/
+      <extraction_id>.md   # one file per extraction; the document points at its current one
   logs/
     daemon.log
   daemon.pid             # single-instance lock (flock) + the running daemon's PID
@@ -181,10 +181,10 @@ bookmark file ──► importer ──► bookmark + document ──► fetch j
                               │                       ▼
                               │                  FTS5 + sqlite-vec
                               │
-                              └── (periodically) ──► insight jobs
-                                                       │
-                                                       ▼
-                                                clusters / interests
+                              └── curio interests rebuild ──► cluster job
+                                                                  │
+                                                                  ▼
+                                                        clusters / interests
 ```
 
 ## Fetcher strategy selection
@@ -247,19 +247,24 @@ top-3-avg), `default_k`, and `embed_timeout_seconds`.
 
 ## Pluggability: where interfaces live
 
-Three interfaces with explicit swap paths:
+The interfaces with explicit swap paths:
 
-1. **`DocumentStore`** — primary metadata storage. SQLite impl in v1; Postgres
-   impl when hosted-mode is wanted.
-2. **`BM25Index`** — keyword index. FTS5 impl in v1; Tantivy or Elasticsearch
-   later if scale requires.
-3. **`VectorIndex`** — embedding index. sqlite-vec impl in v1; pgvector,
-   Qdrant, or Pinecone later.
-4. **`Embedder`** — embedding model client. Ollama impl in v1; Voyage / OpenAI
-   for cloud. Switching embedding models requires re-indexing
-   (see [decisions](./decisions.md#embedding-model-swap)).
-5. **`Fetcher`** — content fetcher. Multiple impls (web2md, jina, github, ...),
-   selected per-URL by the rules engine.
+1. **`store.*Store`** (`internal/store`) — `DocumentStore`,
+   `ExtractionStore`, `BookmarkStore`, `ChunkStore` (FTS5 keyword and
+   sqlite-vec vector search), `JobQueue`/`JobStore` and `InsightStore`. One
+   SQLite implementation (`internal/store/sqlite`); Postgres + pgvector
+   when hosted mode is wanted. depguard keeps every other package on the
+   interfaces.
+2. **`embedder.Embedder`** — embedding model client. Ollama impl; Voyage /
+   OpenAI for cloud. Switching an existing home's embedding model isn't
+   supported (see [decisions](./decisions.md#embedding-model-swap)).
+3. **`generator.Generator`** — LLM text generation, used for cluster labels.
+   Ollama impl.
+4. **`fetcher.Fetcher`** — content fetcher: `native` (Go HTTP + Readability,
+   with Jina Reader as its fallback), `web2md`, `github`, `youtube`,
+   selected per URL by the rules engine.
+5. **`insight.Clusterer`** and **`insight.Labeler`** — the clustering
+   algorithm (kNN graph) and cluster naming (LLM or term labels).
 
 Do not abstract until you have two impls. The interfaces above are commitments
 because we already know we want hosted mode, model swaps, and multiple fetchers.
@@ -276,14 +281,18 @@ mode is a deployment change, not a schema change. See
 External processes the daemon expects:
 
 - **Ollama** — for embeddings and local text generation. Daemon talks to it on
-  `http://localhost:11434`. Fails loudly if absent; documents how to install.
-  Generation is abstracted behind a `generator.Generator` interface (local
-  Ollama `/api/generate` impl), used for optional LLM cluster labels in the
-  insight layer.
+  `http://localhost:11434`. The daemon runs without it and degrades: search
+  returns keyword-only results marked `degraded`, index jobs fail and retry
+  with backoff, cluster labels fall back to term labels, and `/v1/healthz`
+  (and `curio doctor`) says what's wrong. It pulls the models it needs,
+  retrying until Ollama answers. Generation is abstracted behind a
+  `generator.Generator` interface (local Ollama `/api/generate` impl), used
+  for LLM cluster labels in the insight layer.
 - **Node + web2md** (the user's existing tool) — invoked as a subprocess by the
-  `web2md` fetcher. Optional if other fetchers cover all URLs.
-- **Jina Reader (optional)** — self-hostable via Docker, used by the `jina`
-  fetcher.
+  optional `web2md` fetcher. Not needed: the default fetcher is Go-native.
+- **Jina Reader** (`r.jina.ai`, `fetcher.native.jina_base_url`) — the native
+  fetcher's fallback for anti-bot and login-wall pages and PDFs it can't
+  read; off with `fetcher.native.jina_fallback: false`.
 - **Claude API (optional)** — a future `generator.Generator` impl for heavier
   synthesis on the M6 RAG path (retrieve → LLM → cited answer).
 

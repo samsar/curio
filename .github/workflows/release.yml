@@ -5,34 +5,47 @@ on:
     tags:
       - "v*"
 
+# Read-only unless a job asks for more; only the publishing job does.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  ci:
+    name: CI gate
+    # The workflow pull requests run. It inherits this file's read-only
+    # token and sees no secrets.
+    uses: ./.github/workflows/ci.yml
+
   release:
+    name: Publish
+    needs: ci
     # cgo is required (sqlite-vec + mattn/go-sqlite3). macos-14 is an
     # Apple Silicon runner, which can natively build darwin/arm64. Adding
     # darwin/amd64 or linux/amd64 means a matrix runner + goreleaser
     # split/merge; deferred until there's demand.
     runs-on: macos-14
+    permissions:
+      contents: write
     env:
       CGO_ENABLED: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # goreleaser wants tags + full history
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          # The job that holds the write token and the tap PAT builds from
+          # a clean module download, never from a cache another run wrote.
+          cache: false
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          version: "~> v2"
+          version: v2.18.2
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Same secret already used by the git-repos release workflow;
           # PAT with `repo` scope on samsar/homebrew-tap.
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

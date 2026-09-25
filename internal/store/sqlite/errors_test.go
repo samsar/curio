@@ -2,7 +2,7 @@ package sqlite
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"testing"
 	"time"
 
@@ -57,9 +57,9 @@ func TestConstraintErrors(t *testing.T) {
 	})
 	t.Run("not a sqlite error", func(t *testing.T) {
 		assert.False(t, isUniqueViolation(nil))
-		assert.False(t, isUniqueViolation(fmt.Errorf("UNIQUE constraint failed: looks alike")))
+		assert.False(t, isUniqueViolation(errors.New("UNIQUE constraint failed: looks alike")))
 		assert.False(t, isForeignKeyViolation(nil))
-		assert.False(t, isForeignKeyViolation(fmt.Errorf("FOREIGN KEY constraint failed: looks alike")))
+		assert.False(t, isForeignKeyViolation(errors.New("FOREIGN KEY constraint failed: looks alike")))
 	})
 }
 

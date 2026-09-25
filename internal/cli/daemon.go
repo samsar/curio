@@ -37,10 +37,15 @@ func newDaemonStopCmd(env *daemonctl.Env) *cobra.Command {
 		Use:   "stop",
 		Short: "Stop the daemon",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := env.Controller.Stop(cmd.Context()); err != nil {
+			stopped, err := env.Controller.Stop(cmd.Context())
+			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "daemon stopped")
+			if stopped {
+				fmt.Fprintln(cmd.OutOrStdout(), "daemon stopped")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "daemon not running")
+			}
 			return nil
 		},
 	}
@@ -77,12 +82,12 @@ func describeDaemonStatus(st daemonctl.Status, home string) string {
 	case daemonctl.Legacy:
 		return fmt.Sprintf("legacy daemon from an older curio is answering (version %s); "+
 			"run `curio daemon stop` for how to retire it", st.Health.Version)
-	default:
-		if st.Health != nil && st.Health.Home != "" && !daemonctl.SameHome(st.Health.Home, home) {
-			return fmt.Sprintf("not running (the port is served by the daemon for %s)", st.Health.Home)
-		}
-		return "not running"
+	case daemonctl.NotRunning:
 	}
+	if st.Health != nil && st.Health.Home != "" && !daemonctl.SameHome(st.Health.Home, home) {
+		return fmt.Sprintf("not running (the port is served by the daemon for %s)", st.Health.Home)
+	}
+	return "not running"
 }
 
 func newDaemonLogsCmd(env *daemonctl.Env) *cobra.Command {

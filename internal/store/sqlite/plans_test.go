@@ -206,6 +206,16 @@ func TestQueryPlans(t *testing.T) {
 			sorts: true,
 		},
 		{
+			name:  "Bookmarks.Count",
+			query: countBookmarksSQL, args: []any{"local"},
+			want: []string{"SEARCH bookmarks USING COVERING INDEX idx_bookmarks_tenant_created (tenant_id=?)"},
+		},
+		{
+			name:  "TagsForDocument",
+			query: tagsForDocumentSQL, args: []any{"local", "doc"},
+			want: []string{"SEARCH bookmarks USING INDEX idx_bookmarks_document (document_id=?)"},
+		},
+		{
 			name:  "document delete reaches its jobs",
 			query: deleteDocumentSQL, args: []any{"doc"},
 			want: []string{"SEARCH jobs USING COVERING INDEX idx_jobs_document (document_id=?)"},

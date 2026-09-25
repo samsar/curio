@@ -37,7 +37,7 @@ func runCapped(ctx context.Context, timeout time.Duration, stdout io.Writer, nam
 	defer cancel()
 
 	errOut := &cappedBuffer{max: maxStderrBytes}
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: name is the tool the operator configured (fetcher.*.bin), run without a shell
 	cmd.Stdout = stdout
 	cmd.Stderr = errOut
 	isolateProcessGroup(cmd)

@@ -61,7 +61,7 @@ func NewYouTube(opts YouTubeOptions) *YouTube {
 	}
 }
 
-func (y *YouTube) Name() string { return "youtube" }
+func (*YouTube) Name() string { return "youtube" }
 
 func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	u, err := url.Parse(rawURL)
@@ -178,7 +178,7 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlp
 		return nil, fmt.Errorf("youtube: find info.json: %w", err)
 	}
 	if len(infoFiles) == 0 {
-		return nil, fmt.Errorf("youtube: yt-dlp produced no info.json")
+		return nil, errors.New("youtube: yt-dlp produced no info.json")
 	}
 	data, err := os.ReadFile(infoFiles[0])
 	if err != nil {
@@ -208,7 +208,7 @@ var permanentPatterns = []string{
 // if no ERROR lines are found.
 func extractYTDLPError(stderr string) string {
 	var errLines []string
-	for _, line := range strings.Split(stderr, "\n") {
+	for line := range strings.SplitSeq(stderr, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "ERROR:") {
 			errLines = append(errLines, trimmed)

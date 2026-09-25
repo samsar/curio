@@ -4,30 +4,32 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml runs this workflow as its gate, so a tag can only publish a
+  # tree that passes the same checks as a pull request.
+  workflow_call:
 
 permissions:
   contents: read
 
+# Actions are pinned by commit SHA (tag in the trailing comment); Dependabot
+# bumps both. Tool versions come from the Makefile, never from here.
 jobs:
-  build:
+  test:
     name: Build & test
     runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: "1"
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Use go-version-file so the toolchain in go.mod stays the source
-          # of truth; setup-go honors both `go` and `toolchain` directives.
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # go.mod's go line is the exact toolchain; the Makefile exports it
+          # as GOTOOLCHAIN, so nothing is downloaded twice.
           go-version-file: go.mod
-          cache: true
 
       - name: Verify go.mod is tidy
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
+        run: make tidy-check
 
       - name: Build
         run: make build
@@ -38,21 +40,49 @@ jobs:
       - name: Unit tests
         run: make test
 
+      - name: End-to-end test
+        run: make test-e2e
+
+      - name: Vulnerability check
+        run: make vulncheck
+
+  test-macos:
+    # macos-14 is the release runner and darwin/arm64 the only platform
+    # goreleaser ships, so its tests run here before a tag builds on it.
+    name: Unit tests (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: make test
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+
+      - name: Read the pinned golangci-lint version
+        id: pins
+        run: echo "golangci-lint=$(make -s golangci-lint-version)" >> "$GITHUB_OUTPUT"
 
       - name: golangci-lint
-        # Pin a recent v2.x — older v2 releases (v2.0.x) were built with
-        # Go 1.24 and reject modules whose `go` directive is ≥ 1.25.
-        # Multiple deps (pressly/goose, html-to-markdown, ...) require
-        # 1.25, so we need a lint binary built against ≥1.25 too.
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2
+          version: ${{ steps.pins.outputs.golangci-lint }}
+
+      - name: actionlint
+        run: make actionlint

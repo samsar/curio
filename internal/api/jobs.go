@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -103,7 +104,7 @@ func (d Deps) handleDeleteJobs(w http.ResponseWriter, r *http.Request) {
 // which time.ParseDuration doesn't natively support. "30d" → 720h.
 func parseExtendedDuration(s string) (time.Duration, error) {
 	if s == "" {
-		return 0, fmt.Errorf("empty duration")
+		return 0, errors.New("empty duration")
 	}
 	// Days suffix: convert to hours and re-parse.
 	if last := s[len(s)-1]; last == 'd' || last == 'D' {
@@ -112,7 +113,7 @@ func parseExtendedDuration(s string) (time.Duration, error) {
 			return 0, fmt.Errorf("invalid days: %w", err)
 		}
 		if n < 0 {
-			return 0, fmt.Errorf("days must be non-negative")
+			return 0, errors.New("days must be non-negative")
 		}
 		return time.Duration(n) * 24 * time.Hour, nil
 	}

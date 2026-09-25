@@ -67,13 +67,13 @@ func fakeDaemon(t *testing.T, lastSearch *atomic.Value) http.Handler {
 		})
 	}
 	mux.HandleFunc("/v1/documents/doc-unfetched/content", func(w http.ResponseWriter, _ *http.Request) {
-		problem(w, http.StatusNotFound, "document has no extraction yet")
+		problem(t, w, http.StatusNotFound, "document has no extraction yet")
 	})
 	mux.HandleFunc("/v1/documents/doc-broken/content", func(w http.ResponseWriter, _ *http.Request) {
-		problem(w, http.StatusInternalServerError, "database is locked")
+		problem(t, w, http.StatusInternalServerError, "database is locked")
 	})
 	mux.HandleFunc("/v1/documents/doc-missing", func(w http.ResponseWriter, _ *http.Request) {
-		problem(w, http.StatusNotFound, `document "doc-missing" not found`)
+		problem(t, w, http.StatusNotFound, `document "doc-missing" not found`)
 	})
 	mux.HandleFunc("/v1/documents/doc-1/related", func(w http.ResponseWriter, _ *http.Request) {
 		// Includes the source doc itself to exercise the sidecar's
@@ -143,10 +143,10 @@ func running(t *testing.T, c *client.Client) daemon {
 }
 
 // problem answers status with a problem+json body, as the daemon does.
-func problem(w http.ResponseWriter, status int, detail string) {
+func problem(t *testing.T, w http.ResponseWriter, status int, detail string) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"title": http.StatusText(status), "status": status, "detail": detail})
+	assert.NoError(t, json.NewEncoder(w).Encode(client.Problem{Title: http.StatusText(status), Status: status, Detail: detail}))
 }
 
 // session is a connected MCP client plus what the fake daemon behind it saw.
@@ -242,7 +242,7 @@ func TestMCP_ServerErrorsAreNotRetried(t *testing.T) {
 	var requests atomic.Int32
 	failing := serve(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
-		problem(w, http.StatusInternalServerError, "database is locked")
+		problem(t, w, http.StatusInternalServerError, "database is locked")
 	}))
 	res := search(t, connect(t, running(t, failing)))
 	assert.True(t, res.IsError)

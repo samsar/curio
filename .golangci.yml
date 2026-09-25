@@ -1,35 +1,68 @@
 # golangci-lint v2 config — see https://golangci-lint.run/usage/configuration/
 #
-# Lint philosophy for curio: catch real bugs (staticcheck, unused, ineffassign,
-# rowserrcheck, errorlint) but don't get in the way of standard Go idioms
-# (defer Close errors, sentinel error wrapping with %w/%v). gocritic and
-# gosec are turned off — they're high-noise relative to signal for a tool
-# of this scope.
+# Policy: every enabled linter finds real defects or outdated idioms in this
+# tree, and the tree stays at zero issues. A hit is fixed, or silenced at the
+# line with a //nolint that names one linter and says why (nolintlint
+# enforces both). The only config-level exclusions are the ones below, each
+# with its reason.
+#
+# What each linter is for:
+#   errcheck, errchkjson, errorlint, nilerr, nilnil  errors: unchecked,
+#       unchecked JSON, wrapped without %w, returned as nil, nil-and-nil
+#   bodyclose, rowserrcheck, sqlclosecheck, noctx  resources and contexts:
+#       HTTP bodies and SQL rows closed, requests and dials that carry ctx
+#   gosec          subprocesses, file modes and other security footguns
+#   exhaustive     switches over enums name every member
+#   govet, staticcheck, unused, ineffassign, unconvert, copyloopvar
+#                  the standard correctness and dead-code set
+#   gocritic, revive  readability and suspicious constructs (revive's rules
+#       are listed explicitly below)
+#   modernize, intrange, usestdlibvars, perfsprint  current idioms: min/max,
+#       slices/maps, range-over-int, net/http constants, errors.New for
+#       constant messages
+#   prealloc, misspell  small wins
+#   depguard       the store boundary and test-only dependencies
+#   nolintlint     keeps suppressions specific and explained
 
 version: "2"
 
 run:
   timeout: 5m
   tests: true
+  # Tag-gated files are linted too: the sqlite tags every build needs, the
+  # live-site integration test and the end-to-end test.
+  build-tags: [sqlite_fts5, sqlite_json, integration, e2e]
 
 linters:
   default: none
   enable:
-    - errcheck
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-    - misspell
-    - unconvert
-    - prealloc
     - bodyclose
-    - rowserrcheck
-    - sqlclosecheck
-    - errorlint
-    - nilerr
     - copyloopvar
     - depguard
+    - errcheck
+    - errchkjson
+    - errorlint
+    - exhaustive
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - intrange
+    - misspell
+    - modernize
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - perfsprint
+    - prealloc
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unconvert
+    - unused
+    - usestdlibvars
 
   settings:
     depguard:
@@ -70,36 +103,100 @@ linters:
             - pkg: github.com/getkin/kin-openapi
               desc: kin-openapi checks the API against its spec in tests; it must never link into a binary
     errcheck:
-      # Don't flag the idiomatic patterns where the error is genuinely
-      # uninteresting: deferred Close on rows / bodies / files, and explicit
-      # _ = on best-effort writers.
+      # Errors that carry nothing to act on: a deferred Close on something
+      # only read, and a Rollback, which is a no-op after Commit and whose
+      # failure otherwise loses to the error that caused it.
       exclude-functions:
         - (io.Closer).Close
         - (*os.File).Close
         - (*database/sql.Rows).Close
         - (io.ReadCloser).Close
-        - fmt.Fprintf
-        - fmt.Fprintln
-        - fmt.Fprint
-    errorlint:
-      # Some older call sites wrap a sentinel with %w and format the cause
-      # with %v. fmt.Errorf has accepted several %w verbs since Go 1.20, so new
-      # code uses `fmt.Errorf("%w: %w", sentinel, err)` to keep both in the
-      # chain; this check stays off until the remaining %v sites are migrated.
-      errorf: false
+        - (*database/sql.Tx).Rollback
+    exhaustive:
+      # A default does not make a switch exhaustive: new enum members must be
+      # handled on purpose.
+      default-signifies-exhaustive: false
+    gosec:
+      excludes:
+        - G104 # unchecked errors: errcheck owns them, with its exclusions
+        - G304 # file inclusion via variable: paths come from the operator's own arguments, config and $CURIO_HOME
+        - G703 # path traversal taint: same operator-supplied paths as G304
     misspell:
       ignore-rules:
         - strat   # intentional abbreviation of "strategy" (CollapseStrategy)
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    perfsprint:
+      # fmt.Sprintf("%s: %s", a, b) reads better than a + ": " + b.
+      strconcat: false
+    revive:
+      # revive's defaults minus exported and package-comments (doc comments
+      # are written where they help, not to satisfy a rule), plus the rules
+      # after the blank line.
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: var-declaration
+        - name: var-naming
+
+        - name: atomic
+        - name: bool-literal-in-expr
+        - name: constant-logical-expr
+        - name: datarace
+        - name: deep-exit
+        - name: defer
+        - name: early-return
+        - name: identical-branches
+        - name: import-shadowing
+        - name: modifies-value-receiver
+        - name: string-of-int
+        - name: struct-tag
+        - name: unconditional-recursion
+        - name: unnecessary-stmt
+        - name: unused-receiver
+        - name: use-any
+        - name: useless-break
+        - name: waitgroup-by-value
+        # Not redundant-import-alias: it flags the fhttp alias in
+        # internal/fetcher/transport.go, which is required because
+        # github.com/bogdanfinn/fhttp's package name is http.
 
   exclusions:
     rules:
+      # Tests close what they open through t.Cleanup or not at all, talk to
+      # httptest servers without contexts, and use fixed temp paths and
+      # re-executed fake tools on purpose.
       - path: _test\.go
         linters:
           - errcheck
           - bodyclose
-      - path: cmd/
+          - noctx
+          - gosec
+      # The CLI writes to its own stdout/stderr, where a failed write has no
+      # one left to report to.
+      - path: internal/cli/
         linters:
           - errcheck
+        text: fmt\.Fprint
 
 formatters:
   enable:
