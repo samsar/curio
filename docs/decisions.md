@@ -217,7 +217,9 @@ embed deadline bounds the hung case.
 **Query embed deadline:** `search.embed_timeout_seconds` (default 10) bounds
 embedding the query, separately from the embedder's per-request timeout
 (`embedding.timeout_seconds`, sized for index batches). Before, the only bound
-was that 60 s client timeout.
+was that 60 s client timeout. Keep it well under 30 s: the CLI and MCP give up
+on a daemon request after 30 s, so a longer deadline turns a hung Ollama back
+into a client-side timeout instead of a degraded result.
 
 **Fanout scales with k:** each retriever returns `max(50, 8·k)` chunks, the same
 rule `find_related` uses — hits are chunk-level, and one long document can fill

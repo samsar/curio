@@ -133,7 +133,9 @@ type Search struct {
 	Collapse     string  `yaml:"collapse"` // max | sum | top3_avg
 	// EmbedTimeoutSeconds bounds embedding a search query. When Ollama is
 	// down or slower than this, search returns keyword-only results marked
-	// degraded instead of failing. Default 10.
+	// degraded instead of failing. Default 10. Keep it well under the CLI and
+	// MCP client's 30 s request timeout, or a hung Ollama surfaces there as a
+	// client timeout instead of a degraded result.
 	EmbedTimeoutSeconds int `yaml:"embed_timeout_seconds"`
 }
 

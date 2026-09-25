@@ -389,7 +389,8 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 		llmLabeler = insight.NewLLMLabeler(gen)
 		if cfg.Generation.AutoPull {
 			go func() {
-				if err := gen.EnsureModel(ctx, slog.Default()); err != nil {
+				// A pull cut short by daemon shutdown is not a missing model.
+				if err := gen.EnsureModel(ctx, slog.Default()); err != nil && ctx.Err() == nil {
 					slog.Warn("generation model not ready and the pull is not retried; cluster labels use "+
 						"the term fallback until Ollama serves it (run `ollama pull`, or restart the daemon)",
 						"model", cfg.Generation.Model, "err", err)

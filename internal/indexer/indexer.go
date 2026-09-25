@@ -39,10 +39,10 @@ type Options struct {
 
 // embedBatchSize bounds one embed request to at most 32 chunks of at most
 // 3500 bytes (~112 KB), which even CPU-only Ollama embeds in a few seconds.
-// Sending a whole document at once let a long one (a book-length PDF, or any
-// document queued behind the other index workers' requests) run past the
-// embedder's timeout and fail every retry, and it held query embeddings from
-// search waiting behind it in Ollama.
+// That keeps each request well inside the embedder's timeout however long the
+// document is, or however many index workers' requests are queued ahead of
+// it, and limits how long a search's query embedding waits behind index work
+// in Ollama.
 const embedBatchSize = 32
 
 func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer {

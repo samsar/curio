@@ -230,7 +230,7 @@ while indexing fails that index job, and the job queue retries it.
 | Key | Default | Bounds |
 |---|---|---|
 | `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 32 chunks per request) |
-| `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded` |
+| `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded`. Keep it well under 30: the CLI and MCP give up on a request after 30 s, so a hung Ollama would surface as a client timeout instead |
 | `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one clustering run; the rest get term labels |
 
