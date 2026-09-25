@@ -2638,3 +2638,25 @@ re-import resumes.
 
 URL normalization and `importer.Indexable` filtering stay in the handlers,
 which report failures differently (400 versus `filtered_by`).
+
+---
+
+## Migrate: goose's Provider, and a context all the way down
+
+**Decision:** `sqlite.Open`, `Migrate` and `ReadSchemaVersion` take a
+context (`PingContext`, `QueryRowContext`, `Provider.Up(ctx)`), and the
+daemon passes its run context. `Migrate` applies the embedded migrations
+through `goose.NewProvider`, never goose's package-level `SetBaseFS` /
+`SetDialect` / `Up`.
+
+**Why:** the package-level API reads and writes process globals, so two
+databases migrating at once race: four parallel test subtests that each
+built a database failed under `-race`. That kept every DB-backed test
+serial. The Provider holds its state per instance and is quiet unless
+asked (`WithVerbose`), which also ends goose's per-migration `OK` lines in
+test output. Both APIs use the same `goose_db_version` table, so existing
+homes migrate unchanged.
+
+**Shutdown during a migration:** a cancelled context fails `Migrate`, and
+the daemon exits as on any migration error, without reusing the handle
+(see "Migrations: rebuilding a table other tables reference").

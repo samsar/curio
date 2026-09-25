@@ -6,7 +6,9 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -37,7 +39,7 @@ type DB struct {
 // footgun.
 //
 // Open does NOT run migrations. Call Migrate after.
-func Open(path string) (*DB, error) {
+func Open(ctx context.Context, path string) (*DB, error) {
 	vecOnce.Do(func() { sqlitevec.Auto() })
 
 	dsn, err := buildDSN(path)
@@ -49,25 +51,28 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("ping sqlite %q: %w", path, err)
+	if err := db.PingContext(ctx); err != nil {
+		return nil, fmt.Errorf("ping sqlite %q: %w", path, errors.Join(err, db.Close()))
 	}
 	return &DB{DB: db, path: path}, nil
 }
 
 // Migrate applies pending migrations from the embedded FS. Idempotent.
 //
+// It uses goose's Provider, which keeps its state per instance: goose's
+// package-level API (SetBaseFS, SetDialect, Up) reads and writes process
+// globals, a data race when two databases migrate at once.
+//
 // After an error, close db and don't reuse it: a table-rebuild migration
 // runs outside goose's transaction (see migrations/README.md), and one that
 // fails leaves its pooled connection inside an open transaction with
 // foreign keys off.
-func Migrate(db *DB) error {
-	goose.SetBaseFS(migrations.FS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		return fmt.Errorf("set goose dialect: %w", err)
+func Migrate(ctx context.Context, db *DB) error {
+	provider, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations.FS)
+	if err != nil {
+		return fmt.Errorf("load migrations: %w", err)
 	}
-	if err := goose.Up(db.DB, "."); err != nil {
+	if _, err := provider.Up(ctx); err != nil {
 		return fmt.Errorf("apply migrations: %w", err)
 	}
 	return nil
@@ -79,10 +84,12 @@ func (d *DB) Path() string { return d.path }
 // ReadSchemaVersion returns the schema_version recorded in the
 // schema_meta table. Used to sync the marker file (.curio-meta.json)
 // after migrations run.
-func ReadSchemaVersion(db *DB) (int, error) {
+func ReadSchemaVersion(ctx context.Context, db *DB) (int, error) {
 	var v int
-	err := db.QueryRow(`SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&v)
-	return v, err
+	if err := db.QueryRowContext(ctx, `SELECT schema_version FROM schema_meta WHERE id = 1`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return v, nil
 }
 
 // buildDSN produces a connection string that sets curio's required pragmas

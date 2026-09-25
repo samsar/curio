@@ -4,6 +4,7 @@
 package sqlitetest
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -16,7 +17,7 @@ import (
 // connection would see a different database.
 func NewDB(t testing.TB) *sqlite.DB {
 	t.Helper()
-	db, err := sqlite.Open(filepath.Join(t.TempDir(), "curio.db"))
+	db, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "curio.db"))
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
@@ -25,7 +26,7 @@ func NewDB(t testing.TB) *sqlite.DB {
 			t.Errorf("close test database: %v", err)
 		}
 	})
-	if err := sqlite.Migrate(db); err != nil {
+	if err := sqlite.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("migrate test database: %v", err)
 	}
 	return db

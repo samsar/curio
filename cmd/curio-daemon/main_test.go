@@ -74,10 +74,10 @@ type seededJobs struct {
 
 func seedJobs(t *testing.T, home *curiohome.Home) seededJobs {
 	t.Helper()
-	db, err := sqlitestore.Open(home.DBPath())
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
 	require.NoError(t, err)
 	defer db.Close()
-	require.NoError(t, sqlitestore.Migrate(db))
+	require.NoError(t, sqlitestore.Migrate(context.Background(), db))
 
 	q := sqlitestore.NewJobs(db)
 	ctx := context.Background()
@@ -92,7 +92,7 @@ func seedJobs(t *testing.T, home *curiohome.Home) seededJobs {
 // the running one not requeued, the pending one not claimed.
 func assertJobsUntouched(t *testing.T, home *curiohome.Home, seeded seededJobs) {
 	t.Helper()
-	db, err := sqlitestore.Open(home.DBPath())
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
 	require.NoError(t, err)
 	defer db.Close()
 	q := sqlitestore.NewJobs(db)
