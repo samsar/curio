@@ -824,25 +824,34 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 func decodeError(resp *http.Response) *APIError {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")) // "" when unparsable
-	var decoded struct {
-		Problem
-		Startup
-	}
+	var p Problem
 	switch {
 	case err != nil:
-		decoded.Problem = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
+		p = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
 			Detail: fmt.Sprintf("reading the error response: %v", err)}
-	case mediaType != "application/problem+json" || json.Unmarshal(body, &decoded) != nil:
-		decoded.Problem = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
+	case mediaType != "application/problem+json" || json.Unmarshal(body, &p) != nil:
+		p = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
 			Detail: strings.TrimSpace(string(body))}
 	}
-	apiErr := &APIError{Status: resp.StatusCode, Problem: decoded.Problem}
+	apiErr := &APIError{Status: resp.StatusCode, Problem: p}
 	apiErr.Problem.RequestID = cmp.Or(apiErr.Problem.RequestID, resp.Header.Get("X-Request-Id"))
-	// Only healthz names the daemon; other routes send the problem alone.
-	if apiErr.starting() && decoded.PID != 0 && decoded.Home != "" {
-		apiErr.Startup = &decoded.Startup
+	if apiErr.starting() {
+		apiErr.Startup = decodeStartup(body)
 	}
 	return apiErr
+}
+
+// decodeStartup reads the members a starting daemon's healthz answer adds
+// to its problem, or returns nil for a starting problem without them: only
+// healthz names the daemon, and other routes send the problem alone. Other
+// problems aren't read for them, so members of the same names in a foreign
+// problem can't spoil its decoding.
+func decodeStartup(body []byte) *Startup {
+	var s Startup
+	if json.Unmarshal(body, &s) != nil || s.PID == 0 || s.Home == "" {
+		return nil
+	}
+	return &s
 }
 
 // drain reads what is left of a response body, up to maxErrorBody, so that

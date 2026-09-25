@@ -227,6 +227,19 @@ func TestAPIError_ServerErrors(t *testing.T) {
 		assert.Equal(t, "disk full (request req-7; see `curio daemon logs`)", err.Error())
 	})
 
+	t.Run("a problem's extension members are its own", func(t *testing.T) {
+		c := fakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusInternalServerError)
+			// Named like a starting daemon's members, typed otherwise.
+			fmt.Fprint(w, `{"title":"internal error","status":500,"detail":"disk full","pid":"n/a","home":7}`)
+		})
+		_, err := c.Stats(context.Background())
+		p := requireStatus(t, err, http.StatusInternalServerError)
+		assert.Equal(t, "disk full", p.Detail)
+		assert.Nil(t, client.StartupOf(err))
+	})
+
 	t.Run("a body that isn't a problem is the detail", func(t *testing.T) {
 		c := fakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-Request-Id", "req-8")
