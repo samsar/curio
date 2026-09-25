@@ -113,7 +113,8 @@ Only host-wide verdicts are cached (`hostVerdict`): unreachable (NXDOMAIN, `ECON
 - `internal/fetcher/` — Native (Go) and Web2MD (subprocess) backends behind the same `Fetcher` interface.
 - `internal/indexer/` — Chunker (paragraph-aware with hard char cap) + orchestrator (chunk → embed → store).
 - `internal/insight/` — M4 insight layer. Pluggable `Clusterer` (kNN-graph + label propagation), `Labeler` (term / LLM), and the `Engine` that clusters → labels → persists.
-- `internal/generator/` — provider-agnostic LLM text generation (`Generator` interface + Ollama `/api/generate`). Separate from `internal/embedder`; used for cluster labels (M4) and RAG (M6).
+- `internal/generator/` — provider-agnostic LLM text generation (`Generator` interface + Ollama `/api/generate`). Separate from `internal/embedder`; used for cluster labels.
+- `internal/ollama/` — the one Ollama HTTP client both `embedder.Ollama` and `generator.Ollama` sit on (see the insight section).
 - `internal/eval/` — retrieval eval harness (recall@k / NDCG@k / MRR) behind `curio eval --queries`.
 - `migrations/` — Goose SQL migrations, embedded into the binary via `embed.go`. Rebuilding a table must follow the recipe in `migrations/README.md` (NO TRANSACTION, one StatementBegin block, enforcing FK guard). Doing it inside goose's transaction cascade-deletes child rows.
 
