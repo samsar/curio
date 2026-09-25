@@ -148,6 +148,55 @@ func TestDiscoverChromeProfiles(t *testing.T) {
 	assert.Equal(t, "Work", got[1].Name)
 }
 
+func TestCompareChromeProfiles(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"Default", "Profile 1", -1},
+		{"Profile 1", "Default", 1},
+		{"Profile 2", "Profile 10", -1},
+		{"Profile 10", "Profile 2", 1},
+		{"Profile 3", "Profile 3", 0},
+		{"Profile 99", "Guest Profile", -1},
+		{"Profile abc", "Profile 1", 1},
+		{"Guest Profile", "System Profile", -1},
+		{"Default", "Guest Profile", -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.a+" vs "+tc.b, func(t *testing.T) {
+			assert.Equal(t, tc.want, compareChromeProfiles(tc.a, tc.b))
+		})
+	}
+}
+
+func TestDiscoverChromeProfiles_NumericOrder(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CURIO_CHROME_DIR", root)
+	for _, dir := range []string{"Profile 10", "Profile 2", "Default"} {
+		mustMkdir(t, filepath.Join(root, dir))
+		mustWrite(t, filepath.Join(root, dir, "Bookmarks"), `{"roots":{}}`)
+	}
+
+	got, err := DiscoverChromeProfiles()
+	require.NoError(t, err)
+	dirs := make([]string, len(got))
+	for i, p := range got {
+		dirs[i] = p.Dir
+	}
+	assert.Equal(t, []string{"Default", "Profile 2", "Profile 10"}, dirs)
+}
+
+func TestPushFolder(t *testing.T) {
+	base := make([]string, 1, 4) // spare capacity: a plain append would share it
+	base[0] = "Root"
+	a := pushFolder(base, " A ")
+	b := pushFolder(base, "B")
+	assert.Equal(t, []string{"Root", "A"}, a)
+	assert.Equal(t, []string{"Root", "B"}, b, "siblings don't overwrite each other")
+	assert.Equal(t, base, pushFolder(base, "  "), "a blank name adds nothing")
+}
+
 func TestDiscoverChromeProfiles_NoChromeInstalled(t *testing.T) {
 	t.Setenv("CURIO_CHROME_DIR", filepath.Join(t.TempDir(), "nonexistent"))
 	got, err := DiscoverChromeProfiles()

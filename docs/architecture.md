@@ -216,27 +216,27 @@ user tune per-domain without recompiling.
 ## Search: hybrid BM25 + vector
 
 ```
-query ──► BM25 (FTS5)                ──► top 50 chunks
-   │
-   └────► embed (Ollama)
-              │
-              └──► vector ANN (sqlite-vec) ──► top 50 chunks
-                              │
-                              ▼
-                          RRF fusion (k=60)
-                              │
-                              ▼
-                  collapse chunks → documents
-                              │
-                              ▼
-                  apply metadata filters
-                              │
-                              ▼
-                          top k results
+        ┌──► BM25 (FTS5) ─────────────────────────────────► top N chunks ─┐
+query ──┤                                                                 │
+        └──► embed (Ollama) ──► vector ANN (sqlite-vec) ──► top N chunks ─┤
+                                                                          ▼
+                                                                 RRF fusion (k=60)
+                                                                          │
+                                                                          ▼
+                                                            collapse chunks → documents
+                                                                          │
+                                                                          ▼
+                                                                    top k results
+
+N = max(50, 8·k)
 ```
 
-Two knobs in config: BM25/vector weights in RRF, and chunk-to-doc collapse
-strategy (max vs sum vs top-3-avg).
+The two legs run concurrently, and metadata filters (content type, host,
+source) apply inside both. A BM25 failure fails the search. A vector-leg
+failure — Ollama down, or no answer within `search.embed_timeout_seconds` —
+returns the BM25 results marked `degraded` with a warning. Knobs in config:
+BM25/vector weights in RRF, chunk-to-doc collapse strategy (max vs sum vs
+top-3-avg), `default_k`, and `embed_timeout_seconds`.
 
 ## Pluggability: where interfaces live
 

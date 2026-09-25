@@ -8,6 +8,9 @@ package indexer
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/samsar/curio/internal/textutil"
 )
 
 // Chunk is the chunker's output unit. Indexer.Index converts these into
@@ -27,10 +30,11 @@ type ChunkOptions struct {
 	// tokens-per-word is high and a "word-correct" chunk still
 	// overflows the embedder's context window.
 	//
-	// Rule of thumb: ~4 chars per BPE token for English. nomic-embed-text
-	// v1 caps at 2048 tokens regardless of what Ollama's modelfile sets,
-	// so 6000 chars ≈ 1500 tokens leaves a comfortable margin.
-	// Default 6000.
+	// Rule of thumb: ~4 chars per BPE token for English prose, far fewer
+	// on URL- or code-dense text. nomic-embed-text v1 caps at 2048 tokens
+	// regardless of what Ollama's modelfile sets, and 3500 bytes stays
+	// under that even for URL-heavy markdown (see decisions.md).
+	// Default 3500.
 	SizeChars int
 }
 
@@ -188,11 +192,11 @@ var (
 // chunks at word boundaries. Sub-chunks share a small overlap (maxChars/16)
 // so semantic continuity is preserved across the split.
 //
-// Backstop: if a single "word" (no whitespace) is itself longer than
-// maxChars — long URL, base64 string that escaped sanitization, unbroken
-// identifier — it gets hard-truncated to maxChars. Without this, oversized
-// tokens silently bypass the byte budget and trigger embedder failures
-// downstream.
+// Backstop: a single "word" (no whitespace) longer than maxChars — long URL,
+// base64 string that escaped sanitization, unbroken identifier, or a CJK
+// paragraph, which has no spaces at all — is split into consecutive pieces
+// by splitToken. Without this, oversized tokens silently bypass the byte
+// budget and trigger embedder failures downstream.
 func enforceCharLimit(in []Chunk, maxChars int) []Chunk {
 	if maxChars <= 0 {
 		return in
@@ -234,18 +238,20 @@ func enforceCharLimit(in []Chunk, maxChars int) []Chunk {
 			}
 		}
 		for _, w := range words {
-			// Backstop: any single word longer than maxChars gets emitted
-			// as its own truncated chunk and skips the normal packing
-			// path entirely. Folding it into `buf` doesn't work because
-			// even after flushing, the overlap-seed leaves bytes in `buf`
-			// that would make `buf + oversized_word > maxChars`.
+			// Backstop: any single word longer than maxChars is emitted as
+			// its own run of pieces and skips the normal packing path
+			// entirely. Folding it into `buf` doesn't work because even
+			// after flushing, the overlap-seed leaves bytes in `buf` that
+			// would make `buf + oversized_word > maxChars`.
 			if len(w) > maxChars {
 				if buf.Len() > 0 {
 					out = append(out, Chunk{Text: buf.String(), TokenCount: len(bufWords)})
 					buf.Reset()
 					bufWords = nil
 				}
-				out = append(out, Chunk{Text: w[:maxChars], TokenCount: 1})
+				for _, piece := range splitToken(w, maxChars) {
+					out = append(out, Chunk{Text: piece, TokenCount: 1})
+				}
 				continue
 			}
 			projected := buf.Len()
@@ -280,44 +286,65 @@ func enforceCharLimit(in []Chunk, maxChars int) []Chunk {
 	return out
 }
 
-// splitParagraphs splits on blank lines but preserves leading markdown
-// heading lines as their own "paragraph" so headings travel with whichever
-// chunk follows them.
+// splitToken cuts a whitespace-free token into consecutive pieces of at most
+// maxChars bytes, each ending on a rune boundary, so no content is dropped
+// and no piece is invalid UTF-8. A cap smaller than one rune still advances
+// by one whole rune per piece.
+func splitToken(w string, maxChars int) []string {
+	var pieces []string
+	for w != "" {
+		piece := textutil.TruncateBytes(w, maxChars)
+		if piece == "" {
+			_, size := utf8.DecodeRuneInString(w)
+			piece = w[:size]
+		}
+		pieces = append(pieces, piece)
+		w = w[len(piece):]
+	}
+	return pieces
+}
+
+// splitParagraphs splits on blank lines. A markdown heading line ends the
+// paragraph before it and is prefixed to the next paragraph, so the packer
+// can never leave a heading at the tail of the previous chunk, apart from the
+// section it names. Consecutive headings all join that next paragraph; any
+// left at the end of the input stand alone.
 func splitParagraphs(s string) []string {
-	// Normalize line endings.
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 
 	var (
-		out []string
-		buf strings.Builder
+		out      []string
+		headings []string // waiting for the paragraph they introduce
+		buf      strings.Builder
 	)
 	flush := func() {
 		t := strings.TrimSpace(buf.String())
-		if t != "" {
-			out = append(out, t)
-		}
 		buf.Reset()
+		if t == "" {
+			return
+		}
+		out = append(out, strings.Join(append(headings, t), " "))
+		headings = nil
 	}
 
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
+		switch {
+		case trimmed == "":
 			flush()
-			continue
-		}
-		if strings.HasPrefix(trimmed, "#") {
-			// Heading line: flush whatever came before so the heading
-			// joins the next chunk rather than gluing onto the previous.
+		case strings.HasPrefix(trimmed, "#"):
 			flush()
-			out = append(out, trimmed)
-			continue
+			headings = append(headings, trimmed)
+		default:
+			if buf.Len() > 0 {
+				buf.WriteByte(' ')
+			}
+			buf.WriteString(trimmed)
 		}
-		if buf.Len() > 0 {
-			buf.WriteByte(' ')
-		}
-		buf.WriteString(trimmed)
 	}
 	flush()
-
+	if len(headings) > 0 {
+		out = append(out, strings.Join(headings, " "))
+	}
 	return out
 }

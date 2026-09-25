@@ -276,7 +276,7 @@ func (c *Client) GetDocumentContent(ctx context.Context, id string) (string, err
 	return string(body), nil
 }
 
-// SearchRequest body.
+// SearchRequest body. K 0 is omitted, so the daemon's search.default_k applies.
 type SearchRequest struct {
 	Query   string         `json:"query"`
 	K       int            `json:"k,omitempty"`
@@ -498,11 +498,15 @@ func (c *Client) ListJobs(ctx context.Context, opts JobListOpts) (*JobList, erro
 	return &out, nil
 }
 
+// SearchResponse mirrors api.SearchResponse. Degraded means semantic search
+// was unavailable and Items are keyword-only; Warnings says why.
 type SearchResponse struct {
 	Query      string      `json:"query"`
 	TookMS     int64       `json:"took_ms"`
 	BM25Hits   int         `json:"bm25_hits"`
 	VectorHits int         `json:"vector_hits"`
+	Degraded   bool        `json:"degraded,omitempty"`
+	Warnings   []string    `json:"warnings,omitempty"`
 	Items      []SearchHit `json:"items"`
 }
 

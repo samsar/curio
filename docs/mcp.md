@@ -15,7 +15,7 @@ make build      # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `search_bookmarks` | `query`, `k?`, `content_type?[]`, `source?[]`, `host?[]` | top matching documents (title, url, doc_id, score, snippet) |
+| `search_bookmarks` | `query`, `k?` (1-100; default the daemon's `search.default_k`), `content_type?[]`, `source?[]`, `host?[]` | top matching documents (title, url, doc_id, score, snippet); `degraded`/`warnings` when keyword-only |
 | `get_document` | `id` (doc_id) | the document's metadata + full extracted markdown |
 | `find_related` | `id` (doc_id), `k?` | documents similar to the given one (vector similarity over its indexed content), excluding itself |
 
@@ -57,8 +57,11 @@ same `mcpServers` block as above, then restart Claude Desktop.
   reads `config.yaml` for `daemon.listen`, and looks for `curio-daemon` next to
   itself (override with `CURIO_DAEMON_BIN`). The daemon must be reachable or
   startable for tools to work.
-- **Embeddings.** Search needs Ollama running (the daemon embeds the query);
-  if it's down, search returns an error the client will surface.
+- **Embeddings.** Semantic search needs Ollama running (the daemon embeds the
+  query). If it's down or doesn't answer within `search.embed_timeout_seconds`,
+  `search_bookmarks` still returns keyword-only results: the structured output
+  carries `degraded: true` and `warnings`, and the text starts with a note
+  saying so. `find_related` never needs Ollama (it uses stored vectors).
 - **Lifecycle.** The client spawns and stops `curio-mcp` per session; a normal
   disconnect (stdin closed) is a clean exit, not a crash. The daemon keeps
   running across sessions.

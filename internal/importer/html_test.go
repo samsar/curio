@@ -77,7 +77,7 @@ func TestIndexable(t *testing.T) {
 		{"about:", "about:blank", false, ReasonBrowserInternal},
 		{"edge://", "edge://settings", false, ReasonBrowserInternal},
 		{"chrome-extension", "chrome-extension://abc/page.html", false, ReasonBrowserInternal},
-		{"unknown scheme", "ftp://example.com", false, ReasonUnsupportedSchem},
+		{"unknown scheme", "ftp://example.com", false, ReasonUnsupportedScheme},
 		{"case insensitive", "JAVASCRIPT:x", false, ReasonJavaScript},
 	}
 	for _, tc := range cases {
@@ -124,6 +124,36 @@ func TestParseHTML_FolderNameWithSlash(t *testing.T) {
 	require.Len(t, got, 1)
 	// Slashes in folder names are replaced with hyphens.
 	assert.Equal(t, "/Tech-AI", got[0].FolderPath)
+}
+
+func TestParseDateAttr(t *testing.T) {
+	base := time.Date(2023, 11, 14, 22, 13, 20, 0, time.UTC)
+	cases := []struct {
+		in   string
+		want time.Time
+	}{
+		{"1700000000", base},
+		{" 1700000000 ", base},
+		{"1700000000.75", base.Add(750 * time.Millisecond)},
+		{"1700000000123", base.Add(123 * time.Millisecond)},
+		{"1700000000123456", base.Add(123456 * time.Microsecond)},
+		{"1700000000123456789", base.Add(123456789 * time.Nanosecond)},
+		{"1.7e9", base},
+		{"0", time.Time{}},
+		{"-5", time.Time{}},
+		{"-1.5e9", time.Time{}},
+		{"", time.Time{}},
+		{"abc", time.Time{}},
+		{"NaN", time.Time{}},
+		{"+Inf", time.Time{}},
+		{"1e300", time.Time{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := parseDateAttr(tc.in)
+			assert.True(t, tc.want.Equal(got), "got %s, want %s", got, tc.want)
+		})
+	}
 }
 
 func TestParseHTML_MicrosecondEpoch(t *testing.T) {

@@ -1,18 +1,20 @@
 package importer
 
 import (
+	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/samsar/curio/internal/urlutil"
 )
 
 // ChromeProfile describes one discovered Chrome profile, suitable for
@@ -40,7 +42,7 @@ func DiscoverChromeProfiles() ([]ChromeProfile, error) {
 	if root == "" {
 		return nil, nil
 	}
-	if _, err := os.Stat(root); os.IsNotExist(err) {
+	if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -72,22 +74,37 @@ func DiscoverChromeProfiles() ([]ChromeProfile, error) {
 		}
 		profiles = append(profiles, ChromeProfile{Dir: dir, Name: name, BookmarkFile: bm})
 	}
-	// Deterministic order: Default first, then Profile N by N, then anything else alpha.
-	sort.Slice(profiles, func(i, j int) bool { return chromeProfileLess(profiles[i].Dir, profiles[j].Dir) })
+	slices.SortFunc(profiles, func(a, b ChromeProfile) int { return compareChromeProfiles(a.Dir, b.Dir) })
 	return profiles, nil
 }
 
-func chromeProfileLess(a, b string) bool {
-	if a == b {
-		return false
+// compareChromeProfiles orders profile directories deterministically:
+// Default first, then "Profile N" by the number N (so Profile 2 precedes
+// Profile 10), then anything else alphabetically.
+func compareChromeProfiles(a, b string) int {
+	groupA, numA := chromeProfileRank(a)
+	groupB, numB := chromeProfileRank(b)
+	if c := cmp.Compare(groupA, groupB); c != 0 {
+		return c
 	}
-	if a == "Default" {
-		return true
+	if c := cmp.Compare(numA, numB); c != 0 {
+		return c
 	}
-	if b == "Default" {
-		return false
+	return strings.Compare(a, b)
+}
+
+// chromeProfileRank places Default in group 0, "Profile N" in group 1 with
+// its N, and any other directory in group 2.
+func chromeProfileRank(dir string) (group, num int) {
+	if dir == "Default" {
+		return 0, 0
 	}
-	return a < b
+	if suffix, ok := strings.CutPrefix(dir, "Profile "); ok {
+		if n, err := strconv.Atoi(suffix); err == nil {
+			return 1, n
+		}
+	}
+	return 2, 0
 }
 
 // chromeUserDataDir returns the platform-appropriate Chrome user-data dir.
@@ -162,14 +179,8 @@ func ParseChrome(r io.Reader) ([]ParsedBookmark, error) {
 	}
 
 	// Deterministic root order for readable output and stable tests.
-	rootNames := make([]string, 0, len(doc.Roots))
-	for k := range doc.Roots {
-		rootNames = append(rootNames, k)
-	}
-	sort.Strings(rootNames)
-
 	var out []ParsedBookmark
-	for _, name := range rootNames {
+	for _, name := range slices.Sorted(maps.Keys(doc.Roots)) {
 		node := doc.Roots[name]
 		label := chromeRootLabel(name)
 		// Walk the root's children rather than the root itself, so we
@@ -210,21 +221,14 @@ type chromeNode struct {
 func walkChromeNode(n chromeNode, folderStack []string, out *[]ParsedBookmark) {
 	switch n.Type {
 	case "url":
-		bm := ParsedBookmark{
-			URL:        n.URL,
+		*out = append(*out, ParsedBookmark{
+			URL:        canonicalURL(n.URL),
 			Title:      strings.TrimSpace(n.Name),
 			FolderPath: joinFolderPath(folderStack),
 			SavedAt:    chromeMicrosToTime(n.DateAdded),
-		}
-		if norm, err := urlutil.Normalize(n.URL); err == nil {
-			bm.URL = norm
-		}
-		*out = append(*out, bm)
+		})
 	case "folder":
-		next := folderStack
-		if name := strings.TrimSpace(n.Name); name != "" {
-			next = append(append([]string{}, folderStack...), name)
-		}
+		next := pushFolder(folderStack, n.Name)
 		for _, c := range n.Children {
 			walkChromeNode(c, next, out)
 		}

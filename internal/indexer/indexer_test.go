@@ -2,6 +2,8 @@ package indexer
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -169,4 +171,107 @@ func TestIndexer_RequiresIDs(t *testing.T) {
 	require.Error(t, err)
 	err = idx.Index(context.Background(), IndexInput{DocumentID: "x", Markdown: "y"})
 	require.Error(t, err)
+}
+
+// indexedEmbedder encodes each chunk's position into its vector: every text is
+// "wNNN", and component 0 of its vector is NNN. It records batch sizes, fails
+// the call numbered failOn (1-based), and runs onCall after each call.
+type indexedEmbedder struct {
+	batches []int
+	failOn  int
+	onCall  func()
+}
+
+func (e *indexedEmbedder) Dimensions() int { return 768 }
+func (e *indexedEmbedder) Model() string   { return "fake" }
+func (e *indexedEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	e.batches = append(e.batches, len(texts))
+	if e.onCall != nil {
+		defer e.onCall()
+	}
+	if len(e.batches) == e.failOn {
+		return nil, errors.New("ollama: HTTP 500")
+	}
+	out := make([][]float32, len(texts))
+	for i, text := range texts {
+		var n int
+		if _, err := fmt.Sscanf(text, "w%d", &n); err != nil {
+			return nil, err
+		}
+		out[i] = make([]float32, 768)
+		out[i][0] = float32(n)
+	}
+	return out, nil
+}
+
+// numberedMarkdown is n one-word paragraphs "w000".."w{n-1}": with a chunk
+// size of one word, each becomes its own chunk.
+func numberedMarkdown(n int) string {
+	paras := make([]string, n)
+	for i := range paras {
+		paras[i] = fmt.Sprintf("w%03d", i)
+	}
+	return strings.Join(paras, "\n\n")
+}
+
+var oneWordChunks = Options{ChunkSize: 1, ChunkOverlap: 0}
+
+func TestIndexer_EmbedsInOrderedBatches(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	chunks := sqlitestore.NewChunks(db, 768)
+	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
+	emb := &indexedEmbedder{}
+
+	require.NoError(t, New(chunks, emb, oneWordChunks).Index(context.Background(), IndexInput{
+		DocumentID: docID, ExtractionID: extID, Markdown: numberedMarkdown(100),
+	}))
+	assert.Equal(t, []int{32, 32, 32, 4}, emb.batches)
+
+	stored, err := chunks.EmbeddingsForDocument(context.Background(), docID)
+	require.NoError(t, err)
+	require.Len(t, stored, 100)
+	for i, e := range stored {
+		assert.Equal(t, float32(i), e.Embedding[0], "chunk %d got another chunk's vector", i)
+	}
+}
+
+func TestIndexer_FailedBatchKeepsPreviousChunks(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	chunks := sqlitestore.NewChunks(db, 768)
+	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
+	require.NoError(t, New(chunks, &fakeEmbedder{dim: 768}, Options{}).Index(context.Background(), IndexInput{
+		DocumentID: docID, ExtractionID: extID, Markdown: "legacy content",
+	}))
+
+	err := New(chunks, &indexedEmbedder{failOn: 3}, oneWordChunks).Index(context.Background(), IndexInput{
+		DocumentID: docID, ExtractionID: extID, Markdown: numberedMarkdown(100),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "embed chunks 64-95 of 100")
+
+	hits, err := chunks.BM25Search(context.Background(), "local", "legacy", 10, store.SearchFilters{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, hits, "the document's previous chunks are still searchable")
+}
+
+func TestIndexer_CanceledBetweenBatchesWritesNothing(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	chunks := sqlitestore.NewChunks(db, 768)
+	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
+	require.NoError(t, New(chunks, &fakeEmbedder{dim: 768}, Options{}).Index(context.Background(), IndexInput{
+		DocumentID: docID, ExtractionID: extID, Markdown: "legacy content",
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	emb := &indexedEmbedder{onCall: cancel}
+	err := New(chunks, emb, oneWordChunks).Index(ctx, IndexInput{
+		DocumentID: docID, ExtractionID: extID, Markdown: numberedMarkdown(100),
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, []int{32}, emb.batches, "no batch is sent after cancellation")
+
+	stored, err := chunks.EmbeddingsForDocument(context.Background(), docID)
+	require.NoError(t, err)
+	assert.Len(t, stored, 1, "the previous single chunk is untouched")
 }

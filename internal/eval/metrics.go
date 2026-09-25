@@ -29,15 +29,17 @@ func RecallAtK(ranked []string, relevant map[string]bool, k int) float64 {
 	return float64(hits) / float64(len(relevant))
 }
 
-// PrecisionAtK is the fraction of the top k that is relevant.
+// PrecisionAtK is the fraction of the top k ranks that hold a relevant
+// document: hits / k, with ranks past the end of the list counting as misses
+// (trec_eval's P@k). Dividing by the number retrieved instead would score a
+// search that returns fewer results higher.
 func PrecisionAtK(ranked []string, relevant map[string]bool, k int) float64 {
-	k = min(k, len(ranked))
 	if k <= 0 {
 		return 0
 	}
 	hits := 0
-	for i := range k {
-		if relevant[ranked[i]] {
+	for _, id := range ranked[:min(k, len(ranked))] {
+		if relevant[id] {
 			hits++
 		}
 	}

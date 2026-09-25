@@ -198,6 +198,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		BaseURL: cfg.Embedding.BaseURL,
 		Model:   cfg.Embedding.Model,
 		Dim:     cfg.Embedding.Dim,
+		Timeout: time.Duration(cfg.Embedding.TimeoutSeconds) * time.Second,
 	})
 	if err != nil {
 		return nil, err
@@ -230,6 +231,9 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		RRFK:         cfg.Search.RRFK,
 		Collapse:     search.CollapseStrategy(cfg.Search.Collapse),
 		QueryPrefix:  cfg.Embedding.QueryPrefix,
+		DefaultK:     cfg.Search.DefaultK,
+		EmbedTimeout: time.Duration(cfg.Search.EmbedTimeoutSeconds) * time.Second,
+		Log:          slog.Default(),
 	})
 
 	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights)
@@ -365,9 +369,11 @@ func newDispatcher(cfg config.Config, home *curiohome.Home) (fetcher.Dispatcher,
 }
 
 // newInsightEngine builds the insight layer: cluster documents into labeled
-// interests. The generation client is optional — built only when
-// insight.labeling = "llm", and used only if the model is actually available
-// (otherwise clustering falls back to deterministic term labels).
+// interests. With insight.labeling = "llm" the LLM labeler is always wired:
+// whether Ollama and the model are up is decided at each rebuild, where the
+// engine falls back to term labels for any run that can't reach them. A
+// startup check would pin that verdict for the life of the process, and the
+// CLI often auto-starts the daemon before the Ollama app is running.
 func newInsightEngine(ctx context.Context, cfg config.Config, docs store.DocumentStore,
 	chunks store.ChunkStore, insights store.InsightStore) (*insight.Engine, error) {
 	var llmLabeler insight.Labeler
@@ -380,39 +386,28 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 		if err != nil {
 			return nil, err
 		}
-		pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		perr := gen.Ping(pingCtx)
-		cancel()
-		switch {
-		case perr == nil:
-			llmLabeler = insight.NewLLMLabeler(gen)
-			slog.Info("cluster labeling via LLM enabled", "model", cfg.Generation.Model)
-		case cfg.Generation.AutoPull && errors.Is(perr, generator.ErrModelNotLoaded):
-			// Ollama is up but the model isn't pulled yet. Fetch it in the
-			// background so startup isn't blocked; labeling uses the term
-			// fallback until it's ready, then LLM labels on the next run.
-			llmLabeler = insight.NewLLMLabeler(gen)
-			slog.Info("generation model not present; pulling in the background",
-				"model", cfg.Generation.Model)
+		llmLabeler = insight.NewLLMLabeler(gen)
+		if cfg.Generation.AutoPull {
 			go func() {
-				if err := gen.EnsureModel(ctx, slog.Default()); err != nil {
-					slog.Warn("generation model pull failed; cluster labels will use term fallback",
+				// A pull cut short by daemon shutdown is not a missing model.
+				if err := gen.EnsureModel(ctx, slog.Default()); err != nil && ctx.Err() == nil {
+					slog.Warn("generation model not ready and the pull is not retried; cluster labels use "+
+						"the term fallback until Ollama serves it (run `ollama pull`, or restart the daemon)",
 						"model", cfg.Generation.Model, "err", err)
 				}
 			}()
-		default:
-			slog.Warn("generation model unavailable; cluster labels will use term fallback",
-				"model", cfg.Generation.Model, "err", perr)
 		}
 	}
 	clusterer := insight.NewKNNGraphClusterer(insight.KNNGraphOptions{
 		K:              cfg.Insight.KNN,
 		MinSimilarity:  cfg.Insight.MinSimilarity,
 		MinClusterSize: cfg.Insight.MinClusterSize,
-		Center:         cfg.Insight.CenterVectors,
 	})
-	return insight.New(docs, chunks, insights, clusterer, llmLabeler,
-		insight.Config{Labeling: cfg.Insight.Labeling, Center: cfg.Insight.CenterVectors}, slog.Default()), nil
+	return insight.New(docs, chunks, insights, clusterer, llmLabeler, insight.Config{
+		Labeling:        cfg.Insight.Labeling,
+		Center:          cfg.Insight.CenterVectors,
+		LabelingTimeout: time.Duration(cfg.Insight.LabelingTimeoutSeconds) * time.Second,
+	}, slog.Default()), nil
 }
 
 // serve runs the worker pools and the API until ctx is cancelled or the API

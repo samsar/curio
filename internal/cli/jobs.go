@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 func newJobsCmd() *cobra.Command {
@@ -128,23 +130,22 @@ func renderJobList(resp *client.JobList) {
 // wrapLines breaks s on word boundaries so a long error message renders
 // across multiple indented lines instead of one runaway. The first slice
 // element has no leading whitespace; the caller indents each line itself.
+// width counts runes (see truncate).
 func wrapLines(s string, width int) []string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil
 	}
-	if len(s) <= width {
-		return []string{s}
-	}
 	var out []string
-	for len(s) > width {
-		// Try to break at the last space before width; fall back to a hard cut.
-		cut := strings.LastIndex(s[:width], " ")
-		if cut < width/2 {
-			cut = width
+	for utf8.RuneCountInString(s) > width {
+		line := textutil.TruncateRunes(s, width)
+		// Break at the last space if that keeps at least half the line;
+		// otherwise (one long token, or CJK text) hard-cut at width.
+		if sp := strings.LastIndexByte(line, ' '); sp >= 0 && utf8.RuneCountInString(line[:sp]) >= width/2 {
+			line = line[:sp]
 		}
-		out = append(out, s[:cut])
-		s = strings.TrimLeft(s[cut:], " ")
+		out = append(out, line)
+		s = strings.TrimLeft(s[len(line):], " ")
 	}
 	if s != "" {
 		out = append(out, s)

@@ -35,10 +35,10 @@ type OllamaOptions struct {
 	Dim     int           // expected output dimension; validated on first call
 	Timeout time.Duration // per-request; default 60s
 
-	// NumCtx overrides the model's context window for embed calls. Ollama
-	// defaults to 2048 even for models like nomic-embed-text that support
-	// 8192; without this override, large chunks fail with HTTP 400
-	// "input length exceeds the context length". Default 8192.
+	// NumCtx is sent as options.num_ctx on embed calls. It is advisory:
+	// Ollama clamps it to the model's own context length, which is 2048
+	// tokens for nomic-embed-text (its GGUF metadata), so the chunker's
+	// byte cap is what keeps inputs in range. See decisions.md. Default 8192.
 	NumCtx int
 }
 
