@@ -1,37 +1,48 @@
 package search
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/samsar/curio/internal/store"
 )
 
+// MaxK is the most documents one search or related query may return. The
+// chunk fanout scales with k, so k bounds the SQL LIMIT too.
+const MaxK = 100
+
 // Engine runs hybrid search.
 //
-//  1. BM25 over chunks_fts
-//  2. Vector ANN over chunks_vec
-//  3. RRF fuse the two ranked chunk lists
-//  4. Collapse chunks → documents (best chunk per doc, configurable)
-//  5. Return top-K documents with their best chunk snippets
+//  1. BM25 over chunks_fts and vector ANN over chunks_vec, concurrently
+//  2. RRF fuse the two ranked chunk lists
+//  3. Collapse chunks → documents (best chunk per doc, configurable)
+//  4. Return top-K documents with their best chunk snippets
 //
 // The Embedder dependency is used only on the query side — to vectorize
 // the user's query before VectorSearch. Documents are embedded by the
 // indexer at write time.
 type Engine struct {
-	chunks      store.ChunkStore
-	docs        store.DocumentStore
-	embedder    Embedder
-	bm25W       float64
-	vectorW     float64
-	rrfK        int
-	collapse    CollapseStrategy
-	preFanout   int    // how many chunks to pull from each retriever before fusion
-	queryPrefix string // task prefix prepended to the query before embedding (e.g. "search_query: ")
+	chunks       store.ChunkStore
+	docs         store.DocumentStore
+	embedder     Embedder
+	bm25W        float64
+	vectorW      float64
+	rrfK         int
+	collapse     CollapseStrategy
+	preFanout    int    // minimum chunks to pull from each retriever before fusion
+	queryPrefix  string // task prefix prepended to the query before embedding (e.g. "search_query: ")
+	defaultK     int
+	embedTimeout time.Duration
+	log          *slog.Logger
 }
 
 // Embedder is the slice of the embedder package this engine needs.
@@ -53,11 +64,23 @@ const (
 
 // Config wires an Engine. Zero-value fields use sensible defaults.
 type Config struct {
+	// BM25Weight and VectorWeight weigh each retriever in RRF. Both zero
+	// means unset (1.0 each); a single zero switches that retriever's
+	// contribution off.
 	BM25Weight   float64
 	VectorWeight float64
 	RRFK         int
 	Collapse     CollapseStrategy
 	PreFanout    int
+	// DefaultK is the number of results when a request leaves K at 0.
+	// Default 10.
+	DefaultK int
+	// EmbedTimeout bounds embedding the query. When it runs out (or the
+	// embedder fails) Search returns keyword-only results rather than an
+	// error. Default 10s.
+	EmbedTimeout time.Duration
+	// Log receives the warning for a degraded search. Default slog.Default().
+	Log *slog.Logger
 	// QueryPrefix is prepended to the query text before embedding, to match
 	// the document prefix used at index time (nomic-embed-text is a prefixed
 	// model — "search_query: " for queries, "search_document: " for docs).
@@ -67,11 +90,8 @@ type Config struct {
 }
 
 func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, cfg Config) *Engine {
-	if cfg.BM25Weight == 0 {
-		cfg.BM25Weight = 1.0
-	}
-	if cfg.VectorWeight == 0 {
-		cfg.VectorWeight = 1.0
+	if cfg.BM25Weight == 0 && cfg.VectorWeight == 0 {
+		cfg.BM25Weight, cfg.VectorWeight = 1.0, 1.0
 	}
 	if cfg.RRFK == 0 {
 		cfg.RRFK = 60
@@ -82,16 +102,28 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, c
 	if cfg.PreFanout == 0 {
 		cfg.PreFanout = 50
 	}
+	if cfg.DefaultK <= 0 {
+		cfg.DefaultK = 10
+	}
+	if cfg.EmbedTimeout <= 0 {
+		cfg.EmbedTimeout = 10 * time.Second
+	}
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
+	}
 	return &Engine{
-		chunks:      chunks,
-		docs:        docs,
-		embedder:    embedder,
-		bm25W:       cfg.BM25Weight,
-		vectorW:     cfg.VectorWeight,
-		rrfK:        cfg.RRFK,
-		collapse:    cfg.Collapse,
-		preFanout:   cfg.PreFanout,
-		queryPrefix: cfg.QueryPrefix,
+		chunks:       chunks,
+		docs:         docs,
+		embedder:     embedder,
+		bm25W:        cfg.BM25Weight,
+		vectorW:      cfg.VectorWeight,
+		rrfK:         cfg.RRFK,
+		collapse:     cfg.Collapse,
+		preFanout:    cfg.PreFanout,
+		queryPrefix:  cfg.QueryPrefix,
+		defaultK:     cfg.DefaultK,
+		embedTimeout: cfg.EmbedTimeout,
+		log:          cfg.Log,
 	}
 }
 
@@ -99,7 +131,7 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, c
 type Request struct {
 	TenantID string
 	Query    string
-	K        int                 // results to return after fusion + collapse
+	K        int                 // results to return after fusion + collapse; 0 = Config.DefaultK, at most MaxK
 	Filters  store.SearchFilters // content_type / host / source; empty = no filter
 }
 
@@ -127,9 +159,21 @@ type Result struct {
 	BM25Hits   int
 	VectorHits int
 	Items      []Hit
+	// Degraded is set when the vector leg failed and Items are keyword-only;
+	// Warnings then says why.
+	Degraded bool
+	Warnings []string
 }
 
 // Search runs the hybrid pipeline end-to-end.
+//
+// The two retrievers fail asymmetrically. BM25 is local SQLite and always
+// available, so its failure is a bug or corruption and fails the search. The
+// vector leg depends on an embedding model in another process (Ollama), which
+// may be down, still starting, or hung — legitimately optional at query time —
+// so its failure returns the keyword results marked Degraded instead of
+// discarding them. If the caller's own context ends, Search returns that
+// error, never a degraded success.
 func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	if req.Query == "" {
 		return nil, errors.New("search: query is required")
@@ -137,9 +181,13 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	if req.TenantID == "" {
 		return nil, errors.New("search: tenant_id is required")
 	}
-	if req.K <= 0 {
-		req.K = 10
+	switch {
+	case req.K == 0:
+		req.K = e.defaultK
+	case req.K < 0 || req.K > MaxK:
+		return nil, fmt.Errorf("search: k must be between 1 and %d, got %d", MaxK, req.K)
 	}
+	fanout := e.chunkFanout(req.K)
 
 	// FTS5 has its own MATCH grammar — bare punctuation (commas, slashes,
 	// etc.) is a syntax error, and tokens like AND/OR/NOT/NEAR are reserved.
@@ -148,35 +196,46 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	// path keeps the original text since the embedder handles language fine.
 	// Empty after sanitization (e.g. query was all punctuation) means BM25
 	// contributes nothing; vector search still runs.
-	var bm25Hits []store.ChunkHit
+	var bm25Hits, vecHits []store.ChunkHit
+	var vecErr error
+	g, gctx := errgroup.WithContext(ctx)
 	if ftsQuery := sanitizeBM25Query(req.Query); ftsQuery != "" {
-		hits, err := e.chunks.BM25Search(ctx, req.TenantID, ftsQuery, e.preFanout, req.Filters)
-		if err != nil {
-			return nil, fmt.Errorf("bm25: %w", err)
-		}
-		bm25Hits = hits
+		g.Go(func() error {
+			hits, err := e.chunks.BM25Search(gctx, req.TenantID, ftsQuery, fanout, req.Filters)
+			if err != nil {
+				return fmt.Errorf("bm25: %w", err)
+			}
+			bm25Hits = hits
+			return nil
+		})
 	}
-
-	queryVec, err := e.embedder.Embed(ctx, []string{e.queryPrefix + req.Query})
+	g.Go(func() error {
+		// Never fatal: returning nil keeps a vector failure from canceling
+		// the BM25 leg.
+		vecHits, vecErr = e.vectorLeg(gctx, req, fanout)
+		return nil
+	})
+	err := g.Wait()
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, fmt.Errorf("search: %w", cerr)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("embed query: %w", err)
-	}
-	if len(queryVec) == 0 {
-		return nil, errors.New("search: embedder returned no vectors")
-	}
-	vecHits, err := e.chunks.VectorSearch(ctx, req.TenantID, queryVec[0], e.preFanout, req.Filters)
-	if err != nil {
-		return nil, fmt.Errorf("vector: %w", err)
+		return nil, err
 	}
 
-	bm25Ranked := toRanked(bm25Hits)
-	vecRanked := toRanked(vecHits)
-
-	fused := Fuse(
-		[][]RankedItem{bm25Ranked, vecRanked},
-		[]float64{e.bm25W, e.vectorW},
-		e.rrfK,
-	)
+	res := &Result{Query: req.Query}
+	lists := [][]RankedItem{toRanked(bm25Hits), toRanked(vecHits)}
+	weights := []float64{e.bm25W, e.vectorW}
+	if vecErr != nil {
+		e.log.Warn("semantic search unavailable; returning keyword-only results",
+			"query", req.Query, "err", vecErr)
+		res.Degraded = true
+		res.Warnings = []string{fmt.Sprintf("semantic search unavailable (%v); keyword-only results", vecErr)}
+		// Only the keyword list is left, and its weight only balances it
+		// against the vector list; a zero weight would erase the ranking.
+		lists, weights = lists[:1], []float64{1}
+	}
+	fused := Fuse(lists, weights, e.rrfK)
 
 	// Map chunk_id -> (bm25 score, vector score, snippet, document_id)
 	bm25ByID := make(map[string]store.ChunkHit, len(bm25Hits))
@@ -206,12 +265,38 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Result{
-		Query:      req.Query,
-		BM25Hits:   len(bm25Hits),
-		VectorHits: len(vecHits),
-		Items:      items,
-	}, nil
+	res.BM25Hits = len(bm25Hits)
+	res.VectorHits = len(vecHits)
+	res.Items = items
+	return res, nil
+}
+
+// vectorLeg embeds the query under its own deadline, so a hung embedding
+// model costs at most embedTimeout, and runs the ANN search.
+func (e *Engine) vectorLeg(ctx context.Context, req Request, fanout int) ([]store.ChunkHit, error) {
+	ectx, cancel := context.WithTimeout(ctx, e.embedTimeout)
+	defer cancel()
+	vecs, err := e.embedder.Embed(ectx, []string{e.queryPrefix + req.Query})
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+	if len(vecs) != 1 {
+		return nil, fmt.Errorf("embed query: got %d vectors, want 1", len(vecs))
+	}
+	hits, err := e.chunks.VectorSearch(ctx, req.TenantID, vecs[0], fanout, req.Filters)
+	if err != nil {
+		return nil, fmt.Errorf("vector search: %w", err)
+	}
+	return hits, nil
+}
+
+// chunkFanout is how many chunks each retriever returns before fusion. Hits
+// are chunk-level, and one long document can fill dozens of the nearest
+// slots, so a fixed pool could collapse to fewer than k distinct documents
+// (and never yield more documents than its size). ~8 chunk slots per
+// requested document, floored at preFanout.
+func (e *Engine) chunkFanout(k int) int {
+	return max(e.preFanout, k*8)
 }
 
 // RelatedRequest asks for documents similar to an existing document.
@@ -266,12 +351,7 @@ func (e *Engine) Related(ctx context.Context, req RelatedRequest) (*Result, erro
 	}
 
 	mean := meanVector(embs)
-	// Scale the chunk fanout with the requested K: hits are chunk-level,
-	// and one long near-duplicate document can occupy dozens of the
-	// nearest slots — a fixed preFanout(50) pool could collapse to fewer
-	// than K distinct documents (and could never yield more than 50).
-	// ~8 chunk slots per hoped-for document, floored at preFanout.
-	fanout := max(e.preFanout, req.K*8)
+	fanout := e.chunkFanout(req.K)
 	// A non-empty filter (ExcludeDocumentID) routes VectorSearch through
 	// its over-fetch path — required because sqlite-vec applies non-MATCH
 	// predicates after the k cutoff.
@@ -355,11 +435,11 @@ func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, b
 			chunkScore: agg.chunkScore,
 		})
 	}
-	sort.Slice(docList, func(i, j int) bool {
-		if docList[i].score != docList[j].score {
-			return docList[i].score > docList[j].score
+	slices.SortFunc(docList, func(a, b docScore) int {
+		if c := cmp.Compare(b.score, a.score); c != 0 {
+			return c
 		}
-		return docList[i].documentID < docList[j].documentID
+		return strings.Compare(a.documentID, b.documentID)
 	})
 	if len(docList) > k {
 		docList = docList[:k]
@@ -375,7 +455,11 @@ func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, b
 		hit := Hit{Document: doc, Score: d.score}
 		if len(top) > 0 {
 			chunks, err := e.chunks.GetByIDs(ctx, top)
-			if err == nil { // missing chunks shouldn't fail the whole result
+			if err != nil {
+				// The matching chunks only decorate the hit; the document
+				// still matched, so keep it without them.
+				e.log.Warn("search: load matching chunks", "document", d.documentID, "err", err)
+			} else {
 				byID := map[string]*store.Chunk{}
 				for _, c := range chunks {
 					byID[c.ID] = c
@@ -426,11 +510,8 @@ func collapseScore(perChunk map[string]float64, ids []string, strat CollapseStra
 			scores = append(scores, perChunk[id])
 		}
 		// Sort desc and average top 3.
-		sortFloatsDesc(scores)
-		n := 3
-		if len(scores) < n {
-			n = len(scores)
-		}
+		slices.SortFunc(scores, func(a, b float64) int { return cmp.Compare(b, a) })
+		n := min(3, len(scores))
 		if n == 0 {
 			return 0
 		}
@@ -461,11 +542,11 @@ func topChunkIDs(perChunk map[string]float64, n int) []string {
 	for k, v := range perChunk {
 		list = append(list, kv{k, v})
 	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].score != list[j].score {
-			return list[i].score > list[j].score
+	slices.SortFunc(list, func(a, b kv) int {
+		if c := cmp.Compare(b.score, a.score); c != 0 {
+			return c
 		}
-		return list[i].id < list[j].id
+		return strings.Compare(a.id, b.id)
 	})
 	if len(list) > n {
 		list = list[:n]
@@ -475,10 +556,6 @@ func topChunkIDs(perChunk map[string]float64, n int) []string {
 		out[i] = x.id
 	}
 	return out
-}
-
-func sortFloatsDesc(s []float64) {
-	sort.Sort(sort.Reverse(sort.Float64Slice(s)))
 }
 
 // sanitizeBM25Query turns an arbitrary user query into something safe AND

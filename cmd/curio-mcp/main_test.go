@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -15,13 +16,20 @@ import (
 	"github.com/samsar/curio/internal/client"
 )
 
-// fakeDaemon serves the subset of the curio HTTP API the MCP tools call.
-func fakeDaemon(t *testing.T) *httptest.Server {
+// fakeDaemon serves the subset of the curio HTTP API the MCP tools call and
+// stores each /v1/search request body in lastSearch. The query "offline" gets
+// a degraded (keyword-only) search response.
+func fakeDaemon(t *testing.T, lastSearch *atomic.Value) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/search", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"query": "q",
+	mux.HandleFunc("/v1/search", func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&req)) {
+			return
+		}
+		lastSearch.Store(req)
+		resp := map[string]any{
+			"query": req["query"],
 			"items": []map[string]any{{
 				"document": map[string]any{
 					"id": "doc-1", "url": "https://example.com/a", "title": "Alpha",
@@ -30,7 +38,12 @@ func fakeDaemon(t *testing.T) *httptest.Server {
 				"score":   0.42,
 				"matches": []map[string]any{{"chunk_id": "c1", "text": "alpha body", "snippet": "alpha <em>body</em>"}},
 			}},
-		})
+		}
+		if req["query"] == "offline" {
+			resp["degraded"] = true
+			resp["warnings"] = []string{"semantic search unavailable (connection refused); keyword-only results"}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 	mux.HandleFunc("/v1/documents/doc-1/content", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("# Alpha\n\nfull markdown body"))
@@ -69,12 +82,19 @@ func fakeDaemon(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// session is a connected MCP client plus what the fake daemon behind it saw.
+type session struct {
+	*mcp.ClientSession
+	lastSearch atomic.Value // the most recent /v1/search request body
+}
+
 // connectMCP builds the MCP server with our tools (pointed at a fake daemon)
 // and returns a connected in-memory client session.
-func connectMCP(t *testing.T) *mcp.ClientSession {
+func connectMCP(t *testing.T) *session {
 	t.Helper()
 	ctx := context.Background()
-	c := client.New(fakeDaemon(t).URL)
+	sess := &session{}
+	c := client.New(fakeDaemon(t, &sess.lastSearch).URL)
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "curio-test", Version: "test"}, nil)
 	registerTools(srv, c)
@@ -86,7 +106,8 @@ func connectMCP(t *testing.T) *mcp.ClientSession {
 	cs, err := cli.Connect(ctx, clientT, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cs.Close() })
-	return cs
+	sess.ClientSession = cs
+	return sess
 }
 
 func textOf(res *mcp.CallToolResult) string {
@@ -159,4 +180,37 @@ func TestMCP_SearchRequiresQuery(t *testing.T) {
 	if err == nil {
 		assert.True(t, res.IsError, "empty query should be a tool error")
 	}
+}
+
+func TestMCP_SearchLeavesKToTheDaemon(t *testing.T) {
+	cs := connectMCP(t)
+	_, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "search_bookmarks",
+		Arguments: map[string]any{"query": "alpha"},
+	})
+	require.NoError(t, err)
+	req := cs.lastSearch.Load().(map[string]any)
+	assert.NotContains(t, req, "k", "an omitted k is left to the daemon's search.default_k")
+}
+
+func TestMCP_SearchDegraded(t *testing.T) {
+	cs := connectMCP(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "search_bookmarks",
+		Arguments: map[string]any{"query": "offline"},
+	})
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	txt := textOf(res)
+	assert.True(t, strings.HasPrefix(txt, "Note: semantic search is unavailable"), txt)
+	assert.Contains(t, txt, "connection refused")
+	assert.Contains(t, txt, "doc_id: doc-1", "the keyword results are still listed")
+
+	raw, err := json.Marshal(res.StructuredContent)
+	require.NoError(t, err)
+	var out searchOutput
+	require.NoError(t, json.Unmarshal(raw, &out))
+	assert.True(t, out.Degraded)
+	assert.NotEmpty(t, out.Warnings)
+	assert.Len(t, out.Results, 1)
 }

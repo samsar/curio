@@ -231,6 +231,9 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		RRFK:         cfg.Search.RRFK,
 		Collapse:     search.CollapseStrategy(cfg.Search.Collapse),
 		QueryPrefix:  cfg.Embedding.QueryPrefix,
+		DefaultK:     cfg.Search.DefaultK,
+		EmbedTimeout: time.Duration(cfg.Search.EmbedTimeoutSeconds) * time.Second,
+		Log:          slog.Default(),
 	})
 
 	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights)

@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -120,11 +122,19 @@ type Web2MD struct {
 }
 
 type Search struct {
-	DefaultK     int     `yaml:"default_k"`
-	RRFK         int     `yaml:"rrf_k"`
+	// DefaultK is the number of results when a request doesn't set k.
+	DefaultK int `yaml:"default_k"`
+	RRFK     int `yaml:"rrf_k"`
+	// BM25Weight and VectorWeight weigh each retriever in RRF: finite, not
+	// negative, not both zero. A zero switches that retriever's
+	// contribution off.
 	BM25Weight   float64 `yaml:"bm25_weight"`
 	VectorWeight float64 `yaml:"vector_weight"`
 	Collapse     string  `yaml:"collapse"` // max | sum | top3_avg
+	// EmbedTimeoutSeconds bounds embedding a search query. When Ollama is
+	// down or slower than this, search returns keyword-only results marked
+	// degraded instead of failing. Default 10.
+	EmbedTimeoutSeconds int `yaml:"embed_timeout_seconds"`
 }
 
 type Chunking struct {
@@ -217,11 +227,12 @@ func Default() Config {
 			},
 		},
 		Search: Search{
-			DefaultK:     10,
-			RRFK:         60,
-			BM25Weight:   1.0,
-			VectorWeight: 1.0,
-			Collapse:     "max",
+			DefaultK:            10,
+			RRFK:                60,
+			BM25Weight:          1.0,
+			VectorWeight:        1.0,
+			Collapse:            "max",
+			EmbedTimeoutSeconds: 10,
 		},
 		Chunking: Chunking{
 			// 384 words is conservative: nomic-embed-text's context is
@@ -367,14 +378,20 @@ func (c Config) Validate() error {
 		return fmt.Errorf("chunking.overlap_tokens must be in [0, %d), got %d",
 			c.Chunking.SizeTokens, c.Chunking.OverlapTokens)
 	}
-	if c.Search.DefaultK <= 0 {
-		return fmt.Errorf("search.default_k must be positive, got %d", c.Search.DefaultK)
+	if c.Search.DefaultK <= 0 || c.Search.DefaultK > search.MaxK {
+		return fmt.Errorf("search.default_k must be in [1, %d], got %d", search.MaxK, c.Search.DefaultK)
 	}
 	if c.Search.RRFK <= 0 {
 		return fmt.Errorf("search.rrf_k must be positive, got %d", c.Search.RRFK)
 	}
 	if !validCollapse(c.Search.Collapse) {
 		return fmt.Errorf("search.collapse %q must be one of: max, sum, top3_avg", c.Search.Collapse)
+	}
+	if err := validateWeights(c.Search); err != nil {
+		return err
+	}
+	if c.Search.EmbedTimeoutSeconds <= 0 {
+		return fmt.Errorf("search.embed_timeout_seconds must be positive, got %d", c.Search.EmbedTimeoutSeconds)
 	}
 	if c.Fetcher.Web2MD.TimeoutSeconds <= 0 {
 		return fmt.Errorf("fetcher.web2md.timeout_seconds must be positive, got %d",
@@ -472,6 +489,24 @@ func (d Daemon) SlogLevel() slog.Level {
 		return lvl
 	}
 	return slog.LevelInfo
+}
+
+// validateWeights checks the RRF weights. NaN or a negative weight corrupts
+// the fused ordering, and with both at zero every document scores zero.
+func validateWeights(s Search) error {
+	for _, w := range []struct {
+		key string
+		v   float64
+	}{{"search.bm25_weight", s.BM25Weight}, {"search.vector_weight", s.VectorWeight}} {
+		// Written so NaN, which fails every comparison, is rejected.
+		if !(w.v >= 0) || math.IsInf(w.v, 1) {
+			return fmt.Errorf("%s must be a finite number >= 0, got %g", w.key, w.v)
+		}
+	}
+	if s.BM25Weight == 0 && s.VectorWeight == 0 {
+		return errors.New("search.bm25_weight and search.vector_weight must not both be 0")
+	}
+	return nil
 }
 
 func validCollapse(s string) bool {

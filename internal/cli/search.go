@@ -47,11 +47,14 @@ func newSearchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			for _, w := range res.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
+			}
 			renderSearchResults(res)
 			return nil
 		},
 	}
-	cmd.Flags().IntVarP(&k, "k", "k", 10, "Number of results to return")
+	cmd.Flags().IntVarP(&k, "k", "k", 0, "Number of results to return, 1-100 (default: the daemon's search.default_k)")
 	cmd.Flags().StringSliceVar(&contentType, "type", nil, "Filter by content type (article|repo|video|pdf|thread|unknown); repeatable")
 	cmd.Flags().StringSliceVar(&source, "source", nil, "Filter by bookmark source (chrome|safari|firefox|html|manual); repeatable")
 	cmd.Flags().StringSliceVar(&host, "host", nil, "Filter by URL host, e.g. github.com; repeatable")

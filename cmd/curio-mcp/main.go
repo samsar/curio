@@ -122,13 +122,17 @@ type docHit struct {
 
 type searchOutput struct {
 	Results []docHit `json:"results"`
+	// Degraded means semantic search was unavailable and Results are
+	// keyword-only; Warnings says why.
+	Degraded bool     `json:"degraded,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // --- search_bookmarks ---
 
 type searchInput struct {
 	Query       string   `json:"query" jsonschema:"natural-language search query"`
-	K           int      `json:"k,omitempty" jsonschema:"max results to return (default 10)"`
+	K           int      `json:"k,omitempty" jsonschema:"max results to return, 1 to 100 (default: the daemon's search.default_k, 10 unless configured)"`
 	ContentType []string `json:"content_type,omitempty" jsonschema:"filter by content type: article, repo, video, pdf, thread, unknown"`
 	Source      []string `json:"source,omitempty" jsonschema:"filter by bookmark source: chrome, safari, firefox, html, manual"`
 	Host        []string `json:"host,omitempty" jsonschema:"filter by URL host, e.g. github.com"`
@@ -139,20 +143,22 @@ func searchHandler(c *client.Client) mcp.ToolHandlerFor[searchInput, searchOutpu
 		if strings.TrimSpace(in.Query) == "" {
 			return nil, searchOutput{}, errors.New("query is required")
 		}
-		k := in.K
-		if k <= 0 {
-			k = 10
-		}
 		var filters *client.SearchFilters
 		if len(in.ContentType) > 0 || len(in.Source) > 0 || len(in.Host) > 0 {
 			filters = &client.SearchFilters{ContentType: in.ContentType, Source: in.Source, Host: in.Host}
 		}
-		res, err := c.Search(ctx, client.SearchRequest{Query: in.Query, K: k, Filters: filters})
+		res, err := c.Search(ctx, client.SearchRequest{Query: in.Query, K: in.K, Filters: filters})
 		if err != nil {
 			return nil, searchOutput{}, fmt.Errorf("search: %w", err)
 		}
 		out := toSearchOutput(res.Items, "")
-		return textResult(formatHits(in.Query, out.Results)), out, nil
+		out.Degraded, out.Warnings = res.Degraded, res.Warnings
+		text := formatHits(in.Query, out.Results)
+		if res.Degraded {
+			text = "Note: semantic search is unavailable, so these are keyword-only results (" +
+				strings.Join(res.Warnings, "; ") + ").\n\n" + text
+		}
+		return textResult(text), out, nil
 	}
 }
 

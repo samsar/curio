@@ -13,7 +13,9 @@
 package search
 
 import (
-	"sort"
+	"cmp"
+	"slices"
+	"strings"
 )
 
 // ScoredID is one item with its fused score. Caller-supplied ranked lists
@@ -67,12 +69,12 @@ func Fuse(rankedLists [][]RankedItem, weights []float64, k int) []ScoredID {
 	for id, s := range scores {
 		out = append(out, ScoredID{ID: id, Score: s})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Score != out[j].Score {
-			return out[i].Score > out[j].Score
+	slices.SortFunc(out, func(a, b ScoredID) int {
+		if c := cmp.Compare(b.Score, a.Score); c != 0 {
+			return c
 		}
 		// Deterministic tiebreak.
-		return out[i].ID < out[j].ID
+		return strings.Compare(a.ID, b.ID)
 	})
 	return out
 }

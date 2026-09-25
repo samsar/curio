@@ -192,14 +192,43 @@ will want to tune this themselves (e.g., switching a paywalled domain to Jina).
 
 ## Hybrid search: BM25 + vector + RRF
 
-**Decision:** BM25 and vector run in parallel, results merged via Reciprocal
+**Decision:** BM25 and vector run concurrently, results merged via Reciprocal
 Rank Fusion (RRF, k=60), then chunks collapse to documents.
 
 **Why:** BM25 wins on rare terms and proper nouns; vector wins on conceptual
 matches; RRF is the standard, simple, parameter-light fusion method.
 
-**Knobs exposed in config:** BM25/vector weights in RRF, chunk-to-doc collapse
-strategy.
+**Degradation is asymmetric.** BM25 is local SQLite and always available, so a
+BM25 failure is a bug or corruption: the search fails (500) and the in-flight
+vector leg is canceled. The vector leg depends on an embedding model in another
+process — Ollama may be down, not started yet, or hung — which is legitimately
+optional at query time. When it fails for any reason (embed error or timeout,
+no or wrong-sized vector, ANN error), search returns the BM25 results with
+`degraded: true` and a warning ("semantic search unavailable (…); keyword-only
+results") and logs one WARN. Previously the embed error discarded the BM25 hits
+already in hand, so `curio search`, MCP `search_bookmarks` and `curio eval`
+failed outright whenever Ollama was down. Two edges: if the caller's own
+context is canceled or past its deadline, that's an error, never a degraded
+success; and if BM25 had no terms to search (all stopwords) and the vector leg
+fails, the result is empty but degraded, with the warning explaining why.
+There's no circuit breaker: a refused connection fails instantly, and the
+embed deadline bounds the hung case.
+
+**Query embed deadline:** `search.embed_timeout_seconds` (default 10) bounds
+embedding the query, separately from the embedder's per-request timeout
+(`embedding.timeout_seconds`, sized for index batches). Before, the only bound
+was that 60 s client timeout.
+
+**Fanout scales with k:** each retriever returns `max(50, 8·k)` chunks, the same
+rule `find_related` uses — hits are chunk-level, and one long document can fill
+dozens of slots, so a fixed 50-chunk pool could never return k=60 documents.
+Because the fanout is a SQL LIMIT, k is bounded: 1..100 (`search.MaxK`), 400
+outside it; omitted means `search.default_k`, which is now actually applied
+(the engine used to hardcode 10, and the CLI and MCP always sent 10).
+
+**Knobs exposed in config:** BM25/vector weights in RRF (finite, not negative,
+not both zero; a single zero switches that retriever's contribution off),
+chunk-to-doc collapse strategy, `default_k`, `embed_timeout_seconds`.
 
 ---
 
@@ -299,6 +328,12 @@ precision. Without this, hybrid search becomes a black box.
 ---
 
 ## API: search knobs are per-request overrides
+
+**Status: not implemented.** Only the server config sets `weights` and
+`collapse` today, and the request decoder rejects unknown fields, so sending
+them is a 400. `api/openapi.yaml` no longer advertises them (nor the
+`saved_after`/`saved_before` filters). The design below stands for when they
+land.
 
 **Decision:** `weights` (BM25 vs vector RRF mix) and `collapse` (chunk-to-doc
 aggregation) are optional fields in the search request body. Defaults come

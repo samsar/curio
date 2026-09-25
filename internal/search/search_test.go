@@ -1,7 +1,13 @@
 package search
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -233,4 +239,218 @@ func TestEngine_Related_UnknownDocIsNotFound(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, store.ErrNotFound, "unknown doc must surface ErrNotFound for the API's 404 mapping")
+}
+
+// embedFunc adapts a function to Embedder.
+type embedFunc func(ctx context.Context, texts []string) ([][]float32, error)
+
+func (f embedFunc) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	return f(ctx, texts)
+}
+
+var errRefused = errors.New("ollama: post: dial tcp 127.0.0.1:11434: connect: connection refused")
+
+func failingEmbedder() Embedder {
+	return embedFunc(func(context.Context, []string) ([][]float32, error) { return nil, errRefused })
+}
+
+// hangingEmbedder blocks until its context ends, like an Ollama that accepts
+// the request and never answers. entered is closed on the first call.
+func hangingEmbedder(entered chan struct{}) Embedder {
+	var once sync.Once
+	return embedFunc(func(ctx context.Context, _ []string) ([][]float32, error) {
+		once.Do(func() { close(entered) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+}
+
+func TestEngine_DegradesToKeywordResults(t *testing.T) {
+	cases := []struct {
+		name string
+		emb  Embedder
+	}{
+		{"embedder error", failingEmbedder()},
+		{"no vectors", embedFunc(func(context.Context, []string) ([][]float32, error) { return nil, nil })},
+		{"wrong dimension", embedFunc(func(context.Context, []string) ([][]float32, error) {
+			return [][]float32{{1, 2, 3}}, nil
+		})},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := sqlitestore.NewEphemeralDB(t)
+			docs, chunks, _ := seedCorpus(t, db)
+			var logs bytes.Buffer
+			engine := New(chunks, docs, tc.emb, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+
+			res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
+			require.NoError(t, err)
+			require.NotEmpty(t, res.Items)
+			assert.Contains(t, res.Items[0].Document.URL, "llm")
+			assert.True(t, res.Degraded)
+			require.Len(t, res.Warnings, 1)
+			assert.Contains(t, res.Warnings[0], "semantic search unavailable")
+			assert.Contains(t, res.Warnings[0], "keyword-only")
+			assert.Zero(t, res.VectorHits)
+			assert.Equal(t, 1, strings.Count(logs.String(), "level=WARN"), "one warning is logged")
+		})
+	}
+}
+
+func TestEngine_DegradedWithoutKeywordTerms(t *testing.T) {
+	// Nothing survives BM25 sanitization, so the vector leg was the only
+	// retriever: the result is empty, but still a success with a warning.
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+	engine := New(chunks, docs, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
+
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "the and of", K: 3})
+	require.NoError(t, err)
+	assert.Empty(t, res.Items)
+	assert.True(t, res.Degraded)
+	assert.NotEmpty(t, res.Warnings)
+}
+
+func TestEngine_EmbedTimeoutDegrades(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+	engine := New(chunks, docs, hangingEmbedder(make(chan struct{})), Config{
+		EmbedTimeout: 50 * time.Millisecond,
+		Log:          slog.New(slog.DiscardHandler),
+	})
+
+	start := time.Now()
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second, "bounded by the embed timeout")
+	assert.True(t, res.Degraded)
+	require.NotEmpty(t, res.Items)
+	assert.Contains(t, res.Items[0].Document.URL, "llm")
+}
+
+func TestEngine_CallerContextEndIsAnError(t *testing.T) {
+	t.Run("canceled", func(t *testing.T) {
+		db := sqlitestore.NewEphemeralDB(t)
+		docs, chunks, _ := seedCorpus(t, db)
+		entered := make(chan struct{})
+		engine := New(chunks, docs, hangingEmbedder(entered), Config{Log: slog.New(slog.DiscardHandler)})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			<-entered
+			cancel()
+		}()
+		res, err := engine.Search(ctx, Request{TenantID: "local", Query: "attention token", K: 3})
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Nil(t, res)
+	})
+	t.Run("deadline", func(t *testing.T) {
+		db := sqlitestore.NewEphemeralDB(t)
+		docs, chunks, _ := seedCorpus(t, db)
+		engine := New(chunks, docs, hangingEmbedder(make(chan struct{})), Config{Log: slog.New(slog.DiscardHandler)})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_, err := engine.Search(ctx, Request{TenantID: "local", Query: "attention token", K: 3})
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+}
+
+// hookedChunks lets a test intercept BM25Search.
+type hookedChunks struct {
+	store.ChunkStore
+	bm25 func(ctx context.Context) error
+}
+
+func (h *hookedChunks) BM25Search(ctx context.Context, tenantID, query string, limit int, filters store.SearchFilters) ([]store.ChunkHit, error) {
+	if err := h.bm25(ctx); err != nil {
+		return nil, err
+	}
+	return h.ChunkStore.BM25Search(ctx, tenantID, query, limit, filters)
+}
+
+func TestEngine_KeywordFailureIsFatalAndStopsTheVectorLeg(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+	errDisk := errors.New("disk I/O error")
+	broken := &hookedChunks{ChunkStore: chunks, bm25: func(context.Context) error { return errDisk }}
+
+	sawCancel := false
+	emb := embedFunc(func(ctx context.Context, _ []string) ([][]float32, error) {
+		<-ctx.Done()
+		sawCancel = true
+		return nil, ctx.Err()
+	})
+	engine := New(broken, docs, emb, Config{Log: slog.New(slog.DiscardHandler)})
+
+	_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
+	require.ErrorIs(t, err, errDisk)
+	assert.True(t, sawCancel, "the vector leg was canceled and had exited before Search returned")
+}
+
+func TestEngine_LegsRunConcurrently(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+
+	entered := make(chan struct{})
+	var once sync.Once
+	emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
+		once.Do(func() { close(entered) })
+		return [][]float32{filledVec(0.3)}, nil
+	})
+	// BM25 can only finish once the embedder has been called: sequential
+	// legs would wait here until the bound runs out.
+	waitForEmbed := &hookedChunks{ChunkStore: chunks, bm25: func(context.Context) error {
+		select {
+		case <-entered:
+			return nil
+		case <-time.After(10 * time.Second):
+			return errors.New("the vector leg never started while BM25 ran")
+		}
+	}}
+	engine := New(waitForEmbed, docs, emb, Config{})
+
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
+	require.NoError(t, err)
+	assert.False(t, res.Degraded)
+	assert.Positive(t, res.BM25Hits)
+	assert.Positive(t, res.VectorHits)
+}
+
+func TestEngine_FanoutScalesWithK(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs := sqlitestore.NewDocuments(db)
+	exts := sqlitestore.NewExtractions(db)
+	chunks := sqlitestore.NewChunks(db, dim)
+	ctx := context.Background()
+	for i := range 60 {
+		d := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/zebra/%d", i),
+			ContentType: store.ContentTypeArticle}
+		require.NoError(t, docs.Upsert(ctx, d))
+		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
+		require.NoError(t, exts.Create(ctx, e))
+		require.NoError(t, chunks.ReplaceForDocument(ctx, d.ID, e.ID, "", nil,
+			[]store.ChunkInput{{Text: fmt.Sprintf("zebra sighting number %d", i), Embedding: filledVec(0.5)}}))
+	}
+	engine := New(chunks, docs, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
+
+	res, err := engine.Search(ctx, Request{TenantID: "local", Query: "zebra", K: 60})
+	require.NoError(t, err)
+	assert.Len(t, res.Items, 60, "a K above the 50-chunk floor still gets K documents")
+}
+
+func TestEngine_KContract(t *testing.T) {
+	db := sqlitestore.NewEphemeralDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+	engine := New(chunks, docs, &fakeEmbedder{}, Config{DefaultK: 2})
+
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zzqterm"})
+	require.NoError(t, err)
+	assert.Len(t, res.Items, 2, "K 0 uses the configured default")
+
+	for _, k := range []int{-1, MaxK + 1} {
+		_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zzqterm", K: k})
+		assert.Error(t, err, "k=%d", k)
+	}
 }
