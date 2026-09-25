@@ -49,7 +49,9 @@ type Server struct {
 func Start(t testing.TB, opts ...func(*api.Deps)) *Server {
 	t.Helper()
 	s := StartNotReady(t, opts...)
-	s.Ready(t)
+	if err := s.Ready(); err != nil {
+		t.Fatalf("ready: %v", err)
+	}
 	return s
 }
 
@@ -108,12 +110,11 @@ func StartNotReady(t testing.TB, opts ...func(*api.Deps)) *Server {
 		Startup: startup, srv: srv}
 }
 
-// Ready swaps in the full API, as the daemon does once it has started.
-func (s *Server) Ready(t testing.TB) {
-	t.Helper()
-	if err := s.srv.Ready(s.Deps); err != nil {
-		t.Fatalf("ready: %v", err)
-	}
+// Ready swaps in the full API, as the daemon does once it has started. It
+// returns the error rather than failing the test, so a fake daemon can call
+// it from whatever goroutine becomes ready.
+func (s *Server) Ready() error {
+	return s.srv.Ready(s.Deps)
 }
 
 // closeClientConns closes the idle connections of http.DefaultTransport,

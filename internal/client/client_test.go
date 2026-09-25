@@ -79,7 +79,7 @@ func TestHealthz_Starting(t *testing.T) {
 	require.ErrorIs(t, err, client.ErrStarting)
 	assert.Nil(t, client.StartupOf(err), "only healthz names the daemon")
 
-	s.Ready(t)
+	require.NoError(t, s.Ready())
 	h, err = c.Healthz(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "ok", h.Status)

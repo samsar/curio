@@ -145,7 +145,7 @@ func TestDaemonStart_WaitsOutAMigration(t *testing.T) {
 		t.Fatalf("daemon start returned while the daemon was migrating: %v", err)
 	case <-time.After(1500 * time.Millisecond): // past a poll or two
 	}
-	srv.Ready(t)
+	require.NoError(t, srv.Ready())
 
 	select {
 	case err := <-done:

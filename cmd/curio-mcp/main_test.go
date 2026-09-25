@@ -283,23 +283,21 @@ func TestMCP_ConcurrentCallsToAStoppedDaemon(t *testing.T) {
 	assert.GreaterOrEqual(t, starts.Load(), int32(1))
 }
 
-// startingDaemon is the real API as a daemon that is still starting, with
-// the test process holding its home's lock the way the daemon would, so a
-// controller for that home trusts it. ensure makes it ready, once however
-// often it is called, and counts the calls.
+// startingDaemon is the real API as a daemon that is still migrating.
+// ensure stands in for the controller's wait: it makes the daemon ready,
+// once however often it is called, and counts the calls.
 func startingDaemon(t *testing.T, ensures *atomic.Int32) (*apitest.Server, daemon) {
 	t.Helper()
 	srv := apitest.StartNotReady(t)
 	srv.Startup.SetMigrating(6)
 	doc := srv.AddDocument(t, "https://example.com/alpha", store.DocStateFetched)
 	srv.AddContent(t, doc, "alpha body")
-	var once sync.Once
+	ready := sync.OnceValue(srv.Ready)
 	return srv, daemon{
 		client: client.New(srv.URL),
 		ensure: func(context.Context) error {
 			ensures.Add(1)
-			once.Do(func() { srv.Ready(t) })
-			return nil
+			return ready()
 		},
 	}
 }
