@@ -236,6 +236,11 @@ func TestListDocuments(t *testing.T) {
 	require.Len(t, onlyFetched.Items, 1)
 	assert.Equal(t, filepath.Join(s.deps.Home.ContentDir(), *ext.MarkdownPath), onlyFetched.Items[0].MarkdownPath,
 		"an absolute path, ready to cat")
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents?state=archived"}),
+		http.StatusBadRequest)
+	assert.Equal(t, `state "archived" must be one of: pending, fetched, failed, dead`, p.Detail,
+		"a mistyped filter is refused, not answered with nothing")
 }
 
 func TestGetDocumentContent(t *testing.T) {

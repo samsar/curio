@@ -101,6 +101,24 @@ func (s DocState) Valid() bool {
 	return false
 }
 
+// Valid reports whether s is one of the JobStatus constants.
+func (s JobStatus) Valid() bool {
+	switch s {
+	case JobStatusPending, JobStatusRunning, JobStatusDone, JobStatusFailed:
+		return true
+	}
+	return false
+}
+
+// Valid reports whether k is one of the JobKind constants.
+func (k JobKind) Valid() bool {
+	switch k {
+	case JobKindFetch, JobKindIndex, JobKindImport, JobKindCluster, JobKindSummarize:
+		return true
+	}
+	return false
+}
+
 // IsFinished reports whether s is terminal (done or failed). Only finished
 // jobs may be deleted: removing a pending or running job would strand its
 // document in pending with nothing left to move it on.

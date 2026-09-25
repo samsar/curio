@@ -158,8 +158,13 @@ type DocumentListResponse struct {
 }
 
 func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
+	state, err := docStateParam(r)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
 	docs, err := d.Documents.ListWithLastError(r.Context(), d.TenantID, store.ListDocumentsOpts{
-		State: store.DocState(r.URL.Query().Get("state")),
+		State: state,
 		Limit: listLimit(r),
 	})
 	if err != nil {

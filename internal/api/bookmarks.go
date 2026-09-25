@@ -134,9 +134,14 @@ type BookmarkListResponse struct {
 // for one row more than the page holds.
 func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	source := q.Get("source")
+	if source != "" && !validSource(source) {
+		d.writeError(w, r, badRequest("source %q must be one of: %s", source, sourceList))
+		return
+	}
 	limit := listLimit(r)
 	bms, err := d.Bookmarks.List(r.Context(), d.TenantID, store.ListBookmarksOpts{
-		Source:     q.Get("source"),
+		Source:     source,
 		FolderPath: q.Get("folder"),
 		Cursor:     q.Get("cursor"),
 		Limit:      limit + 1,

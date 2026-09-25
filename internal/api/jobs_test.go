@@ -98,6 +98,14 @@ func TestListJobs(t *testing.T) {
 	require.Len(t, pending.Items, 1)
 	assert.Equal(t, "cluster", pending.Items[0].Kind)
 	assert.Empty(t, pending.Items[0].DocURL)
+
+	for query, detail := range map[string]string{
+		"?status=bogus": `status "bogus" must be one of: pending, running, done, failed`,
+		"?kind=bogus":   `kind "bogus" must be one of: fetch, index, import, cluster, summarize`,
+	} {
+		p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/jobs" + query}), http.StatusBadRequest)
+		assert.Equal(t, detail, p.Detail, query)
+	}
 }
 
 func TestDeleteJobs_BadRequests(t *testing.T) {

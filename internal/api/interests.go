@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -45,18 +44,23 @@ type InterestListResponse struct {
 	Items        []InterestResponse `json:"items"`
 }
 
+// Sizes for the interest endpoints. The list previews a few members of each
+// interest; the single interest shows many more.
 const (
-	defaultInterestLimit   = 50
-	defaultInterestMembers = 5
-	maxInterestMembers     = 100
+	defaultInterestLimit      = 50
+	maxInterestLimit          = 500
+	defaultInterestMembers    = 5
+	maxInterestMembers        = 100
+	defaultOneInterestMembers = 100
+	maxOneInterestMembers     = 1000
 )
 
 // handleListInterests returns the current interests — the labeled clusters of
 // the latest completed clustering run. Returns 200 with an empty list when no
 // clustering has run yet.
 func (d Deps) handleListInterests(w http.ResponseWriter, r *http.Request) {
-	limit := intParam(r, "limit", defaultInterestLimit, 1, 500)
-	members := intParam(r, "members", defaultInterestMembers, 0, maxInterestMembers)
+	limit := intQuery(r, "limit", defaultInterestLimit, 1, maxInterestLimit)
+	members := intQuery(r, "members", defaultInterestMembers, 0, maxInterestMembers)
 
 	run, err := d.Insights.LatestRun(r.Context(), d.TenantID, store.ClusterRunDone)
 	if err != nil {
@@ -97,7 +101,7 @@ func (d Deps) handleListInterests(w http.ResponseWriter, r *http.Request) {
 // handleGetInterest returns one interest (cluster) with its member documents.
 func (d Deps) handleGetInterest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	members := intParam(r, "members", maxInterestMembers, 0, 1000)
+	members := intQuery(r, "members", defaultOneInterestMembers, 0, maxOneInterestMembers)
 
 	c, err := d.Insights.GetCluster(r.Context(), id)
 	if err != nil {
@@ -186,23 +190,4 @@ func (d Deps) interestMember(ctx context.Context, m store.ClusterMember) (Intere
 		im.Title = *doc.Title
 	}
 	return im, nil
-}
-
-// intParam reads an int query param with a default and clamping to [lo, hi].
-func intParam(r *http.Request, name string, def, lo, hi int) int {
-	v := r.URL.Query().Get(name)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
-	if n < lo {
-		return lo
-	}
-	if n > hi {
-		return hi
-	}
-	return n
 }

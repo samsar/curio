@@ -121,6 +121,8 @@ func TestDocs(t *testing.T) {
 
 	out = mustRun(t, srv, "docs", "--state", "dead")
 	assert.Contains(t, out, "no documents match")
+	_, err = runCLI(t, srv, "docs", "--state", "archived")
+	require.ErrorContains(t, err, "pending, fetched, failed, dead", "a mistyped state names the valid ones")
 
 	out = mustRun(t, srv, "docs", "show", fetched.ID)
 	assert.Contains(t, out, "url:          https://example.com/fetched")

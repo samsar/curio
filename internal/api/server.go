@@ -306,13 +306,20 @@ const (
 	maxListLimit     = 500
 )
 
-// listLimit reads a list endpoint's ?limit: 1 through maxListLimit is
-// honored, and anything else (absent, malformed, out of range) means
-// defaultListLimit.
+// listLimit reads a list endpoint's ?limit.
 func listLimit(r *http.Request) int {
-	n, err := strconv.Atoi(r.URL.Query().Get("limit"))
-	if err != nil || n < 1 || n > maxListLimit {
-		return defaultListLimit
+	return intQuery(r, "limit", defaultListLimit, 1, maxListLimit)
+}
+
+// intQuery reads a sizing parameter such as ?limit: a value in lo..hi is
+// honored, and anything else (absent, malformed, out of range) means def.
+// Filters are validated instead (docs/decisions.md "API: filters are
+// validated, sizing knobs default"): a wrong filter returns wrong rows,
+// while a wrong size still returns the right ones.
+func intQuery(r *http.Request, name string, def, lo, hi int) int {
+	n, err := strconv.Atoi(r.URL.Query().Get(name))
+	if err != nil || n < lo || n > hi {
+		return def
 	}
 	return n
 }

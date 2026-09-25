@@ -3170,3 +3170,28 @@ own home, so a client had to know the daemon's layout. The same code
 discarded lookup errors, turning a database error into plausible but wrong
 data: a document without `current_extraction`, a hit without a path, an
 interest without members.
+
+---
+
+## API: filters are validated, sizing knobs default
+
+**Decision:** A list filter outside its set is a 400 naming the allowed
+values: `GET /v1/documents?state`, `GET /v1/jobs?status` and `?kind`, and
+`GET /v1/bookmarks?source` (html included), as refetch-all and reindex-all
+already did for `state`. `store.JobStatus` and `store.JobKind` gained
+`Valid()`, matching the jobs table's CHECK constraints. Sizing parameters
+keep the rule "API: handler edge cases found by coverage" set for `limit`:
+one helper, `intQuery`, honors a value in range and treats anything else
+(absent, malformed, out of range) as the default. It serves list `limit`
+(1..500, default 50), interests `limit` (1..500, 50) and `members` (0..100,
+default 5; 0..1000, default 100 on `GET /v1/interests/{id}`), related `k`
+(1..100, 10) and metrics `window` (1..86400 seconds, 3600).
+
+**Why:** A typo in a filter read as "nothing matches": `curio docs --state
+fecthed` printed "no documents match", `curio jobs --status bogus` "no jobs
+match", and `?source=bogus` answered `{"items":[]}`. A wrong filter returns
+wrong rows, so it is refused; a wrong size still returns the right rows, so
+it falls back. The CLI keeps no enum lists of its own: the server's problem
+detail reaches the user as it is. Three hand-written parsers had drifted
+apart: interests clamped out-of-range values (so `members=-1` meant none),
+while related and metrics fell back to their defaults.

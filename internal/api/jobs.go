@@ -117,12 +117,13 @@ func parseExtendedDuration(s string) (time.Duration, error) {
 }
 
 func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	jobs, err := d.Queue.ListWithDoc(r.Context(), d.TenantID, store.ListJobsOpts{
-		Status: store.JobStatus(q.Get("status")),
-		Kind:   store.JobKind(q.Get("kind")),
-		Limit:  listLimit(r),
-	})
+	opts, err := jobFilters(r)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	opts.Limit = listLimit(r)
+	jobs, err := d.Queue.ListWithDoc(r.Context(), d.TenantID, opts)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
@@ -151,4 +152,18 @@ func (d Deps) jobResponse(j store.JobWithDoc) JobResponse {
 		DocTitle:     j.Title,
 		MarkdownPath: d.contentPath(j.MarkdownPath),
 	}
+}
+
+// jobFilters reads the job list's ?status and ?kind. Empty means no filter;
+// a value the jobs table can't hold is a requestError.
+func jobFilters(r *http.Request) (store.ListJobsOpts, error) {
+	q := r.URL.Query()
+	opts := store.ListJobsOpts{Status: store.JobStatus(q.Get("status")), Kind: store.JobKind(q.Get("kind"))}
+	if opts.Status != "" && !opts.Status.Valid() {
+		return store.ListJobsOpts{}, badRequest("status %q must be one of: pending, running, done, failed", opts.Status)
+	}
+	if opts.Kind != "" && !opts.Kind.Valid() {
+		return store.ListJobsOpts{}, badRequest("kind %q must be one of: fetch, index, import, cluster, summarize", opts.Kind)
+	}
+	return opts, nil
 }

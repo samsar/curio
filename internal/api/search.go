@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -145,6 +144,10 @@ func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]Se
 	return out, nil
 }
 
+// defaultRelatedK is how many related documents GET
+// /v1/documents/{id}/related returns without ?k.
+const defaultRelatedK = 10
+
 // RelatedResponse is the body of GET /v1/documents/{id}/related. Scores
 // are raw vector similarities (1/(1+L2 distance), 0..1) — not comparable
 // with /v1/search's RRF-fused scores.
@@ -159,12 +162,7 @@ type RelatedResponse struct {
 // 200 with empty items for a document that has no indexed chunks yet.
 func (d Deps) handleRelatedDocuments(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	k := 10
-	if v := r.URL.Query().Get("k"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= search.MaxK {
-			k = n
-		}
-	}
+	k := intQuery(r, "k", defaultRelatedK, 1, search.MaxK)
 
 	start := time.Now()
 	res, err := d.Search.Related(r.Context(), search.RelatedRequest{

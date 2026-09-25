@@ -68,6 +68,14 @@ func TestListInterests(t *testing.T) {
 	resp = s.do(t, request{method: http.MethodGet, path: "/v1/interests?members=0"})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.NotContains(t, resp.body, `"members"`)
+
+	// Sizing parameters out of range mean their default, as for ?limit.
+	for _, members := range []string{"101", "-1", "many"} {
+		resp = s.do(t, request{method: http.MethodGet, path: "/v1/interests?members=" + members})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		assert.Len(t, got.Items[0].Members, 2, "members=%s: the default 5 covers both", members)
+	}
 }
 
 func TestGetInterest(t *testing.T) {

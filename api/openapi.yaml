@@ -95,7 +95,7 @@ paths:
       operationId: listBookmarks
       summary: List bookmarks with filters
       parameters:
-        - { in: query, name: source,      schema: { type: string, enum: [chrome, safari, firefox, manual] } }
+        - { in: query, name: source,      schema: { type: string, enum: [chrome, safari, firefox, html, manual] } }
         - { in: query, name: state,       schema: { type: string, enum: [pending, fetched, failed, dead] } }
         - { in: query, name: folder,      schema: { type: string }, description: "Exact folder_path prefix match" }
         - { in: query, name: tag,         schema: { type: string }, description: "Returns bookmarks whose tags array contains this value" }
@@ -108,6 +108,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BookmarkList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
 
     post:
       tags: [bookmarks]
@@ -241,6 +242,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DocumentList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
 
   /v1/documents/{id}:
     parameters:
@@ -483,6 +485,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JobList" }
+        "400": { $ref: "#/components/responses/BadRequest" }
 
   /v1/jobs/{id}:
     parameters:
@@ -522,6 +525,14 @@ paths:
 components:
 
   responses:
+    BadRequest:
+      description: >
+        A filter parameter outside its enum. Sizing
+        parameters (limit, members, k, window) are never refused: a value
+        outside their range means their default.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
     NotFound:
       description: Resource not found
       content:

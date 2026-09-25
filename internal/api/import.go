@@ -51,9 +51,8 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 		d.writeError(w, r, err)
 		return
 	}
-	if !validImportSource(req.Source) {
-		writeProblem(w, r, http.StatusBadRequest, "bad request",
-			"source must be one of: chrome, safari, firefox, html, manual")
+	if !validSource(req.Source) {
+		writeProblem(w, r, http.StatusBadRequest, "bad request", "source must be one of: "+sourceList)
 		return
 	}
 	if len(req.Bookmarks) == 0 {
@@ -117,7 +116,11 @@ func (r *ImportResponse) appendError(msg string) {
 	r.Errors = append(r.Errors, msg)
 }
 
-func validImportSource(s string) bool {
+// sourceList names the values validSource accepts, for error details.
+const sourceList = "chrome, safari, firefox, html, manual"
+
+// validSource reports whether s is a bookmark source (bookmarks.source).
+func validSource(s string) bool {
 	switch s {
 	case store.SourceChrome, store.SourceSafari, store.SourceFirefox,
 		store.SourceManual, store.SourceHTML:

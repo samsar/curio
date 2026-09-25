@@ -293,6 +293,10 @@ func TestBookmarks_GetListDelete(t *testing.T) {
 	list = s.listBookmarks(t, "?folder=/Reading")
 	require.Len(t, list.Items, 1)
 	assert.Equal(t, b.ID, list.Items[0].ID)
+	assert.Empty(t, s.listBookmarks(t, "?source=html").Items, "html is a source, just not one used here")
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/bookmarks?source=bogus"}),
+		http.StatusBadRequest)
+	assert.Equal(t, `source "bogus" must be one of: chrome, safari, firefox, html, manual`, p.Detail)
 
 	resp = s.do(t, request{method: http.MethodDelete, path: "/v1/bookmarks/" + b.ID})
 	assert.Equal(t, http.StatusNoContent, resp.status)
