@@ -552,6 +552,17 @@ to. The schema's `source` column gets a new value `html` via migration 002.
 Live browser readers (Chrome JSON, future Safari plist, future Firefox
 SQLite) are convenience layers on top of this. HTML is the workhorse.
 
+**`ADD_DATE` units:** exporters disagree on the unit — seconds (browsers),
+microseconds (Firefox), milliseconds (several read-later tools), even
+nanoseconds — so the parser infers it from the magnitude: ≥ 1e17 is
+nanoseconds, ≥ 1e14 microseconds, ≥ 1e11 milliseconds, else seconds. Each
+threshold is about 1973 in the finer unit and about year 5138 in the coarser
+one, so no plausible date is ambiguous. Integers are parsed exactly; decimals
+and scientific notation keep their sub-second part. The earlier rule (divide
+by 10⁶ above ~9.6e10) turned milliseconds into 1970-01-20 and nanoseconds into
+year 55840. Bookmarks already imported with a wrong date are not corrected:
+re-import skips existing rows, and there is no data migration.
+
 ---
 
 ## HTML parser walks recursively, finds <DL> inside <DT>
