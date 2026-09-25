@@ -21,7 +21,7 @@ when the entry was first committed.
 - 2026-05-23 — [Data model: documents are universal, references are per-source](#data-model-documents-are-universal-references-are-per-source)
 - 2026-05-23 — [Multi-tenancy: `tenant_id` on reference tables, not child tables](#multi-tenancy-tenant_id-on-reference-tables-not-child-tables)
 - 2026-05-23 — [Fetcher selection: data-driven rules file](#fetcher-selection-data-driven-rules-file)
-- 2026-05-23 — [Hybrid search: BM25 + vector + RRF](#hybrid-search-bm25--vector--rrf)
+- 2026-05-23 — [Hybrid search: BM25 + vector + RRF](#hybrid-search-bm25--vector--rrf) (revised)
 - 2026-05-24 — [BM25 query sanitization: OR + stopwords](#bm25-query-sanitization-or--stopwords)
 - 2026-05-23 — [API: cursor pagination, not offset](#api-cursor-pagination-not-offset)
 - 2026-05-23 — [API: all long-running operations are async with job IDs](#api-all-long-running-operations-are-async-with-job-ids)
@@ -67,7 +67,7 @@ when the entry was first committed.
 - 2026-07-05 — [fetcher_rules.yaml: mtime-polled hot reload, keep-last-good](#fetcher_rulesyaml-mtime-polled-hot-reload-keep-last-good)
 - 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search)
 - 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4)
-- 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator)
+- 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator) (revised)
 - 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
 - 2026-07-06 — [M6 (planned): RAG / Q&A synthesis + SOTA natural-language search](#m6-planned-rag--qa-synthesis--sota-natural-language-search)
 - 2026-07-06 — [nomic-embed-text task prefixes (`search_document:` / `search_query:`)](#nomic-embed-text-task-prefixes-search_document--search_query)
@@ -359,6 +359,10 @@ outside it; omitted means `search.default_k`, which is now actually applied
 **Knobs exposed in config:** BM25/vector weights in RRF (finite, not negative,
 not both zero; a single zero switches that retriever's contribution off),
 chunk-to-doc collapse strategy, `default_k`, `embed_timeout_seconds`.
+
+**Revised (2026-09):** the bound is `store.MaxSearchK` (still 100). It moved
+out of `internal/search` because config validation needs it, and importing
+the search engine for a constant linked it into the CLI and `curio-mcp`.
 
 ---
 
@@ -1889,6 +1893,13 @@ labeling uses the term fallback until the generation model lands. Gated by
 metered/offline setups). This is why LLM labeling can be the default without
 making a 2 GB download a hard prerequisite.
 
+**Revised (2026-09):** the generator and the embedder now share one
+`internal/ollama.Client`: the sentinels are `ollama.ErrUnreachable` and
+`ollama.ErrModelNotLoaded`, the pull is `Client.Pull`, and the daemon runs
+`Client.KeepPulled`, which retries the pull until the model lands instead of
+trying once at startup. See "Ollama: one client, one sentinel pair, a pull
+that keeps trying".
+
 ---
 
 ## Retrieval eval harness
@@ -2910,16 +2921,16 @@ the queries" for how a filtered page is read.)
   jobs only for documents in that state with a current extraction
   (`DocumentStore.ListIDsWithContent`).
 
-**Revised (2026-09):** the 405 handler probes the path chi routed on, the
-escaped one when the URL has it: `PUT /v1/bookmarks/a%2Fb` answered 405 with
-an empty `Allow`, because chi matched `a%2Fb` as one `{id}` while the probe
-used the decoded `/v1/bookmarks/a/b`, which matches nothing.
-
 **Why reindex-all needed the second half:** an index job for a document
 with no extraction fails permanently, and the permanent-failure hook then
 marks the document failed. So `curio reindex --all --state=pending` turned
 documents whose first fetch was still in flight into failed ones.
 Single-document reindex already refused such a document with 409.
+
+**Revised (2026-09):** the 405 handler probes the path chi routed on, the
+escaped one when the URL has it: `PUT /v1/bookmarks/a%2Fb` answered 405 with
+an empty `Allow`, because chi matched `a%2Fb` as one `{id}` while the probe
+used the decoded `/v1/bookmarks/a/b`, which matches nothing.
 
 ---
 

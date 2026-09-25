@@ -20,13 +20,13 @@ type Bookmarks struct {
 
 var _ store.BookmarkStore = (*Bookmarks)(nil)
 
-// TagsForDocument returns the deduplicated tags across all bookmarks that
-// reference the document, scoped to the tenant. Order is first-seen.
-// Malformed tag JSON on a row is skipped rather than failing the whole call.
 // tagsForDocumentSQL reads the tags of a document's bookmarks. Its args are
 // the tenant and the document.
 const tagsForDocumentSQL = `SELECT tags FROM bookmarks WHERE tenant_id = ? AND document_id = ?`
 
+// TagsForDocument returns the deduplicated tags across all bookmarks that
+// reference the document, scoped to the tenant. Order is first-seen.
+// Malformed tag JSON on a row is skipped rather than failing the whole call.
 func (s *Bookmarks) TagsForDocument(ctx context.Context, tenantID, documentID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, tagsForDocumentSQL, tenantID, documentID)
 	if err != nil {

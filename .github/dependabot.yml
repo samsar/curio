@@ -1,7 +1,8 @@
 version: 2
 updates:
-  # One PR per ecosystem per week. The go directive is not Dependabot's to
-  # move: see docs/decisions.md "Toolchain".
+  # One PR per ecosystem per week. A module that needs a newer Go makes the
+  # PR raise the go directive, and can add a toolchain line: review both
+  # against docs/decisions.md "Toolchain" before merging.
   - package-ecosystem: gomod
     directory: /
     schedule:

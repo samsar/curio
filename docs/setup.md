@@ -137,7 +137,7 @@ On first run the CLI (or the daemon) creates the home, `~/.curio` or
 daemon creates and migrates `curio.db`. A missing `config.yaml` means the
 defaults. A directory that already exists without `.curio-meta.json` is
 refused rather than adopted, so pointing `CURIO_HOME` at the wrong
-directory can't write into it: use a new or empty path.
+directory can't write into it: use a path that doesn't exist yet.
 
 ## Config: time budgets for Ollama calls
 
