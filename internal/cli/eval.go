@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"text/tabwriter"
 
@@ -52,8 +52,7 @@ func newEvalCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			renderEvalReport(eval.Evaluate(qs, ranked, k))
-			return nil
+			return renderEvalReport(cmd.OutOrStdout(), eval.Evaluate(qs, ranked, k))
 		},
 	}
 	cmd.Flags().StringVar(&queriesPath, "queries", "", "Path to a qrels YAML file (query + relevant URLs)")
@@ -89,8 +88,8 @@ func rankQueries(ctx context.Context, s searcher, qs *eval.QuerySet, k int) ([][
 	return ranked, nil
 }
 
-func renderEvalReport(r eval.Report) {
-	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+func renderEvalReport(w io.Writer, r eval.Report) error {
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	fmt.Fprintf(tw, "query\trel\tR@%d\tP@%d\tNDCG@%d\tRR\n", r.K, r.K, r.K)
 	for _, q := range r.Results {
 		fmt.Fprintf(tw, "%s\t%d\t%.3f\t%.3f\t%.3f\t%.3f\n",
@@ -98,7 +97,10 @@ func renderEvalReport(r eval.Report) {
 	}
 	fmt.Fprintf(tw, "MEAN\t\t%.3f\t%.3f\t%.3f\t%.3f\n",
 		r.MeanRecall, r.MeanPrecision, r.MeanNDCG, r.MRR)
-	_ = tw.Flush()
-	fmt.Printf("\n%d queries · NDCG@%d %.3f · recall@%d %.3f · MRR %.3f\n",
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("write report: %w", err)
+	}
+	fmt.Fprintf(w, "\n%d queries · NDCG@%d %.3f · recall@%d %.3f · MRR %.3f\n",
 		len(r.Results), r.K, r.MeanNDCG, r.K, r.MeanRecall, r.MRR)
+	return nil
 }

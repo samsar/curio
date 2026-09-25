@@ -157,7 +157,7 @@ suggests setting `CURIO_HOME` to a different path.
 ## Data flow
 
 ```
-bookmark file ──► importer ──► bookmarks table ──► enqueue fetch jobs
+bookmark file ──► importer ──► bookmark + document ──► fetch job (new documents only)
                                                           │
                                                           ▼
                               ┌──► fetcher (per-domain strategy)

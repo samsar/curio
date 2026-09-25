@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/urlutil"
 )
 
@@ -60,7 +61,7 @@ func TestGitHubFetch_Repo(t *testing.T) {
 	result, err := g.Fetch(t.Context(), "https://github.com/owner/coolproject")
 	require.NoError(t, err)
 
-	assert.Equal(t, "repo", result.ContentType)
+	assert.Equal(t, store.ContentTypeRepo, result.ContentType)
 	assert.Equal(t, "owner/coolproject", result.Title)
 	assert.Equal(t, "owner", result.Author)
 	assert.Contains(t, result.Markdown, "A cool project for testing")
@@ -99,7 +100,7 @@ func TestGitHubFetch_File(t *testing.T) {
 	result, err := g.Fetch(t.Context(), "https://github.com/owner/myrepo/blob/v2.0/docs/guide.md")
 	require.NoError(t, err)
 
-	assert.Equal(t, "article", result.ContentType)
+	assert.Equal(t, store.ContentTypeArticle, result.ContentType)
 	assert.Equal(t, "docs/guide.md", result.Title)
 	assert.Contains(t, result.Markdown, "# docs/guide.md")
 	assert.Contains(t, result.Markdown, "**Repository:** owner/myrepo — My repository")
@@ -296,7 +297,7 @@ func TestGitHubFetch_Issue(t *testing.T) {
 	result, err := g.Fetch(t.Context(), "https://github.com/owner/repo/issues/123")
 	require.NoError(t, err)
 
-	assert.Equal(t, "thread", result.ContentType)
+	assert.Equal(t, store.ContentTypeThread, result.ContentType)
 	assert.Equal(t, "owner/repo#123: Crash when parsing empty file", result.Title)
 	assert.Equal(t, "reporter", result.Author)
 	assert.Equal(t, "https://github.com/owner/repo/issues/123", result.FinalURL)
@@ -373,7 +374,7 @@ func TestGitHubFetch_Pull(t *testing.T) {
 	result, err := g.Fetch(t.Context(), "https://github.com/owner/repo/pull/456")
 	require.NoError(t, err)
 
-	assert.Equal(t, "thread", result.ContentType)
+	assert.Equal(t, store.ContentTypeThread, result.ContentType)
 	assert.Equal(t, "owner/repo#456: Add retry logic to fetcher", result.Title)
 	assert.Equal(t, "contributor", result.Author)
 	assert.Equal(t, "https://github.com/owner/repo/pull/456", result.FinalURL)
@@ -454,7 +455,7 @@ func TestGitHubFetch_Wiki(t *testing.T) {
 	result, err := g.Fetch(t.Context(), "https://github.com/owner/repo/wiki/Getting-Started")
 	require.NoError(t, err)
 
-	assert.Equal(t, "article", result.ContentType)
+	assert.Equal(t, store.ContentTypeArticle, result.ContentType)
 	assert.Equal(t, "owner/repo wiki: Getting Started", result.Title)
 	assert.Equal(t, "https://github.com/owner/repo/wiki/Getting-Started", result.FinalURL)
 	assert.Contains(t, result.Markdown, "# Getting Started")

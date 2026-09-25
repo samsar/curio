@@ -58,21 +58,9 @@ Disk Access if you get a permission error.`,
 			if err != nil {
 				return fmt.Errorf("parse: %w", err)
 			}
-			fmt.Printf("parsed %d bookmarks from Safari\n", len(bms))
-			bms = flags.applyLimit(bms)
-			if flags.limit > 0 {
-				fmt.Printf("  limited to first %d\n", len(bms))
-			}
-			if flags.dryRun {
-				return reportDryRun(bms)
-			}
-			if err := sendBatches(cmd.Context(), ctx, "safari", bms); err != nil {
-				return err
-			}
-			if flags.follow {
-				return followProgress(cmd.Context(), ctx)
-			}
-			return nil
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "parsed %d bookmarks from Safari\n", len(bms))
+			return importParsed(cmd.Context(), w, ctx, "safari", bms, &flags)
 		},
 	}
 	cmd.Flags().StringVar(&filePath, "file", "", "Path to an arbitrary Bookmarks.plist file")

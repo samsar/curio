@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -285,12 +284,15 @@ func buildFilterClause(f store.SearchFilters) (string, []any) {
 		}
 	}
 	if len(f.Host) > 0 {
-		// No host column, so match the host segment of the URL for http(s).
-		// Exact host (the caller passes it); no port/subdomain coercion.
+		// No host column, so match the host segment of the URL for http(s):
+		// exactly that host, no port or subdomain coercion. The host is
+		// escaped so its '%', '_' and '\' match only themselves; LIKE's ASCII
+		// case-folding is right for host names.
 		conds := make([]string, 0, len(f.Host))
 		for _, h := range f.Host {
-			conds = append(conds, "(d.url LIKE ? OR d.url LIKE ? OR d.url = ? OR d.url = ?)")
-			args = append(args, "http://"+h+"/%", "https://"+h+"/%", "http://"+h, "https://"+h)
+			conds = append(conds, `(d.url LIKE ? ESCAPE '\' OR d.url LIKE ? ESCAPE '\' OR d.url = ? OR d.url = ?)`)
+			args = append(args, escapeLike("http://"+h+"/")+"%", escapeLike("https://"+h+"/")+"%",
+				"http://"+h, "https://"+h)
 		}
 		sb.WriteString(" AND (" + strings.Join(conds, " OR ") + ")")
 	}
@@ -433,8 +435,7 @@ func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.
 	return out, nil
 }
 
-// GetByIDs returns chunks in arbitrary order. Used by the search layer to
-// pull text for collapsed top-K results.
+// GetByIDs returns the chunks with the given IDs, in arbitrary order.
 func (s *Chunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -470,10 +471,7 @@ func (s *Chunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, er
 		out = append(out, &c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if len(out) == 0 {
-		return nil, errors.New("chunks: no rows for any of the given ids")
+		return nil, fmt.Errorf("get chunks: %w", err)
 	}
 	return out, nil
 }

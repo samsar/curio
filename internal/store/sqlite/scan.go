@@ -3,6 +3,7 @@ package sqlite
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -72,4 +73,23 @@ func timePtr(t *time.Time) any {
 		return nil
 	}
 	return formatTime(*t)
+}
+
+// qualify prefixes every column in a comma-separated list with a table
+// alias, for queries that join tables sharing column names.
+func qualify(alias, columns string) string {
+	cols := strings.Split(columns, ",")
+	for i, c := range cols {
+		cols[i] = alias + "." + strings.TrimSpace(c)
+	}
+	return strings.Join(cols, ", ")
+}
+
+// likeEscaper backslash-escapes LIKE's wildcards and the escape character.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// escapeLike makes s match only itself in a LIKE pattern that declares
+// ESCAPE '\'.
+func escapeLike(s string) string {
+	return likeEscaper.Replace(s)
 }

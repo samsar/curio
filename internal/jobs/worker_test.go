@@ -17,6 +17,7 @@ import (
 
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
 var quietLog = slog.New(slog.DiscardHandler)
@@ -53,7 +54,7 @@ func waitForJob(t *testing.T, q store.JobQueue, id string, cond func(*store.Job)
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
-func statusIs(status string) func(*store.Job) bool {
+func statusIs(status store.JobStatus) func(*store.Job) bool {
 	return func(j *store.Job) bool { return j.Status == status }
 }
 
@@ -61,7 +62,7 @@ func statusIs(status string) func(*store.Job) bool {
 // shutdown has begun still gets its success recorded, so the row isn't left
 // running and the job isn't run again on the next start.
 func TestWorker_JobFinishedDuringShutdownIsDone(t *testing.T) {
-	q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
+	q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
 	job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}
 	require.NoError(t, q.Enqueue(context.Background(), job))
 
@@ -101,15 +102,13 @@ func TestWorker_JobInterruptedByShutdownIsRequeued(t *testing.T) {
 			ctx := context.Background()
 
 			doc := &store.Document{TenantID: "local", URL: "https://example.com/x", ContentType: store.ContentTypeArticle}
-			require.NoError(t, deps.Documents.Upsert(ctx, doc))
-			payload, err := json.Marshal(FetchPayload{DocumentID: doc.ID})
-			require.NoError(t, err)
-			job := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}
+			require.NoError(t, deps.Documents.Create(ctx, doc))
+			job := docJob(t, store.JobKindFetch, doc.ID)
 			require.NoError(t, deps.Queue.Enqueue(ctx, job))
 
 			// One earlier real failure, so there is an attempt and a
 			// last_error that must survive the interruption.
-			_, err = deps.Queue.ClaimNext(ctx, nil)
+			_, err := deps.Queue.ClaimNext(ctx, nil)
 			require.NoError(t, err)
 			_, err = deps.Queue.MarkFailed(ctx, job.ID, "earlier failure", true)
 			require.NoError(t, err)
@@ -154,7 +153,7 @@ func TestWorker_JobInterruptedByShutdownIsRequeued(t *testing.T) {
 // TestWorker_RetryableFailureConsumesAttempt pins the live-context path: a
 // retryable error backs off with the attempt spent and no hook.
 func TestWorker_RetryableFailureConsumesAttempt(t *testing.T) {
-	q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
+	q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
 	job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}
 	require.NoError(t, q.Enqueue(context.Background(), job))
 
@@ -206,7 +205,7 @@ func TestWorker_PanicIsContained(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			q := sqlitestore.NewJobs(sqlitestore.NewEphemeralDB(t))
+			q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
 			ctx := context.Background()
 			bad := &store.Job{TenantID: "local", Kind: store.JobKindSummarize, Payload: json.RawMessage(`{"bad":true}`)}
 			good := &store.Job{TenantID: "local", Kind: store.JobKindSummarize, Payload: json.RawMessage(`{"bad":false}`)}
@@ -248,17 +247,15 @@ func TestWorker_RecoverOrphans(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	ctx := context.Background()
 
-	enqueueRunning := func(kind string, attempts int, docID string) *store.Job {
-		payload, err := json.Marshal(FetchPayload{DocumentID: docID})
-		require.NoError(t, err)
-		j := &store.Job{TenantID: "local", Kind: kind, Payload: payload,
-			Status: store.JobStatusRunning, Attempts: attempts}
+	enqueueRunning := func(kind store.JobKind, attempts int, docID string) *store.Job {
+		j := docJob(t, kind, docID)
+		j.Status, j.Attempts = store.JobStatusRunning, attempts
 		require.NoError(t, deps.Queue.Enqueue(ctx, j))
 		return j
 	}
 	newDoc := func(url string) *store.Document {
 		d := &store.Document{TenantID: "local", URL: url, ContentType: store.ContentTypeArticle}
-		require.NoError(t, deps.Documents.Upsert(ctx, d))
+		require.NoError(t, deps.Documents.Create(ctx, d))
 		return d
 	}
 
@@ -296,7 +293,7 @@ type shutdownAfterRecovery struct {
 	shutdown context.CancelFunc
 }
 
-func (q shutdownAfterRecovery) RecoverOrphans(ctx context.Context, kinds []string) ([]*store.Job, int, error) {
+func (q shutdownAfterRecovery) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*store.Job, int, error) {
 	defer q.shutdown()
 	return q.JobQueue.RecoverOrphans(ctx, kinds)
 }
@@ -308,11 +305,9 @@ func TestWorker_RecoverOrphans_HooksOutliveShutdown(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/crashes-the-daemon",
 		ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(context.Background(), doc))
-	payload, err := json.Marshal(FetchPayload{DocumentID: doc.ID})
-	require.NoError(t, err)
-	orphan := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload,
-		Status: store.JobStatusRunning, Attempts: 5}
+	require.NoError(t, deps.Documents.Create(context.Background(), doc))
+	orphan := docJob(t, store.JobKindFetch, doc.ID)
+	orphan.Status, orphan.Attempts = store.JobStatusRunning, 5
 	require.NoError(t, deps.Queue.Enqueue(context.Background(), orphan))
 
 	ctx, cancel := context.WithCancel(context.Background())

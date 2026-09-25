@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
 // testServer runs the full router from NewServer on a real loopback listener
@@ -36,7 +38,7 @@ type testServer struct {
 // newTestServer starts the server; each option adjusts its Deps first.
 func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	t.Helper()
-	db := sqlite.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
 	require.NoError(t, err)
 
@@ -64,6 +66,9 @@ func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ctx) }()
 	t.Cleanup(func() {
+		// A spare connection the client dialed but never used would hold
+		// the graceful shutdown for 5s (see apitest's closeClientConns).
+		http.DefaultClient.CloseIdleConnections()
 		cancel()
 		require.NoError(t, <-served)
 	})
@@ -127,11 +132,27 @@ func (s *testServer) count(t *testing.T, table string) int {
 	return n
 }
 
-func (s *testServer) seedDocument(t *testing.T, url, state string) *store.Document {
+func (s *testServer) seedDocument(t *testing.T, url string, state store.DocState) *store.Document {
 	t.Helper()
 	doc := &store.Document{TenantID: "local", URL: url, State: state}
-	require.NoError(t, s.deps.Documents.Upsert(context.Background(), doc))
+	require.NoError(t, s.deps.Documents.Create(context.Background(), doc))
 	return doc
+}
+
+// seedContent gives doc a current extraction whose markdown is on disk.
+func (s *testServer) seedContent(t *testing.T, doc *store.Document, markdown string) *store.DocumentExtraction {
+	t.Helper()
+	ctx := context.Background()
+	rel := filepath.Join(doc.ID, "content.md")
+	full := filepath.Join(s.deps.Home.ContentDir(), rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o700))
+	require.NoError(t, os.WriteFile(full, []byte(markdown), 0o600))
+	ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
+		MarkdownPath: &rel, ExtractionMeta: []byte(`{"via":"test"}`)}
+	require.NoError(t, s.deps.Extractions.Create(ctx, ext))
+	require.NoError(t, s.deps.Documents.SetCurrentExtraction(ctx, doc.ID, ext.ID))
+	doc.CurrentExtractionID = &ext.ID
+	return ext
 }
 
 func assertProblem(t *testing.T, resp response, status int) {
@@ -428,4 +449,72 @@ func TestServer_HealthIdentity(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
 	assert.Equal(t, os.Getpid(), h.PID)
 	assert.Equal(t, s.deps.Home.Path, h.Home)
+}
+
+// TestServer_RouterErrorsAreProblems: an unknown route and an unsupported
+// method answer problem+json like every other error, and a 405 says which
+// methods the route takes.
+func TestServer_RouterErrorsAreProblems(t *testing.T) {
+	s := newTestServer(t)
+	for _, path := range []string{"/nope", "/v1/nope", "/v1/documents/x/nope"} {
+		assertProblem(t, s.do(t, request{method: http.MethodGet, path: path}), http.StatusNotFound)
+	}
+
+	cases := []struct {
+		method, path, allow string
+	}{
+		{http.MethodPut, "/v1/bookmarks", "GET, POST"},
+		{http.MethodPost, "/v1/bookmarks/some-id", "GET, DELETE"},
+		{http.MethodDelete, "/v1/documents/some-id", "GET"},
+		{http.MethodPatch, "/v1/jobs", "GET, DELETE"},
+		{http.MethodGet, "/v1/search", "POST"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			r, err := http.NewRequest(tc.method, s.base+tc.path, nil)
+			require.NoError(t, err)
+			resp, err := http.DefaultClient.Do(r)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			assertProblem(t, response{status: resp.StatusCode, contentType: resp.Header.Get("Content-Type"),
+				body: string(body)}, http.StatusMethodNotAllowed)
+			assert.Equal(t, tc.allow, resp.Header.Get("Allow"))
+		})
+	}
+}
+
+// TestServer_ErrorsAreProblems: every error path answers
+// application/problem+json whose status matches the response's.
+func TestServer_ErrorsAreProblems(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Bookmarks = failingBookmarkCount{d.Bookmarks} })
+	dead := s.seedDocument(t, "https://example.com/gone", store.DocStateDead)
+
+	cases := []struct {
+		name   string
+		req    request
+		status int
+	}{
+		{"malformed body", request{method: http.MethodPost, path: "/v1/search", contentType: "application/json",
+			body: `{"query":`}, http.StatusBadRequest},
+		{"invalid parameter", request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=bogus"},
+			http.StatusBadRequest},
+		{"unknown document", request{method: http.MethodGet, path: "/v1/documents/nope"}, http.StatusNotFound},
+		{"unknown route", request{method: http.MethodGet, path: "/v2/documents"}, http.StatusNotFound},
+		{"wrong method", request{method: http.MethodPut, path: "/v1/documents/" + dead.ID}, http.StatusMethodNotAllowed},
+		{"dead document", request{method: http.MethodPost, path: "/v1/documents/" + dead.ID + "/refetch"},
+			http.StatusConflict},
+		{"body too large", request{method: http.MethodPost, path: "/v1/bookmarks", contentType: "application/json",
+			body: `{"url":"https://example.com/` + strings.Repeat("a", maxJSONBody) + `"}`}, http.StatusRequestEntityTooLarge},
+		{"not json", request{method: http.MethodPost, path: "/v1/bookmarks", contentType: "text/plain",
+			body: `{"url":"https://example.com/a"}`}, http.StatusUnsupportedMediaType},
+		{"store failure", request{method: http.MethodGet, path: "/v1/stats"}, http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertProblem(t, s.do(t, tc.req), tc.status)
+		})
+	}
 }

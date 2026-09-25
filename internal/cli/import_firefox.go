@@ -49,21 +49,9 @@ Firefox first.`,
 			if err != nil {
 				return fmt.Errorf("parse: %w", err)
 			}
-			fmt.Printf("parsed %d bookmarks from Firefox\n", len(bms))
-			bms = flags.applyLimit(bms)
-			if flags.limit > 0 {
-				fmt.Printf("  limited to first %d\n", len(bms))
-			}
-			if flags.dryRun {
-				return reportDryRun(bms)
-			}
-			if err := sendBatches(cmd.Context(), ctx, "firefox", bms); err != nil {
-				return err
-			}
-			if flags.follow {
-				return followProgress(cmd.Context(), ctx)
-			}
-			return nil
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "parsed %d bookmarks from Firefox\n", len(bms))
+			return importParsed(cmd.Context(), w, ctx, "firefox", bms, &flags)
 		},
 	}
 	cmd.Flags().StringVar(&filePath, "file", "", "Path to an arbitrary places.sqlite file")

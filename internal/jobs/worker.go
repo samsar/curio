@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -49,8 +49,8 @@ const bookkeepingTimeout = 10 * time.Second
 // Worker polls the queue and dispatches jobs.
 type Worker struct {
 	queue        store.JobQueue
-	handlers     map[string]HandlerFunc
-	onPermFail   map[string]PermFailHook
+	handlers     map[store.JobKind]HandlerFunc
+	onPermFail   map[store.JobKind]PermFailHook
 	pollInterval time.Duration
 	log          *slog.Logger
 
@@ -66,8 +66,8 @@ type WorkerOptions struct {
 func NewWorker(q store.JobQueue, opts WorkerOptions) *Worker {
 	w := &Worker{
 		queue:        q,
-		handlers:     map[string]HandlerFunc{},
-		onPermFail:   map[string]PermFailHook{},
+		handlers:     map[store.JobKind]HandlerFunc{},
+		onPermFail:   map[store.JobKind]PermFailHook{},
 		pollInterval: opts.PollInterval,
 		log:          opts.Log,
 	}
@@ -82,7 +82,7 @@ func NewWorker(q store.JobQueue, opts WorkerOptions) *Worker {
 
 // Register attaches a handler for a kind. Overwrites if called twice for
 // the same kind — caller's responsibility to not do that.
-func (w *Worker) Register(kind string, h HandlerFunc) {
+func (w *Worker) Register(kind store.JobKind, h HandlerFunc) {
 	w.handlers[kind] = h
 }
 
@@ -91,7 +91,7 @@ func (w *Worker) Register(kind string, h HandlerFunc) {
 // ErrPermanent). The hook is best-effort: errors are logged but don't
 // re-fail the job. Use to clean up associated state, e.g., transition a
 // parent document to state=failed or state=dead based on the cause.
-func (w *Worker) OnPermanentFailure(kind string, h PermFailHook) {
+func (w *Worker) OnPermanentFailure(kind store.JobKind, h PermFailHook) {
 	w.onPermFail[kind] = h
 }
 
@@ -127,7 +127,7 @@ func (w *Worker) InFlight() []string {
 		ids = append(ids, id.(string))
 		return true
 	})
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids
 }
 
@@ -280,11 +280,11 @@ func (w *Worker) jobLog(job *store.Job) *slog.Logger {
 	return w.log.With("job_id", job.ID, "kind", job.Kind, "attempt", job.Attempts)
 }
 
-func (w *Worker) kinds() []string {
-	out := make([]string, 0, len(w.handlers))
+func (w *Worker) kinds() []store.JobKind {
+	out := make([]store.JobKind, 0, len(w.handlers))
 	for k := range w.handlers {
 		out = append(out, k)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }

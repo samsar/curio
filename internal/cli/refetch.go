@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 )
@@ -28,12 +29,12 @@ func newRefetchCmd() *cobra.Command {
 			}
 
 			if all {
-				return refetchAll(cmd.Context(), ctx, state)
+				return refetchAll(cmd.Context(), cmd.OutOrStdout(), ctx, state)
 			}
 			if len(args) != 1 {
 				return errors.New("provide a document ID or pass --all")
 			}
-			return refetchOne(cmd.Context(), ctx, args[0], force)
+			return refetchOne(cmd.Context(), cmd.OutOrStdout(), ctx, args[0], force)
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false,
@@ -45,16 +46,16 @@ func newRefetchCmd() *cobra.Command {
 	return cmd
 }
 
-func refetchOne(httpCtx context.Context, c *Context, docID string, force bool) error {
+func refetchOne(httpCtx context.Context, w io.Writer, c *Context, docID string, force bool) error {
 	resp, err := c.Client.RefetchDocument(httpCtx, docID, force)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("refetch enqueued for document %s (job %s)\n", docID, resp.JobID)
+	fmt.Fprintf(w, "refetch enqueued for document %s (job %s)\n", docID, resp.JobID)
 	return nil
 }
 
-func refetchAll(httpCtx context.Context, c *Context, state string) error {
+func refetchAll(httpCtx context.Context, w io.Writer, c *Context, state string) error {
 	resp, err := c.Client.RefetchAll(httpCtx, state)
 	if err != nil {
 		return err
@@ -63,6 +64,6 @@ func refetchAll(httpCtx context.Context, c *Context, state string) error {
 	if state != "" {
 		label = "documents in state=" + state
 	}
-	fmt.Printf("refetch enqueued for %s: %d jobs\n", label, resp.JobsEnqueued)
+	fmt.Fprintf(w, "refetch enqueued for %s: %d jobs\n", label, resp.JobsEnqueued)
 	return nil
 }

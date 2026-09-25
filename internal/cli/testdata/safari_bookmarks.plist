@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>WebBookmarkType</key>
+	<string>WebBookmarkTypeList</string>
+	<key>Title</key>
+	<string></string>
+	<key>Children</key>
+	<array>
+		<dict>
+			<key>WebBookmarkType</key>
+			<string>WebBookmarkTypeList</string>
+			<key>WebBookmarkIdentifier</key>
+			<string>BookmarksBar</string>
+			<key>Title</key>
+			<string>BookmarksBar</string>
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>WebBookmarkType</key>
+					<string>WebBookmarkTypeLeaf</string>
+					<key>URLString</key>
+					<string>https://example.com/safari/one</string>
+					<key>URIDictionary</key>
+					<dict>
+						<key>title</key>
+						<string>Safari one</string>
+					</dict>
+				</dict>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

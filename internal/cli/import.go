@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,11 +35,15 @@ func attachImportFlags(cmd *cobra.Command, f *importFlags) {
 	cmd.Flags().BoolVar(&f.follow, "follow", false, "After import, poll /v1/stats until the fetch/index queue drains")
 }
 
-// applyLimit trims a parsed slice to flags.limit if set.
-func (f *importFlags) applyLimit(bms []importer.ParsedBookmark) []importer.ParsedBookmark {
-	if f.limit > 0 && len(bms) > f.limit {
-		return bms[:f.limit]
+// applyLimit trims a parsed slice to flags.limit if set, saying so.
+func (f *importFlags) applyLimit(w io.Writer, bms []importer.ParsedBookmark) []importer.ParsedBookmark {
+	if f.limit <= 0 {
+		return bms
 	}
+	if len(bms) > f.limit {
+		bms = bms[:f.limit]
+	}
+	fmt.Fprintf(w, "  limited to first %d\n", len(bms))
 	return bms
 }
 
@@ -78,21 +83,9 @@ func newImportHTMLCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("parse: %w", err)
 			}
-			fmt.Printf("parsed %d bookmarks from %s\n", len(bms), filepath.Base(args[0]))
-			bms = flags.applyLimit(bms)
-			if flags.limit > 0 {
-				fmt.Printf("  limited to first %d\n", len(bms))
-			}
-			if flags.dryRun {
-				return reportDryRun(bms)
-			}
-			if err := sendBatches(cmd.Context(), ctx, "html", bms); err != nil {
-				return err
-			}
-			if flags.follow {
-				return followProgress(cmd.Context(), ctx)
-			}
-			return nil
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "parsed %d bookmarks from %s\n", len(bms), filepath.Base(args[0]))
+			return importParsed(cmd.Context(), w, ctx, "html", bms, &flags)
 		},
 	}
 	attachImportFlags(cmd, &flags)
@@ -122,18 +115,19 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 				return errors.New("no context")
 			}
 
+			w := cmd.OutOrStdout()
 			if listProfiles {
 				profiles, err := importer.DiscoverChromeProfiles()
 				if err != nil {
 					return err
 				}
 				if len(profiles) == 0 {
-					fmt.Println("no Chrome profiles found")
+					fmt.Fprintln(w, "no Chrome profiles found")
 					return nil
 				}
-				fmt.Println("Chrome profiles:")
+				fmt.Fprintln(w, "Chrome profiles:")
 				for _, p := range profiles {
-					fmt.Printf("  %-15s  %s\n", p.Dir, p.Name)
+					fmt.Fprintf(w, "  %-15s  %s\n", p.Dir, p.Name)
 				}
 				return nil
 			}
@@ -176,12 +170,12 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 			}
 
 			for _, fp := range files {
-				if err := importChromeFile(cmd.Context(), ctx, fp, &flags); err != nil {
+				if err := importChromeFile(cmd.Context(), w, ctx, fp, &flags); err != nil {
 					return err
 				}
 			}
 			if flags.follow {
-				return followProgress(cmd.Context(), ctx)
+				return followProgress(cmd.Context(), w, ctx)
 			}
 			return nil
 		},
@@ -194,7 +188,7 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 	return cmd
 }
 
-func importChromeFile(httpCtx context.Context, c *Context, path string, flags *importFlags) error {
+func importChromeFile(httpCtx context.Context, w io.Writer, c *Context, path string, flags *importFlags) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
@@ -204,22 +198,38 @@ func importChromeFile(httpCtx context.Context, c *Context, path string, flags *i
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
-	fmt.Printf("parsed %d bookmarks from %s\n", len(bms), profileLabelFromPath(path))
-	bms = flags.applyLimit(bms)
-	if flags.limit > 0 {
-		fmt.Printf("  limited to first %d\n", len(bms))
-	}
+	fmt.Fprintf(w, "parsed %d bookmarks from %s\n", len(bms), profileLabelFromPath(path))
+	bms = flags.applyLimit(w, bms)
 	if flags.dryRun {
-		return reportDryRun(bms)
+		reportDryRun(w, bms)
+		return nil
 	}
-	return sendBatches(httpCtx, c, "chrome", bms)
+	return sendBatches(httpCtx, w, c, "chrome", bms)
+}
+
+// importParsed applies the shared import flags to one source's parsed
+// bookmarks: --limit, then either --dry-run's local report or the upload,
+// followed by --follow.
+func importParsed(httpCtx context.Context, w io.Writer, c *Context, source string, bms []importer.ParsedBookmark, flags *importFlags) error {
+	bms = flags.applyLimit(w, bms)
+	if flags.dryRun {
+		reportDryRun(w, bms)
+		return nil
+	}
+	if err := sendBatches(httpCtx, w, c, source, bms); err != nil {
+		return err
+	}
+	if flags.follow {
+		return followProgress(httpCtx, w, c)
+	}
+	return nil
 }
 
 // followProgress polls /v1/stats every 2 seconds and prints a one-line
 // progress update until the queue is drained (zero pending + zero running).
 // Returns nil on quiet shutdown via ctrl-c; prints an interrupt notice.
-func followProgress(httpCtx context.Context, c *Context) error {
-	fmt.Println("\nwatching queue drain — ctrl-c to exit")
+func followProgress(httpCtx context.Context, w io.Writer, c *Context) error {
+	fmt.Fprintln(w, "\nwatching queue drain — ctrl-c to exit")
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 
@@ -231,13 +241,13 @@ func followProgress(httpCtx context.Context, c *Context) error {
 	for {
 		select {
 		case <-httpCtx.Done():
-			fmt.Println("\ninterrupted")
+			fmt.Fprintln(w, "\ninterrupted")
 			return nil
 		case <-tick.C:
 		}
 		stats, err := c.Client.Stats(httpCtx)
 		if err != nil {
-			fmt.Printf("  (stats unavailable: %v)\n", err)
+			fmt.Fprintf(w, "  (stats unavailable: %v)\n", err)
 			continue
 		}
 		pending := stats.JobsByStatus["pending"]
@@ -260,16 +270,16 @@ func followProgress(httpCtx context.Context, c *Context) error {
 		if rate > 0 && pending+running > 0 {
 			eta = time.Duration(float64(pending+running) / rate * float64(time.Second)).Round(time.Second)
 		}
-		fmt.Printf("  done=%d  pending=%d  running=%d  failed=%d  fetched=%d   rate≈%.1f/s   eta≈%s\n",
+		fmt.Fprintf(w, "  done=%d  pending=%d  running=%d  failed=%d  fetched=%d   rate≈%.1f/s   eta≈%s\n",
 			done, pending, running, failed, fetched, rate, eta)
 		lastFinished = finished
 		lastTick = time.Now()
 
 		if pending == 0 && running == 0 {
-			fmt.Printf("\nqueue drained after %s   (%d done, %d failed)\n",
+			fmt.Fprintf(w, "\nqueue drained after %s   (%d done, %d failed)\n",
 				time.Since(startedAt).Round(time.Second), done, failed)
 			if failed > 0 {
-				fmt.Println("  see failures: curio jobs --failed")
+				fmt.Fprintln(w, "  see failures: curio jobs --failed")
 			}
 			return nil
 		}
@@ -278,7 +288,7 @@ func followProgress(httpCtx context.Context, c *Context) error {
 
 // reportDryRun prints the same summary sendBatches would, computed
 // locally from the parsed list without contacting the daemon.
-func reportDryRun(bms []importer.ParsedBookmark) error {
+func reportDryRun(w io.Writer, bms []importer.ParsedBookmark) {
 	filtered := 0
 	by := map[importer.FilterReason]int{}
 	for _, b := range bms {
@@ -287,9 +297,9 @@ func reportDryRun(bms []importer.ParsedBookmark) error {
 			by[why]++
 		}
 	}
-	fmt.Println("\ndry-run — nothing sent to the daemon")
-	fmt.Printf("  would import:  %d\n", len(bms)-filtered)
-	fmt.Printf("  would filter:  %d\n", filtered)
+	fmt.Fprintln(w, "\ndry-run — nothing sent to the daemon")
+	fmt.Fprintf(w, "  would import:  %d\n", len(bms)-filtered)
+	fmt.Fprintf(w, "  would filter:  %d\n", filtered)
 	if len(by) > 0 {
 		keys := make([]importer.FilterReason, 0, len(by))
 		for k := range by {
@@ -297,10 +307,9 @@ func reportDryRun(bms []importer.ParsedBookmark) error {
 		}
 		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 		for _, k := range keys {
-			fmt.Printf("    %s: %d\n", k, by[k])
+			fmt.Fprintf(w, "    %s: %d\n", k, by[k])
 		}
 	}
-	return nil
 }
 
 // profileLabelFromPath turns ".../Chrome/Default/Bookmarks" into "Default".
@@ -326,9 +335,9 @@ func pickChromeProfile(profiles []importer.ChromeProfile, want string) *importer
 
 // sendBatches POSTs the parsed list to /v1/bookmarks/import in chunks and
 // prints progress. Returns nil iff every batch succeeded.
-func sendBatches(httpCtx context.Context, c *Context, source string, bms []importer.ParsedBookmark) error {
+func sendBatches(httpCtx context.Context, w io.Writer, c *Context, source string, bms []importer.ParsedBookmark) error {
 	if len(bms) == 0 {
-		fmt.Println("nothing to import")
+		fmt.Fprintln(w, "nothing to import")
 		return nil
 	}
 	var (
@@ -370,15 +379,15 @@ func sendBatches(httpCtx context.Context, c *Context, source string, bms []impor
 			filteredBy[importer.FilterReason(k)] += v
 		}
 		totalErrors = append(totalErrors, resp.Errors...)
-		fmt.Printf("  ...sent %d/%d (created %d, skipped %d, filtered %d so far)\n",
+		fmt.Fprintf(w, "  ...sent %d/%d (created %d, skipped %d, filtered %d so far)\n",
 			end, len(bms), totalCreated, totalSkipped, totalFiltered)
 	}
 
 	dur := time.Since(start)
-	fmt.Printf("\ndone in %s\n", dur.Round(time.Millisecond))
-	fmt.Printf("  created:       %d\n", totalCreated)
-	fmt.Printf("  skipped (dup): %d\n", totalSkipped)
-	fmt.Printf("  filtered:      %d\n", totalFiltered)
+	fmt.Fprintf(w, "\ndone in %s\n", dur.Round(time.Millisecond))
+	fmt.Fprintf(w, "  created:       %d\n", totalCreated)
+	fmt.Fprintf(w, "  skipped (dup): %d\n", totalSkipped)
+	fmt.Fprintf(w, "  filtered:      %d\n", totalFiltered)
 	if len(filteredBy) > 0 {
 		keys := make([]importer.FilterReason, 0, len(filteredBy))
 		for k := range filteredBy {
@@ -386,17 +395,17 @@ func sendBatches(httpCtx context.Context, c *Context, source string, bms []impor
 		}
 		sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 		for _, k := range keys {
-			fmt.Printf("    %s: %d\n", k, filteredBy[k])
+			fmt.Fprintf(w, "    %s: %d\n", k, filteredBy[k])
 		}
 	}
-	fmt.Printf("  fetch jobs:    %d enqueued\n", totalJobs)
+	fmt.Fprintf(w, "  fetch jobs:    %d enqueued\n", totalJobs)
 	if len(totalErrors) > 0 {
-		fmt.Printf("  errors:        %d (first 10 shown)\n", len(totalErrors))
+		fmt.Fprintf(w, "  errors:        %d (first 10 shown)\n", len(totalErrors))
 		for i, e := range totalErrors {
 			if i >= 10 {
 				break
 			}
-			fmt.Printf("    %s\n", e)
+			fmt.Fprintf(w, "    %s\n", e)
 		}
 	}
 	return nil

@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -46,7 +48,7 @@ type Deps struct {
 	Extractions    store.ExtractionStore
 	Bookmarks      store.BookmarkStore
 	Chunks         store.ChunkStore
-	Queue          store.JobQueue
+	Queue          store.JobStore
 	Embedder       embedder.Embedder
 	Search         *search.Engine
 	Insights       store.InsightStore
@@ -89,6 +91,18 @@ func NewServer(ln net.Listener, deps Deps) (*Server, error) {
 	r.Use(requireLocalHost(origin, deps.Log))
 	r.Use(rejectForeignOrigin(origin, deps.Log))
 	r.Use(requireJSONBody)
+	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+		writeProblem(w, http.StatusNotFound, "not found", "no route for "+req.URL.Path)
+	})
+	// The index is built after the routes below; this handler only runs
+	// once the server is serving.
+	var methods chi.Routes
+	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
+		allowed := strings.Join(allowedMethods(methods, req.URL.Path), ", ")
+		w.Header().Set("Allow", allowed)
+		writeProblem(w, http.StatusMethodNotAllowed, "method not allowed",
+			fmt.Sprintf("%s %s is not supported; allowed: %s", req.Method, req.URL.Path, allowed))
+	})
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/healthz", deps.handleHealth)
@@ -125,6 +139,9 @@ func NewServer(ln net.Listener, deps Deps) (*Server, error) {
 		r.Get("/jobs", deps.handleListJobs)
 		r.Delete("/jobs", deps.handleDeleteJobs)
 	})
+	if methods, err = methodIndex(r); err != nil {
+		return nil, err
+	}
 
 	return &Server{
 		deps: deps,
@@ -183,6 +200,62 @@ func loggingMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
 			)
 		})
 	}
+}
+
+// routeMethods are the methods allowedMethods probes for.
+var routeMethods = []string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodOptions,
+}
+
+// methodIndex copies router's routes onto a mux with no mounts, for
+// allowedMethods. chi fills a 405's Allow header only in its own handler,
+// and its Match can't stand in on the router itself: a mount point such as
+// /v1/bookmarks is registered for every method, so Match reports them all.
+// A subrouter's "/" route also answers without the trailing slash, as it
+// does on the router.
+func methodIndex(router chi.Routes) (chi.Routes, error) {
+	index := chi.NewMux()
+	stub := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	err := chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		index.Method(method, route, stub)
+		if bare := strings.TrimSuffix(route, "/"); bare != route && bare != "" {
+			index.Method(method, bare, stub)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("index routes: %w", err)
+	}
+	return index, nil
+}
+
+// allowedMethods lists the methods index serves for path.
+func allowedMethods(index chi.Routes, path string) []string {
+	var out []string
+	for _, m := range routeMethods {
+		if index.Match(chi.NewRouteContext(), m, path) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// Page sizes for the list endpoints.
+const (
+	defaultListLimit = 50
+	maxListLimit     = 500
+)
+
+// listLimit reads a list endpoint's ?limit: 1 through maxListLimit is
+// honored, and anything else (absent, malformed, out of range) means
+// defaultListLimit.
+func listLimit(r *http.Request) int {
+	n, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || n < 1 || n > maxListLimit {
+		return defaultListLimit
+	}
+	return n
 }
 
 // writeJSON is a small helper to set Content-Type and encode.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -219,3 +220,96 @@ func TestPing_UnreachableKeepsCause(t *testing.T) {
 	require.ErrorIs(t, err, ErrOllamaUnreachable)
 	require.ErrorIs(t, err, syscall.ECONNREFUSED)
 }
+
+// fakeTags serves /api/tags with the given body and status, and counts
+// /api/pull requests, answering them with pullStatus.
+type fakeTags struct {
+	pulls atomic.Int32
+	url   string
+}
+
+func newFakeTags(t *testing.T, status int, body string, pullStatus int) *fakeTags {
+	t.Helper()
+	f := &fakeTags{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			w.WriteHeader(status)
+			fmt.Fprint(w, body)
+		case "/api/pull":
+			f.pulls.Add(1)
+			w.WriteHeader(pullStatus)
+			if pullStatus == http.StatusOK {
+				fmt.Fprint(w, `{"status":"pulling manifest"}`+"\n"+`{"status":"success"}`+"\n")
+			} else {
+				fmt.Fprint(w, `{"error":"no space left on device"}`)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	f.url = srv.URL
+	return f
+}
+
+func TestPing(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr error // nil: the model is there
+	}{
+		{"exact name", 200, `{"models":[{"name":"llama3.2"}]}`, nil},
+		{"tagged name", 200, `{"models":[{"name":"llama3.2:latest"}]}`, nil},
+		{"tagged model field", 200, `{"models":[{"name":"alias","model":"llama3.2:3b"}]}`, nil},
+		{"other models only", 200, `{"models":[{"name":"llama3.2-vision"},{"name":"qwen2"}]}`, ErrModelNotLoaded},
+		{"no models", 200, `{"models":[]}`, ErrModelNotLoaded},
+		{"server error", 500, `oops`, ErrOllamaUnreachable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeTags(t, tc.status, tc.body, http.StatusOK)
+			err := newGen(t, OllamaOptions{BaseURL: f.url, Model: "llama3.2"}).Ping(context.Background())
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestPing_MalformedReply(t *testing.T) {
+	f := newFakeTags(t, 200, `{"models":`, http.StatusOK)
+	err := newGen(t, OllamaOptions{BaseURL: f.url}).Ping(context.Background())
+	require.ErrorContains(t, err, "decode response")
+	assert.NotErrorIs(t, err, ErrModelNotLoaded, "an unreadable reply says nothing about the model")
+}
+
+func TestEnsureModel(t *testing.T) {
+	t.Run("present: no pull", func(t *testing.T) {
+		f := newFakeTags(t, 200, `{"models":[{"name":"llama3.2:latest"}]}`, http.StatusOK)
+		require.NoError(t, newGen(t, OllamaOptions{BaseURL: f.url}).EnsureModel(context.Background(), quietLog()))
+		assert.Zero(t, f.pulls.Load())
+	})
+	t.Run("missing: pulls it", func(t *testing.T) {
+		f := newFakeTags(t, 200, `{"models":[]}`, http.StatusOK)
+		require.NoError(t, newGen(t, OllamaOptions{BaseURL: f.url}).EnsureModel(context.Background(), quietLog()))
+		assert.Equal(t, int32(1), f.pulls.Load())
+	})
+	t.Run("pull fails: the error is returned", func(t *testing.T) {
+		f := newFakeTags(t, 200, `{"models":[]}`, http.StatusInternalServerError)
+		err := newGen(t, OllamaOptions{BaseURL: f.url}).EnsureModel(context.Background(), quietLog())
+		require.ErrorContains(t, err, "no space left on device")
+		assert.Equal(t, int32(1), f.pulls.Load())
+	})
+	t.Run("unreachable: nothing to pull to", func(t *testing.T) {
+		f := newFakeTags(t, 503, `starting`, http.StatusOK)
+		err := newGen(t, OllamaOptions{BaseURL: f.url}).EnsureModel(context.Background(), quietLog())
+		require.ErrorIs(t, err, ErrOllamaUnreachable)
+		assert.Zero(t, f.pulls.Load())
+	})
+}
+
+func quietLog() *slog.Logger { return slog.New(slog.DiscardHandler) }

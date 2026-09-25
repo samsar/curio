@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -54,7 +55,7 @@ with full error messages and attempt counts.`,
 			if err != nil {
 				return err
 			}
-			renderDocList(resp)
+			renderDocList(cmd.OutOrStdout(), resp)
 			return nil
 		},
 	}
@@ -103,15 +104,16 @@ directly. Pass --content to also stream the markdown to stdout.`,
 			if err != nil {
 				return err
 			}
-			renderDocShow(doc, ctx.Home.ContentDir())
+			w := cmd.OutOrStdout()
+			renderDocShow(w, doc, ctx.Home.ContentDir())
 
 			if showContent {
 				body, err := ctx.Client.GetDocumentContent(cmd.Context(), id)
 				if err != nil {
 					return err
 				}
-				fmt.Println("\n--- content ---")
-				fmt.Println(body)
+				fmt.Fprintln(w, "\n--- content ---")
+				fmt.Fprintln(w, body)
 			}
 			return nil
 		},
@@ -120,36 +122,36 @@ directly. Pass --content to also stream the markdown to stdout.`,
 	return cmd
 }
 
-func renderDocShow(d *client.Document, contentDir string) {
-	fmt.Printf("id:           %s\n", d.ID)
-	fmt.Printf("url:          %s\n", d.URL)
+func renderDocShow(w io.Writer, d *client.Document, contentDir string) {
+	fmt.Fprintf(w, "id:           %s\n", d.ID)
+	fmt.Fprintf(w, "url:          %s\n", d.URL)
 	if d.Title != nil && *d.Title != "" {
-		fmt.Printf("title:        %s\n", *d.Title)
+		fmt.Fprintf(w, "title:        %s\n", *d.Title)
 	}
 	if d.Author != nil && *d.Author != "" {
-		fmt.Printf("author:       %s\n", *d.Author)
+		fmt.Fprintf(w, "author:       %s\n", *d.Author)
 	}
-	fmt.Printf("content_type: %s\n", d.ContentType)
-	fmt.Printf("state:        %s\n", d.State)
-	fmt.Printf("created_at:   %s\n", d.CreatedAt.Local().Format("2006-01-02 15:04:05 MST"))
+	fmt.Fprintf(w, "content_type: %s\n", d.ContentType)
+	fmt.Fprintf(w, "state:        %s\n", d.State)
+	fmt.Fprintf(w, "created_at:   %s\n", d.CreatedAt.Local().Format("2006-01-02 15:04:05 MST"))
 	if e := d.CurrentExtraction; e != nil {
-		fmt.Printf("\nlatest extraction:\n")
-		fmt.Printf("  id:           %s\n", e.ID)
-		fmt.Printf("  fetcher:      %s\n", e.Fetcher)
-		fmt.Printf("  status:       %s\n", e.Status)
-		fmt.Printf("  fetched_at:   %s\n", e.FetchedAt.Local().Format("2006-01-02 15:04:05 MST"))
+		fmt.Fprintf(w, "\nlatest extraction:\n")
+		fmt.Fprintf(w, "  id:           %s\n", e.ID)
+		fmt.Fprintf(w, "  fetcher:      %s\n", e.Fetcher)
+		fmt.Fprintf(w, "  status:       %s\n", e.Status)
+		fmt.Fprintf(w, "  fetched_at:   %s\n", e.FetchedAt.Local().Format("2006-01-02 15:04:05 MST"))
 		if e.MarkdownPath != "" {
-			fmt.Printf("  markdown:     %s/%s\n", contentDir, e.MarkdownPath)
+			fmt.Fprintf(w, "  markdown:     %s/%s\n", contentDir, e.MarkdownPath)
 		}
 		if e.ErrorMessage != nil && *e.ErrorMessage != "" {
-			fmt.Printf("  err:          %s\n", *e.ErrorMessage)
+			fmt.Fprintf(w, "  err:          %s\n", *e.ErrorMessage)
 		}
 	}
 }
 
-func renderDocList(resp *client.DocumentList) {
+func renderDocList(w io.Writer, resp *client.DocumentList) {
 	if len(resp.Items) == 0 {
-		fmt.Println("no documents match")
+		fmt.Fprintln(w, "no documents match")
 		return
 	}
 	// Two columns: STATE + URL on one line; LAST_ERR indented below.
@@ -158,18 +160,18 @@ func renderDocList(resp *client.DocumentList) {
 		if d.Title != nil && *d.Title != "" {
 			title = *d.Title
 		}
-		fmt.Printf("%-8s %s\n", d.State, d.URL)
+		fmt.Fprintf(w, "%-8s %s\n", d.State, d.URL)
 		if title != d.URL {
-			fmt.Printf("         (%s)\n", truncate(title, 100))
+			fmt.Fprintf(w, "         (%s)\n", truncate(title, 100))
 		}
 		if d.LastError != "" {
-			fmt.Printf("         err: %s\n", truncate(strings.TrimSpace(d.LastError), 200))
+			fmt.Fprintf(w, "         err: %s\n", truncate(strings.TrimSpace(d.LastError), 200))
 		}
-		fmt.Printf("         doc_id: %s\n", d.ID)
+		fmt.Fprintf(w, "         doc_id: %s\n", d.ID)
 		if d.MarkdownPath != "" {
-			fmt.Printf("         path:   %s\n", d.MarkdownPath)
+			fmt.Fprintf(w, "         path:   %s\n", d.MarkdownPath)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
-	fmt.Printf("%d document(s)\n", len(resp.Items))
+	fmt.Fprintf(w, "%d document(s)\n", len(resp.Items))
 }

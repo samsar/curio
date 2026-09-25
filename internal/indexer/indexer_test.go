@@ -13,6 +13,7 @@ import (
 
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
 // capturingEmbedder records every text it's asked to embed.
@@ -33,7 +34,7 @@ func (c *capturingEmbedder) Embed(_ context.Context, texts []string) ([][]float3
 }
 
 func TestIndexer_DocumentPrefixOnlyOnEmbedInput(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	chunks := sqlitestore.NewChunks(db, 768)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/p")
 
@@ -95,7 +96,7 @@ func seedDocAndExtraction(t *testing.T, db *sqlitestore.DB, tenant, url string) 
 	exts := sqlitestore.NewExtractions(db)
 
 	d := &store.Document{TenantID: tenant, URL: url, ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
 	require.NoError(t, exts.Create(ctx, e))
@@ -104,7 +105,7 @@ func seedDocAndExtraction(t *testing.T, db *sqlitestore.DB, tenant, url string) 
 }
 
 func TestIndexer_HappyPath(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	chunks := sqlitestore.NewChunks(db, 768)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/x")
 
@@ -126,7 +127,7 @@ func TestIndexer_HappyPath(t *testing.T) {
 }
 
 func TestIndexer_EmptyMarkdown_ClearsChunks(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	chunks := sqlitestore.NewChunks(db, 768)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/empty")
 	idx := New(chunks, &fakeEmbedder{dim: 768}, Options{})
@@ -147,7 +148,7 @@ func TestIndexer_EmptyMarkdown_ClearsChunks(t *testing.T) {
 }
 
 func TestIndexer_Idempotent(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	chunks := sqlitestore.NewChunks(db, 768)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/idem")
 	idx := New(chunks, &fakeEmbedder{dim: 768}, Options{})
@@ -164,7 +165,7 @@ func TestIndexer_Idempotent(t *testing.T) {
 }
 
 func TestIndexer_RequiresIDs(t *testing.T) {
-	idx := New(sqlitestore.NewChunks(sqlitestore.NewEphemeralDB(t), 768),
+	idx := New(sqlitestore.NewChunks(sqlitetest.NewDB(t), 768),
 		&fakeEmbedder{dim: 768}, Options{})
 
 	err := idx.Index(context.Background(), IndexInput{ExtractionID: "x", Markdown: "y"})
@@ -217,7 +218,7 @@ func numberedMarkdown(n int) string {
 var oneWordChunks = Options{ChunkSize: 1, ChunkOverlap: 0}
 
 func TestIndexer_EmbedsInOrderedBatches(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	chunks := sqlitestore.NewChunks(db, 768)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
 	emb := &indexedEmbedder{}
@@ -236,7 +237,7 @@ func TestIndexer_EmbedsInOrderedBatches(t *testing.T) {
 }
 
 func TestIndexer_FailedBatchKeepsPreviousChunks(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	chunks := sqlitestore.NewChunks(db, 768)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
 	require.NoError(t, New(chunks, &fakeEmbedder{dim: 768}, Options{}).Index(context.Background(), IndexInput{
@@ -255,7 +256,7 @@ func TestIndexer_FailedBatchKeepsPreviousChunks(t *testing.T) {
 }
 
 func TestIndexer_CanceledBetweenBatchesWritesNothing(t *testing.T) {
-	db := sqlitestore.NewEphemeralDB(t)
+	db := sqlitetest.NewDB(t)
 	chunks := sqlitestore.NewChunks(db, 768)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
 	require.NoError(t, New(chunks, &fakeEmbedder{dim: 768}, Options{}).Index(context.Background(), IndexInput{

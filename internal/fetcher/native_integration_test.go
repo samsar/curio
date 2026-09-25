@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 // TestNative_LiveSites_RenderMarkdown fetches real sites end-to-end and
@@ -58,6 +60,6 @@ func TestNative_LivePDF(t *testing.T) {
 	assertReadableMarkdown(t, res.Markdown)
 	assert.Greater(t, len(res.Markdown), 1000, "suspiciously short PDF extraction")
 	assert.Contains(t, res.Markdown, "Transformer")
-	assert.Equal(t, "pdf", res.ContentType)
+	assert.Equal(t, store.ContentTypePDF, res.ContentType)
 	t.Logf("PDF extracted via=%v, %d chars", res.Meta["via"], len(res.Markdown))
 }

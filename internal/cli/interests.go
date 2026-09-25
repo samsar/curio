@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 
@@ -36,7 +37,7 @@ func newInterestsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			renderInterests(res)
+			renderInterests(cmd.OutOrStdout(), res)
 			return nil
 		},
 	}
@@ -66,38 +67,39 @@ func newInterestsRebuildCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("clustering job enqueued: %s\n", res.JobID)
-			fmt.Println("track it with `curio jobs --kind cluster`, then run `curio interests`")
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "clustering job enqueued: %s\n", res.JobID)
+			fmt.Fprintln(w, "track it with `curio jobs --kind cluster`, then run `curio interests`")
 			return nil
 		},
 	}
 }
 
-func renderInterests(res *client.InterestList) {
+func renderInterests(w io.Writer, res *client.InterestList) {
 	if len(res.Items) == 0 {
-		fmt.Println("no interests yet — run `curio interests rebuild` to compute them")
-		fmt.Println("(clustering needs fetched + indexed documents to group)")
+		fmt.Fprintln(w, "no interests yet — run `curio interests rebuild` to compute them")
+		fmt.Fprintln(w, "(clustering needs fetched + indexed documents to group)")
 		return
 	}
 
-	fmt.Printf("%d interests across %d documents", len(res.Items), res.NumDocuments)
+	fmt.Fprintf(w, "%d interests across %d documents", len(res.Items), res.NumDocuments)
 	if res.NumNoise > 0 {
-		fmt.Printf(" (%d unclustered)", res.NumNoise)
+		fmt.Fprintf(w, " (%d unclustered)", res.NumNoise)
 	}
 	if res.ComputedAt != nil {
-		fmt.Printf(" — computed %s", res.ComputedAt.Local().Format("2006-01-02 15:04"))
+		fmt.Fprintf(w, " — computed %s", res.ComputedAt.Local().Format("2006-01-02 15:04"))
 	}
-	fmt.Print("\n\n")
+	fmt.Fprint(w, "\n\n")
 
 	for i, in := range res.Items {
 		label := in.Label
 		if label == "" {
 			label = "(unlabeled)"
 		}
-		fmt.Printf("%2d. %s  —  %d docs (cohesion %.2f)\n", i+1, label, in.Size, in.Cohesion)
+		fmt.Fprintf(w, "%2d. %s  —  %d docs (cohesion %.2f)\n", i+1, label, in.Size, in.Cohesion)
 		if in.Summary != "" {
 			for _, line := range wrapLines(in.Summary, 96) {
-				fmt.Printf("    %s\n", line)
+				fmt.Fprintf(w, "    %s\n", line)
 			}
 		}
 		for _, m := range in.Members {
@@ -105,12 +107,12 @@ func renderInterests(res *client.InterestList) {
 			if title == "" {
 				title = m.URL
 			}
-			fmt.Printf("      • %s\n", title)
-			fmt.Printf("        doc_id: %s\n", m.DocID)
+			fmt.Fprintf(w, "      • %s\n", title)
+			fmt.Fprintf(w, "        doc_id: %s\n", m.DocID)
 			if m.MarkdownPath != "" {
-				fmt.Printf("        path:   %s\n", m.MarkdownPath)
+				fmt.Fprintf(w, "        path:   %s\n", m.MarkdownPath)
 			}
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 }

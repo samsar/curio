@@ -111,9 +111,11 @@ Every part of it is there for a reason:
   before `COMMIT` when a reference dangles. The check covers the whole
   database, so a dangling reference that predates the migration aborts it
   too; repair the data first rather than narrowing the guard.
-- **It is one `StatementBegin` block.** In NO TRANSACTION mode goose runs
-  each statement on whichever pooled connection it gets. The pragma, the
-  `BEGIN`, the rebuild and the `COMMIT` must all land on the same one.
+- **It is one `StatementBegin` block.** In NO TRANSACTION mode the goose
+  CLI (`make migrate-up`) runs each statement on whichever pooled
+  connection it gets; only the daemon's `goose.Provider` pins one. The
+  pragma, the `BEGIN`, the rebuild and the `COMMIT` must all land on the
+  same connection either way.
 - **Recreate the table's own indexes and triggers.** `DROP TABLE` takes
   them with it. Also re-check any view or trigger on *another* table that
   references this one.

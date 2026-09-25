@@ -1,0 +1,4 @@
+queries:
+  - query: kafka partitions
+    relevant:
+      - https://example.com/kafka
