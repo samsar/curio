@@ -121,20 +121,37 @@ either.
 
 ## Curio itself
 
-Once Ollama and web2md work, build curio:
+Once Ollama works, build curio (web2md is optional; see "Fetcher options").
+The README's "Building from source" lists the Go and C toolchains it needs.
 
 ```sh
 cd ~/projects/curio
 make build
 ./bin/curio version
-./bin/curio-daemon &      # starts on :8765; structured JSON logs to stderr
+./bin/curio daemon start  # listens on 127.0.0.1:8765; JSON logs in ~/.curio/logs/daemon.log
 curl -s http://localhost:8765/v1/healthz | jq
 ```
 
-The daemon will refuse to start if `~/.curio` exists without our marker
-file. First-run initialization is handled by the CLI (forthcoming). For
-now, an empty `~/.curio` works fine — the daemon's storage layer will
-create the database on first connection.
+On first run the CLI (or the daemon) creates the home, `~/.curio` or
+`$CURIO_HOME`: the `.curio-meta.json` marker, `content/` and `logs/`; the
+daemon creates and migrates `curio.db`. A missing `config.yaml` means the
+defaults. A directory that already exists without `.curio-meta.json` is
+refused rather than adopted, so pointing `CURIO_HOME` at the wrong
+directory can't write into it: use a new or empty path.
+
+## Config: time budgets for Ollama calls
+
+Each bounds how long one kind of work waits on Ollama; all are validated as
+positive. When a search or labeling budget runs out, the work degrades
+(keyword-only results, term labels) rather than failing. An embed timeout
+while indexing fails that index job, and the job queue retries it.
+
+| Key | Default | Bounds |
+|---|---|---|
+| `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 32 chunks per request) |
+| `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded`. Keep it well under 30: the CLI and MCP give up on a request after 30 s, so a hung Ollama would surface as a client timeout instead |
+| `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried |
+| `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one clustering run; the rest get term labels |
 
 ## Troubleshooting
 
@@ -144,10 +161,12 @@ create the database on first connection.
 **`vec_version()` not found** — sqlite-vec failed to load. This means cgo
 wasn't enabled. Ensure `CGO_ENABLED=1`; `make` forces this.
 
-**Ollama 404 on `/api/embed`** — your Ollama is too old. The batched embed
-endpoint was added in 2024. Run `ollama --version`; upgrade if below
-0.1.30 or so.
+**"model not loaded" from `/api/embed`** — Ollama answered 404: the
+embedding model isn't pulled. The daemon keeps retrying the pull in the
+background (see above), or run `ollama pull nomic-embed-text`. On a very old
+Ollama (below 0.1.30 or so) the batched embed endpoint doesn't exist and
+answers 404 too: upgrade it.
 
 **`ENOENT: spawn node`** from a fetch — Node isn't on the daemon's PATH.
 Either install Node into a directory in PATH or set
-`fetcher.web2md.node_bin` in config (planned, not yet wired).
+`fetcher.web2md.node_bin` in config.

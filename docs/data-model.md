@@ -133,10 +133,10 @@ document_extractions
   id                UUID PK
   document_id       UUID NOT NULL FK
   fetched_at        TIMESTAMP NOT NULL
-  fetcher           TEXT NOT NULL              -- 'web2md' | 'jina' | 'github' | 'youtube' | 'pdf'
+  fetcher           TEXT NOT NULL              -- 'native' | 'web2md' | 'github' | 'youtube'
   status            TEXT NOT NULL              -- 'ok' | 'partial' | 'paywalled' | 'error'
   markdown_path     TEXT                       -- relative to ~/.curio/content/
-  raw_path          TEXT                       -- original HTML/JSON, optional
+  raw_path          TEXT                       -- unused: no fetcher keeps the raw response
   extraction_meta   JSON                       -- fetcher-specific (repo stars, video duration, ...)
   error_message     TEXT
 ```
@@ -177,7 +177,10 @@ the values that were indexed. `seq` is an explicit INTEGER PRIMARY KEY
 because SQLite keeps those across VACUUM, where an implicit rowid could be
 renumbered and detach the index from its rows.
 
-When the embedding model changes, both virtual tables are rebuilt (see
+Only `chunks_vec` depends on the embedding model: it holds that model's
+vectors at its dimension. Switching an existing home to another model
+isn't supported; the daemon refuses to start when the configured model
+differs from the one recorded in `.curio-meta.json` (see
 [embedding model swap](./decisions.md#embedding-model-swap)).
 
 ### `bookmarks` (reference table)
@@ -190,7 +193,7 @@ bookmarks
   url               TEXT NOT NULL              -- denormalized for fast lookup
   title             TEXT                       -- title at save-time (from the browser)
   saved_at          TIMESTAMP NOT NULL
-  source            TEXT NOT NULL              -- 'chrome' | 'safari' | 'firefox' | 'manual'
+  source            TEXT NOT NULL              -- 'chrome' | 'safari' | 'firefox' | 'html' | 'manual'
   folder_path       TEXT                       -- '/Tech/AI/Agents'
   tags              JSON                       -- string array
   created_at, updated_at
@@ -222,7 +225,8 @@ source-specific fields.
 jobs
   id            UUID PK
   tenant_id     TEXT NOT NULL
-  kind          TEXT NOT NULL                  -- 'fetch' | 'index' | 'cluster' | 'summarize'
+  kind          TEXT NOT NULL                  -- 'fetch' | 'index' | 'cluster'; 'import' and 'summarize'
+                                               --   are reserved: allowed by the CHECK, never enqueued
   payload       JSON NOT NULL
   document_id   UUID FK                        -- → documents(id), ON DELETE SET NULL
   status        TEXT NOT NULL                  -- 'pending' | 'running' | 'done' | 'failed'
@@ -335,9 +339,7 @@ idempotent".
 ```
 ~/.curio/content/
   <document_id>/
-    <extraction_id>.md
-    <extraction_id>.raw.html      # optional
-    <extraction_id>.meta.json     # mirror of extraction_meta, for grep-ability
+    <extraction_id>.md            # one per extraction; the document points at its current one
 ```
 
 Keeping content on disk rather than in SQLite:

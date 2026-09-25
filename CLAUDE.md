@@ -63,8 +63,8 @@ curio-mcp (MCP sidecar)  ──HTTP+JSON──►       │             ├ FTS5
 - `docs/decisions.md` — running log of design choices and *why*. The single most important doc; consult before second-guessing anything that looks weird (e.g., why the chunker has a 3500-char cap, why we don't use `toolchain` in go.mod, why `MarkFailed` returns `(permanent bool, error)`).
 - `docs/architecture.md` — components, transports, data flow.
 - `docs/data-model.md` — schema and the "documents vs references" split.
-- `docs/setup.md` — Ollama + web2md installation flow.
-- `docs/roadmap.md` and `docs/status.md` — what's done vs. deferred per milestone.
+- `docs/setup.md` — Ollama install and auto-pull, first run, the Ollama time budgets, the optional web2md backend, troubleshooting.
+- `docs/roadmap.md` — milestone plans and their status: what shipped, deviations, what's deferred.
 - `api/openapi.yaml` — HTTP contract, held to the router and live responses by `internal/api/openapi_test.go`: a route, request field, response field or status the spec lacks fails `make test`, so update the spec in the same change.
 
 ## State machine, briefly

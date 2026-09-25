@@ -130,8 +130,7 @@ a session, the next tool call starts it again. See [docs/mcp.md](./docs/mcp.md).
 - [MCP server](./docs/mcp.md) — register `curio-mcp` with Claude, available tools
 - [Data model](./docs/data-model.md) — schemas and storage layout
 - [Decisions](./docs/decisions.md) — running log of design choices and why
-- [Roadmap](./docs/roadmap.md) — milestones and what's next
-- [M0 plan](./docs/m0-plan.md) — walking-skeleton implementation plan
+- [Roadmap](./docs/roadmap.md) — milestones, what shipped, and what's next
 - [API](./api/openapi.yaml) — daemon HTTP contract
 - [Migrations](./migrations) — SQLite schema
 
