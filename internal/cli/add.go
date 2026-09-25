@@ -42,9 +42,10 @@ func newAddCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Printf("added bookmark %s\n", res.Bookmark.ID)
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "added bookmark %s\n", res.Bookmark.ID)
 			if res.JobID != "" {
-				fmt.Printf("  fetch job: %s\n", res.JobID)
+				fmt.Fprintf(w, "  fetch job: %s\n", res.JobID)
 			}
 
 			if wait {
@@ -54,7 +55,7 @@ func newAddCmd() *cobra.Command {
 				if err := waitForFetch(cmd.Context(), ctx, *res.Bookmark.DocumentID, time.Duration(waitSec)*time.Second); err != nil {
 					return err
 				}
-				fmt.Println("fetched and indexed")
+				fmt.Fprintln(w, "fetched and indexed")
 			}
 			return nil
 		},

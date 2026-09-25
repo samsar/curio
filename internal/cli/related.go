@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 
@@ -31,7 +32,7 @@ func newRelatedCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			renderRelatedResults(res)
+			renderRelatedResults(cmd.OutOrStdout(), res)
 			return nil
 		},
 	}
@@ -39,23 +40,23 @@ func newRelatedCmd() *cobra.Command {
 	return cmd
 }
 
-func renderRelatedResults(res *client.RelatedResponse) {
+func renderRelatedResults(w io.Writer, res *client.RelatedResponse) {
 	if len(res.Items) == 0 {
-		fmt.Printf("no related documents for %s (is it fetched and indexed?)\n", res.DocID)
+		fmt.Fprintf(w, "no related documents for %s (is it fetched and indexed?)\n", res.DocID)
 		return
 	}
-	fmt.Printf("%d documents related to %s\n\n", len(res.Items), res.DocID)
+	fmt.Fprintf(w, "%d documents related to %s\n\n", len(res.Items), res.DocID)
 	for i, hit := range res.Items {
 		title := hit.Document.URL
 		if hit.Document.Title != nil && *hit.Document.Title != "" {
 			title = *hit.Document.Title
 		}
-		fmt.Printf("%2d. %s\n", i+1, title)
-		fmt.Printf("    %s   (similarity %.4f)\n", hit.Document.URL, hit.Score)
-		fmt.Printf("    doc_id: %s\n", hit.Document.ID)
+		fmt.Fprintf(w, "%2d. %s\n", i+1, title)
+		fmt.Fprintf(w, "    %s   (similarity %.4f)\n", hit.Document.URL, hit.Score)
+		fmt.Fprintf(w, "    doc_id: %s\n", hit.Document.ID)
 		if hit.MarkdownPath != "" {
-			fmt.Printf("    path:   %s\n", hit.MarkdownPath)
+			fmt.Fprintf(w, "    path:   %s\n", hit.MarkdownPath)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 }
