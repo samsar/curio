@@ -283,6 +283,13 @@ func TestGetDocumentContent(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.Equal(t, "text/markdown; charset=utf-8", resp.contentType)
 	assert.Equal(t, "# A\n\nbody", resp.body)
+	// A declared length is what lets a client tell a copy that failed
+	// partway from a complete answer.
+	raw, err := http.Get(s.base + "/v1/documents/" + doc.ID + "/content")
+	require.NoError(t, err)
+	defer raw.Body.Close()
+	assert.Equal(t, int64(len("# A\n\nbody")), raw.ContentLength)
+	assert.Empty(t, raw.TransferEncoding, "not chunked")
 
 	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
 	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + bare.ID + "/content"}),

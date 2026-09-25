@@ -403,8 +403,11 @@ type scoredChunk struct {
 }
 
 // collapseAndHydrate collapses scored chunks into ranked documents (per
-// the engine's collapse strategy), trims to k, and hydrates each hit with
-// its document row and up to 3 top chunks. bm25ByID/vecByID annotate the
+// the engine's collapse strategy) and hydrates the top k with their
+// document rows and up to 3 top chunks each. A document deleted since the
+// retrievers read its chunks is skipped, not an error: a concurrent delete
+// shouldn't fail the query (or make Related report its source missing), and
+// the next-ranked document takes its place. bm25ByID/vecByID annotate the
 // per-chunk retriever scores; either may be nil.
 func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, bm25ByID, vecByID map[string]store.ChunkHit, k int) ([]Hit, error) {
 	type docAgg struct {
@@ -441,13 +444,15 @@ func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, b
 		}
 		return strings.Compare(a.documentID, b.documentID)
 	})
-	if len(docList) > k {
-		docList = docList[:k]
-	}
-
-	items := make([]Hit, 0, len(docList))
+	items := make([]Hit, 0, min(k, len(docList)))
 	for _, d := range docList {
+		if len(items) == k {
+			break
+		}
 		doc, err := e.docs.GetByID(ctx, d.documentID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("hydrate document %s: %w", d.documentID, err)
 		}

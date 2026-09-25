@@ -2869,6 +2869,11 @@ the queries" for how a filtered page is read.)
   jobs only for documents in that state with a current extraction
   (`DocumentStore.ListIDsWithContent`).
 
+**Revised (2026-09):** the 405 handler probes the path chi routed on, the
+escaped one when the URL has it: `PUT /v1/bookmarks/a%2Fb` answered 405 with
+an empty `Allow`, because chi matched `a%2Fb` as one `{id}` while the probe
+used the decoded `/v1/bookmarks/a/b`, which matches nothing.
+
 **Why reindex-all needed the second half:** an index job for a document
 with no extraction fails permanently, and the permanent-failure hook then
 marks the document failed. So `curio reindex --all --state=pending` turned
@@ -3167,6 +3172,16 @@ operator's own tools (see "Local API: loopback only, no token, browsers
 shut out"), and the detail plus the request ID is what makes
 `curio daemon logs` searchable.
 
+**Revised (2026-09):** A handler that panics after its status line went out
+is logged the same way, once, and then aborted with `http.ErrAbortHandler`,
+so net/http cuts the connection. Returning instead let net/http finish the
+chunked response, and a client read a 200 with half a body and no error.
+The access-log line is skipped for such a request; the panic record
+carries its request ID, method and path. `GET /v1/documents/{id}/content`
+declares `Content-Length` from the file's size for the same reason: a copy
+that fails partway is a short body the client detects, not a complete
+answer.
+
 ---
 
 ## API: tolerant responses, strict requests
@@ -3220,6 +3235,12 @@ own home, so a client had to know the daemon's layout. The same code
 discarded lookup errors, turning a database error into plausible but wrong
 data: a document without `current_extraction`, a hit without a path, an
 interest without members.
+
+**Revised (2026-09):** one lookup is exempt: a search or related hit whose
+document was deleted after the chunk search read it is skipped, and the
+next-ranked document takes its place. That is a concurrent delete, not an
+inconsistency, and failing on it answered `POST /v1/search` with a 404 and
+`/related` with "document <source> not found" about the wrong document.
 
 ---
 

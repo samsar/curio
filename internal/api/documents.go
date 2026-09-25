@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -386,9 +387,16 @@ func (d Deps) handleGetDocumentContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	// Content-Length makes a copy that fails partway an error the client
+	// sees (a body shorter than promised), not a complete-looking answer.
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	if _, err := io.Copy(w, f); err != nil {
-		// The status line is out, so the client only sees a short body.
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	if _, err := io.CopyN(w, f, info.Size()); err != nil {
 		d.Log.Warn("stream document content", "request_id", middleware.GetReqID(r.Context()),
 			"document_id", doc.ID, "err", err)
 	}

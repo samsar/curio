@@ -115,16 +115,17 @@ func newRouter(deps Deps, origin localOrigin) (chi.Router, error) {
 	r.Use(rejectForeignOrigin(origin, deps.Log))
 	r.Use(requireJSONBody)
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-		writeProblem(w, req, http.StatusNotFound, "not found", "no route for "+req.URL.Path)
+		writeProblem(w, req, http.StatusNotFound, "not found", "no route for "+routingPath(req))
 	})
 	// The index is built after the routes below; this handler only runs
 	// once the server is serving.
 	var methods chi.Routes
 	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
-		allowed := strings.Join(allowedMethods(methods, req.URL.Path), ", ")
+		path := routingPath(req)
+		allowed := strings.Join(allowedMethods(methods, path), ", ")
 		w.Header().Set("Allow", allowed)
 		writeProblem(w, req, http.StatusMethodNotAllowed, "method not allowed",
-			fmt.Sprintf("%s %s is not supported; allowed: %s", req.Method, req.URL.Path, allowed))
+			fmt.Sprintf("%s %s is not supported; allowed: %s", req.Method, path, allowed))
 	})
 
 	r.Route("/v1", func(r chi.Router) {
@@ -231,6 +232,14 @@ func loggingMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
 // replaces middleware.Recoverer, which answers with a bare 500 and prints
 // a colored stack to stderr, the daemon's JSON log. http.ErrAbortHandler
 // is re-panicked: it is how a handler asks net/http to abort the response.
+//
+// A panic after the status line went out can't become a problem any more,
+// and returning would let net/http finish the response as if it were
+// complete: a client would read a 200 with half a body and no error. So it
+// is logged here and then turned into http.ErrAbortHandler, which makes
+// net/http cut the connection. loggingMiddleware's access line is skipped
+// for that request; the panic record carries its request ID, method and
+// path.
 func recoverProblem(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -249,10 +258,8 @@ func recoverProblem(log *slog.Logger) func(http.Handler) http.Handler {
 					"panic", fmt.Sprint(v),
 					"stack", string(debug.Stack()),
 				)
-				// A handler that panics after its answer has started can
-				// only have the connection cut short.
 				if ww, ok := w.(middleware.WrapResponseWriter); ok && ww.Status() != 0 {
-					return
+					panic(http.ErrAbortHandler)
 				}
 				writeProblem(w, r, http.StatusInternalServerError, "internal error",
 					fmt.Sprintf("the handler panicked: %v", v))
@@ -260,6 +267,15 @@ func recoverProblem(log *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// routingPath is the path chi routes r on: the escaped form when the URL
+// has one, so an ID with an encoded "/" (a%2Fb) stays one segment.
+func routingPath(r *http.Request) string {
+	if r.URL.RawPath != "" {
+		return r.URL.RawPath
+	}
+	return r.URL.Path
 }
 
 // routeMethods are the methods allowedMethods probes for.

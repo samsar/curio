@@ -486,6 +486,8 @@ func TestServer_RouterErrorsAreProblems(t *testing.T) {
 		{http.MethodDelete, "/v1/documents/some-id", "GET"},
 		{http.MethodPatch, "/v1/jobs", "GET, DELETE"},
 		{http.MethodGet, "/v1/search", "POST"},
+		// chi routes on the escaped path, where a%2Fb is one {id} segment.
+		{http.MethodPut, "/v1/bookmarks/a%2Fb", "GET, DELETE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -495,10 +497,39 @@ func TestServer_RouterErrorsAreProblems(t *testing.T) {
 			require.NoError(t, err)
 			defer resp.Body.Close()
 
-			assertProblem(t, newResponse(t, resp, tc.path), http.StatusMethodNotAllowed)
+			p := assertProblem(t, newResponse(t, resp, r.URL.Path), http.StatusMethodNotAllowed)
 			assert.Equal(t, tc.allow, resp.Header.Get("Allow"))
+			assert.Equal(t, fmt.Sprintf("%s %s is not supported; allowed: %s", tc.method, tc.path, tc.allow), p.Detail)
 		})
 	}
+}
+
+// TestServer_PanicAfterAnswerStartedAbortsTheConnection: once the status
+// line is out, a panic can't become a problem; the client must see the
+// answer cut short rather than a complete-looking 200.
+func TestServer_PanicAfterAnswerStartedAbortsTheConnection(t *testing.T) {
+	var rec logRecorder
+	log := slog.New(&rec)
+	h := loggingMiddleware(log)(recoverProblem(log)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"items":[`)
+		w.(http.Flusher).Flush()
+		panic("late")
+	})))
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	_, err = io.ReadAll(resp.Body)
+	require.Error(t, err, "the body read fails instead of ending cleanly")
+
+	errs := rec.at(slog.LevelError)
+	require.Len(t, errs, 1, "logged once")
+	assert.Equal(t, "handler panicked", errs[0]["msg"])
+	assert.Equal(t, "late", errs[0]["panic"])
 }
 
 // TestServer_ErrorsAreProblems: every error path answers
