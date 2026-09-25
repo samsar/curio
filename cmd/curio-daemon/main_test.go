@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -260,22 +259,6 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 	assert.Empty(t, pidFile, "a clean exit leaves the PID file empty")
 }
 
-// latestMigration is the highest numeric prefix among the migration files.
-func latestMigration(t *testing.T) int {
-	t.Helper()
-	entries, err := fs.ReadDir(migrations.FS, ".")
-	require.NoError(t, err)
-	var latest int
-	for _, e := range entries {
-		prefix, _, ok := strings.Cut(e.Name(), "_")
-		require.True(t, ok, e.Name())
-		n, err := strconv.Atoi(prefix)
-		require.NoError(t, err, e.Name())
-		latest = max(latest, n)
-	}
-	return latest
-}
-
 // TestRun_SyncsMarkerSchemaVersion: the marker caches the version goose
 // leaves the database at. Upgrading a database at version 4, whose marker
 // says 4, leaves both at the newest migration.
@@ -290,6 +273,8 @@ func TestRun_SyncsMarkerSchemaVersion(t *testing.T) {
 	require.NoError(t, err)
 	_, err = p.UpTo(ctx, 4)
 	require.NoError(t, err)
+	sources := p.ListSources()
+	latest := int(sources[len(sources)-1].Version) // ListSources sorts by version
 	require.NoError(t, db.Close())
 	meta, err := home.Meta()
 	require.NoError(t, err)
@@ -302,7 +287,6 @@ func TestRun_SyncsMarkerSchemaVersion(t *testing.T) {
 	health, stop := runDaemon(t, listen)
 	stop()
 
-	latest := latestMigration(t)
 	require.Greater(t, latest, 4)
 	assert.Equal(t, latest, health.SchemaVersion)
 	meta, err = home.Meta()

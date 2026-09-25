@@ -35,6 +35,21 @@ const EmbeddingDim = 768
 // every row to it, server-side, and never shows it to clients.
 const LocalTenantID = "local"
 
+// MaxSearchK is the most documents one search or related query returns.
+// The chunk fan-out grows with k, so it also bounds the chunk queries'
+// LIMIT. Config validates search.default_k against it, and the API a
+// request's k.
+const MaxSearchK = 100
+
+// NullableString is s as the value of a nullable text column: nil when s is
+// empty, so an absent value is stored as NULL rather than "".
+func NullableString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // DocState is a document's lifecycle state (documents.state).
 type DocState string
 
@@ -205,7 +220,6 @@ type DocumentStore interface {
 	// wrapping ErrConflict.
 	Create(ctx context.Context, d *Document) error
 	GetByID(ctx context.Context, id string) (*Document, error)
-	GetByURL(ctx context.Context, tenantID, url string) (*Document, error)
 	UpdateState(ctx context.Context, id string, state DocState) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
 

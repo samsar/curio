@@ -91,3 +91,10 @@ func TestSearchFilters_IsEmpty(t *testing.T) {
 		assert.False(t, f.IsEmpty(), name)
 	}
 }
+
+func TestNullableString(t *testing.T) {
+	assert.Nil(t, store.NullableString(""), "empty is NULL")
+	got := store.NullableString("x")
+	require.NotNil(t, got)
+	assert.Equal(t, "x", *got)
+}

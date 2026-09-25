@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -52,20 +51,14 @@ func migratedTo(t *testing.T, version int64) (*DB, *goose.Provider) {
 	return db, p
 }
 
-// latestMigration is the highest numeric prefix among the migration files.
+// latestMigration is the newest version among the embedded migrations, as
+// goose reads them.
 func latestMigration(t *testing.T) int64 {
 	t.Helper()
-	entries, err := fs.ReadDir(migrations.FS, ".")
-	require.NoError(t, err)
-	var latest int64
-	for _, e := range entries {
-		prefix, _, ok := strings.Cut(e.Name(), "_")
-		require.True(t, ok, e.Name())
-		n, err := strconv.ParseInt(prefix, 10, 64)
-		require.NoError(t, err, e.Name())
-		latest = max(latest, n)
-	}
-	return latest
+	db, _ := openUnmigrated(t)
+	sources := newProvider(t, db, migrations.FS).ListSources()
+	require.NotEmpty(t, sources)
+	return sources[len(sources)-1].Version // ListSources sorts by version
 }
 
 func hasColumn(t *testing.T, db *DB, table, column string) bool {

@@ -19,7 +19,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -379,8 +378,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("chunking.overlap_tokens must be in [0, %d), got %d",
 			c.Chunking.SizeTokens, c.Chunking.OverlapTokens)
 	}
-	if c.Search.DefaultK <= 0 || c.Search.DefaultK > search.MaxK {
-		return fmt.Errorf("search.default_k must be in [1, %d], got %d", search.MaxK, c.Search.DefaultK)
+	if c.Search.DefaultK <= 0 || c.Search.DefaultK > store.MaxSearchK {
+		return fmt.Errorf("search.default_k must be in [1, %d], got %d", store.MaxSearchK, c.Search.DefaultK)
 	}
 	if c.Search.RRFK <= 0 {
 		return fmt.Errorf("search.rrf_k must be positive, got %d", c.Search.RRFK)

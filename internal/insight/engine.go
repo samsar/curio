@@ -319,17 +319,10 @@ func (e *Engine) describe(ctx context.Context, tenantID string, points []Point, 
 		return nil, err
 	}
 	for i, lab := range labels {
-		cws[i].Cluster.Label = optional(lab.Name)
-		cws[i].Cluster.Summary = optional(lab.Summary)
+		cws[i].Cluster.Label = store.NullableString(lab.Name)
+		cws[i].Cluster.Summary = store.NullableString(lab.Summary)
 	}
 	return cws, nil
-}
-
-func optional(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
 }
 
 // preparePoints turns document vectors into the unit vectors that both the

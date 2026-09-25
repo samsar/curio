@@ -16,10 +16,6 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// MaxK is the most documents one search or related query may return. The
-// chunk fanout scales with k, so k bounds the SQL LIMIT too.
-const MaxK = 100
-
 // Engine runs hybrid search.
 //
 //  1. BM25 over chunks_fts and vector ANN over chunks_vec, concurrently
@@ -131,7 +127,7 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, c
 type Request struct {
 	TenantID string
 	Query    string
-	K        int                 // results to return after fusion + collapse; 0 = Config.DefaultK, at most MaxK
+	K        int                 // results to return after fusion + collapse; 0 = Config.DefaultK, at most store.MaxSearchK
 	Filters  store.SearchFilters // content_type / host / source; empty = no filter
 }
 
@@ -184,8 +180,8 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	switch {
 	case req.K == 0:
 		req.K = e.defaultK
-	case req.K < 0 || req.K > MaxK:
-		return nil, fmt.Errorf("search: k must be between 1 and %d, got %d", MaxK, req.K)
+	case req.K < 0 || req.K > store.MaxSearchK:
+		return nil, fmt.Errorf("search: k must be between 1 and %d, got %d", store.MaxSearchK, req.K)
 	}
 	fanout := e.chunkFanout(req.K)
 

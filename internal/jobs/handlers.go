@@ -177,23 +177,15 @@ func fetchedMetadata(doc *store.Document, res *fetcher.Result, extractionID stri
 	m := store.FetchedMetadata{
 		ExtractionID: extractionID,
 		ContentType:  cmp.Or(res.ContentType, doc.ContentType),
-		Title:        nonEmpty(res.Title),
-		Author:       nonEmpty(res.Author),
-		Language:     nonEmpty(res.Language),
+		Title:        store.NullableString(res.Title),
+		Author:       store.NullableString(res.Author),
+		Language:     store.NullableString(res.Language),
 		PublishedAt:  res.PublishedAt,
 	}
 	if res.FinalURL != doc.URL {
-		m.URLCanonical = nonEmpty(res.FinalURL)
+		m.URLCanonical = store.NullableString(res.FinalURL)
 	}
 	return m
-}
-
-// nonEmpty is s as a nullable column value: nil when s is empty.
-func nonEmpty(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
 }
 
 // indexHandler builds the closure that runs one index job:

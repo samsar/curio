@@ -555,7 +555,7 @@ func TestEngine_KContract(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, res.Items, 2, "K 0 uses the configured default")
 
-	for _, k := range []int{-1, MaxK + 1} {
+	for _, k := range []int{-1, store.MaxSearchK + 1} {
 		_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zzqterm", K: k})
 		assert.Error(t, err, "k=%d", k)
 	}
