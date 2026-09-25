@@ -573,6 +573,41 @@ func TestMigration009_KeysetIndexes(t *testing.T) {
 	assert.Equal(t, schemaBefore, schemaDump(t, db))
 }
 
+// TestMigration010_DropsUnusedBookmarkIndexes: 010 drops the two bookmark
+// indexes no query reads, keeps every row, and its Down restores the
+// schema exactly.
+func TestMigration010_DropsUnusedBookmarkIndexes(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 9)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url) VALUES ('d1', 'local', 'https://example.com/1');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, saved_at, source, folder_path)
+			VALUES ('b1', 'local', 'd1', 'https://example.com/1', '2024-01-01T00:00:00.000Z', 'chrome', '/Tech');`)
+	require.NoError(t, err)
+	schemaBefore := schemaDump(t, db)
+	rowsBefore := dumpRows(t, db, `SELECT * FROM bookmarks`)
+	indexes := func() []string {
+		rows := dumpRows(t, db, `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'bookmarks'`)
+		names := make([]string, 0, len(rows))
+		for _, row := range rows {
+			names = append(names, row[0].(string))
+		}
+		return names
+	}
+	require.Subset(t, indexes(), []string{"idx_bookmarks_tenant_source", "idx_bookmarks_folder"})
+
+	_, err = p.UpTo(ctx, 10)
+	require.NoError(t, err)
+	assert.NotContains(t, indexes(), "idx_bookmarks_tenant_source")
+	assert.NotContains(t, indexes(), "idx_bookmarks_folder")
+	assert.Subset(t, indexes(), []string{"idx_bookmarks_tenant_created", "idx_bookmarks_document"})
+	assert.Equal(t, rowsBefore, dumpRows(t, db, `SELECT * FROM bookmarks`))
+
+	_, err = p.DownTo(ctx, 9)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db))
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `

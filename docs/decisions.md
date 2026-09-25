@@ -3001,6 +3001,15 @@ a bookmark `Ingest` about 245 µs instead of 190 µs. Reads that were
 proportional to the table are now proportional to the page, which is the
 trade `curio docs` and `curio jobs` need.
 
+**Revised (2026-09):** Migration 010 drops `idx_bookmarks_tenant_source`
+and `idx_bookmarks_folder`, which no query reads. `Bookmarks.List` walks
+`idx_bookmarks_tenant_created` under every filter, `Count` scans it as a
+covering index, `TagsForDocument` and the search source filter use
+`idx_bookmarks_document`, and the point operations use the primary key.
+The `Count` and `TagsForDocument` plans are pinned too now. Every bookmark
+insert, and every source or folder update, no longer maintains two unused
+indexes.
+
 ---
 
 ## Chunks: external-content FTS, derived rows kept by triggers
