@@ -219,10 +219,8 @@ func (s *Jobs) RecoverOrphans(ctx context.Context, kinds []store.JobKind) ([]*st
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
-	// Exhausted orphans first. The first statement writes, so the
-	// transaction takes the write lock outright instead of upgrading from a
-	// read lock (see decisions.md "Job queue claim via atomic UPDATE ...
-	// RETURNING").
+	// Exhausted orphans first: the requeue below takes every running job
+	// of these kinds that is left.
 	now := formatTime(time.Now().UTC())
 	failedArgs := appendArgs([]any{store.JobStatusFailed, orphanExhaustedError, now,
 		store.JobStatusRunning, s.MaxAttempts}, kinds)

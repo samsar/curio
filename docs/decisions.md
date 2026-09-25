@@ -408,7 +408,7 @@ via `sqlite_vec.Auto()` from the sqlite-vec-go-bindings package.
 ## SQLite DSN: per-connection pragmas via mattn's query params
 
 **Decision:** `Open()` builds a DSN like
-`file:/path/curio.db?_fk=true&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000`.
+`file:/path/curio.db?_busy_timeout=5000&_fk=true&_journal_mode=WAL&_synchronous=NORMAL&_txlock=immediate`.
 
 **Why:** SQLite's `foreign_keys` PRAGMA is *per-connection* and defaults to
 OFF — every connection in `database/sql`'s pool must turn it on, or FK
@@ -418,6 +418,51 @@ every new pooled connection.
 
 Note: `_pragma=foreign_keys(1)` syntax is for `modernc.org/sqlite`, NOT
 `mattn/go-sqlite3`. They look similar; mixing them silently no-ops.
+
+**Immediate transactions:** the DSN also sets `_txlock=immediate`, so every
+`BeginTx` issues `BEGIN IMMEDIATE` and takes the write lock at once.
+Without it every transaction was deferred: one that had read and then
+wrote, while another connection held the lock, got `SQLITE_BUSY` at once
+(measured 5 µs), because SQLite skips the busy handler for that upgrade,
+or `SQLITE_BUSY_SNAPSHOT` if a write had committed since its read. The
+same transaction under `_txlock=immediate` waited 372 ms and committed.
+Every transaction curio opens writes (ingest, refetch, orphan recovery,
+chunk replacement, cluster replacement, goose's migrations), so taking the
+lock at BEGIN costs nothing, busy_timeout now covers each of them whole,
+and statement order inside them no longer matters; the "write first"
+rule that comments used to carry is gone. mattn ignores
+`sql.TxOptions.ReadOnly`, so reads never open a transaction; as
+autocommit statements in WAL mode they never wait on a writer.
+
+**Pool policy:** `SetMaxOpenConns(32)`, `SetMaxIdleConns(32)`,
+`SetConnMaxIdleTime(5 * time.Minute)`. database/sql keeps two idle
+connections by default, so under the worker pools connections were closed
+and reopened constantly: 214 closed in a 0.2 s burst of 21 claimers, each
+reopen costing about 0.7 ms (open, pragmas, sqlite-vec) against 2.4 µs for
+a query on a pooled connection. A writer waiting out busy_timeout holds
+its connection, so the cap sits above the 21 default worker goroutines
+with room for the API, and reads don't queue behind waiting writers. The
+idle timeout releases connections and their page caches once the daemon
+has been idle for five minutes. `Open` rejects `":memory:"`, which would
+give each pooled connection its own database.
+
+**No split reader/writer pool:** it would add a routing decision to every
+store method and, with a one-connection writer, a self-deadlock risk for
+any nested use, for little gain at this scale. Revisit if `SQLITE_BUSY`
+shows up in the logs.
+
+**When `SQLITE_BUSY` does happen:** with immediate transactions it means
+the lock stayed held for the whole busy_timeout. Handlers' writes already
+retry through `MarkFailed`'s backoff. The worker's own bookkeeping
+(`MarkDone`, `MarkFailed`, `Requeue` and the permanent-failure hook) is
+retried with a backoff of 50 ms doubling to 1 s, within the 10 s
+bookkeeping budget, on any error except `store.ErrNotRunning`,
+`store.ErrNotFound` and `ErrPermanent`: it used to log the failure and move
+on, leaving the job `running` until the next restart. Retrying is safe
+because the transitions only move a running job and `MarkDocFailed` is
+idempotent (hooks must be). It retries any other error rather than
+classifying SQLite error codes across the store boundary; the budget
+bounds the cost.
 
 ---
 
@@ -438,12 +483,14 @@ connection time, so the migration PRAGMA was redundant *and* breaking.
 id = (SELECT id ... LIMIT 1) RETURNING ...` statement, not a `BEGIN; SELECT;
 UPDATE; COMMIT;` transaction.
 
-**Why:** The transaction approach deadlocks under concurrent workers. The
-initial SELECT takes a SHARED lock; when each worker tries to upgrade to a
-RESERVED lock for the UPDATE, they all block on each other and SQLite's
-busy_timeout doesn't save us under load. The single-statement form acquires
-the write lock immediately, serializes cleanly across workers, and is also
-shorter code.
+**Why:** The transaction approach failed under concurrent workers. The
+initial SELECT took a read lock in a deferred transaction, and upgrading it
+to a write lock for the UPDATE while another worker held the lock fails
+with `SQLITE_BUSY` at once: SQLite skips busy_timeout for that upgrade.
+The single-statement form acquires the write lock immediately, serializes
+cleanly across workers, and is also shorter code. (Transactions are now
+immediate, so a read-then-write transaction would wait instead; see
+"SQLite DSN". The single statement stays the simpler claim.)
 
 Tested with 20 jobs / 8 workers / `-race`: every job claimed exactly once,
 no duplicates, no errors. The test lives in jobs_test.go specifically so the
@@ -2078,7 +2125,8 @@ database" true, and that is the assumption the queue relies on.
   bounds the handler. Every queue write after the decision to claim runs
   on a context detached from it and bounded by 10s, longer than SQLite's
   5s busy_timeout. That covers `ClaimNext`, `MarkDone`, `MarkFailed`,
-  `Requeue` and the permanent-failure hook.
+  `Requeue` and the permanent-failure hook; all but the claim are retried
+  within that bound when they fail (see "SQLite DSN").
 - **Interrupted:** a handler returns while the worker's context is done
   (shutdown). `Requeue` puts the job back to `pending`, runnable now, with
   the attempt refunded and `last_error` untouched. This keys off the
@@ -2159,8 +2207,8 @@ simply redone.
 
 **Decision:** `DocumentStore.RequeueFetch` and `RequeueFetchByStates` reset
 the document(s) to `pending` and insert the fetch job(s) in one
-write-first transaction: the UPDATE comes first, then the INSERTs.
-Everything commits or nothing does.
+transaction: the UPDATE, then the INSERTs. Everything commits or nothing
+does.
 
 - `refetch-all` rejects any `?state=` other than pending, fetched, failed
   or dead with 400. With no `?state=` it defaults to pending, fetched and
@@ -2180,10 +2228,11 @@ and about 2.4s since migration 007 added the jobs indexes and the
 `document_id` check (see "Indexes follow the queries"). Nearly all of it
 is the job INSERTs, and a prepared statement saved only about 8%. That is
 inside the 5s busy_timeout other writers wait on up to roughly 100k
-documents. Past that, a worker write that lands during
-the bulk transaction fails as busy; its job stays `running` and is
-recovered as an orphan on the next start. Chunked transactions are the
-fix if corpora get there.
+documents. Past that, a worker write that waits out the whole
+busy_timeout fails as busy and is retried within the worker's 10 s
+bookkeeping budget (see "SQLite DSN"); only a bulk transaction longer than
+that leaves a job `running` until the next start recovers it as an orphan.
+Chunked transactions are the fix if corpora get there.
 
 **Not done:** skipping documents that already have a queued fetch job.
 
@@ -2628,8 +2677,8 @@ already fall back to the URL or the bookmark title when `title` is NULL.
 ## Bookmark ingest: one transaction, fetch only for new documents
 
 **Decision:** `POST /v1/bookmarks` and `POST /v1/bookmarks/import` save
-each bookmark through `BookmarkStore.Ingest`, one write-first transaction
-per bookmark:
+each bookmark through `BookmarkStore.Ingest`, one transaction per
+bookmark:
 
 1. `INSERT INTO documents ... ON CONFLICT (tenant_id, url) DO NOTHING
    RETURNING id, state`; no row back means the document exists, so it is
@@ -2671,10 +2720,9 @@ per bookmark, the same as the five autocommit statements it replaces, and
 it lets fetch and index workers interleave with a 500-bookmark batch. The
 indexes of migration 007 raised it to about 245 µs, from 190 µs on the
 machine that re-measured both. The
-write comes first so concurrent ingests queue on the write lock through
-busy_timeout (see "Job queue claim via atomic UPDATE ... RETURNING"); five
-writers ingesting the same URLs produced one document and one job per URL
-and no `SQLITE_BUSY`. The import handler stops at the first bookmark after
+transaction takes the write lock at BEGIN (see "SQLite DSN"), so concurrent
+ingests queue on it through busy_timeout; five writers ingesting the same
+URLs produced one document and one job per URL and no `SQLITE_BUSY`. The import handler stops at the first bookmark after
 the client has gone; each committed bookmark stands on its own, so a
 re-import resumes.
 

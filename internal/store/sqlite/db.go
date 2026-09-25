@@ -1,8 +1,9 @@
 // Package sqlite is the SQLite implementation of curio's storage interfaces.
 //
 // Open returns a *sql.DB configured with the pragmas curio depends on
-// (foreign_keys = ON per-connection, WAL, sane busy timeout) and the
-// sqlite-vec extension auto-loaded on every connection.
+// (foreign_keys = ON per-connection, WAL, sane busy timeout), immediate
+// transactions, a pool sized for the daemon's workers, and the sqlite-vec
+// extension auto-loaded on every connection.
 package sqlite
 
 import (
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"sync"
+	"time"
 
 	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3" // sqlite3 driver
@@ -26,17 +28,38 @@ import (
 // extension's already registered.
 var vecOnce sync.Once
 
+// Pool policy. A connection is held by every transaction and by every write
+// waiting out busy_timeout, so the cap sits above the daemon's default 21
+// worker goroutines (16 fetch, 4 index, 1 cluster) with room for the API;
+// at the cap, reads would queue behind the waiting writers. Idle
+// connections are kept up to the cap because opening one (pragmas,
+// sqlite-vec) costs about 0.7 ms against a few microseconds for a query on
+// a pooled one, and database/sql's default of two idle connections had the
+// workers reopening them constantly. They close after five idle minutes,
+// releasing their page caches while the daemon has nothing to do.
+const (
+	maxOpenConns    = 32
+	maxIdleConns    = maxOpenConns
+	connMaxIdleTime = 5 * time.Minute
+)
+
 // DB is a thin wrapper around *sql.DB. Lets us attach lifecycle methods
 // without polluting the standard interface.
+//
+// Every transaction begins with BEGIN IMMEDIATE (the DSN's _txlock), taking
+// the write lock up front: busy_timeout then covers the whole transaction,
+// which can never fail upgrading a read lock to a write lock, whatever order
+// its statements run in. So BeginTx is for writing only, and every caller
+// writes. mattn/go-sqlite3 ignores sql.TxOptions.ReadOnly, so a read must
+// never open a transaction: as autocommit statements, reads in WAL mode
+// never wait on a writer.
 type DB struct {
 	*sql.DB
 	path string
 }
 
-// Open opens (or creates) a SQLite database at path. Use ":memory:" for
-// ephemeral in-memory storage in tests, but pair it with SetMaxOpenConns(1)
-// or use shared cache to avoid the "each connection is a different DB"
-// footgun.
+// Open opens (or creates) the SQLite database file at path. ":memory:" is
+// rejected: each pooled connection would open a database of its own.
 //
 // Open does NOT run migrations. Call Migrate after.
 func Open(ctx context.Context, path string) (*DB, error) {
@@ -51,6 +74,9 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("ping sqlite %q: %w", path, errors.Join(err, db.Close()))
 	}
@@ -105,12 +131,18 @@ func (d *DB) Path() string { return d.path }
 // buildDSN produces a connection string that sets curio's required pragmas
 // on every pooled connection. Without this, foreign_keys defaults to OFF
 // per connection and the schema's FK constraints silently aren't enforced.
+// It also makes every transaction BEGIN IMMEDIATE (see DB).
 //
 // mattn/go-sqlite3 uses `_fk`, `_journal_mode`, `_synchronous`,
-// `_busy_timeout` query params (NOT `_pragma=`, which is modernc.org/sqlite).
+// `_busy_timeout`, `_txlock` query params (NOT `_pragma=`, which is
+// modernc.org/sqlite).
 func buildDSN(path string) (string, error) {
-	if path == "" {
-		return "", fmt.Errorf("sqlite path must not be empty")
+	switch path {
+	case "":
+		return "", errors.New("sqlite path must not be empty")
+	case ":memory:":
+		return "", errors.New("sqlite: in-memory databases are not supported: " +
+			"each pooled connection would open a database of its own")
 	}
 
 	q := url.Values{}
@@ -118,11 +150,7 @@ func buildDSN(path string) (string, error) {
 	q.Set("_journal_mode", "WAL")
 	q.Set("_synchronous", "NORMAL")
 	q.Set("_busy_timeout", "5000")
-
-	// In-memory has its own form.
-	if path == ":memory:" {
-		return ":memory:?" + q.Encode(), nil
-	}
+	q.Set("_txlock", "immediate")
 
 	abs, err := filepath.Abs(path)
 	if err != nil {

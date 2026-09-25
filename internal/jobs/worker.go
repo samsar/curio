@@ -40,11 +40,14 @@ var ErrPermanent = errors.New("permanent failure")
 // that a previous daemon left running with no attempts to spare.
 var errOrphanExhausted = fmt.Errorf("%w: the daemon exited mid-job and no attempts are left", ErrPermanent)
 
-// bookkeepingTimeout bounds each queue write the worker makes. It outlasts
-// SQLite's 5s busy_timeout so a write that has to wait for the lock still
-// lands, and it is the only limit: those writes run detached from the
-// worker's context, so shutdown can't abort them halfway.
+// bookkeepingTimeout bounds each queue write the worker makes, retries
+// included. It outlasts SQLite's 5s busy_timeout so a write that has to wait
+// for the lock still lands, and it is the only limit: those writes run
+// detached from the worker's context, so shutdown can't abort them halfway.
 const bookkeepingTimeout = 10 * time.Second
+
+// bookkeepingRetry spaces the attempts of a failed bookkeeping write.
+var bookkeepingRetry = backoff{initial: 50 * time.Millisecond, max: time.Second}
 
 // Worker polls the queue and dispatches jobs.
 type Worker struct {
@@ -53,6 +56,7 @@ type Worker struct {
 	onPermFail   map[store.JobKind]PermFailHook
 	pollInterval time.Duration
 	log          *slog.Logger
+	retryDelays  backoff // between attempts of a failed bookkeeping write
 
 	inFlight sync.Map // job ID → struct{}, across every goroutine running this Worker
 }
@@ -70,6 +74,7 @@ func NewWorker(q store.JobQueue, opts WorkerOptions) *Worker {
 		onPermFail:   map[store.JobKind]PermFailHook{},
 		pollInterval: opts.PollInterval,
 		log:          opts.Log,
+		retryDelays:  bookkeepingRetry,
 	}
 	if w.pollInterval <= 0 {
 		w.pollInterval = 500 * time.Millisecond
@@ -88,9 +93,12 @@ func (w *Worker) Register(kind store.JobKind, h HandlerFunc) {
 
 // OnPermanentFailure attaches a hook that fires after MarkFailed reports a
 // job has hit terminal-failed state (retries exhausted, or wrapped with
-// ErrPermanent). The hook is best-effort: errors are logged but don't
-// re-fail the job. Use to clean up associated state, e.g., transition a
+// ErrPermanent). Use to clean up associated state, e.g., transition a
 // parent document to state=failed or state=dead based on the cause.
+//
+// A hook that fails is retried like the queue writes (see finish), unless
+// it returns an error wrapping ErrPermanent, so it must be idempotent. One
+// that still fails is logged; it doesn't re-fail the job.
 func (w *Worker) OnPermanentFailure(kind store.JobKind, h PermFailHook) {
 	w.onPermFail[kind] = h
 }
@@ -213,7 +221,9 @@ func (w *Worker) finish(ctx context.Context, log *slog.Logger, job *store.Job, e
 
 	switch {
 	case err == nil:
-		if merr := w.queue.MarkDone(bctx, job.ID); merr != nil {
+		if merr := w.retryBookkeeping(bctx, log, "mark done", func(ctx context.Context) error {
+			return w.queue.MarkDone(ctx, job.ID)
+		}); merr != nil {
 			log.Error("mark done failed", "err", merr)
 			return
 		}
@@ -223,7 +233,9 @@ func (w *Worker) finish(ctx context.Context, log *slog.Logger, job *store.Job, e
 		// The shutdown interrupted the handler, so whatever it returned
 		// (context.Canceled, a killed subprocess, even ErrPermanent) says
 		// nothing about the job. Put it back and give the attempt back.
-		if rerr := w.queue.Requeue(bctx, job.ID); rerr != nil {
+		if rerr := w.retryBookkeeping(bctx, log, "requeue", func(ctx context.Context) error {
+			return w.queue.Requeue(ctx, job.ID)
+		}); rerr != nil {
 			log.Error("requeue after shutdown failed", "err", rerr, "handler_err", err)
 			return
 		}
@@ -237,7 +249,12 @@ func (w *Worker) finish(ctx context.Context, log *slog.Logger, job *store.Job, e
 func (w *Worker) fail(ctx context.Context, log *slog.Logger, job *store.Job, cause error, dur time.Duration) {
 	retry := !errors.Is(cause, ErrPermanent)
 	log.Warn("job failed", "err", cause, "retry", retry, "duration_ms", dur.Milliseconds())
-	permanent, err := w.queue.MarkFailed(ctx, job.ID, cause.Error(), retry)
+	var permanent bool
+	err := w.retryBookkeeping(ctx, log, "mark failed", func(ctx context.Context) error {
+		var err error
+		permanent, err = w.queue.MarkFailed(ctx, job.ID, cause.Error(), retry)
+		return err
+	})
 	if err != nil {
 		log.Error("mark failed errored", "err", err)
 		return
@@ -252,9 +269,46 @@ func (w *Worker) runPermFailHook(ctx context.Context, log *slog.Logger, job *sto
 	if hook == nil {
 		return
 	}
-	if err := recoverPanic(log, "permanent-failure hook", func() error { return hook(ctx, job, cause) }); err != nil {
+	err := w.retryBookkeeping(ctx, log, "permanent-failure hook", func(ctx context.Context) error {
+		return recoverPanic(log, "permanent-failure hook", func() error { return hook(ctx, job, cause) })
+	})
+	if err != nil {
 		log.Error("permanent-failure hook errored", "err", err)
 	}
+}
+
+// retryBookkeeping runs write until it succeeds, fails with an error no
+// retry can fix, or ctx, a bookkeeping context, expires; it returns write's
+// last error. A queue write that never lands leaves its job running until
+// the next restart. Transactions take the write lock at BEGIN, so a write
+// that fails has usually found the lock held past busy_timeout, and a later
+// attempt gets through. Repeating one is safe: the queue's transitions
+// only move a running job, and hooks must be idempotent.
+func (w *Worker) retryBookkeeping(ctx context.Context, log *slog.Logger, what string,
+	write func(context.Context) error) error {
+	delays := w.retryDelays
+	for {
+		err := write(ctx)
+		if err == nil || !retryable(err) {
+			return err
+		}
+		delay := delays.next()
+		log.Warn(what+" failed; retrying", "err", err, "retry_in", delay)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+	}
+}
+
+// retryable reports whether a failed bookkeeping write might succeed if
+// made again. Not when the job isn't in the state the write expects, or
+// isn't there at all, or the error says it is permanent.
+func retryable(err error) bool {
+	return !errors.Is(err, store.ErrNotRunning) &&
+		!errors.Is(err, store.ErrNotFound) &&
+		!errors.Is(err, ErrPermanent)
 }
 
 // recoverPanic runs fn, converting a panic into an ErrPermanent error whose
@@ -287,4 +341,21 @@ func (w *Worker) kinds() []store.JobKind {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// backoff is a delay that doubles from initial up to max. The zero state
+// starts at initial; a copy of a fresh backoff starts over.
+type backoff struct {
+	initial, max time.Duration
+	cur          time.Duration
+}
+
+// next returns the delay to wait now and doubles the one after it.
+func (b *backoff) next() time.Duration {
+	if b.cur == 0 {
+		b.cur = b.initial
+	}
+	d := b.cur
+	b.cur = min(2*b.cur, b.max)
+	return d
 }

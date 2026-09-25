@@ -284,9 +284,6 @@ func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID strin
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
-	// Write first, so the transaction takes the write lock outright instead
-	// of upgrading from a read lock (see decisions.md "Job queue claim via
-	// atomic UPDATE ... RETURNING").
 	res, err := tx.ExecContext(ctx,
 		`UPDATE documents SET state = ?, updated_at = `+sqlNow+` WHERE tenant_id = ? AND id = ?`,
 		store.DocStatePending, tenantID, documentID)
@@ -315,11 +312,10 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
-	// Write first, as in RequeueFetch. The whole corpus goes in one
-	// transaction: resetting and enqueueing 50k documents takes 1.5-2s,
-	// inside the 5s busy_timeout other writers wait for up to roughly 130k
-	// documents (docs/decisions.md "Refetch: state reset and fetch job in
-	// one transaction").
+	// The whole corpus goes in one transaction: resetting and enqueueing 50k
+	// documents takes about 2.4s, inside the 5s busy_timeout other writers
+	// wait for up to roughly 100k documents (docs/decisions.md "Refetch:
+	// state reset and fetch job in one transaction").
 	args := appendArgs([]any{store.DocStatePending, tenantID}, states)
 	rows, err := tx.QueryContext(ctx, resetStatesSQL(len(states)), args...)
 	if err != nil {
@@ -366,10 +362,7 @@ func resetStatesSQL(nStates int) string {
 // getOrCreateDocument returns the tenant's document for url, inserting it in
 // state pending when there is none; created reports whether it did. It runs
 // inside the caller's transaction, for units of work that save a reference
-// (a bookmark today) together with its document. Its first statement is the
-// INSERT, so a transaction that starts here takes the write lock outright
-// instead of upgrading from a read lock (see decisions.md "Job queue claim
-// via atomic UPDATE ... RETURNING").
+// (a bookmark today) together with its document.
 func getOrCreateDocument(ctx context.Context, tx *sql.Tx, tenantID, url string) (id string, state store.DocState, created bool, err error) {
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO documents (id, tenant_id, url) VALUES (?, ?, ?)
