@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -208,17 +210,52 @@ func TestRun_EmbeddingMismatchRefusesToStart(t *testing.T) {
 	}
 }
 
-// runDaemon starts run in the background and waits until it answers
-// /v1/healthz. stop cancels it and waits for run to return cleanly.
-func runDaemon(t *testing.T, listen string) (health *client.Health, stop func()) {
+// daemonRun is run going in the background.
+type daemonRun struct {
+	cancel context.CancelFunc
+	done   chan error
+	ended  bool
+	err    error
+}
+
+// startRun starts run in the background. When the test ends it is
+// cancelled and waited for.
+func startRun(t *testing.T) *daemonRun {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- run(ctx, new(slog.LevelVar)) }()
+	r := &daemonRun{cancel: cancel, done: make(chan error, 1)}
+	go func() { r.done <- run(ctx, new(slog.LevelVar)) }()
+	t.Cleanup(func() {
+		r.cancel()
+		r.wait(t, 30*time.Second)
+	})
+	return r
+}
 
+// wait returns what run returned, failing the test if that takes longer
+// than timeout.
+func (r *daemonRun) wait(t *testing.T, timeout time.Duration) error {
+	t.Helper()
+	if !r.ended {
+		select {
+		case r.err = <-r.done:
+			r.ended = true
+		case <-time.After(timeout):
+			t.Fatalf("run did not return within %s", timeout)
+		}
+	}
+	return r.err
+}
+
+// runDaemon starts run in the background and waits until it answers
+// /v1/healthz as ready. stop cancels it and waits for run to return
+// cleanly.
+func runDaemon(t *testing.T, listen string) (health *client.Health, stop func()) {
+	t.Helper()
+	r := startRun(t)
 	c := client.New("http://" + listen)
 	require.Eventually(t, func() bool {
-		hctx, hcancel := context.WithTimeout(ctx, time.Second)
+		hctx, hcancel := context.WithTimeout(context.Background(), time.Second)
 		defer hcancel()
 		h, err := c.Healthz(hctx)
 		health = h
@@ -227,13 +264,8 @@ func runDaemon(t *testing.T, listen string) (health *client.Health, stop func())
 
 	return health, func() {
 		t.Helper()
-		cancel()
-		select {
-		case err := <-done:
-			require.NoError(t, err)
-		case <-time.After(30 * time.Second):
-			t.Fatal("run did not return after cancellation")
-		}
+		r.cancel()
+		require.NoError(t, r.wait(t, 30*time.Second))
 	}
 }
 
@@ -259,28 +291,34 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 	assert.Empty(t, pidFile, "a clean exit leaves the PID file empty")
 }
 
+// migrateTo brings home's database to version, as an older curio would
+// have left it, with the marker saying so, and returns the newest version.
+func migrateTo(t *testing.T, home *curiohome.Home, version int64) (latest int) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sqlitestore.Open(ctx, home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	p, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations.FS)
+	require.NoError(t, err)
+	_, err = p.UpTo(ctx, version)
+	require.NoError(t, err)
+	meta, err := home.Meta()
+	require.NoError(t, err)
+	meta.SchemaVersion = int(version)
+	require.NoError(t, home.WriteMeta(meta))
+	sources := p.ListSources()
+	return int(sources[len(sources)-1].Version) // ListSources sorts by version
+}
+
 // TestRun_SyncsMarkerSchemaVersion: the marker caches the version goose
 // leaves the database at. Upgrading a database at version 4, whose marker
 // says 4, leaves both at the newest migration.
 func TestRun_SyncsMarkerSchemaVersion(t *testing.T) {
-	ctx := context.Background()
 	listen := freeLoopbackAddr(t)
 	home := newHome(t, listen)
-
-	db, err := sqlitestore.Open(ctx, home.DBPath())
-	require.NoError(t, err)
-	p, err := goose.NewProvider(goose.DialectSQLite3, db.DB, migrations.FS)
-	require.NoError(t, err)
-	_, err = p.UpTo(ctx, 4)
-	require.NoError(t, err)
-	sources := p.ListSources()
-	latest := int(sources[len(sources)-1].Version) // ListSources sorts by version
-	require.NoError(t, db.Close())
+	latest := migrateTo(t, home, 4)
 	meta, err := home.Meta()
-	require.NoError(t, err)
-	meta.SchemaVersion = 4
-	require.NoError(t, home.WriteMeta(meta))
-	meta, err = home.Meta()
 	require.NoError(t, err)
 	written := meta.UpdatedAt
 
@@ -293,6 +331,218 @@ func TestRun_SyncsMarkerSchemaVersion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, latest, meta.SchemaVersion)
 	assert.True(t, meta.UpdatedAt.After(written), "the sync stamps the marker")
+}
+
+// holdWriteLock takes the database's write lock from another connection,
+// which keeps a daemon migrating it in its first migration: that waits up
+// to busy_timeout (5s) for the lock, and cancelling the daemon's context
+// doesn't cut the wait short. release gives the lock back; call it well
+// within 5s of the daemon reaching the migration.
+func holdWriteLock(t *testing.T, home *curiohome.Home) (release func()) {
+	t.Helper()
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	tx, err := db.BeginTx(context.Background(), nil) // BEGIN IMMEDIATE: the write lock
+	require.NoError(t, err)
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			assert.NoError(t, tx.Rollback())
+			assert.NoError(t, db.Close())
+		})
+	}
+	t.Cleanup(release)
+	return release
+}
+
+// waitMigrating waits until the daemon at c reports it is migrating, and
+// returns what it reported.
+func waitMigrating(t *testing.T, c *client.Client) *client.Startup {
+	t.Helper()
+	var st *client.Startup
+	require.Eventually(t, func() bool {
+		_, err := c.Healthz(context.Background())
+		st = client.StartupOf(err)
+		return st != nil && st.Phase == client.PhaseMigrating
+	}, 10*time.Second, 20*time.Millisecond)
+	return st
+}
+
+// rawGet sends a GET to the daemon at listen with extra headers, and
+// returns the status and body.
+func rawGet(t *testing.T, listen, path string, header http.Header) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, "http://"+listen+path, nil)
+	require.NoError(t, err)
+	maps.Copy(req.Header, header)
+	if host := header.Get("Host"); host != "" {
+		req.Host = host
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(body)
+}
+
+// TestRun_AnswersWhileMigrating: from the bind on, a daemon migrating its
+// database answers as a starting daemon: healthz names it and its progress,
+// everything else is refused with Retry-After, and the access policy
+// holds. Once the migration can run, the full API takes over.
+func TestRun_AnswersWhileMigrating(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+	latest := migrateTo(t, home, 4)
+	release := holdWriteLock(t, home)
+	r := startRun(t)
+	c := client.New("http://" + listen)
+
+	st := waitMigrating(t, c)
+	assert.Equal(t, os.Getpid(), st.PID)
+	assert.Equal(t, home.Path, st.Home)
+	assert.Equal(t, &client.MigrationProgress{Applied: 0, Total: latest - 4}, st.Migrations)
+
+	_, err := c.Stats(context.Background())
+	require.ErrorIs(t, err, client.ErrStarting)
+	status, body := rawGet(t, listen, "/v1/stats", nil)
+	assert.Equal(t, http.StatusServiceUnavailable, status)
+	assert.NotContains(t, body, `"pid"`)
+	status, body = rawGet(t, listen, "/v1/healthz", http.Header{"Host": {"attacker.example:" + strings.Split(listen, ":")[1]}})
+	assert.Equal(t, http.StatusForbidden, status)
+	assert.NotContains(t, body, `"pid"`)
+	status, body = rawGet(t, listen, "/v1/healthz", http.Header{"Origin": {"https://attacker.example"}})
+	assert.Equal(t, http.StatusForbidden, status)
+	assert.NotContains(t, body, `"pid"`)
+	release()
+
+	var health *client.Health
+	require.Eventually(t, func() bool {
+		health, err = c.Healthz(context.Background())
+		return err == nil
+	}, 10*time.Second, 20*time.Millisecond)
+	assert.Equal(t, latest, health.SchemaVersion, "the first ready answer has the new schema version")
+	_, err = c.Stats(context.Background())
+	require.NoError(t, err)
+
+	r.cancel()
+	require.NoError(t, r.wait(t, 30*time.Second))
+}
+
+// TestRun_FailureAfterBindStopsServing: a daemon that fails after binding
+// (here, a curio.db that isn't a database) stops serving before it
+// returns, and closes its port before it gives up the lock.
+func TestRun_FailureAfterBindStopsServing(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+	require.NoError(t, os.WriteFile(home.DBPath(), []byte(strings.Repeat("not a database\n", 512)), 0o600))
+
+	err := run(context.Background(), new(slog.LevelVar))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a database")
+
+	ln, err := net.Listen("tcp", listen)
+	require.NoError(t, err, "the port is free again")
+	require.NoError(t, ln.Close())
+	lock, err := daemonctl.AcquireLock(home)
+	require.NoError(t, err, "the lock is free again")
+	require.NoError(t, lock.Release())
+}
+
+// TestRun_CancelWhileMigrating: a daemon told to stop while it migrates
+// returns once the migration step it is in ends, with its port closed and
+// its lock released.
+func TestRun_CancelWhileMigrating(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+	migrateTo(t, home, 4)
+	release := holdWriteLock(t, home)
+	r := startRun(t)
+	waitMigrating(t, client.New("http://"+listen))
+
+	r.cancel()
+	select {
+	case err := <-r.done:
+		t.Fatalf("run returned mid-step: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	release()
+	require.ErrorIs(t, r.wait(t, 10*time.Second), context.Canceled, "which main takes for a clean shutdown")
+
+	ln, err := net.Listen("tcp", listen)
+	require.NoError(t, err, "the port is free again")
+	require.NoError(t, ln.Close())
+	lock, err := daemonctl.AcquireLock(home)
+	require.NoError(t, err, "the lock is free again")
+	require.NoError(t, lock.Release())
+}
+
+// messages returns the records at info with message msg, as attribute maps.
+func (r *recorder) messages(msg string) []map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []map[string]any
+	for _, rec := range r.records {
+		if rec.Message != msg {
+			continue
+		}
+		attrs := map[string]any{}
+		rec.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.Resolve().Any()
+			return true
+		})
+		out = append(out, attrs)
+	}
+	return out
+}
+
+// TestRun_LogsTheStartup: the log tells the startup's story: the daemon
+// starting at the bind, what an upgrade migrates, each migration as it
+// starts and finishes, and the daemon ready. An up-to-date home migrates
+// nothing and says nothing about it.
+func TestRun_LogsTheStartup(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+	latest := migrateTo(t, home, 4)
+	logs := recordLogs(t)
+
+	_, stop := runDaemon(t, listen)
+	stop()
+
+	starting := logs.messages("curio-daemon starting")
+	require.Len(t, starting, 1)
+	assert.Equal(t, home.Path, starting[0]["home"])
+	assert.EqualValues(t, os.Getpid(), starting[0]["pid"])
+	assert.Contains(t, starting[0], "version")
+
+	migrating := logs.messages("migrating database")
+	require.Len(t, migrating, 1)
+	assert.EqualValues(t, latest-4, migrating[0]["pending"])
+	assert.EqualValues(t, 4, migrating[0]["from_version"])
+	assert.EqualValues(t, latest, migrating[0]["to_version"])
+
+	applying := logs.messages("applying migration")
+	applied := logs.messages("migration applied")
+	require.Len(t, applying, latest-4)
+	require.Len(t, applied, latest-4)
+	for i, rec := range applied {
+		assert.EqualValues(t, 5+i, rec["version"])
+		assert.Equal(t, applying[i]["source"], rec["source"])
+		assert.Contains(t, rec, "duration_ms")
+	}
+	ready := logs.messages("database ready")
+	require.Len(t, ready, 1)
+	assert.EqualValues(t, latest, ready[0]["schema_version"])
+	daemonReady := logs.messages("curio-daemon ready")
+	require.Len(t, daemonReady, 1)
+	assert.Contains(t, daemonReady[0], "startup_ms")
+
+	again := recordLogs(t)
+	_, stop = runDaemon(t, listen)
+	stop()
+	assert.Empty(t, again.messages("migrating database"), "nothing pending, nothing said")
+	assert.Empty(t, again.messages("applying migration"))
+	assert.Len(t, again.messages("curio-daemon ready"), 1)
 }
 
 // TestDrain: shutdown waits for the workers up to the grace period, then

@@ -47,14 +47,18 @@ type Health struct {
 	OllamaDetail    string `json:"ollama_detail,omitempty"`
 }
 
-// healthzTimeout bounds Healthz. A daemon answers well within it whatever
-// state Ollama is in, because the handler gives up on its Ollama check after
-// 500ms (api.ollamaPingTimeout); only a port held by something that doesn't
-// answer (a daemon still migrating, some other server) runs it out.
+// healthzTimeout bounds Healthz. A ready daemon answers well within it
+// whatever state Ollama is in, because the handler gives up on its Ollama
+// check after 500ms (api.ollamaPingTimeout), and a starting daemon answers
+// at once. Only a port held by something that doesn't answer (a wedged
+// process, some other server) runs it out.
 const healthzTimeout = 2 * time.Second
 
-// Healthz returns the daemon health blob. Every client finds the daemon with
-// it, so it gives up after healthzTimeout rather than the client's 30s.
+// Healthz returns the health of a daemon that serves the full API. A daemon
+// that is still starting answers with an *APIError matching ErrStarting,
+// whose Startup says which daemon it is and how far along. Every client
+// finds the daemon with it, so it gives up after healthzTimeout rather than
+// the client's 30s.
 func (c *Client) Healthz(ctx context.Context) (*Health, error) {
 	ctx, cancel := context.WithTimeout(ctx, healthzTimeout)
 	defer cancel()
@@ -654,6 +658,57 @@ func (c *Client) RebuildInterests(ctx context.Context) (*RebuildInterestsRespons
 // that is the cause.
 var ErrDaemonUnreachable = errors.New("daemon unreachable")
 
+// ErrStarting matches the answer of a daemon that is up but still starting
+// (migrating its database, say): 503 with the starting problem type. It
+// ran nothing, so the request can be sent again once the daemon is ready.
+var ErrStarting = errors.New("daemon starting")
+
+// startingProblemType mirrors api.StartingProblemType.
+const startingProblemType = "urn:curio:problem:daemon-starting"
+
+// Phases a starting daemon reports, mirroring api's. A daemon may report
+// one this client doesn't know; it is still starting.
+const (
+	PhaseInitializing = "initializing"
+	PhaseMigrating    = "migrating"
+)
+
+// Startup mirrors the members api.Starting adds to the starting problem on
+// /v1/healthz: which daemon answered, and how far along it is.
+type Startup struct {
+	PID        int                `json:"pid"`
+	Home       string             `json:"home"`
+	Version    string             `json:"version"`
+	Phase      string             `json:"phase"`
+	Migrations *MigrationProgress `json:"migrations,omitempty"` // present while migrating
+}
+
+// MigrationProgress mirrors api.MigrationProgress.
+type MigrationProgress struct {
+	Applied int `json:"applied"`
+	Total   int `json:"total"`
+}
+
+// Progress says what the daemon is doing, e.g. "migrating the database, 2
+// of 6 migrations applied" or "initializing".
+func (s Startup) Progress() string {
+	if s.Phase == PhaseMigrating && s.Migrations != nil {
+		return fmt.Sprintf("migrating the database, %d of %d migrations applied",
+			s.Migrations.Applied, s.Migrations.Total)
+	}
+	return s.Phase
+}
+
+// StartupOf returns what a starting daemon's healthz answer reported, if
+// err is one, and nil otherwise.
+func StartupOf(err error) *Startup {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Startup
+	}
+	return nil
+}
+
 // Problem is the RFC 7807 problem body the daemon answers errors with.
 type Problem struct {
 	Type      string `json:"type,omitempty"`
@@ -665,24 +720,36 @@ type Problem struct {
 }
 
 // APIError is a non-2xx answer from the daemon. Callers branch on Status
-// with errors.As.
+// with errors.As, and on a starting daemon with errors.Is(err, ErrStarting).
 type APIError struct {
 	Status  int
 	Problem Problem
+	// Startup is what a starting daemon's healthz answer reported; nil for
+	// any other answer.
+	Startup *Startup
 }
 
 // Error is the problem's detail, or its title when there is none. A server
 // error also names its request ID and where to look it up, since the
-// cause is in the daemon's log.
+// cause is in the daemon's log; a starting daemon's answer isn't one.
 func (e *APIError) Error() string {
 	msg := cmp.Or(e.Problem.Detail, e.Problem.Title, http.StatusText(e.Status), fmt.Sprintf("HTTP %d", e.Status))
-	if e.Status < http.StatusInternalServerError {
+	if e.Status < http.StatusInternalServerError || e.starting() {
 		return msg
 	}
 	if e.Problem.RequestID == "" {
 		return msg + " (see `curio daemon logs`)"
 	}
 	return fmt.Sprintf("%s (request %s; see `curio daemon logs`)", msg, e.Problem.RequestID)
+}
+
+// Is reports whether e is a starting daemon's answer, for ErrStarting.
+func (e *APIError) Is(target error) bool {
+	return target == ErrStarting && e.starting()
+}
+
+func (e *APIError) starting() bool {
+	return e.Status == http.StatusServiceUnavailable && e.Problem.Type == startingProblemType
 }
 
 // IsNotFound reports whether err is the daemon answering 404.
@@ -752,21 +819,30 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 
 // decodeError reads an error response into an *APIError: the problem the
 // daemon sent, or, for a body that isn't one (a proxy, an older daemon),
-// the status text with the body as the detail.
+// the status text with the body as the detail. A starting daemon's healthz
+// answer also fills in Startup.
 func decodeError(resp *http.Response) *APIError {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")) // "" when unparsable
-	var problem Problem
+	var decoded struct {
+		Problem
+		Startup
+	}
 	switch {
 	case err != nil:
-		problem = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
+		decoded.Problem = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
 			Detail: fmt.Sprintf("reading the error response: %v", err)}
-	case mediaType != "application/problem+json" || json.Unmarshal(body, &problem) != nil:
-		problem = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
+	case mediaType != "application/problem+json" || json.Unmarshal(body, &decoded) != nil:
+		decoded.Problem = Problem{Title: http.StatusText(resp.StatusCode), Status: resp.StatusCode,
 			Detail: strings.TrimSpace(string(body))}
 	}
-	problem.RequestID = cmp.Or(problem.RequestID, resp.Header.Get("X-Request-Id"))
-	return &APIError{Status: resp.StatusCode, Problem: problem}
+	apiErr := &APIError{Status: resp.StatusCode, Problem: decoded.Problem}
+	apiErr.Problem.RequestID = cmp.Or(apiErr.Problem.RequestID, resp.Header.Get("X-Request-Id"))
+	// Only healthz names the daemon; other routes send the problem alone.
+	if apiErr.starting() && decoded.PID != 0 && decoded.Home != "" {
+		apiErr.Startup = &decoded.Startup
+	}
+	return apiErr
 }
 
 // drain reads what is left of a response body, up to maxErrorBody, so that
