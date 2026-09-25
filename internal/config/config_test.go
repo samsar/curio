@@ -109,6 +109,8 @@ func TestValidate(t *testing.T) {
 		{"negative dim", func(c *Config) { c.Embedding.Dim = -1 }, "embedding.dim"},
 		{"dim other than the schema's", func(c *Config) { c.Embedding.Dim = 1024 }, "Embedding model swap"},
 		{"empty base_url", func(c *Config) { c.Embedding.BaseURL = "" }, "embedding.base_url"},
+		{"zero embedding timeout", func(c *Config) { c.Embedding.TimeoutSeconds = 0 }, "embedding.timeout_seconds"},
+		{"negative embedding timeout", func(c *Config) { c.Embedding.TimeoutSeconds = -5 }, "embedding.timeout_seconds"},
 		{"zero chunk size", func(c *Config) { c.Chunking.SizeTokens = 0 }, "chunking.size_tokens"},
 		{"overlap >= size", func(c *Config) { c.Chunking.OverlapTokens = 512 }, "chunking.overlap_tokens"},
 		{"negative overlap", func(c *Config) { c.Chunking.OverlapTokens = -1 }, "chunking.overlap_tokens"},

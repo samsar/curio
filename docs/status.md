@@ -227,6 +227,7 @@ positive. When a budget runs out the work degrades rather than failing.
 
 | Key | Default | Bounds |
 |---|---|---|
+| `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 32 chunks per request) |
 | `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one clustering run; the rest get term labels |
 

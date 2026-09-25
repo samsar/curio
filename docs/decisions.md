@@ -651,6 +651,31 @@ is advisory. The 3500-byte chunk cap (entry above) is what bounds inputs.
 
 ---
 
+## Indexer: embed in batches of 32; `embedding.timeout_seconds`
+
+**Decision:** `indexer.Index` embeds a document's chunks in consecutive
+`/api/embed` requests of at most 32 chunks (≤ 32 × 3500 B ≈ 112 KB each), in
+order, and writes nothing until every batch has succeeded. The embedder's
+per-request timeout is configurable as `embedding.timeout_seconds` (default
+60, previously a hard-coded 60 s).
+
+**Why:** one request per document let a long document — a book-length PDF, a
+long docs page, or a moderate one queued inside Ollama behind the other index
+workers' requests (`daemon.index_workers` = 4) — run past the fixed timeout.
+The job then retried from scratch up to five times and ended `failed`: never
+searchable. A 32-chunk request takes a few seconds even on CPU-only Ollama, so
+a timeout now means Ollama is in trouble, not that the document is long. It
+also stops one huge request from holding search's query embedding behind it.
+
+**Where it lives:** batching is orchestration policy, so it's in the indexer
+(`Options.EmbedBatchSize`, not a config key), independent of the embedder
+client. The job-level retry is still the recovery mechanism; batching bounds
+how much work each attempt repeats. A failure names the chunk range
+("embed chunks 64-95 of 180"), and because nothing is written until the end,
+the document's previous chunks stay searchable.
+
+---
+
 ## Document state follows job outcome via OnPermanentFailure hook
 
 **Decision:** Documents have their own state machine

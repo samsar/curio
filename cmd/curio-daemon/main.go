@@ -198,6 +198,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		BaseURL: cfg.Embedding.BaseURL,
 		Model:   cfg.Embedding.Model,
 		Dim:     cfg.Embedding.Dim,
+		Timeout: time.Duration(cfg.Embedding.TimeoutSeconds) * time.Second,
 	})
 	if err != nil {
 		return nil, err

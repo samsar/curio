@@ -58,6 +58,10 @@ type Embedding struct {
 	// AutoPull downloads the embedding model via Ollama at startup if it isn't
 	// present locally. Default true. Set false on metered/offline setups.
 	AutoPull bool `yaml:"auto_pull"`
+	// TimeoutSeconds bounds one embed request. The indexer sends at most 32
+	// chunks per request, so the default of 60 leaves room for CPU-only
+	// Ollama and for requests queued behind the other index workers'.
+	TimeoutSeconds int `yaml:"timeout_seconds"`
 	// DocumentPrefix / QueryPrefix are task-instruction prefixes prepended
 	// before embedding. nomic-embed-text is a prefixed model and REQUIRES
 	// these ("search_document: " for indexed text, "search_query: " for
@@ -187,6 +191,7 @@ func Default() Config {
 			Dim:            store.EmbeddingDim,
 			BaseURL:        "http://localhost:11434",
 			AutoPull:       true,
+			TimeoutSeconds: 60,
 			DocumentPrefix: "search_document: ",
 			QueryPrefix:    "search_query: ",
 		},
@@ -351,6 +356,9 @@ func (c Config) Validate() error {
 	}
 	if c.Embedding.BaseURL == "" {
 		return errors.New("embedding.base_url must not be empty")
+	}
+	if c.Embedding.TimeoutSeconds <= 0 {
+		return fmt.Errorf("embedding.timeout_seconds must be positive, got %d", c.Embedding.TimeoutSeconds)
 	}
 	if c.Chunking.SizeTokens <= 0 {
 		return fmt.Errorf("chunking.size_tokens must be positive, got %d", c.Chunking.SizeTokens)
