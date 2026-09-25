@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -23,61 +24,68 @@ var _ store.DocumentStore = (*Documents)(nil)
 
 func NewDocuments(db *DB) *Documents { return &Documents{db: db} }
 
-func (s *Documents) Upsert(ctx context.Context, d *store.Document) error {
-	if d.ID == "" {
-		d.ID = uuid.NewString()
-	}
+func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 	if d.TenantID == "" {
-		return fmt.Errorf("documents: tenant_id required")
+		return errors.New("documents: tenant_id required")
 	}
 	if d.URL == "" {
-		return fmt.Errorf("documents: url required")
+		return errors.New("documents: url required")
 	}
-	if d.ContentType == "" {
-		d.ContentType = store.ContentTypeUnknown
+	if d.CurrentExtractionID != nil {
+		return errors.New("documents: a new document has no current extraction")
 	}
-	if d.State == "" {
-		d.State = store.DocStatePending
+	doc := *d
+	if doc.ID == "" {
+		doc.ID = uuid.NewString()
 	}
+	doc.State = cmp.Or(doc.State, store.DocStatePending)
+	doc.ContentType = cmp.Or(doc.ContentType, store.ContentTypeUnknown)
 
-	const q = `
-	INSERT INTO documents (
-		id, tenant_id, url, url_canonical, content_type, title, author,
-		published_at, language, word_count, current_extraction_id, state
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT (tenant_id, url) DO UPDATE SET
-		url_canonical         = COALESCE(excluded.url_canonical, documents.url_canonical),
-		content_type          = excluded.content_type,
-		title                 = COALESCE(excluded.title, documents.title),
-		author                = COALESCE(excluded.author, documents.author),
-		published_at          = COALESCE(excluded.published_at, documents.published_at),
-		language              = COALESCE(excluded.language, documents.language),
-		word_count            = COALESCE(excluded.word_count, documents.word_count),
-		current_extraction_id = COALESCE(excluded.current_extraction_id, documents.current_extraction_id),
-		state                 = excluded.state
-	RETURNING id, created_at, updated_at`
-
-	row := s.db.QueryRowContext(ctx, q,
-		d.ID, d.TenantID, d.URL,
-		strPtr(d.URLCanonical),
-		d.ContentType,
-		strPtr(d.Title), strPtr(d.Author),
-		timePtr(d.PublishedAt),
-		strPtr(d.Language),
-		intPtr(d.WordCount),
-		strPtr(d.CurrentExtractionID),
-		d.State,
-	)
 	var createdAt, updatedAt string
-	if err := row.Scan(&d.ID, &createdAt, &updatedAt); err != nil {
-		return fmt.Errorf("upsert document: %w", err)
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO documents (
+			id, tenant_id, url, url_canonical, content_type, title, author,
+			published_at, language, word_count, state
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		RETURNING created_at, updated_at`,
+		doc.ID, doc.TenantID, doc.URL,
+		strPtr(doc.URLCanonical),
+		doc.ContentType,
+		strPtr(doc.Title), strPtr(doc.Author),
+		timePtr(doc.PublishedAt),
+		strPtr(doc.Language),
+		intPtr(doc.WordCount),
+		doc.State,
+	).Scan(&createdAt, &updatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("document for (tenant, url) %s: %w", doc.URL, store.ErrConflict)
+		}
+		return fmt.Errorf("insert document: %w", err)
 	}
-	var err error
-	if d.CreatedAt, err = parseTime(createdAt); err != nil {
+	if doc.CreatedAt, err = parseTime(createdAt); err != nil {
 		return err
 	}
-	d.UpdatedAt, err = parseTime(updatedAt)
-	return err
+	if doc.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return err
+	}
+	*d = doc
+	return nil
+}
+
+func (s *Documents) ApplyFetch(ctx context.Context, id string, m store.FetchedMetadata) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE documents SET
+			content_type = ?, url_canonical = ?, title = ?, author = ?, language = ?,
+			published_at = ?, current_extraction_id = ?, state = ?
+		WHERE id = ?`,
+		m.ContentType, strPtr(m.URLCanonical), strPtr(m.Title), strPtr(m.Author), strPtr(m.Language),
+		timePtr(m.PublishedAt), m.ExtractionID, store.DocStatePending,
+		id)
+	if err != nil {
+		return fmt.Errorf("apply fetch to document %s: %w", id, err)
+	}
+	return ensureRow(res, "document")
 }
 
 func (s *Documents) GetByID(ctx context.Context, id string) (*store.Document, error) {

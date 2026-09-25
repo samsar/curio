@@ -98,7 +98,7 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 				ContentType: store.ContentTypeUnknown,
 				State:       store.DocStatePending,
 			}
-			if err := d.Documents.Upsert(ctx, doc); err != nil {
+			if err := d.Documents.Create(ctx, doc); err != nil {
 				resp.appendError(err.Error())
 				continue
 			}

@@ -19,46 +19,122 @@ import (
 
 // ---------- DocumentStore ----------
 
-func TestDocuments_UpsertAndGet(t *testing.T) {
+func TestDocuments_CreateAndGet(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 	docs := NewDocuments(db)
 
-	d := &store.Document{
-		TenantID:    "local",
-		URL:         "https://example.com/x",
-		ContentType: store.ContentTypeArticle,
-		State:       store.DocStatePending,
-	}
-	require.NoError(t, docs.Upsert(ctx, d))
+	d := &store.Document{TenantID: "local", URL: "https://example.com/x"}
+	require.NoError(t, docs.Create(ctx, d))
 	assert.NotEmpty(t, d.ID)
 	assert.False(t, d.CreatedAt.IsZero())
+	assert.False(t, d.UpdatedAt.IsZero())
+	assert.Equal(t, store.DocStatePending, d.State, "defaulted on insert")
+	assert.Equal(t, store.ContentTypeUnknown, d.ContentType, "defaulted on insert")
 
 	got, err := docs.GetByID(ctx, d.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "https://example.com/x", got.URL)
 	assert.Equal(t, store.DocStatePending, got.State)
+	assert.Equal(t, store.ContentTypeUnknown, got.ContentType)
+	assert.Equal(t, d.CreatedAt, got.CreatedAt)
+
+	title := "Given"
+	explicit := &store.Document{ID: "doc-explicit", TenantID: "local", URL: "https://example.com/y",
+		State: store.DocStateDead, ContentType: store.ContentTypeRepo, Title: &title}
+	require.NoError(t, docs.Create(ctx, explicit))
+	got, err = docs.GetByID(ctx, "doc-explicit")
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateDead, got.State)
+	assert.Equal(t, store.ContentTypeRepo, got.ContentType)
+	require.NotNil(t, got.Title)
+	assert.Equal(t, "Given", *got.Title)
 }
 
-func TestDocuments_UpsertIsIdempotentOnURL(t *testing.T) {
+func TestDocuments_Create_Rejects(t *testing.T) {
+	ctx := context.Background()
+	docs := NewDocuments(newTestDB(t))
+	first := &store.Document{TenantID: "local", URL: "https://x.com/"}
+	require.NoError(t, docs.Create(ctx, first))
+
+	dup := &store.Document{TenantID: "local", URL: "https://x.com/"}
+	err := docs.Create(ctx, dup)
+	require.ErrorIs(t, err, store.ErrConflict)
+	assert.Empty(t, dup.ID, "a failed create leaves the input as it was")
+
+	sameID := &store.Document{ID: first.ID, TenantID: "local", URL: "https://x.com/other"}
+	require.ErrorIs(t, docs.Create(ctx, sameID), store.ErrConflict)
+
+	otherTenant := &store.Document{TenantID: "other", URL: "https://x.com/"}
+	require.NoError(t, docs.Create(ctx, otherTenant), "the URL is unique per tenant")
+
+	extID := uuid.NewString()
+	require.Error(t, docs.Create(ctx, &store.Document{TenantID: "local", URL: "https://x.com/e",
+		CurrentExtractionID: &extID}))
+	require.Error(t, docs.Create(ctx, &store.Document{TenantID: "local"}))
+	require.Error(t, docs.Create(ctx, &store.Document{URL: "https://x.com/t"}))
+}
+
+// TestDocuments_ApplyFetch: the fetch-derived columns describe the current
+// extraction, so a second fetch that finds no author clears the first
+// fetch's author instead of keeping it.
+func TestDocuments_ApplyFetch(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
-	docs := NewDocuments(db)
+	docs, exts := NewDocuments(db), NewExtractions(db)
 
-	d1 := &store.Document{TenantID: "local", URL: "https://x.com/", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d1))
+	words := 1200
+	d := &store.Document{TenantID: "local", URL: "https://example.com/post", WordCount: &words,
+		State: store.DocStateFetched}
+	require.NoError(t, docs.Create(ctx, d))
+	newExtraction := func() string {
+		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK}
+		require.NoError(t, exts.Create(ctx, e))
+		return e.ID
+	}
+	str := func(s string) *string { return &s }
+	published := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
 
-	title := "Updated"
-	d2 := &store.Document{TenantID: "local", URL: "https://x.com/", ContentType: store.ContentTypeArticle, Title: &title}
-	require.NoError(t, docs.Upsert(ctx, d2))
-
-	// Same id should be returned for the (tenant, url) key.
-	assert.Equal(t, d1.ID, d2.ID)
-
-	got, err := docs.GetByURL(ctx, "local", "https://x.com/")
+	first := newExtraction()
+	require.NoError(t, docs.ApplyFetch(ctx, d.ID, store.FetchedMetadata{
+		ExtractionID: first, ContentType: store.ContentTypeArticle,
+		URLCanonical: str("https://example.com/post-canonical"), Title: str("Post"),
+		Author: str("Ada"), Language: str("en"), PublishedAt: &published,
+	}))
+	got, err := docs.GetByID(ctx, d.ID)
 	require.NoError(t, err)
-	require.NotNil(t, got.Title)
-	assert.Equal(t, "Updated", *got.Title)
+	assert.Equal(t, store.DocStatePending, got.State, "pending until indexed")
+	assert.Equal(t, store.ContentTypeArticle, got.ContentType)
+	assert.Equal(t, first, *got.CurrentExtractionID)
+	assert.Equal(t, "https://example.com/post-canonical", *got.URLCanonical)
+	assert.Equal(t, "Ada", *got.Author)
+	assert.Equal(t, published, *got.PublishedAt)
+
+	second := newExtraction()
+	require.NoError(t, docs.ApplyFetch(ctx, d.ID, store.FetchedMetadata{
+		ExtractionID: second, ContentType: store.ContentTypeVideo, Title: str("Post, again"),
+	}))
+	got, err = docs.GetByID(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, second, *got.CurrentExtractionID)
+	assert.Equal(t, store.ContentTypeVideo, got.ContentType)
+	assert.Equal(t, "Post, again", *got.Title)
+	assert.Nil(t, got.URLCanonical, "cleared")
+	assert.Nil(t, got.Author, "cleared")
+	assert.Nil(t, got.Language, "cleared")
+	assert.Nil(t, got.PublishedAt, "cleared")
+	require.NotNil(t, got.WordCount)
+	assert.Equal(t, 1200, *got.WordCount, "not a fetch-derived column")
+	assert.Equal(t, d.CreatedAt, got.CreatedAt)
+
+	err = docs.ApplyFetch(ctx, uuid.NewString(), store.FetchedMetadata{ExtractionID: second, ContentType: store.ContentTypeArticle})
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	err = docs.ApplyFetch(ctx, d.ID, store.FetchedMetadata{ExtractionID: uuid.NewString(), ContentType: store.ContentTypeArticle})
+	require.ErrorContains(t, err, "current_extraction_id references missing")
+	got, err = docs.GetByID(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, second, *got.CurrentExtractionID, "a rejected fetch changes nothing")
 }
 
 func TestDocuments_GetByID_NotFound(t *testing.T) {
@@ -71,7 +147,7 @@ func TestDocuments_UpdateState(t *testing.T) {
 	ctx := context.Background()
 	docs := NewDocuments(newTestDB(t))
 	d := &store.Document{TenantID: "local", URL: "https://example.com/y", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	require.NoError(t, docs.UpdateState(ctx, d.ID, store.DocStateFetched))
 	got, _ := docs.GetByID(ctx, d.ID)
@@ -93,7 +169,7 @@ func TestExtractions_CreateAndList(t *testing.T) {
 	exts := NewExtractions(db)
 
 	d := &store.Document{TenantID: "local", URL: "https://example.com/z", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	mdPath := "z/extraction1.md"
 	e1 := &store.DocumentExtraction{
@@ -129,7 +205,7 @@ func TestDocuments_SetCurrentExtractionTriggerEnforced(t *testing.T) {
 	docs := NewDocuments(db)
 
 	d := &store.Document{TenantID: "local", URL: "https://example.com/trig", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	// Pointing at a missing extraction ID must be rejected by the trigger.
 	err := docs.SetCurrentExtraction(ctx, d.ID, uuid.NewString())
@@ -207,7 +283,7 @@ func TestBookmarks_LinkDocument(t *testing.T) {
 	docs := NewDocuments(db)
 
 	d := &store.Document{TenantID: "local", URL: "https://example.com/link", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	b := &store.Bookmark{TenantID: "local", URL: "https://example.com/link", Source: store.SourceManual, SavedAt: time.Now().UTC()}
 	require.NoError(t, bms.Create(ctx, b))
@@ -502,7 +578,7 @@ func TestJobs_PruneOlderThan_KeepsLiveWork(t *testing.T) {
 	docs := NewDocuments(db)
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/queued"}
-	require.NoError(t, docs.Upsert(ctx, doc))
+	require.NoError(t, docs.Create(ctx, doc))
 	queued := &store.Job{TenantID: "local", Kind: store.JobKindFetch,
 		Payload: json.RawMessage(`{"document_id":"` + doc.ID + `"}`)}
 	require.NoError(t, q.Enqueue(ctx, queued))
@@ -561,7 +637,7 @@ func TestJobs_DeleteByStatus_FinishedOnly(t *testing.T) {
 func seedDoc(t *testing.T, docs *Documents, url string, state store.DocState) *store.Document {
 	t.Helper()
 	d := &store.Document{TenantID: "local", URL: url, State: state}
-	require.NoError(t, docs.Upsert(context.Background(), d))
+	require.NoError(t, docs.Create(context.Background(), d))
 	return d
 }
 
@@ -630,7 +706,7 @@ func TestDocuments_RequeueFetch_NotFound(t *testing.T) {
 	db := newTestDB(t)
 	docs := NewDocuments(db)
 	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs"}
-	require.NoError(t, docs.Upsert(context.Background(), other))
+	require.NoError(t, docs.Create(context.Background(), other))
 
 	for _, id := range []string{uuid.NewString(), other.ID} {
 		_, err := docs.RequeueFetch(context.Background(), "local", id)
@@ -661,7 +737,7 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 		byState[st] = seedDoc(t, docs, "https://example.com/"+string(st), st)
 	}
 	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs", State: store.DocStateFailed}
-	require.NoError(t, docs.Upsert(ctx, other))
+	require.NoError(t, docs.Create(ctx, other))
 
 	n, err := docs.RequeueFetchByStates(ctx, "local",
 		[]store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed})

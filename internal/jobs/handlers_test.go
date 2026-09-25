@@ -101,7 +101,7 @@ func TestFetchHandler_HappyPath(t *testing.T) {
 
 	// Create a document in pending state.
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/article", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	require.NoError(t, deps.Documents.Create(ctx, doc))
 
 	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
 	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}
@@ -134,6 +134,42 @@ func TestFetchHandler_HappyPath(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
+// TestFetchHandler_RefetchClearsStaleMetadata: the document's metadata
+// describes its current extraction, so what the new fetch didn't find is
+// cleared rather than carried over from the previous one.
+func TestFetchHandler_RefetchClearsStaleMetadata(t *testing.T) {
+	deps, _, ff := newTestDeps(t)
+	ctx := context.Background()
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/moved"}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+	payload, err := json.Marshal(FetchPayload{DocumentID: doc.ID})
+	require.NoError(t, err)
+	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}
+
+	ff.res.Author = "Ada"
+	ff.res.FinalURL = "https://example.com/moved-here"
+	require.NoError(t, FetchHandler(deps)(ctx, job))
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Author)
+	assert.Equal(t, "Ada", *got.Author)
+	require.NotNil(t, got.URLCanonical)
+	assert.Equal(t, "https://example.com/moved-here", *got.URLCanonical)
+	first := *got.CurrentExtractionID
+
+	ff.res.Author = ""
+	ff.res.FinalURL = ""
+	require.NoError(t, FetchHandler(deps)(ctx, job))
+	got, err = deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, first, *got.CurrentExtractionID)
+	assert.Nil(t, got.Author, "no author in the new extraction")
+	assert.Nil(t, got.URLCanonical, "no redirect in the new fetch")
+	require.NotNil(t, got.Title)
+	assert.Equal(t, "Article Title", *got.Title)
+	assert.Equal(t, store.ContentTypeArticle, got.ContentType)
+}
+
 // TestFetchHandler_ExtractionStatus: a result flagged Partial (fetched,
 // but missing its primary content) is stored as a partial extraction.
 func TestFetchHandler_ExtractionStatus(t *testing.T) {
@@ -143,7 +179,7 @@ func TestFetchHandler_ExtractionStatus(t *testing.T) {
 			ff.res.Partial = partial
 			ctx := context.Background()
 			doc := &store.Document{TenantID: "local", URL: "https://example.com/video", ContentType: store.ContentTypeVideo}
-			require.NoError(t, deps.Documents.Upsert(ctx, doc))
+			require.NoError(t, deps.Documents.Create(ctx, doc))
 
 			payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
 			require.NoError(t, FetchHandler(deps)(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}))
@@ -167,7 +203,7 @@ func TestFetchHandler_FetcherError_Retryable(t *testing.T) {
 	ff.err = errors.New("network timeout")
 
 	doc := &store.Document{TenantID: "local", URL: "https://x", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(context.Background(), doc))
+	require.NoError(t, deps.Documents.Create(context.Background(), doc))
 
 	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
 	err := FetchHandler(deps)(context.Background(), &store.Job{Payload: payload})
@@ -192,7 +228,7 @@ func TestFetchHandler_DeadLinkSentinelSurvivesBridge(t *testing.T) {
 	ff.err = &fetcher.PermanentError{Err: fetcher.ErrDeadLink}
 
 	doc := &store.Document{TenantID: "local", URL: "https://x/gone", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(context.Background(), doc))
+	require.NoError(t, deps.Documents.Create(context.Background(), doc))
 
 	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
 	err := FetchHandler(deps)(context.Background(), &store.Job{Payload: payload})
@@ -206,7 +242,7 @@ func TestMarkDocFailed_DeadLinkGoesDead(t *testing.T) {
 	ctx := context.Background()
 
 	doc := &store.Document{TenantID: "local", URL: "https://x/gone", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	require.NoError(t, deps.Documents.Create(ctx, doc))
 
 	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
 	job := &store.Job{Payload: payload}
@@ -232,7 +268,7 @@ func TestMarkDocFailed_FinalLoginWallGoesFailed(t *testing.T) {
 	ctx := context.Background()
 
 	doc := &store.Document{TenantID: "local", URL: "https://x/thin", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	require.NoError(t, deps.Documents.Create(ctx, doc))
 	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
 
 	cause := &fetcher.PermanentError{Err: fmt.Errorf("native: %w (extracted text < 500 bytes)", fetcher.ErrLoginWall)}
@@ -256,7 +292,7 @@ func TestIndexHandler_HappyPath(t *testing.T) {
 	ctx := context.Background()
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/idx", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	require.NoError(t, deps.Documents.Create(ctx, doc))
 
 	// Run the fetch first to set everything up.
 	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
@@ -282,7 +318,7 @@ func TestIndexHandler_BookmarkTagsAreSearchable(t *testing.T) {
 	ctx := context.Background()
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/tagged", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	require.NoError(t, deps.Documents.Create(ctx, doc))
 
 	// Bookmark with a distinctive tag absent from the fetched content.
 	docID := doc.ID
@@ -308,7 +344,7 @@ func TestIndexHandler_MissingExtraction_Permanent(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	ctx := context.Background()
 	doc := &store.Document{TenantID: "local", URL: "https://x", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	require.NoError(t, deps.Documents.Create(ctx, doc))
 	// No extraction created.
 
 	payload, _ := json.Marshal(IndexPayload{DocumentID: doc.ID})
@@ -325,7 +361,7 @@ func TestWorker_FullFetchIndexChain(t *testing.T) {
 	defer cancel()
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/e2e", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	require.NoError(t, deps.Documents.Create(ctx, doc))
 
 	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
 	require.NoError(t, deps.Queue.Enqueue(ctx, &store.Job{
@@ -367,7 +403,7 @@ func TestWorker_DeadLinkMarksDocDead(t *testing.T) {
 	defer cancel()
 
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/gone", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(ctx, doc))
+	require.NoError(t, deps.Documents.Create(ctx, doc))
 
 	payload, _ := json.Marshal(FetchPayload{DocumentID: doc.ID})
 	require.NoError(t, deps.Queue.Enqueue(ctx, &store.Job{

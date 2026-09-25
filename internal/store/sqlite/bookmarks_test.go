@@ -18,9 +18,9 @@ func TestBookmarks_TagsForDocument(t *testing.T) {
 	bms := NewBookmarks(db)
 
 	d1 := &store.Document{TenantID: "local", URL: "https://x/a", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d1))
+	require.NoError(t, docs.Create(ctx, d1))
 	d2 := &store.Document{TenantID: "local", URL: "https://x/b", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d2))
+	require.NoError(t, docs.Create(ctx, d2))
 
 	// Two bookmarks (distinct sources) for d1 with overlapping tags.
 	require.NoError(t, bms.Create(ctx, &store.Bookmark{

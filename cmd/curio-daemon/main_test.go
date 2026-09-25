@@ -249,7 +249,7 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 		title := fmt.Sprintf("Article %d", i)
 		d := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/%d", i),
 			Title: &title, State: store.DocStateFetched}
-		require.NoError(t, docs.Upsert(context.Background(), d))
+		require.NoError(t, docs.Create(context.Background(), d))
 		chunks.dvs = append(chunks.dvs, store.DocVector{DocumentID: d.ID, Vector: []float32{1, 0, 0}})
 	}
 

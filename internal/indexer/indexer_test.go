@@ -96,7 +96,7 @@ func seedDocAndExtraction(t *testing.T, db *sqlitestore.DB, tenant, url string) 
 	exts := sqlitestore.NewExtractions(db)
 
 	d := &store.Document{TenantID: tenant, URL: url, ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
 	require.NoError(t, exts.Create(ctx, e))

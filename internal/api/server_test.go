@@ -132,7 +132,7 @@ func (s *testServer) count(t *testing.T, table string) int {
 func (s *testServer) seedDocument(t *testing.T, url string, state store.DocState) *store.Document {
 	t.Helper()
 	doc := &store.Document{TenantID: "local", URL: url, State: state}
-	require.NoError(t, s.deps.Documents.Upsert(context.Background(), doc))
+	require.NoError(t, s.deps.Documents.Create(context.Background(), doc))
 	return doc
 }
 

@@ -102,7 +102,7 @@ func TestWorker_JobInterruptedByShutdownIsRequeued(t *testing.T) {
 			ctx := context.Background()
 
 			doc := &store.Document{TenantID: "local", URL: "https://example.com/x", ContentType: store.ContentTypeArticle}
-			require.NoError(t, deps.Documents.Upsert(ctx, doc))
+			require.NoError(t, deps.Documents.Create(ctx, doc))
 			payload, err := json.Marshal(FetchPayload{DocumentID: doc.ID})
 			require.NoError(t, err)
 			job := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload}
@@ -259,7 +259,7 @@ func TestWorker_RecoverOrphans(t *testing.T) {
 	}
 	newDoc := func(url string) *store.Document {
 		d := &store.Document{TenantID: "local", URL: url, ContentType: store.ContentTypeArticle}
-		require.NoError(t, deps.Documents.Upsert(ctx, d))
+		require.NoError(t, deps.Documents.Create(ctx, d))
 		return d
 	}
 
@@ -309,7 +309,7 @@ func TestWorker_RecoverOrphans_HooksOutliveShutdown(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	doc := &store.Document{TenantID: "local", URL: "https://example.com/crashes-the-daemon",
 		ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Upsert(context.Background(), doc))
+	require.NoError(t, deps.Documents.Create(context.Background(), doc))
 	payload, err := json.Marshal(FetchPayload{DocumentID: doc.ID})
 	require.NoError(t, err)
 	orphan := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Payload: payload,

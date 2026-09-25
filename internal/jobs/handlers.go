@@ -92,8 +92,8 @@ func MarkDocFailed(d Deps) PermFailHook {
 //  2. Call Fetcher.Fetch(ctx, document.URL).
 //  3. Write the resulting markdown to $CURIO_HOME/content/<doc>/<ext>.md.
 //  4. Create a document_extractions row pointing at that file.
-//  5. Update document with extracted title/author/content_type and set
-//     current_extraction_id.
+//  5. Apply the fetched metadata to the document and point
+//     current_extraction_id at the new extraction.
 //  6. Enqueue an index job for the same document.
 //
 // Idempotent on retry: each attempt creates a new extraction row (history)
@@ -168,37 +168,7 @@ func FetchHandler(d Deps) HandlerFunc {
 			return fmt.Errorf("create extraction: %w", err)
 		}
 
-		// Refresh the document with extracted metadata. Upsert preserves
-		// (tenant_id, url) and updates content_type/title/author/state.
-		title := res.Title
-		var titlePtr *string
-		if title != "" {
-			titlePtr = &title
-		}
-		var authorPtr *string
-		if res.Author != "" {
-			authorPtr = &res.Author
-		}
-		var langPtr *string
-		if res.Language != "" {
-			langPtr = &res.Language
-		}
-		updated := &store.Document{
-			ID:                  doc.ID,
-			TenantID:            doc.TenantID,
-			URL:                 doc.URL,
-			ContentType:         cmp.Or(res.ContentType, doc.ContentType),
-			Title:               titlePtr,
-			Author:              authorPtr,
-			Language:            langPtr,
-			PublishedAt:         res.PublishedAt,
-			State:               store.DocStatePending, // still pending until index step
-			CurrentExtractionID: &ext.ID,
-		}
-		if res.FinalURL != "" && res.FinalURL != doc.URL {
-			updated.URLCanonical = &res.FinalURL
-		}
-		if err := d.Documents.Upsert(ctx, updated); err != nil {
+		if err := d.Documents.ApplyFetch(ctx, doc.ID, fetchedMetadata(doc, res, ext.ID)); err != nil {
 			return fmt.Errorf("update document: %w", err)
 		}
 
@@ -214,6 +184,32 @@ func FetchHandler(d Deps) HandlerFunc {
 
 		return nil
 	}
+}
+
+// fetchedMetadata maps a fetch result onto the document columns it
+// describes. A fetcher that can't tell the content type keeps the
+// document's current one.
+func fetchedMetadata(doc *store.Document, res *fetcher.Result, extractionID string) store.FetchedMetadata {
+	m := store.FetchedMetadata{
+		ExtractionID: extractionID,
+		ContentType:  cmp.Or(res.ContentType, doc.ContentType),
+		Title:        nonEmpty(res.Title),
+		Author:       nonEmpty(res.Author),
+		Language:     nonEmpty(res.Language),
+		PublishedAt:  res.PublishedAt,
+	}
+	if res.FinalURL != doc.URL {
+		m.URLCanonical = nonEmpty(res.FinalURL)
+	}
+	return m
+}
+
+// nonEmpty is s as a nullable column value: nil when s is empty.
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // IndexHandler builds the closure that runs one index job:

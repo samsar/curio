@@ -2557,3 +2557,28 @@ violation; the lint rules do.
 consumer (search, insight, jobs, api) already takes `store.*` interfaces,
 and a hosted implementation has to provide these methods to serve the API
 anyway.
+
+---
+
+## Documents: explicit Create and ApplyFetch, no upsert
+
+**Decision:** `DocumentStore` has no upsert. `Create` is a plain INSERT
+that returns `ErrConflict` for an existing `(tenant_id, url)`; ingest's
+get-or-create stays private to the store (see "Bookmark ingest" below).
+`ApplyFetch` is the only way a fetch result reaches the documents row: one
+UPDATE by id that points `current_extraction_id` at the new extraction,
+writes `content_type`, `url_canonical`, `title`, `author`, `language` and
+`published_at` exactly as given (nil writes NULL), and sets the state to
+`pending` until the index step marks it `fetched`.
+
+**Why:** `Upsert` served two callers with different needs. Its ON CONFLICT
+branch COALESCEd every nullable column, so a refetch could never clear an
+author or canonical URL left by an earlier extraction, yet it always
+overwrote `content_type` and `state` and quietly defaulted empty values;
+used as get-or-create, it could rewrite the state of a row another request
+had just created.
+
+**Verbatim writes:** those columns describe `current_extraction_id`, so a
+value the new extraction lacks must not survive from the old one. Clients
+already fall back to the URL or the bookmark title when `title` is NULL.
+`word_count` is left alone because no fetcher sets it.

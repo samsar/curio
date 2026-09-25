@@ -27,7 +27,7 @@ func seedDocs(t *testing.T, db *DB, tenantID string, urls ...string) []string {
 			URL:         u,
 			ContentType: store.ContentTypeArticle,
 		}
-		require.NoError(t, docs.Upsert(ctx, d))
+		require.NoError(t, docs.Create(ctx, d))
 
 		// Each test wants a current extraction to attach chunks to.
 		e := &store.DocumentExtraction{
@@ -198,7 +198,7 @@ func TestChunks_SearchFilters(t *testing.T) {
 	byURL := map[string]string{}
 	for _, s := range seeds {
 		d := &store.Document{TenantID: "local", URL: s.url, ContentType: s.ctype}
-		require.NoError(t, docsStore.Upsert(ctx, d))
+		require.NoError(t, docsStore.Create(ctx, d))
 		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, docsStore.SetCurrentExtraction(ctx, d.ID, e.ID))

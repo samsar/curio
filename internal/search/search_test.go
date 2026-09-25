@@ -89,7 +89,7 @@ func seedCorpus(t *testing.T, db *sqlitestore.DB) (docs *sqlitestore.Documents, 
 
 	for _, c := range corpus {
 		d := &store.Document{TenantID: "local", URL: c.url, ContentType: store.ContentTypeArticle}
-		require.NoError(t, docs.Upsert(ctx, d))
+		require.NoError(t, docs.Create(ctx, d))
 		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, docs.SetCurrentExtraction(ctx, d.ID, e.ID))
@@ -220,7 +220,7 @@ func TestEngine_Related_UnindexedDocIsEmpty(t *testing.T) {
 	// A document with no chunks: create one without indexing it.
 	ctx := context.Background()
 	d := &store.Document{TenantID: "local", URL: "https://example.com/pending", ContentType: store.ContentTypeArticle}
-	require.NoError(t, docs.Upsert(ctx, d))
+	require.NoError(t, docs.Create(ctx, d))
 
 	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
 	res, err := engine.Related(ctx, RelatedRequest{TenantID: "local", DocumentID: d.ID, K: 5})
@@ -489,7 +489,7 @@ func TestEngine_FanoutScalesWithK(t *testing.T) {
 	for i := range 60 {
 		d := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/zebra/%d", i),
 			ContentType: store.ContentTypeArticle}
-		require.NoError(t, docs.Upsert(ctx, d))
+		require.NoError(t, docs.Create(ctx, d))
 		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, chunks.ReplaceForDocument(ctx, d.ID, e.ID, "", nil,

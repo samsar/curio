@@ -97,7 +97,7 @@ func newEngineFixture(t *testing.T, sizes ...int) *engineFixture {
 				TenantID: tenant, URL: fmt.Sprintf("https://example.com/%d/%d", g, i),
 				Title: &title, State: store.DocStateFetched,
 			}
-			require.NoError(t, docs.Upsert(context.Background(), d))
+			require.NoError(t, docs.Create(context.Background(), d))
 			v := make([]float32, len(sizes))
 			v[g] = 1
 			f.vectors.dvs = append(f.vectors.dvs, store.DocVector{DocumentID: d.ID, Vector: v})
