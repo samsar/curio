@@ -45,9 +45,10 @@ linters:
         - fmt.Fprint
         - os.Setenv
     errorlint:
-      # We deliberately use `fmt.Errorf("%w: %v", sentinel, err)` to wrap
-      # the sentinel for errors.Is matching while keeping the wrapped err
-      # readable. Go forbids two %w; this is the standard workaround.
+      # Some older call sites wrap a sentinel with %w and format the cause
+      # with %v. fmt.Errorf has accepted several %w verbs since Go 1.20, so new
+      # code uses `fmt.Errorf("%w: %w", sentinel, err)` to keep both in the
+      # chain; this check stays off until the remaining %v sites are migrated.
       errorf: false
     misspell:
       ignore-rules:

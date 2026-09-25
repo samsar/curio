@@ -1584,6 +1584,23 @@ query rewriting) share the same seam, and an Anthropic/Claude implementation can
 drop in later without touching callers. The embedding model (nomic-embed-text)
 can't generate, so a generation model must be pulled separately.
 
+**Retry policy:** `Generate` retries only what a retry can fix, with a short
+linear backoff (0.5 s, 1 s) and `retries` = 2 by default (negative = none):
+
+| Failure | Retried? | Why |
+|---|---|---|
+| HTTP 5xx | yes | the model may still be loading, or Ollama is restarting |
+| connection refused / reset, EOF mid-response | yes | Ollama starting or restarting |
+| per-attempt timeout (`generation.timeout_seconds`) | **no** | at 120 s per attempt a timeout isn't a blip; retrying tripled the stall (≈6 min per cluster label) |
+| HTTP 404 | no | the model isn't pulled; wraps `ErrModelNotLoaded` |
+| other 4xx, undecodable or oversized (> 1 MiB) reply | no | the same request gets the same answer |
+| caller's context done | no | returned at once, wrapping `context.Canceled` / `DeadlineExceeded` |
+
+Every non-200 is a typed `*StatusError{Code, Body}` (body capped at 2 KiB), and
+transport errors are wrapped `%w: %w` so both `ErrOllamaUnreachable` and the
+cause (e.g. `ECONNREFUSED`, `context.DeadlineExceeded`) stay matchable — the old
+`%w: %v` wrapping hid the timeout, which is why timeouts were being retried.
+
 **Model auto-pull:** because a required model being absent is a poor
 first-run experience, the daemon pulls missing models on startup via Ollama's
 `/api/pull` (shared `internal/ollama.PullModel`; both the embedding and
