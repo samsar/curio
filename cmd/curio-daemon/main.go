@@ -409,7 +409,6 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 		K:              cfg.Insight.KNN,
 		MinSimilarity:  cfg.Insight.MinSimilarity,
 		MinClusterSize: cfg.Insight.MinClusterSize,
-		Center:         cfg.Insight.CenterVectors,
 	})
 	return insight.New(docs, chunks, insights, clusterer, llmLabeler,
 		insight.Config{Labeling: cfg.Insight.Labeling, Center: cfg.Insight.CenterVectors}, slog.Default()), nil

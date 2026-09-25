@@ -711,7 +711,7 @@ components:
         title:         { type: string }
         url:           { type: string }
         markdown_path: { type: string, description: "Absolute on-disk path to the member's extracted markdown" }
-        similarity:    { type: number, description: "Cosine similarity to the cluster medoid (0..1)" }
+        similarity:    { type: number, description: "Cosine similarity to the cluster centroid (0..1)" }
       required: [doc_id, url, similarity]
 
     Interest:
@@ -722,7 +722,7 @@ components:
         label:    { type: string, description: "Topic name; omitted when unlabeled" }
         summary:  { type: string }
         size:     { type: integer, description: "Number of member documents" }
-        cohesion: { type: number, description: "Mean member cosine to the medoid (0..1)" }
+        cohesion: { type: number, description: "Mean member cosine to the cluster centroid (0..1)" }
         members:
           type: array
           items: { $ref: "#/components/schemas/InterestMember" }

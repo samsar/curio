@@ -1,12 +1,16 @@
 package insight
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
-	"sort"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/samsar/curio/internal/store"
 )
@@ -26,15 +30,20 @@ type Config struct {
 	// TitlesPerCluster caps how many representative titles feed the labeler
 	// and are fetched per cluster. Default 12.
 	TitlesPerCluster int
-	// Center must match the clusterer's Center flag. When true, cohesion and
-	// per-member similarity are computed in the same mean-centered space the
-	// clusterer used, so the displayed numbers reflect the actual clustering
-	// rather than the anisotropic raw space. Wire both from the same config.
+	// Center subtracts the corpus mean vector before clustering. Embedding
+	// models like nomic-embed-text are anisotropic (their vectors sit in a
+	// narrow cone), so raw cosines are uniformly high and everything collapses
+	// into one giant cluster; centering removes that shared component so the
+	// residual topical structure drives the graph. Cohesion and member
+	// similarity are computed in the same space, so they describe the actual
+	// clustering. No default is applied here — the config layer owns it
+	// (default true).
 	Center bool
 }
 
-// Engine runs the clustering pipeline: read document vectors → cluster →
-// summarize (medoid + cohesion + member similarities) → label → persist.
+// Engine runs the clustering pipeline: read document vectors → prepare (center,
+// normalize) → cluster → summarize (centroid + cohesion + member similarities)
+// → label → persist.
 type Engine struct {
 	docs        store.DocumentStore
 	chunks      store.ChunkStore
@@ -99,7 +108,10 @@ func (e *Engine) Rebuild(ctx context.Context, tenantID string) (string, error) {
 		}
 	}
 
-	params, _ := json.Marshal(e.clusterer.Params())
+	params, err := e.runParams()
+	if err != nil {
+		return "", err
+	}
 	run := &store.ClusterRun{TenantID: tenantID, Algo: e.clusterer.Name(), Params: params}
 	if err := e.insights.CreateRun(ctx, run); err != nil {
 		return "", fmt.Errorf("create run: %w", err)
@@ -116,6 +128,18 @@ func (e *Engine) Rebuild(ctx context.Context, tenantID string) (string, error) {
 		return run.ID, err
 	}
 	return run.ID, nil
+}
+
+// runParams is the JSON recorded on a run: the clusterer's parameters plus the
+// engine's own vector preparation.
+func (e *Engine) runParams() ([]byte, error) {
+	params := maps.Clone(e.clusterer.Params())
+	params["center"] = e.cfg.Center
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return nil, fmt.Errorf("encode clusterer params: %w", err)
+	}
+	return raw, nil
 }
 
 // pruneStaleRuns drops every run for the tenant except the latest done run, so
@@ -140,17 +164,20 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 	n := len(dvs)
 	cws := make([]store.ClusterWithMembers, 0)
 	numNoise := 0
+	var clusterDur, labelDur time.Duration
 
 	if n > 0 {
-		points := make([]Point, n)
-		for i, dv := range dvs {
-			points[i] = Point{ID: dv.DocumentID, Vector: dv.Vector}
+		points, err := preparePoints(dvs, e.cfg.Center)
+		if err != nil {
+			return err
 		}
 
+		start := time.Now()
 		labels, err := e.clusterer.Cluster(ctx, points)
 		if err != nil {
 			return fmt.Errorf("cluster: %w", err)
 		}
+		clusterDur = time.Since(start)
 
 		groups := make(map[int][]int)
 		for i, l := range labels {
@@ -161,20 +188,9 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 			groups[l] = append(groups[l], i)
 		}
 
-		labelKeys := make([]int, 0, len(groups))
-		for l := range groups {
-			labelKeys = append(labelKeys, l)
-		}
-		sort.Ints(labelKeys)
-
-		// Summarize in the same space the clusterer used, so cohesion and
-		// member similarity are meaningful rather than saturated by anisotropy.
-		var mean []float64
-		if e.cfg.Center {
-			mean = corpusMean(points, len(points[0].Vector))
-		}
-		for _, l := range labelKeys {
-			members, cohesion := summarize(points, groups[l], mean)
+		start = time.Now()
+		for _, l := range slices.Sorted(maps.Keys(groups)) {
+			members, cohesion := summarize(points, groups[l])
 			info := ClusterInfo{Titles: e.titlesFor(ctx, members), Size: len(members)}
 			lab := e.label(ctx, info)
 
@@ -189,8 +205,10 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 			}
 			cws = append(cws, store.ClusterWithMembers{Cluster: c, Members: members})
 		}
+		labelDur = time.Since(start)
 	}
 
+	start := time.Now()
 	if err := e.insights.ReplaceClusters(ctx, runID, cws); err != nil {
 		return fmt.Errorf("write clusters: %w", err)
 	}
@@ -204,24 +222,87 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 		e.log.Warn("prune old cluster runs failed", "err", err)
 	}
 	e.log.Info("clustering done",
-		"tenant", tenantID, "documents", n, "clusters", len(cws), "noise", numNoise)
+		"tenant", tenantID, "documents", n, "clusters", len(cws), "noise", numNoise,
+		"cluster_ms", clusterDur.Milliseconds(), "label_ms", labelDur.Milliseconds(),
+		"persist_ms", time.Since(start).Milliseconds())
 	return nil
 }
 
-// summarize computes the cluster centroid, each member's cosine similarity to
-// it, and the cluster cohesion (mean member similarity). When mean is non-nil
-// it works in the mean-centered space (matching the clusterer), so the numbers
-// reflect the actual clustering. Members are returned ordered by similarity
-// descending (most representative first), with a stable tie-break on doc ID.
-func summarize(points []Point, idxs []int, mean []float64) ([]store.ClusterMember, float64) {
-	dim := len(points[idxs[0]].Vector)
-	centroid := make([]float64, dim)
-	units := make([][]float32, len(idxs))
-	for k, idx := range idxs {
-		u := unitResidual(points[idx].Vector, mean)
-		units[k] = u
-		for d := range dim {
-			centroid[d] += float64(u[d])
+// preparePoints turns document vectors into the unit vectors that both the
+// clusterer and summarize work on, mean-centering them first when center is
+// set (see Config.Center). Preparing once keeps a single n×d copy of the
+// corpus in memory.
+func preparePoints(dvs []store.DocVector, center bool) ([]Point, error) {
+	dim := len(dvs[0].Vector)
+	for _, dv := range dvs {
+		if dim == 0 || len(dv.Vector) != dim {
+			return nil, fmt.Errorf("document %s has a %d-dimensional vector, want %d",
+				dv.DocumentID, len(dv.Vector), dim)
+		}
+	}
+	var mean []float64
+	if center {
+		mean = corpusMean(dvs, dim)
+	}
+	points := make([]Point, len(dvs))
+	for i, dv := range dvs {
+		points[i] = Point{ID: dv.DocumentID, Vector: unitResidual(dv.Vector, mean)}
+	}
+	return points, nil
+}
+
+// corpusMean returns the element-wise mean of all vectors (dim-length), or nil
+// for fewer than two (nothing to center against).
+func corpusMean(dvs []store.DocVector, dim int) []float64 {
+	if len(dvs) < 2 {
+		return nil
+	}
+	mean := make([]float64, dim)
+	for _, dv := range dvs {
+		for d, v := range dv.Vector {
+			mean[d] += float64(v)
+		}
+	}
+	for d := range mean {
+		mean[d] /= float64(len(dvs))
+	}
+	return mean
+}
+
+// unitResidual returns the unit vector of v, first subtracting mean when it is
+// non-nil. A zero residual yields a zero vector, so the point gets no edges and
+// falls out as noise.
+func unitResidual(v []float32, mean []float64) []float32 {
+	residual := make([]float64, len(v))
+	var sum float64
+	for i, x := range v {
+		r := float64(x)
+		if mean != nil {
+			r -= mean[i]
+		}
+		residual[i] = r
+		sum += r * r
+	}
+	out := make([]float32, len(v))
+	if sum == 0 {
+		return out
+	}
+	inv := 1.0 / math.Sqrt(sum)
+	for i, r := range residual {
+		out[i] = float32(r * inv)
+	}
+	return out
+}
+
+// summarize computes the centroid of the members' prepared (unit) vectors,
+// each member's cosine similarity to it, and the cluster cohesion (mean member
+// similarity). Members are returned ordered by similarity descending (most
+// representative first), with a stable tie-break on doc ID.
+func summarize(points []Point, idxs []int) ([]store.ClusterMember, float64) {
+	centroid := make([]float64, len(points[idxs[0]].Vector))
+	for _, idx := range idxs {
+		for d, v := range points[idx].Vector {
+			centroid[d] += float64(v)
 		}
 	}
 	var cn float64
@@ -239,22 +320,20 @@ func summarize(points []Point, idxs []int, mean []float64) ([]store.ClusterMembe
 	var total float64
 	for k, idx := range idxs {
 		var s float64
-		for d := range dim {
-			s += float64(units[k][d]) * centroid[d]
+		for d, v := range points[idx].Vector {
+			s += float64(v) * centroid[d]
 		}
-		if s < 0 {
-			s = 0
-		}
+		s = max(s, 0)
 		members[k] = store.ClusterMember{DocumentID: points[idx].ID, Similarity: s}
 		total += s
 	}
 	cohesion := total / float64(len(idxs))
 
-	sort.SliceStable(members, func(a, b int) bool {
-		if members[a].Similarity != members[b].Similarity {
-			return members[a].Similarity > members[b].Similarity
+	slices.SortStableFunc(members, func(a, b store.ClusterMember) int {
+		if c := cmp.Compare(b.Similarity, a.Similarity); c != 0 {
+			return c
 		}
-		return members[a].DocumentID < members[b].DocumentID
+		return strings.Compare(a.DocumentID, b.DocumentID)
 	})
 	return members, cohesion
 }

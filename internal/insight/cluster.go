@@ -3,7 +3,7 @@
 //
 // The design keeps the algorithm swappable. A Clusterer takes points (a doc ID
 // + its vector) and returns a per-point label array (like scikit-learn's
-// labels_, with -1 for noise); everything above it — medoid/cohesion math,
+// labels_, with -1 for noise); everything above it — centroid/cohesion math,
 // labeling, persistence — is algorithm-agnostic. The shipped implementation is
 // KNNGraphClusterer (a kNN graph + deterministic label propagation, with a
 // noise bucket); a density-based HDBSCAN implementation could drop in behind
@@ -11,10 +11,16 @@
 package insight
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"math"
-	"sort"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // NoiseLabel marks a point that belongs to no cluster.
@@ -53,30 +59,27 @@ type KNNGraphOptions struct {
 	MinClusterSize int
 	// MaxIters caps label-propagation iterations. Default 20.
 	MaxIters int
-	// Center subtracts the corpus mean vector before clustering. Embedding
-	// models like nomic-embed-text are anisotropic (their vectors sit in a
-	// narrow cone), so raw cosines are uniformly high and everything collapses
-	// into one giant cluster; centering removes that shared component so the
-	// residual topical structure drives the graph. No default is applied here —
-	// the config layer owns it (default true) — so a zero-value options struct
-	// clusters on raw vectors.
-	Center bool
 }
 
-// KNNGraphClusterer clusters via a mutual-k-nearest-neighbor graph over cosine
-// similarity, then finds communities with deterministic label propagation.
-// Communities below MinClusterSize become noise.
+// KNNGraphClusterer clusters unit-length vectors with a k-nearest-neighbor
+// graph over cosine similarity, then finds communities with deterministic
+// label propagation. Communities below MinClusterSize become noise.
+//
+// The graph is the union of every node's top-K list: i and j are joined when
+// either lists the other among its K most similar points at or above
+// MinSimilarity, weighted by the larger of the two similarities.
+//
+// Callers normalize (and optionally mean-center) vectors first, so the dot
+// product is the cosine; Cluster rejects a vector that is neither unit length
+// nor zero. A zero vector gets no edges and ends up as noise.
 type KNNGraphClusterer struct {
 	k              int
 	minSim         float64
 	minClusterSize int
 	maxIters       int
-	center         bool
 }
 
-// NewKNNGraphClusterer constructs the clusterer, applying defaults. Center is
-// taken as-is (its default is owned by the config layer), so a zero-value
-// options struct clusters on raw vectors.
+// NewKNNGraphClusterer constructs the clusterer, applying defaults.
 func NewKNNGraphClusterer(opts KNNGraphOptions) *KNNGraphClusterer {
 	if opts.K <= 0 {
 		opts.K = 10
@@ -95,7 +98,6 @@ func NewKNNGraphClusterer(opts KNNGraphOptions) *KNNGraphClusterer {
 		minSim:         opts.MinSimilarity,
 		minClusterSize: opts.MinClusterSize,
 		maxIters:       opts.MaxIters,
-		center:         opts.Center,
 	}
 }
 
@@ -107,7 +109,6 @@ func (c *KNNGraphClusterer) Params() map[string]any {
 		"min_similarity":   c.minSim,
 		"min_cluster_size": c.minClusterSize,
 		"max_iters":        c.maxIters,
-		"center":           c.center,
 	}
 }
 
@@ -120,100 +121,227 @@ type edge struct {
 // Cluster implements Clusterer.
 func (c *KNNGraphClusterer) Cluster(ctx context.Context, points []Point) ([]int, error) {
 	n := len(points)
-	labels := make([]int, n)
-	for i := range labels {
-		labels[i] = NoiseLabel
-	}
 	if n == 0 {
-		return labels, nil
+		return []int{}, nil
+	}
+	if err := checkUnitVectors(points); err != nil {
+		return nil, err
 	}
 
+	// Work in ID order so the result doesn't depend on the input order: label
+	// propagation visits nodes in sequence and breaks ties by the smallest
+	// label, and both follow node order.
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int { return strings.Compare(points[a].ID, points[b].ID) })
+	vecs := make([][]float32, n)
+	for i, idx := range order {
+		vecs[i] = points[idx].Vector
+	}
+
+	neighbors, err := knnNeighbors(ctx, vecs, c.k, c.minSim)
+	if err != nil {
+		return nil, err
+	}
+	lab, err := c.propagate(ctx, unionGraph(neighbors))
+	if err != nil {
+		return nil, err
+	}
+	clusters := c.compact(lab)
+
+	labels := make([]int, n)
+	for i, idx := range order {
+		labels[idx] = clusters[i]
+	}
+	return labels, nil
+}
+
+// unitTolerance bounds |‖v‖²-1| for a vector to count as unit length. Rounding
+// a normalized 768-dimensional vector to float32 stays well inside it.
+const unitTolerance = 1e-3
+
+// checkUnitVectors verifies every point has the same non-zero dimension and
+// is unit length or zero.
+func checkUnitVectors(points []Point) error {
 	dim := len(points[0].Vector)
 	if dim == 0 {
-		return nil, fmt.Errorf("insight: point %s has an empty vector", points[0].ID)
+		return fmt.Errorf("insight: point %s has an empty vector", points[0].ID)
 	}
 	for _, p := range points {
 		if len(p.Vector) != dim {
-			return nil, fmt.Errorf("insight: point %s has dim %d, want %d", p.ID, len(p.Vector), dim)
+			return fmt.Errorf("insight: point %s has dim %d, want %d", p.ID, len(p.Vector), dim)
+		}
+		// Written to reject NaN, which fails every comparison.
+		if sq := dot(p.Vector, p.Vector); sq != 0 && !(math.Abs(sq-1) <= unitTolerance) {
+			return fmt.Errorf("insight: point %s is not unit length (squared norm %g)", p.ID, sq)
 		}
 	}
+	return nil
+}
 
-	// Optionally subtract the corpus mean vector to strip the shared anisotropy
-	// component before normalizing (see KNNGraphOptions.Center).
-	var mean []float64
-	if c.center {
-		mean = corpusMean(points, dim)
-	}
-
-	// Normalize to unit length so a dot product is the cosine similarity.
-	norm := make([][]float32, n)
-	for i, p := range points {
-		norm[i] = unitResidual(p.Vector, mean)
-	}
-
-	// Directed top-K neighbors per node, then unioned into an undirected,
-	// weighted adjacency (keeping the larger weight if an edge appears from
-	// both directions).
-	adjMap := make([]map[int]float64, n)
-	for i := range adjMap {
-		adjMap[i] = make(map[int]float64)
-	}
-	for i := range n {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		for _, e := range topKNeighbors(norm, i, c.k, c.minSim) {
-			if w, ok := adjMap[i][e.to]; !ok || e.w > w {
-				adjMap[i][e.to] = e.w
+// knnNeighbors returns each node's top-k neighbors with similarity >= minSim,
+// ordered by similarity descending, then index ascending. Building this is
+// essentially all of the clusterer's cost (O(n²·d)), and rows are
+// independent, so they are spread over GOMAXPROCS workers that share nothing
+// but a row counter; each worker writes only the slots of the rows it took.
+func knnNeighbors(ctx context.Context, vecs [][]float32, k int, minSim float64) ([][]edge, error) {
+	n := len(vecs)
+	out := make([][]edge, n)
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(runtime.GOMAXPROCS(0), n) {
+		wg.Go(func() {
+			best := newTopK(k)
+			for ctx.Err() == nil {
+				i := int(next.Add(1)) - 1
+				if i >= n {
+					return
+				}
+				out[i] = best.row(vecs, i, minSim)
 			}
-			if w, ok := adjMap[e.to][i]; !ok || e.w > w {
-				adjMap[e.to][i] = e.w
+		})
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// topK keeps one row's k best neighbor candidates in a min-heap whose root is
+// the worst candidate kept, so a row costs O(n log k) rather than a full sort
+// of every candidate above the threshold.
+type topK struct {
+	k    int
+	heap []edge
+}
+
+func newTopK(k int) *topK { return &topK{k: k, heap: make([]edge, 0, k)} }
+
+// row scores node i against every other node and returns its top k, best
+// first.
+func (t *topK) row(vecs [][]float32, i int, minSim float64) []edge {
+	t.heap = t.heap[:0]
+	for j, v := range vecs {
+		if j == i {
+			continue
+		}
+		if w := dot(vecs[i], v); w >= minSim {
+			t.offer(edge{to: j, w: w})
+		}
+	}
+	best := slices.Clone(t.heap)
+	slices.SortFunc(best, func(a, b edge) int {
+		if c := cmp.Compare(b.w, a.w); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.to, b.to)
+	})
+	return best
+}
+
+// worse reports whether a ranks below b: lower similarity, or on a tie the
+// higher index.
+func worse(a, b edge) bool {
+	if a.w != b.w {
+		return a.w < b.w
+	}
+	return a.to > b.to
+}
+
+func (t *topK) offer(e edge) {
+	if len(t.heap) < t.k {
+		t.heap = append(t.heap, e)
+		t.siftUp(len(t.heap) - 1)
+		return
+	}
+	if worse(t.heap[0], e) {
+		t.heap[0] = e
+		t.siftDown(0)
+	}
+}
+
+func (t *topK) siftUp(i int) {
+	h := t.heap
+	for i > 0 {
+		parent := (i - 1) / 2
+		if !worse(h[i], h[parent]) {
+			return
+		}
+		h[i], h[parent] = h[parent], h[i]
+		i = parent
+	}
+}
+
+func (t *topK) siftDown(i int) {
+	h := t.heap
+	for {
+		child := 2*i + 1
+		if child >= len(h) {
+			return
+		}
+		if r := child + 1; r < len(h) && worse(h[r], h[child]) {
+			child = r
+		}
+		if !worse(h[child], h[i]) {
+			return
+		}
+		h[i], h[child] = h[child], h[i]
+		i = child
+	}
+}
+
+// unionGraph merges the directed top-K lists into an undirected adjacency,
+// keeping the larger weight when an edge appears from both directions. Each
+// node's edges are ordered by neighbor index.
+func unionGraph(neighbors [][]edge) [][]edge {
+	weights := make([]map[int]float64, len(neighbors))
+	for i := range weights {
+		weights[i] = make(map[int]float64)
+	}
+	for i, es := range neighbors {
+		for _, e := range es {
+			if w, ok := weights[i][e.to]; !ok || e.w > w {
+				weights[i][e.to] = e.w
+			}
+			if w, ok := weights[e.to][i]; !ok || e.w > w {
+				weights[e.to][i] = e.w
 			}
 		}
 	}
-	adj := make([][]edge, n)
-	for i := range adjMap {
-		es := make([]edge, 0, len(adjMap[i]))
-		for to, w := range adjMap[i] {
+	adj := make([][]edge, len(weights))
+	for i, ws := range weights {
+		es := make([]edge, 0, len(ws))
+		for to, w := range ws {
 			es = append(es, edge{to: to, w: w})
 		}
-		sort.Slice(es, func(a, b int) bool { return es[a].to < es[b].to })
+		slices.SortFunc(es, func(a, b edge) int { return cmp.Compare(a.to, b.to) })
 		adj[i] = es
 	}
+	return adj
+}
 
-	// Label propagation. Each node starts as its own label; iterating in a
-	// fixed order with the max weighted-vote (ties → smallest label) makes the
-	// result deterministic. Isolated nodes keep their unique label and fall
-	// out as noise below.
-	lab := make([]int, n)
+// propagate runs label propagation. Each node starts as its own label; visiting
+// nodes in a fixed order and taking the max weighted vote (ties → smallest
+// label) makes the result deterministic. Isolated nodes keep their unique
+// label and fall out as noise in compact.
+func (c *KNNGraphClusterer) propagate(ctx context.Context, adj [][]edge) ([]int, error) {
+	lab := make([]int, len(adj))
 	for i := range lab {
 		lab[i] = i
 	}
-	for iter := 0; iter < c.maxIters; iter++ {
+	for range c.maxIters {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		changed := false
-		for i := range n {
-			if len(adj[i]) == 0 {
+		for i, es := range adj {
+			if len(es) == 0 {
 				continue
 			}
-			score := make(map[int]float64, len(adj[i]))
-			for _, e := range adj[i] {
-				score[lab[e.to]] += e.w
-			}
-			keys := make([]int, 0, len(score))
-			for k := range score {
-				keys = append(keys, k)
-			}
-			sort.Ints(keys)
-			best, bestScore := lab[i], math.Inf(-1)
-			for _, k := range keys {
-				if score[k] > bestScore { // strict → smallest key wins ties
-					bestScore, best = score[k], k
-				}
-			}
-			if best != lab[i] {
+			if best := bestLabel(lab, es, lab[i]); best != lab[i] {
 				lab[i] = best
 				changed = true
 			}
@@ -222,127 +350,54 @@ func (c *KNNGraphClusterer) Cluster(ctx context.Context, points []Point) ([]int,
 			break
 		}
 	}
+	return lab, nil
+}
 
-	// Group by final label; keep groups >= MinClusterSize, order them
-	// largest-first (ties → smallest member index), and compact to 0..m-1.
+// bestLabel returns the neighbor label with the largest total edge weight, the
+// smallest label winning ties; cur is kept only if no neighbor scores.
+func bestLabel(lab []int, es []edge, cur int) int {
+	score := make(map[int]float64, len(es))
+	for _, e := range es {
+		score[lab[e.to]] += e.w
+	}
+	best, bestScore := cur, math.Inf(-1)
+	for _, l := range slices.Sorted(maps.Keys(score)) {
+		if score[l] > bestScore { // strict → smallest label wins ties
+			bestScore, best = score[l], l
+		}
+	}
+	return best
+}
+
+// compact turns propagated labels into cluster ids: communities of at least
+// MinClusterSize, ordered largest first (ties → smallest member index) and
+// numbered 0..m-1. Every other node is NoiseLabel.
+func (c *KNNGraphClusterer) compact(lab []int) []int {
 	groups := make(map[int][]int)
 	for i, l := range lab {
 		groups[l] = append(groups[l], i) // members appended in ascending index order
 	}
-	type grp struct {
-		members []int
-	}
-	kept := make([]grp, 0, len(groups))
-	labelKeys := make([]int, 0, len(groups))
-	for l := range groups {
-		labelKeys = append(labelKeys, l)
-	}
-	sort.Ints(labelKeys)
-	for _, l := range labelKeys {
+	var kept [][]int
+	for _, l := range slices.Sorted(maps.Keys(groups)) {
 		if len(groups[l]) >= c.minClusterSize {
-			kept = append(kept, grp{members: groups[l]})
+			kept = append(kept, groups[l])
 		}
 	}
-	sort.SliceStable(kept, func(a, b int) bool {
-		if len(kept[a].members) != len(kept[b].members) {
-			return len(kept[a].members) > len(kept[b].members)
+	slices.SortStableFunc(kept, func(a, b []int) int {
+		if d := cmp.Compare(len(b), len(a)); d != 0 {
+			return d
 		}
-		return kept[a].members[0] < kept[b].members[0]
+		return cmp.Compare(a[0], b[0])
 	})
-	for cid, g := range kept {
-		for _, idx := range g.members {
-			labels[idx] = cid
-		}
-	}
-	return labels, nil
-}
 
-// topKNeighbors returns up to k neighbors of node i with cosine >= minSim,
-// sorted by similarity desc then index asc (deterministic).
-func topKNeighbors(norm [][]float32, i, k int, minSim float64) []edge {
-	cands := make([]edge, 0, 16)
-	for j := range norm {
-		if j == i {
-			continue
+	out := make([]int, len(lab))
+	for i := range out {
+		out[i] = NoiseLabel
+	}
+	for cid, members := range kept {
+		for _, idx := range members {
+			out[idx] = cid
 		}
-		w := dot(norm[i], norm[j])
-		if w >= minSim {
-			cands = append(cands, edge{to: j, w: w})
-		}
-	}
-	sort.Slice(cands, func(a, b int) bool {
-		if cands[a].w != cands[b].w {
-			return cands[a].w > cands[b].w
-		}
-		return cands[a].to < cands[b].to
-	})
-	if len(cands) > k {
-		cands = cands[:k]
-	}
-	return cands
-}
-
-// corpusMean returns the element-wise mean of all point vectors (dim-length),
-// or nil for fewer than two points (nothing to center against). Shared by the
-// clusterer and the engine's cluster summarizer so both operate in the same
-// (centered) space.
-func corpusMean(points []Point, dim int) []float64 {
-	if len(points) < 2 {
-		return nil
-	}
-	mean := make([]float64, dim)
-	for _, p := range points {
-		for d, v := range p.Vector {
-			mean[d] += float64(v)
-		}
-	}
-	for d := range mean {
-		mean[d] /= float64(len(points))
-	}
-	return mean
-}
-
-// unitResidual returns the unit vector of v, first subtracting mean when it is
-// non-nil (mean-centering). A zero residual yields a zero vector, so the point
-// gets no edges and falls out as noise.
-func unitResidual(v []float32, mean []float64) []float32 {
-	if mean == nil {
-		return unit(v)
-	}
-	centered := make([]float64, len(v))
-	var sum float64
-	for i, x := range v {
-		c := float64(x) - mean[i]
-		centered[i] = c
-		sum += c * c
-	}
-	out := make([]float32, len(v))
-	if sum == 0 {
-		return out
-	}
-	inv := 1.0 / math.Sqrt(sum)
-	for i, c := range centered {
-		out[i] = float32(c * inv)
-	}
-	return out
-}
-
-// unit returns a unit-length copy of v (dot(unit(a), unit(b)) == cosine(a,b)).
-// A zero vector is returned unchanged (all similarities become 0 → no edges).
-func unit(v []float32) []float32 {
-	var sum float64
-	for _, x := range v {
-		sum += float64(x) * float64(x)
-	}
-	if sum == 0 {
-		out := make([]float32, len(v))
-		copy(out, v)
-		return out
-	}
-	inv := 1.0 / math.Sqrt(sum)
-	out := make([]float32, len(v))
-	for i, x := range v {
-		out[i] = float32(float64(x) * inv)
 	}
 	return out
 }

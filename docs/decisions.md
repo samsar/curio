@@ -1499,9 +1499,42 @@ single-cell genomics, so it's a different well-trodden path, not a hack. Because
 the choice lives behind the interface and we now have an eval harness, swapping
 in real HDBSCAN later (if measurement justifies it) is a contained change.
 
-**Determinism:** fully deterministic — fixed node order, weighted-majority vote
-with a smallest-label tie-break, stable cluster ordering by size. Same corpus →
-same clusters, so runs are reproducible and unit-testable.
+**Graph:** the union of every document's top-K list — an edge joins two
+documents when *either* lists the other among its K most similar (at or above
+`min_similarity`), weighted by the larger of the two similarities. (A mutual-kNN
+graph, where both must list each other, is sparser; it isn't offered because
+nothing measures whether it would help — see the mega-cluster entry for the
+candidates that would.)
+
+**Determinism:** fully deterministic — weighted-majority vote with a
+smallest-label tie-break, stable cluster ordering by size. Label propagation is
+order-sensitive (nodes are visited in sequence, ties go to the smallest label),
+so the clusterer sorts points by document ID internally and maps labels back:
+the result depends on the set of documents, not the order they arrive in. (On
+the seeded 1200-point overlapping corpus in `cluster_test.go`, 5 of 5 shuffles
+used to change the partition; production only escaped this because
+`DocumentVectors` happens to `ORDER BY document_id`.)
+
+**Vector preparation happens once:** the engine mean-centers (when
+`insight.center_vectors`) and normalizes the document vectors, then hands the
+same unit vectors to the clusterer and to the cohesion/similarity summary, so
+both work in the same space and the corpus is held once, not three times. The
+clusterer requires unit (or zero) vectors and says so with an error rather than
+silently renormalizing. `center` is still recorded in the run's params.
+
+**Performance:** building the kNN graph is O(n²·d) and was essentially the
+whole cost (the union step and label propagation take tens of milliseconds even
+at 20k documents). Rows are independent, so they run in parallel across
+GOMAXPROCS workers that share only a row counter, and each row keeps its top K
+in a small heap instead of sorting every candidate above the threshold. Tie
+order (similarity desc, index asc) is unchanged, and a test pins the neighbor
+lists to a serial full-sort reference. `BenchmarkKNNGraphClusterer` (5000
+documents × 768 dims, Apple M4 Max, 16 cores): **15.0 s → 1.29 s**. A 4-way
+unrolled dot product would roughly halve that again, but it changes float
+summation order and so shifts similarities in the last bits; we kept the
+existing dot so an upgrade doesn't reshuffle anyone's interests. Computing
+each pair once (filling both rows from one dot product) was also left out: it
+needs cross-worker synchronization on the row heaps for at most a 2× gain.
 
 **Labels:** LLM labels by default (`LLMLabeler`, `insight.labeling = "llm"`) for
 richer topic names + summaries. The generation model is auto-pulled on startup
