@@ -383,6 +383,12 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 
 	resp, err := n.rt.do(ctx, target, headers)
 	if err != nil {
+		// A certificate that fails verification fails the same way on every
+		// retry, and Jina would fetch past the check. Not host-cached: see
+		// ErrTLSCertificate.
+		if errors.Is(err, ErrTLSCertificate) {
+			return nil, &PermanentError{Err: fmt.Errorf("native: fetch: %w", err)}
+		}
 		// Distinguish dead-host (DNS, connection refused) from generic
 		// transport errors. Dead hosts shouldn't trigger Jina fallback
 		// (Jina can't reach a host that doesn't exist either) and they're

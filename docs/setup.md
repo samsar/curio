@@ -175,6 +175,14 @@ background (see above), or run `ollama pull nomic-embed-text`. On a very old
 Ollama (below 0.1.30 or so) the batched embed endpoint doesn't exist and
 answers 404 too: upgrade it.
 
+**`invalid TLS certificate: … x509: …`** on a document — the site's
+certificate failed verification (expired, for another name, or from an
+untrusted authority). curio won't fetch past that, not even through Jina,
+and doesn't retry it. Once the site fixes its certificate, `curio refetch
+<id>`. If every https document fails this way at once, something is
+intercepting TLS (a captive portal, a corporate proxy) or the system clock
+is badly off; fix that, then `curio refetch --all --state=failed`.
+
 **`ENOENT: spawn node`** from a fetch — Node isn't on the daemon's PATH.
 Either install Node into a directory in PATH or set
 `fetcher.web2md.node_bin` in config.

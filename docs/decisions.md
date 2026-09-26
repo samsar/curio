@@ -116,6 +116,7 @@ when the entry was first committed.
 - 2026-09-25 — [CLI: exit 130 on interrupt, a usage hint on usage errors](#cli-exit-130-on-interrupt-a-usage-hint-on-usage-errors)
 - 2026-09-25 — [Daemon startup: a starting API while migrating, clients that wait on progress](#daemon-startup-a-starting-api-while-migrating-clients-that-wait-on-progress)
 - 2026-09-26 — [Chrome backend: plain http carries an explicit :80](#chrome-backend-plain-http-carries-an-explicit-80)
+- 2026-09-26 — [TLS certificate failures are permanent, never Jina, never host-cached](#tls-certificate-failures-are-permanent-never-jina-never-host-cached)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -4056,6 +4057,57 @@ Nobody bookmarks those.
   hop (through `CheckRedirect`), with the `Host` header left port-free.
   Explicitly mismatched ports (`http://h:443/`, `https://h:80/`) still
   collide.
+
+---
+
+## TLS certificate failures are permanent, never Jina, never host-cached
+
+**Decision:**
+
+- A server certificate that fails verification is
+  `fetcher.ErrTLSCertificate`. Each backend maps its own TLS stack's
+  wrapper at its boundary, so `tryReadability` stays backend-agnostic:
+  `stockRT` crypto/tls's `*CertificateVerificationError`, and `chromeRT`
+  uTLS's, which is a distinct type that `errors.As` with crypto/tls's
+  doesn't match. Classifying on the wrapper covers every chain and
+  hostname failure (expired, not yet valid, another name, an unknown
+  authority), including the untyped `x509: …` errors macOS's platform
+  verifier can produce. The x509 cause and the `*url.Error` stay reachable.
+- From the origin it is a `PermanentError`, returned before the Jina and
+  host-cache steps. The document goes `failed`, not `dead`.
+- A certificate failure talking to Jina stays Jina's trouble: retried like
+  any other Jina transport error, and never cached.
+- Other TLS failures stay retryable: handshake alerts, protocol-version
+  mismatches, EOF or a reset mid-handshake, and a non-TLS answer
+  (`RecordHeaderError`). They are ambiguous or transient, and none showed
+  up in the import this came from.
+- `github.com/bogdanfinn/utls` is now a direct requirement.
+
+**Why:** `https://www.kernel.dk/io_uring.pdf` answered with an expired
+certificate (`x509: certificate has expired or is not yet valid:
+"brick.kernel.dk" certificate is expired`). That was a generic retryable
+transport error, so the document went through all 5 attempts, 60 + 120 +
+240 + 480 s of backoff, with the same answer each time.
+
+- **Permanent:** nothing inside the retry window renews a certificate.
+- **`failed`, not `dead`:** `markDocFailed` maps only `ErrDeadLink` to
+  `dead`. Certificates get fixed; recovery is `curio refetch <id>` or
+  `curio refetch --all --state=failed`.
+- **No Jina:** Jina would fetch past a check curio refuses to skip and
+  store content nobody authenticated. The fallback is for answers that
+  came back (see "Fallback strategy: only Jina for content-came-back
+  cases").
+- **Not host-cached:** a permanent verdict already costs only one
+  handshake per URL, bounded by the per-host gate. The cache protects
+  retry and Jina budgets, and this spends neither. A cached verdict would
+  also make `curio refetch` fail, without sending a request, for up to 15
+  minutes after the site fixed its certificate.
+
+**Caveat:** on a network that intercepts TLS (a captive portal, a
+corporate proxy whose root the system doesn't trust) or with a badly wrong
+local clock, every https fetch fails permanently at once. The error names
+the cause (`invalid TLS certificate: … x509: …`), and once the network or
+clock is right, `curio refetch --all --state=failed` recovers.
 
 ---
 

@@ -2,6 +2,7 @@ package fetcher
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
+	utls "github.com/bogdanfinn/utls"
 
 	"github.com/samsar/curio/internal/urlutil"
 )
@@ -39,7 +41,9 @@ type roundTripper interface {
 	name() string
 	// do issues a GET to target with the given headers (order preserved)
 	// and returns a normalized response. The body must be closed by the
-	// caller. Redirects are followed; finalURL is the settled URL.
+	// caller. Redirects are followed; finalURL is the settled URL. A server
+	// certificate that fails verification is reported as ErrTLSCertificate
+	// by both backends, whichever TLS stack they use.
 	do(ctx context.Context, target string, headers []header) (*fetchResponse, error)
 }
 
@@ -191,6 +195,10 @@ func (s *stockRT) do(ctx context.Context, target string, headers []header) (*fet
 	}
 	resp, err := s.client.Do(req) //nolint:bodyclose // the body escapes in fetchResponse.body, which the caller closes
 	if err != nil {
+		var cve *tls.CertificateVerificationError
+		if errors.As(err, &cve) {
+			return nil, fmt.Errorf("%w: %w", ErrTLSCertificate, err)
+		}
 		return nil, err
 	}
 	return &fetchResponse{
@@ -308,11 +316,17 @@ func chromeCheckRedirect(req *fhttp.Request, via []*fhttp.Request) error {
 }
 
 // chromeError normalizes a failed chrome request: the URL a *url.Error
-// names loses the :80 pin.
+// names loses the :80 pin, and a certificate that failed verification is
+// tagged ErrTLSCertificate. uTLS reports that with its own
+// CertificateVerificationError type, which crypto/tls's doesn't match.
 func chromeError(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
 		ue.URL = withoutDefaultPort(ue.URL)
+	}
+	var cve *utls.CertificateVerificationError
+	if errors.As(err, &cve) {
+		return fmt.Errorf("%w: %w", ErrTLSCertificate, err)
 	}
 	return err
 }
