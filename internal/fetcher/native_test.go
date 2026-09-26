@@ -755,3 +755,21 @@ func TestNative_PDFOverLimit(t *testing.T) {
 		})
 	}
 }
+
+// TestNative_ChromePlainHTTPSettlesOnItsOwnURL: an http:// page fetched
+// through the chrome backend settles on the URL requested, so the fetch
+// handler records no url_canonical, and its relative links resolve without
+// the backend's :80 pin.
+func TestNative_ChromePlainHTTPSettlesOnItsOwnURL(t *testing.T) {
+	ca := newTestCA(t)
+	page := makeArticleHTML("Plain HTTP", strings.Repeat(`A paragraph that links <a href="/other">elsewhere</a>. `, 30))
+	site := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, page) })
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+	n.rt = limitBodies(newRoutedChromeRT(t, ca.pool, plainHTTPSite(t, ca, []string{"example.com"}, site)), maxResponseBytes)
+
+	res, err := n.Fetch(t.Context(), "http://example.com/article")
+	require.NoError(t, err)
+	assert.Equal(t, "http://example.com/article", res.FinalURL)
+	assert.Contains(t, res.Markdown, "(http://example.com/other)")
+	assert.NotContains(t, res.Markdown, ":80")
+}

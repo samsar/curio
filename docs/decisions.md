@@ -115,6 +115,7 @@ when the entry was first committed.
 - 2026-09-25 — [Insight: skip non-finite document vectors, don't fail the run](#insight-skip-non-finite-document-vectors-dont-fail-the-run)
 - 2026-09-25 — [CLI: exit 130 on interrupt, a usage hint on usage errors](#cli-exit-130-on-interrupt-a-usage-hint-on-usage-errors)
 - 2026-09-25 — [Daemon startup: a starting API while migrating, clients that wait on progress](#daemon-startup-a-starting-api-while-migrating-clients-that-wait-on-progress)
+- 2026-09-26 — [Chrome backend: plain http carries an explicit :80](#chrome-backend-plain-http-carries-an-explicit-80)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -1095,6 +1096,13 @@ mops up the stubborn `ErrAntiBot` / `ErrLoginWall` tail.
 **Cost:** pulls in `bogdanfinn/{tls-client,fhttp,utls}` plus brotli, circl,
 and a quic-utls dep. Pinned at `tls-client v1.11.0`. Acceptable for the
 block-rate win; revisit if it bloats build time or the dep goes stale.
+
+**Revised (2026-09-26):** now `tls-client v1.16.0` with `fhttp v0.6.9`,
+the latest release. It caches one transport per `host:port` and uses
+`host:443` for any URL without a port, so `http://` and `https://` on one
+host shared a transport and broke each other. The chrome backend gives
+plain-http requests and redirect hops an explicit `:80` to keep them
+apart; see "Chrome backend: plain http carries an explicit :80".
 
 ---
 
@@ -3955,6 +3963,99 @@ change (a healthz 200, with or without `pid` and `home`, and never a 503)
 behave as before. Old clients talking to a new daemon see a starting
 daemon as "not answering healthz", the same wait and failure as before,
 never as ready.
+
+---
+
+## Chrome backend: plain http carries an explicit :80
+
+**Decision:**
+
+- The chrome backend gives every `http://` request without a port an
+  explicit `:80` before sending it (`pinPlainHTTPPort` in
+  `internal/fetcher/transport.go`). Every redirect hop gets the same pin
+  from the backend's own redirect policy (`chromeCheckRedirect`, installed
+  with `tlsclient.WithCustomRedirectFunc`), which keeps fhttp's default
+  limit of 10 redirects.
+- The pin never shows. The `Host` header stays port-free, and the
+  `Referer` fhttp sets on the next hop is rewritten without it. `finalURL`
+  and the URL a `*url.Error` names lose any default port through
+  `urlutil.StripDefaultPort`, the rule `Normalize` applies. So
+  `Result.FinalURL`, `url_canonical`, the base URL Readability resolves
+  relative links against, and error text never carry `:80`.
+- A URL that names its port is sent as it is. The stock backend is
+  unchanged: net/http keys its connections by scheme.
+- tls-client stays at v1.16.0, the latest release. Nothing upstream fixes
+  this yet; the report below is ready to file. The pin goes once tls-client
+  keys transports by scheme, and `TestChromeRT_PlainAndSecureShareAHost`
+  and `TestChromeRT_ConcurrentUpgradeRedirects` then pass without it.
+
+**Why:** tls-client caches one transport per `host:port`, and for a URL
+without a port it uses `host:443`, whatever the scheme. `http://h/` and
+`https://h/` shared that entry, so on the default backend:
+
+- https, then http: every later http request to the host failed with
+  `http2: unsupported scheme`.
+- http, then https: the first https request failed with tls-client's
+  internal `protocol negotiated`, and http then broke as above.
+- A same-host redirect from http to https, which is where most `http://`
+  bookmarks lead today, failed with `protocol negotiated` on first
+  contact and with `http2: unsupported scheme` on every retry, so the
+  document failed all 5 attempts (`http://www.babycenter.ca/…` in a real
+  import).
+- A redirect from https to http failed with `http2: unsupported scheme`.
+
+The http-first paths also race: tls-client's dial writes the transport map
+under a different lock than the one its readers hold. The race detector
+reports it with 40 concurrent upgrade redirects, and without it the Go
+runtime can abort the whole daemon with `concurrent map read and map
+write`, which no `recover` catches. The unit tests never met any of this
+because every test URL named its port (`127.0.0.1:PORT`). The new tests
+drive the real backend on `example.com` through a dialer that routes by
+address, with a test CA's roots trusted.
+
+**Residual:** a URL that names the other scheme's default port
+(`http://h:443/`, `https://h:80/`) still shares an entry with that scheme.
+Nobody bookmarks those.
+
+**Upstream report (ready to file on bogdanfinn/tls-client):**
+
+- **Title:** RoundTrip keys transports by host:443 for portless http URLs;
+  http and https to one host share a transport, and dialTLS writes
+  cachedTransports unsynchronized.
+- **Versions:** tls-client v1.16.0, fhttp v0.6.9, Go 1.26.8,
+  darwin/arm64.
+- **Cause:** `getDialTLSAddr` (roundtripper.go:675-682) returns
+  `net.JoinHostPort(host, "443")` whenever the URL has no port, regardless
+  of scheme. `RoundTrip` (:317-346) caches transports by that key.
+  `getTransport`'s http branch (:349-352) stores an HTTP/1 transport and
+  records no `cachedKinds` entry for it.
+- **Repro** (`WithDialContext` maps `example.com:443` to an httptest
+  TLS+h2 server and `example.com:80` to a plain one):
+  1. https, then http: every later http request fails with
+     `http2: unsupported scheme`.
+  2. On a fresh client, http, then https: the https request fails with
+     `protocol negotiated`. The cached HTTP/1 transport's
+     `DialTLSContext` is `dialTLS` and there is no `cachedKinds` entry,
+     so `dialTLS` builds a new transport and returns
+     `errProtocolNegotiated`. After that, http fails as in 1.
+  3. A same-host 301 from http to https fails with `protocol negotiated`,
+     then with `http2: unsupported scheme` on every retry.
+  4. An https → http redirect fails with `http2: unsupported scheme`.
+- **Race:** `dialTLS` writes `rt.cachedTransports[addr]` (:540) holding
+  only `rt.Mutex`, while `RoundTrip` reads the map under
+  `cachedTransportsLck` (:325). `-race` flags it; without `-race` the
+  runtime can fatal with `concurrent map read and map write`. A reconnect
+  after `dropCachedTransport` reaches the same unlocked write.
+- **Expected:** http and https never share a transport, and
+  `errProtocolNegotiated` never reaches callers.
+- **Suggested fix:** default the port by scheme (80 for http), or key the
+  cache by scheme and address; record a `cachedKinds` entry for the http
+  transport; take `cachedTransportsLck` for every write to the map in
+  `dialTLS`.
+- **Workaround:** an explicit `:80` on the request and on each redirect
+  hop (through `CheckRedirect`), with the `Host` header left port-free.
+  Explicitly mismatched ports (`http://h:443/`, `https://h:80/`) still
+  collide.
 
 ---
 
