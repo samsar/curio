@@ -4,8 +4,11 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -214,22 +217,131 @@ func TestYouTubeFetch_TranscriptSource(t *testing.T) {
 			assert.Contains(t, res.Markdown, "A test video description.")
 			if tc.picked != "" {
 				assert.Contains(t, res.Markdown, "This track is "+tc.picked)
+				assert.Empty(t, res.PartialReason)
 			} else {
 				assert.NotContains(t, res.Markdown, "## Transcript")
+				assert.Equal(t, `no usable captions for sub_langs "`+DefaultYouTubeSubLangs+`"`, res.PartialReason)
 			}
 		})
 	}
 }
 
-func TestYouTubeFetch_PermanentError(t *testing.T) {
-	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp-unavailable"), Timeout: 30 * time.Second})
-	_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=gone123")
-	require.Error(t, err)
+// TestYouTubeFetch_RunFailures: a video yt-dlp reports gone fails
+// permanently; any other failed run, and a run that wrote no info.json,
+// is retried. Only ERROR lines are quoted.
+func TestYouTubeFetch_RunFailures(t *testing.T) {
+	cases := []struct {
+		mode      string
+		permanent bool
+		quoted    string
+	}{
+		{"yt-dlp-unavailable", true, "ERROR: Video unavailable"},
+		{"yt-dlp-error", false, "ERROR: [youtube] test_id: Unable to extract initial player response"},
+		{"yt-dlp-no-info", false, "yt-dlp produced no info.json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, tc.mode), Timeout: 30 * time.Second})
+			_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+			require.Error(t, err)
 
-	var pe *PermanentError
-	assert.True(t, errors.As(err, &pe), "should be a PermanentError")
-	assert.Contains(t, err.Error(), "ERROR: Video unavailable")
-	assert.NotContains(t, err.Error(), "WARNING")
+			var pe *PermanentError
+			assert.Equal(t, tc.permanent, errors.As(err, &pe), "permanent: %v", err)
+			assert.Contains(t, err.Error(), tc.quoted)
+			assert.NotContains(t, err.Error(), "WARNING")
+		})
+	}
+}
+
+// TestFakeYTDLP_FailedCaption: the fake fails a caption download the way
+// yt-dlp does. By default the video is aborted before its info.json is
+// written; with --ignore-errors the failure is a warning and the rest is
+// written.
+func TestFakeYTDLP_FailedCaption(t *testing.T) {
+	const failure = "Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"
+	bin := fakeTool(t, "yt-dlp")
+	t.Setenv(fakeSubsEnv, "auto:en!429")
+	for _, ignoreErrors := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ignore-errors=%v", ignoreErrors), func(t *testing.T) {
+			dir := t.TempDir()
+			args := []string{"--write-info-json", "-o", filepath.Join(dir, "%(id)s"), "https://www.youtube.com/watch?v=test_id"}
+			if ignoreErrors {
+				args = append([]string{"--ignore-errors"}, args...)
+			}
+			stderr, err := runCapped(t.Context(), 30*time.Second, nil, bin, args...)
+			_, statErr := os.Stat(filepath.Join(dir, "test_id.info.json"))
+			if ignoreErrors {
+				require.NoError(t, err)
+				assert.Contains(t, stderr, "WARNING: "+failure)
+				assert.NoError(t, statErr)
+				return
+			}
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr)
+			assert.Equal(t, 1, exitErr.ExitCode())
+			assert.Contains(t, stderr, "ERROR: "+failure)
+			assert.ErrorIs(t, statErr, fs.ErrNotExist)
+		})
+	}
+}
+
+// TestYouTubeFetch_FailedCaptionDownload: yt-dlp runs with --ignore-errors,
+// so a caption track that fails to download no longer costs the video.
+// When it was the only track, the video is stored as a partial of its
+// description that says why; when another track downloaded, that one is
+// the transcript.
+func TestYouTubeFetch_FailedCaptionDownload(t *testing.T) {
+	const failure = "Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"
+	cases := []struct {
+		subs    string
+		partial bool
+		reason  string
+	}{
+		{"auto:en!429", true, "transcript not downloaded: yt-dlp: " + failure},
+		{"auto:en!429,manual:en-GB", false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.subs, func(t *testing.T) {
+			argsPath := filepath.Join(t.TempDir(), "args")
+			t.Setenv(fakeArgsEnv, argsPath)
+			t.Setenv(fakeSubsEnv, tc.subs)
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
+			res, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+			require.NoError(t, err)
+
+			runs := ytdlpRuns(t, argsPath)
+			require.Len(t, runs, 1)
+			assert.Contains(t, runs[0], "--ignore-errors")
+			assert.Equal(t, store.ContentTypeVideo, res.ContentType)
+			assert.Equal(t, "Test Video", res.Title)
+			assert.Contains(t, res.Markdown, "A test video description.")
+			assert.Equal(t, tc.partial, res.Partial)
+			assert.Equal(t, tc.reason, res.PartialReason)
+			if tc.partial {
+				assert.NotContains(t, res.Markdown, "## Transcript")
+				assert.Equal(t, transcriptNone, res.Meta["transcript_source"])
+			} else {
+				assert.Contains(t, res.Markdown, "This track is manual en-GB.")
+			}
+		})
+	}
+}
+
+// TestYouTubeFetch_PartialReasonIsCapped: however many caption downloads
+// fail, the reason quotes no more of them than any error text does.
+func TestYouTubeFetch_PartialReasonIsCapped(t *testing.T) {
+	tracks := make([]string, 40)
+	for i := range tracks {
+		tracks[i] = fmt.Sprintf("auto:en-l%02d!429", i)
+	}
+	t.Setenv(fakeSubsEnv, strings.Join(tracks, ","))
+	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
+	res, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+	require.NoError(t, err)
+	require.True(t, res.Partial)
+	assert.LessOrEqual(t, len(res.PartialReason), maxErrorBody+len("…"))
+	assert.True(t, strings.HasPrefix(res.PartialReason, "transcript not downloaded: yt-dlp: Unable to download video subtitles for 'en-l00'"))
+	assert.True(t, strings.HasSuffix(res.PartialReason, "…"))
 }
 
 // TestYouTubeFetch_MaxConcurrent: no more than MaxConcurrent yt-dlp

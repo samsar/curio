@@ -111,7 +111,7 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	meta, err := y.runYTDLP(ctx, canonicalURL, tmpDir)
+	meta, captionFailures, err := y.runYTDLP(ctx, canonicalURL, tmpDir)
 	if err != nil {
 		return nil, err
 	}
@@ -151,8 +151,24 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	if meta.Language != "" {
 		result.Language = meta.Language
 	}
+	switch {
+	case result.Partial:
+		result.PartialReason = y.partialReason(captionFailures)
+	case len(captionFailures) > 0:
+		y.log.Warn("youtube: caption track not downloaded, transcript taken from another",
+			"video_id", videoID, "err", strings.Join(captionFailures, "; "))
+	}
 
 	return result, nil
+}
+
+// partialReason says why a video has no transcript: the caption downloads
+// that failed, or else that no track matching sub_langs had any text.
+func (y *YouTube) partialReason(captionFailures []string) string {
+	if len(captionFailures) > 0 {
+		return snippet([]byte("transcript not downloaded: yt-dlp: " + strings.Join(captionFailures, "; ")))
+	}
+	return fmt.Sprintf("no usable captions for sub_langs %q", y.subLangs)
 }
 
 type ytdlpMeta struct {
@@ -173,11 +189,20 @@ type ytdlpMeta struct {
 	Subtitles map[string]json.RawMessage `json:"subtitles"`
 }
 
-func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlpMeta, error) {
+// runYTDLP runs yt-dlp for one video into tmpDir and returns its info.json
+// and yt-dlp's message for each caption track it couldn't download.
+func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (meta *ytdlpMeta, captionFailures []string, err error) {
 	args := []string{
 		"--write-info-json",
 		"--write-subs", "--write-auto-subs",
 		"--sub-langs", y.subLangs,
+		// yt-dlp writes subtitles before info.json, and by default one
+		// caption track that fails to download aborts the whole video: no
+		// info.json, exit 1, the remaining tracks never tried. With
+		// --ignore-errors that failure is a WARNING and the rest is still
+		// written, while extraction errors (unavailable, private, removed,
+		// bot checks, format errors) still exit non-zero.
+		"--ignore-errors",
 		"--skip-download",
 		"--no-playlist",
 		"-o", filepath.Join(tmpDir, "%(id)s"),
@@ -189,28 +214,46 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (*ytdlp
 		msg := extractYTDLPError(stderr)
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && isYTDLPPermanent(msg) {
-			return nil, &PermanentError{Err: fmt.Errorf("youtube: %s", msg)}
+			return nil, nil, &PermanentError{Err: fmt.Errorf("youtube: %s", msg)}
 		}
-		return nil, toolError("youtube: yt-dlp", err, msg)
+		return nil, nil, toolError("youtube: yt-dlp", err, msg)
 	}
 
 	infoFiles, err := filepath.Glob(filepath.Join(tmpDir, "*.info.json"))
 	if err != nil {
-		return nil, fmt.Errorf("youtube: find info.json: %w", err)
+		return nil, nil, fmt.Errorf("youtube: find info.json: %w", err)
 	}
 	if len(infoFiles) == 0 {
-		return nil, errors.New("youtube: yt-dlp produced no info.json")
+		return nil, nil, errors.New("youtube: yt-dlp produced no info.json")
 	}
 	data, err := os.ReadFile(infoFiles[0])
 	if err != nil {
-		return nil, fmt.Errorf("youtube: read info.json: %w", err)
+		return nil, nil, fmt.Errorf("youtube: read info.json: %w", err)
 	}
 
-	var meta ytdlpMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("youtube: parse yt-dlp json: %w", err)
+	meta = &ytdlpMeta{}
+	if err := json.Unmarshal(data, meta); err != nil {
+		return nil, nil, fmt.Errorf("youtube: parse yt-dlp json: %w", err)
 	}
-	return &meta, nil
+	return meta, parseCaptionFailures(stderr), nil
+}
+
+// captionFailureRE matches the warning yt-dlp prints, under
+// --ignore-errors, for a caption track it couldn't download:
+//
+//	WARNING: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests
+var captionFailureRE = regexp.MustCompile(`^WARNING: (Unable to download video subtitles for '[^']*': .*)$`)
+
+// parseCaptionFailures returns yt-dlp's message for each caption track it
+// couldn't download, from the warnings in its stderr.
+func parseCaptionFailures(stderr string) []string {
+	var failures []string
+	for line := range strings.SplitSeq(stderr, "\n") {
+		if m := captionFailureRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			failures = append(failures, m[1])
+		}
+	}
+	return failures
 }
 
 var permanentPatterns = []string{

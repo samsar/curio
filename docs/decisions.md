@@ -118,6 +118,7 @@ when the entry was first committed.
 - 2026-09-26 — [Chrome backend: plain http carries an explicit :80](#chrome-backend-plain-http-carries-an-explicit-80)
 - 2026-09-26 — [TLS certificate failures are permanent, never Jina, never host-cached](#tls-certificate-failures-are-permanent-never-jina-never-host-cached)
 - 2026-09-26 — [YouTube: caption tracks by an exact pattern, not `en.*`](#youtube-caption-tracks-by-an-exact-pattern-not-en)
+- 2026-09-26 — [YouTube: a failed caption download leaves a partial, not a failed fetch](#youtube-a-failed-caption-download-leaves-a-partial-not-a-failed-fetch)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -1444,6 +1445,14 @@ but harmless.
 `en,en-(?-i:[A-Z]{2})` rather than `en.*,en`, which also downloaded one
 machine translation per caption language the video was uploaded with. See
 "YouTube: caption tracks by an exact pattern, not `en.*`".
+
+yt-dlp now runs with `--ignore-errors`, and its caption `WARNING:` lines
+are read: `WARNING: Unable to download video subtitles for '<lang>': …`
+is a caption track that failed to download. A video whose only matching
+tracks all failed is stored as a partial (description only) whose
+extraction `error_message` quotes yt-dlp; recovery is `curio refetch <id>`.
+See "YouTube: a failed caption download leaves a partial, not a failed
+fetch".
 
 ---
 
@@ -4169,6 +4178,45 @@ description-only (partial). Setting `sub_langs` gets them back.
 
 **Migration:** `config.yaml` is never generated, so only a config that sets
 `sub_langs` keeps the old value. `docs/setup.md` says to delete the key.
+
+---
+
+## YouTube: a failed caption download leaves a partial, not a failed fetch
+
+**Decision:**
+
+- yt-dlp runs with `--ignore-errors`. A caption track that fails to
+  download is then a `WARNING: Unable to download video subtitles for
+  '<lang>': <reason>` line, info.json and the other tracks are still
+  written, and yt-dlp exits 0. Extraction errors (unavailable, private,
+  removed, bot checks, format errors) still exit non-zero and keep their
+  classification.
+- `YouTube.Fetch` reads those warnings. With no transcript from any track,
+  the result is `Partial` and its new `PartialReason` quotes them
+  (`transcript not downloaded: yt-dlp: Unable to download video subtitles
+  for 'en': HTTP Error 429: Too Many Requests`), capped at 512 bytes like
+  any quoted error text. A video with no usable captions says `no usable
+  captions for sub_langs "…"`. When another track gave a transcript the
+  result is not partial, and the failed track is logged at Warn.
+- The fetch handler stores `PartialReason` as the extraction's
+  `error_message`, which the API already returns and `curio docs show`
+  prints as `err:`. No new API or CLI surface.
+- Partial counts as success: the job is done, the index job runs, and the
+  document ends `fetched`, searchable by its title and description, with a
+  `partial` extraction. `curio refetch <id>` stores a new extraction, `ok`
+  once the transcript downloads.
+
+**Why:** yt-dlp writes subtitles before info.json, and under its default
+`ignoreerrors='only_download'` a failed caption download raises: exit 1,
+no info.json, and the remaining tracks never tried. One 429 on one often
+useless track (`en-zh`, a machine translation) threw away the video's
+metadata and description, and every retry requested every track again.
+
+**Why partial rather than a retry:** the metadata is already in hand, a
+failed fetch indexes nothing, and a retry repeats every caption request
+against the limit that failed it. The cost is a transcript missing until a
+manual refetch, and "YouTube: a shared cooldown after a 429" bounds how
+many videos one throttle turns into partials.
 
 ---
 

@@ -114,6 +114,11 @@ you widen `sub_langs`.
 If your config sets `sub_langs: "en.*,en"`, the old default, delete the key
 to get the new one.
 
+A video whose captions couldn't be downloaded (YouTube answering 429, say)
+is still stored, with its description only: `curio docs show <id>`
+reports the extraction as `partial` with yt-dlp's reason under `err:`.
+`curio refetch <id>` tries the transcript again.
+
 ## Demo: import and search your bookmarks
 
 End-to-end flow using a Chrome HTML export. Substitute your own browser/path.

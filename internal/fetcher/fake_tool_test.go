@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,8 +33,10 @@ const (
 	fakeLogEnv     = "CURIO_FAKE_LOG"     // yt-dlp appends start/end timestamps here
 	fakeArgsEnv    = "CURIO_FAKE_ARGS"    // yt-dlp appends its arguments here, one JSON array per run
 	// fakeSubsEnv lists the caption tracks the fake yt-dlp's video has, as
-	// comma-separated kind:lang pairs ("manual:en,auto:en-orig"). Unset
-	// means one uploaded English track; "none" means no captions at all.
+	// comma-separated kind:lang pairs ("manual:en,auto:en-orig"). A pair
+	// ending in !<status> ("auto:en!429") is a track whose download fails
+	// with that HTTP status. Unset means one uploaded English track; "none"
+	// means no captions at all.
 	fakeSubsEnv = "CURIO_FAKE_SUBS"
 )
 
@@ -97,15 +102,22 @@ func runFakeTool(mode string, args []string) int {
 		fmt.Fprintln(os.Stderr, "WARNING: ffmpeg not found")
 		fmt.Fprintln(os.Stderr, "ERROR: Video unavailable")
 		return 1
+	case "yt-dlp-error":
+		fmt.Fprintln(os.Stderr, "ERROR: [youtube] test_id: Unable to extract initial player response")
+		return 1
+	case "yt-dlp-no-info":
+		return 0
 	}
 	fmt.Fprintln(os.Stderr, "unknown fake tool mode", mode)
 	return 2
 }
 
 // fakeYTDLP writes what `yt-dlp --write-info-json --write-subs
-// --write-auto-subs` would into the directory of its -o template: an
-// info.json listing the caption tracks, and one VTT per language. Like
-// yt-dlp, it downloads the uploaded track when a language has both kinds.
+// --write-auto-subs` would into the directory of its -o template: one VTT
+// per caption language, then an info.json listing the tracks. Like yt-dlp,
+// it downloads the uploaded track when a language has both kinds, and a
+// track whose download fails (see fakeSubsEnv) aborts the video with an
+// ERROR unless it runs with --ignore-errors, which makes that a WARNING.
 func fakeYTDLP(args []string) int {
 	if path := os.Getenv(fakeArgsEnv); path != "" {
 		line, err := json.Marshal(args)
@@ -120,25 +132,46 @@ func fakeYTDLP(args []string) int {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	code := fakeYTDLPRun(args)
+	if logPath != "" {
+		if err := appendLine(logPath, "end"); err != nil {
+			return 2
+		}
+	}
+	return code
+}
 
+func fakeYTDLPRun(args []string) int {
 	var dir string
 	for i, a := range args {
 		if a == "-o" && i+1 < len(args) {
 			dir = filepath.Dir(args[i+1])
 		}
 	}
+	tracks, captions, err := parseFakeSubs(cmp.Or(os.Getenv(fakeSubsEnv), "manual:en"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
 
-	spec := cmp.Or(os.Getenv(fakeSubsEnv), "manual:en")
-	tracks := map[string]map[string][]any{"manual": {}, "auto": {}}
-	files := map[string]string{} // lang → kind of the downloaded file
-	for pair := range strings.SplitSeq(spec, ",") {
-		kind, lang, ok := strings.Cut(pair, ":")
-		if !ok {
-			continue // "none"
+	ignoreErrors := slices.Contains(args, "--ignore-errors") || slices.Contains(args, "-i")
+	for _, lang := range slices.Sorted(maps.Keys(captions)) {
+		c := captions[lang]
+		if c.failStatus != 0 {
+			msg := fmt.Sprintf("Unable to download video subtitles for '%s': HTTP Error %d: %s",
+				lang, c.failStatus, http.StatusText(c.failStatus))
+			if !ignoreErrors {
+				fmt.Fprintln(os.Stderr, "ERROR: "+msg)
+				return 1
+			}
+			fmt.Fprintln(os.Stderr, "WARNING: "+msg)
+			continue
 		}
-		tracks[kind][lang] = []any{}
-		if files[lang] != "manual" {
-			files[lang] = kind
+		vtt := "WEBVTT\nKind: captions\nLanguage: " + lang + "\n\n00:00:01.000 --> 00:00:04.000\n" +
+			"Hello world this is a test transcript.\n\n00:00:04.500 --> 00:00:08.000\n" +
+			"This track is " + c.kind + " " + lang + ".\n"
+		if os.WriteFile(filepath.Join(dir, "test_id."+lang+".vtt"), []byte(vtt), 0o600) != nil {
+			return 2
 		}
 	}
 
@@ -152,21 +185,38 @@ func fakeYTDLP(args []string) int {
 	if err != nil || os.WriteFile(filepath.Join(dir, "test_id.info.json"), info, 0o600) != nil {
 		return 2
 	}
-	for lang, kind := range files {
-		vtt := "WEBVTT\nKind: captions\nLanguage: " + lang + "\n\n00:00:01.000 --> 00:00:04.000\n" +
-			"Hello world this is a test transcript.\n\n00:00:04.500 --> 00:00:08.000\n" +
-			"This track is " + kind + " " + lang + ".\n"
-		if os.WriteFile(filepath.Join(dir, "test_id."+lang+".vtt"), []byte(vtt), 0o600) != nil {
-			return 2
-		}
-	}
-
-	if logPath != "" {
-		if err := appendLine(logPath, "end"); err != nil {
-			return 2
-		}
-	}
 	return 0
+}
+
+// fakeCaption is the track the fake yt-dlp downloads for one language.
+type fakeCaption struct {
+	kind       string // "manual" or "auto"
+	failStatus int    // the HTTP status its download fails with; 0 when it succeeds
+}
+
+// parseFakeSubs reads a fakeSubsEnv value into info.json's two caption
+// maps, by kind, and the track downloaded for each language.
+func parseFakeSubs(spec string) (tracks map[string]map[string][]any, captions map[string]fakeCaption, err error) {
+	tracks = map[string]map[string][]any{"manual": {}, "auto": {}}
+	captions = map[string]fakeCaption{}
+	for pair := range strings.SplitSeq(spec, ",") {
+		kind, track, ok := strings.Cut(pair, ":")
+		if !ok {
+			continue // "none"
+		}
+		lang, failure, failing := strings.Cut(track, "!")
+		var status int
+		if failing {
+			if status, err = strconv.Atoi(failure); err != nil {
+				return nil, nil, fmt.Errorf("bad %s entry %q: %w", fakeSubsEnv, pair, err)
+			}
+		}
+		tracks[kind][lang] = []any{}
+		if captions[lang].kind != "manual" {
+			captions[lang] = fakeCaption{kind: kind, failStatus: status}
+		}
+	}
+	return tracks, captions, nil
 }
 
 // appendLine appends "<event> <unix nanos>" to path.

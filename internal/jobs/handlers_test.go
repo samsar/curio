@@ -178,12 +178,26 @@ func TestFetchHandler_RefetchClearsStaleMetadata(t *testing.T) {
 }
 
 // TestFetchHandler_ExtractionStatus: a result flagged Partial (fetched,
-// but missing its primary content) is stored as a partial extraction.
+// but missing its primary content) is stored as a partial extraction whose
+// error_message says why. The fetch still succeeds and queues indexing, so
+// the document is searchable by what it has.
 func TestFetchHandler_ExtractionStatus(t *testing.T) {
-	for _, partial := range []bool{false, true} {
-		t.Run(fmt.Sprintf("partial=%v", partial), func(t *testing.T) {
-			deps, _, ff := newTestDeps(t)
-			ff.res.Partial = partial
+	const reason = "transcript not downloaded: yt-dlp: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"
+	cases := []struct {
+		name       string
+		partial    bool
+		reason     string
+		wantStatus string
+	}{
+		{"ok", false, "", store.ExtractionStatusOK},
+		{"partial", true, reason, store.ExtractionStatusPartial},
+		{"partial without a reason", true, "", store.ExtractionStatusPartial},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, db, ff := newTestDeps(t)
+			ff.res.Partial = tc.partial
+			ff.res.PartialReason = tc.reason
 			ctx := context.Background()
 			doc := &store.Document{TenantID: "local", URL: "https://example.com/video", ContentType: store.ContentTypeVideo}
 			require.NoError(t, deps.Documents.Create(ctx, doc))
@@ -194,11 +208,12 @@ func TestFetchHandler_ExtractionStatus(t *testing.T) {
 			require.NoError(t, err)
 			ext, err := deps.Extractions.GetByID(ctx, *got.CurrentExtractionID)
 			require.NoError(t, err)
-			want := store.ExtractionStatusOK
-			if partial {
-				want = store.ExtractionStatusPartial
-			}
-			assert.Equal(t, want, ext.Status)
+			assert.Equal(t, tc.wantStatus, ext.Status)
+			assert.Equal(t, store.NullableString(tc.reason), ext.ErrorMessage)
+
+			var indexJobs int
+			require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindIndex).Scan(&indexJobs))
+			assert.Equal(t, 1, indexJobs)
 		})
 	}
 }

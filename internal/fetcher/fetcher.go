@@ -41,6 +41,9 @@ type Result struct {
 	// content (a video without a transcript). The extraction is stored
 	// with status "partial" instead of "ok".
 	Partial bool
+	// PartialReason says why a Partial result lacks its primary content.
+	// It is stored as the extraction's error_message.
+	PartialReason string
 }
 
 // Fetcher pulls content from a URL.
