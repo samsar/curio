@@ -75,6 +75,45 @@ fetcher:
     timeout_seconds: 30
 ```
 
+### YouTube
+
+YouTube URLs go to the YouTube fetcher when yt-dlp is installed
+(`fetcher.youtube.bin`, by default `yt-dlp` on the daemon's PATH). It
+stores the video's metadata, its description and an English transcript.
+
+```yaml
+fetcher:
+  youtube:
+    bin: "yt-dlp"
+    timeout_seconds: 60
+    # sub_langs: leave unset for the default, en,en-(?-i:[A-Z]{2})
+```
+
+`sub_langs` is passed to yt-dlp's `--sub-langs`. yt-dlp matches each
+comma-separated item, as a case-insensitive regular expression, against the
+whole language key of every caption track, uploaded and automatic, and
+downloads each track that matches. The default picks:
+
+- `en`: the uploaded English track, or else YouTube's automatic one. For a
+  video in another language that is its captions machine-translated into
+  English.
+- `en-(?-i:[A-Z]{2})`: uploaded regional English tracks such as `en-GB` and
+  `en-US`. The region is case-sensitive so that YouTube's automatic
+  translations, keyed `en-<source language>` (`en-zh`, `en-ca`), don't
+  match.
+
+That is one or two caption requests per video. A broader pattern costs one
+request per track it matches, and YouTube answers too many with HTTP 429:
+`en.*` also matches one machine translation for every caption language the
+video was uploaded with, and popular videos have dozens. What the default
+gives up is named English tracks (`en-<id>`) and, on a video without
+automatic captions, the English translation of an uploaded track in
+another language. Such a video is stored with its description only unless
+you widen `sub_langs`.
+
+If your config sets `sub_langs: "en.*,en"`, the old default, delete the key
+to get the new one.
+
 ## Demo: import and search your bookmarks
 
 End-to-end flow using a Chrome HTML export. Substitute your own browser/path.

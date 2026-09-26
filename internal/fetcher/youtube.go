@@ -20,9 +20,30 @@ import (
 	"github.com/samsar/curio/internal/urlutil"
 )
 
+// DefaultYouTubeSubLangs is the yt-dlp --sub-langs value used when
+// YouTubeOptions.SubLangs is empty. yt-dlp full-matches each
+// comma-separated item, as a case-insensitive regular expression, against
+// the language key of every caption track, uploaded and automatic, and
+// downloads each match: one caption request per matched track.
+//
+//   - "en" is the uploaded English track or, without one, YouTube's
+//     automatic track; for a video in another language that is its
+//     captions machine-translated into English.
+//   - "en-(?-i:[A-Z]{2})" adds uploaded regional English tracks (en-GB,
+//     en-US). The region is matched case-sensitively, which keeps out the
+//     translations YouTube keys "en-<source language>" (en-zh, en-ca,
+//     en-en-GB, one per uploaded caption language) and "en-orig", a copy
+//     of the automatic track.
+//
+// That is one or two caption requests per video, where "en.*" made one
+// more for every caption language the video was uploaded with.
+const DefaultYouTubeSubLangs = "en,en-(?-i:[A-Z]{2})"
+
 type YouTubeOptions struct {
-	Bin      string
-	Timeout  time.Duration
+	Bin     string
+	Timeout time.Duration
+	// SubLangs is passed to yt-dlp's --sub-langs as is; empty means
+	// DefaultYouTubeSubLangs.
 	SubLangs string
 	// MaxConcurrent bounds how many yt-dlp processes run at once. Default
 	// 2: each one is slow and talks to YouTube, whose anti-bot measures
@@ -44,7 +65,7 @@ func NewYouTube(opts YouTubeOptions) *YouTube {
 		opts.Timeout = 60 * time.Second
 	}
 	if opts.SubLangs == "" {
-		opts.SubLangs = "en.*,en"
+		opts.SubLangs = DefaultYouTubeSubLangs
 	}
 	if opts.MaxConcurrent <= 0 {
 		opts.MaxConcurrent = 2

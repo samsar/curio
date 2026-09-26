@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +28,7 @@ const (
 	fakeToolEnv    = "CURIO_FAKE_TOOL"
 	fakePIDFileEnv = "CURIO_FAKE_PIDFILE" // hang-with-grandchild writes the grandchild's PID here
 	fakeLogEnv     = "CURIO_FAKE_LOG"     // yt-dlp appends start/end timestamps here
+	fakeArgsEnv    = "CURIO_FAKE_ARGS"    // yt-dlp appends its arguments here, one JSON array per run
 	// fakeSubsEnv lists the caption tracks the fake yt-dlp's video has, as
 	// comma-separated kind:lang pairs ("manual:en,auto:en-orig"). Unset
 	// means one uploaded English track; "none" means no captions at all.
@@ -104,6 +107,12 @@ func runFakeTool(mode string, args []string) int {
 // info.json listing the caption tracks, and one VTT per language. Like
 // yt-dlp, it downloads the uploaded track when a language has both kinds.
 func fakeYTDLP(args []string) int {
+	if path := os.Getenv(fakeArgsEnv); path != "" {
+		line, err := json.Marshal(args)
+		if err != nil || appendRecord(path, string(line)) != nil {
+			return 2
+		}
+	}
 	logPath := os.Getenv(fakeLogEnv)
 	if logPath != "" {
 		if err := appendLine(logPath, "start"); err != nil {
@@ -160,13 +169,36 @@ func fakeYTDLP(args []string) int {
 	return 0
 }
 
-// appendLine appends "<event> <unix nanos>" to path. Short O_APPEND writes
-// don't interleave, so concurrent fakes can share the file.
+// appendLine appends "<event> <unix nanos>" to path.
 func appendLine(path, event string) error {
+	return appendRecord(path, fmt.Sprintf("%s %d", event, time.Now().UnixNano()))
+}
+
+// appendRecord appends line and a newline to path. Short O_APPEND writes
+// don't interleave, so concurrent fakes can share the file.
+func appendRecord(path, line string) error {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f, "%s %d\n", event, time.Now().UnixNano())
+	_, err = io.WriteString(f, line+"\n")
 	return errors.Join(err, f.Close())
+}
+
+// ytdlpRuns returns the argument list of every run of the fake yt-dlp
+// that recorded to path (see fakeArgsEnv).
+func ytdlpRuns(t *testing.T, path string) [][]string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	require.NoError(t, err)
+	var runs [][]string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		var args []string
+		require.NoError(t, json.Unmarshal([]byte(line), &args))
+		runs = append(runs, args)
+	}
+	return runs
 }

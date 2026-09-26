@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -325,4 +326,88 @@ func TestFindTranscript_IOErrors(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "vid.en.vtt"), 0o700)) // unreadable as a file
 	_, _, err = findTranscript(dir, &ytdlpMeta{})
 	require.Error(t, err)
+}
+
+// TestYouTubeFetch_SubLangs: yt-dlp gets DefaultYouTubeSubLangs when
+// sub_langs isn't configured, and a configured value as is.
+func TestYouTubeFetch_SubLangs(t *testing.T) {
+	cases := []struct{ configured, want string }{
+		{"", "en,en-(?-i:[A-Z]{2})"},
+		{"de.*,en", "de.*,en"},
+	}
+	for _, tc := range cases {
+		t.Run("configured="+tc.configured, func(t *testing.T) {
+			argsPath := filepath.Join(t.TempDir(), "args")
+			t.Setenv(fakeArgsEnv, argsPath)
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second, SubLangs: tc.configured})
+			_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+			require.NoError(t, err)
+
+			runs := ytdlpRuns(t, argsPath)
+			require.Len(t, runs, 1)
+			args := runs[0]
+			i := slices.Index(args, "--sub-langs")
+			require.True(t, i >= 0 && i+1 < len(args), "no --sub-langs value in %q", args)
+			assert.Equal(t, tc.want, args[i+1])
+			assert.NotContains(t, args[i+2:], "--sub-langs")
+		})
+	}
+}
+
+// TestDefaultYouTubeSubLangs_Picks: what the default has yt-dlp download
+// from caption layouts YouTube serves. Tracks are listed as yt-dlp sees
+// them: uploaded ones first, then automatic ones without an uploaded
+// track of the same key. YouTube adds an automatic en-<source> track, a
+// machine translation into English, for every uploaded caption language,
+// and en-orig, a copy of the automatic en.
+func TestDefaultYouTubeSubLangs_Picks(t *testing.T) {
+	cases := []struct {
+		name   string
+		tracks []string
+		want   []string
+	}{
+		{
+			"uploaded en-GB, zh and ja",
+			[]string{"en-GB", "zh", "ja", "en-orig", "en", "fr", "de", "en-en-GB", "en-zh", "en-ja"},
+			[]string{"en", "en-GB"},
+		},
+		{"uploaded en", []string{"en", "en-orig", "en-en"}, []string{"en"}},
+		{"automatic only, a Spanish video", []string{"es-orig", "es", "en"}, []string{"en"}},
+		{
+			"uploaded en-US and a named English track",
+			[]string{"en-US", "en-nP7-2PuUl7o", "en-orig", "en", "en-en-US", "en-zh-Hans", "en-pt-BR"},
+			[]string{"en", "en-US"},
+		},
+		{"stream replay with only its live chat", []string{"live_chat"}, nil},
+		{"uploaded Catalan", []string{"ca", "en-orig", "en", "en-ca"}, []string{"en"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ytdlpPicksSubs(DefaultYouTubeSubLangs, tc.tracks))
+		})
+	}
+}
+
+// ytdlpPicksSubs mirrors how yt-dlp turns --sub-langs into the caption
+// tracks it downloads (YoutubeDL.process_subtitles and
+// orderedSet_from_options): each comma-separated item is full-matched, as
+// a case-insensitive regular expression, against every track key in turn,
+// and an item with a leading '-' removes its matches instead. Each track
+// is picked once, in the order first picked.
+func ytdlpPicksSubs(subLangs string, tracks []string) []string {
+	var picked []string
+	for item := range strings.SplitSeq(subLangs, ",") {
+		pattern, discard := strings.CutPrefix(item, "-")
+		re := regexp.MustCompile(`(?i)^(?:` + pattern + `)$`)
+		for _, track := range tracks {
+			switch {
+			case !re.MatchString(track):
+			case discard:
+				picked = slices.DeleteFunc(picked, func(p string) bool { return p == track })
+			case !slices.Contains(picked, track):
+				picked = append(picked, track)
+			}
+		}
+	}
+	return picked
 }

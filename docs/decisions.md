@@ -117,6 +117,7 @@ when the entry was first committed.
 - 2026-09-25 — [Daemon startup: a starting API while migrating, clients that wait on progress](#daemon-startup-a-starting-api-while-migrating-clients-that-wait-on-progress)
 - 2026-09-26 — [Chrome backend: plain http carries an explicit :80](#chrome-backend-plain-http-carries-an-explicit-80)
 - 2026-09-26 — [TLS certificate failures are permanent, never Jina, never host-cached](#tls-certificate-failures-are-permanent-never-jina-never-host-cached)
+- 2026-09-26 — [YouTube: caption tracks by an exact pattern, not `en.*`](#youtube-caption-tracks-by-an-exact-pattern-not-en)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -1438,6 +1439,11 @@ more requests to YouTube, for little gain.
 extract only `ERROR:` lines from stderr. Ignore `WARNING:` lines
 (e.g., "ffmpeg not found", impersonation warnings) that are noisy
 but harmless.
+
+**Revised (2026-09-26):** the default `sub_langs` is now
+`en,en-(?-i:[A-Z]{2})` rather than `en.*,en`, which also downloaded one
+machine translation per caption language the video was uploaded with. See
+"YouTube: caption tracks by an exact pattern, not `en.*`".
 
 ---
 
@@ -4108,6 +4114,61 @@ corporate proxy whose root the system doesn't trust) or with a badly wrong
 local clock, every https fetch fails permanently at once. The error names
 the cause (`invalid TLS certificate: … x509: …`), and once the network or
 clock is right, `curio refetch --all --state=failed` recovers.
+
+---
+
+## YouTube: caption tracks by an exact pattern, not `en.*`
+
+**Decision:** `fetcher.youtube.sub_langs` defaults to
+`en,en-(?-i:[A-Z]{2})`. The value is defined once, as
+`fetcher.DefaultYouTubeSubLangs`, and `NewYouTube` applies it when the key
+is empty; the config no longer carries a literal. A configured value is
+passed to yt-dlp as is.
+
+- `en` is the uploaded English track or, without one, YouTube's automatic
+  track: for a video in another language, its captions machine-translated
+  into English, as before.
+- `en-(?-i:[A-Z]{2})` adds uploaded regional English tracks (`en-GB`,
+  `en-US`). The scoped `(?-i:)` keeps the region case-sensitive.
+
+**Why:** yt-dlp full-matches each `--sub-langs` item, case-insensitively,
+against the key of every uploaded and automatic track. For each uploaded
+track in language L, YouTube's extractor adds an automatic English
+machine translation keyed `en-L` (`en-zh`, `en-en-GB`, `en-zh-Hans`), and
+it adds `en-orig`, the same URL as the automatic `en`. `en.*` matched
+them all, one timedtext request each, and videos with many caption
+languages drew HTTP 429s. Track counts from yt-dlp 2026.08.19's own
+selector on synthetic layouts (offline, `--load-info-json`):
+
+| Layout | `en.*,en` | default |
+|---|---|---|
+| uploaded en-GB, zh, ja + automatic | 6 (en-GB, en-orig, en, en-en-GB, en-zh, en-ja) | 2 (en, en-GB) |
+| uploaded en + automatic | 3 | 1 |
+| automatic only | 2 | 1 |
+
+**What the default gives up:** named uploaded English tracks (`en-<id>`)
+and, on a video without automatic captions, the English translation of an
+uploaded track in another language. Such a video is stored
+description-only (partial). Setting `sub_langs` gets them back.
+
+**Rejected:**
+
+- `en,en-orig`: `en-orig` duplicates the automatic `en`, and uploaded
+  `en-GB`/`en-US` tracks lose to automatic captions.
+- Omitting `--sub-langs`: yt-dlp then picks one track itself, but its last
+  resort is the first uploaded track of any kind. On a stream replay
+  without English captions that is `live_chat`, a paginated chat download.
+- `--extractor-args youtube:skip=translated_subs`: when the flag is given
+  more than once, yt-dlp replaces the whole `youtube:` argument dict
+  instead of merging it, and command-line arguments are applied after
+  config files (`options.py`, `_dict_from_options_callback`). It would
+  silently drop a user's own `player_client` or PO-token settings.
+- A literal region list (`en,en-GB,en-US,en-CA,…`): matching is
+  case-insensitive, so `en-CA` would also select `en-ca`, the English
+  translation of an uploaded Catalan track.
+
+**Migration:** `config.yaml` is never generated, so only a config that sets
+`sub_langs` keeps the old value. `docs/setup.md` says to delete the key.
 
 ---
 
