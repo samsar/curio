@@ -65,7 +65,8 @@ type rateLimiter interface {
 // pace clears one call to an upstream that lim paces and c cools down. A
 // cooldown longer than maxInline returns the time left without waiting, for
 // the caller to fail fast rather than hold a worker; the job queue's backoff
-// covers the rest.
+// covers the rest. lim is nil when the caller is paced elsewhere; only the
+// cooldown applies then.
 //
 // The cooldown is checked twice. Before queueing in the limiter, so a
 // cooldown already too long to sit out fails at once instead of after the
@@ -80,8 +81,10 @@ func pace(ctx context.Context, lim rateLimiter, c *cooldown, clk clock, maxInlin
 		return left, nil
 	}
 	for {
-		if err := lim.Wait(ctx); err != nil {
-			return 0, fmt.Errorf("rate limiter: %w", err)
+		if lim != nil {
+			if err := lim.Wait(ctx); err != nil {
+				return 0, fmt.Errorf("rate limiter: %w", err)
+			}
 		}
 		left := c.remaining(clk.now())
 		if left == 0 || left > maxInline {

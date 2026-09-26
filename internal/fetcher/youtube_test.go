@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -522,4 +524,154 @@ func ytdlpPicksSubs(subLangs string, tracks []string) []string {
 		}
 	}
 	return picked
+}
+
+const testVideoURL = "https://www.youtube.com/watch?v=test_id"
+
+// TestYouTubeFetch_RateLimitStartsCooldown: a 429 anywhere in yt-dlp's
+// output, failing the extraction or only a caption download, pauses every
+// run on the fetcher for youtubeRateLimitCooldown, and the next fetch
+// fails fast without starting yt-dlp. Other failures pause nothing.
+func TestYouTubeFetch_RateLimitStartsCooldown(t *testing.T) {
+	cases := []struct {
+		name     string
+		mode     string
+		subs     string
+		timeout  time.Duration
+		fails    bool
+		cooldown bool
+	}{
+		{"extraction 429", "yt-dlp-429", "", 30 * time.Second, true, true},
+		{"caption 429", "yt-dlp", "auto:en!429", 30 * time.Second, false, true},
+		{"caption 404", "yt-dlp", "auto:en!404", 30 * time.Second, false, false},
+		{"video unavailable", "yt-dlp-unavailable", "", 30 * time.Second, true, false},
+		{"timeout", "yt-dlp-hang", "", 100 * time.Millisecond, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argsPath := filepath.Join(t.TempDir(), "args")
+			t.Setenv(fakeArgsEnv, argsPath)
+			t.Setenv(fakeSubsEnv, tc.subs)
+			fc := newFakeClock()
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, tc.mode), Timeout: tc.timeout})
+			yt.clock = fc.clock()
+
+			_, err := yt.Fetch(t.Context(), testVideoURL)
+			assert.Equal(t, tc.fails, err != nil, "err: %v", err)
+			if !tc.cooldown {
+				assert.Zero(t, yt.cooldown.remaining(fc.now()))
+				return
+			}
+			assert.Equal(t, youtubeRateLimitCooldown, yt.cooldown.remaining(fc.now()))
+			if tc.fails {
+				assertRateLimited(t, err, youtubeRateLimitCooldown)
+			}
+
+			_, err = yt.Fetch(t.Context(), testVideoURL)
+			assertRateLimited(t, err, youtubeRateLimitCooldown)
+			assert.Len(t, ytdlpRuns(t, argsPath), 1, "a fetch during the cooldown must not start yt-dlp")
+			assert.Empty(t, fc.slept())
+		})
+	}
+}
+
+// TestYouTubeFetch_CooldownBeforeRun: a cooldown of up to
+// maxInlineYouTubeWait is sat out through the clock and the video then
+// fetched. A longer one fails at once, without starting yt-dlp, as a
+// retryable 429 carrying the time left.
+func TestYouTubeFetch_CooldownBeforeRun(t *testing.T) {
+	cases := []struct {
+		cooldown time.Duration
+		runs     bool
+	}{
+		{20 * time.Second, true},
+		{maxInlineYouTubeWait, true},
+		{maxInlineYouTubeWait + time.Second, false},
+		{youtubeRateLimitCooldown, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cooldown.String(), func(t *testing.T) {
+			argsPath := filepath.Join(t.TempDir(), "args")
+			t.Setenv(fakeArgsEnv, argsPath)
+			fc := newFakeClock()
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
+			yt.clock = fc.clock()
+			yt.cooldown.extend(fc.now(), tc.cooldown)
+
+			res, err := yt.Fetch(t.Context(), testVideoURL)
+			if tc.runs {
+				require.NoError(t, err)
+				assert.Equal(t, "Test Video", res.Title)
+				assert.Equal(t, []time.Duration{tc.cooldown}, fc.slept())
+				assert.Len(t, ytdlpRuns(t, argsPath), 1)
+				return
+			}
+			assertRateLimited(t, err, tc.cooldown)
+			assert.Empty(t, fc.slept())
+			assert.Empty(t, ytdlpRuns(t, argsPath))
+		})
+	}
+}
+
+// TestYouTubeFetch_CooldownRecheckedAfterSlot: a fetch waiting for the only
+// yt-dlp slot while the run holding it meets a 429 doesn't start yt-dlp
+// once it gets the slot; it fails fast like a fetch that came after the
+// 429.
+func TestYouTubeFetch_CooldownRecheckedAfterSlot(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fc := newFakeClock()
+		yt := NewYouTube(YouTubeOptions{Bin: "yt-dlp-must-not-run", MaxConcurrent: 1})
+		yt.clock = fc.clock()
+		yt.slots <- struct{}{} // a run in progress
+
+		errc := make(chan error, 1)
+		go func() {
+			_, err := yt.Fetch(t.Context(), testVideoURL)
+			errc <- err
+		}()
+		synctest.Wait() // past the first cooldown check, queued for the slot
+
+		yt.cooldown.extend(fc.now(), youtubeRateLimitCooldown) // the run meets a 429
+		<-yt.slots                                             // and ends
+		assertRateLimited(t, <-errc, youtubeRateLimitCooldown)
+	})
+}
+
+// TestYouTubeFetch_LongCooldownDoesNotQueue: a fetch that meets a cooldown
+// too long to sit out fails without waiting for a yt-dlp slot.
+func TestYouTubeFetch_LongCooldownDoesNotQueue(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fc := newFakeClock()
+		yt := NewYouTube(YouTubeOptions{Bin: "yt-dlp-must-not-run", MaxConcurrent: 1})
+		yt.clock = fc.clock()
+		yt.slots <- struct{}{} // every slot taken
+		yt.cooldown.extend(fc.now(), youtubeRateLimitCooldown)
+
+		errc := make(chan error, 1)
+		go func() {
+			_, err := yt.Fetch(t.Context(), testVideoURL)
+			errc <- err
+		}()
+		synctest.Wait()
+		queued := true
+		select {
+		case err := <-errc:
+			queued = false
+			assertRateLimited(t, err, youtubeRateLimitCooldown)
+		default:
+		}
+		<-yt.slots // lets a fetch that did queue finish
+		assert.False(t, queued, "the fetch waited for a slot instead of failing fast")
+	})
+}
+
+// assertRateLimited checks that err is a retryable 429 carrying retryAfter.
+func assertRateLimited(t *testing.T, err error, retryAfter time.Duration) {
+	t.Helper()
+	var se *HTTPStatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
+	assert.Equal(t, retryAfter, se.RetryAfter)
+	var pe *PermanentError
+	assert.False(t, errors.As(err, &pe), "a rate limit must stay retryable: %v", err)
 }

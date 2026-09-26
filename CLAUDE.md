@@ -95,7 +95,11 @@ Every response body is capped at 32 MiB after decompression (`maxResponseBytes`;
 
 Subprocess fetchers (Web2MD, YouTube) run through `runCapped`: own process group, killed as a group on timeout or cancel, stderr capped at 64 KiB. At most 2 yt-dlp processes run at once (`YouTubeOptions.MaxConcurrent`). Their tests re-exec the test binary as the fake tool (`TestMain` + `CURIO_FAKE_TOOL`); don't write shell scripts.
 
-yt-dlp runs with `--ignore-errors`, so a caption track that fails to download is a `WARNING:` line instead of an aborted video. A video left without a transcript is a `Partial` result (description only) whose `PartialReason` quotes yt-dlp and is stored as the extraction's `error_message`; the fetch still succeeds and indexes, and `curio refetch <id>` retries the transcript. yt-dlp's `--sub-langs` defaults to `fetcher.DefaultYouTubeSubLangs` (`en,en-(?-i:[A-Z]{2})`, config leaves the key empty). Every matched track is one caption request: `en.*` also matched YouTube's `en-<source>` machine translations, one per uploaded caption language, and drew 429s. See decisions.md "YouTube: caption tracks by an exact pattern, not `en.*`".
+YouTube (yt-dlp) specifics, each with a 2026-09-26 entry in decisions.md:
+
+- `--sub-langs` defaults to `fetcher.DefaultYouTubeSubLangs` (`en,en-(?-i:[A-Z]{2})`; config leaves the key empty). Every matched track is one caption request: `en.*` also matched YouTube's `en-<source>` machine translations, one per uploaded caption language, and drew 429s.
+- `--ignore-errors`: a caption track that fails to download is a `WARNING:` line, not an aborted video. A video left without a transcript is a `Partial` result (description only) whose `PartialReason` quotes yt-dlp and is stored as the extraction's `error_message`; the fetch succeeds and indexes, and `curio refetch <id>` retries the transcript.
+- Any `HTTP Error 429` in yt-dlp's stderr (ERROR or WARNING) extends a 2-minute cooldown shared by every YouTube fetch. `Fetch` checks it through `pace` (nil limiter) before and after taking a yt-dlp slot: up to 30s is sat out, longer fails fast and retryably with `*HTTPStatusError{429}`.
 
 `ErrDeadLink` (404/410, soft-404 titles, redirect-to-homepage) is always wrapped in a `PermanentError`, never goes to Jina, and is deliberately NOT host-cached (a dead path says nothing about the host). The soft-404 check runs BEFORE the login-wall heuristics in `tryReadability` — order matters, thin tombstone pages would otherwise classify as login walls and leak to Jina.
 

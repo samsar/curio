@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -57,8 +58,22 @@ type YouTube struct {
 	timeout  time.Duration
 	subLangs string
 	slots    chan struct{} // one per running yt-dlp process
+	cooldown cooldown      // shared by every run; a 429 extends it
+	clock    clock
 	log      *slog.Logger
 }
+
+const (
+	// youtubeRateLimitCooldown is how long every yt-dlp run waits after one
+	// of them met an HTTP 429. yt-dlp passes on no Retry-After, and
+	// YouTube's caption and player throttles are per IP and last minutes,
+	// so this is a fixed step, longer than GitHub's minute without a hint.
+	youtubeRateLimitCooldown = 2 * time.Minute
+	// maxInlineYouTubeWait is the longest cooldown a fetch sits out before
+	// running yt-dlp. A longer one fails the fetch at once, retryably:
+	// sitting it out would hold a fetch worker.
+	maxInlineYouTubeWait = 30 * time.Second
+)
 
 func NewYouTube(opts YouTubeOptions) *YouTube {
 	if opts.Timeout == 0 {
@@ -78,6 +93,7 @@ func NewYouTube(opts YouTubeOptions) *YouTube {
 		timeout:  opts.Timeout,
 		subLangs: opts.SubLangs,
 		slots:    make(chan struct{}, opts.MaxConcurrent),
+		clock:    realClock,
 		log:      opts.Log,
 	}
 }
@@ -96,6 +112,11 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 
 	canonicalURL := "https://www.youtube.com/watch?v=" + videoID
 
+	// A cooldown too long to sit out fails the fetch before it queues for
+	// a slot.
+	if err := y.awaitCooldown(ctx, canonicalURL); err != nil {
+		return nil, err
+	}
 	// Queue for a process slot before the per-run timeout starts, so time
 	// spent waiting doesn't count against it.
 	select {
@@ -104,6 +125,10 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("youtube: wait for a yt-dlp slot: %w", ctx.Err())
 	}
+	// A 429 that another run met while this one queued pauses it too.
+	if err := y.awaitCooldown(ctx, canonicalURL); err != nil {
+		return nil, err
+	}
 
 	tmpDir, err := os.MkdirTemp("", "curio-yt-*")
 	if err != nil {
@@ -111,7 +136,7 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	meta, captionFailures, err := y.runYTDLP(ctx, canonicalURL, tmpDir)
+	meta, captionFailures, err := y.runYTDLP(ctx, videoID, canonicalURL, tmpDir)
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +187,22 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	return result, nil
 }
 
+// awaitCooldown sits out a rate-limit cooldown that ends within
+// maxInlineYouTubeWait (see pace; the daemon paces yt-dlp starts itself).
+// A longer one fails at once, without running yt-dlp, with a retryable 429
+// carrying the time left.
+func (y *YouTube) awaitCooldown(ctx context.Context, videoURL string) error {
+	left, err := pace(ctx, nil, &y.cooldown, y.clock, maxInlineYouTubeWait)
+	if err != nil {
+		return fmt.Errorf("youtube: %w", err)
+	}
+	if left > 0 {
+		se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: videoURL, RetryAfter: left}
+		return fmt.Errorf("youtube: not run, rate-limit cooldown has %s left: %w", left.Round(time.Second), se)
+	}
+	return nil
+}
+
 // partialReason says why a video has no transcript: the caption downloads
 // that failed, or else that no track matching sub_langs had any text.
 func (y *YouTube) partialReason(captionFailures []string) string {
@@ -191,7 +232,7 @@ type ytdlpMeta struct {
 
 // runYTDLP runs yt-dlp for one video into tmpDir and returns its info.json
 // and yt-dlp's message for each caption track it couldn't download.
-func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (meta *ytdlpMeta, captionFailures []string, err error) {
+func (y *YouTube) runYTDLP(ctx context.Context, videoID, videoURL, tmpDir string) (meta *ytdlpMeta, captionFailures []string, err error) {
 	args := []string{
 		"--write-info-json",
 		"--write-subs", "--write-auto-subs",
@@ -210,13 +251,21 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (meta *
 	}
 
 	stderr, err := runCapped(ctx, y.timeout, nil, y.bin, args...)
+	rateLimited := y.noteRateLimit(stderr, videoID)
 	if err != nil {
 		msg := extractYTDLPError(stderr)
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && isYTDLPPermanent(msg) {
 			return nil, nil, &PermanentError{Err: fmt.Errorf("youtube: %s", msg)}
 		}
-		return nil, nil, toolError("youtube: yt-dlp", err, msg)
+		err = toolError("youtube: yt-dlp", err, msg)
+		if rateLimited {
+			// The hint travels on the error for when the job queue can honor
+			// it; the cooldown already holds back this fetcher's other runs.
+			se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: videoURL, RetryAfter: youtubeRateLimitCooldown}
+			return nil, nil, fmt.Errorf("%w (rate limited, yt-dlp runs paused for %s: %w)", err, youtubeRateLimitCooldown, se)
+		}
+		return nil, nil, err
 	}
 
 	infoFiles, err := filepath.Glob(filepath.Join(tmpDir, "*.info.json"))
@@ -236,6 +285,20 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoURL, tmpDir string) (meta *
 		return nil, nil, fmt.Errorf("youtube: parse yt-dlp json: %w", err)
 	}
 	return meta, parseCaptionFailures(stderr), nil
+}
+
+// noteRateLimit reports whether a yt-dlp run met an HTTP 429, whether it
+// failed the extraction (an ERROR) or one caption download (a WARNING),
+// and if so extends the cooldown every run on this fetcher shares:
+// YouTube throttles per IP, so the next video would meet the same limit.
+func (y *YouTube) noteRateLimit(stderr, videoID string) bool {
+	if !strings.Contains(stderr, "HTTP Error 429") {
+		return false
+	}
+	y.cooldown.extend(y.clock.now(), youtubeRateLimitCooldown)
+	y.log.Warn("youtube: rate limited, pausing yt-dlp runs",
+		"video_id", videoID, "cooldown", youtubeRateLimitCooldown.String())
+	return true
 }
 
 // captionFailureRE matches the warning yt-dlp prints, under

@@ -119,6 +119,7 @@ when the entry was first committed.
 - 2026-09-26 — [TLS certificate failures are permanent, never Jina, never host-cached](#tls-certificate-failures-are-permanent-never-jina-never-host-cached)
 - 2026-09-26 — [YouTube: caption tracks by an exact pattern, not `en.*`](#youtube-caption-tracks-by-an-exact-pattern-not-en)
 - 2026-09-26 — [YouTube: a failed caption download leaves a partial, not a failed fetch](#youtube-a-failed-caption-download-leaves-a-partial-not-a-failed-fetch)
+- 2026-09-26 — [YouTube: a shared cooldown after a 429](#youtube-a-shared-cooldown-after-a-429)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -4217,6 +4218,48 @@ failed fetch indexes nothing, and a retry repeats every caption request
 against the limit that failed it. The cost is a transcript missing until a
 manual refetch, and "YouTube: a shared cooldown after a 429" bounds how
 many videos one throttle turns into partials.
+
+---
+
+## YouTube: a shared cooldown after a 429
+
+**Decision:**
+
+- Any `HTTP Error 429` in yt-dlp's stderr, on an `ERROR:` line (the
+  extraction) or a `WARNING:` line (one caption download), extends a
+  cooldown shared by every fetch on the YouTube fetcher to 2 minutes from
+  now (`youtubeRateLimitCooldown`), and is logged once at Warn with the
+  video ID. Caption 404s, unavailable videos and timeouts extend nothing.
+- `Fetch` checks the cooldown through `pace`, with no limiter since the
+  daemon's `RateLimited` wrapper already paces yt-dlp starts at 2 a
+  second. It checks before queueing for a yt-dlp slot, so a long cooldown
+  fails without waiting for one, and again once it holds a slot, so a 429
+  that another run met meanwhile stops it too. Up to 30 s left
+  (`maxInlineYouTubeWait`, Jina's cap) is sat out; more fails at once,
+  without running yt-dlp, as a retryable `*HTTPStatusError{429}` whose
+  `RetryAfter` is the time left.
+- A failed run that met a 429 returns a retryable error carrying
+  `*HTTPStatusError{429}` with the 2-minute step as `RetryAfter`.
+  `JobQueue.MarkFailed` takes no delay yet, so the hint rides on the
+  error, as for Jina and GitHub.
+- `MaxConcurrent` (2 runs at once) and the start pacing are unchanged.
+
+**Why:** YouTube throttles per IP, yet after a 429 every queued video
+still started yt-dlp, two at a time, and each 429'd job retried on its own
+backoff. Jina and GitHub already shared a cooldown that a 429 extends;
+YouTube had none. Now that a failed caption download leaves a partial,
+the cooldown also bounds how many videos one throttle leaves without a
+transcript.
+
+**Why a fixed 2 minutes:** yt-dlp passes on no `Retry-After`, so the wait
+is a fixed step. YouTube's caption and player throttles last minutes,
+longer than GitHub's minute without a hint. Against the queue's backoff
+(60, 120, 240, 480 s over 5 attempts): a fetch that fails fast at the
+start of a cooldown is retried 60 s later, meets its last minute and
+fails fast again, then runs on its third attempt 120 s after that. That
+leaves two attempts for real failures. A fetch that meets 30 s or less
+sits it out and runs on the attempt it is on. A run that meets another
+429 starts a fresh 2 minutes.
 
 ---
 

@@ -96,29 +96,23 @@ func runFakeTool(mode string, args []string) int {
 		}
 		time.Sleep(time.Hour)
 		return 0
-	case "yt-dlp":
-		return fakeYTDLP(args)
-	case "yt-dlp-unavailable":
-		fmt.Fprintln(os.Stderr, "WARNING: ffmpeg not found")
-		fmt.Fprintln(os.Stderr, "ERROR: Video unavailable")
-		return 1
-	case "yt-dlp-error":
-		fmt.Fprintln(os.Stderr, "ERROR: [youtube] test_id: Unable to extract initial player response")
-		return 1
-	case "yt-dlp-no-info":
-		return 0
+	case "yt-dlp", "yt-dlp-unavailable", "yt-dlp-error", "yt-dlp-429", "yt-dlp-no-info", "yt-dlp-hang":
+		return fakeYTDLP(mode, args)
 	}
 	fmt.Fprintln(os.Stderr, "unknown fake tool mode", mode)
 	return 2
 }
 
-// fakeYTDLP writes what `yt-dlp --write-info-json --write-subs
-// --write-auto-subs` would into the directory of its -o template: one VTT
-// per caption language, then an info.json listing the tracks. Like yt-dlp,
-// it downloads the uploaded track when a language has both kinds, and a
-// track whose download fails (see fakeSubsEnv) aborts the video with an
-// ERROR unless it runs with --ignore-errors, which makes that a WARNING.
-func fakeYTDLP(args []string) int {
+// fakeYTDLP is the fake yt-dlp. Every mode records its arguments and
+// start/end times when asked to (fakeArgsEnv, fakeLogEnv), then:
+//
+//   - yt-dlp: a video with captions (fakeYTDLPRun)
+//   - yt-dlp-unavailable: a video that is gone
+//   - yt-dlp-error: an extraction that failed for another reason
+//   - yt-dlp-429: an extraction YouTube rate-limited
+//   - yt-dlp-no-info: a run that exits 0 having written nothing
+//   - yt-dlp-hang: a run that never ends
+func fakeYTDLP(mode string, args []string) int {
 	if path := os.Getenv(fakeArgsEnv); path != "" {
 		line, err := json.Marshal(args)
 		if err != nil || appendRecord(path, string(line)) != nil {
@@ -132,7 +126,27 @@ func fakeYTDLP(args []string) int {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	code := fakeYTDLPRun(args)
+
+	var code int
+	switch mode {
+	case "yt-dlp":
+		code = fakeYTDLPRun(args)
+	case "yt-dlp-unavailable":
+		fmt.Fprintln(os.Stderr, "WARNING: ffmpeg not found")
+		fmt.Fprintln(os.Stderr, "ERROR: Video unavailable")
+		code = 1
+	case "yt-dlp-error":
+		fmt.Fprintln(os.Stderr, "ERROR: [youtube] test_id: Unable to extract initial player response")
+		code = 1
+	case "yt-dlp-429":
+		fmt.Fprintln(os.Stderr, "ERROR: [youtube] test_id: Unable to download API page: HTTP Error 429: Too Many Requests")
+		code = 1
+	case "yt-dlp-no-info":
+		code = 0
+	case "yt-dlp-hang":
+		time.Sleep(time.Hour)
+	}
+
 	if logPath != "" {
 		if err := appendLine(logPath, "end"); err != nil {
 			return 2
@@ -141,6 +155,12 @@ func fakeYTDLP(args []string) int {
 	return code
 }
 
+// fakeYTDLPRun writes what `yt-dlp --write-info-json --write-subs
+// --write-auto-subs` would into the directory of its -o template: one VTT
+// per caption language, then an info.json listing the tracks. Like yt-dlp,
+// it downloads the uploaded track when a language has both kinds, and a
+// track whose download fails (see fakeSubsEnv) aborts the video with an
+// ERROR unless it runs with --ignore-errors, which makes that a WARNING.
 func fakeYTDLPRun(args []string) int {
 	var dir string
 	for i, a := range args {

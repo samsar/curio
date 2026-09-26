@@ -117,7 +117,9 @@ to get the new one.
 A video whose captions couldn't be downloaded (YouTube answering 429, say)
 is still stored, with its description only: `curio docs show <id>`
 reports the extraction as `partial` with yt-dlp's reason under `err:`.
-`curio refetch <id>` tries the transcript again.
+`curio refetch <id>` tries the transcript again. After a 429, curio holds
+every YouTube fetch for two minutes, so one throttle doesn't cost a whole
+import its transcripts.
 
 ## Demo: import and search your bookmarks
 
