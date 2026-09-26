@@ -288,7 +288,7 @@ func TestFakeYTDLP_FailedCaption(t *testing.T) {
 }
 
 // TestYouTubeFetch_FailedCaptionDownload: yt-dlp runs with --ignore-errors,
-// so a caption track that fails to download no longer costs the video.
+// so a caption track that fails to download doesn't cost the video.
 // When it was the only track, the video is stored as a partial of its
 // description that says why; when another track downloaded, that one is
 // the transcript.

@@ -119,7 +119,10 @@ is still stored, with its description only: `curio docs show <id>`
 reports the extraction as `partial` with yt-dlp's reason under `err:`.
 `curio refetch <id>` tries the transcript again. After a 429, curio holds
 every YouTube fetch for two minutes, so one throttle doesn't cost a whole
-import its transcripts.
+import its transcripts. A refetch replaces what a video had, so one that
+meets a 429 while refetching a video that already has its transcript
+leaves it description-only until a later refetch gets the transcript;
+`curio refetch --all` includes fetched videos.
 
 ## Demo: import and search your bookmarks
 
@@ -227,7 +230,10 @@ untrusted authority). curio won't fetch past that, not even through Jina,
 and doesn't retry it. Once the site fixes its certificate, `curio refetch
 <id>`. If every https document fails this way at once, something is
 intercepting TLS (a captive portal, a corporate proxy) or the system clock
-is badly off; fix that, then `curio refetch --all --state=failed`.
+is badly off; fix that, then `curio refetch --all --state=failed`. A
+`jina: invalid TLS certificate` error is about the certificate of
+`r.jina.ai`, the fallback reader, not the site's, and is retried like any
+other Jina failure.
 
 **`ENOENT: spawn node`** from a fetch — Node isn't on the daemon's PATH.
 Either install Node into a directory in PATH or set

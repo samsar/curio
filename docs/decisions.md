@@ -4226,6 +4226,18 @@ against the limit that failed it. The cost is a transcript missing until a
 manual refetch, and "YouTube: a shared cooldown after a 429" bounds how
 many videos one throttle turns into partials.
 
+**Known cost:** a refetch replaces the current extraction whatever it
+held. Refetching a video that already has its transcript (`curio refetch
+<id>`, or `refetch --all`, which includes fetched documents) while YouTube
+throttles its captions makes the partial current, and the index job
+re-chunks the document without the transcript; the `ok` extraction stays
+on disk but is no longer the one searched. A later refetch brings the
+transcript back, and the cooldown bounds how many videos one throttle
+catches. Keeping an `ok` extraction current over a later partial is left
+out: the fetch handler would have to choose between extractions and settle
+the document on one it didn't just write, and the partial carries the
+video's current title and description.
+
 ---
 
 ## YouTube: a shared cooldown after a 429
