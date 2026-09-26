@@ -95,9 +95,9 @@ func TestNewNative_WarnsOnMismatchedUserAgent(t *testing.T) {
 	}
 }
 
-// plainHTTPSite serves one site, example.com, as a browser would reach it:
-// https (HTTP/2, a certificate from ca) and plain http, both answering
-// with handler. It returns the routes a chrome backend dials it by.
+// plainHTTPSite serves hosts as a browser reaches them, over https
+// (HTTP/2, a certificate from ca) and plain http, both answering with
+// handler. It returns the routes a backend dials them by.
 func plainHTTPSite(t *testing.T, ca *testCA, hosts []string, handler http.Handler) map[string]string {
 	t.Helper()
 	secure := newTLSServer(t, ca.validLeaf(t, hosts...), handler)
