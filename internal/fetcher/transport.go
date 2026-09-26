@@ -301,13 +301,18 @@ const maxRedirects = 10
 
 // chromeCheckRedirect is the chrome backend's redirect policy: fhttp's
 // default limit, and the :80 pin on every hop (see pinPlainHTTPPort).
-// fhttp calls it once the next hop is built and before it is sent, and by
-// then has set the hop's Referer from the previous hop's URL, which may
-// carry the pin.
+// fhttp calls it once the next hop is built and before it is sent. By then
+// it has set the hop's Referer from the previous hop's URL, which may carry
+// the pin. It has also carried the previous hop's Host over to a Location
+// without a scheme, taking a Host that differs from the URL for one the
+// caller chose; the pin makes them differ, and a scheme-relative Location
+// (//www.example.com/post) names another host. curio never chooses a Host,
+// so every hop takes its own from its URL.
 func chromeCheckRedirect(req *fhttp.Request, via []*fhttp.Request) error {
 	if len(via) >= maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
 	}
+	req.Host = urlutil.StripDefaultPort(req.URL).Host
 	pinPlainHTTPPort(req)
 	if ref := req.Header.Get("Referer"); ref != "" {
 		req.Header.Set("Referer", withoutDefaultPort(ref))

@@ -174,7 +174,7 @@ func chromeGet(t *testing.T, rt roundTripper, target string) string {
 // TestChromeRT_PlainAndSecureShareAHost: http:// and https:// URLs on one
 // host work in any order and across redirects either way. tls-client keys
 // its cached transports by host:443 whatever the scheme, so without the :80
-// pin the second scheme to reach a host failed with "http2: unsupported
+// pin the second scheme to reach a host fails with "http2: unsupported
 // scheme" or "protocol negotiated". The pin never shows: the site sees a
 // port-free Host and Referer, and the settled URL has no :80.
 func TestChromeRT_PlainAndSecureShareAHost(t *testing.T) {
@@ -240,6 +240,45 @@ func TestChromeRT_UpgradeRefererIsPortFree(t *testing.T) {
 	require.Len(t, seen, 2)
 	assert.Equal(t, "/final", seen[1].path)
 	assert.Equal(t, "http://example.com/redir", seen[1].refer)
+}
+
+// TestChromeRT_SchemeRelativeRedirectToAnotherHost: a Location without a
+// scheme that names another host (//www.example.com/post, an apex → www
+// rule) reaches that host under its own name. fhttp carries the previous
+// hop's Host over to such a Location when that Host differs from the
+// hop's URL, which the :80 pin makes true; on a site that routes by Host,
+// the old name loops the redirect or lands on the wrong site.
+func TestChromeRT_SchemeRelativeRedirectToAnotherHost(t *testing.T) {
+	ca := newTestCA(t)
+	hosts := []string{"a.example", "b.example", "example.com", "www.example.com"}
+	moved := map[string]string{"a.example": "b.example", "example.com": "www.example.com"}
+	cases := []struct{ name, target, final string }{
+		{"http, to another host", "http://a.example/x", "http://b.example/x"},
+		{"http, apex to www", "http://example.com/post", "http://www.example.com/post"},
+		{"https, apex to www", "https://example.com/post", "https://www.example.com/post"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var log requestLog
+			site := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				log.record(r)
+				if to, ok := moved[r.Host]; ok {
+					http.Redirect(w, r, "//"+to+r.URL.Path, http.StatusMovedPermanently)
+					return
+				}
+				_, _ = io.WriteString(w, "ok")
+			})
+			rt := newRoutedChromeRT(t, ca.pool, plainHTTPSite(t, ca, hosts, site))
+
+			assert.Equal(t, tc.final, chromeGet(t, rt, tc.target))
+			seen := log.all()
+			require.Len(t, seen, 2)
+			final, err := url.Parse(tc.final)
+			require.NoError(t, err)
+			assert.Equal(t, final.Host, seen[1].host)
+			assert.Equal(t, tc.target, seen[1].refer)
+		})
+	}
 }
 
 // TestChromeRT_RedirectLimit: the redirect policy the pin rides on keeps

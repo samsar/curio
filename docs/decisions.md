@@ -3994,7 +3994,13 @@ never as ready.
   with `tlsclient.WithCustomRedirectFunc`), which keeps fhttp's default
   limit of 10 redirects.
 - The pin never shows. The `Host` header stays port-free, and the
-  `Referer` fhttp sets on the next hop is rewritten without it. `finalURL`
+  `Referer` fhttp sets on the next hop is rewritten without it. Every hop
+  takes its `Host` from its own URL: fhttp carries the previous hop's
+  `Host` over to a `Location` without a scheme when that `Host` differs
+  from the URL, which the pin makes true, and a scheme-relative
+  `Location` (`//www.example.com/post`, an apex → www rule) names another
+  host. Carried over, the new host would get the old host's name, and an
+  apex → www redirect would loop until the limit. `finalURL`
   and the URL a `*url.Error` names lose any default port through
   `urlutil.StripDefaultPort`, the rule `Normalize` applies. So
   `Result.FinalURL`, `url_canonical`, the base URL Readability resolves
@@ -4070,7 +4076,8 @@ Nobody bookmarks those.
   transport; take `cachedTransportsLck` for every write to the map in
   `dialTLS`.
 - **Workaround:** an explicit `:80` on the request and on each redirect
-  hop (through `CheckRedirect`), with the `Host` header left port-free.
+  hop (through `CheckRedirect`), with the `Host` header left port-free
+  and set from each hop's own URL.
   Explicitly mismatched ports (`http://h:443/`, `https://h:80/`) still
   collide.
 
