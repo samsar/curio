@@ -292,6 +292,46 @@ func TestChromeRT_RedirectLimit(t *testing.T) {
 	assert.Len(t, log.all(), maxRedirects)
 }
 
+// TestRoundTrippers_HostlessURLRefused: a URL without a host, requested or
+// redirected to, fails before any dial on both backends, as net/http fails
+// it. On the chrome backend the :80 pin would otherwise turn it into ":80",
+// and tls-client dials an https hop's ":443" before fhttp checks the host;
+// Go dials either on the local machine, and the test dialer would report
+// "no route to" it.
+func TestRoundTrippers_HostlessURLRefused(t *testing.T) {
+	ca := newTestCA(t)
+	locations := map[string]string{
+		"/to-http":        "http:///x",
+		"/to-http-opaque": "http:/x",
+		"/to-https":       "https:///x",
+	}
+	site := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", locations[r.URL.Path])
+		w.WriteHeader(http.StatusMovedPermanently)
+	})
+	routes := plainHTTPSite(t, ca, []string{"example.com"}, site)
+	targets := []string{
+		"http:///x",
+		"http://example.com/to-http",
+		"http://example.com/to-http-opaque",
+		"http://example.com/to-https",
+		"https://example.com/to-http",
+		"https://example.com/to-https",
+	}
+	for _, target := range targets {
+		// A fresh client per target: tls-client caches a transport for a
+		// hostless URL too, which would decide how the next one fails.
+		for backend, rt := range certRoundTrippers(t, ca.pool, routes) {
+			t.Run(backend+"/"+target, func(t *testing.T) {
+				_, err := rt.do(t.Context(), target, nil)
+				require.ErrorContains(t, err, errNoHost.Error())
+				var ue *url.Error
+				assert.ErrorAs(t, err, &ue)
+			})
+		}
+	}
+}
+
 // TestChromeRT_ErrorNamesPortFreeURL: a transport error on a pinned
 // request names the URL as requested, and is still classified by what
 // went wrong.

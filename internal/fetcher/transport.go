@@ -285,8 +285,11 @@ func (c *chromeRT) do(ctx context.Context, target string, headers []header) (*fe
 // that cache without its lock. An explicit port gives each scheme its own
 // entry. It can go once tls-client keys transports by scheme; see
 // docs/decisions.md, "Chrome backend: plain http carries an explicit :80".
+//
+// A URL without a host is left for fhttp to refuse: pinned, it would name
+// ":80", which Go dials on the local machine.
 func pinPlainHTTPPort(req *fhttp.Request) {
-	if !strings.EqualFold(req.URL.Scheme, "http") || req.URL.Port() != "" {
+	if !strings.EqualFold(req.URL.Scheme, "http") || req.URL.Port() != "" || req.URL.Hostname() == "" {
 		return
 	}
 	if req.Host == "" {
@@ -299,6 +302,9 @@ func pinPlainHTTPPort(req *fhttp.Request) {
 // chromeCheckRedirect replaces.
 const maxRedirects = 10
 
+// errNoHost is the error fhttp and net/http give a URL without a host.
+var errNoHost = errors.New("http: no Host in request URL")
+
 // chromeCheckRedirect is the chrome backend's redirect policy: fhttp's
 // default limit, and the :80 pin on every hop (see pinPlainHTTPPort).
 // fhttp calls it once the next hop is built and before it is sent. By then
@@ -308,9 +314,17 @@ const maxRedirects = 10
 // caller chose; the pin makes them differ, and a scheme-relative Location
 // (//www.example.com/post) names another host. curio never chooses a Host,
 // so every hop takes its own from its URL.
+//
+// A hop without a host (Location: http:///x or https:///x) is refused here
+// with the stock backend's error. fhttp refuses one itself only after
+// tls-client has dialed an https hop's address, ":443" for no host, which
+// Go dials on the local machine.
 func chromeCheckRedirect(req *fhttp.Request, via []*fhttp.Request) error {
 	if len(via) >= maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if req.URL.Host == "" {
+		return errNoHost
 	}
 	req.Host = urlutil.StripDefaultPort(req.URL).Host
 	pinPlainHTTPPort(req)

@@ -4007,6 +4007,14 @@ never as ready.
   relative links against, and error text never carry `:80`.
 - A URL that names its port is sent as it is. The stock backend is
   unchanged: net/http keys its connections by scheme.
+- A URL without a host is never pinned, and a redirect hop without one
+  (`Location: http:///x`) is refused with net/http's own `http: no Host
+  in request URL`, as the stock backend refuses it. Pinned, it would name
+  `:80`; unpinned, tls-client dials an https hop's `:443` before fhttp
+  checks the host. Go dials an empty host on the local machine, so the
+  fetch could store a local server's page, or record a refused connection
+  against the redirecting host as unreachable and fail that host's
+  healthy pages from the host cache for 15 minutes.
 - tls-client stays at v1.16.0, the latest release. Nothing upstream fixes
   this yet; the report below is ready to file. The pin goes once tls-client
   keys transports by scheme, and `TestChromeRT_PlainAndSecureShareAHost`
@@ -4071,13 +4079,16 @@ Nobody bookmarks those.
   after `dropCachedTransport` reaches the same unlocked write.
 - **Expected:** http and https never share a transport, and
   `errProtocolNegotiated` never reaches callers.
+- **Also:** `RoundTrip` dials before fhttp checks the URL's host, so an
+  https URL without one (a redirect to `https:///x`) dials `:443` on the
+  local machine instead of failing with `http: no Host in request URL`.
 - **Suggested fix:** default the port by scheme (80 for http), or key the
   cache by scheme and address; record a `cachedKinds` entry for the http
   transport; take `cachedTransportsLck` for every write to the map in
-  `dialTLS`.
+  `dialTLS`; refuse a URL without a host before dialing.
 - **Workaround:** an explicit `:80` on the request and on each redirect
   hop (through `CheckRedirect`), with the `Host` header left port-free
-  and set from each hop's own URL.
+  and set from each hop's own URL, and a hop without a host refused there.
   Explicitly mismatched ports (`http://h:443/`, `https://h:80/`) still
   collide.
 
