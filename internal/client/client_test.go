@@ -16,8 +16,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -127,8 +129,30 @@ func TestErrStarting_OnlyTheStartingProblem(t *testing.T) {
 	}
 }
 
+// TestHealthz_Upstreams: the upstreams a daemon reports decode with their
+// times, classes and counts; the times it leaves out stay zero.
+func TestHealthz_Upstreams(t *testing.T) {
+	failure := time.Date(2026, 9, 27, 14, 40, 1, 0, time.UTC)
+	s := apitest.Start(t, func(d *api.Deps) {
+		d.Upstreams = func() []fetcher.UpstreamHealth {
+			return []fetcher.UpstreamHealth{{Name: "jina", Enabled: true, State: fetcher.UpstreamFailing,
+				LastFailure: failure, LastFailureClass: fetcher.CallAuth, Window: 15 * time.Minute,
+				Recent: map[fetcher.CallClass]int{fetcher.CallAuth: 5}}}
+		}
+	})
+	h, err := client.New(s.URL).Healthz(context.Background())
+	require.NoError(t, err)
+	require.Len(t, h.Upstreams, 1)
+	u := h.Upstreams[0]
+	assert.Equal(t, client.UpstreamHealth{Name: "jina", Enabled: true, State: client.UpstreamFailing,
+		LastFailureAt: failure, LastFailureClass: client.CallAuth, WindowSeconds: 900,
+		Recent: map[string]int{client.CallAuth: 5}}, u)
+	assert.True(t, u.LastSuccessAt.IsZero())
+	assert.True(t, u.CooldownUntil.IsZero())
+}
+
 // TestHealthz_LegacyDaemon: a daemon from before healthz named the daemon
-// still decodes, with no identity.
+// and its upstreams still decodes, with no identity and no upstreams.
 func TestHealthz_LegacyDaemon(t *testing.T) {
 	c := fakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -139,6 +163,7 @@ func TestHealthz_LegacyDaemon(t *testing.T) {
 	assert.Equal(t, "v0.2.0", h.Version)
 	assert.Zero(t, h.PID)
 	assert.Empty(t, h.Home)
+	assert.Nil(t, h.Upstreams)
 }
 
 // requireStatus asserts that err is the daemon answering status, and

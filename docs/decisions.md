@@ -2679,7 +2679,10 @@ same way on every path that exists.
   began on 2026-08-30: 400 permanent page-level failures, 402 origin-403
   first failures that wrote the host cache, and 428 permanent cache hits
   served from those entries. With `cf-mitigated: challenge` it also pauses
-  every Jina call. See "Jina requests identify as curio".
+  every Jina call. See "Jina requests identify as curio". Refined the same
+  day: a 403 whose reason names the target's host is Jina refusing that
+  domain, a verdict like its other 4xx refusals; see "Jina refusing a
+  target is a verdict".
 - **A redirect onto another site's landing or login page is page-level,
   whatever it answered.** A landing page (a dead link) and a login page (a
   final login wall; after a 403 or 503 only its path counts, since no page
@@ -2798,6 +2801,14 @@ extends the same cooldown, by its `Retry-After` or else 10 minutes, and logs
 one warning; like a long 429 cooldown it fails Jina-bound fetches fast and
 retryably. Jina requests send curio's own User-Agent. See "Jina requests
 identify as curio".
+
+**Revised (2026-09-27):** the challenge warning is logged once per pause.
+`cooldown.extend` reports whether it started a pause (none was in effect),
+and only then does `extendJinaCooldown` warn; the challenged answers of
+calls already in flight only extend it, silently. GitHub's call ignores the
+result. The shared cooldown's end is also what Jina's health reports as
+`paused` (see "Fetch upstream health: Jina's calls are tracked and
+reported").
 
 ---
 
@@ -5018,6 +5029,216 @@ instead.
 **Ordering:** this shipped with "Cross-site redirects: judged where they
 land". With Jina answering again, cross-site redirects still sent to it
 would once more store the destinations' landing pages.
+
+**Revised (2026-09-27):**
+
+- **The 403 bullet, narrowed:** Jina's own 403 is no verdict only when it
+  names no target. One whose reason names the target's host is Jina
+  refusing that domain ("AbuseAlleviationError: Anonymous access to domain
+  … blocked until …"), a verdict like its other 4xx refusals. A bare 403,
+  one naming another host and Cloudflare's block page stay no verdict. See
+  "Jina refusing a target is a verdict".
+- **One warning per pause,** not per challenged answer: the warning is
+  logged when a challenge starts a pause. Challenged calls that were
+  already in flight only extend it. A probe of 8 concurrent challenged
+  calls had logged 8 identical warnings. A challenge that meets the short
+  pause of a 429 extends it without a warning; healthz and `curio doctor`
+  still show the pause and the challenged call.
+- **Jina's health is reported,** so an outage like this one shows in
+  healthz, `curio doctor` and `curio status` instead of only in per-job
+  lines. See "Fetch upstream health: Jina's calls are tracked and
+  reported".
+
+---
+
+## Fetch upstream health: Jina's calls are tracked and reported
+
+**Decision:**
+
+- Every Jina request's outcome is recorded (`healthTracker`, in
+  `internal/fetcher/health.go`), in one of nine classes (`CallClass`,
+  given by `jinaCallClass`):
+  - healthy answers: `ok` (the page), `judged` (a 2xx that is not the
+    page: a rejection, the target's error status, a dead link, a body over
+    the cap) and `refused` (Jina declined the target; see "Jina refusing a
+    target is a verdict");
+  - service-level failures (`CallClass.Failed`): `challenged` (the CDN's
+    `cf-mitigated: challenge`), `forbidden` (any other 403), `rate_limited`
+    (429), `auth` (401, 402), `server_error` (5xx, 408, 421, 425, and
+    1xx/3xx) and `network` (a transport error, a timeout, a TLS failure, a
+    body cut short).
+
+  A request cut short by curio's own cancellation (shutdown) is not
+  recorded, nor is a call never sent (the cooldown's fail-fast, a limiter
+  error).
+- The tracker's memory is fixed: counts per class for the last 15 minutes
+  in 15 one-minute buckets, the last healthy answer's time, the last
+  failure's time and class, and the current streak of failures since the
+  last healthy answer (its count, its first failure's time and host, and
+  whether another host failed). It runs no goroutine or ticker; every
+  method takes `now`, which `Native` passes from its clock.
+- The state (`UpstreamState`) is the first that holds: `disabled`
+  (`fetcher.native.jina_fallback: false`), `failing`, `paused` (the shared
+  Jina cooldown ends after now), `idle` (no calls in the window),
+  `degraded` (at least a quarter of the window's calls failed), `ok`.
+- `failing` holds when the current streak spans 2 or more target hosts and
+  either has 5 failures (`failingStreak`) or 30 minutes lie between its
+  first failure and its latest (`failingAfter`). It is decided only when a
+  call is recorded, and lasts, through an empty window too, until the next
+  healthy answer.
+- Entering `failing` logs one WARN, `upstream failing`, with `upstream`,
+  the latest failure's `class`, the `failures` in a row, the streak's
+  start (`since`) and the error capped at 512 bytes (`err`). The next
+  healthy answer logs one INFO, `upstream recovered`, with `failed_for`
+  and `failures`. Both are decided and logged under the tracker's lock, so
+  concurrent fetch workers log each transition once, in order. No other
+  state change logs anything.
+- Where it shows: `GET /v1/healthz` reports `upstreams`, one element
+  (`jina`) from `Native.JinaHealth`, and its `status` stays `ok` whatever
+  they say. `curio doctor` adds a `jina` check: ✓ disabled, idle or ok
+  (with the window's calls by class, refusals and judged pages included),
+  ! degraded or paused, ✗ failing, which fails the command; the last three
+  carry a hint for the failure class with the most calls in the window (the
+  last failure's class on a tie). `curio status` prints one warning line
+  per failing upstream.
+
+**Why:** the fallback failed every call from 2026-08-30 to 2026-09-27 and
+nothing said so (see "Jina requests identify as curio"): healthz answered
+`ok`, doctor and status had no Jina line, and the only trace was 1,250
+`job failed … jina: HTTP 403` lines among thousands of others. The
+thresholds come from the daemon log of the day it was fixed:
+
+- **A 15-minute window:** a few pauses' worth of calls at 20 a minute, and
+  `degraded` clears soon after the trouble does.
+- **Degraded at a quarter:** Jina times out now and then while it works:
+  51 of about 1,313 requests since the restart (about 4%) were retried
+  after a transport timeout. A quarter is well clear of that.
+- **Failing needs two hosts:** one slow target produces long runs of
+  failures while Jina serves everything else. bespokeinvest.com timed out
+  11 times that day, 4 times per fetch, while Jina served 577 pages. Any
+  one host, however long it keeps timing out, can't make Jina failing.
+- **5 in a row, or 30 minutes:** five failures across hosts with no
+  healthy answer between them is no timeout noise. With a challenge's
+  10-minute pause, a persistent challenge lets one Jina request through
+  per pause, so the count alone would take 40 minutes to fire; the
+  duration rule fires at the fourth challenged call.
+- **Failing lasts until an answer:** the WARN is logged exactly when
+  healthz starts reporting `failing`, and a daemon that stopped calling
+  Jina never "recovers" without evidence.
+
+**Why only failing is logged:** `degraded`, `paused` and `idle` are
+derived when read, from the clock. Logging their changes would need a
+ticker, and would chatter on every routine 429 pause. The challenge
+warning stays, once per pause.
+
+**Per request, not per fetch:** health is about the service's answers, and
+the limiter and cooldown count requests too.
+
+**In memory:** the state starts over when the daemon restarts, and Jina
+reads `idle` until it is next called. The failures themselves stay in the
+job log.
+
+**Not done:** GitHub and yt-dlp don't feed a tracker (the types name
+nothing Jina's, and `upstreams` is a list, so they can join without a
+schema change); nothing is persisted; and no circuit breaker stops the Jina
+calls while it is failing: the pauses Jina asks for (a 429, a challenge)
+are already honored, and what is left is for a person to fix.
+
+---
+
+## Jina refusing a target is a verdict
+
+**Decision:**
+
+- `jinaOnce` reads at most `errorBodyDrain` (4 KiB) of a non-2xx Jina
+  answer, in one bounded read that also drains it for connection reuse,
+  and takes Jina's reason from it (`jinaReason`): a JSON answer's
+  `message`, after its `name` when it has one, or the first line of any
+  other answer when it names one of Jina's errors
+  (`^[A-Z][A-Za-z]*Error: `). An HTML page, such as Cloudflare's challenge
+  or block page, gives none. The reason is capped at 512 bytes
+  (`snippet`), a configured `jina_api_key` in it is replaced with
+  `[redacted]`, and it is quoted after the status in every Jina error:
+  `jina: HTTP 401 Unauthorized: …`.
+- `errJinaRefused` ("refused the target") marks Jina refusing the target
+  (`jinaRefusesTarget`):
+  - a 403 without `cf-mitigated: challenge` whose reason names the target's
+    host (`namesHost`: one of the reason's hostname-shaped words, less a
+    closing dot, equals `hostOf(target)`, case-insensitively, so a reason
+    about mobile.twitter.com doesn't name twitter.com). A host inside a URL
+    doesn't count: a service-wide 403 that echoes the requested URL would
+    otherwise fail every document for good while health read ok;
+  - every other deterministic 4xx, all but 401, 402, 403, 408, 421, 425 and
+    429: 400, 404, 410, 422 and 451 as before.
+- `jinaAnswered` is `errJinaRejected` or `errJinaRefused`, one source of
+  truth that Jina's health classifier shares. A refusal is never retried
+  within the fetch, extends no cooldown and writes no cache itself.
+  `settle` decides the rest, unchanged:
+  - behind a page-level origin failure (thin, no article, a login title, a
+    challenge or error page, an unreadable PDF) the fetch is a
+    `PermanentError` at once, and the document goes `failed`, not `dead`,
+    on attempt 1;
+  - behind a host-wide origin verdict (an origin 403/503, a redirect onto
+    the site's own login page) the origin's answering host is cached and
+    the first failure stays retryable; its retry fails from the cache
+    without a Jina request, as after any Jina verdict.
+- Any other 403 stays no verdict: a bare one, one whose reason names
+  another host or none (an IP-wide block), Cloudflare's HTML. It is
+  retryable, uncached and pauses nothing, and Jina's health counts it
+  `forbidden`, a failure; a refusal counts `refused`, a healthy answer. A
+  challenge 403 is unchanged.
+
+A refused 403 behind a thin page ends in `last_error` as:
+
+```
+permanent failure: jina: refused the target: HTTP 403 Forbidden: AbuseAlleviationError: Anonymous access to domain … (after native: login wall or thin content (extracted text < 500 bytes))
+```
+
+`errors.As` still finds Jina's `*HTTPStatusError` before the origin's, and
+`errors.Is` still matches the origin's sentinel.
+
+**Why:** since the restart on 6ffbb77, 167 job failures across 39 jobs
+read `fetch failed: jina: HTTP 403 Forbidden (after native: …)`, and no
+challenge warning was logged: 34 jobs were mobile.twitter.com profiles
+(thin origin pages), 2 LinkedIn `/uas/login` redirects, 1 investing.com
+(an origin 403), and bespokeinvest.com. Every such 403 was retryable, so
+38 of the 39 documents used all 5 attempts, one Jina request each: the 34
+profiles alone took 170 attempts, about 8.5 minutes of the keyless 20 a
+minute. And the error dropped Jina's reason. Keyless probes of r.jina.ai
+on 2026-09-27 showed what the answers were:
+
+| Target | Status | Content-Type | Body |
+|---|---|---|---|
+| mobile.twitter.com | 403, no `cf-mitigated` | `text/plain` | `AbuseAlleviationError: Anonymous access to domain mobile.twitter.com blocked until Sun Sep 27 2026 16:40:15 GMT… due to previous abuse found on https://mobile.twitter.com/…: DDoS attack suspected: Too many requests` |
+| www.investing.com | 403, no `cf-mitigated` | `text/plain` | the same, blocked until 2039 |
+| allrecipes.com | 451 | `application/json` | `{"code": 451, "status": 45101, "message": "This domain is excluded from Jina Reader at the request of its owner, People Inc.", "detail": "The publisher of this URL has instructed Jina AI to cease automated access to its properties. Jina Reader is complying with that request. For programmatic access to this content, please contact People Inc. directly regarding licensing.", "readme": "https://r.jina.ai/docs"}` |
+
+The 403s come from Jina's own application (`via: 1.1 google`), not its
+CDN. They are per-domain refusals, not an outage.
+
+**Why the reason must name the target's host:** a 403 can't become a
+verdict by exclusion. If r.jina.ai's CDN blocked curio with a plain 403, as
+Cloudflare's 1020 block page does, every document would fail for good and
+Jina's health would read `ok`, since refusals are healthy answers: the
+outage again, unseen. Jina's domain blocks name the domain asked for; a
+block of curio itself (Cloudflare's page, an IP ban) names no target. So a
+403 that names none fails safe: retryable, and a `forbidden` failure toward
+`failing`.
+
+**Why `settle` is unchanged:** a refusal is a Jina verdict like a rejected
+page, and "the first failure for a host gets one more real attempt" holds
+for it as for any. The refusal itself is never cached: the block is Jina's,
+per domain, and it ends.
+
+**Not done:**
+
+- **Pacing Jina calls per target domain.** Jina's abuse check named one of
+  the library's own profiles: a burst of about 80 keyless mobile.twitter.com
+  reads between 10:10 and 10:29 tripped the block, and it came back after
+  a second burst at 11:30. Spacing the calls to one domain would avoid the
+  block rather than survive it.
+- **Remembering Jina's domain blocks** until the date they give, so later
+  documents on a blocked domain skip Jina without a request.
 
 ---
 

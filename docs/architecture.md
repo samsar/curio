@@ -53,7 +53,8 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
 - `curio add <url>` — manually add a bookmark
 - `curio import <source> [path]` — bulk import from Chrome / Safari / Firefox
 - `curio search <query>` — hybrid search
-- `curio status` — daemon health, doc counts, job queue depth
+- `curio status` — daemon health, doc counts, job queue depth, and a
+  warning while the Jina fallback is failing
 - `curio daemon {start|stop|status|logs}` — lifecycle management (see "Daemon lifecycle")
 - `curio refetch <id|all>` — force re-extract
 - `curio reindex <id|--all>` — re-chunk and re-embed existing extractions
@@ -314,7 +315,9 @@ External processes the daemon expects:
   login pages are rejected. A redirect onto another site is judged where it
   lands, without Jina: a landing page is a dead link and a login page
   final, even when it answers 403 or 503 (then only a login path counts:
-  no page is read).
+  no page is read). Its health (each request's outcome over the last 15
+  minutes, and whether it is paused or failing) is reported on
+  `/v1/healthz` (`upstreams`), in `curio doctor` and in `curio status`.
 - **Claude API (optional)** — a future `generator.Generator` impl for heavier
   synthesis on the M6 RAG path (retrieve → LLM → cited answer).
 

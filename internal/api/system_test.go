@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/store"
 )
@@ -104,4 +105,55 @@ func TestHealth_OllamaDetail(t *testing.T) {
 			assert.Contains(t, h.OllamaDetail, tc.wantDetail)
 		})
 	}
+}
+
+// TestHealth_Upstreams: healthz reports each upstream as the daemon sees
+// it: every state, times in UTC, unset times and a cooldown that isn't in
+// effect left out, and an empty recent or upstream list sent as such,
+// never as null.
+func TestHealth_Upstreams(t *testing.T) {
+	healthz := func(t *testing.T, upstreams func() []fetcher.UpstreamHealth) map[string]any {
+		t.Helper()
+		s := newTestServer(t, func(d *Deps) { d.Upstreams = upstreams })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var h map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+		return h
+	}
+
+	t.Run("none tracked", func(t *testing.T) {
+		assert.Equal(t, []any{}, healthz(t, nil)["upstreams"])
+	})
+
+	t.Run("each state", func(t *testing.T) {
+		toronto := time.FixedZone("EDT", -4*60*60)
+		failure := time.Date(2026, 9, 27, 10, 40, 1, 0, toronto)
+		states := []fetcher.UpstreamState{fetcher.UpstreamDisabled, fetcher.UpstreamIdle,
+			fetcher.UpstreamOK, fetcher.UpstreamDegraded, fetcher.UpstreamPaused, fetcher.UpstreamFailing}
+		upstreams := make([]fetcher.UpstreamHealth, len(states))
+		for i, state := range states {
+			upstreams[i] = fetcher.UpstreamHealth{Name: string(state), State: state,
+				Enabled: state != fetcher.UpstreamDisabled, Window: 15 * time.Minute}
+		}
+		upstreams[2].LastSuccess = failure.Add(-time.Hour)
+		upstreams[2].Recent = map[fetcher.CallClass]int{fetcher.CallOK: 12, fetcher.CallRefused: 2}
+		upstreams[4].LastFailure, upstreams[4].LastFailureClass = failure, fetcher.CallChallenged
+		upstreams[4].CooldownUntil = failure.Add(10 * time.Minute)
+
+		got := healthz(t, func() []fetcher.UpstreamHealth { return upstreams })["upstreams"].([]any)
+		require.Len(t, got, len(upstreams))
+		for i, u := range got {
+			assert.Equal(t, string(upstreams[i].State), u.(map[string]any)["state"])
+		}
+		assert.Equal(t, map[string]any{"name": "disabled", "enabled": false, "state": "disabled",
+			"window_seconds": float64(900), "recent": map[string]any{}}, got[0])
+		assert.Equal(t, map[string]any{"name": "ok", "enabled": true, "state": "ok",
+			"last_success_at": "2026-09-27T13:40:01Z", "window_seconds": float64(900),
+			"recent": map[string]any{"ok": float64(12), "refused": float64(2)}}, got[2])
+		assert.Equal(t, map[string]any{"name": "paused", "enabled": true, "state": "paused",
+			"last_failure_at": "2026-09-27T14:40:01Z", "last_failure_class": "challenged",
+			"window_seconds": float64(900), "recent": map[string]any{},
+			"cooldown_until": "2026-09-27T14:50:01Z"}, got[4])
+	})
 }

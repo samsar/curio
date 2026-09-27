@@ -18,7 +18,7 @@ brew services start ollama
 ollama pull nomic-embed-text
 
 # 2. Verify
-curio doctor                            # six green checks = ready
+curio doctor                            # seven green checks = ready
 
 # 3. Use
 curio import html ~/Downloads/bookmarks.html --follow
@@ -39,7 +39,7 @@ ones.
 ## More commands
 
 ```sh
-curio doctor                        # verify Ollama + DB + config + paths
+curio doctor                        # verify Ollama + DB + config + paths + the Jina fallback
 curio status                        # daemon health + corpus counts + queue depth
 
 # Inspecting the corpus

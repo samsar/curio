@@ -180,23 +180,40 @@ func TestNative_JinaSideFailuresDoNotCache(t *testing.T) {
 	}
 }
 
-// TestNative_JinaOwn403IsNoVerdict: Jina's own 403 is about curio's client,
-// not the target, whose status comes in a warning. Behind a thin page or an
-// origin 403 the fetch stays retryable after one Jina request, errors.As
-// finds Jina's status, and nothing is cached. Only a 403 carrying
-// Cloudflare's challenge header pauses Jina calls.
+// TestNative_JinaOwn403IsNoVerdict: a 403 from Jina itself that names no
+// target is about curio's client, not the target, whose status comes in a
+// warning: a bare 403, one whose reason names another host, Cloudflare's
+// block page. Behind a thin page or an origin 403 the fetch stays retryable
+// after one Jina request, errors.As finds Jina's status, nothing is cached,
+// and Jina's health counts a failure. Only a 403 carrying Cloudflare's
+// challenge header pauses Jina calls.
 func TestNative_JinaOwn403IsNoVerdict(t *testing.T) {
+	const (
+		bare       = "jina: HTTP 403 Forbidden"
+		challenged = "jina: r.jina.ai's CDN challenged the request: HTTP 403 Forbidden"
+	)
+	otherHost := abuseBlock("mobile.twitter.com")
 	cases := []struct {
-		name       string
-		origin     int // 200 serves the thin page
-		challenged bool
-		sentinel   error
-		pause      time.Duration
+		name        string
+		origin      int // 200 serves the thin page
+		challenged  bool
+		contentType string
+		body        string
+		jinaErr     string // what the error says of Jina's answer
+		sentinel    error
+		class       CallClass
+		pause       time.Duration
 	}{
-		{"thin page", http.StatusOK, false, ErrLoginWall, 0},
-		{"thin page, challenged", http.StatusOK, true, ErrLoginWall, jinaChallengeCooldown},
-		{"origin 403", http.StatusForbidden, false, ErrAntiBot, 0},
-		{"origin 403, challenged", http.StatusForbidden, true, ErrAntiBot, jinaChallengeCooldown},
+		{name: "thin page", origin: http.StatusOK, jinaErr: bare, sentinel: ErrLoginWall, class: CallForbidden},
+		{name: "thin page, challenged", origin: http.StatusOK, challenged: true, jinaErr: challenged,
+			sentinel: ErrLoginWall, class: CallChallenged, pause: jinaChallengeCooldown},
+		{name: "origin 403", origin: http.StatusForbidden, jinaErr: bare, sentinel: ErrAntiBot, class: CallForbidden},
+		{name: "origin 403, challenged", origin: http.StatusForbidden, challenged: true, jinaErr: challenged,
+			sentinel: ErrAntiBot, class: CallChallenged, pause: jinaChallengeCooldown},
+		{name: "thin page, another host blocked", origin: http.StatusOK, contentType: "text/plain", body: otherHost,
+			jinaErr: bare + ": " + strings.TrimSpace(otherHost), sentinel: ErrLoginWall, class: CallForbidden},
+		{name: "origin 403, Cloudflare's block page", origin: http.StatusForbidden, contentType: "text/html",
+			body: cfBlockHTML, jinaErr: bare, sentinel: ErrAntiBot, class: CallForbidden},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -214,7 +231,11 @@ func TestNative_JinaOwn403IsNoVerdict(t *testing.T) {
 				if tc.challenged {
 					w.Header().Set("Cf-Mitigated", "challenge")
 				}
+				if tc.contentType != "" {
+					w.Header().Set("Content-Type", tc.contentType)
+				}
 				w.WriteHeader(http.StatusForbidden)
+				_, _ = io.WriteString(w, tc.body)
 			}))
 			defer jina.Close()
 
@@ -222,6 +243,7 @@ func TestNative_JinaOwn403IsNoVerdict(t *testing.T) {
 			n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 			_, err := n.Fetch(context.Background(), origin.URL+"/a")
 			require.ErrorIs(t, err, tc.sentinel)
+			assert.NotErrorIs(t, err, errJinaRefused)
 			var pe *PermanentError
 			assert.False(t, errors.As(err, &pe), "Jina's own 403 leaves the fetch retryable: %v", err)
 			var se *HTTPStatusError
@@ -229,36 +251,46 @@ func TestNative_JinaOwn403IsNoVerdict(t *testing.T) {
 			assert.Equal(t, http.StatusForbidden, se.StatusCode)
 			assert.True(t, strings.HasPrefix(se.URL, jina.URL), "errors.As finds Jina's status first: %s", se.URL)
 			assert.Equal(t, tc.challenged, errors.Is(err, errJinaChallenged))
+			assert.True(t, strings.HasPrefix(err.Error(), tc.jinaErr+" (after "), err.Error())
 			assert.Equal(t, int32(1), jinaHits.Load(), "no retry within the fetch")
 			assert.NotContains(t, err.Error(), "(cached:")
 			_, cached := n.hostCache.Get(hostOf(origin.URL))
 			assert.False(t, cached)
 			assert.Equal(t, tc.pause, n.jinaCooldown.remaining(fc.now()))
+			assert.Equal(t, map[CallClass]int{tc.class: 1}, n.JinaHealth().Recent)
 		})
 	}
 }
 
 // TestJinaAnswered: a Jina failure is a verdict about the target when its
-// answer was rejected or Jina refused the target with a deterministic 4xx.
-// 401, 402 and 403 are about curio's client, and rate limits, outages and a
+// answer was rejected or Jina refused the target: with a deterministic 4xx,
+// or with a 403 whose reason names the target's host. 401, 402 and any
+// other 403 are about curio's client, and rate limits, outages and a
 // target's trouble for now are no verdict.
 func TestJinaAnswered(t *testing.T) {
-	status := func(code int) error { return fmt.Errorf("jina: %w", &HTTPStatusError{StatusCode: code}) }
+	const target = "https://www.investing.com/news/1"
+	status := func(code int, header http.Header, reason string) error {
+		return jinaStatusError(target, &HTTPStatusError{StatusCode: code}, header, reason)
+	}
+	challenge := http.Header{"Cf-Mitigated": {"challenge"}}
 	cases := []struct {
 		name string
 		err  error
 		want bool
 	}{
 		{"rejected answer", fmt.Errorf("jina: %w: %w", errJinaRejected, ErrAntiBot), true},
-		{"400", status(http.StatusBadRequest), true},
-		{"404", status(http.StatusNotFound), true},
-		{"451", status(http.StatusUnavailableForLegalReasons), true},
-		{"401", status(http.StatusUnauthorized), false},
-		{"402", status(http.StatusPaymentRequired), false},
-		{"403", status(http.StatusForbidden), false},
-		{"403 challenge", fmt.Errorf("jina: %w: %w", errJinaChallenged, &HTTPStatusError{StatusCode: http.StatusForbidden}), false},
-		{"429", status(http.StatusTooManyRequests), false},
-		{"502", status(http.StatusBadGateway), false},
+		{"400", status(http.StatusBadRequest, nil, ""), true},
+		{"404", status(http.StatusNotFound, nil, ""), true},
+		{"451", status(http.StatusUnavailableForLegalReasons, nil, jina451Reason), true},
+		{"401", status(http.StatusUnauthorized, nil, ""), false},
+		{"402", status(http.StatusPaymentRequired, nil, ""), false},
+		{"403", status(http.StatusForbidden, nil, ""), false},
+		{"403 naming the target's host", status(http.StatusForbidden, nil, abuseBlock("www.investing.com")), true},
+		{"403 naming another host", status(http.StatusForbidden, nil, abuseBlock("investing.com")), false},
+		{"403 challenge", status(http.StatusForbidden, challenge, ""), false},
+		{"403 challenge naming the target's host", status(http.StatusForbidden, challenge, abuseBlock("www.investing.com")), false},
+		{"429", status(http.StatusTooManyRequests, nil, ""), false},
+		{"502", status(http.StatusBadGateway, nil, ""), false},
 		{"target trouble", fmt.Errorf("jina: %w: %w", errJinaTargetTrouble, errServerErrorPage), false},
 		{"transport", errors.New("jina: connection reset"), false},
 	}

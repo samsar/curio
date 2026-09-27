@@ -20,6 +20,7 @@ import (
 
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/version"
@@ -54,8 +55,9 @@ type Deps struct {
 	Embedder       embedder.Embedder
 	Search         *search.Engine
 	Insights       store.InsightStore
-	InsightEnabled bool   // gates POST /v1/interests/rebuild (config insight.enabled)
-	TenantID       string // default store.LocalTenantID
+	InsightEnabled bool                            // gates POST /v1/interests/rebuild (config insight.enabled)
+	Upstreams      func() []fetcher.UpstreamHealth // the health of the services fetches depend on; nil reports none
+	TenantID       string                          // default store.LocalTenantID
 	Log            *slog.Logger
 }
 

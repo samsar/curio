@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -47,6 +48,7 @@ type Native struct {
 	jinaAPIKey        string
 	jinaLimiter       rateLimiter
 	jinaCooldown      cooldown
+	jinaHealth        *healthTracker
 	deadLinkDetection bool
 	log               *slog.Logger
 	hostCache         *hostFailureCache
@@ -156,6 +158,7 @@ func NewNative(opts NativeOptions) *Native {
 		jinaBaseURL:       opts.JinaBaseURL,
 		jinaAPIKey:        opts.JinaAPIKey,
 		jinaLimiter:       jinaLimiter,
+		jinaHealth:        newHealthTracker("jina", opts.Log),
 		deadLinkDetection: opts.DeadLinkDetection,
 		log:               opts.Log,
 		hostCache:         newHostFailureCache(opts.HostFailureTTL),
@@ -276,25 +279,15 @@ func jinaCanHelp(err error) bool {
 }
 
 // jinaAnswered reports whether a failed Jina call is a verdict about the
-// target: Jina fetched it and its answer is not the page, or Jina refused it
-// with a deterministic 4xx. Rate limits, outages, timeouts and transport
-// errors are trouble on Jina's side, 401/402/403 are about our client (our
-// account, or r.jina.ai's CDN refusing curio), and a transient status the
-// target gave Jina is the target's trouble for now; none of them is a
-// verdict. The target's own 403 comes in a warning, as a targetStatusError.
+// target: Jina fetched it and its answer is not the page (errJinaRejected),
+// or Jina refused it (errJinaRefused). Rate limits, outages, timeouts and
+// transport errors are trouble on Jina's side, 401/402 and a 403 that names
+// no target are about our client (our account, or r.jina.ai refusing
+// curio), and a transient status the target gave Jina is the target's
+// trouble for now; none of them is a verdict. The target's own 403 comes in
+// a warning, as a targetStatusError.
 func jinaAnswered(err error) bool {
-	if errors.Is(err, errJinaRejected) {
-		return true
-	}
-	var se *HTTPStatusError
-	if !errors.As(err, &se) {
-		return false
-	}
-	switch se.StatusCode {
-	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
-		return false
-	}
-	return se.StatusCode >= 400 && se.StatusCode < 500 && !retryableStatus(se.StatusCode)
+	return errors.Is(err, errJinaRejected) || errors.Is(err, errJinaRefused)
 }
 
 // settle decides what an origin failure that no extraction path could
@@ -1207,6 +1200,12 @@ var (
 	// says nothing about the target, and every Jina call would get the same
 	// answer, so it pauses them all (jinaChallengeCooldown).
 	errJinaChallenged = errors.New("r.jina.ai's CDN challenged the request")
+
+	// errJinaRefused marks Jina's own answer refusing the target
+	// (jinaRefusesTarget): a deterministic 4xx about the request, or a 403
+	// whose reason names the target's host. It is Jina's verdict about the
+	// target, like errJinaRejected, and costs one Jina request.
+	errJinaRefused = errors.New("refused the target")
 )
 
 // targetStatusError is the status the target answered Jina with, as Jina's
@@ -1226,8 +1225,9 @@ func (e *targetStatusError) Error() string {
 }
 
 // tryJina is pass 2: fetch r.jina.ai/<url>. Every call goes through the
-// shared limiter and cooldown (awaitJina). Transient failures are retried up
-// to jinaAttempts times: 5xx and transport errors after a 2/4/8s backoff,
+// shared limiter and cooldown (awaitJina), and every request's outcome
+// counts toward Jina's health (jinaHealth). Transient failures are retried
+// up to jinaAttempts times: 5xx and transport errors after a 2/4/8s backoff,
 // 429s after the cooldown they set.
 func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 	var lastErr error
@@ -1242,6 +1242,11 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 		}
 
 		res, err := n.jinaOnce(ctx, target)
+		// A request our own cancellation (shutdown) cut short says nothing
+		// about Jina.
+		if err == nil || ctx.Err() == nil {
+			n.jinaHealth.record(n.clock.now(), hostOf(target), jinaCallClass(err), err)
+		}
 		if err == nil {
 			return res, nil
 		}
@@ -1271,6 +1276,12 @@ const jinaChallengeCooldown = 10 * time.Minute
 // failed call, attempt (0-based) of its fetch, says Jina would refuse the
 // next ones too. Jina limits per client, so a 429 pauses every caller, not
 // just this one; a CDN challenge pauses them for longer.
+//
+// A challenge warns once per pause: the calls already in flight when the
+// CDN began challenging come back challenged too, and only extend the pause
+// the first one started. One that meets the short cooldown of a 429 extends
+// it silently; healthz and doctor still show the pause and the challenged
+// call.
 func (n *Native) extendJinaCooldown(err error, attempt int) {
 	var se *HTTPStatusError
 	if !errors.As(err, &se) {
@@ -1279,8 +1290,9 @@ func (n *Native) extendJinaCooldown(err error, attempt int) {
 	switch {
 	case errors.Is(err, errJinaChallenged):
 		pause := cmp.Or(se.RetryAfter, jinaChallengeCooldown)
-		n.jinaCooldown.extend(n.clock.now(), pause)
-		n.log.Warn("r.jina.ai's CDN challenged curio, pausing Jina calls", "pause", pause)
+		if n.jinaCooldown.extend(n.clock.now(), pause) {
+			n.log.Warn("r.jina.ai's CDN challenged curio, pausing Jina calls", "pause", pause)
+		}
 	case se.StatusCode == http.StatusTooManyRequests:
 		n.jinaCooldown.extend(n.clock.now(), cmp.Or(se.RetryAfter, jinaBackoff(attempt+1)))
 	}
@@ -1324,13 +1336,19 @@ func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 	defer resp.body.Close()
 
 	if resp.statusCode < 200 || resp.statusCode >= 300 {
-		discardErrorBody(resp.body)
+		// One bounded read gives the reason and lets the connection be
+		// reused (errorBodyDrain). A failed read only loses the reason, and
+		// errs on the safe side: the status still classifies the answer, but
+		// a 403 whose reason is lost names no target and stays no verdict.
+		head, _ := io.ReadAll(io.LimitReader(resp.body, errorBodyDrain))
+		if n.jinaAPIKey != "" {
+			// The reason is quoted into last_error and the logs; a key Jina
+			// echoes back must not go with it.
+			head = bytes.ReplaceAll(head, []byte(n.jinaAPIKey), []byte("[redacted]"))
+		}
 		se := &HTTPStatusError{StatusCode: resp.statusCode, URL: resp.finalURL.String()}
 		se.RetryAfter, _ = parseRetryAfter(resp.header, n.clock.now())
-		if se.StatusCode == http.StatusForbidden && strings.EqualFold(resp.header.Get("Cf-Mitigated"), "challenge") {
-			return nil, fmt.Errorf("jina: %w: %w", errJinaChallenged, se)
-		}
-		return nil, fmt.Errorf("jina: %w", se)
+		return nil, jinaStatusError(target, se, resp.header, jinaReason(resp.contentType, head))
 	}
 	body, err := io.ReadAll(resp.body)
 	if err != nil {
@@ -1358,6 +1376,99 @@ func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 		}
 	}
 	return result, nil
+}
+
+// jinaStatusError classifies Jina's own non-2xx answer se to a request for
+// target, whose header came with it and whose body gave reason (jinaReason;
+// empty when it gave none):
+//
+//   - A 403 carrying Cloudflare's "cf-mitigated: challenge":
+//     errJinaChallenged. Its body is the challenge page, never quoted.
+//   - A refusal of the target (jinaRefusesTarget): errJinaRefused.
+//   - Anything else is Jina's trouble, or curio's with Jina, and no verdict.
+//
+// The reason is quoted after the status, so last_error says why.
+func jinaStatusError(target string, se *HTTPStatusError, header http.Header, reason string) error {
+	var err error = se
+	switch {
+	case se.StatusCode == http.StatusForbidden && strings.EqualFold(header.Get("Cf-Mitigated"), "challenge"):
+		return fmt.Errorf("jina: %w: %w", errJinaChallenged, se)
+	case jinaRefusesTarget(se.StatusCode, reason, hostOf(target)):
+		err = fmt.Errorf("%w: %w", errJinaRefused, se)
+	}
+	if reason == "" {
+		return fmt.Errorf("jina: %w", err)
+	}
+	return fmt.Errorf("jina: %w: %s", err, reason)
+}
+
+// jinaRefusesTarget reports whether Jina's answer with status code, whose
+// body gave reason, refuses the target on host: a deterministic 4xx about
+// the request (400, 404, 410, 422, 451, …), or a 403 whose reason names
+// host. Jina's domain blocks name the domain they block:
+// "AbuseAlleviationError: Anonymous access to domain www.investing.com
+// blocked until …". A refusal of curio itself, such as Cloudflare's block
+// page or an IP ban, names no target, so a 403 that names none stays no
+// verdict rather than failing every document for good.
+func jinaRefusesTarget(code int, reason, host string) bool {
+	switch code {
+	case http.StatusUnauthorized, http.StatusPaymentRequired:
+		return false
+	case http.StatusForbidden:
+		return namesHost(reason, host)
+	}
+	return code >= 400 && code < 500 && !retryableStatus(code)
+}
+
+// namesHost reports whether text names host (lowercase, as hostOf gives
+// it): whether one of its words, split at every character a hostname can't
+// hold and less a sentence's closing dot, is host. A whole name must match,
+// so a reason about mobile.twitter.com doesn't name twitter.com. A host
+// inside a URL doesn't count: an error that echoes the requested URL says
+// nothing about what was refused, and reading it as a refusal would fail
+// every document for good while Jina itself is down.
+func namesHost(text, host string) bool {
+	if host == "" {
+		return false
+	}
+	text = urlInTextRE.ReplaceAllString(text, " ")
+	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '.' && r != '-'
+	})
+	return slices.ContainsFunc(words, func(w string) bool { return strings.TrimRight(w, ".") == host })
+}
+
+// urlInTextRE matches a URL in running text, scheme to the next space.
+var urlInTextRE = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://\S*`)
+
+// jinaErrorLineRE matches the first line of a text answer in which Jina
+// names its error: "AbuseAlleviationError: Anonymous access to …".
+var jinaErrorLineRE = regexp.MustCompile(`^[A-Z][A-Za-z]*Error: `)
+
+// jinaReason is what the head of Jina's error answer says went wrong: a
+// JSON answer's message, after its name when it gives one, or the first line
+// of any other answer when it names one of Jina's errors (jinaErrorLineRE).
+// Anything else, a Cloudflare challenge or block page among them, gives
+// none. It is capped like any quoted body (snippet).
+func jinaReason(contentType string, head []byte) string {
+	if mt := mediaType(contentType); mt == "application/json" || strings.HasSuffix(mt, "+json") {
+		var answer struct {
+			Name    string `json:"name"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(head, &answer) != nil || answer.Message == "" {
+			return ""
+		}
+		if answer.Name != "" {
+			return snippet([]byte(answer.Name + ": " + answer.Message))
+		}
+		return snippet([]byte(answer.Message))
+	}
+	line, _, _ := bytes.Cut(head, []byte("\n"))
+	if !jinaErrorLineRE.Match(line) {
+		return ""
+	}
+	return snippet(line)
 }
 
 // judgeJinaAnswer decides whether a 2xx Jina answer is the page. Jina
@@ -1449,6 +1560,44 @@ func jinaRetryable(err error) bool {
 func isRateLimited(err error) bool {
 	var se *HTTPStatusError
 	return errors.As(err, &se) && se.StatusCode == http.StatusTooManyRequests
+}
+
+// jinaCallClass is how a Jina request went, for Jina's health, from the
+// error jinaOnce returned for it.
+func jinaCallClass(err error) CallClass {
+	var se *HTTPStatusError
+	switch {
+	case err == nil:
+		return CallOK
+	case errors.Is(err, errJinaRefused):
+		return CallRefused
+	case errors.Is(err, errJinaChallenged):
+		return CallChallenged
+	case errors.Is(err, errJinaRejected), errors.Is(err, errJinaTargetTrouble),
+		errors.Is(err, ErrDeadLink), errors.Is(err, ErrTooLarge):
+		// A 2xx whose answer is not the page.
+		return CallJudged
+	case !errors.As(err, &se):
+		// No answer, or not all of one.
+		return CallNetwork
+	}
+	switch se.StatusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired:
+		return CallAuth
+	case http.StatusForbidden:
+		return CallForbidden
+	case http.StatusTooManyRequests:
+		return CallRateLimited
+	}
+	// Every other 4xx refuses the target, which leaves 5xx, 408, 421, 425,
+	// and statuses that are no answer (1xx, 3xx).
+	return CallServerError
+}
+
+// JinaHealth is the health of the Jina fallback: how its recent requests
+// went (healthTracker), and the pause in effect, if any.
+func (n *Native) JinaHealth() UpstreamHealth {
+	return n.jinaHealth.snapshot(n.clock.now(), n.jinaFallback, n.jinaCooldown.deadline())
 }
 
 // jinaHeaderRE matches one "Name: value" line of a Jina Reader header block.
