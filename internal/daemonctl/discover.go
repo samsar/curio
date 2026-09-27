@@ -48,7 +48,8 @@ func Discover(homeOverride, daemonURL string) (Env, error) {
 	return Env{Home: home, Config: cfg, Client: client.New(base), Controller: New(home, bin, base)}, nil
 }
 
-// openHome opens the home override names, initializing it on first use.
+// openHome opens the home override names, initializing it on first use with
+// the default embedding model and width.
 func openHome(override string) (*curiohome.Home, error) {
 	path, err := homePath(override)
 	if err != nil {

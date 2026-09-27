@@ -33,10 +33,13 @@ type Ollama struct {
 // OllamaOptions configures a new Ollama generator.
 type OllamaOptions struct {
 	BaseURL string        // default ollama.DefaultBaseURL
-	Model   string        // a chat/instruct model, e.g. "llama3.2"
+	Model   string        // a chat/instruct model, e.g. "qwen3:4b-instruct"
 	Timeout time.Duration // per-request; default 120s (generation is slow)
-	NumCtx  int           // context window; default 8192
-	Retries int           // extra attempts after the first; 0 = default 2, negative = none
+	// NumCtx is sent as options.num_ctx on every attempt; default 8192.
+	// Without it Ollama sizes the context from the free VRAM, which for a
+	// model with a 256K window can be far more memory than a label needs.
+	NumCtx  int
+	Retries int // extra attempts after the first; 0 = default 2, negative = none
 }
 
 // NewOllama constructs an Ollama generator. It does NOT contact the server;
@@ -86,6 +89,7 @@ func (o *Ollama) Generate(ctx context.Context, prompt string, opts Options) (str
 		Prompt: prompt,
 		System: opts.System,
 		Stream: false,
+		Think:  false,
 		Options: generateOptions{
 			NumCtx:      o.numCtx,
 			Temperature: opts.Temperature,
@@ -132,10 +136,16 @@ func retryable(ctx context.Context, err error) bool {
 }
 
 type generateRequest struct {
-	Model   string          `json:"model"`
-	Prompt  string          `json:"prompt"`
-	System  string          `json:"system,omitempty"`
-	Stream  bool            `json:"stream"`
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	System string `json:"system,omitempty"`
+	Stream bool   `json:"stream"`
+	// Think is always false, and always sent: Ollama turns thinking on for
+	// a model that supports it when the field is missing, and the reasoning
+	// then spends the caller's token budget (NumPredict) and time, leaving
+	// an empty or unparseable reply. A model that can't turn thinking off
+	// answers 4xx, which the insight engine meets with term labels.
+	Think   bool            `json:"think"`
 	Options generateOptions `json:"options"`
 }
 

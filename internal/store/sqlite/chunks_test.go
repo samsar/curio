@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,8 +11,6 @@ import (
 
 	"github.com/samsar/curio/internal/store"
 )
-
-const vecDim = 768
 
 // seedDocs inserts N documents owned by the given tenant and returns their
 // IDs. Used by chunk-store tests that need parent rows.
@@ -45,8 +44,11 @@ func seedDocs(t *testing.T, db *DB, tenantID string, urls ...string) []string {
 
 // fillVec returns a vector of length vecDim with the same value in every slot.
 // Two such vectors have a known L2 distance (= |a-b| * sqrt(dim)).
-func fillVec(v float32) []float32 {
-	out := make([]float32, vecDim)
+func fillVec(v float32) []float32 { return fillVecOf(vecDim, v) }
+
+// fillVecOf is fillVec for a vector index dim wide.
+func fillVecOf(dim int, v float32) []float32 {
+	out := make([]float32, dim)
 	for i := range out {
 		out[i] = v
 	}
@@ -159,7 +161,7 @@ func TestChunks_DimensionMismatch(t *testing.T) {
 	err := ch.ReplaceForDocument(context.Background(), "doc", "ext", "", nil,
 		[]store.ChunkInput{{Text: "short", Embedding: []float32{0.1, 0.2, 0.3}}})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "embedding length 3 != configured dim 768")
+	assert.Contains(t, err.Error(), fmt.Sprintf("embedding length 3 != configured dim %d", vecDim))
 }
 
 // latestExtractionID returns the most recent extraction id for a document.

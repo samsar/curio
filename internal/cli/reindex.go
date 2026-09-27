@@ -26,6 +26,12 @@ or the embedding prefixes, or to pick up new bookmark tags. (It doesn't
 switch embedding models: the daemon refuses a model that differs from the
 one the home was created with.)
 
+Run it with --all when ` + "`curio status` or `curio doctor`" + ` report that the
+embeddings drifted: the embedding model was pulled again as a different
+build, or Ollama was upgraded, since the library was indexed, so new
+queries no longer match the stored vectors. Once every job is enqueued, the
+daemon takes the build serving now as the new baseline.
+
 Documents must already have content: --all targets state=fetched by default
 and, in any state, skips documents that were never fetched.`,
 		Args: cobra.MaximumNArgs(1),

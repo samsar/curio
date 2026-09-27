@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,7 +39,7 @@ embedding:
 	assert.Equal(t, "127.0.0.1:9999", got.Daemon.Listen)
 	assert.Equal(t, "info", got.Daemon.LogLevel, "untouched field keeps default")
 	assert.Equal(t, "mxbai-embed-large", got.Embedding.Model)
-	assert.Equal(t, 768, got.Embedding.Dim, "untouched field keeps default")
+	assert.Equal(t, Default().Embedding.Dim, got.Embedding.Dim, "untouched field keeps default")
 	assert.Equal(t, "ollama", got.Embedding.Provider, "untouched field keeps default")
 	assert.Equal(t, Default().Chunking.SizeTokens, got.Chunking.SizeTokens, "untouched section keeps default")
 }
@@ -105,9 +106,9 @@ func TestValidate(t *testing.T) {
 		{"unknown embedding provider", func(c *Config) { c.Embedding.Provider = "voyage" }, "embedding.provider"},
 		{"unknown generation provider", func(c *Config) { c.Generation.Provider = "openai" }, "generation.provider"},
 		{"empty model", func(c *Config) { c.Embedding.Model = "" }, "embedding.model"},
-		{"zero dim", func(c *Config) { c.Embedding.Dim = 0 }, "embedding.dim"},
-		{"negative dim", func(c *Config) { c.Embedding.Dim = -1 }, "embedding.dim"},
-		{"dim other than the schema's", func(c *Config) { c.Embedding.Dim = 1024 }, "Embedding model swap"},
+		{"zero dim", func(c *Config) { c.Embedding.Dim = 0 }, "embedding.dim must be in [1, 8192], got 0"},
+		{"negative dim", func(c *Config) { c.Embedding.Dim = -1 }, "embedding.dim must be in [1, 8192], got -1"},
+		{"dim past the vector index's limit", func(c *Config) { c.Embedding.Dim = 8193 }, "embedding.dim must be in [1, 8192], got 8193"},
 		{"empty base_url", func(c *Config) { c.Embedding.BaseURL = "" }, "embedding.base_url"},
 		{"zero embedding timeout", func(c *Config) { c.Embedding.TimeoutSeconds = 0 }, "embedding.timeout_seconds"},
 		{"negative embedding timeout", func(c *Config) { c.Embedding.TimeoutSeconds = -5 }, "embedding.timeout_seconds"},
@@ -146,6 +147,42 @@ func TestValidate(t *testing.T) {
 
 func TestValidate_DefaultPasses(t *testing.T) {
 	assert.NoError(t, Default().Validate())
+}
+
+// TestValidate_AnyIndexableWidth: embedding.dim is the home's width, not a
+// constant, so any width the vector index takes is valid.
+func TestValidate_AnyIndexableWidth(t *testing.T) {
+	for _, dim := range []int{1, 384, 768, 1024, 4096, 8192} {
+		t.Run(strconv.Itoa(dim), func(t *testing.T) {
+			cfg := Default()
+			cfg.Embedding.Dim = dim
+			assert.NoError(t, cfg.Validate())
+		})
+	}
+}
+
+// TestDefault_Models pins the models a new home gets and Qwen3-Embedding's
+// prompts: no document prefix, and the query instruction exactly as the
+// model card's get_detailed_instruct writes it, a real newline and nothing
+// after "Query:".
+func TestDefault_Models(t *testing.T) {
+	emb := Default().Embedding
+	assert.Equal(t, "qwen3-embedding:0.6b", emb.Model)
+	assert.Equal(t, 1024, emb.Dim)
+	assert.Empty(t, emb.DocumentPrefix)
+	assert.Equal(t, []byte("Instruct: Given a web search query, retrieve relevant passages that answer the query"+
+		"\nQuery:"), []byte(emb.QueryPrefix))
+	assert.Equal(t, "qwen3:4b-instruct", Default().Generation.Model)
+}
+
+// TestLoad_QueryPrefixFromYAML: the prefix written as a double-quoted YAML
+// string, with its \n escape, loads as the same bytes as the default.
+func TestLoad_QueryPrefixFromYAML(t *testing.T) {
+	got, err := Load(writeConfig(t, `embedding:
+  query_prefix: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+`))
+	require.NoError(t, err)
+	assert.Equal(t, []byte(Default().Embedding.QueryPrefix), []byte(got.Embedding.QueryPrefix))
 }
 
 func TestValidate_DoesNotMutate(t *testing.T) {

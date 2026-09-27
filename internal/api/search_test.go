@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 )
@@ -23,8 +24,10 @@ func (f embedFunc) Embed(ctx context.Context, texts []string) ([][]float32, erro
 	return f(ctx, texts)
 }
 
+// unitVec is a unit vector as wide as the test server's home, which
+// newStartingTestServer creates with the default embedding model and width.
 func unitVec() []float32 {
-	v := make([]float32, store.EmbeddingDim)
+	v := make([]float32, config.Default().Embedding.Dim)
 	v[0] = 1
 	return v
 }

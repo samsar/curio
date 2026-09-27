@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/insight"
@@ -242,6 +243,12 @@ func indexHandler(d Deps) HandlerFunc {
 			Tags:         tags,
 			Markdown:     string(md),
 		})
+		// A chunk the model can't take and a vector of the wrong width fail
+		// the same way on every attempt: the document goes failed at once
+		// instead of burning its retries.
+		if errors.Is(err, embedder.ErrInputTooLong) || errors.Is(err, embedder.ErrWrongDimension) {
+			return fmt.Errorf("%w: index: %w", ErrPermanent, err)
+		}
 		if err != nil {
 			return fmt.Errorf("index: %w", err)
 		}

@@ -35,7 +35,7 @@ type Engine struct {
 	rrfK         int
 	collapse     CollapseStrategy
 	preFanout    int    // minimum chunks to pull from each retriever before fusion
-	queryPrefix  string // task prefix prepended to the query before embedding (e.g. "search_query: ")
+	queryPrefix  string // instruction prepended to the query before embedding
 	defaultK     int
 	embedTimeout time.Duration
 	log          *slog.Logger
@@ -77,11 +77,11 @@ type Config struct {
 	EmbedTimeout time.Duration
 	// Log receives the warning for a degraded search. Default slog.Default().
 	Log *slog.Logger
-	// QueryPrefix is prepended to the query text before embedding, to match
-	// the document prefix used at index time (nomic-embed-text is a prefixed
-	// model — "search_query: " for queries, "search_document: " for docs).
-	// Empty = no prefix. Must correspond to the indexer's document prefix or
-	// vector search quality degrades.
+	// QueryPrefix is prepended to the query text before embedding: the
+	// query half of the embedding model's prompt scheme, whose document half
+	// the indexer applies (by default Qwen3-Embedding's instruction here and
+	// nothing on documents). Empty = no prefix. Must correspond to the
+	// indexer's document prefix or vector search quality degrades.
 	QueryPrefix string
 }
 

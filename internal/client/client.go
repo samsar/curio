@@ -35,7 +35,8 @@ func New(baseURL string) *Client {
 
 // Health mirrors api.Health. PID and Home are zero for a daemon that
 // predates them, which also means it holds no single-instance lock, and
-// Upstreams is nil for one that predates it.
+// Upstreams is nil for one that predates it. EmbeddingDrift is nil unless
+// the daemon reports the build that makes the embeddings changed.
 type Health struct {
 	Status          string           `json:"status"`
 	PID             int              `json:"pid,omitempty"`
@@ -44,10 +45,34 @@ type Health struct {
 	SchemaVersion   int              `json:"schema_version"`
 	EmbeddingModel  string           `json:"embedding_model"`
 	EmbeddingDim    int              `json:"embedding_dim"`
+	EmbeddingDrift  *EmbeddingDrift  `json:"embedding_drift,omitempty"`
 	OllamaReachable bool             `json:"ollama_reachable"`
 	OllamaDetail    string           `json:"ollama_detail,omitempty"`
 	Upstreams       []UpstreamHealth `json:"upstreams,omitempty"`
 }
+
+// EmbeddingDrift mirrors api.EmbeddingDrift: what changed in the build
+// that makes the home's embeddings since the library was indexed, and the
+// command that fixes it.
+type EmbeddingDrift struct {
+	Changes   []DriftChange `json:"changes"`
+	Fix       string        `json:"fix"`
+	CheckedAt time.Time     `json:"checked_at"`
+}
+
+// DriftChange mirrors api.DriftChange. What is DriftModelDigest or
+// DriftOllamaVersion, or one this client doesn't know.
+type DriftChange struct {
+	What     string `json:"what"`
+	Recorded string `json:"recorded"`
+	Current  string `json:"current"`
+}
+
+// The parts of the embedding build a daemon reports changed.
+const (
+	DriftModelDigest   = "model_digest"
+	DriftOllamaVersion = "ollama_version"
+)
 
 // UpstreamHealth mirrors api.UpstreamHealth: how the requests to a service
 // fetches depend on have gone. Unset times are zero.

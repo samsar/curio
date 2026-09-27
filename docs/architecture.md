@@ -134,10 +134,13 @@ CLI commands and the MCP sidecar auto-start it when it isn't running.
   `daemon.pid` for as long as it runs and records its PID there. The kernel
   drops the lock however the daemon dies, so "the lock is held" means "a
   daemon is running", with no PID guesswork.
-- **Startup order.** Lock, then config, then bind the API port and answer
-  as a starting daemon, and only then open and migrate the DB, recover
-  orphaned jobs, swap in the full API and start workers. A second daemon,
-  or one whose port is taken, exits before touching the DB.
+- **Startup order.** Lock, then config, then the home check (a home from
+  before format 2, or a `config.yaml` whose embedding model or width isn't
+  the marker's, is refused here), then bind the API port and answer as a
+  starting daemon, and only then open and migrate the DB, size the vector
+  index from the marker, recover orphaned jobs, swap in the full API and
+  start workers. A second daemon, one whose port is taken, or one the home
+  check refuses exits before touching the DB.
 - **Starting API.** Until it is ready the daemon answers every request 503
   with `Retry-After` and a `urn:curio:problem:daemon-starting` problem;
   on `/v1/healthz` the problem also names the daemon (`pid`, `home`) and
@@ -170,7 +173,8 @@ Everything under `$CURIO_HOME` (defaults to `~/.curio`).
 
 ```
 ~/.curio/
-  .curio-meta.json       # marker file: schema_version, embedding_model, dim
+  .curio-meta.json       # marker file: format, schema_version, embedding model + dim,
+                         # and the model digest + Ollama version that made the vectors
   config.yaml            # user config
   curio.db               # SQLite database (metadata, jobs, FTS5, vectors)
   content/               # extracted markdown, on disk
@@ -282,8 +286,9 @@ The interfaces with explicit swap paths:
    when hosted mode is wanted. depguard keeps every other package on the
    interfaces.
 2. **`embedder.Embedder`** — embedding model client. Ollama impl; Voyage /
-   OpenAI for cloud. Switching an existing home's embedding model isn't
-   supported (see [decisions](./decisions.md#embedding-model-swap)).
+   OpenAI for cloud. A home's embedding model and vector width are fixed
+   when it is created and recorded in its marker; another model means a
+   new home (see [decisions](./decisions.md#embedding-model-and-per-home-width)).
 3. **`generator.Generator`** — LLM text generation, used for cluster labels.
    Ollama impl.
 4. **`fetcher.Fetcher`** — content fetcher: `native` (Go HTTP + Readability,
@@ -313,7 +318,12 @@ External processes the daemon expects:
   (and `curio doctor`) says what's wrong. It pulls the models it needs,
   retrying until Ollama answers. Generation is abstracted behind a
   `generator.Generator` interface (local Ollama `/api/generate` impl), used
-  for LLM cluster labels in the insight layer.
+  for LLM cluster labels in the insight layer. Embed requests never let
+  Ollama truncate an input, and generate requests turn thinking off. The
+  daemon records the embedding model's digest and Ollama's version in the
+  marker, checks them every minute, and reports a change as
+  `embedding_drift` on `/v1/healthz`, in `curio doctor` and in `curio
+  status`, until `curio reindex --all` re-embeds the library.
 - **Node + web2md** (the user's existing tool) — invoked as a subprocess by the
   optional `web2md` fetcher. Not needed: the default fetcher is Go-native.
 - **Jina Reader** (`r.jina.ai`, `fetcher.native.jina_base_url`) — the native

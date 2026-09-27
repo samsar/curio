@@ -41,9 +41,10 @@ type Daemon struct {
 	// blocked on remote HTTP. Default 16.
 	FetchWorkers int `yaml:"fetch_workers"`
 	// IndexWorkers handles index jobs — Ollama embedding throughput is
-	// the bottleneck. nomic-embed-text on Metal saturates around 4
-	// concurrent embed requests; more workers just queue up inside
-	// Ollama. Default 4.
+	// the bottleneck. Ollama serves one request per model at a time unless
+	// OLLAMA_NUM_PARALLEL says otherwise, so more workers mostly queue
+	// inside Ollama, and the wait counts against embedding.timeout_seconds.
+	// Default 4.
 	IndexWorkers int `yaml:"index_workers"`
 	// Workers is the deprecated single-pool count. Load translates it
 	// into FetchWorkers/IndexWorkers (75/25) and zeroes it, so code reading
@@ -53,9 +54,15 @@ type Daemon struct {
 
 type Embedding struct {
 	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	Dim      int    `yaml:"dim"`
-	BaseURL  string `yaml:"base_url"`
+	// Model is the Ollama model that embeds chunks and queries. Pin a tag:
+	// an untagged name means :latest, which moves when the library does,
+	// and for qwen3-embedding is the 8B model, not the 0.6B default.
+	Model string `yaml:"model"`
+	// Dim is the width of Model's vectors. It is the home's width too,
+	// fixed when the home is created and recorded in its marker; the
+	// daemon refuses to start when the two disagree.
+	Dim     int    `yaml:"dim"`
+	BaseURL string `yaml:"base_url"`
 	// AutoPull downloads the embedding model via Ollama at startup if it isn't
 	// present locally. Default true. Set false on metered/offline setups.
 	AutoPull bool `yaml:"auto_pull"`
@@ -63,16 +70,21 @@ type Embedding struct {
 	// chunks per request, so the default of 60 leaves room for CPU-only
 	// Ollama and for requests queued behind the other index workers'.
 	TimeoutSeconds int `yaml:"timeout_seconds"`
-	// DocumentPrefix / QueryPrefix are task-instruction prefixes prepended
-	// before embedding. nomic-embed-text is a prefixed model and REQUIRES
-	// these ("search_document: " for indexed text, "search_query: " for
-	// queries); without them its embedding space collapses. They must stay
-	// consistent — changing either requires reindexing the whole corpus (the
-	// stored doc vectors and query vectors must share the same scheme). Set
-	// both to "" for a model that takes no prefix.
+	// DocumentPrefix / QueryPrefix are prepended to the text before it is
+	// embedded, never stored. Qwen3-Embedding is instruction-aware on the
+	// query side only: queries get QwenQueryPrefix and documents nothing.
+	// Other models have their own scheme (nomic-embed-text wants
+	// "search_document: " and "search_query: "). Stored vectors and query
+	// vectors must share one scheme, so changing either prefix means
+	// `curio reindex --all`.
 	DocumentPrefix string `yaml:"document_prefix"`
 	QueryPrefix    string `yaml:"query_prefix"`
 }
+
+// QwenQueryPrefix is Qwen3-Embedding's query instruction, byte for byte as
+// the model's config_sentence_transformers.json and get_detailed_instruct
+// write it: the task, a newline, and "Query:" with nothing after the colon.
+const QwenQueryPrefix = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
 
 type Fetcher struct {
 	Default string  `yaml:"default"` // "native" | "web2md"
@@ -163,10 +175,10 @@ type Insight struct {
 	// MinClusterSize drops communities smaller than this to noise.
 	MinClusterSize int `yaml:"min_cluster_size"`
 	// CenterVectors subtracts the corpus mean vector before clustering. Default
-	// true: embedding models like nomic-embed-text are anisotropic (vectors in
-	// a narrow cone), so without it raw cosines are uniformly high and the
-	// corpus collapses into one giant cluster. Turn off only if your embeddings
-	// are already isotropic.
+	// true: many embedding models are anisotropic (vectors in a narrow cone),
+	// so without it raw cosines are uniformly high and the corpus collapses
+	// into one giant cluster. Turn off only if your embeddings are already
+	// isotropic.
 	CenterVectors bool `yaml:"center_vectors"`
 	// Labeling selects cluster naming: "llm" (default; needs a generation
 	// model, else falls back to deterministic term labels), "terms", or "off".
@@ -181,8 +193,11 @@ type Insight struct {
 // clusters. Separate from Embedding: a different model and endpoint. Only
 // used when a feature asks for it (insight.labeling = "llm").
 type Generation struct {
-	Provider       string `yaml:"provider"`        // "ollama" (only provider in v1)
-	Model          string `yaml:"model"`           // a chat/instruct model, e.g. "llama3.2"
+	Provider string `yaml:"provider"` // "ollama" (only provider in v1)
+	// Model is a chat/instruct model, default "qwen3:4b-instruct". Unlike
+	// the embedding model it is not recorded in the home: change it and
+	// restart the daemon; nothing needs reindexing.
+	Model          string `yaml:"model"`
 	BaseURL        string `yaml:"base_url"`        // Ollama server; can share the embedder's
 	TimeoutSeconds int    `yaml:"timeout_seconds"` // per-request; generation is slow
 	// AutoPull downloads the generation model via Ollama at startup if it isn't
@@ -202,13 +217,13 @@ func Default() Config {
 		},
 		Embedding: Embedding{
 			Provider:       providerOllama,
-			Model:          "nomic-embed-text",
-			Dim:            store.EmbeddingDim,
+			Model:          "qwen3-embedding:0.6b",
+			Dim:            1024,
 			BaseURL:        "http://localhost:11434",
 			AutoPull:       true,
 			TimeoutSeconds: 60,
-			DocumentPrefix: "search_document: ",
-			QueryPrefix:    "search_query: ",
+			DocumentPrefix: "",
+			QueryPrefix:    QwenQueryPrefix,
 		},
 		Fetcher: Fetcher{
 			Default: "native",
@@ -239,11 +254,10 @@ func Default() Config {
 			EmbedTimeoutSeconds: 10,
 		},
 		Chunking: Chunking{
-			// 384 words is conservative: nomic-embed-text's context is
-			// 2048 tokens (its GGUF context_length; the num_ctx we send is
-			// advisory), and dense markdown (URLs, code blocks, tables)
-			// has far more BPE tokens than whitespace-words. The chunker's
-			// 3500-byte cap backs this up for the worst content. See
+			// 384 words keeps chunks topical, and dense markdown (URLs,
+			// code blocks, tables) has far more BPE tokens than
+			// whitespace-words. The chunker's 3500-byte cap is what bounds
+			// a chunk's tokens against the embedder's num_ctx. See
 			// decisions.md.
 			SizeTokens:    384,
 			OverlapTokens: 48,
@@ -265,7 +279,7 @@ func Default() Config {
 		},
 		Generation: Generation{
 			Provider:       providerOllama,
-			Model:          "llama3.2",
+			Model:          "qwen3:4b-instruct",
 			BaseURL:        "http://localhost:11434",
 			TimeoutSeconds: 120,
 			AutoPull:       true,
@@ -364,10 +378,8 @@ func (c Config) Validate() error {
 	if c.Embedding.Model == "" {
 		return errors.New("embedding.model must not be empty")
 	}
-	if c.Embedding.Dim != store.EmbeddingDim {
-		return fmt.Errorf("embedding.dim must be %d, got %d: the vector index is created with a fixed "+
-			"dimension and a different-dimension model swap isn't implemented yet "+
-			"(see docs/decisions.md \"Embedding model swap\")", store.EmbeddingDim, c.Embedding.Dim)
+	if c.Embedding.Dim < 1 || c.Embedding.Dim > store.MaxEmbeddingDim {
+		return fmt.Errorf("embedding.dim must be in [1, %d], got %d", store.MaxEmbeddingDim, c.Embedding.Dim)
 	}
 	if c.Embedding.BaseURL == "" {
 		return errors.New("embedding.base_url must not be empty")

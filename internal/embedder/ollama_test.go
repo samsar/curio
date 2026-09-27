@@ -3,6 +3,7 @@ package embedder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"syscall"
@@ -82,8 +83,67 @@ func TestOllama_Embed_DimensionMismatch(t *testing.T) {
 
 	o, _ := NewOllama(OllamaOptions{BaseURL: srv.URL, Model: "x", Dim: 4})
 	_, err := o.Embed(context.Background(), []string{"hi"})
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrWrongDimension)
 	assert.Contains(t, err.Error(), "dim 3, expected 4")
+}
+
+// TestOllama_Embed_RequestNeverTruncates pins what every /api/embed body
+// carries, read from the raw JSON so a missing key fails: truncate false
+// (Ollama's default, true, would embed an over-long input cut short),
+// keep_alive, and num_ctx.
+func TestOllama_Embed_RequestNeverTruncates(t *testing.T) {
+	bodies := make(chan map[string]json.RawMessage, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]json.RawMessage
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&raw)) {
+			return
+		}
+		bodies <- raw
+		assert.NoError(t, json.NewEncoder(w).Encode(embedResponse{Embeddings: [][]float32{make([]float32, 4)}}))
+	}))
+	defer srv.Close()
+	o, err := NewOllama(OllamaOptions{BaseURL: srv.URL, Model: "qwen3-embedding:0.6b", Dim: 4})
+	require.NoError(t, err)
+
+	_, err = o.Embed(context.Background(), []string{"hi"})
+	require.NoError(t, err)
+	body := <-bodies
+	assert.JSONEq(t, `"qwen3-embedding:0.6b"`, string(body["model"]))
+	assert.JSONEq(t, `["hi"]`, string(body["input"]))
+	assert.JSONEq(t, `false`, string(body["truncate"]), "truncate is always sent, as false")
+	assert.JSONEq(t, `"30m"`, string(body["keep_alive"]))
+	assert.JSONEq(t, `{"num_ctx":8192}`, string(body["options"]))
+}
+
+// TestOllama_Embed_InputTooLong: Ollama's 400 for an input past the
+// context is ErrInputTooLong, in either wording, with the status error kept
+// in the chain; another 400 is not.
+func TestOllama_Embed_InputTooLong(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		tooLong bool
+	}{
+		{"Ollama 0.34.4", `{"error":"the input length exceeds the context length"}`, true},
+		{"older Ollama", `{"error":"input length exceeds maximum context length"}`, true},
+		{"another bad request", `{"error":"invalid input type"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, tc.body, http.StatusBadRequest)
+			}))
+			defer srv.Close()
+			o, err := NewOllama(OllamaOptions{BaseURL: srv.URL, Model: "x", Dim: 4})
+			require.NoError(t, err)
+
+			_, err = o.Embed(context.Background(), []string{"a", "b", "c"})
+			assert.Equal(t, tc.tooLong, errors.Is(err, ErrInputTooLong), "%v", err)
+			var se *ollama.StatusError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, http.StatusBadRequest, se.Code)
+		})
+	}
 }
 
 func TestOllama_Embed_CountMismatch(t *testing.T) {

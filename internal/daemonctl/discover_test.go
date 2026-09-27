@@ -23,6 +23,12 @@ func TestDiscover(t *testing.T) {
 		assert.Equal(t, "http://"+env.Config.Daemon.Listen, env.Controller.BaseURL)
 		assert.Equal(t, "/opt/curio/curio-daemon", env.Controller.DaemonBin)
 		assert.Same(t, env.Home, env.Controller.Home)
+
+		meta, err := env.Home.Meta()
+		require.NoError(t, err)
+		assert.Equal(t, curiohome.CurrentFormat, meta.Format)
+		assert.Equal(t, "qwen3-embedding:0.6b", meta.EmbeddingModel, "the default embedding model")
+		assert.Equal(t, 1024, meta.EmbeddingDim)
 	})
 
 	t.Run("an explicit daemon URL wins", func(t *testing.T) {

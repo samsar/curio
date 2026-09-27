@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -116,6 +117,46 @@ func TestReindexAll_StoreFailure(t *testing.T) {
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all"})
 	assertProblem(t, resp, http.StatusInternalServerError)
 	assert.Contains(t, resp.body, "enqueued 0 of 1")
+}
+
+// TestReindexAll_ResetsTheDriftBaseline: reindexing the fetched documents,
+// every searchable one, resets the embedding drift baseline once all their
+// jobs are enqueued; reindexing another state leaves it alone.
+func TestReindexAll_ResetsTheDriftBaseline(t *testing.T) {
+	cases := []struct {
+		path        string
+		rebaselines int
+	}{
+		{"/v1/documents/reindex-all", 1},
+		{"/v1/documents/reindex-all?state=fetched", 1},
+		{"/v1/documents/reindex-all?state=failed", 0},
+		{"/v1/documents/reindex-all?state=pending", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			monitor := &driftMonitor{}
+			s := newTestServer(t, func(d *Deps) { d.Drift = monitor })
+			s.seedContent(t, s.seedDocument(t, "https://example.com/a", store.DocStateFetched), "# A")
+
+			resp := s.do(t, request{method: http.MethodPost, path: tc.path})
+			require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+			assert.Equal(t, tc.rebaselines, monitor.rebaselined())
+		})
+	}
+}
+
+// TestReindexAll_DriftResetFailure: a baseline that can't be reset is a
+// 500 that says every job was enqueued, which they were.
+func TestReindexAll_DriftResetFailure(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Drift = &driftMonitor{err: errors.New("write marker tmp: permission denied")} })
+	s.seedContent(t, s.seedDocument(t, "https://example.com/a", store.DocStateFetched), "# A")
+	s.seedContent(t, s.seedDocument(t, "https://example.com/b", store.DocStateFetched), "# B")
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all"}),
+		http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, "enqueued all 2 index jobs")
+	assert.Contains(t, p.Detail, "permission denied")
+	assert.Equal(t, 2, s.count(t, "jobs"))
 }
 
 // TestGetDocumentContent_MissingFile: content deleted from disk is a 404

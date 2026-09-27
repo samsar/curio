@@ -35,9 +35,9 @@ type Chunks struct {
 
 var _ store.ChunkStore = (*Chunks)(nil)
 
-// NewChunks constructs the store. dim must be store.EmbeddingDim, the width
-// chunks_vec is created with; config validation holds embedding.dim to it,
-// and ReplaceForDocument rejects an embedding of any other length.
+// NewChunks constructs the store. dim is the home's embedding width, which
+// EnsureVectorIndex gives chunks_vec; ReplaceForDocument and VectorSearch
+// reject an embedding of any other length.
 func NewChunks(db *DB, dim int) *Chunks {
 	return &Chunks{db: db, dim: dim}
 }

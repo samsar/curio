@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/jobs"
@@ -56,12 +57,14 @@ func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 
 // newStartingTestServer starts the server as a starting daemon, in the
 // initializing phase, until ready is called. Its Deps are built up front
-// so a test can seed the database first.
+// so a test can seed the database first. The home is new, with the default
+// embedding model and width, and the vector index has that width.
 func newStartingTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	t.Helper()
-	db := sqlitetest.NewDB(t)
-	home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
+	defaults := config.Default().Embedding
+	home, err := curiohome.Init(t.TempDir(), defaults.Model, defaults.Dim)
 	require.NoError(t, err)
+	db := sqlitetest.NewDBWithDim(t, defaults.Dim)
 	quiet := slog.New(slog.DiscardHandler)
 	gate, err := jobs.NewQueueGate(context.Background(), sqlite.NewQueueSettings(db), testPools, quiet)
 	require.NoError(t, err)
@@ -71,7 +74,7 @@ func newStartingTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 		Documents:      sqlite.NewDocuments(db),
 		Extractions:    sqlite.NewExtractions(db),
 		Bookmarks:      sqlite.NewBookmarks(db),
-		Chunks:         sqlite.NewChunks(db, store.EmbeddingDim),
+		Chunks:         sqlite.NewChunks(db, defaults.Dim),
 		Queue:          sqlite.NewJobs(db),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
@@ -476,7 +479,7 @@ func TestServer_HealthzWithStalledOllama(t *testing.T) {
 	emb, err := embedder.NewOllama(embedder.OllamaOptions{
 		BaseURL: "http://" + stalled.Addr().String(),
 		Model:   "nomic-embed-text",
-		Dim:     store.EmbeddingDim,
+		Dim:     config.Default().Embedding.Dim,
 	})
 	require.NoError(t, err)
 	s := newTestServer(t, func(d *Deps) { d.Embedder = emb })

@@ -26,11 +26,10 @@ var (
 	ErrNotRunning = errors.New("store: job is not running")
 )
 
-// EmbeddingDim is the width of the vector index: chunks_vec is created as
-// FLOAT[768] in migrations/001_initial.sql. Every stored and query embedding
-// must have exactly this many components; a different width means rebuilding
-// that table.
-const EmbeddingDim = 768
+// MaxEmbeddingDim is the widest embedding the vector index takes: sqlite-vec's
+// SQLITE_VEC_VEC0_MAX_DIMENSIONS. A home's width is fixed when the home is
+// created, recorded in its marker, and must lie in [1, MaxEmbeddingDim].
+const MaxEmbeddingDim = 8192
 
 // LocalTenantID is the tenant of a single-user install: the daemon scopes
 // every row to it, server-side, and never shows it to clients.
@@ -445,8 +444,9 @@ type ChunkEmbedding struct {
 }
 
 // DocVector is a document's mean-pooled embedding — the average of its stored
-// chunk vectors, in the same 768-d space. The insight layer clusters over
-// these; find-related builds the equivalent on demand per document.
+// chunk vectors, in the same space and of the same width. The insight layer
+// clusters over these; find-related builds the equivalent on demand per
+// document.
 type DocVector struct {
 	DocumentID string
 	Vector     []float32
