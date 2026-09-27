@@ -1,6 +1,7 @@
 package fetcher
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -142,10 +143,16 @@ func TestNative_HTTPError_NoFallback(t *testing.T) {
 	assert.Contains(t, err.Error(), "HTTP 500")
 }
 
+// TestParseJina reads Jina's real layout, blank lines between the header
+// groups included, and keeps every Warning line in order.
 func TestParseJina(t *testing.T) {
-	in := `Title: My Article
-URL Source: https://example.com/x
+	in := `Title: Welcome to Python.org
+
+URL Source: https://www.python.org/this-page-does-not-exist-xyz-123/
 Published Time: 2024-01-15T10:00:00Z
+
+Warning: Target URL returned error 404: Not Found
+Warning: This page maybe requiring CAPTCHA, please make sure you are authorized to access this page.
 
 Markdown Content:
 # Heading
@@ -153,11 +160,13 @@ Markdown Content:
 This is the body of the article.
 `
 	got := parseJina(in)
-	assert.Equal(t, "My Article", got.title)
-	assert.Equal(t, "https://example.com/x", got.urlSource)
+	assert.Equal(t, "Welcome to Python.org", got.title)
 	assert.Equal(t, "2024-01-15T10:00:00Z", got.published)
-	assert.Contains(t, got.body, "Heading")
-	assert.Contains(t, got.body, "body of the article")
+	assert.Equal(t, []string{
+		"Target URL returned error 404: Not Found",
+		"This page maybe requiring CAPTCHA, please make sure you are authorized to access this page.",
+	}, got.warnings)
+	assert.Equal(t, "# Heading\n\nThis is the body of the article.", got.body)
 }
 
 func TestParseJina_NoMarker(t *testing.T) {
@@ -734,7 +743,7 @@ func TestNative_PDFOverLimit(t *testing.T) {
 				u, err := url.Parse(target)
 				require.NoError(t, err)
 				if strings.HasPrefix(target, jinaBase) {
-					body := "Title: Big PDF\n\nMarkdown Content:\n" + strings.Repeat("Rendered PDF text. ", 20)
+					body := "Title: Big PDF\n\nMarkdown Content:\n" + strings.Repeat("Rendered PDF text. ", 40)
 					return &fetchResponse{statusCode: http.StatusOK, header: http.Header{}, finalURL: u,
 						body: io.NopCloser(strings.NewReader(body)), contentType: "text/plain"}, nil
 				}
@@ -805,5 +814,510 @@ func TestNative_ChromeHostlessRedirectCachesNothing(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "Healthy", res.Title)
 		})
+	}
+}
+
+// jinaReply builds a Jina Reader answer in its real layout. URL Source is
+// not the requested URL, as after a re-encoding: nothing may read it.
+func jinaReply(title string, warnings []string, body string) string {
+	var b strings.Builder
+	b.WriteString("Title: " + title + "\n\nURL Source: https://jina-echo.example/requested\n\n")
+	for _, w := range warnings {
+		b.WriteString("Warning: " + w + "\n")
+	}
+	if len(warnings) > 0 {
+		b.WriteString("\n")
+	}
+	b.WriteString("Markdown Content:\n" + body)
+	return b.String()
+}
+
+// Warnings Jina adds to an answer.
+const (
+	warnTarget403 = "Target URL returned error 403: Forbidden"
+	warnCaptcha   = "This page maybe requiring CAPTCHA, please make sure you are authorized to access this page."
+)
+
+// Pages as Jina renders them, from answers curio once stored as articles.
+const (
+	// cfChallengeBody is Cloudflare's managed challenge: just over the
+	// 200 characters Jina answers were once held to.
+	cfChallengeBody = "example.com\n-----------\n\n## Performing security verification\n\n" +
+		"This website uses a security service to protect against malicious bots. " +
+		"This page is displayed while the website verifies you are not a bot."
+	cfBlockBody = `Sorry, you have been blocked
+============================
+
+You are unable to access example.com
+------------------------------------
+
+Why have I been blocked?
+------------------------
+
+This website is using a security service to protect itself from online attacks. The action you just performed triggered the security solution.
+
+What can I do to resolve this?
+------------------------------
+
+You can email the site owner to let them know you were blocked.
+
+Cloudflare Ray ID: **8c5f2b1e9d4a7f30** • Performance & security by Cloudflare`
+	redditBlockBody = `You’ve been blocked by network security.
+
+To continue, log in to your Reddit account or use your developer token
+
+If you think you’ve been blocked by mistake, file a ticket below and we’ll look into it.
+
+[Log in](https://www.reddit.com/login/)[File a ticket](https://support.reddithelp.com/hc/en-us/requests/new)`
+	akamaiDeniedBody = `Access Denied
+=============
+
+You don't have permission to access "http://www.example.com/products/42" on this server.
+
+Reference #18.2f3c1702.1726000000.1a2b3c4d
+
+https://errors.edgesuite.net/18.2f3c1702.1726000000.1a2b3c4d`
+	perimeterXBody = `Access to this page has been denied
+===================================
+
+Press & Hold to confirm you are a human (and not a bot).
+
+Reference ID 5f2c1a40-7b3e-11ef-9d2a-0242ac120002`
+	tweetBody = `Conversation
+============
+
+[Jane Doe](https://x.com/janedoe)
+
+[@janedoe](https://x.com/janedoe)
+
+Shipping a new version of our SQLite extension today: vector search now runs inside the same transaction as your writes, so there is no second store to keep in step. Benchmarks, the migration guide and the full changelog are in the thread below. Thanks to everyone who filed issues and sent patches.
+
+[3:14 PM · Sep 20, 2026](https://x.com/janedoe/status/1837000000000000000)
+
+12.4K Views
+
+[42 Reposts](https://x.com/janedoe/status/1837000000000000000/retweets) [310 Likes](https://x.com/janedoe/status/1837000000000000000/likes)`
+)
+
+var (
+	// longArticleBody is over 2 KiB, past where challenge phrases are
+	// looked for, so only the title and Jina's warnings judge it.
+	longArticleBody = strings.Repeat("The interpreter reads the source, compiles it to bytecode and runs it. ", 36)
+	// loginPageBody is long enough that only a login page's title gives it
+	// away.
+	loginPageBody = strings.Repeat("Enter your email address and password to continue to your account. ", 8)
+	// kijijiNotFoundBody is a not-found page long enough that only its
+	// title gives it away.
+	kijijiNotFoundBody = "Oops! We can't seem to find the page you're looking for.\n\n" +
+		strings.Repeat("Browse [Cars & Vehicles](https://www.kijiji.ca/b-cars-vehicles/canada/c27l0), "+
+			"[Real Estate](https://www.kijiji.ca/b-real-estate/canada/c34l0) and more. ", 5)
+)
+
+// jinaHarness is a Native whose origin serves the thin page, or answers
+// with an error status, and whose fake Jina always answers reply. Both
+// count their requests.
+type jinaHarness struct {
+	n          *Native
+	fc         *fakeClock
+	origin     *httptest.Server
+	originHits atomic.Int32
+	jinaHits   atomic.Int32
+}
+
+func newJinaHarness(t *testing.T, originStatus int, deadLinkDetection bool, reply string) *jinaHarness {
+	t.Helper()
+	h := &jinaHarness{fc: newFakeClock()}
+	h.origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h.originHits.Add(1)
+		if originStatus != http.StatusOK {
+			w.WriteHeader(originStatus)
+			return
+		}
+		_, _ = io.WriteString(w, thinPage)
+	}))
+	t.Cleanup(h.origin.Close)
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h.jinaHits.Add(1)
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, reply)
+	}))
+	t.Cleanup(jina.Close)
+	h.n = unpaced(NewNative(NativeOptions{
+		Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
+		DeadLinkDetection: deadLinkDetection,
+	}), h.fc)
+	return h
+}
+
+// originCached reports whether the origin's host has a host-cache entry.
+func (h *jinaHarness) originCached() bool {
+	_, cached := h.n.hostCache.Get(hostOf(h.origin.URL))
+	return cached
+}
+
+// TestNative_JinaTargetStatus pins what the status Jina reports for the
+// target turns a fetch into, behind a thin origin page and behind an origin
+// 403. Whatever the status, the answer costs one Jina request, extends no
+// cooldown, and is never an *HTTPStatusError: the only one in the chain is
+// the origin's own. Only the origin's host-wide verdict is ever cached, and
+// only once Jina gave a verdict of its own.
+func TestNative_JinaTargetStatus(t *testing.T) {
+	type outcome struct{ permanent, deadLink, antiBot, cached bool }
+	cases := []struct {
+		status    int
+		origin    int // 200 serves the thin page
+		detection bool
+		want      outcome
+	}{
+		{http.StatusNotFound, http.StatusOK, true, outcome{permanent: true, deadLink: true}},
+		{http.StatusGone, http.StatusOK, true, outcome{permanent: true, deadLink: true}},
+		{http.StatusNotFound, http.StatusForbidden, true, outcome{permanent: true, deadLink: true, antiBot: true}},
+		{http.StatusGone, http.StatusForbidden, true, outcome{permanent: true, deadLink: true, antiBot: true}},
+		{http.StatusForbidden, http.StatusOK, true, outcome{permanent: true, antiBot: true}},
+		{http.StatusServiceUnavailable, http.StatusOK, true, outcome{permanent: true, antiBot: true}},
+		{http.StatusForbidden, http.StatusForbidden, true, outcome{antiBot: true, cached: true}},
+		{http.StatusServiceUnavailable, http.StatusForbidden, true, outcome{antiBot: true, cached: true}},
+		{http.StatusRequestTimeout, http.StatusOK, true, outcome{}},
+		{http.StatusTooManyRequests, http.StatusOK, true, outcome{}},
+		{http.StatusInternalServerError, http.StatusOK, true, outcome{}},
+		{http.StatusBadGateway, http.StatusOK, true, outcome{}},
+		{520, http.StatusOK, true, outcome{}},
+		{526, http.StatusOK, true, outcome{}},
+		{http.StatusTooManyRequests, http.StatusForbidden, true, outcome{antiBot: true}},
+		{http.StatusBadGateway, http.StatusForbidden, true, outcome{antiBot: true}},
+		{http.StatusBadRequest, http.StatusOK, true, outcome{permanent: true}},
+		{http.StatusUnauthorized, http.StatusOK, true, outcome{permanent: true}},
+		{http.StatusUnavailableForLegalReasons, http.StatusOK, true, outcome{permanent: true}},
+		{http.StatusNotImplemented, http.StatusOK, true, outcome{permanent: true}},
+		{http.StatusNotFound, http.StatusOK, false, outcome{}},
+		{http.StatusGone, http.StatusOK, false, outcome{}},
+		{http.StatusNotFound, http.StatusForbidden, false, outcome{antiBot: true}},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("target %d origin %d detection=%v", tc.status, tc.origin, tc.detection), func(t *testing.T) {
+			warning := fmt.Sprintf("Target URL returned error %d: %s", tc.status, cmp.Or(http.StatusText(tc.status), "Unknown"))
+			h := newJinaHarness(t, tc.origin, tc.detection,
+				jinaReply("Welcome to Python.org", []string{warning}, longArticleBody))
+
+			_, err := h.n.Fetch(context.Background(), h.origin.URL+"/a")
+			require.Error(t, err)
+			var pe *PermanentError
+			assert.Equal(t, tc.want.permanent, errors.As(err, &pe), "permanent: %v", err)
+			assert.Equal(t, tc.want.deadLink, errors.Is(err, ErrDeadLink), "dead link: %v", err)
+			assert.Equal(t, tc.want.antiBot, errors.Is(err, ErrAntiBot), "anti-bot: %v", err)
+			var se *HTTPStatusError
+			assert.Equal(t, tc.origin == http.StatusForbidden, errors.As(err, &se),
+				"the target's status is never an *HTTPStatusError: %v", err)
+			assert.Equal(t, int32(1), h.jinaHits.Load(), "one Jina request per fetch")
+			assert.Zero(t, h.n.jinaCooldown.remaining(h.fc.now()), "Jina's cooldown is its own 429's")
+			assert.Equal(t, tc.want.cached, h.originCached())
+
+			_, err = h.n.Fetch(context.Background(), h.origin.URL+"/b")
+			require.Error(t, err)
+			if tc.want.cached {
+				assert.Contains(t, err.Error(), "(cached:")
+				assert.Equal(t, int32(1), h.originHits.Load())
+			} else {
+				assert.Equal(t, int32(2), h.originHits.Load(), "the next URL on the host reaches the origin")
+			}
+		})
+	}
+}
+
+// TestNative_JinaRejectsNonArticles: a 2xx Jina answer that is a challenge,
+// a block, a not-found or a login page, or too thin, is Jina's verdict: one
+// request, never stored, never cached. Behind a thin origin page it fails
+// the fetch permanently.
+func TestNative_JinaRejectsNonArticles(t *testing.T) {
+	cases := []struct {
+		name     string
+		title    string
+		warnings []string
+		body     string
+		want     error
+		reason   string
+	}{
+		{"cloudflare challenge", "Just a moment...", nil, cfChallengeBody, ErrAntiBot, "bot challenge"},
+		{"cloudflare block", "Attention Required! | Cloudflare", nil, cfBlockBody, ErrAntiBot, "bot challenge"},
+		{"reddit block", "", nil, redditBlockBody, ErrAntiBot, "network security"},
+		{"akamai", "Access Denied", nil, akamaiDeniedBody, ErrAntiBot, "bot challenge"},
+		{"perimeterx", "Access to this page has been denied.", nil, perimeterXBody, ErrAntiBot, "bot challenge"},
+		{"perimeterx, by its text", "", nil, perimeterXBody, ErrAntiBot, "press & hold"},
+		{"captcha warning", "An article", []string{warnCaptcha}, longArticleBody, ErrAntiBot, "CAPTCHA"},
+		{"not-found title", "Page not found | Free local classifieds - Kijiji", nil, kijijiNotFoundBody, ErrDeadLink, "not-found page"},
+		{"thin", "A note", nil, "Too short to be the article.", ErrLoginWall, "extracted text < 500 bytes"},
+		{"atlassian", "Log in to continue - Log in with Atlassian account", nil, loginPageBody, ErrLoginWall, "login wall"},
+		{"google docs", "Google Docs: Sign-in", nil, loginPageBody, ErrLoginWall, "login wall"},
+		{"google sheets", "Google Sheets: Sign-in", nil, loginPageBody, ErrLoginWall, "login wall"},
+		{"google drive", "Google Drive: Sign-in", nil, loginPageBody, ErrLoginWall, "login wall"},
+		{"google accounts", "Sign in - Google Accounts", nil, loginPageBody, ErrLoginWall, "login wall"},
+		{"consensys", "Sign in to Consensys Software Inc.", nil, loginPageBody, ErrLoginWall, "login wall"},
+		{"colorcombos", "ColorCombos.com - Login", nil, loginPageBody, ErrLoginWall, "login wall"},
+		{"bigcommerce", "Login | BigCommerce Help Center", nil, loginPageBody, ErrLoginWall, "login wall"},
+		{"plaid", "Plaid - Dashboard | Signin", nil, loginPageBody, ErrLoginWall, "login wall"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newJinaHarness(t, http.StatusOK, true, jinaReply(tc.title, tc.warnings, tc.body))
+			res, err := h.n.Fetch(context.Background(), h.origin.URL+"/a")
+			require.Error(t, err)
+			assert.Nil(t, res)
+			assert.ErrorIs(t, err, tc.want)
+			assert.Contains(t, err.Error(), tc.reason)
+			assert.Equal(t, !errors.Is(tc.want, ErrDeadLink), errors.Is(err, errJinaRejected),
+				"a dead link is final, every other verdict a rejection: %v", err)
+			var pe *PermanentError
+			assert.ErrorAs(t, err, &pe)
+			assert.Equal(t, int32(1), h.jinaHits.Load())
+			assert.False(t, h.originCached())
+		})
+	}
+}
+
+// TestNative_JinaAcceptsArticles: informational warnings, articles about
+// bot checks and logins, titles that start like a challenge's, and a short
+// post above the floor are all stored, settled on the URL requested.
+func TestNative_JinaAcceptsArticles(t *testing.T) {
+	botEssay := strings.Repeat("Bot checks are everywhere now. ", 20) +
+		"The page said just a moment, then Checking your browser before accessing the site, " +
+		"then asked me to verify you are human. A 404 would have been kinder. " +
+		strings.Repeat("The rest of this essay is about why these checks fail real readers. ", 30)
+	article := strings.Repeat("A paragraph of a real article about the subject in its title. ", 10)
+	cases := []struct {
+		name      string
+		title     string
+		warnings  []string
+		body      string
+		detection bool
+	}{
+		{"informational warnings", "An article", []string{
+			"This page contains iframe that are currently hidden, consider enabling iframe processing.",
+			"This page contains shadow DOM that are currently hidden, consider enabling shadow DOM processing.",
+			"This is a cached snapshot of the original page, consider retry with caching opt-out.",
+			"This page maybe not yet fully loaded, consider explicitly specify a timeout.",
+		}, article, true},
+		{"an essay quoting challenge pages", "Why bot checks fail real readers", nil, botEssay, true},
+		{"grafana", "How to log in to Grafana with SSO", nil, article, true},
+		{"apple", "Sign In With Apple: A Developer's Guide", nil, article, true},
+		{"stack overflow", "Login cognito using with scope openId using id_token or access_token don't working", nil, article, true},
+		{"just a moment of", "Just a moment of silence", nil, article, true},
+		{"access denied:", "Access Denied: A History of Web Censorship", nil, article, true},
+		{"a short post", `Jane Doe on X: "Shipping a new version of our SQLite extension today" / X`, nil, tweetBody, true},
+		{"not-found title, detection off", "Page not found | Free local classifieds - Kijiji", nil, kijijiNotFoundBody, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newJinaHarness(t, http.StatusOK, tc.detection, jinaReply(tc.title, tc.warnings, tc.body))
+			target := h.origin.URL + "/a"
+			res, err := h.n.Fetch(context.Background(), target)
+			require.NoError(t, err)
+			assert.Equal(t, "jina", res.Meta["via"])
+			assert.Equal(t, tc.title, res.Title)
+			assert.Equal(t, target, res.FinalURL, "URL Source echoes the request; it is no final URL")
+			assert.Equal(t, int32(1), h.jinaHits.Load())
+		})
+	}
+}
+
+// TestNative_ChallengePageFallsBackToJina: a bot challenge served with 200
+// is anti-bot, not a thin page, and never stored: with Jina off it fails
+// permanently, and with Jina on Jina is asked once.
+func TestNative_ChallengePageFallsBackToJina(t *testing.T) {
+	for name, page := range challengePages {
+		for _, mode := range []jinaMode{jinaOff, jinaThin} {
+			t.Run(name+"/jina "+string(mode), func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = io.WriteString(w, page)
+				}))
+				defer srv.Close()
+
+				n, jinaCalls := newNativeWithJina(t, mode)
+				res, err := n.Fetch(context.Background(), srv.URL+"/a")
+				require.ErrorIs(t, err, ErrAntiBot)
+				assert.Nil(t, res)
+				assert.Contains(t, err.Error(), "bot challenge")
+				var pe *PermanentError
+				assert.ErrorAs(t, err, &pe)
+				if mode == jinaOff {
+					assert.Zero(t, jinaCalls())
+				} else {
+					assert.Equal(t, int32(1), jinaCalls())
+				}
+			})
+		}
+	}
+}
+
+// challengePages are bot interstitials served with a 200 status.
+var challengePages = map[string]string{
+	"imperva": `<!DOCTYPE html><html><head><title>Pardon Our Interruption</title></head><body>
+<div class="container"><h1>Pardon Our Interruption</h1>
+<p>As you were browsing something about your browser made us think you were a bot. There are a few reasons this might happen:</p>
+<ul><li>You're a power user moving through this website with super-human speed.</li>
+<li>You've disabled cookies in your web browser.</li>
+<li>A third-party browser plugin, such as Ghostery or NoScript, is preventing JavaScript from running. Additional information is available in this <a href="/support">support article</a>.</li></ul>
+<p>To regain access, please make sure that cookies and JavaScript are enabled before reloading the page.</p>
+</div></body></html>`,
+	"cloudflare": `<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body>
+<div class="main-wrapper" role="main"><div class="main-content">
+<h1 class="zone-name-title h1">example.com</h1>
+<h2 class="h2" id="challenge-running">Checking if the site connection is secure</h2>
+<noscript><div class="h2"><span id="challenge-error-text">Enable JavaScript and cookies to continue</span></div></noscript>
+<div id="challenge-body-text" class="core-msg spacer">example.com needs to review the security of your connection before proceeding.</div>
+</div></div></body></html>`,
+}
+
+// TestJudgePage_Order pins the order of the page verdicts: dead links
+// first, then challenges, then the login-wall checks, redirects before
+// content.
+func TestJudgePage_Order(t *testing.T) {
+	at := func(raw string) *url.URL {
+		u, err := url.Parse(raw)
+		require.NoError(t, err)
+		return u
+	}
+	const target = "https://example.com/post"
+	long := strings.Repeat("A sentence of the article. ", 30)
+	challenge := "Checking your browser before accessing example.com."
+	cases := []struct {
+		name      string
+		page      pageView
+		detection bool
+		want      error
+		reason    string
+		siteWide  bool
+	}{
+		{"not-found title before a challenge", pageView{title: "Page not found", text: challenge, found: true}, true, ErrDeadLink, "not-found page", false},
+		{"homepage before a challenge title", pageView{title: "Just a moment...", found: true, finalURL: at("https://example.com/")}, true, ErrDeadLink, "redirected to homepage", false},
+		{"detection off", pageView{title: "Page not found", text: challenge, found: true}, false, ErrAntiBot, "bot challenge", false},
+		{"challenge before a login redirect", pageView{title: "Just a moment...", text: long, found: true, finalURL: at("https://example.com/login")}, true, ErrAntiBot, "bot challenge", false},
+		{"challenge title without an article", pageView{title: "Just a moment..."}, true, ErrAntiBot, "bot challenge", false},
+		{"login redirect before no article", pageView{finalURL: at("https://example.com/login")}, true, ErrLoginWall, "login/auth path", true},
+		{"cross-site redirect before thin", pageView{text: "short", found: true, finalURL: at("https://other.example/post")}, true, ErrLoginWall, "different host", false},
+		{"no article", pageView{title: "Log in"}, true, ErrLoginWall, "no article extracted", false},
+		{"thin before a login title", pageView{title: "Log in", text: "short", found: true}, true, ErrLoginWall, "extracted text < 500 bytes", false},
+		{"login title", pageView{title: "Log in", text: long, found: true}, true, ErrLoginWall, "title looks like a login wall", false},
+		{"article", pageView{title: "A real article", text: long, found: true, finalURL: at(target)}, true, nil, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &Native{deadLinkDetection: tc.detection}
+			err := n.judgePage(target, tc.page)
+			if tc.want == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tc.want)
+			assert.Contains(t, err.Error(), tc.reason)
+			assert.Equal(t, tc.siteWide, errors.Is(err, errSiteLoginWall), "site-wide: %v", err)
+		})
+	}
+}
+
+func TestChallengeTitleRE(t *testing.T) {
+	challenge := []string{
+		"Just a moment...",
+		"Just a moment…",
+		"just a moment...",
+		"Attention Required! | Cloudflare",
+		"Access Denied",
+		"Access denied | www.example.com used Cloudflare to restrict access",
+		"Please Wait... | Cloudflare",
+		"Access to this page has been denied",
+		"Access to this page has been denied.",
+		"Pardon Our Interruption",
+		"DDoS-Guard",
+		"Vercel Security Checkpoint",
+		"Are you a robot?",
+		"Bloomberg - Are you a robot?",
+	}
+	for _, title := range challenge {
+		assert.True(t, challengeTitleRE.MatchString(title), "should match %q", title)
+	}
+	article := []string{
+		"Just a moment of silence",
+		"Attention required! Why focus matters",
+		"Access Denied: A History of Web Censorship",
+		"Are you a robot? The Turing test at 75",
+		"Pardon our dust: new site coming",
+	}
+	for _, title := range article {
+		assert.False(t, challengeTitleRE.MatchString(title), "should NOT match %q", title)
+	}
+}
+
+// TestLooksLikeChallenge_Phrases: challenge phrases count on short pages
+// only, case-insensitively and whatever the apostrophe.
+func TestLooksLikeChallenge_Phrases(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"cloudflare", "example.com needs to review the security of your connection before proceeding.", true},
+		{"reddit, curly apostrophe", redditBlockBody, true},
+		{"incapsula", "Request unsuccessful. Incapsula incident ID: 123000450123456789-12345678901234567", true},
+		{"ad blocker", "Please enable JS and disable any ad blocker", true},
+		{"short page, no phrase", "A short note about our release.", false},
+		{"3 KB article quoting one", strings.Repeat("An essay on bot checks. ", 128) +
+			"Enable JavaScript and cookies to continue, the page said.", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := looksLikeChallenge(pageView{title: "A title", text: tc.text, found: true})
+			assert.Equal(t, tc.want, reason != "", "reason %q", reason)
+		})
+	}
+}
+
+func TestLoginTitleRE(t *testing.T) {
+	login := []string{
+		"Log in to continue - Log in with Atlassian account",
+		"Google Docs: Sign-in",
+		"Sign in - Google Accounts",
+		"Sign in to Consensys Software Inc.",
+		"ColorCombos.com - Login",
+		"Login | BigCommerce Help Center",
+		"Plaid - Dashboard | Signin",
+		"Sign In | Sentry",
+		"Login or Sign Up for a Dropbox Account",
+		"Sign in to read this",
+		"Log in",
+		"Join now",
+		"Join LinkedIn",
+	}
+	for _, title := range login {
+		assert.True(t, loginTitleRE.MatchString(title), "should match %q", title)
+	}
+	article := []string{
+		"Login cognito using with scope openId using id_token or access_token don't working",
+		"How to log in to Grafana with SSO",
+		"Sign In With Apple: A Developer's Guide",
+		"Logging in with OAuth 2.0: a primer",
+		"Why your login page leaks usernames",
+		"Designing a better sign-in",
+	}
+	for _, title := range article {
+		assert.False(t, loginTitleRE.MatchString(title), "should NOT match %q", title)
+	}
+}
+
+func TestLoginPathRE(t *testing.T) {
+	login := []string{
+		"/login", "/login/", "/uas/login", "//user/login.php", "/s/login/", "/auth/login/",
+		"/auth/v3/signin", "/v3/signin/identifier", "/signup/credentials", "/authwall",
+		"/m/signin", "/i/flow/login", "/accounts/login/", "/Login.aspx",
+	}
+	for _, path := range login {
+		assert.True(t, loginPathRE.MatchString(path), "should match %q", path)
+	}
+	notLogin := []string{
+		"/questions/63177503/login-cognito-using-with-scope-openid",
+		"/blog/login-best-practices",
+		"/signup-flow-teardown",
+		"/signing-keys",
+	}
+	for _, path := range notLogin {
+		assert.False(t, loginPathRE.MatchString(path), "should NOT match %q", path)
 	}
 }

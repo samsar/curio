@@ -3,6 +3,7 @@ package fetcher
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -25,12 +26,13 @@ type jinaMode string
 const (
 	jinaOff         jinaMode = "off"
 	jinaThin        jinaMode = "thin 2xx"
+	jinaChallenge   jinaMode = "challenge 2xx"
 	jinaRateLimited jinaMode = "429"
 	jinaDown        jinaMode = "500"
 	jinaUnreachable jinaMode = "unreachable"
 )
 
-var allJinaModes = []jinaMode{jinaOff, jinaThin, jinaRateLimited, jinaDown, jinaUnreachable}
+var allJinaModes = []jinaMode{jinaOff, jinaThin, jinaChallenge, jinaRateLimited, jinaDown, jinaUnreachable}
 
 // newNativeWithJina builds a Native whose Jina fallback behaves per mode,
 // on a fake clock so Jina's retry backoff doesn't sleep. It returns the
@@ -53,6 +55,10 @@ func newNativeWithJina(t *testing.T, mode jinaMode) (*Native, func() int32) {
 		opts.JinaFallback, opts.JinaBaseURL = true, "http://"+closedAddr(t)+"/"
 	case jinaThin:
 		serve(func(w http.ResponseWriter) { _, _ = w.Write([]byte("Title: x\n\nMarkdown Content:\ntoo short")) })
+	case jinaChallenge:
+		serve(func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, jinaReply("Just a moment...", []string{warnTarget403, warnCaptcha}, cfChallengeBody))
+		})
 	case jinaRateLimited:
 		serve(func(w http.ResponseWriter) { w.WriteHeader(http.StatusTooManyRequests) })
 	case jinaDown:
@@ -243,6 +249,60 @@ func TestNative_HostCacheKeyedByAnsweringHost(t *testing.T) {
 	}
 }
 
+// TestNative_ChallengePageIsPageLevel: a bot challenge recognized in a 200
+// page's content is about that page. With Jina off, or with Jina answering
+// thin, the fetch fails for good, and the next healthy URL on the host
+// still goes through.
+func TestNative_ChallengePageIsPageLevel(t *testing.T) {
+	for _, mode := range []jinaMode{jinaOff, jinaThin} {
+		t.Run(string(mode), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/a" {
+					_, _ = io.WriteString(w, challengePages["cloudflare"])
+					return
+				}
+				_, _ = io.WriteString(w, makeArticleHTML("Healthy", ""))
+			}))
+			defer srv.Close()
+
+			n, _ := newNativeWithJina(t, mode)
+			_, err := n.Fetch(context.Background(), srv.URL+"/a")
+			require.ErrorIs(t, err, ErrAntiBot)
+			var pe *PermanentError
+			assert.ErrorAs(t, err, &pe)
+			_, cached := n.hostCache.Get(hostOf(srv.URL))
+			assert.False(t, cached)
+
+			res, err := n.Fetch(context.Background(), srv.URL+"/b")
+			require.NoError(t, err)
+			assert.Equal(t, "readability", res.Meta["via"])
+		})
+	}
+}
+
+// TestNative_LoginSlugRedirectIsAnArticle: a canonicalizing redirect onto a
+// slug that starts with "login-" is no login wall, and caches nothing.
+func TestNative_LoginSlugRedirectIsAnArticle(t *testing.T) {
+	const title = "Login cognito using with scope openId using id_token or access_token don't working"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/questions/63177503", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/questions/63177503/login-cognito-using-with-scope-openid", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("/questions/63177503/login-cognito-using-with-scope-openid", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, makeArticleHTML(title, ""))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+	res, err := n.Fetch(context.Background(), srv.URL+"/questions/63177503")
+	require.NoError(t, err)
+	assert.Equal(t, "readability", res.Meta["via"])
+	assert.Equal(t, title, res.Title)
+	_, cached := n.hostCache.Get(hostOf(srv.URL))
+	assert.False(t, cached)
+}
+
 // newRedirectingServer serves an article everywhere except /a, which
 // redirects to target.
 func newRedirectingServer(t *testing.T, target string) *httptest.Server {
@@ -270,6 +330,7 @@ func TestNative_PageLevelLoginWallIsFinal(t *testing.T) {
 	}{
 		{jinaOff, true, 0},
 		{jinaThin, true, 1},
+		{jinaChallenge, true, 1},
 		{jinaRateLimited, false, 4},
 		{jinaDown, false, 4},
 	}
@@ -403,6 +464,15 @@ func parseArticle(t *testing.T, html, pageURL string) readability.Article {
 	return article
 }
 
+// viewAt is the page verdicts' view of article with the request settled on
+// final, as tryReadability builds it.
+func viewAt(t *testing.T, article readability.Article, final *url.URL) pageView {
+	t.Helper()
+	p, err := articleView(article, final)
+	require.NoError(t, err)
+	return p
+}
+
 // TestLooksLikeLoginWall_WWWIsSameSite: an apex↔www redirect is
 // canonicalization, not a login wall.
 func TestLooksLikeLoginWall_WWWIsSameSite(t *testing.T) {
@@ -414,7 +484,7 @@ func TestLooksLikeLoginWall_WWWIsSameSite(t *testing.T) {
 		article := parseArticle(t, makeArticleHTML("Full article", ""), tc.final)
 		final, err := url.Parse(tc.final)
 		require.NoError(t, err)
-		reason, siteWide := looksLikeLoginWall(article, final, tc.source)
+		reason, siteWide := looksLikeLoginWall(viewAt(t, article, final), tc.source)
 		assert.Empty(t, reason, "%s → %s", tc.source, tc.final)
 		assert.False(t, siteWide)
 	}
@@ -437,7 +507,7 @@ func TestLooksLikeLoginWall_Redirects(t *testing.T) {
 	for _, tc := range cases {
 		final, err := url.Parse(tc.final)
 		require.NoError(t, err)
-		reason, siteWide := looksLikeLoginWall(article, final, tc.source)
+		reason, siteWide := looksLikeLoginWall(viewAt(t, article, final), tc.source)
 		assert.NotEmpty(t, reason, "%s → %s", tc.source, tc.final)
 		assert.Equal(t, tc.siteWide, siteWide, "%s → %s", tc.source, tc.final)
 	}
@@ -449,7 +519,7 @@ func TestLooksLikeSoft404_WWWHomepage(t *testing.T) {
 	final, err := url.Parse("https://www.example.com/")
 	require.NoError(t, err)
 	assert.Equal(t, "redirected to homepage",
-		looksLikeSoft404(readability.Article{}, final, "https://example.com/deleted-post"))
+		looksLikeSoft404(pageView{finalURL: final}, "https://example.com/deleted-post"))
 }
 
 // TestNative_CrossHostRedirectStillFlagged: the documented cross-site
