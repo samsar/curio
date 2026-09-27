@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,4 +44,33 @@ func TestPickChromeProfile(t *testing.T) {
 	}
 	assert.Nil(t, pickChromeProfile(profiles, "default"), "directories match exactly")
 	assert.Nil(t, pickChromeProfile(profiles, "Personal"))
+}
+
+// TestProgressLine: --follow's line says why a closed queue starts nothing,
+// and is as before when the queue is open or couldn't be read.
+func TestProgressLine(t *testing.T) {
+	stats := &client.Stats{
+		JobsByStatus:     map[string]int{"done": 7, "pending": 5, "running": 2, "failed": 1},
+		DocumentsByState: map[string]int{"fetched": 6},
+	}
+	const counts = "  done=7  pending=5  running=2  failed=1  fetched=6   rate≈0.5/s   eta≈14s"
+	opensAt := time.Date(2026, 9, 27, 22, 0, 0, 0, time.Local)
+	cases := []struct {
+		name  string
+		queue *client.Queue
+		want  string
+	}{
+		{"unknown", nil, counts},
+		{"open", &client.Queue{State: client.QueueOpen, Throttle: client.ThrottleGentle}, counts},
+		{"paused", &client.Queue{State: client.QueueClosed, Reason: client.ReasonPaused, Paused: true},
+			counts + "   queue paused (curio resume)"},
+		{"outside the schedule", &client.Queue{State: client.QueueClosed, Reason: client.ReasonOutsideSchedule,
+			Schedule: "22:00-07:00", OpensAt: opensAt.UTC()},
+			counts + "   queue closed outside schedule 22:00-07:00 until 22:00 (curio schedule off)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, progressLine(stats, tc.queue, 0.5, 14*time.Second))
+		})
+	}
 }
