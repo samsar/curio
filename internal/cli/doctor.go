@@ -8,6 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -145,9 +148,16 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 		} else {
 			r.add("ollama", statusFail, health.OllamaDetail, "")
 		}
+
+		// 5. the services fetches depend on (the Jina fallback), as the
+		// daemon has seen them answer
+		for _, u := range health.Upstreams {
+			status, detail, hint := upstreamCheck(u)
+			r.add(u.Name, status, detail, hint)
+		}
 	}
 
-	// 5. fetcher backend: native is always fine; web2md needs the bin to exist
+	// 6. fetcher backend: native is always fine; web2md needs the bin to exist
 	switch c.Config.Fetcher.Default {
 	case "native":
 		r.add("fetcher", statusOK, "native (Go, no external deps)", "")
@@ -168,7 +178,7 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 		}
 	}
 
-	// 6. content dir writable
+	// 7. content dir writable
 	checkContentDir(c.Home.ContentDir(), r)
 }
 
@@ -189,4 +199,127 @@ func checkContentDir(dir string, r *doctorReport) {
 		return
 	}
 	r.add("content dir", statusOK, dir+" writable", "")
+}
+
+// upstreamCheck is doctor's check of an upstream the daemon reports, the
+// Jina fallback today. It renders the state the daemon derived; only the
+// failure class the hint is about is chosen here (dominantFailure).
+func upstreamCheck(u client.UpstreamHealth) (status checkStatus, detail, hint string) {
+	window := windowText(u.WindowSeconds)
+	switch u.State {
+	case client.UpstreamDisabled:
+		return statusOK, "off (fetcher.native.jina_fallback: false)", ""
+	case client.UpstreamIdle:
+		return statusOK, "no calls in the last " + window + lastAnswer(u), ""
+	case client.UpstreamOK:
+		calls, _ := callCounts(u.Recent)
+		return statusOK, fmt.Sprintf("%d calls in the last %s (%s)%s", calls, window, formatMap(u.Recent), lastAnswer(u)), ""
+	case client.UpstreamDegraded:
+		calls, failed := callCounts(u.Recent)
+		return statusWarn, fmt.Sprintf("degraded: %d of %d calls in the last %s failed (%s)",
+			failed, calls, window, formatMap(u.Recent)), upstreamHint(u)
+	case client.UpstreamPaused:
+		return statusWarn, "paused until " + localTime(u.CooldownUntil), upstreamHint(u)
+	case client.UpstreamFailing:
+		return statusFail, fmt.Sprintf("failing: no answer since %s; last failure %s at %s",
+			noAnswerSince(u), u.LastFailureClass, localTime(u.LastFailureAt)), upstreamHint(u)
+	}
+	return statusWarn, fmt.Sprintf("state %q, which this curio doesn't know", u.State), "update curio"
+}
+
+// failureClasses are the call classes that count as an upstream's failures.
+var failureClasses = []string{
+	client.CallChallenged, client.CallForbidden, client.CallRateLimited,
+	client.CallAuth, client.CallServerError, client.CallNetwork,
+}
+
+// jinaAdvice says, per failure class, what it means for the Jina fallback,
+// the one upstream the daemon reports, and what to do about it.
+var jinaAdvice = map[string]string{
+	client.CallChallenged:  "r.jina.ai is challenging curio; see Troubleshooting in docs/setup.md",
+	client.CallForbidden:   "r.jina.ai answered HTTP 403 without naming a target; see `curio daemon logs`",
+	client.CallRateLimited: "Jina is rate-limiting curio; a fetcher.native.jina_api_key raises the limit",
+	client.CallAuth: "check fetcher.native.jina_api_key or CURIO_JINA_API_KEY " +
+		"(401: the key is invalid, 402: it has no balance left)",
+	client.CallServerError: "r.jina.ai is failing on its side; fetches keep retrying",
+	client.CallNetwork:     "curio can't reach r.jina.ai, or it doesn't answer in time; check connectivity",
+}
+
+// upstreamHint names the failure class that dominates u and what to do
+// about it, or is empty when there is none to name.
+func upstreamHint(u client.UpstreamHealth) string {
+	class := dominantFailure(u)
+	advice, ok := jinaAdvice[class]
+	if !ok {
+		return ""
+	}
+	return class + ": " + advice
+}
+
+// dominantFailure is the failure class with the most calls in u's window,
+// or its last failure's class when two classes tie for the most or the
+// window holds no failure.
+func dominantFailure(u client.UpstreamHealth) string {
+	var best string
+	var most int
+	tie := false
+	for _, class := range failureClasses {
+		switch n := u.Recent[class]; {
+		case n > most:
+			best, most, tie = class, n, false
+		case n > 0 && n == most:
+			tie = true
+		}
+	}
+	if best == "" || tie {
+		return u.LastFailureClass
+	}
+	return best
+}
+
+// callCounts sums an upstream's recent calls, and those of them that
+// failed.
+func callCounts(recent map[string]int) (calls, failed int) {
+	for class, n := range recent {
+		calls += n
+		if slices.Contains(failureClasses, class) {
+			failed += n
+		}
+	}
+	return calls, failed
+}
+
+// lastAnswer says when an upstream last answered, after a "; ", or nothing
+// when it hasn't since the daemon started.
+func lastAnswer(u client.UpstreamHealth) string {
+	if u.LastSuccessAt.IsZero() {
+		return ""
+	}
+	return "; last answer " + localTime(u.LastSuccessAt)
+}
+
+// noAnswerSince says since when an upstream has not answered.
+func noAnswerSince(u client.UpstreamHealth) string {
+	if u.LastSuccessAt.IsZero() {
+		return "the daemon started"
+	}
+	return localTime(u.LastSuccessAt)
+}
+
+// windowText writes a window of seconds without its zero units: "15m",
+// "1h", "1m30s".
+func windowText(seconds int) string {
+	s := (time.Duration(seconds) * time.Second).String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
+// localTime writes t in local time, to the minute.
+func localTime(t time.Time) string {
+	return t.Local().Format("2006-01-02 15:04")
 }

@@ -277,6 +277,11 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 	health, stop := runDaemon(t, listen)
 	assert.Equal(t, os.Getpid(), health.PID)
 	assert.Equal(t, home.Path, health.Home)
+	require.Len(t, health.Upstreams, 1, "the Jina fallback, on by default")
+	jina := health.Upstreams[0]
+	assert.Equal(t, "jina", jina.Name)
+	assert.True(t, jina.Enabled)
+	assert.Equal(t, client.UpstreamIdle, jina.State)
 
 	pidFile, err := os.ReadFile(home.PIDFile())
 	require.NoError(t, err)
