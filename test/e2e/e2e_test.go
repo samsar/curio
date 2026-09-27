@@ -436,14 +436,17 @@ func TestDaemon_ReportsEmbeddingDriftUntilReindexed(t *testing.T) {
 	reindexed, err := c.ReindexAll(ctx, "")
 	require.NoError(t, err)
 	assert.Equal(t, 1, reindexed.JobsEnqueued)
-	require.Eventually(t, func() bool {
-		health, err = c.Healthz(ctx)
-		return err == nil && health.EmbeddingDrift == nil
-	}, 10*time.Second, 50*time.Millisecond, logTail(home))
-	meta, err = home.Meta()
+	// The reindex clears the baseline before it answers; the check it
+	// triggers records the build now serving in its own time.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		meta, err := home.Meta()
+		require.NoError(c, err)
+		assert.Equal(c, digestB, meta.EmbeddingModelDigest)
+		assert.Equal(c, "0.34.4", meta.OllamaVersion)
+	}, 10*time.Second, 50*time.Millisecond, "reindex-all makes the build serving now the baseline")
+	health, err = c.Healthz(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, digestB, meta.EmbeddingModelDigest)
-	assert.Equal(t, "0.34.4", meta.OllamaVersion)
+	assert.Nil(t, health.EmbeddingDrift)
 
 	stopped, err := ctl.Stop(ctx)
 	require.NoError(t, err)
