@@ -40,6 +40,20 @@ LDFLAGS := -s -w \
 # rather than silently producing a binary missing SQLite.
 export CGO_ENABLED=1
 
+# sqlite-vec's Go bindings compile sqlite-vec.c with -DSQLITE_CORE alone,
+# which leaves its vector distances on a scalar loop. On arm64,
+# SQLITE_VEC_ENABLE_NEON compiles in its NEON kernels, about 1.7x faster
+# KNN at 1024 dimensions; NEON is part of every ARMv8-A core, so nothing
+# checks for it at run time. Setting CGO_CFLAGS replaces Go's default of
+# -O2 -g, which would build SQLite itself unoptimized, so those stay, and
+# a CGO_CFLAGS already given is extended rather than replaced. The e2e
+# test's go build inherits the export. See docs/decisions.md "sqlite-vec:
+# NEON distance kernels on arm64".
+ifneq ($(filter arm64 aarch64,$(shell uname -m)),)
+override CGO_CFLAGS := $(if $(strip $(CGO_CFLAGS)),$(CGO_CFLAGS),-O2 -g) -DSQLITE_VEC_ENABLE_NEON
+export CGO_CFLAGS
+endif
+
 # Build tags required by mattn/go-sqlite3:
 #   sqlite_fts5     — enables FTS5 for BM25 search
 #   sqlite_json     — JSON1 functions used in CHECK constraints (json_valid)

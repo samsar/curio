@@ -28,7 +28,7 @@ import (
 // a database stopped before the daemon's EnsureVectorIndex keeps.
 const migration001Dim = 768
 
-func openUnmigrated(t *testing.T) (*DB, string) {
+func openUnmigrated(t testing.TB) (*DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "curio.db")
 	db, err := Open(context.Background(), path)

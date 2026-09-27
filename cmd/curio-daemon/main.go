@@ -142,8 +142,14 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 	if err := sqlitestore.EnsureVectorIndex(ctx, db, meta.EmbeddingDim); err != nil {
 		return nil, err
 	}
+	// sqlite-vec's build flags say whether a released binary has its NEON
+	// distance kernels.
+	vecVersion, vecBuild, err := sqlitestore.VectorExtension(ctx, db)
+	if err != nil {
+		return nil, err
+	}
 	slog.Info("database ready", "path", home.DBPath(), "schema_version", schemaVersion,
-		"embedding_dim", meta.EmbeddingDim)
+		"embedding_dim", meta.EmbeddingDim, "sqlite_vec", vecVersion, "sqlite_vec_build", vecBuild)
 	// Before the full API is up, so its first healthz reports the new
 	// version.
 	syncMarkerSchemaVersion(home, meta, int(schemaVersion))

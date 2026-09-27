@@ -22,6 +22,9 @@ builds:
     binary: curio
     env:
       - CGO_ENABLED=1
+      # sqlite-vec's NEON distance kernels, keeping Go's default -O2 -g
+      # (the Makefile's arm64 block explains why).
+      - CGO_CFLAGS=-O2 -g -DSQLITE_VEC_ENABLE_NEON
     goos:
       - darwin
     goarch:
@@ -42,6 +45,9 @@ builds:
     binary: curio-daemon
     env:
       - CGO_ENABLED=1
+      # sqlite-vec's NEON distance kernels, keeping Go's default -O2 -g
+      # (the Makefile's arm64 block explains why).
+      - CGO_CFLAGS=-O2 -g -DSQLITE_VEC_ENABLE_NEON
     goos:
       - darwin
     goarch:
@@ -62,6 +68,9 @@ builds:
     binary: curio-mcp
     env:
       - CGO_ENABLED=1
+      # sqlite-vec's NEON distance kernels, keeping Go's default -O2 -g
+      # (the Makefile's arm64 block explains why).
+      - CGO_CFLAGS=-O2 -g -DSQLITE_VEC_ENABLE_NEON
     goos:
       - darwin
     goarch:

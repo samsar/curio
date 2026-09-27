@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -356,6 +357,21 @@ func TestSqliteVecLoaded(t *testing.T) {
 	var version string
 	require.NoError(t, db.QueryRow(`SELECT vec_version()`).Scan(&version))
 	assert.NotEmpty(t, version, "sqlite-vec should report a version string")
+}
+
+// TestVectorExtension_NEONOnArm64: on arm64, curio's builds compile
+// sqlite-vec's NEON distance kernels (the Makefile and .goreleaser.yaml set
+// -DSQLITE_VEC_ENABLE_NEON), which vec_debug() reports.
+func TestVectorExtension_NEONOnArm64(t *testing.T) {
+	version, flags, err := VectorExtension(context.Background(), newTestDB(t))
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(version, "v"), version)
+	if runtime.GOARCH != "arm64" {
+		t.Skipf("sqlite-vec's NEON kernels are for arm64, not %s", runtime.GOARCH)
+	}
+	assert.Contains(t, strings.Fields(flags), "neon",
+		"sqlite-vec was built without its NEON kernels (build flags %q): run the tests through make, "+
+			`or set CGO_CFLAGS="-O2 -g -DSQLITE_VEC_ENABLE_NEON"`, flags)
 }
 
 func TestChunksVecTableExists(t *testing.T) {
