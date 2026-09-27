@@ -252,16 +252,66 @@ documents (`curio refetch --all --state=dead`, or `curio refetch <id>
 
 **`jina: r.jina.ai's CDN challenged the request`** — Jina Reader's
 Cloudflare refused curio. Jina calls pause for 10 minutes (or the answer's
-`Retry-After`), with a warning in the daemon log for each challenged answer.
-The job queue doesn't wait for the pause: it retries a document about 1, 3,
-7 and 15 minutes after its first failure, five attempts in all. A retry
-that comes due inside the pause fetches the page again, sends no request to
-Jina, and fails at once with `jina: not sent, cooldown has … left: HTTP 429
-Too Many Requests`, a 429 curio reports for its own pause, not an answer
-from Jina. Each such retry uses up an attempt: with the default pause, only
-the fifth attempt of the document that met the challenge can reach Jina. A
-document that runs out of attempts ends `failed`; once Jina answers again,
-`curio refetch --all --state=failed`.
+`Retry-After`), with one warning in the daemon log when a challenge starts
+a pause (`r.jina.ai's CDN challenged curio, pausing Jina calls`); the
+challenged answers of calls already in flight only extend it. `curio
+doctor` shows the `jina` check paused until then, and failing once the
+challenges have gone on for 30 minutes across documents (see the next
+entry). The job queue doesn't wait for the pause: it retries a document
+about 1, 3, 7 and 15 minutes after its first failure, five attempts in
+all. A retry that comes due inside the pause fetches the page again, sends
+no request to Jina, and fails at once with `jina: not sent, cooldown has …
+left: HTTP 429 Too Many Requests`, a 429 curio reports for its own pause,
+not an answer from Jina. Each such retry uses up an attempt: with the
+default pause, only the fifth attempt of the document that met the
+challenge can reach Jina. A document that runs out of attempts ends
+`failed`; once Jina answers again, `curio refetch --all --state=failed`.
+
+**`curio doctor` reports `jina` degraded, paused or failing** — the daemon
+counts how each request to Jina Reader, the fallback for pages the native
+fetcher can't read, went over the last 15 minutes. Degraded means at least
+a quarter of them failed, paused that Jina asked curio to wait (a rate
+limit or a challenge), and failing that nothing but failures came back,
+for documents on two or more sites, 5 in a row or for 30 minutes; the
+daemon log then has one `upstream failing` warning, and `curio status` a
+warning line. The hint names the kind of failure seen most:
+
+- `challenged`: r.jina.ai's Cloudflare took curio for a bot; see the entry
+  above.
+- `forbidden`: r.jina.ai answered HTTP 403 without naming a site, which
+  may mean it blocks curio itself. `curio jobs --failed` quotes what it
+  said, if anything.
+- `auth`: 401 is an invalid `fetcher.native.jina_api_key` (or
+  `CURIO_JINA_API_KEY`), 402 a key with no balance left. Fix or remove the
+  key, then restart the daemon (`curio daemon stop`; the next command
+  starts it).
+- `rate_limited`: Jina is rate-limiting curio. A key raises the limit from
+  20 requests a minute to 200.
+- `server_error`: r.jina.ai is failing on its side. Fetches keep
+  retrying; nothing to do but wait.
+- `network`: curio can't reach r.jina.ai, or it doesn't answer in time.
+  Check the machine's connectivity (a VPN, a proxy, DNS).
+
+Failing clears on the next answer Jina gives, whatever it says about the
+page; `curio refetch <id>` of a failed document makes a call. The state is
+kept in memory: a restarted daemon starts over. Documents that ran out of
+attempts meanwhile are `failed`: `curio refetch --all --state=failed` once
+Jina answers again.
+
+**`jina: refused the target: HTTP 403 Forbidden: AbuseAlleviationError:
+Anonymous access to domain … blocked until …`** — Jina Reader refuses
+keyless reads of that site until the date it gives, after a burst of
+requests for it (curio's own, typically: a bulk import from one site). The
+document fails at once when the site served a page curio can't use (too
+thin, a login or challenge page); when the site itself refused curio (403
+or 503), it fails on the next attempt,
+from the host cache, and so do the site's other documents for 15 minutes.
+A `fetcher.native.jina_api_key` may lift an anonymous block. Otherwise
+refetch after the date, a few documents at a time (`curio refetch <id>`),
+so the next burst doesn't trip it again. **`jina: refused the target:
+HTTP 451 Unavailable For Legal Reasons: This domain is excluded from Jina
+Reader at the request of its owner, …`** is permanent: the site's owner
+opted out of Jina, and only the site itself can serve curio its pages.
 
 **`ENOENT: spawn node`** from a fetch — Node isn't on the daemon's PATH.
 Either install Node into a directory in PATH or set
