@@ -1337,9 +1337,15 @@ func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 
 	if resp.statusCode < 200 || resp.statusCode >= 300 {
 		// One bounded read gives the reason and lets the connection be
-		// reused (errorBodyDrain). A failed read only loses the reason: the
-		// status still classifies the answer.
+		// reused (errorBodyDrain). A failed read only loses the reason, and
+		// errs on the safe side: the status still classifies the answer, but
+		// a 403 whose reason is lost names no target and stays no verdict.
 		head, _ := io.ReadAll(io.LimitReader(resp.body, errorBodyDrain))
+		if n.jinaAPIKey != "" {
+			// The reason is quoted into last_error and the logs; a key Jina
+			// echoes back must not go with it.
+			head = bytes.ReplaceAll(head, []byte(n.jinaAPIKey), []byte("[redacted]"))
+		}
 		se := &HTTPStatusError{StatusCode: resp.statusCode, URL: resp.finalURL.String()}
 		se.RetryAfter, _ = parseRetryAfter(resp.header, n.clock.now())
 		return nil, jinaStatusError(target, se, resp.header, jinaReason(resp.contentType, head))
@@ -1417,16 +1423,23 @@ func jinaRefusesTarget(code int, reason, host string) bool {
 // namesHost reports whether text names host (lowercase, as hostOf gives
 // it): whether one of its words, split at every character a hostname can't
 // hold and less a sentence's closing dot, is host. A whole name must match,
-// so a reason about mobile.twitter.com doesn't name twitter.com.
+// so a reason about mobile.twitter.com doesn't name twitter.com. A host
+// inside a URL doesn't count: an error that echoes the requested URL says
+// nothing about what was refused, and reading it as a refusal would fail
+// every document for good while Jina itself is down.
 func namesHost(text, host string) bool {
 	if host == "" {
 		return false
 	}
+	text = urlInTextRE.ReplaceAllString(text, " ")
 	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '.' && r != '-'
 	})
 	return slices.ContainsFunc(words, func(w string) bool { return strings.TrimRight(w, ".") == host })
 }
+
+// urlInTextRE matches a URL in running text, scheme to the next space.
+var urlInTextRE = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://\S*`)
 
 // jinaErrorLineRE matches the first line of a text answer in which Jina
 // names its error: "AbuseAlleviationError: Anonymous access to …".

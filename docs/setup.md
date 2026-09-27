@@ -304,8 +304,8 @@ keyless reads of that site until the date it gives, after a burst of
 requests for it (curio's own, typically: a bulk import from one site). The
 document fails at once when the site served a page curio can't use (too
 thin, a login or challenge page); when the site itself refused curio (403
-or 503), it fails on the next attempt,
-from the host cache, and so do the site's other documents for 15 minutes.
+or 503), it fails on the next attempt, from the host cache, and so do the
+site's other documents for 15 minutes.
 A `fetcher.native.jina_api_key` may lift an anonymous block. Otherwise
 refetch after the date, a few documents at a time (`curio refetch <id>`),
 so the next burst doesn't trip it again. **`jina: refused the target:

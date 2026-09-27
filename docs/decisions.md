@@ -5156,14 +5156,18 @@ are already honored, and what is left is for a person to fix.
   `message`, after its `name` when it has one, or the first line of any
   other answer when it names one of Jina's errors
   (`^[A-Z][A-Za-z]*Error: `). An HTML page, such as Cloudflare's challenge
-  or block page, gives none. The reason is capped at 512 bytes (`snippet`) and quoted after the
-  status in every Jina error: `jina: HTTP 401 Unauthorized: …`.
+  or block page, gives none. The reason is capped at 512 bytes
+  (`snippet`), a configured `jina_api_key` in it is replaced with
+  `[redacted]`, and it is quoted after the status in every Jina error:
+  `jina: HTTP 401 Unauthorized: …`.
 - `errJinaRefused` ("refused the target") marks Jina refusing the target
   (`jinaRefusesTarget`):
   - a 403 without `cf-mitigated: challenge` whose reason names the target's
     host (`namesHost`: one of the reason's hostname-shaped words, less a
     closing dot, equals `hostOf(target)`, case-insensitively, so a reason
-    about mobile.twitter.com doesn't name twitter.com);
+    about mobile.twitter.com doesn't name twitter.com). A host inside a URL
+    doesn't count: a service-wide 403 that echoes the requested URL would
+    otherwise fail every document for good while health read ok;
   - every other deterministic 4xx, all but 401, 402, 403, 408, 421, 425 and
     429: 400, 404, 410, 422 and 451 as before.
 - `jinaAnswered` is `errJinaRejected` or `errJinaRefused`, one source of

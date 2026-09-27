@@ -1487,6 +1487,9 @@ func TestNamesHost(t *testing.T) {
 	assert.False(t, namesHost(reason, "twitter.co"))
 	assert.False(t, namesHost("Anonymous access to domain abc.com blocked", "c.com"))
 	assert.False(t, namesHost(reason, ""))
+	assert.False(t, namesHost("Forbidden: https://www.example.com/a/b is not allowed", "www.example.com"),
+		"a host inside a URL isn't named")
+	assert.False(t, namesHost("Blocked: HTTP://www.example.com.", "www.example.com"), "whatever the scheme's case")
 }
 
 // fakeAnswer is how a server answers a request, for fakeRT.

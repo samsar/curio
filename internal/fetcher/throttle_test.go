@@ -574,7 +574,12 @@ func TestNative_JinaAPIKey(t *testing.T) {
 			var gotAuth atomic.Value
 			jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotAuth.Store(r.Header.Get("Authorization"))
+				// A 401 that echoes the credential it was sent: its reason
+				// is quoted, the key never.
+				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"name":"AuthenticationFailedError","message":"Invalid token: ` +
+					strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") + `"}`))
 			}))
 			defer jina.Close()
 
@@ -583,12 +588,15 @@ func TestNative_JinaAPIKey(t *testing.T) {
 				Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
 				JinaAPIKey: tc.optKey, Log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			}), newFakeClock())
-			// Enough refusals, across two hosts, to log Jina failing.
+			// Enough 401s, across two hosts, to log Jina failing.
 			other := localhostURL(t, source.URL)
 			for i := range failingStreak {
 				_, err := n.Fetch(context.Background(), []string{source.URL, other}[i%2])
 				require.Error(t, err)
 				assert.NotContains(t, err.Error(), key)
+				if tc.wantAuth != "" {
+					assert.Contains(t, err.Error(), "AuthenticationFailedError: Invalid token: [redacted]")
+				}
 			}
 
 			assert.Equal(t, tc.wantAuth, gotAuth.Load())
