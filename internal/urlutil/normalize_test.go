@@ -298,3 +298,30 @@ func TestNormalize_DistinctURLsStayDistinct(t *testing.T) {
 		assert.NotEqual(t, a, b, "%q and %q should not collapse", p[0], p[1])
 	}
 }
+
+// TestStripDefaultPort: only the scheme's own default port goes, IPv6
+// literals keep their brackets, and the input is left as it was.
+func TestStripDefaultPort(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"http://example.com:80/x?q=1", "http://example.com/x?q=1"},
+		{"https://example.com:443/x", "https://example.com/x"},
+		{"HTTP://example.com:80/x", "http://example.com/x"},
+		{"http://user:pass@example.com:80/x", "http://user:pass@example.com/x"},
+		{"http://[::1]:80/x", "http://[::1]/x"},
+		{"https://[fe80::1]:443/", "https://[fe80::1]/"},
+		{"http://example.com:443/x", "http://example.com:443/x"},
+		{"https://example.com:80/x", "https://example.com:80/x"},
+		{"http://example.com:8080/x", "http://example.com:8080/x"},
+		{"http://example.com/x", "http://example.com/x"},
+		{"http://[::1]/x", "http://[::1]/x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			u, err := url.Parse(tc.in)
+			require.NoError(t, err)
+			before := *u
+			assert.Equal(t, tc.want, StripDefaultPort(u).String())
+			assert.Equal(t, before, *u, "the input must not change")
+		})
+	}
+}

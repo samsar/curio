@@ -156,6 +156,40 @@ func TestPace(t *testing.T) {
 		_, err := pace(ctx, newGatedLimiter(4), &c, newFakeClock().clock(), maxInline)
 		require.ErrorIs(t, err, context.Canceled)
 	})
+
+	t.Run("no limiter", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			cooldown time.Duration
+			left     time.Duration
+			slept    []time.Duration
+		}{
+			{"no cooldown", 0, 0, nil},
+			{"short cooldown is slept", 10 * time.Second, 0, []time.Duration{10 * time.Second}},
+			{"long cooldown is reported", 2 * time.Minute, 2 * time.Minute, nil},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				fc := newFakeClock()
+				var c cooldown
+				c.extend(fc.now(), tc.cooldown)
+				left, err := pace(t.Context(), nil, &c, fc.clock(), maxInline)
+				require.NoError(t, err)
+				assert.Equal(t, tc.left, left)
+				assert.Equal(t, tc.slept, fc.slept())
+			})
+		}
+	})
+
+	t.Run("no limiter, context ends while sleeping", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		fc := newFakeClock()
+		var c cooldown
+		c.extend(fc.now(), 10*time.Second)
+		_, err := pace(ctx, nil, &c, fc.clock(), maxInline)
+		require.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 // TestHostGate: slots are per host, waits honor ctx, and entries go away

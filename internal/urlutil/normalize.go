@@ -142,13 +142,30 @@ func canonicalHost(u *url.URL) (string, error) {
 	if isDefaultPort(u.Scheme, port) {
 		port = ""
 	}
+	return joinHost(hostname, port), nil
+}
+
+// StripDefaultPort returns a copy of u without an explicit default port
+// (:80 for http, :443 for https, the scheme compared case-insensitively).
+// Any other port is kept, and u itself is never modified.
+func StripDefaultPort(u *url.URL) *url.URL {
+	stripped := *u
+	if isDefaultPort(strings.ToLower(u.Scheme), u.Port()) {
+		stripped.Host = joinHost(u.Hostname(), "")
+	}
+	return &stripped
+}
+
+// joinHost is net.JoinHostPort that leaves an empty port out. IPv6
+// literals are bracketed either way.
+func joinHost(hostname, port string) string {
 	if port != "" {
-		return net.JoinHostPort(hostname, port), nil
+		return net.JoinHostPort(hostname, port)
 	}
 	if strings.Contains(hostname, ":") {
-		return "[" + hostname + "]", nil
+		return "[" + hostname + "]"
 	}
-	return hostname, nil
+	return hostname
 }
 
 // queryPair is one '&'-separated query element: text is what goes into the

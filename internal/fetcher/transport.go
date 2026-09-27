@@ -2,8 +2,11 @@ package fetcher
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,6 +15,9 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
+	utls "github.com/bogdanfinn/utls"
+
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // roundTripper is the HTTP backend the Native fetcher issues GETs through.
@@ -35,7 +41,9 @@ type roundTripper interface {
 	name() string
 	// do issues a GET to target with the given headers (order preserved)
 	// and returns a normalized response. The body must be closed by the
-	// caller. Redirects are followed; finalURL is the settled URL.
+	// caller. Redirects are followed; finalURL is the settled URL. A server
+	// certificate that fails verification is reported as ErrTLSCertificate
+	// by both backends, whichever TLS stack they use.
 	do(ctx context.Context, target string, headers []header) (*fetchResponse, error)
 }
 
@@ -187,6 +195,10 @@ func (s *stockRT) do(ctx context.Context, target string, headers []header) (*fet
 	}
 	resp, err := s.client.Do(req) //nolint:bodyclose // the body escapes in fetchResponse.body, which the caller closes
 	if err != nil {
+		var cve *tls.CertificateVerificationError
+		if errors.As(err, &cve) {
+			return nil, fmt.Errorf("%w: %w", ErrTLSCertificate, err)
+		}
 		return nil, err
 	}
 	return &fetchResponse{
@@ -204,16 +216,21 @@ type chromeRT struct {
 	profile string
 }
 
-func newChromeRT(timeout time.Duration, prof chromeProfileSpec) (*chromeRT, error) {
+// newChromeRT builds the chrome backend with prof's fingerprint. extra is
+// applied after curio's own options; production passes none, tests route
+// dials and trust their own roots through it.
+func newChromeRT(timeout time.Duration, prof chromeProfileSpec, extra ...tlsclient.HttpClientOption) (*chromeRT, error) {
 	secs := int(timeout / time.Second)
 	if secs <= 0 {
 		secs = 30
 	}
-	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
+	opts := append([]tlsclient.HttpClientOption{
 		tlsclient.WithClientProfile(prof.tls),
 		tlsclient.WithTimeoutSeconds(secs),
-		// Redirects followed by default; finalURL reflects the settled URL.
-	)
+		// Redirects are followed, so finalURL is the settled URL.
+		tlsclient.WithCustomRedirectFunc(chromeCheckRedirect),
+	}, extra...)
+	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("tls-client init (profile %s): %w", prof.name, err)
 	}
@@ -227,6 +244,7 @@ func (c *chromeRT) do(ctx context.Context, target string, headers []header) (*fe
 	if err != nil {
 		return nil, err
 	}
+	pinPlainHTTPPort(req)
 	// fhttp's Header.Add records each key into HeaderOrderKey as it goes, so
 	// adding in Chrome's order reproduces Chrome's header order on the wire.
 	// Pseudo-header order and H2 SETTINGS come from the client profile.
@@ -235,7 +253,7 @@ func (c *chromeRT) do(ctx context.Context, target string, headers []header) (*fe
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, chromeError(err)
 	}
 	// fhttp auto-decompresses by Content-Encoding on its HTTP/2 path (and
 	// gzip on HTTP/1.1), but NOT on HTTP/3 — and the Chrome profile
@@ -251,9 +269,98 @@ func (c *chromeRT) do(ctx context.Context, target string, headers []header) (*fe
 		statusCode:  resp.StatusCode,
 		header:      http.Header(resp.Header), // same map[string][]string shape
 		body:        resp.Body,
-		finalURL:    resp.Request.URL,
+		finalURL:    urlutil.StripDefaultPort(resp.Request.URL),
 		contentType: resp.Header.Get("Content-Type"),
 	}, nil
+}
+
+// pinPlainHTTPPort gives a portless http:// request an explicit :80,
+// leaving its Host header port-free.
+//
+// tls-client caches one transport per host:port and, for a URL without a
+// port, uses host:443 whatever the scheme (roundtripper.go,
+// getDialTLSAddr). http://h/ and https://h/ would then share one cached
+// transport: whichever scheme reaches a host second fails with "http2:
+// unsupported scheme" or "protocol negotiated", and the dial path writes
+// that cache without its lock. An explicit port gives each scheme its own
+// entry. It can go once tls-client keys transports by scheme; see
+// docs/decisions.md, "Chrome backend: plain http carries an explicit :80".
+//
+// A URL without a host is left for fhttp to refuse: pinned, it would name
+// ":80", which Go dials on the local machine.
+func pinPlainHTTPPort(req *fhttp.Request) {
+	if !strings.EqualFold(req.URL.Scheme, "http") || req.URL.Port() != "" || req.URL.Hostname() == "" {
+		return
+	}
+	if req.Host == "" {
+		req.Host = req.URL.Host
+	}
+	req.URL.Host = net.JoinHostPort(req.URL.Hostname(), "80")
+}
+
+// maxRedirects is the limit of fhttp's default redirect policy, which
+// chromeCheckRedirect replaces.
+const maxRedirects = 10
+
+// errNoHost is the error fhttp and net/http give a URL without a host.
+var errNoHost = errors.New("http: no Host in request URL")
+
+// chromeCheckRedirect is the chrome backend's redirect policy: fhttp's
+// default limit, and the :80 pin on every hop (see pinPlainHTTPPort).
+// fhttp calls it once the next hop is built and before it is sent. By then
+// it has set the hop's Referer from the previous hop's URL, which may carry
+// the pin. It has also carried the previous hop's Host over to a Location
+// without a scheme, taking a Host that differs from the URL for one the
+// caller chose; the pin makes them differ, and a scheme-relative Location
+// (//www.example.com/post) names another host. curio never chooses a Host,
+// so every hop takes its own from its URL.
+//
+// A hop without a host (Location: http:///x or https:///x) is refused here
+// with the stock backend's error. fhttp refuses one itself only after
+// tls-client has dialed an https hop's address, ":443" for no host, which
+// Go dials on the local machine.
+func chromeCheckRedirect(req *fhttp.Request, via []*fhttp.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if req.URL.Host == "" {
+		return errNoHost
+	}
+	req.Host = urlutil.StripDefaultPort(req.URL).Host
+	pinPlainHTTPPort(req)
+	if ref := req.Header.Get("Referer"); ref != "" {
+		req.Header.Set("Referer", withoutDefaultPort(ref))
+	}
+	return nil
+}
+
+// chromeError normalizes a failed chrome request: the URL a *url.Error
+// names loses the :80 pin, and a certificate that failed verification is
+// tagged ErrTLSCertificate. uTLS reports that with its own
+// CertificateVerificationError type, which crypto/tls's doesn't match.
+func chromeError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		ue.URL = withoutDefaultPort(ue.URL)
+	}
+	var cve *utls.CertificateVerificationError
+	if errors.As(err, &cve) {
+		return fmt.Errorf("%w: %w", ErrTLSCertificate, err)
+	}
+	return err
+}
+
+// withoutDefaultPort returns rawURL without an explicit default port. A
+// URL without one, or one that doesn't parse, is returned as is.
+func withoutDefaultPort(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	if stripped := urlutil.StripDefaultPort(u); stripped.Host != u.Host {
+		return stripped.String()
+	}
+	return rawURL
 }
 
 // chromeProfileSpec is one Chrome version curio can impersonate. The

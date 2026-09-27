@@ -47,6 +47,17 @@ var (
 	// decompression). Always permanent: the same URL will be just as big
 	// next time.
 	ErrTooLarge = errors.New("response too large")
+
+	// ErrTLSCertificate marks a server certificate that failed
+	// verification: expired, not yet valid, issued for another name, or
+	// from an authority the system doesn't trust. From the origin it is
+	// always wrapped in a PermanentError (no retry inside the backoff
+	// window renews a certificate) and the document goes failed, not dead:
+	// certificates get fixed. Never sent to Jina, which would fetch past
+	// the check curio refuses to skip. Never host-cached, so a refetch after
+	// the fix goes straight out. Other TLS failures (alerts, resets
+	// mid-handshake, a non-TLS answer) stay retryable.
+	ErrTLSCertificate = errors.New("invalid TLS certificate")
 )
 
 // HTTPStatusError is a non-2xx answer from an upstream. URL is the URL that

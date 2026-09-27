@@ -118,6 +118,7 @@ func fetchHandler(d Deps) HandlerFunc {
 			Fetcher:      f.Name(),
 			Status:       status,
 			MarkdownPath: &relPath,
+			ErrorMessage: store.NullableString(res.PartialReason),
 		}
 		if res.Meta != nil {
 			// Meta is diagnostic; one value JSON can't hold (a NaN, say)
