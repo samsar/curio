@@ -340,9 +340,14 @@ model's own if smaller). curio asks Ollama never to truncate, since a
 truncated chunk gets a vector for text it doesn't hold, so the job fails at
 once and the document goes `failed`; its error names the chunks and the
 longest one's size. Chunks are capped at 3500 bytes, well inside the
-context, so this means an embedding model with a small context: check
-`embedding.model`. A search query that long falls back to keyword results
-with the same reason in its warning.
+context, so this means the home's embedding model has a small context.
+Lower `chunking.size_tokens` and restart the daemon, or start a new home
+with a model that has a larger one (see "The embedding model is the
+home's"). Then bring the documents back: `curio reindex <id>` re-embeds
+one from the content it already has and returns it to `fetched`, and
+`curio refetch --all --state=failed` retries every failed document. A
+search query that long falls back to keyword results with the same reason
+in its warning.
 
 **`curio home from an older curio`** — the home was made by a curio from
 before home formats: its vectors came from another embedding model, under

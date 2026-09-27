@@ -76,7 +76,7 @@ when the entry was first committed.
 - 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out)
 - 2026-09-24 — [Single daemon per home: flock on daemon.pid, bind before touching the DB](#single-daemon-per-home-flock-on-daemonpid-bind-before-touching-the-db) (revised)
 - 2026-09-24 — [Interrupted vs. orphaned jobs](#interrupted-vs-orphaned-jobs)
-- 2026-09-24 — [Config: strict keys, legacy `workers` folded in at load](#config-strict-keys-legacy-workers-folded-in-at-load)
+- 2026-09-24 — [Config: strict keys, legacy `workers` folded in at load](#config-strict-keys-legacy-workers-folded-in-at-load) (revised)
 - 2026-09-24 — [Refetch: state reset and fetch job in one transaction](#refetch-state-reset-and-fetch-job-in-one-transaction)
 - 2026-09-24 — [Migrations: rebuilding a table other tables reference](#migrations-rebuilding-a-table-other-tables-reference)
 - 2026-09-24 — [Fetcher errors: one typed status model](#fetcher-errors-one-typed-status-model)
@@ -114,7 +114,7 @@ when the entry was first committed.
 - 2026-09-25 — [Ollama: one client, one sentinel pair, a pull that keeps trying](#ollama-one-client-one-sentinel-pair-a-pull-that-keeps-trying) (revised)
 - 2026-09-25 — [Insight: skip non-finite document vectors, don't fail the run](#insight-skip-non-finite-document-vectors-dont-fail-the-run)
 - 2026-09-25 — [CLI: exit 130 on interrupt, a usage hint on usage errors](#cli-exit-130-on-interrupt-a-usage-hint-on-usage-errors)
-- 2026-09-25 — [Daemon startup: a starting API while migrating, clients that wait on progress](#daemon-startup-a-starting-api-while-migrating-clients-that-wait-on-progress)
+- 2026-09-25 — [Daemon startup: a starting API while migrating, clients that wait on progress](#daemon-startup-a-starting-api-while-migrating-clients-that-wait-on-progress) (revised)
 - 2026-09-26 — [Chrome backend: plain http carries an explicit :80](#chrome-backend-plain-http-carries-an-explicit-80)
 - 2026-09-26 — [TLS certificate failures are permanent, never Jina, never host-cached](#tls-certificate-failures-are-permanent-never-jina-never-host-cached)
 - 2026-09-26 — [YouTube: caption tracks by an exact pattern, not `en.*`](#youtube-caption-tracks-by-an-exact-pattern-not-en)
@@ -2473,6 +2473,13 @@ simply redone.
   vector table.
 - A provider value was never read, so any value was silently accepted.
 
+**Revised (2026-09-27):** `store.EmbeddingDim` is gone. `embedding.dim`
+is the home's width: `Validate` takes any value in [1,
+`store.MaxEmbeddingDim`] (8192, sqlite-vec's limit), and the daemon
+refuses a value that differs from the one the home's marker records, since
+`chunks_vec` is sized from the marker. See "Embedding model and per-home
+width".
+
 ---
 
 ## Refetch: state reset and fetch job in one transaction
@@ -4246,6 +4253,16 @@ change (a healthz 200, with or without `pid` and `home`, and never a 503)
 behave as before. Old clients talking to a new daemon see a starting
 daemon as "not answering healthz", the same wait and failure as before,
 never as ready.
+
+**Revised (2026-09-27):** the marker check is now the home's embedding
+check (`curiohome.Home.CheckEmbedding`: a legacy home, then a
+`config.yaml` that disagrees with the marker), still before the bind. After
+migrating, `sqlite.EnsureVectorIndex` sizes `chunks_vec` at the marker's
+width before the marker's schema version is synced. The order is now:
+signals, home, lock + PID, config + log level, embedding check, bind, serve
+the starting API, open, migrate, size the vector index, sync the marker,
+build dependencies, recover orphans, swap in the full API, workers and the
+drift monitor. See "Embedding model and per-home width".
 
 ---
 

@@ -20,12 +20,14 @@ make help                # full target list
 
 Run a single test:
 ```sh
+go test -race -count=1 -tags=sqlite_fts5,sqlite_json -run TestParseHTML_Basic ./internal/importer/...
+# on arm64, also compile sqlite-vec's NEON kernels, as make does (x86 can't build them):
 CGO_CFLAGS="-O2 -g -DSQLITE_VEC_ENABLE_NEON" go test -race -count=1 -tags=sqlite_fts5,sqlite_json -run TestParseHTML_Basic ./internal/importer/...
 ```
 
 The build tags are mandatory; without them SQLite FTS5 is missing and `chunks_fts` virtual table creation fails. `make` already passes them. Never invoke `go build` / `go test` directly without `-tags=sqlite_fts5,sqlite_json` — the Makefile is the source of truth.
 
-Cgo is required (sqlite, sqlite-vec). `CGO_ENABLED=1` is forced in the Makefile. On arm64 the Makefile also exports `CGO_CFLAGS` with `-DSQLITE_VEC_ENABLE_NEON` (keeping `-O2 -g`, extending a `CGO_CFLAGS` already set), so sqlite-vec compiles its NEON distance kernels; `.goreleaser.yaml` sets the same. A `go test` outside `make` on arm64 needs that `CGO_CFLAGS` (as above), or `TestVectorExtension_NEONOnArm64` fails. The daemon's "database ready" log line names sqlite-vec's version and build flags. See `docs/decisions.md` "sqlite-vec: NEON distance kernels on arm64".
+Cgo is required (sqlite, sqlite-vec). `CGO_ENABLED=1` is forced in the Makefile. On arm64 the Makefile also exports `CGO_CFLAGS` with `-DSQLITE_VEC_ENABLE_NEON` (keeping `-O2 -g`, extending a `CGO_CFLAGS` already set), so sqlite-vec compiles its NEON distance kernels; `.goreleaser.yaml` sets the same. A `go test` outside `make` on arm64 needs that `CGO_CFLAGS` (the second command above), or `TestVectorExtension_NEONOnArm64` fails; elsewhere the define doesn't compile (`<arm_neon.h>` is ARM-only). The daemon's "database ready" log line names sqlite-vec's version and build flags. See `docs/decisions.md` "sqlite-vec: NEON distance kernels on arm64".
 
 ## Tooling traps
 

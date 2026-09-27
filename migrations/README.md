@@ -82,6 +82,14 @@ an empty table.
   `chunks_vec` at the marker's width and refuses to rebuild one that holds
   vectors, and another width means a new home. See
   [`../docs/decisions.md#embedding-model-and-per-home-width`](../docs/decisions.md#embedding-model-and-per-home-width).
+- **Reshaping `chunks_vec`** (a column, a partition key, a distance
+  metric): not a SQL migration, which can't know the home's width. Its
+  definition lives in `internal/store/sqlite/vectors.go`
+  (`createVectorIndexPrefix`/`Suffix`), and every new database gets its
+  `chunks_vec` from there after the migrations run, recreating whatever
+  empty table they left: a reshape made only in a migration would be
+  undone on every new home. Change it there, and bring existing tables
+  along in that Go step.
 - **Changing the FTS5 tokenizer**: recreate `chunks_fts` with the new
   tokenizer and repopulate it with FTS5's rebuild command,
   `INSERT INTO chunks_fts (chunks_fts) VALUES ('rebuild')`. It is an

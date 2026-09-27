@@ -43,7 +43,8 @@ type Options struct {
 // the embedder's timeout then measures Ollama's health, not document
 // length, and a search's query embedding waits behind a bounded amount of
 // index work in Ollama. How long a batch takes depends on the model and
-// the machine; decisions.md has the numbers.
+// the machine; decisions.md "Indexer: embed in batches of 32" has what was
+// measured, and what wasn't.
 const embedBatchSize = 32
 
 func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer {
