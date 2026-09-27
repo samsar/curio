@@ -172,6 +172,16 @@ func TestUpdatedAt_SetByEveryUpdate(t *testing.T) {
 			},
 		},
 		{
+			name: "QueueSettings.Put", table: "queue_settings",
+			setup: func(t *testing.T, db *DB) string {
+				require.NoError(t, NewQueueSettings(db).Put(ctx, store.DefaultQueueSettings()))
+				return "1"
+			},
+			update: func(t *testing.T, db *DB, _ string) {
+				require.NoError(t, NewQueueSettings(db).Put(ctx, store.QueueSettings{Paused: true, Throttle: store.ThrottleNormal}))
+			},
+		},
+		{
 			name: "Insights.FinishRun", table: "cluster_runs",
 			setup: func(t *testing.T, db *DB) string {
 				run := &store.ClusterRun{TenantID: "local", Algo: "test"}

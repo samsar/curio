@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -65,8 +66,12 @@ type JobStatus string
 // ClusterRunStatus is a clustering run's state (cluster_runs.status).
 type ClusterRunStatus string
 
-// State / kind / status constants. Keep in sync with the CHECK constraints
-// in migrations/.
+// Throttle is how hard the daemon works through its queue
+// (queue_settings.throttle).
+type Throttle string
+
+// State / kind / status / throttle constants. Keep in sync with the CHECK
+// constraints in migrations/.
 const (
 	DocStatePending DocState = "pending"
 	DocStateFetched DocState = "fetched"
@@ -94,6 +99,11 @@ const (
 	ClusterRunRunning ClusterRunStatus = "running"
 	ClusterRunDone    ClusterRunStatus = "done"
 	ClusterRunFailed  ClusterRunStatus = "failed"
+
+	// ThrottleNormal runs every worker the daemon has.
+	ThrottleNormal Throttle = "normal"
+	// ThrottleGentle runs fewer at once, to spare the machine.
+	ThrottleGentle Throttle = "gentle"
 )
 
 // Extraction statuses (document_extractions.status) and bookmark sources
@@ -133,6 +143,15 @@ func (s JobStatus) Valid() bool {
 func (k JobKind) Valid() bool {
 	switch k {
 	case JobKindFetch, JobKindIndex, JobKindImport, JobKindCluster, JobKindSummarize:
+		return true
+	}
+	return false
+}
+
+// Valid reports whether t is one of the Throttle constants.
+func (t Throttle) Valid() bool {
+	switch t {
+	case ThrottleNormal, ThrottleGentle:
 		return true
 	}
 	return false
@@ -560,6 +579,16 @@ type JobStore interface {
 	// PruneOlderThan deletes the tenant's finished jobs last updated before
 	// the cutoff. Pending and running jobs are kept however old they are.
 	PruneOlderThan(ctx context.Context, tenantID string, before time.Time) (int64, error)
+	// QueueCounts counts the pending and running jobs of each kind, across
+	// tenants: workers claim across tenants, so the queue they work through
+	// is daemon-wide. Pending includes retries waiting on run_after. Kinds
+	// with neither are absent from the map.
+	QueueCounts(ctx context.Context) (map[JobKind]QueueCount, error)
+}
+
+// QueueCount is how many jobs of one kind are waiting and running.
+type QueueCount struct {
+	Pending, Running int
 }
 
 // ListJobsOpts filters JobStore.ListWithDoc. Empty fields mean "no filter
@@ -594,6 +623,145 @@ type KindMetrics struct {
 	P99MS                float64
 	Running              int // running now; not bounded by the window
 	OldestRunningSeconds int // age of the oldest running job
+}
+
+// QueueSettings are the queue gate's settings: whether the queue is paused,
+// how hard it runs, and the daily window it may run in. They are
+// daemon-wide, like the claims they gate, and comparable with ==.
+type QueueSettings struct {
+	Paused   bool
+	Throttle Throttle
+	Schedule DailyWindow // zero: no schedule, the queue may run at any time
+}
+
+// DefaultQueueSettings are the settings of a daemon nobody has paused,
+// throttled or scheduled.
+func DefaultQueueSettings() QueueSettings {
+	return QueueSettings{Throttle: ThrottleNormal}
+}
+
+// QueueSettingsStore keeps the queue gate's settings across restarts.
+type QueueSettingsStore interface {
+	// Get returns the stored settings, or DefaultQueueSettings when none
+	// have been stored.
+	Get(ctx context.Context) (QueueSettings, error)
+	// Put stores s, replacing what was there. An invalid throttle or
+	// schedule is an error, and nothing is written.
+	Put(ctx context.Context, s QueueSettings) error
+}
+
+// minutesPerDay bounds a DailyWindow's ends.
+const minutesPerDay = 24 * 60
+
+// DailyWindow is a span of every day on a wall clock, from Start up to but
+// not including End, both in minutes after midnight (0 to 1439). An End
+// before Start wraps midnight: 22:00-07:00 runs overnight. The zero value
+// is no window, and contains every time.
+//
+// A wall clock skips or repeats times when daylight saving starts or ends.
+// Contains goes by the wall clock alone, so a window is open twice in a
+// repeated hour; NextStart moves a start that falls in a skipped hour to
+// the moment the clock resumes.
+type DailyWindow struct {
+	Start, End int
+}
+
+// ParseDailyWindow parses "HH:MM-HH:MM", hours 0 to 23 with one or two
+// digits and minutes with two. Equal ends are an error: the window would be
+// either empty or the whole day, and neither needs a schedule.
+func ParseDailyWindow(s string) (DailyWindow, error) {
+	startText, endText, ok := strings.Cut(s, "-")
+	if !ok {
+		return DailyWindow{}, errors.New("want two times of day joined by '-', HH:MM-HH:MM")
+	}
+	start, err := parseMinuteOfDay(startText)
+	if err != nil {
+		return DailyWindow{}, err
+	}
+	end, err := parseMinuteOfDay(endText)
+	if err != nil {
+		return DailyWindow{}, err
+	}
+	if start == end {
+		return DailyWindow{}, errors.New("the start and end are the same time")
+	}
+	return DailyWindow{Start: start, End: end}, nil
+}
+
+// parseMinuteOfDay parses "HH:MM" into minutes after midnight.
+func parseMinuteOfDay(s string) (int, error) {
+	t, err := time.Parse("15:04", s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a time of day from 00:00 to 23:59", s)
+	}
+	return t.Hour()*60 + t.Minute(), nil
+}
+
+// String formats w as "HH:MM-HH:MM", which ParseDailyWindow reads back.
+func (w DailyWindow) String() string {
+	return fmt.Sprintf("%02d:%02d-%02d:%02d", w.Start/60, w.Start%60, w.End/60, w.End%60)
+}
+
+// IsZero reports whether w is the zero window: no schedule.
+func (w DailyWindow) IsZero() bool {
+	return w == DailyWindow{}
+}
+
+// Valid reports whether w is the zero window, or has both ends in the day
+// and different.
+func (w DailyWindow) Valid() bool {
+	inDay := func(m int) bool { return m >= 0 && m < minutesPerDay }
+	return w.IsZero() || (inDay(w.Start) && inDay(w.End) && w.Start != w.End)
+}
+
+// Contains reports whether t's wall clock, in t's location, is in w.
+func (w DailyWindow) Contains(t time.Time) bool {
+	m := t.Hour()*60 + t.Minute()
+	if w.Start < w.End {
+		return w.Start <= m && m < w.End
+	}
+	return m >= w.Start || m < w.End
+}
+
+// NextStart returns the first time after t, in t's location, at which w
+// opens: its start today, tomorrow or the day after. A start that falls in
+// a daylight-saving gap opens when the gap ends, unless the whole window
+// falls in the gap, and then it opens the next day. It returns the zero
+// time for the zero window or an invalid one.
+func (w DailyWindow) NextStart(t time.Time) time.Time {
+	if w.IsZero() || !w.Valid() {
+		return time.Time{}
+	}
+	year, month, day := t.Date()
+	// Three days always suffice: daylight-saving changes are months apart,
+	// so at most one of the days has a gap.
+	for offset := range 3 {
+		c := time.Date(year, month, day+offset, w.Start/60, w.Start%60, 0, 0, t.Location())
+		if c.Hour()*60+c.Minute() != w.Start {
+			c = gapEnd(c)
+		}
+		if c.After(t) && w.Contains(c) {
+			return c
+		}
+	}
+	return time.Time{}
+}
+
+// gapEnd returns when the daylight-saving gap that time.Date moved c out of
+// ends. time.Date doesn't promise which side of a gap it lands a skipped
+// time on (Go 1.26 puts New York's 02:30 before its gap, at 01:30 EST, and
+// Lord Howe's 02:15 after its, at 02:45), so the gap's end is whichever
+// boundary of c's zone period is nearer.
+func gapEnd(c time.Time) time.Time {
+	start, end := c.ZoneBounds() // zero at either end of the zone's history
+	switch {
+	case start.IsZero():
+		return end
+	case end.IsZero(), c.Sub(start) < end.Sub(c):
+		return start
+	default:
+		return end
+	}
 }
 
 // ClusterRun is one execution of the clustering job. Clustering fully
