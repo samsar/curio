@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -446,19 +448,28 @@ func TestWorker_MarkDoneRetried(t *testing.T) {
 	}
 }
 
-// countingQueue counts claims, and reports the first claim that finds
-// nothing, when the worker has gone idle.
+// countingQueue counts claims, records the kinds each asked for, and
+// reports the first claim that finds nothing, when the worker has gone
+// idle.
 type countingQueue struct {
 	store.JobQueue
+	db     *sqlitestore.DB
 	claims atomic.Int32
 	idle   chan struct{}
+
+	mu         sync.Mutex
+	claimKinds [][]store.JobKind
 }
 
 func newCountingQueue(t *testing.T) *countingQueue {
-	return &countingQueue{JobQueue: sqlitestore.NewJobs(sqlitetest.NewDB(t)), idle: make(chan struct{}, 1)}
+	db := sqlitetest.NewDB(t)
+	return &countingQueue{JobQueue: sqlitestore.NewJobs(db), db: db, idle: make(chan struct{}, 1)}
 }
 
 func (q *countingQueue) ClaimNext(ctx context.Context, kinds []store.JobKind) (*store.Job, error) {
+	q.mu.Lock()
+	q.claimKinds = append(q.claimKinds, slices.Clone(kinds))
+	q.mu.Unlock()
 	j, err := q.JobQueue.ClaimNext(ctx, kinds)
 	q.claims.Add(1)
 	if errors.Is(err, store.ErrNotFound) {
@@ -468,6 +479,13 @@ func (q *countingQueue) ClaimNext(ctx context.Context, kinds []store.JobKind) (*
 		}
 	}
 	return j, err
+}
+
+// kindsClaimed returns the kinds of every claim so far, in order.
+func (q *countingQueue) kindsClaimed() [][]store.JobKind {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return slices.Clone(q.claimKinds)
 }
 
 // fetchWorker is a fetch-only worker whose handler reports each job.
@@ -550,5 +568,285 @@ func TestWorker_PollsForJobsComingDue(t *testing.T) {
 		assert.False(t, time.Now().Before(due), "claimed before it was due")
 	case <-time.After(5 * time.Second):
 		t.Fatal("the job was not claimed once due")
+	}
+}
+
+// slowPolls keeps a worker from polling during a test, so only a signal
+// can explain a claim.
+var slowPolls = WorkerOptions{PollInterval: 10 * time.Minute, MaxPollInterval: 10 * time.Minute}
+
+// queueGate is the daemon's gate over q's database, holding settings.
+func queueGate(t *testing.T, q *countingQueue, settings store.QueueSettings) *QueueGate {
+	t.Helper()
+	ctx := context.Background()
+	stored := sqlitestore.NewQueueSettings(q.db)
+	require.NoError(t, stored.Put(ctx, settings))
+	g, err := NewQueueGate(ctx, stored, PoolSizes{Fetch: 16, Index: 4}, quietLog)
+	require.NoError(t, err)
+	return g
+}
+
+var paused = store.QueueSettings{Paused: true, Throttle: store.ThrottleNormal}
+
+func enqueue(t *testing.T, q store.JobQueue, kind store.JobKind, n int) []*store.Job {
+	t.Helper()
+	jobs := make([]*store.Job, n)
+	for i := range jobs {
+		jobs[i] = &store.Job{TenantID: "local", Kind: kind}
+		require.NoError(t, q.Enqueue(context.Background(), jobs[i]))
+	}
+	return jobs
+}
+
+// receive returns the next value from ch, failing the test after timeout.
+func receive[T any](t *testing.T, ch <-chan T, timeout time.Duration, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(timeout):
+		t.Fatalf("timed out after %s waiting for %s", timeout, what)
+		panic("unreachable")
+	}
+}
+
+// TestWorker_PausedMakesNoClaims: a paused worker neither claims nor polls,
+// however short its poll interval, and the queued job waits.
+func TestWorker_PausedMakesNoClaims(t *testing.T) {
+	q := newCountingQueue(t)
+	job := enqueue(t, q, store.JobKindFetch, 1)[0]
+	w, _ := fetchWorker(q, WorkerOptions{PollInterval: 5 * time.Millisecond, MaxPollInterval: 5 * time.Millisecond,
+		Gate: queueGate(t, q, paused)})
+	stop := startWorker(t, w)
+	defer stop()
+
+	assert.Never(t, func() bool { return q.claims.Load() > 0 }, 300*time.Millisecond, 5*time.Millisecond)
+	assert.Equal(t, store.JobStatusPending, getJob(t, q, job.ID).Status)
+}
+
+// TestWorker_ResumeWakesTheWorker: with polls ten minutes apart, only the
+// gate's change signal can explain the job being claimed at once.
+func TestWorker_ResumeWakesTheWorker(t *testing.T) {
+	q := newCountingQueue(t)
+	job := enqueue(t, q, store.JobKindFetch, 1)[0]
+	gate := queueGate(t, q, paused)
+	opts := slowPolls
+	opts.Gate = gate
+	w, handled := fetchWorker(q, opts)
+	stop := startWorker(t, w)
+	defer stop()
+	assert.Never(t, func() bool { return q.claims.Load() > 0 }, 100*time.Millisecond, 5*time.Millisecond)
+
+	_, err := gate.Update(context.Background(), QueueUpdate{Paused: new(false)})
+	require.NoError(t, err)
+	assert.Equal(t, job.ID, receive(t, handled, time.Second, "the job to be claimed").ID)
+}
+
+// TestWorker_PauseLetsTheRunningJobFinish: a pause stops new claims and
+// never interrupts the job in hand.
+func TestWorker_PauseLetsTheRunningJobFinish(t *testing.T) {
+	q := newCountingQueue(t)
+	jobs := enqueue(t, q, store.JobKindFetch, 2)
+	gate := queueGate(t, q, store.DefaultQueueSettings())
+	started := make(chan context.Context, 2)
+	release := make(chan struct{})
+	w := NewWorker(q, WorkerOptions{PollInterval: 5 * time.Millisecond, Gate: gate, Log: quietLog})
+	w.Register(store.JobKindFetch, func(ctx context.Context, _ *store.Job) error {
+		started <- ctx
+		<-release
+		return nil
+	})
+	stop := startWorker(t, w)
+	defer stop()
+
+	handlerCtx := receive(t, started, 5*time.Second, "the first job to start")
+	_, err := gate.Update(context.Background(), QueueUpdate{Paused: new(true)})
+	require.NoError(t, err)
+	claims := q.claims.Load()
+	assert.NoError(t, handlerCtx.Err(), "the pause leaves the running job alone")
+	close(release)
+
+	waitForJob(t, q, jobs[0].ID, statusIs(store.JobStatusDone))
+	assert.Never(t, func() bool { return q.claims.Load() > claims }, 300*time.Millisecond, 5*time.Millisecond)
+	assert.Equal(t, store.JobStatusPending, getJob(t, q, jobs[1].ID).Status)
+}
+
+// TestWorker_CancelWhilePaused: shutdown doesn't wait for a resume.
+func TestWorker_CancelWhilePaused(t *testing.T) {
+	q := newCountingQueue(t)
+	opts := slowPolls
+	opts.Gate = queueGate(t, q, paused)
+	w, _ := fetchWorker(q, opts)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	cancel()
+	assert.ErrorIs(t, receive(t, done, time.Second, "Run to return"), context.Canceled)
+}
+
+// blockingPool runs a Worker for kind with n goroutines, whose handler
+// blocks until release closes, counting the jobs running at once and the
+// most there have been.
+type blockingPool struct {
+	release chan struct{}
+
+	mu               sync.Mutex
+	running, maxSeen int
+}
+
+func (p *blockingPool) add(delta int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.running += delta
+	p.maxSeen = max(p.maxSeen, p.running)
+}
+
+// counts returns how many jobs are running and the most that have been.
+func (p *blockingPool) counts() (running, maxSeen int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.running, p.maxSeen
+}
+
+func startBlockingPool(t *testing.T, q store.JobQueue, kind store.JobKind, n int, opts WorkerOptions) *blockingPool {
+	t.Helper()
+	opts.Log = quietLog
+	p := &blockingPool{release: make(chan struct{})}
+	w := NewWorker(q, opts)
+	w.Register(kind, func(context.Context, *store.Job) error {
+		p.add(1)
+		defer p.add(-1)
+		<-p.release
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() { assert.ErrorIs(t, w.Run(ctx), context.Canceled) })
+	}
+	t.Cleanup(func() {
+		select {
+		case <-p.release:
+		default:
+			close(p.release)
+		}
+		cancel()
+		wg.Wait()
+	})
+	return p
+}
+
+// TestWorker_GentleThrottle: eight goroutines of one fetch Worker run no
+// more than the gentle cap at once; switching to normal lets the rest
+// claim at once, woken by the change.
+func TestWorker_GentleThrottle(t *testing.T) {
+	q := newCountingQueue(t)
+	enqueue(t, q, store.JobKindFetch, 20)
+	gate := queueGate(t, q, store.QueueSettings{Throttle: store.ThrottleGentle})
+	opts := slowPolls
+	opts.Gate = gate
+	p := startBlockingPool(t, q, store.JobKindFetch, 8, opts)
+
+	require.Eventually(t, func() bool { running, _ := p.counts(); return running == gentleFetchCap },
+		5*time.Second, time.Millisecond)
+	assert.Never(t, func() bool { _, most := p.counts(); return most > gentleFetchCap },
+		200*time.Millisecond, time.Millisecond)
+
+	_, err := gate.Update(context.Background(), QueueUpdate{Throttle: new(store.ThrottleNormal)})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { running, _ := p.counts(); return running == 8 }, time.Second, time.Millisecond)
+}
+
+func TestWorker_GentleThrottleRunsOneIndexJob(t *testing.T) {
+	q := newCountingQueue(t)
+	enqueue(t, q, store.JobKindIndex, 6)
+	opts := slowPolls
+	opts.Gate = queueGate(t, q, store.QueueSettings{Throttle: store.ThrottleGentle})
+	p := startBlockingPool(t, q, store.JobKindIndex, 4, opts)
+
+	require.Eventually(t, func() bool { running, _ := p.counts(); return running == 1 }, 5*time.Second, time.Millisecond)
+	assert.Never(t, func() bool { _, most := p.counts(); return most > 1 }, 200*time.Millisecond, time.Millisecond)
+}
+
+// fakeGate closes the kinds in closes (every kind when nil) until it is
+// opened, or until now reaches until. Its closed verdicts carry until and
+// changed as they are.
+type fakeGate struct {
+	open    atomic.Bool
+	closes  map[store.JobKind]bool
+	until   time.Time
+	changed chan struct{}
+}
+
+func (g *fakeGate) Admit(kind store.JobKind, _ int, now time.Time) Verdict {
+	if g.open.Load() || (g.closes != nil && !g.closes[kind]) || (!g.until.IsZero() && !now.Before(g.until)) {
+		return Verdict{}
+	}
+	return Verdict{Closed: "test", Until: g.until, Changed: g.changed}
+}
+
+// TestWorker_WaitsUntilTheGateReopens: a verdict with no signal, only a
+// time, is asked again when that time comes, not before.
+func TestWorker_WaitsUntilTheGateReopens(t *testing.T) {
+	q := newCountingQueue(t)
+	enqueue(t, q, store.JobKindFetch, 1)
+	until := time.Now().Add(100 * time.Millisecond)
+	opts := slowPolls
+	opts.Gate = &fakeGate{until: until}
+	w, _ := fetchWorker(q, opts)
+	claimed := make(chan time.Time, 1)
+	w.Register(store.JobKindFetch, func(context.Context, *store.Job) error {
+		claimed <- time.Now()
+		return nil
+	})
+	stop := startWorker(t, w)
+	defer stop()
+
+	at := receive(t, claimed, time.Second+100*time.Millisecond, "the job to be claimed")
+	assert.False(t, at.Before(until), "claimed %s before the gate reopened", until.Sub(at))
+}
+
+// TestWorker_GateWaitIsCapped: a gate that reopens without a signal, long
+// before its verdict said, is found open within maxGateWait.
+func TestWorker_GateWaitIsCapped(t *testing.T) {
+	q := newCountingQueue(t)
+	job := enqueue(t, q, store.JobKindFetch, 1)[0]
+	gate := &fakeGate{until: time.Now().Add(time.Hour)}
+	opts := slowPolls
+	opts.Gate = gate
+	w, handled := fetchWorker(q, opts)
+	w.maxGateWait = 50 * time.Millisecond
+	stop := startWorker(t, w)
+	defer stop()
+
+	time.AfterFunc(100*time.Millisecond, func() { gate.open.Store(true) })
+	assert.Equal(t, job.ID, receive(t, handled, time.Second, "the job to be claimed").ID)
+}
+
+// TestWorker_ClaimsOnlyAdmittedKinds: a gate closed to one of a worker's
+// kinds holds back only that kind's jobs.
+func TestWorker_ClaimsOnlyAdmittedKinds(t *testing.T) {
+	q := newCountingQueue(t)
+	fetch := enqueue(t, q, store.JobKindFetch, 1)[0]
+	summarize := enqueue(t, q, store.JobKindSummarize, 1)[0]
+	w, handled := fetchWorker(q, WorkerOptions{PollInterval: 5 * time.Millisecond, MaxPollInterval: 5 * time.Millisecond,
+		Gate: &fakeGate{closes: map[store.JobKind]bool{store.JobKindSummarize: true}, changed: make(chan struct{})}})
+	w.Register(store.JobKindSummarize, func(context.Context, *store.Job) error {
+		t.Error("the closed kind's job ran")
+		return nil
+	})
+	stop := startWorker(t, w)
+	defer stop()
+
+	assert.Equal(t, fetch.ID, receive(t, handled, 5*time.Second, "the fetch job").ID)
+	assert.Never(t, func() bool {
+		j, err := q.GetByID(context.Background(), summarize.ID)
+		return !assert.NoError(t, err) || j.Status != store.JobStatusPending
+	}, 200*time.Millisecond, 10*time.Millisecond)
+	claimed := q.kindsClaimed()
+	require.NotEmpty(t, claimed)
+	for _, kinds := range claimed {
+		assert.Equal(t, []store.JobKind{store.JobKindFetch}, kinds)
 	}
 }
