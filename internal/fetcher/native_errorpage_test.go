@@ -106,11 +106,25 @@ func TestErrorPageTitleRE(t *testing.T) {
 		{"504 Gateway Time-out", 504},
 		{"appdesignvault.com | 526: Invalid SSL certificate", 526},
 		{"example.com | 522: Connection timed out", 522},
+		{"example.com | 503: Service unavailable", 503},
+		// No code: the phrase alone names the status.
+		{"Internal Server Error", 500},
+		{"Bad Gateway", 502},
+		{"Gateway Timeout", 504},
+		{"Gateway Time-out", 504},
+		{"Service Temporarily Unavailable", 503},
 	}
 	for _, tc := range errorPages {
 		m := errorPageTitleRE.FindStringSubmatch(tc.title)
 		if assert.NotNil(t, m, "should match %q", tc.title) {
-			assert.Equal(t, tc.code, errorPageStatus(m), tc.title)
+			code := errorPageStatus(m)
+			assert.Equal(t, tc.code, code, tc.title)
+			// The status decides the verdict: anti-bot, which goes to Jina,
+			// or a server error, retried without it.
+			verdict := errorPageVerdict(code, tc.title)
+			antiBot := tc.code == http.StatusForbidden || tc.code == http.StatusServiceUnavailable
+			assert.Equal(t, antiBot, errors.Is(verdict, ErrAntiBot), "anti-bot: %s", tc.title)
+			assert.Equal(t, !antiBot, errors.Is(verdict, errServerErrorPage), "server error: %s", tc.title)
 		}
 	}
 
