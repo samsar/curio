@@ -235,6 +235,34 @@ is badly off; fix that, then `curio refetch --all --state=failed`. A
 `r.jina.ai`, the fallback reader, not the site's, and is retried like any
 other Jina failure.
 
+**`dead link (redirected to another site's landing page: …)`** on a
+document — the bookmark redirects to another site's homepage or section
+page, which kept nothing of what the bookmark named: the usual fate of a
+retired site's pages. When that page refused curio, the reason follows
+`HTTP 403 Forbidden:` or `HTTP 503 Service Unavailable:`; the verdict is
+the same. A forced refetch (`curio refetch <id> --force`) applies the same
+rule to the same redirect, so it only helps once the redirect changes. If
+the page did move there, bookmark its new address (`curio add <url>`). If
+the rules misjudge a whole corpus, set `fetcher.native.dead_link_detection:
+false` in `~/.curio/config.yaml`, which turns off every dead-link rule
+daemon-wide (404 and 410 are retried, soft 404s stored), restart the daemon
+(`curio daemon stop`; the next command starts it), and refetch the dead
+documents (`curio refetch --all --state=dead`, or `curio refetch <id>
+--force`).
+
+**`jina: r.jina.ai's CDN challenged the request`** — Jina Reader's
+Cloudflare refused curio. Jina calls pause for 10 minutes (or the answer's
+`Retry-After`), with a warning in the daemon log for each challenged answer.
+The job queue doesn't wait for the pause: it retries a document about 1, 3,
+7 and 15 minutes after its first failure, five attempts in all. A retry
+that comes due inside the pause fetches the page again, sends no request to
+Jina, and fails at once with `jina: not sent, cooldown has … left: HTTP 429
+Too Many Requests`, a 429 curio reports for its own pause, not an answer
+from Jina. Each such retry uses up an attempt: with the default pause, only
+the fifth attempt of the document that met the challenge can reach Jina. A
+document that runs out of attempts ends `failed`; once Jina answers again,
+`curio refetch --all --state=failed`.
+
 **`ENOENT: spawn node`** from a fetch — Node isn't on the daemon's PATH.
 Either install Node into a directory in PATH or set
 `fetcher.web2md.node_bin` in config.

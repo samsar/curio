@@ -339,6 +339,82 @@ func TestNative_JinaLongCooldownFailsFast(t *testing.T) {
 	assert.False(t, cached)
 }
 
+// TestNative_JinaChallengePausesJina: when r.jina.ai's CDN challenges
+// curio, every Jina call pauses for the answer's Retry-After, or
+// jinaChallengeCooldown without one, with one warning. A fetch inside the
+// pause fails fast and retryably without a Jina request or a cache entry;
+// once the pause has passed, Jina is asked again.
+func TestNative_JinaChallengePausesJina(t *testing.T) {
+	const key = "jina_secret_key_123"
+	cases := []struct {
+		name       string
+		retryAfter string
+		pause      time.Duration
+	}{
+		{"no Retry-After", "", jinaChallengeCooldown},
+		{"Retry-After", "120", 120 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origin := serveThinPage(t)
+			defer origin.Close()
+			var jinaHits atomic.Int32
+			var challenging atomic.Bool
+			challenging.Store(true)
+			jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				jinaHits.Add(1)
+				if !challenging.Load() {
+					_, _ = w.Write([]byte(jinaArticleBody()))
+					return
+				}
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.Header().Set("Cf-Mitigated", "challenge")
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer jina.Close()
+
+			var logs bytes.Buffer
+			fc := newFakeClock()
+			n := unpaced(NewNative(NativeOptions{
+				Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", JinaAPIKey: key,
+				Log: slog.New(slog.NewTextHandler(&logs, nil)),
+			}), fc)
+			warnings := func() int { return strings.Count(logs.String(), "level=WARN") }
+
+			_, err := n.Fetch(context.Background(), origin.URL+"/a")
+			require.ErrorIs(t, err, errJinaChallenged)
+			assert.Contains(t, err.Error(), "r.jina.ai's CDN challenged the request")
+			assert.Equal(t, tc.pause, n.jinaCooldown.remaining(fc.now()))
+			assert.Equal(t, 1, warnings())
+			assert.Contains(t, logs.String(), "CDN challenged curio")
+			assert.Contains(t, logs.String(), "pause="+tc.pause.String())
+			assert.NotContains(t, logs.String(), key)
+
+			challenging.Store(false)
+			_, err = n.Fetch(context.Background(), origin.URL+"/b")
+			require.ErrorIs(t, err, ErrLoginWall)
+			var pe *PermanentError
+			assert.False(t, errors.As(err, &pe), "must stay retryable: %v", err)
+			var se *HTTPStatusError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
+			assert.Equal(t, tc.pause, se.RetryAfter)
+			assert.Equal(t, int32(1), jinaHits.Load(), "no Jina request inside the pause")
+			assert.Equal(t, 1, warnings(), "one warning per pause")
+			_, cached := n.hostCache.Get(hostOf(origin.URL))
+			assert.False(t, cached)
+
+			fc.advance(tc.pause)
+			res, err := n.Fetch(context.Background(), origin.URL+"/c")
+			require.NoError(t, err)
+			assert.Equal(t, "jina", res.Meta["via"])
+			assert.Equal(t, int32(2), jinaHits.Load())
+		})
+	}
+}
+
 // TestNative_JinaLongCooldownDoesNotQueue: with a long cooldown active,
 // Jina-bound fetches fail fast without waiting their turn in the keyless
 // limiter (one token every 3s), which would hold the fifth for 12s only to

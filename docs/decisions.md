@@ -87,7 +87,7 @@ when the entry was first committed.
 - 2026-09-24 — [Fetch politeness: shared Jina pacing, per-host origin gate](#fetch-politeness-shared-jina-pacing-per-host-origin-gate) (revised)
 - 2026-09-24 — [URL normalization: fetch-equivalent and idempotent](#url-normalization-fetch-equivalent-and-idempotent)
 - 2026-09-24 — [Subprocess fetchers: kill the process group, cap the output](#subprocess-fetchers-kill-the-process-group-cap-the-output)
-- 2026-09-24 — [Chrome profiles carry their own User-Agent and sec-ch-ua](#chrome-profiles-carry-their-own-user-agent-and-sec-ch-ua)
+- 2026-09-24 — [Chrome profiles carry their own User-Agent and sec-ch-ua](#chrome-profiles-carry-their-own-user-agent-and-sec-ch-ua) (revised)
 - 2026-09-24 — [Store boundary: consumers see interfaces, depguard enforces it](#store-boundary-consumers-see-interfaces-depguard-enforces-it)
 - 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert)
 - 2026-09-24 — [Bookmark ingest: one transaction, fetch only for new documents](#bookmark-ingest-one-transaction-fetch-only-for-new-documents)
@@ -120,9 +120,12 @@ when the entry was first committed.
 - 2026-09-26 — [YouTube: caption tracks by an exact pattern, not `en.*`](#youtube-caption-tracks-by-an-exact-pattern-not-en)
 - 2026-09-26 — [YouTube: a failed caption download leaves a partial, not a failed fetch](#youtube-a-failed-caption-download-leaves-a-partial-not-a-failed-fetch)
 - 2026-09-26 — [YouTube: a shared cooldown after a 429](#youtube-a-shared-cooldown-after-a-429)
-- 2026-09-26 — [Page verdicts: one judge for every page, bot challenges included](#page-verdicts-one-judge-for-every-page-bot-challenges-included)
-- 2026-09-26 — [Jina answers are judged like the origin's pages](#jina-answers-are-judged-like-the-origins-pages)
+- 2026-09-26 — [Page verdicts: one judge for every page, bot challenges included](#page-verdicts-one-judge-for-every-page-bot-challenges-included) (revised)
+- 2026-09-26 — [Jina answers are judged like the origin's pages](#jina-answers-are-judged-like-the-origins-pages) (revised)
 - 2026-09-26 — [Search leaves out failed and dead documents](#search-leaves-out-failed-and-dead-documents)
+- 2026-09-27 — [Cross-site redirects: judged where they land](#cross-site-redirects-judged-where-they-land)
+- 2026-09-27 — [Error pages whose status is hidden](#error-pages-whose-status-is-hidden)
+- 2026-09-27 — [Jina requests identify as curio](#jina-requests-identify-as-curio)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -1674,6 +1677,37 @@ reports for the target is a dead link as well. See "Page verdicts: one
 judge for every page, bot challenges included" and "Jina answers are judged
 like the origin's pages".
 
+**Revised (2026-09-27):**
+
+- A redirect that settles on another site's landing page, a homepage or a
+  section that kept nothing of the page asked for, is a soft 404 too
+  (`looksLikeLandingPage`), under the same kill switch. It is not
+  host-cached either, for either host. This rule and the homepage rule
+  judge where a redirect landed whatever that page answered: 2xx, 403 or
+  503. A 403/503 there is a dead link, not anti-bot, and never goes to
+  Jina. See "Cross-site redirects: judged where they land".
+- The homepage rule needs a source that names a page once a trailing index
+  document is dropped, the landing rule's reading of the source
+  (`pageSegments`): `ocw.mit.edu/index.htm` → `ocw.mit.edu/` is the
+  homepage canonicalized, not a page redirected to it. The library holds
+  three such bookmarks, fetched on 2026-05-24 and 25, before the homepage
+  rule existed: `http://ocw.mit.edu/index.htm` (`cd7f3b2f`),
+  `https://ocw.mit.edu/index.htm` (`05d9e332`) and
+  `http://www.infragistics.com/default.aspx` (`85ef605b`). Any refetch
+  would have marked them dead. Still judged dead: a homepage bookmarked
+  under an alias (`vaadin.com/home`, `www.kraken.com/en-us`,
+  `www.realmatters.com/home/default.aspx`), which no URL rule tells from a
+  deleted page.
+- `--force` lifts the 409 and nothing else. A forced refetch runs every
+  dead-link rule again, so it recovers a URL whose answer changed (a 404
+  that came back, a redirect that was fixed), not a page the heuristics
+  misjudge: a not-found title, a homepage redirect or a landing redirect is
+  judged the same way again. The refetch policy and kill switch paragraphs
+  above take per-document `--force` for the escape hatch from a false
+  positive; it is one only once the answer changes. The kill switch is the
+  only override, daemon-wide, and it takes a daemon restart (there is no
+  config reload).
+
 ---
 
 ## fetcher_rules.yaml: mtime-polled hot reload, keep-last-good
@@ -2462,6 +2496,13 @@ budget. Jina kept a status map of its own. Errors built with `%v` or plain
 strings couldn't be matched with `errors.Is`/`errors.As`, and GitHub
 errors pasted whole response bodies into `jobs.last_error`.
 
+**Revised (2026-09-27):** Native's 403 and 503 are `ErrAntiBot` unless the
+request was redirected onto a page the redirect verdicts judge: another
+site's login page, or, with dead-link detection on, the site's homepage or
+another site's landing page. That verdict (`ErrDeadLink`, or the offsite
+login wall) is a `PermanentError` and still carries the origin's
+`*HTTPStatusError`. See "Cross-site redirects: judged where they land".
+
 ---
 
 ## GitHub: secondary rate limits and a shared cooldown
@@ -2630,6 +2671,36 @@ same way on every path that exists.
   about 15 minutes. It now costs at most one origin request per retry,
   bounded by the per-host gate.
 
+**Revised (2026-09-27):**
+
+- **Jina's own 403 is Jina's trouble,** with 401 and 402: r.jina.ai's CDN
+  challenging curio, not a verdict about the target, whose status comes in
+  Jina's warning. `jinaAnswered` had taken it for one since the challenges
+  began on 2026-08-30: 400 permanent page-level failures, 402 origin-403
+  first failures that wrote the host cache, and 428 permanent cache hits
+  served from those entries. With `cf-mitigated: challenge` it also pauses
+  every Jina call. See "Jina requests identify as curio".
+- **A redirect onto another site's landing or login page is page-level,
+  whatever it answered.** A landing page (a dead link) and a login page (a
+  final login wall; after a 403 or 503 only its path counts, since no page
+  is read) cache neither the requested nor the answering host, whatever
+  that page answered: 2xx, 403 or 503. So the anti-bot verdict above needs
+  a 403/503 that no redirect verdict explains: not one after a redirect
+  onto another site's login path, nor, with dead-link detection on, onto
+  the site's homepage or another site's landing page. A 403/503 from any
+  other page on another site is still the anti-bot verdict above, keyed by
+  that site. The site-wide login verdict
+  needs a redirect that stays on the site.
+- **The page-level verdicts above, now:** none is cached. Thin text, no
+  article, a login-like title, and a challenge or 403/503 error page
+  recognized in content fail permanently once every configured extraction
+  path has answered. A redirect onto the homepage or another site's landing
+  page (a dead link, detection on) or onto another site's login page
+  (`errOffsiteLoginWall`) is final at once, without Jina. An error page
+  naming another 5xx (`errServerErrorPage`) is retried and never sent to
+  Jina. See "Cross-site redirects: judged where they land" and "Error pages
+  whose status is hidden".
+
 ---
 
 ## Login-wall heuristic: www and apex are the same site
@@ -2658,6 +2729,12 @@ cached the whole host for 15 minutes (daemon.log, 2026-05-24T14:04:30;
 reproduced). Every real login redirect in the log (`/uas/login`,
 `//user/login.php`, `/s/login/`, `/auth/login/`, `/auth/v3/signin`,
 `/signup/credentials`) still matches.
+
+**Revised (2026-09-27):** a redirect to another host is no longer flagged
+by itself. Only a redirect onto another site's login page (its path or its
+title) is a login wall there, final and never cached; another site's landing
+page is a dead link, and any other destination is judged like any page. See
+"Cross-site redirects: judged where they land".
 
 ---
 
@@ -2715,6 +2792,12 @@ keyless 20 a minute the 16th fetch worker waited about 45 s just to fail,
 and each of them spent a token a later call needed. A short cooldown (up
 to the cap) still queues first, as before. GitHub's calls go through the
 same `pace`.
+
+**Revised (2026-09-27):** a Jina 403 carrying `cf-mitigated: challenge`
+extends the same cooldown, by its `Retry-After` or else 10 minutes, and logs
+one warning; like a long 429 cooldown it fails Jina-bound fetches fast and
+retryably. Jina requests send curio's own User-Agent. See "Jina requests
+identify as curio".
 
 ---
 
@@ -2821,6 +2904,11 @@ Chrome 120 TLS fingerprint with Chrome 133 headers. The `sec-ch-ua` values
 are copied from real Chrome of each version, because the GREASE brand and
 the brand order change from one version to the next. The old 133 value
 had its brands in the wrong order.
+
+**Revised (2026-09-27):** the profile's User-Agent and `sec-ch-ua`, and a
+`user_agent` override, go to origins only. Jina requests identify as curio,
+since r.jina.ai's Cloudflare challenges a browser User-Agent. See "Jina
+requests identify as curio".
 
 ---
 
@@ -4424,6 +4512,27 @@ mode), which `statusFailure` already makes `ErrAntiBot`, host-wide and
 Jina-eligible, and no challenge page in the library came through
 readability.
 
+**Revised (2026-09-27):** the order is now, pinned by `TestJudgePage_Order`:
+
+1. dead link, with detection on: redirected to the homepage or to another
+   site's landing page (both need the final URL), or a not-found title;
+2. bot challenge;
+3. error page, judged like the status it names (see "Error pages whose
+   status is hidden");
+4. login wall by redirect, needs the final URL: onto another site's login
+   page (final, never cached), or onto the site's own login path
+   (site-wide when the path changed);
+5. no article; 6. thin; 7. a login-page title, as before.
+
+A redirect onto another site is no longer a login wall by itself: what it
+reached is judged like any page (see "Cross-site redirects: judged where
+they land"). The one `cf-mitigated: challenge` curio now reads is Jina's own
+(see "Jina requests identify as curio"). The "Not done" note's
+`statusFailure` now judges the redirect first: a 403/503 after a redirect
+onto the homepage or another site's landing page (detection on) or onto
+another site's login path is that verdict, never `ErrAntiBot`; only a
+403/503 no redirect verdict explains is still host-wide and Jina-eligible.
+
 ---
 
 ## Jina answers are judged like the origin's pages
@@ -4460,8 +4569,8 @@ readability.
   costs one Jina request.
 - The target's status is a `targetStatusError`, never an
   `*HTTPStatusError`. That type is Jina's own answer: its 429 extends Jina's
-  cooldown and its `Retry-After` reaches the job, and neither may follow
-  from a status the target gave Jina.
+  cooldown by its `Retry-After`, which a status the target gave Jina must
+  not.
 - A Jina answer's `Result.FinalURL` is the requested URL.
 
 **Host cache: Jina verdicts never write it.** `settle` judges only the
@@ -4514,6 +4623,20 @@ dead documents"). Clusters change only after `curio interests rebuild`.
 followed after curio had already seen them. Judging the redirect target
 locally would save most of the Jina budget; it is a separate change.
 
+**Revised (2026-09-27):** that change is made; see "Cross-site redirects:
+judged where they land". A redirect onto another site's landing page is a
+dead link and one onto another site's login page is final, both without a
+Jina request, and any other cross-site redirect is stored from the origin's
+answer when it passes. The landing pages above that kept a word of the
+source ("Java Issue Tracker - Home" keeps the bug ID) remain a known
+limitation. A Jina answer that is an error page without the target-status
+warning is now rejected, or left to the job's retry for a server error; see
+"Error pages whose status is hidden". Corrected: the `targetStatusError`
+bullet above said Jina's `Retry-After` went on to the job. It never did:
+the job queue retries on its own backoff (`retryBackoff`) and reads no
+`Retry-After`, so Jina's only sets the length of Jina's cooldown. The
+bullet now says so.
+
 ---
 
 ## Search leaves out failed and dead documents
@@ -4561,6 +4684,340 @@ pending/failed/dead documents have no indexed chunks.
 `EmbeddingsForDocument` and `DocumentVectors` are unchanged: a failed or
 dead source document still has vectors for find-related, and clustering
 already reads fetched documents only.
+
+---
+
+## Cross-site redirects: judged where they land
+
+**Decision:** a redirect onto another site (`crossSite`: both hostnames
+known, not the same site by `sameSiteHost`) is no longer a login wall by
+itself. `judgePage` judges the page it reached, with no Jina call unless
+that page fails a page-level verdict:
+
+- **Another site's landing page is a dead link**, with dead-link detection
+  on. `looksLikeLandingPage` runs among the soft-404 checks, after the
+  same-site homepage rule, and holds when all of these do:
+  1. the destination is on another site;
+  2. it is no login page: `loginPathRE` doesn't match its path, nor
+     `loginTitleRE` its title;
+  3. the source names a page: its decoded path, less a trailing index
+     document (`index.*`, `default.*`), holds at least one word, and its
+     path and query keys and values together hold at least two;
+  4. the destination dropped the source's identity: no source word is a
+     word of the destination's hostname, decoded path, or query keys and
+     values. A destination query with a value equal to the source's decoded
+     path is redirect bookkeeping (`?origin=/message.jspa`) and ignored;
+  5. the destination names no page: its path has no segments, fewer than
+     the source's (index document removed), a last segment of letters
+     alone, or a bookkeeping query.
+
+  A word is a maximal run of letters or digits, lowercased, at least two
+  runes long. The verdict is `dead link (redirected to another site's
+  landing page: <host><path>)`, a `PermanentError`: document `dead`, no
+  Jina request, and no host-cache entry for the requested or the answering
+  host.
+- **Another site's login page is a final login wall**, whatever dead-link
+  detection says: a login path (`loginPathRE`) or a login title
+  (`loginTitleRE`) on the destination. `errOffsiteLoginWall` wraps
+  `ErrLoginWall` but not `errSiteLoginWall`, and `tryReadability` makes it
+  a `PermanentError`: document `failed`, no Jina request, never cached.
+- **A 403 or 503 answer gets the same URL rules first.** Before
+  `statusFailure` makes a 403/503 `ErrAntiBot`, `judgeRedirect` judges
+  where the request settled, with `judgePage`'s own predicates and verdict
+  helpers (`deadLink`, `loginWall`) in `judgePage`'s order: with dead-link
+  detection on, a redirect onto the site's homepage or another site's
+  landing page is the dead link above; whatever detection says, a redirect
+  onto another site's login path is the final login wall. The verdict is a
+  `PermanentError` wrapping the origin's `*HTTPStatusError` and the
+  verdict's sentinel, never `ErrAntiBot`: `native: HTTP 403 Forbidden: dead
+  link (redirected to another site's landing page: <host><path>): dead link
+  (content is gone)`. `Fetch` returns it before it consults the host cache
+  or Jina, so there is no Jina request, neither host is cached, and a fresh
+  entry for the destination doesn't override it. The error body is drained
+  unread, so there is no title: the not-found-title and login-title rules
+  can't fire, and another site's login page counts only by its path.
+  - Only 403 and 503, the only origin statuses that go to Jina. 404 and 410
+    are dead links already; 408, 421, 425, 429 and the retried 5xx are
+    retried without Jina and store nothing; any other status fails at once.
+    A landing page that answers one of those keeps its status verdict.
+  - A login path on the requested site that answers 403/503 stays
+    anti-bot: host-wide and Jina-eligible, like the site-wide login wall it
+    is on a 2xx.
+  - With dead-link detection off, a homepage or landing destination that
+    answers 403/503 stays anti-bot and may be stored through Jina, as a 2xx
+    one is stored from the origin: the kill switch's trade.
+- **Any other cross-site redirect is judged like any page.** A page that
+  passes is stored from the origin's answer (`via: readability`,
+  `Result.FinalURL` the destination). One that fails a page-level verdict
+  (a challenge, a 403/503 error page, no article, too little text) is
+  Jina-eligible and never cached; an error page naming another 5xx is
+  retried without Jina (`errServerErrorPage`) and never cached. A 403 or
+  503 status from it is anti-bot, cached under the destination (see "Host
+  cache: only host-wide verdicts, under the host that gave them").
+- A same-site redirect onto a login path is unchanged: site-wide when the
+  path changed, host-cached, Jina-eligible.
+- Jina answers carry no final URL, so no redirect rule fires on them.
+- No new config key: `fetcher.native.dead_link_detection` governs the
+  landing verdict with the other soft-404 rules.
+
+**Why each condition:**
+
+- (2) A login page is a wall, not a tombstone; it gets its own verdict
+  below.
+- (3) Shortener and profile links name a single word (`bit.ly/3xYzAb`,
+  `youtu.be/<id>`, `twitter.com/<user>`); a redirect of theirs to a
+  homepage says nothing about the link. This is the trap "Jina answers are
+  judged like the origin's pages" warned about: a cross-host "root means
+  dead" rule would kill them, and a dead verdict is sticky.
+- (4) A move keeps something of the page: its slug
+  (`farnamstreetblog.com/2013/06/the-work-required-to-have-an-opinion/` →
+  `fs.blog/the-work-required-to-have-an-opinion/`), its ID
+  (`twitter.com/jack/status/20` → `x.com/jack/status/20`, `youtu.be/<id>` →
+  `youtube.com/watch?v=<id>`, `c2.com/cgi/wiki?BurnOut=` →
+  `wiki.c2.com/?BurnOut`), or a name that moved into the hostname
+  (`computing.llnl.gov/tutorials/pthreads/` → `hpc-tutorials.llnl.gov/posix/`,
+  `content.time.com/time/…` → `time.com/archive/…`). The bookkeeping rule
+  catches `forums.aws.amazon.com/message.jspa?messageID=284911` →
+  `repost.aws/forums?newRedirect=1&origin=/message.jspa&messageID=284911`,
+  whose query repeats the ID only to record where the request came from.
+- (5) `/articles/`, `/forums`, `/technologies/` are sections; a numeric ID
+  (`help.evernote.com/hc/articles/209125877`) or a slug
+  (`nngroup.com/articles/why-you-only-need-to-test-with-5-users/`) names a
+  page.
+
+**Why:** the cross-host check in `looksLikeLoginWall` flagged every
+redirect onto another site as `ErrLoginWall` before any other check. Each
+cost a Jina request although the page already in hand was often the
+article, and Jina follows the same redirect: judged without a final URL,
+its answer was the destination's landing page, stored as the document.
+`daemon.log` holds 4,756 such lines over 1,395 URLs, 1,117 of them still
+cross-site under today's `sameSiteHost`. Of their documents, 695 were
+stored through Jina, junk among them ("Ben Horowitz, Partner at Andreessen
+Horowitz" ×11, "Java Issue Tracker - Home" ×11, "Oracle Java Technologies |
+Oracle" ×10, "Forums" ×8, "Articles on Self-Knowledge, Relationships and
+Calm" ×6, "Getting Real" ×5), and 398 failed. On 2026-09-26 326 failed for
+good on a Jina 403 (see "Jina requests identify as curio"), legitimate moves
+among them whose origin page was the article (`collabfund.com/blog/<slug>/`,
+`fs.blog/<slug>/`, `en.wikipedia.org/wiki/<X>`, `x.com/<user>/status/<id>`).
+
+The rule was built and tested against a live `curl -L` probe of 656 of
+those URLs (2026-09-27): 492 end on another site, and the rule marks 78 of
+them landing pages. 76 are junk (`java.sun.com/…` →
+`oracle.com/java/technologies/`, `ibm.com/developerworks/…` →
+`developer.ibm.com/technologies/`, 52 `thebookoflife.org/<slug>/` →
+`theschooloflife.com/articles/`, …) and 2 are section-level bookmarks
+(`pinterest.com/about/careers/` → `pinterestcareers.com/homepage`,
+`store.nike.com/us/en_us/` → `nike.com/w`). No moved article is marked.
+`TestLooksLikeLandingPage` pins the probe's cases.
+
+**Why another site's login page is final:** 48 library URLs redirect onto
+`accounts.google.com`, `id.atlassian.com`, `authn.edx.org`,
+`sentry.io/auth/login`, `data.ai/account/login` or `dropbox.com/login`.
+Jina has no session and follows the same redirect: it brought back the
+login page (38, rejected since "Jina answers are judged like the origin's
+pages"), a challenge (3), or the product's public page, stored as the
+document (Gmail, "Google Drive: Share Files Online…", "Shareable Online
+Calendar…"), never the bookmarked content. The verdict stays out of the
+host cache: it would otherwise take the site-wide branch (the path changed)
+and cache the requested host, `docs.google.com` say, for 15 minutes.
+
+**Why a 403 or 503 gets the URL rules:** `statusFailure` classified them by
+status alone, so the rules above never saw a redirect whose destination
+refused curio. With Jina on, Jina followed the same redirect and, with no
+final URL to judge, stored the destination's landing page: the failure this
+entry fixes for 2xx pages, which a working Jina (see "Jina requests
+identify as curio") would bring back. With Jina off, or once Jina gave its
+own verdict, `settle` cached the destination anti-bot for 15 minutes on the
+strength of another site's redirect, failing its healthy URLs without a
+request, and the document's retry failed from that entry: `failed`, never
+`dead`. Of the probe's 78 landing pairs, 14 answered 403: `typepad.com` →
+`networksolutions.com/typepad` ×4, `sologig.com` → `careerbuilder.com/` ×3,
+`pinterest.com/about/careers/`, `thinkgeek.com` →
+`gamestop.com/collectibles`, `ftalphaville.ft.com` → `ft.com/alphaville`,
+`jobamatic.com` → `simplyhired.com/`, `horizonsetfs.com` → `globalx.ca/`,
+`focus.com` → `telepathy.com/` and `mindware.com` →
+`mindware.orientaltrading.com/`. `daemon.log` shows it happening on
+2026-09-26 between 22:06 and 22:48: curio's own transport got `HTTP 403
+Forbidden` after these redirects and went to Jina, then `fast-fail from
+host cache` lines followed for `www.networksolutions.com`,
+`www.gamestop.com`, `www.ft.com`, `www.simplyhired.com` and
+`www.mindware.orientaltrading.com`. The library holds 7 documents Jina
+stored from exactly these redirects (see Existing documents).
+
+- **Neither host is cached** because the verdict is about this URL and
+  final at once, as dead links and offsite login walls always are: no
+  retry exists for a cache entry to cut short, and the destination's own
+  URLs get their own verdict when they are fetched.
+- **The same-site homepage rule is included:** it is the same
+  `looksLikeSoft404` URL rule on the same junk path, and Jina follows the
+  redirect to `/` and stores the homepage. It stays under the kill switch.
+- **The offsite login rule applies whatever detection says,** by its path,
+  for the reason the 2xx case is final: otherwise the SSO host is cached
+  anti-bot and Jina follows the same redirect.
+
+**Known limitations:**
+
+- A destination that keeps a word of the source is judged like any page,
+  and stored when it passes: `bugs.java.com/?bug_id=<N>` ("Java Issue
+  Tracker - Home", keeps the bug ID), `docs.oracle.com/en/java/javase/27/`
+  (keeps "javase" and "docs"), `docs.cloud.google.com/appengine/docs`,
+  `developer.ibm.com/languages/java/` (IBM `2edb88f5`, whose
+  `…/java/library/…` source keeps "java"). No URL rule tells these from a
+  real move without marking real articles dead.
+- So is a source of one word or none: `bhorowitz.com/<slug>` (the a16z
+  author pages), and a homepage bookmark such as `appdesignvault.com/`,
+  now redirected to a gambling site.
+- A landing page that answers an error status other than 403 or 503 keeps
+  that status's verdict: a 429 or a retried 5xx ends `failed` once its
+  retries run out, not `dead`.
+- No title is read from a 403 or 503 answer, so another site's login page
+  that only its title gives away (`accounts.google.com/ServiceLogin`) is no
+  offsite login wall there: it stays anti-bot, or is a landing page when it
+  kept none of the source's words.
+- No per-document override: `curio refetch <id> --force` only lifts the
+  409, and the new fetch applies the same rule to the same redirect, so it
+  helps only once the redirect changes. A page that did move there is
+  bookmarked at its new address (`curio add <url>`); a corpus the rule
+  misjudges needs `fetcher.native.dead_link_detection: false`, daemon-wide
+  and after a restart. An override per document would need a flag carried
+  from the API through the job payload into the fetcher, and the probe
+  found no moved article that the landing rule marks dead.
+
+**Existing documents:** nothing is migrated; a refetch applies the rule.
+The IBM notices `08bfd6d8`, `c108cb5b`, `e28b9286`, `1fca7860` and
+`54218aa5`, and `appdesignvault.com/portfolio/fitpulse/` (`460c159b`), go
+dead. IBM `2edb88f5` is stored as the IBM Developer "Java" page and
+`appdesignvault.com/` (`aeab1376`) as the gambling site's, per the
+limitations above. The 7 documents Jina stored on 2026-05-24 from a
+landing page that answers curio 403 go dead: `9cec217a` ("Typepad |
+Network Solutions"), `fb85af76`, `dee26197` and `a11710d5`
+("CareerBuilder® - Search Jobs Hiring Now"), `5e331b28` ("Telepathy -
+Powering Successful Brands"), `033bfd1a` ("Global X Investments Canada
+Inc.") and `ca357865` (`pinterest.com/about/careers/`, a section-level
+bookmark).
+
+---
+
+## Error pages whose status is hidden
+
+**Decision:** `judgePage` recognizes an error page by its content, after
+the challenge check and before the login-wall checks (`looksLikeErrorPage`):
+
+- **By title** (`errorPageTitleRE`), anchored at both ends: the error
+  phrase opens the title, optionally after "Error" and/or a status code
+  with a separator, and either ends it or is followed only by a spaced
+  separator and a site name ("Access forbidden : Stanford University", "403
+  | Forbidden | Axway", "503 Service Unavailable", "Error 503"). Also
+  Cloudflare's `<hostname> | 5NN: <reason>` and IBM's `<label>: The page
+  you requested cannot be displayed`. "How to fix a 403 Forbidden error",
+  "Service Unavailable: lessons from our outage" and "Understanding
+  Cloudflare Error 526" are articles. 404 and 410 titles stay with
+  `soft404TitleRE`.
+- **By body**, on pages of at most 2 KiB like the challenge phrases:
+  `<code>accessdenied</code>`, the S3 and Google Cloud Storage XML error,
+  is a 403.
+- **Judged like the status it names**, the mapping `statusFailure` and
+  `targetStatusVerdict` share:
+  - 403, 503, and the status-less refusals ("Forbidden", "Access
+    forbidden", "Service Unavailable", "cannot be displayed", the XML
+    error): `ErrAntiBot`, reason `error page: …`. Page-level: never
+    host-cached (no `*HTTPStatusError` in the chain), Jina-eligible at the
+    origin, and `errJinaRejected` in a Jina answer.
+  - Any other 5xx a title names (500, 502, 504, Cloudflare's 52x and
+    530): `errServerErrorPage`, retryable. At the origin it is neither
+    Jina-eligible nor cached; in a Jina answer `judgeJinaAnswer` makes it
+    `errJinaTargetTrouble`: retryable, uncached, no second Jina request.
+
+**Why:** 12 stored documents are error pages: the IBM notice ×6, "Access
+forbidden : Stanford University", Aptana's "403 | Forbidden",
+"appdesignvault.com | 526: Invalid SSL certificate" ×2, and two untitled
+Google Cloud Storage `AccessDenied` bodies of 588 bytes (`e9a41757`,
+`080ce36f`). They were not served with a 2xx, as first thought: their
+sites answered 503 or 403 (`daemon.log`, 2026-05-24) or redirected to a
+site where Jina met Cloudflare's 526, and the Jina path of the time stored
+whatever came back. Run over the stored bodies, today's `judgeJinaAnswer`
+rejects every one when Jina's `Target URL returned error` warning is
+present, and accepts every one without it; `judgePage` accepts every one as
+a 2xx origin page. None matches the challenge, not-found or login titles,
+and all but the GCS bodies exceed 500 bytes; Aptana's is 68 KB of cookie
+banner, so only its title can tell. This check is defense in depth for the
+two ways the status still goes missing: a Jina answer without the warning,
+and an origin serving its error page with a 2xx.
+
+Over all 7,982 stored titles, the title rule matches exactly the 11 error
+pages (the 10 titled ones above and visage.co's "403 Forbidden"), and the
+body phrase matches only the 8 S3 and GCS error bodies.
+
+**Existing documents:** refetching them doesn't exercise the check today:
+the IBM URLs now redirect to `developer.ibm.com` landing pages (see
+"Cross-site redirects: judged where they land"), Stanford, Aptana and GCS
+answer 403 at the origin, and `appdesignvault.com` redirects elsewhere.
+
+---
+
+## Jina requests identify as curio
+
+**Decision:**
+
+- Every Jina request sends a fixed, non-browser User-Agent,
+  `jinaUserAgent` (`curio (+https://github.com/samsar/curio)`), with
+  `Accept: text/plain` and the bearer key when configured. Never the Chrome
+  profile's User-Agent, never `fetcher.native.user_agent`, and none of the
+  `sec-ch-ua` / `sec-fetch-*` headers: those are for origins.
+- **Jina's own 403 is no verdict about the target.** `jinaAnswered` puts it
+  with 401 and 402, trouble with curio's client: the fetch stays retryable
+  and nothing is cached, behind a thin page or an origin 403 alike. The
+  target's own 403 comes in Jina's warning (`targetStatusVerdict`), and is
+  still an anti-bot rejection.
+- **A CDN challenge pauses Jina.** A 403 carrying Cloudflare's
+  `cf-mitigated: challenge` is `errJinaChallenged` ("r.jina.ai's CDN
+  challenged the request", still wrapping Jina's `*HTTPStatusError`). It
+  extends the shared Jina cooldown by its `Retry-After`, or by
+  `jinaChallengeCooldown` (10 minutes), with one WARN log line per
+  challenged answer. Within the pause, a Jina-bound fetch still makes its
+  origin request but sends no Jina request: it fails fast and retryably
+  through the existing cooldown check (`awaitJina`), uncached. A 403
+  without the header extends nothing.
+
+**Why:** the Jina fallback had failed every call since 2026-08-30.
+`jinaOnce` sent the origin's Chrome User-Agent, and r.jina.ai's Cloudflare
+answers a browser User-Agent from a client that runs no JavaScript with a
+managed challenge. Probed live on 2026-09-27 through curio's own transports:
+
+| Backend | Chrome 133 User-Agent | `curio/1.4 (+https://github.com/samsar/curio)` | No User-Agent |
+|---|---|---|---|
+| chrome | 403, `cf-mitigated: challenge`, "Just a moment..." | 200, Jina's text format | 200 |
+| stock | 403, `cf-mitigated: challenge`, "Just a moment..." | 200, Jina's text format | 200 |
+
+`curl` agrees: 403 with a Chrome User-Agent, 200 with its own. `daemon.log`
+shows 1,250 failed-job lines with a Jina 403 across 864 jobs since
+2026-08-30 (and 5 with 451); the last document stored through Jina dates
+from 2026-07-05. So anti-bot and login-wall pages and PDFs the local
+extractor can't read have had no fallback at all. No decision ever chose
+the browser User-Agent for Jina: "Chrome profiles carry their own
+User-Agent and sec-ch-ua" is about origin requests.
+
+The 403 made it worse: `jinaAnswered` took it for Jina's verdict about the
+target, against "Host cache: only host-wide verdicts, under the host that
+gave them". That produced 400 permanent page-level failures (`permanent
+failure: jina: HTTP 403 Forbidden (after native: login wall or thin
+content …)`), 402 origin-403 first failures that wrote the host cache, and
+428 permanent cache hits served from those entries (`(cached: jina: HTTP
+403 Forbidden …)`).
+
+**Why a pause:** while the CDN refuses curio, every Jina call gets the same
+answer. Pausing all of them saves each Jina-bound fetch a request that would
+only be challenged again. The pause doesn't hold back the job queue's
+retries, which follow its own backoff (about 1, 3, 7 and 15 minutes after
+the first failure): one that comes due inside the pause fails at once,
+retryably, and uses up an attempt, so a document can end `failed` before
+Jina answers again; `curio refetch --all --state=failed` recovers it.
+`jinaOnce` drops the challenge body, so the error names the challenge
+instead.
+
+**Ordering:** this shipped with "Cross-site redirects: judged where they
+land". With Jina answering again, cross-site redirects still sent to it
+would once more store the destinations' landing pages.
 
 ---
 

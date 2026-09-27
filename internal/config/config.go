@@ -103,11 +103,14 @@ type Native struct {
 	// upstream; curio paces keyed calls at 200/min). Optional; also read
 	// from CURIO_JINA_API_KEY.
 	JinaAPIKey string `yaml:"jina_api_key"`
-	UserAgent  string `yaml:"user_agent"`
+	// UserAgent overrides the Chrome profile's User-Agent on origin
+	// requests. Jina Reader requests always identify as curio.
+	UserAgent string `yaml:"user_agent"`
 	// DeadLinkDetection classifies hard 404/410s and detected soft 404s
 	// as permanently dead (doc state `dead`, no retries, no Jina).
-	// Default true; the kill switch exists because the soft-404 title
-	// heuristics can false-positive on unusual corpora.
+	// Default true; the kill switch exists because the soft-404 heuristics
+	// (not-found titles, redirects onto a homepage or another site's
+	// landing page) can false-positive on unusual corpora.
 	DeadLinkDetection bool `yaml:"dead_link_detection"`
 	// Backend selects the HTTP transport: "chrome" (default) parrots a
 	// Chrome TLS+HTTP/2 fingerprint via uTLS to clear JA3/Akamai bot
