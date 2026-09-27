@@ -238,7 +238,9 @@ other Jina failure.
 **`dead link (redirected to another site's landing page: …)`** on a
 document — the bookmark redirects to another site's homepage or section
 page, which kept nothing of what the bookmark named: the usual fate of a
-retired site's pages. If the page did move there, `curio refetch <id>
+retired site's pages. When that page refused curio, the message starts with
+`HTTP 403 Forbidden:` or `HTTP 503 Service Unavailable:`; the verdict is
+the same. If the page did move there, `curio refetch <id>
 --force` fetches it again; if a whole corpus is misjudged,
 `fetcher.native.dead_link_detection: false` turns the dead-link rules off.
 

@@ -8,8 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,10 +89,30 @@ func TestLooksLikeLandingPage(t *testing.T) {
 // which serves page. It returns the 127.0.0.1 base URL.
 func newCrossSiteRedirect(t *testing.T, dest, page string) string {
 	t.Helper()
+	return redirectToLocalhost(t, dest, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, page)
+	})
+}
+
+// newBlockedCrossSiteRedirect is newCrossSiteRedirect with a destination
+// that answers status with a block page.
+func newBlockedCrossSiteRedirect(t *testing.T, dest string, status int) string {
+	t.Helper()
+	return redirectToLocalhost(t, dest, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, blockPageHTML)
+	})
+}
+
+// redirectToLocalhost redirects every request to its server as 127.0.0.1
+// to dest on localhost, where answer serves it. It returns the 127.0.0.1
+// base URL.
+func redirectToLocalhost(t *testing.T, dest string, answer http.HandlerFunc) string {
+	t.Helper()
 	var destBase string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.Host, "localhost:") {
-			_, _ = io.WriteString(w, page)
+			answer(w, r)
 			return
 		}
 		http.Redirect(w, r, destBase+dest, http.StatusFound)
@@ -97,6 +121,30 @@ func newCrossSiteRedirect(t *testing.T, dest, page string) string {
 	destBase = localhostURL(t, srv.URL)
 	return srv.URL
 }
+
+// newBlockedSameSiteRedirect redirects every request to dest (a path and
+// query) on the same host, which answers status with a block page. It
+// returns the base URL.
+func newBlockedSameSiteRedirect(t *testing.T, dest string, status int) string {
+	t.Helper()
+	destURL, err := url.Parse(dest)
+	require.NoError(t, err)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == destURL.Path {
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, blockPageHTML)
+			return
+		}
+		http.Redirect(w, r, dest, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// blockPageHTML is the body of a blocked answer: Cloudflare's block page,
+// which curio drains unread.
+const blockPageHTML = `<html><head><title>Attention Required! | Cloudflare</title></head>` +
+	`<body><h1>Sorry, you have been blocked</h1></body></html>`
 
 // assertUncached asserts that neither side of a cross-site redirect got a
 // host-cache entry.
@@ -115,6 +163,29 @@ func crossSiteNative(t *testing.T, detection bool) (*Native, func() int32) {
 	n, jinaCalls := newNativeWithJina(t, jinaThin)
 	n.deadLinkDetection = detection
 	return n, jinaCalls
+}
+
+// landingReply is what Jina brings back after following a redirect onto a
+// landing page: a page that passes every verdict, so a fetch that reached
+// Jina would store it.
+var landingReply = jinaReply("Java Technologies | Oracle", nil, longArticleBody)
+
+// landingJinaNative is a Native on backend, with dead-link detection as
+// given, whose Jina answers landingReply, counting its requests. With jina
+// false the fallback is off and the count stays zero.
+func landingJinaNative(t *testing.T, backend string, jina, detection bool) (*Native, func() int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, landingReply)
+	}))
+	t.Cleanup(srv.Close)
+	n := NewNative(NativeOptions{
+		Timeout: 5 * time.Second, Backend: backend, DeadLinkDetection: detection,
+		JinaFallback: jina, JinaBaseURL: srv.URL + "/",
+	})
+	return unpaced(n, newFakeClock()), hits.Load
 }
 
 // TestNative_CrossSiteLandingPageIsDead: a redirect that settles on another
@@ -262,4 +333,158 @@ func TestNative_SameSiteLoginRedirectIsSiteWide(t *testing.T) {
 	assert.Equal(t, int32(1), jinaCalls())
 	_, cached := n.hostCache.Get("127.0.0.1")
 	assert.True(t, cached)
+}
+
+// TestNative_BlockedLandingPageIsDead: a redirect onto another site's
+// landing page that answers 403 or 503 is the dead link it is on a 2xx, not
+// anti-bot. It is final at once, without Jina, which would follow the same
+// redirect and store the landing page; it caches neither host, and wins
+// over a fresh entry for the destination.
+func TestNative_BlockedLandingPageIsDead(t *testing.T) {
+	const source, dest = "/developer/technicalArticles/Intl/IntlIntro/", "/java/technologies/"
+	for _, backend := range []string{"chrome", "stock"} {
+		for _, status := range []int{http.StatusForbidden, http.StatusServiceUnavailable} {
+			for _, jina := range []bool{true, false} {
+				for _, destCached := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/%d/jina=%v/destination cached=%v", backend, status, jina, destCached), func(t *testing.T) {
+						src := newBlockedCrossSiteRedirect(t, dest, status)
+						n, jinaCalls := landingJinaNative(t, backend, jina, true)
+						if destCached {
+							n.hostCache.Put("localhost", HostFailAntiBot, "native: HTTP 403 Forbidden: "+ErrAntiBot.Error())
+						}
+
+						_, err := n.Fetch(context.Background(), src+source)
+						var pe *PermanentError
+						require.ErrorAs(t, err, &pe)
+						assert.ErrorIs(t, err, ErrDeadLink)
+						assert.NotErrorIs(t, err, ErrAntiBot)
+						var se *HTTPStatusError
+						require.ErrorAs(t, err, &se, "the origin's status stays in the chain")
+						assert.Equal(t, status, se.StatusCode)
+						assert.Equal(t, "localhost", hostOf(se.URL))
+						assert.Regexp(t, fmt.Sprintf(`^native: HTTP %d %s: dead link \(redirected to another site's landing page: localhost:\d+%s\): %s$`,
+							status, http.StatusText(status), dest, regexp.QuoteMeta(ErrDeadLink.Error())), err.Error())
+						assert.Zero(t, jinaCalls())
+
+						_, cached := n.hostCache.Get("127.0.0.1")
+						assert.False(t, cached, "the requested host is not cached")
+						_, cached = n.hostCache.Get("localhost")
+						assert.Equal(t, destCached, cached, "the destination is cached only as seeded")
+					})
+				}
+			}
+		}
+	}
+}
+
+// TestNative_BlockedHomepageIsDead: a redirect onto the site's homepage that
+// answers 403 or 503 is the dead link it is on a 2xx: final, without Jina,
+// which would store the homepage, and uncached.
+func TestNative_BlockedHomepageIsDead(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusServiceUnavailable} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			src := newBlockedSameSiteRedirect(t, "/", status)
+			n, jinaCalls := landingJinaNative(t, "", true, true)
+
+			_, err := n.Fetch(context.Background(), src+"/2019/05/a-deleted-post")
+			var pe *PermanentError
+			require.ErrorAs(t, err, &pe)
+			assert.ErrorIs(t, err, ErrDeadLink)
+			assert.NotErrorIs(t, err, ErrAntiBot)
+			assert.Contains(t, err.Error(), fmt.Sprintf("HTTP %d", status))
+			assert.Contains(t, err.Error(), "dead link (redirected to homepage)")
+			assert.Zero(t, jinaCalls())
+			_, cached := n.hostCache.Get("127.0.0.1")
+			assert.False(t, cached)
+		})
+	}
+}
+
+// TestNative_BlockedOffsiteLoginIsFinal: a redirect onto another site's
+// login page that answers 403 or 503 is the final login wall it is on a
+// 2xx, whatever dead-link detection says: no Jina request, which would
+// follow the same redirect, and neither host cached.
+func TestNative_BlockedOffsiteLoginIsFinal(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusServiceUnavailable} {
+		for _, detection := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%d/detection=%v", status, detection), func(t *testing.T) {
+				src := newBlockedCrossSiteRedirect(t, "/login?continue=https://example.com/doc", status)
+				n, jinaCalls := landingJinaNative(t, "", true, detection)
+
+				_, err := n.Fetch(context.Background(), src+"/document/d/1AbC/edit")
+				var pe *PermanentError
+				require.ErrorAs(t, err, &pe)
+				assert.ErrorIs(t, err, errOffsiteLoginWall)
+				assert.ErrorIs(t, err, ErrLoginWall)
+				assert.NotErrorIs(t, err, ErrAntiBot)
+				assert.NotErrorIs(t, err, ErrDeadLink)
+				var se *HTTPStatusError
+				require.ErrorAs(t, err, &se)
+				assert.Equal(t, status, se.StatusCode)
+				assert.Contains(t, err.Error(), "redirected onto another site's login page: localhost:")
+				assert.Zero(t, jinaCalls())
+				assertUncached(t, n)
+			})
+		}
+	}
+}
+
+// TestNative_BlockedPageIsAntiBotWithoutARedirectVerdict: a 403 from a page
+// no redirect rule judges (another site's page that kept the source's
+// words, the site's own login page) is anti-bot as before: host-wide,
+// cached under the host that answered once Jina gave its own verdict, the
+// first failure retryable, and stored through Jina when Jina passes.
+func TestNative_BlockedPageIsAntiBotWithoutARedirectVerdict(t *testing.T) {
+	cases := []struct {
+		name, source string
+		redirect     func(t *testing.T) string
+		answering    string // the host cached
+	}{
+		{"another site's page", "/blog/useful-hacks/", func(t *testing.T) string {
+			return newBlockedCrossSiteRedirect(t, "/blog/useful-hacks/", http.StatusForbidden)
+		}, "localhost"},
+		{"the site's own login page", "/post", func(t *testing.T) string {
+			return newBlockedSameSiteRedirect(t, "/login?next=/post", http.StatusForbidden)
+		}, "127.0.0.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/jina thin", func(t *testing.T) {
+			src := tc.redirect(t)
+			n, jinaCalls := crossSiteNative(t, true)
+
+			_, err := n.Fetch(context.Background(), src+tc.source)
+			require.ErrorIs(t, err, ErrAntiBot)
+			assert.NotErrorIs(t, err, ErrDeadLink)
+			assert.NotErrorIs(t, err, errOffsiteLoginWall)
+			var pe *PermanentError
+			assert.False(t, errors.As(err, &pe), "the first failure stays retryable: %v", err)
+			assert.Equal(t, int32(1), jinaCalls())
+			for _, host := range []string{"127.0.0.1", "localhost"} {
+				_, cached := n.hostCache.Get(host)
+				assert.Equal(t, host == tc.answering, cached, "%s cached", host)
+			}
+		})
+		t.Run(tc.name+"/jina passes", func(t *testing.T) {
+			src := tc.redirect(t)
+			n, jinaCalls := landingJinaNative(t, "", true, true)
+
+			res, err := n.Fetch(context.Background(), src+tc.source)
+			require.NoError(t, err)
+			assert.Equal(t, "jina", res.Meta["via"])
+			assert.Equal(t, int32(1), jinaCalls())
+		})
+	}
+}
+
+// TestNative_BlockedLandingPageNeedsDeadLinkDetection: with dead-link
+// detection off, a redirect onto a landing page that answers 403 is
+// anti-bot, and goes to Jina, as before.
+func TestNative_BlockedLandingPageNeedsDeadLinkDetection(t *testing.T) {
+	src := newBlockedCrossSiteRedirect(t, "/java/technologies/", http.StatusForbidden)
+	n, jinaCalls := crossSiteNative(t, false)
+
+	_, err := n.Fetch(context.Background(), src+"/developer/technicalArticles/Intl/IntlIntro/")
+	require.ErrorIs(t, err, ErrAntiBot)
+	assert.NotErrorIs(t, err, ErrDeadLink)
+	assert.Equal(t, int32(1), jinaCalls())
 }

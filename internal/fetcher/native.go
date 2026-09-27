@@ -258,7 +258,9 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 //
 //   - ErrLoginWall: the page came back but was paywalled or thin
 //   - ErrAntiBot: 403/503 from the origin, likely a WAF block, or a
-//     challenge or 403/503 error page served with a 2xx
+//     challenge or 403/503 error page served with a 2xx. A 403/503 from the
+//     homepage or another site's landing page a redirect settled on is a
+//     dead link instead, with dead-link detection on (statusFailure).
 //   - errPDFUnreadable: a PDF the local extractor couldn't read; Jina
 //     renders PDFs itself
 //
@@ -266,8 +268,9 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 // page naming a server error) goes without Jina: it can't conjure a page
 // that doesn't exist, and spending its rate limit on dead links gets us
 // 429'd on the calls that would benefit. Neither does a redirect onto
-// another site's login page, although it is an ErrLoginWall: it comes as a
-// PermanentError, which Fetch returns before asking.
+// another site's login page, although it is an ErrLoginWall, whether that
+// page answered 2xx, 403 or 503: it comes as a PermanentError, which Fetch
+// returns before asking.
 func jinaCanHelp(err error) bool {
 	return errors.Is(err, ErrLoginWall) || errors.Is(err, ErrAntiBot) || errors.Is(err, errPDFUnreadable)
 }
@@ -430,7 +433,7 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 
 	if resp.statusCode < 200 || resp.statusCode >= 300 {
 		discardErrorBody(resp.body)
-		return nil, n.statusFailure(resp)
+		return nil, n.statusFailure(target, resp)
 	}
 
 	// PDFs: extract locally (pure-Go); Fetch falls back to Jina. Detected
@@ -504,22 +507,30 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	return r, nil
 }
 
-// statusFailure classifies a non-2xx origin answer. Two statuses get the
-// fetch policy's special handling before the generic retry rule applies:
+// statusFailure classifies a non-2xx origin answer to a request for target.
+// Two statuses get the fetch policy's special handling before the generic
+// retry rule applies:
 //
 //   - 403 and 503 are commonly Cloudflare / WAF bot blocks rather than
 //     genuine "forbidden" or "server down" answers, and Jina's
 //     infrastructure often gets through where we don't. Tagged ErrAntiBot
-//     so Fetch falls back instead of giving up.
+//     so Fetch falls back instead of giving up. A redirect onto the
+//     homepage or another site's landing or login page is judged first
+//     (judgeRedirect): its verdict is final, since Jina would follow the
+//     same redirect to the same page, and caches neither host, since it is
+//     about this URL alone. It keeps the status in its chain.
 //   - 404 and 410 are deterministic "page is gone" answers: permanent, so
 //     the doc fails on attempt 1 instead of burning the retry budget, and
 //     never sent to Jina. With dead-link detection off they stay
 //     retryable, which is what the kill switch restores.
-func (n *Native) statusFailure(resp *fetchResponse) error {
+func (n *Native) statusFailure(target string, resp *fetchResponse) error {
 	se := &HTTPStatusError{StatusCode: resp.statusCode, URL: resp.finalURL.String()}
 	se.RetryAfter, _ = parseRetryAfter(resp.header, n.clock.now())
 	switch resp.statusCode {
 	case http.StatusForbidden, http.StatusServiceUnavailable:
+		if err := n.judgeRedirect(target, resp.finalURL); err != nil {
+			return &PermanentError{Err: fmt.Errorf("native: %w: %w", se, err)}
+		}
 		return fmt.Errorf("native: %w: %w", se, ErrAntiBot)
 	case http.StatusNotFound, http.StatusGone:
 		if n.deadLinkDetection {
@@ -611,7 +622,7 @@ func articleView(article readability.Article, finalURL *url.URL) (pageView, erro
 func (n *Native) judgePage(target string, p pageView) error {
 	if n.deadLinkDetection {
 		if reason := looksLikeSoft404(p, target); reason != "" {
-			return fmt.Errorf("dead link (%s): %w", reason, ErrDeadLink)
+			return deadLink(reason)
 		}
 	}
 	if reason := looksLikeChallenge(p); reason != "" {
@@ -621,9 +632,46 @@ func (n *Native) judgePage(target string, p pageView) error {
 		return errorPageVerdict(code, reason)
 	}
 	if reason, scope := looksLikeLoginWall(p, target); reason != "" {
-		return fmt.Errorf("%w (%s)", scope.sentinel(), reason)
+		return loginWall(reason, scope)
 	}
 	return nil
+}
+
+// judgeRedirect gives judgePage's redirect verdicts on where a request for
+// target settled, for an answer whose page is not read: with no title and
+// no article, only the URL rules can hold. In judgePage's order:
+//
+//  1. Dead link, with dead-link detection on: the request settled on the
+//     site's homepage or on another site's landing page.
+//  2. A login page on another site. The other login-wall verdicts are left
+//     to the status: a page-level one is about content this answer lacks,
+//     and a login path on the requested site stays anti-bot, host-wide and
+//     Jina-eligible like the site-wide wall it is on a 2xx.
+//
+// It returns nil when neither holds, as for a request that wasn't
+// redirected.
+func (n *Native) judgeRedirect(target string, final *url.URL) error {
+	p := pageView{finalURL: final}
+	if n.deadLinkDetection {
+		if reason := looksLikeSoft404(p, target); reason != "" {
+			return deadLink(reason)
+		}
+	}
+	if reason, scope := looksLikeLoginWall(p, target); scope == loginWallOffsite {
+		return loginWall(reason, scope)
+	}
+	return nil
+}
+
+// deadLink is the dead-link verdict, for the reason a soft-404 rule gives.
+func deadLink(reason string) error {
+	return fmt.Errorf("dead link (%s): %w", reason, ErrDeadLink)
+}
+
+// loginWall is the login-wall verdict of scope, for the reason
+// looksLikeLoginWall gives.
+func loginWall(reason string, scope loginWallScope) error {
+	return fmt.Errorf("%w (%s)", scope.sentinel(), reason)
 }
 
 // looksLikeChallenge detects a bot-challenge or block page served with a

@@ -312,7 +312,8 @@ External processes the daemon expects:
   identify as curio, not as a browser. Its answers are judged like the
   origin's before they are stored: challenge, block, error, not-found and
   login pages are rejected. A redirect onto another site is judged where it
-  lands, without Jina: a landing page is a dead link, a login page final.
+  lands, without Jina: a landing page is a dead link, a login page final,
+  even when it answers 403 or 503.
 - **Claude API (optional)** — a future `generator.Generator` impl for heavier
   synthesis on the M6 RAG path (retrieve → LLM → cited answer).
 

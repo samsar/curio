@@ -1682,8 +1682,10 @@ like the origin's pages".
 - A redirect that settles on another site's landing page, a homepage or a
   section that kept nothing of the page asked for, is a soft 404 too
   (`looksLikeLandingPage`), under the same kill switch. It is not
-  host-cached either, for either host. See "Cross-site redirects: judged
-  where they land".
+  host-cached either, for either host. This rule and the homepage rule
+  judge where a redirect landed whatever that page answered: 2xx, 403 or
+  503. A 403/503 there is a dead link, not anti-bot, and never goes to
+  Jina. See "Cross-site redirects: judged where they land".
 - The homepage rule needs a source that names a page once a trailing index
   document is dropped, the landing rule's reading of the source
   (`pageSegments`): `ocw.mit.edu/index.htm` → `ocw.mit.edu/` is the
@@ -2485,6 +2487,13 @@ budget. Jina kept a status map of its own. Errors built with `%v` or plain
 strings couldn't be matched with `errors.Is`/`errors.As`, and GitHub
 errors pasted whole response bodies into `jobs.last_error`.
 
+**Revised (2026-09-27):** Native's 403 and 503 are `ErrAntiBot` unless the
+request was redirected onto a page the redirect verdicts judge: another
+site's login page, or, with dead-link detection on, the site's homepage or
+another site's landing page. That verdict (`ErrDeadLink`, or the offsite
+login wall) is a `PermanentError` and still carries the origin's
+`*HTTPStatusError`. See "Cross-site redirects: judged where they land".
+
 ---
 
 ## GitHub: secondary rate limits and a shared cooldown
@@ -2664,12 +2673,21 @@ same way on every path that exists.
   every Jina call. See "Jina requests identify as curio".
 - **A redirect onto another site is page-level, whatever it reaches.** A
   landing page (a dead link) and a login page (a final login wall) cache
-  neither the requested nor the answering host; the site-wide login verdict
-  needs a redirect that stays on the site. The page-level list above now
-  reads: thin text, no article, a login-like title, a redirect onto another
-  site's login or landing page, a challenge or an error page recognized in
-  content. See "Cross-site redirects: judged where they land" and "Error
-  pages whose status is hidden".
+  neither the requested nor the answering host, whatever that page
+  answered: 2xx, 403 or 503. So the anti-bot verdict above needs a 403/503
+  that no redirect verdict explains: not one after a redirect onto another
+  site's login page, nor, with dead-link detection on, onto the site's
+  homepage or another site's landing page. The site-wide login verdict
+  needs a redirect that stays on the site.
+- **The page-level verdicts above, now:** none is cached. Thin text, no
+  article, a login-like title, and a challenge or 403/503 error page
+  recognized in content fail permanently once every configured extraction
+  path has answered. A redirect onto the homepage or another site's landing
+  page (a dead link, detection on) or onto another site's login page
+  (`errOffsiteLoginWall`) is final at once, without Jina. An error page
+  naming another 5xx (`errServerErrorPage`) is retried and never sent to
+  Jina. See "Cross-site redirects: judged where they land" and "Error pages
+  whose status is hidden".
 
 ---
 
@@ -4683,11 +4701,39 @@ that page fails a page-level verdict:
   (`loginTitleRE`) on the destination. `errOffsiteLoginWall` wraps
   `ErrLoginWall` but not `errSiteLoginWall`, and `tryReadability` makes it
   a `PermanentError`: document `failed`, no Jina request, never cached.
+- **A 403 or 503 answer gets the same URL rules first.** Before
+  `statusFailure` makes a 403/503 `ErrAntiBot`, `judgeRedirect` judges
+  where the request settled, with `judgePage`'s own predicates and verdict
+  helpers (`deadLink`, `loginWall`) in `judgePage`'s order: with dead-link
+  detection on, a redirect onto the site's homepage or another site's
+  landing page is the dead link above; whatever detection says, a redirect
+  onto another site's login path is the final login wall. The verdict is a
+  `PermanentError` wrapping the origin's `*HTTPStatusError` and the
+  verdict's sentinel, never `ErrAntiBot`: `native: HTTP 403 Forbidden: dead
+  link (redirected to another site's landing page: <host><path>): dead link
+  (content is gone)`. `Fetch` returns it before it consults the host cache
+  or Jina, so there is no Jina request, neither host is cached, and a fresh
+  entry for the destination doesn't override it. The error body is drained
+  unread, so there is no title: the not-found-title and login-title rules
+  can't fire, and another site's login page counts only by its path.
+  - Only 403 and 503, the only origin statuses that go to Jina. 404 and 410
+    are dead links already; 408, 421, 425, 429 and the retried 5xx are
+    retried without Jina and store nothing; any other status fails at once.
+    A landing page that answers one of those keeps its status verdict.
+  - A login path on the requested site that answers 403/503 stays
+    anti-bot: host-wide and Jina-eligible, like the site-wide login wall it
+    is on a 2xx.
+  - With dead-link detection off, a homepage or landing destination that
+    answers 403/503 stays anti-bot and may be stored through Jina, as a 2xx
+    one is stored from the origin: the kill switch's trade.
 - **Any other cross-site redirect is judged like any page.** A page that
   passes is stored from the origin's answer (`via: readability`,
-  `Result.FinalURL` the destination); one that fails a page-level verdict
-  (a challenge, an error page, no article, too little text) is handled as
-  before: Jina-eligible, never cached.
+  `Result.FinalURL` the destination). One that fails a page-level verdict
+  (a challenge, a 403/503 error page, no article, too little text) is
+  Jina-eligible and never cached; an error page naming another 5xx is
+  retried without Jina (`errServerErrorPage`) and never cached. A 403 or
+  503 status from it is anti-bot, cached under the destination (see "Host
+  cache: only host-wide verdicts, under the host that gave them").
 - A same-site redirect onto a login path is unchanged: site-wide when the
   path changed, host-cached, Jina-eligible.
 - Jina answers carry no final URL, so no redirect rule fires on them.
@@ -4755,6 +4801,40 @@ Calendar…"), never the bookmarked content. The verdict stays out of the
 host cache: it would otherwise take the site-wide branch (the path changed)
 and cache the requested host, `docs.google.com` say, for 15 minutes.
 
+**Why a 403 or 503 gets the URL rules:** `statusFailure` classified them by
+status alone, so the rules above never saw a redirect whose destination
+refused curio. With Jina on, Jina followed the same redirect and, with no
+final URL to judge, stored the destination's landing page: the failure this
+entry fixes for 2xx pages, which a working Jina (see "Jina requests
+identify as curio") would bring back. With Jina off, or once Jina gave its
+own verdict, `settle` cached the destination anti-bot for 15 minutes on the
+strength of another site's redirect, failing its healthy URLs without a
+request, and the document's retry failed from that entry: `failed`, never
+`dead`. Of the probe's 78 landing pairs, 14 answered 403: `typepad.com` →
+`networksolutions.com/typepad` ×4, `sologig.com` → `careerbuilder.com/` ×3,
+`pinterest.com/about/careers/`, `thinkgeek.com` →
+`gamestop.com/collectibles`, `ftalphaville.ft.com` → `ft.com/alphaville`,
+`jobamatic.com` → `simplyhired.com/`, `horizonsetfs.com` → `globalx.ca/`,
+`focus.com` → `telepathy.com/` and `mindware.com` →
+`mindware.orientaltrading.com/`. `daemon.log` shows it happening on
+2026-09-26 between 22:06 and 22:48: curio's own transport got `HTTP 403
+Forbidden` after these redirects and went to Jina, then `fast-fail from
+host cache` lines followed for `www.networksolutions.com`,
+`www.gamestop.com`, `www.ft.com`, `www.simplyhired.com` and
+`www.mindware.orientaltrading.com`. The library holds 7 documents Jina
+stored from exactly these redirects (see Existing documents).
+
+- **Neither host is cached** because the verdict is about this URL and
+  final at once, as dead links and offsite login walls always are: no
+  retry exists for a cache entry to cut short, and the destination's own
+  URLs get their own verdict when they are fetched.
+- **The same-site homepage rule is included:** it is the same
+  `looksLikeSoft404` URL rule on the same junk path, and Jina follows the
+  redirect to `/` and stores the homepage. It stays under the kill switch.
+- **The offsite login rule applies whatever detection says,** by its path,
+  for the reason the 2xx case is final: otherwise the SSO host is cached
+  anti-bot and Jina follows the same redirect.
+
 **Known limitations:**
 
 - A destination that keeps a word of the source is judged like any page,
@@ -4767,6 +4847,13 @@ and cache the requested host, `docs.google.com` say, for 15 minutes.
 - So is a source of one word or none: `bhorowitz.com/<slug>` (the a16z
   author pages), and a homepage bookmark such as `appdesignvault.com/`,
   now redirected to a gambling site.
+- A landing page that answers an error status other than 403 or 503 keeps
+  that status's verdict: a 429 or a retried 5xx ends `failed` once its
+  retries run out, not `dead`.
+- No title is read from a 403 or 503 answer, so another site's login page
+  that only its title gives away (`accounts.google.com/ServiceLogin`) is no
+  offsite login wall there: it stays anti-bot, or is a landing page when it
+  kept none of the source's words.
 - Recovery from a wrong dead verdict: `curio refetch <id> --force`, or
   `fetcher.native.dead_link_detection: false` for a corpus it misjudges.
 
@@ -4775,7 +4862,13 @@ The IBM notices `08bfd6d8`, `c108cb5b`, `e28b9286`, `1fca7860` and
 `54218aa5`, and `appdesignvault.com/portfolio/fitpulse/` (`460c159b`), go
 dead. IBM `2edb88f5` is stored as the IBM Developer "Java" page and
 `appdesignvault.com/` (`aeab1376`) as the gambling site's, per the
-limitations above.
+limitations above. The 7 documents Jina stored on 2026-05-24 from a
+landing page that answers curio 403 go dead: `9cec217a` ("Typepad |
+Network Solutions"), `fb85af76`, `dee26197` and `a11710d5`
+("CareerBuilder® - Search Jobs Hiring Now"), `5e331b28` ("Telepathy -
+Powering Successful Brands"), `033bfd1a` ("Global X Investments Canada
+Inc.") and `ca357865` (`pinterest.com/about/careers/`, a section-level
+bookmark).
 
 ---
 
