@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -49,6 +50,9 @@ func newAddCmd(env *daemonctl.Env) *cobra.Command {
 				if res.Bookmark.DocumentID == nil {
 					return errors.New("server returned no document id to wait on")
 				}
+				if res.Bookmark.DocumentState != "fetched" {
+					noteClosedQueue(cmd.Context(), cmd.ErrOrStderr(), env.Client)
+				}
 				if err := waitForFetch(cmd.Context(), env.Client, *res.Bookmark.DocumentID, time.Duration(waitSec)*time.Second); err != nil {
 					return err
 				}
@@ -63,6 +67,22 @@ func newAddCmd(env *daemonctl.Env) *cobra.Command {
 	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the fetch + index to complete")
 	cmd.Flags().IntVar(&waitSec, "wait-timeout", 60, "Seconds to wait when --wait is set")
 	return cmd
+}
+
+// noteClosedQueue tells a user about to wait on a fetch that the queue
+// won't start it yet, and why. It says nothing when the queue can't be
+// read (a daemon from before the queue controls, say): the wait is the
+// same either way.
+func noteClosedQueue(ctx context.Context, w io.Writer, c *client.Client) {
+	ctx, cancel := context.WithTimeout(ctx, queueStatusTimeout)
+	defer cancel()
+	q, err := c.Queue(ctx)
+	if err != nil {
+		return
+	}
+	if why := whyClosed(q); why != "" {
+		fmt.Fprintf(w, "note: nothing starts while the queue is %s\n", why)
+	}
 }
 
 // fetchPollInterval is how often waitForFetch checks the document.

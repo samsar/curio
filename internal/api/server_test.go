@@ -23,6 +23,7 @@ import (
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
@@ -39,6 +40,10 @@ type testServer struct {
 	srv     *Server
 	startup *Startup
 }
+
+// testPools are the pool sizes the test server's queue gate reports limits
+// for: the daemon's defaults.
+var testPools = jobs.PoolSizes{Fetch: 16, Index: 4}
 
 // newTestServer starts the server with the full API; each option adjusts
 // its Deps first.
@@ -57,6 +62,9 @@ func newStartingTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	db := sqlitetest.NewDB(t)
 	home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
 	require.NoError(t, err)
+	quiet := slog.New(slog.DiscardHandler)
+	gate, err := jobs.NewQueueGate(context.Background(), sqlite.NewQueueSettings(db), testPools, quiet)
+	require.NoError(t, err)
 
 	deps := Deps{
 		Home:           home,
@@ -67,7 +75,8 @@ func newStartingTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 		Queue:          sqlite.NewJobs(db),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
-		Log:            slog.New(slog.DiscardHandler),
+		Gate:           gate,
+		Log:            quiet,
 	}
 	for _, opt := range options {
 		opt(&deps)

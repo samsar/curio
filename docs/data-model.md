@@ -263,6 +263,33 @@ when a job is enqueued or put back to pending in this process
 polls, starting at 500 ms and backing off to 5 s, which is how it finds
 retries coming due and jobs other processes enqueued.
 
+Every claim first waits on the queue gate (`queue_settings`, below): while
+the queue is paused, outside its daily schedule, or at the throttle's cap
+for a kind, workers make no claim, and a pending job stays pending however
+long it has been runnable. Running jobs are never interrupted.
+
+### `queue_settings`
+
+The queue gate's settings: one row, daemon-wide, with no `tenant_id`,
+since workers claim across tenants. No row means the defaults: not
+paused, `normal`, no schedule.
+
+```
+queue_settings
+  id              INTEGER PK                   -- always 1
+  paused          INTEGER NOT NULL DEFAULT 0   -- 0 | 1
+  throttle        TEXT NOT NULL DEFAULT 'normal'   -- 'normal' | 'gentle'
+  schedule_start  INTEGER                      -- minutes after local midnight, 0..1439; NULL: no schedule
+  schedule_end    INTEGER                      -- set with schedule_start, never equal to it
+  updated_at
+```
+
+The daemon reads the row once at startup and refuses to start if it
+can't; it writes it only when `PUT /v1/queue` changes a setting. The
+schedule is a window of the daemon's local wall clock, from
+`schedule_start` up to `schedule_end`, wrapping midnight when the end is
+the smaller.
+
 ### `cluster_runs`
 
 One row per clustering execution. The clusters of the latest `done` run are

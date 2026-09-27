@@ -75,6 +75,7 @@ func newStatusCmd(env *daemonctl.Env) *cobra.Command {
 					fmt.Fprintf(w, "jobs:      %s\n", formatMap(stats.JobsByStatus))
 				}
 			}
+			printQueue(cmd.Context(), w, env.Client)
 
 			printDiskUsage(w, env.Home.Path)
 

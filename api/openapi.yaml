@@ -41,6 +41,8 @@ info:
         or with `jobs_enqueued` for the bulk refetch-all and reindex-all,
         which have no parent job. Imports are synchronous per request; the
         fetches they enqueue are not.
+      - `PUT /v1/queue` is a partial update: it changes only the fields the
+        body gives, and answers with the whole queue.
       - Startup: the daemon answers from the moment it binds its port, but
         until it is ready (while it migrates its database, say) every
         request gets 503 with a `Retry-After` header and a problem of type
@@ -634,6 +636,57 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         default: { $ref: "#/components/responses/Problem" }
 
+  /v1/queue:
+    get:
+      tags: [jobs]
+      operationId: getQueue
+      summary: Whether the workers may start jobs, and each pool's limit and load
+      description: >
+        The queue gate's settings (pause, throttle, schedule), whether the
+        queue is open now, and for each worker pool how many of its jobs may
+        run at once and how many are running and pending. The queue is
+        daemon-wide: the counts cover every tenant's jobs, as the workers
+        claim them.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Queue" }
+        default: { $ref: "#/components/responses/Problem" }
+    put:
+      tags: [jobs]
+      operationId: updateQueue
+      summary: Pause or resume the queue, throttle it, or schedule it
+      description: >
+        Applies only the fields given, and answers with the queue as GET
+        does. A change takes effect at the workers' next claim and never
+        interrupts a running job: pausing lets the jobs in hand finish.
+        The settings are stored, so they survive a daemon restart. Pause
+        and schedule must both allow a claim: resuming outside the schedule
+        leaves the queue closed until the window opens, and schedule off
+        opens it now.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QueueUpdate" }
+      responses:
+        "200":
+          description: The queue after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Queue" }
+        "400":
+          description: >
+            No field given, a throttle other than normal or gentle, a
+            schedule that isn't HH:MM-HH:MM with different ends or off, a
+            value of the wrong type, or a malformed body
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+
 components:
 
   parameters:
@@ -1176,3 +1229,69 @@ components:
         deleted: { type: integer }
         mode:    { type: string, description: "The mode as given: status=<status> or older_than=<duration>" }
       required: [deleted, mode]
+
+    Throttle:
+      type: string
+      enum: [normal, gentle]
+      description: |
+        How hard the workers run:
+          - normal: every worker the daemon has (daemon.fetch_workers and daemon.index_workers).
+          - gentle: at most 4 fetches and 1 index job at once, to spare the machine; clustering is unchanged.
+
+    Queue:
+      type: object
+      description: The queue gate and the load behind it.
+      properties:
+        paused:
+          type: boolean
+          description: Whether the queue is paused. It stays paused, across restarts, until resumed.
+        throttle: { $ref: "#/components/schemas/Throttle" }
+        schedule:
+          type: string
+          pattern: "^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$"
+          description: >
+            The daily window jobs may start in, on the daemon's local clock:
+            from the first time up to the second, wrapping midnight when the
+            second is earlier (22:00-07:00 runs overnight). Absent when there
+            is no schedule.
+        state:
+          type: string
+          enum: [open, closed]
+          description: Whether the workers may start jobs now. A throttle never closes the queue.
+        reason:
+          type: string
+          enum: [paused, outside_schedule]
+          description: Why the queue is closed, paused first when both hold; present exactly when state is closed.
+        opens_at:
+          type: string
+          format: date-time
+          description: When the schedule next opens the queue; present exactly when reason is outside_schedule.
+        kinds:
+          type: array
+          description: The worker pools' kinds, in the order fetch, index, cluster.
+          items: { $ref: "#/components/schemas/QueueKind" }
+      required: [paused, throttle, state, kinds]
+
+    QueueKind:
+      type: object
+      properties:
+        kind:    { $ref: "#/components/schemas/JobKind" }
+        limit:   { type: integer, description: "How many jobs of the kind may run at once while the queue is open" }
+        running: { type: integer, description: "Running now, daemon-wide" }
+        pending: { type: integer, description: "Waiting to run, daemon-wide, retries waiting on run_after included" }
+      required: [kind, limit, running, pending]
+
+    QueueUpdate:
+      type: object
+      description: The settings to change; at least one.
+      minProperties: 1
+      properties:
+        paused:   { type: boolean, description: "true pauses the queue, false resumes it" }
+        throttle: { $ref: "#/components/schemas/Throttle" }
+        schedule:
+          type: string
+          pattern: "^(([01]?[0-9]|2[0-3]):[0-5][0-9]-([01]?[0-9]|2[0-3]):[0-5][0-9]|off)$"
+          description: >
+            HH:MM-HH:MM on the daemon's local clock, the two times different,
+            to let jobs start only in that daily window; off to drop the
+            schedule. The hour may have one digit.

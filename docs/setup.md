@@ -168,6 +168,39 @@ to test in chunks. Pool sizes are `daemon.fetch_workers` and
 `daemon.workers` is split 75/25 between them and can't be combined with
 either.
 
+## Pausing, throttling or scheduling an import
+
+A large import keeps the daemon, and Ollama, busy for a while. Three
+settings pace the work. Each is stored in the database, so it holds across
+daemon restarts until changed, and none interrupts a job already running:
+those finish.
+
+```sh
+curio pause                   # start no new jobs; running ones finish
+curio resume                  # start them again
+curio throttle gentle         # at most 4 fetches and 1 index job at once
+curio throttle normal         # every worker again
+curio schedule 22:00-07:00    # start jobs only overnight, on the daemon's clock
+curio schedule off            # at any time again
+```
+
+`gentle` exists to keep the machine cool and quiet: embedding runs in
+Ollama's own process, so what spares the machine is fewer embed requests at
+once, one index job instead of four; lowering curio-daemon's priority
+wouldn't reach Ollama. Clustering runs one job at a time either way.
+
+A pause and a schedule must both allow work. `curio resume` outside the
+window leaves the queue closed until the window opens; `curio schedule
+off` runs it now. The window runs from its start up to its end and may
+wrap midnight; when daylight saving skips its start, it opens as the
+clock resumes.
+
+`curio status` shows the queue's state (open, paused, or closed outside
+the schedule and when it opens) and each pool's running jobs against its
+limit, with what is pending. `curio add --wait` and `curio import
+--follow` say when the queue is closed and what opens it. `curio pause`
+starts the daemon if it isn't running.
+
 ## Curio itself
 
 Once Ollama works, build curio (web2md is optional; see "Fetcher options").
