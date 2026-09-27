@@ -967,6 +967,14 @@ how much work each attempt repeats. A failure names the chunk range
 ("embed chunks 64-95 of 180"), and because nothing is written until the end,
 the document's previous chunks stay searchable.
 
+**Revised (2026-09):** the previous chunks stay searchable only while the
+index job is retrying. Once it fails for good, the index pool's
+permanent-failure hook marks the document `failed`, and search leaves
+failed documents out. A document whose index job gives up after a refetch
+or a `curio reindex`, say because Ollama was down for the whole retry
+window, drops out of search until it is indexed again; its chunks are
+kept. See "Search leaves out failed and dead documents".
+
 ---
 
 ## Document state follows job outcome via OnPermanentFailure hook
@@ -4537,6 +4545,15 @@ pending/failed/dead documents have no indexed chunks.
   too.
 - **Cost:** a synthetic 24k-vector corpus at limit 80 went from 16 ms to
   29 ms per vector query, small next to embedding the query.
+- **Whichever job failed.** The index pool runs the same permanent-failure
+  hook as the fetch pool, so a document whose index job gives up (Ollama
+  down for the whole retry window, say) is `failed` too and leaves search,
+  although the chunks from its last successful index are intact. That is
+  the price of one rule: the state alone says whether a document is
+  searched, and `failed` is what lists it under `curio docs --failed` for
+  recovery. While the index job is still retrying, the document keeps its
+  state (`pending` after a refetch, `fetched` during a `curio reindex`) and
+  stays searchable.
 
 `EmbeddingsForDocument` and `DocumentVectors` are unchanged: a failed or
 dead source document still has vectors for find-related, and clustering

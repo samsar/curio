@@ -397,10 +397,10 @@ type ChunkHit struct {
 
 // SearchFilters scopes a search to documents matching all of the set
 // dimensions (values within one dimension are OR'd). An empty filter set
-// matches every document search reads. Every dimension is checked on each hit's document
-// after the search finds it, so a filter narrows the results without
-// changing what the search reads; host is matched against the document URL
-// (there is no host column).
+// matches every document search reads. Every dimension is checked on each
+// hit's document after the search finds it, so a filter narrows the results
+// without changing what the search reads; host is matched against the
+// document URL (there is no host column).
 type SearchFilters struct {
 	ContentType []string // documents.content_type IN (...)
 	// Host matches documents whose http or https URL has exactly this host,
