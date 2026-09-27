@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -549,6 +550,39 @@ func TestRun_SyncsMarkerSchemaVersion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, latest, meta.SchemaVersion)
 	assert.True(t, meta.UpdatedAt.After(written), "the sync stamps the marker")
+}
+
+// TestRun_GenerationModelIsNotPinned: the writing model is the user's to
+// change. A daemon restarted with another generation.model starts, and the
+// marker is byte for byte what it was, updated_at aside: the home records
+// nothing about the writing model, so nothing needs reindexing.
+func TestRun_GenerationModelIsNotPinned(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+	original, err := os.ReadFile(home.ConfigPath())
+	require.NoError(t, err)
+	useWritingModel := func(model string) {
+		t.Helper()
+		cfg := strings.Replace(string(original), "generation:\n", "generation:\n  model: "+model+"\n", 1)
+		require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(cfg), 0o600))
+	}
+	marker := func() string {
+		t.Helper()
+		raw, err := os.ReadFile(home.MarkerPath())
+		require.NoError(t, err)
+		return regexp.MustCompile(`(?m)^\s*"updated_at": ".*"\n`).ReplaceAllString(string(raw), "")
+	}
+
+	useWritingModel("qwen3:4b-instruct")
+	_, stop := runDaemon(t, listen)
+	stop()
+	before := marker()
+	require.NotContains(t, before, "qwen3:4b-instruct")
+
+	useWritingModel("gemma4:12b")
+	_, stop = runDaemon(t, listen)
+	stop()
+	assert.Equal(t, before, marker())
 }
 
 // holdWriteLock takes the database's write lock from another connection,
