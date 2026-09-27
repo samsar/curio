@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
@@ -281,12 +282,41 @@ func TestIndexer_FailedBatchKeepsPreviousChunks(t *testing.T) {
 		DocumentID: docID, ExtractionID: extID, Markdown: numberedMarkdown(100),
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "embed chunks 64-95 of 100")
+	assert.Contains(t, err.Error(), "embed chunks 64-95 of 100 (longest chunk 4 bytes)")
 
 	hits, err := chunks.BM25Search(context.Background(), "local", "legacy", 10, store.SearchFilters{})
 	require.NoError(t, err)
 	assert.NotEmpty(t, hits, "the document's previous chunks are still searchable")
 }
+
+// TestIndexer_InputTooLongNamesTheLongestChunk: a batch the embedder
+// refuses as too long fails with the batch's range and its longest input's
+// size, and stays matchable as embedder.ErrInputTooLong.
+func TestIndexer_InputTooLongNamesTheLongestChunk(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
+	refuse := embedFunc(func(context.Context, []string) ([][]float32, error) {
+		return nil, fmt.Errorf("ollama embed: %w: HTTP 400: the input length exceeds the context length",
+			embedder.ErrInputTooLong)
+	})
+	md := "short\n\n" + strings.Repeat("x", 120) + "\n\nmiddling words"
+
+	err := New(sqlitestore.NewChunks(db, dim), refuse, Options{ChunkSize: 1, DocumentPrefix: "doc: "}).
+		Index(context.Background(), IndexInput{DocumentID: docID, ExtractionID: extID, Markdown: md})
+	require.ErrorIs(t, err, embedder.ErrInputTooLong)
+	assert.Contains(t, err.Error(), "embed chunks 0-3 of 4 (longest chunk 125 bytes)",
+		"the size counts the prefix: it is what the embedder was sent")
+}
+
+// embedFunc adapts a function to embedder.Embedder.
+type embedFunc func(ctx context.Context, texts []string) ([][]float32, error)
+
+func (f embedFunc) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	return f(ctx, texts)
+}
+func (embedFunc) Dimensions() int { return 0 }
+func (embedFunc) Model() string   { return "fake" }
 
 func TestIndexer_CanceledBetweenBatchesWritesNothing(t *testing.T) {
 	db := sqlitetest.NewDB(t)

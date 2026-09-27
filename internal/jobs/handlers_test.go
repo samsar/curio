@@ -20,8 +20,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/indexer"
+	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
@@ -490,6 +492,64 @@ func TestWorker_PermanentFetchFailureSetsDocState(t *testing.T) {
 			require.NoError(t, db.QueryRow(`SELECT attempts, status FROM jobs WHERE kind = ?`, store.JobKindFetch).Scan(&attempts, &status))
 			assert.Equal(t, 1, attempts)
 			assert.Equal(t, store.JobStatusFailed, status)
+		})
+	}
+}
+
+// refusingEmbedder fails every batch with err.
+type refusingEmbedder struct{ err error }
+
+func (refusingEmbedder) Dimensions() int { return 0 }
+func (refusingEmbedder) Model() string   { return "fake" }
+func (e refusingEmbedder) Embed(context.Context, []string) ([][]float32, error) {
+	return nil, e.err
+}
+
+// TestWorker_DeterministicEmbedFailureIsPermanent: an index job whose
+// chunk the model refuses as too long, or whose vectors come back at the
+// wrong width, fails on its first attempt instead of repeating the same
+// request, and its document goes failed, not dead. last_error says which
+// chunks and why.
+func TestWorker_DeterministicEmbedFailureIsPermanent(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		reason string
+	}{
+		{"input too long", fmt.Errorf("ollama embed: %w: %w", embedder.ErrInputTooLong,
+			&ollama.StatusError{Code: http.StatusBadRequest, Body: `{"error":"the input length exceeds the context length"}`}),
+			"the input length exceeds the context length"},
+		{"wrong dimension", fmt.Errorf("ollama embed: %w: embedding[0] has dim 768, expected 1024",
+			embedder.ErrWrongDimension), "has dim 768, expected 1024"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, db, _ := newTestDeps(t)
+			deps.Indexer = indexer.New(sqlitestore.NewChunks(db, sqlitetest.Width(t, db)), refusingEmbedder{tc.err},
+				indexer.Options{})
+			ctx := context.Background()
+			doc := &store.Document{TenantID: "local", URL: "https://example.com/long", ContentType: store.ContentTypeArticle}
+			require.NoError(t, deps.Documents.Create(ctx, doc))
+			require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+
+			runPoolsUntil(t, deps, func(c *assert.CollectT) {
+				var status store.JobStatus
+				require.NoError(c, db.QueryRow(`SELECT status FROM jobs WHERE kind = ?`, store.JobKindIndex).Scan(&status))
+				assert.Equal(c, store.JobStatusFailed, status)
+			})
+
+			var (
+				attempts  int
+				lastError string
+			)
+			require.NoError(t, db.QueryRow(`SELECT attempts, last_error FROM jobs WHERE kind = ?`, store.JobKindIndex).
+				Scan(&attempts, &lastError))
+			assert.Equal(t, 1, attempts, "not retried")
+			assert.Contains(t, lastError, "embed chunks 0-0 of 1")
+			assert.Contains(t, lastError, tc.reason)
+			got, err := deps.Documents.GetByID(ctx, doc.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.DocStateFailed, got.State)
 		})
 	}
 }

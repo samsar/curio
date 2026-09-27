@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
@@ -327,6 +328,28 @@ func TestEngine_DegradesToKeywordResults(t *testing.T) {
 			assert.Equal(t, 1, strings.Count(logs.String(), "level=WARN"), "one warning is logged")
 		})
 	}
+}
+
+// TestEngine_QueryTooLongDegrades: a query longer than the embedding
+// model's context can't be embedded, so the search returns its keyword
+// results marked degraded, with a warning that says why.
+func TestEngine_QueryTooLongDegrades(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+	tooLong := embedFunc(func(context.Context, []string) ([][]float32, error) {
+		return nil, fmt.Errorf("ollama embed: %w: HTTP 400: {\"error\":\"the input length exceeds the context length\"}",
+			embedder.ErrInputTooLong)
+	})
+	engine := New(chunks, docs, tooLong, Config{Log: slog.New(slog.DiscardHandler)})
+
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
+	require.NoError(t, err)
+	assert.True(t, res.Degraded)
+	require.NotEmpty(t, res.Items)
+	assert.Contains(t, res.Items[0].Document.URL, "llm")
+	require.Len(t, res.Warnings, 1)
+	assert.Contains(t, res.Warnings[0], "input longer than the embedding model's context")
+	assert.Contains(t, res.Warnings[0], "keyword-only")
 }
 
 func TestEngine_DegradedWithoutKeywordTerms(t *testing.T) {

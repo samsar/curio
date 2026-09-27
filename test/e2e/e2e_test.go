@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -83,11 +84,8 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/tags":
 		fmt.Fprintf(w, `{"models":[{"name":%q,"model":%q}]}`, f.model+":latest", f.model+":latest")
 	case "/api/embed":
-		var req struct {
-			Input []string `json:"input"`
-		}
-		if !assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req)) {
-			http.Error(w, "bad request", http.StatusBadRequest)
+		req, ok := f.embedRequest(w, r)
+		if !ok {
 			return
 		}
 		var resp struct {
@@ -105,6 +103,35 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// embedRequest reads an /api/embed request as the daemon must send it:
+// truncate false, which Ollama defaults to true, and a keep_alive. Without
+// truncate false it answers 400, as a real Ollama would for an input past
+// the context, so a daemon that let Ollama truncate fails the test.
+func (f *fakeOllama) embedRequest(w http.ResponseWriter, r *http.Request) (embedRequest, bool) {
+	var req embedRequest
+	body, err := io.ReadAll(r.Body)
+	if !assert.NoError(f.t, err) {
+		http.Error(w, `{"error":"unreadable request"}`, http.StatusBadRequest)
+		return req, false
+	}
+	var raw map[string]json.RawMessage
+	if !assert.NoError(f.t, json.Unmarshal(body, &raw)) || !assert.NoError(f.t, json.Unmarshal(body, &req)) {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return req, false
+	}
+	if string(raw["truncate"]) != "false" {
+		http.Error(w, `{"error":"the input length exceeds the context length"}`, http.StatusBadRequest)
+		return req, false
+	}
+	assert.NotEmpty(f.t, raw["keep_alive"], "every embed request keeps the model loaded")
+	return req, true
+}
+
+// embedRequest is the part of an /api/embed request the fake embeds.
+type embedRequest struct {
+	Input []string `json:"input"`
 }
 
 // embed is a dim-wide bag-of-words embedding: each word adds weight to one
