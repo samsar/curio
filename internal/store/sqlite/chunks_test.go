@@ -483,3 +483,91 @@ func TestChunks_NothingReferencesChunks(t *testing.T) {
 	require.NoError(t, rows.Err())
 	assert.Empty(t, referencing)
 }
+
+// TestChunks_SearchSkipsFailedAndDeadDocuments: a failed or dead document
+// keeps its chunks but leaves both retrievers, and comes back once it is
+// fetched again, or while a refetch of it is pending.
+func TestChunks_SearchSkipsFailedAndDeadDocuments(t *testing.T) {
+	for _, gone := range []store.DocState{store.DocStateFailed, store.DocStateDead} {
+		for _, back := range []store.DocState{store.DocStateFetched, store.DocStatePending} {
+			t.Run(string(gone)+" then "+string(back), func(t *testing.T) {
+				ctx := context.Background()
+				db := newTestDB(t)
+				ch := NewChunks(db, vecDim)
+				docs := NewDocuments(db)
+				docID := seedDocs(t, db, "local", "https://example.com/junk")[0]
+				require.NoError(t, ch.ReplaceForDocument(ctx, docID, latestExtractionID(t, db, docID), "", nil,
+					[]store.ChunkInput{{Text: "zebra migration", Embedding: fillVec(0.1)}}))
+				searched := func() (bm25, vector bool) {
+					t.Helper()
+					bm, err := ch.BM25Search(ctx, "local", "zebra", 10, store.SearchFilters{})
+					require.NoError(t, err)
+					vec, err := ch.VectorSearch(ctx, "local", fillVec(0.1), 10, store.SearchFilters{})
+					require.NoError(t, err)
+					return len(bm) == 1, len(vec) == 1
+				}
+
+				require.NoError(t, docs.UpdateState(ctx, docID, store.DocStateFetched))
+				bm, vec := searched()
+				require.True(t, bm && vec, "a fetched document is searched")
+
+				require.NoError(t, docs.UpdateState(ctx, docID, gone))
+				bm, vec = searched()
+				assert.False(t, bm, "bm25")
+				assert.False(t, vec, "vector")
+
+				require.NoError(t, docs.UpdateState(ctx, docID, back))
+				bm, vec = searched()
+				assert.True(t, bm, "bm25")
+				assert.True(t, vec, "vector")
+			})
+		}
+	}
+}
+
+// TestChunks_VectorSearch_SkippedChunksDontCostHits: the chunks nearest the
+// query belong to failed and dead documents. Vector search still returns
+// limit hits from the others, with and without the related path's
+// exclusion.
+func TestChunks_VectorSearch_SkippedChunksDontCostHits(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	docs := NewDocuments(db)
+	index := func(docID string, v float32) {
+		t.Helper()
+		require.NoError(t, ch.ReplaceForDocument(ctx, docID, latestExtractionID(t, db, docID), "", nil,
+			[]store.ChunkInput{{Text: "text", Embedding: fillVec(v)}}))
+	}
+
+	junk := seedDocs(t, db, "local", "https://example.com/j1", "https://example.com/j2",
+		"https://example.com/j3", "https://example.com/j4")
+	for i, docID := range junk {
+		index(docID, 0.1)
+		state := store.DocStateFailed
+		if i%2 == 1 {
+			state = store.DocStateDead
+		}
+		require.NoError(t, docs.UpdateState(ctx, docID, state))
+	}
+	live := seedDocs(t, db, "local", "https://example.com/l1", "https://example.com/l2",
+		"https://example.com/l3", "https://example.com/l4", "https://example.com/l5")
+	for i, docID := range live {
+		index(docID, 0.2+0.05*float32(i))
+	}
+
+	for name, filters := range map[string]store.SearchFilters{
+		"search":  {},
+		"related": {ExcludeDocumentID: live[0]},
+	} {
+		t.Run(name, func(t *testing.T) {
+			hits, err := ch.VectorSearch(ctx, "local", fillVec(0.1), 3, filters)
+			require.NoError(t, err)
+			require.Len(t, hits, 3)
+			for _, h := range hits {
+				assert.Contains(t, live, h.DocumentID)
+				assert.NotEqual(t, filters.ExcludeDocumentID, h.DocumentID)
+			}
+		})
+	}
+}

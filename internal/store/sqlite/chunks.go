@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -172,7 +173,7 @@ func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit i
 
 // bm25Query builds BM25Search's query: it starts from the FTS MATCH and
 // reaches each hit's chunk by rowid (chunks.seq, the INTEGER PRIMARY KEY),
-// then its document for tenant scoping and filters.
+// then its document for scoping and filters.
 func bm25Query(tenantID, query string, limit int, filters store.SearchFilters) (string, []any) {
 	filterSQL, filterArgs := buildFilterClause(filters)
 
@@ -187,14 +188,27 @@ func bm25Query(tenantID, query string, limit int, filters store.SearchFilters) (
 	JOIN chunks c    ON c.seq = chunks_fts.rowid
 	JOIN documents d ON d.id = c.document_id
 	WHERE chunks_fts MATCH ?
-	  AND d.tenant_id = ?` + filterSQL + `
+	  AND ` + searchedDocSQL + filterSQL + `
 	ORDER BY bm25_score
 	LIMIT ?`
 
-	args := make([]any, 0, 3+len(filterArgs))
-	args = append(args, query, tenantID)
-	args = append(args, filterArgs...)
+	args := slices.Concat([]any{query}, searchedDocArgs(tenantID), filterArgs)
 	return q, append(args, limit)
+}
+
+// searchedDocSQL scopes a search to the documents it may return: the
+// tenant's, except failed and dead ones. Those keep the chunks of an
+// earlier fetch, which no longer say what the URL serves: the page is gone,
+// or a refetch found that what was stored was not the page. A refetch that
+// succeeds re-indexes the document and brings it back. Pending documents
+// stay: one being refetched is searchable until its fetch fails. NOT IN,
+// rather than IN over the other states, leaves the planner driving from the
+// FTS or vec table. The caller's query MUST alias the documents table as
+// `d`; searchedDocArgs are its arguments.
+const searchedDocSQL = `d.tenant_id = ? AND d.state NOT IN (?, ?)`
+
+func searchedDocArgs(tenantID string) []any {
+	return []any{tenantID, store.DocStateFailed, store.DocStateDead}
 }
 
 // VectorSearch runs nearest-neighbor against chunks_vec.
@@ -215,31 +229,7 @@ func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []
 		return nil, fmt.Errorf("serialize query embedding: %w", err)
 	}
 
-	// sqlite-vec applies the k-NN cutoff at the index level BEFORE the
-	// document predicates, so with filters a naive k=limit could return
-	// almost nothing after filtering. Over-fetch neighbors and cap the
-	// returned (closest) rows to limit so the fanout stays consistent.
-	k := limit
-	if !filters.IsEmpty() {
-		if k = limit * 10; k > 1000 {
-			k = 1000
-		}
-	}
-
-	filterSQL, filterArgs := buildFilterClause(filters)
-	q := `
-	SELECT v.chunk_id, c.document_id, v.distance
-	FROM chunks_vec v
-	JOIN chunks c     ON c.id = v.chunk_id
-	JOIN documents d  ON d.id = c.document_id
-	WHERE v.embedding MATCH ? AND k = ?
-	  AND d.tenant_id = ?` + filterSQL + `
-	ORDER BY v.distance`
-
-	args := make([]any, 0, 3+len(filterArgs))
-	args = append(args, serialized, k, tenantID)
-	args = append(args, filterArgs...)
-
+	q, args := vectorQuery(tenantID, serialized, limit, filters)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("vector search: %w", err)
@@ -266,6 +256,33 @@ func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []
 	}
 	return out, rows.Err()
 }
+
+// vectorQuery builds VectorSearch's query: a KNN MATCH on chunks_vec, then
+// each hit's chunk and document for scoping and filters.
+//
+// sqlite-vec applies the k-NN cutoff at the index level BEFORE the
+// document predicates, and every search has one (searchedDocSQL), so a
+// naive k=limit could return almost nothing once they are applied. The
+// query over-fetches neighbors, and VectorSearch keeps the closest limit
+// rows that pass, so the fanout stays consistent.
+func vectorQuery(tenantID string, embedding []byte, limit int, filters store.SearchFilters) (string, []any) {
+	filterSQL, filterArgs := buildFilterClause(filters)
+	q := `
+	SELECT v.chunk_id, c.document_id, v.distance
+	FROM chunks_vec v
+	JOIN chunks c     ON c.id = v.chunk_id
+	JOIN documents d  ON d.id = c.document_id
+	WHERE v.embedding MATCH ? AND k = ?
+	  AND ` + searchedDocSQL + filterSQL + `
+	ORDER BY v.distance`
+
+	k := min(limit*10, maxVectorOverfetch)
+	return q, slices.Concat([]any{embedding, k}, searchedDocArgs(tenantID), filterArgs)
+}
+
+// maxVectorOverfetch caps how many neighbors a vector search reads before
+// its document predicates apply.
+const maxVectorOverfetch = 1000
 
 // buildFilterClause builds the AND-prefixed WHERE conditions and bind args to
 // scope a search by content_type / host / source. The caller's query MUST
@@ -306,9 +323,7 @@ func buildFilterClause(f store.SearchFilters) (string, []any) {
 	}
 	if f.ExcludeDocumentID != "" {
 		// NOTE: in KNN mode sqlite-vec applies this predicate AFTER the
-		// k cutoff — correctness here depends on VectorSearch's
-		// over-fetch when filters are non-empty (which a set
-		// ExcludeDocumentID guarantees via IsEmpty).
+		// k cutoff — correctness here depends on vectorQuery's over-fetch.
 		sb.WriteString(" AND d.id != ?")
 		args = append(args, f.ExcludeDocumentID)
 	}

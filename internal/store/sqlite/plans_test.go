@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -120,6 +121,7 @@ func TestQueryPlans(t *testing.T) {
 	db := newTestDB(t)
 	claimArgs := []any{store.JobStatusRunning, "now", "now", store.JobStatusPending, "now", store.JobKindFetch}
 	bm25Q, bm25Args := bm25Query("local", `"kafka"`, 10, store.SearchFilters{})
+	vecQ, vecArgs := vectorQuery("local", queryVector(t), 10, store.SearchFilters{})
 	getJobQ, getJobArgs := getJobWithDocQuery("local", "job")
 
 	cases := []planCase{
@@ -198,11 +200,30 @@ func TestQueryPlans(t *testing.T) {
 			want: []string{"INDEX idx_chunks_document (document_id=?)"},
 		},
 		{
+			// The document predicates, the state exclusion included, are
+			// checked on each hit through the primary keys.
 			name:  "BM25Search",
 			query: bm25Q, args: bm25Args,
 			first: "SCAN chunks_fts VIRTUAL TABLE",
-			want:  []string{"SEARCH c USING INTEGER PRIMARY KEY (rowid=?)"},
+			want: []string{
+				"SEARCH c USING INTEGER PRIMARY KEY (rowid=?)",
+				"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
+			},
 			// ORDER BY the bm25 score.
+			sorts: true,
+		},
+		{
+			// A KNN scan of chunks_vec (plan kind 3, see
+			// TestQueryPlans_ChunkVectorDeleteIsPointLookup), then the same
+			// per-hit lookups.
+			name:  "VectorSearch",
+			query: vecQ, args: vecArgs,
+			first: "SCAN v VIRTUAL TABLE INDEX 0:3",
+			want: []string{
+				"SEARCH c USING INDEX sqlite_autoindex_chunks_1 (id=?)",
+				"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
+			},
+			// ORDER BY distance.
 			sorts: true,
 		},
 		{
@@ -233,6 +254,14 @@ func TestQueryPlans(t *testing.T) {
 			}
 		})
 	}
+}
+
+// queryVector is a query embedding in sqlite-vec's format.
+func queryVector(t *testing.T) []byte {
+	t.Helper()
+	v, err := sqlitevec.SerializeFloat32(fillVec(0.1))
+	require.NoError(t, err)
+	return v
 }
 
 // TestQueryPlans_ChunkVectorDeleteIsPointLookup: the chunks delete trigger

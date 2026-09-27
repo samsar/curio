@@ -344,10 +344,11 @@ paths:
       description: >
         Ranks other documents by vector similarity to this document's stored
         chunk embeddings (mean-pooled; no query text involved, so Ollama is
-        not needed). The source document is excluded. Returns an empty items
-        list when the document has no indexed chunks yet. Scores are raw
-        vector similarities (1/(1+L2 distance), 0..1) and are NOT comparable
-        with /v1/search's RRF-fused scores.
+        not needed). The source document is excluded, and so are failed and
+        dead documents, whose chunks come from an earlier fetch. Returns an
+        empty items list when the document has no indexed chunks yet. Scores
+        are raw vector similarities (1/(1+L2 distance), 0..1) and are NOT
+        comparable with /v1/search's RRF-fused scores.
       responses:
         "200":
           description: OK
@@ -465,10 +466,12 @@ paths:
       summary: Hybrid BM25 + vector search
       description: >
         Runs BM25 and vector retrieval concurrently and fuses them with RRF.
-        If the embedding model is unavailable (Ollama down, or slower than
-        search.embed_timeout_seconds), the keyword results are still returned
-        with degraded=true and a warning explaining why; a keyword-index
-        failure is a 500.
+        Failed and dead documents are not searched: they may keep the chunks
+        of an earlier fetch, which no longer describe what the URL serves. A
+        pending document (a refetch in flight) is. If the embedding model is
+        unavailable (Ollama down, or slower than search.embed_timeout_seconds),
+        the keyword results are still returned with degraded=true and a
+        warning explaining why; a keyword-index failure is a 500.
       requestBody:
         required: true
         content:
