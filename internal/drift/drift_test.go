@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -236,14 +237,16 @@ func (hangingSource) ModelDigest(ctx context.Context) (string, error) {
 func TestCheck_MarkerWriteFailureIsRetried(t *testing.T) {
 	m, home, src, log := newMonitor(t, Fingerprint{})
 	src.set("0.34.4", digestA, nil)
-	require.NoError(t, os.Chmod(home.Path, 0o500)) // no new files: WriteMeta's temp file fails
-	t.Cleanup(func() { _ = os.Chmod(home.Path, 0o700) })
+	// WriteMeta can't create its temp file where a non-empty directory
+	// stands, whoever runs the test.
+	blocker := home.MarkerPath() + ".tmp"
+	require.NoError(t, os.MkdirAll(filepath.Join(blocker, "keep"), 0o700))
 
 	m.Check(context.Background())
 	assert.Len(t, log.at(slog.LevelError), 1)
 	assert.Empty(t, marker(t, home).EmbeddingModelDigest)
 
-	require.NoError(t, os.Chmod(home.Path, 0o700))
+	require.NoError(t, os.RemoveAll(blocker))
 	m.Check(context.Background())
 	assert.Equal(t, digestA, marker(t, home).EmbeddingModelDigest)
 }

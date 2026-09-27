@@ -347,8 +347,8 @@ func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	}
 	if state == store.DocStateFetched && d.Drift != nil {
 		if err := d.Drift.Rebaseline(); err != nil {
-			d.writeError(w, r, fmt.Errorf("enqueued all %d index jobs, but not the embedding drift reset: %w",
-				len(ids), err))
+			d.writeError(w, r, fmt.Errorf("enqueued all %d index jobs, but resetting the embedding drift baseline "+
+				"failed: %w", len(ids), err))
 			return
 		}
 	}
