@@ -269,6 +269,16 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 	queue := sqlitestore.NewJobs(db)
 	insights := sqlitestore.NewInsights(db)
 
+	// Loaded before any worker or background pull exists, so a stored pause
+	// holds from the first claim and a failure to read it stops the start
+	// before anything runs: running with the queue open would break a pause
+	// the user set.
+	sizes := jobs.PoolSizes{Fetch: cfg.Daemon.FetchWorkers, Index: cfg.Daemon.IndexWorkers}
+	gate, err := jobs.NewQueueGate(ctx, sqlitestore.NewQueueSettings(db), sizes, slog.Default())
+	if err != nil {
+		return nil, err
+	}
+
 	emb, err := embedder.NewOllama(embedder.OllamaOptions{
 		BaseURL: cfg.Embedding.BaseURL,
 		Model:   cfg.Embedding.Model,
@@ -308,15 +318,6 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 	})
 
 	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights)
-	if err != nil {
-		return nil, err
-	}
-
-	// Loaded before any worker exists, so a stored pause holds from the
-	// first claim. A failure to read it stops the start: running with the
-	// queue open would break a pause the user set.
-	sizes := jobs.PoolSizes{Fetch: cfg.Daemon.FetchWorkers, Index: cfg.Daemon.IndexWorkers}
-	gate, err := jobs.NewQueueGate(ctx, sqlitestore.NewQueueSettings(db), sizes, slog.Default())
 	if err != nil {
 		return nil, err
 	}

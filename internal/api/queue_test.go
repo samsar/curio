@@ -84,7 +84,10 @@ func TestQueue_Schedule(t *testing.T) {
 	assert.Equal(t, "closed", q.State)
 	assert.Equal(t, "outside_schedule", q.Reason)
 	assert.Equal(t, time.UTC, q.OpensAt.Location())
-	assert.WithinRange(t, q.OpensAt, time.Now().Add(time.Hour), time.Now().Add(2*time.Hour+time.Minute))
+	w, err := store.ParseDailyWindow(window)
+	require.NoError(t, err)
+	// NextStart, not now plus two hours: on a daylight-saving day the two differ.
+	assert.WithinDuration(t, w.NextStart(time.Now()), q.OpensAt, time.Minute)
 
 	q = decodeQueue(t, putQueue(t, s, `{"schedule":"off"}`))
 	assert.Empty(t, q.Schedule)

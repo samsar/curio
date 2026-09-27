@@ -19,13 +19,14 @@ import (
 
 // windowExcludingNow is a daily window on the local clock, the daemon's in
 // these tests, from two hours from now to three, and when it opens, as
-// HH:MM.
+// HH:MM. The opening comes from NextStart, not the window's start: a
+// daylight-saving gap can move it.
 func windowExcludingNow() (window, opens string) {
 	now := time.Now()
 	m := now.Hour()*60 + now.Minute()
 	const day = 24 * 60
 	w := store.DailyWindow{Start: (m + 120) % day, End: (m + 180) % day}
-	return w.String(), w.String()[:5]
+	return w.String(), w.NextStart(now).Format("15:04")
 }
 
 // oneLine returns out's only line, failing the test if it has another.

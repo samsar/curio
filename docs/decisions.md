@@ -5331,8 +5331,10 @@ end, wrapping midnight when the end is the smaller.
 - The cap is there because Go's timers run on the monotonic clock, which
   on macOS (`mach_absolute_time`) stops while the Mac sleeps and ignores
   changes to the wall clock, while a schedule opens by the wall clock. It
-  also catches a window's second opening in a fall-back hour, which
-  `NextStart` doesn't report.
+  also catches the opening `NextStart` doesn't report when a fall-back
+  hour repeats the start: `time.Date` resolves a repeated wall time to one
+  occurrence (the earlier west of UTC, the later east of it, in Go 1.26),
+  and the cap opens the gate within a minute of the other.
 - A goroutine the throttle holds back waits only for a settings change.
   The goroutines holding the kind's slots claim the next job themselves
   when theirs ends, so whenever one is held, at least the cap's worth are

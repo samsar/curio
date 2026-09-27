@@ -106,7 +106,7 @@ func describeQueue(q *client.Queue) string {
 			withSettings(q, "paused", true), finishing(running(q)))
 	case q.State == client.QueueClosed && q.Reason == client.ReasonOutsideSchedule:
 		return fmt.Sprintf("%s; opens %s (curio schedule off runs it now)",
-			withSettings(q, "closed outside schedule "+q.Schedule, false), q.OpensAt.Local().Format("15:04"))
+			withSettings(q, "closed outside schedule "+q.Schedule, false), opensAt(q))
 	case q.Reason != "":
 		return fmt.Sprintf("%s (%s)", q.State, q.Reason)
 	default:
@@ -123,12 +123,15 @@ func whyClosed(q *client.Queue) string {
 	case q.Reason == client.ReasonPaused:
 		return "paused (curio resume)"
 	case q.Reason == client.ReasonOutsideSchedule:
-		return fmt.Sprintf("closed outside schedule %s until %s (curio schedule off)",
-			q.Schedule, q.OpensAt.Local().Format("15:04"))
+		return fmt.Sprintf("closed outside schedule %s until %s (curio schedule off)", q.Schedule, opensAt(q))
 	default:
 		return fmt.Sprintf("closed (%s)", q.Reason)
 	}
 }
+
+// opensAt is when a queue closed outside its schedule opens, on the local
+// clock, as HH:MM.
+func opensAt(q *client.Queue) string { return q.OpensAt.Local().Format("15:04") }
 
 // withSettings follows state with the throttle, when it isn't normal, and,
 // when schedule is set, the schedule, when there is one.
