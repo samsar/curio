@@ -82,7 +82,7 @@ type fakeOllama struct {
 func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/tags":
-		fmt.Fprintf(w, `{"models":[{"name":%q,"model":%q}]}`, f.model+":latest", f.model+":latest")
+		fmt.Fprintf(w, `{"models":[{"name":%q,"model":%q}]}`, f.model, f.model)
 	case "/api/embed":
 		req, ok := f.embedRequest(w, r)
 		if !ok {

@@ -17,7 +17,7 @@ func pullFrom(t *testing.T, h http.HandlerFunc) *Client {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return newClient(t, srv.URL, "llama3.2")
+	return newClient(t, srv.URL, "qwen3:4b-instruct")
 }
 
 func TestPull_StreamsToSuccess(t *testing.T) {

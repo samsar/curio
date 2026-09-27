@@ -39,7 +39,7 @@ func closedAddr(t *testing.T) string {
 }
 
 // fakeOllama serves /api/tags from its model list and /api/pull by adding
-// the requested model to it.
+// the requested model to it, as Ollama names it: untagged means :latest.
 type fakeOllama struct {
 	t          *testing.T
 	mu         sync.Mutex
@@ -47,6 +47,7 @@ type fakeOllama struct {
 	tagsStatus int // 0: 200
 	pullStatus int // 0: 200
 	pulls      int
+	pulled     []string // the model each pull asked for
 }
 
 func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +76,8 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var req pullRequest
 		assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req))
-		f.models = append(f.models, req.Model+":latest")
+		f.pulled = append(f.pulled, req.Model)
+		f.models = append(f.models, normalizeModel(req.Model))
 		fmt.Fprintln(w, `{"status":"pulling manifest"}`)
 		fmt.Fprintln(w, `{"status":"success"}`)
 	default:
@@ -159,16 +161,28 @@ func TestNew(t *testing.T) {
 func TestPing(t *testing.T) {
 	cases := []struct {
 		name    string
+		model   string
 		status  int
 		body    string
 		wantErr error // nil: the model is there
 	}{
-		{"exact name", 200, `{"models":[{"name":"llama3.2"}]}`, nil},
-		{"tagged name", 200, `{"models":[{"name":"llama3.2:latest"}]}`, nil},
-		{"tagged model field", 200, `{"models":[{"name":"alias","model":"llama3.2:3b"}]}`, nil},
-		{"other models only", 200, `{"models":[{"name":"llama3.2-vision"},{"name":"qwen2"}]}`, ErrModelNotLoaded},
-		{"no models", 200, `{"models":[]}`, ErrModelNotLoaded},
-		{"server error", 500, `oops`, ErrUnreachable},
+		{"untagged name, :latest pulled", "nomic-embed-text", 200,
+			`{"models":[{"name":"nomic-embed-text:latest","model":"nomic-embed-text:latest"}]}`, nil},
+		{"untagged name, only another tag pulled", "qwen3-embedding", 200,
+			`{"models":[{"name":"qwen3-embedding:0.6b","model":"qwen3-embedding:0.6b"}]}`, ErrModelNotLoaded},
+		{"tagged name", "qwen3-embedding:0.6b", 200,
+			`{"models":[{"name":"qwen3-embedding:0.6b","model":"qwen3-embedding:0.6b"}]}`, nil},
+		{"tagged name, only a longer tag pulled", "qwen3-embedding:0.6b", 200,
+			`{"models":[{"name":"qwen3-embedding:0.6b-q8_0","model":"qwen3-embedding:0.6b-q8_0"}]}`, ErrModelNotLoaded},
+		{"case differs", "Qwen3-Embedding:0.6B", 200, `{"models":[{"name":"qwen3-embedding:0.6b"}]}`, nil},
+		{"matched on the model field", "qwen3:4b-instruct", 200,
+			`{"models":[{"name":"alias","model":"qwen3:4b-instruct"}]}`, nil},
+		{"a host's port is not a tag", "localhost:5000/team/m", 200,
+			`{"models":[{"name":"localhost:5000/team/m:latest"}]}`, nil},
+		{"other models only", "qwen3:4b-instruct", 200,
+			`{"models":[{"name":"qwen3:4b-instruct-q8_0"},{"name":"qwen3"}]}`, ErrModelNotLoaded},
+		{"no models", "qwen3:4b-instruct", 200, `{"models":[]}`, ErrModelNotLoaded},
+		{"server error", "qwen3:4b-instruct", 500, `oops`, ErrUnreachable},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -178,13 +192,27 @@ func TestPing(t *testing.T) {
 				fmt.Fprint(w, tc.body)
 			}))
 			t.Cleanup(srv.Close)
-			err := newClient(t, srv.URL, "llama3.2").Ping(context.Background())
+			err := newClient(t, srv.URL, tc.model).Ping(context.Background())
 			if tc.wantErr == nil {
 				require.NoError(t, err)
 				return
 			}
 			require.ErrorIs(t, err, tc.wantErr)
 		})
+	}
+}
+
+func TestNormalizeModel(t *testing.T) {
+	cases := map[string]string{
+		"qwen3-embedding":       "qwen3-embedding:latest",
+		"qwen3-embedding:0.6b":  "qwen3-embedding:0.6b",
+		"Qwen3:4B-Instruct":     "qwen3:4b-instruct",
+		"library/qwen3":         "library/qwen3:latest",
+		"localhost:5000/team/m": "localhost:5000/team/m:latest",
+		"localhost:5000/m:v1":   "localhost:5000/m:v1",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, normalizeModel(in), in)
 	}
 }
 
@@ -289,26 +317,26 @@ func TestPostJSON_ErrorBodyIsQuotedUpToTheCap(t *testing.T) {
 
 func TestEnsureModel(t *testing.T) {
 	t.Run("present: no pull", func(t *testing.T) {
-		f := &fakeOllama{models: []string{"llama3.2:latest"}}
-		require.NoError(t, newClient(t, serveFake(t, f), "llama3.2").EnsureModel(context.Background(), quietLog()))
+		f := &fakeOllama{models: []string{"qwen3:4b-instruct"}}
+		require.NoError(t, newClient(t, serveFake(t, f), "qwen3:4b-instruct").EnsureModel(context.Background(), quietLog()))
 		assert.Zero(t, f.pullCount())
 	})
 	t.Run("missing: pulls it", func(t *testing.T) {
 		f := &fakeOllama{}
-		c := newClient(t, serveFake(t, f), "llama3.2")
+		c := newClient(t, serveFake(t, f), "qwen3:4b-instruct")
 		require.NoError(t, c.EnsureModel(context.Background(), quietLog()))
 		assert.Equal(t, 1, f.pullCount())
 		require.NoError(t, c.Ping(context.Background()), "pulled")
 	})
 	t.Run("pull fails: the error is returned", func(t *testing.T) {
 		f := &fakeOllama{pullStatus: http.StatusInternalServerError}
-		err := newClient(t, serveFake(t, f), "llama3.2").EnsureModel(context.Background(), quietLog())
+		err := newClient(t, serveFake(t, f), "qwen3:4b-instruct").EnsureModel(context.Background(), quietLog())
 		require.ErrorContains(t, err, "no space left on device")
 		assert.Equal(t, 1, f.pullCount())
 	})
 	t.Run("unreachable: nothing to pull to", func(t *testing.T) {
 		f := &fakeOllama{tagsStatus: http.StatusServiceUnavailable}
-		err := newClient(t, serveFake(t, f), "llama3.2").EnsureModel(context.Background(), quietLog())
+		err := newClient(t, serveFake(t, f), "qwen3:4b-instruct").EnsureModel(context.Background(), quietLog())
 		require.ErrorIs(t, err, ErrUnreachable)
 		assert.Zero(t, f.pullCount())
 	})
@@ -347,6 +375,21 @@ func TestKeepPulled_WaitsForOllamaThenPulls(t *testing.T) {
 	assert.Equal(t, []string{notReady, "pulling ollama model"}, rec.messages(slog.LevelDebug),
 		"a retry's failure and pull are debug")
 	assert.Equal(t, []string{"ollama model ready"}, rec.messages(slog.LevelInfo))
+}
+
+// TestKeepPulled_PullsAnUntaggedModelWhenAnotherTagIsPresent: an untagged
+// name means :latest, so having another tag of the model is not having it,
+// and KeepPulled pulls the name as configured.
+func TestKeepPulled_PullsAnUntaggedModelWhenAnotherTagIsPresent(t *testing.T) {
+	f := &fakeOllama{models: []string{"qwen3-embedding:0.6b"}}
+	c := newClient(t, serveFake(t, f), "qwen3-embedding")
+
+	c.KeepPulled(context.Background(), quietLog())
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	assert.Equal(t, []string{"qwen3-embedding"}, f.pulled)
+	assert.Contains(t, f.models, "qwen3-embedding:latest")
 }
 
 const notReady = "ollama model not ready; retrying in the background"

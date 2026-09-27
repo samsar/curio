@@ -92,37 +92,59 @@ func (c *Client) Model() string { return c.model }
 func (c *Client) BaseURL() string { return c.baseURL }
 
 // Ping reports whether Ollama is reachable and has the model: nil, or an
-// error wrapping ErrUnreachable or ErrModelNotLoaded. A model matches by
-// name, or by name plus any tag ("nomic-embed-text" matches
-// "nomic-embed-text:latest"). The caller bounds it with ctx.
+// error wrapping ErrUnreachable or ErrModelNotLoaded. The model must be
+// pulled under the very name Ollama would run for it: names compare case
+// insensitively, and an untagged name means name:latest, as Ollama reads
+// it. So "nomic-embed-text" matches "nomic-embed-text:latest", but
+// "qwen3-embedding" is not loaded when only "qwen3-embedding:0.6b" is. The
+// caller bounds it with ctx.
 func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.lookup(ctx)
+	return err
+}
+
+// tagEntry is one model /api/tags lists.
+type tagEntry struct {
+	Name   string `json:"name"`
+	Model  string `json:"model"`
+	Digest string `json:"digest"`
+}
+
+// lookup finds the model in GET /api/tags, matching each entry's name and
+// model against it (see Ping).
+func (c *Client) lookup(ctx context.Context) (tagEntry, error) {
 	resp, err := c.send(ctx, http.MethodGet, "/api/tags", nil)
 	if err != nil {
-		return err
+		return tagEntry{}, err
 	}
 	defer resp.Body.Close()
 	if !ok(resp) {
-		return fmt.Errorf("%w: /api/tags: %w", ErrUnreachable, statusError(resp))
+		return tagEntry{}, fmt.Errorf("%w: /api/tags: %w", ErrUnreachable, statusError(resp))
 	}
 	var tags struct {
-		Models []struct {
-			Name  string `json:"name"`
-			Model string `json:"model"`
-		} `json:"models"`
+		Models []tagEntry `json:"models"`
 	}
 	if err := decodeJSON(resp.Body, &tags, MaxResponseBody); err != nil {
-		return fmt.Errorf("/api/tags: %w", err)
+		return tagEntry{}, fmt.Errorf("/api/tags: %w", err)
 	}
+	want := normalizeModel(c.model)
 	for _, m := range tags.Models {
-		if c.matches(m.Name) || c.matches(m.Model) {
-			return nil
+		if normalizeModel(m.Name) == want || normalizeModel(m.Model) == want {
+			return m, nil
 		}
 	}
-	return fmt.Errorf("%w: %s", ErrModelNotLoaded, c.model)
+	return tagEntry{}, fmt.Errorf("%w: %s", ErrModelNotLoaded, c.model)
 }
 
-func (c *Client) matches(name string) bool {
-	return name == c.model || strings.HasPrefix(name, c.model+":")
+// normalizeModel is the name Ollama runs for name: lower-cased, with
+// ":latest" when it has no tag. The tag follows a ':' in the last path
+// segment; a ':' before the last '/' belongs to a registry host's port.
+func normalizeModel(name string) string {
+	name = strings.ToLower(name)
+	if !strings.Contains(name[strings.LastIndex(name, "/")+1:], ":") {
+		name += ":latest"
+	}
+	return name
 }
 
 // PostJSON posts in as JSON to path and decodes a 2xx reply of at most
