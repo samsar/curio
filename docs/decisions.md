@@ -1677,11 +1677,25 @@ reports for the target is a dead link as well. See "Page verdicts: one
 judge for every page, bot challenges included" and "Jina answers are judged
 like the origin's pages".
 
-**Revised (2026-09-27):** a redirect that settles on another site's landing
-page, a homepage or a section that kept nothing of the page asked for, is a
-soft 404 too (`looksLikeLandingPage`), under the same kill switch. It is not
-host-cached either, for either host. See "Cross-site redirects: judged where
-they land".
+**Revised (2026-09-27):**
+
+- A redirect that settles on another site's landing page, a homepage or a
+  section that kept nothing of the page asked for, is a soft 404 too
+  (`looksLikeLandingPage`), under the same kill switch. It is not
+  host-cached either, for either host. See "Cross-site redirects: judged
+  where they land".
+- The homepage rule needs a source that names a page once a trailing index
+  document is dropped, the landing rule's reading of the source
+  (`pageSegments`): `ocw.mit.edu/index.htm` → `ocw.mit.edu/` is the
+  homepage canonicalized, not a page redirected to it. The library holds
+  three such bookmarks, fetched on 2026-05-24 and 25, before the homepage
+  rule existed: `http://ocw.mit.edu/index.htm` (`cd7f3b2f`),
+  `https://ocw.mit.edu/index.htm` (`05d9e332`) and
+  `http://www.infragistics.com/default.aspx` (`85ef605b`). Any refetch
+  would have marked them dead. Still judged dead: a homepage bookmarked
+  under an alias (`vaadin.com/home`, `www.kraken.com/en-us`,
+  `www.realmatters.com/home/default.aspx`), which no URL rule tells from a
+  deleted page.
 
 ---
 

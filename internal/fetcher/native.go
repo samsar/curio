@@ -886,8 +886,10 @@ var (
 // deleted articles redirecting to the site root, retired sites sending
 // every old URL to their successor's front door). Three signals:
 //
-//   - the request for a specific path settled on the site's homepage
-//     (same site, www. or not). Needs p.finalURL.
+//   - the request for a page settled on the site's homepage (same site,
+//     www. or not). A source path that is only an index document names no
+//     page: /index.htm → / is the homepage, canonicalized. Needs
+//     p.finalURL.
 //   - the request settled on another site's landing page
 //     (looksLikeLandingPage). Needs p.finalURL.
 //   - the extracted title reads like a not-found page
@@ -898,7 +900,7 @@ func looksLikeSoft404(p pageView, sourceURL string) string {
 	if source, err := url.Parse(sourceURL); err == nil && p.finalURL != nil {
 		final := p.finalURL
 		if sameSiteHost(source.Hostname(), final.Hostname()) &&
-			strings.Trim(source.Path, "/") != "" &&
+			len(pageSegments(source.Path)) > 0 &&
 			strings.Trim(final.Path, "/") == "" &&
 			final.RawQuery == "" {
 			return "redirected to homepage"
@@ -941,10 +943,7 @@ func looksLikeLandingPage(source, final *url.URL, title string) bool {
 	if !crossSite(source, final) || loginPathRE.MatchString(final.Path) || loginTitleRE.MatchString(title) {
 		return false
 	}
-	sourceSegs := pathSegments(source.Path)
-	if n := len(sourceSegs); n > 0 && indexDocumentRE.MatchString(sourceSegs[n-1]) {
-		sourceSegs = sourceSegs[:n-1]
-	}
+	sourceSegs := pageSegments(source.Path)
 	pathWords := urlWords(strings.Join(sourceSegs, "/"))
 	sourceWords := slices.Concat(pathWords, queryWords(source.Query()))
 	if len(pathWords) == 0 || len(sourceWords) < 2 {
@@ -983,6 +982,16 @@ var indexDocumentRE = regexp.MustCompile(`(?i)^(?:index|default)\.[a-z0-9]+$`)
 // pathSegments returns the non-empty segments of a URL path.
 func pathSegments(path string) []string {
 	return strings.FieldsFunc(path, func(r rune) bool { return r == '/' })
+}
+
+// pageSegments returns the segments of a URL path that name a page: all of
+// them, less a trailing index document.
+func pageSegments(path string) []string {
+	segs := pathSegments(path)
+	if n := len(segs); n > 0 && indexDocumentRE.MatchString(segs[n-1]) {
+		segs = segs[:n-1]
+	}
+	return segs
 }
 
 // urlWords returns the words of s: runs of two or more letters or digits,

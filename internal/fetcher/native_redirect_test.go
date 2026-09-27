@@ -218,6 +218,28 @@ func TestNative_LandingRuleNeedsDeadLinkDetection(t *testing.T) {
 	assertUncached(t, n)
 }
 
+// TestNative_IndexDocumentRedirectIsNoDeadLink: a bookmarked index document
+// that redirects to the site root is stored as the homepage it is, not
+// judged a page redirected to the homepage.
+func TestNative_IndexDocumentRedirectIsNoDeadLink(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, makeArticleHTML("MIT OpenCourseWare", ""))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	n, jinaCalls := crossSiteNative(t, true)
+
+	res, err := n.Fetch(context.Background(), srv.URL+"/index.html")
+	require.NoError(t, err)
+	assert.Equal(t, "readability", res.Meta["via"])
+	assert.Equal(t, srv.URL+"/", res.FinalURL)
+	assert.Zero(t, jinaCalls())
+}
+
 // TestNative_SameSiteLoginRedirectIsSiteWide: a redirect onto the requested
 // site's own login page is still host-wide: cached under the site, and the
 // first failure stays retryable after asking Jina.

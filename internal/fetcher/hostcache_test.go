@@ -675,3 +675,27 @@ func TestLooksLikeSoft404_WWWHomepage(t *testing.T) {
 	assert.Equal(t, "redirected to homepage",
 		looksLikeSoft404(pageView{finalURL: final}, "https://example.com/deleted-post"))
 }
+
+// TestLooksLikeSoft404_HomepageNeedsAPage: the homepage rule needs a source
+// that names a page. A site's index document redirecting to the root is the
+// homepage canonicalized, as bookmarks of ocw.mit.edu/index.htm are; an
+// index document below the root still names its directory.
+func TestLooksLikeSoft404_HomepageNeedsAPage(t *testing.T) {
+	cases := []struct{ source, final, reason string }{
+		{"http://ocw.mit.edu/index.htm", "https://ocw.mit.edu/", ""},
+		{"http://www.infragistics.com/default.aspx", "https://www.infragistics.com/", ""},
+		{"https://example.com/index.php", "https://www.example.com/", ""},
+		{"https://example.com", "https://www.example.com/", ""},
+		{"https://example.com/deleted-post", "https://www.example.com/", "redirected to homepage"},
+		{"https://example.com/blog/index.html", "https://example.com/", "redirected to homepage"},
+		// An index document is the homepage only as a source.
+		{"https://example.com/deleted-post", "https://example.com/index.html", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.source+" → "+tc.final, func(t *testing.T) {
+			final, err := url.Parse(tc.final)
+			require.NoError(t, err)
+			assert.Equal(t, tc.reason, looksLikeSoft404(pageView{finalURL: final}, tc.source))
+		})
+	}
+}
