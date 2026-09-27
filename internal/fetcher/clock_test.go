@@ -39,6 +39,14 @@ func (c *fakeClock) sleep(ctx context.Context, d time.Duration) error {
 	return nil
 }
 
+// advance moves now forward by d, as time passing between fetches: no
+// sleep is recorded.
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
 // slept returns the durations requested so far, in order.
 func (c *fakeClock) slept() []time.Duration {
 	c.mu.Lock()

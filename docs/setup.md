@@ -235,6 +235,18 @@ is badly off; fix that, then `curio refetch --all --state=failed`. A
 `r.jina.ai`, the fallback reader, not the site's, and is retried like any
 other Jina failure.
 
+**`dead link (redirected to another site's landing page: …)`** on a
+document — the bookmark redirects to another site's homepage or section
+page, which kept nothing of what the bookmark named: the usual fate of a
+retired site's pages. If the page did move there, `curio refetch <id>
+--force` fetches it again; if a whole corpus is misjudged,
+`fetcher.native.dead_link_detection: false` turns the dead-link rules off.
+
+**`jina: r.jina.ai's CDN challenged the request`** — Jina Reader's
+Cloudflare refused curio. Jina calls pause for 10 minutes (or the answer's
+`Retry-After`), a warning is logged, and the documents that needed Jina stay
+retryable: the job queue retries them once the pause is over.
+
 **`ENOENT: spawn node`** from a fetch — Node isn't on the daemon's PATH.
 Either install Node into a directory in PATH or set
 `fetcher.web2md.node_bin` in config.

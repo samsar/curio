@@ -3,6 +3,7 @@ package fetcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -90,8 +91,8 @@ func localhostURL(t *testing.T, raw string) string {
 }
 
 // TestNative_PageLevelVerdictsAreNotHostCached: a verdict about one page
-// never fails the rest of its host, whether Jina is off or on and whatever
-// Jina answers.
+// never fails the rest of its host, nor the host a redirect reached,
+// whether Jina is off or on and whatever Jina answers.
 func TestNative_PageLevelVerdictsAreNotHostCached(t *testing.T) {
 	article := makeArticleHTML("A real article", "")
 	pages := map[string]func(w http.ResponseWriter, r *http.Request, other string){
@@ -105,8 +106,8 @@ func TestNative_PageLevelVerdictsAreNotHostCached(t *testing.T) {
 			_, _ = w.Write([]byte(`<html><head><title>Sign in to read this</title></head><body><article><h1>Sign in to read this</h1><p>` +
 				strings.Repeat("Some text here. ", 50) + `</p></article></body></html>`))
 		},
-		"cross-host redirect": func(w http.ResponseWriter, r *http.Request, other string) {
-			http.Redirect(w, r, other+"/elsewhere", http.StatusFound)
+		"thin page behind a cross-site redirect": func(w http.ResponseWriter, r *http.Request, other string) {
+			http.Redirect(w, r, other+"/thin", http.StatusFound)
 		},
 	}
 	for pageName, page := range pages {
@@ -122,6 +123,8 @@ func TestNative_PageLevelVerdictsAreNotHostCached(t *testing.T) {
 					case "/b":
 						bHits.Add(1)
 						_, _ = w.Write([]byte(article))
+					case "/thin":
+						_, _ = w.Write([]byte(thinPage))
 					default:
 						_, _ = w.Write([]byte(article))
 					}
@@ -133,6 +136,12 @@ func TestNative_PageLevelVerdictsAreNotHostCached(t *testing.T) {
 				_, err := n.Fetch(context.Background(), srv.URL+"/a")
 				require.Error(t, err)
 				assert.ErrorIs(t, err, ErrLoginWall)
+				assert.NotErrorIs(t, err, errSiteLoginWall)
+				assert.NotErrorIs(t, err, errOffsiteLoginWall)
+				for _, host := range []string{hostOf(srv.URL), hostOf(other)} {
+					_, cached := n.hostCache.Get(host)
+					assert.False(t, cached, "%s must not be cached", host)
+				}
 
 				res, err := n.Fetch(context.Background(), srv.URL+"/b")
 				require.NoError(t, err, "a page-level verdict must not fail the rest of the host")
@@ -168,6 +177,93 @@ func TestNative_JinaSideFailuresDoNotCache(t *testing.T) {
 				assert.Equal(t, int32(i+1), originHits.Load())
 			}
 		})
+	}
+}
+
+// TestNative_JinaOwn403IsNoVerdict: Jina's own 403 is about curio's client,
+// not the target, whose status comes in a warning. Behind a thin page or an
+// origin 403 the fetch stays retryable after one Jina request, errors.As
+// finds Jina's status, and nothing is cached. Only a 403 carrying
+// Cloudflare's challenge header pauses Jina calls.
+func TestNative_JinaOwn403IsNoVerdict(t *testing.T) {
+	cases := []struct {
+		name       string
+		origin     int // 200 serves the thin page
+		challenged bool
+		sentinel   error
+		pause      time.Duration
+	}{
+		{"thin page", http.StatusOK, false, ErrLoginWall, 0},
+		{"thin page, challenged", http.StatusOK, true, ErrLoginWall, jinaChallengeCooldown},
+		{"origin 403", http.StatusForbidden, false, ErrAntiBot, 0},
+		{"origin 403, challenged", http.StatusForbidden, true, ErrAntiBot, jinaChallengeCooldown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.origin != http.StatusOK {
+					w.WriteHeader(tc.origin)
+					return
+				}
+				_, _ = io.WriteString(w, thinPage)
+			}))
+			defer origin.Close()
+			var jinaHits atomic.Int32
+			jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				jinaHits.Add(1)
+				if tc.challenged {
+					w.Header().Set("Cf-Mitigated", "challenge")
+				}
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer jina.Close()
+
+			fc := newFakeClock()
+			n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+			_, err := n.Fetch(context.Background(), origin.URL+"/a")
+			require.ErrorIs(t, err, tc.sentinel)
+			var pe *PermanentError
+			assert.False(t, errors.As(err, &pe), "Jina's own 403 leaves the fetch retryable: %v", err)
+			var se *HTTPStatusError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, http.StatusForbidden, se.StatusCode)
+			assert.True(t, strings.HasPrefix(se.URL, jina.URL), "errors.As finds Jina's status first: %s", se.URL)
+			assert.Equal(t, tc.challenged, errors.Is(err, errJinaChallenged))
+			assert.Equal(t, int32(1), jinaHits.Load(), "no retry within the fetch")
+			assert.NotContains(t, err.Error(), "(cached:")
+			_, cached := n.hostCache.Get(hostOf(origin.URL))
+			assert.False(t, cached)
+			assert.Equal(t, tc.pause, n.jinaCooldown.remaining(fc.now()))
+		})
+	}
+}
+
+// TestJinaAnswered: a Jina failure is a verdict about the target when its
+// answer was rejected or Jina refused the target with a deterministic 4xx.
+// 401, 402 and 403 are about curio's client, and rate limits, outages and a
+// target's trouble for now are no verdict.
+func TestJinaAnswered(t *testing.T) {
+	status := func(code int) error { return fmt.Errorf("jina: %w", &HTTPStatusError{StatusCode: code}) }
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"rejected answer", fmt.Errorf("jina: %w: %w", errJinaRejected, ErrAntiBot), true},
+		{"400", status(http.StatusBadRequest), true},
+		{"404", status(http.StatusNotFound), true},
+		{"451", status(http.StatusUnavailableForLegalReasons), true},
+		{"401", status(http.StatusUnauthorized), false},
+		{"402", status(http.StatusPaymentRequired), false},
+		{"403", status(http.StatusForbidden), false},
+		{"403 challenge", fmt.Errorf("jina: %w: %w", errJinaChallenged, &HTTPStatusError{StatusCode: http.StatusForbidden}), false},
+		{"429", status(http.StatusTooManyRequests), false},
+		{"502", status(http.StatusBadGateway), false},
+		{"target trouble", fmt.Errorf("jina: %w: %w", errJinaTargetTrouble, errServerErrorPage), false},
+		{"transport", errors.New("jina: connection reset"), false},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, jinaAnswered(tc.err), tc.name)
 	}
 }
 
@@ -535,32 +631,39 @@ func TestLooksLikeLoginWall_WWWIsSameSite(t *testing.T) {
 		article := parseArticle(t, makeArticleHTML("Full article", ""), tc.final)
 		final, err := url.Parse(tc.final)
 		require.NoError(t, err)
-		reason, siteWide := looksLikeLoginWall(viewAt(t, article, final), tc.source)
+		reason, _ := looksLikeLoginWall(viewAt(t, article, final), tc.source)
 		assert.Empty(t, reason, "%s → %s", tc.source, tc.final)
-		assert.False(t, siteWide)
 	}
 }
 
 // TestLooksLikeLoginWall_Redirects: a redirect onto the requested site's
-// login page is site-wide; a redirect to another site is flagged but is
-// only about this page.
+// login page is site-wide; one onto another site's login page, by its path
+// or its title, is offsite; a redirect to another site's article is no
+// login wall at all.
 func TestLooksLikeLoginWall_Redirects(t *testing.T) {
-	article := parseArticle(t, makeArticleHTML("Full article", ""), "https://example.com/login")
 	cases := []struct {
-		source, final string
-		siteWide      bool
+		source, final, title string
+		scope                loginWallScope
+		wall                 bool
 	}{
-		{"https://example.com/post", "https://example.com/login", true},
-		{"https://example.com/post", "https://www.example.com/authwall", true},
-		{"https://example.com/login", "https://example.com/login", false}, // bookmarked login page, no redirect
-		{"https://example.com/post", "https://other.example/post", false},
+		{"https://example.com/post", "https://example.com/login", "Full article", loginWallSite, true},
+		{"https://example.com/post", "https://www.example.com/authwall", "Full article", loginWallSite, true},
+		{"https://example.com/login", "https://example.com/login", "Full article", loginWallPage, true}, // bookmarked login page, no redirect
+		{"https://example.com/post", "https://accounts.example.net/login?continue=x", "Full article", loginWallOffsite, true},
+		{"https://docs.example.com/d/1", "https://accounts.example.net/ServiceLogin", "Sign in - Example Accounts", loginWallOffsite, true},
+		{"https://example.com/post", "https://other.example/post", "Full article", 0, false},
 	}
 	for _, tc := range cases {
+		article := parseArticle(t, makeArticleHTML(tc.title, ""), tc.final)
 		final, err := url.Parse(tc.final)
 		require.NoError(t, err)
-		reason, siteWide := looksLikeLoginWall(viewAt(t, article, final), tc.source)
+		reason, scope := looksLikeLoginWall(viewAt(t, article, final), tc.source)
+		if !tc.wall {
+			assert.Empty(t, reason, "%s → %s", tc.source, tc.final)
+			continue
+		}
 		assert.NotEmpty(t, reason, "%s → %s", tc.source, tc.final)
-		assert.Equal(t, tc.siteWide, siteWide, "%s → %s", tc.source, tc.final)
+		assert.Equal(t, tc.scope, scope, "%s → %s", tc.source, tc.final)
 	}
 }
 
@@ -571,23 +674,4 @@ func TestLooksLikeSoft404_WWWHomepage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "redirected to homepage",
 		looksLikeSoft404(pageView{finalURL: final}, "https://example.com/deleted-post"))
-}
-
-// TestNative_CrossHostRedirectStillFlagged: the documented cross-site
-// heuristic is kept (127.0.0.1 → localhost), and never host-cached.
-func TestNative_CrossHostRedirectStillFlagged(t *testing.T) {
-	dest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(makeArticleHTML("Moved", "")))
-	}))
-	defer dest.Close()
-	src := newRedirectingServer(t, localhostURL(t, dest.URL)+"/x")
-
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
-	_, err := n.Fetch(context.Background(), src.URL+"/a")
-	require.ErrorIs(t, err, ErrLoginWall)
-	assert.Contains(t, err.Error(), "redirected to a different host")
-	_, cached := n.hostCache.Get(hostOf(src.URL))
-	assert.False(t, cached)
-	_, cached = n.hostCache.Get("localhost")
-	assert.False(t, cached)
 }

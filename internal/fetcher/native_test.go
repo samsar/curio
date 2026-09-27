@@ -1038,9 +1038,10 @@ func TestNative_JinaTargetStatus(t *testing.T) {
 }
 
 // TestNative_JinaRejectsNonArticles: a 2xx Jina answer that is a challenge,
-// a block, a not-found or a login page, or too thin, is Jina's verdict: one
-// request, never stored, never cached. Behind a thin origin page it fails
-// the fetch permanently.
+// a block, a 403/503 error page without the target-status warning, a
+// not-found or a login page, or too thin, is Jina's verdict: one request,
+// never stored, never cached. Behind a thin origin page it fails the fetch
+// permanently.
 func TestNative_JinaRejectsNonArticles(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1069,6 +1070,12 @@ func TestNative_JinaRejectsNonArticles(t *testing.T) {
 		{"colorcombos", "ColorCombos.com - Login", nil, loginPageBody, ErrLoginWall, "login wall"},
 		{"bigcommerce", "Login | BigCommerce Help Center", nil, loginPageBody, ErrLoginWall, "login wall"},
 		{"plaid", "Plaid - Dashboard | Signin", nil, loginPageBody, ErrLoginWall, "login wall"},
+		{"ibm notice", "IBM notice: The page you requested cannot be displayed", nil, ibmNoticeBody, ErrAntiBot, "error page"},
+		{"stanford", "Access forbidden : Stanford University", nil, stanfordForbiddenBody, ErrAntiBot, "error page"},
+		{"aptana", "403 | Forbidden | Axway", nil, aptanaForbiddenBody, ErrAntiBot, "error page"},
+		{"aptana, stored title", "403 | Forbidden", nil, aptanaForbiddenBody, ErrAntiBot, "error page"},
+		{"google cloud storage", "", nil, gcsAccessDeniedBody, ErrAntiBot, "error page"},
+		{"visage.co", "403 Forbidden", nil, s3AccessDeniedBody, ErrAntiBot, "error page"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1119,6 +1126,9 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 		{"stack overflow", "Login cognito using with scope openId using id_token or access_token don't working", nil, article, true},
 		{"just a moment of", "Just a moment of silence", nil, article, true},
 		{"access denied:", "Access Denied: A History of Web Censorship", nil, article, true},
+		{"access forbidden:", "Access Forbidden: A History of Web Censorship", nil, article, true},
+		{"an article about a 403", "How to fix a 403 Forbidden error", nil, article, true},
+		{"an article about a 526", "Understanding Cloudflare Error 526", nil, article, true},
 		{"a short post", `Jane Doe on X: "Shipping a new version of our SQLite extension today" / X`, nil, tweetBody, true},
 		{"at the floor", "A note", nil, strings.Repeat("x", minArticleBytes), true},
 		{"not-found title, detection off", "Page not found | Free local classifieds - Kijiji", nil, kijijiNotFoundBody, false},
@@ -1186,15 +1196,15 @@ var challengePages = map[string]string{
 }
 
 // TestJudgePage_Order pins the order of the page verdicts: dead links
-// first, then challenges, then the login-wall checks, redirects before
-// content.
+// first (another site's landing page included), then challenges, then
+// error pages, then the login-wall checks, redirects before content.
 func TestJudgePage_Order(t *testing.T) {
 	at := func(raw string) *url.URL {
 		u, err := url.Parse(raw)
 		require.NoError(t, err)
 		return u
 	}
-	const target = "https://example.com/post"
+	const target = "https://example.com/blog/a-post-about-caching"
 	long := strings.Repeat("A sentence of the article. ", 30)
 	challenge := "Checking your browser before accessing example.com."
 	cases := []struct {
@@ -1203,19 +1213,27 @@ func TestJudgePage_Order(t *testing.T) {
 		detection bool
 		want      error
 		reason    string
-		siteWide  bool
+		scope     loginWallScope // of an ErrLoginWall
 	}{
-		{"not-found title before a challenge", pageView{title: "Page not found", text: challenge, found: true}, true, ErrDeadLink, "not-found page", false},
-		{"homepage before a challenge title", pageView{title: "Just a moment...", found: true, finalURL: at("https://example.com/")}, true, ErrDeadLink, "redirected to homepage", false},
-		{"detection off", pageView{title: "Page not found", text: challenge, found: true}, false, ErrAntiBot, "bot challenge", false},
-		{"challenge before a login redirect", pageView{title: "Just a moment...", text: long, found: true, finalURL: at("https://example.com/login")}, true, ErrAntiBot, "bot challenge", false},
-		{"challenge title without an article", pageView{title: "Just a moment..."}, true, ErrAntiBot, "bot challenge", false},
-		{"login redirect before no article", pageView{finalURL: at("https://example.com/login")}, true, ErrLoginWall, "login/auth path", true},
-		{"cross-site redirect before thin", pageView{text: "short", found: true, finalURL: at("https://other.example/post")}, true, ErrLoginWall, "different host", false},
-		{"no article", pageView{title: "Log in"}, true, ErrLoginWall, "no article extracted", false},
-		{"thin before a login title", pageView{title: "Log in", text: "short", found: true}, true, ErrLoginWall, "extracted text < 500 bytes", false},
-		{"login title", pageView{title: "Log in", text: long, found: true}, true, ErrLoginWall, "title looks like a login wall", false},
-		{"article", pageView{title: "A real article", text: long, found: true, finalURL: at(target)}, true, nil, "", false},
+		{"not-found title before a challenge", pageView{title: "Page not found", text: challenge, found: true}, true, ErrDeadLink, "not-found page", 0},
+		{"homepage before a challenge title", pageView{title: "Just a moment...", found: true, finalURL: at("https://example.com/")}, true, ErrDeadLink, "redirected to homepage", 0},
+		{"landing page before a challenge", pageView{title: "Just a moment...", text: challenge, found: true, finalURL: at("https://other.example/articles/")}, true, ErrDeadLink, "another site's landing page", 0},
+		{"detection off", pageView{title: "Page not found", text: challenge, found: true}, false, ErrAntiBot, "bot challenge", 0},
+		{"challenge before an error page", pageView{title: "403 Forbidden", text: challenge, found: true}, true, ErrAntiBot, "bot challenge", 0},
+		{"challenge before a login redirect", pageView{title: "Just a moment...", text: long, found: true, finalURL: at("https://example.com/login")}, true, ErrAntiBot, "bot challenge", 0},
+		{"challenge title without an article", pageView{title: "Just a moment..."}, true, ErrAntiBot, "bot challenge", 0},
+		{"error page before a login redirect", pageView{title: "403 Forbidden", found: true, finalURL: at("https://example.com/login")}, true, ErrAntiBot, "error page", 0},
+		{"server error page before thin", pageView{title: "502 Bad Gateway", text: "short", found: true}, true, errServerErrorPage, "502 Bad Gateway", 0},
+		{"a login destination is no landing page", pageView{title: "Welcome", found: true, finalURL: at("https://accounts.other.example/login")}, true, errOffsiteLoginWall, "another site's login page", loginWallOffsite},
+		{"cross-site login redirect before no article", pageView{title: "Sign in - Other Accounts", finalURL: at("https://accounts.other.example/ServiceLogin")}, true, errOffsiteLoginWall, "another site's login page", loginWallOffsite},
+		{"cross-site login redirect before thin", pageView{text: "short", found: true, finalURL: at("https://id.other.example/login")}, false, errOffsiteLoginWall, "another site's login page", loginWallOffsite},
+		{"same-site login redirect before no article", pageView{finalURL: at("https://example.com/login")}, true, ErrLoginWall, "login/auth path", loginWallSite},
+		{"cross-site redirect onto a thin page", pageView{text: "short", found: true, finalURL: at("https://other.example/blog/a-post-about-caching")}, true, ErrLoginWall, "extracted text < 500 bytes", loginWallPage},
+		{"no article", pageView{title: "Log in"}, true, ErrLoginWall, "no article extracted", loginWallPage},
+		{"thin before a login title", pageView{title: "Log in", text: "short", found: true}, true, ErrLoginWall, "extracted text < 500 bytes", loginWallPage},
+		{"login title", pageView{title: "Log in", text: long, found: true}, true, ErrLoginWall, "title looks like a login wall", loginWallPage},
+		{"article", pageView{title: "A real article", text: long, found: true, finalURL: at(target)}, true, nil, "", 0},
+		{"article on another site", pageView{title: "A real article", text: long, found: true, finalURL: at("https://other.example/2019/a-post-about-caching")}, true, nil, "", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1227,7 +1245,10 @@ func TestJudgePage_Order(t *testing.T) {
 			}
 			require.ErrorIs(t, err, tc.want)
 			assert.Contains(t, err.Error(), tc.reason)
-			assert.Equal(t, tc.siteWide, errors.Is(err, errSiteLoginWall), "site-wide: %v", err)
+			if errors.Is(err, ErrLoginWall) {
+				assert.Equal(t, tc.scope == loginWallSite, errors.Is(err, errSiteLoginWall), "site-wide: %v", err)
+				assert.Equal(t, tc.scope == loginWallOffsite, errors.Is(err, errOffsiteLoginWall), "offsite: %v", err)
+			}
 		})
 	}
 }
@@ -1261,6 +1282,12 @@ func TestJudgeJinaAnswer(t *testing.T) {
 		{"a warning that only mentions a CAPTCHA",
 			jinaParsed{title: "An article", warnings: []string{"This page contains a CAPTCHA widget that was left out."}, body: longArticleBody},
 			nil, ""},
+		{"a 403 error page is a rejection",
+			jinaParsed{title: "Access forbidden : Stanford University", body: stanfordForbiddenBody},
+			errJinaRejected, "error page"},
+		{"a server error page is the target's trouble for now",
+			jinaParsed{title: "appdesignvault.com | 526: Invalid SSL certificate", body: cfInvalidSSLBody},
+			errJinaTargetTrouble, "server error page"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -308,9 +308,11 @@ External processes the daemon expects:
   optional `web2md` fetcher. Not needed: the default fetcher is Go-native.
 - **Jina Reader** (`r.jina.ai`, `fetcher.native.jina_base_url`) — the native
   fetcher's fallback for anti-bot and login-wall pages and PDFs it can't
-  read; off with `fetcher.native.jina_fallback: false`. Its answers are
-  judged like the origin's before they are stored: challenge, block,
-  not-found and login pages are rejected.
+  read; off with `fetcher.native.jina_fallback: false`. Requests to it
+  identify as curio, not as a browser. Its answers are judged like the
+  origin's before they are stored: challenge, block, error, not-found and
+  login pages are rejected. A redirect onto another site is judged where it
+  lands, without Jina: a landing page is a dead link, a login page final.
 - **Claude API (optional)** — a future `generator.Generator` impl for heavier
   synthesis on the M6 RAG path (retrieve → LLM → cited answer).
 

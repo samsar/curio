@@ -18,6 +18,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	readability "codeberg.org/readeck/go-readability/v2"
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
@@ -55,8 +57,9 @@ type Native struct {
 // NativeOptions configures Native. Zero-value fields use defaults.
 type NativeOptions struct {
 	Timeout time.Duration
-	// UserAgent overrides the User-Agent the Chrome profile implies. It is
-	// sent as is; one that names a different Chrome version than the
+	// UserAgent overrides the User-Agent the Chrome profile implies, on
+	// origin requests only: Jina requests identify as curio (jinaUserAgent).
+	// It is sent as is; one that names a different Chrome version than the
 	// profile logs a warning, since bot checks compare the two.
 	UserAgent    string
 	JinaFallback bool
@@ -200,8 +203,8 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 	if originErr == nil {
 		return res, nil
 	}
-	// Dead links, oversized or unsupported bodies, deterministic statuses:
-	// final, and nothing Jina can fix.
+	// Dead links, another site's login page, oversized or unsupported
+	// bodies, deterministic statuses: final, and nothing Jina can fix.
 	var pe *PermanentError
 	if errors.As(originErr, &pe) {
 		return nil, originErr
@@ -254,14 +257,17 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 // jinaCanHelp reports whether an origin failure is one Jina might get past:
 //
 //   - ErrLoginWall: the page came back but was paywalled or thin
-//   - ErrAntiBot: 403/503 from the origin, likely a WAF block
+//   - ErrAntiBot: 403/503 from the origin, likely a WAF block, or a
+//     challenge or 403/503 error page served with a 2xx
 //   - errPDFUnreadable: a PDF the local extractor couldn't read; Jina
 //     renders PDFs itself
 //
-// Everything else (404, other statuses, DNS failures, timeouts) goes
-// without Jina: it can't conjure a page that doesn't exist, and spending
-// its rate limit on dead links gets us 429'd on the calls that would
-// benefit.
+// Everything else (404, other statuses, DNS failures, timeouts, an error
+// page naming a server error) goes without Jina: it can't conjure a page
+// that doesn't exist, and spending its rate limit on dead links gets us
+// 429'd on the calls that would benefit. Neither does a redirect onto
+// another site's login page, although it is an ErrLoginWall: it comes as a
+// PermanentError, which Fetch returns before asking.
 func jinaCanHelp(err error) bool {
 	return errors.Is(err, ErrLoginWall) || errors.Is(err, ErrAntiBot) || errors.Is(err, errPDFUnreadable)
 }
@@ -269,9 +275,10 @@ func jinaCanHelp(err error) bool {
 // jinaAnswered reports whether a failed Jina call is a verdict about the
 // target: Jina fetched it and its answer is not the page, or Jina refused it
 // with a deterministic 4xx. Rate limits, outages, timeouts and transport
-// errors are trouble on Jina's side, 401/402 are about our account, and a
-// transient status the target gave Jina is the target's trouble for now;
-// none of them is a verdict.
+// errors are trouble on Jina's side, 401/402/403 are about our client (our
+// account, or r.jina.ai's CDN refusing curio), and a transient status the
+// target gave Jina is the target's trouble for now; none of them is a
+// verdict. The target's own 403 comes in a warning, as a targetStatusError.
 func jinaAnswered(err error) bool {
 	if errors.Is(err, errJinaRejected) {
 		return true
@@ -281,7 +288,7 @@ func jinaAnswered(err error) bool {
 		return false
 	}
 	switch se.StatusCode {
-	case http.StatusUnauthorized, http.StatusPaymentRequired:
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
 		return false
 	}
 	return se.StatusCode >= 400 && se.StatusCode < 500 && !retryableStatus(se.StatusCode)
@@ -324,9 +331,10 @@ func (n *Native) settle(requestedHost string, originErr, err error) error {
 //   - anti-bot: a 403/503 answer, from the host that sent it
 //   - login wall: a redirect onto the requested site's own login page
 //
-// Everything else is about one page (thin content, a cross-site redirect, a
-// bot challenge recognized in a page's content) or transient, and caching it
-// would fail healthy URLs without a request.
+// Everything else is about one page (thin content, a redirect onto another
+// site's login or landing page, a bot challenge or an error page recognized
+// in a page's content) or transient, and caching it would fail healthy URLs
+// without a request.
 func hostVerdict(err error, requestedHost string) (kind HostFailureKind, host string, ok bool) {
 	switch {
 	case errors.Is(err, ErrHostUnreachable):
@@ -456,7 +464,8 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		return nil, fmt.Errorf("native: %w", err)
 	}
 	if err := n.judgePage(target, page); err != nil {
-		if errors.Is(err, ErrDeadLink) {
+		// Final, and nothing Jina can fix: it follows the same redirect.
+		if errors.Is(err, ErrDeadLink) || errors.Is(err, errOffsiteLoginWall) {
 			return nil, &PermanentError{Err: fmt.Errorf("native: %w", err)}
 		}
 		return nil, fmt.Errorf("native: %w", err)
@@ -533,10 +542,20 @@ func discardErrorBody(body io.Reader) {
 	_, _ = io.CopyN(io.Discard, body, errorBodyDrain)
 }
 
-// errSiteLoginWall is the login wall a whole site sits behind: the request
-// was redirected onto the site's own login page. It wraps ErrLoginWall, so
-// it gets the same Jina fallback, but unlike a thin page it is host-wide.
-var errSiteLoginWall = fmt.Errorf("site-wide %w", ErrLoginWall)
+var (
+	// errSiteLoginWall is the login wall a whole site sits behind: the
+	// request was redirected onto the site's own login page. It wraps
+	// ErrLoginWall, so it gets the same Jina fallback, but unlike a thin page
+	// it is host-wide.
+	errSiteLoginWall = fmt.Errorf("site-wide %w", ErrLoginWall)
+
+	// errOffsiteLoginWall is a redirect onto another site's login page, an
+	// account or SSO host (accounts.google.com, id.atlassian.com). It wraps
+	// ErrLoginWall but is final: Jina has no session either and follows the
+	// same redirect. It says nothing about the rest of either host, so it is
+	// never cached.
+	errOffsiteLoginWall = fmt.Errorf("offsite %w", ErrLoginWall)
+)
 
 // pageView is what the page verdicts look at: a page's title and text,
 // whether an article was found in it, and the URL the request settled on.
@@ -568,20 +587,27 @@ func articleView(article readability.Article, finalURL *url.URL) (pageView, erro
 // run in this order:
 //
 //  1. Dead link, with dead-link detection on: the request settled on the
-//     site's homepage, or the title reads like a not-found page. First,
-//     because a tombstone page is usually thin: the later checks would call
-//     it a login wall and send it to Jina, which can't help with a page that
-//     no longer exists.
+//     site's homepage or on another site's landing page, or the title reads
+//     like a not-found page. First, because a tombstone page is usually
+//     thin: the later checks would call it a login wall and send it to
+//     Jina, which can't help with a page that no longer exists.
 //  2. Bot challenge: a challenge or block interstitial served with a 2xx.
-//  3. Login wall by redirect: onto another site (this page only), or onto a
-//     login path (the whole site, when the redirect stays on it).
-//  4. No article found.
-//  5. Thin: less than minArticleBytes of text.
-//  6. A login-page title.
+//  3. Error page: an error page served with a 2xx, judged like the status
+//     it names.
+//  4. Login wall by redirect: onto another site's login page (final for
+//     this URL), or onto the site's own login path (the whole site, when the
+//     redirect changes the path).
+//  5. No article found.
+//  6. Thin: less than minArticleBytes of text.
+//  7. A login-page title.
+//
+// A redirect onto another site that none of these flags is judged like any
+// page, and stored when it passes.
 //
 // It returns nil for a page that passes, and otherwise an error wrapping
-// ErrDeadLink, ErrAntiBot, errSiteLoginWall or ErrLoginWall. A dead link is
-// final; the caller makes it a PermanentError.
+// ErrDeadLink, ErrAntiBot, errServerErrorPage, errOffsiteLoginWall,
+// errSiteLoginWall or ErrLoginWall. A dead link and an offsite login wall
+// are final; the caller makes them a PermanentError.
 func (n *Native) judgePage(target string, p pageView) error {
 	if n.deadLinkDetection {
 		if reason := looksLikeSoft404(p, target); reason != "" {
@@ -591,12 +617,11 @@ func (n *Native) judgePage(target string, p pageView) error {
 	if reason := looksLikeChallenge(p); reason != "" {
 		return fmt.Errorf("%w (bot challenge: %s)", ErrAntiBot, reason)
 	}
-	if reason, siteWide := looksLikeLoginWall(p, target); reason != "" {
-		sentinel := ErrLoginWall
-		if siteWide {
-			sentinel = errSiteLoginWall
-		}
-		return fmt.Errorf("%w (%s)", sentinel, reason)
+	if code, reason := looksLikeErrorPage(p); reason != "" {
+		return errorPageVerdict(code, reason)
+	}
+	if reason, scope := looksLikeLoginWall(p, target); reason != "" {
+		return fmt.Errorf("%w (%s)", scope.sentinel(), reason)
 	}
 	return nil
 }
@@ -663,40 +688,168 @@ var (
 	}
 )
 
+// looksLikeErrorPage detects an error page served with a 2xx, or whose
+// status the answer doesn't carry (Jina's, without its target-status
+// warning): by an anchored title (errorPageTitleRE) or, on a short page, by
+// an error body (errorPagePhrases). It returns the HTTP status the page
+// names and a short reason string for diagnostics, or the empty string when
+// nothing looks like one.
+func looksLikeErrorPage(p pageView) (code int, reason string) {
+	if m := errorPageTitleRE.FindStringSubmatch(p.title); m != nil {
+		return errorPageStatus(m), "title " + strconv.Quote(p.title)
+	}
+	if trimmedByteLen(p.text) > maxChallengeBytes {
+		return 0, ""
+	}
+	text := strings.ToLower(p.text)
+	for _, e := range errorPagePhrases {
+		if strings.Contains(text, e.phrase) {
+			return e.code, "page says " + strconv.Quote(e.phrase)
+		}
+	}
+	return 0, ""
+}
+
+// errServerErrorPage marks an error page naming a server error other than
+// 503 (500, 502, 504, Cloudflare's 52x). Like the status it names, it is the
+// server's trouble for now: retried with the job's backoff, never cached,
+// and never sent to Jina, which would reach the same failing server.
+var errServerErrorPage = errors.New("server error page")
+
+// errorPageVerdict is what an error page means, by the status it names, the
+// way statusFailure reads a real status: 403 and 503 are anti-bot (page-level
+// here, since no status came with the page), any other a server error.
+func errorPageVerdict(code int, reason string) error {
+	if code == http.StatusForbidden || code == http.StatusServiceUnavailable {
+		return fmt.Errorf("%w (error page: %s)", ErrAntiBot, reason)
+	}
+	return fmt.Errorf("%w (%s)", errServerErrorPage, reason)
+}
+
+// errorPageStatus is the status an errorPageTitleRE match names: the code
+// the title gives, or else the one its phrase means.
+func errorPageStatus(m []string) int {
+	for _, name := range []string{"code", "errorCode", "cfCode"} {
+		if s := m[errorPageTitleRE.SubexpIndex(name)]; s != "" {
+			code, _ := strconv.Atoi(s) // three digits, by the pattern
+			return code
+		}
+	}
+	switch phrase := strings.ToLower(m[errorPageTitleRE.SubexpIndex("phrase")]); {
+	case strings.HasSuffix(phrase, "forbidden"):
+		return http.StatusForbidden
+	case phrase == "internal server error":
+		return http.StatusInternalServerError
+	case phrase == "bad gateway":
+		return http.StatusBadGateway
+	case strings.HasPrefix(phrase, "gateway"):
+		return http.StatusGatewayTimeout
+	}
+	// "Service (temporarily) unavailable", or no phrase: IBM's "The page you
+	// requested cannot be displayed", its 503 notice.
+	return http.StatusServiceUnavailable
+}
+
+var (
+	// errorPageTitleRE matches the titles of server and CDN error pages.
+	// Anchored at both ends: the error opens the title, optionally after
+	// "Error" and a status code, and either ends it or is followed by a
+	// spaced separator and a site name ("Access forbidden : Stanford
+	// University", "403 | Forbidden | Axway"). An article about an error
+	// ("How to fix a 403 Forbidden error", "Service Unavailable: lessons from
+	// our outage") doesn't match. A 404 or 410 title is soft404TitleRE's.
+	errorPageTitleRE = regexp.MustCompile(`(?i)^\s*(?:` +
+		`(?:(?:error\s*)?(?P<code>403|50[0234])\s*(?:[|:–—-]\s*)?)?` +
+		`(?P<phrase>forbidden|access forbidden|internal server error|bad gateway|service (?:temporarily )?unavailable|gateway time-?out)` +
+		`|error\s*(?P<errorCode>403|50[0234])` +
+		// Cloudflare: "example.com | 526: Invalid SSL certificate".
+		`|[a-z0-9-]+(?:\.[a-z0-9-]+)+\s*\|\s*(?P<cfCode>5\d\d):\s+[^|]+` +
+		// IBM: "IBM notice: The page you requested cannot be displayed".
+		`|(?:[^|:]{1,30}:\s*)?(?:the )?page you requested cannot be displayed\.?` +
+		`)(?:\s+[|:·•–—-]\s+[^|:]{1,60})?\s*$`)
+
+	// errorPagePhrases are error bodies recognized on short pages, lowercased,
+	// with the status they mean: S3's and Google Cloud Storage's XML error.
+	errorPagePhrases = []struct {
+		phrase string
+		code   int
+	}{
+		{"<code>accessdenied</code>", http.StatusForbidden},
+	}
+)
+
+// loginWallScope is how far a login-wall verdict reaches.
+type loginWallScope int
+
+const (
+	// loginWallPage is about this page alone: no article, too little text,
+	// a login-page title. Jina may get past it.
+	loginWallPage loginWallScope = iota
+	// loginWallSite is a redirect onto the requested site's own login page,
+	// the one verdict here that speaks for every page on the host.
+	loginWallSite
+	// loginWallOffsite is a redirect onto another site's login page. Final
+	// for this URL, and about neither host (errOffsiteLoginWall).
+	loginWallOffsite
+)
+
+// sentinel is the error a login wall of scope s wraps.
+func (s loginWallScope) sentinel() error {
+	switch s {
+	case loginWallPage:
+		return ErrLoginWall
+	case loginWallSite:
+		return errSiteLoginWall
+	case loginWallOffsite:
+		return errOffsiteLoginWall
+	}
+	return fmt.Errorf("unknown login wall scope %d: %w", int(s), ErrLoginWall)
+}
+
 // looksLikeLoginWall detects a login wall, or a page too thin to be the
 // article:
-//   - redirect to a login path segment (/login, /authwall, /signin, /signup)
-//   - redirect to a different site
+//   - redirect onto another site's login page: a login path segment
+//     (loginPathRE) or a login-page title (loginTitleRE)
+//   - redirect onto a login path segment on the same site (/login,
+//     /authwall, /signin, /signup)
 //   - missing article entirely
 //   - extracted text shorter than minArticleBytes
-//   - a login-page title (loginTitleRE)
+//   - a login-page title
 //
 // Returns the empty string when nothing looks suspicious; otherwise a
-// short reason string for diagnostics. siteWide is set for a redirect onto
-// the requested site's own login page, the one verdict here that speaks for
-// every page on the host. The redirect checks run first so a thin login
-// page still counts as the site-wide wall it is; they need p.finalURL.
-func looksLikeLoginWall(p pageView, sourceURL string) (reason string, siteWide bool) {
+// short reason string for diagnostics and the verdict's scope. The redirect
+// checks run first, so a thin login page still counts as the wall it is;
+// they need p.finalURL. A redirect onto another site that is no login page
+// is none of this function's business: it is judged like any page.
+func looksLikeLoginWall(p pageView, sourceURL string) (reason string, scope loginWallScope) {
 	if source, err := url.Parse(sourceURL); err == nil && p.finalURL != nil {
 		final := p.finalURL
-		if final.Hostname() != "" && source.Hostname() != "" &&
-			!sameSiteHost(final.Hostname(), source.Hostname()) {
-			return "redirected to a different host: " + final.Hostname(), false
-		}
-		if loginPathRE.MatchString(final.Path) {
-			return "redirected to a login/auth path: " + final.Path, final.Path != source.Path
+		loginPath := loginPathRE.MatchString(final.Path)
+		switch {
+		case crossSite(source, final):
+			// Never site-wide: that would cache the requested host for
+			// sending its links to an SSO host.
+			if loginPath || loginTitleRE.MatchString(p.title) {
+				return "redirected onto another site's login page: " + final.Host + final.Path, loginWallOffsite
+			}
+		case loginPath:
+			scope = loginWallPage
+			if final.Path != source.Path {
+				scope = loginWallSite
+			}
+			return "redirected to a login/auth path: " + final.Path, scope
 		}
 	}
 	if !p.found {
-		return "no article extracted", false
+		return "no article extracted", loginWallPage
 	}
 	if trimmedByteLen(p.text) < minArticleBytes {
-		return fmt.Sprintf("extracted text < %d bytes", minArticleBytes), false
+		return fmt.Sprintf("extracted text < %d bytes", minArticleBytes), loginWallPage
 	}
 	if loginTitleRE.MatchString(p.title) {
-		return "title looks like a login wall", false
+		return "title looks like a login wall", loginWallPage
 	}
-	return "", false
+	return "", loginWallPage
 }
 
 // sameSiteHost reports whether two hostnames name the same site, ignoring
@@ -705,6 +858,12 @@ func looksLikeLoginWall(p pageView, sourceURL string) (reason string, siteWide b
 func sameSiteHost(a, b string) bool {
 	norm := func(h string) string { return strings.TrimPrefix(strings.ToLower(h), "www.") }
 	return norm(a) == norm(b)
+}
+
+// crossSite reports whether a request for source settled on another site.
+func crossSite(source, final *url.URL) bool {
+	return source.Hostname() != "" && final.Hostname() != "" &&
+		!sameSiteHost(source.Hostname(), final.Hostname())
 }
 
 var (
@@ -724,29 +883,133 @@ var (
 
 // looksLikeSoft404 detects "soft 404s": pages that answer HTTP 200 but
 // whose content says the resource is gone (CMS not-found templates,
-// deleted articles redirecting to the site root). Two signals:
+// deleted articles redirecting to the site root, retired sites sending
+// every old URL to their successor's front door). Three signals:
 //
-//   - the extracted title reads like a not-found page
 //   - the request for a specific path settled on the site's homepage
-//     (same site, www. or not; cross-site redirects are login-wall
-//     territory). Needs p.finalURL.
+//     (same site, www. or not). Needs p.finalURL.
+//   - the request settled on another site's landing page
+//     (looksLikeLandingPage). Needs p.finalURL.
+//   - the extracted title reads like a not-found page
 //
 // Returns the empty string when nothing looks dead; otherwise a short
 // reason string for diagnostics.
 func looksLikeSoft404(p pageView, sourceURL string) string {
-	source, err := url.Parse(sourceURL)
-	if final := p.finalURL; err == nil && final != nil &&
-		sameSiteHost(source.Hostname(), final.Hostname()) &&
-		strings.Trim(source.Path, "/") != "" &&
-		strings.Trim(final.Path, "/") == "" &&
-		final.RawQuery == "" {
-		return "redirected to homepage"
+	if source, err := url.Parse(sourceURL); err == nil && p.finalURL != nil {
+		final := p.finalURL
+		if sameSiteHost(source.Hostname(), final.Hostname()) &&
+			strings.Trim(source.Path, "/") != "" &&
+			strings.Trim(final.Path, "/") == "" &&
+			final.RawQuery == "" {
+			return "redirected to homepage"
+		}
+		if looksLikeLandingPage(source, final, p.title) {
+			return "redirected to another site's landing page: " + final.Host + final.Path
+		}
 	}
 
 	if p.found && soft404TitleRE.MatchString(p.title) {
 		return "title looks like a not-found page: " + p.title
 	}
 	return ""
+}
+
+// looksLikeLandingPage reports whether a request for source settled on
+// another site's landing page, a homepage or a section such as /articles/,
+// instead of on a page of its own: how a retired site sends every old URL
+// to its successor. All of these must hold:
+//
+//   - final is on another site, and is no login page (that is a login wall,
+//     not a dead link).
+//   - source names a page: its path, less an index document, holds a word,
+//     and its path and query hold two. A shortener or profile link
+//     (bit.ly/x, youtu.be/x, twitter.com/user) never counts, so a redirect
+//     to a homepage can't mark it dead.
+//   - final kept nothing of source: no word of source's path or query is a
+//     word of final's hostname, path or query. A move keeps its slug, ID or
+//     name somewhere (twitter.com/jack/status/20 → x.com/jack/status/20,
+//     youtu.be/ID → youtube.com/watch?v=ID, computing.llnl.gov/tutorials/
+//     pthreads/ → hpc-tutorials.llnl.gov/posix/). A query that only
+//     records the path the request came from (repost.aws/forums?origin=
+//     /message.jspa&messageID=…) is bookkeeping, not identity, and ignored.
+//   - final names no page: no path, fewer path segments than source, a last
+//     segment of letters alone (/articles/, /forums, /technologies/; a
+//     numeric ID is a page), or a bookkeeping query.
+//
+// A word is a run of two or more letters or digits, lowercased.
+func looksLikeLandingPage(source, final *url.URL, title string) bool {
+	if !crossSite(source, final) || loginPathRE.MatchString(final.Path) || loginTitleRE.MatchString(title) {
+		return false
+	}
+	sourceSegs := pathSegments(source.Path)
+	if n := len(sourceSegs); n > 0 && indexDocumentRE.MatchString(sourceSegs[n-1]) {
+		sourceSegs = sourceSegs[:n-1]
+	}
+	pathWords := urlWords(strings.Join(sourceSegs, "/"))
+	sourceWords := slices.Concat(pathWords, queryWords(source.Query()))
+	if len(pathWords) == 0 || len(sourceWords) < 2 {
+		return false
+	}
+
+	bookkeeping := recordsPath(final.Query(), source.Path)
+	finalWords := slices.Concat(urlWords(final.Hostname()), urlWords(final.Path))
+	if !bookkeeping {
+		finalWords = append(finalWords, queryWords(final.Query())...)
+	}
+	if slices.ContainsFunc(sourceWords, func(w string) bool { return slices.Contains(finalWords, w) }) {
+		return false
+	}
+
+	finalSegs := pathSegments(final.Path)
+	return len(finalSegs) == 0 || len(finalSegs) < len(sourceSegs) || bookkeeping ||
+		isLetters(finalSegs[len(finalSegs)-1])
+}
+
+// recordsPath reports whether a value of query q is path: a redirect
+// noting where the request came from.
+func recordsPath(q url.Values, path string) bool {
+	for _, values := range q {
+		if slices.Contains(values, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// indexDocumentRE matches a directory's index document (index.html,
+// default.aspx), which names no page of its own.
+var indexDocumentRE = regexp.MustCompile(`(?i)^(?:index|default)\.[a-z0-9]+$`)
+
+// pathSegments returns the non-empty segments of a URL path.
+func pathSegments(path string) []string {
+	return strings.FieldsFunc(path, func(r rune) bool { return r == '/' })
+}
+
+// urlWords returns the words of s: runs of two or more letters or digits,
+// lowercased.
+func urlWords(s string) []string {
+	runs := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	return slices.DeleteFunc(runs, func(w string) bool { return utf8.RuneCountInString(w) < 2 })
+}
+
+// queryWords returns the words of a query's keys and values.
+func queryWords(q url.Values) []string {
+	var words []string
+	for key, values := range q {
+		words = append(words, urlWords(key)...)
+		for _, v := range values {
+			words = append(words, urlWords(v)...)
+		}
+	}
+	return words
+}
+
+// isLetters reports whether s is all letters: a section name, not an ID or
+// a slug.
+func isLetters(s string) bool {
+	return s != "" && !strings.ContainsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) })
 }
 
 // soft404TitleRE matches titles of common not-found templates: "404 …",
@@ -869,15 +1132,23 @@ func (n *Native) extractPDF(target string, body io.Reader) (*Result, error) {
 var (
 	// errJinaRejected marks a Jina answer that is not the page: the target's
 	// error status, Jina's CAPTCHA warning, or a page verdict (a challenge,
-	// a login page, too little text). It is Jina's verdict about the target.
+	// an error page, a login page, too little text). It is Jina's verdict
+	// about the target.
 	errJinaRejected = errors.New("answer is not the page")
 
 	// errJinaTargetTrouble marks a Jina answer carrying a target status that
-	// a later attempt could change: a timeout, a rate limit, a server error,
-	// or 404/410 with dead-link detection off. It is no verdict about the
-	// target, and calling Jina again at once would only spend its budget,
-	// so the job's backoff retries it.
+	// a later attempt could change: a timeout, a rate limit, a server error
+	// (reported in a warning, or an error page naming one), or 404/410 with
+	// dead-link detection off. It is no verdict about the target, and
+	// calling Jina again at once would only spend its budget, so the job's
+	// backoff retries it.
 	errJinaTargetTrouble = errors.New("target failed for now")
+
+	// errJinaChallenged marks Jina's own 403 carrying Cloudflare's
+	// "cf-mitigated: challenge": r.jina.ai's CDN took curio for a bot. It
+	// says nothing about the target, and every Jina call would get the same
+	// answer, so it pauses them all (jinaChallengeCooldown).
+	errJinaChallenged = errors.New("r.jina.ai's CDN challenged the request")
 )
 
 // targetStatusError is the status the target answered Jina with, as Jina's
@@ -917,12 +1188,7 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 			return res, nil
 		}
 		lastErr = err
-		// Jina limits per client, so a 429 pauses every caller, not just
-		// this one.
-		var se *HTTPStatusError
-		if errors.As(err, &se) && se.StatusCode == http.StatusTooManyRequests {
-			n.jinaCooldown.extend(n.clock.now(), cmp.Or(se.RetryAfter, jinaBackoff(attempt+1)))
-		}
+		n.extendJinaCooldown(err, attempt)
 		if !jinaRetryable(err) || ctx.Err() != nil {
 			return nil, err
 		}
@@ -936,10 +1202,35 @@ func jinaBackoff(attempt int) time.Duration {
 	return time.Duration(1<<attempt) * time.Second
 }
 
+// jinaChallengeCooldown is how long Jina calls pause after r.jina.ai's CDN
+// challenged one, when its answer gave no Retry-After. Every call would be
+// challenged the same way, so a pause saves each fetch a request, while
+// the fetches that needed Jina stay retryable.
+const jinaChallengeCooldown = 10 * time.Minute
+
+// extendJinaCooldown extends the cooldown every Jina call shares when a
+// failed call, attempt (0-based) of its fetch, says Jina would refuse the
+// next ones too. Jina limits per client, so a 429 pauses every caller, not
+// just this one; a CDN challenge pauses them for longer.
+func (n *Native) extendJinaCooldown(err error, attempt int) {
+	var se *HTTPStatusError
+	if !errors.As(err, &se) {
+		return
+	}
+	switch {
+	case errors.Is(err, errJinaChallenged):
+		pause := cmp.Or(se.RetryAfter, jinaChallengeCooldown)
+		n.jinaCooldown.extend(n.clock.now(), pause)
+		n.log.Warn("r.jina.ai's CDN challenged curio, pausing Jina calls", "pause", pause)
+	case se.StatusCode == http.StatusTooManyRequests:
+		n.jinaCooldown.extend(n.clock.now(), cmp.Or(se.RetryAfter, jinaBackoff(attempt+1)))
+	}
+}
+
 // awaitJina paces a Jina call through the shared limiter and cooldown (see
 // pace), sitting out a cooldown a 429 left when it ends within
-// maxInlineJinaWait. A longer one fails at once, without a request, with a
-// retryable 429 carrying the time left.
+// maxInlineJinaWait. A longer one, such as a CDN challenge's pause, fails at
+// once, without a request, with a retryable 429 carrying the time left.
 func (n *Native) awaitJina(ctx context.Context) error {
 	left, err := pace(ctx, n.jinaLimiter, &n.jinaCooldown, n.clock, maxInlineJinaWait)
 	if err != nil {
@@ -947,15 +1238,21 @@ func (n *Native) awaitJina(ctx context.Context) error {
 	}
 	if left > 0 {
 		se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: n.jinaBaseURL, RetryAfter: left}
-		return fmt.Errorf("jina: not sent, rate-limit cooldown has %s left: %w", left.Round(time.Second), se)
+		return fmt.Errorf("jina: not sent, cooldown has %s left: %w", left.Round(time.Second), se)
 	}
 	return nil
 }
 
+// jinaUserAgent is the User-Agent of every Jina request. r.jina.ai sits
+// behind Cloudflare, which answers a browser's User-Agent from a client that
+// runs no JavaScript with a managed challenge (403), while it lets an API
+// client that says what it is through. The browser headers are for origins.
+const jinaUserAgent = "curio (+https://github.com/samsar/curio)"
+
 // jinaOnce makes one Jina request and parses the answer.
 func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 	headers := []header{
-		{"user-agent", n.userAgent},
+		{"user-agent", jinaUserAgent},
 		{"accept", "text/plain"},
 	}
 	if n.jinaAPIKey != "" {
@@ -971,6 +1268,9 @@ func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 		discardErrorBody(resp.body)
 		se := &HTTPStatusError{StatusCode: resp.statusCode, URL: resp.finalURL.String()}
 		se.RetryAfter, _ = parseRetryAfter(resp.header, n.clock.now())
+		if se.StatusCode == http.StatusForbidden && strings.EqualFold(resp.header.Get("Cf-Mitigated"), "challenge") {
+			return nil, fmt.Errorf("jina: %w: %w", errJinaChallenged, se)
+		}
 		return nil, fmt.Errorf("jina: %w", se)
 	}
 	body, err := io.ReadAll(resp.body)
@@ -1012,7 +1312,8 @@ func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 //
 // Jina's other warnings (iframes, shadow DOM, a cached snapshot, a page
 // maybe not fully loaded) are informational. A dead link is returned as
-// is; every other verdict wraps errJinaRejected.
+// is, and a server-error page is errJinaTargetTrouble, like the status it
+// names; every other verdict wraps errJinaRejected.
 func (n *Native) judgeJinaAnswer(target string, a jinaParsed) error {
 	for _, w := range a.warnings {
 		if m := jinaTargetErrorRE.FindStringSubmatch(w); m != nil {
@@ -1024,8 +1325,11 @@ func (n *Native) judgeJinaAnswer(target string, a jinaParsed) error {
 		return fmt.Errorf("%w: %w (bot challenge: jina reports a CAPTCHA)", errJinaRejected, ErrAntiBot)
 	}
 	err := n.judgePage(target, pageView{title: a.title, text: a.body, found: true})
-	if err == nil || errors.Is(err, ErrDeadLink) {
+	switch {
+	case err == nil, errors.Is(err, ErrDeadLink):
 		return err
+	case errors.Is(err, errServerErrorPage):
+		return fmt.Errorf("%w: %w", errJinaTargetTrouble, err)
 	}
 	return fmt.Errorf("%w: %w", errJinaRejected, err)
 }
