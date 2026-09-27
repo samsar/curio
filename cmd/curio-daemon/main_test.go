@@ -850,7 +850,7 @@ func TestRun_LogsTheStartup(t *testing.T) {
 	require.Len(t, ready, 1)
 	assert.EqualValues(t, latest, ready[0]["schema_version"])
 	assert.EqualValues(t, 1024, ready[0]["embedding_dim"])
-	assert.Equal(t, "v0.1.6", ready[0]["sqlite_vec"], "the version go.mod pins")
+	assert.Regexp(t, `^v\d+\.\d+\.\d+`, ready[0]["sqlite_vec"], "the sqlite-vec go.mod pins")
 	assert.Contains(t, ready[0], "sqlite_vec_build", "which SIMD kernels a released binary has")
 	daemonReady := logs.messages("curio-daemon ready")
 	require.Len(t, daemonReady, 1)

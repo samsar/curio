@@ -143,10 +143,12 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 		return nil, err
 	}
 	// sqlite-vec's build flags say whether a released binary has its NEON
-	// distance kernels.
+	// distance kernels. Only this log line reads them, so a sqlite-vec that
+	// words its vec_debug() differently costs the line its flags, not the
+	// daemon its start.
 	vecVersion, vecBuild, err := sqlitestore.VectorExtension(ctx, db)
 	if err != nil {
-		return nil, err
+		slog.Warn("read sqlite-vec's build", "err", err)
 	}
 	slog.Info("database ready", "path", home.DBPath(), "schema_version", schemaVersion,
 		"embedding_dim", meta.EmbeddingDim, "sqlite_vec", vecVersion, "sqlite_vec_build", vecBuild)

@@ -5669,8 +5669,10 @@ arm64:
   `CGO_CFLAGS=-O2 -g -DSQLITE_VEC_ENABLE_NEON`.
 - `sqlite.VectorExtension` reads `vec_version()` and `vec_debug()`'s build
   flags; the daemon's "database ready" log line names both, so a released
-  binary can be checked. A test fails on arm64 when the flags lack "neon",
-  saying to build through make or set `CGO_CFLAGS`, and skips elsewhere.
+  binary can be checked. Failing to read them is a WARN, not a failed
+  start: only that line needs them. A test fails on arm64 when the flags
+  lack "neon", saying to build through make or set `CGO_CFLAGS`, and
+  skips elsewhere.
 
 **Why:** sqlite-vec-go-bindings v0.1.6 compiles `sqlite-vec.c` with
 `#cgo CFLAGS: -DSQLITE_CORE` alone, and the NEON L2 kernel is behind
