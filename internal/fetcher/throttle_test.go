@@ -192,6 +192,23 @@ func TestPace(t *testing.T) {
 	})
 }
 
+// TestCooldown_Extend: an extension reports whether it started a pause;
+// one already in effect is only pushed out, never shortened, and a pause
+// that has ended starts anew.
+func TestCooldown_Extend(t *testing.T) {
+	fc := newFakeClock()
+	var c cooldown
+	assert.True(t, c.extend(fc.now(), time.Minute), "the first extension starts a pause")
+	assert.False(t, c.extend(fc.now(), 2*time.Minute), "one in effect is extended")
+	assert.False(t, c.extend(fc.now(), time.Second))
+	assert.Equal(t, fc.now().Add(2*time.Minute), c.deadline(), "never shortened")
+
+	fc.advance(2 * time.Minute)
+	assert.Zero(t, c.remaining(fc.now()))
+	assert.True(t, c.extend(fc.now(), time.Minute), "a pause that has ended starts anew")
+	assert.Equal(t, fc.now().Add(time.Minute), c.deadline())
+}
+
 // TestHostGate: slots are per host, waits honor ctx, and entries go away
 // once nobody holds or waits for them.
 func TestHostGate(t *testing.T) {
@@ -415,6 +432,65 @@ func TestNative_JinaChallengePausesJina(t *testing.T) {
 	}
 }
 
+// TestNative_JinaChallengeWarnsOncePerPause: Jina calls in flight when
+// r.jina.ai's CDN begins challenging all come back challenged. The first
+// starts the pause and warns; the others only extend it, to the latest
+// Retry-After. Once the pause has passed, the next challenge warns again.
+func TestNative_JinaChallengeWarnsOncePerPause(t *testing.T) {
+	const inFlight = 8
+	origin := serveThinPage(t)
+	defer origin.Close()
+	var jinaHits atomic.Int32
+	arrived := make(chan struct{}, inFlight)
+	release := make(chan struct{})
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit := jinaHits.Add(1)
+		if hit <= inFlight {
+			arrived <- struct{}{}
+			<-release
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(60+int(hit)))
+		w.Header().Set("Cf-Mitigated", "challenge")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer jina.Close()
+
+	var logs bytes.Buffer
+	fc := newFakeClock()
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
+		Log: slog.New(slog.NewTextHandler(&logs, nil))}), fc)
+	warnings := func() int { return strings.Count(logs.String(), "CDN challenged curio, pausing Jina calls") }
+
+	var wg sync.WaitGroup
+	errs := make([]error, inFlight)
+	for i := range errs {
+		wg.Go(func() { _, errs[i] = n.Fetch(context.Background(), origin.URL+"/"+strconv.Itoa(i)) })
+	}
+	hung := time.After(10 * time.Second)
+	for range inFlight {
+		select {
+		case <-arrived:
+		case <-hung:
+			close(release)
+			t.Fatalf("expected %d Jina requests in flight", inFlight)
+		}
+	}
+	close(release)
+	wg.Wait()
+
+	for _, err := range errs {
+		require.ErrorIs(t, err, errJinaChallenged)
+	}
+	assert.Equal(t, 1, warnings(), logs.String())
+	assert.Equal(t, time.Duration(60+inFlight)*time.Second, n.jinaCooldown.remaining(fc.now()),
+		"the pause ends at the latest extension")
+
+	fc.advance(n.jinaCooldown.remaining(fc.now()))
+	_, err := n.Fetch(context.Background(), origin.URL+"/after")
+	require.ErrorIs(t, err, errJinaChallenged)
+	assert.Equal(t, 2, warnings(), "a challenge after the pause starts, and warns of, another")
+}
+
 // TestNative_JinaLongCooldownDoesNotQueue: with a long cooldown active,
 // Jina-bound fetches fail fast without waiting their turn in the keyless
 // limiter (one token every 3s), which would hold the fifth for 12s only to
@@ -476,7 +552,8 @@ func TestNative_JinaServerErrorBackoff(t *testing.T) {
 }
 
 // TestNative_JinaAPIKey: a configured key (or CURIO_JINA_API_KEY) goes out
-// as a bearer token and nowhere else: not in logs, not in errors.
+// as a bearer token and nowhere else: not in errors, not in logs, the
+// warning that Jina is failing included.
 func TestNative_JinaAPIKey(t *testing.T) {
 	const key = "jina_secret_key_123"
 	cases := []struct {
@@ -506,11 +583,16 @@ func TestNative_JinaAPIKey(t *testing.T) {
 				Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
 				JinaAPIKey: tc.optKey, Log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			}), newFakeClock())
-			_, err := n.Fetch(context.Background(), source.URL)
-			require.Error(t, err)
+			// Enough refusals, across two hosts, to log Jina failing.
+			other := localhostURL(t, source.URL)
+			for i := range failingStreak {
+				_, err := n.Fetch(context.Background(), []string{source.URL, other}[i%2])
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), key)
+			}
 
 			assert.Equal(t, tc.wantAuth, gotAuth.Load())
-			assert.NotContains(t, err.Error(), key)
+			assert.Contains(t, logs.String(), `msg="upstream failing"`)
 			assert.NotContains(t, logs.String(), key)
 		})
 	}

@@ -1,19 +1,25 @@
 package fetcher
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1409,4 +1415,351 @@ func TestLoginPathRE(t *testing.T) {
 	for _, path := range notLogin {
 		assert.False(t, loginPathRE.MatchString(path), "should NOT match %q", path)
 	}
+}
+
+// Jina's own error answers, after r.jina.ai's on 2026-09-27.
+const (
+	// jinaAbuseBlock refuses keyless reads of a domain after a burst of
+	// them; {host} stands for the domain it names.
+	jinaAbuseBlock = "AbuseAlleviationError: Anonymous access to domain {host} blocked until " +
+		"Sun Sep 27 2026 16:40:15 GMT+0000 (Coordinated Universal Time) due to previous abuse found on " +
+		"https://{host}/someone: DDoS attack suspected: Too many requests\n"
+	// jina451Body declines a domain whose owner opted out of Jina Reader,
+	// verbatim.
+	jina451Body = `{"code": 451, "status": 45101, "message": "This domain is excluded from Jina Reader at the ` +
+		`request of its owner, People Inc.", "detail": "The publisher of this URL has instructed Jina AI to cease ` +
+		`automated access to its properties. Jina Reader is complying with that request. For programmatic access ` +
+		`to this content, please contact People Inc. directly regarding licensing.", "readme": "https://r.jina.ai/docs"}`
+	jina451Reason = "This domain is excluded from Jina Reader at the request of its owner, People Inc."
+	// cfBlockHTML is the head of the page Cloudflare's CDN blocks a client
+	// with: a 403 without a challenge.
+	cfBlockHTML = "<!DOCTYPE html>\n<html lang=\"en-US\"><head><title>Attention Required! | Cloudflare</title></head>\n" +
+		"<body><h1>Sorry, you have been blocked</h1><h2>You are unable to access jina.ai</h2></body></html>"
+)
+
+// abuseBlock is jinaAbuseBlock naming host.
+func abuseBlock(host string) string { return strings.ReplaceAll(jinaAbuseBlock, "{host}", host) }
+
+func TestJinaReason(t *testing.T) {
+	long := "RateLimitTriggeredError: " + strings.Repeat("é", 400) // byte 512 falls inside an é
+	cases := []struct {
+		name        string
+		contentType string
+		body        string
+		want        string
+	}{
+		{"text error line", "text/plain; charset=utf-8", abuseBlock("mobile.twitter.com") + "more detail\n",
+			strings.TrimSpace(abuseBlock("mobile.twitter.com"))},
+		{"JSON with a name", "application/json",
+			`{"code":401,"name":"AuthenticationRequiredError","message":"Authentication is required to use this endpoint."}`,
+			"AuthenticationRequiredError: Authentication is required to use this endpoint."},
+		{"JSON without a name", "application/json; charset=utf-8", `{"code":422,"message":"Invalid URL"}`, "Invalid URL"},
+		{"451 verbatim", "application/json", jina451Body, jina451Reason},
+		{"JSON without a message", "application/json", `{"code":500}`, ""},
+		{"JSON cut short", "application/json", `{"code":451,"message":"This domain`, ""},
+		{"Cloudflare's challenge", "text/html; charset=UTF-8",
+			"<!DOCTYPE html><html lang=\"en-US\"><head><title>Just a moment...</title>", ""},
+		{"Cloudflare's block page", "text/html; charset=UTF-8", cfBlockHTML, ""},
+		{"plain Forbidden", "text/plain", "Forbidden", ""},
+		{"empty", "", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, jinaReason(tc.contentType, []byte(tc.body)))
+		})
+	}
+
+	t.Run("capped on a rune boundary", func(t *testing.T) {
+		got := jinaReason("text/plain", []byte(long))
+		assert.True(t, strings.HasPrefix(got, "RateLimitTriggeredError: é"))
+		assert.True(t, strings.HasSuffix(got, "é…"), got)
+		assert.LessOrEqual(t, len(got), maxErrorBody+len("…"))
+		assert.True(t, utf8.ValidString(got))
+	})
+}
+
+func TestNamesHost(t *testing.T) {
+	reason := strings.TrimSpace(abuseBlock("mobile.twitter.com"))
+	assert.True(t, namesHost(reason, "mobile.twitter.com"))
+	assert.True(t, namesHost(strings.ToUpper(reason), "mobile.twitter.com"), "case doesn't matter")
+	assert.True(t, namesHost("Access to www.investing.com.", "www.investing.com"), "a closing dot isn't part of it")
+	assert.False(t, namesHost(reason, "twitter.com"), "a parent domain is another host")
+	assert.False(t, namesHost(reason, "twitter.co"))
+	assert.False(t, namesHost("Anonymous access to domain abc.com blocked", "c.com"))
+	assert.False(t, namesHost(reason, ""))
+}
+
+// fakeAnswer is how a server answers a request, for fakeRT.
+type fakeAnswer struct {
+	status      int
+	header      http.Header
+	contentType string
+	body        string
+	bodyErr     error // the body fails with it once body is read
+	err         error // the request fails with it instead
+}
+
+// respond is the answer a describes to a request for target.
+func (a fakeAnswer) respond(target string) (*fetchResponse, error) {
+	if a.err != nil {
+		return nil, a.err
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return nil, err
+	}
+	var body io.Reader = strings.NewReader(a.body)
+	if a.bodyErr != nil {
+		body = io.MultiReader(body, iotest.ErrReader(a.bodyErr))
+	}
+	header := a.header
+	if header == nil {
+		header = http.Header{}
+	}
+	return &fetchResponse{statusCode: a.status, header: header, finalURL: u, body: io.NopCloser(body),
+		contentType: a.contentType}, nil
+}
+
+// TestJinaCallClass: each way a Jina request can go is classed for Jina's
+// health from the error the real jinaOnce returns for it.
+func TestJinaCallClass(t *testing.T) {
+	const target = "https://news.example/story"
+	warned := func(warning string) string { return jinaReply("An article", []string{warning}, longArticleBody) }
+	status := func(code int) fakeAnswer { return fakeAnswer{status: code} }
+	cases := []struct {
+		name  string
+		reply fakeAnswer
+		want  CallClass
+	}{
+		{"the page", fakeAnswer{status: http.StatusOK, body: jinaArticleBody()}, CallOK},
+		{"a thin answer", fakeAnswer{status: http.StatusOK, body: jinaReply("Short", nil, "too short")}, CallJudged},
+		{"the target's 403", fakeAnswer{status: http.StatusOK, body: warned(warnTarget403)}, CallJudged},
+		{"the target's 404", fakeAnswer{status: http.StatusOK,
+			body: warned("Target URL returned error 404: Not Found")}, CallJudged},
+		{"the target's 502", fakeAnswer{status: http.StatusOK,
+			body: warned("Target URL returned error 502: Bad Gateway")}, CallJudged},
+		{"an answer over the cap", fakeAnswer{status: http.StatusOK,
+			body: jinaArticle + strings.Repeat("x", 2*testBodyLimit)}, CallJudged},
+		{"a 403 naming the target's host", fakeAnswer{status: http.StatusForbidden, contentType: "text/plain",
+			body: abuseBlock("news.example")}, CallRefused},
+		{"451", fakeAnswer{status: http.StatusUnavailableForLegalReasons, contentType: "application/json",
+			body: jina451Body}, CallRefused},
+		{"400", status(http.StatusBadRequest), CallRefused},
+		{"404", status(http.StatusNotFound), CallRefused},
+		{"a challenge", fakeAnswer{status: http.StatusForbidden, header: http.Header{"Cf-Mitigated": {"challenge"}},
+			contentType: "text/html", body: "<!DOCTYPE html><title>Just a moment...</title>"}, CallChallenged},
+		{"a bare 403", status(http.StatusForbidden), CallForbidden},
+		{"a 403 naming another host", fakeAnswer{status: http.StatusForbidden, contentType: "text/plain",
+			body: abuseBlock("mobile.twitter.com")}, CallForbidden},
+		{"Cloudflare's block page", fakeAnswer{status: http.StatusForbidden, contentType: "text/html",
+			body: cfBlockHTML}, CallForbidden},
+		{"401", status(http.StatusUnauthorized), CallAuth},
+		{"402", status(http.StatusPaymentRequired), CallAuth},
+		{"429", status(http.StatusTooManyRequests), CallRateLimited},
+		{"500", status(http.StatusInternalServerError), CallServerError},
+		{"502", status(http.StatusBadGateway), CallServerError},
+		{"503", status(http.StatusServiceUnavailable), CallServerError},
+		{"501", status(http.StatusNotImplemented), CallServerError},
+		{"505", status(http.StatusHTTPVersionNotSupported), CallServerError},
+		{"408", status(http.StatusRequestTimeout), CallServerError},
+		{"421", status(http.StatusMisdirectedRequest), CallServerError},
+		{"425", status(http.StatusTooEarly), CallServerError},
+		{"304", status(http.StatusNotModified), CallServerError},
+		{"a connection reset", fakeAnswer{err: &url.Error{Op: "Get", URL: "https://jina.test/",
+			Err: syscall.ECONNRESET}}, CallNetwork},
+		{"a timeout", fakeAnswer{err: &url.Error{Op: "Get", URL: "https://jina.test/",
+			Err: os.ErrDeadlineExceeded}}, CallNetwork},
+		{"a bad certificate", fakeAnswer{err: fmt.Errorf("%w: x509: certificate signed by unknown authority",
+			ErrTLSCertificate)}, CallNetwork},
+		{"a body cut short", fakeAnswer{status: http.StatusOK, body: "Title: Cut off\n",
+			bodyErr: io.ErrUnexpectedEOF}, CallNetwork},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true,
+				JinaBaseURL: "https://jina.test/", DeadLinkDetection: true})
+			n.rt = limitBodies(fakeRT(tc.reply.respond), testBodyLimit)
+			_, err := n.jinaOnce(context.Background(), target)
+			assert.Equal(t, tc.want, jinaCallClass(err), "%v", err)
+		})
+	}
+}
+
+// TestJinaOnce_ErrorBodyReadIsBounded: however long Jina's error answer,
+// jinaOnce reads no more than errorBodyDrain of it.
+func TestJinaOnce_ErrorBodyReadIsBounded(t *testing.T) {
+	body := &countingReader{}
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: "https://jina.test/"})
+	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
+		u, err := url.Parse(target)
+		if err != nil {
+			return nil, err
+		}
+		return &fetchResponse{statusCode: http.StatusBadGateway, header: http.Header{}, finalURL: u,
+			body: io.NopCloser(io.LimitReader(body, 1<<20)), contentType: "text/plain"}, nil
+	})
+	_, err := n.jinaOnce(context.Background(), "https://news.example/story")
+	require.Error(t, err)
+	assert.LessOrEqual(t, body.n.Load(), int64(errorBodyDrain))
+}
+
+// TestNative_JinaRefusal: Jina refusing the target, by a 403 whose reason
+// names the target's host or by a 451, is Jina's verdict, quoted in the
+// error. Behind a thin page the first fetch fails for good after one Jina
+// request; behind an origin 403 the origin's host is cached, and the next
+// URL there fails from the cache without asking Jina. Neither pauses Jina,
+// and Jina's health counts the refusal as a healthy answer.
+func TestNative_JinaRefusal(t *testing.T) {
+	answers := []struct {
+		name        string
+		status      int
+		contentType string
+		body        func(host string) string
+		reason      string
+	}{
+		{"domain blocked", http.StatusForbidden, "text/plain; charset=utf-8", abuseBlock,
+			"HTTP 403 Forbidden: AbuseAlleviationError: Anonymous access to domain 127.0.0.1 blocked until"},
+		{"owner opted out", http.StatusUnavailableForLegalReasons, "application/json",
+			func(string) string { return jina451Body }, "HTTP 451 Unavailable For Legal Reasons: " + jina451Reason},
+	}
+	for _, a := range answers {
+		refusingJina := func(t *testing.T, host string) (base string, hits *atomic.Int32) {
+			t.Helper()
+			hits = new(atomic.Int32)
+			jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				w.Header().Set("Content-Type", a.contentType)
+				w.WriteHeader(a.status)
+				_, _ = io.WriteString(w, a.body(host))
+			}))
+			t.Cleanup(jina.Close)
+			return jina.URL + "/", hits
+		}
+
+		t.Run(a.name+"/thin page", func(t *testing.T) {
+			origin := serveThinPage(t)
+			defer origin.Close()
+			jina, jinaHits := refusingJina(t, hostOf(origin.URL))
+			fc := newFakeClock()
+			n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina}), fc)
+
+			_, err := n.Fetch(context.Background(), origin.URL+"/a")
+			var pe *PermanentError
+			require.ErrorAs(t, err, &pe, "a refusal behind a page-level failure is final")
+			assert.ErrorIs(t, err, ErrLoginWall)
+			assert.ErrorIs(t, err, errJinaRefused)
+			assert.True(t, strings.HasPrefix(err.Error(), "jina: refused the target: "+a.reason), err.Error())
+			assert.Contains(t, err.Error(), "(after native: login wall or thin content")
+			var se *HTTPStatusError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, a.status, se.StatusCode)
+			assert.True(t, strings.HasPrefix(se.URL, jina), "errors.As finds Jina's status first: %s", se.URL)
+			assert.Equal(t, int32(1), jinaHits.Load())
+			assert.Zero(t, n.jinaCooldown.remaining(fc.now()))
+			_, cached := n.hostCache.Get(hostOf(origin.URL))
+			assert.False(t, cached)
+			h := n.JinaHealth()
+			assert.Equal(t, map[CallClass]int{CallRefused: 1}, h.Recent)
+			assert.Equal(t, UpstreamOK, h.State)
+		})
+
+		t.Run(a.name+"/origin 403", func(t *testing.T) {
+			var originHits atomic.Int32
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				originHits.Add(1)
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer origin.Close()
+			jina, jinaHits := refusingJina(t, hostOf(origin.URL))
+			fc := newFakeClock()
+			n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina}), fc)
+
+			_, err := n.Fetch(context.Background(), origin.URL+"/a")
+			require.ErrorIs(t, err, ErrAntiBot)
+			assert.ErrorIs(t, err, errJinaRefused)
+			var pe *PermanentError
+			assert.False(t, errors.As(err, &pe), "the first failure for a host stays retryable: %v", err)
+			_, cached := n.hostCache.Get(hostOf(origin.URL))
+			assert.True(t, cached, "the origin's verdict is cached")
+
+			_, err = n.Fetch(context.Background(), origin.URL+"/b")
+			require.ErrorAs(t, err, &pe)
+			assert.Contains(t, err.Error(), "(cached: jina: refused the target: "+a.reason)
+			assert.Equal(t, int32(1), jinaHits.Load(), "a cache hit asks Jina nothing")
+			assert.Equal(t, int32(1), originHits.Load())
+			assert.Zero(t, n.jinaCooldown.remaining(fc.now()))
+		})
+	}
+}
+
+// TestNative_JinaHealthFromFetches: Jina's health follows its answers to
+// fetches. Jina refusing curio's key on five targets across hosts makes it
+// failing, with one warning that keeps the key out; its next page ends
+// that, with one recovery line.
+func TestNative_JinaHealthFromFetches(t *testing.T) {
+	const (
+		jinaBase = "https://jina.test/"
+		key      = "jina_secret_key_123"
+	)
+	var serving atomic.Bool
+	var logs bytes.Buffer
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
+		JinaAPIKey: key, Log: slog.New(slog.NewTextHandler(&logs, nil))}), newFakeClock())
+	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
+		switch {
+		case !strings.HasPrefix(target, jinaBase):
+			return fakeAnswer{status: http.StatusOK, contentType: "text/html", body: thinPage}.respond(target)
+		case serving.Load():
+			return fakeAnswer{status: http.StatusOK, body: jinaArticleBody()}.respond(target)
+		}
+		return fakeAnswer{status: http.StatusUnauthorized, contentType: "application/json",
+			body: `{"code":401,"name":"AuthenticationFailedError","message":"Invalid API key"}`}.respond(target)
+	})
+	count := func(msg string) int { return strings.Count(logs.String(), `msg="`+msg+`"`) }
+
+	for i := range failingStreak {
+		_, err := n.Fetch(context.Background(), fmt.Sprintf("https://site%d.example/page", i))
+		require.ErrorContains(t, err, "jina: HTTP 401 Unauthorized: AuthenticationFailedError: Invalid API key")
+	}
+	h := n.JinaHealth()
+	assert.Equal(t, UpstreamFailing, h.State)
+	assert.Equal(t, CallAuth, h.LastFailureClass)
+	assert.Equal(t, map[CallClass]int{CallAuth: failingStreak}, h.Recent)
+	assert.Equal(t, 1, count("upstream failing"))
+	assert.Contains(t, logs.String(), "upstream=jina")
+
+	serving.Store(true)
+	res, err := n.Fetch(context.Background(), "https://site9.example/page")
+	require.NoError(t, err)
+	assert.Equal(t, "jina", res.Meta["via"])
+	assert.Equal(t, UpstreamDegraded, n.JinaHealth().State, "5 of 6 calls in the window failed")
+	assert.Equal(t, 1, count("upstream recovered"))
+	assert.Equal(t, 1, count("upstream failing"))
+	assert.NotContains(t, logs.String(), key)
+}
+
+// TestNative_JinaHealthIgnoresCancelledRequests: a Jina request that the
+// fetch's own cancellation (shutdown) cut short is no news about Jina.
+func TestNative_JinaHealthIgnoresCancelledRequests(t *testing.T) {
+	const jinaBase = "https://jina.test/"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var logs bytes.Buffer
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
+		Log: slog.New(slog.NewTextHandler(&logs, nil))}), newFakeClock())
+	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
+		if !strings.HasPrefix(target, jinaBase) {
+			return fakeAnswer{status: http.StatusOK, contentType: "text/html", body: thinPage}.respond(target)
+		}
+		cancel()
+		return nil, &url.Error{Op: "Get", URL: target, Err: context.Canceled}
+	})
+
+	_, err := n.Fetch(ctx, "https://news.example/story")
+	require.ErrorIs(t, err, context.Canceled)
+	h := n.JinaHealth()
+	assert.Empty(t, h.Recent)
+	assert.True(t, h.LastFailure.IsZero())
+	assert.Equal(t, UpstreamIdle, h.State)
+	assert.NotContains(t, logs.String(), "upstream")
 }
