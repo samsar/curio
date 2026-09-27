@@ -1060,8 +1060,10 @@ var (
 	jinaTargetErrorRE = regexp.MustCompile(`(?i)target url returned error (\d{3})\b(?::\s*(.*))?`)
 	// jinaCaptchaRE matches Jina's warning that the target asked for a
 	// CAPTCHA: "This page maybe requiring CAPTCHA, please make sure you are
-	// authorized to access this page."
-	jinaCaptchaRE = regexp.MustCompile(`(?i)\bcaptcha\b`)
+	// authorized to access this page." It is anchored to that warning's
+	// opening, so another warning that merely mentions a CAPTCHA stays
+	// informational.
+	jinaCaptchaRE = regexp.MustCompile(`(?i)^this page maybe requiring captcha\b`)
 )
 
 // jinaRetryable reports whether a failed Jina call is worth another attempt

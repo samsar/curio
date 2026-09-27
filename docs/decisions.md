@@ -4443,7 +4443,10 @@ readability.
    | any other (400, 401, 451, 501, …) | rejected | settled like a thin answer | origin's verdict only |
 
 2. **Jina's CAPTCHA warning** ("This page maybe requiring CAPTCHA, …"):
-   rejected, `ErrAntiBot`.
+   rejected, `ErrAntiBot`. The target's status wins over it, so an answer
+   carrying both a target 404 and this warning is a dead link. It is
+   matched by its opening words: another warning that merely mentions a
+   CAPTCHA is informational.
 3. **The page verdicts** every page gets (`judgePage`, see "Page verdicts:
    one judge for every page, bot challenges included"), with no final URL.
    The thin floor is `minArticleBytes`, 500 bytes, instead of 200

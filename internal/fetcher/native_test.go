@@ -838,10 +838,9 @@ const (
 	warnCaptcha   = "This page maybe requiring CAPTCHA, please make sure you are authorized to access this page."
 )
 
-// Pages as Jina renders them, from answers curio once stored as articles.
+// Pages that are not the article, as Jina renders them in a 200 answer.
 const (
-	// cfChallengeBody is Cloudflare's managed challenge: just over the
-	// 200 characters Jina answers were once held to.
+	// cfChallengeBody is Cloudflare's managed challenge, about 200 bytes.
 	cfChallengeBody = "example.com\n-----------\n\n## Performing security verification\n\n" +
 		"This website uses a security service to protect against malicious bots. " +
 		"This page is displayed while the website verifies you are not a bot."
@@ -883,6 +882,20 @@ https://errors.edgesuite.net/18.2f3c1702.1726000000.1a2b3c4d`
 Press & Hold to confirm you are a human (and not a bot).
 
 Reference ID 5f2c1a40-7b3e-11ef-9d2a-0242ac120002`
+	// parkedDomainBody is a parked domain's page, 340 bytes. Nothing but
+	// its length gives it away.
+	parkedDomainBody = `example.org
+===========
+
+This domain may be for sale!
+
+[Inquire now](https://www.sedo.com/search/details/?domain=example.org&language=us)
+
+Related Searches:
+
+*   [Web Hosting](http://example.org/?q=Web+Hosting)
+*   [Domain Registration](http://example.org/?q=Domain+Registration)
+*   [Email Marketing](http://example.org/?q=Email+Marketing)`
 	tweetBody = `Conversation
 ============
 
@@ -1045,7 +1058,8 @@ func TestNative_JinaRejectsNonArticles(t *testing.T) {
 		{"perimeterx, by its text", "", nil, perimeterXBody, ErrAntiBot, "press & hold"},
 		{"captcha warning", "An article", []string{warnCaptcha}, longArticleBody, ErrAntiBot, "CAPTCHA"},
 		{"not-found title", "Page not found | Free local classifieds - Kijiji", nil, kijijiNotFoundBody, ErrDeadLink, "not-found page"},
-		{"thin", "A note", nil, "Too short to be the article.", ErrLoginWall, "extracted text < 500 bytes"},
+		{"parked domain", "example.org", nil, parkedDomainBody, ErrLoginWall, "extracted text < 500 bytes"},
+		{"a byte under the floor", "A note", nil, strings.Repeat("x", minArticleBytes-1), ErrLoginWall, "extracted text < 500 bytes"},
 		{"atlassian", "Log in to continue - Log in with Atlassian account", nil, loginPageBody, ErrLoginWall, "login wall"},
 		{"google docs", "Google Docs: Sign-in", nil, loginPageBody, ErrLoginWall, "login wall"},
 		{"google sheets", "Google Sheets: Sign-in", nil, loginPageBody, ErrLoginWall, "login wall"},
@@ -1075,13 +1089,16 @@ func TestNative_JinaRejectsNonArticles(t *testing.T) {
 }
 
 // TestNative_JinaAcceptsArticles: informational warnings, articles about
-// bot checks and logins, titles that start like a challenge's, and a short
-// post above the floor are all stored, settled on the URL requested.
+// bot checks and logins, titles that start like a challenge's, a short
+// post and a body of exactly minArticleBytes are all stored, settled on the
+// URL requested.
 func TestNative_JinaAcceptsArticles(t *testing.T) {
+	// botEssay quotes challenge phrases in 3 KB of text, past the 2 KiB
+	// up to which a page's text is searched for them.
 	botEssay := strings.Repeat("Bot checks are everywhere now. ", 20) +
 		"The page said just a moment, then Checking your browser before accessing the site, " +
 		"then asked me to verify you are human. A 404 would have been kinder. " +
-		strings.Repeat("The rest of this essay is about why these checks fail real readers. ", 30)
+		strings.Repeat("The rest of this essay is about why these checks fail real readers. ", 34)
 	article := strings.Repeat("A paragraph of a real article about the subject in its title. ", 10)
 	cases := []struct {
 		name      string
@@ -1103,6 +1120,7 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 		{"just a moment of", "Just a moment of silence", nil, article, true},
 		{"access denied:", "Access Denied: A History of Web Censorship", nil, article, true},
 		{"a short post", `Jane Doe on X: "Shipping a new version of our SQLite extension today" / X`, nil, tweetBody, true},
+		{"at the floor", "A note", nil, strings.Repeat("x", minArticleBytes), true},
 		{"not-found title, detection off", "Page not found | Free local classifieds - Kijiji", nil, kijijiNotFoundBody, false},
 	}
 	for _, tc := range cases {
@@ -1210,6 +1228,50 @@ func TestJudgePage_Order(t *testing.T) {
 			require.ErrorIs(t, err, tc.want)
 			assert.Contains(t, err.Error(), tc.reason)
 			assert.Equal(t, tc.siteWide, errors.Is(err, errSiteLoginWall), "site-wide: %v", err)
+		})
+	}
+}
+
+// TestJudgeJinaAnswer pins the order of the steps a Jina answer is judged
+// in, whatever order its warnings come in: the target's status, then Jina's
+// CAPTCHA warning, then the page verdicts. Only those two warnings count.
+func TestJudgeJinaAnswer(t *testing.T) {
+	const warn404 = "Target URL returned error 404: Not Found"
+	cases := []struct {
+		name   string
+		answer jinaParsed
+		want   error
+		reason string
+	}{
+		{"target status before the CAPTCHA warning",
+			jinaParsed{title: "Welcome to Python.org", warnings: []string{warnCaptcha, warn404}, body: longArticleBody},
+			ErrDeadLink, "HTTP 404"},
+		{"target status before the page",
+			jinaParsed{title: "Just a moment...", warnings: []string{warn404}, body: cfChallengeBody},
+			ErrDeadLink, "HTTP 404"},
+		{"target status in any case",
+			jinaParsed{title: "Welcome to Python.org", warnings: []string{"target url returned error 404: not found"}, body: longArticleBody},
+			ErrDeadLink, "HTTP 404"},
+		{"CAPTCHA warning before the page",
+			jinaParsed{title: "Page not found", warnings: []string{warnCaptcha}, body: longArticleBody},
+			ErrAntiBot, "CAPTCHA"},
+		{"page verdicts after informational warnings",
+			jinaParsed{title: "Page not found", warnings: []string{"This page maybe not yet fully loaded, consider explicitly specify a timeout."}, body: longArticleBody},
+			ErrDeadLink, "not-found page"},
+		{"a warning that only mentions a CAPTCHA",
+			jinaParsed{title: "An article", warnings: []string{"This page contains a CAPTCHA widget that was left out."}, body: longArticleBody},
+			nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &Native{deadLinkDetection: true}
+			err := n.judgeJinaAnswer("https://example.com/post", tc.answer)
+			if tc.want == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tc.want)
+			assert.Contains(t, err.Error(), tc.reason)
 		})
 	}
 }
