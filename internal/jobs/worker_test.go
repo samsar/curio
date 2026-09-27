@@ -671,18 +671,73 @@ func TestWorker_PauseLetsTheRunningJobFinish(t *testing.T) {
 	assert.Equal(t, store.JobStatusPending, getJob(t, q, jobs[1].ID).Status)
 }
 
-// TestWorker_CancelWhilePaused: shutdown doesn't wait for a resume.
+// recordingGate is gate, counting the times it is asked and reporting on
+// closed each time it turns a worker away. The report never blocks Admit:
+// one pending report is enough.
+type recordingGate struct {
+	gate   Gate
+	asked  *atomic.Int32
+	closed chan struct{}
+}
+
+func newRecordingGate(gate Gate) recordingGate {
+	return recordingGate{gate: gate, asked: new(atomic.Int32), closed: make(chan struct{}, 1)}
+}
+
+func (g recordingGate) Admit(kind store.JobKind, active int, now time.Time) Verdict {
+	g.asked.Add(1)
+	v := g.gate.Admit(kind, active, now)
+	if !v.Open() {
+		select {
+		case g.closed <- struct{}{}:
+		default:
+		}
+	}
+	return v
+}
+
+// TestWorker_CancelWhilePaused: shutdown doesn't wait for a resume. The
+// worker is seen asking the paused gate and being turned away before the
+// cancel, so it is the wait for a resume that the cancel ends.
 func TestWorker_CancelWhilePaused(t *testing.T) {
 	q := newCountingQueue(t)
+	gate := newRecordingGate(queueGate(t, q, paused))
 	opts := slowPolls
-	opts.Gate = queueGate(t, q, paused)
+	opts.Gate = gate
 	w, _ := fetchWorker(q, opts)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 
+	receive(t, gate.closed, 5*time.Second, "the worker to ask the paused gate")
+	assert.Zero(t, q.claims.Load(), "the paused worker made no claim")
 	cancel()
 	assert.ErrorIs(t, receive(t, done, time.Second, "Run to return"), context.Canceled)
+}
+
+// TestWorker_EnqueueDoesNotWakeAPausedWorker: a job enqueued during a pause
+// raises the queue's enqueue signal, which a worker waiting on the gate
+// doesn't listen to. With polls ten minutes apart it neither asks the gate
+// again nor claims until the resume, and then claims the job at once.
+func TestWorker_EnqueueDoesNotWakeAPausedWorker(t *testing.T) {
+	q := newCountingQueue(t)
+	settings := queueGate(t, q, paused)
+	gate := newRecordingGate(settings)
+	opts := slowPolls
+	opts.Gate = gate
+	w, handled := fetchWorker(q, opts)
+	stop := startWorker(t, w)
+	defer stop()
+	receive(t, gate.closed, 5*time.Second, "the worker to wait at the paused gate")
+	asked := gate.asked.Load()
+
+	job := enqueue(t, q, store.JobKindFetch, 1)[0]
+	assert.Never(t, func() bool { return q.claims.Load() > 0 || gate.asked.Load() > asked },
+		200*time.Millisecond, 5*time.Millisecond, "the enqueue woke the paused worker")
+
+	_, err := settings.Update(context.Background(), QueueUpdate{Paused: new(false)})
+	require.NoError(t, err)
+	assert.Equal(t, job.ID, receive(t, handled, time.Second, "the job to be claimed").ID)
 }
 
 // blockingPool runs a Worker for kind with n goroutines, whose handler

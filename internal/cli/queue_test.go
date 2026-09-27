@@ -60,6 +60,7 @@ func TestQueueCommands(t *testing.T) {
 	line = oneLine(t, mustRun(t, srv, "throttle", "gentle"))
 	assert.Equal(t, "queue: paused, throttled gentle (fetch 4, index 1 at once); no jobs running, "+
 		"nothing new starts (curio resume)", line)
+	assert.Contains(t, status(), "paused, throttled gentle (fetch 4, index 1 at once)")
 
 	line = oneLine(t, mustRun(t, srv, "resume"))
 	assert.Equal(t, "queue: open, throttled gentle (fetch 4, index 1 at once)", line)
@@ -74,6 +75,9 @@ func TestQueueCommands(t *testing.T) {
 	line = oneLine(t, mustRun(t, srv, "throttle", "normal"))
 	assert.Equal(t, fmt.Sprintf("queue: closed outside schedule %s; opens %s (curio schedule off runs it now)",
 		window, opens), line)
+	line = status()
+	assert.Contains(t, line, "closed outside schedule "+window)
+	assert.NotContains(t, line, "throttled")
 
 	line = oneLine(t, mustRun(t, srv, "schedule", "off"))
 	assert.Equal(t, "queue: open", line)
