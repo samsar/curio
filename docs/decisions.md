@@ -5595,8 +5595,11 @@ if Ollama changed inside that minute. After startup the monitor is the
 marker's only writer, under its own lock, so a rebaseline and a check
 never interleave their writes. With Ollama down or the model not pulled a
 check writes nothing, keeps its last report and logs only at DEBUG;
-healthz and the pull already say so loudly. A failed marker write is
-logged at ERROR and retried at the next check.
+healthz and the pull already say so loudly. So does a check cut short. An
+answer the check can't read (a model listed without a digest, a version
+reply without a version) is reported nowhere else and keeps drift
+detection off, so the first of a run of them is a WARN. A failed marker
+write is logged at ERROR and retried at the next check.
 
 **Why a fixed minute:** two small local requests a minute cost nothing,
 and catch an Ollama upgrade while the daemon runs, without a backoff or

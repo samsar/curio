@@ -2,6 +2,7 @@ package drift
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -165,12 +166,14 @@ func TestCheck_ReportsEachChangeAndWarnsOncePerDrift(t *testing.T) {
 	assert.Len(t, log.at(slog.LevelWarn), 3, "a drift that comes back is warned about again")
 }
 
-// TestCheck_NothingToCompare: with Ollama down, or the model not pulled,
-// the check writes nothing, keeps its last report and logs only at DEBUG.
+// TestCheck_NothingToCompare: with Ollama down, the model not pulled, or
+// the check cut short, the check writes nothing, keeps its last report and
+// logs only at DEBUG.
 func TestCheck_NothingToCompare(t *testing.T) {
 	for name, err := range map[string]error{
 		"unreachable":      fmt.Errorf("%w: connection refused", ollama.ErrUnreachable),
 		"model not pulled": fmt.Errorf("%w: qwen3-embedding:0.6b", ollama.ErrModelNotLoaded),
+		"cut short":        fmt.Errorf("/api/tags: %w", context.DeadlineExceeded),
 	} {
 		t.Run(name, func(t *testing.T) {
 			m, home, src, log := newMonitor(t, Fingerprint{ModelDigest: digestA, OllamaVersion: "0.30.0"})
@@ -186,6 +189,7 @@ func TestCheck_NothingToCompare(t *testing.T) {
 			assert.Equal(t, drifted, m.Report(), "the last report stands")
 			assert.Equal(t, before, marker(t, home))
 			assert.Equal(t, []string{"embedding drift check skipped"}, log.at(slog.LevelDebug))
+			assert.Len(t, log.at(slog.LevelWarn), 1, "only the drift")
 			assert.Empty(t, log.at(slog.LevelError))
 		})
 	}
@@ -198,6 +202,28 @@ func TestCheck_NothingToCompare(t *testing.T) {
 		assert.Equal(t, before, marker(t, home), "nothing is recorded without an answer")
 		assert.True(t, m.Report().CheckedAt.IsZero())
 	})
+}
+
+// TestCheck_UnreadableAnswerWarnsOnce: an answer the check can't read
+// keeps drift detection off, and nothing else reports it, so the first of
+// a run of them is a WARN; a check that reads the fingerprint ends the run.
+func TestCheck_UnreadableAnswerWarnsOnce(t *testing.T) {
+	m, home, src, log := newMonitor(t, Fingerprint{})
+	before := marker(t, home)
+	noDigest := errors.New("/api/tags lists qwen3-embedding:0.6b without a digest")
+
+	src.set("", "", noDigest)
+	m.Check(context.Background())
+	m.Check(context.Background())
+	assert.Len(t, log.at(slog.LevelWarn), 1, "once per run")
+	assert.Len(t, log.at(slog.LevelDebug), 1, "the rest of the run")
+	assert.Equal(t, before, marker(t, home), "nothing recorded")
+
+	src.set("0.34.4", digestA, nil)
+	m.Check(context.Background())
+	src.set("", "", noDigest)
+	m.Check(context.Background())
+	assert.Len(t, log.at(slog.LevelWarn), 2, "a run that starts again is warned about again")
 }
 
 // TestCheck_BoundedByItsTimeout: a check gives up on a hung Ollama within

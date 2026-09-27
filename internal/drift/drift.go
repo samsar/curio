@@ -14,6 +14,7 @@ package drift
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/ollama"
 )
 
 // What a Change names.
@@ -82,9 +84,10 @@ type Monitor struct {
 	now      func() time.Time
 	wake     chan struct{} // capacity 1: a pending check absorbs further asks
 
-	mu     sync.Mutex
-	report Report
-	warned []Change // the drift last warned about, so each is warned about once
+	mu               sync.Mutex
+	report           Report
+	warned           []Change // the drift last warned about, so each is warned about once
+	warnedUnreadable bool     // Ollama's answers can't be read, and that was warned about
 }
 
 // New returns a Monitor for home's embeddings, made by src's model.
@@ -117,19 +120,18 @@ func (m *Monitor) Run(ctx context.Context) {
 }
 
 // Check reads the current fingerprint and holds it to the marker's. With
-// none recorded yet, it records this one. When Ollama doesn't answer or
-// the model isn't pulled there is nothing to compare: the last report
-// stands and nothing is written.
+// none recorded yet, it records this one. When there is no fingerprint to
+// read there is nothing to compare: the last report stands and nothing is
+// written.
 func (m *Monitor) Check(ctx context.Context) {
 	current, err := m.current(ctx)
-	if err != nil {
-		// Healthz and the model pull already report both, loudly.
-		m.log.Debug("embedding drift check skipped", "err", err)
-		return
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err != nil {
+		m.skipped(err)
+		return
+	}
+	m.warnedUnreadable = false
 	meta, err := m.home.Meta()
 	if err != nil {
 		m.log.Error("embedding drift check: read the marker; retrying at the next check", "err", err)
@@ -157,6 +159,32 @@ func (m *Monitor) current(ctx context.Context) (Fingerprint, error) {
 		return Fingerprint{}, fmt.Errorf("embedding model digest: %w", err)
 	}
 	return Fingerprint{ModelDigest: digest, OllamaVersion: version}, nil
+}
+
+// skipped logs a check that read no fingerprint. Ollama down, the model
+// not pulled and a check cut short are only DEBUG: healthz and the model
+// pull report the first two, loudly. An answer the check can't read (a
+// model listed without a digest, a version reply without a version) is
+// reported nowhere else, and drift goes unnoticed for as long as it lasts,
+// so the first of a run of them is a WARN. The caller holds m.mu.
+func (m *Monitor) skipped(err error) {
+	if m.warnedUnreadable || !unreadable(err) {
+		m.log.Debug("embedding drift check skipped", "err", err)
+		return
+	}
+	m.warnedUnreadable = true
+	m.log.Warn("embedding drift check: can't read Ollama's answer, so a drift would go unnoticed", "err", err)
+}
+
+// unreadable reports whether err is Ollama answering something a check
+// can't use, rather than not answering in time or not having the model.
+func unreadable(err error) bool {
+	for _, quiet := range []error{ollama.ErrUnreachable, ollama.ErrModelNotLoaded, context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(err, quiet) {
+			return false
+		}
+	}
+	return true
 }
 
 // record makes fp the home's baseline, keeping every other marker field.
