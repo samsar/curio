@@ -14,15 +14,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 )
 
-// fakeEmbedder returns canned vectors keyed on input text. Tests control
+// fakeEmbedder returns canned vectors keyed on input text, and a dim-wide
+// vector far from every seeded chunk for any other text. Tests control
 // which chunk the vector retriever ranks first by matching the query's
 // embedding to the seeded chunks' embeddings.
 type fakeEmbedder struct {
+	dim    int
 	byText map[string][]float32
 }
 
@@ -32,25 +35,24 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 		v, ok := f.byText[t]
 		if !ok {
 			// Default vector for any unknown text — far from anything.
-			v = filledVec(0.999)
+			v = filledVec(f.dim, 0.999)
 		}
 		out[i] = v
 	}
 	return out, nil
 }
 
-const dim = 768
-
 func TestEngine_QueryPrefixApplied(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, docIDs := seedCorpus(t, db)
 
 	// The query term matches nothing in BM25, so ranking is driven purely by
 	// the vector path. The embedder only returns the postgres chunk's vector
 	// (0.10, the closest) for the PREFIXED query; without the prefix it'd get
 	// the default far vector and postgres would rank last, not first.
-	emb := &fakeEmbedder{byText: map[string][]float32{
-		"search_query: zzqterm": filledVec(0.10),
+	emb := &fakeEmbedder{dim: dim, byText: map[string][]float32{
+		"search_query: zzqterm": filledVec(dim, 0.10),
 	}}
 	eng := New(chunks, docs, emb, Config{QueryPrefix: "search_query: "})
 
@@ -60,7 +62,28 @@ func TestEngine_QueryPrefixApplied(t *testing.T) {
 	assert.Equal(t, docIDs[0], res.Items[0].Document.ID, "prefixed query vector should rank the postgres doc first")
 }
 
-func filledVec(v float32) []float32 {
+// TestEngine_DefaultQueryPrefix: under the default embedding config a query
+// is embedded as Qwen3-Embedding's instruction immediately followed by the
+// query, with no separator.
+func TestEngine_DefaultQueryPrefix(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	docs, chunks, _ := seedCorpus(t, db)
+	var seen []string
+	emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
+		seen = append(seen, texts...)
+		return [][]float32{filledVec(dim, 0.10)}, nil
+	})
+	eng := New(chunks, docs, emb, Config{QueryPrefix: config.Default().Embedding.QueryPrefix})
+
+	_, err := eng.Search(context.Background(), Request{TenantID: "local", Query: "mvcc concurrency", K: 3})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Instruct: Given a web search query, retrieve relevant passages that answer the query" +
+		"\nQuery:mvcc concurrency"}, seen)
+}
+
+// filledVec is a dim-wide vector with v in every component.
+func filledVec(dim int, v float32) []float32 {
 	out := make([]float32, dim)
 	for i := range out {
 		out[i] = v
@@ -75,6 +98,7 @@ func seedCorpus(t *testing.T, db *sqlitestore.DB) (docs *sqlitestore.Documents, 
 	ctx := context.Background()
 	docs = sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
+	dim := sqlitetest.Width(t, db)
 	chunks = sqlitestore.NewChunks(db, dim)
 
 	corpus := []struct {
@@ -94,7 +118,7 @@ func seedCorpus(t *testing.T, db *sqlitestore.DB) (docs *sqlitestore.Documents, 
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, docs.SetCurrentExtraction(ctx, d.ID, e.ID))
 		require.NoError(t, chunks.ReplaceForDocument(ctx, d.ID, e.ID, "", nil,
-			[]store.ChunkInput{{Text: c.text, Embedding: filledVec(c.vec)}}))
+			[]store.ChunkInput{{Text: c.text, Embedding: filledVec(dim, c.vec)}}))
 		docIDs = append(docIDs, d.ID)
 	}
 	return
@@ -102,10 +126,11 @@ func seedCorpus(t *testing.T, db *sqlitestore.DB) (docs *sqlitestore.Documents, 
 
 func TestEngine_HybridSearch(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
 
-	emb := &fakeEmbedder{byText: map[string][]float32{
-		"mvcc concurrency": filledVec(0.10), // closest to postgres chunk
+	emb := &fakeEmbedder{dim: dim, byText: map[string][]float32{
+		"mvcc concurrency": filledVec(dim, 0.10), // closest to postgres chunk
 	}}
 	engine := New(chunks, docs, emb, Config{})
 
@@ -123,9 +148,10 @@ func TestEngine_BM25OnlyMatch(t *testing.T) {
 	// When the embedder is "lost" but BM25 has a strong match, the result
 	// still surfaces the right document.
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
 
-	emb := &fakeEmbedder{byText: nil} // returns the default far-away vector
+	emb := &fakeEmbedder{dim: dim, byText: nil} // returns the default far-away vector
 	engine := New(chunks, docs, emb, Config{})
 
 	res, err := engine.Search(context.Background(), Request{
@@ -140,8 +166,9 @@ func TestEngine_BM25OnlyMatch(t *testing.T) {
 
 func TestEngine_RequiresQuery(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
-	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
+	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{})
 
 	_, err := engine.Search(context.Background(), Request{TenantID: "local"})
 	require.Error(t, err)
@@ -149,8 +176,9 @@ func TestEngine_RequiresQuery(t *testing.T) {
 
 func TestEngine_PerHitScoresExposed(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
-	emb := &fakeEmbedder{byText: map[string][]float32{"mvcc": filledVec(0.10)}}
+	emb := &fakeEmbedder{dim: dim, byText: map[string][]float32{"mvcc": filledVec(dim, 0.10)}}
 	engine := New(chunks, docs, emb, Config{})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "mvcc", K: 3})
@@ -191,11 +219,12 @@ func TestSanitizeBM25Query(t *testing.T) {
 
 func TestEngine_Related_RanksByProximity(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, docIDs := seedCorpus(t, db)
 
 	// Related needs no embedder — it reads stored vectors. The fake is
 	// only here to satisfy the constructor.
-	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
+	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{})
 
 	res, err := engine.Related(context.Background(), RelatedRequest{
 		TenantID:   "local",
@@ -215,6 +244,7 @@ func TestEngine_Related_RanksByProximity(t *testing.T) {
 
 func TestEngine_Related_UnindexedDocIsEmpty(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
 
 	// A document with no chunks: create one without indexing it.
@@ -222,7 +252,7 @@ func TestEngine_Related_UnindexedDocIsEmpty(t *testing.T) {
 	d := &store.Document{TenantID: "local", URL: "https://example.com/pending", ContentType: store.ContentTypeArticle}
 	require.NoError(t, docs.Create(ctx, d))
 
-	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
+	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{})
 	res, err := engine.Related(ctx, RelatedRequest{TenantID: "local", DocumentID: d.ID, K: 5})
 	require.NoError(t, err)
 	assert.Empty(t, res.Items)
@@ -230,9 +260,10 @@ func TestEngine_Related_UnindexedDocIsEmpty(t *testing.T) {
 
 func TestEngine_Related_UnknownDocIsNotFound(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
 
-	engine := New(chunks, docs, &fakeEmbedder{}, Config{})
+	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{})
 	_, err := engine.Related(context.Background(), RelatedRequest{
 		TenantID:   "local",
 		DocumentID: "00000000-0000-0000-0000-000000000000",
@@ -382,9 +413,10 @@ func (brokenChunkLookup) GetByIDs(context.Context, []string) ([]*store.Chunk, er
 
 func TestEngine_ChunkLookupFailureKeepsHitsAndIsLogged(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
 	var logs bytes.Buffer
-	engine := New(brokenChunkLookup{chunks}, docs, &fakeEmbedder{}, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	engine := New(brokenChunkLookup{chunks}, docs, &fakeEmbedder{dim: dim}, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
 	require.NoError(t, err)
@@ -414,10 +446,11 @@ func (v vanishingDocs) GetByID(ctx context.Context, id string) (*store.Document,
 // query doesn't fail, and Related doesn't report its source as missing.
 func TestEngine_HitDeletedMidQueryIsSkipped(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, docIDs := seedCorpus(t, db) // postgres, btree, llm
 	gone := vanishingDocs{docs, map[string]bool{docIDs[1]: true}}
-	engine := New(chunks, gone, &fakeEmbedder{byText: map[string][]float32{
-		"database": filledVec(0.20), // nearest the btree chunk
+	engine := New(chunks, gone, &fakeEmbedder{dim: dim, byText: map[string][]float32{
+		"database": filledVec(dim, 0.20), // nearest the btree chunk
 	}}, Config{})
 	ids := func(hits []Hit) []string {
 		out := make([]string, 0, len(hits))
@@ -496,6 +529,7 @@ func TestEngine_KeywordFailureIsFatalAndStopsTheVectorLeg(t *testing.T) {
 
 func TestEngine_LegsRunConcurrently(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
 
 	// Each leg signals that it started, then waits for the other. Run one
@@ -509,7 +543,7 @@ func TestEngine_LegsRunConcurrently(t *testing.T) {
 		if err := awaitLeg(ctx, bm25Started, "BM25"); err != nil {
 			return nil, err
 		}
-		return [][]float32{filledVec(0.3)}, nil
+		return [][]float32{filledVec(dim, 0.3)}, nil
 	})
 	rendezvous := &hookedChunks{ChunkStore: chunks, bm25: func(ctx context.Context) error {
 		markBM25Started()
@@ -526,6 +560,7 @@ func TestEngine_LegsRunConcurrently(t *testing.T) {
 
 func TestEngine_FanoutScalesWithK(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
 	chunks := sqlitestore.NewChunks(db, dim)
@@ -537,7 +572,7 @@ func TestEngine_FanoutScalesWithK(t *testing.T) {
 		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, chunks.ReplaceForDocument(ctx, d.ID, e.ID, "", nil,
-			[]store.ChunkInput{{Text: fmt.Sprintf("zebra sighting number %d", i), Embedding: filledVec(0.5)}}))
+			[]store.ChunkInput{{Text: fmt.Sprintf("zebra sighting number %d", i), Embedding: filledVec(dim, 0.5)}}))
 	}
 	engine := New(chunks, docs, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
 
@@ -548,8 +583,9 @@ func TestEngine_FanoutScalesWithK(t *testing.T) {
 
 func TestEngine_KContract(t *testing.T) {
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
-	engine := New(chunks, docs, &fakeEmbedder{}, Config{DefaultK: 2})
+	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{DefaultK: 2})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zzqterm"})
 	require.NoError(t, err)

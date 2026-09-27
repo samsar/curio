@@ -19,6 +19,8 @@ import (
 
 	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
+	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/store"
 )
@@ -148,7 +150,7 @@ func TestVersion(t *testing.T) {
 	srv := apitest.Start(t)
 	out := mustRun(t, srv, "version")
 	assert.Contains(t, out, "curio ")
-	assert.Contains(t, out, "embedder: nomic-embed-text/768")
+	assert.Contains(t, out, "embedder: qwen3-embedding:0.6b/1024")
 }
 
 func TestAdd(t *testing.T) {
@@ -522,6 +524,51 @@ func TestDoctor(t *testing.T) {
 	assert.NotContains(t, out, "jina", "a daemon that reports no upstreams gets no upstream check")
 }
 
+// TestDoctor_HomeTheDaemonRefuses: a home the daemon won't serve, a legacy
+// one or one whose config.yaml asks for another embedding model, fails
+// doctor's home check offline, with the daemon's own reason and fix.
+func TestDoctor_HomeTheDaemonRefuses(t *testing.T) {
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, home string)
+		want  []string
+	}{
+		{"legacy", func(t *testing.T, home string) {
+			require.NoError(t, os.WriteFile(filepath.Join(home, curiohome.MarkerFile), []byte(`{"schema_version":11,`+
+				`"embedding_model":"nomic-embed-text","embedding_dim":768}`), 0o600))
+		}, []string{"curio home from an older curio", `"nomic-embed-text" (dim 768)`, "`curio up --fresh`"}},
+		{"mismatch", func(t *testing.T, home string) {
+			defaults := config.Default().Embedding
+			_, err := curiohome.Init(home, defaults.Model, defaults.Dim)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(home, curiohome.ConfigFile),
+				[]byte("embedding:\n  model: mxbai-embed-large\n"), 0o600))
+		}, []string{"embedding model mismatch", `configured "mxbai-embed-large" (dim 1024)`,
+			"Set embedding.model and embedding.dim back", "`curio up --fresh`"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			tc.setup(t, home)
+
+			out, err := runCLIAt(t, home, down.URL, "doctor")
+			require.Error(t, err)
+			line := ""
+			for l := range strings.SplitSeq(out, "\n") {
+				if strings.Contains(l, "curio home") {
+					line = l
+				}
+			}
+			assert.True(t, strings.HasPrefix(line, "✗ curio home"), "the home check fails:\n%s", out)
+			for _, want := range tc.want {
+				assert.Contains(t, line, want)
+			}
+		})
+	}
+}
+
 // TestDoctorAndStatus_FailingJina: a daemon that reports its Jina fallback
 // failing fails doctor, whose jina check says since when and what to do,
 // and status warns once, after the embedding line.
@@ -544,9 +591,9 @@ func TestDoctorAndStatus_FailingJina(t *testing.T) {
 	assert.Contains(t, out, "1 failure(s), 0 warning(s)")
 
 	out = mustRun(t, srv, "status")
-	assert.Contains(t, out, fmt.Sprintf("embed:   nomic-embed-text (dim %d)\n"+
+	assert.Contains(t, out, fmt.Sprintf("embed:   qwen3-embedding:0.6b (dim %d)\n"+
 		"warning: jina is failing: no answer since %s; last failure challenged; run `curio doctor`\n",
-		store.EmbeddingDim, localTime(answered)))
+		srv.Embedder.Dim, localTime(answered)))
 	assert.Equal(t, 1, strings.Count(out, "jina"))
 }
 

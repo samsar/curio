@@ -14,13 +14,11 @@ type Embedder interface {
 	// vectors share the dimensionality returned by Dimensions().
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
 
-	// Dimensions returns the embedding length. Must match the schema's
-	// chunks_vec dimension and the .curio-meta.json marker; the daemon
-	// fails fast on mismatch at startup.
+	// Dimensions returns the embedding length: the home's width, which
+	// its marker records and its vector index is sized to.
 	Dimensions() int
 
-	// Model is the model identifier (e.g., "nomic-embed-text"). Recorded
-	// in extraction metadata so we know which embedder produced any
-	// given chunk's vector.
+	// Model is the model identifier (e.g., "qwen3-embedding:0.6b"), the
+	// one the home's marker records.
 	Model() string
 }

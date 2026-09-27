@@ -45,6 +45,9 @@ type Server struct {
 	Home *curiohome.Home
 	DB   *sqlite.DB
 	Deps api.Deps
+	// Embedder embeds the search engine's queries and AddContent's chunks,
+	// at the home's width.
+	Embedder Embedder
 	// Startup is the progress the server reports until Ready, for a server
 	// from StartNotReady: its phase is initializing until a test sets it.
 	Startup *api.Startup
@@ -53,8 +56,10 @@ type Server struct {
 }
 
 // Start serves the full API on 127.0.0.1:0 until the test ends. Each opt
-// adjusts the Deps before the server starts. The search engine embeds
-// queries with Embedder, so /v1/search and /related work without Ollama.
+// adjusts the Deps before the server starts. The home is a new one with the
+// default embedding model and width, and the search engine embeds queries
+// with an Embedder of that width, so /v1/search and /related work without
+// Ollama.
 func Start(t testing.TB, opts ...func(*api.Deps)) *Server {
 	t.Helper()
 	s := StartNotReady(t, opts...)
@@ -70,14 +75,20 @@ func Start(t testing.TB, opts ...func(*api.Deps)) *Server {
 // database and Deps are there from the start, for seeding.
 func StartNotReady(t testing.TB, opts ...func(*api.Deps)) *Server {
 	t.Helper()
-	db := sqlitetest.NewDB(t)
-	home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
+	defaults := config.Default().Embedding
+	home, err := curiohome.Init(t.TempDir(), defaults.Model, defaults.Dim)
 	if err != nil {
 		t.Fatalf("init curio home: %v", err)
 	}
+	meta, err := home.Meta()
+	if err != nil {
+		t.Fatalf("read curio home marker: %v", err)
+	}
+	emb := Embedder{Dim: meta.EmbeddingDim}
+	db := sqlitetest.NewDBWithDim(t, emb.Dim)
 	quiet := slog.New(slog.DiscardHandler)
 	docs := sqlite.NewDocuments(db)
-	chunks := sqlite.NewChunks(db, store.EmbeddingDim)
+	chunks := sqlite.NewChunks(db, emb.Dim)
 	gate, err := jobs.NewQueueGate(context.Background(), sqlite.NewQueueSettings(db), Pools, quiet)
 	if err != nil {
 		t.Fatalf("queue gate: %v", err)
@@ -89,7 +100,7 @@ func StartNotReady(t testing.TB, opts ...func(*api.Deps)) *Server {
 		Bookmarks:      sqlite.NewBookmarks(db),
 		Chunks:         chunks,
 		Queue:          sqlite.NewJobs(db),
-		Search:         search.New(chunks, docs, Embedder{}, search.Config{Log: quiet}),
+		Search:         search.New(chunks, docs, emb, search.Config{Log: quiet}),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
 		Gate:           gate,
@@ -120,7 +131,7 @@ func StartNotReady(t testing.TB, opts ...func(*api.Deps)) *Server {
 			t.Errorf("serve api: %v", err)
 		}
 	})
-	return &Server{URL: "http://" + ln.Addr().String(), Home: home, DB: db, Deps: deps,
+	return &Server{URL: "http://" + ln.Addr().String(), Home: home, DB: db, Deps: deps, Embedder: emb,
 		Startup: startup, srv: srv}
 }
 
@@ -151,8 +162,8 @@ func (s *Server) AddDocument(t testing.TB, url string, state store.DocState) *st
 }
 
 // AddContent gives doc what a fetch and an index would: markdown on disk, a
-// current extraction pointing at it, and one chunk embedded by Embedder. It
-// leaves the document's state alone.
+// current extraction pointing at it, and one chunk embedded by s.Embedder.
+// It leaves the document's state alone.
 func (s *Server) AddContent(t testing.TB, doc *store.Document, markdown string) *store.DocumentExtraction {
 	t.Helper()
 	ctx := context.Background()
@@ -177,7 +188,7 @@ func (s *Server) AddContent(t testing.TB, doc *store.Document, markdown string) 
 	if doc.Title != nil {
 		title = *doc.Title
 	}
-	chunk := store.ChunkInput{Text: markdown, TokenCount: len(strings.Fields(markdown)), Embedding: Vector(markdown)}
+	chunk := store.ChunkInput{Text: markdown, TokenCount: len(strings.Fields(markdown)), Embedding: s.Embedder.Vector(markdown)}
 	if err := s.Deps.Chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, title, nil, []store.ChunkInput{chunk}); err != nil {
 		t.Fatalf("index document: %v", err)
 	}
@@ -212,26 +223,28 @@ func (s *Server) AddInterest(t testing.TB, label string, docs ...*store.Document
 }
 
 // Embedder embeds text without a model: every word adds weight to one of
-// store.EmbeddingDim buckets and the sum is normalized, so texts that share
-// words get nearby vectors. That is enough for search and related-document
-// tests to rank sensibly offline.
-type Embedder struct{}
+// Dim buckets and the sum is normalized, so texts that share words get
+// nearby vectors. That is enough for search and related-document tests to
+// rank sensibly offline.
+type Embedder struct {
+	Dim int // the home's embedding width
+}
 
-// Embed returns Vector of each text.
-func (Embedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+// Embed returns the Vector of each text.
+func (e Embedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	out := make([][]float32, len(texts))
 	for i, text := range texts {
-		out[i] = Vector(text)
+		out[i] = e.Vector(text)
 	}
 	return out, nil
 }
 
-// Vector is Embedder's embedding of text: unit length, and the first basis
-// vector for text with no words.
-func Vector(text string) []float32 {
-	v := make([]float32, store.EmbeddingDim)
+// Vector is the embedding of text: unit length, and the first basis vector
+// for text with no words.
+func (e Embedder) Vector(text string) []float32 {
+	v := make([]float32, e.Dim)
 	for word := range strings.FieldsSeq(strings.ToLower(text)) {
-		v[crc32.ChecksumIEEE([]byte(word))%store.EmbeddingDim]++
+		v[int(crc32.ChecksumIEEE([]byte(word)))%e.Dim]++
 	}
 	var sum float64
 	for _, x := range v {

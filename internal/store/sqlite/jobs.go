@@ -49,7 +49,7 @@ func (s *Jobs) Enqueued(kinds []store.JobKind) <-chan struct{} {
 	return s.db.enqueued.wait(kinds)
 }
 
-// rowQuerier is what insertJob needs from *sql.DB or *sql.Tx.
+// rowQuerier reads through *sql.DB or *sql.Tx alike.
 type rowQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }

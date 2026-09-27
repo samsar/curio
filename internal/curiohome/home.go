@@ -37,6 +37,12 @@ const (
 	// version its migrations leave the database at (see Meta).
 	CurrentSchemaVersion = 1
 
+	// CurrentFormat is the home layout Init writes and this curio serves.
+	// Format 2 sizes the vector index from the marker's embedding width and
+	// embeds with the prompts of the model it records; a home without a
+	// format, or with an older one, is legacy (see ErrLegacyHome).
+	CurrentFormat = 2
+
 	dirPerm  = 0o700
 	filePerm = 0o600
 )
@@ -55,6 +61,12 @@ var (
 	// ErrAlreadyInitialized: Init was called on a directory that already
 	// contains our marker.
 	ErrAlreadyInitialized = errors.New("curio home already initialized")
+
+	// ErrLegacyHome: the marker predates CurrentFormat. Its vectors were
+	// made under rules this curio no longer follows, so it is never served;
+	// nothing converts it. Remediation: start a new home (`curio up
+	// --fresh` moves this one aside) and import the bookmarks again.
+	ErrLegacyHome = errors.New("curio home from an older curio")
 )
 
 // Meta mirrors the on-disk .curio-meta.json file.
@@ -62,14 +74,59 @@ var (
 // SchemaVersion is a cache of the database's schema version, whose source
 // of truth is goose's goose_db_version table. The daemon rewrites it after
 // migrating, so commands that don't reach the daemon can still show it.
-// The daemon refuses to start when EmbeddingModel or EmbeddingDim disagree
-// with the config.
+//
+// EmbeddingModel and EmbeddingDim say what made the home's vectors, and
+// EmbeddingDim is the width of its vector index; both are fixed at Init.
+// CheckEmbedding holds config.yaml to them. EmbeddingModelDigest and
+// OllamaVersion fingerprint the build that made them: the daemon records
+// them at its first successful check, and reports drift when either
+// changes (internal/drift).
 type Meta struct {
-	SchemaVersion  int       `json:"schema_version"`
-	EmbeddingModel string    `json:"embedding_model"`
-	EmbeddingDim   int       `json:"embedding_dim"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	Format               int       `json:"format"`
+	SchemaVersion        int       `json:"schema_version"`
+	EmbeddingModel       string    `json:"embedding_model"`
+	EmbeddingDim         int       `json:"embedding_dim"`
+	EmbeddingModelDigest string    `json:"embedding_model_digest,omitempty"`
+	OllamaVersion        string    `json:"ollama_version,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+// Embedding names an embedding model and the width of its vectors.
+type Embedding struct {
+	Model string
+	Dim   int
+}
+
+func (e Embedding) String() string { return fmt.Sprintf("%q (dim %d)", e.Model, e.Dim) }
+
+// EmbeddingMismatchError: config.yaml asks for an embedding model or width
+// other than the one the home's vectors were made with. Searching them
+// with another model's query vectors returns noise, and the vector index
+// takes only its own width.
+type EmbeddingMismatchError struct {
+	Recorded   Embedding // the marker's: what made the home's vectors
+	Configured Embedding // config.yaml's
+}
+
+func (e *EmbeddingMismatchError) Error() string {
+	return fmt.Sprintf("embedding model mismatch: configured %v, but this home's vectors were made with %v",
+		e.Configured, e.Recorded)
+}
+
+// CheckEmbedding reports whether this home can serve embeddings from model
+// at dim: ErrLegacyHome for a marker older than CurrentFormat, checked
+// first, or an *EmbeddingMismatchError when model or dim differ from the
+// recorded ones.
+func (m Meta) CheckEmbedding(model string, dim int) error {
+	if m.Format < CurrentFormat {
+		return ErrLegacyHome
+	}
+	configured := Embedding{Model: model, Dim: dim}
+	if recorded := (Embedding{Model: m.EmbeddingModel, Dim: m.EmbeddingDim}); recorded != configured {
+		return &EmbeddingMismatchError{Recorded: recorded, Configured: configured}
+	}
+	return nil
 }
 
 // Home is a verified handle to a curio home directory. Construct via Open or
@@ -95,10 +152,11 @@ func Resolve() (string, error) {
 	return filepath.Join(userHome, DefaultDirName), nil
 }
 
-// Init creates a new curio home at path. Fails with ErrAlreadyInitialized if
-// a marker file is already present. Creates subdirectories for content and
-// logs. The marker captures the embedding model and dimension so later
-// startups can detect configuration drift.
+// Init creates a new curio home at path, in CurrentFormat. Fails with
+// ErrAlreadyInitialized if a marker file is already present. Creates
+// subdirectories for content and logs. The marker records the embedding
+// model and the width of its vectors, which is the home's vector width for
+// good: later startups hold config.yaml to them.
 func Init(path, embeddingModel string, embeddingDim int) (*Home, error) {
 	if err := os.MkdirAll(path, dirPerm); err != nil {
 		return nil, fmt.Errorf("create home %q: %w", path, err)
@@ -112,6 +170,7 @@ func Init(path, embeddingModel string, embeddingDim int) (*Home, error) {
 
 	h := &Home{Path: path}
 	if err := h.WriteMeta(Meta{
+		Format:         CurrentFormat,
 		SchemaVersion:  CurrentSchemaVersion,
 		EmbeddingModel: embeddingModel,
 		EmbeddingDim:   embeddingDim,
@@ -129,7 +188,8 @@ func Init(path, embeddingModel string, embeddingDim int) (*Home, error) {
 
 // Open verifies path exists and is a valid curio home. Returns
 // ErrNotInitialized if path is missing, ErrNotOurs if it exists without our
-// marker.
+// marker. A legacy home opens: whether it can be served is CheckEmbedding's
+// call, and commands such as `curio doctor` still report on it.
 func Open(path string) (*Home, error) {
 	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -175,6 +235,43 @@ func (h *Home) Meta() (Meta, error) {
 		return Meta{}, fmt.Errorf("parse marker: %w", err)
 	}
 	return m, nil
+}
+
+// CheckEmbedding reads the marker and holds it to config.yaml's embedding
+// model and dim (Meta.CheckEmbedding), returning the marker when the home
+// can serve them. A refusal still matches ErrLegacyHome or
+// *EmbeddingMismatchError, and says which files disagree, what they record
+// and what to do: the daemon refuses to start with it, and `curio doctor`
+// reports it.
+func (h *Home) CheckEmbedding(model string, dim int) (Meta, error) {
+	meta, err := h.Meta()
+	if err != nil {
+		return Meta{}, err
+	}
+	err = meta.CheckEmbedding(model, dim)
+	var mismatch *EmbeddingMismatchError
+	switch {
+	case err == nil:
+		return meta, nil
+	case errors.Is(err, ErrLegacyHome):
+		return Meta{}, fmt.Errorf("%w: %s was made before home format %d, which this curio needs; "+
+			"its marker %s records vectors from %v, and nothing converts them. To go on, %s, "+
+			"or move it aside yourself; then import your bookmarks again",
+			err, h.Path, CurrentFormat, h.MarkerPath(),
+			Embedding{Model: meta.EmbeddingModel, Dim: meta.EmbeddingDim}, h.freshHint())
+	case errors.As(err, &mismatch):
+		return Meta{}, fmt.Errorf("%w; %s sets the first and the marker %s records the second. "+
+			"Set embedding.model and embedding.dim back to the recorded values, or, to embed with the new model, %s",
+			err, h.ConfigPath(), h.MarkerPath(), h.freshHint())
+	default:
+		return Meta{}, err
+	}
+}
+
+// freshHint is how to start over in a new home, keeping this one.
+func (h *Home) freshHint() string {
+	return fmt.Sprintf("start a new home with `curio up --fresh`, which moves this one aside to "+
+		"%s.bak-<YYYYMMDD-HHMMSS> and deletes nothing", h.Path)
 }
 
 // WriteMeta replaces the marker file with m, stamping UpdatedAt with the

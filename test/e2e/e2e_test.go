@@ -69,11 +69,12 @@ func buildAndRun(m *testing.M) int {
 }
 
 // fakeOllama answers /api/tags with the default embedding model and
-// /api/embed with deterministic vectors, counting document and query
-// embeddings by their task prefix.
+// /api/embed with deterministic vectors dim wide, counting document and
+// query embeddings: a query carries the default query instruction.
 type fakeOllama struct {
 	t                      *testing.T
 	model                  string
+	dim                    int
 	docEmbeds, queryEmbeds atomic.Int32
 }
 
@@ -93,12 +94,12 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Embeddings [][]float32 `json:"embeddings"`
 		}
 		for _, text := range req.Input {
-			if strings.HasPrefix(text, "search_query: ") {
+			if strings.HasPrefix(text, config.Default().Embedding.QueryPrefix) {
 				f.queryEmbeds.Add(1)
 			} else {
 				f.docEmbeds.Add(1)
 			}
-			resp.Embeddings = append(resp.Embeddings, embed(text))
+			resp.Embeddings = append(resp.Embeddings, embed(text, f.dim))
 		}
 		assert.NoError(f.t, json.NewEncoder(w).Encode(resp))
 	default:
@@ -106,12 +107,13 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// embed is a bag-of-words embedding: each word adds weight to one hashed
-// dimension, so texts that share words land close together. Unit length.
-func embed(text string) []float32 {
-	v := make([]float32, store.EmbeddingDim)
+// embed is a dim-wide bag-of-words embedding: each word adds weight to one
+// hashed dimension, so texts that share words land close together. Unit
+// length.
+func embed(text string, dim int) []float32 {
+	v := make([]float32, dim)
 	for word := range strings.FieldsSeq(strings.ToLower(text)) {
-		v[crc32.ChecksumIEEE([]byte(word))%store.EmbeddingDim]++
+		v[int(crc32.ChecksumIEEE([]byte(word)))%dim]++
 	}
 	var sum float64
 	for _, x := range v {
@@ -189,7 +191,7 @@ func logTail(home *curiohome.Home) string {
 
 func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	ctx := context.Background()
-	ollama := &fakeOllama{t: t, model: config.Default().Embedding.Model}
+	ollama := &fakeOllama{t: t, model: config.Default().Embedding.Model, dim: config.Default().Embedding.Dim}
 	ollamaSrv := httptest.NewServer(ollama)
 	t.Cleanup(ollamaSrv.Close)
 	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -263,7 +265,7 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 // fetched until the queue is resumed.
 func TestDaemon_PauseHoldsTheQueueAcrossARestart(t *testing.T) {
 	ctx := context.Background()
-	ollama := &fakeOllama{t: t, model: config.Default().Embedding.Model}
+	ollama := &fakeOllama{t: t, model: config.Default().Embedding.Model, dim: config.Default().Embedding.Dim}
 	ollamaSrv := httptest.NewServer(ollama)
 	t.Cleanup(ollamaSrv.Close)
 	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

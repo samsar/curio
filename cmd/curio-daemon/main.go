@@ -81,7 +81,10 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 	}
 	logLevel.Set(cfg.Daemon.SlogLevel())
 
-	meta, err := checkMarker(home, cfg)
+	// A legacy home, or a config.yaml asking for another embedding model or
+	// width than the home's, is refused before anything touches the
+	// database.
+	meta, err := home.CheckEmbedding(cfg.Embedding.Model, cfg.Embedding.Dim)
 	if err != nil {
 		return err
 	}
@@ -126,20 +129,26 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 }
 
 // start brings the database up to date and builds everything the full API
-// and the workers need, reporting its progress through startup.
+// and the workers need, reporting its progress through startup. Everything
+// that holds vectors is sized from the marker's embedding width, which
+// config.yaml was checked against.
 func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta curiohome.Meta,
 	db *sqlitestore.DB, startup *api.Startup) (*daemon, error) {
 	schemaVersion, err := sqlitestore.MigrateWithHooks(ctx, db, migrationHooks(home, startup))
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("database ready", "path", home.DBPath(), "schema_version", schemaVersion)
+	if err := sqlitestore.EnsureVectorIndex(ctx, db, meta.EmbeddingDim); err != nil {
+		return nil, err
+	}
+	slog.Info("database ready", "path", home.DBPath(), "schema_version", schemaVersion,
+		"embedding_dim", meta.EmbeddingDim)
 	// Before the full API is up, so its first healthz reports the new
 	// version.
 	syncMarkerSchemaVersion(home, meta, int(schemaVersion))
 	startup.SetInitializing()
 
-	d, err := newDaemon(ctx, cfg, home, db)
+	d, err := newDaemon(ctx, cfg, home, meta.EmbeddingDim, db)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +215,8 @@ func (s *servingAPI) stop() error {
 	return s.wait()
 }
 
-// openHome resolves $CURIO_HOME, initializing it on first run.
+// openHome resolves $CURIO_HOME, initializing it on first run with the
+// default embedding model and width.
 func openHome() (*curiohome.Home, error) {
 	homePath, err := curiohome.Resolve()
 	if err != nil {
@@ -219,27 +229,6 @@ func openHome() (*curiohome.Home, error) {
 	slog.Info("initializing curio home", "path", homePath)
 	defaults := config.Default().Embedding
 	return curiohome.Init(homePath, defaults.Model, defaults.Dim)
-}
-
-// checkMarker refuses to start when config.yaml's embedding model or
-// dimension differs from the ones the home was created with, recorded in
-// the marker: every stored vector came from that model, and searching them
-// with another model's query vectors returns noise.
-func checkMarker(home *curiohome.Home, cfg config.Config) (curiohome.Meta, error) {
-	meta, err := home.Meta()
-	if err != nil {
-		return curiohome.Meta{}, err
-	}
-	if meta.EmbeddingModel == cfg.Embedding.Model && meta.EmbeddingDim == cfg.Embedding.Dim {
-		return meta, nil
-	}
-	return curiohome.Meta{}, fmt.Errorf("embedding model mismatch: %s sets embedding.model %q (dim %d), "+
-		"but this home's vectors were made with %q (dim %d), as recorded in %s. "+
-		"Set embedding.model and embedding.dim back to the recorded values, or use a different CURIO_HOME; "+
-		"switching an existing home's embedding model isn't supported "+
-		`(see docs/decisions.md "Embedding model swap")`,
-		home.ConfigPath(), cfg.Embedding.Model, cfg.Embedding.Dim,
-		meta.EmbeddingModel, meta.EmbeddingDim, home.MarkerPath())
 }
 
 // syncMarkerSchemaVersion copies the schema version the migrations left the
@@ -261,11 +250,14 @@ type daemon struct {
 	pools   []jobs.Pool
 }
 
-func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db *sqlitestore.DB) (*daemon, error) {
+// newDaemon builds the stores, clients, engines and pools over db, whose
+// vector index is dim wide.
+func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim int,
+	db *sqlitestore.DB) (*daemon, error) {
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
 	bms := sqlitestore.NewBookmarks(db)
-	chunks := sqlitestore.NewChunks(db, cfg.Embedding.Dim)
+	chunks := sqlitestore.NewChunks(db, dim)
 	queue := sqlitestore.NewJobs(db)
 	insights := sqlitestore.NewInsights(db)
 
@@ -282,7 +274,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 	emb, err := embedder.NewOllama(embedder.OllamaOptions{
 		BaseURL: cfg.Embedding.BaseURL,
 		Model:   cfg.Embedding.Model,
-		Dim:     cfg.Embedding.Dim,
+		Dim:     dim,
 		Timeout: time.Duration(cfg.Embedding.TimeoutSeconds) * time.Second,
 	})
 	if err != nil {

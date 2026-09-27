@@ -40,7 +40,7 @@ func TestHealthz(t *testing.T) {
 	assert.Equal(t, "ok", h.Status)
 	assert.Equal(t, os.Getpid(), h.PID)
 	assert.Equal(t, s.Home.Path, h.Home)
-	assert.Equal(t, store.EmbeddingDim, h.EmbeddingDim)
+	assert.Equal(t, s.Embedder.Dim, h.EmbeddingDim, "the home's width")
 	assert.Positive(t, h.SchemaVersion)
 }
 

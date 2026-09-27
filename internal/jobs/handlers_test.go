@@ -61,16 +61,15 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 	t.Helper()
 
-	homeDir := t.TempDir()
-	home, err := curiohome.Init(homeDir, "fake", 768)
-	require.NoError(t, err)
-
 	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	home, err := curiohome.Init(t.TempDir(), "fake", dim)
+	require.NoError(t, err)
 
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
 	bms := sqlitestore.NewBookmarks(db)
-	chunks := sqlitestore.NewChunks(db, 768)
+	chunks := sqlitestore.NewChunks(db, dim)
 	queue := sqlitestore.NewJobs(db)
 
 	ff := &fakeFetcher{
@@ -85,7 +84,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 	}
 	dispatcher := &fetcher.Single{F: ff}
 
-	idx := indexer.New(chunks, &fakeEmbedder{dim: 768}, indexer.Options{})
+	idx := indexer.New(chunks, &fakeEmbedder{dim: dim}, indexer.Options{})
 
 	return Deps{
 		Home:        home,
@@ -325,7 +324,7 @@ func TestIndexHandler_HappyPath(t *testing.T) {
 	assert.Equal(t, store.DocStateFetched, got.State, "document should be fetched after index")
 
 	// Searchable via BM25.
-	hits, err := sqlitestore.NewChunks(db, store.EmbeddingDim).BM25Search(ctx, "local", "MVCC", 10, store.SearchFilters{})
+	hits, err := sqlitestore.NewChunks(db, sqlitetest.Width(t, db)).BM25Search(ctx, "local", "MVCC", 10, store.SearchFilters{})
 	require.NoError(t, err)
 	require.NotEmpty(t, hits, "indexed content should be searchable")
 }
@@ -352,7 +351,7 @@ func TestIndexHandler_BookmarkTagsAreSearchable(t *testing.T) {
 
 	// Sanity: the tag is not in the body, so without denormalization this
 	// would return nothing.
-	hits, err := sqlitestore.NewChunks(db, store.EmbeddingDim).BM25Search(ctx, "local", "zorptag", 10, store.SearchFilters{})
+	hits, err := sqlitestore.NewChunks(db, sqlitetest.Width(t, db)).BM25Search(ctx, "local", "zorptag", 10, store.SearchFilters{})
 	require.NoError(t, err)
 	require.NotEmpty(t, hits, "bookmark tag should be searchable via chunks_fts")
 	assert.Equal(t, doc.ID, hits[0].DocumentID)
@@ -531,12 +530,12 @@ func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
 				_, _ = io.WriteString(w, tc.reply)
 			}))
 			defer jina.Close()
-			chunks := sqlitestore.NewChunks(db, store.EmbeddingDim)
+			chunks := sqlitestore.NewChunks(db, sqlitetest.Width(t, db))
 			searched := func(docID string) (bm25, vector bool) {
 				t.Helper()
 				bm, err := chunks.BM25Search(ctx, "local", "MVCC", 10, store.SearchFilters{})
 				require.NoError(t, err)
-				query := make([]float32, store.EmbeddingDim)
+				query := make([]float32, sqlitetest.Width(t, db))
 				for i := range query {
 					query[i] = 0.01 // fakeEmbedder's first vector
 				}

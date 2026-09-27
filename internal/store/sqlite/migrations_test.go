@@ -24,6 +24,10 @@ import (
 // These tests drive goose's Provider directly, the way Migrate does, so they
 // can run migrations from any fs.FS and stop at a chosen version.
 
+// migration001Dim is the width migration 001 creates chunks_vec with, which
+// a database stopped before the daemon's EnsureVectorIndex keeps.
+const migration001Dim = 768
+
 func openUnmigrated(t *testing.T) (*DB, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "curio.db")
@@ -645,6 +649,33 @@ func TestMigration011_QueueSettings(t *testing.T) {
 	assert.Equal(t, schemaBefore, schemaDump(t, db))
 }
 
+// TestMigration012_DropsSchemaMeta: 012 drops the table that claimed
+// nomic-embed-text at 768 for every home. Its Down restores the table as
+// 005 left it, with 001's row, so the Downs before it still run.
+func TestMigration012_DropsSchemaMeta(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 11)
+	schemaBefore := schemaDump(t, db)
+
+	_, err := p.UpTo(ctx, 12)
+	require.NoError(t, err)
+	var tables int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'schema_meta'`).Scan(&tables))
+	assert.Zero(t, tables)
+
+	_, err = p.DownTo(ctx, 11)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db))
+	var model string
+	var dim int
+	require.NoError(t, db.QueryRow(`SELECT embedding_model, embedding_dim FROM schema_meta WHERE id = 1`).Scan(&model, &dim))
+	assert.Equal(t, "nomic-embed-text", model)
+	assert.Equal(t, 768, dim)
+
+	_, err = p.DownTo(ctx, 0)
+	require.NoError(t, err, "every older Down runs over the restored table")
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `
@@ -728,7 +759,7 @@ func TestMigration008_ChunksFTSExternalContent(t *testing.T) {
 			_, err = db.Exec(`INSERT INTO chunks_fts (text, title, title_search, tags, chunk_id, document_id)
 				VALUES (?, ?, ?, ?, ?, ?)`, c.text, doc.title, doc.title, doc.tags, c.id, doc.id)
 			require.NoError(t, err)
-			vec, err := sqlitevec.SerializeFloat32(fillVec(float32(d*10+i) * 0.01))
+			vec, err := sqlitevec.SerializeFloat32(fillVecOf(migration001Dim, float32(d*10+i)*0.01))
 			require.NoError(t, err)
 			_, err = db.Exec(`INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)`, c.id, vec)
 			require.NoError(t, err)
@@ -761,7 +792,7 @@ func TestMigration008_ChunksFTSExternalContent(t *testing.T) {
 	_, err := p.UpTo(ctx, 8)
 	require.NoError(t, err)
 
-	ch := NewChunks(db, vecDim)
+	ch := NewChunks(db, migration001Dim)
 	for _, q := range queries {
 		got, err := ch.BM25Search(ctx, "local", q, 50, store.SearchFilters{})
 		require.NoError(t, err)

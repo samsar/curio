@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
@@ -35,10 +36,11 @@ func (c *capturingEmbedder) Embed(_ context.Context, texts []string) ([][]float3
 
 func TestIndexer_DocumentPrefixOnlyOnEmbedInput(t *testing.T) {
 	db := sqlitetest.NewDB(t)
-	chunks := sqlitestore.NewChunks(db, 768)
+	dim := sqlitetest.Width(t, db)
+	chunks := sqlitestore.NewChunks(db, dim)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/p")
 
-	emb := &capturingEmbedder{dim: 768}
+	emb := &capturingEmbedder{dim: dim}
 	idx := New(chunks, emb, Options{ChunkSize: 10, ChunkOverlap: 2, DocumentPrefix: "search_document: "})
 
 	require.NoError(t, idx.Index(context.Background(), IndexInput{
@@ -60,6 +62,29 @@ func TestIndexer_DocumentPrefixOnlyOnEmbedInput(t *testing.T) {
 	stored, err := chunks.GetByIDs(context.Background(), []string{hits[0].ChunkID})
 	require.NoError(t, err)
 	assert.NotContains(t, stored[0].Text, "search_document:")
+}
+
+// TestIndexer_DefaultConfigSendsChunksAsTheyAre: under the default
+// embedding config, Qwen3-Embedding's, documents take no prefix, so the
+// embedder gets each chunk's text exactly.
+func TestIndexer_DefaultConfigSendsChunksAsTheyAre(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/p")
+	emb := &capturingEmbedder{dim: dim}
+	opts := Options{ChunkSize: 10, ChunkOverlap: 2, DocumentPrefix: config.Default().Embedding.DocumentPrefix}
+	const md = "Ada Lovelace wrote the first published algorithm.\n\nShe saw that the engine could do more than arithmetic."
+
+	require.NoError(t, New(sqlitestore.NewChunks(db, dim), emb, opts).Index(context.Background(), IndexInput{
+		DocumentID: docID, ExtractionID: extID, Markdown: md,
+	}))
+	chunks := ChunkText(md, ChunkOptions{SizeTokens: opts.ChunkSize, OverlapTokens: opts.ChunkOverlap})
+	want := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		want = append(want, c.Text)
+	}
+	require.Len(t, want, 2)
+	assert.Equal(t, want, emb.seen)
 }
 
 // fakeEmbedder returns a fixed-size vector for every text. The value is
@@ -106,10 +131,11 @@ func seedDocAndExtraction(t *testing.T, db *sqlitestore.DB, tenant, url string) 
 
 func TestIndexer_HappyPath(t *testing.T) {
 	db := sqlitetest.NewDB(t)
-	chunks := sqlitestore.NewChunks(db, 768)
+	dim := sqlitetest.Width(t, db)
+	chunks := sqlitestore.NewChunks(db, dim)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/x")
 
-	idx := New(chunks, &fakeEmbedder{dim: 768}, Options{ChunkSize: 10, ChunkOverlap: 2})
+	idx := New(chunks, &fakeEmbedder{dim: dim}, Options{ChunkSize: 10, ChunkOverlap: 2})
 
 	md := "Postgres uses MVCC for concurrency.\n\nB-trees power range scans efficiently."
 	require.NoError(t, idx.Index(context.Background(), IndexInput{
@@ -128,9 +154,10 @@ func TestIndexer_HappyPath(t *testing.T) {
 
 func TestIndexer_EmptyMarkdown_ClearsChunks(t *testing.T) {
 	db := sqlitetest.NewDB(t)
-	chunks := sqlitestore.NewChunks(db, 768)
+	dim := sqlitetest.Width(t, db)
+	chunks := sqlitestore.NewChunks(db, dim)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/empty")
-	idx := New(chunks, &fakeEmbedder{dim: 768}, Options{})
+	idx := New(chunks, &fakeEmbedder{dim: dim}, Options{})
 
 	// First write some content.
 	require.NoError(t, idx.Index(context.Background(), IndexInput{
@@ -149,9 +176,10 @@ func TestIndexer_EmptyMarkdown_ClearsChunks(t *testing.T) {
 
 func TestIndexer_Idempotent(t *testing.T) {
 	db := sqlitetest.NewDB(t)
-	chunks := sqlitestore.NewChunks(db, 768)
+	dim := sqlitetest.Width(t, db)
+	chunks := sqlitestore.NewChunks(db, dim)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/idem")
-	idx := New(chunks, &fakeEmbedder{dim: 768}, Options{})
+	idx := New(chunks, &fakeEmbedder{dim: dim}, Options{})
 
 	md := "the same content twice"
 	for range 2 {
@@ -165,8 +193,9 @@ func TestIndexer_Idempotent(t *testing.T) {
 }
 
 func TestIndexer_RequiresIDs(t *testing.T) {
-	idx := New(sqlitestore.NewChunks(sqlitetest.NewDB(t), 768),
-		&fakeEmbedder{dim: 768}, Options{})
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	idx := New(sqlitestore.NewChunks(db, dim), &fakeEmbedder{dim: dim}, Options{})
 
 	err := idx.Index(context.Background(), IndexInput{ExtractionID: "x", Markdown: "y"})
 	require.Error(t, err)
@@ -174,17 +203,19 @@ func TestIndexer_RequiresIDs(t *testing.T) {
 	require.Error(t, err)
 }
 
-// indexedEmbedder encodes each chunk's position into its vector: every text is
-// "wNNN", and component 0 of its vector is NNN. It records batch sizes, fails
-// the call numbered failOn (1-based), and runs onCall after each call.
+// indexedEmbedder encodes each chunk's position into its dim-wide vector:
+// every text is "wNNN", and component 0 of its vector is NNN. It records
+// batch sizes, fails the call numbered failOn (1-based), and runs onCall
+// after each call.
 type indexedEmbedder struct {
+	dim     int
 	batches []int
 	failOn  int
 	onCall  func()
 }
 
-func (*indexedEmbedder) Dimensions() int { return 768 }
-func (*indexedEmbedder) Model() string   { return "fake" }
+func (e *indexedEmbedder) Dimensions() int { return e.dim }
+func (*indexedEmbedder) Model() string     { return "fake" }
 func (e *indexedEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	e.batches = append(e.batches, len(texts))
 	if e.onCall != nil {
@@ -199,7 +230,7 @@ func (e *indexedEmbedder) Embed(_ context.Context, texts []string) ([][]float32,
 		if _, err := fmt.Sscanf(text, "w%d", &n); err != nil {
 			return nil, err
 		}
-		out[i] = make([]float32, 768)
+		out[i] = make([]float32, e.dim)
 		out[i][0] = float32(n)
 	}
 	return out, nil
@@ -219,9 +250,10 @@ var oneWordChunks = Options{ChunkSize: 1, ChunkOverlap: 0}
 
 func TestIndexer_EmbedsInOrderedBatches(t *testing.T) {
 	db := sqlitetest.NewDB(t)
-	chunks := sqlitestore.NewChunks(db, 768)
+	dim := sqlitetest.Width(t, db)
+	chunks := sqlitestore.NewChunks(db, dim)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
-	emb := &indexedEmbedder{}
+	emb := &indexedEmbedder{dim: dim}
 
 	require.NoError(t, New(chunks, emb, oneWordChunks).Index(context.Background(), IndexInput{
 		DocumentID: docID, ExtractionID: extID, Markdown: numberedMarkdown(100),
@@ -238,13 +270,14 @@ func TestIndexer_EmbedsInOrderedBatches(t *testing.T) {
 
 func TestIndexer_FailedBatchKeepsPreviousChunks(t *testing.T) {
 	db := sqlitetest.NewDB(t)
-	chunks := sqlitestore.NewChunks(db, 768)
+	dim := sqlitetest.Width(t, db)
+	chunks := sqlitestore.NewChunks(db, dim)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
-	require.NoError(t, New(chunks, &fakeEmbedder{dim: 768}, Options{}).Index(context.Background(), IndexInput{
+	require.NoError(t, New(chunks, &fakeEmbedder{dim: dim}, Options{}).Index(context.Background(), IndexInput{
 		DocumentID: docID, ExtractionID: extID, Markdown: "legacy content",
 	}))
 
-	err := New(chunks, &indexedEmbedder{failOn: 3}, oneWordChunks).Index(context.Background(), IndexInput{
+	err := New(chunks, &indexedEmbedder{dim: dim, failOn: 3}, oneWordChunks).Index(context.Background(), IndexInput{
 		DocumentID: docID, ExtractionID: extID, Markdown: numberedMarkdown(100),
 	})
 	require.Error(t, err)
@@ -257,15 +290,16 @@ func TestIndexer_FailedBatchKeepsPreviousChunks(t *testing.T) {
 
 func TestIndexer_CanceledBetweenBatchesWritesNothing(t *testing.T) {
 	db := sqlitetest.NewDB(t)
-	chunks := sqlitestore.NewChunks(db, 768)
+	dim := sqlitetest.Width(t, db)
+	chunks := sqlitestore.NewChunks(db, dim)
 	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
-	require.NoError(t, New(chunks, &fakeEmbedder{dim: 768}, Options{}).Index(context.Background(), IndexInput{
+	require.NoError(t, New(chunks, &fakeEmbedder{dim: dim}, Options{}).Index(context.Background(), IndexInput{
 		DocumentID: docID, ExtractionID: extID, Markdown: "legacy content",
 	}))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	emb := &indexedEmbedder{onCall: cancel}
+	emb := &indexedEmbedder{dim: dim, onCall: cancel}
 	err := New(chunks, emb, oneWordChunks).Index(ctx, IndexInput{
 		DocumentID: docID, ExtractionID: extID, Markdown: numberedMarkdown(100),
 	})

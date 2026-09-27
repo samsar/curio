@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 )
 
@@ -103,11 +104,18 @@ func (r *doctorReport) print(w io.Writer) {
 }
 
 func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
-	// 1. $CURIO_HOME and marker file
-	if meta, err := c.Home.Meta(); err != nil {
+	// 1. $CURIO_HOME, its marker, and whether the daemon will serve it
+	// under config.yaml's embedding model and width, which it checks the
+	// same way before it starts
+	meta, err := c.Home.CheckEmbedding(c.Config.Embedding.Model, c.Config.Embedding.Dim)
+	var mismatch *curiohome.EmbeddingMismatchError
+	switch {
+	case errors.Is(err, curiohome.ErrLegacyHome), errors.As(err, &mismatch):
+		r.add("curio home", statusFail, err.Error(), "")
+	case err != nil:
 		r.add("curio home", statusFail, c.Home.Path+" — marker unreadable: "+err.Error(),
 			"check file perms on "+c.Home.MarkerPath())
-	} else {
+	default:
 		r.add("curio home", statusOK,
 			fmt.Sprintf("%s (schema v%d, embedder %s/%d)",
 				c.Home.Path, meta.SchemaVersion, meta.EmbeddingModel, meta.EmbeddingDim), "")

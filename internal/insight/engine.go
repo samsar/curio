@@ -34,9 +34,9 @@ type Config struct {
 	// LabelingTimeout bounds the total time one run spends waiting on the LLM
 	// labeler. Clusters left when it runs out get term labels. Default 15m.
 	LabelingTimeout time.Duration
-	// Center subtracts the corpus mean vector before clustering. Embedding
-	// models like nomic-embed-text are anisotropic (their vectors sit in a
-	// narrow cone), so raw cosines are uniformly high and everything collapses
+	// Center subtracts the corpus mean vector before clustering. Many
+	// embedding models are anisotropic (their vectors sit in a narrow
+	// cone), so raw cosines are uniformly high and everything collapses
 	// into one giant cluster; centering removes that shared component so the
 	// residual topical structure drives the graph. Cohesion and member
 	// similarity are computed in the same space, so they describe the actual

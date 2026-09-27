@@ -29,22 +29,15 @@ func TestOpenAndMigrate(t *testing.T) {
 	version, err := Migrate(ctx, db)
 	require.NoError(t, err)
 
-	var model string
-	var dim int
-	err = db.QueryRow(`SELECT embedding_model, embedding_dim FROM schema_meta WHERE id=1`).Scan(&model, &dim)
-	require.NoError(t, err)
-	assert.Equal(t, "nomic-embed-text", model)
-	assert.Equal(t, 768, dim)
-
-	// goose_db_version is the only record of the version.
+	// goose_db_version is the only record of the version, and the marker
+	// the only record of the embedding model: no table keeps either.
 	assert.Equal(t, latestMigration(t), version, "the newest migration file")
 	var recorded int64
 	require.NoError(t, db.QueryRow(`SELECT max(version_id) FROM goose_db_version`).Scan(&recorded))
 	assert.Equal(t, recorded, version)
-	var copies int
-	require.NoError(t, db.QueryRow(
-		`SELECT count(*) FROM pragma_table_info('schema_meta') WHERE name = 'schema_version'`).Scan(&copies))
-	assert.Zero(t, copies, "schema_meta keeps no copy of the version")
+	var metaTables int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'schema_meta'`).Scan(&metaTables))
+	assert.Zero(t, metaTables)
 }
 
 func TestMigrate_Idempotent(t *testing.T) {

@@ -31,10 +31,10 @@ type ChunkOptions struct {
 	// overflows the embedder's context window.
 	//
 	// Rule of thumb: ~4 chars per BPE token for English prose, far fewer
-	// on URL- or code-dense text. nomic-embed-text v1 caps at 2048 tokens
-	// regardless of what Ollama's modelfile sets, and 3500 bytes stays
-	// under that even for URL-heavy markdown (see decisions.md).
-	// Default 3500.
+	// on URL- or code-dense text, and never more than one token per byte
+	// for a byte-level BPE tokenizer like Qwen3-Embedding's. So 3500 bytes
+	// is at most 3500 tokens, well inside the embedder's num_ctx of 8192,
+	// whatever the content (see decisions.md). Default 3500.
 	SizeChars int
 }
 
@@ -63,9 +63,9 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	}
 	maxChars := opts.SizeChars
 	if maxChars <= 0 {
-		// 3500 chars ≈ 875 BPE tokens on plain English prose, ≈ 1500-1800
-		// on URL/code-dense markdown (URLs tokenize at ~30 tokens each).
-		// Both well under nomic-embed-text's 2048-token hard ceiling.
+		// 3500 bytes ≈ 875 BPE tokens on plain English prose, ≈ 1500-1800
+		// on URL/code-dense markdown (URLs tokenize at ~30 tokens each),
+		// and at most 3500 for a byte-level tokenizer.
 		maxChars = 3500
 	}
 
@@ -158,7 +158,7 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 //
 // Embedding base64 bytes is pure noise: the BPE tokenizer treats random
 // base64 as high-entropy garbage, blowing up token counts (a 100KB inline
-// PNG → ~30K tokens, vs. nomic-embed-text's 2048-token hard ceiling) AND
+// PNG → ~30K tokens, far past the embedder's 8192-token num_ctx) AND
 // poisoning the semantic vector with content that has zero retrieval value.
 func sanitizeForEmbedding(s string) string {
 	if !strings.Contains(s, "data:") {

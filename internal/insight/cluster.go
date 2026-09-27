@@ -159,7 +159,8 @@ func (c *KNNGraphClusterer) Cluster(ctx context.Context, points []Point) ([]int,
 }
 
 // unitTolerance bounds |‖v‖²-1| for a vector to count as unit length. Rounding
-// a normalized 768-dimensional vector to float32 stays well inside it.
+// a normalized vector of a few thousand dimensions to float32 stays well
+// inside it.
 const unitTolerance = 1e-3
 
 // checkUnitVectors verifies every point has the same non-zero dimension and

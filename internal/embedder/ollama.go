@@ -23,7 +23,7 @@ type Ollama struct {
 // OllamaOptions configures a new Ollama embedder.
 type OllamaOptions struct {
 	BaseURL string        // default ollama.DefaultBaseURL
-	Model   string        // e.g. "nomic-embed-text"
+	Model   string        // e.g. "qwen3-embedding:0.6b"
 	Dim     int           // expected output dimension; every reply is checked against it
 	Timeout time.Duration // per-request; default 60s
 

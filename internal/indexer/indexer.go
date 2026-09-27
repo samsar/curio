@@ -28,9 +28,10 @@ type Indexer struct {
 type Options struct {
 	ChunkSize    int
 	ChunkOverlap int
-	// DocumentPrefix is prepended to each chunk before embedding (not stored),
-	// to satisfy prefixed embedding models like nomic-embed-text
-	// ("search_document: "). Must match the search engine's query prefix.
+	// DocumentPrefix is prepended to each chunk before embedding (not
+	// stored), for models trained with a document instruction; the default,
+	// Qwen3-Embedding, takes none. It is one half of a scheme with the
+	// search engine's query prefix.
 	DocumentPrefix string
 	// EmbedBatchSize caps how many chunks go into one embed request.
 	// Default embedBatchSize.
@@ -38,11 +39,11 @@ type Options struct {
 }
 
 // embedBatchSize bounds one embed request to at most 32 chunks of at most
-// 3500 bytes (~112 KB), which even CPU-only Ollama embeds in a few seconds.
-// That keeps each request well inside the embedder's timeout however long the
-// document is, or however many index workers' requests are queued ahead of
-// it, and limits how long a search's query embedding waits behind index work
-// in Ollama.
+// 3500 bytes (~112 KB), so a request's work doesn't grow with the document:
+// the embedder's timeout then measures Ollama's health, not document
+// length, and a search's query embedding waits behind a bounded amount of
+// index work in Ollama. How long a batch takes depends on the model and
+// the machine; decisions.md has the numbers.
 const embedBatchSize = 32
 
 func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer {
@@ -83,8 +84,8 @@ func (i *Indexer) Index(ctx context.Context, in IndexInput) error {
 		return i.chunks.ReplaceForDocument(ctx, in.DocumentID, in.ExtractionID, in.Title, in.Tags, nil)
 	}
 
-	// Prefix the text sent to the embedder (prefixed models like
-	// nomic-embed-text need it), but keep the STORED chunk text raw so BM25 /
+	// Prefix the text sent to the embedder (models with a document
+	// instruction need it), but keep the STORED chunk text raw so BM25 /
 	// snippets aren't polluted by the prefix.
 	texts := make([]string, len(chunks))
 	for j, c := range chunks {

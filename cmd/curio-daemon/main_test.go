@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,13 +38,22 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// newHome initializes a CURIO_HOME for run() with a config that keeps the
-// daemon offline: Ollama unreachable, nothing auto-pulled, term labels.
+// newHome initializes a CURIO_HOME for run(), with the default embedding
+// model and width, and a config that keeps the daemon offline: Ollama
+// unreachable, nothing auto-pulled, term labels.
 func newHome(t *testing.T, listen string) *curiohome.Home {
+	t.Helper()
+	defaults := config.Default().Embedding
+	return newHomeFor(t, listen, defaults.Model, defaults.Dim, "")
+}
+
+// newHomeFor is newHome for a home created with model at dim, whose
+// config's embedding section adds embeddingKeys.
+func newHomeFor(t *testing.T, listen, model string, dim int, embeddingKeys string) *curiohome.Home {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("CURIO_HOME", dir)
-	home, err := curiohome.Init(dir, "nomic-embed-text", store.EmbeddingDim)
+	home, err := curiohome.Init(dir, model, dim)
 	require.NoError(t, err)
 
 	cfg := fmt.Sprintf(`daemon:
@@ -51,14 +61,14 @@ func newHome(t *testing.T, listen string) *curiohome.Home {
   fetch_workers: 1
   index_workers: 1
 embedding:
-  base_url: http://127.0.0.1:1
+%s  base_url: http://127.0.0.1:1
   auto_pull: false
 generation:
   base_url: http://127.0.0.1:1
   auto_pull: false
 insight:
   labeling: terms
-`, listen)
+`, listen, embeddingKeys)
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(cfg), 0o600))
 	return home
 }
@@ -85,7 +95,12 @@ func seedJobs(t *testing.T, home *curiohome.Home) seededJobs {
 	defer db.Close()
 	_, err = sqlitestore.Migrate(context.Background(), db)
 	require.NoError(t, err)
+	return enqueueSeededJobs(t, db)
+}
 
+// enqueueSeededJobs adds seededJobs' two jobs to db, whatever its version.
+func enqueueSeededJobs(t *testing.T, db *sqlitestore.DB) seededJobs {
+	t.Helper()
 	q := sqlitestore.NewJobs(db)
 	ctx := context.Background()
 	running := &store.Job{TenantID: "local", Kind: store.JobKindFetch, Status: store.JobStatusRunning, Attempts: 1}
@@ -184,7 +199,7 @@ func recordLogs(t *testing.T) *recorder {
 // TestRun_EmbeddingMismatchRefusesToStart: a config whose embedding model
 // differs from the one the home's vectors were made with stops the daemon
 // before it touches the database, with one error that names both sides and
-// the fix, and nothing logged on the way.
+// the fixes, and nothing logged on the way.
 func TestRun_EmbeddingMismatchRefusesToStart(t *testing.T) {
 	home := newHome(t, freeLoopbackAddr(t))
 	cfg, err := os.ReadFile(home.ConfigPath())
@@ -195,20 +210,137 @@ func TestRun_EmbeddingMismatchRefusesToStart(t *testing.T) {
 	logs := recordLogs(t)
 
 	err = run(context.Background(), new(slog.LevelVar))
-	require.Error(t, err)
+	var mismatch *curiohome.EmbeddingMismatchError
+	require.ErrorAs(t, err, &mismatch)
 	for _, want := range []string{
-		home.ConfigPath(), `"mxbai-embed-large" (dim 768)`,
-		home.MarkerPath(), `"nomic-embed-text" (dim 768)`,
-		"set embedding.model and embedding.dim back", "different CURIO_HOME",
-		`"Embedding model swap"`,
+		home.ConfigPath(), `"mxbai-embed-large" (dim 1024)`,
+		home.MarkerPath(), `"qwen3-embedding:0.6b" (dim 1024)`,
+		"Set embedding.model and embedding.dim back", "`curio up --fresh`",
 	} {
-		assert.Contains(t, strings.ToLower(err.Error()), strings.ToLower(want))
+		assert.Contains(t, err.Error(), want)
 	}
+	assert.NotContains(t, err.Error(), "Embedding model swap")
 	assert.NotContains(t, err.Error(), "--reason")
 	assertJobsUntouched(t, home, seeded)
+	assertLoggedNothingAboveInfo(t, logs)
+}
+
+// assertLoggedNothingAboveInfo: main logs the error run returns, once, so
+// run logs nothing of its own about a refusal.
+func assertLoggedNothingAboveInfo(t *testing.T, logs *recorder) {
+	t.Helper()
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
 	for _, r := range logs.records {
 		assert.Less(t, r.Level, slog.LevelWarn, "logged %q; main logs the returned error once", r.Message)
 	}
+}
+
+// legacyMarker is a marker as curio wrote it before home formats: no
+// format key, and nomic-embed-text's width.
+const legacyMarker = `{
+  "schema_version": 11,
+  "embedding_model": "nomic-embed-text",
+  "embedding_dim": 768,
+  "created_at": "2026-05-23T10:00:00Z",
+  "updated_at": "2026-09-27T10:00:00Z"
+}
+`
+
+// TestRun_LegacyHomeRefusedBeforeTheDatabase: a home from before home
+// formats, whose config even pins its old model, is refused before the
+// daemon opens its database: the schema, the vectors and the jobs are as
+// they were, and the error says what the home holds and how to start over.
+func TestRun_LegacyHomeRefusedBeforeTheDatabase(t *testing.T) {
+	ctx := context.Background()
+	listen := freeLoopbackAddr(t)
+	home := newHomeFor(t, listen, "nomic-embed-text", 768, "  model: nomic-embed-text\n  dim: 768\n")
+	require.NoError(t, os.WriteFile(home.MarkerPath(), []byte(legacyMarker), 0o600))
+	const legacyVersion = 11
+	migrateTo(t, home, legacyVersion)
+	require.NoError(t, os.WriteFile(home.MarkerPath(), []byte(legacyMarker), 0o600), "migrateTo rewrote it")
+	seeded, vectorID := seedLegacyHome(t, home)
+	logs := recordLogs(t)
+
+	err := run(ctx, new(slog.LevelVar))
+	require.ErrorIs(t, err, curiohome.ErrLegacyHome)
+	for _, want := range []string{home.Path, home.MarkerPath(), `"nomic-embed-text" (dim 768)`,
+		"`curio up --fresh`", home.Path + ".bak-<YYYYMMDD-HHMMSS>", "import your bookmarks again"} {
+		assert.Contains(t, err.Error(), want)
+	}
+	assertLoggedNothingAboveInfo(t, logs)
+	assertJobsUntouched(t, home, seeded)
+
+	db, err := sqlitestore.Open(ctx, home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	var version int64
+	require.NoError(t, db.QueryRow(`SELECT max(version_id) FROM goose_db_version`).Scan(&version))
+	assert.EqualValues(t, legacyVersion, version, "no migration ran")
+	width, err := sqlitestore.VectorIndexWidth(ctx, db)
+	require.NoError(t, err)
+	assert.Equal(t, 768, width)
+	var kept string
+	require.NoError(t, db.QueryRow(`SELECT chunk_id FROM chunks_vec`).Scan(&kept))
+	assert.Equal(t, vectorID, kept)
+	raw, err := os.ReadFile(home.MarkerPath())
+	require.NoError(t, err)
+	assert.Equal(t, legacyMarker, string(raw), "the marker is left as it was")
+}
+
+// seedLegacyHome gives home's database, left at its version, seededJobs'
+// jobs and one 768-d chunk vector, as a nomic-embed-text home holds them,
+// and returns the jobs and the chunk's ID.
+func seedLegacyHome(t *testing.T, home *curiohome.Home) (seededJobs, string) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sqlitestore.Open(ctx, home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	seeded := enqueueSeededJobs(t, db)
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/a", State: store.DocStateFetched}
+	require.NoError(t, sqlitestore.NewDocuments(db).Create(ctx, doc))
+	ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK}
+	require.NoError(t, sqlitestore.NewExtractions(db).Create(ctx, ext))
+	chunks := sqlitestore.NewChunks(db, 768)
+	require.NoError(t, chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, "", nil,
+		[]store.ChunkInput{{Text: "kept", Embedding: make([]float32, 768)}}))
+	var id string
+	require.NoError(t, db.QueryRow(`SELECT id FROM chunks`).Scan(&id))
+	return seeded, id
+}
+
+// TestRun_SizesTheVectorIndexFromTheHome: the vector index of a new home's
+// database takes the width the marker records, not migration 001's.
+func TestRun_SizesTheVectorIndexFromTheHome(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHomeFor(t, listen, "all-minilm:l6-v2", 384, "  model: all-minilm:l6-v2\n  dim: 384\n")
+
+	_, stop := runDaemon(t, listen)
+	stop()
+
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	var decl string
+	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'chunks_vec'`).Scan(&decl))
+	assert.Contains(t, decl, "FLOAT[384]")
+}
+
+// TestOpenHome_NewHomeGetsTheDefaults: a home the daemon creates, with no
+// config.yaml, records the default embedding model and width, in the
+// current format.
+func TestOpenHome_NewHomeGetsTheDefaults(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "home")
+	t.Setenv("CURIO_HOME", dir)
+
+	home, err := openHome()
+	require.NoError(t, err)
+	meta, err := home.Meta()
+	require.NoError(t, err)
+	assert.Equal(t, curiohome.CurrentFormat, meta.Format)
+	assert.Equal(t, "qwen3-embedding:0.6b", meta.EmbeddingModel)
+	assert.Equal(t, 1024, meta.EmbeddingDim)
 }
 
 // daemonRun is run going in the background.
