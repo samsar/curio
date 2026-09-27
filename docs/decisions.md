@@ -98,7 +98,7 @@ when the entry was first committed.
 - 2026-09-25 — [Jobs reference their document through a column](#jobs-reference-their-document-through-a-column)
 - 2026-09-25 — [Indexes follow the queries; plans are pinned by tests](#indexes-follow-the-queries-plans-are-pinned-by-tests) (revised)
 - 2026-09-25 — [Chunks: external-content FTS, derived rows kept by triggers](#chunks-external-content-fts-derived-rows-kept-by-triggers) (revised)
-- 2026-09-25 — [Worker wakeups: an in-process signal, and idle polls that back off](#worker-wakeups-an-in-process-signal-and-idle-polls-that-back-off)
+- 2026-09-25 — [Worker wakeups: an in-process signal, and idle polls that back off](#worker-wakeups-an-in-process-signal-and-idle-polls-that-back-off) (revised)
 - 2026-09-25 — [API: request IDs, one error mapping, logged server errors](#api-request-ids-one-error-mapping-logged-server-errors) (revised)
 - 2026-09-25 — [API: tolerant responses, strict requests](#api-tolerant-responses-strict-requests)
 - 2026-09-25 — [API: absolute content paths, and hydration errors fail the request](#api-absolute-content-paths-and-hydration-errors-fail-the-request) (revised)
@@ -126,6 +126,7 @@ when the entry was first committed.
 - 2026-09-27 — [Cross-site redirects: judged where they land](#cross-site-redirects-judged-where-they-land)
 - 2026-09-27 — [Error pages whose status is hidden](#error-pages-whose-status-is-hidden)
 - 2026-09-27 — [Jina requests identify as curio](#jina-requests-identify-as-curio)
+- 2026-09-27 — [Queue gate: pause, throttle and schedule, persisted in SQLite](#queue-gate-pause-throttle-and-schedule-persisted-in-sqlite)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -3417,6 +3418,11 @@ finds jobs another process enqueued, which no in-process signal sees.
 semaphore-bounded pool would change the shutdown and drain semantics for
 little further gain.
 
+**Revised (2026-09-27):** a worker now asks the queue gate before each
+claim. While the gate admits none of its kinds, it waits on the gate's
+change signal and reopen time instead of on enqueues and idle polls; see
+"Queue gate: pause, throttle and schedule, persisted in SQLite".
+
 ---
 
 ## API: request IDs, one error mapping, logged server errors
@@ -5239,6 +5245,129 @@ per domain, and it ends.
   block rather than survive it.
 - **Remembering Jina's domain blocks** until the date they give, so later
   documents on a blocked domain skip Jina without a request.
+
+---
+
+## Queue gate: pause, throttle and schedule, persisted in SQLite
+
+**Decision:** workers claim through a gate.
+
+- `jobs.Gate` has one method, `Admit(kind, active, now) Verdict`. A worker
+  asks before every claim, once for each kind it claims, under its own
+  lock, passing how many jobs it already holds, and claims only the kinds
+  admitted. The `Verdict{Closed, Until, Changed}` carries the reason, when
+  the gate may reopen by itself, and a channel closed when what it was
+  decided from changes; the zero verdict admits. `jobs.All(gates...)`
+  gives the first closed verdict, in argument order.
+- `jobs.QueueGate` is the daemon's gate. It checks, in order: paused
+  (every kind, until a change), outside the daily schedule (every kind,
+  until the window's next start), then the throttle's cap for the kind.
+  `gentle` caps fetch at 4 and index at 1. Clustering, one job at a time
+  already, and kinds without a pool are never throttled; `normal` caps
+  nothing.
+- The settings are one row of `queue_settings` (migration 011): `paused`,
+  `throttle`, and `schedule_start`/`schedule_end` in minutes after local
+  midnight, both NULL for no schedule. No row means the defaults.
+- `GET /v1/queue` reports the settings, whether the queue is open
+  (`state`, `reason`, `opens_at`), and each pool's `limit`, `running` and
+  `pending`. `PUT /v1/queue` changes the fields given.
+- The CLI has `curio pause`, `resume`, `throttle gentle|normal` and
+  `schedule HH:MM-HH:MM|off`. `curio status` shows the queue's state and
+  load, and `add --wait` and `import --follow` say when it is closed.
+
+**Why SQLite, read once into memory:**
+
+- A pause must survive a restart, including one launchd makes after a
+  crash or a reboot: an overnight import the user paused must not resume
+  unasked.
+- `config.yaml` needs a restart to take effect, and it is the user's file:
+  the daemon doesn't write it.
+- The daemon is the only writer, so it reads the row once at startup and
+  keeps the settings in memory. `Admit` does no I/O, a claim costs no
+  extra read, and there is no hot row: `Update` writes only when a setting
+  changes, and a PUT that changes nothing writes nothing.
+- `Update` stores before it publishes, so a change the database refused
+  never takes effect, and what runs is what the next daemon loads. The
+  write runs detached from the request, bounded at 10 s like the workers'
+  bookkeeping writes: mattn can report a statement cancelled mid-way as
+  failed after it committed.
+- A row the daemon can't read stops the start (`load queue settings: …`).
+  Starting with the queue open would break the user's pause exactly when
+  the database misbehaves.
+
+**Why caps, not nice:** the heavy work is embedding, and Ollama does it in
+its own process, on the GPU. `nice`, `renice` or `taskpolicy` on
+curio-daemon don't reach it, and nice only reorders CPU time; it doesn't
+reduce the work. What cools the machine is fewer concurrent embed
+requests: gentle runs one index job instead of four. The fetch cap spares
+the network and extraction.
+
+**How pause and schedule combine:** both must allow a claim. Paused is
+the reason reported when both hold. `curio resume` never overrides the
+schedule: outside the window the queue stays closed until it opens, and
+`curio schedule off` runs it now. The window is the daemon's local wall
+clock, as the process read its zone at start, from its start up to its
+end, wrapping midnight when the end is the smaller.
+
+- `DailyWindow.Contains` goes by the wall clock alone, so a window is open
+  twice in a fall-back hour.
+- When a spring-forward gap skips the start, `NextStart` opens the window
+  as the gap ends; a window wholly inside the gap opens the next day.
+- `time.Date` doesn't promise which side of a gap it moves a skipped time
+  to: Go 1.26 puts New York's 02:30 before its gap (01:30 EST) and Lord
+  Howe's 02:15 after its (02:45). So the gap's end is whichever boundary
+  of the zone period `ZoneBounds` reports is nearer.
+
+**How workers wait:**
+
+- A worker reserves a slot under its lock, together with the check, so
+  its goroutines never reserve past a cap. The slot is held until the
+  job's outcome is recorded, and released at once when the claim finds
+  nothing. The reservation is per Worker; the daemon runs one Worker per
+  kind, so it is the kind's count.
+- While the gate admits none of its kinds, the goroutine waits on the
+  verdict's `Changed` and a timer to its `Until`, capped at a minute
+  (`maxGateWait`). It doesn't wake for enqueues, poll, or claim.
+- The cap is there because Go's timers run on the monotonic clock, which
+  on macOS (`mach_absolute_time`) stops while the Mac sleeps and ignores
+  changes to the wall clock, while a schedule opens by the wall clock. It
+  also catches a window's second opening in a fall-back hour, which
+  `NextStart` doesn't report.
+- A goroutine the throttle holds back waits only for a settings change.
+  The goroutines holding the kind's slots claim the next job themselves
+  when theirs ends, so whenever one is held, at least the cap's worth are
+  running or waiting on enqueues. Waking the held ones on every finish
+  would only add churn.
+- Each verdict carries the change channel of the settings it was decided
+  from, the rule `JobQueue.Enqueued` follows too (take the channel, then
+  check), so a change made after the decision still wakes the waiter.
+  `All` then composes gates without a goroutine merging their signals:
+  while one gate holds the composite closed, only its change can open it,
+  and the worker asks again.
+
+**Running jobs are never interrupted:** the gate stops claims, not jobs.
+A job claimed at 06:59 in a 22:00-07:00 window finishes after 07:00, and
+a pause lets the jobs in hand finish; `curio pause` says how many.
+
+**Daemon-wide:** `ClaimNext` and `RecoverOrphans` work across tenants, so
+the settings have no `tenant_id` and `JobStore.QueueCounts` counts every
+tenant's jobs. It is a covering walk of `idx_jobs_claim`'s pending and
+running ranges with no sort: 2.6 ms with 55k pending and 100k done jobs,
+however many finished jobs pile up, so `import --follow` reads it every
+tick.
+
+**`curio pause` starts a stopped daemon,** as every command that needs
+the daemon does. Whatever that daemon claims before the pause lands
+finishes as usual.
+
+**Not done:**
+
+- A gate that holds claims while the Mac runs on battery. It will be one
+  more `jobs.Gate`, composed with `jobs.All`, reporting its own reason in
+  `GET /v1/queue`.
+- Pausing one kind, index only, say.
+- Configurable gentle caps.
+- A paused-since time in `GET /v1/queue`.
 
 ---
 
