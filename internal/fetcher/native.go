@@ -759,9 +759,10 @@ func looksLikeErrorPage(p pageView) (code int, reason string) {
 }
 
 // errServerErrorPage marks an error page naming a server error other than
-// 503 (500, 502, 504, Cloudflare's 52x). Like the status it names, it is the
-// server's trouble for now: retried with the job's backoff, never cached,
-// and never sent to Jina, which would reach the same failing server.
+// 503: any other 5xx a title names (500, 502, 504, Cloudflare's 52x and
+// 530). Like the status it names, it is the server's trouble for now:
+// retried with the job's backoff, never cached, and never sent to Jina,
+// which would reach the same failing server.
 var errServerErrorPage = errors.New("server error page")
 
 // errorPageVerdict is what an error page means, by the status it names, the
@@ -1210,8 +1211,8 @@ var (
 
 // targetStatusError is the status the target answered Jina with, as Jina's
 // "Target URL returned error" warning reports it. It is deliberately not an
-// *HTTPStatusError: that is Jina's own answer, whose 429 sets Jina's
-// cooldown and whose Retry-After the job honors.
+// *HTTPStatusError: that is Jina's own answer, whose 429 extends Jina's
+// cooldown by its Retry-After, which a status the target gave Jina must not.
 type targetStatusError struct {
 	code int
 	text string

@@ -1698,6 +1698,15 @@ like the origin's pages".
   under an alias (`vaadin.com/home`, `www.kraken.com/en-us`,
   `www.realmatters.com/home/default.aspx`), which no URL rule tells from a
   deleted page.
+- `--force` lifts the 409 and nothing else. A forced refetch runs every
+  dead-link rule again, so it recovers a URL whose answer changed (a 404
+  that came back, a redirect that was fixed), not a page the heuristics
+  misjudge: a not-found title, a homepage redirect or a landing redirect is
+  judged the same way again. The refetch policy and kill switch paragraphs
+  above take per-document `--force` for the escape hatch from a false
+  positive; it is one only once the answer changes. The kill switch is the
+  only override, daemon-wide, and it takes a daemon restart (there is no
+  config reload).
 
 ---
 
@@ -4553,8 +4562,8 @@ they land"). The one `cf-mitigated: challenge` curio now reads is Jina's own
   costs one Jina request.
 - The target's status is a `targetStatusError`, never an
   `*HTTPStatusError`. That type is Jina's own answer: its 429 extends Jina's
-  cooldown and its `Retry-After` reaches the job, and neither may follow
-  from a status the target gave Jina.
+  cooldown by its `Retry-After`, which a status the target gave Jina must
+  not.
 - A Jina answer's `Result.FinalURL` is the requested URL.
 
 **Host cache: Jina verdicts never write it.** `settle` judges only the
@@ -4615,7 +4624,11 @@ answer when it passes. The landing pages above that kept a word of the
 source ("Java Issue Tracker - Home" keeps the bug ID) remain a known
 limitation. A Jina answer that is an error page without the target-status
 warning is now rejected, or left to the job's retry for a server error; see
-"Error pages whose status is hidden".
+"Error pages whose status is hidden". Corrected: the `targetStatusError`
+bullet above said Jina's `Retry-After` went on to the job. It never did:
+the job queue retries on its own backoff (`retryBackoff`) and reads no
+`Retry-After`, so Jina's only sets the length of Jina's cooldown. The
+bullet now says so.
 
 ---
 
@@ -4854,8 +4867,14 @@ stored from exactly these redirects (see Existing documents).
   that only its title gives away (`accounts.google.com/ServiceLogin`) is no
   offsite login wall there: it stays anti-bot, or is a landing page when it
   kept none of the source's words.
-- Recovery from a wrong dead verdict: `curio refetch <id> --force`, or
-  `fetcher.native.dead_link_detection: false` for a corpus it misjudges.
+- No per-document override: `curio refetch <id> --force` only lifts the
+  409, and the new fetch applies the same rule to the same redirect, so it
+  helps only once the redirect changes. A page that did move there is
+  bookmarked at its new address (`curio add <url>`); a corpus the rule
+  misjudges needs `fetcher.native.dead_link_detection: false`, daemon-wide
+  and after a restart. An override per document would need a flag carried
+  from the API through the job payload into the fetcher, and the probe
+  found no moved article that the landing rule marks dead.
 
 **Existing documents:** nothing is migrated; a refetch applies the rule.
 The IBM notices `08bfd6d8`, `c108cb5b`, `e28b9286`, `1fca7860` and
@@ -4897,10 +4916,10 @@ the challenge check and before the login-wall checks (`looksLikeErrorPage`):
     error): `ErrAntiBot`, reason `error page: …`. Page-level: never
     host-cached (no `*HTTPStatusError` in the chain), Jina-eligible at the
     origin, and `errJinaRejected` in a Jina answer.
-  - 500, 502, 504 and Cloudflare's 52x: `errServerErrorPage`, retryable. At
-    the origin it is neither Jina-eligible nor cached; in a Jina answer
-    `judgeJinaAnswer` makes it `errJinaTargetTrouble`: retryable,
-    uncached, no second Jina request.
+  - Any other 5xx a title names (500, 502, 504, Cloudflare's 52x and
+    530): `errServerErrorPage`, retryable. At the origin it is neither
+    Jina-eligible nor cached; in a Jina answer `judgeJinaAnswer` makes it
+    `errJinaTargetTrouble`: retryable, uncached, no second Jina request.
 
 **Why:** 12 stored documents are error pages: the IBM notice ×6, "Access
 forbidden : Stanford University", Aptana's "403 | Forbidden",
@@ -4948,9 +4967,10 @@ answer 403 at the origin, and `appdesignvault.com` redirects elsewhere.
   challenged the request", still wrapping Jina's `*HTTPStatusError`). It
   extends the shared Jina cooldown by its `Retry-After`, or by
   `jinaChallengeCooldown` (10 minutes), with one WARN log line per
-  extension. Within the pause, a Jina-bound fetch sends nothing and fails
-  fast and retryably through the existing cooldown check (`awaitJina`),
-  uncached. A 403 without the header extends nothing.
+  challenged answer. Within the pause, a Jina-bound fetch still makes its
+  origin request but sends no Jina request: it fails fast and retryably
+  through the existing cooldown check (`awaitJina`), uncached. A 403
+  without the header extends nothing.
 
 **Why:** the Jina fallback had failed every call since 2026-08-30.
 `jinaOnce` sent the origin's Chrome User-Agent, and r.jina.ai's Cloudflare
@@ -4980,9 +5000,13 @@ content …)`), 402 origin-403 first failures that wrote the host cache, and
 
 **Why a pause:** while the CDN refuses curio, every Jina call gets the same
 answer. Pausing all of them saves each Jina-bound fetch a request that would
-only be challenged again, and leaves the fetches retryable for when the
-challenges stop. `jinaOnce` drops the challenge body, so the error names the
-challenge instead.
+only be challenged again. The pause doesn't hold back the job queue's
+retries, which follow its own backoff (about 1, 3, 7 and 15 minutes after
+the first failure): one that comes due inside the pause fails at once,
+retryably, and uses up an attempt, so a document can end `failed` before
+Jina answers again; `curio refetch --all --state=failed` recovers it.
+`jinaOnce` drops the challenge body, so the error names the challenge
+instead.
 
 **Ordering:** this shipped with "Cross-site redirects: judged where they
 land". With Jina answering again, cross-site redirects still sent to it
