@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,6 +73,81 @@ func TestNative_HeadersFollowProfile(t *testing.T) {
 			assert.Contains(t, chUA, `"Chromium";v="`+tc.major+`"`)
 		})
 	}
+}
+
+// TestNative_JinaUserAgent: origin requests carry the Chrome profile's
+// User-Agent, or the configured override, with the browser headers; Jina
+// requests carry curio's own User-Agent and none of them, on both backends.
+func TestNative_JinaUserAgent(t *testing.T) {
+	cases := []struct{ backend, override, originUA string }{
+		{"", "", chromeUA(133)},
+		{"stock", "", chromeUA(133)},
+		{"", "curio-test/1.0", "curio-test/1.0"},
+		{"stock", "curio-test/1.0", "curio-test/1.0"},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("backend=%q user_agent=%q", tc.backend, tc.override), func(t *testing.T) {
+			var originSaw, jinaSaw atomic.Pointer[http.Header]
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				h := r.Header.Clone()
+				originSaw.Store(&h)
+				_, _ = io.WriteString(w, thinPage)
+			}))
+			defer origin.Close()
+			jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				h := r.Header.Clone()
+				jinaSaw.Store(&h)
+				_, _ = io.WriteString(w, jinaArticleBody())
+			}))
+			defer jina.Close()
+
+			n := unpaced(NewNative(NativeOptions{
+				Timeout: 5 * time.Second, Backend: tc.backend, UserAgent: tc.override,
+				JinaFallback: true, JinaBaseURL: jina.URL + "/",
+			}), newFakeClock())
+			res, err := n.Fetch(t.Context(), origin.URL)
+			require.NoError(t, err)
+			require.Equal(t, "jina", res.Meta["via"])
+
+			originHeader, jinaHeader := *originSaw.Load(), *jinaSaw.Load()
+			assert.Equal(t, tc.originUA, originHeader.Get("User-Agent"))
+			assert.Equal(t, "navigate", originHeader.Get("Sec-Fetch-Mode"))
+			assert.Equal(t, jinaUserAgent, jinaHeader.Get("User-Agent"))
+			assert.Equal(t, "text/plain", jinaHeader.Get("Accept"))
+			for key := range jinaHeader {
+				key = strings.ToLower(key)
+				assert.False(t, strings.HasPrefix(key, "sec-ch-ua") || strings.HasPrefix(key, "sec-fetch-"),
+					"browser header %s sent to Jina", key)
+			}
+		})
+	}
+}
+
+// TestNative_JinaSendsCurioUserAgent mirrors r.jina.ai's Cloudflare, which
+// answers a browser User-Agent with a managed challenge and anything else
+// with the page: a fetch behind a thin origin gets its answer on its one
+// Jina request.
+func TestNative_JinaSendsCurioUserAgent(t *testing.T) {
+	origin := serveThinPage(t)
+	defer origin.Close()
+	var jinaHits atomic.Int32
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jinaHits.Add(1)
+		if strings.Contains(r.UserAgent(), "Mozilla/") {
+			w.Header().Set("Cf-Mitigated", "challenge")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Just a moment...</title></head><body></body></html>`)
+			return
+		}
+		_, _ = io.WriteString(w, jinaArticleBody())
+	}))
+	defer jina.Close()
+
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), newFakeClock())
+	res, err := n.Fetch(t.Context(), origin.URL)
+	require.NoError(t, err)
+	assert.Equal(t, "jina", res.Meta["via"])
+	assert.Equal(t, int32(1), jinaHits.Load())
 }
 
 // TestNewNative_WarnsOnMismatchedUserAgent: an override naming a different

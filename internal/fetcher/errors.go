@@ -25,21 +25,30 @@ func (e *PermanentError) Unwrap() error { return e.Err }
 var (
 	// ErrLoginWall marks a response that came back but looks like a
 	// login/paywall placeholder or thin content rather than the article.
-	// Jina may get through.
+	// Jina may get through, except past a redirect onto another site's
+	// login page, whatever that page answered: Jina follows the same
+	// redirect, so that one is final.
 	ErrLoginWall = errors.New("login wall or thin content")
 
 	// ErrAntiBot marks an answer that suggests bot detection rather than a
-	// missing or auth-required page: HTTP 403 or 503, or a challenge or
-	// block page served with a 2xx. Jina may get through. Distinct from
-	// ErrLoginWall so the two log separately. Only a 403/503 from the origin
-	// is host-wide; a challenge page is about that page.
+	// missing or auth-required page: HTTP 403 or 503, or a challenge, block
+	// or 403/503 error page served with a 2xx (or by Jina, without the
+	// target's status). Jina may get through. Distinct from ErrLoginWall so
+	// the two log separately. Only a 403/503 from the origin is host-wide; a
+	// challenge or error page is about that page. A 403/503 answered after a
+	// redirect onto another site's login path, or with dead-link detection
+	// on onto the homepage or another site's landing page, is no ErrAntiBot:
+	// the redirect is judged instead (Native's statusFailure).
 	ErrAntiBot = errors.New("origin blocked the request (likely anti-bot)")
 
 	// ErrDeadLink marks a URL whose content is gone: a hard 404/410 (from
-	// the origin, or reported by Jina for the target), or a "soft 404" (HTTP
-	// 200 carrying a not-found page). Always wrapped in a PermanentError; a
-	// dead link the origin reports is never routed to Jina. Never
-	// host-cached: a dead path says nothing about the rest of the host.
+	// the origin, or reported by Jina for the target), or a "soft 404": HTTP
+	// 200 carrying a not-found page, or a redirect that settled on the
+	// site's homepage or on another site's landing page, whatever that page
+	// answered: 2xx, 403 or 503. Always wrapped in a PermanentError; a dead
+	// link the origin reports is never routed to Jina. Never host-cached: a
+	// dead path says nothing about the rest of the host, nor a landing page
+	// about the site that redirected there or the site it belongs to.
 	ErrDeadLink = errors.New("dead link (content is gone)")
 
 	// ErrHostUnreachable marks a host that doesn't resolve or refuses
@@ -47,8 +56,11 @@ var (
 	ErrHostUnreachable = errors.New("host unreachable")
 
 	// ErrTooLarge marks a response body over maxResponseBytes (after
-	// decompression). Always permanent: the same URL will be just as big
-	// next time.
+	// decompression). Permanent: the same URL will be just as big next
+	// time. The one exception is a PDF over the cap, which goes to Jina
+	// (errPDFUnreadable): when Jina fails for its own reasons or reports a
+	// transient target status, the error still matches ErrTooLarge but
+	// stays retryable, like any Jina failure that is no verdict.
 	ErrTooLarge = errors.New("response too large")
 
 	// ErrTLSCertificate marks a server certificate that failed
