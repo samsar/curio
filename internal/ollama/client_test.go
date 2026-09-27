@@ -202,6 +202,83 @@ func TestPing(t *testing.T) {
 	}
 }
 
+func TestModelDigest(t *testing.T) {
+	const tags = `{"models":[{"name":"nomic-embed-text:latest","digest":"0a109f422b47"},` +
+		`{"name":"qwen3-embedding:0.6b","model":"qwen3-embedding:0.6b","digest":"ac6da0dfba84"},` +
+		`{"name":"qwen3-embedding:8b","digest":"64b933495768"}]}`
+	cases := []struct {
+		name    string
+		model   string
+		body    string
+		status  int
+		want    string
+		wantErr error
+		errText string
+	}{
+		{"the configured tag's digest", "qwen3-embedding:0.6b", tags, 200, "ac6da0dfba84", nil, ""},
+		{"untagged is :latest", "nomic-embed-text", tags, 200, "0a109f422b47", nil, ""},
+		{"not pulled", "qwen3-embedding", tags, 200, "", ErrModelNotLoaded, ""},
+		{"no digest listed", "m", `{"models":[{"name":"m:latest"}]}`, 200, "", nil, "without a digest"},
+		{"server error", "m", "oops", 500, "", ErrUnreachable, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/api/tags", r.URL.Path)
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			t.Cleanup(srv.Close)
+			got, err := newClient(t, srv.URL, tc.model).ModelDigest(context.Background())
+			switch {
+			case tc.wantErr != nil:
+				require.ErrorIs(t, err, tc.wantErr)
+			case tc.errText != "":
+				require.ErrorContains(t, err, tc.errText)
+			default:
+				require.NoError(t, err)
+				assert.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestVersion(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		want    string
+		wantErr error
+		errText string
+	}{
+		{"the server's version", 200, `{"version":"0.34.4"}`, "0.34.4", nil, ""},
+		{"no version", 200, `{}`, "", nil, "no version"},
+		{"a reply over the limit", 200, `{"version":"` + strings.Repeat("9", MaxResponseBody) + `"}`, "", nil, "exceeds"},
+		{"server error", 503, "starting", "", ErrUnreachable, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/api/version", r.URL.Path)
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			t.Cleanup(srv.Close)
+			got, err := newClient(t, srv.URL, "m").Version(context.Background())
+			switch {
+			case tc.wantErr != nil:
+				require.ErrorIs(t, err, tc.wantErr)
+			case tc.errText != "":
+				require.ErrorContains(t, err, tc.errText)
+			default:
+				require.NoError(t, err)
+				assert.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
+
 func TestNormalizeModel(t *testing.T) {
 	cases := map[string]string{
 		"qwen3-embedding":       "qwen3-embedding:latest",
@@ -232,6 +309,14 @@ func TestTransportErrorsKeepTheirCause(t *testing.T) {
 	c := newClient(t, "http://"+closedAddr(t), "m")
 
 	err := c.Ping(context.Background())
+	require.ErrorIs(t, err, ErrUnreachable)
+	require.ErrorIs(t, err, syscall.ECONNREFUSED)
+
+	_, err = c.Version(context.Background())
+	require.ErrorIs(t, err, ErrUnreachable)
+	require.ErrorIs(t, err, syscall.ECONNREFUSED)
+
+	_, err = c.ModelDigest(context.Background())
 	require.ErrorIs(t, err, ErrUnreachable)
 	require.ErrorIs(t, err, syscall.ECONNREFUSED)
 

@@ -15,13 +15,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
@@ -220,6 +223,35 @@ func (s *Server) AddInterest(t testing.TB, label string, docs ...*store.Document
 		t.Fatalf("finish cluster run: %v", err)
 	}
 	return &c
+}
+
+// Drift is an embedding drift monitor for api.Deps.Drift that reports the
+// drift it was given until a rebaseline, which `curio reindex --all`
+// triggers, clears it, as the daemon's monitor does once its next check
+// records the build serving.
+type Drift struct {
+	mu     sync.Mutex
+	report drift.Report
+}
+
+// NewDrift returns a Drift reporting changes, found at checkedAt.
+func NewDrift(checkedAt time.Time, changes ...drift.Change) *Drift {
+	return &Drift{report: drift.Report{Changes: changes, CheckedAt: checkedAt}}
+}
+
+// Report is the drift, until a rebaseline.
+func (d *Drift) Report() drift.Report {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.report
+}
+
+// Rebaseline clears the drift.
+func (d *Drift) Rebaseline() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.report = drift.Report{CheckedAt: time.Now()}
+	return nil
 }
 
 // Embedder embeds text without a model: every word adds weight to one of

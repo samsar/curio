@@ -59,6 +59,7 @@ type Deps struct {
 	InsightEnabled bool                            // gates POST /v1/interests/rebuild (config insight.enabled)
 	Upstreams      func() []fetcher.UpstreamHealth // the health of the services fetches depend on; nil reports none
 	Gate           *jobs.QueueGate                 // the workers' queue gate, read and changed at /v1/queue
+	Drift          DriftMonitor                    // embedding drift, on healthz, reset by reindex-all; nil tracks none
 	TenantID       string                          // default store.LocalTenantID
 	Log            *slog.Logger
 }

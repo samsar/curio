@@ -157,7 +157,11 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 			r.add("ollama", statusFail, health.OllamaDetail, "")
 		}
 
-		// 5. the services fetches depend on (the Jina fallback), as the
+		// 5. whether the model or Ollama changed since the library was
+		// indexed, as the daemon last checked
+		r.add(driftCheck(health.EmbeddingDrift))
+
+		// 6. the services fetches depend on (the Jina fallback), as the
 		// daemon has seen them answer
 		for _, u := range health.Upstreams {
 			status, detail, hint := upstreamCheck(u)
@@ -165,7 +169,7 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 		}
 	}
 
-	// 6. fetcher backend: native is always fine; web2md needs the bin to exist
+	// 7. fetcher backend: native is always fine; web2md needs the bin to exist
 	switch c.Config.Fetcher.Default {
 	case "native":
 		r.add("fetcher", statusOK, "native (Go, no external deps)", "")
@@ -186,7 +190,7 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 		}
 	}
 
-	// 7. content dir writable
+	// 8. content dir writable
 	checkContentDir(c.Home.ContentDir(), r)
 }
 
@@ -207,6 +211,33 @@ func checkContentDir(dir string, r *doctorReport) {
 		return
 	}
 	r.add("content dir", statusOK, dir+" writable", "")
+}
+
+// driftCheck is doctor's embeddings check: a warning while the daemon
+// reports the build that makes the embeddings changed since the library
+// was indexed, since searches then compare vectors from two builds.
+func driftCheck(d *client.EmbeddingDrift) (name string, status checkStatus, detail, hint string) {
+	if d == nil {
+		return "embeddings", statusOK, "no drift reported since the library was indexed", ""
+	}
+	return "embeddings", statusWarn, "drifted: " + driftChanges(d),
+		"searches compare vectors from two builds; run `" + d.Fix + "` to re-embed the library"
+}
+
+// driftChanges lists what changed in a drift, recorded value first.
+func driftChanges(d *client.EmbeddingDrift) string {
+	parts := make([]string, 0, len(d.Changes))
+	for _, c := range d.Changes {
+		what := c.What
+		switch c.What {
+		case client.DriftModelDigest:
+			what = "model digest"
+		case client.DriftOllamaVersion:
+			what = "Ollama"
+		}
+		parts = append(parts, fmt.Sprintf("%s %s → %s", what, c.Recorded, c.Current))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // upstreamCheck is doctor's check of an upstream the daemon reports, the

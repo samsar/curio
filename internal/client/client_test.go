@@ -19,6 +19,7 @@ import (
 	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/store"
 )
@@ -42,6 +43,24 @@ func TestHealthz(t *testing.T) {
 	assert.Equal(t, s.Home.Path, h.Home)
 	assert.Equal(t, s.Embedder.Dim, h.EmbeddingDim, "the home's width")
 	assert.Positive(t, h.SchemaVersion)
+	assert.Nil(t, h.EmbeddingDrift)
+}
+
+// TestHealthz_EmbeddingDrift: a drift the daemon reports reaches Health
+// whole.
+func TestHealthz_EmbeddingDrift(t *testing.T) {
+	checked := time.Date(2026, 9, 27, 14, 40, 1, 0, time.UTC)
+	s := apitest.Start(t, func(d *api.Deps) {
+		d.Drift = apitest.NewDrift(checked, drift.Change{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"})
+	})
+
+	h, err := client.New(s.URL).Healthz(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, &client.EmbeddingDrift{
+		Changes:   []client.DriftChange{{What: client.DriftOllamaVersion, Recorded: "0.30.0", Current: "0.34.4"}},
+		Fix:       "curio reindex --all",
+		CheckedAt: checked,
+	}, h.EmbeddingDrift)
 }
 
 // TestHealthz_Starting: a starting daemon's healthz answer is an error

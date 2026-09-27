@@ -1,8 +1,9 @@
 // Package ollama is curio's client for the Ollama HTTP API: base-URL
-// validation, the model check behind Ping, pulling a missing model and
-// keeping it pulled, and bounded JSON requests. internal/embedder and
-// internal/generator build their endpoint-specific calls on one Client each,
-// so both report failures through the same sentinels.
+// validation, the model check behind Ping, the server's version and the
+// model's digest, pulling a missing model and keeping it pulled, and
+// bounded JSON requests. internal/embedder and internal/generator build
+// their endpoint-specific calls on one Client each, so both report
+// failures through the same sentinels.
 package ollama
 
 import (
@@ -134,6 +135,43 @@ func (c *Client) lookup(ctx context.Context) (tagEntry, error) {
 		}
 	}
 	return tagEntry{}, fmt.Errorf("%w: %s", ErrModelNotLoaded, c.model)
+}
+
+// ModelDigest is the manifest digest of the model as Ollama has it pulled,
+// the one `ollama list` shows, read from GET /api/tags. It changes when a
+// pull brings a different build of the model. A model that isn't pulled is
+// ErrModelNotLoaded.
+func (c *Client) ModelDigest(ctx context.Context) (string, error) {
+	m, err := c.lookup(ctx)
+	if err != nil {
+		return "", err
+	}
+	if m.Digest == "" {
+		return "", fmt.Errorf("/api/tags lists %s without a digest", m.Name)
+	}
+	return m.Digest, nil
+}
+
+// Version is the Ollama server's version, from GET /api/version.
+func (c *Client) Version(ctx context.Context) (string, error) {
+	resp, err := c.send(ctx, http.MethodGet, "/api/version", nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if !ok(resp) {
+		return "", fmt.Errorf("%w: /api/version: %w", ErrUnreachable, statusError(resp))
+	}
+	var v struct {
+		Version string `json:"version"`
+	}
+	if err := decodeJSON(resp.Body, &v, MaxResponseBody); err != nil {
+		return "", fmt.Errorf("/api/version: %w", err)
+	}
+	if v.Version == "" {
+		return "", errors.New("/api/version: the reply has no version")
+	}
+	return v.Version, nil
 }
 
 // normalizeModel is the name Ollama runs for name: lower-cased, with

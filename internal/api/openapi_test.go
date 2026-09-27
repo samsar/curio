@@ -279,6 +279,8 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		})
 		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 		d.Embedder = pingingEmbedder{err: fmt.Errorf("%w: connection refused", ollama.ErrUnreachable)}
+		// Drifted, both parts of the build changed.
+		d.Drift = &driftMonitor{report: drifted(time.Now())}
 		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
 		// Paused Jina, with every optional field set.
 		d.Upstreams = func() []fetcher.UpstreamHealth {

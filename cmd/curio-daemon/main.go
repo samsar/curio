@@ -17,6 +17,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/generator"
@@ -248,6 +249,7 @@ func syncMarkerSchemaVersion(home *curiohome.Home, meta curiohome.Meta, schemaVe
 type daemon struct {
 	apiDeps api.Deps
 	pools   []jobs.Pool
+	drift   *drift.Monitor
 }
 
 // newDaemon builds the stores, clients, engines and pools over db, whose
@@ -327,6 +329,9 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	}, sizes, jobs.WorkerOptions{Gate: gate, Log: slog.Default()})
 	// The Jina fallback is the one upstream whose health is tracked.
 	upstreams := func() []fetcher.UpstreamHealth { return []fetcher.UpstreamHealth{native.JinaHealth()} }
+	// Built after start's marker writes: from here on the monitor is the
+	// marker's only writer.
+	driftMonitor := drift.New(home, emb.Client(), slog.Default())
 
 	return &daemon{
 		apiDeps: api.Deps{
@@ -342,9 +347,11 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 			InsightEnabled: cfg.Insight.Enabled,
 			Upstreams:      upstreams,
 			Gate:           gate,
+			Drift:          driftMonitor,
 			Log:            slog.Default(),
 		},
 		pools: pools,
+		drift: driftMonitor,
 	}, nil
 }
 
@@ -473,13 +480,15 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 	}, slog.Default()), nil
 }
 
-// serve runs the worker pools alongside the API until ctx is cancelled or
-// the API fails, then shuts both down within the documented budget.
+// serve runs the worker pools and the embedding drift monitor alongside
+// the API until ctx is cancelled or the API fails, then shuts them down
+// within the documented budget.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var workers sync.WaitGroup
+	workers.Go(func() { d.drift.Run(ctx) })
 	for _, p := range d.pools {
 		for range p.Size {
 			workers.Go(func() {

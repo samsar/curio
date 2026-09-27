@@ -21,6 +21,7 @@ import (
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/store"
 )
@@ -522,6 +523,41 @@ func TestDoctor(t *testing.T) {
 	assert.Contains(t, out, "content dir")
 	assert.Contains(t, out, "all checks passed")
 	assert.NotContains(t, out, "jina", "a daemon that reports no upstreams gets no upstream check")
+}
+
+// TestDoctorAndStatus_EmbeddingDrift: while the daemon reports the build
+// that makes the embeddings changed, doctor warns, listing each change and
+// the fix, and status warns once; `curio reindex --all` resets the
+// baseline, and the warnings go.
+func TestDoctorAndStatus_EmbeddingDrift(t *testing.T) {
+	monitor := apitest.NewDrift(time.Now(),
+		drift.Change{What: drift.ModelDigest, Recorded: "sha256:0a109f42", Current: "sha256:ac6da0df"},
+		drift.Change{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"})
+	srv := apitest.Start(t, func(d *api.Deps) { d.Drift = monitor })
+	srv.AddContent(t, srv.AddDocument(t, "https://example.com/a", store.DocStateFetched), "content")
+
+	out := mustRun(t, srv, "doctor")
+	assert.Contains(t, out, fmt.Sprintf("! %-22s drifted: model digest sha256:0a109f42 → sha256:ac6da0df, "+
+		"Ollama 0.30.0 → 0.34.4\n", "embeddings"))
+	assert.Contains(t, out, "  → searches compare vectors from two builds; run `curio reindex --all` to re-embed the library\n")
+	assert.Contains(t, out, "0 failure(s), 1 warning(s)")
+
+	out = mustRun(t, srv, "status")
+	assert.Contains(t, out, "embed:   qwen3-embedding:0.6b (dim 1024)\n"+
+		"warning: embeddings drifted since the library was indexed (model digest sha256:0a109f42 → sha256:ac6da0df, "+
+		"Ollama 0.30.0 → 0.34.4); run `curio reindex --all`\n")
+
+	mustRun(t, srv, "reindex", "--all")
+	assert.NotContains(t, mustRun(t, srv, "status"), "drifted")
+	out = mustRun(t, srv, "doctor")
+	assert.Contains(t, out, fmt.Sprintf("✓ %-22s no drift reported since the library was indexed\n", "embeddings"))
+	assert.Contains(t, out, "all checks passed")
+}
+
+func TestReindex_HelpNamesDrift(t *testing.T) {
+	out := runArgs(t, "reindex", "--help")
+	assert.Contains(t, out, "embeddings drifted")
+	assert.Contains(t, out, "--all")
 }
 
 // TestDoctor_HomeTheDaemonRefuses: a home the daemon won't serve, a legacy

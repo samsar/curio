@@ -56,6 +56,10 @@ func newStatusCmd(env *daemonctl.Env) *cobra.Command {
 			}
 			fmt.Fprintf(w, "schema:  v%d\n", health.SchemaVersion)
 			fmt.Fprintf(w, "embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
+			if d := health.EmbeddingDrift; d != nil {
+				fmt.Fprintf(w, "warning: embeddings drifted since the library was indexed (%s); run `%s`\n",
+					driftChanges(d), d.Fix)
+			}
 			for _, u := range health.Upstreams {
 				fmt.Fprint(w, failingWarning(u))
 			}
