@@ -4,14 +4,20 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -213,22 +219,131 @@ func TestYouTubeFetch_TranscriptSource(t *testing.T) {
 			assert.Contains(t, res.Markdown, "A test video description.")
 			if tc.picked != "" {
 				assert.Contains(t, res.Markdown, "This track is "+tc.picked)
+				assert.Empty(t, res.PartialReason)
 			} else {
 				assert.NotContains(t, res.Markdown, "## Transcript")
+				assert.Equal(t, `no usable captions for sub_langs "`+DefaultYouTubeSubLangs+`"`, res.PartialReason)
 			}
 		})
 	}
 }
 
-func TestYouTubeFetch_PermanentError(t *testing.T) {
-	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp-unavailable"), Timeout: 30 * time.Second})
-	_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=gone123")
-	require.Error(t, err)
+// TestYouTubeFetch_RunFailures: a video yt-dlp reports gone fails
+// permanently; any other failed run, and a run that wrote no info.json,
+// is retried. Only ERROR lines are quoted.
+func TestYouTubeFetch_RunFailures(t *testing.T) {
+	cases := []struct {
+		mode      string
+		permanent bool
+		quoted    string
+	}{
+		{"yt-dlp-unavailable", true, "ERROR: Video unavailable"},
+		{"yt-dlp-error", false, "ERROR: [youtube] test_id: Unable to extract initial player response"},
+		{"yt-dlp-no-info", false, "yt-dlp produced no info.json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, tc.mode), Timeout: 30 * time.Second})
+			_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+			require.Error(t, err)
 
-	var pe *PermanentError
-	assert.True(t, errors.As(err, &pe), "should be a PermanentError")
-	assert.Contains(t, err.Error(), "ERROR: Video unavailable")
-	assert.NotContains(t, err.Error(), "WARNING")
+			var pe *PermanentError
+			assert.Equal(t, tc.permanent, errors.As(err, &pe), "permanent: %v", err)
+			assert.Contains(t, err.Error(), tc.quoted)
+			assert.NotContains(t, err.Error(), "WARNING")
+		})
+	}
+}
+
+// TestFakeYTDLP_FailedCaption: the fake fails a caption download the way
+// yt-dlp does. By default the video is aborted before its info.json is
+// written; with --ignore-errors the failure is a warning and the rest is
+// written.
+func TestFakeYTDLP_FailedCaption(t *testing.T) {
+	const failure = "Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"
+	bin := fakeTool(t, "yt-dlp")
+	t.Setenv(fakeSubsEnv, "auto:en!429")
+	for _, ignoreErrors := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ignore-errors=%v", ignoreErrors), func(t *testing.T) {
+			dir := t.TempDir()
+			args := []string{"--write-info-json", "-o", filepath.Join(dir, "%(id)s"), "https://www.youtube.com/watch?v=test_id"}
+			if ignoreErrors {
+				args = append([]string{"--ignore-errors"}, args...)
+			}
+			stderr, err := runCapped(t.Context(), 30*time.Second, nil, bin, args...)
+			_, statErr := os.Stat(filepath.Join(dir, "test_id.info.json"))
+			if ignoreErrors {
+				require.NoError(t, err)
+				assert.Contains(t, stderr, "WARNING: "+failure)
+				assert.NoError(t, statErr)
+				return
+			}
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr)
+			assert.Equal(t, 1, exitErr.ExitCode())
+			assert.Contains(t, stderr, "ERROR: "+failure)
+			assert.ErrorIs(t, statErr, fs.ErrNotExist)
+		})
+	}
+}
+
+// TestYouTubeFetch_FailedCaptionDownload: yt-dlp runs with --ignore-errors,
+// so a caption track that fails to download doesn't cost the video.
+// When it was the only track, the video is stored as a partial of its
+// description that says why; when another track downloaded, that one is
+// the transcript.
+func TestYouTubeFetch_FailedCaptionDownload(t *testing.T) {
+	const failure = "Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"
+	cases := []struct {
+		subs    string
+		partial bool
+		reason  string
+	}{
+		{"auto:en!429", true, "transcript not downloaded: yt-dlp: " + failure},
+		{"auto:en!429,manual:en-GB", false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.subs, func(t *testing.T) {
+			argsPath := filepath.Join(t.TempDir(), "args")
+			t.Setenv(fakeArgsEnv, argsPath)
+			t.Setenv(fakeSubsEnv, tc.subs)
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
+			res, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+			require.NoError(t, err)
+
+			runs := ytdlpRuns(t, argsPath)
+			require.Len(t, runs, 1)
+			assert.Contains(t, runs[0], "--ignore-errors")
+			assert.Equal(t, store.ContentTypeVideo, res.ContentType)
+			assert.Equal(t, "Test Video", res.Title)
+			assert.Contains(t, res.Markdown, "A test video description.")
+			assert.Equal(t, tc.partial, res.Partial)
+			assert.Equal(t, tc.reason, res.PartialReason)
+			if tc.partial {
+				assert.NotContains(t, res.Markdown, "## Transcript")
+				assert.Equal(t, transcriptNone, res.Meta["transcript_source"])
+			} else {
+				assert.Contains(t, res.Markdown, "This track is manual en-GB.")
+			}
+		})
+	}
+}
+
+// TestYouTubeFetch_PartialReasonIsCapped: however many caption downloads
+// fail, the reason quotes no more of them than any error text does.
+func TestYouTubeFetch_PartialReasonIsCapped(t *testing.T) {
+	tracks := make([]string, 40)
+	for i := range tracks {
+		tracks[i] = fmt.Sprintf("auto:en-l%02d!429", i)
+	}
+	t.Setenv(fakeSubsEnv, strings.Join(tracks, ","))
+	yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
+	res, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+	require.NoError(t, err)
+	require.True(t, res.Partial)
+	assert.LessOrEqual(t, len(res.PartialReason), maxErrorBody+len("…"))
+	assert.True(t, strings.HasPrefix(res.PartialReason, "transcript not downloaded: yt-dlp: Unable to download video subtitles for 'en-l00'"))
+	assert.True(t, strings.HasSuffix(res.PartialReason, "…"))
 }
 
 // TestYouTubeFetch_MaxConcurrent: no more than MaxConcurrent yt-dlp
@@ -325,4 +440,238 @@ func TestFindTranscript_IOErrors(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "vid.en.vtt"), 0o700)) // unreadable as a file
 	_, _, err = findTranscript(dir, &ytdlpMeta{})
 	require.Error(t, err)
+}
+
+// TestYouTubeFetch_SubLangs: yt-dlp gets DefaultYouTubeSubLangs when
+// sub_langs isn't configured, and a configured value as is.
+func TestYouTubeFetch_SubLangs(t *testing.T) {
+	cases := []struct{ configured, want string }{
+		{"", "en,en-(?-i:[A-Z]{2})"},
+		{"de.*,en", "de.*,en"},
+	}
+	for _, tc := range cases {
+		t.Run("configured="+tc.configured, func(t *testing.T) {
+			argsPath := filepath.Join(t.TempDir(), "args")
+			t.Setenv(fakeArgsEnv, argsPath)
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second, SubLangs: tc.configured})
+			_, err := yt.Fetch(t.Context(), "https://www.youtube.com/watch?v=test_id")
+			require.NoError(t, err)
+
+			runs := ytdlpRuns(t, argsPath)
+			require.Len(t, runs, 1)
+			args := runs[0]
+			i := slices.Index(args, "--sub-langs")
+			require.True(t, i >= 0 && i+1 < len(args), "no --sub-langs value in %q", args)
+			assert.Equal(t, tc.want, args[i+1])
+			assert.NotContains(t, args[i+2:], "--sub-langs")
+		})
+	}
+}
+
+// TestDefaultYouTubeSubLangs_Picks: what the default has yt-dlp download
+// from caption layouts YouTube serves. Tracks are listed as yt-dlp sees
+// them: uploaded ones first, then automatic ones without an uploaded
+// track of the same key. YouTube adds an automatic en-<source> track, a
+// machine translation into English, for every uploaded caption language,
+// and en-orig, a copy of the automatic en.
+func TestDefaultYouTubeSubLangs_Picks(t *testing.T) {
+	cases := []struct {
+		name   string
+		tracks []string
+		want   []string
+	}{
+		{
+			"uploaded en-GB, zh and ja",
+			[]string{"en-GB", "zh", "ja", "en-orig", "en", "fr", "de", "en-en-GB", "en-zh", "en-ja"},
+			[]string{"en", "en-GB"},
+		},
+		{"uploaded en", []string{"en", "en-orig", "en-en"}, []string{"en"}},
+		{"automatic only, a Spanish video", []string{"es-orig", "es", "en"}, []string{"en"}},
+		{
+			"uploaded en-US and a named English track",
+			[]string{"en-US", "en-nP7-2PuUl7o", "en-orig", "en", "en-en-US", "en-zh-Hans", "en-pt-BR"},
+			[]string{"en", "en-US"},
+		},
+		{"stream replay with only its live chat", []string{"live_chat"}, nil},
+		{"uploaded Catalan", []string{"ca", "en-orig", "en", "en-ca"}, []string{"en"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ytdlpPicksSubs(DefaultYouTubeSubLangs, tc.tracks))
+		})
+	}
+}
+
+// ytdlpPicksSubs mirrors how yt-dlp turns --sub-langs into the caption
+// tracks it downloads (YoutubeDL.process_subtitles and
+// orderedSet_from_options): each comma-separated item is full-matched, as
+// a case-insensitive regular expression, against every track key in turn,
+// and an item with a leading '-' removes its matches instead. Each track
+// is picked once, in the order first picked.
+func ytdlpPicksSubs(subLangs string, tracks []string) []string {
+	var picked []string
+	for item := range strings.SplitSeq(subLangs, ",") {
+		pattern, discard := strings.CutPrefix(item, "-")
+		re := regexp.MustCompile(`(?i)^(?:` + pattern + `)$`)
+		for _, track := range tracks {
+			switch {
+			case !re.MatchString(track):
+			case discard:
+				picked = slices.DeleteFunc(picked, func(p string) bool { return p == track })
+			case !slices.Contains(picked, track):
+				picked = append(picked, track)
+			}
+		}
+	}
+	return picked
+}
+
+const testVideoURL = "https://www.youtube.com/watch?v=test_id"
+
+// TestYouTubeFetch_RateLimitStartsCooldown: a 429 anywhere in yt-dlp's
+// output, failing the extraction or only a caption download, pauses every
+// run on the fetcher for youtubeRateLimitCooldown, and the next fetch
+// fails fast without starting yt-dlp. Other failures pause nothing.
+func TestYouTubeFetch_RateLimitStartsCooldown(t *testing.T) {
+	cases := []struct {
+		name     string
+		mode     string
+		subs     string
+		timeout  time.Duration
+		fails    bool
+		cooldown bool
+	}{
+		{"extraction 429", "yt-dlp-429", "", 30 * time.Second, true, true},
+		{"caption 429", "yt-dlp", "auto:en!429", 30 * time.Second, false, true},
+		{"caption 404", "yt-dlp", "auto:en!404", 30 * time.Second, false, false},
+		{"video unavailable", "yt-dlp-unavailable", "", 30 * time.Second, true, false},
+		{"timeout", "yt-dlp-hang", "", 100 * time.Millisecond, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argsPath := filepath.Join(t.TempDir(), "args")
+			t.Setenv(fakeArgsEnv, argsPath)
+			t.Setenv(fakeSubsEnv, tc.subs)
+			fc := newFakeClock()
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, tc.mode), Timeout: tc.timeout})
+			yt.clock = fc.clock()
+
+			_, err := yt.Fetch(t.Context(), testVideoURL)
+			assert.Equal(t, tc.fails, err != nil, "err: %v", err)
+			if !tc.cooldown {
+				assert.Zero(t, yt.cooldown.remaining(fc.now()))
+				return
+			}
+			assert.Equal(t, youtubeRateLimitCooldown, yt.cooldown.remaining(fc.now()))
+			if tc.fails {
+				assertRateLimited(t, err, youtubeRateLimitCooldown)
+			}
+
+			_, err = yt.Fetch(t.Context(), testVideoURL)
+			assertRateLimited(t, err, youtubeRateLimitCooldown)
+			assert.Len(t, ytdlpRuns(t, argsPath), 1, "a fetch during the cooldown must not start yt-dlp")
+			assert.Empty(t, fc.slept())
+		})
+	}
+}
+
+// TestYouTubeFetch_CooldownBeforeRun: a cooldown of up to
+// maxInlineYouTubeWait is sat out through the clock and the video then
+// fetched. A longer one fails at once, without starting yt-dlp, as a
+// retryable 429 carrying the time left.
+func TestYouTubeFetch_CooldownBeforeRun(t *testing.T) {
+	cases := []struct {
+		cooldown time.Duration
+		runs     bool
+	}{
+		{20 * time.Second, true},
+		{maxInlineYouTubeWait, true},
+		{maxInlineYouTubeWait + time.Second, false},
+		{youtubeRateLimitCooldown, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cooldown.String(), func(t *testing.T) {
+			argsPath := filepath.Join(t.TempDir(), "args")
+			t.Setenv(fakeArgsEnv, argsPath)
+			fc := newFakeClock()
+			yt := NewYouTube(YouTubeOptions{Bin: fakeTool(t, "yt-dlp"), Timeout: 30 * time.Second})
+			yt.clock = fc.clock()
+			yt.cooldown.extend(fc.now(), tc.cooldown)
+
+			res, err := yt.Fetch(t.Context(), testVideoURL)
+			if tc.runs {
+				require.NoError(t, err)
+				assert.Equal(t, "Test Video", res.Title)
+				assert.Equal(t, []time.Duration{tc.cooldown}, fc.slept())
+				assert.Len(t, ytdlpRuns(t, argsPath), 1)
+				return
+			}
+			assertRateLimited(t, err, tc.cooldown)
+			assert.Empty(t, fc.slept())
+			assert.Empty(t, ytdlpRuns(t, argsPath))
+		})
+	}
+}
+
+// TestYouTubeFetch_CooldownRecheckedAfterSlot: a fetch waiting for the only
+// yt-dlp slot while the run holding it meets a 429 doesn't start yt-dlp
+// once it gets the slot; it fails fast like a fetch that came after the
+// 429.
+func TestYouTubeFetch_CooldownRecheckedAfterSlot(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fc := newFakeClock()
+		yt := NewYouTube(YouTubeOptions{Bin: "yt-dlp-must-not-run", MaxConcurrent: 1})
+		yt.clock = fc.clock()
+		yt.slots <- struct{}{} // a run in progress
+
+		errc := make(chan error, 1)
+		go func() {
+			_, err := yt.Fetch(t.Context(), testVideoURL)
+			errc <- err
+		}()
+		synctest.Wait() // past the first cooldown check, queued for the slot
+
+		yt.cooldown.extend(fc.now(), youtubeRateLimitCooldown) // the run meets a 429
+		<-yt.slots                                             // and ends
+		assertRateLimited(t, <-errc, youtubeRateLimitCooldown)
+	})
+}
+
+// TestYouTubeFetch_LongCooldownDoesNotQueue: a fetch that meets a cooldown
+// too long to sit out fails without waiting for a yt-dlp slot.
+func TestYouTubeFetch_LongCooldownDoesNotQueue(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fc := newFakeClock()
+		yt := NewYouTube(YouTubeOptions{Bin: "yt-dlp-must-not-run", MaxConcurrent: 1})
+		yt.clock = fc.clock()
+		yt.slots <- struct{}{} // every slot taken
+		yt.cooldown.extend(fc.now(), youtubeRateLimitCooldown)
+
+		errc := make(chan error, 1)
+		go func() {
+			_, err := yt.Fetch(t.Context(), testVideoURL)
+			errc <- err
+		}()
+		synctest.Wait()
+		queued := true
+		select {
+		case err := <-errc:
+			queued = false
+			assertRateLimited(t, err, youtubeRateLimitCooldown)
+		default:
+		}
+		<-yt.slots // lets a fetch that did queue finish
+		assert.False(t, queued, "the fetch waited for a slot instead of failing fast")
+	})
+}
+
+// assertRateLimited checks that err is a retryable 429 carrying retryAfter.
+func assertRateLimited(t *testing.T, err error, retryAfter time.Duration) {
+	t.Helper()
+	var se *HTTPStatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
+	assert.Equal(t, retryAfter, se.RetryAfter)
+	var pe *PermanentError
+	assert.False(t, errors.As(err, &pe), "a rate limit must stay retryable: %v", err)
 }

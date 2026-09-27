@@ -75,6 +75,55 @@ fetcher:
     timeout_seconds: 30
 ```
 
+### YouTube
+
+YouTube URLs go to the YouTube fetcher when yt-dlp is installed
+(`fetcher.youtube.bin`, by default `yt-dlp` on the daemon's PATH). It
+stores the video's metadata, its description and an English transcript.
+
+```yaml
+fetcher:
+  youtube:
+    bin: "yt-dlp"
+    timeout_seconds: 60
+    # sub_langs: leave unset for the default, en,en-(?-i:[A-Z]{2})
+```
+
+`sub_langs` is passed to yt-dlp's `--sub-langs`. yt-dlp matches each
+comma-separated item, as a case-insensitive regular expression, against the
+whole language key of every caption track, uploaded and automatic, and
+downloads each track that matches. The default picks:
+
+- `en`: the uploaded English track, or else YouTube's automatic one. For a
+  video in another language that is its captions machine-translated into
+  English.
+- `en-(?-i:[A-Z]{2})`: uploaded regional English tracks such as `en-GB` and
+  `en-US`. The region is case-sensitive so that YouTube's automatic
+  translations, keyed `en-<source language>` (`en-zh`, `en-ca`), don't
+  match.
+
+That is one or two caption requests per video. A broader pattern costs one
+request per track it matches, and YouTube answers too many with HTTP 429:
+`en.*` also matches one machine translation for every caption language the
+video was uploaded with, and popular videos have dozens. What the default
+gives up is named English tracks (`en-<id>`) and, on a video without
+automatic captions, the English translation of an uploaded track in
+another language. Such a video is stored with its description only unless
+you widen `sub_langs`.
+
+If your config sets `sub_langs: "en.*,en"`, the old default, delete the key
+to get the new one.
+
+A video whose captions couldn't be downloaded (YouTube answering 429, say)
+is still stored, with its description only: `curio docs show <id>`
+reports the extraction as `partial` with yt-dlp's reason under `err:`.
+`curio refetch <id>` tries the transcript again. After a 429, curio holds
+every YouTube fetch for two minutes, so one throttle doesn't cost a whole
+import its transcripts. A refetch replaces what a video had, so one that
+meets a 429 while refetching a video that already has its transcript
+leaves it description-only until a later refetch gets the transcript;
+`curio refetch --all` includes fetched videos.
+
 ## Demo: import and search your bookmarks
 
 End-to-end flow using a Chrome HTML export. Substitute your own browser/path.
@@ -174,6 +223,17 @@ embedding model isn't pulled. The daemon keeps retrying the pull in the
 background (see above), or run `ollama pull nomic-embed-text`. On a very old
 Ollama (below 0.1.30 or so) the batched embed endpoint doesn't exist and
 answers 404 too: upgrade it.
+
+**`invalid TLS certificate: … x509: …`** on a document — the site's
+certificate failed verification (expired, for another name, or from an
+untrusted authority). curio won't fetch past that, not even through Jina,
+and doesn't retry it. Once the site fixes its certificate, `curio refetch
+<id>`. If every https document fails this way at once, something is
+intercepting TLS (a captive portal, a corporate proxy) or the system clock
+is badly off; fix that, then `curio refetch --all --state=failed`. A
+`jina: invalid TLS certificate` error is about the certificate of
+`r.jina.ai`, the fallback reader, not the site's, and is retried like any
+other Jina failure.
 
 **`ENOENT: spawn node`** from a fetch — Node isn't on the daemon's PATH.
 Either install Node into a directory in PATH or set

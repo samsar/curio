@@ -178,12 +178,26 @@ func TestFetchHandler_RefetchClearsStaleMetadata(t *testing.T) {
 }
 
 // TestFetchHandler_ExtractionStatus: a result flagged Partial (fetched,
-// but missing its primary content) is stored as a partial extraction.
+// but missing its primary content) is stored as a partial extraction whose
+// error_message says why. The fetch still succeeds and queues indexing, so
+// the document is searchable by what it has.
 func TestFetchHandler_ExtractionStatus(t *testing.T) {
-	for _, partial := range []bool{false, true} {
-		t.Run(fmt.Sprintf("partial=%v", partial), func(t *testing.T) {
-			deps, _, ff := newTestDeps(t)
-			ff.res.Partial = partial
+	const reason = "transcript not downloaded: yt-dlp: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests"
+	cases := []struct {
+		name       string
+		partial    bool
+		reason     string
+		wantStatus string
+	}{
+		{"ok", false, "", store.ExtractionStatusOK},
+		{"partial", true, reason, store.ExtractionStatusPartial},
+		{"partial without a reason", true, "", store.ExtractionStatusPartial},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, db, ff := newTestDeps(t)
+			ff.res.Partial = tc.partial
+			ff.res.PartialReason = tc.reason
 			ctx := context.Background()
 			doc := &store.Document{TenantID: "local", URL: "https://example.com/video", ContentType: store.ContentTypeVideo}
 			require.NoError(t, deps.Documents.Create(ctx, doc))
@@ -194,11 +208,12 @@ func TestFetchHandler_ExtractionStatus(t *testing.T) {
 			require.NoError(t, err)
 			ext, err := deps.Extractions.GetByID(ctx, *got.CurrentExtractionID)
 			require.NoError(t, err)
-			want := store.ExtractionStatusOK
-			if partial {
-				want = store.ExtractionStatusPartial
-			}
-			assert.Equal(t, want, ext.Status)
+			assert.Equal(t, tc.wantStatus, ext.Status)
+			assert.Equal(t, store.NullableString(tc.reason), ext.ErrorMessage)
+
+			var indexJobs int
+			require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindIndex).Scan(&indexJobs))
+			assert.Equal(t, 1, indexJobs)
 		})
 	}
 }
@@ -418,34 +433,52 @@ func TestWorker_FullFetchIndexChain(t *testing.T) {
 	require.Equal(t, store.DocStateFetched, got.State)
 }
 
-// TestWorker_DeadLinkMarksDocDead runs the pools end to end: the fetcher
-// says dead link, the job fails permanently on attempt 1, and the fetch
-// pool's permanent-failure hook flips the document to dead (not failed).
-func TestWorker_DeadLinkMarksDocDead(t *testing.T) {
-	deps, db, ff := newTestDeps(t)
-	ff.res = nil
-	ff.err = &fetcher.PermanentError{Err: fmt.Errorf("native: dead link (HTTP 404): %w", fetcher.ErrDeadLink)}
-	ctx := context.Background()
+// TestWorker_PermanentFetchFailureSetsDocState runs the pools end to end:
+// the fetcher returns a permanent failure, the job fails on attempt 1
+// without burning the retry budget, and the fetch pool's permanent-failure
+// hook sets the document's state from the cause. A dead link is dead; a
+// certificate that failed verification is failed, since certificates get
+// fixed.
+func TestWorker_PermanentFetchFailureSetsDocState(t *testing.T) {
+	cases := []struct {
+		name  string
+		cause error
+		want  store.DocState
+	}{
+		{"dead link", fmt.Errorf("native: dead link (HTTP 404): %w", fetcher.ErrDeadLink), store.DocStateDead},
+		{"invalid certificate", fmt.Errorf("native: fetch: %w: x509: certificate has expired", fetcher.ErrTLSCertificate), store.DocStateFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, db, ff := newTestDeps(t)
+			ff.res = nil
+			ff.err = &fetcher.PermanentError{Err: tc.cause}
+			ctx := context.Background()
 
-	doc := &store.Document{TenantID: "local", URL: "https://example.com/gone", ContentType: store.ContentTypeArticle}
-	require.NoError(t, deps.Documents.Create(ctx, doc))
-	require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+			doc := &store.Document{TenantID: "local", URL: "https://example.com/x", ContentType: store.ContentTypeArticle}
+			require.NoError(t, deps.Documents.Create(ctx, doc))
+			require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 
-	stop := runPools(NewPools(deps, PoolSizes{Fetch: 1, Index: 1},
-		WorkerOptions{PollInterval: 10 * time.Millisecond, Log: quietLog}))
-	defer stop()
+			stop := runPools(NewPools(deps, PoolSizes{Fetch: 1, Index: 1},
+				WorkerOptions{PollInterval: 10 * time.Millisecond, Log: quietLog}))
+			defer stop()
 
-	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		got, err := deps.Documents.GetByID(ctx, doc.ID)
-		require.NoError(c, err)
-		assert.Equal(c, store.DocStateDead, got.State)
-	}, 5*time.Second, 10*time.Millisecond)
-	stop()
+			require.EventuallyWithT(t, func(c *assert.CollectT) {
+				got, err := deps.Documents.GetByID(ctx, doc.ID)
+				require.NoError(c, err)
+				assert.Equal(c, tc.want, got.State)
+			}, 5*time.Second, 10*time.Millisecond)
+			stop()
 
-	// One attempt only — dead links must not burn the retry budget.
-	var attempts int
-	require.NoError(t, db.QueryRow(`SELECT attempts FROM jobs WHERE kind = ?`, store.JobKindFetch).Scan(&attempts))
-	assert.Equal(t, 1, attempts)
+			var (
+				attempts int
+				status   store.JobStatus
+			)
+			require.NoError(t, db.QueryRow(`SELECT attempts, status FROM jobs WHERE kind = ?`, store.JobKindFetch).Scan(&attempts, &status))
+			assert.Equal(t, 1, attempts)
+			assert.Equal(t, store.JobStatusFailed, status)
+		})
+	}
 }
 
 func TestWorker_PermanentFailureDoesNotRetry(t *testing.T) {

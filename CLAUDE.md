@@ -87,13 +87,23 @@ Jina calls from all fetch workers share one limiter (20/min, or 200/min with `fe
 
 `ErrAntiBot` wraps HTTP 403 and 503. The Native fetcher also sends Chrome-like headers (`Sec-Fetch-*`, `Sec-Ch-Ua-*`) to reduce false-positive bot blocks.
 
+The chrome backend (tls-client) gives portless `http://` requests and every redirect hop an explicit `:80` (`pinPlainHTTPPort`, `chromeCheckRedirect`) because tls-client keys cached transports by `host:443` whatever the scheme; the pin never reaches Host, Referer, `finalURL` or error text, each hop takes its Host from its own URL, and a hop without a host is refused (`http: no Host in request URL`) rather than dialed on the local machine. Tests route chrome dials through `newRoutedChromeRT`; see decisions.md "Chrome backend: plain http carries an explicit :80".
+
 Status classification is shared by all HTTP fetchers (`internal/fetcher/errors.go`): every HTTP failure carries a `*HTTPStatusError` (status, the URL that answered, `Retry-After`). 408/421/425/429 and 5xx except 501/505 are retried; every other status is a `PermanentError`. Native's policy (403/503 → `ErrAntiBot`, 404/410 → `ErrDeadLink`) runs before that rule. Error text quotes at most 512 bytes of a response body.
 
 Every response body is capped at 32 MiB after decompression (`maxResponseBytes`; Native through the `limitBodies` transport decorator, GitHub via `readLimited`, Web2MD on its stdout). Overflow is a permanent `ErrTooLarge`: never Jina, never host-cached. A PDF over the cap still goes to Jina without being read further.
 
 Subprocess fetchers (Web2MD, YouTube) run through `runCapped`: own process group, killed as a group on timeout or cancel, stderr capped at 64 KiB. At most 2 yt-dlp processes run at once (`YouTubeOptions.MaxConcurrent`). Their tests re-exec the test binary as the fake tool (`TestMain` + `CURIO_FAKE_TOOL`); don't write shell scripts.
 
+YouTube (yt-dlp) specifics, each with a 2026-09-26 entry in decisions.md:
+
+- `--sub-langs` defaults to `fetcher.DefaultYouTubeSubLangs` (`en,en-(?-i:[A-Z]{2})`; config leaves the key empty). Every matched track is one caption request: `en.*` also matched YouTube's `en-<source>` machine translations, one per uploaded caption language, and drew 429s.
+- `--ignore-errors`: a caption track that fails to download is a `WARNING:` line, not an aborted video. A video left without a transcript is a `Partial` result (description only) whose `PartialReason` quotes yt-dlp and is stored as the extraction's `error_message`; the fetch succeeds and indexes, and `curio refetch <id>` retries the transcript.
+- Any `HTTP Error 429` in yt-dlp's stderr (ERROR or WARNING) extends a 2-minute cooldown shared by every YouTube fetch. `Fetch` checks it through `pace` (nil limiter) before and after taking a yt-dlp slot: up to 30s is sat out, longer fails fast and retryably with `*HTTPStatusError{429}`.
+
 `ErrDeadLink` (404/410, soft-404 titles, redirect-to-homepage) is always wrapped in a `PermanentError`, never goes to Jina, and is deliberately NOT host-cached (a dead path says nothing about the host). The soft-404 check runs BEFORE the login-wall heuristics in `tryReadability` — order matters, thin tombstone pages would otherwise classify as login walls and leak to Jina.
+
+`ErrTLSCertificate` (a server certificate that fails verification: expired, not yet valid, wrong name, unknown authority) is a permanent origin failure: never Jina, never host-cached, and the doc goes `failed`, not `dead`. Each backend maps its own TLS stack's `CertificateVerificationError` (uTLS's is a distinct type from crypto/tls's). Other TLS failures (alerts, resets mid-handshake, a non-TLS answer) stay retryable, and a certificate failure talking to Jina is Jina's trouble, retried as usual. See decisions.md "TLS certificate failures are permanent, never Jina, never host-cached".
 
 A hit on the in-memory host-failure cache (`hostFailureCache`, 15-min TTL) returns a `PermanentError` wrapping the original sentinel — the verdict can't change inside the TTL, so retrying would only re-read the cache. The *first* failure for a host stays retryable; it's what populates the cache. Recovery is `curio refetch --all --state=failed` (or per-doc `curio refetch <id>`). See `docs/decisions.md` "Host-cache hits are permanent failures".
 

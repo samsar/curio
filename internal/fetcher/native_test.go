@@ -755,3 +755,55 @@ func TestNative_PDFOverLimit(t *testing.T) {
 		})
 	}
 }
+
+// TestNative_ChromePlainHTTPSettlesOnItsOwnURL: an http:// page fetched
+// through the chrome backend settles on the URL requested, so the fetch
+// handler records no url_canonical, and its relative links resolve without
+// the backend's :80 pin.
+func TestNative_ChromePlainHTTPSettlesOnItsOwnURL(t *testing.T) {
+	ca := newTestCA(t)
+	page := makeArticleHTML("Plain HTTP", strings.Repeat(`A paragraph that links <a href="/other">elsewhere</a>. `, 30))
+	site := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, page) })
+	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+	n.rt = limitBodies(newRoutedChromeRT(t, ca.pool, plainHTTPSite(t, ca, []string{"example.com"}, site)), maxResponseBytes)
+
+	res, err := n.Fetch(t.Context(), "http://example.com/article")
+	require.NoError(t, err)
+	assert.Equal(t, "http://example.com/article", res.FinalURL)
+	assert.Contains(t, res.Markdown, "(http://example.com/other)")
+	assert.NotContains(t, res.Markdown, ":80")
+}
+
+// TestNative_ChromeHostlessRedirectCachesNothing: a redirect to a URL
+// without a host fails that fetch alone. Dialed, it would reach the local
+// machine, here a refused port, and the refusal would be cached against the
+// redirecting host, failing its healthy pages without a request.
+func TestNative_ChromeHostlessRedirectCachesNothing(t *testing.T) {
+	ca := newTestCA(t)
+	page := makeArticleHTML("Healthy", strings.Repeat("A paragraph long enough to count as an article. ", 30))
+	for _, location := range []string{"http:///x", "https:///x"} {
+		t.Run(location, func(t *testing.T) {
+			site := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/moved" {
+					http.Redirect(w, r, location, http.StatusMovedPermanently)
+					return
+				}
+				_, _ = io.WriteString(w, page)
+			})
+			routes := plainHTTPSite(t, ca, []string{"example.com"}, site)
+			routes[":80"] = closedAddr(t)
+			routes[":443"] = closedAddr(t)
+			n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+			n.rt = limitBodies(newRoutedChromeRT(t, ca.pool, routes), maxResponseBytes)
+
+			_, err := n.Fetch(t.Context(), "http://example.com/moved")
+			require.ErrorContains(t, err, errNoHost.Error())
+			_, cached := n.hostCache.Get("example.com")
+			assert.False(t, cached)
+
+			res, err := n.Fetch(t.Context(), "http://example.com/healthy")
+			require.NoError(t, err)
+			assert.Equal(t, "Healthy", res.Title)
+		})
+	}
+}

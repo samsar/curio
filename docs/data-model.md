@@ -138,7 +138,7 @@ document_extractions
   markdown_path     TEXT                       -- relative to ~/.curio/content/
   raw_path          TEXT                       -- unused: no fetcher keeps the raw response
   extraction_meta   JSON                       -- fetcher-specific (repo stars, video duration, ...)
-  error_message     TEXT
+  error_message     TEXT                       -- why the status isn't 'ok' (a partial's missing content)
 ```
 
 `documents.current_extraction_id` points at the latest successful row. Older

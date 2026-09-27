@@ -924,7 +924,7 @@ components:
         fetcher:         { type: string }
         status:          { type: string, enum: [ok, partial, paywalled, error] }
         markdown_path:   { type: string, description: "Absolute on-disk path to the extracted markdown" }
-        error_message:   { type: string }
+        error_message:   { type: string, description: "Why the extraction isn't ok. For a partial one, why its primary content is missing (a video transcript yt-dlp couldn't download, say)" }
         extraction_meta: { type: object, additionalProperties: true, description: "What the fetcher recorded; its shape varies by fetcher" }
       required: [id, fetched_at, fetcher, status]
 

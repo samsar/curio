@@ -85,7 +85,9 @@ type Fetcher struct {
 type YouTube struct {
 	Bin            string `yaml:"bin"`             // default "yt-dlp"
 	TimeoutSeconds int    `yaml:"timeout_seconds"` // default 60
-	SubLangs       string `yaml:"sub_langs"`       // default "en.*,en"
+	// SubLangs is passed to yt-dlp's --sub-langs. Empty, the default,
+	// means fetcher.DefaultYouTubeSubLangs.
+	SubLangs string `yaml:"sub_langs"`
 }
 
 type GitHub struct {
@@ -220,7 +222,6 @@ func Default() Config {
 			YouTube: YouTube{
 				Bin:            "yt-dlp",
 				TimeoutSeconds: 60,
-				SubLangs:       "en.*,en",
 			},
 			GitHub: GitHub{
 				TimeoutSeconds: 30,

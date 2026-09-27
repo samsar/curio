@@ -115,6 +115,11 @@ when the entry was first committed.
 - 2026-09-25 — [Insight: skip non-finite document vectors, don't fail the run](#insight-skip-non-finite-document-vectors-dont-fail-the-run)
 - 2026-09-25 — [CLI: exit 130 on interrupt, a usage hint on usage errors](#cli-exit-130-on-interrupt-a-usage-hint-on-usage-errors)
 - 2026-09-25 — [Daemon startup: a starting API while migrating, clients that wait on progress](#daemon-startup-a-starting-api-while-migrating-clients-that-wait-on-progress)
+- 2026-09-26 — [Chrome backend: plain http carries an explicit :80](#chrome-backend-plain-http-carries-an-explicit-80)
+- 2026-09-26 — [TLS certificate failures are permanent, never Jina, never host-cached](#tls-certificate-failures-are-permanent-never-jina-never-host-cached)
+- 2026-09-26 — [YouTube: caption tracks by an exact pattern, not `en.*`](#youtube-caption-tracks-by-an-exact-pattern-not-en)
+- 2026-09-26 — [YouTube: a failed caption download leaves a partial, not a failed fetch](#youtube-a-failed-caption-download-leaves-a-partial-not-a-failed-fetch)
+- 2026-09-26 — [YouTube: a shared cooldown after a 429](#youtube-a-shared-cooldown-after-a-429)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -1096,6 +1101,13 @@ mops up the stubborn `ErrAntiBot` / `ErrLoginWall` tail.
 and a quic-utls dep. Pinned at `tls-client v1.11.0`. Acceptable for the
 block-rate win; revisit if it bloats build time or the dep goes stale.
 
+**Revised (2026-09-26):** now `tls-client v1.16.0` with `fhttp v0.6.9`,
+the latest release. It caches one transport per `host:port` and uses
+`host:443` for any URL without a port, so `http://` and `https://` on one
+host shared a transport and broke each other. The chrome backend gives
+plain-http requests and redirect hops an explicit `:80` to keep them
+apart; see "Chrome backend: plain http carries an explicit :80".
+
 ---
 
 ## PDF fetcher: two-tier, pure-Go local then Jina
@@ -1429,6 +1441,19 @@ more requests to YouTube, for little gain.
 extract only `ERROR:` lines from stderr. Ignore `WARNING:` lines
 (e.g., "ffmpeg not found", impersonation warnings) that are noisy
 but harmless.
+
+**Revised (2026-09-26):** the default `sub_langs` is now
+`en,en-(?-i:[A-Z]{2})` rather than `en.*,en`, which also downloaded one
+machine translation per caption language the video was uploaded with. See
+"YouTube: caption tracks by an exact pattern, not `en.*`".
+
+yt-dlp now runs with `--ignore-errors`, and its caption `WARNING:` lines
+are read: `WARNING: Unable to download video subtitles for '<lang>': …`
+is a caption track that failed to download. A video whose only matching
+tracks all failed is stored as a partial (description only) whose
+extraction `error_message` quotes yt-dlp; recovery is `curio refetch <id>`.
+See "YouTube: a failed caption download leaves a partial, not a failed
+fetch".
 
 ---
 
@@ -3955,6 +3980,316 @@ change (a healthz 200, with or without `pid` and `home`, and never a 503)
 behave as before. Old clients talking to a new daemon see a starting
 daemon as "not answering healthz", the same wait and failure as before,
 never as ready.
+
+---
+
+## Chrome backend: plain http carries an explicit :80
+
+**Decision:**
+
+- The chrome backend gives every `http://` request without a port an
+  explicit `:80` before sending it (`pinPlainHTTPPort` in
+  `internal/fetcher/transport.go`). Every redirect hop gets the same pin
+  from the backend's own redirect policy (`chromeCheckRedirect`, installed
+  with `tlsclient.WithCustomRedirectFunc`), which keeps fhttp's default
+  limit of 10 redirects.
+- The pin never shows. The `Host` header stays port-free, and the
+  `Referer` fhttp sets on the next hop is rewritten without it. Every hop
+  takes its `Host` from its own URL: fhttp carries the previous hop's
+  `Host` over to a `Location` without a scheme when that `Host` differs
+  from the URL, which the pin makes true, and a scheme-relative
+  `Location` (`//www.example.com/post`, an apex → www rule) names another
+  host. Carried over, the new host would get the old host's name, and an
+  apex → www redirect would loop until the limit. `finalURL`
+  and the URL a `*url.Error` names lose any default port through
+  `urlutil.StripDefaultPort`, the rule `Normalize` applies. So
+  `Result.FinalURL`, `url_canonical`, the base URL Readability resolves
+  relative links against, and error text never carry `:80`.
+- A URL that names its port is sent as it is. The stock backend is
+  unchanged: net/http keys its connections by scheme.
+- A URL without a host is never pinned, and a redirect hop without one
+  (`Location: http:///x`) is refused with net/http's own `http: no Host
+  in request URL`, as the stock backend refuses it. Pinned, it would name
+  `:80`; unpinned, tls-client dials an https hop's `:443` before fhttp
+  checks the host. Go dials an empty host on the local machine, so the
+  fetch could store a local server's page, or record a refused connection
+  against the redirecting host as unreachable and fail that host's
+  healthy pages from the host cache for 15 minutes.
+- tls-client stays at v1.16.0, the latest release. Nothing upstream fixes
+  this yet; the report below is ready to file. The pin goes once tls-client
+  keys transports by scheme, and `TestChromeRT_PlainAndSecureShareAHost`
+  and `TestChromeRT_ConcurrentUpgradeRedirects` then pass without it.
+
+**Why:** tls-client caches one transport per `host:port`, and for a URL
+without a port it uses `host:443`, whatever the scheme. `http://h/` and
+`https://h/` shared that entry, so on the default backend:
+
+- https, then http: every later http request to the host failed with
+  `http2: unsupported scheme`.
+- http, then https: the first https request failed with tls-client's
+  internal `protocol negotiated`, and http then broke as above.
+- A same-host redirect from http to https, which is where most `http://`
+  bookmarks lead today, failed with `protocol negotiated` on first
+  contact and with `http2: unsupported scheme` on every retry, so the
+  document failed all 5 attempts (`http://www.babycenter.ca/…` in a real
+  import).
+- A redirect from https to http failed with `http2: unsupported scheme`.
+
+The http-first paths also race: tls-client's dial writes the transport map
+under a different lock than the one its readers hold. The race detector
+reports it with 40 concurrent upgrade redirects, and without it the Go
+runtime can abort the whole daemon with `concurrent map read and map
+write`, which no `recover` catches. The unit tests never met any of this
+because every test URL named its port (`127.0.0.1:PORT`). The new tests
+drive the real backend on `example.com` through a dialer that routes by
+address, with a test CA's roots trusted.
+
+**Residual:** a URL that names the other scheme's default port
+(`http://h:443/`, `https://h:80/`) still shares an entry with that scheme.
+Nobody bookmarks those.
+
+**Upstream report (ready to file on bogdanfinn/tls-client):**
+
+- **Title:** RoundTrip keys transports by host:443 for portless http URLs;
+  http and https to one host share a transport, and dialTLS writes
+  cachedTransports unsynchronized.
+- **Versions:** tls-client v1.16.0, fhttp v0.6.9, Go 1.26.8,
+  darwin/arm64.
+- **Cause:** `getDialTLSAddr` (roundtripper.go:675-682) returns
+  `net.JoinHostPort(host, "443")` whenever the URL has no port, regardless
+  of scheme. `RoundTrip` (:317-346) caches transports by that key.
+  `getTransport`'s http branch (:349-352) stores an HTTP/1 transport and
+  records no `cachedKinds` entry for it.
+- **Repro** (`WithDialContext` maps `example.com:443` to an httptest
+  TLS+h2 server and `example.com:80` to a plain one):
+  1. https, then http: every later http request fails with
+     `http2: unsupported scheme`.
+  2. On a fresh client, http, then https: the https request fails with
+     `protocol negotiated`. The cached HTTP/1 transport's
+     `DialTLSContext` is `dialTLS` and there is no `cachedKinds` entry,
+     so `dialTLS` builds a new transport and returns
+     `errProtocolNegotiated`. After that, http fails as in 1.
+  3. A same-host 301 from http to https fails with `protocol negotiated`,
+     then with `http2: unsupported scheme` on every retry.
+  4. An https → http redirect fails with `http2: unsupported scheme`.
+- **Race:** `dialTLS` writes `rt.cachedTransports[addr]` (:540) holding
+  only `rt.Mutex`, while `RoundTrip` reads the map under
+  `cachedTransportsLck` (:325). `-race` flags it; without `-race` the
+  runtime can fatal with `concurrent map read and map write`. A reconnect
+  after `dropCachedTransport` reaches the same unlocked write.
+- **Expected:** http and https never share a transport, and
+  `errProtocolNegotiated` never reaches callers.
+- **Also:** `RoundTrip` dials before fhttp checks the URL's host, so an
+  https URL without one (a redirect to `https:///x`) dials `:443` on the
+  local machine instead of failing with `http: no Host in request URL`.
+- **Suggested fix:** default the port by scheme (80 for http), or key the
+  cache by scheme and address; record a `cachedKinds` entry for the http
+  transport; take `cachedTransportsLck` for every write to the map in
+  `dialTLS`; refuse a URL without a host before dialing.
+- **Workaround:** an explicit `:80` on the request and on each redirect
+  hop (through `CheckRedirect`), with the `Host` header left port-free
+  and set from each hop's own URL, and a hop without a host refused there.
+  Explicitly mismatched ports (`http://h:443/`, `https://h:80/`) still
+  collide.
+
+---
+
+## TLS certificate failures are permanent, never Jina, never host-cached
+
+**Decision:**
+
+- A server certificate that fails verification is
+  `fetcher.ErrTLSCertificate`. Each backend maps its own TLS stack's
+  wrapper at its boundary, so `tryReadability` stays backend-agnostic:
+  `stockRT` crypto/tls's `*CertificateVerificationError`, and `chromeRT`
+  uTLS's, which is a distinct type that `errors.As` with crypto/tls's
+  doesn't match. Classifying on the wrapper covers every chain and
+  hostname failure (expired, not yet valid, another name, an unknown
+  authority), including the untyped `x509: …` errors macOS's platform
+  verifier can produce. The x509 cause and the `*url.Error` stay reachable.
+- From the origin it is a `PermanentError`, returned before the Jina and
+  host-cache steps. The document goes `failed`, not `dead`.
+- A certificate failure talking to Jina stays Jina's trouble: retried like
+  any other Jina transport error, and never cached.
+- Other TLS failures stay retryable: handshake alerts, protocol-version
+  mismatches, EOF or a reset mid-handshake, and a non-TLS answer
+  (`RecordHeaderError`). They are ambiguous or transient, and none showed
+  up in the import this came from.
+- `github.com/bogdanfinn/utls` is now a direct requirement.
+
+**Why:** `https://www.kernel.dk/io_uring.pdf` answered with an expired
+certificate (`x509: certificate has expired or is not yet valid:
+"brick.kernel.dk" certificate is expired`). That was a generic retryable
+transport error, so the document went through all 5 attempts, 60 + 120 +
+240 + 480 s of backoff, with the same answer each time.
+
+- **Permanent:** nothing inside the retry window renews a certificate.
+- **`failed`, not `dead`:** `markDocFailed` maps only `ErrDeadLink` to
+  `dead`. Certificates get fixed; recovery is `curio refetch <id>` or
+  `curio refetch --all --state=failed`.
+- **No Jina:** Jina would fetch past a check curio refuses to skip and
+  store content nobody authenticated. The fallback is for answers that
+  came back (see "Fallback strategy: only Jina for content-came-back
+  cases").
+- **Not host-cached:** a permanent verdict already costs only one
+  handshake per URL, bounded by the per-host gate. The cache protects
+  retry and Jina budgets, and this spends neither. A cached verdict would
+  also make `curio refetch` fail, without sending a request, for up to 15
+  minutes after the site fixed its certificate.
+
+**Caveat:** on a network that intercepts TLS (a captive portal, a
+corporate proxy whose root the system doesn't trust) or with a badly wrong
+local clock, every https fetch fails permanently at once. The error names
+the cause (`invalid TLS certificate: … x509: …`), and once the network or
+clock is right, `curio refetch --all --state=failed` recovers.
+
+---
+
+## YouTube: caption tracks by an exact pattern, not `en.*`
+
+**Decision:** `fetcher.youtube.sub_langs` defaults to
+`en,en-(?-i:[A-Z]{2})`. The value is defined once, as
+`fetcher.DefaultYouTubeSubLangs`, and `NewYouTube` applies it when the key
+is empty; the config no longer carries a literal. A configured value is
+passed to yt-dlp as is.
+
+- `en` is the uploaded English track or, without one, YouTube's automatic
+  track: for a video in another language, its captions machine-translated
+  into English, as before.
+- `en-(?-i:[A-Z]{2})` adds uploaded regional English tracks (`en-GB`,
+  `en-US`). The scoped `(?-i:)` keeps the region case-sensitive.
+
+**Why:** yt-dlp full-matches each `--sub-langs` item, case-insensitively,
+against the key of every uploaded and automatic track. For each uploaded
+track in language L, YouTube's extractor adds an automatic English
+machine translation keyed `en-L` (`en-zh`, `en-en-GB`, `en-zh-Hans`), and
+it adds `en-orig`, the same URL as the automatic `en`. `en.*` matched
+them all, one timedtext request each, and videos with many caption
+languages drew HTTP 429s. Track counts from yt-dlp 2026.08.19's own
+selector on synthetic layouts (offline, `--load-info-json`):
+
+| Layout | `en.*,en` | default |
+|---|---|---|
+| uploaded en-GB, zh, ja + automatic | 6 (en-GB, en-orig, en, en-en-GB, en-zh, en-ja) | 2 (en, en-GB) |
+| uploaded en + automatic | 3 | 1 |
+| automatic only | 2 | 1 |
+
+**What the default gives up:** named uploaded English tracks (`en-<id>`)
+and, on a video without automatic captions, the English translation of an
+uploaded track in another language. Such a video is stored
+description-only (partial). Setting `sub_langs` gets them back.
+
+**Rejected:**
+
+- `en,en-orig`: `en-orig` duplicates the automatic `en`, and uploaded
+  `en-GB`/`en-US` tracks lose to automatic captions.
+- Omitting `--sub-langs`: yt-dlp then picks one track itself, but its last
+  resort is the first uploaded track of any kind. On a stream replay
+  without English captions that is `live_chat`, a paginated chat download.
+- `--extractor-args youtube:skip=translated_subs`: when the flag is given
+  more than once, yt-dlp replaces the whole `youtube:` argument dict
+  instead of merging it, and command-line arguments are applied after
+  config files (`options.py`, `_dict_from_options_callback`). It would
+  silently drop a user's own `player_client` or PO-token settings.
+- A literal region list (`en,en-GB,en-US,en-CA,…`): matching is
+  case-insensitive, so `en-CA` would also select `en-ca`, the English
+  translation of an uploaded Catalan track.
+
+**Migration:** `config.yaml` is never generated, so only a config that sets
+`sub_langs` keeps the old value. `docs/setup.md` says to delete the key.
+
+---
+
+## YouTube: a failed caption download leaves a partial, not a failed fetch
+
+**Decision:**
+
+- yt-dlp runs with `--ignore-errors`. A caption track that fails to
+  download is then a `WARNING: Unable to download video subtitles for
+  '<lang>': <reason>` line, info.json and the other tracks are still
+  written, and yt-dlp exits 0. Extraction errors (unavailable, private,
+  removed, bot checks, format errors) still exit non-zero and keep their
+  classification.
+- `YouTube.Fetch` reads those warnings. With no transcript from any track,
+  the result is `Partial` and its new `PartialReason` quotes them
+  (`transcript not downloaded: yt-dlp: Unable to download video subtitles
+  for 'en': HTTP Error 429: Too Many Requests`), capped at 512 bytes like
+  any quoted error text. A video with no usable captions says `no usable
+  captions for sub_langs "…"`. When another track gave a transcript the
+  result is not partial, and the failed track is logged at Warn.
+- The fetch handler stores `PartialReason` as the extraction's
+  `error_message`, which the API already returns and `curio docs show`
+  prints as `err:`. No new API or CLI surface.
+- Partial counts as success: the job is done, the index job runs, and the
+  document ends `fetched`, searchable by its title and description, with a
+  `partial` extraction. `curio refetch <id>` stores a new extraction, `ok`
+  once the transcript downloads.
+
+**Why:** yt-dlp writes subtitles before info.json, and under its default
+`ignoreerrors='only_download'` a failed caption download raises: exit 1,
+no info.json, and the remaining tracks never tried. One 429 on one often
+useless track (`en-zh`, a machine translation) threw away the video's
+metadata and description, and every retry requested every track again.
+
+**Why partial rather than a retry:** the metadata is already in hand, a
+failed fetch indexes nothing, and a retry repeats every caption request
+against the limit that failed it. The cost is a transcript missing until a
+manual refetch, and "YouTube: a shared cooldown after a 429" bounds how
+many videos one throttle turns into partials.
+
+**Known cost:** a refetch replaces the current extraction whatever it
+held. Refetching a video that already has its transcript (`curio refetch
+<id>`, or `refetch --all`, which includes fetched documents) while YouTube
+throttles its captions makes the partial current, and the index job
+re-chunks the document without the transcript; the `ok` extraction stays
+on disk but is no longer the one searched. A later refetch brings the
+transcript back, and the cooldown bounds how many videos one throttle
+catches. Keeping an `ok` extraction current over a later partial is left
+out: the fetch handler would have to choose between extractions and settle
+the document on one it didn't just write, and the partial carries the
+video's current title and description.
+
+---
+
+## YouTube: a shared cooldown after a 429
+
+**Decision:**
+
+- Any `HTTP Error 429` in yt-dlp's stderr, on an `ERROR:` line (the
+  extraction) or a `WARNING:` line (one caption download), extends a
+  cooldown shared by every fetch on the YouTube fetcher to 2 minutes from
+  now (`youtubeRateLimitCooldown`), and is logged once at Warn with the
+  video ID. Caption 404s, unavailable videos and timeouts extend nothing.
+- `Fetch` checks the cooldown through `pace`, with no limiter since the
+  daemon's `RateLimited` wrapper already paces yt-dlp starts at 2 a
+  second. It checks before queueing for a yt-dlp slot, so a long cooldown
+  fails without waiting for one, and again once it holds a slot, so a 429
+  that another run met meanwhile stops it too. Up to 30 s left
+  (`maxInlineYouTubeWait`, Jina's cap) is sat out; more fails at once,
+  without running yt-dlp, as a retryable `*HTTPStatusError{429}` whose
+  `RetryAfter` is the time left.
+- A failed run that met a 429 returns a retryable error carrying
+  `*HTTPStatusError{429}` with the 2-minute step as `RetryAfter`.
+  `JobQueue.MarkFailed` takes no delay yet, so the hint rides on the
+  error, as for Jina and GitHub.
+- `MaxConcurrent` (2 runs at once) and the start pacing are unchanged.
+
+**Why:** YouTube throttles per IP, yet after a 429 every queued video
+still started yt-dlp, two at a time, and each 429'd job retried on its own
+backoff. Jina and GitHub already shared a cooldown that a 429 extends;
+YouTube had none. Now that a failed caption download leaves a partial,
+the cooldown also bounds how many videos one throttle leaves without a
+transcript.
+
+**Why a fixed 2 minutes:** yt-dlp passes on no `Retry-After`, so the wait
+is a fixed step. YouTube's caption and player throttles last minutes,
+longer than GitHub's minute without a hint. Against the queue's backoff
+(60, 120, 240, 480 s over 5 attempts): a fetch that fails fast at the
+start of a cooldown is retried 60 s later, meets its last minute and
+fails fast again, then runs on its third attempt 120 s after that. That
+leaves two attempts for real failures. A fetch that meets 30 s or less
+sits it out and runs on the attempt it is on. A run that meets another
+429 starts a fresh 2 minutes.
 
 ---
 
