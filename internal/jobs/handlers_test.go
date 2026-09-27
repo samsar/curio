@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -404,6 +408,16 @@ func runPools(pools []Pool) (stop func()) {
 	}
 }
 
+// runPoolsUntil runs the daemon's pools over deps until cond holds, and
+// stops them.
+func runPoolsUntil(t *testing.T, deps Deps, cond func(c *assert.CollectT)) {
+	t.Helper()
+	stop := runPools(NewPools(deps, PoolSizes{Fetch: 1, Index: 1},
+		WorkerOptions{PollInterval: 10 * time.Millisecond, Log: quietLog}))
+	defer stop()
+	require.EventuallyWithT(t, cond, 5*time.Second, 10*time.Millisecond)
+}
+
 // TestWorker_FullFetchIndexChain runs a document through the pools the
 // daemon runs: the fetch pool fetches and enqueues the index job, which only
 // the index pool claims.
@@ -477,6 +491,112 @@ func TestWorker_PermanentFetchFailureSetsDocState(t *testing.T) {
 			require.NoError(t, db.QueryRow(`SELECT attempts, status FROM jobs WHERE kind = ?`, store.JobKindFetch).Scan(&attempts, &status))
 			assert.Equal(t, 1, attempts)
 			assert.Equal(t, store.JobStatusFailed, status)
+		})
+	}
+}
+
+// TestWorker_RefetchRejectsJinaJunk refetches a fetched, indexed document
+// through the pools with the real Native fetcher, whose origin now serves a
+// thin page while Jina answers a challenge page or reports the target's 404.
+// The document fails, or goes dead, on the first attempt. It keeps the
+// extraction it had, is never marked fetched again, and leaves search.
+func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply string
+		want  store.DocState
+	}{
+		{"challenge", "Title: Just a moment...\n\nURL Source: https://example.com/article\n\n" +
+			"Warning: Target URL returned error 403: Forbidden\n" +
+			"Warning: This page maybe requiring CAPTCHA, please make sure you are authorized to access this page.\n\n" +
+			"Markdown Content:\n## Performing security verification\n\n" +
+			"This website uses a security service to protect against malicious bots. " +
+			"This page is displayed while the website verifies you are not a bot.", store.DocStateFailed},
+		{"target 404", "Title: Welcome to Python.org\n\nURL Source: https://example.com/article\n\n" +
+			"Warning: Target URL returned error 404: Not Found\n\n" +
+			"Markdown Content:\n" + strings.Repeat("The official home of the Python Programming Language. ", 60),
+			store.DocStateDead},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, db, _ := newTestDeps(t)
+			ctx := context.Background()
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `<html><body><p>nope</p></body></html>`)
+			}))
+			defer origin.Close()
+			var jinaHits atomic.Int32
+			jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				jinaHits.Add(1)
+				_, _ = io.WriteString(w, tc.reply)
+			}))
+			defer jina.Close()
+			chunks := sqlitestore.NewChunks(db, store.EmbeddingDim)
+			searched := func(docID string) (bm25, vector bool) {
+				t.Helper()
+				bm, err := chunks.BM25Search(ctx, "local", "MVCC", 10, store.SearchFilters{})
+				require.NoError(t, err)
+				query := make([]float32, store.EmbeddingDim)
+				for i := range query {
+					query[i] = 0.01 // fakeEmbedder's first vector
+				}
+				vec, err := chunks.VectorSearch(ctx, "local", query, 10, store.SearchFilters{})
+				require.NoError(t, err)
+				has := func(hits []store.ChunkHit) bool {
+					return slices.ContainsFunc(hits, func(h store.ChunkHit) bool { return h.DocumentID == docID })
+				}
+				return has(bm), has(vec)
+			}
+
+			// The fake fetcher fetched the document once, and it was indexed.
+			doc := &store.Document{TenantID: "local", URL: origin.URL + "/article", ContentType: store.ContentTypeArticle}
+			require.NoError(t, deps.Documents.Create(ctx, doc))
+			require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+			runPoolsUntil(t, deps, func(c *assert.CollectT) {
+				var n int
+				require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
+				assert.Equal(c, 2, n, "fetch + index should both be done")
+			})
+			before, err := deps.Documents.GetByID(ctx, doc.ID)
+			require.NoError(t, err)
+			require.Equal(t, store.DocStateFetched, before.State)
+			require.NotNil(t, before.CurrentExtractionID)
+			bm, vec := searched(doc.ID)
+			require.True(t, bm && vec, "the fetched document is searched")
+
+			deps.Dispatcher = &fetcher.Single{F: fetcher.NewNative(fetcher.NativeOptions{
+				Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
+				DeadLinkDetection: true, Log: quietLog,
+			})}
+			refetch, err := deps.Documents.RequeueFetch(ctx, "local", doc.ID)
+			require.NoError(t, err)
+			runPoolsUntil(t, deps, func(c *assert.CollectT) {
+				got, err := deps.Documents.GetByID(ctx, doc.ID)
+				require.NoError(c, err)
+				assert.Equal(c, tc.want, got.State)
+			})
+
+			var (
+				attempts int
+				status   store.JobStatus
+			)
+			require.NoError(t, db.QueryRow(`SELECT attempts, status FROM jobs WHERE id = ?`, refetch.ID).Scan(&attempts, &status))
+			assert.Equal(t, 1, attempts)
+			assert.Equal(t, store.JobStatusFailed, status)
+			assert.Equal(t, int32(1), jinaHits.Load())
+
+			after, err := deps.Documents.GetByID(ctx, doc.ID)
+			require.NoError(t, err)
+			assert.Equal(t, before.CurrentExtractionID, after.CurrentExtractionID)
+			var extractions, indexJobs int
+			require.NoError(t, db.QueryRow(`SELECT count(*) FROM document_extractions WHERE document_id = ?`, doc.ID).Scan(&extractions))
+			assert.Equal(t, 1, extractions, "the junk answer is not stored")
+			require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindIndex).Scan(&indexJobs))
+			assert.Equal(t, 1, indexJobs, "no index job, so the document never turns fetched")
+
+			bm, vec = searched(doc.ID)
+			assert.False(t, bm, "bm25")
+			assert.False(t, vec, "vector")
 		})
 	}
 }

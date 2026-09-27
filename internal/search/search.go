@@ -314,9 +314,10 @@ const maxRelatedChunks = 64
 // vector, one ANN search runs with the source document excluded, and
 // chunk hits collapse to documents exactly like Search.
 //
-// A document with no indexed chunks (still pending, or failed) returns an
-// empty result rather than an error — the document exists, it just has no
-// vectors to be similar to anything yet.
+// A document with no indexed chunks (not indexed yet) returns an empty
+// result rather than an error — the document exists, it just has no
+// vectors to be similar to anything yet. Failed and dead documents are
+// never among the results (see ChunkStore.VectorSearch).
 func (e *Engine) Related(ctx context.Context, req RelatedRequest) (*Result, error) {
 	if req.DocumentID == "" {
 		return nil, errors.New("related: document_id is required")
@@ -348,9 +349,8 @@ func (e *Engine) Related(ctx context.Context, req RelatedRequest) (*Result, erro
 
 	mean := meanVector(embs)
 	fanout := e.chunkFanout(req.K)
-	// A non-empty filter (ExcludeDocumentID) routes VectorSearch through
-	// its over-fetch path — required because sqlite-vec applies non-MATCH
-	// predicates after the k cutoff.
+	// The exclusion relies on VectorSearch's over-fetch: sqlite-vec applies
+	// non-MATCH predicates after the k cutoff.
 	vecHits, err := e.chunks.VectorSearch(ctx, req.TenantID, mean, fanout,
 		store.SearchFilters{ExcludeDocumentID: req.DocumentID})
 	if err != nil {

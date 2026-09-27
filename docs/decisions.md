@@ -63,9 +63,9 @@ when the entry was first committed.
 - 2026-05-25 — [Per-fetcher rate limiting](#per-fetcher-rate-limiting) (revised)
 - 2026-05-25 — [YouTube URL normalization](#youtube-url-normalization) (revised)
 - 2026-07-05 — [GitHub issues, PRs, and wiki pages](#github-issues-prs-and-wiki-pages)
-- 2026-07-05 — [Dead-link detection: hard 404/410 + soft-404 heuristics](#dead-link-detection-hard-404410--soft-404-heuristics)
+- 2026-07-05 — [Dead-link detection: hard 404/410 + soft-404 heuristics](#dead-link-detection-hard-404410--soft-404-heuristics) (revised)
 - 2026-07-05 — [fetcher_rules.yaml: mtime-polled hot reload, keep-last-good](#fetcher_rulesyaml-mtime-polled-hot-reload-keep-last-good)
-- 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search)
+- 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search) (revised)
 - 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4)
 - 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator) (revised)
 - 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
@@ -82,8 +82,8 @@ when the entry was first committed.
 - 2026-09-24 — [Fetcher errors: one typed status model](#fetcher-errors-one-typed-status-model)
 - 2026-09-24 — [GitHub: secondary rate limits and a shared cooldown](#github-secondary-rate-limits-and-a-shared-cooldown)
 - 2026-09-24 — [Fetchers: one cap on every response body](#fetchers-one-cap-on-every-response-body)
-- 2026-09-24 — [Host cache: only host-wide verdicts, under the host that gave them](#host-cache-only-host-wide-verdicts-under-the-host-that-gave-them)
-- 2026-09-24 — [Login-wall heuristic: www and apex are the same site](#login-wall-heuristic-www-and-apex-are-the-same-site)
+- 2026-09-24 — [Host cache: only host-wide verdicts, under the host that gave them](#host-cache-only-host-wide-verdicts-under-the-host-that-gave-them) (revised)
+- 2026-09-24 — [Login-wall heuristic: www and apex are the same site](#login-wall-heuristic-www-and-apex-are-the-same-site) (revised)
 - 2026-09-24 — [Fetch politeness: shared Jina pacing, per-host origin gate](#fetch-politeness-shared-jina-pacing-per-host-origin-gate) (revised)
 - 2026-09-24 — [URL normalization: fetch-equivalent and idempotent](#url-normalization-fetch-equivalent-and-idempotent)
 - 2026-09-24 — [Subprocess fetchers: kill the process group, cap the output](#subprocess-fetchers-kill-the-process-group-cap-the-output)
@@ -120,6 +120,9 @@ when the entry was first committed.
 - 2026-09-26 — [YouTube: caption tracks by an exact pattern, not `en.*`](#youtube-caption-tracks-by-an-exact-pattern-not-en)
 - 2026-09-26 — [YouTube: a failed caption download leaves a partial, not a failed fetch](#youtube-a-failed-caption-download-leaves-a-partial-not-a-failed-fetch)
 - 2026-09-26 — [YouTube: a shared cooldown after a 429](#youtube-a-shared-cooldown-after-a-429)
+- 2026-09-26 — [Page verdicts: one judge for every page, bot challenges included](#page-verdicts-one-judge-for-every-page-bot-challenges-included)
+- 2026-09-26 — [Jina answers are judged like the origin's pages](#jina-answers-are-judged-like-the-origins-pages)
+- 2026-09-26 — [Search leaves out failed and dead documents](#search-leaves-out-failed-and-dead-documents)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -718,6 +721,12 @@ first and treat `www.` as the same site; see "Host cache: only host-wide
 verdicts, under the host that gave them" and "Login-wall heuristic: www
 and apex are the same site".
 
+**Revised (2026-09):** a Jina answer is no longer accepted on a 200-char
+body alone. It is held to the same 500-byte floor as a page from the origin,
+and to every other page verdict, and the login-title and login-path rules
+were tightened. See "Page verdicts: one judge for every page, bot
+challenges included" and "Jina answers are judged like the origin's pages".
+
 **Operator note:** to compare extraction quality between the two
 backends on a specific URL, point your config at `web2md` and refetch.
 We don't yet have an A/B comparison mode but it'd be a natural M2 add.
@@ -957,6 +966,14 @@ client. The job-level retry is still the recovery mechanism; batching bounds
 how much work each attempt repeats. A failure names the chunk range
 ("embed chunks 64-95 of 180"), and because nothing is written until the end,
 the document's previous chunks stay searchable.
+
+**Revised (2026-09):** the previous chunks stay searchable only while the
+index job is retrying. Once it fails for good, the index pool's
+permanent-failure hook marks the document `failed`, and search leaves
+failed documents out. A document whose index job gives up after a refetch
+or a `curio reindex`, say because Ollama was down for the whole retry
+window, drops out of search until it is indexed again; its chunks are
+kept. See "Search leaves out failed and dead documents".
 
 ---
 
@@ -1651,6 +1668,12 @@ fallback for dead links; scoped out of this pass to keep detection
 observable on its own. If added later, it belongs in `Native.Fetch`
 next to the Jina gate, modeled on `tryJina`.
 
+**Revised (2026-09):** the checks run in `judgePage`, which Jina's answers
+go through too, still before every login-wall check. A 404 or 410 that Jina
+reports for the target is a dead link as well. See "Page verdicts: one
+judge for every page, bot challenges included" and "Jina answers are judged
+like the origin's pages".
+
 ---
 
 ## fetcher_rules.yaml: mtime-polled hot reload, keep-last-good
@@ -1746,6 +1769,12 @@ exists; it just has no vectors yet — kinder to MCP callers than a
 409). Scores are raw vector similarities (1/(1+L2), 0..1) and NOT
 comparable with /v1/search's RRF-fused scores; the openapi
 description says so.
+
+**Revised (2026-09):** `VectorSearch` over-fetches on every query, since
+every query now leaves out failed and dead documents, so the exclusion no
+longer depends on the filter set being non-empty. Failed and dead
+documents are never among the results. See "Search leaves out failed and
+dead documents".
 
 ---
 
@@ -2571,6 +2600,36 @@ same thin page, spending the budget the fallback policy protects and
 bringing back the "~15 minutes pending" symptom. The page answered the
 same way on every path that exists.
 
+**Revised (2026-09):**
+
+- **Jina verdicts never write the cache.** Jina's answers are now judged
+  (see "Jina answers are judged like the origin's pages"). A rejected
+  answer counts as Jina's verdict, exactly like the thin answer before it,
+  so `settle` still applies only the origin's own host-wide verdict. A dead
+  link seen through Jina is final and uncached, and a transient status the
+  target gave Jina is retryable and uncached.
+- **Anti-bot needs the origin's status.** `hostVerdict` caches anti-bot
+  only when the chain carries the origin's `*HTTPStatusError` (a 403/503).
+  A bot challenge recognized in page content is page-level (see "Page
+  verdicts: one judge for every page, bot challenges included").
+- **A redirect onto a cached host fails from the cache.** When the
+  origin's error carries a host-wide verdict for a host other than the one
+  requested, `Fetch` checks that host's entry before calling Jina, and a
+  fresh one fails the fetch with the same `PermanentError` that host's own
+  URLs get. The first failure for a host still stays retryable. Before,
+  `Fetch` checked only the requested host, so a verdict cached under a
+  redirect target never stopped the retries of the URL that reached it: on
+  2026-09-26 a `mobile.nytimes.com` URL that redirected to another host
+  made five origin and Jina attempts (17:58:51, 18:00:01, 18:02:03,
+  18:06:03, 18:14:04; `attempts=5`, `last_error` `fetch failed: jina: HTTP
+  403 Forbidden (after native: HTTP 403 Forbidden: …)`). Judging Jina's
+  challenge pages would have made that common: every Cloudflare-protected
+  bookmark whose old URL redirects to another host
+  (`nsis.sourceforge.net` → `nsis.sourceforge.io`, `wrapbootstrap.com` →
+  `wrapmarket.com`) would have cost five origin and five Jina requests over
+  about 15 minutes. It now costs at most one origin request per retry,
+  bounded by the per-host gate.
+
 ---
 
 ## Login-wall heuristic: www and apex are the same site
@@ -2587,6 +2646,18 @@ which allows 20 requests a minute without a key, and failed outright
 with Jina off. A deleted post redirecting to the `www` homepage skipped
 the soft-404 check and landed in the login-wall path instead of `dead`.
 Redirects to any other host are still flagged, and never host-cached.
+
+**Revised (2026-09):** `loginPathRE` matches a whole path segment, `login`,
+`signin`, `signup` or `authwall`, optionally with a file extension
+(`/login`, `/uas/login`, `//user/login.php`, `/Login.aspx`), not a segment
+that merely starts with one. Its `\b` took `-` for a boundary, so a slug
+canonicalization such as Stack Overflow's `/questions/63177503` →
+`/questions/63177503/login-cognito-…` read as a redirect onto the site's
+login page: a site-wide login wall that, with Jina off or rejecting,
+cached the whole host for 15 minutes (daemon.log, 2026-05-24T14:04:30;
+reproduced). Every real login redirect in the log (`/uas/login`,
+`//user/login.php`, `/s/login/`, `/auth/login/`, `/auth/v3/signin`,
+`/signup/credentials`) still matches.
 
 ---
 
@@ -4290,6 +4361,206 @@ fails fast again, then runs on its third attempt 120 s after that. That
 leaves two attempts for real failures. A fetch that meets 30 s or less
 sits it out and runs on the attempt it is on. A run that meets another
 429 starts a fresh 2 minutes.
+
+---
+
+## Page verdicts: one judge for every page, bot challenges included
+
+**Decision:**
+
+- One method, `Native.judgePage`, makes every verdict on a page that came
+  back, from the origin (`tryReadability`) or from Jina (`jinaOnce`). It
+  looks at a `pageView`: title, text, whether Readability found an article
+  (always true for Jina), and the URL the request settled on (nil for
+  Jina). Its order, pinned by `TestJudgePage_Order`:
+  1. dead link, with detection on: redirected to the homepage (needs the
+     final URL), or a not-found title (`soft404TitleRE`);
+  2. bot challenge;
+  3. login wall by redirect, needs the final URL: onto another site
+     (page-level), or onto a login path (site-wide when the redirect stays
+     on the site and changes the path);
+  4. no article;
+  5. thin: under `minArticleBytes` (500 bytes);
+  6. a login-page title.
+- A bot challenge is `ErrAntiBot`, so it goes to Jina like an origin
+  403/503. It is recognized by an anchored, case-insensitive title
+  (`challengeTitleRE`: "Just a moment...", "Attention Required! |
+  Cloudflare", "Access Denied", "Access to this page has been denied",
+  "Pardon Our Interruption", "DDoS-Guard", "Vercel Security Checkpoint",
+  "Are you a robot?" and a few more), or by a phrase challenge pages use
+  (`challengePhrases`: "checking your browser before accessing", "verify
+  you are human", "why have i been blocked?", …). Phrases count only on
+  pages of 2 KiB or less, lowercased and with ’ read as ', so an article
+  about bot checks can quote them and still be stored.
+- A challenge recognized in page content is page-level: `hostVerdict`
+  caches anti-bot only when the origin's chain carries its
+  `*HTTPStatusError` (a 403/503), keyed by the host of its URL. The
+  fallback that cached any other `ErrAntiBot` under the requested host is
+  gone; nothing produced it before, and a challenge seen after a redirect
+  would have failed a healthy host for 15 minutes.
+- `loginTitleRE` requires the verb to end the title, reach a separator
+  (`| : · • – — -`), or go on with "to"/"or" ("Sign in to continue",
+  "Login | BigCommerce Help Center", "Login or Sign Up"), or to end the
+  title after a separator ("Google Docs: Sign-in", "Plaid - Dashboard |
+  Signin"). "Sign In With Apple: A Developer's Guide" and "How to log in
+  to Grafana with SSO" are articles.
+
+**Why:** the Jina path had none of these checks, which is how challenge,
+block, login and not-found pages were stored as articles (see "Jina answers
+are judged like the origin's pages"), and neither path recognized a
+challenge served with a 2xx. Reproduced: a 200 Imperva "Pardon Our
+Interruption" interstitial was stored as a 509-byte article, and a 200
+Cloudflare "Just a moment..." page failed as a thin login wall rather than
+anti-bot. The old `^(sign in|log in|join now|join linkedin)` title rule
+flagged articles such as "Sign In With Apple: …" (sending them to Jina) and
+missed the library's real login pages. A Python port of the new rule
+matched exactly the 45 login pages stored through Jina and none of the
+4,453 titles fetched through readability, the GitHub API or yt-dlp; the
+challenge titles match none of those 4,453 either.
+
+**Not done:** Cloudflare's `cf-mitigated: challenge` header. Cloudflare
+serves its challenges and blocks with 403 (503 in the legacy under-attack
+mode), which `statusFailure` already makes `ErrAntiBot`, host-wide and
+Jina-eligible, and no challenge page in the library came through
+readability.
+
+---
+
+## Jina answers are judged like the origin's pages
+
+**Decision:** Jina's fallback policy is unchanged (`jinaCanHelp`), but a
+2xx Jina answer is judged before it is stored (`judgeJinaAnswer`):
+
+1. **The target's status**, from a `Warning: Target URL returned error
+   <code>: <text>` line. `parseJina` now keeps every `Warning:` line, in
+   order.
+
+   | Target status | Verdict | Fetch result | Host cache |
+   |---|---|---|---|
+   | 404, 410 (detection on) | `ErrDeadLink` | `PermanentError`, document `dead` | never |
+   | 403, 503 | rejected, `ErrAntiBot` | settled like a thin answer | origin's verdict only |
+   | 408, 421, 425, 429, 5xx but 501/503/505; 404/410 with detection off | `errJinaTargetTrouble` | retryable | never |
+   | any other (400, 401, 451, 501, …) | rejected | settled like a thin answer | origin's verdict only |
+
+2. **Jina's CAPTCHA warning** ("This page maybe requiring CAPTCHA, …"):
+   rejected, `ErrAntiBot`. The target's status wins over it, so an answer
+   carrying both a target 404 and this warning is a dead link. It is
+   matched by its opening words: another warning that merely mentions a
+   CAPTCHA is informational.
+3. **The page verdicts** every page gets (`judgePage`, see "Page verdicts:
+   one judge for every page, bot challenges included"), with no final URL.
+   The thin floor is `minArticleBytes`, 500 bytes, instead of 200
+   characters. Jina's other warnings (iframes, shadow DOM, a cached
+   snapshot, a page maybe not fully loaded) are informational.
+
+- A rejected answer is `errJinaRejected` wrapping its reason, and replaces
+  the old thin-answer sentinel: it is Jina's verdict about the target
+  (`jinaAnswered`), and `settle` treats it as it treated a thin answer.
+- No judged answer is retried within the fetch (`jinaRetryable`): each
+  costs one Jina request.
+- The target's status is a `targetStatusError`, never an
+  `*HTTPStatusError`. That type is Jina's own answer: its 429 extends Jina's
+  cooldown and its `Retry-After` reaches the job, and neither may follow
+  from a status the target gave Jina.
+- A Jina answer's `Result.FinalURL` is the requested URL.
+
+**Host cache: Jina verdicts never write it.** `settle` judges only the
+origin's error, and only once Jina gave a verdict of its own, as before. So
+an origin 403 plus a Jina rejection caches the origin's answering host, and
+an origin thin page plus a Jina rejection caches nothing and fails for good.
+A dead link seen through Jina is final and uncached, like `ErrTooLarge`,
+even when the origin answered 403. A transient target status is the
+target's trouble for now: retryable, uncached.
+
+**Why URL Source is not a final URL:** Jina echoes the request there, as it
+re-encodes it, and never where a redirect ended. Of the 1,297 documents
+stored through Jina, 1,280 have a URL Source equal to the requested URL and
+the other 17 differ only by percent-decoding (`Toronto%2C+ON` →
+`Toronto,+ON`), msdn.microsoft.com → learn.microsoft.com included, which
+does redirect. Storing it wrote a re-encoded copy of the bookmark into
+`documents.url_canonical`.
+
+**Why:** Jina answers 200 for whatever the target served, and only a 2xx
+body over 200 characters was checked. In the library, 1,297 documents are
+fetched through Jina, and the verdicts above reject 206 of them: 98
+challenge titles (84 "Just a moment..." with 200–205-byte bodies, 7
+"Attention Required! | Cloudflare", 7 "Access Denied"), 14 pages with a
+challenge phrase (8 of them Reddit's untitled "You've been blocked by
+network security"), 45 login pages (Atlassian, Google
+Docs/Sheets/Drive and Accounts, BigCommerce, Plaid, …), 16 not-found titles
+("Page not found | Free local classifieds - Kijiji" ×4, …) and 33 stubs
+under 500 bytes. All 123 documents under 500 bytes are challenge, block,
+parked-domain, login or stub pages; none is an article. A live probe of
+`https://www.python.org/this-page-does-not-exist-xyz-123/` answered HTTP
+200, title "Welcome to Python.org", a 13.8 KB body, and the line `Warning:
+Target URL returned error 404: Not Found`, which alone gives it away.
+
+**Known limitation: landing pages.** A cross-host redirect to a landing
+page (java.sun.com → oracle.com/java/technologies/, forums.aws.amazon.com →
+repost.aws/forums) comes back as a real-looking page from the origin and
+from Jina alike. The library holds "Java Issue Tracker - Home" ×11, "Oracle
+Java Technologies" ×10, "[GWT] Project" ×10 and "Forums" ×8 of these. No
+per-page rule tells them from a real page, and a cross-host "redirected to
+a root path means dead" rule would mark shortener and redirector links to
+homepages dead, which is sticky. 5 of the 8 "Home" titles are genuine
+homepage bookmarks. Refetching these would store the same page again.
+
+**Existing documents:** nothing is migrated. `curio refetch <id>` re-judges
+a stored Jina answer: junk ends `failed` or `dead` on its first attempt,
+keeps its extraction, and leaves search (see "Search leaves out failed and
+dead documents"). Clusters change only after `curio interests rebuild`.
+
+**Not done:** 1,043 of the 1,297 were cross-host redirects that Jina simply
+followed after curio had already seen them. Judging the redirect target
+locally would save most of the Jina budget; it is a separate change.
+
+---
+
+## Search leaves out failed and dead documents
+
+**Decision:** `BM25Search` and `VectorSearch` never return chunks of
+documents in state `failed` or `dead` (`AND d.state NOT IN (?, ?)`, bound
+parameters, in `searchedDocSQL` next to the tenant scope). `/v1/search`,
+`curio search`, MCP `search_bookmarks` and find-related inherit it. Pending
+documents are still searched, so a document being refetched stays
+searchable until its fetch fails. `VectorSearch` now always over-fetches
+(`k = min(limit×10, 1000)`, the rule filters already used), since
+sqlite-vec applies `k` before any document predicate and every query now
+has one.
+
+**Why:** a refetch keeps the current extraction and its chunks until a new
+fetch replaces them, and a permanent failure only changes
+`documents.state`. Neither retriever looked at the state, so a document
+refetched into `failed` or `dead` kept matching search. 33 failed documents
+in the library held 870 chunks of gzip garbage from an old fetch. The
+contracts already assumed otherwise: `curio docs` calls the fetched view
+"what's actually searchable", and find-related's entry says
+pending/failed/dead documents have no indexed chunks.
+
+- **Read-side, not a purge.** Deleting chunks in the permanent-failure hook
+  would put a destructive write in `markDocFailed` and a new store method
+  behind it, and would leave the existing 33 documents dirty. The filter
+  fixes them without a migration, and a refetch that succeeds re-indexes
+  the document and brings it back.
+- **`NOT IN`, not `IN ('fetched', 'pending')`,** so the planner keeps
+  driving from the FTS or vec table. `EXPLAIN QUERY PLAN` is identical with
+  and without the predicate, and `TestQueryPlans` now pins the vector plan
+  too.
+- **Cost:** a synthetic 24k-vector corpus at limit 80 went from 16 ms to
+  29 ms per vector query, small next to embedding the query.
+- **Whichever job failed.** The index pool runs the same permanent-failure
+  hook as the fetch pool, so a document whose index job gives up (Ollama
+  down for the whole retry window, say) is `failed` too and leaves search,
+  although the chunks from its last successful index are intact. That is
+  the price of one rule: the state alone says whether a document is
+  searched, and `failed` is what lists it under `curio docs --failed` for
+  recovery. While the index job is still retrying, the document keeps its
+  state (`pending` after a refetch, `fetched` during a `curio reindex`) and
+  stays searchable.
+
+`EmbeddingsForDocument` and `DocumentVectors` are unchanged: a failed or
+dead source document still has vectors for find-related, and clustering
+already reads fetched documents only.
 
 ---
 

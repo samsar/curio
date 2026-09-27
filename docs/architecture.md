@@ -253,9 +253,11 @@ N = max(50, 8·k)
 ```
 
 The two legs run concurrently, and metadata filters (content type, host,
-source) apply inside both. A BM25 failure fails the search. A vector-leg
-failure — Ollama down, or no answer within `search.embed_timeout_seconds` —
-returns the BM25 results marked `degraded` with a warning. Knobs in config:
+source) apply inside both. Neither leg returns failed or dead documents: they
+keep the chunks of an earlier fetch, which no longer describe what the URL
+serves. A BM25 failure fails the search. A vector-leg failure — Ollama
+down, or no answer within `search.embed_timeout_seconds` — returns the BM25
+results marked `degraded` with a warning. Knobs in config:
 BM25/vector weights in RRF, chunk-to-doc collapse strategy (max vs sum vs
 top-3-avg), `default_k`, and `embed_timeout_seconds`.
 
@@ -306,7 +308,9 @@ External processes the daemon expects:
   optional `web2md` fetcher. Not needed: the default fetcher is Go-native.
 - **Jina Reader** (`r.jina.ai`, `fetcher.native.jina_base_url`) — the native
   fetcher's fallback for anti-bot and login-wall pages and PDFs it can't
-  read; off with `fetcher.native.jina_fallback: false`.
+  read; off with `fetcher.native.jina_fallback: false`. Its answers are
+  judged like the origin's before they are stored: challenge, block,
+  not-found and login pages are rejected.
 - **Claude API (optional)** — a future `generator.Generator` impl for heavier
   synthesis on the M6 RAG path (retrieve → LLM → cited answer).
 

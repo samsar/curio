@@ -28,15 +28,18 @@ var (
 	// Jina may get through.
 	ErrLoginWall = errors.New("login wall or thin content")
 
-	// ErrAntiBot marks an origin answer that suggests bot detection (HTTP
-	// 403 or 503) rather than a missing or auth-required page. Jina may get
-	// through. Distinct from ErrLoginWall so the two log separately.
+	// ErrAntiBot marks an answer that suggests bot detection rather than a
+	// missing or auth-required page: HTTP 403 or 503, or a challenge or
+	// block page served with a 2xx. Jina may get through. Distinct from
+	// ErrLoginWall so the two log separately. Only a 403/503 from the origin
+	// is host-wide; a challenge page is about that page.
 	ErrAntiBot = errors.New("origin blocked the request (likely anti-bot)")
 
-	// ErrDeadLink marks a URL whose content is gone: a hard 404/410, or a
-	// "soft 404" (HTTP 200 carrying a not-found page). Always wrapped in a
-	// PermanentError and never routed to Jina. Never host-cached: a dead
-	// path says nothing about the rest of the host.
+	// ErrDeadLink marks a URL whose content is gone: a hard 404/410 (from
+	// the origin, or reported by Jina for the target), or a "soft 404" (HTTP
+	// 200 carrying a not-found page). Always wrapped in a PermanentError; a
+	// dead link the origin reports is never routed to Jina. Never
+	// host-cached: a dead path says nothing about the rest of the host.
 	ErrDeadLink = errors.New("dead link (content is gone)")
 
 	// ErrHostUnreachable marks a host that doesn't resolve or refuses
