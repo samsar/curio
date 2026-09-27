@@ -608,6 +608,43 @@ func TestMigration010_DropsUnusedBookmarkIndexes(t *testing.T) {
 	assert.Equal(t, schemaBefore, schemaDump(t, db))
 }
 
+// TestMigration011_QueueSettings: 011 creates the one-row queue_settings
+// table, whose constraints refuse any row the gate couldn't read, and its
+// Down restores the schema exactly.
+func TestMigration011_QueueSettings(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 10)
+	schemaBefore := schemaDump(t, db)
+
+	_, err := p.UpTo(ctx, 11)
+	require.NoError(t, err)
+	for name, insert := range map[string]string{
+		"a second row":        `INSERT INTO queue_settings (id) VALUES (2)`,
+		"an unknown throttle": `INSERT INTO queue_settings (id, throttle) VALUES (1, 'fast')`,
+		"a paused of 2":       `INSERT INTO queue_settings (id, paused) VALUES (1, 2)`,
+		"a start alone":       `INSERT INTO queue_settings (id, schedule_start) VALUES (1, 60)`,
+		"an end alone":        `INSERT INTO queue_settings (id, schedule_end) VALUES (1, 60)`,
+		"equal ends":          `INSERT INTO queue_settings (id, schedule_start, schedule_end) VALUES (1, 60, 60)`,
+		"an end past the day": `INSERT INTO queue_settings (id, schedule_start, schedule_end) VALUES (1, 60, 1440)`,
+	} {
+		_, err := db.Exec(insert)
+		assert.ErrorContains(t, err, "constraint failed", name)
+	}
+	_, err = db.Exec(`INSERT INTO queue_settings (id, schedule_start, schedule_end) VALUES (1, 1320, 420)`)
+	require.NoError(t, err)
+	var paused int
+	var throttle, updatedAt string
+	require.NoError(t, db.QueryRow(`SELECT paused, throttle, updated_at FROM queue_settings`).Scan(&paused, &throttle, &updatedAt))
+	assert.Zero(t, paused)
+	assert.Equal(t, "normal", throttle)
+	_, err = parseTime(updatedAt)
+	require.NoError(t, err)
+
+	_, err = p.DownTo(ctx, 10)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db))
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `

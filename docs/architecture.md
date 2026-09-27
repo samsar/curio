@@ -53,8 +53,13 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
 - `curio add <url>` — manually add a bookmark
 - `curio import <source> [path]` — bulk import from Chrome / Safari / Firefox
 - `curio search <query>` — hybrid search
-- `curio status` — daemon health, doc counts, job queue depth, and a
-  warning while the Jina fallback is failing
+- `curio status` — daemon health, doc counts, job queue depth and state,
+  and a warning while the Jina fallback is failing
+- `curio pause` / `curio resume` — stop starting jobs, and start again
+  (running jobs finish; the pause survives restarts)
+- `curio throttle gentle|normal` — fewer jobs at once to spare the
+  machine, or every worker
+- `curio schedule HH:MM-HH:MM|off` — start jobs only in a daily window
 - `curio daemon {start|stop|status|logs}` — lifecycle management (see "Daemon lifecycle")
 - `curio refetch <id|all>` — force re-extract
 - `curio reindex <id|--all>` — re-chunk and re-embed existing extractions
@@ -75,7 +80,11 @@ all fetch/index/search/insight workflows.
 - `api/openapi.yaml` is the contract, verified against the router and live
   responses by tests in `internal/api`; the clients (`internal/client`) are
   hand-written, and codegen is deferred
-- Internal worker pool processes jobs from the SQLite-backed queue
+- Internal worker pools process jobs from the SQLite-backed queue. They
+  claim through the queue gate (`jobs.QueueGate`), which holds claims back
+  while the queue is paused, outside its daily schedule, or at the
+  throttle's cap; its settings live in SQLite (`queue_settings`) and are
+  read and changed at `GET`/`PUT /v1/queue`
 
 ### `curio-mcp` (sidecar)
 

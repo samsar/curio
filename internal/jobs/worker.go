@@ -5,6 +5,11 @@
 // queue signals a new job of its kinds and otherwise polls, less often the
 // longer it stays idle. The daemon runs a pool of goroutines per Worker;
 // the claim-once semantics in store/sqlite/jobs.go make that safe.
+//
+// Before every claim a Worker asks its Gate, which can hold claims back:
+// the daemon's QueueGate does while the queue is paused, outside its daily
+// schedule, or at the throttle's cap. A held worker waits for the gate to
+// change, not for jobs.
 package jobs
 
 import (
@@ -51,6 +56,12 @@ const bookkeepingTimeout = 10 * time.Second
 // bookkeepingRetry spaces the attempts of a failed bookkeeping write.
 var bookkeepingRetry = backoff{initial: 50 * time.Millisecond, max: time.Second}
 
+// maxGateWait caps how long a worker waits on a closed gate before asking
+// again. Timers run on the monotonic clock, which stops while a Mac sleeps
+// and ignores changes to the wall clock, while a schedule opens by the wall
+// clock: a timer set at night for 22:00 could fire long after it.
+const maxGateWait = time.Minute
+
 // Worker claims jobs from the queue and dispatches them.
 type Worker struct {
 	queue       store.JobQueue
@@ -59,8 +70,13 @@ type Worker struct {
 	idleDelays  backoff // between polls while there is nothing to claim
 	log         *slog.Logger
 	retryDelays backoff // between attempts of a failed bookkeeping write
+	gate        Gate
+	maxGateWait time.Duration
 
 	inFlight sync.Map // job ID → struct{}, across every goroutine running this Worker
+
+	mu     sync.Mutex
+	active int // slots reserved by the goroutines running this Worker
 }
 
 // WorkerOptions tunes the loop.
@@ -73,7 +89,9 @@ type WorkerOptions struct {
 	// job the queue doesn't signal (a retry coming due, a job from another
 	// process) is noticed. Default 5s, and never below PollInterval.
 	MaxPollInterval time.Duration
-	Log             *slog.Logger // default slog.Default()
+	// Gate is asked before every claim; nil admits every claim.
+	Gate Gate
+	Log  *slog.Logger // default slog.Default()
 }
 
 func NewWorker(q store.JobQueue, opts WorkerOptions) *Worker {
@@ -92,9 +110,14 @@ func NewWorker(q store.JobQueue, opts WorkerOptions) *Worker {
 		idleDelays:  backoff{initial: poll, max: max(maxPoll, poll)},
 		log:         opts.Log,
 		retryDelays: bookkeepingRetry,
+		gate:        opts.Gate,
+		maxGateWait: maxGateWait,
 	}
 	if w.log == nil {
 		w.log = slog.Default()
+	}
+	if w.gate == nil {
+		w.gate = All()
 	}
 	return w
 }
@@ -156,17 +179,25 @@ func (w *Worker) InFlight() []string {
 
 // Run loops until ctx is cancelled. Returns ctx.Err() on shutdown.
 //
-// It drains all available work, then waits until the queue signals a job of
-// its kinds or the idle poll comes due. Every claim takes SQLite's write
-// lock, even one that finds nothing, so idle polls back off from
-// PollInterval to MaxPollInterval; a claimed job resets them, and a failed
-// claim backs off the same way. Polls still find the jobs no signal
+// Before each claim it asks the gate about each of its kinds and reserves a
+// slot, then claims a job of the kinds admitted; the slot is held until
+// that job's outcome is recorded. While the gate admits none of them, Run
+// waits for the gate: until its verdict's Changed closes or its Until comes,
+// capped at maxGateWait. It neither claims nor polls meanwhile, and ignores
+// enqueues.
+//
+// Otherwise it drains all available work, then waits until the queue
+// signals a job of its kinds or the idle poll comes due. Every claim takes
+// SQLite's write lock, even one that finds nothing, so idle polls back off
+// from PollInterval to MaxPollInterval; a claimed job resets them, and a
+// failed claim backs off the same way. Polls still find the jobs no signal
 // announces: retries whose run_after comes due, and jobs enqueued by
 // another process.
 //
 // Cancelling ctx stops new claims and is passed to the running handler; the
 // job's outcome is still recorded, and a job the shutdown interrupted goes
-// back to the queue (see finish).
+// back to the queue (see finish). Closing the gate never interrupts a
+// running job.
 func (w *Worker) Run(ctx context.Context) error {
 	kinds := w.kinds()
 	w.log.Info("worker started", "poll_interval", w.idleDelays.initial,
@@ -174,11 +205,19 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	idle := w.idleDelays
 	for {
-		// Taken before the drain, so a job enqueued after its last claim
-		// found nothing still ends the wait below.
+		// Taken before the claim, so a job enqueued after a claim found
+		// nothing still ends the wait below.
 		wake := w.queue.Enqueued(kinds)
-		for w.tryOne(ctx, kinds) {
+		admitted, verdict := w.admit(kinds)
+		if len(admitted) == 0 {
+			if err := w.awaitGate(ctx, verdict); err != nil {
+				return err
+			}
+			continue
+		}
+		if w.tryOne(ctx, admitted) {
 			idle = w.idleDelays
+			continue
 		}
 
 		timer := time.NewTimer(idle.next())
@@ -194,10 +233,79 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// tryOne claims a job of kinds and dispatches it. Returns true if a job was
-// handled (success or failure), false if the queue was empty, the claim
-// failed, or ctx is done.
+// admit asks the gate about each of kinds and returns the ones it admits.
+// When it admits any, admit reserves a slot, which the caller releases;
+// when it admits none, it returns the verdict to wait on: the first change
+// signal among the closed verdicts, and the earliest time any may reopen.
+// The check and the reservation happen under one lock, so the goroutines
+// running this Worker never reserve past what the gate allows.
+func (w *Worker) admit(kinds []store.JobKind) ([]store.JobKind, Verdict) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := time.Now()
+	var (
+		admitted []store.JobKind
+		wait     Verdict
+	)
+	for _, kind := range kinds {
+		v := w.gate.Admit(kind, w.active, now)
+		switch {
+		case v.Open():
+			admitted = append(admitted, kind)
+		case wait.Open():
+			wait = v
+		default:
+			if wait.Changed == nil {
+				wait.Changed = v.Changed
+			}
+			if !v.Until.IsZero() && (wait.Until.IsZero() || v.Until.Before(wait.Until)) {
+				wait.Until = v.Until
+			}
+		}
+	}
+	if len(admitted) > 0 {
+		w.active++
+	}
+	return admitted, wait
+}
+
+// release gives back the slot admit reserved.
+func (w *Worker) release() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.active--
+}
+
+// awaitGate waits until the closed verdict v says to ask again: its Changed
+// closes, or its Until comes, but no longer than maxGateWait. A verdict
+// with Changed alone waits for the change; one with neither waits
+// maxGateWait. It returns ctx.Err() once ctx is done.
+func (w *Worker) awaitGate(ctx context.Context, v Verdict) error {
+	var retry <-chan time.Time // nil, never ready, for a change alone
+	if !v.Until.IsZero() || v.Changed == nil {
+		wait := w.maxGateWait
+		if !v.Until.IsZero() {
+			wait = min(time.Until(v.Until), wait)
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		retry = timer.C
+	}
+	select {
+	case <-ctx.Done():
+		w.log.Info("worker stopping")
+		return ctx.Err()
+	case <-v.Changed:
+	case <-retry:
+	}
+	return nil
+}
+
+// tryOne claims a job of kinds and dispatches it, then releases the slot
+// admit reserved for it. Returns true if a job was handled (success or
+// failure), false if the queue was empty, the claim failed, or ctx is done.
 func (w *Worker) tryOne(ctx context.Context, kinds []store.JobKind) bool {
+	defer w.release()
 	if ctx.Err() != nil {
 		return false
 	}

@@ -215,6 +215,7 @@ func TestOpenAPI_RequestTypesMatchSchemas(t *testing.T) {
 		{"POST /v1/bookmarks", reflect.TypeFor[CreateBookmarkRequest]()},
 		{"POST /v1/bookmarks/import", reflect.TypeFor[ImportRequest]()},
 		{"POST /v1/search", reflect.TypeFor[SearchRequest]()},
+		{"PUT /v1/queue", reflect.TypeFor[QueueUpdateRequest]()},
 	} {
 		t.Run(tc.op, func(t *testing.T) {
 			op := ops[tc.op]
@@ -374,6 +375,13 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"POST /v1/documents/{id}/reindex", post("/v1/documents/" + f.fetched + "/reindex"), http.StatusAccepted},
 		{"POST /v1/documents/reindex-all", post("/v1/documents/reindex-all"), http.StatusAccepted},
 		{"DELETE /v1/jobs", request{method: http.MethodDelete, path: "/v1/jobs?status=failed"}, http.StatusOK},
+
+		{"GET /v1/queue", get("/v1/queue"), http.StatusOK},
+		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue", `{"paused":true}`), http.StatusOK},
+		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue",
+			`{"paused":false,"throttle":"gentle","schedule":"`+windowExcludingNow()+`"}`), http.StatusOK},
+		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue", `{"throttle":"fast"}`), http.StatusBadRequest},
+		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue", `{"schedule":"off"}`), http.StatusOK},
 	})
 	assert.Equal(t, slices.Sorted(maps.Keys(ops)), slices.Sorted(maps.Keys(exercised)),
 		"every documented operation is exercised")
@@ -384,6 +392,16 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 	resp := s.do(t, request{method: http.MethodPut, path: "/v1/bookmarks"})
 	require.Equal(t, http.StatusMethodNotAllowed, resp.status)
 	validateJSON(t, doc.Components.Schemas["Problem"].Value, resp.body, "PUT /v1/bookmarks")
+}
+
+// windowExcludingNow is a daily window on the local clock, the daemon's,
+// from two hours from now to three: it never holds now, so a queue
+// scheduled to it is closed until it opens.
+func windowExcludingNow() string {
+	now := time.Now()
+	m := now.Hour()*60 + now.Minute()
+	const day = 24 * 60
+	return store.DailyWindow{Start: (m + 120) % day, End: (m + 180) % day}.String()
 }
 
 // checkResponse checks that op documents resp's status and content type,

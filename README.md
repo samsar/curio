@@ -40,7 +40,13 @@ ones.
 
 ```sh
 curio doctor                        # verify Ollama + DB + config + paths + the Jina fallback
-curio status                        # daemon health + corpus counts + queue depth
+curio status                        # daemon health + corpus counts + queue depth and state
+
+# Pacing the work (stored, so it holds across restarts; running jobs finish)
+curio pause                         # start no new jobs until resumed
+curio resume                        # start them again (a schedule still applies)
+curio throttle gentle|normal        # gentle: fewer at once, to keep the machine cool
+curio schedule HH:MM-HH:MM|off      # start jobs only in a daily window, e.g. 22:00-07:00
 
 # Inspecting the corpus
 curio docs                          # successfully-fetched documents (the happy path)

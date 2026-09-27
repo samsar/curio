@@ -690,6 +690,66 @@ func (c *Client) RebuildInterests(ctx context.Context) (*RebuildInterestsRespons
 	return &out, nil
 }
 
+// Queue mirrors api.QueueResponse: the queue gate's settings, whether the
+// workers may start jobs now, and each pool's limit and load.
+type Queue struct {
+	Paused   bool        `json:"paused"`
+	Throttle string      `json:"throttle"`
+	Schedule string      `json:"schedule,omitempty"` // HH:MM-HH:MM; empty when there is none
+	State    string      `json:"state"`
+	Reason   string      `json:"reason,omitempty"`  // why it is closed
+	OpensAt  time.Time   `json:"opens_at,omitzero"` // set while closed outside the schedule
+	Kinds    []QueueKind `json:"kinds"`
+}
+
+// QueueKind mirrors api.QueueKindResponse.
+type QueueKind struct {
+	Kind    string `json:"kind"`
+	Limit   int    `json:"limit"`
+	Running int    `json:"running"`
+	Pending int    `json:"pending"`
+}
+
+// Queue states and reasons, throttles, and the schedule that clears the
+// schedule, mirroring the API's. A daemon may report a state or reason this
+// client doesn't know.
+const (
+	QueueOpen             = "open"
+	QueueClosed           = "closed"
+	ReasonPaused          = "paused"
+	ReasonOutsideSchedule = "outside_schedule"
+	ThrottleNormal        = "normal"
+	ThrottleGentle        = "gentle"
+	ScheduleOff           = "off"
+)
+
+// QueueUpdate is the body of PUT /v1/queue: only the fields set are sent,
+// and only those change.
+type QueueUpdate struct {
+	Paused   *bool  `json:"paused,omitempty"`
+	Throttle string `json:"throttle,omitempty"`
+	Schedule string `json:"schedule,omitempty"` // HH:MM-HH:MM, or ScheduleOff
+}
+
+// Queue reads the queue's state.
+func (c *Client) Queue(ctx context.Context) (*Queue, error) {
+	var q Queue
+	if err := c.do(ctx, http.MethodGet, "/v1/queue", nil, &q); err != nil {
+		return nil, err
+	}
+	return &q, nil
+}
+
+// UpdateQueue changes the queue settings u sets and returns the queue
+// afterwards.
+func (c *Client) UpdateQueue(ctx context.Context, u QueueUpdate) (*Queue, error) {
+	var q Queue
+	if err := c.do(ctx, http.MethodPut, "/v1/queue", u, &q); err != nil {
+		return nil, err
+	}
+	return &q, nil
+}
+
 // ErrDaemonUnreachable means no connection to the daemon could be made at
 // the client's base URL: nothing is listening there, or the address doesn't
 // resolve. The request never reached a daemon, so it is safe to start one

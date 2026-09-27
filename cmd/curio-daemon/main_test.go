@@ -297,6 +297,86 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 	assert.Empty(t, pidFile, "a clean exit leaves the PID file empty")
 }
 
+// TestRun_QueuePauseSurvivesRestart: a pause holds from the first claim of
+// the next daemon, over the jobs the last one left: its orphan, requeued
+// with the attempt it used, and a pending job. Resuming releases both.
+func TestRun_QueuePauseSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+	c := client.New("http://" + listen)
+
+	_, stop := runDaemon(t, listen)
+	_, err := c.UpdateQueue(ctx, client.QueueUpdate{Paused: new(true)})
+	require.NoError(t, err)
+	stop()
+
+	seeded := seedJobs(t, home)
+	_, stop = runDaemon(t, listen)
+	defer stop()
+	q, err := c.Queue(ctx)
+	require.NoError(t, err)
+	assert.True(t, q.Paused)
+	assert.Equal(t, client.QueueClosed, q.State)
+	assert.Equal(t, client.ReasonPaused, q.Reason)
+
+	db, err := sqlitestore.Open(ctx, home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	jobsQ := sqlitestore.NewJobs(db)
+	// job is called from the polling goroutines below, where only assert
+	// may report a failure.
+	job := func(id string) store.Job {
+		j, err := jobsQ.GetByID(ctx, id)
+		if !assert.NoError(t, err) {
+			return store.Job{}
+		}
+		return *j
+	}
+	assert.Never(t, func() bool {
+		orphan, pending := job(seeded.running), job(seeded.pending)
+		return orphan.Status != store.JobStatusPending || orphan.Attempts != 1 ||
+			pending.Status != store.JobStatusPending || pending.Attempts != 0
+	}, 300*time.Millisecond, 20*time.Millisecond, "the jobs wait, unclaimed")
+
+	_, err = c.UpdateQueue(ctx, client.QueueUpdate{Paused: new(false)})
+	require.NoError(t, err)
+	// Their {} payloads name no document, so each fails at its first claim.
+	require.Eventually(t, func() bool {
+		return job(seeded.running).Status == store.JobStatusFailed && job(seeded.pending).Status == store.JobStatusFailed
+	}, 10*time.Second, 20*time.Millisecond)
+}
+
+// TestRun_UnreadableQueueSettingsStopTheStart: a daemon that can't read the
+// queue settings doesn't start with the queue open, which would break a
+// pause the user set.
+func TestRun_UnreadableQueueSettingsStopTheStart(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+	seeded := seedJobs(t, home)
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	_, err = db.Exec(`DROP TABLE queue_settings`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	err = run(context.Background(), new(slog.LevelVar))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "load queue settings")
+	assert.Contains(t, err.Error(), "no such table: queue_settings")
+	ln, err := net.Listen("tcp", listen)
+	require.NoError(t, err, "the port is free again")
+	require.NoError(t, ln.Close())
+
+	db, err = sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	pending, err := sqlitestore.NewJobs(db).GetByID(context.Background(), seeded.pending)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusPending, pending.Status)
+	assert.Zero(t, pending.Attempts, "nothing was claimed")
+}
+
 // migrateTo brings home's database to version, as an older curio would
 // have left it, with the marker saying so, and returns the newest version.
 func migrateTo(t *testing.T, home *curiohome.Home, version int64) (latest int) {

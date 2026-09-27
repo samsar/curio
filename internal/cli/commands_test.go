@@ -169,6 +169,26 @@ func TestAdd(t *testing.T) {
 	require.Error(t, err, "a second manual bookmark for the same URL conflicts")
 }
 
+// TestAdd_WaitOnAClosedQueue: waiting on a fetch the queue won't start
+// says why before it waits, and then waits as ever.
+func TestAdd_WaitOnAClosedQueue(t *testing.T) {
+	srv := apitest.Start(t)
+	mustRun(t, srv, "pause")
+	var stdout, stderr bytes.Buffer
+	err := runCLIStreams(srv.Home.Path, srv.URL, &stdout, &stderr, "add", "https://example.com/new", "--wait",
+		"--wait-timeout", "1")
+	require.EqualError(t, err, "timed out after 1s waiting for the fetch")
+	assert.Equal(t, "note: nothing starts while the queue is paused (curio resume)\n", stderr.String())
+	assert.Contains(t, stdout.String(), "added bookmark ")
+
+	mustRun(t, srv, "resume")
+	stderr.Reset()
+	err = runCLIStreams(srv.Home.Path, srv.URL, &stdout, &stderr, "add", "https://example.com/other", "--wait",
+		"--wait-timeout", "1")
+	require.EqualError(t, err, "timed out after 1s waiting for the fetch", "no daemon workers run here")
+	assert.Empty(t, stderr.String(), "an open queue needs no note")
+}
+
 func TestAdd_WaitReportsFailure(t *testing.T) {
 	srv := apitest.Start(t)
 	srv.AddDocument(t, "https://example.com/dead", store.DocStateDead)

@@ -20,7 +20,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/samsar/curio/internal/api"
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
@@ -29,6 +31,13 @@ import (
 
 // TenantID is the tenant the server serves, as a local daemon does.
 const TenantID = store.LocalTenantID
+
+// Pools are the worker pool sizes the server's queue gate reports limits
+// for: the daemon's defaults.
+var Pools = func() jobs.PoolSizes {
+	d := config.Default().Daemon
+	return jobs.PoolSizes{Fetch: d.FetchWorkers, Index: d.IndexWorkers}
+}()
 
 // Server is a running API and the state behind it.
 type Server struct {
@@ -69,6 +78,10 @@ func StartNotReady(t testing.TB, opts ...func(*api.Deps)) *Server {
 	quiet := slog.New(slog.DiscardHandler)
 	docs := sqlite.NewDocuments(db)
 	chunks := sqlite.NewChunks(db, store.EmbeddingDim)
+	gate, err := jobs.NewQueueGate(context.Background(), sqlite.NewQueueSettings(db), Pools, quiet)
+	if err != nil {
+		t.Fatalf("queue gate: %v", err)
+	}
 	deps := api.Deps{
 		Home:           home,
 		Documents:      docs,
@@ -79,6 +92,7 @@ func StartNotReady(t testing.TB, opts ...func(*api.Deps)) *Server {
 		Search:         search.New(chunks, docs, Embedder{}, search.Config{Log: quiet}),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
+		Gate:           gate,
 		TenantID:       TenantID,
 		Log:            quiet,
 	}

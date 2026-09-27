@@ -171,6 +171,16 @@ func TestQueryPlans(t *testing.T) {
 			want: []string{"INDEX idx_jobs_tenant_status_updated (tenant_id=?)"},
 		},
 		{
+			name:  "QueueCounts",
+			query: queueCountsSQL, args: []any{store.JobStatusPending, store.JobStatusRunning},
+			want: []string{"SEARCH jobs USING COVERING INDEX idx_jobs_claim (status=?)"},
+		},
+		{
+			name:  "QueueSettings.Get",
+			query: getQueueSettingsSQL,
+			want:  []string{"SEARCH queue_settings USING INTEGER PRIMARY KEY (rowid=?)"},
+		},
+		{
 			name:  "CountByState",
 			query: countDocumentsSQL, args: []any{"local"},
 			want: []string{"INDEX idx_documents_tenant_state_updated (tenant_id=?)"},

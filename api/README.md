@@ -50,6 +50,10 @@ The clients are written by hand: `internal/client` for the CLI and the
   operations are watched through `GET /v1/jobs` or `GET /v1/stats`.
   Imports are synchronous per request (`200` with what the batch did); the
   fetches they enqueue are jobs like any other.
+- **Partial updates**: `PUT /v1/queue` changes only the fields the body
+  gives (`paused`, `throttle`, `schedule`) and answers with the whole
+  queue, as `GET /v1/queue` does. `schedule: "off"` clears the schedule,
+  since the API never uses `null`.
 - **Auth**: there is none, and no token. The daemon binds loopback only
   and trusts local processes. It refuses browser-originated requests:
   `Host` must be a loopback name on the daemon's port (403 otherwise, which

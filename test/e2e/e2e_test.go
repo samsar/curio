@@ -258,6 +258,78 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	assert.Empty(t, pidFile, "a clean exit empties the PID file")
 }
 
+// TestDaemon_PauseHoldsTheQueueAcrossARestart: a pause set on one daemon
+// holds on the next one the home starts, so a bookmark added to it isn't
+// fetched until the queue is resumed.
+func TestDaemon_PauseHoldsTheQueueAcrossARestart(t *testing.T) {
+	ctx := context.Background()
+	ollama := &fakeOllama{t: t, model: config.Default().Embedding.Model}
+	ollamaSrv := httptest.NewServer(ollama)
+	t.Cleanup(ollamaSrv.Close)
+	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, articleHTML())
+	}))
+	t.Cleanup(pages.Close)
+
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen, ollamaSrv.URL)
+	baseURL := "http://" + listen
+	ctl := daemonctl.New(home, daemonBin, baseURL)
+	t.Cleanup(func() {
+		if st, err := ctl.Status(context.Background()); err == nil && st.State == daemonctl.Running && st.PID > 0 {
+			_ = syscall.Kill(st.PID, syscall.SIGKILL)
+		}
+	})
+	c := client.New(baseURL)
+
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+	_, err := c.UpdateQueue(ctx, client.QueueUpdate{Paused: new(true)})
+	require.NoError(t, err)
+	stopped, err := ctl.Stop(ctx)
+	require.NoError(t, err)
+	require.True(t, stopped)
+
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+	q, err := c.Queue(ctx)
+	require.NoError(t, err)
+	assert.True(t, q.Paused)
+	assert.Equal(t, client.QueueClosed, q.State)
+	assert.Equal(t, client.ReasonPaused, q.Reason)
+
+	created, err := c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: pages.URL + "/zymurgy"})
+	require.NoError(t, err)
+	require.NotNil(t, created.Bookmark.DocumentID)
+	require.NotEmpty(t, created.JobID)
+	docID := *created.Bookmark.DocumentID
+	assert.Never(t, func() bool {
+		doc, err := c.GetDocument(ctx, docID)
+		if !assert.NoError(t, err) {
+			return true
+		}
+		job, err := c.GetJob(ctx, created.JobID)
+		if !assert.NoError(t, err) {
+			return true
+		}
+		return doc.State != string(store.DocStatePending) || job.Status != string(store.JobStatusPending)
+	}, time.Second, 50*time.Millisecond, "the fetch waits while the queue is paused")
+
+	_, err = c.UpdateQueue(ctx, client.QueueUpdate{Paused: new(false)})
+	require.NoError(t, err)
+	fetched := assert.Eventually(t, func() bool {
+		doc, err := c.GetDocument(ctx, docID)
+		return err == nil && doc.State == string(store.DocStateFetched)
+	}, 30*time.Second, 50*time.Millisecond)
+	if !fetched {
+		t.Logf("daemon log:\n%s", logTail(home))
+		t.FailNow()
+	}
+
+	stopped, err = ctl.Stop(ctx)
+	require.NoError(t, err)
+	assert.True(t, stopped)
+}
+
 // migratedTo brings home's database to version, as an older curio would
 // have left it, and returns the newest version.
 func migratedTo(t *testing.T, home *curiohome.Home, version int64) (latest int) {

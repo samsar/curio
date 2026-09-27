@@ -223,8 +223,10 @@ func importParsed(ctx context.Context, w io.Writer, c *client.Client, source str
 
 // followProgress polls /v1/stats every 2 seconds and prints a one-line
 // progress update until the queue is drained (zero pending + zero running).
-// Cancelling ctx (ctrl-c) is a quiet stop: it prints an interrupt notice
-// and returns nil, since the import itself has finished.
+// Each line also says when the queue is closed, and why, from /v1/queue;
+// when that can't be read the line goes without. Cancelling ctx (ctrl-c) is
+// a quiet stop: it prints an interrupt notice and returns nil, since the
+// import itself has finished.
 func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 	fmt.Fprintln(w, "\nwatching queue drain — ctrl-c to exit")
 	tick := time.NewTicker(2 * time.Second)
@@ -249,11 +251,13 @@ func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 			}
 			continue
 		}
+		// A daemon from before the queue controls answers 404; either way
+		// the line goes without the queue's state.
+		queue, _ := c.Queue(ctx)
 		pending := stats.JobsByStatus["pending"]
 		running := stats.JobsByStatus["running"]
 		done := stats.JobsByStatus["done"]
 		failed := stats.JobsByStatus["failed"]
-		fetched := stats.DocumentsByState["fetched"]
 
 		// Rate = jobs that finished (succeeded OR failed) per second since
 		// the previous tick. We compute against the previous tick's
@@ -269,8 +273,7 @@ func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 		if rate > 0 && pending+running > 0 {
 			eta = time.Duration(float64(pending+running) / rate * float64(time.Second)).Round(time.Second)
 		}
-		fmt.Fprintf(w, "  done=%d  pending=%d  running=%d  failed=%d  fetched=%d   rate≈%.1f/s   eta≈%s\n",
-			done, pending, running, failed, fetched, rate, eta)
+		fmt.Fprintln(w, progressLine(stats, queue, rate, eta))
 		lastFinished = finished
 		lastTick = time.Now()
 
@@ -283,6 +286,19 @@ func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 			return nil
 		}
 	}
+}
+
+// progressLine is one line of followProgress: the job and document counts,
+// the rate and ETA, and why the queue is closed when it is. queue is nil
+// when it couldn't be read.
+func progressLine(stats *client.Stats, queue *client.Queue, rate float64, eta time.Duration) string {
+	line := fmt.Sprintf("  done=%d  pending=%d  running=%d  failed=%d  fetched=%d   rate≈%.1f/s   eta≈%s",
+		stats.JobsByStatus["done"], stats.JobsByStatus["pending"], stats.JobsByStatus["running"],
+		stats.JobsByStatus["failed"], stats.DocumentsByState["fetched"], rate, eta)
+	if why := whyClosed(queue); why != "" {
+		line += "   queue " + why
+	}
+	return line
 }
 
 // reportDryRun prints the same summary sendBatches would, computed

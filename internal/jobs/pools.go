@@ -10,15 +10,20 @@ type Pool struct {
 }
 
 // PoolSizes is how many goroutines run the fetch and index pools. The
-// cluster pool always has one.
+// cluster pool always has clusterPoolSize.
 type PoolSizes struct {
 	Fetch, Index int
 }
+
+// clusterPoolSize is the cluster pool's one goroutine: clustering is
+// corpus-wide, so two runs at once would only redo each other's work.
+const clusterPoolSize = 1
 
 // NewPools builds the daemon's worker pools over d.Queue. Each pool's
 // workers claim only their own kind, so network-bound fetches can run wide
 // without starving Ollama-bound indexing: with one FIFO pool for both, an
 // import was measured finishing 3296 fetches while only 55 index jobs ran.
+// Every pool claims through opts.Gate.
 //
 //   - fetch: the fetch handler, plus the hook that marks the document
 //     failed, or dead, when its job gives up.
@@ -41,6 +46,6 @@ func NewPools(d Deps, sizes PoolSizes, opts WorkerOptions) []Pool {
 	return []Pool{
 		{Name: "fetch", Worker: fetch, Size: sizes.Fetch},
 		{Name: "index", Worker: index, Size: sizes.Index},
-		{Name: "cluster", Worker: cluster, Size: 1},
+		{Name: "cluster", Worker: cluster, Size: clusterPoolSize},
 	}
 }

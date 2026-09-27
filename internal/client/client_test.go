@@ -610,3 +610,38 @@ func countRows(t *testing.T, s *apitest.Server, table string) int {
 	require.NoError(t, s.DB.QueryRow("SELECT count(*) FROM "+table).Scan(&n))
 	return n
 }
+
+// TestQueue: an update sends only the fields it sets, so the others keep
+// their values.
+func TestQueue(t *testing.T) {
+	s, c := start(t)
+	ctx := context.Background()
+
+	q, err := c.Queue(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, &client.Queue{Throttle: client.ThrottleNormal, State: client.QueueOpen, Kinds: []client.QueueKind{
+		{Kind: "fetch", Limit: apitest.Pools.Fetch}, {Kind: "index", Limit: apitest.Pools.Index}, {Kind: "cluster", Limit: 1},
+	}}, q)
+
+	q, err = c.UpdateQueue(ctx, client.QueueUpdate{Paused: new(true), Schedule: "22:00-07:00"})
+	require.NoError(t, err)
+	assert.True(t, q.Paused)
+	assert.Equal(t, client.QueueClosed, q.State)
+	assert.Equal(t, client.ReasonPaused, q.Reason)
+	assert.Equal(t, "22:00-07:00", q.Schedule)
+
+	q, err = c.UpdateQueue(ctx, client.QueueUpdate{Throttle: client.ThrottleGentle})
+	require.NoError(t, err)
+	assert.Equal(t, client.ThrottleGentle, q.Throttle)
+	assert.True(t, q.Paused, "the pause is left as it was")
+	assert.Equal(t, "22:00-07:00", q.Schedule, "and the schedule")
+	assert.Equal(t, 4, q.Kinds[0].Limit)
+
+	q, err = c.UpdateQueue(ctx, client.QueueUpdate{Schedule: client.ScheduleOff})
+	require.NoError(t, err)
+	assert.Empty(t, q.Schedule)
+	assert.True(t, s.Deps.Gate.State(time.Now()).Settings.Paused)
+
+	_, err = c.UpdateQueue(ctx, client.QueueUpdate{Throttle: "fast"})
+	requireStatus(t, err, http.StatusBadRequest)
+}

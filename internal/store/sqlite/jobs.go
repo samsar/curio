@@ -588,6 +588,42 @@ func (s *Jobs) CountByStatus(ctx context.Context, tenantID string) (map[store.Jo
 	return out, nil
 }
 
+// queueCountsSQL counts the unfinished jobs per status and kind, across
+// tenants. It is a covering walk of idx_jobs_claim's pending and running
+// ranges, which yield the rows grouped, so finished jobs cost it nothing
+// however many pile up.
+const queueCountsSQL = `SELECT status, kind, count(*) FROM jobs WHERE status IN (?, ?) GROUP BY status, kind`
+
+func (s *Jobs) QueueCounts(ctx context.Context) (map[store.JobKind]store.QueueCount, error) {
+	rows, err := s.db.QueryContext(ctx, queueCountsSQL, store.JobStatusPending, store.JobStatusRunning)
+	if err != nil {
+		return nil, fmt.Errorf("count queued jobs: %w", err)
+	}
+	defer rows.Close()
+	out := map[store.JobKind]store.QueueCount{}
+	for rows.Next() {
+		var (
+			status store.JobStatus
+			kind   store.JobKind
+			n      int
+		)
+		if err := rows.Scan(&status, &kind, &n); err != nil {
+			return nil, fmt.Errorf("count queued jobs: %w", err)
+		}
+		c := out[kind]
+		if status == store.JobStatusRunning {
+			c.Running = n
+		} else {
+			c.Pending = n
+		}
+		out[kind] = c
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count queued jobs: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Jobs) GetByID(ctx context.Context, id string) (*store.Job, error) {
 	row := s.db.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE id = ?", id)
 	return scanJob(row)
