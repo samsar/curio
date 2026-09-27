@@ -47,8 +47,11 @@ var (
 	ErrHostUnreachable = errors.New("host unreachable")
 
 	// ErrTooLarge marks a response body over maxResponseBytes (after
-	// decompression). Always permanent: the same URL will be just as big
-	// next time.
+	// decompression). Permanent: the same URL will be just as big next
+	// time. The one exception is a PDF over the cap, which goes to Jina
+	// (errPDFUnreadable): when Jina fails for its own reasons or reports a
+	// transient target status, the error still matches ErrTooLarge but
+	// stays retryable, like any Jina failure that is no verdict.
 	ErrTooLarge = errors.New("response too large")
 
 	// ErrTLSCertificate marks a server certificate that failed
