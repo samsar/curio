@@ -312,6 +312,15 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		return nil, err
 	}
 
+	// Loaded before any worker exists, so a stored pause holds from the
+	// first claim. A failure to read it stops the start: running with the
+	// queue open would break a pause the user set.
+	sizes := jobs.PoolSizes{Fetch: cfg.Daemon.FetchWorkers, Index: cfg.Daemon.IndexWorkers}
+	gate, err := jobs.NewQueueGate(ctx, sqlitestore.NewQueueSettings(db), sizes, slog.Default())
+	if err != nil {
+		return nil, err
+	}
+
 	pools := jobs.NewPools(jobs.Deps{
 		Home:        home,
 		Documents:   docs,
@@ -322,8 +331,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		Indexer:     idx,
 		Insight:     insightEngine,
 		Log:         slog.Default(),
-	}, jobs.PoolSizes{Fetch: cfg.Daemon.FetchWorkers, Index: cfg.Daemon.IndexWorkers},
-		jobs.WorkerOptions{Log: slog.Default()})
+	}, sizes, jobs.WorkerOptions{Gate: gate, Log: slog.Default()})
 	// The Jina fallback is the one upstream whose health is tracked.
 	upstreams := func() []fetcher.UpstreamHealth { return []fetcher.UpstreamHealth{native.JinaHealth()} }
 
@@ -340,6 +348,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 			Insights:       insights,
 			InsightEnabled: cfg.Insight.Enabled,
 			Upstreams:      upstreams,
+			Gate:           gate,
 			Log:            slog.Default(),
 		},
 		pools: pools,
