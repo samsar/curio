@@ -397,7 +397,7 @@ type ChunkHit struct {
 
 // SearchFilters scopes a search to documents matching all of the set
 // dimensions (values within one dimension are OR'd). An empty filter set
-// matches everything. Every dimension is checked on each hit's document
+// matches every document search reads. Every dimension is checked on each hit's document
 // after the search finds it, so a filter narrows the results without
 // changing what the search reads; host is matched against the document URL
 // (there is no host column).
@@ -442,16 +442,24 @@ type ChunkStore interface {
 
 	// BM25Search runs FTS5 MATCH against chunk text and returns the top
 	// matches for the given tenant, scoped by filters. Snippet is populated.
+	// Chunks of failed and dead documents are never returned: they come
+	// from an earlier fetch that no longer describes what the URL serves.
+	// Pending documents (a refetch in flight) are searched.
 	BM25Search(ctx context.Context, tenantID, query string, limit int, filters SearchFilters) ([]ChunkHit, error)
 
 	// VectorSearch runs an approximate-nearest-neighbor query against
-	// chunks_vec, scoped by filters. The embedding length must match the
-	// schema's vec dimension; mismatched lengths return an error.
+	// chunks_vec, scoped by filters, and like BM25Search never returns
+	// chunks of failed or dead documents. It over-fetches neighbors, so
+	// excluded chunks nearest the query don't crowd out the hits it
+	// returns. The embedding length must match the schema's vec dimension;
+	// mismatched lengths return an error.
 	VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int, filters SearchFilters) ([]ChunkHit, error)
 
 	// EmbeddingsForDocument reads the stored chunk vectors for a document
-	// in chunk order. Returns an empty slice for documents with no indexed
-	// chunks (not yet fetched/indexed, or failed).
+	// in chunk order, whatever its state. Returns an empty slice for a
+	// document with no indexed chunks (never indexed). A document that
+	// failed or went dead after an earlier successful fetch keeps that
+	// fetch's chunks.
 	EmbeddingsForDocument(ctx context.Context, documentID string) ([]ChunkEmbedding, error)
 
 	// DocumentVectors returns one mean-pooled vector per fetched document in

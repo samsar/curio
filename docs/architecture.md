@@ -253,9 +253,11 @@ N = max(50, 8·k)
 ```
 
 The two legs run concurrently, and metadata filters (content type, host,
-source) apply inside both. A BM25 failure fails the search. A vector-leg
-failure — Ollama down, or no answer within `search.embed_timeout_seconds` —
-returns the BM25 results marked `degraded` with a warning. Knobs in config:
+source) apply inside both. Neither leg returns failed or dead documents: they
+keep the chunks of an earlier fetch, which no longer describe what the URL
+serves. A BM25 failure fails the search. A vector-leg failure — Ollama
+down, or no answer within `search.embed_timeout_seconds` — returns the BM25
+results marked `degraded` with a warning. Knobs in config:
 BM25/vector weights in RRF, chunk-to-doc collapse strategy (max vs sum vs
 top-3-avg), `default_k`, and `embed_timeout_seconds`.
 

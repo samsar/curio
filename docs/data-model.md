@@ -177,6 +177,10 @@ the values that were indexed. `seq` is an explicit INTEGER PRIMARY KEY
 because SQLite keeps those across VACUUM, where an implicit rowid could be
 renumbered and detach the index from its rows.
 
+A document that fails or goes dead keeps the chunks of its last successful
+fetch; search and find-related leave failed and dead documents out, and a
+refetch that succeeds re-indexes them.
+
 Only `chunks_vec` depends on the embedding model: it holds that model's
 vectors at its dimension. Switching an existing home to another model
 isn't supported; the daemon refuses to start when the configured model

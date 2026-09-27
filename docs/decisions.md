@@ -65,7 +65,7 @@ when the entry was first committed.
 - 2026-07-05 — [GitHub issues, PRs, and wiki pages](#github-issues-prs-and-wiki-pages)
 - 2026-07-05 — [Dead-link detection: hard 404/410 + soft-404 heuristics](#dead-link-detection-hard-404410--soft-404-heuristics)
 - 2026-07-05 — [fetcher_rules.yaml: mtime-polled hot reload, keep-last-good](#fetcher_rulesyaml-mtime-polled-hot-reload-keep-last-good)
-- 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search)
+- 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search) (revised)
 - 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4)
 - 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator) (revised)
 - 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
@@ -120,6 +120,7 @@ when the entry was first committed.
 - 2026-09-26 — [YouTube: caption tracks by an exact pattern, not `en.*`](#youtube-caption-tracks-by-an-exact-pattern-not-en)
 - 2026-09-26 — [YouTube: a failed caption download leaves a partial, not a failed fetch](#youtube-a-failed-caption-download-leaves-a-partial-not-a-failed-fetch)
 - 2026-09-26 — [YouTube: a shared cooldown after a 429](#youtube-a-shared-cooldown-after-a-429)
+- 2026-09-26 — [Search leaves out failed and dead documents](#search-leaves-out-failed-and-dead-documents)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -1746,6 +1747,12 @@ exists; it just has no vectors yet — kinder to MCP callers than a
 409). Scores are raw vector similarities (1/(1+L2), 0..1) and NOT
 comparable with /v1/search's RRF-fused scores; the openapi
 description says so.
+
+**Revised (2026-09):** `VectorSearch` over-fetches on every query, since
+every query now leaves out failed and dead documents, so the exclusion no
+longer depends on the filter set being non-empty. Failed and dead
+documents are never among the results. See "Search leaves out failed and
+dead documents".
 
 ---
 
@@ -4290,6 +4297,45 @@ fails fast again, then runs on its third attempt 120 s after that. That
 leaves two attempts for real failures. A fetch that meets 30 s or less
 sits it out and runs on the attempt it is on. A run that meets another
 429 starts a fresh 2 minutes.
+
+---
+
+## Search leaves out failed and dead documents
+
+**Decision:** `BM25Search` and `VectorSearch` never return chunks of
+documents in state `failed` or `dead` (`AND d.state NOT IN (?, ?)`, bound
+parameters, in `searchedDocSQL` next to the tenant scope). `/v1/search`,
+`curio search`, MCP `search_bookmarks` and find-related inherit it. Pending
+documents are still searched, so a document being refetched stays
+searchable until its fetch fails. `VectorSearch` now always over-fetches
+(`k = min(limit×10, 1000)`, the rule filters already used), since
+sqlite-vec applies `k` before any document predicate and every query now
+has one.
+
+**Why:** a refetch keeps the current extraction and its chunks until a new
+fetch replaces them, and a permanent failure only changes
+`documents.state`. Neither retriever looked at the state, so a document
+refetched into `failed` or `dead` kept matching search. 33 failed documents
+in the library held 870 chunks of gzip garbage from an old fetch. The
+contracts already assumed otherwise: `curio docs` calls the fetched view
+"what's actually searchable", and find-related's entry says
+pending/failed/dead documents have no indexed chunks.
+
+- **Read-side, not a purge.** Deleting chunks in the permanent-failure hook
+  would put a destructive write in `markDocFailed` and a new store method
+  behind it, and would leave the existing 33 documents dirty. The filter
+  fixes them without a migration, and a refetch that succeeds re-indexes
+  the document and brings it back.
+- **`NOT IN`, not `IN ('fetched', 'pending')`,** so the planner keeps
+  driving from the FTS or vec table. `EXPLAIN QUERY PLAN` is identical with
+  and without the predicate, and `TestQueryPlans` now pins the vector plan
+  too.
+- **Cost:** a synthetic 24k-vector corpus at limit 80 went from 16 ms to
+  29 ms per vector query, small next to embedding the query.
+
+`EmbeddingsForDocument` and `DocumentVectors` are unchanged: a failed or
+dead source document still has vectors for find-related, and clustering
+already reads fetched documents only.
 
 ---
 
