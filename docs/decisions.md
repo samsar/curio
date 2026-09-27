@@ -2604,6 +2604,23 @@ same way on every path that exists.
   only when the chain carries the origin's `*HTTPStatusError` (a 403/503).
   A bot challenge recognized in page content is page-level (see "Page
   verdicts: one judge for every page, bot challenges included").
+- **A redirect onto a cached host fails from the cache.** When the
+  origin's error carries a host-wide verdict for a host other than the one
+  requested, `Fetch` checks that host's entry before calling Jina, and a
+  fresh one fails the fetch with the same `PermanentError` that host's own
+  URLs get. The first failure for a host still stays retryable. Before,
+  `Fetch` checked only the requested host, so a verdict cached under a
+  redirect target never stopped the retries of the URL that reached it: on
+  2026-09-26 a `mobile.nytimes.com` URL that redirected to another host
+  made five origin and Jina attempts (17:58:51, 18:00:01, 18:02:03,
+  18:06:03, 18:14:04; `attempts=5`, `last_error` `fetch failed: jina: HTTP
+  403 Forbidden (after native: HTTP 403 Forbidden: …)`). Judging Jina's
+  challenge pages would have made that common: every Cloudflare-protected
+  bookmark whose old URL redirects to another host
+  (`nsis.sourceforge.net` → `nsis.sourceforge.io`, `wrapbootstrap.com` →
+  `wrapmarket.com`) would have cost five origin and five Jina requests over
+  about 15 minutes. It now costs at most one origin request per retry,
+  bounded by the per-host gate.
 
 ---
 

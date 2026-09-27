@@ -249,6 +249,57 @@ func TestNative_HostCacheKeyedByAnsweringHost(t *testing.T) {
 	}
 }
 
+// TestNative_CachedRedirectTargetIsFinal: a redirect onto a host whose
+// verdict is cached fails from the cache, as that host's own URLs do,
+// without another Jina request. The first failure caches the destination
+// and stays retryable; the redirecting host is never cached.
+func TestNative_CachedRedirectTargetIsFinal(t *testing.T) {
+	cases := []struct {
+		name      string
+		dest      func(t *testing.T) string
+		mode      jinaMode
+		sentinel  error
+		jinaCalls int32
+	}{
+		{"destination blocks, jina answers a challenge", func(t *testing.T) string {
+			dest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			t.Cleanup(dest.Close)
+			return localhostURL(t, dest.URL)
+		}, jinaChallenge, ErrAntiBot, 1},
+		{"destination down, jina off", func(t *testing.T) string {
+			return "http://localhost:" + strings.Split(closedAddr(t), ":")[1]
+		}, jinaOff, ErrHostUnreachable, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := newRedirectingServer(t, tc.dest(t)+"/x")
+			n, jinaCalls := newNativeWithJina(t, tc.mode)
+
+			_, err := n.Fetch(context.Background(), src.URL+"/a")
+			require.ErrorIs(t, err, tc.sentinel)
+			var pe *PermanentError
+			assert.False(t, errors.As(err, &pe), "the first failure stays retryable: %v", err)
+			_, cached := n.hostCache.Get("localhost")
+			assert.True(t, cached, "the destination is cached")
+			_, cached = n.hostCache.Get(hostOf(src.URL))
+			assert.False(t, cached, "the redirecting host is not")
+			assert.Equal(t, tc.jinaCalls, jinaCalls())
+
+			_, err = n.Fetch(context.Background(), src.URL+"/a")
+			require.ErrorAs(t, err, &pe, "the retry fails from the destination's cache entry")
+			assert.ErrorIs(t, err, tc.sentinel)
+			assert.Contains(t, err.Error(), "(cached:")
+			assert.Equal(t, tc.jinaCalls, jinaCalls(), "no Jina request for a cached destination")
+
+			res, err := n.Fetch(context.Background(), src.URL+"/b")
+			require.NoError(t, err)
+			assert.Equal(t, "readability", res.Meta["via"])
+		})
+	}
+}
+
 // TestNative_ChallengePageIsPageLevel: a bot challenge recognized in a 200
 // page's content is about that page. With Jina off, or with Jina answering
 // thin, the fetch fails for good, and the next healthy URL on the host

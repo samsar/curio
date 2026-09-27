@@ -206,6 +206,15 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 	if errors.As(originErr, &pe) {
 		return nil, originErr
 	}
+	// A redirect can end on a host whose verdict is already cached. That
+	// verdict is as final here as for the host's own URLs; the checks above
+	// only cover the requested host, so without this one every retry would
+	// repeat the origin and Jina calls.
+	if _, answering, ok := hostVerdict(originErr, host); ok && answering != host {
+		if err := n.cachedFailure(target, answering); err != nil {
+			return nil, err
+		}
+	}
 	if !n.jinaFallback || !jinaCanHelp(originErr) {
 		// Settled while still holding the slot, so fetches queued for this
 		// host see any verdict it caches.
