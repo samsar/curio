@@ -15,10 +15,11 @@ reading. Curio makes that context queryable.
 brew install samsar/tap/curio          # or `make build` from a clone
 brew install ollama                    # required for embeddings
 brew services start ollama
-ollama pull nomic-embed-text
+ollama pull qwen3-embedding:0.6b       # the embedding model, 639 MB
+ollama pull qwen3:4b-instruct          # the writing model, for interest labels, 2.5 GB
 
 # 2. Verify
-curio doctor                            # seven green checks = ready
+curio doctor                            # all green = ready
 
 # 3. Use
 curio import html ~/Downloads/bookmarks.html --follow
@@ -28,6 +29,10 @@ curio search "feature flag rollout"
 Export your bookmarks from any browser as HTML (Chrome → Bookmark Manager →
 ⋮ → Export bookmarks). The HTML export works across all browsers and is the
 fastest way to load your corpus.
+
+The daemon pulls both models itself if you skip the `ollama pull` lines.
+The writing model is yours to change (`generation.model`); the embedding
+model is fixed when a home is created. See [docs/setup.md](./docs/setup.md).
 
 Time budget: with the default pools (16 fetch workers, 4 index workers; set
 `daemon.fetch_workers` / `daemon.index_workers` in `~/.curio/config.yaml`) and
@@ -155,7 +160,9 @@ make build      # produces bin/curio, bin/curio-daemon and bin/curio-mcp
 make test       # unit tests
 ```
 
-The Makefile forces `CGO_ENABLED=1`. `make tools` installs the pinned
+The Makefile forces `CGO_ENABLED=1`, and on arm64 compiles sqlite-vec's
+NEON distance kernels (`CGO_CFLAGS` gains `-DSQLITE_VEC_ENABLE_NEON`), so
+build and test through `make`. `make tools` installs the pinned
 golangci-lint and goose, and `make help` lists every target.
 
 ## Naming

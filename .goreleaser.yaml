@@ -117,7 +117,8 @@ brews:
 
         brew install ollama
         brew services start ollama
-        ollama pull nomic-embed-text
+        ollama pull qwen3-embedding:0.6b   # the embedding model
+        ollama pull qwen3:4b-instruct      # the writing model, for interest labels
 
       Then run:
 

@@ -182,10 +182,17 @@ fetch; search and find-related leave failed and dead documents out, and a
 refetch that succeeds re-indexes them.
 
 Only `chunks_vec` depends on the embedding model: it holds that model's
-vectors at its dimension. Switching an existing home to another model
-isn't supported; the daemon refuses to start when the configured model
-differs from the one recorded in `.curio-meta.json` (see
-[embedding model swap](./decisions.md#embedding-model-swap)).
+vectors, and its width is the home's, recorded in `.curio-meta.json` when
+the home is created (1024 for the default `qwen3-embedding:0.6b`). No
+migration can know that width, so migration 001 creates the table at
+FLOAT[768] and the daemon's `sqlite.EnsureVectorIndex`, after migrating,
+recreates it at the marker's width while it is empty; it never rebuilds a
+table that holds vectors. The daemon refuses to start when `config.yaml`'s
+embedding model or width differs from the marker's, or the marker predates
+home format 2 (see
+[embedding model and per-home width](./decisions.md#embedding-model-and-per-home-width)).
+The database records neither: migration 012 dropped `schema_meta`, whose
+row claimed nomic-embed-text at 768 for every home.
 
 ### `bookmarks` (reference table)
 

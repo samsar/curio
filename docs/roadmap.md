@@ -21,7 +21,8 @@ deferred. Design reasoning lives in `docs/decisions.md`.
 - CLI with: `curio add <url>`, `curio search <query>`, `curio daemon
   {start|stop|status}`
 - One fetcher: `web2md` (shells out to the existing Node tool)
-- One embedder: Ollama / `nomic-embed-text`
+- One embedder: Ollama (`nomic-embed-text` at M1; `qwen3-embedding:0.6b`
+  since the models change)
 - BM25 (FTS5) + vector (sqlite-vec) + RRF hybrid search
 - Single-worker job loop in the daemon
 
@@ -35,8 +36,10 @@ doc with a relevant snippet.
   store interfaces in `internal/store` with the SQLite implementation in
   `internal/store/sqlite`.
 - Hybrid search: FTS5 BM25 plus sqlite-vec vectors fused with RRF
-  (`internal/search`), chunked and embedded by `internal/indexer` with
-  Ollama's `nomic-embed-text` (`internal/embedder`, `internal/ollama`).
+  (`internal/search`), chunked and embedded by `internal/indexer` through
+  Ollama (`internal/embedder`, `internal/ollama`): `nomic-embed-text` at
+  768 dimensions then, `qwen3-embedding:0.6b` at 1024 now, each home's
+  width recorded in its marker.
 - Daemon lifecycle for the CLI: auto-start, one daemon per home held by a
   lock (`internal/daemonctl`). The daemon answers as starting, with its
   migration progress, from the moment it binds, and clients wait on that
@@ -178,7 +181,9 @@ topic clusters that feel like an accurate picture of what the user reads.
   of a real corpus next to good niche interests. It comes from mean-pooled
   document vectors, not a tunable knob (decisions.md "Insight clustering
   quality"). Label quality is bounded by the local generation model
-  (`llama3.2` by default).
+  (`qwen3:4b-instruct` by default, `generation.model`). `insight.min_similarity`
+  was tuned on nomic-embed-text vectors; re-tune it with `curio eval` on a
+  library indexed with `qwen3-embedding:0.6b`.
 
 ## M5 — Suggestions and the digest
 
@@ -238,6 +243,7 @@ eval harness shows measurably better retrieval than the v1 baseline.
 - Insight clustering quality: split the ~60% "general-reading" mega-cluster
   (recursive split of oversized clusters → Leiden → better doc representation).
   See `docs/decisions.md` → "Insight clustering quality" for the diagnosis.
-- Embedding model swap: update the marker, rebuild `chunks_vec` at the new
-  dimension and reindex, behind the startup guard that today refuses any
-  model change (see `docs/decisions.md` → "Embedding model swap").
+- Embedding model swap in place: today a home's embedding model and width
+  are fixed when it is created, and another model means a new home (`curio
+  up --fresh`) and a re-import (see `docs/decisions.md` → "Embedding model
+  swap" and "Embedding model and per-home width").

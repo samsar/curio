@@ -15,7 +15,7 @@ when the entry was first committed.
 - 2026-05-23 — [MCP server as a sidecar process](#mcp-server-as-a-sidecar-process)
 - 2026-05-23 — [Storage: SQLite for v1](#storage-sqlite-for-v1)
 - 2026-05-23 — [Job queue: SQLite-backed](#job-queue-sqlite-backed) (revised)
-- 2026-05-23 — [Embedding model: nomic-embed-text via Ollama](#embedding-model-nomic-embed-text-via-ollama) (revised)
+- 2026-05-23 — [Embedding model: nomic-embed-text via Ollama](#embedding-model-nomic-embed-text-via-ollama) (superseded)
 - 2026-05-23 — [Daemon lifecycle: PID file + auto-start](#daemon-lifecycle-pid-file--auto-start) (revised)
 - 2026-05-23 — [Storage location: `~/.curio` with marker file](#storage-location-curio-with-marker-file)
 - 2026-05-23 — [Data model: documents are universal, references are per-source](#data-model-documents-are-universal-references-are-per-source)
@@ -41,9 +41,9 @@ when the entry was first committed.
 - 2026-05-23 — [HTML parser walks recursively, finds <DL> inside <DT>](#html-parser-walks-recursively-finds-dl-inside-dt)
 - 2026-05-23 — [Worker pool: N workers via the same atomic ClaimNext](#worker-pool-n-workers-via-the-same-atomic-claimnext) (revised)
 - 2026-05-23 — [Marker file's schema_version is synced from the DB after migrations](#marker-files-schema_version-is-synced-from-the-db-after-migrations)
-- 2026-05-23 — [Chunker enforces a 3500-char hard cap (not just 384 words)](#chunker-enforces-a-3500-char-hard-cap-not-just-384-words)
-- 2026-05-23 — [Embedder passes num_ctx=8192 to Ollama, chunker defaults to 384 words](#embedder-passes-num_ctx8192-to-ollama-chunker-defaults-to-384-words)
-- 2026-09-24 — [Indexer: embed in batches of 32; `embedding.timeout_seconds`](#indexer-embed-in-batches-of-32-embeddingtimeout_seconds)
+- 2026-05-23 — [Chunker enforces a 3500-char hard cap (not just 384 words)](#chunker-enforces-a-3500-char-hard-cap-not-just-384-words) (revised)
+- 2026-05-23 — [Embedder passes num_ctx=8192 to Ollama, chunker defaults to 384 words](#embedder-passes-num_ctx8192-to-ollama-chunker-defaults-to-384-words) (revised)
+- 2026-09-24 — [Indexer: embed in batches of 32; `embedding.timeout_seconds`](#indexer-embed-in-batches-of-32-embeddingtimeout_seconds) (revised)
 - 2026-05-24 — [Document state follows job outcome via OnPermanentFailure hook](#document-state-follows-job-outcome-via-onpermanentfailure-hook)
 - 2026-05-24 — [Fallback strategy: only Jina for content-came-back cases](#fallback-strategy-only-jina-for-content-came-back-cases)
 - 2026-05-24 — [Anti-bot mitigation: browser-thorough headers, not just User-Agent](#anti-bot-mitigation-browser-thorough-headers-not-just-user-agent)
@@ -70,7 +70,7 @@ when the entry was first committed.
 - 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator) (revised)
 - 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
 - 2026-07-06 — [M6 (planned): RAG / Q&A synthesis + SOTA natural-language search](#m6-planned-rag--qa-synthesis--sota-natural-language-search)
-- 2026-07-06 — [nomic-embed-text task prefixes (`search_document:` / `search_query:`)](#nomic-embed-text-task-prefixes-search_document--search_query)
+- 2026-07-06 — [nomic-embed-text task prefixes (`search_document:` / `search_query:`)](#nomic-embed-text-task-prefixes-search_document--search_query) (revised)
 - 2026-07-06 — [Insight clustering quality: the "general-reading" mega-cluster (known limitation)](#insight-clustering-quality-the-general-reading-mega-cluster-known-limitation)
 - 2026-09-09 — [Host-cache hits are permanent failures](#host-cache-hits-are-permanent-failures) (revised)
 - 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out)
@@ -111,7 +111,7 @@ when the entry was first committed.
 - 2026-09-25 — [Toolchain: the go directive is the build toolchain, govulncheck gates it](#toolchain-the-go-directive-is-the-build-toolchain-govulncheck-gates-it)
 - 2026-09-25 — [Releases: gated on CI, pinned, least privilege](#releases-gated-on-ci-pinned-least-privilege)
 - 2026-09-25 — [Lint: a measured linter set, zero issues, explained suppressions](#lint-a-measured-linter-set-zero-issues-explained-suppressions)
-- 2026-09-25 — [Ollama: one client, one sentinel pair, a pull that keeps trying](#ollama-one-client-one-sentinel-pair-a-pull-that-keeps-trying)
+- 2026-09-25 — [Ollama: one client, one sentinel pair, a pull that keeps trying](#ollama-one-client-one-sentinel-pair-a-pull-that-keeps-trying) (revised)
 - 2026-09-25 — [Insight: skip non-finite document vectors, don't fail the run](#insight-skip-non-finite-document-vectors-dont-fail-the-run)
 - 2026-09-25 — [CLI: exit 130 on interrupt, a usage hint on usage errors](#cli-exit-130-on-interrupt-a-usage-hint-on-usage-errors)
 - 2026-09-25 — [Daemon startup: a starting API while migrating, clients that wait on progress](#daemon-startup-a-starting-api-while-migrating-clients-that-wait-on-progress)
@@ -127,6 +127,10 @@ when the entry was first committed.
 - 2026-09-27 — [Error pages whose status is hidden](#error-pages-whose-status-is-hidden)
 - 2026-09-27 — [Jina requests identify as curio](#jina-requests-identify-as-curio)
 - 2026-09-27 — [Queue gate: pause, throttle and schedule, persisted in SQLite](#queue-gate-pause-throttle-and-schedule-persisted-in-sqlite)
+- 2026-09-27 — [Embedding model and per-home width](#embedding-model-and-per-home-width)
+- 2026-09-27 — [Embedding drift: the marker records the build, healthz reports a change](#embedding-drift-the-marker-records-the-build-healthz-reports-a-change)
+- 2026-09-27 — [Embeddings never truncate; an over-long chunk fails at once](#embeddings-never-truncate-an-over-long-chunk-fails-at-once)
+- 2026-09-27 — [sqlite-vec: NEON distance kernels on arm64](#sqlite-vec-neon-distance-kernels-on-arm64)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -257,6 +261,16 @@ enable a swap: the daemon won't run under the new model to reindex with it.
 changes and new tags. A supported swap (update the marker, rebuild
 `chunks_vec`, reindex, all behind the guard) is future work, tracked in
 `docs/roadmap.md`. There is no `--reason` flag.
+
+**Revised (2026-09-27):** the width is now each home's, fixed when the home
+is created and recorded in its marker (format 2), and `chunks_vec` is sized
+from it by `sqlite.EnsureVectorIndex`. Another embedding model, of any
+width, means a new home: `curio up --fresh` moves the old one aside and the
+bookmarks are imported again. The guard refuses a mismatch and, before it,
+a home from before formats. See "Embedding model and per-home width".
+
+**Superseded (2026-09-27):** new homes embed with `qwen3-embedding:0.6b` at
+1024 dimensions; see "Embedding model and per-home width".
 
 ---
 
@@ -913,6 +927,13 @@ huggingface-tokenizers or similar) would let us pack closer to the
 limit and produce fewer, more semantic chunks. Defer until quality
 issues from the conservative byte heuristic surface.
 
+**Revised (2026-09-27):** the table above is for nomic-embed-text's
+2048-token ceiling. With `qwen3-embedding:0.6b` the bound is exact rather
+than a heuristic: its tokenizer (Qwen2Tokenizer) is a byte-level BPE, at
+most one token per byte, so a 3500-byte chunk is at most 3500 tokens plus
+end-of-text, against a num_ctx of 8192 that is now binding (next entry).
+The cap and the 384-word target are unchanged.
+
 ---
 
 ## Embedder passes num_ctx=8192 to Ollama, chunker defaults to 384 words
@@ -946,6 +967,22 @@ the conservative word-based heuristic.
 `context_length`), and Ollama clamps `num_ctx` to it, so the 8192 we send
 is advisory. The 3500-byte chunk cap (entry above) is what bounds inputs.
 
+**Revised (2026-09-27):** with `qwen3-embedding:0.6b` the 8192 is binding.
+Ollama checks each input against the smaller of `num_ctx` and the model's
+own context, 32K tokens for Qwen3-Embedding, and with `truncate: false` an
+input past it fails instead of being cut (see "Embeddings never truncate;
+an over-long chunk fails at once"). Document chunks can't reach it: they
+are capped at 3500 bytes and the tokenizer is a byte-level BPE, so a chunk
+is at most 3500 tokens plus end-of-text, 2.3x headroom. Chunk sizing (384
+words, 3500 bytes) is unchanged.
+
+`num_ctx` 4096 would still cover every chunk and roughly halve the model's
+KV cache. At 8192 in f16 that cache is 28 layers × 8 KV heads × 128
+(head_dim) × 2 (K and V) × 2 bytes = 112 KiB per token, about 896 MiB:
+computed from the model's config, not measured. It is a memory
+optimization for the per-machine model tiers to measure, and stays 8192
+until then.
+
 ---
 
 ## Indexer: embed in batches of 32; `embedding.timeout_seconds`
@@ -978,6 +1015,14 @@ failed documents out. A document whose index job gives up after a refetch
 or a `curio reindex`, say because Ollama was down for the whole retry
 window, drops out of search until it is indexed again; its chunks are
 kept. See "Search leaves out failed and dead documents".
+
+**Revised (2026-09-27):** "a few seconds even on CPU-only Ollama" was
+measured with nomic-embed-text. `qwen3-embedding:0.6b` has about 4.4 times
+its parameters, and with `OLLAMA_NUM_PARALLEL` at its default of 1 every
+index worker's request waits behind the others inside the same 60 s
+timeout. How long a 32-chunk batch takes with the new model is unmeasured;
+`curio up` measures one to estimate an import, and the batch size and the
+default timeout are to be re-checked against that number.
 
 ---
 
@@ -1990,6 +2035,27 @@ making a 2 GB download a hard prerequisite.
 trying once at startup. See "Ollama: one client, one sentinel pair, a pull
 that keeps trying".
 
+**Revised (2026-09-27):**
+
+- Every `/api/generate` body carries `"think": false`, never omitted.
+  Ollama turns thinking on for a model that supports it when the field is
+  missing (0.34.3's release notes show gemma4 with thinking on by default),
+  and the reasoning spends the labeler's 120-token budget and its time,
+  leaving an empty or unparseable reply and a term-label fallback. A model
+  that can't turn thinking off answers 4xx, which the insight engine meets
+  with term labels. There is no option to turn it on: no caller wants it.
+- `num_ctx` (8192) stays explicit on every attempt, now pinned by a
+  raw-JSON test with `think`. Without it Ollama sizes the context from the
+  free VRAM (the macOS app since 0.17), and `qwen3:4b-instruct` has a 256K
+  window. Label prompts are about 1K tokens; M6 will need more.
+- The default model is `qwen3:4b-instruct`; `llama3.2` is retired. The
+  per-machine tiers (16 GB `gemma4:12b`, 32 GB `gemma4:26b-a4b-it-qat`,
+  64 GB `gemma4:26b`) are in docs/setup.md.
+- `generation.model` is never recorded in the marker: the user changes it
+  and restarts the daemon, and nothing needs reindexing. A daemon test
+  restarts a home with another writing model and finds the marker
+  unchanged but for `updated_at`.
+
 ---
 
 ## Retrieval eval harness
@@ -2076,6 +2142,15 @@ prefix scheme, so changing either prefix means re-embedding the whole corpus
 `.curio-meta.json` cross-check covers only embedding model + dim, so a prefix
 change won't warn; enforcing it is a deliberate follow-up. For now, reindex
 after any prefix change. Set both prefixes to "" for a model that takes none.
+
+**Revised (2026-09-27):** the default model is now `qwen3-embedding:0.6b`,
+which is instruction-aware on the query side only: queries get
+`config.QwenQueryPrefix` and documents nothing (see "Embedding model and
+per-home width" for the exact bytes). The mechanism is unchanged, and
+nomic's two prefixes are what a home made for nomic-embed-text would set.
+The marker now holds a home to its model and width, and refuses a home from
+before formats, but still not to its prefixes: change them only with
+`curio reindex --all`.
 
 ---
 
@@ -3994,6 +4069,21 @@ model was never pulled after Ollama came up, although the log said index
 jobs "will retry until it is", and the generation path said outright that
 the pull is not retried.
 
+**Revised (2026-09-27):** `Ping`, and `ModelDigest`, the digest lookup the
+drift monitor uses, match a model under the name Ollama runs for it:
+lower-cased, with `:latest` appended when the last path segment has no tag
+(a ':' before the last '/' is a registry host's port), compared exactly
+against each `/api/tags` entry's `name` and `model`. The old rule, the name
+alone or with any tag, took `qwen3-embedding` as loaded when only
+`qwen3-embedding:0.6b` was pulled, while Ollama resolves the untagged name
+to `:latest`, the 8B model: `KeepPulled` logged the model ready and never
+pulled it, healthz said it was loaded, and every embed answered 404 until
+the index jobs gave up. It also reported `qwen3-embedding:latest` missing
+next to a pulled `qwen3-embedding`. `Model()` still returns the configured
+string, so requests carry what the user wrote, and untagged names aren't
+rejected: drift detection catches a `:latest` that moves, and the defaults
+are pinned. The client also reads `/api/version` (`Version`).
+
 ---
 
 ## Insight: skip non-finite document vectors, don't fail the run
@@ -5370,6 +5460,250 @@ finishes as usual.
 - Pausing one kind, index only, say.
 - Configurable gentle caps.
 - A paused-since time in `GET /v1/queue`.
+
+---
+
+## Embedding model and per-home width
+
+**Decision:** a new home embeds with `qwen3-embedding:0.6b` (Ollama's q8_0
+build, 639 MB) at 1024 dimensions, and the vector width is the home's:
+
+- `curiohome.Init` records the embedding model and width in the marker,
+  with `format: 2` (`curiohome.CurrentFormat`), fixed for the home's life.
+  `store.EmbeddingDim`, a process-wide 768, is gone; `store.MaxEmbeddingDim`
+  (8192, sqlite-vec's `SQLITE_VEC_VEC0_MAX_DIMENSIONS`) bounds
+  `embedding.dim`.
+- `config.yaml`'s `embedding.model` and `embedding.dim` must match the
+  marker. `curiohome.Home.CheckEmbedding` refuses a marker without format 2
+  (`ErrLegacyHome`, checked first) and a mismatch (an
+  `EmbeddingMismatchError` carrying both model/dim pairs), naming the
+  files, what they record and the fix: `curio up --fresh`, which moves the
+  home to `<home>.bak-<YYYYMMDD-HHMMSS>` and deletes nothing, or moving it
+  aside by hand, then importing the bookmarks again; for a mismatch,
+  setting `embedding.model`/`dim` back is the other fix. The daemon runs it
+  after taking the lock and loading the config, before binding the port or
+  opening the database, and `curio doctor` fails its home check offline
+  with the same text. `curiohome.Open` stays permissive, so doctor and
+  `curio up --fresh` can act on a legacy home.
+- `sqlite.EnsureVectorIndex(db, dim)` sizes `chunks_vec` right after
+  goose: it creates the table when missing, issues no DDL when the width
+  matches, drops and recreates it in one `BEGIN IMMEDIATE` transaction
+  when the width differs and it holds no vector, and refuses a table that
+  holds vectors (`VectorWidthError`, naming the database and both widths,
+  nothing changed). The width is parsed from the table's `CREATE`
+  statement in `sqlite_master`; text it can't parse is an error, not a
+  guess. The daemon sizes the chunk store and the embedder from the
+  marker's width too.
+- Migration 012 drops `schema_meta`.
+- Queries get Qwen3-Embedding's instruction and documents nothing
+  (`config.QwenQueryPrefix`, `embedding.document_prefix: ""`):
+
+  ```text
+  Instruct: Given a web search query, retrieve relevant passages that answer the query
+  Query:
+  ```
+
+  That is one line break and nothing after the colon, byte for byte as
+  Qwen/Qwen3-Embedding-0.6B's `config_sentence_transformers.json` and its
+  `get_detailed_instruct` write it. The model card's TEI curl example puts
+  a space after "Query:"; that is not the canonical prompt.
+
+**Why a format, not inference from the model:** an old home whose
+`config.yaml` pins `embedding.model: nomic-embed-text` and `dim: 768`
+passes a model/dim comparison, and would then run under the new default
+prompts: the Qwen instruction on nomic queries, no `search_document:` on
+nomic documents. That is a half-working index that fails nowhere. An
+explicit format refuses every old home, loudly. No migration code
+converts one: its vectors are another model's, and the owner's decision is
+a fresh home and a re-import (the owner's library: 130k chunks of
+nomic-embed-text at 768).
+
+**Why a Go step after goose, not a migration:** an applied migration never
+changes (migrations/README.md), goose SQL takes no parameter, and a goose
+Go migration would bake one width into its registration and appear in the
+startup hooks without a source file. So 001 still creates `chunks_vec` at
+FLOAT[768], and `EnsureVectorIndex` replaces that empty table on a new
+database; on a normal start it costs one `sqlite_master` read. Dropping
+and recreating the vec0 table inside `BEGIN IMMEDIATE` on a migrated
+database works, the chunks delete trigger (`trg_chunks_delete`) still
+resolves afterwards, and vec0 then rejects the old width ("Dimension
+mismatch … Expected 1024 dimensions but received 768"); tests pin all
+three. The DDL is built from the validated int, and the probes are named
+constants.
+
+**Why drop `schema_meta`:** nothing read it, and its one row claimed
+nomic-embed-text at 768 for every home, which every 1024 home would
+contradict. Its Down restores the table as 005 left it, with 001's row, so
+the older Downs still run.
+
+**What stays:** chunk sizing (384 words, 3500 bytes) and `num_ctx` 8192;
+the re-derivation is in the revised "Embedder passes num_ctx=8192" and
+"Chunker enforces a 3500-char hard cap" entries. `insight.min_similarity`
+was tuned on nomic-embed-text vectors and is left at 0.5; re-tune it with
+`curio eval` once a library is indexed with the new model.
+
+---
+
+## Embedding drift: the marker records the build, healthz reports a change
+
+**Decision:** the daemon fingerprints the build that makes a home's
+embeddings, the embedding model's manifest digest and the Ollama version,
+and reports when it changes:
+
+- `ollama.Client.ModelDigest` reads the digest from `GET /api/tags`, on the
+  same exact-name lookup as `Ping`; `Version` reads `GET /api/version`.
+- `internal/drift.Monitor` runs in the daemon. It checks at start, every
+  minute and right after a rebaseline, each check bounded by 5 s whatever
+  `embedding.timeout_seconds` allows. The first successful check records
+  the fingerprint in the marker (`embedding_model_digest`,
+  `ollama_version`), keeping every other field. Later checks compare, and
+  report each changed part with its recorded and current value.
+- `/v1/healthz` carries `embedding_drift` (`changes`, `fix: curio reindex
+  --all`, `checked_at`) only while drifted, from the monitor's last check,
+  with no Ollama call; `status` stays ok. `curio doctor` warns and lists
+  the changes, `curio status` prints one warning line, and the log has one
+  WARN per distinct drift, not one per check.
+- `POST /v1/documents/reindex-all` for state `fetched` (the default)
+  clears the recorded fingerprint once every job is enqueued and asks for
+  a check, which records the build serving then. Other states leave the
+  baseline alone; a failed reset is a 500 saying all N jobs were enqueued.
+- The daemon never reindexes by itself, and the monitor never enqueues a
+  job.
+
+**Why:** Ollama 0.30.0 changed nomic-embed-text's vectors silently (its
+release note: "nomic-embed-text now converts inputs to lowercase"). After
+such an upgrade, or a pull that brings a new build of the model, new
+query vectors no longer match the stored ones, and search gets worse with
+nothing reporting it.
+
+**Why `/api/tags`, not `/api/show`:** on Ollama 0.34.4, `/api/show`
+returns capabilities, details, license, model_info, modelfile,
+modified_at, parameters and template, and no digest; its modelfile's
+`FROM` line names the weights blob (`sha256-970aa7…` for
+nomic-embed-text), not the manifest. `/api/tags` returns each model's
+manifest `digest` (`0a109f42…` for nomic-embed-text), the value `ollama
+list` shows, which changes when a pull brings a different build. Values
+are compared verbatim.
+
+**Why the daemon records it, at its first successful check:** not at
+`curiohome.Init`, because the daemon and `daemonctl.Discover` create homes
+without Ollama running or the model pulled, and one writer, the daemon
+under its lock, is simpler than a second code path in `curio up`; not at
+the first embed, which would put marker I/O in the index path. An embed
+can precede the record by at most one check interval, which matters only
+if Ollama changed inside that minute. After startup the monitor is the
+marker's only writer, under its own lock, so a rebaseline and a check
+never interleave their writes. With Ollama down or the model not pulled a
+check writes nothing, keeps its last report and logs only at DEBUG;
+healthz and the pull already say so loudly. A failed marker write is
+logged at ERROR and retried at the next check.
+
+**Why a fixed minute:** two small local requests a minute cost nothing,
+and catch an Ollama upgrade while the daemon runs, without a backoff or
+hooks into reachability changes.
+
+**Why `reindex-all` resets at enqueue time:** the fetched documents are
+every searchable one (failed and dead documents are left out of search),
+so once their jobs are in, the whole searchable library is being
+re-embedded by the build serving now. Search mixes old and new vectors
+until the jobs finish.
+
+**Why never reindex automatically:** re-embedding a large library takes
+hours of the user's machine and Ollama; the user decides when.
+
+---
+
+## Embeddings never truncate; an over-long chunk fails at once
+
+**Decision:**
+
+- Every `/api/embed` body carries `"truncate": false` and
+  `"keep_alive": "30m"` next to `options.num_ctx`. Neither is omitted;
+  tests assert them on the raw JSON.
+- A 400 whose error mentions the context length is
+  `embedder.ErrInputTooLong`, with the `*ollama.StatusError` still in the
+  chain, and a vector of the wrong width is `embedder.ErrWrongDimension`.
+- The index handler makes both permanent: the job fails on its first
+  attempt, the document goes `failed` (not `dead`), and `last_error` names
+  the chunk range, the longest chunk's size in bytes and the reason.
+- A query too long to embed degrades search to keyword results, with the
+  reason in the warning; there is no API length limit.
+
+**Why:** Ollama's `/api/embed` defaults `truncate` to true. On 0.34.4 a
+73,889-character input without the field answered 200 with a silently
+truncated vector: a vector for text the chunk doesn't hold. With
+`truncate: false` the same request answers `HTTP 400
+{"error":"the input length exceeds the context length"}`, alone or inside
+a 3-input batch: one over-long input fails the whole batch. Older releases
+word it "input length exceeds maximum context length"; both match. Both
+failures repeat on every attempt, so retrying them only spent the job's
+five attempts.
+
+**No bisection:** the indexer doesn't retry halves of a failed batch to
+find the long chunk. With chunks capped at 3500 bytes, a chunk past the
+context means a misconfigured embedding model, not unusual content, and
+the error names the longest chunk.
+
+**keep_alive 30m:** Ollama unloads an idle model after 5 minutes by
+default, so a paused, throttled or scheduled import reloaded the 639 MB
+model at every burst. 30 minutes is a maximum idle time, not a
+reservation: per Ollama's FAQ, an idle model is still unloaded to make
+room when another model needs the memory, so it doesn't pin memory on an
+8 GB machine. Generation sends none: labeling is a short burst.
+
+---
+
+## sqlite-vec: NEON distance kernels on arm64
+
+**Decision:** curio builds sqlite-vec with its NEON distance kernels on
+arm64:
+
+- The Makefile, on arm64 (`uname -m` arm64 or aarch64), exports
+  `CGO_CFLAGS` with `-DSQLITE_VEC_ENABLE_NEON`, keeping `-O2 -g` and
+  extending a `CGO_CFLAGS` already given. It reaches `build`, `test` and
+  `test-e2e`, whose `go build` inherits it. amd64 builds are unchanged.
+- Every darwin/arm64 build in `.goreleaser.yaml` sets
+  `CGO_CFLAGS=-O2 -g -DSQLITE_VEC_ENABLE_NEON`.
+- `sqlite.VectorExtension` reads `vec_version()` and `vec_debug()`'s build
+  flags; the daemon's "database ready" log line names both, so a released
+  binary can be checked. A test fails on arm64 when the flags lack "neon",
+  saying to build through make or set `CGO_CFLAGS`, and skips elsewhere.
+
+**Why:** sqlite-vec-go-bindings v0.1.6 compiles `sqlite-vec.c` with
+`#cgo CFLAGS: -DSQLITE_CORE` alone, and the NEON L2 kernel is behind
+`SQLITE_VEC_ENABLE_NEON`. curio's build reported `Build flags:  `, empty,
+from `vec_debug()`: every search ran the scalar loop. With the flag it
+reports `neon`. NEON is part of every ARMv8-A core, so nothing checks for
+it at run time.
+
+`BenchmarkVectorSearch` on an Apple M4 Max (16 cores, 64 GB), sqlite-vec
+v0.1.6, 20,000 random unit vectors of 1024 dimensions in 200 documents,
+median of 5 runs of 200 iterations:
+
+| Query | Scalar | NEON | Speedup |
+|---|---|---|---|
+| vec0 KNN, k = 100 | 18.24 ms | 10.81 ms | 1.69x |
+| `Chunks.VectorSearch`, limit 50 (k = 500) | 24.39 ms | 17.12 ms | 1.42x |
+
+A raw vec0 run (k = 100, same machine) agreed: 18.1 against 10.4 ms at
+1024 dimensions, 13.2 against 8.0 ms at 768. Scaled to the owner's 130k
+chunks that is about 70 ms instead of 117 ms per search, extrapolated, not
+measured.
+
+**The `CGO_CFLAGS` trap:** setting `CGO_CFLAGS` replaces Go's default of
+`-O2 -g`, so a bare `CGO_CFLAGS=-DSQLITE_VEC_ENABLE_NEON` would compile
+SQLite itself, mattn/go-sqlite3's amalgamation, unoptimized. The Makefile
+and goreleaser keep `-O2 -g`. A `go test` outside make on arm64 builds
+without the flag and fails the NEON test, whose message says what to set;
+CLAUDE.md's single-test command sets it.
+
+**Rejected:**
+
+- Vendoring `sqlite-vec.c` into curio with `#cgo arm64 CFLAGS`: NEON would
+  be the default in every build, plain `go build` included, but it forks a
+  ~9.6k-line C file out of Dependabot's reach.
+- AVX on amd64: it needs `-mavx` and AVX hardware at run time, curio ships
+  no amd64 build, and nobody asked for it.
 
 ---
 
