@@ -403,28 +403,40 @@ func TestNative_BlockedHomepageIsDead(t *testing.T) {
 // TestNative_BlockedOffsiteLoginIsFinal: a redirect onto another site's
 // login page that answers 403 or 503 is the final login wall it is on a
 // 2xx, whatever dead-link detection says: no Jina request, which would
-// follow the same redirect, and neither host cached.
+// follow the same redirect, and neither host cached. The verdict is the
+// redirect's own, so a fresh anti-bot entry for the destination doesn't
+// replace it.
 func TestNative_BlockedOffsiteLoginIsFinal(t *testing.T) {
 	for _, status := range []int{http.StatusForbidden, http.StatusServiceUnavailable} {
 		for _, detection := range []bool{true, false} {
-			t.Run(fmt.Sprintf("%d/detection=%v", status, detection), func(t *testing.T) {
-				src := newBlockedCrossSiteRedirect(t, "/login?continue=https://example.com/doc", status)
-				n, jinaCalls := landingJinaNative(t, "", true, detection)
+			for _, destCached := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%d/detection=%v/destination cached=%v", status, detection, destCached), func(t *testing.T) {
+					src := newBlockedCrossSiteRedirect(t, "/login?continue=https://example.com/doc", status)
+					n, jinaCalls := landingJinaNative(t, "", true, detection)
+					if destCached {
+						n.hostCache.Put("localhost", HostFailAntiBot, "native: HTTP 403 Forbidden: "+ErrAntiBot.Error())
+					}
 
-				_, err := n.Fetch(context.Background(), src+"/document/d/1AbC/edit")
-				var pe *PermanentError
-				require.ErrorAs(t, err, &pe)
-				assert.ErrorIs(t, err, errOffsiteLoginWall)
-				assert.ErrorIs(t, err, ErrLoginWall)
-				assert.NotErrorIs(t, err, ErrAntiBot)
-				assert.NotErrorIs(t, err, ErrDeadLink)
-				var se *HTTPStatusError
-				require.ErrorAs(t, err, &se)
-				assert.Equal(t, status, se.StatusCode)
-				assert.Contains(t, err.Error(), "redirected onto another site's login page: localhost:")
-				assert.Zero(t, jinaCalls())
-				assertUncached(t, n)
-			})
+					_, err := n.Fetch(context.Background(), src+"/document/d/1AbC/edit")
+					var pe *PermanentError
+					require.ErrorAs(t, err, &pe)
+					assert.ErrorIs(t, err, errOffsiteLoginWall)
+					assert.ErrorIs(t, err, ErrLoginWall)
+					assert.NotErrorIs(t, err, ErrAntiBot)
+					assert.NotErrorIs(t, err, ErrDeadLink)
+					var se *HTTPStatusError
+					require.ErrorAs(t, err, &se)
+					assert.Equal(t, status, se.StatusCode)
+					assert.Contains(t, err.Error(), "redirected onto another site's login page: localhost:")
+					assert.NotContains(t, err.Error(), "(cached:")
+					assert.Zero(t, jinaCalls())
+
+					_, cached := n.hostCache.Get("127.0.0.1")
+					assert.False(t, cached, "the requested host is not cached")
+					_, cached = n.hostCache.Get("localhost")
+					assert.Equal(t, destCached, cached, "the destination is cached only as seeded")
+				})
+			}
 		}
 	}
 }

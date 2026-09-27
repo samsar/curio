@@ -1262,8 +1262,9 @@ func jinaBackoff(attempt int) time.Duration {
 
 // jinaChallengeCooldown is how long Jina calls pause after r.jina.ai's CDN
 // challenged one, when its answer gave no Retry-After. Every call would be
-// challenged the same way, so a pause saves each fetch a request, while
-// the fetches that needed Jina stay retryable.
+// challenged the same way, so a pause saves each fetch a request. The
+// fetches that needed Jina fail retryably, but each queue retry inside the
+// pause still uses up a job attempt, so a document can end failed.
 const jinaChallengeCooldown = 10 * time.Minute
 
 // extendJinaCooldown extends the cooldown every Jina call shares when a

@@ -238,7 +238,7 @@ other Jina failure.
 **`dead link (redirected to another site's landing page: …)`** on a
 document — the bookmark redirects to another site's homepage or section
 page, which kept nothing of what the bookmark named: the usual fate of a
-retired site's pages. When that page refused curio, the message starts with
+retired site's pages. When that page refused curio, the reason follows
 `HTTP 403 Forbidden:` or `HTTP 503 Service Unavailable:`; the verdict is
 the same. A forced refetch (`curio refetch <id> --force`) applies the same
 rule to the same redirect, so it only helps once the redirect changes. If

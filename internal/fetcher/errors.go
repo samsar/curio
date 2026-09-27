@@ -36,7 +36,7 @@ var (
 	// target's status). Jina may get through. Distinct from ErrLoginWall so
 	// the two log separately. Only a 403/503 from the origin is host-wide; a
 	// challenge or error page is about that page. A 403/503 answered after a
-	// redirect onto another site's login page, or with dead-link detection
+	// redirect onto another site's login path, or with dead-link detection
 	// on onto the homepage or another site's landing page, is no ErrAntiBot:
 	// the redirect is judged instead (Native's statusFailure).
 	ErrAntiBot = errors.New("origin blocked the request (likely anti-bot)")

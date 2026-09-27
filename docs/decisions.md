@@ -2680,13 +2680,16 @@ same way on every path that exists.
   first failures that wrote the host cache, and 428 permanent cache hits
   served from those entries. With `cf-mitigated: challenge` it also pauses
   every Jina call. See "Jina requests identify as curio".
-- **A redirect onto another site is page-level, whatever it reaches.** A
-  landing page (a dead link) and a login page (a final login wall) cache
-  neither the requested nor the answering host, whatever that page
-  answered: 2xx, 403 or 503. So the anti-bot verdict above needs a 403/503
-  that no redirect verdict explains: not one after a redirect onto another
-  site's login page, nor, with dead-link detection on, onto the site's
-  homepage or another site's landing page. The site-wide login verdict
+- **A redirect onto another site's landing or login page is page-level,
+  whatever it answered.** A landing page (a dead link) and a login page (a
+  final login wall; after a 403 or 503 only its path counts, since no page
+  is read) cache neither the requested nor the answering host, whatever
+  that page answered: 2xx, 403 or 503. So the anti-bot verdict above needs
+  a 403/503 that no redirect verdict explains: not one after a redirect
+  onto another site's login path, nor, with dead-link detection on, onto
+  the site's homepage or another site's landing page. A 403/503 from any
+  other page on another site is still the anti-bot verdict above, keyed by
+  that site. The site-wide login verdict
   needs a redirect that stays on the site.
 - **The page-level verdicts above, now:** none is cached. Thin text, no
   article, a login-like title, and a challenge or 403/503 error page
@@ -4524,7 +4527,11 @@ readability.
 A redirect onto another site is no longer a login wall by itself: what it
 reached is judged like any page (see "Cross-site redirects: judged where
 they land"). The one `cf-mitigated: challenge` curio now reads is Jina's own
-(see "Jina requests identify as curio").
+(see "Jina requests identify as curio"). The "Not done" note's
+`statusFailure` now judges the redirect first: a 403/503 after a redirect
+onto the homepage or another site's landing page (detection on) or onto
+another site's login path is that verdict, never `ErrAntiBot`; only a
+403/503 no redirect verdict explains is still host-wide and Jina-eligible.
 
 ---
 
