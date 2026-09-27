@@ -110,7 +110,7 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 	meta, err := c.Home.CheckEmbedding(c.Config.Embedding.Model, c.Config.Embedding.Dim)
 	var mismatch *curiohome.EmbeddingMismatchError
 	switch {
-	case errors.Is(err, curiohome.ErrLegacyHome), errors.As(err, &mismatch):
+	case errors.Is(err, curiohome.ErrLegacyHome), errors.Is(err, curiohome.ErrNewerHome), errors.As(err, &mismatch):
 		r.add("curio home", statusFail, err.Error(), "")
 	case err != nil:
 		r.add("curio home", statusFail, c.Home.Path+" — marker unreadable: "+err.Error(),

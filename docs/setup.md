@@ -341,8 +341,10 @@ truncated chunk gets a vector for text it doesn't hold, so the job fails at
 once and the document goes `failed`; its error names the chunks and the
 longest one's size. Chunks are capped at 3500 bytes, well inside the
 context, so this means the home's embedding model has a small context.
-Lower `chunking.size_tokens` and restart the daemon, or start a new home
-with a model that has a larger one (see "The embedding model is the
+Lowering `chunking.size_tokens` and restarting the daemon helps only
+chunks bounded by word count: the 3500-byte cap is fixed, so for a model
+whose context is under about 3500 tokens, start a new home with a model
+that has a larger one (see "The embedding model is the
 home's"). Then bring the documents back: `curio reindex <id>` re-embeds
 one from the content it already has and returns it to `fetched`, and
 `curio refetch --all --state=failed` retries every failed document. A

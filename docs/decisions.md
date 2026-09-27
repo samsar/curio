@@ -1021,8 +1021,8 @@ measured with nomic-embed-text. `qwen3-embedding:0.6b` has about 4.4 times
 its parameters, and with `OLLAMA_NUM_PARALLEL` at its default of 1 every
 index worker's request waits behind the others inside the same 60 s
 timeout. How long a 32-chunk batch takes with the new model is unmeasured;
-`curio up` measures one to estimate an import, and the batch size and the
-default timeout are to be re-checked against that number.
+`curio up` is to measure one to estimate an import, and the batch size and
+the default timeout are to be re-checked against that number.
 
 ---
 

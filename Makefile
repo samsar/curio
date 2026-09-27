@@ -47,9 +47,10 @@ export CGO_ENABLED=1
 # checks for it at run time. Setting CGO_CFLAGS replaces Go's default of
 # -O2 -g, which would build SQLite itself unoptimized, so those stay, and
 # a CGO_CFLAGS already given is extended rather than replaced. The e2e
-# test's go build inherits the export. See docs/decisions.md "sqlite-vec:
+# test's go build inherits the export. The target's GOARCH decides, not the
+# host's: <arm_neon.h> doesn't compile for amd64. See docs/decisions.md "sqlite-vec:
 # NEON distance kernels on arm64".
-ifneq ($(filter arm64 aarch64,$(shell uname -m)),)
+ifeq ($(shell $(GO) env GOARCH),arm64)
 override CGO_CFLAGS := $(if $(strip $(CGO_CFLAGS)),$(CGO_CFLAGS),-O2 -g) -DSQLITE_VEC_ENABLE_NEON
 export CGO_CFLAGS
 endif

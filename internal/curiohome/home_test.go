@@ -186,6 +186,7 @@ func TestMeta_CheckEmbedding(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.meta.CheckEmbedding(tc.model, tc.dim)
+			assert.NotErrorIs(t, err, ErrNewerHome)
 			assert.Equal(t, tc.wantLegacy, errors.Is(err, ErrLegacyHome), "legacy: %v", err)
 			var mismatch *EmbeddingMismatchError
 			assert.Equal(t, tc.wantMismatch, errors.As(err, &mismatch), "mismatch: %v", err)
@@ -198,6 +199,23 @@ func TestMeta_CheckEmbedding(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHome_CheckEmbedding_Newer: a marker past CurrentFormat, from a newer
+// curio, is refused before its embedding is compared, and the refusal says
+// to upgrade.
+func TestHome_CheckEmbedding_Newer(t *testing.T) {
+	h, err := Init(t.TempDir(), "qwen3-embedding:0.6b", 1024)
+	require.NoError(t, err)
+	meta, err := h.Meta()
+	require.NoError(t, err)
+	meta.Format = CurrentFormat + 1
+	require.NoError(t, h.WriteMeta(meta))
+
+	_, err = h.CheckEmbedding("qwen3-embedding:0.6b", 1024)
+	require.ErrorIs(t, err, ErrNewerHome)
+	assert.NotErrorIs(t, err, ErrLegacyHome)
+	assert.Contains(t, err.Error(), "Upgrade curio")
 }
 
 // TestHome_CheckEmbedding_Legacy: the refusal of a legacy home names the

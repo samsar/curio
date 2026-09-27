@@ -67,6 +67,11 @@ var (
 	// nothing converts it. Remediation: start a new home (`curio up
 	// --fresh` moves this one aside) and import the bookmarks again.
 	ErrLegacyHome = errors.New("curio home from an older curio")
+
+	// ErrNewerHome: the marker names a format past CurrentFormat, written
+	// by a newer curio under rules this one doesn't know. Serving it could
+	// corrupt it; the fix is to upgrade curio.
+	ErrNewerHome = errors.New("curio home from a newer curio")
 )
 
 // Meta mirrors the on-disk .curio-meta.json file.
@@ -115,12 +120,15 @@ func (e *EmbeddingMismatchError) Error() string {
 }
 
 // CheckEmbedding reports whether this home can serve embeddings from model
-// at dim: ErrLegacyHome for a marker older than CurrentFormat, checked
-// first, or an *EmbeddingMismatchError when model or dim differ from the
-// recorded ones.
+// at dim: ErrLegacyHome for a marker older than CurrentFormat and
+// ErrNewerHome for one past it, checked first, or an
+// *EmbeddingMismatchError when model or dim differ from the recorded ones.
 func (m Meta) CheckEmbedding(model string, dim int) error {
-	if m.Format < CurrentFormat {
+	switch {
+	case m.Format < CurrentFormat:
 		return ErrLegacyHome
+	case m.Format > CurrentFormat:
+		return ErrNewerHome
 	}
 	configured := Embedding{Model: model, Dim: dim}
 	if recorded := (Embedding{Model: m.EmbeddingModel, Dim: m.EmbeddingDim}); recorded != configured {
@@ -239,7 +247,7 @@ func (h *Home) Meta() (Meta, error) {
 
 // CheckEmbedding reads the marker and holds it to config.yaml's embedding
 // model and dim (Meta.CheckEmbedding), returning the marker when the home
-// can serve them. A refusal still matches ErrLegacyHome or
+// can serve them. A refusal still matches ErrLegacyHome, ErrNewerHome or
 // *EmbeddingMismatchError, and says which files disagree, what they record
 // and what to do: the daemon refuses to start with it, and `curio doctor`
 // reports it.
@@ -259,6 +267,9 @@ func (h *Home) CheckEmbedding(model string, dim int) (Meta, error) {
 			"or move it aside yourself; then import your bookmarks again",
 			err, h.Path, CurrentFormat, h.MarkerPath(),
 			Embedding{Model: meta.EmbeddingModel, Dim: meta.EmbeddingDim}, h.freshHint())
+	case errors.Is(err, ErrNewerHome):
+		return Meta{}, fmt.Errorf("%w: %s is home format %d, which a newer curio wrote; this one serves format %d. "+
+			"Upgrade curio (brew upgrade curio) and restart the daemon", err, h.Path, meta.Format, CurrentFormat)
 	case errors.As(err, &mismatch):
 		return Meta{}, fmt.Errorf("%w; %s sets the first and the marker %s records the second. "+
 			"Set embedding.model and embedding.dim back to the recorded values, or, to embed with the new model, %s",
