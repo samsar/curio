@@ -40,13 +40,24 @@ type cooldown struct {
 	until time.Time
 }
 
-// extend pushes the deadline out to at least now+d.
-func (c *cooldown) extend(now time.Time, d time.Duration) {
+// extend pushes the deadline out to at least now+d. It reports whether it
+// started a pause: whether none was in effect at now.
+func (c *cooldown) extend(now time.Time, d time.Duration) (started bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	started = !c.until.After(now)
 	if t := now.Add(d); t.After(c.until) {
 		c.until = t
 	}
+	return started
+}
+
+// deadline is when the pause ends: in the past, or zero, when none is in
+// effect.
+func (c *cooldown) deadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.until
 }
 
 func (c *cooldown) remaining(now time.Time) time.Duration {

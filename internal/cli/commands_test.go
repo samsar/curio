@@ -12,11 +12,14 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
+	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -496,6 +499,35 @@ func TestDoctor(t *testing.T) {
 	assert.Contains(t, out, "daemon")
 	assert.Contains(t, out, "content dir")
 	assert.Contains(t, out, "all checks passed")
+	assert.NotContains(t, out, "jina", "a daemon that reports no upstreams gets no upstream check")
+}
+
+// TestDoctorAndStatus_FailingJina: a daemon that reports its Jina fallback
+// failing fails doctor, whose jina check says since when and what to do,
+// and status warns once, after the embedding line.
+func TestDoctorAndStatus_FailingJina(t *testing.T) {
+	answered := time.Date(2026, 9, 27, 14, 2, 42, 0, time.UTC)
+	failed := answered.Add(time.Hour)
+	srv := apitest.Start(t, func(d *api.Deps) {
+		d.Upstreams = func() []fetcher.UpstreamHealth {
+			return []fetcher.UpstreamHealth{{Name: "jina", Enabled: true, State: fetcher.UpstreamFailing,
+				LastSuccess: answered, LastFailure: failed, LastFailureClass: fetcher.CallChallenged,
+				Window: 15 * time.Minute, Recent: map[fetcher.CallClass]int{fetcher.CallChallenged: 1}}}
+		}
+	})
+
+	out, err := runCLI(t, srv, "doctor")
+	require.Error(t, err)
+	assert.Contains(t, out, fmt.Sprintf("✗ %-22s failing: no answer since %s; last failure challenged at %s\n",
+		"jina", localTime(answered), localTime(failed)))
+	assert.Contains(t, out, "  → challenged: r.jina.ai is challenging curio; see Troubleshooting in docs/setup.md\n")
+	assert.Contains(t, out, "1 failure(s), 0 warning(s)")
+
+	out = mustRun(t, srv, "status")
+	assert.Contains(t, out, fmt.Sprintf("embed:   nomic-embed-text (dim %d)\n"+
+		"warning: jina is failing: no answer since %s; last failure challenged; run `curio doctor`\n",
+		store.EmbeddingDim, localTime(answered)))
+	assert.Equal(t, 1, strings.Count(out, "jina"))
 }
 
 func TestImport(t *testing.T) {

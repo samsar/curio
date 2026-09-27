@@ -56,6 +56,9 @@ func newStatusCmd(env *daemonctl.Env) *cobra.Command {
 			}
 			fmt.Fprintf(w, "schema:  v%d\n", health.SchemaVersion)
 			fmt.Fprintf(w, "embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
+			for _, u := range health.Upstreams {
+				fmt.Fprint(w, failingWarning(u))
+			}
 
 			sctx, scancel := context.WithTimeout(cmd.Context(), 1*time.Second)
 			defer scancel()
@@ -103,6 +106,16 @@ func formatMap(m map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%s=%d", k, m[k]))
 	}
 	return strings.Join(parts, "  ")
+}
+
+// failingWarning is the line status prints for an upstream the daemon
+// reports failing, and empty for any other state: the details are doctor's.
+func failingWarning(u client.UpstreamHealth) string {
+	if u.State != client.UpstreamFailing {
+		return ""
+	}
+	return fmt.Sprintf("warning: %s is failing: no answer since %s; last failure %s; run `curio doctor`\n",
+		u.Name, noAnswerSince(u), u.LastFailureClass)
 }
 
 // homeMismatchWarning warns when the daemon answering at this address serves

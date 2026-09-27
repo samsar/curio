@@ -285,7 +285,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		go emb.Client().KeepPulled(ctx, slog.With("used_for", "embeddings"))
 	}
 
-	dispatcher, err := newDispatcher(cfg, home)
+	native := newNativeFetcher(cfg)
+	dispatcher, err := newDispatcher(cfg, home, native)
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +324,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 		Log:         slog.Default(),
 	}, jobs.PoolSizes{Fetch: cfg.Daemon.FetchWorkers, Index: cfg.Daemon.IndexWorkers},
 		jobs.WorkerOptions{Log: slog.Default()})
+	// The Jina fallback is the one upstream whose health is tracked.
+	upstreams := func() []fetcher.UpstreamHealth { return []fetcher.UpstreamHealth{native.JinaHealth()} }
 
 	return &daemon{
 		apiDeps: api.Deps{
@@ -336,6 +339,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, db 
 			Search:         engine,
 			Insights:       insights,
 			InsightEnabled: cfg.Insight.Enabled,
+			Upstreams:      upstreams,
 			Log:            slog.Default(),
 		},
 		pools: pools,
@@ -351,11 +355,12 @@ const (
 	youtubeBurst            = 3
 )
 
-// newDispatcher builds the fetcher registry and routing rules. Native is
-// always constructed (pure Go, no external deps) so fetcher_rules.yaml can
-// bind "native" even when web2md is the configured default.
-func newDispatcher(cfg config.Config, home *curiohome.Home) (fetcher.Dispatcher, error) {
-	nativeFetcher := fetcher.NewNative(fetcher.NativeOptions{
+// newNativeFetcher builds the Native fetcher. It is always built (pure Go,
+// no external deps), so fetcher_rules.yaml can bind "native" even when
+// web2md is the configured default, and healthz can report its Jina
+// fallback.
+func newNativeFetcher(cfg config.Config) *fetcher.Native {
+	return fetcher.NewNative(fetcher.NativeOptions{
 		Timeout:           time.Duration(cfg.Fetcher.Native.TimeoutSeconds) * time.Second,
 		UserAgent:         cfg.Fetcher.Native.UserAgent,
 		JinaFallback:      cfg.Fetcher.Native.JinaFallback,
@@ -365,6 +370,11 @@ func newDispatcher(cfg config.Config, home *curiohome.Home) (fetcher.Dispatcher,
 		Backend:           cfg.Fetcher.Native.Backend,
 		Log:               slog.Default(),
 	})
+}
+
+// newDispatcher builds the fetcher registry and routing rules around
+// nativeFetcher.
+func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetcher.Native) (fetcher.Dispatcher, error) {
 	var defaultFetcher fetcher.Fetcher
 	switch cfg.Fetcher.Default {
 	case "native":

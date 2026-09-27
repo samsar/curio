@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
@@ -278,6 +279,18 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 		d.Embedder = pingingEmbedder{err: fmt.Errorf("%w: connection refused", ollama.ErrUnreachable)}
 		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
+		// Paused Jina, with every optional field set.
+		d.Upstreams = func() []fetcher.UpstreamHealth {
+			now := time.Now()
+			return []fetcher.UpstreamHealth{{
+				Name: "jina", Enabled: true, State: fetcher.UpstreamPaused,
+				LastSuccess: now.Add(-time.Hour), LastFailure: now.Add(-time.Minute),
+				LastFailureClass: fetcher.CallChallenged, Window: 15 * time.Minute,
+				Recent: map[fetcher.CallClass]int{fetcher.CallOK: 12, fetcher.CallJudged: 3,
+					fetcher.CallRefused: 2, fetcher.CallChallenged: 1},
+				CooldownUntil: now.Add(9 * time.Minute),
+			}}
+		}
 	})
 	f := seedContractFixtures(t, s)
 	doc := strictSpec(t)

@@ -97,7 +97,9 @@ paths:
         starting; both name the daemon that answered (pid, home). A ready
         daemon answers within about half a second whatever state Ollama is
         in: an unreachable or slow Ollama is reported in ollama_reachable
-        and ollama_detail, not as an error. A starting one answers at once.
+        and ollama_detail, not as an error, and the services fetches depend
+        on (the Jina Reader fallback) in upstreams. A starting one answers
+        at once.
       responses:
         "200":
           description: The daemon is ready
@@ -733,7 +735,69 @@ components:
         embedding_dim:    { type: integer }
         ollama_reachable: { type: boolean }
         ollama_detail:    { type: string, description: "Why Ollama isn't usable; present only when it isn't" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, ollama_reachable]
+        upstreams:
+          type: array
+          description: >
+            The services fetches depend on: today the Jina Reader fallback,
+            named jina. Empty when the daemon tracks none. A failing one
+            doesn't make the daemon unhealthy: status stays ok.
+          items: { $ref: "#/components/schemas/UpstreamHealth" }
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, ollama_reachable, upstreams]
+
+    UpstreamHealth:
+      description: >
+        How an upstream's recent requests went. The daemon keeps it in
+        memory from its start, one outcome per request: a healthy answer
+        (ok, judged, refused) or a service-level failure (every other
+        class).
+      type: object
+      properties:
+        name:    { type: string, description: "The upstream: jina, the Jina Reader fallback" }
+        enabled: { type: boolean, description: "Whether it is configured on (fetcher.native.jina_fallback for jina)" }
+        state:
+          type: string
+          enum: [disabled, idle, ok, degraded, paused, failing]
+          description: |
+            The first of these that holds:
+              - disabled: configured off.
+              - failing: nothing but failures since its last healthy answer, on two or more target hosts, and either 5 of them or over 30 minutes; it lasts until the next healthy answer, however long that takes.
+              - paused: calls are held back until cooldown_until, after a rate limit or a challenge.
+              - idle: no calls in the window.
+              - degraded: at least a quarter of the calls in the window failed.
+              - ok: calls in the window, less than a quarter of them failures.
+        last_success_at:
+          type: string
+          format: date-time
+          description: The last healthy answer; absent when there has been none since the daemon started.
+        last_failure_at:
+          type: string
+          format: date-time
+          description: The last service-level failure; absent when there has been none.
+        last_failure_class:
+          type: string
+          enum: [challenged, forbidden, rate_limited, auth, server_error, network]
+          description: |
+            The last failure's class, present with last_failure_at:
+              - challenged: the upstream's CDN took curio for a bot.
+              - forbidden: a 403 that names no target.
+              - rate_limited: a 429.
+              - auth: a 401 or 402, about curio's key or account.
+              - server_error: a 5xx, 408, 421 or 425, or an answer that is none (1xx, 3xx).
+              - network: no whole answer: a transport error, a timeout, a TLS failure, a body cut short.
+        window_seconds: { type: integer, description: "How far back recent looks, to the minute" }
+        recent:
+          type: object
+          description: |
+            Calls in the window per class; classes without calls are absent. The keys are the failure classes of last_failure_class and the healthy ones:
+              - ok: the upstream served the page.
+              - judged: it answered, and the answer is not the page (a challenge or login page, the target's error status, a body over the size cap).
+              - refused: it declined the target on purpose (a domain it blocks, a 4xx about the request).
+          additionalProperties: { type: integer }
+        cooldown_until:
+          type: string
+          format: date-time
+          description: When the pause in effect ends; present only while one is.
+      required: [name, enabled, state, window_seconds, recent]
 
     Starting:
       description: >

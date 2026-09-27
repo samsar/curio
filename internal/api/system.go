@@ -7,23 +7,65 @@ import (
 	"os"
 	"time"
 
+	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/version"
 )
 
 // Health is the /v1/healthz response. PID and Home identify which daemon
 // answered: clients use them to confirm the process on the port is the one
-// serving their $CURIO_HOME before trusting or signalling it.
+// serving their $CURIO_HOME before trusting or signalling it. Upstreams are
+// the services fetches depend on; like Ollama, a failing one doesn't make
+// the daemon unhealthy.
 type Health struct {
-	Status          string `json:"status"`
-	PID             int    `json:"pid"`
-	Home            string `json:"home"`
-	Version         string `json:"version"`
-	SchemaVersion   int    `json:"schema_version"`
-	EmbeddingModel  string `json:"embedding_model"`
-	EmbeddingDim    int    `json:"embedding_dim"`
-	OllamaReachable bool   `json:"ollama_reachable"`
-	OllamaDetail    string `json:"ollama_detail,omitempty"`
+	Status          string           `json:"status"`
+	PID             int              `json:"pid"`
+	Home            string           `json:"home"`
+	Version         string           `json:"version"`
+	SchemaVersion   int              `json:"schema_version"`
+	EmbeddingModel  string           `json:"embedding_model"`
+	EmbeddingDim    int              `json:"embedding_dim"`
+	OllamaReachable bool             `json:"ollama_reachable"`
+	OllamaDetail    string           `json:"ollama_detail,omitempty"`
+	Upstreams       []UpstreamHealth `json:"upstreams"`
+}
+
+// UpstreamHealth is an upstream's health on the wire (fetcher.UpstreamHealth).
+// Times are UTC, and the ones that aren't set are omitted.
+type UpstreamHealth struct {
+	Name             string         `json:"name"`
+	Enabled          bool           `json:"enabled"`
+	State            string         `json:"state"`
+	LastSuccessAt    time.Time      `json:"last_success_at,omitzero"`
+	LastFailureAt    time.Time      `json:"last_failure_at,omitzero"`
+	LastFailureClass string         `json:"last_failure_class,omitempty"`
+	WindowSeconds    int            `json:"window_seconds"`
+	Recent           map[string]int `json:"recent"`
+	CooldownUntil    time.Time      `json:"cooldown_until,omitzero"`
+}
+
+// upstreams reports the health of each upstream the daemon tracks: an
+// empty list, never null, when it tracks none.
+func (d Deps) upstreams() []UpstreamHealth {
+	var tracked []fetcher.UpstreamHealth
+	if d.Upstreams != nil {
+		tracked = d.Upstreams()
+	}
+	out := make([]UpstreamHealth, 0, len(tracked))
+	for _, u := range tracked {
+		out = append(out, UpstreamHealth{
+			Name:             u.Name,
+			Enabled:          u.Enabled,
+			State:            string(u.State),
+			LastSuccessAt:    u.LastSuccess.UTC(),
+			LastFailureAt:    u.LastFailure.UTC(),
+			LastFailureClass: string(u.LastFailureClass),
+			WindowSeconds:    int(u.Window / time.Second),
+			Recent:           stringKeys(u.Recent),
+			CooldownUntil:    u.CooldownUntil.UTC(),
+		})
+	}
+	return out
 }
 
 // ollamaPingTimeout caps the Ollama check in /v1/healthz, the only part of
@@ -71,6 +113,7 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		EmbeddingDim:    meta.EmbeddingDim,
 		OllamaReachable: reachable,
 		OllamaDetail:    detail,
+		Upstreams:       d.upstreams(),
 	})
 }
 

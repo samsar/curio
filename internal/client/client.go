@@ -34,18 +34,59 @@ func New(baseURL string) *Client {
 }
 
 // Health mirrors api.Health. PID and Home are zero for a daemon that
-// predates them, which also means it holds no single-instance lock.
+// predates them, which also means it holds no single-instance lock, and
+// Upstreams is nil for one that predates it.
 type Health struct {
-	Status          string `json:"status"`
-	PID             int    `json:"pid,omitempty"`
-	Home            string `json:"home,omitempty"`
-	Version         string `json:"version"`
-	SchemaVersion   int    `json:"schema_version"`
-	EmbeddingModel  string `json:"embedding_model"`
-	EmbeddingDim    int    `json:"embedding_dim"`
-	OllamaReachable bool   `json:"ollama_reachable"`
-	OllamaDetail    string `json:"ollama_detail,omitempty"`
+	Status          string           `json:"status"`
+	PID             int              `json:"pid,omitempty"`
+	Home            string           `json:"home,omitempty"`
+	Version         string           `json:"version"`
+	SchemaVersion   int              `json:"schema_version"`
+	EmbeddingModel  string           `json:"embedding_model"`
+	EmbeddingDim    int              `json:"embedding_dim"`
+	OllamaReachable bool             `json:"ollama_reachable"`
+	OllamaDetail    string           `json:"ollama_detail,omitempty"`
+	Upstreams       []UpstreamHealth `json:"upstreams,omitempty"`
 }
+
+// UpstreamHealth mirrors api.UpstreamHealth: how the requests to a service
+// fetches depend on have gone. Unset times are zero.
+type UpstreamHealth struct {
+	Name             string         `json:"name"`
+	Enabled          bool           `json:"enabled"`
+	State            string         `json:"state"`
+	LastSuccessAt    time.Time      `json:"last_success_at,omitzero"`
+	LastFailureAt    time.Time      `json:"last_failure_at,omitzero"`
+	LastFailureClass string         `json:"last_failure_class,omitempty"`
+	WindowSeconds    int            `json:"window_seconds"`
+	Recent           map[string]int `json:"recent,omitempty"`
+	CooldownUntil    time.Time      `json:"cooldown_until,omitzero"`
+}
+
+// Upstream states a daemon reports, mirroring the fetcher's. A daemon may
+// report one this client doesn't know.
+const (
+	UpstreamDisabled = "disabled"
+	UpstreamIdle     = "idle"
+	UpstreamOK       = "ok"
+	UpstreamDegraded = "degraded"
+	UpstreamPaused   = "paused"
+	UpstreamFailing  = "failing"
+)
+
+// Call classes a daemon counts an upstream's requests by, mirroring the
+// fetcher's: three healthy answers, then the failures.
+const (
+	CallOK          = "ok"
+	CallJudged      = "judged"
+	CallRefused     = "refused"
+	CallChallenged  = "challenged"
+	CallForbidden   = "forbidden"
+	CallRateLimited = "rate_limited"
+	CallAuth        = "auth"
+	CallServerError = "server_error"
+	CallNetwork     = "network"
+)
 
 // healthzTimeout bounds Healthz. A ready daemon answers well within it
 // whatever state Ollama is in, because the handler gives up on its Ollama
