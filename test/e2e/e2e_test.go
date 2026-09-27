@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -68,37 +69,56 @@ func buildAndRun(m *testing.M) int {
 	return m.Run()
 }
 
-// fakeOllama answers /api/tags with the default embedding model and
-// /api/embed with deterministic vectors, counting document and query
-// embeddings by their task prefix.
+// fakeOllama is Ollama at version with the default embedding model pulled
+// as digest: /api/version, /api/tags, and /api/embed with deterministic
+// vectors dim wide, counting document and query embeddings (a query
+// carries the default query instruction).
 type fakeOllama struct {
 	t                      *testing.T
 	model                  string
+	dim                    int
+	digest, version        string
 	docEmbeds, queryEmbeds atomic.Int32
+}
+
+// Builds of Ollama and of the embedding model the fake can serve.
+const (
+	digestA = "sha256:0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f"
+	digestB = "sha256:ac6da0dfba84d0b5b1f23d8e5b8b0e0e4f1b1e3c2f4a5b6c7d8e9f0a1b2c3d4e"
+)
+
+// serveOllama starts a fakeOllama at version, with the default embedding
+// model pulled as digest, until the test ends, and returns it and its URL.
+func serveOllama(t *testing.T, digest, version string) (*fakeOllama, string) {
+	t.Helper()
+	defaults := config.Default().Embedding
+	f := &fakeOllama{t: t, model: defaults.Model, dim: defaults.Dim, digest: digest, version: version}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	return f, srv.URL
 }
 
 func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
+	case "/api/version":
+		fmt.Fprintf(w, `{"version":%q}`, f.version)
 	case "/api/tags":
-		fmt.Fprintf(w, `{"models":[{"name":%q,"model":%q}]}`, f.model+":latest", f.model+":latest")
+		fmt.Fprintf(w, `{"models":[{"name":%q,"model":%q,"digest":%q}]}`, f.model, f.model, f.digest)
 	case "/api/embed":
-		var req struct {
-			Input []string `json:"input"`
-		}
-		if !assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req)) {
-			http.Error(w, "bad request", http.StatusBadRequest)
+		req, ok := f.embedRequest(w, r)
+		if !ok {
 			return
 		}
 		var resp struct {
 			Embeddings [][]float32 `json:"embeddings"`
 		}
 		for _, text := range req.Input {
-			if strings.HasPrefix(text, "search_query: ") {
+			if strings.HasPrefix(text, config.Default().Embedding.QueryPrefix) {
 				f.queryEmbeds.Add(1)
 			} else {
 				f.docEmbeds.Add(1)
 			}
-			resp.Embeddings = append(resp.Embeddings, embed(text))
+			resp.Embeddings = append(resp.Embeddings, embed(text, f.dim))
 		}
 		assert.NoError(f.t, json.NewEncoder(w).Encode(resp))
 	default:
@@ -106,12 +126,42 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// embed is a bag-of-words embedding: each word adds weight to one hashed
-// dimension, so texts that share words land close together. Unit length.
-func embed(text string) []float32 {
-	v := make([]float32, store.EmbeddingDim)
+// embedRequest reads an /api/embed request as the daemon must send it:
+// truncate false, which Ollama defaults to true, and a keep_alive. Without
+// truncate false it answers 400, as a real Ollama would for an input past
+// the context, so a daemon that let Ollama truncate fails the test.
+func (f *fakeOllama) embedRequest(w http.ResponseWriter, r *http.Request) (embedRequest, bool) {
+	var req embedRequest
+	body, err := io.ReadAll(r.Body)
+	if !assert.NoError(f.t, err) {
+		http.Error(w, `{"error":"unreadable request"}`, http.StatusBadRequest)
+		return req, false
+	}
+	var raw map[string]json.RawMessage
+	if !assert.NoError(f.t, json.Unmarshal(body, &raw)) || !assert.NoError(f.t, json.Unmarshal(body, &req)) {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return req, false
+	}
+	if string(raw["truncate"]) != "false" {
+		http.Error(w, `{"error":"the input length exceeds the context length"}`, http.StatusBadRequest)
+		return req, false
+	}
+	assert.NotEmpty(f.t, raw["keep_alive"], "every embed request keeps the model loaded")
+	return req, true
+}
+
+// embedRequest is the part of an /api/embed request the fake embeds.
+type embedRequest struct {
+	Input []string `json:"input"`
+}
+
+// embed is a dim-wide bag-of-words embedding: each word adds weight to one
+// hashed dimension, so texts that share words land close together. Unit
+// length.
+func embed(text string, dim int) []float32 {
+	v := make([]float32, dim)
 	for word := range strings.FieldsSeq(strings.ToLower(text)) {
-		v[crc32.ChecksumIEEE([]byte(word))%store.EmbeddingDim]++
+		v[int(crc32.ChecksumIEEE([]byte(word)))%dim]++
 	}
 	var sum float64
 	for _, x := range v {
@@ -189,9 +239,7 @@ func logTail(home *curiohome.Home) string {
 
 func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	ctx := context.Background()
-	ollama := &fakeOllama{t: t, model: config.Default().Embedding.Model}
-	ollamaSrv := httptest.NewServer(ollama)
-	t.Cleanup(ollamaSrv.Close)
+	ollama, ollamaURL := serveOllama(t, digestA, "0.34.4")
 	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, articleHTML())
@@ -199,7 +247,7 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	t.Cleanup(pages.Close)
 
 	listen := freeLoopbackAddr(t)
-	home := newHome(t, listen, ollamaSrv.URL)
+	home := newHome(t, listen, ollamaURL)
 	baseURL := "http://" + listen
 	ctl := daemonctl.New(home, daemonBin, baseURL)
 	t.Cleanup(func() {
@@ -218,6 +266,13 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, st.PID, health.PID, "healthz names the daemon holding the lock")
 	assert.True(t, daemonctl.SameHome(home.Path, health.Home), "served %s", health.Home)
+	assert.Nil(t, health.EmbeddingDrift)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		meta, err := home.Meta()
+		require.NoError(c, err)
+		assert.Equal(c, digestA, meta.EmbeddingModelDigest)
+		assert.Equal(c, "0.34.4", meta.OllamaVersion)
+	}, 10*time.Second, 50*time.Millisecond, "the daemon records the build that makes the embeddings")
 
 	created, err := c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: pages.URL + "/zymurgy"})
 	require.NoError(t, err)
@@ -263,9 +318,7 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 // fetched until the queue is resumed.
 func TestDaemon_PauseHoldsTheQueueAcrossARestart(t *testing.T) {
 	ctx := context.Background()
-	ollama := &fakeOllama{t: t, model: config.Default().Embedding.Model}
-	ollamaSrv := httptest.NewServer(ollama)
-	t.Cleanup(ollamaSrv.Close)
+	_, ollamaURL := serveOllama(t, digestA, "0.34.4")
 	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, articleHTML())
@@ -273,7 +326,7 @@ func TestDaemon_PauseHoldsTheQueueAcrossARestart(t *testing.T) {
 	t.Cleanup(pages.Close)
 
 	listen := freeLoopbackAddr(t)
-	home := newHome(t, listen, ollamaSrv.URL)
+	home := newHome(t, listen, ollamaURL)
 	baseURL := "http://" + listen
 	ctl := daemonctl.New(home, daemonBin, baseURL)
 	t.Cleanup(func() {
@@ -328,6 +381,88 @@ func TestDaemon_PauseHoldsTheQueueAcrossARestart(t *testing.T) {
 	stopped, err = ctl.Stop(ctx)
 	require.NoError(t, err)
 	assert.True(t, stopped)
+}
+
+// TestDaemon_ReportsEmbeddingDriftUntilReindexed: a library indexed under
+// one build of the embedding model and Ollama, served by another, is
+// reported drifted, and the daemon reindexes nothing by itself. `reindex
+// --all` re-embeds it and makes the build serving now the baseline.
+func TestDaemon_ReportsEmbeddingDriftUntilReindexed(t *testing.T) {
+	ctx := context.Background()
+	_, ollamaURL := serveOllama(t, digestB, "0.34.4")
+	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, articleHTML())
+	}))
+	t.Cleanup(pages.Close)
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen, ollamaURL)
+	meta, err := home.Meta()
+	require.NoError(t, err)
+	meta.EmbeddingModelDigest, meta.OllamaVersion = digestA, "0.30.0"
+	require.NoError(t, home.WriteMeta(meta))
+	baseURL := "http://" + listen
+	ctl := daemonctl.New(home, daemonBin, baseURL)
+	t.Cleanup(func() {
+		if st, err := ctl.Status(context.Background()); err == nil && st.State == daemonctl.Running && st.PID > 0 {
+			_ = syscall.Kill(st.PID, syscall.SIGKILL)
+		}
+	})
+	c := client.New(baseURL)
+
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+	var health *client.Health
+	require.Eventually(t, func() bool {
+		health, err = c.Healthz(ctx)
+		return err == nil && health.EmbeddingDrift != nil
+	}, 10*time.Second, 50*time.Millisecond, logTail(home))
+	assert.Equal(t, "ok", health.Status)
+	assert.Equal(t, []client.DriftChange{
+		{What: client.DriftModelDigest, Recorded: digestA, Current: digestB},
+		{What: client.DriftOllamaVersion, Recorded: "0.30.0", Current: "0.34.4"},
+	}, health.EmbeddingDrift.Changes)
+	assert.Equal(t, "curio reindex --all", health.EmbeddingDrift.Fix)
+
+	// A document indexed under the drift: the only index job is its own.
+	created, err := c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: pages.URL + "/zymurgy"})
+	require.NoError(t, err)
+	require.NotNil(t, created.Bookmark.DocumentID)
+	require.Eventually(t, func() bool {
+		d, err := c.GetDocument(ctx, *created.Bookmark.DocumentID)
+		return err == nil && d.State == string(store.DocStateFetched)
+	}, 30*time.Second, 50*time.Millisecond, logTail(home))
+	assert.Equal(t, 1, indexJobs(t, home), "the daemon never reindexes by itself")
+
+	reindexed, err := c.ReindexAll(ctx, "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, reindexed.JobsEnqueued)
+	// The reindex clears the baseline before it answers; the check it
+	// triggers records the build now serving in its own time.
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		meta, err := home.Meta()
+		require.NoError(c, err)
+		assert.Equal(c, digestB, meta.EmbeddingModelDigest)
+		assert.Equal(c, "0.34.4", meta.OllamaVersion)
+	}, 10*time.Second, 50*time.Millisecond, "reindex-all makes the build serving now the baseline")
+	health, err = c.Healthz(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, health.EmbeddingDrift)
+
+	stopped, err := ctl.Stop(ctx)
+	require.NoError(t, err)
+	assert.True(t, stopped)
+}
+
+// indexJobs counts the index jobs in home's database, which a running
+// daemon's WAL lets another connection read.
+func indexJobs(t *testing.T, home *curiohome.Home) int {
+	t.Helper()
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindIndex).Scan(&n))
+	return n
 }
 
 // migratedTo brings home's database to version, as an older curio would

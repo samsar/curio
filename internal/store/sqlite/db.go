@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,6 +198,33 @@ func pendingMigrations(ctx context.Context, provider *goose.Provider) ([]Migrati
 		}
 	}
 	return pending, nil
+}
+
+// sqlite-vec reports its own build through SQL functions.
+const (
+	vecVersionSQL = `SELECT vec_version()`
+	// vecDebugSQL's answer has a "Build flags:" line listing the SIMD
+	// kernels compiled in: "neon", "avx", or nothing for the scalar loop.
+	vecDebugSQL = `SELECT vec_debug()`
+)
+
+// VectorExtension reports the sqlite-vec this binary links: its version,
+// and the build flags vec_debug() lists, space-separated ("neon" when its
+// NEON distance kernels are compiled in, "" for the scalar ones).
+func VectorExtension(ctx context.Context, db *DB) (version, buildFlags string, err error) {
+	if err := db.QueryRowContext(ctx, vecVersionSQL).Scan(&version); err != nil {
+		return "", "", fmt.Errorf("read sqlite-vec version: %w", err)
+	}
+	var debug string
+	if err := db.QueryRowContext(ctx, vecDebugSQL).Scan(&debug); err != nil {
+		return "", "", fmt.Errorf("read sqlite-vec build: %w", err)
+	}
+	for line := range strings.Lines(debug) {
+		if flags, ok := strings.CutPrefix(line, "Build flags:"); ok {
+			return version, strings.Join(strings.Fields(flags), " "), nil
+		}
+	}
+	return "", "", fmt.Errorf("sqlite-vec's vec_debug() lists no build flags: %q", debug)
 }
 
 // Path returns the path Open was called with.

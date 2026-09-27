@@ -39,7 +39,7 @@ func TestResolve_EnvOverrideMakesRelativeAbsolute(t *testing.T) {
 
 func TestInit_CreatesMarkerAndSubdirs(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "fresh")
-	h, err := Init(dir, "nomic-embed-text", 768)
+	h, err := Init(dir, "qwen3-embedding:0.6b", 1024)
 	require.NoError(t, err)
 
 	assert.FileExists(t, h.MarkerPath())
@@ -48,9 +48,12 @@ func TestInit_CreatesMarkerAndSubdirs(t *testing.T) {
 
 	m, err := h.Meta()
 	require.NoError(t, err)
+	assert.Equal(t, CurrentFormat, m.Format)
 	assert.Equal(t, CurrentSchemaVersion, m.SchemaVersion)
-	assert.Equal(t, "nomic-embed-text", m.EmbeddingModel)
-	assert.Equal(t, 768, m.EmbeddingDim)
+	assert.Equal(t, "qwen3-embedding:0.6b", m.EmbeddingModel)
+	assert.Equal(t, 1024, m.EmbeddingDim)
+	assert.Empty(t, m.EmbeddingModelDigest, "the daemon records the fingerprint, not Init")
+	assert.Empty(t, m.OllamaVersion)
 	assert.False(t, m.CreatedAt.IsZero())
 	assert.False(t, m.UpdatedAt.IsZero())
 }
@@ -107,26 +110,152 @@ func TestWriteMeta_AtomicAndRoundTrips(t *testing.T) {
 
 	stale := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	updated := Meta{
-		SchemaVersion:  2,
-		EmbeddingModel: "voyage-3",
-		EmbeddingDim:   1024,
-		CreatedAt:      stale,
-		UpdatedAt:      stale,
+		Format:               CurrentFormat,
+		SchemaVersion:        2,
+		EmbeddingModel:       "voyage-3",
+		EmbeddingDim:         1024,
+		EmbeddingModelDigest: "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+		OllamaVersion:        "0.34.4",
+		CreatedAt:            stale,
+		UpdatedAt:            stale,
 	}
 	before := time.Now().UTC()
 	require.NoError(t, h.WriteMeta(updated))
 
 	got, err := h.Meta()
 	require.NoError(t, err)
-	assert.Equal(t, 2, got.SchemaVersion)
-	assert.Equal(t, "voyage-3", got.EmbeddingModel)
-	assert.Equal(t, 1024, got.EmbeddingDim)
-	assert.Equal(t, stale, got.CreatedAt, "CreatedAt is the caller's")
 	assert.False(t, got.UpdatedAt.Before(before), "every write stamps UpdatedAt, whatever the caller passed")
+	got.UpdatedAt = stale
+	assert.Equal(t, updated, got, "every other field round-trips, CreatedAt included")
 
 	// No leftover .tmp file
 	_, err = os.Stat(h.MarkerPath() + ".tmp")
 	assert.ErrorIs(t, err, fs.ErrNotExist, "tmp file should not remain after successful rename")
+}
+
+// TestWriteMeta_FingerprintOmittedUntilRecorded: a marker without a
+// fingerprint doesn't carry empty fingerprint keys.
+func TestWriteMeta_FingerprintOmittedUntilRecorded(t *testing.T) {
+	h, err := Init(t.TempDir(), "m", 1)
+	require.NoError(t, err)
+	raw, err := os.ReadFile(h.MarkerPath())
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"format": 2`)
+	assert.NotContains(t, string(raw), "embedding_model_digest")
+	assert.NotContains(t, string(raw), "ollama_version")
+}
+
+// legacyMarker is a marker as curio wrote it before home formats: no
+// format key.
+const legacyMarker = `{
+  "schema_version": 11,
+  "embedding_model": "nomic-embed-text",
+  "embedding_dim": 768,
+  "created_at": "2026-05-23T10:00:00Z",
+  "updated_at": "2026-09-27T10:00:00Z"
+}
+`
+
+// legacyHome is a home whose marker predates home formats.
+func legacyHome(t *testing.T) *Home {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, MarkerFile), []byte(legacyMarker), 0o600))
+	h, err := Open(dir)
+	require.NoError(t, err, "a legacy home still opens")
+	return h
+}
+
+func TestMeta_CheckEmbedding(t *testing.T) {
+	current := Meta{Format: CurrentFormat, EmbeddingModel: "qwen3-embedding:0.6b", EmbeddingDim: 1024}
+	cases := []struct {
+		name         string
+		meta         Meta
+		model        string
+		dim          int
+		wantLegacy   bool
+		wantMismatch bool
+	}{
+		{"matches", current, "qwen3-embedding:0.6b", 1024, false, false},
+		{"another model", current, "mxbai-embed-large", 1024, false, true},
+		{"another width", current, "qwen3-embedding:0.6b", 768, false, true},
+		{"no format, matching", Meta{EmbeddingModel: "nomic-embed-text", EmbeddingDim: 768}, "nomic-embed-text", 768, true, false},
+		{"older format, mismatched", Meta{Format: 1, EmbeddingModel: "nomic-embed-text", EmbeddingDim: 768},
+			"qwen3-embedding:0.6b", 1024, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.meta.CheckEmbedding(tc.model, tc.dim)
+			assert.NotErrorIs(t, err, ErrNewerHome)
+			assert.Equal(t, tc.wantLegacy, errors.Is(err, ErrLegacyHome), "legacy: %v", err)
+			var mismatch *EmbeddingMismatchError
+			assert.Equal(t, tc.wantMismatch, errors.As(err, &mismatch), "mismatch: %v", err)
+			if tc.wantMismatch {
+				assert.Equal(t, Embedding{Model: tc.meta.EmbeddingModel, Dim: tc.meta.EmbeddingDim}, mismatch.Recorded)
+				assert.Equal(t, Embedding{Model: tc.model, Dim: tc.dim}, mismatch.Configured)
+			}
+			if !tc.wantLegacy && !tc.wantMismatch {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestHome_CheckEmbedding_Newer: a marker past CurrentFormat, from a newer
+// curio, is refused before its embedding is compared, and the refusal says
+// to upgrade.
+func TestHome_CheckEmbedding_Newer(t *testing.T) {
+	h, err := Init(t.TempDir(), "qwen3-embedding:0.6b", 1024)
+	require.NoError(t, err)
+	meta, err := h.Meta()
+	require.NoError(t, err)
+	meta.Format = CurrentFormat + 1
+	require.NoError(t, h.WriteMeta(meta))
+
+	_, err = h.CheckEmbedding("qwen3-embedding:0.6b", 1024)
+	require.ErrorIs(t, err, ErrNewerHome)
+	assert.NotErrorIs(t, err, ErrLegacyHome)
+	assert.Contains(t, err.Error(), "Upgrade curio")
+}
+
+// TestHome_CheckEmbedding_Legacy: the refusal of a legacy home names the
+// home, its marker, what the marker records and the fix, deleting nothing.
+func TestHome_CheckEmbedding_Legacy(t *testing.T) {
+	h := legacyHome(t)
+	_, err := h.CheckEmbedding("nomic-embed-text", 768)
+	require.ErrorIs(t, err, ErrLegacyHome)
+	for _, want := range []string{
+		h.Path + " was made before home format 2", h.MarkerPath(), `"nomic-embed-text" (dim 768)`,
+		"`curio up --fresh`", h.Path + ".bak-<YYYYMMDD-HHMMSS>", "deletes nothing", "move it aside yourself",
+		"import your bookmarks again",
+	} {
+		assert.Contains(t, err.Error(), want)
+	}
+	_, err = os.Stat(h.MarkerPath())
+	require.NoError(t, err, "the check changes nothing")
+}
+
+// TestHome_CheckEmbedding_Mismatch: the refusal names config.yaml and the
+// marker, both model/dim pairs, and both fixes.
+func TestHome_CheckEmbedding_Mismatch(t *testing.T) {
+	h, err := Init(t.TempDir(), "qwen3-embedding:0.6b", 1024)
+	require.NoError(t, err)
+
+	meta, err := h.CheckEmbedding("qwen3-embedding:0.6b", 1024)
+	require.NoError(t, err)
+	assert.Equal(t, 1024, meta.EmbeddingDim)
+
+	_, err = h.CheckEmbedding("nomic-embed-text", 768)
+	var mismatch *EmbeddingMismatchError
+	require.ErrorAs(t, err, &mismatch)
+	for _, want := range []string{
+		`configured "nomic-embed-text" (dim 768)`, `made with "qwen3-embedding:0.6b" (dim 1024)`,
+		h.ConfigPath(), h.MarkerPath(), "Set embedding.model and embedding.dim back to the recorded values",
+		"`curio up --fresh`", "deletes nothing",
+	} {
+		assert.Contains(t, err.Error(), want)
+	}
+	assert.NotContains(t, err.Error(), "Embedding model swap")
 }
 
 func TestPathHelpers(t *testing.T) {

@@ -313,11 +313,18 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 
 // handleReindexAll enqueues index jobs for the documents in one state that
 // have content. Defaults to state=fetched (the already-indexed set); ?state=
-// overrides, validated as for refetch-all.
-// Use after swapping the embedding model (same dimension) or the chunker.
+// overrides, validated as for refetch-all. Use after the embedding build
+// drifted (healthz embedding_drift), or after changing the chunker or the
+// prompts.
 //
 // Index jobs change no document state, so a partial run strands nothing;
 // it stops at the first failure and reports how far it got.
+//
+// For state=fetched it then resets the embedding drift baseline: the fetched
+// documents are every searchable one with content (failed and dead ones are
+// never searched), so once their jobs are in, the whole library is being
+// re-embedded by the build serving now. Vectors from both builds mix until
+// the jobs finish.
 func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	state, err := docStateParam(r)
 	if err != nil {
@@ -335,6 +342,13 @@ func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	for i, id := range ids {
 		if _, err := d.enqueueIndex(r.Context(), id); err != nil {
 			d.writeError(w, r, fmt.Errorf("enqueued %d of %d index jobs before failing: %w", i, len(ids), err))
+			return
+		}
+	}
+	if state == store.DocStateFetched && d.Drift != nil {
+		if err := d.Drift.Rebaseline(); err != nil {
+			d.writeError(w, r, fmt.Errorf("enqueued all %d index jobs, but resetting the embedding drift baseline "+
+				"failed: %w", len(ids), err))
 			return
 		}
 	}

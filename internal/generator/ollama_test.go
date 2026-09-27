@@ -2,6 +2,7 @@ package generator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -44,7 +45,7 @@ func newFakeOllama(t *testing.T, handle func(w http.ResponseWriter, r *http.Requ
 func newGen(t *testing.T, opts OllamaOptions) *Ollama {
 	t.Helper()
 	if opts.Model == "" {
-		opts.Model = "llama3.2"
+		opts.Model = "qwen3:4b-instruct"
 	}
 	g, err := NewOllama(opts)
 	require.NoError(t, err)
@@ -72,6 +73,36 @@ func TestGenerate_Success(t *testing.T) {
 	assert.Equal(t, "NAME: Go", got)
 }
 
+// TestGenerate_RequestTurnsThinkingOff pins what every /api/generate body
+// carries, on the first attempt and on a retry, read from the raw JSON so a
+// missing key fails: think false, which Ollama would otherwise take as on
+// for a model that thinks, and an explicit num_ctx.
+func TestGenerate_RequestTurnsThinkingOff(t *testing.T) {
+	bodies := make(chan map[string]json.RawMessage, 2)
+	f := newFakeOllama(t, func(w http.ResponseWriter, r *http.Request, call int, release <-chan struct{}) {
+		var raw map[string]json.RawMessage
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&raw))
+		bodies <- raw
+		if call == 1 {
+			status(http.StatusServiceUnavailable, "loading")(w, r, call, release)
+			return
+		}
+		reply("NAME: Go")(w, r, call, release)
+	})
+
+	_, err := newGen(t, OllamaOptions{BaseURL: f.url}).Generate(context.Background(), "p",
+		Options{Temperature: 0.2, MaxTokens: 120})
+	require.NoError(t, err)
+	require.Len(t, bodies, 2, "the first attempt and one retry")
+	for range 2 {
+		body := <-bodies
+		assert.JSONEq(t, `"qwen3:4b-instruct"`, string(body["model"]))
+		assert.JSONEq(t, `false`, string(body["think"]), "think is always sent, as false")
+		assert.JSONEq(t, `false`, string(body["stream"]))
+		assert.JSONEq(t, `{"num_ctx":8192,"temperature":0.2,"num_predict":120}`, string(body["options"]))
+	}
+}
+
 func TestGenerate_ClientErrorsAreNotRetried(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -80,7 +111,7 @@ func TestGenerate_ClientErrorsAreNotRetried(t *testing.T) {
 		notLoaded   bool
 		wantInError string
 	}{
-		{"model not found", http.StatusNotFound, `{"error":"model 'llama3.2' not found"}`, true, "not found"},
+		{"model not found", http.StatusNotFound, `{"error":"model 'qwen3:4b-instruct' not found"}`, true, "not found"},
 		{"bad request", http.StatusBadRequest, `{"error":"invalid options"}`, false, "invalid options"},
 	}
 	for _, tc := range cases {

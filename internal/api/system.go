@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/version"
@@ -16,7 +17,7 @@ import (
 // answered: clients use them to confirm the process on the port is the one
 // serving their $CURIO_HOME before trusting or signalling it. Upstreams are
 // the services fetches depend on; like Ollama, a failing one doesn't make
-// the daemon unhealthy.
+// the daemon unhealthy, and neither does EmbeddingDrift.
 type Health struct {
 	Status          string           `json:"status"`
 	PID             int              `json:"pid"`
@@ -25,9 +26,52 @@ type Health struct {
 	SchemaVersion   int              `json:"schema_version"`
 	EmbeddingModel  string           `json:"embedding_model"`
 	EmbeddingDim    int              `json:"embedding_dim"`
+	EmbeddingDrift  *EmbeddingDrift  `json:"embedding_drift,omitempty"`
 	OllamaReachable bool             `json:"ollama_reachable"`
 	OllamaDetail    string           `json:"ollama_detail,omitempty"`
 	Upstreams       []UpstreamHealth `json:"upstreams"`
+}
+
+// EmbeddingDrift says what changed in the build that makes the home's
+// embeddings (drift.Report), present only while it differs from the build
+// recorded when the library was indexed.
+type EmbeddingDrift struct {
+	Changes   []DriftChange `json:"changes"`
+	Fix       string        `json:"fix"`
+	CheckedAt time.Time     `json:"checked_at"`
+}
+
+// DriftChange is one changed part of the build (drift.Change).
+type DriftChange struct {
+	What     string `json:"what"`
+	Recorded string `json:"recorded"`
+	Current  string `json:"current"`
+}
+
+// DriftMonitor watches the build that makes the home's embeddings: the
+// daemon's is a *drift.Monitor.
+type DriftMonitor interface {
+	// Report is the last check's finding; no Ollama call.
+	Report() drift.Report
+	// Rebaseline makes the build serving now the recorded one.
+	Rebaseline() error
+}
+
+// embeddingDrift is the drift the monitor last found, or nil when there is
+// none or no monitor.
+func (d Deps) embeddingDrift() *EmbeddingDrift {
+	if d.Drift == nil {
+		return nil
+	}
+	r := d.Drift.Report()
+	if !r.Drifted() {
+		return nil
+	}
+	changes := make([]DriftChange, 0, len(r.Changes))
+	for _, c := range r.Changes {
+		changes = append(changes, DriftChange{What: c.What, Recorded: c.Recorded, Current: c.Current})
+	}
+	return &EmbeddingDrift{Changes: changes, Fix: drift.Fix, CheckedAt: r.CheckedAt.UTC()}
 }
 
 // UpstreamHealth is an upstream's health on the wire (fetcher.UpstreamHealth).
@@ -111,6 +155,7 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		SchemaVersion:   meta.SchemaVersion,
 		EmbeddingModel:  meta.EmbeddingModel,
 		EmbeddingDim:    meta.EmbeddingDim,
+		EmbeddingDrift:  d.embeddingDrift(),
 		OllamaReachable: reachable,
 		OllamaDetail:    detail,
 		Upstreams:       d.upstreams(),

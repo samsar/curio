@@ -99,9 +99,10 @@ paths:
         starting; both name the daemon that answered (pid, home). A ready
         daemon answers within about half a second whatever state Ollama is
         in: an unreachable or slow Ollama is reported in ollama_reachable
-        and ollama_detail, not as an error, and the services fetches depend
-        on (the Jina Reader fallback) in upstreams. A starting one answers
-        at once.
+        and ollama_detail, not as an error, the services fetches depend
+        on (the Jina Reader fallback) in upstreams, and a change in the
+        build that makes the embeddings in embedding_drift. A starting one
+        answers at once.
       responses:
         "200":
           description: The daemon is ready
@@ -451,7 +452,14 @@ paths:
       description: >
         Index jobs change no document state, so a partial run strands
         nothing; a failure stops the run and the 500 says how many jobs were
-        enqueued before it. There is no parent job to poll.
+        enqueued before it. There is no parent job to poll. With
+        state=fetched, the default, the fetched documents are every
+        searchable one, so once all their jobs are enqueued the embedding
+        drift baseline is reset: the recorded model digest and Ollama
+        version are cleared, and the daemon's next check records the build
+        serving now, which clears embedding_drift on healthz. A failed
+        reset is a 500 whose detail says all the jobs were enqueued. Other
+        states leave the baseline alone.
       responses:
         "202":
           description: Index jobs enqueued
@@ -784,8 +792,9 @@ components:
         home:             { type: string, description: "Absolute $CURIO_HOME the answering daemon serves" }
         version:          { type: string }
         schema_version:   { type: integer }
-        embedding_model:  { type: string }
-        embedding_dim:    { type: integer }
+        embedding_model:  { type: string, description: "The model that made this home's vectors, as its marker records" }
+        embedding_dim:    { type: integer, description: "This home's vector width, fixed when it was created" }
+        embedding_drift:  { $ref: "#/components/schemas/EmbeddingDrift" }
         ollama_reachable: { type: boolean }
         ollama_detail:    { type: string, description: "Why Ollama isn't usable; present only when it isn't" }
         upstreams:
@@ -796,6 +805,34 @@ components:
             doesn't make the daemon unhealthy: status stays ok.
           items: { $ref: "#/components/schemas/UpstreamHealth" }
       required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, ollama_reachable, upstreams]
+
+    EmbeddingDrift:
+      description: >
+        Present only while the build that makes this home's embeddings
+        differs from the one recorded when the library was indexed: the
+        embedding model's manifest digest (what `ollama list` shows) or the
+        Ollama version. Either can change the vectors the model returns, so
+        new query vectors stop matching the stored ones. The daemon checks
+        once a minute; this is its last check, not a call made for the
+        request. It never reindexes by itself, and status stays ok.
+      type: object
+      properties:
+        changes:
+          type: array
+          items: { $ref: "#/components/schemas/DriftChange" }
+        fix:
+          type: string
+          description: "What re-embeds the library and resets the baseline: curio reindex --all"
+        checked_at: { type: string, format: date-time, description: "When the daemon last checked" }
+      required: [changes, fix, checked_at]
+
+    DriftChange:
+      type: object
+      properties:
+        what:     { type: string, enum: [model_digest, ollama_version] }
+        recorded: { type: string, description: "The value when the library was indexed" }
+        current:  { type: string, description: "The value serving now" }
+      required: [what, recorded, current]
 
     UpstreamHealth:
       description: >

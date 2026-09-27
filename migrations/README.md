@@ -48,10 +48,13 @@ and the daemon copies it into `~/.curio/.curio-meta.json` after migrating,
 as a cache for `/v1/healthz`, `curio version` and `curio doctor`. A
 migration never records the version itself.
 
-`schema_meta` holds the embedding model and dimension 001 hard-coded
-(`nomic-embed-text`, 768), whatever the home was configured with. Nothing
-reads it: the daemon checks the embedding model against the marker,
-`.curio-meta.json`.
+The embedding model and the vector width are the home's, recorded in its
+marker, `.curio-meta.json`, when the home is created; no table records
+them. 012 dropped `schema_meta`, which held the model and width 001
+hard-coded (`nomic-embed-text`, 768) and which nothing read. The daemon
+sizes `chunks_vec` from the marker after migrating
+(`sqlite.EnsureVectorIndex`), so the FLOAT[768] in 001 only ever describes
+an empty table.
 
 ## Adding a migration
 
@@ -74,9 +77,19 @@ reads it: the daemon checks the embedding model against the marker,
   like an ordinary migration, as 008 does for `chunks`: dropping a table
   nothing references runs no ON DELETE actions, and the version bump then
   commits with the rebuild.
-- **Changing embedding dimensions**: DROP and CREATE the `chunks_vec` table;
-  enqueue index jobs for every chunk. See
-  [`../docs/decisions.md#embedding-model-swap`](../docs/decisions.md#embedding-model-swap).
+- **Changing embedding dimensions**: not a migration. The width is each
+  home's, fixed when it is created: `sqlite.EnsureVectorIndex` creates
+  `chunks_vec` at the marker's width and refuses to rebuild one that holds
+  vectors, and another width means a new home. See
+  [`../docs/decisions.md#embedding-model-and-per-home-width`](../docs/decisions.md#embedding-model-and-per-home-width).
+- **Reshaping `chunks_vec`** (a column, a partition key, a distance
+  metric): not a SQL migration, which can't know the home's width. Its
+  definition lives in `internal/store/sqlite/vectors.go`
+  (`createVectorIndexPrefix`/`Suffix`), and every new database gets its
+  `chunks_vec` from there after the migrations run, recreating whatever
+  empty table they left: a reshape made only in a migration would be
+  undone on every new home. Change it there, and bring existing tables
+  along in that Go step.
 - **Changing the FTS5 tokenizer**: recreate `chunks_fts` with the new
   tokenizer and repopulate it with FTS5's rebuild command,
   `INSERT INTO chunks_fts (chunks_fts) VALUES ('rebuild')`. It is an

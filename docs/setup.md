@@ -20,22 +20,35 @@ Apple Silicon, which is noticeably faster than a containerized build.
 
 ```sh
 brew install ollama
-ollama serve &                    # background; or use the menu-bar app
-ollama pull nomic-embed-text      # 274 MB; embedding model (optional — see below)
-ollama list                       # verify
+ollama serve &                        # background; or use the menu-bar app
+ollama pull qwen3-embedding:0.6b      # 639 MB; the embedding model (optional — see below)
+ollama pull qwen3:4b-instruct         # 2.5 GB; the writing model, for interest labels
+ollama list                           # verify
 ```
 
-You can skip the `ollama pull` step: the daemon **auto-pulls** the models it
-needs — the embedding model (`nomic-embed-text`) and, when insight labeling
-is on, the generation model (`llama3.2`, ~2 GB). It pulls in the background
-and keeps retrying, 5 s after a failure and doubling up to every 5 minutes,
-until Ollama answers and the pull completes, so Ollama can start before or
-after the daemon. The first failure is logged at WARN in
-`~/.curio/logs/daemon.log`; retries, and the pulls they start, only at
-debug. Until the model is ready, index jobs retry with backoff and cluster
-labels fall back to term labels. Disable with `embedding.auto_pull: false`
-/ `generation.auto_pull: false` in `config.yaml` (e.g. on a metered
-connection), and pull manually instead.
+curio uses two models:
+
+| Model | Size | Used for |
+|---|---|---|
+| `qwen3-embedding:0.6b` | 639 MB (q8_0) | embedding chunks and queries: 1024-dimensional vectors, a 32K-token context |
+| `qwen3:4b-instruct` | 2.5 GB | naming and summarizing interests (`generation.model`; see "Change the writing model") |
+
+Always pull a tag. An untagged name means `:latest`, which moves when the
+library does, and for `qwen3-embedding` it is the 8B model, not the 0.6B
+one curio uses. curio compares names the way Ollama resolves them, so
+`qwen3-embedding` counts as missing when only `qwen3-embedding:0.6b` is
+pulled.
+
+You can skip the `ollama pull` steps: the daemon **auto-pulls** the models
+it needs — the embedding model and, when insight labeling is on, the
+writing model. It pulls in the background and keeps retrying, 5 s after a
+failure and doubling up to every 5 minutes, until Ollama answers and the
+pull completes, so Ollama can start before or after the daemon. The first
+failure is logged at WARN in `~/.curio/logs/daemon.log`; retries, and the
+pulls they start, only at debug. Until the model is ready, index jobs retry
+with backoff and cluster labels fall back to term labels. Disable with
+`embedding.auto_pull: false` / `generation.auto_pull: false` in
+`config.yaml` (e.g. on a metered connection), and pull manually instead.
 
 Alternative: install via the macOS app from ollama.com — same result, runs
 as a launchd service, less terminal management. Either way the daemon
@@ -44,13 +57,77 @@ listens on `http://localhost:11434`.
 ### Verify Ollama works
 
 ```sh
-curl -s http://localhost:11434/api/tags | jq
-# Should list nomic-embed-text under "models"
+curl -s http://localhost:11434/api/tags | jq '.models[].name'
+# Should list "qwen3-embedding:0.6b"
 
 curl -s http://localhost:11434/api/embed \
-  -d '{"model":"nomic-embed-text","input":["hello"]}' | jq '.embeddings[0] | length'
-# Should print 768
+  -d '{"model":"qwen3-embedding:0.6b","input":["hello"],"truncate":false}' | jq '.embeddings[0] | length'
+# Should print 1024
 ```
+
+### Ollama serves one request at a time
+
+`OLLAMA_NUM_PARALLEL`, how many requests Ollama runs at once per model,
+defaults to 1. The daemon's index workers (`daemon.index_workers`, 4 by
+default) then queue inside Ollama, and the time an embed request waits
+there counts against `embedding.timeout_seconds`. On a slow machine, where
+index jobs time out, lower `daemon.index_workers` or run `curio throttle
+gentle` (one index job at a time). Raise `OLLAMA_NUM_PARALLEL` only with
+memory to spare: each parallel slot holds its own context. curio doesn't
+manage Ollama's environment; set it where Ollama starts (`launchctl setenv
+OLLAMA_NUM_PARALLEL 2` for the app or `brew services`, then restart Ollama;
+or in the shell that runs `ollama serve`).
+
+### Change the writing model
+
+`generation.model` in `~/.curio/config.yaml` names the model that writes
+interest labels; curio sends it `think: false` and an explicit `num_ctx`
+on every request. Edit it and restart the daemon (`curio daemon stop`; the
+next command starts it). With `generation.auto_pull` on, the daemon pulls
+the new model in the background, and interests get term labels until it is
+ready. Nothing needs reindexing: the home records only the embedding model.
+
+Pick by the Mac's unified memory:
+
+| Memory | `generation.model` |
+|---|---|
+| 8 GB | `qwen3:4b-instruct` (the default) |
+| 16 GB | `gemma4:12b` |
+| 32 GB | `gemma4:26b-a4b-it-qat` |
+| 64 GB or more | `gemma4:26b` |
+
+A model that can't turn thinking off answers the request with an error,
+and its interests get term labels; pick another.
+
+### The embedding model is the home's
+
+The embedding model and the width of its vectors are fixed when a home is
+created and recorded in its marker, `.curio-meta.json`; the vector index
+takes that width. `embedding.model` and `embedding.dim` in `config.yaml`
+must match the marker, or the daemon refuses to start and `curio doctor`
+fails its `curio home` check, naming both files and both values. To use
+another embedding model, start a new home with `curio up --fresh` (or move
+`~/.curio` aside yourself) and import your bookmarks again.
+
+### Embedding drift
+
+The same model name can make different vectors after an Ollama upgrade or
+a pull that brings a new build of the model: Ollama 0.30 made
+nomic-embed-text lowercase its input, for one. New queries then stop
+matching the stored vectors, and search quietly gets worse. The daemon
+records the model's digest (what `ollama list` shows) and the Ollama
+version when it first reaches them, and checks every minute. When either
+changes, `curio status` prints a warning line, `curio doctor` warns and
+lists what changed, `/v1/healthz` reports `embedding_drift`, and the log
+has one warning. The fix is
+
+```sh
+curio reindex --all
+```
+
+which re-embeds every fetched document and takes the build serving now as
+the new baseline. Search mixes old and new vectors until the index jobs
+finish. The daemon never reindexes by itself.
 
 ## Fetcher options
 
@@ -238,7 +315,7 @@ while indexing fails that index job, and the job queue retries it.
 
 | Key | Default | Bounds |
 |---|---|---|
-| `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 32 chunks per request) |
+| `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 32 chunks per request), including the time it waits behind other requests inside Ollama |
 | `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded`. Keep it well under 30: the CLI and MCP give up on a request after 30 s, so a hung Ollama would surface as a client timeout instead |
 | `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one clustering run; the rest get term labels |
@@ -253,9 +330,39 @@ wasn't enabled. Ensure `CGO_ENABLED=1`; `make` forces this.
 
 **"model not loaded" from `/api/embed`** — Ollama answered 404: the
 embedding model isn't pulled. The daemon keeps retrying the pull in the
-background (see above), or run `ollama pull nomic-embed-text`. On a very old
-Ollama (below 0.1.30 or so) the batched embed endpoint doesn't exist and
-answers 404 too: upgrade it.
+background (see above), or run `ollama pull qwen3-embedding:0.6b`. On a
+very old Ollama (below 0.1.30 or so) the batched embed endpoint doesn't
+exist and answers 404 too: upgrade it.
+
+**`input longer than the embedding model's context`** on an index job —
+Ollama refused a chunk longer than the context (`num_ctx` 8192, or the
+model's own if smaller). curio asks Ollama never to truncate, since a
+truncated chunk gets a vector for text it doesn't hold, so the job fails at
+once and the document goes `failed`; its error names the chunks and the
+longest one's size. Chunks are capped at 3500 bytes, well inside the
+context, so this means the home's embedding model has a small context.
+Lowering `chunking.size_tokens` and restarting the daemon helps only
+chunks bounded by word count: the 3500-byte cap is fixed, so for a model
+whose context is under about 3500 tokens, start a new home with a model
+that has a larger one (see "The embedding model is the
+home's"). Then bring the documents back: `curio reindex <id>` re-embeds
+one from the content it already has and returns it to `fetched`, and
+`curio refetch --all --state=failed` retries every failed document. A
+search query that long falls back to keyword results with the same reason
+in its warning.
+
+**`curio home from an older curio`** — the home was made by a curio from
+before home formats: its vectors came from another embedding model, under
+other rules, and nothing converts them. The daemon refuses to start and
+`curio doctor` fails its `curio home` check. Start a new home with `curio
+up --fresh`, which moves the old one to `~/.curio.bak-<YYYYMMDD-HHMMSS>`
+and deletes nothing (or move it aside yourself), then import your
+bookmarks again.
+
+**`embedding model mismatch`** — `config.yaml` sets an `embedding.model`
+or `embedding.dim` other than the one the home was created with. Set them
+back to what the error says the marker records, or start a new home for
+the new model (see "The embedding model is the home's").
 
 **`invalid TLS certificate: … x509: …`** on a document — the site's
 certificate failed verification (expired, for another name, or from an

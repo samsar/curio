@@ -23,6 +23,7 @@ import (
 
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/store"
@@ -426,7 +427,8 @@ func TestSetup_Failures(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			home, err := curiohome.Init(t.TempDir(), "nomic-embed-text", store.EmbeddingDim)
+			defaults := config.Default().Embedding
+			home, err := curiohome.Init(t.TempDir(), defaults.Model, defaults.Dim)
 			require.NoError(t, err)
 			url := "http://" + freeAddr(t)
 			ctl := tc.ctl(t, home, url)

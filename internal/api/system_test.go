@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/ollama"
@@ -105,6 +107,81 @@ func TestHealth_OllamaDetail(t *testing.T) {
 			assert.Contains(t, h.OllamaDetail, tc.wantDetail)
 		})
 	}
+}
+
+// driftMonitor is a DriftMonitor that reports report and counts
+// rebaselines, failing them with err.
+type driftMonitor struct {
+	mu          sync.Mutex
+	report      drift.Report
+	err         error
+	rebaselines int
+}
+
+func (m *driftMonitor) Report() drift.Report {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.report
+}
+
+func (m *driftMonitor) Rebaseline() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rebaselines++
+	return m.err
+}
+
+func (m *driftMonitor) rebaselined() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rebaselines
+}
+
+// drifted is a report whose check found both parts of the build changed.
+func drifted(checkedAt time.Time) drift.Report {
+	return drift.Report{CheckedAt: checkedAt, Changes: []drift.Change{
+		{What: drift.ModelDigest, Recorded: "sha256:0a109f42", Current: "sha256:ac6da0df"},
+		{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"},
+	}}
+}
+
+// TestHealth_EmbeddingDrift: healthz carries embedding_drift only while the
+// monitor's last check found the build changed, with each change and the
+// fix, and status stays ok.
+func TestHealth_EmbeddingDrift(t *testing.T) {
+	healthz := func(t *testing.T, monitor DriftMonitor) map[string]any {
+		t.Helper()
+		s := newTestServer(t, func(d *Deps) { d.Drift = monitor })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var h map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+		assert.Equal(t, "ok", h["status"])
+		return h
+	}
+
+	for name, monitor := range map[string]DriftMonitor{
+		"no monitor":        nil,
+		"never checked":     &driftMonitor{},
+		"checked, no drift": &driftMonitor{report: drift.Report{CheckedAt: time.Now()}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.NotContains(t, healthz(t, monitor), "embedding_drift")
+		})
+	}
+
+	t.Run("drifted", func(t *testing.T) {
+		checked := time.Date(2026, 9, 27, 10, 40, 1, 0, time.FixedZone("EDT", -4*60*60))
+		got := healthz(t, &driftMonitor{report: drifted(checked)})["embedding_drift"]
+		assert.Equal(t, map[string]any{
+			"changes": []any{
+				map[string]any{"what": "model_digest", "recorded": "sha256:0a109f42", "current": "sha256:ac6da0df"},
+				map[string]any{"what": "ollama_version", "recorded": "0.30.0", "current": "0.34.4"},
+			},
+			"fix":        "curio reindex --all",
+			"checked_at": "2026-09-27T14:40:01Z",
+		}, got)
+	})
 }
 
 // TestHealth_Upstreams: healthz reports each upstream as the daemon sees
