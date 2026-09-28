@@ -718,13 +718,14 @@ func (c *Client) RebuildInterests(ctx context.Context) (*RebuildInterestsRespons
 // Queue mirrors api.QueueResponse: the queue gate's settings, whether the
 // workers may start jobs now, and each pool's limit and load.
 type Queue struct {
-	Paused   bool        `json:"paused"`
-	Throttle string      `json:"throttle"`
-	Schedule string      `json:"schedule,omitempty"` // HH:MM-HH:MM; empty when there is none
-	State    string      `json:"state"`
-	Reason   string      `json:"reason,omitempty"`  // why it is closed
-	OpensAt  time.Time   `json:"opens_at,omitzero"` // set while closed outside the schedule
-	Kinds    []QueueKind `json:"kinds"`
+	Paused    bool        `json:"paused"`
+	Throttle  string      `json:"throttle"`
+	Schedule  string      `json:"schedule,omitempty"` // HH:MM-HH:MM; empty when there is none
+	KeepAwake bool        `json:"keep_awake"`
+	State     string      `json:"state"`
+	Reason    string      `json:"reason,omitempty"`  // why it is closed
+	OpensAt   time.Time   `json:"opens_at,omitzero"` // set while closed outside the schedule
+	Kinds     []QueueKind `json:"kinds"`
 }
 
 // QueueKind mirrors api.QueueKindResponse.
@@ -751,9 +752,10 @@ const (
 // QueueUpdate is the body of PUT /v1/queue: only the fields set are sent,
 // and only those change.
 type QueueUpdate struct {
-	Paused   *bool  `json:"paused,omitempty"`
-	Throttle string `json:"throttle,omitempty"`
-	Schedule string `json:"schedule,omitempty"` // HH:MM-HH:MM, or ScheduleOff
+	Paused    *bool  `json:"paused,omitempty"`
+	Throttle  string `json:"throttle,omitempty"`
+	Schedule  string `json:"schedule,omitempty"` // HH:MM-HH:MM, or ScheduleOff
+	KeepAwake *bool  `json:"keep_awake,omitempty"`
 }
 
 // Queue reads the queue's state.

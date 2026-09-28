@@ -138,7 +138,8 @@ func TestQueue_UpdateRefusals(t *testing.T) {
 		body string
 		want []string // in the detail
 	}{
-		{"nothing to change", `{}`, []string{"paused", "throttle", "schedule"}},
+		{"nothing to change", `{}`, []string{"paused", "throttle", "schedule", "keep_awake"}},
+		{"keep_awake of the wrong type", `{"keep_awake":"yes"}`, []string{"malformed JSON body"}},
 		{"an unknown throttle", `{"throttle":"fast"}`, []string{`"fast"`, "normal", "gentle"}},
 		{"a malformed schedule", `{"schedule":"22:00"}`, []string{`"22:00"`, "HH:MM-HH:MM", "22:00-07:00", "off"}},
 		{"an hour past the day", `{"schedule":"25:00-07:00"}`, []string{"25:00", "22:00-07:00", "off"}},
@@ -192,4 +193,20 @@ func TestQueue_ServerErrors(t *testing.T) {
 	s = newTestServer(t, func(d *Deps) { d.Queue = failingCounts{d.Queue} })
 	p = assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/queue"}), http.StatusInternalServerError)
 	assert.Contains(t, p.Detail, "database is locked")
+}
+
+// TestQueue_KeepAwakeIsStored: keep-awake set through the API is in the
+// answer and is what the next daemon's gate loads.
+func TestQueue_KeepAwakeIsStored(t *testing.T) {
+	s := newTestServer(t)
+	q := decodeQueue(t, putQueue(t, s, `{"keep_awake":true}`))
+	assert.True(t, q.KeepAwake)
+	assert.Equal(t, "open", q.State, "keep-awake never closes the queue")
+
+	next, err := jobs.NewQueueGate(context.Background(), sqlite.NewQueueSettings(s.db), testPools, s.deps.Log)
+	require.NoError(t, err)
+	assert.True(t, next.State(time.Now()).Settings.KeepAwake)
+
+	q = decodeQueue(t, putQueue(t, s, `{"keep_awake":false}`))
+	assert.False(t, q.KeepAwake)
 }

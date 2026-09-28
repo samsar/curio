@@ -70,6 +70,45 @@ finish. off drops the window, so the queue runs now. A pause still applies.`,
 	}
 }
 
+func newKeepAwakeCmd(env *daemonctl.Env) *cobra.Command {
+	return &cobra.Command{
+		Use:   "keep-awake on|off",
+		Short: "Keep the Mac from idle sleep while jobs are queued and it runs on AC power (on), or let it sleep (off)",
+		Long: `With keep-awake on, the daemon holds the Mac out of idle sleep (caffeinate -i)
+while its workers have jobs queued or running, the queue isn't paused, and
+the Mac runs on AC power, so an import carries on unattended; it lets go
+when the queue drains, on battery, and when paused. A schedule keeps the
+hold while it waits for its window. A closed lid still sleeps a laptop.
+The setting is stored and takes effect at once. 'curio status' shows
+whether the Mac is being held awake. Starts the daemon if it isn't running.`,
+		Args:      cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
+		ValidArgs: []string{keepAwakeOn, keepAwakeOff},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			on := args[0] == keepAwakeOn
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
+				return err
+			}
+			q, err := env.Client.UpdateQueue(cmd.Context(), client.QueueUpdate{KeepAwake: &on})
+			if err != nil {
+				return queueError(err)
+			}
+			if q.KeepAwake {
+				fmt.Fprintln(cmd.OutOrStdout(), "keep-awake: on (the daemon keeps the Mac from idle sleep "+
+					"while jobs are queued and it runs on AC power)")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "keep-awake: off")
+			}
+			return nil
+		},
+	}
+}
+
+// keep-awake's arguments.
+const (
+	keepAwakeOn  = "on"
+	keepAwakeOff = "off"
+)
+
 // updateQueue makes sure the daemon runs, applies u, and prints the queue
 // as it is afterwards. The daemon validates u.
 func updateQueue(cmd *cobra.Command, env *daemonctl.Env, u client.QueueUpdate) error {

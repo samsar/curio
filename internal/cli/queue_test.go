@@ -102,6 +102,32 @@ func TestQueueCommands_Refused(t *testing.T) {
 	assert.Equal(t, "normal", string(srv.Deps.Gate.State(time.Now()).Settings.Throttle))
 }
 
+// TestKeepAwakeCommand: keep-awake on and off change the stored setting;
+// anything else is refused before the daemon is asked.
+func TestKeepAwakeCommand(t *testing.T) {
+	srv := apitest.Start(t)
+	gate := srv.Deps.Gate
+
+	line := oneLine(t, mustRun(t, srv, "keep-awake", "on"))
+	assert.Equal(t, "keep-awake: on (the daemon keeps the Mac from idle sleep while jobs are queued "+
+		"and it runs on AC power)", line)
+	assert.True(t, gate.State(time.Now()).Settings.KeepAwake)
+
+	line = oneLine(t, mustRun(t, srv, "keep-awake", "off"))
+	assert.Equal(t, "keep-awake: off", line)
+	assert.False(t, gate.State(time.Now()).Settings.KeepAwake)
+
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	for _, args := range [][]string{{"keep-awake", "maybe"}, {"keep-awake"}, {"keep-awake", "on", "off"}} {
+		_, err := runCLIAt(t, srv.Home.Path, down.URL, args...)
+		require.Error(t, err, args)
+		assert.NotContains(t, err.Error(), "daemon", "refused before the daemon is asked: %v", args)
+	}
+	_, err := runCLIAt(t, srv.Home.Path, down.URL, "keep-awake", "maybe")
+	assert.Contains(t, err.Error(), `invalid argument "maybe"`)
+}
+
 // TestStatus_QueueLoad: status shows each pool's running jobs against its
 // limit, and what waits.
 func TestStatus_QueueLoad(t *testing.T) {

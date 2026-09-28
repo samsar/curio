@@ -175,7 +175,19 @@ type KindLimit struct {
 
 // State reports the settings in effect and what they mean at now.
 func (g *QueueGate) State(now time.Time) QueueState {
+	return g.state(g.cur.Load(), now)
+}
+
+// Watch is State with a channel closed once the settings it reports are
+// replaced. Both come from one version of the settings, so a watcher that
+// waits on the channel after acting on the state never misses a change.
+func (g *QueueGate) Watch(now time.Time) (QueueState, <-chan struct{}) {
 	st := g.cur.Load()
+	return g.state(st, now), st.changed
+}
+
+// state is what st means at now.
+func (g *QueueGate) state(st *gateState, now time.Time) QueueState {
 	v := st.verdict(now)
 	return QueueState{
 		Settings: st.settings,
@@ -201,13 +213,14 @@ func runLimit(throttle store.Throttle, kind store.JobKind, size int) int {
 // QueueUpdate changes some of the queue settings; nil fields are left as
 // they are. A zero Schedule clears the schedule.
 type QueueUpdate struct {
-	Paused   *bool
-	Throttle *store.Throttle
-	Schedule *store.DailyWindow
+	Paused    *bool
+	Throttle  *store.Throttle
+	Schedule  *store.DailyWindow
+	KeepAwake *bool
 }
 
 // Update applies u, stores the result, and only then publishes it, waking
-// every worker waiting on an earlier verdict. It returns the settings in
+// every worker waiting on an earlier verdict, and every watcher (Watch). It returns the settings in
 // effect afterwards. An update that changes nothing writes and wakes
 // nothing. When the store fails, the settings in effect stay as they were.
 //
@@ -233,6 +246,9 @@ func (g *QueueGate) Update(ctx context.Context, u QueueUpdate) (store.QueueSetti
 	if u.Schedule != nil {
 		next.Schedule = *u.Schedule
 	}
+	if u.KeepAwake != nil {
+		next.KeepAwake = *u.KeepAwake
+	}
 	if next == old.settings {
 		return next, nil
 	}
@@ -256,5 +272,5 @@ func settingsAttrs(s store.QueueSettings) []any {
 	if !s.Schedule.IsZero() {
 		schedule = s.Schedule.String()
 	}
-	return []any{"paused", s.Paused, "throttle", string(s.Throttle), "schedule", schedule}
+	return []any{"paused", s.Paused, "throttle", string(s.Throttle), "schedule", schedule, "keep_awake", s.KeepAwake}
 }

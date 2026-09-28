@@ -117,6 +117,7 @@ over HTTP; auto-starts the daemon if it's not running.`,
 		newResumeCmd(&env),
 		newThrottleCmd(&env),
 		newScheduleCmd(&env),
+		newKeepAwakeCmd(&env),
 		newDoctorCmd(&env),
 		newDaemonCmd(&env),
 	)

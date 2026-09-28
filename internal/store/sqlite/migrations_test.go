@@ -676,6 +676,33 @@ func TestMigration012_DropsSchemaMeta(t *testing.T) {
 	require.NoError(t, err, "every older Down runs over the restored table")
 }
 
+// TestMigration013_KeepAwake: 013 adds keep_awake, off for a row stored
+// before it, and refuses any value but 0 and 1; its Down leaves
+// queue_settings exactly as 011 created it.
+func TestMigration013_KeepAwake(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 12)
+	schemaBefore := schemaDump(t, db)
+	_, err := db.Exec(`INSERT INTO queue_settings (id, paused, throttle, schedule_start, schedule_end)
+		VALUES (1, 1, 'gentle', 1320, 420)`)
+	require.NoError(t, err)
+
+	_, err = p.UpTo(ctx, 13)
+	require.NoError(t, err)
+	got, err := NewQueueSettings(db).Get(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, store.QueueSettings{Paused: true, Throttle: store.ThrottleGentle,
+		Schedule: store.DailyWindow{Start: 1320, End: 420}}, got, "the stored settings, keep-awake off")
+	_, err = db.Exec(`UPDATE queue_settings SET keep_awake = 2`)
+	assert.ErrorContains(t, err, "constraint failed")
+	_, err = db.Exec(`UPDATE queue_settings SET keep_awake = 1`)
+	require.NoError(t, err)
+
+	_, err = p.DownTo(ctx, 12)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "011's table, byte for byte")
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `

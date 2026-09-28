@@ -19,13 +19,14 @@ const (
 // QueueResponse is the body of GET and PUT /v1/queue: the queue gate's
 // settings, what they mean now, and each pool's limit and load.
 type QueueResponse struct {
-	Paused   bool                `json:"paused"`
-	Throttle string              `json:"throttle"`
-	Schedule string              `json:"schedule,omitempty"`
-	State    string              `json:"state"`
-	Reason   string              `json:"reason,omitempty"`
-	OpensAt  time.Time           `json:"opens_at,omitzero"`
-	Kinds    []QueueKindResponse `json:"kinds"`
+	Paused    bool                `json:"paused"`
+	Throttle  string              `json:"throttle"`
+	Schedule  string              `json:"schedule,omitempty"`
+	KeepAwake bool                `json:"keep_awake"`
+	State     string              `json:"state"`
+	Reason    string              `json:"reason,omitempty"`
+	OpensAt   time.Time           `json:"opens_at,omitzero"`
+	Kinds     []QueueKindResponse `json:"kinds"`
 }
 
 // QueueKindResponse is one pool's kind: how many of its jobs may run at
@@ -41,17 +42,18 @@ type QueueKindResponse struct {
 // QueueUpdateRequest is the body of PUT /v1/queue. Only the fields given
 // change.
 type QueueUpdateRequest struct {
-	Paused   *bool   `json:"paused,omitempty"`
-	Throttle *string `json:"throttle,omitempty"`
-	Schedule *string `json:"schedule,omitempty"`
+	Paused    *bool   `json:"paused,omitempty"`
+	Throttle  *string `json:"throttle,omitempty"`
+	Schedule  *string `json:"schedule,omitempty"`
+	KeepAwake *bool   `json:"keep_awake,omitempty"`
 }
 
 // update validates r into the gate's update.
 func (r QueueUpdateRequest) update() (jobs.QueueUpdate, error) {
-	if r.Paused == nil && r.Throttle == nil && r.Schedule == nil {
-		return jobs.QueueUpdate{}, badRequest("nothing to change: give paused, throttle or schedule")
+	if r.Paused == nil && r.Throttle == nil && r.Schedule == nil && r.KeepAwake == nil {
+		return jobs.QueueUpdate{}, badRequest("nothing to change: give paused, throttle, schedule or keep_awake")
 	}
-	u := jobs.QueueUpdate{Paused: r.Paused}
+	u := jobs.QueueUpdate{Paused: r.Paused, KeepAwake: r.KeepAwake}
 	if r.Throttle != nil {
 		throttle := store.Throttle(*r.Throttle)
 		if !throttle.Valid() {
@@ -109,10 +111,11 @@ func (d Deps) writeQueue(w http.ResponseWriter, r *http.Request) {
 
 func queueResponse(st jobs.QueueState, counts map[store.JobKind]store.QueueCount) QueueResponse {
 	resp := QueueResponse{
-		Paused:   st.Settings.Paused,
-		Throttle: string(st.Settings.Throttle),
-		State:    queueOpen,
-		Kinds:    make([]QueueKindResponse, 0, len(st.Limits)),
+		Paused:    st.Settings.Paused,
+		Throttle:  string(st.Settings.Throttle),
+		KeepAwake: st.Settings.KeepAwake,
+		State:     queueOpen,
+		Kinds:     make([]QueueKindResponse, 0, len(st.Limits)),
 	}
 	if !st.Settings.Schedule.IsZero() {
 		resp.Schedule = st.Settings.Schedule.String()
