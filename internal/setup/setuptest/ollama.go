@@ -169,7 +169,7 @@ func (o *Ollama) tags(w http.ResponseWriter) {
 }
 
 // pull streams a pull's progress: the manifest, one layer in three steps,
-// the checks, then success, after which the model is in the tags.
+// the checks, then success, by which time the model is in the tags.
 func (o *Ollama) pull(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Model string `json:"model"`
@@ -196,16 +196,19 @@ func (o *Ollama) pull(w http.ResponseWriter, r *http.Request) {
 	} else {
 		lines = append(lines, `{"status":"verifying sha256 digest"}`, `{"status":"writing manifest"}`, `{"status":"success"}`)
 	}
-	for _, line := range lines {
+	for i, line := range lines {
+		if i == len(lines)-1 && failure == "" {
+			// In the tags before success is said, as Ollama writes the
+			// manifest first: a client that checks the tags on success
+			// finds it there.
+			o.mu.Lock()
+			if !slices.Contains(o.models, model) {
+				o.models = append(o.models, model)
+			}
+			o.mu.Unlock()
+		}
 		fmt.Fprintln(w, line)
 		w.(http.Flusher).Flush()
-	}
-	if failure == "" {
-		o.mu.Lock()
-		if !slices.Contains(o.models, model) {
-			o.models = append(o.models, model)
-		}
-		o.mu.Unlock()
 	}
 }
 
