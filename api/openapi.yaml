@@ -61,11 +61,23 @@ info:
       - A request carrying `Origin` gets 403 unless the Origin is exactly
         `http://127.0.0.1:P`, `http://localhost:P` or `http://[::1]:P`,
         `Origin: null` included. No CORS headers are ever sent.
+      - A change (any method but GET, HEAD and OPTIONS) carrying
+        `Sec-Fetch-Site`, which browsers send, gets 403 unless it carries it
+        once, as `same-origin`: a browser's changes come from the daemon's
+        own pages. Clients that aren't browsers send no such header.
       - A request with a body must send `Content-Type: application/json`
         (415 otherwise) holding exactly one JSON value. Bodies are capped at
         1 MiB, or 32 MiB for `POST /v1/bookmarks/import` (413 otherwise).
         Body-less POSTs need no Content-Type.
     Hosted-mode authentication is deferred.
+
+    Outside this contract, `/` and `/ui/` serve the dashboard's HTML pages
+    (docs/ui.md), unless config.yaml's `daemon.ui` is false. They answer
+    under the same access policy, GET only, each with a strict
+    Content-Security-Policy, and refuse another site's subresource
+    requests (`Sec-Fetch-Site` cross-site or same-site without a
+    top-level navigation). Their changes, when they make any, go through
+    this API as JSON.
 
 servers:
   - url: http://127.0.0.1:8765

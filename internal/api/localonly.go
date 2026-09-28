@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/samsar/curio/internal/ui"
 )
 
 // The API is unauthenticated: it trusts every process that can reach the
@@ -28,8 +30,17 @@ import (
 //     giving it full read access. The browser still sends the attacker's
 //     name in Host, so only loopback names are accepted there.
 //
-// Non-browser clients (the CLI, the MCP sidecar, curl) send a loopback Host
-// and no Origin, and pass untouched.
+// Two Fetch Metadata rules add to those, from what a browser says about
+// where a request came from (Sec-Fetch-Site):
+//
+//   - A change (any method but GET, HEAD and OPTIONS) must come from the
+//     daemon's own pages when the header is there: same-origin.
+//   - The dashboard's pages refuse what another site's page loads as a
+//     subresource (an <img> pointing at /ui/search runs a search), which
+//     carries no Origin. Only a top-level navigation the user made passes.
+//
+// Non-browser clients (the CLI, the MCP sidecar, curl) send a loopback Host,
+// no Origin and no Sec-Fetch-* headers, and pass untouched.
 
 // localOrigin is the set of names under which the daemon is its own origin:
 // localhost, the loopback addresses and the address it is bound to, all on
@@ -127,6 +138,92 @@ func requireJSONBody(next http.Handler) http.Handler {
 	})
 }
 
+// requireSameOriginChanges refuses a change a browser says came from
+// anywhere but the daemon's own pages. A browser sends Sec-Fetch-Site on
+// every request, so a change carrying it must carry it once, as
+// same-origin; one without it is not a browser's and passes. The Origin
+// check refuses other sites' changes already; this one holds where a
+// browser leaves Origin off, and keeps the daemon's names apart: a page
+// from localhost:P changing 127.0.0.1:P is cross-site.
+func requireSameOriginChanges(log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isChange(r.Method) {
+				if site, sent := r.Header["Sec-Fetch-Site"]; sent && (len(site) != 1 || site[0] != "same-origin") {
+					logRejected(log, r, "cross-site change")
+					writeProblem(w, r, http.StatusForbidden, "forbidden",
+						"changes must come from the daemon's own pages (Sec-Fetch-Site: same-origin)")
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// isChange reports whether method may change something: every method but
+// the safe ones.
+func isChange(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return true
+}
+
+// isDashboard reports whether r is for the dashboard: /, /ui or anything
+// under /ui/.
+func isDashboard(r *http.Request) bool {
+	p := routingPath(r)
+	return p == "/" || p == "/ui" || strings.HasPrefix(p, "/ui/")
+}
+
+// dashboardHeaders gives every dashboard response its security headers
+// (ui.SecurityHeaders): pages, assets, redirects and refusals alike.
+func dashboardHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isDashboard(r) {
+			ui.SecurityHeaders(w.Header())
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isolateDashboard refuses a dashboard request another site's page made
+// without the user navigating: an <img>, <link> or fetch pointing at
+// /ui/search makes the daemon run a search, and Ollama embed its query,
+// and a no-cors GET carries no Origin. The browser says the request is
+// cross-site or same-site in Sec-Fetch-Site; only a top-level navigation
+// (Sec-Fetch-Mode navigate to a document), such as following a link to the
+// dashboard, passes. The dashboard's own requests are same-origin.
+func isolateDashboard(log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isDashboard(r) && fromAnotherSite(r) && !userNavigation(r) {
+				logRejected(log, r, "another site's subresource request")
+				writeProblem(w, r, http.StatusForbidden, "forbidden",
+					"the dashboard's pages answer other sites only when the user navigates to them")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// fromAnotherSite reports whether a browser says r came from a page of
+// another site, or of another origin on this one.
+func fromAnotherSite(r *http.Request) bool {
+	return slices.ContainsFunc(r.Header["Sec-Fetch-Site"], func(site string) bool {
+		return site == "cross-site" || site == "same-site"
+	})
+}
+
+// userNavigation reports whether a browser says r loads a page into a
+// window or tab: a navigation, not a subresource.
+func userNavigation(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Mode") == "navigate" && r.Header.Get("Sec-Fetch-Dest") == "document"
+}
+
 func logRejected(log *slog.Logger, r *http.Request, reason string) {
 	log.Warn("request rejected: "+reason,
 		"request_id", middleware.GetReqID(r.Context()),
@@ -134,5 +231,8 @@ func logRejected(log *slog.Logger, r *http.Request, reason string) {
 		"path", r.URL.Path,
 		"host", r.Host,
 		"origin", r.Header.Get("Origin"),
+		"sec_fetch_site", strings.Join(r.Header["Sec-Fetch-Site"], ", "),
+		"sec_fetch_mode", r.Header.Get("Sec-Fetch-Mode"),
+		"sec_fetch_dest", r.Header.Get("Sec-Fetch-Dest"),
 	)
 }

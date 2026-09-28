@@ -75,17 +75,28 @@ type Deps struct {
 type Server struct {
 	ln     net.Listener
 	origin localOrigin
+	pages  dashboard
 	log    *slog.Logger
 	router atomic.Pointer[http.Handler] // what serves each request
 	srv    *http.Server
 }
 
-// NewServer builds a server that answers as a starting daemon for home,
-// reporting startup's progress, until Ready. ln is the already-bound
-// listener; its port is what the Host and Origin checks accept, so the
-// allowlists always match the socket actually serving. A nil log means
-// slog.Default().
-func NewServer(ln net.Listener, home string, startup *Startup, log *slog.Logger) (*Server, error) {
+// ServerConfig is what a Server serves besides the API.
+type ServerConfig struct {
+	Home    string   // the $CURIO_HOME it serves, which a starting daemon names
+	Startup *Startup // the progress a starting daemon reports until Ready
+	UI      UIOptions
+	Log     *slog.Logger // nil means slog.Default()
+}
+
+// NewServer builds a server that answers as a starting daemon for
+// cfg.Home, reporting cfg.Startup's progress, until Ready. ln is the
+// already-bound listener; its port is what the Host and Origin checks
+// accept, so the allowlists always match the socket actually serving.
+// With cfg.UI.Enabled it serves the dashboard's pages too, parsed here, so
+// a template that doesn't build is an error before anything serves.
+func NewServer(ln net.Listener, cfg ServerConfig) (*Server, error) {
+	log := cfg.Log
 	if log == nil {
 		log = slog.Default()
 	}
@@ -93,8 +104,12 @@ func NewServer(ln net.Listener, home string, startup *Startup, log *slog.Logger)
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{ln: ln, origin: origin, log: log}
-	s.swap(newStartingRouter(origin, home, startup, log))
+	pages, err := newDashboard(cfg.UI)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{ln: ln, origin: origin, pages: pages, log: log}
+	s.swap(newStartingRouter(origin, cfg.Home, cfg.Startup, pages, log))
 	s.srv = &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			(*s.router.Load()).ServeHTTP(w, r)
@@ -116,7 +131,7 @@ func (s *Server) Ready(deps Deps) error {
 	if deps.TenantID == "" {
 		deps.TenantID = store.LocalTenantID
 	}
-	router, err := newRouter(deps, s.origin)
+	router, err := newRouter(deps, s.origin, s.pages)
 	if err != nil {
 		return err
 	}
@@ -129,10 +144,15 @@ func (s *Server) swap(h http.Handler) { s.router.Store(&h) }
 // useMiddleware installs the stack every response goes through, starting
 // or ready. Router-level, so every response, 404s and 405s included,
 // carries a request ID and is logged; the access checks after recovery
-// then run before routing.
-func useMiddleware(r chi.Router, origin localOrigin, log *slog.Logger) {
+// then run before routing. With the dashboard's pages served, their
+// security headers are set before anything can answer, so the access
+// checks' refusals carry them too.
+func useMiddleware(r chi.Router, origin localOrigin, pages dashboard, log *slog.Logger) {
 	r.Use(middleware.RequestID)
 	r.Use(exposeRequestID)
+	if pages.enabled() {
+		r.Use(dashboardHeaders)
+	}
 	// middleware.RealIP is intentionally NOT used — it's deprecated due to
 	// X-Forwarded-For spoofing risk and we listen on loopback only, so
 	// remote addrs are always loopback anyway.
@@ -140,14 +160,19 @@ func useMiddleware(r chi.Router, origin localOrigin, log *slog.Logger) {
 	r.Use(recoverProblem(log))
 	r.Use(requireLocalHost(origin, log))
 	r.Use(rejectForeignOrigin(origin, log))
+	r.Use(requireSameOriginChanges(log))
+	if pages.enabled() {
+		r.Use(isolateDashboard(log))
+	}
 	r.Use(requireJSONBody)
 }
 
 // newRouter builds the API's routes and middleware for a daemon that is its
-// own origin under origin. deps must have Log and TenantID set.
-func newRouter(deps Deps, origin localOrigin) (chi.Router, error) {
+// own origin under origin, and the dashboard's when pages has them. deps
+// must have Log and TenantID set.
+func newRouter(deps Deps, origin localOrigin, pages dashboard) (chi.Router, error) {
 	r := chi.NewRouter()
-	useMiddleware(r, origin, deps.Log)
+	useMiddleware(r, origin, pages, deps.Log)
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
 		writeProblem(w, req, http.StatusNotFound, "not found", "no route for "+routingPath(req))
 	})
@@ -201,6 +226,9 @@ func newRouter(deps Deps, origin localOrigin) (chi.Router, error) {
 		r.Get("/queue", deps.handleGetQueue)
 		r.Put("/queue", deps.handleUpdateQueue)
 	})
+	if pages.enabled() {
+		pageHandlers{d: deps, pages: pages}.routes(r)
+	}
 	var err error
 	if methods, err = methodIndex(r); err != nil {
 		return nil, err

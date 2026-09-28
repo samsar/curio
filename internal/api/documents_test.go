@@ -293,9 +293,9 @@ func TestListDocuments(t *testing.T) {
 func TestListDocuments_Filters(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
-	seed := func(url string, ct store.ContentType, state store.DocState, folder string) string {
+	seed := func(docURL string, ct store.ContentType, state store.DocState, folder string) string {
 		t.Helper()
-		b := &store.Bookmark{TenantID: "local", URL: url, Source: store.SourceChrome,
+		b := &store.Bookmark{TenantID: "local", URL: docURL, Source: store.SourceChrome,
 			SavedAt: time.Now().UTC(), FolderPath: store.NullableString(folder)}
 		_, err := s.deps.Bookmarks.Ingest(ctx, b)
 		require.NoError(t, err)

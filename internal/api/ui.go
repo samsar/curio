@@ -1,0 +1,151 @@
+package api
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/ui"
+	"github.com/samsar/curio/internal/version"
+)
+
+// The dashboard: read-only pages under /ui/ on the daemon's own port and
+// origin (docs/ui.md). The handlers in ui_*.go get their data through the
+// same Deps functions as the JSON handlers, and never from SQL, then map it
+// into internal/ui's view models, which the templates render. Every route
+// is a GET: pages never change anything, since another site can make a
+// browser navigate to one. Changes go through /v1 as JSON.
+
+// UIOptions configure the dashboard (config.yaml's daemon.ui and ui).
+type UIOptions struct {
+	// Enabled serves the pages under /ui/, and redirects / there.
+	Enabled bool
+	// LoadRemoteImages shows stored pages' https images on every document
+	// page, without the per-page ?images=1.
+	LoadRemoteImages bool
+}
+
+// dashboard is what a server serves the pages with: none while render is
+// nil.
+type dashboard struct {
+	opts   UIOptions
+	render *ui.Renderer
+}
+
+// newDashboard builds the dashboard opts asks for, parsing its templates.
+func newDashboard(opts UIOptions) (dashboard, error) {
+	if !opts.Enabled {
+		return dashboard{}, nil
+	}
+	render, err := ui.New()
+	if err != nil {
+		return dashboard{}, err
+	}
+	return dashboard{opts: opts, render: render}, nil
+}
+
+func (d dashboard) enabled() bool { return d.render != nil }
+
+// redirectToDashboard answers / with the dashboard.
+func redirectToDashboard(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/ui/", http.StatusFound)
+}
+
+// pageLayout is the frame of a page titled title, under nav.
+func pageLayout(title string, nav ui.Nav) ui.Layout {
+	return ui.Layout{Title: title, Nav: nav, Version: version.String()}
+}
+
+// pageHandlers serve the dashboard's pages over d.
+type pageHandlers struct {
+	d     Deps
+	pages dashboard
+}
+
+// routes adds the pages' routes to r: GETs only (TestDashboard_GETOnly).
+// The assets' route is a Get, not a Mount, which would take every method.
+func (h pageHandlers) routes(r chi.Router) {
+	r.Get("/", redirectToDashboard)
+	r.Route("/ui", func(r chi.Router) {
+		r.NotFound(h.notFound)
+		r.Get("/", h.overview)
+		r.Get("/search", h.search)
+		r.Get("/library", h.library)
+		r.Get("/documents/{id}", h.document)
+		r.Get("/interests", h.interests)
+		r.Get("/interests/{id}", h.interest)
+		r.Get("/static/{file}", h.asset)
+	})
+}
+
+// page answers the page name, rendered from data, with status and the
+// strict CSP.
+func (h pageHandlers) page(w http.ResponseWriter, r *http.Request, status int, name string, data any) {
+	h.pageWithCSP(w, r, status, name, data, ui.CSP)
+}
+
+// pageWithCSP is page with csp as the page's Content-Security-Policy. A
+// page that fails to render is answered as a 500 error page, never half
+// written.
+func (h pageHandlers) pageWithCSP(w http.ResponseWriter, r *http.Request, status int, name string, data any, csp string) {
+	if err := h.pages.render.Page(w, status, name, data, csp); err != nil {
+		h.writePageError(w, r, err, ui.NavNone)
+	}
+}
+
+// writePageError answers err as an error page: classified, and a server
+// error logged once, as writeError answers it as a problem. retry is the
+// page the error page suggests starting over from.
+func (h pageHandlers) writePageError(w http.ResponseWriter, r *http.Request, err error, retry ui.Nav) {
+	status, title := h.d.reportError(r, err)
+	h.errorPage(w, r, status, title, err.Error(), retry)
+}
+
+// lookupError answers a failure to load the kind of resource named id:
+// a 404 page naming it when there is none, writePageError's otherwise.
+func (h pageHandlers) lookupError(w http.ResponseWriter, r *http.Request, kind, id string, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		h.errorPage(w, r, http.StatusNotFound, "not found", fmt.Sprintf("%s %q not found", kind, id), ui.NavOverview)
+		return
+	}
+	h.writePageError(w, r, err, ui.NavNone)
+}
+
+// notFound answers a path under /ui/ that no page has.
+func (h pageHandlers) notFound(w http.ResponseWriter, r *http.Request) {
+	h.errorPage(w, r, http.StatusNotFound, "not found", "no page at "+routingPath(r), ui.NavOverview)
+}
+
+// errorPage answers the error page. Should it fail to render too, nothing
+// has been written yet, and a plain-text answer still can be.
+func (h pageHandlers) errorPage(w http.ResponseWriter, r *http.Request, status int, title, message string, retry ui.Nav) {
+	id := middleware.GetReqID(r.Context())
+	vm := ui.ErrorPage{Layout: pageLayout(title, ui.NavNone), Status: status, Title: title, Message: message,
+		RequestID: id, Retry: retry}
+	if err := h.pages.render.Page(w, status, ui.PageError, vm, ui.CSP); err != nil {
+		h.d.Log.Error("render the error page", "request_id", id, "err", err)
+		http.Error(w, fmt.Sprintf("%s: %s (request %s)", title, message, id), status)
+	}
+}
+
+// panelError reports a panel's failed read, logged as writeError logs it,
+// for the panel to show while the rest of the page renders: the page
+// degrades by panel, where a JSON answer fails whole.
+func (h pageHandlers) panelError(r *http.Request, err error) *ui.PanelError {
+	if err == nil {
+		return nil
+	}
+	h.d.reportError(r, err)
+	return &ui.PanelError{Message: err.Error(), RequestID: middleware.GetReqID(r.Context())}
+}
+
+// asset serves the pages' asset named by the path, or the 404 page.
+func (h pageHandlers) asset(w http.ResponseWriter, r *http.Request) {
+	if !h.pages.render.ServeAsset(w, chi.URLParam(r, "file")) {
+		h.notFound(w, r)
+	}
+}
