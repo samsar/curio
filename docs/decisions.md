@@ -131,8 +131,9 @@ when the entry was first committed.
 - 2026-09-27 — [Embedding drift: the marker records the build, healthz reports a change](#embedding-drift-the-marker-records-the-build-healthz-reports-a-change)
 - 2026-09-27 — [Embeddings never truncate; an over-long chunk fails at once](#embeddings-never-truncate-an-over-long-chunk-fails-at-once)
 - 2026-09-27 — [sqlite-vec: NEON distance kernels on arm64](#sqlite-vec-neon-distance-kernels-on-arm64)
-- 2026-09-27 — [Daemon lifecycle: a per-user launchd agent](#daemon-lifecycle-a-per-user-launchd-agent)
+- 2026-09-27 — [Daemon lifecycle: a per-user launchd agent](#daemon-lifecycle-a-per-user-launchd-agent) (revised)
 - 2026-09-27 — [Keep-awake: caffeinate on AC power while the workers have queued work](#keep-awake-caffeinate-on-ac-power-while-the-workers-have-queued-work)
+- 2026-09-27 — [curio up: a plan-first setup wizard](#curio-up-a-plan-first-setup-wizard)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -4112,6 +4113,15 @@ string, so requests carry what the user wrote, and untagged names aren't
 rejected: drift detection catches a `:latest` that moves, and the defaults
 are pinned. The client also reads `/api/version` (`Version`).
 
+**Revised (2026-09-27), with `curio up`:** `Pull` reports each line of the
+stream (status, digest, total, completed) to a callback instead of logging
+it: `curio up` draws a progress line from it, and `KeepPulled` passes one
+that logs about every 10%, as before. A line over 64 KiB fails the pull,
+and so does a stream silent for 5 minutes, naming the model: read with an
+unbounded decoder on a client with no timeout, a stalled stream blocked
+until the daemon stopped, and `KeepPulled` never retried it. The base-URL
+rule is exported (`ValidateBaseURL`) for `config.Validate`.
+
 ---
 
 ## Insight: skip non-finite document vectors, don't fail the run
@@ -5880,6 +5890,54 @@ Items & Extensions, where the user can disallow it; the install says so.
 install` against a built binary: it would need env overrides for the
 launchctl path and the agents directory, which nothing else needs.
 
+**Revised (2026-09-27), with `curio up`:**
+
+- **Exit status:** the daemon exits 0 when a restart would change
+  nothing, and 1 when one might help:
+  - 0: a signal stopped it (even if its shutdown failed part way);
+    another daemon holds the home's lock; or it refused to start for a
+    cause that stays until someone fixes it: a home it can't open or
+    create (not ours, not a directory), a config.yaml it can't read,
+    parse or validate, a home `CheckEmbedding` refuses (unreadable
+    marker, legacy, newer, a mismatch), or a vector index of another
+    width than the home's (`*VectorWidthError`). `run` marks these
+    refusals where it knows them, with an unexported `refusal` type that
+    `exitCode` finds with `errors.As`, never by matching messages, and
+    `finish` logs one once, at ERROR, saying the daemon stays down until
+    the cause is fixed and a curio command (or `curio up`) starts it.
+  - 1: everything else: a port it can't bind, a database it can't open
+    or migrate, queue settings it can't read, a crash. These may clear by
+    themselves, or are the crash recovery launchd is for.
+
+  **Why:** a refused home or config.yaml exited 1, and under `KeepAlive
+  {SuccessfulExit: false}` launchd relaunched it every 10s for ever,
+  logging an ERROR each time, when only an edit clears it. For the same
+  reason `config.Validate` now rejects what the daemon refused only after
+  binding its port and migrating: an `embedding.base_url` or
+  `generation.base_url` that isn't an http(s) URL with a host, by the rule
+  `ollama.New` uses (`ollama.ValidateBaseURL`), and `fetcher.default:
+  web2md` without `fetcher.web2md.bin`. No `ThrottleInterval`: launchd
+  only delays the restart of a process that exits fast, and with the
+  refusals exiting 0, what is left should retry at the default 10s. The
+  "already running" line now says to run `curio daemon stop` first to
+  replace the running build with the new one.
+- **Install asks the manager first** (`Manager.Preflight`, which returns
+  what `Install` would fail with, changing nothing: root, a program
+  launchd couldn't run, no GUI session as `service.ErrNoGUISession`) and
+  stops nothing for an install that can't happen. Over ssh, `curio daemon
+  install` used to stop the running daemon and then fail. `Launchd.Install`
+  calls `Preflight`, so the refusals are defined once.
+- **No GUI session** for an installed agent (`launchctl print` exit 112)
+  is `Status.NoGUISession`. `curio daemon status` and `curio doctor` say
+  the agent is installed with no login session to run in and that curio
+  commands start the daemon meanwhile, rather than suggesting an install
+  that fails there.
+- **`Controller.WithDaemonStopped(ctx, fn)`** holds `daemon.start.lock`
+  from before it boots the agent out and stops a daemon running outside
+  it until `fn` has returned, and runs `fn` only once nothing holds
+  daemon.pid; `curio up --fresh` moves the home in `fn`. `Uninstall` and
+  it share the part under the lock.
+
 ---
 
 ## Keep-awake: caffeinate on AC power while the workers have queued work
@@ -5947,6 +6005,195 @@ curio's call.
 **Rejected:** IOKit power assertions through cgo (caffeinate is the same
 assertion, with no cgo), and holding on battery (an import would drain
 it).
+
+---
+
+## curio up: a plan-first setup wizard
+
+**Decision:** `curio up` sets curio up on a Mac, and is idempotent. It is
+five steps in `internal/setup`, run in the design's order by one
+function: machine, Ollama, models, home (with config.yaml), daemon. The
+import step (group 5) goes after the daemon.
+
+- **Steps check, then apply.** A `setup.Step` has a `Check(ctx)` that
+  reads the world, bounded (2s per read, `Timeouts.Probe`) and changing
+  nothing, and returns a `Result`: OK, Warn or Fail, a one-line detail, and
+  a `Fix` (a summary and the exact argv of every command it runs) or a
+  `Hint` (what to do by hand). `Apply(ctx, ui)` makes the fix.
+- **The plan comes first.** The runner checks every step; the fixes are
+  the plan. An empty plan changes nothing and prints `Nothing to do: curio
+  is up.` and a status block. A blocker (a Fail with no fix: a directory
+  that isn't a home, a config.yaml that doesn't load, a legacy, newer or
+  mismatched home without `--fresh`, no curio-daemon, another home's or a
+  legacy daemon on the port, too little disk for the missing models)
+  stops the run with the plan before anything is applied: a legacy home
+  with Ollama down runs no brew command. Then each step is checked again
+  right before it applies, confirmed, applied, and checked after; a step
+  that still fails fails the run, and nothing after a failed or declined
+  step runs.
+- **No wizard state.** A run cut short resumes by checking the world
+  again: the steps before it passed, and the plan is what is left.
+  `setup.json` in the home holds only the optional installs the user
+  declined (group 5 records yt-dlp there), outside the strictly validated
+  config.yaml; a corrupt one is a warning and an empty state.
+- **`curio doctor` runs the same checks** (`Runner.Checks`: machine,
+  home, config, ollama, models, daemon, launchd, embeddings) and adds its
+  own (the Jina upstream, the fetcher, the content directory). A test runs
+  both over the same fake worlds: up's plan is empty exactly when doctor
+  shows no ✗ and no ! that curio up would fix. Doctor no longer sits
+  behind `Discover`, so it reports a missing home instead of creating one,
+  and an invalid config.yaml instead of dying before its report.
+- **The root's hook skips `Discover`** for commands annotated as owning
+  their environment (`up`, `doctor`, bare `curio`). `Discover` creates a
+  missing home with the default embedding model, which would make
+  `--embedding-model` a mismatch with the home up had just asked for, and
+  a dry run create a home. An annotation rather than a `PersistentPreRunE`
+  on `up`: that would shadow the root's hook, whose flag tells
+  `cli.Run` a runtime error from a usage error. `daemonctl.Connect` builds
+  the environment of a home that is already open with a config already
+  loaded, or the defaults when it doesn't load.
+
+**Consent:**
+
+- A step with a fix asks one question, after showing the summary and
+  every command in full, shell-quoted, before any runs. Output streams
+  live to stderr; a failed command is named with its exit status.
+- Creating a new home, and writing a config.yaml where there is none, are
+  announced, not asked: they are curio's own files.
+- The models step asks `Use these? [Y/n/choose]` when curio picked the
+  models; `choose` lists every tier.
+- `--fresh`'s move defaults to No.
+- `--yes` answers every question yes, the move included, and takes every
+  default. It never implies `--fresh`.
+- Without a terminal (stdin and stderr both, checked before any prompt
+  library runs) nothing is asked: a non-empty plan is printed and the run
+  exits 1, unless `--yes`. `--dry-run` prints the plan and changes nothing,
+  in any mode.
+- A prompt left without an answer (end of input, ctrl-c, a cancelled
+  context) is `setup.ErrAborted`, which `cli.Run` exits 130 for, like an
+  interrupt; it is never the default.
+- `--no-install` runs no `Installer` command (no brew, no open), leaving
+  those to do by hand. Pulling models, the home, config.yaml and the
+  launchd agent are curio's own work and still happen.
+- Never sudo: `curio up` refuses to run as root.
+
+**The UI:** `charm.land/huh/v2` for the full-screen prompts on a
+terminal; a line prompter of curio's own in accessible mode (`TERM=dumb`
+or `ACCESSIBLE` set); a flags-only UI without a terminal; setuptest's
+scripted UI in tests. huh v2.0.3's accessible mode takes end of input on
+a yes-by-default confirm as yes (a ctrl-d would answer yes to `brew
+install`), ignores a cancelled context, panics on a select without a
+value at end of input, and writes to stdout; the line prompter reads
+input on one goroutine so a cancelled context returns at once, treats end
+of input as an abort, and writes to stderr. Progress is curio's own
+renderer: one line redrawn at most ten times a second on a terminal, a
+line per 10% elsewhere, never going backwards, ending at 100%. depguard
+confines `charm.land` to internal/setup; curio-daemon and curio-mcp don't
+link it.
+
+**The machine** (`setup.Probe`; sysctl, statfs and ioreg through
+golang.org/x/sys, no gopsutil): Apple silicon with 16 GB or more is
+supported; under 16 GB a warning (the smallest models swap in and out;
+import overnight); under Rosetta a warning to install the arm64 build; an
+Intel Mac degraded (CPU-only Ollama, no Homebrew build, a first import of
+days), asked once whether to go on; not macOS, a warning, with no install
+offered. The GPU core count is best effort. **Disk** is judged once the
+missing models are known: the models volume must hold their sizes plus 2
+GiB, and a home on another volume 2 GiB. That scales with the tier where
+a flat 10 GB wouldn't; at 16 GB the two agree.
+
+**Ollama:** the check is whether something answers `GET
+/api/version` at `embedding.base_url`, never whether a binary exists.
+Nothing answering: the formula's service (`brew services start ollama`)
+before the app (`open -a Ollama`), then a Homebrew install on Apple
+silicon, else the download page, opened only in a terminal, with up to
+10 minutes to install it. Too old for the picked models (gemma4 needs
+0.30.5, its QAT tags 0.30.6): `brew upgrade` and `brew services restart`
+for the formula, by hand for the app. A base URL off this machine is its
+owner's to start. Homebrew bottles Ollama only for the newest macOS and
+builds it from source elsewhere, and has no Intel build, which is why the
+app is the alternative.
+
+**Models:** `setup.ModelAdvisor` is a static table: `qwen3-embedding:0.6b`
+everywhere, and the writing model by unified memory (`qwen3:4b-instruct`
+under 16 GB, `gemma4:12b` to 32, `gemma4:26b-a4b-it-qat` to 64,
+`gemma4:26b` from 64), each with its size, a reason, its minimum Ollama
+and the tier below as the smaller alternative. config.yaml's
+`generation.model` is kept, and a `--generation-model` that contradicts
+it is refused, naming the file and key; with no config.yaml the flag,
+else the pick. No writing model is pulled when interest labels don't use
+one. Pulls skip what `Ping` finds (the exact name Ollama runs), go one
+progress line each, and a failed one names `ollama pull <model>`.
+
+**Pull progress** comes from `ollama.Client.Pull`'s callback, one line
+per model summed over its layers; a stalled or oversized stream fails the
+pull (see "Ollama: one client", revised).
+
+**A new home's width is measured,** not assumed or asked: after the pull,
+one short `/api/embed` through internal/embedder (`MeasureWidth`, the
+indexer's request: `truncate: false`, `keep_alive`, `num_ctx`) gives the
+vector length config.yaml and the marker record. `/api/show` reports an
+architecture-specific `<arch>.embedding_length`, the model's hidden size,
+and a flag can be wrong; the embed gives the width the daemon will
+receive. The dry-run plan shows 1024 for the default model and "measured
+after the pull" for another. A default model measuring otherwise is
+recorded as measured, with a warning. An override's prompt prefixes come
+from a table of the models curio knows (qwen3-embedding: the Qwen query
+instruction, no document prefix; nomic-embed-text: `search_document: `
+and `search_query: `); any other gets none and a warning to set them
+before importing. An untagged `--embedding-model` is refused: a home's
+vectors are its model's for good, and `:latest` moves.
+
+**config.yaml is written once, when absent, and never edited:** 0600,
+with a header, the embedding model, width and prompts, the writing
+model, and the addresses that differ from the built-in defaults; linked
+into place from a synced temp file, which fails rather than replaces a
+file written meanwhile. Machine-editing a YAML file a person wrote loses
+its comments and its layout, and a value the user set is theirs. An
+existing config.yaml without `generation.model` is left alone; the plan
+says what curio would pick and which key to set. The home is created
+first (`curiohome.Init` with the measured width): an interrupt between
+the two leaves a valid home the next run gives a config.yaml, where the
+other order would leave a directory the next run must refuse.
+
+**`--fresh`** renames the directory the home resolves to (a symlinked
+home is moved and made again at its target, so the link keeps working)
+to `<dir>.bak-YYYYMMDD-HHMMSS`, then `-2`, `-3` when taken, with one
+`os.Rename`: never a copy, never a delete, and a failed rename leaves the
+home in place and fails the run. What isn't a curio home is never moved.
+It runs inside `daemonctl.Controller.WithDaemonStopped`, which holds
+`daemon.start.lock` from before it boots the agent out and stops a daemon
+running outside it until the rename is done: a daemon started mid-move
+would serve the moved directory and hold the port. A daemon from before
+the lock protocol is refused, since it can't be verified. The move comes
+at the home step, after the pulls, so a failed pull leaves the old home
+untouched.
+
+**The daemon step:** OK when this curio's curio-daemon serves the home
+with config.yaml's writing model under a loaded agent that runs it.
+Otherwise it validates the home again as the daemon will, installs the
+agent (which waits until the daemon serves, a migration reported as it
+goes), `EnsureVersion`s it, and restarts a daemon whose healthz
+`generation_model` differs from config.yaml's; an older daemon that
+reports none is never restarted for it. Over ssh (`ErrNoGUISession` from
+`Preflight`) or with no service manager, the daemon is started on demand
+with a warning, and the check passes with that warning.
+
+**Bare `curio`** prints the help, creating and starting nothing, and adds
+a line pointing at `curio up` when the home doesn't exist, or its daemon
+already serves an empty library (a second at most).
+
+**Rejected:**
+
+- A wizard state file: it would disagree with the world the moment the
+  user fixed something by hand.
+- `setup.ServiceManager`: `internal/service.Manager` is the seam (see
+  "Daemon lifecycle"), extended with `Preflight` and `NoGUISession`.
+- An `--embedding-dim` flag, or `/api/show`: see the measured width.
+- huh's accessible mode: the four defects above.
+
+**Not done:** the import step, the yt-dlp offer and keep-awake offer
+(group 5); Linux.
 
 ---
 

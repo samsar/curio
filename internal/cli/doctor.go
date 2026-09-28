@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,28 +14,71 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/setup"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 // newDoctorCmd diagnoses the parts of curio that fail silently.
 //
 // Inspired by `brew doctor`: walk through every dependency, print a
 // status line per check, end with a one-line summary and a suggested
-// next action if anything's wrong.
-func newDoctorCmd(env *daemonctl.Env) *cobra.Command {
+// next action if anything's wrong. Its checks of the machine, the home,
+// config.yaml, Ollama, the models, the daemon, its launchd agent and the
+// embeddings are `curio up`'s own (setup.Runner.Checks), so the two agree
+// on what healthy means; doctor never creates the home to look at it.
+func newDoctorCmd(flags *rootFlags, d deps) *cobra.Command {
 	return &cobra.Command{
-		Use:   "doctor",
-		Short: "Diagnose curio's environment: daemon, Ollama, DB, config, fetcher",
+		Use:         "doctor",
+		Short:       "Diagnose curio's environment: the Mac, Ollama and its models, the home, the daemon, the fetcher",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{ownsEnvironment: "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			r := newDoctorReport()
-			runDoctorChecks(cmd.Context(), env, r)
-			r.print(cmd.OutOrStdout())
-			if r.failures > 0 {
-				return fmt.Errorf("%d check(s) failed", r.failures)
+			r, err := flags.setupFor(d, d.newUI(cmd.InOrStdin(), cmd.ErrOrStderr(), false), setup.Options{})
+			if err != nil {
+				return err
+			}
+			rep := newDoctorReport()
+			ctx := cmd.Context()
+			for _, c := range r.Checks() {
+				res := c.Run(ctx)
+				rep.add(c.Name, statusOf(res.Status), res.Detail, doctorHint(res))
+			}
+			runOwnChecks(ctx, flags, d, rep)
+			rep.print(cmd.OutOrStdout())
+			if rep.failures > 0 {
+				return fmt.Errorf("%d check(s) failed", rep.failures)
 			}
 			return nil
 		},
+	}
+}
+
+// statusOf is a setup check's status as a doctor line's.
+func statusOf(s setup.Status) checkStatus {
+	switch s {
+	case setup.OK:
+		return statusOK
+	case setup.Warn:
+		return statusWarn
+	case setup.Fail:
+	}
+	return statusFail // a failure, or a status this curio doesn't know: no pass
+}
+
+// doctorHint is what a setup check's line suggests: for what curio up
+// fixes, the commands it would run or that it does it; otherwise the
+// check's own hint.
+func doctorHint(res setup.Result) string {
+	switch {
+	case res.Fix == nil:
+		return res.Hint
+	case len(res.Fix.Commands) > 0:
+		return "run " + textutil.ShellList(res.Fix.Commands...) + ", or `curio up`, which does it"
+	default:
+		return "`curio up` does it: " + res.Fix.Summary
 	}
 }
 
@@ -103,153 +145,56 @@ func (r *doctorReport) print(w io.Writer) {
 	}
 }
 
-func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
-	// 1. $CURIO_HOME, its marker, and whether the daemon will serve it
-	// under config.yaml's embedding model and width, which it checks the
-	// same way before it starts
-	meta, err := c.Home.CheckEmbedding(c.Config.Embedding.Model, c.Config.Embedding.Dim)
-	var mismatch *curiohome.EmbeddingMismatchError
-	switch {
-	case errors.Is(err, curiohome.ErrLegacyHome), errors.Is(err, curiohome.ErrNewerHome), errors.As(err, &mismatch):
-		r.add("curio home", statusFail, err.Error(), "")
-	case err != nil:
-		r.add("curio home", statusFail, c.Home.Path+" — marker unreadable: "+err.Error(),
-			"check file perms on "+c.Home.MarkerPath())
-	default:
-		r.add("curio home", statusOK,
-			fmt.Sprintf("%s (schema v%d, embedder %s/%d)",
-				c.Home.Path, meta.SchemaVersion, meta.EmbeddingModel, meta.EmbeddingDim), "")
+// runOwnChecks adds the checks curio up has no part in: the upstreams
+// fetches depend on, as the daemon reports them, the fetcher, and whether
+// the content directory is writable. They read config.yaml, or the
+// defaults when it doesn't load (its own check says why); with no home
+// there is no daemon or content directory to check.
+func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport) {
+	cfg := config.Default()
+	if d.defaults != nil {
+		cfg = *d.defaults
 	}
-
-	// 2. config validates
-	if err := c.Config.Validate(); err != nil {
-		r.add("config", statusFail, "invalid: "+err.Error(),
-			"edit "+c.Home.ConfigPath())
-	} else {
-		r.add("config", statusOK,
-			fmt.Sprintf("fetch_workers=%d, index_workers=%d, fetcher=%s, model=%s",
-				c.Config.Daemon.FetchWorkers, c.Config.Daemon.IndexWorkers,
-				c.Config.Fetcher.Default, c.Config.Embedding.Model), "")
+	path, err := daemonctl.HomePath(*flags.home)
+	if err != nil {
+		r.add("home", statusFail, err.Error(), "")
+		return
 	}
-
-	// 3. daemon reachable
-	health, err := c.Client.Healthz(ctx)
-	starting := client.StartupOf(err)
-	switch {
-	case starting != nil:
-		r.add("daemon", statusWarn, fmt.Sprintf("starting (pid %d): %s", starting.PID, starting.Progress()),
-			"wait for it, or follow it with `curio daemon logs -f`")
-		r.add("ollama", statusWarn, "not checked while the daemon starts", "run `curio doctor` again once it is ready")
-	case errors.Is(err, client.ErrDaemonUnreachable):
-		r.add("daemon", statusFail, "not reachable at "+c.Controller.BaseURL,
-			"run `curio daemon start`")
-	case err != nil:
-		r.add("daemon", statusFail, "reachable at "+c.Controller.BaseURL+", but healthz failed: "+err.Error(),
-			"check `curio daemon logs`")
-	default:
-		r.add("daemon", statusOK, fmt.Sprintf("running, version %s", health.Version), "")
-
-		// 4. ollama (via the daemon's healthz, since the daemon has the
-		// concrete embedder client and knows the configured base_url)
-		if health.OllamaReachable {
-			r.add("ollama", statusOK, "reachable, model "+health.EmbeddingModel+" loaded", "")
-		} else {
-			r.add("ollama", statusFail, health.OllamaDetail, "")
+	home, homeErr := curiohome.Open(path)
+	if homeErr == nil {
+		if loaded, err := config.Load(home.ConfigPath()); err == nil {
+			cfg = loaded
 		}
-
-		// 5. whether the model or Ollama changed since the library was
-		// indexed, as the daemon last checked
-		r.add(driftCheck(health.EmbeddingDrift))
-
-		// 6. the services fetches depend on (the Jina fallback), as the
-		// daemon has seen them answer
-		for _, u := range health.Upstreams {
-			status, detail, hint := upstreamCheck(u)
-			r.add(u.Name, status, detail, hint)
+		health, err := client.New(daemonctl.BaseURL(cfg, *flags.daemonURL)).Healthz(ctx)
+		if err == nil && daemonctl.SameHome(health.Home, path) {
+			// The services fetches depend on (the Jina fallback), as the
+			// daemon has seen them answer.
+			for _, u := range health.Upstreams {
+				status, detail, hint := upstreamCheck(u)
+				r.add(u.Name, status, detail, hint)
+			}
 		}
 	}
 
-	// 7. the daemon's launchd agent, where there is launchd
-	if res, ok := launchdCheck(ctx, c); ok {
-		r.add(res.name, res.status, res.detail, res.hint)
-	}
-
-	// 8. fetcher backend: native is always fine; web2md needs the bin to exist
-	switch c.Config.Fetcher.Default {
+	// The fetcher backend: native is always fine; web2md needs the bin.
+	switch cfg.Fetcher.Default {
 	case "native":
 		r.add("fetcher", statusOK, "native (Go, no external deps)", "")
 	case "web2md":
-		bin := c.Config.Fetcher.Web2MD.Bin
-		if bin == "" {
-			r.add("fetcher", statusFail, "web2md selected but bin is empty",
-				"set fetcher.web2md.bin in "+c.Home.ConfigPath())
-		} else if _, err := exec.LookPath(bin); err != nil {
+		bin := cfg.Fetcher.Web2MD.Bin
+		if _, err := exec.LookPath(bin); err != nil {
 			if _, statErr := os.Stat(bin); statErr != nil {
 				r.add("fetcher", statusFail, "web2md not found at "+bin,
 					"install Node + web2md, or switch to fetcher.default: native")
-			} else {
-				r.add("fetcher", statusOK, "web2md at "+bin, "")
+				break
 			}
-		} else {
-			r.add("fetcher", statusOK, "web2md at "+bin, "")
 		}
+		r.add("fetcher", statusOK, "web2md at "+bin, "")
 	}
 
-	// 9. content dir writable
-	checkContentDir(c.Home.ContentDir(), r)
-}
-
-// launchdCheck is doctor's check of the daemon's launchd agent; ok is
-// false where there is no launchd to check. No agent is fine: the CLI
-// starts the daemon on demand. An agent is flagged when launchd couldn't
-// run its daemon (the program is gone), hasn't loaded it (disabled, or no
-// GUI session), or runs another curio-daemon than this curio's, which an
-// upgrade to another location, or a second install, leaves behind.
-func launchdCheck(ctx context.Context, c *daemonctl.Env) (res checkResult, ok bool) {
-	if c.Controller.Service == nil {
-		return checkResult{}, false
+	if homeErr == nil {
+		checkContentDir(home.ContentDir(), r)
 	}
-	res.name = "launchd"
-	st, err := c.Controller.Service.Status(ctx)
-	switch {
-	case err != nil:
-		res.status, res.detail = statusWarn, "can't read the agent's status: "+err.Error()
-		return res, true
-	case !st.Supported:
-		return checkResult{}, false
-	case !st.Installed:
-		res.status, res.detail = statusOK, "no agent; the CLI starts the daemon on demand"
-		return res, true
-	}
-	repoint := "`curio daemon install` repoints the agent at this curio's daemon"
-	res.status = statusWarn
-	if _, err := os.Stat(st.Program); st.Program == "" || err != nil {
-		res.detail = fmt.Sprintf("agent %s runs %q, which is missing", st.Label, st.Program)
-		res.hint = repoint + ", or `curio daemon uninstall` removes it"
-		return res, true
-	}
-	switch {
-	case !st.Loaded:
-		res.detail = fmt.Sprintf("agent %s is installed but not loaded", st.Label)
-		res.hint = "`curio daemon install` loads it (an agent needs a desktop login session)"
-	case !sameFile(st.Program, c.Controller.DaemonBin):
-		res.detail = fmt.Sprintf("agent %s runs %s, not this curio's %s", st.Label, st.Program, c.Controller.DaemonBin)
-		res.hint = repoint
-	default:
-		res.status, res.detail = statusOK, fmt.Sprintf("agent %s loaded, runs %s", st.Label, st.Program)
-	}
-	return res, true
-}
-
-// sameFile reports whether paths a and b name one file, however they are
-// spelled or linked.
-func sameFile(a, b string) bool {
-	ai, err := os.Stat(a)
-	if err != nil {
-		return false
-	}
-	bi, err := os.Stat(b)
-	return err == nil && os.SameFile(ai, bi)
 }
 
 // checkContentDir checks that the daemon can write extracted content to dir
@@ -269,33 +214,6 @@ func checkContentDir(dir string, r *doctorReport) {
 		return
 	}
 	r.add("content dir", statusOK, dir+" writable", "")
-}
-
-// driftCheck is doctor's embeddings check: a warning while the daemon
-// reports the build that makes the embeddings changed since the library
-// was indexed, since searches then compare vectors from two builds.
-func driftCheck(d *client.EmbeddingDrift) (name string, status checkStatus, detail, hint string) {
-	if d == nil {
-		return "embeddings", statusOK, "no drift reported since the library was indexed", ""
-	}
-	return "embeddings", statusWarn, "drifted: " + driftChanges(d),
-		"searches compare vectors from two builds; run `" + d.Fix + "` to re-embed the library"
-}
-
-// driftChanges lists what changed in a drift, recorded value first.
-func driftChanges(d *client.EmbeddingDrift) string {
-	parts := make([]string, 0, len(d.Changes))
-	for _, c := range d.Changes {
-		what := c.What
-		switch c.What {
-		case client.DriftModelDigest:
-			what = "model digest"
-		case client.DriftOllamaVersion:
-			what = "Ollama"
-		}
-		parts = append(parts, fmt.Sprintf("%s %s → %s", what, c.Recorded, c.Current))
-	}
-	return strings.Join(parts, ", ")
 }
 
 // upstreamCheck is doctor's check of an upstream the daemon reports, the

@@ -48,18 +48,20 @@ func (c *Controller) Install(ctx context.Context) (changed bool, err error) {
 	return changed, c.EnsureRunning(ctx)
 }
 
-// install is Install's part under the start lock.
+// install is Install's part under the start lock. The manager's refusals
+// (no service manager, root, a program it couldn't run, no GUI session)
+// come first, so no daemon is stopped for an install that can't happen.
 func (c *Controller) install(ctx context.Context) (bool, error) {
 	spec := service.Spec{Program: c.DaemonBin}
+	if err := c.Service.Preflight(ctx, spec); err != nil {
+		return false, err
+	}
 	st, err := c.Status(ctx)
 	switch {
 	case err != nil:
 		return false, err
 	case st.ServiceErr != nil:
 		return false, st.ServiceErr
-	case !st.Service.Supported:
-		// The manager's refusal says why, and no daemon is stopped for it.
-		return c.Service.Install(ctx, spec)
 	case st.State == Legacy:
 		return false, c.legacyStopError(st.PID)
 	}
@@ -76,9 +78,8 @@ func (c *Controller) install(ctx context.Context) (bool, error) {
 
 // Uninstall removes the daemon's agent from the service manager, which
 // stops the agent's daemon, and returns once that daemon has released
-// daemon.pid: a caller may move the home afterwards. A daemon running
-// outside the agent is left alone. removed is false when no agent was
-// installed.
+// daemon.pid. A daemon running outside the agent is left alone. removed is
+// false when no agent was installed.
 func (c *Controller) Uninstall(ctx context.Context) (removed bool, err error) {
 	if c.Service == nil {
 		return false, errNoManager
@@ -95,6 +96,12 @@ func (c *Controller) Uninstall(ctx context.Context) (removed bool, err error) {
 	if st.ServiceErr != nil {
 		return false, st.ServiceErr
 	}
+	return c.uninstall(ctx, st)
+}
+
+// uninstall is Uninstall's part under the start lock, st the status taken
+// under it.
+func (c *Controller) uninstall(ctx context.Context, st Status) (removed bool, err error) {
 	removed, err = c.Service.Uninstall(ctx)
 	if err != nil {
 		return false, err
@@ -105,6 +112,52 @@ func (c *Controller) Uninstall(ctx context.Context) (removed bool, err error) {
 		}
 	}
 	return removed, nil
+}
+
+// WithDaemonStopped runs fn while no daemon runs for this home and none
+// can start, and returns fn's error. It holds daemon.start.lock, which
+// every auto-starter takes before it starts a daemon, from before it stops
+// anything until fn has returned, so a caller can move the home in fn
+// (`curio up --fresh` does): a daemon started mid-move would go on serving
+// the moved directory and hold the port. Under the lock it boots out the
+// home's agent when one is installed, stops a daemon running outside it,
+// lock-verified as Stop does, and runs fn only once nothing holds
+// daemon.pid. A daemon from before the lock protocol can't be verified,
+// so it is refused before anything changes.
+func (c *Controller) WithDaemonStopped(ctx context.Context, fn func() error) error {
+	startLock, err := lockStart(ctx, c.Home.StartLockFile())
+	if err != nil {
+		return err
+	}
+	defer startLock.Close()
+	st, err := c.Status(ctx)
+	switch {
+	case err != nil:
+		return err
+	case st.ServiceErr != nil:
+		return st.ServiceErr
+	case st.State == Legacy:
+		return c.legacyStopError(st.PID)
+	}
+	if svc := st.Service; svc != nil && (svc.Installed || svc.Loaded) {
+		if _, err := c.uninstall(ctx, st); err != nil {
+			return fmt.Errorf("remove the launchd agent: %w", err)
+		}
+		if st, err = c.Status(ctx); err != nil {
+			return err
+		}
+	}
+	if _, err := c.stopRunning(ctx, st); err != nil {
+		return err
+	}
+	held, pid, err := probeLock(c.Home.PIDFile())
+	if err != nil {
+		return err
+	}
+	if held {
+		return fmt.Errorf("curio-daemon (pid %d) still holds %s after it was stopped; not going on", pid, c.Home.PIDFile())
+	}
+	return fn()
 }
 
 // Restart stops the daemon and starts a new one: through the service

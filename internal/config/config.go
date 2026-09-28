@@ -19,6 +19,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -381,8 +382,8 @@ func (c Config) Validate() error {
 	if c.Embedding.Dim < 1 || c.Embedding.Dim > store.MaxEmbeddingDim {
 		return fmt.Errorf("embedding.dim must be in [1, %d], got %d", store.MaxEmbeddingDim, c.Embedding.Dim)
 	}
-	if c.Embedding.BaseURL == "" {
-		return errors.New("embedding.base_url must not be empty")
+	if err := validateBaseURL("embedding.base_url", c.Embedding.BaseURL); err != nil {
+		return err
 	}
 	if c.Embedding.TimeoutSeconds <= 0 {
 		return fmt.Errorf("embedding.timeout_seconds must be positive, got %d", c.Embedding.TimeoutSeconds)
@@ -418,7 +419,11 @@ func (c Config) Validate() error {
 			c.Fetcher.Native.TimeoutSeconds)
 	}
 	switch c.Fetcher.Default {
-	case "native", "web2md":
+	case "native":
+	case "web2md":
+		if c.Fetcher.Web2MD.Bin == "" {
+			return errors.New("fetcher.web2md.bin must be set when fetcher.default is web2md")
+		}
 	case "":
 		return errors.New("fetcher.default must be set (native or web2md)")
 	default:
@@ -452,11 +457,24 @@ func (c Config) Validate() error {
 	if c.Generation.Model == "" {
 		return errors.New("generation.model must not be empty")
 	}
-	if c.Generation.BaseURL == "" {
-		return errors.New("generation.base_url must not be empty")
+	if err := validateBaseURL("generation.base_url", c.Generation.BaseURL); err != nil {
+		return err
 	}
 	if c.Generation.TimeoutSeconds <= 0 {
 		return fmt.Errorf("generation.timeout_seconds must be positive, got %d", c.Generation.TimeoutSeconds)
+	}
+	return nil
+}
+
+// validateBaseURL holds an Ollama address to the rule the Ollama client
+// is built with, so the daemon refuses a bad one as it loads its config,
+// before it binds its port or opens the database.
+func validateBaseURL(key, raw string) error {
+	if raw == "" {
+		return fmt.Errorf("%s must not be empty", key)
+	}
+	if err := ollama.ValidateBaseURL(raw); err != nil {
+		return fmt.Errorf("%s: %w", key, err)
 	}
 	return nil
 }

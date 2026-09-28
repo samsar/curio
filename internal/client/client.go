@@ -35,8 +35,9 @@ func New(baseURL string) *Client {
 
 // Health mirrors api.Health. PID and Home are zero for a daemon that
 // predates them, which also means it holds no single-instance lock, and
-// Upstreams is nil for one that predates it. EmbeddingDrift is nil unless
-// the daemon reports the build that makes the embeddings changed.
+// Upstreams and GenerationModel are empty for one that predates them.
+// EmbeddingDrift is nil unless the daemon reports the build that makes the
+// embeddings changed.
 type Health struct {
 	Status          string           `json:"status"`
 	PID             int              `json:"pid,omitempty"`
@@ -46,6 +47,7 @@ type Health struct {
 	EmbeddingModel  string           `json:"embedding_model"`
 	EmbeddingDim    int              `json:"embedding_dim"`
 	EmbeddingDrift  *EmbeddingDrift  `json:"embedding_drift,omitempty"`
+	GenerationModel string           `json:"generation_model,omitempty"`
 	OllamaReachable bool             `json:"ollama_reachable"`
 	OllamaDetail    string           `json:"ollama_detail,omitempty"`
 	Upstreams       []UpstreamHealth `json:"upstreams,omitempty"`
@@ -742,8 +744,8 @@ type QueueKind struct {
 }
 
 // Queue states and reasons, throttles, the schedule that clears the
-// schedule, and power sources, mirroring the API's. A daemon may report a state or reason this
-// client doesn't know.
+// schedule, and power sources, mirroring the API's. A daemon may report a
+// state or reason this client doesn't know.
 const (
 	QueueOpen             = "open"
 	QueueClosed           = "closed"

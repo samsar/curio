@@ -27,7 +27,8 @@ func TestUnsupported(t *testing.T) {
 	_, startErr := m.Start(ctx)
 	_, restartErr := m.Restart(ctx)
 	for name, err := range map[string]error{
-		"install": installErr, "uninstall": uninstallErr, "start": startErr,
+		"preflight": m.Preflight(ctx, Spec{Program: "/opt/homebrew/bin/curio-daemon"}),
+		"install":   installErr, "uninstall": uninstallErr, "start": startErr,
 		"stop": m.Stop(ctx), "restart": restartErr,
 	} {
 		require.ErrorIs(t, err, ErrUnsupported, name)

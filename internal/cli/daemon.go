@@ -58,7 +58,7 @@ func newDaemonStartCmd(env *daemonctl.Env) *cobra.Command {
 // would only bring the same build back: the agent needs repointing.
 func switchAdvice(env *daemonctl.Env, st daemonctl.Status) string {
 	bin := env.Controller.DaemonBin
-	if svc := st.Service; svc != nil && svc.Loaded && !sameFile(svc.Program, bin) {
+	if svc := st.Service; svc != nil && svc.Loaded && !daemonctl.SameFile(svc.Program, bin) {
 		from := ""
 		if svc.Program != "" { // empty when the agent's definition can't be read
 			from = " from " + svc.Program
@@ -179,6 +179,9 @@ func describeAgent(st daemonctl.Status) string {
 		return ""
 	case !svc.Installed:
 		return "launchd: no agent (`curio daemon install` keeps the daemon running across logins and crashes)"
+	case svc.NoGUISession:
+		return fmt.Sprintf("launchd: agent %s is installed, but there is no GUI login session for it to run in (ssh); "+
+			"curio commands start the daemon themselves meanwhile", svc.Label)
 	case !svc.Loaded:
 		return fmt.Sprintf("launchd: agent %s is installed but not loaded (`curio daemon install` loads it)", svc.Label)
 	case st.Managed():

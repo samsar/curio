@@ -35,9 +35,11 @@ type agentPlist struct {
 //   - RunAtLoad: loading the agent, at install and at each login, starts
 //     the daemon.
 //   - KeepAlive {SuccessfulExit: false}: launchd restarts a daemon that
-//     exits non-zero (a crash, a config it can't load) and leaves one that
-//     exits 0 (told to stop, or another daemon already serves the home)
-//     stopped.
+//     exits non-zero (a crash, a port it can't bind yet), no more often
+//     than its default 10s throttle, and leaves one that exits 0 stopped:
+//     one told to stop, one that finds another daemon serving the home,
+//     and one refusing a config.yaml or a home it can't serve, which only
+//     a fix changes (the daemon's exitCode).
 //   - ExitTimeOut: see ExitTimeout.
 //   - StandardOutPath is daemon.log, which the daemon logs to through
 //     stdout; StandardErrorPath gets only what the runtime writes as the

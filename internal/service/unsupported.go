@@ -17,6 +17,7 @@ var _ Manager = Unsupported{}
 // anything.
 func (Unsupported) Status(context.Context) (Status, error) { return Status{}, nil }
 
+func (Unsupported) Preflight(context.Context, Spec) error       { return unsupported() }
 func (Unsupported) Install(context.Context, Spec) (bool, error) { return false, unsupported() }
 func (Unsupported) Uninstall(context.Context) (bool, error)     { return false, unsupported() }
 func (Unsupported) Start(context.Context) (int, error)          { return 0, unsupported() }

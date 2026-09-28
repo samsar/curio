@@ -46,6 +46,13 @@ func TestHealthz(t *testing.T) {
 	assert.Nil(t, h.EmbeddingDrift)
 }
 
+func TestHealthz_GenerationModel(t *testing.T) {
+	s := apitest.Start(t, func(d *api.Deps) { d.GenerationModel = "gemma4:26b" })
+	h, err := client.New(s.URL).Healthz(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "gemma4:26b", h.GenerationModel)
+}
+
 // TestHealthz_EmbeddingDrift: a drift the daemon reports reaches Health
 // whole.
 func TestHealthz_EmbeddingDrift(t *testing.T) {
