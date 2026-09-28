@@ -73,7 +73,7 @@ when the entry was first committed.
 - 2026-07-06 — [nomic-embed-text task prefixes (`search_document:` / `search_query:`)](#nomic-embed-text-task-prefixes-search_document--search_query) (revised)
 - 2026-07-06 — [Insight clustering quality: the "general-reading" mega-cluster (known limitation)](#insight-clustering-quality-the-general-reading-mega-cluster-known-limitation)
 - 2026-09-09 — [Host-cache hits are permanent failures](#host-cache-hits-are-permanent-failures) (revised)
-- 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out)
+- 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out) (revised)
 - 2026-09-24 — [Single daemon per home: flock on daemon.pid, bind before touching the DB](#single-daemon-per-home-flock-on-daemonpid-bind-before-touching-the-db) (revised)
 - 2026-09-24 — [Interrupted vs. orphaned jobs](#interrupted-vs-orphaned-jobs)
 - 2026-09-24 — [Config: strict keys, legacy `workers` folded in at load](#config-strict-keys-legacy-workers-folded-in-at-load) (revised)
@@ -92,7 +92,7 @@ when the entry was first committed.
 - 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert)
 - 2026-09-24 — [Bookmark ingest: one transaction, fetch only for new documents](#bookmark-ingest-one-transaction-fetch-only-for-new-documents)
 - 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down) (revised)
-- 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders)
+- 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders) (revised)
 - 2026-09-24 — [API: handler edge cases found by coverage](#api-handler-edge-cases-found-by-coverage) (revised)
 - 2026-09-25 — [updated_at: written by each statement, not by triggers](#updated_at-written-by-each-statement-not-by-triggers)
 - 2026-09-25 — [Jobs reference their document through a column](#jobs-reference-their-document-through-a-column)
@@ -103,7 +103,7 @@ when the entry was first committed.
 - 2026-09-25 — [API: tolerant responses, strict requests](#api-tolerant-responses-strict-requests)
 - 2026-09-25 — [API: absolute content paths, and hydration errors fail the request](#api-absolute-content-paths-and-hydration-errors-fail-the-request) (revised)
 - 2026-09-25 — [API: filters are validated, sizing knobs default](#api-filters-are-validated-sizing-knobs-default)
-- 2026-09-25 — [Clients: one discovery, an explicit daemon environment, a signal context](#clients-one-discovery-an-explicit-daemon-environment-a-signal-context)
+- 2026-09-25 — [Clients: one discovery, an explicit daemon environment, a signal context](#clients-one-discovery-an-explicit-daemon-environment-a-signal-context) (revised)
 - 2026-09-25 — [Client errors: a typed APIError, and "unreachable" means never connected](#client-errors-a-typed-apierror-and-unreachable-means-never-connected)
 - 2026-09-25 — [MCP sidecar: restart an unreachable daemon, retry once](#mcp-sidecar-restart-an-unreachable-daemon-retry-once) (revised)
 - 2026-09-25 — [List pagination: keyset on (timestamp, id)](#list-pagination-keyset-on-timestamp-id)
@@ -135,6 +135,7 @@ when the entry was first committed.
 - 2026-09-27 — [Keep-awake: caffeinate on AC power while the workers have queued work](#keep-awake-caffeinate-on-ac-power-while-the-workers-have-queued-work)
 - 2026-09-27 — [curio up: a plan-first setup wizard](#curio-up-a-plan-first-setup-wizard) (revised)
 - 2026-09-28 — [curio up: the import step](#curio-up-the-import-step)
+- 2026-09-28 — [Dashboard: server-rendered pages in the daemon (phase 1)](#dashboard-server-rendered-pages-in-the-daemon-phase-1)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -2302,6 +2303,27 @@ machine out. That is accepted for a single-user tool and revisited with
 hosted-mode auth. Browsers' Private Network Access protections are not
 relied on because they don't ship everywhere.
 
+**Revised (2026-09-28):** Two Fetch Metadata rules join these, and the
+daemon now serves one browser client of its own.
+
+- A change (any method but GET, HEAD and OPTIONS) that carries
+  `Sec-Fetch-Site` gets 403 unless it carries it once, valued
+  `same-origin`. Browsers send it on every request; the CLI and the MCP
+  sidecar send none, and pass. The Origin rule already refuses other
+  sites' changes; this one also holds where a browser leaves Origin off,
+  and keeps the daemon's names apart: a page from `localhost:P` changing
+  `127.0.0.1:P` sends an Origin the daemon accepts, but is cross-site. It
+  runs after the Origin check, in the starting router too, so a refused
+  change during startup is a 403, not a 503.
+- The dashboard (see "Dashboard: server-rendered pages in the daemon
+  (phase 1)") is admitted because it is same-origin: its pages come from
+  the daemon's own port, their requests carry the daemon's own Origin,
+  and they are GET-only. Another site's page loading one as a
+  subresource (`Sec-Fetch-Site` cross-site or same-site without a
+  top-level navigation) is refused.
+
+Rejections are logged with the `Sec-Fetch-*` headers the request carried.
+
 ---
 
 ## Single daemon per home: flock on daemon.pid, bind before touching the DB
@@ -3217,6 +3239,14 @@ case-sensitive and LIKE is not, so `/tech/ai` would match
 keeps SQLite from seeking `idx_bookmarks_folder` on it; see "Indexes follow
 the queries" for how a filtered page is read.)
 
+**Revised (2026-09-28):** `GET /v1/documents` filters by `host` and
+`folder` with the same rules, built by the same code: `hostPredicate`,
+which the search host filter uses too, and `folderPredicate`, which the
+bookmark list uses too. Documents have no folder, so the folder filter is
+an EXISTS over the document's bookmarks of the tenant: a document with
+several bookmarks in the folder is listed once, and one without bookmarks
+never matches a folder.
+
 ---
 
 ## API: handler edge cases found by coverage
@@ -3391,6 +3421,23 @@ indexes.
 new index: it looks each URL up in the unique constraints' own indexes
 (`sqlite_autoindex_documents_2`, `sqlite_autoindex_bookmarks_2`), and its
 plan is pinned too.
+
+**Revised (2026-09-28):** The documents list's `content_type`, `host` and
+`folder` filters need no index either. Under each, alone or together, with
+or without `state`, the list still walks `idx_documents_tenant_updated` or
+`idx_documents_tenant_state_updated` in its order from the cursor, with no
+temporary b-tree, checking the filters on each row it reads; the folder
+filter's EXISTS seeks `idx_bookmarks_document`. At 50k documents and 50k
+bookmarks the slowest selective filters took about 11 ms (a host with 5
+documents), 30 ms (a folder with 5) and 7 ms (a content type with 10),
+against 0.14 ms unfiltered: a page walks the list until it has its rows,
+the trade the bookmark list's folder filter already makes.
+`idx_documents_tenant_ctype` stays dropped. The Document page's two reads
+are pinned too: `GetWithLastError` is a point search of the primary key,
+and `ListByDocument` seeks `idx_bookmarks_document` and sorts its few rows
+by `saved_at`. Ordered by `created_at` instead, SQLite walks
+`idx_bookmarks_tenant_created` through every bookmark the tenant has to
+skip that sort.
 
 ---
 
@@ -3705,6 +3752,11 @@ path doubled: `open /x.html: open /x.html: no such file or directory`.
 Twenty-four call sites repeated `getCtx` and a "no context" error, and
 ten checked for a nil home or controller that `buildContext` could no
 longer return.
+
+**Revised (2026-09-28):** `daemonctl.BaseURL` drops a trailing slash from
+`--daemon-url`. The client joins the API's paths onto the base, so
+`http://127.0.0.1:8765/` asked for `//v1/healthz`, which is no route, and
+every command failed to find the daemon.
 
 ---
 
@@ -6434,6 +6486,184 @@ the host's PATH.
   is unknown; they are named instead.
 - Parsing in the daemon: see "Importers: CLI parses, daemon receives
   lists".
+
+---
+
+## Dashboard: server-rendered pages in the daemon (phase 1)
+
+**Decision:** curio-daemon serves a read-only dashboard under `/ui/` on
+its own port, and `/` redirects there: an Overview (counts, the queue and
+its progress, health, the newest bookmarks), Search, a Library of
+documents with filters and paging, a page per document (metadata, its
+rendered text, related documents, its bookmarks, its last error) and the
+Interests. config.yaml's `daemon.ui` (default true) turns the pages off;
+`curio ui` opens them. Phase 1 changes nothing: refetch, reindex, rebuild
+and the queue controls are phase 2 (docs/ui.md).
+
+**Where it is served, and no token.** From the daemon's own origin, so
+the pages are same-origin with `/v1`: the Origin rule ("Local API")
+already admits their requests and refuses every other site's, and no
+CORS is ever needed. A second port or binary would be another origin,
+needing either CORS or a token the pages would have to be handed; a
+desktop wrapper is a product of its own. The API trusts local processes
+already, and the pages add no one it didn't trust.
+
+**Stack.** Go's `html/template`, not templ: no generator in the build, and
+the standard library's contextual escaping. Every page is a full
+server-rendered page. htmx does two things, search as you type and "load
+more" in the Library, and every htmx request gets the same full page a
+plain GET gets and selects its region (`hx-select`): one rendering path,
+no partial endpoints, no `Vary: HX-Request`, and every page works with
+JavaScript off. No Node toolchain, no SPA, no chart library.
+`TestEveryTemplateRenders` executes every template of every page's set
+(pages, blocks and partials) with a typed sample whose strings are
+hostile, and a template without a sample fails the test, so a broken
+template fails `make test` rather than a page.
+
+**One code path per resource.** The page handlers (`internal/api/ui*.go`)
+get their data from the Deps functions the JSON handlers call (`health`,
+`stats`, `queueState`, `metrics`, `listDocuments`, `document`,
+`openContent`, `search`, `related`, `interests`, `interest`,
+`listBookmarks`), plus two store reads, and map it into `internal/ui`'s
+typed view models. They never build SQL: depguard denies `database/sql`
+and the SQLite store to `internal/ui` and `internal/api/ui*.go`. A view
+can then be rebuilt client-side from `/v1` without its answers
+disagreeing with the page's.
+
+**Security model.** Everything a page shows came from a web page or from
+Jina and is hostile.
+
+- Every response under `/` and `/ui` carries exactly this
+  Content-Security-Policy,
+
+  ```
+  default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+  connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
+  ```
+
+  and `X-Content-Type-Options: nosniff` and `Referrer-Policy:
+  no-referrer`, set by middleware before
+  the access checks, so their 403s, the 404 page, the 405s, the redirect,
+  the starting page and the assets carry them too.
+  `TestDashboard_SecurityHeaders` takes the routes from the router and
+  needs a sample request for each.
+- No template holds inline script, inline style, an event handler,
+  `hx-on`, `hx-vars` or a `javascript:` URL (`TestTemplatesHaveNoInlineCode`),
+  and every page test checks the HTML inert with `internal/ui/uitest`.
+- Stored markdown goes through goldmark with GFM and without
+  `html.WithUnsafe`, so raw HTML is left out. An AST transformer then
+  resolves every link and image against the document's URL
+  (`url_canonical`, else `url`), after resolving character references as
+  the renderer will (`&#106;avascript:` is `javascript:`): a relative
+  link would otherwise resolve against the daemon. Links keep only http,
+  https and mailto; any other becomes its text. bluemonday's UGC
+  allow-list then sanitizes the HTML, allowing those three schemes and no
+  relative URL, and giving links `rel="nofollow noreferrer noopener"` and
+  `target="_blank"`. Its output is the only conversion to one of
+  html/template's trusted types (`template.HTML`, `JS`, `URL` and the
+  rest) outside tests: `TestTrustedHTMLOnlyFromTheSanitizer` parses every
+  non-test Go file in the repository to keep it that way. Search snippets
+  are split at their `<em>` markers into plain-text segments, so a chunk's
+  markup is text.
+- Links the templates make are built in Go (`url.Values`,
+  `url.PathEscape`): a query string pieced together in a template is
+  escaped a second time, and html/template leaves a path segment
+  unescaped. Outbound links carry `rel="noopener noreferrer"`.
+- htmx 2.0.11 is vendored: `dist/htmx.min.js` of the npm package
+  htmx.org@2.0.11 (0BSD), 52,182 bytes, SHA-256
+  `d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717`,
+  identical from jsDelivr, pinned by `TestHTMXIsPinned`. Its config (a
+  meta tag) sets `allowEval: false` (which also rules out `hx-trigger`
+  filters, so none are used), `allowScriptTags: false`,
+  `includeIndicatorStyles: false` (its injected `<style>` would break the
+  CSP; `app.css` has the indicator), `historyCacheSize: 0` (no page
+  snapshots in localStorage), `selfRequestsOnly: true`, and swaps 4xx and
+  5xx answers too, so a failed search replaces the results rather than
+  leaving stale ones.
+- Every page route is a GET (`TestDashboard_GETOnly`): a page must never
+  change anything, since another site can send a browser to one. The
+  assets' route is a `Get`, not a `Mount`: chi reports a mount under every
+  method.
+- A change must come from the daemon's own pages when a browser says
+  where it came from (`Sec-Fetch-Site: same-origin`; see "Local API").
+- A page request another site's page makes as a subresource is refused:
+  `Sec-Fetch-Site` cross-site or same-site gets 403 unless the request is
+  a top-level navigation (`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest:
+  document`), which following a link to the dashboard is. `GET
+  /ui/search?q=` runs the search engine and has Ollama embed the query,
+  and `<img src="http://127.0.0.1:8765/ui/search?q=x">` on any page passed
+  the Host check (the daemon's own Host) and the Origin rule (a no-cors
+  GET carries no Origin). The answer is opaque and nothing is written,
+  but a hostile page left open could keep Ollama busy, starving the index
+  jobs that share it, and add a line per request to `daemon.log`, which is
+  never rotated. `/v1/search` is a POST, so the Origin and JSON rules
+  covered it already; this rule adds to them for the pages.
+
+**Remote images: off by default.** Loading an image tells its host that
+the page was read, and when. Each image is its alt text, linking to it;
+an image that isn't http(s), or already sits inside a link, is its text.
+A document page whose text has remote images offers a "Load images" link
+to itself with `?images=1`, which stores nothing, and
+`ui.load_remote_images: true` shows them on every document page. Only
+https images are shown, lazily, and only those answers' CSP adds `https:`
+to `img-src`; http and `data:` images stay links or text.
+
+**At most 1 MiB of markdown is rendered,** cut after the last whole line
+(`ui.MaxRenderedMarkdown`). goldmark and bluemonday took about 90 ms for a
+2 MiB article, but about half a second for a pathological 2 MiB table,
+which grows to about 11 MiB of HTML. A cut page says so and names the
+markdown file; `GET /v1/documents/{id}/content` has the whole text.
+
+**Pages degrade by panel.** The Overview's panels (counts, queue,
+progress, health, newest bookmarks) and the Document page's text, related
+documents and bookmarks each read on their own. A read that fails shows
+its message and request ID in its panel, logged once as `writeError` logs
+a request's (`reportError`), and the page still answers 200. The JSON API
+keeps "hydration errors fail the request": a client wants a whole answer
+or an error it can act on, a person reading a page wants what could be
+read. A page renders into a buffer first: a template that fails is a 500
+error page, never a truncated 200.
+
+**Progress estimate.** The Overview estimates when the queued fetch and
+index jobs will be done at the pace of the last 10 minutes
+(`ui.ProgressWindow`): rate = done and failed jobs of those kinds in the
+window / 10 minutes, ETA = (pending + running) / rate. It shows an ETA
+only with work queued, the queue open and a rate above 0; with nothing
+finished in the window it says so, and a closed queue says why instead.
+It is labeled an estimate at the window's pace: the index job each fetch
+will enqueue isn't counted until it is.
+
+**While starting,** a page GET answers 503 with a page that reloads
+itself every 2 seconds (a meta refresh, not script) and shows the phase
+and the migrations applied; the assets are served, `/` redirects, and
+changes and `/v1` get the starting problem.
+
+**New API and store reads.** `GET /v1/documents` gained `content_type`,
+`host` and `folder` filters, for the Library (see "Folder and host
+filters" and "Indexes follow the queries"). The Document page reads its
+bookmarks (`BookmarkStore.ListByDocument`, newest saved first: ordered
+by `saved_at`, since `created_at` would walk every bookmark's index
+entry) and its last job error (`DocumentStore.GetWithLastError`, built
+from `ListWithLastError`'s SQL) straight from the store, shown only while
+the document is failed or dead: `/v1` doesn't expose either yet. Rebuilding the page client-side would add
+`last_error` to `GET /v1/documents/{id}` and implement the decided `GET
+/v1/documents/{id}/references` (`{bookmarks: [...]}`).
+
+**Phase 2's rule for changes.** Actions go through `/v1` as JSON sent with
+fetch or XHR (htmx's json-enc, or a small module under `/ui/static/`),
+never as a plain HTML form post: with `Referrer-Policy: no-referrer`, a
+browser sends `Origin: null` on a POST that isn't in CORS mode (the Fetch
+standard's Origin rules), which the Origin rule refuses, and the
+`Sec-Fetch-Site: same-origin` rule applies to them. The document page
+leaves an empty template region, `document-actions`, where its buttons
+go.
+
+**Dependencies.** github.com/yuin/goldmark v1.8.6 (MIT);
+github.com/microcosm-cc/bluemonday v1.0.27 (BSD-3-Clause), with
+github.com/aymerick/douceur v0.2.0 (MIT) and github.com/gorilla/css
+v1.0.1 (BSD-3-Clause); htmx 2.0.11 (0BSD), vendored. golang.org/x/net
+stays at v0.58.0: bluemonday's floor, v0.26.0, carries advisories fixed
+in v0.56.0. govulncheck finds nothing in the new modules.
 
 ---
 
