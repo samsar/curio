@@ -329,10 +329,18 @@ func (h *harness) update(t *testing.T, u jobs.QueueUpdate) {
 	require.NoError(t, err)
 }
 
+// eventuallyHeld waits for want holds to be held, and for the keeper to
+// have logged every hold it started, which it does after taking the hold
+// and updating its State.
 func (h *harness) eventuallyHeld(t *testing.T, want int, msg string) {
 	t.Helper()
-	require.Eventually(t, func() bool { return h.asserter.held() == want }, 2*time.Second, 5*time.Millisecond, msg)
+	require.Eventually(t, func() bool {
+		return h.asserter.held() == want && len(h.logs.with(holdingMsg)) == h.asserter.started()
+	}, 2*time.Second, 5*time.Millisecond, msg)
 }
+
+// holdingMsg is what the keeper logs once it holds the Mac awake.
+const holdingMsg = "keep-awake: holding the Mac awake"
 
 // eventuallyReleased waits for the keeper to have logged releases for
 // reasons, which it does after ending the hold and updating its State.
@@ -356,7 +364,7 @@ func TestKeeper_HoldsOnACWithWork(t *testing.T) {
 	h.eventuallyHeld(t, 1, "held")
 	assert.Equal(t, 1, h.asserter.started())
 	assert.Equal(t, State{Enabled: true, Active: true, Power: PowerAC}, h.keeper.State())
-	holding := h.logs.with("keep-awake: holding the Mac awake")
+	holding := h.logs.with(holdingMsg)
 	require.Len(t, holding, 1)
 	assert.EqualValues(t, 1000, holding[0]["caffeinate_pid"])
 	assert.EqualValues(t, 3, holding[0]["pending"])
