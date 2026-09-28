@@ -164,7 +164,7 @@ func (w *world) checkModels(ctx context.Context) Result {
 		res.Fix = &Fix{Summary: "pull " + sized(p.all()) + ", whichever Ollama lacks once it answers"}
 	case len(missing) > 0:
 		machine, _ := w.probeMachine(ctx) // the machine check reports a failed probe; its volumes are then unknown
-		if short := diskShortage(machine, models(missing), hs.kind != homeOurs || w.freshPending()); short != "" {
+		if short := diskShortage(machine, models(missing)); short != "" {
 			return Result{Status: Fail, Detail: "not enough disk space: " + short, Notes: p.notes,
 				Hint: "free up space, or pick a smaller writing model with --generation-model"}
 		}
@@ -255,7 +255,7 @@ func (s *modelsStep) Apply(ctx context.Context, ui UI) error {
 		return err
 	}
 	machine, _ := w.probeMachine(ctx) // a failed probe was reported by the machine check
-	if short := diskShortage(machine, models(missing), hs.kind != homeOurs || w.freshPending()); short != "" {
+	if short := diskShortage(machine, models(missing)); short != "" {
 		return errors.New("not enough disk space: " + short)
 	}
 	for _, m := range missing {

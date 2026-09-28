@@ -22,8 +22,8 @@ func (s *homeStep) Check(ctx context.Context) Result {
 }
 
 // checkHome is the check of the home itself: there, ours, and one the
-// daemon would serve.
-func (w *world) checkHome(_ context.Context) Result {
+// daemon would serve; and for a new home, room for it.
+func (w *world) checkHome(ctx context.Context) Result {
 	hs := w.readHome()
 	if hs.err != nil {
 		return Result{Status: Fail, Detail: hs.err.Error(), Hint: "fix the permissions, or pass another --curio-home"}
@@ -38,18 +38,40 @@ func (w *world) checkHome(_ context.Context) Result {
 				hs.path, curiohome.MarkerFile),
 			Hint: "pass another --curio-home (or set CURIO_HOME), or move that directory yourself"}
 	case homeMissing, homeEmpty:
+		if res, short := w.noRoomForHome(ctx); short {
+			return res
+		}
 		return Result{Status: Fail, Detail: "no curio home at " + hs.path,
 			Fix: &Fix{Summary: "create a curio home at " + hs.path + " (" + w.newEmbedding() + ")", Consent: Announce}}
 	case homeOurs:
 	}
 	res := w.checkOurs(hs)
 	if w.freshPending() {
+		if res, short := w.noRoomForHome(ctx); short {
+			return res
+		}
 		res.Status = max(res.Status, Warn)
 		res.Fix = &Fix{Summary: fmt.Sprintf("move %s aside to %s, and create a new home (%s)",
 			hs.path, w.backupName(hs), w.newEmbedding()), Consent: AskNo}
 		res.Hint = "nothing is deleted: the old home stays whole at its new name"
 	}
 	return res
+}
+
+// noRoomForHome is the blocker for a new home whose volume the probe
+// measured with less than it needs; short is false when there is room, or
+// the volume is unknown.
+func (w *world) noRoomForHome(ctx context.Context) (res Result, short bool) {
+	m, err := w.probeMachine(ctx) // a failed probe is the machine check's to report
+	if err != nil {
+		return Result{}, false
+	}
+	why := newHomeShortage(m)
+	if why == "" {
+		return Result{}, false
+	}
+	return Result{Status: Fail, Detail: "not enough disk space for a new home: " + why,
+		Hint: "free up space, or pass another --curio-home"}, true
 }
 
 // checkOurs judges a curio home that stays.
