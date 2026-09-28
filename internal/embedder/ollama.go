@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/store"
 )
 
 // Ollama is an Embedder backed by a local (or remote) Ollama server.
@@ -93,13 +94,7 @@ func (o *Ollama) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		return nil, nil
 	}
 	var parsed embedResponse
-	err := o.client.PostJSON(ctx, "/api/embed", embedRequest{
-		Model:     o.client.Model(),
-		Input:     texts,
-		Truncate:  false,
-		KeepAlive: embedKeepAlive,
-		Options:   embedOptions{NumCtx: o.numCtx},
-	}, &parsed, o.maxEmbedReplyBytes(len(texts)))
+	err := o.client.PostJSON(ctx, "/api/embed", o.request(texts), &parsed, o.maxEmbedReplyBytes(len(texts)))
 	if isContextLengthError(err) {
 		return nil, fmt.Errorf("ollama embed: %w: %w", ErrInputTooLong, err)
 	}
@@ -118,6 +113,46 @@ func (o *Ollama) Embed(ctx context.Context, texts []string) ([][]float32, error)
 		}
 	}
 	return parsed.Embeddings, nil
+}
+
+// widthProbe is the text MeasureWidth embeds: any short text will do.
+const widthProbe = "curio"
+
+// MeasureWidth embeds one short text with opts.Model and returns the
+// length of the vector it gets back: the width a new home records, which
+// the model decides and a flag or a table could only get wrong. The
+// request is the indexer's (truncate false, keep_alive, num_ctx); opts.Dim
+// is not needed and is ignored.
+func MeasureWidth(ctx context.Context, opts OllamaOptions) (int, error) {
+	opts.Dim = 1 // NewOllama's check; the reply's width is what is measured
+	o, err := NewOllama(opts)
+	if err != nil {
+		return 0, err
+	}
+	// A reply as wide as the vector index takes; a wider one is no width a
+	// home could have.
+	o.dim = store.MaxEmbeddingDim
+	var parsed embedResponse
+	err = o.client.PostJSON(ctx, "/api/embed", o.request([]string{widthProbe}), &parsed, o.maxEmbedReplyBytes(1))
+	if err != nil {
+		return 0, fmt.Errorf("measure %s's vector width: %w", o.Model(), err)
+	}
+	if len(parsed.Embeddings) != 1 || len(parsed.Embeddings[0]) == 0 {
+		return 0, fmt.Errorf("measure %s's vector width: Ollama returned %d embeddings for one text",
+			o.Model(), len(parsed.Embeddings))
+	}
+	return len(parsed.Embeddings[0]), nil
+}
+
+// request is the /api/embed body for texts.
+func (o *Ollama) request(texts []string) embedRequest {
+	return embedRequest{
+		Model:     o.client.Model(),
+		Input:     texts,
+		Truncate:  false,
+		KeepAlive: embedKeepAlive,
+		Options:   embedOptions{NumCtx: o.numCtx},
+	}
 }
 
 // isContextLengthError reports whether err is Ollama refusing an input

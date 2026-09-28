@@ -109,6 +109,20 @@ func TestHealth_OllamaDetail(t *testing.T) {
 	}
 }
 
+// TestHealth_GenerationModel: healthz names the generation model the
+// daemon started with, so `curio up` can tell a daemon running another one
+// from config.yaml's; the field is there even when it is empty.
+func TestHealth_GenerationModel(t *testing.T) {
+	for _, model := range []string{"gemma4:26b", ""} {
+		s := newTestServer(t, func(d *Deps) { d.GenerationModel = model })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var h map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+		assert.Equal(t, model, h["generation_model"])
+	}
+}
+
 // driftMonitor is a DriftMonitor that reports report and counts
 // rebaselines, failing them with err.
 type driftMonitor struct {
