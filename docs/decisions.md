@@ -6266,9 +6266,10 @@ file is even looked for; `curio import` adds more.
   source it names must be there, readable and hold bookmarks: an unknown
   profile (listing those found), a missing file, a browser that isn't
   installed, an unreadable source, one with no bookmarks, or one macOS
-  withholds without a terminal to walk through Full Disk Access, is a
-  blocker. Nothing new in it is OK ("nothing new in X"), so running the
-  same `--import` again is idempotent.
+  withholds when nobody can be walked through Full Disk Access (no
+  terminal, or `--yes`; see below), is a blocker. Nothing new in it is OK
+  ("nothing new in X"), so running the same `--import` again is
+  idempotent.
 - The menu (the step's `Confirmer`) lists the readable sources with their
   new counts (the one with the most is the default), the ones that need
   permission,
@@ -6308,7 +6309,13 @@ and runs it through the Installer on a yes (never with `--no-install`,
 which says where the pane is), then checks again as often as asked,
 saying a still-denied check needs the terminal restarted. A decline goes
 back to the menu, or with `--import safari` fails the step with the
-remedy.
+remedy. Only someone at the terminal can walk through it: they turn
+access on, and macOS applies it only after a restart, so `--yes`, which
+answers every "check again" itself, would check again for good. Without
+a terminal or with `--yes`, a withheld `--import safari` is a blocker in
+the plan with the remedy, and Apply, meeting a source withheld only
+since the plan, fails with it rather than walking through. `--yes`
+answers no prompt once the run is cancelled, as every UI does.
 
 **Counting what is new: a dry run on the import endpoint.** `POST
 /v1/bookmarks/import` takes `dry_run`: the same body, limit and

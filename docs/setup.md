@@ -89,6 +89,8 @@ does it, asking before each step:
      'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'`)
      and checks again when you say so. macOS applies it only once the
      terminal app restarts: quit it, reopen it, and run `curio up` again.
+     Only you can turn it on, so without a terminal, or with `--yes`,
+     `--import safari` stops at the plan with these steps instead.
    - **YouTube videos** among the new bookmarks: curio indexes a video's
      transcript through yt-dlp. curio up offers `brew install yt-dlp`,
      then restarts the daemon, which finds yt-dlp only as it starts, and

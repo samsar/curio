@@ -67,6 +67,25 @@ func TestYesUI(t *testing.T) {
 	assert.Equal(t, "Use these? yes (--yes)\nWhich? b (--yes)\nPath? /tmp/x (--yes)\n", out.String())
 }
 
+// TestYesUI_Cancelled: --yes answers nothing once the run is cancelled, so
+// ctrl-c stops a run between prompts it would have answered itself.
+func TestYesUI_Cancelled(t *testing.T) {
+	var out bytes.Buffer
+	ui := yesUI{newPlainUI(&out)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	prompts := map[string]func() error{
+		"confirm": func() error { _, err := ui.Confirm(ctx, "Install Ollama?", true); return err },
+		"ask":     func() error { _, err := ui.Ask(ctx, "Use these?", "yes", "no"); return err },
+		"select":  func() error { _, err := ui.Select(ctx, "Which?", []string{"a", "b"}, 0); return err },
+		"input":   func() error { _, err := ui.Input(ctx, "Path?", "/tmp"); return err },
+	}
+	for name, prompt := range prompts {
+		require.ErrorIs(t, prompt(), context.Canceled, name)
+	}
+	assert.Empty(t, out.String(), "nothing answered")
+}
+
 func TestLineUI_Confirm(t *testing.T) {
 	cases := []struct {
 		input string

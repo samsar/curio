@@ -234,11 +234,10 @@ func (w *world) checkNamedImport(ctx context.Context, lib library) Result {
 		return Result{Status: Fail, Detail: err.Error()}
 	}
 	c := w.countSource(ctx, lib, src)
-	switch {
-	case c.av.State == importer.NeedsPermission && !w.deps.UI.Interactive():
+	switch why := w.cantAskForAccess(); {
+	case c.av.State == importer.NeedsPermission && why != "":
 		return Result{Status: Fail, Detail: fmt.Sprintf("--import %s: macOS doesn't let curio read %s without Full "+
-			"Disk Access, which takes a terminal to walk through", w.imp.spec, src.Name()),
-			Hint: fullDiskAccessHint(src)}
+			"Disk Access, %s", w.imp.spec, src.Name(), why), Hint: fullDiskAccessHint(src)}
 	case c.av.State == importer.NeedsPermission:
 		return Result{Status: Warn, Detail: c.src.Name() + " needs Full Disk Access",
 			Fix: &Fix{Summary: "import bookmarks from " + src.Name() + ", once macOS lets curio read them"}}
@@ -545,11 +544,16 @@ func (s *importStep) Apply(ctx context.Context, ui UI) error {
 	return nil
 }
 
-// allowed makes sure src can be read, asking macOS for Full Disk Access
-// when it needs it; a source still withheld is an error naming the remedy.
+// allowed makes sure src can be read, walking the user through Full Disk
+// Access when it needs it and someone can answer; a source still withheld
+// is an error naming the remedy.
 func (w *world) allowed(ctx context.Context, ui UI, src importer.Source) error {
 	if src.Check(ctx).State != importer.NeedsPermission {
 		return nil
+	}
+	if why := w.cantAskForAccess(); why != "" {
+		return fmt.Errorf("%s: macOS doesn't let curio read it without Full Disk Access, %s (%s)", src.Name(), why,
+			fullDiskAccessHint(src))
 	}
 	granted, err := w.fullDiskAccess(ctx, ui, src)
 	switch {
@@ -623,10 +627,26 @@ func terminalApp() string {
 	}
 }
 
+// cantAskForAccess is why this run can't walk the user through Full Disk
+// Access, empty when it can. The walk takes a terminal and someone at it:
+// only the user can turn access on in System Settings, and macOS applies
+// it once the terminal restarts, so --yes, answering every "check again"
+// itself, would check again for good.
+func (w *world) cantAskForAccess() string {
+	switch {
+	case !w.deps.UI.Interactive():
+		return "which takes a terminal to walk through"
+	case w.opts.Yes:
+		return "which only you can turn on, so --yes can't answer for it"
+	}
+	return ""
+}
+
 // fullDiskAccess walks the user through the Full Disk Access macOS wants
 // before src can be read: it explains that macOS grants it to the terminal
 // app, offers to open its pane in System Settings, then checks again as
 // often as the user asks. granted is false when the user stops asking.
+// Only a run that can ask (cantAskForAccess) calls it.
 func (w *world) fullDiskAccess(ctx context.Context, ui UI, src importer.Source) (granted bool, err error) {
 	term := terminalApp()
 	ui.Info(fmt.Sprintf("macOS lets an app read %s's bookmarks only with Full Disk Access, and grants it to the "+

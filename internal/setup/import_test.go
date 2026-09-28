@@ -1,12 +1,14 @@
 package setup_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -279,19 +281,49 @@ func TestImport_FullDiskAccessNoInstall(t *testing.T) {
 	assert.True(t, ui.Said("Give your terminal app Full Disk Access in System Settings > Privacy & Security > Full Disk Access"))
 }
 
-// TestImport_FullDiskAccessWithoutATerminal: without a terminal to walk
-// through it, a withheld --import safari blocks the plan with the remedy.
-func TestImport_FullDiskAccessWithoutATerminal(t *testing.T) {
-	h := newHarness(t)
-	h.firstRun()
-	safariNeedingAccess(h, true)
-	plan, _, err := h.up(setuptest.NewUI(t).NonInteractive(), setup.Options{Import: "safari", Yes: true})
-	var blocked *setup.BlockedError
-	require.ErrorAs(t, err, &blocked)
-	res := item(t, plan, "import")
-	assert.Contains(t, res.Detail, "Full Disk Access")
-	assert.Contains(t, res.Hint, "`curio up --import safari` again")
-	assert.Empty(t, h.installer.Runs())
+// TestImport_FullDiskAccessNobodyToAsk: a withheld --import safari that
+// nobody is there to walk through Full Disk Access blocks the plan with
+// the remedy, opening nothing: without a terminal, and with --yes in one,
+// which would otherwise answer every "check again" itself while macOS
+// withholds the access until the terminal restarts, and never end.
+func TestImport_FullDiskAccessNobodyToAsk(t *testing.T) {
+	cases := []struct {
+		name string
+		ui   func(t *testing.T) (setup.UI, *setuptest.UI)
+		why  string
+	}{
+		{"without a terminal", func(t *testing.T) (setup.UI, *setuptest.UI) {
+			ui := setuptest.NewUI(t).NonInteractive()
+			return ui, ui
+		}, "which takes a terminal to walk through"},
+		{"--yes in a terminal", func(t *testing.T) (setup.UI, *setuptest.UI) {
+			ui := setuptest.NewUI(t)
+			return setup.YesUI(ui), ui
+		}, "which only you can turn on, so --yes can't answer for it"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.firstRun()
+			safariNeedingAccess(h, false)
+			ui, scripted := tc.ui(t)
+			// Bounded, so a run that loops fails the test instead of
+			// hanging it: yesUI answers nothing once the context ends.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			var plan setup.Plan
+			_, err := h.runner(ui, setup.Options{Import: "safari", Yes: true}).Run(ctx,
+				func(p setup.Plan) { plan = p })
+			var blocked *setup.BlockedError
+			require.ErrorAs(t, err, &blocked, "%v", scripted.Events())
+			res := item(t, plan, "import")
+			assert.Equal(t, "--import safari: macOS doesn't let curio read Safari without Full Disk Access, "+tc.why,
+				res.Detail)
+			assert.Contains(t, res.Hint, "`curio up --import safari` again")
+			assert.Empty(t, h.installer.Runs())
+			assert.False(t, scripted.Said("Check again"), "%v", scripted.Events())
+		})
+	}
 }
 
 // TestImport_Blockers: an --import that names nothing importable blocks the
