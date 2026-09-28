@@ -2,6 +2,7 @@ package setup_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -372,6 +373,25 @@ func TestImport_Blockers(t *testing.T) {
 			assert.Empty(t, setuptest.DaemonRequests(h.home), "nothing was sent")
 		})
 	}
+}
+
+// TestImport_ParseFailure: a source that says it's available but can't be
+// parsed (a corrupt Bookmarks file) blocks an --import with the parser's
+// error, and nothing is sent.
+func TestImport_ParseFailure(t *testing.T) {
+	h := newHarness(t)
+	h.firstRun()
+	src := setuptest.NewSource("Firefox", importer.LabelFirefox, "firefox", "https://a.example/")
+	src.FailParse(errors.New("invalid character 'x' looking for beginning of value"))
+	h.sources = func() []importer.Source { return []importer.Source{src} }
+	plan, _, err := h.up(setuptest.NewUI(t), setup.Options{Import: "firefox"})
+	var blocked *setup.BlockedError
+	require.ErrorAs(t, err, &blocked)
+	res := item(t, plan, "import")
+	assert.True(t, res.Blocked())
+	assert.Contains(t, res.Detail, "invalid character 'x'")
+	assert.Positive(t, src.Parses())
+	assert.Empty(t, setuptest.DaemonRequests(h.home), "nothing was sent")
 }
 
 // TestImport_NothingNew: an --import whose bookmarks the library already

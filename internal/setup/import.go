@@ -159,7 +159,10 @@ type library struct {
 	// yet and it is empty.
 	known bool
 	// why it isn't known.
-	why                  string
+	why string
+	// homeBlocked: the home itself is unusable, so no daemon will answer
+	// until the home check's remedy is applied.
+	homeBlocked          bool
 	bookmarks, documents int
 	// daemon is the client of the daemon serving it; nil when there is no
 	// home yet, and every candidate is new.
@@ -171,7 +174,7 @@ type library struct {
 // empty, and no daemon is asked: the one answering serves the old home.
 func (w *world) readLibrary(ctx context.Context, hs homeState) library {
 	if why := hs.unusable(); why != "" {
-		return library{why: why + " (see the curio home check)"}
+		return library{why: why + " (see the curio home check)", homeBlocked: true}
 	}
 	if hs.kind != homeOurs || w.freshPending() {
 		return library{known: true}
@@ -219,6 +222,8 @@ func (s *importStep) Check(ctx context.Context) Result {
 		return w.checkNamedImport(ctx, lib)
 	}
 	switch {
+	case !lib.known && lib.homeBlocked:
+		return Result{Status: Warn, Detail: "not checked: " + lib.why}
 	case !lib.known:
 		return Result{Status: Warn, Detail: "not checked: " + lib.why + "; checked again once the daemon serves"}
 	case lib.bookmarks > 0:

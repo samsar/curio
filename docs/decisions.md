@@ -6411,8 +6411,9 @@ library no longer empty.
 `importer.Discover`) is set by every test that builds Deps, and the
 TestMain of internal/cli, internal/setup and test/e2e runs under
 `setuptest.WithoutBrowsers`, which points CURIO_CHROME_DIR,
-CURIO_SAFARI_DIR and CURIO_FIREFOX_DIR at an empty directory; a test in
-each asserts Discover finds nothing available there. setuptest's
+CURIO_SAFARI_DIR and CURIO_FIREFOX_DIR at an empty directory; tests in
+internal/cli, internal/setup and internal/importer assert Discover finds
+nothing available there. setuptest's
 scriptable `Source` stands in for a browser, and its fake daemon answers
 imports (every valid URL new), keeps queue settings, and reports
 `youtube_fetcher` from a marker file a fake install creates, never from
