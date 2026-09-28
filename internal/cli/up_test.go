@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/service"
@@ -20,19 +21,42 @@ import (
 	"github.com/samsar/curio/internal/setup/setuptest"
 )
 
-// TestUp_NothingToDo: with everything up, curio up changes nothing, says
-// so, and shows the status.
+// TestUp_NothingToDo: with everything up, a library with bookmarks
+// included, curio up changes nothing, says so, and shows the status.
 func TestUp_NothingToDo(t *testing.T) {
 	w := upWorld(t)
+	_, err := w.run(t, "add", "https://example.com/a")
+	require.NoError(t, err)
 	code, stdout, stderr := w.exit(t, "up")
 	assert.Equal(t, 0, code, stderr)
 	assert.Equal(t, "Nothing to do: curio is up.\n"+
 		fmt.Sprintf("daemon:   running (pid %d), kept running by its launchd agent\n", os.Getpid())+
 		"ollama:   0.34.4; qwen3-embedding:0.6b present, gemma4:26b present\n"+
-		"library:  0 documents\n"+
+		"library:  1 document\n"+
 		"queue:    open\n", stdout)
 	assert.Empty(t, stderr)
 	assert.Zero(t, w.agent.Count("Install"))
+}
+
+// TestUp_DaemonStarting: a daemon still starting leaves the parts of the
+// status it serves unread, and the status says so for each, never taking a
+// failed read for an empty library or an open queue.
+func TestUp_DaemonStarting(t *testing.T) {
+	w := upWorldFrom(t, apitest.StartNotReady)
+	code, stdout, stderr := w.exit(t, "up")
+	assert.Equal(t, 0, code, stderr)
+	assert.Empty(t, stderr)
+	assert.True(t, strings.HasPrefix(stdout, "Nothing to do: curio is up.\n"), stdout)
+	for _, want := range []string{
+		"daemon:   unavailable: starting: initializing\n",
+		"library:  unavailable: curio-daemon is starting: initializing\n",
+		"queue:    unavailable: curio-daemon is starting: initializing\n",
+		"warning: import: not checked: the daemon is starting; checked again once the daemon serves\n",
+	} {
+		assert.Contains(t, stdout, want)
+	}
+	assert.NotContains(t, stdout, "0 documents")
+	assert.NotContains(t, stdout, "queue:    open")
 }
 
 // TestUp_FreshMachine: on a Mac with only Ollama, `curio up --yes` sets
@@ -153,8 +177,8 @@ func TestUp_Help(t *testing.T) {
 			flags = append(flags, f[0])
 		}
 	}
-	assert.ElementsMatch(t, []string{"--dry-run", "--embedding-model", "--fresh", "--generation-model", "--no-install",
-		"--yes", "--curio-home", "--daemon-url"}, flags)
+	assert.ElementsMatch(t, []string{"--dry-run", "--embedding-model", "--fresh", "--generation-model", "--import",
+		"--no-install", "--yes", "--curio-home", "--daemon-url"}, flags)
 	assert.Contains(t, out, "deleting nothing")
 	assert.Contains(t, out, "never uses sudo")
 }
@@ -223,6 +247,18 @@ func TestDoctorAgreesWithUp(t *testing.T) {
 			return w
 		},
 		"everything up": func(t *testing.T) *world { return upWorld(t) },
+		"a file home": func(t *testing.T) *world {
+			w := newWorld(t, embedModel, genModel)
+			w.home, w.daemonURL = filepath.Join(t.TempDir(), "curio"), down.URL
+			require.NoError(t, os.WriteFile(w.home, []byte("notes"), 0o600))
+			return w
+		},
+		"a non-curio directory": func(t *testing.T) *world {
+			w := newWorld(t, embedModel, genModel)
+			w.home, w.daemonURL = t.TempDir(), down.URL
+			require.NoError(t, os.WriteFile(filepath.Join(w.home, "notes.txt"), []byte("mine"), 0o600))
+			return w
+		},
 		"a legacy home": func(t *testing.T) *world {
 			w := upWorld(t)
 			require.NoError(t, os.WriteFile(filepath.Join(w.home, curiohome.MarkerFile),
@@ -263,7 +299,7 @@ func TestDoctorAgreesWithUp(t *testing.T) {
 			out, _ := w.run(t, "doctor")
 			r, err := setup.New(setup.Options{Home: w.home, DaemonURL: w.daemonURL}, setup.Deps{
 				UI: setuptest.NewUI(t).NonInteractive(), Probe: w.deps.probe, Installer: w.deps.installer,
-				Connect: w.deps.connect, Defaults: w.deps.defaults,
+				Connect: w.deps.connect, Defaults: w.deps.defaults, Sources: w.deps.sources,
 			})
 			require.NoError(t, err)
 			actionable := false

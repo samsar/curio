@@ -67,6 +67,25 @@ func TestYesUI(t *testing.T) {
 	assert.Equal(t, "Use these? yes (--yes)\nWhich? b (--yes)\nPath? /tmp/x (--yes)\n", out.String())
 }
 
+// TestYesUI_Cancelled: --yes answers nothing once the run is cancelled, so
+// ctrl-c stops a run between prompts it would have answered itself.
+func TestYesUI_Cancelled(t *testing.T) {
+	var out bytes.Buffer
+	ui := yesUI{newPlainUI(&out)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	prompts := map[string]func() error{
+		"confirm": func() error { _, err := ui.Confirm(ctx, "Install Ollama?", true); return err },
+		"ask":     func() error { _, err := ui.Ask(ctx, "Use these?", "yes", "no"); return err },
+		"select":  func() error { _, err := ui.Select(ctx, "Which?", []string{"a", "b"}, 0); return err },
+		"input":   func() error { _, err := ui.Input(ctx, "Path?", "/tmp"); return err },
+	}
+	for name, prompt := range prompts {
+		require.ErrorIs(t, prompt(), context.Canceled, name)
+	}
+	assert.Empty(t, out.String(), "nothing answered")
+}
+
 func TestLineUI_Confirm(t *testing.T) {
 	cases := []struct {
 		input string
@@ -133,6 +152,59 @@ func TestLineUI_CancelWhileReading(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the prompt didn't return once its context was cancelled")
 	}
+}
+
+// TestLineUI_ReadsOnlyWhileAsking: between prompts the input is left to
+// the commands curio runs on the same terminal: a line typed for one
+// reaches it, and the next prompt reads the line after.
+func TestLineUI_ReadsOnlyWhileAsking(t *testing.T) {
+	r, w := io.Pipe()
+	t.Cleanup(func() { _ = w.Close() })
+	ui := newLineUI(r, io.Discard)
+	write := func(s string) {
+		go func() { _, _ = w.Write([]byte(s)) }() // a pipe write waits for its reader
+	}
+
+	write("y\n")
+	ok, err := ui.Confirm(context.Background(), "Install yt-dlp?", false)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	write("for brew\n")
+	got := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := r.Read(buf)
+		got <- string(buf[:n])
+	}()
+	select {
+	case line := <-got:
+		assert.Equal(t, "for brew\n", line, "the command's reader gets the line")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the line typed for the command never reached it")
+	}
+
+	write("n\n")
+	ok, err = ui.Confirm(context.Background(), "Check again?", true)
+	require.NoError(t, err)
+	assert.False(t, ok, "the next prompt reads the line after")
+}
+
+// TestLineUI_CancelledReadGoesToTheNextPrompt: the read a cancelled prompt
+// left waiting delivers its line to the next prompt, not to nobody.
+func TestLineUI_CancelledReadGoesToTheNextPrompt(t *testing.T) {
+	r, w := io.Pipe()
+	t.Cleanup(func() { _ = w.Close() })
+	ui := newLineUI(r, io.Discard)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := ui.read(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+
+	go func() { _, _ = w.Write([]byte("n\n")) }()
+	ok, err := ui.Confirm(context.Background(), "Install Ollama?", true)
+	require.NoError(t, err)
+	assert.False(t, ok)
 }
 
 func TestLineUI_CancelledBefore(t *testing.T) {

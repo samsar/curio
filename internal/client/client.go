@@ -51,6 +51,9 @@ type Health struct {
 	OllamaReachable bool             `json:"ollama_reachable"`
 	OllamaDetail    string           `json:"ollama_detail,omitempty"`
 	Upstreams       []UpstreamHealth `json:"upstreams,omitempty"`
+	// YouTubeFetcher is the yt-dlp the daemon routes YouTube videos to;
+	// empty when they go to its default fetcher, or it predates saying so.
+	YouTubeFetcher string `json:"youtube_fetcher,omitempty"`
 }
 
 // EmbeddingDrift mirrors api.EmbeddingDrift: what changed in the build
@@ -275,6 +278,9 @@ type ImportBookmark struct {
 type ImportRequest struct {
 	Source    string           `json:"source"`
 	Bookmarks []ImportBookmark `json:"bookmarks"`
+	// DryRun counts what the import would do and writes nothing. A daemon
+	// that predates it refuses the field (400, unknown field).
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // ImportResponse mirrors api.ImportResponse.
@@ -287,6 +293,9 @@ type ImportResponse struct {
 	JobsEnqueued int            `json:"jobs_enqueued"`
 	FilteredBy   map[string]int `json:"filtered_by,omitempty"`
 	Errors       []string       `json:"errors,omitempty"`
+	DryRun       bool           `json:"dry_run,omitempty"`
+	// NewURLs are, for a dry run, the URLs the import would fetch.
+	NewURLs []string `json:"new_urls,omitempty"`
 }
 
 func (c *Client) ImportBookmarks(ctx context.Context, req ImportRequest) (*ImportResponse, error) {

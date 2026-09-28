@@ -4,7 +4,10 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +26,7 @@ import (
 	"github.com/samsar/curio/internal/service/servicetest"
 	"github.com/samsar/curio/internal/setup"
 	"github.com/samsar/curio/internal/setup/setuptest"
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -75,6 +79,7 @@ func newUpMachine(t *testing.T) *upMachine {
 			return env, err
 		},
 		Defaults: &defaults,
+		Sources:  setuptest.NoSources,
 	}
 	return m
 }
@@ -82,7 +87,14 @@ func newUpMachine(t *testing.T) *upMachine {
 // up runs `curio up --yes`, with --fresh when fresh.
 func (m *upMachine) up(fresh bool) (setup.Outcome, error) {
 	m.t.Helper()
-	r, err := setup.New(setup.Options{Home: m.home, Yes: true, Fresh: fresh}, m.deps)
+	return m.upWith(setup.Options{Fresh: fresh})
+}
+
+// upWith runs `curio up --yes` with opts.
+func (m *upMachine) upWith(opts setup.Options) (setup.Outcome, error) {
+	m.t.Helper()
+	opts.Home, opts.Yes = m.home, true
+	r, err := setup.New(opts, m.deps)
 	require.NoError(m.t, err)
 	return r.Run(context.Background(), func(setup.Plan) {})
 }
@@ -225,4 +237,64 @@ func TestDaemon_RefusedHomeExitsZero(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(string(out), `"level":"ERROR"`), "%s", out)
 	assert.Contains(t, string(out), "stays down until the cause is fixed")
 	assert.Contains(t, string(out), "curio home from an older curio")
+}
+
+// TestUp_Import: `curio up --yes --import html:<file>` on a Mac with only
+// Ollama sets curio up and imports the file into the real daemon: the
+// queue opened at full speed with keep-awake left off, then the three
+// pages' bookmarks, documents and fetch jobs, the bookmarklet filtered and
+// the duplicate skipped. The runs after it, with --import or without, have
+// nothing to do.
+func TestUp_Import(t *testing.T) {
+	ctx := context.Background()
+	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, articleHTML())
+	}))
+	t.Cleanup(pages.Close)
+	var export strings.Builder
+	export.WriteString("<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n")
+	for _, href := range []string{pages.URL + "/one", pages.URL + "/two", "javascript:alert(1)", pages.URL + "/three",
+		pages.URL + "/one"} {
+		fmt.Fprintf(&export, "<DT><A HREF=%q>A page</A>\n", href)
+	}
+	export.WriteString("</DL><p>\n")
+	file := filepath.Join(t.TempDir(), "bookmarks.html")
+	require.NoError(t, os.WriteFile(file, []byte(export.String()), 0o600))
+
+	m := newUpMachine(t)
+	t.Cleanup(func() { _ = m.agent.Stop(context.Background()) })
+	out, err := m.upWith(setup.Options{Import: "html:" + file})
+	require.NoError(t, err)
+	require.NotNil(t, out.Imported)
+	assert.Equal(t, 3, out.Imported.Created)
+	assert.Equal(t, 3, out.Imported.JobsEnqueued)
+	assert.Equal(t, 1, out.Imported.Filtered)
+	assert.Equal(t, 3, out.Imported.Pages)
+	assert.Equal(t, setup.PaceFull, out.Imported.Pace)
+	assert.False(t, out.Imported.KeepAwake)
+	assert.False(t, out.Imported.CheckBack.IsZero())
+
+	c := client.New("http://" + m.listen)
+	stats, err := c.Stats(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 3, stats.BookmarksTotal)
+	assert.Equal(t, 3, stats.DocumentsTotal)
+	q, err := c.Queue(ctx)
+	require.NoError(t, err)
+	assert.False(t, q.Paused)
+	assert.Equal(t, client.ThrottleNormal, q.Throttle)
+	assert.Empty(t, q.Schedule)
+	assert.False(t, q.KeepAwake)
+	jobs, err := c.ListJobs(ctx, client.JobListOpts{Kind: string(store.JobKindFetch)})
+	require.NoError(t, err)
+	assert.Len(t, jobs.Items, 3)
+
+	for _, opts := range []setup.Options{{}, {Import: "html:" + file}} {
+		out, err = m.upWith(opts)
+		require.NoError(t, err)
+		assert.True(t, out.Plan.Empty(), "%+v", out.Plan)
+		assert.False(t, out.Changed)
+		assert.Nil(t, out.Imported)
+	}
 }

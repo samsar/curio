@@ -21,7 +21,9 @@ func newHuhUI(out io.Writer) *huhUI { return &huhUI{lineWriter{out}} }
 
 func (*huhUI) Interactive() bool { return true }
 
-func (u *huhUI) Progress(title string) Progress { return newProgress(u.out, title, true, time.Now) }
+func (u *huhUI) Progress(title string, unit Unit) Progress {
+	return newProgress(u.out, title, unit, true, time.Now)
+}
 
 func (u *huhUI) Confirm(ctx context.Context, prompt string, def bool) (bool, error) {
 	v := def

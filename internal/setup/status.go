@@ -26,8 +26,14 @@ type Snapshot struct {
 	// Drift is what the daemon reports changed in the build that makes
 	// the embeddings; nil when nothing did.
 	Drift *client.EmbeddingDrift
-	// Warnings are the checks' warnings: "step: detail".
-	Warnings []string
+	// Warnings are the checks' warnings without a fix.
+	Warnings []Warning
+}
+
+// Warning is a check's warning: "step: detail", and the notes under it.
+type Warning struct {
+	Text  string
+	Notes []string
 }
 
 // DaemonSnapshot is the daemon serving the home.
@@ -61,7 +67,7 @@ var errNoHome = errors.New("there is no curio home")
 func (w *world) snapshot(ctx context.Context, plan Plan) Snapshot {
 	var s Snapshot
 	for _, it := range plan.Warnings() {
-		s.Warnings = append(s.Warnings, it.Step+": "+it.Result.Detail)
+		s.Warnings = append(s.Warnings, Warning{Text: it.Step + ": " + it.Result.Detail, Notes: it.Result.Notes})
 	}
 	hs := w.readHome()
 	s.Ollama = w.ollamaSnapshot(ctx, hs)

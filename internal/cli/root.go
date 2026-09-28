@@ -17,6 +17,7 @@ import (
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/importer"
 	"github.com/samsar/curio/internal/setup"
 	"github.com/samsar/curio/internal/version"
 )
@@ -87,6 +88,10 @@ type deps struct {
 	defaults *config.Config
 	// newUI is setup.NewUI, or a test's scripted UI.
 	newUI func(stdin io.Reader, stderr io.Writer, yes bool) setup.UI
+	// sources finds the bookmarks curio up offers to import:
+	// importer.Discover, or a test's, which never reads the browsers of
+	// the machine it runs on.
+	sources func() []importer.Source
 	// geteuid is os.Geteuid: curio up refuses root.
 	geteuid func() int
 }
@@ -97,6 +102,7 @@ func newRootCmd() *cobra.Command {
 		probe:     setup.SystemProbe{},
 		installer: setup.NewHomebrew(),
 		newUI:     setup.NewUI,
+		sources:   importer.Discover,
 		geteuid:   os.Geteuid,
 	})
 }
@@ -194,6 +200,7 @@ func (f *rootFlags) setupFor(d deps, ui setup.UI, opts setup.Options) (*setup.Ru
 		Installer: d.installer,
 		Connect:   d.connect,
 		Defaults:  d.defaults,
+		Sources:   d.sources,
 	})
 }
 

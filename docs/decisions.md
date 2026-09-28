@@ -133,7 +133,8 @@ when the entry was first committed.
 - 2026-09-27 — [sqlite-vec: NEON distance kernels on arm64](#sqlite-vec-neon-distance-kernels-on-arm64)
 - 2026-09-27 — [Daemon lifecycle: a per-user launchd agent](#daemon-lifecycle-a-per-user-launchd-agent) (revised)
 - 2026-09-27 — [Keep-awake: caffeinate on AC power while the workers have queued work](#keep-awake-caffeinate-on-ac-power-while-the-workers-have-queued-work)
-- 2026-09-27 — [curio up: a plan-first setup wizard](#curio-up-a-plan-first-setup-wizard)
+- 2026-09-27 — [curio up: a plan-first setup wizard](#curio-up-a-plan-first-setup-wizard) (revised)
+- 2026-09-28 — [curio up: the import step](#curio-up-the-import-step)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -3386,6 +3387,11 @@ The `Count` and `TagsForDocument` plans are pinned too now. Every bookmark
 insert, and every source or folder update, no longer maintains two unused
 indexes.
 
+**Revised (2026-09-28):** `PreviewIngest`, the import's dry run, needs no
+new index: it looks each URL up in the unique constraints' own indexes
+(`sqlite_autoindex_documents_2`, `sqlite_autoindex_bookmarks_2`), and its
+plan is pinned too.
+
 ---
 
 ## Chunks: external-content FTS, derived rows kept by triggers
@@ -6192,8 +6198,242 @@ already serves an empty library (a second at most).
 - An `--embedding-dim` flag, or `/api/show`: see the measured width.
 - huh's accessible mode: the four defects above.
 
-**Not done:** the import step, the yt-dlp offer and keep-awake offer
-(group 5); Linux.
+**Not done:** Linux.
+
+**Revised (2026-09-28):**
+
+- **The import step is done**, the sixth step: see "curio up: the import
+  step", which also has the yt-dlp and keep-awake offers.
+- **A new home's disk:** the home check judges any new home (a missing or
+  empty path, or one `--fresh` replaces): a volume the probe measured with
+  under 2 GiB free is a blocker, whether or not a model is missing. The
+  models' rule is only theirs now, their sizes plus the 2 GiB margin on
+  the models volume; on one volume that margin is the home's room, so
+  the two never count it twice. Before, only a missing model brought the
+  home's volume into question.
+- **config.yaml without hard links:** on exFAT, FAT and some SMB mounts
+  link(2) fails with ENOTSUP, EOPNOTSUPP or EPERM, and the file is then
+  created exclusively (O_EXCL, so a file written meanwhile still wins) and
+  written and synced in place. That isn't atomic: a crash can leave a
+  partial config.yaml, which the config check then reports as not
+  loading. Either way the directory is synced once the file is in it.
+- **The line prompter reads only while a prompt waits:** a read starts
+  when a prompt needs a line and none is pending. Reading for the UI's
+  life took the lines typed for a command curio runs between prompts
+  (brew, open) and gave them to the next prompt. A read a cancelled
+  prompt leaves pending delivers to the next prompt, the one line that
+  can still be taken from a command, and only as the run ends.
+- **Blocked homes:** a file, a directory that isn't a curio home, or a
+  home that can't be looked at leaves the config and daemon checks "not
+  checked", pointing at the home check, with nothing for curio up to do,
+  where they used to offer fixes up couldn't make. The daemon check's
+  hint for a home the daemon refuses fits the reason: `curio up --fresh`
+  for a legacy home, the marker's permissions (or --fresh) for an
+  unreadable one, an upgrade for a newer one, config.yaml set back (or
+  --fresh) for a mismatch, `curio up --fresh --embedding-model <m>` for a
+  flag the home contradicts. A legacy or newer home also leaves the
+  models "not checked", instead of offering to pull the model its marker
+  records.
+
+---
+
+## curio up: the import step
+
+**Decision:** `curio up`'s sixth step imports the user's bookmarks, and
+only when there is something to do: the library has no bookmarks, or
+`--import` names a source. A library with bookmarks is up, and no browser
+file is even looked for; `curio import` adds more.
+
+**When it has a fix:**
+
+- The library is read from the daemon whose healthz names this home
+  (bounded by the probe timeout). With no home yet, or `--fresh` pending,
+  it is empty and no daemon is asked: the one answering serves the old
+  home, which would count the new home's bookmarks as known. A daemon
+  that doesn't serve the home (down, starting, another home's) leaves the
+  step "not checked", checked again once it serves: in the same run, the
+  daemon step before it starts one.
+- Empty library, a terminal, no `--yes`: the fix is "choose which
+  bookmarks to import", noted with each source's new count or its
+  problem. Without a terminal, or with `--yes`, it is a warning without a
+  fix naming the `--import` value of each source found, shell-quoted
+  (`--import 'chrome:Profile 1'`), with its count: `--yes` never answers
+  a menu. The status block prints a warning's notes under it, so a
+  scripted run sees the values.
+- `--import chrome|chrome:<profile>|safari|firefox|html:<path>` (split at
+  the first ':'; `chrome` is the Default profile, as for `curio import
+  chrome`) is parsed before any check; an unknown kind is an error. The
+  source it names must be there, readable and hold bookmarks: an unknown
+  profile (listing those found), a missing file, a browser that isn't
+  installed, an unreadable source, one with no bookmarks, or one macOS
+  withholds when nobody can be walked through Full Disk Access (no
+  terminal, or `--yes`; see below), is a blocker. Nothing new in it is OK
+  ("nothing new in X"), so running the same `--import` again is
+  idempotent.
+- The menu (the step's `Confirmer`) lists the readable sources with their
+  new counts (the one with the most is the default), the ones that need
+  permission, "An exported bookmarks file (HTML)…" and "Skip for now". A
+  path is typed or dragged into the terminal, which quotes it or escapes
+  its spaces, so it is taken as the shell takes one word; one that won't
+  do says why and shows the menu again, and a file named again is read
+  again. A skip returns yes, not a decline: Apply then does nothing and
+  the check after it is a warning, so the run exits 0. With `--import` it
+  is one yes-or-no, and a no is a decline like any step's.
+- "New" counts bookmarks everywhere (the plan, the menu, the question,
+  the hand-off): those the source hasn't saved, which the import creates.
+  A bookmark whose page another source brought in is new and fetches
+  nothing, so where the pages to fetch are fewer the menu says so ("3 new
+  (2 pages to fetch)"); the estimates, the yt-dlp count and the host
+  warning are of pages.
+- The step keeps what it decided in the run's world (the parse of each
+  source, the index rate, the choice, a skip, the report), so the check
+  after Apply reads "import started" rather than planning another import.
+  Nothing about a pending import is remembered between runs.
+
+**Sources:** `importer.Source` (`Name`, the menu's label; `Label`, the
+API source; `Spec`, the `--import` value; `Check`; `Parse`).
+`importer.Discover` returns a source per Chrome profile (named from Local
+State, the directory added when two names collide), Firefox's install
+default and Safari, and never fails: a profile listing that fails is an
+Unreadable Chrome source. `Check` tells a missing file (NotInstalled)
+from a permission error (NeedsPermission, naming Full Disk Access) from
+anything else (Unreadable), at stat and at open: macOS's TCC refuses
+Safari's plist at either, and the old stat-only lookup read a refusal as
+"not found", so `curio import safari` never reached its Full Disk Access
+remedy. `Spec` is the fifth method the design didn't list: the warning
+and the resume hint name each source by it, and a test double has to be
+nameable too. The Chrome profile matcher (directory, then display name
+ignoring case), `Send` (batches of 500, summed, the first failure named
+by its range) and `CandidatesOf` moved from the CLI into
+`internal/importer`, which may import `internal/client`; `curio import`
+and `curio up` share them, and `curio import`'s output didn't change.
+
+**Full Disk Access:** macOS grants it to the terminal app curio runs in,
+not to curio, and applies it once that app restarts. The step says so
+(naming Terminal or iTerm2 from `$TERM_PROGRAM`), shows `/usr/bin/open
+'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'`
+and runs it through the Installer on a yes (never with `--no-install`,
+which says where the pane is), then checks again as often as asked,
+saying a still-denied check needs the terminal restarted. A decline goes
+back to the menu, or with `--import safari` fails the step with the
+remedy. Only someone at the terminal can walk through it: they turn
+access on, and macOS applies it only after a restart, so `--yes`, which
+answers every "check again" itself, would check again for good. Without
+a terminal or with `--yes`, a withheld `--import safari` is a blocker in
+the plan with the remedy, and Apply, meeting a source withheld only
+since the plan, fails with it rather than walking through. `--yes`
+answers no prompt once the run is cancelled, as every UI does.
+
+**Counting what is new: a dry run on the import endpoint.** `POST
+/v1/bookmarks/import` takes `dry_run`: the same body, limit and
+validation, nothing written, and the ImportResult the import would get
+now, plus `new_urls`, the URLs whose documents it would create (so
+`jobs_enqueued` counts the fetches it would enqueue). The handler
+classifies each URL once, the same way in both modes
+(`importer.Classify`: the filter, then `urlutil.Normalize`), asks the
+store about the distinct URLs in one statement, and replays `Ingest`'s
+rules in request order: a URL seen earlier in the request, or one the
+source has a bookmark of, is skipped; any other is created, and fetched
+when its document is new. A test holds a dry run equal to the import of
+the same body. `BookmarkStore.PreviewIngest` is one `SELECT … FROM
+json_each(?)` with correlated EXISTS on the unique constraints Ingest
+conflicts on; its plan is pinned (`SCAN j`, then covering searches of
+`sqlite_autoindex_documents_2` and `sqlite_autoindex_bookmarks_2`), about
+10 ms for 12k URLs against 10k rows. `importer.CountNew` sends the
+distinct candidates alone, up to 10,000 a request (about 1 MB), and sums
+the answers, exact since no URL is in two requests. `new_urls` is what
+the estimates, the yt-dlp count and the host warning are made of. A
+daemon that predates the field refuses it as unknown (400); the count is
+then unknown, not an error. "Importers: CLI parses, daemon receives
+lists" still holds: the daemon counts a list it is sent.
+
+**yt-dlp:** offered only when the new URLs include YouTube videos
+(`urlutil.YouTubeVideoID`), with their count. healthz gains
+`youtube_fetcher`, the yt-dlp the daemon's LookPath found at startup,
+since the route is fixed then: it tells an install that is needed from
+one the running daemon predates, and a restart that worked from one on a
+PATH launchd doesn't search. The daemon reporting it: said, nothing
+asked. Installed (formula or binary): restart the daemon, then warn if it
+still doesn't find it (link it into Homebrew's bin, or set
+`fetcher.youtube.bin`). Otherwise: a decline in `setup.json` is said and
+not asked; `--no-install` and no Homebrew get hints; else `brew install
+yt-dlp` is shown and asked, then the restart, then healthz. A no is
+saved in `setup.json` (a failed save is a warning). All of it happens
+before the queue is set and a bookmark sent, so the new videos are
+routed by a daemon that has yt-dlp.
+
+**Estimates** (`setup/estimate.go`, pure but for the measurement):
+fetching takes N/45 to N/25 minutes at 16 fetches at once, scaled by
+min(W, 16)/16 for a fetch limit W (`daemon.fetch_workers`, or
+`store.ThrottleGentle.Limit`, which moved into the store from jobs so
+setup needn't link the fetcher stack); indexing takes N × 23 chunks / the
+measured rate, × 0.7 to × 1.5; both round up to the minute. The rate is
+one warm-up batch and one timed batch of `indexer.EmbedBatchSize` (32)
+synthetic chunks of 2,300 to 2,500 characters with the document prefix,
+through the home's model, width and `embedding.timeout_seconds`; a
+failure makes indexing "unknown", never an error. A host is named when it
+holds more than 2/W of the new URLs (12.5% at 16) and at least 100: curio
+fetches at most 2 pages at a time from one site, so those take longer;
+the check-back time isn't stretched for them, since their per-page time
+is unknown. GitHub pages are mentioned only when `config.yaml` sets no
+`fetcher.github.token` (the launchd daemon doesn't see a token exported
+in the shell): 60 API requests an hour, 2 a repository, and `curio
+refetch --all --state=failed` for the ones that fail. The check-back time
+walks the pace's schedule window (`DailyWindow.Contains` and
+`NextStart`): work only inside it. Estimates show in Apply, before the
+pace question, and as fetch ranges in the plan's notes. **The one embed
+a check makes:** the plan measures the index rate only for `--dry-run`,
+whose plan is all it prints; every other check stays embed-free.
+
+**Pace and keep-awake:** "Now, at full speed", "Now, gently (at most 4
+fetches and 1 embedding at a time…)", "Only overnight, 22:00 to 07:00",
+each with its check-back time; the default is full speed, or overnight
+under 16 GiB. Keep-awake is asked after with `Ask`, not `Confirm`, its
+default the queue's current setting (off on a new home): `--yes`'s
+Confirm answers yes, which would turn it on. One `PUT /v1/queue` carries
+both, `{"paused":false,"throttle":…,"schedule":…,"keep_awake":…}`,
+before the import is posted, so the workers claim the import's jobs under
+the chosen pace. Neither question is asked when nothing new is fetched.
+
+**The hand-off:** "Import started. Check back after HH:MM." ("tomorrow
+HH:MM", or a date), what was imported, then `curio status --follow`
+(which follows the queue until it drains), `curio pause | resume`, `curio
+throttle gentle`, `curio search "..."` and the MCP line. Other runs that
+changed something end with the generic card, which names `curio import`.
+A test resolves every command either card names with `root.Find` and
+parses its flags. An import cut short (an error, ctrl-c) warns how many
+bookmarks were sent and names `curio up --import <spec>`, which finishes
+it, skipping those saved, before the error ends the run: `cli.Run`
+prints nothing for an interrupt, and the next run would pass, the
+library no longer empty.
+
+**Tests never read real bookmarks:** `setup.Deps.Sources` (nil means
+`importer.Discover`) is set by every test that builds Deps, and the
+TestMain of internal/cli, internal/setup and test/e2e runs under
+`setuptest.WithoutBrowsers`, which points CURIO_CHROME_DIR,
+CURIO_SAFARI_DIR and CURIO_FIREFOX_DIR at an empty directory; tests in
+internal/cli, internal/setup and internal/importer assert Discover finds
+nothing available there. setuptest's
+scriptable `Source` stands in for a browser, and its fake daemon answers
+imports (every valid URL new), keeps queue settings, and reports
+`youtube_fetcher` from a marker file a fake install creates, never from
+the host's PATH.
+
+**Rejected:**
+
+- A separate preview endpoint: it would duplicate the import's
+  validation and limits, and drift from the rules it previews; a flag
+  runs the same classification.
+- Counting locally: the CLI can't know which URLs the library has, and
+  dedup is the daemon's (documents per tenant and URL, bookmarks per
+  source).
+- Remembering a pending import in setup.json: it would disagree with the
+  library the moment an import finished elsewhere; an interrupted import
+  is finished by running it again, which skips what was saved.
+- Stretching the check-back time for dominant hosts: their per-page time
+  is unknown; they are named instead.
+- Parsing in the daemon: see "Importers: CLI parses, daemon receives
+  lists".
 
 ---
 

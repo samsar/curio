@@ -56,8 +56,9 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
 - `curio add <url>` — manually add a bookmark
 - `curio import <source> [path]` — bulk import from Chrome / Safari / Firefox
 - `curio search <query>` — hybrid search
-- `curio status` — daemon health, doc counts, job queue depth and state,
-  and a warning while the Jina fallback is failing
+- `curio status [--follow]` — daemon health, doc counts, job queue depth
+  and state, and a warning while the Jina fallback is failing; `--follow`
+  then follows the queue until it drains
 - `curio pause` / `curio resume` — stop starting jobs, and start again
   (running jobs finish; the pause survives restarts)
 - `curio throttle gentle|normal` — fewer jobs at once to spare the
@@ -81,27 +82,33 @@ create nothing to look at it. Bare `curio` prints its help, and points at
 ### Setup: `curio up`
 
 `internal/setup` is the setup wizard, and `curio up` a thin command over
-it. Five steps, in order: the machine (chip, memory, cores, free disk,
+it. Six steps, in order: the machine (chip, memory, cores, free disk,
 judged before anything is installed), Ollama (something answering
 `embedding.base_url`, started or installed with Homebrew or the app when
 not), the models (picked by unified memory from a static table, pulled
 with progress), the home and its config.yaml (created where there is
 none, at the width the embedding model measures; `--fresh` moves an old
-one aside first), and the daemon (its launchd agent installed, the daemon
-of this build, with config.yaml's writing model). Each step checks the
-world, read-only and bounded, and may apply a fix; the runner checks every
-step first and shows the fixes as the plan, stops before applying
-anything when the plan has a blocker, then applies step by step, asking
-before each, and checks each again after. A run with nothing to do
+one aside first), the daemon (its launchd agent installed, the daemon of
+this build, with config.yaml's writing model), and the import (for an
+empty library, or `--import`: the sources `importer.Discover` finds, each
+counted by the daemon's dry run, then yt-dlp for new YouTube videos, the
+estimates, the pace and keep-awake set on the queue, and the bookmarks
+sent through the same batched import `curio import` uses). Each step
+checks the world, read-only and bounded, and may apply a fix; the runner
+checks every step first and shows the fixes as the plan, stops before
+applying anything when the plan has a blocker, then applies step by step,
+asking before each, and checks each again after. A run with nothing to do
 changes nothing and shows the status; a run cut short resumes by checking
 again. Its prompts, progress and the output of what it runs go to stderr,
 the plan and the status to stdout. `curio doctor` runs the same checks,
 so the two agree on what healthy means. Installing goes through
 `setup.Installer` (Homebrew), the machine through `setup.Probe`, the
 prompts through `setup.UI` (huh on a terminal, a line prompter in
-accessible mode, none without a terminal), and the daemon's agent through
-`internal/service.Manager`, so the tests fake each. See `docs/setup.md`
-and decisions.md "curio up: a plan-first setup wizard".
+accessible mode, none without a terminal), the daemon's agent through
+`internal/service.Manager`, and the bookmarks through `importer.Source`
+(`setup.Deps.Sources`), so the tests fake each and never read the
+browsers of the machine they run on. See `docs/setup.md` and decisions.md
+"curio up: a plan-first setup wizard" and "curio up: the import step".
 
 ### `curio-daemon`
 
@@ -257,6 +264,10 @@ If `~/.curio` exists without `.curio-meta.json`, the daemon refuses to start and
 suggests setting `CURIO_HOME` to a different path.
 
 ## Data flow
+
+The CLI parses a bookmark file (`importer.Source`) and posts it in
+batches; `curio up` first posts the distinct URLs with `dry_run` to count
+what is new, which writes nothing.
 
 ```
 bookmark file ──► importer ──► bookmark + document ──► fetch job (new documents only)

@@ -362,7 +362,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	}
 
 	native := newNativeFetcher(cfg)
-	dispatcher, err := newDispatcher(cfg, home, native)
+	dispatcher, ytdlp, err := newDispatcher(cfg, home, native)
 	if err != nil {
 		return nil, err
 	}
@@ -423,6 +423,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 			Gate:            gate,
 			Drift:           driftMonitor,
 			KeepAwake:       keeper,
+			YouTubeFetcher:  ytdlp,
 			Log:             slog.Default(),
 		},
 		pools:  pools,
@@ -476,8 +477,9 @@ func newNativeFetcher(cfg config.Config) *fetcher.Native {
 }
 
 // newDispatcher builds the fetcher registry and routing rules around
-// nativeFetcher.
-func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetcher.Native) (fetcher.Dispatcher, error) {
+// nativeFetcher. ytdlp is the yt-dlp YouTube videos go to, as LookPath
+// found it, or empty when they go to the default fetcher.
+func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetcher.Native) (fetcher.Dispatcher, string, error) {
 	var defaultFetcher fetcher.Fetcher
 	switch cfg.Fetcher.Default {
 	case "native":
@@ -489,11 +491,11 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 			Timeout: time.Duration(cfg.Fetcher.Web2MD.TimeoutSeconds) * time.Second,
 		})
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		defaultFetcher = w2m
 	default:
-		return nil, fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
+		return nil, "", fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
 	}
 	// Content-type-specific fetchers, routed by hostname. The built-in
 	// rules below are the defaults; a user-provided fetcher_rules.yaml
@@ -512,7 +514,8 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 	rules = append(rules, fetcher.Rule{Hosts: fetcher.GitHubHosts, Fetcher: ghFetcher})
 	registry[ghFetcher.Name()] = ghFetcher
 
-	if _, err := exec.LookPath(cfg.Fetcher.YouTube.Bin); err == nil {
+	ytdlp, err := exec.LookPath(cfg.Fetcher.YouTube.Bin)
+	if err == nil {
 		ytFetcher := fetcher.NewRateLimited(
 			fetcher.NewYouTube(fetcher.YouTubeOptions{
 				Bin:      cfg.Fetcher.YouTube.Bin,
@@ -531,6 +534,7 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 		// Said out loud: a launchd agent's PATH without Homebrew's
 		// directories would otherwise lose YouTube silently.
 		slog.Info("youtube fetcher disabled: yt-dlp not found", "bin", cfg.Fetcher.YouTube.Bin, "path", os.Getenv("PATH"))
+		ytdlp = ""
 	}
 
 	return fetcher.NewRulesDispatcher(fetcher.RulesDispatcherOptions{
@@ -539,7 +543,7 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 		DefaultRules: rules,
 		Fallback:     defaultFetcher,
 		Log:          slog.Default(),
-	}), nil
+	}), ytdlp, nil
 }
 
 // newInsightEngine builds the insight layer: cluster documents into labeled

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -18,11 +17,6 @@ import (
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/importer"
 )
-
-// Batch size when POSTing to /v1/bookmarks/import. 500 keeps each HTTP
-// request well under typical proxy limits even for thousand-bookmark
-// folders and gives progress updates that feel responsive.
-const importBatchSize = 500
 
 // importFlags are the shared flags across all `curio import` subcommands.
 // Attached via attachImportFlags so adding flags later only needs one edit.
@@ -157,8 +151,8 @@ at an arbitrary Bookmarks JSON file (e.g. a backup).`,
 				if err != nil {
 					return err
 				}
-				match := pickChromeProfile(profiles, want)
-				if match == nil {
+				match, ok := importer.PickChromeProfile(profiles, want)
+				if !ok {
 					return fmt.Errorf("chrome profile %q not found (use --list-profiles to see available)", want)
 				}
 				files = []string{match.BookmarkFile}
@@ -221,6 +215,10 @@ func importParsed(ctx context.Context, w io.Writer, c *client.Client, source str
 	return nil
 }
 
+// followEvery is how often followProgress reads the queue; tests shorten
+// it.
+var followEvery = 2 * time.Second
+
 // followProgress polls /v1/stats every 2 seconds and prints a one-line
 // progress update until the queue is drained (zero pending + zero running).
 // Each line also says when the queue is closed, and why, from /v1/queue;
@@ -229,7 +227,7 @@ func importParsed(ctx context.Context, w io.Writer, c *client.Client, source str
 // import itself has finished.
 func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 	fmt.Fprintln(w, "\nwatching queue drain — ctrl-c to exit")
-	tick := time.NewTicker(2 * time.Second)
+	tick := time.NewTicker(followEvery)
 	defer tick.Stop()
 
 	startedAt := time.Now()
@@ -304,18 +302,11 @@ func progressLine(stats *client.Stats, queue *client.Queue, rate float64, eta ti
 // reportDryRun prints the same summary sendBatches would, computed
 // locally from the parsed list without contacting the daemon.
 func reportDryRun(w io.Writer, bms []importer.ParsedBookmark) {
-	filtered := 0
-	by := map[importer.FilterReason]int{}
-	for _, b := range bms {
-		if ok, why := importer.Indexable(b.URL); !ok {
-			filtered++
-			by[why]++
-		}
-	}
+	c := importer.CandidatesOf(bms)
 	fmt.Fprintln(w, "\ndry-run — nothing sent to the daemon")
-	fmt.Fprintf(w, "  would import:  %d\n", len(bms)-filtered)
-	fmt.Fprintf(w, "  would filter:  %d\n", filtered)
-	printFilterReasons(w, by)
+	fmt.Fprintf(w, "  would import:  %d\n", len(bms)-c.Filtered)
+	fmt.Fprintf(w, "  would filter:  %d\n", c.Filtered)
+	printFilterReasons(w, c.FilteredBy)
 }
 
 // printFilterReasons prints how many bookmarks each reason filtered, one
@@ -332,82 +323,32 @@ func profileLabelFromPath(p string) string {
 	return filepath.Base(dir)
 }
 
-// pickChromeProfile matches want against a profile's directory exactly,
-// then against its display name, ignoring case.
-func pickChromeProfile(profiles []importer.ChromeProfile, want string) *importer.ChromeProfile {
-	for i, p := range profiles {
-		if p.Dir == want {
-			return &profiles[i]
-		}
-	}
-	for i, p := range profiles {
-		if strings.EqualFold(p.Name, want) {
-			return &profiles[i]
-		}
-	}
-	return nil
-}
-
-// sendBatches POSTs the parsed list to /v1/bookmarks/import in chunks and
-// prints progress. Returns nil iff every batch succeeded.
+// sendBatches imports the parsed list into the daemon (importer.Send) and
+// prints its progress and totals. Returns nil iff every batch succeeded.
 func sendBatches(ctx context.Context, w io.Writer, c *client.Client, source string, bms []importer.ParsedBookmark) error {
 	if len(bms) == 0 {
 		fmt.Fprintln(w, "nothing to import")
 		return nil
 	}
-	var (
-		totalCreated, totalSkipped, totalFiltered, totalJobs int
-		totalErrors                                          []string
-		filteredBy                                           = map[importer.FilterReason]int{}
-		start                                                = time.Now()
-	)
-
-	for i := 0; i < len(bms); i += importBatchSize {
-		end := min(i+importBatchSize, len(bms))
-		batch := bms[i:end]
-		converted := make([]client.ImportBookmark, len(batch))
-		for j, b := range batch {
-			converted[j] = client.ImportBookmark{
-				URL:        b.URL,
-				Title:      b.Title,
-				FolderPath: b.FolderPath,
-				Tags:       b.Tags,
-				SavedAt:    b.SavedAt,
-			}
-		}
-
-		resp, err := c.ImportBookmarks(ctx, client.ImportRequest{
-			Source:    source,
-			Bookmarks: converted,
-		})
-		if err != nil {
-			return fmt.Errorf("batch %d-%d: %w", i, end, err)
-		}
-		totalCreated += resp.Created
-		totalSkipped += resp.Skipped
-		totalFiltered += resp.Filtered
-		totalJobs += resp.JobsEnqueued
-		for k, v := range resp.FilteredBy {
-			filteredBy[importer.FilterReason(k)] += v
-		}
-		totalErrors = append(totalErrors, resp.Errors...)
+	start := time.Now()
+	totals, err := importer.Send(ctx, c, source, bms, func(n int, so importer.Totals) {
 		fmt.Fprintf(w, "  ...sent %d/%d (created %d, skipped %d, filtered %d so far)\n",
-			end, len(bms), totalCreated, totalSkipped, totalFiltered)
+			n, len(bms), so.Created, so.Skipped, so.Filtered)
+	})
+	if err != nil {
+		return err
 	}
 
 	dur := time.Since(start)
 	fmt.Fprintf(w, "\ndone in %s\n", dur.Round(time.Millisecond))
-	fmt.Fprintf(w, "  created:       %d\n", totalCreated)
-	fmt.Fprintf(w, "  skipped (dup): %d\n", totalSkipped)
-	fmt.Fprintf(w, "  filtered:      %d\n", totalFiltered)
-	printFilterReasons(w, filteredBy)
-	fmt.Fprintf(w, "  fetch jobs:    %d enqueued\n", totalJobs)
-	if len(totalErrors) > 0 {
-		fmt.Fprintf(w, "  errors:        %d (first 10 shown)\n", len(totalErrors))
-		for i, e := range totalErrors {
-			if i >= 10 {
-				break
-			}
+	fmt.Fprintf(w, "  created:       %d\n", totals.Created)
+	fmt.Fprintf(w, "  skipped (dup): %d\n", totals.Skipped)
+	fmt.Fprintf(w, "  filtered:      %d\n", totals.Filtered)
+	printFilterReasons(w, totals.FilteredBy)
+	fmt.Fprintf(w, "  fetch jobs:    %d enqueued\n", totals.JobsEnqueued)
+	if len(totals.Errors) > 0 {
+		fmt.Fprintf(w, "  errors:        %d (first 10 shown)\n", len(totals.Errors))
+		for _, e := range totals.Errors[:min(10, len(totals.Errors))] {
 			fmt.Fprintf(w, "    %s\n", e)
 		}
 	}

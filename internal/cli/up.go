@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,7 +27,7 @@ func newUpCmd(flags *rootFlags, d deps) *cobra.Command {
 	var opts setup.Options
 	cmd := &cobra.Command{
 		Use:   "up",
-		Short: "Set curio up, or check that it is: the Mac, Ollama, the models, the home, the daemon",
+		Short: "Set curio up, or check that it is: the Mac, Ollama, the models, the home, the daemon, your bookmarks",
 		Long: `Set curio up on this Mac, and keep it set up. curio up checks each part
 (the Mac, Ollama, the search and writing models, the home and its
 config.yaml, the daemon and its launchd agent), shows what it would do,
@@ -34,8 +35,13 @@ and then does it, asking before each step. Every command it runs is shown
 first; it never uses sudo. A run where everything checks out changes
 nothing and says so, and a run cut short picks up where it stopped.
 
+With an empty library it offers to import your bookmarks: from Chrome,
+Firefox, Safari or an exported HTML file, each with how many are new;
+--import names the source up front.
+
 Without a terminal it never asks: it shows the plan and exits 1, unless
---yes answers for you. See docs/setup.md.`,
+--yes answers for you, and imports only what --import names. See
+docs/setup.md.`,
 		Args:        cobra.NoArgs,
 		Annotations: map[string]string{ownsEnvironment: "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -58,6 +64,10 @@ Without a terminal it never asks: it shows the plan and exits 1, unless
 			case !outcome.Changed:
 				fmt.Fprintln(out, "Nothing to do: curio is up.")
 				printUpStatus(out, outcome.Status)
+			case outcome.Imported != nil:
+				fmt.Fprintln(out, "curio is up.")
+				printUpStatus(out, outcome.Status)
+				printHandOff(out, *outcome.Imported, time.Now())
 			default:
 				fmt.Fprintln(out, "curio is up.")
 				printUpStatus(out, outcome.Status)
@@ -78,6 +88,8 @@ Without a terminal it never asks: it shows the plan and exits 1, unless
 		"embed a new home with this Ollama model, tag included (an existing home keeps its own)")
 	f.StringVar(&opts.GenerationModel, "generation-model", "",
 		"write interest labels with this Ollama model, when config.yaml doesn't name one")
+	f.StringVar(&opts.Import, "import", "",
+		"import from this source without a menu: chrome, chrome:<profile>, safari, firefox or html:<file>")
 	return cmd
 }
 
@@ -149,7 +161,10 @@ func printUpStatus(w io.Writer, s setup.Snapshot) {
 			setup.DriftChanges(d), d.Fix)
 	}
 	for _, warning := range s.Warnings {
-		fmt.Fprintf(w, "warning: %s\n", warning)
+		fmt.Fprintf(w, "warning: %s\n", warning.Text)
+		for _, note := range warning.Notes {
+			fmt.Fprintf(w, "  %s\n", note)
+		}
 	}
 }
 
@@ -169,21 +184,57 @@ func describeModels(models []setup.ModelSnapshot) string {
 	return strings.Join(parts, ", ")
 }
 
-// printNext is the card a run that changed something ends with: what to do
-// next, and how to give Claude the library.
-func printNext(w io.Writer) {
+// cardLine is a command a card names, and what it does.
+type cardLine struct{ command, does string }
+
+// nextCard is what a run that changed something and started no import
+// ends with; the MCP line follows it.
+var nextCard = []cardLine{
+	{"curio import chrome", "import more bookmarks (or safari, firefox, html <file>)"},
+	{"curio status", "see what the daemon is doing"},
+	{`curio search "..."`, "search your library"},
+	{"curio pause | resume", "stop starting new work, and start again"},
+	{"curio throttle gentle", "fewer jobs at once, to keep the Mac cool"},
+}
+
+// handOffCard is what a run that started an import ends with, after when
+// to check back; the MCP line follows it.
+var handOffCard = []cardLine{
+	{"curio status --follow", "follow the import until it is done"},
+	{"curio pause | resume", "stop starting new work, and start again"},
+	{"curio throttle gentle", "fewer jobs at once, to keep the Mac cool"},
+	{`curio search "..."`, "search your library, as it grows"},
+}
+
+// mcpLine lets Claude Code search the library.
+func mcpLine() cardLine { return cardLine{mcpCommand(), "let Claude Code search your library (MCP)"} }
+
+// printCard prints lines under title.
+func printCard(w io.Writer, title string, lines []cardLine) {
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Next:")
-	for _, line := range [][2]string{
-		{"curio import chrome", "import your bookmarks (or safari, firefox, html <file>)"},
-		{"curio status", "see how the import is going"},
-		{`curio search "..."`, "search your library"},
-		{"curio pause | resume", "stop starting new work, and start again"},
-		{"curio throttle gentle", "fewer jobs at once, to keep the Mac cool"},
-		{mcpCommand(), "let Claude Code search your library (MCP)"},
-	} {
-		fmt.Fprintf(w, "  %-36s %s\n", line[0], line[1])
+	fmt.Fprintln(w, title)
+	for _, line := range append(slices.Clone(lines), mcpLine()) {
+		fmt.Fprintf(w, "  %-36s %s\n", line.command, line.does)
 	}
+}
+
+// printNext is the card a run that changed something, and started no
+// import, ends with: what to do next, and how to give Claude the library.
+func printNext(w io.Writer) { printCard(w, "Next:", nextCard) }
+
+// printHandOff is the card a run that started an import ends with: when
+// to check back, what was imported, and what to do meanwhile.
+func printHandOff(w io.Writer, r setup.ImportReport, now time.Time) {
+	fmt.Fprintln(w)
+	if r.Pages == 0 {
+		fmt.Fprintf(w, "Imported %s from %s; their pages were in the library already.\n",
+			plural(r.Created, "new bookmark"), r.Source)
+	} else {
+		fmt.Fprintf(w, "Import started. Check back after %s.\n", setup.CheckBackText(now, r.CheckBack))
+		fmt.Fprintf(w, "  %s from %s, %s to fetch and index %s\n", plural(r.Created, "new bookmark"), r.Source,
+			plural(r.Pages, "page"), r.Pace)
+	}
+	printCard(w, "Meanwhile:", handOffCard)
 }
 
 // mcpByName registers the curio-mcp on PATH with Claude Code.
@@ -241,5 +292,5 @@ func upHint(ctx context.Context, homeFlag, daemonURL string) string {
 	if err != nil || stats.BookmarksTotal > 0 {
 		return ""
 	}
-	return "Your library is empty: run `curio up` to check the setup, then import your bookmarks (`curio import --help`)."
+	return "Your library is empty: run `curio up`, which imports your bookmarks."
 }

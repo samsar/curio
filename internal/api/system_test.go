@@ -123,6 +123,23 @@ func TestHealth_GenerationModel(t *testing.T) {
 	}
 }
 
+// TestHealth_YouTubeFetcher: healthz names the yt-dlp the daemon routes
+// YouTube videos to, and leaves the field out when there is none.
+func TestHealth_YouTubeFetcher(t *testing.T) {
+	for _, bin := range []string{"/opt/homebrew/bin/yt-dlp", ""} {
+		s := newTestServer(t, func(d *Deps) { d.YouTubeFetcher = bin })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var h map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+		got, present := h["youtube_fetcher"]
+		assert.Equal(t, bin != "", present, bin)
+		if present {
+			assert.Equal(t, bin, got)
+		}
+	}
+}
+
 // driftMonitor is a DriftMonitor that reports report and counts
 // rebaselines, failing them with err.
 type driftMonitor struct {

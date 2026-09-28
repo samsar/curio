@@ -7,7 +7,6 @@ import (
 
 	"github.com/samsar/curio/internal/importer"
 	"github.com/samsar/curio/internal/store"
-	"github.com/samsar/curio/internal/urlutil"
 )
 
 // ImportRequest is the body of POST /v1/bookmarks/import.
@@ -18,6 +17,8 @@ import (
 type ImportRequest struct {
 	Source    string           `json:"source"` // chrome | safari | firefox | html | manual
 	Bookmarks []ImportBookmark `json:"bookmarks"`
+	// DryRun counts what the import would do and writes nothing.
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // ImportBookmark is one parsed bookmark from the client. Title and
@@ -30,8 +31,8 @@ type ImportBookmark struct {
 	SavedAt    time.Time `json:"saved_at,omitzero"` // zero (absent) means now
 }
 
-// ImportResponse summarizes what happened. Counts always present, errors
-// only when non-empty.
+// ImportResponse summarizes what happened, or for a dry run what would
+// have. Counts always present, errors only when non-empty.
 type ImportResponse struct {
 	Source       string                        `json:"source"`
 	Total        int                           `json:"total"`
@@ -41,6 +42,10 @@ type ImportResponse struct {
 	JobsEnqueued int                           `json:"jobs_enqueued"` // fetches for URLs new to the corpus
 	FilteredBy   map[importer.FilterReason]int `json:"filtered_by,omitempty"`
 	Errors       []string                      `json:"errors,omitempty"` // first ~10
+	DryRun       bool                          `json:"dry_run,omitempty"`
+	// NewURLs are, for a dry run, the URLs whose documents the import
+	// would create and fetch, one each, in request order.
+	NewURLs []string `json:"new_urls,omitempty"`
 }
 
 const importErrorsCap = 10
@@ -60,13 +65,17 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
 	resp := ImportResponse{
 		Source:     req.Source,
 		Total:      len(req.Bookmarks),
 		FilteredBy: map[importer.FilterReason]int{},
 	}
+	if req.DryRun {
+		d.previewImport(w, r, req, resp)
+		return
+	}
 
+	ctx := r.Context()
 	for i, in := range req.Bookmarks {
 		if err := ctx.Err(); err != nil {
 			// The client has gone: stop writing rows nobody will hear about.
@@ -75,29 +84,18 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 			d.Log.Info("import abandoned by the client", "processed", i, "total", len(req.Bookmarks), "err", err)
 			return
 		}
-
-		// Filter first; cheaper to reject before any DB work.
-		ok, why := importer.Indexable(in.URL)
+		norm, ok := resp.classify(in.URL)
 		if !ok {
-			resp.Filtered++
-			resp.FilteredBy[why]++
 			continue
 		}
-		normURL, err := urlutil.Normalize(in.URL)
-		if err != nil {
-			resp.Filtered++
-			resp.FilteredBy[importer.ReasonInvalidURL]++
-			continue
-		}
-
-		in.URL = normURL
+		in.URL = norm
 		res, err := d.Bookmarks.Ingest(ctx, d.bookmarkRow(in, req.Source))
 		switch {
 		case errors.Is(err, store.ErrConflict):
 			resp.Skipped++
 			continue
 		case err != nil:
-			resp.appendError(normURL + ": " + err.Error())
+			resp.appendError(norm + ": " + err.Error())
 			continue
 		}
 		resp.Created++
@@ -107,6 +105,62 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// previewImport answers a dry run: the response the import of req would
+// get against the library as it is now, writing nothing. It looks every
+// distinct URL up at once, then replays Ingest's rules in request order:
+// a URL seen earlier in the request, or one the source has a bookmark of,
+// is skipped; any other is created, and fetched when its document is new.
+func (d Deps) previewImport(w http.ResponseWriter, r *http.Request, req ImportRequest, resp ImportResponse) {
+	urls := make([]string, 0, len(req.Bookmarks))
+	var distinct []string
+	seen := map[string]bool{}
+	for _, in := range req.Bookmarks {
+		norm, ok := resp.classify(in.URL)
+		if !ok {
+			continue
+		}
+		urls = append(urls, norm)
+		if !seen[norm] {
+			seen[norm] = true
+			distinct = append(distinct, norm)
+		}
+	}
+	found, err := d.Bookmarks.PreviewIngest(r.Context(), d.TenantID, req.Source, distinct)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	clear(seen)
+	for _, u := range urls {
+		switch {
+		case seen[u], found[u].BookmarkExists:
+			resp.Skipped++
+		default:
+			resp.Created++
+			if !found[u].DocumentExists {
+				resp.JobsEnqueued++
+				resp.NewURLs = append(resp.NewURLs, u)
+			}
+		}
+		seen[u] = true
+	}
+	resp.DryRun = true
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// classify is the import's verdict on one bookmark's URL, a dry run's and
+// the real import's alike: the URL it is saved under, or false with the
+// filter counted in r.
+func (r *ImportResponse) classify(rawURL string) (string, bool) {
+	norm, why := importer.Classify(rawURL)
+	if why != "" {
+		r.Filtered++
+		r.FilteredBy[why]++
+		return "", false
+	}
+	return norm, true
 }
 
 func (r *ImportResponse) appendError(msg string) {

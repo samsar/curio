@@ -22,16 +22,14 @@ type ParsedBookmark struct {
 	SavedAt    time.Time // zero if the source didn't supply one
 }
 
-// Source labels the bookmark provenance for the store. Mirrors the
-// store.Source* constants but listed here so importer-level code doesn't
-// import the store package transitively.
-type Source string
-
+// The labels bookmarks are saved under (bookmarks.source), one per kind
+// of Source. They mirror the store.Source* constants, listed here so the
+// importer doesn't import the store.
 const (
-	SourceChrome  Source = "chrome"
-	SourceSafari  Source = "safari"
-	SourceFirefox Source = "firefox"
-	SourceHTML    Source = "html"
+	LabelChrome  = "chrome"
+	LabelSafari  = "safari"
+	LabelFirefox = "firefox"
+	LabelHTML    = "html"
 )
 
 // FilterReason explains why a URL was skipped. Returned by Indexable so
@@ -78,6 +76,20 @@ func Indexable(rawURL string) (bool, FilterReason) {
 		return false, ReasonInvalidURL
 	}
 	return true, ""
+}
+
+// Classify is the import's verdict on a bookmark's URL, the daemon's and
+// every count's alike: the normalized URL its bookmark is saved under, or,
+// with an empty URL, why it is filtered.
+func Classify(rawURL string) (string, FilterReason) {
+	if ok, why := Indexable(rawURL); !ok {
+		return "", why
+	}
+	norm, err := urlutil.Normalize(rawURL)
+	if err != nil {
+		return "", ReasonInvalidURL
+	}
+	return norm, ""
 }
 
 var browserInternalPrefixes = []string{

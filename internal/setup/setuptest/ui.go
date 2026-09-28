@@ -198,7 +198,7 @@ func (u *UI) Unanswered() int {
 }
 
 // Progress starts recording a progress report.
-func (u *UI) Progress(title string) setup.Progress {
+func (u *UI) Progress(title string, _ setup.Unit) setup.Progress {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	p := &Progress{Title: title}

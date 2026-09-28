@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -70,6 +71,54 @@ func TestWriteNewFile(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "no temp file left behind")
+}
+
+// TestWriteNewFile_NoHardLinks: on a filesystem without hard links the
+// file is created exclusively in place, 0600, with no temp file left, and
+// a file already there is still never written over.
+func TestWriteNewFile_NoHardLinks(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.ENOTSUP, syscall.EPERM} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			linkFile = func(oldname, newname string) error {
+				return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: errno}
+			}
+			t.Cleanup(func() { linkFile = os.Link })
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+
+			require.NoError(t, writeNewFile(path, []byte("a: 1\n")))
+			info, err := os.Stat(path)
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+			data, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, "a: 1\n", string(data))
+
+			err = writeNewFile(path, []byte("a: 2\n"))
+			require.ErrorIs(t, err, fs.ErrExist)
+			data, err = os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, "a: 1\n", string(data), "untouched")
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			assert.Len(t, entries, 1, "no temp file left behind")
+		})
+	}
+}
+
+// TestWriteNewFile_OtherLinkErrors: a link that fails for another reason
+// fails the write, and nothing is left behind.
+func TestWriteNewFile_OtherLinkErrors(t *testing.T) {
+	linkFile = func(oldname, newname string) error {
+		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: syscall.EIO}
+	}
+	t.Cleanup(func() { linkFile = os.Link })
+	dir := t.TempDir()
+	err := writeNewFile(filepath.Join(dir, "config.yaml"), []byte("a: 1\n"))
+	require.ErrorIs(t, err, syscall.EIO)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
 }
 
 func TestListenOf(t *testing.T) {

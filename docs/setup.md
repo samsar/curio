@@ -19,7 +19,7 @@ but with platform-appropriate package managers.
 curio up
 ```
 
-`curio up` sets curio up on this Mac, and keeps it set up. It checks five
+`curio up` sets curio up on this Mac, and keeps it set up. It checks six
 things, in order, shows what it would do about each (the plan), and then
 does it, asking before each step:
 
@@ -63,23 +63,72 @@ does it, asking before each step:
    home records the embedding model and the width of its vectors, measured
    with one embed after the pull. curio up writes `config.yaml` once, when
    there is none, with those and the writing model, and never edits it
-   again: it is yours. An existing home is checked, never converted (see
-   `--fresh`). A directory that isn't a curio home is never written into.
+   again: it is yours. A new home needs 2 GiB free on its volume, whether
+   or not a model is pulled there. An existing home is checked, never
+   converted (see `--fresh`). A directory that isn't a curio home is never
+   written into.
 5. **The daemon**, kept running by its launchd agent (see "Keep the daemon
    running"): installed, running this curio's `curio-daemon`, and
    restarted when it runs another build or another writing model than
    `config.yaml`'s. Over ssh, with no desktop session for the agent, the
    daemon is started on demand instead, with a warning.
+6. **Your bookmarks**, when the library has none (a new home's hasn't).
+   curio up offers what it finds, each with how many of its bookmarks are
+   new to the library (and how many pages that fetches, when some are
+   there already from another browser), counted by the daemon without
+   saving anything: each Chrome profile, Firefox's default profile,
+   Safari, or an exported HTML file whose path you type or drag into the
+   terminal. `Skip for now` imports nothing, and the next run offers
+   again. A library with bookmarks is left alone: `curio import` adds
+   more. `--import` names the source up front (see below); run again with
+   the same `--import`, it imports only what is new.
+   Without a terminal, or with `--yes`, nothing is imported unless
+   `--import` says what: the status lists the `--import` values for the
+   sources found.
+   - **Safari** needs Full Disk Access: macOS grants it to the terminal
+     app curio runs in (Terminal, iTerm2), not to curio. curio up explains
+     it, offers to open the setting (`/usr/bin/open
+     'x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles'`)
+     and checks again when you say so. macOS applies it only once the
+     terminal app restarts: quit it, reopen it, and run `curio up` again.
+     Only you can turn it on, so without a terminal, or with `--yes`,
+     `--import safari` stops at the plan with these steps instead.
+   - **YouTube videos** among the new bookmarks: curio indexes a video's
+     transcript through yt-dlp. curio up offers `brew install yt-dlp`,
+     then restarts the daemon, which finds yt-dlp only as it starts, and
+     checks that it does. When yt-dlp is installed already it only
+     restarts the daemon; a no is remembered in `setup.json`, and not
+     asked again.
+   - **How long it takes**, as ranges: fetching is network-bound, 25 to 45
+     pages a minute with 16 fetch workers, at most 2 at a time from one
+     site, so a site that holds many of the new pages is named as taking
+     longer; indexing is Ollama-bound, measured on this Mac (one batch of
+     32 sample chunks, at about 23 chunks a page). GitHub pages without a
+     `fetcher.github.token` in `config.yaml` are mentioned: GitHub allows
+     60 API requests an hour without one.
+   - **When to work through them**: now at full speed, gently (`curio
+     throttle gentle`), or only overnight, 22:00 to 07:00 (`curio
+     schedule`), the default on a Mac with under 16 GB, each with when to
+     check back. Then whether to keep the Mac awake (see "Keeping the Mac
+     awake during an import"), as it is by default, off on a new home, so
+     `--yes` never turns it on. Both are set on the queue before any
+     bookmark is sent.
 
 When every check passes, curio up changes nothing and says `Nothing to do:
 curio is up.`, then the status: the daemon and whether launchd keeps it
 running, Ollama and the models, the library's size, the queue, and
 anything worth knowing (an embedding drift, a warning about the Mac). A
-run that did something ends with what to do next: importing, searching,
-pausing, and registering curio with Claude Code (`claude mcp add curio --
-curio-mcp`). Run it again whenever you like: nothing records where a run
-stopped, so a run cut short (ctrl-c, a no) picks up where it left off.
-`curio doctor` runs the same checks and reports them, changing nothing.
+run that started an import ends with `Import started. Check back after
+05:14.` (or `tomorrow 05:14`), what it imports, and what to do meanwhile:
+`curio status --follow`, which follows the queue until it drains, `curio
+pause | resume`, `curio throttle gentle`, `curio search "..."`, and
+registering curio with Claude Code (`claude mcp add curio --
+curio-mcp`). Any other run that did something ends with what to do next.
+Run it again whenever you like: nothing records where a run stopped, so a
+run cut short (ctrl-c, a no) picks up where it left off; an import cut
+short says how many bookmarks were sent, and `curio up --import <source>`
+finishes it, skipping those already saved. `curio doctor` runs the same
+checks (all but the import) and reports them, changing nothing.
 
 What curio up asks, and never does unasked:
 
@@ -101,13 +150,15 @@ What curio up asks, and never does unasked:
 | `--fresh` | Move the existing home aside to `<home>.bak-<YYYYMMDD-HHMMSS>` and start a new one; see below. |
 | `--embedding-model <tag>` | Embed a new home with this model instead of `qwen3-embedding:0.6b`. Name a tag: a home embeds with one model for good. |
 | `--generation-model <tag>` | Write interest labels with this model instead of curio's pick. It can't override a `generation.model` in `config.yaml`: edit that instead. |
+| `--import <source>` | Import from this source without the menu, whatever the library holds: `chrome` (the Default profile), `chrome:<profile>` (its directory, `Profile 1`, or its name), `safari`, `firefox`, or `html:<file>`. One that isn't there, can't be read or holds no bookmarks stops the run before anything is done. |
 
 Without a terminal (in a script, with stdin or stderr redirected), curio
 up never asks: it prints the plan and exits 1, unless `--yes` answers for
 you. It exits 0 when there was nothing to do, when it did everything, and
 after a dry run with no blocker; 1 when a blocker stopped it, a dry run's
 included (a home it won't touch, a
-config.yaml that doesn't load, too little disk; the plan says what to do),
+config.yaml that doesn't load, too little disk, an `--import` with
+nothing to import; the plan says what to do),
 when you said no, or when a step failed; and 130 when a question was left
 unanswered.
 
@@ -325,7 +376,9 @@ End-to-end flow using a Chrome HTML export. Substitute your own browser/path.
 # 1. Export your bookmarks: Chrome → Bookmark Manager → ⋮ → Export bookmarks
 #    Saves a .html file (Netscape Bookmark format).
 
-# 2. Set curio up: Ollama, the models, ~/.curio, the daemon.
+# 2. Set curio up: Ollama, the models, ~/.curio, the daemon. It offers to
+#    import the export too (--import html:~/Downloads/bookmarks.html picks
+#    it up front); skip that to import it by hand, step by step, below.
 curio up
 
 # 3. Dry-run first to see what'd happen without actually importing.

@@ -3,6 +3,7 @@ package importer
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,29 +12,26 @@ import (
 	"howett.net/plist"
 )
 
-// SafariBookmarksPath returns the default path to Safari's Bookmarks.plist.
-// Returns "" on non-darwin or if the file doesn't exist. Honors
-// CURIO_SAFARI_DIR so tests can inject a fixture directory.
-func SafariBookmarksPath() string {
-	if v := os.Getenv("CURIO_SAFARI_DIR"); v != "" {
-		p := filepath.Join(v, "Bookmarks.plist")
-		if _, err := os.Stat(p); err != nil {
-			return ""
-		}
-		return p
+// SafariPlist returns the path of Safari's Bookmarks.plist and the error
+// of looking at it: one matching fs.ErrNotExist off macOS or when it isn't
+// there, and fs.ErrPermission when macOS withholds it (Full Disk Access).
+// Honors CURIO_SAFARI_DIR so tests can inject a fixture directory.
+func SafariPlist() (string, error) {
+	if dir := os.Getenv("CURIO_SAFARI_DIR"); dir != "" {
+		p := filepath.Join(dir, "Bookmarks.plist")
+		_, err := os.Stat(p)
+		return p, err
 	}
 	if runtime.GOOS != "darwin" {
-		return ""
+		return "", fmt.Errorf("safari's bookmarks are macOS-only: %w", fs.ErrNotExist)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("find safari's bookmarks: %w", err)
 	}
 	p := filepath.Join(home, "Library", "Safari", "Bookmarks.plist")
-	if _, err := os.Stat(p); err != nil {
-		return ""
-	}
-	return p
+	_, err = os.Stat(p)
+	return p, err
 }
 
 // ParseSafari reads a Safari Bookmarks.plist (binary or XML) and returns
