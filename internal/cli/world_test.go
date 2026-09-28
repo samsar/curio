@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/porttest"
 	"github.com/samsar/curio/internal/service/servicetest"
 	"github.com/samsar/curio/internal/setup"
 	"github.com/samsar/curio/internal/setup/setuptest"
@@ -112,7 +112,7 @@ func freshWorld(t *testing.T) *world {
 	t.Helper()
 	w := newWorld(t)
 	w.home = filepath.Join(t.TempDir(), "curio")
-	listen := freeAddr(t)
+	listen := porttest.FreeAddr(t)
 	w.daemonURL = "http://" + listen
 	exe, err := os.Executable()
 	require.NoError(t, err)
@@ -154,13 +154,4 @@ func doctorLine(t *testing.T, out, name string) (line, hint string) {
 func markerOf(line string) string {
 	marker, _, _ := strings.Cut(line, " ")
 	return marker
-}
-
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
 }

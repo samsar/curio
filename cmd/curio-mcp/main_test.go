@@ -26,6 +26,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/porttest"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -135,14 +136,6 @@ func serveAt(t *testing.T, addr string, handler http.Handler) error {
 }
 
 // freeAddr is a loopback address nothing listens on.
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
-}
 
 // running is a daemon that is up: needing to start it is a test failure.
 func running(t *testing.T, c *client.Client) daemon {
@@ -207,7 +200,7 @@ func search(t *testing.T, cs *mcp.ClientSession) *mcp.CallToolResult {
 // counts the calls.
 func stoppedDaemon(t *testing.T, starts *atomic.Int32) daemon {
 	t.Helper()
-	addr := freeAddr(t)
+	addr := porttest.FreeAddr(t)
 	var (
 		once     sync.Once
 		startErr error
@@ -237,7 +230,7 @@ func TestMCP_RestartsAStoppedDaemon(t *testing.T) {
 // tool error says both what failed and why the restart did.
 func TestMCP_RestartFailureIsReported(t *testing.T) {
 	d := daemon{
-		client: client.New("http://" + freeAddr(t)),
+		client: client.New("http://" + porttest.FreeAddr(t)),
 		ensure: func(context.Context) error { return errors.New("curio-daemon failed to start: boom") },
 	}
 	res := search(t, connect(t, d))
@@ -430,7 +423,7 @@ func TestSetup_Failures(t *testing.T) {
 			defaults := config.Default().Embedding
 			home, err := curiohome.Init(t.TempDir(), defaults.Model, defaults.Dim)
 			require.NoError(t, err)
-			url := "http://" + freeAddr(t)
+			url := "http://" + porttest.FreeAddr(t)
 			ctl := tc.ctl(t, home, url)
 			e := daemonctl.Env{Home: home, Client: client.New(ctl.BaseURL), Controller: ctl}
 

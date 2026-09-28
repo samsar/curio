@@ -118,6 +118,7 @@ linters:
             - "!**/internal/service/servicetest/**"
             - "!**/internal/setup/setuptest/**"
             - "!**/internal/ui/uitest/**"
+            - "!**/internal/porttest/**"
           deny:
             - pkg: testing
               desc: production code must not link the testing package
@@ -133,6 +134,8 @@ linters:
               desc: setuptest is test support; production code runs the setup wizard through internal/setup
             - pkg: github.com/samsar/curio/internal/ui/uitest
               desc: uitest is test support; it checks pages in tests
+            - pkg: github.com/samsar/curio/internal/porttest
+              desc: porttest is test support; it finds ports for tests' daemons
             - pkg: github.com/getkin/kin-openapi
               desc: kin-openapi checks the API against its spec in tests; it must never link into a binary
     errcheck:
