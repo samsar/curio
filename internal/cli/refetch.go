@@ -19,7 +19,7 @@ func newRefetchCmd(env *daemonctl.Env) *cobra.Command {
 		force bool
 	)
 	cmd := &cobra.Command{
-		Use:   "refetch [document-id]",
+		Use:   "refetch [document-id | url]",
 		Short: "Re-fetch a document (or many) to pick up content changes / fetcher fixes",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -31,9 +31,13 @@ func newRefetchCmd(env *daemonctl.Env) *cobra.Command {
 				return refetchAll(cmd.Context(), cmd.OutOrStdout(), env.Client, state)
 			}
 			if len(args) != 1 {
-				return errors.New("provide a document ID or pass --all")
+				return errors.New("provide a document ID or URL, or pass --all")
 			}
-			return refetchOne(cmd.Context(), cmd.OutOrStdout(), env.Client, args[0], force)
+			id, err := resolveDocumentID(cmd.Context(), env.Client, args[0])
+			if err != nil {
+				return err
+			}
+			return refetchOne(cmd.Context(), cmd.OutOrStdout(), env.Client, id, force)
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false,

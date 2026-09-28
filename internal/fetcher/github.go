@@ -63,6 +63,11 @@ func NewGitHub(opts GitHubOptions) *GitHub {
 
 func (*GitHub) Name() string { return "github" }
 
+// HasToken reports whether requests carry a token, from the options or
+// CURIO_GITHUB_TOKEN. Without one GitHub allows 60 API requests an hour;
+// with any token, even one with no scopes, 5,000.
+func (g *GitHub) HasToken() bool { return g.token != "" }
+
 func (g *GitHub) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {

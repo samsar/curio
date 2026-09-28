@@ -63,6 +63,7 @@ type Deps struct {
 	Drift           DriftMonitor                    // embedding drift, on healthz, reset by reindex-all; nil tracks none
 	KeepAwake       KeepAwake                       // whether the Mac is held awake, on /v1/queue; nil reports it isn't
 	YouTubeFetcher  string                          // the yt-dlp YouTube videos go to, on healthz; empty when they go to the default fetcher
+	GitHubToken     bool                            // the GitHub fetcher sends a token, on healthz
 	TenantID        string                          // default store.LocalTenantID
 	Log             *slog.Logger
 }
@@ -177,6 +178,7 @@ func newRouter(deps Deps, origin localOrigin) (chi.Router, error) {
 
 		r.Route("/documents", func(r chi.Router) {
 			r.Get("/", deps.handleListDocuments)
+			r.Get("/lookup", deps.handleLookupDocument)
 			r.Get("/{id}", deps.handleGetDocument)
 			r.Get("/{id}/content", deps.handleGetDocumentContent)
 			r.Get("/{id}/related", deps.handleRelatedDocuments)
