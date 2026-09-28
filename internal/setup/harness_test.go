@@ -3,7 +3,6 @@ package setup_test
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/importer"
+	"github.com/samsar/curio/internal/porttest"
 	"github.com/samsar/curio/internal/service"
 	"github.com/samsar/curio/internal/service/servicetest"
 	"github.com/samsar/curio/internal/setup"
@@ -69,7 +69,7 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{
 		t:           t,
 		home:        filepath.Join(t.TempDir(), "curio"),
-		listen:      freeAddr(t),
+		listen:      porttest.FreeAddr(t),
 		exe:         exe,
 		ollama:      setuptest.NewOllama(t, "0.34.4"),
 		installer:   setuptest.NewInstaller(),
@@ -217,15 +217,6 @@ func (h *harness) changes() int {
 		n += h.agent.Count(m)
 	}
 	return n
-}
-
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
 }
 
 // stepsOf are the step names of plan items.

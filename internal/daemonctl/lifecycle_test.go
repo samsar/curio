@@ -25,6 +25,7 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/porttest"
 )
 
 // The tests spawn this test binary as the "daemon": with fakeModeEnv set,
@@ -198,7 +199,7 @@ func newTestController(t *testing.T, mode string) *Controller {
 	home, err := curiohome.Init(dir, "nomic-embed-text", 768)
 	require.NoError(t, err)
 
-	addr := freeAddr(t)
+	addr := porttest.FreeAddr(t)
 	t.Setenv(fakeAddrEnv, addr)
 	t.Setenv(fakeModeEnv, mode)
 
@@ -214,15 +215,6 @@ func newTestController(t *testing.T, mode string) *Controller {
 		}
 	})
 	return c
-}
-
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
 }
 
 func spawnCount(t *testing.T, c *Controller) int {
