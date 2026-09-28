@@ -44,13 +44,29 @@ func newDaemonStartCmd(env *daemonctl.Env) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "daemon running")
 			}
 			if h := st.Health; h != nil && h.Version != version.String() {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: the daemon runs curio %s, and this is curio %s; "+
-					"to switch, run `curio daemon stop`, and the next command starts %s\n",
-					h.Version, version.String(), daemonProgram(env, st))
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: the daemon runs curio %s, and this is curio %s; %s\n",
+					h.Version, version.String(), switchAdvice(env, st))
 			}
 			return nil
 		},
 	}
+}
+
+// switchAdvice says how to run this curio's daemon in place of the one
+// running. A loaded agent starts its own program at the next command, so
+// when that is another curio-daemon (an older install elsewhere), a stop
+// would only bring the same build back: the agent needs repointing.
+func switchAdvice(env *daemonctl.Env, st daemonctl.Status) string {
+	bin := env.Controller.DaemonBin
+	if svc := st.Service; svc != nil && svc.Loaded && !sameFile(svc.Program, bin) {
+		from := ""
+		if svc.Program != "" { // empty when the agent's definition can't be read
+			from = " from " + svc.Program
+		}
+		return fmt.Sprintf("to switch, run `curio daemon install`, which repoints the launchd agent%s to %s "+
+			"and restarts the daemon", from, bin)
+	}
+	return "to switch, run `curio daemon stop`, and the next command starts " + daemonProgram(env, st)
 }
 
 // daemonProgram is the curio-daemon the next start runs: the launchd
@@ -201,7 +217,6 @@ this curio's daemon. Never uses sudo.`,
 			if _, err := env.Home.CheckEmbedding(env.Config.Embedding.Model, env.Config.Embedding.Dim); err != nil {
 				return err
 			}
-			warnEnvOnlySettings(cmd.ErrOrStderr(), env.Config, env.Home.ConfigPath())
 			changed, err := env.Controller.Install(ctx)
 			if err != nil {
 				return err
@@ -211,6 +226,7 @@ this curio's daemon. Never uses sudo.`,
 				return err
 			}
 			printInstalled(cmd.OutOrStdout(), st, changed, daemonProgram(env, st))
+			warnEnvOnlySettings(cmd.ErrOrStderr(), env.Config, env.Home.ConfigPath())
 			return nil
 		},
 	}

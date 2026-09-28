@@ -312,11 +312,15 @@ func TestDaemonInstall_RefusedHome(t *testing.T) {
 	assert.Empty(t, fake.Calls())
 }
 
+// TestDaemonInstall_Unsupported: where there is no launchd, install says
+// so, and nothing about an agent's environment.
 func TestDaemonInstall_Unsupported(t *testing.T) {
 	srv := apitest.Start(t)
-	_, _, err := runCLIWith(withService(service.Unsupported{}), srv.Home.Path, srv.URL, "daemon", "install")
+	t.Setenv("CURIO_GITHUB_TOKEN", "ghp_secret")
+	_, stderr, err := runCLIWith(withService(service.Unsupported{}), srv.Home.Path, srv.URL, "daemon", "install")
 	require.ErrorIs(t, err, service.ErrUnsupported)
 	assert.Contains(t, err.Error(), "launchd agents are macOS-only; the CLI starts the daemon on demand")
+	assert.NotContains(t, stderr, "CURIO_GITHUB_TOKEN")
 }
 
 func TestDaemonUninstall(t *testing.T) {
@@ -395,22 +399,58 @@ func (s stopReleases) Stop(ctx context.Context) error {
 }
 
 // TestDaemonStart_AnotherVersion: after a rebuild or an upgrade the daemon
-// still running is the old build; start says so, and how to switch.
+// still running is the old build; start says so, and how to switch: a
+// stop, after which the next command starts this curio's daemon, or, when
+// the launchd agent runs another curio-daemon, which a stop would only
+// start again, an install that repoints it.
 func TestDaemonStart_AnotherVersion(t *testing.T) {
-	home := apitest.Start(t).Home
-	bin := daemonBin(t)
-	holdLockAsDaemon(t, home)
-	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","pid":%d,"home":%q,"version":"v0.9.0 (abc, 2026-09-01)"}`, os.Getpid(), home.Path)
-	}))
-	t.Cleanup(old.Close)
+	const warning = "warning: the daemon runs curio v0.9.0 (abc, 2026-09-01), and this is curio "
+	cases := []struct {
+		name   string
+		agent  func(t *testing.T, fake *servicetest.Fake, bin string)
+		stdout string
+		advice func(bin, agentProgram string) string
+	}{
+		{"no agent", func(*testing.T, *servicetest.Fake, string) {}, "daemon running\n",
+			func(bin, _ string) string {
+				return "to switch, run `curio daemon stop`, and the next command starts " + bin
+			}},
+		{"an agent running this curio's daemon", func(_ *testing.T, fake *servicetest.Fake, bin string) {
+			managedByFake(fake, bin)
+		}, "daemon running (launchd)\n", func(bin, _ string) string {
+			return "to switch, run `curio daemon stop`, and the next command starts " + bin
+		}},
+		{"an agent running another curio-daemon", func(t *testing.T, fake *servicetest.Fake, _ string) {
+			other := filepath.Join(t.TempDir(), "curio-daemon")
+			require.NoError(t, os.WriteFile(other, []byte("#!/bin/false\n"), 0o700))
+			managedByFake(fake, other)
+		}, "daemon running (launchd)\n", func(bin, agentProgram string) string {
+			return "to switch, run `curio daemon install`, which repoints the launchd agent from " + agentProgram +
+				" to " + bin + " and restarts the daemon"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := apitest.Start(t).Home
+			bin := daemonBin(t)
+			holdLockAsDaemon(t, home)
+			old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"status":"ok","pid":%d,"home":%q,"version":"v0.9.0 (abc, 2026-09-01)"}`,
+					os.Getpid(), home.Path)
+			}))
+			t.Cleanup(old.Close)
+			fake := servicetest.New(t, agentLabel)
+			tc.agent(t, fake, bin)
+			svc, err := fake.Status(context.Background())
+			require.NoError(t, err)
 
-	stdout, stderr, err := runCLIWith(withService(servicetest.New(t, agentLabel)), home.Path, old.URL, "daemon", "start")
-	require.NoError(t, err)
-	assert.Equal(t, "daemon running\n", stdout)
-	assert.Equal(t, "warning: the daemon runs curio v0.9.0 (abc, 2026-09-01), and this is curio "+version.String()+
-		"; to switch, run `curio daemon stop`, and the next command starts "+bin+"\n", stderr)
+			stdout, stderr, err := runCLIWith(withService(fake), home.Path, old.URL, "daemon", "start")
+			require.NoError(t, err)
+			assert.Equal(t, tc.stdout, stdout)
+			assert.Equal(t, warning+version.String()+"; "+tc.advice(bin, svc.Program)+"\n", stderr)
+		})
+	}
 }
 
 func TestDoctor_Launchd(t *testing.T) {

@@ -333,7 +333,11 @@ until the daemon is ready. `curio daemon status` shows the same progress.
 
 After you rebuild or upgrade curio, the daemon already running is still
 the old build. `curio daemon start` says so, naming both versions; run
-`curio daemon stop`, and the next command starts the new daemon.
+`curio daemon stop`, and the next command starts the new daemon. If the
+launchd agent (below) runs a curio-daemon other than this curio's, say an
+older install elsewhere, a stop would only start that one again, so the
+warning says to run `curio daemon install` instead, which repoints the
+agent and restarts the daemon.
 
 ## Keep the daemon running (launchd)
 
