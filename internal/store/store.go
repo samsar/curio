@@ -273,6 +273,10 @@ type DocumentStore interface {
 	// wrapping ErrConflict.
 	Create(ctx context.Context, d *Document) error
 	GetByID(ctx context.Context, id string) (*Document, error)
+	// GetByURL returns the tenant's document for url, which must already
+	// be normalized the way ingest stores it (urlutil.Normalize). A URL
+	// with no document is ErrNotFound.
+	GetByURL(ctx context.Context, tenantID, url string) (*Document, error)
 	UpdateState(ctx context.Context, id string, state DocState) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
 

@@ -75,9 +75,10 @@ with full error messages and attempt counts.`,
 func newDocsShowCmd(env *daemonctl.Env) *cobra.Command {
 	var showContent bool
 	cmd := &cobra.Command{
-		Use:   "show <document-id>",
+		Use:   "show <document-id | url>",
 		Short: "Show metadata + (optionally) content for one document",
-		Long: `Print metadata for a single document by ID, including URL, title,
+		Long: `Print metadata for a single document, by ID or by the URL it was
+bookmarked under, including URL, title,
 extraction info, and the on-disk markdown path so you can grep/edit
 directly. Pass --content to also stream the markdown to stdout.`,
 		Args: cobra.ExactArgs(1),
@@ -86,7 +87,10 @@ directly. Pass --content to also stream the markdown to stdout.`,
 				return err
 			}
 
-			id := args[0]
+			id, err := resolveDocumentID(cmd.Context(), env.Client, args[0])
+			if err != nil {
+				return err
+			}
 			doc, err := env.Client.GetDocument(cmd.Context(), id)
 			if err != nil {
 				return err

@@ -71,7 +71,7 @@ Then ask Claude Code about anything you've saved. Claude can search your library
   - Curio goes online to download the pages you bookmarked.
   - For pages that block it, Curio can ask [Jina Reader](https://jina.ai/reader) to fetch the page; that service sees the page's address. To turn this off, set `fetcher.native.jina_fallback: false` in `~/.curio/config.yaml`. Create your own Jina account if you get rate limited and use that.
 - **Changing the writing model.** Curio uses a local model to name your interests. To use a different one, set `generation.model` in `~/.curio/config.yaml` and run `curio up`.
-- **GitHub pages.** Many github.com bookmarks go faster with a GitHub token (`fetcher.github.token` in the same file).
+- **GitHub pages.** Without a GitHub token, GitHub allows only 60 requests an hour, so many github.com bookmarks fail. Any token works, even one with no permissions at all: set `fetcher.github.token` in the same file. `curio doctor` warns when there isn't one.
 - **Upgrading.** Run `brew upgrade curio`, then `curio up`.
 - **Starting over.** `curio up --fresh` moves your current library aside to `~/.curio.bak-<date>` and starts a new one. Nothing is deleted.
 - **Uninstalling.** Run `curio daemon uninstall`, then `brew uninstall curio`. Your library stays in `~/.curio` until you delete it.

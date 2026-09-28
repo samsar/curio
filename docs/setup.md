@@ -105,7 +105,11 @@ does it, asking before each step:
      longer; indexing is Ollama-bound, measured on this Mac (one batch of
      32 sample chunks, at about 23 chunks a page). GitHub pages without a
      `fetcher.github.token` in `config.yaml` are mentioned: GitHub allows
-     60 API requests an hour without one.
+     60 API requests an hour without one. Any token lifts that to 5,000,
+     even one that can access nothing: a classic token with no scopes
+     ticked, or a fine-grained token with public repositories (read-only)
+     and no permissions. `curio doctor` warns while the daemon's GitHub
+     requests carry no token.
    - **When to work through them**: now at full speed, gently (`curio
      throttle gentle`), or only overnight, 22:00 to 07:00 (`curio
      schedule`), the default on a Mac with under 16 GB, each with when to
@@ -589,6 +593,15 @@ while indexing fails that index job, and the job queue retries it.
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one clustering run; the rest get term labels |
 
 ## Troubleshooting
+
+**Checking or retrying one page** — `curio docs show`, `curio refetch`,
+`curio reindex` and `curio related` take the page's URL as well as its
+document ID: `curio refetch https://example.com/article` finds the
+document the URL was bookmarked under (as typed or pasted: case, a
+`#fragment` and tracking parameters don't matter) and refetches it. A URL
+must start with `http://` or `https://`; anything else is taken as an ID.
+`curio jobs --all --limit 500 | grep -B1 -A4 <part of the url>` shows
+every fetch and index attempt for it.
 
 **`fts5` not available** — you built without the required tags. Always use
 `make build` (or pass `-tags=sqlite_fts5,sqlite_json` to `go build`).

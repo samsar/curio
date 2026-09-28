@@ -143,6 +143,12 @@ func TestQueryPlans(t *testing.T) {
 			want:  []string{"INDEX idx_jobs_claim (status=? AND kind=?)"},
 		},
 		{
+			name:  "Documents.GetByURL",
+			query: "SELECT " + documentColumns + " FROM documents WHERE " + getByURLWhere,
+			args:  []any{"local", "https://example.com/x"},
+			want:  []string{"SEARCH documents USING INDEX sqlite_autoindex_documents_2 (tenant_id=? AND url=?)"},
+		},
+		{
 			name:  "GetWithDoc",
 			query: getJobQ, args: getJobArgs,
 			first: "SEARCH j USING INDEX sqlite_autoindex_jobs_1 (id=?)",
