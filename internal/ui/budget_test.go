@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,10 +16,25 @@ import (
 	"github.com/samsar/curio/internal/ui/uitest"
 )
 
-// renderLimit is a generous bound on rendering MaxRenderedMarkdown bytes of
-// anything, race detector included. What the budgets stop took from
-// seconds to minutes at that size.
-const renderLimit = 10 * time.Second
+// renderLimit and renderAlloc are generous bounds on rendering
+// MaxRenderedMarkdown bytes of anything, race detector included: what the
+// budgets stop took from seconds to minutes at that size, or allocated
+// gigabytes. shownAlloc bounds showing a text over a budget, which the
+// budgets refuse before goldmark parses it.
+const (
+	renderLimit = 10 * time.Second
+	renderAlloc = 1 << 30
+	shownAlloc  = 16 << 20
+)
+
+// allocated is how many bytes fn allocates.
+func allocated(fn func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
 
 // fill is head, then unit repeated, then tail: MaxRenderedMarkdown bytes,
 // or as close to it as whole units come.
@@ -47,6 +63,15 @@ func TestMarkdown_OverBudget(t *testing.T) {
 		{"1. then x", fill("", "1. ", "x"), errDeepNesting},
 		// A container per line, each with its own tags.
 		{"16 > a line", fill("", strings.Repeat(">", 16)+"x\n\n", ""), errManyContainers},
+		// Lists a blank line keeps open, each visited again on every one.
+		{"an item over blank lines", fill("- a\n", "\n", "b\n"), errBlockVisits},
+		{"a nested item over blank lines", fill(strings.Repeat("- ", 32)+"a\n", "\n", "b\n"), errBlockVisits},
+		{"a ramp over blank lines", append(markerRamp(16<<10), strings.Repeat("\n", 32000)+"b\n"...), errBlockVisits},
+		// Lists nested a little deeper on every line, each line indented
+		// past them all, and read again by every one.
+		{"a ramp", markerRamp(MaxRenderedMarkdown), errVisitBytes},
+		{"deep lists, spaces", deepLists(false), errVisitBytes},
+		{"deep lists, tabs", deepLists(true), errVisitBytes},
 		// Markup that scans to the end of its paragraph, or is compared
 		// with every other delimiter in it.
 		{"[a](", fill("", "[a](", ""), errDenseMarkup},
@@ -61,6 +86,8 @@ func TestMarkdown_OverBudget(t *testing.T) {
 		{"`a", fill("", "`a", ""), errDenseMarkup},
 		{"[a] lines", fill("", "[a]\n", ""), errDenseMarkup},
 		{"[a]: b lines", fill("", "[a]: b\n", ""), errDenseMarkup},
+		// Emphasis runs that pair with none, within the markup budget.
+		{"a**b then c*", []byte("a**b" + strings.Repeat("c* ", 20000) + "\n"), errEmphasis},
 		// A wide header padding every short line after it.
 		{"wide table", fill(wideTable, "x\n", ""), errTableCells},
 		// A long reference definition repeated by every link to it.
@@ -70,11 +97,20 @@ func TestMarkdown_OverBudget(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			require.LessOrEqual(t, len(tc.src), MaxRenderedMarkdown)
+			// The links are counted as goldmark parses them, so that text
+			// costs what the parse does.
+			limit := uint64(shownAlloc)
+			if tc.want == errLinkBytes {
+				limit = renderAlloc
+			}
 			for _, images := range []bool{false, true} {
+				var text Text
+				var err error
 				start := time.Now()
-				text, err := r.RenderMarkdown(tc.src, docURL, images)
+				alloc := allocated(func() { text, err = r.RenderMarkdown(tc.src, docURL, images) })
 				require.NoError(t, err)
 				assert.Less(t, time.Since(start), renderLimit)
+				assert.Less(t, alloc, limit)
 				assert.Equal(t, tc.want.reason, text.Unformatted)
 				assert.Equal(t, string(tc.src), text.Source)
 				assert.Empty(t, text.HTML)
@@ -100,9 +136,13 @@ func TestMarkdown_WithinBudget(t *testing.T) {
 			"<em>short</em>"}},
 		"a paragraph of links": {paragraphOfLinks(), []string{`<a href="https://en.wikipedia.org/wiki/Name_1"`,
 			`title="Name 1"`}},
-		"nested lists": {nestedLists(), []string{"<ul>\n<li>level 9"}},
-		"a long table": {longTable(), []string{"<td>row 999</td>"}},
-		"long lines":   {fill("", strings.Repeat("word ", 199)+"end\n", ""), []string{"<p>word word"}},
+		"nested lists":       {nestedLists(), []string{"<ul>\n<li>level 9"}},
+		"loose nested lists": {looseNestedLists(), []string{"<ul>\n<li>\n<p>level 3", "<li>level 4"}},
+		"a loose list":       {fill("", "- an item\n\n", ""), []string{"<li>\n<p>an item</p>\n</li>"}},
+		"a long table":       {longTable(), []string{"<td>row 999</td>"}},
+		"long lines":         {fill("", strings.Repeat("word ", 199)+"end\n", ""), []string{"<p>word word"}},
+		"a spaced thematic break": {[]byte("a\n\n" + strings.Repeat("- ", 64) + "\n\nb\n"),
+			[]string{"<p>a</p>\n<hr>\n<p>b</p>"}},
 	}
 	r := newRenderer(t)
 	for name, tc := range cases {
@@ -182,6 +222,19 @@ func nestedLists() []byte {
 	return b.Bytes()
 }
 
+// looseNestedLists is lists nested five deep with a blank line after every
+// item, as a README's outline can be, over and over.
+func looseNestedLists() []byte {
+	var b bytes.Buffer
+	for b.Len() < MaxRenderedMarkdown-1024 {
+		for level := range 5 {
+			fmt.Fprintf(&b, "%s- level %d, with a [link](https://example.com/%d)\n\n", strings.Repeat("  ", level),
+				level, level)
+		}
+	}
+	return b.Bytes()
+}
+
 // longTable is a table of ten columns and 1,000 rows.
 func longTable() []byte {
 	var b bytes.Buffer
@@ -190,6 +243,98 @@ func longTable() []byte {
 		fmt.Fprintf(&b, "| row %d | [x](https://example.com/%d) | *c* | d | e | f | g | h | i | j |\n", i, i)
 	}
 	return b.Bytes()
+}
+
+// linesUpTo is line(0), line(1) and so on, as many as fit in size bytes.
+func linesUpTo(size int, line func(i int) string) []byte {
+	var b bytes.Buffer
+	for i := 0; ; i++ {
+		l := line(i)
+		if b.Len()+len(l) > size {
+			return b.Bytes()
+		}
+		b.WriteString(l)
+	}
+}
+
+// markerRamp is lists 32 deeper on every line, each line indented past
+// all of them with tabs: size bytes at most.
+func markerRamp(size int) []byte {
+	return linesUpTo(size, func(k int) string {
+		return strings.Repeat("\t", 16*k) + strings.Repeat("- ", 32) + "a\n"
+	})
+}
+
+// listIndent is 2·i columns, of spaces or of tabs: the indentation of the
+// ith item of cmark's deeply nested lists.
+func listIndent(i int, tabs bool) string {
+	if tabs {
+		return strings.Repeat("\t", i/2) + strings.Repeat(" ", 2*(i%2))
+	}
+	return strings.Repeat(" ", 2*i)
+}
+
+// deepLists is cmark's deeply nested lists, MaxRenderedMarkdown bytes at
+// most: each item indented two columns past the one before.
+func deepLists(tabs bool) []byte {
+	return linesUpTo(MaxRenderedMarkdown, func(i int) string { return listIndent(i, tabs) + "- a\n" })
+}
+
+// textUnderLists is levels of deepLists indented with tabs, then lines of
+// text in the deepest item: MaxRenderedMarkdown bytes at most.
+func textUnderLists(levels int, text string) []byte {
+	return linesUpTo(MaxRenderedMarkdown, func(i int) string {
+		if i < levels {
+			return listIndent(i, true) + "- a\n"
+		}
+		return listIndent(levels, true) + text + "\n"
+	})
+}
+
+// underBudget is the most of src's first lines within the formatting
+// budgets.
+func underBudget(src []byte) []byte {
+	var s shape
+	n := 0
+	for line := range bytes.Lines(src) {
+		if s.add(line) != nil {
+			break
+		}
+		if end := s; end.endParagraph() != nil {
+			break
+		}
+		n += len(line)
+	}
+	return src[:n]
+}
+
+// TestMarkdown_JustUnderBudget: the costliest shapes found, cut to the most
+// of them within the block and emphasis budgets, are formatted within the
+// render bounds.
+func TestMarkdown_JustUnderBudget(t *testing.T) {
+	cases := map[string][]byte{
+		"an item over blank lines":       fill("- a\n", "\n", "b\n"),
+		"a nested item over blank lines": fill(strings.Repeat("- ", 32)+"a\n", "\n", "b\n"),
+		"deep lists, tabs":               deepLists(true),
+		"text under deep lists":          textUnderLists(128, strings.Repeat("x", 64)),
+		"a**b then c*":                   fill("a**b\n", "c*\n", ""),
+	}
+	r := newRenderer(t)
+	for name, full := range cases {
+		t.Run(name, func(t *testing.T) {
+			src := underBudget(full)
+			require.Less(t, len(src), len(full), "the whole shape is within the budgets")
+			require.NoError(t, checkShape(src))
+			var text Text
+			var err error
+			start := time.Now()
+			alloc := allocated(func() { text, err = r.RenderMarkdown(src, docURL, false) })
+			require.NoError(t, err)
+			assert.Empty(t, text.Unformatted)
+			assert.Less(t, time.Since(start), renderLimit)
+			assert.Less(t, alloc, uint64(renderAlloc))
+		})
+	}
 }
 
 func TestContainerMarkers(t *testing.T) {
@@ -213,6 +358,15 @@ func TestContainerMarkers(t *testing.T) {
 		{"1.5 metres\n", 0, "1.5 metres\n"},
 		{"1234567890. ten digits\n", 0, "1234567890. ten digits\n"},
 		{"|---|---|\n", 0, "|---|---|\n"},
+		// A thematic break is one block, not markers, even after some.
+		{"- - -\n", 0, "- - -\n"},
+		{"* * * *\n", 0, "* * * *\n"},
+		{"> - - -\n", 1, "- - -\n"},
+		{"* - - -\n", 1, "- - -\n"},
+		{"- - -x\n", 2, "-x\n"},
+		{"+ + +\n", 3, "\n"},
+		// Counting stops past maxLineNesting.
+		{strings.Repeat(">", 40), maxLineNesting + 1, strings.Repeat(">", 40-maxLineNesting-1)},
 	}
 	for _, tc := range cases {
 		n, rest := containerMarkers([]byte(tc.line))
@@ -275,11 +429,49 @@ func TestCheckShape_Tables(t *testing.T) {
 // up to a blank line or a line that starts a list item or a heading.
 func TestCheckShape_Paragraphs(t *testing.T) {
 	var s shape
-	for _, line := range []string{"*a* b\n", "[c]\n", "\n", "- *d*\n", "# e_\n"} {
+	for _, line := range []string{"*a* b\n", "[c]\n", "\n", "- *d*\n", "# e_\n", "\n", "***a___b~ ~\n"} {
 		require.NoError(t, s.add([]byte(line)))
 	}
 	require.NoError(t, s.endParagraph())
-	assert.Equal(t, int64(4*10+2*6+1*5), s.work)
+	assert.Equal(t, int64(4*10+2*6+1*5+8*12), s.work)
+	// Runs of *, _ and ~, squared: a run of one character is one run.
+	assert.Equal(t, int64(2*2+2*2+1*1+4*4), s.emphasis)
+}
+
+// TestCheckShape_Blocks: each line is charged the open blocks goldmark can
+// visit at it, and counts the blocks it can leave open.
+func TestCheckShape_Blocks(t *testing.T) {
+	cases := []struct {
+		name   string
+		lines  []string
+		visits int64
+		open   int
+	}{
+		{"a marker opens two blocks, a line one more", []string{"- - a\n"}, 0, 5},
+		{"a blank line visits every block and keeps them open", []string{"- - a\n", "\n", "\n"}, 10, 5},
+		{"a lazy line keeps them open", []string{"- - a\n", "b\n", "\n"}, 1 + 5, 5},
+		{"a line after a blank one closes what it doesn't continue", []string{"- - a\n", "\n", "b\n"}, 5 + 1, 1},
+		{"a column of indentation continues a block", []string{"- - a\n", "\n", "   b\n"}, 5 + 4, 4},
+		{"a tab is four columns", []string{"- - a\n", "\n", "\tb\n"}, 5 + 5, 5},
+		{"a marker continues a block", []string{"> > a\n", "\n", "> b\n"}, 5 + 3, 5},
+		{"a line of markers can visit every block", []string{"- - a\n", "\n", ">\n"}, 5 + 5, 5},
+		{"a thematic break opens one block", []string{"- - - -\n"}, 0, 1},
+		{"each visit reads the line", []string{"- - a\n", "\n", "\t" + strings.Repeat("x", 100) + "\n"}, 5 + 5, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s shape
+			var visitBytes int64
+			for _, line := range tc.lines {
+				before := s.visits
+				require.NoError(t, s.add([]byte(line)))
+				visitBytes += (s.visits - before) * int64(len(line))
+			}
+			assert.Equal(t, tc.visits, s.visits)
+			assert.Equal(t, visitBytes, s.visitBytes)
+			assert.Equal(t, tc.open, s.open)
+		})
+	}
 }
 
 // TestMarkup_CoversInlineTriggers: every character newMarkdown's inline

@@ -3,12 +3,12 @@ package ui
 import "bytes"
 
 // Formatting budgets: how much a document's markdown may hold of what
-// makes goldmark's work grow faster than the text, and still be formatted.
-// A stored page can hold any of it, by accident or by design (a 1 MiB line
-// of > took four and a half minutes), and goldmark can't be stopped part
-// way. A document over a budget is shown as the plain text it is stored
-// as, which costs what its length does. docs/decisions.md "Dashboard:
-// formatting budgets for stored markdown" has the measurements.
+// makes goldmark's work or memory grow faster than the text, and still be
+// formatted. A stored page can hold any of it, by accident or by design (a
+// 1 MiB line of > took four and a half minutes), and goldmark can't be
+// stopped part way. A document over a budget is shown as the plain text it
+// is stored as, which costs what its length does. docs/decisions.md
+// "Dashboard: formatting budgets for stored markdown" has the measurements.
 const (
 	// maxLineNesting is how many blockquotes and list items one line may
 	// open: goldmark's work on a line grows with their square.
@@ -16,11 +16,27 @@ const (
 	// maxContainers bounds the blockquote and list markers of the whole
 	// text, each a container goldmark builds and writes tags for.
 	maxContainers = 1 << 17
+	// maxBlockVisits bounds goldmark's block parse: the sum, over the
+	// text's lines, of the open blocks it visits at each. A blank line
+	// visits every open list, which stays open over any number of them,
+	// and every visit is recorded until the top-level block ends.
+	maxBlockVisits = 1 << 21
+	// maxVisitBytes bounds what those visits read: the sum, over the
+	// text's lines, of their visits times their length. Each visit reads
+	// the line's indentation again, and copies the rest of the line when a
+	// tab is split between two blocks.
+	maxVisitBytes = 1 << 28
 	// maxInlineWork bounds goldmark's inline parsing: the sum, over the
 	// text's paragraphs, of their markup characters times their length.
 	// Each can start a scan to the end of its paragraph (an unclosed [, (
 	// or `), or be compared with every other delimiter in it.
 	maxInlineWork = 1 << 31
+	// maxEmphasisWork bounds goldmark's emphasis matching: the sum, over
+	// the text's paragraphs, of the square of their runs of *, _ and ~.
+	// Each run that can close is compared with every run before it, back
+	// to one it pairs with, and a run that pairs with none can stay to be
+	// compared with the next.
+	maxEmphasisWork = 1 << 27
 	// maxTableCells bounds the cells of the text's tables: goldmark pads
 	// every row to its header's width, so a wide header over many short
 	// lines makes cells out of nothing.
@@ -40,7 +56,10 @@ func (e *budgetError) Error() string { return "over a formatting budget: " + e.r
 var (
 	errDeepNesting    = &budgetError{"a line opens too many blockquotes and lists"}
 	errManyContainers = &budgetError{"it has too many blockquotes and list items"}
+	errBlockVisits    = &budgetError{"its nested lists and blockquotes run over too many lines"}
+	errVisitBytes     = &budgetError{"its lines are nested too deep for their length"}
 	errDenseMarkup    = &budgetError{"its paragraphs hold too much markup"}
+	errEmphasis       = &budgetError{"its paragraphs hold too many runs of *, _ and ~"}
 	errTableCells     = &budgetError{"its tables have too many cells"}
 	errLinkBytes      = &budgetError{"its links repeat too much text"}
 )
@@ -75,14 +94,20 @@ func checkShape(src []byte) error {
 // each of them its markup times its length charges goldmark's inline work
 // at least once.
 type shape struct {
-	containers int
-	cells      int
-	work       int64 // the inline work of the paragraphs before this one
-	// This paragraph's markup characters and bytes, and the width of its
-	// widest delimiter row: goldmark makes a table of a paragraph with a
-	// delimiter row, whose rows are every line after it.
-	markup, size int64
-	cols         int
+	containers, cells int
+	// The block parse: at most how many blocks are open after the last
+	// line, whether that line was blank, and the visits and the bytes they
+	// read, charged so far.
+	open               int
+	blank              bool
+	visits, visitBytes int64
+	// The inline and emphasis work of the paragraphs before this one.
+	work, emphasis int64
+	// This paragraph's markup characters, runs of *, _ and ~, and bytes,
+	// and the width of its widest delimiter row: goldmark makes a table of
+	// a paragraph with a delimiter row, whose rows are every line after it.
+	markup, runs, size int64
+	cols               int
 }
 
 func (s *shape) add(line []byte) error {
@@ -93,7 +118,10 @@ func (s *shape) add(line []byte) error {
 	if s.containers += opened; s.containers > maxContainers {
 		return errManyContainers
 	}
-	if isBlank(line) {
+	if err := s.visitBlocks(line, rest, opened); err != nil {
+		return err
+	}
+	if s.blank {
 		return s.endParagraph()
 	}
 	if startsBlock(line) {
@@ -108,29 +136,82 @@ func (s *shape) add(line []byte) error {
 	if s.cells += s.cols; s.cells > maxTableCells {
 		return errTableCells
 	}
+	var prev byte
 	for _, c := range line {
 		if markup[c] {
 			s.markup++
+			if (c == '*' || c == '_' || c == '~') && c != prev {
+				s.runs++
+			}
 		}
+		prev = c
 	}
 	s.size += int64(len(line))
 	return nil
 }
 
+// visitBlocks charges goldmark's block parse for line, whose leading
+// spaces, tabs and container markers (markers of them) end where rest
+// starts, and keeps count of the blocks that can be open after it. On
+// every line goldmark visits the open blocks in order, up to the first the
+// line doesn't continue.
+//
+// A line continues a blockquote with a > of its own, a list with a marker
+// of its own or as much indentation as its item's content, at least two
+// columns, and the item with that same indentation. Once what is left of
+// the line is blank, it continues every list and list item beneath, as a
+// blank line does. So a line with more than spaces, tabs and markers
+// continues at most one block per marker and per column of indentation,
+// and visits one more; a line with no more than those can visit every open
+// block. Each marker opens at most two blocks, a list and its item, and
+// the line one more, the paragraph or code it holds; a blank line opens
+// none. The blocks a line doesn't continue stay open only when it
+// continues a paragraph lazily, which a line after a blank one can't: no
+// paragraph is open across a blank line.
+func (s *shape) visitBlocks(line, rest []byte, markers int) error {
+	blank := isBlank(line)
+	reach := min(s.open, columns(line[:len(line)-len(rest)])+markers)
+	visits, open := min(s.open, reach+1), reach+2*markers+1
+	switch {
+	case blank:
+		visits, open = s.open, s.open
+	case isBlank(rest):
+		visits, open = s.open, max(open, s.open)
+	case !s.blank:
+		open = max(open, s.open)
+	}
+	s.open, s.blank = open, blank
+	s.visits += int64(visits)
+	s.visitBytes += int64(visits) * int64(len(line))
+	switch {
+	case s.visits > maxBlockVisits:
+		return errBlockVisits
+	case s.visitBytes > maxVisitBytes:
+		return errVisitBytes
+	}
+	return nil
+}
+
 func (s *shape) endParagraph() error {
 	s.work += s.markup * s.size
-	s.markup, s.size, s.cols = 0, 0, 0
-	if s.work > maxInlineWork {
+	s.emphasis += s.runs * s.runs
+	s.markup, s.runs, s.size, s.cols = 0, 0, 0, 0
+	switch {
+	case s.work > maxInlineWork:
 		return errDenseMarkup
+	case s.emphasis > maxEmphasisWork:
+		return errEmphasis
 	}
 	return nil
 }
 
 // containerMarkers counts the blockquote and list markers line starts
-// with, each a container the line can open, and returns the rest of it.
+// with, each a container the line can open, and returns the rest of it. It
+// stops counting past maxLineNesting. A thematic break isn't markers:
+// goldmark takes - - - for one before it tries a list.
 func containerMarkers(line []byte) (int, []byte) {
-	n := 0
-	for i := 0; i < len(line); {
+	n, i := 0, 0
+	for i < len(line) && n <= maxLineNesting {
 		switch c := line[i]; {
 		case c == ' ' || c == '\t':
 			i++
@@ -138,7 +219,7 @@ func containerMarkers(line []byte) (int, []byte) {
 		case c == '>':
 			i++
 		case c == '-' || c == '+' || c == '*':
-			if !markerEnds(line, i+1) {
+			if !markerEnds(line, i+1) || isThematicBreak(line[i:]) {
 				return n, line[i:]
 			}
 			i++
@@ -156,7 +237,40 @@ func containerMarkers(line []byte) (int, []byte) {
 		}
 		n++
 	}
-	return n, nil
+	return n, line[i:]
+}
+
+// isThematicBreak reports whether line is a thematic break: three or more
+// of -, * or _, the same one, and nothing else but spaces.
+func isThematicBreak(line []byte) bool {
+	if len(line) == 0 || (line[0] != '-' && line[0] != '*' && line[0] != '_') {
+		return false
+	}
+	n := 0
+	for _, c := range line {
+		switch {
+		case c == line[0]:
+			n++
+		case !isSpace(c):
+			return false
+		}
+	}
+	return n >= 3
+}
+
+// columns is at most how many columns the spaces and tabs in b fill: a
+// tab fills up to four.
+func columns(b []byte) int {
+	n := 0
+	for _, c := range b {
+		switch c {
+		case ' ':
+			n++
+		case '\t':
+			n += 4
+		}
+	}
+	return n
 }
 
 // markerEnds reports whether a list marker ending before line[i] is one:

@@ -21,8 +21,9 @@ import (
 
 // MaxRenderedMarkdown is how much of a document's markdown its page
 // renders: 1 MiB, which the formatting budgets (budget.go) keep to about a
-// second at worst; a typical article of that size formats in tens of
-// milliseconds. The whole text stays at GET /v1/documents/{id}/content.
+// second and a few hundred megabytes allocated at worst; a typical article
+// of that size formats in tens of milliseconds. The whole text stays at
+// GET /v1/documents/{id}/content.
 const MaxRenderedMarkdown = 1 << 20
 
 // CutMarkdown keeps the first MaxRenderedMarkdown bytes of src, cut after
