@@ -59,3 +59,27 @@ func TestTruncateRunes(t *testing.T) {
 		})
 	}
 }
+
+func TestShellQuote(t *testing.T) {
+	cases := map[string]string{
+		"eyJ0IjoiMjAyNCJ9":        "eyJ0IjoiMjAyNCJ9",
+		"/Users/me/.curio":        "/Users/me/.curio",
+		"/Users/me/My Curio":      "'/Users/me/My Curio'",
+		"it's":                    `'it'\''s'`,
+		"http://127.0.0.1:8765/x": "http://127.0.0.1:8765/x",
+		"":                        "''",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, ShellQuote(in), in)
+	}
+}
+
+func TestShellList(t *testing.T) {
+	assert.Equal(t, "`brew install ollama` and `brew services start ollama`",
+		ShellList([]string{"brew", "install", "ollama"}, []string{"brew", "services", "start", "ollama"}))
+}
+
+func TestShellJoin(t *testing.T) {
+	assert.Equal(t, "/opt/homebrew/bin/brew install ollama", ShellJoin([]string{"/opt/homebrew/bin/brew", "install", "ollama"}))
+	assert.Equal(t, "/usr/bin/open -a 'Ollama App'", ShellJoin([]string{"/usr/bin/open", "-a", "Ollama App"}))
+}

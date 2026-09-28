@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,6 +24,9 @@ import (
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/service/servicetest"
+	"github.com/samsar/curio/internal/setup"
+	"github.com/samsar/curio/internal/setup/setuptest"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -41,19 +45,45 @@ func runCLI(t *testing.T, srv *apitest.Server, args ...string) (string, error) {
 func runCLIAt(t *testing.T, home, daemonURL string, args ...string) (string, error) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	err := runCLIStreams(home, daemonURL, &stdout, &stderr, args...)
+	err := runCLIStreams(newRootCmdWith(testDeps(t)), home, daemonURL, &stdout, &stderr, args...)
 	return stdout.String(), err
 }
 
-// runCLIStreams runs curio with args for home and daemonURL, writing to
-// stdout and stderr.
-func runCLIStreams(home, daemonURL string, stdout, stderr io.Writer, args ...string) error {
-	root := newRootCmd() // flags bind to closures made per construction
+// runCLIStreams runs root with args for home and daemonURL, writing to
+// stdout and stderr, with nothing on stdin: never a terminal.
+func runCLIStreams(root *cobra.Command, home, daemonURL string, stdout, stderr io.Writer, args ...string) error {
+	root.SetIn(strings.NewReader(""))
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.SetArgs(append([]string{"--curio-home", home, "--daemon-url", daemonURL}, args...))
 	return root.Execute()
 }
+
+// testDeps are the root's dependencies in a test: a 64 GiB Apple silicon
+// Mac, an installer that finds Homebrew and nothing else, an Ollama (a
+// fake, with curio's models) that config.yaml's defaults point at, and a
+// launchd agent (a fake) that isn't installed. Nothing reaches the machine
+// the test runs on, so the results are the same on every CI runner.
+func testDeps(t *testing.T) deps {
+	t.Helper()
+	ollama := setuptest.NewOllama(t, "0.34.4", embedModel, genModel)
+	defaults := config.Default()
+	defaults.Embedding.BaseURL, defaults.Generation.BaseURL = ollama.URL, ollama.URL
+	return deps{
+		connect:   withService(servicetest.New(t, agentLabel)),
+		probe:     setuptest.NewProbe(),
+		installer: setuptest.NewInstaller(),
+		defaults:  &defaults,
+		newUI:     setup.NewUI,
+		geteuid:   func() int { return 501 },
+	}
+}
+
+// The models curio picks for testDeps' Mac.
+const (
+	embedModel = "qwen3-embedding:0.6b"
+	genModel   = "gemma4:26b"
+)
 
 // nextPage returns the arguments of the "next page:" line out ends with,
 // without the leading "curio".
@@ -70,7 +100,7 @@ func nextPage(t *testing.T, out string) []string {
 func runArgs(t *testing.T, args ...string) string {
 	t.Helper()
 	var stdout bytes.Buffer
-	root := newRootCmd()
+	root := newRootCmdWith(testDeps(t))
 	root.SetOut(&stdout)
 	root.SetErr(io.Discard)
 	root.SetArgs(args)
@@ -178,7 +208,8 @@ func TestAdd_WaitOnAClosedQueue(t *testing.T) {
 	srv := apitest.Start(t)
 	mustRun(t, srv, "pause")
 	var stdout, stderr bytes.Buffer
-	err := runCLIStreams(srv.Home.Path, srv.URL, &stdout, &stderr, "add", "https://example.com/new", "--wait",
+	err := runCLIStreams(newRootCmdWith(testDeps(t)), srv.Home.Path, srv.URL, &stdout, &stderr, "add",
+		"https://example.com/new", "--wait",
 		"--wait-timeout", "1")
 	require.EqualError(t, err, "timed out after 1s waiting for the fetch")
 	assert.Equal(t, "note: nothing starts while the queue is paused (curio resume)\n", stderr.String())
@@ -186,7 +217,8 @@ func TestAdd_WaitOnAClosedQueue(t *testing.T) {
 
 	mustRun(t, srv, "resume")
 	stderr.Reset()
-	err = runCLIStreams(srv.Home.Path, srv.URL, &stdout, &stderr, "add", "https://example.com/other", "--wait",
+	err = runCLIStreams(newRootCmdWith(testDeps(t)), srv.Home.Path, srv.URL, &stdout, &stderr, "add",
+		"https://example.com/other", "--wait",
 		"--wait-timeout", "1")
 	require.EqualError(t, err, "timed out after 1s waiting for the fetch", "no daemon workers run here")
 	assert.Empty(t, stderr.String(), "an open queue needs no note")
@@ -471,6 +503,7 @@ func TestStatus_DaemonErrors(t *testing.T) {
 		fmt.Fprint(w, `{"title":"internal error","status":500,"detail":"read marker: permission denied"}`)
 	}))
 	t.Cleanup(broken.Close)
+	daemonBin(t)
 
 	out, err := runCLIAt(t, srv.Home.Path, broken.URL, "status")
 	require.NoError(t, err)
@@ -479,7 +512,8 @@ func TestStatus_DaemonErrors(t *testing.T) {
 
 	out, err = runCLIAt(t, srv.Home.Path, broken.URL, "doctor")
 	require.Error(t, err)
-	assert.Contains(t, out, "healthz failed: read marker: permission denied")
+	line, _ := doctorLine(t, out, "daemon")
+	assert.Contains(t, line, broken.URL+" answers, but healthz failed: read marker: permission denied")
 }
 
 // TestStatus_DaemonStarting: a daemon that is still starting is reported
@@ -502,25 +536,32 @@ func TestStatus_DaemonStarting(t *testing.T) {
 }
 
 // TestDoctor_DaemonStarting: a daemon that is starting is a warning, not a
-// failed check, and Ollama, which the daemon checks, is left for later.
+// failed check, and the embeddings, which it reports, are left for later.
 func TestDoctor_DaemonStarting(t *testing.T) {
-	srv := apitest.StartNotReady(t)
-	srv.Startup.SetMigrating(6)
-
-	out, err := runCLI(t, srv, "doctor")
+	w := upWorldFrom(t, apitest.StartNotReady)
+	w.srv.Startup.SetMigrating(6)
+	out, err := w.run(t, "doctor")
 	require.NoError(t, err, out)
-	assert.Contains(t, out, fmt.Sprintf("! daemon                 starting (pid %d): migrating the database, 0 of 6 migrations applied",
-		os.Getpid()))
-	assert.Contains(t, out, "`curio daemon logs -f`")
-	assert.Contains(t, out, "! ollama                 not checked while the daemon starts")
+	line, hint := doctorLine(t, out, "daemon")
+	assert.Equal(t, fmt.Sprintf("! %-22s starting (pid %d): migrating the database, 0 of 6 migrations applied, "+
+		"managed by launchd agent %s", "daemon", os.Getpid(), agentLabel), line)
+	assert.Equal(t, "wait for it; `curio daemon logs -f` follows it", hint)
+	line, _ = doctorLine(t, out, "embeddings")
+	assert.Equal(t, fmt.Sprintf("! %-22s not checked while the daemon starts", "embeddings"), line)
 	assert.Contains(t, out, "0 failure(s), 2 warning(s)")
 }
 
+// TestDoctor: with everything up, every check passes: the ones doctor
+// shares with curio up, then its own.
 func TestDoctor(t *testing.T) {
-	srv := apitest.Start(t)
-	out := mustRun(t, srv, "doctor")
-	assert.Contains(t, out, "daemon")
-	assert.Contains(t, out, "content dir")
+	w := upWorld(t)
+	out, err := w.run(t, "doctor")
+	require.NoError(t, err, out)
+	for _, name := range []string{"machine", "curio home", "config", "ollama", "models", "daemon", "launchd",
+		"embeddings", "fetcher", "content dir"} {
+		line, _ := doctorLine(t, out, name)
+		assert.Equal(t, "✓", markerOf(line), line)
+	}
 	assert.Contains(t, out, "all checks passed")
 	assert.NotContains(t, out, "jina", "a daemon that reports no upstreams gets no upstream check")
 }
@@ -533,23 +574,29 @@ func TestDoctorAndStatus_EmbeddingDrift(t *testing.T) {
 	monitor := apitest.NewDrift(time.Now(),
 		drift.Change{What: drift.ModelDigest, Recorded: "sha256:0a109f42", Current: "sha256:ac6da0df"},
 		drift.Change{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"})
-	srv := apitest.Start(t, func(d *api.Deps) { d.Drift = monitor })
-	srv.AddContent(t, srv.AddDocument(t, "https://example.com/a", store.DocStateFetched), "content")
+	w := upWorld(t, func(d *api.Deps) { d.Drift = monitor })
+	w.srv.AddContent(t, w.srv.AddDocument(t, "https://example.com/a", store.DocStateFetched), "content")
 
-	out := mustRun(t, srv, "doctor")
+	out, err := w.run(t, "doctor")
+	require.NoError(t, err, out)
 	assert.Contains(t, out, fmt.Sprintf("! %-22s drifted: model digest sha256:0a109f42 → sha256:ac6da0df, "+
 		"Ollama 0.30.0 → 0.34.4\n", "embeddings"))
 	assert.Contains(t, out, "  → searches compare vectors from two builds; run `curio reindex --all` to re-embed the library\n")
 	assert.Contains(t, out, "0 failure(s), 1 warning(s)")
 
-	out = mustRun(t, srv, "status")
+	out, err = w.run(t, "status")
+	require.NoError(t, err)
 	assert.Contains(t, out, "embed:   qwen3-embedding:0.6b (dim 1024)\n"+
 		"warning: embeddings drifted since the library was indexed (model digest sha256:0a109f42 → sha256:ac6da0df, "+
 		"Ollama 0.30.0 → 0.34.4); run `curio reindex --all`\n")
 
-	mustRun(t, srv, "reindex", "--all")
-	assert.NotContains(t, mustRun(t, srv, "status"), "drifted")
-	out = mustRun(t, srv, "doctor")
+	_, err = w.run(t, "reindex", "--all")
+	require.NoError(t, err)
+	out, err = w.run(t, "status")
+	require.NoError(t, err)
+	assert.NotContains(t, out, "drifted")
+	out, err = w.run(t, "doctor")
+	require.NoError(t, err, out)
 	assert.Contains(t, out, fmt.Sprintf("✓ %-22s no drift reported since the library was indexed\n", "embeddings"))
 	assert.Contains(t, out, "all checks passed")
 }
@@ -562,7 +609,9 @@ func TestReindex_HelpNamesDrift(t *testing.T) {
 
 // TestDoctor_HomeTheDaemonRefuses: a home the daemon won't serve, a legacy
 // one or one whose config.yaml asks for another embedding model, fails
-// doctor's home check offline, with the daemon's own reason and fix.
+// doctor's home check offline, with the daemon's own reason and fix, and
+// the daemon check points there and at `curio up --fresh`, not at
+// starting a daemon that would only refuse it.
 func TestDoctor_HomeTheDaemonRefuses(t *testing.T) {
 	down := httptest.NewServer(http.NotFoundHandler())
 	down.Close()
@@ -588,20 +637,63 @@ func TestDoctor_HomeTheDaemonRefuses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			tc.setup(t, home)
+			daemonBin(t)
 
 			out, err := runCLIAt(t, home, down.URL, "doctor")
 			require.Error(t, err)
-			line := ""
-			for l := range strings.SplitSeq(out, "\n") {
-				if strings.Contains(l, "curio home") {
-					line = l
-				}
-			}
-			assert.True(t, strings.HasPrefix(line, "✗ curio home"), "the home check fails:\n%s", out)
+			line, _ := doctorLine(t, out, "curio home")
+			assert.Equal(t, "✗", markerOf(line), out)
 			for _, want := range tc.want {
 				assert.Contains(t, line, want)
 			}
+			line, hint := doctorLine(t, out, "daemon")
+			assert.Equal(t, "✗", markerOf(line))
+			assert.Contains(t, line, "see the curio home and config checks")
+			assert.Contains(t, hint, "`curio up --fresh`")
+			assert.NotContains(t, out, "curio daemon start")
 		})
+	}
+}
+
+// TestDoctor_MissingHome: doctor never creates a home to look at it: a
+// missing one fails its check, pointing at curio up, and the rest still
+// print.
+func TestDoctor_MissingHome(t *testing.T) {
+	w := newWorld(t)
+	w.home = filepath.Join(t.TempDir(), "curio")
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	w.daemonURL = down.URL
+
+	out, err := w.run(t, "doctor")
+	require.Error(t, err)
+	line, hint := doctorLine(t, out, "curio home")
+	assert.Equal(t, fmt.Sprintf("✗ %-22s no curio home at %s", "curio home", w.home), line)
+	assert.Contains(t, hint, "`curio up` does it: create a curio home at "+w.home)
+	for _, name := range []string{"machine", "config", "ollama", "models", "daemon", "launchd", "embeddings", "fetcher"} {
+		doctorLine(t, out, name)
+	}
+	assert.NotContains(t, out, "content dir", "no home, no content directory to check")
+	assert.NoDirExists(t, w.home)
+}
+
+// TestDoctor_InvalidConfig: a config.yaml that doesn't load fails its
+// check, with the load error and the file to edit, and every other check
+// still prints.
+func TestDoctor_InvalidConfig(t *testing.T) {
+	w := upWorld(t)
+	path := filepath.Join(w.home, curiohome.ConfigFile)
+	require.NoError(t, os.WriteFile(path, []byte("daemon:\n  fetch_workers: 0\n"), 0o600))
+
+	out, err := w.run(t, "doctor")
+	require.Error(t, err)
+	line, hint := doctorLine(t, out, "config")
+	assert.Equal(t, "✗", markerOf(line))
+	assert.Contains(t, line, "daemon.fetch_workers must be positive")
+	assert.Contains(t, hint, "edit "+path)
+	for _, name := range []string{"machine", "curio home", "ollama", "models", "daemon", "launchd", "embeddings",
+		"fetcher", "content dir"} {
+		doctorLine(t, out, name)
 	}
 }
 
@@ -611,7 +703,7 @@ func TestDoctor_HomeTheDaemonRefuses(t *testing.T) {
 func TestDoctorAndStatus_FailingJina(t *testing.T) {
 	answered := time.Date(2026, 9, 27, 14, 2, 42, 0, time.UTC)
 	failed := answered.Add(time.Hour)
-	srv := apitest.Start(t, func(d *api.Deps) {
+	w := upWorld(t, func(d *api.Deps) {
 		d.Upstreams = func() []fetcher.UpstreamHealth {
 			return []fetcher.UpstreamHealth{{Name: "jina", Enabled: true, State: fetcher.UpstreamFailing,
 				LastSuccess: answered, LastFailure: failed, LastFailureClass: fetcher.CallChallenged,
@@ -619,17 +711,18 @@ func TestDoctorAndStatus_FailingJina(t *testing.T) {
 		}
 	})
 
-	out, err := runCLI(t, srv, "doctor")
+	out, err := w.run(t, "doctor")
 	require.Error(t, err)
 	assert.Contains(t, out, fmt.Sprintf("✗ %-22s failing: no answer since %s; last failure challenged at %s\n",
 		"jina", localTime(answered), localTime(failed)))
 	assert.Contains(t, out, "  → challenged: r.jina.ai is challenging curio; see Troubleshooting in docs/setup.md\n")
 	assert.Contains(t, out, "1 failure(s), 0 warning(s)")
 
-	out = mustRun(t, srv, "status")
+	out, err = w.run(t, "status")
+	require.NoError(t, err)
 	assert.Contains(t, out, fmt.Sprintf("embed:   qwen3-embedding:0.6b (dim %d)\n"+
 		"warning: jina is failing: no answer since %s; last failure challenged; run `curio doctor`\n",
-		srv.Embedder.Dim, localTime(answered)))
+		1024, localTime(answered)))
 	assert.Equal(t, 1, strings.Count(out, "jina"))
 }
 
