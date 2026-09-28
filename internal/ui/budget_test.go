@@ -368,17 +368,20 @@ func TestMarkdown_CostsCheckShapeDoesntSee(t *testing.T) {
 		alloc uint64
 	}{
 		// Links a page can't keep, each charged before it is resolved:
-		// resolving one copies its reference's destination.
+		// resolving one copies its reference's destination. These take
+		// 1-2 s under -race, nearly all of it goldmark's own parse, so the
+		// time bound is the generous one: the allocation bound (the old
+		// code allocated 3.9-11.2 GiB) is what catches a regression.
 		{"ftp references", references("ftp://a.example/"+strings.Repeat("a", kib16), "[x]"),
-			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+			errLinkBytes, nil, renderLimit, linkAlloc},
 		{"ftp references, a long destination", references("ftp://a.example/"+strings.Repeat("a", kib128), "[x]"),
-			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+			errLinkBytes, nil, renderLimit, linkAlloc},
 		{"javascript references", references("javascript:"+strings.Repeat("a", kib16), "[x]"),
-			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+			errLinkBytes, nil, renderLimit, linkAlloc},
 		{"javascript image references", references("javascript:"+strings.Repeat("a", kib16), "![x]"),
-			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+			errLinkBytes, nil, renderLimit, linkAlloc},
 		{"ftp image references", references("ftp://a.example/"+strings.Repeat("a", kib16), "![x]"),
-			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+			errLinkBytes, nil, renderLimit, linkAlloc},
 		// Addresses written out without link markup, which Linkify's
 		// regexps would scan the line for again from every trigger: an
 		// email address dropped for the _ after it, and URLs closed at
