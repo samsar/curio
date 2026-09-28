@@ -1,0 +1,77 @@
+{{define "content" -}}
+<h1>Overview</h1>
+<div class="grid">
+<section class="panel" aria-labelledby="counts">
+<h2 id="counts">Library</h2>
+{{with .Counts.Err}}{{template "panel-error" .}}{{else}}{{with .Counts}}
+<p class="big">{{.Documents}} documents · {{.Bookmarks}} bookmarks</p>
+<ul class="counts">
+{{range .ByState}}<li><a href="{{stateHref .Name}}"><span class="state state-{{.Name}}">{{.Name}}</span></a> <span class="n">{{.Count}}</span></li>
+{{end}}</ul>
+{{with .Jobs}}<h3>Jobs</h3>
+<ul class="counts">
+{{range .}}<li>{{.Name}} <span class="n">{{.Count}}</span></li>
+{{end}}</ul>{{end}}
+{{end}}{{end}}
+</section>
+
+<section class="panel" aria-labelledby="queue">
+<h2 id="queue">Queue</h2>
+{{with .Queue.Err}}{{template "panel-error" .}}{{else}}{{with .Queue}}
+<p>{{if .Open}}<span class="badge ok">open</span>{{else}}<span class="badge warn">closed</span> {{.Reason}}{{if not .OpensAt.IsZero}}; opens {{when .OpensAt}}{{end}}{{end}}</p>
+<dl class="facts">
+<dt>Throttle</dt><dd>{{.Throttle}}</dd>
+<dt>Schedule</dt><dd>{{with .Schedule}}{{.}}{{else}}none{{end}}</dd>
+<dt>Keep awake</dt><dd>{{if .KeepAwake}}on: {{if .KeepAwakeActive}}holding the Mac awake{{else}}not holding it now{{end}} ({{.PowerSource}} power){{else}}off{{end}}</dd>
+</dl>
+<div class="table-wrap"><table>
+<thead><tr><th>Kind</th><th>Running</th><th>Pending</th></tr></thead>
+<tbody>
+{{range .Kinds}}<tr><td>{{.Kind}}</td><td>{{.Running}} of {{.Limit}}</td><td>{{.Pending}}</td></tr>
+{{end}}</tbody>
+</table></div>
+{{end}}{{end}}
+</section>
+
+<section class="panel" aria-labelledby="progress">
+<h2 id="progress">Progress</h2>
+{{with .Progress.Err}}{{template "panel-error" .}}{{else}}{{with .Progress.Progress}}
+{{if eq .State "idle"}}<p>Nothing queued.</p>
+{{else if eq .State "closed"}}<p>{{.Outstanding}} jobs queued. The queue is closed{{with $.Queue.Reason}} ({{.}}){{end}}, so none start until it opens.</p>
+{{else if eq .State "stalled"}}<p>{{.Outstanding}} jobs queued, and none finished in the last {{duration .Window}}.</p>
+{{else}}<p>{{.Outstanding}} jobs queued: done in about <strong>{{duration .ETA}}</strong>.</p>
+<p class="meta">An estimate at the pace of the last {{duration .Window}}: {{.Finished}} jobs finished, {{printf "%.1f" .PerMinute}} a minute.</p>
+{{end}}
+{{end}}{{end}}
+</section>
+
+<section class="panel" aria-labelledby="health">
+<h2 id="health">Health</h2>
+{{with .Health.Err}}{{template "panel-error" .}}{{else}}{{with .Health}}
+<dl class="facts">
+<dt>Daemon</dt><dd>{{.Version}}</dd>
+<dt>Ollama</dt><dd>{{if .OllamaReachable}}<span class="badge ok">reachable</span>{{else}}<span class="badge bad">not reachable</span> {{.OllamaDetail}}{{end}}</dd>
+<dt>Embedding model</dt><dd>{{.EmbeddingModel}} ({{.EmbeddingDim}} dimensions)</dd>
+<dt>Writing model</dt><dd>{{.GenerationModel}}</dd>
+{{range .Upstreams}}<dt>{{.Name}}</dt><dd>{{if .Enabled}}{{.State}}; last answer {{when .LastSuccess}}{{if not .LastFailure.IsZero}}; last failure {{.LastFailureClass}} at {{when .LastFailure}}{{end}}{{if not .CooldownUntil.IsZero}}; paused until {{when .CooldownUntil}}{{end}}{{else}}off{{end}}</dd>
+{{end}}<dt>YouTube</dt><dd>{{with .YouTubeFetcher}}transcripts by {{.}}{{else}}yt-dlp not found: videos are fetched as pages{{end}}</dd>
+</dl>
+{{with .Drift}}<div class="banner warn">
+<p>The embeddings drifted since the library was indexed:</p>
+<ul>{{range .Changes}}<li>{{.What}}: {{.Recorded}} → {{.Current}}</li>{{end}}</ul>
+<p>Run <code>{{.Fix}}</code>.</p>
+</div>{{end}}
+{{end}}{{end}}
+</section>
+
+<section class="panel wide" aria-labelledby="recent">
+<h2 id="recent">Recently saved</h2>
+{{with .Recent.Err}}{{template "panel-error" .}}{{else}}{{with .Recent.Bookmarks}}
+<ul class="recent">
+{{range .}}<li>{{if .DocumentID}}<a href="{{documentHref .DocumentID}}">{{or .Title .URL}}</a>{{else}}{{or .Title .URL}}{{end}}
+<span class="meta">{{.Source}} · {{when .SavedAt}}{{with .DocumentState}} · <span class="state state-{{.}}">{{.}}</span>{{end}}</span></li>
+{{end}}</ul>
+{{else}}<p class="empty">Nothing saved yet. <code>curio import chrome</code> imports your bookmarks (or safari, firefox, html &lt;file&gt;).</p>{{end}}{{end}}
+</section>
+</div>
+{{- end}}
