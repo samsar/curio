@@ -184,6 +184,23 @@ func TestEnsureRunning_LaunchedDaemonFails(t *testing.T) {
 	}
 }
 
+// TestEnsureRunning_LaunchedDaemonSilent: a launched daemon that never
+// answers is a failed start after StartTimeout, not a wait on some
+// other daemon holding the lock.
+func TestEnsureRunning_LaunchedDaemonSilent(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	newAgent(t, c, modeSilent, false)
+	c.StartTimeout = time.Second
+
+	start := time.Now()
+	err := c.EnsureRunning(context.Background())
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), c.StartTimeout+time.Second, "StartTimeout, not the holder's longer budget")
+	assert.Contains(t, err.Error(), "curio-daemon failed to start: no answer at "+c.BaseURL+" within 1s")
+	assert.Contains(t, err.Error(), "fake daemon: bound, not answering")
+	assert.NotContains(t, err.Error(), "holding the lock")
+}
+
 // TestEnsureRunning_LaunchdErr: a launched daemon's stderr is launchd.err,
 // which a failed start quotes when the launch wrote it, and not when it
 // is left over from before.

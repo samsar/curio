@@ -167,6 +167,9 @@ func describeAgent(st daemonctl.Status) string {
 		return fmt.Sprintf("launchd: agent %s is installed but not loaded (`curio daemon install` loads it)", svc.Label)
 	case st.Managed():
 		return fmt.Sprintf("launchd: manages this daemon (agent %s, runs %s)", svc.Label, svc.Program)
+	case svc.Running() && st.State != daemonctl.Running:
+		return fmt.Sprintf("launchd: agent %s runs pid %d, which doesn't hold the home's lock (yet): "+
+			"it is starting, or exiting", svc.Label, svc.PID)
 	case st.State == daemonctl.Running:
 		return fmt.Sprintf("launchd: agent %s is loaded, but the running daemon (pid %d) was started outside launchd; "+
 			"`curio daemon stop` hands it over at the next command", svc.Label, st.PID)

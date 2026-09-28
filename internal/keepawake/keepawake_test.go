@@ -542,6 +542,12 @@ func TestCaffeinate(t *testing.T) {
 	assert.False(t, alive(h.PID()), "reaped")
 }
 
+func TestCaffeinate_Missing(t *testing.T) {
+	_, err := Caffeinate{Bin: filepath.Join(t.TempDir(), "caffeinate"), PID: os.Getpid()}.Hold(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "caffeinate")
+}
+
 // TestKeeper_RealRunners: the keeper over the fake pmset and caffeinate
 // holds with exactly one caffeinate following the daemon's pid, and its
 // stop leaves no caffeinate behind.

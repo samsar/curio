@@ -249,6 +249,10 @@ func TestDescribeAgent(t *testing.T) {
 			Service: agent(func(s *service.Status) { s.State = "not running" })},
 			"launchd: agent " + agentLabel + " is loaded, but the running daemon (pid 42) was started outside launchd; " +
 				"`curio daemon stop` hands it over at the next command"},
+		{"its daemon without the lock", daemonctl.Status{
+			Service: agent(func(s *service.Status) { s.PID, s.State = 42, "running" })},
+			"launchd: agent " + agentLabel + " runs pid 42, which doesn't hold the home's lock (yet): " +
+				"it is starting, or exiting"},
 		{"exited non-zero", daemonctl.Status{Service: agent(func(s *service.Status) { s.LastExit = "exit code 1" })},
 			"launchd: agent " + agentLabel + " is loaded, daemon not running: it last exited with exit code 1, " +
 				"and launchd restarts it (`curio daemon logs` says why it exited)"},
