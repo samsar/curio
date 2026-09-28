@@ -277,6 +277,32 @@ func TestCheck_MarkerWriteFailureIsRetried(t *testing.T) {
 	assert.Equal(t, digestA, marker(t, home).EmbeddingModelDigest)
 }
 
+// TestCheck_UnreadableMarkerIsRetried: a marker that can't be parsed is
+// logged at ERROR, and the check neither reports nor writes anything; once
+// it is repaired, the next check records the fingerprint as usual.
+func TestCheck_UnreadableMarkerIsRetried(t *testing.T) {
+	m, home, src, log := newMonitor(t, Fingerprint{})
+	good, err := os.ReadFile(home.MarkerPath())
+	require.NoError(t, err)
+	const garbage = "{not json"
+	require.NoError(t, os.WriteFile(home.MarkerPath(), []byte(garbage), 0o600))
+	src.set("0.34.4", digestA, nil)
+	before := m.Report()
+
+	m.Check(context.Background())
+	assert.Len(t, log.at(slog.LevelError), 1)
+	assert.Equal(t, before, m.Report(), "the report is unchanged")
+	written, err := os.ReadFile(home.MarkerPath())
+	require.NoError(t, err)
+	assert.Equal(t, garbage, string(written), "nothing written")
+
+	require.NoError(t, os.WriteFile(home.MarkerPath(), good, 0o600))
+	m.Check(context.Background())
+	assert.Equal(t, digestA, marker(t, home).EmbeddingModelDigest)
+	assert.Len(t, log.at(slog.LevelError), 1, "no new error")
+	assert.False(t, m.Report().CheckedAt.IsZero())
+}
+
 // TestRebaseline_RecordsTheCurrentBuild: a rebaseline clears the drift and
 // the recorded fingerprint, and the check it asks for records the build
 // serving now.
