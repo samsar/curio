@@ -6,6 +6,12 @@
 // lock.go); identity comes from /v1/healthz, which reports the answering
 // daemon's PID and home. A PID is only ever signalled when the lock vouches
 // for it.
+//
+// When the service manager has the home's agent loaded (a launchd agent on
+// macOS, see internal/service), the daemon is started, stopped and
+// restarted through it; otherwise it is a child this process spawns. The
+// lock stays the arbiter either way: a daemon launchd starts next to one a
+// client spawned simply loses the lock and exits.
 package daemonctl
 
 import (
@@ -13,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -22,6 +29,7 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/service"
 )
 
 const (
@@ -38,7 +46,9 @@ const (
 	// from hanging on a wedged daemon; the daemon carries on either way.
 	defaultReadyTimeout = 30 * time.Minute
 	// defaultStopTimeout exceeds the daemon's own shutdown budget (20s, see
-	// cmd/curio-daemon), so a healthy daemon always finishes first.
+	// cmd/curio-daemon) and the time launchd gives it to exit before a
+	// SIGKILL (service.ExitTimeout, 25s), so a healthy daemon always
+	// finishes first.
 	defaultStopTimeout = 30 * time.Second
 
 	// pollInterval paces probes while nothing answers or the daemon is
@@ -91,6 +101,18 @@ type Status struct {
 	// nothing did.
 	Health  *client.Health
 	Startup *client.Startup
+	// Service is what the service manager reports about the daemon's
+	// agent, nil when the controller has no manager or couldn't read it;
+	// ServiceErr says why it couldn't. Neither changes State, which is the
+	// lock's to say.
+	Service    *service.Status
+	ServiceErr error
+}
+
+// Managed reports whether the service manager runs the daemon holding the
+// lock.
+func (s Status) Managed() bool {
+	return s.State == Running && s.PID != 0 && s.Service != nil && s.Service.Running() && s.Service.PID == s.PID
 }
 
 // AnsweredBy is the pid and home of whatever answered at BaseURL, serving
@@ -109,10 +131,13 @@ type Controller struct {
 	Home      *curiohome.Home
 	DaemonBin string // absolute path to the curio-daemon executable
 	BaseURL   string // where the daemon serves, for healthz probing
+	// Service is the service manager that runs the home's daemon when it
+	// has the daemon's agent loaded; nil spawns the daemon always.
+	Service service.Manager
 	// StartTimeout is how long a starting daemon may go without an answer
 	// from our daemon, counted from the start of a wait and again from each
 	// answer in which it reports it is starting. A daemon this call didn't
-	// spawn gets max(StartTimeout, StopTimeout): it may be draining after a
+	// start gets max(StartTimeout, StopTimeout): it may be draining after a
 	// stop rather than starting.
 	StartTimeout time.Duration
 	// ReadyTimeout is how long our daemon may keep reporting it is starting
@@ -138,7 +163,8 @@ func New(home *curiohome.Home, daemonBin, baseURL string) *Controller {
 	}
 }
 
-// Status reads the lock for liveness and healthz for identity.
+// Status reads the lock for liveness, healthz for identity, and the service
+// manager, if any, for its agent.
 func (c *Controller) Status(ctx context.Context) (Status, error) {
 	held, pid, err := probeLock(c.Home.PIDFile())
 	if err != nil {
@@ -146,6 +172,13 @@ func (c *Controller) Status(ctx context.Context) (Status, error) {
 	}
 	a := c.probe(ctx)
 	st := Status{PID: pid, Health: a.health, Startup: a.startup}
+	if c.Service != nil {
+		if svc, err := c.Service.Status(ctx); err != nil {
+			st.ServiceErr = err
+		} else {
+			st.Service = &svc
+		}
+	}
 	switch {
 	case held:
 		st.State = Running
@@ -160,10 +193,12 @@ func (c *Controller) Status(ctx context.Context) (Status, error) {
 }
 
 // EnsureRunning returns once a daemon for this home serves the full API at
-// BaseURL, spawning one if none is running. It waits for as long as the
-// daemon is visibly starting, a migration included, up to ReadyTimeout; it
-// fails at once if the daemon exits, and after StartTimeout if it stops
-// answering. Concurrent callers spawn one daemon between them.
+// BaseURL, starting one if none is running: through the service manager
+// when it has the daemon's agent loaded, as a child of this process
+// otherwise. It waits for as long as the daemon is visibly starting, a
+// migration included, up to ReadyTimeout; it fails at once if the daemon
+// exits, and after StartTimeout if it stops answering. Concurrent callers
+// start one daemon between them.
 func (c *Controller) EnsureRunning(ctx context.Context) error {
 	w := &waiter{c: c, goal: untilReady}
 	return w.ensure(ctx)
@@ -181,16 +216,22 @@ func (c *Controller) EnsureStarted(ctx context.Context) (*client.Startup, error)
 	return w.started, err
 }
 
-// Stop sends SIGTERM to the daemon holding this home's lock and waits for it
-// to release the lock. stopped is true when a daemon for this home was
-// running when Stop began and is gone when it returns. A home with no
-// daemon, only a stale PID file, or another home's daemon on the port is
-// (false, nil): there was nothing here to stop.
+// Stop sends SIGTERM to the daemon holding this home's lock, through the
+// service manager when it runs that daemon, and waits for it to release the
+// lock. stopped is true when a daemon for this home was running when Stop
+// began and is gone when it returns. A home with no daemon, only a stale
+// PID file, or another home's daemon on the port is (false, nil): there was
+// nothing here to stop.
 func (c *Controller) Stop(ctx context.Context) (stopped bool, err error) {
 	st, err := c.Status(ctx)
 	if err != nil {
 		return false, err
 	}
+	return c.stopRunning(ctx, st)
+}
+
+// stopRunning stops the daemon st found running, as Stop does.
+func (c *Controller) stopRunning(ctx context.Context, st Status) (stopped bool, err error) {
 	switch st.State {
 	case NotRunning, Stale:
 		return false, nil
@@ -218,12 +259,23 @@ func (c *Controller) Stop(ctx context.Context) (stopped bool, err error) {
 // holds it, pid has exited or is exiting (its number may even belong to
 // another process by now), so it is not signalled, and waitReleased's rule
 // decides when it is gone. ESRCH from the signal means it already is.
+//
+// A daemon the service manager runs is stopped through it (`launchctl kill
+// SIGTERM`), so launchd knows the stop was asked for; one it doesn't run,
+// started by a client or by hand next to a loaded agent, is signalled
+// directly.
 func (c *Controller) signalHolder(ctx context.Context, pid int) error {
 	held, holder, err := probeLock(c.Home.PIDFile())
 	if err != nil {
 		return err
 	}
 	if !held || holder != pid {
+		return c.waitReleased(ctx, pid)
+	}
+	if c.manages(ctx, pid) {
+		if err := c.stopManaged(ctx, pid); err != nil {
+			return err
+		}
 		return c.waitReleased(ctx, pid)
 	}
 	err = syscall.Kill(pid, syscall.SIGTERM)
@@ -234,6 +286,31 @@ func (c *Controller) signalHolder(ctx context.Context, pid int) error {
 		return fmt.Errorf("signal daemon (pid %d): %w", pid, err)
 	}
 	return c.waitReleased(ctx, pid)
+}
+
+// manages reports whether the service manager runs pid. A manager that
+// can't say doesn't: the lock vouches for pid, and a direct SIGTERM stops
+// a daemon launchd runs just as well, which exits 0 and so stays stopped.
+func (c *Controller) manages(ctx context.Context, pid int) bool {
+	if c.Service == nil {
+		return false
+	}
+	st, err := c.Service.Status(ctx)
+	return err == nil && st.Running() && st.PID == pid
+}
+
+// stopManaged asks the service manager to stop its daemon, pid. A request
+// that failed while pid stopped anyway (it was exiting already) is no
+// failure.
+func (c *Controller) stopManaged(ctx context.Context, pid int) error {
+	stopErr := c.Service.Stop(ctx)
+	if stopErr == nil {
+		return nil
+	}
+	if st, err := c.Service.Status(ctx); err == nil && (!st.Running() || st.PID != pid) {
+		return nil
+	}
+	return stopErr
 }
 
 // SameHome reports whether two CURIO_HOME paths name the same directory,
@@ -306,7 +383,7 @@ type waiter struct {
 }
 
 // ensure finds the daemon for this home, waits for one that holds the
-// home's lock, and spawns one when none does.
+// home's lock, and starts one when none does.
 func (w *waiter) ensure(ctx context.Context) error {
 	c := w.c
 	if done, err := c.served(c.probe(ctx)); done || err != nil {
@@ -326,7 +403,7 @@ func (w *waiter) ensure(ctx context.Context) error {
 		// It went away instead (a `curio daemon stop` draining, say): start
 		// our own.
 	}
-	return w.spawn(ctx)
+	return w.start(ctx)
 }
 
 // served reports whether a settles the ensure without a wait. A daemon
@@ -344,12 +421,12 @@ func (c *Controller) served(a answer) (bool, error) {
 	return a.health != nil, nil
 }
 
-// spawn starts a daemon and waits for it. daemon.start.lock serializes
-// spawning, and is held only until the new daemon holds daemon.pid: from
+// start starts a daemon and waits for it. daemon.start.lock serializes
+// starting, and is held only until the new daemon holds daemon.pid: from
 // then on the daemon lock itself tells every other starter to wait for it
 // instead, and holding the start lock through a long migration would park
 // them where they can't report anything.
-func (w *waiter) spawn(ctx context.Context) error {
+func (w *waiter) start(ctx context.Context) error {
 	c := w.c
 	startLock, err := lockStart(ctx, c.Home.StartLockFile())
 	if err != nil {
@@ -376,7 +453,7 @@ func (w *waiter) spawn(ctx context.Context) error {
 		return err
 	}
 
-	ch, err := c.startChild()
+	ch, err := c.startDaemon(ctx)
 	if err != nil {
 		startLock.Close()
 		return err
@@ -386,13 +463,61 @@ func (w *waiter) spawn(ctx context.Context) error {
 	return w.wait(ctx, ch)
 }
 
-// child is a daemon this call spawned.
+// startDaemon starts a daemon for this home: the service manager's, when
+// it has the daemon's agent loaded, and a child of this process otherwise.
+// Next to a loaded agent a child would only race launchd's daemon for the
+// lock, so a manager that can't say whether the agent is loaded fails the
+// start. An agent installed but not loaded (disabled, or with no GUI
+// session to run in, over ssh) is left alone.
+func (c *Controller) startDaemon(ctx context.Context) (*child, error) {
+	if c.Service == nil {
+		return c.startChild()
+	}
+	st, err := c.Service.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("check for curio-daemon's launchd agent before starting the daemon: %w", err)
+	}
+	if !st.Loaded {
+		return c.startChild()
+	}
+	since := time.Now()
+	pid, err := c.Service.Start(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &child{pid: pid, launched: true, since: since}, nil
+}
+
+// child is a daemon this call started: spawned as a child of this process,
+// or launched by the service manager.
 type child struct {
-	pid    int
-	exited <-chan error // delivers cmd.Wait's result once
+	pid int
+	// exited delivers a spawned child's cmd.Wait result once; nil for a
+	// launched one, whose end the service manager reports.
+	exited   <-chan error
+	launched bool
+	since    time.Time // when the launch began
+	// stale is, for a restart, the PID of the daemon being replaced: its
+	// answers and its hold on the lock are never taken for this one's.
+	stale int
+	// locked is set once the daemon has held daemon.pid.
+	locked bool
 	// startLock is held until the child holds daemon.pid, exits, or the
 	// wait for it ends.
 	startLock *os.File
+}
+
+// holds reports whether pid, the lock's holder, is ch. A launch that
+// didn't say which process it started takes the first holder that isn't
+// the daemon it replaces.
+func (ch *child) holds(pid int) bool {
+	if pid == 0 || pid == ch.stale {
+		return false
+	}
+	if ch.launched && ch.pid == 0 {
+		ch.pid = pid
+	}
+	return pid == ch.pid
 }
 
 func (ch *child) releaseStartLock() {
@@ -402,8 +527,8 @@ func (ch *child) releaseStartLock() {
 	}
 }
 
-// startChild runs curio-daemon for this home, detached, logging to
-// daemon.log.
+// startChild runs curio-daemon for this home, detached, with both its
+// stdout (its log) and its stderr in daemon.log.
 func (c *Controller) startChild() (*child, error) {
 	if err := os.MkdirAll(c.Home.LogsDir(), 0o700); err != nil {
 		return nil, fmt.Errorf("create logs dir: %w", err)
@@ -438,7 +563,7 @@ func (c *Controller) startChild() (*child, error) {
 }
 
 // wait polls healthz until our daemon is ready, or, for untilStarted,
-// until it answers at all. Our daemon is ch, the child this call spawned,
+// until it answers at all. Our daemon is ch, the child this call started,
 // or whichever daemon holds the lock; ch is nil when there is no child to
 // watch. The wait fails when the child exits, when the lock holder
 // releases the lock (errHolderExited), and when our daemon runs out of
@@ -474,7 +599,7 @@ func (w *waiter) wait(ctx context.Context, ch *child) error {
 		case <-next.C:
 		}
 
-		holder, err := w.lockHolder(ch, exited != nil)
+		holder, err := w.lockHolder(ctx, ch, exited != nil)
 		if err != nil {
 			return err
 		}
@@ -490,7 +615,9 @@ func (w *waiter) wait(ctx context.Context, ch *child) error {
 			}
 			b.heard(starting)
 		}
-		if err := b.check(c, exited == nil); err != nil {
+		// No child alive to report on: waiting on whoever holds the lock.
+		holderOnly := ch == nil || (!ch.launched && exited == nil)
+		if err := b.check(c, ch, holderOnly); err != nil {
 			return err
 		}
 		next.Reset(b.untilNextProbe())
@@ -498,24 +625,58 @@ func (w *waiter) wait(ctx context.Context, ch *child) error {
 }
 
 // lockHolder returns the PID holding the daemon lock, 0 if none. A child
-// that holds it no longer needs the start lock. Once no child is alive to
-// report its own exit (childAlive false), the lock is how the wait learns
-// that our daemon is gone.
-func (w *waiter) lockHolder(ch *child, childAlive bool) (int, error) {
+// that holds it no longer needs the start lock. Once no spawned child is
+// alive to report its own exit (childAlive false), the lock is how the
+// wait learns that our daemon is gone. A launched daemon that doesn't hold
+// it is the service manager's to account for (launchedUnlocked); the one
+// a restart replaces, still holding it on its way out, isn't ours.
+func (w *waiter) lockHolder(ctx context.Context, ch *child, childAlive bool) (int, error) {
 	held, holder, err := probeLock(w.c.Home.PIDFile())
 	switch {
 	case err != nil:
 		return 0, err
-	case held && ch != nil && holder == ch.pid:
+	case held && ch != nil && ch.holds(holder):
+		ch.locked = true
 		ch.releaseStartLock()
-	case !held && !childAlive && ch == nil:
+	case held && ch != nil && holder == ch.stale:
+		return 0, nil
+	case held:
+	case ch != nil && ch.launched:
+		return 0, w.c.launchedUnlocked(ctx, ch)
+	case !childAlive && ch == nil:
 		return 0, errHolderExited
-	case !held && !childAlive:
+	case !childAlive:
 		return 0, w.c.startFailed(errHolderExited)
-	case !held:
+	default:
 		return 0, nil // the file names a daemon that is gone
 	}
 	return holder, nil
+}
+
+// launchedUnlocked accounts for a launched daemon that doesn't hold the
+// lock: not yet, while the service manager runs it (or still runs the
+// daemon a restart replaces, on its way out), or no longer, which before
+// it served is a failed start. The manager is asked only here, so a daemon
+// that holds the lock through a long migration costs no subprocess per
+// probe.
+func (c *Controller) launchedUnlocked(ctx context.Context, ch *child) error {
+	st, err := c.Service.Status(ctx)
+	if err != nil {
+		return fmt.Errorf("check on the curio-daemon launchd started: %w", err)
+	}
+	switch {
+	case ch.locked:
+	case st.Running() && st.PID == ch.stale:
+		return nil
+	case st.Running() && (ch.pid == 0 || st.PID == ch.pid):
+		ch.pid = st.PID
+		return nil
+	}
+	cause := errors.New("exited before it began serving")
+	if st.LastExit != "" {
+		cause = fmt.Errorf("exited before it began serving (%s)", st.LastExit)
+	}
+	return c.launchFailed(cause, ch.since)
 }
 
 // budget is how long a wait may go on. Our daemon may go for silence
@@ -549,9 +710,10 @@ func (b *budget) deadline() time.Time {
 
 // check returns the wait's error once the deadline has passed: the daemon
 // still starting if it was the ready ceiling that ran out on a daemon
-// reporting progress, and the daemon gone silent otherwise. holder says
-// whether that daemon is one this call didn't spawn.
-func (b *budget) check(c *Controller, holder bool) error {
+// reporting progress, and the daemon gone silent otherwise. ch is the
+// child the wait watches, if any, and holder says whether the daemon that
+// went silent is one this call didn't start.
+func (b *budget) check(c *Controller, ch *child, holder bool) error {
 	deadline := b.deadline()
 	switch {
 	case time.Now().Before(deadline):
@@ -559,7 +721,7 @@ func (b *budget) check(c *Controller, holder bool) error {
 	case b.last != nil && deadline.Equal(b.readyBy):
 		return c.stillStarting(*b.last)
 	default:
-		return c.silent(deadline.Sub(b.lastLife), holder)
+		return c.silent(deadline.Sub(b.lastLife), ch, holder)
 	}
 }
 
@@ -584,7 +746,8 @@ func (w *waiter) ours(a answer, ch *child, holder int) (ready bool, starting *cl
 	if home == "" || !SameHome(home, w.c.Home.Path) {
 		return false, nil
 	}
-	if (ch == nil || pid != ch.pid) && pid != holder {
+	isChild := ch != nil && pid != 0 && pid == ch.pid
+	if !isChild && (pid != holder || pid == 0) {
 		return false, nil
 	}
 	return a.health != nil, a.startup
@@ -619,15 +782,19 @@ func (c *Controller) childExited(waitErr error) error {
 }
 
 // silent is the error for our daemon going quiet for budget. holder says
-// whether that daemon is one this call didn't spawn, whose startup isn't
-// ours to report on.
-func (c *Controller) silent(budget time.Duration, holder bool) error {
+// whether that daemon is one this call didn't start, whose startup isn't
+// ours to report on; otherwise it is ch.
+func (c *Controller) silent(budget time.Duration, ch *child, holder bool) error {
 	cause := fmt.Errorf("no answer at %s within %s", c.BaseURL, budget)
-	if holder {
+	switch {
+	case holder:
 		return fmt.Errorf("waiting for the curio-daemon holding the lock for %s "+
 			"(starting up or shutting down): %w (`curio daemon status` shows its pid)", c.Home.Path, cause)
+	case ch.launched:
+		return c.launchFailed(cause, ch.since)
+	default:
+		return c.startFailed(cause)
 	}
-	return c.startFailed(cause)
 }
 
 // stillStarting is the error for our daemon still reporting s past
@@ -698,6 +865,31 @@ func (c *Controller) startFailed(cause error) error {
 		return fmt.Errorf("curio-daemon failed to start: %w (log %s unreadable: %w)", cause, logPath, err)
 	}
 	return fmt.Errorf("curio-daemon failed to start: %w\nlast lines of %s:\n%s", cause, logPath, tail)
+}
+
+// launchFailed is startFailed for a daemon the service manager launched at
+// since. launchd sends the daemon's stderr to launchd.err, where a daemon
+// that dies before its log is up (a panic, a fatal runtime error) explains
+// itself, so its tail is quoted too when it was written since the launch.
+// The launch time is taken to the second, which is all some filesystems
+// keep of a modification time.
+func (c *Controller) launchFailed(cause error, since time.Time) error {
+	failed := c.startFailed(cause)
+	path := c.Home.LaunchdErrPath()
+	info, err := os.Stat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return failed
+	case err != nil:
+		return fmt.Errorf("%w\n(%s unreadable: %w)", failed, path, err)
+	case info.Size() == 0 || info.ModTime().Before(since.Truncate(time.Second)):
+		return failed
+	}
+	tail, err := logTail(path, logTailLines)
+	if err != nil {
+		return fmt.Errorf("%w\n(%s unreadable: %w)", failed, path, err)
+	}
+	return fmt.Errorf("%w\nlast lines of %s:\n%s", failed, path, tail)
 }
 
 // logTail returns the last n lines of the file at path, reading at most the

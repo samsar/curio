@@ -34,9 +34,10 @@ type Fake struct {
 	// time the fake starts its daemon. The fake starts it in a session of
 	// its own. Without it, the fake runs nothing and Start fails.
 	Launch func() *exec.Cmd
-	// OnInstall, when set, runs as Install begins; its error fails the
-	// Install before anything changes.
-	OnInstall func(service.Spec) error
+	// OnInstall and OnUninstall, when set, run as Install and Uninstall
+	// begin; an error fails the call before anything changes.
+	OnInstall   func(service.Spec) error
+	OnUninstall func() error
 	// IgnoreStop makes Stop succeed without signalling anything, as a
 	// launchd that took the request and never acted on it would.
 	IgnoreStop bool
@@ -53,11 +54,15 @@ type Fake struct {
 
 var _ service.Manager = (*Fake)(nil)
 
-// process is a daemon the fake started.
+// process is a daemon the fake started. Its fields change under the
+// fake's lock.
 type process struct {
 	cmd  *exec.Cmd
 	done chan struct{} // closed once it has exited and been reaped
 	exit string        // how it ended; set before done closes
+	// replaced: start the next daemon as this one exits, in the same
+	// step, so no Status sees the service between the two.
+	replaced bool
 }
 
 func (p *process) running() bool {
@@ -194,10 +199,20 @@ func (f *Fake) Install(_ context.Context, spec service.Spec) (bool, error) {
 // Uninstall implements service.Manager.
 func (f *Fake) Uninstall(context.Context) (bool, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err := f.record("Uninstall"); err != nil {
+	err := f.record("Uninstall")
+	hook := f.OnUninstall
+	f.mu.Unlock()
+	if err != nil {
 		return false, err
 	}
+	if hook != nil {
+		if err := hook(); err != nil {
+			return false, err
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	removed := f.st.Installed || f.st.Loaded
 	if f.st.Loaded {
 		f.signal(syscall.SIGTERM)
@@ -251,24 +266,15 @@ func (f *Fake) Restart(context.Context) (int, error) {
 }
 
 // replace starts the daemon, or, while one runs, sends it SIGTERM and
-// starts the next once it has exited, returning the running one's PID.
-// The caller holds f.mu.
+// starts the next as it exits, returning the running one's PID. The caller
+// holds f.mu.
 func (f *Fake) replace() (int, error) {
 	old := f.proc
 	if old == nil || !old.running() {
 		return f.launch()
 	}
+	old.replaced = true
 	f.signal(syscall.SIGTERM)
-	f.procs.Go(func() {
-		<-old.done
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		if f.st.Loaded && f.proc == old {
-			// A failed launch leaves the service loaded and not running,
-			// which Status reports as launchd would.
-			_, _ = f.launch()
-		}
-	})
 	return old.cmd.Process.Pid, nil
 }
 
@@ -286,8 +292,16 @@ func (f *Fake) launch() (int, error) {
 	f.proc = p
 	f.all = append(f.all, p)
 	f.procs.Go(func() {
-		p.exit = exitText(cmd.Wait())
+		exit := exitText(cmd.Wait())
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		p.exit = exit
 		close(p.done)
+		if p.replaced && f.st.Loaded && f.proc == p {
+			// A replacement that fails to start leaves the service loaded
+			// and not running, which Status reports as launchd would.
+			_, _ = f.launch()
+		}
 	})
 	return cmd.Process.Pid, nil
 }
