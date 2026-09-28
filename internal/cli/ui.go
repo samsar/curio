@@ -20,15 +20,20 @@ func newUICmd(env *daemonctl.Env, openURL func(context.Context, string) error) *
 		Short: "Open the dashboard in your browser",
 		Long: `Open curio's dashboard in your browser: the library's counts, the queue and
 its progress, search, the documents with their text, and your interests.
-It starts the daemon first if it isn't running. The dashboard is served by
-the daemon on its own address, for this Mac only; config.yaml's daemon.ui
-turns it off. --print prints its address instead: open "$(curio ui --print)".`,
+It starts the daemon first if it isn't running, and opens the dashboard as
+soon as the daemon answers: while it is still starting (a migration, say),
+the page shows its progress and turns into the dashboard once it is ready.
+The dashboard is served by the daemon on its own address, for this Mac
+only; config.yaml's daemon.ui turns it off. --print prints its address
+instead: open "$(curio ui --print)".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !env.Config.Daemon.UI {
 				return fmt.Errorf("the dashboard is off: daemon.ui is false in %s", env.Home.ConfigPath())
 			}
-			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
+			// Not EnsureRunning: a starting daemon serves the page that
+			// shows its progress, where a migration can take minutes.
+			if _, err := env.Controller.EnsureStarted(cmd.Context()); err != nil {
 				return err
 			}
 			url := dashboardURL(env.Controller.BaseURL)

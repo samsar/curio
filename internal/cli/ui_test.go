@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/api/apitest"
+	"github.com/samsar/curio/internal/daemonctl"
 )
 
 // recordingOpener records the URLs curio ui opens, failing with err.
@@ -59,6 +60,22 @@ func TestUI_Opens(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), srv.URL+"/ui/", "the URL, to open by hand")
 	assert.Contains(t, err.Error(), "no browser")
+}
+
+// TestUI_WhileStarting: a daemon still starting serves the page that shows
+// its progress, so curio ui opens it rather than waiting for the daemon to
+// be ready.
+func TestUI_WhileStarting(t *testing.T) {
+	starting := apitest.StartNotReady(t)
+	// The daemon's lock, which a starting daemon holds, and whose PID its
+	// healthz names: this process's.
+	lock, err := daemonctl.AcquireLock(starting.Home)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, lock.Release()) })
+	opener := &recordingOpener{}
+	_, err = runUI(t, starting, starting.URL, opener)
+	require.NoError(t, err)
+	assert.Equal(t, []string{starting.URL + "/ui/"}, opener.urls)
 }
 
 // TestUI_Off: with daemon.ui false, curio ui says so, naming the setting
