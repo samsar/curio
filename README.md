@@ -1,181 +1,88 @@
 # Curio
 
-A personal context layer built from your bookmarks. Hybrid BM25 + vector search
-over the full text of every page you've ever bookmarked, with an MCP server so
-your LLM tools can pull that context automatically.
+**Search everything you've ever bookmarked, and let your AI tools use it too.**
 
-The problem it solves: your accumulated curiosity is invisible to the tools you
-think with. When you ask an LLM a question, it has no idea what you've been
-reading. Curio makes that context queryable.
+Your accumulated curiosity is invisible to the tools you think with. You save pages every day and forget most of them. Curio reads every page you've bookmarked, keeps a copy on your Mac, and makes all of it searchable. Further, through its MCP server, it lets your agent look through your library so your questions get answers grounded in what you've actually read.
 
-## Quickstart
+Everything runs on your Mac: your library, the search, and the AI models.
+
+## What you can do with it
+
+- **Find that article again.** `curio search "rolling out feature flags"` searches the full text of every saved page, by meaning, not just keywords.
+- **Ask your agent about your reading.** Connect Curio to your favorite agent then ask things like *"what have I saved about pricing experiments?"*
+- **See what you're into.** `curio interests` groups your library into topics and names them.
+- **Find related reads.** `curio related <id>` shows other pages about the same thing.
+- **Keep old links useful.** Pages are saved when Curio fetches them, so you still have the text of bookmarks that have since gone dead.
+
+## Get started
+
+You need a Mac with Apple silicon (M1 or later), macOS 14 or newer, and [Homebrew](https://brew.sh). 16 GB of memory or more is best, though 8 GB works. You'll also need about 5–25 GB of free disk, depending on your Mac.
 
 ```sh
-brew install samsar/tap/curio          # or `make build` from a clone
+brew install samsar/tap/curio
 curio up
 ```
 
-`curio up` checks the Mac, installs or starts Ollama (with Homebrew, or the
-app from ollama.com), picks and pulls the models for your Mac's memory,
-creates `~/.curio` with its `config.yaml`, and installs a launchd agent that
-keeps the daemon running. Then it offers to import your bookmarks, from a
-Chrome profile, Firefox, Safari or an exported HTML file, each with how
-many are new, says how long fetching and indexing them will take, asks
-whether to work through them now, gently or only overnight, and says when
-to check back. It shows the plan first and asks before each step; every
-command it runs is shown in full, and it never uses sudo. Run it again any
-time: with everything in place it says `Nothing to do: curio is up.` Then:
+That's it. `curio up` walks you through the rest and asks before each step:
+
+1. It checks that your Mac can run AI models locally.
+2. It installs [Ollama](https://ollama.com), the app that runs those models, if you don't have it yet.
+3. It picks the right models for your Mac, tells you why, and downloads them.
+4. It sets Curio up to keep running in the background, even after a restart.
+5. It asks where to import your bookmarks from: Chrome, Safari, Firefox, or an exported file. It shows how many are new and how long they'll take.
+
+A few thousand bookmarks takes a couple of hours to fetch and index. Curio tells you when to check back, and you can search while it works.
+
+Run `curio up` again whenever you like. If everything's fine, it says **"Nothing to do: curio is up."**
+
+## Everyday commands
 
 ```sh
-curio status --follow                # watch the import until it is done
-curio search "feature flag rollout"
+curio search "what you remember about it"   # search your library
+curio status --follow                       # watch an import until it's done
+curio interests                             # the topics in your library
+curio add https://example.com/article       # save one page
+curio import safari                         # import more bookmarks later (also: chrome, firefox, html <file>)
 ```
 
-`curio up --import html:~/Downloads/bookmarks.html` (or `chrome`,
-`chrome:<profile>`, `safari`, `firefox`) picks the source up front, and is
-how a script imports (`--yes`). Export your bookmarks from any browser as
-HTML (Chrome → Bookmark Manager → ⋮ → Export bookmarks); `curio import`
-imports more later.
-
-The writing model is yours to change (`generation.model`); the embedding
-model is fixed when a home is created (`curio up --fresh` starts a new one).
-See [docs/setup.md](./docs/setup.md), which also covers setting up by hand.
-
-Time budget: with the default pools (16 fetch workers, 4 index workers; set
-`daemon.fetch_workers` / `daemon.index_workers` in `~/.curio/config.yaml`) and
-the native fetcher, expect roughly 1–2 seconds per bookmark — so 1000
-bookmarks ≈ 4–8 minutes. The older single `daemon.workers` setting is still
-read, split 75/25 between the two pools, but can't be combined with the new
-ones.
-
-## More commands
+To keep your Mac comfortable during a big import:
 
 ```sh
-curio up                            # set up, or check the setup; --dry-run shows the plan only
-curio doctor                        # what curio up checks, plus the fetcher and the Jina fallback
-curio status                        # daemon health + corpus counts + queue depth and state; --follow watches the queue drain
-
-# Pacing the work (stored, so it holds across restarts; running jobs finish)
-curio pause                         # start no new jobs until resumed
-curio resume                        # start them again (a schedule still applies)
-curio throttle gentle|normal        # gentle: fewer at once, to keep the machine cool
-curio schedule HH:MM-HH:MM|off      # start jobs only in a daily window, e.g. 22:00-07:00
-curio keep-awake on|off             # keep the Mac from idle sleep while jobs are queued, on AC power
-
-# Inspecting the corpus
-curio docs                          # successfully-fetched documents (the happy path)
-curio docs --failed                 # docs whose fetch or index gave up
-curio docs --all                    # every state
-curio docs --all --limit 100        # a page at a time; the last line is the next page's command
-curio docs --all --cursor <token>   # that next page (curio jobs pages the same way)
-curio docs show <doc-id>            # full metadata + on-disk path
-curio docs show <doc-id> --content  # also streams the extracted markdown
-
-# Inspecting work history
-curio jobs                          # done jobs (default; the audit view)
-curio jobs --failed                 # failures with full error + retry count
-curio jobs --all                    # every status
-curio jobs --kind index             # filter by job kind
-curio jobs show <job-id>            # one job, e.g. the one refetch or reindex just enqueued
-
-# Recovery
-curio refetch <doc-id>              # try one URL again
-curio refetch --all --state failed  # retry every failed doc
-
-# Maintenance
-curio jobs prune --older-than 30d   # trim the audit table
-curio jobs delete --status failed   # purge a specific status
-
-# Daemon lifecycle
-curio daemon {start|stop|status|logs|install|uninstall}  # install: a launchd agent keeps it running
-
-# Import variations
-curio import chrome [--profile X | --all-profiles | --list-profiles]
-curio import safari                 # reads ~/Library/Safari/Bookmarks.plist (needs Full Disk Access)
-curio import firefox                # reads the default profile's places.sqlite (Firefox can stay open)
-curio import html --dry-run         # parse + filter without sending
-curio import html --limit 200       # try a slice first
-curio import html --follow          # poll progress until queue drains
+curio pause | resume            # stop starting new work, then pick up again
+curio throttle gentle           # do less at once, so the fans stay quiet
+curio schedule 22:00-07:00      # only work overnight (curio schedule off to undo)
+curio keep-awake on             # stay awake while importing, when plugged in
 ```
 
-Both `curio docs` and `curio jobs` print URL + doc_id + on-disk path under
-each row, so the three usual follow-ups are copy/paste-ready:
-`cat <path>`, `curio docs show <doc_id>`, `curio refetch <doc_id>`.
+If something seems off, run `curio doctor`: it checks every part and says what to fix.
 
-`curio --help` lists everything.
-
-## Use with Claude (MCP)
-
-`curio-mcp` exposes your corpus to Claude Code / Claude Desktop over MCP —
-search and pull saved pages straight into a conversation. It auto-starts the
-daemon.
+## Use it with Claude
 
 ```sh
-claude mcp add curio -- curio-mcp       # curio up prints this, with the path when curio-mcp isn't on PATH
+claude mcp add curio -- curio-mcp
 ```
 
-Tools: `search_bookmarks` (with `content_type`/`source`/`host` filters),
-`get_document`, `find_related`, `list_interests`. If the daemon stops during
-a session, the next tool call starts it again. See [docs/mcp.md](./docs/mcp.md).
+Then ask Claude Code about anything you've saved. Claude can search your library, open a saved page, find related pages, and see your interests. For Claude Desktop, see [docs/mcp.md](./docs/mcp.md).
 
-## High-level architecture
+## Good to know
 
-```text
-┌──────────────┐  ┌─────────────┐  ┌──────────────┐
-│   curio CLI  │  │ curio-mcp   │  │  Future Web  │
-│  (cobra)     │  │ (sidecar)   │  │     UI / API │
-└──────┬───────┘  └──────┬──────┘  └──────┬───────┘
-       └─────────────────┼────────────────┘
-                   HTTP + JSON
-                         │
-                  ┌──────▼────────────┐
-                  │   curio-daemon    │
-                  │  importer/crawler │
-                  │  indexer/search   │
-                  │  insight          │
-                  └──┬───────────┬────┘
-                     │           │
-              ┌──────▼────┐  ┌───▼────────┐
-              │ SQLite    │  │ Ollama     │
-              │ FTS5 +    │  │ (embed +   │
-              │ sqlite-vec│  │ local LLM) │
-              └───────────┘  └────────────┘
-```
+- **Privacy.**
+  - Your library, the search, and the AI models all live on your Mac.
+  - Curio goes online to download the pages you bookmarked.
+  - For pages that block it, Curio can ask [Jina Reader](https://jina.ai/reader) to fetch the page; that service sees the page's address. To turn this off, set `fetcher.native.jina_fallback: false` in `~/.curio/config.yaml`. Create your own Jina account if you get rate limited and use that.
+- **Changing the writing model.** Curio uses a local model to name your interests. To use a different one, set `generation.model` in `~/.curio/config.yaml` and run `curio up`.
+- **GitHub pages.** Many github.com bookmarks go faster with a GitHub token (`fetcher.github.token` in the same file).
+- **Upgrading.** Run `brew upgrade curio`, then `curio up`.
+- **Starting over.** `curio up --fresh` moves your current library aside to `~/.curio.bak-<date>` and starts a new one. Nothing is deleted.
+- **Uninstalling.** Run `curio daemon uninstall`, then `brew uninstall curio`. Your library stays in `~/.curio` until you delete it.
 
-## Documentation
+## More
 
-- [Setup](./docs/setup.md) — full install + troubleshooting
-- [Architecture](./docs/architecture.md) — components, transports, data flow
-- [MCP server](./docs/mcp.md) — register `curio-mcp` with Claude, available tools
-- [Data model](./docs/data-model.md) — schemas and storage layout
-- [Decisions](./docs/decisions.md) — running log of design choices and why
-- [Roadmap](./docs/roadmap.md) — milestones, what shipped, and what's next
-- [API](./api/openapi.yaml) — daemon HTTP contract
-- [Migrations](./migrations) — SQLite schema
+- [Setup and troubleshooting](./docs/setup.md): every detail of `curio up`, and setting up by hand
+- [Using Curio with Claude (MCP)](./docs/mcp.md)
+- [How it works](./docs/architecture.md), [design decisions](./docs/decisions.md), and the [roadmap](./docs/roadmap.md)
 
-## Building from source
-
-Requires Go 1.26.8 or newer, the `go` line in `go.mod`: the Makefile builds
-with exactly that toolchain, and the go command downloads it once if your
-default differs. cgo is required (sqlite + sqlite-vec), so you also need a C
-toolchain: on macOS, the Xcode Command Line Tools (`xcode-select --install`).
-Node isn't needed; the default fetcher is Go-native.
-
-```sh
-git clone https://github.com/samsar/curio
-cd curio
-make build      # produces bin/curio, bin/curio-daemon and bin/curio-mcp
-make test       # unit tests
-```
-
-The Makefile forces `CGO_ENABLED=1`, and on arm64 compiles sqlite-vec's
-NEON distance kernels (`CGO_CFLAGS` gains `-DSQLITE_VEC_ENABLE_NEON`), so
-build and test through `make`. `make tools` installs the pinned
-golangci-lint and goose, and `make help` lists every target.
-
-## Naming
-
-Curio: a rare or interesting object you've collected. Also: curiosity.
+To build from source, clone the repo and run `make build` (Go and the Xcode Command Line Tools required; `make help` lists everything).
 
 ## License
 
