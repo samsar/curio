@@ -13,10 +13,122 @@ useful as a fallback / comparison backend.
 This document covers macOS. Linux / Windows users follow the same shape
 but with platform-appropriate package managers.
 
-## Ollama (native)
+## First run: `curio up`
 
-Install via Homebrew on macOS. The native install uses Metal acceleration on
-Apple Silicon, which is noticeably faster than a containerized build.
+```sh
+curio up
+```
+
+`curio up` sets curio up on this Mac, and keeps it set up. It checks five
+things, in order, shows what it would do about each (the plan), and then
+does it, asking before each step:
+
+1. **The Mac.** Apple silicon with 16 GB of memory or more is what curio is
+   built for. With 8 GB it runs with the smallest models, which swap in and
+   out of memory: import overnight. Under Rosetta it says to install the
+   arm64 build. An Intel Mac runs Ollama on its CPU only (a first import
+   takes days), and curio up asks once whether to go on. Elsewhere than
+   macOS, curio up installs nothing: install and start Ollama yourself.
+2. **Ollama**, answering at `embedding.base_url`
+   (`http://localhost:11434`). When nothing answers, curio up starts the
+   Ollama that is installed (`brew services start ollama` for the Homebrew
+   formula, `open -a Ollama` for the app) or installs it (`brew install
+   ollama`, then `brew services start ollama`), and waits up to a minute
+   for it to answer. Without Homebrew, or on an Intel Mac, it opens
+   <https://ollama.com/download> and waits up to 10 minutes for you to
+   install and open the app. An Ollama too old for the models (gemma4 needs
+   0.30.5) is upgraded with `brew upgrade ollama` and `brew services restart
+   ollama` when Homebrew installed it; the app you update yourself.
+   Homebrew has a prebuilt Ollama only for the newest macOS (on older
+   releases `brew install` builds it from source, which takes a while) and
+   none for Intel, which is why the app from ollama.com is the
+   alternative. An Ollama elsewhere than this Mac is yours to start.
+3. **The models.** curio picks them for your Mac's memory, says why, and
+   offers the tier below: `Use these? [Y/n/choose]`, where `choose` lists
+   every tier. It pulls the ones Ollama doesn't have, with progress, after
+   checking the disk has room for them and 2 GiB more.
+
+   | Memory | Writing model | |
+   |---|---|---|
+   | under 16 GB | `qwen3:4b-instruct` | 2.5 GB |
+   | 16 GB | `gemma4:12b` | 7.6 GB |
+   | 32 GB | `gemma4:26b-a4b-it-qat` | 16 GB |
+   | 64 GB or more | `gemma4:26b` | 19 GB |
+
+   The embedding model is `qwen3-embedding:0.6b` (639 MB) everywhere. A
+   `generation.model` already in `config.yaml` is kept, and nothing is
+   asked; with interest labels off (`insight.labeling: terms`) no writing
+   model is pulled.
+4. **The home**, `~/.curio` or `$CURIO_HOME`, and its `config.yaml`. A new
+   home records the embedding model and the width of its vectors, measured
+   with one embed after the pull. curio up writes `config.yaml` once, when
+   there is none, with those and the writing model, and never edits it
+   again: it is yours. An existing home is checked, never converted (see
+   `--fresh`). A directory that isn't a curio home is never written into.
+5. **The daemon**, kept running by its launchd agent (see "Keep the daemon
+   running"): installed, running this curio's `curio-daemon`, and
+   restarted when it runs another build or another writing model than
+   `config.yaml`'s. Over ssh, with no desktop session for the agent, the
+   daemon is started on demand instead, with a warning.
+
+When every check passes, curio up changes nothing and says `Nothing to do:
+curio is up.`, then the status: the daemon and whether launchd keeps it
+running, Ollama and the models, the library's size, the queue, and
+anything worth knowing (an embedding drift, a warning about the Mac). A
+run that did something ends with what to do next: importing, searching,
+pausing, and registering curio with Claude Code (`claude mcp add curio --
+curio-mcp`). Run it again whenever you like: nothing records where a run
+stopped, so a run cut short (ctrl-c, a no) picks up where it left off.
+`curio doctor` runs the same checks and reports them, changing nothing.
+
+What curio up asks, and never does unasked:
+
+- Every command it runs is shown in full before the question, and its
+  output streams as it runs. A command that fails is named, with how it
+  exited, so you can run it yourself.
+- One question per step, yes by default, except moving a home aside,
+  which is no by default. Creating a new home and writing its `config.yaml`
+  are only announced: those files are curio's.
+- It never uses sudo, and refuses to run as root.
+- A question left without an answer (ctrl-c, ctrl-d) stops the run; it is
+  never taken for yes.
+
+| Flag | Does |
+|---|---|
+| `--yes` | Answer every question: yes to each step, moving the home aside with `--fresh` included, and the default to each choice. It never implies `--fresh`. |
+| `--no-install` | Install and start nothing with Homebrew or the Ollama app: the plan shows the commands to run yourself. Pulling models, the home, `config.yaml` and the launchd agent are curio's own work, and still happen. |
+| `--dry-run` | Show the plan and change nothing. |
+| `--fresh` | Move the existing home aside to `<home>.bak-<YYYYMMDD-HHMMSS>` and start a new one; see below. |
+| `--embedding-model <tag>` | Embed a new home with this model instead of `qwen3-embedding:0.6b`. Name a tag: a home embeds with one model for good. |
+| `--generation-model <tag>` | Write interest labels with this model instead of curio's pick. It can't override a `generation.model` in `config.yaml`: edit that instead. |
+
+Without a terminal (in a script, with stdin or stderr redirected), curio
+up never asks: it prints the plan and exits 1, unless `--yes` answers for
+you. It exits 0 when there was nothing to do, when it did everything, and
+after a dry run; 1 when a blocker stopped it (a home it won't touch, a
+config.yaml that doesn't load, too little disk; the plan says what to do),
+when you said no, or when a step failed; and 130 when a question was left
+unanswered.
+
+### `--fresh`: start a new home
+
+A home made by an older curio, or with another embedding model, can't be
+converted: its vectors came from another model. `curio up --fresh` sets
+it aside and starts over. It stops the daemon (removing its launchd agent
+first), moves the whole home to `~/.curio.bak-<YYYYMMDD-HHMMSS>` (`-2` and
+so on when that name is taken) with one rename, deleting nothing, and
+carries on as a first run; nothing starts a daemon in the home while it
+moves. A symlinked home is moved, and made again, where the link points.
+It asks first, no by default, naming both paths. Then import your
+bookmarks again. The old home stays whole at its new name until you
+delete it.
+
+## Ollama by hand
+
+`curio up` installs and starts Ollama for you. To do it yourself (or with
+`curio up --no-install`), install via Homebrew on macOS. The native install
+uses Metal acceleration on Apple Silicon, which is noticeably faster than a
+containerized build.
 
 ```sh
 brew install ollama
@@ -26,7 +138,7 @@ ollama pull qwen3:4b-instruct         # 2.5 GB; the writing model, for interest 
 ollama list                           # verify
 ```
 
-curio uses two models:
+curio uses two models (`curio up` picks the writing model for your Mac):
 
 | Model | Size | Used for |
 |---|---|---|
@@ -82,12 +194,15 @@ or in the shell that runs `ollama serve`).
 
 `generation.model` in `~/.curio/config.yaml` names the model that writes
 interest labels; curio sends it `think: false` and an explicit `num_ctx`
-on every request. Edit it and restart the daemon (`curio daemon stop`; the
-next command starts it). With `generation.auto_pull` on, the daemon pulls
+on every request. Edit it and run `curio up`, which pulls the new model and
+restarts the daemon. (Or restart the daemon yourself, `curio daemon stop`,
+and the next command starts it: with `generation.auto_pull` on, it pulls
 the new model in the background, and interests get term labels until it is
-ready. Nothing needs reindexing: the home records only the embedding model.
+ready.) Nothing needs reindexing: the home records only the embedding
+model.
 
-Pick by the Mac's unified memory:
+Pick by the Mac's unified memory (`curio up` does, when `config.yaml`
+names none):
 
 | Memory | `generation.model` |
 |---|---|
@@ -209,8 +324,8 @@ End-to-end flow using a Chrome HTML export. Substitute your own browser/path.
 # 1. Export your bookmarks: Chrome → Bookmark Manager → ⋮ → Export bookmarks
 #    Saves a .html file (Netscape Bookmark format).
 
-# 2. Start the curio daemon (auto-creates ~/.curio on first run).
-curio daemon start
+# 2. Set curio up: Ollama, the models, ~/.curio, the daemon.
+curio up
 
 # 3. Dry-run first to see what'd happen without actually importing.
 curio import html --dry-run ~/Downloads/bookmarks.html
@@ -305,23 +420,25 @@ queued).
 
 ## Curio itself
 
-Once Ollama works, build curio (web2md is optional; see "Fetcher options").
-The README's "Building from source" lists the Go and C toolchains it needs.
+To build curio from source (web2md is optional; see "Fetcher options"),
+the README's "Building from source" lists the Go and C toolchains it needs.
 
 ```sh
 cd ~/projects/curio
 make build
 ./bin/curio version
-./bin/curio daemon start  # listens on 127.0.0.1:8765; JSON logs in ~/.curio/logs/daemon.log
+./bin/curio up            # the daemon listens on 127.0.0.1:8765; JSON logs in ~/.curio/logs/daemon.log
 curl -s http://localhost:8765/v1/healthz | jq
 ```
 
-On first run the CLI (or the daemon) creates the home, `~/.curio` or
-`$CURIO_HOME`: the `.curio-meta.json` marker, `content/` and `logs/`; the
-daemon creates and migrates `curio.db`. A missing `config.yaml` means the
-defaults. A directory that already exists without `.curio-meta.json` is
-refused rather than adopted, so pointing `CURIO_HOME` at the wrong
-directory can't write into it: use a path that doesn't exist yet.
+`curio up` creates the home, `~/.curio` or `$CURIO_HOME`: the
+`.curio-meta.json` marker, `content/`, `logs/` and `config.yaml`; the
+daemon creates and migrates `curio.db`. Any other command (or the daemon)
+run first creates a home with the default embedding model and no
+`config.yaml`, which means the defaults; `curio up` then writes one. A
+directory that already exists without `.curio-meta.json` is refused rather
+than adopted, so pointing `CURIO_HOME` at the wrong directory can't write
+into it: use a path that doesn't exist yet.
 
 The first start after an upgrade may migrate the database, which can take
 a minute on a large library. `curio daemon start`, or whichever command
@@ -332,8 +449,9 @@ and how many migrations are applied, and every other request gets 503
 until the daemon is ready. `curio daemon status` shows the same progress.
 
 After you rebuild or upgrade curio, the daemon already running is still
-the old build. `curio daemon start` says so, naming both versions; run
-`curio daemon stop`, and the next command starts the new daemon. If the
+the old build. `curio up` restarts it; `curio daemon start` says so,
+naming both versions: run `curio daemon stop`, and the next command starts
+the new daemon. If the
 launchd agent (below) runs a curio-daemon other than this curio's, say an
 older install elsewhere, a stop would only start that one again, so the
 warning says to run `curio daemon install` instead, which repoints the
@@ -343,7 +461,8 @@ agent and restarts the daemon.
 
 By default the CLI and the MCP sidecar start the daemon when they need it,
 and it runs until it is stopped, the Mac restarts, or it crashes. A
-launchd agent keeps it running instead:
+launchd agent keeps it running instead; `curio up` installs it, and so
+does:
 
 ```sh
 curio daemon install     # start the daemon at login, restart it after a crash
@@ -368,8 +487,11 @@ With the agent installed:
 - `curio daemon stop` stops it through launchd (`launchctl kill
   SIGTERM`); launchd doesn't restart a daemon that stopped cleanly, and
   starts it again at the next login or when a command needs it. A daemon
-  that crashes, or exits because it can't run (a bad `config.yaml`, say),
-  is restarted, every 10 seconds at most, until it runs.
+  that crashes, or can't bind its port, is restarted, every 10 seconds at
+  most, until it runs. One that refuses its `config.yaml` or its home
+  (invalid, or for another embedding model) stays down, having said why
+  once in `logs/daemon.log`: restarting changes nothing until you fix it,
+  after which the next curio command, or `curio up`, starts it.
 - `curio daemon status` says whether launchd runs the daemon, and `curio
   doctor` checks the agent: loaded, and running this curio's daemon.
 
@@ -395,7 +517,9 @@ your shell's environment:
 
 An agent runs only in a desktop login session. Over ssh with nobody
 logged in at the Mac there is none: `curio daemon install` says so, and
-the CLI starts the daemon itself, as without an agent.
+stops nothing; `curio daemon status` and `curio doctor` say the agent has
+no session to run in; and the CLI starts the daemon itself, as without an
+agent.
 
 ## Config: time budgets for Ollama calls
 

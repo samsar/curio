@@ -11,17 +11,19 @@ reading. Curio makes that context queryable.
 ## Quickstart
 
 ```sh
-# 1. Install
 brew install samsar/tap/curio          # or `make build` from a clone
-brew install ollama                    # required for embeddings
-brew services start ollama
-ollama pull qwen3-embedding:0.6b       # the embedding model, 639 MB
-ollama pull qwen3:4b-instruct          # the writing model, for interest labels, 2.5 GB
+curio up
+```
 
-# 2. Verify
-curio doctor                            # all green = ready
+`curio up` checks the Mac, installs or starts Ollama (with Homebrew, or the
+app from ollama.com), picks and pulls the models for your Mac's memory,
+creates `~/.curio` with its `config.yaml`, and installs a launchd agent that
+keeps the daemon running. It shows the plan first and asks before each
+step; every command it runs is shown in full, and it never uses sudo. Run
+it again any time: with everything in place it says `Nothing to do: curio
+is up.` Then:
 
-# 3. Use
+```sh
 curio import html ~/Downloads/bookmarks.html --follow
 curio search "feature flag rollout"
 ```
@@ -30,9 +32,9 @@ Export your bookmarks from any browser as HTML (Chrome → Bookmark Manager →
 ⋮ → Export bookmarks). The HTML export works across all browsers and is the
 fastest way to load your corpus.
 
-The daemon pulls both models itself if you skip the `ollama pull` lines.
 The writing model is yours to change (`generation.model`); the embedding
-model is fixed when a home is created. See [docs/setup.md](./docs/setup.md).
+model is fixed when a home is created (`curio up --fresh` starts a new one).
+See [docs/setup.md](./docs/setup.md), which also covers setting up by hand.
 
 Time budget: with the default pools (16 fetch workers, 4 index workers; set
 `daemon.fetch_workers` / `daemon.index_workers` in `~/.curio/config.yaml`) and
@@ -44,7 +46,8 @@ ones.
 ## More commands
 
 ```sh
-curio doctor                        # verify Ollama + DB + config + paths + the Jina fallback
+curio up                            # set up, or check the setup; --dry-run shows the plan only
+curio doctor                        # what curio up checks, plus the fetcher and the Jina fallback
 curio status                        # daemon health + corpus counts + queue depth and state
 
 # Pacing the work (stored, so it holds across restarts; running jobs finish)
@@ -103,8 +106,7 @@ search and pull saved pages straight into a conversation. It auto-starts the
 daemon.
 
 ```sh
-make build                              # also builds ./bin/curio-mcp
-claude mcp add curio "$PWD/bin/curio-mcp"
+claude mcp add curio -- curio-mcp       # curio up prints this, with the path when curio-mcp isn't on PATH
 ```
 
 Tools: `search_bookmarks` (with `content_type`/`source`/`host` filters),

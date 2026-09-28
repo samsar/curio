@@ -50,6 +50,9 @@
 
 A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
 
+- `curio up` — set curio up, or check that it is (see "Setup: `curio up`")
+- `curio doctor` — check everything `curio up` checks, and the fetcher,
+  the Jina fallback and the content directory, changing nothing
 - `curio add <url>` — manually add a bookmark
 - `curio import <source> [path]` — bulk import from Chrome / Safari / Firefox
 - `curio search <query>` — hybrid search
@@ -69,6 +72,36 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
   (after chunker or embedding-prefix changes, or to pick up new tags)
 
 If a CLI command needs the daemon and it isn't running, the CLI auto-starts it.
+Every command but `up`, `doctor` and bare `curio` finds the home and its
+daemon first (`daemonctl.Discover`), which creates a missing home with
+the default embedding model; those three build their own environment and
+create nothing to look at it. Bare `curio` prints its help, and points at
+`curio up` when there is no home, or its daemon serves an empty library.
+
+### Setup: `curio up`
+
+`internal/setup` is the setup wizard, and `curio up` a thin command over
+it. Five steps, in order: the machine (chip, memory, cores, free disk,
+judged before anything is installed), Ollama (something answering
+`embedding.base_url`, started or installed with Homebrew or the app when
+not), the models (picked by unified memory from a static table, pulled
+with progress), the home and its config.yaml (created where there is
+none, at the width the embedding model measures; `--fresh` moves an old
+one aside first), and the daemon (its launchd agent installed, the daemon
+of this build, with config.yaml's writing model). Each step checks the
+world, read-only and bounded, and may apply a fix; the runner checks every
+step first and shows the fixes as the plan, stops before applying
+anything when the plan has a blocker, then applies step by step, asking
+before each, and checks each again after. A run with nothing to do
+changes nothing and shows the status; a run cut short resumes by checking
+again. Its prompts, progress and the output of what it runs go to stderr,
+the plan and the status to stdout. `curio doctor` runs the same checks,
+so the two agree on what healthy means. Installing goes through
+`setup.Installer` (Homebrew), the machine through `setup.Probe`, the
+prompts through `setup.UI` (huh on a terminal, a line prompter in
+accessible mode, none without a terminal), and the daemon's agent through
+`internal/service.Manager`, so the tests fake each. See `docs/setup.md`
+and decisions.md "curio up: a plan-first setup wizard".
 
 ### `curio-daemon`
 
@@ -158,10 +191,11 @@ otherwise.
   healthz's own bounded wait on Ollama. They wait while their daemon
   reports progress, failing after 15s of silence or at a 30 min ceiling
   (which leaves the daemon running), and print one line when it is
-  migrating. `daemon.start.lock` serializes starting and is held until
-  the new daemon holds `daemon.pid`; installing, removing or restarting
-  the launchd agent holds it throughout, bootout waits included. They only
-  signal the PID the
+  migrating. `daemon.start.lock` serializes starting and is held until the
+  new daemon holds `daemon.pid`; installing, removing or restarting the
+  launchd agent holds it throughout, bootout waits included, and so does
+  `curio up --fresh` from stopping the daemon until the home is moved
+  aside (`Controller.WithDaemonStopped`). They only signal the PID the
   lock holder recorded. A daemon they started that crashes during startup
   is reported immediately, with its exit status and the tail of
   `daemon.log` (and of `launchd.err`, for one launchd started).
@@ -171,7 +205,10 @@ otherwise.
   the lock. Jobs abandoned after the grace period are recovered as orphans
   on the next start. A daemon told to stop exits 0, even when its
   shutdown ran over, and so does one that finds another daemon serving
-  its home; anything else it can't run with exits 1.
+  its home, or refuses to start for a cause only a fix clears (a
+  config.yaml or a home it can't serve, logged once as it stays down);
+  anything else it can't run with, a port it can't bind or a crash, exits
+  1, which the launchd agent retries.
 - **launchd agent** (macOS, `curio daemon install`): a per-user agent,
   `~/Library/LaunchAgents/com.github.samsar.curio.daemon.plist` for
   `~/.curio` (another home's label adds a hash of its path), that starts
@@ -181,8 +218,11 @@ otherwise.
   kickstart`, stop it with `launchctl kill SIGTERM` and restart it with
   `kickstart -k`, all behind `internal/service.Manager`; without it (not
   installed, not loaded, or no GUI login session over ssh) they spawn it.
-  The lock stays the safety net either way. `curio daemon uninstall`
-  boots the agent out and waits until the daemon has let go of the home.
+  The lock stays the safety net either way. Installing asks the manager
+  first (`Preflight`: not root, a program launchd can run, a GUI session)
+  and stops nothing for an install that can't happen. `curio daemon
+  uninstall` boots the agent out and waits until the daemon has let go of
+  the home.
 - **Keep-awake** (`curio keep-awake on`): while keep-awake is on, the
   queue isn't paused, the Mac runs on AC power (`pmset -g ps`) and the
   workers have jobs queued or running, the daemon runs `caffeinate -i -w
@@ -207,7 +247,11 @@ Everything under `$CURIO_HOME` (defaults to `~/.curio`).
     launchd.err          # a launchd-run daemon's stderr: only a dying runtime's output
   daemon.pid             # single-instance lock (flock) + the running daemon's PID
   daemon.start.lock      # serializes clients auto-starting the daemon
+  setup.json             # what curio up remembers: optional installs declined
 ```
+
+`curio up` writes `config.yaml` once, when there is none, and never edits
+it after; `setup.json` is its own.
 
 If `~/.curio` exists without `.curio-meta.json`, the daemon refuses to start and
 suggests setting `CURIO_HOME` to a different path.
@@ -335,7 +379,8 @@ mode is a deployment change, not a schema change. See
 External processes the daemon expects:
 
 - **Ollama** — for embeddings and local text generation. Daemon talks to it on
-  `http://localhost:11434`. The daemon runs without it and degrades: search
+  `http://localhost:11434`; `curio up` starts or installs it when nothing
+  answers there, and pulls the models. The daemon runs without it and degrades: search
   returns keyword-only results marked `degraded`, index jobs fail and retry
   with backoff, cluster labels fall back to term labels, and `/v1/healthz`
   (and `curio doctor`) says what's wrong. It pulls the models it needs,
