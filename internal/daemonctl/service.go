@@ -27,9 +27,11 @@ var errNoManager = fmt.Errorf("%w: this controller spawns the daemon itself", se
 // daemon meanwhile, and a daemon running outside the agent is stopped
 // first: it would keep the lock from the agent's. The lock is released
 // before the wait for the agent's daemon, which EnsureRunning does, taking
-// it itself if the daemon needs starting. It doesn't check that the daemon
-// will serve the home; callers do that first (`curio daemon install` and
-// `curio up` do).
+// it itself if the daemon needs starting. launchd relaunches a daemon that
+// fails every 10s, so Install refuses an agent whose daemon couldn't bind
+// its port because another home's daemon serves there. Whether the home
+// would refuse the daemon is the callers' check, made first (`curio daemon
+// install` and `curio up` make it).
 func (c *Controller) Install(ctx context.Context) (changed bool, err error) {
 	if c.Service == nil {
 		return false, errNoManager
@@ -60,7 +62,11 @@ func (c *Controller) install(ctx context.Context) (bool, error) {
 		return c.Service.Install(ctx, spec)
 	case st.State == Legacy:
 		return false, c.legacyStopError(st.PID)
-	case st.State == Running && !st.Managed():
+	}
+	if _, err := c.served(st.answer()); err != nil {
+		return false, err // the agent's daemon could only fail to bind
+	}
+	if st.State == Running && !st.Managed() {
 		if _, err := c.stopRunning(ctx, st); err != nil {
 			return false, fmt.Errorf("stop the running curio-daemon, so its launchd agent's can take over: %w", err)
 		}

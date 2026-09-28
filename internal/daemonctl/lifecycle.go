@@ -118,9 +118,14 @@ func (s Status) Managed() bool {
 // AnsweredBy is the pid and home of whatever answered at BaseURL, serving
 // or starting; answered is false if nothing did.
 func (s Status) AnsweredBy() (pid int, home string, answered bool) {
-	a := answer{health: s.Health, startup: s.Startup}
+	a := s.answer()
 	pid, home = a.identity()
 	return pid, home, a.health != nil || a.startup != nil
+}
+
+// answer is what answered at BaseURL when s was taken.
+func (s Status) answer() answer {
+	return answer{health: s.Health, startup: s.Startup}
 }
 
 // Controller manages the daemon for one home.

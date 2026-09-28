@@ -2402,9 +2402,11 @@ it, under the same start lock, and wait on the PID launchd reports as on
 a child; the flock stays the safety net, so a daemon launchd starts next
 to a spawned one just loses the lock. Stop goes through `launchctl kill
 SIGTERM` when launchd runs the lock holder, and signals directly
-otherwise. The daemon exits 0 when a signal stopped it and when it finds
-the lock held (ErrAlreadyRunning), which the agent's KeepAlive leaves
-alone. See "Daemon lifecycle: a per-user launchd agent".
+otherwise. The start lock is also held across installing, removing and
+restarting the agent, not only while spawning. The daemon exits 0 when a
+signal stopped it and when it finds the lock held (ErrAlreadyRunning),
+which the agent's KeepAlive leaves alone. See "Daemon lifecycle: a
+per-user launchd agent".
 
 ---
 
@@ -5833,10 +5835,14 @@ restart the daemon through launchd; without it they spawn it, as before.
   once with launchd's last exit, the daemon.log tail and launchd.err's
   when the launch wrote it. Stop re-probes the lock and asks the manager
   when it runs the holder; a daemon started outside launchd is signalled
-  directly. Install and Uninstall run under the start lock: Install stops
-  a daemon running outside the agent (it would keep the lock from the
-  agent's), and Uninstall returns only once the agent's daemon has
-  released daemon.pid, so `curio up --fresh` can move the home after it.
+  directly. Install, Uninstall and a restart through launchd run under
+  the start lock, bootout and `kickstart -k` waits included (up to about
+  40s), so no auto-starter starts a daemon in the middle of one: Install
+  stops a daemon running outside the agent (it would keep the lock from
+  the agent's), and refuses an agent whose daemon couldn't bind because
+  another home's daemon serves the port (launchd would relaunch it every
+  10s); Uninstall returns only once the agent's daemon has released
+  daemon.pid, so `curio up --fresh` can move the home after it.
 - **Exit status:** the daemon exits 0 when a signal stopped it, even if
   its shutdown failed part way (a request outliving the API's 5s grace),
   and when another daemon holds the home's lock; otherwise 1. Before, a

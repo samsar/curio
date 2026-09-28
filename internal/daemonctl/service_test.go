@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -341,6 +342,37 @@ func TestStop_ManagerFails(t *testing.T) {
 	assert.NotZero(t, a.PID(), "still running")
 }
 
+// TestStop_ManagerFailsAfterExit: a stop the manager reports failed while
+// its daemon exited anyway (it was exiting already, and launchctl kill
+// found no process) is a stop.
+func TestStop_ManagerFailsAfterExit(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	a := newAgent(t, c, modeNormal, false)
+	ctx := context.Background()
+	require.NoError(t, c.EnsureRunning(ctx))
+	c.Service = exitsThenFails{Fake: a.Fake, t: t}
+
+	stopped, err := c.Stop(ctx)
+	require.NoError(t, err)
+	assert.True(t, stopped)
+	held, _, err := probeLock(c.Home.PIDFile())
+	require.NoError(t, err)
+	assert.False(t, held)
+}
+
+// exitsThenFails is a manager whose Stop sees its daemon exit, then
+// reports the stop failed.
+type exitsThenFails struct {
+	*servicetest.Fake
+	t *testing.T
+}
+
+func (m exitsThenFails) Stop(context.Context) error {
+	require.NoError(m.t, syscall.Kill(m.PID(), syscall.SIGTERM))
+	require.Eventually(m.t, func() bool { return m.PID() == 0 }, 10*time.Second, 5*time.Millisecond)
+	return errors.New("launchctl kill SIGTERM: exit 3: No such process")
+}
+
 // TestStop_DaemonOutsideTheAgent: a daemon started outside launchd next to
 // a loaded agent is the lock holder, and is signalled directly.
 func TestStop_DaemonOutsideTheAgent(t *testing.T) {
@@ -407,7 +439,10 @@ func TestInstall_TakesOverFromASpawnedDaemon(t *testing.T) {
 }
 
 // TestInstall_ExcludesAutoStarters: a command starting the daemon while
-// the agent is installed neither spawns nor launches a second daemon.
+// the agent is installed waits for the install, then finds the agent's
+// daemon: it neither spawns nor launches a second one. Mid-install the
+// agent isn't loaded yet, and DaemonBin can't run, so a starter that got
+// past the start lock would spawn and fail at once.
 func TestInstall_ExcludesAutoStarters(t *testing.T) {
 	c := newTestController(t, modeNormal)
 	a := newAgent(t, c, modeNormal, false)
@@ -415,19 +450,53 @@ func TestInstall_ExcludesAutoStarters(t *testing.T) {
 	ctx := context.Background()
 	concurrent := make(chan error, 1)
 	a.OnInstall = func(service.Spec) error {
+		assert.True(t, startLockHeld(t, c), "Install holds the start lock")
 		go func() { concurrent <- c.EnsureRunning(ctx) }()
+		assert.Never(t, func() bool { return len(concurrent) > 0 }, 200*time.Millisecond, 10*time.Millisecond,
+			"a starter waits for the install")
 		return nil
 	}
 
 	_, err := c.Install(ctx)
 	require.NoError(t, err)
 	require.NoError(t, <-concurrent)
+	assert.Equal(t, 1, a.Count("Install"))
 	assert.Equal(t, 1, spawnCount(t, c))
 }
 
+// TestInstall_PortTaken: an agent whose daemon couldn't bind its port,
+// which another home's daemon serves, isn't installed: launchd would
+// relaunch it every 10 seconds.
+func TestInstall_PortTaken(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	other := t.TempDir()
+	serveHealth(t, c, map[string]any{"status": "ok", "pid": 4242, "home": other})
+	a := newAgent(t, c, modeNormal, false)
+	a.Set(func(st *service.Status) { st.Installed, st.Loaded = false, false })
+
+	_, err := c.Install(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is served by the curio-daemon for "+other)
+	assert.Zero(t, a.Count("Install"))
+}
+
+// startLockHeld reports whether anyone holds c's daemon.start.lock.
+func startLockHeld(t *testing.T, c *Controller) bool {
+	t.Helper()
+	f, err := os.OpenFile(c.Home.StartLockFile(), os.O_RDWR|os.O_CREATE, 0o600)
+	require.NoError(t, err)
+	defer f.Close() // drops the lock, if this took it
+	err = flock(f, syscall.LOCK_EX|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EWOULDBLOCK) {
+		return true
+	}
+	require.NoError(t, err)
+	return false
+}
+
 // TestUninstall: removing the agent returns once its daemon has let go of
-// the home, so a caller may move it. A command starting the daemon
-// meanwhile starts nothing until then.
+// the home, so a caller may move it. The start lock is held throughout,
+// so a command starting the daemon meanwhile starts nothing until then.
 func TestUninstall(t *testing.T) {
 	c := newTestController(t, modeNormal)
 	exe := c.DaemonBin
@@ -438,6 +507,7 @@ func TestUninstall(t *testing.T) {
 	c.DaemonBin = exe // what a command spawns once the agent is gone
 	concurrent := make(chan error, 1)
 	a.OnUninstall = func() error {
+		assert.True(t, startLockHeld(t, c), "Uninstall holds the start lock")
 		go func() { concurrent <- c.EnsureRunning(ctx) }()
 		return nil
 	}
@@ -453,6 +523,7 @@ func TestUninstall(t *testing.T) {
 	assert.False(t, held && holder == agentPID, "the agent's daemon let go of the home")
 	require.NoError(t, <-concurrent, "served by the agent's daemon while it drained, or by one started after")
 
+	a.OnUninstall = nil // its starter would outlive the test
 	removed, err = c.Uninstall(ctx)
 	require.NoError(t, err)
 	assert.False(t, removed, "nothing installed")

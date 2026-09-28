@@ -158,8 +158,10 @@ otherwise.
   healthz's own bounded wait on Ollama. They wait while their daemon
   reports progress, failing after 15s of silence or at a 30 min ceiling
   (which leaves the daemon running), and print one line when it is
-  migrating. `daemon.start.lock` serializes starting and is held only
-  until the new daemon holds `daemon.pid`. They only signal the PID the
+  migrating. `daemon.start.lock` serializes starting and is held until
+  the new daemon holds `daemon.pid`; installing, removing or restarting
+  the launchd agent holds it throughout, bootout waits included. They only
+  signal the PID the
   lock holder recorded. A daemon they started that crashes during startup
   is reported immediately, with its exit status and the tail of
   `daemon.log` (and of `launchd.err`, for one launchd started).
