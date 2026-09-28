@@ -494,6 +494,28 @@ func TestInterests(t *testing.T) {
 	assert.Equal(t, 1, count(t, srv, `SELECT count(*) FROM jobs WHERE kind = 'cluster'`))
 }
 
+// A finished run that found no interests is reported as such, never as a run
+// still to do: rebuilding again would only repeat it.
+func TestInterests_EmptyRun(t *testing.T) {
+	t.Run("no documents", func(t *testing.T) {
+		srv := apitest.Start(t)
+		srv.AddEmptyClusterRun(t, 0)
+		out := mustRun(t, srv, "interests")
+		assert.Contains(t, out, "found no fetched, indexed documents")
+		assert.Contains(t, out, "`curio status`")
+		assert.NotContains(t, out, "no interests yet")
+	})
+	t.Run("nothing grouped", func(t *testing.T) {
+		srv := apitest.Start(t)
+		srv.AddEmptyClusterRun(t, 35)
+		out := mustRun(t, srv, "interests")
+		assert.Contains(t, out, "grouped none of its 35 documents")
+		assert.Contains(t, out, "insight.min_similarity or insight.min_cluster_size in "+
+			filepath.Join(srv.Home.Path, "config.yaml"))
+		assert.NotContains(t, out, "no interests yet")
+	})
+}
+
 func TestStatus(t *testing.T) {
 	srv := apitest.Start(t)
 	mustRun(t, srv, "add", "https://example.com/a")

@@ -33,7 +33,7 @@ func newInterestsCmd(env *daemonctl.Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			renderInterests(cmd.OutOrStdout(), res)
+			renderInterests(cmd.OutOrStdout(), res, env.Home.ConfigPath())
 			return nil
 		},
 	}
@@ -67,10 +67,9 @@ func newInterestsRebuildCmd(env *daemonctl.Env) *cobra.Command {
 	}
 }
 
-func renderInterests(w io.Writer, res *client.InterestList) {
+func renderInterests(w io.Writer, res *client.InterestList, configPath string) {
 	if len(res.Items) == 0 {
-		fmt.Fprintln(w, "no interests yet — run `curio interests rebuild` to compute them")
-		fmt.Fprintln(w, "(clustering needs fetched + indexed documents to group)")
+		renderNoInterests(w, res, configPath)
 		return
 	}
 
@@ -107,4 +106,25 @@ func renderInterests(w io.Writer, res *client.InterestList) {
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+// renderNoInterests explains an empty list. With no finished clustering run
+// it asks for one. After a run it says what that run found, since rebuilding
+// again only repeats it until the library or the thresholds change.
+func renderNoInterests(w io.Writer, res *client.InterestList, configPath string) {
+	if res.ComputedAt == nil {
+		fmt.Fprintln(w, "no interests yet — run `curio interests rebuild` to compute them")
+		fmt.Fprintln(w, "(clustering needs fetched + indexed documents to group)")
+		return
+	}
+	when := res.ComputedAt.Local().Format("2006-01-02 15:04")
+	if res.NumDocuments == 0 {
+		fmt.Fprintf(w, "no interests: the clustering run of %s found no fetched, indexed documents\n", when)
+		fmt.Fprintln(w, "run `curio interests rebuild` again once `curio status` shows documents fetched and nothing left to index")
+		return
+	}
+	fmt.Fprintf(w, "no interests: the clustering run of %s grouped none of its %d documents\n", when, res.NumDocuments)
+	fmt.Fprintln(w, "an interest needs several documents on a shared topic; for a small or varied library,")
+	fmt.Fprintf(w, "lower insight.min_similarity or insight.min_cluster_size in %s,\n", configPath)
+	fmt.Fprintln(w, "then `curio daemon stop` (the next command starts it again) and `curio interests rebuild`")
 }
