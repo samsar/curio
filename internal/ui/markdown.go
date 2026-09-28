@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/microcosm-cc/bluemonday"
@@ -20,10 +21,10 @@ import (
 )
 
 // MaxRenderedMarkdown is how much of a document's markdown its page
-// renders: 1 MiB, which the formatting budgets (budget.go) keep to about a
-// second and a few hundred megabytes allocated at worst; a typical article
-// of that size formats in tens of milliseconds. The whole text stays at
-// GET /v1/documents/{id}/content.
+// renders: 1 MiB. A typical article of that size formats in tens of
+// milliseconds; whatever the text, the formatting budgets and limits
+// (budget.go) stop a render within about two seconds and a gigabyte
+// allocated. The whole text stays at GET /v1/documents/{id}/content.
 const MaxRenderedMarkdown = 1 << 20
 
 // CutMarkdown keeps the first MaxRenderedMarkdown bytes of src, cut after
@@ -48,8 +49,9 @@ func CutMarkdown(src []byte) ([]byte, bool) {
 type Text struct {
 	// HTML is the formatted text, empty when it is Unformatted.
 	HTML template.HTML
-	// Unformatted says which formatting budget the text is over, when it
-	// is (budget.go): the page then shows Source, the markdown as stored.
+	// Unformatted says which formatting budget or limit the text is over,
+	// when it is (budget.go): the page then shows Source, the markdown as
+	// stored.
 	Unformatted string
 	Source      string
 	// RemoteImages counts the text's http and https images, shown or not:
@@ -63,10 +65,15 @@ type Text struct {
 // link and image against the document's URL, keeps only links to http and
 // https URLs with a host and to mailto ones, and turns images into links,
 // or into https images when asked. bluemonday then sanitizes the HTML
-// against an allow-list. It is safe for concurrent use.
+// against an allow-list. Each render is held to the formatting budgets
+// and limits (budget.go). It is safe for concurrent use.
 type markdown struct {
 	md     goldmark.Markdown
 	policy *bluemonday.Policy
+	// A render's limits: maxFormatTime and maxFormatAlloc, which only
+	// tests change.
+	timeLimit  time.Duration
+	allocLimit uint64
 }
 
 func newMarkdown() *markdown {
@@ -83,17 +90,25 @@ func newMarkdown() *markdown {
 	policy.AllowAttrs("loading").Matching(regexp.MustCompile(`^lazy$`)).OnElements("img")
 	return &markdown{
 		md: goldmark.New(
-			goldmark.WithExtensions(extension.GFM),
-			goldmark.WithParserOptions(parser.WithASTTransformers(util.Prioritized(linkTransformer{}, 100))),
+			// GFM without Linkify, whose regexps scan from every space at a
+			// cost the inline budget doesn't charge: an address written
+			// out without link markup stays text.
+			goldmark.WithExtensions(extension.Table, extension.Strikethrough, extension.TaskList),
+			goldmark.WithParserOptions(
+				parser.WithInlineParsers(util.Prioritized(stopParser{}, stopParserPriority)),
+				parser.WithASTTransformers(util.Prioritized(linkTransformer{}, 100)),
+			),
 		),
-		policy: policy,
+		policy:     policy,
+		timeLimit:  maxFormatTime,
+		allocLimit: maxFormatAlloc,
 	}
 }
 
 // render renders src, a document's stored markdown whose URL is base. With
 // images, https images are shown; otherwise, and for any other image, the
 // image is its alt text, linking to it when it is an http or https URL. A
-// text over a formatting budget comes back Unformatted.
+// text over a formatting budget or limit comes back Unformatted.
 func (m *markdown) render(src []byte, base string, images bool) (Text, error) {
 	html, remote, err := m.format(src, base, images)
 	if over, ok := errors.AsType[*budgetError](err); ok {
@@ -106,42 +121,108 @@ func (m *markdown) render(src []byte, base string, images bool) (Text, error) {
 }
 
 // format formats src into sanitized HTML and counts its remote images. A
-// text over a formatting budget is a *budgetError: the shape of its
-// markdown is checked before goldmark parses it, its links' length once
-// they are resolved, before goldmark writes them.
-func (m *markdown) format(src []byte, base string, images bool) (template.HTML, int, error) {
+// text over a formatting budget or limit is a *budgetError: the shape of
+// its markdown is checked before goldmark parses it, its links' length
+// before they are resolved, and the limits all along. A check of the
+// limits that fails panics with its *budgetError to unwind goldmark, and
+// is recovered here; any other panic goes on.
+func (m *markdown) format(src []byte, base string, images bool) (sanitized template.HTML, remote int, err error) {
 	if err := checkShape(src); err != nil {
 		return "", 0, err
 	}
-	st := &linkState{images: images}
+	limits := startLimits(m.timeLimit, m.allocLimit)
+	defer limits.stop()
+	defer func() {
+		if v := recover(); v != nil {
+			over, ok := v.(*budgetError)
+			if !ok {
+				panic(v)
+			}
+			sanitized, remote, err = "", 0, over
+		}
+	}()
+	st := &linkState{images: images, limits: limits}
 	if u, err := url.Parse(base); err == nil && u.IsAbs() {
 		st.base = u
 	}
 	pc := parser.NewContext()
 	pc.Set(linkStateKey, st)
-	doc := m.md.Parser().Parse(text.NewReader(src), parser.WithContext(pc))
+	doc := m.md.Parser().Parse(stopReader{text.NewReader(src), limits}, parser.WithContext(pc))
 	if st.over != nil {
 		return "", 0, st.over
 	}
-	var buf bytes.Buffer
-	if err := m.md.Renderer().Render(&buf, src, doc); err != nil {
+	w := &htmlWriter{limits: limits}
+	if err := m.md.Renderer().Render(w, src, doc); err != nil {
 		return "", 0, fmt.Errorf("render markdown: %w", err)
 	}
+	limits.check()
 	// The one place curio trusts HTML it didn't write: the sanitizer's
 	// output (TestTrustedHTMLOnlyFromTheSanitizer).
-	return template.HTML(m.policy.SanitizeBytes(buf.Bytes())), st.remote, nil //nolint:gosec // G203: bluemonday's allow-list output, from goldmark without raw HTML
+	return template.HTML(m.policy.SanitizeBytes(w.buf.Bytes())), st.remote, nil //nolint:gosec // G203: bluemonday's allow-list output, from goldmark without raw HTML
+}
+
+// stopParserPriority runs stopParser before every other inline parser:
+// goldmark tries them in ascending priority, and the task list's checkbox
+// parser is at 0.
+const stopParserPriority = -1
+
+// stopParser checks a render's limits at every character an inline parser
+// starts at, where a scan to the end of the paragraph can begin. It parses
+// nothing: goldmark goes on to the next parser.
+type stopParser struct{}
+
+func (stopParser) Trigger() []byte { return []byte("![]`<*_~") }
+
+func (stopParser) Parse(_ ast.Node, _ text.Reader, pc parser.Context) ast.Node {
+	if st, ok := pc.Get(linkStateKey).(*linkState); ok {
+		st.limits.check()
+	}
+	return nil
+}
+
+// stopReader is the reader goldmark's block parse reads a text through: it
+// checks the render's limits at every line the parse peeks at, once for
+// every open block it visits there.
+type stopReader struct {
+	text.Reader
+	limits *formatLimits
+}
+
+func (r stopReader) PeekLine() ([]byte, text.Segment) {
+	r.limits.check()
+	return r.Reader.PeekLine()
+}
+
+// htmlWriter holds the HTML goldmark writes, up to maxHTMLBytes, and
+// checks the render's limits at every write, which goldmark buffers into
+// 4 KiB. Past maxHTMLBytes it panics rather than failing the write:
+// goldmark ignores a failed write and renders on, escaping every URL left
+// for a writer that takes none of it. Its only method is Write, so bufio
+// never writes around it.
+type htmlWriter struct {
+	buf    bytes.Buffer
+	limits *formatLimits
+}
+
+func (w *htmlWriter) Write(p []byte) (int, error) {
+	if w.buf.Len()+len(p) > maxHTMLBytes {
+		panic(errHTMLBytes)
+	}
+	w.limits.check()
+	return w.buf.Write(p)
 }
 
 // linkStateKey carries a render's linkState to linkTransformer.
 var linkStateKey = parser.NewContextKey()
 
-// linkState is one render's settings and findings.
+// linkState is one render's settings, limits and findings.
 type linkState struct {
 	base      *url.URL // the document's URL; nil leaves nothing to resolve against
 	images    bool     // show https images
-	remote    int      // http and https images seen
-	linkBytes int      // the kept links' and images' destinations and titles
-	over      error    // errLinkBytes once linkBytes passes maxLinkBytes
+	limits    *formatLimits
+	remote    int   // http and https images seen
+	linkBytes int   // the links' and images' destinations and titles, as stored
+	over      error // errLinkBytes once linkBytes passes maxLinkBytes
 }
 
 // resolve resolves dest against the document's URL. It reports false for
@@ -160,9 +241,11 @@ func (s *linkState) resolve(dest []byte) (*url.URL, bool) {
 	return u, linkable(u)
 }
 
-// keep counts a kept link's or image's destination and title against
-// maxLinkBytes, and reports whether the render is still within it.
-func (s *linkState) keep(dest, title []byte) bool {
+// charge counts a link's or image's destination and title, as stored,
+// against maxLinkBytes, before anything resolves it, and reports whether
+// the render is still within it. It checks the render's limits too.
+func (s *linkState) charge(dest, title []byte) bool {
+	s.limits.check()
 	s.linkBytes += len(dest) + len(title)
 	if s.linkBytes > maxLinkBytes {
 		s.over = errLinkBytes
@@ -195,11 +278,43 @@ func (linkTransformer) Transform(doc *ast.Document, reader text.Reader, pc parse
 	if !ok {
 		return // a parse without format's context: nothing to resolve against
 	}
-	var links []*ast.Link
-	var autoLinks []*ast.AutoLink
-	var images []*ast.Image
-	// The walk only collects: changing the tree under it would skip nodes.
-	walk(doc, func(n ast.Node) {
+	links, autoLinks, images := collectLinks(doc)
+	source := reader.Source()
+	for _, l := range links {
+		if !st.charge(l.Destination, l.Title) {
+			return
+		}
+		u, ok := st.resolve(l.Destination)
+		if !ok {
+			unwrap(l)
+			continue
+		}
+		l.Destination = []byte(u.String())
+	}
+	for _, a := range autoLinks {
+		st.limits.check()
+		if !autoLinkable(a, source) {
+			a.Parent().ReplaceChild(a.Parent(), a, ast.NewString(a.Label(source)))
+		}
+	}
+	for _, img := range images {
+		if !st.charge(img.Destination, img.Title) {
+			return
+		}
+		st.replaceImage(img, source)
+	}
+}
+
+// collectLinks returns the links, autolinks and images under doc, except
+// those inside an image: all an image holds is written as its text, its
+// alt or the label replacing it. The walk only collects: changing the
+// tree under it would skip nodes. ast.Walk fails only with an error its
+// callback returns, and this one returns none.
+func collectLinks(doc ast.Node) (links []*ast.Link, autoLinks []*ast.AutoLink, images []*ast.Image) {
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
 		switch n := n.(type) {
 		case *ast.Link:
 			links = append(links, n)
@@ -207,34 +322,16 @@ func (linkTransformer) Transform(doc *ast.Document, reader text.Reader, pc parse
 			autoLinks = append(autoLinks, n)
 		case *ast.Image:
 			images = append(images, n)
+			return ast.WalkSkipChildren, nil
 		}
+		return ast.WalkContinue, nil
 	})
-	source := reader.Source()
-	for _, l := range links {
-		u, ok := st.resolve(l.Destination)
-		if !ok {
-			unwrap(l)
-			continue
-		}
-		if l.Destination = []byte(u.String()); !st.keep(l.Destination, l.Title) {
-			return
-		}
-	}
-	for _, a := range autoLinks {
-		if !autoLinkable(a, source) {
-			a.Parent().ReplaceChild(a.Parent(), a, ast.NewString(a.Label(source)))
-		}
-	}
-	for _, img := range images {
-		if !st.replaceImage(img, source) {
-			return
-		}
-	}
+	return links, autoLinks, images
 }
 
-// autoLinkable reports whether a page may keep autolink a: <https://...>,
-// or a bare URL or address the linkify extension found. Its URL is
-// absolute by definition, and written as it is stored, escaped.
+// autoLinkable reports whether a page may keep autolink a, <https://...>
+// or <someone@example.com>. Its URL is absolute by definition, and
+// written as it is stored, escaped.
 func autoLinkable(a *ast.AutoLink, source []byte) bool {
 	if a.AutoLinkType == ast.AutoLinkEmail {
 		return true // written as a mailto: link
@@ -246,8 +343,8 @@ func autoLinkable(a *ast.AutoLink, source []byte) bool {
 // replaceImage leaves img an https image when the render shows images, and
 // otherwise replaces it with its alt text: a link to the image when its
 // URL is http or https and it isn't inside a link already, plain text
-// otherwise. It reports whether the render is still within maxLinkBytes.
-func (s *linkState) replaceImage(img *ast.Image, source []byte) bool {
+// otherwise.
+func (s *linkState) replaceImage(img *ast.Image, source []byte) {
 	u, ok := s.resolve(img.Destination)
 	remote := ok && (u.Scheme == "http" || u.Scheme == "https")
 	if remote {
@@ -256,18 +353,17 @@ func (s *linkState) replaceImage(img *ast.Image, source []byte) bool {
 	if remote && s.images && u.Scheme == "https" {
 		img.Destination = []byte(u.String())
 		img.SetAttributeString("loading", []byte("lazy"))
-		return s.keep(img.Destination, img.Title)
+		return
 	}
 	label := ast.NewString([]byte(imageLabel(img, source)))
 	if !remote || insideLink(img) {
 		img.Parent().ReplaceChild(img.Parent(), img, label)
-		return true
+		return
 	}
 	link := ast.NewLink()
 	link.Destination = []byte(u.String())
 	link.AppendChild(link, label)
 	img.Parent().ReplaceChild(img.Parent(), img, link)
-	return s.keep(link.Destination, nil)
 }
 
 // imageLabel is the text an image is replaced with: its alt text, or a

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -20,12 +22,24 @@ import (
 // MaxRenderedMarkdown bytes of anything, race detector included: what the
 // budgets stop took from seconds to minutes at that size, or allocated
 // gigabytes. shownAlloc bounds showing a text over a budget, which the
-// budgets refuse before goldmark parses it.
+// budgets refuse before goldmark parses it. linkAlloc bounds a text over
+// the link budget, which costs what goldmark's parse of its links does.
 const (
 	renderLimit = 10 * time.Second
 	renderAlloc = 1 << 30
 	shownAlloc  = 16 << 20
+	linkAlloc   = 512 << 20
 )
+
+// newBudgetRenderer is a Renderer whose time limit is out of the way, so a
+// test of the budgets tests them alone: under the race detector, the
+// costliest texts within them take longer than maxFormatTime.
+func newBudgetRenderer(t testing.TB) *Renderer {
+	t.Helper()
+	r := newRenderer(t)
+	r.markdown.timeLimit = time.Minute
+	return r
+}
 
 // allocated is how many bytes fn allocates.
 func allocated(fn func()) uint64 {
@@ -93,7 +107,7 @@ func TestMarkdown_OverBudget(t *testing.T) {
 		// A long reference definition repeated by every link to it.
 		{"repeated reference", fill(longRef, "[x]\n\n", ""), errLinkBytes},
 	}
-	r := newRenderer(t)
+	r := newBudgetRenderer(t)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			require.LessOrEqual(t, len(tc.src), MaxRenderedMarkdown)
@@ -101,7 +115,7 @@ func TestMarkdown_OverBudget(t *testing.T) {
 			// costs what the parse does.
 			limit := uint64(shownAlloc)
 			if tc.want == errLinkBytes {
-				limit = renderAlloc
+				limit = linkAlloc
 			}
 			for _, images := range []bool{false, true} {
 				var text Text
@@ -111,10 +125,7 @@ func TestMarkdown_OverBudget(t *testing.T) {
 				require.NoError(t, err)
 				assert.Less(t, time.Since(start), renderLimit)
 				assert.Less(t, alloc, limit)
-				assert.Equal(t, tc.want.reason, text.Unformatted)
-				assert.Equal(t, string(tc.src), text.Source)
-				assert.Empty(t, text.HTML)
-				assert.Zero(t, text.RemoteImages)
+				assertStored(t, text, tc.src, tc.want)
 			}
 			_, _, err := r.markdown.format(tc.src, docURL, false)
 			assert.ErrorIs(t, err, tc.want)
@@ -144,7 +155,7 @@ func TestMarkdown_WithinBudget(t *testing.T) {
 		"a spaced thematic break": {[]byte("a\n\n" + strings.Repeat("- ", 64) + "\n\nb\n"),
 			[]string{"<p>a</p>\n<hr>\n<p>b</p>"}},
 	}
-	r := newRenderer(t)
+	r := newBudgetRenderer(t)
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			require.NoError(t, checkShape(tc.src))
@@ -319,7 +330,7 @@ func TestMarkdown_JustUnderBudget(t *testing.T) {
 		"text under deep lists":          textUnderLists(128, strings.Repeat("x", 64)),
 		"a**b then c*":                   fill("a**b\n", "c*\n", ""),
 	}
-	r := newRenderer(t)
+	r := newBudgetRenderer(t)
 	for name, full := range cases {
 		t.Run(name, func(t *testing.T) {
 			src := underBudget(full)
@@ -333,6 +344,204 @@ func TestMarkdown_JustUnderBudget(t *testing.T) {
 			assert.Empty(t, text.Unformatted)
 			assert.Less(t, time.Since(start), renderLimit)
 			assert.Less(t, alloc, uint64(renderAlloc))
+		})
+	}
+}
+
+// TestMarkdown_CostsCheckShapeDoesntSee: texts within checkShape's budgets
+// whose cost lies in what it doesn't read, each held by what bounds it to
+// its outcome and to a time and an allocation bound per render, race
+// detector included, with the time limit out of the way.
+func TestMarkdown_CostsCheckShapeDoesntSee(t *testing.T) {
+	const kib16, kib128 = 16 << 10, 128 << 10
+	noLinks := func(t *testing.T, text Text, _ bool) {
+		assert.Contains(t, string(text.HTML), "<p>")
+		assert.NotContains(t, string(text.HTML), "<a")
+	}
+	cases := []struct {
+		name string
+		src  []byte
+		over *budgetError // the budget it is over; nil when it is formatted
+		// shows checks a formatted text, with images or not.
+		shows func(t *testing.T, text Text, images bool)
+		took  time.Duration
+		alloc uint64
+	}{
+		// Links a page can't keep, each charged before it is resolved:
+		// resolving one copies its reference's destination.
+		{"ftp references", references("ftp://a.example/"+strings.Repeat("a", kib16), "[x]"),
+			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+		{"ftp references, a long destination", references("ftp://a.example/"+strings.Repeat("a", kib128), "[x]"),
+			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+		{"javascript references", references("javascript:"+strings.Repeat("a", kib16), "[x]"),
+			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+		{"javascript image references", references("javascript:"+strings.Repeat("a", kib16), "![x]"),
+			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+		{"ftp image references", references("ftp://a.example/"+strings.Repeat("a", kib16), "![x]"),
+			errLinkBytes, nil, 5 * time.Second, linkAlloc},
+		// Addresses written out without link markup, which Linkify's
+		// regexps would scan the line for again from every trigger: an
+		// email address dropped for the _ after it, and URLs closed at
+		// every ).
+		{"an email address after runs of ~", fill("x"+strings.Repeat("~~~a", 680)+"@",
+			strings.Repeat("a", 62)+".", "a_\n"), nil, noLinks, 2 * time.Second, 64 << 20},
+		{"URLs in parentheses", []byte(strings.Repeat("(http://a.b/"+strings.Repeat(")", 4000), 256) + "\n"),
+			nil, noLinks, 2 * time.Second, 64 << 20},
+		// Links within the link budget whose URLs escaping makes five
+		// times longer: the HTML cap.
+		{"escaped references", escapedReferences(), errHTMLBytes, nil, 2 * time.Second, 256 << 20},
+		// Images inside images: only the outer one is labelled, with all
+		// the text inside it.
+		{"nested images", nestedImages(4300), nil, showsOuterImage, 2 * time.Second, 64 << 20},
+	}
+	r := newBudgetRenderer(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.LessOrEqual(t, len(tc.src), MaxRenderedMarkdown)
+			require.NoError(t, checkShape(tc.src), "within the shape budgets")
+			for _, images := range []bool{false, true} {
+				var text Text
+				var err error
+				start := time.Now()
+				alloc := allocated(func() { text, err = r.RenderMarkdown(tc.src, docURL, images) })
+				require.NoError(t, err)
+				assert.Less(t, time.Since(start), tc.took, "images %v", images)
+				assert.Less(t, alloc, tc.alloc, "images %v", images)
+				if tc.over != nil {
+					assertStored(t, text, tc.src, tc.over)
+					continue
+				}
+				require.Empty(t, text.Unformatted, "images %v", images)
+				uitest.AssertInert(t, string(text.HTML))
+				tc.shows(t, text, images)
+			}
+		})
+	}
+}
+
+// references is a reference definition to dest, then ref, a use of it,
+// in paragraphs of their own: MaxRenderedMarkdown bytes.
+func references(dest, ref string) []byte {
+	return fill("[x]: "+dest+"\n\n", ref+"\n\n", "")
+}
+
+// escapedReferences is a reference definition whose destination is
+// 16 KiB of &, which goldmark writes as &amp;, used by 500 links: within
+// the link budget, and 41 MB of HTML.
+func escapedReferences() []byte {
+	return []byte("[x]: https://a.example/?" + strings.Repeat("&", 16<<10) + "\n\n" + strings.Repeat("[x]\n\n", 500))
+}
+
+// nestedImages is n images, each inside the one before.
+func nestedImages(n int) []byte {
+	return []byte(strings.Repeat("![", n) + "a" + strings.Repeat("](https://i.example/x.png)", n) + "\n")
+}
+
+// showsOuterImage checks nestedImages(n) for n over 999, goldmark's limit
+// on open brackets: the innermost images are text inside the rest, and
+// the outer image is its alt text, all of that text. Only the outer image
+// is counted.
+func showsOuterImage(t *testing.T, text Text, images bool) {
+	t.Helper()
+	html := string(text.HTML)
+	assert.Equal(t, 1, text.RemoteImages)
+	if images {
+		// The sanitizer drops an alt with a : in it, as it drops any.
+		assert.Equal(t, `<p><img src="https://i.example/x.png" loading="lazy"></p>`+"\n", html)
+		return
+	}
+	assert.True(t, strings.HasPrefix(html, `<p><a href="https://i.example/x.png" rel="nofollow noreferrer noopener" `+
+		`target="_blank">[image: ![![`), "the outer image's label")
+	assert.Contains(t, html, "![a](https://i.example/x.png)](")
+	assert.True(t, strings.HasSuffix(html, "](https://i.example/x.png)]</a></p>\n"), "the outer image's label")
+}
+
+// assertStored checks that text is src shown as stored, over the budget
+// or limit over.
+func assertStored(t *testing.T, text Text, src []byte, over *budgetError) {
+	t.Helper()
+	assert.Equal(t, over.reason, text.Unformatted)
+	assert.Equal(t, string(src), text.Source)
+	assert.Empty(t, text.HTML)
+	assert.Zero(t, text.RemoteImages)
+}
+
+// mostOnOneLine is unit repeated on one line, as many times as the budgets
+// allow.
+func mostOnOneLine(unit string) []byte {
+	line := func(n int) []byte { return []byte(strings.Repeat(unit, n) + "\n") }
+	return line(sort.Search(MaxRenderedMarkdown/len(unit), func(n int) bool { return checkShape(line(n+1)) != nil }))
+}
+
+// TestMarkdown_TimeLimit: a text within the budgets that takes longer to
+// format than the time limit is stopped there, in the block parse or the
+// inline one, and shown as stored.
+func TestMarkdown_TimeLimit(t *testing.T) {
+	cases := map[string][]byte{
+		"deep lists, tabs": underBudget(deepLists(true)),
+		"[a](":             mostOnOneLine("[a]("),
+	}
+	r := newRenderer(t)
+	r.markdown.timeLimit = 10 * time.Millisecond
+	for name, src := range cases {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, checkShape(src))
+			for _, images := range []bool{false, true} {
+				start := time.Now()
+				text, err := r.RenderMarkdown(src, docURL, images)
+				require.NoError(t, err)
+				assert.Less(t, time.Since(start), 250*time.Millisecond, "images %v", images)
+				assertStored(t, text, src, errFormatTime)
+			}
+		})
+	}
+}
+
+// TestMarkdown_AllocLimit: a text within the budgets that allocates more
+// than the allocation limit is stopped once it has, and shown as stored.
+func TestMarkdown_AllocLimit(t *testing.T) {
+	src := underBudget(textUnderLists(128, strings.Repeat("x", 64)))
+	require.NoError(t, checkShape(src))
+	r := newBudgetRenderer(t)
+	r.markdown.allocLimit = 32 << 20
+	var text Text
+	var err error
+	alloc := allocated(func() { text, err = r.RenderMarkdown(src, docURL, false) })
+	require.NoError(t, err)
+	assertStored(t, text, src, errFormatAlloc)
+	assert.Less(t, alloc, uint64(64<<20))
+}
+
+// TestMarkdown_FormatsAfterAStop: a render stopped part way leaves nothing
+// behind: the same Renderer then formats a text exactly as a fresh one
+// does.
+func TestMarkdown_FormatsAfterAStop(t *testing.T) {
+	stops := []struct {
+		name      string
+		src       []byte
+		timeLimit time.Duration
+		over      *budgetError
+	}{
+		{"by the time limit", mostOnOneLine("[a]("), 10 * time.Millisecond, errFormatTime},
+		{"by the HTML cap", escapedReferences(), time.Minute, errHTMLBytes},
+	}
+	fresh, r := newBudgetRenderer(t), newBudgetRenderer(t)
+	src := article()
+	for _, stop := range stops {
+		t.Run(stop.name, func(t *testing.T) {
+			r.markdown.timeLimit = stop.timeLimit
+			stopped, err := r.RenderMarkdown(stop.src, docURL, false)
+			require.NoError(t, err)
+			require.Equal(t, stop.over.reason, stopped.Unformatted)
+			r.markdown.timeLimit = time.Minute
+			for _, images := range []bool{false, true} {
+				want, err := fresh.RenderMarkdown(src, docURL, images)
+				require.NoError(t, err)
+				require.NotEmpty(t, want.HTML)
+				got, err := r.RenderMarkdown(src, docURL, images)
+				require.NoError(t, err)
+				assert.True(t, got == want, "the same text, images %v", images)
+			}
 		})
 	}
 }
@@ -475,21 +684,45 @@ func TestCheckShape_Blocks(t *testing.T) {
 }
 
 // TestMarkup_CoversInlineTriggers: every character newMarkdown's inline
-// parsers start at is charged as markup, a space aside.
+// parsers start at is charged as markup, and the stop parser starts at
+// each of them.
 func TestMarkup_CoversInlineTriggers(t *testing.T) {
-	charged := func(p parser.InlineParser) {
+	// goldmark's, and those of the extensions newMarkdown uses (a table
+	// is parsed inline cell by cell, with these).
+	parsers := make([]parser.InlineParser, 0, len(parser.DefaultInlineParsers())+2)
+	for _, p := range parser.DefaultInlineParsers() {
+		parsers = append(parsers, p.Value.(parser.InlineParser))
+	}
+	parsers = append(parsers, extension.NewStrikethroughParser(), extension.NewTaskCheckBoxParser())
+	var triggers []byte
+	for _, p := range parsers {
 		for _, c := range p.Trigger() {
-			assert.True(t, c == ' ' || markup[c], "%T starts at %q", p, c)
+			assert.True(t, markup[c], "%T starts at %q", p, c)
+			if !slices.Contains(triggers, c) {
+				triggers = append(triggers, c)
+			}
 		}
 	}
-	for _, p := range parser.DefaultInlineParsers() {
-		charged(p.Value.(parser.InlineParser))
-	}
-	// extension.GFM's.
-	for _, p := range []parser.InlineParser{extension.NewLinkifyParser(), extension.NewStrikethroughParser(),
-		extension.NewTaskCheckBoxParser()} {
-		charged(p)
-	}
+	assert.ElementsMatch(t, triggers, stopParser{}.Trigger())
+}
+
+// TestMarkdown_StoppedPageIsInert: the page of a document whose render the
+// time limit stopped shows its text escaped.
+func TestMarkdown_StoppedPageIsInert(t *testing.T) {
+	r := newRenderer(t)
+	r.markdown.timeLimit = 10 * time.Millisecond
+	hostile := "<script>alert(1)</script> <img src=x onerror=alert(1)>\n\n"
+	src := underBudget(append([]byte(hostile), deepLists(true)...))
+	text, err := r.RenderMarkdown(src, docURL, false)
+	require.NoError(t, err)
+	require.Equal(t, errFormatTime.reason, text.Unformatted)
+	page := samples(t, newRenderer(t))[PageDocument].(Document)
+	page.Text = TextPanel{State: TextShown, Text: text}
+	out := render(t, r, PageDocument, page)
+	uitest.AssertInert(t, out)
+	assert.Contains(t, out, "Shown as stored, unformatted: "+errFormatTime.reason+" to format quickly.")
+	assert.Contains(t, out, `<pre class="source">&lt;script&gt;alert(1)&lt;/script&gt; &lt;img src=x onerror=alert(1)&gt;`+
+		"\n\n- a\n")
 }
 
 // TestMarkdown_OverBudgetPageIsInert: the page of a document over a

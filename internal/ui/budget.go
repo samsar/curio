@@ -1,14 +1,22 @@
 package ui
 
-import "bytes"
+import (
+	"bytes"
+	"runtime/metrics"
+	"sync/atomic"
+	"time"
+)
 
 // Formatting budgets: how much a document's markdown may hold of what
 // makes goldmark's work or memory grow faster than the text, and still be
 // formatted. A stored page can hold any of it, by accident or by design (a
-// 1 MiB line of > took four and a half minutes), and goldmark can't be
-// stopped part way. A document over a budget is shown as the plain text it
-// is stored as, which costs what its length does. docs/decisions.md
-// "Dashboard: formatting budgets for stored markdown" has the measurements.
+// 1 MiB line of > took four and a half minutes). The budgets decide before
+// goldmark parses, the same way on every machine; a render they let
+// through is still stopped once it passes maxFormatTime or maxFormatAlloc
+// (formatLimits), for the shapes they miss. A document over a budget or a
+// limit is shown as the plain text it is stored as, which costs what its
+// length does. docs/decisions.md "Dashboard: formatting budgets for
+// stored markdown" has the measurements.
 const (
 	// maxLineNesting is how many blockquotes and list items one line may
 	// open: goldmark's work on a line grows with their square.
@@ -42,13 +50,31 @@ const (
 	// lines makes cells out of nothing.
 	maxTableCells = 1 << 18
 	// maxLinkBytes bounds the destinations and titles of the text's links
-	// and images, counted once per link: every link to a reference
-	// definition repeats its URL.
+	// and images, as stored, counted for every one of them, kept or not,
+	// before it is resolved: every link to a reference definition repeats
+	// its destination, and resolving one copies it several times over.
 	maxLinkBytes = 8 << 20
+	// maxHTMLBytes bounds the HTML goldmark writes. Escaping makes a
+	// link's URL up to five times longer than maxLinkBytes counts it (&
+	// is &amp;), and sanitizing and serving the page cost what the HTML
+	// does.
+	maxHTMLBytes = 8 * MaxRenderedMarkdown
 )
 
-// budgetError is a formatting budget a text is over, and why its page
-// shows it unformatted.
+// The limits every render is held to, whatever its text: it stops at the
+// first check after maxFormatTime has passed or maxFormatAlloc bytes have
+// been allocated since it began. They sit well above the most a text
+// within the budgets takes (about a second, and 330 MiB allocated), so the
+// budgets stay the decision, and the limits stop only a shape they miss.
+// Each needs the other: within two seconds a render can allocate
+// gigabytes, and one that allocates little can run on.
+const (
+	maxFormatTime  = 2 * time.Second
+	maxFormatAlloc = 1 << 30
+)
+
+// budgetError is a formatting budget or limit a text is over, and why its
+// page shows it unformatted.
 type budgetError struct{ reason string }
 
 func (e *budgetError) Error() string { return "over a formatting budget: " + e.reason }
@@ -62,14 +88,70 @@ var (
 	errEmphasis       = &budgetError{"its paragraphs hold too many runs of *, _ and ~"}
 	errTableCells     = &budgetError{"its tables have too many cells"}
 	errLinkBytes      = &budgetError{"its links repeat too much text"}
+	errHTMLBytes      = &budgetError{"it makes too much HTML"}
+	errFormatTime     = &budgetError{"its markup takes too much work"}
+	errFormatAlloc    = &budgetError{"its markup takes too much memory"}
 )
 
-// markup marks the characters goldmark's inline parsers start at, spaces
-// aside: code spans, links and images, emphasis and strikethrough, raw
-// HTML and autolinks, task list items, and the linkify extension's
-// triggers. A space starts linkify too, but its scan stops at the next
-// space. TestMarkup_CoversInlineTriggers keeps the list in step with the
-// parsers newMarkdown uses.
+// allocCheckEvery is how often a render's checks read the process's
+// allocations: a read costs about as much as a hundred checks (0.2 µs),
+// so reading at every 256th keeps the reads' cost under the checks'.
+const allocCheckEvery = 256
+
+// formatLimits holds one render to maxFormatTime and maxFormatAlloc, or
+// what a test sets instead. goldmark can't be cancelled, so the render
+// checks them from goldmark's extension points (at every inline trigger,
+// every line the block parse reads, every link, autolink and image, and
+// every write of HTML), and a check that fails unwinds goldmark by
+// panicking with its *budgetError, which format recovers. Only the
+// render's goroutine checks; timeUp is set from its timer's.
+type formatLimits struct {
+	timer  *time.Timer
+	timeUp atomic.Bool
+	checks int
+	// The process's heap allocations when the render began, and how many
+	// more it may make.
+	start, maxAlloc uint64
+	allocs          [1]metrics.Sample
+}
+
+// startLimits starts a render's limits: its time runs from now, and its
+// allocations count from here. stop releases its timer.
+func startLimits(maxTime time.Duration, maxAlloc uint64) *formatLimits {
+	l := &formatLimits{maxAlloc: maxAlloc}
+	l.allocs[0].Name = "/gc/heap/allocs:bytes"
+	l.start = l.allocated()
+	l.timer = time.AfterFunc(maxTime, func() { l.timeUp.Store(true) })
+	return l
+}
+
+func (l *formatLimits) stop() { l.timer.Stop() }
+
+// check panics with errFormatTime once the render's time is up, and with
+// errFormatAlloc once the process has allocated more than the render may
+// since it began. The allocations are the whole process's, so other
+// requests can only stop a render sooner.
+func (l *formatLimits) check() {
+	if l.timeUp.Load() {
+		panic(errFormatTime)
+	}
+	if l.checks++; l.checks%allocCheckEvery == 0 && l.allocated()-l.start > l.maxAlloc {
+		panic(errFormatAlloc)
+	}
+}
+
+// allocated is how many bytes the process has allocated on the heap.
+func (l *formatLimits) allocated() uint64 {
+	metrics.Read(l.allocs[:])
+	return l.allocs[0].Value.Uint64()
+}
+
+// markup marks the characters goldmark's inline parsers start at (code
+// spans, links and images, emphasis and strikethrough, raw HTML and
+// autolinks, task list items) and (, where an inline link's destination
+// starts, which the ] before it scans to the end of the line.
+// TestMarkup_CoversInlineTriggers keeps the list in step with the parsers
+// newMarkdown uses.
 var markup = [256]bool{'!': true, '[': true, ']': true, '`': true, '*': true, '_': true, '~': true,
 	'<': true, '(': true}
 

@@ -4,10 +4,16 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 
 	"github.com/samsar/curio/internal/ui/uitest"
 )
@@ -74,7 +80,6 @@ func TestMarkdown_Links(t *testing.T) {
 		{"[proto-relative](//cdn.example/x)", "https://cdn.example/x"},
 		{"[mail](mailto:someone@example.com)", "mailto:someone@example.com"},
 		{"<https://auto.example/x>", "https://auto.example/x"},
-		{"see www.bare.example/x", "http://www.bare.example/x"},
 		{"<someone@example.com>", "mailto:someone@example.com"},
 	}
 	for _, images := range []bool{false, true} {
@@ -105,6 +110,12 @@ func TestMarkdown_Links(t *testing.T) {
 			out := string(renderMD(t, "<"+url+">", images).HTML)
 			uitest.AssertInert(t, out)
 			assert.Equal(t, "<p>"+url+"</p>\n", out, "images %v", images)
+		}
+		// An address written out without link markup is text.
+		for _, src := range []string{"see www.bare.example/x", "see https://bare.example/x", "see someone@example.com"} {
+			out := string(renderMD(t, src, images).HTML)
+			uitest.AssertInert(t, out)
+			assert.Equal(t, "<p>"+src+"</p>\n", out, "images %v", images)
 		}
 	}
 }
@@ -168,6 +179,25 @@ func TestMarkdown_Images(t *testing.T) {
 	assert.NotContains(t, html, `src="data:`)
 }
 
+// TestMarkdown_InsideAnImage: all an image holds is written as its text,
+// so a link or an image inside one is neither kept nor counted.
+func TestMarkdown_InsideAnImage(t *testing.T) {
+	src := "![[x](javascript:alert(1)) ![inner](https://img.example/inner.png)](https://img.example/a.png)\n"
+	want := map[bool]string{
+		false: `<p><a href="https://img.example/a.png" rel="nofollow noreferrer noopener" target="_blank">` +
+			`[image: x inner]</a></p>` + "\n",
+		true: `<p><img src="https://img.example/a.png" alt="x inner" loading="lazy"></p>` + "\n",
+	}
+	for _, images := range []bool{false, true} {
+		out := renderMD(t, src, images)
+		html := string(out.HTML)
+		uitest.AssertInert(t, html)
+		assert.NotContains(t, html, "javascript:")
+		assert.Equal(t, want[images], html)
+		assert.Equal(t, 1, out.RemoteImages, "the outer image")
+	}
+}
+
 // TestMarkdown_NoBase: a document whose URL doesn't parse leaves relative
 // links nothing to resolve against, so they are text.
 func TestMarkdown_NoBase(t *testing.T) {
@@ -177,6 +207,69 @@ func TestMarkdown_NoBase(t *testing.T) {
 	uitest.AssertInert(t, html)
 	assert.NotContains(t, html, "/about")
 	assert.Contains(t, html, `href="https://x.example/"`)
+}
+
+// TestFormatLimits_EveryHookChecks: once a render's time is up, every place
+// goldmark calls curio's code from stops it.
+func TestFormatLimits_EveryHookChecks(t *testing.T) {
+	limits := startLimits(time.Hour, maxFormatAlloc)
+	defer limits.stop()
+	limits.timeUp.Store(true)
+	pc := parser.NewContext()
+	pc.Set(linkStateKey, &linkState{limits: limits})
+	transform := func(src string) func() {
+		return func() {
+			doc := goldmark.New().Parser().Parse(text.NewReader([]byte(src)))
+			linkTransformer{}.Transform(doc.(*ast.Document), text.NewReader([]byte(src)), pc)
+		}
+	}
+	hooks := map[string]func(){
+		"an inline trigger": func() { stopParser{}.Parse(nil, nil, pc) },
+		"a line":            func() { stopReader{text.NewReader([]byte("a\n")), limits}.PeekLine() },
+		"a link":            transform("[a](https://a.example/)"),
+		"an autolink":       transform("<https://a.example/>"),
+		"an image":          transform("![a](https://a.example/a.png)"),
+		"a write of HTML":   func() { _, _ = (&htmlWriter{limits: limits}).Write([]byte("<p>")) },
+	}
+	for name, hook := range hooks {
+		assert.PanicsWithValue(t, errFormatTime, hook, name)
+	}
+}
+
+// TestHTMLWriter_Cap: the HTML writer takes up to maxHTMLBytes, and stops
+// the render at a write past it.
+func TestHTMLWriter_Cap(t *testing.T) {
+	limits := startLimits(time.Hour, maxFormatAlloc)
+	defer limits.stop()
+	w := &htmlWriter{limits: limits}
+	_, err := w.Write(make([]byte, maxHTMLBytes-1))
+	require.NoError(t, err)
+	_, err = w.Write([]byte("x"))
+	require.NoError(t, err)
+	assert.PanicsWithValue(t, errHTMLBytes, func() { _, _ = w.Write([]byte("x")) })
+	assert.Equal(t, maxHTMLBytes, w.buf.Len())
+}
+
+// panicking is an AST transformer that panics with v.
+type panicking struct{ v any }
+
+func (p panicking) Transform(*ast.Document, text.Reader, parser.Context) { panic(p.v) }
+
+// TestFormat_RecoversOnlyBudgetStops: format returns the *budgetError a
+// render panics with, and lets any other panic go on.
+func TestFormat_RecoversOnlyBudgetStops(t *testing.T) {
+	m := newMarkdown()
+	panicsWith := func(v any) {
+		m.md = goldmark.New(goldmark.WithParserOptions(parser.WithASTTransformers(util.Prioritized(panicking{v}, 0))))
+	}
+	panicsWith(errFormatAlloc)
+	html, remote, err := m.format([]byte("text\n"), docURL, false)
+	require.ErrorIs(t, err, errFormatAlloc)
+	assert.Empty(t, html)
+	assert.Zero(t, remote)
+
+	panicsWith("a bug")
+	assert.PanicsWithValue(t, "a bug", func() { _, _, _ = m.format([]byte("text\n"), docURL, false) })
 }
 
 func TestCutMarkdown(t *testing.T) {

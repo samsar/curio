@@ -471,6 +471,19 @@ func TestUI_DocumentUnformatted(t *testing.T) {
 	assert.NotContains(t, body, "Load images", "nothing to load")
 }
 
+// TestUI_DocumentUnlinkableLinksOverBudget: links a page can't keep count
+// against the link budget too, here a thousand to a 16 KiB ftp URL.
+func TestUI_DocumentUnlinkableLinksOverBudget(t *testing.T) {
+	srv := apitest.Start(t)
+	doc := srv.AddDocument(t, "https://site.example/refs", store.DocStateFetched)
+	src := "[x]: ftp://a.example/" + strings.Repeat("a", 16<<10) + "\n\n" + strings.Repeat("[x]\n\n", 1000)
+	srv.AddContent(t, doc, src)
+	body := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	assert.Contains(t, body, "Shown as stored, unformatted: its links repeat too much text to format quickly.")
+	assert.Contains(t, body, `<pre class="source">`+html.EscapeString(src)+"</pre>")
+	assert.NotContains(t, body, `<a href="ftp:`)
+}
+
 // TestUI_DocumentStates: a document without text, one whose text is gone
 // from disk, and a failed one with its last error.
 func TestUI_DocumentStates(t *testing.T) {
