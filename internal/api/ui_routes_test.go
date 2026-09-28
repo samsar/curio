@@ -131,8 +131,14 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 	assert.Contains(t, notFound.body, `<nav aria-label="Main">`)
 	assertSecurityHeaders(t, notFound, ui.CSP)
 	assertSecurityHeaders(t, s.do(t, request{method: http.MethodPost, path: "/ui/search"}), ui.CSP)
-	assertSecurityHeaders(t, s.do(t, request{method: http.MethodGet, path: "/ui/",
-		origin: "https://attacker.example"}), ui.CSP)
+	for _, refused := range []request{
+		{method: http.MethodGet, path: "/ui/", origin: "https://attacker.example"},
+		{method: http.MethodGet, path: "/ui/", host: "attacker.example:" + s.port},
+	} {
+		resp := s.do(t, refused)
+		assert.Equal(t, http.StatusForbidden, resp.status)
+		assertSecurityHeaders(t, resp, ui.CSP)
+	}
 
 	starting := newStartingTestServer(t)
 	resp := starting.do(t, request{method: http.MethodGet, path: "/ui/"})

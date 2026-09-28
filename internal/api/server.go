@@ -81,7 +81,8 @@ type Server struct {
 	srv    *http.Server
 }
 
-// ServerConfig is what a Server serves besides the API.
+// ServerConfig is what NewServer builds a Server from, besides its
+// listener.
 type ServerConfig struct {
 	Home    string   // the $CURIO_HOME it serves, which a starting daemon names
 	Startup *Startup // the progress a starting daemon reports until Ready

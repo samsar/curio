@@ -467,6 +467,34 @@ func TestUI_DocumentTruncated(t *testing.T) {
 	body := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
 	assert.Contains(t, body, "This is the start of the text; all of it is in <code>"+srv.Home.ContentDir())
 	assert.NotContains(t, body, "the last line")
+	assert.NotContains(t, body, "Load images", "offered only for a text with remote images")
+}
+
+// failingDocumentBookmarks fails reading a document's bookmarks.
+type failingDocumentBookmarks struct{ store.BookmarkStore }
+
+func (failingDocumentBookmarks) ListByDocument(context.Context, string, string) ([]*store.Bookmark, error) {
+	return nil, fmt.Errorf("list bookmarks of document: %w", errInjected)
+}
+
+// TestUI_DocumentPanelsDegrade: a document panel whose read fails shows
+// its error, logged once, and the rest of the page renders.
+func TestUI_DocumentPanelsDegrade(t *testing.T) {
+	var rec logRecorder
+	srv := apitest.Start(t, func(d *api.Deps) {
+		d.Bookmarks = failingDocumentBookmarks{d.Bookmarks}
+		d.Log = slog.New(&rec)
+	})
+	doc := titled(t, srv, "https://site.example/post", "A post", store.DocStateFetched)
+	srv.AddContent(t, doc, "# A post\n\nthe text")
+	p := get(t, srv, "/ui/documents/"+doc.ID)
+	require.Equal(t, http.StatusOK, p.status)
+	uitest.AssertInert(t, p.body)
+	assert.Contains(t, p.body, "Couldn't read this: list bookmarks of document: injected failure.")
+	assert.Contains(t, p.body, "<p>the text</p>", "the text panel renders")
+	errs := rec.errors()
+	require.Len(t, errs, 1)
+	assert.Equal(t, p.header.Get("X-Request-Id"), errs[0]["request_id"])
 }
 
 func TestUI_Interests(t *testing.T) {
