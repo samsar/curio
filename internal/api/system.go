@@ -15,9 +15,12 @@ import (
 
 // Health is the /v1/healthz response. PID and Home identify which daemon
 // answered: clients use them to confirm the process on the port is the one
-// serving their $CURIO_HOME before trusting or signalling it. Upstreams are
-// the services fetches depend on; like Ollama, a failing one doesn't make
-// the daemon unhealthy, and neither does EmbeddingDrift.
+// serving their $CURIO_HOME before trusting or signalling it.
+// GenerationModel is the generation.model the daemon started with, which
+// `curio up` compares with config.yaml's to know when a restart would
+// change it. Upstreams are the services fetches depend on; like Ollama, a
+// failing one doesn't make the daemon unhealthy, and neither does
+// EmbeddingDrift.
 type Health struct {
 	Status          string           `json:"status"`
 	PID             int              `json:"pid"`
@@ -27,6 +30,7 @@ type Health struct {
 	EmbeddingModel  string           `json:"embedding_model"`
 	EmbeddingDim    int              `json:"embedding_dim"`
 	EmbeddingDrift  *EmbeddingDrift  `json:"embedding_drift,omitempty"`
+	GenerationModel string           `json:"generation_model"`
 	OllamaReachable bool             `json:"ollama_reachable"`
 	OllamaDetail    string           `json:"ollama_detail,omitempty"`
 	Upstreams       []UpstreamHealth `json:"upstreams"`
@@ -156,6 +160,7 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		EmbeddingModel:  meta.EmbeddingModel,
 		EmbeddingDim:    meta.EmbeddingDim,
 		EmbeddingDrift:  d.embeddingDrift(),
+		GenerationModel: d.GenerationModel,
 		OllamaReachable: reachable,
 		OllamaDetail:    detail,
 		Upstreams:       d.upstreams(),

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/service"
 	"github.com/samsar/curio/internal/service/servicetest"
@@ -120,4 +121,58 @@ func TestDiscover_DaemonBin(t *testing.T) {
 		require.Len(t, fake.Specs(), 1)
 		assert.Equal(t, link, fake.Specs()[0].Program)
 	})
+}
+
+// TestConnect: Connect takes the config it is given, whatever config.yaml
+// says, and creates nothing: a caller that must not initialize a home, or
+// whose config.yaml doesn't load, connects with what it has.
+func TestConnect(t *testing.T) {
+	t.Setenv("CURIO_DAEMON_BIN", "/opt/curio/curio-daemon")
+	home, err := curiohome.Init(t.TempDir(), "qwen3-embedding:0.6b", 1024)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte("daemon: [not, a, map]\n"), 0o600))
+	cfg := config.Default()
+	cfg.Daemon.Listen = "127.0.0.1:9876"
+
+	env, err := Connect(home, cfg, "")
+	require.NoError(t, err)
+	assert.Same(t, home, env.Home)
+	assert.Equal(t, cfg, env.Config)
+	assert.Equal(t, "http://127.0.0.1:9876", env.Controller.BaseURL)
+	assert.Equal(t, "/opt/curio/curio-daemon", env.Controller.DaemonBin)
+	require.NotNil(t, env.Controller.Service)
+
+	env, err = Connect(home, cfg, "http://127.0.0.1:1234")
+	require.NoError(t, err)
+	assert.Equal(t, "http://127.0.0.1:1234", env.Controller.BaseURL)
+}
+
+// TestDiscoverWith: the connect given builds the Env, over the home
+// Discover opened and the config it loaded.
+func TestDiscoverWith(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "home")
+	var got config.Config
+	env, err := DiscoverWith(path, "http://127.0.0.1:1", func(home *curiohome.Home, cfg config.Config, url string) (Env, error) {
+		got = cfg
+		assert.Equal(t, path, home.Path)
+		assert.Equal(t, "http://127.0.0.1:1", url)
+		return Env{Home: home}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, config.Default(), got, "no config.yaml: the defaults")
+	assert.FileExists(t, env.Home.MarkerPath())
+}
+
+func TestSameFile(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	require.NoError(t, os.WriteFile(a, []byte("x"), 0o600))
+	require.NoError(t, os.WriteFile(b, []byte("x"), 0o600))
+	link := filepath.Join(dir, "link")
+	require.NoError(t, os.Symlink(a, link))
+
+	assert.True(t, SameFile(a, a))
+	assert.True(t, SameFile(link, a), "a link names its target")
+	assert.False(t, SameFile(a, b), "equal contents, two files")
+	assert.False(t, SameFile(a, filepath.Join(dir, "gone")))
 }

@@ -480,6 +480,100 @@ func TestInstall_PortTaken(t *testing.T) {
 	assert.Zero(t, a.Count("Install"))
 }
 
+// TestInstall_PreflightFirst: an install the manager would refuse (no GUI
+// session, over ssh) fails with that refusal before anything is stopped:
+// the daemon a client spawned keeps serving.
+func TestInstall_PreflightFirst(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	ctx := context.Background()
+	require.NoError(t, c.EnsureRunning(ctx)) // spawned: no manager yet
+	before, err := c.Status(ctx)
+	require.NoError(t, err)
+	a := newAgent(t, c, modeNormal, false)
+	a.Set(func(st *service.Status) { st.Installed, st.Loaded = false, false })
+	a.Fail("Preflight", service.ErrNoGUISession)
+
+	_, err = c.Install(ctx)
+	require.ErrorIs(t, err, service.ErrNoGUISession)
+	assert.Zero(t, a.Count("Install"))
+	after, err := c.Status(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, after.Health, "still serving")
+	assert.Equal(t, before.PID, after.PID, "the same daemon")
+}
+
+// TestWithDaemonStopped: the agent is booted out and its daemon has let
+// go of the home before fn runs, and nothing starts a daemon in the home
+// until fn returns: a command starting one meanwhile waits for the start
+// lock, then starts its own.
+func TestWithDaemonStopped(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	exe := c.DaemonBin
+	a := newAgent(t, c, modeSlowStop, false)
+	ctx := context.Background()
+	require.NoError(t, c.EnsureRunning(ctx))
+	launched := a.Count("Start")
+	c.DaemonBin = exe // what a command spawns once the agent is gone
+	concurrent := make(chan error, 1)
+
+	err := c.WithDaemonStopped(ctx, func() error {
+		assert.Equal(t, 1, a.Count("Uninstall"))
+		assert.Zero(t, a.PID(), "the agent's daemon is gone")
+		held, _, err := probeLock(c.Home.PIDFile())
+		assert.NoError(t, err)
+		assert.False(t, held, "nothing holds daemon.pid")
+		assert.True(t, startLockHeld(t, c))
+		go func() { concurrent <- c.EnsureRunning(ctx) }()
+		assert.Never(t, func() bool {
+			held, _, _ := probeLock(c.Home.PIDFile())
+			return held || len(concurrent) > 0
+		}, 300*time.Millisecond, 10*time.Millisecond, "nothing starts while fn runs")
+		assert.Equal(t, 1, spawnCount(t, c))
+		return nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, <-concurrent)
+	assert.Equal(t, 2, spawnCount(t, c), "the starter's daemon, once fn had returned")
+	assert.Equal(t, launched, a.Count("Start"), "the agent was gone, so the starter spawned its daemon")
+}
+
+// TestWithDaemonStopped_OutsideTheAgent: a daemon a client spawned is
+// stopped, lock-verified, and an error from fn is the call's.
+func TestWithDaemonStopped_OutsideTheAgent(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	ctx := context.Background()
+	require.NoError(t, c.EnsureRunning(ctx))
+	a := newAgent(t, c, modeNormal, false)
+	a.Set(func(st *service.Status) { st.Installed, st.Loaded = false, false })
+	moveErr := errors.New("rename: cross-device link")
+
+	err := c.WithDaemonStopped(ctx, func() error {
+		held, _, err := probeLock(c.Home.PIDFile())
+		assert.NoError(t, err)
+		assert.False(t, held)
+		return moveErr
+	})
+	require.ErrorIs(t, err, moveErr)
+	assert.Zero(t, a.Count("Uninstall"), "no agent installed")
+	assert.False(t, startLockHeld(t, c), "released once fn returned")
+}
+
+// TestWithDaemonStopped_Legacy: a daemon from before the lock protocol
+// can't be verified, so nothing is stopped or removed and fn never runs.
+func TestWithDaemonStopped_Legacy(t *testing.T) {
+	c := newTestController(t, modeNormal)
+	serveHealth(t, c, map[string]any{"status": "ok", "version": "v0.2.0"})
+	a := newAgent(t, c, modeNormal, false)
+
+	err := c.WithDaemonStopped(context.Background(), func() error {
+		t.Error("fn ran next to a legacy daemon")
+		return nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "from an older version")
+	assert.Zero(t, a.Count("Uninstall"))
+}
+
 // startLockHeld reports whether anyone holds c's daemon.start.lock.
 func startLockHeld(t *testing.T, c *Controller) bool {
 	t.Helper()

@@ -59,6 +59,8 @@ type Client struct {
 	http    *http.Client
 	// pullBackoff is how long KeepPulled waits before retry n (1-based).
 	pullBackoff func(retry int) time.Duration
+	// pullIdle is how long a pull may go without a line of progress.
+	pullIdle time.Duration
 }
 
 // New returns a Client for model at baseURL (DefaultBaseURL when empty),
@@ -71,19 +73,31 @@ func New(baseURL, model string, timeout time.Duration) (*Client, error) {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("bad base_url: %w", err)
-	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("bad base_url %q: want http(s)://host[:port]", baseURL)
+	if err := ValidateBaseURL(baseURL); err != nil {
+		return nil, err
 	}
 	return &Client{
 		baseURL:     strings.TrimRight(baseURL, "/"),
 		model:       model,
 		http:        &http.Client{Timeout: timeout},
 		pullBackoff: pullBackoff,
+		pullIdle:    defaultPullIdle,
 	}, nil
+}
+
+// ValidateBaseURL reports whether raw is an address New accepts: an http
+// or https URL with a host. config.Validate holds embedding.base_url and
+// generation.base_url to it, so a daemon refuses a bad one as it loads its
+// config, not after it has bound its port and migrated.
+func ValidateBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("bad base_url %q: %w", raw, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("bad base_url %q: want http(s)://host[:port]", raw)
+	}
+	return nil
 }
 
 // Model is the model this client asks for.
@@ -277,7 +291,7 @@ func (c *Client) ensureModel(ctx context.Context, log *slog.Logger, level slog.L
 		return err
 	}
 	log.Log(ctx, level, "pulling ollama model", "model", c.model)
-	return c.Pull(ctx, log)
+	return c.Pull(ctx, logPullProgress(ctx, log, c.model))
 }
 
 // KeepPulled runs EnsureModel until the model is ready or ctx ends, waiting

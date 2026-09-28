@@ -143,9 +143,13 @@ func TestNew(t *testing.T) {
 		{"no scheme", "localhost:11434", "m", ""},
 		{"not http", "ftp://localhost", "m", ""},
 		{"no host", "http://", "m", ""},
+		{"host and port, no scheme", "127.0.0.1:11434", "m", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.baseURL != "" {
+				assert.Equal(t, tc.want == "", ValidateBaseURL(tc.baseURL) != nil, "ValidateBaseURL agrees with New")
+			}
 			c, err := New(tc.baseURL, tc.model, time.Second)
 			if tc.want == "" {
 				require.Error(t, err)

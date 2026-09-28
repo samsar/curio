@@ -799,6 +799,7 @@ components:
         embedding_model:  { type: string, description: "The model that made this home's vectors, as its marker records" }
         embedding_dim:    { type: integer, description: "This home's vector width, fixed when it was created" }
         embedding_drift:  { $ref: "#/components/schemas/EmbeddingDrift" }
+        generation_model: { type: string, description: "The generation.model the daemon started with (config.yaml's, or the default); it takes a restart to change" }
         ollama_reachable: { type: boolean }
         ollama_detail:    { type: string, description: "Why Ollama isn't usable; present only when it isn't" }
         upstreams:
@@ -808,7 +809,7 @@ components:
             named jina. Empty when the daemon tracks none. A failing one
             doesn't make the daemon unhealthy: status stays ok.
           items: { $ref: "#/components/schemas/UpstreamHealth" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, ollama_reachable, upstreams]
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, ollama_reachable, upstreams]
 
     EmbeddingDrift:
       description: >

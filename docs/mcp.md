@@ -28,8 +28,13 @@ make build      # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp
 ## Register with Claude Code
 
 ```sh
-claude mcp add curio /absolute/path/to/bin/curio-mcp
+claude mcp add curio -- curio-mcp                    # curio-mcp on PATH (Homebrew)
+claude mcp add curio -- /absolute/path/to/bin/curio-mcp
 ```
+
+A `curio up` that set something up ends by printing the command for your
+install: by name when the `curio-mcp` on PATH is the one next to `curio`,
+and by its absolute path otherwise.
 
 Or add it to a project's `.mcp.json` (or your user MCP config):
 

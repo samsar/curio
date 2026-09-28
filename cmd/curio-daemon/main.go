@@ -62,16 +62,23 @@ func main() {
 // status is what the launchd agent's KeepAlive {SuccessfulExit: false}
 // acts on: launchd restarts a daemon that exits non-zero, after its 10s
 // throttle, and leaves one that exits 0 stopped. So the daemon exits 0
-// when there is nothing to restart: it was told to stop (even if its
+// when a restart would change nothing: it was told to stop (even if its
 // shutdown failed part way, say a request outlived the API's 5s grace),
-// or another daemon already serves the home. Anything else it can't run
-// with (a crash, a bad config.yaml, a taken port, a home it refuses)
-// exits 1, and launchd's throttled retries pick up a fix by themselves;
-// `curio doctor` says what is wrong meanwhile.
+// another daemon already serves the home, or it refused to start for a
+// cause that stays until someone fixes it (a refusal: a config.yaml it
+// can't load, a home it won't serve). A refusal is logged once, as an
+// error saying the daemon stays down until then. Whatever might clear by
+// itself (a taken port, a database it can't open or migrate) or is a crash
+// exits 1, and launchd's throttled retries pick up the recovery.
 func finish(err error, signalled bool, cause error) int {
+	var refused *refusal
 	switch {
 	case errors.Is(err, daemonctl.ErrAlreadyRunning):
-		slog.Warn("another curio-daemon already serves this home; exiting", "err", err)
+		slog.Warn("another curio-daemon already serves this home; exiting "+
+			"(to replace the running build with this one, run `curio daemon stop` first)", "err", err)
+	case errors.As(err, &refused):
+		slog.Error("curio-daemon refuses to start, and stays down until the cause is fixed; "+
+			"then a curio command (or `curio up`) starts it", "err", err)
 	case err != nil && !errors.Is(err, context.Canceled):
 		slog.Error("daemon exited with error", "err", err)
 	}
@@ -82,15 +89,28 @@ func finish(err error, signalled bool, cause error) int {
 }
 
 // exitCode is finish's status for run's err: 0 for a clean or requested
-// end, or another daemon serving the home, and 1 otherwise.
+// end, another daemon serving the home, or a refusal, and 1 otherwise.
 func exitCode(err error, signalled bool) int {
+	var refused *refusal
 	switch {
-	case err == nil, signalled, errors.Is(err, context.Canceled), errors.Is(err, daemonctl.ErrAlreadyRunning):
+	case err == nil, signalled, errors.Is(err, context.Canceled), errors.Is(err, daemonctl.ErrAlreadyRunning),
+		errors.As(err, &refused):
 		return 0
 	default:
 		return 1
 	}
 }
+
+// refusal is the daemon refusing to start for a cause that can't clear by
+// itself: a home it can't open or create, a config.yaml it can't read,
+// parse or validate, a home whose embedding contract config.yaml breaks,
+// or a vector index of another width than the home's. Relaunching it
+// would only fail the same way, so it exits 0 (see finish). run marks the
+// refusals where it knows them, never by matching messages.
+type refusal struct{ err error }
+
+func (r *refusal) Error() string { return r.err.Error() }
+func (r *refusal) Unwrap() error { return r.err }
 
 // run is the whole daemon: it returns when ctx is cancelled (nil) or when
 // startup or serving fails. The order matters. Nothing touches the database
@@ -104,7 +124,7 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 	began := time.Now()
 	home, err := openHome()
 	if err != nil {
-		return err
+		return &refusal{err}
 	}
 	lock, err := daemonctl.AcquireLock(home)
 	if err != nil {
@@ -118,7 +138,7 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 
 	cfg, err := config.Load(home.ConfigPath())
 	if err != nil {
-		return err
+		return &refusal{err}
 	}
 	logLevel.Set(cfg.Daemon.SlogLevel())
 
@@ -127,7 +147,7 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 	// database.
 	meta, err := home.CheckEmbedding(cfg.Embedding.Model, cfg.Embedding.Dim)
 	if err != nil {
-		return err
+		return &refusal{err}
 	}
 
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Daemon.Listen)
@@ -180,6 +200,9 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 		return nil, err
 	}
 	if err := sqlitestore.EnsureVectorIndex(ctx, db, meta.EmbeddingDim); err != nil {
+		if _, ok := errors.AsType[*sqlitestore.VectorWidthError](err); ok {
+			return nil, &refusal{err}
+		}
 		return nil, err
 	}
 	// sqlite-vec's build flags say whether a released binary has its NEON
@@ -385,21 +408,22 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 
 	return &daemon{
 		apiDeps: api.Deps{
-			Home:           home,
-			Documents:      docs,
-			Extractions:    exts,
-			Bookmarks:      bms,
-			Chunks:         chunks,
-			Queue:          queue,
-			Embedder:       emb,
-			Search:         engine,
-			Insights:       insights,
-			InsightEnabled: cfg.Insight.Enabled,
-			Upstreams:      upstreams,
-			Gate:           gate,
-			Drift:          driftMonitor,
-			KeepAwake:      keeper,
-			Log:            slog.Default(),
+			Home:            home,
+			Documents:       docs,
+			Extractions:     exts,
+			Bookmarks:       bms,
+			Chunks:          chunks,
+			Queue:           queue,
+			Embedder:        emb,
+			GenerationModel: cfg.Generation.Model,
+			Search:          engine,
+			Insights:        insights,
+			InsightEnabled:  cfg.Insight.Enabled,
+			Upstreams:       upstreams,
+			Gate:            gate,
+			Drift:           driftMonitor,
+			KeepAwake:       keeper,
+			Log:             slog.Default(),
 		},
 		pools:  pools,
 		drift:  driftMonitor,

@@ -3,11 +3,12 @@ package cli
 import (
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/samsar/curio/internal/textutil"
 )
 
 // resolveFilter turns a list command's filter flags into the one filter
@@ -54,20 +55,9 @@ func printNextPage(w io.Writer, cmd *cobra.Command, next string) {
 		case f.Value.Type() == "bool" && f.Value.String() == "true":
 			args = append(args, "--"+f.Name)
 		default:
-			args = append(args, "--"+f.Name+"="+shellQuote(f.Value.String()))
+			args = append(args, "--"+f.Name+"="+textutil.ShellQuote(f.Value.String()))
 		}
 	})
-	args = append(args, "--cursor="+shellQuote(next))
+	args = append(args, "--cursor="+textutil.ShellQuote(next))
 	fmt.Fprintf(w, "next page: %s\n", strings.Join(args, " "))
-}
-
-// shellSafe matches words a POSIX shell reads as themselves.
-var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
-
-// shellQuote quotes s for a POSIX shell, leaving plain words as they are.
-func shellQuote(s string) string {
-	if shellSafe.MatchString(s) {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

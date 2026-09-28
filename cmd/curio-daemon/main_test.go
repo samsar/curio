@@ -954,10 +954,51 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 	assert.Equal(t, "Reading List", *clusters[0].Label)
 }
 
+// TestRun_RefusalsExitZero: what run returns for a home or config.yaml it
+// refuses is a refusal, which exits 0 so launchd doesn't relaunch the
+// daemon every 10 seconds for nothing; a port it can't bind may free up,
+// and still exits 1.
+func TestRun_RefusalsExitZero(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T)
+		want  int
+	}{
+		{"a legacy home", func(t *testing.T) {
+			home := newHome(t, freeLoopbackAddr(t))
+			require.NoError(t, os.WriteFile(home.MarkerPath(), []byte(legacyMarker), 0o600))
+		}, 0},
+		{"an invalid config.yaml", func(t *testing.T) {
+			home := newHome(t, freeLoopbackAddr(t))
+			require.NoError(t, os.WriteFile(home.ConfigPath(), []byte("embedding:\n  base_url: localhost:11434\n"), 0o600))
+		}, 0},
+		{"a directory that isn't a curio home", func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("mine"), 0o600))
+			t.Setenv("CURIO_HOME", dir)
+		}, 0},
+		{"a taken port", func(t *testing.T) {
+			occupied, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { occupied.Close() })
+			newHome(t, occupied.Addr().String())
+		}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+			err := run(context.Background(), new(slog.LevelVar))
+			require.Error(t, err)
+			assert.Equal(t, tc.want, exitCode(err, false), "%v", err)
+		})
+	}
+}
+
 // TestExitCode: the exit status the launchd agent's KeepAlive
-// {SuccessfulExit: false} acts on. A daemon told to stop, or one that
-// finds another serving its home, exits 0, which launchd leaves alone;
-// anything else exits 1, which launchd retries.
+// {SuccessfulExit: false} acts on. A daemon told to stop, one that finds
+// another serving its home, and one refusing to start for a cause that
+// stays until it is fixed exit 0, which launchd leaves alone; anything
+// else exits 1, which launchd retries.
 func TestExitCode(t *testing.T) {
 	dir := t.TempDir()
 	badConfig := filepath.Join(dir, "config.yaml")
@@ -981,8 +1022,13 @@ func TestExitCode(t *testing.T) {
 		{"a shutdown that ran over", fmt.Errorf("shut down api: %w", context.DeadlineExceeded), true, 0},
 		{"another daemon serves the home", fmt.Errorf("%w for %s (pid 42)", daemonctl.ErrAlreadyRunning, dir), false, 0},
 		{"cancelled", context.Canceled, false, 0},
-		{"a config it can't load", configErr, false, 1},
+		{"a refusal: a config it can't load", &refusal{configErr}, false, 0},
+		{"a refusal: a legacy home", &refusal{curiohome.ErrLegacyHome}, false, 0},
+		{"a refusal, joined with the API's shutdown", errors.Join(&refusal{
+			&sqlitestore.VectorWidthError{Path: "curio.db", Have: 768, Want: 1024}}, nil), false, 0},
+		{"a config error run didn't mark", configErr, false, 1},
 		{"a port it can't bind", fmt.Errorf("listen on %s: %w", occupied.Addr(), bindErr), false, 1},
+		{"a database it can't migrate", errors.New("migrate: no such table: jobs"), false, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1015,10 +1061,18 @@ func TestFinish_Logs(t *testing.T) {
 	logs = recordLogs(t)
 	code = finish(fmt.Errorf("%w for /Users/x/.curio (pid 42)", daemonctl.ErrAlreadyRunning), false, nil)
 	assert.Equal(t, 0, code)
-	assert.Equal(t, map[string]slog.Level{"another curio-daemon already serves this home; exiting": slog.LevelWarn},
-		levels(logs))
-	assert.Contains(t, fmt.Sprint(logs.messages("another curio-daemon already serves this home; exiting")[0]["err"]),
-		"pid 42")
+	const served = "another curio-daemon already serves this home; exiting " +
+		"(to replace the running build with this one, run `curio daemon stop` first)"
+	assert.Equal(t, map[string]slog.Level{served: slog.LevelWarn}, levels(logs))
+	assert.Contains(t, fmt.Sprint(logs.messages(served)[0]["err"]), "pid 42")
+
+	logs = recordLogs(t)
+	code = finish(&refusal{fmt.Errorf("%w: /Users/x/.curio was made before home format 2", curiohome.ErrLegacyHome)}, false, nil)
+	assert.Equal(t, 0, code)
+	const refused = "curio-daemon refuses to start, and stays down until the cause is fixed; " +
+		"then a curio command (or `curio up`) starts it"
+	assert.Equal(t, map[string]slog.Level{refused: slog.LevelError}, levels(logs), "one error, nothing else")
+	assert.Contains(t, fmt.Sprint(logs.messages(refused)[0]["err"]), "home format 2")
 
 	logs = recordLogs(t)
 	assert.Equal(t, 0, finish(context.Canceled, true, errors.New("interrupt signal received")))

@@ -47,22 +47,23 @@ const (
 // Deps bundles everything the API handlers need. The daemon constructs this
 // once it has started and passes it to Server.Ready.
 type Deps struct {
-	Home           *curiohome.Home
-	Documents      store.DocumentStore
-	Extractions    store.ExtractionStore
-	Bookmarks      store.BookmarkStore
-	Chunks         store.ChunkStore
-	Queue          store.JobStore
-	Embedder       embedder.Embedder
-	Search         *search.Engine
-	Insights       store.InsightStore
-	InsightEnabled bool                            // gates POST /v1/interests/rebuild (config insight.enabled)
-	Upstreams      func() []fetcher.UpstreamHealth // the health of the services fetches depend on; nil reports none
-	Gate           *jobs.QueueGate                 // the workers' queue gate, read and changed at /v1/queue
-	Drift          DriftMonitor                    // embedding drift, on healthz, reset by reindex-all; nil tracks none
-	KeepAwake      KeepAwake                       // whether the Mac is held awake, on /v1/queue; nil reports it isn't
-	TenantID       string                          // default store.LocalTenantID
-	Log            *slog.Logger
+	Home            *curiohome.Home
+	Documents       store.DocumentStore
+	Extractions     store.ExtractionStore
+	Bookmarks       store.BookmarkStore
+	Chunks          store.ChunkStore
+	Queue           store.JobStore
+	Embedder        embedder.Embedder
+	GenerationModel string // config.yaml's generation.model as the daemon loaded it, on healthz
+	Search          *search.Engine
+	Insights        store.InsightStore
+	InsightEnabled  bool                            // gates POST /v1/interests/rebuild (config insight.enabled)
+	Upstreams       func() []fetcher.UpstreamHealth // the health of the services fetches depend on; nil reports none
+	Gate            *jobs.QueueGate                 // the workers' queue gate, read and changed at /v1/queue
+	Drift           DriftMonitor                    // embedding drift, on healthz, reset by reindex-all; nil tracks none
+	KeepAwake       KeepAwake                       // whether the Mac is held awake, on /v1/queue; nil reports it isn't
+	TenantID        string                          // default store.LocalTenantID
+	Log             *slog.Logger
 }
 
 // Server is the HTTP layer. It serves from the moment the daemon binds its

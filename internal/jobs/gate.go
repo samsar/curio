@@ -220,9 +220,10 @@ type QueueUpdate struct {
 }
 
 // Update applies u, stores the result, and only then publishes it, waking
-// every worker waiting on an earlier verdict, and every watcher (Watch). It returns the settings in
-// effect afterwards. An update that changes nothing writes and wakes
-// nothing. When the store fails, the settings in effect stay as they were.
+// every worker waiting on an earlier verdict, and every watcher (Watch).
+// It returns the settings in effect afterwards. An update that changes
+// nothing writes and wakes nothing. When the store fails, the settings in
+// effect stay as they were.
 //
 // ctx being done before the update starts stops it. After that the write
 // runs detached from ctx, bounded by bookkeepingTimeout: a statement

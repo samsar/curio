@@ -145,7 +145,8 @@ func TestDaemonStart_WaitsOutAMigration(t *testing.T) {
 
 	var stdout, stderr syncBuffer
 	done := make(chan error, 1)
-	go func() { done <- runCLIStreams(srv.Home.Path, srv.URL, &stdout, &stderr, "daemon", "start") }()
+	root := newRootCmdWith(testDeps(t))
+	go func() { done <- runCLIStreams(root, srv.Home.Path, srv.URL, &stdout, &stderr, "daemon", "start") }()
 
 	notice := "curio-daemon is migrating the database (6 migrations); this can take a minute on a large library; " +
 		"`curio daemon logs -f` shows progress\n"
@@ -167,11 +168,11 @@ func TestDaemonStart_WaitsOutAMigration(t *testing.T) {
 	assert.Equal(t, notice, stderr.String(), "said once")
 }
 
-// withService is daemonctl.Discover, with svc as the controller's service
+// withService is daemonctl.Connect, with svc as the controller's service
 // manager.
-func withService(svc service.Manager) func(home, daemonURL string) (daemonctl.Env, error) {
-	return func(home, daemonURL string) (daemonctl.Env, error) {
-		env, err := daemonctl.Discover(home, daemonURL)
+func withService(svc service.Manager) daemonctl.ConnectFunc {
+	return func(home *curiohome.Home, cfg config.Config, daemonURL string) (daemonctl.Env, error) {
+		env, err := daemonctl.Connect(home, cfg, daemonURL)
 		if err == nil {
 			env.Controller.Service = svc
 		}
@@ -179,16 +180,15 @@ func withService(svc service.Manager) func(home, daemonURL string) (daemonctl.En
 	}
 }
 
-// runCLIWith runs curio with args for home and daemonURL, its home and
-// daemon found by discover.
-func runCLIWith(discover func(home, daemonURL string) (daemonctl.Env, error), home, daemonURL string,
+// runCLIWith runs curio with args for home and daemonURL, connecting to
+// its daemon with connect.
+func runCLIWith(t *testing.T, connect daemonctl.ConnectFunc, home, daemonURL string,
 	args ...string) (stdout, stderr string, err error) {
-	root := newRootCmdWith(discover)
+	t.Helper()
+	d := testDeps(t)
+	d.connect = connect
 	var out, errOut bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&errOut)
-	root.SetArgs(append([]string{"--curio-home", home, "--daemon-url", daemonURL}, args...))
-	err = root.Execute()
+	err = runCLIStreams(newRootCmdWith(d), home, daemonURL, &out, &errOut, args...)
 	return out.String(), errOut.String(), err
 }
 
@@ -261,6 +261,9 @@ func TestDescribeAgent(t *testing.T) {
 				"or when a curio command needs it"},
 		{"installed, not loaded", daemonctl.Status{Service: agent(func(s *service.Status) { s.Loaded = false })},
 			"launchd: agent " + agentLabel + " is installed but not loaded (`curio daemon install` loads it)"},
+		{"no GUI session", daemonctl.Status{Service: agent(func(s *service.Status) { s.Loaded, s.NoGUISession = false, true })},
+			"launchd: agent " + agentLabel + " is installed, but there is no GUI login session for it to run in (ssh); " +
+				"curio commands start the daemon themselves meanwhile"},
 		{"a manager that fails", daemonctl.Status{ServiceErr: errors.New("launchctl print: exit 5")},
 			"launchd: can't read the agent's status: launchctl print: exit 5"},
 	}
@@ -278,7 +281,7 @@ func TestDaemonInstall(t *testing.T) {
 	t.Setenv("CURIO_GITHUB_TOKEN", "ghp_secret")
 	t.Setenv("CURIO_JINA_API_KEY", "")
 
-	stdout, stderr, err := runCLIWith(withService(fake), srv.Home.Path, srv.URL, "daemon", "install")
+	stdout, stderr, err := runCLIWith(t, withService(fake), srv.Home.Path, srv.URL, "daemon", "install")
 	require.NoError(t, err)
 	assert.Equal(t, "launchd agent "+agentLabel+" installed; it runs "+bin+"\n"+
 		"launchd starts the daemon at login and restarts it after a crash\n"+
@@ -289,7 +292,7 @@ func TestDaemonInstall(t *testing.T) {
 		"set fetcher.github.token in "+srv.Home.ConfigPath()+" instead\n", stderr)
 	assert.Equal(t, []service.Spec{{Program: bin}}, fake.Specs(), "the program, and nothing of the environment")
 
-	stdout, _, err = runCLIWith(withService(fake), srv.Home.Path, srv.URL, "daemon", "install")
+	stdout, _, err = runCLIWith(t, withService(fake), srv.Home.Path, srv.URL, "daemon", "install")
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(stdout, "launchd agent "+agentLabel+" already installed; it runs "+bin+"\n"), stdout)
 	assert.NotContains(t, stdout, "background item")
@@ -306,7 +309,7 @@ func TestDaemonInstall_RefusedHome(t *testing.T) {
 	down := httptest.NewServer(http.NotFoundHandler())
 	down.Close()
 
-	_, _, err = runCLIWith(withService(fake), home.Path, down.URL, "daemon", "install")
+	_, _, err = runCLIWith(t, withService(fake), home.Path, down.URL, "daemon", "install")
 	var mismatch *curiohome.EmbeddingMismatchError
 	require.ErrorAs(t, err, &mismatch)
 	assert.Empty(t, fake.Calls())
@@ -317,7 +320,7 @@ func TestDaemonInstall_RefusedHome(t *testing.T) {
 func TestDaemonInstall_Unsupported(t *testing.T) {
 	srv := apitest.Start(t)
 	t.Setenv("CURIO_GITHUB_TOKEN", "ghp_secret")
-	_, stderr, err := runCLIWith(withService(service.Unsupported{}), srv.Home.Path, srv.URL, "daemon", "install")
+	_, stderr, err := runCLIWith(t, withService(service.Unsupported{}), srv.Home.Path, srv.URL, "daemon", "install")
 	require.ErrorIs(t, err, service.ErrUnsupported)
 	assert.Contains(t, err.Error(), "launchd agents are macOS-only; the CLI starts the daemon on demand")
 	assert.NotContains(t, stderr, "CURIO_GITHUB_TOKEN")
@@ -327,7 +330,7 @@ func TestDaemonUninstall(t *testing.T) {
 	t.Run("nothing installed", func(t *testing.T) {
 		srv := apitest.Start(t)
 		fake := servicetest.New(t, agentLabel)
-		stdout, _, err := runCLIWith(withService(fake), srv.Home.Path, srv.URL, "daemon", "uninstall")
+		stdout, _, err := runCLIWith(t, withService(fake), srv.Home.Path, srv.URL, "daemon", "uninstall")
 		require.NoError(t, err)
 		assert.Equal(t, "no launchd agent installed\n", stdout)
 	})
@@ -341,7 +344,7 @@ func TestDaemonUninstall(t *testing.T) {
 			release() // the agent's daemon stops as launchd boots it out
 			return nil
 		}
-		stdout, _, err := runCLIWith(withService(fake), srv.Home.Path, srv.URL, "daemon", "uninstall")
+		stdout, _, err := runCLIWith(t, withService(fake), srv.Home.Path, srv.URL, "daemon", "uninstall")
 		require.NoError(t, err)
 		assert.Equal(t, "launchd agent "+agentLabel+" removed; daemon stopped "+
 			"(the next curio command starts it on demand)\n", stdout)
@@ -352,7 +355,7 @@ func TestDaemonUninstall(t *testing.T) {
 		fake := servicetest.New(t, agentLabel)
 		fake.Set(func(st *service.Status) { st.Installed, st.Loaded = true, true })
 		holdLockAsDaemon(t, srv.Home)
-		stdout, _, err := runCLIWith(withService(fake), srv.Home.Path, srv.URL, "daemon", "uninstall")
+		stdout, _, err := runCLIWith(t, withService(fake), srv.Home.Path, srv.URL, "daemon", "uninstall")
 		require.NoError(t, err)
 		assert.Equal(t, "launchd agent "+agentLabel+" removed\n", stdout)
 	})
@@ -369,17 +372,17 @@ func TestDaemonStartStopStatus_Launchd(t *testing.T) {
 	release := holdLockAsDaemon(t, srv.Home)
 	discover := withService(stopReleases{Fake: fake, release: release})
 
-	stdout, stderr, err := runCLIWith(discover, srv.Home.Path, srv.URL, "daemon", "start")
+	stdout, stderr, err := runCLIWith(t, discover, srv.Home.Path, srv.URL, "daemon", "start")
 	require.NoError(t, err)
 	assert.Equal(t, "daemon running (launchd)\n", stdout)
 	assert.Empty(t, stderr)
 
-	stdout, _, err = runCLIWith(discover, srv.Home.Path, srv.URL, "daemon", "status")
+	stdout, _, err = runCLIWith(t, discover, srv.Home.Path, srv.URL, "daemon", "status")
 	require.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("running (pid %d, home %s, version %s)\n", os.Getpid(), srv.Home.Path, version.String())+
 		"launchd: manages this daemon (agent "+agentLabel+", runs "+bin+")\n", stdout)
 
-	stdout, _, err = runCLIWith(discover, srv.Home.Path, srv.URL, "daemon", "stop")
+	stdout, _, err = runCLIWith(t, discover, srv.Home.Path, srv.URL, "daemon", "stop")
 	require.NoError(t, err)
 	assert.Equal(t, "daemon stopped; its launchd agent starts it again at login, or when a curio command needs it\n", stdout)
 	assert.Equal(t, 1, fake.Count("Stop"))
@@ -445,7 +448,7 @@ func TestDaemonStart_AnotherVersion(t *testing.T) {
 			svc, err := fake.Status(context.Background())
 			require.NoError(t, err)
 
-			stdout, stderr, err := runCLIWith(withService(fake), home.Path, old.URL, "daemon", "start")
+			stdout, stderr, err := runCLIWith(t, withService(fake), home.Path, old.URL, "daemon", "start")
 			require.NoError(t, err)
 			assert.Equal(t, tc.stdout, stdout)
 			assert.Equal(t, warning+version.String()+"; "+tc.advice(bin, svc.Program)+"\n", stderr)
@@ -453,55 +456,52 @@ func TestDaemonStart_AnotherVersion(t *testing.T) {
 	}
 }
 
+// TestDoctor_Launchd: doctor's check of the launchd agent, which curio up
+// installs: missing is a warning curio up fixes, as is an agent not
+// loaded, one running another curio's daemon, or a program that is gone;
+// over ssh, with no GUI session, it is a warning with nothing to fix.
 func TestDoctor_Launchd(t *testing.T) {
 	cases := []struct {
 		name   string
-		set    func(t *testing.T, fake *servicetest.Fake, bin string)
+		set    func(t *testing.T, w *world)
 		marker string
 		detail string
 		hint   string
 	}{
-		{"no agent", func(*testing.T, *servicetest.Fake, string) {}, "✓",
-			"no agent; the CLI starts the daemon on demand", ""},
-		{"loaded, runs this curio's daemon", func(_ *testing.T, fake *servicetest.Fake, bin string) {
-			managedByFake(fake, bin)
-		}, "✓", "agent " + agentLabel + " loaded, runs {bin}", ""},
-		{"the program is gone", func(t *testing.T, fake *servicetest.Fake, _ string) {
-			managedByFake(fake, filepath.Join(t.TempDir(), "gone"))
-		}, "!", "which is missing", "`curio daemon install` repoints the agent at this curio's daemon, or `curio daemon uninstall` removes it"},
-		{"installed, not loaded", func(_ *testing.T, fake *servicetest.Fake, bin string) {
-			fake.Set(func(st *service.Status) { st.Installed, st.Program = true, bin })
-		}, "!", "agent " + agentLabel + " is installed but not loaded", "`curio daemon install` loads it"},
-		{"another curio's daemon", func(t *testing.T, fake *servicetest.Fake, _ string) {
+		{"loaded, runs this curio's daemon", func(*testing.T, *world) {}, "✓",
+			"agent " + agentLabel + " loaded, runs {bin}", ""},
+		{"no agent", func(_ *testing.T, w *world) {
+			w.agent.Set(func(st *service.Status) { *st = service.Status{Supported: true, Label: agentLabel} })
+		}, "!", "no agent: nothing keeps the daemon running across logins and crashes",
+			"`curio up` does it: install the launchd agent (it runs {bin})"},
+		{"the program is gone", func(t *testing.T, w *world) {
+			managedByFake(w.agent, filepath.Join(t.TempDir(), "gone"))
+		}, "!", "which is missing", "`curio up` does it"},
+		{"installed, not loaded", func(_ *testing.T, w *world) {
+			w.agent.Set(func(st *service.Status) { st.Loaded, st.PID = false, 0 })
+		}, "!", "agent " + agentLabel + " is installed but not loaded", "`curio up` does it"},
+		{"another curio's daemon", func(t *testing.T, w *world) {
 			other := filepath.Join(t.TempDir(), "curio-daemon")
 			require.NoError(t, os.WriteFile(other, []byte("#!/bin/false\n"), 0o700))
-			managedByFake(fake, other)
-		}, "!", "not this curio's {bin}", "`curio daemon install` repoints the agent at this curio's daemon"},
-		{"a manager that fails", func(_ *testing.T, fake *servicetest.Fake, _ string) {
-			fake.Fail("Status", errors.New("launchctl print: exit 5"))
+			managedByFake(w.agent, other)
+		}, "!", "not this curio's {bin}", "`curio up` does it"},
+		{"no GUI session", func(_ *testing.T, w *world) {
+			w.agent.Set(func(st *service.Status) { st.Loaded, st.PID, st.NoGUISession = false, 0, true })
+		}, "!", "installed, but there is no GUI login session for it to run in (ssh); " +
+			"curio commands start the daemon themselves meanwhile", ""},
+		{"a manager that fails", func(_ *testing.T, w *world) {
+			w.agent.Fail("Status", errors.New("launchctl print: exit 5"))
 		}, "!", "can't read the agent's status: launchctl print: exit 5", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := apitest.Start(t)
-			bin := daemonBin(t)
-			fake := servicetest.New(t, agentLabel)
-			tc.set(t, fake, bin)
-
-			out, _, _ := runCLIWith(withService(fake), srv.Home.Path, srv.URL, "doctor")
-			var line, next string
-			lines := strings.Split(out, "\n")
-			for i, l := range lines {
-				if strings.Contains(l, " launchd ") {
-					line, next = l, lines[i+1]
-				}
-			}
-			want := fmt.Sprintf("%s %-22s ", tc.marker, "launchd")
-			assert.True(t, strings.HasPrefix(line, want), "%q in:\n%s", want, out)
-			assert.Contains(t, line, strings.ReplaceAll(tc.detail, "{bin}", bin))
-			if tc.hint != "" {
-				assert.Contains(t, next, tc.hint)
-			}
+			w := upWorld(t)
+			tc.set(t, w)
+			out, _ := w.run(t, "doctor")
+			line, hint := doctorLine(t, out, "launchd")
+			assert.Equal(t, tc.marker, markerOf(line), out)
+			assert.Contains(t, line, strings.ReplaceAll(tc.detail, "{bin}", w.bin))
+			assert.Contains(t, hint, strings.ReplaceAll(tc.hint, "{bin}", w.bin))
 			if tc.marker == "✓" {
 				assert.Contains(t, out, "all checks passed")
 			}

@@ -81,6 +81,16 @@ linters:
           deny:
             - pkg: github.com/samsar/curio/internal/store/sqlite
               desc: depend on the internal/store interfaces; only cmd/curio-daemon wires the SQLite implementation
+        # The terminal UI library is the setup wizard's alone: nothing else
+        # prompts, and the daemon and the MCP sidecar must not link it.
+        prompts-in-setup:
+          list-mode: lax
+          files:
+            - "$all"
+            - "!**/internal/setup/**"
+          deny:
+            - pkg: charm.land
+              desc: the terminal UI belongs to internal/setup; other packages take a setup.UI
         # Test-support packages import testing by design, so they are the
         # only non-test files allowed to. Deny matches by import-path
         # prefix, which also covers testing/fstest and friends.
@@ -92,6 +102,7 @@ linters:
             - "!**/internal/store/sqlite/sqlitetest/**"
             - "!**/internal/api/apitest/**"
             - "!**/internal/service/servicetest/**"
+            - "!**/internal/setup/setuptest/**"
           deny:
             - pkg: testing
               desc: production code must not link the testing package
@@ -103,6 +114,8 @@ linters:
               desc: apitest is test support; production code serves the API through internal/api
             - pkg: github.com/samsar/curio/internal/service/servicetest
               desc: servicetest is test support; production code drives the service manager through internal/service
+            - pkg: github.com/samsar/curio/internal/setup/setuptest
+              desc: setuptest is test support; production code runs the setup wizard through internal/setup
             - pkg: github.com/getkin/kin-openapi
               desc: kin-openapi checks the API against its spec in tests; it must never link into a binary
     errcheck:
@@ -194,9 +207,9 @@ linters:
           - bodyclose
           - noctx
           - gosec
-      # The CLI writes to its own stdout/stderr, where a failed write has no
-      # one left to report to.
-      - path: internal/cli/
+      # The CLI, and the setup wizard's UI under it, write to the process's
+      # own stdout/stderr, where a failed write has no one left to report to.
+      - path: internal/(cli|setup)/
         linters:
           - errcheck
         text: fmt\.Fprint

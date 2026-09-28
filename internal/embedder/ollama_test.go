@@ -247,3 +247,48 @@ func TestOllama_Embed_ServerError(t *testing.T) {
 	assert.Contains(t, err.Error(), "HTTP 500")
 	assert.Contains(t, err.Error(), "model not loaded")
 }
+
+// TestMeasureWidth: the width is the length of the vector the model
+// returns, measured with the indexer's request, and a reply with no vector
+// is an error naming the model.
+func TestMeasureWidth(t *testing.T) {
+	width := 768
+	bodies := make(chan map[string]json.RawMessage, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]json.RawMessage
+		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&raw)) {
+			return
+		}
+		bodies <- raw
+		resp := embedResponse{}
+		if width > 0 {
+			resp.Embeddings = [][]float32{make([]float32, width)}
+		}
+		assert.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer srv.Close()
+	opts := OllamaOptions{BaseURL: srv.URL, Model: "nomic-embed-text:v1.5"}
+
+	got, err := MeasureWidth(context.Background(), opts)
+	require.NoError(t, err)
+	assert.Equal(t, 768, got)
+	body := <-bodies
+	assert.JSONEq(t, `"nomic-embed-text:v1.5"`, string(body["model"]))
+	assert.JSONEq(t, `false`, string(body["truncate"]))
+	assert.JSONEq(t, `"30m"`, string(body["keep_alive"]))
+	assert.JSONEq(t, `{"num_ctx":8192}`, string(body["options"]))
+
+	width = 0
+	_, err = MeasureWidth(context.Background(), opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "measure nomic-embed-text:v1.5's vector width")
+}
+
+func TestMeasureWidth_ModelNotPulled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"model \"x:1\" not found, try pulling it first"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+	_, err := MeasureWidth(context.Background(), OllamaOptions{BaseURL: srv.URL, Model: "x:1"})
+	require.ErrorIs(t, err, ollama.ErrModelNotLoaded)
+}

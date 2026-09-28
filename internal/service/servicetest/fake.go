@@ -165,6 +165,14 @@ func (f *Fake) Status(context.Context) (service.Status, error) {
 	return st, nil
 }
 
+// Preflight implements service.Manager: it fails with the error Fail set
+// for it, and passes otherwise.
+func (f *Fake) Preflight(context.Context, service.Spec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.record("Preflight")
+}
+
 // Install implements service.Manager.
 func (f *Fake) Install(_ context.Context, spec service.Spec) (bool, error) {
 	f.mu.Lock()

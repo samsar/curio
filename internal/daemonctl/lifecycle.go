@@ -318,6 +318,18 @@ func (c *Controller) stopManaged(ctx context.Context, pid int) error {
 	return stopErr
 }
 
+// SameFile reports whether paths a and b name one file, however they are
+// spelled or linked: a launchd agent's program and this curio's daemon,
+// say. A path that doesn't exist is no file.
+func SameFile(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
+}
+
 // SameHome reports whether two CURIO_HOME paths name the same directory,
 // resolving symlinks (on macOS /tmp is /private/tmp). A path that doesn't
 // exist here (a home on another machine's filesystem) is compared as
@@ -848,9 +860,15 @@ func (c *Controller) waitReleased(ctx context.Context, pid int) error {
 	}
 }
 
-func (c *Controller) legacyStopError(pid int) error {
+func (c *Controller) legacyStopError(pid int) error { return LegacyStopError(c.BaseURL, pid) }
+
+// LegacyStopError is the error for a curio-daemon from before the lock
+// protocol answering at baseURL: it can't be verified, so nothing stops it
+// but the user, and the error says how. pid is what the home's daemon.pid
+// says, 0 when nothing.
+func LegacyStopError(baseURL string, pid int) error {
 	how := "find its pid with `lsof -nP -iTCP -sTCP:LISTEN`"
-	if u, err := url.Parse(c.BaseURL); err == nil && u.Port() != "" {
+	if u, err := url.Parse(baseURL); err == nil && u.Port() != "" {
 		how = fmt.Sprintf("find its pid with `lsof -nP -iTCP:%s -sTCP:LISTEN`", u.Port())
 	}
 	if pid > 0 {
@@ -858,7 +876,7 @@ func (c *Controller) legacyStopError(pid int) error {
 	}
 	return fmt.Errorf("a curio-daemon from an older version is serving %s; it can't be verified, "+
 		"so it won't be signalled automatically. Stop it by hand (%s); the next command starts a current daemon",
-		c.BaseURL, how)
+		baseURL, how)
 }
 
 // startFailed builds the error for a daemon that didn't come up, with the
