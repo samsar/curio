@@ -6899,10 +6899,14 @@ are each bounded by a budget:
 The allocation limit overshoots by what is allocated between two reads,
 and by one step's allocation: about 0.2 GiB where goldmark doubles a
 slice. The count is the whole process's, so other requests can only stop
-a render sooner, never let it run on. Whether a text is formatted
-depends on the machine's load only for texts that take over 2 s: twice
-the costliest text the budgets accept (about 1 s), and over 15 times the
-slowest ordinary 1 MiB document (a loose list, 120 ms). Tests of the
+a render sooner, never let it run on, and renders running at once share
+the limit: four renders of 'text under deep lists' (about 320 MiB each
+alone) at once were all stopped, while 16 of the 1 MiB article at once
+all formatted. Whether a text is formatted therefore depends on the
+machine's load, and on what else renders at the same time, only for
+texts near a limit: ones that take over 2 s, twice the costliest text
+the budgets accept (about 1 s) and over 15 times the slowest ordinary
+1 MiB document (a loose list, 120 ms), or that allocate hundreds of MiB. Tests of the
 budgets relax the time limit (`newBudgetRenderer`): under the race
 detector, the costliest texts within the budgets take longer than 2 s.
 
@@ -7022,8 +7026,8 @@ real document shown unformatted.
   later write, so goldmark keeps escaping every URL left. On the page of
   escaped `&` that took 79 ms and 211 MiB in review, against 30 ms and
   82 MiB.
-  Table padding happens as goldmark parses, before it writes anything:
-  `maxTableCells` bounds it.
+- Relying on the HTML cap for tables: table padding happens as goldmark
+  parses, before it writes anything, so `maxTableCells` bounds it.
 - Formatting all but the costly paragraphs: which lines make a paragraph
   is known only once goldmark has parsed the blocks, and the block parse
   is where the nesting and the table padding cost.
