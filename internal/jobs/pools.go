@@ -2,9 +2,11 @@ package jobs
 
 import "github.com/samsar/curio/internal/store"
 
-// Pool is one Worker and how many goroutines run it.
+// Pool is one Worker, the kind of job it claims, and how many goroutines
+// run it.
 type Pool struct {
 	Name   string
+	Kind   store.JobKind
 	Worker *Worker
 	Size   int
 }
@@ -44,8 +46,8 @@ func NewPools(d Deps, sizes PoolSizes, opts WorkerOptions) []Pool {
 	cluster.Register(store.JobKindCluster, clusterHandler(d))
 
 	return []Pool{
-		{Name: "fetch", Worker: fetch, Size: sizes.Fetch},
-		{Name: "index", Worker: index, Size: sizes.Index},
-		{Name: "cluster", Worker: cluster, Size: clusterPoolSize},
+		{Name: "fetch", Kind: store.JobKindFetch, Worker: fetch, Size: sizes.Fetch},
+		{Name: "index", Kind: store.JobKindIndex, Worker: index, Size: sizes.Index},
+		{Name: "cluster", Kind: store.JobKindCluster, Worker: cluster, Size: clusterPoolSize},
 	}
 }

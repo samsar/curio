@@ -239,4 +239,38 @@ func printQueue(ctx context.Context, w io.Writer, c *client.Client) {
 	if len(loads) > 0 {
 		fmt.Fprintf(w, "           %s\n", strings.Join(loads, "   "))
 	}
+	fmt.Fprintf(w, "keep-awake: %s\n", describeKeepAwake(q))
+}
+
+// describeKeepAwake says whether keep-awake is on and, if it is, whether
+// the Mac is held awake and, if not, why not, in the keeper's order.
+func describeKeepAwake(q *client.Queue) string {
+	queued := 0
+	for _, k := range q.Kinds {
+		queued += k.Pending + k.Running
+	}
+	switch {
+	case !q.KeepAwake:
+		return "off"
+	case q.KeepAwakeActive:
+		return fmt.Sprintf("on, holding the Mac awake (AC power, %s queued)", plural(queued, "job"))
+	case q.Paused:
+		return "on, not holding: the queue is paused"
+	case queued == 0:
+		return "on, not holding: nothing queued"
+	case q.PowerSource == client.PowerBattery:
+		return "on, not holding: on battery power"
+	case q.PowerSource != client.PowerAC:
+		return "on, not holding: power source unknown"
+	default:
+		return "on, not holding yet"
+	}
+}
+
+// plural is n and noun, "s" added unless n is 1.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }

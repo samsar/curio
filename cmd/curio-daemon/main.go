@@ -24,6 +24,7 @@ import (
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
+	"github.com/samsar/curio/internal/keepawake"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
@@ -297,6 +298,7 @@ type daemon struct {
 	apiDeps api.Deps
 	pools   []jobs.Pool
 	drift   *drift.Monitor
+	keeper  *keepawake.Keeper
 }
 
 // newDaemon builds the stores, clients, engines and pools over db, whose
@@ -379,6 +381,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	// Built after start's marker writes: from here on the monitor is the
 	// marker's only writer.
 	driftMonitor := drift.New(home, emb.Client(), slog.Default())
+	keeper := newKeeper(gate, queue, pools)
 
 	return &daemon{
 		apiDeps: api.Deps{
@@ -395,11 +398,31 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 			Upstreams:      upstreams,
 			Gate:           gate,
 			Drift:          driftMonitor,
+			KeepAwake:      keeper,
 			Log:            slog.Default(),
 		},
-		pools: pools,
-		drift: driftMonitor,
+		pools:  pools,
+		drift:  driftMonitor,
+		keeper: keeper,
 	}, nil
+}
+
+// newKeeper builds the keep-awake keeper over the queue gate's settings
+// and the jobs of the pools' kinds. It holds this process's pid for
+// caffeinate -w, so a hold never outlives the daemon.
+func newKeeper(gate *jobs.QueueGate, queue store.JobStore, pools []jobs.Pool) *keepawake.Keeper {
+	kinds := make([]store.JobKind, 0, len(pools))
+	for _, p := range pools {
+		kinds = append(kinds, p.Kind)
+	}
+	return keepawake.New(keepawake.Options{
+		Settings: gate,
+		Jobs:     queue,
+		Kinds:    kinds,
+		Probe:    keepawake.Pmset{},
+		Asserter: keepawake.Caffeinate{PID: os.Getpid()},
+		Log:      slog.Default(),
+	})
 }
 
 // YouTube pacing: yt-dlp runs start at 2 per second, from a token bucket of
@@ -531,15 +554,17 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 	}, slog.Default()), nil
 }
 
-// serve runs the worker pools and the embedding drift monitor alongside
-// the API until ctx is cancelled or the API fails, then shuts them down
-// within the documented budget.
+// serve runs the worker pools, the embedding drift monitor and the
+// keep-awake keeper alongside the API until ctx is cancelled or the API
+// fails, then shuts them down within the documented budget: the keeper
+// releases its hold as its context ends.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var workers sync.WaitGroup
 	workers.Go(func() { d.drift.Run(ctx) })
+	workers.Go(func() { d.keeper.Run(ctx) })
 	for _, p := range d.pools {
 		for range p.Size {
 			workers.Go(func() {

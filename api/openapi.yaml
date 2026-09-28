@@ -650,11 +650,13 @@ paths:
       operationId: getQueue
       summary: Whether the workers may start jobs, and each pool's limit and load
       description: >
-        The queue gate's settings (pause, throttle, schedule) and the
-        keep-awake setting, whether the queue is open now, and for each
-        worker pool how many of its jobs may run at once and how many are
-        running and pending. The queue is daemon-wide: the counts cover
-        every tenant's jobs, as the workers claim them.
+        The queue gate's settings (pause, throttle, schedule), whether the
+        queue is open now, and for each worker pool how many of its jobs
+        may run at once and how many are running and pending; and the
+        keep-awake setting, whether the Mac is held awake, and its power
+        source. The queue is daemon-wide: the counts cover every tenant's
+        jobs, as the workers claim them. Reading it runs nothing: the power
+        source is the one last read.
       responses:
         "200":
           description: OK
@@ -1299,6 +1301,17 @@ components:
             Whether the daemon keeps the Mac from idle sleep while its
             workers have queued work, the queue isn't paused, and the Mac
             runs on AC power. Stored, off until turned on.
+        keep_awake_active:
+          type: boolean
+          description: Whether the daemon holds the Mac awake now (caffeinate runs).
+        power_source:
+          type: string
+          enum: [ac, battery, unknown]
+          description: >
+            Where the Mac draws its power from, as the daemon last read it
+            (pmset, at most once a minute while there is work); unknown
+            until it has, or when it can't tell. Present exactly while
+            keep_awake is on.
         state:
           type: string
           enum: [open, closed]
@@ -1315,7 +1328,7 @@ components:
           type: array
           description: The worker pools' kinds, in the order fetch, index, cluster.
           items: { $ref: "#/components/schemas/QueueKind" }
-      required: [paused, throttle, keep_awake, state, kinds]
+      required: [paused, throttle, keep_awake, keep_awake_active, state, kinds]
 
     QueueKind:
       type: object
