@@ -66,11 +66,15 @@ func TestUp_EmptyLibraryWithoutATerminal(t *testing.T) {
 	assert.Contains(t, stdout, "  --import 'chrome:Profile 1'  (Chrome: Work: 3 new)\n")
 	assert.Contains(t, stdout, "  --import html:<file>  (an exported bookmarks file)\n")
 	assert.Zero(t, count(t, w.srv, `SELECT count(*) FROM bookmarks`))
+
+	code, _, stderr = w.exit(t, "up", "--dry-run")
+	assert.Equal(t, 0, code, stderr)
+	assert.Empty(t, w.ollama.Embeds(), "a dry run measures indexing only for notes it shows")
 }
 
 // TestUp_ImportMenu: the menu lists each source with how many of its
-// bookmarks are new to the library, the most first by default, and the
-// one chosen is imported: as many as the menu said.
+// bookmarks are new, and the pages to fetch when fewer, and the one chosen
+// is imported: as many as the menu said.
 func TestUp_ImportMenu(t *testing.T) {
 	w := upWorld(t)
 	w.srv.AddDocument(t, "https://example.com/shared", store.DocStateFetched) // in the library, with no bookmark
@@ -80,7 +84,7 @@ func TestUp_ImportMenu(t *testing.T) {
 		setuptest.NewSource("Safari", importer.LabelSafari, "safari"), // no bookmarks: not offered
 	)
 	ui := setuptest.NewUI(t, answers(setuptest.Pick(1).About("Import which bookmarks?\nFirefox: 1 new\n"+
-		"Chrome: Work: 2 new\nAn exported bookmarks file (HTML)…\nSkip for now"))...)
+		"Chrome: Work: 3 new (2 pages to fetch)\nAn exported bookmarks file (HTML)…\nSkip for now"))...)
 	w.scripted(ui)
 
 	code, stdout, stderr := w.exit(t, "up")
@@ -161,23 +165,39 @@ func TestUp_ImportHandOff(t *testing.T) {
 }
 
 // TestUp_ImportYes: --yes --import imports without a terminal, at full
-// speed, never switching keep-awake on.
+// speed, leaving keep-awake as the queue has it: never switched on, nor
+// off.
 func TestUp_ImportYes(t *testing.T) {
-	w := upWorld(t)
-	w.withSources()
-	code, stdout, stderr := w.exit(t, "up", "--yes", "--import", "html:"+htmlFixture)
-	require.Equal(t, 0, code, stderr)
-	assert.Contains(t, stdout, "Import started. Check back after ")
-	assert.Contains(t, stderr, "Keep the Mac awake while it imports? no (--yes)")
-	q, err := client.New(w.daemonURL).Queue(context.Background())
-	require.NoError(t, err)
-	assert.False(t, q.KeepAwake)
-	assert.Equal(t, client.ThrottleNormal, q.Throttle)
-	assert.Empty(t, q.Schedule)
+	cases := []struct {
+		name      string
+		keepAwake bool
+		answer    string
+	}{
+		{"keep-awake off", false, "no"},
+		{"keep-awake on", true, "yes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := upWorld(t)
+			w.withSources()
+			daemon := client.New(w.daemonURL)
+			_, err := daemon.UpdateQueue(context.Background(), client.QueueUpdate{KeepAwake: new(tc.keepAwake)})
+			require.NoError(t, err)
+			code, stdout, stderr := w.exit(t, "up", "--yes", "--import", "html:"+htmlFixture)
+			require.Equal(t, 0, code, stderr)
+			assert.Contains(t, stdout, "Import started. Check back after ")
+			assert.Contains(t, stderr, "Keep the Mac awake while it imports? "+tc.answer+" (--yes)")
+			q, err := daemon.Queue(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, tc.keepAwake, q.KeepAwake)
+			assert.Equal(t, client.ThrottleNormal, q.Throttle)
+			assert.Empty(t, q.Schedule)
 
-	code, stdout, _ = w.exit(t, "up", "--yes", "--import", "html:"+htmlFixture)
-	assert.Equal(t, 0, code)
-	assert.True(t, strings.HasPrefix(stdout, "Nothing to do: curio is up.\n"), stdout)
+			code, stdout, _ = w.exit(t, "up", "--yes", "--import", "html:"+htmlFixture)
+			assert.Equal(t, 0, code)
+			assert.True(t, strings.HasPrefix(stdout, "Nothing to do: curio is up.\n"), stdout)
+		})
+	}
 }
 
 // TestUp_ImportBlockers: an --import that names nothing importable exits
@@ -356,14 +376,14 @@ func TestStatus_Follow(t *testing.T) {
 	followEvery = 10 * time.Millisecond
 	t.Cleanup(func() { followEvery = 2 * time.Second })
 	srv := apitest.Start(t)
-	done := make(chan string, 1)
-	go func() {
-		out, err := runCLI(t, srv, "status", "--follow")
-		assert.NoError(t, err)
-		done <- out
-	}()
+	root := newRootCmdWith(testDeps(t))
+	var stdout, stderr bytes.Buffer
+	done := make(chan error, 1) // the goroutine touches nothing of t, should it outlive the test
+	go func() { done <- runCLIStreams(root, srv.Home.Path, srv.URL, &stdout, &stderr, "status", "--follow") }()
 	select {
-	case out := <-done:
+	case err := <-done:
+		require.NoError(t, err, stderr.String())
+		out := stdout.String()
 		assert.Contains(t, out, "daemon:  running")
 		assert.Contains(t, out, "watching queue drain")
 		assert.Contains(t, out, "queue drained after ")

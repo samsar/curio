@@ -110,6 +110,16 @@ func (c sourceCount) empty() bool { return errors.Is(c.err, importer.ErrEmpty) }
 // readable reports whether the source's bookmarks were read.
 func (c sourceCount) readable() bool { return c.av.State == importer.Available && c.err == nil }
 
+// newBookmarks is how many bookmarks the import would save: those the
+// source hasn't saved before, or, from a daemon that can't count them,
+// every candidate.
+func (c sourceCount) newBookmarks() int {
+	if !c.count.Known {
+		return len(c.count.URLs)
+	}
+	return c.count.Created
+}
+
 // newPages is how many pages the import would fetch: the new URLs, or,
 // from a daemon that can't count them, every candidate.
 func (c sourceCount) newPages() []string {
@@ -120,7 +130,9 @@ func (c sourceCount) newPages() []string {
 }
 
 // describe is the source's line in the plan and the menu: its new count,
-// or its problem.
+// or its problem. The count is of bookmarks, as the import's question and
+// report count them, with the pages to fetch when fewer: a bookmark whose
+// page another source brought in is new, and fetches nothing.
 func (c sourceCount) describe() string {
 	switch {
 	case c.av.State == importer.NeedsPermission:
@@ -134,7 +146,11 @@ func (c sourceCount) describe() string {
 	case !c.count.Known:
 		return fmt.Sprintf("%s: %s", c.src.Name(), plural(len(c.count.URLs), "bookmark"))
 	}
-	return fmt.Sprintf("%s: %d new", c.src.Name(), len(c.count.NewURLs))
+	line := fmt.Sprintf("%s: %d new", c.src.Name(), c.count.Created)
+	if pages := len(c.count.NewURLs); pages != c.count.Created {
+		line += fmt.Sprintf(" (%s to fetch)", plural(pages, "page"))
+	}
+	return line
 }
 
 // library is the library an import would add to.
@@ -210,10 +226,6 @@ func (s *importStep) Check(ctx context.Context) Result {
 			Hint: "`curio import` (chrome, safari, firefox, html <file>) imports more"}
 	}
 	survey := w.survey(ctx, lib)
-	notes := make([]string, 0, len(survey))
-	for _, c := range survey {
-		notes = append(notes, w.sourceNote(ctx, c))
-	}
 	switch {
 	case !w.deps.UI.Interactive():
 		return Result{Status: Warn, Detail: "the library is empty, and without a terminal curio up imports only " +
@@ -221,6 +233,10 @@ func (s *importStep) Check(ctx context.Context) Result {
 	case w.opts.Yes:
 		return Result{Status: Warn, Detail: "the library is empty, and --yes imports only what " +
 			"`curio up --import <source>` names", Notes: importValues(survey)}
+	}
+	notes := make([]string, 0, len(survey))
+	for _, c := range survey {
+		notes = append(notes, w.sourceNote(ctx, c))
 	}
 	return Result{Status: Warn, Detail: "the library is empty", Notes: notes,
 		Fix: &Fix{Summary: "choose which bookmarks to import"}}
@@ -254,16 +270,16 @@ func (w *world) checkNamedImport(ctx context.Context, lib library) Result {
 		return Result{Status: OK, Detail: "nothing new in " + src.Name()}
 	}
 	res := Result{Status: Warn, Detail: "not imported yet", Notes: []string{w.sourceNote(ctx, c)},
-		Fix: &Fix{Summary: "import " + newBookmarks(c, lib) + " from " + src.Name()}}
+		Fix: &Fix{Summary: "import " + bookmarksToImport(c, lib) + " from " + src.Name()}}
 	if !lib.known {
 		res.Notes = []string{"not counted: " + lib.why}
 	}
 	return res
 }
 
-// newBookmarks says how many bookmarks an import brings in: "N new
+// bookmarksToImport says how many bookmarks an import brings in: "N new
 // bookmarks", or just "bookmarks" when that isn't known.
-func newBookmarks(c sourceCount, lib library) string {
+func bookmarksToImport(c sourceCount, lib library) string {
 	if !lib.known || !c.count.Known {
 		return "bookmarks"
 	}
@@ -440,7 +456,7 @@ func menu(survey []sourceCount) (options []string, choices []menuChoice, def int
 	for _, c := range survey {
 		switch {
 		case c.readable():
-			if n := len(c.newPages()); n > most {
+			if n := c.newBookmarks(); n > most {
 				most, def = n, len(options)
 			}
 		case c.av.State == importer.NeedsPermission:
@@ -457,25 +473,51 @@ func menu(survey []sourceCount) (options []string, choices []menuChoice, def int
 
 // askHTMLFile asks for an exported bookmarks file's path and reads it; ok
 // is false, the reason said, for a path that won't do, so the menu is
-// shown again.
+// shown again. A file is read again each time it is named: the user may
+// have fixed it since.
 func (w *world) askHTMLFile(ctx context.Context, ui UI) (importer.Source, bool, error) {
-	path, err := ui.Input(ctx, "Path to the exported bookmarks file:", "")
+	typed, err := ui.Input(ctx, "Path to the exported bookmarks file:", "")
 	if err != nil {
 		return nil, false, err
 	}
-	if strings.TrimSpace(path) == "" {
+	path := typedPath(typed)
+	if path == "" {
 		return nil, false, nil
 	}
-	src := importer.HTMLFile(strings.TrimSpace(path))
+	src := importer.HTMLFile(path)
 	if av := src.Check(ctx); av.State != importer.Available {
 		ui.Warn(src.Name() + ": " + av.Reason)
 		return nil, false, nil
 	}
+	delete(w.imp.parsed, src.Spec())
 	_, parseErr := w.parse(ctx, src)
 	if parseErr != nil {
 		ui.Warn(src.Name() + ": " + parseErr.Error())
 	}
 	return src, parseErr == nil, nil
+}
+
+// typedPath is a path typed at a prompt, taken as a shell takes one word,
+// since a file dragged into the terminal arrives quoted or with its
+// spaces escaped (Safari exports "Safari Bookmarks.html"): one pair of
+// surrounding quotes is dropped; otherwise each backslash escapes the
+// character after it.
+func typedPath(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && (s[0] == '\'' || s[0] == '"') && s[len(s)-1] == s[0] {
+		return s[1 : len(s)-1]
+	}
+	var b strings.Builder
+	escaped := false
+	for _, r := range s {
+		if r == '\\' && !escaped {
+			escaped = true
+			continue
+		}
+		escaped = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // Apply imports the chosen source: the daemon started and asked what is
@@ -595,13 +637,11 @@ type ImportReport struct {
 	// Pages is how many pages new to the library the import fetches.
 	Pages                           int
 	Created, Filtered, JobsEnqueued int
-	// Pace and KeepAwake are what the queue was set to; unset when there
-	// was nothing new to fetch.
+	// Pace and KeepAwake are what the queue was set to, and CheckBack when
+	// the new pages should be done at that pace; unset when there was
+	// nothing new to fetch.
 	Pace      Pace
 	KeepAwake bool
-	// Estimate is how long the new pages take at Pace, and CheckBack when
-	// they should be done; zero when there was nothing to fetch.
-	Estimate  Estimate
 	CheckBack time.Time
 }
 

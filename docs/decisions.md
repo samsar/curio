@@ -6272,12 +6272,19 @@ file is even looked for; `curio import` adds more.
   idempotent.
 - The menu (the step's `Confirmer`) lists the readable sources with their
   new counts (the one with the most is the default), the ones that need
-  permission,
-  "An exported bookmarks file (HTML)…" (a path that won't do says why and
-  shows the menu again) and "Skip for now". A skip returns yes, not a
-  decline: Apply then does nothing and the check after it is a warning,
-  so the run exits 0. With `--import` it is one yes-or-no, and a no is a
-  decline like any step's.
+  permission, "An exported bookmarks file (HTML)…" and "Skip for now". A
+  path is typed or dragged into the terminal, which quotes it or escapes
+  its spaces, so it is taken as the shell takes one word; one that won't
+  do says why and shows the menu again, and a file named again is read
+  again. A skip returns yes, not a decline: Apply then does nothing and
+  the check after it is a warning, so the run exits 0. With `--import` it
+  is one yes-or-no, and a no is a decline like any step's.
+- "New" counts bookmarks everywhere (the plan, the menu, the question,
+  the hand-off): those the source hasn't saved, which the import creates.
+  A bookmark whose page another source brought in is new and fetches
+  nothing, so where the pages to fetch are fewer the menu says so ("3 new
+  (2 pages to fetch)"); the estimates, the yt-dlp count and the host
+  warning are of pages.
 - The step keeps what it decided in the run's world (the parse of each
   source, the index rate, the choice, a skip, the report), so the check
   after Apply reads "import started" rather than planning another import.

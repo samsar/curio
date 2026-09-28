@@ -122,7 +122,7 @@ func (w *world) choosePace(ctx context.Context, ui UI, env daemonctl.Env, hs hom
 		return fmt.Errorf("set the queue to import %s, keep-awake %s: %w", pace, onOff(keepAwake), err)
 	}
 	report.Pace, report.KeepAwake = pace, keepAwake
-	report.Estimate, report.CheckBack = paced(pace, len(pages), cfg, rate, why, now)
+	_, report.CheckBack = paced(pace, len(pages), cfg, rate, why, now)
 	return nil
 }
 

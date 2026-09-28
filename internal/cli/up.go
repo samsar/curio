@@ -226,15 +226,10 @@ func printNext(w io.Writer) { printCard(w, "Next:", nextCard) }
 // to check back, what was imported, and what to do meanwhile.
 func printHandOff(w io.Writer, r setup.ImportReport, now time.Time) {
 	fmt.Fprintln(w)
-	switch {
-	case r.Pages == 0:
+	if r.Pages == 0 {
 		fmt.Fprintf(w, "Imported %s from %s; their pages were in the library already.\n",
 			plural(r.Created, "new bookmark"), r.Source)
-	case r.CheckBack.IsZero():
-		fmt.Fprintf(w, "Import started; when it is done isn't known, but fetching takes %s.\n", r.Estimate.Fetching())
-		fmt.Fprintf(w, "  %s from %s, %s to fetch and index\n", plural(r.Created, "new bookmark"), r.Source,
-			plural(r.Pages, "page"))
-	default:
+	} else {
 		fmt.Fprintf(w, "Import started. Check back after %s.\n", setup.CheckBackText(now, r.CheckBack))
 		fmt.Fprintf(w, "  %s from %s, %s to fetch and index %s\n", plural(r.Created, "new bookmark"), r.Source,
 			plural(r.Pages, "page"), r.Pace)

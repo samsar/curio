@@ -143,6 +143,21 @@ func TestImport_YTDLPDeclined(t *testing.T) {
 	assert.Empty(t, h.installer.Runs())
 }
 
+// TestImport_YTDLPDeclineNotSaved: a decline setup.json can't keep warns
+// that the question comes back, and the import goes on.
+func TestImport_YTDLPDeclineNotSaved(t *testing.T) {
+	h := newHarness(t)
+	h.firstRun()
+	// A directory where setup.json goes: it can't be read, nor replaced.
+	require.NoError(t, os.Mkdir(filepath.Join(h.home, setup.StateFile), 0o700))
+	ui, out := importRun(t, h, bookmarksFile(t, video1, video2, article),
+		importAnswers(setuptest.No().About("Install yt-dlp"))...)
+	assert.True(t, ui.Said("curio up will ask about yt-dlp again: "), "%v", ui.Events())
+	assert.True(t, ui.Said("not installing yt-dlp"))
+	require.NotNil(t, out.Imported)
+	assert.Equal(t, 3, out.Imported.Created)
+}
+
 // TestImport_YTDLPAlreadyRouted: a daemon that already routes YouTube to
 // yt-dlp is said so, with nothing detected, asked or restarted.
 func TestImport_YTDLPAlreadyRouted(t *testing.T) {

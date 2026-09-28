@@ -74,12 +74,14 @@ does it, asking before each step:
    daemon is started on demand instead, with a warning.
 6. **Your bookmarks**, when the library has none (a new home's hasn't).
    curio up offers what it finds, each with how many of its bookmarks are
-   new to the library, counted by the daemon without saving anything:
-   each Chrome profile, Firefox's default profile, Safari, or an exported
-   HTML file whose path you type. `Skip for now` imports nothing, and the
-   next run offers again. A library with bookmarks is left alone: `curio
-   import` adds more. `--import` names the source up front (see below);
-   run again with the same `--import`, it imports only what is new.
+   new to the library (and how many pages that fetches, when some are
+   there already from another browser), counted by the daemon without
+   saving anything: each Chrome profile, Firefox's default profile,
+   Safari, or an exported HTML file whose path you type or drag into the
+   terminal. `Skip for now` imports nothing, and the next run offers
+   again. A library with bookmarks is left alone: `curio import` adds
+   more. `--import` names the source up front (see below); run again with
+   the same `--import`, it imports only what is new.
    Without a terminal, or with `--yes`, nothing is imported unless
    `--import` says what: the status lists the `--import` values for the
    sources found.
