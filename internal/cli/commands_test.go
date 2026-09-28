@@ -828,6 +828,21 @@ func TestImport(t *testing.T) {
 	}
 }
 
+// TestImport_SafariNeedsFullDiskAccess: macOS refusing Safari's bookmarks,
+// already at stat, is a permission to grant, never "not found".
+func TestImport_SafariNeedsFullDiskAccess(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "Safari")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Bookmarks.plist"), []byte("<plist/>"), 0o600))
+	require.NoError(t, os.Chmod(dir, 0))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	t.Setenv("CURIO_SAFARI_DIR", dir)
+
+	_, err := runCLI(t, apitest.Start(t), "import", "safari", "--dry-run")
+	require.ErrorContains(t, err, "Grant Full Disk Access to your terminal")
+	assert.NotContains(t, err.Error(), "not found")
+}
+
 // TestImport_DryRun: a dry run parses and filters locally and never
 // contacts the daemon.
 func TestImport_DryRun(t *testing.T) {

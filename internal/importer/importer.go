@@ -22,16 +22,14 @@ type ParsedBookmark struct {
 	SavedAt    time.Time // zero if the source didn't supply one
 }
 
-// Source labels the bookmark provenance for the store. Mirrors the
-// store.Source* constants but listed here so importer-level code doesn't
-// import the store package transitively.
-type Source string
-
+// The labels bookmarks are saved under (bookmarks.source), one per kind
+// of Source. They mirror the store.Source* constants, listed here so the
+// importer doesn't import the store.
 const (
-	SourceChrome  Source = "chrome"
-	SourceSafari  Source = "safari"
-	SourceFirefox Source = "firefox"
-	SourceHTML    Source = "html"
+	LabelChrome  = "chrome"
+	LabelSafari  = "safari"
+	LabelFirefox = "firefox"
+	LabelHTML    = "html"
 )
 
 // FilterReason explains why a URL was skipped. Returned by Indexable so
