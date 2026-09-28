@@ -278,6 +278,31 @@ limit, with what is pending. `curio add --wait` and `curio import
 --follow` say when the queue is closed and what opens it. `curio pause`
 starts the daemon if it isn't running.
 
+## Keeping the Mac awake during an import
+
+An import stops whenever the Mac idle-sleeps. Keep-awake holds it awake
+while there is work, on AC power only:
+
+```sh
+curio keep-awake on    # hold the Mac awake while jobs are queued, on AC power
+curio keep-awake off   # let it sleep as usual
+```
+
+With keep-awake on, the daemon runs `caffeinate -i -w <its pid>` while its
+workers have jobs queued or running, the queue isn't paused, and the Mac
+draws from AC power (`pmset -g ps`, read once a minute while there is
+work). It lets go when the queue drains, within a minute of the Mac
+going on battery, and at once when you pause the queue or turn keep-awake
+off. A schedule keeps the hold while the queue waits for its window, so an
+overnight import starts: the Mac stays awake until then. The hold prevents
+idle sleep only: the display still sleeps, and closing a laptop's lid
+still puts it to sleep. The setting is stored like the queue settings and
+survives restarts; it is off until you turn it on.
+
+`curio status` says whether keep-awake is on and, if so, whether the Mac
+is being held awake, or why not (on battery, the queue paused, nothing
+queued).
+
 ## Curio itself
 
 Once Ollama works, build curio (web2md is optional; see "Fetcher options").
@@ -305,6 +330,72 @@ started the daemon, prints one line to stderr saying so and waits;
 `/v1/healthz` answers 503 with a `Retry-After` header, the daemon's pid
 and how many migrations are applied, and every other request gets 503
 until the daemon is ready. `curio daemon status` shows the same progress.
+
+After you rebuild or upgrade curio, the daemon already running is still
+the old build. `curio daemon start` says so, naming both versions; run
+`curio daemon stop`, and the next command starts the new daemon. If the
+launchd agent (below) runs a curio-daemon other than this curio's, say an
+older install elsewhere, a stop would only start that one again, so the
+warning says to run `curio daemon install` instead, which repoints the
+agent and restarts the daemon.
+
+## Keep the daemon running (launchd)
+
+By default the CLI and the MCP sidecar start the daemon when they need it,
+and it runs until it is stopped, the Mac restarts, or it crashes. A
+launchd agent keeps it running instead:
+
+```sh
+curio daemon install     # start the daemon at login, restart it after a crash
+curio daemon uninstall   # back to starting it on demand
+```
+
+`curio daemon install` writes a per-user agent,
+`~/Library/LaunchAgents/com.github.samsar.curio.daemon.plist` for
+`~/.curio` (a home elsewhere gets its own agent, the label ending in a
+hash of its path), loads it and waits for its daemon to serve. It runs the
+`curio-daemon` next to the `curio` you ran, by the path it was run by, so
+a `brew upgrade` needs no new agent; run it again after moving curio.
+It never uses sudo. macOS may announce a background item from
+curio-daemon: keep it allowed in System Settings > General > Login Items
+& Extensions, or launchd won't run it. A daemon a command started before
+the install is stopped first, so the agent's can take over.
+
+With the agent installed:
+
+- `curio daemon start`, and every command that needs the daemon, start it
+  through launchd (`launchctl kickstart`) rather than as a child process.
+- `curio daemon stop` stops it through launchd (`launchctl kill
+  SIGTERM`); launchd doesn't restart a daemon that stopped cleanly, and
+  starts it again at the next login or when a command needs it. A daemon
+  that crashes, or exits because it can't run (a bad `config.yaml`, say),
+  is restarted, every 10 seconds at most, until it runs.
+- `curio daemon status` says whether launchd runs the daemon, and `curio
+  doctor` checks the agent: loaded, and running this curio's daemon.
+
+The daemon's log is still `logs/daemon.log`: launchd sends the daemon's
+output there. Its stderr goes to `logs/launchd.err`, which gets only what
+the Go runtime prints when the daemon dies (a panic's stack trace); a
+failed start quotes it.
+
+launchd doesn't run the agent's daemon in your shell, so it doesn't see
+your shell's environment:
+
+- Its `PATH` is Homebrew's directories and the system's
+  (`/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin`).
+  A tool installed elsewhere (yt-dlp, node for web2md) needs its absolute
+  path in `config.yaml` (`fetcher.youtube.bin`, `fetcher.web2md.node_bin`).
+  The daemon logs `youtube fetcher disabled: yt-dlp not found`, with the
+  PATH it searched, when it can't find yt-dlp.
+- Tokens given only in the environment (`CURIO_GITHUB_TOKEN`,
+  `CURIO_JINA_API_KEY`) don't reach it: put them in `config.yaml`
+  (`fetcher.github.token`, `fetcher.native.jina_api_key`). `curio daemon
+  install` warns about each one it sees. Nothing of the environment is
+  written into the agent.
+
+An agent runs only in a desktop login session. Over ssh with nobody
+logged in at the Mac there is none: `curio daemon install` says so, and
+the CLI starts the daemon itself, as without an agent.
 
 ## Config: time budgets for Ollama calls
 

@@ -626,12 +626,17 @@ type KindMetrics struct {
 }
 
 // QueueSettings are the queue gate's settings: whether the queue is paused,
-// how hard it runs, and the daily window it may run in. They are
-// daemon-wide, like the claims they gate, and comparable with ==.
+// how hard it runs, and the daily window it may run in, and whether the
+// daemon keeps the Mac awake while there is work. They are daemon-wide,
+// like the claims they gate, and comparable with ==.
 type QueueSettings struct {
 	Paused   bool
 	Throttle Throttle
 	Schedule DailyWindow // zero: no schedule, the queue may run at any time
+	// KeepAwake holds the Mac out of idle sleep while the workers have
+	// queued work, the queue isn't paused and it runs on AC power
+	// (internal/keepawake). It never gates a claim.
+	KeepAwake bool
 }
 
 // DefaultQueueSettings are the settings of a daemon nobody has paused,

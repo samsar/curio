@@ -52,6 +52,7 @@ curio pause                         # start no new jobs until resumed
 curio resume                        # start them again (a schedule still applies)
 curio throttle gentle|normal        # gentle: fewer at once, to keep the machine cool
 curio schedule HH:MM-HH:MM|off      # start jobs only in a daily window, e.g. 22:00-07:00
+curio keep-awake on|off             # keep the Mac from idle sleep while jobs are queued, on AC power
 
 # Inspecting the corpus
 curio docs                          # successfully-fetched documents (the happy path)
@@ -78,7 +79,7 @@ curio jobs prune --older-than 30d   # trim the audit table
 curio jobs delete --status failed   # purge a specific status
 
 # Daemon lifecycle
-curio daemon {start|stop|status|logs}
+curio daemon {start|stop|status|logs|install|uninstall}  # install: a launchd agent keeps it running
 
 # Import variations
 curio import chrome [--profile X | --all-profiles | --list-profiles]

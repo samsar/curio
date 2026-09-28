@@ -651,10 +651,12 @@ paths:
       summary: Whether the workers may start jobs, and each pool's limit and load
       description: >
         The queue gate's settings (pause, throttle, schedule), whether the
-        queue is open now, and for each worker pool how many of its jobs may
-        run at once and how many are running and pending. The queue is
-        daemon-wide: the counts cover every tenant's jobs, as the workers
-        claim them.
+        queue is open now, and for each worker pool how many of its jobs
+        may run at once and how many are running and pending; and the
+        keep-awake setting, whether the Mac is held awake, and its power
+        source. The queue is daemon-wide: the counts cover every tenant's
+        jobs, as the workers claim them. Reading it runs nothing: the power
+        source is the one last read.
       responses:
         "200":
           description: OK
@@ -665,7 +667,7 @@ paths:
     put:
       tags: [jobs]
       operationId: updateQueue
-      summary: Pause or resume the queue, throttle it, or schedule it
+      summary: Pause or resume the queue, throttle it, schedule it, or keep the Mac awake for it
       description: >
         Applies only the fields given, and answers with the queue as GET
         does. A change takes effect at the workers' next claim and never
@@ -673,7 +675,8 @@ paths:
         The settings are stored, so they survive a daemon restart. Pause
         and schedule must both allow a claim: resuming outside the schedule
         leaves the queue closed until the window opens, and schedule off
-        opens it now.
+        opens it now. keep_awake takes effect at once and never gates a
+        claim.
       requestBody:
         required: true
         content:
@@ -689,7 +692,8 @@ paths:
           description: >
             No field given, a throttle other than normal or gentle, a
             schedule that isn't HH:MM-HH:MM with different ends or off, a
-            value of the wrong type, or a malformed body
+            value of the wrong type (keep_awake is a boolean), or a
+            malformed body
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -1291,6 +1295,23 @@ components:
             from the first time up to the second, wrapping midnight when the
             second is earlier (22:00-07:00 runs overnight). Absent when there
             is no schedule.
+        keep_awake:
+          type: boolean
+          description: >
+            Whether the daemon keeps the Mac from idle sleep while its
+            workers have queued work, the queue isn't paused, and the Mac
+            runs on AC power. Stored, off until turned on.
+        keep_awake_active:
+          type: boolean
+          description: Whether the daemon holds the Mac awake now (caffeinate runs).
+        power_source:
+          type: string
+          enum: [ac, battery, unknown]
+          description: >
+            Where the Mac draws its power from, as the daemon last read it
+            (pmset, at most once a minute while there is work); unknown
+            until it has, or when it can't tell. Present exactly while
+            keep_awake is on.
         state:
           type: string
           enum: [open, closed]
@@ -1307,7 +1328,7 @@ components:
           type: array
           description: The worker pools' kinds, in the order fetch, index, cluster.
           items: { $ref: "#/components/schemas/QueueKind" }
-      required: [paused, throttle, state, kinds]
+      required: [paused, throttle, keep_awake, keep_awake_active, state, kinds]
 
     QueueKind:
       type: object
@@ -1332,3 +1353,6 @@ components:
             HH:MM-HH:MM on the daemon's local clock, the two times different,
             to let jobs start only in that daily window; off to drop the
             schedule. The hour may have one digit.
+        keep_awake:
+          type: boolean
+          description: true keeps the Mac awake while there is work and it runs on AC power; false stops that

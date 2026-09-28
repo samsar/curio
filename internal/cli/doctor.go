@@ -169,7 +169,12 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 		}
 	}
 
-	// 7. fetcher backend: native is always fine; web2md needs the bin to exist
+	// 7. the daemon's launchd agent, where there is launchd
+	if res, ok := launchdCheck(ctx, c); ok {
+		r.add(res.name, res.status, res.detail, res.hint)
+	}
+
+	// 8. fetcher backend: native is always fine; web2md needs the bin to exist
 	switch c.Config.Fetcher.Default {
 	case "native":
 		r.add("fetcher", statusOK, "native (Go, no external deps)", "")
@@ -190,8 +195,61 @@ func runDoctorChecks(ctx context.Context, c *daemonctl.Env, r *doctorReport) {
 		}
 	}
 
-	// 8. content dir writable
+	// 9. content dir writable
 	checkContentDir(c.Home.ContentDir(), r)
+}
+
+// launchdCheck is doctor's check of the daemon's launchd agent; ok is
+// false where there is no launchd to check. No agent is fine: the CLI
+// starts the daemon on demand. An agent is flagged when launchd couldn't
+// run its daemon (the program is gone), hasn't loaded it (disabled, or no
+// GUI session), or runs another curio-daemon than this curio's, which an
+// upgrade to another location, or a second install, leaves behind.
+func launchdCheck(ctx context.Context, c *daemonctl.Env) (res checkResult, ok bool) {
+	if c.Controller.Service == nil {
+		return checkResult{}, false
+	}
+	res.name = "launchd"
+	st, err := c.Controller.Service.Status(ctx)
+	switch {
+	case err != nil:
+		res.status, res.detail = statusWarn, "can't read the agent's status: "+err.Error()
+		return res, true
+	case !st.Supported:
+		return checkResult{}, false
+	case !st.Installed:
+		res.status, res.detail = statusOK, "no agent; the CLI starts the daemon on demand"
+		return res, true
+	}
+	repoint := "`curio daemon install` repoints the agent at this curio's daemon"
+	res.status = statusWarn
+	if _, err := os.Stat(st.Program); st.Program == "" || err != nil {
+		res.detail = fmt.Sprintf("agent %s runs %q, which is missing", st.Label, st.Program)
+		res.hint = repoint + ", or `curio daemon uninstall` removes it"
+		return res, true
+	}
+	switch {
+	case !st.Loaded:
+		res.detail = fmt.Sprintf("agent %s is installed but not loaded", st.Label)
+		res.hint = "`curio daemon install` loads it (an agent needs a desktop login session)"
+	case !sameFile(st.Program, c.Controller.DaemonBin):
+		res.detail = fmt.Sprintf("agent %s runs %s, not this curio's %s", st.Label, st.Program, c.Controller.DaemonBin)
+		res.hint = repoint
+	default:
+		res.status, res.detail = statusOK, fmt.Sprintf("agent %s loaded, runs %s", st.Label, st.Program)
+	}
+	return res, true
+}
+
+// sameFile reports whether paths a and b name one file, however they are
+// spelled or linked.
+func sameFile(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
 }
 
 // checkContentDir checks that the daemon can write extracted content to dir

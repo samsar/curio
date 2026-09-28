@@ -265,5 +265,28 @@ func TestPathHelpers(t *testing.T) {
 	assert.Equal(t, "/curio/curio.db", h.DBPath())
 	assert.Equal(t, "/curio/content", h.ContentDir())
 	assert.Equal(t, "/curio/logs", h.LogsDir())
+	assert.Equal(t, "/curio/logs/daemon.log", h.DaemonLogPath())
+	assert.Equal(t, "/curio/logs/launchd.err", h.LaunchdErrPath())
 	assert.Equal(t, "/curio/daemon.pid", h.PIDFile())
+}
+
+// TestDefaultPath: ~/.curio whatever $CURIO_HOME says.
+func TestDefaultPath(t *testing.T) {
+	userHome := t.TempDir()
+	t.Setenv("HOME", userHome)
+	t.Setenv("CURIO_HOME", t.TempDir())
+	got, err := DefaultPath()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(userHome, DefaultDirName), got)
+}
+
+func TestCanonicalPath(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(dir, link))
+	resolved, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	assert.Equal(t, resolved, CanonicalPath(link))
+	assert.Equal(t, resolved, CanonicalPath(dir+"/."))
+	assert.Equal(t, "/nowhere/curio", CanonicalPath("/nowhere/./curio/"), "a missing path is only cleaned")
 }

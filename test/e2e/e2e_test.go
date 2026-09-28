@@ -161,7 +161,7 @@ type embedRequest struct {
 func embed(text string, dim int) []float32 {
 	v := make([]float32, dim)
 	for word := range strings.FieldsSeq(strings.ToLower(text)) {
-		v[int(crc32.ChecksumIEEE([]byte(word)))%dim]++
+		v[crc32.ChecksumIEEE([]byte(word))%uint32(dim)]++
 	}
 	var sum float64
 	for _, x := range v {
@@ -267,11 +267,11 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	assert.Equal(t, st.PID, health.PID, "healthz names the daemon holding the lock")
 	assert.True(t, daemonctl.SameHome(home.Path, health.Home), "served %s", health.Home)
 	assert.Nil(t, health.EmbeddingDrift)
-	require.EventuallyWithT(t, func(c *assert.CollectT) {
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
 		meta, err := home.Meta()
-		require.NoError(c, err)
-		assert.Equal(c, digestA, meta.EmbeddingModelDigest)
-		assert.Equal(c, "0.34.4", meta.OllamaVersion)
+		require.NoError(collect, err)
+		assert.Equal(collect, digestA, meta.EmbeddingModelDigest)
+		assert.Equal(collect, "0.34.4", meta.OllamaVersion)
 	}, 10*time.Second, 50*time.Millisecond, "the daemon records the build that makes the embeddings")
 
 	created, err := c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: pages.URL + "/zymurgy"})
@@ -438,11 +438,11 @@ func TestDaemon_ReportsEmbeddingDriftUntilReindexed(t *testing.T) {
 	assert.Equal(t, 1, reindexed.JobsEnqueued)
 	// The reindex clears the baseline before it answers; the check it
 	// triggers records the build now serving in its own time.
-	require.EventuallyWithT(t, func(c *assert.CollectT) {
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
 		meta, err := home.Meta()
-		require.NoError(c, err)
-		assert.Equal(c, digestB, meta.EmbeddingModelDigest)
-		assert.Equal(c, "0.34.4", meta.OllamaVersion)
+		require.NoError(collect, err)
+		assert.Equal(collect, digestB, meta.EmbeddingModelDigest)
+		assert.Equal(collect, "0.34.4", meta.OllamaVersion)
 	}, 10*time.Second, 50*time.Millisecond, "reindex-all makes the build serving now the baseline")
 	health, err = c.Healthz(ctx)
 	require.NoError(t, err)

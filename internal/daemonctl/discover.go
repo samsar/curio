@@ -10,6 +10,7 @@ import (
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
+	"github.com/samsar/curio/internal/service"
 )
 
 // Env is what a client of the daemon works with: a home, its config, and a
@@ -30,7 +31,8 @@ type Env struct {
 // model and dimension, which the daemon checks against config.yaml when it
 // starts. daemonURL overrides the address config.yaml's daemon.listen
 // gives. The daemon binary is $CURIO_DAEMON_BIN, or curio-daemon next to
-// the running executable.
+// the running executable. The controller starts the daemon through the
+// home's launchd agent when one is loaded (service.ForHome).
 func Discover(homeOverride, daemonURL string) (Env, error) {
 	home, err := openHome(homeOverride)
 	if err != nil {
@@ -44,8 +46,14 @@ func Discover(homeOverride, daemonURL string) (Env, error) {
 	if err != nil {
 		return Env{}, err
 	}
+	svc, err := service.ForHome(home)
+	if err != nil {
+		return Env{}, err
+	}
 	base := cmp.Or(daemonURL, "http://"+cfg.Daemon.Listen)
-	return Env{Home: home, Config: cfg, Client: client.New(base), Controller: New(home, bin, base)}, nil
+	ctl := New(home, bin, base)
+	ctl.Service = svc
+	return Env{Home: home, Config: cfg, Client: client.New(base), Controller: ctl}, nil
 }
 
 // openHome opens the home override names, initializing it on first use with
@@ -81,11 +89,19 @@ func homePath(override string) (string, error) {
 	return path, nil
 }
 
-// daemonBinary is $CURIO_DAEMON_BIN, or curio-daemon next to the running
-// executable, which is where every install puts it.
+// daemonBinary is $CURIO_DAEMON_BIN, made absolute, or curio-daemon next to
+// the running executable, which is where every install puts it. Neither is
+// resolved through symlinks: a launchd agent installed with the path runs
+// whatever it points at after an upgrade (/opt/homebrew/bin/curio-daemon,
+// not a versioned Cellar directory), and on macOS os.Executable already
+// reports the path this process was started by, symlink included.
 func daemonBinary() (string, error) {
 	if bin := os.Getenv("CURIO_DAEMON_BIN"); bin != "" {
-		return bin, nil
+		abs, err := filepath.Abs(bin)
+		if err != nil {
+			return "", fmt.Errorf("resolve CURIO_DAEMON_BIN=%q: %w", bin, err)
+		}
+		return abs, nil
 	}
 	exe, err := os.Executable()
 	if err != nil {

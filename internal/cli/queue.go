@@ -70,6 +70,45 @@ finish. off drops the window, so the queue runs now. A pause still applies.`,
 	}
 }
 
+func newKeepAwakeCmd(env *daemonctl.Env) *cobra.Command {
+	return &cobra.Command{
+		Use:   "keep-awake on|off",
+		Short: "Keep the Mac from idle sleep while jobs are queued and it runs on AC power (on), or let it sleep (off)",
+		Long: `With keep-awake on, the daemon holds the Mac out of idle sleep (caffeinate -i)
+while its workers have jobs queued or running, the queue isn't paused, and
+the Mac runs on AC power, so an import carries on unattended; it lets go
+when the queue drains, on battery, and when paused. A schedule keeps the
+hold while it waits for its window. A closed lid still sleeps a laptop.
+The setting is stored and takes effect at once. 'curio status' shows
+whether the Mac is being held awake. Starts the daemon if it isn't running.`,
+		Args:      cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
+		ValidArgs: []string{keepAwakeOn, keepAwakeOff},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			on := args[0] == keepAwakeOn
+			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
+				return err
+			}
+			q, err := env.Client.UpdateQueue(cmd.Context(), client.QueueUpdate{KeepAwake: &on})
+			if err != nil {
+				return queueError(err)
+			}
+			if q.KeepAwake {
+				fmt.Fprintln(cmd.OutOrStdout(), "keep-awake: on (the daemon keeps the Mac from idle sleep "+
+					"while jobs are queued and it runs on AC power)")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "keep-awake: off")
+			}
+			return nil
+		},
+	}
+}
+
+// keep-awake's arguments.
+const (
+	keepAwakeOn  = "on"
+	keepAwakeOff = "off"
+)
+
 // updateQueue makes sure the daemon runs, applies u, and prints the queue
 // as it is afterwards. The daemon validates u.
 func updateQueue(cmd *cobra.Command, env *daemonctl.Env, u client.QueueUpdate) error {
@@ -200,4 +239,38 @@ func printQueue(ctx context.Context, w io.Writer, c *client.Client) {
 	if len(loads) > 0 {
 		fmt.Fprintf(w, "           %s\n", strings.Join(loads, "   "))
 	}
+	fmt.Fprintf(w, "keep-awake: %s\n", describeKeepAwake(q))
+}
+
+// describeKeepAwake says whether keep-awake is on and, if it is, whether
+// the Mac is held awake and, if not, why not, in the keeper's order.
+func describeKeepAwake(q *client.Queue) string {
+	queued := 0
+	for _, k := range q.Kinds {
+		queued += k.Pending + k.Running
+	}
+	switch {
+	case !q.KeepAwake:
+		return "off"
+	case q.KeepAwakeActive:
+		return fmt.Sprintf("on, holding the Mac awake (AC power, %s queued)", plural(queued, "job"))
+	case q.Paused:
+		return "on, not holding: the queue is paused"
+	case queued == 0:
+		return "on, not holding: nothing queued"
+	case q.PowerSource == client.PowerBattery:
+		return "on, not holding: on battery power"
+	case q.PowerSource != client.PowerAC:
+		return "on, not holding: power source unknown"
+	default:
+		return "on, not holding yet"
+	}
+}
+
+// plural is n and noun, "s" added unless n is 1.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }

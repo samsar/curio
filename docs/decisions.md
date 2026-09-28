@@ -131,6 +131,8 @@ when the entry was first committed.
 - 2026-09-27 — [Embedding drift: the marker records the build, healthz reports a change](#embedding-drift-the-marker-records-the-build-healthz-reports-a-change)
 - 2026-09-27 — [Embeddings never truncate; an over-long chunk fails at once](#embeddings-never-truncate-an-over-long-chunk-fails-at-once)
 - 2026-09-27 — [sqlite-vec: NEON distance kernels on arm64](#sqlite-vec-neon-distance-kernels-on-arm64)
+- 2026-09-27 — [Daemon lifecycle: a per-user launchd agent](#daemon-lifecycle-a-per-user-launchd-agent)
+- 2026-09-27 — [Keep-awake: caffeinate on AC power while the workers have queued work](#keep-awake-caffeinate-on-ac-power-while-the-workers-have-queued-work)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -290,6 +292,13 @@ daemon per home: flock on daemon.pid, bind before touching the DB" below.
 
 **Later:** `curio service install` drops a `launchd` plist (macOS) or
 `systemd` unit (Linux) for boot-time auto-start.
+
+**Revised (2026-09-27):** the launchd half landed as `curio daemon
+install` (and `uninstall`): a per-user agent that starts the daemon at
+login and restarts it after a crash, and that clients start, stop and
+restart the daemon through while it is loaded. Auto-start without an
+agent is unchanged. See "Daemon lifecycle: a per-user launchd agent".
+systemd stays deferred with Linux.
 
 ---
 
@@ -2386,6 +2395,18 @@ fixed 15s (or 30s for a holder): they wait while the daemon reports
 progress, failing after 15s of silence or at a 30 min ceiling, and they
 hold `daemon.start.lock` only while spawning. See "Daemon startup: a
 starting API while migrating, clients that wait on progress".
+
+**Revised (2026-09-27):** with the home's launchd agent loaded, clients
+start the daemon through it (`launchctl kickstart`) instead of spawning
+it, under the same start lock, and wait on the PID launchd reports as on
+a child; the flock stays the safety net, so a daemon launchd starts next
+to a spawned one just loses the lock. Stop goes through `launchctl kill
+SIGTERM` when launchd runs the lock holder, and signals directly
+otherwise. The start lock is also held across installing, removing and
+restarting the agent, not only while spawning. The daemon exits 0 when a
+signal stopped it and when it finds the lock held (ErrAlreadyRunning),
+which the agent's KeepAlive leaves alone. See "Daemon lifecycle: a
+per-user launchd agent".
 
 ---
 
@@ -5473,7 +5494,9 @@ finishes as usual.
 
 - A gate that holds claims while the Mac runs on battery. It will be one
   more `jobs.Gate`, composed with `jobs.All`, reporting its own reason in
-  `GET /v1/queue`.
+  `GET /v1/queue`; `keepawake.Pmset` is the power probe it can reuse (see
+  "Keep-awake: caffeinate on AC power while the workers have queued
+  work").
 - Pausing one kind, index only, say.
 - Configurable gentle caps.
 - A paused-since time in `GET /v1/queue`.
@@ -5726,6 +5749,204 @@ CLAUDE.md's single-test command sets it.
   ~9.6k-line C file out of Dependabot's reach.
 - AVX on amd64: it needs `-mavx` and AVX hardware at run time, curio ships
   no amd64 build, and nobody asked for it.
+
+---
+
+## Daemon lifecycle: a per-user launchd agent
+
+**Decision:** on macOS, `curio daemon install` installs a per-user
+launchd agent that keeps the home's daemon running; `curio daemon
+uninstall` removes it. While the agent is loaded, clients start, stop and
+restart the daemon through launchd; without it they spawn it, as before.
+
+- **The seam** is `internal/service.Manager` (Status, Install, Uninstall,
+  Start, Stop, Restart), not a `setup.ServiceManager`: daemonctl drives
+  the daemon through it, and the `curio up` wizard (internal/setup)
+  imports daemonctl, so a seam in setup would be an import cycle.
+  `service.ForHome` picks the implementation at run time (`runtime.GOOS`):
+  `Launchd` on darwin, `Unsupported` (manages nothing, every change fails
+  with `ErrUnsupported`) elsewhere. No build tags, so the launchd code
+  compiles and its tests run on the Linux CI job.
+  `servicetest.Fake` is the in-process manager tests inject;
+  `daemonctl.New` leaves the manager nil, so the e2e harness and
+  curio-mcp's tests spawn as before.
+- **The label** is `com.github.samsar.curio.daemon` for `~/.curio`, and
+  for any other home that plus `.` and the first 8 hex digits of the
+  SHA-256 of its canonical path (symlinks resolved). With one label for
+  every home, `curio --curio-home B daemon start` would kickstart home
+  A's agent and then wait on B's lock.
+- **The plist**, at `~/Library/LaunchAgents/<label>.plist`, rendered from
+  a template with every string XML-escaped, written atomically (temp
+  file, fsync, 0644, rename; launchd refuses a group- or world-writable
+  plist) and golden-tested:
+  - `ProgramArguments`: the daemon's path as installed, never resolved
+    through symlinks (`/opt/homebrew/bin/curio-daemon`, not the Cellar),
+    so an upgrade needs no new plist. `CURIO_DAEMON_BIN` is made absolute.
+  - `RunAtLoad` true, `KeepAlive {SuccessfulExit: false}`: launchd starts
+    the daemon at load and login, and restarts it after a non-zero exit.
+  - `ExitTimeOut` 25. `launchctl print` shows `exit timeout = 5` for
+    agents that don't set it, and the daemon's shutdown takes up to 20s
+    (5s HTTP, 15s drain): a bootout, logout or `kickstart -k` would
+    SIGKILL a draining daemon, orphaning its jobs with the attempt kept.
+    The chain is 20s (daemon) < 25s (launchd) < 30s (daemonctl's stop
+    wait), asserted by a test.
+  - `StandardOutPath` daemon.log, `StandardErrorPath` launchd.err. The
+    daemon now logs to stdout, so daemon.log stays the one structured log
+    (`curio daemon logs`, a failed start's quoted tail), and launchd.err
+    gets only what the runtime writes as the process dies. Spawned
+    daemons still send both streams to daemon.log.
+  - `EnvironmentVariables`: `CURIO_HOME` for a non-default home, and a
+    fixed `PATH` of Homebrew's directories then the system's. launchd's
+    default is `/usr/bin:/bin:/usr/sbin:/sbin`, where yt-dlp (looked up
+    once, at startup) and node aren't; copying the installing shell's
+    PATH would bake in whatever that shell had. Nothing else of the
+    environment is carried: `CURIO_GITHUB_TOKEN` and `CURIO_JINA_API_KEY`
+    belong in config.yaml, `curio daemon install` warns about each it
+    sees, and no token is ever written to the plist.
+  - No `ProcessType`: launchd's default suits a service the user waits
+    on.
+- **The verbs**, all in `gui/<uid>`, never with sudo, each bounded (10s;
+  40s for what waits on the daemon's exit), with capped output, failing
+  as a `*LaunchctlError` that quotes the exit status and stderr:
+  - Install: `print` first (bootstrapping a loaded label fails with an
+    opaque "Bootstrap failed: 5"), nothing more when the loaded plist is
+    byte-identical, otherwise `bootout` and poll `print` until the label
+    is gone (bootout returns before the job has stopped, and `--wait` may
+    not exist on every release), then write, `enable` (undoing an earlier
+    `launchctl disable`, as `brew services` does) and `bootstrap`.
+  - Uninstall: `bootout`, the same poll, then remove the plist.
+  - Start: `kickstart -p`; Restart: `kickstart -k -p`, whose termination
+    signal is launchd's to choose (ExitTimeOut covers a SIGTERM); the PID
+    is the last number printed, since the output's form isn't documented,
+    or `print`'s when there is none. Stop: `kill SIGTERM`.
+  - Status: no launchctl at all without a plist, so homes without an
+    agent never fork it; otherwise `print`, reading only the one-tab-deep
+    `state`, `pid`, `last exit code` and `last terminating signal` lines
+    (nested blocks have `state = active` lines of their own). Exit 113
+    (not loaded) and 112 (no GUI domain) are statuses, not errors.
+- **Clients** (`internal/daemonctl`): starting takes `daemon.start.lock`
+  as before, then kickstarts when the manager reports the agent loaded,
+  and spawns otherwise: no agent, one installed but not loaded, or no GUI
+  session (over ssh), where an agent can't run. A manager that can't say
+  fails the start. The launched daemon is waited on like a child:
+  StartTimeout of silence, the start lock released once its PID holds
+  daemon.pid, and, while it doesn't hold the lock, the manager says
+  whether it still runs, so one that dies before serving is reported at
+  once with launchd's last exit, the daemon.log tail and launchd.err's
+  when the launch wrote it. Stop re-probes the lock and asks the manager
+  when it runs the holder; a daemon started outside launchd is signalled
+  directly. Install, Uninstall and a restart through launchd run under
+  the start lock, bootout and `kickstart -k` waits included (up to about
+  40s), so no auto-starter starts a daemon in the middle of one: Install
+  stops a daemon running outside the agent (it would keep the lock from
+  the agent's), and refuses an agent whose daemon couldn't bind because
+  another home's daemon serves the port (launchd would relaunch it every
+  10s); Uninstall returns only once the agent's daemon has released
+  daemon.pid, so `curio up --fresh` can move the home after it.
+- **Exit status:** the daemon exits 0 when a signal stopped it, even if
+  its shutdown failed part way (a request outliving the API's 5s grace),
+  and when another daemon holds the home's lock; otherwise 1. Before, a
+  stop during a slow request exited 1 and launchd restarted the daemon
+  the user had stopped, and a second daemon exited 1 every 10s for ever.
+  A bad config.yaml or a taken port still exits 1, and launchd's
+  throttled retries pick up the fix.
+- **Versions:** `Controller.EnsureVersion` restarts, once, a daemon that
+  reports another version than the caller's (`curio up` after an
+  upgrade), through `kickstart -k` when launchd runs it and Stop plus
+  EnsureRunning otherwise, never taking the old daemon's lock or answers
+  for the new one's; still mismatched, it fails with
+  `ErrVersionMismatch` naming what runs. `curio daemon start` warns when
+  the daemon runs another build than the CLI, the case of rebuilt
+  binaries next to a daemon that kept running.
+- `curio daemon status` and `curio doctor` report the agent: doctor warns
+  about a missing program, an agent installed but not loaded, and one
+  running another curio-daemon than this curio's.
+
+**Why an agent, not a login item or a LaunchDaemon:** an agent is the
+per-user, no-sudo way to run at login and after crashes, in the user's
+GUI session where the home and Ollama are. macOS 13+ shows it in Login
+Items & Extensions, where the user can disallow it; the install says so.
+
+**Rejected:**
+
+- The daemon opening daemon.log itself: foreground `curio-daemon` runs
+  would print nothing. Both streams to daemon.log: the plist's decided
+  launchd.err would be empty for good.
+- Build tags for the launchd code: its tests wouldn't run on CI.
+- `bootout --wait`: not verified on every macOS release curio supports;
+  polling `print` works on all of them.
+
+**Not done:** systemd, with Linux. An end-to-end test of `curio daemon
+install` against a built binary: it would need env overrides for the
+launchctl path and the agents directory, which nothing else needs.
+
+---
+
+## Keep-awake: caffeinate on AC power while the workers have queued work
+
+**Decision:** with keep-awake on (`curio keep-awake on`), the daemon
+holds the Mac out of idle sleep with `caffeinate -i -w <daemon pid>`
+while all of these hold: keep-awake is on, the queue isn't paused, the
+Mac draws from AC power, and jobs of the pools' kinds (fetch, index,
+cluster) are pending or running (`internal/keepawake`).
+
+- **A queue setting, not config.yaml:** `queue_settings.keep_awake`
+  (migration 013), `PUT /v1/queue {"keep_awake": …}`. It must be
+  opt-in, switchable while an import runs (the wizard offers it once the
+  daemon is up, and `off` must take effect at once), and survive
+  restarts, launchd's included. A config.yaml key needs a restart and the
+  daemon never writes the user's file; queue_settings is persisted,
+  changed at runtime, daemon-wide, written by one writer and published to
+  waiters already. It never gates a claim.
+- **The rule's edges:** a pause releases the hold at once (the user said
+  "not now"). A queue closed only by its schedule keeps it: releasing
+  would let an idle Mac sleep before an overnight window opens, and the
+  "only overnight" import the wizard offers would never start. The cost
+  is a Mac awake while it waits for the window. Only the pools' kinds
+  count: the store allows import and summarize jobs no worker claims,
+  which would hold the Mac awake for ever.
+- **Power:** `/usr/bin/pmset -g ps`, bounded to 5s with capped output:
+  "Now drawing from 'AC Power'" is AC, 'Battery Power' and 'UPS Power'
+  battery, anything else (no pmset, a failure, an answer it can't read)
+  unknown, which holds nothing. While there is work it is read once an
+  interval (60s), and at once when the settings change, so unplugging
+  releases within a minute. A step stamps its reading, and any retry it
+  schedules, with the time it began, before it arms its interval timer:
+  stamped after the probe returned, a reading would fall due a few
+  milliseconds after that timer's wake, and be skipped until the next
+  one. While there is work, enqueues don't wake the keeper, so an
+  import's hundreds of enqueues a minute cost no pmset runs; while there
+  is none, an enqueue holds at once.
+- **The hold:** `/usr/bin/caffeinate` with exactly `-i -w <pid>`, started
+  in the daemon's process group (launchd's group kill at the end of
+  ExitTimeOut reaches it) and reaped by one goroutine. `-w` ends it with
+  the daemon however the daemon ends. Release sends SIGTERM, then SIGKILL
+  after 2s. One that can't start (no caffeinate) or exits by itself is
+  retried at the next interval, never in a loop. The keeper runs with
+  the workers and releases its hold as the daemon shuts down.
+- **Wakeups:** the keeper takes the gate's change channel and settings
+  from one snapshot (`QueueGate.Watch`), so turning keep-awake off or
+  pausing releases at once, and waits on that, the interval, the hold's
+  process exiting, and `Enqueued` only while it saw no work.
+- **Reporting:** info on transitions only ("holding the Mac awake" with
+  the caffeinate pid and counts; "released" with the reason). Warnings
+  come once per failure streak: pmset failing, the queue count failing,
+  caffeinate failing to start (a streak ends when one starts). A
+  caffeinate that exits by itself is warned about each time, at most once
+  an interval, next to the "holding" line of its restart. `GET
+  /v1/queue` adds `keep_awake_active` and, while keep-awake is on,
+  `power_source`, both from memory; `curio status`
+  prints a keep-awake line saying whether the Mac is held, and why not.
+  With keep-awake off, the default, the keeper runs no subprocess.
+
+**What `-i` doesn't do:** it prevents idle sleep only. The display still
+sleeps, and closing a laptop's lid still sleeps it; `-s` (system sleep)
+applies on AC only anyway, and holding a closed laptop awake is not
+curio's call.
+
+**Rejected:** IOKit power assertions through cgo (caffeinate is the same
+assertion, with no cgo), and holding on battery (an import would drain
+it).
 
 ---
 

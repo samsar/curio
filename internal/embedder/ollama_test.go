@@ -196,7 +196,7 @@ func TestOllama_ClosedPort(t *testing.T) {
 // batch, so a full batch of real-size vectors fits and a runaway reply
 // doesn't.
 func TestOllama_Embed_ReplyBoundedByBatch(t *testing.T) {
-	const dim = 768
+	const dim = 1024 // the default model's width, qwen3-embedding:0.6b
 	vec := make([]float32, dim)
 	for i := range vec {
 		vec[i] = -0.0123456789 // near the longest JSON a float32 gets

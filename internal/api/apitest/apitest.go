@@ -276,7 +276,7 @@ func (e Embedder) Embed(_ context.Context, texts []string) ([][]float32, error) 
 func (e Embedder) Vector(text string) []float32 {
 	v := make([]float32, e.Dim)
 	for word := range strings.FieldsSeq(strings.ToLower(text)) {
-		v[int(crc32.ChecksumIEEE([]byte(word)))%e.Dim]++
+		v[crc32.ChecksumIEEE([]byte(word))%uint32(e.Dim)]++ //nolint:gosec // G115: Dim is an embedding width, positive and at most store.MaxEmbeddingDim
 	}
 	var sum float64
 	for _, x := range v {
