@@ -5902,26 +5902,34 @@ cluster) are pending or running (`internal/keepawake`).
 - **Power:** `/usr/bin/pmset -g ps`, bounded to 5s with capped output:
   "Now drawing from 'AC Power'" is AC, 'Battery Power' and 'UPS Power'
   battery, anything else (no pmset, a failure, an answer it can't read)
-  unknown, which holds nothing. It is read at most once an interval
-  (60s) unless the settings changed, so unplugging releases within a
-  minute. While there is work, enqueues don't wake the keeper, so an
+  unknown, which holds nothing. While there is work it is read once an
+  interval (60s), and at once when the settings change, so unplugging
+  releases within a minute. A step stamps its reading, and any retry it
+  schedules, with the time it began, before it arms its interval timer:
+  stamped after the probe returned, a reading would fall due a few
+  milliseconds after that timer's wake, and be skipped until the next
+  one. While there is work, enqueues don't wake the keeper, so an
   import's hundreds of enqueues a minute cost no pmset runs; while there
   is none, an enqueue holds at once.
 - **The hold:** `/usr/bin/caffeinate` with exactly `-i -w <pid>`, started
   in the daemon's process group (launchd's group kill at the end of
   ExitTimeOut reaches it) and reaped by one goroutine. `-w` ends it with
   the daemon however the daemon ends. Release sends SIGTERM, then SIGKILL
-  after 2s. One that exits by itself is logged and retried at the next
-  interval, never in a loop. The keeper runs with the workers and
-  releases its hold as the daemon shuts down.
+  after 2s. One that can't start (no caffeinate) or exits by itself is
+  retried at the next interval, never in a loop. The keeper runs with
+  the workers and releases its hold as the daemon shuts down.
 - **Wakeups:** the keeper takes the gate's change channel and settings
   from one snapshot (`QueueGate.Watch`), so turning keep-awake off or
   pausing releases at once, and waits on that, the interval, the hold's
   process exiting, and `Enqueued` only while it saw no work.
 - **Reporting:** info on transitions only ("holding the Mac awake" with
-  the caffeinate pid and counts; "released" with the reason), warn once
-  per failure streak. `GET /v1/queue` adds `keep_awake_active` and, while
-  keep-awake is on, `power_source`, both from memory; `curio status`
+  the caffeinate pid and counts; "released" with the reason). Warnings
+  come once per failure streak: pmset failing, the queue count failing,
+  caffeinate failing to start (a streak ends when one starts). A
+  caffeinate that exits by itself is warned about each time, at most once
+  an interval, next to the "holding" line of its restart. `GET
+  /v1/queue` adds `keep_awake_active` and, while keep-awake is on,
+  `power_source`, both from memory; `curio status`
   prints a keep-awake line saying whether the Mac is held, and why not.
   With keep-awake off, the default, the keeper runs no subprocess.
 

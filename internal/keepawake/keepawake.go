@@ -120,13 +120,14 @@ type run struct {
 	k     *Keeper
 	hold  Hold  // nil while not holding
 	power Power // the last reading
-	// readAt is when the power source was last read; zero for never.
+	// readAt is the start of the step that last read the power source;
+	// zero for never.
 	readAt time.Time
 	// retryAt is when a hold may be tried again after one failed to start
 	// or ended by itself: once an interval, never in a loop.
 	retryAt time.Time
 	// Failure streaks, each logged at its start.
-	powerFailing, countFailing bool
+	powerFailing, countFailing, holdFailing bool
 }
 
 // wakeups are what a step waits on besides a settings change; nil never
@@ -142,6 +143,11 @@ type wakeups struct {
 // fresh power reading.
 func (r *run) step(ctx context.Context, s store.QueueSettings, settingsChanged bool) wakeups {
 	k := r.k
+	// Readings and retries due an interval after this step are stamped
+	// with its start, taken before its interval timer is armed: that
+	// timer wakes the next step no earlier than they fall due, however
+	// long this step's count and probe take.
+	now := time.Now()
 	k.update(func(st *State) { st.Enabled = s.KeepAwake })
 	switch {
 	case !s.KeepAwake:
@@ -165,12 +171,12 @@ func (r *run) step(ctx context.Context, s store.QueueSettings, settingsChanged b
 		// nothing new, and an import makes hundreds a minute.
 		w.enqueued = enqueued
 	default:
-		if settingsChanged || r.readAt.IsZero() || time.Since(r.readAt) >= k.opts.Interval {
-			r.readPower(ctx)
+		if settingsChanged || r.readAt.IsZero() || now.Sub(r.readAt) >= k.opts.Interval {
+			r.readPower(ctx, now)
 		}
 		switch r.power {
 		case PowerAC:
-			r.start(ctx, pending, running)
+			r.start(ctx, now, pending, running)
 		case PowerBattery:
 			r.release("on battery")
 		case PowerUnknown:
@@ -201,11 +207,12 @@ func (r *run) count(ctx context.Context) (pending, running int, err error) {
 	return pending, running, nil
 }
 
-// readPower reads the power source. A reading that fails is unknown, which
-// holds nothing: the Mac may be on battery.
-func (r *run) readPower(ctx context.Context) {
+// readPower reads the power source for the step that began at now. A
+// reading that fails is unknown, which holds nothing: the Mac may be on
+// battery.
+func (r *run) readPower(ctx context.Context, now time.Time) {
 	power, err := r.k.opts.Probe.Power(ctx)
-	r.readAt = time.Now()
+	r.readAt = now
 	if err != nil && !r.powerFailing {
 		r.k.opts.Log.Warn("keep-awake: can't read the power source, so the Mac isn't held awake", "err", err)
 	}
@@ -214,19 +221,25 @@ func (r *run) readPower(ctx context.Context) {
 	r.k.update(func(st *State) { st.Power = power })
 }
 
-// start holds the Mac awake, unless it is held already or a hold failed
-// within the last interval.
-func (r *run) start(ctx context.Context, pending, running int) {
-	if r.hold != nil || time.Now().Before(r.retryAt) {
+// start holds the Mac awake for the step that began at now, unless it is
+// held already or a hold failed within the last interval. A hold that
+// can't start (no caffeinate, say) is retried once an interval and warned
+// about once, until one starts.
+func (r *run) start(ctx context.Context, now time.Time, pending, running int) {
+	if r.hold != nil || now.Before(r.retryAt) {
 		return
 	}
 	h, err := r.k.opts.Asserter.Hold(ctx)
 	if err != nil {
-		r.k.opts.Log.Warn("keep-awake: can't hold the Mac awake; trying again in an interval",
-			"err", err, "interval", r.k.opts.Interval)
-		r.retryAt = time.Now().Add(r.k.opts.Interval)
+		if !r.holdFailing {
+			r.k.opts.Log.Warn("keep-awake: can't hold the Mac awake; trying again once an interval",
+				"err", err, "interval", r.k.opts.Interval)
+		}
+		r.holdFailing = true
+		r.retryAt = now.Add(r.k.opts.Interval)
 		return
 	}
+	r.holdFailing = false
 	r.hold = h
 	r.k.update(func(st *State) { st.Active = true })
 	r.k.opts.Log.Info("keep-awake: holding the Mac awake", "caffeinate_pid", h.PID(), "pending", pending, "running", running)

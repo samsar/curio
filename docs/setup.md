@@ -290,8 +290,8 @@ curio keep-awake off   # let it sleep as usual
 
 With keep-awake on, the daemon runs `caffeinate -i -w <its pid>` while its
 workers have jobs queued or running, the queue isn't paused, and the Mac
-draws from AC power (`pmset -g ps`, read at most once a minute while there
-is work). It lets go when the queue drains, within a minute of the Mac
+draws from AC power (`pmset -g ps`, read once a minute while there is
+work). It lets go when the queue drains, within a minute of the Mac
 going on battery, and at once when you pause the queue or turn keep-awake
 off. A schedule keeps the hold while the queue waits for its window, so an
 overnight import starts: the Mac stays awake until then. The hold prevents

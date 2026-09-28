@@ -91,22 +91,37 @@ func (j *fakeJobs) countCalls() int {
 	return j.counted
 }
 
-// fakeProbe reports the power a test sets, and counts its reads.
+// fakeProbe reports the power a test sets, and records when each read
+// began.
 type fakeProbe struct {
 	mu    sync.Mutex
 	power Power
-	err   error
-	reads int
+	// script, when set, is answered in turn before power.
+	script []Power
+	err    error
+	// latency is how long each read takes, as pmset takes a few
+	// milliseconds.
+	latency time.Duration
+	reads   []time.Time
 }
 
-func (p *fakeProbe) Power(context.Context) (Power, error) {
+func (p *fakeProbe) Power(ctx context.Context) (Power, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.reads++
-	if p.err != nil {
-		return PowerUnknown, p.err
+	p.reads = append(p.reads, time.Now())
+	power, err, latency := p.power, p.err, p.latency
+	if len(p.script) > 0 {
+		power, p.script = p.script[0], p.script[1:]
 	}
-	return p.power, nil
+	p.mu.Unlock()
+	select {
+	case <-time.After(latency):
+	case <-ctx.Done():
+		return PowerUnknown, ctx.Err()
+	}
+	if err != nil {
+		return PowerUnknown, err
+	}
+	return power, nil
 }
 
 func (p *fakeProbe) set(power Power) {
@@ -116,17 +131,23 @@ func (p *fakeProbe) set(power Power) {
 }
 
 func (p *fakeProbe) readCount() int {
+	return len(p.readTimes())
+}
+
+func (p *fakeProbe) readTimes() []time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.reads
+	return append([]time.Time(nil), p.reads...)
 }
 
 // fakeAsserter records its holds. With exitAtOnce each hold's process
-// ends as soon as it starts.
+// ends as soon as it starts; with err set, no hold starts.
 type fakeAsserter struct {
 	mu         sync.Mutex
 	holds      []*fakeHold
 	exitAtOnce bool
+	err        error
+	tries      int
 }
 
 type fakeHold struct {
@@ -139,6 +160,10 @@ type fakeHold struct {
 func (a *fakeAsserter) Hold(context.Context) (Hold, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.tries++
+	if a.err != nil {
+		return nil, a.err
+	}
 	h := &fakeHold{pid: 1000 + len(a.holds), done: make(chan struct{})}
 	if a.exitAtOnce {
 		h.end()
@@ -157,12 +182,24 @@ func (h *fakeHold) Release() {
 	h.end()
 }
 
-// started is how many holds have been started; held how many are still
-// held.
+// started is how many holds have been started, tried how many Hold
+// calls were made, and held how many holds are still held.
 func (a *fakeAsserter) started() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.holds)
+}
+
+func (a *fakeAsserter) tried() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tries
+}
+
+func (a *fakeAsserter) fail(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.err = err
 }
 
 func (a *fakeAsserter) held() int {
@@ -297,6 +334,16 @@ func (h *harness) eventuallyHeld(t *testing.T, want int, msg string) {
 	require.Eventually(t, func() bool { return h.asserter.held() == want }, 2*time.Second, 5*time.Millisecond, msg)
 }
 
+// eventuallyReleased waits for the keeper to have logged releases for
+// reasons, which it does after ending the hold and updating its State.
+func (h *harness) eventuallyReleased(t *testing.T, reasons ...any) {
+	t.Helper()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, reasons, h.logs.releases())
+	}, 2*time.Second, 5*time.Millisecond)
+	assert.Zero(t, h.asserter.held())
+}
+
 const (
 	tick  = 50 * time.Millisecond // a short interval
 	never = time.Hour             // an interval no test waits out
@@ -326,10 +373,56 @@ func TestKeeper_FollowsThePower(t *testing.T) {
 	h.probe.set(PowerAC)
 	h.eventuallyHeld(t, 1, "held once on AC")
 	h.probe.set(PowerBattery)
-	h.eventuallyHeld(t, 0, "released on battery")
-	assert.Equal(t, []any{"on battery"}, h.logs.releases())
+	h.eventuallyReleased(t, "on battery")
 	h.probe.set(PowerAC)
 	h.eventuallyHeld(t, 1, "held again")
+}
+
+// TestKeeper_SlowProbe: the power source is read again at the first
+// interval however long a reading takes (pmset takes a few milliseconds),
+// so unplugging releases within an interval, not two.
+func TestKeeper_SlowProbe(t *testing.T) {
+	const interval = 300 * time.Millisecond
+	h := start(t, true, PowerBattery, interval, func(h *harness) {
+		withWork(h)
+		h.probe.script = []Power{PowerAC}
+		h.probe.latency = 30 * time.Millisecond
+	})
+	h.eventuallyHeld(t, 1, "held on AC")
+	h.eventuallyReleased(t, "on battery")
+	reads := h.probe.readTimes()
+	require.GreaterOrEqual(t, len(reads), 2)
+	assert.Less(t, reads[1].Sub(reads[0]), interval*3/2, "read again at the first interval")
+}
+
+// TestKeeper_NoCaffeinate: a hold that can't start (no caffeinate, say) is
+// tried once an interval and warned about once, until one starts; a later
+// failure starts a new streak, warned about again.
+func TestKeeper_NoCaffeinate(t *testing.T) {
+	missing := errors.New("start /usr/bin/caffeinate: fork/exec /usr/bin/caffeinate: no such file or directory")
+	h := start(t, true, PowerAC, tick, func(h *harness) {
+		withWork(h)
+		h.asserter.err = missing
+	})
+	begin := time.Now()
+	require.Never(t, func() bool { return h.asserter.tried() > int(time.Since(begin)/tick)+2 },
+		8*tick, tick/5, "at most once an interval")
+	assert.GreaterOrEqual(t, h.asserter.tried(), 3, "tried again")
+	assert.Zero(t, h.asserter.started())
+	assert.Equal(t, State{Enabled: true, Power: PowerAC}, h.keeper.State())
+	warning := "keep-awake: can't hold the Mac awake; trying again once an interval"
+	assert.Equal(t, []string{warning}, h.logs.at(slog.LevelWarn))
+
+	h.asserter.fail(nil)
+	h.eventuallyHeld(t, 1, "held once caffeinate starts")
+	h.asserter.fail(missing)
+	h.update(t, jobs.QueueUpdate{KeepAwake: new(false)})
+	h.eventuallyReleased(t, "turned off")
+	h.update(t, jobs.QueueUpdate{KeepAwake: new(true)})
+	require.Eventually(t, func() bool { return len(h.logs.at(slog.LevelWarn)) == 2 }, 2*time.Second, 5*time.Millisecond,
+		"a new streak is warned about")
+	require.Never(t, func() bool { return len(h.logs.at(slog.LevelWarn)) > 2 }, 4*tick, tick/5)
+	assert.Equal(t, []string{warning, warning}, h.logs.at(slog.LevelWarn))
 }
 
 // TestKeeper_Drains: a queue that drains is released at the next
@@ -338,8 +431,7 @@ func TestKeeper_Drains(t *testing.T) {
 	h := start(t, true, PowerAC, tick, withWork)
 	h.eventuallyHeld(t, 1, "held")
 	h.jobs.set(store.JobKindFetch, 0, 0)
-	h.eventuallyHeld(t, 0, "released")
-	assert.Equal(t, []any{"queue drained"}, h.logs.releases())
+	h.eventuallyReleased(t, "queue drained")
 }
 
 // TestKeeper_EnqueueWhileIdle: work arriving at an idle keeper is held at
@@ -360,8 +452,7 @@ func TestKeeper_Pause(t *testing.T) {
 	h.eventuallyHeld(t, 1, "held")
 
 	h.update(t, jobs.QueueUpdate{Paused: new(true)})
-	h.eventuallyHeld(t, 0, "released at once")
-	assert.Equal(t, []any{"paused"}, h.logs.releases())
+	h.eventuallyReleased(t, "paused")
 	h.update(t, jobs.QueueUpdate{Paused: new(false)})
 	h.eventuallyHeld(t, 1, "held again")
 
@@ -378,8 +469,7 @@ func TestKeeper_TurnedOff(t *testing.T) {
 	h := start(t, true, PowerAC, never, withWork)
 	h.eventuallyHeld(t, 1, "held")
 	h.update(t, jobs.QueueUpdate{KeepAwake: new(false)})
-	h.eventuallyHeld(t, 0, "released at once")
-	assert.Equal(t, []any{"turned off"}, h.logs.releases())
+	h.eventuallyReleased(t, "turned off")
 	assert.Equal(t, State{Power: PowerAC}, h.keeper.State())
 }
 
@@ -540,6 +630,26 @@ func TestCaffeinate(t *testing.T) {
 	assert.Equal(t, caffeinateRun{PID: h.PID(), Signal: "SIGTERM"}, runs[1])
 	assert.NoError(t, h.Err(), "a released caffeinate exits cleanly")
 	assert.False(t, alive(h.PID()), "reaped")
+}
+
+// TestCaffeinate_ExitsByItself: a caffeinate that exits on its own closes
+// Done and reports how it ended, and a release after that signals
+// nothing.
+func TestCaffeinate_ExitsByItself(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(fakeDirEnv, dir)
+	h, err := Caffeinate{Bin: fakeTool(t, modeCaffeinateExit), PID: os.Getpid()}.Hold(context.Background())
+	require.NoError(t, err)
+	select {
+	case <-h.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done not closed after caffeinate exited")
+	}
+	require.Error(t, h.Err())
+	assert.Contains(t, h.Err().Error(), "exit status 1")
+
+	h.Release()
+	assert.Len(t, caffeinateRuns(t, dir), 1, "no SIGTERM recorded: there was no process to signal")
 }
 
 func TestCaffeinate_Missing(t *testing.T) {
