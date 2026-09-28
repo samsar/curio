@@ -352,6 +352,23 @@ type BookmarkStore interface {
 
 	// Count returns how many bookmarks the tenant has.
 	Count(ctx context.Context, tenantID string) (int, error)
+
+	// PreviewIngest reports what Ingest would find for each of urls under
+	// source, writing nothing: whether the tenant has the URL's document,
+	// and a bookmark of it from source. urls are normalized, as Ingest
+	// takes them; the result has an entry for each distinct one. It is one
+	// statement however many URLs there are, and none for an empty list.
+	PreviewIngest(ctx context.Context, tenantID, source string, urls []string) (map[string]IngestPreview, error)
+}
+
+// IngestPreview is what BookmarkStore.Ingest would find for one URL.
+type IngestPreview struct {
+	// DocumentExists: the tenant has its document, so Ingest would link
+	// to it and enqueue no fetch.
+	DocumentExists bool
+	// BookmarkExists: the tenant has a bookmark of it from the source, so
+	// Ingest would refuse it (ErrConflict).
+	BookmarkExists bool
 }
 
 // IngestResult reports what BookmarkStore.Ingest did about the bookmark's

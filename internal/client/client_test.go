@@ -53,6 +53,13 @@ func TestHealthz_GenerationModel(t *testing.T) {
 	assert.Equal(t, "gemma4:26b", h.GenerationModel)
 }
 
+func TestHealthz_YouTubeFetcher(t *testing.T) {
+	s := apitest.Start(t, func(d *api.Deps) { d.YouTubeFetcher = "/opt/homebrew/bin/yt-dlp" })
+	h, err := client.New(s.URL).Healthz(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "/opt/homebrew/bin/yt-dlp", h.YouTubeFetcher)
+}
+
 // TestHealthz_EmbeddingDrift: a drift the daemon reports reaches Health
 // whole.
 func TestHealthz_EmbeddingDrift(t *testing.T) {
@@ -389,6 +396,24 @@ func TestBookmarks(t *testing.T) {
 	assert.Equal(t, "https://example.com/b", chrome.Items[0].URL)
 
 	assert.Equal(t, 4, countRows(t, s, "bookmarks"))
+}
+
+// TestImport_DryRun: a dry run reports what the import would do, with the
+// URLs it would fetch, and writes nothing.
+func TestImport_DryRun(t *testing.T) {
+	s, c := start(t)
+	ctx := context.Background()
+	_, err := c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: "https://example.com/a"})
+	require.NoError(t, err)
+
+	res, err := c.ImportBookmarks(ctx, client.ImportRequest{Source: "chrome", DryRun: true,
+		Bookmarks: []client.ImportBookmark{{URL: "https://example.com/a"}, {URL: "https://example.com/b"}}})
+	require.NoError(t, err)
+	assert.True(t, res.DryRun)
+	assert.Equal(t, 2, res.Created)
+	assert.Equal(t, 1, res.JobsEnqueued)
+	assert.Equal(t, []string{"https://example.com/b"}, res.NewURLs)
+	assert.Equal(t, 1, countRows(t, s, "bookmarks"))
 }
 
 func TestDocuments(t *testing.T) {

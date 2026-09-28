@@ -80,6 +80,20 @@ func Indexable(rawURL string) (bool, FilterReason) {
 	return true, ""
 }
 
+// Classify is the import's verdict on a bookmark's URL, the daemon's and
+// every count's alike: the normalized URL its bookmark is saved under, or,
+// with an empty URL, why it is filtered.
+func Classify(rawURL string) (string, FilterReason) {
+	if ok, why := Indexable(rawURL); !ok {
+		return "", why
+	}
+	norm, err := urlutil.Normalize(rawURL)
+	if err != nil {
+		return "", ReasonInvalidURL
+	}
+	return norm, ""
+}
+
 var browserInternalPrefixes = []string{
 	"chrome://",
 	"chrome-extension://",

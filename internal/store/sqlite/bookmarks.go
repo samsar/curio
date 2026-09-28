@@ -260,6 +260,44 @@ func (s *Bookmarks) Count(ctx context.Context, tenantID string) (int, error) {
 	return n, nil
 }
 
+// previewIngestSQL looks each URL of a JSON array up the way Ingest
+// would: the tenant's document of it, and its bookmark from the source.
+// Its args are the tenant, the tenant, the source and the array. Each
+// lookup is a point search of a unique index, so a library of any size
+// answers ten thousand URLs in milliseconds.
+const previewIngestSQL = `SELECT j.value,
+	EXISTS (SELECT 1 FROM documents d WHERE d.tenant_id = ? AND d.url = j.value),
+	EXISTS (SELECT 1 FROM bookmarks b WHERE b.tenant_id = ? AND b.url = j.value AND b.source = ?)
+FROM json_each(?) j`
+
+func (s *Bookmarks) PreviewIngest(ctx context.Context, tenantID, source string, urls []string) (map[string]store.IngestPreview, error) {
+	out := make(map[string]store.IngestPreview, len(urls))
+	if len(urls) == 0 {
+		return out, nil
+	}
+	list, err := json.Marshal(urls)
+	if err != nil {
+		return nil, fmt.Errorf("preview ingest: encode urls: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, previewIngestSQL, tenantID, tenantID, source, string(list))
+	if err != nil {
+		return nil, fmt.Errorf("preview ingest: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var url string
+		var p store.IngestPreview
+		if err := rows.Scan(&url, &p.DocumentExists, &p.BookmarkExists); err != nil {
+			return nil, fmt.Errorf("preview ingest: scan: %w", err)
+		}
+		out[url] = p
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("preview ingest: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Bookmarks) Delete(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM bookmarks WHERE id = ?`, id)
 	if err != nil {

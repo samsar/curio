@@ -282,6 +282,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		// Drifted, both parts of the build changed.
 		d.Drift = &driftMonitor{report: drifted(time.Now())}
 		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
+		d.YouTubeFetcher = "/opt/homebrew/bin/yt-dlp"
 		// Paused Jina, with every optional field set.
 		d.Upstreams = func() []fetcher.UpstreamHealth {
 			now := time.Now()
@@ -349,6 +350,8 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"POST /v1/bookmarks/import", jsonBody(http.MethodPost, "/v1/bookmarks/import",
 			`{"source":"html","bookmarks":[{"url":"https://example.com/imported","saved_at":"2024-01-01T00:00:00Z"},`+
 				`{"url":"javascript:alert(1)"},{"url":"https://example.com/unsavable"}]}`), http.StatusOK},
+		{"POST /v1/bookmarks/import", jsonBody(http.MethodPost, "/v1/bookmarks/import",
+			`{"source":"chrome","dry_run":true,"bookmarks":[{"url":"https://example.com/counted"}]}`), http.StatusOK},
 		{"DELETE /v1/bookmarks/{id}", request{method: http.MethodDelete, path: "/v1/bookmarks/" + f.bookmark}, http.StatusNoContent},
 
 		{"GET /v1/documents", get("/v1/documents?limit=2"), http.StatusOK},
