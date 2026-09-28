@@ -133,6 +133,9 @@ func TestValidate(t *testing.T) {
 		{"NaN min_similarity", func(c *Config) { c.Insight.MinSimilarity = math.NaN() }, "insight.min_similarity"},
 		{"infinite min_similarity", func(c *Config) { c.Insight.MinSimilarity = math.Inf(1) }, "insight.min_similarity"},
 		{"zero labeling timeout", func(c *Config) { c.Insight.LabelingTimeoutSeconds = 0 }, "insight.labeling_timeout_seconds"},
+		{"empty generation base_url", func(c *Config) { c.Generation.BaseURL = "" }, "generation.base_url"},
+		{"web2md without a bin", func(c *Config) { c.Fetcher.Default, c.Fetcher.Web2MD.Bin = "web2md", "" },
+			"fetcher.web2md.bin must be set when fetcher.default is web2md"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -142,6 +145,44 @@ func TestValidate(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 		})
+	}
+}
+
+// TestValidate_BaseURLs: an Ollama address the daemon's client would
+// refuse fails the config, for both keys, so a daemon never gets as far as
+// binding its port and migrating with one.
+func TestValidate_BaseURLs(t *testing.T) {
+	cases := []struct {
+		url string
+		ok  bool
+	}{
+		{"http://localhost:11434", true},
+		{"https://ollama.example", true},
+		{"http://127.0.0.1:11434/", true},
+		{"localhost:11434", false},
+		{"127.0.0.1:11434", false},
+		{"ftp://x", false},
+		{"http://", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		for _, key := range []string{"embedding.base_url", "generation.base_url"} {
+			t.Run(key+"="+tc.url, func(t *testing.T) {
+				cfg := Default()
+				if key == "embedding.base_url" {
+					cfg.Embedding.BaseURL = tc.url
+				} else {
+					cfg.Generation.BaseURL = tc.url
+				}
+				err := cfg.Validate()
+				if tc.ok {
+					require.NoError(t, err)
+					return
+				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), key)
+			})
+		}
 	}
 }
 
