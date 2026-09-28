@@ -266,25 +266,82 @@ func (w *world) embeddingSettings(hs homeState) (string, int) {
 	return w.defaults.Embedding.Model, w.defaults.Embedding.Dim
 }
 
-// refusal is why the daemon would refuse the home as it stands, or ""
-// when it wouldn't, or when --fresh will replace it. A home without a
-// config.yaml isn't refused: curio up writes one.
-func (w *world) refusal(hs homeState) string {
+// refusal is why the daemon would refuse a home as it stands, and the
+// remedy that fits the reason.
+type refusal struct {
+	// why is empty when the daemon would serve the home.
+	why  string
+	hint string
+}
+
+// freshRemedy is the remedy for a home only a new one replaces.
+const freshRemedy = "`curio up --fresh` sets the home aside and starts a new one"
+
+// refusal says why the daemon would refuse the home as it stands, and what
+// to do: nothing when it wouldn't, or when --fresh will replace it. A home
+// without a config.yaml isn't refused: curio up writes one.
+func (w *world) refusal(hs homeState) refusal {
 	if hs.kind != homeOurs || w.freshPending() {
-		return ""
+		return refusal{}
 	}
 	switch {
 	case hs.metaErr != nil:
-		return "its marker is unreadable: " + hs.metaErr.Error()
+		return refusal{why: "its marker is unreadable: " + hs.metaErr.Error(),
+			hint: "check the permissions of " + hs.home.MarkerPath() + ", or " + freshRemedy}
 	case hs.configErr != nil:
-		return "its config.yaml doesn't load: " + hs.configErr.Error()
+		return refusal{why: "its config.yaml doesn't load: " + hs.configErr.Error(),
+			hint: "edit " + hs.home.ConfigPath() + ", or " + freshRemedy}
 	case w.opts.EmbeddingModel != "" && w.opts.EmbeddingModel != hs.meta.EmbeddingModel:
-		return fmt.Sprintf("it embeds with %s, and --embedding-model asks for %s", hs.meta.EmbeddingModel,
-			w.opts.EmbeddingModel)
+		return refusal{
+			why: fmt.Sprintf("it embeds with %s, and --embedding-model asks for %s", hs.meta.EmbeddingModel,
+				w.opts.EmbeddingModel),
+			hint: fmt.Sprintf("`curio up --fresh --embedding-model %s` sets the home aside and starts a new one",
+				w.opts.EmbeddingModel)}
 	}
 	model, dim := w.embeddingSettings(hs)
-	if _, err := hs.home.CheckEmbedding(model, dim); err != nil {
-		return err.Error()
+	_, err := hs.home.CheckEmbedding(model, dim)
+	var mismatch *curiohome.EmbeddingMismatchError
+	switch {
+	case err == nil:
+		return refusal{}
+	case errors.Is(err, curiohome.ErrNewerHome):
+		return refusal{why: err.Error(), hint: "upgrade curio (`brew upgrade curio`)"}
+	case errors.As(err, &mismatch):
+		return refusal{why: err.Error(), hint: "set config.yaml back (embedding.model and embedding.dim as the marker " +
+			"records them), or " + freshRemedy}
+	default:
+		return refusal{why: err.Error(), hint: freshRemedy}
+	}
+}
+
+// formatRefused is ErrLegacyHome or ErrNewerHome for a home that stays
+// whose marker records a format the daemon refuses, whatever config.yaml
+// says; nil otherwise. Nothing about such a home, its embedding model
+// included, is this curio's to act on.
+func (w *world) formatRefused(hs homeState) error {
+	// An unreadable marker records no format; the home check reports it.
+	stays := hs.kind == homeOurs && !w.freshPending() && hs.metaErr == nil
+	switch {
+	case !stays:
+		return nil
+	case hs.meta.Format < curiohome.CurrentFormat:
+		return curiohome.ErrLegacyHome
+	case hs.meta.Format > curiohome.CurrentFormat:
+		return curiohome.ErrNewerHome
+	}
+	return nil
+}
+
+// unusable says why the home's path can hold no home curio up makes, for
+// the checks that can't be made without one; "" when it can.
+func (hs homeState) unusable() string {
+	switch {
+	case hs.err != nil:
+		return "the home can't be looked at"
+	case hs.kind == homeNotDir:
+		return hs.path + " is a file"
+	case hs.kind == homeNotOurs:
+		return hs.path + " isn't a curio home"
 	}
 	return ""
 }
@@ -292,7 +349,7 @@ func (w *world) refusal(hs homeState) string {
 // homeReady reports whether the home is there, stays, and the daemon
 // would serve it: with its config.yaml, or on the defaults without one.
 func (w *world) homeReady(hs homeState) bool {
-	return hs.kind == homeOurs && !w.freshPending() && w.refusal(hs) == ""
+	return hs.kind == homeOurs && !w.freshPending() && w.refusal(hs).why == ""
 }
 
 // connect builds the daemon's environment for an existing home, with its

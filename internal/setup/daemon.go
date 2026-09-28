@@ -37,10 +37,12 @@ func (w *world) checkDaemon(ctx context.Context) Result {
 		return Result{Status: Fail, Detail: problem,
 			Hint: "reinstall curio, or set CURIO_DAEMON_BIN to the curio-daemon to run"}
 	}
-	if why := w.refusal(hs); why != "" {
+	if r := w.refusal(hs); r.why != "" {
 		return Result{Status: Fail, Detail: "not started: curio-daemon would refuse this home (see the curio home and config checks)",
-			Hint: "`curio up --fresh` sets the home aside and starts a new one; or set config.yaml back " +
-				"(embedding.model and embedding.dim as the marker records them)"}
+			Hint: r.hint}
+	}
+	if why := hs.unusable(); why != "" {
+		return Result{Status: Warn, Detail: "not checked: " + why + " (see the curio home check)"}
 	}
 	cfg := w.baseConfig(hs)
 	if !w.homeReady(hs) {

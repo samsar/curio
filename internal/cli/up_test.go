@@ -223,6 +223,18 @@ func TestDoctorAgreesWithUp(t *testing.T) {
 			return w
 		},
 		"everything up": func(t *testing.T) *world { return upWorld(t) },
+		"a file home": func(t *testing.T) *world {
+			w := newWorld(t, embedModel, genModel)
+			w.home, w.daemonURL = filepath.Join(t.TempDir(), "curio"), down.URL
+			require.NoError(t, os.WriteFile(w.home, []byte("notes"), 0o600))
+			return w
+		},
+		"a non-curio directory": func(t *testing.T) *world {
+			w := newWorld(t, embedModel, genModel)
+			w.home, w.daemonURL = t.TempDir(), down.URL
+			require.NoError(t, os.WriteFile(filepath.Join(w.home, "notes.txt"), []byte("mine"), 0o600))
+			return w
+		},
 		"a legacy home": func(t *testing.T) *world {
 			w := upWorld(t)
 			require.NoError(t, os.WriteFile(filepath.Join(w.home, curiohome.MarkerFile),

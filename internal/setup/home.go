@@ -122,6 +122,9 @@ func (w *world) newEmbedding() string {
 // it where there is none.
 func (w *world) checkConfig(ctx context.Context) Result {
 	hs := w.readHome()
+	if why := hs.unusable(); why != "" {
+		return Result{Status: Warn, Detail: "not checked: " + why + " (see the curio home check)"}
+	}
 	switch {
 	case hs.kind != homeOurs || w.freshPending():
 		return Result{Status: Warn, Detail: "none yet: curio up writes one with the new home",

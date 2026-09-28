@@ -72,7 +72,7 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 		p.notes = append(p.notes, "the Mac couldn't be probed, so curio picks for the smallest tier")
 	}
 	embedding := w.newEmbeddingModel()
-	if hs.kind == homeOurs && !w.freshPending() && hs.metaErr == nil {
+	if hs.kind == homeOurs && !w.freshPending() && hs.metaErr == nil && w.formatRefused(hs) == nil {
 		embedding = hs.meta.EmbeddingModel
 	}
 	p.embedding = wanted{knownModel(embedding), cfg.Embedding.BaseURL}
@@ -149,6 +149,9 @@ func (w *world) missing(ctx context.Context, p picks) ([]wanted, error) {
 // takes the ones that aren't.
 func (w *world) checkModels(ctx context.Context) Result {
 	hs := w.readHome()
+	if err := w.formatRefused(hs); err != nil {
+		return Result{Status: Warn, Detail: "not checked: " + err.Error() + " (see the curio home check)"}
+	}
 	p, err := w.pick(ctx, hs)
 	if err != nil {
 		return Result{Status: Fail, Detail: err.Error(), Notes: p.notes}

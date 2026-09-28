@@ -608,30 +608,59 @@ func TestReindex_HelpNamesDrift(t *testing.T) {
 }
 
 // TestDoctor_HomeTheDaemonRefuses: a home the daemon won't serve, a legacy
-// one or one whose config.yaml asks for another embedding model, fails
-// doctor's home check offline, with the daemon's own reason and fix, and
-// the daemon check points there and at `curio up --fresh`, not at
-// starting a daemon that would only refuse it.
+// one, one from a newer curio, one whose marker can't be read or one whose
+// config.yaml asks for another embedding model, fails doctor's home check
+// offline, with the daemon's own reason and fix, and the daemon check
+// points there, with the remedy that fits the reason, not at starting a
+// daemon that would only refuse it.
 func TestDoctor_HomeTheDaemonRefuses(t *testing.T) {
 	down := httptest.NewServer(http.NotFoundHandler())
 	down.Close()
+	const fresh = "`curio up --fresh` sets the home aside and starts a new one"
+	defaults := config.Default().Embedding
 	cases := []struct {
-		name  string
-		setup func(t *testing.T, home string)
-		want  []string
+		name   string
+		setup  func(t *testing.T, home string)
+		want   []string
+		hint   func(home string) string
+		models string // the models line's detail; empty when the models check looks at the home
 	}{
 		{"legacy", func(t *testing.T, home string) {
 			require.NoError(t, os.WriteFile(filepath.Join(home, curiohome.MarkerFile), []byte(`{"schema_version":11,`+
 				`"embedding_model":"nomic-embed-text","embedding_dim":768}`), 0o600))
-		}, []string{"curio home from an older curio", `"nomic-embed-text" (dim 768)`, "`curio up --fresh`"}},
+		}, []string{"curio home from an older curio", `"nomic-embed-text" (dim 768)`, "`curio up --fresh`"},
+			func(string) string { return fresh },
+			"not checked: curio home from an older curio (see the curio home check)"},
+		{"newer", func(t *testing.T, home string) {
+			h, err := curiohome.Init(home, defaults.Model, defaults.Dim)
+			require.NoError(t, err)
+			meta, err := h.Meta()
+			require.NoError(t, err)
+			meta.Format = curiohome.CurrentFormat + 1
+			require.NoError(t, h.WriteMeta(meta))
+		}, []string{"curio home from a newer curio"},
+			func(string) string { return "upgrade curio (`brew upgrade curio`)" },
+			"not checked: curio home from a newer curio (see the curio home check)"},
+		{"unreadable marker", func(t *testing.T, home string) {
+			_, err := curiohome.Init(home, defaults.Model, defaults.Dim)
+			require.NoError(t, err)
+			marker := filepath.Join(home, curiohome.MarkerFile)
+			require.NoError(t, os.Chmod(marker, 0))
+			t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+		}, []string{"its marker is unreadable", "permission denied"},
+			func(home string) string {
+				return "check the permissions of " + filepath.Join(home, curiohome.MarkerFile) + ", or " + fresh
+			}, ""},
 		{"mismatch", func(t *testing.T, home string) {
-			defaults := config.Default().Embedding
 			_, err := curiohome.Init(home, defaults.Model, defaults.Dim)
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(filepath.Join(home, curiohome.ConfigFile),
 				[]byte("embedding:\n  model: mxbai-embed-large\n"), 0o600))
 		}, []string{"embedding model mismatch", `configured "mxbai-embed-large" (dim 1024)`,
-			"Set embedding.model and embedding.dim back", "`curio up --fresh`"}},
+			"Set embedding.model and embedding.dim back", "`curio up --fresh`"},
+			func(string) string {
+				return "set config.yaml back (embedding.model and embedding.dim as the marker records them), or " + fresh
+			}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -649,8 +678,54 @@ func TestDoctor_HomeTheDaemonRefuses(t *testing.T) {
 			line, hint := doctorLine(t, out, "daemon")
 			assert.Equal(t, "✗", markerOf(line))
 			assert.Contains(t, line, "see the curio home and config checks")
-			assert.Contains(t, hint, "`curio up --fresh`")
+			assert.Equal(t, tc.hint(home), hint)
 			assert.NotContains(t, out, "curio daemon start")
+			if tc.models != "" {
+				line, hint = doctorLine(t, out, "models")
+				assert.Equal(t, fmt.Sprintf("! %-22s %s", "models", tc.models), line)
+				assert.Empty(t, hint, "nothing to pull for a home no daemon serves")
+			}
+		})
+	}
+}
+
+// TestUp_HomePathNotAHome: a file, or a directory that isn't a curio
+// home, where the home should be blocks curio up at the home check alone:
+// config.yaml and the daemon aren't checked, planned, or offered to do.
+func TestUp_HomePathNotAHome(t *testing.T) {
+	worlds := map[string]func(t *testing.T, path string){
+		"a file": func(t *testing.T, path string) {
+			require.NoError(t, os.WriteFile(path, []byte("notes"), 0o600))
+		},
+		"a non-curio directory": func(t *testing.T, path string) {
+			require.NoError(t, os.Mkdir(path, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(path, "notes.txt"), []byte("mine"), 0o600))
+		},
+	}
+	for name, make := range worlds {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t, embedModel, genModel)
+			down := httptest.NewServer(http.NotFoundHandler())
+			down.Close()
+			w.home, w.daemonURL = filepath.Join(t.TempDir(), "curio"), down.URL
+			make(t, w.home)
+			daemonBin(t)
+
+			code, stdout, _ := w.exit(t, "up", "--dry-run")
+			assert.Equal(t, 1, code)
+			assert.NotRegexp(t, `\d\. (home|daemon): `, stdout, "no config.yaml or daemon to make before the home")
+			assert.Contains(t, stdout, "To fix by hand first:\n  ✗ home: ")
+			assert.Contains(t, stdout, "  ! daemon: not checked: ")
+
+			out, err := w.run(t, "doctor")
+			require.Error(t, err)
+			for _, check := range []string{"config", "daemon"} {
+				line, hint := doctorLine(t, out, check)
+				assert.Equal(t, "!", markerOf(line), line)
+				assert.Contains(t, line, "not checked: ")
+				assert.Contains(t, line, "(see the curio home check)")
+				assert.Empty(t, hint, "curio up can't do it")
+			}
 		})
 	}
 }
