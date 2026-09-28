@@ -272,7 +272,8 @@ func TestInstall_SymlinkedProgram(t *testing.T) {
 }
 
 // TestInstall_Refusals: a daemon launchd couldn't run, or an install as
-// root, writes nothing and runs no launchctl.
+// root, writes nothing and runs no launchctl; Preflight refuses the same,
+// with the same error.
 func TestInstall_Refusals(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -291,13 +292,25 @@ func TestInstall_Refusals(t *testing.T) {
 			if tc.root {
 				tl.opts.Geteuid = func() int { return 0 }
 			}
-			_, err := tl.Install(context.Background(), Spec{Program: tc.program(tl)})
+			spec := Spec{Program: tc.program(tl)}
+			preflight := tl.Preflight(context.Background(), spec)
+			_, err := tl.Install(context.Background(), spec)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.want)
+			assert.Equal(t, err, preflight)
 			assert.Empty(t, tl.fake.calls())
 			assert.NoDirExists(t, tl.agents)
 		})
 	}
+}
+
+// TestPreflight: an install that would go ahead passes, having asked
+// launchd only what it has loaded.
+func TestPreflight(t *testing.T) {
+	tl := newTestLaunchd(t, modeLaunchctl, fakeState{Loaded: true, PID: 4242})
+	require.NoError(t, tl.Preflight(context.Background(), Spec{Program: tl.program}))
+	assert.Equal(t, []string{"print"}, tl.fake.verbs())
+	assert.NoDirExists(t, tl.agents)
 }
 
 // TestInstall_FailedRename: a plist that can't be put in place leaves no
@@ -341,10 +354,11 @@ func TestInstall_BootstrapFails(t *testing.T) {
 func TestInstall_NoGUISession(t *testing.T) {
 	tl := newTestLaunchd(t, modeLaunchctl, fakeState{NoDomain: true})
 	_, err := tl.Install(context.Background(), Spec{Program: tl.program})
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoGUISession)
 	assert.Contains(t, err.Error(), "log in to the Mac's desktop session")
 	assert.Contains(t, err.Error(), "exit 112")
 	assert.Equal(t, []string{"print"}, tl.fake.verbs())
+	require.ErrorIs(t, tl.Preflight(context.Background(), Spec{Program: tl.program}), ErrNoGUISession)
 }
 
 func TestStartRestartStop(t *testing.T) {
@@ -458,7 +472,7 @@ func TestStatus(t *testing.T) {
 		{"loaded, exited cleanly", fakeState{Loaded: true, LastExit: "0"},
 			Status{Loaded: true, State: "not running"}},
 		{"not loaded", fakeState{}, Status{}},
-		{"no GUI domain", fakeState{NoDomain: true}, Status{}},
+		{"no GUI domain", fakeState{NoDomain: true}, Status{NoGUISession: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

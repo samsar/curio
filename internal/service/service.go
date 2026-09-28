@@ -19,9 +19,16 @@ import (
 	"github.com/samsar/curio/internal/curiohome"
 )
 
-// ErrUnsupported is returned by every change a Manager is asked to make on
-// a platform with no service manager curio supports.
-var ErrUnsupported = errors.New("no service manager for curio-daemon on this platform")
+var (
+	// ErrUnsupported is returned by every change a Manager is asked to make
+	// on a platform with no service manager curio supports.
+	ErrUnsupported = errors.New("no service manager for curio-daemon on this platform")
+
+	// ErrNoGUISession: the user has no desktop login session (logged in
+	// only over ssh, say), which a launchd agent runs in. The clients start
+	// the daemon themselves meanwhile.
+	ErrNoGUISession = errors.New("no GUI login session to run the launchd agent in")
+)
 
 // ExitTimeout is how long launchd lets the daemon exit after SIGTERM before
 // it sends SIGKILL (the plist's ExitTimeOut). launchd's own default is 5s;
@@ -36,6 +43,10 @@ type Manager interface {
 	// Status reports what the service manager knows. A service that isn't
 	// installed, or isn't loaded, is a Status saying so, never an error.
 	Status(ctx context.Context) (Status, error)
+	// Preflight returns the error Install would fail with before changing
+	// anything for spec, or nil, and changes nothing itself: a caller
+	// checks it before stopping a daemon Install would replace.
+	Preflight(ctx context.Context, spec Spec) error
 	// Install writes the service definition for spec and loads it, which
 	// starts the daemon. changed is false when the same definition was
 	// already loaded and nothing was done.
@@ -72,6 +83,9 @@ type Status struct {
 	Loaded  bool   // the service manager has the service loaded
 	State   string // the service manager's word for it ("running", "not running")
 	PID     int    // the running daemon's; 0 when none runs
+	// NoGUISession: the service is installed, but the user has no login
+	// session for it to be loaded in (see ErrNoGUISession).
+	NoGUISession bool
 	// LastExit is how the service's last process ended, as the service
 	// manager words it ("exit code 1", "signal Killed: 9"), for messages;
 	// empty when it never ran or ended cleanly.

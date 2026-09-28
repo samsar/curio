@@ -181,7 +181,36 @@ func (l *Launchd) Status(ctx context.Context) (Status, error) {
 		return st, err
 	}
 	st.Loaded, st.State, st.PID, st.LastExit = p.loaded, p.state, p.pid, p.lastExit
+	st.NoGUISession = p.noDomain != nil
 	return st, nil
+}
+
+// Preflight refuses what Install would: running as root, a program
+// launchd couldn't run, and a user with no GUI session (ErrNoGUISession).
+// It runs `launchctl print` and nothing that changes launchd's state.
+func (l *Launchd) Preflight(ctx context.Context, spec Spec) error {
+	_, err := l.preflight(ctx, spec)
+	return err
+}
+
+// preflight is Preflight, returning what print said about the agent for
+// Install to go on from.
+func (l *Launchd) preflight(ctx context.Context, spec Spec) (printed, error) {
+	if l.opts.Geteuid() == 0 {
+		return printed{}, errors.New("install the launchd agent as your own user, not root: " +
+			"the agent is per-user, and curio never uses sudo")
+	}
+	if err := checkProgram(spec.Program); err != nil {
+		return printed{}, err
+	}
+	p, err := l.print(ctx)
+	if err != nil {
+		return printed{}, err
+	}
+	if p.noDomain != nil {
+		return printed{}, l.noDomainError(p.noDomain)
+	}
+	return p, nil
 }
 
 // Install writes the agent's plist for spec and loads it, which starts the
@@ -190,11 +219,10 @@ func (l *Launchd) Status(ctx context.Context) (Status, error) {
 // booted out, waited out, and loaded again. `enable` comes first, so an
 // explicit install undoes an earlier `launchctl disable`.
 func (l *Launchd) Install(ctx context.Context, spec Spec) (bool, error) {
-	if l.opts.Geteuid() == 0 {
-		return false, errors.New("install the launchd agent as your own user, not root: " +
-			"the agent is per-user, and curio never uses sudo")
-	}
-	if err := checkProgram(spec.Program); err != nil {
+	// launchd refuses to bootstrap a label it has loaded ("Bootstrap
+	// failed: 5"), so what it has decides the rest.
+	p, err := l.preflight(ctx, spec)
+	if err != nil {
 		return false, err
 	}
 	plist, err := renderPlist(agentPlist{
@@ -203,15 +231,6 @@ func (l *Launchd) Install(ctx context.Context, spec Spec) (bool, error) {
 	})
 	if err != nil {
 		return false, err
-	}
-	// launchd refuses to bootstrap a label it has loaded ("Bootstrap
-	// failed: 5"), so what it has decides the rest.
-	p, err := l.print(ctx)
-	if err != nil {
-		return false, err
-	}
-	if p.noDomain != nil {
-		return false, l.noDomainError(p.noDomain)
 	}
 	if p.loaded {
 		current, err := os.ReadFile(l.PlistPath())
@@ -505,9 +524,8 @@ func (l *Launchd) loadError(err error) error {
 
 // noDomainError explains print's answer for a user with no GUI session.
 func (l *Launchd) noDomainError(err *LaunchctlError) error {
-	return fmt.Errorf("no GUI login session for uid %d to run the launchd agent in: "+
-		"log in to the Mac's desktop session and run this again (until then, curio commands start the daemon themselves): %w",
-		l.opts.UID, err)
+	return fmt.Errorf("%w for uid %d: log in to the Mac's desktop session and run this again "+
+		"(until then, curio commands start the daemon themselves): %w", ErrNoGUISession, l.opts.UID, err)
 }
 
 // run runs launchctl with args, bounded by timeout, and returns its
