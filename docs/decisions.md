@@ -6684,10 +6684,10 @@ in v0.56.0. govulncheck finds nothing in the new modules.
 
 **Decision:** Before goldmark sees a document's markdown, one linear pass
 over its lines (`ui.checkShape`, `internal/ui/budget.go`) charges it for
-what makes goldmark's work grow faster than the text, and the link
-transformer counts the links as it resolves them. A text over any budget
-is shown as it is stored, escaped in a `<pre>`, under a banner naming the
-budget; everything else is formatted as before.
+what makes goldmark's work or memory grow faster than the text, and the
+link transformer counts the links as it resolves them. A text over any
+budget is shown as it is stored, escaped in a `<pre>`, under a banner
+naming the budget; everything else is formatted as before.
 
 **Why.** goldmark v1.8.6 has corners where its work grows with the square
 of the input, or multiplies it, and a stored page's markdown is whatever
@@ -6701,6 +6701,19 @@ the development Mac:
   1 MiB line of `>` took 4 min 30 s, allocated 607 MB and wrote 28 MB of
   HTML. At 64 KiB, `>\t` took 2.1 s, `- ` ending in `x` 1.6 s, `>`
   1.1 s, `+ ` and `> - ` 0.55 s, `1. ` 0.37 s.
+- The block parse visits the open blocks on every line, in order, up to
+  the first the line doesn't continue, and keeps a record of each visit
+  until the top-level block ends. A blank line continues every list and
+  list item, so it visits all of them, and lists stay open over any
+  number of blank lines. An item nested 32 deep, then 1 MiB of blank
+  lines, allocated 9.2 GB through the document page and took the daemon
+  to 4.8 GB; one `- a` over the same blank lines, 258 MB. Nesting also
+  builds up line by line through indentation: a 16 KiB ramp of lines
+  indented with tabs, 32 markers each, reached about 1,400 levels, and
+  32,000 blank lines after it (48 KB in all) allocated 11.5 GB. Each
+  visit also reads the line's indentation again, and copies the rest of
+  the line when a tab is split between two blocks: that ramp filling
+  1 MiB took 26 s, cmark's deeply nested lists indented with tabs 4.8 s.
 - Inline markup is quadratic in its paragraph. In one 256 KiB paragraph,
   `[a](` repeated took 21.7 s, `[a](b` and `![a](` 18 s, `*a`, `_a`, `~a`
   and `a*` 4.3 s each, `**a` 2.9 s, `` `a `` 2.2 s, `[a]` lines 0.8 s,
@@ -6709,6 +6722,11 @@ the development Mac:
   An unclosed opener scans to the end of its line or paragraph, each
   emphasis delimiter is compared with every earlier one, and each `]`
   walks its paragraph's lines.
+- Emphasis runs that pair with nothing can stay to be compared again:
+  goldmark has no cut-off for openers that can never match (cmark's
+  `openers_bottom`), so after `a**b`, every `c* ` (a closer the rule of
+  three keeps from pairing with the `**`) is compared with every one
+  before it. One 80 KB paragraph of them took 2.4 s.
 - Two shapes multiply what they are given. goldmark pads every table row
   to its header's width: a 1,024-column header over 128K one-character
   lines (256 KiB) made 1.3 GB of HTML in 69 s. Every link to a reference
@@ -6720,9 +6738,15 @@ case the 1 MiB cap had to cover, was wrong.
 
 **The budgets.**
 
-- `maxLineNesting`: 32 blockquote and list markers on one line.
+- `maxLineNesting`: 32 blockquote and list markers on one line. A
+  thematic break (`- - -`, `* * *`) isn't markers: goldmark tries it
+  before a list at every level.
 - `maxContainers`: 131,072 such markers in the text, each a container
   with its own tags.
+- `maxBlockVisits`: 2^21 (2,097,152), the sum over the text's lines of
+  the open blocks goldmark can visit at each.
+- `maxVisitBytes`: 2^28, the sum over the text's lines of those visits
+  times the line's length.
 - `maxInlineWork`: 2^31, the sum over the text's paragraphs of their
   markup characters times their length in bytes. Markup is every
   character goldmark's inline parsers start at, spaces aside: `!`, `[`,
@@ -6730,6 +6754,8 @@ case the 1 MiB cap had to cover, was wrong.
   starts at a space, but its scan stops at the next one.
   `TestMarkup_CoversInlineTriggers` checks the list against goldmark's
   default inline parsers and GFM's.
+- `maxEmphasisWork`: 2^27, the sum over the text's paragraphs of the
+  square of their runs of `*`, `_` and `~`.
 - `maxTableCells`: 262,144 cells. Every line after a line shaped like a
   delimiter row is charged the widest such row's cells, until the
   paragraph ends, and each such row its header's.
@@ -6745,19 +6771,56 @@ blockquote markers: either interrupts a paragraph inside any container,
 so every paragraph, heading and table cell goldmark parses inline lies
 within one of them. Everything else a paragraph may or may not end at
 (a fence, an HTML block, a table row) is left inside it. Markers are
-counted on every line, continued containers too, and a table is assumed
-wherever a line could be a delimiter row.
+counted on every line, continued containers too, a run of `*`, `_` or
+`~` counts whatever it turns out to be, and a table is assumed wherever
+a line could be a delimiter row.
 
-**Numbers.** Just under the inline budget, the worst shape (`[a](` in
-paragraphs of 2.7 KiB) renders 1 MiB in 0.97 s, `*a` in 0.45 s and
-`` `a `` in 0.26 s; just under the container, table and link budgets,
-80 to 110 ms and at most about 8 MB of HTML. A text over a budget costs
-what copying and escaping it does. `TestMarkdown_OverBudget` renders
-every shape above at 1 MiB and checks it takes that path.
+The block charges follow from how goldmark continues a block. A line
+continues a blockquote only with a `>` of its own, a list only with a
+marker of its own or as much indentation as its item's content (at
+least two columns), and the item with that same indentation; once what
+is left of a line is blank, every list and list item beneath continues.
+So the pass keeps a bound on the blocks open after each line and charges
+each line: a blank line, or one of only spaces, tabs and markers, can
+visit every open block; any other line at most one block per marker and
+per column of indentation (a tab counts four), and one more. Each marker
+opens at most two blocks, a list and its item, and a nonblank line one
+more, the paragraph or code it holds. The blocks a line doesn't continue
+stay open only when it continues a paragraph lazily, which a line after
+a blank one can't. The rule was checked against a copy of goldmark
+instrumented to count its visits and the bytes they read or copy, over
+9 million generated documents (indentation of spaces and tabs, every
+marker, lazy and blank lines, fences, thematic breaks, ramps hundreds of
+levels deep) and over 400 million fuzzed ones: the visits charged were
+never fewer than goldmark's, and the bytes it read or copied were at
+most three times the bytes charged.
 
-On a real library of 3,574 stored documents, rendering all of them took
-1.7 s and the slowest, 1 MiB, 27 ms. One is over a budget: a Wikipedia
-list flattened by Jina into one 325 KiB paragraph of links and citations
+**Numbers.** Just under the budgets, the slowest shape is still `[a](`:
+0.95 s for 1 MiB in paragraphs of 2.7 KiB, and about as long for one
+52 KiB paragraph. Next are lists nested with tabs, cut just under
+`maxVisitBytes` (213 KiB), 0.44 s, and `a**b` over lines of `c*` just
+under `maxEmphasisWork` (34 KiB), 0.43 s; then `` `a `` and `*a` at
+1 MiB in their costliest paragraph sizes, 0.26 and 0.24 s, and text
+under 128 levels of tab-indented lists (1 MiB), 0.24 s. An item 32 deep
+over blank lines takes 25 ms. The most memory is that text under deep
+lists, 322 MiB allocated and 103 MiB of heap at once, then the deep item
+over blank lines, 257 and 93 MiB: about what goldmark takes for 1 MiB of
+one-character lines, which no budget stops (263 and 119 MiB). Just under
+the container, table and link budgets, 80 to 110 ms and at most about
+8 MB of HTML. A text over a budget costs what copying and escaping it
+does. `TestMarkdown_OverBudget` renders every shape above, at 1 MiB
+where it has one, and checks it takes that path, fast and within 16 MiB
+of allocation (the link budget is counted as goldmark parses, so that
+text costs what the parse does); `TestMarkdown_JustUnderBudget` cuts the
+block and emphasis shapes to the most of them within the budgets and
+holds their render to 10 s and 1 GiB, race detector included.
+
+On a real library of 4,498 stored documents, rendering all of them takes
+2.1 s, and the slowest, 583 KiB, 48 ms. The largest block charges are
+165,244 visits and 6.7 × 10^6 visit bytes, 12 and 40 times under their
+budgets; the largest emphasis work within the inline budget is 3.6 ×
+10^6, 37 times under. One document is over a budget: a Wikipedia list
+flattened by Jina into one 325 KiB paragraph of links and citations
 (6.1 × 10^9 of inline work). The next are a Wikipedia article with
 11 KiB paragraphs (1.2 × 10^9) and a PDF extraction without paragraph
 breaks (6.4 × 10^8). What the budgets will catch in practice is that
@@ -6765,7 +6828,10 @@ shape, and PDF text of several hundred KiB with no blank line, which is
 plain text anyway, and tables of a few thousand rows of links: a table
 is charged as one paragraph. `TestMarkdown_WithinBudget` formats a 1 MiB
 article, a 1 MiB awesome-list README, a 100 KiB flattened wiki table,
-lists nested ten deep and a 1,000-row table.
+lists nested ten deep, lists nested five deep with a blank line after
+every item, a 1 MiB loose list, a 1,000-row table and a thematic break
+of 64 spaced dashes, which counted as markers before and was the other
+real document shown unformatted.
 
 **Considered.**
 
@@ -6778,6 +6844,13 @@ lists nested ten deep and a 1,000-row table.
   tighter, so fewer documents would be shown plain, but it would mirror
   goldmark's internals scan by scan and miss the next corner. The budgets
   charge what any inline parser could do.
+- A cap on nesting depth alone: the block parse's cost is its depth
+  times its lines, blank ones included, so only a sum over the lines
+  bounds it.
+- Charging a blank line once, since goldmark reads it in full only at
+  its outermost list: closer to goldmark's count, but it leans on that
+  detail; charging every visit the whole line costs the real library
+  nothing.
 - Capping the HTML goldmark writes: it keeps escaping every link's URL
   for writes that fail, and pads tables while parsing, before it writes.
 - Rows of a detected table as paragraphs of their own: a table goldmark

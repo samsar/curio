@@ -40,7 +40,8 @@ rebuilding interests and the queue controls are still `curio` commands
   their folders and tags, and, for a failed or dead page, its last error.
   The text shown is at most the first 1 MiB; the page says when it is cut
   and where the whole file is. A text whose markdown would take too long
-  to format (a line nesting dozens of quotes, a paragraph thick with
+  or too much memory to format (a line nesting dozens of quotes, lists
+  nested deep over thousands of blank lines, a paragraph thick with
   unclosed brackets, a table padded to thousands of columns: a few shapes
   a page can hold, by accident or on purpose) is shown as it is stored,
   unformatted, and the page says why.
