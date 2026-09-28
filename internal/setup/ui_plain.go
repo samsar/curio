@@ -47,43 +47,61 @@ func (u plainUI) Progress(title string) Progress { return newProgress(u.out, tit
 // while it waits, aborts the prompt; it never answers for the user.
 type lineUI struct {
 	lineWriter
-	in    io.Reader
-	once  sync.Once
-	lines chan string // closed when the input ends
+	in *bufio.Scanner
+
+	mu sync.Mutex
+	// pending is the read a prompt started and no prompt has taken the
+	// line of yet: one a cancelled context left waiting.
+	pending chan lineRead
+}
+
+// lineRead is what one read of the input gave: a line, or the input's end.
+type lineRead struct {
+	line  string
+	ended bool
 }
 
 func newLineUI(in io.Reader, out io.Writer) *lineUI {
-	return &lineUI{lineWriter: lineWriter{out}, in: in}
+	return &lineUI{lineWriter: lineWriter{out}, in: bufio.NewScanner(in)}
 }
 
 func (*lineUI) Interactive() bool { return true }
 
 func (u *lineUI) Progress(title string) Progress { return newProgress(u.out, title, false, time.Now) }
 
-// read waits for the next line of input. One goroutine reads the input
-// for the UI's life, so a prompt can give up on a cancelled context while
-// a read it can't interrupt goes on. The input's end, whatever caused it,
-// is ErrAborted.
+// read waits for the next line of input. The input is read only while a
+// prompt waits for a line: between prompts, curio runs commands (brew,
+// open) on the same terminal, and what the user types for them is theirs.
+// A read runs on its own goroutine, so a prompt can give up on a cancelled
+// context while a read it can't interrupt goes on; that read's line goes
+// to the next prompt, the only line that can be taken from a command, and
+// only as the run ends. The input's end, whatever caused it, is
+// ErrAborted.
 func (u *lineUI) read(ctx context.Context) (string, error) {
-	u.once.Do(func() {
-		u.lines = make(chan string)
-		go func() {
-			defer close(u.lines)
-			for sc := bufio.NewScanner(u.in); sc.Scan(); {
-				u.lines <- sc.Text()
-			}
-		}()
-	})
+	u.mu.Lock()
+	if u.pending == nil {
+		u.pending = make(chan lineRead, 1)
+		go func(done chan<- lineRead) {
+			ok := u.in.Scan()
+			done <- lineRead{line: u.in.Text(), ended: !ok}
+		}(u.pending)
+	}
+	pending := u.pending
+	u.mu.Unlock()
+
 	select {
 	case <-ctx.Done():
 		fmt.Fprintln(u.out)
 		return "", ctx.Err()
-	case line, ok := <-u.lines:
-		if !ok {
+	case r := <-pending:
+		u.mu.Lock()
+		u.pending = nil
+		u.mu.Unlock()
+		if r.ended {
 			fmt.Fprintln(u.out)
 			return "", ErrAborted
 		}
-		return strings.TrimSpace(line), nil
+		return strings.TrimSpace(r.line), nil
 	}
 }
 
