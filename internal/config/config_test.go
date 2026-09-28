@@ -331,6 +331,7 @@ func TestLoad_StrictKeys(t *testing.T) {
 		{name: "top-level typo", yaml: "embeding:\n  model: x\n", wantKey: "embeding"},
 		{name: "nested typo", yaml: "fetcher:\n  native:\n    timeout_secs: 5\n", wantKey: "timeout_secs"},
 		{name: "jina key typo", yaml: "fetcher:\n  native:\n    jina_key: x\n", wantKey: "jina_key"},
+		{name: "ui key typo", yaml: "ui:\n  load_images: true\n", wantKey: "load_images"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -341,6 +342,19 @@ func TestLoad_StrictKeys(t *testing.T) {
 			assert.Contains(t, err.Error(), path)
 		})
 	}
+}
+
+// TestLoad_UI: the dashboard is on and shows no remote images unless
+// config.yaml says otherwise.
+func TestLoad_UI(t *testing.T) {
+	d := Default()
+	assert.True(t, d.Daemon.UI, "the pages are on by default")
+	assert.False(t, d.UI.LoadRemoteImages, "remote images are off by default")
+
+	got, err := Load(writeConfig(t, "daemon:\n  ui: false\nui:\n  load_remote_images: true\n"))
+	require.NoError(t, err)
+	assert.False(t, got.Daemon.UI)
+	assert.True(t, got.UI.LoadRemoteImages)
 }
 
 func TestLoad_CommentOnlyFile_ReturnsDefaults(t *testing.T) {

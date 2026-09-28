@@ -1,0 +1,31 @@
+{{/*
+The next page is a plain link carrying the filters and the cursor. htmx
+turns it into "load more": the next page's rows are appended to #rows, and
+its #more, holding the link after it or nothing, replaces this one.
+*/}}
+{{define "content" -}}
+<h1>Library</h1>
+<form class="filters" action="/ui/library" method="get">
+<label>State <select name="state"><option value="">any</option>{{range docStates}}<option{{if eq . $.Filters.State}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+<label>Type <select name="content_type"><option value="">any</option>{{range contentTypes}}<option{{if eq . $.Filters.ContentType}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+<label>Host <input name="host" value="{{.Filters.Host}}" placeholder="example.com"></label>
+<label>Folder <input name="folder" value="{{.Filters.Folder}}" placeholder="/Reading"></label>
+{{with .Filters.Limit}}<input type="hidden" name="limit" value="{{.}}">{{end}}
+<button type="submit">Filter</button>
+</form>
+{{if .Rows}}
+<div class="table-wrap"><table class="docs">
+<thead><tr><th>Document</th><th>State</th><th>Type</th><th>Updated</th><th>Last error</th></tr></thead>
+<tbody id="rows">
+{{range .Rows}}<tr>
+<td><a href="{{documentHref .DocumentID}}">{{or .Title .URL}}</a>{{if .Title}}<span class="url">{{.URL}}</span>{{end}}</td>
+<td><span class="state state-{{.State}}">{{.State}}</span></td>
+<td>{{.ContentType}}</td>
+<td>{{when .UpdatedAt}}</td>
+<td class="error">{{.LastError}}</td>
+</tr>
+{{end}}</tbody>
+</table></div>
+{{else}}<p class="empty">No documents match.</p>{{end}}
+<div id="more">{{with .NextCursor}}<a class="more" href="{{libraryHref $.Filters .}}" hx-get="{{libraryHref $.Filters .}}" hx-target="#rows" hx-select="#rows > tr" hx-swap="beforeend" hx-select-oob="#more">Load more</a>{{end}}</div>
+{{- end}}

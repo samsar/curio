@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/config"
@@ -75,9 +76,10 @@ func Connect(home *curiohome.Home, cfg config.Config, daemonURL string) (Env, er
 }
 
 // BaseURL is where the daemon for cfg serves: daemonURL when set, and
-// daemon.listen otherwise.
+// daemon.listen otherwise. A trailing slash is dropped: clients join the
+// API's paths onto it, and //v1/healthz is no route.
 func BaseURL(cfg config.Config, daemonURL string) string {
-	return cmp.Or(daemonURL, "http://"+cfg.Daemon.Listen)
+	return strings.TrimRight(cmp.Or(daemonURL, "http://"+cfg.Daemon.Listen), "/")
 }
 
 // openHome opens the home override names, initializing it on first use with

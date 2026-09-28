@@ -145,6 +145,10 @@ func TestConnect(t *testing.T) {
 	env, err = Connect(home, cfg, "http://127.0.0.1:1234")
 	require.NoError(t, err)
 	assert.Equal(t, "http://127.0.0.1:1234", env.Controller.BaseURL)
+
+	env, err = Connect(home, cfg, "http://127.0.0.1:1234/")
+	require.NoError(t, err)
+	assert.Equal(t, "http://127.0.0.1:1234", env.Controller.BaseURL, "the API's paths are joined onto it")
 }
 
 // TestDiscoverWith: the connect given builds the Env, over the home

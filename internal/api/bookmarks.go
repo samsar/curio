@@ -121,45 +121,64 @@ type BookmarkListResponse struct {
 	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
-// handleListBookmarks pages through the tenant's bookmarks, newest first.
-// next_cursor is set exactly when another page follows: the store is asked
-// for one row more than the page holds.
 func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
+	opts, err := listBookmarksOpts(r)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	resp, err := d.listBookmarks(r.Context(), opts)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// listBookmarksOpts reads GET /v1/bookmarks' query: the source and folder
+// filters, the cursor and the page size in Limit. A source or cursor the
+// list can't take is a requestError.
+func listBookmarksOpts(r *http.Request) (store.ListBookmarksOpts, error) {
 	q := r.URL.Query()
 	source := q.Get("source")
 	if source != "" && !validSource(source) {
-		d.writeError(w, r, badRequest("source %q must be one of: %s", source, sourceList))
-		return
+		return store.ListBookmarksOpts{}, badRequest("source %q must be one of: %s", source, sourceList)
 	}
 	after, err := cursorParam(r)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return store.ListBookmarksOpts{}, err
 	}
-	limit := listLimit(r)
-	bms, err := d.Bookmarks.List(r.Context(), d.TenantID, store.ListBookmarksOpts{
+	return store.ListBookmarksOpts{
 		Source:     source,
 		FolderPath: q.Get("folder"),
 		After:      after,
-		Limit:      limit + 1,
-	})
+		Limit:      listLimit(r),
+	}, nil
+}
+
+// listBookmarks pages through the tenant's bookmarks that match opts,
+// newest first; opts.Limit is the page size. NextCursor is set exactly
+// when another page follows: the store is asked for one row more than the
+// page holds.
+func (d Deps) listBookmarks(ctx context.Context, opts store.ListBookmarksOpts) (BookmarkListResponse, error) {
+	limit := opts.Limit
+	opts.Limit = limit + 1
+	bms, err := d.Bookmarks.List(ctx, d.TenantID, opts)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return BookmarkListResponse{}, err
 	}
 	bms, next, err := onePage(bms, limit, func(b store.BookmarkWithState) store.PageKey {
 		return store.PageKey{At: b.CreatedAt, ID: b.ID}
 	})
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return BookmarkListResponse{}, err
 	}
 
 	resp := BookmarkListResponse{Items: make([]BookmarkResponse, 0, len(bms)), NextCursor: next}
 	for _, b := range bms {
 		resp.Items = append(resp.Items, bookmarkToResponse(b.Bookmark, string(b.DocumentState)))
 	}
-	d.writeJSON(w, r, http.StatusOK, resp)
+	return resp, nil
 }
 
 func (d Deps) handleGetBookmark(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,6 @@
+{{define "content" -}}
+<h1>{{.Status}} {{.Title}}</h1>
+<p>{{.Message}}</p>
+{{with .RequestID}}<p class="meta">Request {{.}}; see <code>curio daemon logs</code>.</p>{{end}}
+{{with navHref .Retry}}<p><a href="{{.}}">Start over</a></p>{{end}}
+{{- end}}

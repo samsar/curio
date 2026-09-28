@@ -73,7 +73,7 @@ when the entry was first committed.
 - 2026-07-06 — [nomic-embed-text task prefixes (`search_document:` / `search_query:`)](#nomic-embed-text-task-prefixes-search_document--search_query) (revised)
 - 2026-07-06 — [Insight clustering quality: the "general-reading" mega-cluster (known limitation)](#insight-clustering-quality-the-general-reading-mega-cluster-known-limitation)
 - 2026-09-09 — [Host-cache hits are permanent failures](#host-cache-hits-are-permanent-failures) (revised)
-- 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out)
+- 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out) (revised)
 - 2026-09-24 — [Single daemon per home: flock on daemon.pid, bind before touching the DB](#single-daemon-per-home-flock-on-daemonpid-bind-before-touching-the-db) (revised)
 - 2026-09-24 — [Interrupted vs. orphaned jobs](#interrupted-vs-orphaned-jobs)
 - 2026-09-24 — [Config: strict keys, legacy `workers` folded in at load](#config-strict-keys-legacy-workers-folded-in-at-load) (revised)
@@ -92,7 +92,7 @@ when the entry was first committed.
 - 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert)
 - 2026-09-24 — [Bookmark ingest: one transaction, fetch only for new documents](#bookmark-ingest-one-transaction-fetch-only-for-new-documents)
 - 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down) (revised)
-- 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders)
+- 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders) (revised)
 - 2026-09-24 — [API: handler edge cases found by coverage](#api-handler-edge-cases-found-by-coverage) (revised)
 - 2026-09-25 — [updated_at: written by each statement, not by triggers](#updated_at-written-by-each-statement-not-by-triggers)
 - 2026-09-25 — [Jobs reference their document through a column](#jobs-reference-their-document-through-a-column)
@@ -103,7 +103,7 @@ when the entry was first committed.
 - 2026-09-25 — [API: tolerant responses, strict requests](#api-tolerant-responses-strict-requests)
 - 2026-09-25 — [API: absolute content paths, and hydration errors fail the request](#api-absolute-content-paths-and-hydration-errors-fail-the-request) (revised)
 - 2026-09-25 — [API: filters are validated, sizing knobs default](#api-filters-are-validated-sizing-knobs-default)
-- 2026-09-25 — [Clients: one discovery, an explicit daemon environment, a signal context](#clients-one-discovery-an-explicit-daemon-environment-a-signal-context)
+- 2026-09-25 — [Clients: one discovery, an explicit daemon environment, a signal context](#clients-one-discovery-an-explicit-daemon-environment-a-signal-context) (revised)
 - 2026-09-25 — [Client errors: a typed APIError, and "unreachable" means never connected](#client-errors-a-typed-apierror-and-unreachable-means-never-connected)
 - 2026-09-25 — [MCP sidecar: restart an unreachable daemon, retry once](#mcp-sidecar-restart-an-unreachable-daemon-retry-once) (revised)
 - 2026-09-25 — [List pagination: keyset on (timestamp, id)](#list-pagination-keyset-on-timestamp-id)
@@ -135,6 +135,8 @@ when the entry was first committed.
 - 2026-09-27 — [Keep-awake: caffeinate on AC power while the workers have queued work](#keep-awake-caffeinate-on-ac-power-while-the-workers-have-queued-work)
 - 2026-09-27 — [curio up: a plan-first setup wizard](#curio-up-a-plan-first-setup-wizard) (revised)
 - 2026-09-28 — [curio up: the import step](#curio-up-the-import-step)
+- 2026-09-28 — [Dashboard: server-rendered pages in the daemon (phase 1)](#dashboard-server-rendered-pages-in-the-daemon-phase-1)
+- 2026-09-28 — [Dashboard: formatting budgets for stored markdown](#dashboard-formatting-budgets-for-stored-markdown)
 - 2026-09-28 — [Commands take a document's URL as well as its ID](#commands-take-a-documents-url-as-well-as-its-id)
 - 2026-09-28 — [Doctor warns when GitHub requests carry no token](#doctor-warns-when-github-requests-carry-no-token)
 - 2026-09-25 — [Open questions](#open-questions)
@@ -2304,6 +2306,27 @@ machine out. That is accepted for a single-user tool and revisited with
 hosted-mode auth. Browsers' Private Network Access protections are not
 relied on because they don't ship everywhere.
 
+**Revised (2026-09-28):** Two Fetch Metadata rules join these, and the
+daemon now serves one browser client of its own.
+
+- A change (any method but GET, HEAD and OPTIONS) that carries
+  `Sec-Fetch-Site` gets 403 unless it carries it once, valued
+  `same-origin`. Browsers send it on every request; the CLI and the MCP
+  sidecar send none, and pass. The Origin rule already refuses other
+  sites' changes; this one also holds where a browser leaves Origin off,
+  and keeps the daemon's names apart: a page from `localhost:P` changing
+  `127.0.0.1:P` sends an Origin the daemon accepts, but is cross-site. It
+  runs after the Origin check, in the starting router too, so a refused
+  change during startup is a 403, not a 503.
+- The dashboard (see "Dashboard: server-rendered pages in the daemon
+  (phase 1)") is admitted because it is same-origin: its pages come from
+  the daemon's own port, their requests carry the daemon's own Origin,
+  and they are GET-only. Another site's page loading one as a
+  subresource (`Sec-Fetch-Site` cross-site or same-site without a
+  top-level navigation) is refused.
+
+Rejections are logged with the `Sec-Fetch-*` headers the request carried.
+
 ---
 
 ## Single daemon per home: flock on daemon.pid, bind before touching the DB
@@ -3219,6 +3242,14 @@ case-sensitive and LIKE is not, so `/tech/ai` would match
 keeps SQLite from seeking `idx_bookmarks_folder` on it; see "Indexes follow
 the queries" for how a filtered page is read.)
 
+**Revised (2026-09-28):** `GET /v1/documents` filters by `host` and
+`folder` with the same rules, built by the same code: `hostPredicate`,
+which the search host filter uses too, and `folderPredicate`, which the
+bookmark list uses too. Documents have no folder, so the folder filter is
+an EXISTS over the document's bookmarks of the tenant: a document with
+several bookmarks in the folder is listed once, and one without bookmarks
+never matches a folder.
+
 ---
 
 ## API: handler edge cases found by coverage
@@ -3393,6 +3424,23 @@ indexes.
 new index: it looks each URL up in the unique constraints' own indexes
 (`sqlite_autoindex_documents_2`, `sqlite_autoindex_bookmarks_2`), and its
 plan is pinned too.
+
+**Revised (2026-09-28):** The documents list's `content_type`, `host` and
+`folder` filters need no index either. Under each, alone or together, with
+or without `state`, the list still walks `idx_documents_tenant_updated` or
+`idx_documents_tenant_state_updated` in its order from the cursor, with no
+temporary b-tree, checking the filters on each row it reads; the folder
+filter's EXISTS seeks `idx_bookmarks_document`. At 50k documents and 50k
+bookmarks the slowest selective filters took about 11 ms (a host with 5
+documents), 30 ms (a folder with 5) and 7 ms (a content type with 10),
+against 0.14 ms unfiltered: a page walks the list until it has its rows,
+the trade the bookmark list's folder filter already makes.
+`idx_documents_tenant_ctype` stays dropped. The Document page's two reads
+are pinned too: `GetWithLastError` is a point search of the primary key,
+and `ListByDocument` seeks `idx_bookmarks_document` and sorts its few rows
+by `saved_at`. Ordered by `created_at` instead, SQLite walks
+`idx_bookmarks_tenant_created` through every bookmark the tenant has to
+skip that sort.
 
 ---
 
@@ -3707,6 +3755,11 @@ path doubled: `open /x.html: open /x.html: no such file or directory`.
 Twenty-four call sites repeated `getCtx` and a "no context" error, and
 ten checked for a nil home or controller that `buildContext` could no
 longer return.
+
+**Revised (2026-09-28):** `daemonctl.BaseURL` drops a trailing slash from
+`--daemon-url`. The client joins the API's paths onto the base, so
+`http://127.0.0.1:8765/` asked for `//v1/healthz`, which is no route, and
+every command failed to find the daemon.
 
 ---
 
@@ -6436,6 +6489,562 @@ the host's PATH.
   is unknown; they are named instead.
 - Parsing in the daemon: see "Importers: CLI parses, daemon receives
   lists".
+
+---
+
+## Dashboard: server-rendered pages in the daemon (phase 1)
+
+**Decision:** curio-daemon serves a read-only dashboard under `/ui/` on
+its own port, and `/` redirects there: an Overview (counts, the queue and
+its progress, health, the newest bookmarks), Search, a Library of
+documents with filters and paging, a page per document (metadata, its
+rendered text, related documents, its bookmarks, its last error) and the
+Interests. config.yaml's `daemon.ui` (default true) turns the pages off;
+`curio ui` opens them. Phase 1 changes nothing: refetch, reindex, rebuild
+and the queue controls are phase 2 (docs/ui.md).
+
+**Where it is served, and no token.** From the daemon's own origin, so
+the pages are same-origin with `/v1`: the Origin rule ("Local API")
+already admits their requests and refuses every other site's, and no
+CORS is ever needed. A second port or binary would be another origin,
+needing either CORS or a token the pages would have to be handed; a
+desktop wrapper is a product of its own. The API trusts local processes
+already, and the pages add no one it didn't trust.
+
+**Stack.** Go's `html/template`, not templ: no generator in the build, and
+the standard library's contextual escaping. Every page is a full
+server-rendered page. htmx does two things, search as you type and "load
+more" in the Library, and every htmx request gets the same full page a
+plain GET gets and selects its region (`hx-select`): one rendering path,
+no partial endpoints, no `Vary: HX-Request`, and every page works with
+JavaScript off. No Node toolchain, no SPA, no chart library.
+`TestEveryTemplateRenders` executes every template of every page's set
+(pages, blocks and partials) with a typed sample whose strings are
+hostile, and a template without a sample fails the test, so a broken
+template fails `make test` rather than a page.
+
+**One code path per resource.** The page handlers (`internal/api/ui*.go`)
+get their data from the Deps functions the JSON handlers call (`health`,
+`stats`, `queueState`, `metrics`, `listDocuments`, `document`, `search`,
+`related`, `interests`, `interest`, `listBookmarks`, and `openMarkdown`,
+which `openContent` opens a document's markdown with), plus two store
+reads, and map it into `internal/ui`'s
+typed view models. They never build SQL: depguard denies `database/sql`
+and the SQLite store to `internal/ui` and `internal/api/ui*.go`. A view
+can then be rebuilt client-side from `/v1` without its answers
+disagreeing with the page's.
+
+**Security model.** Everything a page shows came from a web page or from
+Jina and is hostile.
+
+- Every response under `/` and `/ui` carries exactly this
+  Content-Security-Policy,
+
+  ```
+  default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+  connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
+  ```
+
+  and `X-Content-Type-Options: nosniff` and `Referrer-Policy:
+  no-referrer`, set by middleware before
+  the access checks, so their 403s, the 404 page, the 405s, the redirect,
+  the starting page and the assets carry them too.
+  `TestDashboard_SecurityHeaders` takes the routes from the router and
+  needs a sample request for each.
+- No template holds inline script, inline style, an event handler,
+  `hx-on`, `hx-vars` or a `javascript:` URL (`TestTemplatesHaveNoInlineCode`),
+  and every page test checks the HTML inert with `internal/ui/uitest`.
+- Stored markdown goes through goldmark with three of GFM's extensions,
+  tables, strikethrough and task lists, and without `html.WithUnsafe`,
+  so raw HTML is left out. The fourth, Linkify, is left out: a web or
+  email address written out without link markup stays text, since its
+  regexps scan from every space at a cost the formatting budgets can't
+  charge (see "Dashboard: formatting budgets for stored markdown"). An
+  AST transformer then resolves every link and image against the
+  document's URL (`url_canonical`, else `url`), after resolving
+  character references as the renderer will (`&#106;avascript:` is
+  `javascript:`): a relative link would otherwise resolve against the
+  daemon. Links, images and autolinks keep only http and https URLs with
+  a host, and mailto ones; any other becomes its text. What an image
+  holds, a link or another image, is written only as its text. An http
+  URL without a host (`[x](http:/ui/search)`, `<http:/v1/stats>`) is a
+  relative one to a browser on an http page: it would open the daemon's
+  own `/ui/search`. bluemonday's UGC allow-list then sanitizes the HTML,
+  allowing those schemes, requiring a host for http and https again, and
+  no relative URL, and giving links `rel="nofollow noreferrer noopener"`
+  and `target="_blank"`. Its output is the only conversion to one of
+  html/template's trusted types (`template.HTML`, `JS`, `URL` and the
+  rest) outside tests: `TestTrustedHTMLOnlyFromTheSanitizer` parses every
+  non-test Go file in the repository to keep it that way. Search snippets
+  are split at their `<em>` markers into plain-text segments, so a chunk's
+  markup is text.
+- Links the templates make are built in Go (`url.Values`,
+  `url.PathEscape`): a query string pieced together in a template is
+  escaped a second time, and html/template leaves a path segment
+  unescaped. Outbound links carry `rel="noopener noreferrer"`.
+- htmx 2.0.11 is vendored: `dist/htmx.min.js` of the npm package
+  htmx.org@2.0.11 (0BSD), 52,182 bytes, SHA-256
+  `d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717`,
+  identical from jsDelivr, pinned by `TestHTMXIsPinned`. Its config (a
+  meta tag) sets `allowEval: false` (which also rules out `hx-trigger`
+  filters, so none are used), `allowScriptTags: false`,
+  `includeIndicatorStyles: false` (its injected `<style>` would break the
+  CSP; `app.css` has the indicator), `historyCacheSize: 0` (no page
+  snapshots in localStorage), `selfRequestsOnly: true`, and swaps 4xx and
+  5xx answers too, so a failed search replaces the results rather than
+  leaving stale ones.
+- Every page route is a GET (`TestDashboard_GETOnly`): a page must never
+  change anything, since another site can send a browser to one. The
+  assets' route is a `Get`, not a `Mount`: chi reports a mount under every
+  method.
+- A change must come from the daemon's own pages when a browser says
+  where it came from (`Sec-Fetch-Site: same-origin`; see "Local API").
+- A page request another site's page makes as a subresource is refused:
+  `Sec-Fetch-Site` cross-site or same-site gets 403 unless the request is
+  a top-level navigation (`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest:
+  document`), which following a link to the dashboard is. `GET
+  /ui/search?q=` runs the search engine and has Ollama embed the query,
+  and `<img src="http://127.0.0.1:8765/ui/search?q=x">` on any page passed
+  the Host check (the daemon's own Host) and the Origin rule (a no-cors
+  GET carries no Origin). The answer is opaque and nothing is written,
+  but a hostile page left open could keep Ollama busy, starving the index
+  jobs that share it, and add a line per request to `daemon.log`, which is
+  never rotated. `/v1/search` is a POST, so the Origin and JSON rules
+  covered it already; this rule adds to them for the pages.
+
+**Remote images: off by default.** Loading an image tells its host that
+the page was read, and when. Each image is its alt text, linking to it;
+an image that isn't http(s), or already sits inside a link, is its text.
+A document page whose text has remote images offers a "Load images" link
+to itself with `?images=1`, which stores nothing, and
+`ui.load_remote_images: true` shows them on every document page. Only
+https images are shown, lazily, and only those answers' CSP adds `https:`
+to `img-src`; http and `data:` images stay links or text.
+
+**At most 1 MiB of markdown is rendered,** cut after the last whole line
+(`ui.MaxRenderedMarkdown`), or before the character the limit falls in
+when the first line is longer. A cut page says so and names the markdown
+file; `GET /v1/documents/{id}/content` has the whole text. The cap alone
+doesn't bound the cost: goldmark does far more than linear work on some
+shapes a stored page can hold. A text over the formatting budgets, or
+whose render passes two seconds or a gigabyte allocated, is shown as
+stored instead (see "Dashboard: formatting budgets for stored
+markdown").
+
+**Pages degrade by panel.** The Overview's panels (counts, queue,
+progress, health, newest bookmarks) and the Document page's text, related
+documents and bookmarks each read on their own. A read that fails shows
+its message and request ID in its panel, logged once as `writeError` logs
+a request's (`reportError`), and the page still answers 200. A failed
+search is the Search page's answer, with the status `reportError` gives
+it: a 499 when the client has gone. The JSON API
+keeps "hydration errors fail the request": a client wants a whole answer
+or an error it can act on, a person reading a page wants what could be
+read. A page renders into a buffer first: a template that fails is a 500
+error page, never a truncated 200.
+
+**Progress estimate.** The Overview estimates when the queued fetch and
+index jobs will be done at the pace of the last 10 minutes
+(`ui.ProgressWindow`): rate = done and failed jobs of those kinds in the
+window / 10 minutes, ETA = (pending + running) / rate. It shows an ETA
+only with work queued, the queue open and a rate above 0; with nothing
+finished in the window it says so, and a closed queue says why instead.
+It is labeled an estimate at the window's pace: the index job each fetch
+will enqueue isn't counted until it is.
+
+**While starting,** a page GET answers 503 with a page that reloads
+itself every 2 seconds (a meta refresh, not script) and shows the phase
+and the migrations applied; the assets are served, `/` redirects, and
+changes and `/v1` get the starting problem. `curio ui` opens the
+dashboard as soon as the daemon answers (`EnsureStarted`, as `curio-mcp`
+starts), rather than waiting out a migration with nothing to show.
+
+**New API and store reads.** `GET /v1/documents` gained `content_type`,
+`host` and `folder` filters, for the Library (see "Folder and host
+filters" and "Indexes follow the queries"). The Document page reads its
+bookmarks (`BookmarkStore.ListByDocument`, newest saved first: ordered
+by `saved_at`, since `created_at` would walk every bookmark's index
+entry) and its last job error (`DocumentStore.GetWithLastError`, built
+from `ListWithLastError`'s SQL) straight from the store, shown only while
+the document is failed or dead: `/v1` doesn't expose either yet. Rebuilding the page client-side would add
+`last_error` to `GET /v1/documents/{id}` and implement the decided `GET
+/v1/documents/{id}/references` (`{bookmarks: [...]}`).
+
+**Phase 2's rule for changes.** Actions go through `/v1` as JSON sent with
+fetch or XHR (htmx's json-enc, or a small module under `/ui/static/`),
+never as a plain HTML form post: with `Referrer-Policy: no-referrer`, a
+browser sends `Origin: null` on a POST that isn't in CORS mode (the Fetch
+standard's Origin rules), which the Origin rule refuses, and the
+`Sec-Fetch-Site: same-origin` rule applies to them. The document page
+leaves an empty template region, `document-actions`, where its buttons
+go.
+
+**Dependencies.** github.com/yuin/goldmark v1.8.6 (MIT);
+github.com/microcosm-cc/bluemonday v1.0.27 (BSD-3-Clause), with
+github.com/aymerick/douceur v0.2.0 (MIT) and github.com/gorilla/css
+v1.0.1 (BSD-3-Clause); htmx 2.0.11 (0BSD), vendored. golang.org/x/net
+stays at v0.58.0: bluemonday's floor, v0.26.0, carries advisories fixed
+in v0.56.0. govulncheck finds nothing in the new modules.
+
+---
+
+## Dashboard: formatting budgets for stored markdown
+
+**Decision:** Before goldmark sees a document's markdown, one linear pass
+over its lines (`ui.checkShape`, `internal/ui/budget.go`) charges it for
+what makes goldmark's work or memory grow faster than the text. The link
+transformer charges every link and image before it resolves it, and the
+HTML goldmark writes is capped. Whatever the text, every render is also
+held to two seconds and a gigabyte allocated (`maxFormatTime`,
+`maxFormatAlloc`), checked from goldmark's extension points as it runs.
+A text over any budget or limit is shown as it is stored, escaped in a
+`<pre>`, under a banner naming it; everything else is formatted as
+before. GFM's Linkify extension is left out, so an address written out
+without link markup stays text.
+
+**Why.** goldmark v1.8.6 has corners where its work grows with the square
+of the input, or multiplies it, and a stored page's markdown is whatever
+a web page, a GitHub README (stored verbatim), a PDF or Jina made it.
+goldmark has no way to cancel a render: unless something inside it stops
+it, a render runs to the end after its client and the 2-minute write
+timeout are gone, on a core of its own, and every reload starts another.
+Measured through `ui.Renderer.RenderMarkdown` on the development Mac:
+
+- Container markers stacked on one line are quadratic in the markers: a
+  1 MiB line of `>` took 4 min 30 s, allocated 607 MB and wrote 28 MB of
+  HTML. At 64 KiB, `>\t` took 2.1 s, `- ` ending in `x` 1.6 s, `>`
+  1.1 s, `+ ` and `> - ` 0.55 s, `1. ` 0.37 s.
+- The block parse visits the open blocks on every line, in order, up to
+  the first the line doesn't continue, and keeps a record of each visit
+  until the top-level block ends. A blank line continues every list and
+  list item, so it visits all of them, and lists stay open over any
+  number of blank lines. An item nested 32 deep, then 1 MiB of blank
+  lines, allocated 9.2 GB through the document page and took the daemon
+  to 4.8 GB; one `- a` over the same blank lines, 258 MB. Nesting also
+  builds up line by line through indentation: a 16 KiB ramp of lines
+  indented with tabs, 32 markers each, reached about 1,400 levels, and
+  32,000 blank lines after it (48 KB in all) allocated 11.5 GB. Each
+  visit also reads the line's indentation again, and copies the rest of
+  the line when a tab is split between two blocks: that ramp filling
+  1 MiB took 26 s, cmark's deeply nested lists indented with tabs 4.8 s.
+- Inline markup is quadratic in its paragraph. In one 256 KiB paragraph,
+  `[a](` repeated took 21.7 s, `[a](b` and `![a](` 18 s, `[a]` lines
+  0.8 s, `[a]: b` lines 0.6 s, and `[a](< ` 0.8 s at 128 KiB. The same
+  256 KiB as paragraphs of 1,024 `[a](` took 0.37 s: the cost is per
+  paragraph. An unclosed opener scans to the end of its line or
+  paragraph, and each `]` walks its paragraph's lines. `*a`, `_a`, `~a`
+  and `a*` took 4.3 s each, `**a` 2.9 s and `` `a `` 2.2 s, but that was
+  Linkify's (below); without it they take 24 to 54 ms.
+- Emphasis runs that pair with nothing can stay to be compared again:
+  goldmark has no cut-off for openers that can never match (cmark's
+  `openers_bottom`), so after `a**b`, every `c* ` (a closer the rule of
+  three keeps from pairing with the `**`) is compared with every one
+  before it. One 80 KB paragraph of them took 2.4 s.
+- Two shapes multiply what they are given. goldmark pads every table row
+  to its header's width: a 1,024-column header over 128K one-character
+  lines (256 KiB) made 1.3 GB of HTML in 69 s. Every link to a reference
+  definition repeats its URL: one 16 KiB definition used by 32K links
+  (147 KiB) made 540 MB in 7 s.
+
+The earlier assumption, that a 2 MiB table (half a second) was the worst
+case the 1 MiB cap had to cover, was wrong.
+
+Within those budgets, four more shapes cost seconds or gigabytes, and
+they are why every render has limits too:
+
+- Every link and image is resolved: its character references (two more
+  copies of its destination), then `url.Parse` and `ResolveReference`.
+  Only kept links counted against the link budget, and every link to a
+  reference definition shares its destination, so a definition to a
+  16 KiB `ftp:` URL used by 1 MiB of `[x]` links took 11.7 s and
+  allocated 11.2 GiB, formatted; to a `javascript:` URL, 3.3 s and
+  3.9 GiB; as `![x]` images, 9.9 s and 9.4 GiB; a 128 KiB destination,
+  1 min 26 s and 73 GiB.
+- Linkify, which GFM includes, runs regexps (20 to 35 ns a byte) from
+  every space, line start, `*`, `_`, `~` and `(`, a cost the inline
+  budget, calibrated on byte loops at about 1 ns a byte, doesn't see.
+  One 1 MiB line of `x`, 680 `~~~a`, an `@`, a domain of 62-letter labels
+  and `a_` took 24 s: a run of three `~` isn't strikethrough, so its last
+  `~` reaches Linkify, which scans the address and the whole domain and
+  then drops it for the `_` after it, and the next `~` scans it again.
+  256 units of `(http://a.b/` and 4,000 `)` took 2.4 s. The email shape
+  at 256 KiB still took 22.4 s: the budget is a product, so a shorter
+  text admits more scans.
+- The link budget counts URLs as stored, and goldmark escapes them as it
+  writes: `&` is `&amp;`, `"` and `<` are `%22` and `%3C`. A 19 KB page,
+  a definition to `https://a.example/?` and 16 KiB of `&` used by 500
+  links, is within every budget, and wrote 41 MB of HTML, allocating
+  676 MiB in 0.37 s; sanitizing, the page template and the response then
+  cost what that HTML does.
+- The transformer labelled every image, those inside other images too,
+  each over its whole subtree: `![` n times, `a`, then
+  `](https://i.example/x.png)` n times took 29 ms and 160 MiB at
+  n = 4,000 (112 KB).
+
+**The budgets.**
+
+- `maxLineNesting`: 32 blockquote and list markers on one line. A
+  thematic break (`- - -`, `* * *`) isn't markers: goldmark tries it
+  before a list at every level.
+- `maxContainers`: 131,072 such markers in the text, each a container
+  with its own tags.
+- `maxBlockVisits`: 2^21 (2,097,152), the sum over the text's lines of
+  the open blocks goldmark can visit at each.
+- `maxVisitBytes`: 2^28, the sum over the text's lines of those visits
+  times the line's length.
+- `maxInlineWork`: 2^31, the sum over the text's paragraphs of their
+  markup characters times their length in bytes. Markup is every
+  character goldmark's inline parsers start at, `!`, `[`, `]`, `` ` ``,
+  `*`, `_`, `~` and `<`, and `(`, where an inline link's destination
+  starts, which the `]` before it scans to the end of the line.
+  `TestMarkup_CoversInlineTriggers` checks the list against goldmark's
+  default inline parsers and the extensions'.
+- `maxEmphasisWork`: 2^27, the sum over the text's paragraphs of the
+  square of their runs of `*`, `_` and `~`.
+- `maxTableCells`: 262,144 cells. Every line after a line shaped like a
+  delimiter row is charged the widest such row's cells, until the
+  paragraph ends, and each such row its header's.
+- `maxLinkBytes`: 8 MiB of destinations and titles, as stored, over
+  every link and image in the text, kept, unwrapped, labelled or turned
+  into a link, each counted once and before it is resolved: the
+  transformer stops at the first past it, before resolving it and before
+  goldmark writes a thing. Autolinks aren't counted: each covers its own
+  span of the text.
+- `maxHTMLBytes`: 8 MiB of HTML from goldmark, 8 times
+  `MaxRenderedMarkdown`. The writer goldmark renders into stops the
+  render at the write that would pass it.
+
+Each of `checkShape`'s charges is an overestimate, never an
+underestimate. The pass's paragraphs are runs of lines between blank
+lines (spaces, tabs and line ends only, as goldmark counts them), split
+only before a line that starts a bullet item with content or an ATX
+heading at most three spaces in after any blockquote markers: either
+interrupts a paragraph inside any container, so every paragraph, heading
+and table cell goldmark parses inline lies within one of them.
+Everything else a paragraph may or may not end at (a fence, an HTML
+block, a table row) is left inside it. Markers are counted on every
+line, continued containers too, a run of `*`, `_` or `~` counts whatever
+it turns out to be, and a table is assumed wherever a line could be a
+delimiter row.
+
+The block charges follow from how goldmark continues a block. A line
+continues a blockquote only with a `>` of its own, a list only with a
+marker of its own or as much indentation as its item's content (at
+least two columns), and the item with that same indentation; once what
+is left of a line is blank, every list and list item beneath continues.
+So the pass keeps a bound on the blocks open after each line and charges
+each line: a blank line, or one of only spaces, tabs and markers, can
+visit every open block; any other line at most one block per marker and
+per column of indentation (a tab counts four), and one more. Each marker
+opens at most two blocks, a list and its item, and a nonblank line one
+more, the paragraph or code it holds. The blocks a line doesn't continue
+stay open only when it continues a paragraph lazily, which a line after
+a blank one can't. The rule was checked against a copy of goldmark
+instrumented to count its visits and the bytes they read or copy, over
+9 million generated documents (indentation of spaces and tabs, every
+marker, lazy and blank lines, fences, thematic breaks, ramps hundreds of
+levels deep) and over 400 million fuzzed ones: the visits charged were
+never fewer than goldmark's, and the bytes it read or copied were at
+most three times the bytes charged.
+
+**The limits.** The budgets stay the decision: fast, and the same answer
+on every machine. But each covers shapes someone found, and the four
+above got past them, so every render is also held to `maxFormatTime`,
+2 s, and `maxFormatAlloc`, 1 GiB allocated since it began. goldmark
+calls curio's code often enough to be stopped from there:
+
+- at every inline trigger: `stopParser`, an inline parser whose
+  triggers are all the others' (`` ![]`<*_~ ``), runs first at each and
+  parses nothing. Its priority is -1: goldmark tries inline parsers in
+  ascending priority, and the task list's checkbox parser is at 0.
+  `TestMarkup_CoversInlineTriggers` keeps its triggers equal to theirs;
+- at every line the block parse reads, once for each open block it
+  visits there: the `text.Reader` handed to `Parse` checks in
+  `PeekLine`;
+- at every link, autolink and image in the link transformer;
+- at every write of HTML (goldmark buffers through bufio, so every
+  4 KiB), and once more after the render, before sanitizing.
+
+A check is an atomic load of a flag a `time.AfterFunc` sets; every 256th
+also reads the process's heap allocations from runtime/metrics
+(`/gc/heap/allocs:bytes`, 0.2 µs a read, about a hundred checks' worth).
+A check that fails panics with its `*budgetError`, `errFormatTime` or
+`errFormatAlloc`, and the HTML writer with `errHTMLBytes`; `format`
+recovers that and only that, and the page shows the text as stored with
+the reason. Any other panic goes on. Unwinding is safe because goldmark
+v1.8.6 keeps nothing between renders that a render changes: it has no
+recover, no `sync.Pool` and no mutex, its `sync.Once` initializations
+finish before any hook runs, and every render gets a fresh
+`parser.Context`. `TestMarkdown_FormatsAfterAStop` pins that across
+upgrades: after a render stopped by the time limit, and one stopped by
+the HTML cap, the same Renderer formats a 1 MiB article byte for byte as
+a fresh one does. It is the pattern `http.ErrAbortHandler` uses to stop
+a handler.
+
+A render stops at the first check past a limit: it takes at most the
+limit plus the costliest step between two checks, and allocates at most
+the limit plus what one step allocates. The steps no check interrupts
+are each bounded by a budget:
+
+- emphasis matching of one paragraph (goldmark's `ProcessDelimiters`),
+  by `maxEmphasisWork`: `a**b` over lines of `c*` just under it takes
+  0.46 s, and ran 0.42 s past a 10 ms limit;
+- the table extension's escaped-pipe pass, by `maxInlineWork`: up to
+  0.1 s past the limit in the tables tried here, 0.16 to 0.27 s in
+  review;
+- table padding, by `maxTableCells`;
+- sanitizing at most `maxHTMLBytes`: 24 to 200 ms, and 40 to 285 MiB
+  allocated, for 8 MiB of links, list items, images or text.
+
+The allocation limit overshoots by what is allocated between two reads,
+and by one step's allocation: about 0.2 GiB where goldmark doubles a
+slice. The count is the whole process's, so other requests can only stop
+a render sooner, never let it run on, and renders running at once share
+the limit: four renders of 'text under deep lists' (about 320 MiB each
+alone) at once were all stopped, while 16 of the 1 MiB article at once
+all formatted. Whether a text is formatted therefore depends on the
+machine's load, and on what else renders at the same time, only for
+texts near a limit: ones that take over 2 s, twice the costliest text
+the budgets accept (about 1 s) and over 15 times the slowest ordinary
+1 MiB document (a loose list, 120 ms), or that allocate hundreds of MiB. Tests of the
+budgets relax the time limit (`newBudgetRenderer`): under the race
+detector, the costliest texts within the budgets take longer than 2 s.
+
+Each limit needs the other. With the budgets bypassed, the time limit
+alone stops a 1 MiB line of `>`, 1 MiB of cmark's deeply nested lists
+indented with tabs, the tab ramp filling 1 MiB and a 256 KiB paragraph
+of `[a](` at 2,000 to 2,013 ms, but the item nested 32 deep over blank
+lines, and the ramp over blank lines, allocate 5.7 GiB and reach a
+2.1 GiB heap within one second. The allocation limit stops both at
+1.2 GiB allocated after 190 to 230 ms, with at most 454 MiB of heap at
+once. An allocation limit alone lets 64 KiB of `>` on one line run
+1.1 s on 38 MiB. In review, without the fixes for the four shapes
+above, the limits stopped each of them within 5 to 20 ms of a 200 ms
+limit.
+
+**Numbers.** Just under the budgets, the slowest shape is still `[a](`:
+0.95 s for one 52 KiB paragraph, and 1.02 s for 1 MiB in paragraphs of
+2.7 KiB; `[a](b` takes 0.95 s. Next are lists nested with tabs, cut just
+under `maxVisitBytes` (213 KiB), 0.47 s, and `a**b` over lines of `c*`
+just under `maxEmphasisWork` (34 KiB), 0.46 s; then text under 128
+levels of tab-indented lists (1 MiB), 0.27 s. Without Linkify the other
+inline shapes take milliseconds: `` `a `` 8 ms and `*a` 4 ms, each as
+one paragraph just under the budget. An item 32 deep over blank lines
+takes 43 ms. The most memory is that text under deep lists, 322 MiB
+allocated and 119 MiB of heap at once, then the deep item over blank
+lines, 257 and 142 MiB: about what goldmark takes for 1 MiB of
+one-character lines, which no budget stops (263 and 139 MiB).
+
+A text over the link budget costs goldmark's parse of its links and
+nothing more: 1 MiB of `[x]` links to a 16 KiB definition takes 120 to
+170 ms and 200 to 250 MiB, whether the URL is https, ftp or javascript,
+16 KiB or 128, links or images: the transformer stops within the first
+thousand links, and the rest is goldmark parsing some 200,000 of them.
+Links a page keeps reach the HTML cap before the link budget: 510 links
+to a 16 KiB URL write 8.4 MB, and 1 MiB of `[x]` links to a short one
+8.6 MB (0.24 s, 318 MiB). The link budget bounds resolving, the HTML cap
+writing. The page of escaped `&` stops at the cap in 30 ms and 82 MiB.
+The largest HTML of the ordinary documents below is 2.5 MiB: the 1 MiB
+article writes 1.9 MB, the awesome list 2.0 MB and the loose nested
+lists 2.6 MB. A text over a shape budget costs what copying and escaping
+it does.
+
+`TestMarkdown_OverBudget` renders every shape above, at 1 MiB where it
+has one, and checks it takes that path, fast and within 16 MiB of
+allocation (512 MiB for the link budget, whose text costs what the parse
+does). `TestMarkdown_CostsCheckShapeDoesntSee` holds the four shapes
+above to their outcome and to a time and an allocation bound per render.
+`TestMarkdown_JustUnderBudget` cuts the block and emphasis shapes to the
+most of them within the budgets and holds their render to 10 s and
+1 GiB. `TestMarkdown_TimeLimit` stops a block-heavy and an inline-heavy
+text at a 10 ms limit within 250 ms, and `TestMarkdown_AllocLimit` stops
+text under deep lists at a 32 MiB limit within 64 MiB, race detector
+included.
+
+The checks cost 3 to 4% on the ordinary documents below (the 1 MiB
+article 50.0 → 52.1 ms, the awesome list 60.5 → 62.5 ms, nested lists
+80.8 → 83.8 ms, loose nested lists 78.9 → 82.1 ms) and 6% on text under
+deep lists (257 → 273 ms), whose block parse checks at every one of its
+two million visits. Leaving Linkify out pays for them on pages of links:
+against the build before both, the article went from 53.7 to 52.1 ms and
+the awesome list from 65.5 to 62.5 ms, while nested lists cost 1% more
+and text under deep lists 5%.
+
+On a real library of 4,498 stored documents, rendering all of them takes
+2.1 s, and the slowest, 583 KiB, 48 ms. The largest block charges are
+165,244 visits and 6.7 × 10^6 visit bytes, 12 and 40 times under their
+budgets; the largest emphasis work within the inline budget is 3.6 ×
+10^6, 37 times under. One document is over a budget: a Wikipedia list
+flattened by Jina into one 325 KiB paragraph of links and citations
+(6.1 × 10^9 of inline work). The next are a Wikipedia article with
+11 KiB paragraphs (1.2 × 10^9) and a PDF extraction without paragraph
+breaks (6.4 × 10^8). What the budgets will catch in practice is that
+shape, and PDF text of several hundred KiB with no blank line, which is
+plain text anyway, and tables of a few thousand rows of links: a table
+is charged as one paragraph. `TestMarkdown_WithinBudget` formats a 1 MiB
+article, a 1 MiB awesome-list README, a 100 KiB flattened wiki table,
+lists nested ten deep, lists nested five deep with a blank line after
+every item, a 1 MiB loose list, a 1,000-row table and a thematic break
+of 64 spaced dashes, which counted as markers before and was the other
+real document shown unformatted.
+
+**Considered.**
+
+- A render deadline outside the render, a goroutine with a response
+  deadline or a semaphore: it bounds latency or concurrency, not the
+  render, which keeps burning its core. The limits stop the render
+  itself, from inside goldmark.
+- Only the limits, without budgets: the outcome would depend on the
+  machine and its load for every costly text, not only for those over
+  2 s, and the budgets turn most costly texts away in a linear pass.
+- Only a size-limited writer as the outer bound: the unkept links and
+  Linkify's scans wrote 1.9 MB and 1 MB of HTML.
+- A work counter in the transformer and the renderer only: Linkify's
+  cost was inside goldmark's inline parse.
+- A lower input cap: the Linkify email shape still took 22.4 s at
+  256 KiB.
+- Hooking emphasis matching: it means replacing goldmark's emphasis and
+  strikethrough parsers, for a step `maxEmphasisWork` bounds at about
+  half a second.
+- Keeping Linkify with bounded regexps (`WithLinkifyURLRegexp`,
+  `WithLinkifyWWWRegexp`, `WithLinkifyEmailRegexp`): each trigger would
+  still scan at regexp speed, and Linkify triggers at every space, so it
+  would need a charge of its own and regexps to maintain. Dropping it
+  removes the one inline parser the markup budget misprices. Stored
+  pages rarely need it: readability and Jina write `[text](url)`. GitHub
+  READMEs, stored verbatim, lose click-through on bare URLs; docs/ui.md
+  says so.
+- A cap on a destination's length: with every link charged before it is
+  resolved, a 128 KiB destination costs 0.15 s and 203 MiB, all of it
+  goldmark's parse. A cap would bound nothing the charge doesn't, and
+  change how legitimate long URLs render.
+- A second charge after resolving: a resolved URL is at most about three
+  times the stored one plus the base URL, and what the renderer writes
+  for kept links is the HTML cap's.
+- Failing the writes past the HTML cap instead of unwinding: goldmark's
+  node renderers ignore write errors, and bufio then swallows every
+  later write, so goldmark keeps escaping every URL left. On the page of
+  escaped `&` that took 79 ms and 211 MiB in review, against 30 ms and
+  82 MiB.
+- Relying on the HTML cap for tables: table padding happens as goldmark
+  parses, before it writes anything, so `maxTableCells` bounds it.
+- Formatting all but the costly paragraphs: which lines make a paragraph
+  is known only once goldmark has parsed the blocks, and the block parse
+  is where the nesting and the table padding cost.
+- Charging each scan goldmark makes (how far each unclosed opener looks):
+  tighter, so fewer documents would be shown plain, but it would mirror
+  goldmark's internals scan by scan and miss the next corner. The budgets
+  charge what any inline parser could do.
+- A cap on nesting depth alone: the block parse's cost is its depth
+  times its lines, blank ones included, so only a sum over the lines
+  bounds it.
+- Charging a blank line once, since goldmark reads it in full only at
+  its outermost list: closer to goldmark's count, but it leans on that
+  detail; charging every visit the whole line costs the real library
+  nothing.
+- Rows of a detected table as paragraphs of their own: a table goldmark
+  doesn't make (a header in a fenced block, or the heading before a
+  delimiter row) would leave its lines one paragraph charged as many.
 
 ---
 

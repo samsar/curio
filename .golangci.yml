@@ -81,6 +81,20 @@ linters:
           deny:
             - pkg: github.com/samsar/curio/internal/store/sqlite
               desc: depend on the internal/store interfaces; only cmd/curio-daemon wires the SQLite implementation
+        # The dashboard's view layer and page handlers render what the
+        # shared Deps functions return; they never query the database, so a
+        # view can be rebuilt client-side from /v1 later.
+        pages-read-no-sql:
+          list-mode: lax
+          files:
+            - "**/internal/ui/**"
+            - "**/internal/api/ui*.go"
+            - "!$test"
+          deny:
+            - pkg: database/sql
+              desc: pages get their data through the Deps functions the JSON handlers use, never SQL
+            - pkg: github.com/samsar/curio/internal/store/sqlite
+              desc: pages get their data through the Deps functions the JSON handlers use
         # The terminal UI library is the setup wizard's alone: nothing else
         # prompts, and the daemon and the MCP sidecar must not link it.
         prompts-in-setup:
@@ -103,6 +117,7 @@ linters:
             - "!**/internal/api/apitest/**"
             - "!**/internal/service/servicetest/**"
             - "!**/internal/setup/setuptest/**"
+            - "!**/internal/ui/uitest/**"
           deny:
             - pkg: testing
               desc: production code must not link the testing package
@@ -116,6 +131,8 @@ linters:
               desc: servicetest is test support; production code drives the service manager through internal/service
             - pkg: github.com/samsar/curio/internal/setup/setuptest
               desc: setuptest is test support; production code runs the setup wizard through internal/setup
+            - pkg: github.com/samsar/curio/internal/ui/uitest
+              desc: uitest is test support; it checks pages in tests
             - pkg: github.com/getkin/kin-openapi
               desc: kin-openapi checks the API against its spec in tests; it must never link into a binary
     errcheck:

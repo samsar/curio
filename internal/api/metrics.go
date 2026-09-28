@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"time"
 )
@@ -38,11 +39,20 @@ const (
 
 func (d Deps) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	window := time.Duration(intQuery(r, "window", defaultMetricsWindow, 1, maxMetricsWindow)) * time.Second
-
-	rows, err := d.Queue.MetricsByKind(r.Context(), d.TenantID, window)
+	resp, err := d.metrics(r.Context(), window)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
+	}
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// metrics reports each job kind's durations and failures over the jobs
+// that finished within window, and what is running now.
+func (d Deps) metrics(ctx context.Context, window time.Duration) (MetricsResponse, error) {
+	rows, err := d.Queue.MetricsByKind(ctx, d.TenantID, window)
+	if err != nil {
+		return MetricsResponse{}, err
 	}
 
 	resp := MetricsResponse{
@@ -62,5 +72,5 @@ func (d Deps) handleMetrics(w http.ResponseWriter, r *http.Request) {
 			OldestRunningSeconds: m.OldestRunningSeconds,
 		})
 	}
-	d.writeJSON(w, r, http.StatusOK, resp)
+	return resp, nil
 }

@@ -94,6 +94,9 @@ type deps struct {
 	sources func() []importer.Source
 	// geteuid is os.Geteuid: curio up refuses root.
 	geteuid func() int
+	// openURL opens a URL in the browser: openInBrowser, or a test's,
+	// which never runs open.
+	openURL func(ctx context.Context, url string) error
 }
 
 func newRootCmd() *cobra.Command {
@@ -104,6 +107,7 @@ func newRootCmd() *cobra.Command {
 		newUI:     setup.NewUI,
 		sources:   importer.Discover,
 		geteuid:   os.Geteuid,
+		openURL:   openInBrowser,
 	})
 }
 
@@ -173,6 +177,7 @@ over HTTP; auto-starts the daemon if it's not running. New here? Run
 		newInterestsCmd(&env),
 		newEvalCmd(&env),
 		newStatusCmd(&env),
+		newUICmd(&env, d.openURL),
 		newPauseCmd(&env),
 		newResumeCmd(&env),
 		newThrottleCmd(&env),

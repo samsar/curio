@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -149,6 +150,7 @@ func TestUp_ImportHandOff(t *testing.T) {
 		`  2 new bookmarks from bookmarks\.html, 2 pages to fetch and index now, at full speed\n`+
 		`\nMeanwhile:\n`+
 		`  curio status --follow +follow the import until it is done\n`+
+		`  curio ui +watch it in your browser\n`+
 		`  curio pause \| resume +stop starting new work, and start again\n`+
 		`  curio throttle gentle +fewer jobs at once, to keep the Mac cool\n`+
 		`  curio search "\.\.\." +search your library, as it grows\n`+
@@ -162,6 +164,20 @@ func TestUp_ImportHandOff(t *testing.T) {
 	code, stdout, _ = w.exit(t, "up", "--yes", "--import", "html:"+htmlFixture)
 	assert.Equal(t, 0, code)
 	assert.True(t, strings.HasPrefix(stdout, "Nothing to do: curio is up.\n"), stdout)
+}
+
+// TestUp_ImportHandOffWithoutDashboard: with daemon.ui false the hand-off
+// card doesn't offer the dashboard.
+func TestUp_ImportHandOffWithoutDashboard(t *testing.T) {
+	w := upWorld(t)
+	w.withSources()
+	cfg, err := os.ReadFile(w.srv.Home.ConfigPath())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(w.srv.Home.ConfigPath(), append(cfg, "daemon:\n  ui: false\n"...), 0o600))
+	code, stdout, stderr := w.exit(t, "up", "--yes", "--import", "html:"+htmlFixture)
+	require.Equal(t, 0, code, stderr)
+	assert.Contains(t, stdout, "Meanwhile:\n  curio status --follow")
+	assert.NotContains(t, stdout, "curio ui")
 }
 
 // TestUp_ImportYes: --yes --import imports without a terminal, at full
@@ -348,7 +364,7 @@ func TestUp_ImportPace(t *testing.T) {
 // one, with flags it takes.
 func TestUpCards_NameRealCommands(t *testing.T) {
 	root := newRootCmdWith(testDeps(t))
-	for _, line := range slices.Concat(nextCard, handOffCard) {
+	for _, line := range slices.Concat(nextCard, handOffCard, []cardLine{uiLine}) {
 		for _, argv := range cardCommands(t, line.command) {
 			cmd, rest, err := root.Find(argv)
 			require.NoError(t, err, line.command)

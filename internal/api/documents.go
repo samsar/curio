@@ -83,21 +83,31 @@ func (d Deps) handleLookupDocument(w http.ResponseWriter, r *http.Request) {
 	d.writeDocument(w, r, doc)
 }
 
-// writeDocument answers doc with its current extraction, if it has one.
+// writeDocument answers doc as the document endpoints do, with its current
+// extraction when it has one.
 func (d Deps) writeDocument(w http.ResponseWriter, r *http.Request, doc *store.Document) {
-	resp := documentToResponse(doc)
-	if doc.CurrentExtractionID != nil {
-		ext, err := d.currentExtraction(r.Context(), doc)
-		if err != nil {
-			d.writeError(w, r, err)
-			return
-		}
-		if resp.CurrentExtraction, err = d.extractionToResponse(ext); err != nil {
-			d.writeError(w, r, err)
-			return
-		}
+	resp, err := d.document(r.Context(), doc)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
 	}
 	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// document is doc on the wire, with its current extraction.
+func (d Deps) document(ctx context.Context, doc *store.Document) (DocumentResponse, error) {
+	resp := documentToResponse(doc)
+	if doc.CurrentExtractionID == nil {
+		return resp, nil
+	}
+	ext, err := d.currentExtraction(ctx, doc)
+	if err != nil {
+		return DocumentResponse{}, err
+	}
+	if resp.CurrentExtraction, err = d.extractionToResponse(ext); err != nil {
+		return DocumentResponse{}, err
+	}
+	return resp, nil
 }
 
 func (d Deps) extractionToResponse(ext *store.DocumentExtraction) (*ExtractionResponse, error) {
@@ -188,35 +198,66 @@ type DocumentListResponse struct {
 	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
-// handleListDocuments pages through the tenant's documents, most recently
-// updated first. next_cursor is set exactly when another page follows.
 func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
-	state, err := docStateParam(r)
+	opts, err := listDocumentsOpts(r)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
+	}
+	resp, err := d.listDocuments(r.Context(), opts)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// listDocumentsOpts reads GET /v1/documents' query: the state,
+// content_type, host and folder filters, the cursor and the page size in
+// Limit. A filter or cursor the list can't take is a requestError.
+func listDocumentsOpts(r *http.Request) (store.ListDocumentsOpts, error) {
+	state, err := docStateParam(r)
+	if err != nil {
+		return store.ListDocumentsOpts{}, err
+	}
+	q := r.URL.Query()
+	contentType := store.ContentType(q.Get("content_type"))
+	if contentType != "" && !contentType.Valid() {
+		return store.ListDocumentsOpts{}, badRequest("content_type %q must be one of: %s", contentType, contentTypeList)
 	}
 	after, err := cursorParam(r)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return store.ListDocumentsOpts{}, err
 	}
-	limit := listLimit(r)
-	docs, err := d.Documents.ListWithLastError(r.Context(), d.TenantID, store.ListDocumentsOpts{
-		State: state,
-		Limit: limit + 1,
-		After: after,
-	})
+	return store.ListDocumentsOpts{
+		State:       state,
+		ContentType: contentType,
+		Host:        q.Get("host"),
+		Folder:      q.Get("folder"),
+		Limit:       listLimit(r),
+		After:       after,
+	}, nil
+}
+
+// contentTypeList names the content types, for a 400's detail.
+const contentTypeList = "article, repo, video, pdf, thread, unknown"
+
+// listDocuments pages through the tenant's documents that match opts, most
+// recently updated first; opts.Limit is the page size. NextCursor is set
+// exactly when another page follows: the store is asked for one row more
+// than the page holds.
+func (d Deps) listDocuments(ctx context.Context, opts store.ListDocumentsOpts) (DocumentListResponse, error) {
+	limit := opts.Limit
+	opts.Limit = limit + 1
+	docs, err := d.Documents.ListWithLastError(ctx, d.TenantID, opts)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return DocumentListResponse{}, err
 	}
 	docs, next, err := onePage(docs, limit, func(doc store.DocumentWithError) store.PageKey {
 		return store.PageKey{At: doc.UpdatedAt, ID: doc.ID}
 	})
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return DocumentListResponse{}, err
 	}
 
 	out := DocumentListResponse{Items: make([]DocumentListItem, 0, len(docs)), NextCursor: next}
@@ -233,7 +274,7 @@ func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt:    doc.UpdatedAt,
 		})
 	}
-	d.writeJSON(w, r, http.StatusOK, out)
+	return out, nil
 }
 
 // boolParam reports whether a query parameter is set to a truthy value
@@ -405,45 +446,77 @@ func (d Deps) handleGetDocumentContent(w http.ResponseWriter, r *http.Request) {
 		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
-	if doc.CurrentExtractionID == nil {
-		writeProblem(w, r, http.StatusNotFound, "no content", "document has no extraction yet")
-		return
-	}
-	ext, err := d.currentExtraction(r.Context(), doc)
-	if err != nil {
-		d.writeError(w, r, err)
-		return
-	}
-	path := d.markdownPath(ext)
-	if path == "" {
-		writeProblem(w, r, http.StatusNotFound, "no content", "extraction has no markdown path")
-		return
-	}
-	f, err := os.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		// Deleting content from disk is supported (docs/data-model.md).
-		writeProblem(w, r, http.StatusNotFound, "no content",
-			"the extracted markdown is missing on disk; refetch the document")
+	content, err := d.openContent(r.Context(), doc)
+	if unavailable, ok := errors.AsType[*contentUnavailable](err); ok {
+		writeProblem(w, r, http.StatusNotFound, "no content", unavailable.Error())
 		return
 	}
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		d.writeError(w, r, err)
-		return
-	}
+	defer content.Close()
 	// Content-Length makes a copy that fails partway an error the client
 	// sees (a body shorter than promised), not a complete-looking answer.
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	if _, err := io.CopyN(w, f, info.Size()); err != nil {
+	w.Header().Set("Content-Length", strconv.FormatInt(content.size, 10))
+	if _, err := io.CopyN(w, content, content.size); err != nil {
 		d.Log.Warn("stream document content", "request_id", middleware.GetReqID(r.Context()),
 			"document_id", doc.ID, "err", err)
 	}
+}
+
+// contentUnavailable is why a document has no markdown to read: it was
+// never fetched (or its extraction kept none), or the file was deleted
+// from disk, which is supported (docs/data-model.md).
+type contentUnavailable struct {
+	missing bool // the file is gone; otherwise there never was one
+	detail  string
+}
+
+func (e *contentUnavailable) Error() string { return e.detail }
+
+// documentContent is a document's extracted markdown, open for reading.
+type documentContent struct {
+	*os.File
+	path string // absolute
+	size int64  // in bytes, when it was opened
+}
+
+// openContent opens the markdown of doc's current extraction, which the
+// caller closes. A document without one is a *contentUnavailable error.
+func (d Deps) openContent(ctx context.Context, doc *store.Document) (*documentContent, error) {
+	if doc.CurrentExtractionID == nil {
+		return nil, &contentUnavailable{detail: "document has no extraction yet"}
+	}
+	ext, err := d.currentExtraction(ctx, doc)
+	if err != nil {
+		return nil, err
+	}
+	return openMarkdown(doc.ID, d.markdownPath(ext))
+}
+
+// openMarkdown opens path, the markdown of document id's current
+// extraction, or "" when the extraction kept none: a *contentUnavailable
+// error, as a file deleted from disk is.
+func openMarkdown(id, path string) (*documentContent, error) {
+	if path == "" {
+		return nil, &contentUnavailable{detail: "extraction has no markdown path"}
+	}
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, &contentUnavailable{missing: true,
+			detail: "the extracted markdown is missing on disk; refetch the document"}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("document %s: open its markdown: %w", id, err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close() // the Stat error is the one to report
+		return nil, fmt.Errorf("document %s: stat its markdown: %w", id, err)
+	}
+	return &documentContent{File: f, path: path, size: info.Size()}, nil
 }
 
 func documentToResponse(doc *store.Document) DocumentResponse {

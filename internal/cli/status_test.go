@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
 )
 
@@ -161,4 +162,20 @@ func TestWindowText(t *testing.T) {
 	for seconds, want := range map[int]string{900: "15m", 90: "1m30s", 45: "45s", 3600: "1h", 5400: "1h30m"} {
 		assert.Equal(t, want, windowText(seconds), seconds)
 	}
+}
+
+// TestStatus_Dashboard: status says where the dashboard is, ready or
+// starting, unless config.yaml turns it off.
+func TestStatus_Dashboard(t *testing.T) {
+	srv := apitest.Start(t)
+	line := "dashboard: " + srv.URL + "/ui/  (curio ui)\n"
+	assert.Contains(t, mustRun(t, srv, "status"), line)
+
+	starting := apitest.StartNotReady(t)
+	out := mustRun(t, starting, "status")
+	assert.Contains(t, out, "daemon:  starting")
+	assert.Contains(t, out, "dashboard: "+starting.URL+"/ui/  (curio ui)\n")
+
+	require.NoError(t, os.WriteFile(srv.Home.ConfigPath(), []byte("daemon:\n  ui: false\n"), 0o600))
+	assert.NotContains(t, mustRun(t, srv, "status"), "dashboard:")
 }
