@@ -161,9 +161,16 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 		return
 	}
 	home, homeErr := curiohome.Open(path)
+	configPath := filepath.Join(path, curiohome.ConfigFile)
+	// Whether GitHub requests carry a token: config.yaml's, unless the
+	// daemon says otherwise (it also reads CURIO_GITHUB_TOKEN from its own
+	// environment, which this shell's may not be).
+	githubToken := cfg.Fetcher.GitHub.Token != ""
 	if homeErr == nil {
-		if loaded, err := config.Load(home.ConfigPath()); err == nil {
+		configPath = home.ConfigPath()
+		if loaded, err := config.Load(configPath); err == nil {
 			cfg = loaded
+			githubToken = cfg.Fetcher.GitHub.Token != ""
 		}
 		health, err := client.New(daemonctl.BaseURL(cfg, *flags.daemonURL)).Healthz(ctx)
 		if err == nil && daemonctl.SameHome(health.Home, path) {
@@ -173,8 +180,13 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 				status, detail, hint := upstreamCheck(u)
 				r.add(u.Name, status, detail, hint)
 			}
+			if health.GitHubToken != nil {
+				githubToken = *health.GitHubToken
+			}
 		}
 	}
+	status, detail, hint := githubCheck(githubToken, configPath)
+	r.add("github", status, detail, hint)
 
 	// The fetcher backend: native is always fine; web2md needs the bin.
 	switch cfg.Fetcher.Default {
@@ -195,6 +207,20 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 	if homeErr == nil {
 		checkContentDir(home.ContentDir(), r)
 	}
+}
+
+// githubCheck says whether GitHub requests carry a token. Without one
+// GitHub allows 60 API requests an hour, which importing a library with
+// many github.com pages runs through; with any token, 5,000. The token
+// needs no access at all: it only identifies the requests.
+func githubCheck(hasToken bool, configPath string) (status checkStatus, detail, hint string) {
+	if hasToken {
+		return statusOK, "a token is set: 5,000 API requests an hour", ""
+	}
+	return statusWarn, "no token: GitHub allows 60 API requests an hour, so github.com pages can fail rate-limited",
+		"any token works, even one that can access nothing: a classic token with no scopes ticked, or a " +
+			"fine-grained token with public repositories (read-only) and no permissions. Set fetcher.github.token in " +
+			configPath + ", then `curio daemon stop` (the next command starts it again)"
 }
 
 // checkContentDir checks that the daemon can write extracted content to dir

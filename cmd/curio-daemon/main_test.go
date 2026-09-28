@@ -1112,6 +1112,32 @@ func TestFinish_Logs(t *testing.T) {
 
 // TestNewDispatcher_YouTube: whether yt-dlp was found is logged either
 // way; a daemon whose PATH lacks it (a launchd agent's, say) says so.
+// TestNewDispatcher_GitHubToken: healthz's github_token says whether the
+// GitHub fetcher sends a token, from config.yaml or the daemon's own
+// environment.
+func TestNewDispatcher_GitHubToken(t *testing.T) {
+	home, err := curiohome.Init(t.TempDir(), "qwen3-embedding:0.6b", 1024)
+	require.NoError(t, err)
+	cases := []struct {
+		name, config, env string
+		want              bool
+	}{
+		{"none", "", "", false},
+		{"config.yaml", "github_pat_x", "", true},
+		{"environment", "", "github_pat_y", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CURIO_GITHUB_TOKEN", tc.env)
+			cfg := config.Default()
+			cfg.Fetcher.GitHub.Token = tc.config
+			_, routed, err := newDispatcher(cfg, home, newNativeFetcher(cfg))
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, routed.githubToken)
+		})
+	}
+}
+
 func TestNewDispatcher_YouTube(t *testing.T) {
 	home, err := curiohome.Init(t.TempDir(), "qwen3-embedding:0.6b", 1024)
 	require.NoError(t, err)
@@ -1127,9 +1153,9 @@ func TestNewDispatcher_YouTube(t *testing.T) {
 		logs := recordLogs(t)
 		cfg := config.Default()
 		cfg.Fetcher.YouTube.Bin = tc.bin
-		_, ytdlp, err := newDispatcher(cfg, home, newNativeFetcher(cfg))
+		_, routed, err := newDispatcher(cfg, home, newNativeFetcher(cfg))
 		require.NoError(t, err)
-		assert.Equal(t, tc.ytdlp, ytdlp, "what healthz reports as youtube_fetcher")
+		assert.Equal(t, tc.ytdlp, routed.ytdlp, "what healthz reports as youtube_fetcher")
 		got := logs.messages(tc.msg)
 		require.Len(t, got, 1, tc.bin)
 		assert.Equal(t, tc.bin, got[0]["bin"])

@@ -137,8 +137,11 @@ func registerTools(s *mcp.Server, d daemon) {
 		Description: "List the user's inferred interests: topic clusters discovered across their saved " +
 			"library, each with a label, summary, size, and representative documents (with doc_ids). " +
 			"Use this to understand what the user reads about at a high level, or to pick a topic to " +
-			"drill into with search_bookmarks / get_document. If empty, clustering hasn't run yet " +
-			"(the user can run `curio interests rebuild`).",
+			"drill into with search_bookmarks / get_document. If empty with num_documents 0, clustering " +
+			"hasn't run yet or found no indexed documents (the user can run `curio interests rebuild` once " +
+			"documents are fetched). If empty with num_documents above 0, the last run grouped none of " +
+			"them: the library is too small or varied for the insight.min_similarity and " +
+			"insight.min_cluster_size thresholds, and rebuilding again won't change that.",
 	}, listInterestsHandler(d))
 }
 

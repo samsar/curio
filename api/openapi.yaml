@@ -338,6 +338,32 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         default: { $ref: "#/components/responses/Problem" }
 
+  /v1/documents/lookup:
+    get:
+      tags: [documents]
+      operationId: lookupDocument
+      summary: Find the document for a URL
+      description: |
+        The URL is normalized the way ingest stores it (lowercased host,
+        default port, fragment and tracking parameters dropped), so a URL
+        as typed or pasted finds its document. Answers as
+        GET /v1/documents/{id} does.
+      parameters:
+        - in: query
+          name: url
+          required: true
+          schema: { type: string }
+          description: The page's URL, as bookmarked or pasted.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Document" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        default: { $ref: "#/components/responses/Problem" }
+
   /v1/documents/{id}:
     parameters:
       - { $ref: "#/components/parameters/ID" }
@@ -861,7 +887,14 @@ components:
             videos go to for their transcripts; absent when they go to the
             default fetcher. It takes a restart to see a yt-dlp installed
             since.
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, ollama_reachable, upstreams]
+        github_token:
+          type: boolean
+          description: >
+            Whether the GitHub fetcher sends a token (fetcher.github.token,
+            or CURIO_GITHUB_TOKEN in the daemon's environment). Without one
+            GitHub allows 60 API requests an hour; with any token, even one
+            with no scopes, 5,000.
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, ollama_reachable, upstreams, github_token]
 
     EmbeddingDrift:
       description: >

@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // DocumentResponse mirrors the openapi Document schema. tenant_id omitted.
@@ -56,6 +57,35 @@ func (d Deps) handleGetDocument(w http.ResponseWriter, r *http.Request) {
 		d.writeLookupError(w, r, "document", id, err)
 		return
 	}
+	d.writeDocument(w, r, doc)
+}
+
+// handleLookupDocument finds the document for ?url=, normalized the way
+// ingest stores it, so a URL as the user typed or pasted it (another
+// case in the host, a fragment, tracking parameters) finds its document.
+// It answers the document as GET /v1/documents/{id} does.
+func (d Deps) handleLookupDocument(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("url")
+	if raw == "" {
+		writeProblem(w, r, http.StatusBadRequest, "invalid url", "the url parameter is required")
+		return
+	}
+	normURL, err := urlutil.Normalize(raw)
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, "invalid url", err.Error())
+		return
+	}
+	doc, err := d.Documents.GetByURL(r.Context(), d.TenantID, normURL)
+	if err != nil {
+		d.writeLookupError(w, r, "document for url", normURL, err)
+		return
+	}
+	d.writeDocument(w, r, doc)
+}
+
+// writeDocument answers doc as the document endpoints do, with its current
+// extraction when it has one.
+func (d Deps) writeDocument(w http.ResponseWriter, r *http.Request, doc *store.Document) {
 	resp, err := d.document(r.Context(), doc)
 	if err != nil {
 		d.writeError(w, r, err)

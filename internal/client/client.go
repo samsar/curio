@@ -54,6 +54,9 @@ type Health struct {
 	// YouTubeFetcher is the yt-dlp the daemon routes YouTube videos to;
 	// empty when they go to its default fetcher, or it predates saying so.
 	YouTubeFetcher string `json:"youtube_fetcher,omitempty"`
+	// GitHubToken is whether the daemon's GitHub fetcher sends a token;
+	// nil from a daemon that predates saying so.
+	GitHubToken *bool `json:"github_token,omitempty"`
 }
 
 // EmbeddingDrift mirrors api.EmbeddingDrift: what changed in the build
@@ -337,6 +340,18 @@ type Extraction struct {
 func (c *Client) GetDocument(ctx context.Context, id string) (*Document, error) {
 	var out Document
 	if err := c.do(ctx, http.MethodGet, "/v1/documents/"+id, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// LookupDocument returns the document for rawURL, which the daemon
+// normalizes the way ingest stored it. A URL with no document is an
+// *APIError with Status 404 (IsNotFound).
+func (c *Client) LookupDocument(ctx context.Context, rawURL string) (*Document, error) {
+	var out Document
+	path := "/v1/documents/lookup?" + url.Values{"url": {rawURL}}.Encode()
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

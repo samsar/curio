@@ -244,6 +244,25 @@ func (s *Server) AddInterest(t testing.TB, label string, docs ...*store.Document
 	return &c
 }
 
+// AddEmptyClusterRun records a finished clustering run over numDocuments
+// documents that grouped none of them: every document is noise.
+func (s *Server) AddEmptyClusterRun(t testing.TB, numDocuments int) {
+	t.Helper()
+	ctx := context.Background()
+	ins := s.Deps.Insights
+	run := &store.ClusterRun{TenantID: TenantID, Algo: "apitest"}
+	if err := ins.CreateRun(ctx, run); err != nil {
+		t.Fatalf("create cluster run: %v", err)
+	}
+	if err := ins.ReplaceClusters(ctx, run.ID, nil); err != nil {
+		t.Fatalf("write clusters: %v", err)
+	}
+	res := store.RunResult{Status: store.ClusterRunDone, NumDocuments: numDocuments, NumNoise: numDocuments}
+	if err := ins.FinishRun(ctx, run.ID, res); err != nil {
+		t.Fatalf("finish cluster run: %v", err)
+	}
+}
+
 // Drift is an embedding drift monitor for api.Deps.Drift that reports the
 // drift it was given until a rebaseline, which `curio reindex --all`
 // triggers, clears it, as the daemon's monitor does once its next check

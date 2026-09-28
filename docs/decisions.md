@@ -137,6 +137,8 @@ when the entry was first committed.
 - 2026-09-28 — [curio up: the import step](#curio-up-the-import-step)
 - 2026-09-28 — [Dashboard: server-rendered pages in the daemon (phase 1)](#dashboard-server-rendered-pages-in-the-daemon-phase-1)
 - 2026-09-28 — [Dashboard: formatting budgets for stored markdown](#dashboard-formatting-budgets-for-stored-markdown)
+- 2026-09-28 — [Commands take a document's URL as well as its ID](#commands-take-a-documents-url-as-well-as-its-id)
+- 2026-09-28 — [Doctor warns when GitHub requests carry no token](#doctor-warns-when-github-requests-carry-no-token)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -7039,6 +7041,44 @@ real document shown unformatted.
 - Rows of a detected table as paragraphs of their own: a table goldmark
   doesn't make (a header in a fenced block, or the heading before a
   delimiter row) would leave its lines one paragraph charged as many.
+
+---
+
+## Commands take a document's URL as well as its ID
+
+**Decision:** `curio refetch`, `reindex`, `docs show` and `related` accept
+an `http(s)` URL where they take a document ID. The CLI resolves it
+through `GET /v1/documents/lookup?url=`, which normalizes the URL with
+`urlutil.Normalize`, the function ingest stores URLs with, and looks it up
+on the `UNIQUE (tenant_id, url)` index (`DocumentStore.GetByURL`, its plan
+pinned in `plans_test.go`). Anything that isn't an absolute `http` or
+`https` URL is taken as an ID as it is.
+
+**Why:** a user debugging one page knows its URL, not its ID, and `curio
+add` of a URL already bookmarked is refused, so there was no short path
+from a URL to a refetch. Normalizing on the daemon keeps one definition of
+"the same URL". A URL with no document says so and suggests `curio add`.
+A scheme-less argument (`github.com/…`) stays an ID: guessing would make
+an ID that happens to contain a dot ambiguous.
+
+---
+
+## Doctor warns when GitHub requests carry no token
+
+**Decision:** `/v1/healthz` reports `github_token`: whether the daemon's
+GitHub fetcher sends a token, from `fetcher.github.token` or
+`CURIO_GITHUB_TOKEN` in the daemon's own environment. `curio doctor`
+adds a `github` check: a warning when there is none, with the hint that
+any token works, even one with no scopes or permissions, and where to put
+it. When the daemon doesn't say (it is starting, stopped, or predates the
+field), config.yaml decides.
+
+**Why:** without a token GitHub allows 60 API requests an hour, and an
+import with a hundred-odd github.com bookmarks fails many of them
+rate-limited; people don't expect that a token with no access at all is
+enough to lift it to 5,000. The daemon, not the CLI, knows what it sends:
+under launchd it doesn't see the shell's environment, so a token exported
+in a terminal isn't one the daemon has.
 
 ---
 

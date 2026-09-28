@@ -23,6 +23,9 @@ import (
 // EmbeddingDrift. YouTubeFetcher is the yt-dlp the daemon found when it
 // started, which it routes YouTube videos to for their transcripts, or
 // empty: `curio up` tells from it whether a daemon predates an install.
+// GitHubToken says whether the GitHub fetcher sends a token, from
+// config.yaml or its environment: without one GitHub allows 60 API
+// requests an hour, which a library with many github.com pages exceeds.
 type Health struct {
 	Status          string           `json:"status"`
 	PID             int              `json:"pid"`
@@ -37,6 +40,7 @@ type Health struct {
 	OllamaDetail    string           `json:"ollama_detail,omitempty"`
 	Upstreams       []UpstreamHealth `json:"upstreams"`
 	YouTubeFetcher  string           `json:"youtube_fetcher,omitempty"`
+	GitHubToken     bool             `json:"github_token"`
 }
 
 // EmbeddingDrift says what changed in the build that makes the home's
@@ -178,6 +182,7 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		OllamaDetail:    detail,
 		Upstreams:       d.upstreams(),
 		YouTubeFetcher:  d.YouTubeFetcher,
+		GitHubToken:     d.GitHubToken,
 	}, nil
 }
 

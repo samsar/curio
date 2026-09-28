@@ -18,7 +18,7 @@ func newReindexCmd(env *daemonctl.Env) *cobra.Command {
 		state string
 	)
 	cmd := &cobra.Command{
-		Use:   "reindex [document-id]",
+		Use:   "reindex [document-id | url]",
 		Short: "Re-chunk and re-embed already-fetched documents (no re-fetch)",
 		Long: `Reindex re-runs chunking + embedding over a document's existing
 extraction — without re-fetching it. Use it after changing chunker settings
@@ -44,9 +44,13 @@ and, in any state, skips documents that were never fetched.`,
 				return reindexAll(cmd.Context(), cmd.OutOrStdout(), env.Client, state)
 			}
 			if len(args) != 1 {
-				return errors.New("provide a document ID or pass --all")
+				return errors.New("provide a document ID or URL, or pass --all")
 			}
-			return reindexOne(cmd.Context(), cmd.OutOrStdout(), env.Client, args[0])
+			id, err := resolveDocumentID(cmd.Context(), env.Client, args[0])
+			if err != nil {
+				return err
+			}
+			return reindexOne(cmd.Context(), cmd.OutOrStdout(), env.Client, id)
 		},
 	}
 	cmd.Flags().BoolVar(&all, "all", false, "Reindex every document with content (default state=fetched; use --state to override)")

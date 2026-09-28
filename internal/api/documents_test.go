@@ -226,6 +226,34 @@ func TestGetDocument(t *testing.T) {
 	assert.Equal(t, `document "no-such-document" not found`, p.Detail)
 }
 
+// TestLookupDocument: a URL finds its document as typed or pasted,
+// normalized the way ingest stored it, and answers as GET by ID does.
+func TestLookupDocument(t *testing.T) {
+	s := newTestServer(t)
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFailed)
+	lookup := func(raw string) response {
+		return s.do(t, request{method: http.MethodGet, path: "/v1/documents/lookup?url=" + url.QueryEscape(raw)})
+	}
+
+	for _, raw := range []string{
+		"https://example.com/a",
+		"https://EXAMPLE.com:443/a#comments",
+		"https://example.com/a?utm_source=newsletter",
+	} {
+		resp := lookup(raw)
+		require.Equal(t, http.StatusOK, resp.status, "%s: %s", raw, resp.body)
+		var got DocumentResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		assert.Equal(t, doc.ID, got.ID, raw)
+		assert.Equal(t, "failed", got.State, raw)
+	}
+
+	p := assertProblem(t, lookup("https://example.com/b"), http.StatusNotFound)
+	assert.Equal(t, `document for url "https://example.com/b" not found`, p.Detail)
+	assertProblem(t, lookup("not a url"), http.StatusBadRequest)
+	assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/lookup"}), http.StatusBadRequest)
+}
+
 // failingExtractionLookup fails every extraction lookup.
 type failingExtractionLookup struct{ store.ExtractionStore }
 
