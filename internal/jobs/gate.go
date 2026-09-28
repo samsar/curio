@@ -65,29 +65,6 @@ func (gates allGates) Admit(kind store.JobKind, active int, now time.Time) Verdi
 	return Verdict{}
 }
 
-// Gentle throttle caps: how many jobs of a kind run at once under
-// store.ThrottleGentle. Index jobs are what keep Ollama, and so the
-// machine, busy; capping fetches spares the network and extraction.
-// Cluster runs one at a time anyway, and kinds without a cap are never
-// throttled.
-const (
-	gentleFetchCap = 4
-	gentleIndexCap = 1
-)
-
-// gentleCap returns the gentle throttle's cap for kind, and whether it has
-// one.
-func gentleCap(kind store.JobKind) (int, bool) {
-	switch kind {
-	case store.JobKindFetch:
-		return gentleFetchCap, true
-	case store.JobKindIndex:
-		return gentleIndexCap, true
-	case store.JobKindImport, store.JobKindCluster, store.JobKindSummarize:
-	}
-	return 0, false
-}
-
 // QueueGate is the daemon's Gate: it holds claims back while the queue is
 // paused, outside its daily schedule, or at the throttle's cap for a kind,
 // checked in that order. Its settings live in a store.QueueSettingsStore,
@@ -133,10 +110,8 @@ func (g *QueueGate) Admit(kind store.JobKind, active int, now time.Time) Verdict
 	if v := st.verdict(now); !v.Open() {
 		return v
 	}
-	if st.settings.Throttle == store.ThrottleGentle {
-		if limit, capped := gentleCap(kind); capped && active >= limit {
-			return Verdict{Closed: ReasonThrottled, Changed: st.changed}
-		}
+	if limit, capped := st.settings.Throttle.Cap(kind); capped && active >= limit {
+		return Verdict{Closed: ReasonThrottled, Changed: st.changed}
 	}
 	return Verdict{}
 }
@@ -194,20 +169,11 @@ func (g *QueueGate) state(st *gateState, now time.Time) QueueState {
 		Closed:   v.Closed,
 		OpensAt:  v.Until,
 		Limits: []KindLimit{
-			{store.JobKindFetch, runLimit(st.settings.Throttle, store.JobKindFetch, g.pools.Fetch)},
-			{store.JobKindIndex, runLimit(st.settings.Throttle, store.JobKindIndex, g.pools.Index)},
-			{store.JobKindCluster, runLimit(st.settings.Throttle, store.JobKindCluster, clusterPoolSize)},
+			{store.JobKindFetch, st.settings.Throttle.Limit(store.JobKindFetch, g.pools.Fetch)},
+			{store.JobKindIndex, st.settings.Throttle.Limit(store.JobKindIndex, g.pools.Index)},
+			{store.JobKindCluster, st.settings.Throttle.Limit(store.JobKindCluster, clusterPoolSize)},
 		},
 	}
-}
-
-// runLimit is how many jobs of kind run at once, from a pool of size, under
-// throttle.
-func runLimit(throttle store.Throttle, kind store.JobKind, size int) int {
-	if c, capped := gentleCap(kind); capped && throttle == store.ThrottleGentle {
-		return min(c, size)
-	}
-	return size
 }
 
 // QueueUpdate changes some of the queue settings; nil fields are left as

@@ -156,6 +156,41 @@ func (t Throttle) Valid() bool {
 	return false
 }
 
+// Gentle throttle caps: how many jobs of a kind run at once under
+// ThrottleGentle. Index jobs are what keep Ollama, and so the machine,
+// busy; capping fetches spares the network and extraction. Cluster runs
+// one at a time anyway, and kinds without a cap are never throttled.
+const (
+	gentleFetchCap = 4
+	gentleIndexCap = 1
+)
+
+// Cap is how many jobs of kind t lets run at once, and whether it caps
+// kind at all: the gentle throttle caps fetches and index jobs, and the
+// normal one caps nothing.
+func (t Throttle) Cap(kind JobKind) (int, bool) {
+	if t != ThrottleGentle {
+		return 0, false
+	}
+	switch kind {
+	case JobKindFetch:
+		return gentleFetchCap, true
+	case JobKindIndex:
+		return gentleIndexCap, true
+	case JobKindImport, JobKindCluster, JobKindSummarize:
+	}
+	return 0, false
+}
+
+// Limit is how many jobs of kind run at once, from a pool of that size,
+// under t.
+func (t Throttle) Limit(kind JobKind, pool int) int {
+	if c, capped := t.Cap(kind); capped {
+		return min(c, pool)
+	}
+	return pool
+}
+
 // IsFinished reports whether s is terminal (done or failed). Only finished
 // jobs may be deleted: removing a pending or running job would strand its
 // document in pending with nothing left to move it on.
