@@ -309,15 +309,11 @@ func buildFilterClause(f store.SearchFilters) (string, []any) {
 		}
 	}
 	if len(f.Host) > 0 {
-		// No host column, so match the host segment of the URL for http(s):
-		// exactly that host, no port or subdomain coercion. The host is
-		// escaped so its '%', '_' and '\' match only themselves; LIKE's ASCII
-		// case-folding is right for host names.
 		conds := make([]string, 0, len(f.Host))
 		for _, h := range f.Host {
-			conds = append(conds, `(d.url LIKE ? ESCAPE '\' OR d.url LIKE ? ESCAPE '\' OR d.url = ? OR d.url = ?)`)
-			args = append(args, escapeLike("http://"+h+"/")+"%", escapeLike("https://"+h+"/")+"%",
-				"http://"+h, "https://"+h)
+			cond, condArgs := hostPredicate("d.url", h)
+			conds = append(conds, cond)
+			args = append(args, condArgs...)
 		}
 		sb.WriteString(" AND (" + strings.Join(conds, " OR ") + ")")
 	}
@@ -328,6 +324,34 @@ func buildFilterClause(f store.SearchFilters) (string, []any) {
 		args = append(args, f.ExcludeDocumentID)
 	}
 	return sb.String(), args
+}
+
+// hostPredicate is the condition that urlCol, a URL column, is an http or
+// https URL of exactly host, and its arguments. There is no host column,
+// so it matches the host segment of the URL: no port or subdomain
+// coercion. The host is escaped so its '%', '_' and '\' match only
+// themselves; LIKE's ASCII case-folding is right for host names.
+func hostPredicate(urlCol, host string) (string, []any) {
+	cond := "(" + urlCol + ` LIKE ? ESCAPE '\' OR ` + urlCol + ` LIKE ? ESCAPE '\' OR ` +
+		urlCol + " = ? OR " + urlCol + " = ?)"
+	return cond, []any{escapeLike("http://"+host+"/") + "%", escapeLike("https://"+host+"/") + "%",
+		"http://" + host, "https://" + host}
+}
+
+// folderPredicate is the condition that folderCol, a folder path column,
+// is folder or a folder under it, and its arguments; ok is false when
+// folder, without its trailing "/", is empty, which is no filter. It
+// compares byte-wise: '0' is the byte after '/', so [folder+"/",
+// folder+"0") holds exactly the paths that start with folder+"/". Unlike
+// LIKE there is nothing to escape, and it is case-sensitive like the
+// equality.
+func folderPredicate(folderCol, folder string) (cond string, args []any, ok bool) {
+	folder = strings.TrimRight(folder, "/")
+	if folder == "" {
+		return "", nil, false
+	}
+	return "(" + folderCol + " = ? OR (" + folderCol + " >= ? AND " + folderCol + " < ?))",
+		[]any{folder, folder + "/", folder + "0"}, true
 }
 
 // placeholders returns "?,?,...,?" with n marks.

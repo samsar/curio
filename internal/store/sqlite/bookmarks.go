@@ -229,13 +229,9 @@ func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, 
 		clauses = append(clauses, "b.source = ?")
 		args = append(args, opts.Source)
 	}
-	if folder := strings.TrimRight(opts.FolderPath, "/"); folder != "" {
-		// The folder itself or anything under it, compared byte-wise: '0'
-		// is the byte after '/', so [folder+"/", folder+"0") holds exactly
-		// the paths that start with folder+"/". Unlike LIKE there is nothing
-		// to escape, and it is case-sensitive like the equality.
-		clauses = append(clauses, "(b.folder_path = ? OR (b.folder_path >= ? AND b.folder_path < ?))")
-		args = append(args, folder, folder+"/", folder+"0")
+	if cond, condArgs, ok := folderPredicate("b.folder_path", opts.FolderPath); ok {
+		clauses = append(clauses, cond)
+		args = append(args, condArgs...)
 	}
 	if !opts.After.IsZero() {
 		pred, predArgs := keysetAfter("b.created_at", "b.id", opts.After)
@@ -247,6 +243,34 @@ func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, 
 		" WHERE " + strings.Join(clauses, " AND ") +
 		" ORDER BY b.created_at DESC, b.id DESC LIMIT ?"
 	return q, append(args, listLimit(opts.Limit))
+}
+
+// listBookmarksByDocumentSQL reads a document's bookmarks. Its args are the
+// tenant and the document. It orders by saved_at, which leaves SQLite
+// seeking idx_bookmarks_document and sorting the few rows it finds;
+// ordered by created_at, it would walk idx_bookmarks_tenant_created
+// through every bookmark the tenant has to skip that sort.
+const listBookmarksByDocumentSQL = "SELECT " + bookmarkColumns +
+	" FROM bookmarks WHERE tenant_id = ? AND document_id = ? ORDER BY saved_at DESC, id DESC"
+
+func (s *Bookmarks) ListByDocument(ctx context.Context, tenantID, documentID string) ([]*store.Bookmark, error) {
+	rows, err := s.db.QueryContext(ctx, listBookmarksByDocumentSQL, tenantID, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("list bookmarks of document %s: %w", documentID, err)
+	}
+	defer rows.Close()
+	var out []*store.Bookmark
+	for rows.Next() {
+		b, err := scanBookmark(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list bookmarks of document %s: %w", documentID, err)
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list bookmarks of document %s: %w", documentID, err)
+	}
+	return out, nil
 }
 
 // countBookmarksSQL counts a tenant's bookmarks. Its arg is the tenant.

@@ -67,7 +67,7 @@ docs/setup.md.`,
 			case outcome.Imported != nil:
 				fmt.Fprintln(out, "curio is up.")
 				printUpStatus(out, outcome.Status)
-				printHandOff(out, *outcome.Imported, time.Now())
+				printHandOff(out, *outcome.Imported, time.Now(), dashboardOn(*flags.home))
 			default:
 				fmt.Fprintln(out, "curio is up.")
 				printUpStatus(out, outcome.Status)
@@ -206,6 +206,10 @@ var handOffCard = []cardLine{
 	{`curio search "..."`, "search your library, as it grows"},
 }
 
+// uiLine opens the dashboard; the hand-off card names it when config.yaml
+// serves it.
+var uiLine = cardLine{"curio ui", "watch it in your browser"}
+
 // mcpLine lets Claude Code search the library.
 func mcpLine() cardLine { return cardLine{mcpCommand(), "let Claude Code search your library (MCP)"} }
 
@@ -223,8 +227,9 @@ func printCard(w io.Writer, title string, lines []cardLine) {
 func printNext(w io.Writer) { printCard(w, "Next:", nextCard) }
 
 // printHandOff is the card a run that started an import ends with: when
-// to check back, what was imported, and what to do meanwhile.
-func printHandOff(w io.Writer, r setup.ImportReport, now time.Time) {
+// to check back, what was imported, and what to do meanwhile, the
+// dashboard included when dashboard is set.
+func printHandOff(w io.Writer, r setup.ImportReport, now time.Time, dashboard bool) {
 	fmt.Fprintln(w)
 	if r.Pages == 0 {
 		fmt.Fprintf(w, "Imported %s from %s; their pages were in the library already.\n",
@@ -234,7 +239,27 @@ func printHandOff(w io.Writer, r setup.ImportReport, now time.Time) {
 		fmt.Fprintf(w, "  %s from %s, %s to fetch and index %s\n", plural(r.Created, "new bookmark"), r.Source,
 			plural(r.Pages, "page"), r.Pace)
 	}
-	printCard(w, "Meanwhile:", handOffCard)
+	lines := handOffCard
+	if dashboard {
+		// After following the import in the terminal: the same, in a browser.
+		lines = slices.Insert(slices.Clone(handOffCard), 1, uiLine)
+	}
+	printCard(w, "Meanwhile:", lines)
+}
+
+// dashboardOn reports whether the home's config.yaml serves the dashboard.
+// It runs after curio up, so the home exists; one it can't read means no.
+func dashboardOn(homeFlag string) bool {
+	path, err := daemonctl.HomePath(homeFlag)
+	if err != nil {
+		return false
+	}
+	home, err := curiohome.Open(path)
+	if err != nil {
+		return false
+	}
+	cfg, err := config.Load(home.ConfigPath())
+	return err == nil && cfg.Daemon.UI
 }
 
 // mcpByName registers the curio-mcp on PATH with Claude Code.

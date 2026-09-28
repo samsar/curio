@@ -32,6 +32,7 @@ type Config struct {
 	Chunking   Chunking   `yaml:"chunking"`
 	Insight    Insight    `yaml:"insight"`
 	Generation Generation `yaml:"generation"`
+	UI         UI         `yaml:"ui"`
 }
 
 type Daemon struct {
@@ -51,6 +52,9 @@ type Daemon struct {
 	// into FetchWorkers/IndexWorkers (75/25) and zeroes it, so code reading
 	// a loaded Config only ever sees the split pools.
 	Workers int `yaml:"workers,omitempty"`
+	// UI serves the dashboard's pages under /ui/ on the daemon's port.
+	// Default true; false leaves the daemon the JSON API alone.
+	UI bool `yaml:"ui"`
 }
 
 type Embedding struct {
@@ -206,6 +210,14 @@ type Generation struct {
 	AutoPull bool `yaml:"auto_pull"`
 }
 
+// UI configures the dashboard's pages (daemon.ui turns them on).
+type UI struct {
+	// LoadRemoteImages shows the images of stored pages on every document
+	// page. Default false: loading one contacts its host, which learns what
+	// was read and when, so each page offers a link that loads them once.
+	LoadRemoteImages bool `yaml:"load_remote_images"`
+}
+
 // Default returns the baseline config. The loader applies these first, then
 // overlays whatever the user's config.yaml specifies.
 func Default() Config {
@@ -215,6 +227,7 @@ func Default() Config {
 			LogLevel:     "info",
 			FetchWorkers: 16,
 			IndexWorkers: 4,
+			UI:           true,
 		},
 		Embedding: Embedding{
 			Provider:       providerOllama,

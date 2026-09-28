@@ -1,0 +1,10 @@
+{{/* A meta refresh, not script: the page has nothing else to run. */}}
+{{define "head"}}<meta http-equiv="refresh" content="2">{{end}}
+
+{{define "content" -}}
+<h1>curio is starting</h1>
+{{if .Migrating}}<p>Migrating the database: {{.Applied}} of {{.Total}} migrations applied.</p>
+<progress max="{{.Total}}" value="{{.Applied}}">{{.Applied}} of {{.Total}}</progress>
+{{else}}<p>Starting up: {{.Phase}}.</p>{{end}}
+<p class="meta">This page reloads itself every two seconds until curio is ready.</p>
+{{- end}}

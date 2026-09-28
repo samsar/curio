@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,6 +78,10 @@ func testDeps(t *testing.T) deps {
 		newUI:     setup.NewUI,
 		sources:   setuptest.NoSources,
 		geteuid:   func() int { return 501 },
+		openURL: func(_ context.Context, url string) error {
+			t.Errorf("a test opened %s in a browser", url)
+			return errors.New("tests open nothing")
+		},
 	}
 }
 

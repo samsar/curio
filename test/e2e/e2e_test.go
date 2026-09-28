@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -36,6 +37,7 @@ import (
 	"github.com/samsar/curio/internal/setup/setuptest"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/ui"
 	"github.com/samsar/curio/migrations"
 )
 
@@ -303,6 +305,8 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	assert.Positive(t, ollama.docEmbeds.Load(), "the index job embedded the article")
 	assert.Positive(t, ollama.queryEmbeds.Load(), "the search embedded the query")
 
+	assertDashboard(t, baseURL, docID)
+
 	stopped, err := ctl.Stop(ctx)
 	require.NoError(t, err)
 	assert.True(t, stopped)
@@ -312,6 +316,38 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	pidFile, err := os.ReadFile(home.PIDFile())
 	require.NoError(t, err)
 	assert.Empty(t, pidFile, "a clean exit empties the PID file")
+}
+
+// stylesheetRE finds the stylesheet a dashboard page loads.
+var stylesheetRE = regexp.MustCompile(`<link rel="stylesheet" href="(/ui/static/[^"]+)">`)
+
+// assertDashboard checks that the daemon at baseURL serves the dashboard's
+// pages for the fetched document docID, and the stylesheet they load, each
+// under the dashboard's CSP.
+func assertDashboard(t *testing.T, baseURL, docID string) {
+	t.Helper()
+	get := func(path string) (http.Header, string) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL+path, nil)
+		require.NoError(t, err)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", path, body)
+		assert.Equal(t, ui.CSP, resp.Header.Get("Content-Security-Policy"), path)
+		return resp.Header, string(body)
+	}
+	_, overview := get("/ui/")
+	_, doc := get("/ui/documents/" + docID)
+	assert.Contains(t, doc, "An Introduction to Zymurgy")
+	_, results := get("/ui/search?q=" + distinctive)
+	assert.Contains(t, results, `<a href="/ui/documents/`+docID+`">`)
+	css := stylesheetRE.FindStringSubmatch(overview)
+	require.NotNil(t, css, "the Overview loads a stylesheet")
+	header, _ := get(css[1])
+	assert.Equal(t, "text/css; charset=utf-8", header.Get("Content-Type"))
 }
 
 // TestDaemon_PauseHoldsTheQueueAcrossARestart: a pause set on one daemon

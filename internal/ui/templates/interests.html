@@ -1,0 +1,16 @@
+{{define "content" -}}
+<h1>Interests</h1>
+{{with .Run}}
+<p class="meta">From the clustering run of {{when .ComputedAt}} ({{.Algo}}): {{.Documents}} documents, {{.Noise}} of them in no interest.</p>
+{{with $.Interests}}
+<ul class="interests">
+{{range .}}<li class="interest">
+<h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}unlabeled{{end}}</a></h2>
+<p class="meta">{{.Size}} documents · cohesion {{printf "%.2f" .Cohesion}}</p>
+{{with .Summary}}<p>{{.}}</p>{{end}}
+{{with .Members}}<ul>{{range .}}<li><a href="{{documentHref .DocumentID}}">{{or .Title .URL}}</a></li>{{end}}</ul>{{end}}
+</li>
+{{end}}</ul>
+{{else}}<p class="empty">The last run found no interests.</p>{{end}}
+{{else}}<p class="empty">No interests yet: <code>curio interests rebuild</code> groups the library into them.</p>{{end}}
+{{- end}}

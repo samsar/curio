@@ -61,11 +61,23 @@ info:
       - A request carrying `Origin` gets 403 unless the Origin is exactly
         `http://127.0.0.1:P`, `http://localhost:P` or `http://[::1]:P`,
         `Origin: null` included. No CORS headers are ever sent.
+      - A change (any method but GET, HEAD and OPTIONS) carrying
+        `Sec-Fetch-Site`, which browsers send, gets 403 unless it carries it
+        once, as `same-origin`: a browser's changes come from the daemon's
+        own pages. Clients that aren't browsers send no such header.
       - A request with a body must send `Content-Type: application/json`
         (415 otherwise) holding exactly one JSON value. Bodies are capped at
         1 MiB, or 32 MiB for `POST /v1/bookmarks/import` (413 otherwise).
         Body-less POSTs need no Content-Type.
     Hosted-mode authentication is deferred.
+
+    Outside this contract, `/` and `/ui/` serve the dashboard's HTML pages
+    (docs/ui.md), unless config.yaml's `daemon.ui` is false. They answer
+    under the same access policy, GET only, each with a strict
+    Content-Security-Policy, and refuse another site's subresource
+    requests (`Sec-Fetch-Site` cross-site or same-site without a
+    top-level navigation). Their changes, when they make any, go through
+    this API as JSON.
 
 servers:
   - url: http://127.0.0.1:8765
@@ -289,10 +301,32 @@ paths:
       tags: [documents]
       operationId: listDocuments
       summary: List documents, most recently updated first
+      description: >
+        Every filter given must match. Each is checked on the documents the
+        list walks in its order, so a filter that matches few documents
+        reads more of the list to fill a page.
       parameters:
         - in: query
           name: state
           schema: { $ref: "#/components/schemas/DocState" }
+        - in: query
+          name: content_type
+          schema: { $ref: "#/components/schemas/ContentType" }
+        - in: query
+          name: host
+          description: >
+            Documents whose http or https URL has exactly this host, matched
+            case-insensitively, every character literal (no wildcards, no
+            subdomains), as the search host filter matches it.
+          schema: { type: string }
+        - in: query
+          name: folder
+          description: >
+            Documents with a bookmark in this folder or any folder under it,
+            matched as the bookmark list's folder filter: on path segments
+            and case-sensitively; a trailing "/" is ignored and "/" alone is
+            no filter.
+          schema: { type: string }
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Cursor" }
       responses:
@@ -807,6 +841,10 @@ components:
       type: string
       enum: [pending, fetched, failed, dead]
 
+    ContentType:
+      type: string
+      enum: [article, repo, video, pdf, thread, unknown]
+
     JobStatus:
       type: string
       enum: [pending, running, done, failed]
@@ -1126,7 +1164,7 @@ components:
         id:                 { type: string, format: uuid }
         url:                { type: string, format: uri }
         url_canonical:      { type: string, format: uri }
-        content_type:       { type: string, enum: [article, repo, video, pdf, thread, unknown] }
+        content_type:       { $ref: "#/components/schemas/ContentType" }
         title:              { type: string }
         author:             { type: string }
         published_at:       { type: string, format: date-time }
@@ -1157,7 +1195,7 @@ components:
         id:            { type: string, format: uuid }
         url:           { type: string, format: uri }
         title:         { type: string }
-        content_type:  { type: string, enum: [article, repo, video, pdf, thread, unknown] }
+        content_type:  { $ref: "#/components/schemas/ContentType" }
         state:         { $ref: "#/components/schemas/DocState" }
         last_error:    { type: string, description: "Of the most recent failed job for the document" }
         markdown_path: { type: string, description: "Absolute on-disk path to the current extraction's markdown" }
@@ -1204,7 +1242,7 @@ components:
             are not implemented; the server config sets the weights and
             collapse strategy, and sending any of them is a 400.
           properties:
-            content_type: { type: array, items: { type: string, enum: [article, repo, video, pdf, thread, unknown] } }
+            content_type: { type: array, items: { $ref: "#/components/schemas/ContentType" } }
             host:         { type: array, items: { type: string }, description: "URL hosts, matched exactly and case-insensitively" }
             source:       { type: array, items: { $ref: "#/components/schemas/Source" } }
       required: [query]

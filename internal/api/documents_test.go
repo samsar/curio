@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -313,6 +314,108 @@ func TestListDocuments(t *testing.T) {
 		http.StatusBadRequest)
 	assert.Equal(t, `state "archived" must be one of: pending, fetched, failed, dead`, p.Detail,
 		"a mistyped filter is refused, not answered with nothing")
+}
+
+// TestListDocuments_Filters: content_type, host and folder narrow the list,
+// together with state, and a content type outside the set is refused.
+func TestListDocuments_Filters(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	seed := func(docURL string, ct store.ContentType, state store.DocState, folder string) string {
+		t.Helper()
+		b := &store.Bookmark{TenantID: "local", URL: docURL, Source: store.SourceChrome,
+			SavedAt: time.Now().UTC(), FolderPath: store.NullableString(folder)}
+		_, err := s.deps.Bookmarks.Ingest(ctx, b)
+		require.NoError(t, err)
+		_, err = s.db.Exec(`UPDATE documents SET content_type = ?, state = ? WHERE id = ?`, ct, state, *b.DocumentID)
+		require.NoError(t, err)
+		return *b.DocumentID
+	}
+	paper := seed("https://arxiv.example/paper", store.ContentTypePDF, store.DocStateFetched, "/Research/ML")
+	failedPaper := seed("https://arxiv.example/failed", store.ContentTypePDF, store.DocStateFailed, "/Research")
+	repo := seed("https://code.example/repo", store.ContentTypeRepo, store.DocStateFetched, "/Research/ML/Code")
+	video := seed("https://video.example/talk", store.ContentTypeVideo, store.DocStateFetched, "/Talks")
+
+	ids := func(query string) []string {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents" + query})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got DocumentListResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		out := make([]string, 0, len(got.Items))
+		for _, item := range got.Items {
+			out = append(out, item.ID)
+		}
+		return out
+	}
+	cases := []struct {
+		query string
+		want  []string
+	}{
+		{"?content_type=pdf", []string{paper, failedPaper}},
+		{"?content_type=pdf&state=fetched", []string{paper}},
+		{"?host=ARXIV.example", []string{paper, failedPaper}},
+		{"?host=example", nil},
+		{"?folder=/Research/ML", []string{paper, repo}},
+		{"?folder=/Research/", []string{paper, failedPaper, repo}},
+		{"?folder=/research", nil},
+		{"?folder=/", []string{paper, failedPaper, repo, video}},
+		{"?content_type=repo&host=code.example&folder=/Research", []string{repo}},
+		{"?content_type=video&folder=/Research", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.query, func(t *testing.T) {
+			assert.ElementsMatch(t, tc.want, ids(tc.query))
+		})
+	}
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents?content_type=bogus"}),
+		http.StatusBadRequest)
+	assert.Equal(t, `content_type "bogus" must be one of: article, repo, video, pdf, thread, unknown`, p.Detail)
+}
+
+// TestListDocuments_FilteredPaging: a walk one row a page over a filtered
+// list visits every matching document once, most recently updated first.
+func TestListDocuments_FilteredPaging(t *testing.T) {
+	s := newTestServer(t)
+	want := map[string]bool{}
+	for i := range 6 {
+		host := "keep.example"
+		if i%2 == 1 {
+			host = "skip.example"
+		}
+		doc := s.seedDocument(t, fmt.Sprintf("https://%s/%d", host, i), store.DocStateFetched)
+		if host == "keep.example" {
+			want[doc.ID] = true
+		}
+	}
+	var walked []DocumentListItem
+	cursor := ""
+	for range 10 {
+		q := url.Values{"host": {"keep.example"}, "limit": {"1"}}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents?" + q.Encode()})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var page DocumentListResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &page))
+		walked = append(walked, page.Items...)
+		if cursor = page.NextCursor; cursor == "" {
+			break
+		}
+	}
+	got := map[string]bool{}
+	for i, doc := range walked {
+		assert.False(t, got[doc.ID], "visited once")
+		got[doc.ID] = true
+		if i > 0 {
+			prev := walked[i-1]
+			assert.True(t, doc.UpdatedAt.Before(prev.UpdatedAt) ||
+				(doc.UpdatedAt.Equal(prev.UpdatedAt) && doc.ID < prev.ID), "updated_at DESC, id DESC")
+		}
+	}
+	assert.Equal(t, want, got)
 }
 
 // TestListDocuments_Paging: next_cursor is set exactly when another page

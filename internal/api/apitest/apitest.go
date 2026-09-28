@@ -58,14 +58,27 @@ type Server struct {
 	srv *api.Server
 }
 
-// Start serves the full API on 127.0.0.1:0 until the test ends. Each opt
-// adjusts the Deps before the server starts. The home is a new one with the
-// default embedding model and width, and the search engine embeds queries
-// with an Embedder of that width, so /v1/search and /related work without
-// Ollama.
+// DefaultUI is how the daemon serves the dashboard with config.yaml's
+// defaults: on, with remote images off.
+var DefaultUI = func() api.UIOptions {
+	d := config.Default()
+	return api.UIOptions{Enabled: d.Daemon.UI, LoadRemoteImages: d.UI.LoadRemoteImages}
+}()
+
+// Start serves the full API on 127.0.0.1:0 until the test ends, with the
+// dashboard as DefaultUI serves it. Each opt adjusts the Deps before the
+// server starts. The home is a new one with the default embedding model
+// and width, and the search engine embeds queries with an Embedder of that
+// width, so /v1/search and /related work without Ollama.
 func Start(t testing.TB, opts ...func(*api.Deps)) *Server {
 	t.Helper()
-	s := StartNotReady(t, opts...)
+	return StartUI(t, DefaultUI, opts...)
+}
+
+// StartUI is Start with the dashboard served as pages says.
+func StartUI(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
+	t.Helper()
+	s := start(t, pages, opts...)
 	if err := s.Ready(); err != nil {
 		t.Fatalf("ready: %v", err)
 	}
@@ -77,6 +90,12 @@ func Start(t testing.TB, opts ...func(*api.Deps)) *Server {
 // names this process and the server's home, as a starting daemon does. The
 // database and Deps are there from the start, for seeding.
 func StartNotReady(t testing.TB, opts ...func(*api.Deps)) *Server {
+	t.Helper()
+	return start(t, DefaultUI, opts...)
+}
+
+// start serves a starting daemon with the dashboard as pages says.
+func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 	t.Helper()
 	defaults := config.Default().Embedding
 	home, err := curiohome.Init(t.TempDir(), defaults.Model, defaults.Dim)
@@ -119,7 +138,7 @@ func StartNotReady(t testing.TB, opts ...func(*api.Deps)) *Server {
 		t.Fatalf("listen: %v", err)
 	}
 	startup := api.NewStartup()
-	srv, err := api.NewServer(ln, home.Path, startup, deps.Log)
+	srv, err := api.NewServer(ln, api.ServerConfig{Home: home.Path, Startup: startup, UI: pages, Log: deps.Log})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}

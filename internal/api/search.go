@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -68,18 +67,28 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 		d.writeError(w, r, err)
 		return
 	}
-	if req.Query == "" {
-		writeProblem(w, r, http.StatusBadRequest, "bad request", "query is required")
+	resp, err := d.search(r.Context(), req)
+	if err != nil {
+		d.writeError(w, r, err)
 		return
 	}
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// search runs req through the search engine and hydrates its hits. A query
+// or k the engine can't take is a requestError. Semantic search failing
+// is not an error: the keyword results come back Degraded, with Warnings.
+func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
+	if req.Query == "" {
+		return SearchResponse{}, badRequest("query is required")
+	}
 	if req.K < 0 || req.K > store.MaxSearchK {
-		writeProblem(w, r, http.StatusBadRequest, "bad request",
-			fmt.Sprintf("k must be between 1 and %d (or omitted for the default), got %d", store.MaxSearchK, req.K))
-		return
+		return SearchResponse{}, badRequest("k must be between 1 and %d (or omitted for the default), got %d",
+			store.MaxSearchK, req.K)
 	}
 
 	start := time.Now()
-	res, err := d.Search.Search(r.Context(), search.Request{
+	res, err := d.Search.Search(ctx, search.Request{
 		TenantID: d.TenantID,
 		Query:    req.Query,
 		K:        req.K,
@@ -90,16 +99,14 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return SearchResponse{}, err
 	}
 
-	items, err := d.searchHitsToResponse(r.Context(), res.Items)
+	items, err := d.searchHitsToResponse(ctx, res.Items)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return SearchResponse{}, err
 	}
-	d.writeJSON(w, r, http.StatusOK, SearchResponse{
+	return SearchResponse{
 		Query:      res.Query,
 		TookMS:     time.Since(start).Milliseconds(),
 		BM25Hits:   res.BM25Hits,
@@ -107,7 +114,7 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Degraded:   res.Degraded,
 		Warnings:   res.Warnings,
 		Items:      items,
-	})
+	}, nil
 }
 
 // searchHitsToResponse maps engine hits to wire hits, populating each
@@ -163,25 +170,34 @@ type RelatedResponse struct {
 func (d Deps) handleRelatedDocuments(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	k := intQuery(r, "k", defaultRelatedK, 1, store.MaxSearchK)
+	resp, err := d.related(r.Context(), id, k)
+	if err != nil {
+		d.writeLookupError(w, r, "document", id, err)
+		return
+	}
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
 
+// related finds up to k documents similar to document id, hydrated as
+// search hits. An unknown document is an error wrapping store.ErrNotFound,
+// and one with no indexed chunks has none.
+func (d Deps) related(ctx context.Context, id string, k int) (RelatedResponse, error) {
 	start := time.Now()
-	res, err := d.Search.Related(r.Context(), search.RelatedRequest{
+	res, err := d.Search.Related(ctx, search.RelatedRequest{
 		TenantID:   d.TenantID,
 		DocumentID: id,
 		K:          k,
 	})
 	if err != nil {
-		d.writeLookupError(w, r, "document", id, err)
-		return
+		return RelatedResponse{}, err
 	}
-	items, err := d.searchHitsToResponse(r.Context(), res.Items)
+	items, err := d.searchHitsToResponse(ctx, res.Items)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return RelatedResponse{}, err
 	}
-	d.writeJSON(w, r, http.StatusOK, RelatedResponse{
+	return RelatedResponse{
 		DocID:  id,
 		TookMS: time.Since(start).Milliseconds(),
 		Items:  items,
-	})
+	}, nil
 }

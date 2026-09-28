@@ -21,11 +21,11 @@
 
 ```
 ┌──────────────┐  ┌─────────────┐  ┌──────────────┐
-│   curio CLI  │  │ curio-mcp   │  │  Future Web  │
-│  (cobra)     │  │ (sidecar)   │  │   UI / API   │
+│   curio CLI  │  │ curio-mcp   │  │  Dashboard   │
+│  (cobra)     │  │ (sidecar)   │  │ browser /ui/ │
 └──────┬───────┘  └──────┬──────┘  └──────┬───────┘
        └─────────────────┼────────────────┘
-                   HTTP + JSON
+        HTTP + JSON (/v1), HTML pages (/ui/)
                          │
                   ┌──────▼────────────┐
                   │   curio-daemon    │
@@ -56,6 +56,8 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
 - `curio add <url>` — manually add a bookmark
 - `curio import <source> [path]` — bulk import from Chrome / Safari / Firefox
 - `curio search <query>` — hybrid search
+- `curio ui [--print]` — open the dashboard in the browser (see
+  `docs/ui.md`), or print its address
 - `curio status [--follow]` — daemon health, doc counts, job queue depth
   and state, and a warning while the Jina fallback is failing; `--follow`
   then follows the queue until it drains
@@ -117,12 +119,21 @@ all fetch/index/search/insight workflows.
 
 - HTTP+JSON API on `127.0.0.1:8765` (port configurable; the host must be
   loopback). No authentication: it trusts local processes and refuses
-  browser-originated requests (Host allowlist, Origin rejection, JSON-only
-  bodies). See `docs/decisions.md` "Local API: loopback only, no token,
-  browsers shut out".
+  browser-originated requests (Host allowlist, Origin rejection, changes
+  only from its own pages by `Sec-Fetch-Site`, JSON-only bodies), except
+  its own dashboard's. See `docs/decisions.md` "Local API: loopback only,
+  no token, browsers shut out".
 - `api/openapi.yaml` is the contract, verified against the router and live
   responses by tests in `internal/api`; the clients (`internal/client`) are
   hand-written, and codegen is deferred
+- The dashboard: read-only HTML pages under `/ui/` on the same port and
+  origin (`/` redirects there; `daemon.ui: false` turns them off). Page
+  handlers in `internal/api/ui*.go` read through the same functions as the
+  JSON handlers, and `internal/ui` renders them with `html/template`, a
+  sanitized render of each document's markdown, and a vendored htmx for
+  search-as-you-type. Every response carries a strict CSP. See
+  `docs/ui.md`, and decisions.md "Dashboard: server-rendered pages in the
+  daemon (phase 1)"
 - Internal worker pools process jobs from the SQLite-backed queue. They
   claim through the queue gate (`jobs.QueueGate`), which holds claims back
   while the queue is paused, outside its daily schedule, or at the
@@ -425,7 +436,8 @@ External processes the daemon expects:
 - Read-later / highlights (Pocket, Instapaper, Readwise)
 - Trajectory analysis / "new this month" detection (interest clustering itself
   landed in M4 — see the insight layer)
-- Web UI
+- A web UI that changes anything: the dashboard's phase 1 (read-only
+  pages, `docs/ui.md`) has shipped; actions and richer views are planned
 - Authentication (single-tenant local: the API binds loopback only and
   refuses browser-originated requests; see decisions.md "Local API: loopback
   only, no token, browsers shut out")

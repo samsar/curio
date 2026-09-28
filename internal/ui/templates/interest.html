@@ -1,0 +1,16 @@
+{{define "content" -}}
+{{with .Interest}}
+<h1>{{with .Label}}{{.}}{{else}}Unlabeled interest{{end}}</h1>
+{{with .Summary}}<p>{{.}}</p>{{end}}
+<p class="meta">{{.Size}} documents · cohesion {{printf "%.2f" .Cohesion}}{{if lt (len .Members) .Size}} · showing {{len .Members}} of {{.Size}}{{end}}</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Document</th><th>Similarity</th></tr></thead>
+<tbody>
+{{range .Members}}<tr>
+<td><a href="{{documentHref .DocumentID}}">{{or .Title .URL}}</a>{{with outbound .URL}}<a class="url" href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{end}}</td>
+<td>{{printf "%.2f" .Similarity}}</td>
+</tr>
+{{end}}</tbody>
+</table></div>
+{{end}}
+{{- end}}

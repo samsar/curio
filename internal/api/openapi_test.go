@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"maps"
 	"mime"
-	"net"
 	"net/http"
 	"reflect"
 	"slices"
@@ -184,19 +183,21 @@ func TestOpenAPI_StrictValidation(t *testing.T) {
 	assert.NoError(t, schemas["Stats"].Value.VisitJSON(v, validationOptions...), "declared maps stay open")
 }
 
-// TestOpenAPI_RoutesMatchRouter: every route is documented and every
-// documented operation is routed.
+// TestOpenAPI_RoutesMatchRouter: every /v1 route is documented and every
+// documented operation is routed. The dashboard's pages are outside the
+// contract; TestDashboard_Routes pins them.
 func TestOpenAPI_RoutesMatchRouter(t *testing.T) {
-	origin, err := newLocalOrigin(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8765})
-	require.NoError(t, err)
-	router, err := newRouter(Deps{Log: slog.New(slog.DiscardHandler), TenantID: "local"}, origin)
+	router, err := newRouter(Deps{Log: slog.New(slog.DiscardHandler), TenantID: "local"}, testOrigin(t),
+		testDashboard(t, pagesOn))
 	require.NoError(t, err)
 
 	var routed []string
 	require.NoError(t, chi.Walk(router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
-		// A subrouter's root is reported with a trailing slash, and also
-		// answers without one.
-		routed = append(routed, method+" "+strings.TrimSuffix(route, "/"))
+		if strings.HasPrefix(route, "/v1/") {
+			// A subrouter's root is reported with a trailing slash, and also
+			// answers without one.
+			routed = append(routed, method+" "+strings.TrimSuffix(route, "/"))
+		}
 		return nil
 	}))
 	slices.Sort(routed)
@@ -358,6 +359,10 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/documents", get("/v1/documents?state=fetched"), http.StatusOK},
 		{"GET /v1/documents", get("/v1/documents?state=failed"), http.StatusOK},
 		{"GET /v1/documents", get("/v1/documents?state=bogus"), http.StatusBadRequest},
+		{"GET /v1/documents", get("/v1/documents?content_type=unknown"), http.StatusOK},
+		{"GET /v1/documents", get("/v1/documents?content_type=bogus"), http.StatusBadRequest},
+		{"GET /v1/documents", get("/v1/documents?host=example.com&state=fetched"), http.StatusOK},
+		{"GET /v1/documents", get("/v1/documents?folder=/Reading&limit=1"), http.StatusOK},
 		{"GET /v1/documents/{id}", get("/v1/documents/" + f.fetched), http.StatusOK},
 		{"GET /v1/documents/lookup", get("/v1/documents/lookup?url=https://EXAMPLE.com/a%23top"), http.StatusOK},
 		{"GET /v1/documents/lookup", get("/v1/documents/lookup?url=https://example.com/nowhere"), http.StatusNotFound},

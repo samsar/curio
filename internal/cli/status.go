@@ -52,6 +52,7 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 			starting.PID, starting.Version, starting.Progress())
 		fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
 		fmt.Fprint(w, homeMismatchWarning(starting.Home, env.Home.Path))
+		printDashboard(w, env)
 		printDiskUsage(w, env.Home.Path)
 		return true
 	}
@@ -71,6 +72,7 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 	if warning := homeMismatchWarning(health.Home, env.Home.Path); warning != "" {
 		fmt.Fprint(w, warning)
 	}
+	printDashboard(w, env)
 	fmt.Fprintf(w, "schema:  v%d\n", health.SchemaVersion)
 	fmt.Fprintf(w, "embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
 	if d := health.EmbeddingDrift; d != nil {
@@ -117,6 +119,13 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 		}
 	}
 	return true
+}
+
+// printDashboard says where the dashboard is, when config.yaml serves it.
+func printDashboard(w io.Writer, env *daemonctl.Env) {
+	if env.Config.Daemon.UI {
+		fmt.Fprintf(w, "dashboard: %s  (curio ui)\n", dashboardURL(env.Controller.BaseURL))
+	}
 }
 
 // formatMap renders a map[string]int as "key=val  key=val" sorted by key.

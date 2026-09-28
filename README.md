@@ -40,6 +40,7 @@ Run `curio up` again whenever you like. If everything's fine, it says **"Nothing
 ```sh
 curio search "what you remember about it"   # search your library
 curio status --follow                       # watch an import until it's done
+curio ui                                    # open the dashboard in your browser
 curio interests                             # the topics in your library
 curio add https://example.com/article       # save one page
 curio import safari                         # import more bookmarks later (also: chrome, firefox, html <file>)

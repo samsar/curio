@@ -49,6 +49,48 @@ func TestBookmarks_TagsForDocument(t *testing.T) {
 	assert.Empty(t, none)
 }
 
+// TestBookmarks_ListByDocument: a document's bookmarks, the tenant's only,
+// newest saved first; one whose document was deleted links to none.
+func TestBookmarks_ListByDocument(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	saved := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	ingest := func(url, source string, savedAt time.Time) *store.Bookmark {
+		t.Helper()
+		b := newIngestBookmark(url, source)
+		b.SavedAt = savedAt
+		_, err := bms.Ingest(ctx, b)
+		require.NoError(t, err)
+		return b
+	}
+	oldest := ingest("https://example.com/a", store.SourceChrome, saved)
+	newest := ingest("https://example.com/a", store.SourceSafari, saved.Add(2*time.Hour))
+	middle := ingest("https://example.com/a", store.SourceFirefox, saved.Add(time.Hour))
+	ingest("https://example.com/other", store.SourceChrome, saved)
+	docID := *oldest.DocumentID
+	require.NoError(t, bms.Create(ctx, &store.Bookmark{TenantID: "other-tenant", DocumentID: &docID,
+		URL: oldest.URL, Source: store.SourceChrome, SavedAt: saved.Add(3 * time.Hour)}))
+
+	got, err := bms.ListByDocument(ctx, "local", docID)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(got))
+	for _, b := range got {
+		ids = append(ids, b.ID)
+		assert.Equal(t, "local", b.TenantID)
+	}
+	assert.Equal(t, []string{newest.ID, middle.ID, oldest.ID}, ids)
+
+	_, err = db.Exec(`DELETE FROM documents WHERE id = ?`, docID)
+	require.NoError(t, err)
+	got, err = bms.ListByDocument(ctx, "local", docID)
+	require.NoError(t, err)
+	assert.Empty(t, got, "the bookmarks outlive the document, linked to nothing")
+	b, err := bms.GetByID(ctx, newest.ID)
+	require.NoError(t, err)
+	assert.Nil(t, b.DocumentID)
+}
+
 func newIngestBookmark(url, source string) *store.Bookmark {
 	return &store.Bookmark{TenantID: "local", URL: url, Source: source, SavedAt: time.Now().UTC()}
 }

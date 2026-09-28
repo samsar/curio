@@ -2,6 +2,7 @@ package api
 
 import (
 	"cmp"
+	"context"
 	"net/http"
 	"time"
 
@@ -115,14 +116,24 @@ func (d Deps) handleUpdateQueue(w http.ResponseWriter, r *http.Request) {
 
 // writeQueue answers the queue's state now.
 func (d Deps) writeQueue(w http.ResponseWriter, r *http.Request) {
-	counts, err := d.Queue.QueueCounts(r.Context())
+	resp, err := d.queueState(r.Context())
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// queueState is the queue's state now: the gate's settings and what they
+// mean, each pool's limit and load, and whether the Mac is held awake.
+func (d Deps) queueState(ctx context.Context) (QueueResponse, error) {
+	counts, err := d.Queue.QueueCounts(ctx)
+	if err != nil {
+		return QueueResponse{}, err
+	}
 	resp := queueResponse(d.Gate.State(time.Now()), counts)
 	resp.KeepAwakeActive, resp.PowerSource = d.keepAwake(resp.KeepAwake)
-	d.writeJSON(w, r, http.StatusOK, resp)
+	return resp, nil
 }
 
 // keepAwake is whether the Mac is held awake, and the power source while

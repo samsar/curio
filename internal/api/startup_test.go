@@ -81,7 +81,7 @@ func TestStarting_RefusesEverythingElse(t *testing.T) {
 		{method: http.MethodDelete, path: "/v1/jobs?status=failed"},
 		{method: http.MethodPost, path: "/v1/healthz"},
 		{method: http.MethodGet, path: "/v1/nope"},
-		{method: http.MethodGet, path: "/"},
+		{method: http.MethodPost, path: "/ui/search"},
 	} {
 		t.Run(req.method+" "+req.path, func(t *testing.T) {
 			body := getStarting(t, s, req)
@@ -96,6 +96,16 @@ func TestStarting_RefusesEverythingElse(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, resp.status, resp.body)
 	assert.Zero(t, s.count(t, "bookmarks"), "nothing a starting daemon refused has run")
 	assert.Zero(t, s.count(t, "jobs"))
+}
+
+// TestStarting_Root: while starting, / is refused like any other path
+// without the dashboard, and redirects to it with the dashboard.
+func TestStarting_Root(t *testing.T) {
+	getStarting(t, newStartingTestServerUI(t, UIOptions{}), request{method: http.MethodGet, path: "/"})
+
+	resp := newStartingTestServer(t).do(t, request{method: http.MethodGet, path: "/"})
+	assert.Equal(t, http.StatusFound, resp.status)
+	assert.Equal(t, "/ui/", resp.header.Get("Location"))
 }
 
 // TestStarting_AccessPolicy: the access checks apply while starting, before

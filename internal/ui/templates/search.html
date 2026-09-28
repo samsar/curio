@@ -1,0 +1,35 @@
+{{/*
+Search as you type: htmx sends the form's query 400 ms after the last
+keystroke, a new one aborts the request in flight (hx-sync), and the answer,
+the same full page a plain GET gets, replaces what is inside #results. With
+JavaScript off, the form is a plain GET.
+*/}}
+{{define "content" -}}
+<h1>Search</h1>
+<form class="search" action="/ui/search" method="get" role="search">
+<input type="search" name="q" value="{{.Query}}" placeholder="What do you remember about it?" aria-label="Search your library" autofocus
+ hx-get="/ui/search" hx-trigger="input changed delay:400ms, search" hx-sync="this:replace"
+ hx-target="#results" hx-select="#results > *" hx-swap="innerHTML" hx-push-url="true" hx-indicator="#searching">
+<button type="submit">Search</button>
+<span id="searching" class="htmx-indicator">Searching…</span>
+</form>
+<div id="results" aria-live="polite">
+{{with .Err}}{{template "panel-error" .}}{{end}}
+{{with .Results}}
+{{if .Degraded}}<div class="banner warn">{{range .Warnings}}<p>{{.}}</p>{{end}}</div>{{end}}
+{{with .Hits}}
+<p class="meta">{{len .}} documents in {{$.Results.TookMS}} ms</p>
+<ol class="hits">
+{{range .}}<li class="hit">
+<h2><a href="{{documentHref .DocumentID}}">{{or .Title .URL}}</a></h2>
+<p class="url">{{with outbound .URL}}<a href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{else}}{{.URL}}{{end}} <span class="meta">score {{printf "%.4f" .Score}}</span></p>
+{{range .Matches}}<blockquote class="match">
+<p>{{range .Segments}}{{if .Mark}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}}</p>
+<p class="meta">{{with score .BM25}}bm25 {{.}}{{end}}{{with score .Vector}} vector {{.}}{{end}}</p>
+</blockquote>
+{{end}}</li>
+{{end}}</ol>
+{{else}}<p class="empty">Nothing in your library matches.</p>{{end}}
+{{end}}
+</div>
+{{- end}}

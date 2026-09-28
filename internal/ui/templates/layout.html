@@ -1,0 +1,39 @@
+{{/*
+The frame of every page, and the partials the pages share. Rules for every
+template (TestTemplatesHaveNoInlineCode checks them): no inline script or
+style, no event-handler attributes, no hx-on or hx-vars, and every link
+built by a func (links.go), never pieced together here.
+*/}}
+{{define "layout" -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"historyCacheSize":0,"refreshOnHistoryMiss":true,"selfRequestsOnly":true,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true}]}'>
+<title>{{.Layout.Title}} · curio</title>
+<link rel="stylesheet" href="{{asset "app.css"}}">
+<script src="{{asset "htmx-2.0.11.min.js"}}" defer></script>
+{{block "head" .}}{{end}}
+</head>
+<body>
+<header class="site">
+<a class="brand" href="/ui/">curio</a>
+<nav aria-label="Main">
+<a href="/ui/"{{if eq .Layout.Nav "overview"}} aria-current="page"{{end}}>Overview</a>
+<a href="/ui/search"{{if eq .Layout.Nav "search"}} aria-current="page"{{end}}>Search</a>
+<a href="/ui/library"{{if eq .Layout.Nav "library"}} aria-current="page"{{end}}>Library</a>
+<a href="/ui/interests"{{if eq .Layout.Nav "interests"}} aria-current="page"{{end}}>Interests</a>
+</nav>
+</header>
+<main>
+{{template "content" .}}
+</main>
+<footer class="site">curio-daemon {{.Layout.Version}}</footer>
+</body>
+</html>
+{{- end}}
+
+{{define "panel-error" -}}
+<p class="panel-error" role="alert">Couldn't read this: {{.Message}}. <span class="meta">Request {{.RequestID}}; see <code>curio daemon logs</code>.</span></p>
+{{- end}}

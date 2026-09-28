@@ -32,6 +32,7 @@ import (
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
+	"github.com/samsar/curio/internal/ui"
 	"github.com/samsar/curio/migrations"
 )
 
@@ -431,6 +432,31 @@ func TestRun_ServesIdentityAndReleasesOnShutdown(t *testing.T) {
 	assert.Empty(t, pidFile, "a clean exit leaves the PID file empty")
 }
 
+// TestRun_DashboardFollowsConfig: the daemon serves the dashboard by
+// default, and with daemon.ui: false answers /ui/ as the API answers any
+// path it doesn't have.
+func TestRun_DashboardFollowsConfig(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	newHome(t, listen)
+	_, stop := runDaemon(t, listen)
+	status, header, _ := rawGet(t, listen, "/ui/", nil)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "text/html; charset=utf-8", header.Get("Content-Type"))
+	stop()
+
+	home := newHome(t, listen)
+	cfg, err := os.ReadFile(home.ConfigPath())
+	require.NoError(t, err)
+	off := strings.Replace(string(cfg), "daemon:\n", "daemon:\n  ui: false\n", 1)
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(off), 0o600))
+	_, stop = runDaemon(t, listen)
+	defer stop()
+	status, header, body := rawGet(t, listen, "/ui/", nil)
+	assert.Equal(t, http.StatusNotFound, status)
+	assert.Equal(t, "application/problem+json", header.Get("Content-Type"))
+	assert.Contains(t, body, "no route for /ui/")
+}
+
 // TestRun_QueuePauseSurvivesRestart: a pause holds from the first claim of
 // the next daemon, over the jobs the last one left: its orphan, requeued
 // with the attempt it used, and a pending job. Resuming releases both.
@@ -668,6 +694,11 @@ func TestRun_AnswersWhileMigrating(t *testing.T) {
 	status, _, body = rawGet(t, listen, "/v1/healthz", http.Header{"Origin": {"https://attacker.example"}})
 	assert.Equal(t, http.StatusForbidden, status)
 	assert.NotContains(t, body, `"pid"`)
+	status, header, body = rawGet(t, listen, "/ui/", nil)
+	assert.Equal(t, http.StatusServiceUnavailable, status)
+	assert.Equal(t, "text/html; charset=utf-8", header.Get("Content-Type"))
+	assert.Equal(t, ui.CSP, header.Get("Content-Security-Policy"))
+	assert.Contains(t, body, fmt.Sprintf("0 of %d migrations applied", latest-4))
 	release()
 
 	var health *client.Health

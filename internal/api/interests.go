@@ -55,27 +55,32 @@ const (
 	maxOneInterestMembers     = 1000
 )
 
-// handleListInterests returns the current interests — the labeled clusters of
-// the latest completed clustering run. Returns 200 with an empty list when no
-// clustering has run yet.
 func (d Deps) handleListInterests(w http.ResponseWriter, r *http.Request) {
 	limit := intQuery(r, "limit", defaultInterestLimit, 1, maxInterestLimit)
 	members := intQuery(r, "members", defaultInterestMembers, 0, maxInterestMembers)
-
-	run, err := d.Insights.LatestRun(r.Context(), d.TenantID, store.ClusterRunDone)
+	resp, err := d.interests(r.Context(), limit, members)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			d.writeJSON(w, r, http.StatusOK, InterestListResponse{Items: []InterestResponse{}})
-			return
-		}
 		d.writeError(w, r, err)
 		return
 	}
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
 
-	clusters, err := d.Insights.ListClusters(r.Context(), run.ID, limit)
+// interests returns the current interests, the labeled clusters of the
+// latest completed clustering run, up to limit of them with up to members
+// members each. With no completed run yet it returns none, and no error.
+func (d Deps) interests(ctx context.Context, limit, members int) (InterestListResponse, error) {
+	run, err := d.Insights.LatestRun(ctx, d.TenantID, store.ClusterRunDone)
+	if errors.Is(err, store.ErrNotFound) {
+		return InterestListResponse{Items: []InterestResponse{}}, nil
+	}
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return InterestListResponse{}, err
+	}
+
+	clusters, err := d.Insights.ListClusters(ctx, run.ID, limit)
+	if err != nil {
+		return InterestListResponse{}, err
 	}
 
 	resp := InterestListResponse{
@@ -88,36 +93,39 @@ func (d Deps) handleListInterests(w http.ResponseWriter, r *http.Request) {
 		Items:        make([]InterestResponse, 0, len(clusters)),
 	}
 	for _, c := range clusters {
-		in, err := d.interestToResponse(r.Context(), c, members)
+		in, err := d.interestToResponse(ctx, c, members)
 		if err != nil {
-			d.writeError(w, r, err)
-			return
+			return InterestListResponse{}, err
 		}
 		resp.Items = append(resp.Items, in)
 	}
-	d.writeJSON(w, r, http.StatusOK, resp)
+	return resp, nil
 }
 
 // handleGetInterest returns one interest (cluster) with its member documents.
 func (d Deps) handleGetInterest(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	members := intQuery(r, "members", defaultOneInterestMembers, 0, maxOneInterestMembers)
-
-	c, err := d.Insights.GetCluster(r.Context(), id)
+	resp, err := d.interest(r.Context(), id, members)
 	if err != nil {
 		d.writeLookupError(w, r, "interest", id, err)
 		return
 	}
-	if c.TenantID != d.TenantID {
-		notFound(w, r, "interest", id)
-		return
-	}
-	in, err := d.interestToResponse(r.Context(), c, members)
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// interest returns the tenant's interest id with up to members members.
+// Another tenant's interest is an error wrapping store.ErrNotFound, as an
+// unknown one is.
+func (d Deps) interest(ctx context.Context, id string, members int) (InterestResponse, error) {
+	c, err := d.Insights.GetCluster(ctx, id)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return InterestResponse{}, err
 	}
-	d.writeJSON(w, r, http.StatusOK, in)
+	if c.TenantID != d.TenantID {
+		return InterestResponse{}, fmt.Errorf("interest %s: %w", id, store.ErrNotFound)
+	}
+	return d.interestToResponse(ctx, c, members)
 }
 
 // handleRebuildInterests enqueues a clustering job and returns 202 + job_id.

@@ -130,20 +130,30 @@ func (d Deps) upstreams() []UpstreamHealth {
 const ollamaPingTimeout = 500 * time.Millisecond
 
 func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
-	meta, err := d.Home.Meta()
+	h, err := d.health(r.Context())
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
+	d.writeJSON(w, r, http.StatusOK, h)
+}
 
-	// Fail-open: an unreachable Ollama doesn't make the whole daemon
-	// unhealthy (the user can still list bookmarks, browse docs, etc.).
+// health reports the daemon's health. Fail-open: an unreachable Ollama
+// doesn't make the whole daemon unhealthy (the user can still list
+// bookmarks, browse docs, etc.); it is reported in OllamaReachable and
+// OllamaDetail, with advice.
+func (d Deps) health(ctx context.Context) (Health, error) {
+	meta, err := d.Home.Meta()
+	if err != nil {
+		return Health{}, err
+	}
+
 	reachable := true
 	detail := ""
 	if pinger, ok := d.Embedder.(interface {
 		Ping(context.Context) error
 	}); ok {
-		pctx, cancel := context.WithTimeout(r.Context(), ollamaPingTimeout)
+		pctx, cancel := context.WithTimeout(ctx, ollamaPingTimeout)
 		defer cancel()
 		if err := pinger.Ping(pctx); err != nil {
 			reachable = false
@@ -158,7 +168,7 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	d.writeJSON(w, r, http.StatusOK, Health{
+	return Health{
 		Status:          "ok",
 		PID:             os.Getpid(),
 		Home:            d.Home.Path,
@@ -173,7 +183,7 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Upstreams:       d.upstreams(),
 		YouTubeFetcher:  d.YouTubeFetcher,
 		GitHubToken:     d.GitHubToken,
-	})
+	}, nil
 }
 
 // Stats is the /v1/stats response.
@@ -185,38 +195,43 @@ type Stats struct {
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
 }
 
-// handleStats reports corpus and queue counts. A count that can't be read
-// fails the request: `curio import --follow` and `curio status` read absent
-// fields as zero.
 func (d Deps) handleStats(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	bookmarks, err := d.Bookmarks.Count(ctx, d.TenantID)
+	st, err := d.stats(r.Context())
 	if err != nil {
 		d.writeError(w, r, err)
 		return
+	}
+	d.writeJSON(w, r, http.StatusOK, st)
+}
+
+// stats reports corpus and queue counts. A count that can't be read fails
+// the whole answer: `curio import --follow` and `curio status` read absent
+// fields as zero.
+func (d Deps) stats(ctx context.Context) (Stats, error) {
+	bookmarks, err := d.Bookmarks.Count(ctx, d.TenantID)
+	if err != nil {
+		return Stats{}, err
 	}
 	docsByState, err := d.Documents.CountByState(ctx, d.TenantID)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return Stats{}, err
 	}
 	jobsByStatus, err := d.Queue.CountByStatus(ctx, d.TenantID)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return Stats{}, err
 	}
 
 	docsTotal := 0
 	for _, n := range docsByState {
 		docsTotal += n
 	}
-	d.writeJSON(w, r, http.StatusOK, Stats{
+	return Stats{
 		Version:          version.String(),
 		BookmarksTotal:   bookmarks,
 		DocumentsTotal:   docsTotal,
 		DocumentsByState: stringKeys(docsByState),
 		JobsByStatus:     stringKeys(jobsByStatus),
-	})
+	}, nil
 }
 
 // stringKeys converts a count map keyed by a store enum to the wire shape.

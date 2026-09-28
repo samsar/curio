@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -46,20 +47,38 @@ type testServer struct {
 // for: the daemon's defaults.
 var testPools = jobs.PoolSizes{Fetch: 16, Index: 4}
 
-// newTestServer starts the server with the full API; each option adjusts
-// its Deps first.
+// pagesOn is how the daemon serves the dashboard by default: on, with
+// remote images off.
+var pagesOn = UIOptions{Enabled: true}
+
+// newTestServer starts the server with the full API and the dashboard as
+// the daemon's defaults serve it; each option adjusts its Deps first.
 func newTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	t.Helper()
-	s := newStartingTestServer(t, options...)
+	return newTestServerUI(t, pagesOn, options...)
+}
+
+// newTestServerUI is newTestServer with the dashboard served as pages says.
+func newTestServerUI(t *testing.T, pages UIOptions, options ...func(*Deps)) *testServer {
+	t.Helper()
+	s := newStartingTestServerUI(t, pages, options...)
 	s.ready(t)
 	return s
 }
 
 // newStartingTestServer starts the server as a starting daemon, in the
-// initializing phase, until ready is called. Its Deps are built up front
-// so a test can seed the database first. The home is new, with the default
-// embedding model and width, and the vector index has that width.
+// initializing phase, until ready is called, with the dashboard on. Its
+// Deps are built up front so a test can seed the database first. The home
+// is new, with the default embedding model and width, and the vector index
+// has that width.
 func newStartingTestServer(t *testing.T, options ...func(*Deps)) *testServer {
+	t.Helper()
+	return newStartingTestServerUI(t, pagesOn, options...)
+}
+
+// newStartingTestServerUI is newStartingTestServer with the dashboard
+// served as pages says.
+func newStartingTestServerUI(t *testing.T, pages UIOptions, options ...func(*Deps)) *testServer {
 	t.Helper()
 	defaults := config.Default().Embedding
 	home, err := curiohome.Init(t.TempDir(), defaults.Model, defaults.Dim)
@@ -88,7 +107,7 @@ func newStartingTestServer(t *testing.T, options ...func(*Deps)) *testServer {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	startup := NewStartup()
-	srv, err := NewServer(ln, home.Path, startup, deps.Log)
+	srv, err := NewServer(ln, ServerConfig{Home: home.Path, Startup: startup, UI: pages, Log: deps.Log})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -123,7 +142,8 @@ type request struct {
 	origin      string
 	contentType string
 	body        string
-	chunked     bool // send body with no Content-Length
+	chunked     bool        // send body with no Content-Length
+	header      http.Header // more headers, such as a browser's Sec-Fetch-*
 }
 
 type response struct {
@@ -132,6 +152,7 @@ type response struct {
 	requestID   string // the X-Request-Id header
 	path        string // the request's, which a problem's instance names
 	body        string
+	header      http.Header
 }
 
 // newResponse reads resp into a response for the request to path.
@@ -140,8 +161,14 @@ func newResponse(t *testing.T, resp *http.Response, path string) response {
 	b, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	return response{status: resp.StatusCode, contentType: resp.Header.Get("Content-Type"),
-		requestID: resp.Header.Get("X-Request-Id"), path: path, body: string(b)}
+		requestID: resp.Header.Get("X-Request-Id"), path: path, body: string(b), header: resp.Header}
 }
+
+// noRedirects is a client that answers with a redirect instead of
+// following it.
+var noRedirects = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
+}}
 
 func (s *testServer) do(t *testing.T, req request) response {
 	t.Helper()
@@ -164,7 +191,8 @@ func (s *testServer) do(t *testing.T, req request) response {
 	if req.contentType != "" {
 		r.Header.Set("Content-Type", req.contentType)
 	}
-	resp, err := http.DefaultClient.Do(r)
+	maps.Copy(r.Header, req.header)
+	resp, err := noRedirects.Do(r)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	return newResponse(t, resp, r.URL.Path)
@@ -452,7 +480,7 @@ func TestServer_BodylessPostsNeedNoContentType(t *testing.T) {
 func TestServer_ServeReturnsListenerFailure(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	srv, err := NewServer(ln, t.TempDir(), NewStartup(), slog.New(slog.DiscardHandler))
+	srv, err := NewServer(ln, ServerConfig{Home: t.TempDir(), Startup: NewStartup(), Log: slog.New(slog.DiscardHandler)})
 	require.NoError(t, err)
 	require.NoError(t, ln.Close())
 
@@ -648,17 +676,31 @@ func routerDeps(t *testing.T, rec *logRecorder, options ...func(*Deps)) Deps {
 }
 
 // serveInProcess runs req through the router newRouter builds for deps, as
-// the daemon listening on 127.0.0.1:8765 would.
+// the daemon listening on 127.0.0.1:8765 with the dashboard on would.
 func serveInProcess(t *testing.T, deps Deps, req *http.Request) response {
 	t.Helper()
-	origin, err := newLocalOrigin(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8765})
-	require.NoError(t, err)
-	router, err := newRouter(deps, origin)
+	router, err := newRouter(deps, testOrigin(t), testDashboard(t, pagesOn))
 	require.NoError(t, err)
 	req.Host = "127.0.0.1:8765"
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return newResponse(t, rec.Result(), req.URL.Path)
+}
+
+// testOrigin is the origin of a daemon listening on 127.0.0.1:8765.
+func testOrigin(t *testing.T) localOrigin {
+	t.Helper()
+	origin, err := newLocalOrigin(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8765})
+	require.NoError(t, err)
+	return origin
+}
+
+// testDashboard is the dashboard pages says to serve.
+func testDashboard(t *testing.T, pages UIOptions) dashboard {
+	t.Helper()
+	d, err := newDashboard(pages)
+	require.NoError(t, err)
+	return d
 }
 
 func TestServer_RequestIDs(t *testing.T) {

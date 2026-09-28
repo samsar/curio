@@ -160,11 +160,15 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 	// NewServer fails, and otherwise just reports it closed already.
 	defer func() { _ = ln.Close() }()
 	startup := api.NewStartup()
-	srv, err := api.NewServer(ln, home.Path, startup, slog.Default())
+	srv, err := api.NewServer(ln, api.ServerConfig{Home: home.Path, Startup: startup, UI: uiOptions(cfg),
+		Log: slog.Default()})
 	if err != nil {
 		return err
 	}
 	slog.Info("curio-daemon starting", "version", version.String(), "home", home.Path, "pid", os.Getpid())
+	if cfg.Daemon.UI {
+		slog.Info("dashboard", "url", "http://"+ln.Addr().String()+"/ui/")
+	}
 	serving := serveAPI(ctx, srv)
 
 	db, err := sqlitestore.Open(ctx, home.DBPath())
@@ -187,6 +191,11 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 	}
 	slog.Info("curio-daemon ready", "startup_ms", time.Since(began).Milliseconds())
 	return d.serve(ctx, serving)
+}
+
+// uiOptions is how cfg says to serve the dashboard.
+func uiOptions(cfg config.Config) api.UIOptions {
+	return api.UIOptions{Enabled: cfg.Daemon.UI, LoadRemoteImages: cfg.UI.LoadRemoteImages}
 }
 
 // start brings the database up to date and builds everything the full API

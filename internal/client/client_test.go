@@ -323,6 +323,35 @@ func TestAPIError_ServerErrors(t *testing.T) {
 	})
 }
 
+// TestRequestsCarryNoFetchMetadata: the client is not a browser, and says
+// nothing a browser would about where a request came from, so the daemon's
+// Sec-Fetch-Site rules never apply to it.
+func TestRequestsCarryNoFetchMetadata(t *testing.T) {
+	var seen []http.Header
+	c := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Clone())
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	})
+	ctx := context.Background()
+	_, err := c.Stats(ctx)
+	require.NoError(t, err)
+	_, err = c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: "https://example.com/a"})
+	require.NoError(t, err)
+	_, err = c.UpdateQueue(ctx, client.QueueUpdate{Paused: new(true)})
+	require.NoError(t, err)
+	_, err = c.DeleteJobsByStatus(ctx, "failed")
+	require.NoError(t, err)
+
+	require.Len(t, seen, 4)
+	for _, h := range seen {
+		for name := range h {
+			assert.False(t, strings.HasPrefix(name, "Sec-Fetch-"), name)
+		}
+		assert.Empty(t, h.Get("Origin"))
+	}
+}
+
 // TestResponsesAreReadTolerantly: a newer daemon's extra fields are ignored.
 func TestResponsesAreReadTolerantly(t *testing.T) {
 	c := fakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
