@@ -1,6 +1,7 @@
 package setuptest
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -66,7 +67,7 @@ func runDaemon() error {
 	defer func() { _ = lock.Release() }() // the process ends with it
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM)
-	ln, err := net.Listen("tcp", cfg.Daemon.Listen) //nolint:noctx // a fake daemon's whole life; there is no context to bind
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", cfg.Daemon.Listen)
 	if err != nil {
 		return err
 	}
