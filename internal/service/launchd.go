@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -87,15 +88,12 @@ var _ Manager = (*Launchd)(nil)
 
 // NewLaunchd returns the Manager of home's launchd agent.
 func NewLaunchd(home *curiohome.Home, opts LaunchdOptions) (*Launchd, error) {
-	defaultHome, err := curiohome.DefaultPath()
+	userHome, err := userHomeDir()
 	if err != nil {
 		return nil, err
 	}
+	defaultHome := filepath.Join(userHome, curiohome.DefaultDirName)
 	if opts.AgentsDir == "" {
-		userHome, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("locate ~/Library/LaunchAgents: %w", err)
-		}
 		opts.AgentsDir = filepath.Join(userHome, "Library", "LaunchAgents")
 	}
 	if opts.Launchctl == "" {
@@ -118,6 +116,21 @@ func NewLaunchd(home *curiohome.Home, opts LaunchdOptions) (*Launchd, error) {
 	}
 	label, isDefault := agentLabel(home.Path, defaultHome)
 	return &Launchd{home: home, label: label, nonDefaultHome: !isDefault, opts: opts}, nil
+}
+
+// userHomeDir is $HOME, as curiohome.DefaultPath reads it, or the user
+// database's home directory where the environment leaves $HOME unset. A
+// command told its home by --curio-home or $CURIO_HOME needs no $HOME,
+// and the agent's directory and label belong to the user all the same.
+func userHomeDir() (string, error) {
+	if dir, err := os.UserHomeDir(); err == nil {
+		return dir, nil
+	}
+	u, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("locate the user's home directory, for ~/Library/LaunchAgents: %w", err)
+	}
+	return u.HomeDir, nil
 }
 
 // agentLabel is the label of home's agent: BaseLabel for the default home,

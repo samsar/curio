@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -105,6 +106,24 @@ func TestNewLaunchd_Defaults(t *testing.T) {
 	assert.Equal(t, os.Getuid(), l.opts.UID)
 	assert.Equal(t, ExitTimeout+15*time.Second, l.opts.LongCallTimeout)
 	assert.False(t, l.nonDefaultHome)
+}
+
+// TestNewLaunchd_NoHOME: an environment without $HOME (a supervisor's,
+// say) still finds the user's agents and default home in the user
+// database, so a command given its home needs neither.
+func TestNewLaunchd_NoHOME(t *testing.T) {
+	u, err := user.Current()
+	require.NoError(t, err)
+	t.Setenv("HOME", "")
+	home, err := curiohome.Init(t.TempDir(), "qwen3-embedding:0.6b", 1024)
+	require.NoError(t, err)
+
+	l, err := NewLaunchd(home, LaunchdOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(u.HomeDir, "Library", "LaunchAgents"), l.opts.AgentsDir)
+	label, _ := agentLabel(home.Path, filepath.Join(u.HomeDir, curiohome.DefaultDirName))
+	assert.Equal(t, label, l.Label())
+	assert.True(t, l.nonDefaultHome)
 }
 
 func TestRenderPlist(t *testing.T) {

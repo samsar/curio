@@ -65,6 +65,15 @@ func TestDiscover(t *testing.T) {
 		require.ErrorIs(t, err, curiohome.ErrNotOurs)
 	})
 
+	t.Run("a given home needs no $HOME", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		path := filepath.Join(t.TempDir(), "home")
+		env, err := Discover(path, "")
+		require.NoError(t, err)
+		assert.Equal(t, path, env.Home.Path)
+		require.NotNil(t, env.Controller.Service)
+	})
+
 	t.Run("the controller has the platform's service manager", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir()) // no agents of the user's own
 		env, err := Discover(filepath.Join(t.TempDir(), "home"), "")
