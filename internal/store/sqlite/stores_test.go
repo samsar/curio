@@ -52,6 +52,24 @@ func TestDocuments_CreateAndGet(t *testing.T) {
 	assert.Equal(t, "Given", *got.Title)
 }
 
+// TestDocuments_GetByURL: a document is found by its stored URL, within
+// its tenant only; any other URL is ErrNotFound.
+func TestDocuments_GetByURL(t *testing.T) {
+	ctx := context.Background()
+	docs := NewDocuments(newTestDB(t))
+	d := &store.Document{TenantID: "local", URL: "https://example.com/x"}
+	require.NoError(t, docs.Create(ctx, d))
+
+	got, err := docs.GetByURL(ctx, "local", "https://example.com/x")
+	require.NoError(t, err)
+	assert.Equal(t, d.ID, got.ID)
+
+	_, err = docs.GetByURL(ctx, "other", "https://example.com/x")
+	require.ErrorIs(t, err, store.ErrNotFound, "another tenant's document")
+	_, err = docs.GetByURL(ctx, "local", "https://example.com/y")
+	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
 func TestDocuments_Create_Rejects(t *testing.T) {
 	ctx := context.Background()
 	docs := NewDocuments(newTestDB(t))

@@ -91,6 +91,14 @@ func (s *Documents) GetByID(ctx context.Context, id string) (*store.Document, er
 	return s.queryOne(ctx, "id = ?", id)
 }
 
+// getByURLWhere is GetByURL's predicate, pinned in plans_test to the
+// UNIQUE (tenant_id, url) index.
+const getByURLWhere = "tenant_id = ? AND url = ?"
+
+func (s *Documents) GetByURL(ctx context.Context, tenantID, url string) (*store.Document, error) {
+	return s.queryOne(ctx, getByURLWhere, tenantID, url)
+}
+
 // documentColumns is the column list scanDocument expects, in order.
 const documentColumns = `id, tenant_id, url, url_canonical, content_type, title, author,
 	published_at, language, word_count, current_extraction_id, state,

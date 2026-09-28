@@ -362,7 +362,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	}
 
 	native := newNativeFetcher(cfg)
-	dispatcher, ytdlp, err := newDispatcher(cfg, home, native)
+	dispatcher, routed, err := newDispatcher(cfg, home, native)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +423,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 			Gate:            gate,
 			Drift:           driftMonitor,
 			KeepAwake:       keeper,
-			YouTubeFetcher:  ytdlp,
+			YouTubeFetcher:  routed.ytdlp,
+			GitHubToken:     routed.githubToken,
 			Log:             slog.Default(),
 		},
 		pools:  pools,
@@ -476,10 +477,18 @@ func newNativeFetcher(cfg config.Config) *fetcher.Native {
 	})
 }
 
+// routes is what healthz reports about how the dispatcher routes pages.
+type routes struct {
+	// ytdlp is the yt-dlp YouTube videos go to, as LookPath found it, or
+	// empty when they go to the default fetcher.
+	ytdlp string
+	// githubToken: the GitHub fetcher sends a token.
+	githubToken bool
+}
+
 // newDispatcher builds the fetcher registry and routing rules around
-// nativeFetcher. ytdlp is the yt-dlp YouTube videos go to, as LookPath
-// found it, or empty when they go to the default fetcher.
-func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetcher.Native) (fetcher.Dispatcher, string, error) {
+// nativeFetcher, and says how it routes.
+func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetcher.Native) (fetcher.Dispatcher, routes, error) {
 	var defaultFetcher fetcher.Fetcher
 	switch cfg.Fetcher.Default {
 	case "native":
@@ -491,11 +500,11 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 			Timeout: time.Duration(cfg.Fetcher.Web2MD.TimeoutSeconds) * time.Second,
 		})
 		if err != nil {
-			return nil, "", err
+			return nil, routes{}, err
 		}
 		defaultFetcher = w2m
 	default:
-		return nil, "", fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
+		return nil, routes{}, fmt.Errorf("unknown fetcher.default %q", cfg.Fetcher.Default)
 	}
 	// Content-type-specific fetchers, routed by hostname. The built-in
 	// rules below are the defaults; a user-provided fetcher_rules.yaml
@@ -543,7 +552,7 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 		DefaultRules: rules,
 		Fallback:     defaultFetcher,
 		Log:          slog.Default(),
-	}), ytdlp, nil
+	}), routes{ytdlp: ytdlp, githubToken: ghFetcher.HasToken()}, nil
 }
 
 // newInsightEngine builds the insight layer: cluster documents into labeled

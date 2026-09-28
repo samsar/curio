@@ -383,7 +383,33 @@ func TestRefetch(t *testing.T) {
 	assert.Contains(t, out, "refetch enqueued for all documents: 2 jobs")
 
 	_, err = runCLI(t, srv, "refetch")
-	require.ErrorContains(t, err, "provide a document ID or pass --all")
+	require.ErrorContains(t, err, "provide a document ID or URL, or pass --all")
+}
+
+// TestDocumentByURL: refetch, reindex, docs show and related take the URL
+// a document was bookmarked under, as typed or pasted, in place of its
+// ID; a URL with no document says so and how to add it.
+func TestDocumentByURL(t *testing.T) {
+	srv := apitest.Start(t)
+	failed := srv.AddDocument(t, "https://example.com/failed", store.DocStateFailed)
+	fetched := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	srv.AddContent(t, fetched, "content")
+
+	out := mustRun(t, srv, "refetch", "https://EXAMPLE.com/failed#top")
+	assert.Contains(t, out, "refetch enqueued for document "+failed.ID)
+	assert.Equal(t, 1, count(t, srv, `SELECT count(*) FROM jobs WHERE json_extract(payload, '$.document_id') = ?`, failed.ID))
+
+	out = mustRun(t, srv, "reindex", "https://example.com/a?utm_source=x")
+	assert.Contains(t, out, "reindex enqueued for document "+fetched.ID)
+
+	out = mustRun(t, srv, "docs", "show", "https://example.com/a")
+	assert.Contains(t, out, "id:           "+fetched.ID)
+
+	_, err := runCLI(t, srv, "refetch", "https://example.com/unknown")
+	require.EqualError(t, err, "no document for https://example.com/unknown in the library "+
+		"(curio add https://example.com/unknown saves it)")
+	_, err = runCLI(t, srv, "related", "https://example.com/unknown")
+	require.ErrorContains(t, err, "no document for https://example.com/unknown")
 }
 
 func TestReindex(t *testing.T) {
@@ -402,7 +428,7 @@ func TestReindex(t *testing.T) {
 	assert.Contains(t, out, "documents in state=pending: 0 jobs")
 
 	_, err := runCLI(t, srv, "reindex")
-	require.ErrorContains(t, err, "provide a document ID or pass --all")
+	require.ErrorContains(t, err, "provide a document ID or URL, or pass --all")
 }
 
 // indexKafka seeds three fetched documents, two about kafka.
@@ -549,7 +575,11 @@ func TestDoctor_DaemonStarting(t *testing.T) {
 	assert.Equal(t, "wait for it; `curio daemon logs -f` follows it", hint)
 	line, _ = doctorLine(t, out, "embeddings")
 	assert.Equal(t, fmt.Sprintf("! %-22s not checked while the daemon starts", "embeddings"), line)
-	assert.Contains(t, out, "0 failure(s), 2 warning(s)")
+	// A starting daemon doesn't say yet whether it sends a GitHub token, so
+	// config.yaml, which names none here, decides.
+	line, _ = doctorLine(t, out, "github")
+	assert.Equal(t, "!", markerOf(line), line)
+	assert.Contains(t, out, "0 failure(s), 3 warning(s)")
 }
 
 // TestDoctor: with everything up, every check passes: the ones doctor
@@ -559,12 +589,28 @@ func TestDoctor(t *testing.T) {
 	out, err := w.run(t, "doctor")
 	require.NoError(t, err, out)
 	for _, name := range []string{"machine", "curio home", "config", "ollama", "models", "daemon", "launchd",
-		"embeddings", "fetcher", "content dir"} {
+		"embeddings", "github", "fetcher", "content dir"} {
 		line, _ := doctorLine(t, out, name)
 		assert.Equal(t, "✓", markerOf(line), line)
 	}
 	assert.Contains(t, out, "all checks passed")
 	assert.NotContains(t, out, "jina", "a daemon that reports no upstreams gets no upstream check")
+}
+
+// TestDoctor_NoGitHubToken: a daemon whose GitHub fetcher sends no token
+// is a warning that says what it costs and that any token will do, even
+// one with no access, and where to put it.
+func TestDoctor_NoGitHubToken(t *testing.T) {
+	w := upWorld(t, func(d *api.Deps) { d.GitHubToken = false })
+	out, err := w.run(t, "doctor")
+	require.NoError(t, err, out)
+	line, hint := doctorLine(t, out, "github")
+	assert.Equal(t, "!", markerOf(line), line)
+	assert.Contains(t, line, "no token: GitHub allows 60 API requests an hour")
+	assert.Contains(t, hint, "even one that can access nothing")
+	assert.Contains(t, hint, "a classic token with no scopes ticked")
+	assert.Contains(t, hint, "Set fetcher.github.token in "+filepath.Join(w.home, "config.yaml"))
+	assert.Contains(t, out, "0 failure(s), 1 warning(s)")
 }
 
 // TestDoctorAndStatus_EmbeddingDrift: while the daemon reports the build

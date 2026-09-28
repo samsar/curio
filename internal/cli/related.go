@@ -13,7 +13,7 @@ import (
 func newRelatedCmd(env *daemonctl.Env) *cobra.Command {
 	var k int
 	cmd := &cobra.Command{
-		Use:   "related <document-id>",
+		Use:   "related <document-id | url>",
 		Short: "Find documents related to one by embedding similarity",
 		Long: "Find documents related to the given one, ranked by vector similarity\n" +
 			"over its indexed content (no query text involved). Returns nothing for\n" +
@@ -24,7 +24,11 @@ func newRelatedCmd(env *daemonctl.Env) *cobra.Command {
 				return err
 			}
 
-			res, err := env.Client.RelatedDocuments(cmd.Context(), args[0], k)
+			id, err := resolveDocumentID(cmd.Context(), env.Client, args[0])
+			if err != nil {
+				return err
+			}
+			res, err := env.Client.RelatedDocuments(cmd.Context(), id, k)
 			if err != nil {
 				return err
 			}

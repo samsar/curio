@@ -86,7 +86,10 @@ func upWorldFrom(t *testing.T, start func(testing.TB, ...func(*api.Deps)) *apite
 	opts ...func(*api.Deps)) *world {
 	t.Helper()
 	w := newWorld(t, embedModel, genModel)
-	srv := start(t, append([]func(*api.Deps){func(d *api.Deps) { d.GenerationModel = genModel }}, opts...)...)
+	srv := start(t, append([]func(*api.Deps){func(d *api.Deps) {
+		d.GenerationModel = genModel
+		d.GitHubToken = true
+	}}, opts...)...)
 	w.srv, w.home, w.daemonURL = srv, srv.Home.Path, srv.URL
 	writeConfig(t, srv.Home, w.ollama.URL, genModel)
 	holdLockAsDaemon(t, srv.Home)
