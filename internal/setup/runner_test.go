@@ -30,7 +30,8 @@ func TestUp_FirstRun(t *testing.T) {
 
 	plan, out, err := h.up(ui, setup.Options{})
 	require.NoError(t, err, "%v", ui.Events())
-	assert.Equal(t, []string{"models", "home", "daemon"}, stepsOf(plan.Fixes()))
+	assert.Equal(t, []string{"models", "home", "daemon", "import"}, stepsOf(plan.Fixes()),
+		"a new home's library is empty; the fake daemon then reports one with bookmarks")
 	assert.True(t, out.Changed)
 	assert.Equal(t, []string{embedModel, genModel}, h.ollama.Pulls())
 	require.Len(t, ui.Reports(), 2)
@@ -127,7 +128,7 @@ func TestUp_DryRun(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, out.DryRun)
 	assert.False(t, out.Changed)
-	assert.Equal(t, []string{"models", "home", "daemon"}, stepsOf(plan.Fixes()))
+	assert.Equal(t, []string{"models", "home", "daemon", "import"}, stepsOf(plan.Fixes()))
 	assert.Contains(t, item(t, plan, "home").Fix.Summary, embedModel+", 1024 dimensions")
 	assert.NoDirExists(t, h.home)
 	assert.Empty(t, h.ollama.Pulls())

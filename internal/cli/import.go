@@ -215,6 +215,10 @@ func importParsed(ctx context.Context, w io.Writer, c *client.Client, source str
 	return nil
 }
 
+// followEvery is how often followProgress reads the queue; tests shorten
+// it.
+var followEvery = 2 * time.Second
+
 // followProgress polls /v1/stats every 2 seconds and prints a one-line
 // progress update until the queue is drained (zero pending + zero running).
 // Each line also says when the queue is closed, and why, from /v1/queue;
@@ -223,7 +227,7 @@ func importParsed(ctx context.Context, w io.Writer, c *client.Client, source str
 // import itself has finished.
 func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 	fmt.Fprintln(w, "\nwatching queue drain — ctrl-c to exit")
-	tick := time.NewTicker(2 * time.Second)
+	tick := time.NewTicker(followEvery)
 	defer tick.Stop()
 
 	startedAt := time.Now()

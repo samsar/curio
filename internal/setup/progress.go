@@ -21,6 +21,7 @@ const redrawInterval = 100 * time.Millisecond
 type progressLine struct {
 	out    io.Writer
 	title  string
+	unit   Unit
 	redraw bool
 	now    func() time.Time
 
@@ -31,8 +32,8 @@ type progressLine struct {
 	done             bool
 }
 
-func newProgress(out io.Writer, title string, redraw bool, now func() time.Time) *progressLine {
-	return &progressLine{out: out, title: title, redraw: redraw, now: now}
+func newProgress(out io.Writer, title string, unit Unit, redraw bool, now func() time.Time) *progressLine {
+	return &progressLine{out: out, title: title, unit: unit, redraw: redraw, now: now}
 }
 
 func (p *progressLine) Update(completed, total int64) {
@@ -86,7 +87,7 @@ func (p *progressLine) Stop() {
 }
 
 // line is the progress as one line: "pulling gemma4:26b: 40% (7.6 GB of
-// 19 GB)".
+// 19 GB)", or counting items "importing Safari: 40% (500 of 1200)".
 func (p *progressLine) line() string {
 	pct := percent(p.completed, p.total)
 	if p.total == 0 {
@@ -97,9 +98,19 @@ func (p *progressLine) line() string {
 	}
 	s := fmt.Sprintf("%s: %d%%", p.title, pct)
 	if p.total > 0 {
-		s += fmt.Sprintf(" (%s of %s)", FormatSize(byteCount(p.completed)), FormatSize(byteCount(p.total)))
+		s += fmt.Sprintf(" (%s of %s)", p.amount(p.completed), p.amount(p.total))
 	}
 	return s
+}
+
+// amount is n in the progress's unit.
+func (p *progressLine) amount(n int64) string {
+	switch p.unit {
+	case Items:
+		return strconv.FormatInt(n, 10)
+	case Bytes:
+	}
+	return FormatSize(byteCount(n))
 }
 
 // byteCount is n bytes as a size, a negative count as none.

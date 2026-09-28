@@ -21,16 +21,18 @@ import (
 	"github.com/samsar/curio/internal/setup/setuptest"
 )
 
-// TestUp_NothingToDo: with everything up, curio up changes nothing, says
-// so, and shows the status.
+// TestUp_NothingToDo: with everything up, a library with bookmarks
+// included, curio up changes nothing, says so, and shows the status.
 func TestUp_NothingToDo(t *testing.T) {
 	w := upWorld(t)
+	_, err := w.run(t, "add", "https://example.com/a")
+	require.NoError(t, err)
 	code, stdout, stderr := w.exit(t, "up")
 	assert.Equal(t, 0, code, stderr)
 	assert.Equal(t, "Nothing to do: curio is up.\n"+
 		fmt.Sprintf("daemon:   running (pid %d), kept running by its launchd agent\n", os.Getpid())+
 		"ollama:   0.34.4; qwen3-embedding:0.6b present, gemma4:26b present\n"+
-		"library:  0 documents\n"+
+		"library:  1 document\n"+
 		"queue:    open\n", stdout)
 	assert.Empty(t, stderr)
 	assert.Zero(t, w.agent.Count("Install"))
@@ -49,6 +51,7 @@ func TestUp_DaemonStarting(t *testing.T) {
 		"daemon:   unavailable: starting: initializing\n",
 		"library:  unavailable: curio-daemon is starting: initializing\n",
 		"queue:    unavailable: curio-daemon is starting: initializing\n",
+		"warning: import: not checked: the daemon is starting; checked again once the daemon serves\n",
 	} {
 		assert.Contains(t, stdout, want)
 	}
@@ -174,8 +177,8 @@ func TestUp_Help(t *testing.T) {
 			flags = append(flags, f[0])
 		}
 	}
-	assert.ElementsMatch(t, []string{"--dry-run", "--embedding-model", "--fresh", "--generation-model", "--no-install",
-		"--yes", "--curio-home", "--daemon-url"}, flags)
+	assert.ElementsMatch(t, []string{"--dry-run", "--embedding-model", "--fresh", "--generation-model", "--import",
+		"--no-install", "--yes", "--curio-home", "--daemon-url"}, flags)
 	assert.Contains(t, out, "deleting nothing")
 	assert.Contains(t, out, "never uses sudo")
 }
@@ -296,7 +299,7 @@ func TestDoctorAgreesWithUp(t *testing.T) {
 			out, _ := w.run(t, "doctor")
 			r, err := setup.New(setup.Options{Home: w.home, DaemonURL: w.daemonURL}, setup.Deps{
 				UI: setuptest.NewUI(t).NonInteractive(), Probe: w.deps.probe, Installer: w.deps.installer,
-				Connect: w.deps.connect, Defaults: w.deps.defaults,
+				Connect: w.deps.connect, Defaults: w.deps.defaults, Sources: w.deps.sources,
 			})
 			require.NoError(t, err)
 			actionable := false

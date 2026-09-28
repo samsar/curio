@@ -75,6 +75,7 @@ func testDeps(t *testing.T) deps {
 		installer: setuptest.NewInstaller(),
 		defaults:  &defaults,
 		newUI:     setup.NewUI,
+		sources:   setuptest.NoSources,
 		geteuid:   func() int { return 501 },
 	}
 }

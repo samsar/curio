@@ -21,88 +21,102 @@ import (
 )
 
 func newStatusCmd(env *daemonctl.Env) *cobra.Command {
-	return &cobra.Command{
+	var follow bool
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show daemon status, embedding info, and basic counts",
+		Long: `Show the daemon's status, the embedding model, the library's counts, the
+queue and disk usage. With --follow it then follows the queue, a line
+every 2 seconds, until the queue has drained or ctrl-c.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			w := cmd.OutOrStdout()
-			fmt.Fprintf(w, "cli:     %s\n", version.String())
-
-			health, err := env.Client.Healthz(cmd.Context())
-			if starting := client.StartupOf(err); starting != nil {
-				// Counts and performance come from the full API, which
-				// isn't up yet.
-				fmt.Fprintf(w, "daemon:  starting  (pid %d, version %s): %s\n",
-					starting.PID, starting.Version, starting.Progress())
-				fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
-				fmt.Fprint(w, homeMismatchWarning(starting.Home, env.Home.Path))
-				printDiskUsage(w, env.Home.Path)
+			if answering := printStatus(cmd.Context(), cmd.OutOrStdout(), env); !follow || !answering {
 				return nil
 			}
-			if err != nil {
-				if errors.Is(err, client.ErrDaemonUnreachable) {
-					fmt.Fprintln(w, "daemon:  not running")
-				} else {
-					fmt.Fprintf(w, "daemon:  not answering healthz: %v\n", err)
-				}
-				fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
-				printDiskUsage(w, env.Home.Path)
-				return nil
-			}
-
-			fmt.Fprintf(w, "daemon:  running  (version %s)\n", health.Version)
-			fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
-			if warning := homeMismatchWarning(health.Home, env.Home.Path); warning != "" {
-				fmt.Fprint(w, warning)
-			}
-			fmt.Fprintf(w, "schema:  v%d\n", health.SchemaVersion)
-			fmt.Fprintf(w, "embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
-			if d := health.EmbeddingDrift; d != nil {
-				fmt.Fprintf(w, "warning: embeddings drifted since the library was indexed (%s); run `%s`\n",
-					setup.DriftChanges(d), d.Fix)
-			}
-			for _, u := range health.Upstreams {
-				fmt.Fprint(w, failingWarning(u))
-			}
-
-			sctx, scancel := context.WithTimeout(cmd.Context(), 1*time.Second)
-			defer scancel()
-			stats, err := env.Client.Stats(sctx)
-			if err != nil {
-				fmt.Fprintf(w, "\ncounts:    unavailable: %v\n", err)
-			} else {
-				fmt.Fprintf(w, "\nbookmarks: %d\n", stats.BookmarksTotal)
-				fmt.Fprintf(w, "documents: %d\n", stats.DocumentsTotal)
-				if len(stats.DocumentsByState) > 0 {
-					fmt.Fprintf(w, "           %s\n", formatMap(stats.DocumentsByState))
-				}
-				if len(stats.JobsByStatus) > 0 {
-					fmt.Fprintf(w, "jobs:      %s\n", formatMap(stats.JobsByStatus))
-				}
-			}
-			printQueue(cmd.Context(), w, env.Client)
-
-			printDiskUsage(w, env.Home.Path)
-
-			mctx, mcancel := context.WithTimeout(cmd.Context(), 2*time.Second)
-			defer mcancel()
-			m, err := env.Client.Metrics(mctx, 0)
-			if err != nil {
-				fmt.Fprintf(w, "\nperformance: unavailable: %v\n", err)
-			} else if len(m.ByKind) > 0 {
-				fmt.Fprintf(w, "\nperformance (last %ds):\n", m.WindowSeconds)
-				for _, k := range m.ByKind {
-					fmt.Fprintf(w, "  %-9s  done=%-5d  fail=%-4d  mean=%5.0fms  p50=%5.0fms  p95=%5.0fms  p99=%5.0fms",
-						k.Kind, k.Count, k.Failed, k.MeanMS, k.P50MS, k.P95MS, k.P99MS)
-					if k.Running > 0 {
-						fmt.Fprintf(w, "  running=%d (oldest %ds)", k.Running, k.OldestRunningSeconds)
-					}
-					fmt.Fprintln(w)
-				}
-			}
-			return nil
+			return followProgress(cmd.Context(), cmd.OutOrStdout(), env.Client)
 		},
 	}
+	cmd.Flags().BoolVar(&follow, "follow", false, "then follow the queue until it drains (ctrl-c stops following)")
+	return cmd
+}
+
+// printStatus prints the status, and reports whether a daemon answered,
+// ready or starting: what --follow then follows.
+func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answering bool) {
+	fmt.Fprintf(w, "cli:     %s\n", version.String())
+
+	health, err := env.Client.Healthz(ctx)
+	if starting := client.StartupOf(err); starting != nil {
+		// Counts and performance come from the full API, which
+		// isn't up yet.
+		fmt.Fprintf(w, "daemon:  starting  (pid %d, version %s): %s\n",
+			starting.PID, starting.Version, starting.Progress())
+		fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
+		fmt.Fprint(w, homeMismatchWarning(starting.Home, env.Home.Path))
+		printDiskUsage(w, env.Home.Path)
+		return true
+	}
+	if err != nil {
+		if errors.Is(err, client.ErrDaemonUnreachable) {
+			fmt.Fprintln(w, "daemon:  not running")
+		} else {
+			fmt.Fprintf(w, "daemon:  not answering healthz: %v\n", err)
+		}
+		fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
+		printDiskUsage(w, env.Home.Path)
+		return false
+	}
+
+	fmt.Fprintf(w, "daemon:  running  (version %s)\n", health.Version)
+	fmt.Fprintf(w, "home:    %s\n", env.Home.Path)
+	if warning := homeMismatchWarning(health.Home, env.Home.Path); warning != "" {
+		fmt.Fprint(w, warning)
+	}
+	fmt.Fprintf(w, "schema:  v%d\n", health.SchemaVersion)
+	fmt.Fprintf(w, "embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
+	if d := health.EmbeddingDrift; d != nil {
+		fmt.Fprintf(w, "warning: embeddings drifted since the library was indexed (%s); run `%s`\n",
+			setup.DriftChanges(d), d.Fix)
+	}
+	for _, u := range health.Upstreams {
+		fmt.Fprint(w, failingWarning(u))
+	}
+
+	sctx, scancel := context.WithTimeout(ctx, 1*time.Second)
+	defer scancel()
+	stats, err := env.Client.Stats(sctx)
+	if err != nil {
+		fmt.Fprintf(w, "\ncounts:    unavailable: %v\n", err)
+	} else {
+		fmt.Fprintf(w, "\nbookmarks: %d\n", stats.BookmarksTotal)
+		fmt.Fprintf(w, "documents: %d\n", stats.DocumentsTotal)
+		if len(stats.DocumentsByState) > 0 {
+			fmt.Fprintf(w, "           %s\n", formatMap(stats.DocumentsByState))
+		}
+		if len(stats.JobsByStatus) > 0 {
+			fmt.Fprintf(w, "jobs:      %s\n", formatMap(stats.JobsByStatus))
+		}
+	}
+	printQueue(ctx, w, env.Client)
+
+	printDiskUsage(w, env.Home.Path)
+
+	mctx, mcancel := context.WithTimeout(ctx, 2*time.Second)
+	defer mcancel()
+	m, err := env.Client.Metrics(mctx, 0)
+	if err != nil {
+		fmt.Fprintf(w, "\nperformance: unavailable: %v\n", err)
+	} else if len(m.ByKind) > 0 {
+		fmt.Fprintf(w, "\nperformance (last %ds):\n", m.WindowSeconds)
+		for _, k := range m.ByKind {
+			fmt.Fprintf(w, "  %-9s  done=%-5d  fail=%-4d  mean=%5.0fms  p50=%5.0fms  p95=%5.0fms  p99=%5.0fms",
+				k.Kind, k.Count, k.Failed, k.MeanMS, k.P50MS, k.P95MS, k.P99MS)
+			if k.Running > 0 {
+				fmt.Fprintf(w, "  running=%d (oldest %ds)", k.Running, k.OldestRunningSeconds)
+			}
+			fmt.Fprintln(w)
+		}
+	}
+	return true
 }
 
 // formatMap renders a map[string]int as "key=val  key=val" sorted by key.

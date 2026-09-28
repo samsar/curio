@@ -40,7 +40,9 @@ func (plainUI) Select(context.Context, string, []string, int) (int, error) {
 }
 func (plainUI) Input(context.Context, string, string) (string, error) { return "", errNoTerminal }
 
-func (u plainUI) Progress(title string) Progress { return newProgress(u.out, title, false, time.Now) }
+func (u plainUI) Progress(title string, unit Unit) Progress {
+	return newProgress(u.out, title, unit, false, time.Now)
+}
 
 // lineUI is the accessible UI: a prompt is a line, the answer a line of
 // input, and nothing is redrawn. The end of input, or a context cancelled
@@ -67,7 +69,9 @@ func newLineUI(in io.Reader, out io.Writer) *lineUI {
 
 func (*lineUI) Interactive() bool { return true }
 
-func (u *lineUI) Progress(title string) Progress { return newProgress(u.out, title, false, time.Now) }
+func (u *lineUI) Progress(title string, unit Unit) Progress {
+	return newProgress(u.out, title, unit, false, time.Now)
+}
 
 // read waits for the next line of input. The input is read only while a
 // prompt waits for a line: between prompts, curio runs commands (brew,

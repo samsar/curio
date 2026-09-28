@@ -75,6 +75,7 @@ func newUpMachine(t *testing.T) *upMachine {
 			return env, err
 		},
 		Defaults: &defaults,
+		Sources:  setuptest.NoSources,
 	}
 	return m
 }

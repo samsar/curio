@@ -278,7 +278,7 @@ func pull(ctx context.Context, ui UI, m wanted) error {
 	}
 	type layer struct{ completed, total int64 }
 	layers := map[string]layer{}
-	bar := ui.Progress("pulling " + m.Name)
+	bar := ui.Progress("pulling "+m.Name, Bytes)
 	err = c.Pull(ctx, func(p ollama.PullProgress) {
 		if p.Digest == "" || p.Total <= 0 {
 			return

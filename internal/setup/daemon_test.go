@@ -93,7 +93,7 @@ func TestUp_DaemonNoGUISession(t *testing.T) {
 	assert.Nil(t, plan, "nothing to do")
 	var warned bool
 	for _, w := range out.Status.Warnings {
-		warned = warned || strings.Contains(w, "there is no GUI login session")
+		warned = warned || strings.Contains(w.Text, "there is no GUI login session")
 	}
 	assert.True(t, warned, "%v", out.Status.Warnings)
 }

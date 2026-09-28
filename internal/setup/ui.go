@@ -30,14 +30,25 @@ type UI interface {
 	Select(ctx context.Context, prompt string, options []string, def int) (int, error)
 	// Input asks for a line of text, def by default.
 	Input(ctx context.Context, prompt, def string) (string, error)
-	// Progress starts reporting the progress of one piece of work.
-	Progress(title string) Progress
+	// Progress starts reporting the progress of one piece of work,
+	// counted in unit.
+	Progress(title string, unit Unit) Progress
 	// Info and Warn say one line.
 	Info(msg string)
 	Warn(msg string)
 	// Output is where the commands curio runs write, live.
 	Output() io.Writer
 }
+
+// Unit is what a Progress counts.
+type Unit int
+
+const (
+	// Bytes: a download, shown as sizes, "7.6 GB of 19 GB".
+	Bytes Unit = iota
+	// Items: things, shown as numbers, "500 of 1200".
+	Items
+)
 
 // Progress reports how far one piece of work is.
 type Progress interface {

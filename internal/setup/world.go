@@ -15,6 +15,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/importer"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/version"
 )
@@ -37,6 +38,10 @@ type Options struct {
 	// EmbeddingModel and GenerationModel override the models curio would
 	// pick.
 	EmbeddingModel, GenerationModel string
+	// Import is --import, the source to import from without a menu: chrome
+	// (the Default profile), chrome:<profile>, safari, firefox or
+	// html:<path>.
+	Import string
 }
 
 // Deps are what the steps work through. The CLI builds the real ones;
@@ -57,8 +62,12 @@ type Deps struct {
 	// Version is this curio's, which the daemon must run; empty means
 	// version.String().
 	Version string
-	// Now is the clock the --fresh backup's name is taken from; nil means
-	// time.Now.
+	// Sources finds the bookmarks the import step offers; nil means
+	// importer.Discover. Tests pass their own, so no test reads the
+	// browsers of the machine it runs on.
+	Sources func() []importer.Source
+	// Now is the clock the --fresh backup's name, the import's estimates
+	// and their measurement are taken from; nil means time.Now.
 	Now func() time.Time
 	// Timeouts bound the probes and waits; zero fields take the defaults.
 	Timeouts Timeouts
@@ -123,10 +132,16 @@ type world struct {
 	chosen *Model
 	// pickConfirmed: the user agreed to the models curio picked.
 	pickConfirmed bool
+	// imp is what the import step found and decided.
+	imp importState
 }
 
 func newWorld(opts Options, deps Deps) (*world, error) {
 	path, err := daemonctl.HomePath(opts.Home)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := parseImportSpec(opts.Import)
 	if err != nil {
 		return nil, err
 	}
@@ -144,6 +159,10 @@ func newWorld(opts Options, deps Deps) (*world, error) {
 	if w.deps.Now == nil {
 		w.deps.Now = time.Now
 	}
+	if w.deps.Sources == nil {
+		w.deps.Sources = importer.Discover
+	}
+	w.imp = newImportState(spec)
 	return w, nil
 }
 

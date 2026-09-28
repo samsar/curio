@@ -33,10 +33,10 @@ func New(opts Options, deps Deps) (*Runner, error) {
 // steps is `curio up`, in the order of its design: the machine first,
 // before anything is installed; Ollama, which the models need; the
 // models, which a new home measures its width with; the home and its
-// config.yaml, which the daemon needs; the daemon. The import step goes
-// after the daemon.
+// config.yaml, which the daemon needs; the daemon; and the import, which
+// the daemon takes.
 func steps(w *world) []Step {
-	return []Step{&machineStep{w}, &ollamaStep{w: w}, &modelsStep{w}, &homeStep{w}, &daemonStep{w}}
+	return []Step{&machineStep{w}, &ollamaStep{w: w}, &modelsStep{w}, &homeStep{w}, &daemonStep{w}, &importStep{w}}
 }
 
 // Steps are the steps, in the order they run.
@@ -77,6 +77,8 @@ type Outcome struct {
 	Changed bool
 	// Status is curio's state at the end, for a run that got there.
 	Status Snapshot
+	// Imported is the import the run started; nil when it started none.
+	Imported *ImportReport
 }
 
 // Run plans, and applies the plan. With nothing to do it changes nothing
@@ -120,6 +122,7 @@ func (r *Runner) Run(ctx context.Context, show func(Plan)) (Outcome, error) {
 		out.Changed = out.Changed || applied
 	}
 	out.Status = r.w.snapshot(ctx, final)
+	out.Imported = r.w.imp.report
 	return out, nil
 }
 
