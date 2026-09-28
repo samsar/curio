@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -238,18 +237,11 @@ func (c *Controller) signalHolder(ctx context.Context, pid int) error {
 }
 
 // SameHome reports whether two CURIO_HOME paths name the same directory,
-// resolving symlinks (on macOS /tmp is /private/tmp).
+// resolving symlinks (on macOS /tmp is /private/tmp). A path that doesn't
+// exist here (a home on another machine's filesystem) is compared as
+// written.
 func SameHome(a, b string) bool {
-	return canonicalPath(a) == canonicalPath(b)
-}
-
-// canonicalPath resolves symlinks where it can. A path that doesn't exist
-// here (a home on another machine's filesystem) is compared as written.
-func canonicalPath(p string) string {
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return resolved
-	}
-	return filepath.Clean(p)
+	return curiohome.CanonicalPath(a) == curiohome.CanonicalPath(b)
 }
 
 // answer is what healthz at BaseURL said: a daemon serving the full API
