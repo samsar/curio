@@ -429,6 +429,19 @@ func TestUI_DocumentRemoteImagesOn(t *testing.T) {
 	getPage(t, srv, "/ui/", http.StatusOK)
 }
 
+// TestUI_DocumentUnformatted: a stored text too costly to format, here a
+// line opening a thousand blockquotes, is shown as it is stored, escaped.
+func TestUI_DocumentUnformatted(t *testing.T) {
+	srv := apitest.Start(t)
+	doc := srv.AddDocument(t, "https://site.example/deep", store.DocStateFetched)
+	srv.AddContent(t, doc, strings.Repeat(">", 1000)+" <script>alert(1)</script> ![x](https://img.example/x.png)\n")
+	body := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	assert.Contains(t, body, "Shown as stored, unformatted: a line opens too many blockquotes and lists to format quickly.")
+	assert.Contains(t, body, strings.Repeat("&gt;", 1000)+" &lt;script&gt;alert(1)&lt;/script&gt; ![x](https://img.example/x.png)\n</pre>")
+	assert.NotContains(t, body, "<blockquote>")
+	assert.NotContains(t, body, "Load images", "nothing to load")
+}
+
 // TestUI_DocumentStates: a document without text, one whose text is gone
 // from disk, and a failed one with its last error.
 func TestUI_DocumentStates(t *testing.T) {

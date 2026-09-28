@@ -28,7 +28,9 @@
 {{else}}
 {{if .OfferImages}}<p class="banner"><a href="{{documentImagesHref $.Meta.ID}}">Load images</a>: {{.Text.RemoteImages}} from other sites, which learn that you read this when they load.</p>{{end}}
 {{if .Truncated}}<p class="banner warn">This is the start of the text; all of it is in <code>{{.MarkdownPath}}</code>.</p>{{end}}
-{{.Text.HTML}}
+{{if .Text.Unformatted}}<p class="banner warn">Shown as stored, unformatted: {{.Text.Unformatted}} to format quickly.</p>
+<pre class="source">{{.Text.Source}}</pre>
+{{else}}{{.Text.HTML}}{{end}}
 {{end}}
 {{end}}{{end}}
 </article>

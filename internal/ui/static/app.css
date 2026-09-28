@@ -197,6 +197,7 @@ a.more { display: inline-block; margin: 1rem 0; }
 article.text { min-width: 0; line-height: 1.6; }
 article.text img { max-width: 100%; height: auto; }
 article.text pre { overflow-x: auto; background: var(--panel); padding: 0.75rem; border-radius: 6px; }
+article.text pre.source { white-space: pre-wrap; overflow-wrap: anywhere; }
 article.text table { display: block; overflow-x: auto; }
 
 .tag {

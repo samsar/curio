@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,8 @@ func TestMarkdown_Hostile(t *testing.T) {
 }
 
 // TestMarkdown_Links: every link points at the original site or another
-// http(s) or mailto URL, and opens without a Referer.
+// http(s) or mailto URL, and opens without a Referer, whether images are
+// shown or not.
 func TestMarkdown_Links(t *testing.T) {
 	cases := []struct {
 		src, href string
@@ -72,25 +74,51 @@ func TestMarkdown_Links(t *testing.T) {
 		{"[proto-relative](//cdn.example/x)", "https://cdn.example/x"},
 		{"[mail](mailto:someone@example.com)", "mailto:someone@example.com"},
 		{"<https://auto.example/x>", "https://auto.example/x"},
+		{"see www.bare.example/x", "http://www.bare.example/x"},
+		{"<someone@example.com>", "mailto:someone@example.com"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.src, func(t *testing.T) {
-			out := string(renderMD(t, tc.src, false).HTML)
+	for _, images := range []bool{false, true} {
+		for _, tc := range cases {
+			out := string(renderMD(t, tc.src, images).HTML)
 			uitest.AssertInert(t, out)
-			assert.Contains(t, out, `href="`+tc.href+`"`)
-		})
-	}
-	out := string(renderMD(t, "[a link](https://elsewhere.example/)", false).HTML)
-	assert.Contains(t, out, `rel="nofollow noreferrer noopener"`)
-	assert.Contains(t, out, `target="_blank"`)
+			assert.Contains(t, out, `href="`+tc.href+`"`, "%s (images %v)", tc.src, images)
+		}
+		out := string(renderMD(t, "[a link](https://elsewhere.example/)", images).HTML)
+		assert.Contains(t, out, `rel="nofollow noreferrer noopener"`)
+		assert.Contains(t, out, `target="_blank"`)
 
-	// A link that can't be kept is its text.
-	for _, src := range []string{"[kept text](javascript:alert(1))", "[kept text](&#106;avascript:alert(1))",
-		"[kept text](ftp://files.example/x)", "[kept text](%zz)"} {
-		out := string(renderMD(t, src, false).HTML)
-		assert.Contains(t, out, "kept text", src)
-		assert.NotContains(t, out, "<a", src)
+		// A link that can't be kept is its text. An http URL without a
+		// host would resolve against the page, the daemon: http:/ui/ is
+		// http://127.0.0.1:8765/ui/ there.
+		for _, src := range []string{"[kept text](javascript:alert(1))", "[kept text](&#106;avascript:alert(1))",
+			"[kept text](ftp://files.example/x)", "[kept text](%zz)", "[kept text](http:/ui/search?q=x)",
+			"[kept text](http:foo)", "[kept text](https:///x)", "[kept text](http://)",
+			"![kept text](http:/v1/stats)", "![kept text](https:x)"} {
+			out := string(renderMD(t, src, images).HTML)
+			uitest.AssertInert(t, out)
+			assert.Contains(t, out, "kept text", "%s (images %v)", src, images)
+			assert.NotContains(t, out, "<a", "%s (images %v)", src, images)
+			assert.NotContains(t, out, "<img", "%s (images %v)", src, images)
+		}
+		// So is an autolink: its URL.
+		for _, url := range []string{"http:/ui/search?q=x", "https:x", "ftp://files.example/x"} {
+			out := string(renderMD(t, "<"+url+">", images).HTML)
+			uitest.AssertInert(t, out)
+			assert.Equal(t, "<p>"+url+"</p>\n", out, "images %v", images)
+		}
 	}
+}
+
+// TestMarkdown_PolicyNeedsAHost: the sanitizer drops an http or https URL
+// without a host too, whatever produced it.
+func TestMarkdown_PolicyNeedsAHost(t *testing.T) {
+	policy := newMarkdown().policy
+	out := policy.Sanitize(`<a href="http:/ui/search">a</a> <a href="https:x">b</a> <img src="http:/v1/stats" alt="c">` +
+		` <a href="https://kept.example/">d</a>`)
+	assert.NotContains(t, out, "/ui/search")
+	assert.NotContains(t, out, "https:x")
+	assert.NotContains(t, out, "/v1/stats")
+	assert.Contains(t, out, `href="https://kept.example/"`)
 }
 
 // TestMarkdown_Images: without images, each image is its alt text linking
@@ -174,4 +202,13 @@ func TestCutMarkdown(t *testing.T) {
 	assert.True(t, cut)
 	assert.LessOrEqual(t, len(got), MaxRenderedMarkdown)
 	assert.Zero(t, len(got)%3)
+	assert.True(t, utf8.Valid(got))
+
+	// A byte that isn't UTF-8 in that line is kept, as the rest of the
+	// text keeps them: the cut still falls just before the cap.
+	runes[MaxRenderedMarkdown*3/4] = 0xff
+	got, cut = CutMarkdown(runes)
+	assert.True(t, cut)
+	assert.Greater(t, len(got), MaxRenderedMarkdown-utf8.UTFMax)
+	assert.True(t, utf8.RuneStart(runes[len(got)]), "cut before a character")
 }
