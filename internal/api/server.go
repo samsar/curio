@@ -60,6 +60,7 @@ type Deps struct {
 	Upstreams      func() []fetcher.UpstreamHealth // the health of the services fetches depend on; nil reports none
 	Gate           *jobs.QueueGate                 // the workers' queue gate, read and changed at /v1/queue
 	Drift          DriftMonitor                    // embedding drift, on healthz, reset by reindex-all; nil tracks none
+	KeepAwake      KeepAwake                       // whether the Mac is held awake, on /v1/queue; nil reports it isn't
 	TenantID       string                          // default store.LocalTenantID
 	Log            *slog.Logger
 }

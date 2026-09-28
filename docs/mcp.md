@@ -3,7 +3,9 @@
 `curio-mcp` exposes your saved-bookmark corpus to MCP clients (Claude Code,
 Claude Desktop, …) over stdio. It's a thin sidecar: it forwards tool calls to
 the curio daemon over the local HTTP API and **auto-starts the daemon** if it
-isn't already running, at startup and again if it stops mid-session.
+isn't already running, at startup and again if it stops mid-session:
+through the home's launchd agent when one is installed and loaded (`curio
+daemon install`), as a child process otherwise.
 
 Build it with the others:
 

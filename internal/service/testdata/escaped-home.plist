@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.github.samsar.curio.daemon.1a2b3c4d</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/x/tools &amp; bits/curio-daemon</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ExitTimeOut</key>
+	<integer>25</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/x/a &amp; b &lt;c&gt;/curio/logs/daemon.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/x/a &amp; b &lt;c&gt;/curio/logs/launchd.err</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>CURIO_HOME</key>
+		<string>/Users/x/a &amp; b &lt;c&gt;/curio</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+</dict>
+</plist>

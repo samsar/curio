@@ -386,6 +386,7 @@ func TestNewPools(t *testing.T) {
 	got := make([]shape, 0, len(pools))
 	for _, p := range pools {
 		got = append(got, shape{p.Name, p.Worker.kinds(), slices.Sorted(maps.Keys(p.Worker.onPermFail)), p.Size})
+		assert.Equal(t, []store.JobKind{p.Kind}, p.Worker.kinds(), "the pool's Kind is what it claims")
 	}
 	assert.Equal(t, []shape{
 		{"fetch", []store.JobKind{store.JobKindFetch}, []store.JobKind{store.JobKindFetch}, 16},

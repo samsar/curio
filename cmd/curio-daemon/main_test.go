@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -951,4 +952,103 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 	require.Len(t, clusters, 1)
 	require.NotNil(t, clusters[0].Label)
 	assert.Equal(t, "Reading List", *clusters[0].Label)
+}
+
+// TestExitCode: the exit status the launchd agent's KeepAlive
+// {SuccessfulExit: false} acts on. A daemon told to stop, or one that
+// finds another serving its home, exits 0, which launchd leaves alone;
+// anything else exits 1, which launchd retries.
+func TestExitCode(t *testing.T) {
+	dir := t.TempDir()
+	badConfig := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(badConfig, []byte("daemon:\n  speed: fast\n"), 0o600))
+	_, configErr := config.Load(badConfig)
+	require.Error(t, configErr)
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer occupied.Close()
+	_, bindErr := (&net.ListenConfig{}).Listen(context.Background(), "tcp", occupied.Addr().String())
+	require.Error(t, bindErr)
+
+	cases := []struct {
+		name      string
+		err       error
+		signalled bool
+		want      int
+	}{
+		{"a clean exit", nil, false, 0},
+		{"stopped by a signal", context.Canceled, true, 0},
+		{"a shutdown that ran over", fmt.Errorf("shut down api: %w", context.DeadlineExceeded), true, 0},
+		{"another daemon serves the home", fmt.Errorf("%w for %s (pid 42)", daemonctl.ErrAlreadyRunning, dir), false, 0},
+		{"cancelled", context.Canceled, false, 0},
+		{"a config it can't load", configErr, false, 1},
+		{"a port it can't bind", fmt.Errorf("listen on %s: %w", occupied.Addr(), bindErr), false, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, exitCode(tc.err, tc.signalled))
+		})
+	}
+}
+
+// TestFinish_Logs: a shutdown that failed is still logged as an error
+// though the daemon exits 0, and a daemon that finds its home served says
+// by whom, once, as a warning.
+func TestFinish_Logs(t *testing.T) {
+	levels := func(logs *recorder) map[string]slog.Level {
+		logs.mu.Lock()
+		defer logs.mu.Unlock()
+		out := map[string]slog.Level{}
+		for _, r := range logs.records {
+			out[r.Message] = r.Level
+		}
+		return out
+	}
+
+	logs := recordLogs(t)
+	code := finish(fmt.Errorf("shut down api: %w", context.DeadlineExceeded), true, errors.New("terminated signal received"))
+	assert.Equal(t, 0, code)
+	assert.Equal(t, map[string]slog.Level{"daemon exited with error": slog.LevelError, "curio-daemon stopped": slog.LevelInfo},
+		levels(logs))
+	assert.Equal(t, "terminated signal received", logs.messages("curio-daemon stopped")[0]["cause"])
+
+	logs = recordLogs(t)
+	code = finish(fmt.Errorf("%w for /Users/x/.curio (pid 42)", daemonctl.ErrAlreadyRunning), false, nil)
+	assert.Equal(t, 0, code)
+	assert.Equal(t, map[string]slog.Level{"another curio-daemon already serves this home; exiting": slog.LevelWarn},
+		levels(logs))
+	assert.Contains(t, fmt.Sprint(logs.messages("another curio-daemon already serves this home; exiting")[0]["err"]),
+		"pid 42")
+
+	logs = recordLogs(t)
+	assert.Equal(t, 0, finish(context.Canceled, true, errors.New("interrupt signal received")))
+	assert.Equal(t, map[string]slog.Level{"curio-daemon stopped": slog.LevelInfo}, levels(logs), "nothing to report")
+}
+
+// TestNewDispatcher_YouTube: whether yt-dlp was found is logged either
+// way; a daemon whose PATH lacks it (a launchd agent's, say) says so.
+func TestNewDispatcher_YouTube(t *testing.T) {
+	home, err := curiohome.Init(t.TempDir(), "qwen3-embedding:0.6b", 1024)
+	require.NoError(t, err)
+	found, err := os.Executable()
+	require.NoError(t, err)
+	cases := []struct {
+		bin, msg string
+	}{
+		{"curio-no-such-yt-dlp", "youtube fetcher disabled: yt-dlp not found"},
+		{found, "youtube fetcher enabled"},
+	}
+	for _, tc := range cases {
+		logs := recordLogs(t)
+		cfg := config.Default()
+		cfg.Fetcher.YouTube.Bin = tc.bin
+		_, err := newDispatcher(cfg, home, newNativeFetcher(cfg))
+		require.NoError(t, err)
+		got := logs.messages(tc.msg)
+		require.Len(t, got, 1, tc.bin)
+		assert.Equal(t, tc.bin, got[0]["bin"])
+		if tc.bin != found {
+			assert.Equal(t, os.Getenv("PATH"), got[0]["path"], "the PATH searched")
+		}
+	}
 }

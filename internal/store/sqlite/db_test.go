@@ -374,6 +374,35 @@ func TestVectorExtension_NEONOnArm64(t *testing.T) {
 			`or set CGO_CFLAGS="-O2 -g -DSQLITE_VEC_ENABLE_NEON"`, flags)
 }
 
+// TestVecBuildFlags: the flags are the "Build flags:" line's words. An
+// answer without that line is an error, which costs the daemon's log line
+// its flags and nothing else: VectorExtension still returns the version.
+func TestVecBuildFlags(t *testing.T) {
+	cases := []struct {
+		name, debug, want string
+		wantErr           bool
+	}{
+		{"neon", "Version: v0.1.6\nDate: 2024-11-20\nCommit: 1234\nBuild flags: neon \n", "neon", false},
+		{"several", "Version: v0.1.6\nBuild flags:  avx  neon\n", "avx neon", false},
+		{"scalar", "Version: v0.1.6\nBuild flags:  \n", "", false},
+		{"last line, no newline", "Version: v0.1.6\nBuild flags: neon", "neon", false},
+		{"no build flags line", "Version: v0.1.6\nDate: 2024-11-20\n", "", true},
+		{"empty", "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := vecBuildFlags(tc.debug)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "lists no build flags")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestChunksVecTableExists(t *testing.T) {
 	db := newTestDB(t)
 

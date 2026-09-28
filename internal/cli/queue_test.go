@@ -12,8 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/keepawake"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -102,6 +104,32 @@ func TestQueueCommands_Refused(t *testing.T) {
 	assert.Equal(t, "normal", string(srv.Deps.Gate.State(time.Now()).Settings.Throttle))
 }
 
+// TestKeepAwakeCommand: keep-awake on and off change the stored setting;
+// anything else is refused before the daemon is asked.
+func TestKeepAwakeCommand(t *testing.T) {
+	srv := apitest.Start(t)
+	gate := srv.Deps.Gate
+
+	line := oneLine(t, mustRun(t, srv, "keep-awake", "on"))
+	assert.Equal(t, "keep-awake: on (the daemon keeps the Mac from idle sleep while jobs are queued "+
+		"and it runs on AC power)", line)
+	assert.True(t, gate.State(time.Now()).Settings.KeepAwake)
+
+	line = oneLine(t, mustRun(t, srv, "keep-awake", "off"))
+	assert.Equal(t, "keep-awake: off", line)
+	assert.False(t, gate.State(time.Now()).Settings.KeepAwake)
+
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	for _, args := range [][]string{{"keep-awake", "maybe"}, {"keep-awake"}, {"keep-awake", "on", "off"}} {
+		_, err := runCLIAt(t, srv.Home.Path, down.URL, args...)
+		require.Error(t, err, args)
+		assert.NotContains(t, err.Error(), "daemon", "refused before the daemon is asked: %v", args)
+	}
+	_, err := runCLIAt(t, srv.Home.Path, down.URL, "keep-awake", "maybe")
+	assert.Contains(t, err.Error(), `invalid argument "maybe"`)
+}
+
 // TestStatus_QueueLoad: status shows each pool's running jobs against its
 // limit, and what waits.
 func TestStatus_QueueLoad(t *testing.T) {
@@ -110,6 +138,77 @@ func TestStatus_QueueLoad(t *testing.T) {
 	out := mustRun(t, srv, "status")
 	assert.Contains(t, out, "queue:     open\n"+
 		"           fetch 0/16 running, 1 pending   index 0/4 running, 0 pending   cluster 0/1 running, 0 pending\n")
+}
+
+func TestDescribeKeepAwake(t *testing.T) {
+	kinds := func(pending, running int) []client.QueueKind {
+		return []client.QueueKind{{Kind: "fetch", Pending: pending, Running: running}, {Kind: "index"}}
+	}
+	cases := []struct {
+		name string
+		q    client.Queue
+		want string
+	}{
+		{"off", client.Queue{Kinds: kinds(3, 1)}, "off"},
+		{"holding", client.Queue{KeepAwake: true, KeepAwakeActive: true, PowerSource: "ac", Kinds: kinds(3, 1)},
+			"on, holding the Mac awake (AC power, 4 jobs queued)"},
+		{"holding for one", client.Queue{KeepAwake: true, KeepAwakeActive: true, PowerSource: "ac", Kinds: kinds(0, 1)},
+			"on, holding the Mac awake (AC power, 1 job queued)"},
+		{"paused", client.Queue{KeepAwake: true, Paused: true, PowerSource: "ac", Kinds: kinds(3, 0)},
+			"on, not holding: the queue is paused"},
+		{"nothing queued", client.Queue{KeepAwake: true, PowerSource: "ac", Kinds: kinds(0, 0)},
+			"on, not holding: nothing queued"},
+		{"on battery", client.Queue{KeepAwake: true, PowerSource: "battery", Kinds: kinds(3, 0)},
+			"on, not holding: on battery power"},
+		{"power unknown", client.Queue{KeepAwake: true, PowerSource: "unknown", Kinds: kinds(3, 0)},
+			"on, not holding: power source unknown"},
+		{"about to hold", client.Queue{KeepAwake: true, PowerSource: "ac", Kinds: kinds(3, 0)},
+			"on, not holding yet"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, describeKeepAwake(&tc.q))
+		})
+	}
+}
+
+// keepAwakeStub is a keeper reporting a fixed state.
+type keepAwakeStub keepawake.State
+
+func (s keepAwakeStub) State() keepawake.State { return keepawake.State(s) }
+
+// TestStatus_KeepAwake: status says after the pool loads whether
+// keep-awake is on and whether the daemon holds the Mac awake.
+func TestStatus_KeepAwake(t *testing.T) {
+	keepAwakeLine := func(t *testing.T, srv *apitest.Server) string {
+		t.Helper()
+		for line := range strings.SplitSeq(mustRun(t, srv, "status"), "\n") {
+			if strings.HasPrefix(line, "keep-awake:") {
+				return line
+			}
+		}
+		t.Fatal("status has no keep-awake line")
+		return ""
+	}
+
+	srv := apitest.Start(t)
+	assert.Equal(t, "keep-awake: off", keepAwakeLine(t, srv))
+
+	srv = apitest.Start(t, func(d *api.Deps) {
+		d.KeepAwake = keepAwakeStub{Enabled: true, Active: true, Power: keepawake.PowerAC}
+	})
+	mustRun(t, srv, "add", "https://example.com/a")
+	mustRun(t, srv, "keep-awake", "on")
+	out := mustRun(t, srv, "status")
+	assert.Contains(t, out, "cluster 0/1 running, 0 pending\n"+
+		"keep-awake: on, holding the Mac awake (AC power, 1 job queued)\n", "right after the pool loads")
+
+	srv = apitest.Start(t, func(d *api.Deps) {
+		d.KeepAwake = keepAwakeStub{Enabled: true, Power: keepawake.PowerBattery}
+	})
+	mustRun(t, srv, "add", "https://example.com/a")
+	mustRun(t, srv, "keep-awake", "on")
+	assert.Equal(t, "keep-awake: on, not holding: on battery power", keepAwakeLine(t, srv))
 }
 
 // olderDaemon answers as this test's daemon for home, serving healthz,

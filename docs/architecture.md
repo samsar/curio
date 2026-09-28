@@ -60,7 +60,10 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
 - `curio throttle gentle|normal` — fewer jobs at once to spare the
   machine, or every worker
 - `curio schedule HH:MM-HH:MM|off` — start jobs only in a daily window
-- `curio daemon {start|stop|status|logs}` — lifecycle management (see "Daemon lifecycle")
+- `curio keep-awake on|off` — keep the Mac from idle sleep while jobs are
+  queued and it runs on AC power
+- `curio daemon {start|stop|status|logs|install|uninstall}` — lifecycle
+  management, and the launchd agent (see "Daemon lifecycle")
 - `curio refetch <id|all>` — force re-extract
 - `curio reindex <id|--all>` — re-chunk and re-embed existing extractions
   (after chunker or embedding-prefix changes, or to pick up new tags)
@@ -128,7 +131,9 @@ against it. The CLI and MCP sidecar share the hand-written client in
 ## Daemon lifecycle
 
 One daemon per `$CURIO_HOME`, managed via `curio daemon start|stop|status`.
-CLI commands and the MCP sidecar auto-start it when it isn't running.
+CLI commands and the MCP sidecar auto-start it when it isn't running:
+through the home's launchd agent when one is loaded, as a child process
+otherwise.
 
 - **Single instance.** The daemon holds an exclusive `flock` on
   `daemon.pid` for as long as it runs and records its PID there. The kernel
@@ -153,19 +158,36 @@ CLI commands and the MCP sidecar auto-start it when it isn't running.
   healthz's own bounded wait on Ollama. They wait while their daemon
   reports progress, failing after 15s of silence or at a 30 min ceiling
   (which leaves the daemon running), and print one line when it is
-  migrating. `daemon.start.lock` serializes spawning and is held only
-  until the new daemon holds `daemon.pid`. They only signal the PID the
-  lock holder recorded. A spawned daemon that crashes during startup is
-  reported immediately, with its exit status and the tail of
-  `daemon.log`.
+  migrating. `daemon.start.lock` serializes starting and is held until
+  the new daemon holds `daemon.pid`; installing, removing or restarting
+  the launchd agent holds it throughout, bootout waits included. They only
+  signal the PID the
+  lock holder recorded. A daemon they started that crashes during startup
+  is reported immediately, with its exit status and the tail of
+  `daemon.log` (and of `launchd.err`, for one launchd started).
 - **Shutdown** on SIGINT, SIGTERM or SIGHUP: stop accepting work, give
   in-flight HTTP requests 5s and running jobs 15s, record every outcome
   (interrupted jobs are requeued with their attempt refunded), then release
   the lock. Jobs abandoned after the grace period are recovered as orphans
-  on the next start.
-
-V1+: optional `curio service install` that drops a `launchd` plist (macOS) or
-systemd unit (Linux) for auto-start at login.
+  on the next start. A daemon told to stop exits 0, even when its
+  shutdown ran over, and so does one that finds another daemon serving
+  its home; anything else it can't run with exits 1.
+- **launchd agent** (macOS, `curio daemon install`): a per-user agent,
+  `~/Library/LaunchAgents/com.github.samsar.curio.daemon.plist` for
+  `~/.curio` (another home's label adds a hash of its path), that starts
+  the daemon at login and restarts it when it exits non-zero
+  (`KeepAlive {SuccessfulExit: false}`), giving it 25s to exit after
+  SIGTERM. With the agent loaded, clients start the daemon with `launchctl
+  kickstart`, stop it with `launchctl kill SIGTERM` and restart it with
+  `kickstart -k`, all behind `internal/service.Manager`; without it (not
+  installed, not loaded, or no GUI login session over ssh) they spawn it.
+  The lock stays the safety net either way. `curio daemon uninstall`
+  boots the agent out and waits until the daemon has let go of the home.
+- **Keep-awake** (`curio keep-awake on`): while keep-awake is on, the
+  queue isn't paused, the Mac runs on AC power (`pmset -g ps`) and the
+  workers have jobs queued or running, the daemon runs `caffeinate -i -w
+  <its pid>`; it lets go when the queue drains, on battery, when paused
+  or turned off, and as it stops (`internal/keepawake`).
 
 ## Storage layout
 
@@ -181,7 +203,8 @@ Everything under `$CURIO_HOME` (defaults to `~/.curio`).
     <document_id>/
       <extraction_id>.md   # one file per extraction; the document points at its current one
   logs/
-    daemon.log
+    daemon.log           # the daemon's JSON log (its stdout)
+    launchd.err          # a launchd-run daemon's stderr: only a dying runtime's output
   daemon.pid             # single-instance lock (flock) + the running daemon's PID
   daemon.start.lock      # serializes clients auto-starting the daemon
 ```

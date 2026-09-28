@@ -36,6 +36,8 @@ const (
 	// fakeStartingEnv is how long the starting modes report they are
 	// migrating, as a time.Duration.
 	fakeStartingEnv = "CURIO_FAKE_DAEMON_STARTING"
+	// fakeVersionEnv is the version the fake reports; "test" when unset.
+	fakeVersionEnv = "CURIO_FAKE_DAEMON_VERSION"
 
 	modeNormal        = "normal"
 	modeCrashOnStart  = "crash-on-start"
@@ -47,6 +49,10 @@ const (
 	modeStartingThenExit = "starting-then-exit"
 	// modeSilent binds its port and never answers.
 	modeSilent = "silent"
+	// modeSlowStop keeps answering for slowStop after SIGTERM, as a daemon
+	// draining its jobs holds its lock, then exits.
+	modeSlowStop = "slow-stop"
+	slowStop     = 500 * time.Millisecond
 
 	// spawnLog, in the home, gets one line per fake daemon started.
 	spawnLog = "spawned.log"
@@ -97,10 +103,15 @@ func runFakeDaemon(mode string) int {
 	if err != nil {
 		return fail(err)
 	}
+	// Closed before the lock is released, as the real daemon stops
+	// serving before it lets go of the home.
+	srv := &http.Server{Handler: fakeHealthz(mode, home.Path)}
+	defer srv.Close()
 	if mode == modeSilent {
 		fmt.Fprintln(os.Stderr, "fake daemon: bound, not answering")
+		defer ln.Close()
 	} else {
-		go func() { _ = http.Serve(ln, fakeHealthz(mode, home.Path)) }()
+		go func() { _ = srv.Serve(ln) }()
 	}
 
 	var gaveUp <-chan time.Time
@@ -109,12 +120,23 @@ func runFakeDaemon(mode string) int {
 	}
 	select {
 	case <-stop:
+		if mode == modeSlowStop {
+			time.Sleep(slowStop)
+		}
 	case <-gaveUp:
 		fmt.Fprintln(os.Stderr, "fake daemon: gave up migrating")
 		return 4
 	case <-time.After(time.Minute): // never outlive the test run
 	}
 	return 0
+}
+
+// fakeVersion is the version the fake daemon reports.
+func fakeVersion() string {
+	if v := os.Getenv(fakeVersionEnv); v != "" {
+		return v
+	}
+	return "test"
 }
 
 // startingFor is how long the fake reports it is starting.
@@ -140,7 +162,8 @@ func fakeHealthz(mode, home string) http.Handler {
 			}
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "pid": os.Getpid(), "home": home})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "pid": os.Getpid(), "home": home,
+			"version": fakeVersion()})
 	})
 }
 
@@ -152,7 +175,7 @@ func writeStarting(w http.ResponseWriter, pid int, home string) error {
 	w.WriteHeader(http.StatusServiceUnavailable)
 	return json.NewEncoder(w).Encode(map[string]any{
 		"type": "urn:curio:problem:daemon-starting", "title": "daemon starting", "status": http.StatusServiceUnavailable,
-		"pid": pid, "home": home, "version": "test", "phase": "migrating",
+		"pid": pid, "home": home, "version": fakeVersion(), "phase": "migrating",
 		"migrations": map[string]any{"applied": 2, "total": 6},
 	})
 }

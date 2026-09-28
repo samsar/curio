@@ -384,6 +384,8 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			`{"paused":false,"throttle":"gentle","schedule":"`+windowExcludingNow()+`"}`), http.StatusOK},
 		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue", `{"throttle":"fast"}`), http.StatusBadRequest},
 		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue", `{"schedule":"off"}`), http.StatusOK},
+		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue", `{"keep_awake":true}`), http.StatusOK},
+		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue", `{"keep_awake":"yes"}`), http.StatusBadRequest},
 	})
 	assert.Equal(t, slices.Sorted(maps.Keys(ops)), slices.Sorted(maps.Keys(exercised)),
 		"every documented operation is exercised")

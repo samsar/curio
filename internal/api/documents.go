@@ -288,9 +288,10 @@ func docStateParam(r *http.Request) (store.DocState, error) {
 
 // handleReindexDocument enqueues an index job for the document — re-chunking
 // and re-embedding its current extraction's markdown. Unlike refetch it does
-// NOT re-fetch or reset state; the doc stays fetched. Useful after an
-// embedding-model or chunker change, or to pick up new bookmark tags. The
-// document must already have a current extraction.
+// NOT re-fetch or reset state; the doc stays fetched. Useful after the
+// embedding build drifts (`curio doctor` reports it), after a chunker
+// change, or to pick up new bookmark tags. The document must already have a
+// current extraction.
 func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	doc, err := d.Documents.GetByID(r.Context(), id)

@@ -24,6 +24,7 @@ import (
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
+	"github.com/samsar/curio/internal/keepawake"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
@@ -39,16 +40,55 @@ const workerDrainTimeout = 15 * time.Second
 
 func main() {
 	logLevel := new(slog.LevelVar)
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+	// The log goes to stdout. A client that spawns the daemon sends both
+	// streams to daemon.log; its launchd agent sends stdout there and
+	// stderr to launchd.err, which so gets only what the runtime writes as
+	// the process dies (a panic's trace, a fatal error).
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
 
 	// SIGHUP too: the daemon has no reload path, and a hangup should shut it
 	// down cleanly rather than kill it mid-job.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	err := run(ctx, logLevel)
+	// Read before stop, which cancels ctx itself: only a signal has
+	// cancelled it by now, and its cause names the signal.
+	signalled := ctx.Err() != nil
+	cause := context.Cause(ctx)
 	stop()
-	if err != nil && !errors.Is(err, context.Canceled) {
+	os.Exit(finish(err, signalled, cause))
+}
+
+// finish logs how run ended and returns the daemon's exit status. The
+// status is what the launchd agent's KeepAlive {SuccessfulExit: false}
+// acts on: launchd restarts a daemon that exits non-zero, after its 10s
+// throttle, and leaves one that exits 0 stopped. So the daemon exits 0
+// when there is nothing to restart: it was told to stop (even if its
+// shutdown failed part way, say a request outlived the API's 5s grace),
+// or another daemon already serves the home. Anything else it can't run
+// with (a crash, a bad config.yaml, a taken port, a home it refuses)
+// exits 1, and launchd's throttled retries pick up a fix by themselves;
+// `curio doctor` says what is wrong meanwhile.
+func finish(err error, signalled bool, cause error) int {
+	switch {
+	case errors.Is(err, daemonctl.ErrAlreadyRunning):
+		slog.Warn("another curio-daemon already serves this home; exiting", "err", err)
+	case err != nil && !errors.Is(err, context.Canceled):
 		slog.Error("daemon exited with error", "err", err)
-		os.Exit(1)
+	}
+	if signalled {
+		slog.Info("curio-daemon stopped", "cause", cause.Error())
+	}
+	return exitCode(err, signalled)
+}
+
+// exitCode is finish's status for run's err: 0 for a clean or requested
+// end, or another daemon serving the home, and 1 otherwise.
+func exitCode(err error, signalled bool) int {
+	switch {
+	case err == nil, signalled, errors.Is(err, context.Canceled), errors.Is(err, daemonctl.ErrAlreadyRunning):
+		return 0
+	default:
+		return 1
 	}
 }
 
@@ -258,6 +298,7 @@ type daemon struct {
 	apiDeps api.Deps
 	pools   []jobs.Pool
 	drift   *drift.Monitor
+	keeper  *keepawake.Keeper
 }
 
 // newDaemon builds the stores, clients, engines and pools over db, whose
@@ -340,6 +381,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	// Built after start's marker writes: from here on the monitor is the
 	// marker's only writer.
 	driftMonitor := drift.New(home, emb.Client(), slog.Default())
+	keeper := newKeeper(gate, queue, pools)
 
 	return &daemon{
 		apiDeps: api.Deps{
@@ -356,11 +398,31 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 			Upstreams:      upstreams,
 			Gate:           gate,
 			Drift:          driftMonitor,
+			KeepAwake:      keeper,
 			Log:            slog.Default(),
 		},
-		pools: pools,
-		drift: driftMonitor,
+		pools:  pools,
+		drift:  driftMonitor,
+		keeper: keeper,
 	}, nil
+}
+
+// newKeeper builds the keep-awake keeper over the queue gate's settings
+// and the jobs of the pools' kinds. It holds this process's pid for
+// caffeinate -w, so a hold never outlives the daemon.
+func newKeeper(gate *jobs.QueueGate, queue store.JobStore, pools []jobs.Pool) *keepawake.Keeper {
+	kinds := make([]store.JobKind, 0, len(pools))
+	for _, p := range pools {
+		kinds = append(kinds, p.Kind)
+	}
+	return keepawake.New(keepawake.Options{
+		Settings: gate,
+		Jobs:     queue,
+		Kinds:    kinds,
+		Probe:    keepawake.Pmset{},
+		Asserter: keepawake.Caffeinate{PID: os.Getpid()},
+		Log:      slog.Default(),
+	})
 }
 
 // YouTube pacing: yt-dlp runs start at 2 per second, from a token bucket of
@@ -441,6 +503,10 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 		// survives rule reloads.
 		registry[ytFetcher.Name()] = ytFetcher
 		slog.Info("youtube fetcher enabled", "bin", cfg.Fetcher.YouTube.Bin)
+	} else {
+		// Said out loud: a launchd agent's PATH without Homebrew's
+		// directories would otherwise lose YouTube silently.
+		slog.Info("youtube fetcher disabled: yt-dlp not found", "bin", cfg.Fetcher.YouTube.Bin, "path", os.Getenv("PATH"))
 	}
 
 	return fetcher.NewRulesDispatcher(fetcher.RulesDispatcherOptions{
@@ -488,15 +554,17 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 	}, slog.Default()), nil
 }
 
-// serve runs the worker pools and the embedding drift monitor alongside
-// the API until ctx is cancelled or the API fails, then shuts them down
-// within the documented budget.
+// serve runs the worker pools, the embedding drift monitor and the
+// keep-awake keeper alongside the API until ctx is cancelled or the API
+// fails, then shuts them down within the documented budget: the keeper
+// releases its hold as its context ends.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var workers sync.WaitGroup
 	workers.Go(func() { d.drift.Run(ctx) })
+	workers.Go(func() { d.keeper.Run(ctx) })
 	for _, p := range d.pools {
 		for range p.Size {
 			workers.Go(func() {

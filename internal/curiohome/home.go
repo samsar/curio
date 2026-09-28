@@ -23,9 +23,14 @@ const (
 	DBFile           = "curio.db"
 	ContentDirName   = "content"
 	LogsDirName      = "logs"
-	// DaemonLogFile, in the logs dir, gets the daemon's output: clients that
-	// start it point its stdout and stderr there.
+	// DaemonLogFile, in the logs dir, gets the daemon's structured log,
+	// which it writes to stdout: clients that spawn it point its stdout and
+	// stderr there, and its launchd agent its stdout.
 	DaemonLogFile = "daemon.log"
+	// LaunchdErrFile, in the logs dir, gets what a daemon run by its
+	// launchd agent writes to stderr: only what the Go runtime prints as
+	// the process dies (a panic's trace, a fatal error).
+	LaunchdErrFile = "launchd.err"
 	// PIDFileName is the daemon's single-instance lock; the running daemon
 	// holds an exclusive flock on it and records its PID inside.
 	PIDFileName = "daemon.pid"
@@ -153,11 +158,26 @@ func Resolve() (string, error) {
 		}
 		return abs, nil
 	}
+	return DefaultPath()
+}
+
+// DefaultPath is ~/.curio, the home used when $CURIO_HOME is unset.
+func DefaultPath() (string, error) {
 	userHome, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user home: %w", err)
 	}
 	return filepath.Join(userHome, DefaultDirName), nil
+}
+
+// CanonicalPath resolves symlinks in path where it can (on macOS /tmp is
+// /private/tmp), so two spellings of one directory compare equal. A path
+// that doesn't exist here is cleaned and compared as written.
+func CanonicalPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
 }
 
 // Init creates a new curio home at path, in CurrentFormat. Fails with
@@ -229,6 +249,7 @@ func (h *Home) DBPath() string           { return filepath.Join(h.Path, DBFile) 
 func (h *Home) ContentDir() string       { return filepath.Join(h.Path, ContentDirName) }
 func (h *Home) LogsDir() string          { return filepath.Join(h.Path, LogsDirName) }
 func (h *Home) DaemonLogPath() string    { return filepath.Join(h.LogsDir(), DaemonLogFile) }
+func (h *Home) LaunchdErrPath() string   { return filepath.Join(h.LogsDir(), LaunchdErrFile) }
 func (h *Home) PIDFile() string          { return filepath.Join(h.Path, PIDFileName) }
 func (h *Home) StartLockFile() string    { return filepath.Join(h.Path, StartLockFileName) }
 

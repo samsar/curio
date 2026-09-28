@@ -210,21 +210,30 @@ const (
 
 // VectorExtension reports the sqlite-vec this binary links: its version,
 // and the build flags vec_debug() lists, space-separated ("neon" when its
-// NEON distance kernels are compiled in, "" for the scalar ones).
+// NEON distance kernels are compiled in, "" for the scalar ones). When the
+// version was read but the flags weren't, it returns the version with the
+// error.
 func VectorExtension(ctx context.Context, db *DB) (version, buildFlags string, err error) {
 	if err := db.QueryRowContext(ctx, vecVersionSQL).Scan(&version); err != nil {
 		return "", "", fmt.Errorf("read sqlite-vec version: %w", err)
 	}
 	var debug string
 	if err := db.QueryRowContext(ctx, vecDebugSQL).Scan(&debug); err != nil {
-		return "", "", fmt.Errorf("read sqlite-vec build: %w", err)
+		return version, "", fmt.Errorf("read sqlite-vec build: %w", err)
 	}
+	buildFlags, err = vecBuildFlags(debug)
+	return version, buildFlags, err
+}
+
+// vecBuildFlags reads the build flags from vec_debug()'s answer: the
+// "Build flags:" line's words, space-separated.
+func vecBuildFlags(debug string) (string, error) {
 	for line := range strings.Lines(debug) {
 		if flags, ok := strings.CutPrefix(line, "Build flags:"); ok {
-			return version, strings.Join(strings.Fields(flags), " "), nil
+			return strings.Join(strings.Fields(flags), " "), nil
 		}
 	}
-	return "", "", fmt.Errorf("sqlite-vec's vec_debug() lists no build flags: %q", debug)
+	return "", fmt.Errorf("sqlite-vec's vec_debug() lists no build flags: %q", debug)
 }
 
 // Path returns the path Open was called with.

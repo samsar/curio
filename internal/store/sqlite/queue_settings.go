@@ -24,13 +24,14 @@ func NewQueueSettings(db *DB) *QueueSettings {
 
 // Queue settings statements: a primary-key lookup and an upsert of row 1.
 const (
-	getQueueSettingsSQL = `SELECT paused, throttle, schedule_start, schedule_end FROM queue_settings WHERE id = 1`
+	getQueueSettingsSQL = `SELECT paused, throttle, schedule_start, schedule_end, keep_awake FROM queue_settings WHERE id = 1`
 	putQueueSettingsSQL = `
-	INSERT INTO queue_settings (id, paused, throttle, schedule_start, schedule_end)
-	VALUES (1, ?, ?, ?, ?)
+	INSERT INTO queue_settings (id, paused, throttle, schedule_start, schedule_end, keep_awake)
+	VALUES (1, ?, ?, ?, ?, ?)
 	ON CONFLICT (id) DO UPDATE SET
 		paused = excluded.paused, throttle = excluded.throttle,
 		schedule_start = excluded.schedule_start, schedule_end = excluded.schedule_end,
+		keep_awake = excluded.keep_awake,
 		updated_at = ` + sqlNow
 )
 
@@ -39,7 +40,8 @@ func (s *QueueSettings) Get(ctx context.Context) (store.QueueSettings, error) {
 		settings   store.QueueSettings
 		start, end sql.NullInt64
 	)
-	err := s.db.QueryRowContext(ctx, getQueueSettingsSQL).Scan(&settings.Paused, &settings.Throttle, &start, &end)
+	err := s.db.QueryRowContext(ctx, getQueueSettingsSQL).Scan(&settings.Paused, &settings.Throttle, &start, &end,
+		&settings.KeepAwake)
 	if errors.Is(err, sql.ErrNoRows) {
 		return store.DefaultQueueSettings(), nil
 	}
@@ -65,7 +67,8 @@ func (s *QueueSettings) Put(ctx context.Context, settings store.QueueSettings) e
 	if !settings.Schedule.IsZero() {
 		start, end = settings.Schedule.Start, settings.Schedule.End
 	}
-	if _, err := s.db.ExecContext(ctx, putQueueSettingsSQL, settings.Paused, settings.Throttle, start, end); err != nil {
+	if _, err := s.db.ExecContext(ctx, putQueueSettingsSQL, settings.Paused, settings.Throttle, start, end,
+		settings.KeepAwake); err != nil {
 		return fmt.Errorf("put queue settings: %w", err)
 	}
 	return nil

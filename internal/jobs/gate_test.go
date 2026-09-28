@@ -156,7 +156,7 @@ func TestNewQueueGate_ReadsTheStoreOnce(t *testing.T) {
 	_, gets, puts := m.stored()
 	assert.Equal(t, 1, gets)
 	assert.Zero(t, puts)
-	assert.Equal(t, []map[string]any{{"paused": true, "throttle": "gentle", "schedule": "22:00-07:00"}},
+	assert.Equal(t, []map[string]any{{"paused": true, "throttle": "gentle", "schedule": "22:00-07:00", "keep_awake": false}},
 		logs.messages(t, "queue settings loaded"))
 }
 
@@ -306,7 +306,7 @@ func TestQueueGate_Update(t *testing.T) {
 	later := g.Admit(store.JobKindFetch, 0, now)
 	require.NotNil(t, later.Changed)
 	assert.False(t, isClosed(later.Changed), "a later verdict waits for the next change")
-	assert.Equal(t, []map[string]any{{"paused": true, "throttle": "gentle", "schedule": "22:00-07:00"}},
+	assert.Equal(t, []map[string]any{{"paused": true, "throttle": "gentle", "schedule": "22:00-07:00", "keep_awake": false}},
 		logs.messages(t, "queue settings changed"))
 
 	got, err = g.Update(ctx, QueueUpdate{Schedule: &store.DailyWindow{}})
@@ -405,4 +405,66 @@ func TestQueueGate_UpdateOutlivesItsCaller(t *testing.T) {
 	close(m.release)
 	require.NoError(t, <-done)
 	assert.Equal(t, ReasonPaused, g.Admit(store.JobKindFetch, 0, time.Now()).Closed)
+}
+
+// TestQueueGate_KeepAwake: keep-awake is stored and published like the
+// other settings, written only when it changes, and never gates a claim.
+func TestQueueGate_KeepAwake(t *testing.T) {
+	ctx := context.Background()
+	logs := &logRecorder{}
+	m := newMemSettings(store.DefaultQueueSettings())
+	g, err := NewQueueGate(ctx, m, daemonPools, slog.New(logs))
+	require.NoError(t, err)
+	st, changed := g.Watch(time.Now())
+	assert.False(t, st.Settings.KeepAwake)
+
+	got, err := g.Update(ctx, QueueUpdate{KeepAwake: new(true)})
+	require.NoError(t, err)
+	assert.True(t, got.KeepAwake)
+	assert.True(t, isClosed(changed), "a watcher is woken")
+	stored, _, puts := m.stored()
+	assert.True(t, stored.KeepAwake)
+	assert.Equal(t, 1, puts)
+	assert.Equal(t, true, logs.messages(t, "queue settings changed")[0]["keep_awake"])
+
+	_, err = g.Update(ctx, QueueUpdate{KeepAwake: new(true)})
+	require.NoError(t, err)
+	_, _, puts = m.stored()
+	assert.Equal(t, 1, puts, "the same value again writes nothing")
+
+	settings := []store.QueueSettings{
+		{Throttle: store.ThrottleGentle, Schedule: window(t, "22:00-07:00")},
+		{Paused: true, Throttle: store.ThrottleNormal},
+		store.DefaultQueueSettings(),
+	}
+	for _, s := range settings {
+		off, _ := newGate(t, s)
+		s.KeepAwake = true
+		on, _ := newGate(t, s)
+		for _, now := range []time.Time{at(10, 12, 0), at(10, 23, 0)} {
+			for _, kind := range []store.JobKind{store.JobKindFetch, store.JobKindIndex, store.JobKindCluster} {
+				for active := range 5 {
+					a, b := off.Admit(kind, active, now), on.Admit(kind, active, now)
+					assert.Equal(t, a.Closed, b.Closed)
+					assert.Equal(t, a.Until, b.Until)
+				}
+			}
+		}
+	}
+}
+
+// TestQueueGate_Watch: the state and channel Watch returns belong
+// together: the channel closes at the first change after that state.
+func TestQueueGate_Watch(t *testing.T) {
+	g, _ := newGate(t, store.DefaultQueueSettings())
+	st, changed := g.Watch(at(10, 12, 0))
+	assert.Equal(t, g.State(at(10, 12, 0)), st)
+	assert.False(t, isClosed(changed))
+
+	_, err := g.Update(context.Background(), QueueUpdate{Paused: new(true)})
+	require.NoError(t, err)
+	assert.True(t, isClosed(changed))
+	st, changed = g.Watch(at(10, 12, 0))
+	assert.Equal(t, ReasonPaused, st.Closed)
+	assert.False(t, isClosed(changed))
 }

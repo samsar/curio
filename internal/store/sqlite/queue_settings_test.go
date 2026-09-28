@@ -22,8 +22,8 @@ func TestQueueSettings_PutThenGet(t *testing.T) {
 	qs := NewQueueSettings(newTestDB(t))
 	for _, want := range []store.QueueSettings{
 		{Paused: true, Throttle: store.ThrottleGentle, Schedule: store.DailyWindow{Start: 22 * 60, End: 7 * 60}},
-		{Paused: false, Throttle: store.ThrottleNormal, Schedule: store.DailyWindow{Start: 0, End: 30}},
-		{Paused: true, Throttle: store.ThrottleGentle}, // the schedule cleared
+		{Paused: false, Throttle: store.ThrottleNormal, Schedule: store.DailyWindow{Start: 0, End: 30}, KeepAwake: true},
+		{Paused: true, Throttle: store.ThrottleGentle}, // the schedule cleared, keep-awake off again
 	} {
 		require.NoError(t, qs.Put(ctx, want))
 		got, err := qs.Get(ctx)
@@ -44,7 +44,8 @@ func TestQueueSettings_SurviveReopening(t *testing.T) {
 		require.NoError(t, err)
 		return db
 	}
-	want := store.QueueSettings{Paused: true, Throttle: store.ThrottleGentle, Schedule: store.DailyWindow{Start: 60, End: 120}}
+	want := store.QueueSettings{Paused: true, Throttle: store.ThrottleGentle, Schedule: store.DailyWindow{Start: 60, End: 120},
+		KeepAwake: true}
 
 	db := open()
 	require.NoError(t, NewQueueSettings(db).Put(ctx, want))
