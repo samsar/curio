@@ -1087,17 +1087,18 @@ func TestNewDispatcher_YouTube(t *testing.T) {
 	found, err := os.Executable()
 	require.NoError(t, err)
 	cases := []struct {
-		bin, msg string
+		bin, msg, ytdlp string
 	}{
-		{"curio-no-such-yt-dlp", "youtube fetcher disabled: yt-dlp not found"},
-		{found, "youtube fetcher enabled"},
+		{"curio-no-such-yt-dlp", "youtube fetcher disabled: yt-dlp not found", ""},
+		{found, "youtube fetcher enabled", found},
 	}
 	for _, tc := range cases {
 		logs := recordLogs(t)
 		cfg := config.Default()
 		cfg.Fetcher.YouTube.Bin = tc.bin
-		_, err := newDispatcher(cfg, home, newNativeFetcher(cfg))
+		_, ytdlp, err := newDispatcher(cfg, home, newNativeFetcher(cfg))
 		require.NoError(t, err)
+		assert.Equal(t, tc.ytdlp, ytdlp, "what healthz reports as youtube_fetcher")
 		got := logs.messages(tc.msg)
 		require.Len(t, got, 1, tc.bin)
 		assert.Equal(t, tc.bin, got[0]["bin"])

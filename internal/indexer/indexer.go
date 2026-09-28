@@ -34,18 +34,18 @@ type Options struct {
 	// search engine's query prefix.
 	DocumentPrefix string
 	// EmbedBatchSize caps how many chunks go into one embed request.
-	// Default embedBatchSize.
+	// Default EmbedBatchSize.
 	EmbedBatchSize int
 }
 
-// embedBatchSize bounds one embed request to at most 32 chunks of at most
+// EmbedBatchSize bounds one embed request to at most 32 chunks of at most
 // 3500 bytes (~112 KB), so a request's work doesn't grow with the document:
 // the embedder's timeout then measures Ollama's health, not document
 // length, and a search's query embedding waits behind a bounded amount of
 // index work in Ollama. How long a batch takes depends on the model and
 // the machine; decisions.md "Indexer: embed in batches of 32" has what was
 // measured, and what wasn't.
-const embedBatchSize = 32
+const EmbedBatchSize = 32
 
 func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer {
 	co := ChunkOptions{
@@ -54,7 +54,7 @@ func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer 
 	}
 	batch := opts.EmbedBatchSize
 	if batch <= 0 {
-		batch = embedBatchSize
+		batch = EmbedBatchSize
 	}
 	return &Indexer{chunks: chunks, embedder: emb, opts: co, docPrefix: opts.DocumentPrefix, batchSize: batch}
 }

@@ -62,6 +62,7 @@ type Deps struct {
 	Gate            *jobs.QueueGate                 // the workers' queue gate, read and changed at /v1/queue
 	Drift           DriftMonitor                    // embedding drift, on healthz, reset by reindex-all; nil tracks none
 	KeepAwake       KeepAwake                       // whether the Mac is held awake, on /v1/queue; nil reports it isn't
+	YouTubeFetcher  string                          // the yt-dlp YouTube videos go to, on healthz; empty when they go to the default fetcher
 	TenantID        string                          // default store.LocalTenantID
 	Log             *slog.Logger
 }

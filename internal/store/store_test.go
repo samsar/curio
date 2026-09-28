@@ -111,6 +111,31 @@ func TestThrottle_Valid(t *testing.T) {
 	}
 }
 
+// TestThrottle_Limit: the gentle throttle caps fetches at 4 and index jobs
+// at 1, never above the pool; the normal one, and every other kind, run
+// the whole pool.
+func TestThrottle_Limit(t *testing.T) {
+	cases := []struct {
+		throttle store.Throttle
+		kind     store.JobKind
+		pool     int
+		want     int
+	}{
+		{store.ThrottleGentle, store.JobKindFetch, 16, 4},
+		{store.ThrottleGentle, store.JobKindFetch, 2, 2},
+		{store.ThrottleGentle, store.JobKindIndex, 4, 1},
+		{store.ThrottleGentle, store.JobKindCluster, 1, 1},
+		{store.ThrottleGentle, store.JobKindImport, 8, 8},
+		{store.ThrottleNormal, store.JobKindFetch, 16, 16},
+		{store.ThrottleNormal, store.JobKindIndex, 4, 4},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, tc.throttle.Limit(tc.kind, tc.pool), "%s %s of %d", tc.throttle, tc.kind, tc.pool)
+	}
+	_, capped := store.ThrottleNormal.Cap(store.JobKindFetch)
+	assert.False(t, capped)
+}
+
 func TestParseDailyWindow(t *testing.T) {
 	accepted := map[string]store.DailyWindow{
 		"22:00-07:00": {Start: 22 * 60, End: 7 * 60},

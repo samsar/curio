@@ -174,3 +174,62 @@ func TestUp_FreshDryRun(t *testing.T) {
 	assertHolds(t, h.home, files)
 	assert.Zero(t, h.changes())
 }
+
+// TestUp_NewHomeNeedsRoom: a new home needs 2 GiB on its volume whether or
+// not a model is missing, and without it the plan is blocked before
+// anything is applied; on the models' volume the models' margin is that
+// room. A home that stays isn't judged by it.
+func TestUp_NewHomeNeedsRoom(t *testing.T) {
+	const sizes = 639e6 + 19e9 // the models the harness's Mac gets
+	cases := []struct {
+		name       string
+		pulled     bool   // Ollama has every model
+		sameVolume bool   // the home is on the models' volume
+		free       uint64 // on the home's volume
+		existing   bool   // a home that stays
+		fresh      bool
+		blocked    bool
+	}{
+		{name: "models present, another volume, 1 GiB", pulled: true, free: 1 << 30, blocked: true},
+		{name: "models present, one volume, 1 GiB", pulled: true, sameVolume: true, free: 1 << 30, blocked: true},
+		{name: "models missing, one volume, their sizes and 2 GiB", sameVolume: true, free: sizes + 2<<30},
+		{name: "another volume, 3 GiB", pulled: true, free: 3 << 30},
+		{name: "--fresh, another volume, 1 GiB", pulled: true, existing: true, fresh: true, free: 1 << 30,
+			blocked: true},
+		{name: "a home that stays, 1 GiB", pulled: true, existing: true, free: 1 << 30},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			if tc.pulled {
+				h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel, genModel)
+				h.defaults.Embedding.BaseURL, h.defaults.Generation.BaseURL = h.ollama.URL, h.ollama.URL
+			}
+			if tc.existing {
+				h.writeHome(genModel)
+			}
+			h.probe.Facts.Home = setup.Volume{Path: filepath.Dir(h.home), Free: tc.free, ID: "disk2"}
+			if tc.sameVolume {
+				h.probe.Facts.Home.ID = h.probe.Facts.Models.ID
+				h.probe.Facts.Models.Free = tc.free
+			}
+			r := h.runner(setuptest.NewUI(t), setup.Options{Fresh: tc.fresh, DryRun: true})
+			home := item(t, r.Plan(t.Context()), "home")
+			if !tc.blocked {
+				assert.False(t, home.Blocked(), "%+v", home)
+				assert.NotContains(t, home.Detail, "disk space")
+				return
+			}
+			assert.True(t, home.Blocked(), "%+v", home)
+			assert.Equal(t, "not enough disk space for a new home: the volume of "+filepath.Dir(h.home)+
+				" has 1.1 GB free, and a new curio home needs 2 GiB", home.Detail)
+			assert.Equal(t, "free up space, or pass another --curio-home", home.Hint)
+
+			_, _, err := h.up(setuptest.NewUI(t), setup.Options{Fresh: tc.fresh, Yes: true})
+			var blocked *setup.BlockedError
+			require.ErrorAs(t, err, &blocked)
+			assert.Empty(t, h.ollama.Pulls(), "nothing applied")
+			assert.Zero(t, h.changes())
+		})
+	}
+}

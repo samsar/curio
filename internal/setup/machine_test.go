@@ -54,38 +54,43 @@ func TestDiskShortage(t *testing.T) {
 	gemma := Model{Name: "gemma4:26b", Size: 19e9}
 	qwen := Model{Name: "qwen3-embedding:0.6b", Size: 639e6}
 	unknown := Model{Name: "mistral-small:24b"}
-	withFree := func(models, home uint64, sameVolume bool) Machine {
+	withFree := func(free uint64) Machine {
 		m := appleSilicon(64)
-		m.Models = Volume{Path: "/Users/x/.ollama", Free: models, ID: "disk1"}
-		m.Home = Volume{Path: "/Users/x", Free: home, ID: "disk1"}
-		if !sameVolume {
-			m.Home.ID = "disk2"
-		}
+		m.Models = Volume{Path: "/Users/x/.ollama", Free: free, ID: "disk1"}
 		return m
 	}
 
-	assert.Empty(t, diskShortage(withFree(100e9, 100e9, true), []Model{gemma, qwen}, true))
-	assert.Empty(t, diskShortage(withFree(1e9, 1e9, true), nil, false), "nothing to pull")
+	assert.Empty(t, diskShortage(withFree(100e9), []Model{gemma, qwen}))
+	assert.Empty(t, diskShortage(withFree(1e9), nil), "nothing to pull")
 
-	short := diskShortage(withFree(20e9, 20e9, true), []Model{gemma, qwen}, true)
+	short := diskShortage(withFree(20e9), []Model{gemma, qwen})
 	for _, want := range []string{"/Users/x/.ollama", "has 20 GB free", "gemma4:26b (19 GB)",
 		"qwen3-embedding:0.6b (639 MB)", "need 21.8 GB", "2 GiB margin"} {
 		assert.Contains(t, short, want)
 	}
 
-	short = diskShortage(withFree(1e9, 100e9, true), []Model{unknown}, true)
+	short = diskShortage(withFree(1e9), []Model{unknown})
 	assert.Contains(t, short, "mistral-small:24b (size unknown)", "an unknown size counts the margin")
-	assert.Empty(t, diskShortage(withFree(3e9, 100e9, true), []Model{unknown}, true))
+	assert.Empty(t, diskShortage(withFree(3e9), []Model{unknown}))
 
-	short = diskShortage(withFree(100e9, 1e9, false), []Model{gemma}, true)
-	assert.Contains(t, short, "the volume of /Users/x has 1 GB free, and a new curio home needs 2 GiB")
-	assert.Empty(t, diskShortage(withFree(100e9, 1e9, false), []Model{gemma}, false), "no new home")
-	assert.Empty(t, diskShortage(withFree(100e9, 1e9, true), []Model{gemma}, true),
-		"one volume: the models' margin covers the home")
+	unmeasured := withFree(1)
+	unmeasured.Models = Volume{}
+	assert.Empty(t, diskShortage(unmeasured, []Model{gemma}), "a volume the probe couldn't measure isn't judged")
+}
 
-	unmeasured := withFree(1, 1, false)
-	unmeasured.Models, unmeasured.Home = Volume{}, Volume{}
-	assert.Empty(t, diskShortage(unmeasured, []Model{gemma}, true), "a volume the probe couldn't measure isn't judged")
+func TestNewHomeShortage(t *testing.T) {
+	withFree := func(free uint64) Machine {
+		m := appleSilicon(64)
+		m.Home = Volume{Path: "/Users/x", Free: free, ID: "disk2"}
+		return m
+	}
+	assert.Equal(t, "the volume of /Users/x has 1 GB free, and a new curio home needs 2 GiB",
+		newHomeShortage(withFree(1e9)))
+	assert.Empty(t, newHomeShortage(withFree(3e9)))
+	assert.Empty(t, newHomeShortage(withFree(diskMargin)), "exactly the margin is enough")
+	unmeasured := withFree(1)
+	unmeasured.Home = Volume{}
+	assert.Empty(t, newHomeShortage(unmeasured), "a volume the probe couldn't measure isn't judged")
 }
 
 func TestParseGPUCores(t *testing.T) {

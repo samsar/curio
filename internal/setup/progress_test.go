@@ -30,7 +30,7 @@ func redraws(s string) []string { return strings.Split(s, "\r\x1b[K")[1:] }
 func TestProgress_Terminal(t *testing.T) {
 	var out bytes.Buffer
 	c := newClock()
-	p := newProgress(&out, "pulling gemma4:26b", true, c.Now)
+	p := newProgress(&out, "pulling gemma4:26b", Bytes, true, c.Now)
 
 	p.Update(1e9, 19e9)
 	c.Advance(50 * time.Millisecond)
@@ -53,7 +53,7 @@ func TestProgress_Terminal(t *testing.T) {
 // and 100% at the end, once.
 func TestProgress_Lines(t *testing.T) {
 	var out bytes.Buffer
-	p := newProgress(&out, "pulling qwen3-embedding:0.6b", false, newClock().Now)
+	p := newProgress(&out, "pulling qwen3-embedding:0.6b", Bytes, false, newClock().Now)
 	for _, done := range []int64{50, 99, 100, 150, 340, 300, 1000} {
 		p.Update(done, 1000)
 	}
@@ -69,7 +69,7 @@ func TestProgress_Lines(t *testing.T) {
 // TestProgress_Stop: a report cut short ends its line where it stands.
 func TestProgress_Stop(t *testing.T) {
 	var out bytes.Buffer
-	p := newProgress(&out, "pulling gemma4:26b", true, newClock().Now)
+	p := newProgress(&out, "pulling gemma4:26b", Bytes, true, newClock().Now)
 	p.Update(1e9, 19e9)
 	p.Stop()
 	p.Update(5e9, 19e9)
@@ -85,4 +85,14 @@ func TestFormatSize(t *testing.T) {
 	for n, want := range cases {
 		assert.Equal(t, want, FormatSize(n), "%d", n)
 	}
+}
+
+// TestProgress_Items: a count of things is shown as numbers, not sizes.
+func TestProgress_Items(t *testing.T) {
+	var out bytes.Buffer
+	p := newProgress(&out, "importing Safari", Items, false, newClock().Now)
+	p.Update(500, 1200)
+	p.Done()
+	assert.Equal(t, []string{"importing Safari: 41% (500 of 1200)", "importing Safari: 100% (1200 of 1200)"},
+		lines(out.String()))
 }

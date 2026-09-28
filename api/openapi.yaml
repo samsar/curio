@@ -227,6 +227,13 @@ paths:
         batches (the CLI sends 500 at a time). A bookmark that already
         exists for this source is skipped; one curio can't fetch is
         filtered and counted under its reason.
+
+        With dry_run, nothing is written: the response is the one this
+        body would get against the library as it is now, with dry_run
+        true and new_urls, the URLs the import would fetch (so
+        jobs_enqueued counts the fetches it would enqueue). `curio up`
+        counts a source's new bookmarks this way, sending its distinct
+        URLs alone, up to 10,000 a request.
       requestBody:
         required: true
         content:
@@ -809,6 +816,13 @@ components:
             named jina. Empty when the daemon tracks none. A failing one
             doesn't make the daemon unhealthy: status stays ok.
           items: { $ref: "#/components/schemas/UpstreamHealth" }
+        youtube_fetcher:
+          type: string
+          description: >
+            The yt-dlp the daemon found when it started, which YouTube
+            videos go to for their transcripts; absent when they go to the
+            default fetcher. It takes a restart to see a yt-dlp installed
+            since.
       required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, ollama_reachable, upstreams]
 
     EmbeddingDrift:
@@ -1027,6 +1041,9 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/ImportBookmark" }
+        dry_run:
+          type: boolean
+          description: Count what the import would do, and write nothing
       required: [source, bookmarks]
 
     ImportBookmark:
@@ -1055,6 +1072,16 @@ components:
         errors:
           type: array
           description: The first few per-bookmark failures; absent when there were none.
+          items: { type: string }
+        dry_run:
+          type: boolean
+          description: The counts are what the import would do; nothing was written. Absent otherwise.
+        new_urls:
+          type: array
+          description: >
+            For a dry run, the normalized URLs whose documents the import
+            would create and fetch, one each, in request order; absent when
+            there are none, and for an import.
           items: { type: string }
       required: [source, total, created, skipped, filtered, jobs_enqueued]
 

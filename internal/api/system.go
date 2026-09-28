@@ -20,7 +20,9 @@ import (
 // `curio up` compares with config.yaml's to know when a restart would
 // change it. Upstreams are the services fetches depend on; like Ollama, a
 // failing one doesn't make the daemon unhealthy, and neither does
-// EmbeddingDrift.
+// EmbeddingDrift. YouTubeFetcher is the yt-dlp the daemon found when it
+// started, which it routes YouTube videos to for their transcripts, or
+// empty: `curio up` tells from it whether a daemon predates an install.
 type Health struct {
 	Status          string           `json:"status"`
 	PID             int              `json:"pid"`
@@ -34,6 +36,7 @@ type Health struct {
 	OllamaReachable bool             `json:"ollama_reachable"`
 	OllamaDetail    string           `json:"ollama_detail,omitempty"`
 	Upstreams       []UpstreamHealth `json:"upstreams"`
+	YouTubeFetcher  string           `json:"youtube_fetcher,omitempty"`
 }
 
 // EmbeddingDrift says what changed in the build that makes the home's
@@ -164,6 +167,7 @@ func (d Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
 		OllamaReachable: reachable,
 		OllamaDetail:    detail,
 		Upstreams:       d.upstreams(),
+		YouTubeFetcher:  d.YouTubeFetcher,
 	})
 }
 

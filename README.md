@@ -18,19 +18,24 @@ curio up
 `curio up` checks the Mac, installs or starts Ollama (with Homebrew, or the
 app from ollama.com), picks and pulls the models for your Mac's memory,
 creates `~/.curio` with its `config.yaml`, and installs a launchd agent that
-keeps the daemon running. It shows the plan first and asks before each
-step; every command it runs is shown in full, and it never uses sudo. Run
-it again any time: with everything in place it says `Nothing to do: curio
-is up.` Then:
+keeps the daemon running. Then it offers to import your bookmarks, from a
+Chrome profile, Firefox, Safari or an exported HTML file, each with how
+many are new, says how long fetching and indexing them will take, asks
+whether to work through them now, gently or only overnight, and says when
+to check back. It shows the plan first and asks before each step; every
+command it runs is shown in full, and it never uses sudo. Run it again any
+time: with everything in place it says `Nothing to do: curio is up.` Then:
 
 ```sh
-curio import html ~/Downloads/bookmarks.html --follow
+curio status --follow                # watch the import until it is done
 curio search "feature flag rollout"
 ```
 
-Export your bookmarks from any browser as HTML (Chrome → Bookmark Manager →
-⋮ → Export bookmarks). The HTML export works across all browsers and is the
-fastest way to load your corpus.
+`curio up --import html:~/Downloads/bookmarks.html` (or `chrome`,
+`chrome:<profile>`, `safari`, `firefox`) picks the source up front, and is
+how a script imports (`--yes`). Export your bookmarks from any browser as
+HTML (Chrome → Bookmark Manager → ⋮ → Export bookmarks); `curio import`
+imports more later.
 
 The writing model is yours to change (`generation.model`); the embedding
 model is fixed when a home is created (`curio up --fresh` starts a new one).
@@ -48,7 +53,7 @@ ones.
 ```sh
 curio up                            # set up, or check the setup; --dry-run shows the plan only
 curio doctor                        # what curio up checks, plus the fetcher and the Jina fallback
-curio status                        # daemon health + corpus counts + queue depth and state
+curio status                        # daemon health + corpus counts + queue depth and state; --follow watches the queue drain
 
 # Pacing the work (stored, so it holds across restarts; running jobs finish)
 curio pause                         # start no new jobs until resumed

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 
@@ -118,12 +119,21 @@ func (w *world) writeConfig(ctx context.Context, ui UI, hs homeState) error {
 	return nil
 }
 
-// writeNewFile writes data to path, 0600, only while nothing is there,
-// and atomically: a temp file in the same directory, synced, then linked
-// into place. A link, unlike a rename, fails when path exists
+// linkFile puts writeNewFile's temp file in place; tests stand in a
+// filesystem without hard links.
+var linkFile = os.Link
+
+// writeNewFile writes data to path, 0600, only while nothing is there:
+// a temp file in the same directory, synced, then linked into place,
+// which is atomic. A link, unlike a rename, fails when path exists
 // (fs.ErrExist) rather than replacing what someone else wrote meanwhile.
+// A filesystem without hard links (exFAT, FAT, some SMB mounts) gets the
+// file created exclusively and written in place instead, which isn't
+// atomic: a crash can leave it partial. Either way the directory is
+// synced once the file is in it.
 func writeNewFile(path string, data []byte) (err error) {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
@@ -139,8 +149,58 @@ func writeNewFile(path string, data []byte) (err error) {
 	if err = errors.Join(err, tmp.Close()); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := os.Link(tmp.Name(), path); err != nil {
+	switch err := linkFile(tmp.Name(), path); {
+	case err == nil:
+	case noHardLinks(err):
+		if err := writeExclusive(path, data); err != nil {
+			return err
+		}
+	default:
 		return fmt.Errorf("put %s in place: %w", path, err)
+	}
+	return syncDir(dir)
+}
+
+// noHardLinks reports whether a link failed because the filesystem has no
+// hard links.
+func noHardLinks(err error) bool {
+	return errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, syscall.EPERM)
+}
+
+// writeExclusive creates path, 0600, only while nothing is there
+// (fs.ErrExist otherwise), and writes and syncs data into it. A file a
+// failed write leaves partial is removed.
+func writeExclusive(path string, data []byte) (err error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if err = errors.Join(err, f.Close()); err != nil {
+		if rmErr := os.Remove(path); rmErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove the partial %s: %w", path, rmErr))
+		}
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// syncDir makes dir's entries durable. A filesystem that can't sync a
+// directory is left to its own guarantees.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open %s to sync it: %w", dir, err)
+	}
+	err = d.Sync()
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+		err = nil
+	}
+	if err = errors.Join(err, d.Close()); err != nil {
+		return fmt.Errorf("sync %s: %w", dir, err)
 	}
 	return nil
 }

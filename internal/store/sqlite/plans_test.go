@@ -242,6 +242,17 @@ func TestQueryPlans(t *testing.T) {
 			want: []string{"SEARCH bookmarks USING COVERING INDEX idx_bookmarks_tenant_created (tenant_id=?)"},
 		},
 		{
+			// Driven by the URLs given, each looked up in the unique
+			// indexes Ingest's inserts conflict on.
+			name:  "PreviewIngest",
+			query: previewIngestSQL, args: []any{"local", "local", store.SourceChrome, `["https://example.com/a"]`},
+			first: "SCAN j",
+			want: []string{
+				"SEARCH d USING COVERING INDEX sqlite_autoindex_documents_2 (tenant_id=? AND url=?)",
+				"SEARCH b USING COVERING INDEX sqlite_autoindex_bookmarks_2 (tenant_id=? AND url=? AND source=?)",
+			},
+		},
+		{
 			name:  "TagsForDocument",
 			query: tagsForDocumentSQL, args: []any{"local", "doc"},
 			want: []string{"SEARCH bookmarks USING INDEX idx_bookmarks_document (document_id=?)"},

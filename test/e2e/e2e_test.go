@@ -33,6 +33,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/setup/setuptest"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/migrations"
@@ -42,7 +43,7 @@ import (
 var daemonBin string
 
 func TestMain(m *testing.M) {
-	os.Exit(buildAndRun(m))
+	os.Exit(setuptest.WithoutBrowsers(func() int { return buildAndRun(m) }))
 }
 
 func buildAndRun(m *testing.M) int {

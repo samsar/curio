@@ -17,6 +17,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/importer"
 	"github.com/samsar/curio/internal/service"
 	"github.com/samsar/curio/internal/service/servicetest"
 	"github.com/samsar/curio/internal/setup"
@@ -48,6 +49,12 @@ type harness struct {
 	// service is what the daemon's controller gets; the agent unless a
 	// test says otherwise.
 	service service.Manager
+	// sources are the bookmarks the import step finds; none unless a test
+	// says otherwise.
+	sources func() []importer.Source
+	// ytdlpMarker makes the fake daemons started after it exists route
+	// YouTube videos to yt-dlp (setuptest.YTDLPMarkerVar).
+	ytdlpMarker string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -57,15 +64,19 @@ func newHarness(t *testing.T) *harness {
 	t.Setenv("CURIO_DAEMON_BIN", exe)
 	t.Setenv(setuptest.DaemonVar, "1") // what a spawned curio-daemon runs as
 	t.Setenv(setuptest.DaemonVersionVar, "")
+	marker := filepath.Join(t.TempDir(), "yt-dlp-installed")
+	t.Setenv(setuptest.YTDLPMarkerVar, marker)
 	h := &harness{
-		t:         t,
-		home:      filepath.Join(t.TempDir(), "curio"),
-		listen:    freeAddr(t),
-		exe:       exe,
-		ollama:    setuptest.NewOllama(t, "0.34.4"),
-		installer: setuptest.NewInstaller(),
-		probe:     setuptest.NewProbe(),
-		agent:     servicetest.New(t, service.BaseLabel+".test"),
+		t:           t,
+		home:        filepath.Join(t.TempDir(), "curio"),
+		listen:      freeAddr(t),
+		exe:         exe,
+		ollama:      setuptest.NewOllama(t, "0.34.4"),
+		installer:   setuptest.NewInstaller(),
+		probe:       setuptest.NewProbe(),
+		agent:       servicetest.New(t, service.BaseLabel+".test"),
+		sources:     setuptest.NoSources,
+		ytdlpMarker: marker,
 	}
 	h.defaults = config.Default()
 	h.defaults.Daemon.Listen = h.listen
@@ -113,6 +124,7 @@ func (h *harness) deps(ui setup.UI) setup.Deps {
 		Installer: h.installer,
 		Connect:   h.connect,
 		Defaults:  &h.defaults,
+		Sources:   h.sources,
 		Timeouts:  setup.Timeouts{Probe: 2 * time.Second, Start: 5 * time.Second, Download: 5 * time.Second, Poll: 20 * time.Millisecond},
 	}
 }
@@ -175,6 +187,27 @@ func (h *harness) writeHome(generation string) *curiohome.Home {
 		h.listen, h.ollama.URL, generation, h.ollama.URL)
 	require.NoError(h.t, os.WriteFile(home.ConfigPath(), []byte(cfg), 0o600))
 	return home
+}
+
+// installYTDLP makes the fake daemons started from now on find yt-dlp.
+func (h *harness) installYTDLP() {
+	h.t.Helper()
+	require.NoError(h.t, os.WriteFile(h.ytdlpMarker, nil, 0o600))
+}
+
+// bookmarksFile writes an exported bookmarks file holding urls and returns
+// its path.
+func bookmarksFile(t *testing.T, urls ...string) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n")
+	for i, u := range urls {
+		fmt.Fprintf(&b, "<DT><A HREF=%q>Page %d</A>\n", u, i)
+	}
+	b.WriteString("</DL><p>\n")
+	path := filepath.Join(t.TempDir(), "bookmarks.html")
+	require.NoError(t, os.WriteFile(path, []byte(b.String()), 0o600))
+	return path
 }
 
 // changes counts the agent's calls that change something.

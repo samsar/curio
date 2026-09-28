@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 	case "command":
 		os.Exit(fakeCommand())
 	}
-	os.Exit(m.Run())
+	os.Exit(setuptest.WithoutBrowsers(m.Run))
 }
 
 // fakeBrew answers `brew list --versions <formula>` as its mode says.

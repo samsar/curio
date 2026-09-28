@@ -38,13 +38,29 @@ const (
 // places.sqlite, discovered via profiles.ini. Returns "" if Firefox isn't
 // installed or the file doesn't exist. Honors CURIO_FIREFOX_DIR for tests.
 func FirefoxBookmarksPath() string {
-	root := firefoxRoot()
-	if root == "" {
+	p, err := firefoxPlaces()
+	if err != nil {
 		return ""
 	}
-	rel := firefoxDefaultProfileRel(root)
+	return p
+}
+
+// firefoxPlaces is the default profile's places.sqlite, found through
+// profiles.ini, or why it can't be: an error matching fs.ErrNotExist when
+// Firefox, its default profile or the file isn't there.
+func firefoxPlaces() (string, error) {
+	root := firefoxRoot()
+	if root == "" {
+		return "", fmt.Errorf("no Firefox profiles directory on %s: %w", runtime.GOOS, fs.ErrNotExist)
+	}
+	iniPath := filepath.Join(root, "profiles.ini")
+	ini, err := parseINI(iniPath)
+	if err != nil {
+		return "", err
+	}
+	rel := firefoxDefaultProfileRel(ini)
 	if rel == "" {
-		return ""
+		return "", fmt.Errorf("%s names no profile: %w", iniPath, fs.ErrNotExist)
 	}
 	profDir := rel
 	if !filepath.IsAbs(profDir) {
@@ -52,9 +68,9 @@ func FirefoxBookmarksPath() string {
 	}
 	p := filepath.Join(profDir, "places.sqlite")
 	if _, err := os.Stat(p); err != nil {
-		return ""
+		return "", err
 	}
-	return p
+	return p, nil
 }
 
 func firefoxRoot() string {
@@ -78,12 +94,11 @@ func firefoxRoot() string {
 	return ""
 }
 
-// firefoxDefaultProfileRel reads profiles.ini and returns the relative (or
-// absolute) path of the profile to use. Modern Firefox is per-install, so we
+// firefoxDefaultProfileRel returns the relative (or absolute) path of the
+// profile profiles.ini says to use. Modern Firefox is per-install, so we
 // prefer the [Install*] section's Default (what the running browser uses),
 // then fall back to a [Profile*] marked Default=1, then the first profile.
-func firefoxDefaultProfileRel(root string) string {
-	ini := parseINI(filepath.Join(root, "profiles.ini"))
+func firefoxDefaultProfileRel(ini map[string]map[string]string) string {
 	sections := slices.Sorted(maps.Keys(ini)) // deterministic
 
 	for _, s := range sections {
@@ -110,13 +125,12 @@ func firefoxDefaultProfileRel(root string) string {
 	return ""
 }
 
-// parseINI parses a flat INI file into section→key→value. Returns an empty
-// map on any read error (caller treats that as "no Firefox").
-func parseINI(path string) map[string]map[string]string {
+// parseINI parses a flat INI file into section→key→value.
+func parseINI(path string) (map[string]map[string]string, error) {
 	out := map[string]map[string]string{}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return out
+		return nil, err
 	}
 	section := ""
 	for line := range strings.SplitSeq(string(b), "\n") {
@@ -136,7 +150,7 @@ func parseINI(path string) map[string]map[string]string {
 			out[section][strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // ParseFirefox reads a Firefox places.sqlite and returns its bookmarks.

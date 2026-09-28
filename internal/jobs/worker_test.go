@@ -802,6 +802,7 @@ func TestWorker_GentleThrottle(t *testing.T) {
 	opts := slowPolls
 	opts.Gate = gate
 	p := startBlockingPool(t, q, store.JobKindFetch, 8, opts)
+	gentleFetchCap, _ := store.ThrottleGentle.Cap(store.JobKindFetch)
 
 	require.Eventually(t, func() bool { running, _ := p.counts(); return running == gentleFetchCap },
 		5*time.Second, time.Millisecond)

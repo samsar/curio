@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -301,14 +302,17 @@ func TestParseSafari_MalformedPlist(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestSafariBookmarksPath(t *testing.T) {
+func TestSafariPlist(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CURIO_SAFARI_DIR", dir)
+	want := filepath.Join(dir, "Bookmarks.plist")
 
-	// No file yet — should return empty.
-	assert.Equal(t, "", SafariBookmarksPath())
+	path, err := SafariPlist()
+	require.ErrorIs(t, err, fs.ErrNotExist, "no file yet")
+	assert.Equal(t, want, path)
 
-	// Create the file.
-	mustWrite(t, filepath.Join(dir, "Bookmarks.plist"), "placeholder")
-	assert.Equal(t, filepath.Join(dir, "Bookmarks.plist"), SafariBookmarksPath())
+	mustWrite(t, want, "placeholder")
+	path, err = SafariPlist()
+	require.NoError(t, err)
+	assert.Equal(t, want, path)
 }

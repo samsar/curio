@@ -37,16 +37,22 @@ Disk Access if you get a permission error.`,
 
 			path := filePath
 			if path == "" {
-				path = importer.SafariBookmarksPath()
-				if path == "" {
+				var err error
+				path, err = importer.SafariPlist()
+				switch {
+				case errors.Is(err, fs.ErrPermission):
+					return needsFullDiskAccess(err)
+				case errors.Is(err, fs.ErrNotExist):
 					return errors.New("safari bookmarks not found (is this macOS?); use --file to specify a path")
+				case err != nil:
+					return err
 				}
 			}
 
 			// An *os.PathError already names the file.
 			f, err := os.Open(path)
 			if errors.Is(err, fs.ErrPermission) {
-				return fmt.Errorf("%w\n\nGrant Full Disk Access to your terminal in System Settings → Privacy & Security", err)
+				return needsFullDiskAccess(err)
 			}
 			if err != nil {
 				return err
@@ -65,4 +71,11 @@ Disk Access if you get a permission error.`,
 	cmd.Flags().StringVar(&filePath, "file", "", "Path to an arbitrary Bookmarks.plist file")
 	attachImportFlags(cmd, &flags)
 	return cmd
+}
+
+// needsFullDiskAccess is a permission error reading Safari's bookmarks,
+// which macOS withholds, stat included, from a terminal app without Full
+// Disk Access.
+func needsFullDiskAccess(err error) error {
+	return fmt.Errorf("%w\n\nGrant Full Disk Access to your terminal in System Settings → Privacy & Security", err)
 }

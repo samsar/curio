@@ -2,19 +2,24 @@ package setuptest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/importer"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -27,6 +32,16 @@ const (
 	// DaemonVersionVar is the version the fake daemon reports; this
 	// curio's when unset.
 	DaemonVersionVar = "CURIO_SETUPTEST_DAEMON_VERSION"
+	// YTDLPMarkerVar names a file whose presence, as the fake daemon
+	// starts, makes it route YouTube videos to YTDLPPath, as a daemon
+	// that found yt-dlp does: a test's installer makes it for `brew
+	// install yt-dlp`, never the host's PATH.
+	YTDLPMarkerVar = "CURIO_SETUPTEST_YTDLP_MARKER"
+	// YTDLPPath is the yt-dlp the fake daemon reports.
+	YTDLPPath = "/opt/homebrew/bin/yt-dlp"
+	// requestLog is the file in the home's logs the fake daemon records
+	// each request that changes something in, one line each.
+	requestLog = "setuptest-daemon.log"
 )
 
 // RunDaemonIfAsked runs this test binary as the fake daemon when
@@ -35,8 +50,11 @@ const (
 //
 // The fake is curio-daemon as far as curio up and the CLI see it: it
 // holds the home's lock ($CURIO_HOME), and serves, on config.yaml's
-// daemon.listen, a healthz naming itself, its version and config.yaml's
-// writing model, and the stats and queue the status reads, until SIGTERM.
+// daemon.listen, a healthz naming itself, its version, config.yaml's
+// writing model and its YouTube route (YTDLPMarkerVar); stats reporting a
+// library of 3 bookmarks; the queue, whose settings it keeps; and imports,
+// counting every valid URL as new, until SIGTERM. What changes something
+// is recorded in the home's logs (DaemonRequests).
 func RunDaemonIfAsked() (exitCode int, asked bool) {
 	if os.Getenv(DaemonVar) == "" {
 		return 0, false
@@ -75,7 +93,15 @@ func runDaemon() error {
 	if v == "" {
 		v = version.String()
 	}
-	srv := &http.Server{Handler: daemonAPI(home.Path, v, cfg), ReadHeaderTimeout: time.Second}
+	ytdlp := ""
+	if marker := os.Getenv(YTDLPMarkerVar); marker != "" {
+		if _, err := os.Stat(marker); err == nil {
+			ytdlp = YTDLPPath
+		}
+	}
+	fake := &fakeDaemon{home: home, version: v, cfg: cfg, ytdlp: ytdlp,
+		queue: map[string]any{"paused": false, "throttle": "normal", "keep_awake": false}}
+	srv := &http.Server{Handler: fake, ReadHeaderTimeout: time.Second}
 	defer func() { _ = srv.Close() }() // the process ends with it
 	go func() { _ = srv.Serve(ln) }()  // Serve ends when srv closes
 	select {
@@ -85,21 +111,124 @@ func runDaemon() error {
 	return nil
 }
 
-// daemonAPI is the part of the daemon's API the fake serves.
-func daemonAPI(home, v string, cfg config.Config) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/v1/healthz":
-			writeJSON(w, map[string]any{"status": "ok", "pid": os.Getpid(), "home": home, "version": v,
-				"generation_model": cfg.Generation.Model, "embedding_model": cfg.Embedding.Model,
-				"embedding_dim": cfg.Embedding.Dim, "ollama_reachable": true, "upstreams": []any{}})
-		case r.URL.Path == "/v1/stats":
-			writeJSON(w, map[string]any{"version": v, "bookmarks_total": 3, "documents_total": 3})
-		case strings.HasPrefix(r.URL.Path, "/v1/queue"):
-			writeJSON(w, map[string]any{"paused": false, "throttle": "normal", "state": "open",
-				"kinds": []map[string]any{{"kind": "fetch", "limit": 16}, {"kind": "index", "limit": 4}}})
-		default:
-			http.NotFound(w, r)
+// fakeDaemon is the part of the daemon's API the fake serves.
+type fakeDaemon struct {
+	home    *curiohome.Home
+	version string
+	cfg     config.Config
+	ytdlp   string
+
+	mu    sync.Mutex
+	queue map[string]any // paused, throttle, schedule, keep_awake
+}
+
+func (f *fakeDaemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/v1/healthz":
+		health := map[string]any{"status": "ok", "pid": os.Getpid(), "home": f.home.Path, "version": f.version,
+			"generation_model": f.cfg.Generation.Model, "embedding_model": f.cfg.Embedding.Model,
+			"embedding_dim": f.cfg.Embedding.Dim, "ollama_reachable": true, "upstreams": []any{}}
+		if f.ytdlp != "" {
+			health["youtube_fetcher"] = f.ytdlp
 		}
-	})
+		writeJSON(w, health)
+	case r.URL.Path == "/v1/stats":
+		writeJSON(w, map[string]any{"version": f.version, "bookmarks_total": 3, "documents_total": 3})
+	case r.URL.Path == "/v1/queue":
+		f.serveQueue(w, r)
+	case r.URL.Path == "/v1/bookmarks/import" && r.Method == http.MethodPost:
+		f.serveImport(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// serveQueue reports the queue, open whatever its settings, after a PUT's
+// changes.
+func (f *fakeDaemon) serveQueue(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r.Method == http.MethodPut {
+		var u map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		maps.Copy(f.queue, u)
+		if f.queue["schedule"] == "off" {
+			delete(f.queue, "schedule")
+		}
+		f.record(r, u)
+	}
+	q := maps.Clone(f.queue)
+	q["state"] = "open"
+	q["kinds"] = []map[string]any{{"kind": "fetch", "limit": 16}, {"kind": "index", "limit": 4}}
+	writeJSON(w, q)
+}
+
+// serveImport counts an import's bookmarks as the daemon would with an
+// empty library: every one the filter keeps, once, is created and fetched.
+func (f *fakeDaemon) serveImport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Source    string `json:"source"`
+		DryRun    bool   `json:"dry_run"`
+		Bookmarks []struct {
+			URL string `json:"url"`
+		} `json:"bookmarks"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	resp := map[string]any{"source": req.Source, "total": len(req.Bookmarks), "dry_run": req.DryRun}
+	var created []string
+	seen := map[string]bool{}
+	filtered, skipped := 0, 0
+	for _, b := range req.Bookmarks {
+		norm, why := importer.Classify(b.URL)
+		switch {
+		case why != "":
+			filtered++
+		case seen[norm]:
+			skipped++
+		default:
+			seen[norm] = true
+			created = append(created, norm)
+		}
+	}
+	resp["created"], resp["skipped"], resp["filtered"], resp["jobs_enqueued"] = len(created), skipped, filtered, len(created)
+	if req.DryRun {
+		resp["new_urls"] = created
+	}
+	f.mu.Lock()
+	f.record(r, map[string]any{"source": req.Source, "dry_run": req.DryRun, "created": len(created)})
+	f.mu.Unlock()
+	writeJSON(w, resp)
+}
+
+// record appends the request and what it carried to the request log; the
+// log is the tests', and a failure to write it loses only that.
+func (f *fakeDaemon) record(r *http.Request, what map[string]any) {
+	line, err := json.Marshal(what)
+	if err != nil {
+		return
+	}
+	log, err := os.OpenFile(filepath.Join(f.home.Path, curiohome.LogsDirName, requestLog),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer log.Close()
+	_, _ = fmt.Fprintf(log, "%s %s %s\n", r.Method, r.URL.Path, line)
+}
+
+// DaemonRequests are the requests that changed something that the fake
+// daemons serving home received, in order: "PUT /v1/queue {...}", "POST
+// /v1/bookmarks/import {...}".
+func DaemonRequests(home string) []string {
+	data, err := os.ReadFile(filepath.Join(home, curiohome.LogsDirName, requestLog))
+	if err != nil {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 }

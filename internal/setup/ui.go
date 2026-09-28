@@ -30,14 +30,25 @@ type UI interface {
 	Select(ctx context.Context, prompt string, options []string, def int) (int, error)
 	// Input asks for a line of text, def by default.
 	Input(ctx context.Context, prompt, def string) (string, error)
-	// Progress starts reporting the progress of one piece of work.
-	Progress(title string) Progress
+	// Progress starts reporting the progress of one piece of work,
+	// counted in unit.
+	Progress(title string, unit Unit) Progress
 	// Info and Warn say one line.
 	Info(msg string)
 	Warn(msg string)
 	// Output is where the commands curio runs write, live.
 	Output() io.Writer
 }
+
+// Unit is what a Progress counts.
+type Unit int
+
+const (
+	// Bytes: a download, shown as sizes, "7.6 GB of 19 GB".
+	Bytes Unit = iota
+	// Items: things, shown as numbers, "500 of 1200".
+	Items
+)
 
 // Progress reports how far one piece of work is.
 type Progress interface {
@@ -108,15 +119,23 @@ func isTerminal(f any) bool {
 
 // yesUI answers every prompt of the UI it wraps as --yes does: a yes to
 // every confirmation, the default to everything else. It says what it
-// answered, so the output shows what was agreed to.
+// answered, so the output shows what was agreed to. Like any UI, it
+// answers nothing once the context is cancelled: ctrl-c stops a run
+// between its prompts too.
 type yesUI struct{ UI }
 
-func (u yesUI) Confirm(_ context.Context, prompt string, _ bool) (bool, error) {
+func (u yesUI) Confirm(ctx context.Context, prompt string, _ bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	u.Info(prompt + " yes (--yes)")
 	return true, nil
 }
 
-func (u yesUI) Ask(_ context.Context, prompt string, answers ...string) (int, error) {
+func (u yesUI) Ask(ctx context.Context, prompt string, answers ...string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if len(answers) == 0 {
 		return 0, errNoAnswers
 	}
@@ -124,7 +143,10 @@ func (u yesUI) Ask(_ context.Context, prompt string, answers ...string) (int, er
 	return 0, nil
 }
 
-func (u yesUI) Select(_ context.Context, prompt string, options []string, def int) (int, error) {
+func (u yesUI) Select(ctx context.Context, prompt string, options []string, def int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if def < 0 || def >= len(options) {
 		return 0, errNoAnswers
 	}
@@ -132,7 +154,10 @@ func (u yesUI) Select(_ context.Context, prompt string, options []string, def in
 	return def, nil
 }
 
-func (u yesUI) Input(_ context.Context, prompt, def string) (string, error) {
+func (u yesUI) Input(ctx context.Context, prompt, def string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	u.Info(prompt + " " + def + " (--yes)")
 	return def, nil
 }

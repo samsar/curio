@@ -85,10 +85,25 @@ func (s *testServer) createBookmark(t *testing.T, url string) (response, Bookmar
 
 func (s *testServer) importBookmarks(t *testing.T, source string, urls ...string) ImportResponse {
 	t.Helper()
-	req := ImportRequest{Source: source}
+	return s.postImport(t, importRequest(source, false, urls...))
+}
+
+// dryRun asks what importing urls from source would do.
+func (s *testServer) dryRun(t *testing.T, source string, urls ...string) ImportResponse {
+	t.Helper()
+	return s.postImport(t, importRequest(source, true, urls...))
+}
+
+func importRequest(source string, dryRun bool, urls ...string) ImportRequest {
+	req := ImportRequest{Source: source, DryRun: dryRun}
 	for _, u := range urls {
 		req.Bookmarks = append(req.Bookmarks, ImportBookmark{URL: u})
 	}
+	return req
+}
+
+func (s *testServer) postImport(t *testing.T, req ImportRequest) ImportResponse {
+	t.Helper()
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks/import", contentType: "application/json", body: string(body)})
@@ -356,4 +371,110 @@ func TestImportBookmarks_ErrorsAreCapped(t *testing.T) {
 	got := s.importBookmarks(t, store.SourceChrome, urls...)
 	assert.Len(t, got.Errors, importErrorsCap)
 	assert.Contains(t, got.Errors[0], "https://example.com/0: ")
+}
+
+// documentURLs are the URLs of the library's documents.
+func (s *testServer) documentURLs(t *testing.T) map[string]bool {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT url FROM documents`)
+	require.NoError(t, err)
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var u string
+		require.NoError(t, rows.Scan(&u))
+		out[u] = true
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// TestImportBookmarks_DryRunIsTheImport: a dry run answers what the import
+// of the same body then does, count for count, and new_urls are the
+// documents it then creates, however the batch mixes new URLs, ones the
+// source has, ones the library has from elsewhere, duplicates and URLs
+// curio can't fetch. The dry run writes nothing.
+func TestImportBookmarks_DryRunIsTheImport(t *testing.T) {
+	s := newTestServer(t)
+	s.importBookmarks(t, store.SourceChrome, "https://example.com/mine")
+	s.importBookmarks(t, store.SourceSafari, "https://example.com/theirs")
+	s.seedDocument(t, "https://example.com/doc-only", store.DocStateFetched)
+	batch := []string{
+		"https://example.com/new-1",
+		"https://example.com/mine",
+		"https://example.com/theirs",
+		"https://example.com/doc-only",
+		"javascript:alert(1)",
+		"HTTPS://Example.COM/new-1",                 // the same URL, normalized
+		"https://example.com/new-2?utm_source=feed", // new-2 once its tracking is dropped
+		"https://example.com/new-2",
+		"file:///etc/hosts",
+		"https://example.com/theirs",
+	}
+	before := [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, "jobs")}
+	docsBefore := s.documentURLs(t)
+
+	preview := s.dryRun(t, store.SourceChrome, batch...)
+	assert.Equal(t, before, [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, "jobs")},
+		"a dry run writes nothing")
+	assert.True(t, preview.DryRun)
+	assert.Equal(t, []string{"https://example.com/new-1", "https://example.com/new-2"}, preview.NewURLs)
+	assert.Equal(t, len(preview.NewURLs), preview.JobsEnqueued)
+
+	got := s.importBookmarks(t, store.SourceChrome, batch...)
+	assert.False(t, got.DryRun)
+	assert.Empty(t, got.NewURLs, "only a dry run lists them")
+	want := preview
+	want.DryRun, want.NewURLs = false, nil
+	assert.Equal(t, want, got)
+	assert.Equal(t, ImportResponse{Source: store.SourceChrome, Total: 10, Created: 4, Skipped: 4, Filtered: 2,
+		JobsEnqueued: 2, FilteredBy: map[importer.FilterReason]int{importer.ReasonJavaScript: 1,
+			importer.ReasonLocalFile: 1}}, got)
+
+	created := []string{}
+	for u := range s.documentURLs(t) {
+		if !docsBefore[u] {
+			created = append(created, u)
+		}
+	}
+	assert.ElementsMatch(t, preview.NewURLs, created)
+	again := s.dryRun(t, store.SourceChrome, batch...)
+	assert.Zero(t, again.Created, "the import done, nothing is new")
+	assert.Empty(t, again.NewURLs)
+}
+
+// TestImportBookmarks_DryRunAtScale: ten thousand bookmarks, two thousand
+// the source has and a thousand the library has from another source, are
+// counted in one request, exactly.
+func TestImportBookmarks_DryRunAtScale(t *testing.T) {
+	s := newTestServer(t)
+	urls := make([]string, 10_000)
+	for i := range urls {
+		urls[i] = fmt.Sprintf("https://example.com/page/%d", i)
+	}
+	s.importBookmarks(t, store.SourceChrome, urls[:2000]...)
+	s.importBookmarks(t, store.SourceSafari, urls[2000:3000]...)
+	before := [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, "jobs")}
+
+	got := s.dryRun(t, store.SourceChrome, urls...)
+	assert.Equal(t, 10_000, got.Total)
+	assert.Equal(t, 2000, got.Skipped)
+	assert.Equal(t, 8000, got.Created)
+	assert.Equal(t, 7000, got.JobsEnqueued)
+	assert.Equal(t, urls[3000:], got.NewURLs)
+	assert.Equal(t, before, [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, "jobs")})
+}
+
+// TestImportBookmarks_DryRunValidates: a dry run is held to the import's
+// rules: a known source and a non-empty list.
+func TestImportBookmarks_DryRunValidates(t *testing.T) {
+	s := newTestServer(t)
+	for _, body := range []string{
+		`{"source":"opera","dry_run":true,"bookmarks":[{"url":"https://example.com/a"}]}`,
+		`{"source":"chrome","dry_run":true,"bookmarks":[]}`,
+	} {
+		resp := s.do(t, request{method: http.MethodPost, path: "/v1/bookmarks/import", contentType: "application/json",
+			body: body})
+		assertProblem(t, resp, http.StatusBadRequest)
+	}
 }

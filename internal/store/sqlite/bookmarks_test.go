@@ -260,3 +260,55 @@ func TestBookmarks_ListFolder(t *testing.T) {
 		})
 	}
 }
+
+// TestBookmarks_PreviewIngest: each URL is reported as Ingest would find
+// it, for the tenant and the source asked about, and nothing is written.
+func TestBookmarks_PreviewIngest(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	_, err := bms.Ingest(ctx, newIngestBookmark("https://x/chrome", store.SourceChrome))
+	require.NoError(t, err)
+	_, err = bms.Ingest(ctx, newIngestBookmark("https://x/safari", store.SourceSafari))
+	require.NoError(t, err)
+	require.NoError(t, NewDocuments(db).Create(ctx, &store.Document{TenantID: "local", URL: "https://x/doc-only"}))
+	other := newIngestBookmark("https://x/other-tenant", store.SourceChrome)
+	other.TenantID = "other"
+	_, err = bms.Ingest(ctx, other)
+	require.NoError(t, err)
+	before := countIngestRows(t, db)
+
+	got, err := bms.PreviewIngest(ctx, "local", store.SourceChrome, []string{
+		"https://x/chrome", "https://x/safari", "https://x/doc-only", "https://x/other-tenant", "https://x/new",
+		"https://x/new",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]store.IngestPreview{
+		"https://x/chrome":       {DocumentExists: true, BookmarkExists: true},
+		"https://x/safari":       {DocumentExists: true},
+		"https://x/doc-only":     {DocumentExists: true},
+		"https://x/other-tenant": {},
+		"https://x/new":          {},
+	}, got)
+	assert.Equal(t, before, countIngestRows(t, db), "nothing written")
+
+	got, err = bms.PreviewIngest(ctx, "other", store.SourceChrome, []string{"https://x/other-tenant", "https://x/chrome"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]store.IngestPreview{
+		"https://x/other-tenant": {DocumentExists: true, BookmarkExists: true},
+		"https://x/chrome":       {},
+	}, got, "scoped to the tenant")
+}
+
+// TestBookmarks_PreviewIngestEmpty: no URLs, no query: a closed database
+// isn't asked.
+func TestBookmarks_PreviewIngestEmpty(t *testing.T) {
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	require.NoError(t, db.Close())
+	got, err := bms.PreviewIngest(context.Background(), "local", store.SourceChrome, nil)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	_, err = bms.PreviewIngest(context.Background(), "local", store.SourceChrome, []string{"https://x/a"})
+	require.Error(t, err, "a URL is asked about")
+}

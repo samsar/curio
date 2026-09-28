@@ -72,7 +72,7 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 		p.notes = append(p.notes, "the Mac couldn't be probed, so curio picks for the smallest tier")
 	}
 	embedding := w.newEmbeddingModel()
-	if hs.kind == homeOurs && !w.freshPending() && hs.metaErr == nil {
+	if hs.kind == homeOurs && !w.freshPending() && hs.metaErr == nil && w.formatRefused(hs) == nil {
 		embedding = hs.meta.EmbeddingModel
 	}
 	p.embedding = wanted{knownModel(embedding), cfg.Embedding.BaseURL}
@@ -149,6 +149,9 @@ func (w *world) missing(ctx context.Context, p picks) ([]wanted, error) {
 // takes the ones that aren't.
 func (w *world) checkModels(ctx context.Context) Result {
 	hs := w.readHome()
+	if err := w.formatRefused(hs); err != nil {
+		return Result{Status: Warn, Detail: "not checked: " + err.Error() + " (see the curio home check)"}
+	}
 	p, err := w.pick(ctx, hs)
 	if err != nil {
 		return Result{Status: Fail, Detail: err.Error(), Notes: p.notes}
@@ -164,7 +167,7 @@ func (w *world) checkModels(ctx context.Context) Result {
 		res.Fix = &Fix{Summary: "pull " + sized(p.all()) + ", whichever Ollama lacks once it answers"}
 	case len(missing) > 0:
 		machine, _ := w.probeMachine(ctx) // the machine check reports a failed probe; its volumes are then unknown
-		if short := diskShortage(machine, models(missing), hs.kind != homeOurs || w.freshPending()); short != "" {
+		if short := diskShortage(machine, models(missing)); short != "" {
 			return Result{Status: Fail, Detail: "not enough disk space: " + short, Notes: p.notes,
 				Hint: "free up space, or pick a smaller writing model with --generation-model"}
 		}
@@ -255,7 +258,7 @@ func (s *modelsStep) Apply(ctx context.Context, ui UI) error {
 		return err
 	}
 	machine, _ := w.probeMachine(ctx) // a failed probe was reported by the machine check
-	if short := diskShortage(machine, models(missing), hs.kind != homeOurs || w.freshPending()); short != "" {
+	if short := diskShortage(machine, models(missing)); short != "" {
 		return errors.New("not enough disk space: " + short)
 	}
 	for _, m := range missing {
@@ -275,7 +278,7 @@ func pull(ctx context.Context, ui UI, m wanted) error {
 	}
 	type layer struct{ completed, total int64 }
 	layers := map[string]layer{}
-	bar := ui.Progress("pulling " + m.Name)
+	bar := ui.Progress("pulling "+m.Name, Bytes)
 	err = c.Pull(ctx, func(p ollama.PullProgress) {
 		if p.Digest == "" || p.Total <= 0 {
 			return

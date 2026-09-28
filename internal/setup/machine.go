@@ -140,32 +140,40 @@ func Assess(m Machine) Verdict {
 // logs.
 const diskMargin = 2 * GiB
 
-// diskShortage returns why the disk can't take the missing models (their
-// sizes plus diskMargin on the models volume) and, when it is another
-// volume, a new home (diskMargin); "" when it can. A model of unknown size
-// counts only the margin and is said to be of unknown size; a volume the
-// probe couldn't measure isn't judged.
-func diskShortage(m Machine, missing []Model, newHome bool) string {
-	var problems []string
-	if m.Models.Known() && len(missing) > 0 {
-		need := uint64(diskMargin)
-		names := make([]string, 0, len(missing))
-		for _, mod := range missing {
-			need += mod.Size
-			size := "size unknown"
-			if mod.Size > 0 {
-				size = FormatSize(mod.Size)
-			}
-			names = append(names, fmt.Sprintf("%s (%s)", mod.Name, size))
-		}
-		if m.Models.Free < need {
-			problems = append(problems, fmt.Sprintf("the volume of %s has %s free, and %s need %s with a 2 GiB margin",
-				m.Models.Path, FormatSize(m.Models.Free), strings.Join(names, " and "), FormatSize(need)))
-		}
+// diskShortage returns why the models volume can't take the missing
+// models, their sizes plus diskMargin, or "" when it can. A model of
+// unknown size counts only the margin and is said to be of unknown size;
+// a volume the probe couldn't measure isn't judged. The home's own need is
+// the home check's (newHomeShortage).
+func diskShortage(m Machine, missing []Model) string {
+	if !m.Models.Known() || len(missing) == 0 {
+		return ""
 	}
-	if newHome && m.Home.Known() && m.Home.ID != m.Models.ID && m.Home.Free < diskMargin {
-		problems = append(problems, fmt.Sprintf("the volume of %s has %s free, and a new curio home needs 2 GiB",
-			m.Home.Path, FormatSize(m.Home.Free)))
+	need := uint64(diskMargin)
+	names := make([]string, 0, len(missing))
+	for _, mod := range missing {
+		need += mod.Size
+		size := "size unknown"
+		if mod.Size > 0 {
+			size = FormatSize(mod.Size)
+		}
+		names = append(names, fmt.Sprintf("%s (%s)", mod.Name, size))
 	}
-	return strings.Join(problems, "; ")
+	if m.Models.Free >= need {
+		return ""
+	}
+	return fmt.Sprintf("the volume of %s has %s free, and %s need %s with a 2 GiB margin",
+		m.Models.Path, FormatSize(m.Models.Free), strings.Join(names, " and "), FormatSize(need))
+}
+
+// newHomeShortage returns why the home's volume can't take a new home,
+// diskMargin, or "" when it can or the probe couldn't measure it. On the
+// models' volume the margin the missing models keep is that same 2 GiB,
+// so the two checks never count it twice.
+func newHomeShortage(m Machine) string {
+	if !m.Home.Known() || m.Home.Free >= diskMargin {
+		return ""
+	}
+	return fmt.Sprintf("the volume of %s has %s free, and a new curio home needs 2 GiB",
+		m.Home.Path, FormatSize(m.Home.Free))
 }
