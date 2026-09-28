@@ -48,12 +48,16 @@ func (c *Controller) Install(ctx context.Context) (changed bool, err error) {
 
 // install is Install's part under the start lock.
 func (c *Controller) install(ctx context.Context) (bool, error) {
+	spec := service.Spec{Program: c.DaemonBin}
 	st, err := c.Status(ctx)
 	switch {
 	case err != nil:
 		return false, err
 	case st.ServiceErr != nil:
 		return false, st.ServiceErr
+	case !st.Service.Supported:
+		// The manager's refusal says why, and no daemon is stopped for it.
+		return c.Service.Install(ctx, spec)
 	case st.State == Legacy:
 		return false, c.legacyStopError(st.PID)
 	case st.State == Running && !st.Managed():
@@ -61,7 +65,7 @@ func (c *Controller) install(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("stop the running curio-daemon, so its launchd agent's can take over: %w", err)
 		}
 	}
-	return c.Service.Install(ctx, service.Spec{Program: c.DaemonBin})
+	return c.Service.Install(ctx, spec)
 }
 
 // Uninstall removes the daemon's agent from the service manager, which

@@ -58,6 +58,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 func newRootCmd() *cobra.Command {
+	return newRootCmdWith(daemonctl.Discover)
+}
+
+// newRootCmdWith is the root command over discover, which finds the home
+// and its daemon for the --curio-home and --daemon-url given. Tests wrap
+// daemonctl.Discover to give the controller a fake service manager.
+func newRootCmdWith(discover func(home, daemonURL string) (daemonctl.Env, error)) *cobra.Command {
 	var (
 		daemonURL string
 		homeFlag  string
@@ -77,7 +84,7 @@ over HTTP; auto-starts the daemon if it's not running.`,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			var err error
-			env, err = daemonctl.Discover(homeFlag, daemonURL)
+			env, err = discover(homeFlag, daemonURL)
 			if err != nil {
 				return err
 			}
