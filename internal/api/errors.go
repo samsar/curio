@@ -90,30 +90,39 @@ func errorStatus(err error) (int, string) {
 	}
 }
 
-// writeError answers a handler's error as a problem. A server error is
-// logged once with its request ID, since its detail is all the client
-// gets. The detail keeps the raw error text: the API's clients are the
-// local operator's own tools (docs/decisions.md "Local API").
+// writeError answers a handler's error as a problem. The detail keeps the
+// raw error text: the API's clients are the local operator's own tools
+// (docs/decisions.md "Local API").
+func (d Deps) writeError(w http.ResponseWriter, r *http.Request, err error) {
+	status, title := d.reportError(r, err)
+	writeProblem(w, r, status, title, err.Error())
+}
+
+// reportError classifies err, from serving r, into the status and title
+// it is answered with (errorStatus), and logs a server error once with the
+// request ID, since the answer's detail is all the client gets. Problems
+// and pages both report through it.
 //
 // When the client has already gone, the error is almost always the
 // cancellation itself, so it is logged at info as a 499 rather than as a
 // daemon failure.
-func (d Deps) writeError(w http.ResponseWriter, r *http.Request, err error) {
-	status, title := errorStatus(err)
-	if status >= http.StatusInternalServerError {
-		level := slog.LevelError
-		if r.Context().Err() != nil {
-			level, status, title = slog.LevelInfo, statusClientClosedRequest, "client closed request"
-		}
-		d.Log.Log(r.Context(), level, "request failed",
-			"request_id", middleware.GetReqID(r.Context()),
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", status,
-			"err", err,
-		)
+func (d Deps) reportError(r *http.Request, err error) (status int, title string) {
+	status, title = errorStatus(err)
+	if status < http.StatusInternalServerError {
+		return status, title
 	}
-	writeProblem(w, r, status, title, err.Error())
+	level := slog.LevelError
+	if r.Context().Err() != nil {
+		level, status, title = slog.LevelInfo, statusClientClosedRequest, "client closed request"
+	}
+	d.Log.Log(r.Context(), level, "request failed",
+		"request_id", middleware.GetReqID(r.Context()),
+		"method", r.Method,
+		"path", r.URL.Path,
+		"status", status,
+		"err", err,
+	)
+	return status, title
 }
 
 // writeLookupError reports a failure to load the kind of resource the
