@@ -6552,17 +6552,22 @@ Jina and is hostile.
 - No template holds inline script, inline style, an event handler,
   `hx-on`, `hx-vars` or a `javascript:` URL (`TestTemplatesHaveNoInlineCode`),
   and every page test checks the HTML inert with `internal/ui/uitest`.
-- Stored markdown goes through goldmark with GFM and without
-  `html.WithUnsafe`, so raw HTML is left out. An AST transformer then
-  resolves every link and image against the document's URL
-  (`url_canonical`, else `url`), after resolving character references as
-  the renderer will (`&#106;avascript:` is `javascript:`): a relative
-  link would otherwise resolve against the daemon. Links, images and
-  autolinks keep only http and https URLs with a host, and mailto ones;
-  any other becomes its text. An http URL without a host
-  (`[x](http:/ui/search)`, `<http:/v1/stats>`) is a relative one to a
-  browser on an http page: it would open the daemon's own
-  `/ui/search`. bluemonday's UGC allow-list then sanitizes the HTML,
+- Stored markdown goes through goldmark with three of GFM's extensions,
+  tables, strikethrough and task lists, and without `html.WithUnsafe`,
+  so raw HTML is left out. The fourth, Linkify, is left out: a web or
+  email address written out without link markup stays text, since its
+  regexps scan from every space at a cost the formatting budgets can't
+  charge (see "Dashboard: formatting budgets for stored markdown"). An
+  AST transformer then resolves every link and image against the
+  document's URL (`url_canonical`, else `url`), after resolving
+  character references as the renderer will (`&#106;avascript:` is
+  `javascript:`): a relative link would otherwise resolve against the
+  daemon. Links, images and autolinks keep only http and https URLs with
+  a host, and mailto ones; any other becomes its text. What an image
+  holds, a link or another image, is written only as its text. An http
+  URL without a host (`[x](http:/ui/search)`, `<http:/v1/stats>`) is a
+  relative one to a browser on an http page: it would open the daemon's
+  own `/ui/search`. bluemonday's UGC allow-list then sanitizes the HTML,
   allowing those schemes, requiring a host for http and https again, and
   no relative URL, and giving links `rel="nofollow noreferrer noopener"`
   and `target="_blank"`. Its output is the only conversion to one of
@@ -6619,8 +6624,9 @@ to `img-src`; http and `data:` images stay links or text.
 when the first line is longer. A cut page says so and names the markdown
 file; `GET /v1/documents/{id}/content` has the whole text. The cap alone
 doesn't bound the cost: goldmark does far more than linear work on some
-shapes a stored page can hold, and a text over the formatting budgets is
-shown as stored instead (see "Dashboard: formatting budgets for stored
+shapes a stored page can hold. A text over the formatting budgets, or
+whose render passes two seconds or a gigabyte allocated, is shown as
+stored instead (see "Dashboard: formatting budgets for stored
 markdown").
 
 **Pages degrade by panel.** The Overview's panels (counts, queue,
@@ -6684,18 +6690,23 @@ in v0.56.0. govulncheck finds nothing in the new modules.
 
 **Decision:** Before goldmark sees a document's markdown, one linear pass
 over its lines (`ui.checkShape`, `internal/ui/budget.go`) charges it for
-what makes goldmark's work or memory grow faster than the text, and the
-link transformer counts the links as it resolves them. A text over any
-budget is shown as it is stored, escaped in a `<pre>`, under a banner
-naming the budget; everything else is formatted as before.
+what makes goldmark's work or memory grow faster than the text. The link
+transformer charges every link and image before it resolves it, and the
+HTML goldmark writes is capped. Whatever the text, every render is also
+held to two seconds and a gigabyte allocated (`maxFormatTime`,
+`maxFormatAlloc`), checked from goldmark's extension points as it runs.
+A text over any budget or limit is shown as it is stored, escaped in a
+`<pre>`, under a banner naming it; everything else is formatted as
+before. GFM's Linkify extension is left out, so an address written out
+without link markup stays text.
 
 **Why.** goldmark v1.8.6 has corners where its work grows with the square
 of the input, or multiplies it, and a stored page's markdown is whatever
 a web page, a GitHub README (stored verbatim), a PDF or Jina made it.
-goldmark can't be cancelled: a render runs to the end after its client
-and the 2-minute write timeout are gone, on a core of its own, and every
-reload starts another. Measured through `ui.Renderer.RenderMarkdown` on
-the development Mac:
+goldmark has no way to cancel a render: unless something inside it stops
+it, a render runs to the end after its client and the 2-minute write
+timeout are gone, on a core of its own, and every reload starts another.
+Measured through `ui.Renderer.RenderMarkdown` on the development Mac:
 
 - Container markers stacked on one line are quadratic in the markers: a
   1 MiB line of `>` took 4 min 30 s, allocated 607 MB and wrote 28 MB of
@@ -6715,13 +6726,13 @@ the development Mac:
   the line when a tab is split between two blocks: that ramp filling
   1 MiB took 26 s, cmark's deeply nested lists indented with tabs 4.8 s.
 - Inline markup is quadratic in its paragraph. In one 256 KiB paragraph,
-  `[a](` repeated took 21.7 s, `[a](b` and `![a](` 18 s, `*a`, `_a`, `~a`
-  and `a*` 4.3 s each, `**a` 2.9 s, `` `a `` 2.2 s, `[a]` lines 0.8 s,
-  `[a]: b` lines 0.6 s, and `[a](< ` 0.8 s at 128 KiB. The same 256 KiB
-  as paragraphs of 1,024 `[a](` took 0.37 s: the cost is per paragraph.
-  An unclosed opener scans to the end of its line or paragraph, each
-  emphasis delimiter is compared with every earlier one, and each `]`
-  walks its paragraph's lines.
+  `[a](` repeated took 21.7 s, `[a](b` and `![a](` 18 s, `[a]` lines
+  0.8 s, `[a]: b` lines 0.6 s, and `[a](< ` 0.8 s at 128 KiB. The same
+  256 KiB as paragraphs of 1,024 `[a](` took 0.37 s: the cost is per
+  paragraph. An unclosed opener scans to the end of its line or
+  paragraph, and each `]` walks its paragraph's lines. `*a`, `_a`, `~a`
+  and `a*` took 4.3 s each, `**a` 2.9 s and `` `a `` 2.2 s, but that was
+  Linkify's (below); without it they take 24 to 54 ms.
 - Emphasis runs that pair with nothing can stay to be compared again:
   goldmark has no cut-off for openers that can never match (cmark's
   `openers_bottom`), so after `a**b`, every `c* ` (a closer the rule of
@@ -6736,6 +6747,38 @@ the development Mac:
 The earlier assumption, that a 2 MiB table (half a second) was the worst
 case the 1 MiB cap had to cover, was wrong.
 
+Within those budgets, four more shapes cost seconds or gigabytes, and
+they are why every render has limits too:
+
+- Every link and image is resolved: its character references (two more
+  copies of its destination), then `url.Parse` and `ResolveReference`.
+  Only kept links counted against the link budget, and every link to a
+  reference definition shares its destination, so a definition to a
+  16 KiB `ftp:` URL used by 1 MiB of `[x]` links took 11.7 s and
+  allocated 11.2 GiB, formatted; to a `javascript:` URL, 3.3 s and
+  3.9 GiB; as `![x]` images, 9.9 s and 9.4 GiB; a 128 KiB destination,
+  1 min 26 s and 73 GiB.
+- Linkify, which GFM includes, runs regexps (20 to 35 ns a byte) from
+  every space, line start, `*`, `_`, `~` and `(`, a cost the inline
+  budget, calibrated on byte loops at about 1 ns a byte, doesn't see.
+  One 1 MiB line of `x`, 680 `~~~a`, an `@`, a domain of 62-letter labels
+  and `a_` took 24 s: a run of three `~` isn't strikethrough, so its last
+  `~` reaches Linkify, which scans the address and the whole domain and
+  then drops it for the `_` after it, and the next `~` scans it again.
+  256 units of `(http://a.b/` and 4,000 `)` took 2.4 s. The email shape
+  at 256 KiB still took 22.4 s: the budget is a product, so a shorter
+  text admits more scans.
+- The link budget counts URLs as stored, and goldmark escapes them as it
+  writes: `&` is `&amp;`, `"` and `<` are `%22` and `%3C`. A 19 KB page,
+  a definition to `https://a.example/?` and 16 KiB of `&` used by 500
+  links, is within every budget, and wrote 41 MB of HTML, allocating
+  676 MiB in 0.37 s; sanitizing, the page template and the response then
+  cost what that HTML does.
+- The transformer labelled every image, those inside other images too,
+  each over its whole subtree: `![` n times, `a`, then
+  `](https://i.example/x.png)` n times took 29 ms and 160 MiB at
+  n = 4,000 (112 KB).
+
 **The budgets.**
 
 - `maxLineNesting`: 32 blockquote and list markers on one line. A
@@ -6749,31 +6792,38 @@ case the 1 MiB cap had to cover, was wrong.
   times the line's length.
 - `maxInlineWork`: 2^31, the sum over the text's paragraphs of their
   markup characters times their length in bytes. Markup is every
-  character goldmark's inline parsers start at, spaces aside: `!`, `[`,
-  `]`, `` ` ``, `*`, `_`, `~`, `<` and `(` (linkify's); linkify also
-  starts at a space, but its scan stops at the next one.
+  character goldmark's inline parsers start at, `!`, `[`, `]`, `` ` ``,
+  `*`, `_`, `~` and `<`, and `(`, where an inline link's destination
+  starts, which the `]` before it scans to the end of the line.
   `TestMarkup_CoversInlineTriggers` checks the list against goldmark's
-  default inline parsers and GFM's.
+  default inline parsers and the extensions'.
 - `maxEmphasisWork`: 2^27, the sum over the text's paragraphs of the
   square of their runs of `*`, `_` and `~`.
 - `maxTableCells`: 262,144 cells. Every line after a line shaped like a
   delimiter row is charged the widest such row's cells, until the
   paragraph ends, and each such row its header's.
-- `maxLinkBytes`: 8 MiB of resolved destinations and titles over all the
-  text's kept links and images, counted per link: the transformer stops
-  there, before goldmark writes a thing.
+- `maxLinkBytes`: 8 MiB of destinations and titles, as stored, over
+  every link and image in the text, kept, unwrapped, labelled or turned
+  into a link, each counted once and before it is resolved: the
+  transformer stops at the first past it, before resolving it and before
+  goldmark writes a thing. Autolinks aren't counted: each covers its own
+  span of the text.
+- `maxHTMLBytes`: 8 MiB of HTML from goldmark, 8 times
+  `MaxRenderedMarkdown`. The writer goldmark renders into stops the
+  render at the write that would pass it.
 
-Each is an overestimate, never an underestimate. The pass's paragraphs
-are runs of lines between blank lines (spaces, tabs and line ends only,
-as goldmark counts them), split only before a line that starts a bullet
-item with content or an ATX heading at most three spaces in after any
-blockquote markers: either interrupts a paragraph inside any container,
-so every paragraph, heading and table cell goldmark parses inline lies
-within one of them. Everything else a paragraph may or may not end at
-(a fence, an HTML block, a table row) is left inside it. Markers are
-counted on every line, continued containers too, a run of `*`, `_` or
-`~` counts whatever it turns out to be, and a table is assumed wherever
-a line could be a delimiter row.
+Each of `checkShape`'s charges is an overestimate, never an
+underestimate. The pass's paragraphs are runs of lines between blank
+lines (spaces, tabs and line ends only, as goldmark counts them), split
+only before a line that starts a bullet item with content or an ATX
+heading at most three spaces in after any blockquote markers: either
+interrupts a paragraph inside any container, so every paragraph, heading
+and table cell goldmark parses inline lies within one of them.
+Everything else a paragraph may or may not end at (a fence, an HTML
+block, a table row) is left inside it. Markers are counted on every
+line, continued containers too, a run of `*`, `_` or `~` counts whatever
+it turns out to be, and a table is assumed wherever a line could be a
+delimiter row.
 
 The block charges follow from how goldmark continues a block. A line
 continues a blockquote only with a `>` of its own, a list only with a
@@ -6795,25 +6845,124 @@ levels deep) and over 400 million fuzzed ones: the visits charged were
 never fewer than goldmark's, and the bytes it read or copied were at
 most three times the bytes charged.
 
+**The limits.** The budgets stay the decision: fast, and the same answer
+on every machine. But each covers shapes someone found, and the four
+above got past them, so every render is also held to `maxFormatTime`,
+2 s, and `maxFormatAlloc`, 1 GiB allocated since it began. goldmark
+calls curio's code often enough to be stopped from there:
+
+- at every inline trigger: `stopParser`, an inline parser whose
+  triggers are all the others' (`` ![]`<*_~ ``), runs first at each and
+  parses nothing. Its priority is -1: goldmark tries inline parsers in
+  ascending priority, and the task list's checkbox parser is at 0.
+  `TestMarkup_CoversInlineTriggers` keeps its triggers equal to theirs;
+- at every line the block parse reads, once for each open block it
+  visits there: the `text.Reader` handed to `Parse` checks in
+  `PeekLine`;
+- at every link, autolink and image in the link transformer;
+- at every write of HTML (goldmark buffers through bufio, so every
+  4 KiB), and once more after the render, before sanitizing.
+
+A check is an atomic load of a flag a `time.AfterFunc` sets; every 256th
+also reads the process's heap allocations from runtime/metrics
+(`/gc/heap/allocs:bytes`, 0.2 µs a read, about a hundred checks' worth).
+A check that fails panics with its `*budgetError`, `errFormatTime` or
+`errFormatAlloc`, and the HTML writer with `errHTMLBytes`; `format`
+recovers that and only that, and the page shows the text as stored with
+the reason. Any other panic goes on. Unwinding is safe because goldmark
+v1.8.6 keeps nothing between renders that a render changes: it has no
+recover, no `sync.Pool` and no mutex, its `sync.Once` initializations
+finish before any hook runs, and every render gets a fresh
+`parser.Context`. `TestMarkdown_FormatsAfterAStop` pins that across
+upgrades: after a render stopped by the time limit, and one stopped by
+the HTML cap, the same Renderer formats a 1 MiB article byte for byte as
+a fresh one does. It is the pattern `http.ErrAbortHandler` uses to stop
+a handler.
+
+A render stops at the first check past a limit: it takes at most the
+limit plus the costliest step between two checks, and allocates at most
+the limit plus what one step allocates. The steps no check interrupts
+are each bounded by a budget:
+
+- emphasis matching of one paragraph (goldmark's `ProcessDelimiters`),
+  by `maxEmphasisWork`: `a**b` over lines of `c*` just under it takes
+  0.46 s, and ran 0.42 s past a 10 ms limit;
+- the table extension's escaped-pipe pass, by `maxInlineWork`: up to
+  0.1 s past the limit in the tables tried here, 0.16 to 0.27 s in
+  review;
+- table padding, by `maxTableCells`;
+- sanitizing at most `maxHTMLBytes`: 24 to 200 ms, and 40 to 285 MiB
+  allocated, for 8 MiB of links, list items, images or text.
+
+The allocation limit overshoots by what is allocated between two reads,
+and by one step's allocation: about 0.2 GiB where goldmark doubles a
+slice. The count is the whole process's, so other requests can only stop
+a render sooner, never let it run on. Whether a text is formatted
+depends on the machine's load only for texts that take over 2 s: twice
+the costliest text the budgets accept (about 1 s), and over 15 times the
+slowest ordinary 1 MiB document (a loose list, 120 ms). Tests of the
+budgets relax the time limit (`newBudgetRenderer`): under the race
+detector, the costliest texts within the budgets take longer than 2 s.
+
+Each limit needs the other. With the budgets bypassed, the time limit
+alone stops a 1 MiB line of `>`, 1 MiB of cmark's deeply nested lists
+indented with tabs, the tab ramp filling 1 MiB and a 256 KiB paragraph
+of `[a](` at 2,000 to 2,013 ms, but the item nested 32 deep over blank
+lines, and the ramp over blank lines, allocate 5.7 GiB and reach a
+2.1 GiB heap within one second. The allocation limit stops both at
+1.2 GiB allocated after 190 to 230 ms, with at most 454 MiB of heap at
+once. An allocation limit alone lets 64 KiB of `>` on one line run
+1.1 s on 38 MiB. In review, without the fixes for the four shapes
+above, the limits stopped each of them within 5 to 20 ms of a 200 ms
+limit.
+
 **Numbers.** Just under the budgets, the slowest shape is still `[a](`:
-0.95 s for 1 MiB in paragraphs of 2.7 KiB, and about as long for one
-52 KiB paragraph. Next are lists nested with tabs, cut just under
-`maxVisitBytes` (213 KiB), 0.44 s, and `a**b` over lines of `c*` just
-under `maxEmphasisWork` (34 KiB), 0.43 s; then `` `a `` and `*a` at
-1 MiB in their costliest paragraph sizes, 0.26 and 0.24 s, and text
-under 128 levels of tab-indented lists (1 MiB), 0.24 s. An item 32 deep
-over blank lines takes 25 ms. The most memory is that text under deep
-lists, 322 MiB allocated and 103 MiB of heap at once, then the deep item
-over blank lines, 257 and 93 MiB: about what goldmark takes for 1 MiB of
-one-character lines, which no budget stops (263 and 119 MiB). Just under
-the container, table and link budgets, 80 to 110 ms and at most about
-8 MB of HTML. A text over a budget costs what copying and escaping it
-does. `TestMarkdown_OverBudget` renders every shape above, at 1 MiB
-where it has one, and checks it takes that path, fast and within 16 MiB
-of allocation (the link budget is counted as goldmark parses, so that
-text costs what the parse does); `TestMarkdown_JustUnderBudget` cuts the
-block and emphasis shapes to the most of them within the budgets and
-holds their render to 10 s and 1 GiB, race detector included.
+0.95 s for one 52 KiB paragraph, and 1.02 s for 1 MiB in paragraphs of
+2.7 KiB; `[a](b` takes 0.95 s. Next are lists nested with tabs, cut just
+under `maxVisitBytes` (213 KiB), 0.47 s, and `a**b` over lines of `c*`
+just under `maxEmphasisWork` (34 KiB), 0.46 s; then text under 128
+levels of tab-indented lists (1 MiB), 0.27 s. Without Linkify the other
+inline shapes take milliseconds: `` `a `` 8 ms and `*a` 4 ms, each as
+one paragraph just under the budget. An item 32 deep over blank lines
+takes 43 ms. The most memory is that text under deep lists, 322 MiB
+allocated and 119 MiB of heap at once, then the deep item over blank
+lines, 257 and 142 MiB: about what goldmark takes for 1 MiB of
+one-character lines, which no budget stops (263 and 139 MiB).
+
+A text over the link budget costs goldmark's parse of its links and
+nothing more: 1 MiB of `[x]` links to a 16 KiB definition takes 120 to
+170 ms and 200 to 250 MiB, whether the URL is https, ftp or javascript,
+16 KiB or 128, links or images: the transformer stops within the first
+thousand links, and the rest is goldmark parsing some 200,000 of them.
+Links a page keeps reach the HTML cap before the link budget: 510 links
+to a 16 KiB URL write 8.4 MB, and 1 MiB of `[x]` links to a short one
+8.6 MB (0.24 s, 318 MiB). The link budget bounds resolving, the HTML cap
+writing. The page of escaped `&` stops at the cap in 30 ms and 82 MiB.
+The largest HTML of the ordinary documents below is 2.5 MiB: the 1 MiB
+article writes 1.9 MB, the awesome list 2.0 MB and the loose nested
+lists 2.6 MB. A text over a shape budget costs what copying and escaping
+it does.
+
+`TestMarkdown_OverBudget` renders every shape above, at 1 MiB where it
+has one, and checks it takes that path, fast and within 16 MiB of
+allocation (512 MiB for the link budget, whose text costs what the parse
+does). `TestMarkdown_CostsCheckShapeDoesntSee` holds the four shapes
+above to their outcome and to a time and an allocation bound per render.
+`TestMarkdown_JustUnderBudget` cuts the block and emphasis shapes to the
+most of them within the budgets and holds their render to 10 s and
+1 GiB. `TestMarkdown_TimeLimit` stops a block-heavy and an inline-heavy
+text at a 10 ms limit within 250 ms, and `TestMarkdown_AllocLimit` stops
+text under deep lists at a 32 MiB limit within 64 MiB, race detector
+included.
+
+The checks cost 3 to 4% on the ordinary documents below (the 1 MiB
+article 50.0 → 52.1 ms, the awesome list 60.5 → 62.5 ms, nested lists
+80.8 → 83.8 ms, loose nested lists 78.9 → 82.1 ms) and 6% on text under
+deep lists (257 → 273 ms), whose block parse checks at every one of its
+two million visits. Leaving Linkify out pays for them on pages of links:
+against the build before both, the article went from 53.7 to 52.1 ms and
+the awesome list from 65.5 to 62.5 ms, while nested lists cost 1% more
+and text under deep lists 5%.
 
 On a real library of 4,498 stored documents, rendering all of them takes
 2.1 s, and the slowest, 583 KiB, 48 ms. The largest block charges are
@@ -6835,8 +6984,44 @@ real document shown unformatted.
 
 **Considered.**
 
-- A render deadline: goldmark can't be stopped, so a deadline would only
-  abandon a goroutine that keeps burning its core.
+- A render deadline outside the render, a goroutine with a response
+  deadline or a semaphore: it bounds latency or concurrency, not the
+  render, which keeps burning its core. The limits stop the render
+  itself, from inside goldmark.
+- Only the limits, without budgets: the outcome would depend on the
+  machine and its load for every costly text, not only for those over
+  2 s, and the budgets turn most costly texts away in a linear pass.
+- Only a size-limited writer as the outer bound: the unkept links and
+  Linkify's scans wrote 1.9 MB and 1 MB of HTML.
+- A work counter in the transformer and the renderer only: Linkify's
+  cost was inside goldmark's inline parse.
+- A lower input cap: the Linkify email shape still took 22.4 s at
+  256 KiB.
+- Hooking emphasis matching: it means replacing goldmark's emphasis and
+  strikethrough parsers, for a step `maxEmphasisWork` bounds at about
+  half a second.
+- Keeping Linkify with bounded regexps (`WithLinkifyURLRegexp`,
+  `WithLinkifyWWWRegexp`, `WithLinkifyEmailRegexp`): each trigger would
+  still scan at regexp speed, and Linkify triggers at every space, so it
+  would need a charge of its own and regexps to maintain. Dropping it
+  removes the one inline parser the markup budget misprices. Stored
+  pages rarely need it: readability and Jina write `[text](url)`. GitHub
+  READMEs, stored verbatim, lose click-through on bare URLs; docs/ui.md
+  says so.
+- A cap on a destination's length: with every link charged before it is
+  resolved, a 128 KiB destination costs 0.15 s and 203 MiB, all of it
+  goldmark's parse. A cap would bound nothing the charge doesn't, and
+  change how legitimate long URLs render.
+- A second charge after resolving: a resolved URL is at most about three
+  times the stored one plus the base URL, and what the renderer writes
+  for kept links is the HTML cap's.
+- Failing the writes past the HTML cap instead of unwinding: goldmark's
+  node renderers ignore write errors, and bufio then swallows every
+  later write, so goldmark keeps escaping every URL left. On the page of
+  escaped `&` that took 79 ms and 211 MiB in review, against 30 ms and
+  82 MiB.
+  Table padding happens as goldmark parses, before it writes anything:
+  `maxTableCells` bounds it.
 - Formatting all but the costly paragraphs: which lines make a paragraph
   is known only once goldmark has parsed the blocks, and the block parse
   is where the nesting and the table padding cost.
@@ -6851,8 +7036,6 @@ real document shown unformatted.
   its outermost list: closer to goldmark's count, but it leans on that
   detail; charging every visit the whole line costs the real library
   nothing.
-- Capping the HTML goldmark writes: it keeps escaping every link's URL
-  for writes that fail, and pads tables while parsing, before it writes.
 - Rows of a detected table as paragraphs of their own: a table goldmark
   doesn't make (a header in a fenced block, or the heading before a
   delimiter row) would leave its lines one paragraph charged as many.

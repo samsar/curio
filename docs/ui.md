@@ -44,7 +44,10 @@ rebuilding interests and the queue controls are still `curio` commands
   nested deep over thousands of blank lines, a paragraph thick with
   unclosed brackets, a table padded to thousands of columns: a few shapes
   a page can hold, by accident or on purpose) is shown as it is stored,
-  unformatted, and the page says why.
+  unformatted, and the page says why. Whatever the text holds, formatting
+  stops after two seconds or a gigabyte of memory, and the text is shown
+  as stored. Web and email addresses written out in the text without
+  link markup show as text, not links: a GitHub README's bare URLs, say.
 - **Interests**: the topics the last clustering run found, each with a few
   of its documents; an interest's page lists its documents by similarity.
   With no run yet, `curio interests rebuild` makes one.
