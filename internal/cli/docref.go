@@ -31,7 +31,7 @@ func resolveDocumentID(ctx context.Context, c *client.Client, arg string) (strin
 		if strings.HasPrefix(apiErr.Problem.Detail, lookupMissPrefix) {
 			return "", fmt.Errorf("no document for %s in the library (curio add %s saves it)", arg, arg)
 		}
-		return "", fmt.Errorf("the running daemon is older than this curio and can't look documents up by URL: " +
+		return "", errors.New("the running daemon is older than this curio and can't look documents up by URL: " +
 			"upgrade it (brew upgrade curio, then curio up), or pass the document ID")
 	default:
 		return "", err
