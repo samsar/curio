@@ -136,6 +136,7 @@ when the entry was first committed.
 - 2026-09-27 — [curio up: a plan-first setup wizard](#curio-up-a-plan-first-setup-wizard) (revised)
 - 2026-09-28 — [curio up: the import step](#curio-up-the-import-step)
 - 2026-09-28 — [Dashboard: server-rendered pages in the daemon (phase 1)](#dashboard-server-rendered-pages-in-the-daemon-phase-1)
+- 2026-09-28 — [Dashboard: formatting budgets for stored markdown](#dashboard-formatting-budgets-for-stored-markdown)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -6522,9 +6523,10 @@ template fails `make test` rather than a page.
 
 **One code path per resource.** The page handlers (`internal/api/ui*.go`)
 get their data from the Deps functions the JSON handlers call (`health`,
-`stats`, `queueState`, `metrics`, `listDocuments`, `document`,
-`openContent`, `search`, `related`, `interests`, `interest`,
-`listBookmarks`), plus two store reads, and map it into `internal/ui`'s
+`stats`, `queueState`, `metrics`, `listDocuments`, `document`, `search`,
+`related`, `interests`, `interest`, `listBookmarks`, and `openMarkdown`,
+which `openContent` opens a document's markdown with), plus two store
+reads, and map it into `internal/ui`'s
 typed view models. They never build SQL: depguard denies `database/sql`
 and the SQLite store to `internal/ui` and `internal/api/ui*.go`. A view
 can then be rebuilt client-side from `/v1` without its answers
@@ -6555,11 +6557,15 @@ Jina and is hostile.
   resolves every link and image against the document's URL
   (`url_canonical`, else `url`), after resolving character references as
   the renderer will (`&#106;avascript:` is `javascript:`): a relative
-  link would otherwise resolve against the daemon. Links keep only http,
-  https and mailto; any other becomes its text. bluemonday's UGC
-  allow-list then sanitizes the HTML, allowing those three schemes and no
-  relative URL, and giving links `rel="nofollow noreferrer noopener"` and
-  `target="_blank"`. Its output is the only conversion to one of
+  link would otherwise resolve against the daemon. Links, images and
+  autolinks keep only http and https URLs with a host, and mailto ones;
+  any other becomes its text. An http URL without a host
+  (`[x](http:/ui/search)`, `<http:/v1/stats>`) is a relative one to a
+  browser on an http page: it would open the daemon's own
+  `/ui/search`. bluemonday's UGC allow-list then sanitizes the HTML,
+  allowing those schemes, requiring a host for http and https again, and
+  no relative URL, and giving links `rel="nofollow noreferrer noopener"`
+  and `target="_blank"`. Its output is the only conversion to one of
   html/template's trusted types (`template.HTML`, `JS`, `URL` and the
   rest) outside tests: `TestTrustedHTMLOnlyFromTheSanitizer` parses every
   non-test Go file in the repository to keep it that way. Search snippets
@@ -6609,16 +6615,21 @@ https images are shown, lazily, and only those answers' CSP adds `https:`
 to `img-src`; http and `data:` images stay links or text.
 
 **At most 1 MiB of markdown is rendered,** cut after the last whole line
-(`ui.MaxRenderedMarkdown`). goldmark and bluemonday took about 90 ms for a
-2 MiB article, but about half a second for a pathological 2 MiB table,
-which grows to about 11 MiB of HTML. A cut page says so and names the
-markdown file; `GET /v1/documents/{id}/content` has the whole text.
+(`ui.MaxRenderedMarkdown`), or before the character the limit falls in
+when the first line is longer. A cut page says so and names the markdown
+file; `GET /v1/documents/{id}/content` has the whole text. The cap alone
+doesn't bound the cost: goldmark does far more than linear work on some
+shapes a stored page can hold, and a text over the formatting budgets is
+shown as stored instead (see "Dashboard: formatting budgets for stored
+markdown").
 
 **Pages degrade by panel.** The Overview's panels (counts, queue,
 progress, health, newest bookmarks) and the Document page's text, related
 documents and bookmarks each read on their own. A read that fails shows
 its message and request ID in its panel, logged once as `writeError` logs
-a request's (`reportError`), and the page still answers 200. The JSON API
+a request's (`reportError`), and the page still answers 200. A failed
+search is the Search page's answer, with the status `reportError` gives
+it: a 499 when the client has gone. The JSON API
 keeps "hydration errors fail the request": a client wants a whole answer
 or an error it can act on, a person reading a page wants what could be
 read. A page renders into a buffer first: a template that fails is a 500
@@ -6636,7 +6647,9 @@ will enqueue isn't counted until it is.
 **While starting,** a page GET answers 503 with a page that reloads
 itself every 2 seconds (a meta refresh, not script) and shows the phase
 and the migrations applied; the assets are served, `/` redirects, and
-changes and `/v1` get the starting problem.
+changes and `/v1` get the starting problem. `curio ui` opens the
+dashboard as soon as the daemon answers (`EnsureStarted`, as `curio-mcp`
+starts), rather than waiting out a migration with nothing to show.
 
 **New API and store reads.** `GET /v1/documents` gained `content_type`,
 `host` and `folder` filters, for the Library (see "Folder and host
@@ -6664,6 +6677,112 @@ github.com/aymerick/douceur v0.2.0 (MIT) and github.com/gorilla/css
 v1.0.1 (BSD-3-Clause); htmx 2.0.11 (0BSD), vendored. golang.org/x/net
 stays at v0.58.0: bluemonday's floor, v0.26.0, carries advisories fixed
 in v0.56.0. govulncheck finds nothing in the new modules.
+
+---
+
+## Dashboard: formatting budgets for stored markdown
+
+**Decision:** Before goldmark sees a document's markdown, one linear pass
+over its lines (`ui.checkShape`, `internal/ui/budget.go`) charges it for
+what makes goldmark's work grow faster than the text, and the link
+transformer counts the links as it resolves them. A text over any budget
+is shown as it is stored, escaped in a `<pre>`, under a banner naming the
+budget; everything else is formatted as before.
+
+**Why.** goldmark v1.8.6 has corners where its work grows with the square
+of the input, or multiplies it, and a stored page's markdown is whatever
+a web page, a GitHub README (stored verbatim), a PDF or Jina made it.
+goldmark can't be cancelled: a render runs to the end after its client
+and the 2-minute write timeout are gone, on a core of its own, and every
+reload starts another. Measured through `ui.Renderer.RenderMarkdown` on
+the development Mac:
+
+- Container markers stacked on one line are quadratic in the markers: a
+  1 MiB line of `>` took 4 min 30 s, allocated 607 MB and wrote 28 MB of
+  HTML. At 64 KiB, `>\t` took 2.1 s, `- ` ending in `x` 1.6 s, `>`
+  1.1 s, `+ ` and `> - ` 0.55 s, `1. ` 0.37 s.
+- Inline markup is quadratic in its paragraph. In one 256 KiB paragraph,
+  `[a](` repeated took 21.7 s, `[a](b` and `![a](` 18 s, `*a`, `_a`, `~a`
+  and `a*` 4.3 s each, `**a` 2.9 s, `` `a `` 2.2 s, `[a]` lines 0.8 s,
+  `[a]: b` lines 0.6 s, and `[a](< ` 0.8 s at 128 KiB. The same 256 KiB
+  as paragraphs of 1,024 `[a](` took 0.37 s: the cost is per paragraph.
+  An unclosed opener scans to the end of its line or paragraph, each
+  emphasis delimiter is compared with every earlier one, and each `]`
+  walks its paragraph's lines.
+- Two shapes multiply what they are given. goldmark pads every table row
+  to its header's width: a 1,024-column header over 128K one-character
+  lines (256 KiB) made 1.3 GB of HTML in 69 s. Every link to a reference
+  definition repeats its URL: one 16 KiB definition used by 32K links
+  (147 KiB) made 540 MB in 7 s.
+
+The earlier assumption, that a 2 MiB table (half a second) was the worst
+case the 1 MiB cap had to cover, was wrong.
+
+**The budgets.**
+
+- `maxLineNesting`: 32 blockquote and list markers on one line.
+- `maxContainers`: 131,072 such markers in the text, each a container
+  with its own tags.
+- `maxInlineWork`: 2^31, the sum over the text's paragraphs of their
+  markup characters times their length in bytes. Markup is every
+  character goldmark's inline parsers start at, spaces aside: `!`, `[`,
+  `]`, `` ` ``, `*`, `_`, `~`, `<` and `(` (linkify's); linkify also
+  starts at a space, but its scan stops at the next one.
+  `TestMarkup_CoversInlineTriggers` checks the list against goldmark's
+  default inline parsers and GFM's.
+- `maxTableCells`: 262,144 cells. Every line after a line shaped like a
+  delimiter row is charged the widest such row's cells, until the
+  paragraph ends, and each such row its header's.
+- `maxLinkBytes`: 8 MiB of resolved destinations and titles over all the
+  text's kept links and images, counted per link: the transformer stops
+  there, before goldmark writes a thing.
+
+Each is an overestimate, never an underestimate. The pass's paragraphs
+are runs of lines between blank lines (spaces, tabs and line ends only,
+as goldmark counts them), split only before a line that starts a bullet
+item with content or an ATX heading at most three spaces in after any
+blockquote markers: either interrupts a paragraph inside any container,
+so every paragraph, heading and table cell goldmark parses inline lies
+within one of them. Everything else a paragraph may or may not end at
+(a fence, an HTML block, a table row) is left inside it. Markers are
+counted on every line, continued containers too, and a table is assumed
+wherever a line could be a delimiter row.
+
+**Numbers.** Just under the inline budget, the worst shape (`[a](` in
+paragraphs of 2.7 KiB) renders 1 MiB in 0.97 s, `*a` in 0.45 s and
+`` `a `` in 0.26 s; just under the container, table and link budgets,
+80 to 110 ms and at most about 8 MB of HTML. A text over a budget costs
+what copying and escaping it does. `TestMarkdown_OverBudget` renders
+every shape above at 1 MiB and checks it takes that path.
+
+On a real library of 3,574 stored documents, rendering all of them took
+1.7 s and the slowest, 1 MiB, 27 ms. One is over a budget: a Wikipedia
+list flattened by Jina into one 325 KiB paragraph of links and citations
+(6.1 × 10^9 of inline work). The next are a Wikipedia article with
+11 KiB paragraphs (1.2 × 10^9) and a PDF extraction without paragraph
+breaks (6.4 × 10^8). What the budgets will catch in practice is that
+shape, and PDF text of several hundred KiB with no blank line, which is
+plain text anyway, and tables of a few thousand rows of links: a table
+is charged as one paragraph. `TestMarkdown_WithinBudget` formats a 1 MiB
+article, a 1 MiB awesome-list README, a 100 KiB flattened wiki table,
+lists nested ten deep and a 1,000-row table.
+
+**Considered.**
+
+- A render deadline: goldmark can't be stopped, so a deadline would only
+  abandon a goroutine that keeps burning its core.
+- Formatting all but the costly paragraphs: which lines make a paragraph
+  is known only once goldmark has parsed the blocks, and the block parse
+  is where the nesting and the table padding cost.
+- Charging each scan goldmark makes (how far each unclosed opener looks):
+  tighter, so fewer documents would be shown plain, but it would mirror
+  goldmark's internals scan by scan and miss the next corner. The budgets
+  charge what any inline parser could do.
+- Capping the HTML goldmark writes: it keeps escaping every link's URL
+  for writes that fail, and pads tables while parsing, before it writes.
+- Rows of a detected table as paragraphs of their own: a table goldmark
+  doesn't make (a header in a fenced block, or the heading before a
+  delimiter row) would leave its lines one paragraph charged as many.
 
 ---
 

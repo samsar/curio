@@ -9,6 +9,10 @@ curio ui            # open it in your browser (starts the daemon if needed)
 curio ui --print    # print its address instead: http://127.0.0.1:8765/ui/
 ```
 
+While the daemon is starting (applying a database migration after an
+upgrade, say), the page shows its progress and turns into the dashboard
+once the daemon is ready.
+
 `curio status` shows the address too. The dashboard is read-only for now:
 it shows what curio knows and changes nothing. Refetching, reindexing,
 rebuilding interests and the queue controls are still `curio` commands
@@ -35,7 +39,11 @@ rebuilding interests and the queue controls are still `curio` commands
   Reader called out), its text, related documents, its bookmarks with
   their folders and tags, and, for a failed or dead page, its last error.
   The text shown is at most the first 1 MiB; the page says when it is cut
-  and where the whole file is.
+  and where the whole file is. A text whose markdown would take too long
+  to format (a line nesting dozens of quotes, a paragraph thick with
+  unclosed brackets, a table padded to thousands of columns: a few shapes
+  a page can hold, by accident or on purpose) is shown as it is stored,
+  unformatted, and the page says why.
 - **Interests**: the topics the last clustering run found, each with a few
   of its documents; an interest's page lists its documents by similarity.
   With no run yet, `curio interests rebuild` makes one.
@@ -70,11 +78,15 @@ dashboard is off.
 
 Every saved page is treated as hostile: it came from the web. The
 dashboard renders it without any of its scripts, styles or forms, keeps
-only its http, https and mailto links (pointing at the original site), and
-sends a strict Content-Security-Policy with every response, so nothing it
-shows can run code or load from anywhere but the daemon. Other websites
-can't make your browser use the dashboard or the API: the daemon refuses
-their requests. The rules, and why, are in
+only its links to web addresses (pointing at the original site) and email
+addresses, and sends a strict Content-Security-Policy with every
+response, so nothing it shows can run code or load from anywhere but the
+daemon. Other websites can't use the dashboard or the API through your
+browser: they can't read what the daemon answers, it refuses their
+requests to change anything, and their pages can't load a dashboard page
+as an image, a frame or a script. A page can still send your tab to a
+dashboard page, as a link you follow does; that only shows you the page,
+since pages change nothing. The rules, and why, are in
 [decisions.md](./decisions.md): "Dashboard: server-rendered pages in the
-daemon (phase 1)" and "Local API: loopback only, no token, browsers shut
-out".
+daemon (phase 1)", "Dashboard: formatting budgets for stored markdown" and
+"Local API: loopback only, no token, browsers shut out".
