@@ -21,8 +21,7 @@ func (h pageHandlers) search(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(q) != "" {
 		resp, err := h.d.search(r.Context(), SearchRequest{Query: q})
 		if err != nil {
-			status, _ = errorStatus(err)
-			vm.Err = h.panelError(r, err)
+			status, vm.Err = h.reportPanel(r, err)
 		} else {
 			vm.Results = searchResults(resp)
 		}

@@ -463,7 +463,13 @@ func (d Deps) openContent(ctx context.Context, doc *store.Document) (*documentCo
 	if err != nil {
 		return nil, err
 	}
-	path := d.markdownPath(ext)
+	return openMarkdown(doc.ID, d.markdownPath(ext))
+}
+
+// openMarkdown opens path, the markdown of document id's current
+// extraction, or "" when the extraction kept none: a *contentUnavailable
+// error, as a file deleted from disk is.
+func openMarkdown(id, path string) (*documentContent, error) {
 	if path == "" {
 		return nil, &contentUnavailable{detail: "extraction has no markdown path"}
 	}
@@ -473,12 +479,12 @@ func (d Deps) openContent(ctx context.Context, doc *store.Document) (*documentCo
 			detail: "the extracted markdown is missing on disk; refetch the document"}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("document %s: open its markdown: %w", doc.ID, err)
+		return nil, fmt.Errorf("document %s: open its markdown: %w", id, err)
 	}
 	info, err := f.Stat()
 	if err != nil {
 		_ = f.Close() // the Stat error is the one to report
-		return nil, fmt.Errorf("document %s: stat its markdown: %w", doc.ID, err)
+		return nil, fmt.Errorf("document %s: stat its markdown: %w", id, err)
 	}
 	return &documentContent{File: f, path: path, size: info.Size()}, nil
 }

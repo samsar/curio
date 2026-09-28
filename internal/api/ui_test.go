@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -304,6 +305,9 @@ func TestUI_SearchEmptyQuery(t *testing.T) {
 // moreRE finds the Library's next-page link.
 var moreRE = regexp.MustCompile(`<a class="more" href="([^"]+)"`)
 
+// assetRE finds the first asset a page loads.
+var assetRE = regexp.MustCompile(`(?:href|src)="(/ui/static/[^"]+)"`)
+
 func TestUI_Library(t *testing.T) {
 	srv := apitest.Start(t)
 	paper := titled(t, srv, "https://arxiv.example/paper", "A paper", store.DocStateFetched)
@@ -409,10 +413,12 @@ func TestUI_Document(t *testing.T) {
 	assert.NotContains(t, body, "an old failure", "a fetched document's old failure isn't current")
 	assert.Contains(t, body, "<code>curio refetch "+doc.ID+"</code>")
 
-	images := getPageCSP(t, srv, "/ui/documents/"+doc.ID+"?images=1", http.StatusOK, ui.CSPWithImages)
-	assert.Contains(t, images, `<img src="https://img.example/d.png" alt="diagram" loading="lazy">`)
-	assert.NotContains(t, images, "Load images")
-	getPage(t, srv, "/ui/documents/"+doc.ID+"?images=yes", http.StatusOK)
+	for _, on := range []string{"1", "true"} {
+		images := getPageCSP(t, srv, "/ui/documents/"+doc.ID+"?images="+on, http.StatusOK, ui.CSPWithImages)
+		assert.Contains(t, images, `<img src="https://img.example/d.png" alt="diagram" loading="lazy">`)
+		assert.NotContains(t, images, "Load images")
+	}
+	assert.NotContains(t, getPage(t, srv, "/ui/documents/"+doc.ID+"?images=yes", http.StatusOK), "<img")
 
 	getPage(t, srv, "/ui/documents/no-such-document", http.StatusNotFound)
 }
@@ -427,6 +433,29 @@ func TestUI_DocumentRemoteImagesOn(t *testing.T) {
 	assert.Contains(t, body, `<img src="https://img.example/d.png" alt="diagram" loading="lazy">`)
 	assert.NotContains(t, body, "Load images")
 	getPage(t, srv, "/ui/", http.StatusOK)
+}
+
+// countingExtractions counts the extractions read by ID.
+type countingExtractions struct {
+	store.ExtractionStore
+	reads *atomic.Int32
+}
+
+func (c countingExtractions) GetByID(ctx context.Context, id string) (*store.DocumentExtraction, error) {
+	c.reads.Add(1)
+	return c.ExtractionStore.GetByID(ctx, id)
+}
+
+// TestUI_DocumentReadsItsExtractionOnce: the page's facts about how its
+// text was fetched, and the text, come from one read of the extraction.
+func TestUI_DocumentReadsItsExtractionOnce(t *testing.T) {
+	reads := new(atomic.Int32)
+	srv := apitest.Start(t, func(d *api.Deps) { d.Extractions = countingExtractions{d.Extractions, reads} })
+	doc := srv.AddDocument(t, "https://site.example/post", store.DocStateFetched)
+	srv.AddContent(t, doc, "# A post\n\nthe text")
+	reads.Store(0)
+	assert.Contains(t, getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK), "<p>the text</p>")
+	assert.EqualValues(t, 1, reads.Load())
 }
 
 // TestUI_DocumentUnformatted: a stored text too costly to format, here a
@@ -582,12 +611,14 @@ func TestUI_GETNeverWrites(t *testing.T) {
 	require.NoError(t, err)
 	before := fingerprint(t, srv)
 
+	overview := getPage(t, srv, "/ui/", http.StatusOK)
 	cursor := html.UnescapeString(moreRE.FindStringSubmatch(getPage(t, srv, "/ui/library?limit=1", http.StatusOK))[1])
 	for _, path := range []string{
 		"/", "/ui/", "/ui", "/ui/search", "/ui/search?q=kafka", "/ui/library", "/ui/library?state=failed",
 		"/ui/library?content_type=article&host=example.com&folder=/Reading", cursor, "/ui/library?state=bogus",
 		"/ui/documents/" + doc.ID, "/ui/documents/" + doc.ID + "?images=1", "/ui/documents/" + failed.ID,
 		"/ui/documents/nope", "/ui/interests", "/ui/interests/" + interest.ID, "/ui/nope",
+		assetRE.FindStringSubmatch(overview)[1], "/ui/static/nope.css",
 	} {
 		p := get(t, srv, path)
 		assert.Less(t, p.status, http.StatusInternalServerError, path)

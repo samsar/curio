@@ -42,9 +42,9 @@ func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 	images := h.pages.opts.LoadRemoteImages || boolParam(r, "images")
 	vm := ui.Document{
 		Layout:     pageLayout(cmp.Or(deref(doc.Title), doc.URL), ui.NavLibrary),
-		Meta:       documentMeta(resp, h.d.contentPath(doc.MarkdownPath)),
+		Meta:       documentMeta(resp),
 		Extraction: extractionView(resp.CurrentExtraction),
-		Text:       h.documentText(r, doc.Document, images),
+		Text:       h.documentText(r, resp, images),
 		Related:    h.relatedPanel(r, id),
 		Bookmarks:  h.bookmarksPanel(r, id),
 	}
@@ -61,10 +61,10 @@ func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 	h.pageWithCSP(w, r, http.StatusOK, ui.PageDocument, vm, csp)
 }
 
-func documentMeta(d DocumentResponse, markdownPath string) ui.DocumentMeta {
+func documentMeta(d DocumentResponse) ui.DocumentMeta {
 	m := ui.DocumentMeta{ID: d.ID, Title: deref(d.Title), URL: d.URL, CanonicalURL: deref(d.URLCanonical),
 		ContentType: d.ContentType, State: d.State, Author: deref(d.Author), Language: deref(d.Language),
-		CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, MarkdownPath: markdownPath}
+		CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, MarkdownPath: currentMarkdownPath(d)}
 	if d.PublishedAt != nil {
 		m.PublishedAt = *d.PublishedAt
 	}
@@ -85,11 +85,20 @@ func extractionView(e *ExtractionResponse) *ui.Extraction {
 		FetchedAt: e.FetchedAt}
 }
 
+// currentMarkdownPath is the absolute path of the document's current
+// markdown, or "" when it has none.
+func currentMarkdownPath(d DocumentResponse) string {
+	if d.CurrentExtraction == nil {
+		return ""
+	}
+	return d.CurrentExtraction.MarkdownPath
+}
+
 // documentText renders the document's markdown, the first
 // ui.MaxRenderedMarkdown bytes of it, from the file GET
 // /v1/documents/{id}/content streams.
-func (h pageHandlers) documentText(r *http.Request, doc *store.Document, images bool) ui.TextPanel {
-	content, err := h.d.openContent(r.Context(), doc)
+func (h pageHandlers) documentText(r *http.Request, doc DocumentResponse, images bool) ui.TextPanel {
+	content, err := openMarkdown(doc.ID, currentMarkdownPath(doc))
 	if unavailable, ok := errors.AsType[*contentUnavailable](err); ok {
 		if unavailable.missing {
 			return ui.TextPanel{State: ui.TextMissing}

@@ -139,8 +139,16 @@ func (h pageHandlers) panelError(r *http.Request, err error) *ui.PanelError {
 	if err == nil {
 		return nil
 	}
-	h.d.reportError(r, err)
-	return &ui.PanelError{Message: err.Error(), RequestID: middleware.GetReqID(r.Context())}
+	_, p := h.reportPanel(r, err)
+	return p
+}
+
+// reportPanel is panelError for a read whose failure is the page's answer,
+// a search's: it also returns the status to answer with, reportError's,
+// which is a 499 when the client has gone.
+func (h pageHandlers) reportPanel(r *http.Request, err error) (int, *ui.PanelError) {
+	status, _ := h.d.reportError(r, err)
+	return status, &ui.PanelError{Message: err.Error(), RequestID: middleware.GetReqID(r.Context())}
 }
 
 // asset serves the pages' asset named by the path, or the 404 page.

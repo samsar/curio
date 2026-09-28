@@ -380,3 +380,22 @@ func TestPage_RenderFailure(t *testing.T) {
 	assert.Equal(t, "request failed", errs[0]["msg"])
 	assert.EqualValues(t, http.StatusInternalServerError, errs[0]["status"])
 }
+
+// TestSearchPage_ClientGone: a search that fails because its client has
+// gone answers, and logs, the 499 reportError gives it, not the 500 of the
+// error alone.
+func TestSearchPage_ClientGone(t *testing.T) {
+	var rec logRecorder
+	deps := routerDeps(t, &rec, withSearch)
+	h := pageHandlers{d: deps, pages: testDashboard(t, pagesOn)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	h.search(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/ui/search?q=text", nil))
+
+	assert.Equal(t, statusClientClosedRequest, w.Code)
+	assert.Empty(t, rec.at(slog.LevelError))
+	infos := rec.at(slog.LevelInfo)
+	require.Len(t, infos, 1)
+	assert.EqualValues(t, statusClientClosedRequest, infos[0]["status"])
+}
