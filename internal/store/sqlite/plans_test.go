@@ -77,11 +77,20 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 	docs := func(name string, opts store.ListDocumentsOpts, index string) planCase {
 		opts.After = after
 		q, args := listDocumentsQuery("local", opts)
-		return planCase{name: name + ", " + page, query: q, args: args, want: []string{
+		want := []string{
 			index + keyset("updated_at") + ")",
 			"SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)",
-		}}
+		}
+		if opts.Folder != "" {
+			want = append(want, "SEARCH b EXISTS USING INDEX idx_bookmarks_document (document_id=?)")
+		}
+		return planCase{name: name + ", " + page, query: q, args: args, want: want}
 	}
+	const (
+		byTenant = "SEARCH d USING INDEX idx_documents_tenant_updated (tenant_id=?"
+		byState  = "SEARCH d USING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?"
+	)
+	fetched := store.DocStateFetched
 	jobs := func(name string, opts store.ListJobsOpts, index string) planCase {
 		opts.After = after
 		q, args := listJobsQuery("local", opts)
@@ -99,10 +108,19 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 		}}
 	}
 	return []planCase{
-		docs("ListWithLastError", store.ListDocumentsOpts{},
-			"SEARCH d USING INDEX idx_documents_tenant_updated (tenant_id=?"),
-		docs("ListWithLastError by state", store.ListDocumentsOpts{State: store.DocStateFetched},
-			"SEARCH d USING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?"),
+		docs("ListWithLastError", store.ListDocumentsOpts{}, byTenant),
+		docs("ListWithLastError by state", store.ListDocumentsOpts{State: fetched}, byState),
+		docs("ListWithLastError by content type", store.ListDocumentsOpts{ContentType: store.ContentTypePDF}, byTenant),
+		docs("ListWithLastError by state and content type",
+			store.ListDocumentsOpts{State: fetched, ContentType: store.ContentTypePDF}, byState),
+		docs("ListWithLastError by host", store.ListDocumentsOpts{Host: "example.com"}, byTenant),
+		docs("ListWithLastError by state and host", store.ListDocumentsOpts{State: fetched, Host: "example.com"}, byState),
+		docs("ListWithLastError by folder", store.ListDocumentsOpts{Folder: "/Tech/AI"}, byTenant),
+		docs("ListWithLastError by state and folder", store.ListDocumentsOpts{State: fetched, Folder: "/Tech/AI"}, byState),
+		docs("ListWithLastError by content type, host and folder", store.ListDocumentsOpts{
+			ContentType: store.ContentTypeArticle, Host: "example.com", Folder: "/Tech"}, byTenant),
+		docs("ListWithLastError by every filter", store.ListDocumentsOpts{State: fetched,
+			ContentType: store.ContentTypeArticle, Host: "example.com", Folder: "/Tech"}, byState),
 		jobs("ListWithDoc", store.ListJobsOpts{},
 			"SEARCH j USING INDEX idx_jobs_tenant_updated (tenant_id=?"),
 		jobs("ListWithDoc by status", store.ListJobsOpts{Status: store.JobStatusDone},
@@ -123,6 +141,7 @@ func TestQueryPlans(t *testing.T) {
 	bm25Q, bm25Args := bm25Query("local", `"kafka"`, 10, store.SearchFilters{})
 	vecQ, vecArgs := vectorQuery("local", queryVector(t), 10, store.SearchFilters{})
 	getJobQ, getJobArgs := getJobWithDocQuery("local", "job")
+	getDocQ, getDocArgs := getDocumentWithErrorQuery("local", "doc")
 
 	cases := []planCase{
 		{
@@ -256,6 +275,20 @@ func TestQueryPlans(t *testing.T) {
 			name:  "TagsForDocument",
 			query: tagsForDocumentSQL, args: []any{"local", "doc"},
 			want: []string{"SEARCH bookmarks USING INDEX idx_bookmarks_document (document_id=?)"},
+		},
+		{
+			name:  "GetWithLastError",
+			query: getDocQ, args: getDocArgs,
+			first: "SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
+			want:  []string{"SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)"},
+		},
+		{
+			// A document has a bookmark per source at most, so sorting them
+			// is cheap; see listBookmarksByDocumentSQL for the order.
+			name:  "ListByDocument",
+			query: listBookmarksByDocumentSQL, args: []any{"local", "doc"},
+			first: "SEARCH bookmarks USING INDEX idx_bookmarks_document (document_id=?)",
+			sorts: true,
 		},
 		{
 			name:  "document delete reaches its jobs",

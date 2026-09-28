@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -169,11 +170,11 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, opts
 
 	var out []store.DocumentWithError
 	for rows.Next() {
-		var item store.DocumentWithError
-		if item.Document, err = scanDocument(rows, &item.LastError, &item.MarkdownPath); err != nil {
+		item, err := scanDocumentWithError(rows)
+		if err != nil {
 			return nil, fmt.Errorf("list documents with error: %w", err)
 		}
-		out = append(out, item)
+		out = append(out, *item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list documents with error: %w", err)
@@ -181,35 +182,89 @@ func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, opts
 	return out, nil
 }
 
+func (s *Documents) GetWithLastError(ctx context.Context, tenantID, id string) (*store.DocumentWithError, error) {
+	q, args := getDocumentWithErrorQuery(tenantID, id)
+	doc, err := scanDocumentWithError(s.db.QueryRowContext(ctx, q, args...))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("document %s: %w", id, err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get document %s with error: %w", id, err)
+	}
+	return doc, nil
+}
+
+// selectDocumentsWithError reads documents as ListWithLastError and
+// GetWithLastError return them: each with the error of its most recent
+// failed job, a seek on idx_jobs_document, and its current extraction's
+// markdown path. Its one argument is store.JobStatusFailed; the query that
+// uses it adds a WHERE on documents d.
+var selectDocumentsWithError = `SELECT ` + qualify("d", documentColumns) + `,
+	COALESCE((
+		SELECT j.last_error FROM jobs j
+		WHERE j.document_id = d.id AND j.status = ?
+		ORDER BY j.updated_at DESC
+		LIMIT 1
+	), '') AS last_error,
+	COALESCE(e.markdown_path, '') AS markdown_path
+	FROM documents d
+	LEFT JOIN document_extractions e ON e.id = d.current_extraction_id`
+
+// scanDocumentWithError scans a row of selectDocumentsWithError.
+func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.DocumentWithError, error) {
+	var item store.DocumentWithError
+	var err error
+	if item.Document, err = scanDocument(row, &item.LastError, &item.MarkdownPath); err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
 // listDocumentsQuery builds ListWithLastError's query. It walks
 // idx_documents_tenant_state_updated when filtered by state, and
 // idx_documents_tenant_updated otherwise, in (updated_at, id) order from
-// opts.After, so it stops at the limit, and the last-error subquery, a seek
-// on idx_jobs_document, runs only for the rows returned.
+// opts.After, so it stops at the limit. The other filters are checked on
+// each row it walks, the folder's through a seek on
+// idx_bookmarks_document, and the last-error subquery runs only for the
+// rows returned.
 func listDocumentsQuery(tenantID string, opts store.ListDocumentsOpts) (string, []any) {
-	q := `SELECT ` + qualify("d", documentColumns) + `,
-		COALESCE((
-			SELECT j.last_error FROM jobs j
-			WHERE j.document_id = d.id AND j.status = ?
-			ORDER BY j.updated_at DESC
-			LIMIT 1
-		), '') AS last_error,
-		COALESCE(e.markdown_path, '') AS markdown_path
-		FROM documents d
-		LEFT JOIN document_extractions e ON e.id = d.current_extraction_id
-		WHERE d.tenant_id = ?`
+	clauses := []string{"d.tenant_id = ?"}
 	args := []any{store.JobStatusFailed, tenantID}
 	if opts.State != "" {
-		q += ` AND d.state = ?`
+		clauses = append(clauses, "d.state = ?")
 		args = append(args, opts.State)
+	}
+	if opts.ContentType != "" {
+		clauses = append(clauses, "d.content_type = ?")
+		args = append(args, opts.ContentType)
+	}
+	if opts.Host != "" {
+		cond, condArgs := hostPredicate("d.url", opts.Host)
+		clauses = append(clauses, cond)
+		args = append(args, condArgs...)
+	}
+	if cond, condArgs, ok := folderPredicate("b.folder_path", opts.Folder); ok {
+		// EXISTS, not a join: a document with several bookmarks in the
+		// folder is still one row.
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM bookmarks b"+
+			" WHERE b.document_id = d.id AND b.tenant_id = d.tenant_id AND "+cond+")")
+		args = append(args, condArgs...)
 	}
 	if !opts.After.IsZero() {
 		pred, predArgs := keysetAfter("d.updated_at", "d.id", opts.After)
-		q += ` AND ` + pred
+		clauses = append(clauses, pred)
 		args = append(args, predArgs...)
 	}
-	q += ` ORDER BY d.updated_at DESC, d.id DESC LIMIT ?`
+	q := selectDocumentsWithError + " WHERE " + strings.Join(clauses, " AND ") +
+		" ORDER BY d.updated_at DESC, d.id DESC LIMIT ?"
 	return q, append(args, listLimit(opts.Limit))
+}
+
+// getDocumentWithErrorQuery builds GetWithLastError's query: a point
+// search of the documents primary key.
+func getDocumentWithErrorQuery(tenantID, id string) (string, []any) {
+	return selectDocumentsWithError + " WHERE d.id = ? AND d.tenant_id = ?",
+		[]any{store.JobStatusFailed, id, tenantID}
 }
 
 // Reads of the tenant's documents by state. Both use

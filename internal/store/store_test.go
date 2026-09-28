@@ -21,6 +21,16 @@ func TestDocState_Valid(t *testing.T) {
 	}
 }
 
+func TestContentType_Valid(t *testing.T) {
+	for _, c := range []store.ContentType{store.ContentTypeArticle, store.ContentTypeRepo, store.ContentTypeVideo,
+		store.ContentTypePDF, store.ContentTypeThread, store.ContentTypeUnknown} {
+		assert.True(t, c.Valid(), c)
+	}
+	for _, c := range []store.ContentType{"", "bogus", "Article", "fetched"} {
+		assert.False(t, c.Valid(), c)
+	}
+}
+
 // The valid sets are the jobs table's CHECK constraints (migrations/001).
 func TestJobStatus_Valid(t *testing.T) {
 	for _, s := range []store.JobStatus{store.JobStatusPending, store.JobStatusRunning, store.JobStatusDone,

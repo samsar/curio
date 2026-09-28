@@ -129,6 +129,16 @@ func (s DocState) Valid() bool {
 	return false
 }
 
+// Valid reports whether t is one of the ContentType constants.
+func (t ContentType) Valid() bool {
+	switch t {
+	case ContentTypeArticle, ContentTypeRepo, ContentTypeVideo, ContentTypePDF, ContentTypeThread,
+		ContentTypeUnknown:
+		return true
+	}
+	return false
+}
+
 // Valid reports whether s is one of the JobStatus constants.
 func (s JobStatus) Valid() bool {
 	switch s {
@@ -300,6 +310,10 @@ type DocumentStore interface {
 	// failed job that targeted it and the markdown path of its current
 	// extraction.
 	ListWithLastError(ctx context.Context, tenantID string, opts ListDocumentsOpts) ([]DocumentWithError, error)
+	// GetWithLastError returns one of the tenant's documents as
+	// ListWithLastError lists it. ErrNotFound if the tenant has no such
+	// document.
+	GetWithLastError(ctx context.Context, tenantID, id string) (*DocumentWithError, error)
 	// ListIDsWithContent returns the IDs of the tenant's documents in state
 	// that have a current extraction: the ones an index job can work on.
 	ListIDsWithContent(ctx context.Context, tenantID string, state DocState) ([]string, error)
@@ -335,11 +349,21 @@ func (k PageKey) IsZero() bool {
 }
 
 // ListDocumentsOpts filters DocumentStore.ListWithLastError. Empty fields
-// mean "no filter for that dimension".
+// mean "no filter for that dimension"; the ones set must all match.
 type ListDocumentsOpts struct {
-	State DocState
-	Limit int     // <= 0 means the impl default (50)
-	After PageKey // updated_at and ID of the previous page's last row
+	State       DocState
+	ContentType ContentType
+	// Host matches documents whose http or https URL has exactly this host,
+	// ASCII case-insensitively as DNS names are. Every character is
+	// literal. It is SearchFilters.Host's rule.
+	Host string
+	// Folder matches documents with a bookmark in that folder or any folder
+	// under it, by ListBookmarksOpts.FolderPath's rule: on path segments,
+	// case-sensitively, every character literal, a trailing "/" ignored and
+	// "/" alone no filter.
+	Folder string
+	Limit  int     // <= 0 means the impl default (50)
+	After  PageKey // updated_at and ID of the previous page's last row
 }
 
 // DocumentWithError is a document plus what a debug listing shows next to
@@ -377,6 +401,10 @@ type BookmarkStore interface {
 	// List lists the tenant's bookmarks, newest first by CreatedAt (then by
 	// ID, descending), each with its document's state.
 	List(ctx context.Context, tenantID string, opts ListBookmarksOpts) ([]BookmarkWithState, error)
+	// ListByDocument returns the tenant's bookmarks linked to the document,
+	// newest saved first (by SavedAt, then by ID, descending). It is
+	// unpaged: a URL has at most one bookmark per source.
+	ListByDocument(ctx context.Context, tenantID, documentID string) ([]*Bookmark, error)
 	Delete(ctx context.Context, id string) error
 	LinkDocument(ctx context.Context, bookmarkID, documentID string) error
 
