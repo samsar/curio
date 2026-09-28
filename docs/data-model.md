@@ -277,9 +277,9 @@ long it has been runnable. Running jobs are never interrupted.
 
 ### `queue_settings`
 
-The queue gate's settings: one row, daemon-wide, with no `tenant_id`,
-since workers claim across tenants. No row means the defaults: not
-paused, `normal`, no schedule.
+The queue gate's settings, and keep-awake: one row, daemon-wide, with no
+`tenant_id`, since workers claim across tenants. No row means the
+defaults: not paused, `normal`, no schedule, keep-awake off.
 
 ```
 queue_settings
@@ -289,7 +289,11 @@ queue_settings
   schedule_start  INTEGER                      -- minutes after local midnight, 0..1439; NULL: no schedule
   schedule_end    INTEGER                      -- set with schedule_start, never equal to it
   updated_at
+  keep_awake      INTEGER NOT NULL DEFAULT 0   -- 0 | 1: hold the Mac awake while there is work, on AC power (013)
 ```
+
+`keep_awake` never gates a claim: the daemon's keep-awake keeper reads it
+to decide whether to run `caffeinate` while the workers have work.
 
 The daemon reads the row once at startup and refuses to start if it
 can't; it writes it only when `PUT /v1/queue` changes a setting. The
