@@ -62,11 +62,13 @@ func backupPath(dir string, t time.Time) (string, error) {
 // moveAside renames the directory the home resolves to, symlinks
 // followed, to its backup name, with one rename, while no daemon runs for
 // the home and none can start (daemonctl's WithDaemonStopped: the agent
-// booted out, a daemon stopped, daemon.start.lock held throughout). What
-// isn't a curio home is never moved. Nothing in either tree is deleted; a
-// rename that fails (another volume, a mount point, permissions) leaves
-// the home where it was.
-func (w *world) moveAside(ctx context.Context, hs homeState) (string, error) {
+// booted out, a daemon stopped, daemon.start.lock held throughout), then
+// runs then on the emptied path under the same hold, so the new home
+// exists before any daemon can start there. What isn't a curio home is
+// never moved. Nothing in either tree is deleted; a rename that fails
+// (another volume, a mount point, permissions) leaves the home where it
+// was.
+func (w *world) moveAside(ctx context.Context, hs homeState, then func(dir string) error) (string, error) {
 	dir, err := resolveHome(hs.path)
 	if err != nil {
 		return "", err
@@ -85,6 +87,9 @@ func (w *world) moveAside(ctx context.Context, hs homeState) (string, error) {
 		}
 		if err := os.Rename(dir, dest); err != nil {
 			return fmt.Errorf("move %s aside: %w; it is left where it was", dir, err)
+		}
+		if err := then(dir); err != nil {
+			return fmt.Errorf("moved %s aside to %s, then: %w", dir, dest, err)
 		}
 		return nil
 	})

@@ -125,7 +125,17 @@ func (s *homeStep) Apply(ctx context.Context, ui UI) error {
 	w := s.w
 	hs := w.readHome()
 	if w.freshPending() && hs.kind == homeOurs {
-		dest, err := w.moveAside(ctx, hs)
+		// Measured before the move and created inside it, while no daemon
+		// can start: an auto-starter waiting on the start lock would
+		// otherwise spawn a daemon that makes a default home at the path
+		// before this one does.
+		model, width, err := w.measureNewHome(ctx, ui, hs)
+		if err != nil {
+			return err
+		}
+		dest, err := w.moveAside(ctx, hs, func(dir string) error {
+			return initHome(ui, hs, dir, model, width)
+		})
 		if err != nil {
 			return err
 		}
@@ -146,28 +156,44 @@ func (s *homeStep) Apply(ctx context.Context, ui UI) error {
 }
 
 // createHome makes a new home at hs.path, recording the embedding model
-// and the width it measures: the model decides its width, and a new home
-// records what the daemon will receive.
+// and the width it measures.
 func (w *world) createHome(ctx context.Context, ui UI, hs homeState) error {
-	model := w.newEmbeddingModel()
-	cfg := w.baseConfig(hs)
-	width, err := embedder.MeasureWidth(ctx, embedder.OllamaOptions{
-		BaseURL: cfg.Embedding.BaseURL,
-		Model:   model,
-		Timeout: time.Duration(cfg.Embedding.TimeoutSeconds) * time.Second,
-	})
+	model, width, err := w.measureNewHome(ctx, ui, hs)
 	if err != nil {
 		return err
-	}
-	if model == w.defaults.Embedding.Model && width != w.defaults.Embedding.Dim {
-		ui.Warn(fmt.Sprintf("%s returned %d-dimensional vectors, not the %d curio expects; the new home records %d",
-			model, width, w.defaults.Embedding.Dim, width))
 	}
 	dir, err := resolveHome(hs.path)
 	if err != nil {
 		return err
 	}
-	_, err = curiohome.Init(dir, model, width)
+	return initHome(ui, hs, dir, model, width)
+}
+
+// measureNewHome is the embedding model a new home records and the width
+// it measures: the model decides its width, and a new home records what
+// the daemon will receive.
+func (w *world) measureNewHome(ctx context.Context, ui UI, hs homeState) (model string, width int, err error) {
+	model = w.newEmbeddingModel()
+	cfg := w.baseConfig(hs)
+	width, err = embedder.MeasureWidth(ctx, embedder.OllamaOptions{
+		BaseURL: cfg.Embedding.BaseURL,
+		Model:   model,
+		Timeout: time.Duration(cfg.Embedding.TimeoutSeconds) * time.Second,
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	if model == w.defaults.Embedding.Model && width != w.defaults.Embedding.Dim {
+		ui.Warn(fmt.Sprintf("%s returned %d-dimensional vectors, not the %d curio expects; the new home records %d",
+			model, width, w.defaults.Embedding.Dim, width))
+	}
+	return model, width, nil
+}
+
+// initHome creates the home at dir, hs.path resolved, for model at width.
+// A home another command created there meanwhile is left as it is.
+func initHome(ui UI, hs homeState, dir, model string, width int) error {
+	_, err := curiohome.Init(dir, model, width)
 	switch {
 	case errors.Is(err, curiohome.ErrAlreadyInitialized):
 		ui.Warn(hs.path + " became a curio home meanwhile; checking it as it is")

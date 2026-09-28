@@ -94,6 +94,9 @@ func printPlan(w io.Writer, p setup.Plan) {
 			for _, note := range it.Result.Notes {
 				fmt.Fprintf(w, "       %s\n", note)
 			}
+			if it.Result.Hint != "" {
+				fmt.Fprintf(w, "       %s\n", it.Result.Hint)
+			}
 		}
 	}
 	if blockers := p.Blockers(); len(blockers) > 0 {

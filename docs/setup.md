@@ -37,7 +37,7 @@ does it, asking before each step:
    for it to answer. Without Homebrew, or on an Intel Mac, it opens
    <https://ollama.com/download> and waits up to 10 minutes for you to
    install and open the app. An Ollama too old for the models (gemma4 needs
-   0.30.5) is upgraded with `brew upgrade ollama` and `brew services restart
+   0.30.5, its QAT tags 0.30.6) is upgraded with `brew upgrade ollama` and `brew services restart
    ollama` when Homebrew installed it; the app you update yourself.
    Homebrew has a prebuilt Ollama only for the newest macOS (on older
    releases `brew install` builds it from source, which takes a while) and
@@ -105,7 +105,8 @@ What curio up asks, and never does unasked:
 Without a terminal (in a script, with stdin or stderr redirected), curio
 up never asks: it prints the plan and exits 1, unless `--yes` answers for
 you. It exits 0 when there was nothing to do, when it did everything, and
-after a dry run; 1 when a blocker stopped it (a home it won't touch, a
+after a dry run with no blocker; 1 when a blocker stopped it, a dry run's
+included (a home it won't touch, a
 config.yaml that doesn't load, too little disk; the plan says what to do),
 when you said no, or when a step failed; and 130 when a question was left
 unanswered.
@@ -451,8 +452,7 @@ until the daemon is ready. `curio daemon status` shows the same progress.
 After you rebuild or upgrade curio, the daemon already running is still
 the old build. `curio up` restarts it; `curio daemon start` says so,
 naming both versions: run `curio daemon stop`, and the next command starts
-the new daemon. If the
-launchd agent (below) runs a curio-daemon other than this curio's, say an
+the new daemon. If the launchd agent (below) runs a curio-daemon other than this curio's, say an
 older install elsewhere, a stop would only start that one again, so the
 warning says to run `curio daemon install` instead, which repoints the
 agent and restarts the daemon.

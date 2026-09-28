@@ -380,8 +380,8 @@ External processes the daemon expects:
 
 - **Ollama** — for embeddings and local text generation. Daemon talks to it on
   `http://localhost:11434`; `curio up` starts or installs it when nothing
-  answers there, and pulls the models. The daemon runs without it and degrades: search
-  returns keyword-only results marked `degraded`, index jobs fail and retry
+  answers there, and pulls the models. The daemon runs without it and
+  degrades: search returns keyword-only results marked `degraded`, index jobs fail and retry
   with backoff, cluster labels fall back to term labels, and `/v1/healthz`
   (and `curio doctor`) says what's wrong. It pulls the models it needs,
   retrying until Ollama answers. Generation is abstracted behind a

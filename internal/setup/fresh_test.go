@@ -74,6 +74,7 @@ func TestUp_Fresh(t *testing.T) {
 	home := item(t, plan, "home")
 	assert.Equal(t, setup.AskNo, home.Fix.Consent)
 	assert.Contains(t, home.Fix.Summary, "move "+h.home+" aside to "+backup)
+	assert.Contains(t, home.Hint, "nothing is deleted", "the plan says so before the move is agreed to")
 
 	assertHolds(t, backup, files)
 	assert.Equal(t, 1, h.agent.Count("Uninstall"))

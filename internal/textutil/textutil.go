@@ -11,8 +11,9 @@ import (
 // TruncateBytes returns the longest prefix of s that is at most n bytes and
 // ends on a rune boundary. Slicing a Go string by byte offset (s[:n]) cuts
 // multi-byte runes in half and yields invalid UTF-8, which corrupts chunk
-// text sent to the embedder, persisted labels, and terminal output alike. It returns "" when n is smaller than the first
-// rune, and s itself when s already fits.
+// text sent to the embedder, persisted labels, and terminal output alike.
+// It returns "" when n is smaller than the first rune, and s itself when s
+// already fits.
 func TruncateBytes(s string, n int) string {
 	if n >= len(s) {
 		return s
