@@ -20,7 +20,7 @@ make build      # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp
 | `search_bookmarks` | `query`, `k?` (1-100; default the daemon's `search.default_k`), `content_type?[]`, `source?[]`, `host?[]` | top matching documents (title, url, doc_id, score, snippet); `degraded`/`warnings` when keyword-only |
 | `get_document` | `id` (doc_id) | the document's metadata + full extracted markdown; a note instead of the markdown when nothing is extracted yet. An unknown id, or content that fails to load, is a tool error |
 | `find_related` | `id` (doc_id), `k?` | documents similar to the given one (vector similarity over its indexed content), excluding itself |
-| `list_interests` | `limit?` (default 20), `members?` (default 5) | the labeled topic clusters from the latest clustering run, each with a summary, size and representative documents (doc_ids); empty until `curio interests rebuild` has run |
+| `list_interests` | `limit?` (default 20), `members?` (default 5) | the labeled topic clusters from the latest clustering run, each with a summary, size and representative documents (doc_ids); empty until `curio interests rebuild` has run, or when the last run grouped none of its `num_documents` |
 
 `content_type` ∈ `article|repo|video|pdf|thread|unknown`, `source` ∈
 `chrome|safari|firefox|html|manual`, `host` is a URL host like `github.com`.
