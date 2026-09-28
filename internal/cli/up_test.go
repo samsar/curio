@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/service"
@@ -33,6 +34,26 @@ func TestUp_NothingToDo(t *testing.T) {
 		"queue:    open\n", stdout)
 	assert.Empty(t, stderr)
 	assert.Zero(t, w.agent.Count("Install"))
+}
+
+// TestUp_DaemonStarting: a daemon still starting leaves the parts of the
+// status it serves unread, and the status says so for each, never taking a
+// failed read for an empty library or an open queue.
+func TestUp_DaemonStarting(t *testing.T) {
+	w := upWorldFrom(t, apitest.StartNotReady)
+	code, stdout, stderr := w.exit(t, "up")
+	assert.Equal(t, 0, code, stderr)
+	assert.Empty(t, stderr)
+	assert.True(t, strings.HasPrefix(stdout, "Nothing to do: curio is up.\n"), stdout)
+	for _, want := range []string{
+		"daemon:   unavailable: starting: initializing\n",
+		"library:  unavailable: curio-daemon is starting: initializing\n",
+		"queue:    unavailable: curio-daemon is starting: initializing\n",
+	} {
+		assert.Contains(t, stdout, want)
+	}
+	assert.NotContains(t, stdout, "0 documents")
+	assert.NotContains(t, stdout, "queue:    open")
 }
 
 // TestUp_FreshMachine: on a Mac with only Ollama, `curio up --yes` sets
