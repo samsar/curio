@@ -518,7 +518,10 @@ func TestWithDaemonStopped(t *testing.T) {
 
 	err := c.WithDaemonStopped(ctx, func() error {
 		assert.Equal(t, 1, a.Count("Uninstall"))
-		assert.Zero(t, a.PID(), "the agent's daemon is gone")
+		// The daemon lets go of daemon.pid as it exits; the fake reaps it
+		// just after, so its PID clears a moment later on a loaded machine.
+		assert.Eventually(t, func() bool { return a.PID() == 0 }, 5*time.Second, 10*time.Millisecond,
+			"the agent's daemon is gone")
 		held, _, err := probeLock(c.Home.PIDFile())
 		assert.NoError(t, err)
 		assert.False(t, held, "nothing holds daemon.pid")

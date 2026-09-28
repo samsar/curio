@@ -107,24 +107,19 @@ brews:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: "https://github.com/samsar/curio"
-    description: "Personal context layer built from your bookmarks — hybrid BM25 + vector search"
+    description: "Search everything you've bookmarked, locally, and let your AI tools use it"
     license: "Apache-2.0"
-    # Ollama is required at runtime for embeddings. We don't depends_on
-    # because some users prefer the menu-bar app from ollama.com over
-    # the brew formula; either works.
+    # Ollama is required at runtime. `curio up` installs or starts it (with
+    # consent), so the formula doesn't depend on it: some users prefer the
+    # menu-bar app from ollama.com over the brew formula; either works.
     caveats: |
-      curio needs Ollama for embeddings. If you don't have it yet:
+      To finish setting up, run:
 
-        brew install ollama
-        brew services start ollama
-        ollama pull qwen3-embedding:0.6b   # the embedding model
-        ollama pull qwen3:4b-instruct      # the writing model, for interest labels
+        curio up
 
-      Then run:
-
-        curio doctor          # verify your setup
-        curio import html ~/Downloads/bookmarks.html --follow
-        curio search "..."
+      It checks your Mac, installs Ollama if needed (asking first), picks
+      and downloads the models, keeps curio running in the background, and
+      offers to import your bookmarks. Run it again any time to check.
     install: |
       bin.install "curio"
       bin.install "curio-daemon"
