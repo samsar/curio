@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -119,6 +120,78 @@ const (
 	SourceManual  = "manual"
 	SourceHTML    = "html" // Netscape HTML export, any browser
 )
+
+// FailureCause is why a failed or dead document failed
+// (documents.failure_cause): what the site did, as the fetcher read it, or
+// the step that gave up. Unlike the enums above it has no CHECK constraint
+// (migrations/014 says why); the store checks Valid on every write instead.
+type FailureCause string
+
+// Failure causes, in the order FailureCauses lists them.
+const (
+	// FailureCauseDeadLink: the content is gone (a 404 or 410, or a page
+	// that says so). The one cause of a dead document.
+	FailureCauseDeadLink FailureCause = "dead_link"
+	// FailureCauseAntiBot: the site blocked the request (a 403 or 503, a
+	// challenge or block page).
+	FailureCauseAntiBot FailureCause = "anti_bot"
+	// FailureCauseLoginWall: a login page, or too little text to be the
+	// article.
+	FailureCauseLoginWall FailureCause = "login_wall"
+	// FailureCauseJinaRefused: the Jina Reader fallback refused the target
+	// (a domain block, a publisher's opt-out, a deterministic 4xx).
+	FailureCauseJinaRefused FailureCause = "jina_refused"
+	// FailureCauseTLS: the site's certificate failed verification.
+	FailureCauseTLS FailureCause = "tls"
+	// FailureCauseUnreachable: the host doesn't resolve, or refuses
+	// connections.
+	FailureCauseUnreachable FailureCause = "unreachable"
+	// FailureCauseTimeout: the site, or the tool fetching it, took too long.
+	FailureCauseTimeout FailureCause = "timeout"
+	// FailureCauseNetwork: any other transport failure (a reset, a TLS
+	// alert, a redirect loop, our own network down).
+	FailureCauseNetwork FailureCause = "network"
+	// FailureCauseRateLimited: the site, or GitHub or YouTube, rate-limited
+	// the requests.
+	FailureCauseRateLimited FailureCause = "rate_limited"
+	// FailureCauseHTTPError: any other HTTP status, or an error page naming
+	// one.
+	FailureCauseHTTPError FailureCause = "http_error"
+	// FailureCauseUnsupported: a URL or content curio can't read (a channel
+	// page, a GitHub profile, a file that isn't HTML, a PDF it can't
+	// extract).
+	FailureCauseUnsupported FailureCause = "unsupported"
+	// FailureCauseTooLarge: the response was over the body cap.
+	FailureCauseTooLarge FailureCause = "too_large"
+	// FailureCauseIndex: the fetch succeeded, and indexing gave up.
+	FailureCauseIndex FailureCause = "index"
+	// FailureCauseOther: anything else.
+	FailureCauseOther FailureCause = "other"
+)
+
+// failureCauses is every FailureCause, in the order of their constants.
+var failureCauses = []FailureCause{
+	FailureCauseDeadLink, FailureCauseAntiBot, FailureCauseLoginWall, FailureCauseJinaRefused,
+	FailureCauseTLS, FailureCauseUnreachable, FailureCauseTimeout, FailureCauseNetwork,
+	FailureCauseRateLimited, FailureCauseHTTPError, FailureCauseUnsupported, FailureCauseTooLarge,
+	FailureCauseIndex, FailureCauseOther,
+}
+
+// FailureCauses returns every FailureCause, in the order of their
+// constants, in a slice the caller may keep.
+func FailureCauses() []FailureCause { return slices.Clone(failureCauses) }
+
+// Valid reports whether c is one of the FailureCause constants.
+func (c FailureCause) Valid() bool { return slices.Contains(failureCauses, c) }
+
+// State is the state a document that failed for c is in: dead for a dead
+// link, failed for every other cause.
+func (c FailureCause) State() DocState {
+	if c == FailureCauseDeadLink {
+		return DocStateDead
+	}
+	return DocStateFailed
+}
 
 // Valid reports whether s is one of the DocState constants.
 func (s DocState) Valid() bool {
