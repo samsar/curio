@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,6 +124,36 @@ func TestSearch_UnsupportedFieldsAreRejected(t *testing.T) {
 		t.Run(body, func(t *testing.T) {
 			assertProblem(t, s.search(t, body), http.StatusBadRequest)
 		})
+	}
+}
+
+// TestSearch_FiltersValidated: a content_type or source outside its set is
+// a 400 naming the allowed values, refused before the query is embedded,
+// where it used to answer "nothing matches"; values in the set filter.
+func TestSearch_FiltersValidated(t *testing.T) {
+	var embeds atomic.Int32
+	counting := embedFunc(func(context.Context, []string) ([][]float32, error) {
+		embeds.Add(1)
+		return [][]float32{unitVec()}, nil
+	})
+	s := newSearchServer(t, counting, search.Config{})
+	for body, allowed := range map[string]string{
+		`{"query":"kafka","filters":{"content_type":["articles"]}}`: `"articles" must be one of: ` + contentTypeList,
+		`{"query":"kafka","filters":{"source":["chrom"]}}`:          `"chrom" must be one of: ` + sourceList,
+	} {
+		t.Run(body, func(t *testing.T) {
+			p := assertProblem(t, s.search(t, body), http.StatusBadRequest)
+			assert.Contains(t, p.Detail, allowed)
+		})
+	}
+	assert.Zero(t, embeds.Load(), "a refused filter embeds nothing")
+
+	for _, body := range []string{
+		`{"query":"kafka","filters":{"content_type":["article"]}}`,
+		`{"query":"kafka","filters":{"source":["chrome"]}}`,
+	} {
+		resp := s.search(t, body)
+		assert.Equal(t, http.StatusOK, resp.status, resp.body)
 	}
 }
 

@@ -102,7 +102,7 @@ when the entry was first committed.
 - 2026-09-25 — [API: request IDs, one error mapping, logged server errors](#api-request-ids-one-error-mapping-logged-server-errors) (revised)
 - 2026-09-25 — [API: tolerant responses, strict requests](#api-tolerant-responses-strict-requests)
 - 2026-09-25 — [API: absolute content paths, and hydration errors fail the request](#api-absolute-content-paths-and-hydration-errors-fail-the-request) (revised)
-- 2026-09-25 — [API: filters are validated, sizing knobs default](#api-filters-are-validated-sizing-knobs-default)
+- 2026-09-25 — [API: filters are validated, sizing knobs default](#api-filters-are-validated-sizing-knobs-default) (revised)
 - 2026-09-25 — [Clients: one discovery, an explicit daemon environment, a signal context](#clients-one-discovery-an-explicit-daemon-environment-a-signal-context) (revised)
 - 2026-09-25 — [Client errors: a typed APIError, and "unreachable" means never connected](#client-errors-a-typed-apierror-and-unreachable-means-never-connected)
 - 2026-09-25 — [MCP sidecar: restart an unreachable daemon, retry once](#mcp-sidecar-restart-an-unreachable-daemon-retry-once) (revised)
@@ -3732,6 +3732,14 @@ it falls back. The CLI keeps no enum lists of its own: the server's problem
 detail reaches the user as it is. Three hand-written parsers had drifted
 apart: interests clamped out-of-range values (so `members=-1` meant none),
 while related and metrics fell back to their defaults.
+
+**Revised (2026-09-29):** `POST /v1/search` validates its filters the same
+way: a `filters.content_type` or `filters.source` value outside its set is a
+400 naming the allowed values, refused before the query is embedded.
+`{"query":"kafka","filters":{"content_type":["articles"]}}` answered 200 with
+no items, so `curio search --type articles` printed "no results" and an MCP
+client passing "articles" found nothing. `filters.host` stays free-form:
+hosts are literal input.
 
 ---
 
