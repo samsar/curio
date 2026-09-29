@@ -211,6 +211,9 @@ func pollParam(r *http.Request, kinds ...string) (string, error) {
 	return "", badRequest("%s %q must be one of: %s", ui.PollParam, poll, strings.Join(kinds, ", "))
 }
 
+// isPoll reports whether r asks a page for its live regions.
+func isPoll(r *http.Request) bool { return r.URL.Query().Get(ui.PollParam) != "" }
+
 // deref is *s, or "" for nil: an optional field as a page shows it.
 func deref(s *string) string {
 	if s == nil {

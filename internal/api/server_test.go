@@ -855,6 +855,41 @@ func TestServer_UnknownFieldNamesTheRemedy(t *testing.T) {
 	assert.Zero(t, s.count(t, "bookmarks"))
 }
 
+// TestServer_PollsLogAtDebug: a dashboard poll that succeeded is logged at
+// debug, so an open page's polls don't grow daemon.log; one that failed,
+// and every other request, pages included, is logged at info.
+func TestServer_PollsLogAtDebug(t *testing.T) {
+	var rec logRecorder
+	deps := routerDeps(t, &rec)
+	for _, tc := range []struct {
+		path   string
+		status int
+		level  slog.Level
+	}{
+		{"/ui/status", http.StatusOK, slog.LevelInfo},
+		{"/ui/status?poll=live", http.StatusOK, slog.LevelDebug},
+		{"/ui/status?poll=health", http.StatusOK, slog.LevelDebug},
+		{"/ui/status?poll=bogus", http.StatusBadRequest, slog.LevelInfo},
+		{"/ui/documents/nope?poll=jobs&updated=2026-09-29T00:00:00.000Z", http.StatusNotFound, slog.LevelInfo},
+		{"/v1/stats?poll=live", http.StatusOK, slog.LevelInfo},
+	} {
+		rec.mu.Lock()
+		rec.records = nil
+		rec.mu.Unlock()
+		resp := serveInProcess(t, deps, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		require.Equal(t, tc.status, resp.status, tc.path)
+		var levels []slog.Level
+		rec.mu.Lock()
+		for _, r := range rec.records {
+			if r.Message == "http" {
+				levels = append(levels, r.Level)
+			}
+		}
+		rec.mu.Unlock()
+		assert.Equal(t, []slog.Level{tc.level}, levels, tc.path)
+	}
+}
+
 // TestLocalOrigin_BoundAddress: the daemon's own origin includes the
 // loopback address it is bound to, whichever it is, so a dashboard served
 // from 127.0.0.2 can send its changes; another loopback address stays
