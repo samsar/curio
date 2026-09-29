@@ -116,7 +116,7 @@ func stylesheet(t *testing.T) string {
 // columns to one letter when the body had it.
 var wrapAnywhere = []string{
 	"code", "details.more-text pre", "pre.source", "dl.facts .mono", ".doc-head h1", ".result-title a",
-	".snippet", ".related a", ".bookmark-list .title", ".interest h2 a",
+	".snippet", ".related a", ".bookmark-list .title", ".interest h2 a", ".cause-main h2",
 }
 
 // TestStylesheet: the rules the design language keeps, which no test of a

@@ -155,13 +155,13 @@ footer names the address the daemon listens on.
   fetched and bookmarks, and a bar of the documents by state, each state
   linking to the Library of those), the queue (open or closed and why,
   with Pause or Resume, its throttle, keep-awake and schedule controls,
-  and each pool's load and the jobs it finished in the last 10 minutes), and why
-  documents failed (the five commonest causes as bars, each leading to
-  its group on Failures, and **All failures →** to the tab); beside them, health
-  (the daemon, Ollama, the models, embedding drift, the Jina Reader
-  fallback and the YouTube fetcher, each with a status dot), an estimate
-  of when the queued work will be done, at the pace of the last 10
-  minutes, and the jobs by status.
+  and each pool's load and the jobs it finished in the last 10 minutes),
+  and why documents failed (the five commonest causes as bars, each
+  leading to its group on Failures, and **All failures →** to the tab);
+  beside them, health (the daemon, Ollama, the models, embedding drift,
+  the Jina Reader fallback and the YouTube fetcher, each with a status
+  dot), an estimate of when the queued work will be done, at the pace of
+  the last 10 minutes, and the jobs by status.
 
 Lists show times relative to now ("13 min ago"), with the exact time on
 hover; a document's page shows its own dates in full. Anything a saved page

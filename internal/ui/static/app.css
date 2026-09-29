@@ -970,7 +970,7 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 }
 .cause-icon.neutral { background: var(--neutral-soft); color: var(--neutral); border-color: var(--neutral-border); }
 .cause-icon.warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-border); }
-.cause-main h2 { font-size: var(--fs-md); display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s1) var(--s2); }
+.cause-main h2 { font-size: var(--fs-md); display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s1) var(--s2); min-width: 0; overflow-wrap: anywhere; }
 .cause-main h2 code { font-size: var(--fs-xs); font-weight: 500; color: var(--text-3); }
 .cause-main .why { color: var(--text-2); margin-top: var(--s1); }
 .cause-main .hosts { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); margin-top: var(--s3); }

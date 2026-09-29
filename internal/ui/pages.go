@@ -708,8 +708,7 @@ func (f Failures) Views() LibraryViews {
 	return LibraryViews{OnFailures: true, Failed: f.Total, Counted: true}
 }
 
-// Dead is how many of the documents are dead links, and Failed how many
-// failed for any other cause.
+// Dead is how many of the documents are dead links.
 func (f Failures) Dead() int {
 	for _, g := range f.Groups {
 		if g.DeadLinks() {
@@ -719,6 +718,8 @@ func (f Failures) Dead() int {
 	return 0
 }
 
+// Failed is how many of the documents failed for a cause other than a
+// dead link.
 func (f Failures) Failed() int { return f.Total - f.Dead() }
 
 // Totals is the sentence over the groups: how many documents couldn't be
