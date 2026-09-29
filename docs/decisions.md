@@ -66,7 +66,7 @@ when the entry was first committed.
 - 2026-07-05 — [Dead-link detection: hard 404/410 + soft-404 heuristics](#dead-link-detection-hard-404410--soft-404-heuristics) (revised)
 - 2026-07-05 — [fetcher_rules.yaml: mtime-polled hot reload, keep-last-good](#fetcher_rulesyaml-mtime-polled-hot-reload-keep-last-good)
 - 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search) (revised)
-- 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4)
+- 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4) (revised)
 - 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator) (revised)
 - 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
 - 2026-07-06 — [M6 (planned): RAG / Q&A synthesis + SOTA natural-language search](#m6-planned-rag--qa-synthesis--sota-natural-language-search)
@@ -142,6 +142,7 @@ when the entry was first committed.
 - 2026-09-28 — [Failure causes: recorded when a document fails](#failure-causes-recorded-when-a-document-fails)
 - 2026-09-29 — [Dashboard: a design language under the CSP](#dashboard-a-design-language-under-the-csp) (revised)
 - 2026-09-29 — [Dashboard: search is home, the Overview becomes Status](#dashboard-search-is-home-the-overview-becomes-status)
+- 2026-09-29 — [Dashboard: actions through /v1, sent by a first-party module](#dashboard-actions-through-v1-sent-by-a-first-party-module)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -2001,6 +2002,18 @@ interests with an empty run.
 (202 + job_id; 409 when disabled) — rather than the separately-sketched
 `/v1/clusters`.
 
+**Revised (2026-09-29):** a failed run is kept until the next run replaces
+it. Pruning after a failure used to keep the latest done run alone, which
+deleted the failed row at once whenever there was one, so a rebuild that
+failed left no trace a reader could find. It now keeps the latest done run
+and the run that just failed (`PruneRunsExcept` takes the runs to keep, at
+least one): at most two rows, a later failure replacing the earlier, and a
+success pruning both. `LatestRun` with no status, the newest attempt, is
+then the failure, which the dashboard's Interests page reports (see
+"Dashboard: actions through /v1, sent by a first-party module"); the
+current interests are still the latest done run's. `LatestRun` breaks a tie
+on `started_at`, kept to the millisecond, by insertion order.
+
 ---
 
 ## LLM generation client (`generator.Generator`)
@@ -2331,6 +2344,15 @@ daemon now serves one browser client of its own.
   top-level navigation) is refused.
 
 Rejections are logged with the `Sec-Fetch-*` headers the request carried.
+
+**Revised (2026-09-29):** the Origin allowlist also holds the bound
+address's own origin, `http://<daemon.listen's address>:P` (IPv6 in
+brackets). A page served from a `daemon.listen` of 127.0.0.2 is the daemon
+itself, and the dashboard's changes carry that page's origin: without it
+every change from such a page was refused, though its reads, which carry
+no Origin, worked. The address is loopback by config validation, so this
+admits nothing new. See "Dashboard: actions through /v1, sent by a
+first-party module".
 
 ---
 
@@ -6726,6 +6748,14 @@ answers 302 to `/ui/` with its query. The page handlers no longer read
 subresource request for `/ui/search` before the redirect. See "Dashboard:
 search is home, the Overview becomes Status".
 
+**Revised (2026-09-29):** the dashboard changes things now: a document's
+refetch and reindex, the interests' rebuild and the queue's controls,
+sent to `/v1` as JSON by the pages' own script, and its live parts refresh
+by themselves. "Phase 2's rule for changes" above stands, but not its
+choice of json-enc, and the empty `document-actions` region holds the
+document's buttons. The pages are still GET-only. See "Dashboard: actions
+through /v1, sent by a first-party module".
+
 ---
 
 ## Dashboard: formatting budgets for stored markdown
@@ -7621,6 +7651,231 @@ out.
 Overview; the Library's "Date saved" order will list saves. A Failures
 view of the library, with refetch by cause, will be a Library tab, not a
 fifth navigation item: a phone's navigation fits four.
+
+---
+
+## Dashboard: actions through /v1, sent by a first-party module
+
+**Decision:** the dashboard changes things. A document's page refetches it
+(a dead link only after a confirm, with `force=1`) and reindexes it,
+Interests rebuilds the interests, and Status pauses and resumes the queue
+and sets its throttle, keep-awake and schedule. Each change goes to the
+`/v1` route the CLI uses, as JSON, sent by one first-party script,
+`internal/ui/static/actions.js`; the pages stay GET-only, and nothing new
+is routed. What changes on a page refreshes by itself: Status's queue,
+counts, progress and jobs every 2 seconds and its health every 15, a
+document's jobs and the Interests' rebuild while they are in flight.
+
+**Why a module, not htmx's json-enc.** json-enc sends every form value as
+a string, so `{"paused":"true"}`, which `PUT /v1/queue` refuses, and it
+has no way to show a problem's `detail`. actions.js is under 200 lines:
+one strict IIFE, no dependency, no global, and none of `eval`,
+`innerHTML`, a timer, `mode` or `credentials` (`TestActionsScript` reads
+it for them). It writes only `textContent` and creates no element.
+
+**Every change is declared in Go.** A control is a button, a checkbox or
+a form carrying an `Action` (`internal/ui/actions.go`) as data attributes:
+`data-method` (POST or PUT), `data-path` (under `/v1/`, query included,
+its document ID one escaped segment), a button's `data-body` (json.Marshal
+of fixed keys), a checkbox's `data-field`, a form's `data-join`, and
+`data-status`, the id of the `.action-status` it reports to, with
+`data-done` (and a checkbox's `data-done-off`). actions.js sends exactly
+that: the body, `{field: checked}`, or a form's fields with the values of
+those sharing a name joined (the schedule's two times make
+`{"schedule":"22:00-07:00"}`); it parses no 2xx body. A template writes
+none of it: `TestTemplatesHaveNoInlineCode` requires each of those values,
+and every `hx-get`, to be one template action. `TestDashboard_ActionsMatchTheAPI`
+renders the pages in each state and holds every control to the API: the
+method and path route (`methodIndex`), the route is in `api/openapi.yaml`,
+the query is one the route takes (refetch's `force=1`), the body, built
+by actions.js's rules, decodes strictly into the request and validates,
+and the status is on the page; every `ActionKind` must appear. uitest
+refuses a `data-method` other than POST or PUT, a `data-path` that isn't
+a clean path under `/v1/` (no scheme, host, empty or dot segment, escaped
+or not), an `hx-get` off `/ui/`, and any `hx-post`, `hx-put`, `hx-patch`
+or `hx-delete`.
+
+**How it sends.** `fetch(url, {method, headers, body, signal:
+AbortSignal.timeout(15000)})` in its default mode, with no `mode` or
+`credentials`. Checked in headless Chrome 154 under the pages'
+`Referrer-Policy: no-referrer`: a POST and a PUT carry `Origin:
+http://127.0.0.1:P`, `Sec-Fetch-Site: same-origin` and `Sec-Fetch-Mode:
+cors`, so the Origin rule and the same-origin rule ("Local API") admit
+them, where a plain form post would send `Origin: null`. `Content-Type:
+application/json` goes exactly with a body; refetch, reindex and rebuild
+send none. It refuses, sending nothing, a method other than POST or PUT
+and a path not under `/v1/` of its own origin. One change runs at a time
+per page, and none is retried: a click while one is in flight does
+nothing, and a checkbox toggled then is set back. The status shows
+`data-state` busy, then ok with the done text, or error with the problem's
+`detail` (else its `title`, else `HTTP <status>`), or, on a network error
+or the timeout, that the daemon didn't answer; a checkbox whose change
+wasn't taken is set back. Settled, it dispatches `curio:changed` on the
+body, which the pollers listen for.
+
+**Controls that need JavaScript are `.js-only`, not `hidden`.** actions.js
+first marks `<html>` with `data-js`; app.css hides `.js-only` until then
+and `.no-js` after (`!important`), and gives `[hidden]` `display: none
+!important`. The attribute alone doesn't hide this design's controls:
+`.btn`, `.segmented` and `.switch` set `display`, which beats the
+browser's `[hidden]` rule (a `hidden` `.btn` computed `inline-flex` in
+Chrome), and a poll re-renders them, so a script that revealed them once
+would have to reveal them after every swap. Without JavaScript the queue
+card shows its settings and the commands (`curio pause`, …) instead, and
+a document page its "From the terminal" commands, as before. Only the
+pollers carry `hidden` (`TestTemplates_HiddenOnlyOnPollers`).
+
+**A poll reads only what it refreshes (`?poll=`).** htmx's `hx-select`
+selects in the browser; the server would still read the whole page. So a
+poller asks the same route for its regions (`ui.PollParam`): Status's
+`?poll=live` reads the stats, the queue and its metrics, `?poll=health`
+the health alone; a document's `?poll=jobs&updated=…&extraction=…` reads
+the document, its jobs and, while one waits, the queue, never its text,
+related documents or bookmarks; Interests' `?poll=rebuild&run=…` reads the
+queue and the newest run, never the interests. Same route, handler and
+template, the URL alone decides the answer, and a panel the answer didn't
+read is left out, never shown empty. A value the page doesn't take, or a
+document poll without a time, is a 400 that reads nothing. Measured on a
+`sqlite3 -readonly` `.backup` of the author's library (7,467 documents,
+11,969 jobs), served by a throwaway daemon with Ollama unreachable, median
+of 20 curl timings:
+
+| Request | Time | Size |
+|---|---|---|
+| `/ui/status` | 4.3 ms | 15.6 KB |
+| `/ui/status?poll=live` | 1.9 ms | 10.9 KB |
+| `/ui/status?poll=health` | 0.5 ms | 5.1 KB |
+| a document's page (9 KB of markdown) | 41.8 ms | 19 KB |
+| its `?poll=jobs` | 0.45 ms | 3.4 KB |
+| the largest document's page (2.3 MB, 1 MiB rendered) | 263 ms | 1.0 MB |
+| its `?poll=jobs` | 0.48 ms | 3.4 KB |
+| `/ui/interests` | 5.8 ms | 63 KB |
+| its `?poll=rebuild` | 0.43 ms | 3.7 KB |
+
+Polling a document's whole page every 2 seconds would have cost 2 to 13%
+of a core per open tab. Why documents failed reads the cause and URL of
+every failed document (about 2 ms of the Status page's 4.3) and health pings Ollama
+(up to 500 ms when it hangs), so neither is in the 2-second poll: the
+failures are read with the page alone, health every 15 seconds.
+
+**Pollers.** A poller is a dedicated, empty, hidden element (`data-poll`,
+the poller partial, built from `ui.Poller`) with `hx-get` built in Go,
+`hx-swap="none"`, `hx-select-oob` naming its regions and
+`hx-sync="this:replace"`. No content region carries hx- attributes. Two
+cases, reproduced in headless Chrome against a scratch server with the
+vendored htmx and the pages' config and CSP, decided the shape. A region
+that swapped itself (`hx-select` of itself, outerHTML) with the default
+sync lost a refresh triggered while its own request was in flight: the
+queued request belongs to the element the answer replaces, and htmx drops
+requests of detached elements; with `this:replace` the newest trigger is
+the one answered. And the pages' htmx config swaps 4xx and 5xx answers,
+so an answer without the region (the 503 starting page while the daemon
+restarts, an error page) replaced it with nothing, poller included. A
+poller that swaps nothing in its own place can remove nothing: the ids
+aren't in such an answer. Status has two pollers, `every 2s, curio:changed
+from:body` and `every 15s`; a document's and the Interests' poller lists
+itself among its regions and is rendered with `every 2s` exactly while
+something is in flight (or the document is pending), so the server's
+render decides whether polling goes on. Each region a poller names is on
+its page, and in its answer, exactly once, whatever the state (tests take
+the ids from the pollers). actions.js keeps them quiet: a poll is
+cancelled while the tab is hidden (`every` has no filter under
+`allowEval: false`, so `htmx:beforeRequest` is), or while a change is in
+flight, whose answer could land before the change's; the tab becoming
+visible triggers one.
+
+**An unchanged region keeps its element.** htmx restores focus by id after
+a swap, but a screen reader announces a refocused control again, so
+replacing an unchanged Pause button every 2 seconds would announce it
+every 2 seconds. On `htmx:oobBeforeSwap` actions.js skips a region whose
+new element `isEqualNode` the one on the page. Regions that hold a
+control hold nothing that changes with time, and each of Status's
+controls has a region of its own (`queue-toggle`, `queue-throttle`,
+`queue-keep-awake`), apart from the text that does change (`queue-state`,
+`keep-awake-hint`, `schedule-state`), so a control is replaced only when
+its setting changes; every focusable element in a region has an id. The
+schedule's form is in no region, so a poll never replaces a time being
+typed. Checked in Chrome: focus on Pause stays through polls, and the
+unchanged button is the same node.
+
+**Stale, not live.** An answer that isn't the page (`detail.isError` in
+`htmx:beforeSwap`) or no answer (`htmx:sendError`) marks `<html>`
+`data-stale` and swaps nothing; the next page answer clears it. A note
+("Not updating: the daemon didn't answer. This page keeps trying.") shows
+while it is set, and Progress's live badge hides. It is checked before
+the swap, not after the request: a poller that lists itself is replaced
+by its answer, and a replaced element's later events never reach the
+document.
+
+**No live roles in polled regions.** A polled region announces nothing:
+Status's callouts are notes, not alerts, and the panel error has no role,
+since a live role there would speak on every poll that changed it. Only
+the `.action-status` elements announce (`role="status"`,
+`aria-live="polite"`), and none is in a region. A test walks every region
+of every polled page's samples for `aria-live` and the alert and status
+roles.
+
+**What came of the work is a reload offer, not a swap.** A document's
+region lists its jobs in flight (kind, queued or running, the attempt out
+of the queue's `AttemptLimit`, a retry's time, and why a closed queue
+holds them) and, against the baseline the page was rendered with (its
+`updated_at` and current extraction, in the poller's URL, which a poll's
+answer keeps), what came of them: a new text (offered as soon as it is
+current), and once nothing is in flight, a failure or another change.
+Every job outcome moves `updated_at`, so a refetch that fails is reported
+rather than going silent. Interests compares run ids: a newer done run is
+"New interests are ready: reload"; a newer failed run is its error, once
+nothing is in flight, and on page load too, since the interests shown
+are then older. Swapping the list in would re-read the page's costliest
+read (50 interests with their members, 5.8 ms and 63 KB) every time and
+move the grid under the reader; the document's text, the same with its
+render. In-flight comes from the queue's per-kind counts; the running
+rebuild's start is read only while one runs, and no read walks the queued
+jobs, which an import makes thousands of.
+
+**Polls are logged at debug.** An access line is about 200 bytes, and a
+visible Status tab polls 1,800 times an hour and its health 240: about
+400 KB an hour, 10 MB a day per open tab, into a `daemon.log` that is
+never rotated. A GET to a dashboard path with `poll` that answers below
+400 is logged at debug (`daemon.log_level: debug` shows it); a failed
+poll, and every page load and API request, still at info. Checked on the
+throwaway daemon: ten polls added no line at info.
+
+**New reads.** The page handlers read two more things straight from the
+store, beside `GetWithLastError` and `ListByDocument`: `JobStore.AttemptLimit`
+(the queue's `MaxAttempts`, for "attempt 2 of 5") and
+`InsightStore.LatestRun` with no status, the newest run. The engine now
+keeps a failed run until the next run replaces it (see "Insight layer",
+revised), without which a failed rebuild left nothing to read. The
+document's jobs are `listJobs` by document with a page of 10, and
+`onePage` now refuses a limit below 1 rather than indexing `rows[-1]`.
+
+**The Origin rule admits the bound address.** A dashboard served from
+another loopback address sends its changes with that origin (see "Local
+API", revised).
+
+**Checked in a browser.** Headless Chrome 154 against a throwaway daemon
+on a small seeded home, with a local test site and a fake Ollama: the
+fast poll ran every 2 seconds; Pause and Resume, Normal and Gentle,
+keep-awake on and off, and a schedule of 22:00 to 07:00 then Turn off each
+changed `GET /v1/queue` and the regions within one refresh; 07:00 to 07:00
+showed the API's 400 detail in the card's foot, and an empty time sent
+nothing; stopping the daemon showed the stale note and hid the live
+badge, and restarting it cleared both with every region in place. A
+refetch of a fetched document, held by a paused queue, showed the fetch
+and why it waited, then "The text changed: reload", and polling stopped;
+"Refetch anyway…" on a dead link opened its confirm with Cancel focused,
+Esc and Cancel closed it without a request, and its confirm sent
+`?force=1` and reported the link failed again. A rebuild showed queued
+(with the queue paused) with its button disabled and focused, then "New
+interests are ready: reload", and polling stopped. With JavaScript off
+the controls were hidden and the settings and commands shown, and at
+390 px no page scrolled sideways. The review then checked the two that
+headless Chrome doesn't show on its own. With `document.hidden` overridden,
+no poll ran for 4.5 seconds and one ran as soon as `visibilitychange`
+fired. With a queue change held open through the DevTools protocol, the
+status read that curio-daemon didn't answer after 14.9 seconds, and the
+keep-awake switch was set back.
 
 ---
 

@@ -38,9 +38,19 @@ var inlineCode = map[string]*regexp.Regexp{
 // scriptRE matches a script element, capturing its attributes and content.
 var scriptRE = regexp.MustCompile(`(?is)<script(\s[^>]*)?>(.*?)</script>`)
 
+// builtInGoRE finds the attributes whose values Go builds, a change's
+// (actions.go) and a poll's (links.go), capturing each value, quoted or
+// not; a template action in it may hold quotes of its own. htmx reads
+// data-hx-get as hx-get.
+var builtInGoRE = regexp.MustCompile(`(?i)\s(data-(?:method|path|body|field|join)|(?:data-)?hx-get)\s*=\s*` +
+	`("(?:\{\{.*?\}\}|[^"])*"|'(?:\{\{.*?\}\}|[^'])*'|(?:\{\{.*?\}\}|[^\s>])*)`)
+
+// oneActionRE matches a value that is exactly one template action.
+var oneActionRE = regexp.MustCompile(`^\{\{[^{}]*\}\}$`)
+
 // inlineCodeProblems lists what in a template's source the CSP would block
-// or htmx would evaluate: inlineCode, and a <script> without src or with
-// content.
+// or htmx would evaluate: inlineCode, a <script> without src or with
+// content, and a value Go builds written as a literal, or pieced together.
 func inlineCodeProblems(src string) []string {
 	text := templateCommentRE.ReplaceAllString(src, "")
 	var problems []string
@@ -56,6 +66,15 @@ func inlineCodeProblems(src string) []string {
 	for _, m := range scripts {
 		if !strings.Contains(m[1], " src=") || strings.TrimSpace(m[2]) != "" {
 			problems = append(problems, "a <script> without src or with content: "+m[0])
+		}
+	}
+	for _, m := range builtInGoRE.FindAllStringSubmatch(text, -1) {
+		value := m[2]
+		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') {
+			value = value[1 : len(value)-1]
+		}
+		if !oneActionRE.MatchString(value) {
+			problems = append(problems, m[1]+" not built in Go: "+strings.TrimSpace(m[0]))
 		}
 	}
 	return problems
@@ -78,10 +97,39 @@ func TestTemplatesHaveNoInlineCode(t *testing.T) {
 		`<button hx-on:click="x()">`, `<button data-hx-on-click="x()">`, `<div hx-vars="a:1">`,
 		`<a href="javascript:x()">`, `<script>x()</script>`, `<script src="/ui/static/a.js">x()</script>`,
 		`<script src="/ui/static/a.js">`,
+		`<button data-method="POST">`, `<button data-path="/v1/documents/{{.ID}}/refetch">`,
+		`<button data-body='{"paused":true}'>`, `<button data-body="{{.A}}{{.B}}">`, `<input data-field="keep_awake">`,
+		`<form data-join="-">`, `<div hx-get="/ui/status?poll=live">`, `<div HX-GET={{.A}}x>`, `<div hx-get="">`,
+		`<button data-method=POST>`,
 	} {
 		assert.NotEmpty(t, inlineCodeProblems(bad), bad)
 	}
 	assert.Empty(t, inlineCodeProblems(`{{/* no hx-on, no <style>, no onclick= */}}`), "comments may name them")
+	assert.Empty(t, inlineCodeProblems(`<button data-method="{{.Method}}" data-path="{{.Path}}"{{with .Body}} data-body="{{.}}"{{end}}>`+
+		`<div hx-get="{{navHref "search"}}" data-hx-get='{{.Href}}'>`), "values built in Go")
+}
+
+// hiddenTagRE finds a tag carrying the hidden attribute.
+var hiddenTagRE = regexp.MustCompile(`(?i)<[a-z]+[^>]*\shidden(?:[\s>=/]|$)[^>]*`)
+
+// TestTemplates_HiddenOnlyOnPollers: only the pollers carry hidden. A
+// control that needs JavaScript is js-only: the display .btn, .segmented
+// and .switch set beats [hidden], and a poll re-renders the controls.
+func TestTemplates_HiddenOnlyOnPollers(t *testing.T) {
+	paths, err := fs.Glob(files, "templates/*.html")
+	require.NoError(t, err)
+	var pollers int
+	for _, path := range paths {
+		src, err := fs.ReadFile(files, path)
+		require.NoError(t, err)
+		for _, tag := range hiddenTagRE.FindAllString(templateCommentRE.ReplaceAllString(string(src), ""), -1) {
+			assert.Contains(t, tag, "data-poll", "%s: %s", path, tag)
+			pollers++
+		}
+	}
+	assert.Equal(t, 1, pollers, "the poller partial")
+	assert.Len(t, hiddenTagRE.FindAllString(`<button class="btn" hidden>x</button><p hidden=""><i aria-hidden="true">`,
+		-1), 2)
 }
 
 // trustedHTMLTypes are html/template's types that mark content as safe,

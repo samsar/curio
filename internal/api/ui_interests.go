@@ -2,10 +2,12 @@ package api
 
 import (
 	"cmp"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
 )
 
@@ -20,25 +22,81 @@ const (
 
 // interests answers GET /ui/interests: the latest clustering run's
 // largest interests, each with a few members, as GET /v1/interests lists
-// them.
+// them, and a rebuild of them.
+//
+// Its poller asks for the rebuild alone (?poll=rebuild, with the run the
+// page shows), which never reads the interests: they are the page's
+// costliest read, and a newer run is offered as a reload instead.
 func (h pageHandlers) interests(w http.ResponseWriter, r *http.Request) {
-	resp, err := h.d.interests(r.Context(), defaultInterestLimit, interestCardMembers)
+	poll, err := pollParam(r, ui.PollRebuild)
 	if err != nil {
-		h.writePageError(w, r, err, ui.NavNone)
+		h.writePageError(w, r, err, ui.NavInterests)
 		return
 	}
-	vm := ui.Interests{Layout: h.pages.layout("Interests", ui.NavInterests)}
-	if resp.RunID != "" {
-		vm.Run = &ui.InterestRun{Algo: resp.Algo, Documents: resp.NumDocuments, Noise: resp.NumNoise,
-			Interests: resp.NumClusters}
-		if resp.ComputedAt != nil {
-			vm.Run.ComputedAt = *resp.ComputedAt
+	vm := ui.Interests{Layout: h.pages.layout("Interests", ui.NavInterests), Poll: poll}
+	shown := ui.ShownRun(r.URL.Query())
+	if poll == "" {
+		resp, err := h.d.interests(r.Context(), defaultInterestLimit, interestCardMembers)
+		if err != nil {
+			h.writePageError(w, r, err, ui.NavNone)
+			return
+		}
+		if resp.RunID != "" {
+			vm.Run = &ui.InterestRun{Algo: resp.Algo, Documents: resp.NumDocuments,
+				Noise: resp.NumNoise, Interests: resp.NumClusters}
+			if resp.ComputedAt != nil {
+				vm.Run.ComputedAt = *resp.ComputedAt
+			}
+		}
+		for _, in := range resp.Items {
+			vm.Interests = append(vm.Interests, interestView(in))
+		}
+		shown = resp.RunID
+	}
+	vm.Rebuild = h.rebuild(r, shown)
+	h.page(w, r, http.StatusOK, ui.PageInterests, vm)
+}
+
+// rebuild reads whether a rebuild is queued or running, from the queue's
+// cluster pool, and what the newest clustering run came to when it isn't
+// shown, the run the page shows. The running rebuild's start is read only
+// while one runs, and no read walks the queued jobs, which an import
+// makes thousands of.
+func (h pageHandlers) rebuild(r *http.Request, shown string) ui.Rebuild {
+	ctx := r.Context()
+	b := ui.Rebuild{Enabled: h.d.InsightEnabled, Shown: shown}
+	queue, err := h.d.queueState(ctx)
+	if err != nil {
+		b.Err = h.panelError(r, err)
+		return b
+	}
+	for _, k := range queue.Kinds {
+		if k.Kind == string(store.JobKindCluster) {
+			b.Queued, b.Running = k.Pending > 0, k.Running > 0
 		}
 	}
-	for _, in := range resp.Items {
-		vm.Interests = append(vm.Interests, interestView(in))
+	if b.Queued && queue.State == queueClosed {
+		b.Hold = queue.Reason
 	}
-	h.page(w, r, http.StatusOK, ui.PageInterests, vm)
+	if b.Running {
+		running, err := h.d.listJobs(ctx, store.ListJobsOpts{Kind: store.JobKindCluster,
+			Status: store.JobStatusRunning, Limit: 1})
+		switch {
+		case err != nil:
+			h.quietError(r, err)
+		case len(running.Items) > 0:
+			b.StartedAt = running.Items[0].UpdatedAt // its claim
+		}
+	}
+	run, err := h.d.Insights.LatestRun(ctx, h.d.TenantID, "")
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+	case err != nil:
+		b.Err = h.panelError(r, err)
+	case run.ID != shown:
+		b.NewRun, b.RunError = string(run.Status), deref(run.Error)
+	}
+	return b
 }
 
 // interest answers GET /ui/interests/{id}: one interest and its members,

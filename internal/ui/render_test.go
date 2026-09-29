@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/html"
 
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui/uitest"
@@ -63,22 +64,22 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 	return map[string]any{
 		PageStatus: Status{
 			Layout: layout(NavStatus),
-			Counts: CountsPanel{Documents: 3, Bookmarks: 4,
+			Counts: &CountsPanel{Documents: 3, Bookmarks: 4,
 				ByState: []Count{{Name: evilAttr, Count: 1}, {Name: "fetched", Count: 2}},
 				Jobs:    []Count{{Name: evilScript, Count: 5}}},
-			Queue: QueuePanel{Open: false, Reason: evilScript, OpensAt: at, Throttle: evilQuotes,
-				Schedule: evilAttr, Kinds: []KindLoad{{Kind: evilScript, Running: 1, Limit: 4, Pending: 9}},
-				KeepAwake: true, KeepAwakeActive: true, PowerSource: evilQuotes},
-			Progress: ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 30, Finished: 12}},
-				ProgressWindow, true)},
-			Health: HealthPanel{Version: evilQuotes, OllamaDetail: evilScript, EmbeddingModel: evilAttr,
+			Queue: &QueuePanel{Open: false, Paused: true, Reason: evilScript, OpensAt: at, Throttle: evilQuotes,
+				Schedule: evilAttr, Kinds: []KindLoad{{Kind: evilScript, Running: 1, Limit: 4, Pending: 9, Finished: 3}},
+				FinishedIn: ProgressWindow, KeepAwake: true, KeepAwakeActive: true, PowerSource: evilQuotes},
+			Progress: &ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 30, Finished: 12}},
+				ProgressWindow, true), Reason: evilScript},
+			Health: &HealthPanel{Version: evilQuotes, OllamaDetail: evilScript, EmbeddingModel: evilAttr,
 				EmbeddingDim: 1024, GenerationModel: evilScript, YouTubeFetcher: evilAttr,
 				Drift: &Drift{Changes: []DriftChange{{What: evilScript, Recorded: evilAttr, Current: evilURL}},
 					Fix: evilQuotes},
 				Upstreams: []Upstream{upstream(evilScript, "failing", true), upstream("jina", "degraded", true),
 					upstream(evilAttr, "paused", true), upstream("jina", "failing", false),
 					upstream(evilQuotes, evilAttr, true), {Name: "jina", Enabled: true, State: "failing"}}},
-			Failures: FailuresPanel{Total: 17, Causes: []Count{{Name: evilScript, Count: 9},
+			Failures: &FailuresPanel{Total: 17, Causes: []Count{{Name: evilScript, Count: 9},
 				{Name: string(store.FailureCauseAntiBot), Count: 5}, {Name: string(store.FailureCauseDeadLink), Count: 3}}},
 		},
 		PageSearch: Search{
@@ -125,11 +126,17 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			Related: RelatedPanel{Docs: []RelatedDoc{{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Score: 0.9}}},
 			Bookmarks: BookmarksPanel{Bookmarks: []DocumentBookmark{{Source: evilScript, Folder: evilAttr,
 				Title: evilQuotes, Tags: []string{evilScript, evilURL}, SavedAt: at}}},
+			Jobs: DocumentJobs{DocumentID: evilAttr, State: evilAttr, Baseline: DocumentBaseline{Updated: at,
+				Extraction: evilScript}, Current: DocumentBaseline{Updated: at, Extraction: evilAttr},
+				Jobs:         []JobLine{{Kind: evilScript, Running: true, Attempts: 2}, {Kind: evilAttr, Attempts: 1, RunAfter: at}},
+				AttemptLimit: 5, Hold: evilScript},
 		},
 		PageInterests: Interests{
 			Layout:    layout(NavInterests),
 			Run:       &InterestRun{ComputedAt: at, Algo: evilScript, Documents: 40, Noise: 3, Interests: 9},
 			Interests: []Interest{interest, {ID: "unlabeled", Size: 1}},
+			Rebuild: Rebuild{Enabled: true, Running: true, StartedAt: at, Shown: evilAttr, NewRun: evilScript,
+				RunError: evilScript},
 		},
 		PageInterest: InterestPage{Layout: layout(NavInterests), Interest: interest},
 		PageError: ErrorPage{Layout: layout(NavNone), Status: http.StatusBadRequest, Title: evilScript,
@@ -164,9 +171,9 @@ func sampleVariants(t testing.TB) map[string][]any {
 				}}},
 			Search{Layout: layout(NavSearch), Query: " ", Home: &SearchHome{}},
 		},
-		PageStatus: {Status{Layout: layout(NavStatus), Counts: CountsPanel{Err: panelErr},
-			Queue: QueuePanel{Err: panelErr}, Progress: ProgressPanel{Err: panelErr}, Health: HealthPanel{Err: panelErr},
-			Failures: FailuresPanel{Err: panelErr}}},
+		PageStatus:    statusVariants(layout(NavStatus), panelErr, at),
+		PageDocument:  documentVariants(layout(NavLibrary), panelErr, at),
+		PageInterests: interestsVariants(layout(NavInterests), panelErr, at),
 		PageLibrary: {
 			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{State: evilAttr, Limit: 7}, Counts: counts,
 				Rows: []LibraryRow{row}, NextCursor: evilScript, PageSize: 7, Shown: 3},
@@ -174,6 +181,77 @@ func sampleVariants(t testing.TB) map[string][]any {
 				Rows: []LibraryRow{row}, PageSize: 50},
 			Library{Layout: layout(NavLibrary), Rows: []LibraryRow{row}, NextCursor: evilAttr, PageSize: 50},
 		},
+	}
+}
+
+// statusVariants are Status with each state of its panels and controls:
+// every read failed; the queue open, gentle, keep-awake on but not holding
+// on battery, a schedule, the metrics unread; the queue closed by its
+// schedule with keep-awake off; its read failed alone; and the two polls'
+// answers.
+func statusVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
+	kinds := []KindLoad{{Kind: "fetch", Running: 2, Limit: 16, Pending: 1632}, {Kind: "index", Limit: 4}}
+	health := &HealthPanel{OllamaReachable: true, Version: evilQuotes}
+	return []any{
+		Status{Layout: layout, Counts: &CountsPanel{Err: panelErr}, Queue: &QueuePanel{Err: panelErr},
+			Progress: &ProgressPanel{Err: panelErr}, Health: &HealthPanel{Err: panelErr},
+			Failures: &FailuresPanel{Err: panelErr}},
+		Status{Layout: layout, Counts: &CountsPanel{}, Queue: &QueuePanel{Open: true, Throttle: "gentle",
+			Schedule: "22:00-07:00", Kinds: kinds, KeepAwake: true, PowerSource: "battery"},
+			Progress: &ProgressPanel{Err: panelErr}, Health: health, Failures: &FailuresPanel{}},
+		Status{Layout: layout, Counts: &CountsPanel{}, Queue: &QueuePanel{Reason: "outside_schedule", OpensAt: at,
+			Throttle: "normal", Schedule: "22:00-07:00", Kinds: kinds, FinishedIn: ProgressWindow},
+			Progress: &ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 3}}, ProgressWindow,
+				false), Reason: "outside_schedule"}, Health: health, Failures: &FailuresPanel{}},
+		Status{Layout: layout, Counts: &CountsPanel{}, Queue: &QueuePanel{Err: panelErr},
+			Progress: &ProgressPanel{Err: panelErr}, Health: health, Failures: &FailuresPanel{}},
+		Status{Layout: layout, Poll: PollLive, Counts: &CountsPanel{Documents: 2},
+			Queue: &QueuePanel{Open: true, Throttle: "normal", Kinds: kinds}, Progress: &ProgressPanel{}},
+		Status{Layout: layout, Poll: PollHealth, Health: &HealthPanel{OllamaDetail: evilScript}},
+	}
+}
+
+// documentVariants are a document's page in each state, with a job queued
+// behind a paused queue, running, and retrying, each outcome of its jobs,
+// a dead link's confirm, its jobs' read failed, and a poll's answer.
+func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
+	doc := func(state string, ext *Extraction, jobs DocumentJobs) Document {
+		jobs.DocumentID, jobs.State, jobs.AttemptLimit = evilAttr, state, 5
+		return Document{Layout: layout, Meta: DocumentMeta{ID: evilAttr, URL: evilURL, State: state},
+			Extraction: ext, Text: TextPanel{State: TextNotFetched}, Jobs: jobs}
+	}
+	ext := &Extraction{Fetcher: evilScript, Via: "readability", FetchedAt: at}
+	then := DocumentBaseline{Updated: at, Extraction: evilAttr}
+	later := DocumentBaseline{Updated: at.Add(time.Second), Extraction: evilAttr}
+	queued := []JobLine{{Kind: "fetch"}}
+	return []any{
+		doc("pending", nil, DocumentJobs{Baseline: then, Current: then, Jobs: queued, Hold: "paused"}),
+		doc("fetched", ext, DocumentJobs{Baseline: then, Current: then, Jobs: []JobLine{{Kind: "index", Running: true,
+			Attempts: 1}}}),
+		doc("failed", nil, DocumentJobs{Baseline: then, Current: then, Jobs: []JobLine{{Kind: "fetch", Attempts: 2,
+			RunAfter: at}}}),
+		doc("dead", nil, DocumentJobs{Baseline: then, Current: later}),
+		doc("fetched", ext, DocumentJobs{Baseline: then, Current: later}),
+		doc("fetched", ext, DocumentJobs{Baseline: then, Current: DocumentBaseline{Updated: at, Extraction: evilScript}}),
+		doc("fetched", ext, DocumentJobs{Err: panelErr}),
+		Document{Layout: layout, Poll: PollJobs, Meta: DocumentMeta{ID: evilAttr}, Jobs: DocumentJobs{DocumentID: evilAttr,
+			State: "pending", Baseline: then, Current: later, Jobs: queued, AttemptLimit: 5}},
+	}
+}
+
+// interestsVariants are the Interests with a rebuild queued behind a
+// paused queue, one done and one failed since the run shown, insight off
+// without a run, the rebuild's reads failed, and a poll's answer.
+func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
+	run := &InterestRun{ComputedAt: at, Documents: 3}
+	return []any{
+		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Queued: true, Hold: "paused", Shown: "run"}},
+		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Shown: "run", NewRun: "done"}},
+		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Shown: "run", NewRun: "failed",
+			RunError: evilScript}},
+		Interests{Layout: layout, Rebuild: Rebuild{}},
+		Interests{Layout: layout, Rebuild: Rebuild{Enabled: true, Err: panelErr}},
+		Interests{Layout: layout, Poll: PollRebuild, Rebuild: Rebuild{Enabled: true, Running: true, Shown: evilAttr}},
 	}
 }
 
@@ -220,9 +298,27 @@ func partialSamples(t testing.TB) map[string][]any {
 			causeBar("dead_link", 819, 926), []BarSegment(nil),
 			[]BarSegment{{Class: evilAttr, X: evilScript, Width: evilQuotes}}},
 		"upstream-failure": {Upstream{Name: evilScript, LastFailure: at, LastFailureClass: evilScript}, Upstream{}},
-		"full-error":       {evilScript, ""},
-		"match":            {Match{Segments: Highlight(evilScript + " <em>" + evilAttr + "</em>"), BM25: new(1.5)}},
-		"cohesion":         {0.5},
+		"attention": {&HealthPanel{OllamaDetail: evilScript, Drift: &Drift{Fix: evilScript},
+			Upstreams: []Upstream{{Name: evilScript, Enabled: true, State: "failing"}}}, &HealthPanel{OllamaReachable: true}},
+		"queue-card": {&QueuePanel{Paused: true, Reason: evilScript, OpensAt: at, Throttle: evilAttr, Schedule: evilScript,
+			Kinds: []KindLoad{{Kind: evilScript}}, FinishedIn: ProgressWindow, KeepAwake: true, PowerSource: evilQuotes},
+			&QueuePanel{Err: &PanelError{Message: evilScript, RequestID: evilAttr}}},
+		"queue-why": {&QueuePanel{Open: true}, &QueuePanel{Reason: evilScript, OpensAt: at}},
+		"progress": {&ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 1}}, ProgressWindow,
+			false), Reason: evilScript}},
+		"doc-jobs": {DocumentJobs{DocumentID: evilAttr, State: evilScript, Jobs: []JobLine{{Kind: evilScript}},
+			Hold: evilScript, Current: DocumentBaseline{Extraction: evilScript}},
+			DocumentJobs{Err: &PanelError{Message: evilScript, RequestID: evilAttr}}},
+		"rebuild-state": {Rebuild{Queued: true, Hold: evilScript, NewRun: "done"},
+			Rebuild{NewRun: "failed", RunError: evilScript}, Rebuild{Err: &PanelError{Message: evilScript}}},
+		"rebuild-control": {Rebuild{Enabled: true, Queued: true}, Rebuild{}},
+		"action": {Action{Kind: evilAttr, Method: evilScript, Path: evilURL, body: map[string]any{evilAttr: evilScript},
+			Field: evilQuotes, Join: evilAttr, Status: evilScript, Done: evilQuotes, DoneOff: evilScript}, Action{}},
+		"poller": {DocumentJobs{DocumentID: evilAttr, Baseline: DocumentBaseline{Updated: at, Extraction: evilScript},
+			Jobs: []JobLine{{Kind: "fetch"}}}.Poller(), Rebuild{Shown: evilScript}.Poller(), Status{}.Pollers()[1]},
+		"full-error": {evilScript, ""},
+		"match":      {Match{Segments: Highlight(evilScript + " <em>" + evilAttr + "</em>"), BM25: new(1.5)}},
+		"cohesion":   {0.5},
 	}
 }
 
@@ -263,7 +359,8 @@ func TestEveryTemplateRenders(t *testing.T) {
 // template of the page's file, which holds its defines.
 func pageTemplate(page, name string) bool {
 	switch name {
-	case "layout", "head", "header-search", "content", "document-actions", "layout.html", page + ".html":
+	case "layout", "head", "header-search", "content", "document-page", "document-actions", "interests-page",
+		"layout.html", page + ".html":
 		return true
 	}
 	return false
@@ -408,7 +505,7 @@ func TestAssets(t *testing.T) {
 			}
 		}
 	}
-	require.Len(t, refs, 2, "the stylesheet and htmx")
+	require.Len(t, refs, 3, "the stylesheet, htmx and actions.js")
 	types := map[string]string{".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
 	for _, ref := range refs {
 		file := strings.TrimPrefix(ref, AssetPrefix)
@@ -426,4 +523,114 @@ func TestAssets(t *testing.T) {
 	for _, name := range []string{"app.css", "app.0000000000000000.css", "nope.js", ""} {
 		assert.False(t, r.ServeAsset(httptest.NewRecorder(), name), name)
 	}
+}
+
+// TestPages_Scripts: every page loads htmx, then actions.js, each deferred
+// and under its hashed name.
+func TestPages_Scripts(t *testing.T) {
+	r := newRenderer(t)
+	actionsJS := regexp.MustCompile(`<script src="/ui/static/actions\.[0-9a-f]{16}\.js" defer></script>`)
+	for page, data := range eachSample(t, r) {
+		out := render(t, r, page, data)
+		loc := actionsJS.FindStringIndex(out)
+		require.NotNil(t, loc, page)
+		assert.Less(t, strings.Index(out, `<script src="/ui/static/htmx-`), loc[0], "%s: after htmx", page)
+		assert.Equal(t, 2, strings.Count(out, "<script"), page)
+	}
+}
+
+// polledPages are the pages with live regions.
+var polledPages = []string{PageStatus, PageDocument, PageInterests}
+
+// TestLiveRegions: in every sample of a page with live regions, each
+// region a poller names is on the page exactly once, and nothing in it
+// announces itself (no live role: it would speak on every poll that
+// changes it) or can take focus without an id, which is how htmx finds
+// what had focus after a swap. Every control's status is on the page, and
+// announces; a poll's answer carries a control's region, not its status.
+func TestLiveRegions(t *testing.T) {
+	r := newRenderer(t)
+	all := allSamples(t, r)
+	for _, page := range polledPages {
+		for i, data := range all[page] {
+			doc := parse(t, render(t, r, page, data))
+			ids := elementIDs(doc)
+			for _, poller := range withAttr(doc, "data-poll") {
+				for id := range strings.SplitSeq(strings.ReplaceAll(attrValue(poller, "hx-select-oob"), "#", ""), ",") {
+					require.Equal(t, 1, ids[id], "%s sample %d: region %q", page, i, id)
+					for n := range byID(doc, id).Descendants() {
+						if n.Type != html.ElementNode {
+							continue
+						}
+						role := attrValue(n, "role")
+						assert.False(t, hasAttr(n, "aria-live") || role == "alert" || role == "status",
+							"%s sample %d: a live role in region %q: <%s role=%q>", page, i, id, n.Data, role)
+						if focusable(n) {
+							assert.NotEmpty(t, attrValue(n, "id"), "%s sample %d: <%s> in region %q", page, i, n.Data, id)
+						}
+					}
+				}
+			}
+			if isPoll(data) {
+				continue
+			}
+			for _, control := range withAttr(doc, "data-status") {
+				status := byID(doc, attrValue(control, "data-status"))
+				require.NotNil(t, status, "%s sample %d: %s's status", page, i, attrValue(control, "data-kind"))
+				assert.Equal(t, "action-status", attrValue(status, "class"))
+				assert.Equal(t, "polite", attrValue(status, "aria-live"))
+			}
+		}
+	}
+}
+
+// isPoll reports whether a sample is a poll's answer.
+func isPoll(data any) bool {
+	switch d := data.(type) {
+	case Status:
+		return d.Poll != ""
+	case Document:
+		return d.Poll != ""
+	case Interests:
+		return d.Poll != ""
+	}
+	return false
+}
+
+// elementIDs counts the ids of doc's elements.
+func elementIDs(doc *html.Node) map[string]int {
+	ids := map[string]int{}
+	for n := range doc.Descendants() {
+		if n.Type == html.ElementNode && hasAttr(n, "id") {
+			ids[attrValue(n, "id")]++
+		}
+	}
+	return ids
+}
+
+// withAttr are doc's elements that carry attr.
+func withAttr(doc *html.Node, attr string) []*html.Node {
+	var out []*html.Node
+	for n := range doc.Descendants() {
+		if n.Type == html.ElementNode && hasAttr(n, attr) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func hasAttr(n *html.Node, key string) bool {
+	return slices.ContainsFunc(n.Attr, func(a html.Attribute) bool { return a.Key == key })
+}
+
+// focusable reports whether n can take focus: a link, a control, or
+// anything given a tabindex.
+func focusable(n *html.Node) bool {
+	switch n.Data {
+	case "a":
+		return hasAttr(n, "href")
+	case "button", "input", "select", "textarea", "summary":
+		return true
+	}
+	return hasAttr(n, "tabindex")
 }

@@ -1,0 +1,662 @@
+package api_test
+
+import (
+	"cmp"
+	"context"
+	"encoding/json"
+	"html"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	xhtml "golang.org/x/net/html"
+
+	"github.com/samsar/curio/internal/api"
+	"github.com/samsar/curio/internal/api/apitest"
+	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/jobs"
+	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/store"
+)
+
+// These tests drive the pages' live parts over the real API: what each
+// poll reads and renders, the controls each page offers and the state
+// they show, and what the pollers find in the answers.
+
+// reads counts the store and embedder reads the pages make, by name.
+type reads struct {
+	mu sync.Mutex
+	n  map[string]int
+	// jobs are the options of each ListWithDoc.
+	jobs []store.ListJobsOpts
+}
+
+func (r *reads) add(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.n[name]++
+}
+
+// take returns the counts so far and starts over.
+func (r *reads) take() map[string]int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.n
+	r.n = map[string]int{}
+	return n
+}
+
+// countReads makes a test server's stores and embedder count their reads
+// into r.
+func countReads(r *reads) func(*api.Deps) {
+	r.n = map[string]int{}
+	return func(d *api.Deps) {
+		d.Documents = readDocs{d.Documents, r}
+		d.Queue = &readJobs{d.Queue, r}
+		d.Extractions = readExtractions{d.Extractions, r}
+		d.Bookmarks = readBookmarks{d.Bookmarks, r}
+		d.Insights = readInsights{d.Insights, r}
+		d.Embedder = pinger{reads: r}
+		d.Search = search.New(readChunks{d.Chunks, r}, d.Documents, apitest.Embedder{Dim: config.Default().Embedding.Dim},
+			search.Config{Log: slog.New(slog.DiscardHandler)})
+	}
+}
+
+type readDocs struct {
+	store.DocumentStore
+	r *reads
+}
+
+func (d readDocs) CountByState(ctx context.Context, tenantID string) (map[store.DocState]int, error) {
+	d.r.add("stats")
+	return d.DocumentStore.CountByState(ctx, tenantID)
+}
+
+func (d readDocs) FailureSummary(ctx context.Context, tenantID string, hosts int) (store.FailureSummary, error) {
+	d.r.add("failures")
+	return d.DocumentStore.FailureSummary(ctx, tenantID, hosts)
+}
+
+func (d readDocs) GetWithLastError(ctx context.Context, tenantID, id string) (*store.DocumentWithError, error) {
+	d.r.add("document")
+	return d.DocumentStore.GetWithLastError(ctx, tenantID, id)
+}
+
+type readJobs struct {
+	store.JobStore
+	r *reads
+}
+
+func (j *readJobs) QueueCounts(ctx context.Context) (map[store.JobKind]store.QueueCount, error) {
+	j.r.add("queue")
+	return j.JobStore.QueueCounts(ctx)
+}
+
+func (j *readJobs) MetricsByKind(ctx context.Context, tenantID string, window time.Duration) ([]store.KindMetrics, error) {
+	j.r.add("metrics")
+	return j.JobStore.MetricsByKind(ctx, tenantID, window)
+}
+
+func (j *readJobs) ListWithDoc(ctx context.Context, tenantID string, opts store.ListJobsOpts) ([]store.JobWithDoc, error) {
+	j.r.add("jobs")
+	j.r.mu.Lock()
+	j.r.jobs = append(j.r.jobs, opts)
+	j.r.mu.Unlock()
+	return j.JobStore.ListWithDoc(ctx, tenantID, opts)
+}
+
+type readExtractions struct {
+	store.ExtractionStore
+	r *reads
+}
+
+func (e readExtractions) GetByID(ctx context.Context, id string) (*store.DocumentExtraction, error) {
+	e.r.add("extraction")
+	return e.ExtractionStore.GetByID(ctx, id)
+}
+
+type readBookmarks struct {
+	store.BookmarkStore
+	r *reads
+}
+
+func (b readBookmarks) ListByDocument(ctx context.Context, tenantID, documentID string) ([]*store.Bookmark, error) {
+	b.r.add("bookmarks")
+	return b.BookmarkStore.ListByDocument(ctx, tenantID, documentID)
+}
+
+type readInsights struct {
+	store.InsightStore
+	r *reads
+}
+
+func (i readInsights) LatestRun(ctx context.Context, tenantID string, status store.ClusterRunStatus) (*store.ClusterRun, error) {
+	i.r.add(cmp.Or(string(status), "newest") + " run")
+	return i.InsightStore.LatestRun(ctx, tenantID, status)
+}
+
+func (i readInsights) ListClusters(ctx context.Context, runID string, limit int) ([]*store.Cluster, error) {
+	i.r.add("interests")
+	return i.InsightStore.ListClusters(ctx, runID, limit)
+}
+
+type readChunks struct {
+	store.ChunkStore
+	r *reads
+}
+
+func (c readChunks) EmbeddingsForDocument(ctx context.Context, documentID string) ([]store.ChunkEmbedding, error) {
+	c.r.add("related")
+	return c.ChunkStore.EmbeddingsForDocument(ctx, documentID)
+}
+
+// pinger is an embedder whose Ping, the one call health makes, always
+// answers.
+type pinger struct {
+	embedder.Embedder
+	reads *reads
+}
+
+func (p pinger) Ping(context.Context) error {
+	p.reads.add("ping")
+	return nil
+}
+
+// TestUI_StatusReads: the page reads every panel; its 2-second poll the
+// counts, the queue and its metrics, never health (an Ollama ping) or the
+// failures; its health poll health alone. A poll it doesn't take is a 400
+// that reads nothing.
+func TestUI_StatusReads(t *testing.T) {
+	r := &reads{}
+	srv := apitest.Start(t, countReads(r))
+	srv.AddFailedDocument(t, "https://example.com/blocked", store.FailureCauseAntiBot)
+	for _, tc := range []struct {
+		path   string
+		status int
+		want   map[string]int
+	}{
+		{"/ui/status", http.StatusOK, map[string]int{"stats": 1, "queue": 1, "metrics": 1, "ping": 1, "failures": 1}},
+		{"/ui/status?poll=live", http.StatusOK, map[string]int{"stats": 1, "queue": 1, "metrics": 1}},
+		{"/ui/status?poll=health", http.StatusOK, map[string]int{"ping": 1}},
+		{"/ui/status?poll=jobs", http.StatusBadRequest, map[string]int{}},
+		{"/ui/status?poll=%3Cscript%3E", http.StatusBadRequest, map[string]int{}},
+	} {
+		r.take()
+		getPage(t, srv, tc.path, tc.status)
+		assert.Equal(t, tc.want, r.take(), tc.path)
+	}
+}
+
+// TestUI_StatusPolls: each poll's answer is the frame and the panels it
+// read, with their live regions: the 2-second poll's has no health, no
+// callouts and no failures; the health poll's has those, and no queue.
+func TestUI_StatusPolls(t *testing.T) {
+	srv := apitest.Start(t, func(d *api.Deps) { d.Embedder = failingPinger{} })
+	srv.AddFailedDocument(t, "https://example.com/blocked", store.FailureCauseAntiBot)
+
+	live := getPage(t, srv, "/ui/status?poll=live", http.StatusOK)
+	for _, gone := range []string{`id="health"`, `id="attention"`, "Ollama isn't ready", "Why documents failed",
+		"data-poll"} {
+		assert.NotContains(t, live, gone)
+	}
+	for _, id := range []string{"library-live", "queue-state", "queue-toggle", "queue-throttle", "queue-pools",
+		"progress-live", "jobs-live"} {
+		assert.Contains(t, live, `id="`+id+`"`)
+	}
+
+	health := getPage(t, srv, "/ui/status?poll=health", http.StatusOK)
+	assert.Contains(t, health, `<p class="callout-title">Ollama isn't ready</p>`)
+	assert.Contains(t, health, `id="health-live"`)
+	for _, gone := range []string{`id="library-live"`, `id="queue-state"`, `id="progress-live"`, "Why documents failed",
+		"data-poll"} {
+		assert.NotContains(t, health, gone)
+	}
+	page := getPage(t, srv, "/ui/status", http.StatusOK)
+	assert.Contains(t, page, "Why documents failed", "the page reads the failures")
+	assert.Equal(t, 2, strings.Count(page, "data-poll"))
+}
+
+// failingPinger is an embedder whose Ping fails, as when Ollama is down.
+type failingPinger struct{ embedder.Embedder }
+
+func (failingPinger) Ping(context.Context) error { return errInjected }
+
+// pageDoc parses a page.
+func pageDoc(t *testing.T, body string) *xhtml.Node {
+	t.Helper()
+	doc, err := xhtml.Parse(strings.NewReader(body))
+	require.NoError(t, err)
+	return doc
+}
+
+// elementByID is doc's element with id, or nil.
+func elementByID(doc *xhtml.Node, id string) *xhtml.Node {
+	for n := range doc.Descendants() {
+		if n.Type == xhtml.ElementNode && attr(n, "id") == id {
+			return n
+		}
+	}
+	return nil
+}
+
+func hasAttribute(n *xhtml.Node, key string) bool {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// pollers are a page's pollers: the URL each GETs, and the ids of the
+// regions it swaps in.
+func pollers(t *testing.T, doc *xhtml.Node) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	for n := range doc.Descendants() {
+		if n.Type == xhtml.ElementNode && hasAttribute(n, "data-poll") {
+			assert.True(t, hasAttribute(n, "hidden"), "a poller is hidden")
+			assert.Nil(t, n.FirstChild, "and empty")
+			assert.Equal(t, "none", attr(n, "hx-swap"))
+			assert.Equal(t, "this:replace", attr(n, "hx-sync"))
+			out[attr(n, "hx-get")] = strings.Split(strings.ReplaceAll(attr(n, "hx-select-oob"), "#", ""), ",")
+		}
+	}
+	return out
+}
+
+// countIDs counts id in doc.
+func countIDs(doc *xhtml.Node, id string) int {
+	n := 0
+	for e := range doc.Descendants() {
+		if e.Type == xhtml.ElementNode && attr(e, "id") == id {
+			n++
+		}
+	}
+	return n
+}
+
+// TestUI_LiveRegionsExist: every region a poller swaps in is on its page
+// once, and in the poller's answer once, whatever is in flight: Status, a
+// document whose fetch is queued, and the Interests with a rebuild queued.
+func TestUI_LiveRegionsExist(t *testing.T) {
+	srv := apitest.Start(t)
+	doc := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	_, err := srv.Deps.Documents.RequeueFetch(context.Background(), apitest.TenantID, doc.ID)
+	require.NoError(t, err)
+	srv.AddInterest(t, "Kafka", doc)
+	enqueueRebuild(t, srv)
+
+	for _, path := range []string{"/ui/status", "/ui/documents/" + doc.ID, "/ui/interests"} {
+		page := pageDoc(t, getPage(t, srv, path, http.StatusOK))
+		polls := pollers(t, page)
+		require.NotEmpty(t, polls, path)
+		for href, regions := range polls {
+			answer := pageDoc(t, getPage(t, srv, href, http.StatusOK))
+			for _, id := range regions {
+				assert.Equal(t, 1, countIDs(page, id), "%s: region %s on the page", path, id)
+				assert.Equal(t, 1, countIDs(answer, id), "%s: region %s in %s", path, id, href)
+			}
+		}
+	}
+}
+
+// enqueueRebuild queues a clustering run, as Rebuild does.
+func enqueueRebuild(t *testing.T, srv *apitest.Server) *store.Job {
+	t.Helper()
+	job := &store.Job{TenantID: apitest.TenantID, Kind: store.JobKindCluster, Payload: json.RawMessage(`{}`)}
+	require.NoError(t, srv.Deps.Queue.Enqueue(context.Background(), job))
+	return job
+}
+
+// putQueue changes the queue's settings through the API, as the page's
+// controls do.
+func putQueue(t *testing.T, srv *apitest.Server, body string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, srv.URL+"/v1/queue",
+		strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode, body)
+}
+
+// TestUI_StatusControls: the queue's controls show its settings after each
+// change through PUT /v1/queue, and send the changes that would undo them;
+// the schedule's time fields sit outside every polled region, so a poll
+// never replaces a time being typed.
+func TestUI_StatusControls(t *testing.T) {
+	srv := apitest.Start(t)
+	controls := func() *xhtml.Node {
+		t.Helper()
+		return pageDoc(t, getPage(t, srv, "/ui/status", http.StatusOK))
+	}
+	page := controls()
+	assert.Equal(t, `{"paused":true}`, attr(elementByID(page, "queue-pause"), "data-body"))
+	assert.Equal(t, "true", attr(elementByID(page, "throttle-normal"), "aria-pressed"))
+	assert.False(t, hasAttribute(elementByID(page, "keep-awake"), "checked"))
+	assert.Empty(t, attr(elementByID(page, "schedule-opens"), "value"))
+	assert.Equal(t, "Off: jobs start at any hour.", textContent(elementByID(page, "schedule-state")))
+	assert.Equal(t, "Off: jobs wait while the Mac sleeps.", textContent(elementByID(page, "keep-awake-hint")))
+
+	putQueue(t, srv, `{"paused":true,"throttle":"gentle","keep_awake":true,"schedule":"22:00-07:00"}`)
+	page = controls()
+	pause := elementByID(page, "queue-pause")
+	assert.Equal(t, "resume", attr(pause, "data-kind"))
+	assert.Equal(t, `{"paused":false}`, attr(pause, "data-body"))
+	assert.Equal(t, "false", attr(elementByID(page, "throttle-normal"), "aria-pressed"))
+	assert.Equal(t, "true", attr(elementByID(page, "throttle-gentle"), "aria-pressed"))
+	assert.True(t, hasAttribute(elementByID(page, "keep-awake"), "checked"))
+	assert.Equal(t, "On, not holding the Mac awake: the queue is paused.",
+		textContent(elementByID(page, "keep-awake-hint")))
+	assert.Equal(t, "22:00", attr(elementByID(page, "schedule-opens"), "value"))
+	assert.Equal(t, "07:00", attr(elementByID(page, "schedule-closes"), "value"))
+	assert.Equal(t, "Jobs start from 22:00 to 07:00.", textContent(elementByID(page, "schedule-state")))
+
+	regions := map[string]bool{}
+	for _, ids := range pollers(t, page) {
+		for _, id := range ids {
+			regions[id] = true
+		}
+	}
+	for _, field := range []string{"schedule-form", "schedule-opens", "schedule-closes"} {
+		for n := elementByID(page, field); n != nil; n = n.Parent {
+			assert.False(t, regions[attr(n, "id")], "%s is inside region %s", field, attr(n, "id"))
+		}
+	}
+}
+
+// textContent is n's text, its whitespace collapsed.
+func textContent(n *xhtml.Node) string {
+	var b strings.Builder
+	for d := range n.Descendants() {
+		if d.Type == xhtml.TextNode {
+			b.WriteString(d.Data)
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// TestUI_DocumentActions: each state's controls: Refetch for pending,
+// fetched and failed documents; for a dead one, Refetch anyway behind its
+// confirm, which forces it; Reindex only with a text.
+func TestUI_DocumentActions(t *testing.T) {
+	srv := apitest.Start(t)
+	fetched := srv.AddDocument(t, "https://example.com/fetched", store.DocStateFetched)
+	srv.AddContent(t, fetched, "# Fetched")
+	failed := srv.AddFailedDocument(t, "https://example.com/blocked", store.FailureCauseAntiBot)
+	dead := srv.AddDocument(t, "https://example.com/gone", store.DocStateDead)
+	pending := srv.AddDocument(t, "https://example.com/pending", store.DocStatePending)
+
+	for _, doc := range []*store.Document{fetched, failed, pending} {
+		page := pageDoc(t, getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK))
+		refetch := elementByID(page, "refetch")
+		require.NotNil(t, refetch, doc.State)
+		assert.Equal(t, "/v1/documents/"+doc.ID+"/refetch", attr(refetch, "data-path"))
+		assert.Equal(t, doc.State == store.DocStateFailed, strings.Contains(attr(refetch, "class"), "btn-primary"))
+		assert.Nil(t, elementByID(page, "confirm-refetch"))
+	}
+	withText := pageDoc(t, getPage(t, srv, "/ui/documents/"+fetched.ID, http.StatusOK))
+	assert.Equal(t, "/v1/documents/"+fetched.ID+"/reindex", attr(elementByID(withText, "reindex"), "data-path"))
+	assert.Regexp(t, `^Fetched .+ by apitest$`, textContent(elementByID(withText, "doc-status")))
+	noText := pageDoc(t, getPage(t, srv, "/ui/documents/"+pending.ID, http.StatusOK))
+	assert.Equal(t, "true", attr(elementByID(noText, "reindex"), "aria-disabled"))
+	assert.False(t, hasAttribute(elementByID(noText, "reindex"), "data-path"))
+
+	gone := pageDoc(t, getPage(t, srv, "/ui/documents/"+dead.ID, http.StatusOK))
+	assert.Nil(t, elementByID(gone, "refetch"))
+	assert.Equal(t, "confirm-refetch", attr(elementByID(gone, "refetch-anyway"), "popovertarget"))
+	assert.Equal(t, "/v1/documents/"+dead.ID+"/refetch?force=1", attr(elementByID(gone, "refetch-forced"), "data-path"))
+}
+
+// pollerHref is the URL of the page's poller whose regions include id.
+func pollerHref(t *testing.T, body, id string) string {
+	t.Helper()
+	for href, regions := range pollers(t, pageDoc(t, body)) {
+		if slices.Contains(regions, id) {
+			return href
+		}
+	}
+	require.Failf(t, "no poller", "for region %s", id)
+	return ""
+}
+
+// pollerTrigger is the hx-trigger of the poller with id in body.
+func pollerTrigger(t *testing.T, body, id string) string {
+	t.Helper()
+	n := elementByID(pageDoc(t, body), id)
+	require.NotNil(t, n, id)
+	return attr(n, "hx-trigger")
+}
+
+// TestUI_DocumentJobs: the document's jobs in flight and why the queue
+// holds them; its poller polls every 2 seconds exactly while there is work,
+// and carries the page's baseline, which a poll's answer keeps.
+func TestUI_DocumentJobs(t *testing.T) {
+	ctx := context.Background()
+	srv := apitest.Start(t)
+	doc := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	srv.AddContent(t, doc, "# A")
+	body := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	assert.Equal(t, "curio:changed from:body", pollerTrigger(t, body, "doc-poll"), "nothing in flight")
+	assert.Contains(t, body, `<div class="doc-jobs" id="doc-jobs"></div>`)
+
+	_, err := srv.Deps.Documents.RequeueFetch(ctx, apitest.TenantID, doc.ID)
+	require.NoError(t, err)
+	_, err = srv.Deps.Gate.Update(ctx, jobsPause())
+	require.NoError(t, err)
+	body = getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	assert.Contains(t, body, `<li>Fetch queued</li>`)
+	assert.Contains(t, body, `<a id="doc-jobs-hold" href="/ui/status">The queue is closed: Paused</a>`)
+	assert.Equal(t, "every 2s, curio:changed from:body", pollerTrigger(t, body, "doc-poll"))
+
+	_, err = srv.Deps.Gate.Update(ctx, jobs.QueueUpdate{Paused: new(false)})
+	require.NoError(t, err)
+	claimed, err := srv.Deps.Queue.ClaimNext(ctx, []store.JobKind{store.JobKindFetch})
+	require.NoError(t, err)
+	body = getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	assert.Contains(t, body, `<li>Fetch running · attempt 1 of 5</li>`)
+	assert.NotContains(t, body, "doc-jobs-hold")
+
+	_, err = srv.Deps.Queue.MarkFailed(ctx, claimed.ID, "HTTP 503", true)
+	require.NoError(t, err)
+	body = getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	assert.Regexp(t, `<li>Fetch queued · attempt 2 of 5, due <time datetime="[^"]+" title="[^"]+">[^<]+</time></li>`, body)
+}
+
+// TestUI_DocumentPoll: a poll's answer is the jobs' region and its poller,
+// which keeps the baseline the poll carried, and says what came of the
+// jobs since: a new text, a failure, or another change.
+func TestUI_DocumentPoll(t *testing.T) {
+	ctx := context.Background()
+	srv := apitest.Start(t)
+	doc := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	old := srv.AddContent(t, doc, "# A")
+	page := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	href := pollerHref(t, page, "doc-jobs")
+	u, err := url.Parse(href)
+	require.NoError(t, err)
+	assert.Equal(t, "/ui/documents/"+doc.ID, u.Path)
+	assert.Equal(t, "jobs", u.Query().Get("poll"))
+	assert.Equal(t, old.ID, u.Query().Get("extraction"))
+
+	answer := getPage(t, srv, href, http.StatusOK)
+	assert.Contains(t, answer, `<div class="doc-jobs" id="doc-jobs"></div>`, "nothing changed")
+	for _, gone := range []string{`<article class="prose">`, `id="related"`, `id="bookmarks"`, `id="details"`, "<h1>"} {
+		assert.NotContains(t, answer, gone)
+	}
+	assert.Equal(t, href, html.UnescapeString(pollerHref(t, answer, "doc-jobs")), "the baseline is kept")
+
+	// Another change: a stale updated time.
+	stale := u.Query()
+	stale.Set("updated", "2020-01-01T00:00:00.000Z")
+	staleHref := u.Path + "?" + stale.Encode()
+	answer = getPage(t, srv, staleHref, http.StatusOK)
+	assert.Contains(t, answer, `Updated: <a id="doc-reload" href="/ui/documents/`+doc.ID+`">reload</a>`)
+	assert.Equal(t, staleHref, html.UnescapeString(pollerHref(t, answer, "doc-jobs")),
+		"the poll's own baseline, not the library's")
+
+	// A new text.
+	srv.AddContent(t, doc, "# A, refetched")
+	answer = getPage(t, srv, href, http.StatusOK)
+	assert.Contains(t, answer, `The text changed: <a id="doc-reload" href="/ui/documents/`+doc.ID+`">reload</a>`)
+
+	// A failure.
+	failed := srv.AddFailedDocument(t, "https://example.com/blocked", store.FailureCauseAntiBot)
+	failedPage := getPage(t, srv, "/ui/documents/"+failed.ID, http.StatusOK)
+	failedHref, err := url.Parse(pollerHref(t, failedPage, "doc-jobs"))
+	require.NoError(t, err)
+	q := failedHref.Query()
+	q.Set("updated", "2020-01-01T00:00:00.000Z")
+	answer = getPage(t, srv, failedHref.Path+"?"+q.Encode(), http.StatusOK)
+	assert.Contains(t, answer, `It failed: <a id="doc-reload" href="/ui/documents/`+failed.ID+`">reload to see why</a>`)
+
+	// While a job is in flight nothing is offered but a new text, and it
+	// keeps polling.
+	_, err = srv.Deps.Documents.RequeueFetch(ctx, apitest.TenantID, failed.ID)
+	require.NoError(t, err)
+	answer = getPage(t, srv, failedHref.Path+"?"+q.Encode(), http.StatusOK)
+	assert.NotContains(t, answer, "doc-reload")
+	assert.Equal(t, "every 2s, curio:changed from:body", pollerTrigger(t, answer, "doc-poll"))
+}
+
+// TestUI_DocumentReads: the page reads the document, its text, related
+// documents, bookmarks and jobs; its poll the document and its jobs alone,
+// never the text, related documents or bookmarks. The jobs are asked for
+// by document, a page of them and one more. A poll it doesn't take, or
+// without a baseline, is a 400 that reads nothing.
+func TestUI_DocumentReads(t *testing.T) {
+	r := &reads{}
+	srv := apitest.Start(t, countReads(r))
+	doc := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	srv.AddContent(t, doc, "# A\n\nthe text")
+	page := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	assert.Equal(t, map[string]int{"document": 1, "extraction": 1, "related": 1, "bookmarks": 1, "jobs": 1}, r.take())
+	require.Len(t, r.jobs, 1)
+	assert.Equal(t, doc.ID, r.jobs[0].DocumentID)
+	assert.GreaterOrEqual(t, r.jobs[0].Limit, 2, "a page of jobs and one more")
+
+	getPage(t, srv, pollerHref(t, page, "doc-jobs"), http.StatusOK)
+	assert.Equal(t, map[string]int{"document": 1, "jobs": 1}, r.take())
+
+	_, err := srv.Deps.Documents.RequeueFetch(context.Background(), apitest.TenantID, doc.ID)
+	require.NoError(t, err)
+	getPage(t, srv, pollerHref(t, page, "doc-jobs"), http.StatusOK)
+	assert.Equal(t, map[string]int{"document": 1, "jobs": 1, "queue": 1}, r.take(), "the queue, while a job waits")
+
+	for _, query := range []string{"?poll=live", "?poll=jobs", "?poll=jobs&updated=yesterday",
+		"?poll=jobs&updated=2026-09-29"} {
+		body := getPage(t, srv, "/ui/documents/"+doc.ID+query, http.StatusBadRequest)
+		assert.Contains(t, body, `<div class="big-code">400</div>`, query)
+		assert.Empty(t, r.take(), query)
+	}
+}
+
+// TestUI_InterestsRebuild: the Rebuild button, disabled while a rebuild is
+// queued or running; the state of one, and why the queue holds it; then
+// what the newest run came to: its interests ready to load, or its
+// failure. The poller polls every 2 seconds exactly while one is in
+// flight.
+func TestUI_InterestsRebuild(t *testing.T) {
+	ctx := context.Background()
+	srv := apitest.Start(t)
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	srv.AddInterest(t, "Kafka", a)
+
+	body := getPage(t, srv, "/ui/interests", http.StatusOK)
+	rebuild := elementByID(pageDoc(t, body), "rebuild")
+	require.NotNil(t, rebuild)
+	assert.Equal(t, "/v1/interests/rebuild", attr(rebuild, "data-path"))
+	assert.False(t, hasAttribute(rebuild, "aria-disabled"))
+	assert.Equal(t, "curio:changed from:body", pollerTrigger(t, body, "rebuild-poll"))
+	href := pollerHref(t, body, "rebuild-state")
+
+	job := enqueueRebuild(t, srv)
+	_, err := srv.Deps.Gate.Update(ctx, jobsPause())
+	require.NoError(t, err)
+	answer := getPage(t, srv, href, http.StatusOK)
+	assert.Contains(t, answer, `<p>Rebuild queued · <a id="rebuild-hold" href="/ui/status">the queue is closed: Paused</a></p>`)
+	assert.Equal(t, "true", attr(elementByID(pageDoc(t, answer), "rebuild"), "aria-disabled"))
+	assert.Equal(t, "every 2s, curio:changed from:body", pollerTrigger(t, answer, "rebuild-poll"))
+
+	_, err = srv.Deps.Gate.Update(ctx, jobs.QueueUpdate{Paused: new(false)})
+	require.NoError(t, err)
+	claimed, err := srv.Deps.Queue.ClaimNext(ctx, []store.JobKind{store.JobKindCluster})
+	require.NoError(t, err)
+	require.Equal(t, job.ID, claimed.ID)
+	answer = getPage(t, srv, href, http.StatusOK)
+	assert.Regexp(t, `<p>Rebuilding · started <time[^>]*>just now</time></p>`, answer)
+
+	require.NoError(t, srv.Deps.Queue.MarkDone(ctx, claimed.ID))
+	srv.AddInterest(t, "Kafka streams", a)
+	answer = getPage(t, srv, href, http.StatusOK)
+	assert.Contains(t, answer, `<p>New interests are ready: <a id="rebuild-reload" href="/ui/interests">reload</a></p>`)
+	assert.Equal(t, "curio:changed from:body", pollerTrigger(t, answer, "rebuild-poll"), "nothing in flight")
+	assert.Equal(t, href, pollerHref(t, answer, "rebuild-state"),
+		"the answer's poller still carries the run the page shows, not the newer one")
+
+	failRun(t, srv, "cluster: label: <ollama> unreachable")
+	body = getPage(t, srv, "/ui/interests", http.StatusOK)
+	assert.Contains(t, body, "Kafka streams", "the latest done run's interests")
+	assert.Contains(t, body, `The rebuild failed: cluster: label: &lt;ollama&gt; unreachable</p>`,
+		"a failure newer than the interests shown, reported on the page")
+}
+
+// failRun records a clustering run that failed with msg, as the insight
+// engine records a failed rebuild.
+func failRun(t *testing.T, srv *apitest.Server, msg string) {
+	t.Helper()
+	ctx := context.Background()
+	run := &store.ClusterRun{TenantID: apitest.TenantID, Algo: "apitest"}
+	require.NoError(t, srv.Deps.Insights.CreateRun(ctx, run))
+	require.NoError(t, srv.Deps.Insights.FinishRun(ctx, run.ID,
+		store.RunResult{Status: store.ClusterRunFailed, Error: &msg}))
+}
+
+// TestUI_InterestsReads: the page reads the interests and the rebuild's
+// state; its poll the rebuild's alone: the queue and the newest run, never
+// the interests. A running rebuild's start is its one job read.
+func TestUI_InterestsReads(t *testing.T) {
+	r := &reads{}
+	srv := apitest.Start(t, countReads(r))
+	srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/a", store.DocStateFetched))
+	body := getPage(t, srv, "/ui/interests", http.StatusOK)
+	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "queue": 1, "newest run": 1}, r.take())
+
+	href := pollerHref(t, body, "rebuild-state")
+	getPage(t, srv, href, http.StatusOK)
+	assert.Equal(t, map[string]int{"queue": 1, "newest run": 1}, r.take())
+
+	enqueueRebuild(t, srv)
+	_, err := srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})
+	require.NoError(t, err)
+	r.jobs = nil
+	getPage(t, srv, href, http.StatusOK)
+	assert.Equal(t, map[string]int{"queue": 1, "newest run": 1, "jobs": 1}, r.take())
+	require.Len(t, r.jobs, 1)
+	assert.Equal(t, store.ListJobsOpts{Kind: store.JobKindCluster, Status: store.JobStatusRunning, Limit: 2}, r.jobs[0],
+		"the running one, never the queued")
+
+	getPage(t, srv, "/ui/interests?poll=jobs", http.StatusBadRequest)
+	assert.Empty(t, r.take())
+}
+
+// TestUI_InterestsInsightOff: with insight off there is no Rebuild, and
+// the empty page says how to turn it on, not to rebuild.
+func TestUI_InterestsInsightOff(t *testing.T) {
+	srv := apitest.Start(t, func(d *api.Deps) { d.InsightEnabled = false })
+	body := getPage(t, srv, "/ui/interests", http.StatusOK)
+	assert.Nil(t, elementByID(pageDoc(t, body), "rebuild"))
+	assert.Contains(t, body, "set <code>insight.enabled: true</code> in config.yaml")
+	assert.NotContains(t, body, "curio interests rebuild")
+}

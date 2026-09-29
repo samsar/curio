@@ -854,3 +854,75 @@ func TestServer_UnknownFieldNamesTheRemedy(t *testing.T) {
 	assert.Contains(t, p.Detail, "curio daemon stop")
 	assert.Zero(t, s.count(t, "bookmarks"))
 }
+
+// TestServer_PollsLogAtDebug: a dashboard poll that succeeded is logged at
+// debug, so an open page's polls don't grow daemon.log; one that failed,
+// and every other request, pages included, is logged at info.
+func TestServer_PollsLogAtDebug(t *testing.T) {
+	var rec logRecorder
+	deps := routerDeps(t, &rec)
+	for _, tc := range []struct {
+		path   string
+		status int
+		level  slog.Level
+	}{
+		{"/ui/status", http.StatusOK, slog.LevelInfo},
+		{"/ui/status?poll=live", http.StatusOK, slog.LevelDebug},
+		{"/ui/status?poll=health", http.StatusOK, slog.LevelDebug},
+		{"/ui/status?poll=bogus", http.StatusBadRequest, slog.LevelInfo},
+		{"/ui/documents/nope?poll=jobs&updated=2026-09-29T00:00:00.000Z", http.StatusNotFound, slog.LevelInfo},
+		{"/v1/stats?poll=live", http.StatusOK, slog.LevelInfo},
+	} {
+		rec.mu.Lock()
+		rec.records = nil
+		rec.mu.Unlock()
+		resp := serveInProcess(t, deps, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		require.Equal(t, tc.status, resp.status, tc.path)
+		var levels []slog.Level
+		rec.mu.Lock()
+		for _, r := range rec.records {
+			if r.Message == "http" {
+				levels = append(levels, r.Level)
+			}
+		}
+		rec.mu.Unlock()
+		assert.Equal(t, []slog.Level{tc.level}, levels, tc.path)
+	}
+}
+
+// TestLocalOrigin_BoundAddress: the daemon's own origin includes the
+// loopback address it is bound to, whichever it is, so a dashboard served
+// from 127.0.0.2 can send its changes; another loopback address stays
+// another origin.
+func TestLocalOrigin_BoundAddress(t *testing.T) {
+	for _, tc := range []struct {
+		bound   net.IP
+		allowed []string
+		refused []string
+	}{
+		{net.IPv4(127, 0, 0, 2),
+			[]string{"http://127.0.0.2:8765", "http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"},
+			[]string{"http://127.0.0.3:8765", "http://127.0.0.2:8766", "https://127.0.0.2:8765"}},
+		{net.IPv6loopback,
+			[]string{"http://[::1]:8765", "http://127.0.0.1:8765", "http://localhost:8765"},
+			[]string{"http://[0:0:0:0:0:0:0:1]:8765", "http://127.0.0.2:8765", "http://[::1]:8766"}},
+	} {
+		origin, err := newLocalOrigin(&net.TCPAddr{IP: tc.bound, Port: 8765})
+		require.NoError(t, err)
+		check := rejectForeignOrigin(origin, slog.New(slog.DiscardHandler))(http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+		status := func(o string) int {
+			req := httptest.NewRequest(http.MethodPut, "/v1/queue", nil)
+			req.Header.Set("Origin", o)
+			w := httptest.NewRecorder()
+			check.ServeHTTP(w, req)
+			return w.Code
+		}
+		for _, o := range tc.allowed {
+			assert.Equal(t, http.StatusNoContent, status(o), "%s bound: %s", tc.bound, o)
+		}
+		for _, o := range tc.refused {
+			assert.Equal(t, http.StatusForbidden, status(o), "%s bound: %s", tc.bound, o)
+		}
+	}
+}

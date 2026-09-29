@@ -193,12 +193,12 @@ var calloutTitleRE = regexp.MustCompile(`<div class="callout (callout-[a-z]+) mb
 
 // TestStatus_Attention: what needs attention opens the page, before the
 // board, in a fixed order: Ollama, the drift, then each failing or
-// degraded upstream. None shows when the health read failed, and a
-// healthy daemon shows none.
+// degraded upstream, each a note, since the region is polled. None shows
+// when the health read failed, and a healthy daemon shows none.
 func TestStatus_Attention(t *testing.T) {
 	r := newRenderer(t)
 	at := time.Now().Add(-5 * time.Minute)
-	st := Status{Layout: Layout{Title: "Status", Nav: NavStatus}, Health: HealthPanel{
+	st := Status{Layout: Layout{Title: "Status", Nav: NavStatus}, Health: &HealthPanel{
 		OllamaDetail: "ollama unreachable (start it with `ollama serve`)",
 		Drift:        &Drift{Changes: []DriftChange{{What: "model digest", Recorded: "a", Current: "b"}}, Fix: "curio reindex --all"},
 		Upstreams: []Upstream{
@@ -214,10 +214,10 @@ func TestStatus_Attention(t *testing.T) {
 		got = append(got, m[1:])
 	}
 	assert.Equal(t, [][]string{
-		{"callout-danger", "alert", "Ollama isn't ready"},
-		{"callout-warn", "status", "The embeddings drifted"},
-		{"callout-warn", "status", "Jina Reader is degraded"},
-		{"callout-danger", "alert", "other is failing"},
+		{"callout-danger", "note", "Ollama isn't ready"},
+		{"callout-warn", "note", "The embeddings drifted"},
+		{"callout-warn", "note", "Jina Reader is degraded"},
+		{"callout-danger", "note", "other is failing"},
 	}, got)
 	assert.Less(t, strings.LastIndex(out, `class="callout`), strings.Index(out, `<div class="board">`),
 		"the callouts come before the board")
@@ -232,7 +232,7 @@ func TestStatus_Attention(t *testing.T) {
 	st.Health.Err = &PanelError{Message: "health", RequestID: "r"}
 	assert.NotContains(t, render(t, r, PageStatus, st), `class="callout`, "no health read, no callouts")
 
-	healthy := Status{Layout: st.Layout, Health: HealthPanel{OllamaReachable: true,
+	healthy := Status{Layout: st.Layout, Health: &HealthPanel{OllamaReachable: true,
 		Upstreams: []Upstream{{Name: "jina", Enabled: true, State: "ok"}}}}
 	assert.NotContains(t, render(t, r, PageStatus, healthy), `class="callout`)
 }
@@ -241,8 +241,8 @@ func TestStatus_Attention(t *testing.T) {
 // of its documents, with a bar scaled to the most; none read, no card.
 func TestStatus_Failures(t *testing.T) {
 	r := newRenderer(t)
-	st := Status{Layout: Layout{Title: "Status", Nav: NavStatus}, Health: HealthPanel{OllamaReachable: true},
-		Failures: FailuresPanel{Total: 1745, Causes: []Count{{Name: "anti_bot", Count: 926}, {Name: "dead_link", Count: 819}}}}
+	st := Status{Layout: Layout{Title: "Status", Nav: NavStatus}, Health: &HealthPanel{OllamaReachable: true},
+		Failures: &FailuresPanel{Total: 1745, Causes: []Count{{Name: "anti_bot", Count: 926}, {Name: "dead_link", Count: 819}}}}
 	out := render(t, r, PageStatus, st)
 	assert.Contains(t, out, `<a class="more" href="/ui/library?state=failed">Failed documents →</a>`)
 	assert.Contains(t, out, `<li><a class="label" href="/ui/library?cause=anti_bot" title="Blocked by bot protection">`+
@@ -252,10 +252,12 @@ func TestStatus_Failures(t *testing.T) {
 	assert.Contains(t, out, `<rect class="fill-neutral" x="0.000" y="0" width="88.445" height="10"/></svg><span class="n">819</span>`)
 	assert.NotContains(t, out, "style=")
 
-	st.Failures = FailuresPanel{}
+	st.Failures = &FailuresPanel{}
 	assert.NotContains(t, render(t, r, PageStatus, st), "Why documents failed", "nothing failed")
 	st.Failures.Err = &PanelError{Message: "failures", RequestID: "r"}
 	assert.Contains(t, render(t, r, PageStatus, st), "Couldn't read this: failures.")
+	st.Failures = nil
+	assert.NotContains(t, render(t, r, PageStatus, st), "Why documents failed", "not read")
 }
 
 // TestSearch_Placeholder: the box says how many documents there are to
@@ -407,4 +409,369 @@ func TestSearchHit_Matches(t *testing.T) {
 	hit.Matches = nil
 	assert.Empty(t, hit.ShownMatches())
 	assert.Empty(t, hit.MoreMatches())
+}
+
+// TestQueuePanel_Controls: the controls follow the settings: Resume while
+// paused, the throttle's button pressed, the schedule's times in the form,
+// and a keep-awake hint that says, in the keeper's order, why it doesn't
+// hold the Mac awake.
+func TestQueuePanel_Controls(t *testing.T) {
+	assert.Equal(t, ActionPause, QueuePanel{}.Toggle().Kind)
+	assert.Equal(t, ActionResume, QueuePanel{Paused: true}.Toggle().Kind)
+
+	choices := QueuePanel{Throttle: "gentle"}.Throttles()
+	require.Len(t, choices, 2)
+	assert.Equal(t, []string{"throttle-normal", "Normal"}, []string{choices[0].ID, choices[0].Label})
+	assert.Equal(t, []string{"throttle-gentle", "Gentle"}, []string{choices[1].ID, choices[1].Label})
+	assert.Equal(t, []bool{false, true}, []bool{choices[0].Pressed, choices[1].Pressed})
+	for _, c := range choices {
+		assert.Equal(t, ActionThrottle, c.Action.Kind)
+	}
+	assert.Equal(t, "Gentle: at most 4 fetches and 1 index at a time.", gentleHint(), "from the gentle caps")
+
+	set := QueuePanel{Schedule: "22:00-07:00"}
+	assert.Equal(t, []string{"22:00", "07:00"}, []string{set.ScheduleStart(), set.ScheduleEnd()})
+	assert.Empty(t, QueuePanel{}.ScheduleStart()+QueuePanel{}.ScheduleEnd())
+
+	busy := []KindLoad{{Kind: "fetch", Pending: 3, Running: 1}, {Kind: "index", Pending: 2}}
+	assert.Equal(t, 5, QueuePanel{Kinds: busy}.Waiting())
+	for _, tc := range []struct {
+		panel QueuePanel
+		want  string
+	}{
+		{QueuePanel{Kinds: busy}, "Off: jobs wait while the Mac sleeps."},
+		{QueuePanel{KeepAwake: true, KeepAwakeActive: true, PowerSource: "ac", Kinds: busy},
+			"Holding the Mac awake while jobs run (AC power)."},
+		{QueuePanel{KeepAwake: true, Paused: true, PowerSource: "ac", Kinds: busy},
+			"On, not holding the Mac awake: the queue is paused."},
+		{QueuePanel{KeepAwake: true, PowerSource: "ac"}, "On, not holding the Mac awake: nothing is queued."},
+		{QueuePanel{KeepAwake: true, PowerSource: "ac", Kinds: []KindLoad{{Kind: "index", Running: 1}}},
+			"On, not holding the Mac awake yet."},
+		{QueuePanel{KeepAwake: true, PowerSource: "battery", Kinds: busy},
+			"On, not holding the Mac awake: it runs on battery."},
+		{QueuePanel{KeepAwake: true, PowerSource: "unknown", Kinds: busy},
+			"On, not holding the Mac awake: its power source is unknown."},
+	} {
+		assert.Equal(t, tc.want, tc.panel.KeepAwakeHint())
+	}
+}
+
+// TestStatus_Pollers: the page polls what changes every 2 seconds and
+// after every change, and health every 15 seconds; a poll's answer has no
+// pollers of its own.
+func TestStatus_Pollers(t *testing.T) {
+	pollers := Status{}.Pollers()
+	require.Len(t, pollers, 2)
+	assert.Equal(t, "/ui/status?poll=live", pollers[0].Href)
+	assert.Equal(t, "every 2s, curio:changed from:body", pollers[0].Trigger())
+	assert.Equal(t, "#library-live,#queue-state,#queue-toggle,#queue-throttle,#queue-keep-awake,#keep-awake-hint,"+
+		"#schedule-state,#queue-pools,#progress-live,#jobs-live", pollers[0].Select())
+	assert.Equal(t, "/ui/status?poll=health", pollers[1].Href)
+	assert.Equal(t, "every 15s", pollers[1].Trigger())
+	assert.Equal(t, "#attention,#health-live", pollers[1].Select())
+	assert.Empty(t, Status{Poll: PollLive}.Pollers())
+	assert.Empty(t, Status{Poll: PollHealth}.Pollers())
+}
+
+// TestStatus_Controls: the queue card's controls say the settings, send
+// their changes, and need JavaScript; their equivalents without it are
+// the settings and the commands. No phase badge is left.
+func TestStatus_Controls(t *testing.T) {
+	r := newRenderer(t)
+	queue := &QueuePanel{Open: true, Throttle: "normal", KeepAwake: false, Kinds: []KindLoad{{Kind: "fetch", Limit: 16}}}
+	st := Status{Layout: Layout{Title: "Status", Nav: NavStatus}, Queue: queue}
+	doc := parse(t, render(t, r, PageStatus, st))
+	pause := byID(doc, "queue-pause")
+	require.NotNil(t, pause)
+	assert.Equal(t, "pause", attrValue(pause, "data-kind"))
+	assert.Contains(t, attrValue(byID(doc, "queue-toggle"), "class"), "js-only")
+	assert.Equal(t, "true", attrValue(byID(doc, "throttle-normal"), "aria-pressed"))
+	assert.Equal(t, "false", attrValue(byID(doc, "throttle-gentle"), "aria-pressed"))
+	assert.Equal(t, `{"throttle":"gentle"}`, attrValue(byID(doc, "throttle-gentle"), "data-body"))
+	awake := byID(doc, "keep-awake")
+	assert.False(t, hasAttr(awake, "checked"))
+	assert.Equal(t, "switch", attrValue(awake, "role"))
+	assert.Equal(t, "keep_awake", attrValue(awake, "data-field"))
+	assert.Empty(t, attrValue(byID(doc, "schedule-opens"), "value"), "no schedule")
+	assert.Equal(t, "-", attrValue(byID(doc, "schedule-form"), "data-join"))
+	for _, n := range withAttr(doc, "class") {
+		if strings.Contains(attrValue(n, "class"), "controls") {
+			assert.Contains(t, attrValue(n, "class"), "js-only")
+		}
+	}
+	out := render(t, r, PageStatus, st)
+	assert.Contains(t, out, `<dl class="facts mt-4 no-js">`)
+	assert.Contains(t, out, `<div class="cli mt-4 no-js"><span class="muted">From the terminal</span><code>curio pause</code>`)
+	assert.Contains(t, out, `<span class="why">Nothing waiting</span>`)
+	assert.NotContains(t, out, "Phase 2")
+
+	queue.Paused, queue.Open, queue.Reason, queue.Throttle, queue.KeepAwake = true, false, "paused", "gentle", true
+	queue.Schedule = "22:00-07:00"
+	doc = parse(t, render(t, r, PageStatus, st))
+	assert.Equal(t, "resume", attrValue(byID(doc, "queue-pause"), "data-kind"))
+	assert.Equal(t, `{"paused":false}`, attrValue(byID(doc, "queue-pause"), "data-body"))
+	assert.Equal(t, "true", attrValue(byID(doc, "throttle-gentle"), "aria-pressed"))
+	assert.True(t, hasAttr(byID(doc, "keep-awake"), "checked"))
+	assert.Equal(t, "22:00", attrValue(byID(doc, "schedule-opens"), "value"))
+	assert.Equal(t, "07:00", attrValue(byID(doc, "schedule-closes"), "value"))
+	out = render(t, r, PageStatus, st)
+	assert.Contains(t, out, `<span class="badge queue-closed">closed</span><span class="why">Paused</span>`)
+	assert.Contains(t, out, `<p class="schedule-now" id="schedule-state">Jobs start from 22:00 to 07:00.</p>`)
+}
+
+// TestStatus_Polls: a poll's answer holds the panels it read, and the
+// frame, and nothing else: no health, callouts or failures in the 2-second
+// poll's, and only those in the health poll's.
+func TestStatus_Polls(t *testing.T) {
+	r := newRenderer(t)
+	layout := Layout{Title: "Status", Nav: NavStatus}
+	live := render(t, r, PageStatus, Status{Layout: layout, Poll: PollLive, Counts: &CountsPanel{},
+		Queue: &QueuePanel{Open: true}, Progress: &ProgressPanel{}})
+	for _, gone := range []string{`id="health"`, `id="attention"`, "Why documents failed", "data-poll"} {
+		assert.NotContains(t, live, gone)
+	}
+	for _, there := range []string{`id="library-live"`, `id="queue-state"`, `id="progress-live"`, `id="jobs-live"`} {
+		assert.Contains(t, live, there)
+	}
+	health := render(t, r, PageStatus, Status{Layout: layout, Poll: PollHealth, Health: &HealthPanel{}})
+	assert.Contains(t, health, `id="attention"`)
+	assert.Contains(t, health, `id="health-live"`)
+	for _, gone := range []string{`id="counts"`, `id="queue"`, `id="progress"`, `id="jobs"`, "Why documents failed"} {
+		assert.NotContains(t, health, gone)
+	}
+}
+
+// TestStatus_ProgressClosed: a closed queue's progress says why, as the
+// queue's state line does.
+func TestStatus_ProgressClosed(t *testing.T) {
+	r := newRenderer(t)
+	for reason, want := range map[string]string{"paused": "Paused", "outside_schedule": "Outside its schedule",
+		evilScript: "Closed"} {
+		st := Status{Layout: Layout{Title: "Status"}, Progress: &ProgressPanel{Reason: reason,
+			Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 2}}, ProgressWindow, false)}}
+		assert.Contains(t, render(t, r, PageStatus, st), "<p>2 jobs queued. "+want+": none start until the queue opens.</p>")
+	}
+}
+
+// TestDocumentJobs: what came of a document's jobs against its page's
+// baseline, and when its poller polls.
+func TestDocumentJobs(t *testing.T) {
+	at := time.Date(2026, 9, 29, 7, 0, 0, 0, time.UTC)
+	page := DocumentBaseline{Updated: at, Extraction: "e1"}
+	updated := DocumentBaseline{Updated: at.Add(time.Millisecond), Extraction: "e1"}
+	newText := DocumentBaseline{Updated: at.Add(time.Second), Extraction: "e2"}
+	fetching := []JobLine{{Kind: "fetch", Running: true, Attempts: 1}}
+	for _, tc := range []struct {
+		name string
+		jobs DocumentJobs
+		want DocumentOutcome
+	}{
+		{"unchanged", DocumentJobs{State: "fetched", Baseline: page, Current: page}, OutcomeNone},
+		{"working", DocumentJobs{State: "pending", Baseline: page, Current: updated, Jobs: fetching}, OutcomeNone},
+		{"a new text, still indexing", DocumentJobs{State: "fetched", Baseline: page, Current: newText,
+			Jobs: []JobLine{{Kind: "index"}}}, OutcomeTextChanged},
+		{"a first text", DocumentJobs{State: "fetched", Baseline: DocumentBaseline{Updated: at}, Current: newText},
+			OutcomeTextChanged},
+		{"failed", DocumentJobs{State: "failed", Baseline: page, Current: updated}, OutcomeFailed},
+		{"dead", DocumentJobs{State: "dead", Baseline: page, Current: updated}, OutcomeFailed},
+		{"updated", DocumentJobs{State: "fetched", Baseline: page, Current: updated}, OutcomeUpdated},
+		{"jobs unread", DocumentJobs{State: "fetched", Baseline: page, Current: updated,
+			Err: &PanelError{Message: "m"}}, OutcomeNone},
+	} {
+		assert.Equal(t, tc.want, tc.jobs.Outcome(), tc.name)
+	}
+
+	for _, tc := range []struct {
+		jobs  DocumentJobs
+		every bool
+	}{
+		{DocumentJobs{State: "fetched"}, false},
+		{DocumentJobs{State: "fetched", Jobs: fetching}, true},
+		{DocumentJobs{State: "pending"}, true},
+		{DocumentJobs{State: "failed"}, false},
+		{DocumentJobs{State: "fetched", Err: &PanelError{Message: "m"}}, true}, // a read that failed tries again
+	} {
+		p := tc.jobs.Poller()
+		assert.Equal(t, tc.every, p.Every > 0, "%+v", tc.jobs)
+		assert.Equal(t, []string{"doc-jobs", "doc-poll"}, p.Regions, "it lists itself")
+		assert.True(t, p.OnChange)
+	}
+	p := DocumentJobs{DocumentID: "d1", Baseline: page, State: "pending"}.Poller()
+	assert.Equal(t, documentPollHref("d1", page), p.Href, "it carries the page's baseline")
+	assert.Equal(t, "every 2s, curio:changed from:body", p.Trigger())
+	assert.Equal(t, "curio:changed from:body", DocumentJobs{State: "fetched"}.Poller().Trigger())
+
+	retry := JobLine{Kind: "fetch", Attempts: 2}
+	assert.True(t, retry.Retrying())
+	assert.Equal(t, 3, retry.Attempt(), "the attempt it waits to make")
+	running := JobLine{Kind: "fetch", Running: true, Attempts: 2}
+	assert.False(t, running.Retrying())
+	assert.Equal(t, 2, running.Attempt())
+	assert.False(t, JobLine{Kind: "fetch"}.Retrying())
+}
+
+// TestDocument_Actions: each state's buttons: Refetch, the primary one for
+// a failed document; for a dead link, Refetch anyway behind a confirm that
+// forces it; Reindex only with a text. At rest the status says how the
+// text was fetched.
+func TestDocument_Actions(t *testing.T) {
+	r := newRenderer(t)
+	at := time.Now().Add(-13 * time.Hour)
+	page := func(state string, ext *Extraction) *html.Node {
+		return parse(t, render(t, r, PageDocument, Document{Layout: Layout{Title: "d"},
+			Meta: DocumentMeta{ID: "d1", URL: "https://example.com/", State: state}, Extraction: ext,
+			Text: TextPanel{State: TextNotFetched}, Jobs: DocumentJobs{DocumentID: "d1", State: state}}))
+	}
+	ext := &Extraction{Fetcher: "native", Via: "readability", FetchedAt: at}
+	for _, state := range []string{"pending", "fetched", "failed"} {
+		doc := page(state, ext)
+		refetch := byID(doc, "refetch")
+		require.NotNil(t, refetch, state)
+		assert.Equal(t, "/v1/documents/d1/refetch", attrValue(refetch, "data-path"), state)
+		assert.Equal(t, state == "failed", strings.Contains(attrValue(refetch, "class"), "btn-primary"), state)
+		assert.Nil(t, byID(doc, "confirm-refetch"), state)
+		assert.Equal(t, "/v1/documents/d1/reindex", attrValue(byID(doc, "reindex"), "data-path"), state)
+	}
+	fetched := render(t, r, PageDocument, Document{Layout: Layout{Title: "d"},
+		Meta: DocumentMeta{ID: "d1", State: "fetched"}, Extraction: ext, Text: TextPanel{State: TextNotFetched}})
+	assert.Regexp(t, `<div class="doc-actions js-only">`, fetched)
+	assert.Regexp(t, `<span class="action-status" id="doc-status" role="status" aria-live="polite">Fetched <time[^>]*>13 h ago</time> by native via Readability</span>`, fetched)
+	assert.NotContains(t, fetched, "Phase 2")
+
+	dead := page("dead", nil)
+	assert.Nil(t, byID(dead, "refetch"))
+	anyway := byID(dead, "refetch-anyway")
+	require.NotNil(t, anyway)
+	assert.Equal(t, "confirm-refetch", attrValue(anyway, "popovertarget"))
+	assert.False(t, hasAttr(anyway, "data-method"), "it only opens the confirm")
+	confirm := byID(dead, "confirm-refetch")
+	require.NotNil(t, confirm)
+	assert.True(t, hasAttr(confirm, "popover"))
+	assert.Equal(t, "alertdialog", attrValue(confirm, "role"))
+	assert.Equal(t, "confirm-refetch-title", attrValue(confirm, "aria-labelledby"))
+	assert.Equal(t, "confirm-refetch-text", attrValue(confirm, "aria-describedby"))
+	cancel := byID(dead, "refetch-cancel")
+	assert.True(t, hasAttr(cancel, "autofocus"))
+	assert.Equal(t, "hide", attrValue(cancel, "popovertargetaction"))
+	assert.False(t, hasAttr(cancel, "data-method"))
+	forced := byID(dead, "refetch-forced")
+	assert.Equal(t, "/v1/documents/d1/refetch?force=1", attrValue(forced, "data-path"))
+	assert.Equal(t, "hide", attrValue(forced, "popovertargetaction"))
+	reindex := byID(dead, "reindex")
+	assert.Equal(t, "true", attrValue(reindex, "aria-disabled"), "nothing to reindex")
+	assert.NotEmpty(t, attrValue(reindex, "title"), "says why")
+	assert.False(t, hasAttr(reindex, "data-method"))
+	assert.Empty(t, textOf(byID(dead, "doc-status")), "no text, nothing to say at rest")
+}
+
+// TestDocument_JobLines: the jobs in flight by kind, whether they run or
+// wait, their attempt, a retry's time, why the queue holds them, and each
+// outcome's reload link.
+func TestDocument_JobLines(t *testing.T) {
+	r := newRenderer(t)
+	at := time.Now().Add(4 * time.Minute)
+	jobsOf := func(j DocumentJobs) string {
+		j.DocumentID, j.AttemptLimit = "d1", 5
+		out := render(t, r, PageDocument, Document{Layout: Layout{Title: "d"}, Poll: PollJobs, Jobs: j})
+		return regexp.MustCompile(`(?s)<div class="doc-jobs" id="doc-jobs">.*?</div>`).FindString(out)
+	}
+	assert.Contains(t, jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch"}}}), "<li>Fetch queued</li>")
+	assert.Contains(t, jobsOf(DocumentJobs{State: "fetched", Jobs: []JobLine{{Kind: "index", Running: true,
+		Attempts: 2}}}), "<li>Index running · attempt 2 of 5</li>")
+	assert.Regexp(t, `<li>Fetch queued · attempt 3 of 5, due <time[^>]*>in 3 min</time></li>`,
+		jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Attempts: 2, RunAfter: at}}}))
+	held := jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch"}}, Hold: "paused"})
+	assert.Contains(t, held, `<a id="doc-jobs-hold" href="/ui/status">The queue is closed: Paused</a>`)
+	assert.NotContains(t, jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Running: true}},
+		Hold: "paused"}), "closed", "a running job isn't held")
+
+	base := DocumentBaseline{Updated: at, Extraction: "e1"}
+	later := DocumentBaseline{Updated: at.Add(time.Second), Extraction: "e1"}
+	assert.Contains(t, jobsOf(DocumentJobs{State: "fetched", Baseline: base, Current: DocumentBaseline{Extraction: "e2"}}),
+		`The text changed: <a id="doc-reload" href="/ui/documents/d1">reload</a>`)
+	assert.Contains(t, jobsOf(DocumentJobs{State: "failed", Baseline: base, Current: later}),
+		`It failed: <a id="doc-reload" href="/ui/documents/d1">reload to see why</a>`)
+	assert.Contains(t, jobsOf(DocumentJobs{State: "fetched", Baseline: base, Current: later}),
+		`Updated: <a id="doc-reload" href="/ui/documents/d1">reload</a>`)
+	assert.Equal(t, `<div class="doc-jobs" id="doc-jobs"></div>`, jobsOf(DocumentJobs{State: "fetched", Baseline: base,
+		Current: base}), "nothing to say, nothing in it")
+}
+
+// TestRebuild: what came of the newest rebuild, reported once nothing is
+// in flight for a failure, and when its poller polls.
+func TestRebuild(t *testing.T) {
+	for _, tc := range []struct {
+		rebuild Rebuild
+		want    RebuildOutcome
+	}{
+		{Rebuild{}, RebuildNone},
+		{Rebuild{NewRun: "running", Running: true}, RebuildNone},
+		{Rebuild{NewRun: "done"}, RebuildReady},
+		{Rebuild{NewRun: "done", Queued: true}, RebuildReady},
+		{Rebuild{NewRun: "failed", RunError: "boom"}, RebuildFailed},
+		{Rebuild{NewRun: "failed", Queued: true}, RebuildNone},
+	} {
+		assert.Equal(t, tc.want, tc.rebuild.Outcome(), "%+v", tc.rebuild)
+	}
+	assert.Equal(t, ActionRebuild, Rebuild{}.Action().Kind)
+	for _, tc := range []struct {
+		rebuild Rebuild
+		every   bool
+	}{{Rebuild{}, false}, {Rebuild{Queued: true}, true}, {Rebuild{Running: true}, true},
+		{Rebuild{Err: &PanelError{Message: "m"}}, true}} { // a read that failed tries again
+		p := tc.rebuild.Poller()
+		assert.Equal(t, tc.every, p.Every > 0)
+		assert.Equal(t, []string{"rebuild-state", "rebuild-control", "rebuild-poll"}, p.Regions)
+	}
+	assert.Equal(t, "/ui/interests?poll=rebuild&run=r1", Rebuild{Shown: "r1"}.Poller().Href)
+}
+
+// TestInterests_Rebuild: the Rebuild button while insight is on, disabled
+// while a rebuild is in flight; the state of one; and, with insight off,
+// an empty page that says how to turn it on.
+func TestInterests_Rebuild(t *testing.T) {
+	r := newRenderer(t)
+	layout := Layout{Title: "Interests", Nav: NavInterests}
+	run := &InterestRun{Documents: 3}
+	page := func(b Rebuild) (string, *html.Node) {
+		out := render(t, r, PageInterests, Interests{Layout: layout, Run: run, Rebuild: b})
+		return out, parse(t, out)
+	}
+	out, doc := page(Rebuild{Enabled: true, Shown: "r1"})
+	rebuild := byID(doc, "rebuild")
+	require.NotNil(t, rebuild)
+	assert.Equal(t, "/v1/interests/rebuild", attrValue(rebuild, "data-path"))
+	assert.False(t, hasAttr(rebuild, "aria-disabled"))
+	assert.Contains(t, out, `<span class="action-status" id="rebuild-status" role="status" aria-live="polite"></span>`)
+	assert.Contains(t, out, `<span class="no-js muted">Rebuild them with <code>curio interests rebuild</code>.</span>`)
+	assert.Contains(t, out, `hx-get="/ui/interests?poll=rebuild&amp;run=r1" hx-trigger="curio:changed from:body"`)
+
+	out, doc = page(Rebuild{Enabled: true, Queued: true, Hold: "outside_schedule", Shown: "r1"})
+	assert.Equal(t, "true", attrValue(byID(doc, "rebuild"), "aria-disabled"))
+	assert.Contains(t, out, `<p>Rebuild queued · <a id="rebuild-hold" href="/ui/status">the queue is closed: Outside its schedule</a></p>`)
+	assert.Contains(t, out, `hx-trigger="every 2s, curio:changed from:body"`)
+	out, _ = page(Rebuild{Enabled: true, Running: true, StartedAt: time.Now().Add(-2 * time.Minute)})
+	assert.Regexp(t, `<p>Rebuilding · started <time[^>]*>2 min ago</time></p>`, out)
+	out, _ = page(Rebuild{Enabled: true, NewRun: "done"})
+	assert.Contains(t, out, `<p>New interests are ready: <a id="rebuild-reload" href="/ui/interests">reload</a></p>`)
+	out, _ = page(Rebuild{Enabled: true, NewRun: "failed", RunError: "cluster: <boom>"})
+	assert.Contains(t, out, `<p class="failed" title="cluster: &lt;boom&gt;">The rebuild failed: cluster: &lt;boom&gt;</p>`)
+
+	off := render(t, r, PageInterests, Interests{Layout: layout})
+	assert.Nil(t, byID(parse(t, off), "rebuild"))
+	assert.Contains(t, off, "set <code>insight.enabled: true</code> in config.yaml")
+	assert.NotContains(t, off, "curio interests rebuild")
+	assert.Contains(t, render(t, r, PageInterests, Interests{Layout: layout, Rebuild: Rebuild{Enabled: true}}),
+		"<code>curio interests rebuild</code> groups the library into them.")
+}
+
+// textOf is n's text.
+func textOf(n *html.Node) string {
+	var b strings.Builder
+	for d := range n.Descendants() {
+		if d.Type == html.TextNode {
+			b.WriteString(d.Data)
+		}
+	}
+	return b.String()
 }

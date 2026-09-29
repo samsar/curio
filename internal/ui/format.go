@@ -331,3 +331,68 @@ func coverageBar(documents, noise int) []BarSegment {
 // clustered is how many of a run's documents are in an interest: those
 // that aren't noise.
 func clustered(documents, noise int) int { return min(max(documents-noise, 0), max(documents, 0)) }
+
+// throttleLabel is a throttle's name on its button.
+func throttleLabel(t store.Throttle) string {
+	switch t {
+	case store.ThrottleNormal:
+		return "Normal"
+	case store.ThrottleGentle:
+		return "Gentle"
+	}
+	return string(t)
+}
+
+// gentleHint says what the gentle throttle holds each pool to, from its
+// caps.
+func gentleHint() string {
+	fetches, _ := store.ThrottleGentle.Cap(store.JobKindFetch)
+	indexes, _ := store.ThrottleGentle.Cap(store.JobKindIndex)
+	return "Gentle: at most " + count(fetches, "fetch", "fetches") + " and " + count(indexes, "index", "indexes") +
+		" at a time."
+}
+
+// queueReason is why a closed queue holds its jobs, for people: from the
+// gate's reasons, as GET /v1/queue reports them.
+func queueReason(reason string) string {
+	switch reason {
+	case "paused":
+		return "Paused"
+	case "outside_schedule":
+		return "Outside its schedule"
+	}
+	return "Closed"
+}
+
+// jobKindLabel is a job's kind for people: what its work is.
+func jobKindLabel(kind string) string {
+	switch store.JobKind(kind) {
+	case store.JobKindFetch:
+		return "Fetch"
+	case store.JobKindIndex:
+		return "Index"
+	case store.JobKindImport:
+		return "Import"
+	case store.JobKindCluster:
+		return "Rebuild"
+	case store.JobKindSummarize:
+		return "Summary"
+	}
+	return "Job"
+}
+
+// viaLabel is what served an extraction's text (its extraction_meta via)
+// for people; a value it doesn't know is shown as stored.
+func viaLabel(via string) string {
+	switch via {
+	case "readability":
+		return "Readability"
+	case "jina":
+		return "Jina Reader"
+	case "pdf-local":
+		return "local PDF extraction"
+	case "github-api":
+		return "GitHub's API"
+	}
+	return via
+}

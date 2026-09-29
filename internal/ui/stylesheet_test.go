@@ -173,6 +173,20 @@ func TestStylesheet(t *testing.T) {
 		assert.Contains(t, light, token, "a dark token with a light value")
 	}
 
+	// What needs JavaScript shows once actions.js marks the page, what
+	// stands in for it only until then, and [hidden] hides whatever sets
+	// display, as .btn does.
+	for selector, display := range map[string]string{":root:not([data-js]) .js-only": "none !important",
+		":root[data-js] .no-js": "none !important", "[hidden]": "none !important"} {
+		assert.Equal(t, display, declarations(ruleFor(t, rules, "", selector).body)["display"], selector)
+	}
+	assert.NotEmpty(t, declarations(ruleFor(t, rules, "", ".btn").body)["display"], "why [hidden] needs !important")
+	// The stale note shows only while the pollers go unanswered, and the
+	// live badge hides then.
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".stale-note").body)["display"])
+	assert.Equal(t, "flex", declarations(ruleFor(t, rules, "", ":root[data-stale] .stale-note").body)["display"])
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ":root[data-stale] .badge-live").body)["display"])
+
 	motion := ruleFor(t, rules, "@media (prefers-reduced-motion: reduce)", "*")
 	assert.Equal(t, "none !important", declarations(motion.body)["animation"])
 	assert.Equal(t, "none !important", declarations(motion.body)["transition"])
