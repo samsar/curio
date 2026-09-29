@@ -40,8 +40,9 @@ footer names the address the daemon listens on.
   query.
 - **Library**: every document, most recently updated first. Tabs choose
   the state (All, Fetched, Pending, Failed, Dead), each with its count
-  when the state is the only filter; with a type, host or folder chosen
-  too, the counts are left out, since they count the whole library.
+  when the state is the only filter; with a type, host, folder or cause
+  chosen too, the counts are left out, since they count the whole
+  library.
   Filters narrow it by type, host (`example.com`, exactly) and bookmark
   folder (the folder and the folders under it), and Apply keeps the tab
   chosen. Each row shows the title on one line, or where the page lives

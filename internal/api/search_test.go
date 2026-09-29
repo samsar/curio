@@ -129,7 +129,8 @@ func TestSearch_UnsupportedFieldsAreRejected(t *testing.T) {
 
 // TestSearch_FiltersValidated: a content_type or source outside its set is
 // a 400 naming the allowed values, refused before the query is embedded,
-// where it used to answer "nothing matches"; values in the set filter.
+// not an empty answer that reads as "nothing matches"; values in the set
+// filter.
 func TestSearch_FiltersValidated(t *testing.T) {
 	var embeds atomic.Int32
 	counting := embedFunc(func(context.Context, []string) ([][]float32, error) {

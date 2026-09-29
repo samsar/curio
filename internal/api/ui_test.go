@@ -272,8 +272,8 @@ func TestUI_StatusPanelsDegrade(t *testing.T) {
 }
 
 // TestUI_StatusAttention: what needs attention opens Status, before the
-// board: the drift, then a failing Jina Reader, whose copy never counts a
-// refusal as a failure.
+// board: the drift, then a failing Jina Reader, whose copy never calls a
+// refusal a failure.
 func TestUI_StatusAttention(t *testing.T) {
 	now := time.Now()
 	srv := apitest.Start(t, func(d *api.Deps) {
@@ -298,6 +298,41 @@ func TestUI_StatusAttention(t *testing.T) {
 	assert.Contains(t, body, "The last failure was challenged, <time")
 	assert.NotContains(t, body, "refus")
 	assert.NotContains(t, body, "Ollama isn't ready", "the apitest embedder has no Ollama to ping")
+}
+
+// TestUI_StatusDegraded: a degraded Jina Reader's callout counts its calls
+// in the window its health reports, as its health does: an ok, judged or
+// refused call is a healthy answer, and each other class is a failure.
+func TestUI_StatusDegraded(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		window time.Duration
+		recent map[fetcher.CallClass]int
+		want   string
+	}{
+		{"refusals are answers", 15 * time.Minute, map[fetcher.CallClass]int{fetcher.CallOK: 10, fetcher.CallJudged: 3,
+			fetcher.CallRefused: 5, fetcher.CallRateLimited: 4, fetcher.CallNetwork: 2},
+			"<p>6 of its 24 calls in the last 15m failed."},
+		{"every failure class", 30 * time.Minute, map[fetcher.CallClass]int{fetcher.CallRefused: 7,
+			fetcher.CallChallenged: 1, fetcher.CallForbidden: 1, fetcher.CallAuth: 1, fetcher.CallServerError: 1},
+			"<p>4 of its 11 calls in the last 30m failed."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			srv := apitest.Start(t, func(d *api.Deps) {
+				d.Upstreams = func() []fetcher.UpstreamHealth {
+					return []fetcher.UpstreamHealth{{Name: "jina", Enabled: true, State: fetcher.UpstreamDegraded,
+						LastSuccess: now.Add(-time.Minute), LastFailure: now.Add(-2 * time.Minute),
+						LastFailureClass: fetcher.CallNetwork, Window: tc.window, Recent: tc.recent}}
+				}
+			})
+			body := getPage(t, srv, "/ui/status", http.StatusOK)
+			degraded := strings.Index(body, `<p class="callout-title">Jina Reader is degraded</p>`)
+			require.Positive(t, degraded)
+			assert.Less(t, degraded, strings.Index(body, `<div class="board">`), "before the board")
+			assert.Contains(t, body, tc.want)
+		})
+	}
 }
 
 // TestUI_StatusFailures: the causes with the most failed and dead
@@ -584,9 +619,13 @@ func TestUI_SearchHomeDegrades(t *testing.T) {
 // TestUI_SearchType: a type limits the search, and the page keeps it: the
 // chosen tab is marked, and the form carries it for the next search. A
 // type the page doesn't offer still limits it; one that isn't a type is a
-// 400 page that starts over from the home.
+// 400 page that starts over from the home, and no search runs.
 func TestUI_SearchType(t *testing.T) {
-	srv := apitest.Start(t)
+	embeds, mu := 0, new(sync.Mutex)
+	srv := apitest.Start(t, func(d *api.Deps) {
+		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &embeds, mu: mu}
+		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+	})
 	article := titled(t, srv, "https://example.com/article", "Kafka article", store.DocStateFetched)
 	srv.AddContent(t, article, "kafka partitions explained")
 	video := titled(t, srv, "https://example.com/video", "Kafka video", store.DocStateFetched)
@@ -617,12 +656,19 @@ func TestUI_SearchType(t *testing.T) {
 	assert.Contains(t, home, `<div class="landing">`)
 	assert.Contains(t, home, `<a href="/ui/?content_type=pdf" aria-current="page">PDFs</a>`)
 
+	mu.Lock()
+	searched := embeds
+	mu.Unlock()
+	require.Positive(t, searched, "the searches above embed their query")
 	for _, path := range []string{"/ui/?q=kafka&content_type=bogus", "/ui/?content_type=bogus"} {
 		body := getPage(t, srv, path, http.StatusBadRequest)
 		assert.Contains(t, body, `<div class="big-code">400</div>`+"\n<h1>bad request</h1>", path)
 		assert.Contains(t, body, `must be one of: article, repo, video, pdf, thread, unknown`, path)
 		assert.Contains(t, body, `<a class="btn btn-primary" href="/ui/">Start over</a>`, path)
 	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, searched, embeds, "a type that isn't one runs no search")
 }
 
 // moreRE finds the Library's next-page link.
@@ -842,6 +888,26 @@ func TestUI_LibraryPages(t *testing.T) {
 	assert.Contains(t, form, `<input type="hidden" name="cause" value="anti_bot">`, "filtering again keeps the cause")
 	body := getPage(t, srv, "/ui/library?cause=bogus", http.StatusBadRequest)
 	assert.Contains(t, body, `<div class="big-code">400</div>`+"\n<h1>bad request</h1>")
+}
+
+// TestUI_LibraryShown: shown counts the rows a page appends to, and
+// anything but a count up to a million counts none.
+func TestUI_LibraryShown(t *testing.T) {
+	srv := apitest.Start(t)
+	srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	for shown, want := range map[string]string{
+		"":        "Showing 1 of 1 document,",
+		"0":       "Showing 1 of 1 document,",
+		"-1":      "Showing 1 of 1 document,",
+		"two":     "Showing 1 of 1 document,",
+		"1.5":     "Showing 1 of 1 document,",
+		"1000001": "Showing 1 of 1 document,",
+		"2":       "Showing 3 documents,", // more than there are: the list moved on
+		"1000000": "Showing 1,000,001 documents,",
+	} {
+		body := getPage(t, srv, "/ui/library?state=fetched&shown="+shown, http.StatusOK)
+		assert.Contains(t, body, `<p class="pager-summary mt-4" id="showing">`+want, "shown=%s", shown)
+	}
 }
 
 // TestUI_LibraryCountsDegrade: the Library does without counts it can't

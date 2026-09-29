@@ -31,6 +31,15 @@ func TestLinks(t *testing.T) {
 		"folder": {"/100% Reading/#1"}, "cause": {"anti_bot"}, "cursor": {"cursor+/="}, "limit": {"7"}}, u.Query(),
 		"the next page keeps every filter")
 
+	for href, want := range map[string]url.Values{
+		stateHref("a&b=c #1"): {"state": {"a&b=c #1"}},
+		causeHref("a&b=c #1"): {"cause": {"a&b=c #1"}},
+	} {
+		u := parseHref(t, href)
+		assert.Equal(t, "/ui/library", u.Path, href)
+		assert.Equal(t, want, u.Query(), "a code the page doesn't know round-trips: %s", href)
+	}
+
 	more := parseHref(t, libraryMoreHref(f, "cursor+/=", 150))
 	assert.Equal(t, "/ui/library", more.Path)
 	want := u.Query()
