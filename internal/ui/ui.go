@@ -123,6 +123,7 @@ func funcs(assets assetSet) template.FuncMap {
 		"stateTone":          stateTone,
 		"typeIcon":           typeIcon,
 		"num":                num,
+		"count":              count,
 		"pct":                pct,
 		"stateBar":           stateBar,
 		"coverageBar":        coverageBar,

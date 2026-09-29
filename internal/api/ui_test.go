@@ -186,7 +186,7 @@ func TestUI_Overview(t *testing.T) {
 	assert.NotContains(t, body, "style=")
 	assert.Contains(t, body, `<span class="badge queue-open">open</span>`)
 	assert.Contains(t, body, `<td>fetch</td><td class="num">0 of 16</td><td class="num">1</td>`, "the new page's fetch job")
-	assert.Contains(t, body, "1 jobs queued, and none finished in the last 10m.")
+	assert.Contains(t, body, "1 job queued, and none finished in the last 10m.")
 	assert.Contains(t, body, `qwen3-embedding:0.6b<span class="sub">1024 dimensions</span>`)
 	assert.Contains(t, body, `<a class="doc-title untitled" href="/ui/documents/`+fetched.ID+
 		`" title="https://example.com/fetched">example.com/fetched</a>`, "a bookmark links to its document")
@@ -197,7 +197,7 @@ func TestUI_Overview(t *testing.T) {
 	require.NoError(t, err)
 	body = getPage(t, srv, "/ui/", http.StatusOK)
 	assert.Contains(t, body, `<span class="badge queue-closed">closed</span><span class="why">paused`)
-	assert.Contains(t, body, "1 jobs queued. The queue is closed (paused), so none start until it opens.")
+	assert.Contains(t, body, "1 job queued. The queue is closed (paused), so none start until it opens.")
 }
 
 // failingCount fails the bookmark count, which the Overview's counts read.
@@ -243,6 +243,8 @@ func TestUI_Search(t *testing.T) {
 	srv := apitest.Start(t)
 	doc := titled(t, srv, "https://example.com/kafka", "Kafka partitions", store.DocStateFetched)
 	srv.AddContent(t, doc, "kafka partitions and <script>alert(1)</script> consumer groups")
+	_, err := srv.DB.Exec(`UPDATE documents SET content_type = 'article' WHERE id = ?`, doc.ID)
+	require.NoError(t, err)
 
 	form := getPage(t, srv, "/ui/search", http.StatusOK)
 	assert.Contains(t, form, `hx-get="/ui/search" hx-trigger="input changed delay:400ms, search" hx-sync="this:replace"`)
@@ -260,6 +262,8 @@ func TestUI_Search(t *testing.T) {
 	assert.Contains(t, body, `<span class="path" title="https://example.com/kafka"><b>example.com</b> › kafka</span>`)
 	assert.NotContains(t, body, `rel="noopener noreferrer"`, "results link to their document's page, not out")
 	assert.Contains(t, body, "<mark>kafka</mark>")
+	assert.Contains(t, body, `<div class="result-foot"><span class="tag">article</span>`, "the hit's type")
+	assert.Contains(t, body, "<strong>1 document</strong>")
 	assert.Contains(t, body, "&lt;script&gt;alert(1)&lt;/script&gt;", "the chunk's markup is text")
 	assert.Regexp(t, `bm25 \d+\.\d{3}`, body)
 	assert.Regexp(t, `vector \d+\.\d{3}`, body)
@@ -680,7 +684,9 @@ func TestUI_Interests(t *testing.T) {
 
 	a := titled(t, srv, "https://example.com/a", "Kafka partitions", store.DocStateFetched)
 	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
-	interest := srv.AddInterest(t, "Stream <processing>", a, b)
+	c := srv.AddDocument(t, "https://example.com/c", store.DocStateFetched)
+	d := srv.AddDocument(t, "https://example.com/d", store.DocStateFetched)
+	interest := srv.AddInterest(t, "Stream <processing>", a, b, c, d)
 	_, err := srv.DB.Exec(`UPDATE clusters SET size = 150 WHERE id = ?`, interest.ID)
 	require.NoError(t, err)
 
@@ -689,11 +695,13 @@ func TestUI_Interests(t *testing.T) {
 	assert.Contains(t, list, "<b>150</b> documents")
 	assert.Contains(t, list, `<meter class="meter" min="0" max="1" value="0.90">0.90</meter>0.90</span>`, "cohesion")
 	assert.Contains(t, list, `<a href="/ui/documents/`+a.ID+`" title="Kafka partitions">Kafka partitions</a>`)
-	assert.Contains(t, list, "1 topics curio found in your library, largest first.</p>", "the run's count, all shown")
+	assert.Contains(t, list, "1 topic curio found in your library, largest first.</p>", "the run's count, all shown")
+	assert.Contains(t, list, `title="https://example.com/c">example.com/c</a>`, "a card lists 3 members")
+	assert.NotContains(t, list, "example.com/d", "and no more")
 
 	one := getPage(t, srv, "/ui/interests/"+interest.ID, http.StatusOK)
 	assert.Contains(t, one, "<h1>Stream &lt;processing&gt;</h1>")
-	assert.Contains(t, one, "showing 2 of 150")
+	assert.Contains(t, one, "showing 4 of 150")
 	assert.Contains(t, one, `<a class="doc-title untitled" href="/ui/documents/`+b.ID+
 		`" title="https://example.com/b">example.com/b</a>`)
 	assert.Contains(t, one, `<td class="num muted">2</td>`, "ranked")
@@ -703,6 +711,18 @@ func TestUI_Interests(t *testing.T) {
 	_, err = srv.DB.Exec(`UPDATE clusters SET tenant_id = 'other' WHERE id = ?`, interest.ID)
 	require.NoError(t, err)
 	getPage(t, srv, "/ui/interests/"+interest.ID, http.StatusNotFound)
+}
+
+// TestUI_InterestsEmptyRun: a run that grouped nothing says so, rather
+// than counting zero topics "largest first".
+func TestUI_InterestsEmptyRun(t *testing.T) {
+	srv := apitest.Start(t)
+	srv.AddEmptyClusterRun(t, 5)
+
+	page := getPage(t, srv, "/ui/interests", http.StatusOK)
+	assert.Contains(t, page, `<p class="lede">The last clustering run found no topics in your library.</p>`)
+	assert.Contains(t, page, "<h2>No interests in this run</h2>")
+	assert.NotContains(t, page, "largest first")
 }
 
 // jobsPause pauses the queue.

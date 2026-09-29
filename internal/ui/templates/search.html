@@ -31,14 +31,14 @@ text/template keeps a block's default over an empty define.
 <div class="callout-body">{{range .Warnings}}<p>{{.}}</p>{{end}}</div>
 </div>{{end}}
 {{with .Hits}}
-<div class="results-head"><span><strong>{{num (len .)}} documents</strong> · {{$.Results.TookMS}} ms</span></div>
+<div class="results-head"><span><strong>{{count (len .) "document" "documents"}}</strong> · {{$.Results.TookMS}} ms</span></div>
 <ol class="results">
 {{range $hit := .}}<li class="result">
 <div class="result-where"><span class="fav">{{template "icon" (typeIcon .ContentType)}}</span><span class="path" title="{{.URL}}">{{with host .URL}}<b>{{.}}</b>{{with urlTrail $hit.URL}} › {{.}}{{end}}{{else}}{{.URL}}{{end}}</span></div>
 <h2 class="result-title"><a href="{{documentHref .DocumentID}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</a></h2>
 {{range .ShownMatches}}{{template "match" .}}{{end}}
 <div class="result-foot">{{with .ContentType}}<span class="tag">{{.}}</span>{{end}}<span class="mono muted">score {{printf "%.4f" .Score}}</span>
-{{- with .MoreMatches}}<details><summary>{{len .}} more {{if eq (len .) 1}}passage{{else}}passages{{end}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
+{{- with .MoreMatches}}<details><summary>{{count (len .) "more passage" "more passages"}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
 </li>
 {{end}}</ol>
 {{else}}<div class="card"><div class="empty">

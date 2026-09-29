@@ -74,7 +74,7 @@ window), and the footer names the address the daemon listens on.
   no run yet, `curio interests rebuild` makes one.
 
 Lists show times relative to now ("13 min ago"), with the exact time on
-hover; a document's page shows them in full. Anything a saved page
+hover; a document's page shows its own dates in full. Anything a saved page
 brought with it, a long title, address or error, takes one line in a
 list, cut short, with the whole of it on hover.
 

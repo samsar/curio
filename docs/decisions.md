@@ -7396,7 +7396,8 @@ are native `<meter>`s, a migration's progress a `<progress>`.
 
 **Times.** Lists show relative times ("13 min ago", "in 3 h", a date past
 a week) in `<time datetime>`, RFC 3339 in UTC, with the exact
-daemon-local time in `title`. A document's page shows them in full. A
+daemon-local time in `title`. A document's page shows its own dates in
+full; its bookmarks, a list, are relative. A
 published date is a day, stored as its midnight UTC (347 of the author's
 2,048 are), so it is formatted in UTC (`day`): on the daemon's clock west
 of UTC, 2014-03-14 read as "2014-03-13 20:00".

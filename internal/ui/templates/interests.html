@@ -1,7 +1,7 @@
 {{define "content" -}}
 <div class="page-head"><div class="titles">
 <h1>Interests</h1>
-{{with .Run}}<p class="lede">{{num .Interests}} topics curio found in your library, largest first{{if lt (len $.Interests) .Interests}}; these are the {{len $.Interests}} largest{{end}}.</p>
+{{with .Run}}<p class="lede">{{if .Interests}}{{count .Interests "topic" "topics"}} curio found in your library, largest first{{if lt (len $.Interests) .Interests}}; these are the {{len $.Interests}} largest{{end}}.{{else}}The last clustering run found no topics in your library.{{end}}</p>
 {{else}}<p class="lede">Topics curio finds in your library, by grouping pages alike.</p>{{end}}
 </div></div>
 {{with .Run}}

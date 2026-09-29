@@ -10,7 +10,7 @@ the search page, since an empty define wouldn't replace the block).
 <div class="center-page"><div class="card center-card">
 <div class="logo">{{template "logo"}}</div>
 <h1>curio is starting</h1>
-{{if .Migrating}}<p>Migrating the database: {{.Applied}} of {{.Total}} migrations applied.</p>
+{{if .Migrating}}<p>Migrating the database: {{.Applied}} of {{count .Total "migration" "migrations"}} applied.</p>
 <progress class="progress" max="{{.Total}}" value="{{.Applied}}">{{.Applied}} of {{.Total}}</progress>
 {{else}}<p>Starting up: {{.Phase}}.</p>{{end}}
 <p class="meta">This page reloads itself every two seconds until curio is ready.</p>

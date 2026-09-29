@@ -75,7 +75,7 @@
 </ul>
 {{with .Drift}}<div class="callout callout-warn mt-4" role="status">{{template "icon" "alert"}}
 <p class="callout-title">The embeddings drifted</p>
-<div class="callout-body"><p>What makes them changed since the library was indexed:</p>
+<div class="callout-body"><p>What changed since the library was indexed:</p>
 <ul>{{range .Changes}}<li>{{.What}}: {{.Recorded}} → {{.Current}}</li>{{end}}</ul>
 <p>Run <code>{{.Fix}}</code>.</p></div>
 </div>{{end}}
@@ -88,9 +88,9 @@
 <div class="card-body">
 {{with .Progress.Err}}{{template "panel-error" .}}{{else}}{{with .Progress.Progress}}
 {{if eq .State "idle"}}<p>Nothing queued.</p>
-{{else if eq .State "closed"}}<p>{{num .Outstanding}} jobs queued. The queue is closed{{with $.Queue.Reason}} ({{.}}){{end}}, so none start until it opens.</p>
-{{else if eq .State "stalled"}}<p>{{num .Outstanding}} jobs queued, and none finished in the last {{duration .Window}}.</p>
-{{else}}<div class="stat"><span class="label">{{num .Outstanding}} jobs left</span><span class="value">≈ {{duration .ETA}}</span><span class="hint">An estimate at the pace of the last {{duration .Window}}: {{num .Finished}} jobs finished, {{printf "%.1f" .PerMinute}} a minute.</span></div>
+{{else if eq .State "closed"}}<p>{{count .Outstanding "job" "jobs"}} queued. The queue is closed{{with $.Queue.Reason}} ({{.}}){{end}}, so none start until it opens.</p>
+{{else if eq .State "stalled"}}<p>{{count .Outstanding "job" "jobs"}} queued, and none finished in the last {{duration .Window}}.</p>
+{{else}}<div class="stat"><span class="label">{{count .Outstanding "job" "jobs"}} left</span><span class="value">≈ {{duration .ETA}}</span><span class="hint">An estimate at the pace of the last {{duration .Window}}: {{count .Finished "job" "jobs"}} finished, {{printf "%.1f" .PerMinute}} a minute.</span></div>
 {{end}}
 {{end}}{{end}}
 </div>

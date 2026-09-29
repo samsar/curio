@@ -27,10 +27,12 @@ func relTime(t, now time.Time) string {
 	if t.IsZero() {
 		return "never"
 	}
+	// Sub saturates past about 292 years, and negating the saturated
+	// minimum stays negative, so the future is measured from now.
+	future := t.After(now)
 	d := now.Sub(t)
-	future := d < 0
 	if future {
-		d = -d
+		d = t.Sub(now)
 	}
 	var n int
 	var unit string
@@ -208,6 +210,15 @@ func num(n int) string {
 		b.WriteByte(digits[i])
 	}
 	return b.String()
+}
+
+// count is n, grouped as num groups it, and the noun for it: one for 1,
+// many for any other n ("1 topic", "2,041 topics", "0 jobs").
+func count(n int, one, many string) string {
+	if n == 1 {
+		return num(n) + " " + one
+	}
+	return num(n) + " " + many
 }
 
 // pct is n's share of total as a whole percent, rounded, but never a

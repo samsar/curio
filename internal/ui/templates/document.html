@@ -5,7 +5,7 @@
 <h1>{{or .Title (shortURL .URL)}}</h1>
 <p class="doc-url">{{template "icon" "external"}}{{with outbound .URL}}<a href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{else}}<span class="truncate">{{.URL}}</span>{{end}}</p>
 <div class="meta-row">{{template "state-badge" .State}}{{with .ContentType}}<span class="tag">{{template "icon" (typeIcon .)}}{{.}}</span>{{end}}
-{{- with .WordCount}}<span class="text">{{num .}} words</span>{{end}}
+{{- with .WordCount}}<span class="text">{{count . "word" "words"}}</span>{{end}}
 {{- with .Author}}<span class="sep">·</span><span class="text">by {{.}}</span>{{end}}
 {{- if not .PublishedAt.IsZero}}<span class="sep">·</span><span class="text">published {{day .PublishedAt}}</span>{{end}}
 {{- with .Language}}<span class="sep">·</span><span class="text">{{.}}</span>{{end}}</div>

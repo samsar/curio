@@ -34,6 +34,13 @@ func TestRelTime(t *testing.T) {
 	assert.Equal(t, now.Add(-week).Local().Format("Jan 2, 2006"), relTime(now.Add(-week), now), "a week ago: its date")
 	assert.Equal(t, now.Add(week).Local().Format("Jan 2, 2006"), relTime(now.Add(week), now), "a week on: its date")
 	assert.Equal(t, "never", relTime(time.Time{}, now))
+
+	// Past about 292 years Sub saturates; a corrupt imported date that far
+	// out is still a date, never "just now".
+	for _, far := range []time.Time{time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC), time.Unix(99999999999, 0),
+		time.Date(1, 1, 2, 0, 0, 0, 0, time.UTC)} {
+		assert.Equal(t, far.Local().Format("Jan 2, 2006"), relTime(far, now), far)
+	}
 }
 
 func TestTimeAttributes(t *testing.T) {
@@ -141,6 +148,12 @@ func TestShortError(t *testing.T) {
 	words := shortError(strings.Repeat("stderr line ", 10_000))
 	assert.LessOrEqual(t, utf8.RuneCountInString(words), maxShortErrorRunes+1)
 	assert.True(t, strings.HasSuffix(words, "line…"), "cut at a word")
+
+	// A long URL early on: the cut falls inside it rather than back at the
+	// word before it, which would leave only "Get…".
+	url := "https://example.com/" + strings.Repeat("a", 400)
+	got := shortError(`fetch failed: native: fetch: Get "` + url + `": context deadline exceeded`)
+	assert.Equal(t, `Get "`+url[:maxShortErrorRunes-len(`Get "`)]+"…", got)
 }
 
 // TestFetcherNames: shortError drops the prefix each fetcher's errors
@@ -178,6 +191,13 @@ func TestNum(t *testing.T) {
 	} {
 		assert.Equal(t, want, num(n), n)
 	}
+}
+
+func TestCount(t *testing.T) {
+	assert.Equal(t, "0 topics", count(0, "topic", "topics"))
+	assert.Equal(t, "1 topic", count(1, "topic", "topics"))
+	assert.Equal(t, "2 topics", count(2, "topic", "topics"))
+	assert.Equal(t, "2,041 more passages", count(2041, "more passage", "more passages"))
 }
 
 func TestPct(t *testing.T) {
