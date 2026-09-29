@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
@@ -22,10 +23,10 @@ import (
 // the API, so a typo in an Action's method, path, query or body fails here
 // rather than when someone clicks: over pages in each state, every control
 // with a data-method asks for a route the router serves and the spec
-// documents, with the query it takes, and sends a body, built as
-// actions.js builds it, that the route's request decodes strictly and
-// accepts. Its status is on the page, and announces. Every kind of Action
-// appears on some page.
+// documents, with a query the route takes and its handler accepts, and
+// sends a body, built as actions.js builds it, that the route's request
+// decodes strictly and accepts. Its status is on the page, and announces.
+// Every kind of Action appears on some page.
 func TestDashboard_ActionsMatchTheAPI(t *testing.T) {
 	s := newTestServer(t, withSearch)
 	router, err := newRouter(s.deps, testOrigin(t), testDashboard(t, pagesOn))
@@ -54,6 +55,7 @@ func TestDashboard_ActionsMatchTheAPI(t *testing.T) {
 	for _, doc := range []*store.Document{fetched, failed, dead, pending} {
 		get("/ui/documents/" + doc.ID)
 	}
+	get("/ui/failures")
 	s.seedInterest(t, "local", "Kafka", fetched)
 	get("/ui/interests")
 
@@ -78,9 +80,20 @@ func TestDashboard_ActionsMatchTheAPI(t *testing.T) {
 }
 
 // actionQueries are the query parameters each route's actions may carry,
-// and their values.
-var actionQueries = map[string]url.Values{
+// and the values each may take, one at a time.
+var actionQueries = map[string]map[string][]string{
 	"POST /v1/documents/{id}/refetch": {"force": {"1"}},
+	"POST /v1/documents/refetch-all":  {"cause": failureCauseNames(), "state": {string(store.DocStateDead)}},
+}
+
+// failureCauseNames are the causes a refetch by cause may name.
+func failureCauseNames() []string {
+	causes := store.FailureCauses()
+	names := make([]string, len(causes))
+	for i, c := range causes {
+		names[i] = string(c)
+	}
+	return names
 }
 
 // checkAction checks control, an element of page with a data-method,
@@ -97,7 +110,14 @@ func checkAction(t *testing.T, index chi.Routes, ops map[string]*openapi3.Operat
 	op := method + " " + pattern
 	assert.Contains(t, ops, op, "the spec documents it")
 	for key, values := range target.Query() {
-		assert.Equal(t, actionQueries[op][key], values, "%s takes %s", op, key)
+		allowed, ok := actionQueries[op][key]
+		require.True(t, ok, "%s takes no %s", op, key)
+		require.Len(t, values, 1, "%s: one %s", op, key)
+		assert.Contains(t, allowed, values[0], "%s: %s", op, key)
+	}
+	if op == "POST /v1/documents/refetch-all" {
+		_, _, err := refetchAllFilter(httptest.NewRequest(method, target.String(), nil))
+		assert.NoError(t, err, "%s: the handler takes %s", op, target)
 	}
 
 	for _, body := range controlBodies(t, control) {

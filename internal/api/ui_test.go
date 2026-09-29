@@ -229,7 +229,8 @@ func TestUI_Status(t *testing.T) {
 	assert.Contains(t, body, `qwen3-embedding:0.6b<span class="sub">1024 dimensions</span>`)
 	assert.NotContains(t, body, "Recently saved")
 	assert.NotContains(t, body, `class="callout`, "a healthy daemon needs no attention")
-	assert.Contains(t, body, `<a class="more" href="/ui/library?state=failed">Failed documents →</a>`)
+	assert.Contains(t, body, `<a class="more" href="/ui/failures">All failures →</a>`,
+		"the Failures tab, which counts the dead links the card counts too")
 
 	// Paused: the queue and the progress say why nothing starts, and the
 	// button resumes.
@@ -355,8 +356,9 @@ func TestUI_StatusDegraded(t *testing.T) {
 }
 
 // TestUI_StatusFailures: the causes with the most failed and dead
-// documents, most first, each linking to the Library of them, with a bar
-// scaled to the most; the card shows five.
+// documents, most first, each leading to its card on the Failures tab,
+// with a bar scaled to the most; the card shows five, and leads to the
+// tab.
 func TestUI_StatusFailures(t *testing.T) {
 	srv := apitest.Start(t)
 	for i := range 3 {
@@ -366,11 +368,11 @@ func TestUI_StatusFailures(t *testing.T) {
 
 	body := getPage(t, srv, "/ui/status", http.StatusOK)
 	assert.Contains(t, body, `<h2 id="failures">`)
-	assert.Contains(t, body, `<a class="more" href="/ui/library?state=failed">Failed documents →</a>`)
-	blocked := `<li><a class="label" href="/ui/library?cause=anti_bot" title="Blocked by bot protection">Blocked by bot protection</a>` +
+	assert.Contains(t, body, `<a class="more" href="/ui/failures">All failures →</a>`)
+	blocked := `<li><a class="label" href="/ui/failures#cause-anti_bot" title="Blocked by bot protection">Blocked by bot protection</a>` +
 		`<svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>` +
 		`<rect class="fill-danger" x="0.000" y="0" width="100.000" height="10"/></svg><span class="n">3</span></li>`
-	dead := `<li><a class="label" href="/ui/library?cause=dead_link" title="Dead link">Dead link</a>` +
+	dead := `<li><a class="label" href="/ui/failures#cause-dead_link" title="Dead link">Dead link</a>` +
 		`<svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>` +
 		`<rect class="fill-neutral" x="0.000" y="0" width="33.333" height="10"/></svg><span class="n">1</span></li>`
 	assert.Contains(t, body, blocked)
@@ -384,10 +386,10 @@ func TestUI_StatusFailures(t *testing.T) {
 		}
 	}
 	body = getPage(t, srv, "/ui/status", http.StatusOK)
-	assert.Equal(t, 5, strings.Count(body, `<a class="label" href="/ui/library?cause=`), "five causes")
+	assert.Equal(t, 5, strings.Count(body, `<a class="label" href="/ui/failures#cause-`), "five causes")
 	assert.Contains(t, body, `<rect class="fill-danger" x="0.000" y="0" width="100.000" height="10"/></svg><span class="n">6</span>`,
 		"scaled to the most")
-	assert.NotContains(t, body, "cause=dead_link", "the sixth isn't drawn")
+	assert.NotContains(t, body, "cause-dead_link", "the sixth isn't drawn")
 }
 
 // failingEmbedder can't embed a query, as when Ollama is down.
@@ -752,7 +754,9 @@ func TestUI_Library(t *testing.T) {
 	assert.NotContains(t, pdf, other.ID)
 	assert.Contains(t, pdf, `<option selected>pdf</option>`)
 	assert.Contains(t, pdf, `value="arxiv.example"`)
-	assert.NotContains(t, pdf, `class="count"`, "the whole library's counts don't count a filtered list")
+	assert.NotContains(t, stateTabsOf(t, pdf), `class="count"`, "the whole library's counts don't count a filtered list")
+	assert.Contains(t, pdf, `<a id="subnav-failures" href="/ui/failures">Failures <span class="count">1</span></a>`,
+		"the Failures tab counts the whole library's failures, whatever the filters")
 	assert.Contains(t, pdf, `<a href="/ui/library?content_type=pdf&amp;host=arxiv.example&amp;state=failed">Failed</a>`,
 		"a tab keeps the other filters")
 	assert.Contains(t, pdf, `>Showing 2 documents, most recently updated first.</p>`)
@@ -863,7 +867,8 @@ func TestUI_LibrarySaved(t *testing.T) {
 	onHost := getPage(t, srv, "/ui/library?order=saved&host=blocked.example&cause=anti_bot", http.StatusOK)
 	assertLibraryTable(t, onHost, 1)
 	assert.Contains(t, onHost, `>Showing 1 save.</p>`)
-	assert.NotContains(t, onHost, `class="count"`)
+	assert.NotContains(t, stateTabsOf(t, onHost), `class="count"`)
+	assert.Contains(t, onHost, `<a id="subnav-failures" href="/ui/failures">Failures <span class="count">1</span></a>`)
 	assert.Contains(t, onHost, `<input type="hidden" name="cause" value="anti_bot">`)
 	inFolder := getPage(t, srv, "/ui/library?order=saved&folder=/Research&content_type=pdf", http.StatusOK)
 	assertLibraryTable(t, inFolder, 1)
@@ -932,6 +937,22 @@ func assertLibraryTable(t *testing.T, page string, rows int) {
 		}
 		assert.Equal(t, []string{"", "state-cell", "c-type", "c-when when"}, cells)
 	}
+}
+
+// stateTabsOf is the markup of the Library's state tabs in page.
+func stateTabsOf(t *testing.T, page string) string {
+	t.Helper()
+	doc, err := xhtml.Parse(strings.NewReader(page))
+	require.NoError(t, err)
+	for n := range doc.Descendants() {
+		if n.Type == xhtml.ElementNode && attr(n, "role") == "group" && attr(n, "aria-label") == "State" {
+			var b strings.Builder
+			require.NoError(t, xhtml.Render(&b, n))
+			return b.String()
+		}
+	}
+	require.Fail(t, "no state tabs")
+	return ""
 }
 
 func attr(n *xhtml.Node, key string) string {
@@ -1099,6 +1120,132 @@ func TestUI_LibraryCountsDegrade(t *testing.T) {
 	errs := rec.errors()
 	require.Len(t, errs, 1)
 	assert.Equal(t, p.header.Get("X-Request-Id"), errs[0]["request_id"])
+	assert.ErrorIs(t, errs[0]["err"].(error), errInjected)
+}
+
+// TestUI_LibraryCause: a cause filter, in either order, is a line under the
+// toolbar naming it by its label and code, whose Clear keeps every other
+// filter and the order; the page it leads to has no line.
+func TestUI_LibraryCause(t *testing.T) {
+	srv := apitest.Start(t)
+	blocked := srv.AddFailedDocument(t, "https://blocked.example/a", store.FailureCauseAntiBot)
+	srv.AddFailedDocument(t, "https://other.example/a", store.FailureCauseAntiBot)
+	save(t, srv, store.Bookmark{URL: blocked.URL, Source: store.SourceChrome})
+	for query, cleared := range map[string]string{
+		"cause=anti_bot":                              "/ui/library",
+		"cause=anti_bot&host=blocked.example":         "/ui/library?host=blocked.example",
+		"order=saved&cause=anti_bot":                  "/ui/library?order=saved",
+		"order=saved&cause=anti_bot&state=failed":     "/ui/library?order=saved&state=failed",
+		"cause=anti_bot&host=blocked.example&limit=7": "/ui/library?host=blocked.example&limit=7",
+	} {
+		body := getPage(t, srv, "/ui/library?"+query, http.StatusOK)
+		line := regexp.MustCompile(`<p class="cause-line">.*</p>`).FindString(body)
+		assert.Equal(t, `<p class="cause-line"><span class="muted">Why they failed:</span> <strong>Blocked by bot protection</strong> `+
+			`<code>anti_bot</code> <a id="clear-cause" href="`+html.EscapeString(cleared)+
+			`" aria-label="Clear the cause filter">Clear</a></p>`, line, query)
+		assert.NotContains(t, getPage(t, srv, cleared, http.StatusOK), "cause-line", "%s: cleared", query)
+	}
+	assert.NotContains(t, getPage(t, srv, "/ui/library?host=blocked.example", http.StatusOK), "cause-line")
+}
+
+// TestUI_Failures: the Library's Failures tab over the real API, under the
+// Library's navigation item and head: the totals, a card per cause, most
+// first, each host tag leading to the Library of exactly the documents it
+// counts, the causes without documents, and a cause a newer daemon wrote,
+// shown by its code without a link or a refetch, since the Library and
+// refetch-all refuse it.
+func TestUI_Failures(t *testing.T) {
+	srv := apitest.Start(t)
+	for i := range 3 {
+		srv.AddFailedDocument(t, fmt.Sprintf("https://blocked.example/%d", i), store.FailureCauseAntiBot)
+	}
+	srv.AddFailedDocument(t, "https://walled.example/a", store.FailureCauseAntiBot)
+	srv.AddFailedDocument(t, "https://gone.example/a", store.FailureCauseDeadLink)
+	newer := srv.AddFailedDocument(t, "https://newer.example/a", store.FailureCauseOther)
+	_, err := srv.DB.Exec(`UPDATE documents SET failure_cause = '<new_cause>' WHERE id = ?`, newer.ID)
+	require.NoError(t, err)
+	titled(t, srv, "https://example.com/fetched", "Fetched", store.DocStateFetched)
+
+	body := getPage(t, srv, "/ui/failures", http.StatusOK)
+	assert.Contains(t, body, "<title>Failures · curio</title>")
+	assert.Contains(t, body, `<a href="/ui/library" aria-current="page">`, "under the Library's item")
+	assert.Equal(t, 1, strings.Count(body, `aria-current="page"><svg class="icon"`), "and no other")
+	assert.Contains(t, body, `<form class="header-search"`)
+	assert.Contains(t, body, "<h1>Library</h1>\n"+`<p class="lede">7 documents from 0 bookmarks.</p>`)
+	assert.Contains(t, body, `<a id="subnav-failures" href="/ui/failures" aria-current="page">Failures <span class="count">6</span></a>`)
+	assert.Contains(t, body, `<p class="failures-totals">6 documents couldn&#39;t be fetched: 5 failed and 1 dead link, grouped by why.`)
+
+	page := pageDoc(t, body)
+	var cards []string
+	for n := range page.Descendants() {
+		if n.Type == xhtml.ElementNode && n.Data == "li" && attr(n, "class") == "card cause" {
+			cards = append(cards, attr(n, "id"))
+		}
+	}
+	assert.Equal(t, []string{"cause-anti_bot", "cause-<new_cause>", "cause-dead_link"}, cards,
+		"by count, most first, then by cause")
+	tags := regexp.MustCompile(`<a class="tag" id="(host-anti_bot-\d)" href="([^"]+)" title="([^"]+)"><span class="name">[^<]+</span> <span class="n">(\d+)</span></a>`).
+		FindAllStringSubmatch(body, -1)
+	require.Len(t, tags, 2)
+	assert.Equal(t, []string{"host-anti_bot-0", "/ui/library?cause=anti_bot&amp;host=blocked.example", "blocked.example", "3"},
+		tags[0][1:])
+	assert.Equal(t, "host-anti_bot-1", tags[1][1])
+	listed := getPage(t, srv, html.UnescapeString(tags[0][2]), http.StatusOK)
+	assert.Len(t, docLinkRE.FindAllString(listed, -1), 3, "the tag's Library lists what it counts")
+	assert.Contains(t, body, `<a class="btn btn-sm btn-ghost" id="view-dead_link" href="/ui/library?cause=dead_link">`)
+	assert.Len(t, docLinkRE.FindAllString(getPage(t, srv, "/ui/library?cause=dead_link", http.StatusOK), -1), 1,
+		"View in Library finds the dead links without a state")
+
+	unknown := elementByID(page, "cause-<new_cause>")
+	require.NotNil(t, unknown)
+	for n := range unknown.Descendants() {
+		assert.False(t, n.Type == xhtml.ElementNode && (n.Data == "a" || n.Data == "button" || hasAttribute(n, "data-method")),
+			"no link or refetch: <%s>", n.Data)
+	}
+	assert.Contains(t, body, `<h2>&lt;new_cause&gt; <code>&lt;new_cause&gt;</code></h2>`)
+	assert.Contains(t, body, `<span class="tag" title="newer.example"><span class="name">newer.example</span> <span class="n">1</span></span>`)
+	assert.Contains(t, body, "Causes without documents: Behind a login, Refused by Jina Reader,")
+	assert.NotContains(t, body, "Causes without documents: Dead link")
+
+	empty := getPage(t, apitest.Start(t), "/ui/failures", http.StatusOK)
+	assert.Contains(t, empty, "<h2>Nothing failed</h2>")
+	assert.Contains(t, empty, `Failures <span class="count">0</span>`)
+}
+
+// TestUI_FailuresDegrade: the Failures tab does without what it can't
+// read: a summary that fails is its error in the groups' region, logged
+// once, the head still there without the subnav's count; counts that fail
+// leave the lede's fallback, logged once, the groups still there.
+func TestUI_FailuresDegrade(t *testing.T) {
+	var rec logRecorder
+	srv := apitest.Start(t, func(d *api.Deps) {
+		d.Documents = failingSummary{d.Documents}
+		d.Log = slog.New(&rec)
+	})
+	p := get(t, srv, "/ui/failures")
+	require.Equal(t, http.StatusOK, p.status)
+	uitest.AssertInert(t, p.body)
+	live := regexp.MustCompile(`(?s)<div class="failures" id="failures-live">.*?</div></div>`).FindString(p.body)
+	assert.Contains(t, live, "Couldn't read this: summarize failures: injected failure.")
+	assert.Contains(t, live, "Request "+p.header.Get("X-Request-Id"))
+	assert.Contains(t, p.body, `<a id="subnav-failures" href="/ui/failures" aria-current="page">Failures</a>`)
+	assert.Contains(t, p.body, `<p class="lede">0 documents from 0 bookmarks.</p>`)
+	require.Len(t, rec.errors(), 1)
+
+	var counts logRecorder
+	srv = apitest.Start(t, func(d *api.Deps) {
+		d.Bookmarks = failingCount{d.Bookmarks}
+		d.Log = slog.New(&counts)
+	})
+	srv.AddFailedDocument(t, "https://blocked.example/a", store.FailureCauseAntiBot)
+	p = get(t, srv, "/ui/failures")
+	require.Equal(t, http.StatusOK, p.status)
+	assert.Contains(t, p.body, `<p class="lede">Every page curio saved for you.</p>`)
+	assert.NotContains(t, p.body, "panel-error")
+	assert.Contains(t, p.body, `id="cause-anti_bot"`)
+	assert.Contains(t, p.body, `Failures <span class="count">1</span>`, "the summary counts")
+	errs := counts.errors()
+	require.Len(t, errs, 1)
 	assert.ErrorIs(t, errs[0]["err"].(error), errInjected)
 }
 
@@ -1413,12 +1560,12 @@ func TestUI_GETNeverWrites(t *testing.T) {
 	before := fingerprint(t, srv)
 
 	var polls []string
-	for _, path := range []string{"/ui/status", "/ui/documents/" + queued.ID, "/ui/interests"} {
+	for _, path := range []string{"/ui/status", "/ui/documents/" + queued.ID, "/ui/interests", "/ui/failures"} {
 		for _, m := range hxGetRE.FindAllStringSubmatch(getPage(t, srv, path, http.StatusOK), -1) {
 			polls = append(polls, html.UnescapeString(m[1]))
 		}
 	}
-	require.Len(t, polls, 4, "Status's two, the document's and the Interests'")
+	require.Len(t, polls, 5, "Status's two, the document's, the Interests' and the Failures tab's")
 	for _, poll := range polls {
 		getPage(t, srv, poll, http.StatusOK)
 	}
@@ -1439,7 +1586,8 @@ func TestUI_GETNeverWrites(t *testing.T) {
 		"/ui/library?state=bogus", "/ui/documents/" + doc.ID, "/ui/documents/" + doc.ID + "?images=1",
 		"/ui/documents/" + failed.ID, "/ui/documents/nope", "/ui/interests", "/ui/interests/" + interest.ID, "/ui/nope",
 		assetRE.FindStringSubmatch(home)[1], "/ui/static/nope.css", "/ui/status?poll=bogus",
-		"/ui/documents/" + doc.ID + "?poll=jobs", "/ui/interests?poll=live",
+		"/ui/documents/" + doc.ID + "?poll=jobs", "/ui/interests?poll=live", "/ui/failures",
+		"/ui/failures?poll=bogus", "/ui/library?cause=other&host=example.com",
 	} {
 		p := get(t, srv, path)
 		assert.Less(t, p.status, http.StatusInternalServerError, path)

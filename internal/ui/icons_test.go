@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 // iconBranchRE finds the names the icon template switches on.
@@ -48,6 +50,9 @@ func usedIcons(t testing.TB) []string {
 	}
 	for _, contentType := range append(slices.Clone(contentTypes), "", "bogus") {
 		used = append(used, typeIcon(contentType))
+	}
+	for _, cause := range append(store.FailureCauses(), "", "bogus") {
+		used = append(used, causeIcon(string(cause)))
 	}
 	for _, item := range navItems() {
 		used = append(used, item.Icon)

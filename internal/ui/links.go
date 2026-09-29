@@ -30,12 +30,14 @@ const PollParam = "poll"
 
 // The live regions a poll asks for: Status's that change by the second
 // (PollLive) and its health (PollHealth), a document's jobs (PollJobs),
-// and the Interests' rebuild (PollRebuild).
+// the Interests' rebuild (PollRebuild), and the Failures tab's groups with
+// the Library's subnav (PollCauses).
 const (
 	PollLive    = "live"
 	PollHealth  = "health"
 	PollJobs    = "jobs"
 	PollRebuild = "rebuild"
+	PollCauses  = "causes"
 )
 
 // The baseline a poll carries: what its page showed when it was rendered,
@@ -95,6 +97,24 @@ func interestsPollHref(shown string) string {
 // ShownRun reads the baseline an Interests poll carries: the clustering run
 // its page shows, "" for none.
 func ShownRun(q url.Values) string { return q.Get(runParam) }
+
+// failuresHref is the Library's Failures tab.
+func failuresHref() string { return "/ui/failures" }
+
+// failuresPollHref is the Failures tab's live regions.
+func failuresPollHref() string {
+	return failuresHref() + "?" + url.Values{PollParam: {PollCauses}}.Encode()
+}
+
+// causeCardID is the id of cause's card on the Failures tab, which
+// failureCauseHref leads to.
+func causeCardID(cause string) string { return "cause-" + cause }
+
+// failureCauseHref is cause's card on the Failures tab, its fragment
+// escaped however odd the cause.
+func failureCauseHref(cause string) string {
+	return (&url.URL{Path: failuresHref(), Fragment: causeCardID(cause)}).String()
+}
 
 // searchHref is the search page for q, limited to contentType when it is
 // set; a blank q is the search home.
@@ -165,8 +185,22 @@ func clearFiltersHref(f LibraryFilters) string {
 	return libraryHref(LibraryFilters{Order: f.Order}, "")
 }
 
-// causeHref is the Library of the documents that failed for cause.
+// clearCauseHref is the first page of the Library under f without its
+// cause filter: the other filters, the order and the page size kept.
+func clearCauseHref(f LibraryFilters) string {
+	f.Cause = ""
+	return libraryHref(f, "")
+}
+
+// causeHref is the Library of the documents that failed for cause, dead
+// links among them: the list's cause filter takes every state.
 func causeHref(cause string) string { return libraryHref(LibraryFilters{Cause: cause}, "") }
+
+// causeHostHref is the Library of the documents on host that failed for
+// cause: a host tag of cause's card, which the tag counts exactly.
+func causeHostHref(cause, host string) string {
+	return libraryHref(LibraryFilters{Cause: cause, Host: host}, "")
+}
 
 // navHrefs are the navigation's pages.
 var navHrefs = map[Nav]string{

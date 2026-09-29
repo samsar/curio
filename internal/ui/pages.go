@@ -2,6 +2,7 @@ package ui
 
 import (
 	"cmp"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ const (
 	PageSearch    = "search"    // Search
 	PageStatus    = "status"    // Status
 	PageLibrary   = "library"   // Library
+	PageFailures  = "failures"  // Failures
 	PageDocument  = "document"  // Document
 	PageInterests = "interests" // Interests
 	PageInterest  = "interest"  // Interest
@@ -456,6 +458,35 @@ type LibraryCounts struct {
 	ByState              map[string]int // documents by state
 }
 
+// Head is the Library's head: its lede counts the library, and its subnav
+// leads to the Failures tab with how many documents failed or are dead,
+// both from the counts, whatever the filters.
+func (l Library) Head() LibraryHead {
+	views := LibraryViews{}
+	if c := l.Counts; c != nil {
+		views.Failed = c.ByState[string(store.DocStateFailed)] + c.ByState[string(store.DocStateDead)]
+		views.Counted = true
+	}
+	return LibraryHead{Counts: l.Counts, Views: views}
+}
+
+// LibraryHead heads the Library's two views, Documents and Failures (the
+// library-head partial): the library's counts for the lede, nil when they
+// couldn't be read, and the subnav between the views.
+type LibraryHead struct {
+	Counts *LibraryCounts
+	Views  LibraryViews
+}
+
+// LibraryViews is the Library's subnav (the library-subnav partial): which
+// view is current, Documents or Failures, and how many documents failed or
+// are dead, the Failures tab's count, when it is known.
+type LibraryViews struct {
+	OnFailures bool
+	Failed     int
+	Counted    bool
+}
+
 // libraryStates are the Library's state tabs, in their order; "" is every
 // state.
 var libraryStates = []struct {
@@ -647,6 +678,124 @@ type DocCell struct {
 	When         time.Time // shown here on a phone, whose table has no time column
 	FailureCause string
 	LastError    string
+}
+
+// Failures is the Library's Failures tab: the library's failed and dead
+// documents grouped by why they failed, from one read of the failure
+// summary. A poll's answer (Poll PollCauses) holds its live regions alone,
+// the Library's subnav and the groups, and reads the summary alone.
+type Failures struct {
+	Layout Layout
+	Poll   string
+	// Counts are the library's, for the head's lede: nil when they
+	// couldn't be read, and in a poll's answer, which has no lede.
+	Counts *LibraryCounts
+	Err    *PanelError // the summary couldn't be read
+	Total  int         // failed and dead documents
+	Groups []FailureGroup
+}
+
+// Head is the Failures tab's head: the Library's, its subnav counting the
+// summary's documents, which it knows exactly when the summary was read.
+func (f Failures) Head() LibraryHead { return LibraryHead{Counts: f.Counts, Views: f.Views()} }
+
+// Views is the Library's subnav as the Failures tab shows it, current,
+// counting the summary's documents when it was read.
+func (f Failures) Views() LibraryViews {
+	if f.Err != nil {
+		return LibraryViews{OnFailures: true}
+	}
+	return LibraryViews{OnFailures: true, Failed: f.Total, Counted: true}
+}
+
+// Dead is how many of the documents are dead links, and Failed how many
+// failed for any other cause.
+func (f Failures) Dead() int {
+	for _, g := range f.Groups {
+		if g.DeadLinks() {
+			return g.Count
+		}
+	}
+	return 0
+}
+
+func (f Failures) Failed() int { return f.Total - f.Dead() }
+
+// Totals is the sentence over the groups: how many documents couldn't be
+// fetched, how many of them failed and how many are dead links when there
+// are both, and what a group's refetch does.
+func (f Failures) Totals() string {
+	s := count(f.Total, "document", "documents") + " couldn't be fetched"
+	if failed, dead := f.Failed(), f.Dead(); failed > 0 && dead > 0 {
+		s += ": " + num(failed) + " failed and " + count(dead, "dead link", "dead links")
+	}
+	return s + ", grouped by why. Refetching a group queues a fresh fetch for each of its documents."
+}
+
+// Absent are the causes no document failed for, in store.FailureCauses'
+// order, for the footnote under the groups.
+func (f Failures) Absent() []string {
+	var absent []string
+	for _, cause := range store.FailureCauses() {
+		if !slices.ContainsFunc(f.Groups, func(g FailureGroup) bool { return g.Cause == string(cause) }) {
+			absent = append(absent, string(cause))
+		}
+	}
+	return absent
+}
+
+// Pollers are the page's one poller, none for a poll's answer: it
+// refreshes the groups and the subnav's count after every change the
+// page makes and when the tab comes back into view, never on a timer,
+// since the summary reads every failed document.
+func (f Failures) Pollers() []Poller {
+	if f.Poll != "" {
+		return nil
+	}
+	return []Poller{{ID: failuresPoller, Href: failuresPollHref(), OnChange: true, Regions: failuresRegions}}
+}
+
+// FailureGroup is the documents that failed for one cause, and the hosts
+// most of them are on, most first, each with how many of the cause's
+// documents it holds. A cause this build doesn't know, one a newer daemon
+// wrote, is shown by its code, and neither the Library nor refetch-all
+// takes it.
+type FailureGroup struct {
+	Cause string
+	Count int
+	Hosts []Count
+}
+
+// ID is the id of the group's card, which Status's rows lead to.
+func (g FailureGroup) ID() string { return causeCardID(g.Cause) }
+
+// Known reports whether the cause is one this build knows, which the
+// group's links and refetch need.
+func (g FailureGroup) Known() bool { return store.FailureCause(g.Cause).Valid() }
+
+// DeadLinks reports whether the group is the dead links, which are
+// refetched only after a confirm.
+func (g FailureGroup) DeadLinks() bool { return g.Cause == string(store.FailureCauseDeadLink) }
+
+// Refetch is the group's refetch of a known cause: the dead links', which
+// names their state, or the cause's.
+func (g FailureGroup) Refetch() Action {
+	if g.DeadLinks() {
+		return refetchDeadLinksAction(g.Count)
+	}
+	return refetchCauseAction(g.Cause, g.Count)
+}
+
+// Command is the command that does what the group's Refetch does, for a
+// page without JavaScript: "" for a cause this build doesn't know.
+func (g FailureGroup) Command() string {
+	switch {
+	case !g.Known():
+		return ""
+	case g.DeadLinks():
+		return "curio refetch --all --state dead --cause " + g.Cause
+	}
+	return "curio refetch --all --cause " + g.Cause
 }
 
 // Document is one document's page. A poll's answer (Poll PollJobs) holds

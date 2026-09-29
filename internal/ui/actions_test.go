@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"io/fs"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -41,6 +42,10 @@ func TestActions(t *testing.T) {
 		{scheduleAction(), "PUT", "/v1/queue", "", "", "-", queueStatus, ActionSchedule, "Schedule saved", ""},
 		{scheduleOffAction(), "PUT", "/v1/queue", `{"schedule":"off"}`, "", "", queueStatus, ActionScheduleOff,
 			"Schedule turned off", ""},
+		{refetchCauseAction("anti_bot", 926), "POST", "/v1/documents/refetch-all?cause=anti_bot", "", "", "",
+			failuresStatus, ActionRefetchCause, "Blocked by bot protection: 926 refetches queued", ""},
+		{refetchDeadLinksAction(819), "POST", "/v1/documents/refetch-all?cause=dead_link&state=dead", "", "", "",
+			failuresStatus, ActionRefetchDeadLinks, "Dead link: 819 refetches queued", ""},
 	} {
 		t.Run(string(tc.kind), func(t *testing.T) {
 			a := tc.action
@@ -55,7 +60,23 @@ func TestActions(t *testing.T) {
 	normal, err := throttleAction(store.ThrottleNormal).Body()
 	require.NoError(t, err)
 	assert.Equal(t, `{"throttle":"normal"}`, normal)
-	assert.Len(t, ActionKinds, 10, "a kind for each constructor above")
+	assert.Len(t, ActionKinds, 12, "a kind for each constructor above")
+	assert.Equal(t, "Other: 1 refetch queued", refetchCauseAction("other", 1).Done)
+	assert.Equal(t, "Dead link: 1,024 refetches queued", refetchDeadLinksAction(1024).Done)
+}
+
+// TestActions_EscapeCauses: a cause, however odd, is one escaped value of
+// refetch-all's query, and says what the daemon took by its code when this
+// build has no words for it.
+func TestActions_EscapeCauses(t *testing.T) {
+	a := refetchCauseAction("a&b=c #1", 1)
+	path, query, found := strings.Cut(a.Path, "?")
+	require.True(t, found)
+	assert.Equal(t, "/v1/documents/refetch-all", path)
+	values, err := url.ParseQuery(query)
+	require.NoError(t, err)
+	assert.Equal(t, url.Values{"cause": {"a&b=c #1"}}, values)
+	assert.Equal(t, "a&b=c #1: 1 refetch queued", a.Done)
 }
 
 // TestActions_EscapeIDs: a document's ID, however odd, is one escaped

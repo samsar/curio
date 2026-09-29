@@ -84,6 +84,49 @@ func parseHref(t *testing.T, href string) *url.URL {
 	return u
 }
 
+// TestFailuresLinks: the Failures tab and its poll; a cause's card, which
+// Status's rows lead to, by the id the card carries, its fragment escaped
+// however odd the cause; and a host tag's Library of one cause on one
+// host, both round-tripping.
+func TestFailuresLinks(t *testing.T) {
+	assert.Equal(t, "/ui/failures", failuresHref())
+	assert.Equal(t, "/ui/failures?poll=causes", failuresPollHref())
+	assert.Equal(t, "cause-anti_bot", causeCardID("anti_bot"))
+	assert.Equal(t, failuresHref()+"#"+causeCardID("anti_bot"), failureCauseHref("anti_bot"))
+
+	const odd = `a&b=c #1 <x>"`
+	u := parseHref(t, failureCauseHref(odd))
+	assert.Equal(t, "/ui/failures", u.Path)
+	assert.Empty(t, u.RawQuery)
+	assert.Equal(t, causeCardID(odd), u.Fragment, "the fragment round-trips")
+
+	u = parseHref(t, causeHostHref("anti_bot", "a&b=c.example:8080"))
+	assert.Equal(t, "/ui/library", u.Path)
+	assert.Equal(t, url.Values{"cause": {"anti_bot"}, "host": {"a&b=c.example:8080"}}, u.Query())
+	assert.Equal(t, "/ui/library?cause=dead_link&host=gone.example", causeHostHref("dead_link", "gone.example"),
+		"no state: the list's cause filter takes dead documents")
+}
+
+// TestClearCauseHref: clearing the cause keeps every other filter, the
+// order and the page size, and drops the cause and the cursor, in either
+// order.
+func TestClearCauseHref(t *testing.T) {
+	for _, order := range []string{"", OrderSaved} {
+		f := LibraryFilters{Order: order, State: "failed", ContentType: "pdf", Host: "a&b=c.example",
+			Folder: "/100% Reading/#1", Cause: "a&cause=b #1", Limit: 7}
+		want := url.Values{"state": {"failed"}, "content_type": {"pdf"}, "host": {"a&b=c.example"},
+			"folder": {"/100% Reading/#1"}, "limit": {"7"}}
+		if order != "" {
+			want.Set("order", order)
+		}
+		u := parseHref(t, clearCauseHref(f))
+		assert.Equal(t, "/ui/library", u.Path, order)
+		assert.Equal(t, want, u.Query(), order)
+	}
+	assert.Equal(t, "/ui/library", clearCauseHref(LibraryFilters{Cause: "anti_bot"}))
+	assert.Equal(t, "/ui/library?order=saved", clearCauseHref(LibraryFilters{Order: OrderSaved, Cause: "anti_bot"}))
+}
+
 // TestSearchHref: a search's query and type round-trip, however odd; a
 // blank query is left out, and the home without a type is /ui/.
 func TestSearchHref(t *testing.T) {

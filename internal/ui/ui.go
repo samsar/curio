@@ -27,7 +27,8 @@ var files embed.FS
 // pageNames are the pages: each is templates/<name>.html on top of the
 // layout, the partials and the icons.
 var pageNames = []string{
-	PageSearch, PageStatus, PageLibrary, PageDocument, PageInterests, PageInterest, PageError, PageStarting,
+	PageSearch, PageStatus, PageLibrary, PageFailures, PageDocument, PageInterests, PageInterest, PageError,
+	PageStarting,
 }
 
 // Renderer renders the dashboard's pages and serves its assets. It is
@@ -96,8 +97,8 @@ func (r *Renderer) RenderMarkdown(src []byte, base string, images bool) (Text, e
 // funcs are the templates' functions. Every link is built by one of them
 // (links.go) or a view model's method, never pieced together in a
 // template, and so is every stored value's display form, class and icon
-// name (format.go). Actions and pollers come from the view models' methods
-// (actions.go, poll.go).
+// name (format.go, causes.go). Actions and pollers come from the view
+// models' methods (actions.go, poll.go).
 func funcs(assets assetSet) template.FuncMap {
 	return template.FuncMap{
 		"asset":              assets.url,
@@ -107,8 +108,12 @@ func funcs(assets assetSet) template.FuncMap {
 		"libraryHref":        libraryHref,
 		"libraryMoreHref":    libraryMoreHref,
 		"clearFiltersHref":   clearFiltersHref,
+		"clearCauseHref":     clearCauseHref,
 		"stateHref":          stateHref,
 		"causeHref":          causeHref,
+		"causeHostHref":      causeHostHref,
+		"failuresHref":       failuresHref,
+		"failureCauseHref":   failureCauseHref,
 		"navHref":            navHref,
 		"navItems":           navItems,
 		"outbound":           outbound,
@@ -124,6 +129,8 @@ func funcs(assets assetSet) template.FuncMap {
 		"shortError":         shortError,
 		"causeLabel":         causeLabel,
 		"causeWhy":           causeWhy,
+		"causeIcon":          causeIcon,
+		"causeTone":          causeTone,
 		"interestName":       interestName,
 		"stateClass":         stateClass,
 		"stateTone":          stateTone,

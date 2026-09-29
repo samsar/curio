@@ -15,29 +15,33 @@ import (
 // renders an Action as data attributes (the action partial) and writes
 // none of it itself (TestTemplatesHaveNoInlineCode), and
 // TestDashboard_ActionsMatchTheAPI, in internal/api, holds every Action
-// the pages render to the router and to api/openapi.yaml.
+// the pages render to the router and to api/openapi.yaml, and a refetch by
+// cause to refetch-all's own checks.
 
 // ActionKind names what an Action changes: one per constructor below.
 type ActionKind string
 
 // The kinds of Action, in ActionKinds' order.
 const (
-	ActionRefetch       ActionKind = "refetch"
-	ActionForcedRefetch ActionKind = "refetch-forced"
-	ActionReindex       ActionKind = "reindex"
-	ActionRebuild       ActionKind = "rebuild"
-	ActionPause         ActionKind = "pause"
-	ActionResume        ActionKind = "resume"
-	ActionThrottle      ActionKind = "throttle"
-	ActionKeepAwake     ActionKind = "keep-awake"
-	ActionSchedule      ActionKind = "schedule"
-	ActionScheduleOff   ActionKind = "schedule-off"
+	ActionRefetch          ActionKind = "refetch"
+	ActionForcedRefetch    ActionKind = "refetch-forced"
+	ActionReindex          ActionKind = "reindex"
+	ActionRebuild          ActionKind = "rebuild"
+	ActionPause            ActionKind = "pause"
+	ActionResume           ActionKind = "resume"
+	ActionThrottle         ActionKind = "throttle"
+	ActionKeepAwake        ActionKind = "keep-awake"
+	ActionSchedule         ActionKind = "schedule"
+	ActionScheduleOff      ActionKind = "schedule-off"
+	ActionRefetchCause     ActionKind = "refetch-cause"
+	ActionRefetchDeadLinks ActionKind = "refetch-dead-links"
 )
 
 // ActionKinds are every kind of Action: a page must render each one
 // somewhere (TestDashboard_ActionsMatchTheAPI).
 var ActionKinds = []ActionKind{ActionRefetch, ActionForcedRefetch, ActionReindex, ActionRebuild, ActionPause,
-	ActionResume, ActionThrottle, ActionKeepAwake, ActionSchedule, ActionScheduleOff}
+	ActionResume, ActionThrottle, ActionKeepAwake, ActionSchedule, ActionScheduleOff, ActionRefetchCause,
+	ActionRefetchDeadLinks}
 
 // The ids of the pages' action statuses, the .action-status elements their
 // Actions report to.
@@ -45,6 +49,7 @@ const (
 	documentStatus = "doc-status"
 	queueStatus    = "queue-status"
 	rebuildStatus  = "rebuild-status"
+	failuresStatus = "failures-status"
 )
 
 // Action is a change a control asks the daemon for, and how it reports
@@ -95,6 +100,31 @@ func forcedRefetchAction(id string) Action {
 	return Action{Kind: ActionForcedRefetch, Method: http.MethodPost,
 		Path:   documentAPIPath(id, "refetch") + "?" + url.Values{"force": {"1"}}.Encode(),
 		Status: documentStatus, Done: "Refetch requested"}
+}
+
+// refetchCauseAction refetches the documents that failed for cause, as
+// curio refetch --all --cause does; n is how many the page counts, for
+// what it says once the daemon has taken the change. The cause is one
+// escaped query value, however odd.
+func refetchCauseAction(cause string, n int) Action {
+	return refetchAllAction(ActionRefetchCause, cause, url.Values{"cause": {cause}}, n)
+}
+
+// refetchDeadLinksAction refetches the n dead links. refetch-all refuses
+// their cause without state=dead, since its default states leave dead
+// documents out.
+func refetchDeadLinksAction(n int) Action {
+	cause := string(store.FailureCauseDeadLink)
+	return refetchAllAction(ActionRefetchDeadLinks, cause,
+		url.Values{"cause": {cause}, "state": {string(store.DocStateDead)}}, n)
+}
+
+// refetchAllAction is a refetch of the n documents POST
+// /v1/documents/refetch-all selects with query, all of them failed for
+// cause.
+func refetchAllAction(kind ActionKind, cause string, query url.Values, n int) Action {
+	return Action{Kind: kind, Method: http.MethodPost, Path: "/v1/documents/refetch-all?" + query.Encode(),
+		Status: failuresStatus, Done: causeLabel(cause) + ": " + count(n, "refetch", "refetches") + " queued"}
 }
 
 // reindexAction queues a new index of document id's current text.
