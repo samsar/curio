@@ -129,14 +129,17 @@ all fetch/index/search/insight workflows.
   responses by tests in `internal/api`; the clients (`internal/client`) are
   hand-written, and codegen is deferred
 - The dashboard: read-only HTML pages under `/ui/` on the same port and
-  origin (`/` redirects there; `daemon.ui: false` turns them off). Page
-  handlers in `internal/api/ui*.go` read through the same functions as the
-  JSON handlers, and `internal/ui` renders them with `html/template`, a
-  sanitized render of each document's markdown, one stylesheet of design
-  tokens and components with inline SVG icons, and a vendored htmx for
-  search-as-you-type. Every response carries a strict CSP. See
-  `docs/ui.md`, and decisions.md "Dashboard: server-rendered pages in the
-  daemon (phase 1)" and "Dashboard: a design language under the CSP"
+  origin (`/` redirects there; `daemon.ui: false` turns them off): search
+  is the home at `/ui/`, then the Library, the Interests, and Status at
+  `/ui/status` (the queue, health, progress and why documents failed).
+  Page handlers in `internal/api/ui*.go` read through the same functions
+  as the JSON handlers, and `internal/ui` renders them with
+  `html/template`, a sanitized render of each document's markdown, one
+  stylesheet of design tokens and components with inline SVG icons, and
+  a vendored htmx for search-as-you-type. Every response carries a strict
+  CSP. See `docs/ui.md`, and decisions.md "Dashboard: server-rendered
+  pages in the daemon (phase 1)", "Dashboard: a design language under the
+  CSP" and "Dashboard: search is home, the Overview becomes Status"
 - Internal worker pools process jobs from the SQLite-backed queue. They
   claim through the queue gate (`jobs.QueueGate`), which holds claims back
   while the queue is paused, outside its daily schedule, or at the

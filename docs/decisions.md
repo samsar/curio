@@ -135,12 +135,13 @@ when the entry was first committed.
 - 2026-09-27 — [Keep-awake: caffeinate on AC power while the workers have queued work](#keep-awake-caffeinate-on-ac-power-while-the-workers-have-queued-work)
 - 2026-09-27 — [curio up: a plan-first setup wizard](#curio-up-a-plan-first-setup-wizard) (revised)
 - 2026-09-28 — [curio up: the import step](#curio-up-the-import-step)
-- 2026-09-28 — [Dashboard: server-rendered pages in the daemon (phase 1)](#dashboard-server-rendered-pages-in-the-daemon-phase-1)
+- 2026-09-28 — [Dashboard: server-rendered pages in the daemon (phase 1)](#dashboard-server-rendered-pages-in-the-daemon-phase-1) (revised)
 - 2026-09-28 — [Dashboard: formatting budgets for stored markdown](#dashboard-formatting-budgets-for-stored-markdown)
 - 2026-09-28 — [Commands take a document's URL as well as its ID](#commands-take-a-documents-url-as-well-as-its-id)
 - 2026-09-28 — [Doctor warns when GitHub requests carry no token](#doctor-warns-when-github-requests-carry-no-token)
 - 2026-09-28 — [Failure causes: recorded when a document fails](#failure-causes-recorded-when-a-document-fails)
-- 2026-09-29 — [Dashboard: a design language under the CSP](#dashboard-a-design-language-under-the-csp)
+- 2026-09-29 — [Dashboard: a design language under the CSP](#dashboard-a-design-language-under-the-csp) (revised)
+- 2026-09-29 — [Dashboard: search is home, the Overview becomes Status](#dashboard-search-is-home-the-overview-becomes-status)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -6717,6 +6718,14 @@ v1.0.1 (BSD-3-Clause); htmx 2.0.11 (0BSD), vendored. golang.org/x/net
 stays at v0.58.0: bluemonday's floor, v0.26.0, carries advisories fixed
 in v0.56.0. govulncheck finds nothing in the new modules.
 
+**Revised (2026-09-29):** search is the home, at `/ui/`, and the Overview
+is Status, at `/ui/status`, without the newest bookmarks; `/ui/search`
+answers 302 to `/ui/` with its query. The page handlers no longer read
+`listBookmarks` and read `failures` for Status. The request
+`isolateDashboard` guards is `GET /ui/?q=`, and it refuses another site's
+subresource request for `/ui/search` before the redirect. See "Dashboard:
+search is home, the Overview becomes Status".
+
 ---
 
 ## Dashboard: formatting budgets for stored markdown
@@ -7490,6 +7499,128 @@ address makes wider than a phone. No test sees layout, so a change to
 the sheet or a template is checked in a browser, at 1440 and 390 px, in
 both themes, with long and hostile data, under the real CSP (headless
 Chrome logs a CSP violation to its console).
+
+**Revised (2026-09-29):** the header's search box is a GET to `/ui/`, the
+search home, and the "Fetched" tile is Status's, the Overview's
+successor. The Recently saved list is gone from the table of hostile
+content by place, with the Overview. See "Dashboard: search is home, the
+Overview becomes Status".
+
+---
+
+## Dashboard: search is home, the Overview becomes Status
+
+**Decision:** the dashboard opens on search. `/ui/` is the search page,
+and the navigation is Search, Library, Interests, Status. The Overview
+moved to `/ui/status` as Status: what needs attention first, as callouts
+(Ollama not ready, the embeddings drifted, the Jina Reader fallback
+failing or degraded), then a 2:1 board of the library, the queue and "Why
+documents failed" on the left, health, progress and the jobs on the
+right. `/ui/search` answers 302 to `/ui/` with its query as sent. The
+Library's state filter became tabs with counts, and the search page
+gained a type filter. `curio ui` still opens `/ui/`.
+
+**Why search is home.** Search is what people open the dashboard for;
+Status answers "is curio working?", which you ask now and then, or when
+something looks off. A status strip on the home was considered and
+rejected: a line that reads the same on every visit becomes noise, the
+box's placeholder already says how much there is to search ("Search your
+4,498 documents"), and what does affect a search, semantic search being
+down, shows with the results as the keyword-only warning.
+
+**The home reads nothing while a query is typed.** Search as you type
+renders the whole page on every keystroke, so with a query the page reads
+the search and nothing else. Without one it reads `stats` (the fetched
+count, for the placeholder) and `interests` with limit 6 and no members
+(the latest run and its six largest clusters), for one quiet line of
+interests at the foot of the screen. Each read that fails is logged once
+(`reportError`, a 499 at info when the client has gone) and left out: no
+panel error on a page that shows no panels. On the author's library
+(7,467 documents, about 12,000 jobs) each of stats' three counts and the
+interests read take under a millisecond on covering indexes, so nothing
+is cached; they still run only without a query.
+`TestUI_SearchHomeReadsOnlyWithoutAQuery` counts the reads: none with a
+query, htmx's request or not, and one each without.
+
+**#results carries no class.** htmx swaps the children of `#results`
+(`hx-select="#results > *"`, `innerHTML`), never the element, so a class
+on it would stay as the first render set it: a page that opened on the
+home would show full-width results after typing, and one that opened on
+results would squeeze the interests line into the 48 rem column. Its
+child carries the width: `.landing` on the home, `div.results` with a
+query. A plain GET of either state renders the DOM a swap leaves.
+
+**The old address redirects, after the cross-site check.** `/ui/search`
+answers 302 with `/ui/?` and its raw query, unparsed, so any parameter a
+later page takes survives, and the fixed path keeps the Location on the
+daemon. `isolateDashboard` runs before routing, so another site's
+subresource request for `/ui/search?q=` is refused with a 403, never
+redirected into a search.
+
+**The type filter.** `content_type` is validated as the Library validates
+it (`contentTypeParam`, one helper): a value that isn't a content type is
+a 400 page, on the home too, and no read runs. A valid type the page
+doesn't offer (thread, unknown) still limits the search and marks no
+tab. The tabs are links built in Go (`searchHref`), so a type is a plain
+navigation that works without JavaScript; the chosen type is a hidden
+input in the form, so a plain submit keeps it. htmx sends a GET with the
+triggering input's value alone, so the box carries `hx-include="closest
+form"` (htmx sends `q` once), and the tabs sit outside `#results`: typing
+"kafka" on the home left the PDFs tab pointing at
+`/ui/?content_type=pdf`, and choosing it dropped the query. The box
+therefore swaps `#search-scope` out of band (`hx-select-oob`) with every
+answer, as the Library's load more swaps `#more`. `POST /v1/search`
+validates its filters the same way (see "API: filters are validated,
+sizing knobs default").
+
+**Library tabs count only what they list.** The counts come from `stats`
+and cover the whole library, so a tab shows one only when state is the
+page's one filter: with a host, folder, type or cause chosen, "Failed
+2,150" would sit over the failed documents of one host. The form keeps
+the current state as a hidden input, since Apply would otherwise drop
+the tab the state select used to hold. "Showing N of M documents" under
+the table needs N, the rows the page shows, which a keyset cursor can't
+know on the next page: htmx's load more asks for it with `shown`, the
+rows shown so far, and swaps `#showing` out of band with `#more`; the
+plain link, for JavaScript off, shows only its own rows and carries no
+`shown`. `shown` is display only (`intQuery`, 0 when absent or out of
+range), never a filter, and no tab or form carries it. M is the current
+state's count, left out when the counts don't apply or when N passes it,
+as it does when the library changed between pages. A CSS counter over
+the rows was rejected: it prints ungrouped numbers, puts content in CSS,
+and no test can see it.
+
+**Interest names are cut only when two words remain.** A line of six
+names fits one line at 1440 px when each is cut at its first " and ", but
+cutting always turned 30 of the author's 91 labels holding " and " into
+one word ("Identity and Access Management" read "Identity"). `interestName`
+cuts only when the words before it are at least two. The full label is
+in `title`, and a name longer than 18 rem ends in an ellipsis: labels
+come from an LLM or from page words and can be any length.
+
+**Status's callouts say what the tracker says.** They come from the
+health read alone, in a fixed order, and only while it succeeded. An
+upstream gets one while failing (danger) or degraded (warn), from
+`Upstream.Alert` over a fixed set; a pause is the upstream's own request
+and gets none. The copy counts only the tracker's failure classes as
+failures: a refusal of a target is a healthy answer
+("Fetch upstream health"), so the degraded callout gives the reported
+counts and window ("6 of its 20 calls in the last 15m failed") rather
+than a share or a window of its own, and both point to `curio doctor`
+for the cause.
+
+**Why documents failed.** Status draws the five commonest causes of
+`failures` (the function `GET /v1/failures` runs) as bars scaled to the
+largest, each linking to the Library of that cause. The card is hidden
+when nothing failed. `FailureSummary` reads the cause and URL of every
+failed and dead document, about a millisecond per 3,000: fine once per
+page load, but a region of the page that is polled must leave the card
+out.
+
+**What moved elsewhere.** Recently saved left the dashboard with the
+Overview; the Library's "Date saved" order will list saves. A Failures
+view of the library, with refetch by cause, will be a Library tab, not a
+fifth navigation item: a phone's navigation fits four.
 
 ---
 

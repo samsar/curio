@@ -237,9 +237,12 @@ eval harness shows measurably better retrieval than the v1 baseline.
 - Read-later importers (Pocket, Instapaper, Raindrop)
 - Highlight importers (Readwise)
 - Web UI: phase 1, the read-only dashboard (Overview, Search, Library,
-  Document, Interests; `curio ui`), has shipped. Phase 2 adds actions
-  (refetch, reindex, rebuild, a failures view grouped by cause, queue
-  controls, live progress); what its views read has shipped: every
+  Document, Interests; `curio ui`), has shipped, and its pages were
+  reorganised since: search is the home and the Overview is Status (see
+  decisions.md "Dashboard: search is home, the Overview becomes Status").
+  Phase 2 adds actions (refetch, reindex, rebuild, a failures view
+  grouped by cause, queue controls, live progress); what its views read
+  has shipped: every
   failed document's cause (`GET /v1/failures`, `?cause=` filters,
   `curio refetch --all --cause`) and a document's jobs
   (`GET /v1/jobs?document_id=`). Phase 3 brings richer views (an
