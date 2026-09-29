@@ -239,7 +239,9 @@ eval harness shows measurably better retrieval than the v1 baseline.
 - Web UI: phase 1, the read-only dashboard (Overview, Search, Library,
   Document, Interests; `curio ui`), has shipped, and its pages were
   reorganised since: search is the home and the Overview is Status (see
-  decisions.md "Dashboard: search is home, the Overview becomes Status").
+  decisions.md "Dashboard: search is home, the Overview becomes Status"),
+  and the Library lists saves, newest saved first, in its Date saved
+  order (decisions.md "Library: a Date saved order lists saves").
   Phase 2 adds actions. Shipped: a document's refetch (a dead link's
   behind a confirm) and reindex with its jobs' progress, the interests'
   rebuild, the queue's controls, and live refresh of Status, a document's

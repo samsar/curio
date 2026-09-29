@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +91,11 @@ func (d readDocs) GetWithLastError(ctx context.Context, tenantID, id string) (*s
 	return d.DocumentStore.GetWithLastError(ctx, tenantID, id)
 }
 
+func (d readDocs) ListWithLastError(ctx context.Context, tenantID string, opts store.ListDocumentsOpts) ([]store.DocumentWithError, error) {
+	d.r.add("documents")
+	return d.DocumentStore.ListWithLastError(ctx, tenantID, opts)
+}
+
 type readJobs struct {
 	store.JobStore
 	r *reads
@@ -131,6 +137,11 @@ type readBookmarks struct {
 func (b readBookmarks) ListByDocument(ctx context.Context, tenantID, documentID string) ([]*store.Bookmark, error) {
 	b.r.add("bookmarks")
 	return b.BookmarkStore.ListByDocument(ctx, tenantID, documentID)
+}
+
+func (b readBookmarks) List(ctx context.Context, tenantID string, opts store.ListBookmarksOpts) ([]store.BookmarkWithDocument, error) {
+	b.r.add("saves")
+	return b.BookmarkStore.List(ctx, tenantID, opts)
 }
 
 type readInsights struct {
@@ -559,6 +570,36 @@ func TestUI_DocumentReads(t *testing.T) {
 		body := getPage(t, srv, "/ui/documents/"+doc.ID+query, http.StatusBadRequest)
 		assert.Contains(t, body, `<div class="big-code">400</div>`, query)
 		assert.Empty(t, r.take(), query)
+	}
+}
+
+// TestUI_LibraryReads: the Library is one list read and the counts in
+// either order: the documents in Last updated, the saves in Date saved,
+// each row's document from that same read, never a read per row. A query
+// it doesn't take reads nothing.
+func TestUI_LibraryReads(t *testing.T) {
+	r := &reads{}
+	srv := apitest.Start(t, countReads(r))
+	for i := range 3 {
+		doc := srv.AddFailedDocument(t, "https://example.com/"+strconv.Itoa(i), store.FailureCauseAntiBot)
+		bookmark(t, srv, doc.URL, store.SourceChrome, "")
+		bookmark(t, srv, doc.URL, store.SourceSafari, "")
+	}
+	for _, tc := range []struct {
+		path   string
+		status int
+		want   map[string]int
+	}{
+		{"/ui/library", http.StatusOK, map[string]int{"documents": 1, "stats": 1}},
+		{"/ui/library?order=updated&state=failed", http.StatusOK, map[string]int{"documents": 1, "stats": 1}},
+		{"/ui/library?order=saved", http.StatusOK, map[string]int{"saves": 1, "stats": 1}},
+		{"/ui/library?order=saved&state=failed&limit=2", http.StatusOK, map[string]int{"saves": 1, "stats": 1}},
+		{"/ui/library?order=bogus", http.StatusBadRequest, map[string]int{}},
+		{"/ui/library?order=saved&cursor=bogus", http.StatusBadRequest, map[string]int{}},
+	} {
+		r.take()
+		getPage(t, srv, tc.path, tc.status)
+		assert.Equal(t, tc.want, r.take(), tc.path)
 	}
 }
 

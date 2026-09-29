@@ -106,7 +106,7 @@ when the entry was first committed.
 - 2026-09-25 — [Clients: one discovery, an explicit daemon environment, a signal context](#clients-one-discovery-an-explicit-daemon-environment-a-signal-context) (revised)
 - 2026-09-25 — [Client errors: a typed APIError, and "unreachable" means never connected](#client-errors-a-typed-apierror-and-unreachable-means-never-connected)
 - 2026-09-25 — [MCP sidecar: restart an unreachable daemon, retry once](#mcp-sidecar-restart-an-unreachable-daemon-retry-once) (revised)
-- 2026-09-25 — [List pagination: keyset on (timestamp, id)](#list-pagination-keyset-on-timestamp-id)
+- 2026-09-25 — [List pagination: keyset on (timestamp, id)](#list-pagination-keyset-on-timestamp-id) (revised)
 - 2026-09-25 — [API: the spec is the contract, checked by tests](#api-the-spec-is-the-contract-checked-by-tests) (revised)
 - 2026-09-25 — [Toolchain: the go directive is the build toolchain, govulncheck gates it](#toolchain-the-go-directive-is-the-build-toolchain-govulncheck-gates-it)
 - 2026-09-25 — [Releases: gated on CI, pinned, least privilege](#releases-gated-on-ci-pinned-least-privilege)
@@ -143,6 +143,7 @@ when the entry was first committed.
 - 2026-09-29 — [Dashboard: a design language under the CSP](#dashboard-a-design-language-under-the-csp) (revised)
 - 2026-09-29 — [Dashboard: search is home, the Overview becomes Status](#dashboard-search-is-home-the-overview-becomes-status)
 - 2026-09-29 — [Dashboard: actions through /v1, sent by a first-party module](#dashboard-actions-through-v1-sent-by-a-first-party-module)
+- 2026-09-29 — [Library: a Date saved order lists saves](#library-a-date-saved-order-lists-saves)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -3476,6 +3477,23 @@ list by document writes its tenant term `+j.tenant_id` so it seeks
 `idx_jobs_document` instead of walking a tenant index. Both are measured
 and pinned; see "Failure causes: recorded when a document fails".
 
+**Revised (2026-09-29):** migration 015 adds `idx_bookmarks_tenant_saved
+(tenant_id, saved_at, id)` for the bookmark list's saved order, and
+rebuilds `idx_bookmarks_document` as `(document_id, saved_at, id)`. With
+the new index alone, SQLite walked every bookmark the tenant has in saved
+order, rather than seek one document's and sort them, for `ListByDocument`
+and for an untitled document's bookmark title (1.2 ms instead of 9 µs,
+and 4.5 ms instead of 0.16 ms for a Library page of untitled documents,
+both growing with the library). With the rebuilt index both seek the
+document and read its bookmarks in their order: `ListByDocument` no
+longer sorts, and its pin now refuses a sort. `document_id` stays the
+index's first column, so `TagsForDocument`, the EXISTS of the folder
+filter and of search's source filter, and the foreign-key action keep
+their seek; a BM25 search by source is pinned too now. `Count` is served
+by either tenant index as a covering index, and SQLite now takes the
+saved one, which its pin names. See "Library: a Date saved order lists
+saves".
+
 ---
 
 ## Chunks: external-content FTS, derived rows kept by triggers
@@ -3889,18 +3907,23 @@ that wait on progress".
 page with opaque cursors over a keyset:
 
 - Documents and jobs order by `updated_at DESC, id DESC`; bookmarks by
-  `created_at DESC, id DESC`, newest first by a key that never changes.
+  `created_at DESC, id DESC`, newest first by a key that never changes,
+  or with `order=saved` by `saved_at DESC, id DESC`, newest saved first
+  (the Library's Date saved order), which never changes either.
 - `store.PageKey{At, ID}` is the last row of a page. `ListDocumentsOpts`
   and `ListJobsOpts` gained `After`, which replaced `ListBookmarksOpts`'
   `Cursor`; a non-zero key restricts the list to rows strictly after it
   with the row-value predicate `(updated_at, id) < (?, ?)`.
 - The handlers ask the store for one row more than the page, so
   `next_cursor` is present exactly when another page follows. The cursor
-  is base64url of `{"t": <RFC 3339>, "id": ...}`. One that doesn't decode
-  to a time and an ID is a 400 "invalid cursor", never ignored.
-- `BookmarkStore.List` returns `BookmarkWithState`, the document's state
-  read through a `LEFT JOIN` in the same query, instead of the handler
-  loading each bookmark's document.
+  is base64url of `{"t": <RFC 3339>, "id": ...}`, plus `"o"` naming the
+  order when it isn't the list's default (`"o":"saved"`). One that doesn't
+  decode to a time and an ID, or that another order issued, is a 400
+  "invalid cursor", never ignored.
+- `BookmarkStore.List` returns `BookmarkWithDocument`, what the list shows
+  of each bookmark's document (its state, title, type, cause and last
+  error) read through a `LEFT JOIN` in the same query, instead of the
+  handler loading each bookmark's document.
 - `curio docs` and `curio jobs` take `--cursor`, and a page that has a
   successor ends with `next page: <the command as run> --cursor=<token>`.
   `--limit` outside 1..500 is a usage error.
@@ -3939,7 +3962,16 @@ it. The expanded `ts < ? OR (ts = ? AND id < ?)` form only seeks
 | `idx_documents_tenant_state_updated (tenant_id, state, updated_at, id)` | `ListWithLastError` by state, and no cause; `CountByState`; `ListIDsWithContent`; `DocumentVectors` (now covering); `RequeueFetchByStates` without a cause |
 | `idx_documents_tenant_cause_updated (tenant_id, failure_cause, updated_at, id) WHERE failure_cause IS NOT NULL` | `ListWithLastError` by cause, alone or with state, host or folder; `RequeueFetchByStates` by cause; `FailureSummary` |
 | `idx_documents_tenant_updated (tenant_id, updated_at, id)` | `ListWithLastError` unfiltered |
-| `idx_bookmarks_tenant_created (tenant_id, created_at, id)` | `Bookmarks.List`, unfiltered or filtered by source or folder (checked per row) |
+| `idx_bookmarks_tenant_created (tenant_id, created_at, id)` | `Bookmarks.List` in created order, unfiltered or under any filter (checked per row) |
+| `idx_bookmarks_tenant_saved (tenant_id, saved_at, id)` | `Bookmarks.List` in saved order, unfiltered or under any filter (checked per row); `Count` (covering) |
+| `idx_bookmarks_document (document_id, saved_at, id)` | `ListByDocument`, read in order; an untitled document's bookmark title in `ListWithLastError` and `GetWithLastError`; `TagsForDocument`; the EXISTS of the documents list's folder filter and of search's source filter; the FK action when a document is deleted |
+
+**Revised (2026-09-29):** the bookmark list gained the saved order, with
+the Library's filters, migration 015's two index changes above, and
+cursors that record a non-default order. Cursors of a default order encode
+as before, so the ones already issued keep working, and one of another
+order is refused rather than resuming that walk at an unrelated position.
+See "Library: a Date saved order lists saves".
 
 ---
 
@@ -7876,6 +7908,133 @@ no poll ran for 4.5 seconds and one ran as soon as `visibilitychange`
 fired. With a queue change held open through the DevTools protocol, the
 status read that curio-daemon didn't answer after 14.9 seconds, and the
 keep-awake switch was set back.
+
+---
+
+## Library: a Date saved order lists saves
+
+**Decision:** the Library's toolbar gains an Order field. Last updated,
+the default, lists documents as before. Date saved lists saves, newest
+saved first, one row per bookmark: `GET /v1/bookmarks?order=saved` under
+the Library's filters (state, type, host, folder, cause), which the page
+reads through the same Deps function. In that order the time column reads
+Saved, the line under a title names the browser it came from on a wide
+screen (the folder on hover), and a note under the table explains the
+duplicates and Safari's dates. An untitled document is named by its
+bookmark's title, in italics, in both orders and on its own page.
+
+**Why an order of the table.** The redesign weighed three places for the
+recent saves the Overview used to list:
+
+- (A) an order of the table, chosen. It adds no element: the tabs,
+  filters, Load more and the phone fold all apply, it pages through every
+  save rather than a handful, and it is invisible until chosen.
+- (B) a collapsed "Recently saved" row at the top of the table card,
+  opening onto the 8 newest. The cheapest, with no store or API change,
+  but capped at 8, hidden yet there on every visit, and in `created_at`
+  order, which follows imports rather than saves.
+- (D) a denormalized `documents.saved_at`, the newest bookmark's, with
+  its own indexes: one row per document and every filter indexed as
+  `updated_at` is, for a backfill, two indexes and the import path writing
+  the column. It is worth that only if Date saved becomes the default
+  order.
+
+**A row is a save.** A page saved in two browsers is listed twice: 30 of
+the author's 7,467 documents are. Safari's bookmarks keep no save date,
+so they carry the time curio imported them: all 2,169 of the author's are
+stamped within one second, and an import lands as one batch at the top of
+the order. The note says both. Reading the Reading List's `DateAdded`,
+the one date Safari keeps, is left to the importer, outside the dashboard
+work.
+
+**Storage.** Migration 015 changes two indexes inside goose's
+transaction, rebuilding no table:
+
+- `idx_bookmarks_tenant_saved (tenant_id, saved_at, id)`. The saved order
+  walks it from the cursor and stops at its limit, as the created order
+  walks `idx_bookmarks_tenant_created`. Every filter is checked on the
+  rows it reads, the document's through its primary key, so a filter that
+  matches few saves reads more of the list: the trade the folder filter
+  already makes.
+- `idx_bookmarks_document`, rebuilt as `(document_id, saved_at, id)`.
+  With the saved index alone SQLite, which has no statistics to go on,
+  walked every bookmark in saved order for each read of one document's
+  bookmarks newest saved first, where it used to seek the document and
+  sort its few: `ListByDocument` took 1.2 ms instead of 9 µs, and a
+  Library page of 51 untitled failed documents with their bookmark titles
+  4.5 ms instead of 0.16 ms, both growing with the library. The rebuilt
+  index serves the order too, so both seek and read in order.
+- The host is checked on the bookmark's URL. Ingest keys the document by
+  the bookmark's normalized URL, so the two are equal (0 of the author's
+  7,497 bookmarks differ), and checking the bookmark's skips a document
+  lookup for each row the host rejects: a host with no saves reads the
+  list in 1.8 ms, against 4.7 ms on the document's URL.
+
+**Paging.** The keyset is `(saved_at, id)` through `keysetAfter`, and
+`store.BookmarkOrder.Key` is both the store's `After` and the API's
+cursor, so the two can't drift apart. A cursor records its order when it
+isn't the list's default (`"o":"saved"`), so the cursors issued before
+decode as they did, and one from the other order is a 400 "invalid
+cursor" rather than a walk resumed at an unrelated position (see "List
+pagination: keyset on (timestamp, id)").
+
+**Measured** on a `sqlite3 -readonly` `.backup` of the author's library
+(7,497 bookmarks, 7,467 documents) migrated through 015, SQLite 3.53.4
+on an Apple M4 Max, median of 21 reads of a page of 51:
+
+| Read | Time |
+|---|---|
+| Date saved, the first page | 0.12 ms |
+| Date saved, after 5,000 saves | 0.12 ms |
+| state=fetched / host=github.com / state=dead | 0.13 / 0.15 / 0.45 ms |
+| state=pending (no saves) | 4.2 ms |
+| content_type=thread (7 saves) | 4.2 ms |
+| cause=tls (43 saves) | 4.3 ms |
+| a host with no saves | 1.8 ms |
+| a folder with one save | 1.5 ms |
+| source=manual (5 saves) | 1.3 ms |
+| `ListByDocument` | 8 µs |
+| the documents list, first page, with bookmark titles | 0.13 ms (0.11 without) |
+| a page of 51 untitled failed documents, with them | 0.14 ms (0.10 without) |
+
+Migration 015 took 15 ms when a throwaway daemon started on a copy, and
+23 ms under the probe.
+
+**The tabs keep document counts** in both orders. A tab counts the
+documents in a state, the same whichever order lists them, and the lede
+names both totals. Exact counts of saves by state would take another
+join on every render, for a difference the note explains: on the
+author's library All is 7,467 documents and 7,497 saves, Fetched 4,498
+and 4,522, Failed 2,150 and 2,152, Dead 819 and 823. The Showing line
+never mixes them: "Showing N of M saves", M the bookmarks total, only
+with no filter at all, state included; "Showing N saves" otherwise.
+
+**An untitled document is named by its bookmark.** 3,019 of the author's
+documents have no title, every failed or dead one (2,969) and 50 fetched
+ones, and 3,015 of them have a bookmark with one. A document with no
+title of its own takes the title of its most recently saved bookmark
+whose title isn't blank: `bookmarkTitleSQL`, in the select list
+`ListWithLastError` and `GetWithLastError` share, runs only for untitled
+rows and seeks `idx_bookmarks_document`. `GET /v1/documents` returns it
+as `bookmark_title`. In the Date saved order a row is a save, so it takes
+that save's own title: no subquery, and the same name unless a
+document's bookmarks carry different titles (none of the author's
+untitled ones do) or the save has none (5 saves). The Document page names
+an untitled document the same way, in its heading and tab, from the
+`GetWithLastError` it already runs. The fallback is italic, weight 500,
+`--text-2`, the unlabeled interest's treatment, in the title's own font:
+it reads as a name, never as the monospace address an unnamed row shows.
+Bookmark titles that are addresses are shown as they are (15 of the
+3,015 start with `http://` or `https://`, and 46 more are an address
+without its scheme): the italic already says it is the bookmark's name,
+and a heuristic for what looks like a URL isn't worth its misses.
+
+**Still named by their address:** Interests, an interest's members and
+search results. They list fetched documents only (50 untitled, 21 of them
+in the current interests), read their documents through their own
+queries, and their pages are changing in their own work (interest
+paging, search paging). The doc-title partial takes the fallback, so
+they can pass one later.
 
 ---
 

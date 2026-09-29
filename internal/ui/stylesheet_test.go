@@ -150,6 +150,12 @@ func TestStylesheet(t *testing.T) {
 	}
 	assert.Equal(t, "5.75rem", declarations(ruleFor(t, rules, phone, "col.c-state").body)["width"])
 	assert.Equal(t, "inline", declarations(ruleFor(t, rules, phone, ".doc-sub .narrow").body)["display"])
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, phone, ".doc-sub .wide").body)["display"],
+		"a save's browser shows on wide screens only")
+	fallback := declarations(ruleFor(t, rules, "", ".doc-title.from-bookmark").body)
+	assert.Equal(t, "italic", fallback["font-style"], "a bookmark's title stands in for the document's")
+	assert.NotContains(t, fallback, "font-family", "in the title's own font, unlike an address")
+	assert.Equal(t, "italic", declarations(ruleFor(t, rules, "", ".doc-head h1.from-bookmark").body)["font-style"])
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".load-more:empty").body)["display"])
 	assert.Equal(t, "pre-wrap", declarations(ruleFor(t, rules, "", "pre.source").body)["white-space"])
 	ruleFor(t, rules, "@media (max-width: 64rem)", ".header-search")

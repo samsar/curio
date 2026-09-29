@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -27,7 +28,9 @@ const (
 // current extraction, its rendered text, related documents and bookmarks,
 // its jobs in flight, and, while it is failed or dead, why it failed and
 // its last error. The text, related and bookmarks panels read on their
-// own, and one that fails shows its error while the rest renders.
+// own, and one that fails shows its error while the rest renders. An
+// untitled document is named by its bookmark's title, as the Library
+// names it, read with the document.
 //
 // Stored pages' remote images are off: each is its alt text, linking to
 // it. ?images=1, or ui.load_remote_images, shows the https ones, and only
@@ -53,8 +56,9 @@ func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 	if poll == "" {
 		baseline = current
 	}
+	bookmarkTitle := strings.TrimSpace(doc.BookmarkTitle)
 	vm := ui.Document{
-		Layout: h.pages.layout(cmp.Or(deref(doc.Title), doc.URL), ui.NavLibrary),
+		Layout: h.pages.layout(cmp.Or(deref(doc.Title), bookmarkTitle, doc.URL), ui.NavLibrary),
 		Poll:   poll,
 		Jobs:   h.documentJobs(r, doc.Document, baseline, current),
 	}
@@ -69,6 +73,7 @@ func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 	}
 	images := h.pages.opts.LoadRemoteImages || boolParam(r, "images")
 	vm.Meta = documentMeta(resp)
+	vm.Meta.BookmarkTitle = bookmarkTitle
 	vm.Extraction = extractionView(resp.CurrentExtraction)
 	vm.Text = h.documentText(r, resp, images)
 	vm.Related = h.relatedPanel(r, id)
