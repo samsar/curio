@@ -320,6 +320,7 @@ type Document struct {
 	PublishedAt       *time.Time  `json:"published_at,omitempty"`
 	Language          *string     `json:"language,omitempty"`
 	State             string      `json:"state"`
+	FailureCause      string      `json:"failure_cause,omitempty"` // why a failed or dead document failed
 	CurrentExtraction *Extraction `json:"current_extraction,omitempty"`
 	CreatedAt         time.Time   `json:"created_at"`
 	UpdatedAt         time.Time   `json:"updated_at"`
@@ -413,6 +414,7 @@ type DocumentListItem struct {
 	Title        *string   `json:"title,omitempty"`
 	ContentType  string    `json:"content_type"`
 	State        string    `json:"state"`
+	FailureCause string    `json:"failure_cause,omitempty"`
 	LastError    string    `json:"last_error,omitempty"`
 	MarkdownPath string    `json:"markdown_path,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -479,10 +481,24 @@ type RefetchAllResponse struct {
 	JobsEnqueued int `json:"jobs_enqueued"`
 }
 
-func (c *Client) RefetchAll(ctx context.Context, state string) (*RefetchAllResponse, error) {
+// RefetchAllOpts narrows RefetchAll. Empty fields leave the daemon's
+// default: every document but the dead ones, whatever their cause.
+type RefetchAllOpts struct {
+	State string // pending | fetched | failed | dead
+	Cause string // a failure cause, such as anti_bot; dead_link needs State dead
+}
+
+func (c *Client) RefetchAll(ctx context.Context, opts RefetchAllOpts) (*RefetchAllResponse, error) {
+	q := url.Values{}
+	if opts.State != "" {
+		q.Set("state", opts.State)
+	}
+	if opts.Cause != "" {
+		q.Set("cause", opts.Cause)
+	}
 	path := "/v1/documents/refetch-all"
-	if state != "" {
-		path += "?state=" + url.QueryEscape(state)
+	if len(q) > 0 {
+		path += "?" + q.Encode()
 	}
 	var out RefetchAllResponse
 	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
