@@ -2344,6 +2344,15 @@ daemon now serves one browser client of its own.
 
 Rejections are logged with the `Sec-Fetch-*` headers the request carried.
 
+**Revised (2026-09-29):** the Origin allowlist also holds the bound
+address's own origin, `http://<daemon.listen's address>:P` (IPv6 in
+brackets). A page served from a `daemon.listen` of 127.0.0.2 is the daemon
+itself, and the dashboard's changes carry that page's origin: without it
+every change from such a page was refused, though its reads, which carry
+no Origin, worked. The address is loopback by config validation, so this
+admits nothing new. See "Dashboard: actions through /v1, sent by a
+first-party module".
+
 ---
 
 ## Single daemon per home: flock on daemon.pid, bind before touching the DB

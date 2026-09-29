@@ -854,3 +854,40 @@ func TestServer_UnknownFieldNamesTheRemedy(t *testing.T) {
 	assert.Contains(t, p.Detail, "curio daemon stop")
 	assert.Zero(t, s.count(t, "bookmarks"))
 }
+
+// TestLocalOrigin_BoundAddress: the daemon's own origin includes the
+// loopback address it is bound to, whichever it is, so a dashboard served
+// from 127.0.0.2 can send its changes; another loopback address stays
+// another origin.
+func TestLocalOrigin_BoundAddress(t *testing.T) {
+	for _, tc := range []struct {
+		bound   net.IP
+		allowed []string
+		refused []string
+	}{
+		{net.IPv4(127, 0, 0, 2),
+			[]string{"http://127.0.0.2:8765", "http://127.0.0.1:8765", "http://localhost:8765", "http://[::1]:8765"},
+			[]string{"http://127.0.0.3:8765", "http://127.0.0.2:8766", "https://127.0.0.2:8765"}},
+		{net.IPv6loopback,
+			[]string{"http://[::1]:8765", "http://127.0.0.1:8765", "http://localhost:8765"},
+			[]string{"http://[0:0:0:0:0:0:0:1]:8765", "http://127.0.0.2:8765", "http://[::1]:8766"}},
+	} {
+		origin, err := newLocalOrigin(&net.TCPAddr{IP: tc.bound, Port: 8765})
+		require.NoError(t, err)
+		check := rejectForeignOrigin(origin, slog.New(slog.DiscardHandler))(http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+		status := func(o string) int {
+			req := httptest.NewRequest(http.MethodPut, "/v1/queue", nil)
+			req.Header.Set("Origin", o)
+			w := httptest.NewRecorder()
+			check.ServeHTTP(w, req)
+			return w.Code
+		}
+		for _, o := range tc.allowed {
+			assert.Equal(t, http.StatusNoContent, status(o), "%s bound: %s", tc.bound, o)
+		}
+		for _, o := range tc.refused {
+			assert.Equal(t, http.StatusForbidden, status(o), "%s bound: %s", tc.bound, o)
+		}
+	}
+}
