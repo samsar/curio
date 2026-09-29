@@ -139,7 +139,9 @@ func (s *Insights) LatestRun(ctx context.Context, tenantID string, status store.
 		q += ` AND status = ?`
 		args = append(args, status)
 	}
-	q += ` ORDER BY started_at DESC LIMIT 1`
+	// started_at is kept to the millisecond, so two runs can share one; the
+	// later insert is the newer run.
+	q += ` ORDER BY started_at DESC, rowid DESC LIMIT 1`
 	return scanClusterRun(s.db.QueryRowContext(ctx, q, args...))
 }
 
@@ -204,9 +206,18 @@ func (s *Insights) ClusterMembers(ctx context.Context, clusterID string, limit i
 	return out, rows.Err()
 }
 
-func (s *Insights) PruneRunsExcept(ctx context.Context, tenantID, keepRunID string) error {
-	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM cluster_runs WHERE tenant_id = ? AND id != ?`, tenantID, keepRunID); err != nil {
+// PruneRunsExcept implements store.InsightStore. Keeping none would delete
+// every run, the current interests with them, so it is refused.
+func (s *Insights) PruneRunsExcept(ctx context.Context, tenantID string, keepRunIDs ...string) error {
+	if len(keepRunIDs) == 0 {
+		return errors.New("prune runs: no run to keep")
+	}
+	args := []any{tenantID}
+	for _, id := range keepRunIDs {
+		args = append(args, id)
+	}
+	q := `DELETE FROM cluster_runs WHERE tenant_id = ? AND id NOT IN (` + placeholders(len(keepRunIDs)) + `)`
+	if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
 		return fmt.Errorf("prune runs: %w", err)
 	}
 	return nil

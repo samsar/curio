@@ -1068,8 +1068,8 @@ type InsightStore interface {
 	// similarity DESC. limit <= 0 means all.
 	ClusterMembers(ctx context.Context, clusterID string, limit int) ([]ClusterMember, error)
 
-	// PruneRunsExcept deletes every run for the tenant except keepRunID,
-	// cascading its clusters + memberships. Keeps storage bounded to the
-	// current snapshot.
-	PruneRunsExcept(ctx context.Context, tenantID, keepRunID string) error
+	// PruneRunsExcept deletes every run for the tenant except keepRunIDs,
+	// at least one, cascading their clusters + memberships. Keeps storage
+	// bounded to the current snapshot.
+	PruneRunsExcept(ctx context.Context, tenantID string, keepRunIDs ...string) error
 }

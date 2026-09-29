@@ -66,7 +66,7 @@ when the entry was first committed.
 - 2026-07-05 — [Dead-link detection: hard 404/410 + soft-404 heuristics](#dead-link-detection-hard-404410--soft-404-heuristics) (revised)
 - 2026-07-05 — [fetcher_rules.yaml: mtime-polled hot reload, keep-last-good](#fetcher_rulesyaml-mtime-polled-hot-reload-keep-last-good)
 - 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search) (revised)
-- 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4)
+- 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4) (revised)
 - 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator) (revised)
 - 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
 - 2026-07-06 — [M6 (planned): RAG / Q&A synthesis + SOTA natural-language search](#m6-planned-rag--qa-synthesis--sota-natural-language-search)
@@ -2000,6 +2000,18 @@ interests with an empty run.
 `GET /v1/interests`, `GET /v1/interests/{id}`, `POST /v1/interests/rebuild`
 (202 + job_id; 409 when disabled) — rather than the separately-sketched
 `/v1/clusters`.
+
+**Revised (2026-09-29):** a failed run is kept until the next run replaces
+it. Pruning after a failure used to keep the latest done run alone, which
+deleted the failed row at once whenever there was one, so a rebuild that
+failed left no trace a reader could find. It now keeps the latest done run
+and the run that just failed (`PruneRunsExcept` takes the runs to keep, at
+least one): at most two rows, a later failure replacing the earlier, and a
+success pruning both. `LatestRun` with no status, the newest attempt, is
+then the failure, which the dashboard's Interests page reports (see
+"Dashboard: actions through /v1, sent by a first-party module"); the
+current interests are still the latest done run's. `LatestRun` breaks a tie
+on `started_at`, kept to the millisecond, by insertion order.
 
 ---
 
