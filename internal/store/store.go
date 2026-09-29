@@ -394,9 +394,9 @@ type DocumentStore interface {
 	// ErrNotFound if the tenant has no such document.
 	RequeueFetch(ctx context.Context, tenantID, documentID string) (*Job, error)
 	// RequeueFetchByStates does the same for every tenant document whose
-	// state is one of states, in one transaction. Returns how many jobs it
-	// enqueued.
-	RequeueFetchByStates(ctx context.Context, tenantID string, states []DocState) (int, error)
+	// state is one of states and, unless cause is empty, that failed for
+	// cause, in one transaction. Returns how many jobs it enqueued.
+	RequeueFetchByStates(ctx context.Context, tenantID string, states []DocState, cause FailureCause) (int, error)
 
 	// ListWithLastError lists the tenant's documents, most recently updated
 	// first (then by ID, descending), each with the error of the most recent
@@ -413,6 +413,37 @@ type DocumentStore interface {
 	// CountByState counts the tenant's documents per state. States with no
 	// documents are absent from the map.
 	CountByState(ctx context.Context, tenantID string) (map[DocState]int, error)
+	// FailureSummary counts the tenant's failed and dead documents by
+	// failure cause, naming for each cause at most topHosts of the hosts
+	// its documents are on.
+	FailureSummary(ctx context.Context, tenantID string, topHosts int) (FailureSummary, error)
+}
+
+// FailureSummary is how many of a tenant's documents failed, for each
+// cause.
+type FailureSummary struct {
+	Total int // failed and dead documents: the sum of the causes' counts
+	// Causes are the causes with documents, the most documents first, then
+	// by cause.
+	Causes []CauseCount
+}
+
+// CauseCount is how many documents failed for one cause, and the hosts
+// most of them are on.
+type CauseCount struct {
+	Cause FailureCause
+	Count int
+	// Hosts are the hosts with the most of the cause's documents, the most
+	// first, then by host. A host is the URL's authority as the documents
+	// list's host filter matches it: lowercased, port and all, "www."
+	// kept. A document whose URL has none counts toward Count alone.
+	Hosts []HostCount
+}
+
+// HostCount is how many of a cause's documents are on one host.
+type HostCount struct {
+	Host  string
+	Count int
 }
 
 // FetchedMetadata is what a fetch learned about a document, for
@@ -455,8 +486,11 @@ type ListDocumentsOpts struct {
 	// case-sensitively, every character literal, a trailing "/" ignored and
 	// "/" alone no filter.
 	Folder string
-	Limit  int     // <= 0 means the impl default (50)
-	After  PageKey // updated_at and ID of the previous page's last row
+	// Cause matches documents that failed for it: failed ones, or dead ones
+	// for FailureCauseDeadLink.
+	Cause FailureCause
+	Limit int     // <= 0 means the impl default (50)
+	After PageKey // updated_at and ID of the previous page's last row
 }
 
 // DocumentWithError is a document plus what a debug listing shows next to

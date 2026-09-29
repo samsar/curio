@@ -256,6 +256,87 @@ func TestDocuments_GetWithLastError(t *testing.T) {
 	}
 }
 
+// TestDocuments_ListCauseFilter: the list narrows to the documents that
+// failed for a cause, together with the other filters, and pages through
+// them in its order, every one once.
+func TestDocuments_ListCauseFilter(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	docs := NewDocuments(db)
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	fail := func(url string, cause store.FailureCause, at time.Time) *store.Document {
+		t.Helper()
+		d := &store.Document{TenantID: "local", URL: url, FailureCause: cause}
+		require.NoError(t, docs.Create(ctx, d))
+		_, err := db.Exec(`UPDATE documents SET updated_at = ? WHERE id = ?`, formatTime(at), d.ID)
+		require.NoError(t, err)
+		return d
+	}
+	var blocked, blockedOnA []string
+	for i := range 7 {
+		host := "a.example"
+		if i%2 == 0 {
+			host = "b.example"
+		}
+		cause := store.FailureCauseAntiBot
+		if i%3 == 0 {
+			cause = store.FailureCauseTimeout
+		}
+		// Two documents share each timestamp, so the ID breaks the tie.
+		d := fail(fmt.Sprintf("https://%s/%d", host, i), cause, base.Add(time.Duration(i/2)*time.Hour))
+		if cause == store.FailureCauseAntiBot {
+			blocked = append(blocked, d.URL)
+			if host == "a.example" {
+				blockedOnA = append(blockedOnA, d.URL)
+			}
+		}
+	}
+	gone := fail("https://a.example/gone", store.FailureCauseDeadLink, base)
+	seedDoc(t, docs, "https://a.example/fetched", store.DocStateFetched)
+	filed := newIngestBookmark("https://a.example/filed", store.SourceChrome)
+	filed.FolderPath = store.NullableString("/Blocked")
+	_, err := NewBookmarks(db).Ingest(ctx, filed)
+	require.NoError(t, err)
+	require.NoError(t, docs.MarkFailed(ctx, *filed.DocumentID, store.FailureCauseAntiBot))
+	blocked = append(blocked, filed.URL)
+	blockedOnA = append(blockedOnA, filed.URL)
+
+	for name, tc := range map[string]struct {
+		opts store.ListDocumentsOpts
+		want []string
+	}{
+		"alone":              {store.ListDocumentsOpts{Cause: store.FailureCauseAntiBot}, blocked},
+		"with its state":     {store.ListDocumentsOpts{Cause: store.FailureCauseAntiBot, State: store.DocStateFailed}, blocked},
+		"with another":       {store.ListDocumentsOpts{Cause: store.FailureCauseAntiBot, State: store.DocStateFetched}, nil},
+		"with a host":        {store.ListDocumentsOpts{Cause: store.FailureCauseAntiBot, Host: "a.example"}, blockedOnA},
+		"with a folder":      {store.ListDocumentsOpts{Cause: store.FailureCauseAntiBot, Folder: "/Blocked"}, []string{filed.URL}},
+		"dead links":         {store.ListDocumentsOpts{Cause: store.FailureCauseDeadLink}, []string{gone.URL}},
+		"dead, if failed":    {store.ListDocumentsOpts{Cause: store.FailureCauseDeadLink, State: store.DocStateFailed}, nil},
+		"a cause no one has": {store.ListDocumentsOpts{Cause: store.FailureCauseIndex}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.ElementsMatch(t, tc.want, listDocumentURLs(t, docs, "local", tc.opts))
+		})
+	}
+
+	var got []string
+	var after store.PageKey
+	for range 20 {
+		page, err := docs.ListWithLastError(ctx, "local",
+			store.ListDocumentsOpts{Cause: store.FailureCauseAntiBot, Limit: 1, After: after})
+		require.NoError(t, err)
+		if len(page) == 0 {
+			break
+		}
+		require.Len(t, page, 1)
+		assert.Equal(t, store.FailureCauseAntiBot, page[0].FailureCause)
+		got = append(got, page[0].URL)
+		after = store.PageKey{At: page[0].UpdatedAt, ID: page[0].ID}
+	}
+	assert.Equal(t, listDocumentURLs(t, docs, "local", store.ListDocumentsOpts{Cause: store.FailureCauseAntiBot}), got,
+		"every one once, in the list's order")
+}
+
 // assertCauseInvariant asserts that no document's failure cause disagrees
 // with its state: a cause is set exactly when the document is failed or
 // dead, and a dead document's is dead_link.
@@ -327,7 +408,7 @@ func TestDocuments_FailureCauseFollowsState(t *testing.T) {
 		assertCauseInvariant(t, db, "RequeueFetch of a document failed for "+string(cause))
 	}
 
-	requeued, err := docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed, store.DocStateDead})
+	requeued, err := docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed, store.DocStateDead}, "")
 	require.NoError(t, err)
 	assert.Equal(t, 2*len(store.FailureCauses()), requeued)
 	assertCauseInvariant(t, db, "RequeueFetchByStates")

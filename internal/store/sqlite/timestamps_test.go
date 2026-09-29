@@ -102,7 +102,17 @@ func TestUpdatedAt_SetByEveryUpdate(t *testing.T) {
 			name: "Documents.RequeueFetchByStates", table: "documents",
 			setup: func(t *testing.T, db *DB) string { return newDoc(t, db, store.DocStateFailed).ID },
 			update: func(t *testing.T, db *DB, _ string) {
-				n, err := NewDocuments(db).RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed})
+				n, err := NewDocuments(db).RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed}, "")
+				require.NoError(t, err)
+				require.Equal(t, 1, n)
+			},
+		},
+		{
+			name: "Documents.RequeueFetchByStates by cause", table: "documents",
+			setup: func(t *testing.T, db *DB) string { return newDoc(t, db, store.DocStateFailed).ID },
+			update: func(t *testing.T, db *DB, _ string) {
+				n, err := NewDocuments(db).RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed},
+					stateCause(store.DocStateFailed))
 				require.NoError(t, err)
 				require.Equal(t, 1, n)
 			},

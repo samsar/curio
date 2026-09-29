@@ -89,8 +89,12 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 	const (
 		byTenant = "SEARCH d USING INDEX idx_documents_tenant_updated (tenant_id=?"
 		byState  = "SEARCH d USING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?"
+		// A cause seeks its own documents in the partial index of the
+		// documents that failed, whatever else filters the list.
+		byCause = "SEARCH d USING INDEX idx_documents_tenant_cause_updated (tenant_id=? AND failure_cause=?"
 	)
 	fetched := store.DocStateFetched
+	antiBot := store.FailureCauseAntiBot
 	jobs := func(name string, opts store.ListJobsOpts, index string) planCase {
 		opts.After = after
 		q, args := listJobsQuery("local", opts)
@@ -121,6 +125,11 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 			ContentType: store.ContentTypeArticle, Host: "example.com", Folder: "/Tech"}, byTenant),
 		docs("ListWithLastError by every filter", store.ListDocumentsOpts{State: fetched,
 			ContentType: store.ContentTypeArticle, Host: "example.com", Folder: "/Tech"}, byState),
+		docs("ListWithLastError by cause", store.ListDocumentsOpts{Cause: antiBot}, byCause),
+		docs("ListWithLastError by cause and state",
+			store.ListDocumentsOpts{Cause: antiBot, State: store.DocStateFailed}, byCause),
+		docs("ListWithLastError by cause and host", store.ListDocumentsOpts{Cause: antiBot, Host: "example.com"}, byCause),
+		docs("ListWithLastError by cause and folder", store.ListDocumentsOpts{Cause: antiBot, Folder: "/Tech"}, byCause),
 		jobs("ListWithDoc", store.ListJobsOpts{},
 			"SEARCH j USING INDEX idx_jobs_tenant_updated (tenant_id=?"),
 		jobs("ListWithDoc by status", store.ListJobsOpts{Status: store.JobStatusDone},
@@ -226,8 +235,21 @@ func TestQueryPlans(t *testing.T) {
 		},
 		{
 			name:  "RequeueFetchByStates",
-			query: resetStatesSQL(2), args: []any{store.DocStatePending, "local", store.DocStateFailed, store.DocStateFetched},
-			want: []string{"INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)"},
+			query: resetStatesSQL(2, false),
+			args:  []any{store.DocStatePending, "local", store.DocStateFailed, store.DocStateFetched},
+			want:  []string{"INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)"},
+		},
+		{
+			name:  "RequeueFetchByStates by cause",
+			query: resetStatesSQL(3, true),
+			args: []any{store.DocStatePending, "local", store.DocStatePending, store.DocStateFetched, store.DocStateFailed,
+				store.FailureCauseAntiBot},
+			want: []string{"INDEX idx_documents_tenant_cause_updated (tenant_id=? AND failure_cause=?)"},
+		},
+		{
+			name:  "FailureSummary",
+			query: failureSummarySQL, args: []any{"local"},
+			want: []string{"SEARCH documents USING INDEX idx_documents_tenant_cause_updated (tenant_id=? AND failure_cause>?)"},
 		},
 		{
 			name:  "ReplaceForDocument delete",

@@ -207,7 +207,8 @@ func (s *testServer) count(t *testing.T, table string) int {
 
 // seedDocument creates the tenant's document for url in state. A failed
 // one failed for store.FailureCauseOther and a dead one for a dead link,
-// the causes the store requires of them.
+// the causes the store requires of them; seedFailedDocument names the
+// cause.
 func (s *testServer) seedDocument(t *testing.T, url string, state store.DocState) *store.Document {
 	t.Helper()
 	var cause store.FailureCause
@@ -219,6 +220,15 @@ func (s *testServer) seedDocument(t *testing.T, url string, state store.DocState
 	case store.DocStatePending, store.DocStateFetched:
 	}
 	doc := &store.Document{TenantID: "local", URL: url, State: state, FailureCause: cause}
+	require.NoError(t, s.deps.Documents.Create(context.Background(), doc))
+	return doc
+}
+
+// seedFailedDocument creates the tenant's document for url, failed for
+// cause: dead for a dead link, failed for any other.
+func (s *testServer) seedFailedDocument(t *testing.T, url string, cause store.FailureCause) *store.Document {
+	t.Helper()
+	doc := &store.Document{TenantID: "local", URL: url, FailureCause: cause}
 	require.NoError(t, s.deps.Documents.Create(context.Background(), doc))
 	return doc
 }

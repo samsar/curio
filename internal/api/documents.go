@@ -34,6 +34,7 @@ type DocumentResponse struct {
 	Language          *string             `json:"language,omitempty"`
 	WordCount         *int                `json:"word_count,omitempty"`
 	State             string              `json:"state"`
+	FailureCause      string              `json:"failure_cause,omitempty"`
 	CurrentExtraction *ExtractionResponse `json:"current_extraction,omitempty"`
 	CreatedAt         time.Time           `json:"created_at"`
 	UpdatedAt         time.Time           `json:"updated_at"`
@@ -186,6 +187,7 @@ type DocumentListItem struct {
 	Title        *string   `json:"title,omitempty"`
 	ContentType  string    `json:"content_type"`
 	State        string    `json:"state"`
+	FailureCause string    `json:"failure_cause,omitempty"`
 	LastError    string    `json:"last_error,omitempty"`
 	MarkdownPath string    `json:"markdown_path,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -213,10 +215,14 @@ func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 }
 
 // listDocumentsOpts reads GET /v1/documents' query: the state,
-// content_type, host and folder filters, the cursor and the page size in
-// Limit. A filter or cursor the list can't take is a requestError.
+// content_type, host, folder and cause filters, the cursor and the page
+// size in Limit. A filter or cursor the list can't take is a requestError.
 func listDocumentsOpts(r *http.Request) (store.ListDocumentsOpts, error) {
 	state, err := docStateParam(r)
+	if err != nil {
+		return store.ListDocumentsOpts{}, err
+	}
+	cause, err := failureCauseParam(r)
 	if err != nil {
 		return store.ListDocumentsOpts{}, err
 	}
@@ -234,6 +240,7 @@ func listDocumentsOpts(r *http.Request) (store.ListDocumentsOpts, error) {
 		ContentType: contentType,
 		Host:        q.Get("host"),
 		Folder:      q.Get("folder"),
+		Cause:       cause,
 		Limit:       listLimit(r),
 		After:       after,
 	}, nil
@@ -268,6 +275,7 @@ func (d Deps) listDocuments(ctx context.Context, opts store.ListDocumentsOpts) (
 			Title:        doc.Title,
 			ContentType:  string(doc.ContentType),
 			State:        string(doc.State),
+			FailureCause: string(doc.FailureCause),
 			LastError:    doc.LastError,
 			MarkdownPath: d.contentPath(doc.MarkdownPath),
 			CreatedAt:    doc.CreatedAt,
@@ -324,13 +332,29 @@ var refetchAllDefaultStates = []store.DocState{store.DocStatePending, store.DocS
 
 // handleRefetchAll resets documents to pending and enqueues a fetch job for
 // each, all in one transaction: either every matching document is requeued
-// or none is. ?state= narrows it to one document state. Useful after a
-// fetcher change to rebuild the corpus. Returns 202 with the number of jobs
-// enqueued; there is no parent job to poll.
+// or none is. ?state= narrows it to one document state, and ?cause= to the
+// documents that failed for one cause. Useful after a fetcher change to
+// rebuild the corpus, or once a site that blocked curio lets it back in.
+// Returns 202 with the number of jobs enqueued; there is no parent job to
+// poll.
+//
+// cause=dead_link without state=dead is a 400: dead links' documents are
+// dead, which the default states leave out, so it would enqueue nothing
+// while looking like a refetch of every dead link.
 func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
 	state, err := docStateParam(r)
 	if err != nil {
 		d.writeError(w, r, err)
+		return
+	}
+	cause, err := failureCauseParam(r)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	if cause == store.FailureCauseDeadLink && state != store.DocStateDead {
+		d.writeError(w, r, badRequest("dead links are refetched only with state=dead: "+
+			"their documents are dead, which refetch-all leaves out unless asked"))
 		return
 	}
 	states := refetchAllDefaultStates
@@ -338,7 +362,7 @@ func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
 		states = []store.DocState{state}
 	}
 
-	n, err := d.Documents.RequeueFetchByStates(r.Context(), d.TenantID, states)
+	n, err := d.Documents.RequeueFetchByStates(r.Context(), d.TenantID, states, cause)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
@@ -355,6 +379,26 @@ func docStateParam(r *http.Request) (store.DocState, error) {
 	}
 	return s, nil
 }
+
+// failureCauseParam reads ?cause. Empty means any cause; a value that
+// isn't a failure cause is a requestError naming them.
+func failureCauseParam(r *http.Request) (store.FailureCause, error) {
+	c := store.FailureCause(r.URL.Query().Get("cause"))
+	if c != "" && !c.Valid() {
+		return "", badRequest("cause %q must be one of: %s", c, failureCauseList)
+	}
+	return c, nil
+}
+
+// failureCauseList names the failure causes, for a 400's detail.
+var failureCauseList = func() string {
+	causes := store.FailureCauses()
+	names := make([]string, len(causes))
+	for i, c := range causes {
+		names[i] = string(c)
+	}
+	return strings.Join(names, ", ")
+}()
 
 // handleReindexDocument enqueues an index job for the document — re-chunking
 // and re-embedding its current extraction's markdown. Unlike refetch it does
@@ -531,6 +575,7 @@ func documentToResponse(doc *store.Document) DocumentResponse {
 		Language:     doc.Language,
 		WordCount:    doc.WordCount,
 		State:        string(doc.State),
+		FailureCause: string(doc.FailureCause),
 		CreatedAt:    doc.CreatedAt,
 		UpdatedAt:    doc.UpdatedAt,
 	}

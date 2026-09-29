@@ -945,7 +945,7 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 	require.NoError(t, docs.Create(ctx, other))
 
 	n, err := docs.RequeueFetchByStates(ctx, "local",
-		[]store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed})
+		[]store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed}, "")
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
 	assert.Equal(t, 3, countRows(t, db, "jobs"))
@@ -961,10 +961,56 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 	}
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, other.ID), "another tenant's document is untouched")
 
-	n, err = docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateDead})
+	n, err = docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateDead}, "")
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 	assert.Equal(t, store.DocStatePending, docState(t, docs, byState[store.DocStateDead].ID))
+}
+
+// TestDocuments_RequeueFetchByStates_Cause: a cause narrows the refetch to
+// the documents in the states that failed for it, and clears their causes;
+// the rest keep theirs.
+func TestDocuments_RequeueFetchByStates_Cause(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	docs, q := NewDocuments(db), NewJobs(db)
+	fail := func(url string, cause store.FailureCause) *store.Document {
+		t.Helper()
+		d := &store.Document{TenantID: "local", URL: url, FailureCause: cause}
+		require.NoError(t, docs.Create(ctx, d))
+		return d
+	}
+	blocked := []*store.Document{fail("https://a.example/1", store.FailureCauseAntiBot),
+		fail("https://b.example/1", store.FailureCauseAntiBot)}
+	timedOut := fail("https://c.example/1", store.FailureCauseTimeout)
+	gone := fail("https://d.example/1", store.FailureCauseDeadLink)
+	theirs := &store.Document{TenantID: "other", URL: "https://a.example/1", FailureCause: store.FailureCauseAntiBot}
+	require.NoError(t, docs.Create(ctx, theirs))
+
+	n, err := docs.RequeueFetchByStates(ctx, "local",
+		[]store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed}, store.FailureCauseAntiBot)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	for _, d := range blocked {
+		got, err := docs.GetByID(ctx, d.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DocStatePending, got.State)
+		assert.Empty(t, got.FailureCause)
+		assert.Len(t, fetchJobsFor(t, q, d.ID), 1)
+	}
+	for _, d := range []*store.Document{timedOut, gone, theirs} {
+		got, err := docs.GetByID(ctx, d.ID)
+		require.NoError(t, err)
+		assert.Equal(t, d.FailureCause, got.FailureCause, "untouched: %s", d.URL)
+	}
+
+	n, err = docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed}, store.FailureCauseDeadLink)
+	require.NoError(t, err)
+	assert.Zero(t, n, "a dead link's document is dead, not failed")
+	n, err = docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateDead}, store.FailureCauseDeadLink)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.Equal(t, 3, countRows(t, db, "jobs"))
 }
 
 func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
@@ -975,7 +1021,7 @@ func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
 	failJobInserts(t, db)
 
 	_, err := docs.RequeueFetchByStates(context.Background(), "local",
-		[]store.DocState{store.DocStateFetched, store.DocStateFailed})
+		[]store.DocState{store.DocStateFetched, store.DocStateFailed}, "")
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, a.ID))
 	assert.Equal(t, store.DocStateFetched, docState(t, docs, b.ID))

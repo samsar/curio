@@ -274,12 +274,14 @@ func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document
 }
 
 // listDocumentsQuery builds ListWithLastError's query. It walks
-// idx_documents_tenant_state_updated when filtered by state, and
+// idx_documents_tenant_cause_updated when filtered by cause,
+// idx_documents_tenant_state_updated when filtered by state alone, and
 // idx_documents_tenant_updated otherwise, in (updated_at, id) order from
-// opts.After, so it stops at the limit. The other filters are checked on
-// each row it walks, the folder's through a seek on
-// idx_bookmarks_document, and the last-error subquery runs only for the
-// rows returned.
+// opts.After, so it stops at the limit. The cause's partial index holds
+// only the documents that failed, so a rare cause reads its own documents
+// rather than the whole list. The other filters are checked on each row
+// it walks, the folder's through a seek on idx_bookmarks_document, and the
+// last-error subquery runs only for the rows returned.
 func listDocumentsQuery(tenantID string, opts store.ListDocumentsOpts) (string, []any) {
 	clauses := []string{"d.tenant_id = ?"}
 	args := []any{store.JobStatusFailed, tenantID}
@@ -295,6 +297,10 @@ func listDocumentsQuery(tenantID string, opts store.ListDocumentsOpts) (string, 
 		cond, condArgs := hostPredicate("d.url", opts.Host)
 		clauses = append(clauses, cond)
 		args = append(args, condArgs...)
+	}
+	if opts.Cause != "" {
+		clauses = append(clauses, "d.failure_cause = ?")
+		args = append(args, opts.Cause)
 	}
 	if cond, condArgs, ok := folderPredicate("b.folder_path", opts.Folder); ok {
 		// EXISTS, not a join: a document with several bookmarks in the
@@ -372,6 +378,83 @@ func (s *Documents) CountByState(ctx context.Context, tenantID string) (map[stor
 	return out, nil
 }
 
+// failureSummarySQL reads the cause and URL of each of the tenant's failed
+// and dead documents, for FailureSummary to count. The cause's partial
+// index holds exactly those documents, so it reads no others. Counting in
+// Go costs about 1 ms for 3,000 rows, and saves SQL both extracting a host
+// from each URL and ranking hosts within each cause.
+const failureSummarySQL = `SELECT failure_cause, url FROM documents
+	WHERE tenant_id = ? AND failure_cause IS NOT NULL`
+
+func (s *Documents) FailureSummary(ctx context.Context, tenantID string, topHosts int) (store.FailureSummary, error) {
+	rows, err := s.db.QueryContext(ctx, failureSummarySQL, tenantID)
+	if err != nil {
+		return store.FailureSummary{}, fmt.Errorf("failure summary: %w", err)
+	}
+	defer rows.Close()
+	var total int
+	counts := map[store.FailureCause]int{}
+	hosts := map[store.FailureCause]map[string]int{}
+	for rows.Next() {
+		var (
+			cause store.FailureCause
+			url   string
+		)
+		if err := rows.Scan(&cause, &url); err != nil {
+			return store.FailureSummary{}, fmt.Errorf("failure summary: %w", err)
+		}
+		total++
+		counts[cause]++
+		if host := urlAuthority(url); host != "" {
+			if hosts[cause] == nil {
+				hosts[cause] = map[string]int{}
+			}
+			hosts[cause][host]++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return store.FailureSummary{}, fmt.Errorf("failure summary: %w", err)
+	}
+
+	summary := store.FailureSummary{Total: total, Causes: make([]store.CauseCount, 0, len(counts))}
+	for cause, n := range counts {
+		summary.Causes = append(summary.Causes,
+			store.CauseCount{Cause: cause, Count: n, Hosts: topHostCounts(hosts[cause], topHosts)})
+	}
+	slices.SortFunc(summary.Causes, func(a, b store.CauseCount) int {
+		return cmp.Or(cmp.Compare(b.Count, a.Count), cmp.Compare(a.Cause, b.Cause))
+	})
+	return summary, nil
+}
+
+// topHostCounts is the n hosts with the most documents in counts, the most
+// first, then by host.
+func topHostCounts(counts map[string]int, n int) []store.HostCount {
+	out := make([]store.HostCount, 0, len(counts))
+	for host, c := range counts {
+		out = append(out, store.HostCount{Host: host, Count: c})
+	}
+	slices.SortFunc(out, func(a, b store.HostCount) int {
+		return cmp.Or(cmp.Compare(b.Count, a.Count), strings.Compare(a.Host, b.Host))
+	})
+	return out[:min(max(n, 0), len(out))]
+}
+
+// urlAuthority is the host of URL u as the documents list's host filter
+// matches it (hostPredicate): the text after "://" up to the next '/', '?'
+// or '#', lowercased as DNS names compare, with any port kept. It is ""
+// when u has none.
+func urlAuthority(u string) string {
+	_, rest, ok := strings.Cut(u, "://")
+	if !ok {
+		return ""
+	}
+	if end := strings.IndexAny(rest, "/?#"); end >= 0 {
+		rest = rest[:end]
+	}
+	return strings.ToLower(rest)
+}
+
 func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionID string) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE documents SET current_extraction_id = ?, updated_at = `+sqlNow+` WHERE id = ?`,
@@ -412,7 +495,8 @@ func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID strin
 	return job, nil
 }
 
-func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, states []store.DocState) (int, error) {
+func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, states []store.DocState,
+	cause store.FailureCause) (int, error) {
 	if len(states) == 0 {
 		return 0, errors.New("requeue fetch: states required")
 	}
@@ -427,7 +511,10 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	// wait for up to roughly 100k documents (docs/decisions.md "Refetch:
 	// state reset and fetch job in one transaction").
 	args := appendArgs([]any{store.DocStatePending, tenantID}, states)
-	rows, err := tx.QueryContext(ctx, resetStatesSQL(len(states)), args...)
+	if cause != "" {
+		args = append(args, cause)
+	}
+	rows, err := tx.QueryContext(ctx, resetStatesSQL(len(states), cause != ""), args...)
 	if err != nil {
 		return 0, fmt.Errorf("reset document states: %w", err)
 	}
@@ -463,13 +550,19 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 	return len(ids), nil
 }
 
-// resetStatesSQL sets the tenant's documents in nStates states to pending,
-// clearing their failure causes, returning their IDs. Its args are the new
-// state, the tenant, then the states.
-func resetStatesSQL(nStates int) string {
-	return `
+// resetStatesSQL sets the tenant's documents in nStates states, and with
+// one failure cause when withCause, to pending, clearing their causes, and
+// returns their IDs. Its args are the new state, the tenant, the states,
+// then the cause. A cause seeks idx_documents_tenant_cause_updated, and
+// states alone idx_documents_tenant_state_updated.
+func resetStatesSQL(nStates int, withCause bool) string {
+	q := `
 	UPDATE documents SET state = ?, failure_cause = NULL, updated_at = ` + sqlNow + `
-	WHERE tenant_id = ? AND state IN (` + placeholders(nStates) + `)
+	WHERE tenant_id = ? AND state IN (` + placeholders(nStates) + `)`
+	if withCause {
+		q += ` AND failure_cause = ?`
+	}
+	return q + `
 	RETURNING id`
 }
 

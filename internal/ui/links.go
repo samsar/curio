@@ -23,7 +23,7 @@ func interestHref(id string) string { return "/ui/interests/" + url.PathEscape(i
 func libraryHref(f LibraryFilters, cursor string) string {
 	q := url.Values{}
 	for name, v := range map[string]string{"state": f.State, "content_type": f.ContentType, "host": f.Host,
-		"folder": f.Folder, "cursor": cursor} {
+		"folder": f.Folder, "cause": f.Cause, "cursor": cursor} {
 		if v != "" {
 			q.Set(name, v)
 		}

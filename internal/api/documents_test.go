@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -96,6 +97,68 @@ func TestRefetchAll(t *testing.T) {
 	resp = s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=dead"})
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
 	assert.JSONEq(t, `{"jobs_enqueued":1}`, resp.body)
+}
+
+// TestRefetchAll_Cause: ?cause refetches exactly the documents that failed
+// for it, among the default states or the one given, each with one job and
+// its cause cleared. Dead links need state=dead.
+func TestRefetchAll_Cause(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	blocked := []*store.Document{s.seedFailedDocument(t, "https://a.example/1", store.FailureCauseAntiBot),
+		s.seedFailedDocument(t, "https://b.example/1", store.FailureCauseAntiBot)}
+	timedOut := s.seedFailedDocument(t, "https://c.example/1", store.FailureCauseTimeout)
+	gone := []*store.Document{s.seedFailedDocument(t, "https://d.example/1", store.FailureCauseDeadLink),
+		s.seedFailedDocument(t, "https://d.example/2", store.FailureCauseDeadLink)}
+	fetched := s.seedDocument(t, "https://e.example/1", store.DocStateFetched)
+	refetchAll := func(query string) response {
+		return s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?" + query})
+	}
+	jobsFor := func(doc *store.Document) int {
+		t.Helper()
+		var n int
+		require.NoError(t, s.db.QueryRow(`SELECT count(*) FROM jobs WHERE document_id = ?`, doc.ID).Scan(&n))
+		return n
+	}
+
+	p := assertProblem(t, refetchAll("cause=bogus"), http.StatusBadRequest)
+	assert.Contains(t, p.Detail, `cause "bogus" must be one of: dead_link, anti_bot,`)
+	for _, query := range []string{"cause=dead_link", "cause=dead_link&state=failed"} {
+		p := assertProblem(t, refetchAll(query), http.StatusBadRequest)
+		assert.Contains(t, p.Detail, "dead links are refetched only with state=dead", query)
+	}
+	assert.Zero(t, s.count(t, "jobs"), "a refused refetch enqueues nothing")
+
+	resp := refetchAll("cause=anti_bot")
+	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+	assert.JSONEq(t, `{"jobs_enqueued":2}`, resp.body)
+	for _, doc := range blocked {
+		got, err := s.deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DocStatePending, got.State)
+		assert.Empty(t, got.FailureCause)
+		assert.Equal(t, 1, jobsFor(doc))
+	}
+	for _, doc := range []*store.Document{timedOut, gone[0], gone[1], fetched} {
+		got, err := s.deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(t, err)
+		assert.Equal(t, doc.State, got.State, doc.URL)
+		assert.Equal(t, doc.FailureCause, got.FailureCause, doc.URL)
+		assert.Zero(t, jobsFor(doc), doc.URL)
+	}
+
+	resp = refetchAll("state=fetched&cause=timeout")
+	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+	assert.JSONEq(t, `{"jobs_enqueued":0}`, resp.body, "a pair no document has requeues nothing")
+
+	resp = refetchAll("state=dead&cause=dead_link")
+	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+	assert.JSONEq(t, `{"jobs_enqueued":2}`, resp.body)
+	for _, doc := range gone {
+		assert.Equal(t, store.DocStatePending, s.docState(t, doc.ID))
+		assert.Equal(t, 1, jobsFor(doc))
+	}
+	assert.Equal(t, 4, s.count(t, "jobs"))
 }
 
 func TestRefetchAll_StoreFailure(t *testing.T) {
@@ -216,10 +279,20 @@ func TestGetDocument(t *testing.T) {
 		"an absolute path, like every other path the API returns")
 	assert.Equal(t, map[string]any{"via": "test"}, got.CurrentExtraction.ExtractionMeta)
 
+	assert.Empty(t, got.FailureCause)
+
 	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
 	resp = s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + bare.ID})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.NotContains(t, resp.body, "current_extraction")
+	assert.NotContains(t, resp.body, "failure_cause")
+
+	failed := s.seedFailedDocument(t, "https://example.com/expired", store.FailureCauseTLS)
+	resp = s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + failed.ID})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+	assert.Equal(t, "failed", got.State)
+	assert.Equal(t, "tls", got.FailureCause)
 
 	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/no-such-document"}),
 		http.StatusNotFound)
@@ -378,44 +451,122 @@ func TestListDocuments_Filters(t *testing.T) {
 // list visits every matching document once, most recently updated first.
 func TestListDocuments_FilteredPaging(t *testing.T) {
 	s := newTestServer(t)
-	want := map[string]bool{}
+	byHost, byCause := map[string]bool{}, map[string]bool{}
 	for i := range 6 {
-		host := "keep.example"
+		host, cause := "keep.example", store.FailureCauseAntiBot
 		if i%2 == 1 {
-			host = "skip.example"
+			host, cause = "skip.example", store.FailureCauseTimeout
 		}
 		doc := s.seedDocument(t, fmt.Sprintf("https://%s/%d", host, i), store.DocStateFetched)
+		failed := s.seedFailedDocument(t, fmt.Sprintf("https://failed.example/%d", i), cause)
 		if host == "keep.example" {
-			want[doc.ID] = true
+			byHost[doc.ID] = true
+			byCause[failed.ID] = true
 		}
 	}
-	var walked []DocumentListItem
-	cursor := ""
-	for range 10 {
-		q := url.Values{"host": {"keep.example"}, "limit": {"1"}}
-		if cursor != "" {
-			q.Set("cursor", cursor)
-		}
-		resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents?" + q.Encode()})
+	for _, tc := range []struct {
+		filter url.Values
+		want   map[string]bool
+	}{
+		{url.Values{"host": {"keep.example"}}, byHost},
+		{url.Values{"cause": {"anti_bot"}}, byCause},
+		{url.Values{"cause": {"anti_bot"}, "state": {"failed"}, "host": {"failed.example"}}, byCause},
+	} {
+		t.Run(tc.filter.Encode(), func(t *testing.T) {
+			var walked []DocumentListItem
+			cursor := ""
+			for range 10 {
+				q := maps.Clone(tc.filter)
+				q.Set("limit", "1")
+				if cursor != "" {
+					q.Set("cursor", cursor)
+				}
+				resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents?" + q.Encode()})
+				require.Equal(t, http.StatusOK, resp.status, resp.body)
+				var page DocumentListResponse
+				require.NoError(t, json.Unmarshal([]byte(resp.body), &page))
+				walked = append(walked, page.Items...)
+				if cursor = page.NextCursor; cursor == "" {
+					break
+				}
+			}
+			got := map[string]bool{}
+			for i, doc := range walked {
+				assert.False(t, got[doc.ID], "visited once")
+				got[doc.ID] = true
+				if i > 0 {
+					prev := walked[i-1]
+					assert.True(t, doc.UpdatedAt.Before(prev.UpdatedAt) ||
+						(doc.UpdatedAt.Equal(prev.UpdatedAt) && doc.ID < prev.ID), "updated_at DESC, id DESC")
+				}
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestListDocuments_Cause: ?cause narrows the list to the documents that
+// failed for it, together with the other filters, each carrying its
+// cause; a cause that isn't one is refused, naming them all.
+func TestListDocuments_Cause(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	filed := &store.Bookmark{TenantID: "local", URL: "https://a.example/filed", Source: store.SourceChrome,
+		SavedAt: time.Now().UTC(), FolderPath: store.NullableString("/Blocked")}
+	_, err := s.deps.Bookmarks.Ingest(ctx, filed)
+	require.NoError(t, err)
+	require.NoError(t, s.deps.Documents.MarkFailed(ctx, *filed.DocumentID, store.FailureCauseAntiBot))
+	onA := s.seedFailedDocument(t, "https://a.example/1", store.FailureCauseAntiBot)
+	onB := s.seedFailedDocument(t, "https://b.example/1", store.FailureCauseAntiBot)
+	walled := s.seedFailedDocument(t, "https://a.example/2", store.FailureCauseLoginWall)
+	gone := s.seedFailedDocument(t, "https://a.example/3", store.FailureCauseDeadLink)
+	s.seedDocument(t, "https://a.example/4", store.DocStateFetched)
+
+	list := func(query string) map[string]string {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents?" + query})
 		require.Equal(t, http.StatusOK, resp.status, resp.body)
-		var page DocumentListResponse
-		require.NoError(t, json.Unmarshal([]byte(resp.body), &page))
-		walked = append(walked, page.Items...)
-		if cursor = page.NextCursor; cursor == "" {
-			break
+		var got DocumentListResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		causes := map[string]string{}
+		for _, item := range got.Items {
+			causes[item.ID] = item.FailureCause
 		}
+		return causes
 	}
-	got := map[string]bool{}
-	for i, doc := range walked {
-		assert.False(t, got[doc.ID], "visited once")
-		got[doc.ID] = true
-		if i > 0 {
-			prev := walked[i-1]
-			assert.True(t, doc.UpdatedAt.Before(prev.UpdatedAt) ||
-				(doc.UpdatedAt.Equal(prev.UpdatedAt) && doc.ID < prev.ID), "updated_at DESC, id DESC")
+	blocked := func(ids ...string) map[string]string {
+		out := map[string]string{}
+		for _, id := range ids {
+			out[id] = "anti_bot"
 		}
+		return out
 	}
-	assert.Equal(t, want, got)
+	cases := []struct {
+		query string
+		want  map[string]string
+	}{
+		{"cause=anti_bot", blocked(*filed.DocumentID, onA.ID, onB.ID)},
+		{"cause=anti_bot&state=failed", blocked(*filed.DocumentID, onA.ID, onB.ID)},
+		{"cause=anti_bot&state=fetched", map[string]string{}},
+		{"cause=anti_bot&host=a.example", blocked(*filed.DocumentID, onA.ID)},
+		{"cause=anti_bot&folder=/Blocked", blocked(*filed.DocumentID)},
+		{"cause=anti_bot&content_type=unknown&limit=500", blocked(*filed.DocumentID, onA.ID, onB.ID)},
+		{"cause=login_wall", map[string]string{walled.ID: "login_wall"}},
+		{"cause=dead_link", map[string]string{gone.ID: "dead_link"}},
+		{"cause=dead_link&state=failed", map[string]string{}},
+		{"state=failed&host=a.example", map[string]string{*filed.DocumentID: "anti_bot", onA.ID: "anti_bot",
+			walled.ID: "login_wall"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.query, func(t *testing.T) {
+			assert.Equal(t, tc.want, list(tc.query))
+		})
+	}
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents?cause=bogus"}),
+		http.StatusBadRequest)
+	assert.Equal(t, `cause "bogus" must be one of: dead_link, anti_bot, login_wall, jina_refused, tls, `+
+		`unreachable, timeout, network, rate_limited, http_error, unsupported, too_large, index, other`, p.Detail)
 }
 
 // TestListDocuments_Paging: next_cursor is set exactly when another page
@@ -499,4 +650,54 @@ func TestReindexDocument(t *testing.T) {
 	s.failJobInserts(t)
 	assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/" + doc.ID + "/reindex"}),
 		http.StatusInternalServerError)
+}
+
+// TestFailures: the failed and dead documents counted by cause, the most
+// first, each with the hosts most of it is on; and every cause and host
+// pair it names lists exactly its count through the documents list.
+func TestFailures(t *testing.T) {
+	s := newTestServer(t)
+	get := func() response {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/failures"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		return resp
+	}
+	assert.JSONEq(t, `{"total":0,"causes":[]}`, get().body, "arrays, never null")
+
+	for i, u := range []string{"https://example.com/a", "https://example.com/b", "https://www.example.com/c",
+		"https://example.com:8443/d", "https://a.example/e", "https://b.example/f", "https://c.example/g"} {
+		s.seedFailedDocument(t, u, store.FailureCauseAntiBot)
+		if i < 2 {
+			s.seedFailedDocument(t, u+"/gone", store.FailureCauseDeadLink)
+		}
+	}
+	s.seedFailedDocument(t, "https://slow.example/a", store.FailureCauseTimeout)
+	s.seedFailedDocument(t, "https://slow.example/b", store.FailureCauseTimeout)
+	s.seedFailedDocument(t, "https://walled.example/a", store.FailureCauseLoginWall)
+	s.seedDocument(t, "https://example.com/fetched", store.DocStateFetched)
+	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs", FailureCause: store.FailureCauseAntiBot}
+	require.NoError(t, s.deps.Documents.Create(context.Background(), other))
+
+	resp := get()
+	assert.JSONEq(t, `{"total":12,"causes":[
+		{"cause":"anti_bot","count":7,"hosts":[
+			{"host":"example.com","count":2},{"host":"a.example","count":1},{"host":"b.example","count":1},
+			{"host":"c.example","count":1},{"host":"example.com:8443","count":1}]},
+		{"cause":"dead_link","count":2,"hosts":[{"host":"example.com","count":2}]},
+		{"cause":"timeout","count":2,"hosts":[{"host":"slow.example","count":2}]},
+		{"cause":"login_wall","count":1,"hosts":[{"host":"walled.example","count":1}]}]}`, resp.body)
+
+	var summary FailuresResponse
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &summary))
+	for _, c := range summary.Causes {
+		for _, h := range c.Hosts {
+			q := url.Values{"cause": {c.Cause}, "host": {h.Host}, "limit": {"500"}}
+			listed := s.do(t, request{method: http.MethodGet, path: "/v1/documents?" + q.Encode()})
+			require.Equal(t, http.StatusOK, listed.status, listed.body)
+			var page DocumentListResponse
+			require.NoError(t, json.Unmarshal([]byte(listed.body), &page))
+			assert.Len(t, page.Items, h.Count, "%s at %s", c.Cause, h.Host)
+		}
+	}
 }
