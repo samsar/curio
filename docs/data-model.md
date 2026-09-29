@@ -115,6 +115,7 @@ documents
   word_count            INTEGER
   current_extraction_id UUID                   -- FK to latest successful extraction
   state                 TEXT NOT NULL          -- 'pending' | 'fetched' | 'failed' | 'dead'
+  failure_cause         TEXT                   -- why a failed or dead document failed; NULL otherwise
   created_at, updated_at
   UNIQUE (tenant_id, url)
 ```
@@ -122,6 +123,20 @@ documents
 Why `tenant_id` is denormalized here: every search/list query filters by tenant,
 and joining through a reference table on every search hurts. The constraint is
 enforced at write time by the importer/crawler.
+
+`failure_cause` is one of `store.FailureCauses` (`dead_link`, `anti_bot`,
+`login_wall`, `jina_refused`, `tls`, `unreachable`, `timeout`, `network`,
+`rate_limited`, `http_error`, `unsupported`, `too_large`, `index`,
+`other`). It is set exactly when the document is `failed` or `dead`, and a
+`dead` document's is `dead_link`: the permanent-failure hook records it with
+the state (`MarkFailed` derives the state from the cause), and every write
+that moves the document on clears it (a refetch, a successful fetch or
+index). No CHECK constraint holds the values, unlike the other enums: the
+store validates them, and a new cause needs no table rebuild. The partial
+index `idx_documents_tenant_cause_updated (tenant_id, failure_cause,
+updated_at, id) WHERE failure_cause IS NOT NULL` serves the cause filters
+and the failure summary, and holds only the documents that failed. See
+[Failure causes: recorded when a document fails](./decisions.md#failure-causes-recorded-when-a-document-fails).
 
 ### `document_extractions`
 

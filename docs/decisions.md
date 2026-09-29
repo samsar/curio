@@ -2244,8 +2244,10 @@ deploy) now fails every URL on that host for the rest of the TTL
 window without a second real attempt — previously they'd have retried
 into the same cached verdict anyway, so little is actually lost.
 Recovery is `curio refetch --all --state=failed` (or per-doc
-`curio refetch <id>`) once the host is back: cheap and explicit,
-same posture as dead links. The
+`curio refetch <id>`, or one kind of failure with `curio refetch --all
+--cause=anti_bot`; see "Failure causes: recorded when a document
+fails") once the host is back: cheap and explicit, same posture as dead
+links. The
 `(cached: …)` suffix survives into `last_error` so
 `curio jobs --failed` shows why.
 
@@ -3441,6 +3443,13 @@ and `ListByDocument` seeks `idx_bookmarks_document` and sorts its few rows
 by `saved_at`. Ordered by `created_at` instead, SQLite walks
 `idx_bookmarks_tenant_created` through every bookmark the tenant has to
 skip that sort.
+
+**Revised (2026-09-28):** migration 014 adds
+`idx_documents_tenant_cause_updated`, a partial index of the documents
+that failed, for the cause filters and the failure summary, and the jobs
+list by document writes its tenant term `+j.tenant_id` so it seeks
+`idx_jobs_document` instead of walking a tenant index. Both are measured
+and pinned; see "Failure causes: recorded when a document fails".
 
 ---
 
@@ -5445,6 +5454,11 @@ per domain, and it ends.
 - **Remembering Jina's domain blocks** until the date they give, so later
   documents on a blocked domain skip Jina without a request.
 
+**Revised (2026-09-28):** a document Jina refused records the cause
+`jina_refused` (the ones the host cache failed after it, `anti_bot`), so
+`curio refetch --all --cause=jina_refused` retries them once the block
+lifts. See "Failure causes: recorded when a document fails".
+
 ---
 
 ## Queue gate: pause, throttle and schedule, persisted in SQLite
@@ -7083,6 +7097,191 @@ rate-limited; people don't expect that a token with no access at all is
 enough to lift it to 5,000. The daemon, not the CLI, knows what it sends:
 under launchd it doesn't see the shell's environment, so a token exported
 in a terminal isn't one the daemon has.
+
+---
+
+## Failure causes: recorded when a document fails
+
+**Decision:** every failed or dead document records why it failed, in
+`documents.failure_cause`, one of `store.FailureCauses`. The
+permanent-failure hook (`markDocFailed`) writes it through
+`DocumentStore.MarkFailed`: `fetcher.FailureCause` of the error a fetch
+job gave up with, or `index` for an index job, whatever its error. The
+cause is what the dashboard's Failures view groups by, what
+`GET /v1/failures` counts, and what `GET /v1/documents?cause=`,
+`POST /v1/documents/refetch-all?cause=` and `curio refetch --all --cause`
+filter on.
+
+**Why stored, not parsed:** until now the only record of a failure was
+`jobs.last_error`, text, and reading causes back from it fails three ways:
+
+- The text has lost the typed chain, and after a Jina fallback it carries
+  both paths' verdicts: `jina: answer is not the page: target answered
+  HTTP 401 Unauthorized (after native: HTTP 403 Forbidden: origin blocked
+  the request (likely anti-bot))` is an HTTP error, not an anti-bot block.
+  Even the live error matches both sentinels with `errors.Is`. Only the
+  fetcher knows which path spoke for the target.
+- The wording changes with the fetchers.
+- `curio jobs prune` deletes failed jobs, and their documents' causes
+  would go with them.
+
+So the fetcher classifies the typed error once, when the job gives up,
+and the cause is stored with the state.
+
+**The causes**, with the count on the author's library after the backfill
+(7,467 documents, 2,969 failed or dead):
+
+| Cause | Means | Documents |
+|---|---|---|
+| `dead_link` | The content is gone: a 404 or 410, a soft 404, a redirect onto a homepage or another site's landing page. The one cause of a `dead` document. | 819 |
+| `anti_bot` | The site blocked the request: a 403 or 503, a challenge or block page. | 926 |
+| `login_wall` | A login page, a redirect onto one, or too little text to be the article. | 188 |
+| `jina_refused` | The Jina fallback refused the target: a domain block, a publisher's opt-out, a deterministic 4xx. | 185 |
+| `tls` | The site's certificate failed verification. | 43 |
+| `unreachable` | The host doesn't resolve, or refuses connections. | 244 |
+| `timeout` | The site, or the tool fetching it, took too long. | 130 |
+| `network` | Any other transport failure: a reset, a TLS alert, a redirect loop, our own network down, a body cut short. | 26 |
+| `rate_limited` | The site, GitHub or YouTube rate-limited curio. | 222 |
+| `http_error` | Any other status, or an error page naming one. | 143 |
+| `unsupported` | A URL or content curio can't read: a channel page, a GitHub profile, a file that isn't HTML, a PDF it can't extract. | 28 |
+| `too_large` | The response was over the 32 MiB body cap. | 0 |
+| `index` | The fetch worked, then indexing gave up. | 0 |
+| `other` | Anything else. | 15 |
+
+**Precedence** (`fetcher.FailureCause`, `internal/fetcher/cause.go`):
+
+1. A dead link anywhere in the chain is `dead_link`: the rule that made a
+   document dead before, so `dead_link` and the `dead` state always
+   agree.
+2. After a Jina fallback, one path speaks for the target: Jina, when its
+   failure is a verdict about the target (`jinaAnswered`: an answer that
+   isn't the page, a refusal; `errJinaTargetTrouble`: a status the target
+   gave Jina; `ErrTooLarge`), and the origin otherwise. Jina's own trouble
+   (its 429, a 5xx, its CDN's challenge, 401/402, a 403 naming no target,
+   a network error, the cooldown's fail-fast) says nothing about the site,
+   so a document is grouped by what the site did, as the fallback policy
+   judges it. To tell the two paths apart the composite error is now a
+   named type, `jinaFallbackError`, whose text is byte-identical to the
+   old `%w (after %w)` and whose `Unwrap` returns Jina's error first, so
+   `errors.Is`/`As`, `last_error` and the host cache's text are unchanged.
+3. The first of these the chosen error matches: `errJinaRefused`
+   (`jina_refused`), `ErrTLSCertificate`, `ErrHostUnreachable`,
+   `ErrTooLarge`, `ErrAntiBot`, `ErrLoginWall`, then `unsupported`
+   (`ErrUnsupported`, `ErrFetcherNotFound`, `errPDFUnreadable`), a rate
+   limit (`errRateLimited`, or a 429 status), any other status
+   (`http_error`), a deadline or network timeout, any other transport
+   failure (`network`), and `other`.
+
+A host-cache hit is classified by the verdict it cached: the first
+document of a site whose 403 Jina also refused reads `jina_refused`, and
+the ones the cache failed after it `anti_bot`. `fetcher.ErrUnsupported` is
+new, wrapped where a YouTube URL names no video, a GitHub URL isn't one the
+GitHub fetcher reads, and a response is neither HTML nor a PDF; those were
+bare `PermanentError`s. Their errors read as before, but for "(unsupported
+URL)" at the end of YouTube's and of GitHub's unrecognized-URL one. A new
+sentinel or failure path belongs in the list.
+
+**The invariant:** `failure_cause` is set exactly when the document is
+`failed` or `dead`, and `dead` goes with `dead_link` and nothing else.
+`MarkFailed(id, cause)` derives the state from the cause
+(`FailureCause.State()`), so no caller can pair `dead` with `anti_bot`;
+`UpdateState` is gone, since it couldn't keep the two in step.
+`MarkFetched`, `ApplyFetch` (a duplicate or stale fetch job that succeeds
+for a failed document), `RequeueFetch` and `RequeueFetchByStates` clear the
+cause in the statement that moves the document on, and `Create` refuses a
+pair that breaks the invariant. The store is the only writer, so no trigger
+guards it; a test drives every writer and runs the invariant query after
+each.
+
+**Migration 014** adds the column, fills it and creates the index inside
+goose's transaction. The backfill takes the `last_error` of each failed or
+dead document's most recent failed job and reads it with LIKE rules frozen
+for the wording errors had until now, mirroring the classifier: a dead
+document is `dead_link`; no failed job, or one without an error, is
+`other`; an index job's failure is `index`; a Jina-led error by Jina's
+verdict, or else by its `(after native: …)` part; a host-cache hit by the
+verdict it cached; then the native, youtube, github and dispatcher shapes,
+timeouts and transport failures. From here on the classifier works on
+typed errors, so the rules never need to follow a new wording. The
+backfill leaves `updated_at` alone, unlike every UPDATE the store runs:
+the failures happened already, and bumping the column would reorder the
+Library around the migration. On a copy of the author's library it took
+about 160 ms, gave the counts above, and left no document breaking the
+invariant. `TestMigration014_FailureCause` pins the rules over the real
+error shapes.
+
+**No CHECK constraint**, unlike every other enum column: causes will grow
+(the Failures view will want finer ones), and changing a CHECK on
+`documents` means rebuilding the table most others reference, with the
+recipe in `migrations/README.md`. The store validates every write
+instead; `TestOpenAPI_FailureCauseEnum` holds the spec's enum to
+`store.FailureCauses`, and a CLI test holds `--cause`'s help to it.
+
+**Indexes**, following "Indexes follow the queries":
+
+- `idx_documents_tenant_cause_updated (tenant_id, failure_cause,
+  updated_at, id) WHERE failure_cause IS NOT NULL`. Without it a cause
+  filter walks `idx_documents_tenant_updated` through every document to
+  fill a page of a rare cause: SQLite has no statistics to prefer anything
+  else. It is partial, so the documents that never failed, most of a
+  library, cost it nothing. It serves a page of one cause and the pages
+  after it, alone or with state, host or folder; refetch-all by cause;
+  and the failure summary, for which `failure_cause IS NOT NULL` is a
+  range on it. Every earlier plan is unchanged.
+- A document's jobs (`GET /v1/jobs?document_id=`, which the Document page
+  will poll every 2 s). Written plainly, `AND j.document_id = ?` is
+  planned through `idx_jobs_tenant_updated`, the index that serves the
+  ORDER BY, walking every tenant job to find a handful: 3 ms warm and up
+  to 16 ms on the author's 12k jobs, growing with a table only manual
+  pruning shrinks, against 0.03 ms through `idx_jobs_document`. The tenant
+  term is written `+j.tenant_id`: the unary plus keeps SQLite off the
+  tenant indexes, and it seeks `idx_jobs_document` and sorts the few rows.
+  No new index: one on `(document_id, updated_at, id)` would still need
+  the plus under a status filter, and would churn the pinned last-error
+  plan. The plans are pinned, with a check that no tenant index appears.
+
+**API:**
+
+- `GET /v1/failures` answers `{total, causes: [{cause, count, hosts:
+  [{host, count}]}]}`: the causes by count, then name, each with at most
+  5 hosts by count, then host. A host is the URL's authority as the
+  documents list's host filter matches it (lowercased, port kept, `www.`
+  a host of its own), so `GET /v1/documents?cause=C&host=H` lists exactly
+  what the pair counts, which a test checks for every pair. The store
+  reads each failed document's cause and URL over the partial index and
+  counts in Go: about 1 ms for 3,000 rows, where SQL would need to cut the
+  host out of each URL and rank the hosts within each cause. The arrays
+  are never null.
+- `GET /v1/documents?cause=` composes with every other filter; documents
+  carry `failure_cause`, omitted when there is none.
+  `POST /v1/documents/refetch-all?cause=` composes with `state` and its
+  default, and clears the causes it resets. `cause=dead_link` without
+  `state=dead` is a 400: dead links' documents are dead, which the default
+  leaves out, so it would enqueue nothing while reading like a refetch of
+  every dead link. Other pairs no document can match (`state=fetched&
+  cause=tls`) truthfully enqueue 0.
+- The Library page parses its query as `GET /v1/documents` does, so its
+  next-page link and filter form carry `cause=`; it has no control for it
+  yet.
+- `curio refetch --all --cause <cause>` (with or without `--state`), and a
+  cause line in `curio docs` and `curio docs show`. `--state` or `--cause`
+  without `--all` is now an error, where `--state` used to be ignored.
+
+**Not done:**
+
+- **Any change to fetching.** The cause is recorded, never acted on: holding
+  a host-cache anti-bot failure back to retry later, and pacing Jina per
+  site, are the import-failure fixes, separate changes.
+- **Causes for yt-dlp's refusals.** Private, removed and unavailable
+  videos stay `other` (all 15 of the author's `other` documents); yt-dlp's
+  wording is the only signal, and no view needs them apart yet.
+- **Folding transport failures into `timeout` or `unreachable`.** The
+  first taxonomy had no `network`; the author's library has 26 documents
+  of resets, TLS alerts, `ENETUNREACH`, redirect loops and bodies cut
+  short, which mean neither a slow site nor a missing one to someone
+  deciding what to retry.
+- **A cause filter on `curio docs`.** It shows the cause; the flag waits
+  for a need.
 
 ---
 

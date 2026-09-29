@@ -397,11 +397,14 @@ curio import html --follow ~/Downloads/bookmarks.html
 # 6. Search the corpus.
 curio search "feature flag rollout"
 
-# 7. See failures (404s, paywalls, embedding errors).
+# 7. See failures (404s, paywalls, embedding errors). `curio docs --failed`
+#    shows each failed document's cause (anti_bot, login_wall, tls, ...).
 curio jobs --failed
 
-# 8. Retry failures after fixing whatever caused them.
+# 8. Retry failures after fixing whatever caused them: all of them, or
+#    those of one cause.
 curio refetch --all --state failed
+curio refetch --all --cause anti_bot
 
 # 9. Check overall state.
 curio status
@@ -649,9 +652,10 @@ the new model (see "The embedding model is the home's").
 certificate failed verification (expired, for another name, or from an
 untrusted authority). curio won't fetch past that, not even through Jina,
 and doesn't retry it. Once the site fixes its certificate, `curio refetch
-<id>`. If every https document fails this way at once, something is
+<id>`, or `curio refetch --all --cause=tls` for every document that failed
+this way. If every https document fails this way at once, something is
 intercepting TLS (a captive portal, a corporate proxy) or the system clock
-is badly off; fix that, then `curio refetch --all --state=failed`. A
+is badly off; fix that, then `curio refetch --all --cause=tls`. A
 `jina: invalid TLS certificate` error is about the certificate of
 `r.jina.ai`, the fallback reader, not the site's, and is retried like any
 other Jina failure.
@@ -729,7 +733,11 @@ or 503), it fails on the next attempt, from the host cache, and so do the
 site's other documents for 15 minutes.
 A `fetcher.native.jina_api_key` may lift an anonymous block. Otherwise
 refetch after the date, a few documents at a time (`curio refetch <id>`),
-so the next burst doesn't trip it again. **`jina: refused the target:
+so the next burst doesn't trip it again. Such documents' cause is
+`jina_refused` (`anti_bot` for those the host cache failed after the
+first), so `curio docs --failed` finds them and `curio refetch --all
+--cause=jina_refused` retries them all at once, which suits a site with
+only a few. **`jina: refused the target:
 HTTP 451 Unavailable For Legal Reasons: This domain is excluded from Jina
 Reader at the request of its owner, …`** is permanent: the site's owner
 opted out of Jina, and only the site itself can serve curio its pages.
