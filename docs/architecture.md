@@ -132,10 +132,11 @@ all fetch/index/search/insight workflows.
   origin (`/` redirects there; `daemon.ui: false` turns them off). Page
   handlers in `internal/api/ui*.go` read through the same functions as the
   JSON handlers, and `internal/ui` renders them with `html/template`, a
-  sanitized render of each document's markdown, and a vendored htmx for
+  sanitized render of each document's markdown, one stylesheet of design
+  tokens and components with inline SVG icons, and a vendored htmx for
   search-as-you-type. Every response carries a strict CSP. See
   `docs/ui.md`, and decisions.md "Dashboard: server-rendered pages in the
-  daemon (phase 1)"
+  daemon (phase 1)" and "Dashboard: a design language under the CSP"
 - Internal worker pools process jobs from the SQLite-backed queue. They
   claim through the queue gate (`jobs.QueueGate`), which holds claims back
   while the queue is paused, outside its daily schedule, or at the

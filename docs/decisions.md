@@ -140,6 +140,7 @@ when the entry was first committed.
 - 2026-09-28 — [Commands take a document's URL as well as its ID](#commands-take-a-documents-url-as-well-as-its-id)
 - 2026-09-28 — [Doctor warns when GitHub requests carry no token](#doctor-warns-when-github-requests-carry-no-token)
 - 2026-09-28 — [Failure causes: recorded when a document fails](#failure-causes-recorded-when-a-document-fails)
+- 2026-09-29 — [Dashboard: a design language under the CSP](#dashboard-a-design-language-under-the-csp)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -7337,6 +7338,150 @@ instead; `TestOpenAPI_FailureCauseEnum` holds the spec's enum to
   errors rather than to their classification.
 - **A cause filter on `curio docs`.** It shows the cause; the flag waits
   for a need.
+
+---
+
+## Dashboard: a design language under the CSP
+
+**Decision:** the dashboard's pages share one design language: one
+stylesheet (`internal/ui/static/app.css`) of tokens and components,
+served from `/ui/static/` under the pages' `style-src 'self'`, and a
+page frame (`templates/layout.html`) with a skip link, a sticky header
+(the brand, the navigation with icons, a search box), and a footer
+naming the daemon's version and the address it listens on. Every
+template is built from its components, and the rules below hold for any
+page added later.
+
+**One stylesheet, no inline style.** Tokens first (neutrals, one indigo
+accent, four status tones with soft fills, a type scale on a 14 px UI
+base, 4 px spacing steps, radii, shadows), then base, layout,
+components, pages, the responsive rules at 64 rem and 48 rem, and
+utilities. System fonts only; nothing is imported, and the one image is a
+`data:` URL (the select's chevron). Dark mode follows
+`prefers-color-scheme`, guarded by `:root:not([data-theme="light"])`, and
+the same values sit under `:root[data-theme="dark"]` so a host can force
+a theme; the product never sets `data-theme`. `color-scheme: light dark`
+makes native controls follow. `prefers-reduced-motion` turns off every
+animation and transition. `TestStylesheet` pins what no page test can
+see: the rules below, the two dark blocks equal, and the sheet loading
+nothing.
+
+**`overflow-wrap: break-word` on the body, never `anywhere`.** The old
+sheet set `body { overflow-wrap: anywhere }`. Unlike `break-word`,
+`anywhere` counts a break chance between any two characters when a box's
+min-content width is worked out, so every table cell's minimum was about
+one character, and the Library's automatic table layout shared its width
+by max-content: stored URLs up to 705 characters and errors over 400 won,
+and State, Type and Updated read "Sta/te", "fet/ch/ed", one letter a line
+on a phone. `anywhere` is left only where a string is read rather than
+scanned and has no column to squeeze: `code`, the full error's `<pre>`,
+the unformatted text's `pre.source`, IDs and paths (`dl.facts .mono`), a
+document's `h1`, search result titles and passages, related titles,
+bookmark titles and interest labels. `TestStylesheet` holds that list.
+
+**Tables have fixed layouts.** `table.data` is `table-layout: fixed`
+and its columns' widths come from `<col>` classes (state 7 rem, type
+6.5 rem, time 7.5 rem, similarity 9.5 rem, rank 3 rem), never from
+content, and a cell clips what it holds, so no stored value spills into
+the next column. Below 48 rem the Library folds its Type and Updated
+columns into the line under each title (`.narrow`), and two columns
+remain.
+
+**Proportions are attributes, never `style=`.** The CSP refuses inline
+style, so the state bar and the coverage bar are SVGs drawn by the server
+in a 0-100 viewBox, each segment an `x` and `width` attribute
+(`stateBar`, `coverageBar`, worked in thousandths so segments meet and
+the bar ends at 100.000) and its colour a class; similarity and cohesion
+are native `<meter>`s, a migration's progress a `<progress>`.
+
+**Times.** Lists show relative times ("13 min ago", "in 3 h", a date past
+a week) in `<time datetime>`, RFC 3339 in UTC, with the exact
+daemon-local time in `title`. A document's page shows its own dates in
+full; its bookmarks, a list, are relative. A
+published date is a day, stored as its midnight UTC (347 of the author's
+2,048 are), so it is formatted in UTC (`day`): on the daemon's clock west
+of UTC, 2014-03-14 read as "2014-03-13 20:00".
+
+**Hostile content, by place.** Every stored string is hostile and can be
+any length:
+
+| Where | Title | URL | Error |
+|---|---|---|---|
+| Lists (Library, Recently saved, Interest members, card members) | 1 line, ellipsis, `title=` | host and path, 1 line | cause and short error, 1 line, `title=` |
+| Search results | 2-line clamp | host › path, 1 line, `title=` | none |
+| Document page | wraps (`anywhere`) | 1 line, ellipsis | the cause's sentence, and `<details>` "Full error" in a `<pre>` that wraps anywhere and scrolls past 16 rem |
+| Facts: IDs, paths | | monospace, wraps anywhere | |
+
+**Display transforms are plain strings.** `host`, `shortURL`, `urlTrail`,
+`shortError`, `causeLabel`, `num`, `pct` and the rest (`format.go`)
+return strings or structs of them, which `html/template` escapes; none
+returns a trusted type, and `TestTrustedHTMLOnlyFromTheSanitizer` is
+unchanged.
+
+- `shortURL` names an untitled document: host, escaped path without the
+  trailing slash, and the query. It keeps the query because it is often
+  what tells two pages apart: of the author's 3,019 untitled documents,
+  401 have one, and without it 155 of them collapse into 26 identical
+  names, 53 reading `www.youtube.com/watch`. It drops the scheme,
+  userinfo and fragment, and never decodes a percent-escape: `%E2%80%AE`
+  stays text, not a right-to-left override.
+- `shortError` drops what every stored error starts with and says nothing
+  about the document: at most one worker wrapper (`permanent failure: `,
+  `fetch failed: `), then one fetcher name (`native: `, `github: `,
+  `youtube: `, `web2md: `; `TestFetcherNames` holds the list to the
+  fetchers' `Name()`s), then native's `fetch: `. `jina: ` stays, since it
+  says Jina gave the verdict, and so does `index: `. It collapses
+  whitespace and cuts at 300 characters: stored errors reach 1,657 on the
+  author's library, and a subprocess's stderr 64 KiB. The whole error is
+  in `title=` and on the document's page.
+- A failed or dead document's last error and cause show only while it is
+  failed or dead, in the Library as on its page (`failureCurrent`): the
+  Library printed the last failed job's error whatever the state, and two
+  fetched documents in the author's library showed one.
+- A document's page offers the commands that work: `curio refetch
+  --force` for a dead document, whose plain refetch the API refuses, and
+  `curio reindex` only when it has an extraction to reindex.
+
+**Class and icon names come from fixed sets.** A class or icon name is a
+template literal or the output of a Go func over a fixed set:
+`stateClass` (`state-pending|fetched|failed|dead`, or nothing),
+`stateTone`, `typeIcon`, `causeLabel` over `store.FailureCauses()`
+(`TestCauses`: each has a label and a sentence, the labels distinct), an
+upstream's `Tone`. A stored value never picks a class, as `state-{{.State}}`
+did, escaped but still chosen by the page. The Overview's tile reads
+"Fetched", not "Searchable": `stats` counts fetched documents, not
+indexed ones, and while the queue works fetched documents wait for their
+index jobs.
+
+**Icons are an inline partial.** `templates/icons.html` defines `icon`,
+one switch on its name whose branches are whole `<svg>`s of inline
+shapes (`aria-hidden`, sized by where they sit), and `logo`. No sprite:
+a `<use href="#…">` is a fragment reference to keep inert and a request
+to allow, and an icon font is a font to load. The shapes are Lucide's,
+whose ISC license asks for its notice in every copy; the file's opening
+comment carries it, and the file is embedded as is. `TestIcons` checks
+that every icon a template or a func names is defined and every one
+defined is used, and that the file references and styles nothing.
+
+**The frame.** A skip link (`href="#main"`) comes first. `uitest` refused
+every fragment link, so it now accepts one exactly when the page has an
+element with that id; `#ZgotmplZ`, html/template's refusal, never passes.
+The navigation is built in Go (`navItems`, over `navHrefs`, which an
+error page's Retry uses too) and stays `<nav aria-label="Main">`. The
+header's search box is a plain GET form to `/ui/search`, hidden below
+64 rem; the Search page (which is one) and the starting page (which
+can't search) override its block with an HTML comment, since text/template
+keeps a block's default over an empty define. The footer names the
+listener's address (`ln.Addr()`, handed to the dashboard by `NewServer`),
+so a page says which daemon, on which port, it came from.
+
+**Nothing grows past its box.** Besides the clipping cells, the search
+results column (`.results`) is `width: 100%`: a flex item with auto
+margins shrinks to its min-content width, which a result's one-line
+address makes wider than a phone. No test sees layout, so a change to
+the sheet or a template is checked in a browser, at 1440 and 390 px, in
+both themes, with long and hostile data, under the real CSP (headless
+Chrome logs a CSP violation to its console).
 
 ---
 

@@ -25,7 +25,7 @@ import (
 var files embed.FS
 
 // pageNames are the pages: each is templates/<name>.html on top of the
-// layout and the partials.
+// layout, the partials and the icons.
 var pageNames = []string{
 	PageOverview, PageSearch, PageLibrary, PageDocument, PageInterests, PageInterest, PageError, PageStarting,
 }
@@ -45,7 +45,8 @@ func New() (*Renderer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ui: %w", err)
 	}
-	base, err := template.New("layout.html").Funcs(funcs(assets)).ParseFS(files, "templates/layout.html")
+	base, err := template.New("layout.html").Funcs(funcs(assets)).ParseFS(files, "templates/layout.html",
+		"templates/icons.html")
 	if err != nil {
 		return nil, fmt.Errorf("ui: parse the layout: %w", err)
 	}
@@ -93,7 +94,8 @@ func (r *Renderer) RenderMarkdown(src []byte, base string, images bool) (Text, e
 }
 
 // funcs are the templates' functions. Every link is built by one of them
-// (links.go), never pieced together in a template.
+// (links.go), never pieced together in a template, and so is every stored
+// value's display form, class and icon name (format.go).
 func funcs(assets assetSet) template.FuncMap {
 	return template.FuncMap{
 		"asset":              assets.url,
@@ -103,10 +105,29 @@ func funcs(assets assetSet) template.FuncMap {
 		"libraryHref":        libraryHref,
 		"stateHref":          stateHref,
 		"navHref":            navHref,
+		"navItems":           navItems,
 		"outbound":           outbound,
 		"when":               when,
+		"ago":                ago,
+		"datetime":           datetime,
+		"day":                day,
 		"duration":           duration,
 		"score":              score,
+		"host":               host,
+		"shortURL":           shortURL,
+		"urlTrail":           urlTrail,
+		"shortError":         shortError,
+		"causeLabel":         causeLabel,
+		"causeWhy":           causeWhy,
+		"stateClass":         stateClass,
+		"stateTone":          stateTone,
+		"typeIcon":           typeIcon,
+		"num":                num,
+		"count":              count,
+		"pct":                pct,
+		"stateBar":           stateBar,
+		"coverageBar":        coverageBar,
+		"inc":                func(i int) int { return i + 1 },
 		"docStates":          func() []string { return docStates },
 		"contentTypes":       func() []string { return contentTypes },
 	}

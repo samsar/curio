@@ -20,40 +20,63 @@ rebuilding interests and the queue controls are still `curio` commands
 
 ## The pages
 
-- **Overview**: how many documents are in each state (each links to the
-  Library of those), bookmarks and jobs; the queue, open or closed and
-  why, its throttle, schedule and keep-awake, and each pool's load; an
-  estimate of when the queued work will be done, at the pace of the last
-  10 minutes; health: the daemon, Ollama, the models, embedding drift and
-  its fix, the Jina Reader fallback and the YouTube fetcher; and your 10
-  newest bookmarks.
+The pages follow your Mac's light or dark appearance. Every page but
+Search and the starting page has a search box in its header (on a wide
+window), and the footer names the address the daemon listens on.
+
+- **Overview**: cards for the library (how many documents, fetched and
+  bookmarks, and a bar of the documents by state, each state linking to
+  the Library of those), the queue (open or closed and why, its throttle,
+  schedule and keep-awake, and each pool's load), your newest bookmarks,
+  health (the daemon, Ollama, the models, embedding drift and its fix,
+  the Jina Reader fallback and the YouTube fetcher, each with a status
+  dot), an estimate of when the queued work will be done, at the pace of
+  the last 10 minutes, and the jobs by status.
 - **Search**: the same hybrid search as `curio search`, as you type. Each
-  result shows its score and the passages that matched, with the matched
-  words highlighted. When semantic search is unavailable (Ollama down),
-  the keyword results come with a warning.
+  result shows where the page lives, its title, the first two passages
+  that matched with the matched words highlighted (the rest a click
+  away), and its scores. When semantic search is unavailable (Ollama
+  down), the keyword results come under a warning.
 - **Library**: every document, most recently updated first, filtered by
   state, type, host (`example.com`, exactly) and bookmark folder (the
-  folder and the folders under it). "Load more" pages through the rest.
-  A `cause=` in the address (`/ui/library?cause=anti_bot`) narrows it to
-  the documents that failed for one cause, and paging and filtering keep
-  it; the page has no control for it yet.
-- **Document**: what curio knows about one page (title, addresses, type,
-  state, author, dates, where its markdown is), how it was fetched (Jina
-  Reader called out), its text, related documents, its bookmarks with
-  their folders and tags, and, for a failed or dead page, its last error.
-  The text shown is at most the first 1 MiB; the page says when it is cut
-  and where the whole file is. A text whose markdown would take too long
-  or too much memory to format (a line nesting dozens of quotes, lists
-  nested deep over thousands of blank lines, a paragraph thick with
-  unclosed brackets, a table padded to thousands of columns: a few shapes
-  a page can hold, by accident or on purpose) is shown as it is stored,
-  unformatted, and the page says why. Whatever the text holds, formatting
-  stops after two seconds or a gigabyte of memory, and the text is shown
-  as stored. Web and email addresses written out in the text without
-  link markup show as text, not links: a GitHub README's bare URLs, say.
-- **Interests**: the topics the last clustering run found, each with a few
-  of its documents; an interest's page lists its documents by similarity.
-  With no run yet, `curio interests rebuild` makes one.
+  folder and the folders under it). Each row shows the title on one line,
+  or where the page lives for an untitled one, its state, type and when
+  it was last updated; a failed or dead row adds why it failed, its cause
+  and the start of its error, with the whole error on hover and on the
+  document's page. On a phone the type and time move under the title.
+  "Load more" pages through the rest. A `cause=` in the address
+  (`/ui/library?cause=anti_bot`) narrows it to the documents that failed
+  for one cause, and paging and filtering keep it; the page has no
+  control for it yet.
+- **Document**: the page's title and address, its state, type, length,
+  author, published date and language; for a failed page, a box naming
+  why it failed and what that means, with its **Full error** a click
+  away, and for a dead one, that the page is gone. Then its text, and
+  beside it related documents, its bookmarks with their folders and tags,
+  and its details: when it was added, updated and fetched (Jina Reader
+  called out), its ID, where its markdown is, and the `curio` commands
+  that work for it. The text shown is at most the first 1 MiB; the page
+  says when it is cut and where the whole file is. A text whose markdown
+  would take too long or too much memory to format (a line nesting dozens
+  of quotes, lists nested deep over thousands of blank lines, a paragraph
+  thick with unclosed brackets, a table padded to thousands of columns: a
+  few shapes a page can hold, by accident or on purpose) is shown as it is
+  stored, unformatted, and the page says why. Whatever the text holds,
+  formatting stops after two seconds or a gigabyte of memory, and the text
+  is shown as stored. Web and email addresses written out in the text
+  without link markup show as text, not links: a GitHub README's bare
+  URLs, say.
+- **Interests**: the topics the last clustering run found, largest first:
+  how many there are (the page shows the 50 largest), a bar of how many
+  documents are in one and how many in none, and a card for each with
+  its size, how alike its documents are, its summary and a few of its
+  documents. An interest's page lists its documents by similarity. With
+  no run yet, `curio interests rebuild` makes one.
+
+Lists show times relative to now ("13 min ago"), with the exact time on
+hover; a document's page shows its own dates in full. Anything a saved page
+brought with it, a long title, address or error, takes one line in a
+list, cut short, with the whole of it on hover.
 
 ## Images from other sites
 
@@ -95,5 +118,6 @@ as an image, a frame or a script. A page can still send your tab to a
 dashboard page, as a link you follow does; that only shows you the page,
 since pages change nothing. The rules, and why, are in
 [decisions.md](./decisions.md): "Dashboard: server-rendered pages in the
-daemon (phase 1)", "Dashboard: formatting budgets for stored markdown" and
-"Local API: loopback only, no token, browsers shut out".
+daemon (phase 1)", "Dashboard: formatting budgets for stored markdown",
+"Dashboard: a design language under the CSP" and "Local API: loopback
+only, no token, browsers shut out".

@@ -9,17 +9,23 @@ import (
 	"github.com/samsar/curio/internal/ui"
 )
 
+// interestCardMembers is how many of an interest's documents its card on
+// the Interests page lists.
+const interestCardMembers = 3
+
 // interests answers GET /ui/interests: the latest clustering run's
-// interests, each with a few members, as GET /v1/interests lists them.
+// largest interests, each with a few members, as GET /v1/interests lists
+// them.
 func (h pageHandlers) interests(w http.ResponseWriter, r *http.Request) {
-	resp, err := h.d.interests(r.Context(), defaultInterestLimit, defaultInterestMembers)
+	resp, err := h.d.interests(r.Context(), defaultInterestLimit, interestCardMembers)
 	if err != nil {
 		h.writePageError(w, r, err, ui.NavNone)
 		return
 	}
-	vm := ui.Interests{Layout: pageLayout("Interests", ui.NavInterests)}
+	vm := ui.Interests{Layout: h.pages.layout("Interests", ui.NavInterests)}
 	if resp.RunID != "" {
-		vm.Run = &ui.InterestRun{Algo: resp.Algo, Documents: resp.NumDocuments, Noise: resp.NumNoise}
+		vm.Run = &ui.InterestRun{Algo: resp.Algo, Documents: resp.NumDocuments, Noise: resp.NumNoise,
+			Interests: resp.NumClusters}
 		if resp.ComputedAt != nil {
 			vm.Run.ComputedAt = *resp.ComputedAt
 		}
@@ -41,7 +47,7 @@ func (h pageHandlers) interest(w http.ResponseWriter, r *http.Request) {
 	}
 	in := interestView(resp)
 	h.page(w, r, http.StatusOK, ui.PageInterest, ui.InterestPage{
-		Layout: pageLayout(cmp.Or(in.Label, "Unlabeled interest"), ui.NavInterests), Interest: in})
+		Layout: h.pages.layout(cmp.Or(in.Label, "Unlabeled interest"), ui.NavInterests), Interest: in})
 }
 
 func interestView(in InterestResponse) ui.Interest {

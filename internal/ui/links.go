@@ -51,6 +51,30 @@ var navHrefs = map[Nav]string{
 // navHref is nav's page, or "" for none.
 func navHref(nav Nav) string { return navHrefs[nav] }
 
+// NavItem is one item of the pages' navigation: its label and icon, and
+// the page it links to.
+type NavItem struct {
+	Nav   Nav
+	Label string
+	Icon  string
+	Href  string
+}
+
+// navItems is the pages' navigation, in its order, each item linking to
+// its navHrefs page, as an error page's Retry does.
+func navItems() []NavItem {
+	items := []NavItem{
+		{Nav: NavOverview, Label: "Overview", Icon: "activity"},
+		{Nav: NavSearch, Label: "Search", Icon: "search"},
+		{Nav: NavLibrary, Label: "Library", Icon: "library"},
+		{Nav: NavInterests, Label: "Interests", Icon: "sparkles"},
+	}
+	for i := range items {
+		items[i].Href = navHref(items[i].Nav)
+	}
+	return items
+}
+
 // outbound is u when it is an http or https URL, which a page may link
 // to, and "" otherwise: a stored URL is never trusted to be one.
 func outbound(u string) string {
