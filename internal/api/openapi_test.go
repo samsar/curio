@@ -309,6 +309,9 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		}
 	})
 	f := seedContractFixtures(t, s)
+	savedCursor, err := encodeCursor(store.PageKey{At: time.Now(), ID: uuid.NewString()},
+		bookmarkCursorOrder(store.BookmarkOrderSaved))
+	require.NoError(t, err)
 	doc := strictSpec(t)
 	ops := specOperations(doc)
 	jsonBody := func(method, path, body string) request {
@@ -350,6 +353,14 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/metrics", get("/v1/metrics"), http.StatusOK},
 
 		{"GET /v1/bookmarks", get("/v1/bookmarks?limit=1"), http.StatusOK},
+		{"GET /v1/bookmarks", get("/v1/bookmarks?order=saved&limit=1"), http.StatusOK},
+		{"GET /v1/bookmarks", get("/v1/bookmarks?order=saved"), http.StatusOK},
+		{"GET /v1/bookmarks", get("/v1/bookmarks?order=saved&state=failed&host=example.com&cause=anti_bot"),
+			http.StatusOK},
+		{"GET /v1/bookmarks", get("/v1/bookmarks?order=created&content_type=unknown&folder=/Reading"), http.StatusOK},
+		{"GET /v1/bookmarks", get("/v1/bookmarks?order=bogus"), http.StatusBadRequest},
+		{"GET /v1/bookmarks", get("/v1/bookmarks?state=bogus"), http.StatusBadRequest},
+		{"GET /v1/bookmarks", get("/v1/bookmarks?cursor=" + savedCursor), http.StatusBadRequest},
 		{"GET /v1/bookmarks/{id}", get("/v1/bookmarks/" + f.bookmark), http.StatusOK},
 		{"POST /v1/bookmarks", jsonBody(http.MethodPost, "/v1/bookmarks",
 			`{"url":"https://example.com/new","title":"New","folder_path":"/Reading","tags":["go"]}`), http.StatusCreated},
@@ -555,8 +566,9 @@ type contractFixtures struct {
 // TestOpenAPI_ResponsesMatchSchemas enforces: two indexed documents with
 // titles and content, one of them with every optional metadata column and
 // an extraction error message, a document failed as anti-bot and a dead
-// one, two bookmarks (one with a folder and tags), a failed job and done
-// ones, and an interest with a summary.
+// one, three bookmarks (one with a folder and tags, one of the untitled
+// failed document with a title of its own), a failed job and done ones,
+// and an interest with a summary.
 func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	t.Helper()
 	ctx := context.Background()
@@ -602,6 +614,12 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	// A second bookmark, so a page of one has a next page.
 	_, err = s.deps.Bookmarks.Ingest(ctx, &store.Bookmark{TenantID: "local", URL: b.URL,
 		Source: store.SourceFirefox, SavedAt: time.Now().UTC()})
+	require.NoError(t, err)
+	// The failed document's, which names it in the document list and
+	// carries its failure in the bookmark list.
+	blockedTitle := "A blocked page"
+	_, err = s.deps.Bookmarks.Ingest(ctx, &store.Bookmark{TenantID: "local", URL: failed.URL, Title: &blockedTitle,
+		Source: store.SourceSafari, SavedAt: time.Now().UTC().Add(-time.Hour)})
 	require.NoError(t, err)
 
 	interest := s.seedInterest(t, "local", "Kafka", a)

@@ -401,8 +401,8 @@ type DocumentStore interface {
 
 	// ListWithLastError lists the tenant's documents, most recently updated
 	// first (then by ID, descending), each with the error of the most recent
-	// failed job that targeted it and the markdown path of its current
-	// extraction.
+	// failed job that targeted it, the markdown path of its current
+	// extraction, and, for an untitled one, its bookmark title.
 	ListWithLastError(ctx context.Context, tenantID string, opts ListDocumentsOpts) ([]DocumentWithError, error)
 	// GetWithLastError returns one of the tenant's documents as
 	// ListWithLastError lists it. ErrNotFound if the tenant has no such
@@ -501,6 +501,11 @@ type DocumentWithError struct {
 	*Document
 	LastError    string // of the most recent failed job for the document; empty if none
 	MarkdownPath string // current extraction's, relative to the content dir; empty if none
+	// BookmarkTitle names a document with no title of its own: the title
+	// of its most recently saved bookmark (by SavedAt, then ID) whose title
+	// isn't blank. It is empty for a titled document, and for one with no
+	// such bookmark.
+	BookmarkTitle string
 }
 
 // ExtractionStore operates on the document_extractions table.
@@ -526,9 +531,12 @@ type BookmarkStore interface {
 	// given. Ingest is the API path; Create is the low-level insert.
 	Create(ctx context.Context, b *Bookmark) error
 	GetByID(ctx context.Context, id string) (*Bookmark, error)
-	// List lists the tenant's bookmarks, newest first by CreatedAt (then by
-	// ID, descending), each with its document's state.
-	List(ctx context.Context, tenantID string, opts ListBookmarksOpts) ([]BookmarkWithState, error)
+	// List lists the tenant's bookmarks in opts.Order, each with what a
+	// list of them shows of its document: newest first by CreatedAt, when
+	// curio added them, by default, or by SavedAt, when the browser saved
+	// them, in BookmarkOrderSaved; then by ID, descending. An order outside
+	// the BookmarkOrder constants is an error, and nothing is read.
+	List(ctx context.Context, tenantID string, opts ListBookmarksOpts) ([]BookmarkWithDocument, error)
 	// ListByDocument returns the tenant's bookmarks linked to the document,
 	// newest saved first (by SavedAt, then by ID, descending). It is
 	// unpaged: a URL has at most one bookmark per source.
@@ -570,16 +578,49 @@ type IngestResult struct {
 	FetchJob        *Job     // enqueued for a document this call created; nil otherwise
 }
 
-// BookmarkWithState is a bookmark and the state of the document it links
-// to, read in the same query.
-type BookmarkWithState struct {
+// BookmarkWithDocument is a bookmark and what a list of bookmarks shows of
+// the document it links to, read in the same query. The document fields
+// are zero when the bookmark links to no document.
+type BookmarkWithDocument struct {
 	*Bookmark
-	DocumentState DocState // empty when the bookmark links to no document
+	DocumentState        DocState
+	DocumentTitle        *string
+	DocumentContentType  ContentType
+	DocumentFailureCause FailureCause
+	DocumentLastError    string // of the most recent failed job for the document
 }
 
-// ListBookmarksOpts are filters for BookmarkStore.List. Empty fields mean
-// "no filter for that dimension."
+// BookmarkOrder is the order BookmarkStore.List lists bookmarks in.
+type BookmarkOrder string
+
+const (
+	// BookmarkOrderCreated lists bookmarks newest first by when curio
+	// added them (CreatedAt). It is the default: an empty order means it.
+	BookmarkOrderCreated BookmarkOrder = "created"
+	// BookmarkOrderSaved lists them newest first by when the browser saved
+	// them (SavedAt).
+	BookmarkOrderSaved BookmarkOrder = "saved"
+)
+
+// Valid reports whether o is one of the BookmarkOrder constants.
+func (o BookmarkOrder) Valid() bool {
+	return o == BookmarkOrderCreated || o == BookmarkOrderSaved
+}
+
+// Key is b's position in a list in order o, the key of ListBookmarksOpts'
+// After: its SavedAt in BookmarkOrderSaved, its CreatedAt otherwise, and
+// its ID.
+func (o BookmarkOrder) Key(b *Bookmark) PageKey {
+	if o == BookmarkOrderSaved {
+		return PageKey{At: b.SavedAt, ID: b.ID}
+	}
+	return PageKey{At: b.CreatedAt, ID: b.ID}
+}
+
+// ListBookmarksOpts filter and page BookmarkStore.List. Empty fields mean
+// "no filter for that dimension"; the ones set must all match.
 type ListBookmarksOpts struct {
+	Order  BookmarkOrder // empty means BookmarkOrderCreated
 	Source string
 	// FolderPath matches that folder and every folder under it, on path
 	// segments and case-sensitively: "/Tech/AI" matches "/Tech/AI" and
@@ -587,8 +628,19 @@ type ListBookmarksOpts struct {
 	// character is literal, a trailing "/" is ignored, and "/" alone is no
 	// filter.
 	FolderPath string
-	Limit      int     // <= 0 means the impl default (50)
-	After      PageKey // created_at and ID of the previous page's last row
+	// Host matches bookmarks whose http or https URL has exactly this
+	// host, ASCII case-insensitively as DNS names are. Every character is
+	// literal. It is ListDocumentsOpts.Host's rule, on the bookmark's URL,
+	// which is its document's.
+	Host string
+	// State, ContentType and Cause match the bookmark's document, by
+	// ListDocumentsOpts' rules. A bookmark linked to no document matches
+	// none of them.
+	State       DocState
+	ContentType ContentType
+	Cause       FailureCause
+	Limit       int     // <= 0 means the impl default (50)
+	After       PageKey // the previous page's last row's key in Order (BookmarkOrder.Key)
 }
 
 // Chunk is the indexed text segment unit. Each chunk owns one row in the

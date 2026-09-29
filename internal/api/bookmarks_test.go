@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -265,7 +266,9 @@ func TestListBookmarks_Paging(t *testing.T) {
 }
 
 // TestLists_BogusCursor: a cursor this daemon didn't issue is a 400 on every
-// list, never ignored and never a 500.
+// list, never ignored and never a 500, and so is a cursor another order
+// issued: a saved-order cursor on the created order, the documents or the
+// jobs, and a default one on the saved order.
 func TestLists_BogusCursor(t *testing.T) {
 	s := newTestServer(t)
 	for _, path := range []string{"/v1/bookmarks", "/v1/documents", "/v1/jobs"} {
@@ -273,6 +276,155 @@ func TestLists_BogusCursor(t *testing.T) {
 			p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: path + "?cursor=" + cursor}),
 				http.StatusBadRequest)
 			assert.Contains(t, p.Detail, "invalid cursor", "%s?cursor=%s", path, cursor)
+		}
+	}
+
+	key := store.PageKey{At: time.Now(), ID: "b1"}
+	saved, err := encodeCursor(key, "saved")
+	require.NoError(t, err)
+	plain, err := encodeCursor(key, "")
+	require.NoError(t, err)
+	for _, path := range []string{"/v1/bookmarks?cursor=" + saved, "/v1/bookmarks?order=created&cursor=" + saved,
+		"/v1/documents?cursor=" + saved, "/v1/jobs?cursor=" + saved, "/v1/bookmarks?order=saved&cursor=" + plain} {
+		p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: path}), http.StatusBadRequest)
+		assert.Equal(t, "invalid cursor: another list or order issued it; list again from the first page", p.Detail,
+			path)
+	}
+	for _, path := range []string{"/v1/bookmarks?order=saved&cursor=" + saved, "/v1/bookmarks?cursor=" + plain,
+		"/v1/documents?cursor=" + plain, "/v1/jobs?cursor=" + plain} {
+		assert.Equal(t, http.StatusOK, s.do(t, request{method: http.MethodGet, path: path}).status,
+			"%s: a cursor of the list's own order", path)
+	}
+}
+
+// TestListBookmarks_SavedOrder: order=saved lists every save newest saved
+// first, ties broken by ID, a page at a time with cursors of its own; the
+// Library's filters narrow it; each item carries what the list shows of
+// its document, none for a bookmark linked to no document; and an order
+// or filter outside its set is a 400 that names the set, the filters'
+// the same as the document list's.
+func TestListBookmarks_SavedOrder(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	fetched := s.seedDocument(t, "https://a.example/fetched", store.DocStateFetched)
+	_, err := s.db.Exec(`UPDATE documents SET title = 'A page', content_type = 'article' WHERE id = ?`, fetched.ID)
+	require.NoError(t, err)
+	blocked := s.seedFailedDocument(t, "https://b.example/blocked", store.FailureCauseAntiBot)
+	for i, msg := range []string{"an older failure", "the newest failure"} {
+		job, err := store.NewDocumentJob("local", store.JobKindFetch, blocked.ID)
+		require.NoError(t, err)
+		job.Status = store.JobStatusFailed
+		require.NoError(t, s.deps.Queue.Enqueue(ctx, job))
+		_, err = s.db.Exec(`UPDATE jobs SET last_error = ?, updated_at = ? WHERE id = ?`, msg,
+			fmt.Sprintf("2026-09-0%dT00:00:00.000Z", i+1), job.ID)
+		require.NoError(t, err)
+	}
+
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	type seed struct {
+		doc    *store.Document
+		url    string
+		source string
+		folder string
+		saved  time.Time
+	}
+	seeds := []seed{
+		{fetched, fetched.URL, store.SourceChrome, "/Tech/AI", base.Add(-48 * time.Hour)},
+		{fetched, fetched.URL, store.SourceSafari, "/Reading", base}, // the same page, saved twice
+		{blocked, blocked.URL, store.SourceChrome, "/Tech", base},    // a tie on saved_at
+		{nil, "https://a.example/orphan", store.SourceFirefox, "/Tech/AI", base.Add(-time.Hour)},
+		{nil, "https://c.example/newest", store.SourceManual, "", base.Add(time.Hour)},
+	}
+	bookmarks := make([]*store.Bookmark, 0, len(seeds))
+	for _, b := range seeds {
+		bm := &store.Bookmark{TenantID: "local", URL: b.url, Source: b.source, SavedAt: b.saved,
+			FolderPath: store.NullableString(b.folder)}
+		if b.doc != nil {
+			bm.DocumentID = &b.doc.ID
+		}
+		require.NoError(t, s.deps.Bookmarks.Create(ctx, bm))
+		bookmarks = append(bookmarks, bm)
+	}
+	want := slices.Clone(bookmarks)
+	slices.SortFunc(want, func(a, b *store.Bookmark) int {
+		return cmp.Or(b.SavedAt.Compare(a.SavedAt), strings.Compare(b.ID, a.ID))
+	})
+	wantIDs := make([]string, 0, len(want))
+	for _, b := range want {
+		wantIDs = append(wantIDs, b.ID)
+	}
+	ids := func(list BookmarkListResponse) []string {
+		out := make([]string, 0, len(list.Items))
+		for _, item := range list.Items {
+			out = append(out, item.ID)
+		}
+		return out
+	}
+
+	assert.Equal(t, wantIDs, ids(s.listBookmarks(t, "?order=saved")), "newest saved first, ties by ID")
+	var walked []string
+	query := "?order=saved&limit=1"
+	for range len(want) + 1 {
+		page := s.listBookmarks(t, query)
+		walked = append(walked, ids(page)...)
+		if page.NextCursor == "" {
+			break
+		}
+		query = "?order=saved&limit=1&cursor=" + page.NextCursor
+	}
+	assert.Equal(t, wantIDs, walked, "a page at a time, every save once")
+
+	orphan, pagePair := bookmarks[3].ID, []string{bookmarks[0].ID, bookmarks[1].ID}
+	for query, want := range map[string][]string{
+		"&state=fetched":                  pagePair,
+		"&state=failed":                   {bookmarks[2].ID},
+		"&content_type=article":           pagePair,
+		"&host=A.EXAMPLE":                 append([]string{orphan}, pagePair...),
+		"&cause=anti_bot":                 {bookmarks[2].ID},
+		"&folder=/Tech/AI":                {bookmarks[0].ID, orphan},
+		"&source=safari":                  {bookmarks[1].ID},
+		"&state=fetched&folder=/Reading":  {bookmarks[1].ID},
+		"&state=dead":                     {},
+		"&host=b.example&cause=dead_link": {},
+	} {
+		assert.ElementsMatch(t, want, ids(s.listBookmarks(t, "?order=saved"+query)), query)
+	}
+
+	items := map[string]BookmarkListItem{}
+	for _, item := range s.listBookmarks(t, "?order=saved").Items {
+		items[item.ID] = item
+	}
+	page := items[bookmarks[1].ID]
+	require.NotNil(t, page.DocumentTitle)
+	assert.Equal(t, "A page", *page.DocumentTitle)
+	assert.Equal(t, "article", page.DocumentContentType)
+	assert.Equal(t, "fetched", page.DocumentState)
+	assert.Empty(t, page.DocumentFailureCause)
+	failed := items[bookmarks[2].ID]
+	assert.Nil(t, failed.DocumentTitle)
+	assert.Equal(t, "failed", failed.DocumentState)
+	assert.Equal(t, "anti_bot", failed.DocumentFailureCause)
+	assert.Equal(t, "the newest failure", failed.DocumentLastError)
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/bookmarks?order=saved&source=firefox"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	for _, field := range []string{"document_id", "document_state", "document_title", "document_content_type",
+		"document_failure_cause", "document_last_error"} {
+		assert.NotContains(t, resp.body, `"`+field+`"`, "a bookmark linked to no document")
+	}
+
+	for path, detail := range map[string]string{
+		"/v1/bookmarks?order=bogus":        `order "bogus" must be one of: created, saved`,
+		"/v1/bookmarks?order=updated":      `order "updated" must be one of: created, saved`,
+		"/v1/bookmarks?state=bogus":        `state "bogus" must be one of: pending, fetched, failed, dead`,
+		"/v1/bookmarks?content_type=bogus": `content_type "bogus" must be one of: ` + contentTypeList,
+		"/v1/bookmarks?cause=bogus":        `cause "bogus" must be one of: ` + failureCauseList,
+	} {
+		p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: path}), http.StatusBadRequest)
+		assert.Equal(t, detail, p.Detail, path)
+		documents := strings.Replace(path, "/v1/bookmarks", "/v1/documents", 1)
+		if !strings.Contains(path, "order=") {
+			p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: documents}), http.StatusBadRequest)
+			assert.Equal(t, detail, p.Detail, "%s: the same as the document list's", documents)
 		}
 	}
 }

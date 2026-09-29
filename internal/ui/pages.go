@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"strings"
 	"time"
 
@@ -433,7 +434,9 @@ type Match struct {
 	Vector   *float64
 }
 
-// Library is a page of documents under the filters.
+// Library is a page of the library under the filters: documents, most
+// recently updated first, or in the Date saved order saves, newest saved
+// first.
 type Library struct {
 	Layout     Layout
 	Filters    LibraryFilters
@@ -500,27 +503,46 @@ func (l Library) CountsApply() bool {
 // the pages before it showed, and its own.
 func (l Library) ShownThrough() int { return l.Shown + len(l.Rows) }
 
-// OfTotal is how many documents the rows shown are of, for "Showing N of
-// M": the current state's count, or 0 when the counts don't apply, or
-// fall behind the rows shown, as they do when the library changed between
-// pages.
+// OfTotal is how many rows the rows shown are of, for "Showing N of M":
+// in the Date saved order the library's bookmarks, with no filter at all,
+// and otherwise the current state's documents, when the counts apply. It
+// is 0 when there is no such count, or it falls behind the rows shown, as
+// it does when the library changed between pages.
 func (l Library) OfTotal() int {
-	if !l.CountsApply() {
+	var total int
+	switch saved := l.Filters.Saved(); {
+	case saved && l.Counts != nil && !l.Filters.Filtered():
+		total = l.Counts.Bookmarks
+	case !saved && l.CountsApply():
+		total = l.Counts.state(l.Filters.State)
+	default:
 		return 0
 	}
-	if total := l.Counts.state(l.Filters.State); l.ShownThrough() <= total {
-		return total
+	if l.ShownThrough() > total {
+		return 0
 	}
-	return 0
+	return total
 }
 
-// LibraryFilters are a Library page's query, the parameters GET
-// /v1/documents takes. Empty fields filter nothing; Limit 0 is the default
-// page size.
+// The Library's orders, as its order parameter names them: Last updated,
+// the default, lists documents, and Date saved lists saves. Links leave
+// the default out.
+const (
+	OrderUpdated = "updated"
+	OrderSaved   = "saved"
+)
+
+// LibraryFilters are a Library page's query: its order, and the filters
+// GET /v1/documents and GET /v1/bookmarks take. Empty fields filter
+// nothing; Limit 0 is the default page size. The order is no filter.
 type LibraryFilters struct {
+	Order                                   string // "" for Last updated, or OrderSaved
 	State, ContentType, Host, Folder, Cause string
 	Limit                                   int
 }
+
+// Saved reports whether the page lists saves, in the Date saved order.
+func (f LibraryFilters) Saved() bool { return f.Order == OrderSaved }
 
 // Filter is one filter a Library page applies: its name and value.
 type Filter struct {
@@ -542,35 +564,73 @@ func (f LibraryFilters) Active() []Filter {
 // Filtered reports whether any filter filters something.
 func (f LibraryFilters) Filtered() bool { return len(f.Active()) > 0 }
 
-// LibraryRow is one document in the list. LastError and FailureCause are
-// set only while the document is failed or dead.
+// LibraryRow is one row of the list: a document, or in the Date saved
+// order a save and its document. LastError and FailureCause are set only
+// while the document is failed or dead.
 type LibraryRow struct {
-	DocumentID   string
-	Title        string // empty for an untitled document
-	URL          string
-	State        string
-	ContentType  string
-	UpdatedAt    time.Time
-	LastError    string
-	FailureCause string
+	DocumentID string // empty for a save linked to no document
+	Title      string // the document's; empty for an untitled document
+	// BookmarkTitle names an untitled document: its newest titled
+	// bookmark's title, or in the Date saved order the save's own.
+	BookmarkTitle string
+	URL           string
+	State         string // the document's; empty for a save linked to none
+	ContentType   string
+	When          time.Time // the time column's: when the document was updated, or the page saved
+	Source        string    // the browser a save came from; empty for a document
+	Folder        string    // the folder it was saved in
+	LastError     string
+	FailureCause  string
 }
 
-// Cell is the row's document cell: a titled document's short URL under its
-// title, an untitled one's host under its short URL.
+// Cell is the row's document cell: its name, with its short URL under it,
+// or its host when only its address names it, and, for a save, the
+// browser it came from.
 func (r LibraryRow) Cell() DocCell {
+	ref := DocRef{ID: r.DocumentID, Title: r.Title, Fallback: r.BookmarkTitle, URL: r.URL}
 	where := shortURL(r.URL)
-	if r.Title == "" {
+	if !ref.Named() {
 		where = host(r.URL)
 	}
-	return DocCell{Ref: DocRef{ID: r.DocumentID, Title: r.Title, URL: r.URL}, Where: where,
-		ContentType: r.ContentType, When: r.UpdatedAt, FailureCause: r.FailureCause, LastError: r.LastError}
+	return DocCell{Ref: ref, Where: where, Source: r.Source, Folder: r.Folder, ContentType: r.ContentType,
+		When: r.When, FailureCause: r.FailureCause, LastError: r.LastError}
 }
 
 // DocRef names a document in a list (the doc-title partial): by its
-// title, or by its short URL while it has none, linking to its page when
-// it has an ID.
+// title; while it has none, by Fallback, a bookmark's title, styled as
+// one; or by its short URL. It links to its page when it has an ID.
 type DocRef struct {
 	ID, Title, URL string
+	Fallback       string
+}
+
+// Named reports whether a title or a fallback names the document, rather
+// than its address.
+func (r DocRef) Named() bool { return r.Title != "" || r.Fallback != "" }
+
+// Name is what a list calls the document: its title, its fallback, or its
+// short URL.
+func (r DocRef) Name() string {
+	if r.Named() {
+		return cmp.Or(r.Title, r.Fallback)
+	}
+	return shortURL(r.URL)
+}
+
+// Hover is the whole of its name, shown on hover: its title, its
+// fallback, or its URL.
+func (r DocRef) Hover() string { return cmp.Or(r.Title, r.Fallback, r.URL) }
+
+// Class is the class its name carries besides doc-title: from-bookmark
+// for a fallback, untitled for its address, and none for its title.
+func (r DocRef) Class() string {
+	switch {
+	case r.Title != "":
+		return ""
+	case r.Fallback != "":
+		return "from-bookmark"
+	}
+	return "untitled"
 }
 
 // DocCell is a document as a list's first column shows it (the doc-cell
@@ -579,10 +639,10 @@ type DocRef struct {
 type DocCell struct {
 	Ref   DocRef
 	Where string // under its name: where it lives
-	// Source is the browser a bookmark came from, for a list of pages as
-	// they were saved, which no page lists yet; a list of documents leaves
-	// it empty.
+	// Source is the browser a save came from, and Folder the folder it was
+	// saved in, for a list of saves; a list of documents leaves both empty.
 	Source       string
+	Folder       string
 	ContentType  string    // shown here on a phone, whose table has no Type column
 	When         time.Time // shown here on a phone, whose table has no time column
 	FailureCause string
@@ -712,19 +772,22 @@ func (l JobLine) Attempt() int {
 // DocumentMeta is what the library knows about a document. Zero values are
 // unknown.
 type DocumentMeta struct {
-	ID           string
-	Title        string
-	URL          string
-	CanonicalURL string
-	ContentType  string
-	State        string
-	Author       string
-	Language     string
-	PublishedAt  time.Time
-	WordCount    int
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	MarkdownPath string // absolute; empty when it has none
+	ID    string
+	Title string
+	// BookmarkTitle names an untitled document: its newest titled
+	// bookmark's title. Empty for a titled document, or one without.
+	BookmarkTitle string
+	URL           string
+	CanonicalURL  string
+	ContentType   string
+	State         string
+	Author        string
+	Language      string
+	PublishedAt   time.Time
+	WordCount     int
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	MarkdownPath  string // absolute; empty when it has none
 }
 
 // Extraction is how the document's current text was fetched.

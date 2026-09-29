@@ -129,6 +129,26 @@ func TestNewDocumentJob(t *testing.T) {
 	assert.Equal(t, "doc-1", p.DocumentID)
 }
 
+func TestBookmarkOrder_Valid(t *testing.T) {
+	for _, o := range []store.BookmarkOrder{store.BookmarkOrderCreated, store.BookmarkOrderSaved} {
+		assert.True(t, o.Valid(), o)
+	}
+	for _, o := range []store.BookmarkOrder{"", "updated", "Saved", "saved_at"} {
+		assert.False(t, o.Valid(), o)
+	}
+}
+
+// TestBookmarkOrder_Key: a bookmark's position is its save time in the
+// saved order, and when curio added it otherwise, the default included.
+func TestBookmarkOrder_Key(t *testing.T) {
+	saved := time.Date(2019, 5, 1, 12, 0, 0, 0, time.UTC)
+	created := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	b := &store.Bookmark{ID: "b1", SavedAt: saved, CreatedAt: created}
+	assert.Equal(t, store.PageKey{At: saved, ID: "b1"}, store.BookmarkOrderSaved.Key(b))
+	assert.Equal(t, store.PageKey{At: created, ID: "b1"}, store.BookmarkOrderCreated.Key(b))
+	assert.Equal(t, store.PageKey{At: created, ID: "b1"}, store.BookmarkOrder("").Key(b), "the default order")
+}
+
 func TestSearchFilters_IsEmpty(t *testing.T) {
 	assert.True(t, store.SearchFilters{}.IsEmpty())
 	assert.True(t, store.SearchFilters{ContentType: []string{}, Host: []string{}}.IsEmpty(), "empty slices filter nothing")

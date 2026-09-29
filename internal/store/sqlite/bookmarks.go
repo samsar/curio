@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -194,20 +195,23 @@ func (s *Bookmarks) GetByID(ctx context.Context, id string) (*store.Bookmark, er
 	return scanBookmark(row)
 }
 
-// List reads each bookmark's document state through a join, so a page is
-// one query however many bookmarks it holds.
-func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBookmarksOpts) ([]store.BookmarkWithState, error) {
-	q, args := listBookmarksQuery(tenantID, opts)
+// List reads what each bookmark's row shows of its document through a
+// join, so a page is one query however many bookmarks it holds.
+func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBookmarksOpts) ([]store.BookmarkWithDocument, error) {
+	q, args, err := listBookmarksQuery(tenantID, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list bookmarks: %w", err)
+	}
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list bookmarks: %w", err)
 	}
 	defer rows.Close()
 
-	var out []store.BookmarkWithState
+	var out []store.BookmarkWithDocument
 	for rows.Next() {
-		var item store.BookmarkWithState
-		if item.Bookmark, err = scanBookmark(rows, &item.DocumentState); err != nil {
+		item, err := scanBookmarkWithDocument(rows)
+		if err != nil {
 			return nil, fmt.Errorf("list bookmarks: %w", err)
 		}
 		out = append(out, item)
@@ -218,13 +222,47 @@ func (s *Bookmarks) List(ctx context.Context, tenantID string, opts store.ListBo
 	return out, nil
 }
 
-// listBookmarksQuery builds List's query. A page walks
-// idx_bookmarks_tenant_created in (created_at, id) order from opts.After,
-// checking the source and folder filters per row, so it reads about one
-// page of rows, not every bookmark the tenant has.
-func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, []any) {
+// scanBookmarkWithDocument scans a row of listBookmarksQuery.
+func scanBookmarkWithDocument(row interface{ Scan(...any) error }) (store.BookmarkWithDocument, error) {
+	var (
+		item  store.BookmarkWithDocument
+		title sql.NullString
+		err   error
+	)
+	item.Bookmark, err = scanBookmark(row, &item.DocumentState, &title, &item.DocumentContentType,
+		&item.DocumentFailureCause, &item.DocumentLastError)
+	if err != nil {
+		return store.BookmarkWithDocument{}, err
+	}
+	item.DocumentTitle = nullableString(title)
+	return item, nil
+}
+
+// bookmarkOrderColumns are the timestamps each BookmarkOrder lists by,
+// newest first: those of idx_bookmarks_tenant_created and
+// idx_bookmarks_tenant_saved, each followed by id, which ends the index.
+var bookmarkOrderColumns = map[store.BookmarkOrder]string{
+	store.BookmarkOrderCreated: "b.created_at",
+	store.BookmarkOrderSaved:   "b.saved_at",
+}
+
+// listBookmarksQuery builds List's query, or refuses an order outside the
+// BookmarkOrder constants. A page walks its order's index in (timestamp,
+// id) order from opts.After, checking every filter on each row it reads,
+// so it reads about one page of rows unless a filter matches few. Source,
+// folder and host are the bookmark's, the host on its URL, which is its
+// document's (ingest keys the document by it), so a row they reject costs
+// no document lookup. State, type and cause are the document's, reached by
+// its primary key, and the last error, as ListWithLastError reads it, runs
+// only for the rows returned.
+func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, []any, error) {
+	order := cmp.Or(opts.Order, store.BookmarkOrderCreated)
+	ts, ok := bookmarkOrderColumns[order]
+	if !ok {
+		return "", nil, fmt.Errorf("unknown order %q", opts.Order)
+	}
 	clauses := []string{"b.tenant_id = ?"}
-	args := []any{tenantID}
+	args := []any{store.JobStatusFailed, tenantID}
 	if opts.Source != "" {
 		clauses = append(clauses, "b.source = ?")
 		args = append(args, opts.Source)
@@ -233,23 +271,40 @@ func listBookmarksQuery(tenantID string, opts store.ListBookmarksOpts) (string, 
 		clauses = append(clauses, cond)
 		args = append(args, condArgs...)
 	}
+	if opts.Host != "" {
+		cond, condArgs := hostPredicate("b.url", opts.Host)
+		clauses = append(clauses, cond)
+		args = append(args, condArgs...)
+	}
+	if opts.State != "" {
+		clauses = append(clauses, "d.state = ?")
+		args = append(args, opts.State)
+	}
+	if opts.ContentType != "" {
+		clauses = append(clauses, "d.content_type = ?")
+		args = append(args, opts.ContentType)
+	}
+	if opts.Cause != "" {
+		clauses = append(clauses, "d.failure_cause = ?")
+		args = append(args, opts.Cause)
+	}
 	if !opts.After.IsZero() {
-		pred, predArgs := keysetAfter("b.created_at", "b.id", opts.After)
+		pred, predArgs := keysetAfter(ts, "b.id", opts.After)
 		clauses = append(clauses, pred)
 		args = append(args, predArgs...)
 	}
-	q := "SELECT " + qualify("b", bookmarkColumns) + ", COALESCE(d.state, '')" +
+	q := "SELECT " + qualify("b", bookmarkColumns) + ", COALESCE(d.state, ''), d.title," +
+		" COALESCE(d.content_type, ''), COALESCE(d.failure_cause, ''), " + lastErrorSQL +
 		" FROM bookmarks b LEFT JOIN documents d ON d.id = b.document_id" +
 		" WHERE " + strings.Join(clauses, " AND ") +
-		" ORDER BY b.created_at DESC, b.id DESC LIMIT ?"
-	return q, append(args, listLimit(opts.Limit))
+		" ORDER BY " + ts + " DESC, b.id DESC LIMIT ?"
+	return q, append(args, listLimit(opts.Limit)), nil
 }
 
 // listBookmarksByDocumentSQL reads a document's bookmarks. Its args are the
-// tenant and the document. It orders by saved_at, which leaves SQLite
-// seeking idx_bookmarks_document and sorting the few rows it finds;
-// ordered by created_at, it would walk idx_bookmarks_tenant_created
-// through every bookmark the tenant has to skip that sort.
+// tenant and the document. It seeks idx_bookmarks_document, which holds a
+// document's bookmarks in (saved_at, id) order, so it reads them in the
+// order it returns them.
 const listBookmarksByDocumentSQL = "SELECT " + bookmarkColumns +
 	" FROM bookmarks WHERE tenant_id = ? AND document_id = ? ORDER BY saved_at DESC, id DESC"
 

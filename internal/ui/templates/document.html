@@ -15,7 +15,7 @@ so a poll never replaces a button, and only their status announces.
 <div class="doc-head">
 {{with .Meta}}
 <nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "library"}}">Library</a>{{with host .URL}}<span class="sep">/</span><span>{{.}}</span>{{end}}</nav>
-<h1>{{or .Title (shortURL .URL)}}</h1>
+{{if .Title}}<h1>{{.Title}}</h1>{{else if .BookmarkTitle}}<h1 class="from-bookmark">{{.BookmarkTitle}}</h1>{{else}}<h1>{{shortURL .URL}}</h1>{{end}}
 <p class="doc-url">{{template "icon" "external"}}{{with outbound .URL}}<a href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{else}}<span class="truncate">{{.URL}}</span>{{end}}</p>
 <div class="meta-row">{{template "state-badge" .State}}{{with .ContentType}}<span class="tag">{{template "icon" (typeIcon .)}}{{.}}</span>{{end}}
 {{- with .WordCount}}<span class="text">{{count . "word" "words"}}</span>{{end}}

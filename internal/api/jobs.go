@@ -143,7 +143,7 @@ func listJobsOpts(r *http.Request) (store.ListJobsOpts, error) {
 	if err != nil {
 		return store.ListJobsOpts{}, err
 	}
-	if opts.After, err = cursorParam(r); err != nil {
+	if opts.After, err = cursorParam(r, ""); err != nil {
 		return store.ListJobsOpts{}, err
 	}
 	opts.Limit = listLimit(r)
@@ -161,7 +161,7 @@ func (d Deps) listJobs(ctx context.Context, opts store.ListJobsOpts) (JobListRes
 	if err != nil {
 		return JobListResponse{}, err
 	}
-	jobs, next, err := onePage(jobs, limit, func(j store.JobWithDoc) store.PageKey {
+	jobs, next, err := onePage(jobs, limit, "", func(j store.JobWithDoc) store.PageKey {
 		return store.PageKey{At: j.UpdatedAt, ID: j.ID}
 	})
 	if err != nil {

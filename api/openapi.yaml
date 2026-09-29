@@ -31,11 +31,14 @@ info:
         (`limit`, `members`, `k`, `window`) are never refused: a value
         outside their range, or not a number, means their default.
       - The bookmark, document and job lists return `{ items, next_cursor }`,
-        `next_cursor` present exactly when another page follows. Pages are
-        keyset-based: they never overlap, inserts don't shift them, and a
-        row updated mid-walk moves ahead of the cursor. Cursors are opaque;
-        one a daemon upgrade invalidated is a 400, and the walk starts
-        again.
+        `next_cursor` present exactly when another page follows. Documents
+        and jobs come most recently updated first; bookmarks newest first
+        by when curio added them, or with `order=saved` by when the browser
+        saved them. Pages are keyset-based: they never overlap, inserts
+        don't shift them, and a row updated mid-walk moves ahead of the
+        cursor. Cursors are opaque and page only the list and order that
+        issued them; any other, or one a daemon upgrade invalidated, is a
+        400, and the walk starts again.
       - Work that runs in the background answers 202: with a `job_id` to
         poll at `GET /v1/jobs/{id}` (refetch, reindex, interests rebuild),
         or with `jobs_enqueued` for the bulk refetch-all and reindex-all,
@@ -176,8 +179,27 @@ paths:
     get:
       tags: [bookmarks]
       operationId: listBookmarks
-      summary: List bookmarks, newest first
+      summary: List bookmarks, newest added or newest saved first
+      description: >
+        Bookmarks newest first by when curio added them, or with
+        `order=saved` by when the browser saved them; a page saved in two
+        browsers is two bookmarks. Every filter given must match: source,
+        folder and host on the bookmark, state, content type and cause on
+        its document, which a bookmark linked to no document never matches.
+        Each filter is checked on the bookmarks the list walks in its
+        order, so one that matches few bookmarks reads more of the list to
+        fill a page.
       parameters:
+        - in: query
+          name: order
+          description: >
+            `created` (the default) lists bookmarks newest first by when
+            curio added them (`created_at`), which follows imports: an
+            import's bookmarks come together. `saved` lists them newest
+            first by when the browser saved them (`saved_at`). Safari keeps
+            no save dates, so its bookmarks carry the time curio imported
+            them. A cursor pages only the order that issued it.
+          schema: { type: string, enum: [created, saved], default: created }
         - in: query
           name: source
           schema: { $ref: "#/components/schemas/Source" }
@@ -188,11 +210,30 @@ paths:
             and case-sensitively; a trailing "/" is ignored and "/" alone is
             no filter.
           schema: { type: string }
+        - in: query
+          name: host
+          description: >
+            Bookmarks whose http or https URL has exactly this host, matched
+            case-insensitively, every character literal (no wildcards, no
+            subdomains), as the document list's host filter matches it.
+          schema: { type: string }
+        - in: query
+          name: state
+          description: Bookmarks whose document is in this state.
+          schema: { $ref: "#/components/schemas/DocState" }
+        - in: query
+          name: content_type
+          description: Bookmarks whose document has this content type.
+          schema: { $ref: "#/components/schemas/ContentType" }
+        - in: query
+          name: cause
+          description: Bookmarks whose document failed for this cause (dead ones for dead_link).
+          schema: { $ref: "#/components/schemas/FailureCause" }
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Cursor" }
       responses:
         "200":
-          description: One page of bookmarks, each with its document's state
+          description: One page of bookmarks, each with what the list shows of its document
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BookmarkList" }
@@ -826,7 +867,9 @@ components:
     Cursor:
       in: query
       name: cursor
-      description: The next_cursor of the previous page.
+      description: >
+        The next_cursor of the previous page. A cursor pages only the list,
+        and the order, that issued it; any other is a 400.
       schema: { type: string }
 
   responses:
@@ -843,7 +886,9 @@ components:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
     BadRequest:
-      description: A filter parameter outside its enum, or a cursor this daemon didn't issue.
+      description: >
+        A filter or order parameter outside its enum, or a cursor this
+        daemon didn't issue for this list and order.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -1129,10 +1174,34 @@ components:
         updated_at:     { type: string, format: date-time }
       required: [id, url, saved_at, source, created_at, updated_at]
 
+    BookmarkListItem:
+      type: object
+      description: >
+        A bookmark as the list shows it: the Bookmark, and what the list
+        shows of its document. The document fields are absent when empty,
+        and all of them when the bookmark links to no document.
+      properties:
+        id:                     { type: string, format: uuid }
+        url:                    { type: string, format: uri }
+        title:                  { type: string }
+        saved_at:               { type: string, format: date-time }
+        source:                 { $ref: "#/components/schemas/Source" }
+        folder_path:            { type: string }
+        tags:                   { type: array, items: { type: string } }
+        document_id:            { type: string, format: uuid, description: "Absent once the document is deleted" }
+        document_state:         { $ref: "#/components/schemas/DocState" }
+        document_title:         { type: string, description: "The document's own title, from its fetch" }
+        document_content_type:  { $ref: "#/components/schemas/ContentType" }
+        document_failure_cause: { $ref: "#/components/schemas/FailureCause" }
+        document_last_error:    { type: string, description: "Of the most recent failed job for the document" }
+        created_at:             { type: string, format: date-time }
+        updated_at:             { type: string, format: date-time }
+      required: [id, url, saved_at, source, created_at, updated_at]
+
     BookmarkList:
       type: object
       properties:
-        items:       { type: array, items: { $ref: "#/components/schemas/Bookmark" } }
+        items:       { type: array, items: { $ref: "#/components/schemas/BookmarkListItem" } }
         next_cursor: { type: string, description: "Present exactly when another page follows; pass it as ?cursor" }
       required: [items]
 
@@ -1261,6 +1330,11 @@ components:
         failure_cause: { $ref: "#/components/schemas/FailureCause" }
         last_error:    { type: string, description: "Of the most recent failed job for the document" }
         markdown_path: { type: string, description: "Absolute on-disk path to the current extraction's markdown" }
+        bookmark_title:
+          type: string
+          description: >
+            Set only when the document has no title of its own: the title
+            of its most recently saved bookmark that has one.
         created_at:    { type: string, format: date-time }
         updated_at:    { type: string, format: date-time }
       required: [id, url, content_type, state, created_at, updated_at]

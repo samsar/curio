@@ -354,3 +354,203 @@ func TestBookmarks_PreviewIngestEmpty(t *testing.T) {
 	_, err = bms.PreviewIngest(context.Background(), "local", store.SourceChrome, []string{"https://x/a"})
 	require.Error(t, err, "a URL is asked about")
 }
+
+// seedBookmarkAt inserts bookmark id of url from source, linked to the
+// document docID ("" for none), saved at saved and added to curio at
+// created, both in the store's time format.
+func seedBookmarkAt(t *testing.T, db *DB, id, docID, url, source, saved, created string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO bookmarks (id, tenant_id, document_id, url, saved_at, source, created_at)
+		VALUES (?, 'local', ?, ?, ?, ?, ?)`, id, store.NullableString(docID), url, saved, source, created)
+	require.NoError(t, err)
+}
+
+// listBookmarkIDs lists the IDs of the tenant's bookmarks under opts, in
+// the order List returns them.
+func listBookmarkIDs(t *testing.T, bms *Bookmarks, opts store.ListBookmarksOpts) []string {
+	t.Helper()
+	got, err := bms.List(context.Background(), "local", opts)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(got))
+	for _, b := range got {
+		ids = append(ids, b.ID)
+	}
+	return ids
+}
+
+// TestBookmarks_ListOrders: the default order is newest added first, the
+// saved order newest saved first, each broken by ID, and a cursor page of
+// either starts after its own key: here the two disagree on every row.
+func TestBookmarks_ListOrders(t *testing.T) {
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	seedBookmarkAt(t, db, "b1", "", "https://example.com/1", store.SourceSafari,
+		"2020-01-01T00:00:00.000Z", "2026-01-04T00:00:00.000Z")
+	seedBookmarkAt(t, db, "b2", "", "https://example.com/2", store.SourceChrome,
+		"2024-01-01T00:00:00.000Z", "2026-01-03T00:00:00.000Z")
+	seedBookmarkAt(t, db, "b3", "", "https://example.com/3", store.SourceChrome,
+		"2022-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z")
+	seedBookmarkAt(t, db, "b4", "", "https://example.com/4", store.SourceFirefox,
+		"2024-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z")
+
+	created := []string{"b1", "b2", "b3", "b4"}
+	assert.Equal(t, created, listBookmarkIDs(t, bms, store.ListBookmarksOpts{}), "the default order")
+	assert.Equal(t, created, listBookmarkIDs(t, bms, store.ListBookmarksOpts{Order: store.BookmarkOrderCreated}))
+	assert.Equal(t, []string{"b4", "b2", "b3", "b1"},
+		listBookmarkIDs(t, bms, store.ListBookmarksOpts{Order: store.BookmarkOrderSaved}),
+		"newest saved first, a tie broken by ID")
+
+	b2, err := bms.GetByID(context.Background(), "b2")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"b3", "b1"}, listBookmarkIDs(t, bms,
+		store.ListBookmarksOpts{Order: store.BookmarkOrderSaved, After: store.BookmarkOrderSaved.Key(b2)}))
+	assert.Equal(t, []string{"b3", "b4"}, listBookmarkIDs(t, bms,
+		store.ListBookmarksOpts{Order: store.BookmarkOrderCreated, After: store.BookmarkOrderCreated.Key(b2)}))
+
+	for _, order := range []store.BookmarkOrder{"updated", "SAVED", "saved_at"} {
+		got, err := bms.List(context.Background(), "local", store.ListBookmarksOpts{Order: order})
+		assert.ErrorContains(t, err, "unknown order", order)
+		assert.Nil(t, got, order)
+	}
+}
+
+// bookmarkListFixture is a library for the bookmark list's filters: each
+// document's bookmarks, two of them the same page saved in two browsers,
+// and bookmarks linked to no document.
+type bookmarkListFixture struct {
+	pagePair             [2]string // a titled fetched article's two bookmarks, chrome and safari
+	blocked, gone, weird string    // the bookmarks of a failed, a dead and an odd-hosted document
+	orphan, filed        string    // two bookmarks linked to no document, one filed in /Tech/AI
+}
+
+func seedBookmarkList(t *testing.T, db *DB) bookmarkListFixture {
+	t.Helper()
+	ctx := context.Background()
+	docs, bms := NewDocuments(db), NewBookmarks(db)
+	title := "A page"
+	page := &store.Document{TenantID: "local", URL: "https://a.example/page", State: store.DocStateFetched,
+		ContentType: store.ContentTypeArticle, Title: &title}
+	blocked := &store.Document{TenantID: "local", URL: "https://b.example/blocked",
+		FailureCause: store.FailureCauseAntiBot}
+	gone := &store.Document{TenantID: "local", URL: "https://a.example/gone.pdf", ContentType: store.ContentTypePDF,
+		FailureCause: store.FailureCauseDeadLink}
+	weird := &store.Document{TenantID: "local", URL: "https://a_b.example/x", State: store.DocStateFetched}
+	for _, d := range []*store.Document{page, blocked, gone, weird} {
+		require.NoError(t, docs.Create(ctx, d))
+	}
+	save := func(doc *store.Document, url, source, folder string) string {
+		t.Helper()
+		b := &store.Bookmark{TenantID: "local", URL: url, Source: source, SavedAt: time.Now().UTC(),
+			FolderPath: store.NullableString(folder)}
+		if doc != nil {
+			b.DocumentID = &doc.ID
+		}
+		require.NoError(t, bms.Create(ctx, b))
+		return b.ID
+	}
+	return bookmarkListFixture{
+		pagePair: [2]string{save(page, page.URL, store.SourceChrome, "/Tech/AI"),
+			save(page, page.URL, store.SourceSafari, "/Tech/AIRPLANES")},
+		blocked: save(blocked, blocked.URL, store.SourceChrome, "/Tech"),
+		gone:    save(gone, gone.URL, store.SourceFirefox, "/Reading"),
+		weird:   save(weird, weird.URL, store.SourceChrome, ""),
+		orphan:  save(nil, "https://axb.example/x", store.SourceChrome, ""),
+		filed:   save(nil, "https://a.example/filed", store.SourceManual, "/Tech/AI"),
+	}
+}
+
+// TestBookmarks_ListFilters: each filter alone and all of them together,
+// in both orders. A page saved in two browsers is listed once per
+// bookmark; a bookmark linked to no document is listed unfiltered, and by
+// the bookmark's own filters, but matches no filter on a document. The
+// host matches case-insensitively with every character literal, and the
+// folder on path segments.
+func TestBookmarks_ListFilters(t *testing.T) {
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	f := seedBookmarkList(t, db)
+	page := f.pagePair[:]
+	cases := map[string]struct {
+		opts store.ListBookmarksOpts
+		want []string
+	}{
+		"unfiltered": {store.ListBookmarksOpts{},
+			append([]string{f.blocked, f.gone, f.weird, f.orphan, f.filed}, page...)},
+		"source":             {store.ListBookmarksOpts{Source: store.SourceSafari}, []string{f.pagePair[1]}},
+		"folder":             {store.ListBookmarksOpts{FolderPath: "/Tech/AI"}, []string{f.pagePair[0], f.filed}},
+		"host":               {store.ListBookmarksOpts{Host: "A.Example"}, append([]string{f.gone, f.filed}, page...)},
+		"host, _ literal":    {store.ListBookmarksOpts{Host: "a_b.example"}, []string{f.weird}},
+		"host, % literal":    {store.ListBookmarksOpts{Host: "a%"}, nil},
+		"state":              {store.ListBookmarksOpts{State: store.DocStateFetched}, append([]string{f.weird}, page...)},
+		"state, failed":      {store.ListBookmarksOpts{State: store.DocStateFailed}, []string{f.blocked}},
+		"content type":       {store.ListBookmarksOpts{ContentType: store.ContentTypePDF}, []string{f.gone}},
+		"content type, any":  {store.ListBookmarksOpts{ContentType: store.ContentTypeUnknown}, []string{f.blocked, f.weird}},
+		"cause":              {store.ListBookmarksOpts{Cause: store.FailureCauseDeadLink}, []string{f.gone}},
+		"a cause no one has": {store.ListBookmarksOpts{Cause: store.FailureCauseTLS}, nil},
+		"every filter": {store.ListBookmarksOpts{Source: store.SourceChrome, FolderPath: "/Tech", Host: "b.example",
+			State: store.DocStateFailed, ContentType: store.ContentTypeUnknown, Cause: store.FailureCauseAntiBot},
+			[]string{f.blocked}},
+		"every filter, one off": {store.ListBookmarksOpts{Source: store.SourceChrome, FolderPath: "/Tech",
+			Host: "b.example", State: store.DocStateFailed, ContentType: store.ContentTypeUnknown,
+			Cause: store.FailureCauseLoginWall}, nil},
+	}
+	for name, tc := range cases {
+		for _, order := range []store.BookmarkOrder{store.BookmarkOrderCreated, store.BookmarkOrderSaved} {
+			t.Run(name+" in "+string(order)+" order", func(t *testing.T) {
+				tc.opts.Order = order
+				assert.ElementsMatch(t, tc.want, listBookmarkIDs(t, bms, tc.opts))
+			})
+		}
+	}
+}
+
+// TestBookmarks_ListDocumentFields: a row carries its document's state,
+// title, type and cause, and the error of its most recent failed job, not
+// an older one's; a bookmark linked to no document carries none of them.
+func TestBookmarks_ListDocumentFields(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	f := seedBookmarkList(t, db)
+	blocked, err := bms.GetByID(ctx, f.blocked)
+	require.NoError(t, err)
+	for i, job := range []struct{ status, lastError, at string }{
+		{"failed", "the older failure", "2026-09-01T00:00:00.000Z"},
+		{"failed", "the newest failure", "2026-09-03T00:00:00.000Z"},
+		{"done", "", "2026-09-04T00:00:00.000Z"},
+		{"failed", "the oldest failure", "2026-08-01T00:00:00.000Z"},
+	} {
+		_, err := db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, last_error, updated_at, document_id)
+			VALUES (?, 'local', 'fetch', json_object('document_id', ?), ?, ?, ?, ?)`,
+			fmt.Sprintf("j%d", i), *blocked.DocumentID, job.status, store.NullableString(job.lastError), job.at,
+			*blocked.DocumentID)
+		require.NoError(t, err)
+	}
+
+	for _, order := range []store.BookmarkOrder{store.BookmarkOrderCreated, store.BookmarkOrderSaved} {
+		got, err := bms.List(ctx, "local", store.ListBookmarksOpts{Order: order})
+		require.NoError(t, err)
+		rows := map[string]store.BookmarkWithDocument{}
+		for _, b := range got {
+			rows[b.ID] = b
+		}
+		require.Len(t, rows, 7, order)
+
+		assert.Equal(t, store.BookmarkWithDocument{Bookmark: rows[f.blocked].Bookmark,
+			DocumentState: store.DocStateFailed, DocumentContentType: store.ContentTypeUnknown,
+			DocumentFailureCause: store.FailureCauseAntiBot, DocumentLastError: "the newest failure"},
+			rows[f.blocked], order)
+		for _, id := range f.pagePair {
+			page := rows[id]
+			require.NotNil(t, page.DocumentTitle, order)
+			assert.Equal(t, "A page", *page.DocumentTitle, order)
+			assert.Equal(t, store.DocStateFetched, page.DocumentState, order)
+			assert.Equal(t, store.ContentTypeArticle, page.DocumentContentType, order)
+			assert.Empty(t, page.DocumentFailureCause, order)
+			assert.Empty(t, page.DocumentLastError, order)
+		}
+		assert.Equal(t, store.FailureCauseDeadLink, rows[f.gone].DocumentFailureCause, order)
+		assert.Equal(t, store.BookmarkWithDocument{Bookmark: rows[f.orphan].Bookmark}, rows[f.orphan],
+			"%s: no document, no document fields", order)
+	}
+}

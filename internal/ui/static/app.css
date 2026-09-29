@@ -556,6 +556,9 @@ col.c-rank { width: 3rem; }
 }
 a.doc-title:hover { color: var(--accent-text); }
 .doc-title.untitled { font-family: var(--mono); font-size: 0.86em; font-weight: 500; color: var(--text-2); }
+/* An untitled document named by its bookmark's title: the fallback style
+   of an unlabeled interest, in the title's own font and size. */
+.doc-title.from-bookmark { font-style: italic; font-weight: 500; color: var(--text-2); }
 .doc-sub {
   display: flex; align-items: center; gap: 0.4rem; min-width: 0;
   margin-top: 0.15rem;
@@ -853,6 +856,7 @@ main.page:has(.landing) { padding-bottom: var(--s6); }
 /* Document ------------------------------------------------------------------ */
 
 .doc-head h1 { font-size: var(--fs-xl); overflow-wrap: anywhere; }
+.doc-head h1.from-bookmark { font-style: italic; }
 .doc-url { display: flex; align-items: center; gap: 0.4rem; margin-top: var(--s2); min-width: 0; font-size: var(--fs-sm); }
 .doc-url a { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .doc-url svg { color: var(--text-3); }

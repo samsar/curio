@@ -48,6 +48,35 @@ func TestLinks(t *testing.T) {
 	assert.NotContains(t, href, "shown=", "the plain link doesn't")
 }
 
+// TestLibraryOrderLinks: the Date saved order round-trips through every
+// Library link, and the default order is left out; clearing the filters
+// keeps the order and drops the rest.
+func TestLibraryOrderLinks(t *testing.T) {
+	saved := LibraryFilters{Order: OrderSaved, State: "failed", Host: "a&b=c.example", Folder: "/100% Reading/#1",
+		Limit: 7}
+	for name, href := range map[string]string{
+		"next page": libraryHref(saved, "cursor+/="),
+		"load more": libraryMoreHref(saved, "cursor+/=", 150),
+		"state tab": stateTabHref(saved, "dead"),
+	} {
+		assert.Equal(t, OrderSaved, parseHref(t, href).Query().Get("order"), name)
+	}
+	assert.Equal(t, "/ui/library?order=saved", clearFiltersHref(saved))
+	assert.Equal(t, "/ui/library?order=saved", libraryHref(LibraryFilters{Order: OrderSaved}, ""))
+
+	updated := saved
+	updated.Order = ""
+	for name, href := range map[string]string{
+		"next page":     libraryHref(updated, "c"),
+		"load more":     libraryMoreHref(updated, "c", 1),
+		"state tab":     stateTabHref(updated, "dead"),
+		"clear filters": clearFiltersHref(updated),
+	} {
+		assert.NotContains(t, parseHref(t, href).Query(), "order", "%s: the default order is left out", name)
+	}
+	assert.Equal(t, "/ui/library", clearFiltersHref(updated))
+}
+
 func parseHref(t *testing.T, href string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(href)

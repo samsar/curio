@@ -907,6 +907,55 @@ func TestMigration014_FailureCause(t *testing.T) {
 	assert.Equal(t, want, causes(), "Up again gives the same causes")
 }
 
+// TestMigration015_BookmarksSavedOrder: 015 adds the saved-order index and
+// rebuilds idx_bookmarks_document ending in (saved_at, id), keeps every
+// row, its Down restores 014's schema exactly, and Up runs again.
+func TestMigration015_BookmarksSavedOrder(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 14)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url) VALUES ('d1', 'local', 'https://example.com/1');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path, created_at)
+			VALUES ('b1', 'local', 'd1', 'https://example.com/1', 'One', '2024-01-01T00:00:00.000Z', 'chrome', '/Tech',
+			        '2026-09-01T00:00:00.000Z'),
+			       ('b2', 'local', 'd1', 'https://example.com/1', NULL, '2025-01-01T00:00:00.000Z', 'safari', NULL,
+			        '2026-09-02T00:00:00.000Z'),
+			       ('b3', 'local', NULL, 'https://example.com/3', 'Three', '2023-01-01T00:00:00.000Z', 'manual', NULL,
+			        '2026-09-03T00:00:00.000Z');`)
+	require.NoError(t, err)
+	schemaBefore := schemaDump(t, db)
+	rowsBefore := dumpRows(t, db, `SELECT * FROM bookmarks ORDER BY id`)
+	indexes := func() map[string]string {
+		t.Helper()
+		out := map[string]string{}
+		for _, row := range dumpRows(t, db, `SELECT name, sql FROM sqlite_master
+			WHERE type = 'index' AND tbl_name = 'bookmarks' AND sql IS NOT NULL`) {
+			out[row[0].(string)] = row[1].(string)
+		}
+		return out
+	}
+
+	_, err = p.UpTo(ctx, 15)
+	require.NoError(t, err)
+	got := indexes()
+	assert.Equal(t, "CREATE INDEX idx_bookmarks_tenant_saved ON bookmarks(tenant_id, saved_at, id)",
+		got["idx_bookmarks_tenant_saved"])
+	assert.Equal(t, "CREATE INDEX idx_bookmarks_document ON bookmarks(document_id, saved_at, id)",
+		got["idx_bookmarks_document"])
+	assert.Equal(t, "CREATE INDEX idx_bookmarks_tenant_created ON bookmarks(tenant_id, created_at, id)",
+		got["idx_bookmarks_tenant_created"], "the created order keeps its index")
+	assert.Equal(t, rowsBefore, dumpRows(t, db, `SELECT * FROM bookmarks ORDER BY id`))
+
+	_, err = p.DownTo(ctx, 14)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "014's schema, byte for byte")
+	assert.Equal(t, rowsBefore, dumpRows(t, db, `SELECT * FROM bookmarks ORDER BY id`))
+
+	_, err = p.UpTo(ctx, 15)
+	require.NoError(t, err)
+	assert.Contains(t, indexes(), "idx_bookmarks_tenant_saved", "Up runs again")
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `

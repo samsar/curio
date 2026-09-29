@@ -133,12 +133,12 @@ func libraryMoreHref(f LibraryFilters, cursor string, shown int) string {
 }
 
 // libraryQuery is the query of the Library under f from the page after
-// cursor: the filters that filter something, and the page size when it
-// isn't the default.
+// cursor: the order unless it is the default, the filters that filter
+// something, and the page size when it isn't the default.
 func libraryQuery(f LibraryFilters, cursor string) url.Values {
 	q := url.Values{}
-	for name, v := range map[string]string{"state": f.State, "content_type": f.ContentType, "host": f.Host,
-		"folder": f.Folder, "cause": f.Cause, "cursor": cursor} {
+	for name, v := range map[string]string{"order": f.Order, "state": f.State, "content_type": f.ContentType,
+		"host": f.Host, "folder": f.Folder, "cause": f.Cause, "cursor": cursor} {
 		if v != "" {
 			q.Set(name, v)
 		}
@@ -157,6 +157,12 @@ func stateHref(state string) string { return libraryHref(LibraryFilters{State: s
 func stateTabHref(f LibraryFilters, state string) string {
 	f.State = state
 	return libraryHref(f, "")
+}
+
+// clearFiltersHref is the first page of the Library in f's order, with
+// no filter.
+func clearFiltersHref(f LibraryFilters) string {
+	return libraryHref(LibraryFilters{Order: f.Order}, "")
 }
 
 // causeHref is the Library of the documents that failed for cause.

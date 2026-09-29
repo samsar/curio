@@ -180,18 +180,20 @@ func (d Deps) contentPath(rel string) string {
 // the join-with-extractions query so debugging is one API call.
 //
 // MarkdownPath is the absolute on-disk path (content_dir + relative path)
-// so the CLI can print something `cat`-friendly directly.
+// so the CLI can print something `cat`-friendly directly. BookmarkTitle
+// names an untitled document: its newest titled bookmark's title.
 type DocumentListItem struct {
-	ID           string    `json:"id"`
-	URL          string    `json:"url"`
-	Title        *string   `json:"title,omitempty"`
-	ContentType  string    `json:"content_type"`
-	State        string    `json:"state"`
-	FailureCause string    `json:"failure_cause,omitempty"`
-	LastError    string    `json:"last_error,omitempty"`
-	MarkdownPath string    `json:"markdown_path,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	URL           string    `json:"url"`
+	Title         *string   `json:"title,omitempty"`
+	ContentType   string    `json:"content_type"`
+	State         string    `json:"state"`
+	FailureCause  string    `json:"failure_cause,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	MarkdownPath  string    `json:"markdown_path,omitempty"`
+	BookmarkTitle string    `json:"bookmark_title,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // DocumentListResponse is the body of GET /v1/documents.
@@ -218,32 +220,51 @@ func (d Deps) handleListDocuments(w http.ResponseWriter, r *http.Request) {
 // content_type, host, folder and cause filters, the cursor and the page
 // size in Limit. A filter or cursor the list can't take is a requestError.
 func listDocumentsOpts(r *http.Request) (store.ListDocumentsOpts, error) {
-	state, err := docStateParam(r)
+	f, err := documentFilterParams(r)
 	if err != nil {
 		return store.ListDocumentsOpts{}, err
 	}
-	cause, err := failureCauseParam(r)
+	after, err := cursorParam(r, "")
 	if err != nil {
 		return store.ListDocumentsOpts{}, err
 	}
-	contentType, err := contentTypeParam(r)
-	if err != nil {
-		return store.ListDocumentsOpts{}, err
-	}
-	after, err := cursorParam(r)
-	if err != nil {
-		return store.ListDocumentsOpts{}, err
-	}
-	q := r.URL.Query()
 	return store.ListDocumentsOpts{
-		State:       state,
-		ContentType: contentType,
-		Host:        q.Get("host"),
-		Folder:      q.Get("folder"),
-		Cause:       cause,
+		State:       f.state,
+		ContentType: f.contentType,
+		Host:        f.host,
+		Folder:      r.URL.Query().Get("folder"),
+		Cause:       f.cause,
 		Limit:       listLimit(r),
 		After:       after,
 	}, nil
+}
+
+// documentFilters are the filters on a document that GET /v1/documents
+// checks on each document, and GET /v1/bookmarks on each bookmark's.
+type documentFilters struct {
+	state       store.DocState
+	contentType store.ContentType
+	host        string
+	cause       store.FailureCause
+}
+
+// documentFilterParams reads ?state, ?content_type, ?host and ?cause, the
+// same way for both lists: a state, type or cause outside its set is a
+// requestError naming the set.
+func documentFilterParams(r *http.Request) (documentFilters, error) {
+	state, err := docStateParam(r)
+	if err != nil {
+		return documentFilters{}, err
+	}
+	contentType, err := contentTypeParam(r)
+	if err != nil {
+		return documentFilters{}, err
+	}
+	cause, err := failureCauseParam(r)
+	if err != nil {
+		return documentFilters{}, err
+	}
+	return documentFilters{state: state, contentType: contentType, host: r.URL.Query().Get("host"), cause: cause}, nil
 }
 
 // contentTypeParam reads ?content_type. Empty means any type; a value that
@@ -270,7 +291,7 @@ func (d Deps) listDocuments(ctx context.Context, opts store.ListDocumentsOpts) (
 	if err != nil {
 		return DocumentListResponse{}, err
 	}
-	docs, next, err := onePage(docs, limit, func(doc store.DocumentWithError) store.PageKey {
+	docs, next, err := onePage(docs, limit, "", func(doc store.DocumentWithError) store.PageKey {
 		return store.PageKey{At: doc.UpdatedAt, ID: doc.ID}
 	})
 	if err != nil {
@@ -280,16 +301,17 @@ func (d Deps) listDocuments(ctx context.Context, opts store.ListDocumentsOpts) (
 	out := DocumentListResponse{Items: make([]DocumentListItem, 0, len(docs)), NextCursor: next}
 	for _, doc := range docs {
 		out.Items = append(out.Items, DocumentListItem{
-			ID:           doc.ID,
-			URL:          doc.URL,
-			Title:        doc.Title,
-			ContentType:  string(doc.ContentType),
-			State:        string(doc.State),
-			FailureCause: string(doc.FailureCause),
-			LastError:    doc.LastError,
-			MarkdownPath: d.contentPath(doc.MarkdownPath),
-			CreatedAt:    doc.CreatedAt,
-			UpdatedAt:    doc.UpdatedAt,
+			ID:            doc.ID,
+			URL:           doc.URL,
+			Title:         doc.Title,
+			ContentType:   string(doc.ContentType),
+			State:         string(doc.State),
+			FailureCause:  string(doc.FailureCause),
+			LastError:     doc.LastError,
+			MarkdownPath:  d.contentPath(doc.MarkdownPath),
+			BookmarkTitle: doc.BookmarkTitle,
+			CreatedAt:     doc.CreatedAt,
+			UpdatedAt:     doc.UpdatedAt,
 		})
 	}
 	return out, nil

@@ -68,24 +68,27 @@ role: a polled region holding it would announce it on every poll.
 {{- end}}
 
 {{/*
-A document's name in a list, a DocRef: its title on one line, or, for an
-untitled one, where it lives; the whole of either on hover. It links to
-the document's page when there is one.
+A document's name in a list, a DocRef: its title on one line; for an
+untitled one, its bookmark's title, styled as a fallback, or where it
+lives; the whole of any of them on hover. It links to the document's page
+when there is one.
 */}}
 {{define "doc-title" -}}
-{{if .ID}}<a class="doc-title{{if not .Title}} untitled{{end}}" href="{{documentHref .ID}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</a>
-{{- else}}<span class="doc-title{{if not .Title}} untitled{{end}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</span>{{end}}
+{{if .ID}}<a class="doc-title{{with .Class}} {{.}}{{end}}" href="{{documentHref .ID}}" title="{{.Hover}}">{{.Name}}</a>
+{{- else}}<span class="doc-title{{with .Class}} {{.}}{{end}}" title="{{.Hover}}">{{.Name}}</span>{{end}}
 {{- end}}
 
 {{/*
-A list's document cell, a DocCell: its name, where it lives, on a phone
-the type and time its row's other columns hold there, and, for a failed
-one, why: the cause and the start of the error, the whole error on hover.
+A list's document cell, a DocCell: its name, where it lives, for a save
+the browser it came from on a wide screen (its folder on hover), on a
+phone the type and time its row's other columns hold there, and, for a
+failed one, why: the cause and the start of the error, the whole error on
+hover.
 */}}
 {{define "doc-cell" -}}
 {{template "doc-title" .Ref}}
 <span class="doc-sub"><span class="host" title="{{.Ref.URL}}">{{.Where}}</span>
-{{- with .Source}}<span class="sep">·</span><span>{{.}}</span>{{end}}
+{{- with .Source}}<span class="sep wide">·</span><span class="wide"{{with $.Folder}} title="{{.}}"{{end}}>{{.}}</span>{{end}}
 {{- with .ContentType}}<span class="sep narrow">·</span><span class="narrow">{{.}}</span>{{end}}
 {{- if not .When.IsZero}}<span class="sep narrow">·</span><span class="narrow">{{template "reltime" .When}}</span>{{end -}}
 </span>
