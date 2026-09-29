@@ -1,10 +1,18 @@
-{{/* A meta refresh, not script: the page has nothing else to run. */}}
+{{/*
+A meta refresh, not script: the page has nothing else to run. Nothing can
+be searched yet, so the header has no search box (an HTML comment, as on
+the search page, since an empty define wouldn't replace the block).
+*/}}
 {{define "head"}}<meta http-equiv="refresh" content="2">{{end}}
+{{define "header-search"}}<!-- no header search -->{{end}}
 
 {{define "content" -}}
+<div class="center-page"><div class="card center-card">
+<div class="logo">{{template "logo"}}</div>
 <h1>curio is starting</h1>
 {{if .Migrating}}<p>Migrating the database: {{.Applied}} of {{.Total}} migrations applied.</p>
-<progress max="{{.Total}}" value="{{.Applied}}">{{.Applied}} of {{.Total}}</progress>
+<progress class="progress" max="{{.Total}}" value="{{.Applied}}">{{.Applied}} of {{.Total}}</progress>
 {{else}}<p>Starting up: {{.Phase}}.</p>{{end}}
 <p class="meta">This page reloads itself every two seconds until curio is ready.</p>
+</div></div>
 {{- end}}

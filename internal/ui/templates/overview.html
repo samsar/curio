@@ -1,77 +1,111 @@
 {{define "content" -}}
+<div class="page-head"><div class="titles">
 <h1>Overview</h1>
-<div class="grid">
-<section class="panel" aria-labelledby="counts">
-<h2 id="counts">Library</h2>
+<p class="lede">What curio is doing, and whether everything it needs is working.</p>
+</div></div>
+<div class="board">
+<div>
+<section class="card" aria-labelledby="counts">
+<div class="card-head"><h2 id="counts">{{template "icon" "library"}}Library</h2><a class="more" href="{{navHref "library"}}">Open the library →</a></div>
+<div class="card-body">
 {{with .Counts.Err}}{{template "panel-error" .}}{{else}}{{with .Counts}}
-<p class="big">{{.Documents}} documents · {{.Bookmarks}} bookmarks</p>
-<ul class="counts">
-{{range .ByState}}<li><a href="{{stateHref .Name}}"><span class="state state-{{.Name}}">{{.Name}}</span></a> <span class="n">{{.Count}}</span></li>
-{{end}}</ul>
-{{with .Jobs}}<h3>Jobs</h3>
-<ul class="counts">
-{{range .}}<li>{{.Name}} <span class="n">{{.Count}}</span></li>
-{{end}}</ul>{{end}}
+<div class="stats">
+<div class="stat"><span class="label">Documents</span><span class="value">{{num .Documents}}</span></div>
+<div class="stat"><span class="label">Fetched</span><span class="value">{{num (.State "fetched")}} <small>{{pct (.State "fetched") .Documents}}</small></span></div>
+<div class="stat"><span class="label">Bookmarks</span><span class="value">{{num .Bookmarks}}</span></div>
+</div>
+<div class="mt-6">{{template "stackbar" (stateBar .ByState)}}</div>
+<div class="legend">{{range .ByState}}<a href="{{stateHref .Name}}"><span class="swatch swatch-{{stateTone .Name}}"></span>{{.Name}} <span class="n">{{num .Count}}</span> <span class="pct">{{pct .Count $.Counts.Documents}}</span></a>{{end}}</div>
 {{end}}{{end}}
+</div>
 </section>
 
-<section class="panel" aria-labelledby="queue">
-<h2 id="queue">Queue</h2>
+<section class="card" aria-labelledby="queue">
+<div class="card-head"><h2 id="queue">{{template "icon" "layers"}}Queue</h2></div>
+<div class="card-body">
 {{with .Queue.Err}}{{template "panel-error" .}}{{else}}{{with .Queue}}
-<p>{{if .Open}}<span class="badge ok">open</span>{{else}}<span class="badge warn">closed</span> {{.Reason}}{{if not .OpensAt.IsZero}}; opens {{when .OpensAt}}{{end}}{{end}}</p>
-<dl class="facts">
+<div class="queue-top">{{if .Open}}<span class="badge queue-open">open</span>{{else}}<span class="badge queue-closed">closed</span><span class="why">{{.Reason}}{{if not .OpensAt.IsZero}}; opens {{template "reltime" .OpensAt}}{{end}}</span>{{end}}</div>
+<dl class="facts mt-4">
 <dt>Throttle</dt><dd>{{.Throttle}}</dd>
 <dt>Schedule</dt><dd>{{with .Schedule}}{{.}}{{else}}none{{end}}</dd>
 <dt>Keep awake</dt><dd>{{if .KeepAwake}}on: {{if .KeepAwakeActive}}holding the Mac awake{{else}}not holding it now{{end}} ({{.PowerSource}} power){{else}}off{{end}}</dd>
 </dl>
-<div class="table-wrap"><table>
-<thead><tr><th>Kind</th><th>Running</th><th>Pending</th></tr></thead>
+<table class="pools">
+<thead><tr><th scope="col">Pool</th><th scope="col" class="num">Running</th><th scope="col" class="num">Pending</th></tr></thead>
 <tbody>
-{{range .Kinds}}<tr><td>{{.Kind}}</td><td>{{.Running}} of {{.Limit}}</td><td>{{.Pending}}</td></tr>
+{{range .Kinds}}<tr><td>{{.Kind}}</td><td class="num">{{.Running}} of {{.Limit}}</td><td class="num">{{num .Pending}}</td></tr>
 {{end}}</tbody>
-</table></div>
+</table>
 {{end}}{{end}}
+</div>
 </section>
 
-<section class="panel" aria-labelledby="progress">
-<h2 id="progress">Progress</h2>
-{{with .Progress.Err}}{{template "panel-error" .}}{{else}}{{with .Progress.Progress}}
-{{if eq .State "idle"}}<p>Nothing queued.</p>
-{{else if eq .State "closed"}}<p>{{.Outstanding}} jobs queued. The queue is closed{{with $.Queue.Reason}} ({{.}}){{end}}, so none start until it opens.</p>
-{{else if eq .State "stalled"}}<p>{{.Outstanding}} jobs queued, and none finished in the last {{duration .Window}}.</p>
-{{else}}<p>{{.Outstanding}} jobs queued: done in about <strong>{{duration .ETA}}</strong>.</p>
-<p class="meta">An estimate at the pace of the last {{duration .Window}}: {{.Finished}} jobs finished, {{printf "%.1f" .PerMinute}} a minute.</p>
-{{end}}
-{{end}}{{end}}
+<section class="card table-card" aria-labelledby="recent">
+<div class="card-head"><h2 id="recent">{{template "icon" "bookmark"}}Recently saved</h2></div>
+{{with .Recent.Err}}<div class="card-body">{{template "panel-error" .}}</div>
+{{else}}{{with .Recent.Bookmarks}}<div class="card-body flush"><div class="table-scroll">
+<table class="data">
+<colgroup><col><col class="c-state"><col class="c-when"></colgroup>
+<thead><tr><th scope="col">Document</th><th scope="col">State</th><th scope="col" class="c-when">Saved</th></tr></thead>
+<tbody>
+{{range .}}<tr>
+<td>{{template "doc-cell" .Cell}}</td>
+<td class="state-cell">{{with .DocumentState}}{{template "state-badge" .}}{{end}}</td>
+<td class="c-when when">{{template "reltime" .SavedAt}}</td>
+</tr>
+{{end}}</tbody>
+</table>
+</div></div>
+{{else}}<div class="card-body"><p class="empty-inline">Nothing saved yet. <code>curio import chrome</code> imports your bookmarks (or safari, firefox, html &lt;file&gt;).</p></div>{{end}}{{end}}
 </section>
+</div>
 
-<section class="panel" aria-labelledby="health">
-<h2 id="health">Health</h2>
+<div>
+<section class="card" aria-labelledby="health">
+<div class="card-head"><h2 id="health">{{template "icon" "cpu"}}Health</h2></div>
+<div class="card-body">
 {{with .Health.Err}}{{template "panel-error" .}}{{else}}{{with .Health}}
-<dl class="facts">
-<dt>Daemon</dt><dd>{{.Version}}</dd>
-<dt>Ollama</dt><dd>{{if .OllamaReachable}}<span class="badge ok">reachable</span>{{else}}<span class="badge bad">not reachable</span> {{.OllamaDetail}}{{end}}</dd>
-<dt>Embedding model</dt><dd>{{.EmbeddingModel}} ({{.EmbeddingDim}} dimensions)</dd>
-<dt>Writing model</dt><dd>{{.GenerationModel}}</dd>
-{{range .Upstreams}}<dt>{{.Name}}</dt><dd>{{if .Enabled}}{{.State}}; last answer {{when .LastSuccess}}{{if not .LastFailure.IsZero}}; last failure {{.LastFailureClass}} at {{when .LastFailure}}{{end}}{{if not .CooldownUntil.IsZero}}; paused until {{when .CooldownUntil}}{{end}}{{else}}off{{end}}</dd>
-{{end}}<dt>YouTube</dt><dd>{{with .YouTubeFetcher}}transcripts by {{.}}{{else}}yt-dlp not found: videos are fetched as pages{{end}}</dd>
-</dl>
-{{with .Drift}}<div class="banner warn">
-<p>The embeddings drifted since the library was indexed:</p>
+<ul class="rows">
+<li><span class="label"><span class="dot dot-ok"></span>Daemon</span><span class="value">{{.Version}}</span></li>
+<li><span class="label"><span class="dot {{if .OllamaReachable}}dot-ok{{else}}dot-danger{{end}}"></span>Ollama</span><span class="value">{{if .OllamaReachable}}reachable{{else}}not reachable<span class="sub">{{.OllamaDetail}}</span>{{end}}</span></li>
+<li><span class="label"><span class="dot {{if .Drift}}dot-warn{{else}}dot-ok{{end}}"></span>Embeddings</span><span class="value">{{.EmbeddingModel}}<span class="sub">{{.EmbeddingDim}} dimensions{{if .Drift}}, drifted{{end}}</span></span></li>
+<li><span class="label"><span class="dot"></span>Writing model</span><span class="value">{{.GenerationModel}}</span></li>
+{{range .Upstreams}}<li><span class="label"><span class="dot dot-{{.Tone}}"></span>{{.Label}}</span><span class="value">{{if .Enabled}}{{.State}}<span class="sub">last answer {{template "reltime" .LastSuccess}}{{if not .LastFailure.IsZero}} · last failure {{.LastFailureClass}}, {{template "reltime" .LastFailure}}{{end}}{{if not .CooldownUntil.IsZero}} · resumes {{template "reltime" .CooldownUntil}}{{end}}</span>{{else}}off{{end}}</span></li>
+{{end}}<li><span class="label"><span class="dot{{if .YouTubeFetcher}} dot-ok{{end}}"></span>YouTube</span><span class="value">{{with .YouTubeFetcher}}yt-dlp<span class="sub">{{.}}</span>{{else}}yt-dlp not found<span class="sub">videos are fetched as pages</span>{{end}}</span></li>
+</ul>
+{{with .Drift}}<div class="callout callout-warn mt-4" role="status">{{template "icon" "alert"}}
+<p class="callout-title">The embeddings drifted</p>
+<div class="callout-body"><p>What makes them changed since the library was indexed:</p>
 <ul>{{range .Changes}}<li>{{.What}}: {{.Recorded}} → {{.Current}}</li>{{end}}</ul>
-<p>Run <code>{{.Fix}}</code>.</p>
+<p>Run <code>{{.Fix}}</code>.</p></div>
 </div>{{end}}
 {{end}}{{end}}
+</div>
 </section>
 
-<section class="panel wide" aria-labelledby="recent">
-<h2 id="recent">Recently saved</h2>
-{{with .Recent.Err}}{{template "panel-error" .}}{{else}}{{with .Recent.Bookmarks}}
-<ul class="recent">
-{{range .}}<li>{{if .DocumentID}}<a href="{{documentHref .DocumentID}}">{{or .Title .URL}}</a>{{else}}{{or .Title .URL}}{{end}}
-<span class="meta">{{.Source}} · {{when .SavedAt}}{{with .DocumentState}} · <span class="state state-{{.}}">{{.}}</span>{{end}}</span></li>
-{{end}}</ul>
-{{else}}<p class="empty">Nothing saved yet. <code>curio import chrome</code> imports your bookmarks (or safari, firefox, html &lt;file&gt;).</p>{{end}}{{end}}
+<section class="card" aria-labelledby="progress">
+<div class="card-head"><h2 id="progress">{{template "icon" "clock"}}Progress</h2></div>
+<div class="card-body">
+{{with .Progress.Err}}{{template "panel-error" .}}{{else}}{{with .Progress.Progress}}
+{{if eq .State "idle"}}<p>Nothing queued.</p>
+{{else if eq .State "closed"}}<p>{{num .Outstanding}} jobs queued. The queue is closed{{with $.Queue.Reason}} ({{.}}){{end}}, so none start until it opens.</p>
+{{else if eq .State "stalled"}}<p>{{num .Outstanding}} jobs queued, and none finished in the last {{duration .Window}}.</p>
+{{else}}<div class="stat"><span class="label">{{num .Outstanding}} jobs left</span><span class="value">≈ {{duration .ETA}}</span><span class="hint">An estimate at the pace of the last {{duration .Window}}: {{num .Finished}} jobs finished, {{printf "%.1f" .PerMinute}} a minute.</span></div>
+{{end}}
+{{end}}{{end}}
+</div>
 </section>
+
+<section class="card" aria-labelledby="jobs">
+<div class="card-head"><h2 id="jobs">{{template "icon" "server"}}Jobs</h2></div>
+<div class="card-body">
+{{with .Counts.Err}}{{template "panel-error" .}}{{else}}{{with .Counts.Jobs}}
+<ul class="rows">
+{{range .}}<li><span class="label">{{.Name}}</span><span class="value">{{num .Count}}</span></li>
+{{end}}</ul>
+{{else}}<p class="empty-inline">No jobs yet.</p>{{end}}{{end}}
+</div>
+</section>
+</div>
 </div>
 {{- end}}

@@ -32,6 +32,7 @@ type Layout struct {
 	Title   string // the page's, in <title>
 	Nav     Nav    // the current navigation item
 	Version string // the daemon's
+	Listen  string // the address the daemon listens on; empty when unknown
 }
 
 // PanelError is why a panel's data couldn't be read: the message, and the
@@ -59,6 +60,16 @@ type CountsPanel struct {
 	ByState   []Count // every document state, in lifecycle order
 	Bookmarks int
 	Jobs      []Count // by status, the statuses with jobs
+}
+
+// State is how many documents are in state.
+func (p CountsPanel) State(state string) int {
+	for _, c := range p.ByState {
+		if c.Name == state {
+			return c.Count
+		}
+	}
+	return 0
 }
 
 // Count is how many there are of Name.
@@ -133,6 +144,31 @@ type Upstream struct {
 	CooldownUntil    time.Time
 }
 
+// Label is the upstream's name for people.
+func (u Upstream) Label() string {
+	if u.Name == "jina" {
+		return "Jina Reader"
+	}
+	return u.Name
+}
+
+// Tone is how well the upstream is doing, for its status dot: ok, warn,
+// danger, or neutral when it is off or its state is unknown.
+func (u Upstream) Tone() string {
+	if !u.Enabled {
+		return "neutral"
+	}
+	switch u.State {
+	case "ok", "idle":
+		return "ok"
+	case "degraded", "paused":
+		return "warn"
+	case "failing":
+		return "danger"
+	}
+	return "neutral"
+}
+
 // RecentPanel is the newest bookmarks.
 type RecentPanel struct {
 	Err       *PanelError
@@ -147,6 +183,14 @@ type RecentBookmark struct {
 	SavedAt       time.Time
 	DocumentID    string // empty when its document was deleted
 	DocumentState string
+}
+
+// Cell is the bookmark as a list's document cell: named by its own title,
+// linking to its document while there is one, with its host and browser
+// under it.
+func (b RecentBookmark) Cell() DocCell {
+	return DocCell{Ref: DocRef{ID: b.DocumentID, Title: b.Title, URL: b.URL}, Where: host(b.URL),
+		Source: b.Source, When: b.SavedAt}
 }
 
 // Search is the search page: the form, and the results of its query.
@@ -167,11 +211,28 @@ type SearchResults struct {
 
 // SearchHit is one ranked document and the chunks that matched in it.
 type SearchHit struct {
-	DocumentID string
-	Title      string // empty for an untitled document
-	URL        string
-	Score      float64 // the fused score
-	Matches    []Match
+	DocumentID  string
+	Title       string // empty for an untitled document
+	URL         string
+	ContentType string
+	Score       float64 // the fused score
+	Matches     []Match
+}
+
+// shownMatches is how many of a hit's matches its result shows; the rest
+// are a click away.
+const shownMatches = 2
+
+// ShownMatches are the matches the result shows.
+func (h SearchHit) ShownMatches() []Match { return h.Matches[:min(len(h.Matches), shownMatches)] }
+
+// MoreMatches are the matches after ShownMatches, none when there are
+// no more.
+func (h SearchHit) MoreMatches() []Match {
+	if len(h.Matches) <= shownMatches {
+		return nil
+	}
+	return h.Matches[shownMatches:]
 }
 
 // Match is a matching chunk: its highlighted snippet, or the start of its
@@ -189,6 +250,7 @@ type Library struct {
 	Filters    LibraryFilters
 	Rows       []LibraryRow
 	NextCursor string // empty on the last page
+	PageSize   int    // how many rows a page holds
 }
 
 // LibraryFilters are a Library page's query, the parameters GET
@@ -199,15 +261,68 @@ type LibraryFilters struct {
 	Limit                                   int
 }
 
-// LibraryRow is one document in the list.
+// Filter is one filter a Library page applies: its name and value.
+type Filter struct {
+	Name, Value string
+}
+
+// Active are the filters that filter something, in the form's order.
+func (f LibraryFilters) Active() []Filter {
+	var active []Filter
+	for _, filter := range []Filter{{"state", f.State}, {"type", f.ContentType}, {"host", f.Host},
+		{"folder", f.Folder}, {"cause", f.Cause}} {
+		if filter.Value != "" {
+			active = append(active, filter)
+		}
+	}
+	return active
+}
+
+// Filtered reports whether any filter filters something.
+func (f LibraryFilters) Filtered() bool { return len(f.Active()) > 0 }
+
+// LibraryRow is one document in the list. LastError and FailureCause are
+// set only while the document is failed or dead.
 type LibraryRow struct {
-	DocumentID  string
-	Title       string // empty for an untitled document
-	URL         string
-	State       string
-	ContentType string
-	UpdatedAt   time.Time
-	LastError   string
+	DocumentID   string
+	Title        string // empty for an untitled document
+	URL          string
+	State        string
+	ContentType  string
+	UpdatedAt    time.Time
+	LastError    string
+	FailureCause string
+}
+
+// Cell is the row's document cell: a titled document's short URL under its
+// title, an untitled one's host under its short URL.
+func (r LibraryRow) Cell() DocCell {
+	where := shortURL(r.URL)
+	if r.Title == "" {
+		where = host(r.URL)
+	}
+	return DocCell{Ref: DocRef{ID: r.DocumentID, Title: r.Title, URL: r.URL}, Where: where,
+		ContentType: r.ContentType, When: r.UpdatedAt, FailureCause: r.FailureCause, LastError: r.LastError}
+}
+
+// DocRef names a document in a list (the doc-title partial): by its
+// title, or by its short URL while it has none, linking to its page when
+// it has an ID.
+type DocRef struct {
+	ID, Title, URL string
+}
+
+// DocCell is a document as a list's first column shows it (the doc-cell
+// partial): its name, where it lives, what the row's other columns show
+// where a phone folds them away, and, for a failed one, why.
+type DocCell struct {
+	Ref          DocRef
+	Where        string    // under its name: where it lives
+	Source       string    // the browser a bookmark came from, in a list of saves
+	ContentType  string    // shown here on a phone, whose table has no Type column
+	When         time.Time // shown here on a phone, whose table has no time column
+	FailureCause string
+	LastError    string
 }
 
 // Document is one document's page.
@@ -215,13 +330,14 @@ type Document struct {
 	Layout     Layout
 	Meta       DocumentMeta
 	Extraction *Extraction // nil before its first fetch
-	// LastError is its most recent failed job's error, set only while the
-	// document is failed or dead: an older failure a refetch recovered
-	// from isn't current.
-	LastError string
-	Text      TextPanel
-	Related   RelatedPanel
-	Bookmarks BookmarksPanel
+	// LastError is its most recent failed job's error, and FailureCause
+	// why it failed, set only while the document is failed or dead: an
+	// older failure a refetch recovered from isn't current.
+	LastError    string
+	FailureCause string
+	Text         TextPanel
+	Related      RelatedPanel
+	Bookmarks    BookmarksPanel
 }
 
 // DocumentMeta is what the library knows about a document. Zero values are
@@ -318,8 +434,12 @@ type InterestRun struct {
 	ComputedAt time.Time
 	Algo       string
 	Documents  int
-	Noise      int
+	Noise      int // documents in no interest
+	Interests  int // how many interests it found, shown or not
 }
+
+// Clustered is how many of the run's documents are in an interest.
+func (r InterestRun) Clustered() int { return clustered(r.Documents, r.Noise) }
 
 // Interest is one interest (a labeled cluster) and some of its members.
 type Interest struct {
@@ -337,6 +457,12 @@ type Member struct {
 	Title      string
 	URL        string
 	Similarity float64
+}
+
+// Cell is the member as a list's document cell, with its host under its
+// name.
+func (m Member) Cell() DocCell {
+	return DocCell{Ref: DocRef{ID: m.DocumentID, Title: m.Title, URL: m.URL}, Where: host(m.URL)}
 }
 
 // InterestPage is one interest's page, with its members up to the page's

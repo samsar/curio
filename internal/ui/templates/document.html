@@ -1,56 +1,92 @@
 {{define "content" -}}
+<div class="doc-head">
 {{with .Meta}}
-<h1>{{or .Title .URL}}</h1>
-<p class="url">{{with outbound .URL}}<a href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{else}}{{.URL}}{{end}}</p>
-<dl class="facts">
-<dt>State</dt><dd><span class="state state-{{.State}}">{{.State}}</span></dd>
-<dt>Type</dt><dd>{{.ContentType}}</dd>
-{{with .CanonicalURL}}<dt>Canonical URL</dt><dd>{{with outbound .}}<a href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{else}}{{.}}{{end}}</dd>{{end}}
-{{with .Author}}<dt>Author</dt><dd>{{.}}</dd>{{end}}
-{{if not .PublishedAt.IsZero}}<dt>Published</dt><dd>{{when .PublishedAt}}</dd>{{end}}
-{{with .Language}}<dt>Language</dt><dd>{{.}}</dd>{{end}}
-{{with .WordCount}}<dt>Words</dt><dd>{{.}}</dd>{{end}}
-<dt>Added</dt><dd>{{when .CreatedAt}}</dd>
-<dt>Updated</dt><dd>{{when .UpdatedAt}}</dd>
-<dt>ID</dt><dd><code>{{.ID}}</code></dd>
-{{with .MarkdownPath}}<dt>Markdown</dt><dd><code>{{.}}</code></dd>{{end}}
-</dl>
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "library"}}">Library</a>{{with host .URL}}<span class="sep">/</span><span>{{.}}</span>{{end}}</nav>
+<h1>{{or .Title (shortURL .URL)}}</h1>
+<p class="doc-url">{{template "icon" "external"}}{{with outbound .URL}}<a href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{else}}<span class="truncate">{{.URL}}</span>{{end}}</p>
+<div class="meta-row">{{template "state-badge" .State}}{{with .ContentType}}<span class="tag">{{template "icon" (typeIcon .)}}{{.}}</span>{{end}}
+{{- with .WordCount}}<span class="text">{{num .}} words</span>{{end}}
+{{- with .Author}}<span class="sep">·</span><span class="text">by {{.}}</span>{{end}}
+{{- if not .PublishedAt.IsZero}}<span class="sep">·</span><span class="text">published {{day .PublishedAt}}</span>{{end}}
+{{- with .Language}}<span class="sep">·</span><span class="text">{{.}}</span>{{end}}</div>
 {{end}}
-{{with .LastError}}<div class="banner bad"><p>Last error: {{.}}</p></div>{{end}}
-{{with .Extraction}}<p class="meta">Fetched {{when .FetchedAt}} by {{.Fetcher}}{{with .Via}} via {{if eq . "jina"}}<strong>Jina Reader</strong>{{else}}{{.}}{{end}}{{end}}: {{.Status}}{{with .ErrorMessage}} ({{.}}){{end}}</p>{{end}}
+{{if eq .Meta.State "failed"}}
+<div class="callout callout-danger mt-4" role="alert">{{template "icon" "alert-circle"}}
+<p class="callout-title">{{or (causeLabel .FailureCause) "Couldn't fetch this page"}}</p>
+<div class="callout-body">{{with causeWhy .FailureCause}}<p>{{.}}</p>{{end}}{{template "full-error" .LastError}}</div>
+</div>
+{{else if eq .Meta.State "dead"}}
+<div class="callout mt-4" role="note">{{template "icon" "unlink"}}
+<p class="callout-title">This page is gone</p>
+<div class="callout-body"><p>{{causeWhy "dead_link"}}</p>{{template "full-error" .LastError}}</div>
+</div>
+{{end}}
 {{block "document-actions" .}}{{end}}
-<p class="meta">From the terminal: <code>curio refetch {{.Meta.ID}}</code> · <code>curio reindex {{.Meta.ID}}</code></p>
-<div class="columns">
-<article class="text">
-{{with .Text.Err}}{{template "panel-error" .}}{{else}}{{with .Text}}
-{{if eq .State "not-fetched"}}<p class="empty">Not fetched yet.</p>
-{{else if eq .State "missing"}}<p class="empty">The extracted text is missing on disk; refetch the document.</p>
-{{else}}
-{{if .OfferImages}}<p class="banner"><a href="{{documentImagesHref $.Meta.ID}}">Load images</a>: {{.Text.RemoteImages}} from other sites, which learn that you read this when they load.</p>{{end}}
-{{if .Truncated}}<p class="banner warn">This is the start of the text; all of it is in <code>{{.MarkdownPath}}</code>.</p>{{end}}
-{{if .Text.Unformatted}}<p class="banner warn">Shown as stored, unformatted: {{.Text.Unformatted}} to format quickly.</p>
-<pre class="source">{{.Text.Source}}</pre>
-{{else}}{{.Text.HTML}}{{end}}
+</div>
+<div class="split mt-6">
+{{with .Text.Err}}<div class="card"><div class="card-body">{{template "panel-error" .}}</div></div>
+{{else}}{{with .Text}}
+{{if eq .State "not-fetched"}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "article"}}</div>
+{{if or (eq $.Meta.State "failed") (eq $.Meta.State "dead")}}<h2>No text</h2>
+<p>curio couldn't fetch this page, so it has nothing to show or search.</p>
+{{else}}<h2>Not fetched yet</h2>
+<p>The text shows here once curio fetches the page.</p>{{end}}
+</div></div>
+{{else if eq .State "missing"}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "alert"}}</div>
+<h2>No text on disk</h2>
+<p>The extracted text is missing on disk; refetch the document.</p>
+</div></div>
+{{else}}<div class="stack">
+{{if .OfferImages}}<div class="callout callout-info" role="note">{{template "icon" "info"}}<div class="callout-body"><p><a href="{{documentImagesHref $.Meta.ID}}">Load images</a>: {{.Text.RemoteImages}} from other sites, which learn that you read this when they load.</p></div></div>
 {{end}}
+{{- if .Truncated}}<div class="callout callout-warn" role="note">{{template "icon" "alert"}}<div class="callout-body"><p>This is the start of the text; all of it is in <code>{{.MarkdownPath}}</code>.</p></div></div>
+{{end}}
+{{- if .Text.Unformatted}}<div class="callout callout-warn" role="note">{{template "icon" "alert"}}<div class="callout-body"><p>Shown as stored, unformatted: {{.Text.Unformatted}} to format quickly.</p></div></div>
+<article class="prose"><pre class="source">{{.Text.Source}}</pre></article>
+{{else}}<article class="prose">{{.Text.HTML}}</article>{{end}}
+</div>{{end}}
 {{end}}{{end}}
-</article>
-<aside>
-<section class="panel" aria-labelledby="related">
-<h2 id="related">Related</h2>
-{{with .Related.Err}}{{template "panel-error" .}}{{else}}{{with .Related.Docs}}
-<ul class="related">
-{{range .}}<li><a href="{{documentHref .DocumentID}}">{{or .Title .URL}}</a> <span class="meta">{{printf "%.2f" .Score}}</span></li>
-{{end}}</ul>
-{{else}}<p class="empty">None yet: related documents come from its indexed text.</p>{{end}}{{end}}
+<aside class="side">
+<section class="card" aria-labelledby="related">
+<div class="card-head"><h2 id="related">Related</h2>{{if .Related.Docs}}<span class="muted num">similarity</span>{{end}}</div>
+{{with .Related.Err}}<div class="card-body">{{template "panel-error" .}}</div>
+{{else}}{{with .Related.Docs}}<div class="card-body flush"><ul class="related">
+{{range .}}<li><a href="{{documentHref .DocumentID}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</a><span class="doc-sub"><span class="host">{{host .URL}}</span><span class="meter-row"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .Score}}">{{printf "%.2f" .Score}}</meter>{{printf "%.2f" .Score}}</span></span></li>
+{{end}}</ul></div>
+{{else}}<div class="card-body"><p class="empty-inline">None yet: related documents come from its indexed text.</p></div>{{end}}{{end}}
 </section>
-<section class="panel" aria-labelledby="bookmarks">
-<h2 id="bookmarks">Bookmarks</h2>
-{{with .Bookmarks.Err}}{{template "panel-error" .}}{{else}}{{with .Bookmarks.Bookmarks}}
-<ul class="bookmarks">
-{{range .}}<li><strong>{{.Source}}</strong>{{with .Folder}} in <code>{{.}}</code>{{end}} · {{when .SavedAt}}{{with .Title}}<br>{{.}}{{end}}{{with .Tags}}<br>{{range .}}<span class="tag">{{.}}</span> {{end}}{{end}}</li>
-{{end}}</ul>
-{{else}}<p class="empty">No bookmark links here.</p>{{end}}{{end}}
+<section class="card" aria-labelledby="bookmarks">
+<div class="card-head"><h2 id="bookmarks">Bookmarks</h2></div>
+{{with .Bookmarks.Err}}<div class="card-body">{{template "panel-error" .}}</div>
+{{else}}{{with .Bookmarks.Bookmarks}}<div class="card-body flush"><ul class="bookmark-list">
+{{range .}}<li><div class="where"><strong>{{.Source}}</strong>{{with .Folder}}{{template "icon" "folder"}}<code>{{.}}</code>{{end}}{{range .Tags}}<span class="tag">{{.}}</span>{{end}}</div><div class="when">saved {{template "reltime" .SavedAt}}</div>{{with .Title}}<div class="title">{{.}}</div>{{end}}</li>
+{{end}}</ul></div>
+{{else}}<div class="card-body"><p class="empty-inline">No bookmark links here.</p></div>{{end}}{{end}}
+</section>
+<section class="card" aria-labelledby="details">
+<div class="card-head"><h2 id="details">Details</h2></div>
+<div class="card-body">
+<dl class="facts">
+<dt>Added</dt><dd>{{when .Meta.CreatedAt}}</dd>
+<dt>Updated</dt><dd>{{when .Meta.UpdatedAt}}</dd>
+{{with .Extraction}}<dt>Fetched</dt><dd>{{when .FetchedAt}} by {{.Fetcher}}{{with .Via}} via {{if eq . "jina"}}<strong>Jina Reader</strong>{{else}}{{.}}{{end}}{{end}}: {{.Status}}{{with .ErrorMessage}} ({{.}}){{end}}</dd>{{end}}
+{{with .Meta.CanonicalURL}}<dt>Canonical URL</dt><dd>{{with outbound .}}<a href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{else}}{{.}}{{end}}</dd>{{end}}
+<dt>ID</dt><dd class="mono">{{.Meta.ID}}</dd>
+{{with .Meta.MarkdownPath}}<dt>Markdown</dt><dd class="mono">{{.}}</dd>{{end}}
+</dl>
+<div class="cli mt-4"><span class="muted">From the terminal</span>
+{{if eq .Meta.State "dead"}}<code>curio refetch --force {{.Meta.ID}}</code>{{else}}<code>curio refetch {{.Meta.ID}}</code>{{end}}
+{{if .Extraction}}<code>curio reindex {{.Meta.ID}}</code>{{end}}
+</div>
+</div>
 </section>
 </aside>
 </div>
+{{- end}}
+
+{{/* A failed document's whole error, one click away. */}}
+{{define "full-error" -}}
+{{with .}}<details class="more-text"><summary>Full error</summary><pre>{{.}}</pre></details>{{end}}
 {{- end}}

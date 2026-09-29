@@ -1,16 +1,37 @@
 {{define "content" -}}
+<div class="page-head"><div class="titles">
 <h1>Interests</h1>
+{{with .Run}}<p class="lede">{{num .Interests}} topics curio found in your library, largest first{{if lt (len $.Interests) .Interests}}; these are the {{len $.Interests}} largest{{end}}.</p>
+{{else}}<p class="lede">Topics curio finds in your library, by grouping pages alike.</p>{{end}}
+</div></div>
 {{with .Run}}
-<p class="meta">From the clustering run of {{when .ComputedAt}} ({{.Algo}}): {{.Documents}} documents, {{.Noise}} of them in no interest.</p>
+<section class="card mb-4" aria-label="Coverage"><div class="card-body"><div class="coverage">
+{{template "stackbar" (coverageBar .Documents .Noise)}}
+<div class="legend"><span class="item"><span class="swatch swatch-accent"></span><span class="n">{{num .Clustered}}</span> in an interest <span class="pct">{{pct .Clustered .Documents}}</span></span><span class="item"><span class="swatch swatch-track"></span><span class="n">{{num .Noise}}</span> in none <span class="pct">{{pct .Noise .Documents}}</span></span><span class="item run">Run of {{when .ComputedAt}} · {{.Algo}} · {{num .Documents}} documents</span></div>
+</div></div></section>
 {{with $.Interests}}
-<ul class="interests">
-{{range .}}<li class="interest">
-<h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}unlabeled{{end}}</a></h2>
-<p class="meta">{{.Size}} documents · cohesion {{printf "%.2f" .Cohesion}}</p>
-{{with .Summary}}<p>{{.}}</p>{{end}}
-{{with .Members}}<ul>{{range .}}<li><a href="{{documentHref .DocumentID}}">{{or .Title .URL}}</a></li>{{end}}</ul>{{end}}
+<ul class="interest-grid" role="list">
+{{range .}}<li class="card interest">
+<h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a></h2>
+<div class="stats"><span><b>{{num .Size}}</b> documents</span>{{template "cohesion" .Cohesion}}</div>
+{{with .Summary}}<p class="summary">{{.}}</p>{{end}}
+{{with .Members}}<ul class="members">{{range .}}<li><a href="{{documentHref .DocumentID}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</a></li>{{end}}</ul>{{end}}
+<a class="all" href="{{interestHref .ID}}">All {{num .Size}} documents →</a>
 </li>
 {{end}}</ul>
-{{else}}<p class="empty">The last run found no interests.</p>{{end}}
-{{else}}<p class="empty">No interests yet: <code>curio interests rebuild</code> groups the library into them.</p>{{end}}
+{{else}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "sparkles"}}</div>
+<h2>No interests in this run</h2>
+<p>The last run found no interests.</p>
+</div></div>{{end}}
+{{else}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "sparkles"}}</div>
+<h2>No interests yet</h2>
+<p><code>curio interests rebuild</code> groups the library into them.</p>
+</div></div>{{end}}
+{{- end}}
+
+{{/* An interest's cohesion: how alike its documents are, from 0 to 1. */}}
+{{define "cohesion" -}}
+<span class="meter-row" title="Cohesion: how alike its documents are"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>{{printf "%.2f" .}}</span>
 {{- end}}

@@ -716,10 +716,11 @@ func testOrigin(t *testing.T) localOrigin {
 	return origin
 }
 
-// testDashboard is the dashboard pages says to serve.
+// testDashboard is the dashboard pages says to serve, for a daemon whose
+// address it doesn't know.
 func testDashboard(t *testing.T, pages UIOptions) dashboard {
 	t.Helper()
-	d, err := newDashboard(pages)
+	d, err := newDashboard(pages, "")
 	require.NoError(t, err)
 	return d
 }

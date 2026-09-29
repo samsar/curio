@@ -3,33 +3,55 @@ Search as you type: htmx sends the form's query 400 ms after the last
 keystroke, a new one aborts the request in flight (hx-sync), and the answer,
 the same full page a plain GET gets, replaces what is inside #results. With
 JavaScript off, the form is a plain GET.
+
+The page is its own search box, so the header has none. The define holds
+an HTML comment, which html/template leaves out of the page, because
+text/template keeps a block's default over an empty define.
 */}}
+{{define "header-search"}}<!-- no header search -->{{end}}
+
 {{define "content" -}}
-<h1>Search</h1>
-<form class="search" action="/ui/search" method="get" role="search">
-<input type="search" name="q" value="{{.Query}}" placeholder="What do you remember about it?" aria-label="Search your library" autofocus
+<div class="search-page">
+<h1 class="visually-hidden">Search</h1>
+<form class="search-hero" action="/ui/search" method="get" role="search">
+<label class="visually-hidden" for="q">Search your library</label>
+<div class="searchbox">
+{{template "icon" "search"}}
+<input id="q" type="search" name="q" value="{{.Query}}" placeholder="What do you remember about it?" autocomplete="off" autofocus
  hx-get="/ui/search" hx-trigger="input changed delay:400ms, search" hx-sync="this:replace"
  hx-target="#results" hx-select="#results > *" hx-swap="innerHTML" hx-push-url="true" hx-indicator="#searching">
-<button type="submit">Search</button>
-<span id="searching" class="htmx-indicator">Searching…</span>
+<div class="searchbox-end"><span id="searching" class="htmx-indicator spinner" aria-hidden="true"></span><button class="btn btn-primary" type="submit" aria-label="Search">{{template "icon" "search"}}<span class="label">Search</span></button></div>
+</div>
 </form>
-<div id="results" aria-live="polite">
+<div id="results" class="results" aria-live="polite">
 {{with .Err}}{{template "panel-error" .}}{{end}}
 {{with .Results}}
-{{if .Degraded}}<div class="banner warn">{{range .Warnings}}<p>{{.}}</p>{{end}}</div>{{end}}
+{{if .Degraded}}<div class="callout callout-warn mb-4" role="status">{{template "icon" "alert"}}
+<p class="callout-title">Keyword results only</p>
+<div class="callout-body">{{range .Warnings}}<p>{{.}}</p>{{end}}</div>
+</div>{{end}}
 {{with .Hits}}
-<p class="meta">{{len .}} documents in {{$.Results.TookMS}} ms</p>
-<ol class="hits">
-{{range .}}<li class="hit">
-<h2><a href="{{documentHref .DocumentID}}">{{or .Title .URL}}</a></h2>
-<p class="url">{{with outbound .URL}}<a href="{{.}}" rel="noopener noreferrer" target="_blank">{{.}}</a>{{else}}{{.URL}}{{end}} <span class="meta">score {{printf "%.4f" .Score}}</span></p>
-{{range .Matches}}<blockquote class="match">
-<p>{{range .Segments}}{{if .Mark}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}}</p>
-<p class="meta">{{with score .BM25}}bm25 {{.}}{{end}}{{with score .Vector}} vector {{.}}{{end}}</p>
-</blockquote>
-{{end}}</li>
+<div class="results-head"><span><strong>{{num (len .)}} documents</strong> · {{$.Results.TookMS}} ms</span></div>
+<ol class="results">
+{{range $hit := .}}<li class="result">
+<div class="result-where"><span class="fav">{{template "icon" (typeIcon .ContentType)}}</span><span class="path" title="{{.URL}}">{{with host .URL}}<b>{{.}}</b>{{with urlTrail $hit.URL}} › {{.}}{{end}}{{else}}{{.URL}}{{end}}</span></div>
+<h2 class="result-title"><a href="{{documentHref .DocumentID}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</a></h2>
+{{range .ShownMatches}}{{template "match" .}}{{end}}
+<div class="result-foot">{{with .ContentType}}<span class="tag">{{.}}</span>{{end}}<span class="mono muted">score {{printf "%.4f" .Score}}</span>
+{{- with .MoreMatches}}<details><summary>{{len .}} more {{if eq (len .) 1}}passage{{else}}passages{{end}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
+</li>
 {{end}}</ol>
-{{else}}<p class="empty">Nothing in your library matches.</p>{{end}}
+{{else}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "search-x"}}</div>
+<h2>Nothing in your library matches</h2>
+<p>curio looks for your words and for pages about the same idea in other words, and found neither. Try other words, or fewer.</p>
+</div></div>{{end}}
 {{end}}
 </div>
+</div>
+{{- end}}
+
+{{/* A passage that matched: its marked words, and each retriever's score. */}}
+{{define "match" -}}
+<p class="snippet">{{range .Segments}}{{if .Mark}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}} <span class="mono muted">{{with score .BM25}}bm25 {{.}}{{end}}{{with score .Vector}} vector {{.}}{{end}}</span></p>
 {{- end}}

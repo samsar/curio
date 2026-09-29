@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	xhtml "golang.org/x/net/html"
 
 	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
@@ -158,6 +159,8 @@ func TestUI_Root(t *testing.T) {
 
 	body := getPage(t, srv, "/ui", http.StatusOK)
 	assert.Contains(t, body, "<h1>Overview</h1>", "/ui is /ui/")
+	assert.Contains(t, body, "<span>"+strings.TrimPrefix(srv.URL, "http://")+" · this Mac only</span>",
+		"the footer names where the daemon listens")
 }
 
 func TestUI_Overview(t *testing.T) {
@@ -169,22 +172,31 @@ func TestUI_Overview(t *testing.T) {
 	bookmark(t, srv, "https://example.com/new", store.SourceSafari, "")
 
 	body := getPage(t, srv, "/ui/", http.StatusOK)
-	assert.Contains(t, body, "3 documents · 2 bookmarks")
+	assert.Contains(t, body, `<span class="label">Documents</span><span class="value">3</span>`)
+	assert.Contains(t, body, `<span class="label">Fetched</span><span class="value">1 <small>33%</small></span>`)
+	assert.Contains(t, body, `<span class="label">Bookmarks</span><span class="value">2</span>`)
 	for _, state := range []string{"pending", "fetched", "failed", "dead"} {
 		assert.Contains(t, body, `<a href="/ui/library?state=`+state+`">`)
 	}
-	assert.Contains(t, body, `<span class="badge ok">open</span>`)
-	assert.Contains(t, body, "<td>fetch</td><td>0 of 16</td><td>1</td>", "the new page's fetch job")
+	// The state bar's proportions are attributes: a third each of pending,
+	// fetched and failed.
+	assert.Contains(t, body, `<rect class="fill-warn" x="0.000" y="0" width="33.333" height="10"/>`+
+		`<rect class="fill-ok" x="33.333" y="0" width="33.334" height="10"/>`+
+		`<rect class="fill-danger" x="66.667" y="0" width="33.333" height="10"/>`)
+	assert.NotContains(t, body, "style=")
+	assert.Contains(t, body, `<span class="badge queue-open">open</span>`)
+	assert.Contains(t, body, `<td>fetch</td><td class="num">0 of 16</td><td class="num">1</td>`, "the new page's fetch job")
 	assert.Contains(t, body, "1 jobs queued, and none finished in the last 10m.")
-	assert.Contains(t, body, "qwen3-embedding:0.6b (1024 dimensions)")
-	assert.Contains(t, body, `<a href="/ui/documents/`+fetched.ID+`">https://example.com/fetched</a>`)
-	assert.Contains(t, body, "https://example.com/new")
+	assert.Contains(t, body, `qwen3-embedding:0.6b<span class="sub">1024 dimensions</span>`)
+	assert.Contains(t, body, `<a class="doc-title untitled" href="/ui/documents/`+fetched.ID+
+		`" title="https://example.com/fetched">example.com/fetched</a>`, "a bookmark links to its document")
+	assert.Contains(t, body, `title="https://example.com/new">example.com/new</a>`)
 
 	// Paused: the progress says why nothing starts.
 	_, err := srv.Deps.Gate.Update(context.Background(), jobsPause())
 	require.NoError(t, err)
 	body = getPage(t, srv, "/ui/", http.StatusOK)
-	assert.Contains(t, body, `<span class="badge warn">closed</span> paused`)
+	assert.Contains(t, body, `<span class="badge queue-closed">closed</span><span class="why">paused`)
 	assert.Contains(t, body, "1 jobs queued. The queue is closed (paused), so none start until it opens.")
 }
 
@@ -211,7 +223,7 @@ func TestUI_OverviewPanelsDegrade(t *testing.T) {
 	id := p.header.Get("X-Request-Id")
 	assert.Contains(t, p.body, "Couldn't read this: count bookmarks: injected failure.")
 	assert.Contains(t, p.body, "Request "+id)
-	assert.Contains(t, p.body, `<span class="badge ok">open</span>`, "the queue panel renders")
+	assert.Contains(t, p.body, `<span class="badge queue-open">open</span>`, "the queue panel renders")
 	assert.Contains(t, p.body, "qwen3-embedding:0.6b", "the health panel renders")
 
 	errs := rec.errors()
@@ -233,15 +245,20 @@ func TestUI_Search(t *testing.T) {
 	srv.AddContent(t, doc, "kafka partitions and <script>alert(1)</script> consumer groups")
 
 	form := getPage(t, srv, "/ui/search", http.StatusOK)
-	assert.Contains(t, form, `hx-trigger="input changed delay:400ms, search" hx-sync="this:replace"`)
+	assert.Contains(t, form, `hx-get="/ui/search" hx-trigger="input changed delay:400ms, search" hx-sync="this:replace"`)
 	assert.Contains(t, form, `hx-target="#results" hx-select="#results > *" hx-swap="innerHTML"`)
 	assert.Contains(t, form, `hx-push-url="true"`)
-	assert.NotContains(t, form, `class="hits"`)
+	assert.Contains(t, form, `hx-indicator="#searching"`)
+	assert.NotContains(t, form, `<ol class="results">`)
+	assert.NotContains(t, form, `class="header-search"`, "the page is its own search box")
+	assert.Contains(t, form, `<button class="btn btn-primary" type="submit" aria-label="Search">`,
+		"named where a phone shows only its icon")
 
 	body := getPage(t, srv, "/ui/search?q=kafka", http.StatusOK)
 	assert.Contains(t, body, `value="kafka"`)
-	assert.Contains(t, body, `<a href="/ui/documents/`+doc.ID+`">Kafka partitions</a>`)
-	assert.Contains(t, body, `<a href="https://example.com/kafka" rel="noopener noreferrer" target="_blank">`)
+	assert.Contains(t, body, `<a href="/ui/documents/`+doc.ID+`" title="Kafka partitions">Kafka partitions</a>`)
+	assert.Contains(t, body, `<span class="path" title="https://example.com/kafka"><b>example.com</b> › kafka</span>`)
+	assert.NotContains(t, body, `rel="noopener noreferrer"`, "results link to their document's page, not out")
 	assert.Contains(t, body, "<mark>kafka</mark>")
 	assert.Contains(t, body, "&lt;script&gt;alert(1)&lt;/script&gt;", "the chunk's markup is text")
 	assert.Regexp(t, `bm25 \d+\.\d{3}`, body)
@@ -249,13 +266,13 @@ func TestUI_Search(t *testing.T) {
 	assert.NotContains(t, body, "semantic search unavailable")
 
 	// htmx asks for the same page a plain GET gets, and selects its results.
-	took := regexp.MustCompile(`in \d+ ms`)
+	took := regexp.MustCompile(`· \d+ ms`)
 	htmx := getWith(t, srv, "/ui/search?q=kafka", http.Header{"Hx-Request": {"true"}, "Hx-Current-Url": {srv.URL + "/ui/search"}})
 	require.Equal(t, http.StatusOK, htmx.status)
 	assert.Equal(t, took.ReplaceAllString(body, ""), took.ReplaceAllString(htmx.body, ""))
 
 	assert.Contains(t, getPage(t, apitest.Start(t), "/ui/search?q=kafka", http.StatusOK),
-		"Nothing in your library matches.")
+		"<h2>Nothing in your library matches</h2>")
 }
 
 // TestUI_SearchDegraded: without semantic search the page shows the
@@ -268,7 +285,8 @@ func TestUI_SearchDegraded(t *testing.T) {
 	srv.AddContent(t, doc, "kafka partitions")
 
 	body := getPage(t, srv, "/ui/search?q=kafka", http.StatusOK)
-	assert.Contains(t, body, `<div class="banner warn"><p>semantic search unavailable (`)
+	assert.Contains(t, body, `<p class="callout-title">Keyword results only</p>`+"\n"+
+		`<div class="callout-body"><p>semantic search unavailable (`)
 	assert.Contains(t, body, "Kafka partitions")
 }
 
@@ -303,7 +321,10 @@ func TestUI_SearchEmptyQuery(t *testing.T) {
 }
 
 // moreRE finds the Library's next-page link.
-var moreRE = regexp.MustCompile(`<a class="more" href="([^"]+)"`)
+var moreRE = regexp.MustCompile(`<div class="load-more" id="more"><a class="btn" href="([^"]+)"`)
+
+// docLinkRE finds the documents a list links to, by their names.
+var docLinkRE = regexp.MustCompile(`<a class="doc-title(?: untitled)?" href="/ui/documents/([^"]+)"`)
 
 // assetRE finds the first asset a page loads.
 var assetRE = regexp.MustCompile(`(?:href|src)="(/ui/static/[^"]+)"`)
@@ -320,10 +341,13 @@ func TestUI_Library(t *testing.T) {
 
 	all := getPage(t, srv, "/ui/library", http.StatusOK)
 	for _, doc := range []*store.Document{paper, failedDoc, other} {
-		assert.Contains(t, all, `<a href="/ui/documents/`+doc.ID+`">`)
+		assert.Contains(t, all, `href="/ui/documents/`+doc.ID+`"`)
 	}
-	assert.Contains(t, all, `<td class="error">HTTP 503 from the origin</td>`)
-	assert.Contains(t, all, `<option value="">any</option>`)
+	assert.Contains(t, all, `<span class="doc-error" title="HTTP 503 from the origin"><span class="err-cause">Other</span> `+
+		`<span class="msg">HTTP 503 from the origin</span></span>`)
+	assert.Contains(t, all, `<option value="">Any state</option>`)
+	assert.Contains(t, all, `<option value="">Any type</option>`)
+	assertLibraryTable(t, all, 3)
 
 	filtered := func(query string) string {
 		t.Helper()
@@ -341,13 +365,81 @@ func TestUI_Library(t *testing.T) {
 	inFolder := filtered("folder=/Research")
 	assert.Contains(t, inFolder, paper.ID)
 	assert.NotContains(t, inFolder, failedDoc.ID)
-	assert.Contains(t, filtered("host=nothing.example"), "No documents match.")
+	none := filtered("host=nothing.example")
+	assert.Contains(t, none, "<h2>No documents match</h2>")
+	assert.Contains(t, none, "host <code>nothing.example</code>")
+	assert.Contains(t, none, `<a class="btn" href="/ui/library">Clear filters</a>`)
 
 	for _, query := range []string{"state=bogus", "content_type=bogus", "cursor=not-a-cursor"} {
 		body := getPage(t, srv, "/ui/library?"+query, http.StatusBadRequest)
-		assert.Contains(t, body, "<h1>400 bad request</h1>", query)
-		assert.Contains(t, body, `<a href="/ui/library">Start over</a>`, query)
+		assert.Contains(t, body, `<div class="big-code">400</div>`+"\n<h1>bad request</h1>", query)
+		assert.Contains(t, body, `<a class="btn btn-primary" href="/ui/library">Start over</a>`, query)
 	}
+}
+
+// assertLibraryTable checks a Library page's table: widths from the
+// colgroup, and rows rows of the four cells its columns name, Type and
+// Updated last, which a phone folds away.
+func assertLibraryTable(t *testing.T, page string, rows int) {
+	t.Helper()
+	doc, err := xhtml.Parse(strings.NewReader(page))
+	require.NoError(t, err)
+	var cols []string
+	var trs []*xhtml.Node
+	for n := range doc.Descendants() {
+		switch {
+		case n.Type != xhtml.ElementNode:
+		case n.Data == "col":
+			cols = append(cols, attr(n, "class"))
+		case n.Data == "tbody" && attr(n, "id") == "rows":
+			for tr := range n.ChildNodes() {
+				if tr.Type == xhtml.ElementNode {
+					trs = append(trs, tr)
+				}
+			}
+		}
+	}
+	assert.Equal(t, []string{"", "c-state", "c-type", "c-when"}, cols)
+	require.Len(t, trs, rows)
+	for _, tr := range trs {
+		var cells []string
+		for td := range tr.ChildNodes() {
+			if td.Type == xhtml.ElementNode {
+				require.Equal(t, "td", td.Data)
+				cells = append(cells, attr(td, "class"))
+			}
+		}
+		assert.Equal(t, []string{"", "state-cell", "c-type", "c-when when"}, cells)
+	}
+}
+
+func attr(n *xhtml.Node, key string) string {
+	for _, a := range n.Attr {
+		if a.Key == key {
+			return a.Val
+		}
+	}
+	return ""
+}
+
+// TestUI_LibraryFailures: a failed or dead row says why under its name,
+// by its cause and the start of its error, with the whole error on
+// hover; a document a refetch recovered shows no old failure.
+func TestUI_LibraryFailures(t *testing.T) {
+	srv := apitest.Start(t)
+	recovered := titled(t, srv, "https://example.com/recovered", "Recovered", store.DocStateFetched)
+	failJob(t, srv, recovered, "an old failure a refetch recovered from")
+	blocked := srv.AddFailedDocument(t, "https://blocked.example/a", store.FailureCauseAntiBot)
+	const blockedErr = "permanent failure: native: origin blocked the request (likely anti-bot)"
+	failJob(t, srv, blocked, blockedErr)
+	srv.AddFailedDocument(t, "https://gone.example/a", store.FailureCauseDeadLink)
+
+	body := getPage(t, srv, "/ui/library", http.StatusOK)
+	assert.NotContains(t, body, "an old failure")
+	assert.Contains(t, body, `<span class="doc-error" title="`+blockedErr+`"><span class="err-cause">Blocked by bot protection</span> `+
+		`<span class="msg">origin blocked the request (likely anti-bot)</span></span>`)
+	assert.Contains(t, body, `<span class="doc-error"><span class="err-cause">Dead link</span> </span>`)
+	assert.Equal(t, 2, strings.Count(body, `<span class="doc-error"`))
 }
 
 // TestUI_LibraryPages: following the next-page link one row at a time
@@ -362,7 +454,6 @@ func TestUI_LibraryPages(t *testing.T) {
 		byCause[srv.AddFailedDocument(t, fmt.Sprintf("https://blocked.example/%d", i), store.FailureCauseAntiBot).ID] = true
 		srv.AddFailedDocument(t, fmt.Sprintf("https://walled.example/%d", i), store.FailureCauseLoginWall)
 	}
-	idRE := regexp.MustCompile(`<a href="/ui/documents/([^"]+)">`)
 	for _, tc := range []struct {
 		filter string
 		want   map[string]bool
@@ -372,7 +463,7 @@ func TestUI_LibraryPages(t *testing.T) {
 			path := "/ui/library?" + tc.filter + "&limit=1"
 			for range 10 {
 				body := getPage(t, srv, path, http.StatusOK)
-				ids := idRE.FindAllStringSubmatch(body, -1)
+				ids := docLinkRE.FindAllStringSubmatch(body, -1)
 				require.Len(t, ids, 1, path)
 				got[ids[0][1]]++
 				m := moreRE.FindStringSubmatch(body)
@@ -382,7 +473,7 @@ func TestUI_LibraryPages(t *testing.T) {
 				path = html.UnescapeString(m[1])
 				assert.Contains(t, path, tc.filter)
 				assert.Contains(t, path, "limit=1")
-				assert.Contains(t, body, `hx-select-oob="#more"`)
+				assert.Contains(t, body, `hx-select-oob="#more">Load 1 more</a></div>`)
 			}
 			require.Len(t, got, len(tc.want))
 			for id, n := range got {
@@ -395,7 +486,7 @@ func TestUI_LibraryPages(t *testing.T) {
 	form := getPage(t, srv, "/ui/library?cause=anti_bot", http.StatusOK)
 	assert.Contains(t, form, `<input type="hidden" name="cause" value="anti_bot">`, "filtering again keeps the cause")
 	body := getPage(t, srv, "/ui/library?cause=bogus", http.StatusBadRequest)
-	assert.Contains(t, body, "<h1>400 bad request</h1>")
+	assert.Contains(t, body, `<div class="big-code">400</div>`+"\n<h1>bad request</h1>")
 }
 
 // hostileMarkdown is a stored page trying everything.
@@ -414,18 +505,20 @@ func TestUI_Document(t *testing.T) {
 
 	body := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
 	assert.Contains(t, body, "<h1>A post</h1>")
-	assert.Contains(t, body, "<code>"+doc.ID+"</code>")
+	assert.Contains(t, body, `<dd class="mono">`+doc.ID+"</dd>")
 	assert.Contains(t, body, srv.Home.ContentDir(), "the absolute markdown path")
 	assert.Contains(t, body, "by apitest")
 	assert.Contains(t, body, `<a href="https://site.example/about" rel="nofollow noreferrer noopener" target="_blank">relative</a>`)
 	assert.Contains(t, body, `>[image: diagram]</a>`)
 	assert.NotContains(t, body, "<img")
 	assert.Contains(t, body, `<a href="/ui/documents/`+doc.ID+`?images=1">Load images</a>`)
-	assert.Contains(t, body, `<a href="/ui/documents/`+related.ID+`">Hostile relative</a>`)
-	assert.Contains(t, body, "<strong>chrome</strong> in <code>/Reading/Web</code>")
+	assert.Contains(t, body, `<a href="/ui/documents/`+related.ID+`" title="Hostile relative">Hostile relative</a>`)
+	assert.Regexp(t, `<strong>chrome</strong><svg class="icon"[^>]*>.*?</svg><code>/Reading/Web</code>`, body)
 	assert.Contains(t, body, `<span class="tag">&lt;b&gt;tag&lt;/b&gt;</span>`)
 	assert.NotContains(t, body, "an old failure", "a fetched document's old failure isn't current")
+	assert.NotContains(t, body, `class="callout callout-danger`)
 	assert.Contains(t, body, "<code>curio refetch "+doc.ID+"</code>")
+	assert.Contains(t, body, "<code>curio reindex "+doc.ID+"</code>")
 
 	for _, on := range []string{"1", "true"} {
 		images := getPageCSP(t, srv, "/ui/documents/"+doc.ID+"?images="+on, http.StatusOK, ui.CSPWithImages)
@@ -499,13 +592,16 @@ func TestUI_DocumentUnlinkableLinksOverBudget(t *testing.T) {
 }
 
 // TestUI_DocumentStates: a document without text, one whose text is gone
-// from disk, and a failed one with its last error.
+// from disk, a failed one with why and its last error, and a dead one.
 func TestUI_DocumentStates(t *testing.T) {
 	srv := apitest.Start(t)
 	pending := srv.AddDocument(t, "https://example.com/pending", store.DocStatePending)
-	assert.Contains(t, getPage(t, srv, "/ui/documents/"+pending.ID, http.StatusOK), "Not fetched yet.")
-	assert.Contains(t, getPage(t, srv, "/ui/documents/"+pending.ID, http.StatusOK),
-		"None yet: related documents come from its indexed text.")
+	body := getPage(t, srv, "/ui/documents/"+pending.ID, http.StatusOK)
+	assert.Contains(t, body, "<h2>Not fetched yet</h2>")
+	assert.Contains(t, body, "None yet: related documents come from its indexed text.")
+	assert.Contains(t, body, "<code>curio refetch "+pending.ID+"</code>")
+	assert.NotContains(t, body, "curio reindex", "nothing to reindex before a fetch")
+	assert.NotContains(t, body, `class="callout`)
 
 	gone := srv.AddDocument(t, "https://example.com/gone", store.DocStateFetched)
 	ext := srv.AddContent(t, gone, "# Gone")
@@ -513,12 +609,24 @@ func TestUI_DocumentStates(t *testing.T) {
 	assert.Contains(t, getPage(t, srv, "/ui/documents/"+gone.ID, http.StatusOK),
 		"The extracted text is missing on disk; refetch the document.")
 
-	for _, state := range []store.DocState{store.DocStateFailed, store.DocStateDead} {
-		doc := srv.AddDocument(t, "https://example.com/"+string(state), state)
-		failJob(t, srv, doc, "HTTP 404 <from> the origin")
-		assert.Contains(t, getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK),
-			"Last error: HTTP 404 &lt;from&gt; the origin", state)
-	}
+	failed := srv.AddFailedDocument(t, "https://example.com/blocked", store.FailureCauseAntiBot)
+	failJob(t, srv, failed, "permanent failure: native: HTTP 403 <from> the origin")
+	body = getPage(t, srv, "/ui/documents/"+failed.ID, http.StatusOK)
+	assert.Contains(t, body, `<div class="callout callout-danger mt-4" role="alert">`)
+	assert.Contains(t, body, `<p class="callout-title">Blocked by bot protection</p>`)
+	assert.Contains(t, body, "<p>The site blocked curio&#39;s request: a 403 or 503, or a bot check or block page.</p>")
+	assert.Contains(t, body, `<details class="more-text"><summary>Full error</summary>`+
+		"<pre>permanent failure: native: HTTP 403 &lt;from&gt; the origin</pre></details>")
+	assert.Contains(t, body, "<h2>No text</h2>")
+	assert.Contains(t, body, "<code>curio refetch "+failed.ID+"</code>")
+
+	dead := srv.AddDocument(t, "https://example.com/dead", store.DocStateDead)
+	failJob(t, srv, dead, "permanent failure: native: dead link (HTTP 404)")
+	body = getPage(t, srv, "/ui/documents/"+dead.ID, http.StatusOK)
+	assert.Contains(t, body, `<div class="callout mt-4" role="note">`)
+	assert.Contains(t, body, `<p class="callout-title">This page is gone</p>`)
+	assert.Contains(t, body, "<pre>permanent failure: native: dead link (HTTP 404)</pre>")
+	assert.Contains(t, body, "<code>curio refetch --force "+dead.ID+"</code>", "a dead link refetches only forced")
 }
 
 // TestUI_DocumentTruncated: a text past the render cap shows its start and
@@ -578,14 +686,18 @@ func TestUI_Interests(t *testing.T) {
 
 	list := getPage(t, srv, "/ui/interests", http.StatusOK)
 	assert.Contains(t, list, `<a href="/ui/interests/`+interest.ID+`">Stream &lt;processing&gt;</a>`)
-	assert.Contains(t, list, "150 documents · cohesion 0.90")
-	assert.Contains(t, list, `<a href="/ui/documents/`+a.ID+`">Kafka partitions</a>`)
+	assert.Contains(t, list, "<b>150</b> documents")
+	assert.Contains(t, list, `<meter class="meter" min="0" max="1" value="0.90">0.90</meter>0.90</span>`, "cohesion")
+	assert.Contains(t, list, `<a href="/ui/documents/`+a.ID+`" title="Kafka partitions">Kafka partitions</a>`)
+	assert.Contains(t, list, "1 topics curio found in your library, largest first.</p>", "the run's count, all shown")
 
 	one := getPage(t, srv, "/ui/interests/"+interest.ID, http.StatusOK)
 	assert.Contains(t, one, "<h1>Stream &lt;processing&gt;</h1>")
 	assert.Contains(t, one, "showing 2 of 150")
-	assert.Contains(t, one, `<a href="/ui/documents/`+b.ID+`">https://example.com/b</a>`)
-	assert.Contains(t, one, "<td>0.80</td>")
+	assert.Contains(t, one, `<a class="doc-title untitled" href="/ui/documents/`+b.ID+
+		`" title="https://example.com/b">example.com/b</a>`)
+	assert.Contains(t, one, `<td class="num muted">2</td>`, "ranked")
+	assert.Contains(t, one, `</meter>0.80</span></td>`)
 
 	getPage(t, srv, "/ui/interests/no-such-interest", http.StatusNotFound)
 	_, err = srv.DB.Exec(`UPDATE clusters SET tenant_id = 'other' WHERE id = ?`, interest.ID)
