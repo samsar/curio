@@ -1,0 +1,77 @@
+{{/*
+The Library's Failures tab: the Library's head, the page's action status,
+then its live region, one card per failure cause, most first, all from
+one read of the failure summary. Its poller (Failures.Pollers) refreshes
+that region and the subnav's count after a change the page makes and when
+the tab comes back into view, never on a timer; a poll's answer is those
+two regions alone.
+
+Every group's refetch reports to the page's one status, outside the
+regions: a refetch that is taken empties its group, so the refresh removes
+the card and would take a status of the card's own with it, and a
+refreshed region may not announce. The dead links' confirm sits in their
+card, so the count it names is refreshed with it. A cause this build
+doesn't know gets a card without links, refetch or command: neither the
+Library nor refetch-all takes it.
+*/}}
+{{define "content" -}}
+{{if .Poll}}{{template "library-subnav" .Views}}
+{{template "failures-live" .}}
+{{- else}}{{template "failures-page" .}}{{end}}
+{{- end}}
+
+{{define "failures-page" -}}
+{{template "library-head" .Head}}
+<div class="page-status"><span class="action-status" id="failures-status" role="status" aria-live="polite"></span></div>
+{{template "failures-live" .}}
+{{range .Pollers}}{{template "poller" .}}
+{{end}}
+{{- end}}
+
+{{/*
+The groups, a Failures: the totals, a card per cause, and the causes no
+document failed for; nothing failed; or why the summary couldn't be read.
+Every focusable element has an id made from its cause, never from its
+card's place, so focus stays on its control when the card survives a
+refresh.
+*/}}
+{{define "failures-live" -}}
+<div class="failures" id="failures-live">
+{{- with .Err}}{{template "panel-error" .}}{{else}}{{if .Total}}
+<p class="failures-totals">{{.Totals}}</p>
+<ul class="causes">
+{{range .Groups}}{{$g := .}}<li class="card cause" id="{{.ID}}">
+<span class="cause-icon {{causeTone .Cause}}">{{template "icon" (causeIcon .Cause)}}</span>
+<div class="cause-main">
+<h2>{{causeLabel .Cause}} <code>{{.Cause}}</code></h2>
+{{with causeWhy .Cause}}<p class="why">{{.}}</p>{{end}}
+{{with .Hosts}}<div class="hosts" role="group" aria-label="Top hosts">
+{{- range $i, $h := .}}{{if $g.Known}}<a class="tag" id="host-{{$g.Cause}}-{{$i}}" href="{{causeHostHref $g.Cause $h.Name}}" title="{{$h.Name}}"><span class="name">{{$h.Name}}</span> <span class="n">{{num $h.Count}}</span></a>
+{{- else}}<span class="tag" title="{{$h.Name}}"><span class="name">{{$h.Name}}</span> <span class="n">{{num $h.Count}}</span></span>{{end}}{{end -}}
+</div>{{end}}
+</div>
+<div class="count"><div class="value">{{num .Count}}<span class="visually-hidden"> {{if eq .Count 1}}document{{else}}documents{{end}},</span></div><div class="pct">{{pct .Count $.Total}}<span class="visually-hidden"> of failures</span></div></div>
+{{if .Known}}<div class="cause-actions">
+{{- if .DeadLinks}}<button class="btn btn-sm js-only" type="button" id="refetch-dead_link" popovertarget="confirm-dead_link">{{template "icon" "refresh"}}Refetch {{num .Count}} anyway…</button>
+{{- else}}<button class="btn btn-sm js-only" type="button" id="refetch-{{.Cause}}"{{template "action" .Refetch}}>{{template "icon" "refresh"}}Refetch {{num .Count}}</button>{{end}}
+<a class="btn btn-sm btn-ghost" id="view-{{.Cause}}" href="{{causeHref .Cause}}">View in Library →</a>
+<code class="no-js">{{.Command}}</code>
+</div>{{end}}
+{{if .DeadLinks}}<div class="confirm" id="confirm-dead_link" popover role="alertdialog" aria-labelledby="confirm-dead_link-title" aria-describedby="confirm-dead_link-text">
+<h2 id="confirm-dead_link-title">{{template "icon" "refresh"}}Refetch {{count .Count "dead link" "dead links"}}?</h2>
+<p id="confirm-dead_link-text">curio found these pages gone. It will try each one again, and a page still gone stays dead.</p>
+<div class="actions">
+<button class="btn" type="button" id="refetch-dead_link-cancel" popovertarget="confirm-dead_link" popovertargetaction="hide" autofocus>Cancel</button>
+<button class="btn btn-primary" type="button" id="refetch-dead_link-confirm" popovertarget="confirm-dead_link" popovertargetaction="hide"{{template "action" .Refetch}}>Refetch {{num .Count}}</button>
+</div>
+</div>{{end}}
+</li>
+{{end}}</ul>
+{{with .Absent}}<p class="empty-inline mt-4">Causes without documents: {{range $i, $c := .}}{{if $i}}, {{end}}{{causeLabel $c}}{{end}}.</p>{{end}}
+{{- else}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "circle-check"}}</div>
+<h2>Nothing failed</h2>
+<p>No document failed to fetch, and none is a dead link.</p>
+</div></div>{{end}}{{end -}}
+</div>
+{{- end}}

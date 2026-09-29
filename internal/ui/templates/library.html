@@ -11,13 +11,12 @@ its own rows. The Date saved note sits outside both, so it shows once.
 The state tabs count the whole library's documents, so they show counts
 only when state is the one filter, in either order. The form carries the
 state as a hidden input: Apply keeps the tab. The order is a field of the
-form, and every link keeps it.
+form, and every link keeps it. A cause, which the Failures tab's links
+set, has no field: the form carries it hidden too, and a line under the
+toolbar names it, with a link that clears it alone.
 */}}
 {{define "content" -}}
-<div class="page-head"><div class="titles">
-<h1>Library</h1>
-<p class="lede">{{with .Counts}}{{count .Documents "document" "documents"}} from {{count .Bookmarks "bookmark" "bookmarks"}}.{{else}}Every page curio saved for you.{{end}}</p>
-</div></div>
+{{template "library-head" .Head}}
 <form class="toolbar" action="{{navHref "library"}}" method="get">
 <div class="segmented" role="group" aria-label="State">{{range .StateTabs}}<a href="{{.Href}}"{{if .Current}} aria-current="page"{{end}}>{{.Label}}{{if .Counted}} <span class="count">{{num .Count}}</span>{{end}}</a>{{end}}</div>
 <div class="grow"></div>
@@ -32,6 +31,8 @@ form, and every link keeps it.
 <button class="btn" type="submit">Apply</button>
 </div>
 </form>
+{{with .Filters.Cause}}<p class="cause-line"><span class="muted">Why they failed:</span> <strong>{{causeLabel .}}</strong> <code>{{.}}</code> <a id="clear-cause" href="{{clearCauseHref $.Filters}}" aria-label="Clear the cause filter">Clear</a></p>
+{{end -}}
 {{if .Rows}}
 <div class="card table-card">
 <div class="table-scroll">

@@ -114,6 +114,18 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			NextCursor: evilAttr,
 			PageSize:   7,
 		},
+		PageFailures: Failures{
+			Layout: layout(NavLibrary),
+			Counts: &LibraryCounts{Documents: 7467, Bookmarks: 7497, ByState: map[string]int{"failed": 930, "dead": 820}},
+			Total:  1750,
+			Groups: []FailureGroup{
+				{Cause: "anti_bot", Count: 926, Hosts: []Count{{Name: evilScript, Count: 169}, {Name: evilAttr + evilQuotes,
+					Count: 48}, {Name: strings.Repeat("h", 300) + ".example", Count: 5}}},
+				{Cause: "dead_link", Count: 820, Hosts: []Count{{Name: evilAttr, Count: 51}}},
+				{Cause: evilScript, Count: 3, Hosts: []Count{{Name: evilQuotes, Count: 3}}},
+				{Cause: "rate_limited", Count: 1},
+			},
+		},
 		PageDocument: Document{
 			Layout: layout(NavLibrary),
 			Meta: DocumentMeta{ID: evilAttr, Title: evilScript, BookmarkTitle: evilAttr, URL: evilURL, CanonicalURL: evilURL,
@@ -149,8 +161,8 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 
 // sampleVariants are more samples of the pages with branches their sample
 // can't take: the search home, with interests and without, Status with
-// every panel failed, and the Library with counts for its tabs and without
-// counts.
+// every panel failed, the Library with counts for its tabs and without
+// counts, and the Failures tab in each of its states.
 func sampleVariants(t testing.TB) map[string][]any {
 	t.Helper()
 	at := time.Date(2026, 9, 28, 9, 30, 0, 0, time.UTC)
@@ -181,6 +193,7 @@ func sampleVariants(t testing.TB) map[string][]any {
 			Search{Layout: layout(NavSearch), Query: " ", Home: &SearchHome{}},
 		},
 		PageStatus:    statusVariants(layout(NavStatus), panelErr, at),
+		PageFailures:  failuresVariants(layout(NavLibrary), panelErr, counts),
 		PageDocument:  documentVariants(layout(NavLibrary), panelErr, at),
 		PageInterests: interestsVariants(layout(NavInterests), panelErr, at),
 		PageLibrary: {
@@ -195,6 +208,8 @@ func sampleVariants(t testing.TB) map[string][]any {
 				Rows: saves, PageSize: 50},
 			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{Order: OrderSaved, Folder: evilAttr},
 				Counts: counts},
+			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{Order: OrderSaved, Cause: evilAttr,
+				Host: evilQuotes}, Counts: counts, Rows: saves, PageSize: 50},
 		},
 	}
 }
@@ -258,6 +273,24 @@ func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 	}
 }
 
+// failuresVariants are the Failures tab with nothing failed, the summary
+// unread, the library's counts unread, only failed documents, only dead
+// links, and a poll's answer, the summary read and not.
+func failuresVariants(layout Layout, panelErr *PanelError, counts *LibraryCounts) []any {
+	failed := []FailureGroup{{Cause: "timeout", Count: 2, Hosts: []Count{{Name: evilAttr, Count: 2}}},
+		{Cause: "tls", Count: 1}}
+	dead := []FailureGroup{{Cause: "dead_link", Count: 1, Hosts: []Count{{Name: evilScript, Count: 1}}}}
+	return []any{
+		Failures{Layout: layout, Counts: counts},
+		Failures{Layout: layout, Counts: counts, Err: panelErr},
+		Failures{Layout: layout, Total: 3, Groups: failed},
+		Failures{Layout: layout, Counts: counts, Total: 3, Groups: failed},
+		Failures{Layout: layout, Counts: counts, Total: 1, Groups: dead},
+		Failures{Layout: layout, Poll: PollCauses, Total: 4, Groups: append(slices.Clone(failed), dead...)},
+		Failures{Layout: layout, Poll: PollCauses, Err: panelErr},
+	}
+}
+
 // interestsVariants are the Interests with a rebuild queued behind a
 // paused queue, one done and one failed since the run shown, insight off
 // without a run, the rebuild's reads failed, and a poll's answer.
@@ -315,6 +348,10 @@ func partialSamples(t testing.TB) map[string][]any {
 			LastError: evilAttr},
 			DocCell{Ref: DocRef{Fallback: evilScript, URL: evilURL}, Source: evilAttr},
 			DocCell{Ref: DocRef{URL: evilURL}}},
+		"library-head": {LibraryHead{Counts: &LibraryCounts{Documents: 3, Bookmarks: 4},
+			Views: LibraryViews{Failed: 2, Counted: true}}, LibraryHead{Views: LibraryViews{OnFailures: true}}},
+		"library-subnav": {LibraryViews{},
+			LibraryViews{OnFailures: true, Failed: 2971, Counted: true}},
 		"state-badge": {evilScript, "dead"},
 		"stackbar": {stateBar([]Count{{Name: "fetched", Count: 2}, {Name: "failed", Count: 1}}),
 			causeBar("dead_link", 819, 926), []BarSegment(nil),
@@ -382,7 +419,7 @@ func TestEveryTemplateRenders(t *testing.T) {
 func pageTemplate(page, name string) bool {
 	switch name {
 	case "layout", "head", "header-search", "content", "document-page", "document-actions", "interests-page",
-		"layout.html", page + ".html":
+		"failures-page", "failures-live", "layout.html", page + ".html":
 		return true
 	}
 	return false
@@ -479,7 +516,7 @@ func TestPages_Navigation(t *testing.T) {
 			assert.Equal(t, []string{"/ui/"}, current, page)
 		case PageStatus:
 			assert.Equal(t, []string{"/ui/status"}, current, page)
-		case PageLibrary, PageDocument:
+		case PageLibrary, PageFailures, PageDocument:
 			assert.Equal(t, []string{"/ui/library"}, current, page)
 		case PageInterests, PageInterest:
 			assert.Equal(t, []string{"/ui/interests"}, current, page)
@@ -562,7 +599,7 @@ func TestPages_Scripts(t *testing.T) {
 }
 
 // polledPages are the pages with live regions.
-var polledPages = []string{PageStatus, PageDocument, PageInterests}
+var polledPages = []string{PageStatus, PageFailures, PageDocument, PageInterests}
 
 // TestLiveRegions: in every sample of a page with live regions, each
 // region a poller names is on the page exactly once, and nothing in it
@@ -614,6 +651,8 @@ func isPoll(data any) bool {
 	case Document:
 		return d.Poll != ""
 	case Interests:
+		return d.Poll != ""
+	case Failures:
 		return d.Poll != ""
 	}
 	return false

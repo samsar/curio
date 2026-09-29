@@ -374,32 +374,41 @@ var refetchAllDefaultStates = []store.DocState{store.DocStatePending, store.DocS
 // dead, which the default states leave out, so it would enqueue nothing
 // while looking like a refetch of every dead link.
 func (d Deps) handleRefetchAll(w http.ResponseWriter, r *http.Request) {
-	state, err := docStateParam(r)
+	states, cause, err := refetchAllFilter(r)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
-	cause, err := failureCauseParam(r)
-	if err != nil {
-		d.writeError(w, r, err)
-		return
-	}
-	if cause == store.FailureCauseDeadLink && state != store.DocStateDead {
-		d.writeError(w, r, badRequest("dead links are refetched only with state=dead: "+
-			"their documents are dead, which refetch-all leaves out unless asked"))
-		return
-	}
-	states := refetchAllDefaultStates
-	if state != "" {
-		states = []store.DocState{state}
-	}
-
 	n, err := d.Documents.RequeueFetchByStates(r.Context(), d.TenantID, states, cause)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
 	d.writeJSON(w, r, http.StatusAccepted, map[string]int{"jobs_enqueued": n})
+}
+
+// refetchAllFilter reads which documents refetch-all requeues: the states,
+// ?state= or else refetchAllDefaultStates, and ?cause=, "" for any. A
+// value it doesn't take is a requestError, and so is a dead_link cause
+// without state=dead. The dashboard's refetch actions are held to it
+// (TestDashboard_ActionsMatchTheAPI).
+func refetchAllFilter(r *http.Request) ([]store.DocState, store.FailureCause, error) {
+	state, err := docStateParam(r)
+	if err != nil {
+		return nil, "", err
+	}
+	cause, err := failureCauseParam(r)
+	if err != nil {
+		return nil, "", err
+	}
+	if cause == store.FailureCauseDeadLink && state != store.DocStateDead {
+		return nil, "", badRequest("dead links are refetched only with state=dead: " +
+			"their documents are dead, which refetch-all leaves out unless asked")
+	}
+	if state != "" {
+		return []store.DocState{state}, cause, nil
+	}
+	return refetchAllDefaultStates, cause, nil
 }
 
 // docStateParam reads ?state. Empty means the caller's default; a value

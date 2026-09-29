@@ -52,11 +52,14 @@ func (p Poller) Select() string { return "#" + strings.Join(p.Regions, ",#") }
 
 // The ids of the pages' live regions and pollers. Status's fast poller
 // refreshes what changes by the second; its health poller, what pings
-// Ollama, every 15 seconds; the failures card is read with the page alone.
+// Ollama, every 15 seconds; its failures card is read with the page alone.
+// The Failures tab's poller refreshes the groups and the subnav's count,
+// both from one read of the failure summary, only after a change.
 var (
 	statusLiveRegions = []string{"library-live", "queue-state", "queue-toggle", "queue-throttle", "queue-keep-awake",
 		"keep-awake-hint", "schedule-state", "queue-pools", "progress-live", "jobs-live"}
 	statusHealthRegions = []string{"attention", "health-live"}
+	failuresRegions     = []string{librarySubnavID, failuresLiveID}
 )
 
 const (
@@ -68,4 +71,7 @@ const (
 	rebuildStateID   = "rebuild-state"
 	rebuildControlID = "rebuild-control"
 	rebuildPoller    = "rebuild-poll"
+	librarySubnavID  = "library-subnav"
+	failuresLiveID   = "failures-live"
+	failuresPoller   = "failures-poll"
 )

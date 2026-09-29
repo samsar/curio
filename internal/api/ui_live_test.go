@@ -297,7 +297,8 @@ func countIDs(doc *xhtml.Node, id string) int {
 
 // TestUI_LiveRegionsExist: every region a poller swaps in is on its page
 // once, and in the poller's answer once, whatever is in flight: Status, a
-// document whose fetch is queued, and the Interests with a rebuild queued.
+// document whose fetch is queued, the Interests with a rebuild queued, and
+// the Failures tab.
 func TestUI_LiveRegionsExist(t *testing.T) {
 	srv := apitest.Start(t)
 	doc := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
@@ -305,8 +306,10 @@ func TestUI_LiveRegionsExist(t *testing.T) {
 	require.NoError(t, err)
 	srv.AddInterest(t, "Kafka", doc)
 	enqueueRebuild(t, srv)
+	srv.AddFailedDocument(t, "https://blocked.example/a", store.FailureCauseAntiBot)
+	srv.AddFailedDocument(t, "https://gone.example/a", store.FailureCauseDeadLink)
 
-	for _, path := range []string{"/ui/status", "/ui/documents/" + doc.ID, "/ui/interests"} {
+	for _, path := range []string{"/ui/status", "/ui/documents/" + doc.ID, "/ui/interests", "/ui/failures"} {
 		page := pageDoc(t, getPage(t, srv, path, http.StatusOK))
 		polls := pollers(t, page)
 		require.NotEmpty(t, polls, path)
@@ -601,6 +604,98 @@ func TestUI_LibraryReads(t *testing.T) {
 		getPage(t, srv, tc.path, tc.status)
 		assert.Equal(t, tc.want, r.take(), tc.path)
 	}
+}
+
+// TestUI_FailuresReads: the Failures tab reads the failure summary once and
+// the library's counts for its lede; its poll the summary alone, once. A
+// poll it doesn't take is a 400 that reads nothing and starts over from
+// the Library.
+func TestUI_FailuresReads(t *testing.T) {
+	r := &reads{}
+	srv := apitest.Start(t, countReads(r))
+	srv.AddFailedDocument(t, "https://blocked.example/a", store.FailureCauseAntiBot)
+	for _, tc := range []struct {
+		path   string
+		status int
+		want   map[string]int
+	}{
+		{"/ui/failures", http.StatusOK, map[string]int{"stats": 1, "failures": 1}},
+		{"/ui/failures?poll=causes", http.StatusOK, map[string]int{"failures": 1}},
+		{"/ui/failures?poll=live", http.StatusBadRequest, map[string]int{}},
+		{"/ui/failures?poll=%3Cscript%3E", http.StatusBadRequest, map[string]int{}},
+	} {
+		r.take()
+		body := getPage(t, srv, tc.path, tc.status)
+		assert.Equal(t, tc.want, r.take(), tc.path)
+		if tc.status == http.StatusBadRequest {
+			assert.Contains(t, body, `<a class="btn btn-primary" href="/ui/library">Start over</a>`, tc.path)
+		}
+	}
+}
+
+// postChange sends a control's change as actions.js sends a button's
+// without a body, and returns the status and the answer's jobs_enqueued.
+func postChange(t *testing.T, srv *apitest.Server, control *xhtml.Node) (int, int) {
+	t.Helper()
+	require.Equal(t, http.MethodPost, attr(control, "data-method"))
+	require.False(t, hasAttribute(control, "data-body"))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+attr(control, "data-path"), nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	var got struct {
+		JobsEnqueued int `json:"jobs_enqueued"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	return resp.StatusCode, got.JobsEnqueued
+}
+
+// TestUI_FailuresRefetch: a group's Refetch, sent as actions.js sends it,
+// requeues every document of its cause, as many as its label says, and the
+// poll that follows no longer shows the group, its documents in neither the
+// totals nor the subnav's count; the dead links' confirm does the same for
+// them. A stale repeat queues nothing.
+func TestUI_FailuresRefetch(t *testing.T) {
+	srv := apitest.Start(t)
+	for _, u := range []string{"https://blocked.example/1", "https://blocked.example/2", "https://walled.example/3"} {
+		srv.AddFailedDocument(t, u, store.FailureCauseAntiBot)
+	}
+	srv.AddFailedDocument(t, "https://login.example/a", store.FailureCauseLoginWall)
+	srv.AddFailedDocument(t, "https://gone.example/a", store.FailureCauseDeadLink)
+	srv.AddFailedDocument(t, "https://gone.example/b", store.FailureCauseDeadLink)
+
+	body := getPage(t, srv, "/ui/failures", http.StatusOK)
+	page := pageDoc(t, body)
+	assert.Contains(t, body, "6 documents couldn&#39;t be fetched: 4 failed and 2 dead links, grouped by why.")
+	blocked := elementByID(page, "refetch-anti_bot")
+	require.NotNil(t, blocked)
+	assert.Equal(t, "Refetch 3", textContent(blocked))
+	status, n := postChange(t, srv, blocked)
+	assert.Equal(t, http.StatusAccepted, status)
+	assert.Equal(t, 3, n, "every document the label counts")
+
+	poll := pollerHref(t, body, "failures-live")
+	answer := getPage(t, srv, poll, http.StatusOK)
+	doc := pageDoc(t, answer)
+	assert.Nil(t, elementByID(doc, "cause-anti_bot"), "an emptied group's card is gone")
+	assert.NotNil(t, elementByID(doc, "cause-login_wall"))
+	assert.Contains(t, answer, "3 documents couldn&#39;t be fetched: 1 failed and 2 dead links, grouped by why.")
+	assert.Equal(t, "Failures 3", textContent(elementByID(doc, "subnav-failures")))
+	assert.Contains(t, answer, "Causes without documents: Blocked by bot protection, ")
+
+	confirm := elementByID(page, "refetch-dead_link-confirm")
+	require.NotNil(t, confirm)
+	status, n = postChange(t, srv, confirm)
+	assert.Equal(t, http.StatusAccepted, status)
+	assert.Equal(t, 2, n)
+	doc = pageDoc(t, getPage(t, srv, poll, http.StatusOK))
+	assert.Nil(t, elementByID(doc, "cause-dead_link"))
+	assert.Equal(t, "Failures 1", textContent(elementByID(doc, "subnav-failures")))
+
+	status, n = postChange(t, srv, blocked)
+	assert.Equal(t, http.StatusAccepted, status)
+	assert.Zero(t, n, "a stale repeat finds nothing to queue")
 }
 
 // TestUI_InterestsRebuild: the Rebuild button, disabled while a rebuild is

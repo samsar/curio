@@ -21,8 +21,9 @@ const maxShown = 1_000_000
 // and its parsing, source aside: the Library has no source filter. Each
 // failed or dead row says why it failed. An order, filter or cursor the
 // list can't take, a cursor of the other order among them, is a 400 page
-// that offers the first page. The library's counts label the state tabs
-// and the lede; the page does without them when they can't be read.
+// that offers the first page. The library's counts label the state tabs,
+// the lede and the subnav's Failures tab; the page does without them when
+// they can't be read.
 //
 // shown, which htmx's "load more" sends, is how many rows the page it
 // appends to holds, for the Showing line alone: a keyset cursor can't tell
@@ -47,13 +48,22 @@ func (h pageHandlers) library(w http.ResponseWriter, r *http.Request) {
 	}
 	vm.Layout = h.pages.layout("Library", ui.NavLibrary)
 	vm.Shown = intQuery(r, "shown", 0, 0, maxShown)
-	if st, err := h.d.stats(ctx); err != nil {
-		h.quietError(r, err)
-	} else {
-		vm.Counts = &ui.LibraryCounts{Documents: st.DocumentsTotal, Bookmarks: st.BookmarksTotal,
-			ByState: st.DocumentsByState}
-	}
+	vm.Counts = h.libraryCounts(r)
 	h.page(w, r, http.StatusOK, ui.PageLibrary, vm)
+}
+
+// libraryCounts reads the whole library's counts, which head both of the
+// Library's views: the lede, the Failures tab's count in the subnav, and
+// on the Documents view the state tabs. nil when they can't be read,
+// which the pages do without.
+func (h pageHandlers) libraryCounts(r *http.Request) *ui.LibraryCounts {
+	st, err := h.d.stats(r.Context())
+	if err != nil {
+		h.quietError(r, err)
+		return nil
+	}
+	return &ui.LibraryCounts{Documents: st.DocumentsTotal, Bookmarks: st.BookmarksTotal,
+		ByState: st.DocumentsByState}
 }
 
 // libraryOrder reads the Library's ?order: "" for Last updated (absent,

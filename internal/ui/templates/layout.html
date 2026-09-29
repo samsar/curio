@@ -7,7 +7,7 @@ asks for is an Action built in Go (actions.go), rendered by the action
 partial, and every poll URL is built in Go too: a data-method, data-path,
 data-body, data-field, data-join or hx-get value is one template action,
 never a literal. Class and icon names come from literals or from funcs
-over fixed sets (format.go), never from a stored string.
+over fixed sets (format.go, causes.go), never from a stored string.
 
 actions.js marks <html> with data-js as it loads: a control that needs it
 carries js-only, which app.css hides until then, and what stands in for it
@@ -95,6 +95,30 @@ hover.
 {{- if or .FailureCause .LastError}}
 <span class="doc-error"{{with .LastError}} title="{{.}}"{{end}}>{{with causeLabel .FailureCause}}<span class="err-cause">{{.}}</span> {{end}}{{with shortError .LastError}}<span class="msg">{{.}}</span>{{end}}</span>
 {{- end}}
+{{- end}}
+
+{{/*
+The head of the Library's two views, Documents and Failures, a
+LibraryHead: the title, a lede that counts the library when the counts
+could be read, and the subnav.
+*/}}
+{{define "library-head" -}}
+<div class="page-head"><div class="titles">
+<h1>Library</h1>
+<p class="lede">{{with .Counts}}{{count .Documents "document" "documents"}} from {{count .Bookmarks "bookmark" "bookmarks"}}.{{else}}Every page curio saved for you.{{end}}</p>
+</div></div>
+{{template "library-subnav" .Views}}
+{{- end}}
+
+{{/*
+The Library's subnav, a LibraryViews: Documents and Failures, the
+current one marked, Failures with how many documents failed or are dead
+when that is known, whatever the list's filters. The Failures tab
+refreshes it with its groups, so its links have ids and it holds no live
+role.
+*/}}
+{{define "library-subnav" -}}
+<nav class="subnav" id="library-subnav" aria-label="Library views"><a id="subnav-documents" href="{{navHref "library"}}"{{if not .OnFailures}} aria-current="page"{{end}}>Documents</a><a id="subnav-failures" href="{{failuresHref}}"{{if .OnFailures}} aria-current="page"{{end}}>Failures{{if .Counted}} <span class="count">{{num .Failed}}</span>{{end}}</a></nav>
 {{- end}}
 
 {{/* A document state as a badge: a dot (hollow for dead) and the state. */}}
