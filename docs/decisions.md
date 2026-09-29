@@ -7652,6 +7652,8 @@ Overview; the Library's "Date saved" order will list saves. A Failures
 view of the library, with refetch by cause, will be a Library tab, not a
 fifth navigation item: a phone's navigation fits four.
 
+---
+
 ## Dashboard: actions through /v1, sent by a first-party module
 
 **Decision:** the dashboard changes things. A document's page refetches it
@@ -7868,9 +7870,12 @@ Esc and Cancel closed it without a request, and its confirm sent
 (with the queue paused) with its button disabled and focused, then "New
 interests are ready: reload", and polling stopped. With JavaScript off
 the controls were hidden and the settings and commands shown, and at
-390 px no page scrolled sideways. Checked by reading instead:
-cancelling polls in a hidden tab (headless Chrome's tab is never hidden)
-and the 15-second timeout.
+390 px no page scrolled sideways. The review then checked the two that
+headless Chrome doesn't show on its own. With `document.hidden` overridden,
+no poll ran for 4.5 seconds and one ran as soon as `visibilitychange`
+fired. With a queue change held open through the DevTools protocol, the
+status read that curio-daemon didn't answer after 14.9 seconds, and the
+keep-awake switch was set back.
 
 ---
 

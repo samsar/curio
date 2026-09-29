@@ -211,7 +211,7 @@ func TestUI_Status(t *testing.T) {
 	assert.Contains(t, body, `<td>fetch</td><td class="num">0 of 16</td><td class="num">1</td><td class="num">0</td>`,
 		"the new page's fetch job")
 	assert.Contains(t, body, `<span class="why">Working: 1 job waiting</span>`)
-	assert.Contains(t, body, `id="queue-pause" data-action="pause"`)
+	assert.Contains(t, body, `id="queue-pause" data-kind="pause"`)
 	assert.Contains(t, body, "1 job queued, and none finished in the last 10m.")
 	assert.Contains(t, body, `qwen3-embedding:0.6b<span class="sub">1024 dimensions</span>`)
 	assert.NotContains(t, body, "Recently saved")
@@ -225,7 +225,7 @@ func TestUI_Status(t *testing.T) {
 	body = getPage(t, srv, "/ui/status", http.StatusOK)
 	assert.Contains(t, body, `<span class="badge queue-closed">closed</span><span class="why">Paused</span>`)
 	assert.Contains(t, body, "1 job queued. Paused: none start until the queue opens.")
-	assert.Contains(t, body, `id="queue-pause" data-action="resume"`)
+	assert.Contains(t, body, `id="queue-pause" data-kind="resume"`)
 }
 
 // failingCount fails the bookmark count, which stats reads.

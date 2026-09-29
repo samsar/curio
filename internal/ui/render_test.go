@@ -133,7 +133,7 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 		},
 		PageInterests: Interests{
 			Layout:    layout(NavInterests),
-			Run:       &InterestRun{ID: evilAttr, ComputedAt: at, Algo: evilScript, Documents: 40, Noise: 3, Interests: 9},
+			Run:       &InterestRun{ComputedAt: at, Algo: evilScript, Documents: 40, Noise: 3, Interests: 9},
 			Interests: []Interest{interest, {ID: "unlabeled", Size: 1}},
 			Rebuild: Rebuild{Enabled: true, Running: true, StartedAt: at, Shown: evilAttr, NewRun: evilScript,
 				RunError: evilScript},
@@ -243,7 +243,7 @@ func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 // paused queue, one done and one failed since the run shown, insight off
 // without a run, the rebuild's reads failed, and a poll's answer.
 func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
-	run := &InterestRun{ID: "run", ComputedAt: at, Documents: 3}
+	run := &InterestRun{ComputedAt: at, Documents: 3}
 	return []any{
 		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Queued: true, Hold: "paused", Shown: "run"}},
 		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Shown: "run", NewRun: "done"}},
@@ -576,7 +576,7 @@ func TestLiveRegions(t *testing.T) {
 			}
 			for _, control := range withAttr(doc, "data-status") {
 				status := byID(doc, attrValue(control, "data-status"))
-				require.NotNil(t, status, "%s sample %d: %s's status", page, i, attrValue(control, "data-action"))
+				require.NotNil(t, status, "%s sample %d: %s's status", page, i, attrValue(control, "data-kind"))
 				assert.Equal(t, "action-status", attrValue(status, "class"))
 				assert.Equal(t, "polite", attrValue(status, "aria-live"))
 			}

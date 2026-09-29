@@ -40,8 +40,9 @@ var scriptRE = regexp.MustCompile(`(?is)<script(\s[^>]*)?>(.*?)</script>`)
 
 // builtInGoRE finds the attributes whose values Go builds, a change's
 // (actions.go) and a poll's (links.go), capturing each value, quoted or
-// not; a template action in it may hold quotes of its own.
-var builtInGoRE = regexp.MustCompile(`(?i)\s(data-(?:method|path|body|field|join)|hx-get)\s*=\s*` +
+// not; a template action in it may hold quotes of its own. htmx reads
+// data-hx-get as hx-get.
+var builtInGoRE = regexp.MustCompile(`(?i)\s(data-(?:method|path|body|field|join)|(?:data-)?hx-get)\s*=\s*` +
 	`("(?:\{\{.*?\}\}|[^"])*"|'(?:\{\{.*?\}\}|[^'])*'|(?:\{\{.*?\}\}|[^\s>])*)`)
 
 // oneActionRE matches a value that is exactly one template action.

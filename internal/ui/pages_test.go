@@ -483,7 +483,7 @@ func TestStatus_Controls(t *testing.T) {
 	doc := parse(t, render(t, r, PageStatus, st))
 	pause := byID(doc, "queue-pause")
 	require.NotNil(t, pause)
-	assert.Equal(t, "pause", attrValue(pause, "data-action"))
+	assert.Equal(t, "pause", attrValue(pause, "data-kind"))
 	assert.Contains(t, attrValue(byID(doc, "queue-toggle"), "class"), "js-only")
 	assert.Equal(t, "true", attrValue(byID(doc, "throttle-normal"), "aria-pressed"))
 	assert.Equal(t, "false", attrValue(byID(doc, "throttle-gentle"), "aria-pressed"))
@@ -508,7 +508,7 @@ func TestStatus_Controls(t *testing.T) {
 	queue.Paused, queue.Open, queue.Reason, queue.Throttle, queue.KeepAwake = true, false, "paused", "gentle", true
 	queue.Schedule = "22:00-07:00"
 	doc = parse(t, render(t, r, PageStatus, st))
-	assert.Equal(t, "resume", attrValue(byID(doc, "queue-pause"), "data-action"))
+	assert.Equal(t, "resume", attrValue(byID(doc, "queue-pause"), "data-kind"))
 	assert.Equal(t, `{"paused":false}`, attrValue(byID(doc, "queue-pause"), "data-body"))
 	assert.Equal(t, "true", attrValue(byID(doc, "throttle-gentle"), "aria-pressed"))
 	assert.True(t, hasAttr(byID(doc, "keep-awake"), "checked"))
@@ -589,6 +589,7 @@ func TestDocumentJobs(t *testing.T) {
 		{DocumentJobs{State: "fetched", Jobs: fetching}, true},
 		{DocumentJobs{State: "pending"}, true},
 		{DocumentJobs{State: "failed"}, false},
+		{DocumentJobs{State: "fetched", Err: &PanelError{Message: "m"}}, true}, // a read that failed tries again
 	} {
 		p := tc.jobs.Poller()
 		assert.Equal(t, tc.every, p.Every > 0, "%+v", tc.jobs)
@@ -716,7 +717,8 @@ func TestRebuild(t *testing.T) {
 	for _, tc := range []struct {
 		rebuild Rebuild
 		every   bool
-	}{{Rebuild{}, false}, {Rebuild{Queued: true}, true}, {Rebuild{Running: true}, true}} {
+	}{{Rebuild{}, false}, {Rebuild{Queued: true}, true}, {Rebuild{Running: true}, true},
+		{Rebuild{Err: &PanelError{Message: "m"}}, true}} { // a read that failed tries again
 		p := tc.rebuild.Poller()
 		assert.Equal(t, tc.every, p.Every > 0)
 		assert.Equal(t, []string{"rebuild-state", "rebuild-control", "rebuild-poll"}, p.Regions)
@@ -730,7 +732,7 @@ func TestRebuild(t *testing.T) {
 func TestInterests_Rebuild(t *testing.T) {
 	r := newRenderer(t)
 	layout := Layout{Title: "Interests", Nav: NavInterests}
-	run := &InterestRun{ID: "r1", Documents: 3}
+	run := &InterestRun{Documents: 3}
 	page := func(b Rebuild) (string, *html.Node) {
 		out := render(t, r, PageInterests, Interests{Layout: layout, Run: run, Rebuild: b})
 		return out, parse(t, out)

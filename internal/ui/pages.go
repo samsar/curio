@@ -675,13 +675,14 @@ func (j DocumentJobs) Outcome() DocumentOutcome {
 }
 
 // Poller is the document's poller: every 2 seconds while a job is in
-// flight or the document waits for one, and after every change the page
-// makes, carrying the page's baseline. It lists itself, so its answer
-// decides whether it keeps polling.
+// flight, the document waits for one, or its jobs couldn't be read (a read
+// that failed says nothing about whether one runs), and after every change
+// the page makes, carrying the page's baseline. It lists itself, so its
+// answer decides whether it keeps polling.
 func (j DocumentJobs) Poller() Poller {
 	p := Poller{ID: documentPoller, Href: documentPollHref(j.DocumentID, j.Baseline), OnChange: true,
 		Regions: []string{documentJobsID, documentPoller}}
-	if j.InFlight() || j.State == string(store.DocStatePending) {
+	if j.Err != nil || j.InFlight() || j.State == string(store.DocStatePending) {
 		p.Every = pollEvery
 	}
 	return p
@@ -811,10 +812,9 @@ type Rebuild struct {
 	Running bool
 	// StartedAt is when the running rebuild started; zero when unknown.
 	StartedAt time.Time
-	// Hold is why the queue holds a queued rebuild, the gate's reason, and
-	// OpensAt when it opens; "" while it is open.
-	Hold    string
-	OpensAt time.Time
+	// Hold is why the queue holds a queued rebuild, the gate's reason; ""
+	// while it is open.
+	Hold string
 	// Shown is the run the page shows, "" for none: the latest done one.
 	Shown string
 	// NewRun is the status of the newest run, of any status, when it isn't
@@ -853,12 +853,13 @@ func (b Rebuild) Outcome() RebuildOutcome {
 func (Rebuild) Action() Action { return rebuildAction() }
 
 // Poller is the rebuild's poller: every 2 seconds while a rebuild is in
-// flight, and after every change the page makes, carrying the run the page
-// shows. It lists itself, so its answer decides whether it keeps polling.
+// flight or the queue or runs couldn't be read, and after every change the
+// page makes, carrying the run the page shows. It lists itself, so its
+// answer decides whether it keeps polling.
 func (b Rebuild) Poller() Poller {
 	p := Poller{ID: rebuildPoller, Href: interestsPollHref(b.Shown), OnChange: true,
 		Regions: []string{rebuildStateID, rebuildControlID, rebuildPoller}}
-	if b.InFlight() {
+	if b.Err != nil || b.InFlight() {
 		p.Every = pollEvery
 	}
 	return p
@@ -866,7 +867,6 @@ func (b Rebuild) Poller() Poller {
 
 // InterestRun is the clustering run the interests come from.
 type InterestRun struct {
-	ID         string
 	ComputedAt time.Time
 	Algo       string
 	Documents  int

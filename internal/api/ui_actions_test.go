@@ -65,7 +65,7 @@ func TestDashboard_ActionsMatchTheAPI(t *testing.T) {
 			if n.Type != html.ElementNode || !hasNodeAttr(n, "data-method") {
 				continue
 			}
-			kind := ui.ActionKind(nodeAttr(n, "data-action"))
+			kind := ui.ActionKind(nodeAttr(n, "data-kind"))
 			seen[kind] = true
 			t.Run(string(kind), func(t *testing.T) {
 				checkAction(t, index, ops, doc, n)

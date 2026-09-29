@@ -73,31 +73,35 @@ func TestActions_EscapeIDs(t *testing.T) {
 }
 
 // TestActions_Render: an Action's every value is escaped into its
-// control's attributes, and the control is inert.
+// control's attributes, and the control is inert. The partial runs inside a
+// tag, as the pages call it: html/template escapes an attribute by its
+// name there, not as body text.
 func TestActions_Render(t *testing.T) {
-	set := newRenderer(t).pages[PageDocument]
+	set, err := newRenderer(t).pages[PageDocument].Clone()
+	require.NoError(t, err)
+	_, err = set.New("probe").Parse(`<button id="control"{{template "action" .}}>x</button>`)
+	require.NoError(t, err)
 	hostile := Action{Kind: evilAttr, Method: evilScript, Path: evilURL, body: map[string]any{evilAttr: evilScript},
 		Field: evilQuotes, Join: evilAttr, Status: evilAttr, Done: evilScript, DoneOff: evilQuotes}
-	var attrs bytes.Buffer
-	require.NoError(t, set.ExecuteTemplate(&attrs, "action", hostile))
+	var out bytes.Buffer
+	require.NoError(t, set.ExecuteTemplate(&out, "probe", hostile))
 
-	button := byID(parse(t, `<button id="control"`+attrs.String()+">x</button>"), "control")
+	button := byID(parse(t, out.String()), "control")
 	require.NotNil(t, button)
 	body, err := hostile.Body()
 	require.NoError(t, err)
-	for attr, want := range map[string]string{"data-action": evilAttr, "data-method": evilScript,
+	for attr, want := range map[string]string{"data-kind": evilAttr, "data-method": evilScript,
 		"data-path": evilURL, "data-body": body, "data-field": evilQuotes, "data-join": evilAttr,
 		"data-status": evilAttr, "data-done": evilScript, "data-done-off": evilQuotes} {
 		assert.Equal(t, want, attrValue(button, attr), attr)
 	}
 	assert.Len(t, button.Attr, 10, "no attribute broke out")
-	assert.NotEmpty(t, uitest.Problems("<button"+attrs.String()+">x</button>"),
-		"uitest refuses its method and path")
+	assert.NotEmpty(t, uitest.Problems(out.String()), "uitest refuses its method and path")
 
 	// A real one is inert.
-	attrs.Reset()
-	require.NoError(t, set.ExecuteTemplate(&attrs, "action", pauseAction()))
-	uitest.AssertInert(t, "<button"+attrs.String()+">Pause</button>")
+	out.Reset()
+	require.NoError(t, set.ExecuteTemplate(&out, "probe", pauseAction()))
+	uitest.AssertInert(t, out.String())
 }
 
 // TestActionsScript: actions.js is one strict IIFE with no globals, under

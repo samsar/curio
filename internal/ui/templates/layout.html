@@ -108,7 +108,7 @@ one, why: the cause and the start of the error, the whole error on hover.
 An Action as the data attributes of the control that asks for it, written
 inside that control's tag: actions.js sends it as they say.
 */}}
-{{define "action"}} data-action="{{.Kind}}" data-method="{{.Method}}" data-path="{{.Path}}" data-status="{{.Status}}" data-done="{{.Done}}"
+{{define "action"}} data-kind="{{.Kind}}" data-method="{{.Method}}" data-path="{{.Path}}" data-status="{{.Status}}" data-done="{{.Done}}"
 {{- with .DoneOff}} data-done-off="{{.}}"{{end}}
 {{- with .Body}} data-body="{{.}}"{{end}}
 {{- with .Field}} data-field="{{.}}"{{end}}

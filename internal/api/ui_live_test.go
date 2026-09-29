@@ -352,7 +352,7 @@ func TestUI_StatusControls(t *testing.T) {
 	putQueue(t, srv, `{"paused":true,"throttle":"gentle","keep_awake":true,"schedule":"22:00-07:00"}`)
 	page = controls()
 	pause := elementByID(page, "queue-pause")
-	assert.Equal(t, "resume", attr(pause, "data-action"))
+	assert.Equal(t, "resume", attr(pause, "data-kind"))
 	assert.Equal(t, `{"paused":false}`, attr(pause, "data-body"))
 	assert.Equal(t, "false", attr(elementByID(page, "throttle-normal"), "aria-pressed"))
 	assert.Equal(t, "true", attr(elementByID(page, "throttle-gentle"), "aria-pressed"))
@@ -602,6 +602,8 @@ func TestUI_InterestsRebuild(t *testing.T) {
 	answer = getPage(t, srv, href, http.StatusOK)
 	assert.Contains(t, answer, `<p>New interests are ready: <a id="rebuild-reload" href="/ui/interests">reload</a></p>`)
 	assert.Equal(t, "curio:changed from:body", pollerTrigger(t, answer, "rebuild-poll"), "nothing in flight")
+	assert.Equal(t, href, pollerHref(t, answer, "rebuild-state"),
+		"the answer's poller still carries the run the page shows, not the newer one")
 
 	failRun(t, srv, "cluster: label: <ollama> unreachable")
 	body = getPage(t, srv, "/ui/interests", http.StatusOK)

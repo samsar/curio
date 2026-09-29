@@ -42,7 +42,7 @@ func (h pageHandlers) interests(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if resp.RunID != "" {
-			vm.Run = &ui.InterestRun{ID: resp.RunID, Algo: resp.Algo, Documents: resp.NumDocuments,
+			vm.Run = &ui.InterestRun{Algo: resp.Algo, Documents: resp.NumDocuments,
 				Noise: resp.NumNoise, Interests: resp.NumClusters}
 			if resp.ComputedAt != nil {
 				vm.Run.ComputedAt = *resp.ComputedAt
@@ -76,7 +76,7 @@ func (h pageHandlers) rebuild(r *http.Request, shown string) ui.Rebuild {
 		}
 	}
 	if b.Queued && queue.State == queueClosed {
-		b.Hold, b.OpensAt = queue.Reason, queue.OpensAt
+		b.Hold = queue.Reason
 	}
 	if b.Running {
 		running, err := h.d.listJobs(ctx, store.ListJobsOpts{Kind: store.JobKindCluster,

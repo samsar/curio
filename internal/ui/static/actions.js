@@ -4,13 +4,12 @@
    (internal/ui/actions.go): data-method, data-path under /v1/, and a
    button's data-body, a checkbox's state under data-field, or a form's
    fields, those sharing a name joined by data-join. This sends it as JSON,
-   one change at a time and never twice, and writes what came of it into
-   the .action-status data-status names: data-done (data-done-off for an
-   unchecked checkbox), or the daemon's problem. The api package's
-   TestDashboard_ActionsMatchTheAPI builds bodies by the same rules. The
+   one change at a time, and writes what came of it into the .action-status
+   data-status names: data-done (data-done-off for an unchecked checkbox) or
+   the daemon's problem (TestDashboard_ActionsMatchTheAPI mirrors it). The
    hooks at the end hold the pollers ([data-poll]) while nobody looks or a
-   change is in flight, mark the page stale while the daemon doesn't
-   answer, and leave an unchanged region alone. */
+   change is in flight, mark the page stale while the daemon doesn't answer,
+   and leave an unchanged region alone. */
 (function () {
   'use strict';
 
@@ -124,6 +123,8 @@
     let taken = false;
     try {
       taken = await send(control);
+    } catch (e) { // before fetch: a browser without what send uses, say
+      report(control, 'error', 'The change wasn\'t sent (' + e + ').');
     } finally {
       setBack(control, taken);
       control.removeAttribute('aria-busy');
