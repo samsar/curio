@@ -74,36 +74,52 @@ footer names the address the daemon listens on.
   library.
   Filters narrow it by type, host (`example.com`, exactly) and bookmark
   folder (the folder and the folders under it), and Apply keeps the tab
-  chosen. Each row shows the title on one line, or where the page lives
-  for an untitled one, its state, type and when it was last updated; a
-  failed or dead row adds why it failed, its cause and the start of its
-  error, with the whole error on hover and on the document's page. On a
-  phone the type and time move under the title. "Load more" pages
+  chosen. Each row shows the title on one line with where the page lives
+  under it, its state, type and when it was last updated. A page with no
+  title of its own (every one that failed, and a few others) is named by
+  its bookmark's title, in italics, with its address under it; one
+  without a titled bookmark is named by its address, with its host under
+  it. A failed or dead row adds why it failed, its cause and the start of
+  its error, with the whole error on hover and on the document's page. On
+  a phone the type and time move under the title. "Load more" pages
   through the rest, and the line under the table counts the documents
   shown ("Showing 100 of 2,150 documents"). A `cause=` in the address
   (`/ui/library?cause=anti_bot`) narrows it to the documents that failed
   for one cause, and paging, the tabs and filtering keep it; Status links
   there for each cause.
-- **Document**: the page's title and address, its state, type, length,
-  author, published date and language; for a failed page, a box naming
-  why it failed and what that means, with its **Full error** a click
-  away, and for a dead one, that the page is gone. Then its text, and
-  beside it related documents, its bookmarks with their folders and tags,
-  and its details: when it was added, updated and fetched (Jina Reader
-  called out), its ID, where its markdown is, and the `curio` commands
-  that work for it. Under its head, **Refetch** and **Reindex**, and how
-  its text was fetched; for a dead link, **Refetch anyway…**, which asks
-  first. The text shown is at most the first 1 MiB; the page
-  says when it is cut and where the whole file is. A text whose markdown
-  would take too long or too much memory to format (a line nesting dozens
-  of quotes, lists nested deep over thousands of blank lines, a paragraph
-  thick with unclosed brackets, a table padded to thousands of columns: a
-  few shapes a page can hold, by accident or on purpose) is shown as it is
-  stored, unformatted, and the page says why. Whatever the text holds,
-  formatting stops after two seconds or a gigabyte of memory, and the text
-  is shown as stored. Web and email addresses written out in the text
-  without link markup show as text, not links: a GitHub README's bare
-  URLs, say.
+
+  **Order** switches to **Date saved** (`/ui/library?order=saved`): your
+  saves, newest saved first, one row per bookmark, so a page saved in two
+  browsers is listed twice. The time column reads Saved, the line under a
+  title adds the browser it was saved in on a wide window (hover it for
+  the folder), and a note under the table says why a page can appear
+  twice and why Safari's bookmarks are dated when curio imported them
+  (Safari keeps no save dates). An untitled page is named by that save's
+  own title. The tabs, filters and Load more work as in Last updated, and
+  the tabs still count documents; the line under the table counts saves,
+  "Showing 50 of 7,497 saves" with no filter at all, and "Showing 50
+  saves" with any.
+- **Document**: the page's title (for an untitled page, its bookmark's
+  title, in italics, as the Library names it) and address, its state,
+  type, length, author, published date and language; for a failed page,
+  a box naming why it failed and what that means, with its **Full
+  error** a click away, and for a dead one, that the page is gone. Then
+  its text, and beside it related documents, its bookmarks with their
+  folders and tags, and its details: when it was added, updated and
+  fetched (Jina Reader called out), its ID, where its markdown is, and
+  the `curio` commands that work for it. Under its head, **Refetch** and
+  **Reindex**, and how its text was fetched; for a dead link, **Refetch
+  anyway…**, which asks first. The text shown is at most the first 1
+  MiB; the page says when it is cut and where the whole file is. A text
+  whose markdown would take too long or too much memory to format (a
+  line nesting dozens of quotes, lists nested deep over thousands of
+  blank lines, a paragraph thick with unclosed brackets, a table padded
+  to thousands of columns: a few shapes a page can hold, by accident or
+  on purpose) is shown as it is stored, unformatted, and the page says
+  why. Whatever the text holds, formatting stops after two seconds or a
+  gigabyte of memory, and the text is shown as stored. Web and email
+  addresses written out in the text without link markup show as text,
+  not links: a GitHub README's bare URLs, say.
 - **Interests**: the topics the last clustering run found, largest first:
   how many there are (the page shows the 50 largest), a bar of how many
   documents are in one and how many in none, and a card for each with

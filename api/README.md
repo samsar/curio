@@ -28,11 +28,14 @@ The clients are written by hand: `internal/client` for the CLI and the
 - **Pagination** on `GET /v1/bookmarks`, `/v1/documents` and `/v1/jobs` is
   cursor-based, not offset. A response carries `next_cursor` exactly when
   another page follows; pass it back as `?cursor=` for that page. Documents
-  and jobs come most recently updated first, bookmarks newest first. Pages
-  never overlap and rows inserted during a walk don't shift it; a row
-  updated mid-walk moves ahead of the cursor and is not revisited. Cursors
-  are opaque and may be invalidated by a daemon upgrade: an invalid one is
-  a 400, and the client starts the walk again. There is no `total`.
+  and jobs come most recently updated first; bookmarks newest first by
+  when curio added them, or with `order=saved` by when the browser saved
+  them. Pages never overlap and rows inserted during a walk don't shift
+  it; a row updated mid-walk moves ahead of the cursor and is not
+  revisited. Cursors are opaque, page only the list and order that issued
+  them, and may be invalidated by a daemon upgrade: an invalid one, or
+  one of another order, is a 400, and the client starts the walk again.
+  There is no `total`.
 - **Startup**: the daemon answers from the moment it binds its port. Until
   it is ready (while it migrates its database, say), every request gets
   `503` with a `Retry-After` header and a problem of type

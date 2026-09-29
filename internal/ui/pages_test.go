@@ -50,11 +50,11 @@ func TestLibrary_Table(t *testing.T) {
 	untitled := "https://www.google.com/search?q=angular&ei=" + strings.Repeat("CgZwc3ktYWIQ", 50)
 	lib := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, PageSize: 50, NextCursor: "c", Rows: []LibraryRow{
 		{DocumentID: "a", Title: strings.Repeat("A long title ", 25), URL: "https://example.com/a", State: "fetched",
-			ContentType: "article", UpdatedAt: at},
-		{DocumentID: "b", URL: untitled, State: "fetched", ContentType: "unknown", UpdatedAt: at},
-		{DocumentID: "c", URL: "https://twitter.com/x/status/1", State: "failed", ContentType: "unknown", UpdatedAt: at,
+			ContentType: "article", When: at},
+		{DocumentID: "b", URL: untitled, State: "fetched", ContentType: "unknown", When: at},
+		{DocumentID: "c", URL: "https://twitter.com/x/status/1", State: "failed", ContentType: "unknown", When: at,
 			FailureCause: "anti_bot", LastError: "permanent failure: native: origin blocked the request (likely anti-bot)"},
-		{DocumentID: "d", URL: "https://gone.example/", State: "dead", ContentType: "unknown", UpdatedAt: at,
+		{DocumentID: "d", URL: "https://gone.example/", State: "dead", ContentType: "unknown", When: at,
 			FailureCause: "dead_link"},
 	}}
 	out := render(t, r, PageLibrary, lib)
@@ -115,6 +115,98 @@ func TestLibrary_Empty(t *testing.T) {
 	assert.Contains(t, out, `<div class="load-more" id="more"></div>`)
 }
 
+// TestDocRef: a list names a document by its title, then by its
+// bookmark's title as a fallback, then by its short URL, each on one line
+// with the whole name on hover, linked when it has an ID.
+func TestDocRef(t *testing.T) {
+	set := newRenderer(t).pages[PageLibrary]
+	const url = "https://example.com/a/b?q=1"
+	for _, tc := range []struct {
+		ref  DocRef
+		want string
+	}{
+		{DocRef{ID: "d1", Title: "A <title>", Fallback: "ignored", URL: url},
+			`<a class="doc-title" href="/ui/documents/d1" title="A &lt;title&gt;">A &lt;title&gt;</a>`},
+		{DocRef{ID: "d1", Fallback: "Saved as <this>", URL: url},
+			`<a class="doc-title from-bookmark" href="/ui/documents/d1" title="Saved as &lt;this&gt;">Saved as &lt;this&gt;</a>`},
+		{DocRef{ID: "d1", URL: url},
+			`<a class="doc-title untitled" href="/ui/documents/d1" title="` + url + `">example.com/a/b?q=1</a>`},
+		{DocRef{Fallback: "Saved as <this>", URL: url},
+			`<span class="doc-title from-bookmark" title="Saved as &lt;this&gt;">Saved as &lt;this&gt;</span>`},
+		{DocRef{URL: url},
+			`<span class="doc-title untitled" title="` + url + `">example.com/a/b?q=1</span>`},
+	} {
+		var buf strings.Builder
+		require.NoError(t, set.ExecuteTemplate(&buf, "doc-title", tc.ref))
+		assert.Equal(t, tc.want, buf.String(), "%+v", tc.ref)
+	}
+
+	row := LibraryRow{DocumentID: "d1", URL: url, BookmarkTitle: "Saved"}
+	assert.Equal(t, "example.com/a/b?q=1", row.Cell().Where, "a named row's short URL under its name")
+	row.BookmarkTitle = ""
+	assert.Equal(t, "example.com", row.Cell().Where, "an unnamed row's host under its address")
+}
+
+// TestLibrary_Saved: in the Date saved order the time column reads Saved
+// and holds when each page was saved, a row names the browser it came
+// from on a wide screen, with the folder on hover, a note explains the
+// rows, and the Showing line counts saves: of the library's bookmarks with
+// no filter at all, on their own otherwise.
+func TestLibrary_Saved(t *testing.T) {
+	r := newRenderer(t)
+	saved := time.Now().Add(-26 * time.Hour)
+	counts := &LibraryCounts{Documents: 7467, Bookmarks: 7497, ByState: map[string]int{"failed": 2150}}
+	lib := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: LibraryFilters{Order: OrderSaved},
+		Counts: counts, PageSize: 50, NextCursor: "c", Rows: []LibraryRow{
+			{DocumentID: "a", Title: "A page", URL: "https://example.com/a", State: "fetched", ContentType: "article",
+				When: saved, Source: "safari", Folder: "/Reading/Web"},
+			{URL: "https://example.com/orphan", BookmarkTitle: "No document", When: saved, Source: "chrome"},
+		}}
+	out := render(t, r, PageLibrary, lib)
+	assert.Contains(t, out, `<option value="saved" selected>Date saved</option>`)
+	assert.Contains(t, out, `<th scope="col" class="c-when">Saved</th>`)
+	assert.Contains(t, out, `<span class="sep wide">·</span><span class="wide" title="/Reading/Web">safari</span>`)
+	assert.Contains(t, out, `<span class="sep wide">·</span><span class="wide">chrome</span>`, "no folder, no title")
+	assert.Contains(t, out, `<time datetime="`+datetime(saved)+`"`)
+	assert.Contains(t, out, `<span class="doc-title from-bookmark" title="No document">No document</span>`)
+	assert.Contains(t, out, `<td class="state-cell"></td>`+"\n"+`<td class="c-type"></td>`, "no document, no state or type")
+	assert.Contains(t, out, `<div class="load-more" id="more"><a class="btn" href="/ui/library?cursor=c&amp;order=saved"`)
+	assert.Equal(t, 1, strings.Count(out, `<p class="table-note">Newest saves first, one row per bookmark: `+
+		`a page saved in two browsers is listed twice. Safari keeps no save dates, so its bookmarks are dated when `+
+		`curio imported them.</p>`))
+	assert.Contains(t, out, `<p class="pager-summary mt-4" id="showing">Showing 2 of 7,497 saves.</p>`)
+	assert.Contains(t, out, `<a href="/ui/library?order=saved&amp;state=failed">Failed <span class="count">2,150</span></a>`,
+		"the tabs keep the order and count documents")
+
+	for _, f := range []LibraryFilters{{State: "failed"}, {ContentType: "pdf"}, {Host: "example.com"},
+		{Folder: "/Reading"}, {Cause: "anti_bot"}} {
+		f.Order = OrderSaved
+		lib.Filters = f
+		assert.Contains(t, render(t, r, PageLibrary, lib), `<p class="pager-summary mt-4" id="showing">Showing 2 saves.</p>`,
+			"%+v", f)
+	}
+	lib.Filters, lib.Rows = LibraryFilters{Order: OrderSaved, State: "failed"}, lib.Rows[:1]
+	assert.Contains(t, render(t, r, PageLibrary, lib), `>Showing 1 save.</p>`)
+	lib.Filters, lib.Counts = LibraryFilters{Order: OrderSaved}, nil
+	assert.Contains(t, render(t, r, PageLibrary, lib), `>Showing 1 save.</p>`, "no counts read")
+	lib.Counts, lib.Shown = counts, 7497
+	assert.Contains(t, render(t, r, PageLibrary, lib), `>Showing 7,498 saves.</p>`, "more shown than the count")
+
+	lib.Rows, lib.NextCursor = nil, ""
+	out = render(t, r, PageLibrary, lib)
+	assert.Contains(t, out, "<h2>Your library is empty</h2>")
+	assert.NotContains(t, out, "table-note")
+	lib.Filters.Host = "nothing.example"
+	out = render(t, r, PageLibrary, lib)
+	assert.Contains(t, out, "<h2>No saves match</h2>")
+	assert.Contains(t, out, `<a class="btn" href="/ui/library?order=saved">Clear filters</a>`, "it keeps the order")
+
+	lib.Filters.Order = ""
+	out = render(t, r, PageLibrary, lib)
+	assert.Contains(t, out, `<option value="updated">Last updated</option><option value="saved">Date saved</option>`)
+	assert.Contains(t, out, "<h2>No documents match</h2>")
+}
+
 // TestInterests_Cut: the Interests page says how many interests the run
 // found, and when it shows only the largest, how many; the coverage bar's
 // proportions are attributes.
@@ -162,6 +254,12 @@ func TestDocument_Head(t *testing.T) {
 	doc.Meta.Title, doc.Meta.URL = "", "ftp://gone.example/a/"
 	out = render(t, r, PageDocument, doc)
 	assert.Contains(t, out, "<h1>gone.example/a</h1>", "an untitled document by its short URL")
+	doc.Meta.BookmarkTitle = "Saved as <this>"
+	assert.Contains(t, render(t, r, PageDocument, doc), `<h1 class="from-bookmark">Saved as &lt;this&gt;</h1>`,
+		"or by its bookmark's title, styled as a fallback")
+	doc.Meta.Title = "Its own"
+	assert.Contains(t, render(t, r, PageDocument, doc), "<h1>Its own</h1>", "a title of its own comes first")
+	doc.Meta.Title, doc.Meta.BookmarkTitle = "", ""
 	assert.Contains(t, out, `<span class="truncate">ftp://gone.example/a/</span>`, "not a link")
 	assert.Contains(t, out, `<p class="callout-title">This page is gone</p>`)
 	assert.Contains(t, out, "<code>curio refetch --force d1</code>")

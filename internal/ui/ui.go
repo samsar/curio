@@ -106,6 +106,7 @@ func funcs(assets assetSet) template.FuncMap {
 		"interestHref":       interestHref,
 		"libraryHref":        libraryHref,
 		"libraryMoreHref":    libraryMoreHref,
+		"clearFiltersHref":   clearFiltersHref,
 		"stateHref":          stateHref,
 		"causeHref":          causeHref,
 		"navHref":            navHref,

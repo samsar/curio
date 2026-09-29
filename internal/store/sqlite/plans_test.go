@@ -63,14 +63,15 @@ type planCase struct {
 // listPlanCases pins the three paged lists: for every filter, the first
 // page and a page after a cursor both walk their index in the list's order,
 // the cursor page from the keyset constraint, with no sort.
-func listPlanCases() []planCase {
+func listPlanCases(t *testing.T) []planCase {
 	after := store.PageKey{At: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), ID: "last-row"}
-	return slices.Concat(listPagePlanCases("first page", store.PageKey{}), listPagePlanCases("cursor page", after))
+	return slices.Concat(listPagePlanCases(t, "first page", store.PageKey{}),
+		listPagePlanCases(t, "cursor page", after))
 }
 
 // listPagePlanCases are the list plan cases for one page, named page: the
 // one after the key after.
-func listPagePlanCases(page string, after store.PageKey) []planCase {
+func listPagePlanCases(t *testing.T, page string, after store.PageKey) []planCase {
 	keyset := func(ts string) string {
 		if after.IsZero() {
 			return ""
@@ -83,11 +84,13 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 		want := []string{
 			index + keyset("updated_at") + ")",
 			"SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)",
+			untitledBookmarkTitle,
 		}
 		if opts.Folder != "" {
 			want = append(want, "SEARCH b EXISTS USING INDEX idx_bookmarks_document (document_id=?)")
 		}
-		return planCase{name: name + ", " + page, query: q, args: args, want: want}
+		return planCase{name: name + ", " + page, query: q, args: args, want: want,
+			avoid: []string{"idx_bookmarks_tenant_"}}
 	}
 	const (
 		byTenant = "SEARCH d USING INDEX idx_documents_tenant_updated (tenant_id=?"
@@ -118,15 +121,32 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 			avoid: []string{"idx_jobs_tenant_"},
 		}
 	}
-	bookmarks := func(name string, opts store.ListBookmarksOpts) planCase {
-		opts.After = after
-		q, args := listBookmarksQuery("local", opts)
-		return planCase{name: name + ", " + page, query: q, args: args, want: []string{
-			"SEARCH b USING INDEX idx_bookmarks_tenant_created (tenant_id=?" + keyset("created_at") + ")",
-			"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
-		}}
+	// Each order walks its own index under every filter, reaching the
+	// document by its primary key and its last error through
+	// idx_jobs_document.
+	bookmarks := func(name string, opts store.ListBookmarksOpts) []planCase {
+		orders := []struct {
+			order     store.BookmarkOrder
+			index, ts string
+		}{
+			{store.BookmarkOrderCreated, "idx_bookmarks_tenant_created", "created_at"},
+			{store.BookmarkOrderSaved, "idx_bookmarks_tenant_saved", "saved_at"},
+		}
+		cases := make([]planCase, 0, len(orders))
+		for _, o := range orders {
+			opts.Order, opts.After = o.order, after
+			q, args, err := listBookmarksQuery("local", opts)
+			require.NoError(t, err)
+			cases = append(cases, planCase{name: name + " in " + string(o.order) + " order, " + page, query: q,
+				args: args, want: []string{
+					"SEARCH b USING INDEX " + o.index + " (tenant_id=?" + keyset(o.ts) + ")",
+					"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
+					"SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)",
+				}})
+		}
+		return cases
 	}
-	return []planCase{
+	return slices.Concat([]planCase{
 		docs("ListWithLastError", store.ListDocumentsOpts{}, byTenant),
 		docs("ListWithLastError by state", store.ListDocumentsOpts{State: fetched}, byState),
 		docs("ListWithLastError by content type", store.ListDocumentsOpts{ContentType: store.ContentTypePDF}, byTenant),
@@ -157,16 +177,31 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 		jobsOfDocument("ListWithDoc by document and status", store.ListJobsOpts{Status: store.JobStatusFailed},
 			"document_id=? AND status=?"),
 		jobsOfDocument("ListWithDoc by document and kind", store.ListJobsOpts{Kind: store.JobKindFetch}, "document_id=?"),
+	},
 		bookmarks("Bookmarks.List", store.ListBookmarksOpts{}),
 		bookmarks("Bookmarks.List by source", store.ListBookmarksOpts{Source: store.SourceChrome}),
 		bookmarks("Bookmarks.List by folder", store.ListBookmarksOpts{FolderPath: "/Tech/AI"}),
-	}
+		bookmarks("Bookmarks.List by host", store.ListBookmarksOpts{Host: "example.com"}),
+		bookmarks("Bookmarks.List by state", store.ListBookmarksOpts{State: fetched}),
+		bookmarks("Bookmarks.List by content type", store.ListBookmarksOpts{ContentType: store.ContentTypePDF}),
+		bookmarks("Bookmarks.List by cause", store.ListBookmarksOpts{Cause: antiBot}),
+		bookmarks("Bookmarks.List by every filter", store.ListBookmarksOpts{Source: store.SourceChrome,
+			FolderPath: "/Tech", Host: "example.com", State: store.DocStateFailed, ContentType: store.ContentTypeArticle,
+			Cause: antiBot}),
+	)
 }
+
+// untitledBookmarkTitle is the plan row of an untitled document's bookmark
+// title (bookmarkTitleSQL): a seek of the document's bookmarks, read in
+// saved order, never a walk of a tenant index.
+const untitledBookmarkTitle = "SEARCH b USING INDEX idx_bookmarks_document (document_id=?)"
 
 func TestQueryPlans(t *testing.T) {
 	db := newTestDB(t)
 	claimArgs := []any{store.JobStatusRunning, "now", "now", store.JobStatusPending, "now", store.JobKindFetch}
 	bm25Q, bm25Args := bm25Query("local", `"kafka"`, 10, store.SearchFilters{})
+	bm25SourceQ, bm25SourceArgs := bm25Query("local", `"kafka"`, 10,
+		store.SearchFilters{Source: []string{store.SourceChrome}})
 	vecQ, vecArgs := vectorQuery("local", queryVector(t), 10, store.SearchFilters{})
 	getJobQ, getJobArgs := getJobWithDocQuery("local", "job")
 	getDocQ, getDocArgs := getDocumentWithErrorQuery("local", "doc")
@@ -289,6 +324,16 @@ func TestQueryPlans(t *testing.T) {
 			sorts: true,
 		},
 		{
+			// The source filter's EXISTS seeks the hit's document's
+			// bookmarks, however many bookmarks the tenant has.
+			name:  "BM25Search by source",
+			query: bm25SourceQ, args: bm25SourceArgs,
+			first: "SCAN chunks_fts VIRTUAL TABLE",
+			want:  []string{"SEARCH b EXISTS USING INDEX idx_bookmarks_document (document_id=?)"},
+			sorts: true,
+			avoid: []string{"idx_bookmarks_tenant_"},
+		},
+		{
 			// A KNN scan of chunks_vec (plan kind 3, see
 			// TestQueryPlans_ChunkVectorDeleteIsPointLookup), then the same
 			// per-hit lookups.
@@ -303,9 +348,11 @@ func TestQueryPlans(t *testing.T) {
 			sorts: true,
 		},
 		{
+			// Either tenant index covers the count equally; SQLite takes the
+			// saved one.
 			name:  "Bookmarks.Count",
 			query: countBookmarksSQL, args: []any{"local"},
-			want: []string{"SEARCH bookmarks USING COVERING INDEX idx_bookmarks_tenant_created (tenant_id=?)"},
+			want: []string{"SEARCH bookmarks USING COVERING INDEX idx_bookmarks_tenant_saved (tenant_id=?)"},
 		},
 		{
 			// Driven by the URLs given, each looked up in the unique
@@ -327,15 +374,15 @@ func TestQueryPlans(t *testing.T) {
 			name:  "GetWithLastError",
 			query: getDocQ, args: getDocArgs,
 			first: "SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
-			want:  []string{"SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)"},
+			want:  []string{"SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)", untitledBookmarkTitle},
+			avoid: []string{"idx_bookmarks_tenant_"},
 		},
 		{
-			// A document has a bookmark per source at most, so sorting them
-			// is cheap; see listBookmarksByDocumentSQL for the order.
+			// The document's bookmarks, read in the order they are listed.
 			name:  "ListByDocument",
 			query: listBookmarksByDocumentSQL, args: []any{"local", "doc"},
 			first: "SEARCH bookmarks USING INDEX idx_bookmarks_document (document_id=?)",
-			sorts: true,
+			avoid: []string{"idx_bookmarks_tenant_"},
 		},
 		{
 			name:  "document delete reaches its jobs",
@@ -343,7 +390,7 @@ func TestQueryPlans(t *testing.T) {
 			want: []string{"SEARCH jobs USING COVERING INDEX idx_jobs_document (document_id=?)"},
 		},
 	}
-	for _, tc := range slices.Concat(cases, listPlanCases()) {
+	for _, tc := range slices.Concat(cases, listPlanCases(t)) {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := queryPlan(t, db, tc.query, tc.args...)
 			assert.True(t, strings.HasPrefix(plan, tc.first), "plan starts with %q:\n%s", tc.first, plan)

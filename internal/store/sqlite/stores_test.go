@@ -339,27 +339,6 @@ func TestBookmarks_UniqueConflict(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrConflict)
 }
 
-func TestBookmarks_ListFilters(t *testing.T) {
-	ctx := context.Background()
-	bms := NewBookmarks(newTestDB(t))
-
-	mkAt := time.Now().UTC()
-	for i, src := range []string{store.SourceChrome, store.SourceChrome, store.SourceSafari} {
-		require.NoError(t, bms.Create(ctx, &store.Bookmark{
-			TenantID: "local", URL: "https://example.com/" + string(rune('a'+i)),
-			Source: src, SavedAt: mkAt,
-		}))
-	}
-
-	chrome, err := bms.List(ctx, "local", store.ListBookmarksOpts{Source: store.SourceChrome})
-	require.NoError(t, err)
-	assert.Len(t, chrome, 2)
-
-	safari, err := bms.List(ctx, "local", store.ListBookmarksOpts{Source: store.SourceSafari})
-	require.NoError(t, err)
-	assert.Len(t, safari, 1)
-}
-
 func TestBookmarks_LinkDocument(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -1131,13 +1110,36 @@ func pagedLists() []pagedList {
 				return keys, err
 			},
 			// created_at never changes, so the change is a new bookmark.
-			change: func(t *testing.T, db *DB, _ string) {
+			change: newBookmark,
+		},
+		{
+			name: "bookmarks by saved",
+			seed: func(t *testing.T, db *DB, id, at string) {
 				t.Helper()
-				require.NoError(t, NewBookmarks(db).Create(context.Background(), &store.Bookmark{TenantID: "local",
-					URL: "https://example.com/new", Source: store.SourceChrome, SavedAt: time.Now().UTC()}))
+				_, err := db.Exec(`INSERT INTO bookmarks (id, tenant_id, url, saved_at, source)
+					VALUES (?, 'local', ?, ?, 'chrome')`, id, "https://example.com/"+id, at)
+				require.NoError(t, err)
 			},
+			page: func(db *DB, after store.PageKey, limit int) ([]store.PageKey, error) {
+				rows, err := NewBookmarks(db).List(context.Background(), "local",
+					store.ListBookmarksOpts{Order: store.BookmarkOrderSaved, Limit: limit, After: after})
+				keys := make([]store.PageKey, len(rows))
+				for i, r := range rows {
+					keys[i] = store.BookmarkOrderSaved.Key(r.Bookmark)
+				}
+				return keys, err
+			},
+			// saved_at never changes either; a new save is newer than the walk.
+			change: newBookmark,
 		},
 	}
+}
+
+// newBookmark saves a bookmark now, ahead of any walk of the bookmarks.
+func newBookmark(t *testing.T, db *DB, _ string) {
+	t.Helper()
+	require.NoError(t, NewBookmarks(db).Create(context.Background(), &store.Bookmark{TenantID: "local",
+		URL: "https://example.com/new", Source: store.SourceChrome, SavedAt: time.Now().UTC()}))
 }
 
 // walk pages through a list two rows at a time, calling between after each
@@ -1205,7 +1207,8 @@ func TestLists_KeysetPagesOverTies(t *testing.T) {
 }
 
 // TestBookmarks_ListDocumentState: a listed bookmark carries its document's
-// state from the same query, and none when it links to no document.
+// state, type and cause from the same query, and none when it links to no
+// document.
 func TestBookmarks_ListDocumentState(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -1221,9 +1224,13 @@ func TestBookmarks_ListDocumentState(t *testing.T) {
 
 	got, err := bms.List(ctx, "local", store.ListBookmarksOpts{})
 	require.NoError(t, err)
-	states := map[string]store.DocState{}
+	rows := map[string]store.BookmarkWithDocument{}
 	for _, b := range got {
-		states[b.ID] = b.DocumentState
+		rows[b.ID] = b
 	}
-	assert.Equal(t, map[string]store.DocState{linked.ID: store.DocStateDead, unlinked.ID: ""}, states)
+	require.Len(t, rows, 2)
+	assert.Equal(t, store.BookmarkWithDocument{Bookmark: rows[linked.ID].Bookmark, DocumentState: store.DocStateDead,
+		DocumentContentType: store.ContentTypeUnknown, DocumentFailureCause: store.FailureCauseDeadLink},
+		rows[linked.ID])
+	assert.Equal(t, store.BookmarkWithDocument{Bookmark: rows[unlinked.ID].Bookmark}, rows[unlinked.ID])
 }

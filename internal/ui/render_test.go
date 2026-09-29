@@ -105,16 +105,18 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			Shown:  50,
 			Rows: []LibraryRow{
 				{DocumentID: evilAttr, Title: evilScript, URL: evilURL, State: evilQuotes, ContentType: evilAttr,
-					UpdatedAt: at, LastError: evilScript, FailureCause: evilAttr},
+					When: at, LastError: evilScript, FailureCause: evilAttr},
 				{DocumentID: "doc", URL: "https://example.com/" + evilQuotes, State: "failed", ContentType: "pdf",
-					UpdatedAt: at, LastError: "permanent failure: native: " + evilScript, FailureCause: "anti_bot"},
+					When: at, LastError: "permanent failure: native: " + evilScript, FailureCause: "anti_bot"},
+				{DocumentID: evilAttr, BookmarkTitle: evilScript, URL: evilURL, State: "failed", ContentType: "unknown",
+					When: at, LastError: evilAttr, FailureCause: "tls"},
 			},
 			NextCursor: evilAttr,
 			PageSize:   7,
 		},
 		PageDocument: Document{
 			Layout: layout(NavLibrary),
-			Meta: DocumentMeta{ID: evilAttr, Title: evilScript, URL: evilURL, CanonicalURL: evilURL,
+			Meta: DocumentMeta{ID: evilAttr, Title: evilScript, BookmarkTitle: evilAttr, URL: evilURL, CanonicalURL: evilURL,
 				ContentType: evilQuotes, State: evilAttr, Author: evilScript, Language: evilQuotes, PublishedAt: at,
 				WordCount: 42, CreatedAt: at, UpdatedAt: at, MarkdownPath: evilScript},
 			Extraction: &Extraction{Fetcher: evilScript, Via: "jina", Status: evilAttr, ErrorMessage: evilQuotes,
@@ -157,7 +159,14 @@ func sampleVariants(t testing.TB) map[string][]any {
 	}
 	panelErr := &PanelError{Message: evilScript, RequestID: evilAttr}
 	row := LibraryRow{DocumentID: evilAttr, Title: evilScript, URL: evilURL, State: evilQuotes, ContentType: evilAttr,
-		UpdatedAt: at}
+		When: at}
+	saves := []LibraryRow{
+		{DocumentID: evilAttr, BookmarkTitle: evilQuotes + evilScript, URL: evilURL, State: "failed",
+			ContentType: evilAttr, When: at, Source: evilScript, Folder: evilAttr, LastError: evilScript,
+			FailureCause: evilQuotes},
+		{BookmarkTitle: evilAttr, URL: evilURL, When: at, Source: evilAttr, Folder: evilScript},
+		{URL: "https://example.com/" + evilQuotes, When: at, Source: "safari"},
+	}
 	counts := &LibraryCounts{Documents: 7467, Bookmarks: 7497, ByState: map[string]int{"fetched": 4498, evilAttr: 2}}
 	return map[string][]any{
 		PageSearch: {
@@ -180,6 +189,12 @@ func sampleVariants(t testing.TB) map[string][]any {
 			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{State: "fetched"}, Counts: counts,
 				Rows: []LibraryRow{row}, PageSize: 50},
 			Library{Layout: layout(NavLibrary), Rows: []LibraryRow{row}, NextCursor: evilAttr, PageSize: 50},
+			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{Order: OrderSaved, Host: evilScript, Limit: 7},
+				Counts: counts, Rows: saves, NextCursor: evilScript, PageSize: 7, Shown: 3},
+			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{Order: OrderSaved}, Counts: counts,
+				Rows: saves, PageSize: 50},
+			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{Order: OrderSaved, Folder: evilAttr},
+				Counts: counts},
 		},
 	}
 }
@@ -211,9 +226,10 @@ func statusVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 	}
 }
 
-// documentVariants are a document's page in each state, with a job queued
-// behind a paused queue, running, and retrying, each outcome of its jobs,
-// a dead link's confirm, its jobs' read failed, and a poll's answer.
+// documentVariants are a document's page in each state, untitled, with a
+// job queued behind a paused queue, running, and retrying (named by its
+// bookmark's title), each outcome of its jobs, a dead link's confirm, its
+// jobs' read failed, and a poll's answer.
 func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 	doc := func(state string, ext *Extraction, jobs DocumentJobs) Document {
 		jobs.DocumentID, jobs.State, jobs.AttemptLimit = evilAttr, state, 5
@@ -224,12 +240,15 @@ func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 	then := DocumentBaseline{Updated: at, Extraction: evilAttr}
 	later := DocumentBaseline{Updated: at.Add(time.Second), Extraction: evilAttr}
 	queued := []JobLine{{Kind: "fetch"}}
+	// Named by its bookmark's title, as an untitled page is.
+	failed := doc("failed", nil, DocumentJobs{Baseline: then, Current: then, Jobs: []JobLine{{Kind: "fetch",
+		Attempts: 2, RunAfter: at}}})
+	failed.Meta.BookmarkTitle = evilScript
 	return []any{
 		doc("pending", nil, DocumentJobs{Baseline: then, Current: then, Jobs: queued, Hold: "paused"}),
 		doc("fetched", ext, DocumentJobs{Baseline: then, Current: then, Jobs: []JobLine{{Kind: "index", Running: true,
 			Attempts: 1}}}),
-		doc("failed", nil, DocumentJobs{Baseline: then, Current: then, Jobs: []JobLine{{Kind: "fetch", Attempts: 2,
-			RunAfter: at}}}),
+		failed,
 		doc("dead", nil, DocumentJobs{Baseline: then, Current: later}),
 		doc("fetched", ext, DocumentJobs{Baseline: then, Current: later}),
 		doc("fetched", ext, DocumentJobs{Baseline: then, Current: DocumentBaseline{Updated: at, Extraction: evilScript}}),
@@ -289,9 +308,12 @@ func partialSamples(t testing.TB) map[string][]any {
 		"icons.html":  {nil},
 		"reltime":     {time.Time{}, at},
 		"doc-title": {DocRef{ID: evilAttr, Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, URL: evilURL},
-			DocRef{Title: evilScript, URL: evilURL}},
+			DocRef{Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, Fallback: evilScript, URL: evilURL},
+			DocRef{Fallback: evilAttr + evilQuotes, URL: evilURL}},
 		"doc-cell": {DocCell{Ref: DocRef{ID: evilAttr, Title: evilScript, URL: evilURL}, Where: evilQuotes,
-			Source: evilScript, ContentType: evilAttr, When: at, FailureCause: evilScript, LastError: evilAttr},
+			Source: evilScript, Folder: evilAttr, ContentType: evilAttr, When: at, FailureCause: evilScript,
+			LastError: evilAttr},
+			DocCell{Ref: DocRef{Fallback: evilScript, URL: evilURL}, Source: evilAttr},
 			DocCell{Ref: DocRef{URL: evilURL}}},
 		"state-badge": {evilScript, "dead"},
 		"stackbar": {stateBar([]Count{{Name: "fetched", Count: 2}, {Name: "failed", Count: 1}}),

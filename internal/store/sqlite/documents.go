@@ -211,8 +211,8 @@ func (s *Documents) MarkFetched(ctx context.Context, id string) error {
 }
 
 // ListWithLastError looks up, for each document, the error of the most
-// recent failed job for it, and its current extraction for the markdown
-// path.
+// recent failed job for it, its current extraction for the markdown path,
+// and, for an untitled one, its bookmark's title, all in one query.
 func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, opts store.ListDocumentsOpts) ([]store.DocumentWithError, error) {
 	q, args := listDocumentsQuery(tenantID, opts)
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -247,19 +247,42 @@ func (s *Documents) GetWithLastError(ctx context.Context, tenantID, id string) (
 	return doc, nil
 }
 
-// selectDocumentsWithError reads documents as ListWithLastError and
-// GetWithLastError return them: each with the error of its most recent
-// failed job, a seek on idx_jobs_document, and its current extraction's
-// markdown path. Its one argument is store.JobStatusFailed; the query that
-// uses it adds a WHERE on documents d.
-var selectDocumentsWithError = `SELECT ` + qualify("d", documentColumns) + `,
-	COALESCE((
+// lastErrorSQL is the error of the most recent failed job of documents d,
+// or empty when it has none, or d is NULL for a bookmark linked to no
+// document: a seek on idx_jobs_document. Its one argument is
+// store.JobStatusFailed.
+const lastErrorSQL = `COALESCE((
 		SELECT j.last_error FROM jobs j
 		WHERE j.document_id = d.id AND j.status = ?
 		ORDER BY j.updated_at DESC
 		LIMIT 1
-	), '') AS last_error,
-	COALESCE(e.markdown_path, '') AS markdown_path
+	), '')`
+
+// bookmarkTitleSQL names an untitled document d: the title of its most
+// recently saved bookmark whose title isn't blank, or empty when it has
+// none or d has a title of its own. Blank is ASCII whitespace alone, as
+// the pages, which trim what they show, see it: SQL's one-argument trim
+// strips only spaces, and a tab-only title would hide an older real one.
+// It seeks idx_bookmarks_document, which holds a document's bookmarks in
+// (saved_at, id) order, and runs only for the untitled rows. It takes no
+// argument.
+const bookmarkTitleSQL = `COALESCE(CASE WHEN coalesce(d.title, '') = '' THEN (
+		SELECT b.title FROM bookmarks b
+		WHERE b.document_id = d.id AND b.tenant_id = d.tenant_id
+			AND trim(b.title, ' ' || char(9, 10, 11, 12, 13)) <> ''
+		ORDER BY b.saved_at DESC, b.id DESC
+		LIMIT 1
+	) END, '')`
+
+// selectDocumentsWithError reads documents as ListWithLastError and
+// GetWithLastError return them: each with the error of its most recent
+// failed job, its current extraction's markdown path, and an untitled
+// one's bookmark title. Its one argument is store.JobStatusFailed; the
+// query that uses it adds a WHERE on documents d.
+var selectDocumentsWithError = `SELECT ` + qualify("d", documentColumns) + `,
+	` + lastErrorSQL + ` AS last_error,
+	COALESCE(e.markdown_path, '') AS markdown_path,
+	` + bookmarkTitleSQL + ` AS bookmark_title
 	FROM documents d
 	LEFT JOIN document_extractions e ON e.id = d.current_extraction_id`
 
@@ -267,7 +290,7 @@ var selectDocumentsWithError = `SELECT ` + qualify("d", documentColumns) + `,
 func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.DocumentWithError, error) {
 	var item store.DocumentWithError
 	var err error
-	if item.Document, err = scanDocument(row, &item.LastError, &item.MarkdownPath); err != nil {
+	if item.Document, err = scanDocument(row, &item.LastError, &item.MarkdownPath, &item.BookmarkTitle); err != nil {
 		return nil, err
 	}
 	return &item, nil
@@ -281,7 +304,7 @@ func scanDocumentWithError(row interface{ Scan(...any) error }) (*store.Document
 // only the documents that failed, so a rare cause reads its own documents
 // rather than the whole list. The other filters are checked on each row
 // it walks, the folder's through a seek on idx_bookmarks_document, and the
-// last-error subquery runs only for the rows returned.
+// last-error and bookmark-title subqueries run only for the rows returned.
 func listDocumentsQuery(tenantID string, opts store.ListDocumentsOpts) (string, []any) {
 	clauses := []string{"d.tenant_id = ?"}
 	args := []any{store.JobStatusFailed, tenantID}

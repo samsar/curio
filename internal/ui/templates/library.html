@@ -1,15 +1,17 @@
 {{/*
-The next page is a plain link carrying the filters and the cursor. htmx
-turns it into "load more": the next page's rows are appended to #rows, and
-its #more, holding the link after it or nothing, replaces this one. Every
-page has a #more, an empty one without rows, so the last one clears it.
-htmx asks for the next page with how many rows the page shows so far
-(shown), so that its #showing, which replaces this one, counts them all;
-the plain link leaves it out, since that page shows only its own rows.
+The next page is a plain link carrying the order, the filters and the
+cursor. htmx turns it into "load more": the next page's rows are appended
+to #rows, and its #more, holding the link after it or nothing, replaces
+this one. Every page has a #more, an empty one without rows, so the last
+one clears it. htmx asks for the next page with how many rows the page
+shows so far (shown), so that its #showing, which replaces this one,
+counts them all; the plain link leaves it out, since that page shows only
+its own rows. The Date saved note sits outside both, so it shows once.
 
-The state tabs count the whole library, so they show counts only when
-state is the one filter. The form carries the state as a hidden input:
-Apply keeps the tab.
+The state tabs count the whole library's documents, so they show counts
+only when state is the one filter, in either order. The form carries the
+state as a hidden input: Apply keeps the tab. The order is a field of the
+form, and every link keeps it.
 */}}
 {{define "content" -}}
 <div class="page-head"><div class="titles">
@@ -23,6 +25,7 @@ Apply keeps the tab.
 <label class="field"><span>Type</span><select class="select" name="content_type"><option value="">Any type</option>{{range contentTypes}}<option{{if eq . $.Filters.ContentType}} selected{{end}}>{{.}}</option>{{end}}</select></label>
 <label class="field"><span>Host</span><input class="input" name="host" value="{{.Filters.Host}}" placeholder="example.com"></label>
 <label class="field"><span>Folder</span><input class="input" name="folder" value="{{.Filters.Folder}}" placeholder="/Reading"></label>
+<label class="field"><span>Order</span><select class="select" name="order"><option value="updated">Last updated</option><option value="saved"{{if .Filters.Saved}} selected{{end}}>Date saved</option></select></label>
 {{with .Filters.State}}<input type="hidden" name="state" value="{{.}}">{{end}}
 {{with .Filters.Cause}}<input type="hidden" name="cause" value="{{.}}">{{end}}
 {{with .Filters.Limit}}<input type="hidden" name="limit" value="{{.}}">{{end}}
@@ -34,27 +37,29 @@ Apply keeps the tab.
 <div class="table-scroll">
 <table class="data">
 <colgroup><col><col class="c-state"><col class="c-type"><col class="c-when"></colgroup>
-<thead><tr><th scope="col">Document</th><th scope="col">State</th><th scope="col" class="c-type">Type</th><th scope="col" class="c-when">Updated</th></tr></thead>
+<thead><tr><th scope="col">Document</th><th scope="col">State</th><th scope="col" class="c-type">Type</th><th scope="col" class="c-when">{{if .Filters.Saved}}Saved{{else}}Updated{{end}}</th></tr></thead>
 <tbody id="rows">
 {{range .Rows}}<tr>
 <td>{{template "doc-cell" .Cell}}</td>
-<td class="state-cell">{{template "state-badge" .State}}</td>
-<td class="c-type"><span class="tag">{{template "icon" (typeIcon .ContentType)}}{{.ContentType}}</span></td>
-<td class="c-when when">{{template "reltime" .UpdatedAt}}</td>
+<td class="state-cell">{{with .State}}{{template "state-badge" .}}{{end}}</td>
+<td class="c-type">{{with .ContentType}}<span class="tag">{{template "icon" (typeIcon .)}}{{.}}</span>{{end}}</td>
+<td class="c-when when">{{template "reltime" .When}}</td>
 </tr>
 {{end}}</tbody>
 </table>
 </div>
 <div class="load-more" id="more">{{with .NextCursor}}<a class="btn" href="{{libraryHref $.Filters .}}" hx-get="{{libraryMoreHref $.Filters . $.ShownThrough}}" hx-target="#rows" hx-select="#rows > tr" hx-swap="beforeend" hx-select-oob="#more,#showing">Load {{$.PageSize}} more</a>{{end}}</div>
+{{if .Filters.Saved}}<p class="table-note">Newest saves first, one row per bookmark: a page saved in two browsers is listed twice. Safari keeps no save dates, so its bookmarks are dated when curio imported them.</p>{{end}}
 </div>
-<p class="pager-summary mt-4" id="showing">Showing {{with .OfTotal}}{{num $.ShownThrough}} of {{count . "document" "documents"}}{{else}}{{count .ShownThrough "document" "documents"}}{{end}}, most recently updated first.</p>
+{{if .Filters.Saved}}<p class="pager-summary mt-4" id="showing">Showing {{with .OfTotal}}{{num $.ShownThrough}} of {{count . "save" "saves"}}{{else}}{{count .ShownThrough "save" "saves"}}{{end}}.</p>
+{{- else}}<p class="pager-summary mt-4" id="showing">Showing {{with .OfTotal}}{{num $.ShownThrough}} of {{count . "document" "documents"}}{{else}}{{count .ShownThrough "document" "documents"}}{{end}}, most recently updated first.</p>{{end}}
 {{else}}
 <div class="card">
 {{if .Filters.Filtered}}<div class="empty">
 <div class="empty-icon">{{template "icon" "inbox"}}</div>
-<h2>No documents match</h2>
+<h2>{{if .Filters.Saved}}No saves match{{else}}No documents match{{end}}</h2>
 <p>Nothing in the library has {{range $i, $f := .Filters.Active}}{{if $i}}, {{end}}{{$f.Name}} <code>{{$f.Value}}</code>{{end}}.{{if .Filters.Host}} A host matches exactly: <code>www.</code> and other subdomains are hosts of their own.{{end}}</p>
-<p class="mt-2"><a class="btn" href="{{navHref "library"}}">Clear filters</a></p>
+<p class="mt-2"><a class="btn" href="{{clearFiltersHref .Filters}}">Clear filters</a></p>
 </div>
 {{else}}<div class="empty">
 <div class="empty-icon">{{template "icon" "inbox"}}</div>

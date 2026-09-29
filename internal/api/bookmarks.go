@@ -115,9 +115,21 @@ func (d Deps) bookmarkRow(in ImportBookmark, source string) *store.Bookmark {
 	}
 }
 
+// BookmarkListItem mirrors the openapi BookmarkListItem schema: a bookmark
+// as GET /v1/bookmarks lists it, with what the list shows of its document.
+// Each document field is omitted when it is empty, and all of them when
+// the bookmark links to no document.
+type BookmarkListItem struct {
+	BookmarkResponse
+	DocumentTitle        *string `json:"document_title,omitempty"`
+	DocumentContentType  string  `json:"document_content_type,omitempty"`
+	DocumentFailureCause string  `json:"document_failure_cause,omitempty"`
+	DocumentLastError    string  `json:"document_last_error,omitempty"`
+}
+
 // BookmarkListResponse mirrors the openapi BookmarkList schema.
 type BookmarkListResponse struct {
-	Items      []BookmarkResponse `json:"items"`
+	Items      []BookmarkListItem `json:"items"`
 	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
@@ -135,31 +147,79 @@ func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 	d.writeJSON(w, r, http.StatusOK, resp)
 }
 
-// listBookmarksOpts reads GET /v1/bookmarks' query: the source and folder
-// filters, the cursor and the page size in Limit. A source or cursor the
-// list can't take is a requestError.
+// listBookmarksOpts reads GET /v1/bookmarks' query: the order, the source
+// filter, and what bookmarksPageOpts reads for that order. An order,
+// filter or cursor the list can't take is a requestError.
 func listBookmarksOpts(r *http.Request) (store.ListBookmarksOpts, error) {
-	q := r.URL.Query()
-	source := q.Get("source")
+	source := r.URL.Query().Get("source")
 	if source != "" && !validSource(source) {
 		return store.ListBookmarksOpts{}, badRequest("source %q must be one of: %s", source, sourceList)
 	}
-	after, err := cursorParam(r)
+	order, err := bookmarkOrderParam(r)
+	if err != nil {
+		return store.ListBookmarksOpts{}, err
+	}
+	opts, err := bookmarksPageOpts(r, order)
+	if err != nil {
+		return store.ListBookmarksOpts{}, err
+	}
+	opts.Source = source
+	return opts, nil
+}
+
+// bookmarksPageOpts reads the query of a page of bookmarks in order: the
+// state, content_type, host, folder and cause filters, a cursor that order
+// issued, and the page size in Limit. The Library's Date saved order reads
+// its page with it too, having no source filter. A filter or cursor the
+// list can't take is a requestError.
+func bookmarksPageOpts(r *http.Request, order store.BookmarkOrder) (store.ListBookmarksOpts, error) {
+	f, err := documentFilterParams(r)
+	if err != nil {
+		return store.ListBookmarksOpts{}, err
+	}
+	after, err := cursorParam(r, bookmarkCursorOrder(order))
 	if err != nil {
 		return store.ListBookmarksOpts{}, err
 	}
 	return store.ListBookmarksOpts{
-		Source:     source,
-		FolderPath: q.Get("folder"),
-		After:      after,
-		Limit:      listLimit(r),
+		Order:       order,
+		FolderPath:  r.URL.Query().Get("folder"),
+		Host:        f.host,
+		State:       f.state,
+		ContentType: f.contentType,
+		Cause:       f.cause,
+		After:       after,
+		Limit:       listLimit(r),
 	}, nil
 }
 
-// listBookmarks pages through the tenant's bookmarks that match opts,
-// newest first; opts.Limit is the page size. NextCursor is set exactly
-// when another page follows: the store is asked for one row more than the
-// page holds.
+// bookmarkOrderParam reads ?order: created, the default, or saved.
+func bookmarkOrderParam(r *http.Request) (store.BookmarkOrder, error) {
+	order := store.BookmarkOrder(r.URL.Query().Get("order"))
+	if order == "" {
+		return store.BookmarkOrderCreated, nil
+	}
+	if !order.Valid() {
+		return "", badRequest("order %q must be one of: %s, %s", order, store.BookmarkOrderCreated,
+			store.BookmarkOrderSaved)
+	}
+	return order, nil
+}
+
+// bookmarkCursorOrder is the order the bookmark list's cursors record for
+// a walk in order: none for the created order, the list's default.
+func bookmarkCursorOrder(order store.BookmarkOrder) string {
+	if order == store.BookmarkOrderSaved {
+		return string(order)
+	}
+	return ""
+}
+
+// listBookmarks pages through the tenant's bookmarks that match opts, in
+// opts.Order; opts.Limit is the page size, at least 1. NextCursor is set
+// exactly when another page follows: the store is asked for one row more
+// than the page holds. The cursor is the last row's key in the order the
+// store walked (BookmarkOrder.Key), so the two can't drift apart.
 func (d Deps) listBookmarks(ctx context.Context, opts store.ListBookmarksOpts) (BookmarkListResponse, error) {
 	limit := opts.Limit
 	opts.Limit = limit + 1
@@ -167,16 +227,21 @@ func (d Deps) listBookmarks(ctx context.Context, opts store.ListBookmarksOpts) (
 	if err != nil {
 		return BookmarkListResponse{}, err
 	}
-	bms, next, err := onePage(bms, limit, func(b store.BookmarkWithState) store.PageKey {
-		return store.PageKey{At: b.CreatedAt, ID: b.ID}
-	})
+	key := func(b store.BookmarkWithDocument) store.PageKey { return opts.Order.Key(b.Bookmark) }
+	bms, next, err := onePage(bms, limit, bookmarkCursorOrder(opts.Order), key)
 	if err != nil {
 		return BookmarkListResponse{}, err
 	}
 
-	resp := BookmarkListResponse{Items: make([]BookmarkResponse, 0, len(bms)), NextCursor: next}
+	resp := BookmarkListResponse{Items: make([]BookmarkListItem, 0, len(bms)), NextCursor: next}
 	for _, b := range bms {
-		resp.Items = append(resp.Items, bookmarkToResponse(b.Bookmark, string(b.DocumentState)))
+		resp.Items = append(resp.Items, BookmarkListItem{
+			BookmarkResponse:     bookmarkToResponse(b.Bookmark, string(b.DocumentState)),
+			DocumentTitle:        b.DocumentTitle,
+			DocumentContentType:  string(b.DocumentContentType),
+			DocumentFailureCause: string(b.DocumentFailureCause),
+			DocumentLastError:    b.DocumentLastError,
+		})
 	}
 	return resp, nil
 }

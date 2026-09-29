@@ -18,17 +18,30 @@ import (
 type cursor struct {
 	At time.Time `json:"t"`
 	ID string    `json:"id"`
+	// Order names the order of the list that issued the cursor when it
+	// isn't that list's default, so a cursor pages only the order it came
+	// from. A default order records none: the cursors issued before lists
+	// had orders keep working.
+	Order string `json:"o,omitempty"`
 }
 
-func encodeCursor(key store.PageKey) (string, error) {
-	b, err := json.Marshal(cursor{At: key.At.UTC(), ID: key.ID})
+// errOtherOrder is a cursor that another order of a list, or another list,
+// issued: its position means nothing in the walk it was sent to.
+var errOtherOrder = errors.New("another list or order issued it")
+
+// encodeCursor is the cursor after key in a list walked in order, "" for a
+// list's default order.
+func encodeCursor(key store.PageKey, order string) (string, error) {
+	b, err := json.Marshal(cursor{At: key.At.UTC(), ID: key.ID, Order: order})
 	if err != nil {
 		return "", fmt.Errorf("encode cursor: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-func decodeCursor(s string) (store.PageKey, error) {
+// decodeCursor reads a cursor of a list walked in order, "" for a list's
+// default order; one issued for another order is errOtherOrder.
+func decodeCursor(s, order string) (store.PageKey, error) {
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
 		return store.PageKey{}, err
@@ -40,18 +53,22 @@ func decodeCursor(s string) (store.PageKey, error) {
 	if c.ID == "" || c.At.IsZero() {
 		return store.PageKey{}, errors.New("it names no position")
 	}
+	if c.Order != order {
+		return store.PageKey{}, errOtherOrder
+	}
 	return store.PageKey{At: c.At, ID: c.ID}, nil
 }
 
-// cursorParam reads a list endpoint's ?cursor: the start of the list when
-// it is absent, and a requestError when it isn't a cursor this daemon
-// issued.
-func cursorParam(r *http.Request) (store.PageKey, error) {
+// cursorParam reads a list endpoint's ?cursor, for a walk in order, ""
+// for the list's default order: the start of the list when it is absent,
+// and a requestError when it isn't a cursor this daemon issued for that
+// order.
+func cursorParam(r *http.Request, order string) (store.PageKey, error) {
 	s := r.URL.Query().Get("cursor")
 	if s == "" {
 		return store.PageKey{}, nil
 	}
-	key, err := decodeCursor(s)
+	key, err := decodeCursor(s, order)
 	if err != nil {
 		return store.PageKey{}, badRequest("invalid cursor: %w; list again from the first page", err)
 	}
@@ -59,11 +76,11 @@ func cursorParam(r *http.Request) (store.PageKey, error) {
 }
 
 // onePage trims rows, which the store was asked for with a limit of
-// limit+1, to limit, and returns the cursor of the page that follows: ""
-// when these rows are the last. key is a row's position in the list. A page
-// holds at least one row: a limit below 1 is an error, since the next
-// page's cursor is the last row's.
-func onePage[T any](rows []T, limit int, key func(T) store.PageKey) ([]T, string, error) {
+// limit+1, to limit, and returns the cursor of the page that follows in
+// order ("" for the list's default): "" when these rows are the last. key
+// is a row's position in the list. A page holds at least one row: a limit
+// below 1 is an error, since the next page's cursor is the last row's.
+func onePage[T any](rows []T, limit int, order string, key func(T) store.PageKey) ([]T, string, error) {
 	if limit < 1 {
 		return nil, "", fmt.Errorf("page size %d: a page holds at least one row", limit)
 	}
@@ -71,6 +88,6 @@ func onePage[T any](rows []T, limit int, key func(T) store.PageKey) ([]T, string
 		return rows, "", nil
 	}
 	rows = rows[:limit]
-	next, err := encodeCursor(key(rows[limit-1]))
+	next, err := encodeCursor(key(rows[limit-1]), order)
 	return rows, next, err
 }
