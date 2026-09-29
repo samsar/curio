@@ -139,11 +139,12 @@ when the entry was first committed.
 - 2026-09-28 — [Dashboard: formatting budgets for stored markdown](#dashboard-formatting-budgets-for-stored-markdown)
 - 2026-09-28 — [Commands take a document's URL as well as its ID](#commands-take-a-documents-url-as-well-as-its-id)
 - 2026-09-28 — [Doctor warns when GitHub requests carry no token](#doctor-warns-when-github-requests-carry-no-token)
-- 2026-09-28 — [Failure causes: recorded when a document fails](#failure-causes-recorded-when-a-document-fails)
+- 2026-09-28 — [Failure causes: recorded when a document fails](#failure-causes-recorded-when-a-document-fails) (revised)
 - 2026-09-29 — [Dashboard: a design language under the CSP](#dashboard-a-design-language-under-the-csp) (revised)
-- 2026-09-29 — [Dashboard: search is home, the Overview becomes Status](#dashboard-search-is-home-the-overview-becomes-status)
-- 2026-09-29 — [Dashboard: actions through /v1, sent by a first-party module](#dashboard-actions-through-v1-sent-by-a-first-party-module)
+- 2026-09-29 — [Dashboard: search is home, the Overview becomes Status](#dashboard-search-is-home-the-overview-becomes-status) (revised)
+- 2026-09-29 — [Dashboard: actions through /v1, sent by a first-party module](#dashboard-actions-through-v1-sent-by-a-first-party-module) (revised)
 - 2026-09-29 — [Library: a Date saved order lists saves](#library-a-date-saved-order-lists-saves)
+- 2026-09-29 — [Dashboard: the Failures tab](#dashboard-the-failures-tab)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -6788,6 +6789,11 @@ choice of json-enc, and the empty `document-actions` region holds the
 document's buttons. The pages are still GET-only. See "Dashboard: actions
 through /v1, sent by a first-party module".
 
+**Revised (2026-09-29):** phase 2 is complete. Its last piece is the
+Library's Failures tab, `/ui/failures`: the failed and dead documents
+grouped by cause, each group refetched through `POST
+/v1/documents/refetch-all`. See "Dashboard: the Failures tab".
+
 ---
 
 ## Dashboard: formatting budgets for stored markdown
@@ -7418,6 +7424,11 @@ instead; `TestOpenAPI_FailureCauseEnum` holds the spec's enum to
 - **A cause filter on `curio docs`.** It shows the cause; the flag waits
   for a need.
 
+**Revised (2026-09-29):** the Library shows its cause filter now: a line
+under the toolbar names the cause, with a Clear that drops it alone. The
+Library's Failures tab groups the failed and dead documents by cause and
+refetches a group by it. See "Dashboard: the Failures tab".
+
 ---
 
 ## Dashboard: a design language under the CSP
@@ -7684,6 +7695,13 @@ Overview; the Library's "Date saved" order will list saves. A Failures
 view of the library, with refetch by cause, will be a Library tab, not a
 fifth navigation item: a phone's navigation fits four.
 
+**Revised (2026-09-29):** the failures card leads to the Library's
+Failures tab: "All failures →" to the tab, where "Failed documents →"
+left out the dead links the card counts, and each cause to its card
+there (`/ui/failures#cause-<code>`), rather than to the Library of that
+cause, which answers 400 for a cause this build doesn't know. See
+"Dashboard: the Failures tab".
+
 ---
 
 ## Dashboard: actions through /v1, sent by a first-party module
@@ -7909,6 +7927,16 @@ fired. With a queue change held open through the DevTools protocol, the
 status read that curio-daemon didn't answer after 14.9 seconds, and the
 keep-awake switch was set back.
 
+**Revised (2026-09-29):** the Failures tab's poller is the one poller
+that reads the failure summary: once per change (`?poll=causes`, after a
+change made there and when the tab comes back into view), never on a
+timer; Status's still leave it out. A group's refetch adds two kinds of
+Action, and `TestDashboard_ActionsMatchTheAPI` now allows a set of
+values for each query key and runs refetch-all's own checks
+(`refetchAllFilter`) on each such action, so one the API would refuse,
+a dead-link refetch without `state=dead` or a cause it doesn't know,
+fails the walk. See "Dashboard: the Failures tab".
+
 ---
 
 ## Library: a Date saved order lists saves
@@ -8036,6 +8064,175 @@ in the current interests), read their documents through their own
 queries, and their pages are changing in their own work (interest
 paging, search paging). The doc-title partial takes the fallback, so
 they can pass one later.
+
+---
+
+## Dashboard: the Failures tab
+
+**Decision:** the Library gains a second view, Failures, at
+`/ui/failures`: the failed and dead documents grouped by
+`documents.failure_cause`, most first. A line counts them, failed and
+dead links apart. Each cause has a card: its icon, label and code, the
+sentence on what it means, the five hosts most of its documents are on
+(each a tag leading to the Library of that cause on that host), how many
+documents and their share, **Refetch N** and **View in Library →**.
+Under the cards, the causes without documents. The tab shares the
+Library's head: its title, its lede and a Documents / Failures subnav,
+whose Failures tab counts the failed and dead documents. Status's "Why
+documents failed" leads there. With it, phase 2 of the dashboard is
+complete.
+
+**A Library tab, at a route of its own.** It is a view of the library,
+and a phone's navigation fits four items, so the page's frame marks
+Library current and the navigation keeps its four (`TestNavItems`). It
+has its own route rather than `/ui/library?view=failures`:
+
+- A Library URL's query is a valid `GET /v1/documents` query, parsed by
+  the same function. A `view=` would break that, and every Library link
+  would have to carry or drop it.
+- The tab reads other data, the summary rather than a list, and has a
+  poll of its own.
+- Every page is one handler, one template and one view model.
+
+**What it reads.** The page reads `failures` (the function `GET
+/v1/failures` runs) once, and `stats` once, for the lede. The subnav
+counts the summary's total, so the two numbers agree. Its poll reads
+`failures` once, and nothing else (`TestUI_FailuresReads`). The Library
+page's subnav counts failed and dead documents from the `stats` it
+already reads. Measured on a `sqlite3 -readonly` `.backup` of the
+author's library (7,467 documents, 2,969 failed or dead, 12 causes),
+served by a throwaway daemon, median of 21 curl timings:
+
+| Request | Time | Size |
+|---|---|---|
+| `/ui/failures` | 4.5 ms | 33.4 KB |
+| `/ui/failures?poll=causes` | 3.0 ms | 32.9 KB |
+| `GET /v1/failures` | 2.3 ms | 2.7 KB |
+
+**No timed poll.** The summary reads the cause and URL of every failed
+and dead document, a scan that grows with the failures, and what changes
+the groups is mostly a refetch made there. So the tab refreshes on
+`curio:changed`: after a change it makes, and when it comes back into
+view (actions.js dispatches the event on `visibilitychange`). Its poller
+(`hx-trigger="curio:changed from:body"`, no `every`) asks for
+`?poll=causes` and swaps two regions from the one read: the subnav
+(`library-subnav`), whose count is the summary's total, and the groups
+(`failures-live`): the totals, the cards and the footnote; the empty
+state; or the summary's error, which the next refresh can clear. Every
+focusable element in them has an id made from its cause
+(`refetch-<code>`, `view-<code>`, `host-<code>-<n>`, the confirm's),
+never from its card's place, so focus stays on a control whose card
+survives a refresh.
+
+**One status for the page.** A refetch the daemon takes requeues every
+document of its cause, so the refresh right after it always removes the
+card that held the button, and a status of the card's own with it. A
+status inside a refreshed region would also break the rule that nothing
+polled announces. So one `.action-status`, `failures-status`, sits
+between the subnav and the groups, outside both regions, over the totals
+its refetches change. It takes no room while empty (`.page-status`).
+Status's queue card does the same, with one status for all its controls.
+
+**Dead links behind a confirm, with `state=dead`.** refetch-all's default
+states leave dead documents out, and it answers 400 for
+`cause=dead_link` without `state=dead` ("Failure causes"). So the dead
+links' action sends both (`refetchDeadLinksAction`), and
+`FailureGroup.Refetch` is the one place that picks it: no template
+decides a query. As on a dead document's page, a refetch of links found
+gone asks first. "Refetch N anyway…" opens a declarative popover
+(`popovertarget`, no script) with Cancel autofocused, and its button
+sends. The confirm sits in the dead links' card, so the N it names is
+refreshed with the card. htmx focuses an `[autofocus]` element in
+content it swaps in, which would reach the closed confirm's Cancel after
+every refresh. The browser check showed that it doesn't: a closed
+popover isn't rendered, so `focus()` does nothing, and after a group's
+refetch the page's active element was the body.
+
+**N is the page's.** actions.js parses no 2xx body and stays as it was.
+The done text is built in Go from the group's count ("Blocked by bot
+protection: 926 refetches queued"), and the refresh right after it shows
+what is really left. A repeat from a stale page enqueues 0, since a
+requeued document is pending with its cause cleared, while saying it
+queued N, which the refresh corrects. Reading `jobs_enqueued` would take
+a new branch in actions.js for a number the page already shows.
+
+**A cause this build doesn't know** (one a newer daemon wrote; the
+column has no CHECK) still gets its card: the code as its label, no
+sentence, the neutral alert icon. Its hosts are plain tags, and it has
+no View link, Refetch or command, since `/ui/library?cause=` and
+refetch-all both answer 400 for it.
+
+**Host tags lead to exactly what they count.** A tag leads to
+`/ui/library?cause=C&host=H`, and `failures` counts hosts as the
+documents list's host filter matches them, so the Library lists what the
+tag counts (`TestUI_Failures` follows one). A stored host can be any
+length. In the mockup's own 390 px screenshot a real 48-character host
+overflowed its card and clipped its count. So a tag is at most its
+column's width, the name gives way with an ellipsis while the count
+stays, and the whole host is in `title` (`TestStylesheet`). The hosts are
+one group (`role="group"`, "Top hosts"), and the count reads "926
+documents, 31% of failures" to a screen reader, with visually hidden
+words.
+
+**View in Library** is `causeHref` for every cause, dead links too. The
+list's cause filter matches dead documents (`failure_cause = ?`);
+`state=dead` is refetch-all's rule alone.
+
+**Status leads to the cards.** "All failures →" leads to the tab. It
+replaces "Failed documents →", which left out the dead links the card
+counts. Each cause leads to its card, `/ui/failures#cause-<code>`, built
+from the `causeCardID` that gives the card its id. The page's `html` has
+a `scroll-padding-top` of the header's height and a step, so a jump
+lands the card below the sticky header, about 15 px under it in Chrome.
+
+**The Library's cause line.** The Library had no control for `cause=`;
+the tab's links set it. A line under the toolbar names it ("Why they
+failed: **Blocked by bot protection** `anti_bot`"), with a Clear
+(`clearCauseHref`) that keeps every other filter, the order and the page
+size. The form still carries the cause as a hidden input, so Apply keeps
+it. The subnav's count is the whole library's, shown whatever the
+filters. The state tabs still count only a list with no other filter;
+the tests that said no count shows on a filtered page now look at the
+tabs alone.
+
+**Tones.** A cause's icon and tone come from one table
+(`internal/ui/causes.go`, through `causeIcon` and `causeTone`):
+
+- warn where its sentence says a refetch later usually works (`timeout`,
+  `network`, `rate_limited`);
+- neutral for dead links, drawn as the dead state is, and where a
+  refetch can't change the verdict or it isn't the site refusing
+  (`unsupported`, `too_large`, `other`);
+- danger, the failed state's, for the rest.
+
+That matches the mockup for the 12 causes it shows. Ten new icons are
+Lucide's shapes. Status's bars keep their colours.
+
+**Checked in a browser.** Headless Chrome 154 against a throwaway daemon
+on the `.backup` above, with its queue paused before anything was clicked
+and Ollama unreachable:
+
+- At 1440 and 390 px, light and dark, Failures, Status and the Library
+  with `cause=anti_bot` (with and without a host, in both orders) had no
+  CSP violation or script error and no sideways scroll at 390. Every
+  host tag stayed inside its card with its count shown, the 48-character
+  host included. The same held with hostile rows seeded: a 300-character
+  host, markup and quotes in a host, and a cause this build doesn't know.
+  The only console entry was Chrome's own request for `/favicon.ico` on a
+  new origin, a 404.
+- Refetch 15 on Other showed "Other: 15 refetches queued". One poll
+  followed, the card went, and the totals and the subnav fell from 2,969
+  to 2,954. Focus was on the body, and the confirm stayed closed.
+- "Refetch 819 anyway…" opened the confirm with Cancel focused. Esc and
+  Cancel closed it without a request. Its button sent
+  `?cause=dead_link&state=dead`, and the dead links' card went.
+- 834 fetches waited in the paused queue, and none ran.
+- With JavaScript off, no Refetch showed, and each group showed its
+  command.
+- A Status row's link landed its card about 15 px below the header at both
+  widths.
+- Nothing failed, on a fresh home, is the empty state, and the subnav
+  counts 0.
 
 ---
 
