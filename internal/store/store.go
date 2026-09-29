@@ -300,8 +300,12 @@ type Document struct {
 	WordCount           *int
 	CurrentExtractionID *string
 	State               DocState
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	// FailureCause is why a failed or dead document failed, and empty for
+	// every other: the store keeps it set exactly when State is failed or
+	// dead, and State equal to its State().
+	FailureCause FailureCause
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // DocumentExtraction is one fetch attempt against a document.
@@ -349,33 +353,45 @@ type Job struct {
 // DocumentStore operates on the documents table.
 type DocumentStore interface {
 	// Create inserts a new document and fills in its ID (when empty),
-	// CreatedAt and UpdatedAt. An empty State or ContentType is stored as
-	// pending or unknown; those defaults apply on insert only. A new
-	// document has no extraction, so CurrentExtractionID must be nil. A
-	// document that already exists for (tenant_id, url) is an error
-	// wrapping ErrConflict.
+	// CreatedAt and UpdatedAt. An empty ContentType is stored as unknown,
+	// and an empty State as pending, or as FailureCause.State() when a
+	// cause is given; those defaults apply on insert only. A cause must be
+	// valid and go with the state (FailureCause.State()), and a failed or
+	// dead document must have one; anything else is an error, and nothing
+	// is inserted. A new document has no extraction, so
+	// CurrentExtractionID must be nil. A document that already exists for
+	// (tenant_id, url) is an error wrapping ErrConflict.
 	Create(ctx context.Context, d *Document) error
 	GetByID(ctx context.Context, id string) (*Document, error)
 	// GetByURL returns the tenant's document for url, which must already
 	// be normalized the way ingest stores it (urlutil.Normalize). A URL
 	// with no document is ErrNotFound.
 	GetByURL(ctx context.Context, tenantID, url string) (*Document, error)
-	UpdateState(ctx context.Context, id string, state DocState) error
+	// MarkFailed records that a document failed for cause, which must be
+	// valid (an invalid one is an error, and nothing is written): its state
+	// becomes cause.State(), dead for a dead link and failed for any other
+	// cause. ErrNotFound if there is no such document.
+	MarkFailed(ctx context.Context, id string, cause FailureCause) error
+	// MarkFetched records that a document was fetched and indexed: its
+	// state becomes fetched, and it has no failure cause. ErrNotFound if
+	// there is no such document.
+	MarkFetched(ctx context.Context, id string) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
 
 	// ApplyFetch records a successful fetch on a document: it points
 	// current_extraction_id at m.ExtractionID, which must exist, writes the
-	// fetch-derived columns exactly as given, and sets the state to pending
-	// until the index step marks it fetched. A nil field clears its column:
-	// those columns describe the current extraction, so none may keep a
-	// value from an earlier one. word_count is left alone. ErrNotFound if
-	// there is no such document.
+	// fetch-derived columns exactly as given, and sets the state to pending,
+	// with no failure cause, until the index step marks it fetched. A nil
+	// field clears its column: those columns describe the current
+	// extraction, so none may keep a value from an earlier one. word_count
+	// is left alone. ErrNotFound if there is no such document.
 	ApplyFetch(ctx context.Context, id string, m FetchedMetadata) error
 
-	// RequeueFetch resets the tenant's document to pending and enqueues a
-	// fresh fetch job for it, atomically: either both happen or neither
-	// does, so a document is never left pending with no job to move it on.
-	// Returns the new job, or ErrNotFound if the tenant has no such document.
+	// RequeueFetch resets the tenant's document to pending, clearing its
+	// failure cause, and enqueues a fresh fetch job for it, atomically:
+	// either both happen or neither does, so a document is never left
+	// pending with no job to move it on. Returns the new job, or
+	// ErrNotFound if the tenant has no such document.
 	RequeueFetch(ctx context.Context, tenantID, documentID string) (*Job, error)
 	// RequeueFetchByStates does the same for every tenant document whose
 	// state is one of states, in one transaction. Returns how many jobs it

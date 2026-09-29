@@ -255,3 +255,110 @@ func TestDocuments_GetWithLastError(t *testing.T) {
 		assert.ErrorIs(t, err, store.ErrNotFound, id)
 	}
 }
+
+// assertCauseInvariant asserts that no document's failure cause disagrees
+// with its state: a cause is set exactly when the document is failed or
+// dead, and a dead document's is dead_link.
+func assertCauseInvariant(t *testing.T, db *DB, after string) {
+	t.Helper()
+	var violations int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM documents
+		WHERE (state IN ('failed', 'dead')) != (failure_cause IS NOT NULL)
+		   OR (state = 'dead') != (failure_cause IS 'dead_link')`).Scan(&violations))
+	assert.Zero(t, violations, "after %s", after)
+}
+
+// TestDocuments_FailureCauseFollowsState: every write that sets a
+// document's state keeps its failure cause in step with it.
+func TestDocuments_FailureCauseFollowsState(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	docs, exts := NewDocuments(db), NewExtractions(db)
+	n := 0
+	create := func(state store.DocState, cause store.FailureCause) *store.Document {
+		t.Helper()
+		n++
+		d := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/%d", n), State: state,
+			FailureCause: cause}
+		require.NoError(t, docs.Create(ctx, d))
+		return d
+	}
+	stored := func(d *store.Document) *store.Document {
+		t.Helper()
+		got, err := docs.GetByID(ctx, d.ID)
+		require.NoError(t, err)
+		return got
+	}
+
+	create("", "")
+	create(store.DocStatePending, "")
+	create(store.DocStateFetched, "")
+	for _, cause := range store.FailureCauses() {
+		assert.Equal(t, cause.State(), stored(create("", cause)).State, "the state follows from the cause")
+		assert.Equal(t, cause, stored(create(cause.State(), cause)).FailureCause)
+	}
+	assertCauseInvariant(t, db, "Create")
+
+	d := create("", "")
+	for _, cause := range store.FailureCauses() {
+		require.NoError(t, docs.MarkFailed(ctx, d.ID, cause))
+		assertCauseInvariant(t, db, "MarkFailed "+string(cause))
+	}
+	require.NoError(t, docs.MarkFetched(ctx, d.ID))
+	assertCauseInvariant(t, db, "MarkFetched")
+
+	// A fetch job that succeeds for a failed document, say one a refetch
+	// raced with.
+	failed := create("", store.FailureCauseAntiBot)
+	ext := &store.DocumentExtraction{DocumentID: failed.ID, Fetcher: "test", Status: store.ExtractionStatusOK}
+	require.NoError(t, exts.Create(ctx, ext))
+	require.NoError(t, docs.ApplyFetch(ctx, failed.ID, store.FetchedMetadata{ExtractionID: ext.ID,
+		ContentType: store.ContentTypeArticle}))
+	assert.Empty(t, stored(failed).FailureCause)
+	assertCauseInvariant(t, db, "ApplyFetch")
+
+	for _, cause := range []store.FailureCause{store.FailureCauseTLS, store.FailureCauseDeadLink} {
+		d := create("", cause)
+		_, err := docs.RequeueFetch(ctx, "local", d.ID)
+		require.NoError(t, err)
+		got := stored(d)
+		assert.Equal(t, store.DocStatePending, got.State)
+		assert.Empty(t, got.FailureCause)
+		assertCauseInvariant(t, db, "RequeueFetch of a document failed for "+string(cause))
+	}
+
+	requeued, err := docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed, store.DocStateDead})
+	require.NoError(t, err)
+	assert.Equal(t, 2*len(store.FailureCauses()), requeued)
+	assertCauseInvariant(t, db, "RequeueFetchByStates")
+	var causes int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM documents WHERE failure_cause IS NOT NULL`).Scan(&causes))
+	assert.Zero(t, causes)
+
+	_, err = NewBookmarks(db).Ingest(ctx, newIngestBookmark("https://example.com/new", store.SourceChrome))
+	require.NoError(t, err)
+	assertCauseInvariant(t, db, "Ingest")
+}
+
+// TestDocuments_Create_CauseMustFitTheState: Create refuses a cause that
+// doesn't go with the state, and a failed or dead document without one,
+// inserting nothing.
+func TestDocuments_Create_CauseMustFitTheState(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	docs := NewDocuments(db)
+	for name, d := range map[string]store.Document{
+		"failed without a cause":  {State: store.DocStateFailed},
+		"dead without a cause":    {State: store.DocStateDead},
+		"dead for another cause":  {State: store.DocStateDead, FailureCause: store.FailureCauseAntiBot},
+		"failed for a dead link":  {State: store.DocStateFailed, FailureCause: store.FailureCauseDeadLink},
+		"pending with a cause":    {State: store.DocStatePending, FailureCause: store.FailureCauseOther},
+		"fetched with a cause":    {State: store.DocStateFetched, FailureCause: store.FailureCauseTLS},
+		"an unknown cause":        {FailureCause: "bogus"},
+		"an unknown failed cause": {State: store.DocStateFailed, FailureCause: "Anti_Bot"},
+	} {
+		d.TenantID, d.URL = "local", "https://example.com/refused"
+		assert.Error(t, docs.Create(ctx, &d), name)
+	}
+	assert.Zero(t, countRows(t, db, "documents"))
+}

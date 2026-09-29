@@ -42,11 +42,13 @@ func TestDocuments_CreateAndGet(t *testing.T) {
 
 	title := "Given"
 	explicit := &store.Document{ID: "doc-explicit", TenantID: "local", URL: "https://example.com/y",
-		State: store.DocStateDead, ContentType: store.ContentTypeRepo, Title: &title}
+		State: store.DocStateDead, FailureCause: store.FailureCauseDeadLink, ContentType: store.ContentTypeRepo,
+		Title: &title}
 	require.NoError(t, docs.Create(ctx, explicit))
 	got, err = docs.GetByID(ctx, "doc-explicit")
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateDead, got.State)
+	assert.Equal(t, store.FailureCauseDeadLink, got.FailureCause)
 	assert.Equal(t, store.ContentTypeRepo, got.ContentType)
 	require.NotNil(t, got.Title)
 	assert.Equal(t, "Given", *got.Title)
@@ -162,21 +164,45 @@ func TestDocuments_GetByID_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestDocuments_UpdateState(t *testing.T) {
+// TestDocuments_MarkFailed: each cause sets the state it goes with, dead
+// for a dead link and failed for the rest, and MarkFetched clears it.
+func TestDocuments_MarkFailed(t *testing.T) {
 	ctx := context.Background()
 	docs := NewDocuments(newTestDB(t))
 	d := &store.Document{TenantID: "local", URL: "https://example.com/y", ContentType: store.ContentTypeArticle}
 	require.NoError(t, docs.Create(ctx, d))
 
-	require.NoError(t, docs.UpdateState(ctx, d.ID, store.DocStateFetched))
-	got, _ := docs.GetByID(ctx, d.ID)
+	for _, cause := range store.FailureCauses() {
+		require.NoError(t, docs.MarkFailed(ctx, d.ID, cause))
+		got, err := docs.GetByID(ctx, d.ID)
+		require.NoError(t, err)
+		assert.Equal(t, cause.State(), got.State, cause)
+		assert.Equal(t, cause, got.FailureCause)
+	}
+
+	require.NoError(t, docs.MarkFetched(ctx, d.ID))
+	got, err := docs.GetByID(ctx, d.ID)
+	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFetched, got.State)
+	assert.Empty(t, got.FailureCause)
 }
 
-func TestDocuments_UpdateState_Missing(t *testing.T) {
+// TestDocuments_MarkFailed_Refused: a cause that isn't one writes nothing,
+// and a document that doesn't exist is ErrNotFound.
+func TestDocuments_MarkFailed_Refused(t *testing.T) {
+	ctx := context.Background()
 	docs := NewDocuments(newTestDB(t))
-	err := docs.UpdateState(context.Background(), uuid.NewString(), store.DocStateFetched)
-	assert.ErrorIs(t, err, store.ErrNotFound)
+	d := seedDoc(t, docs, "https://example.com/y", store.DocStateFetched)
+	for _, cause := range []store.FailureCause{"", "bogus"} {
+		require.Error(t, docs.MarkFailed(ctx, d.ID, cause), cause)
+		got, err := docs.GetByID(ctx, d.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DocStateFetched, got.State)
+		assert.Empty(t, got.FailureCause)
+	}
+
+	assert.ErrorIs(t, docs.MarkFailed(ctx, uuid.NewString(), store.FailureCauseOther), store.ErrNotFound)
+	assert.ErrorIs(t, docs.MarkFetched(ctx, uuid.NewString()), store.ErrNotFound)
 }
 
 // ---------- ExtractionStore ----------
@@ -798,11 +824,27 @@ func TestJobs_DeleteByStatus_FinishedOnly(t *testing.T) {
 
 // ---------- refetch ----------
 
+// seedDoc creates the tenant's document for url in state, with the cause
+// stateCause gives it.
 func seedDoc(t *testing.T, docs *Documents, url string, state store.DocState) *store.Document {
 	t.Helper()
-	d := &store.Document{TenantID: "local", URL: url, State: state}
+	d := &store.Document{TenantID: "local", URL: url, State: state, FailureCause: stateCause(state)}
 	require.NoError(t, docs.Create(context.Background(), d))
 	return d
+}
+
+// stateCause is the failure cause test documents in state are created
+// with: other for a failed one and a dead link for a dead one, as Create
+// requires, and none for the rest.
+func stateCause(state store.DocState) store.FailureCause {
+	switch state {
+	case store.DocStateFailed:
+		return store.FailureCauseOther
+	case store.DocStateDead:
+		return store.FailureCauseDeadLink
+	case store.DocStatePending, store.DocStateFetched:
+	}
+	return ""
 }
 
 func docState(t *testing.T, docs *Documents, id string) store.DocState {
@@ -898,7 +940,8 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 	for _, st := range []store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
 		byState[st] = seedDoc(t, docs, "https://example.com/"+string(st), st)
 	}
-	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs", State: store.DocStateFailed}
+	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs",
+		FailureCause: store.FailureCauseAntiBot}
 	require.NoError(t, docs.Create(ctx, other))
 
 	n, err := docs.RequeueFetchByStates(ctx, "local",
@@ -1108,7 +1151,7 @@ func TestBookmarks_ListDocumentState(t *testing.T) {
 		SavedAt: time.Now().UTC()}
 	_, err := bms.Ingest(ctx, linked)
 	require.NoError(t, err)
-	require.NoError(t, NewDocuments(db).UpdateState(ctx, *linked.DocumentID, store.DocStateDead))
+	require.NoError(t, NewDocuments(db).MarkFailed(ctx, *linked.DocumentID, store.FailureCauseDeadLink))
 	unlinked := &store.Bookmark{TenantID: "local", URL: "https://example.com/b", Source: store.SourceChrome,
 		SavedAt: time.Now().UTC()}
 	require.NoError(t, bms.Create(ctx, unlinked))

@@ -269,17 +269,43 @@ func TestMarkDocFailed_DeadLinkGoesDead(t *testing.T) {
 
 	job := docJob(t, store.JobKindFetch, doc.ID)
 
-	// Dead-link cause → dead.
+	// A dead link → dead, for a dead link.
 	require.NoError(t, markDocFailed(deps)(ctx, job, &fetcher.PermanentError{Err: fetcher.ErrDeadLink}))
 	got, err := deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateDead, got.State)
+	assert.Equal(t, store.FailureCauseDeadLink, got.FailureCause)
 
-	// Any other cause → failed.
+	// Any other error → failed, for what the error says.
 	require.NoError(t, markDocFailed(deps)(ctx, job, errors.New("some other permanent failure")))
 	got, err = deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFailed, got.State)
+	assert.Equal(t, store.FailureCauseOther, got.FailureCause)
+}
+
+// TestMarkDocFailed_IndexJobFailsForIndex: an index job that gave up
+// failed its document for index, whatever its error says: the fetch
+// worked.
+func TestMarkDocFailed_IndexJobFailsForIndex(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	ctx := context.Background()
+
+	doc := &store.Document{TenantID: "local", URL: "https://x/indexed", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+	job := docJob(t, store.JobKindIndex, doc.ID)
+
+	for _, jobErr := range []error{
+		fmt.Errorf("%w: index: %w", ErrPermanent, embedder.ErrInputTooLong),
+		&fetcher.PermanentError{Err: fetcher.ErrDeadLink},
+		errOrphanExhausted,
+	} {
+		require.NoError(t, markDocFailed(deps)(ctx, job, jobErr))
+		got, err := deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DocStateFailed, got.State, jobErr)
+		assert.Equal(t, store.FailureCauseIndex, got.FailureCause, jobErr)
+	}
 }
 
 // TestMarkDocFailed_FinalLoginWallGoesFailed: a page-level login wall that
@@ -298,6 +324,7 @@ func TestMarkDocFailed_FinalLoginWallGoesFailed(t *testing.T) {
 	got, err := deps.Documents.GetByID(ctx, doc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFailed, got.State)
+	assert.Equal(t, store.FailureCauseLoginWall, got.FailureCause)
 }
 
 func TestFetchHandler_BadPayload_Permanent(t *testing.T) {
@@ -449,20 +476,40 @@ func TestWorker_FullFetchIndexChain(t *testing.T) {
 	require.Equal(t, store.DocStateFetched, got.State)
 }
 
+// TestWorker_RefetchClearsTheFailureCause: a document that failed, refetched
+// and now fetched and indexed through the pools, ends fetched with no
+// failure cause.
+func TestWorker_RefetchClearsTheFailureCause(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	ctx := context.Background()
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/back", FailureCause: store.FailureCauseAntiBot}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+
+	_, err := deps.Documents.RequeueFetch(ctx, "local", doc.ID)
+	require.NoError(t, err)
+	runPoolsUntil(t, deps, func(c *assert.CollectT) {
+		got, err := deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(c, err)
+		assert.Equal(c, store.DocStateFetched, got.State)
+		assert.Empty(c, got.FailureCause)
+	})
+}
+
 // TestWorker_PermanentFetchFailureSetsDocState runs the pools end to end:
 // the fetcher returns a permanent failure, the job fails on attempt 1
 // without burning the retry budget, and the fetch pool's permanent-failure
-// hook sets the document's state from the cause. A dead link is dead; a
-// certificate that failed verification is failed, since certificates get
-// fixed.
+// hook records why the document failed, which sets its state. A dead link
+// is dead; a certificate that failed verification is failed, since
+// certificates get fixed.
 func TestWorker_PermanentFetchFailureSetsDocState(t *testing.T) {
 	cases := []struct {
 		name  string
 		cause error
-		want  store.DocState
+		want  store.FailureCause
 	}{
-		{"dead link", fmt.Errorf("native: dead link (HTTP 404): %w", fetcher.ErrDeadLink), store.DocStateDead},
-		{"invalid certificate", fmt.Errorf("native: fetch: %w: x509: certificate has expired", fetcher.ErrTLSCertificate), store.DocStateFailed},
+		{"dead link", fmt.Errorf("native: dead link (HTTP 404): %w", fetcher.ErrDeadLink), store.FailureCauseDeadLink},
+		{"invalid certificate", fmt.Errorf("native: fetch: %w: x509: certificate has expired", fetcher.ErrTLSCertificate),
+			store.FailureCauseTLS},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -482,7 +529,8 @@ func TestWorker_PermanentFetchFailureSetsDocState(t *testing.T) {
 			require.EventuallyWithT(t, func(c *assert.CollectT) {
 				got, err := deps.Documents.GetByID(ctx, doc.ID)
 				require.NoError(c, err)
-				assert.Equal(c, tc.want, got.State)
+				assert.Equal(c, tc.want.State(), got.State)
+				assert.Equal(c, tc.want, got.FailureCause)
 			}, 5*time.Second, 10*time.Millisecond)
 			stop()
 
@@ -509,8 +557,8 @@ func (e refusingEmbedder) Embed(context.Context, []string) ([][]float32, error) 
 // TestWorker_DeterministicEmbedFailureIsPermanent: an index job whose
 // chunk the model refuses as too long, or whose vectors come back at the
 // wrong width, fails on its first attempt instead of repeating the same
-// request, and its document goes failed, not dead. last_error says which
-// chunks and why.
+// request, and its document goes failed for index, not dead. last_error
+// says which chunks and why.
 func TestWorker_DeterministicEmbedFailureIsPermanent(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -551,6 +599,7 @@ func TestWorker_DeterministicEmbedFailureIsPermanent(t *testing.T) {
 			got, err := deps.Documents.GetByID(ctx, doc.ID)
 			require.NoError(t, err)
 			assert.Equal(t, store.DocStateFailed, got.State)
+			assert.Equal(t, store.FailureCauseIndex, got.FailureCause)
 		})
 	}
 }
@@ -558,24 +607,25 @@ func TestWorker_DeterministicEmbedFailureIsPermanent(t *testing.T) {
 // TestWorker_RefetchRejectsJinaJunk refetches a fetched, indexed document
 // through the pools with the real Native fetcher, whose origin now serves a
 // thin page while Jina answers a challenge page or reports the target's 404.
-// The document fails, or goes dead, on the first attempt. It keeps the
-// extraction it had, is never marked fetched again, and leaves search.
+// The document fails as anti-bot, or goes dead, on the first attempt. It
+// keeps the extraction it had, is never marked fetched again, and leaves
+// search.
 func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
 	cases := []struct {
 		name  string
 		reply string
-		want  store.DocState
+		want  store.FailureCause
 	}{
 		{"challenge", "Title: Just a moment...\n\nURL Source: https://example.com/article\n\n" +
 			"Warning: Target URL returned error 403: Forbidden\n" +
 			"Warning: This page maybe requiring CAPTCHA, please make sure you are authorized to access this page.\n\n" +
 			"Markdown Content:\n## Performing security verification\n\n" +
 			"This website uses a security service to protect against malicious bots. " +
-			"This page is displayed while the website verifies you are not a bot.", store.DocStateFailed},
+			"This page is displayed while the website verifies you are not a bot.", store.FailureCauseAntiBot},
 		{"target 404", "Title: Welcome to Python.org\n\nURL Source: https://example.com/article\n\n" +
 			"Warning: Target URL returned error 404: Not Found\n\n" +
 			"Markdown Content:\n" + strings.Repeat("The official home of the Python Programming Language. ", 60),
-			store.DocStateDead},
+			store.FailureCauseDeadLink},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -633,7 +683,8 @@ func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
 			runPoolsUntil(t, deps, func(c *assert.CollectT) {
 				got, err := deps.Documents.GetByID(ctx, doc.ID)
 				require.NoError(c, err)
-				assert.Equal(c, tc.want, got.State)
+				assert.Equal(c, tc.want.State(), got.State)
+				assert.Equal(c, tc.want, got.FailureCause)
 			})
 
 			var (

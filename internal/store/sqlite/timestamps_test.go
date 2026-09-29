@@ -38,7 +38,7 @@ func TestUpdatedAt_SetByEveryUpdate(t *testing.T) {
 
 	newDoc := func(t *testing.T, db *DB, state store.DocState) *store.Document {
 		t.Helper()
-		d := &store.Document{TenantID: "local", URL: "https://example.com/doc", State: state}
+		d := &store.Document{TenantID: "local", URL: "https://example.com/doc", State: state, FailureCause: stateCause(state)}
 		require.NoError(t, NewDocuments(db).Create(ctx, d))
 		return d
 	}
@@ -70,10 +70,17 @@ func TestUpdatedAt_SetByEveryUpdate(t *testing.T) {
 			},
 		},
 		{
-			name: "Documents.UpdateState", table: "documents",
+			name: "Documents.MarkFailed", table: "documents",
 			setup: func(t *testing.T, db *DB) string { return newDoc(t, db, store.DocStatePending).ID },
 			update: func(t *testing.T, db *DB, id string) {
-				require.NoError(t, NewDocuments(db).UpdateState(ctx, id, store.DocStateFetched))
+				require.NoError(t, NewDocuments(db).MarkFailed(ctx, id, store.FailureCauseAntiBot))
+			},
+		},
+		{
+			name: "Documents.MarkFetched", table: "documents",
+			setup: func(t *testing.T, db *DB) string { return newDoc(t, db, store.DocStatePending).ID },
+			update: func(t *testing.T, db *DB, id string) {
+				require.NoError(t, NewDocuments(db).MarkFetched(ctx, id))
 			},
 		},
 		{
@@ -252,7 +259,7 @@ func TestUpdates_WriteOneRow(t *testing.T) {
 		return n
 	}
 	before := totalChanges()
-	require.NoError(t, docs.UpdateState(ctx, d.ID, store.DocStateFetched))
+	require.NoError(t, docs.MarkFetched(ctx, d.ID))
 	assert.Equal(t, 1, totalChanges()-before)
 
 	var triggers int

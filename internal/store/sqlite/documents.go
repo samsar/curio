@@ -34,19 +34,23 @@ func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 	if d.CurrentExtractionID != nil {
 		return errors.New("documents: a new document has no current extraction")
 	}
+	state, err := newDocumentState(d.State, d.FailureCause)
+	if err != nil {
+		return err
+	}
 	doc := *d
 	if doc.ID == "" {
 		doc.ID = uuid.NewString()
 	}
-	doc.State = cmp.Or(doc.State, store.DocStatePending)
+	doc.State = state
 	doc.ContentType = cmp.Or(doc.ContentType, store.ContentTypeUnknown)
 
 	var createdAt, updatedAt string
-	err := s.db.QueryRowContext(ctx, `
+	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO documents (
 			id, tenant_id, url, url_canonical, content_type, title, author,
-			published_at, language, word_count, state
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			published_at, language, word_count, state, failure_cause
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING created_at, updated_at`,
 		doc.ID, doc.TenantID, doc.URL,
 		strPtr(doc.URLCanonical),
@@ -56,6 +60,7 @@ func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 		strPtr(doc.Language),
 		intPtr(doc.WordCount),
 		doc.State,
+		store.NullableString(string(doc.FailureCause)),
 	).Scan(&createdAt, &updatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -73,11 +78,33 @@ func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 	return nil
 }
 
+// newDocumentState is the state Create inserts a document in, given the
+// state and failure cause it was asked for: a cause must be valid and go
+// with the state (store.FailureCause.State), which it fills in when empty,
+// and a failed or dead document must have one.
+func newDocumentState(state store.DocState, cause store.FailureCause) (store.DocState, error) {
+	if cause == "" {
+		state = cmp.Or(state, store.DocStatePending)
+		if state == store.DocStateFailed || state == store.DocStateDead {
+			return "", fmt.Errorf("documents: a %s document needs a failure cause", state)
+		}
+		return state, nil
+	}
+	if !cause.Valid() {
+		return "", fmt.Errorf("documents: unknown failure cause %q", cause)
+	}
+	if state != "" && state != cause.State() {
+		return "", fmt.Errorf("documents: a %s document can't have failure cause %s", state, cause)
+	}
+	return cause.State(), nil
+}
+
 func (s *Documents) ApplyFetch(ctx context.Context, id string, m store.FetchedMetadata) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE documents SET
 			content_type = ?, url_canonical = ?, title = ?, author = ?, language = ?,
-			published_at = ?, current_extraction_id = ?, state = ?, updated_at = `+sqlNow+`
+			published_at = ?, current_extraction_id = ?, state = ?, failure_cause = NULL,
+			updated_at = `+sqlNow+`
 		WHERE id = ?`,
 		m.ContentType, strPtr(m.URLCanonical), strPtr(m.Title), strPtr(m.Author), strPtr(m.Language),
 		timePtr(m.PublishedAt), m.ExtractionID, store.DocStatePending,
@@ -102,7 +129,7 @@ func (s *Documents) GetByURL(ctx context.Context, tenantID, url string) (*store.
 
 // documentColumns is the column list scanDocument expects, in order.
 const documentColumns = `id, tenant_id, url, url_canonical, content_type, title, author,
-	published_at, language, word_count, current_extraction_id, state,
+	published_at, language, word_count, current_extraction_id, state, failure_cause,
 	created_at, updated_at`
 
 func (s *Documents) queryOne(ctx context.Context, where string, args ...any) (*store.Document, error) {
@@ -116,7 +143,7 @@ func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Doc
 	var (
 		d                                            store.Document
 		urlCanonical, title, author, language, curEx sql.NullString
-		publishedAt                                  sql.NullString
+		publishedAt, failureCause                    sql.NullString
 		wordCount                                    sql.NullInt64
 		createdAt, updatedAt                         string
 	)
@@ -125,7 +152,7 @@ func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Doc
 		&urlCanonical, &d.ContentType,
 		&title, &author,
 		&publishedAt, &language,
-		&wordCount, &curEx, &d.State,
+		&wordCount, &curEx, &d.State, &failureCause,
 		&createdAt, &updatedAt,
 	}, extra)...)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -140,6 +167,7 @@ func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Doc
 	d.Language = nullableString(language)
 	d.CurrentExtractionID = nullableString(curEx)
 	d.WordCount = nullableInt(wordCount)
+	d.FailureCause = store.FailureCause(failureCause.String)
 	if publishedAt.Valid {
 		pt, err := parseTime(publishedAt.String)
 		if err != nil {
@@ -156,11 +184,28 @@ func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Doc
 	return &d, nil
 }
 
-func (s *Documents) UpdateState(ctx context.Context, id string, state store.DocState) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE documents SET state = ?, updated_at = `+sqlNow+` WHERE id = ?`, state, id)
+// markFailedSQL and markFetchedSQL write a document's state and failure
+// cause together, so no write can leave the one without the other.
+const (
+	markFailedSQL  = `UPDATE documents SET state = ?, failure_cause = ?, updated_at = ` + sqlNow + ` WHERE id = ?`
+	markFetchedSQL = `UPDATE documents SET state = ?, failure_cause = NULL, updated_at = ` + sqlNow + ` WHERE id = ?`
+)
+
+func (s *Documents) MarkFailed(ctx context.Context, id string, cause store.FailureCause) error {
+	if !cause.Valid() {
+		return fmt.Errorf("mark document %s failed: unknown failure cause %q", id, cause)
+	}
+	res, err := s.db.ExecContext(ctx, markFailedSQL, cause.State(), cause, id)
 	if err != nil {
-		return fmt.Errorf("update document state: %w", err)
+		return fmt.Errorf("mark document %s failed: %w", id, err)
+	}
+	return ensureRow(res, "document")
+}
+
+func (s *Documents) MarkFetched(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, markFetchedSQL, store.DocStateFetched, id)
+	if err != nil {
+		return fmt.Errorf("mark document %s fetched: %w", id, err)
 	}
 	return ensureRow(res, "document")
 }
@@ -349,7 +394,8 @@ func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID strin
 	defer tx.Rollback()
 
 	res, err := tx.ExecContext(ctx,
-		`UPDATE documents SET state = ?, updated_at = `+sqlNow+` WHERE tenant_id = ? AND id = ?`,
+		`UPDATE documents SET state = ?, failure_cause = NULL, updated_at = `+sqlNow+`
+		WHERE tenant_id = ? AND id = ?`,
 		store.DocStatePending, tenantID, documentID)
 	if err != nil {
 		return nil, fmt.Errorf("reset document state: %w", err)
@@ -418,11 +464,11 @@ func (s *Documents) RequeueFetchByStates(ctx context.Context, tenantID string, s
 }
 
 // resetStatesSQL sets the tenant's documents in nStates states to pending,
-// returning their IDs. Its args are the new state, the tenant, then the
-// states.
+// clearing their failure causes, returning their IDs. Its args are the new
+// state, the tenant, then the states.
 func resetStatesSQL(nStates int) string {
 	return `
-	UPDATE documents SET state = ?, updated_at = ` + sqlNow + `
+	UPDATE documents SET state = ?, failure_cause = NULL, updated_at = ` + sqlNow + `
 	WHERE tenant_id = ? AND state IN (` + placeholders(nStates) + `)
 	RETURNING id`
 }

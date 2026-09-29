@@ -243,8 +243,9 @@ func TestWorker_PanicIsContained(t *testing.T) {
 }
 
 // TestWorker_RecoverOrphans: an orphan with no attempts left fails and its
-// document fails with it; other orphans of the worker's kinds are requeued
-// with their attempt kept; other kinds are untouched.
+// document fails with it, for other: nothing says what the site did; other
+// orphans of the worker's kinds are requeued with their attempt kept;
+// other kinds are untouched.
 func TestWorker_RecoverOrphans(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	ctx := context.Background()
@@ -276,6 +277,7 @@ func TestWorker_RecoverOrphans(t *testing.T) {
 	gotDoc, err := deps.Documents.GetByID(ctx, exhaustedDoc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFailed, gotDoc.State)
+	assert.Equal(t, store.FailureCauseOther, gotDoc.FailureCause)
 
 	gotRetry := getJob(t, deps.Queue, retry.ID)
 	assert.Equal(t, store.JobStatusPending, gotRetry.Status)
@@ -324,6 +326,31 @@ func TestWorker_RecoverOrphans_HooksOutliveShutdown(t *testing.T) {
 	got, err := deps.Documents.GetByID(context.Background(), doc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFailed, got.State)
+	assert.Equal(t, store.FailureCauseOther, got.FailureCause)
+}
+
+// TestWorker_RecoverOrphans_IndexOrphanFailsForIndex: an index job that
+// took the daemon down until its attempts ran out fails its document for
+// index: its fetch had worked.
+func TestWorker_RecoverOrphans_IndexOrphanFailsForIndex(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	ctx := context.Background()
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/crashes-the-index",
+		ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+	orphan := docJob(t, store.JobKindIndex, doc.ID)
+	orphan.Status, orphan.Attempts = store.JobStatusRunning, 5
+	require.NoError(t, deps.Queue.Enqueue(ctx, orphan))
+
+	w := NewWorker(deps.Queue, WorkerOptions{Log: quietLog})
+	w.Register(store.JobKindIndex, indexHandler(deps))
+	w.OnPermanentFailure(store.JobKindIndex, markDocFailed(deps))
+	require.NoError(t, w.RecoverOrphans(ctx))
+
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateFailed, got.State)
+	assert.Equal(t, store.FailureCauseIndex, got.FailureCause)
 }
 
 func TestBackoff(t *testing.T) {
