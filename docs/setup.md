@@ -737,8 +737,8 @@ so the next burst doesn't trip it again. Documents that failed at once
 record the cause `jina_refused`, which `curio docs --failed` shows, and
 `curio refetch --all --cause=jina_refused` retries them all at once,
 which suits a site with only a few. When the site itself answered 403 or
-503, all its documents record `anti_bot`, the first included, whose retry
-fails from the host cache: `--cause=anti_bot` reaches them,
+503, all its documents normally record `anti_bot`, the first included,
+whose retry fails from the host cache: `--cause=anti_bot` reaches them,
 `--cause=jina_refused` doesn't. **`jina: refused the target:
 HTTP 451 Unavailable For Legal Reasons: This domain is excluded from Jina
 Reader at the request of its owner, …`** is permanent: the site's owner

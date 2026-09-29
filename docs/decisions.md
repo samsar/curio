@@ -5460,11 +5460,11 @@ origin failure (a thin, login or challenge page, an unreadable PDF) fails
 for good on that attempt and records the cause `jina_refused`, so
 `curio refetch --all --cause=jina_refused` retries those once the block
 lifts. Behind a host-wide origin verdict the refusal isn't the
-document's last word: its retry fails from the host cache, so it records
-the cached verdict, `anti_bot` for an origin 403 or 503 (the first
-document of the site included), `login_wall` for a redirect onto the
-site's own login page, and `--cause=anti_bot` is what reaches it. See
-"Failure causes: recorded when a document fails".
+document's last word: its retry normally fails from the host cache, so
+it records the cached verdict, `anti_bot` for an origin 403 or 503 (the
+first document of the site included), `login_wall` for a redirect onto
+the site's own login page, and `--cause=anti_bot` is what reaches it.
+See "Failure causes: recorded when a document fails".
 
 ---
 
@@ -7141,9 +7141,9 @@ and the cause is stored with the state.
 | Cause | Means | Documents |
 |---|---|---|
 | `dead_link` | The content is gone: a 404 or 410, a soft 404, a redirect onto a homepage or another site's landing page. The one cause of a `dead` document. | 819 |
-| `anti_bot` | The site blocked the request: a 403 or 503, whatever Jina then said; a challenge or block page. | 926 |
+| `anti_bot` | The site blocked the request: a 403 or 503, a challenge or block page. What Jina found after it can make it another cause (below). | 926 |
 | `login_wall` | A login page, a redirect onto one, or too little text to be the article. | 188 |
-| `jina_refused` | The site served a page curio can't use, and the Jina fallback refused the target: a domain block, a publisher's opt-out, a deterministic 4xx. | 185 |
+| `jina_refused` | The Jina fallback refused the target (a domain block, a publisher's opt-out, a deterministic 4xx), normally after the site served a page curio can't use (below). | 185 |
 | `tls` | The site's certificate failed verification. | 43 |
 | `unreachable` | The host doesn't resolve, or refuses connections. | 244 |
 | `timeout` | The site, or the tool fetching it, took too long. | 130 |
@@ -7179,20 +7179,45 @@ and the cause is stored with the state.
    (`http_error`), a deadline or network timeout, any other transport
    failure (`network`), and `other`.
 
-A host-cache hit is classified by the verdict it cached, and a host-wide
-verdict decides the cause of all its site's documents, the first
-included. When the site answered 403 or 503, or redirected onto its own
-login page, `settle` caches the origin's verdict and leaves the fallback's
-failure retryable whatever Jina said, so the document's next attempt
-fails from the cache and records `anti_bot` (`login_wall`). Jina's
-verdict is a document's last word only behind a verdict about one page (a
-thin, login or challenge page, a PDF curio can't read), which fails it
-for good at once. On the author's library all 185 `jina_refused`
-documents came after a login-wall or thin page, none after a 403 or 503,
-and the 33 whose cached verdict quotes Jina's `AbuseAlleviationError` are
-`anti_bot`. So `--cause=jina_refused` reaches the pages Jina would have
-read but for its refusal; a site that refused curio outright is under
-`--cause=anti_bot`, whatever Jina said about it.
+A host-cache hit is classified by the verdict it cached. A document
+records the error its last attempt ended with, so what it records after a
+host-wide origin verdict (the site answered 403 or 503, or redirected
+onto its own login page) depends on what Jina then did: `Native.Fetch`
+caches the origin's verdict (`settle`) only when Jina gave one of its own
+about the target.
+
+- Jina refused the target, or answered with something that isn't the
+  page: the origin's verdict is cached and the failure stays retryable,
+  so the retry fails from the cache and the document records `anti_bot`
+  (`login_wall`), the site's first document included. Normally: the
+  cache lives 15 minutes, in memory, so when a daemon restart or a paused
+  queue lets it lapse before a document's last attempt, that attempt asks
+  the origin and Jina again and records Jina's verdict, `jina_refused`
+  for a refusal.
+- Jina's own trouble caches nothing and is retried, but the origin speaks
+  for the target, so the document records `anti_bot` (`login_wall`) once
+  its attempts run out.
+- Jina found the target's 404 or 410 or a not-found page (dead-link
+  detection on), or answered over the body cap: the document fails at
+  once, `dead_link` or `too_large`, and nothing is cached.
+- Jina reported a status the target has for now (a 429, a 5xx other than
+  503, a 404 or 410 with dead-link detection off): retried without
+  caching, so the document records `rate_limited` or `http_error` when
+  its last attempt ends that way.
+
+Behind a verdict about one page (a thin, login or challenge page, a PDF
+curio can't read), nothing is cached and Jina's refusal, or an answer
+that isn't the page, fails the document for good at once under Jina's
+verdict; the other outcomes go as above, with the origin's page-level
+cause where the origin speaks. On the author's library all 185
+`jina_refused` documents came after a login-wall or thin page, none after
+a 403 or 503, and the 33 whose cached verdict quotes Jina's
+`AbuseAlleviationError` are `anti_bot`. Of the documents whose own
+fallback followed the origin's 403, 33 are `dead_link` (Jina found the
+target's 404 or 410, or a not-found page) and 1 is `http_error` (the
+target's 500, reported by Jina). So `--cause=anti_bot` reaches a site
+that blocked curio, and `--cause=jina_refused` the pages Jina would have
+read but for its refusal.
 
 `fetcher.ErrUnsupported` is new, wrapped where a YouTube URL names no
 video, a GitHub URL isn't one the GitHub fetcher reads, and a response is
