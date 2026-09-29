@@ -935,7 +935,7 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .cause .bar { grid-column: 2 / -1; }
 
 .bars { list-style: none; padding: 0; display: grid; gap: var(--s3); }
-.bars li { display: grid; grid-template-columns: minmax(0, 9rem) minmax(0, 1fr) 3.5rem; align-items: center; gap: var(--s3); font-size: var(--fs-sm); }
+.bars li { display: grid; grid-template-columns: minmax(0, 12rem) minmax(0, 1fr) 3.5rem; align-items: center; gap: var(--s3); font-size: var(--fs-sm); }
 .bars .label { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bars a.label:hover { color: var(--accent-text); text-decoration: none; }
 .bars .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); font-weight: 560; }

@@ -242,9 +242,8 @@ eval harness shows measurably better retrieval than the v1 baseline.
   decisions.md "Dashboard: search is home, the Overview becomes Status").
   Phase 2 adds actions (refetch, reindex, rebuild, a failures view
   grouped by cause, queue controls, live progress); what its views read
-  has shipped: every
-  failed document's cause (`GET /v1/failures`, `?cause=` filters,
-  `curio refetch --all --cause`) and a document's jobs
+  has shipped: every failed document's cause (`GET /v1/failures`,
+  `?cause=` filters, `curio refetch --all --cause`) and a document's jobs
   (`GET /v1/jobs?document_id=`). Phase 3 brings richer views (an
   interest map, suspect pages, HTML export upload, live updates). See
   `docs/ui.md` and decisions.md "Dashboard: server-rendered pages in the

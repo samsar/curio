@@ -485,15 +485,20 @@ func (c countingStates) CountByState(ctx context.Context, tenantID string) (map[
 }
 
 // countingRuns counts the reads of the latest clustering run, which the
-// interests read makes.
+// interests read makes, and of any interest's members.
 type countingRuns struct {
 	store.InsightStore
-	calls *atomic.Int32
+	calls, members *atomic.Int32
 }
 
 func (c countingRuns) LatestRun(ctx context.Context, tenantID string, status store.ClusterRunStatus) (*store.ClusterRun, error) {
 	c.calls.Add(1)
 	return c.InsightStore.LatestRun(ctx, tenantID, status)
+}
+
+func (c countingRuns) ClusterMembers(ctx context.Context, clusterID string, limit int) ([]store.ClusterMember, error) {
+	c.members.Add(1)
+	return c.InsightStore.ClusterMembers(ctx, clusterID, limit)
 }
 
 // failingRuns fails the latest clustering run's read.
@@ -509,11 +514,12 @@ func (failingRuns) LatestRun(context.Context, string, store.ClusterRunStatus) (*
 // the interests, run once each without one, and neither runs for a type
 // the page refuses.
 func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
-	states, runs := new(atomic.Int32), new(atomic.Int32)
+	states, runs, members := new(atomic.Int32), new(atomic.Int32), new(atomic.Int32)
 	srv := apitest.Start(t, func(d *api.Deps) {
 		d.Documents = countingStates{d.Documents, states}
-		d.Insights = countingRuns{d.Insights, runs}
+		d.Insights = countingRuns{d.Insights, runs, members}
 	})
+	srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/kafka", store.DocStateFetched))
 	for _, tc := range []struct {
 		path   string
 		header http.Header
@@ -535,6 +541,7 @@ func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
 		require.Equal(t, tc.status, p.status, tc.path)
 		assert.Equal(t, tc.reads, states.Load(), "%s: the documents by state", tc.path)
 		assert.Equal(t, tc.reads, runs.Load(), "%s: the latest run", tc.path)
+		assert.Zero(t, members.Load(), "%s: the landing names interests, never reads their members", tc.path)
 	}
 }
 
