@@ -729,12 +729,11 @@ func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
 	}
 }
 
-// TestWorker_SiteBlockIsAntiBotWhateverJinaSays: a site that answers 403
-// fails even its first document for anti_bot when Jina refuses the target
-// too. The origin's verdict is host-wide, so it is cached and the refusal
+// TestWorker_SiteBlockJinaRefusesIsAntiBot: a site that answers 403 fails
+// even its first document for anti_bot when Jina refuses the target too. The origin's verdict is host-wide, so it is cached and the refusal
 // stays retryable; the retry fails from the host cache, without a request,
 // and the document records the cached verdict, not Jina's.
-func TestWorker_SiteBlockIsAntiBotWhateverJinaSays(t *testing.T) {
+func TestWorker_SiteBlockJinaRefusesIsAntiBot(t *testing.T) {
 	deps, db, _ := newTestDeps(t)
 	ctx := context.Background()
 	var originHits, jinaHits atomic.Int32
