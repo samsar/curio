@@ -62,6 +62,19 @@ func redirectToDashboard(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/ui/", http.StatusFound)
 }
 
+// redirectToSearch answers GET /ui/search, the search page's address before
+// search became the home, with the home and the same query, so that links
+// and bookmarks to it keep working. The query passes through as sent,
+// whatever parameters it holds; the path is fixed, so the answer never
+// leads off the daemon.
+func redirectToSearch(w http.ResponseWriter, r *http.Request) {
+	target := "/ui/"
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, target, http.StatusFound) //nolint:gosec // G710: the path is fixed; only the query is the request's
+}
+
 // failureCurrent reports whether a document in state is failing now, and
 // so whether a page shows its last error and cause: a refetch that
 // recovered from an older failure leaves that job's error behind.
@@ -86,8 +99,9 @@ func (h pageHandlers) routes(r chi.Router) {
 	r.Get("/", redirectToDashboard)
 	r.Route("/ui", func(r chi.Router) {
 		r.NotFound(h.notFound)
-		r.Get("/", h.overview)
-		r.Get("/search", h.search)
+		r.Get("/", h.search)
+		r.Get("/search", redirectToSearch)
+		r.Get("/status", h.status)
 		r.Get("/library", h.library)
 		r.Get("/documents/{id}", h.document)
 		r.Get("/interests", h.interests)
@@ -123,7 +137,7 @@ func (h pageHandlers) writePageError(w http.ResponseWriter, r *http.Request, err
 // a 404 page naming it when there is none, writePageError's otherwise.
 func (h pageHandlers) lookupError(w http.ResponseWriter, r *http.Request, kind, id string, err error) {
 	if errors.Is(err, store.ErrNotFound) {
-		h.errorPage(w, r, http.StatusNotFound, "not found", fmt.Sprintf("%s %q not found", kind, id), ui.NavOverview)
+		h.errorPage(w, r, http.StatusNotFound, "not found", fmt.Sprintf("%s %q not found", kind, id), ui.NavSearch)
 		return
 	}
 	h.writePageError(w, r, err, ui.NavNone)
@@ -131,7 +145,7 @@ func (h pageHandlers) lookupError(w http.ResponseWriter, r *http.Request, kind, 
 
 // notFound answers a path under /ui/ that no page has.
 func (h pageHandlers) notFound(w http.ResponseWriter, r *http.Request) {
-	h.errorPage(w, r, http.StatusNotFound, "not found", "no page at "+routingPath(r), ui.NavOverview)
+	h.errorPage(w, r, http.StatusNotFound, "not found", "no page at "+routingPath(r), ui.NavSearch)
 }
 
 // errorPage answers the error page. Should it fail to render too, nothing
@@ -157,6 +171,13 @@ func (h pageHandlers) panelError(r *http.Request, err error) *ui.PanelError {
 	return p
 }
 
+// quietError reports a failed read the page does without, logged as
+// writeError logs it: the page leaves out what the read was for, rather
+// than showing a panel's error where nothing would have shown.
+func (h pageHandlers) quietError(r *http.Request, err error) {
+	h.d.reportError(r, err)
+}
+
 // reportPanel is panelError for a read whose failure is the page's answer,
 // a search's: it also returns the status to answer with, reportError's,
 // which is a 499 when the client has gone.
@@ -170,4 +191,12 @@ func (h pageHandlers) asset(w http.ResponseWriter, r *http.Request) {
 	if !h.pages.render.ServeAsset(w, chi.URLParam(r, "file")) {
 		h.notFound(w, r)
 	}
+}
+
+// deref is *s, or "" for nil: an optional field as a page shows it.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

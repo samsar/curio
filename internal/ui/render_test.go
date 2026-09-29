@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui/uitest"
 )
 
@@ -53,9 +55,14 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 	interest := Interest{ID: evilAttr, Label: evilScript, Summary: evilQuotes, Size: 7, Cohesion: 0.7,
 		Members: []Member{member, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes}}}
 
+	upstream := func(name, state string, enabled bool) Upstream {
+		return Upstream{Name: name, Enabled: enabled, State: state, LastSuccess: at, LastFailure: at,
+			LastFailureClass: evilQuotes, CooldownUntil: at, Window: 15 * time.Minute, Calls: 20, Failed: 6}
+	}
+
 	return map[string]any{
-		PageOverview: Overview{
-			Layout: layout(NavOverview),
+		PageStatus: Status{
+			Layout: layout(NavStatus),
 			Counts: CountsPanel{Documents: 3, Bookmarks: 4,
 				ByState: []Count{{Name: evilAttr, Count: 1}, {Name: "fetched", Count: 2}},
 				Jobs:    []Count{{Name: evilScript, Count: 5}}},
@@ -68,18 +75,16 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 				EmbeddingDim: 1024, GenerationModel: evilScript, YouTubeFetcher: evilAttr,
 				Drift: &Drift{Changes: []DriftChange{{What: evilScript, Recorded: evilAttr, Current: evilURL}},
 					Fix: evilQuotes},
-				Upstreams: []Upstream{{Name: evilScript, Enabled: true, State: evilAttr, LastSuccess: at,
-					LastFailure: at, LastFailureClass: evilQuotes, CooldownUntil: at}}},
-			Recent: RecentPanel{Bookmarks: []RecentBookmark{
-				{Title: evilScript, URL: evilURL, Source: evilAttr, SavedAt: at, DocumentID: evilAttr, DocumentState: evilQuotes},
-				{URL: evilURL, Source: "chrome", SavedAt: at},
-				{URL: "https://example.com/" + evilQuotes, Source: "safari", SavedAt: at, DocumentID: "doc",
-					DocumentState: "fetched"},
-			}},
+				Upstreams: []Upstream{upstream(evilScript, "failing", true), upstream("jina", "degraded", true),
+					upstream(evilAttr, "paused", true), upstream("jina", "failing", false),
+					upstream(evilQuotes, evilAttr, true), {Name: "jina", Enabled: true, State: "failing"}}},
+			Failures: FailuresPanel{Total: 17, Causes: []Count{{Name: evilScript, Count: 9},
+				{Name: string(store.FailureCauseAntiBot), Count: 5}, {Name: string(store.FailureCauseDeadLink), Count: 3}}},
 		},
 		PageSearch: Search{
 			Layout: layout(NavSearch),
 			Query:  evilAttr,
+			Type:   evilAttr,
 			Err:    panelErr,
 			Results: &SearchResults{Degraded: true, Warnings: []string{evilScript}, TookMS: 12, Hits: []SearchHit{{
 				DocumentID: evilAttr, Title: evilScript, URL: evilURL, ContentType: evilAttr, Score: 0.03,
@@ -95,6 +100,8 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			Layout: layout(NavLibrary),
 			Filters: LibraryFilters{State: evilAttr, ContentType: evilScript, Host: evilQuotes, Folder: evilURL,
 				Cause: evilScript, Limit: 7},
+			Counts: &LibraryCounts{Documents: 3, Bookmarks: 4, ByState: map[string]int{evilAttr: 1}},
+			Shown:  50,
 			Rows: []LibraryRow{
 				{DocumentID: evilAttr, Title: evilScript, URL: evilURL, State: evilQuotes, ContentType: evilAttr,
 					UpdatedAt: at, LastError: evilScript, FailureCause: evilAttr},
@@ -131,6 +138,58 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 	}
 }
 
+// sampleVariants are more samples of the pages with branches their sample
+// can't take: the search home, with interests and without, Status with
+// every panel failed, and the Library with counts for its tabs and without
+// counts.
+func sampleVariants(t testing.TB) map[string][]any {
+	t.Helper()
+	at := time.Date(2026, 9, 28, 9, 30, 0, 0, time.UTC)
+	layout := func(nav Nav) Layout {
+		return Layout{Title: evilScript, Nav: nav, Version: evilQuotes, Listen: sampleListen}
+	}
+	panelErr := &PanelError{Message: evilScript, RequestID: evilAttr}
+	row := LibraryRow{DocumentID: evilAttr, Title: evilScript, URL: evilURL, State: evilQuotes, ContentType: evilAttr,
+		UpdatedAt: at}
+	counts := &LibraryCounts{Documents: 7467, Bookmarks: 7497, ByState: map[string]int{"fetched": 4498, evilAttr: 2}}
+	return map[string][]any{
+		PageSearch: {
+			Search{Layout: layout(NavSearch), Type: "pdf", Home: &SearchHome{Searchable: 4498, AllInterests: 222,
+				Interests: []Interest{
+					{ID: evilAttr, Label: evilScript, Size: 90},
+					{ID: "long", Label: strings.Repeat("W", 200), Size: 80},
+					{ID: "unlabeled", Size: 70},
+					{ID: "cut", Label: "Mobile Ecosystems and " + evilScript, Size: 60},
+					{ID: "whole", Label: evilQuotes + " and " + evilAttr, Size: 50},
+				}}},
+			Search{Layout: layout(NavSearch), Query: " ", Home: &SearchHome{}},
+		},
+		PageStatus: {Status{Layout: layout(NavStatus), Counts: CountsPanel{Err: panelErr},
+			Queue: QueuePanel{Err: panelErr}, Progress: ProgressPanel{Err: panelErr}, Health: HealthPanel{Err: panelErr},
+			Failures: FailuresPanel{Err: panelErr}}},
+		PageLibrary: {
+			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{State: evilAttr, Limit: 7}, Counts: counts,
+				Rows: []LibraryRow{row}, NextCursor: evilScript, PageSize: 7, Shown: 3},
+			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{State: "fetched"}, Counts: counts,
+				Rows: []LibraryRow{row}, PageSize: 50},
+			Library{Layout: layout(NavLibrary), Rows: []LibraryRow{row}, NextCursor: evilAttr, PageSize: 50},
+		},
+	}
+}
+
+// allSamples are every page's samples: its sample, then its variants.
+func allSamples(t testing.TB, r *Renderer) map[string][]any {
+	t.Helper()
+	all := map[string][]any{}
+	for page, sample := range samples(t, r) {
+		all[page] = []any{sample}
+	}
+	for page, variants := range sampleVariants(t) {
+		all[page] = append(all[page], variants...)
+	}
+	return all
+}
+
 // sampleListen is the samples' daemon address.
 const sampleListen = "127.0.0.1:8765"
 
@@ -159,9 +218,12 @@ func partialSamples(t testing.TB) map[string][]any {
 		"state-badge": {evilScript, "dead"},
 		"stackbar": {stateBar([]Count{{Name: "fetched", Count: 2}, {Name: "failed", Count: 1}}),
 			[]BarSegment{{Class: evilAttr, X: evilScript, Width: evilQuotes}}},
-		"full-error": {evilScript, ""},
-		"match":      {Match{Segments: Highlight(evilScript + " <em>" + evilAttr + "</em>"), BM25: new(1.5)}},
-		"cohesion":   {0.5},
+		"hbar": {causeBar("dead_link", 819, 926), []BarSegment(nil),
+			[]BarSegment{{Class: evilAttr, X: evilScript, Width: evilQuotes}}},
+		"upstream-failure": {Upstream{Name: evilScript, LastFailure: at, LastFailureClass: evilScript}, Upstream{}},
+		"full-error":       {evilScript, ""},
+		"match":            {Match{Segments: Highlight(evilScript + " <em>" + evilAttr + "</em>"), BM25: new(1.5)}},
+		"cohesion":         {0.5},
 	}
 }
 
@@ -171,9 +233,9 @@ func partialSamples(t testing.TB) map[string][]any {
 // without a sample fails: a new one needs one here.
 func TestEveryTemplateRenders(t *testing.T) {
 	r := newRenderer(t)
-	pageSamples := samples(t, r)
+	pageSamples := allSamples(t, r)
 	partials := partialSamples(t)
-	require.ElementsMatch(t, pageNames, keys(pageSamples), "a sample for every page")
+	require.ElementsMatch(t, pageNames, keys(samples(t, r)), "a sample for every page")
 	for _, page := range pageNames {
 		set := r.pages[page]
 		for _, tmpl := range set.Templates() {
@@ -181,7 +243,7 @@ func TestEveryTemplateRenders(t *testing.T) {
 			t.Run(page+"/"+name, func(t *testing.T) {
 				data, ok := partials[name]
 				if !ok && pageTemplate(page, name) {
-					data, ok = []any{pageSamples[page]}, true
+					data, ok = pageSamples[page], true
 				}
 				require.True(t, ok, "template %q of the %s page has no sample", name, page)
 				for _, d := range data {
@@ -221,8 +283,8 @@ func keys(m map[string]any) []string {
 func TestPage_WritesNothingOnFailure(t *testing.T) {
 	r := newRenderer(t)
 	w := httptest.NewRecorder()
-	// The overview's template reads fields a Search doesn't have.
-	err := r.Page(w, http.StatusOK, PageOverview, Search{Layout: Layout{Title: "t"}}, CSP)
+	// Status's template reads fields a Search doesn't have.
+	err := r.Page(w, http.StatusOK, PageStatus, Search{Layout: Layout{Title: "t"}}, CSP)
 	require.Error(t, err)
 	assert.False(t, w.Flushed)
 	assert.Zero(t, w.Body.Len(), "nothing written")
@@ -250,14 +312,20 @@ func TestPage_Headers(t *testing.T) {
 // the stylesheet, which themes for dark mode.
 func TestPages_Layout(t *testing.T) {
 	r := newRenderer(t)
-	for page, data := range samples(t, r) {
+	for page, data := range eachSample(t, r) {
 		out := render(t, r, page, data)
 		assert.Contains(t, out, `<meta name="viewport" content="width=device-width, initial-scale=1">`, page)
 		assert.Contains(t, out, `<a class="skip-link" href="#main">Skip to content</a>`, page)
 		assert.Contains(t, out, `<main id="main" class="page">`, page)
 		assert.Contains(t, out, `<nav aria-label="Main">`, page)
-		headerSearch := strings.Contains(out, `<form class="header-search" action="/ui/search" method="get" role="search">`)
-		assert.Equal(t, page != PageSearch && page != PageStarting, headerSearch, "%s: the header's search box", page)
+		assert.Contains(t, out, `<a class="brand" href="/ui/" aria-label="curio: search">`, page)
+		const headerSearch = `<form class="header-search" action="/ui/" method="get" role="search">`
+		if page != PageSearch && page != PageStarting {
+			assert.Equal(t, 1, strings.Count(out, headerSearch), "%s: the header's search box", page)
+			assert.Equal(t, 1, strings.Count(out, ` name="q"`), "%s: the header's search box sends only q", page)
+		} else {
+			assert.NotContains(t, out, `class="header-search"`, page)
+		}
 		assert.Contains(t, out, `<footer class="site"><div class="container"><span>curio-daemon &#39;&#34;&lt;&gt;&amp;</span>`+
 			`<span>`+sampleListen+` · this Mac only</span></div></footer>`, page)
 	}
@@ -279,7 +347,7 @@ func TestPages_Layout(t *testing.T) {
 func TestPages_Navigation(t *testing.T) {
 	r := newRenderer(t)
 	navRE := regexp.MustCompile(`<a href="([^"]+)"( aria-current="page")?><svg class="icon"`)
-	for page, data := range samples(t, r) {
+	for page, data := range eachSample(t, r) {
 		var hrefs, current []string
 		for _, m := range navRE.FindAllStringSubmatch(render(t, r, page, data), -1) {
 			hrefs = append(hrefs, m[1])
@@ -287,18 +355,33 @@ func TestPages_Navigation(t *testing.T) {
 				current = append(current, m[1])
 			}
 		}
-		assert.Equal(t, []string{"/ui/", "/ui/search", "/ui/library", "/ui/interests"}, hrefs, page)
+		assert.Equal(t, []string{"/ui/", "/ui/library", "/ui/interests", "/ui/status"}, hrefs, page)
 		switch page {
-		case PageOverview:
-			assert.Equal(t, []string{"/ui/"}, current, page)
 		case PageSearch:
-			assert.Equal(t, []string{"/ui/search"}, current, page)
+			assert.Equal(t, []string{"/ui/"}, current, page)
+		case PageStatus:
+			assert.Equal(t, []string{"/ui/status"}, current, page)
 		case PageLibrary, PageDocument:
 			assert.Equal(t, []string{"/ui/library"}, current, page)
 		case PageInterests, PageInterest:
 			assert.Equal(t, []string{"/ui/interests"}, current, page)
 		default:
 			assert.Empty(t, current, page)
+		}
+	}
+}
+
+// eachSample yields every sample of every page, variants included.
+func eachSample(t *testing.T, r *Renderer) iter.Seq2[string, any] {
+	t.Helper()
+	all := allSamples(t, r)
+	return func(yield func(string, any) bool) {
+		for page, samples := range all {
+			for _, data := range samples {
+				if !yield(page, data) {
+					return
+				}
+			}
 		}
 	}
 }
@@ -319,7 +402,7 @@ var assetRefRE = regexp.MustCompile(`(?:href|src)="(/ui/static/[^"]+)"`)
 func TestAssets(t *testing.T) {
 	r := newRenderer(t)
 	var refs []string
-	for page, data := range samples(t, r) {
+	for page, data := range eachSample(t, r) {
 		for _, m := range assetRefRE.FindAllStringSubmatch(render(t, r, page, data), -1) {
 			if !slices.Contains(refs, m[1]) {
 				refs = append(refs, m[1])

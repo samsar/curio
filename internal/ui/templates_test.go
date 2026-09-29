@@ -186,7 +186,7 @@ func TestHTMXIsPinned(t *testing.T) {
 // style and keep no copy of pages in localStorage.
 func TestHTMXConfig(t *testing.T) {
 	r := newRenderer(t)
-	for page, data := range samples(t, r) {
+	for page, data := range eachSample(t, r) {
 		doc, err := html.Parse(strings.NewReader(render(t, r, page, data)))
 		require.NoError(t, err)
 		var content string

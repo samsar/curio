@@ -813,13 +813,23 @@ body:has(#show-scores:checked) .score { display: inline; }
 main.page:has(.landing) { padding-bottom: var(--s6); }
 .landing { flex: 1 0 auto; display: flex; flex-direction: column; justify-content: flex-end; }
 
-/* One quiet line of interests: inline text that wraps like a sentence. */
-.explore-line { max-width: 70rem; margin: 0 auto; text-align: center; font-size: var(--fs-sm); line-height: 2; color: var(--text-3); }
+/* One quiet line of interests: inline text that wraps like a sentence.
+   A name is a label an LLM or a page's words made, of any length: it
+   takes one line, cut short, with the whole of it on hover. The line
+   fills its measure, as .results does: a flex item with auto margins
+   would size to its content, and a long name's min-content width would
+   widen it past the screen. */
+.explore-line { width: 100%; max-width: 70rem; margin: 0 auto; text-align: center; font-size: var(--fs-sm); line-height: 2; color: var(--text-3); }
 .explore-line .label { display: block; font-size: var(--fs-xs); line-height: 1.6; }
 .explore-line ul, .explore-line li { display: inline; list-style: none; padding: 0; margin: 0; }
 .explore-line li { margin: 0 0.6rem; }
-.explore-line a { color: var(--text-2); white-space: nowrap; }
+.explore-line a {
+  display: inline-block; max-width: min(18rem, 100%); vertical-align: bottom;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-2);
+}
 .explore-line a:hover { color: var(--accent-text); text-decoration: none; }
+.explore-line .unlabeled { color: var(--text-3); font-style: italic; }
 .explore-line .all { margin-left: 0.6rem; color: var(--accent-text); font-weight: 540; white-space: nowrap; }
 
 /* Document ------------------------------------------------------------------ */
@@ -927,6 +937,7 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .bars { list-style: none; padding: 0; display: grid; gap: var(--s3); }
 .bars li { display: grid; grid-template-columns: minmax(0, 9rem) minmax(0, 1fr) 3.5rem; align-items: center; gap: var(--s3); font-size: var(--fs-sm); }
 .bars .label { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bars a.label:hover { color: var(--accent-text); text-decoration: none; }
 .bars .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); font-weight: 560; }
 svg.hbar { display: block; width: 100%; height: 0.5rem; border-radius: var(--r-pill); overflow: hidden; }
 

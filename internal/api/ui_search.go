@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
 )
 
@@ -11,15 +12,32 @@ import (
 // snippet shows.
 const matchExcerptRunes = 300
 
-// search answers GET /ui/search?q=: the form, and for a query, the results
-// of the same search POST /v1/search runs, at the default k. A search that
-// fails is shown where its results would be, with its status.
+// search answers GET /ui/?q=&content_type=, the dashboard's home: the form,
+// and for a query, the results of the same search POST /v1/search runs, at
+// the default k, limited to the content type when one is given. A search
+// that fails is shown where its results would be, with its status. A type
+// that isn't one is a 400 page, as the Library answers it.
+//
+// Search as you type renders the whole page on every keystroke, so with a
+// query the page reads nothing but the search; without one it reads what
+// the home shows instead (home).
 func (h pageHandlers) search(w http.ResponseWriter, r *http.Request) {
+	contentType, err := contentTypeParam(r)
+	if err != nil {
+		h.writePageError(w, r, err, ui.NavSearch)
+		return
+	}
 	q := r.URL.Query().Get("q")
-	vm := ui.Search{Layout: h.pages.layout("Search", ui.NavSearch), Query: q}
+	vm := ui.Search{Layout: h.pages.layout("Search", ui.NavSearch), Query: q, Type: string(contentType)}
 	status := http.StatusOK
-	if strings.TrimSpace(q) != "" {
-		resp, err := h.d.search(r.Context(), SearchRequest{Query: q})
+	if strings.TrimSpace(q) == "" {
+		vm.Home = h.home(r)
+	} else {
+		req := SearchRequest{Query: q}
+		if contentType != "" {
+			req.Filters.ContentType = []string{string(contentType)}
+		}
+		resp, err := h.d.search(r.Context(), req)
 		if err != nil {
 			status, vm.Err = h.reportPanel(r, err)
 		} else {
@@ -27,6 +45,30 @@ func (h pageHandlers) search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.page(w, r, status, ui.PageSearch, vm)
+}
+
+// home is what the search page shows without a query: how many documents
+// there are to search, for the box's placeholder, and the latest run's
+// largest interests, without their members. The home does without a read
+// that fails: it is logged, and what it was for is left out.
+func (h pageHandlers) home(r *http.Request) *ui.SearchHome {
+	ctx := r.Context()
+	home := &ui.SearchHome{}
+	if st, err := h.d.stats(ctx); err != nil {
+		h.quietError(r, err)
+	} else {
+		home.Searchable = st.DocumentsByState[string(store.DocStateFetched)]
+	}
+	interests, err := h.d.interests(ctx, homeInterests, 0)
+	if err != nil {
+		h.quietError(r, err)
+		return home
+	}
+	home.AllInterests = interests.NumClusters
+	for _, in := range interests.Items {
+		home.Interests = append(home.Interests, interestView(in))
+	}
+	return home
 }
 
 func searchResults(resp SearchResponse) *ui.SearchResults {

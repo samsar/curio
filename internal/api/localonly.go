@@ -36,7 +36,7 @@ import (
 //   - A change (any method but GET, HEAD and OPTIONS) must come from the
 //     daemon's own pages when the header is there: same-origin.
 //   - The dashboard's pages refuse what another site's page loads as a
-//     subresource (an <img> pointing at /ui/search runs a search), which
+//     subresource (an <img> pointing at /ui/?q= runs a search), which
 //     carries no Origin. Only a top-level navigation the user made passes.
 //
 // Non-browser clients (the CLI, the MCP sidecar, curl) send a loopback Host,
@@ -191,7 +191,7 @@ func dashboardHeaders(next http.Handler) http.Handler {
 
 // isolateDashboard refuses a dashboard request another site's page made
 // without the user navigating: an <img>, <link> or fetch pointing at
-// /ui/search makes the daemon run a search, and Ollama embed its query,
+// /ui/?q= makes the daemon run a search, and Ollama embed its query,
 // and a no-cors GET carries no Origin. The browser says the request is
 // cross-site or same-site in Sec-Fetch-Site; only a top-level navigation
 // (Sec-Fetch-Mode navigate to a document), such as following a link to the

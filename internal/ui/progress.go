@@ -2,7 +2,7 @@ package ui
 
 import "time"
 
-// ProgressWindow is how far back the Overview's progress estimate looks
+// ProgressWindow is how far back Status's progress estimate looks
 // for the pace the queue is working at.
 const ProgressWindow = 10 * time.Minute
 

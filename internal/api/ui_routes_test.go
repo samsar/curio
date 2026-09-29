@@ -50,6 +50,7 @@ func TestDashboard_Routes(t *testing.T) {
 		"GET /ui/library",
 		"GET /ui/search",
 		"GET /ui/static/{file}",
+		"GET /ui/status",
 	}, dashboardRoutes(t, router))
 
 	router, err = newRouter(deps, testOrigin(t), testDashboard(t, UIOptions{}))
@@ -76,6 +77,7 @@ func uiSamples(t *testing.T, s *testServer) map[string]string {
 		"/":                    "/",
 		"/ui/":                 "/ui/",
 		"/ui/search":           "/ui/search?q=text",
+		"/ui/status":           "/ui/status",
 		"/ui/library":          "/ui/library?state=fetched",
 		"/ui/documents/{id}":   "/ui/documents/" + doc.ID,
 		"/ui/interests":        "/ui/interests",
@@ -88,7 +90,7 @@ func uiSamples(t *testing.T, s *testServer) map[string]string {
 // stylesheetRE finds a page's stylesheet.
 var stylesheetRE = regexp.MustCompile(`<link rel="stylesheet" href="(/ui/static/[^"]+)">`)
 
-// stylesheetURL is the stylesheet the Overview loads.
+// stylesheetURL is the stylesheet the search home loads.
 func stylesheetURL(t *testing.T, s *testServer) string {
 	t.Helper()
 	resp := s.do(t, request{method: http.MethodGet, path: "/ui/"})
@@ -130,7 +132,7 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 	assert.Equal(t, "text/html; charset=utf-8", notFound.contentType)
 	assert.Contains(t, notFound.body, `<nav aria-label="Main">`)
 	assertSecurityHeaders(t, notFound, ui.CSP)
-	assertSecurityHeaders(t, s.do(t, request{method: http.MethodPost, path: "/ui/search"}), ui.CSP)
+	assertSecurityHeaders(t, s.do(t, request{method: http.MethodPost, path: "/ui/"}), ui.CSP)
 	for _, refused := range []request{
 		{method: http.MethodGet, path: "/ui/", origin: "https://attacker.example"},
 		{method: http.MethodGet, path: "/ui/", host: "attacker.example:" + s.port},
@@ -168,11 +170,11 @@ func TestDashboard_GETOnly(t *testing.T) {
 // problem, or its starting problem while starting.
 func TestDashboard_Off(t *testing.T) {
 	s := newStartingTestServerUI(t, UIOptions{})
-	for _, path := range []string{"/", "/ui/", "/ui/search?q=x"} {
+	for _, path := range []string{"/", "/ui/", "/ui/?q=x"} {
 		getStarting(t, s, request{method: http.MethodGet, path: path})
 	}
 	s.ready(t)
-	for _, path := range []string{"/", "/ui/", "/ui/search", "/ui/static/app.css"} {
+	for _, path := range []string{"/", "/ui/", "/ui/status", "/ui/static/app.css"} {
 		resp := s.do(t, request{method: http.MethodGet, path: path})
 		assertProblem(t, resp, http.StatusNotFound)
 		assert.Empty(t, resp.header.Get("Content-Security-Policy"))
@@ -286,20 +288,24 @@ func (e countingEmbedder) Embed(_ context.Context, texts []string) ([][]float32,
 }
 
 // TestDashboard_CrossSiteSubresource: another site's page can't make the
-// daemon search by loading /ui/search as an image; a user following a
+// daemon search by loading /ui/?q= as an image, nor through the old
+// search address, which is refused before it redirects; a user following a
 // link from there, and the dashboard's own requests, get the page.
 func TestDashboard_CrossSiteSubresource(t *testing.T) {
 	var embeds atomic.Int32
 	s := newTestServer(t, func(d *Deps) {
 		d.Search = search.New(d.Chunks, d.Documents, countingEmbedder{&embeds}, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
-	path := "/ui/search?q=kafka"
-	for _, site := range []string{"cross-site", "same-site"} {
-		for _, h := range []http.Header{secFetch(site, "no-cors", "image"), secFetch(site, "cors", "empty"),
-			secFetch(site, "navigate", "iframe")} {
-			resp := s.do(t, request{method: http.MethodGet, path: path, header: h})
-			assertProblem(t, resp, http.StatusForbidden)
-			assertSecurityHeaders(t, resp, ui.CSP)
+	path := "/ui/?q=kafka"
+	for _, refused := range []string{path, "/ui/", "/ui/search?q=kafka"} {
+		for _, site := range []string{"cross-site", "same-site"} {
+			for _, h := range []http.Header{secFetch(site, "no-cors", "image"), secFetch(site, "cors", "empty"),
+				secFetch(site, "navigate", "iframe")} {
+				resp := s.do(t, request{method: http.MethodGet, path: refused, header: h})
+				assertProblem(t, resp, http.StatusForbidden)
+				assert.Empty(t, resp.header.Get("Location"), refused)
+				assertSecurityHeaders(t, resp, ui.CSP)
+			}
 		}
 	}
 	assert.Zero(t, embeds.Load(), "no search ran")
@@ -351,13 +357,13 @@ func TestStarting_Page(t *testing.T) {
 	assert.Equal(t, http.StatusOK, asset.status)
 	assert.Equal(t, "text/css; charset=utf-8", asset.contentType)
 
-	getStarting(t, s, request{method: http.MethodPost, path: "/ui/search"})
+	getStarting(t, s, request{method: http.MethodPost, path: "/ui/"})
 	getStarting(t, s, request{method: http.MethodGet, path: "/v1/stats"})
 
 	s.ready(t)
 	resp = get("/ui/")
 	assert.Equal(t, http.StatusOK, resp.status)
-	assert.Contains(t, resp.body, "<h1>Overview</h1>")
+	assert.Contains(t, resp.body, `<h1 class="visually-hidden">Search</h1>`)
 }
 
 // TestPage_RenderFailure: a page that fails to render is a 500 error page,
@@ -366,15 +372,15 @@ func TestPage_RenderFailure(t *testing.T) {
 	var rec logRecorder
 	deps := routerDeps(t, &rec)
 	h := pageHandlers{d: deps, pages: testDashboard(t, pagesOn)}
-	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/ui/status", nil)
 	w := httptest.NewRecorder()
-	// The Overview's template reads fields a Search doesn't have.
-	h.page(w, req, http.StatusOK, ui.PageOverview, ui.Search{})
+	// Status's template reads fields a Search doesn't have.
+	h.page(w, req, http.StatusOK, ui.PageStatus, ui.Search{})
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Equal(t, "text/html; charset=utf-8", w.Header().Get("Content-Type"))
 	assert.Contains(t, w.Body.String(), `<div class="big-code">500</div>`+"\n<h1>internal error</h1>")
-	assert.NotContains(t, w.Body.String(), "<h1>Overview</h1>")
+	assert.NotContains(t, w.Body.String(), "<h1>Status</h1>")
 	errs := rec.at(slog.LevelError)
 	require.Len(t, errs, 1)
 	assert.Equal(t, "request failed", errs[0]["msg"])
@@ -391,11 +397,32 @@ func TestSearchPage_ClientGone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	w := httptest.NewRecorder()
-	h.search(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/ui/search?q=text", nil))
+	h.search(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/ui/?q=text", nil))
 
 	assert.Equal(t, statusClientClosedRequest, w.Code)
 	assert.Empty(t, rec.at(slog.LevelError))
 	infos := rec.at(slog.LevelInfo)
 	require.Len(t, infos, 1)
 	assert.EqualValues(t, statusClientClosedRequest, infos[0]["status"])
+}
+
+// TestSearchHome_ClientGone: the home's reads failing because its client
+// has gone are logged at info as 499s, never as the daemon's errors.
+func TestSearchHome_ClientGone(t *testing.T) {
+	var rec logRecorder
+	deps := routerDeps(t, &rec, withSearch)
+	h := pageHandlers{d: deps, pages: testDashboard(t, pagesOn)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	h.search(w, httptest.NewRequestWithContext(ctx, http.MethodGet, "/ui/", nil))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `<div class="landing">`)
+	assert.Empty(t, rec.at(slog.LevelError))
+	infos := rec.at(slog.LevelInfo)
+	require.Len(t, infos, 2, "the counts and the interests")
+	for _, info := range infos {
+		assert.EqualValues(t, statusClientClosedRequest, info["status"])
+	}
 }

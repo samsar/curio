@@ -226,15 +226,15 @@ func listDocumentsOpts(r *http.Request) (store.ListDocumentsOpts, error) {
 	if err != nil {
 		return store.ListDocumentsOpts{}, err
 	}
-	q := r.URL.Query()
-	contentType := store.ContentType(q.Get("content_type"))
-	if contentType != "" && !contentType.Valid() {
-		return store.ListDocumentsOpts{}, badRequest("content_type %q must be one of: %s", contentType, contentTypeList)
+	contentType, err := contentTypeParam(r)
+	if err != nil {
+		return store.ListDocumentsOpts{}, err
 	}
 	after, err := cursorParam(r)
 	if err != nil {
 		return store.ListDocumentsOpts{}, err
 	}
+	q := r.URL.Query()
 	return store.ListDocumentsOpts{
 		State:       state,
 		ContentType: contentType,
@@ -244,6 +244,16 @@ func listDocumentsOpts(r *http.Request) (store.ListDocumentsOpts, error) {
 		Limit:       listLimit(r),
 		After:       after,
 	}, nil
+}
+
+// contentTypeParam reads ?content_type. Empty means any type; a value that
+// isn't a content type is a requestError naming them.
+func contentTypeParam(r *http.Request) (store.ContentType, error) {
+	t := store.ContentType(r.URL.Query().Get("content_type"))
+	if t != "" && !t.Valid() {
+		return "", badRequest("content_type %q must be one of: %s", t, contentTypeList)
+	}
+	return t, nil
 }
 
 // contentTypeList names the content types, for a 400's detail.

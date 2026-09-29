@@ -51,7 +51,7 @@ func TestProblems(t *testing.T) {
 <a href="/ui/documents/abc">doc</a>
 <a href="https://example.com/a" rel="nofollow noreferrer noopener" target="_blank">out</a>
 <a href="mailto:a@example.com">mail</a>
-<form action="/ui/search"><input name="q" hx-get="/ui/search" hx-select="#results > *"></form>
+<form action="/ui/"><input name="q" hx-get="/ui/" hx-select="#results > *"></form>
 <img src="https://img.example/a.png" alt="a" loading="lazy">
 </main>
 </body></html>`
