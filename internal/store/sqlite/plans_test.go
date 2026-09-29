@@ -55,6 +55,9 @@ type planCase struct {
 	// sorts allows a temporary b-tree. Every other plan must read its
 	// rows in order.
 	sorts bool
+	// avoid are substrings the plan must not contain: indexes that would
+	// read far more rows than the query needs.
+	avoid []string
 }
 
 // listPlanCases pins the three paged lists: for every filter, the first
@@ -89,8 +92,12 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 	const (
 		byTenant = "SEARCH d USING INDEX idx_documents_tenant_updated (tenant_id=?"
 		byState  = "SEARCH d USING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?"
+		// A cause seeks its own documents in the partial index of the
+		// documents that failed, whatever else filters the list.
+		byCause = "SEARCH d USING INDEX idx_documents_tenant_cause_updated (tenant_id=? AND failure_cause=?"
 	)
 	fetched := store.DocStateFetched
+	antiBot := store.FailureCauseAntiBot
 	jobs := func(name string, opts store.ListJobsOpts, index string) planCase {
 		opts.After = after
 		q, args := listJobsQuery("local", opts)
@@ -98,6 +105,18 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 			index + keyset("updated_at") + ")",
 			"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
 		}}
+	}
+	// A document's jobs are a handful, so sorting them is cheap; walking a
+	// tenant index to find them is not.
+	jobsOfDocument := func(name string, opts store.ListJobsOpts, constraints string) planCase {
+		opts.After, opts.DocumentID = after, "doc"
+		q, args := listJobsQuery("local", opts)
+		return planCase{name: name + ", " + page, query: q, args: args,
+			first: "SEARCH j USING INDEX idx_jobs_document (" + constraints,
+			want:  []string{"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)"},
+			sorts: true,
+			avoid: []string{"idx_jobs_tenant_"},
+		}
 	}
 	bookmarks := func(name string, opts store.ListBookmarksOpts) planCase {
 		opts.After = after
@@ -121,6 +140,11 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 			ContentType: store.ContentTypeArticle, Host: "example.com", Folder: "/Tech"}, byTenant),
 		docs("ListWithLastError by every filter", store.ListDocumentsOpts{State: fetched,
 			ContentType: store.ContentTypeArticle, Host: "example.com", Folder: "/Tech"}, byState),
+		docs("ListWithLastError by cause", store.ListDocumentsOpts{Cause: antiBot}, byCause),
+		docs("ListWithLastError by cause and state",
+			store.ListDocumentsOpts{Cause: antiBot, State: store.DocStateFailed}, byCause),
+		docs("ListWithLastError by cause and host", store.ListDocumentsOpts{Cause: antiBot, Host: "example.com"}, byCause),
+		docs("ListWithLastError by cause and folder", store.ListDocumentsOpts{Cause: antiBot, Folder: "/Tech"}, byCause),
 		jobs("ListWithDoc", store.ListJobsOpts{},
 			"SEARCH j USING INDEX idx_jobs_tenant_updated (tenant_id=?"),
 		jobs("ListWithDoc by status", store.ListJobsOpts{Status: store.JobStatusDone},
@@ -129,6 +153,10 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 			"SEARCH j USING INDEX idx_jobs_tenant_updated (tenant_id=?"),
 		jobs("ListWithDoc by status and kind", store.ListJobsOpts{Status: store.JobStatusDone, Kind: store.JobKindFetch},
 			"SEARCH j USING INDEX idx_jobs_tenant_status_updated (tenant_id=? AND status=?"),
+		jobsOfDocument("ListWithDoc by document", store.ListJobsOpts{}, "document_id=?"),
+		jobsOfDocument("ListWithDoc by document and status", store.ListJobsOpts{Status: store.JobStatusFailed},
+			"document_id=? AND status=?"),
+		jobsOfDocument("ListWithDoc by document and kind", store.ListJobsOpts{Kind: store.JobKindFetch}, "document_id=?"),
 		bookmarks("Bookmarks.List", store.ListBookmarksOpts{}),
 		bookmarks("Bookmarks.List by source", store.ListBookmarksOpts{Source: store.SourceChrome}),
 		bookmarks("Bookmarks.List by folder", store.ListBookmarksOpts{FolderPath: "/Tech/AI"}),
@@ -226,8 +254,21 @@ func TestQueryPlans(t *testing.T) {
 		},
 		{
 			name:  "RequeueFetchByStates",
-			query: resetStatesSQL(2), args: []any{store.DocStatePending, "local", store.DocStateFailed, store.DocStateFetched},
-			want: []string{"INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)"},
+			query: resetStatesSQL(2, false),
+			args:  []any{store.DocStatePending, "local", store.DocStateFailed, store.DocStateFetched},
+			want:  []string{"INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)"},
+		},
+		{
+			name:  "RequeueFetchByStates by cause",
+			query: resetStatesSQL(3, true),
+			args: []any{store.DocStatePending, "local", store.DocStatePending, store.DocStateFetched, store.DocStateFailed,
+				store.FailureCauseAntiBot},
+			want: []string{"INDEX idx_documents_tenant_cause_updated (tenant_id=? AND failure_cause=?)"},
+		},
+		{
+			name:  "FailureSummary",
+			query: failureSummarySQL, args: []any{"local"},
+			want: []string{"SEARCH documents USING INDEX idx_documents_tenant_cause_updated (tenant_id=? AND failure_cause>?)"},
 		},
 		{
 			name:  "ReplaceForDocument delete",
@@ -311,6 +352,9 @@ func TestQueryPlans(t *testing.T) {
 			}
 			if !tc.sorts {
 				assert.NotContains(t, plan, "USE TEMP B-TREE")
+			}
+			for _, avoid := range tc.avoid {
+				assert.NotContains(t, plan, avoid)
 			}
 		})
 	}

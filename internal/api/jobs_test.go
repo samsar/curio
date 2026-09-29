@@ -108,6 +108,46 @@ func TestListJobs(t *testing.T) {
 	}
 }
 
+// TestListJobs_Document: ?document_id lists the jobs of one document, with
+// the other filters, and none for a document no job works on.
+func TestListJobs_Document(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	other := s.seedDocument(t, "https://example.com/b", store.DocStateFetched)
+	enqueue := func(docID string, kind store.JobKind, status store.JobStatus) string {
+		t.Helper()
+		job, err := store.NewDocumentJob("local", kind, docID)
+		require.NoError(t, err)
+		job.Status = status
+		require.NoError(t, s.deps.Queue.Enqueue(ctx, job))
+		return job.ID
+	}
+	failedFetch := enqueue(doc.ID, store.JobKindFetch, store.JobStatusFailed)
+	doneFetch := enqueue(doc.ID, store.JobKindFetch, store.JobStatusDone)
+	doneIndex := enqueue(doc.ID, store.JobKindIndex, store.JobStatusDone)
+	enqueue(other.ID, store.JobKindFetch, store.JobStatusFailed)
+	require.NoError(t, s.deps.Queue.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindCluster}))
+
+	ids := func(query string) []string {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/jobs?" + query})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got JobListResponse
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		out := make([]string, 0, len(got.Items))
+		for _, j := range got.Items {
+			assert.Equal(t, doc.URL, j.DocURL)
+			out = append(out, j.ID)
+		}
+		return out
+	}
+	assert.ElementsMatch(t, []string{failedFetch, doneFetch, doneIndex}, ids("document_id="+doc.ID))
+	assert.ElementsMatch(t, []string{doneFetch, doneIndex}, ids("document_id="+doc.ID+"&status=done"))
+	assert.Equal(t, []string{doneFetch}, ids("document_id="+doc.ID+"&status=done&kind=fetch"))
+	assert.Empty(t, ids("document_id=no-such-document"))
+}
+
 // TestListJobs_Paging: jobs that share an updated_at still page in a fixed
 // order, each once, and next_cursor is set exactly when another page
 // follows.

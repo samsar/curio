@@ -34,6 +34,9 @@ rebuilding interests and the queue controls are still `curio` commands
 - **Library**: every document, most recently updated first, filtered by
   state, type, host (`example.com`, exactly) and bookmark folder (the
   folder and the folders under it). "Load more" pages through the rest.
+  A `cause=` in the address (`/ui/library?cause=anti_bot`) narrows it to
+  the documents that failed for one cause, and paging and filtering keep
+  it; the page has no control for it yet.
 - **Document**: what curio knows about one page (title, addresses, type,
   state, author, dates, where its markdown is), how it was fetched (Jina
   Reader called out), its text, related documents, its bookmarks with

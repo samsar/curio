@@ -19,13 +19,15 @@ func TestLinks(t *testing.T) {
 	assert.Empty(t, navHref("elsewhere"))
 
 	// Every value round-trips through the query, however odd.
-	f := LibraryFilters{State: "fetched", ContentType: "pdf", Host: "a&b=c.example", Folder: "/100% Reading/#1", Limit: 7}
+	f := LibraryFilters{State: "failed", ContentType: "pdf", Host: "a&b=c.example", Folder: "/100% Reading/#1",
+		Cause: "anti_bot", Limit: 7}
 	href := libraryHref(f, "cursor+/=")
 	u, err := url.Parse(href)
 	require.NoError(t, err)
 	assert.Equal(t, "/ui/library", u.Path)
-	assert.Equal(t, url.Values{"state": {"fetched"}, "content_type": {"pdf"}, "host": {"a&b=c.example"},
-		"folder": {"/100% Reading/#1"}, "cursor": {"cursor+/="}, "limit": {"7"}}, u.Query())
+	assert.Equal(t, url.Values{"state": {"failed"}, "content_type": {"pdf"}, "host": {"a&b=c.example"},
+		"folder": {"/100% Reading/#1"}, "cause": {"anti_bot"}, "cursor": {"cursor+/="}, "limit": {"7"}}, u.Query(),
+		"the next page keeps every filter")
 }
 
 func TestOutbound(t *testing.T) {

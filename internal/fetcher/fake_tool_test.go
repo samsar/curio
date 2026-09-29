@@ -96,7 +96,8 @@ func runFakeTool(mode string, args []string) int {
 		}
 		time.Sleep(time.Hour)
 		return 0
-	case "yt-dlp", "yt-dlp-unavailable", "yt-dlp-error", "yt-dlp-429", "yt-dlp-no-info", "yt-dlp-hang":
+	case "yt-dlp", "yt-dlp-unavailable", "yt-dlp-private", "yt-dlp-gone", "yt-dlp-error", "yt-dlp-429",
+		"yt-dlp-no-info", "yt-dlp-hang":
 		return fakeYTDLP(mode, args)
 	}
 	fmt.Fprintln(os.Stderr, "unknown fake tool mode", mode)
@@ -108,6 +109,9 @@ func runFakeTool(mode string, args []string) int {
 //
 //   - yt-dlp: a video with captions (fakeYTDLPRun)
 //   - yt-dlp-unavailable: a video that is gone
+//   - yt-dlp-private: a private video
+//   - yt-dlp-gone: a video that is gone, in words no permanent pattern
+//     matches
 //   - yt-dlp-error: an extraction that failed for another reason
 //   - yt-dlp-429: an extraction YouTube rate-limited
 //   - yt-dlp-no-info: a run that exits 0 having written nothing
@@ -134,6 +138,12 @@ func fakeYTDLP(mode string, args []string) int {
 	case "yt-dlp-unavailable":
 		fmt.Fprintln(os.Stderr, "WARNING: ffmpeg not found")
 		fmt.Fprintln(os.Stderr, "ERROR: Video unavailable")
+		code = 1
+	case "yt-dlp-private":
+		fmt.Fprintln(os.Stderr, "ERROR: [youtube] test_id: Private video. Sign in if you've been granted access to this video")
+		code = 1
+	case "yt-dlp-gone":
+		fmt.Fprintln(os.Stderr, "ERROR: [youtube] test_id: This video is unavailable")
 		code = 1
 	case "yt-dlp-error":
 		fmt.Fprintln(os.Stderr, "ERROR: [youtube] test_id: Unable to extract initial player response")

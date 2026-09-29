@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -120,6 +121,79 @@ const (
 	SourceHTML    = "html" // Netscape HTML export, any browser
 )
 
+// FailureCause is why a failed or dead document failed
+// (documents.failure_cause): what the site did, as the fetcher read it, or
+// the step that gave up. Unlike the enums above it has no CHECK constraint
+// (migrations/014 says why); the store checks Valid on every write instead.
+type FailureCause string
+
+// Failure causes, in the order FailureCauses lists them.
+const (
+	// FailureCauseDeadLink: the content is gone (a 404 or 410, or a page
+	// that says so). The one cause of a dead document.
+	FailureCauseDeadLink FailureCause = "dead_link"
+	// FailureCauseAntiBot: the site blocked the request (a 403 or 503, a
+	// challenge or block page).
+	FailureCauseAntiBot FailureCause = "anti_bot"
+	// FailureCauseLoginWall: a login page, or too little text to be the
+	// article.
+	FailureCauseLoginWall FailureCause = "login_wall"
+	// FailureCauseJinaRefused: the Jina Reader fallback refused the target
+	// (a domain block, a publisher's opt-out, a deterministic 4xx),
+	// normally after the site served a page curio can't use.
+	FailureCauseJinaRefused FailureCause = "jina_refused"
+	// FailureCauseTLS: the site's certificate failed verification.
+	FailureCauseTLS FailureCause = "tls"
+	// FailureCauseUnreachable: the host doesn't resolve, or refuses
+	// connections.
+	FailureCauseUnreachable FailureCause = "unreachable"
+	// FailureCauseTimeout: the site, or the tool fetching it, took too long.
+	FailureCauseTimeout FailureCause = "timeout"
+	// FailureCauseNetwork: any other transport failure (a reset, a TLS
+	// alert, a redirect loop, our own network down).
+	FailureCauseNetwork FailureCause = "network"
+	// FailureCauseRateLimited: the site, or GitHub or YouTube, rate-limited
+	// the requests.
+	FailureCauseRateLimited FailureCause = "rate_limited"
+	// FailureCauseHTTPError: any other HTTP status, or an error page naming
+	// one.
+	FailureCauseHTTPError FailureCause = "http_error"
+	// FailureCauseUnsupported: a URL or content curio can't read (a channel
+	// page, a GitHub profile, a file that isn't HTML, a PDF it can't
+	// extract).
+	FailureCauseUnsupported FailureCause = "unsupported"
+	// FailureCauseTooLarge: the response was over the body cap.
+	FailureCauseTooLarge FailureCause = "too_large"
+	// FailureCauseIndex: the fetch succeeded, and indexing gave up.
+	FailureCauseIndex FailureCause = "index"
+	// FailureCauseOther: anything else.
+	FailureCauseOther FailureCause = "other"
+)
+
+// failureCauses is every FailureCause, in the order of their constants.
+var failureCauses = []FailureCause{
+	FailureCauseDeadLink, FailureCauseAntiBot, FailureCauseLoginWall, FailureCauseJinaRefused,
+	FailureCauseTLS, FailureCauseUnreachable, FailureCauseTimeout, FailureCauseNetwork,
+	FailureCauseRateLimited, FailureCauseHTTPError, FailureCauseUnsupported, FailureCauseTooLarge,
+	FailureCauseIndex, FailureCauseOther,
+}
+
+// FailureCauses returns every FailureCause, in the order of their
+// constants, in a slice the caller may keep.
+func FailureCauses() []FailureCause { return slices.Clone(failureCauses) }
+
+// Valid reports whether c is one of the FailureCause constants.
+func (c FailureCause) Valid() bool { return slices.Contains(failureCauses, c) }
+
+// State is the state a document that failed for c is in: dead for a dead
+// link, failed for every other cause.
+func (c FailureCause) State() DocState {
+	if c == FailureCauseDeadLink {
+		return DocStateDead
+	}
+	return DocStateFailed
+}
+
 // Valid reports whether s is one of the DocState constants.
 func (s DocState) Valid() bool {
 	switch s {
@@ -227,8 +301,12 @@ type Document struct {
 	WordCount           *int
 	CurrentExtractionID *string
 	State               DocState
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	// FailureCause is why a failed or dead document failed, and empty for
+	// every other: the store keeps it set exactly when State is failed or
+	// dead, and State equal to its State().
+	FailureCause FailureCause
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // DocumentExtraction is one fetch attempt against a document.
@@ -276,38 +354,50 @@ type Job struct {
 // DocumentStore operates on the documents table.
 type DocumentStore interface {
 	// Create inserts a new document and fills in its ID (when empty),
-	// CreatedAt and UpdatedAt. An empty State or ContentType is stored as
-	// pending or unknown; those defaults apply on insert only. A new
-	// document has no extraction, so CurrentExtractionID must be nil. A
-	// document that already exists for (tenant_id, url) is an error
-	// wrapping ErrConflict.
+	// CreatedAt and UpdatedAt. An empty ContentType is stored as unknown,
+	// and an empty State as pending, or as FailureCause.State() when a
+	// cause is given; those defaults apply on insert only. A cause must be
+	// valid and go with the state (FailureCause.State()), and a failed or
+	// dead document must have one; anything else is an error, and nothing
+	// is inserted. A new document has no extraction, so
+	// CurrentExtractionID must be nil. A document that already exists for
+	// (tenant_id, url) is an error wrapping ErrConflict.
 	Create(ctx context.Context, d *Document) error
 	GetByID(ctx context.Context, id string) (*Document, error)
 	// GetByURL returns the tenant's document for url, which must already
 	// be normalized the way ingest stores it (urlutil.Normalize). A URL
 	// with no document is ErrNotFound.
 	GetByURL(ctx context.Context, tenantID, url string) (*Document, error)
-	UpdateState(ctx context.Context, id string, state DocState) error
+	// MarkFailed records that a document failed for cause, which must be
+	// valid (an invalid one is an error, and nothing is written): its state
+	// becomes cause.State(), dead for a dead link and failed for any other
+	// cause. ErrNotFound if there is no such document.
+	MarkFailed(ctx context.Context, id string, cause FailureCause) error
+	// MarkFetched records that a document was fetched and indexed: its
+	// state becomes fetched, and it has no failure cause. ErrNotFound if
+	// there is no such document.
+	MarkFetched(ctx context.Context, id string) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
 
 	// ApplyFetch records a successful fetch on a document: it points
 	// current_extraction_id at m.ExtractionID, which must exist, writes the
-	// fetch-derived columns exactly as given, and sets the state to pending
-	// until the index step marks it fetched. A nil field clears its column:
-	// those columns describe the current extraction, so none may keep a
-	// value from an earlier one. word_count is left alone. ErrNotFound if
-	// there is no such document.
+	// fetch-derived columns exactly as given, and sets the state to pending,
+	// with no failure cause, until the index step marks it fetched. A nil
+	// field clears its column: those columns describe the current
+	// extraction, so none may keep a value from an earlier one. word_count
+	// is left alone. ErrNotFound if there is no such document.
 	ApplyFetch(ctx context.Context, id string, m FetchedMetadata) error
 
-	// RequeueFetch resets the tenant's document to pending and enqueues a
-	// fresh fetch job for it, atomically: either both happen or neither
-	// does, so a document is never left pending with no job to move it on.
-	// Returns the new job, or ErrNotFound if the tenant has no such document.
+	// RequeueFetch resets the tenant's document to pending, clearing its
+	// failure cause, and enqueues a fresh fetch job for it, atomically:
+	// either both happen or neither does, so a document is never left
+	// pending with no job to move it on. Returns the new job, or
+	// ErrNotFound if the tenant has no such document.
 	RequeueFetch(ctx context.Context, tenantID, documentID string) (*Job, error)
 	// RequeueFetchByStates does the same for every tenant document whose
-	// state is one of states, in one transaction. Returns how many jobs it
-	// enqueued.
-	RequeueFetchByStates(ctx context.Context, tenantID string, states []DocState) (int, error)
+	// state is one of states and, unless cause is empty, that failed for
+	// cause, in one transaction. Returns how many jobs it enqueued.
+	RequeueFetchByStates(ctx context.Context, tenantID string, states []DocState, cause FailureCause) (int, error)
 
 	// ListWithLastError lists the tenant's documents, most recently updated
 	// first (then by ID, descending), each with the error of the most recent
@@ -324,6 +414,37 @@ type DocumentStore interface {
 	// CountByState counts the tenant's documents per state. States with no
 	// documents are absent from the map.
 	CountByState(ctx context.Context, tenantID string) (map[DocState]int, error)
+	// FailureSummary counts the tenant's failed and dead documents by
+	// failure cause, naming for each cause at most topHosts of the hosts
+	// its documents are on.
+	FailureSummary(ctx context.Context, tenantID string, topHosts int) (FailureSummary, error)
+}
+
+// FailureSummary is how many of a tenant's documents failed, for each
+// cause.
+type FailureSummary struct {
+	Total int // failed and dead documents: the sum of the causes' counts
+	// Causes are the causes with documents, the most documents first, then
+	// by cause.
+	Causes []CauseCount
+}
+
+// CauseCount is how many documents failed for one cause, and the hosts
+// most of them are on.
+type CauseCount struct {
+	Cause FailureCause
+	Count int
+	// Hosts are the hosts with the most of the cause's documents, the most
+	// first, then by host. A host is the URL's authority as the documents
+	// list's host filter matches it: lowercased, port and all, "www."
+	// kept. A document whose URL has none counts toward Count alone.
+	Hosts []HostCount
+}
+
+// HostCount is how many of a cause's documents are on one host.
+type HostCount struct {
+	Host  string
+	Count int
 }
 
 // FetchedMetadata is what a fetch learned about a document, for
@@ -366,8 +487,11 @@ type ListDocumentsOpts struct {
 	// case-sensitively, every character literal, a trailing "/" ignored and
 	// "/" alone no filter.
 	Folder string
-	Limit  int     // <= 0 means the impl default (50)
-	After  PageKey // updated_at and ID of the previous page's last row
+	// Cause matches documents that failed for it: failed ones, or dead ones
+	// for FailureCauseDeadLink.
+	Cause FailureCause
+	Limit int     // <= 0 means the impl default (50)
+	After PageKey // updated_at and ID of the previous page's last row
 }
 
 // DocumentWithError is a document plus what a debug listing shows next to
@@ -678,10 +802,11 @@ type QueueCount struct {
 // ListJobsOpts filters JobStore.ListWithDoc. Empty fields mean "no filter
 // for that dimension".
 type ListJobsOpts struct {
-	Status JobStatus
-	Kind   JobKind
-	Limit  int     // <= 0 means the impl default (50)
-	After  PageKey // updated_at and ID of the previous page's last row
+	Status     JobStatus
+	Kind       JobKind
+	DocumentID string  // the jobs that work on this document
+	Limit      int     // <= 0 means the impl default (50)
+	After      PageKey // updated_at and ID of the previous page's last row
 }
 
 // JobWithDoc is a job plus the URL, title and current markdown path of the

@@ -213,6 +213,7 @@ func newRouter(deps Deps, origin localOrigin, pages dashboard) (chi.Router, erro
 			r.Post("/{id}/reindex", deps.handleReindexDocument)
 			r.Post("/reindex-all", deps.handleReindexAll)
 		})
+		r.Get("/failures", deps.handleFailures)
 
 		r.Post("/search", deps.handleSearch)
 

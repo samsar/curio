@@ -75,7 +75,7 @@ func (g *GitHub) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	}
 	info, ok := urlutil.ParseGitHubURL(u)
 	if !ok {
-		return nil, &PermanentError{Err: fmt.Errorf("github: not a recognized GitHub URL: %s", rawURL)}
+		return nil, &PermanentError{Err: fmt.Errorf("github: not a recognized GitHub URL: %s (%w URL)", rawURL, ErrUnsupported)}
 	}
 
 	switch info.Type {
@@ -90,7 +90,7 @@ func (g *GitHub) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	case "wiki":
 		return g.fetchWiki(ctx, info)
 	default:
-		return nil, &PermanentError{Err: fmt.Errorf("github: unsupported URL type %q for %s", info.Type, rawURL)}
+		return nil, &PermanentError{Err: fmt.Errorf("github: %w URL type %q for %s", ErrUnsupported, info.Type, rawURL)}
 	}
 }
 

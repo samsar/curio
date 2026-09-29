@@ -34,9 +34,10 @@ debug stuck content, --all to see every state, or --state for
 exact filtering.
 
 Each row carries the most recent error from a failed job that
-targeted it AND the on-disk markdown path (when present), so most
-follow-ups (cat the file, run curio refetch, etc.) don't need
-another lookup.
+targeted it, why a failed or dead document failed (its cause, which
+curio refetch --all --cause takes), AND the on-disk markdown path
+(when present), so most follow-ups (cat the file, run curio refetch,
+etc.) don't need another lookup.
 
 Rows come most recently updated first, a page at a time; when more
 follow, the last line is the command that shows the next page.
@@ -130,6 +131,9 @@ func renderDocShow(w io.Writer, d *client.Document) {
 	}
 	fmt.Fprintf(w, "content_type: %s\n", d.ContentType)
 	fmt.Fprintf(w, "state:        %s\n", d.State)
+	if d.FailureCause != "" {
+		fmt.Fprintf(w, "cause:        %s\n", d.FailureCause)
+	}
 	fmt.Fprintf(w, "created_at:   %s\n", d.CreatedAt.Local().Format("2006-01-02 15:04:05 MST"))
 	if e := d.CurrentExtraction; e != nil {
 		fmt.Fprintf(w, "\nlatest extraction:\n")
@@ -163,6 +167,9 @@ func renderDocList(w io.Writer, resp *client.DocumentList) {
 		}
 		if d.LastError != "" {
 			fmt.Fprintf(w, "         err: %s\n", truncate(strings.TrimSpace(d.LastError), 200))
+		}
+		if d.FailureCause != "" {
+			fmt.Fprintf(w, "         cause:  %s\n", d.FailureCause)
 		}
 		fmt.Fprintf(w, "         doc_id: %s\n", d.ID)
 		if d.MarkdownPath != "" {

@@ -259,6 +259,8 @@ func TestDocs(t *testing.T) {
 	out = mustRun(t, srv, "docs", "--failed")
 	assert.Contains(t, out, "https://example.com/failed")
 	assert.Contains(t, out, "err: HTTP 500 from origin")
+	assert.Contains(t, out, "\n         cause:  other\n         doc_id: "+failed.ID+"\n",
+		"the cause, aligned with the lines below it")
 
 	out = mustRun(t, srv, "docs", "--all")
 	assert.Contains(t, out, "3 document(s)")
@@ -270,6 +272,8 @@ func TestDocs(t *testing.T) {
 	out = mustRun(t, srv, "docs", "--state", "dead")
 	assert.Contains(t, out, "no documents match")
 	assert.NotContains(t, out, "next page:", "a single page has no next")
+	out = mustRun(t, srv, "docs", "--state", "pending")
+	assert.NotContains(t, out, "cause:", "only a failed or dead document has one")
 
 	// Paging: the first page ends with the command for the second, which
 	// keeps the filters and the home the first was run with.
@@ -294,6 +298,7 @@ func TestDocs(t *testing.T) {
 	assert.Contains(t, out, "markdown:     "+filepath.Join(srv.Home.ContentDir(), fetched.ID)+"/",
 		"the daemon's absolute path, printed as given")
 	assert.Contains(t, out, "state:        fetched")
+	assert.NotContains(t, out, "cause:")
 	assert.Contains(t, out, "fetcher:      apitest")
 	assert.NotContains(t, out, "The fetched body.")
 
@@ -302,7 +307,7 @@ func TestDocs(t *testing.T) {
 	assert.Contains(t, out, "The fetched body.")
 
 	out = mustRun(t, srv, "docs", "show", failed.ID, "--content")
-	assert.Contains(t, out, "state:        failed")
+	assert.Contains(t, out, "state:        failed\ncause:        other\n")
 	assert.Contains(t, out, "(no extracted content yet)", "the content 404 of a known document is an answer")
 
 	_, err = runCLI(t, srv, "docs", "show", "no-such-document")
@@ -389,6 +394,71 @@ func TestRefetch(t *testing.T) {
 
 	_, err = runCLI(t, srv, "refetch")
 	require.ErrorContains(t, err, "provide a document ID or URL, or pass --all")
+}
+
+// TestRefetch_Cause: --cause refetches the documents that failed for it,
+// with --state or without, and prints what it requeued; the daemon's 400s
+// come through, and --state or --cause without --all is refused before
+// the daemon is contacted.
+func TestRefetch_Cause(t *testing.T) {
+	srv := apitest.Start(t)
+	blocked := []*store.Document{srv.AddFailedDocument(t, "https://a.example/1", store.FailureCauseAntiBot),
+		srv.AddFailedDocument(t, "https://b.example/1", store.FailureCauseAntiBot)}
+	slow := srv.AddFailedDocument(t, "https://c.example/1", store.FailureCauseTimeout)
+	srv.AddFailedDocument(t, "https://d.example/1", store.FailureCauseDeadLink)
+	jobsFor := func(doc *store.Document) int {
+		t.Helper()
+		return count(t, srv, `SELECT count(*) FROM jobs WHERE document_id = ?`, doc.ID)
+	}
+
+	_, err := runCLI(t, srv, "refetch", "--all", "--cause", "bogus")
+	require.ErrorContains(t, err, `cause "bogus" must be one of: `+failureCauses)
+	_, err = runCLI(t, srv, "refetch", "--all", "--cause", "dead_link")
+	require.ErrorContains(t, err, "dead links are refetched only with state=dead")
+	assert.Zero(t, count(t, srv, `SELECT count(*) FROM jobs`))
+
+	out := mustRun(t, srv, "refetch", "--all", "--cause", "anti_bot")
+	assert.Contains(t, out, "refetch enqueued for documents with cause=anti_bot: 2 jobs")
+	for _, doc := range blocked {
+		assert.Equal(t, 1, jobsFor(doc), doc.URL)
+	}
+	assert.Zero(t, jobsFor(slow))
+
+	out = mustRun(t, srv, "refetch", "--all", "--state", "failed", "--cause", "timeout")
+	assert.Contains(t, out, "refetch enqueued for documents in state=failed with cause=timeout: 1 jobs")
+	out = mustRun(t, srv, "refetch", "--all", "--state", "dead", "--cause", "dead_link")
+	assert.Contains(t, out, "refetch enqueued for documents in state=dead with cause=dead_link: 1 jobs")
+
+	var requests atomic.Int32
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(daemon.Close)
+	for _, args := range [][]string{
+		{"refetch", blocked[0].ID, "--cause", "anti_bot"},
+		{"refetch", blocked[0].ID, "--state", "failed"},
+		{"refetch", "--cause", "anti_bot"},
+	} {
+		_, err := runCLIAt(t, srv.Home.Path, daemon.URL, args...)
+		require.EqualError(t, err, "--state and --cause filter --all", strings.Join(args, " "))
+	}
+	assert.Zero(t, requests.Load(), "the daemon is never contacted")
+	assert.Equal(t, 4, count(t, srv, `SELECT count(*) FROM jobs`), "nothing more is enqueued")
+}
+
+// TestRefetch_CauseHelp: --cause's help names every cause the store has, in
+// its order.
+func TestRefetch_CauseHelp(t *testing.T) {
+	causes := store.FailureCauses()
+	names := make([]string, len(causes))
+	for i, c := range causes {
+		names[i] = string(c)
+	}
+	assert.Equal(t, strings.Join(names, ", "), failureCauses)
+	flag := newRefetchCmd(nil).Flags().Lookup("cause")
+	require.NotNil(t, flag)
+	assert.Contains(t, flag.Usage, failureCauses)
 }
 
 // TestDocumentByURL: refetch, reindex, docs show and related take the URL

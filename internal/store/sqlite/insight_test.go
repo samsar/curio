@@ -19,7 +19,7 @@ func TestInsights_RoundTrip(t *testing.T) {
 	ids := seedDocs(t, db, "local",
 		"https://example.com/a", "https://example.com/b", "https://example.com/c")
 	for _, id := range ids {
-		require.NoError(t, docs.UpdateState(ctx, id, store.DocStateFetched))
+		require.NoError(t, docs.MarkFetched(ctx, id))
 	}
 
 	run := &store.ClusterRun{TenantID: "local", Algo: "knn-graph", Params: []byte(`{"k":10}`)}
@@ -95,7 +95,7 @@ func TestChunks_DocumentVectors(t *testing.T) {
 
 	ids := seedDocs(t, db, "local", "https://example.com/x", "https://example.com/y")
 	for _, id := range ids {
-		require.NoError(t, docs.UpdateState(ctx, id, store.DocStateFetched))
+		require.NoError(t, docs.MarkFetched(ctx, id))
 	}
 	extX := latestExtractionID(t, db, ids[0])
 	extY := latestExtractionID(t, db, ids[1])

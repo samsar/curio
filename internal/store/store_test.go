@@ -21,6 +21,44 @@ func TestDocState_Valid(t *testing.T) {
 	}
 }
 
+// TestFailureCauses: the list holds every cause once, in the order of the
+// constants, and a caller can't change it for the next.
+func TestFailureCauses(t *testing.T) {
+	all := []store.FailureCause{
+		store.FailureCauseDeadLink, store.FailureCauseAntiBot, store.FailureCauseLoginWall,
+		store.FailureCauseJinaRefused, store.FailureCauseTLS, store.FailureCauseUnreachable,
+		store.FailureCauseTimeout, store.FailureCauseNetwork, store.FailureCauseRateLimited,
+		store.FailureCauseHTTPError, store.FailureCauseUnsupported, store.FailureCauseTooLarge,
+		store.FailureCauseIndex, store.FailureCauseOther,
+	}
+	assert.Equal(t, all, store.FailureCauses())
+
+	got := store.FailureCauses()
+	got[0] = "bogus"
+	assert.Equal(t, all, store.FailureCauses(), "a fresh slice each call")
+}
+
+func TestFailureCause_Valid(t *testing.T) {
+	for _, c := range store.FailureCauses() {
+		assert.True(t, c.Valid(), c)
+	}
+	for _, c := range []store.FailureCause{"", "bogus", "Anti_Bot", "failed"} {
+		assert.False(t, c.Valid(), c)
+	}
+}
+
+// TestFailureCause_State: a dead link, and nothing else, makes a document
+// dead.
+func TestFailureCause_State(t *testing.T) {
+	for _, c := range store.FailureCauses() {
+		want := store.DocStateFailed
+		if c == store.FailureCauseDeadLink {
+			want = store.DocStateDead
+		}
+		assert.Equal(t, want, c.State(), c)
+	}
+}
+
 func TestContentType_Valid(t *testing.T) {
 	for _, c := range []store.ContentType{store.ContentTypeArticle, store.ContentTypeRepo, store.ContentTypeVideo,
 		store.ContentTypePDF, store.ContentTypeThread, store.ContentTypeUnknown} {

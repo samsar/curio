@@ -195,8 +195,8 @@ type Library struct {
 // /v1/documents takes. Empty fields filter nothing; Limit 0 is the default
 // page size.
 type LibraryFilters struct {
-	State, ContentType, Host, Folder string
-	Limit                            int
+	State, ContentType, Host, Folder, Cause string
+	Limit                                   int
 }
 
 // LibraryRow is one document in the list.

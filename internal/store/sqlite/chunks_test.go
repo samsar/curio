@@ -509,16 +509,21 @@ func TestChunks_SearchSkipsFailedAndDeadDocuments(t *testing.T) {
 					return len(bm) == 1, len(vec) == 1
 				}
 
-				require.NoError(t, docs.UpdateState(ctx, docID, store.DocStateFetched))
+				require.NoError(t, docs.MarkFetched(ctx, docID))
 				bm, vec := searched()
 				require.True(t, bm && vec, "a fetched document is searched")
 
-				require.NoError(t, docs.UpdateState(ctx, docID, gone))
+				require.NoError(t, docs.MarkFailed(ctx, docID, stateCause(gone)))
 				bm, vec = searched()
 				assert.False(t, bm, "bm25")
 				assert.False(t, vec, "vector")
 
-				require.NoError(t, docs.UpdateState(ctx, docID, back))
+				if back == store.DocStateFetched {
+					require.NoError(t, docs.MarkFetched(ctx, docID))
+				} else {
+					_, err := docs.RequeueFetch(ctx, "local", docID)
+					require.NoError(t, err)
+				}
 				bm, vec = searched()
 				assert.True(t, bm, "bm25")
 				assert.True(t, vec, "vector")
@@ -546,11 +551,11 @@ func TestChunks_VectorSearch_SkippedChunksDontCostHits(t *testing.T) {
 		"https://example.com/j3", "https://example.com/j4")
 	for i, docID := range junk {
 		index(docID, 0.1)
-		state := store.DocStateFailed
+		cause := store.FailureCauseAntiBot
 		if i%2 == 1 {
-			state = store.DocStateDead
+			cause = store.FailureCauseDeadLink
 		}
-		require.NoError(t, docs.UpdateState(ctx, docID, state))
+		require.NoError(t, docs.MarkFailed(ctx, docID, cause))
 	}
 	live := seedDocs(t, db, "local", "https://example.com/l1", "https://example.com/l2",
 		"https://example.com/l3", "https://example.com/l4", "https://example.com/l5")

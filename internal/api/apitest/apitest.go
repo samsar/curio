@@ -173,12 +173,33 @@ func closeClientConns() {
 	http.DefaultClient.CloseIdleConnections()
 }
 
-// AddDocument creates a document with no content in state.
+// AddDocument creates a document with no content in state. A failed one
+// failed for store.FailureCauseOther and a dead one for a dead link, the
+// causes the store requires of them; AddFailedDocument names the cause.
 func (s *Server) AddDocument(t testing.TB, url string, state store.DocState) *store.Document {
 	t.Helper()
-	doc := &store.Document{TenantID: TenantID, URL: url, State: state}
+	var cause store.FailureCause
+	switch state {
+	case store.DocStateFailed:
+		cause = store.FailureCauseOther
+	case store.DocStateDead:
+		cause = store.FailureCauseDeadLink
+	case store.DocStatePending, store.DocStateFetched:
+	}
+	return s.addDocument(t, &store.Document{TenantID: TenantID, URL: url, State: state, FailureCause: cause})
+}
+
+// AddFailedDocument creates a document with no content that failed for
+// cause: dead for a dead link, failed for any other.
+func (s *Server) AddFailedDocument(t testing.TB, url string, cause store.FailureCause) *store.Document {
+	t.Helper()
+	return s.addDocument(t, &store.Document{TenantID: TenantID, URL: url, FailureCause: cause})
+}
+
+func (s *Server) addDocument(t testing.TB, doc *store.Document) *store.Document {
+	t.Helper()
 	if err := s.Deps.Documents.Create(context.Background(), doc); err != nil {
-		t.Fatalf("create document %s: %v", url, err)
+		t.Fatalf("create document %s: %v", doc.URL, err)
 	}
 	return doc
 }

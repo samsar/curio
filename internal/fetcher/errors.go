@@ -73,6 +73,13 @@ var (
 	// the fix goes straight out. Other TLS failures (alerts, resets
 	// mid-handshake, a non-TLS answer) stay retryable.
 	ErrTLSCertificate = errors.New("invalid TLS certificate")
+
+	// ErrUnsupported marks a URL or a response no fetcher reads: a YouTube
+	// URL that names no video (a channel page), a GitHub URL of a page the
+	// GitHub fetcher doesn't read (a profile, a repository's actions), a
+	// response that is neither HTML nor a PDF. Always wrapped in a
+	// PermanentError: the same URL is as unreadable next time.
+	ErrUnsupported = errors.New("unsupported")
 )
 
 // HTTPStatusError is a non-2xx answer from an upstream. URL is the URL that

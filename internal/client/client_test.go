@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -501,10 +502,10 @@ func TestRefetchAndReindex(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, forced.JobID)
 
-	all, err := c.RefetchAll(ctx, "fetched")
+	all, err := c.RefetchAll(ctx, client.RefetchAllOpts{State: "fetched"})
 	require.NoError(t, err)
 	assert.Equal(t, 1, all.JobsEnqueued)
-	_, err = c.RefetchAll(ctx, "bogus")
+	_, err = c.RefetchAll(ctx, client.RefetchAllOpts{State: "bogus"})
 	requireStatus(t, err, http.StatusBadRequest)
 
 	one, err := c.ReindexDocument(ctx, fetched.ID)
@@ -516,6 +517,55 @@ func TestRefetchAndReindex(t *testing.T) {
 	reindexed, err = c.ReindexAll(ctx, "")
 	require.NoError(t, err)
 	assert.Zero(t, reindexed.JobsEnqueued, "nothing is fetched any more")
+}
+
+// TestFailureCauses: a refetch-all by cause sends the state and the cause,
+// escaped, and requeues only what they match; documents decode their
+// causes.
+func TestFailureCauses(t *testing.T) {
+	s, c := start(t)
+	ctx := context.Background()
+	blocked := s.AddFailedDocument(t, "https://example.com/blocked", store.FailureCauseAntiBot)
+	s.AddFailedDocument(t, "https://example.com/slow", store.FailureCauseTimeout)
+	gone := s.AddFailedDocument(t, "https://example.com/gone", store.FailureCauseDeadLink)
+
+	doc, err := c.GetDocument(ctx, blocked.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", doc.State)
+	assert.Equal(t, "anti_bot", doc.FailureCause)
+	list, err := c.ListDocuments(ctx, client.ListDocumentsOpts{State: "dead"})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, "dead_link", list.Items[0].FailureCause)
+
+	var sent url.Values
+	fake := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		sent = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprint(w, `{"jobs_enqueued":3}`)
+	})
+	res, err := fake.RefetchAll(ctx, client.RefetchAllOpts{State: "failed", Cause: "anti bot&state=dead"})
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.JobsEnqueued)
+	assert.Equal(t, url.Values{"state": {"failed"}, "cause": {"anti bot&state=dead"}}, sent, "each value escaped")
+
+	_, err = c.RefetchAll(ctx, client.RefetchAllOpts{Cause: "dead_link"})
+	requireStatus(t, err, http.StatusBadRequest)
+
+	res, err = c.RefetchAll(ctx, client.RefetchAllOpts{Cause: "anti_bot"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.JobsEnqueued)
+	res, err = c.RefetchAll(ctx, client.RefetchAllOpts{State: "dead", Cause: "dead_link"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.JobsEnqueued)
+	for _, d := range []*store.Document{blocked, gone} {
+		got, err := c.GetDocument(ctx, d.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "pending", got.State)
+		assert.Empty(t, got.FailureCause)
+	}
+	assert.Equal(t, 2, countRows(t, s, "jobs"))
 }
 
 func TestJobs(t *testing.T) {

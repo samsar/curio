@@ -375,3 +375,140 @@ func TestBookmarks_Count(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n)
 }
+
+// TestDocuments_FailureSummary: the tenant's failed and dead documents by
+// cause, the most first and ties by cause, each with its hosts, the most
+// first and ties by host, cut at topHosts. A host is the URL's authority,
+// lowercased, port kept and www. distinct; a URL with none counts toward
+// its cause alone.
+func TestDocuments_FailureSummary(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	docs := NewDocuments(db)
+
+	empty, err := docs.FailureSummary(ctx, "local", 3)
+	require.NoError(t, err)
+	assert.Equal(t, store.FailureSummary{Causes: []store.CauseCount{}}, empty)
+
+	fail := func(tenantID, url string, cause store.FailureCause) {
+		t.Helper()
+		require.NoError(t, docs.Create(ctx, &store.Document{TenantID: tenantID, URL: url, FailureCause: cause}))
+	}
+	for _, url := range []string{"https://EXAMPLE.com/a", "https://example.com/b", "https://www.example.com/c",
+		"https://example.com:8443/d", "https://c.example/e", "https://b.example/f"} {
+		fail("local", url, store.FailureCauseAntiBot)
+	}
+	fail("local", "https://slow.example/a", store.FailureCauseTimeout)
+	fail("local", "not-a-url", store.FailureCauseTimeout)
+	fail("local", "https://gone.example/a", store.FailureCauseDeadLink)
+	fail("local", "https://gone.example/b", store.FailureCauseDeadLink)
+	fail("local", "https://walled.example/a", store.FailureCauseLoginWall)
+	fail("other", "https://example.com/theirs", store.FailureCauseAntiBot)
+	seedDoc(t, docs, "https://example.com/fetched", store.DocStateFetched)
+	seedDoc(t, docs, "https://example.com/pending", store.DocStatePending)
+
+	got, err := docs.FailureSummary(ctx, "local", 3)
+	require.NoError(t, err)
+	assert.Equal(t, store.FailureSummary{Total: 11, Causes: []store.CauseCount{
+		{Cause: store.FailureCauseAntiBot, Count: 6, Hosts: []store.HostCount{
+			{Host: "example.com", Count: 2}, {Host: "b.example", Count: 1}, {Host: "c.example", Count: 1}}},
+		{Cause: store.FailureCauseDeadLink, Count: 2, Hosts: []store.HostCount{{Host: "gone.example", Count: 2}}},
+		{Cause: store.FailureCauseTimeout, Count: 2, Hosts: []store.HostCount{{Host: "slow.example", Count: 1}}},
+		{Cause: store.FailureCauseLoginWall, Count: 1, Hosts: []store.HostCount{{Host: "walled.example", Count: 1}}},
+	}}, got)
+
+	all, err := docs.FailureSummary(ctx, "local", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []store.HostCount{{Host: "example.com", Count: 2}, {Host: "b.example", Count: 1},
+		{Host: "c.example", Count: 1}, {Host: "example.com:8443", Count: 1}, {Host: "www.example.com", Count: 1}},
+		all.Causes[0].Hosts, "a port and www. make other hosts")
+	for _, c := range all.Causes {
+		for _, h := range c.Hosts {
+			assert.Len(t, listDocumentURLs(t, docs, "local", store.ListDocumentsOpts{Cause: c.Cause, Host: h.Host}),
+				h.Count, "the list's host filter finds what %s at %s counts", c.Cause, h.Host)
+		}
+	}
+
+	for _, n := range []int{0, -1} {
+		none, err := docs.FailureSummary(ctx, "local", n)
+		require.NoError(t, err)
+		for _, c := range none.Causes {
+			assert.Empty(t, c.Hosts, "topHosts %d", n)
+		}
+	}
+}
+
+func TestURLAuthority(t *testing.T) {
+	for u, want := range map[string]string{
+		"https://example.com/a":          "example.com",
+		"https://EXAMPLE.com/a":          "example.com",
+		"https://example.com:8443/a":     "example.com:8443",
+		"https://www.example.com/":       "www.example.com",
+		"https://example.com":            "example.com",
+		"https://example.com?next=/a":    "example.com",
+		"https://example.com#top":        "example.com",
+		"https://xn--bcher-kva.example/": "xn--bcher-kva.example",
+		"not-a-url":                      "",
+		"mailto:someone@example.com":     "",
+	} {
+		assert.Equal(t, want, urlAuthority(u), u)
+	}
+}
+
+// TestJobs_ListWithDoc_ByDocument: a document's jobs, the tenant's only,
+// most recently updated first, and paged from a cursor like the rest of
+// the list.
+func TestJobs_ListWithDoc_ByDocument(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	q := NewJobs(db)
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	docID := insertDoc(t, db, "local", "https://example.com/a", store.DocStateFetched, base)
+	otherDoc := insertDoc(t, db, "local", "https://example.com/b", store.DocStateFetched, base)
+	rows := []jobRow{
+		{kind: store.JobKindIndex, status: store.JobStatusDone},
+		{kind: store.JobKindFetch, status: store.JobStatusDone},
+		{kind: store.JobKindFetch, status: store.JobStatusFailed, lastError: "HTTP 503"},
+	}
+	want := make([]string, len(rows)) // newest first
+	for i, row := range rows {
+		row.docID, row.updatedAt = docID, base.Add(-time.Duration(i)*time.Minute)
+		want[i] = insertJobRow(t, db, row)
+	}
+	insertJobRow(t, db, jobRow{kind: store.JobKindFetch, status: store.JobStatusDone, docID: otherDoc, updatedAt: base})
+	insertJobRow(t, db, jobRow{tenantID: "other", kind: store.JobKindFetch, status: store.JobStatusDone,
+		docID: docID, updatedAt: base})
+
+	ids := func(opts store.ListJobsOpts) []string {
+		t.Helper()
+		opts.DocumentID = docID
+		jobs, err := q.ListWithDoc(ctx, "local", opts)
+		require.NoError(t, err)
+		out := make([]string, len(jobs))
+		for i, j := range jobs {
+			assert.Equal(t, "https://example.com/a", j.URL)
+			out[i] = j.ID
+		}
+		return out
+	}
+	assert.Equal(t, want, ids(store.ListJobsOpts{}), "newest first, this tenant's only")
+	assert.Equal(t, want[:2], ids(store.ListJobsOpts{Status: store.JobStatusDone}))
+	assert.Equal(t, want[1:], ids(store.ListJobsOpts{Kind: store.JobKindFetch}))
+
+	var walked []string
+	var after store.PageKey
+	for range 5 {
+		jobs, err := q.ListWithDoc(ctx, "local", store.ListJobsOpts{DocumentID: docID, Limit: 1, After: after})
+		require.NoError(t, err)
+		if len(jobs) == 0 {
+			break
+		}
+		walked = append(walked, jobs[0].ID)
+		after = store.PageKey{At: jobs[0].UpdatedAt, ID: jobs[0].ID}
+	}
+	assert.Equal(t, want, walked)
+
+	none, err := q.ListWithDoc(ctx, "local", store.ListJobsOpts{DocumentID: "no-such-document"})
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}

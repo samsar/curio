@@ -301,12 +301,16 @@ func seedLegacyHome(t *testing.T, home *curiohome.Home) (seededJobs, string) {
 	require.NoError(t, err)
 	defer db.Close()
 	seeded := enqueueSeededJobs(t, db)
-	doc := &store.Document{TenantID: "local", URL: "https://example.com/a", State: store.DocStateFetched}
-	require.NoError(t, sqlitestore.NewDocuments(db).Create(ctx, doc))
-	ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK}
+	// The document store writes the latest schema; the document goes in as
+	// the home's older one holds it.
+	const docID = "legacy-document"
+	_, err = db.ExecContext(ctx, `INSERT INTO documents (id, tenant_id, url, state)
+		VALUES (?, 'local', 'https://example.com/a', 'fetched')`, docID)
+	require.NoError(t, err)
+	ext := &store.DocumentExtraction{DocumentID: docID, Fetcher: "test", Status: store.ExtractionStatusOK}
 	require.NoError(t, sqlitestore.NewExtractions(db).Create(ctx, ext))
 	chunks := sqlitestore.NewChunks(db, 768)
-	require.NoError(t, chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, "", nil,
+	require.NoError(t, chunks.ReplaceForDocument(ctx, docID, ext.ID, "", nil,
 		[]store.ChunkInput{{Text: "kept", Embedding: make([]float32, 768)}}))
 	var id string
 	require.NoError(t, db.QueryRow(`SELECT id FROM chunks`).Scan(&id))

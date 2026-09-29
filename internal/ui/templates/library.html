@@ -10,6 +10,7 @@ its #more, holding the link after it or nothing, replaces this one.
 <label>Type <select name="content_type"><option value="">any</option>{{range contentTypes}}<option{{if eq . $.Filters.ContentType}} selected{{end}}>{{.}}</option>{{end}}</select></label>
 <label>Host <input name="host" value="{{.Filters.Host}}" placeholder="example.com"></label>
 <label>Folder <input name="folder" value="{{.Filters.Folder}}" placeholder="/Reading"></label>
+{{with .Filters.Cause}}<input type="hidden" name="cause" value="{{.}}">{{end}}
 {{with .Filters.Limit}}<input type="hidden" name="limit" value="{{.}}">{{end}}
 <button type="submit">Filter</button>
 </form>

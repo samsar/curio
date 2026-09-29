@@ -86,8 +86,9 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			}, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes}}},
 		},
 		PageLibrary: Library{
-			Layout:  layout(NavLibrary),
-			Filters: LibraryFilters{State: evilAttr, ContentType: evilScript, Host: evilQuotes, Folder: evilURL, Limit: 7},
+			Layout: layout(NavLibrary),
+			Filters: LibraryFilters{State: evilAttr, ContentType: evilScript, Host: evilQuotes, Folder: evilURL,
+				Cause: evilScript, Limit: 7},
 			Rows: []LibraryRow{{DocumentID: evilAttr, Title: evilScript, URL: evilURL, State: evilQuotes,
 				ContentType: evilAttr, UpdatedAt: at, LastError: evilScript}},
 			NextCursor: evilAttr,

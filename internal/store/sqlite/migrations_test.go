@@ -510,6 +510,9 @@ func TestMigration007_BackfillsJobDocumentID(t *testing.T) {
 	}, docIDs)
 	assert.Empty(t, dumpRows(t, db, `PRAGMA foreign_key_check`))
 
+	// The store reads the latest schema.
+	_, err = p.Up(ctx)
+	require.NoError(t, err)
 	docs, err := NewDocuments(db).ListWithLastError(ctx, "local", store.ListDocumentsOpts{})
 	require.NoError(t, err)
 	require.Len(t, docs, 2)
@@ -701,6 +704,207 @@ func TestMigration013_KeepAwake(t *testing.T) {
 	_, err = p.DownTo(ctx, 12)
 	require.NoError(t, err)
 	assert.Equal(t, schemaBefore, schemaDump(t, db), "011's table, byte for byte")
+}
+
+// abuseBlockError is the reason Jina gives for a domain it blocks.
+const abuseBlockError = "AbuseAlleviationError: Anonymous access to domain twitter.com blocked until " +
+	"Mon Sep 28 2026 10:00:00 GMT+0000 (Coordinated Universal Time) due to previous abuse found on " +
+	"https://twitter.com/someone: DDoS attack suspected: Too many requests"
+
+// TestMigration014_FailureCause: 014 gives each failed or dead document the
+// cause the error of its most recent failed job reads as, and every other
+// document none. Nothing else in the rows changes, the invariant holds,
+// the cause index is there, Down restores 013's schema exactly, and Up runs
+// again.
+func TestMigration014_FailureCause(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 13)
+	const (
+		thin      = "native: login wall or thin content (extracted text < 500 bytes)"
+		origin403 = "native: HTTP 403 Forbidden: origin blocked the request (likely anti-bot)"
+	)
+	type failedJob struct{ kind, lastError string }
+	fetch := func(lastError string) []failedJob { return []failedJob{{"fetch", lastError}} }
+	cases := []struct {
+		name  string
+		state store.DocState
+		jobs  []failedJob // failed jobs, oldest first
+		want  store.FailureCause
+	}{
+		{"an anti-bot cache hit, cached from a Jina rejection", store.DocStateFailed, fetch(
+			"permanent failure: native: origin blocked the request (likely anti-bot) (cached: jina: answer is not " +
+				"the page: " + thin[len("native: "):] + " (after " + origin403 + "))"), store.FailureCauseAntiBot},
+		{"an anti-bot cache hit, cached from a Jina refusal", store.DocStateFailed, fetch(
+			"permanent failure: native: origin blocked the request (likely anti-bot) (cached: jina: refused the " +
+				"target: HTTP 403 Forbidden: " + abuseBlockError + " (after " + origin403 + "))"), store.FailureCauseAntiBot},
+		{"an unreachable cache hit", store.DocStateFailed, fetch(
+			"permanent failure: native: host unreachable (cached: native: fetch: host unreachable: " +
+				`Get "https://gone.example/a": dial tcp: lookup gone.example: no such host)`), store.FailureCauseUnreachable},
+		{"a login-wall cache hit", store.DocStateFailed, fetch(
+			"permanent failure: native: login wall or thin content (cached: native: site-wide login wall or thin " +
+				"content (redirected to a login/auth path: /login))"), store.FailureCauseLoginWall},
+
+		{"Jina's domain block", store.DocStateFailed, fetch(
+			"permanent failure: jina: refused the target: HTTP 403 Forbidden: " + abuseBlockError + " (after " + thin + ")"),
+			store.FailureCauseJinaRefused},
+		{"Jina's 422 about a timeout", store.DocStateFailed, fetch(
+			"permanent failure: jina: refused the target: HTTP 422 Unprocessable Entity: TimeoutError: page.goto: " +
+				"Timeout 30000ms exceeded (after " + thin + ")"), store.FailureCauseJinaRefused},
+		{"a thin Jina answer", store.DocStateFailed, fetch(
+			"permanent failure: jina: answer is not the page: login wall or thin content (extracted text < 500 bytes) " +
+				"(after " + thin + ")"), store.FailureCauseLoginWall},
+		{"Jina's CAPTCHA warning", store.DocStateFailed, fetch(
+			"permanent failure: jina: answer is not the page: origin blocked the request (likely anti-bot) " +
+				"(bot challenge: jina reports a CAPTCHA) (after " + thin + ")"), store.FailureCauseAntiBot},
+		{"target 403 through Jina", store.DocStateFailed, fetch(
+			"fetch failed: jina: answer is not the page: target answered HTTP 403 Forbidden: origin blocked the " +
+				"request (likely anti-bot) (after " + origin403 + ")"), store.FailureCauseAntiBot},
+		{"target 401 through Jina", store.DocStateFailed, fetch(
+			"fetch failed: jina: answer is not the page: target answered HTTP 401 Unauthorized (after " + origin403 + ")"),
+			store.FailureCauseHTTPError},
+		{"target 500 through Jina", store.DocStateFailed, fetch(
+			"fetch failed: jina: target failed for now: target answered HTTP 500 Internal Server Error (after " +
+				origin403 + ")"), store.FailureCauseHTTPError},
+		{"target 429 through Jina", store.DocStateFailed, fetch(
+			"fetch failed: jina: target failed for now: target answered HTTP 429 Too Many Requests (after " + thin + ")"),
+			store.FailureCauseRateLimited},
+		{"Jina's own 403", store.DocStateFailed, fetch(
+			"fetch failed: jina: HTTP 403 Forbidden: OperationNotAllowedError: This operation is not allowed (after " +
+				origin403 + ")"), store.FailureCauseAntiBot},
+
+		{"another site's login page", store.DocStateFailed, fetch(
+			"permanent failure: native: offsite login wall or thin content (redirected onto another site's login " +
+				"page: accounts.example.org/signin)"), store.FailureCauseLoginWall},
+		{"an expired certificate", store.DocStateFailed, fetch(
+			`permanent failure: native: fetch: invalid TLS certificate: Get "https://expired.example/": tls: failed ` +
+				"to verify certificate: x509: certificate has expired or is not yet valid"), store.FailureCauseTLS},
+		{"origin 401", store.DocStateFailed, fetch("permanent failure: native: HTTP 401 Unauthorized"),
+			store.FailureCauseHTTPError},
+		{"origin 999", store.DocStateFailed, fetch("permanent failure: native: HTTP 999"), store.FailureCauseHTTPError},
+		{"origin 500", store.DocStateFailed, fetch("fetch failed: native: HTTP 500 Internal Server Error"),
+			store.FailureCauseHTTPError},
+		{"origin 429", store.DocStateFailed, fetch("fetch failed: native: HTTP 429 Too Many Requests"),
+			store.FailureCauseRateLimited},
+		{"YouTube's cooldown", store.DocStateFailed, fetch(
+			"fetch failed: youtube: not run, rate-limit cooldown has 2m0s left: HTTP 429 Too Many Requests"),
+			store.FailureCauseRateLimited},
+		{"GitHub's cooldown", store.DocStateFailed, fetch(
+			"fetch failed: github: https://api.github.com/repos/owner/repo: not sent, rate-limit cooldown has " +
+				"24m30s left: rate limited: HTTP 429 Too Many Requests"), store.FailureCauseRateLimited},
+		{"a channel page", store.DocStateFailed, fetch(
+			"permanent failure: youtube: cannot extract video ID from https://www.youtube.com/@channel"),
+			store.FailureCauseUnsupported},
+		{"a GitHub profile", store.DocStateFailed, fetch(
+			"permanent failure: github: not a recognized GitHub URL: https://github.com/someone"),
+			store.FailureCauseUnsupported},
+		{"an image", store.DocStateFailed, fetch(
+			`permanent failure: native: unsupported content type "image/png" (not HTML); URL: https://example.com/a.png`),
+			store.FailureCauseUnsupported},
+		{"no fetcher", store.DocStateFailed, fetch(
+			"permanent failure: no fetcher for https://example.com/x: fetcher: no fetcher matches url"),
+			store.FailureCauseUnsupported},
+		{"a client timeout", store.DocStateFailed, fetch(
+			`fetch failed: native: fetch: Get "https://slow.example/": context deadline exceeded ` +
+				"(Client.Timeout exceeded while awaiting headers)"), store.FailureCauseTimeout},
+		{"a DNS timeout", store.DocStateFailed, fetch(
+			`fetch failed: native: fetch: Get "https://slow.example/": dial tcp: lookup slow.example: i/o timeout`),
+			store.FailureCauseTimeout},
+		{"our network unreachable", store.DocStateFailed, fetch(
+			`fetch failed: native: fetch: Get "https://example.com/": dial tcp 192.0.2.1:443: connect: network is unreachable`),
+			store.FailureCauseNetwork},
+		{"a TLS alert", store.DocStateFailed, fetch(
+			`fetch failed: native: fetch: Get "https://example.com/": remote error: tls: handshake failure`),
+			store.FailureCauseNetwork},
+		{"a redirect loop", store.DocStateFailed, fetch(
+			`fetch failed: native: fetch: Get "/a": stopped after 10 redirects`), store.FailureCauseNetwork},
+		{"GitHub's 404", store.DocStateFailed, fetch(
+			"permanent failure: github: https://api.github.com/repos/owner/gone: HTTP 404 Not Found"),
+			store.FailureCauseHTTPError},
+		{"a body over the cap", store.DocStateFailed, fetch(
+			"permanent failure: native: https://example.com/huge: response too large (limit 33554432 bytes)"),
+			store.FailureCauseTooLarge},
+		{"a private video", store.DocStateFailed, fetch(
+			"permanent failure: youtube: ERROR: [youtube] abc: Private video. Sign in if you've been granted access " +
+				"to this video"), store.FailureCauseOther},
+		{"an orphan out of attempts", store.DocStateFailed, fetch(orphanExhaustedError), store.FailureCauseOther},
+		{"a handler panic", store.DocStateFailed, fetch(
+			"panic: runtime error: invalid memory address or nil pointer dereference (permanent failure)"),
+			store.FailureCauseOther},
+
+		{"an index failure after a fetch failure", store.DocStateFailed,
+			[]failedJob{{"fetch", "fetch failed: native: HTTP 500 Internal Server Error"},
+				{"index", "index: embed: ollama unreachable"}}, store.FailureCauseIndex},
+		{"a fetch failure after an index failure", store.DocStateFailed,
+			[]failedJob{{"index", "index: embed: ollama unreachable"},
+				{"fetch", "fetch failed: native: HTTP 429 Too Many Requests"}}, store.FailureCauseRateLimited},
+		{"a failure without an error", store.DocStateFailed, fetch(""), store.FailureCauseOther},
+		{"no failed job", store.DocStateFailed, nil, store.FailureCauseOther},
+		{"dead, with no failed job", store.DocStateDead, nil, store.FailureCauseDeadLink},
+		{"dead, whatever its error says", store.DocStateDead, fetch("fetch failed: native: HTTP 500 Internal Server Error"),
+			store.FailureCauseDeadLink},
+		{"fetched after a failed job", store.DocStateFetched, fetch("fetch failed: native: HTTP 500"), ""},
+		{"pending after a failed job", store.DocStatePending, fetch(origin403), ""},
+	}
+	for i, tc := range cases {
+		id := fmt.Sprintf("d%02d", i)
+		_, err := db.Exec(`INSERT INTO documents (id, tenant_id, url, state, updated_at)
+			VALUES (?, 'local', ?, ?, '2024-01-01T00:00:00.000Z')`, id, "https://example.com/"+id, tc.state)
+		require.NoError(t, err)
+		for j, job := range tc.jobs {
+			_, err := db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, attempts, last_error,
+				updated_at, document_id) VALUES (?, 'local', ?, json_object('document_id', ?), 'failed', 5, ?, ?, ?)`,
+				fmt.Sprintf("%s-j%d", id, j), job.kind, id, store.NullableString(job.lastError),
+				fmt.Sprintf("2024-01-01T00:0%d:00.000Z", j+1), id)
+			require.NoError(t, err)
+		}
+	}
+	var columns string
+	require.NoError(t, db.QueryRow(`SELECT group_concat(name, ', ') FROM pragma_table_info('documents')`).Scan(&columns))
+	docsQuery := `SELECT ` + columns + ` FROM documents ORDER BY id`
+	docsBefore := dumpRows(t, db, docsQuery)
+	jobsBefore := dumpRows(t, db, `SELECT * FROM jobs ORDER BY id`)
+	schemaBefore := schemaDump(t, db)
+
+	causes := func() map[string]store.FailureCause {
+		t.Helper()
+		got := map[string]store.FailureCause{}
+		for _, row := range dumpRows(t, db, `SELECT id, COALESCE(failure_cause, '') FROM documents`) {
+			got[row[0].(string)] = store.FailureCause(row[1].(string))
+		}
+		return got
+	}
+	want := map[string]store.FailureCause{}
+	for i, tc := range cases {
+		want[fmt.Sprintf("d%02d", i)] = tc.want
+	}
+
+	_, err := p.UpTo(ctx, 14)
+	require.NoError(t, err)
+	got := causes()
+	for i, tc := range cases {
+		id := fmt.Sprintf("d%02d", i)
+		assert.Equal(t, tc.want, got[id], "%s (%s)", tc.name, id)
+	}
+	assert.Equal(t, docsBefore, dumpRows(t, db, docsQuery), "updated_at and every other column untouched")
+	assert.Equal(t, jobsBefore, dumpRows(t, db, `SELECT * FROM jobs ORDER BY id`))
+	assertCauseInvariant(t, db, "after the backfill")
+	var indexed string
+	require.NoError(t, db.QueryRow(`SELECT group_concat(name, ', ') FROM
+		(SELECT name FROM pragma_index_info('idx_documents_tenant_cause_updated') ORDER BY seqno)`).Scan(&indexed))
+	assert.Equal(t, "tenant_id, failure_cause, updated_at, id", indexed)
+	var partial bool
+	require.NoError(t, db.QueryRow(`SELECT partial FROM pragma_index_list('documents')
+		WHERE name = 'idx_documents_tenant_cause_updated'`).Scan(&partial))
+	assert.True(t, partial)
+
+	_, err = p.DownTo(ctx, 13)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "013's schema, byte for byte")
+	assert.Equal(t, docsBefore, dumpRows(t, db, docsQuery))
+
+	_, err = p.UpTo(ctx, 14)
+	require.NoError(t, err)
+	assert.Equal(t, want, causes(), "Up again gives the same causes")
 }
 
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over

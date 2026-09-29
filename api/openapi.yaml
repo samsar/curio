@@ -302,9 +302,10 @@ paths:
       operationId: listDocuments
       summary: List documents, most recently updated first
       description: >
-        Every filter given must match. Each is checked on the documents the
-        list walks in its order, so a filter that matches few documents
-        reads more of the list to fill a page.
+        Every filter given must match. The cause filter reads only the
+        documents that failed for its cause. Each other filter is checked on
+        the documents the list walks in its order, so one that matches few
+        documents reads more of the list to fill a page.
       parameters:
         - in: query
           name: state
@@ -327,6 +328,10 @@ paths:
             and case-sensitively; a trailing "/" is ignored and "/" alone is
             no filter.
           schema: { type: string }
+        - in: query
+          name: cause
+          description: Documents that failed for this cause (dead ones for dead_link).
+          schema: { $ref: "#/components/schemas/FailureCause" }
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Cursor" }
       responses:
@@ -465,21 +470,33 @@ paths:
         name: state
         description: "Only refetch documents in this state. Default: pending, fetched and failed; dead documents only when asked for."
         schema: { $ref: "#/components/schemas/DocState" }
+      - in: query
+        name: cause
+        description: >
+          Only refetch documents that failed for this cause, among the
+          state's or the default's. dead_link needs state=dead: dead links'
+          documents are dead, which the default leaves out.
+        schema: { $ref: "#/components/schemas/FailureCause" }
     post:
       tags: [documents]
       operationId: refetchAllDocuments
       summary: Reset matching documents to pending and enqueue a fetch job for each
       description: >
-        All-or-nothing: every matching document is reset and gets a fetch job
-        in one transaction, or nothing changes. There is no parent job to
-        poll; watch GET /v1/jobs or GET /v1/stats instead.
+        All-or-nothing: every matching document is reset, its failure cause
+        cleared, and gets a fetch job in one transaction, or nothing
+        changes. There is no parent job to poll; watch GET /v1/jobs or
+        GET /v1/stats instead.
       responses:
         "202":
           description: Fetch jobs enqueued
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JobsEnqueued" }
-        "400": { $ref: "#/components/responses/BadRequest" }
+        "400":
+          description: A state or cause outside its enum, or cause=dead_link without state=dead
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
         default: { $ref: "#/components/responses/Problem" }
 
   /v1/documents/{id}/reindex:
@@ -534,6 +551,27 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/JobsEnqueued" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /v1/failures:
+    get:
+      tags: [documents]
+      operationId: listFailures
+      summary: Count the failed and dead documents by cause, with the hosts most of each are on
+      description: >
+        Causes with no documents are left out; the others come the most
+        documents first, then by cause. Each names at most 5 hosts, the most
+        documents first, then by host. A host is as the documents list's
+        host filter matches it (lowercased, with its port, www. kept), so
+        GET /v1/documents?cause=C&host=H lists exactly the documents the
+        pair counts. A document whose URL has no host counts toward its
+        cause alone.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FailureSummary" }
         default: { $ref: "#/components/responses/Problem" }
 
   # ---------- search ----------
@@ -650,6 +688,12 @@ paths:
         - in: query
           name: kind
           schema: { $ref: "#/components/schemas/JobKind" }
+        - in: query
+          name: document_id
+          description: >
+            Only the jobs that work on this document. An ID no job works on,
+            a document's that doesn't exist included, lists none.
+          schema: { type: string }
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Cursor" }
       responses:
@@ -840,6 +884,22 @@ components:
     DocState:
       type: string
       enum: [pending, fetched, failed, dead]
+
+    FailureCause:
+      type: string
+      description: >
+        Why a failed or dead document failed: dead_link (the content is
+        gone; a dead document's cause, and only its), anti_bot (the site
+        blocked the request), login_wall (a login page, or too little text
+        to be the article), jina_refused (the Jina Reader fallback refused
+        the target, normally after the site served a page curio can't
+        use), tls (the certificate failed verification), unreachable (the host
+        doesn't resolve or refuses connections), timeout, network (any
+        other transport failure), rate_limited, http_error (any other
+        status), unsupported (a URL or content curio can't read), too_large
+        (over the body cap), index (fetched, then indexing gave up), other.
+      enum: [dead_link, anti_bot, login_wall, jina_refused, tls, unreachable, timeout, network, rate_limited,
+        http_error, unsupported, too_large, index, other]
 
     ContentType:
       type: string
@@ -1171,6 +1231,7 @@ components:
         language:           { type: string }
         word_count:         { type: integer }
         state:              { $ref: "#/components/schemas/DocState" }
+        failure_cause:      { $ref: "#/components/schemas/FailureCause" }
         current_extraction: { $ref: "#/components/schemas/Extraction" }
         created_at:         { type: string, format: date-time }
         updated_at:         { type: string, format: date-time }
@@ -1197,6 +1258,7 @@ components:
         title:         { type: string }
         content_type:  { $ref: "#/components/schemas/ContentType" }
         state:         { $ref: "#/components/schemas/DocState" }
+        failure_cause: { $ref: "#/components/schemas/FailureCause" }
         last_error:    { type: string, description: "Of the most recent failed job for the document" }
         markdown_path: { type: string, description: "Absolute on-disk path to the current extraction's markdown" }
         created_at:    { type: string, format: date-time }
@@ -1209,6 +1271,31 @@ components:
         items:       { type: array, items: { $ref: "#/components/schemas/DocumentListItem" } }
         next_cursor: { type: string, description: "Present exactly when another page follows; pass it as ?cursor" }
       required: [items]
+
+    FailureSummary:
+      type: object
+      properties:
+        total:  { type: integer, description: "Failed and dead documents: the sum of the causes' counts" }
+        causes: { type: array, items: { $ref: "#/components/schemas/FailureCauseCount" } }
+      required: [total, causes]
+
+    FailureCauseCount:
+      type: object
+      properties:
+        cause: { $ref: "#/components/schemas/FailureCause" }
+        count: { type: integer }
+        hosts:
+          type: array
+          description: At most 5, the most documents first, then by host
+          items: { $ref: "#/components/schemas/HostCount" }
+      required: [cause, count, hosts]
+
+    HostCount:
+      type: object
+      properties:
+        host:  { type: string }
+        count: { type: integer }
+      required: [host, count]
 
     RelatedResponse:
       type: object
