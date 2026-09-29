@@ -22,7 +22,7 @@ from a stored string.
 <a class="skip-link" href="#main">Skip to content</a>
 <header class="site">
 <div class="container">
-<a class="brand" href="{{navHref "overview"}}" aria-label="curio: overview">{{template "logo"}}<span class="word">curio</span></a>
+<a class="brand" href="{{navHref "search"}}" aria-label="curio: search">{{template "logo"}}<span class="word">curio</span></a>
 <nav aria-label="Main">
 {{range navItems}}<a href="{{.Href}}"{{if eq .Nav $.Layout.Nav}} aria-current="page"{{end}}>{{template "icon" .Icon}}<span>{{.Label}}</span></a>
 {{end}}</nav>

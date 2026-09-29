@@ -107,6 +107,19 @@ func urlTrail(u string) string {
 	return strings.Join(segments, " › ")
 }
 
+// interestName is an interest's label as a line of them names it: the
+// words before its first " and " when there are at least two of them, or
+// the whole label. "Mobile Ecosystems and Strategy" is "Mobile
+// Ecosystems", but "Identity and Access Management" stays whole, which one
+// word, "Identity", wouldn't name.
+func interestName(label string) string {
+	head, _, found := strings.Cut(label, " and ")
+	if found && len(strings.Fields(head)) >= 2 {
+		return head
+	}
+	return label
+}
+
 // maxShortErrorRunes is how much of an error a list shows: stored errors
 // run to thousands of characters, a subprocess's stderr to 64 KiB.
 const maxShortErrorRunes = 300
@@ -296,6 +309,17 @@ func stateBar(counts []Count) []BarSegment {
 		total += byState[state]
 	}
 	return barSegments(parts, total)
+}
+
+// causeBar draws the n documents that failed for cause as a bar scaled to
+// most, the count of the cause with the most: neutral for dead links, as
+// the dead state is drawn, and danger for every other cause.
+func causeBar(cause string, n, most int) []BarSegment {
+	class := "fill-danger"
+	if store.FailureCause(cause) == store.FailureCauseDeadLink {
+		class = "fill-neutral"
+	}
+	return barSegments([]barPart{{value: n, class: class}}, most)
 }
 
 // coverageBar draws the share of a clustering run's documents that are

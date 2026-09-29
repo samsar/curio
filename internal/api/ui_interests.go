@@ -9,9 +9,14 @@ import (
 	"github.com/samsar/curio/internal/ui"
 )
 
-// interestCardMembers is how many of an interest's documents its card on
-// the Interests page lists.
-const interestCardMembers = 3
+const (
+	// interestCardMembers is how many of an interest's documents its card
+	// on the Interests page lists.
+	interestCardMembers = 3
+	// homeInterests is how many of the largest interests the search home
+	// names.
+	homeInterests = 6
+)
 
 // interests answers GET /ui/interests: the latest clustering run's
 // largest interests, each with a few members, as GET /v1/interests lists

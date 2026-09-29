@@ -3,18 +3,27 @@ The next page is a plain link carrying the filters and the cursor. htmx
 turns it into "load more": the next page's rows are appended to #rows, and
 its #more, holding the link after it or nothing, replaces this one. Every
 page has a #more, an empty one without rows, so the last one clears it.
+htmx asks for the next page with how many rows the page shows so far
+(shown), so that its #showing, which replaces this one, counts them all;
+the plain link leaves it out, since that page shows only its own rows.
+
+The state tabs count the whole library, so they show counts only when
+state is the one filter. The form carries the state as a hidden input:
+Apply keeps the tab.
 */}}
 {{define "content" -}}
 <div class="page-head"><div class="titles">
 <h1>Library</h1>
-<p class="lede">Every page curio saved for you, most recently updated first.</p>
+<p class="lede">{{with .Counts}}{{count .Documents "document" "documents"}} from {{count .Bookmarks "bookmark" "bookmarks"}}.{{else}}Every page curio saved for you.{{end}}</p>
 </div></div>
-<form class="toolbar" action="/ui/library" method="get">
+<form class="toolbar" action="{{navHref "library"}}" method="get">
+<div class="segmented" role="group" aria-label="State">{{range .StateTabs}}<a href="{{.Href}}"{{if .Current}} aria-current="page"{{end}}>{{.Label}}{{if .Counted}} <span class="count">{{num .Count}}</span>{{end}}</a>{{end}}</div>
+<div class="grow"></div>
 <div class="filters">
-<label class="field"><span>State</span><select class="select" name="state"><option value="">Any state</option>{{range docStates}}<option{{if eq . $.Filters.State}} selected{{end}}>{{.}}</option>{{end}}</select></label>
 <label class="field"><span>Type</span><select class="select" name="content_type"><option value="">Any type</option>{{range contentTypes}}<option{{if eq . $.Filters.ContentType}} selected{{end}}>{{.}}</option>{{end}}</select></label>
 <label class="field"><span>Host</span><input class="input" name="host" value="{{.Filters.Host}}" placeholder="example.com"></label>
 <label class="field"><span>Folder</span><input class="input" name="folder" value="{{.Filters.Folder}}" placeholder="/Reading"></label>
+{{with .Filters.State}}<input type="hidden" name="state" value="{{.}}">{{end}}
 {{with .Filters.Cause}}<input type="hidden" name="cause" value="{{.}}">{{end}}
 {{with .Filters.Limit}}<input type="hidden" name="limit" value="{{.}}">{{end}}
 <button class="btn" type="submit">Apply</button>
@@ -36,8 +45,9 @@ page has a #more, an empty one without rows, so the last one clears it.
 {{end}}</tbody>
 </table>
 </div>
-<div class="load-more" id="more">{{with .NextCursor}}<a class="btn" href="{{libraryHref $.Filters .}}" hx-get="{{libraryHref $.Filters .}}" hx-target="#rows" hx-select="#rows > tr" hx-swap="beforeend" hx-select-oob="#more">Load {{$.PageSize}} more</a>{{end}}</div>
+<div class="load-more" id="more">{{with .NextCursor}}<a class="btn" href="{{libraryHref $.Filters .}}" hx-get="{{libraryMoreHref $.Filters . $.ShownThrough}}" hx-target="#rows" hx-select="#rows > tr" hx-swap="beforeend" hx-select-oob="#more,#showing">Load {{$.PageSize}} more</a>{{end}}</div>
 </div>
+<p class="pager-summary mt-4" id="showing">Showing {{with .OfTotal}}{{num $.ShownThrough}} of {{count . "document" "documents"}}{{else}}{{count .ShownThrough "document" "documents"}}{{end}}, most recently updated first.</p>
 {{else}}
 <div class="card">
 {{if .Filters.Filtered}}<div class="empty">

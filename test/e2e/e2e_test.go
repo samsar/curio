@@ -322,8 +322,8 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 var stylesheetRE = regexp.MustCompile(`<link rel="stylesheet" href="(/ui/static/[^"]+)">`)
 
 // assertDashboard checks that the daemon at baseURL serves the dashboard's
-// pages for the fetched document docID, and the stylesheet they load, each
-// under the dashboard's CSP.
+// pages for the fetched document docID, the search home and Status among
+// them, and the stylesheet they load, each under the dashboard's CSP.
 func assertDashboard(t *testing.T, baseURL, docID string) {
 	t.Helper()
 	get := func(path string) (http.Header, string) {
@@ -339,13 +339,16 @@ func assertDashboard(t *testing.T, baseURL, docID string) {
 		assert.Equal(t, ui.CSP, resp.Header.Get("Content-Security-Policy"), path)
 		return resp.Header, string(body)
 	}
-	_, overview := get("/ui/")
+	_, home := get("/ui/")
+	assert.Contains(t, home, `<div class="landing">`, "the search home")
 	_, doc := get("/ui/documents/" + docID)
 	assert.Contains(t, doc, "An Introduction to Zymurgy")
-	_, results := get("/ui/search?q=" + distinctive)
+	_, results := get("/ui/?q=" + distinctive)
 	assert.Contains(t, results, `<a href="/ui/documents/`+docID+`" title="`, "a result links to its document's page")
-	css := stylesheetRE.FindStringSubmatch(overview)
-	require.NotNil(t, css, "the Overview loads a stylesheet")
+	_, status := get("/ui/status")
+	assert.Contains(t, status, "<h1>Status</h1>")
+	css := stylesheetRE.FindStringSubmatch(home)
+	require.NotNil(t, css, "the search home loads a stylesheet")
 	header, _ := get(css[1])
 	assert.Equal(t, "text/css; charset=utf-8", header.Get("Content-Type"))
 }

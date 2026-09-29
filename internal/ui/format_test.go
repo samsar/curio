@@ -249,6 +249,40 @@ func TestBars(t *testing.T) {
 		"never past the bar's end")
 }
 
+// TestCauseBar: a cause's bar is scaled to the cause with the most, dead
+// links drawn neutral like the dead state, every other cause danger.
+func TestCauseBar(t *testing.T) {
+	assert.Equal(t, []BarSegment{{Class: "fill-danger", X: "0.000", Width: "100.000"}}, causeBar("anti_bot", 926, 926))
+	assert.Equal(t, []BarSegment{{Class: "fill-neutral", X: "0.000", Width: "88.445"}}, causeBar("dead_link", 819, 926))
+	assert.Equal(t, []BarSegment{{Class: "fill-danger", X: "0.000", Width: "26.350"}}, causeBar(evilAttr, 244, 926),
+		"a cause this build has no words for")
+	assert.Equal(t, []BarSegment{{Class: "fill-danger", X: "0.000", Width: "100.000"}}, causeBar("tls", 5, 3),
+		"never past the bar's end")
+	for _, tc := range []struct{ n, most int }{{0, 926}, {-1, 926}, {5, 0}, {5, -1}} {
+		assert.Empty(t, causeBar("anti_bot", tc.n, tc.most), "%d of %d", tc.n, tc.most)
+	}
+}
+
+// TestInterestName: a label is cut at its first " and " only when the
+// words before it are at least two.
+func TestInterestName(t *testing.T) {
+	for label, want := range map[string]string{
+		"Mobile Ecosystems and Strategy":  "Mobile Ecosystems",
+		"Job Search and Interviewing":     "Job Search",
+		"Java GUI Focus and Events":       "Java GUI Focus",
+		"Identity and Access Management":  "Identity and Access Management",
+		"Economic and Social Instability": "Economic and Social Instability",
+		"Rock and Roll":                   "Rock and Roll",
+		"A and B and C":                   "A and B and C",
+		"AWS Serverless Architecture":     "AWS Serverless Architecture",
+		"":                                "",
+		evilScript + " " + evilAttr:       evilScript + " " + evilAttr,
+		"Research andDevelopment":         "Research andDevelopment",
+	} {
+		assert.Equal(t, want, interestName(label), label)
+	}
+}
+
 // milli reads a BarSegment's attribute back in thousandths.
 func milli(t *testing.T, decimal string) int {
 	t.Helper()

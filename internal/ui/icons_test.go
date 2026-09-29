@@ -70,7 +70,7 @@ func TestIcons(t *testing.T) {
 		assert.Contains(t, used, name, "an icon no page uses")
 	}
 
-	set := newRenderer(t).pages[PageOverview]
+	set := newRenderer(t).pages[PageStatus]
 	svgRE := regexp.MustCompile(`^<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">(?:<[a-z]+ [^<>]*/>)+</svg>$`)
 	for _, name := range defined {
 		var buf bytes.Buffer

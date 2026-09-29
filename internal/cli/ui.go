@@ -18,8 +18,9 @@ func newUICmd(env *daemonctl.Env, openURL func(context.Context, string) error) *
 	cmd := &cobra.Command{
 		Use:   "ui",
 		Short: "Open the dashboard in your browser",
-		Long: `Open curio's dashboard in your browser: the library's counts, the queue and
-its progress, search, the documents with their text, and your interests.
+		Long: `Open curio's dashboard in your browser. It opens on search; the library
+lists every document with its text a click away, the interests group them
+by topic, and Status shows the library's counts, the queue and its progress.
 It starts the daemon first if it isn't running, and opens the dashboard as
 soon as the daemon answers: while it is still starting (a migration, say),
 the page shows its progress and turns into the dashboard once it is ready.
