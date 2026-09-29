@@ -3900,10 +3900,11 @@ it. The expanded `ts < ? OR (ts = ? AND id < ?)` form only seeks
 | Index | Serves |
 |---|---|
 | `idx_jobs_claim (status, kind, run_after, created_at)` | `ClaimNext`; `RecoverOrphans` |
-| `idx_jobs_document (document_id, status, updated_at)` | a document's last error (`curio docs`); the FK action when a document is deleted |
-| `idx_jobs_tenant_status_updated (tenant_id, status, updated_at, id)` | `ListWithDoc` by status, with or without kind; `CountByStatus`; `MetricsByKind`'s window; `PruneOlderThan`; `DeleteByStatus` |
+| `idx_jobs_document (document_id, status, updated_at)` | a document's last error (`curio docs`); `ListWithDoc` by document, with or without status or kind (its tenant term written `+j.tenant_id`); the FK action when a document is deleted |
+| `idx_jobs_tenant_status_updated (tenant_id, status, updated_at, id)` | `ListWithDoc` by status, with or without kind, and no document; `CountByStatus`; `MetricsByKind`'s window; `PruneOlderThan`; `DeleteByStatus` |
 | `idx_jobs_tenant_updated (tenant_id, updated_at, id)` | `ListWithDoc` unfiltered or by kind only |
-| `idx_documents_tenant_state_updated (tenant_id, state, updated_at, id)` | `ListWithLastError` by state; `CountByState`; `ListIDsWithContent`; `DocumentVectors` (now covering); `RequeueFetchByStates` |
+| `idx_documents_tenant_state_updated (tenant_id, state, updated_at, id)` | `ListWithLastError` by state, and no cause; `CountByState`; `ListIDsWithContent`; `DocumentVectors` (now covering); `RequeueFetchByStates` without a cause |
+| `idx_documents_tenant_cause_updated (tenant_id, failure_cause, updated_at, id) WHERE failure_cause IS NOT NULL` | `ListWithLastError` by cause, alone or with state, host or folder; `RequeueFetchByStates` by cause; `FailureSummary` |
 | `idx_documents_tenant_updated (tenant_id, updated_at, id)` | `ListWithLastError` unfiltered |
 | `idx_bookmarks_tenant_created (tenant_id, created_at, id)` | `Bookmarks.List`, unfiltered or filtered by source or folder (checked per row) |
 
@@ -5454,10 +5455,16 @@ per domain, and it ends.
 - **Remembering Jina's domain blocks** until the date they give, so later
   documents on a blocked domain skip Jina without a request.
 
-**Revised (2026-09-28):** a document Jina refused records the cause
-`jina_refused` (the ones the host cache failed after it, `anti_bot`), so
-`curio refetch --all --cause=jina_refused` retries them once the block
-lifts. See "Failure causes: recorded when a document fails".
+**Revised (2026-09-28):** a document Jina refused behind a page-level
+origin failure (a thin, login or challenge page, an unreadable PDF) fails
+for good on that attempt and records the cause `jina_refused`, so
+`curio refetch --all --cause=jina_refused` retries those once the block
+lifts. Behind a host-wide origin verdict the refusal isn't the
+document's last word: its retry fails from the host cache, so it records
+the cached verdict, `anti_bot` for an origin 403 or 503 (the first
+document of the site included), `login_wall` for a redirect onto the
+site's own login page, and `--cause=anti_bot` is what reaches it. See
+"Failure causes: recorded when a document fails".
 
 ---
 
@@ -7134,13 +7141,13 @@ and the cause is stored with the state.
 | Cause | Means | Documents |
 |---|---|---|
 | `dead_link` | The content is gone: a 404 or 410, a soft 404, a redirect onto a homepage or another site's landing page. The one cause of a `dead` document. | 819 |
-| `anti_bot` | The site blocked the request: a 403 or 503, a challenge or block page. | 926 |
+| `anti_bot` | The site blocked the request: a 403 or 503, whatever Jina then said; a challenge or block page. | 926 |
 | `login_wall` | A login page, a redirect onto one, or too little text to be the article. | 188 |
-| `jina_refused` | The Jina fallback refused the target: a domain block, a publisher's opt-out, a deterministic 4xx. | 185 |
+| `jina_refused` | The site served a page curio can't use, and the Jina fallback refused the target: a domain block, a publisher's opt-out, a deterministic 4xx. | 185 |
 | `tls` | The site's certificate failed verification. | 43 |
 | `unreachable` | The host doesn't resolve, or refuses connections. | 244 |
 | `timeout` | The site, or the tool fetching it, took too long. | 130 |
-| `network` | Any other transport failure: a reset, a TLS alert, a redirect loop, our own network down, a body cut short. | 26 |
+| `network` | Any other transport failure: a reset, a TLS alert, a redirect loop, a connection closed before the answer, our own network down. | 26 |
 | `rate_limited` | The site, GitHub or YouTube rate-limited curio. | 222 |
 | `http_error` | Any other status, or an error page naming one. | 143 |
 | `unsupported` | A URL or content curio can't read: a channel page, a GitHub profile, a file that isn't HTML, a PDF it can't extract. | 28 |
@@ -7172,14 +7179,27 @@ and the cause is stored with the state.
    (`http_error`), a deadline or network timeout, any other transport
    failure (`network`), and `other`.
 
-A host-cache hit is classified by the verdict it cached: the first
-document of a site whose 403 Jina also refused reads `jina_refused`, and
-the ones the cache failed after it `anti_bot`. `fetcher.ErrUnsupported` is
-new, wrapped where a YouTube URL names no video, a GitHub URL isn't one the
-GitHub fetcher reads, and a response is neither HTML nor a PDF; those were
-bare `PermanentError`s. Their errors read as before, but for "(unsupported
-URL)" at the end of YouTube's and of GitHub's unrecognized-URL one. A new
-sentinel or failure path belongs in the list.
+A host-cache hit is classified by the verdict it cached, and a host-wide
+verdict decides the cause of all its site's documents, the first
+included. When the site answered 403 or 503, or redirected onto its own
+login page, `settle` caches the origin's verdict and leaves the fallback's
+failure retryable whatever Jina said, so the document's next attempt
+fails from the cache and records `anti_bot` (`login_wall`). Jina's
+verdict is a document's last word only behind a verdict about one page (a
+thin, login or challenge page, a PDF curio can't read), which fails it
+for good at once. On the author's library all 185 `jina_refused`
+documents came after a login-wall or thin page, none after a 403 or 503,
+and the 33 whose cached verdict quotes Jina's `AbuseAlleviationError` are
+`anti_bot`. So `--cause=jina_refused` reaches the pages Jina would have
+read but for its refusal; a site that refused curio outright is under
+`--cause=anti_bot`, whatever Jina said about it.
+
+`fetcher.ErrUnsupported` is new, wrapped where a YouTube URL names no
+video, a GitHub URL isn't one the GitHub fetcher reads, and a response is
+neither HTML nor a PDF; those were bare `PermanentError`s. Their errors
+read as before, but for "(unsupported URL)" at the end of YouTube's and
+of GitHub's unrecognized-URL one. A new sentinel or failure path belongs
+in the list.
 
 **The invariant:** `failure_cause` is set exactly when the document is
 `failed` or `dead`, and `dead` goes with `dead_link` and nothing else.
@@ -7277,9 +7297,18 @@ instead; `TestOpenAPI_FailureCauseEnum` holds the spec's enum to
   wording is the only signal, and no view needs them apart yet.
 - **Folding transport failures into `timeout` or `unreachable`.** The
   first taxonomy had no `network`; the author's library has 26 documents
-  of resets, TLS alerts, `ENETUNREACH`, redirect loops and bodies cut
-  short, which mean neither a slow site nor a missing one to someone
-  deciding what to retry.
+  of them (9 TLS alerts, 8 `ENETUNREACH`, 5 resets, 3 redirect loops, a
+  connection closed before the answer), which mean neither a slow site
+  nor a missing one to someone deciding what to retry.
+- **An HTML body that fails to read.** go-readability reads the body
+  itself and flattens its read error into text (`native: readability:
+  failed to parse input: …`, no `%w`), so a timeout or a connection lost
+  while reading a page's body is `other`, where a PDF's or GitHub's is
+  `timeout` or `network`. The backfill, which reads only the words, would
+  call such a timeout `timeout`; none of the 3,156 errors the author's
+  jobs record has the shape. Keeping the read error means capturing it
+  around the body in `tryReadability`, a change to the fetch path's
+  errors rather than to their classification.
 - **A cause filter on `curio docs`.** It shows the cause; the flag waits
   for a need.
 

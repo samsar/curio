@@ -733,11 +733,13 @@ or 503), it fails on the next attempt, from the host cache, and so do the
 site's other documents for 15 minutes.
 A `fetcher.native.jina_api_key` may lift an anonymous block. Otherwise
 refetch after the date, a few documents at a time (`curio refetch <id>`),
-so the next burst doesn't trip it again. Such documents' cause is
-`jina_refused` (`anti_bot` for those the host cache failed after the
-first), so `curio docs --failed` finds them and `curio refetch --all
---cause=jina_refused` retries them all at once, which suits a site with
-only a few. **`jina: refused the target:
+so the next burst doesn't trip it again. Documents that failed at once
+record the cause `jina_refused`, which `curio docs --failed` shows, and
+`curio refetch --all --cause=jina_refused` retries them all at once,
+which suits a site with only a few. When the site itself answered 403 or
+503, all its documents record `anti_bot`, the first included, whose retry
+fails from the host cache: `--cause=anti_bot` reaches them,
+`--cause=jina_refused` doesn't. **`jina: refused the target:
 HTTP 451 Unavailable For Legal Reasons: This domain is excluded from Jina
 Reader at the request of its owner, …`** is permanent: the site's owner
 opted out of Jina, and only the site itself can serve curio its pages.

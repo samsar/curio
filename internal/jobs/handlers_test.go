@@ -729,6 +729,69 @@ func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
 	}
 }
 
+// TestWorker_SiteBlockIsAntiBotWhateverJinaSays: a site that answers 403
+// fails even its first document for anti_bot when Jina refuses the target
+// too. The origin's verdict is host-wide, so it is cached and the refusal
+// stays retryable; the retry fails from the host cache, without a request,
+// and the document records the cached verdict, not Jina's.
+func TestWorker_SiteBlockIsAntiBotWhateverJinaSays(t *testing.T) {
+	deps, db, _ := newTestDeps(t)
+	ctx := context.Background()
+	var originHits, jinaHits atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originHits.Add(1)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+	}))
+	defer origin.Close()
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jinaHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnavailableForLegalReasons)
+		_, _ = io.WriteString(w, `{"code": 451, "message": "This domain is excluded from Jina Reader at the request of its owner."}`)
+	}))
+	defer jina.Close()
+	deps.Dispatcher = &fetcher.Single{F: fetcher.NewNative(fetcher.NativeOptions{
+		Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", Log: quietLog,
+	})}
+
+	doc := &store.Document{TenantID: "local", URL: origin.URL + "/article", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+	job := docJob(t, store.JobKindFetch, doc.ID)
+	require.NoError(t, deps.Queue.Enqueue(ctx, job))
+	jobRow := func(c require.TestingT) (status store.JobStatus, attempts int, lastError string) {
+		require.NoError(c, db.QueryRow(`SELECT status, attempts, last_error FROM jobs WHERE id = ?`, job.ID).
+			Scan(&status, &attempts, &lastError))
+		return status, attempts, lastError
+	}
+
+	// Attempt 1 asks the origin, then Jina, and is retried.
+	runPoolsUntil(t, deps, func(c *assert.CollectT) {
+		status, attempts, lastError := jobRow(c)
+		assert.Equal(c, store.JobStatusPending, status)
+		assert.Equal(c, 1, attempts)
+		assert.Contains(c, lastError, "jina: refused the target: HTTP 451")
+	})
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.DocStatePending, got.State)
+
+	// Attempt 2, once its backoff is skipped, fails from the host cache.
+	_, err = db.ExecContext(ctx, `UPDATE jobs SET run_after = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, job.ID)
+	require.NoError(t, err)
+	runPoolsUntil(t, deps, func(c *assert.CollectT) {
+		got, err := deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(c, err)
+		assert.Equal(c, store.DocStateFailed, got.State)
+		assert.Equal(c, store.FailureCauseAntiBot, got.FailureCause)
+	})
+	status, attempts, lastError := jobRow(t)
+	assert.Equal(t, store.JobStatusFailed, status)
+	assert.Equal(t, 2, attempts)
+	assert.Contains(t, lastError, "(cached: jina: refused the target: HTTP 451")
+	assert.Equal(t, int32(1), originHits.Load())
+	assert.Equal(t, int32(1), jinaHits.Load())
+}
+
 func TestWorker_PermanentFailureDoesNotRetry(t *testing.T) {
 	q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
 	q.MaxAttempts = 5

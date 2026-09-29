@@ -138,8 +138,9 @@ const (
 	// FailureCauseLoginWall: a login page, or too little text to be the
 	// article.
 	FailureCauseLoginWall FailureCause = "login_wall"
-	// FailureCauseJinaRefused: the Jina Reader fallback refused the target
-	// (a domain block, a publisher's opt-out, a deterministic 4xx).
+	// FailureCauseJinaRefused: the site served a page curio can't use, and
+	// the Jina Reader fallback refused the target (a domain block, a
+	// publisher's opt-out, a deterministic 4xx).
 	FailureCauseJinaRefused FailureCause = "jina_refused"
 	// FailureCauseTLS: the site's certificate failed verification.
 	FailureCauseTLS FailureCause = "tls"

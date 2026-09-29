@@ -891,10 +891,11 @@ components:
         Why a failed or dead document failed: dead_link (the content is
         gone; a dead document's cause, and only its), anti_bot (the site
         blocked the request), login_wall (a login page, or too little text
-        to be the article), jina_refused (the Jina Reader fallback refused
-        the target), tls (the certificate failed verification), unreachable
-        (the host doesn't resolve or refuses connections), timeout, network
-        (any other transport failure), rate_limited, http_error (any other
+        to be the article), jina_refused (the site served a page curio
+        can't use, and the Jina Reader fallback refused the target), tls
+        (the certificate failed verification), unreachable (the host
+        doesn't resolve or refuses connections), timeout, network (any
+        other transport failure), rate_limited, http_error (any other
         status), unsupported (a URL or content curio can't read), too_large
         (over the body cap), index (fetched, then indexing gave up), other.
       enum: [dead_link, anti_bot, login_wall, jina_refused, tls, unreachable, timeout, network, rate_limited,

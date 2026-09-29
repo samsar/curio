@@ -43,7 +43,10 @@ import (
 //     a body cut short): network
 //   - anything else: other
 //
-// A new sentinel or failure path belongs in this list.
+// An HTML page's body is read by go-readability, which flattens a read
+// error into text, so a page whose body times out or is cut short is
+// other; a PDF's or GitHub's keeps its chain. A new sentinel or failure
+// path belongs in this list.
 func FailureCause(err error) store.FailureCause {
 	switch {
 	case err == nil:
