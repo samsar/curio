@@ -110,6 +110,7 @@ func (h pageHandlers) routes(r chi.Router) {
 		r.Get("/search", redirectToSearch)
 		r.Get("/status", h.status)
 		r.Get("/library", h.library)
+		r.Get("/failures", h.failures)
 		r.Get("/documents/{id}", h.document)
 		r.Get("/interests", h.interests)
 		r.Get("/interests/{id}", h.interest)

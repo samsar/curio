@@ -116,7 +116,7 @@ func stylesheet(t *testing.T) string {
 // columns to one letter when the body had it.
 var wrapAnywhere = []string{
 	"code", "details.more-text pre", "pre.source", "dl.facts .mono", ".doc-head h1", ".result-title a",
-	".snippet", ".related a", ".bookmark-list .title", ".interest h2 a",
+	".snippet", ".related a", ".bookmark-list .title", ".interest h2 a", ".cause-main h2",
 }
 
 // TestStylesheet: the rules the design language keeps, which no test of a
@@ -167,6 +167,18 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "ellipsis", explore["text-overflow"], "an interest's name never widens the page")
 	assert.Equal(t, "hidden", explore["overflow"])
 	assert.NotEmpty(t, explore["max-width"])
+	// A failure group's host tag never grows past its card: the host gives
+	// way, cut with an ellipsis, and its count stays.
+	assert.Equal(t, "100%", declarations(ruleFor(t, rules, "", ".hosts .tag").body)["max-width"])
+	hostName := declarations(ruleFor(t, rules, "", ".hosts .tag .name").body)
+	assert.Equal(t, map[string]string{"min-width": "0", "overflow": "hidden", "text-overflow": "ellipsis",
+		"white-space": "nowrap"}, hostName)
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".hosts .tag .n").body)["flex"])
+	// A #fragment jump, Status's causes to their cards, lands below the
+	// sticky header.
+	assert.Equal(t, "sticky", declarations(ruleFor(t, rules, "", "header.site").body)["position"])
+	assert.Equal(t, "calc(var(--header-h) + var(--s4))",
+		declarations(ruleFor(t, rules, "", "html").body)["scroll-padding-top"])
 
 	// Dark mode follows the system unless a host forces light, and a host
 	// can force it: both blocks set the same tokens to the same values.

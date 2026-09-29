@@ -242,13 +242,13 @@ eval harness shows measurably better retrieval than the v1 baseline.
   decisions.md "Dashboard: search is home, the Overview becomes Status"),
   and the Library lists saves, newest saved first, in its Date saved
   order (decisions.md "Library: a Date saved order lists saves").
-  Phase 2 adds actions. Shipped: a document's refetch (a dead link's
+  Phase 2, actions, has shipped: a document's refetch (a dead link's
   behind a confirm) and reindex with its jobs' progress, the interests'
   rebuild, the queue's controls, and live refresh of Status, a document's
   jobs and a rebuild (decisions.md "Dashboard: actions through /v1, sent
-  by a first-party module"). Pending: the failures view grouped by cause,
-  with refetch by cause; what it reads has shipped (`GET /v1/failures`,
-  `?cause=` filters, `curio refetch --all --cause`). Phase 3 brings richer
+  by a first-party module"); and the Library's Failures tab, the failed
+  and dead documents grouped by cause with a refetch of each group
+  (decisions.md "Dashboard: the Failures tab"). Phase 3 brings richer
   views (an interest map, suspect pages, HTML export upload). See
   `docs/ui.md` and decisions.md "Dashboard: server-rendered pages in the
   daemon (phase 1)".

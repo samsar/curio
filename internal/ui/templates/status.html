@@ -6,7 +6,8 @@ documents failed on the left; health, progress and the jobs on the right.
 Two pollers (Status.Pollers) keep the live regions current: every 2
 seconds, and after every change, what changes by the second; every 15
 seconds, health, whose read pings Ollama. Why documents failed is read
-with the page alone. A poll's answer renders the panels it read and no
+with the page alone; its causes lead to their groups on the Library's
+Failures tab. A poll's answer renders the panels it read and no
 other. No polled region announces (no live role): only the queue's action
 status does, and its controls sit in regions of their own, which change
 only when their setting does.
@@ -37,10 +38,10 @@ only when their setting does.
 {{with .Queue}}{{template "queue-card" .}}{{end}}
 {{with .Failures}}{{if or .Err .Total}}
 <section class="card" aria-labelledby="failures">
-<div class="card-head"><h2 id="failures">{{template "icon" "alert-circle"}}Why documents failed</h2><a class="more" href="{{stateHref "failed"}}">Failed documents →</a></div>
+<div class="card-head"><h2 id="failures">{{template "icon" "alert-circle"}}Why documents failed</h2><a class="more" href="{{failuresHref}}">All failures →</a></div>
 <div class="card-body">
 {{with .Err}}{{template "panel-error" .}}{{else}}<ul class="bars">
-{{range .Causes}}<li><a class="label" href="{{causeHref .Name}}" title="{{causeLabel .Name}}">{{causeLabel .Name}}</a>{{template "stackbar" (causeBar .Name .Count $.Failures.Most)}}<span class="n">{{num .Count}}</span></li>
+{{range .Causes}}<li><a class="label" href="{{failureCauseHref .Name}}" title="{{causeLabel .Name}}">{{causeLabel .Name}}</a>{{template "stackbar" (causeBar .Name .Count $.Failures.Most)}}<span class="n">{{num .Count}}</span></li>
 {{end}}</ul>{{end}}
 </div>
 </section>

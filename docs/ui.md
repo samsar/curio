@@ -21,13 +21,16 @@ the dashboard does what these commands do:
 | a document's **Refetch** | fetches the page again | `curio refetch <id>` |
 | a dead link's **Refetch anyway…**, after you confirm | fetches it though it was found gone | `curio refetch --force <id>` |
 | a document's **Reindex** (once it has text) | re-chunks and re-embeds its text | `curio reindex <id>` |
+| a group's **Refetch N** on Failures | fetches again every document that failed for that cause | `curio refetch --all --cause <cause>` |
+| dead links' **Refetch N anyway…** on Failures, after you confirm | fetches every dead link again | `curio refetch --all --state dead --cause dead_link` |
 | **Rebuild** on Interests | groups the library into interests again | `curio interests rebuild` |
 | **Pause** / **Resume** on Status | stops starting jobs, or starts them again | `curio pause`, `curio resume` |
 | **Throttle** on Status | runs fewer jobs at once (gentle), or all (normal) | `curio throttle gentle\|normal` |
 | **Keep awake** on Status | keeps the Mac from idle sleep while jobs run on AC power | `curio keep-awake on\|off` |
 | **Schedule** on Status | starts jobs only between two times, or at any hour (Turn off) | `curio schedule HH:MM-HH:MM\|off` |
 
-Each says what came of it next to it: done, or the daemon's reason for
+Each says what came of it next to it (on Failures, over the groups,
+since a group that was refetched goes): done, or the daemon's reason for
 refusing it. One change runs at a time. The controls need JavaScript;
 without it the pages show the commands instead, and Status the queue's
 settings.
@@ -42,7 +45,9 @@ is queued or running (why, if the queue holds them, and each retry's
 attempt), then offers a reload once there is something new to show: a
 new text, a failure, or another change. Interests does the same for a
 rebuild: queued or running, then "New interests are ready: reload", or
-why the rebuild failed. Nothing refreshes while the tab is in the
+why the rebuild failed. Failures refreshes its groups, and the count on
+its tab, after a refetch you make there and when you come back to its
+tab, never on a timer. Nothing refreshes while the tab is in the
 background; it catches up when you come back. If the daemon stops
 answering, a note says the page isn't updating, and it goes once the
 daemon is back.
@@ -84,9 +89,13 @@ footer names the address the daemon listens on.
   a phone the type and time move under the title. "Load more" pages
   through the rest, and the line under the table counts the documents
   shown ("Showing 100 of 2,150 documents"). A `cause=` in the address
-  (`/ui/library?cause=anti_bot`) narrows it to the documents that failed
-  for one cause, and paging, the tabs and filtering keep it; Status links
-  there for each cause.
+  (`/ui/library?cause=anti_bot`, where Failures' links lead) narrows it
+  to the documents that failed for one cause: a line under the filters
+  names it, with **Clear**, which drops the cause and keeps everything
+  else, and paging, the tabs and filtering keep it. Above the filters,
+  **Documents** and **Failures** switch between the Library's two views;
+  Failures shows how many documents failed or are dead, whatever the
+  filters.
 
   **Order** switches to **Date saved** (`/ui/library?order=saved`): your
   saves, newest saved first, one row per bookmark, so a page saved in two
@@ -99,6 +108,17 @@ footer names the address the daemon listens on.
   the tabs still count documents; the line under the table counts saves,
   "Showing 50 of 7,497 saves" with no filter at all, and "Showing 50
   saves" with any.
+- **Failures** (`/ui/failures`), the Library's second tab: the documents
+  that couldn't be fetched, grouped by why. A line counts them, failed
+  and dead links apart, then a card for each cause, the most first: what
+  the cause means, the sites most of its documents are on (each leading
+  to the Library of that cause on that site), how many documents and
+  their share, **Refetch N**, and **View in Library →**; the dead links'
+  refetch asks first. Under the cards, the causes no document failed for.
+  A refetch queues a fresh fetch for each document of the group, so its
+  card goes; while the queue is paused, or outside its schedule, the
+  fetches wait there (Status says so), and the documents are pending
+  meanwhile.
 - **Document**: the page's title (for an untitled page, its bookmark's
   title, in italics, as the Library names it) and address, its state,
   type, length, author, published date and language; for a failed page,
@@ -135,13 +155,13 @@ footer names the address the daemon listens on.
   fetched and bookmarks, and a bar of the documents by state, each state
   linking to the Library of those), the queue (open or closed and why,
   with Pause or Resume, its throttle, keep-awake and schedule controls,
-  and each pool's load and the jobs it finished in the last 10 minutes), and why
-  documents failed (the five commonest causes as bars, each linking to
-  the Library of the documents that failed for it); beside them, health
-  (the daemon, Ollama, the models, embedding drift, the Jina Reader
-  fallback and the YouTube fetcher, each with a status dot), an estimate
-  of when the queued work will be done, at the pace of the last 10
-  minutes, and the jobs by status.
+  and each pool's load and the jobs it finished in the last 10 minutes),
+  and why documents failed (the five commonest causes as bars, each
+  leading to its group on Failures, and **All failures →** to the tab);
+  beside them, health (the daemon, Ollama, the models, embedding drift,
+  the Jina Reader fallback and the YouTube fetcher, each with a status
+  dot), an estimate of when the queued work will be done, at the pace of
+  the last 10 minutes, and the jobs by status.
 
 Lists show times relative to now ("13 min ago"), with the exact time on
 hover; a document's page shows its own dates in full. Anything a saved page
@@ -192,5 +212,5 @@ pages, which the daemon checks. The rules, and why, are in
 [decisions.md](./decisions.md): "Dashboard: server-rendered pages in the
 daemon (phase 1)", "Dashboard: formatting budgets for stored markdown",
 "Dashboard: a design language under the CSP", "Dashboard: actions through
-/v1, sent by a first-party module" and "Local API: loopback only, no
-token, browsers shut out".
+/v1, sent by a first-party module", "Dashboard: the Failures tab" and
+"Local API: loopback only, no token, browsers shut out".

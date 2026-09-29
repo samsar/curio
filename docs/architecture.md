@@ -132,8 +132,9 @@ all fetch/index/search/insight workflows.
   origin (`/` redirects there; `daemon.ui: false` turns them off): search
   is the home at `/ui/`, then the Library (documents most recently
   updated first, or in its Date saved order the saves, newest saved
-  first), the Interests, and Status at `/ui/status` (the queue, health,
-  progress and why documents failed).
+  first, and its Failures tab at `/ui/failures`, the failed and dead
+  documents grouped by cause), the Interests, and Status at `/ui/status`
+  (the queue, health, progress and why documents failed).
   Page handlers in `internal/api/ui*.go` read through the same functions
   as the JSON handlers, and `internal/ui` renders them with
   `html/template`, a sanitized render of each document's markdown, one
@@ -141,13 +142,15 @@ all fetch/index/search/insight workflows.
   a vendored htmx for search-as-you-type and live regions, which pollers
   refresh with `?poll=` (the page's live regions alone, and their reads
   alone). What a page changes (refetch, reindex, rebuild, the queue's
-  controls) its own script, `actions.js`, sends to `/v1` as JSON, from
+  controls, a failure group's refetch) its own script, `actions.js`,
+  sends to `/v1` as JSON, from
   actions built in Go (`internal/ui/actions.go`). Every response carries
   a strict CSP. See `docs/ui.md`, and decisions.md "Dashboard:
   server-rendered pages in the daemon (phase 1)", "Dashboard: a design
   language under the CSP", "Dashboard: search is home, the Overview
   becomes Status", "Dashboard: actions through /v1, sent by a
-  first-party module" and "Library: a Date saved order lists saves"
+  first-party module", "Library: a Date saved order lists saves" and
+  "Dashboard: the Failures tab"
 - Internal worker pools process jobs from the SQLite-backed queue. They
   claim through the queue gate (`jobs.QueueGate`), which holds claims back
   while the queue is paused, outside its daily schedule, or at the
@@ -451,8 +454,8 @@ External processes the daemon expects:
 - Trajectory analysis / "new this month" detection (interest clustering itself
   landed in M4 — see the insight layer)
 - A web UI beyond the dashboard (`docs/ui.md`): its pages refetch,
-  reindex, rebuild and control the queue; a failures view and richer
-  views are planned
+  reindex, rebuild, control the queue and group failures by cause;
+  richer views are planned
 - Authentication (single-tenant local: the API binds loopback only and
   refuses browser-originated requests; see decisions.md "Local API: loopback
   only, no token, browsers shut out")

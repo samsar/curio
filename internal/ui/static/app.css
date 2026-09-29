@@ -121,7 +121,9 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+/* A #fragment jump (Status's causes to their cards, the skip link) lands
+   below the sticky header, not under it. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; scroll-padding-top: calc(var(--header-h) + var(--s4)); }
 
 body {
   margin: 0;
@@ -589,6 +591,10 @@ a.doc-title:hover { color: var(--accent-text); }
 
 /* Filter bar -------------------------------------------------------------- */
 
+/* The Library's cause filter, which has no field: what it is, and a link
+   that clears it alone. */
+.cause-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s2); margin: calc(-1 * var(--s1)) 0 var(--s4); font-size: var(--fs-sm); }
+
 .toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s3); margin-bottom: var(--s4); }
 .toolbar .grow { flex: 1 1 auto; }
 .filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s3); }
@@ -942,6 +948,12 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 
 /* Failures ------------------------------------------------------------------- */
 
+/* The Failures tab's one action status, over the totals its refetches
+   change; it takes no room while it has nothing to say. */
+.page-status { margin-bottom: var(--s4); }
+.page-status:has(> .action-status:empty) { display: none; }
+.failures-totals { color: var(--text-2); margin-bottom: var(--s4); max-width: 48rem; }
+
 .causes { list-style: none; padding: 0; display: grid; gap: var(--s3); }
 .cause {
   display: grid;
@@ -949,6 +961,8 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
   gap: var(--s2) var(--s4);
   padding: var(--s5);
 }
+/* A cause's tone (causeTone): danger is the base, warn and neutral
+   override it. */
 .cause-icon {
   display: grid; place-items: center;
   width: 2.25rem; height: 2.25rem; border-radius: var(--r-md);
@@ -956,10 +970,15 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 }
 .cause-icon.neutral { background: var(--neutral-soft); color: var(--neutral); border-color: var(--neutral-border); }
 .cause-icon.warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-border); }
-.cause h2 { font-size: var(--fs-md); display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s1) var(--s2); }
-.cause h2 code { font-size: var(--fs-xs); font-weight: 500; color: var(--text-3); }
-.cause .why { color: var(--text-2); margin-top: var(--s1); }
-.cause .hosts { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); margin-top: var(--s3); }
+.cause-main h2 { font-size: var(--fs-md); display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s1) var(--s2); min-width: 0; overflow-wrap: anywhere; }
+.cause-main h2 code { font-size: var(--fs-xs); font-weight: 500; color: var(--text-3); }
+.cause-main .why { color: var(--text-2); margin-top: var(--s1); }
+.cause-main .hosts { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); margin-top: var(--s3); }
+/* A host is stored, hostile, and any length: its tag never grows past the
+   card's column, and the name, not the count, gives way, whole on hover. */
+.hosts .tag { max-width: 100%; }
+.hosts .tag .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hosts .tag .n { flex: none; }
 .cause .count { text-align: right; }
 .cause .count .value { font-size: var(--fs-xl); font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
 .cause .count .pct { color: var(--text-3); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }

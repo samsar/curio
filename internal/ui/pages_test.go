@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 // parse parses a rendered page.
@@ -335,19 +337,24 @@ func TestStatus_Attention(t *testing.T) {
 	assert.NotContains(t, render(t, r, PageStatus, healthy), `class="callout`)
 }
 
-// TestStatus_Failures: the causes, most first, each linking to the Library
-// of its documents, with a bar scaled to the most; none read, no card.
+// TestStatus_Failures: the causes, most first, each leading to its card on
+// the Failures tab, with a bar scaled to the most; the card leads to the
+// tab; none read, no card.
 func TestStatus_Failures(t *testing.T) {
 	r := newRenderer(t)
 	st := Status{Layout: Layout{Title: "Status", Nav: NavStatus}, Health: &HealthPanel{OllamaReachable: true},
-		Failures: &FailuresPanel{Total: 1745, Causes: []Count{{Name: "anti_bot", Count: 926}, {Name: "dead_link", Count: 819}}}}
+		Failures: &FailuresPanel{Total: 1745, Causes: []Count{{Name: "anti_bot", Count: 926}, {Name: "dead_link", Count: 819},
+			{Name: "new_cause", Count: 1}}}}
 	out := render(t, r, PageStatus, st)
-	assert.Contains(t, out, `<a class="more" href="/ui/library?state=failed">Failed documents →</a>`)
-	assert.Contains(t, out, `<li><a class="label" href="/ui/library?cause=anti_bot" title="Blocked by bot protection">`+
+	assert.Contains(t, out, `<a class="more" href="/ui/failures">All failures →</a>`)
+	assert.Contains(t, out, `<li><a class="label" href="/ui/failures#cause-anti_bot" title="Blocked by bot protection">`+
 		`Blocked by bot protection</a><svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">`+
 		`<rect class="fill-track" x="0" y="0" width="100" height="10"/><rect class="fill-danger" x="0.000" y="0" width="100.000" height="10"/></svg>`+
 		`<span class="n">926</span></li>`)
 	assert.Contains(t, out, `<rect class="fill-neutral" x="0.000" y="0" width="88.445" height="10"/></svg><span class="n">819</span>`)
+	assert.Contains(t, out, `<a class="label" href="/ui/failures#cause-dead_link" title="Dead link">`)
+	assert.Contains(t, out, `<a class="label" href="/ui/failures#cause-new_cause" title="new_cause">`,
+		"a cause this build doesn't know leads to its card too, which the Library would refuse")
 	assert.NotContains(t, out, "style=")
 
 	st.Failures = &FailuresPanel{}
@@ -476,7 +483,9 @@ func TestLibrary_Tabs(t *testing.T) {
 		f.State = "failed"
 		lib.Filters = f
 		out := render(t, r, PageLibrary, lib)
-		assert.NotContains(t, out, `class="count"`, "%+v", f)
+		assert.NotContains(t, render1(t, stateTabs(t, out)), `class="count"`, "%+v: the tabs count no filtered list", f)
+		assert.Contains(t, out, `>Failures <span class="count">2,969</span></a>`,
+			"%+v: the subnav counts the whole library's failures", f)
 		assert.Contains(t, out, `>Showing 51 documents, most recently updated first.</p>`, "%+v", f)
 		assert.Contains(t, out, `aria-current="page">Failed</a>`, "%+v", f)
 	}
@@ -492,6 +501,26 @@ func TestLibrary_Tabs(t *testing.T) {
 	lib.Shown = 819
 	assert.Contains(t, render(t, r, PageLibrary, lib), `>Showing 820 documents, most recently updated first.</p>`,
 		"more rows shown than the count: the library changed between pages")
+}
+
+// stateTabs is the Library's state tabs in the page out.
+func stateTabs(t *testing.T, out string) *html.Node {
+	t.Helper()
+	for n := range parse(t, out).Descendants() {
+		if n.Type == html.ElementNode && attrValue(n, "role") == "group" && attrValue(n, "aria-label") == "State" {
+			return n
+		}
+	}
+	require.Fail(t, "no state tabs")
+	return nil
+}
+
+// render1 is n's markup.
+func render1(t *testing.T, n *html.Node) string {
+	t.Helper()
+	var b strings.Builder
+	require.NoError(t, html.Render(&b, n))
+	return b.String()
 }
 
 // TestSearchHit_Matches: a result shows its first two matches, and the
@@ -872,4 +901,317 @@ func textOf(n *html.Node) string {
 		}
 	}
 	return b.String()
+}
+
+// sampleFailures is a Failures tab over the author's library's causes, as
+// GET /v1/failures orders them: by count, most first, then by cause. None
+// failed as too large or while indexing.
+func sampleFailures() Failures {
+	return Failures{Layout: Layout{Title: "Failures", Nav: NavLibrary},
+		Counts: &LibraryCounts{Documents: 7467, Bookmarks: 7497, ByState: map[string]int{"failed": 2151, "dead": 820}},
+		Total:  2971,
+		Groups: []FailureGroup{
+			{Cause: "anti_bot", Count: 927, Hosts: []Count{{Name: "stackoverflow.com", Count: 169},
+				{Name: "medium.com", Count: 134}}},
+			{Cause: "dead_link", Count: 820, Hosts: []Count{{Name: "www.thebookoflife.org", Count: 51}}},
+			{Cause: "unreachable", Count: 244}, {Cause: "rate_limited", Count: 222}, {Cause: "login_wall", Count: 188},
+			{Cause: "jina_refused", Count: 185}, {Cause: "http_error", Count: 143}, {Cause: "timeout", Count: 130},
+			{Cause: "tls", Count: 43}, {Cause: "unsupported", Count: 28}, {Cause: "network", Count: 26},
+			{Cause: "other", Count: 15},
+		}}
+}
+
+// TestFailures: the totals split failed from dead links, and say so only
+// when there are both; the footnote names the causes without documents in
+// their order; the subnav counts the summary's documents while it was read;
+// and the page polls once per change, never on a timer.
+func TestFailures(t *testing.T) {
+	f := sampleFailures()
+	assert.Equal(t, 820, f.Dead())
+	assert.Equal(t, 2151, f.Failed())
+	assert.Equal(t, "2,971 documents couldn't be fetched: 2,151 failed and 820 dead links, grouped by why. "+
+		"Refetching a group queues a fresh fetch for each of its documents.", f.Totals())
+	assert.Equal(t, []string{"too_large", "index"}, f.Absent())
+
+	onlyFailed := Failures{Total: 3, Groups: []FailureGroup{{Cause: "timeout", Count: 2}, {Cause: "tls", Count: 1}}}
+	assert.Zero(t, onlyFailed.Dead())
+	assert.Equal(t, "3 documents couldn't be fetched, grouped by why. "+
+		"Refetching a group queues a fresh fetch for each of its documents.", onlyFailed.Totals())
+	onlyDead := Failures{Total: 1, Groups: []FailureGroup{{Cause: "dead_link", Count: 1}}}
+	assert.Equal(t, 1, onlyDead.Dead())
+	assert.Zero(t, onlyDead.Failed())
+	assert.Equal(t, "1 document couldn't be fetched, grouped by why. "+
+		"Refetching a group queues a fresh fetch for each of its documents.", onlyDead.Totals())
+	absent := onlyDead.Absent()
+	assert.Len(t, absent, len(store.FailureCauses())-1)
+	assert.Equal(t, "anti_bot", absent[0], "in store.FailureCauses' order")
+	unknown := Failures{Total: 1, Groups: []FailureGroup{{Cause: "new_cause", Count: 1}}}
+	assert.Len(t, unknown.Absent(), len(store.FailureCauses()), "a cause this build doesn't know is none of them")
+
+	assert.Equal(t, LibraryViews{OnFailures: true, Failed: 2971, Counted: true}, f.Views())
+	assert.Equal(t, LibraryHead{Counts: f.Counts, Views: f.Views()}, f.Head())
+	f.Err = &PanelError{Message: "m", RequestID: "r"}
+	assert.Equal(t, LibraryViews{OnFailures: true}, f.Views(), "no count without the summary")
+
+	pollers := sampleFailures().Pollers()
+	require.Len(t, pollers, 1)
+	p := pollers[0]
+	assert.Equal(t, "failures-poll", p.ID)
+	assert.Equal(t, "/ui/failures?poll=causes", p.Href)
+	assert.Equal(t, "curio:changed from:body", p.Trigger(), "after a change, never on a timer")
+	assert.Equal(t, "#library-subnav,#failures-live", p.Select())
+	assert.Empty(t, Failures{Poll: PollCauses}.Pollers())
+}
+
+// TestFailureGroup: a group's card id, whether its cause is one the
+// Library and refetch-all take, its refetch (the dead links' names their
+// state) and the command that does it; a cause this build doesn't know has
+// neither.
+func TestFailureGroup(t *testing.T) {
+	blocked := FailureGroup{Cause: "anti_bot", Count: 927}
+	assert.Equal(t, "cause-anti_bot", blocked.ID())
+	assert.True(t, blocked.Known())
+	assert.False(t, blocked.DeadLinks())
+	assert.Equal(t, refetchCauseAction("anti_bot", 927), blocked.Refetch())
+	assert.Equal(t, "curio refetch --all --cause anti_bot", blocked.Command())
+
+	dead := FailureGroup{Cause: "dead_link", Count: 820}
+	assert.True(t, dead.DeadLinks())
+	assert.Equal(t, refetchDeadLinksAction(820), dead.Refetch())
+	assert.Equal(t, "curio refetch --all --state dead --cause dead_link", dead.Command())
+
+	unknown := FailureGroup{Cause: evilScript, Count: 3}
+	assert.False(t, unknown.Known())
+	assert.Empty(t, unknown.Command())
+	assert.Equal(t, "cause-"+evilScript, unknown.ID())
+
+	lib := Library{Counts: &LibraryCounts{ByState: map[string]int{"fetched": 9, "failed": 2150, "dead": 819}}}
+	assert.Equal(t, LibraryViews{Failed: 2969, Counted: true}, lib.Head().Views, "the Library counts from its stats")
+	assert.Equal(t, LibraryViews{}, Library{}.Head().Views, "and without them, not at all")
+}
+
+// cardsOf are the ids of the Failures tab's cards, in page order.
+func cardsOf(doc *html.Node) []string {
+	var ids []string
+	for n := range doc.Descendants() {
+		if n.Type == html.ElementNode && n.Data == "li" && attrValue(n, "class") == "card cause" {
+			ids = append(ids, attrValue(n, "id"))
+		}
+	}
+	return ids
+}
+
+// TestFailures_Page: the Library's head with Failures current and counted,
+// the totals, a card per cause in the summary's order, each with its icon,
+// label and code, why, hosts linking to the Library of that cause and host,
+// count and share, and View in Library; the causes without documents; a
+// cause this build doesn't know without a link or a refetch.
+func TestFailures_Page(t *testing.T) {
+	r := newRenderer(t)
+	f := sampleFailures()
+	f.Groups = append(f.Groups, FailureGroup{Cause: "new_cause", Count: 1,
+		Hosts: []Count{{Name: "new.example", Count: 1}}})
+	out := render(t, r, PageFailures, f)
+	doc := parse(t, out)
+
+	assert.Contains(t, out, "<title>Failures · curio</title>")
+	assert.Contains(t, out, "<h1>Library</h1>\n"+`<p class="lede">7,467 documents from 7,497 bookmarks.</p>`)
+	assert.Contains(t, out, `<nav class="subnav" id="library-subnav" aria-label="Library views">`+
+		`<a id="subnav-documents" href="/ui/library">Documents</a>`+
+		`<a id="subnav-failures" href="/ui/failures" aria-current="page">Failures <span class="count">2,971</span></a></nav>`)
+	assert.NotContains(t, out, "Phase 2")
+	assert.Contains(t, out, `<p class="failures-totals">2,971 documents couldn&#39;t be fetched: 2,151 failed and 820 dead links,`)
+
+	cards := cardsOf(doc)
+	require.Len(t, cards, 13)
+	assert.Equal(t, []string{"cause-anti_bot", "cause-dead_link", "cause-unreachable"}, cards[:3], "the summary's order")
+	assert.Equal(t, "cause-new_cause", cards[12])
+
+	assert.Contains(t, out, `<li class="card cause" id="cause-anti_bot">`+"\n"+
+		`<span class="cause-icon danger"><svg class="icon"`)
+	assert.Contains(t, out, `<h2>Blocked by bot protection <code>anti_bot</code></h2>`+"\n"+
+		`<p class="why">The site blocked curio&#39;s request:`)
+	assert.Contains(t, out, `<div class="hosts" role="group" aria-label="Top hosts">`+
+		`<a class="tag" id="host-anti_bot-0" href="/ui/library?cause=anti_bot&amp;host=stackoverflow.com" title="stackoverflow.com">`+
+		`<span class="name">stackoverflow.com</span> <span class="n">169</span></a>`+
+		`<a class="tag" id="host-anti_bot-1" href="/ui/library?cause=anti_bot&amp;host=medium.com" title="medium.com">`)
+	assert.Contains(t, out, `<div class="count"><div class="value">927<span class="visually-hidden"> documents,</span></div>`+
+		`<div class="pct">31%<span class="visually-hidden"> of failures</span></div></div>`)
+	assert.Contains(t, out, `<a class="btn btn-sm btn-ghost" id="view-anti_bot" href="/ui/library?cause=anti_bot">View in Library →</a>`)
+	assert.Contains(t, out, `<a class="btn btn-sm btn-ghost" id="view-dead_link" href="/ui/library?cause=dead_link">`,
+		"the list's cause filter takes dead documents; state=dead is refetch-all's rule alone")
+	assert.Contains(t, out, `<li class="card cause" id="cause-dead_link">`+"\n"+`<span class="cause-icon neutral">`)
+	assert.Contains(t, out, `<li class="card cause" id="cause-timeout">`+"\n"+`<span class="cause-icon warn">`)
+	assert.Contains(t, out, `<div class="value">15<span class="visually-hidden"> documents,</span></div><div class="pct">1%`)
+	assert.NotContains(t, render1(t, byID(doc, "cause-unreachable")), `class="hosts"`, "no hosts, no group")
+
+	unknown := byID(doc, "cause-new_cause")
+	markup := render1(t, unknown)
+	assert.Contains(t, markup, `<h2>new_cause <code>new_cause</code></h2>`)
+	assert.NotContains(t, markup, `class="why"`)
+	assert.Contains(t, out, `<span class="tag" title="new.example"><span class="name">new.example</span> <span class="n">1</span></span>`)
+	assert.Contains(t, markup, `<div class="value">1<span class="visually-hidden"> document,</span></div>`)
+	for n := range unknown.Descendants() {
+		assert.False(t, n.Type == html.ElementNode && (focusable(n) || n.Data == "code" && hasAttr(n, "class")),
+			"no link, refetch or command: %s", render1(t, n))
+	}
+
+	assert.Contains(t, out, `<p class="empty-inline mt-4">Causes without documents: Too large, Index failed.</p>`)
+	f.Groups = append(f.Groups, FailureGroup{Cause: "too_large", Count: 1}, FailureGroup{Cause: "index", Count: 1})
+	assert.NotContains(t, render(t, r, PageFailures, f), "Causes without documents", "every cause has some")
+}
+
+// TestFailures_States: nothing failed is an empty state and nothing else;
+// a summary that couldn't be read is its error inside the region, and the
+// head renders, its subnav without a count; the library's counts unread
+// are the lede's fallback; a poll's answer is the subnav and the region
+// alone.
+func TestFailures_States(t *testing.T) {
+	r := newRenderer(t)
+	layout := Layout{Title: "Failures", Nav: NavLibrary}
+	counts := &LibraryCounts{Documents: 3, Bookmarks: 3}
+
+	empty := render(t, r, PageFailures, Failures{Layout: layout, Counts: counts})
+	live := render1(t, byID(parse(t, empty), "failures-live"))
+	assert.Contains(t, live, `<div class="empty">`)
+	assert.Contains(t, live, "<h2>Nothing failed</h2>")
+	for _, gone := range []string{"failures-totals", `class="causes"`, "Causes without documents"} {
+		assert.NotContains(t, live, gone)
+	}
+	assert.Contains(t, empty, `Failures <span class="count">0</span></a>`, "0 is a count")
+
+	failed := render(t, r, PageFailures, Failures{Layout: layout, Counts: counts,
+		Err: &PanelError{Message: "summarize failures: boom", RequestID: "req-1"}})
+	doc := parse(t, failed)
+	assert.Contains(t, render1(t, byID(doc, "failures-live")),
+		`<div class="panel-error">`, "the error sits in the region, which a refresh can clear")
+	assert.Contains(t, failed, "Couldn't read this: summarize failures: boom.")
+	assert.NotContains(t, render1(t, byID(doc, "library-subnav")), "count")
+	assert.Contains(t, failed, "<h1>Library</h1>")
+
+	unread := render(t, r, PageFailures, Failures{Layout: layout, Total: 1,
+		Groups: []FailureGroup{{Cause: "tls", Count: 1}}})
+	assert.Contains(t, unread, `<p class="lede">Every page curio saved for you.</p>`)
+	assert.Contains(t, unread, `Failures <span class="count">1</span></a>`, "the summary counts, stats or not")
+
+	poll := render(t, r, PageFailures, Failures{Layout: layout, Poll: PollCauses, Total: 1,
+		Groups: []FailureGroup{{Cause: "tls", Count: 1}}})
+	doc = parse(t, poll)
+	assert.NotNil(t, byID(doc, "library-subnav"))
+	assert.NotNil(t, byID(doc, "failures-live"))
+	for _, gone := range []string{"<h1>", `class="lede"`, `id="failures-status"`, "data-poll"} {
+		assert.NotContains(t, poll, gone)
+	}
+}
+
+// TestFailures_Actions: a group's Refetch sends refetch-all by its cause
+// and says what it queued in the page's one status, outside the live
+// regions; the dead links' opens a confirm in their card, whose button
+// sends their state too; each needs JavaScript, and its command stands in
+// without it. The status holds nothing at rest.
+func TestFailures_Actions(t *testing.T) {
+	r := newRenderer(t)
+	out := render(t, r, PageFailures, sampleFailures())
+	doc := parse(t, out)
+
+	refetch := byID(doc, "refetch-anti_bot")
+	require.NotNil(t, refetch)
+	assert.Equal(t, "btn btn-sm js-only", attrValue(refetch, "class"))
+	assert.Equal(t, "POST", attrValue(refetch, "data-method"))
+	assert.Equal(t, "/v1/documents/refetch-all?cause=anti_bot", attrValue(refetch, "data-path"))
+	assert.Equal(t, "failures-status", attrValue(refetch, "data-status"))
+	assert.Equal(t, "Blocked by bot protection: 927 refetches queued", attrValue(refetch, "data-done"))
+	assert.Equal(t, "Refetch 927", textOf(refetch))
+	assert.False(t, hasAttr(refetch, "hidden"))
+
+	opener := byID(doc, "refetch-dead_link")
+	require.NotNil(t, opener)
+	assert.Equal(t, "btn btn-sm js-only", attrValue(opener, "class"))
+	assert.Equal(t, "confirm-dead_link", attrValue(opener, "popovertarget"))
+	assert.False(t, hasAttr(opener, "data-method"), "it only opens the confirm")
+	assert.Equal(t, "Refetch 820 anyway…", textOf(opener))
+
+	confirm := byID(doc, "confirm-dead_link")
+	require.NotNil(t, confirm)
+	assert.True(t, hasAttr(confirm, "popover"))
+	assert.Equal(t, "alertdialog", attrValue(confirm, "role"))
+	assert.Equal(t, "confirm-dead_link-title", attrValue(confirm, "aria-labelledby"))
+	assert.Equal(t, "confirm-dead_link-text", attrValue(confirm, "aria-describedby"))
+	assert.Equal(t, "Refetch 820 dead links?", textOf(byID(doc, "confirm-dead_link-title")))
+	assert.NotEmpty(t, textOf(byID(doc, "confirm-dead_link-text")))
+	assert.Contains(t, render1(t, byID(doc, "cause-dead_link")), `id="confirm-dead_link"`,
+		"in the card, refreshed with the count it names")
+	cancel := byID(doc, "refetch-dead_link-cancel")
+	assert.True(t, hasAttr(cancel, "autofocus"))
+	assert.Equal(t, "confirm-dead_link", attrValue(cancel, "popovertarget"))
+	assert.Equal(t, "hide", attrValue(cancel, "popovertargetaction"))
+	assert.False(t, hasAttr(cancel, "data-method"))
+	forced := byID(doc, "refetch-dead_link-confirm")
+	assert.Equal(t, "btn btn-primary", attrValue(forced, "class"))
+	assert.Equal(t, "/v1/documents/refetch-all?cause=dead_link&state=dead", attrValue(forced, "data-path"))
+	assert.Equal(t, "hide", attrValue(forced, "popovertargetaction"))
+	assert.Equal(t, "Dead link: 820 refetches queued", attrValue(forced, "data-done"))
+	assert.Equal(t, "Refetch 820", textOf(forced))
+
+	status := byID(doc, "failures-status")
+	require.NotNil(t, status)
+	assert.Equal(t, "action-status", attrValue(status, "class"))
+	assert.Equal(t, "status", attrValue(status, "role"))
+	assert.Equal(t, "polite", attrValue(status, "aria-live"))
+	assert.Nil(t, status.FirstChild, "empty at rest")
+	for n := status; n != nil; n = n.Parent {
+		assert.NotContains(t, []string{"library-subnav", "failures-live"}, attrValue(n, "id"), "outside the regions")
+	}
+	assert.Less(t, strings.Index(out, `id="library-subnav"`), strings.Index(out, `id="failures-status"`))
+	assert.Less(t, strings.Index(out, `id="failures-status"`), strings.Index(out, `id="failures-live"`))
+
+	assert.Contains(t, out, `<code class="no-js">curio refetch --all --cause anti_bot</code>`)
+	assert.Contains(t, out, `<code class="no-js">curio refetch --all --state dead --cause dead_link</code>`)
+	assert.Equal(t, 12, len(withAttr(doc, "data-method")), "a refetch for every group, the dead links' in its confirm")
+}
+
+// TestLibrary_Head: the Library's head, in either order, has its subnav
+// with Documents current and the Failures tab counting the failed and dead
+// documents from the stats it read, whatever the filters, and no count
+// without them.
+func TestLibrary_Head(t *testing.T) {
+	r := newRenderer(t)
+	counts := &LibraryCounts{Documents: 7467, Bookmarks: 7497, ByState: map[string]int{"failed": 2150, "dead": 819}}
+	for _, f := range []LibraryFilters{{}, {Order: OrderSaved}, {Host: "a.example", Cause: "tls"}} {
+		out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: f,
+			Counts: counts})
+		assert.Contains(t, out, `<nav class="subnav" id="library-subnav" aria-label="Library views">`+
+			`<a id="subnav-documents" href="/ui/library" aria-current="page">Documents</a>`+
+			`<a id="subnav-failures" href="/ui/failures">Failures <span class="count">2,969</span></a></nav>`, "%+v", f)
+	}
+	out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary}})
+	assert.Contains(t, out, `<a id="subnav-failures" href="/ui/failures">Failures</a>`)
+}
+
+// TestLibrary_CauseLine: a cause filter, in either order, gets a line
+// under the toolbar naming it, with a link that clears it alone; the form
+// keeps it for Apply; no cause, no line.
+func TestLibrary_CauseLine(t *testing.T) {
+	r := newRenderer(t)
+	for _, order := range []string{"", OrderSaved} {
+		f := LibraryFilters{Order: order, Host: "blocked.example", Cause: "anti_bot"}
+		for _, rows := range [][]LibraryRow{nil, {{DocumentID: "a", URL: "https://blocked.example/a", State: "failed"}}} {
+			out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: f,
+				Rows: rows, PageSize: 50})
+			doc := parse(t, out)
+			link := byID(doc, "clear-cause")
+			require.NotNil(t, link, order)
+			assert.Equal(t, clearCauseHref(f), attrValue(link, "href"), order)
+			assert.Contains(t, attrValue(link, "aria-label"), "Clear", order)
+			assert.Equal(t, "Clear", textOf(link))
+			assert.Contains(t, out, `<p class="cause-line"><span class="muted">Why they failed:</span> `+
+				`<strong>Blocked by bot protection</strong> <code>anti_bot</code> `, order)
+			assert.Contains(t, out, `<input type="hidden" name="cause" value="anti_bot">`, order)
+			assert.Less(t, strings.Index(out, `</form>`), strings.Index(out, `class="cause-line"`), "under the toolbar")
+		}
+	}
+	out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary},
+		Filters: LibraryFilters{Host: "blocked.example"}})
+	assert.NotContains(t, out, "cause-line")
+	assert.NotContains(t, out, "clear-cause")
 }

@@ -322,8 +322,9 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 var stylesheetRE = regexp.MustCompile(`<link rel="stylesheet" href="(/ui/static/[^"]+)">`)
 
 // assertDashboard checks that the daemon at baseURL serves the dashboard's
-// pages for the fetched document docID, the search home and Status among
-// them, and the stylesheet they load, each under the dashboard's CSP.
+// pages for the fetched document docID, the search home, Status and the
+// Library's Failures tab (nothing failed) among them, and the stylesheet
+// they load, each under the dashboard's CSP.
 func assertDashboard(t *testing.T, baseURL, docID string) {
 	t.Helper()
 	get := func(path string) (http.Header, string) {
@@ -347,6 +348,8 @@ func assertDashboard(t *testing.T, baseURL, docID string) {
 	assert.Contains(t, results, `<a href="/ui/documents/`+docID+`" title="`, "a result links to its document's page")
 	_, status := get("/ui/status")
 	assert.Contains(t, status, "<h1>Status</h1>")
+	_, failures := get("/ui/failures")
+	assert.Contains(t, failures, "<h2>Nothing failed</h2>")
 	css := stylesheetRE.FindStringSubmatch(home)
 	require.NotNil(t, css, "the search home loads a stylesheet")
 	header, _ := get(css[1])
