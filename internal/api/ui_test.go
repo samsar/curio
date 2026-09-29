@@ -349,10 +349,10 @@ func TestUI_StatusFailures(t *testing.T) {
 	assert.Contains(t, body, `<h2 id="failures">`)
 	assert.Contains(t, body, `<a class="more" href="/ui/library?state=failed">Failed documents →</a>`)
 	blocked := `<li><a class="label" href="/ui/library?cause=anti_bot" title="Blocked by bot protection">Blocked by bot protection</a>` +
-		`<svg class="hbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>` +
+		`<svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>` +
 		`<rect class="fill-danger" x="0.000" y="0" width="100.000" height="10"/></svg><span class="n">3</span></li>`
 	dead := `<li><a class="label" href="/ui/library?cause=dead_link" title="Dead link">Dead link</a>` +
-		`<svg class="hbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>` +
+		`<svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>` +
 		`<rect class="fill-neutral" x="0.000" y="0" width="33.333" height="10"/></svg><span class="n">1</span></li>`
 	assert.Contains(t, body, blocked)
 	assert.Contains(t, body, dead)

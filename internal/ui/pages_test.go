@@ -246,7 +246,7 @@ func TestStatus_Failures(t *testing.T) {
 	out := render(t, r, PageStatus, st)
 	assert.Contains(t, out, `<a class="more" href="/ui/library?state=failed">Failed documents →</a>`)
 	assert.Contains(t, out, `<li><a class="label" href="/ui/library?cause=anti_bot" title="Blocked by bot protection">`+
-		`Blocked by bot protection</a><svg class="hbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">`+
+		`Blocked by bot protection</a><svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">`+
 		`<rect class="fill-track" x="0" y="0" width="100" height="10"/><rect class="fill-danger" x="0.000" y="0" width="100.000" height="10"/></svg>`+
 		`<span class="n">926</span></li>`)
 	assert.Contains(t, out, `<rect class="fill-neutral" x="0.000" y="0" width="88.445" height="10"/></svg><span class="n">819</span>`)

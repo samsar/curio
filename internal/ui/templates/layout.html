@@ -90,8 +90,3 @@ one, why: the cause and the start of the error, the whole error on hover.
 {{define "stackbar" -}}
 <svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>{{range .}}<rect class="{{.Class}}" x="{{.X}}" y="0" width="{{.Width}}" height="10"/>{{end}}</svg>
 {{- end}}
-
-{{/* A bar of a list of them, []BarSegment, drawn over its track. */}}
-{{define "hbar" -}}
-<svg class="hbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>{{range .}}<rect class="{{.Class}}" x="{{.X}}" y="0" width="{{.Width}}" height="10"/>{{end}}</svg>
-{{- end}}

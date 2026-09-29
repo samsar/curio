@@ -939,7 +939,7 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .bars .label { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bars a.label:hover { color: var(--accent-text); text-decoration: none; }
 .bars .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); font-weight: 560; }
-svg.hbar { display: block; width: 100%; height: 0.5rem; border-radius: var(--r-pill); overflow: hidden; }
+.bars svg.stackbar { height: 0.5rem; }
 
 /* Queue ----------------------------------------------------------------------- */
 
