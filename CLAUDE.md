@@ -75,7 +75,7 @@ browser   (curio ui)     ──HTML /ui/──►       │             └ sqli
 
 ## Dashboard
 
-Read-only pages under `/ui/` on the daemon's own port (`/` redirects there; `daemon.ui: false` turns them off; `curio ui` opens them). User doc: `docs/ui.md`; design: decisions.md "Dashboard: server-rendered pages in the daemon (phase 1)" and "Dashboard: formatting budgets for stored markdown". Rules future changes keep:
+Read-only pages under `/ui/` on the daemon's own port (`/` redirects there; `daemon.ui: false` turns them off; `curio ui` opens them). User doc: `docs/ui.md`; design: decisions.md "Dashboard: server-rendered pages in the daemon (phase 1)", "Dashboard: formatting budgets for stored markdown" and "Dashboard: a design language under the CSP". Rules future changes keep:
 
 - `/ui` routes are GET only (`TestDashboard_GETOnly`), and every `/` and `/ui` response carries the strict CSP, nosniff and no-referrer (`TestDashboard_SecurityHeaders`, which needs a sample request for each new route). Another site's subresource request for a page is refused (`isolateDashboard`).
 - No inline script, style, event handler, `hx-on`, `hx-vars` or `javascript:` in templates (`TestTemplatesHaveNoInlineCode`). Links are built in Go (`internal/ui/links.go`), never in a template.
@@ -86,6 +86,7 @@ Read-only pages under `/ui/` on the daemon's own port (`/` redirects there; `dae
 - Changes (phase 2) go through `/v1` as JSON via fetch/XHR, never form posts (`Referrer-Policy: no-referrer` makes browsers send `Origin: null` on those), and must be `Sec-Fetch-Site: same-origin`.
 - Page handlers call the same Deps functions as the JSON handlers (`health`, `search`, `listDocuments`, ...), no SQL (depguard); panels degrade on their own, the JSON API fails whole.
 - Every template renders in `TestEveryTemplateRenders` with a typed, hostile sample; a new template needs one, and every page test checks inertness with `internal/ui/uitest`.
+- The design language (`TestStylesheet`, `TestIcons`): colours, type and spacing come from `app.css`'s tokens, and dark mode from `prefers-color-scheme` (a `data-theme` block mirrors it; the product never sets it). Proportions are SVG attributes (a 0-100 viewBox, `x`/`width`) or `<meter>`/`<progress>` values, never `style=`. A list shows a stored string on one line, cut by CSS, with the whole value in `title=`. Tables are `table-layout: fixed` with `<col>` widths, and cells clip. `body` is `overflow-wrap: break-word`; `anywhere` only in the rules `TestStylesheet` lists (code, pre, IDs and paths, reading titles), never a table's. Class and icon names come from Go funcs over fixed sets (`stateClass`, `stateTone`, `typeIcon`, `causeLabel`, `navItems`), never from a stored string. Icons come from `templates/icons.html` (inline `<svg>`, Lucide's ISC notice; no `<use>`, sprite or font). A `#fragment` link must name an id on its page (uitest). An empty `{{define}}` doesn't replace a block (text/template keeps the default), so a page drops the header's search box with an HTML comment. Check a layout change in a browser at 1440 and 390 px, both themes, with long and hostile data.
 
 ## State machine, briefly
 
