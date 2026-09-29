@@ -8019,7 +8019,8 @@ rows and seeks `idx_bookmarks_document`. `GET /v1/documents` returns it
 as `bookmark_title`. In the Date saved order a row is a save, so it takes
 that save's own title: no subquery, and the same name unless a
 document's bookmarks carry different titles (none of the author's
-untitled ones do) or the save has none (5 saves). The Document page names
+untitled ones do) or the save has none while an older one of the same
+document has one (1 save). The Document page names
 an untitled document the same way, in its heading and tab, from the
 `GetWithLastError` it already runs. The fallback is italic, weight 500,
 `--text-2`, the unlabeled interest's treatment, in the title's own font:

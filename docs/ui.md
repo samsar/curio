@@ -101,25 +101,25 @@ footer names the address the daemon listens on.
   saves" with any.
 - **Document**: the page's title (for an untitled page, its bookmark's
   title, in italics, as the Library names it) and address, its state,
-  type, length, author, published date and language; for a failed page, a box naming
-  why it failed and what that means, with its **Full error** a click
-  away, and for a dead one, that the page is gone. Then its text, and
-  beside it related documents, its bookmarks with their folders and tags,
-  and its details: when it was added, updated and fetched (Jina Reader
-  called out), its ID, where its markdown is, and the `curio` commands
-  that work for it. Under its head, **Refetch** and **Reindex**, and how
-  its text was fetched; for a dead link, **Refetch anyway…**, which asks
-  first. The text shown is at most the first 1 MiB; the page
-  says when it is cut and where the whole file is. A text whose markdown
-  would take too long or too much memory to format (a line nesting dozens
-  of quotes, lists nested deep over thousands of blank lines, a paragraph
-  thick with unclosed brackets, a table padded to thousands of columns: a
-  few shapes a page can hold, by accident or on purpose) is shown as it is
-  stored, unformatted, and the page says why. Whatever the text holds,
-  formatting stops after two seconds or a gigabyte of memory, and the text
-  is shown as stored. Web and email addresses written out in the text
-  without link markup show as text, not links: a GitHub README's bare
-  URLs, say.
+  type, length, author, published date and language; for a failed page,
+  a box naming why it failed and what that means, with its **Full
+  error** a click away, and for a dead one, that the page is gone. Then
+  its text, and beside it related documents, its bookmarks with their
+  folders and tags, and its details: when it was added, updated and
+  fetched (Jina Reader called out), its ID, where its markdown is, and
+  the `curio` commands that work for it. Under its head, **Refetch** and
+  **Reindex**, and how its text was fetched; for a dead link, **Refetch
+  anyway…**, which asks first. The text shown is at most the first 1
+  MiB; the page says when it is cut and where the whole file is. A text
+  whose markdown would take too long or too much memory to format (a
+  line nesting dozens of quotes, lists nested deep over thousands of
+  blank lines, a paragraph thick with unclosed brackets, a table padded
+  to thousands of columns: a few shapes a page can hold, by accident or
+  on purpose) is shown as it is stored, unformatted, and the page says
+  why. Whatever the text holds, formatting stops after two seconds or a
+  gigabyte of memory, and the text is shown as stored. Web and email
+  addresses written out in the text without link markup show as text,
+  not links: a GitHub README's bare URLs, say.
 - **Interests**: the topics the last clustering run found, largest first:
   how many there are (the page shows the 50 largest), a bar of how many
   documents are in one and how many in none, and a card for each with

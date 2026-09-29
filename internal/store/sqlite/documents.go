@@ -260,12 +260,16 @@ const lastErrorSQL = `COALESCE((
 
 // bookmarkTitleSQL names an untitled document d: the title of its most
 // recently saved bookmark whose title isn't blank, or empty when it has
-// none or d has a title of its own. It seeks idx_bookmarks_document,
-// which holds a document's bookmarks in (saved_at, id) order, and runs
-// only for the untitled rows. It takes no argument.
+// none or d has a title of its own. Blank is ASCII whitespace alone, as
+// the pages, which trim what they show, see it: SQL's one-argument trim
+// strips only spaces, and a tab-only title would hide an older real one.
+// It seeks idx_bookmarks_document, which holds a document's bookmarks in
+// (saved_at, id) order, and runs only for the untitled rows. It takes no
+// argument.
 const bookmarkTitleSQL = `COALESCE(CASE WHEN coalesce(d.title, '') = '' THEN (
 		SELECT b.title FROM bookmarks b
-		WHERE b.document_id = d.id AND b.tenant_id = d.tenant_id AND trim(b.title) <> ''
+		WHERE b.document_id = d.id AND b.tenant_id = d.tenant_id
+			AND trim(b.title, ' ' || char(9, 10, 11, 12, 13)) <> ''
 		ORDER BY b.saved_at DESC, b.id DESC
 		LIMIT 1
 	) END, '')`

@@ -285,6 +285,7 @@ func TestDocuments_BookmarkTitle(t *testing.T) {
 		{untitled, "local", new("Newest titled"), "2026-02-01T00:00:00.000Z", store.SourceSafari, "newest titled"},
 		{untitled, "local", nil, "2026-03-01T00:00:00.000Z", store.SourceFirefox, "newer, no title"},
 		{untitled, "local", new("  "), "2026-04-01T00:00:00.000Z", store.SourceManual, "newer, blank"},
+		{untitled, "local", new("\t\r\n "), "2026-04-15T00:00:00.000Z", store.SourceHTML, "newer, whitespace"},
 		{untitled, "other", new("Theirs"), "2026-05-01T00:00:00.000Z", store.SourceChrome, "another tenant's"},
 		{emptyTitle, "local", new("Named by its bookmark"), "2026-01-01T00:00:00.000Z", store.SourceChrome, "empty"},
 		{titled, "local", new("A bookmark title"), "2026-01-01T00:00:00.000Z", store.SourceChrome, "titled"},
