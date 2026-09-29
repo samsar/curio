@@ -53,7 +53,11 @@ func markDocFailed(d Deps) PermFailHook {
 		}
 		cause := store.FailureCauseIndex
 		if job.Kind != store.JobKindIndex {
-			cause = fetcher.FailureCause(jobErr)
+			// FailureCause is "" only for a nil error, which the worker
+			// never passes. Were one to come, the store would refuse the
+			// empty cause and retryBookkeeping retry that refusal until its
+			// deadline, leaving the document pending; other records it.
+			cause = cmp.Or(fetcher.FailureCause(jobErr), store.FailureCauseOther)
 		}
 		if err := d.Documents.MarkFailed(ctx, payload.DocumentID, cause); err != nil {
 			return fmt.Errorf("mark doc %s failed (%s): %w", payload.DocumentID, cause, err)

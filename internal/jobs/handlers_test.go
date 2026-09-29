@@ -308,6 +308,23 @@ func TestMarkDocFailed_IndexJobFailsForIndex(t *testing.T) {
 	}
 }
 
+// TestMarkDocFailed_NoErrorRecordsOther: a hook called without an error
+// still records a cause the store takes, instead of an empty one it would
+// refuse on every retry.
+func TestMarkDocFailed_NoErrorRecordsOther(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	ctx := context.Background()
+
+	doc := &store.Document{TenantID: "local", URL: "https://x/no-error", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+
+	require.NoError(t, markDocFailed(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID), nil))
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateFailed, got.State)
+	assert.Equal(t, store.FailureCauseOther, got.FailureCause)
+}
+
 // TestMarkDocFailed_FinalLoginWallGoesFailed: a page-level login wall that
 // the fetcher made final is a failed document, not a dead one; the page may
 // well exist behind the wall.
