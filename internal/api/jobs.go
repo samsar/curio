@@ -151,9 +151,9 @@ func listJobsOpts(r *http.Request) (store.ListJobsOpts, error) {
 }
 
 // listJobs pages through the tenant's jobs that match opts, most recently
-// updated first; opts.Limit is the page size. NextCursor is set exactly
-// when another page follows: the store is asked for one row more than the
-// page holds.
+// updated first; opts.Limit is the page size, at least 1, as listJobsOpts
+// reads it. NextCursor is set exactly when another page follows: the store
+// is asked for one row more than the page holds.
 func (d Deps) listJobs(ctx context.Context, opts store.ListJobsOpts) (JobListResponse, error) {
 	limit := opts.Limit
 	opts.Limit = limit + 1

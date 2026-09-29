@@ -250,9 +250,9 @@ func listDocumentsOpts(r *http.Request) (store.ListDocumentsOpts, error) {
 const contentTypeList = "article, repo, video, pdf, thread, unknown"
 
 // listDocuments pages through the tenant's documents that match opts, most
-// recently updated first; opts.Limit is the page size. NextCursor is set
-// exactly when another page follows: the store is asked for one row more
-// than the page holds.
+// recently updated first; opts.Limit is the page size, at least 1, as
+// listDocumentsOpts reads it. NextCursor is set exactly when another page
+// follows: the store is asked for one row more than the page holds.
 func (d Deps) listDocuments(ctx context.Context, opts store.ListDocumentsOpts) (DocumentListResponse, error) {
 	limit := opts.Limit
 	opts.Limit = limit + 1
