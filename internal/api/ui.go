@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -13,12 +15,17 @@ import (
 	"github.com/samsar/curio/internal/version"
 )
 
-// The dashboard: read-only pages under /ui/ on the daemon's own port and
-// origin (docs/ui.md). The handlers in ui_*.go get their data through the
-// same Deps functions as the JSON handlers, and never from SQL, then map it
+// The dashboard: pages under /ui/ on the daemon's own port and origin
+// (docs/ui.md). The handlers in ui_*.go get their data through the same
+// Deps functions as the JSON handlers, and never from SQL, then map it
 // into internal/ui's view models, which the templates render. Every route
 // is a GET: pages never change anything, since another site can make a
-// browser navigate to one. Changes go through /v1 as JSON.
+// browser navigate to one. What a page changes, its own script sends to
+// /v1 as JSON (internal/ui/static/actions.js).
+//
+// A page's pollers ask for its live regions alone with ?poll= (ui.PollParam):
+// the same route, handler and template, which then read only what those
+// regions show.
 
 // UIOptions configure the dashboard (config.yaml's daemon.ui and ui).
 type UIOptions struct {
@@ -191,6 +198,17 @@ func (h pageHandlers) asset(w http.ResponseWriter, r *http.Request) {
 	if !h.pages.render.ServeAsset(w, chi.URLParam(r, "file")) {
 		h.notFound(w, r)
 	}
+}
+
+// pollParam reads a page's ?poll: "" for the whole page, or one of kinds,
+// the live regions it takes. Any other value is a requestError, answered
+// before the page reads anything.
+func pollParam(r *http.Request, kinds ...string) (string, error) {
+	poll := r.URL.Query().Get(ui.PollParam)
+	if poll == "" || slices.Contains(kinds, poll) {
+		return poll, nil
+	}
+	return "", badRequest("%s %q must be one of: %s", ui.PollParam, poll, strings.Join(kinds, ", "))
 }
 
 // deref is *s, or "" for nil: an optional field as a page shows it.

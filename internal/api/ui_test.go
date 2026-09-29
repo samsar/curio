@@ -197,8 +197,8 @@ func TestUI_Status(t *testing.T) {
 	assert.Contains(t, body, `<span class="label">Documents</span><span class="value">3</span>`)
 	assert.Contains(t, body, `<span class="label">Fetched</span><span class="value">1 <small>33%</small></span>`)
 	assert.Contains(t, body, `<span class="label">Bookmarks</span><span class="value">2</span>`)
-	for _, state := range []string{"pending", "fetched", "failed", "dead"} {
-		assert.Contains(t, body, `<a href="/ui/library?state=`+state+`">`)
+	for i, state := range []string{"pending", "fetched", "failed", "dead"} {
+		assert.Contains(t, body, fmt.Sprintf(`<a id="legend-%d" href="/ui/library?state=%s">`, i, state))
 	}
 	// The state bar's proportions are attributes: a third each of pending,
 	// fetched and failed.
@@ -207,19 +207,25 @@ func TestUI_Status(t *testing.T) {
 		`<rect class="fill-danger" x="66.667" y="0" width="33.333" height="10"/>`)
 	assert.NotContains(t, body, "style=")
 	assert.Contains(t, body, `<span class="badge queue-open">open</span>`)
-	assert.Contains(t, body, `<td>fetch</td><td class="num">0 of 16</td><td class="num">1</td>`, "the new page's fetch job")
+	assert.Contains(t, body, `<th scope="col" class="num">Finished, 10m</th>`)
+	assert.Contains(t, body, `<td>fetch</td><td class="num">0 of 16</td><td class="num">1</td><td class="num">0</td>`,
+		"the new page's fetch job")
+	assert.Contains(t, body, `<span class="why">Working: 1 job waiting</span>`)
+	assert.Contains(t, body, `id="queue-pause" data-action="pause"`)
 	assert.Contains(t, body, "1 job queued, and none finished in the last 10m.")
 	assert.Contains(t, body, `qwen3-embedding:0.6b<span class="sub">1024 dimensions</span>`)
 	assert.NotContains(t, body, "Recently saved")
 	assert.NotContains(t, body, `class="callout`, "a healthy daemon needs no attention")
 	assert.Contains(t, body, `<a class="more" href="/ui/library?state=failed">Failed documents →</a>`)
 
-	// Paused: the progress says why nothing starts.
+	// Paused: the queue and the progress say why nothing starts, and the
+	// button resumes.
 	_, err := srv.Deps.Gate.Update(context.Background(), jobsPause())
 	require.NoError(t, err)
 	body = getPage(t, srv, "/ui/status", http.StatusOK)
-	assert.Contains(t, body, `<span class="badge queue-closed">closed</span><span class="why">paused`)
-	assert.Contains(t, body, "1 job queued. The queue is closed (paused), so none start until it opens.")
+	assert.Contains(t, body, `<span class="badge queue-closed">closed</span><span class="why">Paused</span>`)
+	assert.Contains(t, body, "1 job queued. Paused: none start until the queue opens.")
+	assert.Contains(t, body, `id="queue-pause" data-action="resume"`)
 }
 
 // failingCount fails the bookmark count, which stats reads.
@@ -1205,9 +1211,14 @@ func fingerprint(t *testing.T, srv *apitest.Server) map[string]string {
 	return out
 }
 
+// hxGetRE finds the URLs a page's htmx GETs, its pollers' among them.
+var hxGetRE = regexp.MustCompile(`hx-get="([^"]+)"`)
+
 // TestUI_GETNeverWrites: crawling every page, with every parameter they
-// take, changes nothing in the database.
+// take, and every poll they render, with a fetch and a rebuild in flight,
+// changes nothing in the database.
 func TestUI_GETNeverWrites(t *testing.T) {
+	ctx := context.Background()
 	srv := apitest.Start(t)
 	doc := titled(t, srv, "https://example.com/a", "Kafka", store.DocStateFetched)
 	srv.AddContent(t, doc, hostileMarkdown)
@@ -1215,9 +1226,25 @@ func TestUI_GETNeverWrites(t *testing.T) {
 	failJob(t, srv, failed, "HTTP 503")
 	bookmark(t, srv, doc.URL, store.SourceChrome, "/Reading")
 	interest := srv.AddInterest(t, "Kafka", doc)
-	_, err := srv.Deps.Gate.Update(context.Background(), jobsPause())
+	queued := srv.AddDocument(t, "https://example.com/queued", store.DocStateFetched)
+	_, err := srv.Deps.Documents.RequeueFetch(ctx, apitest.TenantID, queued.ID)
+	require.NoError(t, err)
+	enqueueRebuild(t, srv)
+	failRun(t, srv, "boom")
+	_, err = srv.Deps.Gate.Update(ctx, jobsPause())
 	require.NoError(t, err)
 	before := fingerprint(t, srv)
+
+	var polls []string
+	for _, path := range []string{"/ui/status", "/ui/documents/" + queued.ID, "/ui/interests"} {
+		for _, m := range hxGetRE.FindAllStringSubmatch(getPage(t, srv, path, http.StatusOK), -1) {
+			polls = append(polls, html.UnescapeString(m[1]))
+		}
+	}
+	require.Len(t, polls, 4, "Status's two, the document's and the Interests'")
+	for _, poll := range polls {
+		getPage(t, srv, poll, http.StatusOK)
+	}
 
 	home := getPage(t, srv, "/ui/", http.StatusOK)
 	library := getPage(t, srv, "/ui/library?limit=1", http.StatusOK)
@@ -1229,7 +1256,8 @@ func TestUI_GETNeverWrites(t *testing.T) {
 		"/ui/library?state=failed", "/ui/library?content_type=article&host=example.com&folder=/Reading", cursor, more,
 		"/ui/library?state=bogus", "/ui/documents/" + doc.ID, "/ui/documents/" + doc.ID + "?images=1",
 		"/ui/documents/" + failed.ID, "/ui/documents/nope", "/ui/interests", "/ui/interests/" + interest.ID, "/ui/nope",
-		assetRE.FindStringSubmatch(home)[1], "/ui/static/nope.css",
+		assetRE.FindStringSubmatch(home)[1], "/ui/static/nope.css", "/ui/status?poll=bogus",
+		"/ui/documents/" + doc.ID + "?poll=jobs", "/ui/interests?poll=live",
 	} {
 		p := get(t, srv, path)
 		assert.Less(t, p.status, http.StatusInternalServerError, path)

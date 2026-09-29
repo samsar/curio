@@ -21,6 +21,8 @@ func newUICmd(env *daemonctl.Env, openURL func(context.Context, string) error) *
 		Long: `Open curio's dashboard in your browser. It opens on search; the library
 lists every document with its text a click away, the interests group them
 by topic, and Status shows the library's counts, the queue and its progress.
+The pages can refetch and reindex a document, rebuild the interests, and
+control the queue (pause, throttle, keep awake, schedule), as the commands do.
 It starts the daemon first if it isn't running, and opens the dashboard as
 soon as the daemon answers: while it is still starting (a migration, say),
 the page shows its progress and turns into the dashboard once it is ready.

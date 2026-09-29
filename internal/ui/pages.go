@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"time"
 
 	"github.com/samsar/curio/internal/store"
@@ -48,14 +49,32 @@ type PanelError struct {
 
 // Status is what curio is doing and whether what it needs works: what
 // needs attention, the library's counts, the queue, why documents failed,
-// health, how far along its work is, and the jobs.
+// health, how far along its work is, and the jobs. A panel is nil when the
+// page wasn't asked for it: a poll reads, and renders, only the panels its
+// live regions show.
 type Status struct {
-	Layout   Layout
-	Counts   CountsPanel
-	Queue    QueuePanel
-	Progress ProgressPanel
-	Health   HealthPanel
-	Failures FailuresPanel
+	Layout Layout
+	// Poll is the live regions the page was asked for, PollLive or
+	// PollHealth, or "" for the whole page.
+	Poll     string
+	Counts   *CountsPanel
+	Queue    *QueuePanel
+	Progress *ProgressPanel
+	Health   *HealthPanel
+	Failures *FailuresPanel
+}
+
+// Pollers are the whole page's pollers, none for a poll's answer: one
+// refreshes what changes by the second, and after every change the page
+// makes; the other, health, which pings Ollama, every 15 seconds.
+func (s Status) Pollers() []Poller {
+	if s.Poll != "" {
+		return nil
+	}
+	return []Poller{
+		{ID: statusPoller, Href: statusPollHref(PollLive), Every: pollEvery, OnChange: true, Regions: statusLiveRegions},
+		{ID: healthPoller, Href: statusPollHref(PollHealth), Every: healthPollEvery, Regions: statusHealthRegions},
+	}
 }
 
 // CountsPanel counts the library and the jobs.
@@ -83,15 +102,19 @@ type Count struct {
 	Count int
 }
 
-// QueuePanel is the queue gate and the pools' load.
+// QueuePanel is the queue gate, its settings and the pools' load.
 type QueuePanel struct {
 	Err      *PanelError
 	Open     bool
+	Paused   bool
 	Reason   string    // why it is closed
 	OpensAt  time.Time // when a closed queue opens; zero when unknown
 	Throttle string
 	Schedule string // HH:MM-HH:MM; empty for none
 	Kinds    []KindLoad
+	// FinishedIn is the window the pools' Finished counts cover, 0 when
+	// they couldn't be read.
+	FinishedIn time.Duration
 	// KeepAwake is the setting; KeepAwakeActive whether the Mac is held
 	// awake now, and PowerSource what it runs on, while the setting is on.
 	KeepAwake       bool
@@ -99,16 +122,109 @@ type QueuePanel struct {
 	PowerSource     string
 }
 
-// KindLoad is one pool's load.
+// KindLoad is one pool's load, and how many of its jobs finished, done or
+// failed, in the panel's FinishedIn.
 type KindLoad struct {
-	Kind                    string
-	Running, Limit, Pending int
+	Kind                              string
+	Running, Limit, Pending, Finished int
 }
 
-// ProgressPanel is the queue's progress estimate.
+// Waiting is how many jobs wait in the pools.
+func (p QueuePanel) Waiting() int {
+	n := 0
+	for _, k := range p.Kinds {
+		n += k.Pending
+	}
+	return n
+}
+
+// Toggle is the queue's Pause button, or Resume while it is paused.
+func (p QueuePanel) Toggle() Action {
+	if p.Paused {
+		return resumeAction()
+	}
+	return pauseAction()
+}
+
+// ThrottleChoice is one button of the throttle control.
+type ThrottleChoice struct {
+	ID, Label string
+	Pressed   bool
+	Action    Action
+}
+
+// Throttles are the throttle control's buttons, the setting's pressed.
+func (p QueuePanel) Throttles() []ThrottleChoice {
+	choices := make([]ThrottleChoice, 0, 2)
+	for _, t := range []store.Throttle{store.ThrottleNormal, store.ThrottleGentle} {
+		choices = append(choices, ThrottleChoice{ID: "throttle-" + string(t), Label: throttleLabel(t),
+			Pressed: p.Throttle == string(t), Action: throttleAction(t)})
+	}
+	return choices
+}
+
+// KeepAwakeSwitch is the keep-awake switch's Action.
+func (QueuePanel) KeepAwakeSwitch() Action { return keepAwakeAction() }
+
+// SaveSchedule is the schedule form's Action, and ScheduleOff its Turn off
+// button's.
+func (QueuePanel) SaveSchedule() Action { return scheduleAction() }
+
+func (QueuePanel) ScheduleOff() Action { return scheduleOffAction() }
+
+// ScheduleStart and ScheduleEnd are the schedule's times, HH:MM, for the
+// form's fields: empty without a schedule.
+func (p QueuePanel) ScheduleStart() string {
+	start, _, _ := strings.Cut(p.Schedule, "-")
+	return start
+}
+
+func (p QueuePanel) ScheduleEnd() string {
+	_, end, _ := strings.Cut(p.Schedule, "-")
+	return end
+}
+
+// KeepAwakeHint says what keep-awake does now: whether it holds the Mac
+// awake and, when it doesn't, why not, in the keeper's order.
+func (p QueuePanel) KeepAwakeHint() string {
+	switch {
+	case !p.KeepAwake:
+		return "Off: jobs wait while the Mac sleeps."
+	case p.KeepAwakeActive:
+		return "Holding the Mac awake while jobs run (AC power)."
+	case p.Paused:
+		return "On, not holding the Mac awake: the queue is paused."
+	case p.queued() == 0:
+		return "On, not holding the Mac awake: nothing is queued."
+	case p.PowerSource == powerBattery:
+		return "On, not holding the Mac awake: it runs on battery."
+	case p.PowerSource != powerAC:
+		return "On, not holding the Mac awake: its power source is unknown."
+	}
+	return "On, not holding the Mac awake yet."
+}
+
+// The power sources GET /v1/queue reports keep-awake's Mac running on.
+const (
+	powerAC      = "ac"
+	powerBattery = "battery"
+)
+
+// queued is how many jobs the pools wait on or run.
+func (p QueuePanel) queued() int {
+	n := 0
+	for _, k := range p.Kinds {
+		n += k.Pending + k.Running
+	}
+	return n
+}
+
+// ProgressPanel is the queue's progress estimate, and why a closed queue
+// holds the work.
 type ProgressPanel struct {
 	Err      *PanelError
 	Progress Progress
+	Reason   string
 }
 
 // HealthPanel is the daemon's health and what it depends on.
@@ -473,9 +589,11 @@ type DocCell struct {
 	LastError    string
 }
 
-// Document is one document's page.
+// Document is one document's page. A poll's answer (Poll PollJobs) holds
+// its live regions alone, Jobs and their poller, and reads nothing else.
 type Document struct {
 	Layout     Layout
+	Poll       string
 	Meta       DocumentMeta
 	Extraction *Extraction // nil before its first fetch
 	// LastError is its most recent failed job's error, and FailureCause
@@ -486,6 +604,108 @@ type Document struct {
 	Text         TextPanel
 	Related      RelatedPanel
 	Bookmarks    BookmarksPanel
+	Jobs         DocumentJobs
+}
+
+// Refetch is the document's Refetch button; ForcedRefetch is the one that
+// refetches a dead link, behind its confirm.
+func (d Document) Refetch() Action { return refetchAction(d.Meta.ID) }
+
+func (d Document) ForcedRefetch() Action { return forcedRefetchAction(d.Meta.ID) }
+
+// Reindex is the document's Reindex button.
+func (d Document) Reindex() Action { return reindexAction(d.Meta.ID) }
+
+// DocumentJobs is a document's live region: its jobs in flight, and what
+// came of them since the page was rendered. Baseline is what the page
+// shows, Current what the library holds now; a page's own render has them
+// equal.
+type DocumentJobs struct {
+	DocumentID string
+	State      string // the document's, now
+	Baseline   DocumentBaseline
+	Current    DocumentBaseline
+	Err        *PanelError // the jobs couldn't be read
+	Jobs       []JobLine   // queued and running, newest first
+	// AttemptLimit is how many attempts a job gets.
+	AttemptLimit int
+	// Hold is why the queue holds the queued jobs, the gate's reason, or ""
+	// while it is open or unknown.
+	Hold string
+}
+
+// InFlight reports whether a job of the document is queued or running.
+func (j DocumentJobs) InFlight() bool { return len(j.Jobs) > 0 }
+
+// Queued reports whether a job of the document waits in the queue.
+func (j DocumentJobs) Queued() bool {
+	for _, l := range j.Jobs {
+		if !l.Running {
+			return true
+		}
+	}
+	return false
+}
+
+// DocumentOutcome is what came of a document's jobs since its page was
+// rendered, for the page to offer a reload.
+type DocumentOutcome string
+
+// What came of a document's jobs.
+const (
+	OutcomeNone        DocumentOutcome = ""
+	OutcomeTextChanged DocumentOutcome = "text-changed" // a new extraction is current
+	OutcomeFailed      DocumentOutcome = "failed"       // it failed, or is dead
+	OutcomeUpdated     DocumentOutcome = "updated"      // anything else changed
+)
+
+// Outcome is what came of the document's jobs: a new text as soon as it is
+// current; otherwise, once no job is in flight, a failure or an update when
+// the document changed.
+func (j DocumentJobs) Outcome() DocumentOutcome {
+	switch {
+	case j.Current.Extraction != j.Baseline.Extraction:
+		return OutcomeTextChanged
+	case j.Err != nil || j.InFlight() || j.Current.Updated.Equal(j.Baseline.Updated):
+		return OutcomeNone
+	case j.State == string(store.DocStateFailed) || j.State == string(store.DocStateDead):
+		return OutcomeFailed
+	}
+	return OutcomeUpdated
+}
+
+// Poller is the document's poller: every 2 seconds while a job is in
+// flight or the document waits for one, and after every change the page
+// makes, carrying the page's baseline. It lists itself, so its answer
+// decides whether it keeps polling.
+func (j DocumentJobs) Poller() Poller {
+	p := Poller{ID: documentPoller, Href: documentPollHref(j.DocumentID, j.Baseline), OnChange: true,
+		Regions: []string{documentJobsID, documentPoller}}
+	if j.InFlight() || j.State == string(store.DocStatePending) {
+		p.Every = pollEvery
+	}
+	return p
+}
+
+// JobLine is one of a document's jobs in flight: its kind, whether it
+// runs or waits, the attempts it has used, and, for a retry, when it may
+// run again.
+type JobLine struct {
+	Kind     string
+	Running  bool
+	Attempts int
+	RunAfter time.Time
+}
+
+// Retrying reports whether the job waits to be tried again.
+func (l JobLine) Retrying() bool { return !l.Running && l.Attempts > 0 }
+
+// Attempt is the attempt the job is on, running, or waits to make.
+func (l JobLine) Attempt() int {
+	if l.Running {
+		return l.Attempts
+	}
+	return l.Attempts + 1
 }
 
 // DocumentMeta is what the library knows about a document. Zero values are
@@ -570,15 +790,83 @@ type DocumentBookmark struct {
 	SavedAt time.Time
 }
 
-// Interests is the latest clustering run's interests.
+// Interests is the latest clustering run's interests, and a rebuild of
+// them. A poll's answer (Poll PollRebuild) holds the rebuild's live
+// regions alone, and reads no interest.
 type Interests struct {
 	Layout    Layout
+	Poll      string
 	Run       *InterestRun // nil before the first run finished
 	Interests []Interest
+	Rebuild   Rebuild
+}
+
+// Rebuild is the Interests page's rebuild: whether the page offers one,
+// whether one is queued or running, and what the newest clustering run
+// came to when it isn't the run the page shows.
+type Rebuild struct {
+	Enabled bool        // config.yaml's insight.enabled
+	Err     *PanelError // the queue or the runs couldn't be read
+	Queued  bool
+	Running bool
+	// StartedAt is when the running rebuild started; zero when unknown.
+	StartedAt time.Time
+	// Hold is why the queue holds a queued rebuild, the gate's reason, and
+	// OpensAt when it opens; "" while it is open.
+	Hold    string
+	OpensAt time.Time
+	// Shown is the run the page shows, "" for none: the latest done one.
+	Shown string
+	// NewRun is the status of the newest run, of any status, when it isn't
+	// Shown, and RunError its error: "" when it is.
+	NewRun   string
+	RunError string
+}
+
+// InFlight reports whether a rebuild is queued or running.
+func (b Rebuild) InFlight() bool { return b.Queued || b.Running }
+
+// RebuildOutcome is what came of the newest rebuild, for the page to say.
+type RebuildOutcome string
+
+// What came of a rebuild.
+const (
+	RebuildNone   RebuildOutcome = ""
+	RebuildReady  RebuildOutcome = "ready"  // a newer run's interests are ready
+	RebuildFailed RebuildOutcome = "failed" // the newest run failed
+)
+
+// Outcome is what came of the newest rebuild: a newer done run is ready to
+// load; a failed one is reported once no rebuild is in flight, which may
+// yet replace it.
+func (b Rebuild) Outcome() RebuildOutcome {
+	switch {
+	case b.NewRun == string(store.ClusterRunDone):
+		return RebuildReady
+	case b.NewRun == string(store.ClusterRunFailed) && !b.InFlight():
+		return RebuildFailed
+	}
+	return RebuildNone
+}
+
+// Action is the Rebuild button's.
+func (Rebuild) Action() Action { return rebuildAction() }
+
+// Poller is the rebuild's poller: every 2 seconds while a rebuild is in
+// flight, and after every change the page makes, carrying the run the page
+// shows. It lists itself, so its answer decides whether it keeps polling.
+func (b Rebuild) Poller() Poller {
+	p := Poller{ID: rebuildPoller, Href: interestsPollHref(b.Shown), OnChange: true,
+		Regions: []string{rebuildStateID, rebuildControlID, rebuildPoller}}
+	if b.InFlight() {
+		p.Every = pollEvery
+	}
+	return p
 }
 
 // InterestRun is the clustering run the interests come from.
 type InterestRun struct {
+	ID         string
 	ComputedAt time.Time
 	Algo       string
 	Documents  int
