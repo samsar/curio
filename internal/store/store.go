@@ -792,6 +792,9 @@ type JobStore interface {
 	// is daemon-wide. Pending includes retries waiting on run_after. Kinds
 	// with neither are absent from the map.
 	QueueCounts(ctx context.Context) (map[JobKind]QueueCount, error)
+	// AttemptLimit is how many attempts a job gets: MarkFailed fails it
+	// for good once its attempts reach this many.
+	AttemptLimit() int
 }
 
 // QueueCount is how many jobs of one kind are waiting and running.

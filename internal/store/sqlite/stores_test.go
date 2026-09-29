@@ -536,6 +536,23 @@ func TestJobs_MarkFailed_RetryAndExhaust(t *testing.T) {
 	assert.Equal(t, store.JobStatusFailed, got.Status)
 }
 
+// TestJobs_AttemptLimit: the limit the queue reports is the one MarkFailed
+// fails a job at.
+func TestJobs_AttemptLimit(t *testing.T) {
+	ctx := context.Background()
+	q := NewJobs(newTestDB(t))
+	assert.Equal(t, 5, q.AttemptLimit(), "the default")
+
+	q.MaxAttempts = 1
+	require.Equal(t, 1, q.AttemptLimit())
+	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
+	claimed, err := q.ClaimNext(ctx, nil)
+	require.NoError(t, err)
+	permanent, err := q.MarkFailed(ctx, claimed.ID, "transient", true)
+	require.NoError(t, err)
+	assert.True(t, permanent, "failed for good at its only attempt")
+}
+
 // TestRetryBackoff: 30s doubled per failed attempt, capped at an hour,
 // however many attempts.
 func TestRetryBackoff(t *testing.T) {
