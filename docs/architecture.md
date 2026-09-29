@@ -128,7 +128,7 @@ all fetch/index/search/insight workflows.
 - `api/openapi.yaml` is the contract, verified against the router and live
   responses by tests in `internal/api`; the clients (`internal/client`) are
   hand-written, and codegen is deferred
-- The dashboard: read-only HTML pages under `/ui/` on the same port and
+- The dashboard: GET-only HTML pages under `/ui/` on the same port and
   origin (`/` redirects there; `daemon.ui: false` turns them off): search
   is the home at `/ui/`, then the Library, the Interests, and Status at
   `/ui/status` (the queue, health, progress and why documents failed).
@@ -136,10 +136,16 @@ all fetch/index/search/insight workflows.
   as the JSON handlers, and `internal/ui` renders them with
   `html/template`, a sanitized render of each document's markdown, one
   stylesheet of design tokens and components with inline SVG icons, and
-  a vendored htmx for search-as-you-type. Every response carries a strict
-  CSP. See `docs/ui.md`, and decisions.md "Dashboard: server-rendered
-  pages in the daemon (phase 1)", "Dashboard: a design language under the
-  CSP" and "Dashboard: search is home, the Overview becomes Status"
+  a vendored htmx for search-as-you-type and live regions, which pollers
+  refresh with `?poll=` (the page's live regions alone, and their reads
+  alone). What a page changes (refetch, reindex, rebuild, the queue's
+  controls) its own script, `actions.js`, sends to `/v1` as JSON, from
+  actions built in Go (`internal/ui/actions.go`). Every response carries
+  a strict CSP. See `docs/ui.md`, and decisions.md "Dashboard:
+  server-rendered pages in the daemon (phase 1)", "Dashboard: a design
+  language under the CSP", "Dashboard: search is home, the Overview
+  becomes Status" and "Dashboard: actions through /v1, sent by a
+  first-party module"
 - Internal worker pools process jobs from the SQLite-backed queue. They
   claim through the queue gate (`jobs.QueueGate`), which holds claims back
   while the queue is paused, outside its daily schedule, or at the
@@ -442,8 +448,9 @@ External processes the daemon expects:
 - Read-later / highlights (Pocket, Instapaper, Readwise)
 - Trajectory analysis / "new this month" detection (interest clustering itself
   landed in M4 — see the insight layer)
-- A web UI that changes anything: the dashboard's phase 1 (read-only
-  pages, `docs/ui.md`) has shipped; actions and richer views are planned
+- A web UI beyond the dashboard (`docs/ui.md`): its pages refetch,
+  reindex, rebuild and control the queue; a failures view and richer
+  views are planned
 - Authentication (single-tenant local: the API binds loopback only and
   refuses browser-originated requests; see decisions.md "Local API: loopback
   only, no token, browsers shut out")

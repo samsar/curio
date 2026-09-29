@@ -13,10 +13,39 @@ While the daemon is starting (applying a database migration after an
 upgrade, say), the page shows its progress and turns into the dashboard
 once the daemon is ready.
 
-`curio status` shows the address too. The dashboard is read-only for now:
-it shows what curio knows and changes nothing. Refetching, reindexing,
-rebuilding interests and the queue controls are still `curio` commands
-(the document page lists the ones for that document).
+`curio status` shows the address too. Besides showing what curio knows,
+the dashboard does what these commands do:
+
+| On the page | What it does | The command |
+|---|---|---|
+| a document's **Refetch** | fetches the page again | `curio refetch <id>` |
+| a dead link's **Refetch anyway…**, after you confirm | fetches it though it was found gone | `curio refetch --force <id>` |
+| a document's **Reindex** (once it has text) | re-chunks and re-embeds its text | `curio reindex <id>` |
+| **Rebuild** on Interests | groups the library into interests again | `curio interests rebuild` |
+| **Pause** / **Resume** on Status | stops starting jobs, or starts them again | `curio pause`, `curio resume` |
+| **Throttle** on Status | runs fewer jobs at once (gentle), or all (normal) | `curio throttle gentle\|normal` |
+| **Keep awake** on Status | keeps the Mac from idle sleep while jobs run on AC power | `curio keep-awake on\|off` |
+| **Schedule** on Status | starts jobs only between two times, or at any hour (Turn off) | `curio schedule HH:MM-HH:MM\|off` |
+
+Each says what came of it next to it: done, or the daemon's reason for
+refusing it. One change runs at a time. The controls need JavaScript;
+without it the pages show the commands instead, and Status the queue's
+settings.
+
+## What refreshes by itself
+
+Status keeps itself current: the library's counts, the queue, its
+progress and the jobs every 2 seconds and right after a change you make,
+and health (which checks Ollama) every 15 seconds; why documents failed
+is read when the page loads. A document's page shows its jobs while one
+is queued or running (why, if the queue holds them, and each retry's
+attempt), then offers a reload once there is something new to show: a
+new text, a failure, or another change. Interests does the same for a
+rebuild: queued or running, then "New interests are ready: reload", or
+why the rebuild failed. Nothing refreshes while the tab is in the
+background; it catches up when you come back. If the daemon stops
+answering, a note says the page isn't updating, and it goes once the
+daemon is back.
 
 ## The pages
 
@@ -62,7 +91,9 @@ footer names the address the daemon listens on.
   beside it related documents, its bookmarks with their folders and tags,
   and its details: when it was added, updated and fetched (Jina Reader
   called out), its ID, where its markdown is, and the `curio` commands
-  that work for it. The text shown is at most the first 1 MiB; the page
+  that work for it. Under its head, **Refetch** and **Reindex**, and how
+  its text was fetched; for a dead link, **Refetch anyway…**, which asks
+  first. The text shown is at most the first 1 MiB; the page
   says when it is cut and where the whole file is. A text whose markdown
   would take too long or too much memory to format (a line nesting dozens
   of quotes, lists nested deep over thousands of blank lines, a paragraph
@@ -77,15 +108,18 @@ footer names the address the daemon listens on.
   how many there are (the page shows the 50 largest), a bar of how many
   documents are in one and how many in none, and a card for each with
   its size, how alike its documents are, its summary and a few of its
-  documents. An interest's page lists its documents by similarity. With
-  no run yet, `curio interests rebuild` makes one.
+  documents. An interest's page lists its documents by similarity.
+  **Rebuild**, at the top, groups the library again. With insight turned
+  off in config.yaml (`insight.enabled: false`), there is no Rebuild, and
+  the page says so.
 - **Status**: what curio is doing, and whether what it needs works. What
   needs your attention comes first: Ollama not ready, the embeddings
   drifted (with the command that fixes it), or the Jina Reader fallback
   failing or degraded. Then cards for the library (how many documents,
   fetched and bookmarks, and a bar of the documents by state, each state
   linking to the Library of those), the queue (open or closed and why,
-  its throttle, schedule and keep-awake, and each pool's load), and why
+  with Pause or Resume, its throttle, keep-awake and schedule controls,
+  and each pool's load and the jobs it finished in the last 10 minutes), and why
   documents failed (the five commonest causes as bars, each linking to
   the Library of the documents that failed for it); beside them, health
   (the daemon, Ollama, the models, embedding drift, the Jina Reader
@@ -136,8 +170,11 @@ browser: they can't read what the daemon answers, it refuses their
 requests to change anything, and their pages can't load a dashboard page
 as an image, a frame or a script. A page can still send your tab to a
 dashboard page, as a link you follow does; that only shows you the page,
-since pages change nothing. The rules, and why, are in
+since opening a page changes nothing. A change is sent only by the
+dashboard's own script, to the daemon's API as JSON, from the daemon's own
+pages, which the daemon checks. The rules, and why, are in
 [decisions.md](./decisions.md): "Dashboard: server-rendered pages in the
 daemon (phase 1)", "Dashboard: formatting budgets for stored markdown",
-"Dashboard: a design language under the CSP" and "Local API: loopback
-only, no token, browsers shut out".
+"Dashboard: a design language under the CSP", "Dashboard: actions through
+/v1, sent by a first-party module" and "Local API: loopback only, no
+token, browsers shut out".

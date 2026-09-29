@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"errors"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Every link a page makes is built here, whole, from the values it names:
@@ -18,6 +21,80 @@ func documentImagesHref(id string) string { return documentHref(id) + "?images=1
 
 // interestHref is an interest's page.
 func interestHref(id string) string { return "/ui/interests/" + url.PathEscape(id) }
+
+// PollParam is the query parameter that asks a page for its live regions
+// alone, the ones a poller refreshes, rather than the whole page: its
+// value names which, and the page reads only what those show. The access
+// log knows a poll by it, too.
+const PollParam = "poll"
+
+// The live regions a poll asks for: Status's that change by the second
+// (PollLive) and its health (PollHealth), a document's jobs (PollJobs),
+// and the Interests' rebuild (PollRebuild).
+const (
+	PollLive    = "live"
+	PollHealth  = "health"
+	PollJobs    = "jobs"
+	PollRebuild = "rebuild"
+)
+
+// The baseline a poll carries: what its page showed when it was rendered,
+// which the answer compares the library against.
+const (
+	updatedParam    = "updated"
+	extractionParam = "extraction"
+	runParam        = "run"
+)
+
+// pollTimeLayout writes a baseline's time: RFC 3339 in UTC to the
+// millisecond, as the store keeps times, so it compares equal to the time
+// it came from.
+const pollTimeLayout = "2006-01-02T15:04:05.000Z07:00"
+
+// statusPollHref is Status's live regions of kind, PollLive or PollHealth.
+func statusPollHref(kind string) string {
+	return navHref(NavStatus) + "?" + url.Values{PollParam: {kind}}.Encode()
+}
+
+// DocumentBaseline is what a document's page shows of it, which its poll
+// compares the library against: when the document was last updated, and
+// its current extraction ("" for none).
+type DocumentBaseline struct {
+	Updated    time.Time
+	Extraction string
+}
+
+// documentPollHref is the live regions of document id's page, whose
+// baseline is b.
+func documentPollHref(id string, b DocumentBaseline) string {
+	return documentHref(id) + "?" + url.Values{PollParam: {PollJobs},
+		updatedParam: {b.Updated.UTC().Format(pollTimeLayout)}, extractionParam: {b.Extraction}}.Encode()
+}
+
+// ParseDocumentBaseline reads the baseline a document poll carries, as
+// documentPollHref wrote it. A poll without a time, or with one that isn't
+// RFC 3339, has none.
+func ParseDocumentBaseline(q url.Values) (DocumentBaseline, error) {
+	s := q.Get(updatedParam)
+	if s == "" {
+		return DocumentBaseline{}, errors.New(PollJobs + " poll without its " + updatedParam + " time")
+	}
+	updated, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return DocumentBaseline{}, fmt.Errorf("%s %q: %w", updatedParam, s, err)
+	}
+	return DocumentBaseline{Updated: updated, Extraction: q.Get(extractionParam)}, nil
+}
+
+// interestsPollHref is the Interests' rebuild regions, for a page showing
+// the clustering run shown ("" for none).
+func interestsPollHref(shown string) string {
+	return navHref(NavInterests) + "?" + url.Values{PollParam: {PollRebuild}, runParam: {shown}}.Encode()
+}
+
+// ShownRun reads the baseline an Interests poll carries: the clustering run
+// its page shows, "" for none.
+func ShownRun(q url.Values) string { return q.Get(runParam) }
 
 // searchHref is the search page for q, limited to contentType when it is
 // set; a blank q is the search home.

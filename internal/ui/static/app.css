@@ -631,6 +631,8 @@ nav.pager {
 
 /* Action status: what an action did, next to it (aria-live). ------------------ */
 
+/* actions.js writes it as text alone, so a busy one's spinner is drawn
+   here. A card's foot holding nothing but an empty one takes no room. */
 .action-status {
   display: inline-flex; align-items: center; gap: 0.4rem;
   font-size: var(--fs-sm); color: var(--text-3);
@@ -639,7 +641,23 @@ nav.pager {
 .action-status:empty { display: none; }
 .action-status[data-state="ok"] { color: var(--ok); }
 .action-status[data-state="error"] { color: var(--danger); }
-.action-status[data-state="busy"] svg { animation: spin 0.9s linear infinite; }
+.action-status[data-state="busy"]::before {
+  content: ""; flex: none; width: 0.75rem; height: 0.75rem;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+.card-foot:has(> .action-status:empty) { display: none; }
+
+/* Not updating: the page's pollers go unanswered (actions.js sets
+   data-stale), so what it shows may be out of date, and nothing is live. */
+.stale-note {
+  display: none; align-items: center; gap: var(--s2);
+  margin-bottom: var(--s4); padding: var(--s2) var(--s3);
+  border: 1px solid var(--warn-border); border-radius: var(--r-md);
+  background: var(--warn-soft); color: var(--warn); font-size: var(--fs-sm);
+}
+:root[data-stale] .stale-note { display: flex; }
+:root[data-stale] .badge-live { display: none; }
 
 /* Confirm: a popover (declarative: popovertarget opens it, no script). ------ */
 
@@ -843,6 +861,11 @@ main.page:has(.landing) { padding-bottom: var(--s6); }
 .meta-row .text { color: var(--text-3); font-size: var(--fs-sm); }
 .doc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s5); padding-top: var(--s5); border-top: 1px solid var(--border); }
 .doc-actions .action-status { margin-left: var(--s2); }
+/* The document's jobs in flight, and what came of them. */
+.doc-jobs { display: grid; gap: var(--s1); margin-top: var(--s3); font-size: var(--fs-sm); color: var(--text-2); }
+.doc-jobs:empty { display: none; }
+.job-lines { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s1); }
+.job-outcome a, .job-hold a { font-weight: 560; }
 
 .prose { font-size: var(--fs-md); line-height: var(--lh-read); color: var(--text); max-width: 42rem; overflow-wrap: break-word; }
 .prose > * + * { margin-top: 1em; }
@@ -888,6 +911,11 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .cli code { display: block; padding: 0.4rem 0.6rem; font-size: var(--fs-xs); color: var(--text-2); }
 
 /* Interests ------------------------------------------------------------------ */
+
+/* The Interests' rebuild, in its head: queued or running, and what came of it. */
+.rebuild-state { font-size: var(--fs-sm); color: var(--text-2); }
+.rebuild-state:empty { display: none; }
+.rebuild-state .failed { color: var(--danger); }
 
 .interest-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s4); list-style: none; padding: 0; }
 .interest { display: flex; flex-direction: column; padding: var(--s5); gap: var(--s3); }
@@ -944,8 +972,10 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 /* Queue ----------------------------------------------------------------------- */
 
 .queue-top { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); }
+.queue-state { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); min-width: 0; }
 .queue-top .why { color: var(--text-3); font-size: var(--fs-sm); }
-.queue-top .btn { margin-left: auto; }
+.queue-toggle { margin-left: auto; }
+.schedule-now { font-size: var(--fs-sm); color: var(--text-2); }
 .controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s4); margin-top: var(--s5); padding-top: var(--s5); border-top: 1px solid var(--border); }
 .control { display: grid; gap: var(--s2); align-content: start; min-width: 0; }
 .control > .label { font-size: var(--fs-xs); font-weight: 580; color: var(--text-3); display: flex; align-items: center; gap: 0.35rem; }
@@ -1030,6 +1060,14 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 }
 
 /* ------------------------------------------------------------- 7 utilities */
+
+/* Controls that need JavaScript are .js-only, shown once actions.js marks
+   <html> with data-js; what stands in for them without it is .no-js.
+   !important, as [hidden] is: .btn, .segmented and .switch set display,
+   which beats the browser's own [hidden] rule. */
+:root:not([data-js]) .js-only { display: none !important; }
+:root[data-js] .no-js { display: none !important; }
+[hidden] { display: none !important; }
 
 .visually-hidden {
   position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;

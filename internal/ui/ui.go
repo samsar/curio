@@ -94,8 +94,10 @@ func (r *Renderer) RenderMarkdown(src []byte, base string, images bool) (Text, e
 }
 
 // funcs are the templates' functions. Every link is built by one of them
-// (links.go), never pieced together in a template, and so is every stored
-// value's display form, class and icon name (format.go).
+// (links.go) or a view model's method, never pieced together in a
+// template, and so is every stored value's display form, class and icon
+// name (format.go). Actions and pollers come from the view models' methods
+// (actions.go, poll.go).
 func funcs(assets assetSet) template.FuncMap {
 	return template.FuncMap{
 		"asset":              assets.url,
@@ -131,6 +133,10 @@ func funcs(assets assetSet) template.FuncMap {
 		"stateBar":           stateBar,
 		"coverageBar":        coverageBar,
 		"causeBar":           causeBar,
+		"queueReason":        queueReason,
+		"gentleHint":         gentleHint,
+		"jobKindLabel":       jobKindLabel,
+		"viaLabel":           viaLabel,
 		"inc":                func(i int) int { return i + 1 },
 		"contentTypes":       func() []string { return contentTypes },
 	}

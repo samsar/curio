@@ -18,36 +18,59 @@ const statusCauses = 5
 // panel reads on its own, and one that fails shows its error while the
 // others render.
 //
-// failures reads the cause and URL of every failed and dead document, about
-// a millisecond per 3,000: fine once per page load, but a region of the page
-// that is polled must leave the failures card out.
+// Its pollers ask for less: ?poll=live for the counts, the queue and its
+// progress (a few covering index walks, every 2 seconds), and ?poll=health
+// for health, whose read pings Ollama, every 15 seconds. failures reads
+// the cause and URL of every failed and dead document, about a
+// millisecond per 3,000, so only the page reads it.
 func (h pageHandlers) status(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	vm := ui.Status{Layout: h.pages.layout("Status", ui.NavStatus)}
+	poll, err := pollParam(r, ui.PollLive, ui.PollHealth)
+	if err != nil {
+		h.writePageError(w, r, err, ui.NavStatus)
+		return
+	}
+	vm := ui.Status{Layout: h.pages.layout("Status", ui.NavStatus), Poll: poll}
+	if poll != ui.PollHealth {
+		h.statusLive(r, &vm)
+	}
+	if poll != ui.PollLive {
+		health, err := h.d.health(r.Context())
+		panel := healthPanel(health)
+		panel.Err = h.panelError(r, err)
+		vm.Health = &panel
+	}
+	if poll == "" {
+		failures, err := h.d.failures(r.Context())
+		panel := failuresPanel(failures)
+		panel.Err = h.panelError(r, err)
+		vm.Failures = &panel
+	}
+	h.page(w, r, http.StatusOK, ui.PageStatus, vm)
+}
 
+// statusLive reads what Status's 2-second poll shows into vm: the counts,
+// the queue and its progress, and each pool's finished jobs, which come
+// with the progress's metrics.
+func (h pageHandlers) statusLive(r *http.Request, vm *ui.Status) {
+	ctx := r.Context()
 	stats, err := h.d.stats(ctx)
-	vm.Counts = countsPanel(stats)
-	vm.Counts.Err = h.panelError(r, err)
+	counts := countsPanel(stats)
+	counts.Err = h.panelError(r, err)
+	vm.Counts = &counts
 
 	queue, err := h.d.queueState(ctx)
-	vm.Queue = queuePanel(queue)
-	vm.Queue.Err = h.panelError(r, err)
-	if vm.Queue.Err != nil {
-		vm.Progress.Err = vm.Queue.Err // the same failure, logged once
-	} else {
+	panel := queuePanel(queue)
+	panel.Err = h.panelError(r, err)
+	progress := ui.ProgressPanel{Err: panel.Err} // the same failure, logged once
+	if panel.Err == nil {
 		metrics, err := h.d.metrics(ctx, ui.ProgressWindow)
-		vm.Progress = ui.ProgressPanel{Err: h.panelError(r, err), Progress: estimateProgress(queue, metrics)}
+		progress = ui.ProgressPanel{Err: h.panelError(r, err), Progress: estimateProgress(queue, metrics),
+			Reason: queue.Reason}
+		if err == nil {
+			addFinished(&panel, metrics)
+		}
 	}
-
-	health, err := h.d.health(ctx)
-	vm.Health = healthPanel(health)
-	vm.Health.Err = h.panelError(r, err)
-
-	failures, err := h.d.failures(ctx)
-	vm.Failures = failuresPanel(failures)
-	vm.Failures.Err = h.panelError(r, err)
-
-	h.page(w, r, http.StatusOK, ui.PageStatus, vm)
+	vm.Queue, vm.Progress = &panel, &progress
 }
 
 // countsPanel shows every document state, in lifecycle order, whether or
@@ -68,12 +91,26 @@ func countsPanel(s Stats) ui.CountsPanel {
 }
 
 func queuePanel(q QueueResponse) ui.QueuePanel {
-	p := ui.QueuePanel{Open: q.State == queueOpen, Reason: q.Reason, OpensAt: q.OpensAt, Throttle: q.Throttle,
-		Schedule: q.Schedule, KeepAwake: q.KeepAwake, KeepAwakeActive: q.KeepAwakeActive, PowerSource: q.PowerSource}
+	p := ui.QueuePanel{Open: q.State == queueOpen, Paused: q.Paused, Reason: q.Reason, OpensAt: q.OpensAt,
+		Throttle: q.Throttle, Schedule: q.Schedule, KeepAwake: q.KeepAwake, KeepAwakeActive: q.KeepAwakeActive,
+		PowerSource: q.PowerSource}
 	for _, k := range q.Kinds {
 		p.Kinds = append(p.Kinds, ui.KindLoad{Kind: k.Kind, Running: k.Running, Limit: k.Limit, Pending: k.Pending})
 	}
 	return p
+}
+
+// addFinished gives p's pools how many of their jobs finished, done or
+// failed, in m's window.
+func addFinished(p *ui.QueuePanel, m MetricsResponse) {
+	finished := map[string]int{}
+	for _, k := range m.ByKind {
+		finished[k.Kind] = k.Count
+	}
+	for i := range p.Kinds {
+		p.Kinds[i].Finished = finished[p.Kinds[i].Kind]
+	}
+	p.FinishedIn = time.Duration(m.WindowSeconds) * time.Second
 }
 
 // estimateProgress estimates when the fetch and index jobs queued now will

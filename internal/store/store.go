@@ -792,6 +792,9 @@ type JobStore interface {
 	// is daemon-wide. Pending includes retries waiting on run_after. Kinds
 	// with neither are absent from the map.
 	QueueCounts(ctx context.Context) (map[JobKind]QueueCount, error)
+	// AttemptLimit is how many attempts a job gets: MarkFailed fails it
+	// for good once its attempts reach this many.
+	AttemptLimit() int
 }
 
 // QueueCount is how many jobs of one kind are waiting and running.
@@ -1068,8 +1071,8 @@ type InsightStore interface {
 	// similarity DESC. limit <= 0 means all.
 	ClusterMembers(ctx context.Context, clusterID string, limit int) ([]ClusterMember, error)
 
-	// PruneRunsExcept deletes every run for the tenant except keepRunID,
-	// cascading its clusters + memberships. Keeps storage bounded to the
-	// current snapshot.
-	PruneRunsExcept(ctx context.Context, tenantID, keepRunID string) error
+	// PruneRunsExcept deletes every run for the tenant except keepRunIDs,
+	// at least one, cascading their clusters + memberships. Keeps storage
+	// bounded to the current snapshot.
+	PruneRunsExcept(ctx context.Context, tenantID string, keepRunIDs ...string) error
 }

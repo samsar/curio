@@ -280,16 +280,17 @@ func exposeRequestID(next http.Handler) http.Handler {
 	})
 }
 
-// loggingMiddleware records each request at info level with status and
-// duration. Avoids middleware.Logger because we want structured slog output
-// instead of stdlib log.
+// loggingMiddleware records each request with status and duration, at
+// info level but for a dashboard poll that succeeded (accessLevel). Avoids
+// middleware.Logger because we want structured slog output instead of
+// stdlib log.
 func loggingMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			start := time.Now()
 			next.ServeHTTP(ww, r)
-			log.Info("http",
+			log.Log(r.Context(), accessLevel(r, ww.Status()), "http",
 				"request_id", middleware.GetReqID(r.Context()),
 				"method", r.Method,
 				"path", r.URL.Path,
@@ -299,6 +300,19 @@ func loggingMiddleware(log *slog.Logger) func(http.Handler) http.Handler {
 			)
 		})
 	}
+}
+
+// accessLevel is the level of r's access line, answered with status. A
+// dashboard page polls its live regions every few seconds while it is open,
+// which at about 200 bytes a line would grow daemon.log, never rotated, by
+// some 10 MB a day for one open Status tab: a poll that succeeded is logged
+// at debug (daemon.log_level: debug shows it). A poll that failed, and
+// every other request, is logged at info.
+func accessLevel(r *http.Request, status int) slog.Level {
+	if r.Method == http.MethodGet && isDashboard(r) && isPoll(r) && status < http.StatusBadRequest {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
 }
 
 // recoverProblem turns a panicking handler into a logged 500 problem. It

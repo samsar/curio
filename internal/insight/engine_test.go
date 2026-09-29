@@ -387,16 +387,36 @@ func TestRebuild_AllVectorsNonFinite(t *testing.T) {
 func TestRebuild_Failures(t *testing.T) {
 	failing := clusterFunc(func(context.Context, []Point) ([]int, error) { return nil, errors.New("boom") })
 
-	t.Run("a failed run keeps the prior run and is pruned", func(t *testing.T) {
+	t.Run("a failed run keeps the prior run, and is the newest until the next", func(t *testing.T) {
+		ctx := context.Background()
 		f := newEngineFixture(t, 3, 4)
 		prior := f.rebuild(t, f.engine(nil, nil, Config{}))
 
-		runID, err := f.engine(failing, nil, Config{}).Rebuild(context.Background(), tenant)
+		first, err := f.engine(failing, nil, Config{}).Rebuild(ctx, tenant)
 		require.Error(t, err)
-		assert.Equal(t, store.ClusterRunFailed, f.insights.finished[runID])
-		_, err = f.store.GetRun(context.Background(), runID)
-		assert.ErrorIs(t, err, store.ErrNotFound, "the failed run is pruned")
+		assert.Equal(t, store.ClusterRunFailed, f.insights.finished[first])
+		newest, err := f.store.LatestRun(ctx, tenant, "")
+		require.NoError(t, err)
+		assert.Equal(t, first, newest.ID, "the failure is kept, for the Interests page to report")
+		require.NotNil(t, newest.Error)
+		assert.Contains(t, *newest.Error, "boom")
 		f.assertCurrentRun(t, prior)
+
+		second, err := f.engine(failing, nil, Config{}).Rebuild(ctx, tenant)
+		require.Error(t, err)
+		_, err = f.store.GetRun(ctx, first)
+		assert.ErrorIs(t, err, store.ErrNotFound, "a later failure replaces it")
+		newest, err = f.store.LatestRun(ctx, tenant, "")
+		require.NoError(t, err)
+		assert.Equal(t, second, newest.ID)
+		f.assertCurrentRun(t, prior)
+
+		done := f.rebuild(t, f.engine(nil, nil, Config{}))
+		for _, id := range []string{prior, second} {
+			_, err = f.store.GetRun(ctx, id)
+			assert.ErrorIs(t, err, store.ErrNotFound, "a success prunes every other run")
+		}
+		f.assertCurrentRun(t, done)
 	})
 	t.Run("a failed first run is kept as the only row", func(t *testing.T) {
 		f := newEngineFixture(t, 3, 4)

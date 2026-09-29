@@ -9,28 +9,57 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
 )
 
-// relatedOnDocumentPage is how many related documents a document's page
-// lists.
-const relatedOnDocumentPage = 5
+const (
+	// relatedOnDocumentPage is how many related documents a document's page
+	// lists.
+	relatedOnDocumentPage = 5
+	// documentJobs is how many of a document's most recently updated jobs
+	// its page reads, for those in flight: a document has one or two at a
+	// time, a fetch and then its index.
+	documentJobs = 10
+)
 
 // document answers GET /ui/documents/{id}: the document's metadata and
 // current extraction, its rendered text, related documents and bookmarks,
-// and, while it is failed or dead, why it failed and its last error. The
-// text, related and bookmarks panels read on their own, and one that fails
-// shows its error while the rest renders.
+// its jobs in flight, and, while it is failed or dead, why it failed and
+// its last error. The text, related and bookmarks panels read on their
+// own, and one that fails shows its error while the rest renders.
 //
 // Stored pages' remote images are off: each is its alt text, linking to
 // it. ?images=1, or ui.load_remote_images, shows the https ones, and only
 // that answer's CSP allows https images.
+//
+// Its poller asks for the jobs alone (?poll=jobs, with the baseline the
+// page showed): the document, its jobs and, while one waits, the queue,
+// never its text, related documents or bookmarks.
 func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := chi.URLParam(r, "id")
+	poll, baseline, err := documentPoll(r)
+	if err != nil {
+		h.writePageError(w, r, err, ui.NavLibrary)
+		return
+	}
 	doc, err := h.d.Documents.GetWithLastError(ctx, h.d.TenantID, id)
 	if err != nil {
 		h.lookupError(w, r, "document", id, err)
+		return
+	}
+	current := ui.DocumentBaseline{Updated: doc.UpdatedAt, Extraction: deref(doc.CurrentExtractionID)}
+	if poll == "" {
+		baseline = current
+	}
+	vm := ui.Document{
+		Layout: h.pages.layout(cmp.Or(deref(doc.Title), doc.URL), ui.NavLibrary),
+		Poll:   poll,
+		Jobs:   h.documentJobs(r, doc.Document, baseline, current),
+	}
+	if poll != "" {
+		h.page(w, r, http.StatusOK, ui.PageDocument, vm)
 		return
 	}
 	resp, err := h.d.document(ctx, doc.Document)
@@ -39,14 +68,11 @@ func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	images := h.pages.opts.LoadRemoteImages || boolParam(r, "images")
-	vm := ui.Document{
-		Layout:     h.pages.layout(cmp.Or(deref(doc.Title), doc.URL), ui.NavLibrary),
-		Meta:       documentMeta(resp),
-		Extraction: extractionView(resp.CurrentExtraction),
-		Text:       h.documentText(r, resp, images),
-		Related:    h.relatedPanel(r, id),
-		Bookmarks:  h.bookmarksPanel(r, id),
-	}
+	vm.Meta = documentMeta(resp)
+	vm.Extraction = extractionView(resp.CurrentExtraction)
+	vm.Text = h.documentText(r, resp, images)
+	vm.Related = h.relatedPanel(r, id)
+	vm.Bookmarks = h.bookmarksPanel(r, id)
 	if failureCurrent(doc.State) {
 		vm.LastError, vm.FailureCause = doc.LastError, string(doc.FailureCause)
 	}
@@ -55,6 +81,51 @@ func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 		csp = ui.CSPWithImages
 	}
 	h.pageWithCSP(w, r, http.StatusOK, ui.PageDocument, vm, csp)
+}
+
+// documentPoll reads what a document page's request asks for: "" for the
+// page, or ui.PollJobs with the baseline the page showed.
+func documentPoll(r *http.Request) (string, ui.DocumentBaseline, error) {
+	poll, err := pollParam(r, ui.PollJobs)
+	if err != nil || poll == "" {
+		return poll, ui.DocumentBaseline{}, err
+	}
+	baseline, err := ui.ParseDocumentBaseline(r.URL.Query())
+	if err != nil {
+		return "", ui.DocumentBaseline{}, badRequest("%w", err)
+	}
+	return poll, baseline, nil
+}
+
+// documentJobs reads doc's jobs in flight, queued or running, newest
+// first, and, while one waits, why the queue holds it: the region of its
+// page that its poller refreshes, against the baseline the page showed.
+// The jobs' failure is the region's; the queue's is left out of it.
+func (h pageHandlers) documentJobs(r *http.Request, doc *store.Document, baseline, current ui.DocumentBaseline) ui.DocumentJobs {
+	j := ui.DocumentJobs{DocumentID: doc.ID, State: string(doc.State), Baseline: baseline, Current: current,
+		AttemptLimit: h.d.Queue.AttemptLimit()}
+	resp, err := h.d.listJobs(r.Context(), store.ListJobsOpts{DocumentID: doc.ID, Limit: documentJobs})
+	if err != nil {
+		j.Err = h.panelError(r, err)
+		return j
+	}
+	for _, job := range resp.Items {
+		switch store.JobStatus(job.Status) {
+		case store.JobStatusPending, store.JobStatusRunning:
+			j.Jobs = append(j.Jobs, ui.JobLine{Kind: job.Kind, Running: job.Status == string(store.JobStatusRunning),
+				Attempts: job.Attempts, RunAfter: job.RunAfter})
+		case store.JobStatusDone, store.JobStatusFailed:
+		}
+	}
+	if j.Queued() {
+		switch queue, err := h.d.queueState(r.Context()); {
+		case err != nil:
+			h.quietError(r, err)
+		case queue.State == queueClosed:
+			j.Hold = queue.Reason
+		}
+	}
+	return j
 }
 
 func documentMeta(d DocumentResponse) ui.DocumentMeta {

@@ -34,6 +34,9 @@ func NewJobs(db *DB) *Jobs {
 	return &Jobs{db: db, MaxAttempts: 5}
 }
 
+// AttemptLimit implements store.JobStore: MaxAttempts.
+func (s *Jobs) AttemptLimit() int { return s.MaxAttempts }
+
 func (s *Jobs) Enqueue(ctx context.Context, j *store.Job) error {
 	if err := insertJob(ctx, s.db, j); err != nil {
 		return err

@@ -67,6 +67,10 @@ func newLocalOrigin(addr net.Addr) (localOrigin, error) {
 			"http://127.0.0.1:" + port: true,
 			"http://localhost:" + port: true,
 			"http://[::1]:" + port:     true,
+			// A dashboard served from another loopback address
+			// (daemon.listen 127.0.0.2, say) sends its changes with that
+			// origin, which is the daemon's own.
+			"http://" + net.JoinHostPort(bound.String(), port): true,
 		},
 	}, nil
 }

@@ -1,4 +1,17 @@
+{{/*
+A document's page. Its live region is its jobs (doc-jobs): what is queued
+or running, and what came of it since the page was rendered, which its
+poller (DocumentJobs.Poller) keeps current while there is work. A poll's
+answer is that region and the poller alone. The actions sit outside it,
+so a poll never replaces a button, and only their status announces.
+*/}}
 {{define "content" -}}
+{{if .Poll}}{{template "doc-jobs" .Jobs}}
+{{template "poller" .Jobs.Poller}}
+{{- else}}{{template "document-page" .}}{{end}}
+{{- end}}
+
+{{define "document-page" -}}
 <div class="doc-head">
 {{with .Meta}}
 <nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "library"}}">Library</a>{{with host .URL}}<span class="sep">/</span><span>{{.}}</span>{{end}}</nav>
@@ -21,7 +34,7 @@
 <div class="callout-body"><p>{{causeWhy "dead_link"}}</p>{{template "full-error" .LastError}}</div>
 </div>
 {{end}}
-{{block "document-actions" .}}{{end}}
+{{template "document-actions" .}}
 </div>
 <div class="split mt-6">
 {{with .Text.Err}}<div class="card"><div class="card-body">{{template "panel-error" .}}</div></div>
@@ -83,6 +96,52 @@
 </div>
 </section>
 </aside>
+</div>
+{{template "poller" .Jobs.Poller}}
+{{- end}}
+
+{{/*
+What can be done to the document, which needs JavaScript: refetch it (a
+dead link only after a confirm, since the API refuses it without force)
+and reindex it when it has a text. Beside them, their status, which at
+rest says how the text was fetched, and under them the jobs.
+*/}}
+{{define "document-actions" -}}
+<div class="doc-actions js-only">
+{{- if eq .Meta.State "dead"}}<button class="btn" type="button" id="refetch-anyway" popovertarget="confirm-refetch">{{template "icon" "refresh"}}Refetch anyway…</button>
+{{- else}}<button class="btn{{if eq .Meta.State "failed"}} btn-primary{{end}}" type="button" id="refetch"{{template "action" .Refetch}}>{{template "icon" "refresh"}}Refetch</button>{{end}}
+{{- if .Extraction}}<button class="btn" type="button" id="reindex"{{template "action" .Reindex}}>{{template "icon" "database"}}Reindex</button>
+{{- else}}<button class="btn" type="button" id="reindex" aria-disabled="true" title="Nothing to reindex: it has no text yet">{{template "icon" "database"}}Reindex</button>{{end}}
+<span class="action-status" id="doc-status" role="status" aria-live="polite">{{with .Extraction}}Fetched {{template "reltime" .FetchedAt}} by {{.Fetcher}}{{with .Via}} via {{viaLabel .}}{{end}}{{end}}</span>
+</div>
+{{template "doc-jobs" .Jobs}}
+{{if eq .Meta.State "dead"}}<div class="confirm" id="confirm-refetch" popover role="alertdialog" aria-labelledby="confirm-refetch-title" aria-describedby="confirm-refetch-text">
+<h2 id="confirm-refetch-title">{{template "icon" "refresh"}}Refetch a dead link?</h2>
+<p id="confirm-refetch-text">curio found this page gone. It will try again, and the page stays dead if nothing changed.</p>
+<div class="actions">
+<button class="btn" type="button" id="refetch-cancel" popovertarget="confirm-refetch" popovertargetaction="hide" autofocus>Cancel</button>
+<button class="btn btn-primary" type="button" id="refetch-forced" popovertarget="confirm-refetch" popovertargetaction="hide"{{template "action" .ForcedRefetch}}>Refetch anyway</button>
+</div>
+</div>{{end}}
+{{- end}}
+
+{{/*
+A document's jobs in flight, a DocumentJobs, newest first, and what came
+of them since the page was rendered: a new text, a failure or another
+change, each with a link that reloads the page. Every link has an id, so
+focus survives a poll; no live role.
+*/}}
+{{define "doc-jobs" -}}
+<div class="doc-jobs" id="doc-jobs">
+{{- with .Err}}{{template "panel-error" .}}{{else}}
+{{- with .Jobs}}<ul class="job-lines">
+{{- range .}}<li>{{jobKindLabel .Kind}} {{if .Running}}running · attempt {{.Attempt}} of {{$.AttemptLimit}}{{else}}queued{{if .Retrying}} · attempt {{.Attempt}} of {{$.AttemptLimit}}, due {{template "reltime" .RunAfter}}{{end}}{{end}}</li>
+{{- end}}</ul>{{end}}
+{{- if and .Queued .Hold}}<p class="job-hold"><a id="doc-jobs-hold" href="{{navHref "status"}}">The queue is closed: {{queueReason .Hold}}</a></p>{{end}}
+{{- if eq .Outcome "text-changed"}}<p class="job-outcome">The text changed: <a id="doc-reload" href="{{documentHref .DocumentID}}">reload</a></p>
+{{- else if eq .Outcome "failed"}}<p class="job-outcome">It failed: <a id="doc-reload" href="{{documentHref .DocumentID}}">reload to see why</a></p>
+{{- else if eq .Outcome "updated"}}<p class="job-outcome">Updated: <a id="doc-reload" href="{{documentHref .DocumentID}}">reload</a></p>{{end}}
+{{- end -}}
 </div>
 {{- end}}
 

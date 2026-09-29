@@ -71,14 +71,22 @@ func TestInsights_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, clusters2, 1)
 
-	// PruneRunsExcept drops other runs (and cascades their clusters).
+	// PruneRunsExcept drops other runs (and cascades their clusters), and
+	// never every run.
 	old := &store.ClusterRun{TenantID: "local", Algo: "knn-graph"}
 	require.NoError(t, ins.CreateRun(ctx, old))
-	require.NoError(t, ins.PruneRunsExcept(ctx, "local", run.ID))
+	failed := &store.ClusterRun{TenantID: "local", Algo: "knn-graph"}
+	require.NoError(t, ins.CreateRun(ctx, failed))
+	require.NoError(t, ins.PruneRunsExcept(ctx, "local", run.ID, failed.ID))
 	_, err = ins.GetRun(ctx, old.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
+	for _, kept := range []string{run.ID, failed.ID} {
+		_, err = ins.GetRun(ctx, kept)
+		assert.NoError(t, err)
+	}
+	require.Error(t, ins.PruneRunsExcept(ctx, "local"), "no run to keep")
 	_, err = ins.GetRun(ctx, run.ID)
-	assert.NoError(t, err)
+	assert.NoError(t, err, "nothing pruned")
 
 	// Sentinel mapping.
 	_, err = ins.GetCluster(ctx, "does-not-exist")
@@ -149,4 +157,28 @@ func TestInsights_FinishRun_RequiresTerminalStatus(t *testing.T) {
 	assert.Equal(t, store.ClusterRunRunning, got.Status, "a refused finish changes nothing")
 	assert.Zero(t, got.NumDocuments)
 	assert.Nil(t, got.FinishedAt)
+}
+
+// TestInsights_LatestRun_SameStart: of two runs started in the same
+// millisecond, the later one is the latest, whatever its status.
+func TestInsights_LatestRun_SameStart(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ins := NewInsights(db)
+	done := &store.ClusterRun{TenantID: "local", Algo: "knn-graph"}
+	require.NoError(t, ins.CreateRun(ctx, done))
+	require.NoError(t, ins.FinishRun(ctx, done.ID, store.RunResult{Status: store.ClusterRunDone}))
+	failed := &store.ClusterRun{TenantID: "local", Algo: "knn-graph"}
+	require.NoError(t, ins.CreateRun(ctx, failed))
+	msg := "boom"
+	require.NoError(t, ins.FinishRun(ctx, failed.ID, store.RunResult{Status: store.ClusterRunFailed, Error: &msg}))
+	_, err := db.ExecContext(ctx, `UPDATE cluster_runs SET started_at = ?`, formatTime(done.StartedAt))
+	require.NoError(t, err)
+
+	latest, err := ins.LatestRun(ctx, "local", "")
+	require.NoError(t, err)
+	assert.Equal(t, failed.ID, latest.ID)
+	latest, err = ins.LatestRun(ctx, "local", store.ClusterRunDone)
+	require.NoError(t, err)
+	assert.Equal(t, done.ID, latest.ID)
 }

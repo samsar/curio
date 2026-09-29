@@ -127,3 +127,39 @@ func TestDuration(t *testing.T) {
 	}
 	assert.Equal(t, "never", when(time.Time{}))
 }
+
+// TestPollHrefs: each poll asks its own page for its live regions; a
+// document's carries the page's baseline, which round-trips exactly
+// whatever its values, and an Interests poll the run the page shows.
+func TestPollHrefs(t *testing.T) {
+	assert.Equal(t, "/ui/status?poll=live", statusPollHref(PollLive))
+	assert.Equal(t, "/ui/status?poll=health", statusPollHref(PollHealth))
+
+	updated := time.Date(2026, 9, 29, 7, 2, 3, 456_000_000, time.FixedZone("PDT", -7*3600))
+	for _, b := range []DocumentBaseline{
+		{Updated: updated, Extraction: "e1"},
+		{Updated: updated, Extraction: "a&b=c #1/%2F"},
+		{Updated: updated},
+	} {
+		u := parseHref(t, documentPollHref("a/b?#", b))
+		assert.Equal(t, "/ui/documents/a%2Fb%3F%23", u.EscapedPath(), "one path segment")
+		q := u.Query()
+		assert.Equal(t, PollJobs, q.Get(PollParam))
+		assert.Equal(t, "2026-09-29T14:02:03.456Z", q.Get("updated"), "UTC, to the millisecond")
+		got, err := ParseDocumentBaseline(q)
+		require.NoError(t, err)
+		assert.True(t, got.Updated.Equal(b.Updated), "the time round-trips")
+		assert.Equal(t, b.Extraction, got.Extraction)
+	}
+	for _, bad := range []string{"", "yesterday", "2026-09-29", "2026-09-29 14:02:03"} {
+		_, err := ParseDocumentBaseline(url.Values{"updated": {bad}, "extraction": {"e1"}})
+		assert.Error(t, err, "updated %q", bad)
+	}
+
+	for _, run := range []string{"r1", "", "a&run=b #1"} {
+		u := parseHref(t, interestsPollHref(run))
+		assert.Equal(t, "/ui/interests", u.Path)
+		assert.Equal(t, PollRebuild, u.Query().Get(PollParam))
+		assert.Equal(t, run, ShownRun(u.Query()), "the run round-trips")
+	}
+}

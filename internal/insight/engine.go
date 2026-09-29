@@ -181,7 +181,7 @@ func nonFinite(dv store.DocVector) bool {
 const bookkeepingTimeout = 10 * time.Second
 
 // recordFailure marks the run failed and prunes stale runs, keeping the last
-// good run's interests.
+// good run's interests and this failure.
 func (e *Engine) recordFailure(ctx context.Context, tenantID, runID string, numDocuments int, cause error) {
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookkeepingTimeout)
 	defer cancel()
@@ -208,23 +208,24 @@ func (e *Engine) runParams() ([]byte, error) {
 	return raw, nil
 }
 
-// pruneStaleRuns drops every run for the tenant except the latest done run, so
-// a successful run's interests survive later failures. If there is definitely
-// no done run yet, it keeps fallbackKeepID so a persistently-failing first run
-// can't accumulate rows without bound. If the latest done run can't be read,
-// it prunes nothing: this is best-effort cleanup, and deleting on a guess
-// could take the last good interests with it.
-func (e *Engine) pruneStaleRuns(ctx context.Context, tenantID, fallbackKeepID string) {
-	keep := fallbackKeepID
+// pruneStaleRuns drops every run for the tenant except the latest done run
+// and failedRunID, the run that just failed. The done run's interests survive
+// later failures, and the failure stays the newest run, which the Interests
+// page reports, until another run replaces it: at most two rows, so a
+// persistently failing rebuild can't accumulate them. If the latest done run
+// can't be read, it prunes nothing: this is best-effort cleanup, and deleting
+// on a guess could take the last good interests with it.
+func (e *Engine) pruneStaleRuns(ctx context.Context, tenantID, failedRunID string) {
+	keep := []string{failedRunID}
 	switch done, err := e.insights.LatestRun(ctx, tenantID, store.ClusterRunDone); {
 	case err == nil:
-		keep = done.ID
+		keep = append(keep, done.ID)
 	case !errors.Is(err, store.ErrNotFound):
 		e.log.Warn("skip pruning cluster runs: can't read the last completed run",
 			"tenant", tenantID, "err", err)
 		return
 	}
-	if err := e.insights.PruneRunsExcept(ctx, tenantID, keep); err != nil {
+	if err := e.insights.PruneRunsExcept(ctx, tenantID, keep...); err != nil {
 		e.log.Warn("prune stale cluster runs failed", "err", err)
 	}
 }

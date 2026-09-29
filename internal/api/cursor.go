@@ -60,8 +60,13 @@ func cursorParam(r *http.Request) (store.PageKey, error) {
 
 // onePage trims rows, which the store was asked for with a limit of
 // limit+1, to limit, and returns the cursor of the page that follows: ""
-// when these rows are the last. key is a row's position in the list.
+// when these rows are the last. key is a row's position in the list. A page
+// holds at least one row: a limit below 1 is an error, since the next
+// page's cursor is the last row's.
 func onePage[T any](rows []T, limit int, key func(T) store.PageKey) ([]T, string, error) {
+	if limit < 1 {
+		return nil, "", fmt.Errorf("page size %d: a page holds at least one row", limit)
+	}
 	if len(rows) <= limit {
 		return rows, "", nil
 	}

@@ -2,9 +2,17 @@
 The frame of every page, and the partials the pages share. Rules for every
 template (TestTemplatesHaveNoInlineCode checks them): no inline script or
 style, no event-handler attributes, no hx-on or hx-vars, and every link
-built by a func (links.go), never pieced together here. Class and icon
-names come from literals or from funcs over fixed sets (format.go), never
-from a stored string.
+built by a func (links.go), never pieced together here. A change a control
+asks for is an Action built in Go (actions.go), rendered by the action
+partial, and every poll URL is built in Go too: a data-method, data-path,
+data-body, data-field, data-join or hx-get value is one template action,
+never a literal. Class and icon names come from literals or from funcs
+over fixed sets (format.go), never from a stored string.
+
+actions.js marks <html> with data-js as it loads: a control that needs it
+carries js-only, which app.css hides until then, and what stands in for it
+without JavaScript (a command, the queue's settings) carries no-js. The
+stale note shows while a poller's requests go unanswered (data-stale).
 */}}
 {{define "layout" -}}
 <!doctype html>
@@ -16,6 +24,7 @@ from a stored string.
 <title>{{.Layout.Title}} · curio</title>
 <link rel="stylesheet" href="{{asset "app.css"}}">
 <script src="{{asset "htmx-2.0.11.min.js"}}" defer></script>
+<script src="{{asset "actions.js"}}" defer></script>
 {{block "head" .}}{{end}}
 </head>
 <body>
@@ -36,6 +45,7 @@ from a stored string.
 </header>
 <main id="main" class="page">
 <div class="container">
+<div class="stale-note">{{template "icon" "alert"}}<span>Not updating: the daemon didn't answer. This page keeps trying.</span></div>
 {{template "content" .}}
 </div>
 </main>
@@ -44,9 +54,12 @@ from a stored string.
 </html>
 {{- end}}
 
-{{/* A panel whose read failed: why, and where the daemon logged it. */}}
+{{/*
+A panel whose read failed: why, and where the daemon logged it. No live
+role: a polled region holding it would announce it on every poll.
+*/}}
 {{define "panel-error" -}}
-<div class="panel-error" role="alert">{{template "icon" "alert-circle"}}<span>Couldn't read this: {{.Message}}. <span class="meta">Request {{.RequestID}} · see <code>curio daemon logs</code></span></span></div>
+<div class="panel-error">{{template "icon" "alert-circle"}}<span>Couldn't read this: {{.Message}}. <span class="meta">Request {{.RequestID}} · see <code>curio daemon logs</code></span></span></div>
 {{- end}}
 
 {{/* A time in a list: how long ago, with the exact time on hover. */}}
@@ -89,4 +102,24 @@ one, why: the cause and the start of the error, the whole error on hover.
 {{/* A stacked bar of []BarSegment, drawn over its track. */}}
 {{define "stackbar" -}}
 <svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>{{range .}}<rect class="{{.Class}}" x="{{.X}}" y="0" width="{{.Width}}" height="10"/>{{end}}</svg>
+{{- end}}
+
+{{/*
+An Action as the data attributes of the control that asks for it, written
+inside that control's tag: actions.js sends it as they say.
+*/}}
+{{define "action"}} data-kind="{{.Kind}}" data-method="{{.Method}}" data-path="{{.Path}}" data-status="{{.Status}}" data-done="{{.Done}}"
+{{- with .DoneOff}} data-done-off="{{.}}"{{end}}
+{{- with .Body}} data-body="{{.}}"{{end}}
+{{- with .Field}} data-field="{{.}}"{{end}}
+{{- with .Join}} data-join="{{.}}"{{end}}
+{{- end}}
+
+{{/*
+A Poller (poll.go): hidden and empty, it GETs its page's live regions and
+swaps in, out of band, only the regions it names, so an answer that isn't
+the page can't remove one; the newest request is the one answered.
+*/}}
+{{define "poller" -}}
+<div id="{{.ID}}" hidden data-poll hx-get="{{.Href}}" hx-trigger="{{.Trigger}}" hx-swap="none" hx-select-oob="{{.Select}}" hx-sync="this:replace"></div>
 {{- end}}

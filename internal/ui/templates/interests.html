@@ -1,9 +1,28 @@
+{{/*
+The Interests: the latest clustering run's, largest first, and a rebuild.
+The rebuild's state and its button are live regions, which its poller
+(Rebuild.Poller) keeps current while a rebuild is queued or running; a
+poll's answer is those regions and the poller alone, and reads no
+interest. A newer run is offered as a reload, not swapped in.
+*/}}
 {{define "content" -}}
+{{if .Poll}}{{template "rebuild-state" .Rebuild}}
+{{template "rebuild-control" .Rebuild}}
+{{template "poller" .Rebuild.Poller}}
+{{- else}}{{template "interests-page" .}}{{end}}
+{{- end}}
+
+{{define "interests-page" -}}
 <div class="page-head"><div class="titles">
 <h1>Interests</h1>
 {{with .Run}}<p class="lede">{{if .Interests}}{{count .Interests "topic" "topics"}} curio found in your library, largest first{{if lt (len $.Interests) .Interests}}; these are the {{len $.Interests}} largest{{end}}.{{else}}The last clustering run found no topics in your library.{{end}}</p>
 {{else}}<p class="lede">Topics curio finds in your library, by grouping pages alike.</p>{{end}}
-</div></div>
+</div>
+<div class="actions">{{template "rebuild-state" .Rebuild}}
+{{- if .Rebuild.Enabled}}<span class="action-status" id="rebuild-status" role="status" aria-live="polite"></span>{{end}}
+{{- template "rebuild-control" .Rebuild}}
+{{- if and .Rebuild.Enabled .Run}}<span class="no-js muted">Rebuild them with <code>curio interests rebuild</code>.</span>{{end}}</div>
+</div>
 {{with .Run}}
 <section class="card mb-4" aria-label="Coverage"><div class="card-body"><div class="coverage">
 {{template "stackbar" (coverageBar .Documents .Noise)}}
@@ -27,8 +46,36 @@
 {{else}}<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "sparkles"}}</div>
 <h2>No interests yet</h2>
-<p><code>curio interests rebuild</code> groups the library into them.</p>
+{{if .Rebuild.Enabled}}<p><code>curio interests rebuild</code> groups the library into them.</p>
+{{else}}<p>Finding them is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon.</p>{{end}}
 </div></div>{{end}}
+{{template "poller" .Rebuild.Poller}}
+{{- end}}
+
+{{/*
+A Rebuild's state: queued, and why the queue holds it, or running, and
+since when; then what the newest run came to when the page doesn't show
+it. Its links have ids, so focus survives a poll; no live role.
+*/}}
+{{define "rebuild-state" -}}
+<div class="rebuild-state" id="rebuild-state">
+{{- with .Err}}{{template "panel-error" .}}{{else}}
+{{- if .Running}}<p>Rebuilding{{if not .StartedAt.IsZero}} · started {{template "reltime" .StartedAt}}{{end}}</p>
+{{- else if .Queued}}<p>Rebuild queued{{with .Hold}} · <a id="rebuild-hold" href="{{navHref "status"}}">the queue is closed: {{queueReason .}}</a>{{end}}</p>{{end}}
+{{- if eq .Outcome "ready"}}<p>New interests are ready: <a id="rebuild-reload" href="{{navHref "interests"}}">reload</a></p>
+{{- else if eq .Outcome "failed"}}<p class="failed" title="{{.RunError}}">The rebuild failed: {{shortError .RunError}}</p>{{end}}
+{{- end -}}
+</div>
+{{- end}}
+
+{{/*
+The Rebuild button, while insight is on: disabled while a rebuild is
+queued or running, the only change that replaces it.
+*/}}
+{{define "rebuild-control" -}}
+<div class="rebuild-control js-only" id="rebuild-control">
+{{- if .Enabled}}<button class="btn" type="button" id="rebuild"{{if .InFlight}} aria-disabled="true" title="A rebuild is already queued or running"{{end}}{{template "action" .Action}}>{{template "icon" "refresh"}}Rebuild</button>{{end -}}
+</div>
 {{- end}}
 
 {{/* An interest's cohesion: how alike its documents are, from 0 to 1. */}}

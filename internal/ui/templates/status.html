@@ -2,73 +2,39 @@
 Status: what needs attention first, as callouts drawn from the health
 read, then a 2:1 board of stacked columns: the library, the queue and why
 documents failed on the left; health, progress and the jobs on the right.
+
+Two pollers (Status.Pollers) keep the live regions current: every 2
+seconds, and after every change, what changes by the second; every 15
+seconds, health, whose read pings Ollama. Why documents failed is read
+with the page alone. A poll's answer renders the panels it read and no
+other. No polled region announces (no live role): only the queue's action
+status does, and its controls sit in regions of their own, which change
+only when their setting does.
 */}}
 {{define "content" -}}
 <div class="page-head"><div class="titles">
 <h1>Status</h1>
 <p class="lede">What curio is doing, and whether everything it needs is working.</p>
 </div></div>
-{{with .Health}}{{if not .Err}}
-{{if not .OllamaReachable}}<div class="callout callout-danger mb-4" role="alert">{{template "icon" "alert-circle"}}
-<p class="callout-title">Ollama isn't ready</p>
-<div class="callout-body">{{with .OllamaDetail}}<p>{{.}}</p>{{end}}<p>Until it is, search matches your words but not their meaning, and new pages aren't indexed.</p></div>
-</div>
-{{end}}
-{{with .Drift}}<div class="callout callout-warn mb-4" role="status">{{template "icon" "alert"}}
-<p class="callout-title">The embeddings drifted</p>
-<div class="callout-body"><p>What changed since the library was indexed:</p>
-<ul>{{range .Changes}}<li>{{.What}}: {{.Recorded}} → {{.Current}}</li>{{end}}</ul>
-<p>Run <code>{{.Fix}}</code>.</p></div>
-</div>
-{{end}}
-{{range .Upstreams}}{{if eq .Alert "danger"}}<div class="callout callout-danger mb-4" role="alert">{{template "icon" "alert-circle"}}
-<p class="callout-title">{{.Label}} is failing</p>
-<div class="callout-body"><p>Its calls have failed, for more than one site, since {{if .LastSuccess.IsZero}}the daemon started{{else}}its last good answer, {{template "reltime" .LastSuccess}}{{end}}. Pages that need it can't be fetched until it recovers.</p>
-{{template "upstream-failure" .}}</div>
-</div>
-{{else if eq .Alert "warn"}}<div class="callout callout-warn mb-4" role="status">{{template "icon" "alert"}}
-<p class="callout-title">{{.Label}} is degraded</p>
-<div class="callout-body"><p>{{num .Failed}} of its {{count .Calls "call" "calls"}} in the last {{duration .Window}} failed. Pages that need it fail more often until it recovers.</p>
-{{template "upstream-failure" .}}</div>
-</div>
-{{end}}{{end}}
-{{end}}{{end}}
+{{with .Health}}<div class="attention" id="attention">{{if not .Err}}{{template "attention" .}}{{end}}</div>{{end}}
 <div class="board">
 <div>
-<section class="card" aria-labelledby="counts">
+{{with .Counts}}<section class="card" aria-labelledby="counts">
 <div class="card-head"><h2 id="counts">{{template "icon" "library"}}Library</h2><a class="more" href="{{navHref "library"}}">Open the library →</a></div>
-<div class="card-body">
-{{with .Counts.Err}}{{template "panel-error" .}}{{else}}{{with .Counts}}
+<div class="card-body" id="library-live">
+{{with .Err}}{{template "panel-error" .}}{{else}}
 <div class="stats">
 <div class="stat"><span class="label">Documents</span><span class="value">{{num .Documents}}</span></div>
 <div class="stat"><span class="label">Fetched</span><span class="value">{{num (.State "fetched")}} <small>{{pct (.State "fetched") .Documents}}</small></span></div>
 <div class="stat"><span class="label">Bookmarks</span><span class="value">{{num .Bookmarks}}</span></div>
 </div>
 <div class="mt-6">{{template "stackbar" (stateBar .ByState)}}</div>
-<div class="legend">{{range .ByState}}<a href="{{stateHref .Name}}"><span class="swatch swatch-{{stateTone .Name}}"></span>{{.Name}} <span class="n">{{num .Count}}</span> <span class="pct">{{pct .Count $.Counts.Documents}}</span></a>{{end}}</div>
-{{end}}{{end}}
+{{$total := .Documents}}<div class="legend">{{range $i, $c := .ByState}}<a id="legend-{{$i}}" href="{{stateHref $c.Name}}"><span class="swatch swatch-{{stateTone $c.Name}}"></span>{{$c.Name}} <span class="n">{{num $c.Count}}</span> <span class="pct">{{pct $c.Count $total}}</span></a>{{end}}</div>
+{{end}}
 </div>
 </section>
-
-<section class="card" aria-labelledby="queue">
-<div class="card-head"><h2 id="queue">{{template "icon" "layers"}}Queue</h2></div>
-<div class="card-body">
-{{with .Queue.Err}}{{template "panel-error" .}}{{else}}{{with .Queue}}
-<div class="queue-top">{{if .Open}}<span class="badge queue-open">open</span>{{else}}<span class="badge queue-closed">closed</span><span class="why">{{.Reason}}{{if not .OpensAt.IsZero}}; opens {{template "reltime" .OpensAt}}{{end}}</span>{{end}}</div>
-<dl class="facts mt-4">
-<dt>Throttle</dt><dd>{{.Throttle}}</dd>
-<dt>Schedule</dt><dd>{{with .Schedule}}{{.}}{{else}}none{{end}}</dd>
-<dt>Keep awake</dt><dd>{{if .KeepAwake}}on: {{if .KeepAwakeActive}}holding the Mac awake{{else}}not holding it now{{end}} ({{.PowerSource}} power){{else}}off{{end}}</dd>
-</dl>
-<table class="pools">
-<thead><tr><th scope="col">Pool</th><th scope="col" class="num">Running</th><th scope="col" class="num">Pending</th></tr></thead>
-<tbody>
-{{range .Kinds}}<tr><td>{{.Kind}}</td><td class="num">{{.Running}} of {{.Limit}}</td><td class="num">{{num .Pending}}</td></tr>
-{{end}}</tbody>
-</table>
-{{end}}{{end}}
-</div>
-</section>
+{{end}}
+{{with .Queue}}{{template "queue-card" .}}{{end}}
 {{with .Failures}}{{if or .Err .Total}}
 <section class="card" aria-labelledby="failures">
 <div class="card-head"><h2 id="failures">{{template "icon" "alert-circle"}}Why documents failed</h2><a class="more" href="{{stateHref "failed"}}">Failed documents →</a></div>
@@ -82,10 +48,10 @@ documents failed on the left; health, progress and the jobs on the right.
 </div>
 
 <div>
-<section class="card" aria-labelledby="health">
+{{with .Health}}<section class="card" aria-labelledby="health">
 <div class="card-head"><h2 id="health">{{template "icon" "cpu"}}Health</h2></div>
-<div class="card-body">
-{{with .Health.Err}}{{template "panel-error" .}}{{else}}{{with .Health}}
+<div class="card-body" id="health-live">
+{{with .Err}}{{template "panel-error" .}}{{else}}
 <ul class="rows">
 <li><span class="label"><span class="dot dot-ok"></span>Daemon</span><span class="value">{{.Version}}</span></li>
 <li><span class="label"><span class="dot {{if .OllamaReachable}}dot-ok{{else}}dot-danger{{end}}"></span>Ollama</span><span class="value">{{if .OllamaReachable}}reachable{{else}}not reachable<span class="sub">{{.OllamaDetail}}</span>{{end}}</span></li>
@@ -94,38 +60,130 @@ documents failed on the left; health, progress and the jobs on the right.
 {{range .Upstreams}}<li><span class="label"><span class="dot dot-{{.Tone}}"></span>{{.Label}}</span><span class="value">{{if .Enabled}}{{.State}}<span class="sub">last answer {{template "reltime" .LastSuccess}}{{if not .LastFailure.IsZero}} · last failure {{.LastFailureClass}}, {{template "reltime" .LastFailure}}{{end}}{{if not .CooldownUntil.IsZero}} · resumes {{template "reltime" .CooldownUntil}}{{end}}</span>{{else}}off{{end}}</span></li>
 {{end}}<li><span class="label"><span class="dot{{if .YouTubeFetcher}} dot-ok{{end}}"></span>YouTube</span><span class="value">{{with .YouTubeFetcher}}yt-dlp<span class="sub">{{.}}</span>{{else}}yt-dlp not found<span class="sub">videos are fetched as pages</span>{{end}}</span></li>
 </ul>
-{{end}}{{end}}
-</div>
-</section>
-
-<section class="card" aria-labelledby="progress">
-<div class="card-head"><h2 id="progress">{{template "icon" "clock"}}Progress</h2></div>
-<div class="card-body">
-{{with .Progress.Err}}{{template "panel-error" .}}{{else}}{{with .Progress.Progress}}
-{{if eq .State "idle"}}<p>Nothing queued.</p>
-{{else if eq .State "closed"}}<p>{{count .Outstanding "job" "jobs"}} queued. The queue is closed{{with $.Queue.Reason}} ({{.}}){{end}}, so none start until it opens.</p>
-{{else if eq .State "stalled"}}<p>{{count .Outstanding "job" "jobs"}} queued, and none finished in the last {{duration .Window}}.</p>
-{{else}}<div class="stat"><span class="label">{{count .Outstanding "job" "jobs"}} left</span><span class="value">≈ {{duration .ETA}}</span><span class="hint">An estimate at the pace of the last {{duration .Window}}: {{count .Finished "job" "jobs"}} finished, {{printf "%.1f" .PerMinute}} a minute.</span></div>
 {{end}}
-{{end}}{{end}}
 </div>
 </section>
-
-<section class="card" aria-labelledby="jobs">
+{{end}}
+{{with .Progress}}<section class="card" aria-labelledby="progress">
+<div class="card-head"><h2 id="progress">{{template "icon" "clock"}}Progress</h2><span class="badge badge-accent badge-live js-only">live</span></div>
+<div class="card-body" id="progress-live">
+{{with .Err}}{{template "panel-error" .}}{{else}}{{template "progress" .}}{{end}}
+</div>
+</section>
+{{end}}
+{{with .Counts}}<section class="card" aria-labelledby="jobs">
 <div class="card-head"><h2 id="jobs">{{template "icon" "server"}}Jobs</h2></div>
-<div class="card-body">
-{{with .Counts.Err}}{{template "panel-error" .}}{{else}}{{with .Counts.Jobs}}
+<div class="card-body" id="jobs-live">
+{{with .Err}}{{template "panel-error" .}}{{else}}{{with .Jobs}}
 <ul class="rows">
 {{range .}}<li><span class="label">{{.Name}}</span><span class="value">{{num .Count}}</span></li>
 {{end}}</ul>
 {{else}}<p class="empty-inline">No jobs yet.</p>{{end}}{{end}}
 </div>
 </section>
+{{end}}
 </div>
 </div>
+{{range .Pollers}}{{template "poller" .}}
+{{end}}
+{{- end}}
+
+{{/*
+What needs attention, a HealthPanel's callouts, in a fixed order: Ollama,
+the drift, then each failing or degraded upstream. A note, not an alert:
+they sit in a polled region.
+*/}}
+{{define "attention" -}}
+{{if not .OllamaReachable}}<div class="callout callout-danger mb-4" role="note">{{template "icon" "alert-circle"}}
+<p class="callout-title">Ollama isn't ready</p>
+<div class="callout-body">{{with .OllamaDetail}}<p>{{.}}</p>{{end}}<p>Until it is, search matches your words but not their meaning, and new pages aren't indexed.</p></div>
+</div>
+{{end}}
+{{with .Drift}}<div class="callout callout-warn mb-4" role="note">{{template "icon" "alert"}}
+<p class="callout-title">The embeddings drifted</p>
+<div class="callout-body"><p>What changed since the library was indexed:</p>
+<ul>{{range .Changes}}<li>{{.What}}: {{.Recorded}} → {{.Current}}</li>{{end}}</ul>
+<p>Run <code>{{.Fix}}</code>.</p></div>
+</div>
+{{end}}
+{{range .Upstreams}}{{if eq .Alert "danger"}}<div class="callout callout-danger mb-4" role="note">{{template "icon" "alert-circle"}}
+<p class="callout-title">{{.Label}} is failing</p>
+<div class="callout-body"><p>Its calls have failed, for more than one site, since {{if .LastSuccess.IsZero}}the daemon started{{else}}its last good answer, {{template "reltime" .LastSuccess}}{{end}}. Pages that need it can't be fetched until it recovers.</p>
+{{template "upstream-failure" .}}</div>
+</div>
+{{else if eq .Alert "warn"}}<div class="callout callout-warn mb-4" role="note">{{template "icon" "alert"}}
+<p class="callout-title">{{.Label}} is degraded</p>
+<div class="callout-body"><p>{{num .Failed}} of its {{count .Calls "call" "calls"}} in the last {{duration .Window}} failed. Pages that need it fail more often until it recovers.</p>
+{{template "upstream-failure" .}}</div>
+</div>
+{{end}}{{end}}
 {{- end}}
 
 {{/* An Upstream's last failure, and where to find out why it fails. */}}
 {{define "upstream-failure" -}}
 <p>{{if not .LastFailure.IsZero}}The last failure was {{.LastFailureClass}}, {{template "reltime" .LastFailure}}. {{end}}<code>curio doctor</code> says why.</p>
+{{- end}}
+
+{{/*
+The queue card, a QueuePanel: whether the queue is open and why, its
+controls, the pools' load, and the action status its controls report to.
+Each part a poll refreshes is a region of its own, present whatever the
+read gave: the controls change only with their settings, apart from what
+the state and hints say. The schedule's form is in none, so a poll never
+replaces a time being typed. Without JavaScript the settings and their
+commands show instead.
+*/}}
+{{define "queue-card" -}}
+<section class="card" aria-labelledby="queue">
+<div class="card-head"><h2 id="queue">{{template "icon" "layers"}}Queue</h2></div>
+<div class="card-body">
+<div class="queue-top">
+<div class="queue-state" id="queue-state">{{with .Err}}{{template "panel-error" .}}{{else}}{{if .Open}}<span class="badge queue-open">open</span>{{else}}<span class="badge queue-closed">closed</span>{{end}}<span class="why">{{template "queue-why" .}}</span>{{end}}</div>
+<div class="queue-toggle js-only" id="queue-toggle">{{if not .Err}}<button class="btn btn-sm" type="button" id="queue-pause"{{template "action" .Toggle}}>{{if .Paused}}{{template "icon" "play"}}Resume{{else}}{{template "icon" "pause"}}Pause{{end}}</button>{{end}}</div>
+</div>
+<div class="controls js-only">
+<div class="control"><span class="label">{{template "icon" "gauge"}}Throttle</span>
+<div id="queue-throttle">{{if not .Err}}<div class="segmented" role="group" aria-label="Throttle" aria-describedby="throttle-hint">{{range .Throttles}}<button type="button" id="{{.ID}}" aria-pressed="{{.Pressed}}"{{template "action" .Action}}>{{.Label}}</button>{{end}}</div>{{end}}</div>
+<span class="hint" id="throttle-hint">{{gentleHint}}</span></div>
+<div class="control"><span class="label" id="keep-awake-label">{{template "icon" "coffee"}}Keep awake</span>
+<div id="queue-keep-awake">{{if not .Err}}<label class="switch"><input type="checkbox" role="switch" id="keep-awake" aria-labelledby="keep-awake-label" aria-describedby="keep-awake-hint"{{if .KeepAwake}} checked{{end}}{{template "action" .KeepAwakeSwitch}}><span aria-hidden="true">{{if .KeepAwake}}On{{else}}Off{{end}}</span></label>{{end}}</div>
+<span class="hint" id="keep-awake-hint">{{if not .Err}}{{.KeepAwakeHint}}{{end}}</span></div>
+<div class="control span-all"><span class="label" id="schedule-label">{{template "icon" "calendar"}}Schedule</span>
+<p class="schedule-now" id="schedule-state">{{if not .Err}}{{with .Schedule}}Jobs start from {{$.ScheduleStart}} to {{$.ScheduleEnd}}.{{else}}Off: jobs start at any hour.{{end}}{{end}}</p>
+<form class="inline" id="schedule-form" aria-labelledby="schedule-label"{{template "action" .SaveSchedule}}><input class="input input-time" type="time" name="schedule" id="schedule-opens" aria-label="Opens at" value="{{.ScheduleStart}}" required><span class="muted">to</span><input class="input input-time" type="time" name="schedule" id="schedule-closes" aria-label="Closes at" value="{{.ScheduleEnd}}" required><button class="btn btn-sm" type="submit" id="schedule-save">Save</button><button class="btn btn-sm btn-ghost" type="button" id="schedule-off"{{template "action" .ScheduleOff}}>Turn off</button></form>
+<span class="hint">With a schedule, jobs start only inside it; running ones finish.</span></div>
+</div>
+<div id="queue-pools">{{if not .Err}}
+<table class="pools">
+<thead><tr><th scope="col">Pool</th><th scope="col" class="num">Running</th><th scope="col" class="num">Pending</th>{{with .FinishedIn}}<th scope="col" class="num">Finished, {{duration .}}</th>{{end}}</tr></thead>
+<tbody>
+{{range .Kinds}}<tr><td>{{.Kind}}</td><td class="num">{{.Running}} of {{.Limit}}</td><td class="num">{{num .Pending}}</td>{{if $.FinishedIn}}<td class="num">{{num .Finished}}</td>{{end}}</tr>
+{{end}}</tbody>
+</table>
+{{end}}</div>
+{{if not .Err}}<dl class="facts mt-4 no-js">
+<dt>Throttle</dt><dd>{{.Throttle}}</dd>
+<dt>Schedule</dt><dd>{{with .Schedule}}{{.}}{{else}}none{{end}}</dd>
+<dt>Keep awake</dt><dd>{{if .KeepAwake}}on: {{if .KeepAwakeActive}}holding the Mac awake{{else}}not holding it now{{end}} ({{.PowerSource}} power){{else}}off{{end}}</dd>
+</dl>{{end}}
+<div class="cli mt-4 no-js"><span class="muted">From the terminal</span><code>curio pause</code><code>curio resume</code><code>curio throttle gentle|normal</code><code>curio schedule HH:MM-HH:MM|off</code><code>curio keep-awake on|off</code></div>
+</div>
+<div class="card-foot"><span class="action-status" id="queue-status" role="status" aria-live="polite"></span></div>
+</section>
+{{- end}}
+
+{{/* Why the queue holds its jobs, or how many wait, as its state line says. */}}
+{{define "queue-why" -}}
+{{if .Open}}{{with .Waiting}}Working: {{count . "job" "jobs"}} waiting{{else}}Nothing waiting{{end}}{{else}}{{queueReason .Reason}}{{if not .OpensAt.IsZero}}; opens {{template "reltime" .OpensAt}}{{end}}{{end}}
+{{- end}}
+
+{{/* A ProgressPanel's estimate, or why there is none. */}}
+{{define "progress" -}}
+{{with .Progress}}
+{{if eq .State "idle"}}<p>Nothing queued.</p>
+{{else if eq .State "closed"}}<p>{{count .Outstanding "job" "jobs"}} queued. {{queueReason $.Reason}}: none start until the queue opens.</p>
+{{else if eq .State "stalled"}}<p>{{count .Outstanding "job" "jobs"}} queued, and none finished in the last {{duration .Window}}.</p>
+{{else}}<div class="stat"><span class="label">{{count .Outstanding "job" "jobs"}} left</span><span class="value">≈ {{duration .ETA}}</span><span class="hint">An estimate at the pace of the last {{duration .Window}}: {{count .Finished "job" "jobs"}} finished, {{printf "%.1f" .PerMinute}} a minute.</span></div>
+{{end}}
+{{end}}
 {{- end}}

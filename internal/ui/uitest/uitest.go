@@ -24,7 +24,13 @@ import (
 //   - an href or src whose scheme is not http, https or mailto, other than
 //     a path under /ui/ or, for an href, a fragment naming an element of
 //     the page, and an action or formaction other than such a path;
-//   - an http(s) link whose rel lacks noopener or noreferrer.
+//   - an http(s) link whose rel lacks noopener or noreferrer;
+//   - a change a control asks actions.js for with a data-method other than
+//     POST or PUT, or a data-path that isn't a clean path under /v1/ (no
+//     scheme or host, no empty or dot segment);
+//   - an hx-get that isn't a path under /ui/, and any htmx attribute that
+//     changes something (hx-post, hx-put, hx-patch, hx-delete): changes go
+//     through actions.js, data- prefixed forms included.
 func Problems(page string) []string {
 	root, err := html.Parse(strings.NewReader(page))
 	if err != nil {
@@ -91,6 +97,20 @@ func elementProblems(n *html.Node, ids map[string]bool) []string {
 			if !strings.HasPrefix(strings.TrimSpace(a.Val), "/ui/") {
 				problems = append(problems, key+"="+strconv.Quote(a.Val)+" on <"+n.Data+">: forms submit to /ui/ only")
 			}
+		case key == "data-method":
+			if a.Val != "POST" && a.Val != "PUT" {
+				problems = append(problems, key+"="+strconv.Quote(a.Val)+" on <"+n.Data+">: changes are POST or PUT")
+			}
+		case key == "data-path":
+			if !cleanAPIPath(a.Val) {
+				problems = append(problems, key+"="+strconv.Quote(a.Val)+" on <"+n.Data+">: changes go to a path under /v1/")
+			}
+		case name == "hx-get":
+			if !strings.HasPrefix(a.Val, "/ui/") {
+				problems = append(problems, key+"="+strconv.Quote(a.Val)+" on <"+n.Data+">: htmx reads pages under /ui/ only")
+			}
+		case slices.Contains(htmxChanges, name):
+			problems = append(problems, key+" attribute on <"+n.Data+">: changes go through actions.js")
 		}
 	}
 	if n.Data == "a" && isOutbound(attr(n, "href")) {
@@ -100,6 +120,26 @@ func elementProblems(n *html.Node, ids map[string]bool) []string {
 		}
 	}
 	return problems
+}
+
+// htmxChanges are the htmx attributes that send a change.
+var htmxChanges = []string{"hx-post", "hx-put", "hx-patch", "hx-delete"}
+
+// cleanAPIPath reports whether p is a path under /v1/, its query aside,
+// that a browser resolves to itself: no scheme or host, and no empty or
+// dot segment, escaped or not, that would lead it elsewhere.
+func cleanAPIPath(p string) bool {
+	path, _, _ := strings.Cut(p, "?")
+	if !strings.HasPrefix(path, "/v1/") || strings.ContainsAny(path, "\\#") {
+		return false
+	}
+	for _, seg := range strings.Split(path, "/")[1:] {
+		dots := strings.ReplaceAll(strings.ToLower(seg), "%2e", ".")
+		if seg == "" || dots == "." || dots == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // allowedURL reports whether a page may point at u: a path under /ui/, or
