@@ -139,6 +139,7 @@ when the entry was first committed.
 - 2026-09-28 — [Dashboard: formatting budgets for stored markdown](#dashboard-formatting-budgets-for-stored-markdown)
 - 2026-09-28 — [Commands take a document's URL as well as its ID](#commands-take-a-documents-url-as-well-as-its-id)
 - 2026-09-28 — [Doctor warns when GitHub requests carry no token](#doctor-warns-when-github-requests-carry-no-token)
+- 2026-09-28 — [Failure causes: recorded when a document fails](#failure-causes-recorded-when-a-document-fails)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
