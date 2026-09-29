@@ -218,7 +218,7 @@ bookmarks
   document_id       UUID FK                    -- linked at ingest; NULL only if the document is deleted
   url               TEXT NOT NULL              -- denormalized for fast lookup
   title             TEXT                       -- title at save-time (from the browser)
-  saved_at          TIMESTAMP NOT NULL
+  saved_at          TIMESTAMP NOT NULL         -- when the browser saved it; see below
   source            TEXT NOT NULL              -- 'chrome' | 'safari' | 'firefox' | 'html' | 'manual'
   folder_path       TEXT                       -- '/Tech/AI/Agents'
   tags              JSON                       -- string array
@@ -231,6 +231,16 @@ A bookmark is saved together with its document in one transaction
 created `pending`, the bookmark is linked to it, and a fetch job is enqueued
 only when the document is new. The same URL bookmarked in several browsers
 is one document, fetched once.
+
+`saved_at` is when the browser saved the bookmark, as its importer reads
+it. Safari keeps no save date, so its bookmarks carry the time curio
+imported them; a manual bookmark (`curio add`), or an imported one that
+names no date, carries the time it was added. `created_at` is when curio
+added the row. `GET /v1/bookmarks` lists by `created_at` by default and by
+`saved_at` with `order=saved`, the Library's Date saved order, each
+through its own index (`idx_bookmarks_tenant_created`,
+`idx_bookmarks_tenant_saved`); `idx_bookmarks_document (document_id,
+saved_at, id)` reads one document's bookmarks newest saved first.
 
 ### Future reference tables (not in v1)
 

@@ -256,6 +256,60 @@ func TestDocuments_GetWithLastError(t *testing.T) {
 	}
 }
 
+// TestDocuments_BookmarkTitle: an untitled document is named by its most
+// recently saved bookmark whose title isn't blank, the tenant's own; a
+// titled document, and one with no such bookmark, get none. The list and
+// the single read agree.
+func TestDocuments_BookmarkTitle(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	docs := NewDocuments(db)
+	untitled := seedDoc(t, docs, "https://example.com/untitled", store.DocStateFailed)
+	emptyTitle := seedDoc(t, docs, "https://example.com/empty-title", store.DocStateFetched)
+	_, err := db.Exec(`UPDATE documents SET title = '' WHERE id = ?`, emptyTitle.ID)
+	require.NoError(t, err)
+	titled := seedDoc(t, docs, "https://example.com/titled", store.DocStateFetched)
+	_, err = db.Exec(`UPDATE documents SET title = 'Its own' WHERE id = ?`, titled.ID)
+	require.NoError(t, err)
+	unnamed := seedDoc(t, docs, "https://example.com/unnamed", store.DocStatePending)
+	bare := seedDoc(t, docs, "https://example.com/bare", store.DocStatePending)
+
+	for i, b := range []struct {
+		doc          *store.Document
+		tenant       string
+		title        *string
+		saved        string
+		source, name string
+	}{
+		{untitled, "local", new("Older title"), "2026-01-01T00:00:00.000Z", store.SourceChrome, "older"},
+		{untitled, "local", new("Newest titled"), "2026-02-01T00:00:00.000Z", store.SourceSafari, "newest titled"},
+		{untitled, "local", nil, "2026-03-01T00:00:00.000Z", store.SourceFirefox, "newer, no title"},
+		{untitled, "local", new("  "), "2026-04-01T00:00:00.000Z", store.SourceManual, "newer, blank"},
+		{untitled, "other", new("Theirs"), "2026-05-01T00:00:00.000Z", store.SourceChrome, "another tenant's"},
+		{emptyTitle, "local", new("Named by its bookmark"), "2026-01-01T00:00:00.000Z", store.SourceChrome, "empty"},
+		{titled, "local", new("A bookmark title"), "2026-01-01T00:00:00.000Z", store.SourceChrome, "titled"},
+		{unnamed, "local", nil, "2026-01-01T00:00:00.000Z", store.SourceChrome, "no title"},
+		{unnamed, "local", new(""), "2026-02-01T00:00:00.000Z", store.SourceSafari, "empty title"},
+	} {
+		_, err := db.Exec(`INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, fmt.Sprintf("b%d", i), b.tenant, b.doc.ID, b.doc.URL, strPtr(b.title),
+			b.saved, b.source)
+		require.NoError(t, err, b.name)
+	}
+
+	want := map[string]string{untitled.ID: "Newest titled", emptyTitle.ID: "Named by its bookmark", titled.ID: "",
+		unnamed.ID: "", bare.ID: ""}
+	listed, err := docs.ListWithLastError(ctx, "local", store.ListDocumentsOpts{})
+	require.NoError(t, err)
+	require.Len(t, listed, len(want))
+	for _, d := range listed {
+		assert.Equal(t, want[d.ID], d.BookmarkTitle, d.URL)
+		got, err := docs.GetWithLastError(ctx, "local", d.ID)
+		require.NoError(t, err)
+		assert.Equal(t, d.BookmarkTitle, got.BookmarkTitle, "%s: as the list has it", d.URL)
+	}
+}
+
 // TestDocuments_ListCauseFilter: the list narrows to the documents that
 // failed for a cause, together with the other filters, and pages through
 // them in its order, every one once.
