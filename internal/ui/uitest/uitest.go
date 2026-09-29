@@ -22,17 +22,24 @@ import (
 //   - an on* event-handler attribute, or an hx-on* one (data- prefixed too);
 //   - an iframe, frame, object, embed or base element;
 //   - an href or src whose scheme is not http, https or mailto, other than
-//     a path under /ui/, and an action or formaction other than such a path;
+//     a path under /ui/ or, for an href, a fragment naming an element of
+//     the page, and an action or formaction other than such a path;
 //   - an http(s) link whose rel lacks noopener or noreferrer.
 func Problems(page string) []string {
 	root, err := html.Parse(strings.NewReader(page))
 	if err != nil {
 		return []string{"parse: " + err.Error()}
 	}
+	ids := map[string]bool{}
+	for n := range root.Descendants() {
+		if n.Type == html.ElementNode && attr(n, "id") != "" {
+			ids[attr(n, "id")] = true
+		}
+	}
 	var problems []string
 	for n := range root.Descendants() {
 		if n.Type == html.ElementNode {
-			problems = append(problems, elementProblems(n)...)
+			problems = append(problems, elementProblems(n, ids)...)
 		}
 	}
 	return problems
@@ -50,7 +57,9 @@ func AssertInert(t testing.TB, page string) {
 // attributes.
 var forbidden = []string{"iframe", "frame", "object", "embed", "base"}
 
-func elementProblems(n *html.Node) []string {
+// elementProblems lists what makes element n not inert; ids are the ids
+// of the page's elements, which a fragment link may name.
+func elementProblems(n *html.Node, ids map[string]bool) []string {
 	var problems []string
 	switch {
 	case n.Data == "script":
@@ -71,6 +80,8 @@ func elementProblems(n *html.Node) []string {
 			problems = append(problems, "style attribute on <"+n.Data+">")
 		case strings.HasPrefix(key, "on"), strings.HasPrefix(name, "hx-on"):
 			problems = append(problems, key+" attribute on <"+n.Data+">")
+		case key == "href" && pageFragment(a.Val, ids):
+			// A link within the page, such as the skip link.
 		case key == "href", key == "src":
 			if !allowedURL(a.Val) {
 				problems = append(problems, key+"="+strconv.Quote(a.Val)+" on <"+n.Data+">")
@@ -109,6 +120,18 @@ func allowedURL(u string) bool {
 		return true
 	}
 	return false
+}
+
+// refusedURL is what html/template writes in place of a URL it won't
+// put in a page.
+const refusedURL = "ZgotmplZ"
+
+// pageFragment reports whether href is a fragment naming an element of
+// the page, ids, such as a skip link's "#main". html/template's refusal,
+// "#ZgotmplZ", never is.
+func pageFragment(href string, ids map[string]bool) bool {
+	id, ok := strings.CutPrefix(href, "#")
+	return ok && id != refusedURL && ids[id]
 }
 
 // isOutbound reports whether href leaves curio for an http(s) site.
