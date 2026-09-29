@@ -454,3 +454,61 @@ func TestURLAuthority(t *testing.T) {
 		assert.Equal(t, want, urlAuthority(u), u)
 	}
 }
+
+// TestJobs_ListWithDoc_ByDocument: a document's jobs, the tenant's only,
+// most recently updated first, and paged from a cursor like the rest of
+// the list.
+func TestJobs_ListWithDoc_ByDocument(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	q := NewJobs(db)
+	base := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	docID := insertDoc(t, db, "local", "https://example.com/a", store.DocStateFetched, base)
+	otherDoc := insertDoc(t, db, "local", "https://example.com/b", store.DocStateFetched, base)
+	rows := []jobRow{
+		{kind: store.JobKindIndex, status: store.JobStatusDone},
+		{kind: store.JobKindFetch, status: store.JobStatusDone},
+		{kind: store.JobKindFetch, status: store.JobStatusFailed, lastError: "HTTP 503"},
+	}
+	want := make([]string, len(rows)) // newest first
+	for i, row := range rows {
+		row.docID, row.updatedAt = docID, base.Add(-time.Duration(i)*time.Minute)
+		want[i] = insertJobRow(t, db, row)
+	}
+	insertJobRow(t, db, jobRow{kind: store.JobKindFetch, status: store.JobStatusDone, docID: otherDoc, updatedAt: base})
+	insertJobRow(t, db, jobRow{tenantID: "other", kind: store.JobKindFetch, status: store.JobStatusDone,
+		docID: docID, updatedAt: base})
+
+	ids := func(opts store.ListJobsOpts) []string {
+		t.Helper()
+		opts.DocumentID = docID
+		jobs, err := q.ListWithDoc(ctx, "local", opts)
+		require.NoError(t, err)
+		out := make([]string, len(jobs))
+		for i, j := range jobs {
+			assert.Equal(t, "https://example.com/a", j.URL)
+			out[i] = j.ID
+		}
+		return out
+	}
+	assert.Equal(t, want, ids(store.ListJobsOpts{}), "newest first, this tenant's only")
+	assert.Equal(t, want[:2], ids(store.ListJobsOpts{Status: store.JobStatusDone}))
+	assert.Equal(t, want[1:], ids(store.ListJobsOpts{Kind: store.JobKindFetch}))
+
+	var walked []string
+	var after store.PageKey
+	for range 5 {
+		jobs, err := q.ListWithDoc(ctx, "local", store.ListJobsOpts{DocumentID: docID, Limit: 1, After: after})
+		require.NoError(t, err)
+		if len(jobs) == 0 {
+			break
+		}
+		walked = append(walked, jobs[0].ID)
+		after = store.PageKey{At: jobs[0].UpdatedAt, ID: jobs[0].ID}
+	}
+	assert.Equal(t, want, walked)
+
+	none, err := q.ListWithDoc(ctx, "local", store.ListJobsOpts{DocumentID: "no-such-document"})
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}

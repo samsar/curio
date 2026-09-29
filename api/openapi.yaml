@@ -688,6 +688,12 @@ paths:
         - in: query
           name: kind
           schema: { $ref: "#/components/schemas/JobKind" }
+        - in: query
+          name: document_id
+          description: >
+            Only the jobs that work on this document. An ID no job works on,
+            a document's that doesn't exist included, lists none.
+          schema: { type: string }
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Cursor" }
       responses:

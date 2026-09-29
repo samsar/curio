@@ -55,6 +55,9 @@ type planCase struct {
 	// sorts allows a temporary b-tree. Every other plan must read its
 	// rows in order.
 	sorts bool
+	// avoid are substrings the plan must not contain: indexes that would
+	// read far more rows than the query needs.
+	avoid []string
 }
 
 // listPlanCases pins the three paged lists: for every filter, the first
@@ -103,6 +106,18 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 			"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
 		}}
 	}
+	// A document's jobs are a handful, so sorting them is cheap; walking a
+	// tenant index to find them is not.
+	jobsOfDocument := func(name string, opts store.ListJobsOpts, constraints string) planCase {
+		opts.After, opts.DocumentID = after, "doc"
+		q, args := listJobsQuery("local", opts)
+		return planCase{name: name + ", " + page, query: q, args: args,
+			first: "SEARCH j USING INDEX idx_jobs_document (" + constraints,
+			want:  []string{"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)"},
+			sorts: true,
+			avoid: []string{"idx_jobs_tenant_"},
+		}
+	}
 	bookmarks := func(name string, opts store.ListBookmarksOpts) planCase {
 		opts.After = after
 		q, args := listBookmarksQuery("local", opts)
@@ -138,6 +153,10 @@ func listPagePlanCases(page string, after store.PageKey) []planCase {
 			"SEARCH j USING INDEX idx_jobs_tenant_updated (tenant_id=?"),
 		jobs("ListWithDoc by status and kind", store.ListJobsOpts{Status: store.JobStatusDone, Kind: store.JobKindFetch},
 			"SEARCH j USING INDEX idx_jobs_tenant_status_updated (tenant_id=? AND status=?"),
+		jobsOfDocument("ListWithDoc by document", store.ListJobsOpts{}, "document_id=?"),
+		jobsOfDocument("ListWithDoc by document and status", store.ListJobsOpts{Status: store.JobStatusFailed},
+			"document_id=? AND status=?"),
+		jobsOfDocument("ListWithDoc by document and kind", store.ListJobsOpts{Kind: store.JobKindFetch}, "document_id=?"),
 		bookmarks("Bookmarks.List", store.ListBookmarksOpts{}),
 		bookmarks("Bookmarks.List by source", store.ListBookmarksOpts{Source: store.SourceChrome}),
 		bookmarks("Bookmarks.List by folder", store.ListBookmarksOpts{FolderPath: "/Tech/AI"}),
@@ -333,6 +352,9 @@ func TestQueryPlans(t *testing.T) {
 			}
 			if !tc.sorts {
 				assert.NotContains(t, plan, "USE TEMP B-TREE")
+			}
+			for _, avoid := range tc.avoid {
+				assert.NotContains(t, plan, avoid)
 			}
 		})
 	}

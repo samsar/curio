@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -120,38 +121,57 @@ func parseExtendedDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-// handleListJobs pages through the tenant's jobs, most recently updated
-// first. next_cursor is set exactly when another page follows.
 func (d Deps) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	opts, err := listJobsOpts(r)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	resp, err := d.listJobs(r.Context(), opts)
+	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// listJobsOpts reads GET /v1/jobs' query: the status, kind and document_id
+// filters, the cursor and the page size in Limit. A filter or cursor the
+// list can't take is a requestError.
+func listJobsOpts(r *http.Request) (store.ListJobsOpts, error) {
 	opts, err := jobFilters(r)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return store.ListJobsOpts{}, err
 	}
 	if opts.After, err = cursorParam(r); err != nil {
-		d.writeError(w, r, err)
-		return
+		return store.ListJobsOpts{}, err
 	}
-	limit := listLimit(r)
+	opts.Limit = listLimit(r)
+	return opts, nil
+}
+
+// listJobs pages through the tenant's jobs that match opts, most recently
+// updated first; opts.Limit is the page size. NextCursor is set exactly
+// when another page follows: the store is asked for one row more than the
+// page holds.
+func (d Deps) listJobs(ctx context.Context, opts store.ListJobsOpts) (JobListResponse, error) {
+	limit := opts.Limit
 	opts.Limit = limit + 1
-	jobs, err := d.Queue.ListWithDoc(r.Context(), d.TenantID, opts)
+	jobs, err := d.Queue.ListWithDoc(ctx, d.TenantID, opts)
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return JobListResponse{}, err
 	}
 	jobs, next, err := onePage(jobs, limit, func(j store.JobWithDoc) store.PageKey {
 		return store.PageKey{At: j.UpdatedAt, ID: j.ID}
 	})
 	if err != nil {
-		d.writeError(w, r, err)
-		return
+		return JobListResponse{}, err
 	}
-
 	resp := JobListResponse{Items: make([]JobResponse, 0, len(jobs)), NextCursor: next}
 	for _, j := range jobs {
 		resp.Items = append(resp.Items, d.jobResponse(j))
 	}
-	d.writeJSON(w, r, http.StatusOK, resp)
+	return resp, nil
 }
 
 // handleGetJob returns one job as the list shows it: the job a 202 from
@@ -184,11 +204,13 @@ func (d Deps) jobResponse(j store.JobWithDoc) JobResponse {
 	}
 }
 
-// jobFilters reads the job list's ?status and ?kind. Empty means no filter;
-// a value the jobs table can't hold is a requestError.
+// jobFilters reads the job list's ?status, ?kind and ?document_id. Empty
+// means no filter; a status or kind the jobs table can't hold is a
+// requestError. Any document ID is taken: one no job works on lists none.
 func jobFilters(r *http.Request) (store.ListJobsOpts, error) {
 	q := r.URL.Query()
-	opts := store.ListJobsOpts{Status: store.JobStatus(q.Get("status")), Kind: store.JobKind(q.Get("kind"))}
+	opts := store.ListJobsOpts{Status: store.JobStatus(q.Get("status")), Kind: store.JobKind(q.Get("kind")),
+		DocumentID: q.Get("document_id")}
 	if opts.Status != "" && !opts.Status.Valid() {
 		return store.ListJobsOpts{}, badRequest("status %q must be one of: pending, running, done, failed", opts.Status)
 	}

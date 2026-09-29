@@ -395,6 +395,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/jobs", get("/v1/jobs?status=failed"), http.StatusOK},
 		{"GET /v1/jobs", get("/v1/jobs?status=done"), http.StatusOK},
 		{"GET /v1/jobs", get("/v1/jobs?limit=1"), http.StatusOK},
+		{"GET /v1/jobs", get("/v1/jobs?document_id=" + f.failed), http.StatusOK},
 		{"GET /v1/jobs/{id}", get("/v1/jobs/" + f.failedJob), http.StatusOK},
 
 		{"POST /v1/documents/refetch-all", post("/v1/documents/refetch-all?cause=dead_link"), http.StatusBadRequest},

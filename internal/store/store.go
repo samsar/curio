@@ -801,10 +801,11 @@ type QueueCount struct {
 // ListJobsOpts filters JobStore.ListWithDoc. Empty fields mean "no filter
 // for that dimension".
 type ListJobsOpts struct {
-	Status JobStatus
-	Kind   JobKind
-	Limit  int     // <= 0 means the impl default (50)
-	After  PageKey // updated_at and ID of the previous page's last row
+	Status     JobStatus
+	Kind       JobKind
+	DocumentID string  // the jobs that work on this document
+	Limit      int     // <= 0 means the impl default (50)
+	After      PageKey // updated_at and ID of the previous page's last row
 }
 
 // JobWithDoc is a job plus the URL, title and current markdown path of the
