@@ -351,37 +351,51 @@ func TestUI_Library(t *testing.T) {
 }
 
 // TestUI_LibraryPages: following the next-page link one row at a time
-// visits every matching document once, with the filters kept.
+// visits every matching document once, with the filters kept, the cause
+// among them, which the page has no control for yet.
 func TestUI_LibraryPages(t *testing.T) {
 	srv := apitest.Start(t)
-	want := map[string]bool{}
+	byHost, byCause := map[string]bool{}, map[string]bool{}
 	for i := range 5 {
-		doc := srv.AddDocument(t, fmt.Sprintf("https://keep.example/%d", i), store.DocStateFetched)
-		want[doc.ID] = true
+		byHost[srv.AddDocument(t, fmt.Sprintf("https://keep.example/%d", i), store.DocStateFetched).ID] = true
 		srv.AddDocument(t, fmt.Sprintf("https://skip.example/%d", i), store.DocStateFetched)
+		byCause[srv.AddFailedDocument(t, fmt.Sprintf("https://blocked.example/%d", i), store.FailureCauseAntiBot).ID] = true
+		srv.AddFailedDocument(t, fmt.Sprintf("https://walled.example/%d", i), store.FailureCauseLoginWall)
 	}
 	idRE := regexp.MustCompile(`<a href="/ui/documents/([^"]+)">`)
-	got := map[string]int{}
-	path := "/ui/library?host=keep.example&limit=1"
-	for range 10 {
-		body := getPage(t, srv, path, http.StatusOK)
-		ids := idRE.FindAllStringSubmatch(body, -1)
-		require.Len(t, ids, 1, path)
-		got[ids[0][1]]++
-		m := moreRE.FindStringSubmatch(body)
-		if m == nil {
-			break
-		}
-		path = html.UnescapeString(m[1])
-		assert.Contains(t, path, "host=keep.example")
-		assert.Contains(t, path, "limit=1")
-		assert.Contains(t, body, `hx-select-oob="#more"`)
+	for _, tc := range []struct {
+		filter string
+		want   map[string]bool
+	}{{"host=keep.example", byHost}, {"cause=anti_bot", byCause}} {
+		t.Run(tc.filter, func(t *testing.T) {
+			got := map[string]int{}
+			path := "/ui/library?" + tc.filter + "&limit=1"
+			for range 10 {
+				body := getPage(t, srv, path, http.StatusOK)
+				ids := idRE.FindAllStringSubmatch(body, -1)
+				require.Len(t, ids, 1, path)
+				got[ids[0][1]]++
+				m := moreRE.FindStringSubmatch(body)
+				if m == nil {
+					break
+				}
+				path = html.UnescapeString(m[1])
+				assert.Contains(t, path, tc.filter)
+				assert.Contains(t, path, "limit=1")
+				assert.Contains(t, body, `hx-select-oob="#more"`)
+			}
+			require.Len(t, got, len(tc.want))
+			for id, n := range got {
+				assert.True(t, tc.want[id], id)
+				assert.Equal(t, 1, n, "visited once: %s", id)
+			}
+		})
 	}
-	require.Len(t, got, len(want))
-	for id, n := range got {
-		assert.True(t, want[id], id)
-		assert.Equal(t, 1, n, "visited once: %s", id)
-	}
+
+	form := getPage(t, srv, "/ui/library?cause=anti_bot", http.StatusOK)
+	assert.Contains(t, form, `<input type="hidden" name="cause" value="anti_bot">`, "filtering again keeps the cause")
+	body := getPage(t, srv, "/ui/library?cause=bogus", http.StatusBadRequest)
+	assert.Contains(t, body, "<h1>400 bad request</h1>")
 }
 
 // hostileMarkdown is a stored page trying everything.

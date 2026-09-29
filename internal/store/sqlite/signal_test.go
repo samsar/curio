@@ -110,7 +110,7 @@ func TestJobs_Enqueued(t *testing.T) {
 				return seedDoc(t, NewDocuments(db), "https://example.com/f", store.DocStateFailed).ID
 			},
 			act: func(t *testing.T, db *DB, _ string) {
-				n, err := NewDocuments(db).RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed})
+				n, err := NewDocuments(db).RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed}, "")
 				require.NoError(t, err)
 				require.Equal(t, 1, n)
 			},
@@ -119,7 +119,7 @@ func TestJobs_Enqueued(t *testing.T) {
 		{
 			name: "RequeueFetchByStates with nothing to requeue",
 			act: func(t *testing.T, db *DB, _ string) {
-				n, err := NewDocuments(db).RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed})
+				n, err := NewDocuments(db).RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateFailed}, "")
 				require.NoError(t, err)
 				require.Zero(t, n)
 			},

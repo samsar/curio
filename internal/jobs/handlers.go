@@ -34,13 +34,16 @@ type Deps struct {
 }
 
 // markDocFailed is the permanent-failure hook of the fetch and index pools:
-// it reads document_id from the job payload and sets the document's state to
-// failed, or dead when the cause identifies the URL itself as gone
-// (fetcher.ErrDeadLink: a hard 404/410 or a detected soft 404). Without it a
+// it reads document_id from the job payload and records why the document
+// failed, which also sets its state. An index job's failure is
+// store.FailureCauseIndex, whatever its error; any other job's is what
+// fetcher.FailureCause reads from the error it gave up with. The document
+// goes dead exactly when that is a dead link (fetcher.ErrDeadLink: a hard
+// 404/410 or a detected soft 404), and failed otherwise. Without the hook a
 // document whose job gave up would stay pending forever, indistinguishable
 // from one whose job is about to run.
 func markDocFailed(d Deps) PermFailHook {
-	return func(ctx context.Context, job *store.Job, cause error) error {
+	return func(ctx context.Context, job *store.Job, jobErr error) error {
 		var payload store.DocumentJobPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return fmt.Errorf("decode payload to mark doc failed: %w", err)
@@ -48,12 +51,16 @@ func markDocFailed(d Deps) PermFailHook {
 		if payload.DocumentID == "" {
 			return nil // nothing to clean up
 		}
-		state := store.DocStateFailed
-		if errors.Is(cause, fetcher.ErrDeadLink) {
-			state = store.DocStateDead
+		cause := store.FailureCauseIndex
+		if job.Kind != store.JobKindIndex {
+			// FailureCause is "" only for a nil error, which the worker
+			// never passes. Were one to come, the store would refuse the
+			// empty cause and retryBookkeeping retry that refusal until its
+			// deadline, leaving the document pending; other records it.
+			cause = cmp.Or(fetcher.FailureCause(jobErr), store.FailureCauseOther)
 		}
-		if err := d.Documents.UpdateState(ctx, payload.DocumentID, state); err != nil {
-			return fmt.Errorf("update doc %s to %s: %w", payload.DocumentID, state, err)
+		if err := d.Documents.MarkFailed(ctx, payload.DocumentID, cause); err != nil {
+			return fmt.Errorf("mark doc %s failed (%s): %w", payload.DocumentID, cause, err)
 		}
 		return nil
 	}
@@ -195,7 +202,7 @@ func fetchedMetadata(doc *store.Document, res *fetcher.Result, extractionID stri
 //  2. Read the markdown file off disk.
 //  3. Pull the bookmark's tags (if any) for FTS boosting — best-effort.
 //  4. Run the Indexer.
-//  5. Mark document state=fetched.
+//  5. Mark the document fetched, which clears any failure cause.
 func indexHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
 		doc, err := loadJobDocument(ctx, d, job)
@@ -253,8 +260,8 @@ func indexHandler(d Deps) HandlerFunc {
 			return fmt.Errorf("index: %w", err)
 		}
 
-		if err := d.Documents.UpdateState(ctx, doc.ID, store.DocStateFetched); err != nil {
-			return fmt.Errorf("update state: %w", err)
+		if err := d.Documents.MarkFetched(ctx, doc.ID); err != nil {
+			return fmt.Errorf("mark fetched: %w", err)
 		}
 		return nil
 	}

@@ -107,7 +107,7 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 	}
 	videoID, ok := urlutil.YouTubeVideoID(u)
 	if !ok {
-		return nil, &PermanentError{Err: fmt.Errorf("youtube: cannot extract video ID from %s", rawURL)}
+		return nil, &PermanentError{Err: fmt.Errorf("youtube: cannot extract video ID from %s (%w URL)", rawURL, ErrUnsupported)}
 	}
 
 	canonicalURL := "https://www.youtube.com/watch?v=" + videoID

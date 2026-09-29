@@ -240,10 +240,7 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		}
 		return res, nil
 	}
-	// Jina's failure leads the chain: it is the path a retry now depends
-	// on, so errors.As finds its status and Retry-After first. errors.Is
-	// still matches the origin's sentinel.
-	err = fmt.Errorf("%w (after %w)", jinaErr, originErr)
+	err = &jinaFallbackError{jina: jinaErr, origin: originErr}
 	switch {
 	case errors.Is(jinaErr, ErrTooLarge), errors.Is(jinaErr, ErrDeadLink):
 		// Final, and about this URL alone: never cached.
@@ -256,6 +253,21 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 	}
 	return nil, n.settle(host, originErr, err)
 }
+
+// jinaFallbackError is a fetch that failed on the origin, then on Jina.
+// Jina's failure leads the chain: it is the path a retry now depends on, so
+// errors.As finds its status and Retry-After first, while errors.Is still
+// matches the origin's sentinel. Kept apart, the two tell FailureCause
+// which of them spoke for the target.
+type jinaFallbackError struct {
+	jina, origin error
+}
+
+func (e *jinaFallbackError) Error() string {
+	return e.jina.Error() + " (after " + e.origin.Error() + ")"
+}
+
+func (e *jinaFallbackError) Unwrap() []error { return []error{e.jina, e.origin} }
 
 // jinaCanHelp reports whether an origin failure is one Jina might get past:
 //
@@ -443,7 +455,7 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 	// unread avoids pulling down the whole file.
 	if !isReadableContentType(resp.contentType) {
 		return nil, &PermanentError{Err: fmt.Errorf(
-			"native: unsupported content type %q (not HTML); URL: %s", resp.contentType, target)}
+			"native: %w content type %q (not HTML); URL: %s", ErrUnsupported, resp.contentType, target)}
 	}
 
 	finalURL := resp.finalURL

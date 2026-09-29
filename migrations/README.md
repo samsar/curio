@@ -35,7 +35,10 @@ silently disables FK enforcement — every connection must turn it on.
 - **Timestamps**: RFC 3339 UTC as TEXT (`YYYY-MM-DDTHH:MM:SS.fffZ`).
   Lexicographic sort = chronological sort.
 - **JSON columns**: TEXT validated with `CHECK (col IS NULL OR json_valid(col))`.
-- **Enums**: TEXT with `CHECK (col IN (...))`.
+- **Enums**: TEXT with `CHECK (col IN (...))`. The one exception is
+  `documents.failure_cause` (014), validated in Go (`store.FailureCause`):
+  causes will grow, and changing a CHECK on `documents` means rebuilding
+  the table most others reference.
 - **Booleans**: INTEGER (0 / 1).
 - **Soft delete**: not used. Cascading FKs handle cleanup. If we ever need
   retention/restore, add a dedicated trash table per entity.

@@ -70,7 +70,9 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
   queued and it runs on AC power
 - `curio daemon {start|stop|status|logs|install|uninstall}` — lifecycle
   management, and the launchd agent (see "Daemon lifecycle")
-- `curio refetch <id|all>` — force re-extract
+- `curio refetch <id|--all>` — force re-extract; `--all` narrows with
+  `--state`, and with `--cause` to one cause of failures (`anti_bot`,
+  `tls`, ...)
 - `curio reindex <id|--all>` — re-chunk and re-embed existing extractions
   (after chunker or embedding-prefix changes, or to pick up new tags)
 

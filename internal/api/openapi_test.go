@@ -160,6 +160,17 @@ func TestOpenAPI_Valid(t *testing.T) {
 	assert.Contains(t, doc.Info.Description, "the API never sends `null`")
 }
 
+// TestOpenAPI_FailureCauseEnum: the spec names every failure cause the
+// store has, in its order, so a new cause can't reach the wire unnoticed.
+func TestOpenAPI_FailureCauseEnum(t *testing.T) {
+	causes := store.FailureCauses()
+	want := make([]any, len(causes))
+	for i, c := range causes {
+		want[i] = string(c)
+	}
+	assert.Equal(t, want, loadSpec(t).Components.Schemas["FailureCause"].Value.Enum)
+}
+
 // TestOpenAPI_StrictValidation: the validation the contract tests rely on
 // catches what it must, so a green run means something.
 func TestOpenAPI_StrictValidation(t *testing.T) {
@@ -363,7 +374,10 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/documents", get("/v1/documents?content_type=bogus"), http.StatusBadRequest},
 		{"GET /v1/documents", get("/v1/documents?host=example.com&state=fetched"), http.StatusOK},
 		{"GET /v1/documents", get("/v1/documents?folder=/Reading&limit=1"), http.StatusOK},
+		{"GET /v1/documents", get("/v1/documents?cause=anti_bot"), http.StatusOK},
+		{"GET /v1/documents", get("/v1/documents?cause=bogus"), http.StatusBadRequest},
 		{"GET /v1/documents/{id}", get("/v1/documents/" + f.fetched), http.StatusOK},
+		{"GET /v1/documents/{id}", get("/v1/documents/" + f.failed), http.StatusOK},
 		{"GET /v1/documents/lookup", get("/v1/documents/lookup?url=https://EXAMPLE.com/a%23top"), http.StatusOK},
 		{"GET /v1/documents/lookup", get("/v1/documents/lookup?url=https://example.com/nowhere"), http.StatusNotFound},
 		{"GET /v1/documents/lookup", get("/v1/documents/lookup?url=ftp://example.com/a"), http.StatusBadRequest},
@@ -372,6 +386,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/documents/{id}/related", get("/v1/documents/" + f.fetched + "/related"), http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","k":5}`), http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka offline"}`), http.StatusOK},
+		{"GET /v1/failures", get("/v1/failures"), http.StatusOK},
 
 		{"GET /v1/interests", get("/v1/interests"), http.StatusOK},
 		{"GET /v1/interests/{id}", get("/v1/interests/" + f.interest), http.StatusOK},
@@ -380,8 +395,11 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/jobs", get("/v1/jobs?status=failed"), http.StatusOK},
 		{"GET /v1/jobs", get("/v1/jobs?status=done"), http.StatusOK},
 		{"GET /v1/jobs", get("/v1/jobs?limit=1"), http.StatusOK},
+		{"GET /v1/jobs", get("/v1/jobs?document_id=" + f.failed), http.StatusOK},
 		{"GET /v1/jobs/{id}", get("/v1/jobs/" + f.failedJob), http.StatusOK},
 
+		{"POST /v1/documents/refetch-all", post("/v1/documents/refetch-all?cause=dead_link"), http.StatusBadRequest},
+		{"POST /v1/documents/refetch-all", post("/v1/documents/refetch-all?cause=anti_bot"), http.StatusAccepted},
 		{"POST /v1/documents/{id}/refetch", post("/v1/documents/" + f.dead + "/refetch"), http.StatusConflict},
 		{"POST /v1/documents/{id}/refetch", post("/v1/documents/" + f.failed + "/refetch"), http.StatusAccepted},
 		{"POST /v1/documents/refetch-all", post("/v1/documents/refetch-all?state=failed"), http.StatusAccepted},
@@ -536,9 +554,9 @@ type contractFixtures struct {
 // property a response schema declares shows up in some response, which
 // TestOpenAPI_ResponsesMatchSchemas enforces: two indexed documents with
 // titles and content, one of them with every optional metadata column and
-// an extraction error message, a failed and a dead document, two bookmarks
-// (one with a folder and tags), a failed job and done ones, and an interest
-// with a summary.
+// an extraction error message, a document failed as anti-bot and a dead
+// one, two bookmarks (one with a folder and tags), a failed job and done
+// ones, and an interest with a summary.
 func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	t.Helper()
 	ctx := context.Background()
@@ -563,7 +581,7 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	done.Status = store.JobStatusDone
 	require.NoError(t, s.deps.Queue.Enqueue(ctx, done))
 
-	failed := s.seedDocument(t, "https://example.com/failed", store.DocStateFailed)
+	failed := s.seedFailedDocument(t, "https://example.com/failed", store.FailureCauseAntiBot)
 	job, err := store.NewDocumentJob("local", store.JobKindFetch, failed.ID)
 	require.NoError(t, err)
 	job.Status = store.JobStatusFailed

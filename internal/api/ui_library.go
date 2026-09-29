@@ -35,7 +35,7 @@ func (h pageHandlers) library(w http.ResponseWriter, r *http.Request) {
 // only when it isn't the default.
 func libraryFilters(opts store.ListDocumentsOpts) ui.LibraryFilters {
 	f := ui.LibraryFilters{State: string(opts.State), ContentType: string(opts.ContentType), Host: opts.Host,
-		Folder: opts.Folder}
+		Folder: opts.Folder, Cause: string(opts.Cause)}
 	if opts.Limit != defaultListLimit {
 		f.Limit = opts.Limit
 	}

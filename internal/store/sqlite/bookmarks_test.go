@@ -151,7 +151,7 @@ func TestBookmarks_Ingest_KnownURL(t *testing.T) {
 	first := newIngestBookmark("https://example.com/post", store.SourceChrome)
 	_, err := bms.Ingest(ctx, first)
 	require.NoError(t, err)
-	require.NoError(t, docs.UpdateState(ctx, *first.DocumentID, store.DocStateFetched))
+	require.NoError(t, docs.MarkFetched(ctx, *first.DocumentID))
 
 	second := newIngestBookmark("https://example.com/post", store.SourceSafari)
 	stale := "ignored"

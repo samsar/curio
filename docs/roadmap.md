@@ -239,9 +239,13 @@ eval harness shows measurably better retrieval than the v1 baseline.
 - Web UI: phase 1, the read-only dashboard (Overview, Search, Library,
   Document, Interests; `curio ui`), has shipped. Phase 2 adds actions
   (refetch, reindex, rebuild, a failures view grouped by cause, queue
-  controls, live progress); phase 3 richer views (an interest map,
-  suspect pages, HTML export upload, live updates). See `docs/ui.md` and
-  decisions.md "Dashboard: server-rendered pages in the daemon (phase 1)".
+  controls, live progress); what its views read has shipped: every
+  failed document's cause (`GET /v1/failures`, `?cause=` filters,
+  `curio refetch --all --cause`) and a document's jobs
+  (`GET /v1/jobs?document_id=`). Phase 3 brings richer views (an
+  interest map, suspect pages, HTML export upload, live updates). See
+  `docs/ui.md` and decisions.md "Dashboard: server-rendered pages in the
+  daemon (phase 1)".
 - Snapshot to WARC for dead-link insurance
 - Cross-source signal weighting ("read this thing, bookmarked this thing,
   highlighted this thing → strong interest")

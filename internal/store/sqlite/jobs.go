@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -356,18 +357,16 @@ func (s *Jobs) GetWithDoc(ctx context.Context, tenantID, id string) (*store.JobW
 	return job, nil
 }
 
-// jobWithDocSelect selects the tenant's jobs, each with its document's URL
-// and title and its current extraction's markdown path, in the columns
-// scanJobWithDoc reads. Its one argument is the tenant; callers append
-// further conditions.
-var jobWithDocSelect = "SELECT " + qualify("j", jobColumns) + ", COALESCE(d.url, '') AS doc_url, " +
+// jobWithDocFrom selects jobs, each with its document's URL and title and
+// its current extraction's markdown path, in the columns scanJobWithDoc
+// reads. Callers add the WHERE.
+var jobWithDocFrom = "SELECT " + qualify("j", jobColumns) + ", COALESCE(d.url, '') AS doc_url, " +
 	"COALESCE(d.title, '') AS doc_title, COALESCE(e.markdown_path, '') AS markdown_path " +
 	"FROM jobs j " +
 	"LEFT JOIN documents d ON d.id = j.document_id " +
-	"LEFT JOIN document_extractions e ON e.id = d.current_extraction_id " +
-	"WHERE j.tenant_id = ?"
+	"LEFT JOIN document_extractions e ON e.id = d.current_extraction_id"
 
-// scanJobWithDoc scans a row of jobWithDocSelect.
+// scanJobWithDoc scans a row of jobWithDocFrom.
 func scanJobWithDoc(row interface{ Scan(...any) error }) (*store.JobWithDoc, error) {
 	var item store.JobWithDoc
 	var err error
@@ -380,30 +379,41 @@ func scanJobWithDoc(row interface{ Scan(...any) error }) (*store.JobWithDoc, err
 // getJobWithDocQuery builds GetWithDoc's query: a point lookup on the jobs
 // primary key.
 func getJobWithDocQuery(tenantID, id string) (string, []any) {
-	return jobWithDocSelect + " AND j.id = ?", []any{tenantID, id}
+	return jobWithDocFrom + " WHERE j.tenant_id = ? AND j.id = ?", []any{tenantID, id}
 }
 
 // listJobsQuery builds ListWithDoc's query. It walks
 // idx_jobs_tenant_status_updated when filtered by status, and
 // idx_jobs_tenant_updated otherwise, in (updated_at, id) order from
 // opts.After, so it stops at the limit instead of sorting every tenant job.
+//
+// A document's jobs are the exception: idx_jobs_document seeks them and
+// they are sorted, a handful of rows. The tenant term is written
+// +j.tenant_id then, because the unary plus keeps SQLite off the tenant
+// indexes: curio never runs ANALYZE, and without statistics SQLite takes
+// the index that serves the ORDER BY and walks every tenant job to find
+// the document's few (3 to 16 ms at 12k jobs, against 0.03 ms).
 func listJobsQuery(tenantID string, opts store.ListJobsOpts) (string, []any) {
-	q := jobWithDocSelect
+	clauses := []string{"j.tenant_id = ?"}
 	args := []any{tenantID}
+	if opts.DocumentID != "" {
+		clauses = []string{"+j.tenant_id = ?", "j.document_id = ?"}
+		args = append(args, opts.DocumentID)
+	}
 	if opts.Status != "" {
-		q += " AND j.status = ?"
+		clauses = append(clauses, "j.status = ?")
 		args = append(args, opts.Status)
 	}
 	if opts.Kind != "" {
-		q += " AND j.kind = ?"
+		clauses = append(clauses, "j.kind = ?")
 		args = append(args, opts.Kind)
 	}
 	if !opts.After.IsZero() {
 		pred, predArgs := keysetAfter("j.updated_at", "j.id", opts.After)
-		q += " AND " + pred
+		clauses = append(clauses, pred)
 		args = append(args, predArgs...)
 	}
-	q += " ORDER BY j.updated_at DESC, j.id DESC LIMIT ?"
+	q := jobWithDocFrom + " WHERE " + strings.Join(clauses, " AND ") + " ORDER BY j.updated_at DESC, j.id DESC LIMIT ?"
 	return q, append(args, listLimit(opts.Limit))
 }
 
