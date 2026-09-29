@@ -207,8 +207,9 @@ var handOffCard = []cardLine{
 }
 
 // uiLine opens the dashboard; the hand-off card names it when config.yaml
-// serves it.
-var uiLine = cardLine{"curio ui", "watch it in your browser"}
+// serves it. The dashboard opens on search, and its Status page is where
+// the import's progress shows.
+var uiLine = cardLine{"curio ui", "search in your browser; its Status page shows the import"}
 
 // mcpLine lets Claude Code search the library.
 func mcpLine() cardLine { return cardLine{mcpCommand(), "let Claude Code search your library (MCP)"} }
