@@ -265,6 +265,46 @@ func (s *Server) AddInterest(t testing.TB, label string, docs ...*store.Document
 	return &c
 }
 
+// Interest is an interest AddInterests records: its label, empty for an
+// unlabeled one, and its size.
+type Interest struct {
+	Label string
+	Size  int
+}
+
+// AddInterests records a finished clustering run whose clusters are
+// interests, without members, over as many documents as their sizes add
+// up to: enough for a page that lists interests by size alone.
+func (s *Server) AddInterests(t testing.TB, interests ...Interest) []*store.Cluster {
+	t.Helper()
+	ctx := context.Background()
+	ins := s.Deps.Insights
+	run := &store.ClusterRun{TenantID: TenantID, Algo: "apitest"}
+	if err := ins.CreateRun(ctx, run); err != nil {
+		t.Fatalf("create cluster run: %v", err)
+	}
+	clusters := make([]*store.Cluster, 0, len(interests))
+	written := make([]store.ClusterWithMembers, 0, len(interests))
+	documents := 0
+	for _, in := range interests {
+		c := &store.Cluster{ID: uuid.NewString(), TenantID: TenantID, RunID: run.ID, Size: in.Size, Cohesion: 0.7}
+		if in.Label != "" {
+			c.Label = &in.Label
+		}
+		clusters = append(clusters, c)
+		written = append(written, store.ClusterWithMembers{Cluster: *c})
+		documents += in.Size
+	}
+	if err := ins.ReplaceClusters(ctx, run.ID, written); err != nil {
+		t.Fatalf("write clusters: %v", err)
+	}
+	res := store.RunResult{Status: store.ClusterRunDone, NumDocuments: documents, NumClusters: len(interests)}
+	if err := ins.FinishRun(ctx, run.ID, res); err != nil {
+		t.Fatalf("finish cluster run: %v", err)
+	}
+	return clusters
+}
+
 // AddEmptyClusterRun records a finished clustering run over numDocuments
 // documents that grouped none of them: every document is noise.
 func (s *Server) AddEmptyClusterRun(t testing.TB, numDocuments int) {

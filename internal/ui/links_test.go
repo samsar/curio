@@ -14,8 +14,10 @@ func TestLinks(t *testing.T) {
 	assert.Equal(t, "/ui/documents/x?images=1", documentImagesHref("x"))
 	assert.Equal(t, "/ui/interests/%20x", interestHref(" x"))
 	assert.Equal(t, "/ui/library?state=failed", stateHref("failed"))
+	assert.Equal(t, "/ui/library?cause=anti_bot", causeHref("anti_bot"))
 	assert.Equal(t, "/ui/library", libraryHref(LibraryFilters{}, ""))
-	assert.Equal(t, "/ui/", navHref(NavOverview))
+	assert.Equal(t, "/ui/", navHref(NavSearch))
+	assert.Equal(t, "/ui/status", navHref(NavStatus))
 	assert.Empty(t, navHref("elsewhere"))
 
 	// Every value round-trips through the query, however odd.
@@ -28,6 +30,62 @@ func TestLinks(t *testing.T) {
 	assert.Equal(t, url.Values{"state": {"failed"}, "content_type": {"pdf"}, "host": {"a&b=c.example"},
 		"folder": {"/100% Reading/#1"}, "cause": {"anti_bot"}, "cursor": {"cursor+/="}, "limit": {"7"}}, u.Query(),
 		"the next page keeps every filter")
+
+	for href, want := range map[string]url.Values{
+		stateHref("a&b=c #1"): {"state": {"a&b=c #1"}},
+		causeHref("a&b=c #1"): {"cause": {"a&b=c #1"}},
+	} {
+		u := parseHref(t, href)
+		assert.Equal(t, "/ui/library", u.Path, href)
+		assert.Equal(t, want, u.Query(), "a code the page doesn't know round-trips: %s", href)
+	}
+
+	more := parseHref(t, libraryMoreHref(f, "cursor+/=", 150))
+	assert.Equal(t, "/ui/library", more.Path)
+	want := u.Query()
+	want.Set("shown", "150")
+	assert.Equal(t, want, more.Query(), "load more asks for the next page with the rows shown")
+	assert.NotContains(t, href, "shown=", "the plain link doesn't")
+}
+
+func parseHref(t *testing.T, href string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(href)
+	require.NoError(t, err)
+	return u
+}
+
+// TestSearchHref: a search's query and type round-trip, however odd; a
+// blank query is left out, and the home without a type is /ui/.
+func TestSearchHref(t *testing.T) {
+	const q = "a&b=c #1 <x>"
+	for _, contentType := range []string{"", "article", "repo", "video", "pdf"} {
+		u := parseHref(t, searchHref(q, contentType))
+		assert.Equal(t, "/ui/", u.Path, contentType)
+		want := url.Values{"q": {q}}
+		if contentType != "" {
+			want.Set("content_type", contentType)
+		}
+		assert.Equal(t, want, u.Query(), contentType)
+	}
+	assert.Equal(t, "/ui/", searchHref("", ""))
+	assert.Equal(t, "/ui/", searchHref("  ", ""), "a blank query is the home")
+	assert.Equal(t, "/ui/?content_type=pdf", searchHref(" ", "pdf"))
+	assert.Equal(t, "/ui/?content_type=pdf&q=kafka", searchHref("kafka", "pdf"))
+}
+
+// TestStateTabHref: a state tab keeps the page's other filters and its
+// size, drops the cursor, and sets or drops the state.
+func TestStateTabHref(t *testing.T) {
+	f := LibraryFilters{State: "failed", ContentType: "pdf", Host: "a&b=c.example", Folder: "/100% Reading/#1",
+		Cause: "anti_bot", Limit: 7}
+	u := parseHref(t, stateTabHref(f, "dead"))
+	assert.Equal(t, url.Values{"state": {"dead"}, "content_type": {"pdf"}, "host": {"a&b=c.example"},
+		"folder": {"/100% Reading/#1"}, "cause": {"anti_bot"}, "limit": {"7"}}, u.Query())
+	u = parseHref(t, stateTabHref(f, ""))
+	assert.Equal(t, url.Values{"content_type": {"pdf"}, "host": {"a&b=c.example"},
+		"folder": {"/100% Reading/#1"}, "cause": {"anti_bot"}, "limit": {"7"}}, u.Query(), "All drops the state")
+	assert.Equal(t, "/ui/library", stateTabHref(LibraryFilters{State: "failed"}, ""))
 }
 
 // TestNavItems: the navigation in its order, each item linking where an
@@ -40,9 +98,11 @@ func TestNavItems(t *testing.T) {
 		assert.Equal(t, navHref(item.Nav), item.Href, item.Nav)
 		assert.NotEmpty(t, item.Label, item.Nav)
 	}
-	assert.Equal(t, []Nav{NavOverview, NavSearch, NavLibrary, NavInterests}, navs)
-	assert.Equal(t, []string{"/ui/", "/ui/search", "/ui/library", "/ui/interests"},
+	assert.Equal(t, []Nav{NavSearch, NavLibrary, NavInterests, NavStatus}, navs)
+	assert.Equal(t, []string{"/ui/", "/ui/library", "/ui/interests", "/ui/status"},
 		[]string{items[0].Href, items[1].Href, items[2].Href, items[3].Href})
+	assert.Equal(t, []string{"search", "library", "sparkles", "activity"},
+		[]string{items[0].Icon, items[1].Icon, items[2].Icon, items[3].Icon})
 	assert.Len(t, navHrefs, len(items), "every page with an address is in the navigation")
 }
 

@@ -81,7 +81,7 @@ func TestStarting_RefusesEverythingElse(t *testing.T) {
 		{method: http.MethodDelete, path: "/v1/jobs?status=failed"},
 		{method: http.MethodPost, path: "/v1/healthz"},
 		{method: http.MethodGet, path: "/v1/nope"},
-		{method: http.MethodPost, path: "/ui/search"},
+		{method: http.MethodPost, path: "/ui/"},
 	} {
 		t.Run(req.method+" "+req.path, func(t *testing.T) {
 			body := getStarting(t, s, req)

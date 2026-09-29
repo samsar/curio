@@ -27,7 +27,7 @@ var files embed.FS
 // pageNames are the pages: each is templates/<name>.html on top of the
 // layout, the partials and the icons.
 var pageNames = []string{
-	PageOverview, PageSearch, PageLibrary, PageDocument, PageInterests, PageInterest, PageError, PageStarting,
+	PageSearch, PageStatus, PageLibrary, PageDocument, PageInterests, PageInterest, PageError, PageStarting,
 }
 
 // Renderer renders the dashboard's pages and serves its assets. It is
@@ -103,7 +103,9 @@ func funcs(assets assetSet) template.FuncMap {
 		"documentImagesHref": documentImagesHref,
 		"interestHref":       interestHref,
 		"libraryHref":        libraryHref,
+		"libraryMoreHref":    libraryMoreHref,
 		"stateHref":          stateHref,
+		"causeHref":          causeHref,
 		"navHref":            navHref,
 		"navItems":           navItems,
 		"outbound":           outbound,
@@ -119,6 +121,7 @@ func funcs(assets assetSet) template.FuncMap {
 		"shortError":         shortError,
 		"causeLabel":         causeLabel,
 		"causeWhy":           causeWhy,
+		"interestName":       interestName,
 		"stateClass":         stateClass,
 		"stateTone":          stateTone,
 		"typeIcon":           typeIcon,
@@ -127,14 +130,14 @@ func funcs(assets assetSet) template.FuncMap {
 		"pct":                pct,
 		"stateBar":           stateBar,
 		"coverageBar":        coverageBar,
+		"causeBar":           causeBar,
 		"inc":                func(i int) int { return i + 1 },
-		"docStates":          func() []string { return docStates },
 		"contentTypes":       func() []string { return contentTypes },
 	}
 }
 
-// The filter values the Library's form offers: every document state, in
-// lifecycle order, and every content type.
+// Every document state, in lifecycle order, as the state bar draws them,
+// and every content type, as the Library's form offers them.
 var (
 	docStates = []string{string(store.DocStatePending), string(store.DocStateFetched),
 		string(store.DocStateFailed), string(store.DocStateDead)}

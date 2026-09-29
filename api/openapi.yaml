@@ -601,7 +601,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResponse" }
         "400":
-          description: Missing query, k outside 0..100, an unknown field, or a malformed body
+          description: Missing query, k outside 0..100, a content_type or source outside its set, an unknown field, or a malformed body
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }

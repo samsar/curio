@@ -2,20 +2,28 @@ package api
 
 import (
 	"net/http"
+	"time"
 
+	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
 )
 
-// recentBookmarks is how many of the newest bookmarks the Overview lists.
-const recentBookmarks = 10
+// statusCauses is how many failure causes Status's card draws: the few
+// that account for most failures.
+const statusCauses = 5
 
-// overview answers GET /ui/: counts, the queue and its progress, health,
-// and the newest bookmarks. Each panel reads on its own, and one that
-// fails shows its error while the others render.
-func (h pageHandlers) overview(w http.ResponseWriter, r *http.Request) {
+// status answers GET /ui/status: counts, the queue and its progress,
+// health, and why documents failed, with what needs attention first. Each
+// panel reads on its own, and one that fails shows its error while the
+// others render.
+//
+// failures reads the cause and URL of every failed and dead document, about
+// a millisecond per 3,000: fine once per page load, but a region of the page
+// that is polled must leave the failures card out.
+func (h pageHandlers) status(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	vm := ui.Overview{Layout: h.pages.layout("Overview", ui.NavOverview)}
+	vm := ui.Status{Layout: h.pages.layout("Status", ui.NavStatus)}
 
 	stats, err := h.d.stats(ctx)
 	vm.Counts = countsPanel(stats)
@@ -35,11 +43,11 @@ func (h pageHandlers) overview(w http.ResponseWriter, r *http.Request) {
 	vm.Health = healthPanel(health)
 	vm.Health.Err = h.panelError(r, err)
 
-	recent, err := h.d.listBookmarks(ctx, store.ListBookmarksOpts{Limit: recentBookmarks})
-	vm.Recent = recentPanel(recent)
-	vm.Recent.Err = h.panelError(r, err)
+	failures, err := h.d.failures(ctx)
+	vm.Failures = failuresPanel(failures)
+	vm.Failures.Err = h.panelError(r, err)
 
-	h.page(w, r, http.StatusOK, ui.PageOverview, vm)
+	h.page(w, r, http.StatusOK, ui.PageStatus, vm)
 }
 
 // countsPanel shows every document state, in lifecycle order, whether or
@@ -97,26 +105,26 @@ func healthPanel(h Health) ui.HealthPanel {
 		}
 	}
 	for _, u := range h.Upstreams {
-		p.Upstreams = append(p.Upstreams, ui.Upstream{Name: u.Name, Enabled: u.Enabled, State: u.State,
-			LastSuccess: u.LastSuccessAt, LastFailure: u.LastFailureAt, LastFailureClass: u.LastFailureClass,
-			CooldownUntil: u.CooldownUntil})
+		up := ui.Upstream{Name: u.Name, Enabled: u.Enabled, State: u.State, LastSuccess: u.LastSuccessAt,
+			LastFailure: u.LastFailureAt, LastFailureClass: u.LastFailureClass, CooldownUntil: u.CooldownUntil,
+			Window: time.Duration(u.WindowSeconds) * time.Second}
+		for class, n := range u.Recent {
+			up.Calls += n
+			if fetcher.CallClass(class).Failed() {
+				up.Failed += n
+			}
+		}
+		p.Upstreams = append(p.Upstreams, up)
 	}
 	return p
 }
 
-func recentPanel(l BookmarkListResponse) ui.RecentPanel {
-	var p ui.RecentPanel
-	for _, b := range l.Items {
-		p.Bookmarks = append(p.Bookmarks, ui.RecentBookmark{Title: deref(b.Title), URL: b.URL, Source: b.Source,
-			SavedAt: b.SavedAt, DocumentID: deref(b.DocumentID), DocumentState: b.DocumentState})
+// failuresPanel shows the statusCauses causes with the most failed and dead
+// documents, most first, as failures counts them.
+func failuresPanel(f FailuresResponse) ui.FailuresPanel {
+	p := ui.FailuresPanel{Total: f.Total}
+	for _, c := range f.Causes[:min(len(f.Causes), statusCauses)] {
+		p.Causes = append(p.Causes, ui.Count{Name: c.Cause, Count: c.Count})
 	}
 	return p
-}
-
-// deref is *s, or "" for nil: an optional field as a page shows it.
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
 }

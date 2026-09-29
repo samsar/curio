@@ -75,9 +75,10 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 	d.writeJSON(w, r, http.StatusOK, resp)
 }
 
-// search runs req through the search engine and hydrates its hits. A query
-// or k the engine can't take is a requestError. Semantic search failing
-// is not an error: the keyword results come back Degraded, with Warnings.
+// search runs req through the search engine and hydrates its hits. A query,
+// k or filter the engine can't take is a requestError. Semantic search
+// failing is not an error: the keyword results come back Degraded, with
+// Warnings.
 func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	if req.Query == "" {
 		return SearchResponse{}, badRequest("query is required")
@@ -85,6 +86,9 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 	if req.K < 0 || req.K > store.MaxSearchK {
 		return SearchResponse{}, badRequest("k must be between 1 and %d (or omitted for the default), got %d",
 			store.MaxSearchK, req.K)
+	}
+	if err := validateSearchFilters(req.Filters); err != nil {
+		return SearchResponse{}, err
 	}
 
 	start := time.Now()
@@ -115,6 +119,23 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		Warnings:   res.Warnings,
 		Items:      items,
 	}, nil
+}
+
+// validateSearchFilters refuses a content_type or source outside its set, as
+// the lists refuse their filters: the engine would match nothing, and a typo
+// would read as "no results". Hosts are literal input and match as given.
+func validateSearchFilters(f Filters) error {
+	for _, t := range f.ContentType {
+		if !store.ContentType(t).Valid() {
+			return badRequest("filters.content_type %q must be one of: %s", t, contentTypeList)
+		}
+	}
+	for _, s := range f.Source {
+		if !validSource(s) {
+			return badRequest("filters.source %q must be one of: %s", s, sourceList)
+		}
+	}
+	return nil
 }
 
 // searchHitsToResponse maps engine hits to wire hits, populating each

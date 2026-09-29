@@ -150,7 +150,7 @@ func TestUp_ImportHandOff(t *testing.T) {
 		`  2 new bookmarks from bookmarks\.html, 2 pages to fetch and index now, at full speed\n`+
 		`\nMeanwhile:\n`+
 		`  curio status --follow +follow the import until it is done\n`+
-		`  curio ui +watch it in your browser\n`+
+		`  curio ui +search in your browser; its Status page shows the import\n`+
 		`  curio pause \| resume +stop starting new work, and start again\n`+
 		`  curio throttle gentle +fewer jobs at once, to keep the Mac cool\n`+
 		`  curio search "\.\.\." +search your library, as it grows\n`+

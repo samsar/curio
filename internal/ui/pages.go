@@ -1,12 +1,16 @@
 package ui
 
-import "time"
+import (
+	"time"
+
+	"github.com/samsar/curio/internal/store"
+)
 
 // Page names, for Renderer.Page: one template per page, each with its view
 // model below.
 const (
-	PageOverview  = "overview"  // Overview
 	PageSearch    = "search"    // Search
+	PageStatus    = "status"    // Status
 	PageLibrary   = "library"   // Library
 	PageDocument  = "document"  // Document
 	PageInterests = "interests" // Interests
@@ -21,10 +25,10 @@ type Nav string
 // The navigation, in its order; NavNone marks no item current.
 const (
 	NavNone      Nav = ""
-	NavOverview  Nav = "overview"
 	NavSearch    Nav = "search"
 	NavLibrary   Nav = "library"
 	NavInterests Nav = "interests"
+	NavStatus    Nav = "status"
 )
 
 // Layout is what every page's frame shows.
@@ -42,15 +46,16 @@ type PanelError struct {
 	RequestID string
 }
 
-// Overview is the dashboard's home: counts, the queue, how far along its
-// work is, health, and what was saved last.
-type Overview struct {
+// Status is what curio is doing and whether what it needs works: what
+// needs attention, the library's counts, the queue, why documents failed,
+// health, how far along its work is, and the jobs.
+type Status struct {
 	Layout   Layout
 	Counts   CountsPanel
 	Queue    QueuePanel
 	Progress ProgressPanel
 	Health   HealthPanel
-	Recent   RecentPanel
+	Failures FailuresPanel
 }
 
 // CountsPanel counts the library and the jobs.
@@ -138,10 +143,15 @@ type Upstream struct {
 	Name             string
 	Enabled          bool
 	State            string
-	LastSuccess      time.Time
+	LastSuccess      time.Time // its last healthy answer
 	LastFailure      time.Time
 	LastFailureClass string
 	CooldownUntil    time.Time
+	// Calls and Failed count its calls in the last Window, and those that
+	// failed: its health's own reckoning, which counts a refusal of a
+	// target as a healthy answer.
+	Window        time.Duration
+	Calls, Failed int
 }
 
 // Label is the upstream's name for people.
@@ -169,36 +179,99 @@ func (u Upstream) Tone() string {
 	return "neutral"
 }
 
-// RecentPanel is the newest bookmarks.
-type RecentPanel struct {
-	Err       *PanelError
-	Bookmarks []RecentBookmark
+// Alert is the tone of the callout Status opens with for the upstream:
+// danger while it is failing, warn while it is degraded, and "" for none.
+// A pause is the upstream's own request, and idle, ok and off need
+// nothing.
+func (u Upstream) Alert() string {
+	if !u.Enabled {
+		return ""
+	}
+	switch u.State {
+	case "failing":
+		return "danger"
+	case "degraded":
+		return "warn"
+	}
+	return ""
 }
 
-// RecentBookmark is a bookmark and the state of its document.
-type RecentBookmark struct {
-	Title         string // empty for an untitled bookmark
-	URL           string
-	Source        string
-	SavedAt       time.Time
-	DocumentID    string // empty when its document was deleted
-	DocumentState string
+// FailuresPanel is why the library's documents failed: how many failed or
+// are dead, and the causes with the most of them, most first.
+type FailuresPanel struct {
+	Err    *PanelError
+	Total  int
+	Causes []Count // by failure cause
 }
 
-// Cell is the bookmark as a list's document cell: named by its own title,
-// linking to its document while there is one, with its host and browser
-// under it.
-func (b RecentBookmark) Cell() DocCell {
-	return DocCell{Ref: DocRef{ID: b.DocumentID, Title: b.Title, URL: b.URL}, Where: host(b.URL),
-		Source: b.Source, When: b.SavedAt}
+// Most is the count of the cause with the most documents, which the
+// causes' bars are scaled to, or 0 for none.
+func (p FailuresPanel) Most() int {
+	if len(p.Causes) == 0 {
+		return 0
+	}
+	return p.Causes[0].Count
 }
 
-// Search is the search page: the form, and the results of its query.
+// Search is the search page: the form, and either the home, without a
+// query, or the results of its query.
 type Search struct {
 	Layout  Layout
 	Query   string
+	Type    string         // the content type the search is limited to; empty for all
+	Home    *SearchHome    // set exactly when there is no query
 	Err     *PanelError    // the search failed
-	Results *SearchResults // nil before a query is given, or when it failed
+	Results *SearchResults // nil without a query, or when it failed
+}
+
+// SearchHome is what the search page shows without a query, under the
+// box. Zero values are unknown: a read the home does without is left out.
+type SearchHome struct {
+	Searchable   int        // fetched documents
+	Interests    []Interest // the latest run's largest, largest first, without members
+	AllInterests int        // how many interests the run found
+}
+
+// Placeholder is the search box's placeholder: how many documents there
+// are to search, when the home knows.
+func (s Search) Placeholder() string {
+	if s.Home == nil || s.Home.Searchable <= 0 {
+		return "Search your library"
+	}
+	return "Search your " + count(s.Home.Searchable, "document", "documents")
+}
+
+// searchTypes are the content types the search page offers to limit a
+// search to, in the order it offers them; "" is all of them.
+var searchTypes = []struct {
+	label       string
+	contentType store.ContentType
+}{
+	{"All", ""}, {"Articles", store.ContentTypeArticle}, {"Repos", store.ContentTypeRepo},
+	{"Videos", store.ContentTypeVideo}, {"PDFs", store.ContentTypePDF},
+}
+
+// Tab is one link of a segmented control: its label, the page it leads
+// to, whether it is the page's current choice, and its count when it has
+// one.
+type Tab struct {
+	Label   string
+	Href    string
+	Current bool
+	Count   int
+	Counted bool
+}
+
+// TypeTabs are the search's type filter: a link to this query limited to
+// each offered type, the current one marked. A type the page doesn't
+// offer (thread, unknown) still limits the search, and marks none.
+func (s Search) TypeTabs() []Tab {
+	tabs := make([]Tab, 0, len(searchTypes))
+	for _, t := range searchTypes {
+		tabs = append(tabs, Tab{Label: t.label, Href: searchHref(s.Query, string(t.contentType)),
+			Current: s.Type == string(t.contentType)})
+	}
+	return tabs
 }
 
 // SearchResults is a query's ranked hits.
@@ -248,9 +321,81 @@ type Match struct {
 type Library struct {
 	Layout     Layout
 	Filters    LibraryFilters
+	Counts     *LibraryCounts // nil when they couldn't be read
 	Rows       []LibraryRow
 	NextCursor string // empty on the last page
 	PageSize   int    // how many rows a page holds
+	// Shown is how many rows the pages before this one showed above it:
+	// set when "load more" appends this page to them, 0 on a page of its
+	// own.
+	Shown int
+}
+
+// LibraryCounts are the whole library's counts, whatever the filters.
+type LibraryCounts struct {
+	Documents, Bookmarks int
+	ByState              map[string]int // documents by state
+}
+
+// libraryStates are the Library's state tabs, in their order; "" is every
+// state.
+var libraryStates = []struct {
+	label string
+	state store.DocState
+}{
+	{"All", ""}, {"Fetched", store.DocStateFetched}, {"Pending", store.DocStatePending},
+	{"Failed", store.DocStateFailed}, {"Dead", store.DocStateDead},
+}
+
+// StateTabs are the Library's state filter: a link to the first page of
+// each state under the page's other filters, the current one marked, each
+// with its count when the counts apply.
+func (l Library) StateTabs() []Tab {
+	counted := l.CountsApply()
+	tabs := make([]Tab, 0, len(libraryStates))
+	for _, s := range libraryStates {
+		tab := Tab{Label: s.label, Href: stateTabHref(l.Filters, string(s.state)),
+			Current: l.Filters.State == string(s.state)}
+		if counted {
+			tab.Count, tab.Counted = l.Counts.state(string(s.state)), true
+		}
+		tabs = append(tabs, tab)
+	}
+	return tabs
+}
+
+// state is how many documents are in state, or in any for "".
+func (c LibraryCounts) state(state string) int {
+	if state == "" {
+		return c.Documents
+	}
+	return c.ByState[state]
+}
+
+// CountsApply reports whether the library's counts count what the page
+// lists: they are the whole library's by state, so they apply when state
+// is the one filter, if any.
+func (l Library) CountsApply() bool {
+	f := l.Filters
+	return l.Counts != nil && f.ContentType == "" && f.Host == "" && f.Folder == "" && f.Cause == ""
+}
+
+// ShownThrough is how many rows the page shows through this one: those
+// the pages before it showed, and its own.
+func (l Library) ShownThrough() int { return l.Shown + len(l.Rows) }
+
+// OfTotal is how many documents the rows shown are of, for "Showing N of
+// M": the current state's count, or 0 when the counts don't apply, or
+// fall behind the rows shown, as they do when the library changed between
+// pages.
+func (l Library) OfTotal() int {
+	if !l.CountsApply() {
+		return 0
+	}
+	if total := l.Counts.state(l.Filters.State); l.ShownThrough() <= total {
+		return total
+	}
+	return 0
 }
 
 // LibraryFilters are a Library page's query, the parameters GET
@@ -316,9 +461,12 @@ type DocRef struct {
 // partial): its name, where it lives, what the row's other columns show
 // where a phone folds them away, and, for a failed one, why.
 type DocCell struct {
-	Ref          DocRef
-	Where        string    // under its name: where it lives
-	Source       string    // the browser a bookmark came from, in a list of saves
+	Ref   DocRef
+	Where string // under its name: where it lives
+	// Source is the browser a bookmark came from, for a list of pages as
+	// they were saved, which no page lists yet; a list of documents leaves
+	// it empty.
+	Source       string
 	ContentType  string    // shown here on a phone, whose table has no Type column
 	When         time.Time // shown here on a phone, whose table has no time column
 	FailureCause string

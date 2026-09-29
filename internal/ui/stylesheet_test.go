@@ -155,6 +155,12 @@ func TestStylesheet(t *testing.T) {
 	ruleFor(t, rules, "@media (max-width: 64rem)", ".header-search")
 	assert.Equal(t, "100%", declarations(ruleFor(t, rules, "", ".results").body)["width"],
 		"the results column never grows past the screen to fit a one-line address")
+	assert.Equal(t, "100%", declarations(ruleFor(t, rules, "", ".explore-line").body)["width"],
+		"the interests line never grows past the screen to fit a long name")
+	explore := declarations(ruleFor(t, rules, "", ".explore-line a").body)
+	assert.Equal(t, "ellipsis", explore["text-overflow"], "an interest's name never widens the page")
+	assert.Equal(t, "hidden", explore["overflow"])
+	assert.NotEmpty(t, explore["max-width"])
 
 	// Dark mode follows the system unless a host forces light, and a host
 	// can force it: both blocks set the same tokens to the same values.
