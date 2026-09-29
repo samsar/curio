@@ -34,10 +34,12 @@ type UIOptions struct {
 type dashboard struct {
 	opts   UIOptions
 	render *ui.Renderer
+	listen string // the address the daemon listens on, which the pages name
 }
 
-// newDashboard builds the dashboard opts asks for, parsing its templates.
-func newDashboard(opts UIOptions) (dashboard, error) {
+// newDashboard builds the dashboard opts asks for, parsing its templates,
+// for a daemon listening on listen ("" when unknown).
+func newDashboard(opts UIOptions, listen string) (dashboard, error) {
 	if !opts.Enabled {
 		return dashboard{}, nil
 	}
@@ -45,19 +47,31 @@ func newDashboard(opts UIOptions) (dashboard, error) {
 	if err != nil {
 		return dashboard{}, err
 	}
-	return dashboard{opts: opts, render: render}, nil
+	return dashboard{opts: opts, render: render, listen: listen}, nil
 }
 
 func (d dashboard) enabled() bool { return d.render != nil }
+
+// layout is the frame of a page titled title, under nav.
+func (d dashboard) layout(title string, nav ui.Nav) ui.Layout {
+	return ui.Layout{Title: title, Nav: nav, Version: version.String(), Listen: d.listen}
+}
 
 // redirectToDashboard answers / with the dashboard.
 func redirectToDashboard(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/ui/", http.StatusFound)
 }
 
-// pageLayout is the frame of a page titled title, under nav.
-func pageLayout(title string, nav ui.Nav) ui.Layout {
-	return ui.Layout{Title: title, Nav: nav, Version: version.String()}
+// failureCurrent reports whether a document in state is failing now, and
+// so whether a page shows its last error and cause: a refetch that
+// recovered from an older failure leaves that job's error behind.
+func failureCurrent(state store.DocState) bool {
+	switch state {
+	case store.DocStateFailed, store.DocStateDead:
+		return true
+	case store.DocStatePending, store.DocStateFetched:
+	}
+	return false
 }
 
 // pageHandlers serve the dashboard's pages over d.
@@ -124,7 +138,7 @@ func (h pageHandlers) notFound(w http.ResponseWriter, r *http.Request) {
 // has been written yet, and a plain-text answer still can be.
 func (h pageHandlers) errorPage(w http.ResponseWriter, r *http.Request, status int, title, message string, retry ui.Nav) {
 	id := middleware.GetReqID(r.Context())
-	vm := ui.ErrorPage{Layout: pageLayout(title, ui.NavNone), Status: status, Title: title, Message: message,
+	vm := ui.ErrorPage{Layout: h.pages.layout(title, ui.NavNone), Status: status, Title: title, Message: message,
 		RequestID: id, Retry: retry}
 	if err := h.pages.render.Page(w, status, ui.PageError, vm, ui.CSP); err != nil {
 		h.d.Log.Error("render the error page", "request_id", id, "err", err)

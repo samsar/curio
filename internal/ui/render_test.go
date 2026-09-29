@@ -42,7 +42,9 @@ func newRenderer(t testing.TB) *Renderer {
 func samples(t testing.TB, r *Renderer) map[string]any {
 	t.Helper()
 	at := time.Date(2026, 9, 28, 9, 30, 0, 0, time.UTC)
-	layout := func(nav Nav) Layout { return Layout{Title: evilScript, Nav: nav, Version: evilQuotes} }
+	layout := func(nav Nav) Layout {
+		return Layout{Title: evilScript, Nav: nav, Version: evilQuotes, Listen: sampleListen}
+	}
 	panelErr := &PanelError{Message: evilScript, RequestID: evilAttr}
 	text, err := r.RenderMarkdown([]byte("# "+evilScript+"\n\n<img src=x onerror=alert(1)> [x]("+evilURL+
 		") ![alt "+evilAttr+"](https://img.example/a.png)\n"), "https://example.com/post", false)
@@ -71,6 +73,8 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			Recent: RecentPanel{Bookmarks: []RecentBookmark{
 				{Title: evilScript, URL: evilURL, Source: evilAttr, SavedAt: at, DocumentID: evilAttr, DocumentState: evilQuotes},
 				{URL: evilURL, Source: "chrome", SavedAt: at},
+				{URL: "https://example.com/" + evilQuotes, Source: "safari", SavedAt: at, DocumentID: "doc",
+					DocumentState: "fetched"},
 			}},
 		},
 		PageSearch: Search{
@@ -78,20 +82,27 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			Query:  evilAttr,
 			Err:    panelErr,
 			Results: &SearchResults{Degraded: true, Warnings: []string{evilScript}, TookMS: 12, Hits: []SearchHit{{
-				DocumentID: evilAttr, Title: evilScript, URL: evilURL, Score: 0.03,
+				DocumentID: evilAttr, Title: evilScript, URL: evilURL, ContentType: evilAttr, Score: 0.03,
 				Matches: []Match{
 					{Segments: Highlight("before <em>" + evilScript + "</em> after " + evilAttr), BM25: new(1.5)},
 					{Segments: []Segment{{Text: Excerpt(evilQuotes+evilScript, 300)}}, Vector: new(0.7)},
+					{Segments: Highlight(evilScript + " <em>third</em>"), BM25: new(0.5), Vector: new(0.2)},
 				},
-			}, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes}}},
+			}, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes + "/a/b?q=" + evilScript,
+				ContentType: "video"}}},
 		},
 		PageLibrary: Library{
 			Layout: layout(NavLibrary),
 			Filters: LibraryFilters{State: evilAttr, ContentType: evilScript, Host: evilQuotes, Folder: evilURL,
 				Cause: evilScript, Limit: 7},
-			Rows: []LibraryRow{{DocumentID: evilAttr, Title: evilScript, URL: evilURL, State: evilQuotes,
-				ContentType: evilAttr, UpdatedAt: at, LastError: evilScript}},
+			Rows: []LibraryRow{
+				{DocumentID: evilAttr, Title: evilScript, URL: evilURL, State: evilQuotes, ContentType: evilAttr,
+					UpdatedAt: at, LastError: evilScript, FailureCause: evilAttr},
+				{DocumentID: "doc", URL: "https://example.com/" + evilQuotes, State: "failed", ContentType: "pdf",
+					UpdatedAt: at, LastError: "permanent failure: native: " + evilScript, FailureCause: "anti_bot"},
+			},
 			NextCursor: evilAttr,
+			PageSize:   7,
 		},
 		PageDocument: Document{
 			Layout: layout(NavLibrary),
@@ -100,7 +111,8 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 				WordCount: 42, CreatedAt: at, UpdatedAt: at, MarkdownPath: evilScript},
 			Extraction: &Extraction{Fetcher: evilScript, Via: "jina", Status: evilAttr, ErrorMessage: evilQuotes,
 				FetchedAt: at},
-			LastError: evilScript,
+			LastError:    evilScript,
+			FailureCause: evilAttr,
 			Text: TextPanel{State: TextShown, Text: text, Truncated: true, MarkdownPath: evilAttr,
 				OfferImages: true},
 			Related: RelatedPanel{Docs: []RelatedDoc{{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Score: 0.9}}},
@@ -109,7 +121,7 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 		},
 		PageInterests: Interests{
 			Layout:    layout(NavInterests),
-			Run:       &InterestRun{ComputedAt: at, Algo: evilScript, Documents: 40, Noise: 3},
+			Run:       &InterestRun{ComputedAt: at, Algo: evilScript, Documents: 40, Noise: 3, Interests: 9},
 			Interests: []Interest{interest, {ID: "unlabeled", Size: 1}},
 		},
 		PageInterest: InterestPage{Layout: layout(NavInterests), Interest: interest},
@@ -119,10 +131,38 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 	}
 }
 
-// partialSamples are the view models of the partials every page set
-// shares.
-var partialSamples = map[string]any{
-	"panel-error": &PanelError{Message: evilScript, RequestID: evilAttr},
+// sampleListen is the samples' daemon address.
+const sampleListen = "127.0.0.1:8765"
+
+// partialSamples are the view models of the partials the page sets hold,
+// each with every shape of data it takes: every icon, a known one or not,
+// and hostile values in every string.
+func partialSamples(t testing.TB) map[string][]any {
+	t.Helper()
+	at := time.Date(2026, 9, 28, 9, 30, 0, 0, time.UTC)
+	names := append(iconNames(t), "no-such-icon", evilScript)
+	icons := make([]any, 0, len(names))
+	for _, name := range names {
+		icons = append(icons, name)
+	}
+	return map[string][]any{
+		"panel-error": {&PanelError{Message: evilScript, RequestID: evilAttr}},
+		"icon":        icons,
+		"logo":        {nil},
+		"icons.html":  {nil},
+		"reltime":     {time.Time{}, at},
+		"doc-title": {DocRef{ID: evilAttr, Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, URL: evilURL},
+			DocRef{Title: evilScript, URL: evilURL}},
+		"doc-cell": {DocCell{Ref: DocRef{ID: evilAttr, Title: evilScript, URL: evilURL}, Where: evilQuotes,
+			Source: evilScript, ContentType: evilAttr, When: at, FailureCause: evilScript, LastError: evilAttr},
+			DocCell{Ref: DocRef{URL: evilURL}}},
+		"state-badge": {evilScript, "dead"},
+		"stackbar": {stateBar([]Count{{Name: "fetched", Count: 2}, {Name: "failed", Count: 1}}),
+			[]BarSegment{{Class: evilAttr, X: evilScript, Width: evilQuotes}}},
+		"full-error": {evilScript, ""},
+		"match":      {Match{Segments: Highlight(evilScript + " <em>" + evilAttr + "</em>"), BM25: new(1.5)}},
+		"cohesion":   {0.5},
+	}
 }
 
 // TestEveryTemplateRenders executes every template each page's set
@@ -132,23 +172,26 @@ var partialSamples = map[string]any{
 func TestEveryTemplateRenders(t *testing.T) {
 	r := newRenderer(t)
 	pageSamples := samples(t, r)
+	partials := partialSamples(t)
 	require.ElementsMatch(t, pageNames, keys(pageSamples), "a sample for every page")
 	for _, page := range pageNames {
 		set := r.pages[page]
 		for _, tmpl := range set.Templates() {
 			name := tmpl.Name()
 			t.Run(page+"/"+name, func(t *testing.T) {
-				data, ok := partialSamples[name]
-				if !ok {
-					data, ok = pageSamples[page], pageTemplate(page, name)
+				data, ok := partials[name]
+				if !ok && pageTemplate(page, name) {
+					data, ok = []any{pageSamples[page]}, true
 				}
 				require.True(t, ok, "template %q of the %s page has no sample", name, page)
-				var buf bytes.Buffer
-				require.NoError(t, set.ExecuteTemplate(&buf, name, data))
-				out := buf.String()
-				uitest.AssertInert(t, out)
-				assert.NotContains(t, out, evilScript, "escaped")
-				assert.NotContains(t, out, `onerror="alert`, "escaped")
+				for _, d := range data {
+					var buf bytes.Buffer
+					require.NoError(t, set.ExecuteTemplate(&buf, name, d))
+					out := buf.String()
+					uitest.AssertInert(t, out)
+					assert.NotContains(t, out, evilScript, "escaped")
+					assert.NotContains(t, out, `onerror="alert`, "escaped")
+				}
 			})
 		}
 	}
@@ -159,7 +202,7 @@ func TestEveryTemplateRenders(t *testing.T) {
 // template of the page's file, which holds its defines.
 func pageTemplate(page, name string) bool {
 	switch name {
-	case "layout", "head", "content", "document-actions", "layout.html", page + ".html":
+	case "layout", "head", "header-search", "content", "document-actions", "layout.html", page + ".html":
 		return true
 	}
 	return false
@@ -201,20 +244,63 @@ func TestPage_Headers(t *testing.T) {
 	assert.Equal(t, strconv.Itoa(w.Body.Len()), w.Header().Get("Content-Length"))
 }
 
-// TestPages_Layout: every page has the viewport meta and loads the
-// stylesheet, which themes for dark mode.
+// TestPages_Layout: every page has the viewport meta, a skip link to its
+// content, the navigation, the header's search box unless the page can't
+// use one, and a footer naming the daemon and where it listens; it loads
+// the stylesheet, which themes for dark mode.
 func TestPages_Layout(t *testing.T) {
 	r := newRenderer(t)
 	for page, data := range samples(t, r) {
 		out := render(t, r, page, data)
 		assert.Contains(t, out, `<meta name="viewport" content="width=device-width, initial-scale=1">`, page)
+		assert.Contains(t, out, `<a class="skip-link" href="#main">Skip to content</a>`, page)
+		assert.Contains(t, out, `<main id="main" class="page">`, page)
 		assert.Contains(t, out, `<nav aria-label="Main">`, page)
-		assert.Contains(t, out, "curio-daemon ", page)
+		headerSearch := strings.Contains(out, `<form class="header-search" action="/ui/search" method="get" role="search">`)
+		assert.Equal(t, page != PageSearch && page != PageStarting, headerSearch, "%s: the header's search box", page)
+		assert.Contains(t, out, `<footer class="site"><div class="container"><span>curio-daemon &#39;&#34;&lt;&gt;&amp;</span>`+
+			`<span>`+sampleListen+` · this Mac only</span></div></footer>`, page)
 	}
+
+	unknown := samples(t, r)[PageError].(ErrorPage)
+	unknown.Layout.Listen = ""
+	assert.Contains(t, render(t, r, PageError, unknown),
+		`<footer class="site"><div class="container"><span>curio-daemon &#39;&#34;&lt;&gt;&amp;</span></div></footer>`,
+		"the footer without an address")
+
 	css, ok := r.assets.files[r.assets.hashed["app.css"]]
 	require.True(t, ok)
 	assert.Contains(t, string(css.body), "@media (prefers-color-scheme: dark)")
 	assert.Contains(t, string(css.body), "color-scheme: light dark")
+}
+
+// TestPages_Navigation: the navigation links to every page, in its order,
+// the current one marked, and to no page when none is current.
+func TestPages_Navigation(t *testing.T) {
+	r := newRenderer(t)
+	navRE := regexp.MustCompile(`<a href="([^"]+)"( aria-current="page")?><svg class="icon"`)
+	for page, data := range samples(t, r) {
+		var hrefs, current []string
+		for _, m := range navRE.FindAllStringSubmatch(render(t, r, page, data), -1) {
+			hrefs = append(hrefs, m[1])
+			if m[2] != "" {
+				current = append(current, m[1])
+			}
+		}
+		assert.Equal(t, []string{"/ui/", "/ui/search", "/ui/library", "/ui/interests"}, hrefs, page)
+		switch page {
+		case PageOverview:
+			assert.Equal(t, []string{"/ui/"}, current, page)
+		case PageSearch:
+			assert.Equal(t, []string{"/ui/search"}, current, page)
+		case PageLibrary, PageDocument:
+			assert.Equal(t, []string{"/ui/library"}, current, page)
+		case PageInterests, PageInterest:
+			assert.Equal(t, []string{"/ui/interests"}, current, page)
+		default:
+			assert.Empty(t, current, page)
+		}
+	}
 }
 
 func render(t *testing.T, r *Renderer, page string, data any) string {

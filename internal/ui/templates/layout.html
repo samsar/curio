@@ -2,7 +2,9 @@
 The frame of every page, and the partials the pages share. Rules for every
 template (TestTemplatesHaveNoInlineCode checks them): no inline script or
 style, no event-handler attributes, no hx-on or hx-vars, and every link
-built by a func (links.go), never pieced together here.
+built by a func (links.go), never pieced together here. Class and icon
+names come from literals or from funcs over fixed sets (format.go), never
+from a stored string.
 */}}
 {{define "layout" -}}
 <!doctype html>
@@ -17,23 +19,74 @@ built by a func (links.go), never pieced together here.
 {{block "head" .}}{{end}}
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 <header class="site">
-<a class="brand" href="/ui/">curio</a>
+<div class="container">
+<a class="brand" href="{{navHref "overview"}}" aria-label="curio: overview">{{template "logo"}}<span class="word">curio</span></a>
 <nav aria-label="Main">
-<a href="/ui/"{{if eq .Layout.Nav "overview"}} aria-current="page"{{end}}>Overview</a>
-<a href="/ui/search"{{if eq .Layout.Nav "search"}} aria-current="page"{{end}}>Search</a>
-<a href="/ui/library"{{if eq .Layout.Nav "library"}} aria-current="page"{{end}}>Library</a>
-<a href="/ui/interests"{{if eq .Layout.Nav "interests"}} aria-current="page"{{end}}>Interests</a>
-</nav>
+{{range navItems}}<a href="{{.Href}}"{{if eq .Nav $.Layout.Nav}} aria-current="page"{{end}}>{{template "icon" .Icon}}<span>{{.Label}}</span></a>
+{{end}}</nav>
+<div class="site-tools">
+{{block "header-search" .}}<form class="header-search" action="{{navHref "search"}}" method="get" role="search">
+{{template "icon" "search"}}
+<input type="search" name="q" placeholder="Search the library" aria-label="Search the library">
+</form>{{end}}
+</div>
+</div>
 </header>
-<main>
+<main id="main" class="page">
+<div class="container">
 {{template "content" .}}
+</div>
 </main>
-<footer class="site">curio-daemon {{.Layout.Version}}</footer>
+<footer class="site"><div class="container"><span>curio-daemon {{.Layout.Version}}</span>{{with .Layout.Listen}}<span>{{.}} · this Mac only</span>{{end}}</div></footer>
 </body>
 </html>
 {{- end}}
 
+{{/* A panel whose read failed: why, and where the daemon logged it. */}}
 {{define "panel-error" -}}
-<p class="panel-error" role="alert">Couldn't read this: {{.Message}}. <span class="meta">Request {{.RequestID}}; see <code>curio daemon logs</code>.</span></p>
+<div class="panel-error" role="alert">{{template "icon" "alert-circle"}}<span>Couldn't read this: {{.Message}}. <span class="meta">Request {{.RequestID}} · see <code>curio daemon logs</code></span></span></div>
+{{- end}}
+
+{{/* A time in a list: how long ago, with the exact time on hover. */}}
+{{define "reltime" -}}
+{{if .IsZero}}never{{else}}<time datetime="{{datetime .}}" title="{{when .}}">{{ago .}}</time>{{end}}
+{{- end}}
+
+{{/*
+A document's name in a list, a DocRef: its title on one line, or, for an
+untitled one, where it lives; the whole of either on hover. It links to
+the document's page when there is one.
+*/}}
+{{define "doc-title" -}}
+{{if .ID}}<a class="doc-title{{if not .Title}} untitled{{end}}" href="{{documentHref .ID}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</a>
+{{- else}}<span class="doc-title{{if not .Title}} untitled{{end}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</span>{{end}}
+{{- end}}
+
+{{/*
+A list's document cell, a DocCell: its name, where it lives, on a phone
+the type and time its row's other columns hold there, and, for a failed
+one, why: the cause and the start of the error, the whole error on hover.
+*/}}
+{{define "doc-cell" -}}
+{{template "doc-title" .Ref}}
+<span class="doc-sub"><span class="host" title="{{.Ref.URL}}">{{.Where}}</span>
+{{- with .Source}}<span class="sep">·</span><span>{{.}}</span>{{end}}
+{{- with .ContentType}}<span class="sep narrow">·</span><span class="narrow">{{.}}</span>{{end}}
+{{- if not .When.IsZero}}<span class="sep narrow">·</span><span class="narrow">{{template "reltime" .When}}</span>{{end -}}
+</span>
+{{- if or .FailureCause .LastError}}
+<span class="doc-error"{{with .LastError}} title="{{.}}"{{end}}>{{with causeLabel .FailureCause}}<span class="err-cause">{{.}}</span> {{end}}{{with shortError .LastError}}<span class="msg">{{.}}</span>{{end}}</span>
+{{- end}}
+{{- end}}
+
+{{/* A document state as a badge: a dot (hollow for dead) and the state. */}}
+{{define "state-badge" -}}
+<span class="badge {{stateClass .}}">{{.}}</span>
+{{- end}}
+
+{{/* A stacked bar of []BarSegment, drawn over its track. */}}
+{{define "stackbar" -}}
+<svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>{{range .}}<rect class="{{.Class}}" x="{{.X}}" y="0" width="{{.Width}}" height="10"/>{{end}}</svg>
 {{- end}}

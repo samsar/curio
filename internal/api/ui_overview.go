@@ -15,7 +15,7 @@ const recentBookmarks = 10
 // fails shows its error while the others render.
 func (h pageHandlers) overview(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	vm := ui.Overview{Layout: pageLayout("Overview", ui.NavOverview)}
+	vm := ui.Overview{Layout: h.pages.layout("Overview", ui.NavOverview)}
 
 	stats, err := h.d.stats(ctx)
 	vm.Counts = countsPanel(stats)

@@ -1,6 +1,9 @@
 package ui
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // Segment is a run of text in a search match: a term the search matched
 // when Mark is set. Templates put marked segments in <mark>, escaping the
@@ -40,9 +43,15 @@ func Highlight(snippet string) []Segment {
 	return out
 }
 
+// excerptWordSlack is how far back from its cut Excerpt looks for a word
+// boundary. Past it, a long unbroken token (a URL early in an error) would
+// take nearly all of the text with it, so the cut falls inside the token.
+const excerptWordSlack = 32
+
 // Excerpt is the start of text for a match without a snippet: its first
-// maxRunes runes, cut back to a word boundary with an ellipsis when it is
-// longer, and its whitespace collapsed.
+// maxRunes runes, with its whitespace collapsed and, when it is longer, an
+// ellipsis, cut back to a word boundary within excerptWordSlack runes of
+// the cut and inside the word otherwise.
 func Excerpt(text string, maxRunes int) string {
 	text = strings.Join(strings.Fields(text), " ")
 	runes := []rune(text)
@@ -50,7 +59,7 @@ func Excerpt(text string, maxRunes int) string {
 		return text
 	}
 	head := string(runes[:maxRunes])
-	if i := strings.LastIndexByte(head, ' '); i > 0 {
+	if i := strings.LastIndexByte(head, ' '); i > 0 && utf8.RuneCountInString(head[i:]) <= excerptWordSlack {
 		head = head[:i]
 	}
 	return head + "…"

@@ -1,6 +1,9 @@
 {{define "content" -}}
-<h1>{{.Status}} {{.Title}}</h1>
+<div class="center-page"><div class="card center-card">
+<div class="big-code">{{.Status}}</div>
+<h1>{{.Title}}</h1>
 <p>{{.Message}}</p>
-{{with .RequestID}}<p class="meta">Request {{.}}; see <code>curio daemon logs</code>.</p>{{end}}
-{{with navHref .Retry}}<p><a href="{{.}}">Start over</a></p>{{end}}
+{{with .RequestID}}<p class="meta">Request {{.}} · see <code>curio daemon logs</code></p>{{end}}
+{{with navHref .Retry}}<div class="actions"><a class="btn btn-primary" href="{{.}}">Start over</a></div>{{end}}
+</div></div>
 {{- end}}

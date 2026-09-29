@@ -106,7 +106,7 @@ func NewServer(ln net.Listener, cfg ServerConfig) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	pages, err := newDashboard(cfg.UI)
+	pages, err := newDashboard(cfg.UI, ln.Addr().String())
 	if err != nil {
 		return nil, err
 	}

@@ -23,6 +23,9 @@ func TestProblems(t *testing.T) {
 		"data link":               `<a href="data:text/html,<script>alert(1)</script>">x</a>`,
 		"relative link":           `<a href="../admin">x</a>`,
 		"fragment link":           `<a href="#top">x</a>`,
+		"fragment of nothing":     `<main id="main"></main><a href="#top">x</a>`,
+		"empty fragment":          `<a id="" href="#">x</a>`,
+		"fragment image":          `<img id="x" src="#x">`,
 		"link without rel":        `<a href="https://example.com/">x</a>`,
 		"link with half a rel":    `<a href="https://example.com/" rel="noopener">x</a>`,
 		"form to another site":    `<form action="https://evil.example/"></form>`,
@@ -31,6 +34,7 @@ func TestProblems(t *testing.T) {
 		"base":                    `<base href="https://evil.example/">`,
 		"data image":              `<img src="data:image/png;base64,AAAA">`,
 		"html/template's refusal": `<a href="#ZgotmplZ">x</a>`,
+		"refusal naming an id":    `<p id="ZgotmplZ"></p><a href="#ZgotmplZ">x</a>`,
 	}
 	for name, page := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -42,11 +46,14 @@ func TestProblems(t *testing.T) {
 <link rel="stylesheet" href="/ui/static/app.0123456789abcdef.css">
 <script src="/ui/static/htmx-2.0.11.min.0123456789abcdef.js" defer></script>
 </head><body>
+<a class="skip-link" href="#main">Skip to content</a>
+<main id="main">
 <a href="/ui/documents/abc">doc</a>
 <a href="https://example.com/a" rel="nofollow noreferrer noopener" target="_blank">out</a>
 <a href="mailto:a@example.com">mail</a>
 <form action="/ui/search"><input name="q" hx-get="/ui/search" hx-select="#results > *"></form>
 <img src="https://img.example/a.png" alt="a" loading="lazy">
+</main>
 </body></html>`
 	assert.Empty(t, Problems(good))
 }

@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
 )
 
@@ -19,9 +18,9 @@ const relatedOnDocumentPage = 5
 
 // document answers GET /ui/documents/{id}: the document's metadata and
 // current extraction, its rendered text, related documents and bookmarks,
-// and its last error while it is failed or dead. The text, related and
-// bookmarks panels read on their own, and one that fails shows its error
-// while the rest renders.
+// and, while it is failed or dead, why it failed and its last error. The
+// text, related and bookmarks panels read on their own, and one that fails
+// shows its error while the rest renders.
 //
 // Stored pages' remote images are off: each is its alt text, linking to
 // it. ?images=1, or ui.load_remote_images, shows the https ones, and only
@@ -41,18 +40,15 @@ func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 	}
 	images := h.pages.opts.LoadRemoteImages || boolParam(r, "images")
 	vm := ui.Document{
-		Layout:     pageLayout(cmp.Or(deref(doc.Title), doc.URL), ui.NavLibrary),
+		Layout:     h.pages.layout(cmp.Or(deref(doc.Title), doc.URL), ui.NavLibrary),
 		Meta:       documentMeta(resp),
 		Extraction: extractionView(resp.CurrentExtraction),
 		Text:       h.documentText(r, resp, images),
 		Related:    h.relatedPanel(r, id),
 		Bookmarks:  h.bookmarksPanel(r, id),
 	}
-	switch doc.State {
-	case store.DocStateFailed, store.DocStateDead:
-		vm.LastError = doc.LastError
-	case store.DocStatePending, store.DocStateFetched:
-		// An older failure a refetch recovered from isn't current.
+	if failureCurrent(doc.State) {
+		vm.LastError, vm.FailureCause = doc.LastError, string(doc.FailureCause)
 	}
 	csp := ui.CSP
 	if images {

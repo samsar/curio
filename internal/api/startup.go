@@ -162,7 +162,7 @@ func (s startingAPI) refuse(w http.ResponseWriter, r *http.Request) {
 // its progress, or the starting problem should the page fail to render.
 func (s startingAPI) page(w http.ResponseWriter, r *http.Request) {
 	phase, migrations := s.startup.Progress()
-	vm := ui.Starting{Layout: pageLayout("Starting", ui.NavNone), Phase: string(phase)}
+	vm := ui.Starting{Layout: s.pages.layout("Starting", ui.NavNone), Phase: string(phase)}
 	if migrations != nil {
 		vm.Migrating, vm.Applied, vm.Total = true, migrations.Applied, migrations.Total
 	}

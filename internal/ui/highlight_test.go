@@ -33,6 +33,9 @@ func TestExcerpt(t *testing.T) {
 	assert.Equal(t, "short text", Excerpt("  short\n\ttext ", 20))
 	assert.Equal(t, "one two…", Excerpt("one two three", 10), "cut back to a word")
 	assert.Equal(t, "abcdefghij…", Excerpt("abcdefghijklmnop", 10), "one long word is cut inside it")
+	token := strings.Repeat("x", 200)
+	assert.Equal(t, "see "+token[:96]+"…", Excerpt("see "+token+" end", 100),
+		"a word boundary further back than excerptWordSlack is passed over")
 	long := strings.Repeat("é", 400)
 	got := Excerpt(long, 300)
 	assert.Equal(t, strings.Repeat("é", 300)+"…", got, "counted in runes, never split")

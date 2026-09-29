@@ -30,6 +30,22 @@ func TestLinks(t *testing.T) {
 		"the next page keeps every filter")
 }
 
+// TestNavItems: the navigation in its order, each item linking where an
+// error page's Retry does.
+func TestNavItems(t *testing.T) {
+	items := navItems()
+	navs := make([]Nav, 0, len(items))
+	for _, item := range items {
+		navs = append(navs, item.Nav)
+		assert.Equal(t, navHref(item.Nav), item.Href, item.Nav)
+		assert.NotEmpty(t, item.Label, item.Nav)
+	}
+	assert.Equal(t, []Nav{NavOverview, NavSearch, NavLibrary, NavInterests}, navs)
+	assert.Equal(t, []string{"/ui/", "/ui/search", "/ui/library", "/ui/interests"},
+		[]string{items[0].Href, items[1].Href, items[2].Href, items[3].Href})
+	assert.Len(t, navHrefs, len(items), "every page with an address is in the navigation")
+}
+
 func TestOutbound(t *testing.T) {
 	for _, u := range []string{"https://example.com/a", "http://example.com", "HTTPS://Example.com/x"} {
 		assert.Equal(t, u, outbound(u))

@@ -373,7 +373,7 @@ func TestPage_RenderFailure(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Equal(t, "text/html; charset=utf-8", w.Header().Get("Content-Type"))
-	assert.Contains(t, w.Body.String(), "500 internal error")
+	assert.Contains(t, w.Body.String(), `<div class="big-code">500</div>`+"\n<h1>internal error</h1>")
 	assert.NotContains(t, w.Body.String(), "<h1>Overview</h1>")
 	errs := rec.at(slog.LevelError)
 	require.Len(t, errs, 1)

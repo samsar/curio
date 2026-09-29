@@ -343,7 +343,7 @@ func assertDashboard(t *testing.T, baseURL, docID string) {
 	_, doc := get("/ui/documents/" + docID)
 	assert.Contains(t, doc, "An Introduction to Zymurgy")
 	_, results := get("/ui/search?q=" + distinctive)
-	assert.Contains(t, results, `<a href="/ui/documents/`+docID+`">`)
+	assert.Contains(t, results, `<a href="/ui/documents/`+docID+`" title="`, "a result links to its document's page")
 	css := stylesheetRE.FindStringSubmatch(overview)
 	require.NotNil(t, css, "the Overview loads a stylesheet")
 	header, _ := get(css[1])

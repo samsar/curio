@@ -16,7 +16,7 @@ const matchExcerptRunes = 300
 // fails is shown where its results would be, with its status.
 func (h pageHandlers) search(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
-	vm := ui.Search{Layout: pageLayout("Search", ui.NavSearch), Query: q}
+	vm := ui.Search{Layout: h.pages.layout("Search", ui.NavSearch), Query: q}
 	status := http.StatusOK
 	if strings.TrimSpace(q) != "" {
 		resp, err := h.d.search(r.Context(), SearchRequest{Query: q})
@@ -33,7 +33,7 @@ func searchResults(resp SearchResponse) *ui.SearchResults {
 	res := &ui.SearchResults{Degraded: resp.Degraded, Warnings: resp.Warnings, TookMS: resp.TookMS}
 	for _, item := range resp.Items {
 		hit := ui.SearchHit{DocumentID: item.Document.ID, Title: deref(item.Document.Title), URL: item.Document.URL,
-			Score: item.Score}
+			ContentType: item.Document.ContentType, Score: item.Score}
 		for _, m := range item.Matches {
 			hit.Matches = append(hit.Matches, ui.Match{Segments: matchSegments(m), BM25: m.BM25Score, Vector: m.VectorScore})
 		}
