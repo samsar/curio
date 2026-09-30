@@ -36,8 +36,9 @@ func New(baseURL string) *Client {
 // Health mirrors api.Health. PID and Home are zero for a daemon that
 // predates them, which also means it holds no single-instance lock, and
 // Upstreams and GenerationModel are empty for one that predates them.
-// EmbeddingDrift is nil unless the daemon reports the build that makes the
-// embeddings changed.
+// EmbeddingDrift is nil unless the daemon reports a drift: the build that
+// makes the embeddings changed, and a re-embedded sample showed the
+// vectors did, or couldn't be checked.
 type Health struct {
 	Status          string           `json:"status"`
 	PID             int              `json:"pid,omitempty"`

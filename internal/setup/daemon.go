@@ -334,10 +334,11 @@ func (w *world) checkAgent(ctx context.Context) Result {
 	return Result{Status: OK, Detail: fmt.Sprintf("agent %s loaded, runs %s", st.Label, st.Program)}
 }
 
-// checkDrift is the embeddings check: whether the daemon reports the
-// build that makes the embeddings changed since the library was indexed.
-// It is a warning, fixed by `curio reindex --all`, which curio up never
-// runs by itself.
+// checkDrift is the embeddings check: whether the daemon reports a drift
+// since the library was indexed, a change of build whose re-embedded
+// sample doesn't match the stored vectors or couldn't be checked, with the
+// daemon's evidence. It is a warning, fixed by `curio reindex --all`,
+// which curio up never runs by itself.
 func (w *world) checkDrift(ctx context.Context) Result {
 	hs := w.readHome()
 	if !w.homeReady(hs) {

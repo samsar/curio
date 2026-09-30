@@ -170,8 +170,10 @@ footer names the address the daemon listens on.
   the page says so.
 - **Status**: what curio is doing, and whether what it needs works. What
   needs your attention comes first: Ollama not ready, the embeddings
-  drifted (with the command that fixes it), or the Jina Reader fallback
-  failing or degraded. Then cards for the library (how many documents,
+  drifted, or may have drifted, since the library was indexed (what
+  changed, what a re-embedded sample of the library showed, and the
+  command that fixes it), or the Jina Reader fallback failing or
+  degraded. Then cards for the library (how many documents,
   fetched and bookmarks, and a bar of the documents by state, each state
   linking to the Library of those), the queue (open or closed and why,
   with Pause or Resume, its throttle, keep-awake and schedule controls,

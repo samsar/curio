@@ -116,8 +116,9 @@ paths:
         in: an unreachable or slow Ollama is reported in ollama_reachable
         and ollama_detail, not as an error, the services fetches depend
         on (the Jina Reader fallback) in upstreams, and a change in the
-        build that makes the embeddings in embedding_drift. A starting one
-        answers at once.
+        build that makes the embeddings, once a re-embedded sample of the
+        library shows it changed the vectors or can't be checked, in
+        embedding_drift. A starting one answers at once.
       responses:
         "200":
           description: The daemon is ready

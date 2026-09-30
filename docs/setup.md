@@ -286,12 +286,26 @@ another embedding model, start a new home with `curio up --fresh` (or move
 The same model name can make different vectors after an Ollama upgrade or
 a pull that brings a new build of the model: Ollama 0.30 made
 nomic-embed-text lowercase its input, for one. New queries then stop
-matching the stored vectors, and search quietly gets worse. The daemon
-records the model's digest (what `ollama list` shows) and the Ollama
-version when it first reaches them, and checks every minute. When either
-changes, `curio status` prints a warning line, `curio doctor` warns and
-lists what changed, `/v1/healthz` reports `embedding_drift`, and the log
-has one warning. The fix is
+matching the stored vectors, and search quietly gets worse. Most upgrades
+change nothing, though. The daemon records the model's digest (what
+`ollama list` shows) and the Ollama version when it first reaches them,
+and checks every minute. When either changes, it re-embeds a sample of
+your library, up to 64 chunks (about 6 seconds on an M4 Max), and compares
+each with its stored vector:
+
+- **They match:** the daemon takes the new build as the baseline, logs
+  it, and there is nothing to do.
+- **They don't:** `curio status` prints a warning line, `curio doctor`
+  warns and lists what changed, with the evidence (`64 of 64 sampled
+  chunks changed (worst cosine 0.9713)`), the dashboard's Status page
+  shows it, `/v1/healthz` reports `embedding_drift`, and the log has one
+  warning.
+- **The sample can't be re-embedded:** at once when the new build can't
+  embed it at all (a reply of the wrong width, say), otherwise after three
+  failed attempts about 45 minutes apart, the same places say the
+  embeddings *may* have drifted, and why. The daemon keeps trying.
+
+The fix is
 
 ```sh
 curio reindex --all

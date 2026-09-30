@@ -28,9 +28,12 @@ one the home was created with.)
 
 Run it with --all when ` + "`curio status` or `curio doctor`" + ` report that the
 embeddings drifted: the embedding model was pulled again as a different
-build, or Ollama was upgraded, since the library was indexed, so new
-queries no longer match the stored vectors. Once every job is enqueued, the
-daemon takes the build serving now as the new baseline.
+build, or Ollama was upgraded, since the library was indexed, and a sample
+of the library re-embedded by the build serving now doesn't match the
+stored vectors (or couldn't be checked), so new queries no longer match
+them. A change whose sample matches is recorded without a warning. Once
+every job is enqueued, the daemon takes the build serving now as the new
+baseline.
 
 Documents must already have content: --all targets state=fetched by default
 and, in any state, skips documents that were never fetched.`,
