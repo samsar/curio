@@ -71,3 +71,27 @@ func TestProgressLine_DueLater(t *testing.T) {
 	assert.Equal(t, "  done=7  pending=172  running=2  failed=0  fetched=0   rate≈0.5/s   eta≈14s (72 more due later)",
 		progressLine(working, queue(171, 71), 0.5, 14*time.Second))
 }
+
+// TestFollowETA: --follow's ETA counts the jobs due now, running or
+// pending, and leaves out the ones due later, which no rate brings closer.
+func TestFollowETA(t *testing.T) {
+	cases := []struct {
+		name                    string
+		pending, running, later int
+		rate                    float64
+		want                    time.Duration
+	}{
+		{"nothing due later", 5, 2, 0, 0.5, 14 * time.Second},
+		{"some due later", 172, 2, 71, 0.5, 206 * time.Second},
+		{"only jobs due later", 171, 0, 171, 0.5, 0},
+		{"running while the rest wait", 171, 2, 171, 0.5, 4 * time.Second},
+		{"a count read between polls", 3, 1, 5, 0.5, 2 * time.Second},
+		{"nothing finished", 5, 2, 0, 0, 0},
+		{"drained", 0, 0, 0, 0.5, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, followETA(tc.pending, tc.running, tc.later, tc.rate))
+		})
+	}
+}

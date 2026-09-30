@@ -270,11 +270,7 @@ func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 			rate = float64(finished-lastFinished) / elapsed
 		}
 		later, _ := dueLater(queue)
-		due := max(pending-later, 0) + running
-		var eta time.Duration
-		if rate > 0 && due > 0 {
-			eta = time.Duration(float64(due) / rate * float64(time.Second)).Round(time.Second)
-		}
+		eta := followETA(pending, running, later, rate)
 		fmt.Fprintln(w, progressLine(stats, queue, rate, eta))
 		lastFinished = finished
 		lastTick = time.Now()
@@ -288,6 +284,17 @@ func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 			return nil
 		}
 	}
+}
+
+// followETA is how long the jobs due now take at rate finishes a second:
+// the running ones and the pending ones not due later. Zero when nothing is
+// due or nothing finished.
+func followETA(pending, running, later int, rate float64) time.Duration {
+	due := max(pending-later, 0) + running
+	if rate <= 0 || due == 0 {
+		return 0
+	}
+	return time.Duration(float64(due) / rate * float64(time.Second)).Round(time.Second)
 }
 
 // progressLine is one line of followProgress: the job and document counts,
