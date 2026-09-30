@@ -146,6 +146,7 @@ when the entry was first committed.
 - 2026-09-29 — [Library: a Date saved order lists saves](#library-a-date-saved-order-lists-saves) (revised)
 - 2026-09-29 — [Dashboard: the Failures tab](#dashboard-the-failures-tab)
 - 2026-09-29 — [Interests page by offset within a run](#interests-page-by-offset-within-a-run)
+- 2026-09-29 — [Search pages by offset within a fixed-depth pool](#search-pages-by-offset-within-a-fixed-depth-pool)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -413,6 +414,12 @@ chunk-to-doc collapse strategy, `default_k`, `embed_timeout_seconds`.
 out of `internal/search` because config validation needs it, and importing
 the search engine for a constant linked it into the CLI and `curio-mcp`.
 
+**Revised (2026-09-29):** the fanout no longer scales with k. Every search
+reads one pool, 800 chunks from each retriever (8 × `store.MaxSearchK`),
+ranks its documents, and returns the window `[offset, offset+k)` of that
+ranking; see "Search pages by offset within a fixed-depth pool".
+`find_related` keeps `max(50, 8·k)`.
+
 ---
 
 ## BM25 query sanitization: OR + stopwords
@@ -479,12 +486,18 @@ in the response), not offset/limit.
 fetches and clients silently skip data. Cursors are stable on SQLite via
 `WHERE id > :cursor ORDER BY id LIMIT N`. Cost is the same.
 
-**Revised (2026-09-29):** one exception: `GET /v1/interests` and `GET
+**Revised (2026-09-29):** `GET /v1/interests` and `GET
 /v1/interests/{id}` page by `offset` within a clustering run. A run's rows
 are written once and never change, so an offset is exact there, and it
 gives numbered pages the random access a cursor can't. `run_id` on every
 interest shows a rebuild between two pages. See "Interests page by offset
 within a run".
+
+**Revised (2026-09-29):** `POST /v1/search` pages by offset too. A
+search's order is a score recomputed on every request, so it has no
+keyset, and within one ranking an offset is exact: every request for a
+query ranks the same pool. See "Search pages by offset within a
+fixed-depth pool".
 
 ---
 
@@ -3511,6 +3524,16 @@ which hydrates every member of a page at once, seeks the documents primary
 key for each ID of a JSON array, its tenant written `+d.tenant_id` so that
 it never walks a tenant index; its pin refuses one. See "Interests page by
 offset within a run".
+
+**Revised (2026-09-29):** search's new read needs no index either.
+`Snippets` reaches each chunk's FTS row by rowid, its `seq` found through
+`sqlite_autoindex_chunks_1`, with the MATCH only marking terms (FTS5 plans
+it `INDEX 0:=M`); its plan is pinned. Search names its untitled hits with
+the members' `GetByIDsWithLastError` rather than a read of its own: a
+bookmark-title query written `d.tenant_id = ? AND d.id IN (…)` fell into
+the same trap, planned on the test database as a seek of the primary key
+for three IDs, which its pin used, and as a walk of the tenant's documents
+from four on. See "Search pages by offset within a fixed-depth pool".
 
 ---
 
@@ -8098,8 +8121,15 @@ they can pass one later.
 now too. `GET /v1/interests` and `GET /v1/interests/{id}` read members'
 documents with `GetByIDsWithLastError`, which carries the bookmark title,
 and return it as `bookmark_title`; the cards and an interest's member table
-show it in italics. Search results are still named by their address. See
-"Interests page by offset within a run".
+show it in italics. See "Interests page by offset within a run".
+
+**Revised (2026-09-29):** search results and the Document page's related
+documents take the fallback too: `/v1/search` and `/related` carry
+`bookmark_title` for their untitled hits, read once per response with the
+same `GetByIDsWithLastError`, and the result's title and the related link
+style it as the Library does. Every list that names a document now names
+an untitled one by its bookmark. See "Search pages by offset within a
+fixed-depth pool".
 
 ---
 
@@ -8458,6 +8488,240 @@ A rebuild started from page 2 was queued behind the paused queue,
 "Rebuilding" once the queue opened, then "New interests are ready:
 reload", and the poller stopped polling; page 2 of the old run then showed
 the new run's, with the note.
+
+---
+
+## Search pages by offset within a fixed-depth pool
+
+**Decision:** every search ranks one pool of fixed depth, whatever it asks
+for. Each retriever returns `chunkFanout(store.MaxSearchK)` chunks, 800,
+the fused chunks collapse to documents, and the documents sort by score,
+then ID. A request is a window of that ranking, `[offset, offset+k)`:
+`POST /v1/search` takes `offset`, and answers `total`, how many documents
+the ranking holds (at most 100), and `capped`, whether more matched than
+it holds. The dashboard shows the ranking 10 results a page, `?page=` 1 to
+10, under a numbered pager. `curio search`, MCP `search_bookmarks` and
+`curio eval` still send k alone, and get the first k of the same ranking.
+`find_related` keeps `max(50, 8·k)`. The pages reuse the Interests'
+numbered pager ("Interests page by offset within a run").
+
+**Why a fixed pool.** The pool used to grow with k (`max(50, 8·k)`), so a
+page asked as "k=20, keep 11–20" was ranked from more chunks than page 1.
+RRF sums reciprocal ranks, and a chunk ranked about 90 in both lists
+(2/150 = 0.0133) outranks one ranked 30 in one list alone (1/90 = 0.0111),
+so a document could cross page 1's edge, and a reader paging forward would
+see it twice or never. With one pool, every window of a query is a slice
+of one ranking: pages at offsets 0–90 concatenate to the k=100 answer.
+
+**Why offset here, and cursors elsewhere.** The live lists page by keyset
+because rows land between their pages ("API: cursor pagination, not
+offset"); the interests page by offset because a run's rows never change.
+A search has no keyset: its order is a score recomputed on every
+request. Within one ranking an offset is exact; a cursor would only wrap
+one, and couldn't jump to page 7. A document indexed between two pages
+can shift the ranking under them, as it would shift a reload of the same
+page.
+
+**Total and capped** are counted before hydration: `total` is
+`min(documents in the pool, 100)`, and `capped` is set when the pool held
+more. An offset at or past `total` is an empty window, a 200. With
+semantic search on, nearly every query is capped: the vector leg's 800
+nearest chunks always come from more than 100 documents (44 of the 44
+queries below), and a keyword-only search of common words can be too (the
+browser check's). So the results' head says "100+ documents match ·
+showing the best 100", and the last page says "curio ranks the best 100
+matches; refine the query to see others."
+
+**Validation** is `offset < 0 || offset > MaxSearchK - k`, with k as the
+request gets it (`search.default_k` when omitted), a 400 naming the bounds
+before the query is embedded; the engine checks the same. It is written as
+a difference because `offset + k` overflows: the decoder takes an offset of
+9223372036854775807, and the sum would wrap negative and pass.
+
+**The page size is 10, not `search.default_k`.** Pages must tile the
+100-document ranking exactly, and the page count must not change with the
+config: `ui.SearchPageSize` is 10, `ui.MaxSearchPages` 10.
+
+**Measured**, to decide whether the CLI and MCP rank the pool too. Setup:
+a `sqlite3 -readonly` `.backup` of the author's library (4,498 fetched
+documents, 41,489 chunks) served by throwaway daemons built from the tree,
+with the queue paused and no pulls; 44 queries drawn from interest labels,
+document titles and questions asked in natural language, each searched 5
+times at k=10 and twice at k=100, and for this build each of its pages at
+offsets 0–90; the k-scaled build (cebb708) run before and after this one;
+an Apple M4 Max, SQLite 3.53.4, Ollama 0.34.4, `qwen3-embedding:0.6b`. No
+relevance judgments exist for the library, so the pool's ranking is
+measured against the k-scaled one, not against qrels.
+
+| Ranking: the pool's first 10 against the k-scaled k=10 | |
+|---|---|
+| Identical, in order | 28/44 |
+| The same documents | 30/44 |
+| overlap@10 / @5 / @3, mean | 9.41 (min 5) / 4.84 / 2.95 |
+| The same top result | 44/44 |
+| Results replaced | 26 of 440 (5.9%); they land at ranks 11–23 of the pool |
+| Pages at offsets 0–90 concatenated = the pool's k=100 | 44/44 |
+| The pool's first 10 = the k-scaled k=100's first 10 | 44/44 |
+
+By title the swaps are mixed: some better ("How to speak so that people
+want to listen" for "how to speak patrick winston"), some worse.
+
+| took_ms, 220 searches at k=10 | p50 | p95 |
+|---|---|---|
+| k-scaled pool (two runs) | 69 | 81–83 |
+| fixed pool, snippets made in the BM25 query (prototype) | 82 | 115–147 |
+| fixed pool, snippets for the window (this build) | 77 | 86 |
+| each page of this build, offsets 0–90 | 76 | 82 |
+
+At k=100, this build took 94 / 103 ms against 83–85 / 123–130. Rebased
+onto the interests' paging, which changed only how untitled hits are
+read, it returned the same rankings, pages and snippets for 44 of 44
+queries, at 73 / 84 ms over 3 repetitions.
+
+**Snippets for the window.** BM25's query made FTS5's `snippet()` for every
+row it returned, 800 of them at the pool's LIMIT for a page that shows at
+most 30, and that made BM25 the search's critical path. Stages, median of
+7 per query on the copy:
+
+| Stage | p50 | p95 |
+|---|---|---|
+| BM25 with `snippet()`, LIMIT 80 / 800 | 27 / 85 ms | 62 / 157 ms |
+| BM25 without, LIMIT 80 / 800 | 14 / 16 ms | 46 / 49 ms |
+| vector, k=800 / 1,000 (limits 80 / 800) | 48 / 55 ms | |
+| `Snippets`, 30 chunks | 2.3 ms | 3.2 ms |
+
+So BM25's query makes no snippet now. After hydration the engine reads
+the snippets of the window's BM25 chunks, at most 3 a result, in one query
+(`ChunkStore.Snippets`: `MATCH ? AND rowid IN (…)`, each chunk's FTS row
+by rowid, its plan pinned), with the FTS query the BM25 leg ran. They are
+the snippets the old query made: 44 of 44 queries alike in the
+measurement, and a store test holds `Snippets` to the old query's
+`snippet()`. `matches[].snippet` is unchanged on the wire. A failed read
+logs one WARN and keeps the hits without snippets; the caller's context
+ending is an error.
+
+**The CLI and MCP rank the pool too.** The alternative kept the k-scaled
+fanout for a request without an offset. With no regression to detect, one
+ranking everywhere wins: the dashboard's first page, `curio search`,
+`search_bookmarks` and `curio eval` agree (with the conditional variant
+they would differ for 16 of the 44 queries, and eval would measure a
+ranking the dashboard never shows), and the API keeps one meaning: an
+omitted offset is offset 0, and `total` and `capped` mean the same to
+every caller. The cost is 8 ms at p50 and 3–5 ms at p95. `curio search`
+now prints BM25 and vector counts up to 800 where it printed 80.
+
+**How to revisit it.** Once relevance judgments exist for a library, run
+`curio eval --queries` against both rankings. If recall@10 or nDCG@10
+regress, a `search.Request` field can put requests without an offset back
+on the k-scaled fanout, keeping the dashboard on the pool.
+
+**Ties rank the same on every page.** The pool is ranked again for every
+page, and RRF's ranks come from the retrievers' output order, so a tie's
+order must not change between requests. BM25 scores tie exactly for
+duplicate text (the author's library has 948 chunk texts duplicated across
+302 searchable documents), so BM25's query orders by `bm25_score, c.seq`;
+fusion and the document sort already break ties by ID. The vector leg
+can't take a second key, since sqlite-vec refuses one ("Only a single
+'ORDER BY distance' clause is allowed on vec0 KNN queries"), and its
+distances tie only for bit-identical embeddings.
+
+**The dashboard's pages:**
+
+- `?page=` is read only with a query: absent or empty is page 1, and
+  anything but a whole number from 1 to 10 is a 400 page that runs no
+  search (`searchPageParam`: the Interests' rule, capped at the last page
+  any search can have).
+- The pager is the Interests' (`ui.Pager` from `newPager(pageSpan)`, the
+  `pager` partial): a summary ("Results 11–20 of 37"), Previous, the first
+  and last pages and those beside the current one, a gap for two or more
+  pages left out, and Next. Its links are `searchHref(q, type, page)`, the
+  first page naming none, and the type tabs lead to page 1.
+- A page past the last (1 ≤ page ≤ 10 with offset ≥ total > 0) is the
+  Interests' out-of-range card ("No page 5", how many pages there are, and
+  the first and last) under the head that counts the matches, and no
+  pager. It answers 200, where the Interests' answers 404: a search page's
+  status is its search's (a failed search answers the search's error), and
+  this search answered, as `POST /v1/search` answers an offset past
+  `total` with an empty window. Nothing matched is still "Nothing in your
+  library matches".
+- htmx boosts the pager: a wrapper swaps `#results` with the box's
+  `hx-target` and `hx-select`, scrolls the results' top into view below
+  the sticky header (`show:#results:top`), and pushes the page's URL; the
+  links work as they are without JavaScript. The box and the pager share
+  one `hx-sync` on `.search-page`: a keystroke `replace`s (it aborts a
+  page in flight), a page `drop`s (asked for during a keystroke's search,
+  it is dropped), so an old query's page never lands under a new one.
+  Previous and Next have ids in the shared partial (`pager-prev`,
+  `pager-next`), so htmx gives focus back to the one used; the Interests'
+  pages, which aren't boosted, carry them unused. The form holds no page:
+  typing starts at page 1.
+- Show scores: each passage's bm25 and vector scores and each result's
+  fused score sit in `.score` spans, which show only while the
+  `#show-scores` checkbox is checked (`body:has(#show-scores:checked)`,
+  no script). The checkbox is inside `#results`, which every keystroke and
+  page replaces; `hx-preserve` keeps it, and its state, across both swaps
+  (htmx 2.0.11 applies it after `hx-select`). A full load starts it
+  unchecked. Each result says how it matched without the toggle: "keyword
+  + meaning", "keyword only" or "meaning only" (`SearchHit.MatchKind`).
+- Passages without markdown. Chunks are stored markdown with no newlines,
+  so even block syntax is inline: of 1,160 real snippets from the queries
+  above, 436 hold a link's `](`, 210 a heading, 153 bold, 79 an image, and
+  62 start inside a link's destination. `ui.Passage` drops the markup and
+  keeps the text it wraps: a link's or image's text without its
+  destination (any scheme, balanced parentheses, cut anywhere by the
+  snippet), emphasis, code and strikethrough runs (not between two letters
+  or digits: `snake_case`, `5*3`), flattened heading and quote markers
+  (not `x > 5` or `->`), table rules, and the tags of a fixed list of HTML
+  elements (other angle brackets stay text), escapes taken literally.
+  Whitespace collapses, FTS5's ellipses stay at the ends, and two marks
+  apart by at most 3 runes of spaces and hyphens merge ("single-table
+  design" is one mark). A passage without a snippet, or whose snippet is
+  markup alone, is the start of its chunk's cleaned text, 300 runes. Each
+  rule is one pass that never goes back, so cleaning is linear in the
+  text, tested on adversarial texts 100 times a chunk's size. The result
+  is plain strings the template escapes, never a trusted type; the
+  document's page shows the whole text formatted.
+- An untitled result, and an untitled related document on a document's
+  page, is named as the Library names it: its bookmark's title in italics
+  (`.result-title a.from-bookmark`, in the title's own font), or its short
+  address in monospace, with the address above it as before. The API
+  reads a response's untitled hits, only when there are any, with the
+  interests' batched `GetByIDsWithLastError` (the IDs as one JSON array,
+  each document by its key, `+d.tenant_id`), and a failed read fails the
+  request, as a failed markdown path does ("API: absolute content paths,
+  and hydration errors fail the request"). A lighter read of the bookmark
+  title alone was tried first and dropped: written `d.tenant_id = ? AND
+  d.id IN (…)`, SQLite planned it on the test database as a seek of each
+  document's key for three IDs, which its pin used, and from four on as a
+  walk of `idx_documents_tenant_state_updated` through every document the
+  tenant has, the trap "Interests page by offset within a run" describes.
+  A page has at most 10 hits, `k` at most 100, and most hits are titled
+  (50 of the 4,498 fetched documents aren't), so the Library row's extra
+  columns cost next to nothing.
+
+**Checked in a browser.** Headless Chrome 154 against this build on the
+copy above (the queue paused), and against the real templates rendered
+with hostile view models (a 300-character title, a 700-character
+unbroken address as an untitled result, markup and quotes in titles,
+bookmark titles and snippets), under the real CSP:
+
+- Page 1, a middle page (5), the capped last page with its note, a result
+  named by its bookmark, a keyword-only page (a daemon whose
+  `embedding.base_url` is a closed port), a page past the last there (a
+  200 with the out-of-range card under "20 documents match") and the
+  hostile pages, at 1440 and 390 px, light and dark: no CSP violation, no script error, and no
+  sideways scroll at 390, where the pager reads "Previous · Page 5 of 10
+  · Next". The only console entry was Chrome's own request for
+  `/favicon.ico` on an origin's first load, a 404.
+- Next swapped `#results` without a page load, pushed `?page=2`, and left
+  the results' top 15 px below the sticky header. Back loaded page 1
+  afresh. Enter on a focused Next paged, and focus stayed on Next.
+- A new query from page 2 went to page 1, with no page in its URL, and
+  Show scores stayed checked across the keystroke and across paging; a
+  type tab loaded page 1 with it unchecked.
+- A page clicked while a keystroke's search was in flight was dropped,
+  and a keystroke right after a page click won: the query typed and its
+  first page.
 
 ---
 

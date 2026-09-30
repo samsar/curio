@@ -250,8 +250,11 @@ eval harness shows measurably better retrieval than the v1 baseline.
   and dead documents grouped by cause with a refetch of each group
   (decisions.md "Dashboard: the Failures tab"). The Interests and an
   interest's documents page by number, 24 interests and 50 documents a
-  page (decisions.md "Interests page by offset within a run"). Phase 3
-  brings richer views (an interest map, suspect pages, HTML export
+  page (decisions.md "Interests page by offset within a run"), and so do
+  search results, 10 a page over one ranking of the best 100, their
+  passages without markdown and their scores behind Show scores
+  (decisions.md "Search pages by offset within a fixed-depth pool").
+  Phase 3 brings richer views (an interest map, suspect pages, HTML export
   upload). See
   `docs/ui.md` and decisions.md "Dashboard: server-rendered pages in the
   daemon (phase 1)".
