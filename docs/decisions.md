@@ -126,6 +126,8 @@ when the entry was first committed.
 - 2026-09-27 — [Cross-site redirects: judged where they land](#cross-site-redirects-judged-where-they-land)
 - 2026-09-27 — [Error pages whose status is hidden](#error-pages-whose-status-is-hidden)
 - 2026-09-27 — [Jina requests identify as curio](#jina-requests-identify-as-curio) (revised)
+- 2026-09-27 — [Fetch upstream health: Jina's calls are tracked and reported](#fetch-upstream-health-jinas-calls-are-tracked-and-reported) (revised)
+- 2026-09-27 — [Jina refusing a target is a verdict](#jina-refusing-a-target-is-a-verdict) (revised)
 - 2026-09-27 — [Queue gate: pause, throttle and schedule, persisted in SQLite](#queue-gate-pause-throttle-and-schedule-persisted-in-sqlite)
 - 2026-09-27 — [Embedding model and per-home width](#embedding-model-and-per-home-width)
 - 2026-09-27 — [Embedding drift: the marker records the build, healthz reports a change](#embedding-drift-the-marker-records-the-build-healthz-reports-a-change)
