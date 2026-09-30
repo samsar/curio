@@ -102,8 +102,9 @@ func fetchHandler(d Deps) HandlerFunc {
 				return fmt.Errorf("%w: %w", ErrPermanent, pe.Err)
 			}
 			err = fmt.Errorf("fetch failed: %w", err)
-			// The fetcher held the call back itself: the job waits for the
-			// hold instead of spending an attempt, and nothing is written.
+			// The fetcher held the call back, for a limit of its own or one
+			// an upstream named the end of: the job waits for the hold
+			// instead of spending an attempt, and nothing is written.
 			if de, ok := errors.AsType[*fetcher.DeferError](err); ok {
 				return &DeferError{Until: de.Until, Reason: de.Reason, Err: err}
 			}

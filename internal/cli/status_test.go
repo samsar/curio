@@ -82,6 +82,29 @@ func TestUpstreamCheck(t *testing.T) {
 			"server_error: r.jina.ai is failing on its side; fetches keep retrying"},
 		{"a state from a newer daemon", jina("overloaded", nil), statusWarn,
 			`state "overloaded", which this curio doesn't know`, "update curio"},
+		{"ok, one site blocked", jina(client.UpstreamOK, func(u *client.UpstreamHealth) {
+			u.Recent = map[string]int{client.CallOK: 3, client.CallRateLimited: 1}
+			u.SitePauses = []client.SitePause{{Site: "twitter.com", Until: failed.Add(time.Hour)}}
+		}), statusOK, "4 calls in the last 15m (ok=3  rate_limited=1); Jina Reader blocks keyless reads of 1 site " +
+			"for now: twitter.com until " + localTime(failed.Add(time.Hour)), ""},
+		{"idle, two sites blocked", jina(client.UpstreamIdle, func(u *client.UpstreamHealth) {
+			u.SitePauses = []client.SitePause{{Site: "forbes.com", Until: failed.Add(20 * time.Minute)},
+				{Site: "twitter.com", Until: failed.Add(time.Hour)}}
+		}), statusOK, "no calls in the last 15m; Jina Reader blocks keyless reads of 2 sites for now: forbes.com until " +
+			localTime(failed.Add(20*time.Minute)) + ", twitter.com until " + localTime(failed.Add(time.Hour)), ""},
+		{"degraded, five sites blocked", jina(client.UpstreamDegraded, func(u *client.UpstreamHealth) {
+			u.Recent = map[string]int{client.CallOK: 2, client.CallRateLimited: 5}
+			for _, site := range []string{"alibaba.com", "forbes.com", "instagram.com", "twitter.com", "x.com"} {
+				u.SitePauses = append(u.SitePauses, client.SitePause{Site: site, Until: failed})
+			}
+		}), statusWarn, "degraded: 5 of 7 calls in the last 15m failed (ok=2  rate_limited=5); Jina Reader blocks " +
+			"keyless reads of 5 sites for now: alibaba.com until " + localTime(failed) + ", forbes.com until " +
+			localTime(failed) + ", instagram.com until " + localTime(failed) + ", and 2 more",
+			"rate_limited: Jina is rate-limiting curio, or blocking keyless reads of a busy site, which curio waits out; " +
+				"a fetcher.native.jina_api_key raises the limit (a block names anonymous access only)"},
+		{"disabled, a site blocked", jina(client.UpstreamDisabled, func(u *client.UpstreamHealth) {
+			u.SitePauses = []client.SitePause{{Site: "twitter.com", Until: failed}}
+		}), statusOK, "off (fetcher.native.jina_fallback: false)", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,7 +122,7 @@ func TestUpstreamHint(t *testing.T) {
 	wants := map[string]string{
 		client.CallChallenged:  "r.jina.ai is challenging curio",
 		client.CallForbidden:   "HTTP 403 without naming a target",
-		client.CallRateLimited: "a fetcher.native.jina_api_key raises the limit",
+		client.CallRateLimited: "blocking keyless reads of a busy site, which curio waits out; a fetcher.native.jina_api_key raises the limit",
 		client.CallAuth:        "check fetcher.native.jina_api_key or CURIO_JINA_API_KEY",
 		client.CallServerError: "failing on its side",
 		client.CallNetwork:     "check connectivity",

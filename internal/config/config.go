@@ -120,6 +120,11 @@ type Native struct {
 	// upstream; curio paces keyed calls at 200/min). Optional; also read
 	// from CURIO_JINA_API_KEY.
 	JinaAPIKey string `yaml:"jina_api_key"`
+	// JinaSiteRequestsPerMinute caps the Jina Reader requests for pages of
+	// one site (its registrable domain) a minute, key or not: Jina blocks a
+	// site's keyless reads for about an hour after a run of them. Default
+	// fetcher.DefaultJinaSiteRequestsPerMinute (6), at least 1.
+	JinaSiteRequestsPerMinute int `yaml:"jina_site_requests_per_minute"`
 	// UserAgent overrides the Chrome profile's User-Agent on origin
 	// requests. Jina Reader requests always identify as curio.
 	UserAgent string `yaml:"user_agent"`
@@ -242,10 +247,11 @@ func Default() Config {
 		Fetcher: Fetcher{
 			Default: "native",
 			Native: Native{
-				TimeoutSeconds:    30,
-				JinaFallback:      true,
-				DeadLinkDetection: true,
-				Backend:           "chrome",
+				TimeoutSeconds:            30,
+				JinaFallback:              true,
+				JinaSiteRequestsPerMinute: 6,
+				DeadLinkDetection:         true,
+				Backend:                   "chrome",
 			},
 			Web2MD: Web2MD{
 				Bin:            "web2md",
@@ -430,6 +436,10 @@ func (c Config) Validate() error {
 	if c.Fetcher.Native.TimeoutSeconds <= 0 {
 		return fmt.Errorf("fetcher.native.timeout_seconds must be positive, got %d",
 			c.Fetcher.Native.TimeoutSeconds)
+	}
+	if c.Fetcher.Native.JinaSiteRequestsPerMinute < 1 {
+		return fmt.Errorf("fetcher.native.jina_site_requests_per_minute must be at least 1, got %d",
+			c.Fetcher.Native.JinaSiteRequestsPerMinute)
 	}
 	switch c.Fetcher.Default {
 	case "native":

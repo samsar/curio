@@ -819,12 +819,12 @@ func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
 	}
 }
 
-// TestWorker_SiteBlockJinaRefusesIsAntiBot: a site that answers 403 fails
-// even its first document for anti_bot when Jina refuses the target too.
-// The origin's verdict is host-wide, so it is cached and the refusal stays
-// retryable; the retry fails from the host cache, without a request, and
-// the document records the cached verdict, not Jina's.
-func TestWorker_SiteBlockJinaRefusesIsAntiBot(t *testing.T) {
+// TestWorker_JinaRefusalPastACachedSite: a site that answers 403 has its
+// verdict cached, and the refusal Jina gave its first document stays
+// retryable. The retry skips the origin and asks Jina, whose refusal of
+// that page is final: the document records jina_refused, Jina's verdict,
+// not the cached one.
+func TestWorker_JinaRefusalPastACachedSite(t *testing.T) {
 	deps, db, _ := newTestDeps(t)
 	ctx := context.Background()
 	var originHits, jinaHits atomic.Int32
@@ -840,8 +840,13 @@ func TestWorker_SiteBlockJinaRefusesIsAntiBot(t *testing.T) {
 		_, _ = io.WriteString(w, `{"code": 451, "message": "This domain is excluded from Jina Reader at the request of its owner."}`)
 	}))
 	defer jina.Close()
+	// A key and a fast pace a site keep curio's own pacing out of the
+	// retry's way: keyless, at the default pace, its Jina request would wait
+	// for the shared limiter's next token (3 s) and the site's next turn
+	// (10 s).
 	deps.Dispatcher = &fetcher.Single{F: fetcher.NewNative(fetcher.NativeOptions{
-		Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", Log: quietLog,
+		Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", JinaAPIKey: "test-key",
+		JinaSiteRequestsPerMinute: 6000, Log: quietLog,
 	})}
 
 	doc := &store.Document{TenantID: "local", URL: origin.URL + "/article", ContentType: store.ContentTypeArticle}
@@ -865,21 +870,22 @@ func TestWorker_SiteBlockJinaRefusesIsAntiBot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, store.DocStatePending, got.State)
 
-	// Attempt 2, once its backoff is skipped, fails from the host cache.
+	// Attempt 2, once its backoff is skipped, asks Jina alone.
 	_, err = db.ExecContext(ctx, `UPDATE jobs SET run_after = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, job.ID)
 	require.NoError(t, err)
 	runPoolsUntil(t, deps, func(c *assert.CollectT) {
 		got, err := deps.Documents.GetByID(ctx, doc.ID)
 		require.NoError(c, err)
 		assert.Equal(c, store.DocStateFailed, got.State)
-		assert.Equal(c, store.FailureCauseAntiBot, got.FailureCause)
+		assert.Equal(c, store.FailureCauseJinaRefused, got.FailureCause)
 	})
 	status, attempts, lastError := jobRow(t)
 	assert.Equal(t, store.JobStatusFailed, status)
 	assert.Equal(t, 2, attempts)
-	assert.Contains(t, lastError, "(cached: jina: refused the target: HTTP 451")
+	assert.Contains(t, lastError, "jina: refused the target: HTTP 451")
+	assert.Contains(t, lastError, "(cached: native: HTTP 403 Forbidden: ", "the entry quotes the origin")
 	assert.Equal(t, int32(1), originHits.Load())
-	assert.Equal(t, int32(1), jinaHits.Load())
+	assert.Equal(t, int32(2), jinaHits.Load())
 }
 
 func TestWorker_PermanentFailureDoesNotRetry(t *testing.T) {

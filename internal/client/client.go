@@ -94,6 +94,15 @@ type UpstreamHealth struct {
 	WindowSeconds    int            `json:"window_seconds"`
 	Recent           map[string]int `json:"recent,omitempty"`
 	CooldownUntil    time.Time      `json:"cooldown_until,omitzero"`
+	// SitePauses are the sites the upstream holds back for now, each until
+	// a time; empty when none is.
+	SitePauses []SitePause `json:"site_pauses,omitempty"`
+}
+
+// SitePause mirrors api.SitePause: an upstream's block of one site's reads.
+type SitePause struct {
+	Site  string    `json:"site"`
+	Until time.Time `json:"until"`
 }
 
 // Upstream states a daemon reports, mirroring the fetcher's. A daemon may

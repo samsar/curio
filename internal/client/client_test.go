@@ -164,14 +164,16 @@ func TestErrStarting_OnlyTheStartingProblem(t *testing.T) {
 }
 
 // TestHealthz_Upstreams: the upstreams a daemon reports decode with their
-// times, classes and counts; the times it leaves out stay zero.
+// times, classes, counts and site pauses; the times it leaves out stay
+// zero.
 func TestHealthz_Upstreams(t *testing.T) {
 	failure := time.Date(2026, 9, 27, 14, 40, 1, 0, time.UTC)
 	s := apitest.Start(t, func(d *api.Deps) {
 		d.Upstreams = func() []fetcher.UpstreamHealth {
 			return []fetcher.UpstreamHealth{{Name: "jina", Enabled: true, State: fetcher.UpstreamFailing,
 				LastFailure: failure, LastFailureClass: fetcher.CallAuth, Window: 15 * time.Minute,
-				Recent: map[fetcher.CallClass]int{fetcher.CallAuth: 5}}}
+				Recent:     map[fetcher.CallClass]int{fetcher.CallAuth: 5},
+				SitePauses: []fetcher.SitePause{{Site: "twitter.com", Until: failure.Add(time.Hour)}}}}
 		}
 	})
 	h, err := client.New(s.URL).Healthz(context.Background())
@@ -180,7 +182,8 @@ func TestHealthz_Upstreams(t *testing.T) {
 	u := h.Upstreams[0]
 	assert.Equal(t, client.UpstreamHealth{Name: "jina", Enabled: true, State: client.UpstreamFailing,
 		LastFailureAt: failure, LastFailureClass: client.CallAuth, WindowSeconds: 900,
-		Recent: map[string]int{client.CallAuth: 5}}, u)
+		Recent:     map[string]int{client.CallAuth: 5},
+		SitePauses: []client.SitePause{{Site: "twitter.com", Until: failure.Add(time.Hour)}}}, u)
 	assert.True(t, u.LastSuccessAt.IsZero())
 	assert.True(t, u.CooldownUntil.IsZero())
 }

@@ -88,6 +88,51 @@ func thenCached(origin fakeAnswer, jina *fakeAnswer) func(*testing.T) error {
 	}
 }
 
+// errOriginAsked is what the origin answers a fetch that should have
+// skipped it.
+var errOriginAsked = errors.New("the origin was asked past its cache entry")
+
+// cachedHostNative is a fakeNative whose Jina answers jina, with a fresh
+// cache entry of kind, quoting originErr, for causePage's host. Its origin
+// fails with errOriginAsked.
+func cachedHostNative(t *testing.T, kind HostFailureKind, originErr string, jina fakeAnswer) *Native {
+	t.Helper()
+	n := fakeNative(t, failing(errOriginAsked), &jina, true)
+	n.hostCache.Put(hostOf(causePage), kind, originErr, n.clock.now())
+	return n
+}
+
+// pastCachedHost fetches causePage past a fresh cache entry for its host
+// (cachedHostNative), without asking the origin.
+func pastCachedHost(kind HostFailureKind, originErr string, jina fakeAnswer) func(*testing.T) error {
+	return func(t *testing.T) error {
+		_, err := cachedHostNative(t, kind, originErr, jina).Fetch(t.Context(), causePage)
+		assert.NotErrorIs(t, err, errOriginAsked)
+		return err
+	}
+}
+
+// jinaArticlePage is Jina's answer rendering the article.
+var jinaArticlePage = jinaPage("An article", nil, longArticleBody)
+
+// afterItsTurns paces n's Jina calls at the default rate a site, and hands
+// out every turn of causePage's site that starts within the inline cap, so
+// its next Jina call is deferred for a turn. It returns n.
+func afterItsTurns(n *Native) *Native {
+	interval := time.Minute / DefaultJinaSiteRequestsPerMinute
+	n.jinaSites = newSitePacer(interval)
+	for range int(maxInlineJinaWait/interval) + 1 {
+		n.jinaSites.take(siteOf(hostOf(causePage)), n.clock.now(), maxInlineJinaWait)
+	}
+	return n
+}
+
+// Cached origin answers, as settle stores them.
+const (
+	cachedOrigin403   = "native: HTTP 403 Forbidden: origin blocked the request (likely anti-bot)"
+	cachedOriginLogin = "native: site-wide login wall or thin content (redirected to a login/auth path: /login)"
+)
+
 // fetchFrom fetches rawURL with a Native on backend, its Jina off and
 // dead-link detection on, for the cases a real server answers.
 func fetchFrom(t *testing.T, backend, rawURL string) error {
@@ -149,6 +194,8 @@ var jinaTrouble = []struct {
 
 func nativeCauseCases() []causeCase {
 	abuse := fakeAnswer{status: http.StatusForbidden, contentType: "text/plain", body: abuseBlock("news.example")}
+	abuse429 := fakeAnswer{status: http.StatusTooManyRequests, contentType: "text/plain", body: abuseBlock("news.example")}
+	opted := fakeAnswer{status: http.StatusUnavailableForLegalReasons, contentType: "application/json", body: jina451Body}
 	nxdomain := failing(transportError(causePage, "dial",
 		&net.DNSError{Err: "no such host", Name: "news.example", IsNotFound: true}))
 	refused := failing(transportError(causePage, "dial", os.NewSyscallError("connect", syscall.ECONNREFUSED)))
@@ -173,15 +220,58 @@ func nativeCauseCases() []causeCase {
 
 		{"origin 403, Jina off", viaFakes(answerStatus(http.StatusForbidden), nil), store.FailureCauseAntiBot},
 		{"origin 403, then its host cached", thenCached(answerStatus(http.StatusForbidden), nil), store.FailureCauseAntiBot},
-		{"origin 403, Jina's domain block", viaFakes(answerStatus(http.StatusForbidden), new(abuse)),
-			store.FailureCauseJinaRefused},
-		{"origin 403 and Jina's domain block, then its host cached",
-			thenCached(answerStatus(http.StatusForbidden), new(abuse)), store.FailureCauseAntiBot},
+		{"origin 403, Jina's block of the site", viaFakes(answerStatus(http.StatusForbidden), new(abuse)),
+			store.FailureCauseRateLimited},
+		{"origin 403, Jina's block of the site with a 429", viaFakes(answerStatus(http.StatusForbidden), new(abuse429)),
+			store.FailureCauseRateLimited},
+		{"origin 403, Jina's block of the site, then another page", func(t *testing.T) error {
+			n := fakeNative(t, answerStatus(http.StatusForbidden), &abuse, true)
+			_, err := n.Fetch(t.Context(), causePage)
+			require.ErrorIs(t, err, errJinaSiteBlocked)
+			_, err = n.Fetch(t.Context(), "https://news.example/2026/another-story")
+			require.ErrorContains(t, err, "jina: not sent, Jina Reader blocks news.example until ")
+			return err
+		}, store.FailureCauseRateLimited},
 
-		{"thin page, Jina's domain block", viaFakes(thinOrigin, new(abuse)), store.FailureCauseJinaRefused},
-		{"thin page, Jina's 451", viaFakes(thinOrigin, new(fakeAnswer{
-			status: http.StatusUnavailableForLegalReasons, contentType: "application/json", body: jina451Body})),
+		{"cached host, Jina's CAPTCHA warning", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaPage("An article", []string{warnCaptcha}, longArticleBody)), store.FailureCauseAntiBot},
+		{"cached host, target 403 through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaTarget(http.StatusForbidden)), store.FailureCauseAntiBot},
+		{"cached host, target 503 through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaTarget(http.StatusServiceUnavailable)), store.FailureCauseAntiBot},
+		{"cached host, target 401 through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaTarget(http.StatusUnauthorized)), store.FailureCauseHTTPError},
+		{"cached host, Jina's 451", pastCachedHost(HostFailAntiBot, cachedOrigin403, opted),
 			store.FailureCauseJinaRefused},
+		{"cached host, a thin Jina answer", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaPage("Short", nil, "too short")), store.FailureCauseLoginWall},
+		{"cached host, a login page through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaPage("Sign in - Google Accounts", nil, loginPageBody)), store.FailureCauseLoginWall},
+		{"cached host, target 404 through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaTarget(http.StatusNotFound)), store.FailureCauseDeadLink},
+		{"cached host, Jina's 500", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			answerStatus(http.StatusInternalServerError)), store.FailureCauseAntiBot},
+		{"cached login wall, Jina's 500", pastCachedHost(HostFailLoginWall, cachedOriginLogin,
+			answerStatus(http.StatusInternalServerError)), store.FailureCauseLoginWall},
+		{"cached host, Jina's block of the site", pastCachedHost(HostFailAntiBot, cachedOrigin403, abuse),
+			store.FailureCauseRateLimited},
+		{"cached host, a site's turn at Jina", func(t *testing.T) error {
+			n := cachedHostNative(t, HostFailAntiBot, cachedOrigin403, *jinaArticlePage)
+			_, err := afterItsTurns(n).Fetch(t.Context(), causePage)
+			return err
+		}, store.FailureCauseAntiBot},
+
+		{"thin page, Jina's block of the site", viaFakes(thinOrigin, new(abuse)), store.FailureCauseRateLimited},
+		{"thin page, Jina's 451", viaFakes(thinOrigin, new(opted)), store.FailureCauseJinaRefused},
+		{"thin page, a site's turn at Jina", func(t *testing.T) error {
+			_, err := afterItsTurns(fakeNative(t, thinOrigin, jinaArticlePage, true)).Fetch(t.Context(), causePage)
+			return err
+		}, store.FailureCauseLoginWall},
+		{"origin 403, a site's turn at Jina", func(t *testing.T) error {
+			n := fakeNative(t, answerStatus(http.StatusForbidden), jinaArticlePage, true)
+			_, err := afterItsTurns(n).Fetch(t.Context(), causePage)
+			return err
+		}, store.FailureCauseAntiBot},
 		{"thin page, Jina's 422 about a timeout", viaFakes(thinOrigin, new(fakeAnswer{
 			status: http.StatusUnprocessableEntity, contentType: "application/json",
 			body: `{"code":422,"name":"TimeoutError","message":"page.goto: Timeout 30000ms exceeded"}`})),
@@ -425,18 +515,31 @@ func otherCauseCases() []causeCase {
 	}
 }
 
-// heldCauseCases are the cases whose call curio held back itself, which
-// alone are deferred (DeferError). Every other case, an upstream's 429 or
-// a yt-dlp run that met one included, ended in an answer.
+// heldCauseCases are the cases whose call curio held back itself (a shared
+// cooldown, a site's turn, a host-cache entry waited out) or Jina Reader's
+// block of the site held back, the call that met the block included: they
+// alone are deferred (DeferError). Every other case, an upstream's 429 or a
+// yt-dlp run that met one included, ended in an answer that decided it.
 var heldCauseCases = map[string]bool{
-	"github: the cooldown":  true,
-	"youtube: the cooldown": true,
+	"github: the cooldown":                                        true,
+	"youtube: the cooldown":                                       true,
+	"origin 403, then its host cached":                            true,
+	"a redirect onto the site's login page, then its host cached": true,
+	"origin 403, Jina's block of the site":                        true,
+	"origin 403, Jina's block of the site with a 429":             true,
+	"origin 403, Jina's block of the site, then another page":     true,
+	"cached host, Jina's block of the site":                       true,
+	"cached host, a site's turn at Jina":                          true,
+	"thin page, Jina's block of the site":                         true,
+	"thin page, a site's turn at Jina":                            true,
+	"origin 403, a site's turn at Jina":                           true,
 }
 
 // TestFailureCause: each failed fetch gets its cause, which is one of the
 // store's causes, and a dead link exactly when the error is one, the rule
 // that makes a document dead. The fetch handler's wrapping changes
-// nothing, and only a call curio held back is deferred.
+// nothing, and only a held call is deferred (heldCauseCases): its cause is
+// the one its job records once a day of waiting runs out.
 func TestFailureCause(t *testing.T) {
 	assert.Empty(t, FailureCause(nil))
 	for _, tc := range slices.Concat(nativeCauseCases(), otherCauseCases()) {
@@ -457,13 +560,14 @@ func TestFailureCause(t *testing.T) {
 // TestJinaFallbackError: the error a fetch returns after Jina failed too
 // reads as it always has, and still unwraps to Jina's failure first.
 func TestJinaFallbackError(t *testing.T) {
-	jina := fmt.Errorf("jina: %w: %w: %s", errJinaRefused, &HTTPStatusError{StatusCode: http.StatusForbidden},
-		strings.TrimSpace(abuseBlock("news.example")))
+	jina := fmt.Errorf("jina: %w: %w: %s", errJinaRefused,
+		&HTTPStatusError{StatusCode: http.StatusUnavailableForLegalReasons}, jina451Reason)
 	origin := fmt.Errorf("native: %w (extracted text < 500 bytes)", ErrLoginWall)
 	err := &jinaFallbackError{jina: jina, origin: origin}
 
 	assert.Equal(t, fmt.Errorf("%w (after %w)", jina, origin).Error(), err.Error())
-	assert.True(t, strings.HasPrefix(err.Error(), "jina: refused the target: HTTP 403 Forbidden: AbuseAlleviationError: "))
+	assert.True(t, strings.HasPrefix(err.Error(),
+		"jina: refused the target: HTTP 451 Unavailable For Legal Reasons: This domain is excluded from Jina Reader"))
 	assert.True(t, strings.HasSuffix(err.Error(),
 		" (after native: login wall or thin content (extracted text < 500 bytes))"))
 	assert.Equal(t, []error{jina, origin}, err.Unwrap())
