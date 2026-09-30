@@ -8705,14 +8705,14 @@ with hostile view models (a 300-character title, a 700-character
 unbroken address as an untitled result, markup and quotes in titles,
 bookmark titles and snippets), under the real CSP:
 
-- Page 1, a middle page (5), the capped last page with its note, a result
-  named by its bookmark, a keyword-only page (a daemon whose
+- Page 1, a middle page (5), the capped last page with its note, a
+  result named by its bookmark, a keyword-only page (a daemon whose
   `embedding.base_url` is a closed port), a page past the last there (a
   200 with the out-of-range card under "20 documents match") and the
-  hostile pages, at 1440 and 390 px, light and dark: no CSP violation, no script error, and no
-  sideways scroll at 390, where the pager reads "Previous · Page 5 of 10
-  · Next". The only console entry was Chrome's own request for
-  `/favicon.ico` on an origin's first load, a 404.
+  hostile pages, at 1440 and 390 px, light and dark: no CSP violation,
+  no script error, and no sideways scroll at 390, where the pager reads
+  "Previous · Page 5 of 10 · Next". The only console entry was Chrome's
+  own request for `/favicon.ico` on an origin's first load, a 404.
 - Next swapped `#results` without a page load, pushed `?page=2`, and left
   the results' top 15 px below the sticky header. Back loaded page 1
   afresh. Enter on a focused Next paged, and focus stayed on Next.

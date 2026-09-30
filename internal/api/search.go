@@ -164,8 +164,9 @@ func validateSearchFilters(f Filters) error {
 // ones by their bookmarks (bookmarkTitles).
 //
 // One extra DB hit per result to surface the markdown path. K is at most
-// store.MaxSearchK (100), so this stays small; if it ever shows up in latency,
-// batch via a single SELECT IN (...) instead.
+// store.MaxSearchK (100), so this stays small; GetByIDsWithLastError, which
+// the untitled hits' names already use, returns markdown_path too and could
+// serve every hit in one read if it ever shows in latency.
 func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]SearchHitResponse, error) {
 	titles, err := d.bookmarkTitles(ctx, hits)
 	if err != nil {

@@ -802,6 +802,9 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .results-head strong { color: var(--text); font-weight: 600; }
 .toggle { display: inline-flex; align-items: center; gap: var(--s2); cursor: pointer; }
 .toggle input { accent-color: var(--accent); margin: 0; }
+/* With nothing to score, the Show scores checkbox stays in the results,
+   unseen, so hx-preserve carries its state to the next ones. */
+.scores-kept { display: none; }
 
 ol.results { list-style: none; padding: 0; }
 .result { padding: var(--s5) 0; border-top: 1px solid var(--border); }

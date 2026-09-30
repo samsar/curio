@@ -901,7 +901,9 @@ func TestSearch_ResultsPage(t *testing.T) {
 	past := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 5,
 		Results: &SearchResults{Total: 37}})
 	assert.Contains(t, past, `<strong>37 documents</strong> match`)
-	assert.NotContains(t, past, "show-scores", "no scores to show")
+	assert.Contains(t, past, `<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true"`,
+		"no scores to show, but the checkbox stays, unseen, so its state carries to the next results")
+	assert.NotContains(t, past, "Show scores")
 	assert.Contains(t, past, `<h2>No page 5</h2>`+"\n"+`<p>This list has 4 pages.</p>`+"\n"+
 		`<p class="mt-2"><a class="btn" href="/ui/?q=kafka">First page</a> <a class="btn" href="/ui/?page=4&amp;q=kafka">Last page</a></p>`)
 	assert.NotContains(t, past, `class="pager"`, "the card leads to the first and last pages")
@@ -915,6 +917,8 @@ func TestSearch_ResultsPage(t *testing.T) {
 	none := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 1, Results: &SearchResults{}})
 	assert.Contains(t, none, "<h2>Nothing in your library matches</h2>")
 	assert.NotContains(t, none, "results-head")
+	assert.Contains(t, none, `<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true"`,
+		"a query that matched nothing keeps Show scores for the next one")
 }
 
 // TestQueuePanel_Controls: the controls follow the settings: Resume while

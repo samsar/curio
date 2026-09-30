@@ -1494,10 +1494,13 @@ components:
         capped:
           type: boolean
           description: >
-            Whether more documents matched than the ranking holds, so total
-            is 100 and the rest are never returned. With semantic search on
-            nearly every query is capped: the vector index's nearest chunks
-            span far more than 100 documents.
+            Whether the ranked pool held more documents than the ranking
+            keeps, so total is 100 and the rest are never returned. The pool
+            is each retriever's best 800 chunks: a keyword-only search whose
+            words appear in more chunks than that may match more documents
+            than it counts. With semantic search on nearly every query is
+            capped: the vector index's nearest chunks span far more than 100
+            documents.
         degraded:
           type: boolean
           description: >

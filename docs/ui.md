@@ -69,11 +69,11 @@ footer names the address the daemon listens on.
   (`/ui/?q=kafka&content_type=pdf`). The results come 10 a page, with
   numbered pages under them, up to the best 100 (`&page=2`); typing or
   choosing another type starts again at page 1, and a page past the last
-  says how many pages there are. A line over them counts
-  what matched ("37 documents match"), or, past 100, says "100+ documents
-  match · showing the best 100", and the last page then says to refine the
-  query to see others. Each result shows where the page lives, its title,
-  how it matched (keyword, meaning, or both), and the first two passages
+  says how many pages there are. A line over them counts what matched
+  ("37 documents match"), or, past 100, says "100+ documents match ·
+  showing the best 100", and the last page then says to refine the query
+  to see others. Each result shows where the page lives, its title, how
+  it matched (keyword, meaning, or both), and the first two passages
   that matched with the matched words highlighted (the rest a click
   away). A passage is shown without its markdown (a link's text without
   its address, no heading or bold marks); the document's page has the
@@ -81,8 +81,8 @@ footer names the address the daemon listens on.
   and each result's fused score, and stays on while you type and page. A
   page with no title of its own is named by its bookmark's title, in
   italics, as the Library names it, and so is a related document on a
-  document's page. When semantic search is unavailable (Ollama down), the
-  keyword results come under a warning. The old address,
+  document's page. When semantic search is unavailable (Ollama down),
+  the keyword results come under a warning. The old address,
   `/ui/search?q=…`, leads here with its query.
 - **Library**: every document, most recently updated first. Tabs choose
   the state (All, Fetched, Pending, Failed, Dead), each with its count

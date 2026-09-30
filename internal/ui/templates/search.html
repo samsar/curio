@@ -62,7 +62,7 @@ text/template keeps a block's default over an empty define.
 <div class="callout-body">{{range .Warnings}}<p>{{.}}</p>{{end}}</div>
 </div>{{end}}
 {{if .Total}}<div class="results-head"><span><strong>{{.Count}}</strong> {{.Verb}}{{if .Capped}} · showing the best {{num .Total}}{{end}} · {{.TookMS}} ms</span>
-{{- if .Hits}}<label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true"> Show scores</label>{{end}}</div>
+{{- if .Hits}}<label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true"> Show scores</label>{{else}}<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true" tabindex="-1" aria-hidden="true"></div>{{end}}</div>
 {{with .Hits}}<ol class="results">
 {{range $hit := .}}<li class="result">
 <div class="result-where"><span class="fav">{{template "icon" (typeIcon .ContentType)}}</span><span class="path" title="{{.URL}}">{{with host .URL}}<b>{{.}}</b>{{with urlTrail $hit.URL}} › {{.}}{{end}}{{else}}{{.URL}}{{end}}</span></div>
@@ -75,7 +75,8 @@ text/template keeps a block's default over an empty define.
 {{else}}{{with $.OutOfRange}}{{template "out-of-range" .}}{{end}}{{end}}
 {{if $.CappedNote}}<p class="results-note">curio ranks the best {{num .Total}} matches; refine the query to see others.</p>{{end}}
 {{with $.Pager}}<div hx-boost="true" hx-target="#results" hx-select="#results > *" hx-swap="innerHTML show:#results:top" hx-sync="closest .search-page:drop">{{template "pager" .}}</div>{{end}}
-{{else}}<div class="card"><div class="empty">
+{{else}}<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true" tabindex="-1" aria-hidden="true"></div>
+<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "search-x"}}</div>
 <h2>Nothing in your library matches</h2>
 <p>curio looks for your words and for pages about the same idea in other words, and found neither. Try other words, or fewer.</p>
