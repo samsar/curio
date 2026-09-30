@@ -68,7 +68,9 @@ func markDocFailed(d Deps) PermFailHook {
 
 // fetchHandler builds the closure that runs one fetch job:
 //  1. Load document; look up the right Fetcher via the dispatcher.
-//  2. Call Fetcher.Fetch(ctx, document.URL).
+//  2. Call Fetcher.Fetch(ctx, document.URL). A failure is ErrPermanent for
+//     a fetcher.PermanentError, a *DeferError for a fetcher.DeferError, and
+//     retryable otherwise.
 //  3. Write the resulting markdown to $CURIO_HOME/content/<doc>/<ext>.md.
 //  4. Create a document_extractions row pointing at that file.
 //  5. Apply the fetched metadata to the document and point
@@ -99,7 +101,13 @@ func fetchHandler(d Deps) HandlerFunc {
 				// hook, which picks the document's terminal state from it.
 				return fmt.Errorf("%w: %w", ErrPermanent, pe.Err)
 			}
-			return fmt.Errorf("fetch failed: %w", err)
+			err = fmt.Errorf("fetch failed: %w", err)
+			// The fetcher held the call back itself: the job waits for the
+			// hold instead of spending an attempt, and nothing is written.
+			if de, ok := errors.AsType[*fetcher.DeferError](err); ok {
+				return &DeferError{Until: de.Until, Reason: de.Reason, Err: err}
+			}
+			return err
 		}
 
 		// Pre-generate the extraction ID so we can write the file under

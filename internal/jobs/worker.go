@@ -13,6 +13,7 @@
 package jobs
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -28,7 +29,9 @@ import (
 
 // HandlerFunc executes one job. Return nil for success; return an error for
 // failure. The worker decides retry vs. permanent failure based on whether
-// the error is wrapped with ErrPermanent.
+// the error is wrapped with ErrPermanent. A handler that didn't try, held
+// back by a limit curio keeps itself, returns a *DeferError instead: the
+// job waits for the hold without using up an attempt.
 type HandlerFunc func(ctx context.Context, job *store.Job) error
 
 // PermFailHook runs after a job reaches terminal failure (ErrPermanent or
@@ -42,6 +45,44 @@ type PermFailHook func(ctx context.Context, job *store.Job, cause error) error
 // wrapper — the worker will retry them with exponential backoff via the
 // JobQueue's MarkFailed.
 var ErrPermanent = errors.New("permanent failure")
+
+// DeferError is a handler's report that it didn't run its job: a hold curio
+// keeps itself (an upstream's shared rate-limit cooldown) outlasts what the
+// handler waits out inline. The job goes back to the queue until Until,
+// with the attempt refunded and "waiting for <Reason>" as its last_error,
+// while it is younger than deferralBudget; after that the deferral fails
+// the attempt like any error, with Err's text. Reason is worded to follow
+// "waiting for"; Err is what the job fails with then, and keeps the chain
+// the permanent-failure hook reads. A handler returns one only when it sent
+// nothing whose answer could decide the job; ErrPermanent in the chain
+// wins over it.
+type DeferError struct {
+	Until  time.Time
+	Reason string
+	Err    error
+}
+
+func (e *DeferError) Error() string { return e.Err.Error() }
+func (e *DeferError) Unwrap() error { return e.Err }
+
+const (
+	// deferralBudget is how long after its creation a job may still be
+	// deferred. A day is 24 of GitHub's hourly resets, time for about 700
+	// repositories at 2 calls each without a token, and the longest
+	// Retry-After the fetchers honor. An upstream that holds curio off for
+	// longer won't serve it: a visible rate_limited failure that a refetch
+	// retries beats a document pending for days. The budget counts from
+	// created_at, which the queue already keeps, and a refetch enqueues a
+	// new job with a new budget.
+	deferralBudget = 24 * time.Hour
+	// minDeferral is the shortest wait a deferral sets, so a hold that has
+	// already ended (or a handler that named no time) can't make a job spin
+	// through claims.
+	minDeferral = time.Second
+	// genericHoldReason is what a deferred job waits for when its handler
+	// didn't say.
+	genericHoldReason = "an upstream's limit to lift"
+)
 
 // errOrphanExhausted is the cause handed to permanent-failure hooks for jobs
 // that a previous daemon left running with no attempts to spare.
@@ -191,8 +232,8 @@ func (w *Worker) InFlight() []string {
 // SQLite's write lock, even one that finds nothing, so idle polls back off
 // from PollInterval to MaxPollInterval; a claimed job resets them, and a
 // failed claim backs off the same way. Polls still find the jobs no signal
-// announces: retries whose run_after comes due, and jobs enqueued by
-// another process.
+// announces: retries and deferred jobs whose run_after comes due, and jobs
+// enqueued by another process.
 //
 // Cancelling ctx stops new claims and is passed to the running handler; the
 // job's outcome is still recorded, and a job the shutdown interrupted goes
@@ -346,9 +387,21 @@ func (w *Worker) invoke(ctx context.Context, log *slog.Logger, job *store.Job) e
 	return recoverPanic(log, "job handler", func() error { return h(ctx, job) })
 }
 
-// finish records a handled job's outcome. ctx is the worker's context; the
-// writes themselves run detached from it, so a shutdown that begins while a
-// handler runs still gets that job's outcome recorded.
+// finish records a handled job's outcome, the first of these that holds:
+//
+//  1. no error: the job is done;
+//  2. the worker's context is done: the shutdown interrupted it, so it
+//     goes back to the queue, runnable now, attempt refunded, whatever it
+//     returned (a deferral included);
+//  3. the error wraps ErrPermanent: it fails for good;
+//  4. a *DeferError while the job is younger than deferralBudget: it waits
+//     for its hold, attempt refunded (deferJob);
+//  5. anything else, a deferral past the budget included: the attempt
+//     failed, and the queue retries it or, out of attempts, fails it.
+//
+// ctx is the worker's context; the writes themselves run detached from it,
+// so a shutdown that begins while a handler runs still gets that job's
+// outcome recorded.
 func (w *Worker) finish(ctx context.Context, log *slog.Logger, job *store.Job, err error, dur time.Duration) {
 	bctx, cancel := bookkeepingContext(ctx)
 	defer cancel()
@@ -376,8 +429,50 @@ func (w *Worker) finish(ctx context.Context, log *slog.Logger, job *store.Job, e
 		log.Info("job interrupted by shutdown; requeued", "handler_err", err, "duration_ms", dur.Milliseconds())
 
 	default:
+		// A deferral that also wraps ErrPermanent is a verdict, and one
+		// past the budget an attempt like any failure.
+		if de, ok := errors.AsType[*DeferError](err); ok && !errors.Is(err, ErrPermanent) {
+			now := time.Now()
+			if now.Sub(job.CreatedAt) < deferralBudget {
+				w.deferJob(bctx, log, job, de, now, dur)
+				return
+			}
+			log.Info("job's deferral budget is spent; its deferral counts as a failed attempt",
+				"created_at", job.CreatedAt, "budget", deferralBudget)
+		}
 		w.fail(bctx, log, job, err, dur)
 	}
+}
+
+// deferJob puts a job its handler deferred back in the queue until de's
+// Until (see deferralTime), with the attempt refunded and what it waits for
+// as its last_error. The permanent-failure hook doesn't run: the job isn't
+// finished.
+func (w *Worker) deferJob(ctx context.Context, log *slog.Logger, job *store.Job, de *DeferError, now time.Time,
+	dur time.Duration) {
+	until := deferralTime(de.Until, now)
+	reason := "waiting for " + cmp.Or(de.Reason, genericHoldReason)
+	if err := w.retryBookkeeping(ctx, log, "defer", func(ctx context.Context) error {
+		return w.queue.Defer(ctx, job.ID, until, reason)
+	}); err != nil {
+		log.Error("defer failed", "err", err, "handler_err", de.Err)
+		return
+	}
+	log.Info("job deferred", "until", until, "reason", reason, "err", de.Err, "duration_ms", dur.Milliseconds())
+}
+
+// deferralTime is when a job deferred at now until until runs again: until,
+// but no sooner than minDeferral from now and no later than deferralBudget.
+// It is not held to the budget's end, so a job deferred just inside its
+// budget still waits for the hold, then gets one real try.
+func deferralTime(until, now time.Time) time.Time {
+	if earliest := now.Add(minDeferral); until.Before(earliest) {
+		return earliest
+	}
+	if latest := now.Add(deferralBudget); until.After(latest) {
+		return latest
+	}
+	return until
 }
 
 func (w *Worker) fail(ctx context.Context, log *slog.Logger, job *store.Job, cause error, dur time.Duration) {

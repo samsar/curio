@@ -171,6 +171,13 @@ func TestUpdatedAt_SetByEveryUpdate(t *testing.T) {
 			},
 		},
 		{
+			name: "Jobs.Defer", table: "jobs",
+			setup: func(t *testing.T, db *DB) string { return newJob(t, db, store.JobStatusRunning, 1) },
+			update: func(t *testing.T, db *DB, id string) {
+				require.NoError(t, NewJobs(db).Defer(ctx, id, time.Now().Add(time.Hour), "waiting"))
+			},
+		},
+		{
 			name: "Jobs.RecoverOrphans requeue", table: "jobs",
 			setup: func(t *testing.T, db *DB) string { return newJob(t, db, store.JobStatusRunning, 1) },
 			update: func(t *testing.T, db *DB, _ string) {

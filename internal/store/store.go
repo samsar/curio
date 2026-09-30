@@ -785,9 +785,10 @@ func NewDocumentJob(tenantID string, kind JobKind, documentID string) (*Job, err
 
 // JobQueue is the SQLite-backed work queue.
 //
-// The transitions out of running (MarkDone, MarkFailed, Requeue) only apply
-// to a job that is currently running. Otherwise they change nothing and
-// return ErrNotRunning, or ErrNotFound if the job doesn't exist.
+// The transitions out of running (MarkDone, MarkFailed, Requeue, Defer)
+// only apply to a job that is currently running. Otherwise they change
+// nothing and return ErrNotRunning, or ErrNotFound if the job doesn't
+// exist.
 type JobQueue interface {
 	// Enqueue inserts j, filling in its ID and timestamps. A payload that
 	// names a document_id (see DocumentJobPayload) links the job to that
@@ -806,7 +807,8 @@ type JobQueue interface {
 	// still closes it. Jobs enqueued by another process, and pending jobs
 	// that come due by run_after, close nothing: find those by polling.
 	Enqueued(kinds []JobKind) <-chan struct{}
-	// MarkDone sets a running job to done.
+	// MarkDone sets a running job to done and clears its last_error: a
+	// done job has nothing left to explain.
 	MarkDone(ctx context.Context, id string) error
 	// MarkFailed records errMsg on a running job and either sends it back to
 	// pending with a backoff run_after, or sets it failed when retry is false
@@ -819,6 +821,13 @@ type JobQueue interface {
 	// the attempt its claim counted: the run was interrupted (the daemon is
 	// shutting down), so it says nothing about the job. last_error is kept.
 	Requeue(ctx context.Context, id string) error
+	// Defer sends a running job back to pending, runnable at until, refunds
+	// the attempt its claim counted, and records reason, why it waits, as
+	// its last_error: the handler didn't try, held back by a limit curio
+	// keeps itself, so the run says nothing about the job. The job isn't
+	// runnable before until, so Defer closes no Enqueued channel: workers
+	// find it by polling, as they find a retry's backoff.
+	Defer(ctx context.Context, id string, until time.Time, reason string) error
 	// RecoverOrphans handles jobs of the given kinds left running by a daemon
 	// that exited without recording their outcome (crash, SIGKILL, a shutdown
 	// that timed out). Each goes back to pending, runnable now, keeping the

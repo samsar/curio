@@ -97,6 +97,7 @@ func TestWorker_JobInterruptedByShutdownIsRequeued(t *testing.T) {
 		{"context error", context.Canceled},
 		{"killed subprocess", errors.New("web2md: signal: killed")},
 		{"permanent error", fmt.Errorf("%w: document vanished", ErrPermanent)},
+		{"deferral", &DeferError{Until: time.Now().Add(time.Hour), Reason: "a limit to lift", Err: errors.New("held")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -176,6 +177,189 @@ func TestWorker_RetryableFailureConsumesAttempt(t *testing.T) {
 	assert.Equal(t, 1, got.Attempts)
 	assert.True(t, got.RunAfter.After(time.Now()), "retry is backed off")
 	assert.Zero(t, hookCalls.Load())
+}
+
+// handleOnce claims a job of kind through w and handles it, as one turn of
+// Run does, returning once its outcome is recorded.
+func handleOnce(t *testing.T, w *Worker, kind store.JobKind) {
+	t.Helper()
+	admitted, _ := w.admit([]store.JobKind{kind})
+	require.Equal(t, []store.JobKind{kind}, admitted)
+	require.True(t, w.tryOne(context.Background(), admitted), "a job was claimed")
+}
+
+// sqlAgo is SQL for the time d before now, in the queue's format.
+func sqlAgo(d time.Duration) string {
+	return fmt.Sprintf("strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ', 'now', '-%d seconds')", int(d.Seconds()))
+}
+
+// deferringWorker is a worker for summarize jobs whose handler returns
+// err, counting the calls of its permanent-failure hook.
+func deferringWorker(q store.JobQueue, err error) (*Worker, *atomic.Int32) {
+	var hookCalls atomic.Int32
+	w := NewWorker(q, WorkerOptions{Log: quietLog})
+	w.Register(store.JobKindSummarize, func(context.Context, *store.Job) error { return err })
+	w.OnPermanentFailure(store.JobKindSummarize, func(context.Context, *store.Job, error) error {
+		hookCalls.Add(1)
+		return nil
+	})
+	return w, &hookCalls
+}
+
+// TestWorker_DeferralRefundsTheAttempt: a handler that defers its job puts
+// it back in the queue until the time it names, with the claim's attempt
+// refunded, what it waits for as its last_error, and no permanent-failure
+// hook: on its first claim, and after a real failure, whose attempt it
+// keeps.
+func TestWorker_DeferralRefundsTheAttempt(t *testing.T) {
+	cases := []struct {
+		name          string
+		reason        string
+		failedBefore  bool
+		wantAttempts  int
+		wantLastError string
+	}{
+		{"first claim", "GitHub's API rate limit to reset", false, 0,
+			"waiting for GitHub's API rate limit to reset"},
+		{"after a failure", "GitHub's API rate limit to reset", true, 1,
+			"waiting for GitHub's API rate limit to reset"},
+		{"no reason given", "", false, 0, "waiting for " + genericHoldReason},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db := sqlitetest.NewDB(t)
+			q := sqlitestore.NewJobs(db)
+			job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}
+			require.NoError(t, q.Enqueue(ctx, job))
+			if tc.failedBefore {
+				_, err := q.ClaimNext(ctx, nil)
+				require.NoError(t, err)
+				_, err = q.MarkFailed(ctx, job.ID, "transient", true)
+				require.NoError(t, err)
+				_, err = db.ExecContext(ctx, `UPDATE jobs SET run_after = `+sqlAgo(time.Second)+` WHERE id = ?`, job.ID)
+				require.NoError(t, err)
+			}
+
+			until := time.Now().UTC().Add(24 * time.Minute).Truncate(time.Millisecond)
+			w, hookCalls := deferringWorker(q, &DeferError{Until: until, Reason: tc.reason,
+				Err: errors.New("github: not sent, rate-limit cooldown has 24m0s left")})
+			handleOnce(t, w, store.JobKindSummarize)
+
+			got := getJob(t, q, job.ID)
+			assert.Equal(t, store.JobStatusPending, got.Status)
+			assert.Equal(t, tc.wantAttempts, got.Attempts)
+			assert.Equal(t, until, got.RunAfter)
+			require.NotNil(t, got.LastError)
+			assert.Equal(t, tc.wantLastError, *got.LastError)
+			assert.Zero(t, hookCalls.Load())
+		})
+	}
+}
+
+// TestWorker_DeferralIsClamped: a deferral runs the job again no sooner
+// than minDeferral from now, however long ago its hold ended, and no
+// later than deferralBudget from now.
+func TestWorker_DeferralIsClamped(t *testing.T) {
+	cases := []struct {
+		name  string
+		until func(now time.Time) time.Time
+		want  time.Duration
+	}{
+		{"no time", func(time.Time) time.Time { return time.Time{} }, minDeferral},
+		{"a time past", func(now time.Time) time.Time { return now.Add(-time.Hour) }, minDeferral},
+		{"two days off", func(now time.Time) time.Time { return now.Add(48 * time.Hour) }, deferralBudget},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
+			job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}
+			require.NoError(t, q.Enqueue(context.Background(), job))
+
+			before := time.Now()
+			w, _ := deferringWorker(q, &DeferError{Until: tc.until(before), Reason: "a limit to lift",
+				Err: errors.New("held")})
+			handleOnce(t, w, store.JobKindSummarize)
+			after := time.Now()
+
+			got := getJob(t, q, job.ID).RunAfter
+			assert.False(t, got.Before(before.Add(tc.want).Truncate(time.Millisecond)), "run_after %s", got)
+			assert.False(t, got.After(after.Add(tc.want)), "run_after %s", got)
+		})
+	}
+}
+
+// TestWorker_DeferralPastTheBudgetFails: once a job is deferralBudget old,
+// a deferral fails the attempt like any error: the attempt counts, the
+// error's text is its last_error, and the queue backs it off.
+func TestWorker_DeferralPastTheBudgetFails(t *testing.T) {
+	ctx := context.Background()
+	db := sqlitetest.NewDB(t)
+	q := sqlitestore.NewJobs(db)
+	job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}
+	require.NoError(t, q.Enqueue(ctx, job))
+	_, err := db.ExecContext(ctx, `UPDATE jobs SET created_at = `+sqlAgo(deferralBudget+time.Hour)+` WHERE id = ?`, job.ID)
+	require.NoError(t, err)
+
+	w, hookCalls := deferringWorker(q, &DeferError{Until: time.Now().Add(time.Hour), Reason: "a limit to lift",
+		Err: errors.New("github: not sent, rate-limit cooldown has 1h0m0s left")})
+	handleOnce(t, w, store.JobKindSummarize)
+
+	got := getJob(t, q, job.ID)
+	assert.Equal(t, store.JobStatusPending, got.Status)
+	assert.Equal(t, 1, got.Attempts, "the attempt counts")
+	require.NotNil(t, got.LastError)
+	assert.Equal(t, "github: not sent, rate-limit cooldown has 1h0m0s left", *got.LastError)
+	assert.WithinDuration(t, time.Now().Add(time.Minute), got.RunAfter, 5*time.Second, "the first retry's backoff")
+	assert.Zero(t, hookCalls.Load())
+}
+
+// TestWorker_PermanentDeferralFails: ErrPermanent wins over a deferral in
+// the same chain: the job fails for good and its hook runs.
+func TestWorker_PermanentDeferralFails(t *testing.T) {
+	q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
+	job := &store.Job{TenantID: "local", Kind: store.JobKindSummarize}
+	require.NoError(t, q.Enqueue(context.Background(), job))
+
+	w, hookCalls := deferringWorker(q, fmt.Errorf("%w: %w", ErrPermanent,
+		&DeferError{Until: time.Now().Add(time.Hour), Reason: "a limit to lift", Err: errors.New("held")}))
+	handleOnce(t, w, store.JobKindSummarize)
+
+	got := getJob(t, q, job.ID)
+	assert.Equal(t, store.JobStatusFailed, got.Status)
+	assert.Equal(t, 1, got.Attempts)
+	assert.Equal(t, int32(1), hookCalls.Load())
+}
+
+// TestWorker_DeferredJobRunsWhenDue: a deferred job raises no signal when
+// it comes due; an idle worker's poll finds it and runs it, and the done
+// job keeps no last_error.
+func TestWorker_DeferredJobRunsWhenDue(t *testing.T) {
+	q := newCountingQueue(t)
+	job := &store.Job{TenantID: "local", Kind: store.JobKindFetch}
+	require.NoError(t, q.Enqueue(context.Background(), job))
+
+	var calls atomic.Int32
+	w := NewWorker(q, WorkerOptions{PollInterval: 10 * time.Millisecond, MaxPollInterval: 20 * time.Millisecond,
+		Log: quietLog})
+	w.Register(store.JobKindFetch, func(context.Context, *store.Job) error {
+		if calls.Add(1) == 1 {
+			return &DeferError{Until: time.Now().Add(time.Hour), Reason: "a limit to lift", Err: errors.New("held")}
+		}
+		return nil
+	})
+	stop := startWorker(t, w)
+	defer stop()
+
+	waitForJob(t, q, job.ID, func(j *store.Job) bool { return j.Status == store.JobStatusPending && j.LastError != nil })
+	_, err := q.db.Exec(`UPDATE jobs SET run_after = `+sqlAgo(time.Second)+` WHERE id = ?`, job.ID)
+	require.NoError(t, err)
+	waitForJob(t, q, job.ID, statusIs(store.JobStatusDone))
+
+	got := getJob(t, q, job.ID)
+	assert.Equal(t, 1, got.Attempts, "only the run counts")
+	assert.Nil(t, got.LastError)
+	assert.Equal(t, int32(2), calls.Load())
 }
 
 // TestWorker_PanicIsContained: a panicking handler or hook fails its job

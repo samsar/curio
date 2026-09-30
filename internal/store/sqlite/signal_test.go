@@ -135,6 +135,16 @@ func TestJobs_Enqueued(t *testing.T) {
 			wake: true,
 		},
 		{
+			// A deferred job isn't claimable until its time: polls find it.
+			name: "Defer",
+			setup: func(t *testing.T, db *DB) string {
+				return enqueueWithStatus(t, NewJobs(db), store.JobKindFetch, store.JobStatusRunning, 1).ID
+			},
+			act: func(t *testing.T, db *DB, id string) {
+				require.NoError(t, NewJobs(db).Defer(ctx, id, time.Now().Add(time.Hour), "waiting"))
+			},
+		},
+		{
 			name: "RecoverOrphans",
 			setup: func(t *testing.T, db *DB) string {
 				return enqueueWithStatus(t, NewJobs(db), store.JobKindFetch, store.JobStatusRunning, 1).ID

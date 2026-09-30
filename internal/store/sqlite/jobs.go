@@ -157,10 +157,14 @@ func claimSQL(nKinds int) string {
 	RETURNING ` + jobColumns
 }
 
+// markDoneSQL sets a running job done. A done job has nothing left to
+// explain, so the error a retry or a deferral left goes.
+const markDoneSQL = `
+	UPDATE jobs SET status = ?, last_error = NULL, updated_at = ` + sqlNow + `
+	WHERE id = ? AND status = ?`
+
 func (s *Jobs) MarkDone(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET status = ?, updated_at = `+sqlNow+` WHERE id = ? AND status = ?`,
-		store.JobStatusDone, id, store.JobStatusRunning)
+	res, err := s.db.ExecContext(ctx, markDoneSQL, store.JobStatusDone, id, store.JobStatusRunning)
 	if err != nil {
 		return fmt.Errorf("mark done: %w", err)
 	}
@@ -229,6 +233,27 @@ func (s *Jobs) Requeue(ctx context.Context, id string) error {
 	}
 	s.db.enqueued.notify(kind)
 	return nil
+}
+
+// deferJobSQL sends a running job back to pending until a set time, with
+// the attempt its claim counted refunded and why it waits as its
+// last_error. Its args are status, run_after, last_error, updated_at, then
+// the job's ID and status.
+const deferJobSQL = `
+	UPDATE jobs SET status = ?, attempts = max(attempts - 1, 0), started_at = NULL,
+	                run_after = ?, last_error = ?, updated_at = ?
+	WHERE id = ? AND status = ?`
+
+// Defer implements store.JobQueue. It signals nothing: the job isn't
+// runnable before until.
+func (s *Jobs) Defer(ctx context.Context, id string, until time.Time, reason string) error {
+	res, err := s.db.ExecContext(ctx, deferJobSQL,
+		store.JobStatusPending, formatTime(until), reason, formatTime(time.Now().UTC()),
+		id, store.JobStatusRunning)
+	if err != nil {
+		return fmt.Errorf("defer job: %w", err)
+	}
+	return s.ensureTransitioned(ctx, res, id)
 }
 
 // orphanExhaustedError is the last_error of an orphan with no attempts left.
