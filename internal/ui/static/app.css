@@ -817,6 +817,10 @@ ol.results { list-style: none; padding: 0; }
 .result-where .path b { color: var(--text-2); font-weight: 540; }
 .result-title { margin-top: 0.3rem; font-size: 1.0625rem; font-weight: 600; line-height: 1.35; letter-spacing: -0.01em; }
 .result-title a { color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+/* An untitled result, named by its short address, or by its bookmark's
+   title in the title's own font, as a list's document cell names it. */
+.result-title a.untitled { font-family: var(--mono); font-size: 0.86em; font-weight: 500; color: var(--text-2); }
+.result-title a.from-bookmark { font-style: italic; font-weight: 500; color: var(--text-2); }
 .result-title a:hover { color: var(--accent-text); text-decoration: none; }
 .snippet { margin-top: var(--s2); color: var(--text-2); line-height: 1.6; overflow-wrap: anywhere; }
 .snippet + .snippet { margin-top: var(--s1); padding-top: var(--s1); }
@@ -828,6 +832,8 @@ ol.results { list-style: none; padding: 0; }
 .score { display: none; font-family: var(--mono); font-size: var(--fs-xs); color: var(--text-3); }
 /* "Show scores": a checkbox, no script. */
 body:has(#show-scores:checked) .score { display: inline; }
+/* The last page of a search that matched more than it ranks says so. */
+.results-note { margin-top: var(--s5); color: var(--text-3); font-size: var(--fs-sm); text-align: center; }
 
 /* Search home -------------------------------------------------------------
    One frame for home and results. On the landing (#results holds
@@ -909,6 +915,8 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .related li { padding: 0.65rem var(--s5); border-top: 1px solid var(--border); }
 .related li:first-child { border-top: 0; }
 .related a { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; color: var(--text); font-weight: 540; line-height: 1.4; }
+.related a.untitled { font-family: var(--mono); font-size: 0.86em; font-weight: 500; color: var(--text-2); }
+.related a.from-bookmark { font-style: italic; font-weight: 500; color: var(--text-2); }
 .related a:hover { color: var(--accent-text); text-decoration: none; }
 .related .doc-sub { justify-content: space-between; }
 .bookmark-list { list-style: none; padding: 0; }

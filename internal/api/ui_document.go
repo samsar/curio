@@ -204,7 +204,7 @@ func (h pageHandlers) relatedPanel(r *http.Request, id string) ui.RelatedPanel {
 	var p ui.RelatedPanel
 	for _, hit := range resp.Items {
 		p.Docs = append(p.Docs, ui.RelatedDoc{DocumentID: hit.Document.ID, Title: deref(hit.Document.Title),
-			URL: hit.Document.URL, Score: hit.Score})
+			BookmarkTitle: strings.TrimSpace(hit.BookmarkTitle), URL: hit.Document.URL, Score: hit.Score})
 	}
 	return p
 }
