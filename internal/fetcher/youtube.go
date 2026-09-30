@@ -70,9 +70,11 @@ const (
 	// so this is a fixed step, longer than GitHub's minute without a hint.
 	youtubeRateLimitCooldown = 2 * time.Minute
 	// maxInlineYouTubeWait is the longest cooldown a fetch sits out before
-	// running yt-dlp. A longer one fails the fetch at once, retryably:
-	// sitting it out would hold a fetch worker.
+	// running yt-dlp. A longer one defers the fetch at once: sitting it out
+	// would hold a fetch worker.
 	maxInlineYouTubeWait = 30 * time.Second
+	// youTubeHoldReason is what a deferred YouTube fetch waits for.
+	youTubeHoldReason = "YouTube's rate limit to pass"
 )
 
 func NewYouTube(opts YouTubeOptions) *YouTube {
@@ -112,7 +114,7 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 
 	canonicalURL := "https://www.youtube.com/watch?v=" + videoID
 
-	// A cooldown too long to sit out fails the fetch before it queues for
+	// A cooldown too long to sit out defers the fetch before it queues for
 	// a slot.
 	if err := y.awaitCooldown(ctx, canonicalURL); err != nil {
 		return nil, err
@@ -189,8 +191,8 @@ func (y *YouTube) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 
 // awaitCooldown sits out a rate-limit cooldown that ends within
 // maxInlineYouTubeWait (see pace; the daemon paces yt-dlp starts itself).
-// A longer one fails at once, without running yt-dlp, with a retryable 429
-// carrying the time left.
+// A longer one returns at once, without running yt-dlp, a *DeferError until
+// the cooldown ends around a 429 carrying the time left.
 func (y *YouTube) awaitCooldown(ctx context.Context, videoURL string) error {
 	left, err := pace(ctx, nil, &y.cooldown, y.clock, maxInlineYouTubeWait)
 	if err != nil {
@@ -198,7 +200,8 @@ func (y *YouTube) awaitCooldown(ctx context.Context, videoURL string) error {
 	}
 	if left > 0 {
 		se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: videoURL, RetryAfter: left}
-		return fmt.Errorf("youtube: not run, rate-limit cooldown has %s left: %w", left.Round(time.Second), se)
+		return heldBack(&y.cooldown, youTubeHoldReason,
+			fmt.Errorf("youtube: not run, rate-limit cooldown has %s left: %w", left.Round(time.Second), se))
 	}
 	return nil
 }
@@ -260,8 +263,10 @@ func (y *YouTube) runYTDLP(ctx context.Context, videoID, videoURL, tmpDir string
 		}
 		err = toolError("youtube: yt-dlp", err, msg)
 		if rateLimited {
-			// The hint travels on the error for when the job queue can honor
-			// it; the cooldown already holds back this fetcher's other runs.
+			// This run met the limit, so it fails like any answer: the queue
+			// retries it on its own backoff, and a retry that comes inside
+			// the cooldown is deferred until it ends (awaitCooldown), as are
+			// this fetcher's other runs.
 			se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: videoURL, RetryAfter: youtubeRateLimitCooldown}
 			return nil, nil, fmt.Errorf("%w (rate limited, yt-dlp runs paused for %s: %w)", err, youtubeRateLimitCooldown, se)
 		}

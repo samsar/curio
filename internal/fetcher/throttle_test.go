@@ -17,6 +17,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
+
+	"github.com/samsar/curio/internal/store"
 )
 
 const jinaArticle = "Title: Via Jina\n\nMarkdown Content:\n"
@@ -322,8 +324,11 @@ func TestNative_JinaRateLimitCooldown(t *testing.T) {
 }
 
 // TestNative_JinaLongCooldownFailsFast: a Retry-After beyond the inline
-// cap stops all Jina calls for the cooldown. Callers get a retryable 429
-// with the time left, and no host verdict is cached.
+// cap stops all Jina calls for the cooldown. Every fetch that needs Jina,
+// the one whose call met the 429 included, is deferred until the cooldown
+// ends, around a retryable 429 with the time left, and keeps the origin's
+// sentinel and cause. No host verdict is cached, and Jina's health counts
+// only the call that was sent.
 func TestNative_JinaLongCooldownFailsFast(t *testing.T) {
 	var jinaHits atomic.Int32
 	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -339,7 +344,7 @@ func TestNative_JinaLongCooldownFailsFast(t *testing.T) {
 
 	fc := newFakeClock()
 	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
-	for _, path := range []string{"/a", "/b", "/c"} {
+	for i, path := range []string{"/a", "/b", "/c"} {
 		_, err := n.Fetch(context.Background(), origin.URL+path)
 		require.ErrorIs(t, err, ErrAntiBot)
 		var pe *PermanentError
@@ -349,8 +354,20 @@ func TestNative_JinaLongCooldownFailsFast(t *testing.T) {
 		require.ErrorAs(t, err, &se, "errors.As finds Jina's status, not the origin's 403")
 		assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
 		assert.Equal(t, 120*time.Second, se.RetryAfter)
+
+		de := requireDeferred(t, err, fc.now().Add(120*time.Second))
+		assert.Equal(t, jinaHoldReason, de.Reason)
+		assert.True(t, strings.HasPrefix(err.Error(), "jina: not sent, cooldown has 2m0s left: "), err.Error())
+		fb, ok := errors.AsType[*jinaFallbackError](err)
+		require.True(t, ok)
+		assert.Same(t, de, fb.jina, "the deferral is Jina's failure, unchanged")
+		assert.Equal(t, store.FailureCauseAntiBot, FailureCause(err), "the origin still speaks for the target")
+		if i == 0 {
+			assert.Equal(t, map[CallClass]int{CallRateLimited: 1}, n.JinaHealth().Recent)
+		}
 	}
 	assert.Equal(t, int32(1), jinaHits.Load(), "no Jina requests during the cooldown")
+	assert.Equal(t, map[CallClass]int{CallRateLimited: 1}, n.JinaHealth().Recent, "a held call is no call")
 	assert.Empty(t, fc.slept())
 	_, cached := n.hostCache.Get(hostOf(origin.URL))
 	assert.False(t, cached)
@@ -358,9 +375,10 @@ func TestNative_JinaLongCooldownFailsFast(t *testing.T) {
 
 // TestNative_JinaChallengePausesJina: when r.jina.ai's CDN challenges
 // curio, every Jina call pauses for the answer's Retry-After, or
-// jinaChallengeCooldown without one, with one warning. A fetch inside the
-// pause fails fast and retryably without a Jina request or a cache entry;
-// once the pause has passed, Jina is asked again.
+// jinaChallengeCooldown without one, with one warning. The fetch that was
+// challenged fails like any answer. A fetch inside the pause is deferred
+// until it ends, without a Jina request or a cache entry; once the pause
+// has passed, Jina is asked again.
 func TestNative_JinaChallengePausesJina(t *testing.T) {
 	const key = "jina_secret_key_123"
 	cases := []struct {
@@ -403,6 +421,8 @@ func TestNative_JinaChallengePausesJina(t *testing.T) {
 			_, err := n.Fetch(context.Background(), origin.URL+"/a")
 			require.ErrorIs(t, err, errJinaChallenged)
 			assert.Contains(t, err.Error(), "r.jina.ai's CDN challenged the request")
+			assertNotDeferred(t, err)
+			calls := n.JinaHealth().Recent
 			assert.Equal(t, tc.pause, n.jinaCooldown.remaining(fc.now()))
 			assert.Equal(t, 1, warnings())
 			assert.Contains(t, logs.String(), "CDN challenged curio")
@@ -418,6 +438,8 @@ func TestNative_JinaChallengePausesJina(t *testing.T) {
 			require.ErrorAs(t, err, &se)
 			assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
 			assert.Equal(t, tc.pause, se.RetryAfter)
+			requireDeferred(t, err, fc.now().Add(tc.pause))
+			assert.Equal(t, calls, n.JinaHealth().Recent, "a held call is no call")
 			assert.Equal(t, int32(1), jinaHits.Load(), "no Jina request inside the pause")
 			assert.Equal(t, 1, warnings(), "one warning per pause")
 			_, cached := n.hostCache.Get(hostOf(origin.URL))
@@ -492,9 +514,9 @@ func TestNative_JinaChallengeWarnsOncePerPause(t *testing.T) {
 }
 
 // TestNative_JinaLongCooldownDoesNotQueue: with a long cooldown active,
-// Jina-bound fetches fail fast without waiting their turn in the keyless
-// limiter (one token every 3s), which would hold the fifth for 12s only to
-// fail the same way.
+// Jina-bound fetches are deferred at once, without waiting their turn in
+// the keyless limiter (one token every 3s), which would hold the fifth for
+// 12s only to be deferred the same way.
 func TestNative_JinaLongCooldownDoesNotQueue(t *testing.T) {
 	t.Setenv("CURIO_JINA_API_KEY", "") // the keyless rate
 	var jinaHits atomic.Int32
@@ -510,6 +532,7 @@ func TestNative_JinaLongCooldownDoesNotQueue(t *testing.T) {
 
 	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
 	n.jinaCooldown.extend(time.Now(), 120*time.Second) // another worker's 429
+	pauseEnds := n.jinaCooldown.deadline()
 
 	start := time.Now()
 	var wg sync.WaitGroup
@@ -527,6 +550,7 @@ func TestNative_JinaLongCooldownDoesNotQueue(t *testing.T) {
 		var se *HTTPStatusError
 		require.ErrorAs(t, err, &se)
 		assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
+		requireDeferred(t, err, pauseEnds)
 	}
 	assert.Zero(t, jinaHits.Load())
 }

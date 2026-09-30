@@ -75,9 +75,11 @@ type rateLimiter interface {
 
 // pace clears one call to an upstream that lim paces and c cools down. A
 // cooldown longer than maxInline returns the time left without waiting, for
-// the caller to fail fast rather than hold a worker; the job queue's backoff
-// covers the rest. lim is nil when the caller is paced elsewhere; only the
-// cooldown applies then.
+// the caller to defer the fetch (heldBack) rather than hold a worker; the
+// job queue runs it again when the cooldown ends. lim is nil when the
+// caller is paced elsewhere; only the cooldown applies then. The limiter's
+// wait is always sat out: it is a steady pace, as long as the turns of the
+// callers queued ahead.
 //
 // The cooldown is checked twice. Before queueing in the limiter, so a
 // cooldown already too long to sit out fails at once instead of after the

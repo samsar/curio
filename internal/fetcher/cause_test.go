@@ -425,10 +425,18 @@ func otherCauseCases() []causeCase {
 	}
 }
 
+// heldCauseCases are the cases whose call curio held back itself, which
+// alone are deferred (DeferError). Every other case, an upstream's 429 or
+// a yt-dlp run that met one included, ended in an answer.
+var heldCauseCases = map[string]bool{
+	"github: the cooldown":  true,
+	"youtube: the cooldown": true,
+}
+
 // TestFailureCause: each failed fetch gets its cause, which is one of the
 // store's causes, and a dead link exactly when the error is one, the rule
 // that makes a document dead. The fetch handler's wrapping changes
-// nothing.
+// nothing, and only a call curio held back is deferred.
 func TestFailureCause(t *testing.T) {
 	assert.Empty(t, FailureCause(nil))
 	for _, tc := range slices.Concat(nativeCauseCases(), otherCauseCases()) {
@@ -440,6 +448,8 @@ func TestFailureCause(t *testing.T) {
 			assert.Contains(t, store.FailureCauses(), got)
 			assert.Equal(t, errors.Is(err, ErrDeadLink), got == store.FailureCauseDeadLink)
 			assert.Equal(t, got, FailureCause(fmt.Errorf("fetch failed: %w", err)))
+			_, deferred := errors.AsType[*DeferError](err)
+			assert.Equal(t, heldCauseCases[tc.name], deferred, "deferred: %v", err)
 		})
 	}
 }
