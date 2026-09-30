@@ -12,7 +12,9 @@ import (
 // kinds that are host-wide ("this whole site rejects us") rather than
 // path-specific ("this URL was 404"). 404s, thin pages and timeouts aren't
 // cached because a failure on /foo doesn't tell us anything about /bar.
-// See hostVerdict for how a failure is classified.
+// See hostVerdict for how a failure is classified, and Native's
+// pastCachedHost for what an entry of each kind does to the host's other
+// pages.
 type HostFailureKind int
 
 const (
@@ -47,22 +49,44 @@ func (k HostFailureKind) sentinel() error {
 	return fmt.Errorf("unknown host failure kind %d", int(k))
 }
 
-// hostCacheEntry stores one prior failure for a host. originalErr is
-// preserved so future short-circuits can return the same diagnostic
-// instead of a generic "we cached this" message.
-type hostCacheEntry struct {
-	kind        HostFailureKind
-	originalErr string
-	seenAt      time.Time
+// waitReason is what a page on host waits for while an entry of this kind
+// holds it back, worded to follow "waiting for".
+func (k HostFailureKind) waitReason(host string) string {
+	switch k {
+	case HostFailUnreachable:
+		return host + " to be tried again: it couldn't be reached"
+	case HostFailAntiBot:
+		return host + " to be tried again: it blocked curio's last request"
+	case HostFailLoginWall:
+		return host + " to be tried again: it sent curio's last request to its login page"
+	}
+	return host + " to be tried again"
 }
 
-// hostFailureCache memoizes host-wide failures so repeat fetches of bad
-// domains short-circuit without burning the full 5×retry × N×backoff
-// budget. A hit is surfaced by Native.Fetch as a PermanentError — the
-// job fails immediately rather than backing off into the same cached
-// verdict. Concurrent-safe; bounded by sweeping expired entries on every
-// Put (cheap because the population of hosts in a corpus is small —
-// hundreds, not millions).
+// hostCacheEntry is one host's cached failure: its kind, what the origin
+// answered (originErr, which every page the entry holds back quotes), and
+// when the entry expires.
+type hostCacheEntry struct {
+	kind      HostFailureKind
+	originErr string
+	until     time.Time
+}
+
+// err is the error of a page the entry holds back: the kind's sentinel,
+// for errors.Is, and the origin's answer in a "(cached: …)" suffix, which
+// survives into last_error for diagnosis.
+func (e hostCacheEntry) err() error {
+	return fmt.Errorf("native: %w (cached: %s)", e.kind.sentinel(), e.originErr)
+}
+
+// hostFailureCache remembers host-wide failures (hostVerdict) for ttl, so
+// the rest of a bad host's pages don't repeat the origin request whose
+// answer is known: an unreachable host's pages fail at once, and an
+// anti-bot or login-wall host's go to Jina without it (Native's
+// pastCachedHost). Time is the caller's, from the Native's clock.
+// Concurrent-safe; bounded by sweeping long-expired entries on every Put
+// (cheap because the population of hosts in a corpus is small — hundreds,
+// not millions).
 type hostFailureCache struct {
 	mu      sync.RWMutex
 	entries map[string]hostCacheEntry
@@ -79,36 +103,36 @@ func newHostFailureCache(ttl time.Duration) *hostFailureCache {
 	}
 }
 
-// Get returns the cached failure for host if one exists and is fresh.
-// Returns zero entry + false on miss or expired.
-func (c *hostFailureCache) Get(host string) (hostCacheEntry, bool) {
+// Get returns host's entry while it is fresh at now, and false on a miss or
+// once it has expired.
+func (c *hostFailureCache) Get(host string, now time.Time) (hostCacheEntry, bool) {
 	if host == "" {
 		return hostCacheEntry{}, false
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	e, ok := c.entries[host]
-	if !ok || time.Since(e.seenAt) > c.ttl {
+	if !ok || !now.Before(e.until) {
 		return hostCacheEntry{}, false
 	}
 	return e, true
 }
 
-// Put records a host-wide failure. Sweeps expired entries opportunistically
-// so the map doesn't grow without bound.
-func (c *hostFailureCache) Put(host string, kind HostFailureKind, errMsg string) {
+// Put records a host-wide failure seen at now, quoting originErr, the
+// origin's own answer. Sweeps expired entries opportunistically so the map
+// doesn't grow without bound.
+func (c *hostFailureCache) Put(host string, kind HostFailureKind, originErr string, now time.Time) {
 	if host == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[host] = hostCacheEntry{kind: kind, originalErr: errMsg, seenAt: time.Now()}
+	c.entries[host] = hostCacheEntry{kind: kind, originErr: originErr, until: now.Add(c.ttl)}
 
-	// Opportunistic sweep: on every Put, drop any entry older than 2×TTL.
-	// Cheap because typical map size is small.
-	cutoff := time.Now().Add(-2 * c.ttl)
+	// Opportunistic sweep: on every Put, drop any entry written 2×TTL ago
+	// or more. Cheap because typical map size is small.
 	for h, e := range c.entries {
-		if e.seenAt.Before(cutoff) {
+		if !e.until.Add(c.ttl).After(now) {
 			delete(c.entries, h)
 		}
 	}

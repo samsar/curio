@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -245,7 +246,8 @@ func TestHostGate(t *testing.T) {
 
 // TestNative_JinaLimiterIsShared: all Jina calls share one limiter. With
 // one token an hour, two concurrent fetches make exactly one Jina request;
-// the other gives up when its context runs out.
+// the other gives up when its context runs out. The site's own spacing is
+// off, so only the limiter holds the second.
 func TestNative_JinaLimiterIsShared(t *testing.T) {
 	source := serveThinPage(t)
 	defer source.Close()
@@ -258,6 +260,7 @@ func TestNative_JinaLimiterIsShared(t *testing.T) {
 
 	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
 	n.jinaLimiter = rate.NewLimiter(rate.Every(time.Hour), 1)
+	n.jinaSites = newSitePacer(0)
 
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
@@ -369,8 +372,7 @@ func TestNative_JinaLongCooldownDefers(t *testing.T) {
 	assert.Equal(t, int32(1), jinaHits.Load(), "no Jina requests during the cooldown")
 	assert.Equal(t, map[CallClass]int{CallRateLimited: 1}, n.JinaHealth().Recent, "a held call is no call")
 	assert.Empty(t, fc.slept())
-	_, cached := n.hostCache.Get(hostOf(origin.URL))
-	assert.False(t, cached)
+	assert.False(t, hostCached(n, hostOf(origin.URL)))
 }
 
 // TestNative_JinaChallengePausesJina: when r.jina.ai's CDN challenges
@@ -442,8 +444,7 @@ func TestNative_JinaChallengePausesJina(t *testing.T) {
 			assert.Equal(t, calls, n.JinaHealth().Recent, "a held call is no call")
 			assert.Equal(t, int32(1), jinaHits.Load(), "no Jina request inside the pause")
 			assert.Equal(t, 1, warnings(), "one warning per pause")
-			_, cached := n.hostCache.Get(hostOf(origin.URL))
-			assert.False(t, cached)
+			assert.False(t, hostCached(n, hostOf(origin.URL)))
 
 			fc.advance(tc.pause)
 			res, err := n.Fetch(context.Background(), origin.URL+"/c")
@@ -684,8 +685,8 @@ func TestNative_OriginConcurrencyPerHost(t *testing.T) {
 }
 
 // TestNative_QueuedFetchesSeeFreshVerdict: fetches queued behind the ones
-// that got a host cached as anti-bot fail from the cache when their turn
-// comes, without contacting the origin.
+// that got a host cached as anti-bot see the entry when their turn comes:
+// with Jina off, they wait for it to expire without contacting the origin.
 func TestNative_QueuedFetchesSeeFreshVerdict(t *testing.T) {
 	var hits, inFlight atomic.Int32
 	release := make(chan struct{})
@@ -697,7 +698,9 @@ func TestNative_QueuedFetchesSeeFreshVerdict(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	fc := newFakeClock()
 	n := NewNative(NativeOptions{Timeout: 30 * time.Second})
+	n.clock = fc.clock()
 	var wg sync.WaitGroup
 	errs := make([]error, 6)
 	for i := range errs {
@@ -708,14 +711,157 @@ func TestNative_QueuedFetchesSeeFreshVerdict(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, int32(originRequestsPerHost), hits.Load(), "queued fetches must not reach the origin")
-	cached := 0
+	held := 0
 	for _, err := range errs {
 		require.ErrorIs(t, err, ErrAntiBot)
 		if strings.Contains(err.Error(), "(cached:") {
-			cached++
+			held++
+			requireDeferred(t, err, fc.now().Add(15*time.Minute))
 		}
 	}
-	assert.Equal(t, len(errs)-originRequestsPerHost, cached)
+	assert.Equal(t, len(errs)-originRequestsPerHost, held)
+}
+
+// TestNative_QueuedFetchPastAFreshEntry: a fetch that queued for an origin
+// slot while its host got cached sees the entry once it holds the slot, and
+// releases the slot before it calls Jina.
+func TestNative_QueuedFetchPastAFreshEntry(t *testing.T) {
+	var originHits atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originHits.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer origin.Close()
+	var inJina atomic.Int32
+	release := make(chan struct{})
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		inJina.Add(1)
+		<-release
+		_, _ = w.Write([]byte(jinaArticleBody()))
+	}))
+	defer jina.Close()
+
+	fc := newFakeClock()
+	n := unpaced(NewNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	host := hostOf(origin.URL)
+	holders := func() int {
+		n.originSlots.mu.Lock()
+		defer n.originSlots.mu.Unlock()
+		if e, ok := n.originSlots.hosts[host]; ok {
+			return e.refs
+		}
+		return 0
+	}
+	slots := make([]func(), 0, originRequestsPerHost)
+	for range originRequestsPerHost {
+		r, err := n.originSlots.acquire(t.Context(), host)
+		require.NoError(t, err)
+		slots = append(slots, r)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := n.Fetch(context.Background(), origin.URL+"/queued")
+		done <- err
+	}()
+	require.Eventually(t, func() bool { return holders() == originRequestsPerHost+1 }, 5*time.Second, time.Millisecond,
+		"the fetch waits for a slot")
+	n.hostCache.Put(host, HostFailAntiBot, cachedOrigin403, fc.now())
+	slots[0]()
+
+	require.Eventually(t, func() bool { return inJina.Load() == 1 }, 5*time.Second, time.Millisecond)
+	assert.Equal(t, originRequestsPerHost-1, holders(), "the fetch let its slot go before calling Jina")
+	close(release)
+	require.NoError(t, <-done)
+	assert.Zero(t, originHits.Load(), "the origin is not asked")
+	slots[1]()
+}
+
+// TestNative_CachedHostSkipsTheOrigin: past a fresh anti-bot entry, a page
+// of the host goes to Jina without an origin request and without an origin
+// slot, and is stored when Jina serves it, marked with the entry's kind.
+func TestNative_CachedHostSkipsTheOrigin(t *testing.T) {
+	var originHits atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originHits.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer origin.Close()
+	var inJina atomic.Int32
+	release := make(chan struct{})
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		inJina.Add(1)
+		<-release
+		_, _ = w.Write([]byte(jinaArticleBody()))
+	}))
+	defer jina.Close()
+
+	fc := newFakeClock()
+	n := unpaced(NewNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	host := hostOf(origin.URL)
+	n.hostCache.Put(host, HostFailAntiBot, "native: HTTP 403 Forbidden: "+ErrAntiBot.Error(), fc.now())
+
+	type result struct {
+		res *Result
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		res, err := n.Fetch(context.Background(), origin.URL+"/b")
+		done <- result{res, err}
+	}()
+	require.Eventually(t, func() bool { return inJina.Load() == 1 }, 5*time.Second, time.Millisecond)
+	n.originSlots.mu.Lock()
+	_, holding := n.originSlots.hosts[host]
+	n.originSlots.mu.Unlock()
+	assert.False(t, holding, "no origin slot is held while Jina works")
+	close(release)
+
+	got := <-done
+	require.NoError(t, got.err)
+	assert.Equal(t, "jina", got.res.Meta["via"])
+	assert.Equal(t, "anti-bot", got.res.Meta["host_cache"])
+	assert.Zero(t, originHits.Load(), "the origin is not asked")
+}
+
+// TestNative_CachedHostVerdictWritesNothing: Jina's verdict on a page that
+// skipped the origin neither writes nor refreshes the host's entry, which
+// expires when the origin's answer set it to.
+func TestNative_CachedHostVerdictWritesNothing(t *testing.T) {
+	var originHits atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originHits.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer origin.Close()
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, jinaReply("Short", nil, "too short"))
+	}))
+	defer jina.Close()
+
+	fc := newFakeClock()
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	host := hostOf(origin.URL)
+	_, err := n.Fetch(context.Background(), origin.URL+"/a")
+	require.ErrorIs(t, err, errJinaRejected)
+	written, ok := n.hostCache.Get(host, fc.now())
+	require.True(t, ok, "the origin's 403, with Jina's verdict, is cached")
+	assert.Equal(t, fc.now().Add(15*time.Minute), written.until)
+
+	fc.advance(10 * time.Minute)
+	_, err = n.Fetch(context.Background(), origin.URL+"/b")
+	var pe *PermanentError
+	require.ErrorAs(t, err, &pe, "Jina's verdict on the page is final")
+	now, ok := n.hostCache.Get(host, fc.now())
+	require.True(t, ok)
+	assert.Equal(t, written, now, "the entry is not refreshed")
+	assert.Equal(t, int32(1), originHits.Load())
+
+	fc.advance(5 * time.Minute)
+	assert.False(t, hostCached(n, host), "it expires when it was set to")
+	_, err = n.Fetch(context.Background(), origin.URL+"/c")
+	require.Error(t, err)
+	assert.Equal(t, int32(2), originHits.Load(), "then the origin is asked again")
 }
 
 // TestNative_OriginSlotFreeDuringJina: a fetch waiting on Jina doesn't hold

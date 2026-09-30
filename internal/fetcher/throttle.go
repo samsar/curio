@@ -89,6 +89,9 @@ type rateLimiter interface {
 // when a rate-limit answer arrived still sees it. A caller that sits a
 // cooldown out queues for a fresh token afterwards, so the callers it held
 // up resume at the limiter's pace rather than all at once when it ends.
+//
+// A Jina call takes its site's turn before it gets here (Native.awaitJina),
+// so a site held back for longer never queues for a token.
 func pace(ctx context.Context, lim rateLimiter, c *cooldown, clk clock, maxInline time.Duration) (time.Duration, error) {
 	if left := c.remaining(clk.now()); left > maxInline {
 		return left, nil

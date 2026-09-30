@@ -221,8 +221,7 @@ func TestNative_ErrorPageFromOrigin(t *testing.T) {
 			var pe *PermanentError
 			assert.ErrorAs(t, err, &pe, "every extraction path answered")
 			assert.Equal(t, tc.jinaCalls, jinaCalls())
-			_, cached := n.hostCache.Get(hostOf(srv.URL))
-			assert.False(t, cached)
+			assert.False(t, hostCached(n, hostOf(srv.URL)))
 		})
 	}
 
@@ -234,8 +233,7 @@ func TestNative_ErrorPageFromOrigin(t *testing.T) {
 		var pe *PermanentError
 		assert.False(t, errors.As(err, &pe), "a server error is retried: %v", err)
 		assert.Zero(t, jinaCalls())
-		_, cached := n.hostCache.Get(hostOf(srv.URL))
-		assert.False(t, cached)
+		assert.False(t, hostCached(n, hostOf(srv.URL)))
 	})
 }
 

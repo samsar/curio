@@ -151,8 +151,7 @@ const blockPageHTML = `<html><head><title>Attention Required! | Cloudflare</titl
 func assertUncached(t *testing.T, n *Native) {
 	t.Helper()
 	for _, host := range []string{"127.0.0.1", "localhost"} {
-		_, cached := n.hostCache.Get(host)
-		assert.False(t, cached, "%s must not be cached", host)
+		assert.False(t, hostCached(n, host), "%s must not be cached", host)
 	}
 }
 
@@ -331,8 +330,7 @@ func TestNative_SameSiteLoginRedirectIsSiteWide(t *testing.T) {
 	var pe *PermanentError
 	assert.False(t, errors.As(err, &pe), "the first failure stays retryable: %v", err)
 	assert.Equal(t, int32(1), jinaCalls())
-	_, cached := n.hostCache.Get("127.0.0.1")
-	assert.True(t, cached)
+	assert.True(t, hostCached(n, "127.0.0.1"))
 }
 
 // TestNative_BlockedLandingPageIsDead: a redirect onto another site's
@@ -350,7 +348,7 @@ func TestNative_BlockedLandingPageIsDead(t *testing.T) {
 						src := newBlockedCrossSiteRedirect(t, dest, status)
 						n, jinaCalls := landingJinaNative(t, backend, jina, true)
 						if destCached {
-							n.hostCache.Put("localhost", HostFailAntiBot, "native: HTTP 403 Forbidden: "+ErrAntiBot.Error())
+							n.hostCache.Put("localhost", HostFailAntiBot, "native: HTTP 403 Forbidden: "+ErrAntiBot.Error(), n.clock.now())
 						}
 
 						_, err := n.Fetch(context.Background(), src+source)
@@ -366,10 +364,8 @@ func TestNative_BlockedLandingPageIsDead(t *testing.T) {
 							status, http.StatusText(status), dest, regexp.QuoteMeta(ErrDeadLink.Error())), err.Error())
 						assert.Zero(t, jinaCalls())
 
-						_, cached := n.hostCache.Get("127.0.0.1")
-						assert.False(t, cached, "the requested host is not cached")
-						_, cached = n.hostCache.Get("localhost")
-						assert.Equal(t, destCached, cached, "the destination is cached only as seeded")
+						assert.False(t, hostCached(n, "127.0.0.1"), "the requested host is not cached")
+						assert.Equal(t, destCached, hostCached(n, "localhost"), "the destination is cached only as seeded")
 					})
 				}
 			}
@@ -394,8 +390,7 @@ func TestNative_BlockedHomepageIsDead(t *testing.T) {
 			assert.Contains(t, err.Error(), fmt.Sprintf("HTTP %d", status))
 			assert.Contains(t, err.Error(), "dead link (redirected to homepage)")
 			assert.Zero(t, jinaCalls())
-			_, cached := n.hostCache.Get("127.0.0.1")
-			assert.False(t, cached)
+			assert.False(t, hostCached(n, "127.0.0.1"))
 		})
 	}
 }
@@ -414,7 +409,7 @@ func TestNative_BlockedOffsiteLoginIsFinal(t *testing.T) {
 					src := newBlockedCrossSiteRedirect(t, "/login?continue=https://example.com/doc", status)
 					n, jinaCalls := landingJinaNative(t, "", true, detection)
 					if destCached {
-						n.hostCache.Put("localhost", HostFailAntiBot, "native: HTTP 403 Forbidden: "+ErrAntiBot.Error())
+						n.hostCache.Put("localhost", HostFailAntiBot, "native: HTTP 403 Forbidden: "+ErrAntiBot.Error(), n.clock.now())
 					}
 
 					_, err := n.Fetch(context.Background(), src+"/document/d/1AbC/edit")
@@ -431,10 +426,8 @@ func TestNative_BlockedOffsiteLoginIsFinal(t *testing.T) {
 					assert.NotContains(t, err.Error(), "(cached:")
 					assert.Zero(t, jinaCalls())
 
-					_, cached := n.hostCache.Get("127.0.0.1")
-					assert.False(t, cached, "the requested host is not cached")
-					_, cached = n.hostCache.Get("localhost")
-					assert.Equal(t, destCached, cached, "the destination is cached only as seeded")
+					assert.False(t, hostCached(n, "127.0.0.1"), "the requested host is not cached")
+					assert.Equal(t, destCached, hostCached(n, "localhost"), "the destination is cached only as seeded")
 				})
 			}
 		}
@@ -472,8 +465,7 @@ func TestNative_BlockedPageIsAntiBotWithoutARedirectVerdict(t *testing.T) {
 			assert.False(t, errors.As(err, &pe), "the first failure stays retryable: %v", err)
 			assert.Equal(t, int32(1), jinaCalls())
 			for _, host := range []string{"127.0.0.1", "localhost"} {
-				_, cached := n.hostCache.Get(host)
-				assert.Equal(t, host == tc.answering, cached, "%s cached", host)
+				assert.Equal(t, host == tc.answering, hostCached(n, host), "%s cached", host)
 			}
 		})
 		t.Run(tc.name+"/jina passes", func(t *testing.T) {

@@ -48,6 +48,7 @@ type Native struct {
 	jinaAPIKey        string
 	jinaLimiter       rateLimiter
 	jinaCooldown      cooldown
+	jinaSites         *sitePacer
 	jinaHealth        *healthTracker
 	deadLinkDetection bool
 	log               *slog.Logger
@@ -69,6 +70,11 @@ type NativeOptions struct {
 	// JinaAPIKey is sent as a bearer token and raises Jina's rate limit.
 	// Empty falls back to the CURIO_JINA_API_KEY environment variable.
 	JinaAPIKey string
+	// JinaSiteRequestsPerMinute caps the Jina requests for pages of one
+	// site (siteOf) a minute, key or not: Jina's abuse check blocks a
+	// domain's keyless reads after a burst. Zero or less means
+	// DefaultJinaSiteRequestsPerMinute.
+	JinaSiteRequestsPerMinute int
 	// DeadLinkDetection classifies hard 404/410 and detected soft 404s
 	// as permanent dead links (never retried, never sent to Jina).
 	// Off by default here like JinaFallback — the daemon passes the
@@ -100,6 +106,17 @@ const (
 	maxInlineJinaWait = 30 * time.Second
 	// jinaHoldReason is what a fetch deferred for Jina waits for.
 	jinaHoldReason = "the pause on Jina Reader calls to end"
+	// jinaSiteBlockDefault is how long Jina Reader's block of a site is
+	// taken to last when its answer gives no end curio can read: the blocks
+	// observed ended about an hour after they began.
+	jinaSiteBlockDefault = time.Hour
+	// minJinaSiteBlock and maxJinaSiteBlock bound the pause a block sets. A
+	// block always pauses its site a minute at least, since Jina has just
+	// refused it, so an end already past (a slow clock) can't send the
+	// site's pages straight back; and a day at most, the longest a job
+	// waits (store.DeferralBudget): one block named 2039.
+	minJinaSiteBlock = time.Minute
+	maxJinaSiteBlock = store.DeferralBudget
 	// jinaAttempts is how many times one fetch calls Jina for transient
 	// failures (5xx, 429, transport errors).
 	jinaAttempts = 4
@@ -127,6 +144,10 @@ func NewNative(opts NativeOptions) *Native {
 		jinaPerMinute = jinaKeyedRequestsPerMinute
 	}
 	jinaLimiter := rate.NewLimiter(rate.Every(time.Minute/time.Duration(jinaPerMinute)), 1)
+	perSite := opts.JinaSiteRequestsPerMinute
+	if perSite <= 0 {
+		perSite = DefaultJinaSiteRequestsPerMinute
+	}
 
 	// The stock backend has no Chrome fingerprint, but its headers still
 	// come from the latest profile.
@@ -159,6 +180,7 @@ func NewNative(opts NativeOptions) *Native {
 		jinaBaseURL:       opts.JinaBaseURL,
 		jinaAPIKey:        opts.JinaAPIKey,
 		jinaLimiter:       jinaLimiter,
+		jinaSites:         newSitePacer(time.Minute / time.Duration(perSite)),
 		jinaHealth:        newHealthTracker("jina", opts.Log),
 		deadLinkDetection: opts.DeadLinkDetection,
 		log:               opts.Log,
@@ -175,20 +197,20 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 		return nil, errors.New("native: url is empty")
 	}
 
-	// Fast-fail by domain: if this host had a host-wide failure recently,
-	// short-circuit instead of burning the full retry/Jina budget.
-	// Three reasons this matters in practice:
+	// A host whose failure spoke for all its pages (settle) is cached, and
+	// its other pages skip the origin request whose answer is known
+	// (pastCachedHost). Three reasons this matters in practice:
 	//   1. ~17% of import failures concentrate in <15 hosts (LinkedIn,
 	//      NYT, Inc.com, dribbble, etc.) — same fail signature every time.
-	//   2. Each origin failure costs ~30s of HTTP timeout + retries;
-	//      Jina fallback adds another ~30s of its own retries.
-	//   3. Hammering Jina with hopeless lookups gets us 429'd on the
-	//      cases where it would have helped.
+	//   2. Each origin failure costs ~30s of HTTP timeout + retries.
+	//   3. A host that just blocked curio blocks its next request too:
+	//      asking again for every page spends time and invites a longer
+	//      block.
 	// Cache is in-memory only — survives goroutines, not daemon restarts.
 	// That's fine: it re-warms within minutes of resuming.
 	host := hostOf(target)
-	if err := n.cachedFailure(target, host); err != nil {
-		return nil, err
+	if hit, ok := n.hostCache.Get(host, n.clock.now()); ok {
+		return n.pastCachedHost(ctx, target, host, hit, hit.err())
 	}
 
 	release, err := n.originSlots.acquire(ctx, host)
@@ -197,9 +219,11 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 	}
 	defer release()
 	// A verdict cached while this fetch queued for the host applies to it
-	// too; don't send the request that verdict says is hopeless.
-	if err := n.cachedFailure(target, host); err != nil {
-		return nil, err
+	// too; don't send the request that verdict says is hopeless, nor hold
+	// the slot past it.
+	if hit, ok := n.hostCache.Get(host, n.clock.now()); ok {
+		release()
+		return n.pastCachedHost(ctx, target, host, hit, hit.err())
 	}
 
 	// Pass 1: direct fetch + Readability (or local PDF extraction).
@@ -213,13 +237,14 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 	if errors.As(originErr, &pe) {
 		return nil, originErr
 	}
-	// A redirect can end on a host whose verdict is already cached. That
-	// verdict is as final here as for the host's own URLs; the checks above
-	// only cover the requested host, so without this one every retry would
-	// repeat the origin and Jina calls.
+	// A redirect can end on a host whose verdict is already cached. Its
+	// entry holds this page as it holds the host's own (the checks above
+	// only cover the requested host): without this one, every retry would
+	// ask the origin again and write the entry anew.
 	if _, answering, ok := hostVerdict(originErr, host); ok && answering != host {
-		if err := n.cachedFailure(target, answering); err != nil {
-			return nil, err
+		if hit, ok := n.hostCache.Get(answering, n.clock.now()); ok {
+			release()
+			return n.pastCachedHost(ctx, target, answering, hit, originErr)
 		}
 	}
 	if !n.jinaFallback || !jinaCanHelp(originErr) {
@@ -296,9 +321,10 @@ func jinaCanHelp(err error) bool {
 // or Jina refused it (errJinaRefused). Rate limits, outages, timeouts and
 // transport errors are trouble on Jina's side, 401/402 and a 403 that names
 // no target are about our client (our account, or r.jina.ai refusing
-// curio), and a transient status the target gave Jina is the target's
-// trouble for now; none of them is a verdict. The target's own 403 comes in
-// a warning, as a targetStatusError.
+// curio), Jina's block of the target's site (errJinaSiteBlocked) ends at a
+// time it names, and a transient status the target gave Jina is the
+// target's trouble for now; none of them is a verdict. The target's own 403
+// comes in a warning, as a targetStatusError.
 func jinaAnswered(err error) bool {
 	return errors.Is(err, errJinaRejected) || errors.Is(err, errJinaRefused)
 }
@@ -306,9 +332,10 @@ func jinaAnswered(err error) bool {
 // settle decides what an origin failure that no extraction path could
 // rescue becomes; err is what Fetch returns for it.
 //
-//   - A host-wide verdict is cached under the host that gave it, and err
-//     stays retryable: the first failure for a host gets one more real
-//     attempt, later URLs on the host hit the cache.
+//   - A host-wide verdict is cached under the host that gave it, quoting
+//     the origin's own answer, and err stays retryable: the first failure
+//     for a host gets one more real attempt, and later URLs on the host
+//     skip the origin while the entry lasts (pastCachedHost).
 //   - A page-level verdict Jina could have helped with is final. Every
 //     extraction path has answered, so a retry would only repeat the origin
 //     and Jina calls (up to four Jina requests each), which is the budget
@@ -316,11 +343,12 @@ func jinaAnswered(err error) bool {
 //   - Anything else (a transient status, a transport error) is returned as
 //     is.
 //
-// Only originErr is judged. Jina's verdicts are about the one page it was
-// asked for and never write the cache.
+// Only originErr is judged, and only its text is cached: Jina's verdicts
+// are about the one page it was asked for, and never write the cache nor
+// reach the host's other pages.
 func (n *Native) settle(requestedHost string, originErr, err error) error {
 	if kind, host, ok := hostVerdict(originErr, requestedHost); ok {
-		n.hostCache.Put(host, kind, err.Error())
+		n.hostCache.Put(host, kind, originErr.Error(), n.clock.now())
 		return err
 	}
 	if jinaCanHelp(originErr) {
@@ -371,22 +399,48 @@ func orHost(host, fallback string) string {
 	return host
 }
 
-// cachedFailure returns the fresh host-cache verdict for host as a
-// PermanentError, or nil. The verdict cannot change inside the TTL, so
-// letting the worker back off and retry (60s → 120s → 240s → 480s, ~15 min
-// per URL) would only re-read the cache four more times. Recovery once the
-// host is healthy is `curio refetch --all --state=failed`. The sentinel is
-// kept so callers can still errors.Is the failure kind, and the
-// "(cached: …)" suffix survives into last_error for diagnosis.
-func (n *Native) cachedFailure(target, host string) error {
-	cached, ok := n.hostCache.Get(host)
-	if !ok {
-		return nil
+// pastCachedHost fetches target, a page on host or redirected onto it,
+// past host's fresh cache entry hit. origin is the page's own origin
+// failure, or hit's error when the origin wasn't asked. The entry says what
+// the origin would answer, so:
+//
+//   - An unreachable host fails the page for good, from the entry: Jina
+//     can't reach the host either, and a name that doesn't resolve isn't
+//     back within the entry's life.
+//   - With Jina off, an anti-bot or login-wall host defers the page until
+//     the entry expires, when the origin is asked again. Nothing was learned
+//     about the page.
+//   - Otherwise Jina is asked, and its answer decides the page alone, as a
+//     fallback's does: a verdict about the target (a rejection, a refusal,
+//     a dead link, a body over the cap) is final, and Jina's own trouble,
+//     the target's for now, or a hold stays retryable or deferred. Nothing
+//     is cached or refreshed: the entry spoke for the host once, and Jina
+//     speaks for one page.
+//
+// The caller holds no origin slot.
+func (n *Native) pastCachedHost(ctx context.Context, target, host string, hit hostCacheEntry, origin error) (*Result, error) {
+	cached := hit.err()
+	switch {
+	case !jinaCanHelp(cached):
+		n.log.Info("fast-fail from host cache", "url", target, "host", host, "kind", hit.kind.String(),
+			"expires_in", hit.until.Sub(n.clock.now()).Round(time.Second).String())
+		return nil, &PermanentError{Err: cached}
+	case !n.jinaFallback:
+		return nil, &DeferError{Until: hit.until, Reason: hit.kind.waitReason(host), Err: cached}
 	}
-	n.log.Info("fast-fail from host cache",
-		"url", target, "host", host, "kind", cached.kind.String(),
-		"age_seconds", int(time.Since(cached.seenAt).Seconds()))
-	return &PermanentError{Err: fmt.Errorf("native: %w (cached: %s)", cached.kind.sentinel(), cached.originalErr)}
+
+	n.log.Info("host cache: asking jina without the origin", "url", target, "host", host,
+		"kind", hit.kind.String(), "expires_in", hit.until.Sub(n.clock.now()).Round(time.Second).String())
+	res, jinaErr := n.tryJina(ctx, target)
+	if jinaErr == nil {
+		res.Meta["host_cache"] = hit.kind.String()
+		return res, nil
+	}
+	err := &jinaFallbackError{jina: jinaErr, origin: origin}
+	if jinaAnswered(jinaErr) || errors.Is(jinaErr, ErrDeadLink) || errors.Is(jinaErr, ErrTooLarge) {
+		return nil, &PermanentError{Err: err}
+	}
+	return nil, err
 }
 
 // tryReadability does pass 1: fetch HTML, run Readability, render to
@@ -1215,11 +1269,49 @@ var (
 	errJinaChallenged = errors.New("r.jina.ai's CDN challenged the request")
 
 	// errJinaRefused marks Jina's own answer refusing the target
-	// (jinaRefusesTarget): a deterministic 4xx about the request, or a 403
-	// whose reason names the target's host. It is Jina's verdict about the
-	// target, like errJinaRejected, and costs one Jina request.
+	// (jinaRefusesTarget): a deterministic 4xx about the request, such as a
+	// publisher's opt-out (451), or a 403 whose reason names the target's
+	// host and is no site block. It is Jina's verdict about the target, like
+	// errJinaRejected, and costs one Jina request.
 	errJinaRefused = errors.New("refused the target")
+
+	// errJinaSiteBlocked marks Jina Reader's block of a site's keyless
+	// reads for now (an AbuseAlleviationError, jinaSiteBlock), and the calls
+	// curio holds back while it lasts (siteBlockedError). It says nothing
+	// about the target: the site's pages wait for the block to end.
+	errJinaSiteBlocked = errors.New("blocks the site for now")
 )
+
+// jinaSiteBlock is Jina Reader's answer that it blocks keyless reads of a
+// domain until a time it names, after a burst of them: "AbuseAlleviationError:
+// Anonymous access to domain mobile.twitter.com blocked until Mon Sep 28
+// 2026 18:48:50 GMT+0000 (Coordinated Universal Time) due to previous abuse
+// found on …". err is the answer's error, errJinaSiteBlocked around Jina's
+// *HTTPStatusError, quoting its reason.
+type jinaSiteBlock struct {
+	domain string    // the domain the answer names; empty when it names none
+	until  time.Time // when the answer says the block ends; zero when it doesn't say readably
+	reason string    // Jina's reason (jinaReason)
+	err    error
+}
+
+func (e *jinaSiteBlock) Error() string { return e.err.Error() }
+func (e *jinaSiteBlock) Unwrap() error { return e.err }
+
+// siteBlockedError is a Jina call for a page of site that curio didn't
+// send, because Jina Reader blocks the site until until for reason.
+type siteBlockedError struct {
+	site   string
+	until  time.Time
+	reason string
+}
+
+func (e *siteBlockedError) Error() string {
+	return fmt.Sprintf("jina: not sent, Jina Reader blocks %s until %s: %s",
+		e.site, e.until.UTC().Format(time.RFC3339), e.reason)
+}
+
+func (*siteBlockedError) Unwrap() error { return errJinaSiteBlocked }
 
 // targetStatusError is the status the target answered Jina with, as Jina's
 // "Target URL returned error" warning reports it. It is deliberately not an
@@ -1237,11 +1329,12 @@ func (e *targetStatusError) Error() string {
 	return fmt.Sprintf("target answered HTTP %d", e.code)
 }
 
-// tryJina is pass 2: fetch r.jina.ai/<url>. Every call goes through the
-// shared limiter and cooldown (awaitJina), and every request's outcome
-// counts toward Jina's health (jinaHealth). Transient failures are retried
-// up to jinaAttempts times: 5xx and transport errors after a 2/4/8s backoff,
-// 429s after the cooldown they set.
+// tryJina is pass 2: fetch r.jina.ai/<url>. Every call takes its site's
+// turn and goes through the shared limiter and cooldown (awaitJina), and
+// every request's outcome counts toward Jina's health (jinaHealth).
+// Transient failures are retried up to jinaAttempts times: 5xx and
+// transport errors after a 2/4/8s backoff, 429s after the cooldown they
+// set. Jina's block of the site defers the fetch at once (siteBlocked).
 func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 	var lastErr error
 	for attempt := range jinaAttempts {
@@ -1250,7 +1343,7 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 				return nil, fmt.Errorf("jina: %w", err)
 			}
 		}
-		if err := n.awaitJina(ctx); err != nil {
+		if err := n.awaitJina(ctx, target); err != nil {
 			return nil, err
 		}
 
@@ -1264,6 +1357,11 @@ func (n *Native) tryJina(ctx context.Context, target string) (*Result, error) {
 			return res, nil
 		}
 		lastErr = err
+		// A site's block holds that site's pages alone, whatever its
+		// status: never the shared cooldown, and never a retry.
+		if sb, ok := errors.AsType[*jinaSiteBlock](err); ok {
+			return nil, n.siteBlocked(target, sb)
+		}
 		n.extendJinaCooldown(err, attempt)
 		if !jinaRetryable(err) || ctx.Err() != nil {
 			return nil, err
@@ -1288,7 +1386,9 @@ const jinaChallengeCooldown = 10 * time.Minute
 // extendJinaCooldown extends the cooldown every Jina call shares when a
 // failed call, attempt (0-based) of its fetch, says Jina would refuse the
 // next ones too. Jina limits per client, so a 429 pauses every caller, not
-// just this one; a CDN challenge pauses them for longer.
+// just this one; a CDN challenge pauses them for longer. A block of one
+// site, even one answered with a 429, pauses that site alone and never
+// comes here (siteBlocked).
 //
 // A challenge warns once per pause: the calls already in flight when the
 // CDN began challenging come back challenged too, and only extend the pause
@@ -1311,25 +1411,116 @@ func (n *Native) extendJinaCooldown(err error, attempt int) {
 	}
 }
 
-// awaitJina paces a Jina call through the shared limiter and cooldown (see
-// pace), sitting out a cooldown a 429 left when it ends within
-// maxInlineJinaWait. A longer one, such as a CDN challenge's pause, returns
-// at once, without a request, a *DeferError until the cooldown ends around
-// a 429 carrying the time left, whether or not this fetch has called Jina
+// awaitJina clears a Jina call for target, in this order:
+//
+//  1. The shared cooldown, when it already outlasts maxInlineJinaWait:
+//     before the site's turn, which it would otherwise spend.
+//  2. The turn of target's site (siteOf), which Jina Reader's block of the
+//     site also holds back (sitePacer.take).
+//  3. The shared limiter and cooldown (pace).
+//  4. The send-time guard, which spaces the site's requests again after
+//     the limiter's queue (sitePacer.spaceSend).
+//  5. The site's block, once more, right before the request goes.
+//
+// Waits up to maxInlineJinaWait are sat out; the limiter's and the guard's
+// always are, as steady paces. A longer hold returns at once, without a
+// request, a *DeferError until it ends: the cooldown's around a 429
+// carrying the time left, whether or not this fetch has called Jina
 // already. The fetch then runs again whole: the origin's answer is not
 // kept, since a block may have lifted by then, and a memo of it would be
 // state a restart loses.
-func (n *Native) awaitJina(ctx context.Context) error {
+func (n *Native) awaitJina(ctx context.Context, target string) error {
+	site := siteOf(hostOf(target))
+	if left := n.jinaCooldown.remaining(n.clock.now()); left > maxInlineJinaWait {
+		return n.cooldownHold(left)
+	}
+	turn := n.jinaSites.take(site, n.clock.now(), maxInlineJinaWait)
+	if !turn.until.IsZero() {
+		return n.siteHold(site, turn)
+	}
+	if err := n.sleepFor(ctx, turn.wait); err != nil {
+		return err
+	}
 	left, err := pace(ctx, n.jinaLimiter, &n.jinaCooldown, n.clock, maxInlineJinaWait)
 	if err != nil {
 		return fmt.Errorf("jina: %w", err)
 	}
 	if left > 0 {
-		se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: n.jinaBaseURL, RetryAfter: left}
-		return heldBack(&n.jinaCooldown, jinaHoldReason,
-			fmt.Errorf("jina: not sent, cooldown has %s left: %w", left.Round(time.Second), se))
+		return n.cooldownHold(left)
+	}
+	if err := n.sleepFor(ctx, n.jinaSites.spaceSend(site, n.clock.now())); err != nil {
+		return err
+	}
+	if turn, held := n.jinaSites.holdForBlock(site, n.clock.now()); held {
+		return n.siteHold(site, turn)
 	}
 	return nil
+}
+
+// sleepFor sits out a wait of d before a Jina call, on the Native's clock.
+func (n *Native) sleepFor(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	if err := n.clock.sleep(ctx, d); err != nil {
+		return fmt.Errorf("jina: %w", err)
+	}
+	return nil
+}
+
+// cooldownHold is the deferral of a Jina call the shared cooldown holds,
+// with left of it to go.
+func (n *Native) cooldownHold(left time.Duration) *DeferError {
+	se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: n.jinaBaseURL, RetryAfter: left}
+	return heldBack(&n.jinaCooldown, jinaHoldReason,
+		fmt.Errorf("jina: not sent, cooldown has %s left: %w", left.Round(time.Second), se))
+}
+
+// siteHold is the deferral of a Jina call for a page of site that the
+// site pacer holds past the inline cap, for the site's turn or its block.
+// Its error is retryable, and says nothing about the page.
+func (n *Native) siteHold(site string, turn siteTurn) *DeferError {
+	if turn.block != nil {
+		return &DeferError{Until: turn.until, Reason: siteBlockReason(site),
+			Err: &siteBlockedError{site: site, until: turn.block.until, reason: turn.block.reason}}
+	}
+	return &DeferError{Until: turn.until, Reason: "a turn at Jina Reader for " + site,
+		Err: fmt.Errorf("jina: not sent, %s's turn comes at %s (%s between its requests)",
+			site, turn.until.UTC().Format(time.RFC3339), n.jinaSites.interval)}
+}
+
+// siteBlockReason is what the pages of site wait for while Jina Reader
+// blocks it, worded to follow "waiting for".
+func siteBlockReason(site string) string { return "Jina Reader's block of " + site + " to lift" }
+
+// siteBlocked records Jina Reader's block of a site, from sb, its answer
+// to a request for target, and returns the deferral of target's fetch: it
+// waits for the block's end, spread out with the site's other pages (see
+// sitePacer). The site is the one the answer names, or target's when it
+// names none. The block lasts until the time the answer gives, or
+// jinaSiteBlockDefault without one, within [minJinaSiteBlock,
+// maxJinaSiteBlock]. It warns when it starts a block; answers that extend
+// one say nothing more.
+func (n *Native) siteBlocked(target string, sb *jinaSiteBlock) *DeferError {
+	now := n.clock.now()
+	site := siteOf(cmp.Or(sb.domain, hostOf(target)))
+	end := siteBlockEnd(sb.until, now)
+	turn, started := n.jinaSites.block(site, end, sb.reason, now)
+	if started {
+		n.log.Warn("Jina Reader blocks keyless reads of a site, holding its pages",
+			"site", site, "domain", sb.domain, "until", end)
+	}
+	return &DeferError{Until: turn.until, Reason: siteBlockReason(site), Err: sb}
+}
+
+// siteBlockEnd is when a block that Jina Reader said, at now, lasts until
+// said (zero when it didn't say readably) is taken to end.
+func siteBlockEnd(said, now time.Time) time.Time {
+	pause := jinaSiteBlockDefault
+	if !said.IsZero() {
+		pause = said.Sub(now)
+	}
+	return now.Add(min(max(pause, minJinaSiteBlock), maxJinaSiteBlock))
 }
 
 // jinaUserAgent is the User-Agent of every Jina request. r.jina.ai sits
@@ -1402,6 +1593,8 @@ func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 //
 //   - A 403 carrying Cloudflare's "cf-mitigated: challenge":
 //     errJinaChallenged. Its body is the challenge page, never quoted.
+//   - An AbuseAlleviationError, whatever its status (403 or 429): Jina's
+//     block of a site for now, a *jinaSiteBlock (errJinaSiteBlocked).
 //   - A refusal of the target (jinaRefusesTarget): errJinaRefused.
 //   - Anything else is Jina's trouble, or curio's with Jina, and no verdict.
 //
@@ -1411,6 +1604,8 @@ func jinaStatusError(target string, se *HTTPStatusError, header http.Header, rea
 	switch {
 	case se.StatusCode == http.StatusForbidden && strings.EqualFold(header.Get("Cf-Mitigated"), "challenge"):
 		return fmt.Errorf("jina: %w: %w", errJinaChallenged, se)
+	case strings.HasPrefix(reason, jinaAbuseErrorName+": "):
+		return parseSiteBlock(reason, fmt.Errorf("jina: %w: %w: %s", errJinaSiteBlocked, se, reason))
 	case jinaRefusesTarget(se.StatusCode, reason, hostOf(target)):
 		err = fmt.Errorf("%w: %w", errJinaRefused, se)
 	}
@@ -1423,11 +1618,10 @@ func jinaStatusError(target string, se *HTTPStatusError, header http.Header, rea
 // jinaRefusesTarget reports whether Jina's answer with status code, whose
 // body gave reason, refuses the target on host: a deterministic 4xx about
 // the request (400, 404, 410, 422, 451, …), or a 403 whose reason names
-// host. Jina's domain blocks name the domain they block:
-// "AbuseAlleviationError: Anonymous access to domain www.investing.com
-// blocked until …". A refusal of curio itself, such as Cloudflare's block
-// page or an IP ban, names no target, so a 403 that names none stays no
-// verdict rather than failing every document for good.
+// host. Jina's abuse blocks name the domain too, but end, and are told
+// apart before (jinaSiteBlock). A refusal of curio itself, such as
+// Cloudflare's block page or an IP ban, names no target, so a 403 that
+// names none stays no verdict rather than failing every document for good.
 func jinaRefusesTarget(code int, reason, host string) bool {
 	switch code {
 	case http.StatusUnauthorized, http.StatusPaymentRequired:
@@ -1462,6 +1656,46 @@ var urlInTextRE = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://\S*`)
 // jinaErrorLineRE matches the first line of a text answer in which Jina
 // names its error: "AbuseAlleviationError: Anonymous access to …".
 var jinaErrorLineRE = regexp.MustCompile(`^[A-Z][A-Za-z]*Error: `)
+
+// jinaAbuseErrorName is the name Jina Reader gives its block of a domain's
+// keyless reads, which opens the error's reason (jinaReason).
+const jinaAbuseErrorName = "AbuseAlleviationError"
+
+var (
+	// jinaSiteBlockRE reads the domain and the end of a block from an
+	// AbuseAlleviationError's reason: "Anonymous access to domain <domain>
+	// blocked until <date> due to …". A sentence's closing dot after the
+	// domain is not part of it.
+	jinaSiteBlockRE = regexp.MustCompile(`(?i)\baccess to domain (\S+?)\.? blocked until (.+?)(?:\s+due to\b|$)`)
+	// jinaZoneNameRE matches the time zone's name that closes a JavaScript
+	// date: " (Coordinated Universal Time)".
+	jinaZoneNameRE = regexp.MustCompile(`\s*\([^()]*\)$`)
+	// jinaDateLayouts are the forms a block's end is read in: a JavaScript
+	// Date's toString, as Jina writes it (a 1- or 2-digit day, any GMT
+	// offset), then the HTTP and ISO forms, should it switch.
+	jinaDateLayouts = []string{"Mon Jan 2 2006 15:04:05 GMT-0700", time.RFC1123, time.RFC1123Z, time.RFC3339Nano}
+)
+
+// parseSiteBlock reads a *jinaSiteBlock around err from reason, an
+// AbuseAlleviationError's. A reason that names no domain, or no end curio
+// can read, leaves that part empty; the block still holds the target's
+// site (siteBlocked).
+func parseSiteBlock(reason string, err error) *jinaSiteBlock {
+	sb := &jinaSiteBlock{reason: reason, err: err}
+	m := jinaSiteBlockRE.FindStringSubmatch(reason)
+	if m == nil {
+		return sb
+	}
+	sb.domain = strings.ToLower(m[1])
+	date := jinaZoneNameRE.ReplaceAllString(m[2], "")
+	for _, layout := range jinaDateLayouts {
+		if t, perr := time.Parse(layout, date); perr == nil {
+			sb.until = t
+			break
+		}
+	}
+	return sb
+}
 
 // jinaReason is what the head of Jina's error answer says went wrong: a
 // JSON answer's message, after its name when it gives one, or the first line
@@ -1562,10 +1796,11 @@ var (
 // within the same fetch: transport errors and Jina's retryable statuses are.
 // A judged answer is not (another call would bring the same page back, and
 // a target that failed for now is left to the job's backoff), nor are an
-// oversized body and Jina's deterministic statuses.
+// oversized body, Jina's deterministic statuses, and its block of a site,
+// even with a 429: the block's end is when to ask again.
 func jinaRetryable(err error) bool {
 	if errors.Is(err, errJinaRejected) || errors.Is(err, errJinaTargetTrouble) ||
-		errors.Is(err, ErrDeadLink) || errors.Is(err, ErrTooLarge) {
+		errors.Is(err, ErrDeadLink) || errors.Is(err, ErrTooLarge) || errors.Is(err, errJinaSiteBlocked) {
 		return false
 	}
 	var se *HTTPStatusError
@@ -1587,6 +1822,9 @@ func jinaCallClass(err error) CallClass {
 	switch {
 	case err == nil:
 		return CallOK
+	case errors.Is(err, errJinaSiteBlocked):
+		// Jina limiting curio's reads of a site, whatever the status.
+		return CallRateLimited
 	case errors.Is(err, errJinaRefused):
 		return CallRefused
 	case errors.Is(err, errJinaChallenged):
@@ -1613,9 +1851,14 @@ func jinaCallClass(err error) CallClass {
 }
 
 // JinaHealth is the health of the Jina fallback: how its recent requests
-// went (healthTracker), and the pause in effect, if any.
+// went (healthTracker), the pause in effect, if any, and the sites Jina
+// Reader blocks for now, which leave its state alone: a block is about one
+// site's reads, not the service.
 func (n *Native) JinaHealth() UpstreamHealth {
-	return n.jinaHealth.snapshot(n.clock.now(), n.jinaFallback, n.jinaCooldown.deadline())
+	now := n.clock.now()
+	h := n.jinaHealth.snapshot(now, n.jinaFallback, n.jinaCooldown.deadline())
+	h.SitePauses = n.jinaSites.pauses(now)
+	return h
 }
 
 // jinaHeaderRE matches one "Name: value" line of a Jina Reader header block.

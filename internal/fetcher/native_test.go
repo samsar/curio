@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -427,12 +428,13 @@ func TestSoft404TitleRE(t *testing.T) {
 	}
 }
 
-// TestNative_HostCache_HitIsPermanent: a redirect onto the site's own
+// TestNative_HostCache_LoginWallHitDefers: a redirect onto the site's own
 // login page is a host-wide verdict. The first failure is a plain retryable
-// error (it populates the cache); every fetch on that host within the TTL
-// short-circuits as a PermanentError carrying the same sentinel plus a
-// "(cached: …)" suffix, and never contacts the origin.
-func TestNative_HostCache_HitIsPermanent(t *testing.T) {
+// error (it populates the cache). With Jina off, every fetch on that host
+// within the TTL waits for the entry to expire without contacting the
+// origin, carrying the same sentinel plus a "(cached: …)" suffix that
+// quotes the origin's answer; after it, the origin is asked again.
+func TestNative_HostCache_LoginWallHitDefers(t *testing.T) {
 	var hits atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", func(w http.ResponseWriter, _ *http.Request) {
@@ -446,7 +448,8 @@ func TestNative_HostCache_HitIsPermanent(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	fc := newFakeClock()
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false}), fc)
 
 	// First attempt: real fetch, retryable login-wall error.
 	_, err := n.Fetch(context.Background(), srv.URL+"/first")
@@ -455,19 +458,31 @@ func TestNative_HostCache_HitIsPermanent(t *testing.T) {
 	var pe *PermanentError
 	assert.False(t, errors.As(err, &pe), "first failure must stay retryable: %v", err)
 	assert.Equal(t, int32(2), hits.Load(), "redirect + login page")
+	expires := fc.now().Add(15 * time.Minute)
 
-	// Second attempt, same host, different path: served from the host
-	// cache, permanent, origin not contacted.
+	// Same host, different path, a minute later: held by the host cache
+	// until the entry expires, origin not contacted.
+	fc.advance(time.Minute)
 	_, err = n.Fetch(context.Background(), srv.URL+"/second")
-	require.Error(t, err)
+	de := requireDeferred(t, err, expires)
+	assert.Equal(t, hostOf(srv.URL)+" to be tried again: it sent curio's last request to its login page", de.Reason)
 	assert.ErrorIs(t, err, ErrLoginWall)
-	require.True(t, errors.As(err, &pe), "cache hit must be permanent: %v", err)
-	assert.Contains(t, err.Error(), "(cached:")
+	assert.Equal(t, "native: login wall or thin content (cached: native: site-wide login wall or thin content "+
+		"(redirected to a login/auth path: /login))", err.Error())
 	assert.Equal(t, int32(2), hits.Load(), "cache hit must not contact origin")
+	assert.Equal(t, store.FailureCauseLoginWall, FailureCause(err))
+
+	// Once the entry expires, the origin is asked again.
+	fc.advance(14 * time.Minute)
+	_, err = n.Fetch(context.Background(), srv.URL+"/third")
+	require.ErrorIs(t, err, ErrLoginWall)
+	assert.False(t, errors.As(err, &pe), "a new first failure: %v", err)
+	assert.NotContains(t, err.Error(), "(cached:")
+	assert.Equal(t, int32(4), hits.Load())
 }
 
 // Same contract for the anti-bot kind (HTTP 403 → ErrAntiBot).
-func TestNative_HostCache_AntiBotHitIsPermanent(t *testing.T) {
+func TestNative_HostCache_AntiBotHitDefers(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
@@ -475,7 +490,8 @@ func TestNative_HostCache_AntiBotHitIsPermanent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	fc := newFakeClock()
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false}), fc)
 
 	_, err := n.Fetch(context.Background(), srv.URL+"/a")
 	require.Error(t, err)
@@ -484,10 +500,12 @@ func TestNative_HostCache_AntiBotHitIsPermanent(t *testing.T) {
 	assert.False(t, errors.As(err, &pe), "first 403 must stay retryable: %v", err)
 
 	_, err = n.Fetch(context.Background(), srv.URL+"/b")
-	require.Error(t, err)
+	requireDeferred(t, err, fc.now().Add(15*time.Minute))
 	assert.ErrorIs(t, err, ErrAntiBot)
-	require.True(t, errors.As(err, &pe), "cached 403 must be permanent: %v", err)
+	assert.Equal(t, "native: origin blocked the request (likely anti-bot) "+
+		"(cached: native: HTTP 403 Forbidden: origin blocked the request (likely anti-bot))", err.Error())
 	assert.Equal(t, int32(1), hits.Load())
+	assert.Equal(t, store.FailureCauseAntiBot, FailureCause(err))
 }
 
 // TestNative_StatusMatrix pins how every class of origin status is
@@ -622,10 +640,12 @@ func TestNative_ErrorAnswerKeepsConnection(t *testing.T) {
 	})
 }
 
-// unpaced strips n's waits for tests: an unlimited Jina limiter, and fc
-// as the clock so backoffs and cooldowns are recorded instead of slept.
+// unpaced strips n's waits for tests: an unlimited Jina limiter, no
+// spacing between a site's Jina requests (its blocks still hold it), and
+// fc as the clock so backoffs and cooldowns are recorded instead of slept.
 func unpaced(n *Native, fc *fakeClock) *Native {
 	n.jinaLimiter = rate.NewLimiter(rate.Inf, 1)
+	n.jinaSites = newSitePacer(0)
 	n.clock = fc.clock()
 	return n
 }
@@ -813,8 +833,7 @@ func TestNative_ChromeHostlessRedirectCachesNothing(t *testing.T) {
 
 			_, err := n.Fetch(t.Context(), "http://example.com/moved")
 			require.ErrorContains(t, err, errNoHost.Error())
-			_, cached := n.hostCache.Get("example.com")
-			assert.False(t, cached)
+			assert.False(t, hostCached(n, "example.com"))
 
 			res, err := n.Fetch(t.Context(), "http://example.com/healthy")
 			require.NoError(t, err)
@@ -970,8 +989,7 @@ func newJinaHarness(t *testing.T, originStatus int, deadLinkDetection bool, repl
 
 // originCached reports whether the origin's host has a host-cache entry.
 func (h *jinaHarness) originCached() bool {
-	_, cached := h.n.hostCache.Get(hostOf(h.origin.URL))
-	return cached
+	return hostCached(h.n, hostOf(h.origin.URL))
 }
 
 // TestNative_JinaTargetStatus pins what the status Jina reports for the
@@ -979,7 +997,8 @@ func (h *jinaHarness) originCached() bool {
 // 403. Whatever the status, the answer costs one Jina request, extends no
 // cooldown, and is never an *HTTPStatusError: the only one in the chain is
 // the origin's own. Only the origin's host-wide verdict is ever cached, and
-// only once Jina gave a verdict of its own.
+// only once Jina gave a verdict of its own; the host's next URL then asks
+// Jina alone.
 func TestNative_JinaTargetStatus(t *testing.T) {
 	type outcome struct{ permanent, deadLink, antiBot, cached bool }
 	cases := []struct {
@@ -1034,8 +1053,14 @@ func TestNative_JinaTargetStatus(t *testing.T) {
 			_, err = h.n.Fetch(context.Background(), h.origin.URL+"/b")
 			require.Error(t, err)
 			if tc.want.cached {
+				// The next URL skips the origin; Jina's verdict on it is its
+				// own, and final.
+				require.ErrorAs(t, err, &pe)
+				assert.ErrorIs(t, err, errJinaRejected)
 				assert.Contains(t, err.Error(), "(cached:")
 				assert.Equal(t, int32(1), h.originHits.Load())
+				assert.Equal(t, int32(2), h.jinaHits.Load(), "one Jina request of its own")
+				assert.Equal(t, store.FailureCauseAntiBot, FailureCause(err))
 			} else {
 				assert.Equal(t, int32(2), h.originHits.Load(), "the next URL on the host reaches the origin")
 			}
@@ -1440,6 +1465,14 @@ const (
 // abuseBlock is jinaAbuseBlock naming host.
 func abuseBlock(host string) string { return strings.ReplaceAll(jinaAbuseBlock, "{host}", host) }
 
+// jinaHostRefusal is a 403 whose reason names a host, {host}, and is no
+// abuse block. Its wording is made up: the rule it tests is for a refusal
+// of the target, whatever Jina calls it.
+const jinaHostRefusal = "DomainRefusedError: Jina Reader does not read {host}\n"
+
+// hostRefusal is jinaHostRefusal naming host.
+func hostRefusal(host string) string { return strings.ReplaceAll(jinaHostRefusal, "{host}", host) }
+
 func TestJinaReason(t *testing.T) {
 	long := "RateLimitTriggeredError: " + strings.Repeat("é", 400) // byte 512 falls inside an é
 	cases := []struct {
@@ -1476,6 +1509,104 @@ func TestJinaReason(t *testing.T) {
 		assert.LessOrEqual(t, len(got), maxErrorBody+len("…"))
 		assert.True(t, utf8.ValidString(got))
 	})
+}
+
+// TestParseSiteBlock: an AbuseAlleviationError names the domain Jina
+// blocks and when the block ends, in JavaScript's Date form (any GMT
+// offset, a 1- or 2-digit day), or should Jina switch, in the HTTP or ISO
+// form. A reason without them leaves them unset.
+func TestParseSiteBlock(t *testing.T) {
+	blocked := func(domain, until string) string {
+		return "AbuseAlleviationError: Anonymous access to domain " + domain + " blocked until " + until +
+			" due to previous abuse found on https://" + domain + "/someone: DDoS attack suspected: Too many requests"
+	}
+	cases := []struct {
+		name   string
+		reason string
+		domain string
+		until  time.Time
+	}{
+		{"mobile.twitter.com, as Jina wrote it", blocked("mobile.twitter.com",
+			"Mon Sep 28 2026 18:48:50 GMT+0000 (Coordinated Universal Time)"),
+			"mobile.twitter.com", time.Date(2026, 9, 28, 18, 48, 50, 0, time.UTC)},
+		{"another offset", blocked("x.com", "Mon Sep 28 2026 11:51:10 GMT-0700 (Pacific Daylight Time)"),
+			"x.com", time.Date(2026, 9, 28, 18, 51, 10, 0, time.UTC)},
+		{"a one-digit day, no zone name", blocked("x.com", "Mon Oct 5 2026 11:51:10 GMT-0700"),
+			"x.com", time.Date(2026, 10, 5, 18, 51, 10, 0, time.UTC)},
+		{"an ISO date", blocked("x.com", "2026-09-28T18:51:10.000Z"), "x.com", time.Date(2026, 9, 28, 18, 51, 10, 0, time.UTC)},
+		{"an HTTP date", blocked("x.com", "Mon, 28 Sep 2026 18:51:10 GMT"), "x.com", time.Date(2026, 9, 28, 18, 51, 10, 0, time.UTC)},
+		{"no reason given after the date", "AbuseAlleviationError: Anonymous access to domain Www.Forbes.com blocked until " +
+			"Mon Sep 28 2026 07:33:33 GMT+0000 (Coordinated Universal Time)",
+			"www.forbes.com", time.Date(2026, 9, 28, 7, 33, 33, 0, time.UTC)},
+		{"a closing dot", "AbuseAlleviationError: Anonymous access to domain x.com. blocked until sometime",
+			"x.com", time.Time{}},
+		{"an unreadable date", blocked("x.com", "sometime"), "x.com", time.Time{}},
+		{"no domain", "AbuseAlleviationError: Too many requests", "", time.Time{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := errors.New("the answer")
+			sb := parseSiteBlock(tc.reason, err)
+			assert.Equal(t, tc.domain, sb.domain)
+			assert.True(t, tc.until.Equal(sb.until), "until %v, want %v", sb.until, tc.until)
+			assert.Equal(t, tc.reason, sb.reason)
+			assert.Same(t, err, errors.Unwrap(sb))
+		})
+	}
+}
+
+// TestSiteBlockEnd: a block lasts until the time Jina gave, or an hour when
+// it gave none it could read, and never less than a minute nor more than a
+// job waits.
+func TestSiteBlockEnd(t *testing.T) {
+	now := time.Date(2026, 9, 28, 17, 50, 10, 0, time.UTC)
+	cases := []struct {
+		name string
+		said time.Time
+		want time.Duration
+	}{
+		{"as said", now.Add(58*time.Minute + 40*time.Second), 58*time.Minute + 40*time.Second},
+		{"unsaid", time.Time{}, jinaSiteBlockDefault},
+		{"already over", now.Add(-time.Minute), minJinaSiteBlock},
+		{"in a few seconds", now.Add(5 * time.Second), minJinaSiteBlock},
+		{"in 2039", time.Date(2039, 12, 30, 17, 9, 6, 0, time.UTC), store.DeferralBudget},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, now.Add(tc.want), siteBlockEnd(tc.said, now), tc.name)
+	}
+}
+
+// TestJinaStatusError_SiteBlock: an AbuseAlleviationError is a site block
+// whatever its status, text or JSON, quoting Jina's reason; a challenge
+// stays a challenge.
+func TestJinaStatusError_SiteBlock(t *testing.T) {
+	const target = "https://mobile.twitter.com/someone"
+	reason := strings.TrimSpace(abuseBlock("mobile.twitter.com"))
+	for _, code := range []int{http.StatusForbidden, http.StatusTooManyRequests} {
+		err := jinaStatusError(target, &HTTPStatusError{StatusCode: code}, nil, reason)
+		sb, ok := errors.AsType[*jinaSiteBlock](err)
+		require.True(t, ok, "%d: %v", code, err)
+		assert.Equal(t, "mobile.twitter.com", sb.domain)
+		assert.ErrorIs(t, err, errJinaSiteBlocked)
+		assert.NotErrorIs(t, err, errJinaRefused)
+		assert.Equal(t, fmt.Sprintf("jina: blocks the site for now: HTTP %d %s: %s", code, http.StatusText(code), reason),
+			err.Error())
+		var se *HTTPStatusError
+		require.ErrorAs(t, err, &se)
+		assert.Equal(t, code, se.StatusCode)
+		assert.False(t, jinaRetryable(err), "the block's end is when to ask again")
+	}
+
+	jsonReason := jinaReason("application/json", []byte(`{"name":"AbuseAlleviationError","message":"Anonymous access to domain `+
+		`x.com blocked until Mon Sep 28 2026 18:51:10 GMT+0000 (Coordinated Universal Time)"}`))
+	sb, ok := errors.AsType[*jinaSiteBlock](jinaStatusError(target, &HTTPStatusError{StatusCode: http.StatusForbidden}, nil, jsonReason))
+	require.True(t, ok, "a JSON answer's name counts too")
+	assert.Equal(t, "x.com", sb.domain)
+
+	challenged := jinaStatusError(target, &HTTPStatusError{StatusCode: http.StatusForbidden},
+		http.Header{"Cf-Mitigated": {"challenge"}}, reason)
+	assert.ErrorIs(t, challenged, errJinaChallenged)
+	assert.NotErrorIs(t, challenged, errJinaSiteBlocked)
 }
 
 func TestNamesHost(t *testing.T) {
@@ -1544,7 +1675,13 @@ func TestJinaCallClass(t *testing.T) {
 		{"an answer over the cap", fakeAnswer{status: http.StatusOK,
 			body: jinaArticle + strings.Repeat("x", 2*testBodyLimit)}, CallJudged},
 		{"a 403 naming the target's host", fakeAnswer{status: http.StatusForbidden, contentType: "text/plain",
-			body: abuseBlock("news.example")}, CallRefused},
+			body: hostRefusal("news.example")}, CallRefused},
+		{"an abuse block of the target's site", fakeAnswer{status: http.StatusForbidden, contentType: "text/plain",
+			body: abuseBlock("news.example")}, CallRateLimited},
+		{"an abuse block with a 429", fakeAnswer{status: http.StatusTooManyRequests, contentType: "text/plain",
+			body: abuseBlock("news.example")}, CallRateLimited},
+		{"an abuse block of another site", fakeAnswer{status: http.StatusForbidden, contentType: "text/plain",
+			body: abuseBlock("mobile.twitter.com")}, CallRateLimited},
 		{"451", fakeAnswer{status: http.StatusUnavailableForLegalReasons, contentType: "application/json",
 			body: jina451Body}, CallRefused},
 		{"400", status(http.StatusBadRequest), CallRefused},
@@ -1553,7 +1690,7 @@ func TestJinaCallClass(t *testing.T) {
 			contentType: "text/html", body: "<!DOCTYPE html><title>Just a moment...</title>"}, CallChallenged},
 		{"a bare 403", status(http.StatusForbidden), CallForbidden},
 		{"a 403 naming another host", fakeAnswer{status: http.StatusForbidden, contentType: "text/plain",
-			body: abuseBlock("mobile.twitter.com")}, CallForbidden},
+			body: hostRefusal("mobile.twitter.com")}, CallForbidden},
 		{"Cloudflare's block page", fakeAnswer{status: http.StatusForbidden, contentType: "text/html",
 			body: cfBlockHTML}, CallForbidden},
 		{"401", status(http.StatusUnauthorized), CallAuth},
@@ -1610,8 +1747,9 @@ func TestJinaOnce_ErrorBodyReadIsBounded(t *testing.T) {
 // names the target's host or by a 451, is Jina's verdict, quoted in the
 // error. Behind a thin page the first fetch fails for good after one Jina
 // request; behind an origin 403 the origin's host is cached, and the next
-// URL there fails from the cache without asking Jina. Neither pauses Jina,
-// and Jina's health counts the refusal as a healthy answer.
+// URL there skips the origin and fails for good on Jina's refusal of it.
+// Neither pauses Jina, and Jina's health counts the refusal as a healthy
+// answer.
 func TestNative_JinaRefusal(t *testing.T) {
 	answers := []struct {
 		name        string
@@ -1620,8 +1758,8 @@ func TestNative_JinaRefusal(t *testing.T) {
 		body        func(host string) string
 		reason      string
 	}{
-		{"domain blocked", http.StatusForbidden, "text/plain; charset=utf-8", abuseBlock,
-			"HTTP 403 Forbidden: AbuseAlleviationError: Anonymous access to domain 127.0.0.1 blocked until"},
+		{"a 403 naming the target's host", http.StatusForbidden, "text/plain; charset=utf-8", hostRefusal,
+			"HTTP 403 Forbidden: DomainRefusedError: Jina Reader does not read 127.0.0.1"},
 		{"owner opted out", http.StatusUnavailableForLegalReasons, "application/json",
 			func(string) string { return jina451Body }, "HTTP 451 Unavailable For Legal Reasons: " + jina451Reason},
 	}
@@ -1659,8 +1797,7 @@ func TestNative_JinaRefusal(t *testing.T) {
 			assert.True(t, strings.HasPrefix(se.URL, jina), "errors.As finds Jina's status first: %s", se.URL)
 			assert.Equal(t, int32(1), jinaHits.Load())
 			assert.Zero(t, n.jinaCooldown.remaining(fc.now()))
-			_, cached := n.hostCache.Get(hostOf(origin.URL))
-			assert.False(t, cached)
+			assert.False(t, hostCached(n, hostOf(origin.URL)))
 			h := n.JinaHealth()
 			assert.Equal(t, map[CallClass]int{CallRefused: 1}, h.Recent)
 			assert.Equal(t, UpstreamOK, h.State)
@@ -1682,17 +1819,210 @@ func TestNative_JinaRefusal(t *testing.T) {
 			assert.ErrorIs(t, err, errJinaRefused)
 			var pe *PermanentError
 			assert.False(t, errors.As(err, &pe), "the first failure for a host stays retryable: %v", err)
-			_, cached := n.hostCache.Get(hostOf(origin.URL))
-			assert.True(t, cached, "the origin's verdict is cached")
+			assert.True(t, hostCached(n, hostOf(origin.URL)), "the origin's verdict is cached")
 
 			_, err = n.Fetch(context.Background(), origin.URL+"/b")
-			require.ErrorAs(t, err, &pe)
-			assert.Contains(t, err.Error(), "(cached: jina: refused the target: "+a.reason)
-			assert.Equal(t, int32(1), jinaHits.Load(), "a cache hit asks Jina nothing")
-			assert.Equal(t, int32(1), originHits.Load())
+			require.ErrorAs(t, err, &pe, "the next URL's own refusal is final")
+			assert.ErrorIs(t, err, errJinaRefused)
+			assert.True(t, strings.HasPrefix(err.Error(), "jina: refused the target: "+a.reason), err.Error())
+			assert.Contains(t, err.Error(),
+				"(after native: origin blocked the request (likely anti-bot) (cached: native: HTTP 403 Forbidden: ")
+			assert.Equal(t, int32(2), jinaHits.Load(), "the next URL asks Jina")
+			assert.Equal(t, int32(1), originHits.Load(), "and not the origin")
+			assert.Equal(t, store.FailureCauseJinaRefused, FailureCause(err))
 			assert.Zero(t, n.jinaCooldown.remaining(fc.now()))
 		})
 	}
+}
+
+// jinaBlockDate writes t as Jina writes the end of a block: a JavaScript
+// Date, with the zone's name.
+func jinaBlockDate(t time.Time) string {
+	return t.UTC().Format("Mon Jan 2 2006 15:04:05 GMT-0700") + " (Coordinated Universal Time)"
+}
+
+// siteBlockAnswer is Jina's AbuseAlleviationError, with status, blocking
+// keyless reads of domain until until.
+func siteBlockAnswer(status int, domain string, until time.Time) fakeAnswer {
+	return fakeAnswer{status: status, contentType: "text/plain; charset=utf-8",
+		body: "AbuseAlleviationError: Anonymous access to domain " + domain + " blocked until " + jinaBlockDate(until) +
+			" due to previous abuse found on https://" + domain + "/someone: DDoS attack suspected: Too many requests\n"}
+}
+
+// blockingJina is a Native on fc, without site spacing, logging to logs,
+// whose origin answers origin and whose Jina answers pages of news.example
+// with block while blocking holds, and every other page with an article.
+// It counts Jina's requests by site.
+func blockingJina(t *testing.T, fc *fakeClock, logs *logRecorder, origin, block fakeAnswer,
+	blocking *atomic.Bool) (n *Native, jinaHits func(site string) int) {
+	t.Helper()
+	const jinaBase = "https://jina.test/"
+	var mu sync.Mutex
+	hits := map[string]int{}
+	n = unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
+		DeadLinkDetection: true, Log: slog.New(logs)}), fc)
+	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
+		page, isJina := strings.CutPrefix(target, jinaBase)
+		if !isJina {
+			return origin.respond(target)
+		}
+		site := siteOf(hostOf(page))
+		mu.Lock()
+		hits[site]++
+		mu.Unlock()
+		if site == "news.example" && blocking.Load() {
+			return block.respond(target)
+		}
+		return fakeAnswer{status: http.StatusOK, body: jinaArticleBody()}.respond(target)
+	})
+	return n, func(site string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return hits[site]
+	}
+}
+
+// TestNative_JinaSiteBlock: Jina's AbuseAlleviationError, with a 403 or a
+// 429, is no verdict. The page that met it waits for the block's end, which
+// its answer names, and so does every later page of the site, www. or not,
+// without a Jina request, behind a thin page or an origin 403 alike: never
+// a permanent failure, never a host-cache entry, never Jina's shared
+// cooldown. Health counts the one call; the block logs one warning and
+// shows in the upstream's site pauses. Once it ends, Jina is asked again.
+func TestNative_JinaSiteBlock(t *testing.T) {
+	origins := []struct {
+		name     string
+		answer   fakeAnswer
+		sentinel error
+		cause    store.FailureCause // once a day of waiting runs out
+	}{
+		{"thin page", htmlPage(thinPage), ErrLoginWall, store.FailureCauseRateLimited},
+		{"origin 403", answerStatus(http.StatusForbidden), ErrAntiBot, store.FailureCauseRateLimited},
+	}
+	for _, origin := range origins {
+		for _, status := range []int{http.StatusForbidden, http.StatusTooManyRequests} {
+			t.Run(fmt.Sprintf("%s/%d", origin.name, status), func(t *testing.T) {
+				fc := newFakeClock()
+				ends := fc.now().Add(50 * time.Minute)
+				var blocking atomic.Bool
+				blocking.Store(true)
+				logs := &logRecorder{}
+				n, jinaHits := blockingJina(t, fc, logs, origin.answer, siteBlockAnswer(status, "www.news.example", ends), &blocking)
+				const reason = "Jina Reader's block of news.example to lift"
+
+				_, err := n.Fetch(t.Context(), "https://www.news.example/a")
+				de := requireDeferred(t, err, ends)
+				assert.Equal(t, reason, de.Reason)
+				assert.ErrorIs(t, err, errJinaSiteBlocked)
+				assert.ErrorIs(t, err, origin.sentinel)
+				assert.NotErrorIs(t, err, errJinaRefused)
+				assert.True(t, strings.HasPrefix(err.Error(), fmt.Sprintf("jina: blocks the site for now: HTTP %d %s: "+
+					"AbuseAlleviationError: Anonymous access to domain www.news.example blocked until", status, http.StatusText(status))),
+					err.Error())
+				assert.Equal(t, 1, jinaHits("news.example"))
+				assert.Equal(t, map[CallClass]int{CallRateLimited: 1}, n.JinaHealth().Recent)
+				assert.Zero(t, n.jinaCooldown.remaining(fc.now()), "the shared cooldown is not the site's")
+				assert.False(t, hostCached(n, "www.news.example"), "a block writes no host-cache entry")
+				assert.Equal(t, origin.cause, FailureCause(fmt.Errorf("fetch failed: %w", err)))
+				assert.Equal(t, 1, logs.count(slog.LevelWarn, "Jina Reader blocks keyless reads of a site, holding its pages"))
+
+				// The site's later pages wait for the block without a request.
+				for _, page := range []string{"https://news.example/b", "https://m.news.example/c"} {
+					_, err = n.Fetch(t.Context(), page)
+					de = requireDeferred(t, err, ends)
+					assert.Equal(t, reason, de.Reason)
+					assert.ErrorIs(t, err, errJinaSiteBlocked)
+					assert.Contains(t, err.Error(), "jina: not sent, Jina Reader blocks news.example until "+
+						ends.Format(time.RFC3339)+": AbuseAlleviationError: Anonymous access to domain www.news.example")
+					assert.Equal(t, origin.cause, FailureCause(fmt.Errorf("fetch failed: %w", err)))
+				}
+				assert.Equal(t, 1, jinaHits("news.example"))
+				h := n.JinaHealth()
+				assert.Equal(t, map[CallClass]int{CallRateLimited: 1}, h.Recent, "a held call is no call")
+				assert.Equal(t, []SitePause{{Site: "news.example", Until: ends}}, h.SitePauses)
+				assert.NotEqual(t, UpstreamPaused, h.State, "one site's block doesn't pause Jina")
+
+				// Other sites are not held.
+				res, err := n.Fetch(t.Context(), "https://blog.example/d")
+				require.NoError(t, err)
+				assert.Equal(t, "jina", res.Meta["via"])
+
+				// Once the block ends, the site's pages ask Jina again.
+				fc.advance(50 * time.Minute)
+				blocking.Store(false)
+				res, err = n.Fetch(t.Context(), "https://news.example/b")
+				require.NoError(t, err)
+				assert.Equal(t, "jina", res.Meta["via"])
+				assert.Equal(t, 2, jinaHits("news.example"))
+				assert.Empty(t, n.JinaHealth().SitePauses)
+				assert.Equal(t, 1, logs.count(slog.LevelWarn, "Jina Reader blocks keyless reads of a site, holding its pages"))
+			})
+		}
+	}
+}
+
+// TestNative_JinaSiteBlockWarnsOncePerBlock: Jina calls for a site in
+// flight when Jina blocks it all come back blocked. The first answer starts
+// the block and warns; the others extend it, to the latest end, silently.
+// A block after that one has ended warns again.
+func TestNative_JinaSiteBlockWarnsOncePerBlock(t *testing.T) {
+	const inFlight = 2
+	fc := newFakeClock()
+	first, later := fc.now().Add(40*time.Minute), fc.now().Add(45*time.Minute)
+	arrived := make(chan struct{}, inFlight)
+	release := make(chan struct{})
+	var answered atomic.Int32
+	logs := &logRecorder{}
+	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: causeJina,
+		Log: slog.New(logs)}), fc)
+	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
+		if !strings.HasPrefix(target, causeJina) {
+			return thinOrigin.respond(target)
+		}
+		arrived <- struct{}{}
+		<-release
+		end := first
+		if answered.Add(1) > 1 {
+			end = later
+		}
+		return siteBlockAnswer(http.StatusForbidden, "news.example", end).respond(target)
+	})
+	warnings := func() int {
+		return logs.count(slog.LevelWarn, "Jina Reader blocks keyless reads of a site, holding its pages")
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, inFlight)
+	for i := range errs {
+		wg.Go(func() { _, errs[i] = n.Fetch(t.Context(), fmt.Sprintf("https://news.example/%d", i)) })
+	}
+	for range inFlight {
+		select {
+		case <-arrived:
+		case <-time.After(10 * time.Second):
+			close(release)
+			t.Fatalf("expected %d Jina requests in flight", inFlight)
+		}
+	}
+	close(release)
+	wg.Wait()
+
+	untils := make([]time.Time, 0, len(errs))
+	for _, err := range errs {
+		assert.ErrorIs(t, err, errJinaSiteBlocked)
+		de, ok := errors.AsType[*DeferError](err)
+		require.True(t, ok, "a deferral: %v", err)
+		untils = append(untils, de.Until)
+	}
+	assert.ElementsMatch(t, []time.Time{first, later}, untils, "each waits for the block as its answer left it")
+	assert.Equal(t, 1, warnings(), logs.messages())
+	assert.Equal(t, []SitePause{{Site: "news.example", Until: later}}, n.JinaHealth().SitePauses,
+		"the block ends at the latest extension")
+
+	fc.advance(later.Sub(fc.now()))
+	_, err := n.Fetch(t.Context(), "https://news.example/after")
+	require.ErrorIs(t, err, errJinaSiteBlocked)
+	assert.Equal(t, 2, warnings(), "a block after the last one ended warns again")
 }
 
 // TestNative_JinaHealthFromFetches: Jina's health follows its answers to

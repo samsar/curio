@@ -21,10 +21,12 @@ import (
 // paths speaks for the target: Jina when its failure is a verdict about the
 // target (it answered with something that isn't the page, refused the
 // target, reported a status the target gave it, or sent a body over the
-// cap), and the origin when it is Jina's own trouble (its rate limit, an
-// outage, its CDN challenging curio, our account), which says nothing about
-// the site. A document is grouped by what the site did, as the fallback
-// policy reads it.
+// cap) or its block of the target's site, and the origin when it is Jina's
+// own trouble (its rate limit, an outage, its CDN challenging curio, our
+// account, a turn or pause curio kept), which says nothing about the site.
+// The origin's side is the host cache's verdict for a page that skipped
+// the origin. A document is grouped by what the site did, as the fallback
+// policy reads it, or by the block that held it back.
 //
 // The error that speaks is classified by the first of these it matches:
 //
@@ -35,7 +37,7 @@ import (
 //   - ErrAntiBot: anti_bot
 //   - ErrLoginWall: login_wall
 //   - ErrUnsupported, ErrFetcherNotFound or errPDFUnreadable: unsupported
-//   - errRateLimited, or a 429 status: rate_limited
+//   - errRateLimited, errJinaSiteBlocked, or a 429 status: rate_limited
 //   - any other status, the origin's or one the target gave Jina, or an
 //     error page naming one (errServerErrorPage): http_error
 //   - a deadline or a network timeout: timeout
@@ -58,14 +60,16 @@ func FailureCause(err error) store.FailureCause {
 }
 
 // speaker is the part of err that speaks for the target: after a Jina
-// fallback, Jina's failure when it is a verdict about the target and the
-// origin's otherwise; err itself when Jina was never asked.
+// fallback, Jina's failure when it is a verdict about the target or its
+// block of the site, and the origin's otherwise; err itself when Jina was
+// never asked.
 func speaker(err error) error {
 	var fb *jinaFallbackError
 	if !errors.As(err, &fb) {
 		return err
 	}
-	if jinaAnswered(fb.jina) || errors.Is(fb.jina, errJinaTargetTrouble) || errors.Is(fb.jina, ErrTooLarge) {
+	if jinaAnswered(fb.jina) || errors.Is(fb.jina, errJinaTargetTrouble) || errors.Is(fb.jina, ErrTooLarge) ||
+		errors.Is(fb.jina, errJinaSiteBlocked) {
 		return fb.jina
 	}
 	return fb.origin
@@ -89,7 +93,7 @@ func classify(err error) store.FailureCause {
 		return store.FailureCauseLoginWall
 	case errors.Is(err, ErrUnsupported), errors.Is(err, ErrFetcherNotFound), errors.Is(err, errPDFUnreadable):
 		return store.FailureCauseUnsupported
-	case errors.Is(err, errRateLimited), code == http.StatusTooManyRequests:
+	case errors.Is(err, errRateLimited), errors.Is(err, errJinaSiteBlocked), code == http.StatusTooManyRequests:
 		return store.FailureCauseRateLimited
 	case code != 0, errors.Is(err, errServerErrorPage):
 		return store.FailureCauseHTTPError
