@@ -834,8 +834,9 @@ type JobQueue interface {
 	Requeue(ctx context.Context, id string) error
 	// Defer sends a running job back to pending, runnable at until, refunds
 	// the attempt its claim counted, and records reason, why it waits, as
-	// its last_error: the handler didn't try, held back by a limit curio
-	// keeps itself, so the run says nothing about the job. The job isn't
+	// its last_error: the handler was held back, by a limit curio keeps
+	// itself or a hold an upstream names the end of, so the run says
+	// nothing about the job. The job isn't
 	// runnable before until, so Defer closes no Enqueued channel: workers
 	// find it by polling, as they find a retry's backoff.
 	Defer(ctx context.Context, id string, until time.Time, reason string) error

@@ -777,6 +777,46 @@ func TestNative_QueuedFetchPastAFreshEntry(t *testing.T) {
 	slots[1]()
 }
 
+// TestNative_RedirectOntoACachedHost: a page whose origin redirects onto a
+// host with a fresh anti-bot entry goes to Jina past that entry, and lets
+// its own host's origin slot go before it calls Jina.
+func TestNative_RedirectOntoACachedHost(t *testing.T) {
+	var inJina atomic.Int32
+	release := make(chan struct{})
+	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		inJina.Add(1)
+		<-release
+		_, _ = w.Write([]byte(jinaArticleBody()))
+	}))
+	defer jina.Close()
+	base := redirectToLocalhost(t, "/moved", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	fc := newFakeClock()
+	n := unpaced(NewNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	n.hostCache.Put("localhost", HostFailAntiBot, cachedOrigin403, fc.now())
+	host := hostOf(base)
+	holders := func() int {
+		n.originSlots.mu.Lock()
+		defer n.originSlots.mu.Unlock()
+		if e, ok := n.originSlots.hosts[host]; ok {
+			return e.refs
+		}
+		return 0
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := n.Fetch(context.Background(), base+"/page")
+		done <- err
+	}()
+	require.Eventually(t, func() bool { return inJina.Load() == 1 }, 5*time.Second, time.Millisecond)
+	assert.Zero(t, holders(), "the fetch let its host's slot go before calling Jina")
+	close(release)
+	require.NoError(t, <-done)
+}
+
 // TestNative_CachedHostSkipsTheOrigin: past a fresh anti-bot entry, a page
 // of the host goes to Jina without an origin request and without an origin
 // slot, and is stored when Jina serves it, marked with the entry's kind.

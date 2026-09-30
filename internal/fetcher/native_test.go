@@ -1961,6 +1961,49 @@ func TestNative_JinaSiteBlock(t *testing.T) {
 	}
 }
 
+// TestNative_JinaSiteBlockNamesItsSite: a block holds the site Jina's
+// answer names, which need not be the target's, and the target's own site
+// when the answer names none, for jinaSiteBlockDefault.
+func TestNative_JinaSiteBlockNamesItsSite(t *testing.T) {
+	t.Run("another site", func(t *testing.T) {
+		fc := newFakeClock()
+		ends := fc.now().Add(50 * time.Minute)
+		var blocking atomic.Bool
+		blocking.Store(true)
+		n, jinaHits := blockingJina(t, fc, &logRecorder{}, answerStatus(http.StatusForbidden),
+			siteBlockAnswer(http.StatusForbidden, "mobile.other.example", ends), &blocking)
+
+		_, err := n.Fetch(t.Context(), "https://www.news.example/a")
+		requireDeferred(t, err, ends)
+		assert.Equal(t, []SitePause{{Site: "other.example", Until: ends}}, n.JinaHealth().SitePauses)
+
+		_, err = n.Fetch(t.Context(), "https://other.example/b")
+		requireDeferred(t, err, ends)
+		assert.Zero(t, jinaHits("other.example"), "the named site's pages wait without a request")
+
+		blocking.Store(false)
+		res, err := n.Fetch(t.Context(), "https://www.news.example/c")
+		require.NoError(t, err, "the target's own site isn't held")
+		assert.Equal(t, "jina", res.Meta["via"])
+	})
+	t.Run("no site named", func(t *testing.T) {
+		fc := newFakeClock()
+		var blocking atomic.Bool
+		blocking.Store(true)
+		block := fakeAnswer{status: http.StatusForbidden, contentType: "text/plain; charset=utf-8",
+			body: "AbuseAlleviationError: Too many requests\n"}
+		n, jinaHits := blockingJina(t, fc, &logRecorder{}, answerStatus(http.StatusForbidden), block, &blocking)
+		ends := fc.now().Add(jinaSiteBlockDefault)
+
+		_, err := n.Fetch(t.Context(), "https://www.news.example/a")
+		requireDeferred(t, err, ends)
+		assert.Equal(t, []SitePause{{Site: "news.example", Until: ends}}, n.JinaHealth().SitePauses)
+		_, err = n.Fetch(t.Context(), "https://news.example/b")
+		requireDeferred(t, err, ends)
+		assert.Equal(t, 1, jinaHits("news.example"))
+	})
+}
+
 // TestNative_JinaSiteBlockWarnsOncePerBlock: Jina calls for a site in
 // flight when Jina blocks it all come back blocked. The first answer starts
 // the block and warns; the others extend it, to the latest end, silently.

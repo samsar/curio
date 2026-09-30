@@ -145,6 +145,35 @@ func TestSitePacer_Block(t *testing.T) {
 	assert.True(t, started, "a block after the last one ended is a new one")
 }
 
+// TestSitePacer_TurnAfterABlock: a turn deferred for the site's pace, with
+// a block that has ended or ends before the turn would go, waits for its
+// turn, not for the block: it carries no block, so the page isn't told
+// Jina's block holds it.
+func TestSitePacer_TurnAfterABlock(t *testing.T) {
+	t0 := newFakeClock().now()
+	for _, tc := range []struct {
+		name string
+		ends time.Time // the block's
+		now  time.Time // when the burst asks
+	}{
+		{"ended", t0.Add(time.Minute), t0.Add(2 * time.Minute)},
+		{"ending within the inline wait", t0.Add(10 * time.Second), t0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newSitePacer(testSiteInterval)
+			p.block("news.example", tc.ends, "AbuseAlleviationError: …", t0)
+			var turn siteTurn
+			for range 100 {
+				if turn = p.take("news.example", tc.now, maxInlineJinaWait); !turn.until.IsZero() {
+					break
+				}
+			}
+			require.False(t, turn.until.IsZero(), "a burst past the inline cap defers")
+			assert.Nil(t, turn.block, "the block ends before the turn")
+		})
+	}
+}
+
 // TestSitePacer_Pauses: the blocks in effect, by site.
 func TestSitePacer_Pauses(t *testing.T) {
 	p := newSitePacer(testSiteInterval)
