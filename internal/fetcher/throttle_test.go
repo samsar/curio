@@ -323,13 +323,13 @@ func TestNative_JinaRateLimitCooldown(t *testing.T) {
 	})
 }
 
-// TestNative_JinaLongCooldownFailsFast: a Retry-After beyond the inline
+// TestNative_JinaLongCooldownDefers: a Retry-After beyond the inline
 // cap stops all Jina calls for the cooldown. Every fetch that needs Jina,
 // the one whose call met the 429 included, is deferred until the cooldown
 // ends, around a retryable 429 with the time left, and keeps the origin's
 // sentinel and cause. No host verdict is cached, and Jina's health counts
 // only the call that was sent.
-func TestNative_JinaLongCooldownFailsFast(t *testing.T) {
+func TestNative_JinaLongCooldownDefers(t *testing.T) {
 	var jinaHits atomic.Int32
 	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		jinaHits.Add(1)

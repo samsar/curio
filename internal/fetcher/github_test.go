@@ -586,11 +586,11 @@ func TestGitHub_RateLimitDelays(t *testing.T) {
 	}
 }
 
-// TestGitHub_LongRetryAfterFailsFast: a Retry-After beyond the inline cap
-// isn't slept in the worker. The attempt fails retryably with the hint, and
-// every call during the cooldown, from any Fetch, is deferred until it ends
-// without reaching GitHub.
-func TestGitHub_LongRetryAfterFailsFast(t *testing.T) {
+// TestGitHub_LongRetryAfterDefersLaterCalls: a Retry-After beyond the
+// inline cap isn't slept in the worker. The attempt that met it fails
+// retryably with the hint, and every call during the cooldown, from any
+// Fetch, is deferred until it ends without reaching GitHub.
+func TestGitHub_LongRetryAfterDefersLaterCalls(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
