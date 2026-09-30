@@ -1071,8 +1071,8 @@ components:
         and some came back further than cosine 0.9999 from their stored
         vectors, or of another length. Not verified: the build serving now
         couldn't embed the sample at all (a reply of another width, an input
-        too long, a request Ollama refuses), or three attempts in a row
-        failed; the daemon keeps retrying those.
+        too long, a request Ollama refuses), which isn't retried; or three
+        attempts in a row failed, which the daemon keeps retrying.
       type: object
       properties:
         verified: { type: boolean, description: "Whether a re-embedded sample showed the change" }

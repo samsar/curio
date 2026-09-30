@@ -360,12 +360,19 @@ func (w *world) checkDrift(ctx context.Context) Result {
 		return Result{Status: OK, Detail: "no drift reported since the library was indexed"}
 	}
 	d := h.EmbeddingDrift
-	detail := "drifted: " + DriftChanges(d)
-	if v := d.Verification; v != nil {
-		detail = driftVerb(v) + ": " + DriftChanges(d) + "; " + v.Detail
-	}
-	return Result{Status: Warn, Detail: detail,
+	return Result{Status: Warn, Detail: driftDetail(d),
 		Hint: "searches compare vectors from two builds; run `" + d.Fix + "` to re-embed the library"}
+}
+
+// driftDetail is doctor's detail for a drift: how sure it is, what
+// changed and the daemon's evidence. A daemon that predates verifying a
+// change sends no evidence.
+func driftDetail(d *client.EmbeddingDrift) string {
+	v := d.Verification
+	if v == nil {
+		return "drifted: " + DriftChanges(d)
+	}
+	return driftVerb(v) + ": " + DriftChanges(d) + "; " + v.Detail
 }
 
 // DriftWarning is the warning line curio status and curio up print for a

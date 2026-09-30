@@ -9217,6 +9217,8 @@ failed for reasons of their own too; those fail again, the same way.
 - **Caching Jina's verdicts per site.** A site Jina never passes costs a
   request per page, as above.
 
+---
+
 ## Embedding drift: verified by re-embedding a sample
 
 **Decision:** a changed embedding fingerprint (model digest or Ollama
@@ -9255,9 +9257,20 @@ be re-embedded at all:
   reported unverified, naming the attempts and the last error; retries go
   on, and a verdict replaces that report.
 - **While a verdict is pending,** the last report stands.
+- **At most 4 verifications start in an hour,** whatever change each
+  verifies. A build that keeps changing (a `base_url` balancing Ollamas of
+  two versions, say) outdates every verification, which asks for the next
+  at once, or flips back to the recorded build between checks, which
+  starts a new change's verification at the next one: without the cap it
+  re-embeds the sample back to back for as long as it flips. The first
+  check the cap holds back is one WARN. A single change, even retried
+  after failures (starts 15 and 45 minutes after the first), never meets
+  it. Such a build's report never settles, since each flip outdates or
+  resets its verification; that is outside what a local Ollama does, and
+  the WARN names it.
 - **The evidence has one wording,** `drift.Evidence.Detail` (`64 of 64
   sampled chunks changed (worst cosine 0.9713)`, or `not verified: ` and
-  why, the cosine cut toward zero at four decimals so one under 0.9999
+  why, the cosine rounded down at four decimals so one under 0.9999
   never prints as 0.9999). The daemon logs it and sends it as healthz's
   `verification.detail`; `curio doctor`, `curio status`, `curio up` and
   the Status page print it as sent, saying "drifted" or "may have

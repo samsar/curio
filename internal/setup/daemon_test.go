@@ -180,3 +180,29 @@ func TestDriftWarning(t *testing.T) {
 		})
 	}
 }
+
+// TestDriftDetail: doctor says how sure a drift is, what changed and the
+// daemon's evidence; a daemon that predates verifying a change gets the
+// detail it always did.
+func TestDriftDetail(t *testing.T) {
+	changes := []client.DriftChange{{What: client.DriftOllamaVersion, Recorded: "0.34.4", Current: "0.35.0"}}
+	for name, tc := range map[string]struct {
+		verification *client.DriftVerification
+		want         string
+	}{
+		"verified": {
+			&client.DriftVerification{Verified: true, Detail: "64 of 64 sampled chunks changed (worst cosine 0.9713)"},
+			"drifted: Ollama 0.34.4 → 0.35.0; 64 of 64 sampled chunks changed (worst cosine 0.9713)",
+		},
+		"unverified": {
+			&client.DriftVerification{Detail: "not verified: after 3 attempts: ollama unreachable"},
+			"may have drifted: Ollama 0.34.4 → 0.35.0; not verified: after 3 attempts: ollama unreachable",
+		},
+		"an older daemon": {nil, "drifted: Ollama 0.34.4 → 0.35.0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := &client.EmbeddingDrift{Changes: changes, Verification: tc.verification, Fix: "curio reindex --all"}
+			assert.Equal(t, tc.want, setup.DriftDetail(d))
+		})
+	}
+}

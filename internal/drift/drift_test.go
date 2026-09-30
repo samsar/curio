@@ -681,7 +681,7 @@ func TestCheck_FailedVerificationsBackOff(t *testing.T) {
 
 				failed := n + 2
 				report := m.Report()
-				if failed < verifyAttempts {
+				if failed < 3 {
 					assert.Equal(t, clean, report, "no report change after %d failures", failed)
 					continue
 				}
@@ -707,6 +707,71 @@ func TestCheck_FailedVerificationsBackOff(t *testing.T) {
 			assert.True(t, strings.HasPrefix(log.at(slog.LevelWarn)[1], "embeddings drifted:"))
 		})
 	}
+}
+
+// TestCheck_SameVectorsClearAnUnverifiedDrift: a verdict of the same
+// vectors clears the unverified drift it replaces even when the marker
+// can't take the build; the next check retries the write alone.
+func TestCheck_SameVectorsClearAnUnverifiedDrift(t *testing.T) {
+	m, home, src, log := newMonitor(t, Fingerprint{ModelDigest: digestA, OllamaVersion: "0.34.4"})
+	clk := withClock(m)
+	fake(m).answer(Comparison{}, fmt.Errorf("re-embed 64 sampled chunks: %w", ollama.ErrUnreachable))
+	src.set("0.35.0", digestA, nil)
+	for _, wait := range []time.Duration{0, verifyRetry, 2 * verifyRetry} {
+		clk.advance(wait)
+		m.Check(context.Background())
+	}
+	require.True(t, m.Report().Drifted(), "unverified after three failures")
+	require.False(t, m.Report().Evidence.Verified)
+
+	fake(m).answer(same, nil)
+	blocker := home.MarkerPath() + ".tmp"
+	require.NoError(t, os.MkdirAll(filepath.Join(blocker, "keep"), 0o700))
+	clk.advance(4 * verifyRetry)
+	m.Check(context.Background())
+	assert.False(t, m.Report().Drifted(), "the verdict clears the report")
+	assert.Len(t, log.at(slog.LevelError), 1)
+	assert.Equal(t, "0.34.4", marker(t, home).OllamaVersion)
+	calls := fake(m).callCount()
+
+	require.NoError(t, os.RemoveAll(blocker))
+	m.Check(context.Background())
+	assert.Equal(t, "0.35.0", marker(t, home).OllamaVersion)
+	assert.Equal(t, calls, fake(m).callCount(), "only the write was retried")
+	assert.False(t, m.Report().Drifted())
+}
+
+// TestCheck_VerificationsAreCapped: a build that changes during every
+// verification outdates each one, and each asks for the next at once; at
+// most 4 start in an hour, the cap is warned about once, and the next
+// starts when the hour has passed.
+func TestCheck_VerificationsAreCapped(t *testing.T) {
+	m, _, src, log := newMonitor(t, Fingerprint{ModelDigest: digestA, OllamaVersion: "0.34.4"})
+	clk := withClock(m)
+	versions := []string{"0.35.0", "0.36.0"}
+	flips := 0
+	src.set(versions[0], digestA, nil)
+	fake(m).during = func() {
+		flips++
+		src.set(versions[flips%2], digestA, nil)
+	}
+
+	for range 10 {
+		m.Check(context.Background())
+	}
+	assert.Equal(t, 4, fake(m).callCount(), "capped")
+	assert.Len(t, log.at(slog.LevelInfo), 4, "each start is logged")
+	assert.False(t, m.Report().Drifted())
+	require.Len(t, log.at(slog.LevelWarn), 1)
+	assert.True(t, strings.HasPrefix(log.at(slog.LevelWarn)[0], "embedding drift check: the build keeps changing"))
+
+	clk.advance(time.Hour - time.Second)
+	m.Check(context.Background())
+	assert.Equal(t, 4, fake(m).callCount(), "within the hour")
+	clk.advance(time.Second)
+	m.Check(context.Background())
+	assert.Equal(t, 5, fake(m).callCount(), "the hour has passed")
+	assert.Len(t, log.at(slog.LevelWarn), 1)
 }
 
 // TestCheck_UnreadableFingerprintAfterTheSampleIsAFailedAttempt: a
@@ -880,7 +945,7 @@ func TestCheck_SecondChangeRestartsTheVerification(t *testing.T) {
 
 // TestRun_StopsDuringAVerification: shutdown cuts a verification short;
 // Run returns, and the cut is no failed attempt and nothing to log above
-// DEBUG.
+// DEBUG: the only line above it is the verification's start.
 func TestRun_StopsDuringAVerification(t *testing.T) {
 	m, _, src, log := newMonitor(t, Fingerprint{ModelDigest: digestA, OllamaVersion: "0.34.4"})
 	src.set("0.34.4", digestB, nil)
@@ -898,7 +963,9 @@ func TestRun_StopsDuringAVerification(t *testing.T) {
 	waitFor(t, done, "Run did not return when its context ended")
 	assert.Zero(t, m.change.failed)
 	assert.False(t, m.verifying)
-	for _, level := range []slog.Level{slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
+	require.Len(t, log.at(slog.LevelInfo), 1)
+	assert.True(t, strings.HasPrefix(log.at(slog.LevelInfo)[0], "embedding drift check: the build changed;"))
+	for _, level := range []slog.Level{slog.LevelWarn, slog.LevelError} {
 		assert.Empty(t, log.at(level), "%s", level)
 	}
 }

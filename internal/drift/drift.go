@@ -62,6 +62,14 @@ const (
 	// change is reported unverified: about 45 minutes after the first, so
 	// a flaky Ollama can hide a drift for an hour at most.
 	verifyAttempts = 3
+	// At most maxVerifications start in any verificationWindow, whatever
+	// change each verifies. A build that keeps changing (a base_url that
+	// balances Ollamas of two versions, say) outdates every verification,
+	// and each asks for the next at once, or starts a new change's at the
+	// next check: the cap bounds what that costs the machine. A single
+	// change, even one retried after failures, never meets it.
+	maxVerifications   = 4
+	verificationWindow = time.Hour
 )
 
 // Fingerprint identifies the build that makes a home's embeddings.
@@ -141,8 +149,10 @@ type Monitor struct {
 	warnedVerified   bool     // whether that warning was about a verified drift
 	warnedUnreadable bool     // Ollama's answers can't be read, and that was warned about
 	change           verification
-	verifying        bool   // a verification is running, with m.mu released
-	epoch            uint64 // bumped by every write of the fingerprint to the marker
+	verifying        bool        // a verification is running, with m.mu released
+	epoch            uint64      // bumped by every write of the fingerprint to the marker
+	started          []time.Time // when the verifications of the last verificationWindow started
+	warnedCapped     bool        // a verification is held back by the cap, and that was warned about
 }
 
 // pair is a change of build: the recorded fingerprint and the current one.
@@ -218,7 +228,8 @@ func (m *Monitor) Run(ctx context.Context) {
 // from the verifyAttempts-th in a row the change is reported unverified,
 // and retries go on. A verification is discarded, and a check asked for at
 // once, when the build changed again or a rebaseline or a record happened
-// while it ran. At most one runs at a time.
+// while it ran. At most one runs at a time, and at most maxVerifications
+// start in an hour.
 func (m *Monitor) Check(ctx context.Context) {
 	current, err := m.current(ctx)
 	a := m.assess(current, err)
@@ -289,11 +300,33 @@ func (m *Monitor) assess(current Fingerprint, err error) *attempt {
 	case m.change.evidence != nil:
 		m.reportDrift(*m.change.evidence)
 	}
-	if m.change.final || m.verifying || m.now().Before(m.change.retryAt) {
+	if m.change.final || m.verifying || m.now().Before(m.change.retryAt) || !m.admit() {
 		return nil
 	}
 	m.verifying = true
+	m.log.Info("embedding drift check: the build changed; re-embedding a sample of the library to see whether its vectors did",
+		changeArgs(compare(p.recorded, p.current))...)
 	return &attempt{pair: p, meta: meta, epoch: m.epoch}
+}
+
+// admit reports whether a verification may start now, under the cap of
+// maxVerifications a verificationWindow, and counts it when it may. The
+// first check the cap holds back warns, once until one starts again. The
+// caller holds m.mu.
+func (m *Monitor) admit() bool {
+	now := m.now()
+	m.started = slices.DeleteFunc(m.started, func(t time.Time) bool { return !now.Before(t.Add(verificationWindow)) })
+	if len(m.started) >= maxVerifications {
+		if !m.warnedCapped {
+			m.warnedCapped = true
+			m.log.Warn("embedding drift check: the build keeps changing, so its verifications are held back",
+				"limit", fmt.Sprintf("%d an hour", maxVerifications), "next_at", m.started[0].Add(verificationWindow).UTC())
+		}
+		return false
+	}
+	m.warnedCapped = false
+	m.started = append(m.started, now)
+	return true
 }
 
 // settle applies a's outcome: cmp and err from the verifier, after and

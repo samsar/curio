@@ -302,7 +302,7 @@ each with its stored vector:
   warning.
 - **The sample can't be re-embedded:** at once when the new build can't
   embed it at all (a reply of the wrong width, say), otherwise after three
-  failed attempts about 45 minutes apart, the same places say the
+  failed attempts over about 45 minutes, the same places say the
   embeddings *may* have drifted, and why. The daemon keeps trying.
 
 The fix is
