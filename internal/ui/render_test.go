@@ -88,16 +88,10 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			Layout: layout(NavSearch),
 			Query:  evilAttr,
 			Type:   evilAttr,
+			Page:   2,
 			Err:    panelErr,
-			Results: &SearchResults{Degraded: true, Warnings: []string{evilScript}, TookMS: 12, Hits: []SearchHit{{
-				DocumentID: evilAttr, Title: evilScript, URL: evilURL, ContentType: evilAttr, Score: 0.03,
-				Matches: []Match{
-					{Segments: Highlight("before <em>" + evilScript + "</em> after " + evilAttr), BM25: new(1.5)},
-					{Segments: []Segment{{Text: Excerpt(evilQuotes+evilScript, 300)}}, Vector: new(0.7)},
-					{Segments: Highlight(evilScript + " <em>third</em>"), BM25: new(0.5), Vector: new(0.2)},
-				},
-			}, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes + "/a/b?q=" + evilScript,
-				ContentType: "video"}}},
+			Results: &SearchResults{Degraded: true, Warnings: []string{evilScript}, TookMS: 12, Total: 37,
+				Hits: sampleHits()},
 		},
 		PageLibrary: Library{
 			Layout: layout(NavLibrary),
@@ -139,7 +133,9 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			FailureCause: evilAttr,
 			Text: TextPanel{State: TextShown, Text: text, Truncated: true, MarkdownPath: evilAttr,
 				OfferImages: true},
-			Related: RelatedPanel{Docs: []RelatedDoc{{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Score: 0.9}}},
+			Related: RelatedPanel{Docs: []RelatedDoc{{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Score: 0.9},
+				{DocumentID: evilQuotes, BookmarkTitle: evilScript, URL: evilURL, Score: 0.8},
+				{DocumentID: "doc", URL: "https://example.com/" + strings.Repeat("y", 700) + evilAttr, Score: 0.7}}},
 			Bookmarks: BookmarksPanel{Bookmarks: []DocumentBookmark{{Source: evilScript, Folder: evilAttr,
 				Title: evilQuotes, Tags: []string{evilScript, evilURL}, SavedAt: at}}},
 			Jobs: DocumentJobs{DocumentID: evilAttr, State: evilAttr, Baseline: DocumentBaseline{Updated: at,
@@ -163,10 +159,36 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 	}
 }
 
+// sampleHits are search results with hostile values everywhere: titled,
+// named by a bookmark, named by an address alone, and a long title and an
+// unbroken address; with passages BM25 found, the vector search found, both
+// found, and hostile markup in snippets and text.
+func sampleHits() []SearchHit {
+	return []SearchHit{{
+		DocumentID: evilAttr, Title: evilScript, URL: evilURL, ContentType: evilAttr, Score: 0.03,
+		Matches: []Match{
+			{Segments: Passage("before <em>"+evilScript+"</em> after "+evilAttr, ""), BM25: new(1.5)},
+			{Segments: Passage("", "[x]("+evilURL+") "+evilQuotes+evilScript), Vector: new(0.7)},
+			{Segments: Passage("<em>"+evilAttr+"</em>-<em>third</em> <a href=x>"+evilQuotes+"</a>", ""), BM25: new(0.5),
+				Vector: new(0.2)},
+		},
+	}, {
+		DocumentID: "doc", URL: "https://example.com/" + evilQuotes + "/a/b?q=" + evilScript, ContentType: "video",
+		BookmarkTitle: evilScript + evilAttr,
+	}, {
+		DocumentID: evilQuotes, URL: "https://example.com/" + strings.Repeat("x", 700) + evilScript,
+		Matches: []Match{{Segments: Passage("", "# "+evilScript), Vector: new(0.4)}},
+	}, {
+		DocumentID: "long", Title: strings.Repeat("A long title ", 25) + evilQuotes, URL: evilURL,
+	}}
+}
+
 // sampleVariants are more samples of the pages with branches their sample
-// can't take: the search home, with interests and without, Status with
-// every panel failed, the Library with counts for its tabs and without
-// counts, and the Failures tab in each of its states.
+// can't take: the search home, with interests and without, and results: a
+// middle page with gaps on both sides of its pager, a capped search's last
+// page, a page past the end, and one page alone; Status with every panel
+// failed, the Library with counts for its tabs and without counts, and the
+// Failures tab in each of its states.
 func sampleVariants(t testing.TB) map[string][]any {
 	t.Helper()
 	at := time.Date(2026, 9, 28, 9, 30, 0, 0, time.UTC)
@@ -195,6 +217,13 @@ func sampleVariants(t testing.TB) map[string][]any {
 					{ID: "whole", Label: evilQuotes + " and " + evilAttr, Size: 50},
 				}}},
 			Search{Layout: layout(NavSearch), Query: " ", Home: &SearchHome{}},
+			Search{Layout: layout(NavSearch), Query: evilScript, Type: evilQuotes, Page: 5,
+				Results: &SearchResults{TookMS: 80, Total: 100, Hits: sampleHits()}},
+			Search{Layout: layout(NavSearch), Query: evilQuotes, Page: 10,
+				Results: &SearchResults{TookMS: 80, Total: 100, Capped: true, Hits: sampleHits()}},
+			Search{Layout: layout(NavSearch), Query: evilAttr, Page: 5, Results: &SearchResults{Total: 37}},
+			Search{Layout: layout(NavSearch), Query: evilURL, Page: 1, Results: &SearchResults{Total: 4, Hits: sampleHits()}},
+			Search{Layout: layout(NavSearch), Query: evilScript, Page: 1, Results: &SearchResults{}},
 		},
 		PageStatus:    statusVariants(layout(NavStatus), panelErr, at),
 		PageFailures:  failuresVariants(layout(NavLibrary), panelErr, counts),
@@ -432,16 +461,23 @@ func partialSamples(t testing.TB) map[string][]any {
 				Href: func(page int) string { return interestPageHref(evilScript+evilURL, page) }}),
 			newPager(pageSpan{Page: 2, Size: 50, Shown: 34, Total: 84, Noun: evilAttr,
 				Href: func(page int) string { return interestPageHref(evilAttr, page) }}),
+			newPager(pageSpan{Page: 10, Size: SearchPageSize, Shown: 10, Total: 100, Noun: evilQuotes,
+				Href: evilSearchHref}),
 		},
 		"out-of-range": {
 			outOfRange(11, 10, func(page int) string { return interestsPageHref(page, evilScript) }),
 			outOfRange(math.MaxInt, 0, func(page int) string { return interestPageHref(evilAttr, page) }),
+			outOfRange(7, 4, evilSearchHref),
 		},
 		"full-error": {evilScript, ""},
-		"match":      {Match{Segments: Highlight(evilScript + " <em>" + evilAttr + "</em>"), BM25: new(1.5)}},
-		"cohesion":   {0.5},
+		"match": {Match{Segments: Highlight(evilScript + " <em>" + evilAttr + "</em>"), BM25: new(1.5)},
+			Match{Segments: Passage("", evilQuotes), Vector: new(0.2)}, Match{}},
+		"cohesion": {0.5},
 	}
 }
+
+// evilSearchHref is a page of the search for a hostile query and type.
+func evilSearchHref(page int) string { return searchHref(evilScript+evilURL, evilAttr, page) }
 
 // TestEveryTemplateRenders executes every template each page's set
 // defines, the page and the partials alike, with a typed sample whose

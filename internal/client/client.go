@@ -388,7 +388,8 @@ type SearchFilters struct {
 	Source      []string `json:"source,omitempty"`
 }
 
-// SearchHit mirrors api.SearchHitResponse.
+// SearchHit is the part of api.SearchHitResponse the CLI reads: it leaves
+// out bookmark_title, which only the dashboard shows.
 type SearchHit struct {
 	Document     Document     `json:"document"`
 	Score        float64      `json:"score"`
@@ -633,8 +634,10 @@ func (c *Client) ListJobs(ctx context.Context, opts JobListOpts) (*JobList, erro
 	return &out, nil
 }
 
-// SearchResponse mirrors api.SearchResponse. Degraded means semantic search
-// was unavailable and Items are keyword-only; Warnings says why.
+// SearchResponse is the part of api.SearchResponse the CLI and curio-mcp
+// read: it leaves out total and capped, which only the dashboard's pages
+// use. Degraded means semantic search was unavailable and Items are
+// keyword-only; Warnings says why.
 type SearchResponse struct {
 	Query      string      `json:"query"`
 	TookMS     int64       `json:"took_ms"`

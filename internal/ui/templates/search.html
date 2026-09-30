@@ -4,13 +4,23 @@ around the box, and a line of the largest interests at the foot of the
 screen. With one, it holds the results.
 
 Search as you type: htmx sends the form's query, and the type the
-search is limited to, 400 ms after the last keystroke; a new one aborts
-the request in flight (hx-sync), and the answer, the same full page a
-plain GET gets, replaces what is inside #results, and the type links
-(#search-scope, out of band), so that each carries the query typed. With
-JavaScript off, the form is a plain GET. #results carries no class of its
-own: htmx swaps only its children, so each state's width is its child's,
-and a swap leaves the page as a plain GET of it renders.
+search is limited to, 400 ms after the last keystroke, and the answer,
+the same full page a plain GET gets, replaces what is inside #results,
+and the type links (#search-scope, out of band), so that each carries the
+query typed. The form holds no page, so typing starts again at page 1.
+With JavaScript off, the form is a plain GET. #results carries no class
+of its own: htmx swaps only its children, so each state's width is its
+child's, and a swap leaves the page as a plain GET of it renders.
+
+Paging: the pager's links are plain links to ?q=&page=, built in Go;
+htmx boosts them to swap #results the same way, push their URL and bring
+the top of the results into view. The box and the pager share one
+hx-sync on .search-page: a keystroke aborts a page in flight, and a page
+asked for while a keystroke's search is in flight is dropped, so an old
+query's page never lands under a new one. Show scores keeps its state
+across both (hx-preserve); a full page load starts it unchecked. A page
+past the last is the numbered lists' out-of-range card, under the head
+that counts the matches.
 
 The page is its own search box, so the header has none. The define holds
 an HTML comment, which html/template leaves out of the page, because
@@ -26,7 +36,7 @@ text/template keeps a block's default over an empty define.
 <div class="searchbox">
 {{template "icon" "search"}}
 <input id="q" type="search" name="q" value="{{.Query}}" placeholder="{{.Placeholder}}" autocomplete="off" autofocus
- hx-get="{{navHref "search"}}" hx-trigger="input changed delay:400ms, search" hx-sync="this:replace" hx-include="closest form"
+ hx-get="{{navHref "search"}}" hx-trigger="input changed delay:400ms, search" hx-sync="closest .search-page:replace" hx-include="closest form"
  hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope" hx-swap="innerHTML" hx-push-url="true" hx-indicator="#searching">
 <div class="searchbox-end"><span id="searching" class="htmx-indicator spinner" aria-hidden="true"></span><button class="btn btn-primary" type="submit" aria-label="Search">{{template "icon" "search"}}<span class="label">Search</span></button></div>
 </div>
@@ -51,18 +61,22 @@ text/template keeps a block's default over an empty define.
 <p class="callout-title">Keyword results only</p>
 <div class="callout-body">{{range .Warnings}}<p>{{.}}</p>{{end}}</div>
 </div>{{end}}
-{{with .Hits}}
-<div class="results-head"><span><strong>{{count (len .) "document" "documents"}}</strong> · {{$.Results.TookMS}} ms</span></div>
-<ol class="results">
+{{if .Total}}<div class="results-head"><span><strong>{{.Count}}</strong> {{.Verb}}{{if .Capped}} · showing the best {{num .Total}}{{end}} · {{.TookMS}} ms</span>
+{{- if .Hits}}<label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true"> Show scores</label>{{else}}<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true" tabindex="-1" aria-hidden="true"></div>{{end}}</div>
+{{with .Hits}}<ol class="results">
 {{range $hit := .}}<li class="result">
 <div class="result-where"><span class="fav">{{template "icon" (typeIcon .ContentType)}}</span><span class="path" title="{{.URL}}">{{with host .URL}}<b>{{.}}</b>{{with urlTrail $hit.URL}} › {{.}}{{end}}{{else}}{{.URL}}{{end}}</span></div>
-<h2 class="result-title"><a href="{{documentHref .DocumentID}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</a></h2>
+{{with .Ref}}<h2 class="result-title"><a href="{{documentHref .ID}}" title="{{.Hover}}"{{with .Class}} class="{{.}}"{{end}}>{{.Name}}</a></h2>{{end}}
 {{range .ShownMatches}}{{template "match" .}}{{end}}
-<div class="result-foot">{{with .ContentType}}<span class="tag">{{.}}</span>{{end}}<span class="mono muted">score {{printf "%.4f" .Score}}</span>
+<div class="result-foot">{{with .ContentType}}<span class="tag">{{.}}</span>{{end}}{{with .MatchKind}}<span class="badge badge-accent plain">{{.}}</span>{{end}}<span class="score">score {{printf "%.4f" .Score}}</span>
 {{- with .MoreMatches}}<details><summary>{{count (len .) "more passage" "more passages"}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
 </li>
 {{end}}</ol>
-{{else}}<div class="card"><div class="empty">
+{{else}}{{with $.OutOfRange}}{{template "out-of-range" .}}{{end}}{{end}}
+{{if $.CappedNote}}<p class="results-note">curio ranks the best {{num .Total}} matches; refine the query to see others.</p>{{end}}
+{{with $.Pager}}<div hx-boost="true" hx-target="#results" hx-select="#results > *" hx-swap="innerHTML show:#results:top" hx-sync="closest .search-page:drop">{{template "pager" .}}</div>{{end}}
+{{else}}<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true" tabindex="-1" aria-hidden="true"></div>
+<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "search-x"}}</div>
 <h2>Nothing in your library matches</h2>
 <p>curio looks for your words and for pages about the same idea in other words, and found neither. Try other words, or fewer.</p>
@@ -73,7 +87,10 @@ text/template keeps a block's default over an empty define.
 </div>
 {{- end}}
 
-{{/* A passage that matched: its marked words, and each retriever's score. */}}
+{{/*
+A passage that matched, its words marked, and, for Show scores, each
+retriever's score.
+*/}}
 {{define "match" -}}
-<p class="snippet">{{range .Segments}}{{if .Mark}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}} <span class="mono muted">{{with score .BM25}}bm25 {{.}}{{end}}{{with score .Vector}} vector {{.}}{{end}}</span></p>
+<p class="snippet">{{range .Segments}}{{if .Mark}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}}{{with .Scores}} <span class="score">{{.}}</span>{{end}}</p>
 {{- end}}

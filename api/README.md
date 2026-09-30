@@ -35,11 +35,17 @@ The clients are written by hand: `internal/client` for the CLI and the
   revisited. Cursors are opaque, page only the list and order that issued
   them, and may be invalidated by a daemon upgrade: an invalid one, or
   one of another order, is a 400, and the client starts the walk again.
-  There is no `total`. The one exception is `GET /v1/interests` and `GET
-  /v1/interests/{id}`, which page by `offset` within a clustering run,
-  whose interests and members never change: an offset past the end is an
-  empty page, `num_clusters` and `size` are the totals, and a `run_id`
-  that differs between two pages shows a rebuild in between.
+  There is no `total`. Two exceptions page by `offset`. `GET
+  /v1/interests` and `GET /v1/interests/{id}` page within a clustering
+  run, whose interests and members never change: an offset past the end is
+  an empty page, `num_clusters` and `size` are the totals, and a `run_id`
+  that differs between two pages shows a rebuild in between. `POST
+  /v1/search` pages within the one ranking every request for a query gets,
+  its best 100 documents at most: the response is the window `[offset,
+  offset+k)`, `offset + k` is at most 100, an offset past the end is an
+  empty window, `total` counts the ranking and `capped` says more matched
+  than it holds. A search is ranked again for every page, so a document
+  indexed between two pages can shift them.
 - **Startup**: the daemon answers from the moment it binds its port. Until
   it is ready (while it migrates its database, say), every request gets
   `503` with a `Retry-After` header and a problem of type

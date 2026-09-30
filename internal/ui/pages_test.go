@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -238,13 +239,13 @@ func TestInterests_Pages(t *testing.T) {
 	assert.Contains(t, out, `<span class="pager-summary">Interests 1–24 of 222</span>`)
 	assert.Contains(t, out, `<a href="/ui/interests?run=run-1" aria-label="Page 1" aria-current="page">1</a>`)
 	assert.Contains(t, out, `<a href="/ui/interests?page=10&amp;run=run-1" aria-label="Page 10">10</a>`)
-	assert.Contains(t, out, `<a class="step" href="/ui/interests?page=2&amp;run=run-1" rel="next">`)
+	assert.Contains(t, out, `<a class="step" id="pager-next" href="/ui/interests?page=2&amp;run=run-1" rel="next">`)
 	assert.NotContains(t, out, `role="note"`, "no rebuild since")
 
 	out = render(t, r, PageInterests, interestsPage(2))
 	assert.Contains(t, out, `<p class="lede">222 topics curio found in your library, largest first. Page 2 of 10.</p>`)
 	assert.Contains(t, out, `<span class="pager-summary">Interests 25–48 of 222</span>`)
-	assert.Contains(t, out, `<a class="step" href="/ui/interests?run=run-1" rel="prev">`)
+	assert.Contains(t, out, `<a class="step" id="pager-prev" href="/ui/interests?run=run-1" rel="prev">`)
 
 	last := interestsPage(10)
 	assert.Len(t, last.Interests, 6)
@@ -372,7 +373,7 @@ func TestInterestPage_Pages(t *testing.T) {
 	assert.NotContains(t, out, `<td class="num muted">51</td>`)
 	assert.Contains(t, out, `<span class="pager-summary">Documents 1–50 of 84, most similar first</span>`)
 	assert.Contains(t, out, `<a href="/ui/interests/i1?page=2" aria-label="Page 2">2</a>`)
-	assert.Contains(t, out, `<a class="step" href="/ui/interests/i1?page=2" rel="next">`)
+	assert.Contains(t, out, `<a class="step" id="pager-next" href="/ui/interests/i1?page=2" rel="next">`)
 
 	two := interestPage(2, 84)
 	out = render(t, r, PageInterest, two)
@@ -381,7 +382,7 @@ func TestInterestPage_Pages(t *testing.T) {
 	assert.Contains(t, out, `<td class="num muted">84</td>`)
 	assert.Equal(t, 34, strings.Count(out, `<td class="num muted">`))
 	assert.Contains(t, out, `<span class="pager-summary">Documents 51–84 of 84, most similar first</span>`)
-	assert.Contains(t, out, `<a class="step" href="/ui/interests/i1" rel="prev">`)
+	assert.Contains(t, out, `<a class="step" id="pager-prev" href="/ui/interests/i1" rel="prev">`)
 	assert.Equal(t, []int{51, 52}, []int{two.Ranked()[0].Rank, two.Ranked()[1].Rank})
 
 	deep := interestPage(25, 1300)
@@ -595,6 +596,9 @@ func TestSearch_TypeTabs(t *testing.T) {
 	assert.Equal(t, []string{"/ui/?q=kafka", "/ui/?content_type=article&q=kafka", "/ui/?content_type=repo&q=kafka",
 		"/ui/?content_type=video&q=kafka", "/ui/?content_type=pdf&q=kafka"}, hrefs)
 	assert.Equal(t, []string{"Videos"}, current)
+	for _, tab := range (Search{Query: "kafka", Type: "video", Page: 3}).TypeTabs() {
+		assert.NotContains(t, tab.Href, "page", "%s: another type starts at page 1", tab.Label)
+	}
 
 	assert.True(t, Search{}.TypeTabs()[0].Current, "All without a type")
 	for _, tab := range (Search{Type: "thread"}).TypeTabs() {
@@ -734,6 +738,187 @@ func TestSearchHit_Matches(t *testing.T) {
 	hit.Matches = nil
 	assert.Empty(t, hit.ShownMatches())
 	assert.Empty(t, hit.MoreMatches())
+}
+
+// TestSearch_Paging: how many pages a search's results fill, when the page
+// is past the last or says the ranking stops at the cap, and its pager,
+// which counts the results the page shows and links pages of the same
+// query and type.
+func TestSearch_Paging(t *testing.T) {
+	page := func(n, total int, capped bool) Search {
+		hits := make([]SearchHit, max(0, min(SearchPageSize, total-PageOffset(n, SearchPageSize))))
+		return Search{Query: "kafka", Type: "pdf", Page: n,
+			Results: &SearchResults{Total: total, Capped: capped, Hits: hits}}
+	}
+	for _, tc := range []struct {
+		search             Search
+		pages              int
+		outOfRange, capped bool
+		summary, items     string // "" without a pager
+	}{
+		{page(1, 37, false), 4, false, false, "Results 1–10 of 37", "1* 2 3 4"},
+		{page(4, 37, false), 4, false, false, "Results 31–37 of 37", "1 2 3 4*"},
+		{page(5, 37, false), 4, true, false, "", ""},
+		{page(1, 7, false), 1, false, false, "", ""},
+		{page(2, 7, false), 1, true, false, "", ""},
+		{page(5, 100, true), 10, false, false, "Results 41–50 of 100", "1 … 4 5* 6 … 10"},
+		{page(9, 100, true), 10, false, false, "Results 81–90 of 100", "1 … 8 9* 10"},
+		{page(10, 100, true), 10, false, true, "Results 91–100 of 100", "1 … 9 10*"},
+		{page(10, 100, false), 10, false, false, "Results 91–100 of 100", "1 … 9 10*"},
+		{page(1, 0, false), 0, false, false, "", ""},
+		{page(3, 0, false), 0, false, false, "", ""},
+	} {
+		s := tc.search
+		name := fmt.Sprintf("page %d of %d results", s.Page, s.Results.Total)
+		assert.Equal(t, tc.pages, s.Pages(), name)
+		assert.Equal(t, tc.capped, s.CappedNote(), name)
+		if tc.outOfRange {
+			assert.Equal(t, &PageOutOfRange{Page: s.Page, Pages: tc.pages, First: "/ui/?content_type=pdf&q=kafka",
+				Last: searchHref("kafka", "pdf", tc.pages)}, s.OutOfRange(), name)
+		} else {
+			assert.Nil(t, s.OutOfRange(), "%s: nothing matched, or the page has results", name)
+		}
+		if tc.summary == "" {
+			assert.Nil(t, s.Pager(), "%s: one page, or past the last", name)
+			continue
+		}
+		p := s.Pager()
+		require.NotNil(t, p, name)
+		assert.Equal(t, tc.summary, p.Summary, name)
+		assert.Equal(t, tc.items, pagerItems(p), name)
+		for _, item := range p.Items {
+			if !item.Gap() {
+				assert.Equal(t, searchHref("kafka", "pdf", item.Page), item.Href, name)
+			}
+		}
+	}
+	assert.Equal(t, "Results 1–10 of 37", Search{Query: "kafka",
+		Results: &SearchResults{Total: 37, Hits: make([]SearchHit, 10)}}.Pager().Summary, "page 0 is the first")
+	assert.Zero(t, Search{}.Pages(), "no results, no pages")
+	assert.Nil(t, Search{}.Pager())
+	assert.Nil(t, Search{}.OutOfRange())
+}
+
+// TestSearchResults_Count: the results' head counts the documents that
+// match, and past the cap says there are more.
+func TestSearchResults_Count(t *testing.T) {
+	for _, tc := range []struct {
+		results     SearchResults
+		count, verb string
+	}{
+		{SearchResults{Total: 1}, "1 document", "matches"},
+		{SearchResults{Total: 37}, "37 documents", "match"},
+		{SearchResults{Total: 100}, "100 documents", "match"},
+		{SearchResults{Total: 100, Capped: true}, "100+ documents", "match"},
+	} {
+		assert.Equal(t, tc.count, tc.results.Count())
+		assert.Equal(t, tc.verb, tc.results.Verb(), tc.count)
+	}
+}
+
+// TestSearchHit_MatchKind: a result says which searches found its
+// passages: its words, their meaning, or both.
+func TestSearchHit_MatchKind(t *testing.T) {
+	bm25, vector := new(22.5), new(0.71)
+	for _, tc := range []struct {
+		matches []Match
+		want    string
+	}{
+		{nil, ""},
+		{[]Match{{BM25: bm25}}, "keyword only"},
+		{[]Match{{Vector: vector}, {Vector: vector}}, "meaning only"},
+		{[]Match{{BM25: bm25, Vector: vector}}, "keyword + meaning"},
+		{[]Match{{BM25: bm25}, {Vector: vector}}, "keyword + meaning"},
+		{[]Match{{}}, ""},
+	} {
+		assert.Equal(t, tc.want, SearchHit{Matches: tc.matches}.MatchKind(), "%+v", tc.matches)
+	}
+}
+
+// TestMatch_Scores: a passage's scores, for Show scores, name each
+// retriever that returned it.
+func TestMatch_Scores(t *testing.T) {
+	assert.Equal(t, "bm25 22.523 · vector 0.710", Match{BM25: new(22.523), Vector: new(0.71)}.Scores())
+	assert.Equal(t, "bm25 22.523", Match{BM25: new(22.523)}.Scores())
+	assert.Equal(t, "vector 0.710", Match{Vector: new(0.71)}.Scores())
+	assert.Empty(t, Match{}.Scores())
+}
+
+// TestSearch_ResultsPage: a page of results: the head counts the ranking,
+// with the Show scores toggle; every score is in a .score span; a result
+// says how it matched and is named as a list names a document; the pager,
+// boosted to swap the results in, sits under them; the last page of a
+// capped search says so, and a page past the end says how many there are.
+func TestSearch_ResultsPage(t *testing.T) {
+	r := newRenderer(t)
+	layout := Layout{Title: "Search", Nav: NavSearch}
+	hits := []SearchHit{
+		{DocumentID: "titled", Title: "Kafka partitions", URL: "https://example.com/kafka", ContentType: "article",
+			Score: 0.0328, Matches: []Match{{Segments: Passage("<em>kafka</em> partitions", ""), BM25: new(22.523),
+				Vector: new(0.71)}}},
+		{DocumentID: "saved", BookmarkTitle: "Saved as <this>", URL: "https://example.com/saved", Score: 0.03,
+			Matches: []Match{{Segments: []Segment{{Text: "text"}}, Vector: new(0.5)}}},
+		{DocumentID: "bare", URL: "https://example.com/some/where", Score: 0.02},
+	}
+	out := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 2,
+		Results: &SearchResults{Total: 37, TookMS: 12, Hits: hits}})
+	assert.Contains(t, out, `<div class="results-head"><span><strong>37 documents</strong> match · 12 ms</span>`+
+		`<label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true"> Show scores</label></div>`)
+	assert.Contains(t, out, `<mark>kafka</mark> partitions <span class="score">bm25 22.523 · vector 0.710</span></p>`)
+	assert.Contains(t, out, `<span class="badge badge-accent plain">keyword &#43; meaning</span><span class="score">score 0.0328</span>`)
+	assert.Contains(t, out, `<span class="badge badge-accent plain">meaning only</span>`)
+	assert.NotRegexp(t, `(bm25|vector|score) \d`, regexp.MustCompile(`<span class="score">[^<]*</span>`).ReplaceAllString(out, ""),
+		"no score outside .score")
+	assert.Contains(t, out, `<h2 class="result-title"><a href="/ui/documents/titled" title="Kafka partitions">Kafka partitions</a></h2>`)
+	assert.Contains(t, out, `<a href="/ui/documents/saved" title="Saved as &lt;this&gt;" class="from-bookmark">Saved as &lt;this&gt;</a>`)
+	assert.Contains(t, out, `<a href="/ui/documents/bare" title="https://example.com/some/where" class="untitled">example.com/some/where</a>`)
+	assert.Contains(t, out, `<span class="path" title="https://example.com/saved"><b>example.com</b> › saved</span>`,
+		"the address stays above a result named by its bookmark")
+
+	assert.Contains(t, out, `<div hx-boost="true" hx-target="#results" hx-select="#results > *" hx-swap="innerHTML show:#results:top"`+
+		` hx-sync="closest .search-page:drop"><nav class="pager" aria-label="Pages"><span class="pager-summary">Results 11–13 of 37</span>`)
+	assert.Contains(t, out, `<a class="step" id="pager-prev" href="/ui/?q=kafka" rel="prev">`)
+	assert.Contains(t, out, `<a href="/ui/?q=kafka" aria-label="Page 1">1</a><a href="/ui/?page=2&amp;q=kafka" aria-label="Page 2" aria-current="page">2</a>`+
+		`<a href="/ui/?page=3&amp;q=kafka" aria-label="Page 3">3</a><a href="/ui/?page=4&amp;q=kafka" aria-label="Page 4">4</a><span class="of">Page 2 of 4</span>`)
+	assert.Contains(t, out, `<a class="step" id="pager-next" href="/ui/?page=3&amp;q=kafka" rel="next">Next<svg`)
+	assert.Less(t, strings.Index(out, `</ol>`), strings.Index(out, `<nav class="pager"`), "under the results")
+	assert.NotContains(t, out, "results-note")
+	assert.NotContains(t, out, `name="page"`, "typing starts again at page 1")
+	assert.Contains(t, out, `hx-sync="closest .search-page:replace"`, "a keystroke aborts a page in flight")
+
+	first := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 1,
+		Results: &SearchResults{Total: 37, Hits: hits}})
+	assert.Contains(t, first, `<span class="step" aria-disabled="true"><svg`)
+	assert.NotContains(t, first, `id="pager-prev"`, "no step back from the first page")
+	last := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 10,
+		Results: &SearchResults{Total: 100, Capped: true, TookMS: 9, Hits: hits}})
+	assert.Contains(t, last, `<strong>100&#43; documents</strong> match · showing the best 100 · 9 ms</span>`)
+	assert.Contains(t, last, `<p class="results-note">curio ranks the best 100 matches; refine the query to see others.</p>`)
+	assert.NotContains(t, last, `id="pager-next"`, "no step on from the last page")
+	assert.Contains(t, last, `<span class="step" aria-disabled="true">Next<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`+
+		`<path d="m9 18 6-6-6-6"/></svg></span></div></nav>`)
+
+	past := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 5,
+		Results: &SearchResults{Total: 37}})
+	assert.Contains(t, past, `<strong>37 documents</strong> match`)
+	assert.Contains(t, past, `<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true"`,
+		"no scores to show, but the checkbox stays, unseen, so its state carries to the next results")
+	assert.NotContains(t, past, "Show scores")
+	assert.Contains(t, past, `<h2>No page 5</h2>`+"\n"+`<p>This list has 4 pages.</p>`+"\n"+
+		`<p class="mt-2"><a class="btn" href="/ui/?q=kafka">First page</a> <a class="btn" href="/ui/?page=4&amp;q=kafka">Last page</a></p>`)
+	assert.NotContains(t, past, `class="pager"`, "the card leads to the first and last pages")
+	assert.NotContains(t, past, "Nothing in your library matches")
+
+	one := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 1,
+		Results: &SearchResults{Total: 1, Hits: hits[:1]}})
+	assert.Contains(t, one, `<strong>1 document</strong> matches`)
+	assert.NotContains(t, one, `class="pager"`, "one page, no pager")
+
+	none := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 1, Results: &SearchResults{}})
+	assert.Contains(t, none, "<h2>Nothing in your library matches</h2>")
+	assert.NotContains(t, none, "results-head")
+	assert.Contains(t, none, `<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true"`,
+		"a query that matched nothing keeps Show scores for the next one")
 }
 
 // TestQueuePanel_Controls: the controls follow the settings: Resume while
