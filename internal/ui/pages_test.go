@@ -1239,11 +1239,12 @@ func TestDocument_JobLines(t *testing.T) {
 	retry := jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Waiting: true, Attempts: 2,
 		RunAfter: at, LastError: "fetch failed: native: HTTP 503 Service Unavailable"}}})
 	assert.Regexp(t, `<li>Fetch waiting, due <time[^>]*>in 3 min</time> · attempt 3 of 5`+
-		`<span class="job-why" title="fetch failed: native: HTTP 503 Service Unavailable">HTTP 503 Service Unavailable</span></li>`,
+		`<span class="visually-hidden">: </span><span class="job-why" title="fetch failed: native: HTTP 503 Service Unavailable">`+
+		`HTTP 503 Service Unavailable</span></li>`,
 		retry)
 	deferred := jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Waiting: true, RunAfter: at,
 		LastError: "waiting for GitHub's API rate limit to reset"}}})
-	assert.Regexp(t, `<li>Fetch waiting, due <time[^>]*>in 3 min</time><span class="job-why" `+
+	assert.Regexp(t, `<li>Fetch waiting, due <time[^>]*>in 3 min</time><span class="visually-hidden">: </span><span class="job-why" `+
 		`title="waiting for GitHub&#39;s API rate limit to reset">waiting for GitHub&#39;s API rate limit to reset</span></li>`,
 		deferred)
 	assert.NotContains(t, deferred, "attempt", "no attempt used yet")
@@ -1251,6 +1252,10 @@ func TestDocument_JobLines(t *testing.T) {
 		shown := textOf(byID(parse(t, out), "doc-jobs"))
 		assert.NotContains(t, shown, "failed", "the reason is shown without its wrappers: %s", shown)
 	}
+	assert.Equal(t, "Fetch waiting, due in 3 min · attempt 3 of 5: HTTP 503 Service Unavailable",
+		textOf(byID(parse(t, retry), "doc-jobs")), "as text, the reason is set off from the line")
+	assert.Equal(t, "Fetch waiting, due in 3 min: waiting for GitHub's API rate limit to reset",
+		textOf(byID(parse(t, deferred), "doc-jobs")))
 	held := jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch"}}, Hold: "paused"})
 	assert.Contains(t, held, `<a id="doc-jobs-hold" href="/ui/status">The queue is closed: Paused</a>`)
 	assert.NotContains(t, jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Running: true}},

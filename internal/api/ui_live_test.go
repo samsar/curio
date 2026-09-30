@@ -506,7 +506,7 @@ func TestUI_DocumentJobs(t *testing.T) {
 	require.NoError(t, err)
 	body = getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
 	assert.Regexp(t, `<li>Fetch waiting, due <time datetime="[^"]+" title="[^"]+">[^<]+</time> · attempt 2 of 5`+
-		`<span class="job-why" title="HTTP 503">HTTP 503</span></li>`, body)
+		`<span class="visually-hidden">: </span><span class="job-why" title="HTTP 503">HTTP 503</span></li>`, body)
 
 	_, err = srv.Deps.Queue.ClaimNext(ctx, nil)
 	require.ErrorIs(t, err, store.ErrNotFound, "backing off")
@@ -518,7 +518,7 @@ func TestUI_DocumentJobs(t *testing.T) {
 		"waiting for GitHub's API rate limit to reset"))
 	body = getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
 	assert.Regexp(t, `<li>Fetch waiting, due <time datetime="[^"]+" title="[^"]+">in 2[34] min</time> · attempt 2 of 5`+
-		`<span class="job-why" title="waiting for GitHub&#39;s API rate limit to reset">`, body)
+		`<span class="visually-hidden">: </span><span class="job-why" title="waiting for GitHub&#39;s API rate limit to reset">`, body)
 }
 
 // TestUI_DocumentPoll: a poll's answer is the jobs' region and its poller,
