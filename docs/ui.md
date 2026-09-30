@@ -41,9 +41,12 @@ Status keeps itself current: the library's counts, the queue, its
 progress and the jobs every 2 seconds and right after a change you make,
 and health (which checks Ollama) every 15 seconds; why documents failed
 is read when the page loads. A document's page shows its jobs while one
-is queued or running (why, if the queue holds them, and each retry's
-attempt), then offers a reload once there is something new to show: a
-new text, a failure, or another change. Interests does the same for a
+is queued, waiting or running: why, if the queue holds them; the attempt
+a job is on, once it has used one; and for a job that waits for a time,
+when it is due and why on a line of its own, the error a retry follows or
+the rate limit a fetch waits out, whole on hover. Then it offers a reload
+once there is something new to show: a new text, a failure, or another
+change. Interests does the same for a
 rebuild: queued or running, then "New interests are ready: reload", or
 why the rebuild failed. Failures refreshes its groups, and the count on
 its tab, after a refetch you make there and when you come back to its
@@ -179,7 +182,11 @@ footer names the address the daemon listens on.
   beside them, health (the daemon, Ollama, the models, embedding drift,
   the Jina Reader fallback and the YouTube fetcher, each with a status
   dot), an estimate of when the queued work will be done, at the pace of
-  the last 10 minutes, and the jobs by status.
+  the last 10 minutes, and the jobs by status. The estimate counts only
+  the jobs that can run now: jobs due later (a retry backing off, a fetch
+  waiting for a rate limit) are said apart, how many and when the first is
+  due, and when they are all that is queued, the card says so instead of
+  that the queue stalled; so does the queue's state line.
 
 Lists show times relative to now ("13 min ago"), with the exact time on
 hover; a document's page shows its own dates in full. Anything a saved page

@@ -105,11 +105,12 @@ does it, asking before each step:
      longer; indexing is Ollama-bound, measured on this Mac (one batch of
      32 sample chunks, at about 23 chunks a page). GitHub pages without a
      `fetcher.github.token` in `config.yaml` are mentioned: GitHub allows
-     60 API requests an hour without one. Any token lifts that to 5,000,
-     even one that can access nothing: a classic token with no scopes
-     ticked, or a fine-grained token with public repositories (read-only)
-     and no permissions. `curio doctor` warns while the daemon's GitHub
-     requests carry no token.
+     60 API requests an hour without one, about 30 repositories, so they
+     wait for its hourly limit, and the note says for about how long. Any
+     token lifts that to 5,000, even one that can access nothing: a
+     classic token with no scopes ticked, or a fine-grained token with
+     public repositories (read-only) and no permissions. `curio doctor`
+     warns while the daemon's GitHub requests carry no token.
    - **When to work through them**: now at full speed, gently (`curio
      throttle gentle`), or only overnight, 22:00 to 07:00 (`curio
      schedule`), the default on a Mac with under 16 GB, each with when to
@@ -682,15 +683,14 @@ a pause (`r.jina.ai's CDN challenged curio, pausing Jina calls`); the
 challenged answers of calls already in flight only extend it. `curio
 doctor` shows the `jina` check paused until then, and failing once the
 challenges have gone on for 30 minutes across documents (see the next
-entry). The job queue doesn't wait for the pause: it retries a document
-about 1, 3, 7 and 15 minutes after its first failure, five attempts in
-all. A retry that comes due inside the pause fetches the page again, sends
-no request to Jina, and fails at once with `jina: not sent, cooldown has …
-left: HTTP 429 Too Many Requests`, a 429 curio reports for its own pause,
-not an answer from Jina. Each such retry uses up an attempt: with the
-default pause, only the fifth attempt of the document that met the
-challenge can reach Jina. A document that runs out of attempts ends
-`failed`; once Jina answers again, `curio refetch --all --state=failed`.
+entry). The document whose request was challenged fails that attempt.
+Documents that need Jina during the pause wait for it: the fetch sends no
+request to Jina, and the job goes back to the queue until the pause ends,
+without using up an attempt, then fetches the page again, whole (see
+"Documents waiting for a rate limit" below). A document still held after a
+day fails with `jina: not sent, cooldown has … left: HTTP 429 Too Many
+Requests`, a 429 curio reports for its own pause, not an answer from Jina;
+once Jina answers again, `curio refetch <id>`.
 
 **`curio doctor` reports `jina` degraded, paused or failing** — the daemon
 counts how each request to Jina Reader, the fallback for pages the native
@@ -722,6 +722,27 @@ page; `curio refetch <id>` of a failed document makes a call. The state is
 kept in memory: a restarted daemon starts over. Documents that ran out of
 attempts meanwhile are `failed`: `curio refetch --all --state=failed` once
 Jina answers again.
+
+**Documents waiting for a rate limit** — when an upstream's rate limit
+holds curio back (GitHub's API, YouTube after an `HTTP Error 429`, a pause
+on Jina Reader calls), a fetch that would meet it sends nothing and waits
+instead of failing: its job goes back to the queue until the limit lifts,
+without using up an attempt. A document's page then says its fetch is
+waiting, when it is due, and why (`waiting for GitHub's API rate limit to
+reset`); `curio jobs --status pending` shows the same reason as `last:`,
+beside `next attempt:`; and Status's estimate counts the jobs due later
+apart from the work it can do now, or says how many wait and when the
+first is due when nothing else is queued (`curio status` adds `(N due
+later)` to a pool's load). Without a token, GitHub serves about 30
+repositories an hour, so a library with many github.com pages waits hours:
+set `fetcher.github.token` (any token, even one with no scopes, lifts the
+limit from 60 requests an hour to 5,000) and restart the daemon (`curio
+daemon stop`; the next command starts it). A job waits for up to a day from
+when it was queued; one still held after that fails as `rate_limited`,
+which `curio refetch --all --cause=rate_limited` retries. So do documents
+that failed `rate_limited` before curio waited for these limits: set the
+token first, then `curio refetch --all --cause=rate_limited`, or open
+Failures on the dashboard and refetch the Rate limited group.
 
 **`jina: refused the target: HTTP 403 Forbidden: AbuseAlleviationError:
 Anonymous access to domain … blocked until …`** — Jina Reader refuses

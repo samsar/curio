@@ -75,12 +75,12 @@ when the entry was first committed.
 - 2026-09-09 — [Host-cache hits are permanent failures](#host-cache-hits-are-permanent-failures) (revised)
 - 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out) (revised)
 - 2026-09-24 — [Single daemon per home: flock on daemon.pid, bind before touching the DB](#single-daemon-per-home-flock-on-daemonpid-bind-before-touching-the-db) (revised)
-- 2026-09-24 — [Interrupted vs. orphaned jobs](#interrupted-vs-orphaned-jobs)
+- 2026-09-24 — [Interrupted vs. orphaned jobs](#interrupted-vs-orphaned-jobs) (revised)
 - 2026-09-24 — [Config: strict keys, legacy `workers` folded in at load](#config-strict-keys-legacy-workers-folded-in-at-load) (revised)
 - 2026-09-24 — [Refetch: state reset and fetch job in one transaction](#refetch-state-reset-and-fetch-job-in-one-transaction)
 - 2026-09-24 — [Migrations: rebuilding a table other tables reference](#migrations-rebuilding-a-table-other-tables-reference)
 - 2026-09-24 — [Fetcher errors: one typed status model](#fetcher-errors-one-typed-status-model)
-- 2026-09-24 — [GitHub: secondary rate limits and a shared cooldown](#github-secondary-rate-limits-and-a-shared-cooldown)
+- 2026-09-24 — [GitHub: secondary rate limits and a shared cooldown](#github-secondary-rate-limits-and-a-shared-cooldown) (revised)
 - 2026-09-24 — [Fetchers: one cap on every response body](#fetchers-one-cap-on-every-response-body)
 - 2026-09-24 — [Host cache: only host-wide verdicts, under the host that gave them](#host-cache-only-host-wide-verdicts-under-the-host-that-gave-them) (revised)
 - 2026-09-24 — [Login-wall heuristic: www and apex are the same site](#login-wall-heuristic-www-and-apex-are-the-same-site) (revised)
@@ -119,7 +119,7 @@ when the entry was first committed.
 - 2026-09-26 — [TLS certificate failures are permanent, never Jina, never host-cached](#tls-certificate-failures-are-permanent-never-jina-never-host-cached)
 - 2026-09-26 — [YouTube: caption tracks by an exact pattern, not `en.*`](#youtube-caption-tracks-by-an-exact-pattern-not-en)
 - 2026-09-26 — [YouTube: a failed caption download leaves a partial, not a failed fetch](#youtube-a-failed-caption-download-leaves-a-partial-not-a-failed-fetch)
-- 2026-09-26 — [YouTube: a shared cooldown after a 429](#youtube-a-shared-cooldown-after-a-429)
+- 2026-09-26 — [YouTube: a shared cooldown after a 429](#youtube-a-shared-cooldown-after-a-429) (revised)
 - 2026-09-26 — [Page verdicts: one judge for every page, bot challenges included](#page-verdicts-one-judge-for-every-page-bot-challenges-included) (revised)
 - 2026-09-26 — [Jina answers are judged like the origin's pages](#jina-answers-are-judged-like-the-origins-pages) (revised)
 - 2026-09-26 — [Search leaves out failed and dead documents](#search-leaves-out-failed-and-dead-documents)
@@ -138,7 +138,7 @@ when the entry was first committed.
 - 2026-09-28 — [Dashboard: server-rendered pages in the daemon (phase 1)](#dashboard-server-rendered-pages-in-the-daemon-phase-1) (revised)
 - 2026-09-28 — [Dashboard: formatting budgets for stored markdown](#dashboard-formatting-budgets-for-stored-markdown)
 - 2026-09-28 — [Commands take a document's URL as well as its ID](#commands-take-a-documents-url-as-well-as-its-id)
-- 2026-09-28 — [Doctor warns when GitHub requests carry no token](#doctor-warns-when-github-requests-carry-no-token)
+- 2026-09-28 — [Doctor warns when GitHub requests carry no token](#doctor-warns-when-github-requests-carry-no-token) (revised)
 - 2026-09-28 — [Failure causes: recorded when a document fails](#failure-causes-recorded-when-a-document-fails) (revised)
 - 2026-09-29 — [Dashboard: a design language under the CSP](#dashboard-a-design-language-under-the-csp) (revised)
 - 2026-09-29 — [Dashboard: search is home, the Overview becomes Status](#dashboard-search-is-home-the-overview-becomes-status) (revised)
@@ -147,6 +147,7 @@ when the entry was first committed.
 - 2026-09-29 — [Dashboard: the Failures tab](#dashboard-the-failures-tab)
 - 2026-09-29 — [Interests page by offset within a run](#interests-page-by-offset-within-a-run)
 - 2026-09-29 — [Search pages by offset within a fixed-depth pool](#search-pages-by-offset-within-a-fixed-depth-pool)
+- 2026-09-30 — [Waiting is not failing: jobs curio didn't send are deferred](#waiting-is-not-failing-jobs-curio-didnt-send-are-deferred)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -2535,6 +2536,16 @@ that has already committed.
 **Not done:** graceful drain of in-flight handlers. Interrupted work is
 simply redone.
 
+**Revised (2026-09-30):** a third way back to the queue. A handler that
+didn't run its job, held back by a cooldown curio keeps itself, returns a
+`jobs.DeferError`, and the worker puts the job back with `JobQueue.Defer`:
+pending until the hold ends, the attempt refunded, what it waits for as its
+`last_error`, for up to a day from the job's creation. A deferral during
+shutdown is an interruption like any other (`Requeue`), and `ErrPermanent`
+in its chain wins over it. `Defer` moves only a `running` row, like the
+other transitions, and `MarkDone` now clears `last_error`. See "Waiting is
+not failing: jobs curio didn't send are deferred".
+
 ---
 
 ## Config: strict keys, legacy `workers` folded in at load
@@ -2726,6 +2737,15 @@ the limit per account and IP.
 for the whole wait. `JobQueue.MarkFailed` takes no delay, so the queue
 can't honor the hint yet. `RetryAfter` travels on the error for when it
 can.
+
+**Revised (2026-09-30):** a call the cooldown holds past the 2-minute cap
+no longer fails the fetch: `awaitTurn` returns a `fetcher.DeferError`
+until the cooldown ends, around the same retryable 429, and the job waits
+for the reset with its attempt refunded, for up to a day. The call whose
+answer carried the long `Retry-After` still fails its attempt, since GitHub
+answered it. A delay from `X-RateLimit-Reset` is clamped at 24 hours, as a
+`Retry-After` is. See "Waiting is not failing: jobs curio didn't send are
+deferred".
 
 ---
 
@@ -2990,6 +3010,14 @@ calls already in flight only extend it, silently. GitHub's call ignores the
 result. The shared cooldown's end is also what Jina's health reports as
 `paused` (see "Fetch upstream health: Jina's calls are tracked and
 reported").
+
+**Revised (2026-09-30):** the queue can take a delay now. A Jina call the
+cooldown holds past 30 s (a long 429, a CDN challenge's pause) is a
+`fetcher.DeferError` until the cooldown ends; the fetch is deferred with
+its attempt refunded and runs again, whole, when the pause is over. The
+origin's error still leads the cause, and the host cache is still not
+written. See "Waiting is not failing: jobs curio didn't send are
+deferred".
 
 ---
 
@@ -4788,6 +4816,13 @@ fails fast again, then runs on its third attempt 120 s after that. That
 leaves two attempts for real failures. A fetch that meets 30 s or less
 sits it out and runs on the attempt it is on. A run that meets another
 429 starts a fresh 2 minutes.
+
+**Revised (2026-09-30):** the attempt arithmetic above is gone. A fetch
+that meets more than 30 s of cooldown, before its yt-dlp slot or after, is
+a `fetcher.DeferError` until the cooldown ends: the job waits for it with
+the attempt refunded, and runs once it has passed. Only a run that met a
+429 itself spends an attempt. See "Waiting is not failing: jobs curio
+didn't send are deferred".
 
 ---
 
@@ -7239,6 +7274,14 @@ enough to lift it to 5,000. The daemon, not the CLI, knows what it sends:
 under launchd it doesn't see the shell's environment, so a token exported
 in a terminal isn't one the daemon has.
 
+**Revised (2026-09-30):** without a token, github.com pages now wait for
+GitHub's hourly limit instead of failing rate-limited (see "Waiting is not
+failing: jobs curio didn't send are deferred"). The check's detail says so,
+about 30 repositories an hour, and `curio up`'s note says how long its
+github.com pages may wait, and that the ones still waiting after a day fail
+as `rate_limited`, which `curio refetch --all --cause=rate_limited`
+retries.
+
 ---
 
 ## Failure causes: recorded when a document fails
@@ -8722,6 +8765,160 @@ bookmark titles and snippets), under the real CSP:
 - A page clicked while a keystroke's search was in flight was dropped,
   and a keystroke right after a page click won: the query typed and its
   first page.
+
+---
+
+## Waiting is not failing: jobs curio didn't send are deferred
+
+**Decision:** a fetch that curio held back itself doesn't fail. The job
+waits for the hold, with its attempt refunded, for up to a day.
+
+- **Three sources.** Each shared cooldown is sat out inline up to a cap,
+  and a longer one used to fail the fetch with a retryable 429 and no
+  request. Now each returns a `fetcher.DeferError{Until, Reason, Err}`:
+  `Until` is the cooldown's end, `Reason` what the fetch waits for, and
+  `Err` the error it used to fail with, text and chain unchanged
+  (`heldBack`, `internal/fetcher/errors.go`).
+  - GitHub's `awaitTurn` (2-minute cap), for any call of a fetch: a README
+    call held after the repository's answered defers the whole fetch.
+  - YouTube's `awaitCooldown` (30 s), before queueing for a yt-dlp slot
+    and again once it holds one; the slot is released.
+  - Native's `awaitJina` (30 s), whether or not the fetch has called Jina
+    already. `Native.Fetch` returns it inside `jinaFallbackError`
+    unchanged, so the origin's sentinel and cause still speak, the host
+    cache isn't written, and Jina's health counts no call.
+
+  A `DeferError` is never a `PermanentError`, and no fetcher wraps it in
+  one. The limiter's wait stays inline: it is a steady pace, and its
+  callers carry no deadline. An answer to a request that was sent is never
+  deferred: a GitHub 429 or rate-limit 403 with a long `Retry-After`, a
+  yt-dlp run that met `HTTP Error 429`, Jina's own 429 or CDN challenge.
+  GitHub's `X-RateLimit-Reset` delay is clamped at 24 hours, as
+  `Retry-After` already was: it becomes the cooldown, and so the time a
+  deferred fetch waits for.
+- **The fetch handler** turns a `fetcher.DeferError` anywhere in `Fetch`'s
+  error into a `jobs.DeferError` around `fetch failed: …`, keeping `Until`
+  and `Reason`, after checking for a `PermanentError` first. Nothing is
+  written: no markdown, extraction, document change or index job.
+- **The worker** records a handled job's outcome by the first of:
+  1. no error: `MarkDone`;
+  2. the worker's context is done: `Requeue`, a deferral included (runnable
+     now, attempt refunded, the earlier `last_error` kept);
+  3. `ErrPermanent` in the chain: failed for good, even around a deferral;
+  4. a `jobs.DeferError` while `now - created_at` is under 24 hours
+     (`deferralBudget`): `JobQueue.Defer`, with `run_after` its `Until`
+     clamped to [now + 1 s, now + 24 h], `last_error` `waiting for
+     <Reason>`, one `job deferred` log line, and no permanent-failure hook;
+  5. anything else, a deferral past the budget included: `MarkFailed` as
+     before. The attempt counts, `last_error` is `Err`'s text, and at the
+     last attempt the hook reads the 429 in the chain: `rate_limited`.
+
+  `Until` is not clamped to the budget's end, so a job deferred at 23
+  hours still waits for its hold and then gets one real try.
+- **`JobQueue.Defer`** is one status-guarded UPDATE, like `Requeue`: a
+  `running` row goes `pending` with `run_after` set, `attempts` less one
+  (never below 0), `last_error` the reason, `started_at` cleared. It
+  signals nothing: the job isn't runnable before its time, and idle
+  workers poll at least every 5 s, as they do for a retry's backoff.
+  `MarkDone` now clears `last_error`: a done job has nothing left to
+  explain, and every GitHub fetch that waited once would otherwise read
+  "waiting for …" in `curio jobs`' default view of done jobs.
+- **Native redoes the whole fetch** at `Until`, origin request included.
+  Keeping the origin's answer would be per-URL state that a restart loses
+  and that goes stale; the request is cheap and gated at 2 per host, and a
+  block that has lifted may let the origin serve the page.
+- **Surfaces.** The rule is "a pending job whose `run_after` is still ahead
+  waits, and its `last_error` says why": the error a retry retries after,
+  or what a deferral waits for. No marker says which.
+  - A document's page says the job is waiting, when it is due (relative,
+    the exact time on hover), its attempt once it has used one, and why, on
+    a line of its own, whole on hover. A due pending job reads "queued".
+  - `curio jobs` labels a failed job's `last_error` `err:`, any other's
+    `last:`.
+  - `QueueCounts` also counts, per kind, the pending jobs due later and
+    the earliest `run_after` among them, in the same covering walk of
+    `idx_jobs_claim`. `/v1/queue`'s kinds carry them as `due_later` and
+    `next_due`; `pending` still counts every pending job.
+  - Status's estimate divides only the work due now by the window's
+    finishes. A new `waiting` state, the queue open with nothing due or
+    running but jobs due later, says how many and when the first is due,
+    where it used to say `stalled`; the running and stalled states add how
+    many more are due later. The queue card's state line says the same
+    instead of "Working" when every pending job is due later and none
+    runs.
+  - `curio status` adds `(N due later)` to a pool's load; `--follow`
+    computes its ETA over the jobs due now, and prints how many are due
+    later, and when the first is, instead of `rate≈0.0/s eta≈0s` when
+    nothing else is queued.
+  - `curio doctor`'s `github` check and `curio up`'s GitHub note say pages
+    wait for GitHub's hourly limit, not that they fail.
+
+**Why:** an import of the author's library ended with 2,150 failed
+documents, 222 of them `rate_limited`, and 211 of those never sent a
+request: 171 GitHub fetches and 40 YouTube fetches that met curio's own
+cooldown. The queue retries a failed attempt after 60, 120, 240 and 480 s
+(`retryBackoff` of the attempts the claim already counted), so five
+attempts span about 15 minutes, while GitHub's primary limit resets up to
+an hour after it trips: the last attempts still read `cooldown has 24m30s
+left`. Jina's held calls failed the same way under the origin's cause, so
+they hid in the `anti_bot` and `login_wall` counts. Every one of those
+failures was curio's own hold, which only waiting could clear.
+
+**What counts as an attempt:** a claim whose outcome an upstream decided.
+A claim that ended on curio's own hold is refunded, whatever it sent
+before it met the hold: a Jina 429 whose `Retry-After` outlasts the cap is
+an answer, and the next Jina call of the same fetch is then held. An
+interrupted claim is refunded; an orphaned one is kept ("Interrupted vs.
+orphaned jobs").
+
+**Why a day, counted from `created_at`:** 24 of GitHub's hourly resets,
+time for about 700 repositories at 2 calls each without a token, and the
+longest `Retry-After` the fetchers honor. An upstream that holds curio off
+longer won't serve it: a visible `rate_limited` failure that `curio
+refetch` retries beats a document pending for days. `created_at` is
+already in the table, so there is no migration, and a refetch enqueues a
+new job with a new budget.
+
+**Why `last_error` for the reason:** the owner's choice, and no migration.
+A pending job's `last_error` already explained a retry; a deferral's
+reads the same way, and `MarkDone` clears it once there is nothing left to
+explain. A column would have said "deferred" apart from "retrying", which
+no surface needs: both wait for their `run_after`.
+
+**Tradeoffs:**
+
+- The budget counts from creation, so a job that sat a day in a paused
+  queue, or outside its schedule, gets no deferrals: its first held claim
+  fails the attempt.
+- Each held Jina-bound document requests its origin again once per hold,
+  30 s at the least and 10 minutes for a CDN challenge, for up to its day,
+  until anti-bot host-cache hits go straight to Jina.
+- The jobs a hold releases come due together. The upstream's own pacing
+  spreads them: GitHub's limiter (1.5 calls a second), yt-dlp's 2 slots,
+  Jina's 20 a minute. At each GitHub reset the call that meets the limit
+  again spends its job's attempt, since GitHub answered it, and the rest
+  are deferred to the next reset.
+- Keep-awake counts every pending job, those due later included: they are
+  work the queue will run, so a Mac on AC power stays awake while GitHub
+  pages wait for resets.
+- `MarkFailed` still ignores `Retry-After` on answers that were sent. The
+  cooldown those answers extend turns the next claim that meets it into a
+  deferral, so the attempt it spends is only the one that got the answer.
+- A GitHub fetch whose second call is held spends its first call again on
+  its next run.
+- The reason lives in `last_error` rather than a column of its own, so
+  only its text tells a deferral from a retry. A surface that must tell
+  them apart, rather than show why a job waits, would need the column.
+
+**Recovering old failures:** documents that failed `rate_limited` before
+this change stay failed. Set `fetcher.github.token` first, then `curio
+refetch --all --cause=rate_limited`, or Failures → Rate limited → Refetch
+on the dashboard.
+
+**Not done here:** the host cache (a cached verdict is still a permanent
+failure), per-site Jina pacing, `AbuseAlleviationError`, and `MarkFailed`
+honoring `Retry-After`. Those paths can return a `fetcher.DeferError` when
+they come.
 
 ---
 

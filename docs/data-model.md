@@ -267,8 +267,9 @@ jobs
   document_id   UUID FK                        -- → documents(id), ON DELETE SET NULL
   status        TEXT NOT NULL                  -- 'pending' | 'running' | 'done' | 'failed'
   attempts      INTEGER NOT NULL DEFAULT 0
-  run_after     TIMESTAMP NOT NULL DEFAULT now
-  last_error    TEXT
+  run_after     TIMESTAMP NOT NULL DEFAULT now -- when a pending job may run: a retry's backoff, a deferral's hold
+  last_error    TEXT                           -- a failed job's error; a pending job's retry error or its
+                                               --   "waiting for …" reason; cleared when done
   started_at    TIMESTAMP                      -- set when claimed
   created_at, updated_at
 ```
@@ -286,8 +287,14 @@ id = (SELECT id FROM jobs WHERE status = 'pending' AND kind = ? AND
 run_after <= now ORDER BY run_after, created_at LIMIT 1) RETURNING ...`, so
 jobs are claimed in the order they became runnable. `idx_jobs_claim
 (status, kind, run_after, created_at)` turns a one-kind claim into an index
-seek and the first row, however many jobs are queued. Failed jobs get
-exponential backoff via `run_after`.
+seek and the first row, however many jobs are queued. An attempt that
+failed and may be retried gets exponential backoff via `run_after`, and
+keeps its error in `last_error`. A job deferred because curio held its
+fetch back itself (an upstream's rate-limit cooldown) goes back to
+`pending` with `run_after` at the hold's end, the attempt refunded, and
+`waiting for …` in `last_error`, for up to a day from `created_at`. So a
+pending job whose `run_after` is still ahead waits, and its `last_error`
+says why. `MarkDone` clears `last_error`.
 
 Idle workers don't poll on a fixed tick. The store signals, per kind,
 when a job is enqueued or put back to pending in this process
