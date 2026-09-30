@@ -235,3 +235,27 @@ func TestPollHrefs(t *testing.T) {
 		assert.Equal(t, run, ShownRun(u.Query()), "the run round-trips")
 	}
 }
+
+// TestPageHrefs: a page of the Interests names the run it shows, and the
+// first page no number; a page of an interest's members keeps the ID one
+// path segment. Every value round-trips, however odd.
+func TestPageHrefs(t *testing.T) {
+	assert.Equal(t, "/ui/interests", interestsPageHref(1, ""))
+	assert.Equal(t, "/ui/interests?run=r", interestsPageHref(1, "r"))
+	assert.Equal(t, "/ui/interests?page=2&run=r", interestsPageHref(2, "r"))
+	assert.Equal(t, "/ui/interests?page=2", interestsPageHref(2, ""))
+	for _, run := range []string{"a&page=9&run=b #1", `"><script>`, "100%/x?"} {
+		u := parseHref(t, interestsPageHref(3, run))
+		assert.Equal(t, "/ui/interests", u.Path)
+		assert.Equal(t, url.Values{PageParam: {"3"}, "run": {run}}, u.Query(), "the run round-trips")
+		assert.Equal(t, run, ShownRun(u.Query()))
+	}
+
+	assert.Equal(t, "/ui/interests/i1", interestPageHref("i1", 1))
+	assert.Equal(t, "/ui/interests/i1?page=2", interestPageHref("i1", 2))
+	for _, id := range []string{"a/b?page=9#x", `"><script>`, "../status"} {
+		u := parseHref(t, interestPageHref(id, 4))
+		assert.Equal(t, "/ui/interests/"+url.PathEscape(id), u.EscapedPath(), "one path segment")
+		assert.Equal(t, url.Values{PageParam: {"4"}}, u.Query())
+	}
+}

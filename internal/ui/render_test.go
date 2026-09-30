@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"io"
 	"iter"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -54,7 +55,8 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 	require.NoError(t, err)
 	member := Member{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Similarity: 0.8}
 	interest := Interest{ID: evilAttr, Label: evilScript, Summary: evilQuotes, Size: 7, Cohesion: 0.7,
-		Members: []Member{member, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes}}}
+		Members: []Member{member, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes},
+			{DocumentID: evilScript, BookmarkTitle: evilAttr + evilScript, URL: evilURL}}}
 
 	upstream := func(name, state string, enabled bool) Upstream {
 		return Upstream{Name: name, Enabled: enabled, State: state, LastSuccess: at, LastFailure: at,
@@ -146,13 +148,15 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 				AttemptLimit: 5, Hold: evilScript},
 		},
 		PageInterests: Interests{
-			Layout:    layout(NavInterests),
-			Run:       &InterestRun{ComputedAt: at, Algo: evilScript, Documents: 40, Noise: 3, Interests: 9},
+			Layout: layout(NavInterests),
+			Page:   2, RunChanged: true,
+			Run: &InterestRun{ID: evilAttr + evilScript, ComputedAt: at, Algo: evilScript, Documents: 400, Noise: 3,
+				Interests: 60},
 			Interests: []Interest{interest, {ID: "unlabeled", Size: 1}},
 			Rebuild: Rebuild{Enabled: true, Running: true, StartedAt: at, Shown: evilAttr, NewRun: evilScript,
 				RunError: evilScript},
 		},
-		PageInterest: InterestPage{Layout: layout(NavInterests), Interest: interest},
+		PageInterest: InterestPage{Layout: layout(NavInterests), Interest: interest, RunAt: at},
 		PageError: ErrorPage{Layout: layout(NavNone), Status: http.StatusBadRequest, Title: evilScript,
 			Message: evilAttr, RequestID: evilQuotes, Retry: NavLibrary},
 		PageStarting: Starting{Layout: layout(NavNone), Phase: evilScript, Migrating: true, Applied: 1, Total: 6},
@@ -196,6 +200,7 @@ func sampleVariants(t testing.TB) map[string][]any {
 		PageFailures:  failuresVariants(layout(NavLibrary), panelErr, counts),
 		PageDocument:  documentVariants(layout(NavLibrary), panelErr, at),
 		PageInterests: interestsVariants(layout(NavInterests), panelErr, at),
+		PageInterest:  interestVariants(layout(NavInterests)),
 		PageLibrary: {
 			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{State: evilAttr, Limit: 7}, Counts: counts,
 				Rows: []LibraryRow{row}, NextCursor: evilScript, PageSize: 7, Shown: 3},
@@ -293,9 +298,22 @@ func failuresVariants(layout Layout, panelErr *PanelError, counts *LibraryCounts
 
 // interestsVariants are the Interests with a rebuild queued behind a
 // paused queue, one done and one failed since the run shown, insight off
-// without a run, the rebuild's reads failed, and a poll's answer.
+// without a run, the rebuild's reads failed, a poll's answer, the first,
+// a middle and the last of many pages, the first page of a newer run than
+// asked for, and a page past the last of a run, of an empty run and
+// without one.
 func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 	run := &InterestRun{ComputedAt: at, Documents: 3}
+	many := &InterestRun{ID: evilScript, ComputedAt: at, Algo: evilAttr, Documents: 4498, Noise: 2547, Interests: 1951}
+	cards := func(n int) []Interest {
+		out := make([]Interest, 0, n)
+		for i := range n {
+			out = append(out, Interest{ID: evilAttr + strconv.Itoa(i), Label: evilScript, Size: 10, Cohesion: 0.6,
+				Members: []Member{{DocumentID: evilAttr, BookmarkTitle: evilScript, URL: evilURL}}})
+		}
+		return out
+	}
+	rebuild := Rebuild{Enabled: true, Shown: evilScript}
 	return []any{
 		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Queued: true, Hold: "paused", Shown: "run"}},
 		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Shown: "run", NewRun: "done"}},
@@ -304,6 +322,38 @@ func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any 
 		Interests{Layout: layout, Rebuild: Rebuild{}},
 		Interests{Layout: layout, Rebuild: Rebuild{Enabled: true, Err: panelErr}},
 		Interests{Layout: layout, Poll: PollRebuild, Rebuild: Rebuild{Enabled: true, Running: true, Shown: evilAttr}},
+		Interests{Layout: layout, Page: 1, Run: many, Interests: cards(InterestsPageSize), Rebuild: rebuild},
+		Interests{Layout: layout, Page: 51, Run: many, Interests: cards(InterestsPageSize), Rebuild: rebuild},
+		Interests{Layout: layout, Page: 82, Run: many, Interests: cards(7), Rebuild: rebuild},
+		Interests{Layout: layout, Page: 1, RunChanged: true, Run: many, Interests: cards(InterestsPageSize),
+			Rebuild: rebuild},
+		Interests{Layout: layout, Page: 83, RunChanged: true, Run: many, Rebuild: rebuild},
+		Interests{Layout: layout, Page: math.MaxInt, Run: &InterestRun{ID: evilAttr, ComputedAt: at, Documents: 5,
+			Noise: 5}, Rebuild: rebuild},
+		Interests{Layout: layout, Page: 2, Rebuild: Rebuild{Enabled: true}},
+	}
+}
+
+// interestVariants are an interest's page of members named every way, on
+// its first page, past its thousandth member, and past its last page, and
+// without a run time.
+func interestVariants(layout Layout) []any {
+	members := func(n int) []Member {
+		out := make([]Member, 0, n)
+		for i := range n {
+			out = append(out, Member{DocumentID: evilAttr + strconv.Itoa(i), BookmarkTitle: evilScript,
+				URL: "https://example.com/" + evilQuotes + strconv.Itoa(i), Similarity: 0.5})
+		}
+		return out
+	}
+	big := Interest{ID: evilScript, Label: evilAttr, Summary: evilScript, Size: 1234, Cohesion: 0.6}
+	first, deep := big, big
+	first.Members, deep.Members = members(InterestMembersPageSize), members(InterestMembersPageSize)
+	return []any{
+		InterestPage{Layout: layout, Interest: first, Page: 1},
+		InterestPage{Layout: layout, Interest: deep, Page: 21},
+		InterestPage{Layout: layout, Interest: big, Page: 26},
+		InterestPage{Layout: layout, Interest: Interest{ID: evilAttr, Size: 1}, Page: 2},
 	}
 }
 
@@ -375,6 +425,18 @@ func partialSamples(t testing.TB) map[string][]any {
 			Field: evilQuotes, Join: evilAttr, Status: evilScript, Done: evilQuotes, DoneOff: evilScript}, Action{}},
 		"poller": {DocumentJobs{DocumentID: evilAttr, Baseline: DocumentBaseline{Updated: at, Extraction: evilScript},
 			Jobs: []JobLine{{Kind: "fetch"}}}.Poller(), Rebuild{Shown: evilScript}.Poller(), Status{}.Pollers()[1]},
+		"pager": {
+			newPager(pageSpan{Page: 5, Size: 24, Shown: 24, Total: 1951, Noun: evilScript, Suffix: evilAttr,
+				Href: func(page int) string { return interestsPageHref(page, evilAttr+evilScript) }}),
+			newPager(pageSpan{Page: 1, Size: 50, Shown: 50, Total: 84, Noun: evilQuotes, Suffix: evilScript,
+				Href: func(page int) string { return interestPageHref(evilScript+evilURL, page) }}),
+			newPager(pageSpan{Page: 2, Size: 50, Shown: 34, Total: 84, Noun: evilAttr,
+				Href: func(page int) string { return interestPageHref(evilAttr, page) }}),
+		},
+		"out-of-range": {
+			outOfRange(11, 10, func(page int) string { return interestsPageHref(page, evilScript) }),
+			outOfRange(math.MaxInt, 0, func(page int) string { return interestPageHref(evilAttr, page) }),
+		},
 		"full-error": {evilScript, ""},
 		"match":      {Match{Segments: Highlight(evilScript + " <em>" + evilAttr + "</em>"), BM25: new(1.5)}},
 		"cohesion":   {0.5},

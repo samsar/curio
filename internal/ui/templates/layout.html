@@ -143,6 +143,37 @@ inside that control's tag: actions.js sends it as they say.
 {{- end}}
 
 {{/*
+A numbered list's Pager (pager.go), under the list: which rows the page
+shows; Previous, the pages by number with gaps for those left out, and
+Next. Previous on the first page and Next on the last are not links. A
+phone shows "Page N of M" in place of the numbers.
+*/}}
+{{define "pager" -}}
+<nav class="pager" aria-label="Pages"><span class="pager-summary">{{.Summary}}</span><div class="pager-pages">
+{{- with .Prev}}<a class="step" href="{{.}}" rel="prev">{{template "icon" "chevron-left"}}Previous</a>
+{{- else}}<span class="step" aria-disabled="true">{{template "icon" "chevron-left"}}Previous</span>{{end}}
+{{- range .Items}}{{if .Gap}}<span class="gap" aria-hidden="true">…</span>
+{{- else}}<a href="{{.Href}}" aria-label="Page {{num .Page}}"{{if .Current}} aria-current="page"{{end}}>{{num .Page}}</a>{{end}}{{end -}}
+<span class="of">Page {{num .Page}} of {{num .Pages}}</span>
+{{- with .Next}}<a class="step" href="{{.}}" rel="next">Next{{template "icon" "chevron-right"}}</a>
+{{- else}}<span class="step" aria-disabled="true">Next{{template "icon" "chevron-right"}}</span>{{end -}}
+</div></nav>
+{{- end}}
+
+{{/*
+A page past a numbered list's last, a PageOutOfRange, in place of the
+list: how many pages there are, and the way to the first and the last.
+*/}}
+{{define "out-of-range" -}}
+<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "search-x"}}</div>
+<h2>No page {{num .Page}}</h2>
+<p>This list has {{count .Pages "page" "pages"}}.</p>
+<p class="mt-2"><a class="btn" href="{{.First}}">First page</a>{{if gt .Pages 1}} <a class="btn" href="{{.Last}}">Last page</a>{{end}}</p>
+</div></div>
+{{- end}}
+
+{{/*
 A Poller (poll.go): hidden and empty, it GETs its page's live regions and
 swaps in, out of band, only the regions it names, so an answer that isn't
 the page can't remove one; the newest request is the one answered.

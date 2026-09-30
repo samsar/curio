@@ -547,7 +547,8 @@ col.c-state { width: 7rem; }
 col.c-type { width: 6.5rem; }
 col.c-when { width: 7.5rem; }
 col.c-sim { width: 9.5rem; }
-col.c-rank { width: 3rem; }
+/* Room for a four-digit rank, "1,234", and the cell's padding, on a phone too. */
+col.c-rank { width: 3.5rem; }
 
 /* A document cell: its title on one line, where it lives under it, and,
    for a failed one, why, in at most two lines. */
@@ -940,6 +941,10 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .interest .members > li { min-width: 0; }
 .interest .members a { display: block; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .interest .members a:hover { color: var(--accent-text); text-decoration: none; }
+/* An untitled member, named as the Library names one: by its bookmark's
+   title, in italics, or by its address, in the address's mono. */
+.interest .members a.from-bookmark { font-style: italic; }
+.interest .members a.untitled { font-family: var(--mono); font-size: 0.86em; }
 .interest .all { font-size: var(--fs-sm); font-weight: 540; }
 
 .coverage { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s1); }

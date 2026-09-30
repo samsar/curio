@@ -141,7 +141,7 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "hidden", declarations(ruleFor(t, rules, "", "table.data td").body)["overflow"],
 		"a cell's content stays in its column")
 	for col, width := range map[string]string{"col.c-state": "7rem", "col.c-type": "6.5rem", "col.c-when": "7.5rem",
-		"col.c-sim": "9.5rem", "col.c-rank": "3rem"} {
+		"col.c-sim": "9.5rem", "col.c-rank": "3.5rem"} {
 		assert.Equal(t, width, declarations(ruleFor(t, rules, "", col).body)["width"], col)
 	}
 	const phone = "@media (max-width: 48rem)"
@@ -156,6 +156,11 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "italic", fallback["font-style"], "a bookmark's title stands in for the document's")
 	assert.NotContains(t, fallback, "font-family", "in the title's own font, unlike an address")
 	assert.Equal(t, "italic", declarations(ruleFor(t, rules, "", ".doc-head h1.from-bookmark").body)["font-style"])
+	// An interest card's untitled members, as the Library names documents.
+	assert.Equal(t, "italic",
+		declarations(ruleFor(t, rules, "", ".interest .members a.from-bookmark").body)["font-style"])
+	assert.Equal(t, "var(--mono)",
+		declarations(ruleFor(t, rules, "", ".interest .members a.untitled").body)["font-family"])
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".load-more:empty").body)["display"])
 	assert.Equal(t, "pre-wrap", declarations(ruleFor(t, rules, "", "pre.source").body)["white-space"])
 	ruleFor(t, rules, "@media (max-width: 64rem)", ".header-search")

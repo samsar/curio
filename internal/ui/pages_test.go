@@ -209,27 +209,218 @@ func TestLibrary_Saved(t *testing.T) {
 	assert.Contains(t, out, "<h2>No documents match</h2>")
 }
 
-// TestInterests_Cut: the Interests page says how many interests the run
-// found, and when it shows only the largest, how many; the coverage bar's
-// proportions are attributes.
-func TestInterests_Cut(t *testing.T) {
-	r := newRenderer(t)
-	page := Interests{Layout: Layout{Title: "Interests", Nav: NavInterests},
-		Run: &InterestRun{ComputedAt: time.Now(), Algo: "knn-graph", Documents: 3142, Noise: 1191, Interests: 222}}
-	for i := range 50 {
-		page.Interests = append(page.Interests, Interest{ID: strconv.Itoa(i), Label: "Topic " + strconv.Itoa(i),
+// interestsPage is page of a run of 222 interests, its cards as many as
+// the page holds of them; the coverage bar's proportions are attributes.
+func interestsPage(page int) Interests {
+	v := Interests{Layout: Layout{Title: "Interests", Nav: NavInterests}, Page: page,
+		Run: &InterestRun{ID: "run-1", ComputedAt: time.Now(), Algo: "knn-graph", Documents: 3142, Noise: 1191,
+			Interests: 222}}
+	for i := range min(InterestsPageSize, 222-PageOffset(page, InterestsPageSize)) {
+		v.Interests = append(v.Interests, Interest{ID: strconv.Itoa(i), Label: "Topic " + strconv.Itoa(i),
 			Size: 84 - i, Cohesion: 0.7})
 	}
-	out := render(t, r, PageInterests, page)
-	assert.Contains(t, out, "222 topics curio found in your library, largest first; these are the 50 largest.")
+	return v
+}
+
+// TestInterests_Pages: the lede counts the run's interests, and past the
+// first page says which page it is; the pager under the cards counts the
+// cards shown of the run's, and every link between pages names the run.
+func TestInterests_Pages(t *testing.T) {
+	r := newRenderer(t)
+	out := render(t, r, PageInterests, interestsPage(1))
+	assert.Contains(t, out, `<p class="lede">222 topics curio found in your library, largest first.</p>`)
+	assert.NotContains(t, out, "largest;")
+	assert.Equal(t, InterestsPageSize, strings.Count(out, `<li class="card interest">`))
 	assert.Contains(t, out, `<rect class="fill-accent" x="0.000" y="0" width="62.094" height="10"/>`)
 	assert.Contains(t, out, `<span class="n">1,951</span> in an interest <span class="pct">62%</span>`)
 	assert.Contains(t, out, `<span class="n">1,191</span> in none <span class="pct">38%</span>`)
 	assert.NotContains(t, out, "style=")
+	assert.Contains(t, out, `<span class="pager-summary">Interests 1–24 of 222</span>`)
+	assert.Contains(t, out, `<a href="/ui/interests?run=run-1" aria-label="Page 1" aria-current="page">1</a>`)
+	assert.Contains(t, out, `<a href="/ui/interests?page=10&amp;run=run-1" aria-label="Page 10">10</a>`)
+	assert.Contains(t, out, `<a class="step" href="/ui/interests?page=2&amp;run=run-1" rel="next">`)
+	assert.NotContains(t, out, `role="note"`, "no rebuild since")
 
-	page.Run.Interests = 50
-	assert.Contains(t, render(t, r, PageInterests, page), "50 topics curio found in your library, largest first.</p>",
-		"all of them shown")
+	out = render(t, r, PageInterests, interestsPage(2))
+	assert.Contains(t, out, `<p class="lede">222 topics curio found in your library, largest first. Page 2 of 10.</p>`)
+	assert.Contains(t, out, `<span class="pager-summary">Interests 25–48 of 222</span>`)
+	assert.Contains(t, out, `<a class="step" href="/ui/interests?run=run-1" rel="prev">`)
+
+	last := interestsPage(10)
+	assert.Len(t, last.Interests, 6)
+	out = render(t, r, PageInterests, last)
+	assert.Contains(t, out, "Page 10 of 10.</p>")
+	assert.Contains(t, out, `<span class="pager-summary">Interests 217–222 of 222</span>`)
+	assert.Contains(t, out, `<span class="step" aria-disabled="true">Next`)
+	assert.Nil(t, last.OutOfRange())
+
+	all := interestsPage(1)
+	all.Run.Interests = InterestsPageSize
+	out = render(t, r, PageInterests, all)
+	assert.Contains(t, out, "24 topics curio found in your library, largest first.</p>")
+	assert.NotContains(t, out, `class="pager"`, "one page needs no pager")
+}
+
+// TestInterests_RunChanged: a page asked for from another run's says the
+// interests were rebuilt, leading back to the first page past it; the
+// note sits outside the polled regions.
+func TestInterests_RunChanged(t *testing.T) {
+	r := newRenderer(t)
+	page := interestsPage(3)
+	page.RunChanged = true
+	out := render(t, r, PageInterests, page)
+	assert.Contains(t, out, `<div class="callout callout-info mb-4" role="note">`)
+	assert.Contains(t, out, `The interests were rebuilt since the page you came from, so this page lists the new `+
+		`run's. <a href="/ui/interests?run=run-1">Start again from page 1</a>.</p>`)
+	note := strings.Index(out, `role="note"`)
+	assert.Less(t, note, strings.Index(out, `aria-label="Coverage"`), "above the coverage")
+	assert.Greater(t, note, strings.Index(out, `id="rebuild-control"`), "outside the head's live regions")
+
+	page = interestsPage(1)
+	page.RunChanged = true
+	out = render(t, r, PageInterests, page)
+	assert.Contains(t, out, "so this page lists the new run's.</p>", "the first page needs no way back to it")
+	assert.NotContains(t, out, "Start again")
+}
+
+// TestInterests_OutOfRange: a page past the last keeps the head, the
+// coverage and the rebuild, and in place of the cards says how many pages
+// there are, with the way to the first and last; a run without interests
+// and no run at all have one page.
+func TestInterests_OutOfRange(t *testing.T) {
+	r := newRenderer(t)
+	page := interestsPage(11)
+	require.NotNil(t, page.OutOfRange())
+	page.Rebuild = Rebuild{Enabled: true, Shown: "run-1"}
+	out := render(t, r, PageInterests, page)
+	assert.Contains(t, out, `<p class="lede">222 topics curio found in your library, largest first.</p>`)
+	assert.Contains(t, out, `aria-label="Coverage"`)
+	assert.Contains(t, out, `id="rebuild"`)
+	assert.Contains(t, out, `id="rebuild-poll"`)
+	assert.Contains(t, out, "<h2>No page 11</h2>\n<p>This list has 10 pages.</p>")
+	assert.Contains(t, out, `<a class="btn" href="/ui/interests?run=run-1">First page</a> `+
+		`<a class="btn" href="/ui/interests?page=10&amp;run=run-1">Last page</a>`)
+	assert.NotContains(t, out, "interest-grid")
+	assert.NotContains(t, out, `class="pager"`)
+
+	empty := Interests{Layout: page.Layout, Page: 2, Run: &InterestRun{ID: "run-2", Documents: 5, Noise: 5}}
+	out = render(t, r, PageInterests, empty)
+	assert.Contains(t, out, "<h2>No page 2</h2>\n<p>This list has 1 page.</p>")
+	assert.Contains(t, out, `<a class="btn" href="/ui/interests?run=run-2">First page</a></p>`)
+	assert.NotContains(t, out, "No interests in this run", "the card never says the run found none")
+
+	none := Interests{Layout: page.Layout, Page: 2}
+	out = render(t, r, PageInterests, none)
+	assert.Contains(t, out, "<h2>No page 2</h2>")
+	assert.Contains(t, out, `<a class="btn" href="/ui/interests">First page</a></p>`)
+	assert.NotContains(t, out, "No interests yet")
+	assert.Nil(t, Interests{Page: 1}.OutOfRange())
+}
+
+// TestInterests_MemberNames: a card names its members as the Library
+// names documents: by title, then by a bookmark's title in italics, then
+// by address, the whole of it on hover.
+func TestInterests_MemberNames(t *testing.T) {
+	r := newRenderer(t)
+	page := interestsPage(1)
+	page.Interests[0].Members = []Member{
+		{DocumentID: "d1", Title: "A <title>", BookmarkTitle: "ignored", URL: "https://example.com/a"},
+		{DocumentID: "d2", BookmarkTitle: "AWS Serverless Application Lens",
+			URL: "https://d1.awsstatic.com/whitepapers/AWS-Serverless-Applications-Lens.pdf"},
+		{DocumentID: "d3", URL: "https://example.com/b/?q=1"},
+	}
+	out := render(t, r, PageInterests, page)
+	assert.Contains(t, out, `<ul class="members">`+
+		`<li><a href="/ui/documents/d1" title="A &lt;title&gt;">A &lt;title&gt;</a></li>`+
+		`<li><a class="from-bookmark" href="/ui/documents/d2" title="AWS Serverless Application Lens">`+
+		`AWS Serverless Application Lens</a></li>`+
+		`<li><a class="untitled" href="/ui/documents/d3" title="https://example.com/b/?q=1">example.com/b?q=1</a></li>`+
+		`</ul>`)
+}
+
+// interestPage is page of an interest of size members, with the members
+// the page holds, each named by its bookmark.
+func interestPage(page, size int) InterestPage {
+	in := Interest{ID: "i1", Label: "AWS Serverless Architecture", Size: size, Cohesion: 0.59}
+	first := PageOffset(page, InterestMembersPageSize)
+	for i := first; i < min(first+InterestMembersPageSize, size); i++ {
+		in.Members = append(in.Members, Member{DocumentID: "d" + strconv.Itoa(i), BookmarkTitle: "Saved " + strconv.Itoa(i),
+			URL: "https://example.com/" + strconv.Itoa(i), Similarity: 0.5})
+	}
+	return InterestPage{Layout: Layout{Title: in.Label, Nav: NavInterests}, Interest: in, Page: page}
+}
+
+// TestInterestPage_Pages: an interest's members are ranked across its
+// pages, with a pager under them that counts the documents shown of all of
+// them, and the head names the run the interest comes from.
+func TestInterestPage_Pages(t *testing.T) {
+	r := newRenderer(t)
+	one := interestPage(1, 84)
+	one.RunAt = time.Date(2026, 9, 28, 10, 34, 0, 0, time.Local)
+	out := render(t, r, PageInterest, one)
+	assert.Contains(t, out, `cohesion 0.59</span><span class="sep">·</span><span class="text">run of 2026-09-28 10:34</span></div>`)
+	assert.NotContains(t, out, "showing")
+	assert.Contains(t, out, `<td class="num muted">1</td>`)
+	assert.Contains(t, out, `<td class="num muted">50</td>`)
+	assert.NotContains(t, out, `<td class="num muted">51</td>`)
+	assert.Contains(t, out, `<span class="pager-summary">Documents 1–50 of 84, most similar first</span>`)
+	assert.Contains(t, out, `<a href="/ui/interests/i1?page=2" aria-label="Page 2">2</a>`)
+	assert.Contains(t, out, `<a class="step" href="/ui/interests/i1?page=2" rel="next">`)
+
+	two := interestPage(2, 84)
+	out = render(t, r, PageInterest, two)
+	assert.NotContains(t, out, "run of", "no run time, no run line")
+	assert.Contains(t, out, `<td class="num muted">51</td>`)
+	assert.Contains(t, out, `<td class="num muted">84</td>`)
+	assert.Equal(t, 34, strings.Count(out, `<td class="num muted">`))
+	assert.Contains(t, out, `<span class="pager-summary">Documents 51–84 of 84, most similar first</span>`)
+	assert.Contains(t, out, `<a class="step" href="/ui/interests/i1" rel="prev">`)
+	assert.Equal(t, []int{51, 52}, []int{two.Ranked()[0].Rank, two.Ranked()[1].Rank})
+
+	deep := interestPage(25, 1300)
+	assert.Contains(t, render(t, r, PageInterest, deep), `<td class="num muted">1,201</td>`, "a rank grouped as a count")
+
+	whole := interestPage(1, 50)
+	assert.NotContains(t, render(t, r, PageInterest, whole), `class="pager"`, "one page needs no pager")
+}
+
+// TestInterestPage_OutOfRange: a page past the last keeps the interest's
+// head, and in place of the table leads to the first and last pages.
+func TestInterestPage_OutOfRange(t *testing.T) {
+	r := newRenderer(t)
+	page := interestPage(3, 84)
+	require.NotNil(t, page.OutOfRange())
+	page.Interest.Summary = "Guides to serverless AWS."
+	out := render(t, r, PageInterest, page)
+	assert.Contains(t, out, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a></nav>`)
+	assert.Contains(t, out, "<h1>AWS Serverless Architecture</h1>")
+	assert.Contains(t, out, `<p class="lede">Guides to serverless AWS.</p>`)
+	assert.Contains(t, out, `<span class="badge badge-accent plain">84 documents</span>`)
+	assert.Contains(t, out, "<h2>No page 3</h2>\n<p>This list has 2 pages.</p>")
+	assert.Contains(t, out, `<a class="btn" href="/ui/interests/i1">First page</a> `+
+		`<a class="btn" href="/ui/interests/i1?page=2">Last page</a>`)
+	assert.NotContains(t, out, "<table")
+	assert.Nil(t, interestPage(2, 84).OutOfRange())
+}
+
+// TestMember_Cell: an interest's member is named as the Library names a
+// document, with its short URL under a name and its host under an
+// address.
+func TestMember_Cell(t *testing.T) {
+	const url = "https://example.com/a/b?q=1"
+	named := Member{DocumentID: "d1", BookmarkTitle: "Saved", URL: url}.Cell()
+	assert.Equal(t, DocRef{ID: "d1", Fallback: "Saved", URL: url}, named.Ref)
+	assert.Equal(t, "from-bookmark", named.Ref.Class())
+	assert.Equal(t, "example.com/a/b?q=1", named.Where)
+	titled := Member{DocumentID: "d1", Title: "Title", URL: url}.Cell()
+	assert.Equal(t, "example.com/a/b?q=1", titled.Where)
+	address := Member{DocumentID: "d1", URL: url}.Cell()
+	assert.Equal(t, "untitled", address.Ref.Class())
+	assert.Equal(t, "example.com", address.Where)
+
+	out := render(t, newRenderer(t), PageInterest, interestPage(1, 1))
+	assert.Contains(t, out, `<a class="doc-title from-bookmark" href="/ui/documents/d0" title="Saved 0">Saved 0</a>`+
+		"\n"+`<span class="doc-sub"><span class="host" title="https://example.com/0">example.com/0</span>`)
 }
 
 // TestDocument_Head: the head's facts, a published date as its UTC day,

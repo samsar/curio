@@ -96,6 +96,11 @@ func (d readDocs) ListWithLastError(ctx context.Context, tenantID string, opts s
 	return d.DocumentStore.ListWithLastError(ctx, tenantID, opts)
 }
 
+func (d readDocs) GetByIDsWithLastError(ctx context.Context, tenantID string, ids []string) ([]store.DocumentWithError, error) {
+	d.r.add("member documents")
+	return d.DocumentStore.GetByIDsWithLastError(ctx, tenantID, ids)
+}
+
 type readJobs struct {
 	store.JobStore
 	r *reads
@@ -154,9 +159,24 @@ func (i readInsights) LatestRun(ctx context.Context, tenantID string, status sto
 	return i.InsightStore.LatestRun(ctx, tenantID, status)
 }
 
-func (i readInsights) ListClusters(ctx context.Context, runID string, limit int) ([]*store.Cluster, error) {
+func (i readInsights) ListClusters(ctx context.Context, runID string, limit, offset int) ([]*store.Cluster, error) {
 	i.r.add("interests")
-	return i.InsightStore.ListClusters(ctx, runID, limit)
+	return i.InsightStore.ListClusters(ctx, runID, limit, offset)
+}
+
+func (i readInsights) ClusterMembers(ctx context.Context, clusterID string, limit, offset int) ([]store.ClusterMember, error) {
+	i.r.add("members")
+	return i.InsightStore.ClusterMembers(ctx, clusterID, limit, offset)
+}
+
+func (i readInsights) GetCluster(ctx context.Context, id string) (*store.Cluster, error) {
+	i.r.add("interest")
+	return i.InsightStore.GetCluster(ctx, id)
+}
+
+func (i readInsights) GetRun(ctx context.Context, id string) (*store.ClusterRun, error) {
+	i.r.add("run")
+	return i.InsightStore.GetRun(ctx, id)
 }
 
 type readChunks struct {
@@ -748,6 +768,36 @@ func TestUI_InterestsRebuild(t *testing.T) {
 		"a failure newer than the interests shown, reported on the page")
 }
 
+// TestUI_InterestsRebuildPaged: past the first page, and past the last,
+// the rebuild is the same: its state is the queue's, and its poller asks
+// for the rebuild alone, with the run shown and no page; once the rebuild
+// is done, it offers the Interests' first page.
+func TestUI_InterestsRebuildPaged(t *testing.T) {
+	ctx := context.Background()
+	srv := apitest.Start(t)
+	interests := make([]apitest.Interest, 0, 30)
+	for i := range 30 {
+		interests = append(interests, apitest.Interest{Label: "Topic " + strconv.Itoa(i), Size: 100 - i})
+	}
+	run := srv.AddInterests(t, interests...)[0].RunID
+	enqueueRebuild(t, srv)
+	_, err := srv.Deps.Gate.Update(ctx, jobsPause())
+	require.NoError(t, err)
+	want := "/ui/interests?" + url.Values{"poll": {"rebuild"}, "run": {run}}.Encode()
+	for path, status := range map[string]int{"/ui/interests?page=2&run=" + run: http.StatusOK,
+		"/ui/interests?page=3": http.StatusNotFound} {
+		body := getPage(t, srv, path, status)
+		assert.Equal(t, want, pollerHref(t, body, "rebuild-state"), path)
+		assert.Equal(t, "every 2s, curio:changed from:body", pollerTrigger(t, body, "rebuild-poll"), path)
+		assert.Contains(t, body, `<p>Rebuild queued · <a id="rebuild-hold" href="/ui/status">`, path)
+		assert.Equal(t, "true", attr(elementByID(pageDoc(t, body), "rebuild"), "aria-disabled"), path)
+	}
+
+	srv.AddInterest(t, "Kafka streams", srv.AddDocument(t, "https://example.com/a", store.DocStateFetched))
+	answer := getPage(t, srv, want, http.StatusOK)
+	assert.Contains(t, answer, `<p>New interests are ready: <a id="rebuild-reload" href="/ui/interests">reload</a></p>`)
+}
+
 // failRun records a clustering run that failed with msg, as the insight
 // engine records a failed rebuild.
 func failRun(t *testing.T, srv *apitest.Server, msg string) {
@@ -759,19 +809,42 @@ func failRun(t *testing.T, srv *apitest.Server, msg string) {
 		store.RunResult{Status: store.ClusterRunFailed, Error: &msg}))
 }
 
-// TestUI_InterestsReads: the page reads the interests and the rebuild's
-// state; its poll the rebuild's alone: the queue and the newest run, never
-// the interests. A running rebuild's start is its one job read.
+// TestUI_InterestsReads: the page reads a page of the interests, each
+// card's members and all their documents at once, and the rebuild's
+// state; a page past the last reads no member; its poll reads the
+// rebuild's state alone: the queue and the newest run, never the
+// interests. A running rebuild's start is its one job read. An interest's
+// page reads it, its run, its members and their documents, once each.
 func TestUI_InterestsReads(t *testing.T) {
 	r := &reads{}
 	srv := apitest.Start(t, countReads(r))
-	srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/a", store.DocStateFetched))
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	interests := srv.AddInterests(t, apitest.Interest{Label: "Kafka", Size: 2, Members: []*store.Document{a, b}},
+		apitest.Interest{Label: "Go", Size: 1}, apitest.Interest{Label: "Rust", Size: 1})
 	body := getPage(t, srv, "/ui/interests", http.StatusOK)
+	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "members": 3, "member documents": 1, "queue": 1,
+		"newest run": 1}, r.take(), "no document or extraction read one by one")
+
+	getPage(t, srv, "/ui/interests?page=2", http.StatusNotFound)
 	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "queue": 1, "newest run": 1}, r.take())
+	getPage(t, srv, "/ui/interests?page=x", http.StatusBadRequest)
+	assert.Empty(t, r.take())
+
+	getPage(t, srv, "/ui/interests/"+interests[0].ID, http.StatusOK)
+	assert.Equal(t, map[string]int{"interest": 1, "run": 1, "members": 1, "member documents": 1}, r.take())
+	getPage(t, srv, "/ui/interests/"+interests[1].ID, http.StatusOK)
+	assert.Equal(t, map[string]int{"interest": 1, "run": 1, "members": 1}, r.take(), "no member, no document read")
+	getPage(t, srv, "/ui/interests/"+interests[0].ID+"?page=2", http.StatusNotFound)
+	assert.Equal(t, map[string]int{"interest": 1, "run": 1}, r.take())
+	getPage(t, srv, "/ui/interests/"+interests[0].ID+"?page=x", http.StatusBadRequest)
+	assert.Empty(t, r.take())
 
 	href := pollerHref(t, body, "rebuild-state")
 	getPage(t, srv, href, http.StatusOK)
 	assert.Equal(t, map[string]int{"queue": 1, "newest run": 1}, r.take())
+	getPage(t, srv, href+"&page=x", http.StatusOK)
+	assert.Equal(t, map[string]int{"queue": 1, "newest run": 1}, r.take(), "a poll ignores the page")
 
 	enqueueRebuild(t, srv)
 	_, err := srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})

@@ -378,6 +378,39 @@ func TestQueryPlans(t *testing.T) {
 			avoid: []string{"idx_bookmarks_tenant_"},
 		},
 		{
+			// The IDs' own documents, each by its primary key. Written with
+			// d.tenant_id = ?, the same query walks every document the
+			// tenant has in idx_documents_tenant_state_updated instead.
+			name:  "GetByIDsWithLastError",
+			query: getDocumentsWithErrorSQL, args: []any{store.JobStatusFailed, `["a","b","c"]`, "local"},
+			first: "SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
+			want: []string{
+				"SEARCH e USING INDEX sqlite_autoindex_document_extractions_1 (id=?)",
+				"SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)",
+				untitledBookmarkTitle,
+			},
+			avoid: []string{"idx_documents_tenant_", "idx_bookmarks_tenant_"},
+		},
+		{
+			// idx_clusters_run gives the size order; only clusters of the
+			// same size are sorted, by cohesion and ID.
+			name:  "ListClusters",
+			query: listClustersSQL, args: []any{"run", 24, 48},
+			first: "SEARCH clusters USING INDEX idx_clusters_run (run_id=?)",
+			want:  []string{"USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY"},
+			sorts: true,
+		},
+		{
+			// A cluster's members, sorted by similarity: no index holds
+			// them in that order (see "Interests page by offset within a
+			// run").
+			name:  "ClusterMembers",
+			query: clusterMembersSQL, args: []any{"cluster", 50, 50},
+			first: "SEARCH cluster_documents USING INDEX sqlite_autoindex_cluster_documents_1 (cluster_id=?)",
+			sorts: true,
+			avoid: []string{"idx_cluster_documents_document"},
+		},
+		{
 			// The document's bookmarks, read in the order they are listed.
 			name:  "ListByDocument",
 			query: listBookmarksByDocumentSQL, args: []any{"local", "doc"},

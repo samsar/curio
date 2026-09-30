@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -215,24 +216,11 @@ func (s *Documents) MarkFetched(ctx context.Context, id string) error {
 // and, for an untitled one, its bookmark's title, all in one query.
 func (s *Documents) ListWithLastError(ctx context.Context, tenantID string, opts store.ListDocumentsOpts) ([]store.DocumentWithError, error) {
 	q, args := listDocumentsQuery(tenantID, opts)
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	docs, err := s.queryDocumentsWithError(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list documents with error: %w", err)
 	}
-	defer rows.Close()
-
-	var out []store.DocumentWithError
-	for rows.Next() {
-		item, err := scanDocumentWithError(rows)
-		if err != nil {
-			return nil, fmt.Errorf("list documents with error: %w", err)
-		}
-		out = append(out, *item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list documents with error: %w", err)
-	}
-	return out, nil
+	return docs, nil
 }
 
 func (s *Documents) GetWithLastError(ctx context.Context, tenantID, id string) (*store.DocumentWithError, error) {
@@ -245,6 +233,57 @@ func (s *Documents) GetWithLastError(ctx context.Context, tenantID, id string) (
 		return nil, fmt.Errorf("get document %s with error: %w", id, err)
 	}
 	return doc, nil
+}
+
+// getDocumentsWithErrorSQL is GetByIDsWithLastError's query. The IDs come
+// as one JSON array, so the SQL is the same however many there are, and no
+// number of them reaches SQLite's limit on bound parameters (32,766). Each
+// ID seeks the documents primary key. The tenant term is written
+// +d.tenant_id so that it is only checked on the rows found: SQLite, which
+// has no statistics to go on, takes d.tenant_id = ? with ten IDs or more
+// as a reason to walk idx_documents_tenant_state_updated through every
+// document the tenant has, 3 to 4 times slower on the author's library and
+// slower as the library grows. Its arguments are store.JobStatusFailed,
+// the IDs and the tenant.
+var getDocumentsWithErrorSQL = selectDocumentsWithError +
+	" WHERE d.id IN (SELECT value FROM json_each(?)) AND +d.tenant_id = ?"
+
+func (s *Documents) GetByIDsWithLastError(ctx context.Context, tenantID string, ids []string) ([]store.DocumentWithError, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("get documents with error: encode their IDs: %w", err)
+	}
+	docs, err := s.queryDocumentsWithError(ctx, getDocumentsWithErrorSQL, store.JobStatusFailed, string(list), tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("get documents with error: %w", err)
+	}
+	return docs, nil
+}
+
+// queryDocumentsWithError runs q, a query of selectDocumentsWithError, and
+// scans its rows.
+func (s *Documents) queryDocumentsWithError(ctx context.Context, q string, args ...any) ([]store.DocumentWithError, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []store.DocumentWithError
+	for rows.Next() {
+		item, err := scanDocumentWithError(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // lastErrorSQL is the error of the most recent failed job of documents d,
