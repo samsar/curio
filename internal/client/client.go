@@ -60,12 +60,26 @@ type Health struct {
 }
 
 // EmbeddingDrift mirrors api.EmbeddingDrift: what changed in the build
-// that makes the home's embeddings since the library was indexed, and the
-// command that fixes it.
+// that makes the home's embeddings since the library was indexed, the
+// evidence it was reported on, and the command that fixes it.
+// Verification is nil from a daemon that predates verifying a change.
 type EmbeddingDrift struct {
-	Changes   []DriftChange `json:"changes"`
-	Fix       string        `json:"fix"`
-	CheckedAt time.Time     `json:"checked_at"`
+	Changes      []DriftChange      `json:"changes"`
+	Verification *DriftVerification `json:"verification,omitempty"`
+	Fix          string             `json:"fix"`
+	CheckedAt    time.Time          `json:"checked_at"`
+}
+
+// DriftVerification mirrors api.DriftVerification: whether a re-embedded
+// sample showed the change, and Detail, the daemon's wording of it.
+// MinCosine is nil unless Verified.
+type DriftVerification struct {
+	Verified  bool      `json:"verified"`
+	Sampled   int       `json:"sampled"`
+	Changed   int       `json:"changed"`
+	MinCosine *float64  `json:"min_cosine,omitempty"`
+	Detail    string    `json:"detail"`
+	SampledAt time.Time `json:"sampled_at"`
 }
 
 // DriftChange mirrors api.DriftChange. What is DriftModelDigest or

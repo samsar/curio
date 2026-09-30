@@ -499,7 +499,8 @@ func TestStatus_Attention(t *testing.T) {
 	at := time.Now().Add(-5 * time.Minute)
 	st := Status{Layout: Layout{Title: "Status", Nav: NavStatus}, Health: &HealthPanel{
 		OllamaDetail: "ollama unreachable (start it with `ollama serve`)",
-		Drift:        &Drift{Changes: []DriftChange{{What: "model digest", Recorded: "a", Current: "b"}}, Fix: "curio reindex --all"},
+		Drift: &Drift{Changes: []DriftChange{{What: "model digest", Recorded: "a", Current: "b"}}, Verified: true,
+			Detail: "64 of 64 sampled chunks changed (worst cosine 0.9713)", Fix: "curio reindex --all"},
 		Upstreams: []Upstream{
 			{Name: "jina", Enabled: true, State: "degraded", LastSuccess: at, LastFailure: at,
 				LastFailureClass: "rate_limited", Window: 15 * time.Minute, Calls: 20, Failed: 6},
@@ -527,6 +528,7 @@ func TestStatus_Attention(t *testing.T) {
 	assert.NotContains(t, out, "refus", "a refusal is a healthy answer")
 	assert.Equal(t, 1, strings.Count(out, "The embeddings drifted"), "the Health card keeps its row, not a callout")
 	assert.Contains(t, out, `<span class="sub">0 dimensions, drifted</span>`)
+	assert.Contains(t, out, "<p>Re-embedded sample: 64 of 64 sampled chunks changed (worst cosine 0.9713)</p>")
 
 	st.Health.Err = &PanelError{Message: "health", RequestID: "r"}
 	assert.NotContains(t, render(t, r, PageStatus, st), `class="callout`, "no health read, no callouts")
@@ -534,6 +536,23 @@ func TestStatus_Attention(t *testing.T) {
 	healthy := Status{Layout: st.Layout, Health: &HealthPanel{OllamaReachable: true,
 		Upstreams: []Upstream{{Name: "jina", Enabled: true, State: "ok"}}}}
 	assert.NotContains(t, render(t, r, PageStatus, healthy), `class="callout`)
+}
+
+// TestStatus_UnverifiedDrift: a drift no sample could verify says it may
+// have happened, in its callout and its Health row, with why.
+func TestStatus_UnverifiedDrift(t *testing.T) {
+	r := newRenderer(t)
+	st := Status{Layout: Layout{Title: "Status", Nav: NavStatus}, Health: &HealthPanel{OllamaReachable: true,
+		Drift: &Drift{Changes: []DriftChange{{What: "Ollama", Recorded: "0.34.4", Current: "0.35.0"}},
+			Detail: "not verified: after 3 attempts: ollama unreachable", Fix: "curio reindex --all"}}}
+	out := render(t, r, PageStatus, st)
+
+	callouts := calloutTitleRE.FindAllStringSubmatch(out, -1)
+	require.Len(t, callouts, 1)
+	assert.Equal(t, []string{"callout-warn", "note", "The embeddings may have drifted"}, callouts[0][1:])
+	assert.NotContains(t, out, "The embeddings drifted")
+	assert.Contains(t, out, `<span class="sub">0 dimensions, may have drifted</span>`)
+	assert.Contains(t, out, "<p>Re-embedded sample: not verified: after 3 attempts: ollama unreachable</p>")
 }
 
 // TestStatus_Failures: the causes, most first, each leading to its card on

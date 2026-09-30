@@ -347,10 +347,24 @@ func TestUI_StatusAttention(t *testing.T) {
 	assert.Less(t, drifted, failing, "the drift first")
 	assert.Less(t, failing, board, "before the board")
 	assert.Contains(t, body, "<li>model digest: sha256:aaa → sha256:bbb</li>")
+	assert.Contains(t, body, "<p>Re-embedded sample: 64 of 64 sampled chunks changed (worst cosine 0.9713)</p>")
 	assert.Contains(t, body, "for more than one site, since its last good answer, <time")
 	assert.Contains(t, body, "The last failure was challenged, <time")
 	assert.NotContains(t, body, "refus")
 	assert.NotContains(t, body, "Ollama isn't ready", "the apitest embedder has no Ollama to ping")
+}
+
+// TestUI_StatusUnverifiedDrift: a drift no sample could verify reaches
+// Status as one that may have happened, with the daemon's reason.
+func TestUI_StatusUnverifiedDrift(t *testing.T) {
+	srv := apitest.Start(t, func(d *api.Deps) {
+		d.Drift = apitest.NewDrift(time.Now(), drift.Change{What: "Ollama", Recorded: "0.34.4", Current: "0.35.0"}).
+			Unverified("after 3 attempts: ollama unreachable")
+	})
+	body := getPage(t, srv, "/ui/status", http.StatusOK)
+	assert.Contains(t, body, `<p class="callout-title">The embeddings may have drifted</p>`)
+	assert.Contains(t, body, "<p>Re-embedded sample: not verified: after 3 attempts: ollama unreachable</p>")
+	assert.Contains(t, body, ", may have drifted</span>")
 }
 
 // TestUI_StatusDegraded: a degraded Jina Reader's callout counts its calls

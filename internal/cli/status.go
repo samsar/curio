@@ -76,8 +76,7 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 	fmt.Fprintf(w, "schema:  v%d\n", health.SchemaVersion)
 	fmt.Fprintf(w, "embed:   %s (dim %d)\n", health.EmbeddingModel, health.EmbeddingDim)
 	if d := health.EmbeddingDrift; d != nil {
-		fmt.Fprintf(w, "warning: embeddings drifted since the library was indexed (%s); run `%s`\n",
-			setup.DriftChanges(d), d.Fix)
+		fmt.Fprintln(w, setup.DriftWarning(d))
 	}
 	for _, u := range health.Upstreams {
 		fmt.Fprint(w, failingWarning(u))
