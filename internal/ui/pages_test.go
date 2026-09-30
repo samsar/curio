@@ -1111,13 +1111,8 @@ func TestDocumentJobs(t *testing.T) {
 	assert.Equal(t, "every 2s, curio:changed from:body", p.Trigger())
 	assert.Equal(t, "curio:changed from:body", DocumentJobs{State: "fetched"}.Poller().Trigger())
 
-	retry := JobLine{Kind: "fetch", Attempts: 2}
-	assert.True(t, retry.Retrying())
-	assert.Equal(t, 3, retry.Attempt(), "the attempt it waits to make")
-	running := JobLine{Kind: "fetch", Running: true, Attempts: 2}
-	assert.False(t, running.Retrying())
-	assert.Equal(t, 2, running.Attempt())
-	assert.False(t, JobLine{Kind: "fetch"}.Retrying())
+	assert.Equal(t, 3, JobLine{Kind: "fetch", Waiting: true, Attempts: 2}.Attempt(), "the attempt it waits to make")
+	assert.Equal(t, 2, JobLine{Kind: "fetch", Running: true, Attempts: 2}.Attempt())
 }
 
 // TestDocument_Actions: each state's buttons: Refetch, the primary one for
@@ -1174,9 +1169,10 @@ func TestDocument_Actions(t *testing.T) {
 	assert.Empty(t, textOf(byID(dead, "doc-status")), "no text, nothing to say at rest")
 }
 
-// TestDocument_JobLines: the jobs in flight by kind, whether they run or
-// wait, their attempt, a retry's time, why the queue holds them, and each
-// outcome's reload link.
+// TestDocument_JobLines: the jobs in flight by kind, whether they run, are
+// queued or wait for a time, their attempt, when a waiting job is due and
+// why it waits, why the queue holds them, and each outcome's reload link.
+// A pending job never reads as failed.
 func TestDocument_JobLines(t *testing.T) {
 	r := newRenderer(t)
 	at := time.Now().Add(4 * time.Minute)
@@ -1186,10 +1182,26 @@ func TestDocument_JobLines(t *testing.T) {
 		return regexp.MustCompile(`(?s)<div class="doc-jobs" id="doc-jobs">.*?</div>`).FindString(out)
 	}
 	assert.Contains(t, jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch"}}}), "<li>Fetch queued</li>")
+	assert.Contains(t, jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Attempts: 2,
+		LastError: "fetch failed: HTTP 503"}}}), "<li>Fetch queued · attempt 3 of 5</li>", "a retry that is due")
 	assert.Contains(t, jobsOf(DocumentJobs{State: "fetched", Jobs: []JobLine{{Kind: "index", Running: true,
 		Attempts: 2}}}), "<li>Index running · attempt 2 of 5</li>")
-	assert.Regexp(t, `<li>Fetch queued · attempt 3 of 5, due <time[^>]*>in 3 min</time></li>`,
-		jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Attempts: 2, RunAfter: at}}}))
+
+	retry := jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Waiting: true, Attempts: 2,
+		RunAfter: at, LastError: "fetch failed: native: HTTP 503 Service Unavailable"}}})
+	assert.Regexp(t, `<li>Fetch waiting, due <time[^>]*>in 3 min</time> · attempt 3 of 5`+
+		`<span class="job-why" title="fetch failed: native: HTTP 503 Service Unavailable">HTTP 503 Service Unavailable</span></li>`,
+		retry)
+	deferred := jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Waiting: true, RunAfter: at,
+		LastError: "waiting for GitHub's API rate limit to reset"}}})
+	assert.Regexp(t, `<li>Fetch waiting, due <time[^>]*>in 3 min</time><span class="job-why" `+
+		`title="waiting for GitHub&#39;s API rate limit to reset">waiting for GitHub&#39;s API rate limit to reset</span></li>`,
+		deferred)
+	assert.NotContains(t, deferred, "attempt", "no attempt used yet")
+	for _, out := range []string{retry, deferred} {
+		shown := textOf(byID(parse(t, out), "doc-jobs"))
+		assert.NotContains(t, shown, "failed", "the reason is shown without its wrappers: %s", shown)
+	}
 	held := jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch"}}, Hold: "paused"})
 	assert.Contains(t, held, `<a id="doc-jobs-hold" href="/ui/status">The queue is closed: Paused</a>`)
 	assert.NotContains(t, jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Running: true}},

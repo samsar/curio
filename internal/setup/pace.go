@@ -160,8 +160,8 @@ func onOff(on bool) string {
 
 // importNotes are what to know before an import of pages starts: how long
 // it takes at full speed, the sites that may take longer, the GitHub pages
-// that need a token, the GPU, and what closing the terminal or sleeping
-// does. rate is the measured index rate, 0 when unknown; configPath is
+// that wait for GitHub's hourly limit without a token, the GPU, and what
+// closing the terminal or sleeping does. rate is the measured index rate, 0 when unknown; configPath is
 // where fetcher.github.token goes; managed says launchd keeps the daemon
 // running.
 func importNotes(e Estimate, rate float64, pages []string, cfg config.Config, configPath string, managed bool) []string {
@@ -186,9 +186,10 @@ func importNotes(e Estimate, rate float64, pages []string, cfg config.Config, co
 	}
 	if n := countHost(pages, githubHost); n > 0 && cfg.Fetcher.GitHub.Token == "" {
 		notes = append(notes, fmt.Sprintf("  %s on github.com: without a token GitHub allows 60 API requests "+
-			"an hour, 2 a repository. Set fetcher.github.token in %s, then `curio daemon stop` (the next command "+
-			"starts it again); `curio refetch --all --state=failed` fetches the ones that fail",
-			plural(n, "page"), configPath))
+			"an hour, 2 a repository, so they wait for its hourly limit: up to about %s for these. Set "+
+			"fetcher.github.token in %s, then `curio daemon stop` (the next command starts it again). Pages "+
+			"still waiting after a day fail as rate_limited; `curio refetch --all --cause=rate_limited` retries them",
+			plural(n, "page"), formatDuration(gitHubWait(n)), configPath))
 	}
 	restart := "the next curio command starts the daemon again"
 	if managed {

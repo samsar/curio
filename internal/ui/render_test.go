@@ -140,7 +140,9 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 				Title: evilQuotes, Tags: []string{evilScript, evilURL}, SavedAt: at}}},
 			Jobs: DocumentJobs{DocumentID: evilAttr, State: evilAttr, Baseline: DocumentBaseline{Updated: at,
 				Extraction: evilScript}, Current: DocumentBaseline{Updated: at, Extraction: evilAttr},
-				Jobs:         []JobLine{{Kind: evilScript, Running: true, Attempts: 2}, {Kind: evilAttr, Attempts: 1, RunAfter: at}},
+				Jobs: []JobLine{{Kind: evilScript, Running: true, Attempts: 2},
+					{Kind: evilAttr, Waiting: true, Attempts: 1, RunAfter: at, LastError: evilScript + evilQuotes},
+					{Kind: "fetch", Waiting: true, RunAfter: at, LastError: evilAttr}},
 				AttemptLimit: 5, Hold: evilScript},
 		},
 		PageInterests: Interests{
@@ -291,7 +293,7 @@ func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 	queued := []JobLine{{Kind: "fetch"}}
 	// Named by its bookmark's title, as an untitled page is.
 	failed := doc("failed", nil, DocumentJobs{Baseline: then, Current: then, Jobs: []JobLine{{Kind: "fetch",
-		Attempts: 2, RunAfter: at}}})
+		Waiting: true, Attempts: 2, RunAfter: at, LastError: evilScript}}})
 	failed.Meta.BookmarkTitle = evilScript
 	return []any{
 		doc("pending", nil, DocumentJobs{Baseline: then, Current: then, Jobs: queued, Hold: "paused"}),
@@ -444,7 +446,8 @@ func partialSamples(t testing.TB) map[string][]any {
 		"queue-why": {&QueuePanel{Open: true}, &QueuePanel{Reason: evilScript, OpensAt: at}},
 		"progress": {&ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 1}}, ProgressWindow,
 			false), Reason: evilScript}},
-		"doc-jobs": {DocumentJobs{DocumentID: evilAttr, State: evilScript, Jobs: []JobLine{{Kind: evilScript}},
+		"doc-jobs": {DocumentJobs{DocumentID: evilAttr, State: evilScript, Jobs: []JobLine{{Kind: evilScript},
+			{Kind: evilAttr, Waiting: true, RunAfter: at, LastError: evilAttr + evilScript}},
 			Hold: evilScript, Current: DocumentBaseline{Extraction: evilScript}},
 			DocumentJobs{Err: &PanelError{Message: evilScript, RequestID: evilAttr}}},
 		"rebuild-state": {Rebuild{Queued: true, Hold: evilScript, NewRun: "done"},

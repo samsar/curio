@@ -1575,11 +1575,21 @@ components:
         status:        { $ref: "#/components/schemas/JobStatus" }
         attempts:      { type: integer }
         payload:       { description: "The job's input, as stored: any JSON value" }
-        last_error:    { type: string }
+        last_error:
+          type: string
+          description: >
+            A failed job's error. A pending or running job's is the error of
+            the attempt it retries after, or, for a job deferred while an
+            upstream's rate limit held curio back, what it waits for
+            ("waiting for GitHub's API rate limit to reset"). Absent once the
+            job is done.
         run_after:
           type: string
           format: date-time
-          description: When a pending job may next run. Stale once the job is done or failed.
+          description: >
+            When a pending job may next run: after a retry's backoff, or when
+            the hold a deferred job waits for ends. Stale once the job is
+            done or failed.
         created_at:    { type: string, format: date-time }
         updated_at:    { type: string, format: date-time }
         doc_url:       { type: string, format: uri, description: "Of the document the job works on; absent for jobs without one" }

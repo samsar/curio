@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -114,11 +115,13 @@ func (h pageHandlers) documentJobs(r *http.Request, doc *store.Document, baselin
 		j.Err = h.panelError(r, err)
 		return j
 	}
+	read := time.Now()
 	for _, job := range resp.Items {
-		switch store.JobStatus(job.Status) {
+		switch status := store.JobStatus(job.Status); status {
 		case store.JobStatusPending, store.JobStatusRunning:
-			j.Jobs = append(j.Jobs, ui.JobLine{Kind: job.Kind, Running: job.Status == string(store.JobStatusRunning),
-				Attempts: job.Attempts, RunAfter: job.RunAfter})
+			j.Jobs = append(j.Jobs, ui.JobLine{Kind: job.Kind, Running: status == store.JobStatusRunning,
+				Waiting: status == store.JobStatusPending && job.RunAfter.After(read), Attempts: job.Attempts,
+				RunAfter: job.RunAfter, LastError: deref(job.LastError)})
 		case store.JobStatusDone, store.JobStatusFailed:
 		}
 	}

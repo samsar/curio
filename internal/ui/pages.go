@@ -1014,17 +1014,19 @@ func (j DocumentJobs) Poller() Poller {
 }
 
 // JobLine is one of a document's jobs in flight: its kind, whether it
-// runs or waits, the attempts it has used, and, for a retry, when it may
-// run again.
+// runs, is queued or waits for a time to come, and the attempts it has
+// used. A waiting job is pending with a run_after still ahead when the jobs
+// were read: a retry backing off, or a job deferred for a hold. Its
+// LastError says why: the error of the attempt it retries after, or what
+// a deferral waits for.
 type JobLine struct {
-	Kind     string
-	Running  bool
-	Attempts int
-	RunAfter time.Time
+	Kind      string
+	Running   bool
+	Waiting   bool
+	Attempts  int
+	RunAfter  time.Time
+	LastError string
 }
-
-// Retrying reports whether the job waits to be tried again.
-func (l JobLine) Retrying() bool { return !l.Running && l.Attempts > 0 }
 
 // Attempt is the attempt the job is on, running, or waits to make.
 func (l JobLine) Attempt() int {

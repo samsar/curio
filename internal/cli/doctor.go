@@ -211,13 +211,16 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 
 // githubCheck says whether GitHub requests carry a token. Without one
 // GitHub allows 60 API requests an hour, which importing a library with
-// many github.com pages runs through; with any token, 5,000. The token
-// needs no access at all: it only identifies the requests.
+// many github.com pages runs through, and the pages wait for the limit to
+// reset; with any token, 5,000. The token needs no access at all: it only
+// identifies the requests.
 func githubCheck(hasToken bool, configPath string) (status checkStatus, detail, hint string) {
 	if hasToken {
 		return statusOK, "a token is set: 5,000 API requests an hour", ""
 	}
-	return statusWarn, "no token: GitHub allows 60 API requests an hour, so github.com pages can fail rate-limited",
+	const noToken = "no token: GitHub allows 60 API requests an hour, so github.com pages wait for its hourly " +
+		"limit (about 30 repositories an hour)"
+	return statusWarn, noToken,
 		"any token works, even one that can access nothing: a classic token with no scopes ticked, or a " +
 			"fine-grained token with public repositories (read-only) and no permissions. Set fetcher.github.token in " +
 			configPath + ", then `curio daemon stop` (the next command starts it again)"
