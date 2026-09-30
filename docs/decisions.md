@@ -149,7 +149,8 @@ when the entry was first committed.
 - 2026-09-29 — [Dashboard: the Failures tab](#dashboard-the-failures-tab)
 - 2026-09-29 — [Interests page by offset within a run](#interests-page-by-offset-within-a-run)
 - 2026-09-29 — [Search pages by offset within a fixed-depth pool](#search-pages-by-offset-within-a-fixed-depth-pool)
-- 2026-09-30 — [Waiting is not failing: jobs curio didn't send are deferred](#waiting-is-not-failing-jobs-curio-didnt-send-are-deferred)
+- 2026-09-30 — [Waiting is not failing: jobs curio didn't send are deferred](#waiting-is-not-failing-jobs-curio-didnt-send-are-deferred) (revised)
+- 2026-09-30 — [A site's block is not its pages' verdict](#a-sites-block-is-not-its-pages-verdict)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -2303,6 +2304,14 @@ Thin pages and Jina-side failures are no longer cached, and a page-level
 login wall is final on its own. See "Host cache: only host-wide verdicts,
 under the host that gave them" below.
 
+**Revised (2026-09-30):** an anti-bot or login-wall hit no longer fails
+the page. It skips the origin only: with Jina on, the page goes to Jina,
+whose verdict on that page decides it; with Jina off, it waits for the
+entry to expire (a `DeferError`), without using up an attempt. Only an
+unreachable hit is still a `PermanentError` from the cache. The entry now
+quotes the origin's own answer, not the fallback's. See "A site's block is
+not its pages' verdict".
+
 ---
 
 ## Local API: loopback only, no token, browsers shut out
@@ -2907,6 +2916,18 @@ same way on every path that exists.
   Jina. See "Cross-site redirects: judged where they land" and "Error pages
   whose status is hidden".
 
+**Revised (2026-09-30):** which verdicts are cached, and under which host,
+is unchanged; what a hit does changed. A page on a host with a fresh
+anti-bot or login-wall entry goes to Jina without asking the origin, and
+Jina's verdict about it is final; with Jina off, it waits for the entry
+to expire. A redirect onto such a host does the same, carrying the page's
+own origin error; an unreachable entry still fails it from the cache.
+Neither ever writes or refreshes an entry. The entry stores `originErr`'s
+text, so `(cached: …)` quotes what the origin answered. The cost: while an
+entry is fresh, a routed page's dead link that redirects to a homepage or
+a landing page is caught only by its title. See "A site's block is not its
+pages' verdict".
+
 ---
 
 ## Login-wall heuristic: www and apex are the same site
@@ -3020,6 +3041,15 @@ its attempt refunded and runs again, whole, when the pause is over. The
 origin's error still leads the cause, and the host cache is still not
 written. See "Waiting is not failing: jobs curio didn't send are
 deferred".
+
+**Revised (2026-09-30):** Jina requests are also paced per site, the
+registrable domain: 6 a minute by default
+(`fetcher.native.jina_site_requests_per_minute`), turns taken before the
+shared limiter, waited for up to 30 s and deferred beyond, and a
+send-time guard that spaces a site's sends again after the limiter's
+queue. The host cache checked once the slot is acquired now sends the
+page to Jina, releasing the slot first. See "A site's block is not its
+pages' verdict".
 
 ---
 
@@ -5423,6 +5453,13 @@ from its creation, and runs again whole. So a document no longer ends
 one whose request was challenged still fails that attempt. See "Waiting is
 not failing: jobs curio didn't send are deferred".
 
+**Revised (2026-09-30):** the narrowed 403 bullet's example is no
+refusal any more: an `AbuseAlleviationError` is Jina's block of a site for
+now (`errJinaSiteBlocked`), whatever its status, recognized before the
+refusal rule, and it holds the site's pages until it ends. A 403 whose
+reason names the target's host and is no abuse block is still a refusal.
+See "A site's block is not its pages' verdict".
+
 ---
 
 ## Fetch upstream health: Jina's calls are tracked and reported
@@ -5522,6 +5559,13 @@ are already honored, and what is left is for a person to fix.
 fails fast: `awaitJina` returns a `fetcher.DeferError` and the job waits
 for the pause (see "Waiting is not failing: jobs curio didn't send are
 deferred"). It is still a call never sent, and records nothing.
+
+**Revised (2026-09-30):** `rate_limited` also counts Jina's block of a
+site (an `AbuseAlleviationError`, whatever its status), which was a
+healthy `refused`; a page held for a site's turn or block records
+nothing. Healthz's upstreams carry `site_pauses`, the blocks in effect,
+which `curio doctor`'s `jina` check lists; a block leaves the state alone.
+See "A site's block is not its pages' verdict".
 
 ---
 
@@ -5629,6 +5673,16 @@ it records the cached verdict, `anti_bot` for an origin 403 or 503 (the
 first document of the site included), `login_wall` for a redirect onto
 the site's own login page, and `--cause=anti_bot` is what reaches it.
 See "Failure causes: recorded when a document fails".
+
+**Revised (2026-09-30):** the abuse block is no refusal any more. An
+`AbuseAlleviationError` is `errJinaSiteBlocked`, recognized first: the
+site's pages wait for the end it names, and it fails none, caches nothing
+and is counted `rate_limited`. Both items under "Not done" are done:
+Jina requests are paced per site, and a site's block is remembered until
+it ends. And behind a host-wide origin verdict, the retry of a refused
+document no longer fails from the cache: it asks Jina without the origin,
+and a refusal of that page is final, `jina_refused`. See "A site's block
+is not its pages' verdict".
 
 ---
 
@@ -7543,6 +7597,16 @@ GitHub or YouTube fetch `rate_limited`, from the 429 its error carries; a
 Jina-bound one the origin's cause, since a held Jina call is Jina's own
 trouble.
 
+**Revised (2026-09-30):** after a host-wide origin verdict, a document no
+longer records the cached verdict: its retry, and every other page of the
+host while the entry is fresh, asks Jina without the origin and records
+Jina's verdict about that page (the cached verdict's cause only when Jina
+has trouble of its own). Jina's `AbuseAlleviationError` is no longer
+`jina_refused`: it defers the site's pages until the block ends, and a
+document still held after its day records `rate_limited`, which now
+covers Jina Reader too; `jina_refused` is left with opt-outs and
+deterministic 4xx. See "A site's block is not its pages' verdict".
+
 ---
 
 ## Dashboard: a design language under the CSP
@@ -8954,6 +9018,182 @@ them with the rest of their group.
 failure), per-site Jina pacing, `AbuseAlleviationError`, and `MarkFailed`
 honoring `Retry-After`. Those paths can return a `fetcher.DeferError` when
 they come.
+
+**Revised (2026-09-30):** three more holds return a `fetcher.DeferError`:
+a host-cache entry waited out with Jina off, a site's turn at Jina, and
+Jina's block of a site. The last is an answer that was sent, and still a
+deferral: it names when Jina will read the site again and decides nothing
+about the page, which is the case the rule above is for. See "A site's
+block is not its pages' verdict".
+
+---
+
+## A site's block is not its pages' verdict
+
+**Decision:** a verdict about one site no longer fails the site's other
+pages. Three changes to `Native` (`internal/fetcher`), which only work
+together:
+
+- **A cached host's pages skip the origin, not Jina** (`pastCachedHost`).
+  A fresh `hostFailureCache` entry of kind anti-bot or login-wall no longer
+  fails a page from the cache:
+  - With Jina on, the page goes to Jina without an origin request or an
+    origin slot: the entry is checked before `hostGate.acquire` and again
+    after it, and the slot is released before any Jina wait or call.
+    Jina's answer decides that page alone, judged as any fallback answer
+    (`judgeJinaAnswer`). A good one is stored, with `host_cache`
+    (`anti-bot`, `login-wall`) in its meta. A verdict about the target
+    (`jinaAnswered`, `ErrDeadLink`, `ErrTooLarge`) is a `PermanentError`
+    around `jinaFallbackError{jina, origin}`, whose origin side is the
+    entry's error. Jina's own trouble, the target's for now, or a hold
+    stays retryable or deferred.
+  - With Jina off, the page is a `DeferError` until the entry expires
+    (`waiting for www.nytimes.com to be tried again: it blocked curio's
+    last request`), never a `PermanentError`; its error keeps the
+    `(cached: …)` text and the entry's cause.
+  - A page that skipped the origin never writes or refreshes the entry,
+    which lives 15 minutes from the origin's answer.
+  - A redirect onto a host with a fresh entry is held the same way, except
+    that its `jinaFallbackError` carries the page's own origin error.
+  - An unreachable entry still fails the page for good, from the cache.
+  - The entry quotes the origin's own answer: `settle` stores
+    `originErr.Error()`, not the fallback's composite text, so every later
+    page's `(cached: …)` reads `native: HTTP 403 Forbidden: origin blocked
+    the request (likely anti-bot)`. The cache reads time from the fetcher's
+    injectable clock: `Get` and `Put` take `now`, and an entry carries its
+    expiry.
+- **Jina requests are paced per site** (`sitePacer`,
+  `internal/fetcher/sitepace.go`). A site is the registrable domain
+  (`siteOf`, `publicsuffix.EffectiveTLDPlusOne`: mobile.twitter.com and
+  twitter.com are one site), or the host itself for an IP address, a name
+  under no public suffix, or a public suffix. A site gets
+  `fetcher.native.jina_site_requests_per_minute` requests a minute (default
+  6, `DefaultJinaSiteRequestsPerMinute`: turns 10 s apart), key or not.
+  `awaitJina` clears each request in order: the shared cooldown's
+  pre-check (a held request spends no turn), the site's turn, the shared
+  limiter and cooldown (`pace`, unchanged), a send-time guard, and the
+  site's block once more. A turn within 30 s (`maxInlineJinaWait`) is
+  waited for. A later one is a `DeferError` (`waiting for a turn at Jina
+  Reader for twitter.com`), with no request, no limiter token and no
+  health record. Deferred pages get Untils one interval apart, after the
+  ones already handed out, so they come back spread out and find their
+  turns free. In-fetch retries take turns too. The guard spaces a site's
+  sends an interval apart, whatever the shared limiter's queue did, and
+  its wait is sat out like the limiter's.
+- **Jina's block of a site holds the site's pages, and fails none.** A
+  non-2xx Jina answer whose reason is an `AbuseAlleviationError`
+  (`Anonymous access to domain mobile.twitter.com blocked until Mon Sep 28
+  2026 18:48:50 GMT+0000 (Coordinated Universal Time) due to …`), with a
+  403 or a 429, is `errJinaSiteBlocked`, recognized before the refusal
+  rule. Its end is read from Jina's JavaScript date (or an HTTP or ISO
+  one), taken as 1 hour when it can't be read (`jinaSiteBlockDefault`),
+  and clamped to [1 minute, 24 hours] (`minJinaSiteBlock`,
+  `maxJinaSiteBlock`, the deferral budget). The block is recorded under
+  the site of the domain it names, or the target's when it names none,
+  and is only ever extended. The page that received it and every later
+  page of the site are `DeferError`s until it ends (`waiting for Jina
+  Reader's block of twitter.com to lift`), spread one interval apart from
+  its end. Later pages send nothing (`jina: not sent, Jina Reader blocks
+  twitter.com until …: <Jina's reason>`); the block is checked before the
+  turn and again before sending. It is never `jinaAnswered`, never cached,
+  never extends the shared cooldown, and is never retried within the
+  fetch. One WARN per block, when it starts. Jina's health counts the
+  answer `rate_limited`; `/v1/healthz` reports the blocks in effect as
+  `upstreams[].site_pauses`, and `curio doctor`'s `jina` check lists them,
+  neither changing the upstream's state. A document still held when its
+  day of waiting runs out records `rate_limited`.
+
+**Why:** an import of the owner's library ended with 2,150 failed
+documents. 866 of them were anti-bot host-cache hits: 810 quote Jina's
+rejection of another page (its CAPTCHA warning, a status the target gave
+it), 33 an `AbuseAlleviationError`, 23 another refusal. 160 of the 169
+failed stackoverflow.com documents failed on their first attempt, from the
+cache, without a request of their own; medium.com lost 134 documents this
+way and www.nytimes.com 48. One page's Jina verdict failed the whole host
+for 15 minutes, although Jina served other pages of those sites: bloomberg
+49 fetched (all through Jina) against 20 failed, medium 21 against 134,
+quora 11 against 32, theatlantic 8 against 28, stackoverflow 3 against 169.
+And because the entry stored the composite text, 810 documents'
+`last_error` names a CAPTCHA or a target status they never received.
+
+170 more documents failed `jina_refused` on an abuse block directly
+(mobile.twitter.com 117, twitter.com 35, …): 203 failed jobs on
+2026-09-28 name blocks of mobile.twitter.com, twitter.com, x.com,
+www.forbes.com, www.instagram.com, www.alibaba.com, stocktwits.com,
+www.smithsonianmag.com, www.postman.com, www.benzinga.com and
+www.investing.com. The blocks are temporary and name their end, about an
+hour on: www.alibaba.com answered at 07:51:49 "until 08:51:48" and at
+07:52:13 "until 08:52:12", mobile.twitter.com at 17:50:10 "until
+18:48:50", www.instagram.com at 07:41:37 "until 08:38:29"; one named 2039
+(www.investing.com). Taken for refusals, they failed pages for good,
+cached their site's origin 403s, counted as healthy answers, and cost
+every later page of the site a request to learn the block again. "Jina
+refusing a target is a verdict" listed pacing per domain and remembering
+blocks as not done. The cache change makes pacing necessary:
+stackoverflow.com's 169 pages each need a Jina request now, where the cache
+failed them with none.
+
+**Why 6 a minute:** about 80 keyless mobile.twitter.com reads between
+10:10 and 10:29 tripped a block, while bloomberg took 10 Jina requests in
+one minute without one. Six is conservative; it leaves the keyless 20 a
+minute to three sites at once. Jina blocks hostnames separately
+(mobile.twitter.com until 18:48:50 and twitter.com until 18:46:03 in the
+same run), but the two were blocked within a minute of each other both
+times, and a block can name www.X for a target on X, so turns and blocks
+are per registrable domain.
+
+**Why not a `rate.Limiter` per site:** a discrete-event simulation, 169
+pages of one site on 16 workers with claims ordered by `run_after` as
+`JobQueue` orders them. With a limiter per site, cancelling a deferred
+page's reservation sends every deferred page back at the same next slot:
+21.6 claims a page, each two SQLite writes and, on an uncached host, an
+origin request. Keeping the reservation starves the site: the page that
+comes back can't claim the slot it holds. The pacer keeps four times and
+a block per site, nothing per page, and hands deferrals distinct Untils:
+1.6 to 2.0 claims a page. **Why the send-time guard:** the shared
+limiter's queue can bunch one site's requests. With a 1,500-job backlog
+the smallest gap fell to 3 s, and 7 or 8 requests landed in one minute.
+With the guard the smallest gap is exactly 10 s, at most 6 land in a
+minute, and its waits stayed under about 18 s with a 3,000-job backlog.
+
+**Why an unreachable hit stays final:** the 243 documents that failed from
+a cached unreachable entry cover 179 hosts, 172 with no such name and 7
+refusing connections. A read-only DNS check on 2026-09-30 found 122
+NXDOMAIN, 24 SERVFAIL, 28 names without an address record and 2 aliases to
+names without one: none of the 172 resolves. Of the 7 refusing hosts, 4
+are `localhost:NNNN` dev servers and 1 resolves to 127.0.0.1. Jina can't
+reach them either, and deferring would only churn the queue for a day.
+
+**Costs:**
+
+- About one more Jina request per page of a cached site: some 800 for the
+  owner's library, around 40 minutes of the keyless 20 a minute. Pages of
+  a site Jina never passes still spend one each.
+- A routed page's Jina answer carries no final URL, so while its host's
+  entry is fresh, a dead link that redirects to the site's homepage or to
+  another site's landing page is caught only by the not-found title rule.
+  27 of the owner's 819 dead documents were redirect verdicts behind a 403
+  or 503.
+- With Jina off, a cached host's pages all come due when the entry
+  expires.
+- Turns and blocks live in memory: a restart relearns a block with one
+  request per blocked site.
+- An import's pages that need Jina go at the keyless 20 a minute in all
+  (about an hour for a thousand) and 6 a minute for any one site.
+
+**Recovering old failures:** documents that failed before this change stay
+failed. Refetch them from the dashboard's Failures tab ("Blocked by bot
+protection", "Refused by Jina Reader"), or with `curio refetch --all
+--cause=anti_bot` and `--cause=jina_refused`. The groups hold pages that
+failed for reasons of their own too; those fail again, the same way.
+
+**Not done:**
+
+- **The dashboard.** Its Status page doesn't show the blocked sites;
+  healthz and `curio doctor` do, and each held document's page says what
+  it waits for.
+- **Caching Jina's verdicts per site.** A site Jina never passes costs a
+  request per page, as above.
 
 ---
 

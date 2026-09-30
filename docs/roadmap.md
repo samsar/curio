@@ -104,8 +104,12 @@ correctly and search returns useful results across content types.
 - Retries with exponential backoff in the job queue; dead-link detection
   (hard 404/410 and soft 404s) moves a document to `dead`.
 - Rate limiting per fetcher, a shared Jina pace and cooldown, and at most
-  two origin requests in flight per host (`throttle.go`). The native
-  fetcher sends a Chrome TLS fingerprint (`transport.go`).
+  two origin requests in flight per host (`throttle.go`). Jina requests
+  are also paced per site (6 a minute by default), and Jina's block of a
+  site holds the site's pages until it ends instead of failing them
+  (`sitepace.go`). A host cached for a 403, 503 or login redirect sends its
+  other pages to Jina without asking the origin. The native fetcher sends
+  a Chrome TLS fingerprint (`transport.go`).
 - Deviations: Jina Reader is not a self-hosted fetcher but the native
   fetcher's fallback through `r.jina.ai` (`fetcher.native.jina_base_url`),
   used only for anti-bot and login-wall pages and PDFs the local extractor
