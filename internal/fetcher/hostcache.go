@@ -49,18 +49,14 @@ func (k HostFailureKind) sentinel() error {
 	return fmt.Errorf("unknown host failure kind %d", int(k))
 }
 
-// waitReason is what a page on host waits for while an entry of this kind
-// holds it back, worded to follow "waiting for".
+// waitReason is what a page on host waits for while an anti-bot or
+// login-wall entry holds it back, worded to follow "waiting for". An
+// unreachable entry holds no page back: it fails the page (pastCachedHost).
 func (k HostFailureKind) waitReason(host string) string {
-	switch k {
-	case HostFailUnreachable:
-		return host + " to be tried again: it couldn't be reached"
-	case HostFailAntiBot:
-		return host + " to be tried again: it blocked curio's last request"
-	case HostFailLoginWall:
+	if k == HostFailLoginWall {
 		return host + " to be tried again: it sent curio's last request to its login page"
 	}
-	return host + " to be tried again"
+	return host + " to be tried again: it blocked curio's last request"
 }
 
 // hostCacheEntry is one host's cached failure: its kind, what the origin

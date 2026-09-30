@@ -747,14 +747,12 @@ func TestHostFailureCache(t *testing.T) {
 }
 
 // TestHostFailureKind_WaitReason: what a page waits for behind each kind
-// of entry, worded to follow "waiting for".
+// of entry that holds pages back, worded to follow "waiting for".
 func TestHostFailureKind_WaitReason(t *testing.T) {
 	assert.Equal(t, "www.nytimes.com to be tried again: it blocked curio's last request",
 		HostFailAntiBot.waitReason("www.nytimes.com"))
 	assert.Equal(t, "example.com to be tried again: it sent curio's last request to its login page",
 		HostFailLoginWall.waitReason("example.com"))
-	assert.Equal(t, "dead.example to be tried again: it couldn't be reached",
-		HostFailUnreachable.waitReason("dead.example"))
 }
 
 func TestHostOf(t *testing.T) {
