@@ -22,6 +22,35 @@ func documentImagesHref(id string) string { return documentHref(id) + "?images=1
 // interestHref is an interest's page.
 func interestHref(id string) string { return "/ui/interests/" + url.PathEscape(id) }
 
+// PageParam is the query parameter of a numbered list's page, from 1
+// (pager.go).
+const PageParam = "page"
+
+// interestsPageHref is page (from 1) of the interests of the clustering
+// run run: a page read from another run says so. The first page carries
+// no number, and no run when run is "".
+func interestsPageHref(page int, run string) string {
+	q := url.Values{}
+	if page > 1 {
+		q.Set(PageParam, strconv.Itoa(page))
+	}
+	if run != "" {
+		q.Set(runParam, run)
+	}
+	if len(q) == 0 {
+		return navHref(NavInterests)
+	}
+	return navHref(NavInterests) + "?" + q.Encode()
+}
+
+// interestPageHref is page (from 1) of interest id's members.
+func interestPageHref(id string, page int) string {
+	if page <= 1 {
+		return interestHref(id)
+	}
+	return interestHref(id) + "?" + url.Values{PageParam: {strconv.Itoa(page)}}.Encode()
+}
+
 // PollParam is the query parameter that asks a page for its live regions
 // alone, the ones a poller refreshes, rather than the whole page: its
 // value names which, and the page reads only what those show. The access
@@ -94,8 +123,9 @@ func interestsPollHref(shown string) string {
 	return navHref(NavInterests) + "?" + url.Values{PollParam: {PollRebuild}, runParam: {shown}}.Encode()
 }
 
-// ShownRun reads the baseline an Interests poll carries: the clustering run
-// its page shows, "" for none.
+// ShownRun reads the clustering run an Interests URL names, "" for none:
+// for a poll, the run its page shows; for a page, the run the page it was
+// reached from showed.
 func ShownRun(q url.Values) string { return q.Get(runParam) }
 
 // failuresHref is the Library's Failures tab.

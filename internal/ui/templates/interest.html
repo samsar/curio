@@ -1,25 +1,32 @@
+{{/*
+An interest: its head, with the run it comes from, and a page of its
+members, most similar first, ranked across the pages.
+*/}}
 {{define "content" -}}
-{{with .Interest}}
 <div class="page-head"><div class="titles">
 <nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "interests"}}">Interests</a></nav>
+{{with .Interest -}}
 <h1>{{with .Label}}{{.}}{{else}}Unlabeled interest{{end}}</h1>
 {{with .Summary}}<p class="lede">{{.}}</p>{{end}}
-<div class="meta-row"><span class="badge badge-accent plain">{{num .Size}} documents</span><span class="meter-row" title="Cohesion: how alike its documents are"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .Cohesion}}">{{printf "%.2f" .Cohesion}}</meter>cohesion {{printf "%.2f" .Cohesion}}</span>{{if lt (len .Members) .Size}}<span class="sep">·</span><span class="text">showing {{len .Members}} of {{.Size}}</span>{{end}}</div>
+<div class="meta-row"><span class="badge badge-accent plain">{{num .Size}} documents</span><span class="meter-row" title="Cohesion: how alike its documents are"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .Cohesion}}">{{printf "%.2f" .Cohesion}}</meter>cohesion {{printf "%.2f" .Cohesion}}</span>{{if not $.RunAt.IsZero}}<span class="sep">·</span><span class="text">run of {{when $.RunAt}}</span>{{end}}</div>
+{{- end}}
 </div></div>
-<div class="card table-card">
+{{if .OutOfRange}}{{template "out-of-range" .OutOfRange}}
+{{- else}}<div class="card table-card">
 <div class="table-scroll">
 <table class="data">
 <colgroup><col class="c-rank"><col><col class="c-sim"></colgroup>
 <thead><tr><th scope="col">#</th><th scope="col">Document</th><th scope="col">Similarity</th></tr></thead>
 <tbody>
-{{range $i, $m := .Members}}<tr>
-<td class="num muted">{{inc $i}}</td>
-<td>{{template "doc-cell" $m.Cell}}</td>
-<td><span class="meter-row"><meter class="meter" min="0" max="1" value="{{printf "%.2f" $m.Similarity}}">{{printf "%.2f" $m.Similarity}}</meter>{{printf "%.2f" $m.Similarity}}</span></td>
+{{range .Ranked}}<tr>
+<td class="num muted">{{num .Rank}}</td>
+<td>{{template "doc-cell" .Cell}}</td>
+<td><span class="meter-row"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .Similarity}}">{{printf "%.2f" .Similarity}}</meter>{{printf "%.2f" .Similarity}}</span></td>
 </tr>
 {{end}}</tbody>
 </table>
 </div>
 </div>
-{{end}}
+{{with .Pager}}{{template "pager" .}}{{end}}
+{{- end}}
 {{- end}}

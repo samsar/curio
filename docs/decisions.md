@@ -23,7 +23,7 @@ when the entry was first committed.
 - 2026-05-23 — [Fetcher selection: data-driven rules file](#fetcher-selection-data-driven-rules-file)
 - 2026-05-23 — [Hybrid search: BM25 + vector + RRF](#hybrid-search-bm25--vector--rrf) (revised)
 - 2026-05-24 — [BM25 query sanitization: OR + stopwords](#bm25-query-sanitization-or--stopwords)
-- 2026-05-23 — [API: cursor pagination, not offset](#api-cursor-pagination-not-offset)
+- 2026-05-23 — [API: cursor pagination, not offset](#api-cursor-pagination-not-offset) (revised)
 - 2026-05-23 — [API: all long-running operations are async with job IDs](#api-all-long-running-operations-are-async-with-job-ids)
 - 2026-05-23 — [API: search response exposes BM25 and vector scores per chunk](#api-search-response-exposes-bm25-and-vector-scores-per-chunk)
 - 2026-05-23 — [API: search knobs are per-request overrides](#api-search-knobs-are-per-request-overrides)
@@ -143,8 +143,9 @@ when the entry was first committed.
 - 2026-09-29 — [Dashboard: a design language under the CSP](#dashboard-a-design-language-under-the-csp) (revised)
 - 2026-09-29 — [Dashboard: search is home, the Overview becomes Status](#dashboard-search-is-home-the-overview-becomes-status) (revised)
 - 2026-09-29 — [Dashboard: actions through /v1, sent by a first-party module](#dashboard-actions-through-v1-sent-by-a-first-party-module) (revised)
-- 2026-09-29 — [Library: a Date saved order lists saves](#library-a-date-saved-order-lists-saves)
+- 2026-09-29 — [Library: a Date saved order lists saves](#library-a-date-saved-order-lists-saves) (revised)
 - 2026-09-29 — [Dashboard: the Failures tab](#dashboard-the-failures-tab)
+- 2026-09-29 — [Interests page by offset within a run](#interests-page-by-offset-within-a-run)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -477,6 +478,13 @@ in the response), not offset/limit.
 **Why:** Offset is buggy under concurrent writes — rows land between page
 fetches and clients silently skip data. Cursors are stable on SQLite via
 `WHERE id > :cursor ORDER BY id LIMIT N`. Cost is the same.
+
+**Revised (2026-09-29):** one exception: `GET /v1/interests` and `GET
+/v1/interests/{id}` page by `offset` within a clustering run. A run's rows
+are written once and never change, so an offset is exact there, and it
+gives numbered pages the random access a cursor can't. `run_id` on every
+interest shows a rebuild between two pages. See "Interests page by offset
+within a run".
 
 ---
 
@@ -3495,6 +3503,15 @@ by either tenant index as a covering index, and SQLite now takes the
 saved one, which its pin names. See "Library: a Date saved order lists
 saves".
 
+**Revised (2026-09-29):** the interests' reads are pinned too, and need no
+index. `ListClusters` seeks `idx_clusters_run` and sorts only clusters of
+the same size; `ClusterMembers` seeks the primary key's index and sorts the
+cluster's members; both pins allow those sorts. `GetByIDsWithLastError`,
+which hydrates every member of a page at once, seeks the documents primary
+key for each ID of a JSON array, its tenant written `+d.tenant_id` so that
+it never walks a tenant index; its pin refuses one. See "Interests page by
+offset within a run".
+
 ---
 
 ## Chunks: external-content FTS, derived rows kept by triggers
@@ -3782,6 +3799,13 @@ way: a `filters.content_type` or `filters.source` value outside its set is a
 no items, so `curio search --type articles` printed "no results" and an MCP
 client passing "articles" found nothing. `filters.host` stays free-form:
 hosts are literal input.
+
+**Revised (2026-09-29):** `offset` on `GET /v1/interests` and `GET
+/v1/interests/{id}`, and the dashboard's `?page=`, are positions, not
+sizes: read as the default, a wrong one would answer the first page for
+another. So they are refused as a filter is, a 400 naming them when they
+aren't a whole number in range (`positionParam`); `limit` and `members`
+keep their defaults. See "Interests page by offset within a run".
 
 ---
 
@@ -7937,6 +7961,11 @@ values for each query key and runs refetch-all's own checks
 a dead-link refetch without `state=dead` or a cause it doesn't know,
 fails the walk. See "Dashboard: the Failures tab".
 
+**Revised (2026-09-29):** the Interests page now shows 24 interests a page,
+and reads their members' documents at once: 1.8 ms and 34 KB where the
+table above has 5.8 ms and 63 KB for 50 cards. See "Interests page by
+offset within a run".
+
 ---
 
 ## Library: a Date saved order lists saves
@@ -8064,6 +8093,13 @@ in the current interests), read their documents through their own
 queries, and their pages are changing in their own work (interest
 paging, search paging). The doc-title partial takes the fallback, so
 they can pass one later.
+
+**Revised (2026-09-29):** interests' members are named by their bookmark
+now too. `GET /v1/interests` and `GET /v1/interests/{id}` read members'
+documents with `GetByIDsWithLastError`, which carries the bookmark title,
+and return it as `bookmark_title`; the cards and an interest's member table
+show it in italics. Search results are still named by their address. See
+"Interests page by offset within a run".
 
 ---
 
@@ -8233,6 +8269,195 @@ and Ollama unreachable:
   widths.
 - Nothing failed, on a fresh home, is the empty state, and the subnav
   counts 0.
+
+---
+
+## Interests page by offset within a run
+
+**Decision:** `GET /v1/interests` and `GET /v1/interests/{id}` take an
+`offset`, and the dashboard pages through them by number: 24 interests a
+page on Interests, 50 members a page on an interest's page. 24 cards fill
+rows of 3, 2 and 1, the grid's columns at each width. The numbered pager is
+generic (`internal/ui/pager.go`, the `pager` partial, links built in
+`links.go`), for the search pages to reuse.
+
+**Why offset, here.** "API: cursor pagination, not offset" refuses offset
+because rows land between two page reads, so a client skips or repeats
+them. A run's clusters and memberships are written once, in one
+transaction (`ReplaceClusters`), and never change; a rebuild writes a new
+run and prunes the old one once it finishes. Within a run, an offset names
+the same rows on every read, so offset is exact. Numbered pages need random
+access ("page 7 of 10"), which a keyset cursor can't give without walking
+the pages before. The live lists (documents, jobs, bookmarks) stay on
+cursors.
+
+**Total orders.** An offset over an order with ties can repeat or skip a
+row at a page boundary, and the ties are real. In the author's run (222
+clusters, 1,951 memberships), 209 of the 222 clusters share their size
+with another: there are only 30 distinct sizes. Cohesion separates them
+today, with no exact tie on both. 40 groups of members, 96 members in all,
+tie on similarity within their cluster. So `ListClusters` orders by `size
+DESC, cohesion DESC, id` and `ClusterMembers` by `similarity DESC,
+document_id`, and both take a limit and an offset. Each is one SQL
+constant ending in `LIMIT ? OFFSET ?`, a limit of 0 or less bound as -1
+(no limit); a negative offset is an error before any query.
+
+**An offset is refused; past the end is an empty page.** An offset is a
+position: read as 0, a malformed one would answer the first page for
+another. So anything but a whole number of 0 or more is a 400 naming it,
+as a filter is (see "API: filters are validated, sizing knobs default");
+`limit` and `members` keep their defaults. An offset at or past the end is
+an empty page, not a 400: the end depends on the run, which can change
+between two requests. The empty page still carries `run_id` and
+`num_clusters`, so a client can tell "finished" from "rebuilt". Every
+interest carries `run_id`, list items and the single interest alike;
+`num_clusters` and `size` are the totals across pages.
+
+**Paging through a rebuild.**
+
+- Links between the Interests' pages carry the run they show (`run=`). A
+  page asked for from another run shows the newest run's page of that
+  number, with a note that the interests were rebuilt since and, past page
+  1, a link to the first page. The run it came from is pruned the moment
+  the rebuild finishes, so its page N can't be served, and the new run's
+  page N keeps the reader's place in the size order. The run asked for is
+  compared, never shown. The rebuild's poller is unchanged: it carries the
+  run shown and no page, and reads only the queue and the newest run.
+- An interest gets a new ID with every run, so after a rebuild the next
+  page of an interest's members is a 404. It says so ("interests get new
+  IDs each time they are rebuilt"), and its Start over leads to Interests.
+- The API reads the latest done run, then its page of clusters: two
+  autocommit reads, since a read never opens a transaction (see "SQLite
+  DSN: per-connection pragmas via mattn's query params"). A rebuild that
+  finishes between them prunes the run, and a page the run held reads no
+  clusters. When a page comes back empty for an offset below the run's
+  `num_clusters`, it is read once more, from the newer run; a second miss
+  is answered as read, rather than chasing rebuilds. `FinishRun` writes
+  `num_clusters` as the run's cluster count, so the test can't misfire,
+  and an offset past the end never reads again. A card that reads its
+  members just after its cluster was pruned shows fewer of them; that is
+  accepted, and the rebuild's line offers the reload.
+
+**Members in one read.** Each member used to read its document, then its
+current extraction for the markdown path: about 354 statements for
+`/ui/interests` (50 cards of 3), 552 for `GET /v1/interests` with its
+defaults, 170 for an interest's page of 84 members, and 4,126 for
+`?limit=500&members=100` on the author's library. Now a page reads each
+interest's page of members (`ClusterMembers`), then all their documents at
+once, with `DocumentStore.GetByIDsWithLastError`: the Library's own select,
+with the last error, the markdown path and an untitled document's bookmark
+title. That is at most 30 statements for `/ui/interests` (the run, the
+page, 24 cards' members, the documents, the queue's counts and the newest
+run), 4 for an interest's page (the interest, its members, their
+documents, its run), 53 for `GET /v1/interests` and 225 for
+`?limit=500&members=100`. A member whose document is missing from the read
+is a 500, never a 404 naming the interest: memberships cascade with their
+document.
+
+The read has a planner trap. With `d.tenant_id = ?` and ten IDs or more,
+SQLite, with no statistics, walks `idx_documents_tenant_state_updated`
+through every document the tenant has instead of seeking the primary key:
+453 µs instead of 116 µs for 50 IDs, 3.9 ms instead of 2.8 ms for 1,000,
+and growing with the library. With three IDs it still seeks, so a plan pin
+written with a few placeholders passes while production walks the tenant.
+So the IDs go in as one JSON array (`d.id IN (SELECT value FROM
+json_each(?))`), and the tenant is checked as `+d.tenant_id`, on the rows
+found. The SQL is one constant, whatever the number of IDs, so one plan
+and one pin cover it, and it has no limit on bound parameters (32,766; the
+API's largest request is 500 × 100 IDs, and a store test passes 40,001).
+On the empty test database the same SQL without the `+` plans the tenant
+walk, so the pin fails on a regression. Measured with the `+`: 116 µs for
+50 IDs, 172 µs for 72, 2.8 ms for 1,000, where the reads one by one took
+708 µs for 50 and 1.01 ms for 72; the 24 cards' reads take 1.21 ms, the
+50 cards' took 3.05 ms. Rejected:
+
+- one window-function query for every card's members: slower (494 µs
+  against 357 µs for the 24 reads), since it sorts every member of the
+  page's clusters;
+- one query joining members to their documents: about as fast (228 µs for
+  50), but across the store boundary, where the insight store stays about
+  clusters.
+
+Members now carry their `state` and, when untitled, a `bookmark_title`,
+and the cards and the member table name an untitled member by its bookmark
+in italics, as the Library does. All 21 untitled members of the author's
+run have a titled bookmark, and 8 of them are among a card's three.
+
+**No new index.** `ListClusters` seeks `idx_clusters_run (run_id, size
+DESC)`, which gives the size order, and sorts only the ties;
+`ClusterMembers` seeks the primary key's index and sorts the cluster's
+members. Both are pinned with their sorts. Measured on the author's
+library, median of 31: `ListClusters`, 24 a page at offsets 0, 96 and 216,
+36, 61 and 75 µs; the largest interest's members (84), 50 a page at offsets
+0 and 50, 42 and 37 µs. Synthetic worst cases in the same copy: one
+cluster holding all 4,498 fetched documents, 287 µs for its first page,
+1.6 ms for its last and 237 µs for a card's three; a run of 2,001
+clusters, 37 µs for the first page and 628 µs for the last. Covering
+indexes, `(cluster_id, similarity DESC, document_id)` and `(run_id, size
+DESC, cohesion DESC, id)`, bring these to 20–74 µs and 24–48 µs:
+microseconds, for a migration and one more index write per membership on
+every rebuild. Revisit when clusters reach tens of thousands of members.
+
+**The pages.** Interests' lede counts the run's interests and, from page 2,
+says which page it is ("Page 2 of 10."). The pager sits under the cards
+when there is more than one page: which interests the page shows,
+Previous, the first and last pages, the current one and its neighbours (a
+run of two or more pages left out is one gap, a single one is shown),
+Next, and on a phone "Page N of M" between Previous and Next. A disabled
+Previous or Next is a `<span>`: a link with `aria-disabled` still takes
+focus and still navigates. A page past the last is a 404 that keeps the
+page's frame (the head, the coverage, the Rebuild and its poller), with a
+card saying how many pages there are and leading to the first and the
+last; it reads no members. A page that isn't a whole number of 1 or more
+is a 400 that reads nothing, and a poll ignores `page`. An interest's page
+lists 50 members, ranked across the pages (ranks computed in Go), under a
+pager of its own, with the run it comes from in its meta row ("run of
+2026-09-28 10:34"). That run is one more direct store read,
+`InsightStore.GetRun`, beside `LatestRun` and `AttemptLimit`; a failed read
+is logged once and the line left out. The rank column grew from 3 rem to
+3.5 rem: members were capped at 100 before, and in Chrome at 1440 px a
+four-digit rank ran 2.7 px past its cell's clip and "1,234" 6.7 px.
+
+**Measured** on a throwaway daemon over a `sqlite3 -readonly` `.backup` of
+the author's library (222 interests, the largest of 84 members), Ollama
+unreachable, median of 21 curl timings, before (origin/main) and after on
+the same machine:
+
+| Request | Before | After |
+|---|---|---|
+| `/ui/interests` | 5.0 ms, 62.7 KB (50 cards) | 1.8 ms, 34.0 KB (24 cards) |
+| `/ui/interests?page=10` | | 0.95 ms, 12.7 KB (6 cards) |
+| the largest interest's page | 2.8 ms, 47.7 KB | 1.35 ms, 33.1 KB (50 members) |
+| its page 2 | | 0.97 ms, 23.7 KB (34 members) |
+| `GET /v1/interests` | 7.1 ms, 125 KB | 2.9 ms, 133 KB |
+| `GET /v1/interests?limit=500&members=100` | 49.0 ms, 930 KB | 14.6 ms, 981 KB |
+
+The JSON grew by each interest's `run_id` and each member's `state`. The
+Interests' row supersedes the 5.8 ms and 63 KB that "Dashboard: actions
+through /v1, sent by a first-party module" measured for 50 cards.
+
+**Checked in a browser.** Headless Chrome 154 against a throwaway daemon
+on that `.backup`, its queue paused before it started and Ollama
+unreachable, at 1440 and 390 px, light and dark. The pages: Interests
+pages 1, 5 and 10, page 11 (the 404), page 2 asked for from an old run
+(the note), the largest interest's pages 1, 2 and 3 (the 404), and a
+hostile sample seeded in the copy (a 300-character label with markup, an
+untitled member whose bookmark title is 300 characters of markup, and a
+700-character member URL). On every one:
+
+- no CSP violation or script error; the only console entry was Chrome's
+  own request for `/favicon.ico` on a new origin, a 404;
+- no sideways scroll at 390, and the phone's pager read Previous · "Page N
+  of M" · Next with the numbers hidden;
+- the current page carried `aria-current`, and page 1's Previous and the
+  last page's Next were spans;
+- no rank was clipped, and the cards' fallback names were italic, their
+  addresses in the mono face, all inside their cards.
+
+A rebuild started from page 2 was queued behind the paused queue,
+"Rebuilding" once the queue opened, then "New interests are ready:
+reload", and the poller stopped polling; page 2 of the old run then showed
+the new run's, with the note.
 
 ---
 

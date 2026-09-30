@@ -614,16 +614,11 @@ type LibraryRow struct {
 	FailureCause  string
 }
 
-// Cell is the row's document cell: its name, with its short URL under it,
-// or its host when only its address names it, and, for a save, the
-// browser it came from.
+// Cell is the row's document cell: its name, where it lives under it,
+// and, for a save, the browser it came from.
 func (r LibraryRow) Cell() DocCell {
 	ref := DocRef{ID: r.DocumentID, Title: r.Title, Fallback: r.BookmarkTitle, URL: r.URL}
-	where := shortURL(r.URL)
-	if !ref.Named() {
-		where = host(r.URL)
-	}
-	return DocCell{Ref: ref, Where: where, Source: r.Source, Folder: r.Folder, ContentType: r.ContentType,
+	return DocCell{Ref: ref, Where: ref.where(), Source: r.Source, Folder: r.Folder, ContentType: r.ContentType,
 		When: r.When, FailureCause: r.FailureCause, LastError: r.LastError}
 }
 
@@ -662,6 +657,15 @@ func (r DocRef) Class() string {
 		return "from-bookmark"
 	}
 	return "untitled"
+}
+
+// where is what a list shows under its name: its short URL when a title or
+// a fallback names it, or its host when its address already does.
+func (r DocRef) where() string {
+	if r.Named() {
+		return shortURL(r.URL)
+	}
+	return host(r.URL)
 }
 
 // DocCell is a document as a list's first column shows it (the doc-cell
@@ -1004,15 +1008,65 @@ type DocumentBookmark struct {
 	SavedAt time.Time
 }
 
-// Interests is the latest clustering run's interests, and a rebuild of
-// them. A poll's answer (Poll PollRebuild) holds the rebuild's live
-// regions alone, and reads no interest.
+// Interests is a page of the latest clustering run's interests, and a
+// rebuild of them. A poll's answer (Poll PollRebuild) holds the rebuild's
+// live regions alone, and reads no interest.
 type Interests struct {
-	Layout    Layout
-	Poll      string
-	Run       *InterestRun // nil before the first run finished
-	Interests []Interest
-	Rebuild   Rebuild
+	Layout Layout
+	Poll   string
+	// Page is the page shown, from 1; 0 is the first.
+	Page int
+	// RunChanged is set when the page was asked for from a page of another
+	// run: the interests were rebuilt since, and this page is the newer
+	// run's.
+	RunChanged bool
+	Run        *InterestRun // nil before the first run finished
+	Interests  []Interest
+	Rebuild    Rebuild
+}
+
+// Page sizes of the numbered lists of interests and of an interest's
+// members. 24 cards fill rows of 3, 2 and 1.
+const (
+	InterestsPageSize       = 24
+	InterestMembersPageSize = 50
+)
+
+func (v Interests) page() int { return max(v.Page, 1) }
+
+// Pages is how many pages the run's interests fill.
+func (v Interests) Pages() int {
+	if v.Run == nil {
+		return 0
+	}
+	return pageCount(v.Run.Interests, InterestsPageSize)
+}
+
+// OutOfRange is the page when it is past the last, nil otherwise.
+func (v Interests) OutOfRange() *PageOutOfRange {
+	return outOfRange(v.page(), v.Pages(), v.pageHref)
+}
+
+// Pager is the pager under the cards, nil when they fit on one page.
+func (v Interests) Pager() *Pager {
+	if v.Run == nil {
+		return nil
+	}
+	return newPager(pageSpan{Page: v.page(), Size: InterestsPageSize, Shown: len(v.Interests), Total: v.Run.Interests,
+		Noun: "Interests", Href: v.pageHref})
+}
+
+// FirstPage is the first page of the run shown.
+func (v Interests) FirstPage() string { return v.pageHref(1) }
+
+// pageHref is page of the run shown: every link between pages names the
+// run, so that a page asked for after a rebuild knows it changed.
+func (v Interests) pageHref(page int) string {
+	run := ""
+	if v.Run != nil {
+		run = v.Run.ID
+	}
+	return interestsPageHref(page, run)
 }
 
 // Rebuild is the Interests page's rebuild: whether the page offers one,
@@ -1080,6 +1134,7 @@ func (b Rebuild) Poller() Poller {
 
 // InterestRun is the clustering run the interests come from.
 type InterestRun struct {
+	ID         string
 	ComputedAt time.Time
 	Algo       string
 	Documents  int
@@ -1104,21 +1159,71 @@ type Interest struct {
 type Member struct {
 	DocumentID string
 	Title      string
-	URL        string
-	Similarity float64
+	// BookmarkTitle names an untitled document: its newest titled
+	// bookmark's title.
+	BookmarkTitle string
+	URL           string
+	Similarity    float64
 }
 
-// Cell is the member as a list's document cell, with its host under its
-// name.
+// Ref is how a list names the member.
+func (m Member) Ref() DocRef {
+	return DocRef{ID: m.DocumentID, Title: m.Title, Fallback: m.BookmarkTitle, URL: m.URL}
+}
+
+// Cell is the member as a list's document cell: its name, where it lives
+// under it.
 func (m Member) Cell() DocCell {
-	return DocCell{Ref: DocRef{ID: m.DocumentID, Title: m.Title, URL: m.URL}, Where: host(m.URL)}
+	ref := m.Ref()
+	return DocCell{Ref: ref, Where: ref.where()}
 }
 
-// InterestPage is one interest's page, with its members up to the page's
-// cap.
+// InterestPage is one interest's page: its head, and a page of its members,
+// most similar first.
 type InterestPage struct {
 	Layout   Layout
-	Interest Interest
+	Interest Interest // its Members are the page's; Size counts them all
+	// Page is the page of members shown, from 1; 0 is the first.
+	Page int
+	// RunAt is when the clustering run the interest comes from finished;
+	// zero when unknown.
+	RunAt time.Time
+}
+
+func (p InterestPage) page() int { return max(p.Page, 1) }
+
+// Pages is how many pages the interest's members fill.
+func (p InterestPage) Pages() int { return pageCount(p.Interest.Size, InterestMembersPageSize) }
+
+// OutOfRange is the page when it is past the last, nil otherwise.
+func (p InterestPage) OutOfRange() *PageOutOfRange {
+	return outOfRange(p.page(), p.Pages(), p.pageHref)
+}
+
+// Pager is the pager under the members, nil when they fit on one page.
+func (p InterestPage) Pager() *Pager {
+	return newPager(pageSpan{Page: p.page(), Size: InterestMembersPageSize, Shown: len(p.Interest.Members),
+		Total: p.Interest.Size, Noun: "Documents", Suffix: ", most similar first", Href: p.pageHref})
+}
+
+func (p InterestPage) pageHref(page int) string { return interestPageHref(p.Interest.ID, page) }
+
+// RankedMember is a member and its rank among all the interest's members,
+// from 1, most similar first.
+type RankedMember struct {
+	Rank int
+	Member
+}
+
+// Ranked are the page's members with their ranks, which continue from the
+// pages before.
+func (p InterestPage) Ranked() []RankedMember {
+	first := PageOffset(p.page(), InterestMembersPageSize) + 1
+	out := make([]RankedMember, 0, len(p.Interest.Members))
+	for i, m := range p.Interest.Members {
+		out = append(out, RankedMember{Rank: first + i, Member: m})
+	}
+	return out
 }
 
 // ErrorPage is a page's error: its status and message, and the request ID

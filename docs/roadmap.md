@@ -248,8 +248,11 @@ eval harness shows measurably better retrieval than the v1 baseline.
   jobs and a rebuild (decisions.md "Dashboard: actions through /v1, sent
   by a first-party module"); and the Library's Failures tab, the failed
   and dead documents grouped by cause with a refetch of each group
-  (decisions.md "Dashboard: the Failures tab"). Phase 3 brings richer
-  views (an interest map, suspect pages, HTML export upload). See
+  (decisions.md "Dashboard: the Failures tab"). The Interests and an
+  interest's documents page by number, 24 interests and 50 documents a
+  page (decisions.md "Interests page by offset within a run"). Phase 3
+  brings richer views (an interest map, suspect pages, HTML export
+  upload). See
   `docs/ui.md` and decisions.md "Dashboard: server-rendered pages in the
   daemon (phase 1)".
 - Snapshot to WARC for dead-link insurance
