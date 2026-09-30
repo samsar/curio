@@ -370,6 +370,20 @@ func TestJobs(t *testing.T) {
 	assert.NotContains(t, out, "job(s)", "one job, not a list")
 	_, err = runCLI(t, srv, "jobs", "show", "no-such-job")
 	require.EqualError(t, err, `job "no-such-job" not found`)
+
+	// A deferred job's last_error says what it waits for; it is no error.
+	ctx := context.Background()
+	deferred, err := store.NewDocumentJob(apitest.TenantID, store.JobKindFetch, doc.ID)
+	require.NoError(t, err)
+	require.NoError(t, srv.Deps.Queue.Enqueue(ctx, deferred))
+	claimed, err := srv.Deps.Queue.ClaimNext(ctx, []store.JobKind{store.JobKindFetch})
+	require.NoError(t, err)
+	require.NoError(t, srv.Deps.Queue.Defer(ctx, claimed.ID, time.Now().Add(24*time.Minute),
+		"waiting for GitHub's API rate limit to reset"))
+	out = mustRun(t, srv, "jobs", "show", deferred.ID)
+	assert.Contains(t, out, "pending  fetch      attempts=0")
+	assert.Contains(t, out, "\n  last: waiting for GitHub's API rate limit to reset\n  next attempt: ")
+	assert.NotContains(t, out, "err:")
 }
 
 func TestRefetch(t *testing.T) {
@@ -703,7 +717,9 @@ func TestDoctor_NoGitHubToken(t *testing.T) {
 	require.NoError(t, err, out)
 	line, hint := doctorLine(t, out, "github")
 	assert.Equal(t, "!", markerOf(line), line)
-	assert.Contains(t, line, "no token: GitHub allows 60 API requests an hour")
+	assert.Contains(t, line, "no token: GitHub allows 60 API requests an hour, so github.com pages wait for its "+
+		"hourly limit (about 30 repositories an hour)")
+	assert.NotContains(t, line, "fail")
 	assert.Contains(t, hint, "even one that can access nothing")
 	assert.Contains(t, hint, "a classic token with no scopes ticked")
 	assert.Contains(t, hint, "Set fetcher.github.token in "+filepath.Join(w.home, "config.yaml"))

@@ -783,11 +783,22 @@ func NewDocumentJob(tenantID string, kind JobKind, documentID string) (*Job, err
 	return &Job{TenantID: tenantID, Kind: kind, Payload: payload}, nil
 }
 
+// DeferralBudget is how long after its creation a job may still be
+// deferred (JobQueue.Defer); past it, the worker counts a deferral as a
+// failed attempt. A day is 24 of GitHub's hourly resets, time for about
+// 700 repositories at 2 calls each without a token, and the longest
+// Retry-After the fetchers honor. An upstream that holds curio off for
+// longer won't serve it: a visible failure that a refetch retries beats a
+// document pending for days. The budget counts from created_at, which the
+// queue already keeps, and a refetch enqueues a new job with a new budget.
+const DeferralBudget = 24 * time.Hour
+
 // JobQueue is the SQLite-backed work queue.
 //
-// The transitions out of running (MarkDone, MarkFailed, Requeue) only apply
-// to a job that is currently running. Otherwise they change nothing and
-// return ErrNotRunning, or ErrNotFound if the job doesn't exist.
+// The transitions out of running (MarkDone, MarkFailed, Requeue, Defer)
+// only apply to a job that is currently running. Otherwise they change
+// nothing and return ErrNotRunning, or ErrNotFound if the job doesn't
+// exist.
 type JobQueue interface {
 	// Enqueue inserts j, filling in its ID and timestamps. A payload that
 	// names a document_id (see DocumentJobPayload) links the job to that
@@ -806,7 +817,8 @@ type JobQueue interface {
 	// still closes it. Jobs enqueued by another process, and pending jobs
 	// that come due by run_after, close nothing: find those by polling.
 	Enqueued(kinds []JobKind) <-chan struct{}
-	// MarkDone sets a running job to done.
+	// MarkDone sets a running job to done and clears its last_error: a
+	// done job has nothing left to explain.
 	MarkDone(ctx context.Context, id string) error
 	// MarkFailed records errMsg on a running job and either sends it back to
 	// pending with a backoff run_after, or sets it failed when retry is false
@@ -819,6 +831,13 @@ type JobQueue interface {
 	// the attempt its claim counted: the run was interrupted (the daemon is
 	// shutting down), so it says nothing about the job. last_error is kept.
 	Requeue(ctx context.Context, id string) error
+	// Defer sends a running job back to pending, runnable at until, refunds
+	// the attempt its claim counted, and records reason, why it waits, as
+	// its last_error: the handler didn't try, held back by a limit curio
+	// keeps itself, so the run says nothing about the job. The job isn't
+	// runnable before until, so Defer closes no Enqueued channel: workers
+	// find it by polling, as they find a retry's backoff.
+	Defer(ctx context.Context, id string, until time.Time, reason string) error
 	// RecoverOrphans handles jobs of the given kinds left running by a daemon
 	// that exited without recording their outcome (crash, SIGKILL, a shutdown
 	// that timed out). Each goes back to pending, runnable now, keeping the
@@ -855,8 +874,9 @@ type JobStore interface {
 	PruneOlderThan(ctx context.Context, tenantID string, before time.Time) (int64, error)
 	// QueueCounts counts the pending and running jobs of each kind, across
 	// tenants: workers claim across tenants, so the queue they work through
-	// is daemon-wide. Pending includes retries waiting on run_after. Kinds
-	// with neither are absent from the map.
+	// is daemon-wide. Pending counts every pending job; DueLater and NextDue
+	// single out those whose run_after is still ahead. Kinds with neither
+	// pending nor running jobs are absent from the map.
 	QueueCounts(ctx context.Context) (map[JobKind]QueueCount, error)
 	// AttemptLimit is how many attempts a job gets: MarkFailed fails it
 	// for good once its attempts reach this many.
@@ -866,6 +886,12 @@ type JobStore interface {
 // QueueCount is how many jobs of one kind are waiting and running.
 type QueueCount struct {
 	Pending, Running int
+	// DueLater is how many of the pending jobs can't run yet: their
+	// run_after, a retry's backoff or a deferral's hold, is still ahead.
+	// NextDue is the earliest of those run_afters; zero when there are
+	// none.
+	DueLater int
+	NextDue  time.Time
 }
 
 // ListJobsOpts filters JobStore.ListWithDoc. Empty fields mean "no filter

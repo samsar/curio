@@ -530,8 +530,9 @@ const testVideoURL = "https://www.youtube.com/watch?v=test_id"
 
 // TestYouTubeFetch_RateLimitStartsCooldown: a 429 anywhere in yt-dlp's
 // output, failing the extraction or only a caption download, pauses every
-// run on the fetcher for youtubeRateLimitCooldown, and the next fetch
-// fails fast without starting yt-dlp. Other failures pause nothing.
+// run on the fetcher for youtubeRateLimitCooldown, and the next fetch is
+// deferred until the pause ends without starting yt-dlp. The run that met
+// the 429 fails like any answer. Other failures pause nothing.
 func TestYouTubeFetch_RateLimitStartsCooldown(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -565,10 +566,11 @@ func TestYouTubeFetch_RateLimitStartsCooldown(t *testing.T) {
 			assert.Equal(t, youtubeRateLimitCooldown, yt.cooldown.remaining(fc.now()))
 			if tc.fails {
 				assertRateLimited(t, err, youtubeRateLimitCooldown)
+				assertNotDeferred(t, err)
 			}
 
 			_, err = yt.Fetch(t.Context(), testVideoURL)
-			assertRateLimited(t, err, youtubeRateLimitCooldown)
+			assertHeld(t, err, fc.now().Add(youtubeRateLimitCooldown), youtubeRateLimitCooldown)
 			assert.Len(t, ytdlpRuns(t, argsPath), 1, "a fetch during the cooldown must not start yt-dlp")
 			assert.Empty(t, fc.slept())
 		})
@@ -577,8 +579,8 @@ func TestYouTubeFetch_RateLimitStartsCooldown(t *testing.T) {
 
 // TestYouTubeFetch_CooldownBeforeRun: a cooldown of up to
 // maxInlineYouTubeWait is sat out through the clock and the video then
-// fetched. A longer one fails at once, without starting yt-dlp, as a
-// retryable 429 carrying the time left.
+// fetched. A longer one defers the fetch at once, without starting yt-dlp,
+// around a retryable 429 carrying the time left.
 func TestYouTubeFetch_CooldownBeforeRun(t *testing.T) {
 	cases := []struct {
 		cooldown time.Duration
@@ -606,7 +608,7 @@ func TestYouTubeFetch_CooldownBeforeRun(t *testing.T) {
 				assert.Len(t, ytdlpRuns(t, argsPath), 1)
 				return
 			}
-			assertRateLimited(t, err, tc.cooldown)
+			assertHeld(t, err, fc.now().Add(tc.cooldown), tc.cooldown)
 			assert.Empty(t, fc.slept())
 			assert.Empty(t, ytdlpRuns(t, argsPath))
 		})
@@ -615,8 +617,8 @@ func TestYouTubeFetch_CooldownBeforeRun(t *testing.T) {
 
 // TestYouTubeFetch_CooldownRecheckedAfterSlot: a fetch waiting for the only
 // yt-dlp slot while the run holding it meets a 429 doesn't start yt-dlp
-// once it gets the slot; it fails fast like a fetch that came after the
-// 429.
+// once it gets the slot; it is deferred like a fetch that came after the
+// 429, and gives the slot back.
 func TestYouTubeFetch_CooldownRecheckedAfterSlot(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fc := newFakeClock()
@@ -633,12 +635,17 @@ func TestYouTubeFetch_CooldownRecheckedAfterSlot(t *testing.T) {
 
 		yt.cooldown.extend(fc.now(), youtubeRateLimitCooldown) // the run meets a 429
 		<-yt.slots                                             // and ends
-		assertRateLimited(t, <-errc, youtubeRateLimitCooldown)
+		assertHeld(t, <-errc, fc.now().Add(youtubeRateLimitCooldown), youtubeRateLimitCooldown)
+		select {
+		case yt.slots <- struct{}{}: // the next fetch can take it
+		default:
+			t.Fatal("the deferred fetch kept its yt-dlp slot")
+		}
 	})
 }
 
 // TestYouTubeFetch_LongCooldownDoesNotQueue: a fetch that meets a cooldown
-// too long to sit out fails without waiting for a yt-dlp slot.
+// too long to sit out is deferred without waiting for a yt-dlp slot.
 func TestYouTubeFetch_LongCooldownDoesNotQueue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fc := newFakeClock()
@@ -657,12 +664,24 @@ func TestYouTubeFetch_LongCooldownDoesNotQueue(t *testing.T) {
 		select {
 		case err := <-errc:
 			queued = false
-			assertRateLimited(t, err, youtubeRateLimitCooldown)
+			assertHeld(t, err, fc.now().Add(youtubeRateLimitCooldown), youtubeRateLimitCooldown)
 		default:
 		}
 		<-yt.slots // lets a fetch that did queue finish
 		assert.False(t, queued, "the fetch waited for a slot instead of failing fast")
 	})
+}
+
+// assertHeld checks that err is a fetch the cooldown held: deferred until
+// until, for YouTube's rate limit, around a retryable 429 carrying left, and
+// read as rate_limited.
+func assertHeld(t *testing.T, err error, until time.Time, left time.Duration) {
+	t.Helper()
+	de := requireDeferred(t, err, until)
+	assert.Equal(t, youTubeHoldReason, de.Reason)
+	assert.True(t, strings.HasPrefix(err.Error(), "youtube: not run, rate-limit cooldown has "), err.Error())
+	assertRateLimited(t, err, left)
+	assert.Equal(t, store.FailureCauseRateLimited, FailureCause(err))
 }
 
 // assertRateLimited checks that err is a retryable 429 carrying retryAfter.

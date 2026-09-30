@@ -505,7 +505,20 @@ func TestUI_DocumentJobs(t *testing.T) {
 	_, err = srv.Deps.Queue.MarkFailed(ctx, claimed.ID, "HTTP 503", true)
 	require.NoError(t, err)
 	body = getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
-	assert.Regexp(t, `<li>Fetch queued · attempt 2 of 5, due <time datetime="[^"]+" title="[^"]+">[^<]+</time></li>`, body)
+	assert.Regexp(t, `<li>Fetch waiting, due <time datetime="[^"]+" title="[^"]+">[^<]+</time> · attempt 2 of 5`+
+		`<span class="visually-hidden">: </span><span class="job-why" title="HTTP 503">HTTP 503</span></li>`, body)
+
+	_, err = srv.Deps.Queue.ClaimNext(ctx, nil)
+	require.ErrorIs(t, err, store.ErrNotFound, "backing off")
+	_, err = srv.DB.ExecContext(ctx, `UPDATE jobs SET run_after = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE document_id = ?`, doc.ID)
+	require.NoError(t, err)
+	claimed, err = srv.Deps.Queue.ClaimNext(ctx, []store.JobKind{store.JobKindFetch})
+	require.NoError(t, err)
+	require.NoError(t, srv.Deps.Queue.Defer(ctx, claimed.ID, time.Now().Add(24*time.Minute),
+		"waiting for GitHub's API rate limit to reset"))
+	body = getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	assert.Regexp(t, `<li>Fetch waiting, due <time datetime="[^"]+" title="[^"]+">in 2[34] min</time> · attempt 2 of 5`+
+		`<span class="visually-hidden">: </span><span class="job-why" title="waiting for GitHub&#39;s API rate limit to reset">`, body)
 }
 
 // TestUI_DocumentPoll: a poll's answer is the jobs' region and its poller,

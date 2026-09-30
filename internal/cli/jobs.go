@@ -129,8 +129,15 @@ func renderJob(w io.Writer, j client.Job) {
 		}
 	}
 	if j.LastError != nil && *j.LastError != "" {
+		// Only a failed job's last_error is its error. Any other job's is
+		// the error of the attempt it retries after, or what a deferral
+		// waits for.
+		label := "last"
+		if j.Status == "failed" {
+			label = "err"
+		}
 		for _, line := range wrapLines(*j.LastError, 100) {
-			fmt.Fprintf(w, "  err: %s\n", line)
+			fmt.Fprintf(w, "  %s: %s\n", label, line)
 		}
 	}
 	// Payload is debugging signal when no DocURL was joined (import,

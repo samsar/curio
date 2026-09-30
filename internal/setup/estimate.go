@@ -51,6 +51,17 @@ const (
 // githubHost is the host the GitHub fetcher takes, through GitHub's API.
 const githubHost = "github.com"
 
+// gitHubPagesPerHour is how many github.com pages GitHub's API serves an
+// hour without a token: 60 requests, about 2 a page.
+const gitHubPagesPerHour = 30
+
+// gitHubWait bounds how long n github.com pages take without a token: the
+// hourly limit serves gitHubPagesPerHour of them, and the rest wait for the
+// next hour's.
+func gitHubWait(n int) time.Duration {
+	return time.Duration((n+gitHubPagesPerHour-1)/gitHubPagesPerHour) * time.Hour
+}
+
 // Estimate is how long an import's new pages take to fetch and to index.
 type Estimate struct {
 	// Pages is how many new pages there are.

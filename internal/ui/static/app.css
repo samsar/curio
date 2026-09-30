@@ -885,6 +885,8 @@ main.page:has(.landing) { padding-bottom: var(--s6); }
 .doc-jobs { display: grid; gap: var(--s1); margin-top: var(--s3); font-size: var(--fs-sm); color: var(--text-2); }
 .doc-jobs:empty { display: none; }
 .job-lines { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s1); }
+.job-lines li { min-width: 0; }
+.job-why { display: block; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .job-outcome a, .job-hold a { font-weight: 560; }
 
 .prose { font-size: var(--fs-md); line-height: var(--lh-read); color: var(--text); max-width: 42rem; overflow-wrap: break-word; }

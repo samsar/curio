@@ -619,6 +619,9 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 		        strftime('%Y-%m-%dT%H:%M:%fZ','now'))`, uuid.NewString())
 	require.NoError(t, err)
 	dead := s.seedDocument(t, "https://example.com/dead", store.DocStateDead)
+	// A job due later, which the queue counts apart, with when it is due.
+	require.NoError(t, s.deps.Queue.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindCluster,
+		RunAfter: time.Now().Add(24 * time.Minute)}))
 
 	folder, title := "/Reading/Kafka", "A"
 	bookmark := &store.Bookmark{TenantID: "local", URL: a.URL, Title: &title, FolderPath: &folder,

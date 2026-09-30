@@ -206,6 +206,22 @@ func running(q *client.Queue) int {
 	return n
 }
 
+// dueLater is how many of q's pending jobs can't run yet (a retry's
+// backoff, a deferral's hold), and when the first of them can; 0 and zero
+// when q is nil, none waits for a time, or the daemon doesn't say.
+func dueLater(q *client.Queue) (n int, next time.Time) {
+	if q == nil {
+		return 0, time.Time{}
+	}
+	for _, k := range q.Kinds {
+		n += k.DueLater
+		if !k.NextDue.IsZero() && (next.IsZero() || k.NextDue.Before(next)) {
+			next = k.NextDue
+		}
+	}
+	return n, next
+}
+
 // finishing says how many running jobs finish.
 func finishing(n int) string {
 	switch n {
@@ -222,7 +238,7 @@ func finishing(n int) string {
 const queueStatusTimeout = time.Second
 
 // printQueue prints status's queue lines: the queue's state and each
-// pool's load.
+// pool's load, with how many of its pending jobs are due later.
 func printQueue(ctx context.Context, w io.Writer, c *client.Client) {
 	ctx, cancel := context.WithTimeout(ctx, queueStatusTimeout)
 	defer cancel()
@@ -234,7 +250,11 @@ func printQueue(ctx context.Context, w io.Writer, c *client.Client) {
 	fmt.Fprintf(w, "queue:     %s\n", describeQueue(q))
 	loads := make([]string, 0, len(q.Kinds))
 	for _, k := range q.Kinds {
-		loads = append(loads, fmt.Sprintf("%s %d/%d running, %d pending", k.Kind, k.Running, k.Limit, k.Pending))
+		load := fmt.Sprintf("%s %d/%d running, %d pending", k.Kind, k.Running, k.Limit, k.Pending)
+		if k.DueLater > 0 {
+			load += fmt.Sprintf(" (%d due later)", k.DueLater)
+		}
+		loads = append(loads, load)
 	}
 	if len(loads) > 0 {
 		fmt.Fprintf(w, "           %s\n", strings.Join(loads, "   "))

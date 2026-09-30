@@ -95,7 +95,8 @@ func queuePanel(q QueueResponse) ui.QueuePanel {
 		Throttle: q.Throttle, Schedule: q.Schedule, KeepAwake: q.KeepAwake, KeepAwakeActive: q.KeepAwakeActive,
 		PowerSource: q.PowerSource}
 	for _, k := range q.Kinds {
-		p.Kinds = append(p.Kinds, ui.KindLoad{Kind: k.Kind, Running: k.Running, Limit: k.Limit, Pending: k.Pending})
+		p.Kinds = append(p.Kinds, ui.KindLoad{Kind: k.Kind, Running: k.Running, Limit: k.Limit, Pending: k.Pending,
+			DueLater: k.DueLater, NextDue: k.NextDue})
 	}
 	return p
 }
@@ -125,7 +126,7 @@ func estimateProgress(q QueueResponse, m MetricsResponse) ui.Progress {
 	for _, k := range q.Kinds {
 		if k.Kind == string(store.JobKindFetch) || k.Kind == string(store.JobKindIndex) {
 			work = append(work, ui.KindWork{Kind: k.Kind, Pending: k.Pending, Running: k.Running,
-				Finished: finished[k.Kind]})
+				DueLater: k.DueLater, NextDue: k.NextDue, Finished: finished[k.Kind]})
 		}
 	}
 	return ui.EstimateProgress(work, ui.ProgressWindow, q.State == queueOpen)

@@ -96,9 +96,10 @@ const (
 	jinaRequestsPerMinute      = 20
 	jinaKeyedRequestsPerMinute = 200
 	// maxInlineJinaWait is the longest Jina cooldown a fetch sits out.
-	// Longer ones fail the fetch retryably and leave the wait to the job
-	// queue's backoff.
+	// Longer ones defer the fetch until the cooldown ends (awaitJina).
 	maxInlineJinaWait = 30 * time.Second
+	// jinaHoldReason is what a fetch deferred for Jina waits for.
+	jinaHoldReason = "the pause on Jina Reader calls to end"
 	// jinaAttempts is how many times one fetch calls Jina for transient
 	// failures (5xx, 429, transport errors).
 	jinaAttempts = 4
@@ -1280,8 +1281,8 @@ func jinaBackoff(attempt int) time.Duration {
 // jinaChallengeCooldown is how long Jina calls pause after r.jina.ai's CDN
 // challenged one, when its answer gave no Retry-After. Every call would be
 // challenged the same way, so a pause saves each fetch a request. The
-// fetches that needed Jina fail retryably, but each queue retry inside the
-// pause still uses up a job attempt, so a document can end failed.
+// fetches that need Jina during it are deferred until it ends, without
+// using up an attempt.
 const jinaChallengeCooldown = 10 * time.Minute
 
 // extendJinaCooldown extends the cooldown every Jina call shares when a
@@ -1312,8 +1313,12 @@ func (n *Native) extendJinaCooldown(err error, attempt int) {
 
 // awaitJina paces a Jina call through the shared limiter and cooldown (see
 // pace), sitting out a cooldown a 429 left when it ends within
-// maxInlineJinaWait. A longer one, such as a CDN challenge's pause, fails at
-// once, without a request, with a retryable 429 carrying the time left.
+// maxInlineJinaWait. A longer one, such as a CDN challenge's pause, returns
+// at once, without a request, a *DeferError until the cooldown ends around
+// a 429 carrying the time left, whether or not this fetch has called Jina
+// already. The fetch then runs again whole: the origin's answer is not
+// kept, since a block may have lifted by then, and a memo of it would be
+// state a restart loses.
 func (n *Native) awaitJina(ctx context.Context) error {
 	left, err := pace(ctx, n.jinaLimiter, &n.jinaCooldown, n.clock, maxInlineJinaWait)
 	if err != nil {
@@ -1321,7 +1326,8 @@ func (n *Native) awaitJina(ctx context.Context) error {
 	}
 	if left > 0 {
 		se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: n.jinaBaseURL, RetryAfter: left}
-		return fmt.Errorf("jina: not sent, cooldown has %s left: %w", left.Round(time.Second), se)
+		return heldBack(&n.jinaCooldown, jinaHoldReason,
+			fmt.Errorf("jina: not sent, cooldown has %s left: %w", left.Round(time.Second), se))
 	}
 	return nil
 }

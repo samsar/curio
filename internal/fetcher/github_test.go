@@ -586,11 +586,11 @@ func TestGitHub_RateLimitDelays(t *testing.T) {
 	}
 }
 
-// TestGitHub_LongRetryAfterFailsFast: a Retry-After beyond the inline cap
-// isn't slept in the worker. The attempt fails retryably with the hint, and
-// every call during the cooldown, from any Fetch, fails the same way
-// without reaching GitHub.
-func TestGitHub_LongRetryAfterFailsFast(t *testing.T) {
+// TestGitHub_LongRetryAfterDefersLaterCalls: a Retry-After beyond the
+// inline cap isn't slept in the worker. The attempt that met it fails
+// retryably with the hint, and every call during the cooldown, from any
+// Fetch, is deferred until it ends without reaching GitHub.
+func TestGitHub_LongRetryAfterDefersLaterCalls(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
@@ -603,7 +603,7 @@ func TestGitHub_LongRetryAfterFailsFast(t *testing.T) {
 	fc := newFakeClock()
 	g.clock = fc.clock()
 
-	for _, target := range []string{"https://github.com/owner/repo", "https://github.com/other/repo/issues/7"} {
+	for i, target := range []string{"https://github.com/owner/repo", "https://github.com/other/repo/issues/7"} {
 		_, err := g.Fetch(t.Context(), target)
 		require.Error(t, err)
 		var pe *PermanentError
@@ -611,6 +611,11 @@ func TestGitHub_LongRetryAfterFailsFast(t *testing.T) {
 		var se *HTTPStatusError
 		require.ErrorAs(t, err, &se)
 		assert.Equal(t, 600*time.Second, se.RetryAfter)
+		if i == 0 {
+			assertNotDeferred(t, err)
+		} else {
+			requireDeferred(t, err, fc.now().Add(600*time.Second))
+		}
 	}
 	assert.Equal(t, int32(1), hits.Load(), "calls during the cooldown must not reach GitHub")
 	assert.Empty(t, fc.slept(), "a long cooldown must not be slept inline")
@@ -652,13 +657,18 @@ func TestGitHub_CooldownHoldsQueuedCalls(t *testing.T) {
 		errs = append(errs, <-results)
 	}
 
-	for _, err := range errs {
+	for i, err := range errs {
 		require.Error(t, err)
 		var pe *PermanentError
 		assert.False(t, errors.As(err, &pe), "rate limit must stay retryable: %v", err)
 		var se *HTTPStatusError
 		require.ErrorAs(t, err, &se)
 		assert.Equal(t, 600*time.Second, se.RetryAfter)
+		if i == 0 {
+			assertNotDeferred(t, err) // the call that went out
+		} else {
+			requireDeferred(t, err, fc.now().Add(600*time.Second))
+		}
 	}
 	assert.Equal(t, int32(1), hits.Load(), "queued calls must not reach GitHub during the cooldown")
 	assert.Empty(t, fc.slept())
@@ -766,6 +776,92 @@ func TestGitHubFetch_ReadmeRateLimitCooldownIsRetryable(t *testing.T) {
 	var se *HTTPStatusError
 	require.ErrorAs(t, err, &se)
 	assert.Equal(t, 900*time.Second, se.RetryAfter)
+	assertNotDeferred(t, err)
+}
+
+// TestGitHub_HeldCallIsDeferred: a call the shared cooldown holds past
+// maxInlineRateLimitWait is not sent. The fetch is deferred until the
+// cooldown ends, around a retryable 429 carrying the time left, and still
+// reads rate_limited.
+func TestGitHub_HeldCallIsDeferred(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	defer srv.Close()
+	g := newTestGitHub(t, srv)
+	fc := newFakeClock()
+	g.clock = fc.clock()
+	g.cooldown.extend(fc.now(), time.Hour)
+
+	_, err := g.Fetch(t.Context(), "https://github.com/owner/repo")
+	de := requireDeferred(t, err, fc.now().Add(time.Hour))
+	assert.Equal(t, gitHubHoldReason, de.Reason)
+	assert.Equal(t, "github: "+srv.URL+"/repos/owner/repo: not sent, rate-limit cooldown has 1h0m0s left: "+
+		"rate limited: HTTP 429 Too Many Requests", err.Error())
+	assert.ErrorIs(t, err, errRateLimited)
+	var se *HTTPStatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
+	assert.Equal(t, time.Hour, se.RetryAfter)
+	assert.Equal(t, store.FailureCauseRateLimited, FailureCause(err))
+	assert.Zero(t, hits.Load(), "a held call is not sent")
+	assert.Empty(t, fc.slept())
+}
+
+// TestGitHubFetch_HeldReadmeIsDeferred: a README call the cooldown holds
+// after the repository's call answered defers the whole fetch. It is never
+// taken for a repository without a README and stored.
+func TestGitHubFetch_HeldReadmeIsDeferred(t *testing.T) {
+	fc := newFakeClock()
+	var (
+		fetcher    atomic.Pointer[GitHub]
+		readmeHits atomic.Int32
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo", func(w http.ResponseWriter, _ *http.Request) {
+		fetcher.Load().cooldown.extend(fc.now(), time.Hour) // another worker's call met the limit
+		_, _ = w.Write([]byte(repoMetaJSON))
+	})
+	mux.HandleFunc("/repos/owner/repo/readme", func(w http.ResponseWriter, _ *http.Request) {
+		readmeHits.Add(1)
+		_, _ = w.Write([]byte("# readme"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	g := newTestGitHub(t, srv)
+	g.clock = fc.clock()
+	fetcher.Store(g)
+
+	res, err := g.Fetch(t.Context(), "https://github.com/owner/repo")
+	assert.Nil(t, res, "nothing is stored")
+	requireDeferred(t, err, fc.now().Add(time.Hour))
+	assert.Contains(t, err.Error(), "/readme: not sent")
+	assert.False(t, isNotFound(err))
+	assert.Zero(t, readmeHits.Load())
+}
+
+// TestGitHub_RateLimitResetIsClamped: a primary limit's reset time is
+// waited for up to maxRetryAfter, as a Retry-After is; one further off is
+// clamped.
+func TestGitHub_RateLimitResetIsClamped(t *testing.T) {
+	fc := newFakeClock()
+	g := &GitHub{clock: fc.clock()}
+	cases := []struct {
+		reset time.Duration
+		want  time.Duration
+	}{
+		{time.Hour, time.Hour},
+		{48 * time.Hour, maxRetryAfter},
+	}
+	for _, tc := range cases {
+		t.Run(tc.reset.String(), func(t *testing.T) {
+			resp := &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}}
+			resp.Header.Set("X-RateLimit-Remaining", "0")
+			resp.Header.Set("X-RateLimit-Reset", strconv.FormatInt(fc.now().Add(tc.reset).Unix(), 10))
+			got, ok := g.rateLimitDelay(resp, nil)
+			require.True(t, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 // TestGitHubFetch_FileEscaping: the decoded path and ref from a bookmark

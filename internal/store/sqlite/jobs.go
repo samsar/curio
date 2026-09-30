@@ -157,10 +157,14 @@ func claimSQL(nKinds int) string {
 	RETURNING ` + jobColumns
 }
 
+// markDoneSQL sets a running job done. A done job has nothing left to
+// explain, so the error a retry or a deferral left goes.
+const markDoneSQL = `
+	UPDATE jobs SET status = ?, last_error = NULL, updated_at = ` + sqlNow + `
+	WHERE id = ? AND status = ?`
+
 func (s *Jobs) MarkDone(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET status = ?, updated_at = `+sqlNow+` WHERE id = ? AND status = ?`,
-		store.JobStatusDone, id, store.JobStatusRunning)
+	res, err := s.db.ExecContext(ctx, markDoneSQL, store.JobStatusDone, id, store.JobStatusRunning)
 	if err != nil {
 		return fmt.Errorf("mark done: %w", err)
 	}
@@ -229,6 +233,27 @@ func (s *Jobs) Requeue(ctx context.Context, id string) error {
 	}
 	s.db.enqueued.notify(kind)
 	return nil
+}
+
+// deferJobSQL sends a running job back to pending until a set time, with
+// the attempt its claim counted refunded and why it waits as its
+// last_error. Its args are status, run_after, last_error, updated_at, then
+// the job's ID and status.
+const deferJobSQL = `
+	UPDATE jobs SET status = ?, attempts = max(attempts - 1, 0), started_at = NULL,
+	                run_after = ?, last_error = ?, updated_at = ?
+	WHERE id = ? AND status = ?`
+
+// Defer implements store.JobQueue. It signals nothing: the job isn't
+// runnable before until.
+func (s *Jobs) Defer(ctx context.Context, id string, until time.Time, reason string) error {
+	res, err := s.db.ExecContext(ctx, deferJobSQL,
+		store.JobStatusPending, formatTime(until), reason, formatTime(time.Now().UTC()),
+		id, store.JobStatusRunning)
+	if err != nil {
+		return fmt.Errorf("defer job: %w", err)
+	}
+	return s.ensureTransitioned(ctx, res, id)
 }
 
 // orphanExhaustedError is the last_error of an orphan with no attempts left.
@@ -602,13 +627,19 @@ func (s *Jobs) CountByStatus(ctx context.Context, tenantID string) (map[store.Jo
 }
 
 // queueCountsSQL counts the unfinished jobs per status and kind, across
-// tenants. It is a covering walk of idx_jobs_claim's pending and running
-// ranges, which yield the rows grouped, so finished jobs cost it nothing
-// however many pile up.
-const queueCountsSQL = `SELECT status, kind, count(*) FROM jobs WHERE status IN (?, ?) GROUP BY status, kind`
+// tenants, and of those the ones whose run_after is after ?3 (now), with
+// the earliest such run_after. It is a covering walk of idx_jobs_claim's
+// pending and running ranges, whose entries hold run_after and yield the
+// rows grouped, so finished jobs cost it nothing however many pile up.
+const queueCountsSQL = `
+	SELECT status, kind, count(*),
+	       count(CASE WHEN run_after > ?3 THEN 1 END),
+	       min(CASE WHEN run_after > ?3 THEN run_after END)
+	FROM jobs WHERE status IN (?1, ?2) GROUP BY status, kind`
 
 func (s *Jobs) QueueCounts(ctx context.Context) (map[store.JobKind]store.QueueCount, error) {
-	rows, err := s.db.QueryContext(ctx, queueCountsSQL, store.JobStatusPending, store.JobStatusRunning)
+	rows, err := s.db.QueryContext(ctx, queueCountsSQL, store.JobStatusPending, store.JobStatusRunning,
+		formatTime(time.Now().UTC()))
 	if err != nil {
 		return nil, fmt.Errorf("count queued jobs: %w", err)
 	}
@@ -616,18 +647,24 @@ func (s *Jobs) QueueCounts(ctx context.Context) (map[store.JobKind]store.QueueCo
 	out := map[store.JobKind]store.QueueCount{}
 	for rows.Next() {
 		var (
-			status store.JobStatus
-			kind   store.JobKind
-			n      int
+			status   store.JobStatus
+			kind     store.JobKind
+			n, later int
+			nextDue  sql.NullString
 		)
-		if err := rows.Scan(&status, &kind, &n); err != nil {
+		if err := rows.Scan(&status, &kind, &n, &later, &nextDue); err != nil {
 			return nil, fmt.Errorf("count queued jobs: %w", err)
 		}
 		c := out[kind]
 		if status == store.JobStatusRunning {
 			c.Running = n
 		} else {
-			c.Pending = n
+			c.Pending, c.DueLater = n, later
+			if nextDue.Valid {
+				if c.NextDue, err = parseTime(nextDue.String); err != nil {
+					return nil, fmt.Errorf("count queued jobs: %w", err)
+				}
+			}
 		}
 		out[kind] = c
 	}

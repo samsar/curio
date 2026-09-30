@@ -778,12 +778,16 @@ type Queue struct {
 	Kinds       []QueueKind `json:"kinds"`
 }
 
-// QueueKind mirrors api.QueueKindResponse.
+// QueueKind mirrors api.QueueKindResponse. DueLater is how many of
+// Pending can't run yet, and NextDue when the first of them can; a daemon
+// that doesn't report them leaves both zero.
 type QueueKind struct {
-	Kind    string `json:"kind"`
-	Limit   int    `json:"limit"`
-	Running int    `json:"running"`
-	Pending int    `json:"pending"`
+	Kind     string    `json:"kind"`
+	Limit    int       `json:"limit"`
+	Running  int       `json:"running"`
+	Pending  int       `json:"pending"`
+	DueLater int       `json:"due_later"`
+	NextDue  time.Time `json:"next_due,omitzero"`
 }
 
 // Queue states and reasons, throttles, the schedule that clears the

@@ -160,10 +160,10 @@ func onOff(on bool) string {
 
 // importNotes are what to know before an import of pages starts: how long
 // it takes at full speed, the sites that may take longer, the GitHub pages
-// that need a token, the GPU, and what closing the terminal or sleeping
-// does. rate is the measured index rate, 0 when unknown; configPath is
-// where fetcher.github.token goes; managed says launchd keeps the daemon
-// running.
+// that wait for GitHub's hourly limit without a token, the GPU, and what
+// closing the terminal or sleeping does. rate is the measured index rate,
+// 0 when unknown; configPath is where fetcher.github.token goes; managed
+// says launchd keeps the daemon running.
 func importNotes(e Estimate, rate float64, pages []string, cfg config.Config, configPath string, managed bool) []string {
 	notes := []string{
 		fmt.Sprintf("%s to fetch and index:", plural(e.Pages, "new page")),
@@ -185,10 +185,15 @@ func importNotes(e Estimate, rate float64, pages []string, cfg config.Config, co
 			"from one site: those may take longer than this", strings.Join(named, ", "), perHostInFlight))
 	}
 	if n := countHost(pages, githubHost); n > 0 && cfg.Fetcher.GitHub.Token == "" {
+		wait := "up to about " + formatDuration(gitHubWait(n)) + " for these"
+		if gitHubWait(n) > store.DeferralBudget {
+			wait = fmt.Sprintf("about %d of them a day", gitHubPagesPerHour*int(store.DeferralBudget/time.Hour))
+		}
 		notes = append(notes, fmt.Sprintf("  %s on github.com: without a token GitHub allows 60 API requests "+
-			"an hour, 2 a repository. Set fetcher.github.token in %s, then `curio daemon stop` (the next command "+
-			"starts it again); `curio refetch --all --state=failed` fetches the ones that fail",
-			plural(n, "page"), configPath))
+			"an hour, 2 a repository, so they wait for its hourly limit: %s. Set "+
+			"fetcher.github.token in %s, then `curio daemon stop` (the next command starts it again). Pages "+
+			"still waiting after a day fail as rate_limited; `curio refetch --all --cause=rate_limited` retries them",
+			plural(n, "page"), wait, configPath))
 	}
 	restart := "the next curio command starts the daemon again"
 	if managed {

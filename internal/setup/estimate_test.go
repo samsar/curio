@@ -124,24 +124,43 @@ func slicesConcat(parts ...[]string) []string {
 }
 
 // TestImportNotes_GitHub: GitHub pages without a token are mentioned once,
-// pointing at config.yaml, which the daemon reads; with a token they
-// aren't.
+// with how long they wait for GitHub's limit, pointing at config.yaml,
+// which the daemon reads; with a token they aren't.
 func TestImportNotes_GitHub(t *testing.T) {
 	pages := append(urlsOn("github.com", 40), spread(60)...)
 	cfg := config.Default()
 	e := estimateImport(len(pages), cfg.Daemon.FetchWorkers, 40, "")
 	notes := strings.Join(importNotes(e, 40, pages, cfg, "/Users/x/.curio/config.yaml", true), "\n")
-	assert.Contains(t, notes, "40 pages on github.com: without a token GitHub allows 60 API requests an hour, 2 a repository")
+	assert.Contains(t, notes, "40 pages on github.com: without a token GitHub allows 60 API requests an hour, "+
+		"2 a repository, so they wait for its hourly limit: up to about 2h for these.")
 	assert.Contains(t, notes, "Set fetcher.github.token in /Users/x/.curio/config.yaml")
-	assert.Contains(t, notes, "`curio refetch --all --state=failed`")
+	assert.Contains(t, notes, "Pages still waiting after a day fail as rate_limited; "+
+		"`curio refetch --all --cause=rate_limited` retries them")
+	assert.NotContains(t, notes, "--state=failed")
 	assert.Contains(t, notes, "launchd keeps the daemon running")
 	assert.Contains(t, notes, "`curio throttle gentle`")
 	assert.Contains(t, notes, "A sleeping Mac pauses the import.")
+
+	// More than a day's worth: the note says what a day serves, not a
+	// wait past the day after which they fail.
+	many := urlsOn("github.com", 1000)
+	e = estimateImport(len(many), cfg.Daemon.FetchWorkers, 40, "")
+	notes = strings.Join(importNotes(e, 40, many, cfg, "/Users/x/.curio/config.yaml", true), "\n")
+	assert.Contains(t, notes, "they wait for its hourly limit: about 720 of them a day.")
+	assert.NotContains(t, notes, "up to about 34h")
 
 	cfg.Fetcher.GitHub.Token = "ghp_example"
 	notes = strings.Join(importNotes(e, 40, pages, cfg, "/Users/x/.curio/config.yaml", false), "\n")
 	assert.NotContains(t, notes, "github.com")
 	assert.Contains(t, notes, "the next curio command starts the daemon again")
+}
+
+// TestGitHubWait: without a token GitHub serves about 30 pages an hour, so
+// n pages take up to an hour for each 30 of them.
+func TestGitHubWait(t *testing.T) {
+	for n, want := range map[int]time.Duration{1: time.Hour, 30: time.Hour, 31: 2 * time.Hour, 171: 6 * time.Hour} {
+		assert.Equal(t, want, gitHubWait(n), "%d pages", n)
+	}
 }
 
 // fakeEmbedder embeds by advancing a fake clock by took per call.

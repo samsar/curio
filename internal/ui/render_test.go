@@ -140,7 +140,9 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 				Title: evilQuotes, Tags: []string{evilScript, evilURL}, SavedAt: at}}},
 			Jobs: DocumentJobs{DocumentID: evilAttr, State: evilAttr, Baseline: DocumentBaseline{Updated: at,
 				Extraction: evilScript}, Current: DocumentBaseline{Updated: at, Extraction: evilAttr},
-				Jobs:         []JobLine{{Kind: evilScript, Running: true, Attempts: 2}, {Kind: evilAttr, Attempts: 1, RunAfter: at}},
+				Jobs: []JobLine{{Kind: evilScript, Running: true, Attempts: 2},
+					{Kind: evilAttr, Waiting: true, Attempts: 1, RunAfter: at, LastError: evilScript + evilQuotes},
+					{Kind: "fetch", Waiting: true, RunAfter: at, LastError: evilAttr}},
 				AttemptLimit: 5, Hold: evilScript},
 		},
 		PageInterests: Interests{
@@ -271,6 +273,16 @@ func statusVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 			Progress: &ProgressPanel{Err: panelErr}, Health: health, Failures: &FailuresPanel{}},
 		Status{Layout: layout, Poll: PollLive, Counts: &CountsPanel{Documents: 2},
 			Queue: &QueuePanel{Open: true, Throttle: "normal", Kinds: kinds}, Progress: &ProgressPanel{}},
+		// Every job waits for a later time, and some wait beside work that runs.
+		Status{Layout: layout, Poll: PollLive, Counts: &CountsPanel{Documents: 2},
+			Queue: &QueuePanel{Open: true, Throttle: "normal", Kinds: []KindLoad{{Kind: "fetch", Limit: 16,
+				Pending: 171, DueLater: 171, NextDue: at}}},
+			Progress: &ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 171, DueLater: 171,
+				NextDue: at}}, ProgressWindow, true)}},
+		Status{Layout: layout, Poll: PollLive, Counts: &CountsPanel{Documents: 2},
+			Queue: &QueuePanel{Open: true, Throttle: "normal", Kinds: kinds},
+			Progress: &ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 40, DueLater: 30,
+				NextDue: at, Running: 2, Finished: 9}}, ProgressWindow, true)}},
 		Status{Layout: layout, Poll: PollHealth, Health: &HealthPanel{OllamaDetail: evilScript}},
 	}
 }
@@ -291,7 +303,7 @@ func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 	queued := []JobLine{{Kind: "fetch"}}
 	// Named by its bookmark's title, as an untitled page is.
 	failed := doc("failed", nil, DocumentJobs{Baseline: then, Current: then, Jobs: []JobLine{{Kind: "fetch",
-		Attempts: 2, RunAfter: at}}})
+		Waiting: true, Attempts: 2, RunAfter: at, LastError: evilScript}}})
 	failed.Meta.BookmarkTitle = evilScript
 	return []any{
 		doc("pending", nil, DocumentJobs{Baseline: then, Current: then, Jobs: queued, Hold: "paused"}),
@@ -441,10 +453,16 @@ func partialSamples(t testing.TB) map[string][]any {
 		"queue-card": {&QueuePanel{Paused: true, Reason: evilScript, OpensAt: at, Throttle: evilAttr, Schedule: evilScript,
 			Kinds: []KindLoad{{Kind: evilScript}}, FinishedIn: ProgressWindow, KeepAwake: true, PowerSource: evilQuotes},
 			&QueuePanel{Err: &PanelError{Message: evilScript, RequestID: evilAttr}}},
-		"queue-why": {&QueuePanel{Open: true}, &QueuePanel{Reason: evilScript, OpensAt: at}},
-		"progress": {&ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 1}}, ProgressWindow,
-			false), Reason: evilScript}},
-		"doc-jobs": {DocumentJobs{DocumentID: evilAttr, State: evilScript, Jobs: []JobLine{{Kind: evilScript}},
+		"queue-why": {&QueuePanel{Open: true}, &QueuePanel{Reason: evilScript, OpensAt: at},
+			&QueuePanel{Open: true, Kinds: []KindLoad{{Kind: evilScript, Pending: 2, DueLater: 2, NextDue: at}}}},
+		"due-later": {Progress{DueLater: 3, NextDue: at}, Progress{}},
+		"progress": {
+			&ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 2, DueLater: 2, NextDue: at}},
+				ProgressWindow, true)},
+			&ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 1}}, ProgressWindow, false),
+				Reason: evilScript}},
+		"doc-jobs": {DocumentJobs{DocumentID: evilAttr, State: evilScript, Jobs: []JobLine{{Kind: evilScript},
+			{Kind: evilAttr, Waiting: true, RunAfter: at, LastError: evilAttr + evilScript}},
 			Hold: evilScript, Current: DocumentBaseline{Extraction: evilScript}},
 			DocumentJobs{Err: &PanelError{Message: evilScript, RequestID: evilAttr}}},
 		"rebuild-state": {Rebuild{Queued: true, Hold: evilScript, NewRun: "done"},
