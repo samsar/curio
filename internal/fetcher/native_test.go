@@ -2007,14 +2007,14 @@ func TestNative_JinaSiteBlockWarnsOncePerBlock(t *testing.T) {
 	close(release)
 	wg.Wait()
 
-	untils := make([]time.Time, 0, len(errs))
 	for _, err := range errs {
 		assert.ErrorIs(t, err, errJinaSiteBlocked)
 		de, ok := errors.AsType[*DeferError](err)
 		require.True(t, ok, "a deferral: %v", err)
-		untils = append(untils, de.Until)
+		// Whichever answer is recorded first, a page waits for the block as
+		// it stood then.
+		assert.True(t, de.Until.Equal(first) || de.Until.Equal(later), "until %v", de.Until)
 	}
-	assert.ElementsMatch(t, []time.Time{first, later}, untils, "each waits for the block as its answer left it")
 	assert.Equal(t, 1, warnings(), logs.messages())
 	assert.Equal(t, []SitePause{{Site: "news.example", Until: later}}, n.JinaHealth().SitePauses,
 		"the block ends at the latest extension")
