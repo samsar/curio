@@ -340,9 +340,23 @@ type Drift struct {
 	report drift.Report
 }
 
-// NewDrift returns a Drift reporting changes, found at checkedAt.
+// DriftSample is the comparison a NewDrift's sample found: every chunk
+// changed.
+var DriftSample = drift.Comparison{Sampled: 64, Changed: 64, MinCosine: 0.9713}
+
+// NewDrift returns a Drift reporting changes, found at checkedAt and
+// verified by a sample (DriftSample) compared then.
 func NewDrift(checkedAt time.Time, changes ...drift.Change) *Drift {
-	return &Drift{report: drift.Report{Changes: changes, CheckedAt: checkedAt}}
+	return &Drift{report: drift.Report{Changes: changes, CheckedAt: checkedAt,
+		Evidence: drift.Evidence{Verified: true, Comparison: DriftSample, At: checkedAt}}}
+}
+
+// Unverified makes d's drift one no sample could verify, for reason.
+func (d *Drift) Unverified(reason string) *Drift {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.report.Evidence = drift.Evidence{Reason: reason, At: d.report.CheckedAt}
+	return d
 }
 
 // Report is the drift, until a rebaseline.

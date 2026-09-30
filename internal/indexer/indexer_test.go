@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,67 @@ func TestIndexer_DefaultConfigSendsChunksAsTheyAre(t *testing.T) {
 	}
 	require.Len(t, want, 2)
 	assert.Equal(t, want, emb.seen)
+}
+
+// batchRecorder records every batch it is asked to embed.
+type batchRecorder struct {
+	dim     int
+	batches [][]string
+}
+
+func (r *batchRecorder) Dimensions() int { return r.dim }
+func (*batchRecorder) Model() string     { return "fake" }
+func (r *batchRecorder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	r.batches = append(r.batches, slices.Clone(texts))
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = make([]float32, r.dim)
+	}
+	return out, nil
+}
+
+// TestIndexer_EmbedChunksSendsWhatIndexSent: re-embedding a document's
+// stored chunk texts, in order, sends the embedder the batches indexing
+// sent: the same texts, prefixed the same way, split at the same places.
+// The drift check relies on it to compare like with like.
+func TestIndexer_EmbedChunksSendsWhatIndexSent(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	chunks := sqlitestore.NewChunks(db, dim)
+	docID, extID := seedDocAndExtraction(t, db, "local", "https://example.com/long")
+	opts := Options{ChunkSize: 1, DocumentPrefix: "search_document: ", EmbedBatchSize: 3}
+	indexed := &batchRecorder{dim: dim}
+
+	require.NoError(t, New(chunks, indexed, opts).Index(context.Background(), IndexInput{
+		DocumentID: docID, ExtractionID: extID, Markdown: numberedMarkdown(8),
+	}))
+	require.Len(t, indexed.batches, 3, "several batches")
+
+	reembedded := &batchRecorder{dim: dim}
+	_, err := New(chunks, reembedded, opts).EmbedChunks(context.Background(), storedTexts(t, chunks, docID))
+	require.NoError(t, err)
+	assert.Equal(t, indexed.batches, reembedded.batches)
+	assert.True(t, strings.HasPrefix(reembedded.batches[0][0], "search_document: w000"))
+}
+
+// storedTexts is the document's stored chunk texts in chunk order.
+func storedTexts(t *testing.T, chunks store.ChunkStore, docID string) []string {
+	t.Helper()
+	ctx := context.Background()
+	embs, err := chunks.EmbeddingsForDocument(ctx, docID)
+	require.NoError(t, err)
+	ids := make([]string, len(embs))
+	for i, e := range embs {
+		ids[i] = e.ChunkID
+	}
+	stored, err := chunks.GetByIDs(ctx, ids)
+	require.NoError(t, err)
+	slices.SortFunc(stored, func(a, b *store.Chunk) int { return a.Ord - b.Ord })
+	texts := make([]string, len(stored))
+	for i, c := range stored {
+		texts[i] = c.Text
+	}
+	return texts
 }
 
 // fakeEmbedder returns a fixed-size vector for every text. The value is

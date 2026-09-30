@@ -334,10 +334,11 @@ func (w *world) checkAgent(ctx context.Context) Result {
 	return Result{Status: OK, Detail: fmt.Sprintf("agent %s loaded, runs %s", st.Label, st.Program)}
 }
 
-// checkDrift is the embeddings check: whether the daemon reports the
-// build that makes the embeddings changed since the library was indexed.
-// It is a warning, fixed by `curio reindex --all`, which curio up never
-// runs by itself.
+// checkDrift is the embeddings check: whether the daemon reports a drift
+// since the library was indexed, a change of build whose re-embedded
+// sample doesn't match the stored vectors or couldn't be checked, with the
+// daemon's evidence. It is a warning, fixed by `curio reindex --all`,
+// which curio up never runs by itself.
 func (w *world) checkDrift(ctx context.Context) Result {
 	hs := w.readHome()
 	if !w.homeReady(hs) {
@@ -358,8 +359,41 @@ func (w *world) checkDrift(ctx context.Context) Result {
 	case h.EmbeddingDrift == nil:
 		return Result{Status: OK, Detail: "no drift reported since the library was indexed"}
 	}
-	return Result{Status: Warn, Detail: "drifted: " + DriftChanges(h.EmbeddingDrift),
-		Hint: "searches compare vectors from two builds; run `" + h.EmbeddingDrift.Fix + "` to re-embed the library"}
+	d := h.EmbeddingDrift
+	return Result{Status: Warn, Detail: driftDetail(d),
+		Hint: "searches compare vectors from two builds; run `" + d.Fix + "` to re-embed the library"}
+}
+
+// driftDetail is doctor's detail for a drift: how sure it is, what
+// changed and the daemon's evidence. A daemon that predates verifying a
+// change sends no evidence.
+func driftDetail(d *client.EmbeddingDrift) string {
+	v := d.Verification
+	if v == nil {
+		return "drifted: " + DriftChanges(d)
+	}
+	return driftVerb(v) + ": " + DriftChanges(d) + "; " + v.Detail
+}
+
+// DriftWarning is the warning line curio status and curio up print for a
+// drift: what changed and the daemon's evidence, then the fix. A daemon
+// that predates verifying a change sends no evidence.
+func DriftWarning(d *client.EmbeddingDrift) string {
+	v := d.Verification
+	if v == nil {
+		return fmt.Sprintf("warning: embeddings drifted since the library was indexed (%s); run `%s`",
+			DriftChanges(d), d.Fix)
+	}
+	return fmt.Sprintf("warning: embeddings %s since the library was indexed (%s; %s); run `%s`",
+		driftVerb(v), DriftChanges(d), v.Detail, d.Fix)
+}
+
+// driftVerb says how sure a drift is: a sample showed it, or none could.
+func driftVerb(v *client.DriftVerification) string {
+	if v.Verified {
+		return "drifted"
+	}
+	return "may have drifted"
 }
 
 // DriftChanges lists what changed in a drift, recorded value first: "model

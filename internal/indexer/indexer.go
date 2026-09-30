@@ -85,15 +85,11 @@ func (i *Indexer) Index(ctx context.Context, in IndexInput) error {
 		return i.chunks.ReplaceForDocument(ctx, in.DocumentID, in.ExtractionID, in.Title, in.Tags, nil)
 	}
 
-	// Prefix the text sent to the embedder (models with a document
-	// instruction need it), but keep the STORED chunk text raw so BM25 /
-	// snippets aren't polluted by the prefix.
 	texts := make([]string, len(chunks))
 	for j, c := range chunks {
-		texts[j] = i.docPrefix + c.Text
+		texts[j] = c.Text
 	}
-
-	vectors, err := i.embed(ctx, texts)
+	vectors, err := i.EmbedChunks(ctx, texts)
 	if err != nil {
 		return err
 	}
@@ -107,6 +103,21 @@ func (i *Indexer) Index(ctx context.Context, in IndexInput) error {
 		}
 	}
 	return i.chunks.ReplaceForDocument(ctx, in.DocumentID, in.ExtractionID, in.Title, in.Tags, inputs)
+}
+
+// EmbedChunks embeds chunk texts as indexing does, and is the path every
+// index embed request takes: each text prefixed with the document prefix
+// (models with a document instruction need it; the stored text stays raw,
+// so BM25 and snippets never see it), in consecutive batches of at most
+// the batch size, in order. The drift check re-embeds stored chunks
+// through it, so what it compares was sent exactly as the stored vectors
+// were.
+func (i *Indexer) EmbedChunks(ctx context.Context, texts []string) ([][]float32, error) {
+	prefixed := make([]string, len(texts))
+	for j, t := range texts {
+		prefixed[j] = i.docPrefix + t
+	}
+	return i.embed(ctx, prefixed)
 }
 
 // embed embeds texts in consecutive batches of at most batchSize, preserving

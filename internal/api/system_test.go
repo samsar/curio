@@ -162,23 +162,38 @@ func (m *driftMonitor) Rebaseline() error {
 	return m.err
 }
 
+func (m *driftMonitor) set(report drift.Report) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.report = report
+}
+
 func (m *driftMonitor) rebaselined() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.rebaselines
 }
 
-// drifted is a report whose check found both parts of the build changed.
+// drifted is a report whose check found both parts of the build changed,
+// and a sample re-embedded by the build serving at checkedAt changed.
 func drifted(checkedAt time.Time) drift.Report {
 	return drift.Report{CheckedAt: checkedAt, Changes: []drift.Change{
 		{What: drift.ModelDigest, Recorded: "sha256:0a109f42", Current: "sha256:ac6da0df"},
 		{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"},
-	}}
+	}, Evidence: drift.Evidence{Verified: true, At: checkedAt,
+		Comparison: drift.Comparison{Sampled: 64, Changed: 60, Identical: 4, MinCosine: 0.97134}}}
+}
+
+// driftedUnverified is drifted with a sample that couldn't be re-embedded.
+func driftedUnverified(checkedAt time.Time) drift.Report {
+	r := drifted(checkedAt)
+	r.Evidence = drift.Evidence{Reason: "after 3 attempts: ollama unreachable", At: checkedAt.Add(-time.Minute)}
+	return r
 }
 
 // TestHealth_EmbeddingDrift: healthz carries embedding_drift only while the
-// monitor's last check found the build changed, with each change and the
-// fix, and status stays ok.
+// monitor reports a drift, with each change, the evidence as the monitor
+// words it and the fix, and status stays ok.
 func TestHealth_EmbeddingDrift(t *testing.T) {
 	healthz := func(t *testing.T, monitor DriftMonitor) map[string]any {
 		t.Helper()
@@ -201,13 +216,38 @@ func TestHealth_EmbeddingDrift(t *testing.T) {
 		})
 	}
 
+	checked := time.Date(2026, 9, 27, 10, 40, 1, 0, time.FixedZone("EDT", -4*60*60))
+	changes := []any{
+		map[string]any{"what": "model_digest", "recorded": "sha256:0a109f42", "current": "sha256:ac6da0df"},
+		map[string]any{"what": "ollama_version", "recorded": "0.30.0", "current": "0.34.4"},
+	}
 	t.Run("drifted", func(t *testing.T) {
-		checked := time.Date(2026, 9, 27, 10, 40, 1, 0, time.FixedZone("EDT", -4*60*60))
 		got := healthz(t, &driftMonitor{report: drifted(checked)})["embedding_drift"]
 		assert.Equal(t, map[string]any{
-			"changes": []any{
-				map[string]any{"what": "model_digest", "recorded": "sha256:0a109f42", "current": "sha256:ac6da0df"},
-				map[string]any{"what": "ollama_version", "recorded": "0.30.0", "current": "0.34.4"},
+			"changes": changes,
+			"verification": map[string]any{
+				"verified":   true,
+				"sampled":    float64(64),
+				"changed":    float64(60),
+				"min_cosine": 0.97134,
+				"detail":     "60 of 64 sampled chunks changed (worst cosine 0.9713)",
+				"sampled_at": "2026-09-27T14:40:01Z",
+			},
+			"fix":        "curio reindex --all",
+			"checked_at": "2026-09-27T14:40:01Z",
+		}, got)
+	})
+
+	t.Run("may have drifted", func(t *testing.T) {
+		got := healthz(t, &driftMonitor{report: driftedUnverified(checked)})["embedding_drift"]
+		assert.Equal(t, map[string]any{
+			"changes": changes,
+			"verification": map[string]any{
+				"verified":   false,
+				"sampled":    float64(0),
+				"changed":    float64(0),
+				"detail":     "not verified: after 3 attempts: ollama unreachable",
+				"sampled_at": "2026-09-27T14:39:01Z",
 			},
 			"fix":        "curio reindex --all",
 			"checked_at": "2026-09-27T14:40:01Z",

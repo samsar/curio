@@ -718,6 +718,23 @@ type DocVector struct {
 	Vector     []float32
 }
 
+// ChunkSample is how many documents ChunkStore.SampleChunks represents by
+// their longest chunk, and how many by a random one.
+type ChunkSample struct {
+	Longest int
+	Random  int
+}
+
+// SampledChunk is a chunk ChunkStore.SampleChunks chose: its text exactly
+// as stored (without the document prefix the embedder was sent) and the
+// vector stored for it.
+type SampledChunk struct {
+	ChunkID    string
+	DocumentID string
+	Text       string
+	Embedding  []float32
+}
+
 // ChunkStore writes and queries the chunks tables + FTS5 + vec virtual tables.
 type ChunkStore interface {
 	// ReplaceForDocument atomically deletes all existing chunks for the
@@ -761,6 +778,18 @@ type ChunkStore interface {
 	// Documents with no chunks are omitted. Each vector has length == the
 	// configured embedding dim. This is the corpus-wide input to clustering.
 	DocumentVectors(ctx context.Context, tenantID string) ([]DocVector, error)
+
+	// SampleChunks returns a sample of the tenant's fetched documents'
+	// chunks, each with its text as stored and its stored vector, at most
+	// one chunk per document, in no particular order. n.Longest documents
+	// are represented by their longest chunk in bytes: those whose longest
+	// chunks are the longest, ties going to the chunk written first (the
+	// lower seq), within a document and between documents. n.Random more
+	// documents are then chosen uniformly among the rest, and one chunk
+	// uniformly from each. A library with fewer documents gives fewer
+	// chunks; one with none, an empty sample. It reads every chunk's
+	// length, one pass over the chunks table.
+	SampleChunks(ctx context.Context, tenantID string, n ChunkSample) ([]SampledChunk, error)
 
 	// GetByIDs returns the chunks with the given IDs, in no particular
 	// order. IDs that match no chunk (a reindex replaced it since it was

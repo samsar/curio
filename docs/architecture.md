@@ -436,9 +436,13 @@ External processes the daemon expects:
   for LLM cluster labels in the insight layer. Embed requests never let
   Ollama truncate an input, and generate requests turn thinking off. The
   daemon records the embedding model's digest and Ollama's version in the
-  marker, checks them every minute, and reports a change as
-  `embedding_drift` on `/v1/healthz`, in `curio doctor` and in `curio
-  status`, until `curio reindex --all` re-embeds the library.
+  marker and checks them every minute. A change is verified by
+  re-embedding a sample of up to 64 stored chunks through the indexer:
+  one whose sample matches the stored vectors becomes the new baseline,
+  and one whose sample doesn't, or can't be re-embedded, is reported with
+  that evidence as `embedding_drift` on `/v1/healthz`, in `curio doctor`,
+  in `curio status` and on the dashboard's Status page, until `curio
+  reindex --all` re-embeds the library.
 - **Node + web2md** (the user's existing tool) — invoked as a subprocess by the
   optional `web2md` fetcher. Not needed: the default fetcher is Go-native.
 - **Jina Reader** (`r.jina.ai`, `fetcher.native.jina_base_url`) — the native

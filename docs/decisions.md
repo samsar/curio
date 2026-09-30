@@ -130,7 +130,7 @@ when the entry was first committed.
 - 2026-09-27 — [Jina refusing a target is a verdict](#jina-refusing-a-target-is-a-verdict) (revised)
 - 2026-09-27 — [Queue gate: pause, throttle and schedule, persisted in SQLite](#queue-gate-pause-throttle-and-schedule-persisted-in-sqlite)
 - 2026-09-27 — [Embedding model and per-home width](#embedding-model-and-per-home-width)
-- 2026-09-27 — [Embedding drift: the marker records the build, healthz reports a change](#embedding-drift-the-marker-records-the-build-healthz-reports-a-change)
+- 2026-09-27 — [Embedding drift: the marker records the build, healthz reports a change](#embedding-drift-the-marker-records-the-build-healthz-reports-a-change) (revised)
 - 2026-09-27 — [Embeddings never truncate; an over-long chunk fails at once](#embeddings-never-truncate-an-over-long-chunk-fails-at-once)
 - 2026-09-27 — [sqlite-vec: NEON distance kernels on arm64](#sqlite-vec-neon-distance-kernels-on-arm64)
 - 2026-09-27 — [Daemon lifecycle: a per-user launchd agent](#daemon-lifecycle-a-per-user-launchd-agent) (revised)
@@ -151,6 +151,7 @@ when the entry was first committed.
 - 2026-09-29 — [Search pages by offset within a fixed-depth pool](#search-pages-by-offset-within-a-fixed-depth-pool)
 - 2026-09-30 — [Waiting is not failing: jobs curio didn't send are deferred](#waiting-is-not-failing-jobs-curio-didnt-send-are-deferred) (revised)
 - 2026-09-30 — [A site's block is not its pages' verdict](#a-sites-block-is-not-its-pages-verdict)
+- 2026-09-30 — [Embedding drift: verified by re-embedding a sample](#embedding-drift-verified-by-re-embedding-a-sample)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -5965,6 +5966,15 @@ until the jobs finish.
 **Why never reindex automatically:** re-embedding a large library takes
 hours of the user's machine and Ollama; the user decides when.
 
+**Revised (2026-09-30):** a changed fingerprint is no longer reported as it
+is. The monitor first re-embeds a sample of the library under the build
+serving now: a sample that matches the stored vectors records the new
+build with no report, and only one that doesn't, or that can't be checked,
+reaches `embedding_drift`, which now carries that evidence
+(`verification`). Upgrading Ollama from 0.34.4 to 0.35.0 was reported
+while every sampled chunk came back bit for bit. See "Embedding drift:
+verified by re-embedding a sample".
+
 ---
 
 ## Embeddings never truncate; an over-long chunk fails at once
@@ -9206,6 +9216,176 @@ failed for reasons of their own too; those fail again, the same way.
   it waits for.
 - **Caching Jina's verdicts per site.** A site Jina never passes costs a
   request per page, as above.
+
+---
+
+## Embedding drift: verified by re-embedding a sample
+
+**Decision:** a changed embedding fingerprint (model digest or Ollama
+version) is reported as a drift only once a sample of the library,
+re-embedded by the build serving now, shows the vectors changed, or can't
+be re-embedded at all:
+
+- **The sample** (`drift.Sampler`, over `ChunkStore.SampleChunks`): one
+  chunk from each of up to 64 fetched documents. 16 are the documents
+  whose longest chunk, in bytes, is longest, represented by that chunk,
+  ties going to the lower `seq`; 48 are documents chosen at random among
+  the rest, one random chunk each. A smaller library gives a smaller
+  sample, an empty one none.
+- **The requests are indexing's own.** `Indexer.EmbedChunks` is the path
+  every index embed takes (the configured document prefix, batches of 32,
+  in order), and the sampler re-embeds the stored texts through it, with
+  the daemon's embedder: model, `truncate`, `keep_alive` and `num_ctx` are
+  the index path's by construction.
+- **A chunk matches** when its vector comes back bit for bit, or when its
+  cosine with the stored vector is at least 0.9999 and its length is
+  within sqrt(2(1 - 0.9999)) = 1.4% of the stored one's. A zero vector, a
+  NaN or Inf component and another width never match, and the worst
+  cosine is never NaN (it reaches healthz's JSON).
+- **Verdicts.** Every chunk matches: the new build is recorded in the
+  marker, with one INFO naming the change and the evidence, and nothing is
+  reported. Some don't: the change is reported, with `sampled`, `changed`
+  and `min_cosine`, until the build changes again or `curio reindex --all`
+  rebaselines. The build can't embed the sample (a reply of another width,
+  an input too long, a 4xx other than 404, 408 and 429: failures the same
+  build repeats): the change is reported at once as unverified, with the
+  error as its reason. Each distinct drift, verified or not, is one WARN.
+- **Other failures** (Ollama down, the model not pulled, 5xx, timeouts, a
+  store error) are retried at the first check 15 minutes later, then 30
+  minutes, 1, 2 and 4 hours, and every 4 hours after. From the third
+  failure in a row, about 45 minutes after the first, the change is
+  reported unverified, naming the attempts and the last error; retries go
+  on, and a verdict replaces that report.
+- **While a verdict is pending,** the last report stands.
+- **At most 4 verifications start in an hour,** whatever change each
+  verifies. A build that keeps changing (a `base_url` balancing Ollamas of
+  two versions, say) outdates every verification, which asks for the next
+  at once, or flips back to the recorded build between checks, which
+  starts a new change's verification at the next one: without the cap it
+  re-embeds the sample back to back for as long as it flips. The first
+  check the cap holds back is one WARN. A single change, even retried
+  after failures (starts 15 and 45 minutes after the first), never meets
+  it. Such a build's report never settles, since each flip outdates or
+  resets its verification; that is outside what a local Ollama does, and
+  the WARN names it.
+- **The evidence has one wording,** `drift.Evidence.Detail` (`64 of 64
+  sampled chunks changed (worst cosine 0.9713)`, or `not verified: ` and
+  why, the cosine rounded down at four decimals so one under 0.9999
+  never prints as 0.9999). The daemon logs it and sends it as healthz's
+  `verification.detail`; `curio doctor`, `curio status`, `curio up` and
+  the Status page print it as sent, saying "drifted" or "may have
+  drifted".
+
+**Why:** after the owner upgraded Ollama from 0.34.4 to 0.35.0 (model
+digest `ac6da0df…` unchanged), healthz, doctor, status, the dashboard and
+the log all reported a drift and asked for a reindex, hours of the
+machine. Re-embedding 320 stored chunks under 0.35.0 gave 320 vectors bit
+for bit the same as those stored under 0.34.4, and embedding the same
+chunks twice showed no noise at all. A fingerprint says what might have
+changed the vectors; only re-embedding says whether it did. The drift the
+check exists for still shows: Ollama 0.30.0 lowercasing nomic-embed-text's
+input moves the vector of every chunk with a capital letter.
+
+**Why batching doesn't matter, and the request still is indexing's:** on
+the owner's Ollama, stored chunks re-embedded four ways all came back bit
+for bit: in the indexer's own batches, in one batch of 32 chunks from 32
+documents, in that batch reversed, and one per request. So the sample may
+mix documents in a batch. The request is still indexing's by
+construction: one path can't diverge from itself, so the parity test only
+has to prove `Index` uses it. The sample uses the configured document
+prefix, so a prefix changed in config.yaml without a reindex also shows as
+a difference, when a change of build next triggers a check.
+
+**Why 64, and why these:**
+
+- **48 random chunks, one per document:** a change that touches 1 chunk in
+  10 slips past all 48 with probability 0.9^48 = 0.6%, 1 in 20 with 8.5%.
+  A change that touches every input, like the lowercasing, shows in any
+  one. One per document spreads the sample over the library rather than
+  over its longest documents.
+- **16 longest:** the long-sequence path (attention over 3,500 bytes,
+  batching of long inputs) is where a change to the runtime shows first.
+  Lengths saturate at the chunker's cap: on the owner's library 376 of
+  41,489 chunks are exactly 3,500 bytes, in 248 documents, and taken
+  plainly the 16 longest come from 13 of them. So each document is
+  represented once, by its longest chunk, and ties go to the lower `seq`:
+  `seq` has no AUTOINCREMENT, a reindex writes a document's chunks at the
+  top, and the lower one is the chunk written first, the least likely to
+  have been re-embedded since the change.
+- **The cost:** 77-89 ms per 2,400-character chunk and 130 ms per
+  3,500-character chunk on the owner's M4 Max (the review measured 52-65 ms
+  for ~2 KB and 157 ms for 3,500 bytes), about 6 s for the sample; an 8 GB
+  M1 takes 4-5 times as long. Once per change of build.
+
+**Why 0.9999, and the length guard:** between unit vectors the L2
+distance search ranks by is sqrt(2(1 - cos)), so a chunk at cosine 0.9999
+has moved at most 0.014 of it from its stored self. The same build
+re-embeds bit for bit, so the bound only has to absorb noise a build that
+changes nothing might add. A cosine can't see a change of
+length, and L2 orders like cosine only between unit vectors (the owner's
+stored vectors measure 1 ± 5e-7), so a length that strays by more than the
+same 1.4% is a change too. With unit vectors, as Ollama returns them
+today, the guard never changes a verdict.
+
+**Why the sample's bound is its batches times `embedding.timeout_seconds`**
+(2 × 60 s by default, covering the store read too): each request is
+already bounded by that timeout, which includes waiting in Ollama behind
+the index workers' batches. A shorter bound would fail samples a slow
+machine's config allows (CPU-only Ollama with a raised timeout); a longer
+one bounds nothing more. Doubling the retry up to 4 hours keeps a machine
+that can't finish the sample from spending that bound every 15 minutes.
+
+**Why the last report stands while a verdict is pending:** the verdict
+normally lands within seconds. Reporting the pending change would flash
+the very false alarm this entry removes, on healthz, doctor, status and
+the dashboard, and transient failures are capped at three attempts, so a
+flaky Ollama hides a drift for an hour at most.
+
+**Why a verification running across a rebaseline, a record or another
+change is discarded:** it compared vectors against a baseline that no
+longer holds, or verified a build no longer serving. After the sample the
+monitor reads the fingerprint again and applies the result only if it is
+still the one verified, the change is still the monitor's, and no
+rebaseline or record happened meanwhile (an epoch both bump). Otherwise it
+asks for a check at once, which records the build after a rebaseline, or
+verifies the newer build; the build in between is never recorded. At most
+one verification runs, and the monitor's mutex is never held across it:
+`Report`, which healthz and the dashboard's 2-second poll call, answers
+while it runs.
+
+**Why verdicts live in memory:** a restart verifies again, once, about 6
+s; persisting verdicts would add marker fields for a once-per-upgrade
+cost.
+
+**Why not a job, and not gated by the queue:** the verification runs on
+the monitor's goroutine, on the daemon's context, and ignores pause,
+schedule and throttle. It is one bounded burst per change of build, and
+holding it for a schedule would leave a drift unreported for up to a day.
+Shutdown cuts it short without counting an attempt.
+
+**The store read** is one autocommit statement (in WAL a read never waits
+on writers): each fetched document's chunks ranked by length in one
+window, then the random documents shuffled before a chunk is picked from
+each, then each sampled chunk's vector by a point lookup on `chunks_vec`'s
+`chunk_id` (the table has no rowid tied to `seq`, and `chunk_id IN
+(subquery)` scans every vector). Its plan is pinned. Measured: 0.26-0.28 s
+warm on the owner's 41,489 chunks (0.9 s cold), 3.1-3.9 s warm on a
+synthetic 497,868 (8-10 s cold). The cost is one pass over the chunks
+table, 143 MiB on the owner's library; an index on the length would add a
+migration and a write to every chunk insert, for a read that runs once per
+change of build.
+
+**What it can miss:** a "same" verdict needs every sampled chunk to
+match, and a change that moves every vector shows in any chunk still
+holding an old vector. So it is missed only if every sampled chunk was
+re-embedded after the change. With a fraction f of documents re-indexed
+since, that is about f^48 for the random set (f = 0.5: 4e-15), and the
+longest set prefers the chunks written first. As f approaches 1 the stored
+vectors are the new build's, and recording it is right. For a change that
+touches a fraction p of chunks, re-indexed documents dilute detection to a
+miss probability of (1 - p(1 - f))^48. The check runs within a minute of
+an upgrade while the daemon runs, or at its start (no index job runs while
+it is down), so f is small.
 
 ---
 

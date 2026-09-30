@@ -300,6 +300,25 @@ func TestQueryPlans(t *testing.T) {
 			sorts: true,
 		},
 		{
+			// The fetched documents' chunks once, to rank their lengths;
+			// a chunk picked for each row of picked, never for each
+			// candidate document; then each sampled chunk by its seq. Its
+			// vector is a point lookup
+			// (TestQueryPlans_SampleChunksReadsVectorsByID).
+			name:  "SampleChunks",
+			query: sampleChunksSQL, args: []any{"local", store.DocStateFetched, 16, 48},
+			want: []string{
+				"SEARCH d USING COVERING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)",
+				"SEARCH c USING INDEX idx_chunks_document (document_id=?)",
+				"SEARCH c EXISTS USING COVERING INDEX idx_chunks_document (document_id=?)",
+				"SCAN p\nSEARCH c USING INTEGER PRIMARY KEY (rowid=?)\nCORRELATED SCALAR SUBQUERY",
+				"SEARCH c USING INTEGER PRIMARY KEY (rowid=?)",
+			},
+			// The length ranking, the shuffles and each document's chunk
+			// pick.
+			sorts: true,
+		},
+		{
 			name:  "RequeueFetchByStates",
 			query: resetStatesSQL(2, false),
 			args:  []any{store.DocStatePending, "local", store.DocStateFailed, store.DocStateFetched},
@@ -486,4 +505,24 @@ func TestQueryPlans_ChunkVectorDeleteIsPointLookup(t *testing.T) {
 
 	plan := queryPlan(t, db, `DELETE FROM chunks_vec WHERE chunk_id = ?`, "chunk")
 	assert.Regexp(t, regexp.MustCompile(`SCAN chunks_vec VIRTUAL TABLE INDEX \d+:2`), plan)
+}
+
+// TestQueryPlans_SampleChunksReadsVectorsByID: every vector the sample
+// reads is a vec0 point lookup, never a scan of every vector.
+func TestQueryPlans_SampleChunksReadsVectorsByID(t *testing.T) {
+	db := newTestDB(t)
+	plan := queryPlan(t, db, sampleChunksSQL, "local", store.DocStateFetched, 16, 48)
+
+	var vec0 []string
+	for line := range strings.Lines(plan) {
+		if strings.Contains(line, "VIRTUAL TABLE") {
+			vec0 = append(vec0, strings.TrimSpace(line))
+		}
+	}
+	require.NotEmpty(t, vec0, "the vectors are read from chunks_vec:\n%s", plan)
+	pointLookup := regexp.MustCompile(`^SCAN v VIRTUAL TABLE INDEX \d+:2`)
+	for _, line := range vec0 {
+		assert.Regexp(t, pointLookup, line)
+	}
+	assert.NotRegexp(t, regexp.MustCompile(`VIRTUAL TABLE INDEX \d+:1`), plan)
 }

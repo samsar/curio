@@ -62,20 +62,54 @@ func TestHealthz_YouTubeFetcher(t *testing.T) {
 }
 
 // TestHealthz_EmbeddingDrift: a drift the daemon reports reaches Health
-// whole.
+// whole, with its evidence, verified or not.
 func TestHealthz_EmbeddingDrift(t *testing.T) {
 	checked := time.Date(2026, 9, 27, 14, 40, 1, 0, time.UTC)
-	s := apitest.Start(t, func(d *api.Deps) {
-		d.Drift = apitest.NewDrift(checked, drift.Change{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"})
-	})
+	change := drift.Change{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"}
+	healthz := func(t *testing.T, monitor *apitest.Drift) *client.EmbeddingDrift {
+		t.Helper()
+		s := apitest.Start(t, func(d *api.Deps) { d.Drift = monitor })
+		h, err := client.New(s.URL).Healthz(context.Background())
+		require.NoError(t, err)
+		return h.EmbeddingDrift
+	}
+	want := func(v client.DriftVerification) *client.EmbeddingDrift {
+		return &client.EmbeddingDrift{
+			Changes:      []client.DriftChange{{What: client.DriftOllamaVersion, Recorded: "0.30.0", Current: "0.34.4"}},
+			Verification: &v,
+			Fix:          "curio reindex --all",
+			CheckedAt:    checked,
+		}
+	}
 
-	h, err := client.New(s.URL).Healthz(context.Background())
+	t.Run("verified", func(t *testing.T) {
+		assert.Equal(t, want(client.DriftVerification{Verified: true, Sampled: 64, Changed: 64,
+			MinCosine: new(0.9713), Detail: "64 of 64 sampled chunks changed (worst cosine 0.9713)", SampledAt: checked,
+		}), healthz(t, apitest.NewDrift(checked, change)))
+	})
+	t.Run("unverified", func(t *testing.T) {
+		assert.Equal(t, want(client.DriftVerification{Detail: "not verified: after 3 attempts: ollama unreachable",
+			SampledAt: checked,
+		}), healthz(t, apitest.NewDrift(checked, change).Unverified("after 3 attempts: ollama unreachable")))
+	})
+}
+
+// TestHealthz_EmbeddingDriftFromAnOlderDaemon: a daemon that predates
+// verifying a change reports its drift without evidence.
+func TestHealthz_EmbeddingDriftFromAnOlderDaemon(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok","version":"v2.3.0","schema_version":15,"embedding_model":"qwen3-embedding:0.6b",`+
+			`"embedding_dim":1024,"ollama_reachable":true,"embedding_drift":{"changes":[{"what":"ollama_version",`+
+			`"recorded":"0.34.4","current":"0.35.0"}],"fix":"curio reindex --all","checked_at":"2026-09-27T14:40:01Z"}}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	h, err := client.New(srv.URL).Healthz(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, &client.EmbeddingDrift{
-		Changes:   []client.DriftChange{{What: client.DriftOllamaVersion, Recorded: "0.30.0", Current: "0.34.4"}},
-		Fix:       "curio reindex --all",
-		CheckedAt: checked,
-	}, h.EmbeddingDrift)
+	require.NotNil(t, h.EmbeddingDrift)
+	assert.Nil(t, h.EmbeddingDrift.Verification)
+	assert.Equal(t, "0.35.0", h.EmbeddingDrift.Changes[0].Current)
 }
 
 // TestHealthz_Starting: a starting daemon's healthz answer is an error

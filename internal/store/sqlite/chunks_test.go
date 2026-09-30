@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -715,4 +716,235 @@ func TestChunks_VectorSearch_SkippedChunksDontCostHits(t *testing.T) {
 			}
 		})
 	}
+}
+
+// sampleLibrary writes documents and their chunks for SampleChunks' tests.
+type sampleLibrary struct {
+	t      *testing.T
+	db     *DB
+	chunks *Chunks
+	docs   *Documents
+	n      int // documents written, for unique URLs and vectors
+}
+
+func newSampleLibrary(t *testing.T) *sampleLibrary {
+	db := newTestDB(t)
+	return &sampleLibrary{t: t, db: db, chunks: NewChunks(db, vecDim), docs: NewDocuments(db)}
+}
+
+// add writes a document of tenant in state whose chunks are texts, in
+// order, and returns its ID.
+func (l *sampleLibrary) add(tenant string, state store.DocState, texts ...string) string {
+	l.t.Helper()
+	ctx := context.Background()
+	l.n++
+	id := seedDocs(l.t, l.db, tenant, fmt.Sprintf("https://example.com/%d", l.n))[0]
+	inputs := make([]store.ChunkInput, len(texts))
+	for i, text := range texts {
+		inputs[i] = store.ChunkInput{Text: text, Embedding: sampleVector(l.n*100 + i)}
+	}
+	require.NoError(l.t, l.chunks.ReplaceForDocument(ctx, id, latestExtractionID(l.t, l.db, id), "", nil, inputs))
+	switch state {
+	case store.DocStateFetched:
+		require.NoError(l.t, l.docs.MarkFetched(ctx, id))
+	case store.DocStateFailed, store.DocStateDead:
+		require.NoError(l.t, l.docs.MarkFailed(ctx, id, stateCause(state)))
+	case store.DocStatePending:
+	}
+	return id
+}
+
+func (l *sampleLibrary) sample(n store.ChunkSample) []store.SampledChunk {
+	l.t.Helper()
+	got, err := l.chunks.SampleChunks(context.Background(), "local", n)
+	require.NoError(l.t, err)
+	return got
+}
+
+// sampleVector is a vector unique to seed whose components are hard to
+// round-trip: negative, tiny and irrational values.
+func sampleVector(seed int) []float32 {
+	v := make([]float32, vecDim)
+	for i := range v {
+		v[i] = float32(math.Sin(float64(seed*vecDim+i))) * float32(math.Pow(10, float64(i%7-3)))
+	}
+	return v
+}
+
+// textsOf maps each sampled chunk's document to its text.
+func textsOf(t *testing.T, sample []store.SampledChunk) map[string]string {
+	t.Helper()
+	out := make(map[string]string, len(sample))
+	for _, c := range sample {
+		_, dup := out[c.DocumentID]
+		require.False(t, dup, "document %s sampled twice", c.DocumentID)
+		out[c.DocumentID] = c.Text
+	}
+	return out
+}
+
+// TestSampleChunks_OnlyTheTenantsFetchedDocuments: chunks of pending,
+// failed and dead documents, and of another tenant's, are never sampled,
+// however many are asked for.
+func TestSampleChunks_OnlyTheTenantsFetchedDocuments(t *testing.T) {
+	l := newSampleLibrary(t)
+	fetched := l.add("local", store.DocStateFetched, "fetched one", "fetched two")
+	for _, state := range []store.DocState{store.DocStatePending, store.DocStateFailed, store.DocStateDead} {
+		l.add("local", state, "a much longer chunk of a document that isn't fetched")
+	}
+	l.add("other", store.DocStateFetched, "a much longer chunk of another tenant's document")
+
+	for _, n := range []store.ChunkSample{{Longest: 16, Random: 48}, {Longest: 0, Random: 48}, {Longest: 16}} {
+		got := textsOf(t, l.sample(n))
+		assert.Equal(t, []string{fetched}, slices.Collect(maps.Keys(got)), "%+v", n)
+	}
+}
+
+// TestSampleChunks_Longest: each document is represented by its longest
+// chunk in bytes, the documents with the longest representatives are
+// chosen, and ties go to the chunk written first, within a document and
+// between documents.
+func TestSampleChunks_Longest(t *testing.T) {
+	for name, tc := range map[string]struct {
+		docs    [][]string // each document's chunks, in the order written
+		longest int
+		want    []string // the texts sampled
+	}{
+		"each document's longest chunk": {
+			docs:    [][]string{{"short", "the longest one", "middling"}},
+			longest: 1,
+			want:    []string{"the longest one"},
+		},
+		"the documents with the longest chunks": {
+			docs:    [][]string{{"ten bytes!"}, {"thirty bytes, give or take it"}, {"twenty bytes, or so"}},
+			longest: 2,
+			want:    []string{"thirty bytes, give or take it", "twenty bytes, or so"},
+		},
+		"a tie within a document goes to the chunk written first": {
+			docs:    [][]string{{"x", "first", "later", "y"}},
+			longest: 1,
+			want:    []string{"first"},
+		},
+		"a tie between documents goes to the chunk written first": {
+			docs:    [][]string{{"x", "first"}, {"later"}, {"third"}},
+			longest: 2,
+			want:    []string{"first", "later"},
+		},
+		"bytes, not characters, within a document": {
+			docs:    [][]string{{"abcdefghi", "ééééé"}}, // 9 bytes, then 5 characters in 10 bytes
+			longest: 1,
+			want:    []string{"ééééé"},
+		},
+		"bytes, not characters, between documents": {
+			docs:    [][]string{{"abcdefghi"}, {"ééééé"}},
+			longest: 1,
+			want:    []string{"ééééé"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := newSampleLibrary(t)
+			for _, texts := range tc.docs {
+				l.add("local", store.DocStateFetched, texts...)
+			}
+			got := textsOf(t, l.sample(store.ChunkSample{Longest: tc.longest}))
+			assert.ElementsMatch(t, tc.want, slices.Collect(maps.Values(got)))
+		})
+	}
+}
+
+// TestSampleChunks_Random: the random chunks come from documents the
+// longest set doesn't hold, one each, and every chunk of those documents
+// can be chosen.
+func TestSampleChunks_Random(t *testing.T) {
+	l := newSampleLibrary(t)
+	longestDocs := map[string]string{
+		l.add("local", store.DocStateFetched, "short", strings.Repeat("l", 60)): strings.Repeat("l", 60),
+		l.add("local", store.DocStateFetched, strings.Repeat("m", 50), "tiny"):  strings.Repeat("m", 50),
+	}
+	others := map[string]bool{} // every chunk of the other documents
+	for i := range 6 {
+		texts := []string{fmt.Sprintf("doc %d, one", i), fmt.Sprintf("doc %d, two", i), fmt.Sprintf("doc %d, three", i)}
+		l.add("local", store.DocStateFetched, texts...)
+		for _, text := range texts {
+			others[text] = false
+		}
+	}
+
+	for range 200 {
+		got := textsOf(t, l.sample(store.ChunkSample{Longest: 2, Random: 3}))
+		require.Len(t, got, 5)
+		for doc, text := range longestDocs {
+			assert.Equal(t, text, got[doc], "the longest set")
+			delete(got, doc)
+		}
+		require.Len(t, got, 3, "the random chunks come from the other documents")
+		for _, text := range got {
+			_, ok := others[text]
+			require.True(t, ok, "%q is another document's chunk", text)
+			others[text] = true
+		}
+	}
+	for text, seen := range others {
+		assert.True(t, seen, "%q was never chosen", text)
+	}
+}
+
+// TestSampleChunks_FewerThanAsked: a library smaller than the sample gives
+// every fetched document with chunks once; one without chunks never.
+func TestSampleChunks_FewerThanAsked(t *testing.T) {
+	l := newSampleLibrary(t)
+	a := l.add("local", store.DocStateFetched, "a one", "a two")
+	b := l.add("local", store.DocStateFetched, "b one")
+	l.add("local", store.DocStateFetched) // no chunks
+
+	for range 20 {
+		got := textsOf(t, l.sample(store.ChunkSample{Longest: 1, Random: 48}))
+		assert.ElementsMatch(t, []string{a, b}, slices.Collect(maps.Keys(got)))
+	}
+}
+
+func TestSampleChunks_EmptyLibrary(t *testing.T) {
+	l := newSampleLibrary(t)
+	l.add("local", store.DocStateFetched) // no chunks
+
+	got := l.sample(store.ChunkSample{Longest: 16, Random: 48})
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
+}
+
+// TestSampleChunks_TextAndVectorAsStored: a sampled chunk carries its ID,
+// its document, its text exactly as stored and its vector bit for bit.
+func TestSampleChunks_TextAndVectorAsStored(t *testing.T) {
+	l := newSampleLibrary(t)
+	const text = "  Ada Lovelace — «the first algorithm»\n\nwith trailing space "
+	doc := l.add("local", store.DocStateFetched, text)
+	want := sampleVector(l.n * 100)
+
+	got := l.sample(store.ChunkSample{Longest: 1})
+	require.Len(t, got, 1)
+	assert.Equal(t, doc, got[0].DocumentID)
+	assert.Equal(t, text, got[0].Text)
+	stored, err := l.chunks.EmbeddingsForDocument(context.Background(), doc)
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.Equal(t, stored[0].ChunkID, got[0].ChunkID)
+	require.Len(t, got[0].Embedding, vecDim)
+	for i := range want {
+		require.Equal(t, math.Float32bits(want[i]), math.Float32bits(got[0].Embedding[i]), "component %d", i)
+	}
+}
+
+func TestSampleChunks_Refusals(t *testing.T) {
+	l := newSampleLibrary(t)
+	l.add("local", store.DocStateFetched, "text")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := l.chunks.SampleChunks(ctx, "local", store.ChunkSample{Longest: 1, Random: 1})
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, err = l.chunks.SampleChunks(context.Background(), "", store.ChunkSample{Longest: 1})
+	require.Error(t, err, "a tenant is required")
+	_, err = l.chunks.SampleChunks(context.Background(), "local", store.ChunkSample{Random: -1})
+	require.Error(t, err, "SQLite would read a negative LIMIT as none")
 }
