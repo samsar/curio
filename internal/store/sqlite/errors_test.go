@@ -82,7 +82,7 @@ func TestInsights_MalformedTimestamps(t *testing.T) {
 	require.NoError(t, ins.ReplaceClusters(ctx, run.ID, []store.ClusterWithMembers{{Cluster: store.Cluster{TenantID: "local"}}}))
 	_, err = db.Exec(`UPDATE clusters SET created_at = 'not a time' WHERE run_id = ?`, run.ID)
 	require.NoError(t, err)
-	_, err = ins.ListClusters(ctx, run.ID, 0)
+	_, err = ins.ListClusters(ctx, run.ID, 0, 0)
 	require.ErrorContains(t, err, "not a time")
 }
 

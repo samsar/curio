@@ -140,11 +140,17 @@ footer names the address the daemon listens on.
   gigabyte of memory, and the text is shown as stored. Web and email
   addresses written out in the text without link markup show as text,
   not links: a GitHub README's bare URLs, say.
-- **Interests**: the topics the last clustering run found, largest first:
-  how many there are (the page shows the 50 largest), a bar of how many
-  documents are in one and how many in none, and a card for each with
-  its size, how alike its documents are, its summary and a few of its
-  documents. An interest's page lists its documents by similarity.
+- **Interests**: the topics the last clustering run found, largest first,
+  24 a page: how many there are, a bar of how many documents are in one
+  and how many in none, and a card for each with its size, how alike its
+  documents are, its summary and a few of its documents. An untitled
+  document is named by its bookmark's title, in italics. Numbered pages
+  under the cards lead through the rest (a phone shows "Page 2 of 10"
+  between Previous and Next). A rebuild that finishes while you page
+  through leads to the new run's page of that number, which says the
+  interests were rebuilt; a page past the last says how many pages there
+  are. An interest's page lists its documents by similarity, 50 a page,
+  ranked across the pages, with the run the interest comes from.
   **Rebuild**, at the top, groups the library again. With insight turned
   off in config.yaml (`insight.enabled: false`), there is no Rebuild, and
   the page says so.

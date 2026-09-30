@@ -129,7 +129,7 @@ func (f *engineFixture) assertCurrentRun(t *testing.T, runID string) {
 	done, err := f.store.LatestRun(context.Background(), tenant, store.ClusterRunDone)
 	require.NoError(t, err)
 	assert.Equal(t, runID, done.ID)
-	clusters, err := f.store.ListClusters(context.Background(), runID, 0)
+	clusters, err := f.store.ListClusters(context.Background(), runID, 0, 0)
 	require.NoError(t, err)
 	assert.NotEmpty(t, clusters, "the run's clusters are intact")
 }
@@ -137,7 +137,7 @@ func (f *engineFixture) assertCurrentRun(t *testing.T, runID string) {
 // clustersBySize maps each cluster size of a run to its label.
 func (f *engineFixture) clustersBySize(t *testing.T, runID string) map[int]string {
 	t.Helper()
-	clusters, err := f.store.ListClusters(context.Background(), runID, 0)
+	clusters, err := f.store.ListClusters(context.Background(), runID, 0, 0)
 	require.NoError(t, err)
 	out := map[int]string{}
 	for _, c := range clusters {
@@ -322,11 +322,11 @@ func TestRebuild_EmptyCorpus(t *testing.T) {
 // cluster first.
 func (f *engineFixture) runMembers(t *testing.T, runID string) [][]string {
 	t.Helper()
-	clusters, err := f.store.ListClusters(context.Background(), runID, 0)
+	clusters, err := f.store.ListClusters(context.Background(), runID, 0, 0)
 	require.NoError(t, err)
 	out := make([][]string, 0, len(clusters))
 	for _, c := range clusters {
-		members, err := f.store.ClusterMembers(context.Background(), c.ID, 0)
+		members, err := f.store.ClusterMembers(context.Background(), c.ID, 0, 0)
 		require.NoError(t, err)
 		ids := make([]string, 0, len(members))
 		for _, m := range members {

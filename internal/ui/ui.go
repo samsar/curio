@@ -145,7 +145,6 @@ func funcs(assets assetSet) template.FuncMap {
 		"gentleHint":         gentleHint,
 		"jobKindLabel":       jobKindLabel,
 		"viaLabel":           viaLabel,
-		"inc":                func(i int) int { return i + 1 },
 		"contentTypes":       func() []string { return contentTypes },
 	}
 }

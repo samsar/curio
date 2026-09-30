@@ -400,7 +400,11 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/failures", get("/v1/failures"), http.StatusOK},
 
 		{"GET /v1/interests", get("/v1/interests"), http.StatusOK},
+		{"GET /v1/interests", get("/v1/interests?offset=1"), http.StatusOK},
+		{"GET /v1/interests", get("/v1/interests?offset=-1"), http.StatusBadRequest},
 		{"GET /v1/interests/{id}", get("/v1/interests/" + f.interest), http.StatusOK},
+		{"GET /v1/interests/{id}", get("/v1/interests/" + f.interest + "?offset=1"), http.StatusOK},
+		{"GET /v1/interests/{id}", get("/v1/interests/" + f.interest + "?offset=x"), http.StatusBadRequest},
 		{"POST /v1/interests/rebuild", post("/v1/interests/rebuild"), http.StatusAccepted},
 
 		{"GET /v1/jobs", get("/v1/jobs?status=failed"), http.StatusOK},
@@ -568,7 +572,8 @@ type contractFixtures struct {
 // an extraction error message, a document failed as anti-bot and a dead
 // one, three bookmarks (one with a folder and tags, one of the untitled
 // failed document with a title of its own), a failed job and done ones,
-// and an interest with a summary.
+// and an interest with a summary, whose members are a titled document and
+// the untitled failed one.
 func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	t.Helper()
 	ctx := context.Background()
@@ -622,7 +627,8 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 		Source: store.SourceSafari, SavedAt: time.Now().UTC().Add(-time.Hour)})
 	require.NoError(t, err)
 
-	interest := s.seedInterest(t, "local", "Kafka", a)
+	// The failed document is untitled, and named by its bookmark.
+	interest := s.seedInterest(t, "local", "Kafka", a, failed)
 	_, err = s.db.Exec(`UPDATE clusters SET summary = 'Streaming with Kafka.' WHERE id = ?`, interest.ID)
 	require.NoError(t, err)
 	return contractFixtures{fetched: a.ID, failed: failed.ID, dead: dead.ID, bookmark: bookmark.ID,

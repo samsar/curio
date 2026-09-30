@@ -251,11 +251,7 @@ func (s *Server) AddInterest(t testing.TB, label string, docs ...*store.Document
 	}
 	c := store.Cluster{ID: uuid.NewString(), TenantID: TenantID, RunID: run.ID, Label: &label,
 		Size: len(docs), Cohesion: 0.9}
-	members := make([]store.ClusterMember, len(docs))
-	for i, d := range docs {
-		members[i] = store.ClusterMember{ClusterID: c.ID, DocumentID: d.ID, Similarity: 0.9 - 0.1*float64(i)}
-	}
-	if err := ins.ReplaceClusters(ctx, run.ID, []store.ClusterWithMembers{{Cluster: c, Members: members}}); err != nil {
+	if err := ins.ReplaceClusters(ctx, run.ID, []store.ClusterWithMembers{{Cluster: c, Members: members(c.ID, docs)}}); err != nil {
 		t.Fatalf("write clusters: %v", err)
 	}
 	res := store.RunResult{Status: store.ClusterRunDone, NumDocuments: len(docs), NumClusters: 1}
@@ -265,16 +261,27 @@ func (s *Server) AddInterest(t testing.TB, label string, docs ...*store.Document
 	return &c
 }
 
+// members are docs as the members of cluster id, in their order: each
+// less similar than the one before.
+func members(id string, docs []*store.Document) []store.ClusterMember {
+	out := make([]store.ClusterMember, len(docs))
+	for i, d := range docs {
+		out[i] = store.ClusterMember{ClusterID: id, DocumentID: d.ID, Similarity: 0.9 - 0.1*float64(i)}
+	}
+	return out
+}
+
 // Interest is an interest AddInterests records: its label, empty for an
-// unlabeled one, and its size.
+// unlabeled one, its size, and its members, most similar first, if any.
 type Interest struct {
-	Label string
-	Size  int
+	Label   string
+	Size    int
+	Members []*store.Document
 }
 
 // AddInterests records a finished clustering run whose clusters are
-// interests, without members, over as many documents as their sizes add
-// up to: enough for a page that lists interests by size alone.
+// interests, over as many documents as their sizes add up to, with the
+// members they are given: enough for a page that lists interests by size.
 func (s *Server) AddInterests(t testing.TB, interests ...Interest) []*store.Cluster {
 	t.Helper()
 	ctx := context.Background()
@@ -292,7 +299,7 @@ func (s *Server) AddInterests(t testing.TB, interests ...Interest) []*store.Clus
 			c.Label = &in.Label
 		}
 		clusters = append(clusters, c)
-		written = append(written, store.ClusterWithMembers{Cluster: *c})
+		written = append(written, store.ClusterWithMembers{Cluster: *c, Members: members(c.ID, in.Members)})
 		documents += in.Size
 	}
 	if err := ins.ReplaceClusters(ctx, run.ID, written); err != nil {

@@ -656,14 +656,21 @@ paths:
       operationId: listInterests
       summary: List inferred interests (labeled topic clusters)
       description: >
-        Returns the interests from the latest completed clustering run, largest
-        first, with run metadata. An interest is a labeled cluster. Returns an
-        empty list when clustering has not run yet.
+        Returns a page of the interests from the latest completed clustering
+        run, largest first (by size, then cohesion, then id), with run
+        metadata. An interest is a labeled cluster. Returns an empty list when
+        clustering has not run yet.
       parameters:
         - in: query
           name: limit
           description: Max interests. Out of range or malformed means the default.
           schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: offset
+          description: >
+            How many interests to skip, in the list's order. An offset at or
+            past the end answers an empty page of the run, not an error.
+          schema: { type: integer, minimum: 0, default: 0 }
         - in: query
           name: members
           description: Member documents per interest; 0 for none. Out of range or malformed means the default.
@@ -674,6 +681,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/InterestList" }
+        "400":
+          description: An offset that isn't a whole number of 0 or more
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
         default: { $ref: "#/components/responses/Problem" }
 
   /v1/interests/rebuild:
@@ -702,16 +714,28 @@ paths:
         name: members
         description: Member documents to include; 0 for none. Out of range or malformed means the default.
         schema: { type: integer, minimum: 0, maximum: 1000, default: 100 }
+      - in: query
+        name: offset
+        description: >
+          How many members to skip, most similar first (then by document id).
+          An offset at or past the end answers the interest without members,
+          not an error.
+        schema: { type: integer, minimum: 0, default: 0 }
     get:
       tags: [insight]
       operationId: getInterest
-      summary: Get one interest with its member documents
+      summary: Get one interest with a page of its member documents
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Interest" }
+        "400":
+          description: An offset that isn't a whole number of 0 or more
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
         default: { $ref: "#/components/responses/Problem" }
 
@@ -1456,33 +1480,39 @@ components:
     InterestMember:
       type: object
       properties:
-        doc_id:        { type: string, format: uuid }
-        title:         { type: string }
-        url:           { type: string, format: uri }
-        markdown_path: { type: string, description: "Absolute on-disk path to the member's extracted markdown" }
-        similarity:    { type: number, description: "Cosine similarity to the cluster centroid (0..1)" }
-      required: [doc_id, url, similarity]
+        doc_id:         { type: string, format: uuid }
+        title:          { type: string, description: "The document's own title; omitted when it has none" }
+        bookmark_title: { type: string, description: "For an untitled document, its most recently saved bookmark's title, when that has one" }
+        url:            { type: string, format: uri }
+        state:          { $ref: "#/components/schemas/DocState" }
+        markdown_path:  { type: string, description: "Absolute on-disk path to the member's extracted markdown" }
+        similarity:     { type: number, description: "Cosine similarity to the cluster centroid (0..1)" }
+      required: [doc_id, url, state, similarity]
 
     Interest:
       type: object
-      description: A labeled topic cluster.
+      description: A labeled topic cluster, with a page of its members.
       properties:
         id:       { type: string, format: uuid }
+        run_id:   { type: string, format: uuid, description: "The clustering run the interest belongs to" }
         label:    { type: string, description: "Topic name; omitted when unlabeled" }
         summary:  { type: string }
-        size:     { type: integer, description: "Number of member documents" }
+        size:     { type: integer, description: "Number of member documents, across every page of them" }
         cohesion: { type: number, description: "Mean member cosine to the cluster centroid (0..1)" }
         members:
           type: array
           items: { $ref: "#/components/schemas/InterestMember" }
-      required: [id, size, cohesion]
+      required: [id, run_id, size, cohesion]
 
     InterestList:
       type: object
       description: >
-        Not cursor-paginated: interests are a small bounded snapshot returned
-        with the metadata of the run that produced them. The run fields are
-        absent before the first clustering run.
+        Paged by offset within the run: a run's interests never change, so an
+        offset names the same interests on every read of that run. A rebuild
+        makes a new run, and a client sees it by comparing run_id across
+        pages; num_clusters is the run's total. Returned with the metadata of
+        the run that produced them; the run fields are absent before the
+        first clustering run.
       properties:
         run_id:        { type: string, format: uuid }
         computed_at:   { type: string, format: date-time }

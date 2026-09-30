@@ -1,9 +1,11 @@
 {{/*
-The Interests: the latest clustering run's, largest first, and a rebuild.
-The rebuild's state and its button are live regions, which its poller
-(Rebuild.Poller) keeps current while a rebuild is queued or running; a
-poll's answer is those regions and the poller alone, and reads no
-interest. A newer run is offered as a reload, not swapped in.
+The Interests: a page of the latest clustering run's, largest first, and a
+rebuild. The rebuild's state and its button are live regions, which its
+poller (Rebuild.Poller) keeps current while a rebuild is queued or
+running; a poll's answer is those regions and the poller alone, and reads
+no interest. A newer run is offered as a reload, not swapped in. Links
+between pages name the run shown; a page asked for from another run's
+says it shows the newer one's.
 */}}
 {{define "content" -}}
 {{if .Poll}}{{template "rebuild-state" .Rebuild}}
@@ -15,7 +17,7 @@ interest. A newer run is offered as a reload, not swapped in.
 {{define "interests-page" -}}
 <div class="page-head"><div class="titles">
 <h1>Interests</h1>
-{{with .Run}}<p class="lede">{{if .Interests}}{{count .Interests "topic" "topics"}} curio found in your library, largest first{{if lt (len $.Interests) .Interests}}; these are the {{len $.Interests}} largest{{end}}.{{else}}The last clustering run found no topics in your library.{{end}}</p>
+{{with .Run}}<p class="lede">{{if .Interests}}{{count .Interests "topic" "topics"}} curio found in your library, largest first.{{if and (gt $.Page 1) (not $.OutOfRange)}} Page {{num $.Page}} of {{num $.Pages}}.{{end}}{{else}}The last clustering run found no topics in your library.{{end}}</p>
 {{else}}<p class="lede">Topics curio finds in your library, by grouping pages alike.</p>{{end}}
 </div>
 <div class="actions">{{template "rebuild-state" .Rebuild}}
@@ -23,27 +25,32 @@ interest. A newer run is offered as a reload, not swapped in.
 {{- template "rebuild-control" .Rebuild}}
 {{- if and .Rebuild.Enabled .Run}}<span class="no-js muted">Rebuild them with <code>curio interests rebuild</code>.</span>{{end}}</div>
 </div>
-{{with .Run}}
+{{if .RunChanged}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>The interests were rebuilt since the page you came from, so this page {{if .OutOfRange}}is past the new run's last{{else}}lists the new run's{{end}}.{{if gt .Page 1}} <a href="{{.FirstPage}}">Start again from page 1</a>.{{end}}</p></div></div>
+{{end}}
+{{- with .Run}}
 <section class="card mb-4" aria-label="Coverage"><div class="card-body"><div class="coverage">
 {{template "stackbar" (coverageBar .Documents .Noise)}}
 <div class="legend"><span class="item"><span class="swatch swatch-accent"></span><span class="n">{{num .Clustered}}</span> in an interest <span class="pct">{{pct .Clustered .Documents}}</span></span><span class="item"><span class="swatch swatch-track"></span><span class="n">{{num .Noise}}</span> in none <span class="pct">{{pct .Noise .Documents}}</span></span><span class="item run">Run of {{when .ComputedAt}} · {{.Algo}} · {{num .Documents}} documents</span></div>
 </div></div></section>
-{{with $.Interests}}
+{{end}}
+{{- if .OutOfRange}}{{template "out-of-range" .OutOfRange}}
+{{- else if .Run}}{{with .Interests}}
 <ul class="interest-grid" role="list">
 {{range .}}<li class="card interest">
 <h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a></h2>
 <div class="stats"><span><b>{{num .Size}}</b> documents</span>{{template "cohesion" .Cohesion}}</div>
 {{with .Summary}}<p class="summary">{{.}}</p>{{end}}
-{{with .Members}}<ul class="members">{{range .}}<li><a href="{{documentHref .DocumentID}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</a></li>{{end}}</ul>{{end}}
+{{with .Members}}<ul class="members">{{range .}}{{with .Ref}}<li><a{{with .Class}} class="{{.}}"{{end}} href="{{documentHref .ID}}" title="{{.Hover}}">{{.Name}}</a></li>{{end}}{{end}}</ul>{{end}}
 <a class="all" href="{{interestHref .ID}}">All {{num .Size}} documents →</a>
 </li>
 {{end}}</ul>
+{{with $.Pager}}{{template "pager" .}}{{end}}
 {{else}}<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "sparkles"}}</div>
 <h2>No interests in this run</h2>
 <p>The last run found no interests.</p>
 </div></div>{{end}}
-{{else}}<div class="card"><div class="empty">
+{{- else}}<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "sparkles"}}</div>
 <h2>No interests yet</h2>
 {{if .Rebuild.Enabled}}<p><code>curio interests rebuild</code> groups the library into them.</p>

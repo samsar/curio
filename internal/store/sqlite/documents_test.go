@@ -3,6 +3,8 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -309,6 +311,76 @@ func TestDocuments_BookmarkTitle(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, d.BookmarkTitle, got.BookmarkTitle, "%s: as the list has it", d.URL)
 	}
+}
+
+// TestDocuments_GetByIDsWithLastError: the tenant's documents with the
+// IDs given, each as GetWithLastError returns it, its last error, markdown
+// path and bookmark title included; another tenant's and unknown IDs are
+// left out, and no number of IDs is too many for one read.
+func TestDocuments_GetByIDsWithLastError(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	docs := NewDocuments(db)
+	exts := NewExtractions(db)
+	q := NewJobs(db)
+
+	failed := seedDoc(t, docs, "https://example.com/failed", store.DocStateFailed)
+	rel := failed.ID + "/e.md"
+	ext := &store.DocumentExtraction{DocumentID: failed.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
+		MarkdownPath: &rel}
+	require.NoError(t, exts.Create(ctx, ext))
+	require.NoError(t, docs.SetCurrentExtraction(ctx, failed.ID, ext.ID))
+	job, err := store.NewDocumentJob("local", store.JobKindFetch, failed.ID)
+	require.NoError(t, err)
+	job.Status = store.JobStatusFailed
+	require.NoError(t, q.Enqueue(ctx, job))
+	_, err = db.Exec(`UPDATE jobs SET last_error = 'HTTP 503' WHERE id = ?`, job.ID)
+	require.NoError(t, err)
+
+	untitled := seedDoc(t, docs, "https://example.com/untitled", store.DocStateFetched)
+	_, err = db.Exec(`INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source)
+		VALUES ('b1', 'local', ?, ?, 'Saved as this', '2026-01-01T00:00:00.000Z', 'chrome')`, untitled.ID, untitled.URL)
+	require.NoError(t, err)
+	titled := seedDoc(t, docs, "https://example.com/titled", store.DocStateFetched)
+	_, err = db.Exec(`UPDATE documents SET title = 'Its own' WHERE id = ?`, titled.ID)
+	require.NoError(t, err)
+	theirs := &store.Document{TenantID: "other", URL: "https://example.com/theirs"}
+	require.NoError(t, docs.Create(ctx, theirs))
+
+	got, err := docs.GetByIDsWithLastError(ctx, "local",
+		[]string{titled.ID, failed.ID, theirs.ID, "no-such-document", untitled.ID, failed.ID})
+	require.NoError(t, err)
+	byID := map[string]store.DocumentWithError{}
+	for _, d := range got {
+		byID[d.ID] = d
+	}
+	assert.Len(t, got, 3, "each once, the tenant's own")
+	assert.ElementsMatch(t, []string{failed.ID, untitled.ID, titled.ID}, slices.Collect(maps.Keys(byID)))
+	for id, d := range byID {
+		one, err := docs.GetWithLastError(ctx, "local", id)
+		require.NoError(t, err)
+		assert.Equal(t, *one, d, "%s: as GetWithLastError has it", d.URL)
+	}
+	assert.Equal(t, "HTTP 503", byID[failed.ID].LastError)
+	assert.Equal(t, rel, byID[failed.ID].MarkdownPath)
+	assert.Equal(t, "Saved as this", byID[untitled.ID].BookmarkTitle)
+	assert.Empty(t, byID[titled.ID].BookmarkTitle)
+
+	none, err := docs.GetByIDsWithLastError(ctx, "local", nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+
+	// More IDs than SQLite binds parameters in one statement (32,766).
+	const missing = 40_000
+	many := make([]string, 0, missing+1)
+	many = append(many, untitled.ID)
+	for i := range missing {
+		many = append(many, fmt.Sprintf("missing-%d", i))
+	}
+	got, err = docs.GetByIDsWithLastError(ctx, "local", many)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, untitled.ID, got[0].ID)
 }
 
 // TestDocuments_ListCauseFilter: the list narrows to the documents that

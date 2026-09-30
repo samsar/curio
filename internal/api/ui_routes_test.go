@@ -134,6 +134,18 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 	assert.Equal(t, "text/html; charset=utf-8", notFound.contentType)
 	assert.Contains(t, notFound.body, `<nav aria-label="Main">`)
 	assertSecurityHeaders(t, notFound, ui.CSP)
+	// A numbered list's page past the last, one that isn't a number, and an
+	// interest that is gone.
+	interest := samples["/ui/interests/{id}"]
+	for path, status := range map[string]int{
+		"/ui/interests?page=2": http.StatusNotFound, "/ui/interests?page=0": http.StatusBadRequest,
+		interest + "?page=2": http.StatusNotFound, interest + "?page=x": http.StatusBadRequest,
+		"/ui/interests/nope": http.StatusNotFound,
+	} {
+		resp := s.do(t, request{method: http.MethodGet, path: path})
+		assert.Equal(t, status, resp.status, path)
+		assertSecurityHeaders(t, resp, ui.CSP)
+	}
 	assertSecurityHeaders(t, s.do(t, request{method: http.MethodPost, path: "/ui/"}), ui.CSP)
 	for _, refused := range []request{
 		{method: http.MethodGet, path: "/ui/", origin: "https://attacker.example"},

@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"math"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -47,7 +49,7 @@ func TestInsights_RoundTrip(t *testing.T) {
 	assert.Equal(t, 1, got.NumClusters)
 	require.NotNil(t, got.FinishedAt)
 
-	clusters, err := ins.ListClusters(ctx, run.ID, 0)
+	clusters, err := ins.ListClusters(ctx, run.ID, 0, 0)
 	require.NoError(t, err)
 	require.Len(t, clusters, 1)
 	require.NotNil(t, clusters[0].Label)
@@ -58,7 +60,7 @@ func TestInsights_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "local", c0.TenantID)
 
-	members, err := ins.ClusterMembers(ctx, c0.ID, 0)
+	members, err := ins.ClusterMembers(ctx, c0.ID, 0, 0)
 	require.NoError(t, err)
 	require.Len(t, members, 3)
 	// ordered by similarity descending
@@ -67,7 +69,7 @@ func TestInsights_RoundTrip(t *testing.T) {
 
 	// ReplaceClusters is idempotent: re-running replaces, not duplicates.
 	require.NoError(t, ins.ReplaceClusters(ctx, run.ID, []store.ClusterWithMembers{cw}))
-	clusters2, err := ins.ListClusters(ctx, run.ID, 0)
+	clusters2, err := ins.ListClusters(ctx, run.ID, 0, 0)
 	require.NoError(t, err)
 	assert.Len(t, clusters2, 1)
 
@@ -181,4 +183,91 @@ func TestInsights_LatestRun_SameStart(t *testing.T) {
 	latest, err = ins.LatestRun(ctx, "local", store.ClusterRunDone)
 	require.NoError(t, err)
 	assert.Equal(t, done.ID, latest.ID)
+}
+
+// TestInsights_PagedOrders: a run's clusters and a cluster's members come
+// in a total order, ties broken by ID, so pages of any size read from
+// successive offsets add up to the whole list, every row once.
+func TestInsights_PagedOrders(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ins := NewInsights(db)
+	ids := seedDocs(t, db, "local", "https://example.com/a", "https://example.com/b", "https://example.com/c",
+		"https://example.com/d", "https://example.com/e")
+
+	run := &store.ClusterRun{TenantID: "local", Algo: "knn-graph"}
+	require.NoError(t, ins.CreateRun(ctx, run))
+	cluster := func(id string, size int, cohesion float64, members ...store.ClusterMember) store.ClusterWithMembers {
+		return store.ClusterWithMembers{Cluster: store.Cluster{ID: id, TenantID: "local", Size: size,
+			Cohesion: cohesion}, Members: members}
+	}
+	// Written out of order: the ties on size and cohesion come by ID, and
+	// the ties on similarity by document ID.
+	members := []store.ClusterMember{{DocumentID: ids[3], Similarity: 0.5}, {DocumentID: ids[0], Similarity: 0.9},
+		{DocumentID: ids[4], Similarity: 0.5}, {DocumentID: ids[1], Similarity: 0.5}, {DocumentID: ids[2], Similarity: 0.7}}
+	require.NoError(t, ins.ReplaceClusters(ctx, run.ID, []store.ClusterWithMembers{
+		cluster("c-tie-b", 2, 0.5), cluster("c-small", 1, 0.9), cluster("c-big", 5, 0.1, members...),
+		cluster("c-tie-a", 2, 0.5), cluster("c-cohesive", 2, 0.8),
+	}))
+
+	all, err := ins.ListClusters(ctx, run.ID, 0, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c-big", "c-cohesive", "c-tie-a", "c-tie-b", "c-small"}, clusterIDs(all))
+	allMembers, err := ins.ClusterMembers(ctx, "c-big", 0, 0)
+	require.NoError(t, err)
+	byDocument := slices.Sorted(slices.Values([]string{ids[1], ids[3], ids[4]}))
+	assert.Equal(t, append([]string{ids[0], ids[2]}, byDocument...), memberIDs(allMembers))
+
+	for size := 1; size <= 3; size++ {
+		var clusters []*store.Cluster
+		var members []store.ClusterMember
+		for offset := 0; offset < len(all)+size; offset += size {
+			page, err := ins.ListClusters(ctx, run.ID, size, offset)
+			require.NoError(t, err)
+			assert.LessOrEqual(t, len(page), size)
+			clusters = append(clusters, page...)
+			memberPage, err := ins.ClusterMembers(ctx, "c-big", size, offset)
+			require.NoError(t, err)
+			members = append(members, memberPage...)
+		}
+		assert.Equal(t, clusterIDs(all), clusterIDs(clusters), "clusters %d a page", size)
+		assert.Equal(t, memberIDs(allMembers), memberIDs(members), "members %d a page", size)
+	}
+
+	rest, err := ins.ListClusters(ctx, run.ID, 0, 3)
+	require.NoError(t, err)
+	assert.Equal(t, clusterIDs(all[3:]), clusterIDs(rest), "no limit: the rest from the offset")
+	restMembers, err := ins.ClusterMembers(ctx, "c-big", -1, 3)
+	require.NoError(t, err)
+	assert.Equal(t, memberIDs(allMembers[3:]), memberIDs(restMembers))
+
+	for _, offset := range []int{len(all), 1000, math.MaxInt} {
+		past, err := ins.ListClusters(ctx, run.ID, 24, offset)
+		require.NoError(t, err, "offset %d", offset)
+		assert.Empty(t, past, "offset %d", offset)
+		pastMembers, err := ins.ClusterMembers(ctx, "c-big", 50, offset)
+		require.NoError(t, err, "offset %d", offset)
+		assert.Empty(t, pastMembers, "offset %d", offset)
+	}
+
+	_, err = ins.ListClusters(ctx, run.ID, 24, -1)
+	require.ErrorContains(t, err, "offset -1 is negative")
+	_, err = ins.ClusterMembers(ctx, "c-big", 50, -1)
+	require.ErrorContains(t, err, "offset -1 is negative")
+}
+
+func clusterIDs(clusters []*store.Cluster) []string {
+	out := make([]string, 0, len(clusters))
+	for _, c := range clusters {
+		out = append(out, c.ID)
+	}
+	return out
+}
+
+func memberIDs(members []store.ClusterMember) []string {
+	out := make([]string, 0, len(members))
+	for _, m := range members {
+		out = append(out, m.DocumentID)
+	}
+	return out
 }

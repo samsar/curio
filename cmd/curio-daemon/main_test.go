@@ -982,7 +982,7 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 
 	runID, err := eng.Rebuild(context.Background(), "local")
 	require.NoError(t, err)
-	clusters, err := insights.ListClusters(context.Background(), runID, 0)
+	clusters, err := insights.ListClusters(context.Background(), runID, 0, 0)
 	require.NoError(t, err)
 	require.Len(t, clusters, 1)
 	require.NotNil(t, clusters[0].Label)

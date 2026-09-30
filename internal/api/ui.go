@@ -212,6 +212,11 @@ func pollParam(r *http.Request, kinds ...string) (string, error) {
 	return "", badRequest("%s %q must be one of: %s", ui.PollParam, poll, strings.Join(kinds, ", "))
 }
 
+// pageParam reads a numbered list's ?page (ui.PageParam), from 1: absent
+// or empty is the first, and anything but a whole number of 1 or more is a
+// requestError, answered before the page reads anything.
+func pageParam(r *http.Request) (int, error) { return positionParam(r, ui.PageParam, 1) }
+
 // isPoll reports whether r asks a page for its live regions.
 func isPoll(r *http.Request) bool { return r.URL.Query().Get(ui.PollParam) != "" }
 

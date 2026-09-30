@@ -408,6 +408,11 @@ type DocumentStore interface {
 	// ListWithLastError lists it. ErrNotFound if the tenant has no such
 	// document.
 	GetWithLastError(ctx context.Context, tenantID, id string) (*DocumentWithError, error)
+	// GetByIDsWithLastError returns the tenant's documents with those IDs,
+	// each as ListWithLastError lists it, in no particular order, in one
+	// read however many there are. An ID that names no document of the
+	// tenant's is left out. No IDs return none.
+	GetByIDsWithLastError(ctx context.Context, tenantID string, ids []string) ([]DocumentWithError, error)
 	// ListIDsWithContent returns the IDs of the tenant's documents in state
 	// that have a current extraction: the ones an index job can work on.
 	ListIDsWithContent(ctx context.Context, tenantID string, state DocState) ([]string, error)
@@ -1112,16 +1117,23 @@ type InsightStore interface {
 	// GetRun returns a run by ID, or ErrNotFound.
 	GetRun(ctx context.Context, id string) (*ClusterRun, error)
 
-	// ListClusters returns a run's clusters ordered largest-first (size DESC,
-	// then cohesion DESC). limit <= 0 means all.
-	ListClusters(ctx context.Context, runID string, limit int) ([]*Cluster, error)
+	// ListClusters returns a run's clusters largest first: by size, then
+	// cohesion, both descending, then by ID. A run's clusters are written
+	// once and never change, so this order never changes either, and an
+	// offset names the same clusters on every read. It returns at most
+	// limit clusters from offset in that order; limit <= 0 means every
+	// one from offset. An offset at or past the end returns none, and a
+	// negative one is an error.
+	ListClusters(ctx context.Context, runID string, limit, offset int) ([]*Cluster, error)
 
 	// GetCluster returns a cluster by ID, or ErrNotFound.
 	GetCluster(ctx context.Context, id string) (*Cluster, error)
 
-	// ClusterMembers returns a cluster's member documents ordered by
-	// similarity DESC. limit <= 0 means all.
-	ClusterMembers(ctx context.Context, clusterID string, limit int) ([]ClusterMember, error)
+	// ClusterMembers returns a cluster's member documents, most similar
+	// first, then by document ID: an order that never changes, as
+	// ListClusters' doesn't. limit and offset page through it as they do
+	// ListClusters'.
+	ClusterMembers(ctx context.Context, clusterID string, limit, offset int) ([]ClusterMember, error)
 
 	// PruneRunsExcept deletes every run for the tenant except keepRunIDs,
 	// at least one, cascading their clusters + memberships. Keeps storage

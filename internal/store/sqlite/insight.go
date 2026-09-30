@@ -152,14 +152,40 @@ func (s *Insights) GetRun(ctx context.Context, id string) (*store.ClusterRun, er
 
 const clusterColumns = `id, tenant_id, run_id, label, summary, size, cohesion, created_at, updated_at`
 
-func (s *Insights) ListClusters(ctx context.Context, runID string, limit int) ([]*store.Cluster, error) {
-	q := `SELECT ` + clusterColumns + ` FROM clusters WHERE run_id = ? ORDER BY size DESC, cohesion DESC`
-	args := []any{runID}
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
+// listClustersSQL is a page of a run's clusters, largest first, ending in
+// the ID so that ties come the same way on every read. It seeks
+// idx_clusters_run (run_id, size DESC), which gives the size order, and
+// sorts only the clusters that tie on size, by cohesion and ID. Its
+// arguments are the run, the limit (-1 for none) and the offset.
+const listClustersSQL = `SELECT ` + clusterColumns + ` FROM clusters WHERE run_id = ?
+	ORDER BY size DESC, cohesion DESC, id LIMIT ? OFFSET ?`
+
+// clusterMembersSQL is a page of a cluster's members, most similar first,
+// ending in the document ID for the same reason. It seeks the primary
+// key's index (cluster_id, document_id) and sorts the cluster's members.
+// Its arguments are the cluster, the limit (-1 for none) and the offset.
+const clusterMembersSQL = `SELECT cluster_id, document_id, similarity FROM cluster_documents
+	WHERE cluster_id = ? ORDER BY similarity DESC, document_id LIMIT ? OFFSET ?`
+
+// pageArgs are the LIMIT and OFFSET arguments of a page of at most limit
+// rows from offset; limit <= 0 is -1, which SQLite reads as no limit. A
+// negative offset is an error.
+func pageArgs(limit, offset int) (int, int, error) {
+	if offset < 0 {
+		return 0, 0, fmt.Errorf("offset %d is negative", offset)
 	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	if limit <= 0 {
+		limit = -1
+	}
+	return limit, offset, nil
+}
+
+func (s *Insights) ListClusters(ctx context.Context, runID string, limit, offset int) ([]*store.Cluster, error) {
+	limit, offset, err := pageArgs(limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("list clusters: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, listClustersSQL, runID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list clusters: %w", err)
 	}
@@ -173,7 +199,10 @@ func (s *Insights) ListClusters(ctx context.Context, runID string, limit int) ([
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list clusters: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Insights) GetCluster(ctx context.Context, id string) (*store.Cluster, error) {
@@ -181,15 +210,12 @@ func (s *Insights) GetCluster(ctx context.Context, id string) (*store.Cluster, e
 	return scanCluster(s.db.QueryRowContext(ctx, q, id))
 }
 
-func (s *Insights) ClusterMembers(ctx context.Context, clusterID string, limit int) ([]store.ClusterMember, error) {
-	q := `SELECT cluster_id, document_id, similarity
-	      FROM cluster_documents WHERE cluster_id = ? ORDER BY similarity DESC`
-	args := []any{clusterID}
-	if limit > 0 {
-		q += ` LIMIT ?`
-		args = append(args, limit)
+func (s *Insights) ClusterMembers(ctx context.Context, clusterID string, limit, offset int) ([]store.ClusterMember, error) {
+	limit, offset, err := pageArgs(limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("cluster members: %w", err)
 	}
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := s.db.QueryContext(ctx, clusterMembersSQL, clusterID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("cluster members: %w", err)
 	}
@@ -203,7 +229,10 @@ func (s *Insights) ClusterMembers(ctx context.Context, clusterID string, limit i
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cluster members: %w", err)
+	}
+	return out, nil
 }
 
 // PruneRunsExcept implements store.InsightStore. Keeping none would delete
