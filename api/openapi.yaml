@@ -116,8 +116,9 @@ paths:
         in: an unreachable or slow Ollama is reported in ollama_reachable
         and ollama_detail, not as an error, the services fetches depend
         on (the Jina Reader fallback) in upstreams, and a change in the
-        build that makes the embeddings in embedding_drift. A starting one
-        answers at once.
+        build that makes the embeddings, once a re-embedded sample of the
+        library shows it changed the vectors or can't be checked, in
+        embedding_drift. A starting one answers at once.
       responses:
         "200":
           description: The daemon is ready
@@ -1040,22 +1041,56 @@ components:
     EmbeddingDrift:
       description: >
         Present only while the build that makes this home's embeddings
-        differs from the one recorded when the library was indexed: the
-        embedding model's manifest digest (what `ollama list` shows) or the
-        Ollama version. Either can change the vectors the model returns, so
-        new query vectors stop matching the stored ones. The daemon checks
-        once a minute; this is its last check, not a call made for the
-        request. It never reindexes by itself, and status stays ok.
+        differs from the one recorded when the library was indexed (the
+        embedding model's manifest digest, what `ollama list` shows, or the
+        Ollama version) and a sample of the library re-embedded by the build
+        serving now doesn't match the stored vectors, or can't be checked.
+        Either part can change the vectors the model returns, so new query
+        vectors stop matching the stored ones; many changes don't, and a
+        sample that matches makes the new build the recorded one without a
+        report. The daemon checks once a minute and verifies each change
+        once; this is its last check, not a call made for the request. It
+        never reindexes by itself, and status stays ok.
       type: object
       properties:
         changes:
           type: array
           items: { $ref: "#/components/schemas/DriftChange" }
+        verification: { $ref: "#/components/schemas/DriftVerification" }
         fix:
           type: string
           description: "What re-embeds the library and resets the baseline: curio reindex --all"
         checked_at: { type: string, format: date-time, description: "When the daemon last checked" }
-      required: [changes, fix, checked_at]
+      required: [changes, verification, fix, checked_at]
+
+    DriftVerification:
+      description: >
+        What the drift was reported on. Verified: the daemon re-embedded
+        one chunk from each of up to 64 fetched documents (16 by their
+        longest chunk, 48 at random) through the indexer's own requests,
+        and some came back further than cosine 0.9999 from their stored
+        vectors, or of another length. Not verified: the build serving now
+        couldn't embed the sample at all (a reply of another width, an input
+        too long, a request Ollama refuses), which isn't retried; or three
+        attempts in a row failed, which the daemon keeps retrying.
+      type: object
+      properties:
+        verified: { type: boolean, description: "Whether a re-embedded sample showed the change" }
+        sampled:  { type: integer, minimum: 0, description: "Chunks re-embedded; 0 when not verified" }
+        changed:  { type: integer, minimum: 0, description: "Chunks whose vector didn't match its stored one; 0 when not verified" }
+        min_cosine:
+          type: number
+          minimum: -1
+          maximum: 1
+          description: "The worst chunk's cosine with its stored vector; present only when verified"
+        detail:
+          type: string
+          description: >
+            The daemon's wording of the evidence, which clients print as it
+            is: "64 of 64 sampled chunks changed (worst cosine 0.9713)", or
+            "not verified: " and why.
+        sampled_at: { type: string, format: date-time, description: "When the sample was compared, or given up on" }
+      required: [verified, sampled, changed, detail, sampled_at]
 
     DriftChange:
       type: object

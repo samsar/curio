@@ -145,3 +145,64 @@ func TestUp_DaemonStartedOutsideTheAgent(t *testing.T) {
 	assert.True(t, out.Status.Daemon.Managed)
 	assert.NotEqual(t, spawned, out.Status.Daemon.PID)
 }
+
+// TestDriftWarning: the warning line says how sure the drift is and quotes
+// the daemon's evidence; a daemon that predates verifying a change gets
+// the line it always did.
+func TestDriftWarning(t *testing.T) {
+	changes := []client.DriftChange{
+		{What: client.DriftModelDigest, Recorded: "sha256:0a109f42", Current: "sha256:ac6da0df"},
+		{What: client.DriftOllamaVersion, Recorded: "0.30.0", Current: "0.34.4"},
+	}
+	const changed = "model digest sha256:0a109f42 → sha256:ac6da0df, Ollama 0.30.0 → 0.34.4"
+	for name, tc := range map[string]struct {
+		verification *client.DriftVerification
+		want         string
+	}{
+		"verified": {
+			&client.DriftVerification{Verified: true, Detail: "64 of 64 sampled chunks changed (worst cosine 0.9713)"},
+			"warning: embeddings drifted since the library was indexed (" + changed +
+				"; 64 of 64 sampled chunks changed (worst cosine 0.9713)); run `curio reindex --all`",
+		},
+		"unverified": {
+			&client.DriftVerification{Detail: "not verified: after 3 attempts: ollama unreachable"},
+			"warning: embeddings may have drifted since the library was indexed (" + changed +
+				"; not verified: after 3 attempts: ollama unreachable); run `curio reindex --all`",
+		},
+		"an older daemon": {
+			nil,
+			"warning: embeddings drifted since the library was indexed (" + changed + "); run `curio reindex --all`",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := &client.EmbeddingDrift{Changes: changes, Verification: tc.verification, Fix: "curio reindex --all"}
+			assert.Equal(t, tc.want, setup.DriftWarning(d))
+		})
+	}
+}
+
+// TestDriftDetail: doctor says how sure a drift is, what changed and the
+// daemon's evidence; a daemon that predates verifying a change gets the
+// detail it always did.
+func TestDriftDetail(t *testing.T) {
+	changes := []client.DriftChange{{What: client.DriftOllamaVersion, Recorded: "0.34.4", Current: "0.35.0"}}
+	for name, tc := range map[string]struct {
+		verification *client.DriftVerification
+		want         string
+	}{
+		"verified": {
+			&client.DriftVerification{Verified: true, Detail: "64 of 64 sampled chunks changed (worst cosine 0.9713)"},
+			"drifted: Ollama 0.34.4 → 0.35.0; 64 of 64 sampled chunks changed (worst cosine 0.9713)",
+		},
+		"unverified": {
+			&client.DriftVerification{Detail: "not verified: after 3 attempts: ollama unreachable"},
+			"may have drifted: Ollama 0.34.4 → 0.35.0; not verified: after 3 attempts: ollama unreachable",
+		},
+		"an older daemon": {nil, "drifted: Ollama 0.34.4 → 0.35.0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := &client.EmbeddingDrift{Changes: changes, Verification: tc.verification, Fix: "curio reindex --all"}
+			assert.Equal(t, tc.want, setup.DriftDetail(d))
+		})
+	}
+}

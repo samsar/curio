@@ -157,8 +157,7 @@ func printUpStatus(w io.Writer, s setup.Snapshot) {
 		fmt.Fprintf(w, "queue:    %s\n", describeQueue(s.Queue))
 	}
 	if d := s.Drift; d != nil {
-		fmt.Fprintf(w, "warning: embeddings drifted since the library was indexed (%s); run `%s`\n",
-			setup.DriftChanges(d), d.Fix)
+		fmt.Fprintln(w, setup.DriftWarning(d))
 	}
 	for _, warning := range s.Warnings {
 		fmt.Fprintf(w, "warning: %s\n", warning.Text)

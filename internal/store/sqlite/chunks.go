@@ -538,6 +538,87 @@ func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.
 	return out, nil
 }
 
+// sampleChunksSQL is SampleChunks' statement. Its arguments are the
+// tenant, the fetched state and the two counts.
+//
+// longest ranks each fetched document's chunks by length in bytes, the
+// lower seq first among equals, and keeps the n longest of the documents'
+// first. Lengths bunch at the chunker's cap, so the tie-break decides much
+// of the set; seq has no AUTOINCREMENT, so a reindex rewrites a document's
+// chunks at the top and the lower seq is the chunk written first. Ranking
+// every chunk is the statement's one pass over the chunks table.
+//
+// picked then shuffles the other fetched documents that have chunks and
+// keeps n; only then does sample pick one chunk of each, at random. Picked
+// in the same SELECT as the shuffle, the chunk would be picked for every
+// candidate document. Both CTEs are MATERIALIZED so random() and longest,
+// read twice, are each evaluated once.
+//
+// Each sampled chunk is reached by its seq, and its vector by its ID: a
+// point lookup in vec0, where `chunk_id IN (subquery)` scans every vector.
+const sampleChunksSQL = `
+	WITH longest AS MATERIALIZED (
+		SELECT seq, document_id FROM (
+			SELECT c.seq, c.document_id, octet_length(c.text) AS bytes,
+			       row_number() OVER (PARTITION BY c.document_id ORDER BY octet_length(c.text) DESC, c.seq) AS nth
+			FROM documents d JOIN chunks c ON c.document_id = d.id
+			WHERE d.tenant_id = ?1 AND d.state = ?2)
+		WHERE nth = 1
+		ORDER BY bytes DESC, seq
+		LIMIT ?3),
+	picked AS MATERIALIZED (
+		SELECT d.id FROM documents d
+		WHERE d.tenant_id = ?1 AND d.state = ?2
+		  AND d.id NOT IN (SELECT document_id FROM longest)
+		  AND EXISTS (SELECT 1 FROM chunks c WHERE c.document_id = d.id)
+		ORDER BY random()
+		LIMIT ?4),
+	sample(seq) AS (
+		SELECT seq FROM longest
+		UNION ALL
+		SELECT (SELECT c.seq FROM chunks c WHERE c.document_id = p.id ORDER BY random() LIMIT 1) FROM picked p)
+	SELECT c.id, c.document_id, c.text, v.embedding
+	FROM sample s
+	JOIN chunks c     ON c.seq = s.seq
+	JOIN chunks_vec v ON v.chunk_id = c.id`
+
+// SampleChunks reads the sample in one autocommit statement: in WAL a read
+// never waits on a writer, and a transaction would add nothing to one
+// statement's snapshot.
+func (s *Chunks) SampleChunks(ctx context.Context, tenantID string, n store.ChunkSample) ([]store.SampledChunk, error) {
+	if tenantID == "" {
+		return nil, errors.New("chunks: tenant_id required")
+	}
+	// SQLite reads a negative LIMIT as none.
+	if n.Longest < 0 || n.Random < 0 {
+		return nil, fmt.Errorf("chunks: sample sizes must not be negative (longest %d, random %d)", n.Longest, n.Random)
+	}
+	rows, err := s.db.QueryContext(ctx, sampleChunksSQL, tenantID, store.DocStateFetched, n.Longest, n.Random)
+	if err != nil {
+		return nil, fmt.Errorf("sample chunks: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]store.SampledChunk, 0, n.Longest+n.Random)
+	for rows.Next() {
+		var (
+			c    store.SampledChunk
+			blob []byte
+		)
+		if err := rows.Scan(&c.ChunkID, &c.DocumentID, &c.Text, &blob); err != nil {
+			return nil, fmt.Errorf("scan sampled chunk: %w", err)
+		}
+		if c.Embedding, err = decodeVector(blob, s.dim); err != nil {
+			return nil, fmt.Errorf("chunk %s: %w", c.ChunkID, err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sample chunks: %w", err)
+	}
+	return out, nil
+}
+
 // GetByIDs returns the chunks with the given IDs, in arbitrary order.
 func (s *Chunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, error) {
 	if len(ids) == 0 {

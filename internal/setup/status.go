@@ -23,8 +23,9 @@ type Snapshot struct {
 	DocumentsErr error
 	Queue        *client.Queue
 	QueueErr     error
-	// Drift is what the daemon reports changed in the build that makes
-	// the embeddings; nil when nothing did.
+	// Drift is the embedding drift the daemon reports: what changed in the
+	// build that makes the embeddings, and the evidence the vectors did;
+	// nil when it reports none.
 	Drift *client.EmbeddingDrift
 	// Warnings are the checks' warnings without a fix.
 	Warnings []Warning

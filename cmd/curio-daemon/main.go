@@ -410,9 +410,16 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	}, sizes, jobs.WorkerOptions{Gate: gate, Log: slog.Default()})
 	// The Jina fallback is the one upstream whose health is tracked.
 	upstreams := func() []fetcher.UpstreamHealth { return []fetcher.UpstreamHealth{native.JinaHealth()} }
+	// A change of build is verified by re-embedding a sample through the
+	// indexer, so the requests are the ones that made the stored vectors,
+	// sent by the same embedder.
+	sampler, err := drift.NewSampler(chunks, idx, time.Duration(cfg.Embedding.TimeoutSeconds)*time.Second)
+	if err != nil {
+		return nil, err
+	}
 	// Built after start's marker writes: from here on the monitor is the
 	// marker's only writer.
-	driftMonitor := drift.New(home, emb.Client(), slog.Default())
+	driftMonitor := drift.New(home, emb.Client(), sampler, slog.Default())
 	keeper := newKeeper(gate, queue, pools)
 
 	return &daemon{

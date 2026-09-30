@@ -89,8 +89,10 @@ var (
 // EmbeddingDim is the width of its vector index; both are fixed at Init.
 // CheckEmbedding holds config.yaml to them. EmbeddingModelDigest and
 // OllamaVersion fingerprint the build that made them: the daemon records
-// them at its first successful check, and reports drift when either
-// changes (internal/drift).
+// them at its first successful check. When either changes it re-embeds a
+// sample of the library, records the new build if the vectors come back
+// the same, and reports a drift if they don't or can't be checked
+// (internal/drift).
 type Meta struct {
 	Format               int       `json:"format"`
 	SchemaVersion        int       `json:"schema_version"`

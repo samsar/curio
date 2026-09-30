@@ -20,7 +20,9 @@ import (
 // `curio up` compares with config.yaml's to know when a restart would
 // change it. Upstreams are the services fetches depend on; like Ollama, a
 // failing one doesn't make the daemon unhealthy, and neither does
-// EmbeddingDrift. YouTubeFetcher is the yt-dlp the daemon found when it
+// EmbeddingDrift: a change of the embedding build that a re-embedded
+// sample of the library showed, or couldn't rule out, changed the vectors.
+// YouTubeFetcher is the yt-dlp the daemon found when it
 // started, which it routes YouTube videos to for their transcripts, or
 // empty: `curio up` tells from it whether a daemon predates an install.
 // GitHubToken says whether the GitHub fetcher sends a token, from
@@ -45,11 +47,27 @@ type Health struct {
 
 // EmbeddingDrift says what changed in the build that makes the home's
 // embeddings (drift.Report), present only while it differs from the build
-// recorded when the library was indexed.
+// recorded when the library was indexed and a sample of the library,
+// re-embedded by the build serving now, doesn't match the stored vectors
+// or couldn't be checked. Verification is that evidence.
 type EmbeddingDrift struct {
-	Changes   []DriftChange `json:"changes"`
-	Fix       string        `json:"fix"`
-	CheckedAt time.Time     `json:"checked_at"`
+	Changes      []DriftChange     `json:"changes"`
+	Verification DriftVerification `json:"verification"`
+	Fix          string            `json:"fix"`
+	CheckedAt    time.Time         `json:"checked_at"`
+}
+
+// DriftVerification is what a drift was reported on (drift.Evidence):
+// the sample's comparison when Verified, and Detail, the daemon's wording
+// of it, which clients print as it is. MinCosine is set only when
+// Verified.
+type DriftVerification struct {
+	Verified  bool      `json:"verified"`
+	Sampled   int       `json:"sampled"`
+	Changed   int       `json:"changed"`
+	MinCosine *float64  `json:"min_cosine,omitempty"`
+	Detail    string    `json:"detail"`
+	SampledAt time.Time `json:"sampled_at"`
 }
 
 // DriftChange is one changed part of the build (drift.Change).
@@ -82,7 +100,18 @@ func (d Deps) embeddingDrift() *EmbeddingDrift {
 	for _, c := range r.Changes {
 		changes = append(changes, DriftChange{What: c.What, Recorded: c.Recorded, Current: c.Current})
 	}
-	return &EmbeddingDrift{Changes: changes, Fix: drift.Fix, CheckedAt: r.CheckedAt.UTC()}
+	return &EmbeddingDrift{Changes: changes, Verification: driftVerification(r.Evidence), Fix: drift.Fix,
+		CheckedAt: r.CheckedAt.UTC()}
+}
+
+// driftVerification is ev on the wire.
+func driftVerification(ev drift.Evidence) DriftVerification {
+	v := DriftVerification{Verified: ev.Verified, Sampled: ev.Sampled, Changed: ev.Changed, Detail: ev.Detail(),
+		SampledAt: ev.At.UTC()}
+	if ev.Verified {
+		v.MinCosine = &ev.MinCosine
+	}
+	return v
 }
 
 // UpstreamHealth is an upstream's health on the wire (fetcher.UpstreamHealth).

@@ -726,39 +726,61 @@ func TestDoctor_NoGitHubToken(t *testing.T) {
 	assert.Contains(t, out, "0 failure(s), 1 warning(s)")
 }
 
-// TestDoctorAndStatus_EmbeddingDrift: while the daemon reports the build
-// that makes the embeddings changed, doctor warns, listing each change and
-// the fix, and status warns once; `curio reindex --all` resets the
-// baseline, and the warnings go.
+// TestDoctorAndStatus_EmbeddingDrift: while the daemon reports a drift,
+// doctor warns, listing each change, the daemon's evidence and the fix,
+// and status warns once, saying how sure the drift is; `curio reindex
+// --all` resets the baseline, and the warnings go.
 func TestDoctorAndStatus_EmbeddingDrift(t *testing.T) {
-	monitor := apitest.NewDrift(time.Now(),
-		drift.Change{What: drift.ModelDigest, Recorded: "sha256:0a109f42", Current: "sha256:ac6da0df"},
-		drift.Change{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"})
-	w := upWorld(t, func(d *api.Deps) { d.Drift = monitor })
-	w.srv.AddContent(t, w.srv.AddDocument(t, "https://example.com/a", store.DocStateFetched), "content")
+	const changed = "model digest sha256:0a109f42 → sha256:ac6da0df, Ollama 0.30.0 → 0.34.4"
+	for name, tc := range map[string]struct {
+		unverified     string // the reason, for a drift no sample verified
+		doctor, status string
+	}{
+		"verified": {
+			doctor: "drifted: " + changed + "; 64 of 64 sampled chunks changed (worst cosine 0.9713)",
+			status: "warning: embeddings drifted since the library was indexed (" + changed +
+				"; 64 of 64 sampled chunks changed (worst cosine 0.9713)); run `curio reindex --all`",
+		},
+		"unverified": {
+			unverified: "after 3 attempts: ollama unreachable",
+			doctor:     "may have drifted: " + changed + "; not verified: after 3 attempts: ollama unreachable",
+			status: "warning: embeddings may have drifted since the library was indexed (" + changed +
+				"; not verified: after 3 attempts: ollama unreachable); run `curio reindex --all`",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			monitor := apitest.NewDrift(time.Now(),
+				drift.Change{What: drift.ModelDigest, Recorded: "sha256:0a109f42", Current: "sha256:ac6da0df"},
+				drift.Change{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"})
+			if tc.unverified != "" {
+				monitor.Unverified(tc.unverified)
+			}
+			w := upWorld(t, func(d *api.Deps) { d.Drift = monitor })
+			w.srv.AddContent(t, w.srv.AddDocument(t, "https://example.com/a", store.DocStateFetched), "content")
 
-	out, err := w.run(t, "doctor")
-	require.NoError(t, err, out)
-	assert.Contains(t, out, fmt.Sprintf("! %-22s drifted: model digest sha256:0a109f42 → sha256:ac6da0df, "+
-		"Ollama 0.30.0 → 0.34.4\n", "embeddings"))
-	assert.Contains(t, out, "  → searches compare vectors from two builds; run `curio reindex --all` to re-embed the library\n")
-	assert.Contains(t, out, "0 failure(s), 1 warning(s)")
+			out, err := w.run(t, "doctor")
+			require.NoError(t, err, out)
+			assert.Contains(t, out, fmt.Sprintf("! %-22s %s\n", "embeddings", tc.doctor))
+			assert.Contains(t, out,
+				"  → searches compare vectors from two builds; run `curio reindex --all` to re-embed the library\n")
+			assert.Contains(t, out, "0 failure(s), 1 warning(s)")
 
-	out, err = w.run(t, "status")
-	require.NoError(t, err)
-	assert.Contains(t, out, "embed:   qwen3-embedding:0.6b (dim 1024)\n"+
-		"warning: embeddings drifted since the library was indexed (model digest sha256:0a109f42 → sha256:ac6da0df, "+
-		"Ollama 0.30.0 → 0.34.4); run `curio reindex --all`\n")
+			out, err = w.run(t, "status")
+			require.NoError(t, err)
+			assert.Contains(t, out, "embed:   qwen3-embedding:0.6b (dim 1024)\n"+tc.status+"\n")
+			assert.Equal(t, 1, strings.Count(out, "warning: embeddings"))
 
-	_, err = w.run(t, "reindex", "--all")
-	require.NoError(t, err)
-	out, err = w.run(t, "status")
-	require.NoError(t, err)
-	assert.NotContains(t, out, "drifted")
-	out, err = w.run(t, "doctor")
-	require.NoError(t, err, out)
-	assert.Contains(t, out, fmt.Sprintf("✓ %-22s no drift reported since the library was indexed\n", "embeddings"))
-	assert.Contains(t, out, "all checks passed")
+			_, err = w.run(t, "reindex", "--all")
+			require.NoError(t, err)
+			out, err = w.run(t, "status")
+			require.NoError(t, err)
+			assert.NotContains(t, out, "drifted")
+			out, err = w.run(t, "doctor")
+			require.NoError(t, err, out)
+			assert.Contains(t, out, fmt.Sprintf("✓ %-22s no drift reported since the library was indexed\n", "embeddings"))
+			assert.Contains(t, out, "all checks passed")
+		})
+	}
 }
 
 func TestReindex_HelpNamesDrift(t *testing.T) {

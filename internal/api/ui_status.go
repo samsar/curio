@@ -137,7 +137,7 @@ func healthPanel(h Health) ui.HealthPanel {
 		EmbeddingModel: h.EmbeddingModel, EmbeddingDim: h.EmbeddingDim, GenerationModel: h.GenerationModel,
 		YouTubeFetcher: h.YouTubeFetcher}
 	if d := h.EmbeddingDrift; d != nil {
-		p.Drift = &ui.Drift{Fix: d.Fix}
+		p.Drift = &ui.Drift{Verified: d.Verification.Verified, Detail: d.Verification.Detail, Fix: d.Fix}
 		for _, c := range d.Changes {
 			p.Drift.Changes = append(p.Drift.Changes, ui.DriftChange{What: c.What, Recorded: c.Recorded, Current: c.Current})
 		}

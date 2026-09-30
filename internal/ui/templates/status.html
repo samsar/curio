@@ -56,7 +56,7 @@ only when their setting does.
 <ul class="rows">
 <li><span class="label"><span class="dot dot-ok"></span>Daemon</span><span class="value">{{.Version}}</span></li>
 <li><span class="label"><span class="dot {{if .OllamaReachable}}dot-ok{{else}}dot-danger{{end}}"></span>Ollama</span><span class="value">{{if .OllamaReachable}}reachable{{else}}not reachable<span class="sub">{{.OllamaDetail}}</span>{{end}}</span></li>
-<li><span class="label"><span class="dot {{if .Drift}}dot-warn{{else}}dot-ok{{end}}"></span>Embeddings</span><span class="value">{{.EmbeddingModel}}<span class="sub">{{.EmbeddingDim}} dimensions{{if .Drift}}, drifted{{end}}</span></span></li>
+<li><span class="label"><span class="dot {{if .Drift}}dot-warn{{else}}dot-ok{{end}}"></span>Embeddings</span><span class="value">{{.EmbeddingModel}}<span class="sub">{{.EmbeddingDim}} dimensions{{with .Drift}}, {{if .Verified}}drifted{{else}}may have drifted{{end}}{{end}}</span></span></li>
 <li><span class="label"><span class="dot"></span>Writing model</span><span class="value">{{.GenerationModel}}</span></li>
 {{range .Upstreams}}<li><span class="label"><span class="dot dot-{{.Tone}}"></span>{{.Label}}</span><span class="value">{{if .Enabled}}{{.State}}<span class="sub">last answer {{template "reltime" .LastSuccess}}{{if not .LastFailure.IsZero}} · last failure {{.LastFailureClass}}, {{template "reltime" .LastFailure}}{{end}}{{if not .CooldownUntil.IsZero}} · resumes {{template "reltime" .CooldownUntil}}{{end}}</span>{{else}}off{{end}}</span></li>
 {{end}}<li><span class="label"><span class="dot{{if .YouTubeFetcher}} dot-ok{{end}}"></span>YouTube</span><span class="value">{{with .YouTubeFetcher}}yt-dlp<span class="sub">{{.}}</span>{{else}}yt-dlp not found<span class="sub">videos are fetched as pages</span>{{end}}</span></li>
@@ -101,9 +101,10 @@ they sit in a polled region.
 </div>
 {{end}}
 {{with .Drift}}<div class="callout callout-warn mb-4" role="note">{{template "icon" "alert"}}
-<p class="callout-title">The embeddings drifted</p>
+<p class="callout-title">{{if .Verified}}The embeddings drifted{{else}}The embeddings may have drifted{{end}}</p>
 <div class="callout-body"><p>What changed since the library was indexed:</p>
 <ul>{{range .Changes}}<li>{{.What}}: {{.Recorded}} → {{.Current}}</li>{{end}}</ul>
+<p>Re-embedded sample: {{.Detail}}</p>
 <p>Run <code>{{.Fix}}</code>.</p></div>
 </div>
 {{end}}

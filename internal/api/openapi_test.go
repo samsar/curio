@@ -280,6 +280,8 @@ type exchange struct {
 // seeded fixtures and validates each real response against the spec: first
 // a few while the daemon is starting, then all of them once it is ready.
 func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
+	// Drifted, both parts of the build changed and a sample showed it.
+	monitor := &driftMonitor{report: drifted(time.Now())}
 	s := newStartingTestServer(t, func(d *Deps) {
 		// A query mentioning "offline" can't be embedded, so its search
 		// degrades to keyword results with a warning.
@@ -291,8 +293,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		})
 		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 		d.Embedder = pingingEmbedder{err: fmt.Errorf("%w: connection refused", ollama.ErrUnreachable)}
-		// Drifted, both parts of the build changed.
-		d.Drift = &driftMonitor{report: drifted(time.Now())}
+		d.Drift = monitor
 		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
 		d.YouTubeFetcher = "/opt/homebrew/bin/yt-dlp"
 		// Paused Jina, with every optional field set.
@@ -435,6 +436,10 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue", `{"keep_awake":true}`), http.StatusOK},
 		{"PUT /v1/queue", jsonBody(http.MethodPut, "/v1/queue", `{"keep_awake":"yes"}`), http.StatusBadRequest},
 	})
+	// A drift no sample could verify.
+	monitor.set(driftedUnverified(time.Now()))
+	run([]exchange{{"GET /v1/healthz", get("/v1/healthz"), http.StatusOK}})
+
 	assert.Equal(t, slices.Sorted(maps.Keys(ops)), slices.Sorted(maps.Keys(exercised)),
 		"every documented operation is exercised")
 	assert.Empty(t, seen.missing(doc, slices.Collect(maps.Values(ops))),

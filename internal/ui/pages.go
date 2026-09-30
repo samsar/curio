@@ -275,10 +275,14 @@ type HealthPanel struct {
 }
 
 // Drift is what changed in the build that makes the embeddings since the
-// library was indexed, and the command that fixes it.
+// library was indexed, the evidence it was reported on, and the command
+// that fixes it. Verified is whether a re-embedded sample showed the
+// change; Detail is the daemon's wording of the evidence.
 type Drift struct {
-	Changes []DriftChange
-	Fix     string
+	Changes  []DriftChange
+	Verified bool
+	Detail   string
+	Fix      string
 }
 
 // DriftChange is one changed part of the embedding build.
