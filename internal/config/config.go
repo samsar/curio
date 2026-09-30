@@ -122,7 +122,7 @@ type Native struct {
 	JinaAPIKey string `yaml:"jina_api_key"`
 	// JinaSiteRequestsPerMinute caps the Jina Reader requests for pages of
 	// one site (its registrable domain) a minute, key or not: Jina blocks a
-	// site's keyless reads for about an hour after a burst of them. Default
+	// site's keyless reads for about an hour after a run of them. Default
 	// fetcher.DefaultJinaSiteRequestsPerMinute (6), at least 1.
 	JinaSiteRequestsPerMinute int `yaml:"jina_site_requests_per_minute"`
 	// UserAgent overrides the Chrome profile's User-Agent on origin

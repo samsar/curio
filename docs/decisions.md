@@ -5676,8 +5676,9 @@ See "Failure causes: recorded when a document fails".
 
 **Revised (2026-09-30):** the abuse block is no refusal any more. An
 `AbuseAlleviationError` is `errJinaSiteBlocked`, recognized first: the
-site's pages wait for the end it names, and it fails none, caches nothing
-and is counted `rate_limited`. Both items under "Not done" are done:
+site's pages wait for the end it names instead of failing on it, it caches
+nothing, and it is counted `rate_limited` (as is a page still held when
+its day of waiting runs out). Both items under "Not done" are done:
 Jina requests are paced per site, and a site's block is remembered until
 it ends. And behind a host-wide origin verdict, the retry of a refused
 document no longer fails from the cache: it asks Jina without the origin,
@@ -9080,8 +9081,8 @@ together:
   turns free. In-fetch retries take turns too. The guard spaces a site's
   sends an interval apart, whatever the shared limiter's queue did, and
   its wait is sat out like the limiter's.
-- **Jina's block of a site holds the site's pages, and fails none.** A
-  non-2xx Jina answer whose reason is an `AbuseAlleviationError`
+- **Jina's block of a site holds the site's pages instead of failing
+  them.** A non-2xx Jina answer whose reason is an `AbuseAlleviationError`
   (`Anonymous access to domain mobile.twitter.com blocked until Mon Sep 28
   2026 18:48:50 GMT+0000 (Coordinated Universal Time) due to …`), with a
   403 or a 429, is `errJinaSiteBlocked`, recognized before the refusal
@@ -9089,11 +9090,11 @@ together:
   one), taken as 1 hour when it can't be read (`jinaSiteBlockDefault`),
   and clamped to [1 minute, 24 hours] (`minJinaSiteBlock`,
   `maxJinaSiteBlock`, the deferral budget). The block is recorded under
-  the site of the domain it names, or the target's when it names none,
-  and is only ever extended. The page that received it and every later
-  page of the site are `DeferError`s until it ends (`waiting for Jina
-  Reader's block of twitter.com to lift`), spread one interval apart from
-  its end. Later pages send nothing (`jina: not sent, Jina Reader blocks
+  the site of the domain it names, or the target's when it names none, and
+  is only ever extended. The page that received it and every later page of
+  the site are `DeferError`s until it ends (`waiting for Jina Reader's
+  block of twitter.com to lift`), spread one interval apart from its end.
+  Later pages send nothing (`jina: not sent, Jina Reader blocks
   twitter.com until …: <Jina's reason>`); the block is checked before the
   turn and again before sending. It is never `jinaAnswered`, never cached,
   never extends the shared cooldown, and is never retried within the
@@ -9133,14 +9134,19 @@ blocks as not done. The cache change makes pacing necessary:
 stackoverflow.com's 169 pages each need a Jina request now, where the cache
 failed them with none.
 
-**Why 6 a minute:** about 80 keyless mobile.twitter.com reads between
-10:10 and 10:29 tripped a block, while bloomberg took 10 Jina requests in
-one minute without one. Six is conservative; it leaves the keyless 20 a
-minute to three sites at once. Jina blocks hostnames separately
-(mobile.twitter.com until 18:48:50 and twitter.com until 18:46:03 in the
-same run), but the two were blocked within a minute of each other both
-times, and a block can name www.X for a target on X, so turns and blocks
-are per registrable domain.
+**Why 6 a minute:** bloomberg took 10 Jina requests in one minute without
+a block, and 6 a minute leaves the keyless 20 a minute to three sites at
+once. It is not below every run that tripped a block: mobile.twitter.com
+was blocked after about 80 keyless reads between 10:10 and 10:29, some 4 a
+minute, so a long run of one site at 6 a minute may still trip one. The
+owner's database can't narrow it down: it keeps each job's last attempt
+only, and almost no Jina extractions for the blocked sites. A block now
+costs the site's pages about an hour's wait, not their documents: curio
+waits it out, and the value can be lowered. Jina blocks hostnames
+separately (mobile.twitter.com until 18:48:50 and twitter.com until
+18:46:03 in the same run), but the two were blocked within a minute of
+each other both times, and a block can name www.X for a target on X, so
+turns and blocks are per registrable domain.
 
 **Why not a `rate.Limiter` per site:** a discrete-event simulation, 169
 pages of one site on 16 workers with claims ordered by `run_after` as
@@ -9148,13 +9154,14 @@ pages of one site on 16 workers with claims ordered by `run_after` as
 page's reservation sends every deferred page back at the same next slot:
 21.6 claims a page, each two SQLite writes and, on an uncached host, an
 origin request. Keeping the reservation starves the site: the page that
-comes back can't claim the slot it holds. The pacer keeps four times and
-a block per site, nothing per page, and hands deferrals distinct Untils:
-1.6 to 2.0 claims a page. **Why the send-time guard:** the shared
-limiter's queue can bunch one site's requests. With a 1,500-job backlog
-the smallest gap fell to 3 s, and 7 or 8 requests landed in one minute.
-With the guard the smallest gap is exactly 10 s, at most 6 land in a
-minute, and its waits stayed under about 18 s with a 3,000-job backlog.
+comes back can't claim the slot it holds. The pacer keeps four times per
+site (its last turn, the last deferral handed out, its last send and its
+block's end) and the block's reason, nothing per page, and hands deferrals
+distinct Untils: 1.6 to 2.0 claims a page. **Why the send-time guard:**
+the shared limiter's queue can bunch one site's requests. With a 1,500-job
+backlog the smallest gap fell to 3 s, and 7 or 8 requests landed in one
+minute. With the guard the smallest gap is exactly 10 s, at most 6 land in
+a minute, and its waits stayed under about 18 s with a 3,000-job backlog.
 
 **Why an unreachable hit stays final:** the 243 documents that failed from
 a cached unreachable entry cover 179 hosts, 172 with no such name and 7
@@ -9175,7 +9182,12 @@ reach them either, and deferring would only churn the queue for a day.
   27 of the owner's 819 dead documents were redirect verdicts behind a 403
   or 503.
 - With Jina off, a cached host's pages all come due when the entry
-  expires.
+  expires, and a host that keeps answering 403 holds them for up to their
+  day of waiting, where the cache used to fail them at once. Each time the
+  entry expires, about 2 of them (the host's origin slots) ask the origin
+  again, each spending an attempt, and the rest wait for the next expiry.
+  They fail `anti_bot` (`login_wall` behind a login redirect) when their
+  attempts or their day run out.
 - Turns and blocks live in memory: a restart relearns a block with one
   request per blocked site.
 - An import's pages that need Jina go at the keyless 20 a minute in all

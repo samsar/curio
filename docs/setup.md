@@ -345,19 +345,29 @@ with a free key (`jina_api_key`) curio sends up to 200. On top of that,
 `jina_site_requests_per_minute` caps the requests for the pages of any one
 site, key or not: 6 a minute by default, one every 10 seconds. A site is
 its registrable domain, so `mobile.twitter.com` and `twitter.com` count as
-one. Jina blocks keyless reads of a site for about an hour after a burst
-of them, and 6 a minute stays well under the bursts that tripped one. A
-page whose site's turn is more than 30 seconds off waits in the queue for
-it, without using up an attempt; the other sites' pages go meanwhile.
-Raise the value to speed up an import dominated by one site only with a
-key, since Jina's blocks name anonymous access; lower it if Jina still
-blocks a site (see Troubleshooting). Restart the daemon after a change
-(`curio daemon stop`; the next command starts it).
+one. A page whose site's turn is more than 30 seconds off waits in the
+queue for it, without using up an attempt; the other sites' pages go
+meanwhile. Jina blocks keyless reads of a site for about an hour after a
+run of them. 6 a minute is under the 10 in one minute that one site took
+without a block, but another was blocked after about 80 reads in 19
+minutes, some 4 a minute, so a long run of one site's pages may still be
+blocked. curio then waits the block out (see Troubleshooting); lower the
+value if that keeps happening. Raise it to speed up an import dominated by
+one site only with a key, since Jina's blocks name anonymous access.
+Restart the daemon after a change (`curio daemon stop`; the next command
+starts it).
 
 When a site answers curio's own request with 403 or 503, or sends it to
-its login page, curio stops asking the site for 15 minutes: its other
-pages go straight to Jina, and each gets Jina's verdict of its own. With
-the fallback off, they wait for the 15 minutes to pass.
+its login page, and Jina turns that page down too (or the fallback is
+off), curio stops asking the site for 15 minutes: its other pages go
+straight to Jina, and each gets Jina's verdict of its own. When Jina
+serves the page, or can't answer for now, nothing is cached, and the
+site's next pages ask the site again. With the fallback off, the pages
+wait for the 15 minutes to pass, and a site that keeps refusing curio
+holds them for up to a day: each time the 15 minutes end, about two of
+them ask the site again, each spending one of its attempts, and the rest
+wait once more. They fail, as `anti_bot` or `login_wall`, when their
+attempts or their day run out.
 
 ### YouTube
 

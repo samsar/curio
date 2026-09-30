@@ -13,11 +13,13 @@ import (
 // DefaultJinaSiteRequestsPerMinute is how many Jina Reader requests curio
 // sends for pages of one site a minute, unless configured otherwise
 // (fetcher.native.jina_site_requests_per_minute). Jina blocks keyless reads
-// of a domain after a burst of them (an AbuseAlleviationError, for about an
-// hour): about 80 reads of mobile.twitter.com in 19 minutes tripped one,
-// while bloomberg.com took 10 in one minute without. Six a minute stays
-// well under both, and leaves the keyless 20 a minute to three sites at
-// once.
+// of a domain after a run of them (an AbuseAlleviationError, for about an
+// hour). Six a minute is under the 10 in one minute bloomberg.com took
+// without a block, and leaves the keyless 20 a minute to three sites at
+// once. It is not under every run that tripped one: mobile.twitter.com was
+// blocked after about 80 reads in 19 minutes, some 4 a minute, so a long
+// run of one site at this pace may still be blocked. curio then waits the
+// block out (sitePacer), and the value can be lowered.
 const DefaultJinaSiteRequestsPerMinute = 6
 
 // sitePaceSweepEvery is the least time between two sweeps of the sites
