@@ -18,14 +18,15 @@ const (
 	// CallJudged: it answered, and the answer is not the page (a challenge
 	// or login page, the target's error status, a body over the cap).
 	CallJudged CallClass = "judged"
-	// CallRefused: it declined the target on purpose (a domain it blocks, a
-	// 4xx about the request).
+	// CallRefused: it declined the target on purpose (a domain it excludes,
+	// a 4xx about the request).
 	CallRefused CallClass = "refused"
 	// CallChallenged: its CDN took curio for a bot.
 	CallChallenged CallClass = "challenged"
 	// CallForbidden: a 403 that names no target.
 	CallForbidden CallClass = "forbidden"
-	// CallRateLimited: a 429.
+	// CallRateLimited: a 429, or its block of a site's keyless reads for
+	// now (an AbuseAlleviationError).
 	CallRateLimited CallClass = "rate_limited"
 	// CallAuth: a 401 or 402, about curio's key or account.
 	CallAuth CallClass = "auth"
@@ -89,6 +90,17 @@ type UpstreamHealth struct {
 	Recent map[CallClass]int
 	// CooldownUntil is when the pause in effect ends; zero when none is.
 	CooldownUntil time.Time
+	// SitePauses are the upstream's blocks of one site each in effect, by
+	// site; empty when there are none. They leave State alone: a block is
+	// about one site's reads, not the service.
+	SitePauses []SitePause
+}
+
+// SitePause is an upstream's block of one site's reads: until when it
+// holds the site's pages back.
+type SitePause struct {
+	Site  string
+	Until time.Time
 }
 
 const (

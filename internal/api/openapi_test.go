@@ -305,6 +305,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 				Recent: map[fetcher.CallClass]int{fetcher.CallOK: 12, fetcher.CallJudged: 3,
 					fetcher.CallRefused: 2, fetcher.CallChallenged: 1},
 				CooldownUntil: now.Add(9 * time.Minute),
+				SitePauses:    []fetcher.SitePause{{Site: "twitter.com", Until: now.Add(58 * time.Minute)}},
 			}}
 		}
 	})

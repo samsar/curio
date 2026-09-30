@@ -246,13 +246,21 @@ func checkContentDir(dir string, r *doctorReport) {
 }
 
 // upstreamCheck is doctor's check of an upstream the daemon reports, the
-// Jina fallback today. It renders the state the daemon derived; only the
+// Jina fallback today. It renders the state the daemon derived, and the
+// sites the upstream blocks for now, which leave the status alone; only the
 // failure class the hint is about is chosen here (dominantFailure).
 func upstreamCheck(u client.UpstreamHealth) (status checkStatus, detail, hint string) {
+	if u.State == client.UpstreamDisabled {
+		return statusOK, "off (fetcher.native.jina_fallback: false)", ""
+	}
+	status, detail, hint = upstreamState(u)
+	return status, detail + sitePausesText(u.SitePauses), hint
+}
+
+// upstreamState renders the state of an upstream that is configured on.
+func upstreamState(u client.UpstreamHealth) (status checkStatus, detail, hint string) {
 	window := windowText(u.WindowSeconds)
 	switch u.State {
-	case client.UpstreamDisabled:
-		return statusOK, "off (fetcher.native.jina_fallback: false)", ""
 	case client.UpstreamIdle:
 		return statusOK, "no calls in the last " + window + lastAnswer(u), ""
 	case client.UpstreamOK:
@@ -271,6 +279,30 @@ func upstreamCheck(u client.UpstreamHealth) (status checkStatus, detail, hint st
 	return statusWarn, fmt.Sprintf("state %q, which this curio doesn't know", u.State), "update curio"
 }
 
+// maxSitePausesShown is how many blocked sites doctor names before it
+// counts the rest: enough for the few a busy import trips at once.
+const maxSitePausesShown = 3
+
+// sitePausesText says which sites Jina Reader blocks for now and until
+// when, after a "; ", or nothing when it blocks none.
+func sitePausesText(pauses []client.SitePause) string {
+	if len(pauses) == 0 {
+		return ""
+	}
+	sites := "1 site"
+	if len(pauses) > 1 {
+		sites = fmt.Sprintf("%d sites", len(pauses))
+	}
+	named := make([]string, 0, maxSitePausesShown+1)
+	for _, p := range pauses[:min(len(pauses), maxSitePausesShown)] {
+		named = append(named, p.Site+" until "+localTime(p.Until))
+	}
+	if more := len(pauses) - maxSitePausesShown; more > 0 {
+		named = append(named, fmt.Sprintf("and %d more", more))
+	}
+	return fmt.Sprintf("; Jina Reader blocks keyless reads of %s for now: %s", sites, strings.Join(named, ", "))
+}
+
 // failureClasses are the call classes that count as an upstream's failures.
 var failureClasses = []string{
 	client.CallChallenged, client.CallForbidden, client.CallRateLimited,
@@ -280,9 +312,10 @@ var failureClasses = []string{
 // jinaAdvice says, per failure class, what it means for the Jina fallback,
 // the one upstream the daemon reports, and what to do about it.
 var jinaAdvice = map[string]string{
-	client.CallChallenged:  "r.jina.ai is challenging curio; see Troubleshooting in docs/setup.md",
-	client.CallForbidden:   "r.jina.ai answered HTTP 403 without naming a target; see `curio daemon logs`",
-	client.CallRateLimited: "Jina is rate-limiting curio; a fetcher.native.jina_api_key raises the limit",
+	client.CallChallenged: "r.jina.ai is challenging curio; see Troubleshooting in docs/setup.md",
+	client.CallForbidden:  "r.jina.ai answered HTTP 403 without naming a target; see `curio daemon logs`",
+	client.CallRateLimited: "Jina is rate-limiting curio, or blocking keyless reads of a busy site, " +
+		"which curio waits out; a fetcher.native.jina_api_key raises the limit (a block names anonymous access only)",
 	client.CallAuth: "check fetcher.native.jina_api_key or CURIO_JINA_API_KEY " +
 		"(401: the key is invalid, 402: it has no balance left)",
 	client.CallServerError: "r.jina.ai is failing on its side; fetches keep retrying",

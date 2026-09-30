@@ -447,11 +447,20 @@ External processes the daemon expects:
   identify as curio, not as a browser. Its answers are judged like the
   origin's before they are stored: challenge, block, error, not-found and
   login pages are rejected. A redirect onto another site is judged where it
-  lands, without Jina: a landing page is a dead link and a login page
-  final, even when it answers 403 or 503 (then only a login path counts:
-  no page is read). Its health (each request's outcome over the last 15
-  minutes, and whether it is paused or failing) is reported on
-  `/v1/healthz` (`upstreams`), in `curio doctor` and in `curio status`.
+  lands, without Jina: a landing page is a dead link and a login page final,
+  even when it answers 403 or 503 (then only a login path counts: no page is
+  read). Requests go at 20 a minute (200 with a key), and at 6 a minute for
+  any one site, its registrable domain
+  (`fetcher.native.jina_site_requests_per_minute`); a page whose site's turn
+  is further off waits in the queue. Jina's block of a site's keyless reads
+  (an `AbuseAlleviationError`) holds the site's pages until the time it
+  names instead of failing them; only a page still held after a day of
+  waiting fails, as rate-limited. While a host's 403, 503 or login redirect
+  is cached (15 minutes), its other pages go to Jina without asking the
+  origin, each judged on Jina's answer for it. Its health (each request's
+  outcome over the last 15 minutes, whether it is paused or failing, and the
+  sites it blocks) is reported on `/v1/healthz` (`upstreams`), in `curio
+  doctor` and in `curio status`.
 - **Claude API (optional)** — a future `generator.Generator` impl for heavier
   synthesis on the M6 RAG path (retrieve → LLM → cited answer).
 

@@ -20,15 +20,18 @@ type PermanentError struct {
 func (e *PermanentError) Error() string { return e.Err.Error() }
 func (e *PermanentError) Unwrap() error { return e.Err }
 
-// DeferError is a call curio chose not to make: a hold it keeps itself, a
-// cooldown every caller of an upstream shares, outlasts what a fetch sits
-// out inline. Nothing was learned about the URL, and the fetch should run
-// again at Until. It is never a PermanentError, and no fetcher wraps it in
-// one. Until is never zero. Reason says what the call waits for, for a
-// person, worded to follow "waiting for" ("GitHub's API rate limit to
-// reset"). Err is the error the fetch fails with once the job may wait no
-// longer: its text and chain (the 429 and its time left) are what an
-// ordinary retryable failure would carry.
+// DeferError is a fetch held back without a verdict. Either curio chose not
+// to make a call, because a hold it keeps itself (a cooldown every caller
+// of an upstream shares, a site's turn, a host-cache entry it waits out)
+// outlasts what a fetch sits out inline; or an upstream answered that it
+// will serve again at a time it names (Jina Reader's block of a site),
+// which decides nothing about the page. Nothing was learned about the URL,
+// and the fetch should run again at Until. It is never a PermanentError,
+// and no fetcher wraps it in one. Until is never zero. Reason says what the
+// call waits for, for a person, worded to follow "waiting for" ("GitHub's
+// API rate limit to reset"). Err is the error the fetch fails with once the
+// job may wait no longer: its text and chain (a 429 and its time left, the
+// block) are what an ordinary retryable failure would carry.
 type DeferError struct {
 	Until  time.Time
 	Reason string
@@ -58,11 +61,13 @@ var (
 	// missing or auth-required page: HTTP 403 or 503, or a challenge, block
 	// or 403/503 error page served with a 2xx (or by Jina, without the
 	// target's status). Jina may get through. Distinct from ErrLoginWall so
-	// the two log separately. Only a 403/503 from the origin is host-wide; a
-	// challenge or error page is about that page. A 403/503 answered after a
-	// redirect onto another site's login path, or with dead-link detection
-	// on onto the homepage or another site's landing page, is no ErrAntiBot:
-	// the redirect is judged instead (Native's statusFailure).
+	// the two log separately. Only a 403/503 from the origin is host-wide,
+	// and cached: the host's other pages then go to Jina without asking the
+	// origin, for a while. A challenge or error page is about that page. A
+	// 403/503 answered after a redirect onto another site's login path, or
+	// with dead-link detection on onto the homepage or another site's
+	// landing page, is no ErrAntiBot: the redirect is judged instead
+	// (Native's statusFailure).
 	ErrAntiBot = errors.New("origin blocked the request (likely anti-bot)")
 
 	// ErrDeadLink marks a URL whose content is gone: a hard 404/410 (from

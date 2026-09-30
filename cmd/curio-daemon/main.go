@@ -475,14 +475,15 @@ const (
 // fallback.
 func newNativeFetcher(cfg config.Config) *fetcher.Native {
 	return fetcher.NewNative(fetcher.NativeOptions{
-		Timeout:           time.Duration(cfg.Fetcher.Native.TimeoutSeconds) * time.Second,
-		UserAgent:         cfg.Fetcher.Native.UserAgent,
-		JinaFallback:      cfg.Fetcher.Native.JinaFallback,
-		JinaBaseURL:       cfg.Fetcher.Native.JinaBaseURL,
-		JinaAPIKey:        cfg.Fetcher.Native.JinaAPIKey,
-		DeadLinkDetection: cfg.Fetcher.Native.DeadLinkDetection,
-		Backend:           cfg.Fetcher.Native.Backend,
-		Log:               slog.Default(),
+		Timeout:                   time.Duration(cfg.Fetcher.Native.TimeoutSeconds) * time.Second,
+		UserAgent:                 cfg.Fetcher.Native.UserAgent,
+		JinaFallback:              cfg.Fetcher.Native.JinaFallback,
+		JinaBaseURL:               cfg.Fetcher.Native.JinaBaseURL,
+		JinaAPIKey:                cfg.Fetcher.Native.JinaAPIKey,
+		JinaSiteRequestsPerMinute: cfg.Fetcher.Native.JinaSiteRequestsPerMinute,
+		DeadLinkDetection:         cfg.Fetcher.Native.DeadLinkDetection,
+		Backend:                   cfg.Fetcher.Native.Backend,
+		Log:                       slog.Default(),
 	})
 }
 

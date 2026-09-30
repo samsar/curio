@@ -154,8 +154,7 @@ func TestNative_EndlessHTMLHitsBodyCap(t *testing.T) {
 			assert.ErrorIs(t, err, ErrTooLarge)
 			assert.Zero(t, jinaHits.Load(), "an oversized page must not go to Jina")
 
-			_, ok := n.hostCache.Get(hostOf(srv.URL))
-			assert.False(t, ok, "an oversized page says nothing about the host")
+			assert.False(t, hostCached(n, hostOf(srv.URL)), "an oversized page says nothing about the host")
 		})
 	}
 }

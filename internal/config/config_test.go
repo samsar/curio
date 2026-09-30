@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/samsar/curio/internal/fetcher"
 )
 
 func TestLoad_MissingFile_ReturnsDefaults(t *testing.T) {
@@ -86,6 +88,26 @@ chunking:
 	assert.Equal(t, 128, got.Chunking.OverlapTokens)
 }
 
+// TestLoad_JinaSiteRequestsPerMinute: the key sets the pace, and a file
+// without it keeps the fetcher's default.
+func TestLoad_JinaSiteRequestsPerMinute(t *testing.T) {
+	got, err := Load(writeConfig(t, "fetcher:\n  native:\n    jina_site_requests_per_minute: 3\n"))
+	require.NoError(t, err)
+	assert.Equal(t, 3, got.Fetcher.Native.JinaSiteRequestsPerMinute)
+	assert.True(t, got.Fetcher.Native.JinaFallback, "untouched sibling keeps default")
+
+	got, err = Load(writeConfig(t, "fetcher:\n  native:\n    timeout_seconds: 10\n"))
+	require.NoError(t, err)
+	assert.Equal(t, fetcher.DefaultJinaSiteRequestsPerMinute, got.Fetcher.Native.JinaSiteRequestsPerMinute)
+}
+
+// TestDefault_JinaSiteRequestsPerMinute: config's default is the fetcher's,
+// which config can't import without linking the fetcher into every binary
+// that reads config.yaml.
+func TestDefault_JinaSiteRequestsPerMinute(t *testing.T) {
+	assert.Equal(t, fetcher.DefaultJinaSiteRequestsPerMinute, Default().Fetcher.Native.JinaSiteRequestsPerMinute)
+}
+
 func TestLoad_MalformedYAML(t *testing.T) {
 	path := writeConfig(t, "daemon: {not valid yaml")
 	_, err := Load(path)
@@ -128,6 +150,10 @@ func TestValidate(t *testing.T) {
 		{"zero rrf_k", func(c *Config) { c.Search.RRFK = 0 }, "search.rrf_k"},
 		{"bad collapse", func(c *Config) { c.Search.Collapse = "average" }, "search.collapse"},
 		{"zero web2md timeout", func(c *Config) { c.Fetcher.Web2MD.TimeoutSeconds = 0 }, "web2md.timeout_seconds"},
+		{"zero Jina requests a site", func(c *Config) { c.Fetcher.Native.JinaSiteRequestsPerMinute = 0 },
+			"fetcher.native.jina_site_requests_per_minute must be at least 1, got 0"},
+		{"negative Jina requests a site", func(c *Config) { c.Fetcher.Native.JinaSiteRequestsPerMinute = -3 },
+			"fetcher.native.jina_site_requests_per_minute"},
 		{"zero min_similarity", func(c *Config) { c.Insight.MinSimilarity = 0 }, "insight.min_similarity"},
 		{"min_similarity above 1", func(c *Config) { c.Insight.MinSimilarity = 1.5 }, "insight.min_similarity"},
 		{"NaN min_similarity", func(c *Config) { c.Insight.MinSimilarity = math.NaN() }, "insight.min_similarity"},
@@ -331,6 +357,8 @@ func TestLoad_StrictKeys(t *testing.T) {
 		{name: "top-level typo", yaml: "embeding:\n  model: x\n", wantKey: "embeding"},
 		{name: "nested typo", yaml: "fetcher:\n  native:\n    timeout_secs: 5\n", wantKey: "timeout_secs"},
 		{name: "jina key typo", yaml: "fetcher:\n  native:\n    jina_key: x\n", wantKey: "jina_key"},
+		{name: "jina site pace typo", yaml: "fetcher:\n  native:\n    jina_requests_per_site: 3\n",
+			wantKey: "jina_requests_per_site"},
 		{name: "ui key typo", yaml: "ui:\n  load_images: true\n", wantKey: "load_images"},
 	}
 	for _, tc := range cases {

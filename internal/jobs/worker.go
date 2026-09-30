@@ -29,9 +29,10 @@ import (
 
 // HandlerFunc executes one job. Return nil for success; return an error for
 // failure. The worker decides retry vs. permanent failure based on whether
-// the error is wrapped with ErrPermanent. A handler that didn't try, held
-// back by a limit curio keeps itself, returns a *DeferError instead: the
-// job waits for the hold without using up an attempt.
+// the error is wrapped with ErrPermanent. A handler held back by a limit,
+// one curio keeps itself or one an upstream names the end of, returns a
+// *DeferError instead: the job waits for the hold without using up an
+// attempt.
 type HandlerFunc func(ctx context.Context, job *store.Job) error
 
 // PermFailHook runs after a job reaches terminal failure (ErrPermanent or
@@ -47,8 +48,9 @@ type PermFailHook func(ctx context.Context, job *store.Job, cause error) error
 var ErrPermanent = errors.New("permanent failure")
 
 // DeferError is a handler's report that it didn't run its job: a hold curio
-// keeps itself (an upstream's shared rate-limit cooldown) outlasts what the
-// handler waits out inline. The job goes back to the queue until Until,
+// keeps itself (an upstream's shared rate-limit cooldown), or one an
+// upstream named the end of (Jina Reader's block of a site), outlasts what
+// the handler waits out inline. The job goes back to the queue until Until,
 // with the attempt refunded and "waiting for <Reason>" as its last_error,
 // while it is younger than deferralBudget; after that the deferral fails
 // the attempt like any error, with Err's text. Reason is worded to follow

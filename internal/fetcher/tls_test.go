@@ -214,8 +214,7 @@ func TestNative_UntrustedCertificateIsPermanent(t *testing.T) {
 			assert.ErrorIs(t, err, ErrTLSCertificate)
 			assert.Contains(t, err.Error(), "x509:")
 			assert.Zero(t, jinaHits.Load(), "Jina must not fetch past a failed certificate check")
-			_, cached := n.hostCache.Get(hostOf(origin.URL))
-			assert.False(t, cached)
+			assert.False(t, hostCached(n, hostOf(origin.URL)))
 
 			before := handshakes.Load()
 			_, err = n.Fetch(t.Context(), origin.URL+"/b")
@@ -291,8 +290,7 @@ func TestNative_JinaCertificateFailureIsJinasTrouble(t *testing.T) {
 			assert.ErrorIs(t, err, ErrTLSCertificate)
 			var pe *PermanentError
 			assert.False(t, errors.As(err, &pe), "Jina's trouble must leave the fetch retryable: %v", err)
-			_, cached := n.hostCache.Get(hostOf(origin.URL))
-			assert.False(t, cached)
+			assert.False(t, hostCached(n, hostOf(origin.URL)))
 		})
 	}
 }
