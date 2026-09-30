@@ -185,11 +185,15 @@ func importNotes(e Estimate, rate float64, pages []string, cfg config.Config, co
 			"from one site: those may take longer than this", strings.Join(named, ", "), perHostInFlight))
 	}
 	if n := countHost(pages, githubHost); n > 0 && cfg.Fetcher.GitHub.Token == "" {
+		wait := "up to about " + formatDuration(gitHubWait(n)) + " for these"
+		if gitHubWait(n) > store.DeferralBudget {
+			wait = fmt.Sprintf("about %d of them a day", gitHubPagesPerHour*int(store.DeferralBudget/time.Hour))
+		}
 		notes = append(notes, fmt.Sprintf("  %s on github.com: without a token GitHub allows 60 API requests "+
-			"an hour, 2 a repository, so they wait for its hourly limit: up to about %s for these. Set "+
+			"an hour, 2 a repository, so they wait for its hourly limit: %s. Set "+
 			"fetcher.github.token in %s, then `curio daemon stop` (the next command starts it again). Pages "+
 			"still waiting after a day fail as rate_limited; `curio refetch --all --cause=rate_limited` retries them",
-			plural(n, "page"), formatDuration(gitHubWait(n)), configPath))
+			plural(n, "page"), wait, configPath))
 	}
 	restart := "the next curio command starts the daemon again"
 	if managed {

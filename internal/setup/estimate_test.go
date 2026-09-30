@@ -141,6 +141,14 @@ func TestImportNotes_GitHub(t *testing.T) {
 	assert.Contains(t, notes, "`curio throttle gentle`")
 	assert.Contains(t, notes, "A sleeping Mac pauses the import.")
 
+	// More than a day's worth: the note says what a day serves, not a
+	// wait past the day after which they fail.
+	many := urlsOn("github.com", 1000)
+	e = estimateImport(len(many), cfg.Daemon.FetchWorkers, 40, "")
+	notes = strings.Join(importNotes(e, 40, many, cfg, "/Users/x/.curio/config.yaml", true), "\n")
+	assert.Contains(t, notes, "they wait for its hourly limit: about 720 of them a day.")
+	assert.NotContains(t, notes, "up to about 34h")
+
 	cfg.Fetcher.GitHub.Token = "ghp_example"
 	notes = strings.Join(importNotes(e, 40, pages, cfg, "/Users/x/.curio/config.yaml", false), "\n")
 	assert.NotContains(t, notes, "github.com")

@@ -66,15 +66,8 @@ func (e *DeferError) Error() string { return e.Err.Error() }
 func (e *DeferError) Unwrap() error { return e.Err }
 
 const (
-	// deferralBudget is how long after its creation a job may still be
-	// deferred. A day is 24 of GitHub's hourly resets, time for about 700
-	// repositories at 2 calls each without a token, and the longest
-	// Retry-After the fetchers honor. An upstream that holds curio off for
-	// longer won't serve it: a visible failure that a refetch retries beats
-	// a document pending for days. The budget counts from
-	// created_at, which the queue already keeps, and a refetch enqueues a
-	// new job with a new budget.
-	deferralBudget = 24 * time.Hour
+	// deferralBudget is store.DeferralBudget, which says why a day.
+	deferralBudget = store.DeferralBudget
 	// minDeferral is the shortest wait a deferral sets, so a hold that has
 	// already ended (or a handler that named no time) can't make a job spin
 	// through claims.

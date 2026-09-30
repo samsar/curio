@@ -48,7 +48,7 @@ func TestProgressLine(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, progressLine(stats, tc.queue, 0.5))
+			assert.Equal(t, tc.want, progressLine(stats, tc.queue, 0.5, time.Now()))
 		})
 	}
 }
@@ -65,11 +65,26 @@ func TestProgressLine_DueLater(t *testing.T) {
 	}
 	waiting := &client.Stats{JobsByStatus: map[string]int{"done": 7, "pending": 172}}
 	assert.Equal(t, "  done=7  pending=172  running=0  failed=0  fetched=0   172 due later, the first at 14:32",
-		progressLine(waiting, queue(171, 171), 0))
+		progressLine(waiting, queue(171, 171), 0, next.Add(-time.Hour)))
 
 	working := &client.Stats{JobsByStatus: map[string]int{"done": 7, "pending": 172, "running": 2}}
 	assert.Equal(t, "  done=7  pending=172  running=2  failed=0  fetched=0   rate≈0.5/s   eta≈3m24s (72 more due later)",
-		progressLine(working, queue(171, 71), 0.5))
+		progressLine(working, queue(171, 71), 0.5, next.Add(-time.Hour)))
+}
+
+// TestDueAt: when the first job due later is due, on the local clock: a
+// time today, tomorrow's, or a date after that; a deferral can be up to a
+// day ahead.
+func TestDueAt(t *testing.T) {
+	now := time.Date(2026, 9, 30, 22, 0, 0, 0, time.Local)
+	for next, want := range map[time.Time]string{
+		time.Date(2026, 9, 30, 23, 15, 0, 0, time.Local): "at 23:15",
+		time.Date(2026, 9, 30, 21, 59, 0, 0, time.Local): "at 21:59",
+		time.Date(2026, 10, 1, 9, 5, 0, 0, time.Local):   "tomorrow at 09:05",
+		time.Date(2026, 10, 2, 0, 0, 0, 0, time.Local):   "on Oct 2 at 00:00",
+	} {
+		assert.Equal(t, want, dueAt(next, now), next)
+	}
 }
 
 // TestFollowETA: --follow's ETA counts the jobs due now, running or

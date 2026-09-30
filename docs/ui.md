@@ -43,17 +43,16 @@ and health (which checks Ollama) every 15 seconds; why documents failed
 is read when the page loads. A document's page shows its jobs while one
 is queued, waiting or running: why, if the queue holds them; the attempt
 a job is on, once it has used one; and for a job that waits for a time,
-when it is due and why on a line of its own, the error a retry follows or
-the rate limit a fetch waits out, whole on hover. Then it offers a reload
-once there is something new to show: a new text, a failure, or another
-change. Interests does the same for a
-rebuild: queued or running, then "New interests are ready: reload", or
-why the rebuild failed. Failures refreshes its groups, and the count on
-its tab, after a refetch you make there and when you come back to its
-tab, never on a timer. Nothing refreshes while the tab is in the
-background; it catches up when you come back. If the daemon stops
-answering, a note says the page isn't updating, and it goes once the
-daemon is back.
+when it is due and why on a line of its own, the error a retry follows
+or the rate limit a fetch waits out, whole on hover. Then it offers a
+reload once there is something new to show: a new text, a failure, or
+another change. Interests does the same for a rebuild: queued or
+running, then "New interests are ready: reload", or why the rebuild
+failed. Failures refreshes its groups, and the count on its tab, after a
+refetch you make there and when you come back to its tab, never on a
+timer. Nothing refreshes while the tab is in the background; it catches
+up when you come back. If the daemon stops answering, a note says the
+page isn't updating, and it goes once the daemon is back.
 
 ## The pages
 

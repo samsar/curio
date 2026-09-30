@@ -269,7 +269,7 @@ func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 		if elapsed > 0 {
 			rate = float64(finished-lastFinished) / elapsed
 		}
-		fmt.Fprintln(w, progressLine(stats, queue, rate))
+		fmt.Fprintln(w, progressLine(stats, queue, rate, time.Now()))
 		lastFinished = finished
 		lastTick = time.Now()
 
@@ -295,13 +295,28 @@ func followETA(pending, running, later int, rate float64) time.Duration {
 	return time.Duration(float64(due) / rate * float64(time.Second)).Round(time.Second)
 }
 
+// dueAt says when next is due: "at 14:32" today, "tomorrow at 09:05", or
+// the date for later, on the local clock.
+func dueAt(next, now time.Time) string {
+	next, now = next.Local(), now.Local()
+	y, m, d := now.Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
+	switch {
+	case next.Before(today.AddDate(0, 0, 1)):
+		return "at " + next.Format("15:04")
+	case next.Before(today.AddDate(0, 0, 2)):
+		return "tomorrow at " + next.Format("15:04")
+	}
+	return "on " + next.Format("Jan 2 at 15:04")
+}
+
 // progressLine is one line of followProgress: the job and document counts,
 // the rate jobs finish at (a second) and the ETA of the jobs due now, and
 // why the queue is closed when it is. queue is nil when it couldn't be
 // read. Jobs due later are said beside the ETA, or, when nothing else is
 // pending or running, instead of the rate and the ETA, which have nothing
-// to measure: how many, and when the first is due.
-func progressLine(stats *client.Stats, queue *client.Queue, rate float64) string {
+// to measure: how many, and when the first is due, from now.
+func progressLine(stats *client.Stats, queue *client.Queue, rate float64, now time.Time) string {
 	pending, running := stats.JobsByStatus["pending"], stats.JobsByStatus["running"]
 	line := fmt.Sprintf("  done=%d  pending=%d  running=%d  failed=%d  fetched=%d",
 		stats.JobsByStatus["done"], pending, running, stats.JobsByStatus["failed"], stats.DocumentsByState["fetched"])
@@ -309,7 +324,7 @@ func progressLine(stats *client.Stats, queue *client.Queue, rate float64) string
 	eta := followETA(pending, running, later, rate)
 	switch {
 	case later > 0 && later >= pending && running == 0:
-		line += fmt.Sprintf("   %d due later, the first at %s", later, next.Local().Format("15:04"))
+		line += fmt.Sprintf("   %d due later, the first %s", later, dueAt(next, now))
 	case later > 0:
 		line += fmt.Sprintf("   rate≈%.1f/s   eta≈%s (%d more due later)", rate, eta, later)
 	default:

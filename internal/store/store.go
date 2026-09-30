@@ -783,6 +783,16 @@ func NewDocumentJob(tenantID string, kind JobKind, documentID string) (*Job, err
 	return &Job{TenantID: tenantID, Kind: kind, Payload: payload}, nil
 }
 
+// DeferralBudget is how long after its creation a job may still be
+// deferred (JobQueue.Defer); past it, the worker counts a deferral as a
+// failed attempt. A day is 24 of GitHub's hourly resets, time for about
+// 700 repositories at 2 calls each without a token, and the longest
+// Retry-After the fetchers honor. An upstream that holds curio off for
+// longer won't serve it: a visible failure that a refetch retries beats a
+// document pending for days. The budget counts from created_at, which the
+// queue already keeps, and a refetch enqueues a new job with a new budget.
+const DeferralBudget = 24 * time.Hour
+
 // JobQueue is the SQLite-backed work queue.
 //
 // The transitions out of running (MarkDone, MarkFailed, Requeue, Defer)
