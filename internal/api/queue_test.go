@@ -33,11 +33,17 @@ func decodeQueue(t *testing.T, resp response) QueueResponse {
 	return q
 }
 
+// TestQueue_Get: each pool's limit and its jobs, daemon-wide, with the
+// pending ones that can't run yet counted apart, and when the first of
+// them can.
 func TestQueue_Get(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
+	later := time.Now().UTC().Add(24 * time.Minute).Truncate(time.Millisecond)
 	for _, j := range []*store.Job{
 		{TenantID: "local", Kind: store.JobKindFetch},
+		{TenantID: "local", Kind: store.JobKindFetch, RunAfter: later},
+		{TenantID: "local", Kind: store.JobKindFetch, RunAfter: later.Add(time.Hour)},
 		{TenantID: "local", Kind: store.JobKindFetch, Status: store.JobStatusRunning},
 		{TenantID: "other", Kind: store.JobKindFetch},
 		{TenantID: "local", Kind: store.JobKindFetch, Status: store.JobStatusDone},
@@ -52,7 +58,7 @@ func TestQueue_Get(t *testing.T) {
 		Throttle: "normal",
 		State:    "open",
 		Kinds: []QueueKindResponse{
-			{Kind: "fetch", Limit: testPools.Fetch, Running: 1, Pending: 2},
+			{Kind: "fetch", Limit: testPools.Fetch, Running: 1, Pending: 4, DueLater: 2, NextDue: later},
 			{Kind: "index", Limit: testPools.Index},
 			{Kind: "cluster", Limit: 1, Pending: 1},
 		},

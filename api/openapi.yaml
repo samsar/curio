@@ -1676,8 +1676,19 @@ components:
         kind:    { $ref: "#/components/schemas/JobKind" }
         limit:   { type: integer, description: "How many jobs of the kind may run at once while the queue is open" }
         running: { type: integer, description: "Running now, daemon-wide" }
-        pending: { type: integer, description: "Waiting to run, daemon-wide, retries waiting on run_after included" }
-      required: [kind, limit, running, pending]
+        pending: { type: integer, description: "Waiting to run, daemon-wide, the ones due later included" }
+        due_later:
+          type: integer
+          description: >
+            How many of the pending jobs can't run yet, because their
+            run_after is still ahead: a retry backing off after a failed
+            attempt, or a job deferred while an upstream's rate limit holds
+            curio back.
+        next_due:
+          type: string
+          format: date-time
+          description: When the first of the jobs due later can run; present exactly when due_later is above 0.
+      required: [kind, limit, running, pending, due_later]
 
     QueueUpdate:
       type: object

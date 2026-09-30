@@ -1063,6 +1063,55 @@ func TestStatus_ProgressClosed(t *testing.T) {
 	}
 }
 
+// TestStatus_Progress: each state of the progress estimate, and the jobs
+// due later beside the work due now; the queue's state line doesn't say it
+// works while every job waits for a later time.
+func TestStatus_Progress(t *testing.T) {
+	r := newRenderer(t)
+	soon := time.Now().Add(24*time.Minute + 30*time.Second)
+	progressOf := func(open bool, work ...KindWork) string {
+		st := Status{Layout: Layout{Title: "Status"}, Progress: &ProgressPanel{Reason: "paused",
+			Progress: EstimateProgress(work, ProgressWindow, open)}}
+		return textOf(byID(parse(t, render(t, r, PageStatus, st)), "progress-live"))
+	}
+	cases := []struct {
+		name string
+		open bool
+		work []KindWork
+		want string
+	}{
+		{"idle", true, nil, "Nothing queued."},
+		{"closed", false, []KindWork{{Kind: "fetch", Pending: 5, DueLater: 3, NextDue: soon}},
+			"5 jobs queued. Paused: none start until the queue opens."},
+		{"waiting", true, []KindWork{{Kind: "fetch", Pending: 171, DueLater: 171, NextDue: soon}},
+			"171 jobs due later, the first in 24 min: none can run before then."},
+		{"stalled", true, []KindWork{{Kind: "fetch", Pending: 5, DueLater: 3, NextDue: soon}},
+			"2 jobs queued, and none finished in the last 10m. 3 more jobs are due later, the first in 24 min."},
+		{"running", true, []KindWork{{Kind: "fetch", Pending: 21, DueLater: 1, NextDue: soon, Finished: 10}},
+			"20 jobs left≈ 20mAn estimate at the pace of the last 10m: 10 jobs finished, 1.0 a minute. " +
+				"1 more job is due later, the first in 24 min."},
+		{"running, nothing due later", true, []KindWork{{Kind: "fetch", Pending: 20, Finished: 10}},
+			"20 jobs left≈ 20mAn estimate at the pace of the last 10m: 10 jobs finished, 1.0 a minute."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, strings.TrimSpace(progressOf(tc.open, tc.work...)))
+		})
+	}
+
+	why := func(q QueuePanel) string {
+		out := render(t, r, PageStatus, Status{Layout: Layout{Title: "Status"}, Queue: &q})
+		return textOf(byID(parse(t, out), "queue-state"))
+	}
+	assert.Equal(t, "open171 jobs due later, the first in 24 min", why(QueuePanel{Open: true,
+		Kinds: []KindLoad{{Kind: "fetch", Pending: 171, DueLater: 171, NextDue: soon}, {Kind: "index"}}}))
+	assert.Equal(t, "openWorking: 172 jobs waiting", why(QueuePanel{Open: true,
+		Kinds: []KindLoad{{Kind: "fetch", Pending: 171, DueLater: 171, NextDue: soon}, {Kind: "index", Pending: 1}}}),
+		"one job can run")
+	assert.Equal(t, "openWorking: 171 jobs waiting", why(QueuePanel{Open: true,
+		Kinds: []KindLoad{{Kind: "fetch", Pending: 171, DueLater: 171, NextDue: soon, Running: 1}}}), "one runs")
+}
+
 // TestDocumentJobs: what came of a document's jobs against its page's
 // baseline, and when its poller polls.
 func TestDocumentJobs(t *testing.T) {

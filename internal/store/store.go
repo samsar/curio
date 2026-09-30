@@ -864,8 +864,9 @@ type JobStore interface {
 	PruneOlderThan(ctx context.Context, tenantID string, before time.Time) (int64, error)
 	// QueueCounts counts the pending and running jobs of each kind, across
 	// tenants: workers claim across tenants, so the queue they work through
-	// is daemon-wide. Pending includes retries waiting on run_after. Kinds
-	// with neither are absent from the map.
+	// is daemon-wide. Pending counts every pending job; DueLater and NextDue
+	// single out those whose run_after is still ahead. Kinds with neither
+	// pending nor running jobs are absent from the map.
 	QueueCounts(ctx context.Context) (map[JobKind]QueueCount, error)
 	// AttemptLimit is how many attempts a job gets: MarkFailed fails it
 	// for good once its attempts reach this many.
@@ -875,6 +876,12 @@ type JobStore interface {
 // QueueCount is how many jobs of one kind are waiting and running.
 type QueueCount struct {
 	Pending, Running int
+	// DueLater is how many of the pending jobs can't run yet: their
+	// run_after, a retry's backoff or a deferral's hold, is still ahead.
+	// NextDue is the earliest of those run_afters; zero when there are
+	// none.
+	DueLater int
+	NextDue  time.Time
 }
 
 // ListJobsOpts filters JobStore.ListWithDoc. Empty fields mean "no filter

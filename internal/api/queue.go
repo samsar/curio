@@ -46,12 +46,16 @@ type KeepAwake interface {
 
 // QueueKindResponse is one pool's kind: how many of its jobs may run at
 // once while the queue is open, and how many are running and waiting,
-// daemon-wide.
+// daemon-wide. DueLater is how many of the waiting ones can't run yet (a
+// retry's backoff, a deferral's hold); NextDue, present exactly when
+// there are some, is when the first of them can.
 type QueueKindResponse struct {
-	Kind    string `json:"kind"`
-	Limit   int    `json:"limit"`
-	Running int    `json:"running"`
-	Pending int    `json:"pending"`
+	Kind     string    `json:"kind"`
+	Limit    int       `json:"limit"`
+	Running  int       `json:"running"`
+	Pending  int       `json:"pending"`
+	DueLater int       `json:"due_later"`
+	NextDue  time.Time `json:"next_due,omitzero"`
 }
 
 // QueueUpdateRequest is the body of PUT /v1/queue. Only the fields given
@@ -168,7 +172,7 @@ func queueResponse(st jobs.QueueState, counts map[store.JobKind]store.QueueCount
 	for _, l := range st.Limits {
 		c := counts[l.Kind]
 		resp.Kinds = append(resp.Kinds, QueueKindResponse{Kind: string(l.Kind), Limit: l.Limit,
-			Running: c.Running, Pending: c.Pending})
+			Running: c.Running, Pending: c.Pending, DueLater: c.DueLater, NextDue: c.NextDue})
 	}
 	return resp
 }

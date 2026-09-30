@@ -272,7 +272,7 @@ func TestQueryPlans(t *testing.T) {
 		},
 		{
 			name:  "QueueCounts",
-			query: queueCountsSQL, args: []any{store.JobStatusPending, store.JobStatusRunning},
+			query: queueCountsSQL, args: []any{store.JobStatusPending, store.JobStatusRunning, "now"},
 			want: []string{"SEARCH jobs USING COVERING INDEX idx_jobs_claim (status=?)"},
 		},
 		{

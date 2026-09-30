@@ -126,10 +126,14 @@ type QueuePanel struct {
 }
 
 // KindLoad is one pool's load, and how many of its jobs finished, done or
-// failed, in the panel's FinishedIn.
+// failed, in the panel's FinishedIn. DueLater is how many of its pending
+// jobs can't run yet, and NextDue when the first of them can (zero when
+// none).
 type KindLoad struct {
 	Kind                              string
 	Running, Limit, Pending, Finished int
+	DueLater                          int
+	NextDue                           time.Time
 }
 
 // Waiting is how many jobs wait in the pools.
@@ -139,6 +143,32 @@ func (p QueuePanel) Waiting() int {
 		n += k.Pending
 	}
 	return n
+}
+
+// OnlyDueLater reports whether jobs wait, none runs, and every one that
+// waits can't run yet: the queue is open, but has nothing to work on
+// before NextDue.
+func (p QueuePanel) OnlyDueLater() bool {
+	later := 0
+	for _, k := range p.Kinds {
+		if k.Running > 0 {
+			return false
+		}
+		later += k.DueLater
+	}
+	return later > 0 && later == p.Waiting()
+}
+
+// NextDue is when the first job due later in the pools can run; zero when
+// none waits for a time.
+func (p QueuePanel) NextDue() time.Time {
+	var next time.Time
+	for _, k := range p.Kinds {
+		if !k.NextDue.IsZero() && (next.IsZero() || k.NextDue.Before(next)) {
+			next = k.NextDue
+		}
+	}
+	return next
 }
 
 // Toggle is the queue's Pause button, or Resume while it is paused.

@@ -221,9 +221,11 @@ var followEvery = 2 * time.Second
 
 // followProgress polls /v1/stats every 2 seconds and prints a one-line
 // progress update until the queue is drained (zero pending + zero running).
-// Each line also says when the queue is closed, and why, from /v1/queue;
-// when that can't be read the line goes without. Cancelling ctx (ctrl-c) is
-// a quiet stop: it prints an interrupt notice and returns nil, since the
+// Each line also says when the queue is closed, and why, and how many jobs
+// are due later, from /v1/queue; when that can't be read the line goes
+// without. The ETA counts only the jobs due now: the ones due later can't
+// run before their time, however fast the rest go. Cancelling ctx (ctrl-c)
+// is a quiet stop: it prints an interrupt notice and returns nil, since the
 // import itself has finished.
 func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 	fmt.Fprintln(w, "\nwatching queue drain — ctrl-c to exit")
@@ -267,9 +269,11 @@ func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 		if elapsed > 0 {
 			rate = float64(finished-lastFinished) / elapsed
 		}
+		later, _ := dueLater(queue)
+		due := max(pending-later, 0) + running
 		var eta time.Duration
-		if rate > 0 && pending+running > 0 {
-			eta = time.Duration(float64(pending+running) / rate * float64(time.Second)).Round(time.Second)
+		if rate > 0 && due > 0 {
+			eta = time.Duration(float64(due) / rate * float64(time.Second)).Round(time.Second)
 		}
 		fmt.Fprintln(w, progressLine(stats, queue, rate, eta))
 		lastFinished = finished
@@ -288,11 +292,21 @@ func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 
 // progressLine is one line of followProgress: the job and document counts,
 // the rate and ETA, and why the queue is closed when it is. queue is nil
-// when it couldn't be read.
+// when it couldn't be read. Jobs due later are said beside the ETA, or,
+// when nothing else is pending or running, instead of the rate and the
+// ETA, which have nothing to measure: how many, and when the first is due.
 func progressLine(stats *client.Stats, queue *client.Queue, rate float64, eta time.Duration) string {
-	line := fmt.Sprintf("  done=%d  pending=%d  running=%d  failed=%d  fetched=%d   rate≈%.1f/s   eta≈%s",
-		stats.JobsByStatus["done"], stats.JobsByStatus["pending"], stats.JobsByStatus["running"],
-		stats.JobsByStatus["failed"], stats.DocumentsByState["fetched"], rate, eta)
+	pending, running := stats.JobsByStatus["pending"], stats.JobsByStatus["running"]
+	line := fmt.Sprintf("  done=%d  pending=%d  running=%d  failed=%d  fetched=%d",
+		stats.JobsByStatus["done"], pending, running, stats.JobsByStatus["failed"], stats.DocumentsByState["fetched"])
+	switch later, next := dueLater(queue); {
+	case later > 0 && later >= pending && running == 0:
+		line += fmt.Sprintf("   %d due later, the first at %s", later, next.Local().Format("15:04"))
+	case later > 0:
+		line += fmt.Sprintf("   rate≈%.1f/s   eta≈%s (%d more due later)", rate, eta, later)
+	default:
+		line += fmt.Sprintf("   rate≈%.1f/s   eta≈%s", rate, eta)
+	}
 	if why := whyClosed(queue); why != "" {
 		line += "   queue " + why
 	}

@@ -52,3 +52,22 @@ func TestProgressLine(t *testing.T) {
 		})
 	}
 }
+
+// TestProgressLine_DueLater: jobs due later are said beside the ETA, which
+// leaves them out, or, when they are all that is queued, instead of a rate
+// and an ETA that have nothing to measure.
+func TestProgressLine_DueLater(t *testing.T) {
+	next := time.Date(2026, 9, 30, 14, 32, 0, 0, time.Local)
+	queue := func(pending, later int) *client.Queue {
+		return &client.Queue{State: client.QueueOpen, Kinds: []client.QueueKind{
+			{Kind: "fetch", Pending: pending, DueLater: later, NextDue: next.Add(time.Hour).UTC()},
+			{Kind: "index", Pending: 1, DueLater: 1, NextDue: next.UTC()}}}
+	}
+	waiting := &client.Stats{JobsByStatus: map[string]int{"done": 7, "pending": 172}}
+	assert.Equal(t, "  done=7  pending=172  running=0  failed=0  fetched=0   172 due later, the first at 14:32",
+		progressLine(waiting, queue(171, 171), 0, 0))
+
+	working := &client.Stats{JobsByStatus: map[string]int{"done": 7, "pending": 172, "running": 2}}
+	assert.Equal(t, "  done=7  pending=172  running=2  failed=0  fetched=0   rate≈0.5/s   eta≈14s (72 more due later)",
+		progressLine(working, queue(171, 71), 0.5, 14*time.Second))
+}
