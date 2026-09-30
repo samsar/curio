@@ -140,8 +140,8 @@ const (
 	// article.
 	FailureCauseLoginWall FailureCause = "login_wall"
 	// FailureCauseJinaRefused: the Jina Reader fallback refused the target
-	// (a domain block, a publisher's opt-out, a deterministic 4xx),
-	// normally after the site served a page curio can't use.
+	// (a publisher's opt-out, a deterministic 4xx), normally after the site
+	// served a page curio can't use.
 	FailureCauseJinaRefused FailureCause = "jina_refused"
 	// FailureCauseTLS: the site's certificate failed verification.
 	FailureCauseTLS FailureCause = "tls"
@@ -153,8 +153,9 @@ const (
 	// FailureCauseNetwork: any other transport failure (a reset, a TLS
 	// alert, a redirect loop, our own network down).
 	FailureCauseNetwork FailureCause = "network"
-	// FailureCauseRateLimited: the site, or GitHub or YouTube, rate-limited
-	// the requests.
+	// FailureCauseRateLimited: the site, GitHub, YouTube or Jina Reader
+	// rate-limited the requests (a 429), or Jina Reader blocked the site's
+	// keyless reads for longer than the job could wait.
 	FailureCauseRateLimited FailureCause = "rate_limited"
 	// FailureCauseHTTPError: any other HTTP status, or an error page naming
 	// one.

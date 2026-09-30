@@ -216,9 +216,9 @@ func TestHealth_EmbeddingDrift(t *testing.T) {
 }
 
 // TestHealth_Upstreams: healthz reports each upstream as the daemon sees
-// it: every state, times in UTC, unset times and a cooldown that isn't in
-// effect left out, and an empty recent or upstream list sent as such,
-// never as null.
+// it: every state, times in UTC, unset times, a cooldown that isn't in
+// effect and site pauses when there are none left out, and an empty recent
+// or upstream list sent as such, never as null.
 func TestHealth_Upstreams(t *testing.T) {
 	healthz := func(t *testing.T, upstreams func() []fetcher.UpstreamHealth) map[string]any {
 		t.Helper()
@@ -248,6 +248,8 @@ func TestHealth_Upstreams(t *testing.T) {
 		upstreams[2].Recent = map[fetcher.CallClass]int{fetcher.CallOK: 12, fetcher.CallRefused: 2}
 		upstreams[4].LastFailure, upstreams[4].LastFailureClass = failure, fetcher.CallChallenged
 		upstreams[4].CooldownUntil = failure.Add(10 * time.Minute)
+		upstreams[2].SitePauses = []fetcher.SitePause{{Site: "forbes.com", Until: failure.Add(20 * time.Minute)},
+			{Site: "twitter.com", Until: failure.Add(time.Hour)}}
 
 		got := healthz(t, func() []fetcher.UpstreamHealth { return upstreams })["upstreams"].([]any)
 		require.Len(t, got, len(upstreams))
@@ -258,7 +260,11 @@ func TestHealth_Upstreams(t *testing.T) {
 			"window_seconds": float64(900), "recent": map[string]any{}}, got[0])
 		assert.Equal(t, map[string]any{"name": "ok", "enabled": true, "state": "ok",
 			"last_success_at": "2026-09-27T13:40:01Z", "window_seconds": float64(900),
-			"recent": map[string]any{"ok": float64(12), "refused": float64(2)}}, got[2])
+			"recent": map[string]any{"ok": float64(12), "refused": float64(2)},
+			"site_pauses": []any{
+				map[string]any{"site": "forbes.com", "until": "2026-09-27T15:00:01Z"},
+				map[string]any{"site": "twitter.com", "until": "2026-09-27T15:40:01Z"},
+			}}, got[2])
 		assert.Equal(t, map[string]any{"name": "paused", "enabled": true, "state": "paused",
 			"last_failure_at": "2026-09-27T14:40:01Z", "last_failure_class": "challenged",
 			"window_seconds": float64(900), "recent": map[string]any{},

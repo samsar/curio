@@ -97,6 +97,14 @@ type UpstreamHealth struct {
 	WindowSeconds    int            `json:"window_seconds"`
 	Recent           map[string]int `json:"recent"`
 	CooldownUntil    time.Time      `json:"cooldown_until,omitzero"`
+	SitePauses       []SitePause    `json:"site_pauses,omitempty"`
+}
+
+// SitePause is an upstream's block of one site's reads on the wire
+// (fetcher.SitePause), until a UTC time.
+type SitePause struct {
+	Site  string    `json:"site"`
+	Until time.Time `json:"until"`
 }
 
 // upstreams reports the health of each upstream the daemon tracks: an
@@ -118,7 +126,21 @@ func (d Deps) upstreams() []UpstreamHealth {
 			WindowSeconds:    int(u.Window / time.Second),
 			Recent:           stringKeys(u.Recent),
 			CooldownUntil:    u.CooldownUntil.UTC(),
+			SitePauses:       sitePauses(u.SitePauses),
 		})
+	}
+	return out
+}
+
+// sitePauses is pauses on the wire: nil, and so left out, when there are
+// none.
+func sitePauses(pauses []fetcher.SitePause) []SitePause {
+	if len(pauses) == 0 {
+		return nil
+	}
+	out := make([]SitePause, len(pauses))
+	for i, p := range pauses {
+		out[i] = SitePause{Site: p.Site, Until: p.Until.UTC()}
 	}
 	return out
 }

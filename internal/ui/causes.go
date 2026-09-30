@@ -23,7 +23,7 @@ var causes = map[store.FailureCause]causeText{
 	store.FailureCauseLoginWall: {"Behind a login", "The site answered with a sign-in page, " +
 		"a redirect onto one, or too little text to be the article.", "lock", "danger"},
 	store.FailureCauseJinaRefused: {"Refused by Jina Reader", "The site served a page curio can't use, " +
-		"and Jina Reader refused to fetch it: the site opted out, or Jina is limiting it.", "ban", "danger"},
+		"and Jina Reader refused to fetch it: the site opted out of Jina, or Jina rejected the request.", "ban", "danger"},
 	store.FailureCauseTLS: {"Certificate problem", "The site's certificate failed verification: " +
 		"expired, for another name, or from an unknown issuer.", "shield-x", "danger"},
 	store.FailureCauseUnreachable: {"Host unreachable", "The host's name doesn't resolve, " +
@@ -32,7 +32,7 @@ var causes = map[store.FailureCause]causeText{
 		"A refetch later often works.", "hourglass", "warn"},
 	store.FailureCauseNetwork: {"Connection problem", "The connection failed: a reset, a TLS alert, " +
 		"a redirect loop, or an answer cut short. A refetch later often works.", "zap-off", "warn"},
-	store.FailureCauseRateLimited: {"Rate limited", "The site, GitHub or YouTube asked curio to slow down. " +
+	store.FailureCauseRateLimited: {"Rate limited", "The site, GitHub, YouTube or Jina Reader asked curio to slow down. " +
 		"A refetch later usually works.", "gauge", "warn"},
 	store.FailureCauseHTTPError: {"HTTP error", "The site answered with an error status curio doesn't retry, " +
 		"like 400 or 401.", "server", "danger"},

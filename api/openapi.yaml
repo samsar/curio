@@ -970,12 +970,15 @@ components:
         gone; a dead document's cause, and only its), anti_bot (the site
         blocked the request), login_wall (a login page, or too little text
         to be the article), jina_refused (the Jina Reader fallback refused
-        the target, normally after the site served a page curio can't
-        use), tls (the certificate failed verification), unreachable (the host
-        doesn't resolve or refuses connections), timeout, network (any
-        other transport failure), rate_limited, http_error (any other
-        status), unsupported (a URL or content curio can't read), too_large
-        (over the body cap), index (fetched, then indexing gave up), other.
+        the target, a publisher's opt-out or a deterministic 4xx, normally
+        after the site served a page curio can't use), tls (the certificate
+        failed verification), unreachable (the host doesn't resolve or
+        refuses connections), timeout, network (any other transport
+        failure), rate_limited (the site, GitHub, YouTube or Jina Reader
+        asked curio to slow down: a 429, or Jina Reader's block of the
+        site's keyless reads), http_error (any other status), unsupported
+        (a URL or content curio can't read), too_large (over the body cap),
+        index (fetched, then indexing gave up), other.
       enum: [dead_link, anti_bot, login_wall, jina_refused, tls, unreachable, timeout, network, rate_limited,
         http_error, unsupported, too_large, index, other]
 
@@ -1098,7 +1101,7 @@ components:
             The last failure's class, present with last_failure_at:
               - challenged: the upstream's CDN took curio for a bot.
               - forbidden: a 403 that names no target.
-              - rate_limited: a 429.
+              - rate_limited: a 429, or Jina Reader's block of a site's keyless reads (see site_pauses).
               - auth: a 401 or 402, about curio's key or account.
               - server_error: a 5xx, 408, 421 or 425, or an answer that is none (1xx, 3xx).
               - network: no whole answer: a transport error, a timeout, a TLS failure, a body cut short.
@@ -1109,12 +1112,26 @@ components:
             Calls in the window per class; classes without calls are absent. The keys are the failure classes of last_failure_class and the healthy ones:
               - ok: the upstream served the page.
               - judged: it answered, and the answer is not the page (a challenge or login page, the target's error status, a body over the size cap).
-              - refused: it declined the target on purpose (a domain it blocks, a 4xx about the request).
+              - refused: it declined the target on purpose (a domain it excludes, a 4xx about the request).
           additionalProperties: { type: integer }
         cooldown_until:
           type: string
           format: date-time
           description: When the pause in effect ends; present only while one is.
+        site_pauses:
+          type: array
+          description: >
+            The sites the upstream blocks for now, by site, each until a UTC
+            time; absent when there are none. For jina, Jina Reader's blocks
+            of a site's keyless reads (an AbuseAlleviationError): curio holds
+            the site's pages until the block ends. A block of one site leaves
+            state alone.
+          items:
+            type: object
+            properties:
+              site:  { type: string, description: "The site: a registrable domain, such as twitter.com, or a host that has none" }
+              until: { type: string, format: date-time, description: "When the block ends" }
+            required: [site, until]
       required: [name, enabled, state, window_seconds, recent]
 
     Starting:
