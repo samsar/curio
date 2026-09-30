@@ -2,21 +2,23 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
 )
 
-// matchExcerptRunes is how much of a chunk's text a match without a BM25
-// snippet shows.
-const matchExcerptRunes = 300
-
-// search answers GET /ui/?q=&content_type=, the dashboard's home: the form,
-// and for a query, the results of the same search POST /v1/search runs, at
-// the default k, limited to the content type when one is given. A search
-// that fails is shown where its results would be, with its status. A type
-// that isn't one is a 400 page, as the Library answers it.
+// search answers GET /ui/?q=&content_type=&page=, the dashboard's home:
+// the form, and for a query, a page of the results of the same search POST
+// /v1/search runs, ui.SearchPageSize of them from the page's offset,
+// limited to the content type when one is given. A search that fails is
+// shown where its results would be, with its status. A type that isn't
+// one is a 400 page, as the Library answers it, and so is a page no search
+// can have, before anything is searched; without a query the page is
+// ignored. A page past this search's last is its answer, a 200 with the
+// out-of-range card: the page's status is its search's, and the search
+// answered, as POST /v1/search answers an offset past its total.
 //
 // Search as you type renders the whole page on every keystroke, so with a
 // query the page reads nothing but the search; without one it reads what
@@ -32,19 +34,40 @@ func (h pageHandlers) search(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	if strings.TrimSpace(q) == "" {
 		vm.Home = h.home(r)
+		h.page(w, r, status, ui.PageSearch, vm)
+		return
+	}
+	if vm.Page, err = searchPageParam(r); err != nil {
+		h.writePageError(w, r, err, ui.NavSearch)
+		return
+	}
+	req := SearchRequest{Query: q, K: ui.SearchPageSize, Offset: ui.PageOffset(vm.Page, ui.SearchPageSize)}
+	if contentType != "" {
+		req.Filters.ContentType = []string{string(contentType)}
+	}
+	resp, err := h.d.search(r.Context(), req)
+	if err != nil {
+		status, vm.Err = h.reportPanel(r, err)
 	} else {
-		req := SearchRequest{Query: q}
-		if contentType != "" {
-			req.Filters.ContentType = []string{string(contentType)}
-		}
-		resp, err := h.d.search(r.Context(), req)
-		if err != nil {
-			status, vm.Err = h.reportPanel(r, err)
-		} else {
-			vm.Results = searchResults(resp)
-		}
+		vm.Results = searchResults(resp)
 	}
 	h.page(w, r, status, ui.PageSearch, vm)
+}
+
+// searchPageParam reads the search page's ?page (ui.PageParam) as pageParam
+// reads a numbered list's, and refuses a page past ui.MaxSearchPages as
+// well: a search ranks store.MaxSearchK documents at most, so no search has
+// one, and the page's offset would be one POST /v1/search refuses.
+func searchPageParam(r *http.Request) (int, error) {
+	s := r.URL.Query().Get(ui.PageParam)
+	if s == "" {
+		return 1, nil
+	}
+	page, err := strconv.Atoi(s)
+	if err != nil || page < 1 || page > ui.MaxSearchPages {
+		return 0, badRequest("%s %q must be a whole number from 1 to %d", ui.PageParam, s, ui.MaxSearchPages)
+	}
+	return page, nil
 }
 
 // home is what the search page shows without a query: how many documents
@@ -72,24 +95,17 @@ func (h pageHandlers) home(r *http.Request) *ui.SearchHome {
 }
 
 func searchResults(resp SearchResponse) *ui.SearchResults {
-	res := &ui.SearchResults{Degraded: resp.Degraded, Warnings: resp.Warnings, TookMS: resp.TookMS}
+	res := &ui.SearchResults{Degraded: resp.Degraded, Warnings: resp.Warnings, TookMS: resp.TookMS,
+		Total: resp.Total, Capped: resp.Capped}
 	for _, item := range resp.Items {
-		hit := ui.SearchHit{DocumentID: item.Document.ID, Title: deref(item.Document.Title), URL: item.Document.URL,
+		hit := ui.SearchHit{DocumentID: item.Document.ID, Title: deref(item.Document.Title),
+			BookmarkTitle: strings.TrimSpace(item.BookmarkTitle), URL: item.Document.URL,
 			ContentType: item.Document.ContentType, Score: item.Score}
 		for _, m := range item.Matches {
-			hit.Matches = append(hit.Matches, ui.Match{Segments: matchSegments(m), BM25: m.BM25Score, Vector: m.VectorScore})
+			hit.Matches = append(hit.Matches, ui.Match{Segments: ui.Passage(m.Snippet, m.Text), BM25: m.BM25Score,
+				Vector: m.VectorScore})
 		}
 		res.Hits = append(res.Hits, hit)
 	}
 	return res
-}
-
-// matchSegments is what a match shows: its BM25 snippet with the matched
-// terms marked, or, for a match only the vector search found, the start of
-// its text.
-func matchSegments(m ChunkMatchJSON) []ui.Segment {
-	if m.Snippet != "" {
-		return ui.Highlight(m.Snippet)
-	}
-	return []ui.Segment{{Text: ui.Excerpt(m.Text, matchExcerptRunes)}}
 }

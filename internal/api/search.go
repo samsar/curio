@@ -1,7 +1,9 @@
 package api
 
 import (
+	"cmp"
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -12,10 +14,12 @@ import (
 )
 
 // SearchRequest is the POST /v1/search body. K 0 (or omitted) means the
-// configured search.default_k.
+// configured search.default_k. The response is the documents ranked
+// [Offset, Offset+K) of the one ranking every request for the query gets.
 type SearchRequest struct {
 	Query   string  `json:"query"`
 	K       int     `json:"k,omitempty"`
+	Offset  int     `json:"offset,omitempty"`
 	Filters Filters `json:"filters,omitzero"`
 }
 
@@ -31,12 +35,15 @@ type Filters struct {
 // is the absolute on-disk path to the extracted markdown, populated from
 // the doc's current extraction. Empty when there's no extraction yet.
 // Surfaced here so CLI consumers can `cat` / open the file without a
-// second round-trip to /v1/documents/{id}.
+// second round-trip to /v1/documents/{id}. BookmarkTitle names an untitled
+// document: its newest titled bookmark's title, as the documents list has
+// it.
 type SearchHitResponse struct {
-	Document     DocumentResponse `json:"document"`
-	Score        float64          `json:"score"`
-	MarkdownPath string           `json:"markdown_path,omitempty"`
-	Matches      []ChunkMatchJSON `json:"matches,omitempty"`
+	Document      DocumentResponse `json:"document"`
+	Score         float64          `json:"score"`
+	MarkdownPath  string           `json:"markdown_path,omitempty"`
+	BookmarkTitle string           `json:"bookmark_title,omitempty"`
+	Matches       []ChunkMatchJSON `json:"matches,omitempty"`
 }
 
 // ChunkMatchJSON mirrors the openapi schema; pointer scores let us emit
@@ -49,13 +56,17 @@ type ChunkMatchJSON struct {
 	VectorScore *float64 `json:"vector_score,omitempty"`
 }
 
-// SearchResponse mirrors the openapi SearchResponse schema. Degraded and
-// Warnings report keyword-only results when semantic search was unavailable.
+// SearchResponse mirrors the openapi SearchResponse schema. Total is how
+// many documents the query's ranking holds, at most store.MaxSearchK, and
+// Capped whether more matched than it ranks. Degraded and Warnings report
+// keyword-only results when semantic search was unavailable.
 type SearchResponse struct {
 	Query      string              `json:"query"`
 	TookMS     int64               `json:"took_ms"`
 	BM25Hits   int                 `json:"bm25_hits"`
 	VectorHits int                 `json:"vector_hits"`
+	Total      int                 `json:"total"`
+	Capped     bool                `json:"capped"`
 	Degraded   bool                `json:"degraded,omitempty"`
 	Warnings   []string            `json:"warnings,omitempty"`
 	Items      []SearchHitResponse `json:"items"`
@@ -76,9 +87,9 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // search runs req through the search engine and hydrates its hits. A query,
-// k or filter the engine can't take is a requestError. Semantic search
-// failing is not an error: the keyword results come back Degraded, with
-// Warnings.
+// k, offset or filter the engine can't take is a requestError, refused
+// before the query is embedded. Semantic search failing is not an error:
+// the keyword results come back Degraded, with Warnings.
 func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	if req.Query == "" {
 		return SearchResponse{}, badRequest("query is required")
@@ -86,6 +97,13 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 	if req.K < 0 || req.K > store.MaxSearchK {
 		return SearchResponse{}, badRequest("k must be between 1 and %d (or omitted for the default), got %d",
 			store.MaxSearchK, req.K)
+	}
+	// Checked as a difference: offset+k overflows for an offset near the
+	// int64 the decoder takes.
+	k := cmp.Or(req.K, d.Search.DefaultK())
+	if req.Offset < 0 || req.Offset > store.MaxSearchK-k {
+		return SearchResponse{}, badRequest("offset must be between 0 and %d (offset + k at most %d), got %d",
+			store.MaxSearchK-k, store.MaxSearchK, req.Offset)
 	}
 	if err := validateSearchFilters(req.Filters); err != nil {
 		return SearchResponse{}, err
@@ -96,6 +114,7 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		TenantID: d.TenantID,
 		Query:    req.Query,
 		K:        req.K,
+		Offset:   req.Offset,
 		Filters: store.SearchFilters{
 			ContentType: req.Filters.ContentType,
 			Host:        req.Filters.Host,
@@ -115,6 +134,8 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		TookMS:     time.Since(start).Milliseconds(),
 		BM25Hits:   res.BM25Hits,
 		VectorHits: res.VectorHits,
+		Total:      res.Total,
+		Capped:     res.Capped,
 		Degraded:   res.Degraded,
 		Warnings:   res.Warnings,
 		Items:      items,
@@ -139,12 +160,18 @@ func validateSearchFilters(f Filters) error {
 }
 
 // searchHitsToResponse maps engine hits to wire hits, populating each
-// hit's markdown path from its current extraction.
+// hit's markdown path from its current extraction and naming the untitled
+// ones by their bookmarks (bookmarkTitles).
 //
 // One extra DB hit per result to surface the markdown path. K is at most
-// store.MaxSearchK (100), so this stays small; if it ever shows up in latency,
-// batch via a single SELECT IN (...) instead.
+// store.MaxSearchK (100), so this stays small; GetByIDsWithLastError, which
+// the untitled hits' names already use, returns markdown_path too and could
+// serve every hit in one read if it ever shows in latency.
 func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]SearchHitResponse, error) {
+	titles, err := d.bookmarkTitles(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]SearchHitResponse, 0, len(hits))
 	for _, hit := range hits {
 		matches := make([]ChunkMatchJSON, 0, len(hit.Chunks))
@@ -163,13 +190,39 @@ func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]Se
 			return nil, err
 		}
 		out = append(out, SearchHitResponse{
-			Document:     documentToResponse(hit.Document),
-			Score:        hit.Score,
-			MarkdownPath: mdPath,
-			Matches:      matches,
+			Document:      documentToResponse(hit.Document),
+			Score:         hit.Score,
+			MarkdownPath:  mdPath,
+			BookmarkTitle: titles[hit.Document.ID],
+			Matches:       matches,
 		})
 	}
 	return out, nil
+}
+
+// bookmarkTitles names the hits' untitled documents, by ID, as the
+// documents list names them: by their newest titled bookmark. It reads
+// them all at once, with the batched read the interests' members take, and
+// reads nothing when every hit has a title of its own.
+func (d Deps) bookmarkTitles(ctx context.Context, hits []search.Hit) (map[string]string, error) {
+	titles := map[string]string{}
+	var untitled []string
+	for _, hit := range hits {
+		if deref(hit.Document.Title) == "" {
+			untitled = append(untitled, hit.Document.ID)
+		}
+	}
+	if len(untitled) == 0 {
+		return titles, nil
+	}
+	docs, err := d.Documents.GetByIDsWithLastError(ctx, d.TenantID, untitled)
+	if err != nil {
+		return nil, fmt.Errorf("name untitled hits by their bookmarks: %w", err)
+	}
+	for _, doc := range docs {
+		titles[doc.ID] = doc.BookmarkTitle
+	}
+	return titles, nil
 }
 
 // defaultRelatedK is how many related documents GET

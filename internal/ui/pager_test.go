@@ -123,7 +123,8 @@ func TestOutOfRange(t *testing.T) {
 
 // TestPager_Markup: the pager's links are built in Go and named for a
 // screen reader; the current page is marked; Previous on the first page
-// and Next on the last are not links; a phone's "Page N of M" is there.
+// and Next on the last are not links, and the steps that are have the ids
+// htmx gives focus back by; a phone's "Page N of M" is there.
 func TestPager_Markup(t *testing.T) {
 	set := newRenderer(t).pages[PageInterests]
 	pager := func(page int) string {
@@ -140,11 +141,13 @@ func TestPager_Markup(t *testing.T) {
 	assert.Contains(t, out, `<a href="/list?page=1" aria-label="Page 1" aria-current="page">1</a>`+
 		`<a href="/list?page=2" aria-label="Page 2">2</a><span class="gap" aria-hidden="true">…</span>`+
 		`<a href="/list?page=10" aria-label="Page 10">10</a><span class="of">Page 1 of 10</span>`)
-	assert.Contains(t, out, `<a class="step" href="/list?page=2" rel="next">Next<svg class="icon"`)
+	assert.Contains(t, out, `<a class="step" id="pager-next" href="/list?page=2" rel="next">Next<svg class="icon"`)
+	assert.NotContains(t, out, `id="pager-prev"`)
 	assert.Equal(t, 1, strings.Count(out, `aria-current="page"`))
 
 	out = pager(10)
-	assert.Contains(t, out, `<a class="step" href="/list?page=9" rel="prev"><svg class="icon"`)
+	assert.Contains(t, out, `<a class="step" id="pager-prev" href="/list?page=9" rel="prev"><svg class="icon"`)
+	assert.NotContains(t, out, `id="pager-next"`)
 	assert.Contains(t, out, `<span class="step" aria-disabled="true">Next<svg class="icon"`)
 	assert.NotContains(t, out, `rel="next"`)
 	assert.Contains(t, out, `<span class="of">Page 10 of 10</span>`)

@@ -396,6 +396,9 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/documents/{id}/content", get("/v1/documents/" + f.fetched + "/content"), http.StatusOK},
 		{"GET /v1/documents/{id}/related", get("/v1/documents/" + f.fetched + "/related"), http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","k":5}`), http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","k":1,"offset":1}`), http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","k":10,"offset":91}`),
+			http.StatusBadRequest},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka offline"}`), http.StatusOK},
 		{"GET /v1/failures", get("/v1/failures"), http.StatusOK},
 
@@ -569,25 +572,31 @@ type contractFixtures struct {
 // property a response schema declares shows up in some response, which
 // TestOpenAPI_ResponsesMatchSchemas enforces: two indexed documents with
 // titles and content, one of them with every optional metadata column and
-// an extraction error message, a document failed as anti-bot and a dead
-// one, three bookmarks (one with a folder and tags, one of the untitled
-// failed document with a title of its own), a failed job and done ones,
-// and an interest with a summary, whose members are a titled document and
-// the untitled failed one.
+// an extraction error message, an indexed untitled one, a document failed
+// as anti-bot and a dead one, four bookmarks (one with a folder and tags,
+// one of each untitled document with a title of its own), a failed job and
+// done ones, and an interest with a summary, whose members are a titled
+// document and the untitled failed one.
 func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	t.Helper()
 	ctx := context.Background()
+	// indexed seeds a fetched document of text, titled unless title is empty.
 	indexed := func(url, title, text string) (*store.Document, *store.DocumentExtraction) {
 		doc := s.seedDocument(t, url, store.DocStateFetched)
-		_, err := s.db.Exec(`UPDATE documents SET title = ? WHERE id = ?`, title, doc.ID)
-		require.NoError(t, err)
-		ext := s.seedContent(t, doc, "# "+title+"\n\n"+text)
+		markdown := text
+		if title != "" {
+			_, err := s.db.Exec(`UPDATE documents SET title = ? WHERE id = ?`, title, doc.ID)
+			require.NoError(t, err)
+			markdown = "# " + title + "\n\n" + text
+		}
+		ext := s.seedContent(t, doc, markdown)
 		require.NoError(t, s.deps.Chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, title, nil,
 			[]store.ChunkInput{{Text: text, Embedding: unitVec()}}))
 		return doc, ext
 	}
 	a, aExt := indexed("https://example.com/a", "Kafka partitions", "kafka partitions and consumer groups")
 	b, _ := indexed("https://example.com/b", "Kafka brokers", "kafka brokers and replication")
+	untitled, _ := indexed("https://example.com/untitled", "", "kafka connect sinks")
 	_, err := s.db.Exec(`UPDATE documents SET url_canonical = 'https://example.com/a/', author = 'Ada',
 		published_at = '2024-01-02T03:04:05.000Z', language = 'en', word_count = 6 WHERE id = ?`, a.ID)
 	require.NoError(t, err)
@@ -625,6 +634,11 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	blockedTitle := "A blocked page"
 	_, err = s.deps.Bookmarks.Ingest(ctx, &store.Bookmark{TenantID: "local", URL: failed.URL, Title: &blockedTitle,
 		Source: store.SourceSafari, SavedAt: time.Now().UTC().Add(-time.Hour)})
+	require.NoError(t, err)
+	// The untitled indexed document's, which names it among search hits.
+	connectTitle := "Kafka Connect notes"
+	_, err = s.deps.Bookmarks.Ingest(ctx, &store.Bookmark{TenantID: "local", URL: untitled.URL, Title: &connectTitle,
+		Source: store.SourceChrome, SavedAt: time.Now().UTC().Add(-2 * time.Hour)})
 	require.NoError(t, err)
 
 	// The failed document is untitled, and named by its bookmark.

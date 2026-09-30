@@ -205,6 +205,7 @@ func TestQueryPlans(t *testing.T) {
 	vecQ, vecArgs := vectorQuery("local", queryVector(t), 10, store.SearchFilters{})
 	getJobQ, getJobArgs := getJobWithDocQuery("local", "job")
 	getDocQ, getDocArgs := getDocumentWithErrorQuery("local", "doc")
+	snippetsQ, snippetsArgs := snippetsQuery(`"kafka"`, []string{"a", "b", "c"})
 
 	cases := []planCase{
 		{
@@ -332,6 +333,18 @@ func TestQueryPlans(t *testing.T) {
 			want:  []string{"SEARCH b EXISTS USING INDEX idx_bookmarks_document (document_id=?)"},
 			sorts: true,
 			avoid: []string{"idx_bookmarks_tenant_"},
+		},
+		{
+			// Each chunk's FTS row by rowid, its seq found by its ID, never
+			// a walk of every row the MATCH finds: FTS5 reports the rowid
+			// equality as '=' and the MATCH as 'M'.
+			name:  "Snippets",
+			query: snippetsQ, args: snippetsArgs,
+			first: "SCAN chunks_fts VIRTUAL TABLE INDEX 0:=M",
+			want: []string{
+				"SEARCH chunks USING COVERING INDEX sqlite_autoindex_chunks_1 (id=?)",
+				"SEARCH c USING INTEGER PRIMARY KEY (rowid=?)",
+			},
 		},
 		{
 			// A KNN scan of chunks_vec (plan kind 3, see

@@ -66,7 +66,7 @@ so a poll never replaces a button, and only their status announces.
 <div class="card-head"><h2 id="related">Related</h2>{{if .Related.Docs}}<span class="muted num">similarity</span>{{end}}</div>
 {{with .Related.Err}}<div class="card-body">{{template "panel-error" .}}</div>
 {{else}}{{with .Related.Docs}}<div class="card-body flush"><ul class="related">
-{{range .}}<li><a href="{{documentHref .DocumentID}}" title="{{or .Title .URL}}">{{or .Title (shortURL .URL)}}</a><span class="doc-sub"><span class="host">{{host .URL}}</span><span class="meter-row"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .Score}}">{{printf "%.2f" .Score}}</meter>{{printf "%.2f" .Score}}</span></span></li>
+{{range .}}<li>{{with .Ref}}<a href="{{documentHref .ID}}" title="{{.Hover}}"{{with .Class}} class="{{.}}"{{end}}>{{.Name}}</a>{{end}}<span class="doc-sub"><span class="host">{{host .URL}}</span><span class="meter-row"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .Score}}">{{printf "%.2f" .Score}}</meter>{{printf "%.2f" .Score}}</span></span></li>
 {{end}}</ul></div>
 {{else}}<div class="card-body"><p class="empty-inline">None yet: related documents come from its indexed text.</p></div>{{end}}{{end}}
 </section>

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -127,23 +128,31 @@ func TestClearCauseHref(t *testing.T) {
 	assert.Equal(t, "/ui/library?order=saved", clearCauseHref(LibraryFilters{Order: OrderSaved, Cause: "anti_bot"}))
 }
 
-// TestSearchHref: a search's query and type round-trip, however odd; a
-// blank query is left out, and the home without a type is /ui/.
+// TestSearchHref: a search's query, type and page round-trip, however odd
+// the query; a blank query is left out, and so is its page, the first page
+// names none, and the home without a type is /ui/.
 func TestSearchHref(t *testing.T) {
-	const q = "a&b=c #1 <x>"
-	for _, contentType := range []string{"", "article", "repo", "video", "pdf"} {
-		u := parseHref(t, searchHref(q, contentType))
-		assert.Equal(t, "/ui/", u.Path, contentType)
-		want := url.Values{"q": {q}}
-		if contentType != "" {
-			want.Set("content_type", contentType)
+	for _, q := range []string{"a&b=c #1 <x>", "page=2&q=x", "100%", "ü ñ ☃"} {
+		for _, contentType := range []string{"", "article", "repo", "video", "pdf", "a&b"} {
+			for _, page := range []int{-1, 0, 1, 2, 10} {
+				u := parseHref(t, searchHref(q, contentType, page))
+				assert.Equal(t, "/ui/", u.Path, contentType)
+				want := url.Values{"q": {q}}
+				if contentType != "" {
+					want.Set("content_type", contentType)
+				}
+				if page > 1 {
+					want.Set(PageParam, strconv.Itoa(page))
+				}
+				assert.Equal(t, want, u.Query(), "%q, %q, page %d", q, contentType, page)
+			}
 		}
-		assert.Equal(t, want, u.Query(), contentType)
 	}
-	assert.Equal(t, "/ui/", searchHref("", ""))
-	assert.Equal(t, "/ui/", searchHref("  ", ""), "a blank query is the home")
-	assert.Equal(t, "/ui/?content_type=pdf", searchHref(" ", "pdf"))
-	assert.Equal(t, "/ui/?content_type=pdf&q=kafka", searchHref("kafka", "pdf"))
+	assert.Equal(t, "/ui/", searchHref("", "", 1))
+	assert.Equal(t, "/ui/", searchHref("  ", "", 3), "a blank query is the home, which has no pages")
+	assert.Equal(t, "/ui/?content_type=pdf", searchHref(" ", "pdf", 2))
+	assert.Equal(t, "/ui/?content_type=pdf&q=kafka", searchHref("kafka", "pdf", 1))
+	assert.Equal(t, "/ui/?content_type=pdf&page=2&q=kafka", searchHref("kafka", "pdf", 2))
 }
 
 // TestStateTabHref: a state tab keeps the page's other filters and its

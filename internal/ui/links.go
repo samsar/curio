@@ -146,12 +146,16 @@ func failureCauseHref(cause string) string {
 	return (&url.URL{Path: failuresHref(), Fragment: causeCardID(cause)}).String()
 }
 
-// searchHref is the search page for q, limited to contentType when it is
-// set; a blank q is the search home.
-func searchHref(q, contentType string) string {
+// searchHref is page, from 1, of the search page's results for q, limited
+// to contentType when it is set; the first page names none. A blank q is
+// the search home, which has no pages.
+func searchHref(q, contentType string, page int) string {
 	v := url.Values{}
 	if strings.TrimSpace(q) != "" {
 		v.Set("q", q)
+		if page > 1 {
+			v.Set(PageParam, strconv.Itoa(page))
+		}
 	}
 	if contentType != "" {
 		v.Set("content_type", contentType)

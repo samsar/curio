@@ -364,13 +364,21 @@ query ──┤                                                                 
                                                                  RRF fusion (k=60)
                                                                           │
                                                                           ▼
-                                                            collapse chunks → documents
+                                                   collapse chunks → documents, rank them
                                                                           │
                                                                           ▼
-                                                                    top k results
+                                                  the window [offset, offset+k), hydrated,
+                                                  with the BM25 snippets of its chunks
 
-N = max(50, 8·k)
+N = 800 = 8 × MaxSearchK, for every search
 ```
+
+Every search reads the same pool, whatever its k and offset, so the
+windows of one query are slices of one ranking of at most 100 documents
+(`total`, and `capped` when more matched); a request without an offset
+gets its first k. Only the window is hydrated, and BM25's snippets are
+made for its chunks alone, in one query. `find_related` sizes its pool
+from its k instead, `max(50, 8·k)`.
 
 The two legs run concurrently, and metadata filters (content type, host,
 source) apply inside both. Neither leg returns failed or dead documents: they

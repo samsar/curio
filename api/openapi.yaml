@@ -624,6 +624,11 @@ paths:
       summary: Hybrid BM25 + vector search
       description: >
         Runs BM25 and vector retrieval concurrently and fuses them with RRF.
+        Every request ranks the same pool, the best 100 documents at most,
+        whatever k and offset it sends, and returns its window of that
+        ranking, [offset, offset+k): pages of one query tile one ranking,
+        and a request without an offset gets its first k. total counts the
+        ranking, and capped says more matched than it holds.
         Failed and dead documents are not searched: they may keep the chunks
         of an earlier fetch, which no longer describe what the URL serves. A
         pending document (a refetch in flight) is. If the embedding model is
@@ -642,7 +647,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResponse" }
         "400":
-          description: Missing query, k outside 0..100, a content_type or source outside its set, an unknown field, or a malformed body
+          description: >
+            Missing query, k outside 0..100, an offset below 0 or with
+            offset + k over 100 (k as omitted means the default), a
+            content_type or source outside its set, an unknown field, or a
+            malformed body
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -1419,6 +1428,16 @@ components:
             Max documents to return after RRF fusion + collapse, 1 to 100.
             Omitted (or 0) uses the server's search.default_k (10 unless
             configured).
+        offset:
+          type: integer
+          minimum: 0
+          maximum: 99
+          description: >
+            Where the results start in the query's ranking: the response is
+            the window [offset, offset+k) of one ranking of at most 100
+            documents, the same ranking for every offset, so the pages of a
+            query tile it. offset + k is at most 100, k as the request gets
+            it (the default when omitted). Omitted means 0.
         filters:
           type: object
           description: >
@@ -1438,6 +1457,12 @@ components:
         document:      { $ref: "#/components/schemas/Document" }
         score:         { type: number, description: "Fused RRF score for search, vector similarity for related (higher = better)" }
         markdown_path: { type: string, description: "Absolute on-disk path to the document's current markdown" }
+        bookmark_title:
+          type: string
+          description: >
+            Set only when the document has no title of its own: the title
+            of its most recently saved bookmark that has one, as the
+            documents list names it.
         matches:
           type: array
           description: Top matching chunks for this document, in score order
@@ -1461,6 +1486,21 @@ components:
         took_ms:     { type: integer, description: "Time the search took, in milliseconds" }
         bm25_hits:   { type: integer, description: "How many chunks BM25 returned before fusion" }
         vector_hits: { type: integer, description: "How many chunks the vector index returned before fusion (0 when degraded)" }
+        total:
+          type: integer
+          description: >
+            How many documents the query's ranking holds, at most 100:
+            every offset below it has results.
+        capped:
+          type: boolean
+          description: >
+            Whether the ranked pool held more documents than the ranking
+            keeps, so total is 100 and the rest are never returned. The pool
+            is each retriever's best 800 chunks: a keyword-only search whose
+            words appear in more chunks than that may match more documents
+            than it counts. With semantic search on nearly every query is
+            capped: the vector index's nearest chunks span far more than 100
+            documents.
         degraded:
           type: boolean
           description: >
@@ -1473,7 +1513,7 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }
-      required: [query, took_ms, bm25_hits, vector_hits, items]
+      required: [query, took_ms, bm25_hits, vector_hits, total, capped, items]
 
     # ---------- insight ----------
 

@@ -18,10 +18,13 @@ import (
 
 // Engine runs hybrid search.
 //
-//  1. BM25 over chunks_fts and vector ANN over chunks_vec, concurrently
+//  1. BM25 over chunks_fts and vector ANN over chunks_vec, concurrently,
+//     each reading the same pool of chunks whatever the request asks for
 //  2. RRF fuse the two ranked chunk lists
-//  3. Collapse chunks → documents (best chunk per doc, configurable)
-//  4. Return top-K documents with their best chunk snippets
+//  3. Collapse chunks → documents (best chunk per doc, configurable), and
+//     rank them
+//  4. Return the requested window of that ranking, [Offset, Offset+K), with
+//     each document's best chunks and the BM25 snippets of those alone
 //
 // The Embedder dependency is used only on the query side — to vectorize
 // the user's query before VectorSearch. Documents are embedded by the
@@ -67,7 +70,10 @@ type Config struct {
 	VectorWeight float64
 	RRFK         int
 	Collapse     CollapseStrategy
-	PreFanout    int
+	// PreFanout is the fewest chunks a retriever returns before fusion:
+	// Search reads max(PreFanout, 8·store.MaxSearchK) for every request,
+	// Related max(PreFanout, 8·K). Default 50.
+	PreFanout int
 	// DefaultK is the number of results when a request leaves K at 0.
 	// Default 10.
 	DefaultK int
@@ -127,8 +133,13 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, c
 type Request struct {
 	TenantID string
 	Query    string
-	K        int                 // results to return after fusion + collapse; 0 = Config.DefaultK, at most store.MaxSearchK
-	Filters  store.SearchFilters // content_type / host / source; empty = no filter
+	K        int // results to return after fusion + collapse; 0 = Config.DefaultK, at most store.MaxSearchK
+	// Offset is where in the ranking the results start: Search returns the
+	// documents ranked [Offset, Offset+K). Every search ranks the same pool
+	// whatever K and Offset, so the windows of one query tile one ranking.
+	// 0 <= Offset <= store.MaxSearchK-K.
+	Offset  int
+	Filters store.SearchFilters // content_type / host / source; empty = no filter
 }
 
 // Hit is a single document-level result with its best chunk snippets attached.
@@ -142,8 +153,10 @@ type Hit struct {
 // Exposing both BM25 and vector scores lets API consumers tune the search
 // without server-side guessing.
 type ChunkMatch struct {
-	ChunkID     string
-	Text        string
+	ChunkID string
+	Text    string
+	// Snippet is the passage of Text around the query's terms, each between
+	// <em> and </em>, for a chunk BM25 returned; empty otherwise.
 	Snippet     string
 	BM25Score   *float64 // nil if BM25 didn't surface this chunk
 	VectorScore *float64
@@ -155,6 +168,11 @@ type Result struct {
 	BM25Hits   int
 	VectorHits int
 	Items      []Hit
+	// Total is how many documents Search ranked, at most store.MaxSearchK,
+	// and Capped is set when more matched than it ranks. Related sets
+	// neither.
+	Total  int
+	Capped bool
 	// Degraded is set when the vector leg failed and Items are keyword-only;
 	// Warnings then says why.
 	Degraded bool
@@ -162,6 +180,13 @@ type Result struct {
 }
 
 // Search runs the hybrid pipeline end-to-end.
+//
+// Every search reads the same pool, chunkFanout(store.MaxSearchK) chunks
+// from each retriever, and ranks the documents they come from; the request
+// picks its window of that ranking. A pool that grew with K would rank a
+// page asked as "k=20, keep 11-20" from more chunks than page 1, and a
+// document could then show on both pages or on neither. See
+// docs/decisions.md "Search pages by offset within a fixed-depth pool".
 //
 // The two retrievers fail asymmetrically. BM25 is local SQLite and always
 // available, so its failure is a bug or corruption and fails the search. The
@@ -183,7 +208,12 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	case req.K < 0 || req.K > store.MaxSearchK:
 		return nil, fmt.Errorf("search: k must be between 1 and %d, got %d", store.MaxSearchK, req.K)
 	}
-	fanout := e.chunkFanout(req.K)
+	// Checked as a difference: Offset+K overflows for an Offset near MaxInt.
+	if req.Offset < 0 || req.Offset > store.MaxSearchK-req.K {
+		return nil, fmt.Errorf("search: offset must be between 0 and %d (offset + k at most %d), got %d",
+			store.MaxSearchK-req.K, store.MaxSearchK, req.Offset)
+	}
+	fanout := e.chunkFanout(store.MaxSearchK)
 
 	// FTS5 has its own MATCH grammar — bare punctuation (commas, slashes,
 	// etc.) is a syntax error, and tokens like AND/OR/NOT/NEAR are reserved.
@@ -195,7 +225,8 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	var bm25Hits, vecHits []store.ChunkHit
 	var vecErr error
 	g, gctx := errgroup.WithContext(ctx)
-	if ftsQuery := sanitizeBM25Query(req.Query); ftsQuery != "" {
+	ftsQuery := sanitizeBM25Query(req.Query)
+	if ftsQuery != "" {
 		g.Go(func() error {
 			hits, err := e.chunks.BM25Search(gctx, req.TenantID, ftsQuery, fanout, req.Filters)
 			if err != nil {
@@ -233,7 +264,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	}
 	fused := Fuse(lists, weights, e.rrfK)
 
-	// Map chunk_id -> (bm25 score, vector score, snippet, document_id)
+	// Map chunk_id -> (bm25 score, vector score, document_id)
 	bm25ByID := make(map[string]store.ChunkHit, len(bm25Hits))
 	for _, h := range bm25Hits {
 		bm25ByID[h.ChunkID] = h
@@ -257,8 +288,13 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		scored = append(scored, scoredChunk{chunkID: fc.ID, documentID: docID, score: fc.Score})
 	}
 
-	items, err := e.collapseAndHydrate(ctx, scored, bm25ByID, vecByID, req.K)
+	ranked := rankDocuments(scored, e.collapse)
+	res.Total, res.Capped = min(len(ranked), store.MaxSearchK), len(ranked) > store.MaxSearchK
+	items, err := e.hydrate(ctx, ranked, req.Offset, req.K, bm25ByID, vecByID)
 	if err != nil {
+		return nil, err
+	}
+	if err := e.attachSnippets(ctx, ftsQuery, items); err != nil {
 		return nil, err
 	}
 	res.BM25Hits = len(bm25Hits)
@@ -266,6 +302,9 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	res.Items = items
 	return res, nil
 }
+
+// DefaultK is how many results a request that leaves K at 0 gets.
+func (e *Engine) DefaultK() int { return e.defaultK }
 
 // vectorLeg embeds the query under its own deadline, so a hung embedding
 // model costs at most embedTimeout, and runs the ANN search.
@@ -286,11 +325,13 @@ func (e *Engine) vectorLeg(ctx context.Context, req Request, fanout int) ([]stor
 	return hits, nil
 }
 
-// chunkFanout is how many chunks each retriever returns before fusion. Hits
-// are chunk-level, and one long document can fill dozens of the nearest
-// slots, so a fixed pool could collapse to fewer than k distinct documents
-// (and never yield more documents than its size). ~8 chunk slots per
-// requested document, floored at preFanout.
+// chunkFanout is how many chunks each retriever returns before fusion for
+// k documents: Search asks it for store.MaxSearchK, the most any window
+// reaches, Related for its K. Hits are chunk-level, and one long document
+// can fill dozens of the nearest slots, so a pool of about k chunks could
+// collapse to fewer than k distinct documents (and never yield more
+// documents than its size). ~8 chunk slots per document, floored at
+// preFanout.
 func (e *Engine) chunkFanout(k int) int {
 	return max(e.preFanout, k*8)
 }
@@ -365,7 +406,7 @@ func (e *Engine) Related(ctx context.Context, req RelatedRequest) (*Result, erro
 		scored = append(scored, scoredChunk{chunkID: h.ChunkID, documentID: h.DocumentID, score: h.Score})
 	}
 
-	items, err := e.collapseAndHydrate(ctx, scored, nil, vecByID, req.K)
+	items, err := e.hydrate(ctx, rankDocuments(scored, e.collapse), 0, req.K, nil, vecByID)
 	if err != nil {
 		return nil, err
 	}
@@ -398,14 +439,18 @@ type scoredChunk struct {
 	score      float64
 }
 
-// collapseAndHydrate collapses scored chunks into ranked documents (per
-// the engine's collapse strategy) and hydrates the top k with their
-// document rows and up to 3 top chunks each. A document deleted since the
-// retrievers read its chunks is skipped, not an error: a concurrent delete
-// shouldn't fail the query (or make Related report its source missing), and
-// the next-ranked document takes its place. bm25ByID/vecByID annotate the
-// per-chunk retriever scores; either may be nil.
-func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, bm25ByID, vecByID map[string]store.ChunkHit, k int) ([]Hit, error) {
+// docScore is one document of a ranking: its collapsed score, and the
+// scores of its chunks the retrievers returned.
+type docScore struct {
+	documentID string
+	score      float64
+	chunkScore map[string]float64
+}
+
+// rankDocuments collapses scored chunks into documents, by strategy, and
+// sorts them best first. Equal scores are ordered by document ID, so a
+// ranking recomputed for every page puts its ties in the same place.
+func rankDocuments(scored []scoredChunk, strategy CollapseStrategy) []docScore {
 	type docAgg struct {
 		chunkIDs   []string
 		chunkScore map[string]float64
@@ -421,27 +466,34 @@ func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, b
 		agg.chunkScore[sc.chunkID] = sc.score
 	}
 
-	type docScore struct {
-		documentID string
-		score      float64
-		chunkScore map[string]float64
-	}
-	docList := make([]docScore, 0, len(byDoc))
+	ranked := make([]docScore, 0, len(byDoc))
 	for docID, agg := range byDoc {
-		docList = append(docList, docScore{
+		ranked = append(ranked, docScore{
 			documentID: docID,
-			score:      collapseScore(agg.chunkScore, agg.chunkIDs, e.collapse),
+			score:      collapseScore(agg.chunkScore, agg.chunkIDs, strategy),
 			chunkScore: agg.chunkScore,
 		})
 	}
-	slices.SortFunc(docList, func(a, b docScore) int {
+	slices.SortFunc(ranked, func(a, b docScore) int {
 		if c := cmp.Compare(b.score, a.score); c != 0 {
 			return c
 		}
 		return strings.Compare(a.documentID, b.documentID)
 	})
-	items := make([]Hit, 0, min(k, len(docList)))
-	for _, d := range docList {
+	return ranked
+}
+
+// hydrate turns the ranked documents from offset on into k hits: each
+// document's row and up to 3 of its top chunks, reading nothing for the
+// documents before offset or after the k-th. A document deleted since the
+// retrievers read its chunks is skipped, not an error: a concurrent delete
+// shouldn't fail the query (or make Related report its source missing), and
+// the next-ranked document takes its place. bm25ByID/vecByID annotate the
+// per-chunk retriever scores; either may be nil.
+func (e *Engine) hydrate(ctx context.Context, ranked []docScore, offset, k int, bm25ByID, vecByID map[string]store.ChunkHit) ([]Hit, error) {
+	window := ranked[min(offset, len(ranked)):]
+	items := make([]Hit, 0, min(k, len(window)))
+	for _, d := range window {
 		if len(items) == k {
 			break
 		}
@@ -452,41 +504,83 @@ func (e *Engine) collapseAndHydrate(ctx context.Context, scored []scoredChunk, b
 		if err != nil {
 			return nil, fmt.Errorf("hydrate document %s: %w", d.documentID, err)
 		}
-		top := topChunkIDs(d.chunkScore, 3)
-		hit := Hit{Document: doc, Score: d.score}
-		if len(top) > 0 {
-			chunks, err := e.chunks.GetByIDs(ctx, top)
-			if err != nil {
-				// The matching chunks only decorate the hit; the document
-				// still matched, so keep it without them.
-				e.log.Warn("search: load matching chunks", "document", d.documentID, "err", err)
-			} else {
-				byID := map[string]*store.Chunk{}
-				for _, c := range chunks {
-					byID[c.ID] = c
-				}
-				for _, cid := range top {
-					c, ok := byID[cid]
-					if !ok {
-						continue
-					}
-					m := ChunkMatch{ChunkID: c.ID, Text: c.Text}
-					if h, ok := bm25ByID[cid]; ok {
-						s := h.Score
-						m.BM25Score = &s
-						m.Snippet = h.Snippet
-					}
-					if h, ok := vecByID[cid]; ok {
-						s := h.Score
-						m.VectorScore = &s
-					}
-					hit.Chunks = append(hit.Chunks, m)
-				}
-			}
-		}
-		items = append(items, hit)
+		items = append(items, Hit{Document: doc, Score: d.score,
+			Chunks: e.matches(ctx, d, bm25ByID, vecByID)})
 	}
 	return items, nil
+}
+
+// matches loads document d's top 3 chunks with each retriever's score. The
+// matching chunks only decorate the hit, and the document still matched,
+// so a failed read leaves the hit without them, logged.
+func (e *Engine) matches(ctx context.Context, d docScore, bm25ByID, vecByID map[string]store.ChunkHit) []ChunkMatch {
+	top := topChunkIDs(d.chunkScore, 3)
+	if len(top) == 0 {
+		return nil
+	}
+	chunks, err := e.chunks.GetByIDs(ctx, top)
+	if err != nil {
+		e.log.Warn("search: load matching chunks", "document", d.documentID, "err", err)
+		return nil
+	}
+	byID := make(map[string]*store.Chunk, len(chunks))
+	for _, c := range chunks {
+		byID[c.ID] = c
+	}
+	var out []ChunkMatch
+	for _, cid := range top {
+		c, ok := byID[cid]
+		if !ok {
+			continue
+		}
+		m := ChunkMatch{ChunkID: c.ID, Text: c.Text}
+		if h, ok := bm25ByID[cid]; ok {
+			s := h.Score
+			m.BM25Score = &s
+		}
+		if h, ok := vecByID[cid]; ok {
+			s := h.Score
+			m.VectorScore = &s
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// attachSnippets gives every match in items that BM25 returned its snippet
+// for ftsQuery, read in one query for the window's chunks alone: the pool
+// holds up to 800 BM25 chunks, and FTS5 making a snippet of each cost more
+// than the rest of the keyword search. A failed read leaves the matches
+// without snippets, logged, as a failed chunk read leaves a hit without
+// its matches; the caller's context ending is an error, never a degraded
+// success.
+func (e *Engine) attachSnippets(ctx context.Context, ftsQuery string, items []Hit) error {
+	var ids []string
+	for _, it := range items {
+		for _, m := range it.Chunks {
+			if m.BM25Score != nil {
+				ids = append(ids, m.ChunkID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	snippets, err := e.chunks.Snippets(ctx, ftsQuery, ids)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("search: %w", cerr)
+		}
+		e.log.Warn("search: load snippets", "err", err)
+		return nil
+	}
+	for i := range items {
+		for j := range items[i].Chunks {
+			m := &items[i].Chunks[j]
+			m.Snippet = snippets[m.ChunkID]
+		}
+	}
+	return nil
 }
 
 func toRanked(hits []store.ChunkHit) []RankedItem {

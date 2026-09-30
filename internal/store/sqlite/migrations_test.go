@@ -968,16 +968,22 @@ const bm25BeforeMigration008 = `
 	ORDER BY bm25_score
 	LIMIT ?`
 
-func bm25Before008(t *testing.T, db *DB, query string) []store.ChunkHit {
+// bm25Hit is a BM25 hit with its snippet, as a search shows it.
+type bm25Hit struct {
+	store.ChunkHit
+	snippet string
+}
+
+func bm25Before008(t *testing.T, db *DB, query string) []bm25Hit {
 	t.Helper()
 	rows, err := db.Query(bm25BeforeMigration008, query, "local", 50)
 	require.NoError(t, err)
 	defer rows.Close()
-	var hits []store.ChunkHit
+	var hits []bm25Hit
 	for rows.Next() {
-		var h store.ChunkHit
+		var h bm25Hit
 		var bm25 float64
-		require.NoError(t, rows.Scan(&h.ChunkID, &h.DocumentID, &bm25, &h.Snippet))
+		require.NoError(t, rows.Scan(&h.ChunkID, &h.DocumentID, &bm25, &h.snippet))
 		h.Score = -bm25
 		hits = append(hits, h)
 	}
@@ -985,16 +991,36 @@ func bm25Before008(t *testing.T, db *DB, query string) []store.ChunkHit {
 	return hits
 }
 
+// bm25Search is BM25Search's hits with their snippets from Snippets, as
+// search reads them.
+func bm25Search(t *testing.T, ch *Chunks, query string) []bm25Hit {
+	t.Helper()
+	ctx := context.Background()
+	found, err := ch.BM25Search(ctx, "local", query, 50, store.SearchFilters{})
+	require.NoError(t, err)
+	ids := make([]string, 0, len(found))
+	for _, h := range found {
+		ids = append(ids, h.ChunkID)
+	}
+	snippets, err := ch.Snippets(ctx, query, ids)
+	require.NoError(t, err)
+	hits := make([]bm25Hit, 0, len(found))
+	for _, h := range found {
+		hits = append(hits, bm25Hit{ChunkHit: h, snippet: snippets[h.ChunkID]})
+	}
+	return hits
+}
+
 // assertSameHits compares two BM25 result lists: the same chunks and
 // documents in the same order with the same snippets, and scores equal to
 // within floating-point noise.
-func assertSameHits(t *testing.T, want, got []store.ChunkHit, query string) {
+func assertSameHits(t *testing.T, want, got []bm25Hit, query string) {
 	t.Helper()
 	require.Len(t, got, len(want), query)
 	for i := range want {
 		assert.Equal(t, want[i].ChunkID, got[i].ChunkID, "%s: hit %d", query, i)
 		assert.Equal(t, want[i].DocumentID, got[i].DocumentID, "%s: hit %d", query, i)
-		assert.Equal(t, want[i].Snippet, got[i].Snippet, "%s: hit %d", query, i)
+		assert.Equal(t, want[i].snippet, got[i].snippet, "%s: hit %d", query, i)
 		assert.InDelta(t, want[i].Score, got[i].Score, 1e-9, "%s: hit %d", query, i)
 	}
 }
@@ -1053,7 +1079,7 @@ func TestMigration008_ChunksFTSExternalContent(t *testing.T) {
 		`internals`,         // in a title only
 		`observability`,     // in tags only
 	}
-	before := map[string][]store.ChunkHit{}
+	before := map[string][]bm25Hit{}
 	for _, q := range queries {
 		hits := bm25Before008(t, db, q)
 		require.NotEmpty(t, hits, q)
@@ -1074,9 +1100,7 @@ func TestMigration008_ChunksFTSExternalContent(t *testing.T) {
 
 	ch := NewChunks(db, migration001Dim)
 	for _, q := range queries {
-		got, err := ch.BM25Search(ctx, "local", q, 50, store.SearchFilters{})
-		require.NoError(t, err)
-		assertSameHits(t, before[q], got, q)
+		assertSameHits(t, before[q], bm25Search(t, ch, q), q)
 	}
 	_, err = db.Exec(`INSERT INTO chunks_fts (chunks_fts, rank) VALUES ('integrity-check', 1)`)
 	require.NoError(t, err)

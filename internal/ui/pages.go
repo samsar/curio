@@ -333,15 +333,63 @@ func (p FailuresPanel) Most() int {
 }
 
 // Search is the search page: the form, and either the home, without a
-// query, or the results of its query.
+// query, or a page of the results of its query.
 type Search struct {
-	Layout  Layout
-	Query   string
-	Type    string         // the content type the search is limited to; empty for all
+	Layout Layout
+	Query  string
+	Type   string // the content type the search is limited to; empty for all
+	// Page is the page of results shown, from 1; 0 is the first.
+	Page    int
 	Home    *SearchHome    // set exactly when there is no query
 	Err     *PanelError    // the search failed
 	Results *SearchResults // nil without a query, or when it failed
 }
+
+// SearchPageSize is how many results a page of search shows. It is fixed,
+// not search.default_k, so that the pages tile the ranking of
+// store.MaxSearchK documents a search ranks exactly.
+const SearchPageSize = 10
+
+// MaxSearchPages is how many pages a search has at most.
+const MaxSearchPages = store.MaxSearchK / SearchPageSize
+
+func (s Search) page() int { return max(s.Page, 1) }
+
+// Pages is how many pages the results fill: none when nothing matched.
+func (s Search) Pages() int {
+	if s.Results == nil {
+		return 0
+	}
+	return pageCount(s.Results.Total, SearchPageSize)
+}
+
+// OutOfRange is the page when it is past the results' last, nil otherwise,
+// and nil when nothing matched, which the page says instead.
+func (s Search) OutOfRange() *PageOutOfRange {
+	if s.Pages() == 0 {
+		return nil
+	}
+	return outOfRange(s.page(), s.Pages(), s.pageHref)
+}
+
+// CappedNote reports whether the page says the ranking stops at the cap:
+// on the last page of a search that matched more than it ranks.
+func (s Search) CappedNote() bool {
+	return s.Results != nil && s.Results.Capped && s.page() == s.Pages()
+}
+
+// Pager is the pager under the results, nil when they fit on one page or
+// the page is past the last.
+func (s Search) Pager() *Pager {
+	if s.Results == nil {
+		return nil
+	}
+	return newPager(pageSpan{Page: s.page(), Size: SearchPageSize, Shown: len(s.Results.Hits), Total: s.Results.Total,
+		Noun: "Results", Href: s.pageHref})
+}
+
+// pageHref is page of the query's results, limited to the type shown.
+func (s Search) pageHref(page int) string { return searchHref(s.Query, s.Type, page) }
 
 // SearchHome is what the search page shows without a query, under the
 // box. Zero values are unknown: a read the home does without is left out.
@@ -381,34 +429,85 @@ type Tab struct {
 	Counted bool
 }
 
-// TypeTabs are the search's type filter: a link to this query limited to
-// each offered type, the current one marked. A type the page doesn't
-// offer (thread, unknown) still limits the search, and marks none.
+// TypeTabs are the search's type filter: a link to the first page of this
+// query limited to each offered type, the current one marked. A type the
+// page doesn't offer (thread, unknown) still limits the search, and marks
+// none.
 func (s Search) TypeTabs() []Tab {
 	tabs := make([]Tab, 0, len(searchTypes))
 	for _, t := range searchTypes {
-		tabs = append(tabs, Tab{Label: t.label, Href: searchHref(s.Query, string(t.contentType)),
+		tabs = append(tabs, Tab{Label: t.label, Href: searchHref(s.Query, string(t.contentType), 1),
 			Current: s.Type == string(t.contentType)})
 	}
 	return tabs
 }
 
-// SearchResults is a query's ranked hits.
+// SearchResults is a page of a query's ranked hits.
 type SearchResults struct {
 	Degraded bool     // semantic search was unavailable: keyword results only
 	Warnings []string // why
 	TookMS   int64
-	Hits     []SearchHit
+	// Total is how many documents the query's ranking holds, at most
+	// store.MaxSearchK, and Capped whether more matched than it ranks.
+	Total  int
+	Capped bool
+	Hits   []SearchHit // the page's
+}
+
+// Count is how many documents match, as the results' head counts them:
+// "1 document", "37 documents", or, past the cap, "100+ documents".
+func (r SearchResults) Count() string {
+	if r.Capped {
+		return num(r.Total) + "+ documents"
+	}
+	return count(r.Total, "document", "documents")
+}
+
+// Verb agrees with Count.
+func (r SearchResults) Verb() string {
+	if r.Total == 1 && !r.Capped {
+		return "matches"
+	}
+	return "match"
 }
 
 // SearchHit is one ranked document and the chunks that matched in it.
 type SearchHit struct {
-	DocumentID  string
-	Title       string // empty for an untitled document
-	URL         string
-	ContentType string
-	Score       float64 // the fused score
-	Matches     []Match
+	DocumentID string
+	Title      string // empty for an untitled document
+	// BookmarkTitle names an untitled document: its newest titled
+	// bookmark's title.
+	BookmarkTitle string
+	URL           string
+	ContentType   string
+	Score         float64 // the fused score
+	Matches       []Match
+}
+
+// Ref names the hit as a list names a document: by its title, by its
+// bookmark's, or by its short URL.
+func (h SearchHit) Ref() DocRef {
+	return DocRef{ID: h.DocumentID, Title: h.Title, Fallback: h.BookmarkTitle, URL: h.URL}
+}
+
+// MatchKind says which retrievers found the hit's matching chunks, in
+// words: keyword search's words, the vector search's meaning, or both; ""
+// when it has no matches.
+func (h SearchHit) MatchKind() string {
+	keyword, meaning := false, false
+	for _, m := range h.Matches {
+		keyword = keyword || m.BM25 != nil
+		meaning = meaning || m.Vector != nil
+	}
+	switch {
+	case keyword && meaning:
+		return "keyword + meaning"
+	case keyword:
+		return "keyword only"
+	case meaning:
+		return "meaning only"
+	}
+	return ""
 }
 
 // shownMatches is how many of a hit's matches its result shows; the rest
@@ -427,13 +526,25 @@ func (h SearchHit) MoreMatches() []Match {
 	return h.Matches[shownMatches:]
 }
 
-// Match is a matching chunk: its highlighted snippet, or the start of its
-// text for a match only the vector search found, with each retriever's
+// Match is a matching chunk: its passage (Passage), with each retriever's
 // score when it returned the chunk.
 type Match struct {
 	Segments []Segment
 	BM25     *float64
 	Vector   *float64
+}
+
+// Scores are the match's retriever scores, for Show scores: "bm25 22.523 ·
+// vector 0.710", or the one a retriever gave.
+func (m Match) Scores() string {
+	var parts []string
+	if m.BM25 != nil {
+		parts = append(parts, "bm25 "+score(m.BM25))
+	}
+	if m.Vector != nil {
+		parts = append(parts, "vector "+score(m.Vector))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // Library is a page of the library under the filters: documents, most
@@ -989,8 +1100,16 @@ type RelatedPanel struct {
 type RelatedDoc struct {
 	DocumentID string
 	Title      string
-	URL        string
-	Score      float64
+	// BookmarkTitle names an untitled document: its newest titled
+	// bookmark's title.
+	BookmarkTitle string
+	URL           string
+	Score         float64
+}
+
+// Ref names the document as a list names one.
+func (d RelatedDoc) Ref() DocRef {
+	return DocRef{ID: d.DocumentID, Title: d.Title, Fallback: d.BookmarkTitle, URL: d.URL}
 }
 
 // BookmarksPanel is the document's bookmarks.

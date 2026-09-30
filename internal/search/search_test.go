@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -581,27 +583,343 @@ func TestEngine_LegsRunConcurrently(t *testing.T) {
 	assert.Positive(t, res.VectorHits)
 }
 
-func TestEngine_FanoutScalesWithK(t *testing.T) {
-	db := sqlitetest.NewDB(t)
-	dim := sqlitetest.Width(t, db)
-	docs := sqlitestore.NewDocuments(db)
-	exts := sqlitestore.NewExtractions(db)
-	chunks := sqlitestore.NewChunks(db, dim)
+// seedMatching puts n documents into the DB, document i with one chunk of
+// text(i) embedded as filledVec(vec(i)), and returns their IDs in the order
+// written.
+func seedMatching(t *testing.T, db *sqlitestore.DB, n int, text func(int) string, vec func(int) float32) (
+	docs *sqlitestore.Documents, chunks *sqlitestore.Chunks, ids []string) {
+	t.Helper()
 	ctx := context.Background()
-	for i := range 60 {
+	dim := sqlitetest.Width(t, db)
+	docs = sqlitestore.NewDocuments(db)
+	exts := sqlitestore.NewExtractions(db)
+	chunks = sqlitestore.NewChunks(db, dim)
+	for i := range n {
 		d := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/zebra/%d", i),
 			ContentType: store.ContentTypeArticle}
 		require.NoError(t, docs.Create(ctx, d))
 		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK, FetchedAt: time.Now().UTC()}
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, chunks.ReplaceForDocument(ctx, d.ID, e.ID, "", nil,
-			[]store.ChunkInput{{Text: fmt.Sprintf("zebra sighting number %d", i), Embedding: filledVec(dim, 0.5)}}))
+			[]store.ChunkInput{{Text: text(i), Embedding: filledVec(dim, vec(i))}}))
+		ids = append(ids, d.ID)
 	}
-	engine := New(chunks, docs, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
+	return docs, chunks, ids
+}
 
-	res, err := engine.Search(ctx, Request{TenantID: "local", Query: "zebra", K: 60})
+// sightings are n documents about zebras, each a sighting of its own
+// number, their vectors spread so the vector leg ranks them in a strict
+// order of its own.
+func sightings(t *testing.T, db *sqlitestore.DB, n int) (*sqlitestore.Documents, *sqlitestore.Chunks, []string) {
+	t.Helper()
+	return seedMatching(t, db, n, func(i int) string { return fmt.Sprintf("zebra sighting number %d", i) },
+		func(i int) float32 { return 0.1 + float32(i)*0.005 })
+}
+
+// zebraEmbedder embeds every query as the vector the sightings are spread
+// towards.
+func zebraEmbedder(dim int) Embedder {
+	return embedFunc(func(context.Context, []string) ([][]float32, error) {
+		return [][]float32{filledVec(dim, 0.6)}, nil
+	})
+}
+
+func hitIDs(hits []Hit) []string {
+	out := make([]string, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, h.Document.ID)
+	}
+	return out
+}
+
+// TestEngine_PagesTileTheRanking: every window of a query is a slice of
+// one ranking, so its pages of 10 are the k=100 ranking's documents, in
+// its order, each once; each page says how many documents the ranking
+// holds and that more matched.
+func TestEngine_PagesTileTheRanking(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	docs, chunks, _ := sightings(t, db, 110)
+	engine := New(chunks, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	ctx := context.Background()
+
+	whole, err := engine.Search(ctx, Request{TenantID: "local", Query: "zebra", K: 100})
 	require.NoError(t, err)
-	assert.Len(t, res.Items, 60, "a K above the 50-chunk floor still gets K documents")
+	require.Len(t, whole.Items, 100)
+	var paged []Hit
+	for offset := 0; offset <= 90; offset += 10 {
+		page, err := engine.Search(ctx, Request{TenantID: "local", Query: "zebra", K: 10, Offset: offset})
+		require.NoError(t, err)
+		assert.Len(t, page.Items, 10, "offset %d", offset)
+		assert.Equal(t, 100, page.Total, "offset %d", offset)
+		assert.True(t, page.Capped, "offset %d: 110 documents matched", offset)
+		paged = append(paged, page.Items...)
+	}
+	assert.Equal(t, hitIDs(whole.Items), hitIDs(paged))
+	for i := range paged {
+		assert.Equal(t, whole.Items[i].Score, paged[i].Score, "rank %d", i)
+	}
+}
+
+// TestEngine_KOnlyIsTheFirstPage: a request without an offset ranks the
+// same pool as a page does, so its results are the ranking's first K,
+// whatever K: the CLI, MCP and the dashboard's first page agree.
+func TestEngine_KOnlyIsTheFirstPage(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	docs, chunks, _ := sightings(t, db, 110)
+	engine := New(chunks, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	ctx := context.Background()
+
+	ten, err := engine.Search(ctx, Request{TenantID: "local", Query: "zebra", K: 10})
+	require.NoError(t, err)
+	hundred, err := engine.Search(ctx, Request{TenantID: "local", Query: "zebra", K: 100})
+	require.NoError(t, err)
+	assert.Equal(t, hundred.Items[:10], ten.Items)
+}
+
+// TestEngine_SmallPool: a pool of fewer documents than the cap is ranked
+// whole: its total is exact and not capped, a window that runs past its end
+// is cut short, and one that starts past it is empty, not an error.
+func TestEngine_SmallPool(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	docs, chunks, _ := sightings(t, db, 37)
+	engine := New(chunks, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	for _, tc := range []struct{ offset, items int }{{0, 10}, {30, 7}, {37, 0}, {40, 0}} {
+		res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra", Offset: tc.offset})
+		require.NoError(t, err, "offset %d", tc.offset)
+		assert.Len(t, res.Items, tc.items, "offset %d", tc.offset)
+		assert.Equal(t, 37, res.Total, "offset %d", tc.offset)
+		assert.False(t, res.Capped, "offset %d", tc.offset)
+	}
+
+	degraded := New(chunks, docs, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
+	res, err := degraded.Search(context.Background(), Request{TenantID: "local", Query: "zebra", Offset: 30})
+	require.NoError(t, err)
+	assert.True(t, res.Degraded)
+	assert.Len(t, res.Items, 7)
+	assert.Equal(t, 37, res.Total, "keyword results are counted too")
+	assert.False(t, res.Capped)
+}
+
+// countingChunks counts the chunk store's reads and records the limit each
+// retriever was asked for. Snippets calls onSnippets and fails with
+// snippetsErr, each when set.
+type countingChunks struct {
+	store.ChunkStore
+	mu                  sync.Mutex
+	bm25Limit, vecLimit int
+	getByIDs, snippets  int
+	snippetIDs          []string
+	snippetsErr         error
+	onSnippets          func()
+}
+
+func (c *countingChunks) BM25Search(ctx context.Context, tenantID, query string, limit int, filters store.SearchFilters) ([]store.ChunkHit, error) {
+	c.mu.Lock()
+	c.bm25Limit = limit
+	c.mu.Unlock()
+	return c.ChunkStore.BM25Search(ctx, tenantID, query, limit, filters)
+}
+
+func (c *countingChunks) VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int, filters store.SearchFilters) ([]store.ChunkHit, error) {
+	c.mu.Lock()
+	c.vecLimit = limit
+	c.mu.Unlock()
+	return c.ChunkStore.VectorSearch(ctx, tenantID, embedding, limit, filters)
+}
+
+func (c *countingChunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, error) {
+	c.mu.Lock()
+	c.getByIDs++
+	c.mu.Unlock()
+	return c.ChunkStore.GetByIDs(ctx, ids)
+}
+
+func (c *countingChunks) Snippets(ctx context.Context, query string, chunkIDs []string) (map[string]string, error) {
+	c.mu.Lock()
+	c.snippets++
+	c.snippetIDs = append(c.snippetIDs, chunkIDs...)
+	c.mu.Unlock()
+	if c.onSnippets != nil {
+		c.onSnippets()
+	}
+	if c.snippetsErr != nil {
+		return nil, c.snippetsErr
+	}
+	return c.ChunkStore.Snippets(ctx, query, chunkIDs)
+}
+
+// countingDocs counts the document reads.
+type countingDocs struct {
+	store.DocumentStore
+	getByID atomic.Int32
+}
+
+func (c *countingDocs) GetByID(ctx context.Context, id string) (*store.Document, error) {
+	c.getByID.Add(1)
+	return c.DocumentStore.GetByID(ctx, id)
+}
+
+// TestEngine_HydratesOnlyTheWindow: a page deep in the ranking reads its
+// own documents and chunks, not those of the pages before it.
+func TestEngine_HydratesOnlyTheWindow(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	docs, chunks, _ := sightings(t, db, 110)
+	cd, cc := &countingDocs{DocumentStore: docs}, &countingChunks{ChunkStore: chunks}
+	engine := New(cc, cd, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra", K: 10, Offset: 60})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 10)
+	assert.EqualValues(t, 10, cd.getByID.Load(), "one read per document of the window")
+	assert.Equal(t, 10, cc.getByIDs, "one chunk read per document of the window")
+	assert.Equal(t, 1, cc.snippets, "one snippet read for the window")
+}
+
+// TestEngine_FixedFanout: each retriever reads the pool for the cap,
+// whatever the window asked for; a window as large as the cap still gets
+// every document it asks for.
+func TestEngine_FixedFanout(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	docs, chunks, _ := sightings(t, db, 60)
+	cc := &countingChunks{ChunkStore: chunks}
+	engine := New(cc, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	for _, req := range []Request{{K: 1}, {K: 10}, {K: 100}, {K: 1, Offset: 50}, {K: 10, Offset: 50}} {
+		req.TenantID, req.Query = "local", "zebra"
+		_, err := engine.Search(context.Background(), req)
+		require.NoError(t, err, "k %d, offset %d", req.K, req.Offset)
+		assert.Equal(t, 8*store.MaxSearchK, cc.bm25Limit, "k %d, offset %d", req.K, req.Offset)
+		assert.Equal(t, 8*store.MaxSearchK, cc.vecLimit, "k %d, offset %d", req.K, req.Offset)
+	}
+
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra", K: 60})
+	require.NoError(t, err)
+	assert.Len(t, res.Items, 60)
+}
+
+// TestEngine_TiesRankByID: documents whose fused scores are equal, from
+// the same text ranked in opposite orders by the two retrievers, are
+// ordered by ID, on every call, so each shows on exactly one page.
+func TestEngine_TiesRankByID(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	const n = 30
+	// BM25 ties every copy and ranks them as written; the vector leg ranks
+	// them the other way, so copies i and n-1-i fuse to the same score.
+	docs, chunks, ids := seedMatching(t, db, n, func(int) string { return "the same syndicated zebra post" },
+		func(i int) float32 { return 0.1 + float32(i)*0.01 })
+	engine := New(chunks, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	page := func(offset int) []Hit {
+		res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra", K: 10, Offset: offset})
+		require.NoError(t, err)
+		return res.Items
+	}
+
+	var first []Hit
+	for offset := 0; offset < n; offset += 10 {
+		first = append(first, page(offset)...)
+	}
+	assert.ElementsMatch(t, ids, hitIDs(first), "every document on exactly one page")
+	ties := 0
+	for i := 1; i < len(first); i++ {
+		a, b := first[i-1], first[i]
+		require.GreaterOrEqual(t, a.Score, b.Score, "rank %d", i)
+		if a.Score == b.Score {
+			ties++
+			assert.Less(t, a.Document.ID, b.Document.ID, "a tie is ordered by ID, rank %d", i)
+		}
+	}
+	assert.Equal(t, n/2, ties, "the copies tie in pairs")
+
+	var again []Hit
+	for offset := 0; offset < n; offset += 10 {
+		again = append(again, page(offset)...)
+	}
+	assert.Equal(t, hitIDs(first), hitIDs(again), "the same ranking on every call")
+}
+
+// TestEngine_OffsetContract: an offset is checked against the K the
+// request gets, its default included, without overflowing.
+func TestEngine_OffsetContract(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+	engine := New(chunks, docs, &fakeEmbedder{dim: sqlitetest.Width(t, db)}, Config{DefaultK: 10})
+	for _, tc := range []struct{ k, offset int }{{10, -1}, {10, 91}, {0, 91}, {100, 1}, {10, math.MaxInt}, {0, math.MaxInt}} {
+		_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "database", K: tc.k, Offset: tc.offset})
+		assert.Error(t, err, "k %d, offset %d", tc.k, tc.offset)
+	}
+	for _, tc := range []struct{ k, offset int }{{10, 90}, {0, 90}, {100, 0}, {1, 99}} {
+		_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "database", K: tc.k, Offset: tc.offset})
+		assert.NoError(t, err, "k %d, offset %d", tc.k, tc.offset)
+	}
+	assert.Equal(t, 10, engine.DefaultK())
+	assert.Equal(t, 10, New(chunks, docs, &fakeEmbedder{}, Config{}).DefaultK(), "the default's default")
+}
+
+// TestEngine_SnippetsForTheWindow: one read makes the snippets of the
+// window's chunks that BM25 returned, their terms marked; a chunk only the
+// vector leg returned has none, and isn't asked about.
+func TestEngine_SnippetsForTheWindow(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	docs, chunks, ids := seedCorpus(t, db) // postgres, btree, llm
+	cc := &countingChunks{ChunkStore: chunks}
+	// "mvcc" matches the postgres chunk's words; the vector leg returns all
+	// three chunks.
+	engine := New(cc, docs, &fakeEmbedder{dim: dim, byText: map[string][]float32{"mvcc": filledVec(dim, 0.10)}}, Config{})
+
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "mvcc", K: 3})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 3)
+	assert.Equal(t, 1, cc.snippets)
+	byDoc := map[string]ChunkMatch{}
+	for _, h := range res.Items {
+		require.Len(t, h.Chunks, 1)
+		byDoc[h.Document.ID] = h.Chunks[0]
+	}
+	pg := byDoc[ids[0]]
+	require.NotNil(t, pg.BM25Score)
+	assert.Equal(t, "PostgreSQL uses <em>MVCC</em> for concurrency control between transactions.", pg.Snippet)
+	assert.Equal(t, []string{pg.ChunkID}, cc.snippetIDs, "only BM25's chunks are asked about")
+	for _, id := range ids[1:] {
+		m := byDoc[id]
+		assert.Nil(t, m.BM25Score)
+		assert.NotNil(t, m.VectorScore)
+		assert.Empty(t, m.Snippet, "a vector-only match has no snippet")
+	}
+
+	cc.snippets = 0
+	res, err = engine.Search(context.Background(), Request{TenantID: "local", Query: "zzqterm", K: 3})
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Items)
+	assert.Zero(t, cc.snippets, "a window BM25 found nothing in reads no snippets")
+}
+
+// TestEngine_SnippetFailureKeepsHitsAndIsLogged: the snippets only
+// decorate the matches, so a failed read leaves them without, logged once;
+// the caller's context ending is an error.
+func TestEngine_SnippetFailureKeepsHitsAndIsLogged(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	docs, chunks, _ := seedCorpus(t, db)
+	var logs bytes.Buffer
+	cc := &countingChunks{ChunkStore: chunks, snippetsErr: errors.New("database is locked")}
+	engine := New(cc, docs, &fakeEmbedder{dim: dim}, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Items)
+	require.NotEmpty(t, res.Items[0].Chunks, "the hit keeps its matches")
+	assert.NotNil(t, res.Items[0].Chunks[0].BM25Score)
+	assert.Empty(t, res.Items[0].Chunks[0].Snippet)
+	assert.Equal(t, 1, strings.Count(logs.String(), "level=WARN"))
+	assert.Contains(t, logs.String(), "database is locked")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cc.onSnippets = cancel
+	cc.snippetsErr = context.Canceled
+	res, err = engine.Search(ctx, Request{TenantID: "local", Query: "attention token", K: 3})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, res)
 }
 
 func TestEngine_KContract(t *testing.T) {

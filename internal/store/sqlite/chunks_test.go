@@ -3,6 +3,9 @@ package sqlite
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +80,10 @@ func TestChunks_ReplaceForDocument_FullCycle(t *testing.T) {
 	first, err := ch.GetByIDs(ctx, []string{hits[0].ChunkID})
 	require.NoError(t, err)
 	assert.Contains(t, first[0].Text, "MVCC")
-	assert.NotEmpty(t, hits[0].Snippet)
+	snippets, err := ch.Snippets(ctx, "mvcc concurrency", []string{hits[0].ChunkID})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{hits[0].ChunkID: "PostgreSQL uses <em>MVCC</em> for <em>concurrency</em> control."},
+		snippets)
 
 	// Vector search: closest vector to 0.10 is the first chunk.
 	vHits, err := ch.VectorSearch(ctx, "local", fillVec(0.10), 10, store.SearchFilters{})
@@ -340,6 +346,138 @@ func TestChunks_GetByIDs_MissingIDs(t *testing.T) {
 	got, err = ch.GetByIDs(ctx, []string{"gone-1", "gone-2"})
 	require.NoError(t, err)
 	assert.Empty(t, got)
+}
+
+// TestChunks_Snippets: the snippets of the chunks asked for are the ones
+// the MATCH itself makes, the query's terms marked and a long text cut
+// around them; a chunk the query doesn't match, or that is gone, is absent.
+func TestChunks_Snippets(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	ids := seedDocs(t, db, "local", "https://example.com/a", "https://example.com/b")
+	long := strings.Repeat("filler words before the match ", 12) + "kafka partitions" +
+		strings.Repeat(" and filler words after it", 12)
+	for i, texts := range [][]string{{long, "consumer groups read kafka topics"}, {"nothing to see here"}} {
+		inputs := make([]store.ChunkInput, 0, len(texts))
+		for _, text := range texts {
+			inputs = append(inputs, store.ChunkInput{Text: text, Embedding: fillVec(0.1)})
+		}
+		require.NoError(t, ch.ReplaceForDocument(ctx, ids[i], latestExtractionID(t, db, ids[i]), "", nil, inputs))
+	}
+	const query = `"kafka" OR "partitions"`
+
+	inQuery := snippetsOfEveryMatch(t, db, query)
+	require.Len(t, inQuery, 2)
+
+	var unmatched string
+	require.NoError(t, db.QueryRow(`SELECT id FROM chunks WHERE document_id = ?`, ids[1]).Scan(&unmatched))
+	asked := append(slices.Collect(maps.Keys(inQuery)), unmatched, "gone")
+	got, err := ch.Snippets(ctx, query, asked)
+	require.NoError(t, err)
+	assert.Equal(t, inQuery, got)
+	for _, snippet := range got {
+		assert.Contains(t, snippet, "<em>kafka</em>")
+	}
+	assert.Contains(t, slices.Collect(maps.Values(got)), "consumer groups read <em>kafka</em> topics")
+	for _, snippet := range got {
+		if strings.HasPrefix(snippet, "…") {
+			assert.Contains(t, snippet, "<em>kafka</em> <em>partitions</em>")
+			assert.True(t, strings.HasSuffix(snippet, "…"), "a long text is cut on both sides of its match")
+		}
+	}
+
+	got, err = ch.Snippets(ctx, query, []string{"gone"})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// snippetsOfEveryMatch are the snippets query's MATCH makes for every row
+// it finds, by chunk ID, as BM25Search's own query once made them.
+func snippetsOfEveryMatch(t *testing.T, db *DB, query string) map[string]string {
+	t.Helper()
+	rows, err := db.Query(`SELECT c.id, `+snippetSQL+` FROM chunks_fts JOIN chunks c ON c.seq = chunks_fts.rowid
+		WHERE chunks_fts MATCH ?`, query)
+	require.NoError(t, err)
+	defer rows.Close()
+	snippets := map[string]string{}
+	for rows.Next() {
+		var id, snippet string
+		require.NoError(t, rows.Scan(&id, &snippet))
+		snippets[id] = snippet
+	}
+	require.NoError(t, rows.Err())
+	return snippets
+}
+
+// TestChunks_SnippetsWithNothingToMark: no chunks, or a blank query, which
+// BM25Search matches nothing for, run no query: a closed database isn't
+// asked.
+func TestChunks_SnippetsWithNothingToMark(t *testing.T) {
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	require.NoError(t, db.Close())
+	for _, tc := range []struct {
+		name  string
+		query string
+		ids   []string
+	}{
+		{"no chunks", `"kafka"`, nil},
+		{"an empty query", "", []string{"chunk"}},
+		{"a blank query", " \t\n", []string{"chunk"}},
+	} {
+		got, err := ch.Snippets(context.Background(), tc.query, tc.ids)
+		require.NoError(t, err, tc.name)
+		assert.Empty(t, got, tc.name)
+	}
+	_, err := ch.Snippets(context.Background(), `"kafka"`, []string{"chunk"})
+	require.Error(t, err, "a chunk is asked about")
+}
+
+// TestChunks_BM25TiesInWriteOrder: chunks with the same text score the
+// same, and come back in the order they were written, however many tie
+// and wherever the limit cuts them: search ranks again for every page it
+// shows, and a tie's order decides the fused scores.
+func TestChunks_BM25TiesInWriteOrder(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	urls := make([]string, 0, 40)
+	for i := range 40 {
+		urls = append(urls, fmt.Sprintf("https://example.com/copy/%d", i))
+	}
+	ids := seedDocs(t, db, "local", urls...)
+	for _, id := range ids {
+		require.NoError(t, ch.ReplaceForDocument(ctx, id, latestExtractionID(t, db, id), "", nil,
+			[]store.ChunkInput{{Text: "the same syndicated kafka post", Embedding: fillVec(0.1)}}))
+	}
+	written := chunkIDsWritten(t, db)
+	for _, limit := range []int{7, 25, 40} {
+		hits, err := ch.BM25Search(ctx, "local", `"kafka"`, limit, store.SearchFilters{})
+		require.NoError(t, err)
+		got := make([]string, 0, len(hits))
+		for _, h := range hits {
+			assert.Equal(t, hits[0].Score, h.Score, "every copy scores the same")
+			got = append(got, h.ChunkID)
+		}
+		assert.Equal(t, written[:limit], got, "limit %d", limit)
+	}
+}
+
+// chunkIDsWritten are the chunks' IDs in the order they were written.
+func chunkIDsWritten(t *testing.T, db *DB) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT id FROM chunks ORDER BY seq`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		ids = append(ids, id)
+	}
+	require.NoError(t, rows.Err())
+	return ids
 }
 
 // TestChunks_HostFilter: the host is matched literally, so '_' and '%' in a

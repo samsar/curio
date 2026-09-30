@@ -156,16 +156,12 @@ func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit i
 		var (
 			h       store.ChunkHit
 			bm25Neg float64
-			snippet sql.NullString
 		)
-		if err := rows.Scan(&h.ChunkID, &h.DocumentID, &bm25Neg, &snippet); err != nil {
+		if err := rows.Scan(&h.ChunkID, &h.DocumentID, &bm25Neg); err != nil {
 			return nil, fmt.Errorf("scan bm25 hit: %w", err)
 		}
 		// Negate so "higher is better" matches vector convention.
 		h.Score = -bm25Neg
-		if snippet.Valid {
-			h.Snippet = snippet.String
-		}
 		out = append(out, h)
 	}
 	return out, rows.Err()
@@ -173,27 +169,77 @@ func (s *Chunks) BM25Search(ctx context.Context, tenantID, query string, limit i
 
 // bm25Query builds BM25Search's query: it starts from the FTS MATCH and
 // reaches each hit's chunk by rowid (chunks.seq, the INTEGER PRIMARY KEY),
-// then its document for scoping and filters.
+// then its document for scoping and filters. It makes no snippet: FTS5
+// would make one for every row the query returns, a search's hundreds,
+// where a page shows a few (see Snippets).
+//
+// Equal scores, the same text in two documents, are ordered by seq: search
+// ranks again for every page it shows, and a tie's order decides the
+// fused scores, so it must come out the same each time.
 func bm25Query(tenantID, query string, limit int, filters store.SearchFilters) (string, []any) {
 	filterSQL, filterArgs := buildFilterClause(filters)
-
-	// snippet() args: column index, open mark, close mark, ellipsis,
-	// max tokens. 32 tokens gives ~200-300 char snippets — enough to
-	// see the match in context without flooding the CLI. The CLI's
-	// wrapLines breaks them across lines on word boundaries.
 	q := `
-	SELECT c.id, c.document_id, bm25(chunks_fts) AS bm25_score,
-	       snippet(chunks_fts, 0, '<em>', '</em>', '…', 32)
+	SELECT c.id, c.document_id, bm25(chunks_fts) AS bm25_score
 	FROM chunks_fts
 	JOIN chunks c    ON c.seq = chunks_fts.rowid
 	JOIN documents d ON d.id = c.document_id
 	WHERE chunks_fts MATCH ?
 	  AND ` + searchedDocSQL + filterSQL + `
-	ORDER BY bm25_score
+	ORDER BY bm25_score, c.seq
 	LIMIT ?`
 
 	args := slices.Concat([]any{query}, searchedDocArgs(tenantID), filterArgs)
 	return q, append(args, limit)
+}
+
+// snippetSQL is the snippet FTS5 makes of a chunk's text for the query it
+// matched: the matched terms between <em> and </em>, … where the text is
+// cut, and 32 tokens, about 200 to 300 characters: enough to see a match
+// in context without flooding the CLI, whose wrapLines breaks it on word
+// boundaries.
+const snippetSQL = `snippet(chunks_fts, 0, '<em>', '</em>', '…', 32)`
+
+// Snippets returns the snippet of each of chunkIDs for query, a MATCH
+// expression as BM25Search takes it, in one statement. A chunk the query
+// doesn't match, or that no longer exists (a reindex replaced it since it
+// was retrieved), is absent.
+func (s *Chunks) Snippets(ctx context.Context, query string, chunkIDs []string) (map[string]string, error) {
+	out := make(map[string]string, len(chunkIDs))
+	if len(chunkIDs) == 0 || strings.TrimSpace(query) == "" {
+		return out, nil
+	}
+	q, args := snippetsQuery(query, chunkIDs)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("snippets: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, snippet string
+		if err := rows.Scan(&id, &snippet); err != nil {
+			return nil, fmt.Errorf("scan snippet: %w", err)
+		}
+		out[id] = snippet
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("snippets: %w", err)
+	}
+	return out, nil
+}
+
+// snippetsQuery builds Snippets' query. It reaches the chunks' FTS rows by
+// rowid, each chunk's seq looked up by its ID, so FTS5 makes snippets of
+// those rows alone; the MATCH doesn't find rows, it gives snippet() the
+// phrases to mark.
+func snippetsQuery(query string, chunkIDs []string) (string, []any) {
+	q := `
+	SELECT c.id, ` + snippetSQL + `
+	FROM chunks_fts
+	JOIN chunks c ON c.seq = chunks_fts.rowid
+	WHERE chunks_fts MATCH ?
+	  AND chunks_fts.rowid IN (SELECT seq FROM chunks WHERE id IN (` + placeholders(len(chunkIDs)) + `))`
+	return q, appendArgs([]any{query}, chunkIDs)
 }
 
 // searchedDocSQL scopes a search to the documents it may return: the
@@ -259,6 +305,11 @@ func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []
 
 // vectorQuery builds VectorSearch's query: a KNN MATCH on chunks_vec, then
 // each hit's chunk and document for scoping and filters.
+//
+// Unlike bm25Query's, its order has no tie-break: sqlite-vec refuses a
+// second ORDER BY key on a KNN query ("Only a single 'ORDER BY distance'
+// clause is allowed on vec0 KNN queries"). Two chunks tie only when their
+// embeddings are bit for bit the same.
 //
 // sqlite-vec applies the k-NN cutoff at the index level BEFORE the
 // document predicates, and every search has one (searchedDocSQL), so a

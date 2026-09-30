@@ -161,6 +161,21 @@ func TestStylesheet(t *testing.T) {
 		declarations(ruleFor(t, rules, "", ".interest .members a.from-bookmark").body)["font-style"])
 	assert.Equal(t, "var(--mono)",
 		declarations(ruleFor(t, rules, "", ".interest .members a.untitled").body)["font-family"])
+	// A search result or a related document is named the same way.
+	for _, selector := range []string{".result-title a.from-bookmark", ".related a.from-bookmark"} {
+		fallback := declarations(ruleFor(t, rules, "", selector).body)
+		assert.Equal(t, "italic", fallback["font-style"], selector)
+		assert.NotContains(t, fallback, "font-family", "%s: in the title's own font", selector)
+	}
+	for _, selector := range []string{".result-title a.untitled", ".related a.untitled"} {
+		assert.Equal(t, "var(--mono)", declarations(ruleFor(t, rules, "", selector).body)["font-family"],
+			"%s: an address in monospace", selector)
+	}
+	// Show scores is a checkbox the stylesheet alone reads: scores are
+	// hidden until it is checked.
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".score").body)["display"])
+	assert.Equal(t, "inline", declarations(ruleFor(t, rules, "", "body:has(#show-scores:checked) .score").body)["display"])
+	assert.NotEmpty(t, declarations(ruleFor(t, rules, "", ".results-note").body), "the capped note is styled here")
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".load-more:empty").body)["display"])
 	assert.Equal(t, "pre-wrap", declarations(ruleFor(t, rules, "", "pre.source").body)["white-space"])
 	ruleFor(t, rules, "@media (max-width: 64rem)", ".header-search")
