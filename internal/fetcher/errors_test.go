@@ -1,6 +1,8 @@
 package fetcher
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRetryableStatus(t *testing.T) {
@@ -59,4 +62,53 @@ func TestSnippet(t *testing.T) {
 	got := snippet([]byte(long))
 	assert.True(t, utf8.ValidString(got), "must cut on a rune boundary")
 	assert.LessOrEqual(t, len(strings.TrimSuffix(got, "…")), maxErrorBody)
+}
+
+// TestHeldBack: a call a cooldown holds is deferred until the cooldown
+// ends. The deferral reads as, and unwraps to, the error it carries, and is
+// no PermanentError, however it is wrapped.
+func TestHeldBack(t *testing.T) {
+	fc := newFakeClock()
+	var c cooldown
+	c.extend(fc.now(), time.Hour)
+	se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, RetryAfter: time.Hour}
+	cause := fmt.Errorf("upstream: not sent: %w", se)
+
+	de := heldBack(&c, "the upstream to answer again", cause)
+	assert.Equal(t, fc.now().Add(time.Hour), de.Until)
+	assert.Equal(t, "the upstream to answer again", de.Reason)
+	assert.Equal(t, cause.Error(), de.Error())
+	assert.Same(t, cause, errors.Unwrap(de))
+
+	wrapped := fmt.Errorf("fetch failed: %w", de)
+	got, ok := errors.AsType[*DeferError](wrapped)
+	require.True(t, ok)
+	assert.Same(t, de, got)
+	assert.ErrorIs(t, wrapped, cause)
+	gotStatus, ok := errors.AsType[*HTTPStatusError](wrapped)
+	require.True(t, ok, "the 429 stays in the chain")
+	assert.Same(t, se, gotStatus)
+	_, permanent := errors.AsType[*PermanentError](wrapped)
+	assert.False(t, permanent)
+}
+
+// requireDeferred checks that err is a deferral until until, naming what it
+// waits for, and no PermanentError, and returns it.
+func requireDeferred(t *testing.T, err error, until time.Time) *DeferError {
+	t.Helper()
+	de, ok := errors.AsType[*DeferError](err)
+	require.True(t, ok, "a deferral: %v", err)
+	assert.Equal(t, until, de.Until)
+	assert.NotEmpty(t, de.Reason)
+	_, permanent := errors.AsType[*PermanentError](err)
+	assert.False(t, permanent, "a deferral is never permanent: %v", err)
+	return de
+}
+
+// assertNotDeferred checks that err, which a request that was sent ended
+// in, is no deferral.
+func assertNotDeferred(t *testing.T, err error) {
+	t.Helper()
+	_, deferred := errors.AsType[*DeferError](err)
+	assert.False(t, deferred, "an answer is never deferred: %v", err)
 }

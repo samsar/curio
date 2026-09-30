@@ -54,7 +54,10 @@ type Fetcher interface {
 	Name() string
 
 	// Fetch extracts the resource at rawURL. Honors ctx for cancellation
-	// and deadlines.
+	// and deadlines. A failure is a *PermanentError when no retry can
+	// change it, a *DeferError when curio held the call back itself and
+	// the fetch should run again at its Until, and retried with backoff
+	// otherwise.
 	Fetch(ctx context.Context, rawURL string) (*Result, error)
 }
 

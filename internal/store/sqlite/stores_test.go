@@ -359,6 +359,31 @@ func TestBookmarks_LinkDocument(t *testing.T) {
 
 // ---------- JobQueue ----------
 
+// TestJobs_MarkDone_ClearsLastError: a job that failed an attempt, then
+// succeeded, is done with nothing left to explain.
+func TestJobs_MarkDone_ClearsLastError(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	q := NewJobs(db)
+	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
+	claimed, err := q.ClaimNext(ctx, nil)
+	require.NoError(t, err)
+	_, err = q.MarkFailed(ctx, claimed.ID, "transient", true)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `UPDATE jobs SET run_after = ? WHERE id = ?`, formatTime(time.Now().UTC()), claimed.ID)
+	require.NoError(t, err)
+
+	retried, err := q.ClaimNext(ctx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, retried.LastError, "a running retry keeps the error it retries after")
+	require.NoError(t, q.MarkDone(ctx, retried.ID))
+
+	got, err := q.GetByID(ctx, retried.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusDone, got.Status)
+	assert.Nil(t, got.LastError)
+}
+
 func TestJobs_EnqueueClaimDone(t *testing.T) {
 	ctx := context.Background()
 	q := NewJobs(newTestDB(t))
@@ -655,8 +680,56 @@ func TestJobs_Requeue_NeverBelowZeroAttempts(t *testing.T) {
 	assert.Zero(t, got.Attempts)
 }
 
-// TestJobs_TransitionsRequireRunning: MarkDone, MarkFailed and Requeue only
-// move a running job. Anything else is reported and left as it was.
+// TestJobs_Defer: a deferred job goes back to pending until the time given,
+// with its claim's attempt refunded and why it waits as its last_error, and
+// is claimable once that time comes.
+func TestJobs_Defer(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	q := NewJobs(db)
+	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
+	claimed, err := q.ClaimNext(ctx, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, claimed.Attempts)
+
+	until := time.Now().UTC().Add(24 * time.Minute).Truncate(time.Millisecond)
+	require.NoError(t, q.Defer(ctx, claimed.ID, until, "waiting for GitHub's API rate limit to reset"))
+
+	got, err := q.GetByID(ctx, claimed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.JobStatusPending, got.Status)
+	assert.Zero(t, got.Attempts, "the claim is refunded")
+	assert.Equal(t, until, got.RunAfter)
+	require.NotNil(t, got.LastError)
+	assert.Equal(t, "waiting for GitHub's API rate limit to reset", *got.LastError)
+	assert.False(t, startedAt(t, db, claimed.ID).Valid)
+
+	_, err = q.ClaimNext(ctx, nil)
+	require.ErrorIs(t, err, store.ErrNotFound, "not claimable before its time")
+
+	_, err = db.ExecContext(ctx, `UPDATE jobs SET run_after = ? WHERE id = ?`,
+		formatTime(time.Now().UTC().Add(-time.Second)), claimed.ID)
+	require.NoError(t, err)
+	again, err := q.ClaimNext(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, claimed.ID, again.ID)
+	assert.Equal(t, 1, again.Attempts)
+}
+
+func TestJobs_Defer_NeverBelowZeroAttempts(t *testing.T) {
+	ctx := context.Background()
+	q := NewJobs(newTestDB(t))
+	j := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusRunning, 0)
+
+	require.NoError(t, q.Defer(ctx, j.ID, time.Now().Add(time.Minute), "waiting"))
+	got, err := q.GetByID(ctx, j.ID)
+	require.NoError(t, err)
+	assert.Zero(t, got.Attempts)
+}
+
+// TestJobs_TransitionsRequireRunning: MarkDone, MarkFailed, Requeue and
+// Defer only move a running job. Anything else is reported and left as it
+// was.
 func TestJobs_TransitionsRequireRunning(t *testing.T) {
 	transitions := map[string]func(q *Jobs, id string) error{
 		"MarkDone": func(q *Jobs, id string) error { return q.MarkDone(context.Background(), id) },
@@ -665,6 +738,9 @@ func TestJobs_TransitionsRequireRunning(t *testing.T) {
 			return err
 		},
 		"Requeue": func(q *Jobs, id string) error { return q.Requeue(context.Background(), id) },
+		"Defer": func(q *Jobs, id string) error {
+			return q.Defer(context.Background(), id, time.Now().Add(time.Hour), "waiting")
+		},
 	}
 	for name, transition := range transitions {
 		t.Run(name, func(t *testing.T) {

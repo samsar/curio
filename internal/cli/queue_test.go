@@ -140,6 +140,16 @@ func TestStatus_QueueLoad(t *testing.T) {
 		"           fetch 0/16 running, 1 pending   index 0/4 running, 0 pending   cluster 0/1 running, 0 pending\n")
 }
 
+// TestStatus_QueueLoadDueLater: a pool whose pending jobs include some
+// that can't run yet says how many.
+func TestStatus_QueueLoadDueLater(t *testing.T) {
+	srv := apitest.Start(t)
+	require.NoError(t, srv.Deps.Queue.Enqueue(t.Context(), &store.Job{TenantID: apitest.TenantID,
+		Kind: store.JobKindCluster, RunAfter: time.Now().Add(24 * time.Minute)}))
+	out := mustRun(t, srv, "status")
+	assert.Contains(t, out, "   cluster 0/1 running, 1 pending (1 due later)\n")
+}
+
 func TestDescribeKeepAwake(t *testing.T) {
 	kinds := func(pending, running int) []client.QueueKind {
 		return []client.QueueKind{{Kind: "fetch", Pending: pending, Running: running}, {Kind: "index"}}

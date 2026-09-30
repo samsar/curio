@@ -486,9 +486,12 @@ func (g *GitHub) threadComments(ctx context.Context, info urlutil.GitHubURLInfo)
 const (
 	maxAPIRetries = 3
 	// maxInlineRateLimitWait is the longest rate-limit pause apiGet sits
-	// out inside a job. Longer ones fail the attempt with the remaining
-	// time in RetryAfter and leave the rest to the job queue's backoff.
+	// out inside a job. An answer asking for longer fails the attempt with
+	// the time in RetryAfter; a call the cooldown then holds is deferred
+	// until it ends (awaitTurn).
 	maxInlineRateLimitWait = 2 * time.Minute
+	// gitHubHoldReason is what a deferred GitHub fetch waits for.
+	gitHubHoldReason = "GitHub's API rate limit to reset"
 )
 
 // errRateLimited tags a rate-limit answer; the wrapped *HTTPStatusError
@@ -521,8 +524,10 @@ func (g *GitHub) apiGet(ctx context.Context, endpoint, accept string) ([]byte, e
 
 // awaitTurn paces one API call through the shared limiter and cooldown
 // (see pace), sitting out a cooldown that ends within
-// maxInlineRateLimitWait. A longer one fails at once, without a request,
-// with a retryable 429 carrying the time left.
+// maxInlineRateLimitWait. A longer one returns at once, without a request,
+// a *DeferError until the cooldown ends around a 429 carrying the time
+// left. That holds for any call of a fetch: one whose README call is held
+// after its repository's answered defers as a whole.
 func (g *GitHub) awaitTurn(ctx context.Context, endpoint string) error {
 	left, err := pace(ctx, g.limiter, &g.cooldown, g.clock, maxInlineRateLimitWait)
 	if err != nil {
@@ -530,8 +535,9 @@ func (g *GitHub) awaitTurn(ctx context.Context, endpoint string) error {
 	}
 	if left > 0 {
 		se := &HTTPStatusError{StatusCode: http.StatusTooManyRequests, URL: endpoint, RetryAfter: left}
-		return fmt.Errorf("github: %s: not sent, rate-limit cooldown has %s left: %w: %w",
-			endpoint, left.Round(time.Second), errRateLimited, se)
+		return heldBack(&g.cooldown, gitHubHoldReason,
+			fmt.Errorf("github: %s: not sent, rate-limit cooldown has %s left: %w: %w",
+				endpoint, left.Round(time.Second), errRateLimited, se))
 	}
 	return nil
 }
@@ -589,7 +595,9 @@ var secondaryLimitRE = regexp.MustCompile(`(?i)secondary rate limit|abuse detect
 // still positive. Any other 403 is a real permission answer. The delay is
 // Retry-After when given, else the primary limit's reset time, else a
 // minute: GitHub asks for at least that much before retrying a secondary
-// limit, and a reset time already past is no reason to hammer.
+// limit, and a reset time already past is no reason to hammer. Either hint
+// is clamped at maxRetryAfter: it becomes the cooldown every call waits
+// out, and the time a deferred fetch waits for.
 func (g *GitHub) rateLimitDelay(resp *http.Response, body []byte) (time.Duration, bool) {
 	now := g.clock.now()
 	retryAfter, hasRetryAfter := parseRetryAfter(resp.Header, now)
@@ -610,7 +618,7 @@ func (g *GitHub) rateLimitDelay(resp *http.Response, body []byte) (time.Duration
 	if primary {
 		if epoch, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 			if d := time.Unix(epoch, 0).Sub(now); d > 0 {
-				return d, true
+				return min(d, maxRetryAfter), true
 			}
 		}
 	}

@@ -75,18 +75,20 @@ type rateLimiter interface {
 
 // pace clears one call to an upstream that lim paces and c cools down. A
 // cooldown longer than maxInline returns the time left without waiting, for
-// the caller to fail fast rather than hold a worker; the job queue's backoff
-// covers the rest. lim is nil when the caller is paced elsewhere; only the
-// cooldown applies then.
+// the caller to defer the fetch (heldBack) rather than hold a worker; the
+// job queue runs it again when the cooldown ends. lim is nil when the
+// caller is paced elsewhere; only the cooldown applies then. The limiter's
+// wait is always sat out: it is a steady pace, as long as the turns of the
+// callers queued ahead.
 //
 // The cooldown is checked twice. Before queueing in the limiter, so a
-// cooldown already too long to sit out fails at once instead of after the
-// caller's turn for a token (at 20 a minute, the 16th fetch worker would
-// wait 45s only to fail), without spending a token a later call needs. And
-// after lim grants a token, so a call that was already queued when a
-// rate-limit answer arrived still sees it. A caller that sits a cooldown out
-// queues for a fresh token afterwards, so the callers it held up resume at
-// the limiter's pace rather than all at once when it ends.
+// cooldown already too long to sit out is reported at once instead of after
+// the caller's turn for a token (at 20 a minute, the 16th fetch worker would
+// wait 45s only to be deferred), without spending a token a later call
+// needs. And after lim grants a token, so a call that was already queued
+// when a rate-limit answer arrived still sees it. A caller that sits a
+// cooldown out queues for a fresh token afterwards, so the callers it held
+// up resume at the limiter's pace rather than all at once when it ends.
 func pace(ctx context.Context, lim rateLimiter, c *cooldown, clk clock, maxInline time.Duration) (time.Duration, error) {
 	if left := c.remaining(clk.now()); left > maxInline {
 		return left, nil

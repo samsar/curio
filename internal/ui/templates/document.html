@@ -128,14 +128,20 @@ rest says how the text was fetched, and under them the jobs.
 {{/*
 A document's jobs in flight, a DocumentJobs, newest first, and what came
 of them since the page was rendered: a new text, a failure or another
-change, each with a link that reloads the page. Every link has an id, so
-focus survives a poll; no live role.
+change, each with a link that reloads the page. A job that waits for a
+time says when, and on a line of its own why: the error it retries after,
+or what it was deferred for, set off by a colon that only its text shows
+(a screen reader, a reader view). Every link has an id, so focus survives
+a poll; no live role.
 */}}
 {{define "doc-jobs" -}}
 <div class="doc-jobs" id="doc-jobs">
 {{- with .Err}}{{template "panel-error" .}}{{else}}
 {{- with .Jobs}}<ul class="job-lines">
-{{- range .}}<li>{{jobKindLabel .Kind}} {{if .Running}}running · attempt {{.Attempt}} of {{$.AttemptLimit}}{{else}}queued{{if .Retrying}} · attempt {{.Attempt}} of {{$.AttemptLimit}}, due {{template "reltime" .RunAfter}}{{end}}{{end}}</li>
+{{- range .}}<li>{{jobKindLabel .Kind}} {{if .Running}}running · attempt {{.Attempt}} of {{$.AttemptLimit}}
+{{- else if .Waiting}}waiting, due {{template "reltime" .RunAfter}}{{if .Attempts}} · attempt {{.Attempt}} of {{$.AttemptLimit}}{{end}}
+{{- with .LastError}}<span class="visually-hidden">: </span><span class="job-why" title="{{.}}">{{shortError .}}</span>{{end}}
+{{- else}}queued{{if .Attempts}} · attempt {{.Attempt}} of {{$.AttemptLimit}}{{end}}{{end}}</li>
 {{- end}}</ul>{{end}}
 {{- if and .Queued .Hold}}<p class="job-hold"><a id="doc-jobs-hold" href="{{navHref "status"}}">The queue is closed: {{queueReason .Hold}}</a></p>{{end}}
 {{- if eq .Outcome "text-changed"}}<p class="job-outcome">The text changed: <a id="doc-reload" href="{{documentHref .DocumentID}}">reload</a></p>

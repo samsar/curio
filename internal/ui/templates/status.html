@@ -173,18 +173,32 @@ commands show instead.
 </section>
 {{- end}}
 
-{{/* Why the queue holds its jobs, or how many wait, as its state line says. */}}
+{{/*
+Why the queue holds its jobs, or how many wait, as its state line says:
+jobs that all wait for a later time, with nothing running, say when the
+first is due instead of that it works.
+*/}}
 {{define "queue-why" -}}
-{{if .Open}}{{with .Waiting}}Working: {{count . "job" "jobs"}} waiting{{else}}Nothing waiting{{end}}{{else}}{{queueReason .Reason}}{{if not .OpensAt.IsZero}}; opens {{template "reltime" .OpensAt}}{{end}}{{end}}
+{{if .Open}}{{if .OnlyDueLater}}{{count .Waiting "job" "jobs"}} due later, the first {{template "reltime" .NextDue}}{{else}}{{with .Waiting}}Working: {{count . "job" "jobs"}} waiting{{else}}Nothing waiting{{end}}{{end}}{{else}}{{queueReason .Reason}}{{if not .OpensAt.IsZero}}; opens {{template "reltime" .OpensAt}}{{end}}{{end}}
 {{- end}}
 
-{{/* A ProgressPanel's estimate, or why there is none. */}}
+{{/*
+A ProgressPanel's estimate, or why there is none. Jobs due later (a
+retry's backoff, a hold on an upstream) are left out of the estimate and
+said apart.
+*/}}
 {{define "progress" -}}
 {{with .Progress}}
 {{if eq .State "idle"}}<p>Nothing queued.</p>
-{{else if eq .State "closed"}}<p>{{count .Outstanding "job" "jobs"}} queued. {{queueReason $.Reason}}: none start until the queue opens.</p>
-{{else if eq .State "stalled"}}<p>{{count .Outstanding "job" "jobs"}} queued, and none finished in the last {{duration .Window}}.</p>
-{{else}}<div class="stat"><span class="label">{{count .Outstanding "job" "jobs"}} left</span><span class="value">≈ {{duration .ETA}}</span><span class="hint">An estimate at the pace of the last {{duration .Window}}: {{count .Finished "job" "jobs"}} finished, {{printf "%.1f" .PerMinute}} a minute.</span></div>
+{{else if eq .State "closed"}}<p>{{count .Queued "job" "jobs"}} queued. {{queueReason $.Reason}}: none start until the queue opens.</p>
+{{else if eq .State "waiting"}}<p>{{count .DueLater "job" "jobs"}} due later, the first {{template "reltime" .NextDue}}: none can run before then.</p>
+{{else if eq .State "stalled"}}<p>{{count .Outstanding "job" "jobs"}} queued, and none finished in the last {{duration .Window}}.{{template "due-later" .}}</p>
+{{else}}<div class="stat"><span class="label">{{count .Outstanding "job" "jobs"}} left</span><span class="value">≈ {{duration .ETA}}</span><span class="hint">An estimate at the pace of the last {{duration .Window}}: {{count .Finished "job" "jobs"}} finished, {{printf "%.1f" .PerMinute}} a minute.{{template "due-later" .}}</span></div>
 {{end}}
 {{end}}
+{{- end}}
+
+{{/* A Progress's jobs due later, after the work due now, if it has any. */}}
+{{define "due-later" -}}
+{{with .DueLater}} {{count . "more job is" "more jobs are"}} due later, the first {{template "reltime" $.NextDue}}.{{end}}
 {{- end}}

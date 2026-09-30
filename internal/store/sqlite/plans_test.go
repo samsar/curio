@@ -214,6 +214,17 @@ func TestQueryPlans(t *testing.T) {
 			want: []string{"SEARCH jobs USING INDEX idx_jobs_claim (status=? AND kind=? AND run_after<?)"},
 		},
 		{
+			name:  "MarkDone",
+			query: markDoneSQL, args: []any{store.JobStatusDone, "job", store.JobStatusRunning},
+			want: []string{"SEARCH jobs USING INDEX sqlite_autoindex_jobs_1 (id=?)"},
+		},
+		{
+			name:  "Defer",
+			query: deferJobSQL,
+			args:  []any{store.JobStatusPending, "later", "waiting", "now", "job", store.JobStatusRunning},
+			want:  []string{"SEARCH jobs USING INDEX sqlite_autoindex_jobs_1 (id=?)"},
+		},
+		{
 			name:  "RecoverOrphans fail",
 			query: failOrphansSQL(2),
 			args:  []any{store.JobStatusFailed, "error", "now", store.JobStatusRunning, 5, store.JobKindFetch, store.JobKindIndex},
@@ -261,7 +272,7 @@ func TestQueryPlans(t *testing.T) {
 		},
 		{
 			name:  "QueueCounts",
-			query: queueCountsSQL, args: []any{store.JobStatusPending, store.JobStatusRunning},
+			query: queueCountsSQL, args: []any{store.JobStatusPending, store.JobStatusRunning, "now"},
 			want: []string{"SEARCH jobs USING COVERING INDEX idx_jobs_claim (status=?)"},
 		},
 		{

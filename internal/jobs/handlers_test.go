@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -234,6 +236,94 @@ func TestFetchHandler_FetcherError_Retryable(t *testing.T) {
 	err := fetchHandler(deps)(context.Background(), docJob(t, store.JobKindFetch, doc.ID))
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, ErrPermanent), "network failures must be retryable")
+}
+
+// TestFetchHandler_HeldFetchIsDeferred: a fetch the fetcher held back
+// itself is a deferral until the hold ends, for what the fetcher said it
+// waits for, around the fetch's error, whose chain still carries the 429.
+// Nothing is written: no markdown, extraction, document change or index
+// job. A PermanentError is checked first: it is a verdict whatever it
+// wraps.
+func TestFetchHandler_HeldFetchIsDeferred(t *testing.T) {
+	deps, db, ff := newTestDeps(t)
+	ctx := context.Background()
+	until := time.Now().Add(24 * time.Minute)
+	se := &fetcher.HTTPStatusError{StatusCode: http.StatusTooManyRequests, RetryAfter: 24 * time.Minute}
+	held := &fetcher.DeferError{Until: until, Reason: "the pause on Jina Reader calls to end",
+		Err: fmt.Errorf("jina: not sent, cooldown has 24m0s left: %w", se)}
+	ff.res = nil
+	ff.err = fmt.Errorf("native: %w", held)
+
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/held", ContentType: store.ContentTypeArticle}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+
+	err := fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID))
+	de, ok := errors.AsType[*DeferError](err)
+	require.True(t, ok, "a deferral: %v", err)
+	assert.Equal(t, until, de.Until)
+	assert.Equal(t, held.Reason, de.Reason)
+	assert.Equal(t, "fetch failed: native: jina: not sent, cooldown has 24m0s left: HTTP 429 Too Many Requests", err.Error())
+	assert.NotErrorIs(t, err, ErrPermanent)
+	gotStatus, ok := errors.AsType[*fetcher.HTTPStatusError](err)
+	require.True(t, ok)
+	assert.Same(t, se, gotStatus)
+
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStatePending, got.State)
+	assert.Nil(t, got.CurrentExtractionID)
+	assert.Equal(t, doc.UpdatedAt, got.UpdatedAt)
+	var extractions, indexJobs int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM document_extractions`).Scan(&extractions))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindIndex).Scan(&indexJobs))
+	assert.Zero(t, extractions)
+	assert.Zero(t, indexJobs)
+	_, err = os.Stat(filepath.Join(deps.Home.ContentDir(), doc.ID))
+	assert.ErrorIs(t, err, fs.ErrNotExist, "no markdown written")
+
+	ff.err = &fetcher.PermanentError{Err: held}
+	err = fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID))
+	assert.ErrorIs(t, err, ErrPermanent)
+	_, ok = errors.AsType[*DeferError](err)
+	assert.False(t, ok, "a verdict is never deferred")
+}
+
+// TestWorker_HeldFetchPastTheBudgetFailsRateLimited: a fetch the fetcher
+// still holds back once its job is a day old fails the attempt like any
+// retryable error; at the job's last attempt the document fails for
+// rate_limited, read from the 429 the deferral carried.
+func TestWorker_HeldFetchPastTheBudgetFailsRateLimited(t *testing.T) {
+	deps, db, ff := newTestDeps(t)
+	ctx := context.Background()
+	ff.res = nil
+	ff.err = &fetcher.DeferError{Until: time.Now().Add(time.Hour), Reason: "GitHub's API rate limit to reset",
+		Err: fmt.Errorf("github: not sent, rate-limit cooldown has 1h0m0s left: %w",
+			&fetcher.HTTPStatusError{StatusCode: http.StatusTooManyRequests, RetryAfter: time.Hour})}
+
+	doc := &store.Document{TenantID: "local", URL: "https://github.com/owner/repo", ContentType: store.ContentTypeRepo}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+	job := docJob(t, store.JobKindFetch, doc.ID)
+	require.NoError(t, deps.Queue.Enqueue(ctx, job))
+	// Four attempts spent, and a day and an hour old.
+	_, err := db.ExecContext(ctx, `UPDATE jobs SET attempts = 4, created_at = `+sqlAgo(deferralBudget+time.Hour)+
+		` WHERE id = ?`, job.ID)
+	require.NoError(t, err)
+
+	w := NewWorker(deps.Queue, WorkerOptions{Log: quietLog})
+	w.Register(store.JobKindFetch, fetchHandler(deps))
+	w.OnPermanentFailure(store.JobKindFetch, markDocFailed(deps))
+	handleOnce(t, w, store.JobKindFetch)
+
+	gotJob := getJob(t, deps.Queue, job.ID)
+	assert.Equal(t, store.JobStatusFailed, gotJob.Status)
+	assert.Equal(t, 5, gotJob.Attempts)
+	require.NotNil(t, gotJob.LastError)
+	assert.Equal(t, "fetch failed: github: not sent, rate-limit cooldown has 1h0m0s left: HTTP 429 Too Many Requests",
+		*gotJob.LastError)
+	got, err := deps.Documents.GetByID(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateFailed, got.State)
+	assert.Equal(t, store.FailureCauseRateLimited, got.FailureCause)
 }
 
 func TestFetchHandler_MissingDocument_Permanent(t *testing.T) {

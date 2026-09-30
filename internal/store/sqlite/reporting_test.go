@@ -272,7 +272,9 @@ func TestJobs_CountByStatus(t *testing.T) {
 }
 
 // TestJobs_QueueCounts: the unfinished jobs of each kind, whatever their
-// tenant, with pending retries still waiting on run_after counted.
+// tenant, with the pending jobs whose run_after is still ahead (a retry, a
+// deferral) counted among them, and apart, with the earliest of their
+// run_afters.
 func TestJobs_QueueCounts(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -294,12 +296,20 @@ func TestJobs_QueueCounts(t *testing.T) {
 	retry := enqueueWithStatus(t, q, store.JobKindIndex, store.JobStatusRunning, 1)
 	_, err := q.MarkFailed(ctx, retry.ID, "transient", true)
 	require.NoError(t, err)
+	retried, err := q.GetByID(ctx, retry.ID)
+	require.NoError(t, err)
+	// Two deferrals, the sooner second.
+	soon := now.Add(24 * time.Minute).Truncate(time.Millisecond)
+	for _, until := range []time.Time{now.Add(time.Hour), soon} {
+		j := enqueueWithStatus(t, q, store.JobKindFetch, store.JobStatusRunning, 1)
+		require.NoError(t, q.Defer(ctx, j.ID, until, "waiting for a limit to lift"))
+	}
 
 	got, err := q.QueueCounts(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, map[store.JobKind]store.QueueCount{
-		store.JobKindFetch: {Pending: 3, Running: 1},
-		store.JobKindIndex: {Pending: 1, Running: 1},
+		store.JobKindFetch: {Pending: 5, Running: 1, DueLater: 2, NextDue: soon},
+		store.JobKindIndex: {Pending: 1, Running: 1, DueLater: 1, NextDue: retried.RunAfter},
 	}, got)
 }
 

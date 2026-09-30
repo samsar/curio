@@ -753,6 +753,13 @@ func TestQueue(t *testing.T) {
 		{Kind: "fetch", Limit: apitest.Pools.Fetch}, {Kind: "index", Limit: apitest.Pools.Index}, {Kind: "cluster", Limit: 1},
 	}}, q)
 
+	later := time.Now().UTC().Add(24 * time.Minute).Truncate(time.Millisecond)
+	require.NoError(t, s.Deps.Queue.Enqueue(ctx, &store.Job{TenantID: apitest.TenantID, Kind: store.JobKindCluster,
+		RunAfter: later}))
+	q, err = c.Queue(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, client.QueueKind{Kind: "cluster", Limit: 1, Pending: 1, DueLater: 1, NextDue: later}, q.Kinds[2])
+
 	q, err = c.UpdateQueue(ctx, client.QueueUpdate{Paused: new(true), Schedule: "22:00-07:00"})
 	require.NoError(t, err)
 	assert.True(t, q.Paused)

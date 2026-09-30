@@ -20,6 +20,30 @@ type PermanentError struct {
 func (e *PermanentError) Error() string { return e.Err.Error() }
 func (e *PermanentError) Unwrap() error { return e.Err }
 
+// DeferError is a call curio chose not to make: a hold it keeps itself, a
+// cooldown every caller of an upstream shares, outlasts what a fetch sits
+// out inline. Nothing was learned about the URL, and the fetch should run
+// again at Until. It is never a PermanentError, and no fetcher wraps it in
+// one. Until is never zero. Reason says what the call waits for, for a
+// person, worded to follow "waiting for" ("GitHub's API rate limit to
+// reset"). Err is the error the fetch fails with once the job may wait no
+// longer: its text and chain (the 429 and its time left) are what an
+// ordinary retryable failure would carry.
+type DeferError struct {
+	Until  time.Time
+	Reason string
+	Err    error
+}
+
+func (e *DeferError) Error() string { return e.Err.Error() }
+func (e *DeferError) Unwrap() error { return e.Err }
+
+// heldBack is the error of a call cooldown c holds past the caller's inline
+// cap: a *DeferError until the cooldown ends, for reason, around err.
+func heldBack(c *cooldown, reason string, err error) *DeferError {
+	return &DeferError{Until: c.deadline(), Reason: reason, Err: err}
+}
+
 // Sentinels callers branch on with errors.Is. They say why a fetch failed;
 // whether it is retried is decided separately (PermanentError).
 var (
@@ -122,7 +146,8 @@ func statusError(code int, err error) error {
 }
 
 // maxRetryAfter bounds a Retry-After hint. Longer hints are clamped rather
-// than trusted: the job queue's own backoff tops out well below this.
+// than trusted: a hint becomes a cooldown that defers every fetch it holds
+// (DeferError), and the job queue lets a job wait a day at most.
 const maxRetryAfter = 24 * time.Hour
 
 // parseRetryAfter reads a Retry-After header given as delta-seconds or as an
