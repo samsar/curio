@@ -48,14 +48,14 @@ func TestProgressLine(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, progressLine(stats, tc.queue, 0.5, 14*time.Second))
+			assert.Equal(t, tc.want, progressLine(stats, tc.queue, 0.5))
 		})
 	}
 }
 
 // TestProgressLine_DueLater: jobs due later are said beside the ETA, which
-// leaves them out, or, when they are all that is queued, instead of a rate
-// and an ETA that have nothing to measure.
+// leaves them out (102 jobs due now at 0.5 a second), or, when they are all
+// that is queued, instead of a rate and an ETA that have nothing to measure.
 func TestProgressLine_DueLater(t *testing.T) {
 	next := time.Date(2026, 9, 30, 14, 32, 0, 0, time.Local)
 	queue := func(pending, later int) *client.Queue {
@@ -65,11 +65,11 @@ func TestProgressLine_DueLater(t *testing.T) {
 	}
 	waiting := &client.Stats{JobsByStatus: map[string]int{"done": 7, "pending": 172}}
 	assert.Equal(t, "  done=7  pending=172  running=0  failed=0  fetched=0   172 due later, the first at 14:32",
-		progressLine(waiting, queue(171, 171), 0, 0))
+		progressLine(waiting, queue(171, 171), 0))
 
 	working := &client.Stats{JobsByStatus: map[string]int{"done": 7, "pending": 172, "running": 2}}
-	assert.Equal(t, "  done=7  pending=172  running=2  failed=0  fetched=0   rate≈0.5/s   eta≈14s (72 more due later)",
-		progressLine(working, queue(171, 71), 0.5, 14*time.Second))
+	assert.Equal(t, "  done=7  pending=172  running=2  failed=0  fetched=0   rate≈0.5/s   eta≈3m24s (72 more due later)",
+		progressLine(working, queue(171, 71), 0.5))
 }
 
 // TestFollowETA: --follow's ETA counts the jobs due now, running or

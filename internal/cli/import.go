@@ -269,9 +269,7 @@ func followProgress(ctx context.Context, w io.Writer, c *client.Client) error {
 		if elapsed > 0 {
 			rate = float64(finished-lastFinished) / elapsed
 		}
-		later, _ := dueLater(queue)
-		eta := followETA(pending, running, later, rate)
-		fmt.Fprintln(w, progressLine(stats, queue, rate, eta))
+		fmt.Fprintln(w, progressLine(stats, queue, rate))
 		lastFinished = finished
 		lastTick = time.Now()
 
@@ -298,15 +296,18 @@ func followETA(pending, running, later int, rate float64) time.Duration {
 }
 
 // progressLine is one line of followProgress: the job and document counts,
-// the rate and ETA, and why the queue is closed when it is. queue is nil
-// when it couldn't be read. Jobs due later are said beside the ETA, or,
-// when nothing else is pending or running, instead of the rate and the
-// ETA, which have nothing to measure: how many, and when the first is due.
-func progressLine(stats *client.Stats, queue *client.Queue, rate float64, eta time.Duration) string {
+// the rate jobs finish at (a second) and the ETA of the jobs due now, and
+// why the queue is closed when it is. queue is nil when it couldn't be
+// read. Jobs due later are said beside the ETA, or, when nothing else is
+// pending or running, instead of the rate and the ETA, which have nothing
+// to measure: how many, and when the first is due.
+func progressLine(stats *client.Stats, queue *client.Queue, rate float64) string {
 	pending, running := stats.JobsByStatus["pending"], stats.JobsByStatus["running"]
 	line := fmt.Sprintf("  done=%d  pending=%d  running=%d  failed=%d  fetched=%d",
 		stats.JobsByStatus["done"], pending, running, stats.JobsByStatus["failed"], stats.DocumentsByState["fetched"])
-	switch later, next := dueLater(queue); {
+	later, next := dueLater(queue)
+	eta := followETA(pending, running, later, rate)
+	switch {
 	case later > 0 && later >= pending && running == 0:
 		line += fmt.Sprintf("   %d due later, the first at %s", later, next.Local().Format("15:04"))
 	case later > 0:
