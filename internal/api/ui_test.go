@@ -243,6 +243,38 @@ func TestUI_Status(t *testing.T) {
 	assert.Contains(t, body, `id="queue-pause" data-kind="resume"`)
 }
 
+// TestUI_StatusDueLater: jobs that can't run before a later time (a hold
+// on GitHub) read as waiting for the first of them on the queue's state
+// line and in the progress, never as work nor as a stall; once a job is
+// due, the progress counts it alone and says the rest apart.
+func TestUI_StatusDueLater(t *testing.T) {
+	srv := apitest.Start(t)
+	ctx := context.Background()
+	first := time.Now().Add(24*time.Minute + 30*time.Second)
+	for _, runAfter := range []time.Time{first.Add(time.Hour), first} {
+		require.NoError(t, srv.Deps.Queue.Enqueue(ctx,
+			&store.Job{TenantID: apitest.TenantID, Kind: store.JobKindFetch, RunAfter: runAfter}))
+	}
+	due := func(text string) *regexp.Regexp {
+		return regexp.MustCompile(regexp.QuoteMeta(text) + `<time datetime="` +
+			regexp.QuoteMeta(first.UTC().Format(time.RFC3339)) + `" title="[^"]+">in 24 min</time>`)
+	}
+
+	body := getPage(t, srv, "/ui/status", http.StatusOK)
+	assert.Regexp(t, due(`<span class="why">2 jobs due later, the first `), body)
+	assert.NotContains(t, body, "Working:")
+	assert.Regexp(t, due(`<p>2 jobs due later, the first `), body)
+	assert.Contains(t, body, ": none can run before then.</p>")
+	assert.NotContains(t, body, "none finished")
+
+	require.NoError(t, srv.Deps.Queue.Enqueue(ctx, &store.Job{TenantID: apitest.TenantID, Kind: store.JobKindFetch}))
+	body = getPage(t, srv, "/ui/status", http.StatusOK)
+	assert.Contains(t, body, `<span class="why">Working: 3 jobs waiting</span>`)
+	assert.Regexp(t, due("1 job queued, and none finished in the last 10m. 2 more jobs are due later, the first "),
+		body)
+	assert.NotContains(t, body, "none can run")
+}
+
 // failingCount fails the bookmark count, which stats reads.
 type failingCount struct{ store.BookmarkStore }
 
