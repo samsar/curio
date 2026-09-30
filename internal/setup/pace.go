@@ -161,9 +161,9 @@ func onOff(on bool) string {
 // importNotes are what to know before an import of pages starts: how long
 // it takes at full speed, the sites that may take longer, the GitHub pages
 // that wait for GitHub's hourly limit without a token, the GPU, and what
-// closing the terminal or sleeping does. rate is the measured index rate, 0 when unknown; configPath is
-// where fetcher.github.token goes; managed says launchd keeps the daemon
-// running.
+// closing the terminal or sleeping does. rate is the measured index rate,
+// 0 when unknown; configPath is where fetcher.github.token goes; managed
+// says launchd keeps the daemon running.
 func importNotes(e Estimate, rate float64, pages []string, cfg config.Config, configPath string, managed bool) []string {
 	notes := []string{
 		fmt.Sprintf("%s to fetch and index:", plural(e.Pages, "new page")),

@@ -125,7 +125,7 @@ when the entry was first committed.
 - 2026-09-26 — [Search leaves out failed and dead documents](#search-leaves-out-failed-and-dead-documents)
 - 2026-09-27 — [Cross-site redirects: judged where they land](#cross-site-redirects-judged-where-they-land)
 - 2026-09-27 — [Error pages whose status is hidden](#error-pages-whose-status-is-hidden)
-- 2026-09-27 — [Jina requests identify as curio](#jina-requests-identify-as-curio)
+- 2026-09-27 — [Jina requests identify as curio](#jina-requests-identify-as-curio) (revised)
 - 2026-09-27 — [Queue gate: pause, throttle and schedule, persisted in SQLite](#queue-gate-pause-throttle-and-schedule-persisted-in-sqlite)
 - 2026-09-27 — [Embedding model and per-home width](#embedding-model-and-per-home-width)
 - 2026-09-27 — [Embedding drift: the marker records the build, healthz reports a change](#embedding-drift-the-marker-records-the-build-healthz-reports-a-change)
@@ -5412,6 +5412,15 @@ would once more store the destinations' landing pages.
   lines. See "Fetch upstream health: Jina's calls are tracked and
   reported".
 
+**Revised (2026-09-30):** the pause holds the queue's retries back now. A
+Jina-bound fetch inside it still makes its origin request, then gets a
+`fetcher.DeferError` from `awaitJina` instead of a retryable failure: the
+job waits for the pause to end with its attempt refunded, for up to a day
+from its creation, and runs again whole. So a document no longer ends
+`failed` before Jina answers again, unless the pauses outlast its day; the
+one whose request was challenged still fails that attempt. See "Waiting is
+not failing: jobs curio didn't send are deferred".
+
 ---
 
 ## Fetch upstream health: Jina's calls are tracked and reported
@@ -5506,6 +5515,11 @@ nothing Jina's, and `upstreams` is a list, so they can join without a
 schema change); nothing is persisted; and no circuit breaker stops the Jina
 calls while it is failing: the pauses Jina asks for (a 429, a challenge)
 are already honored, and what is left is for a person to fix.
+
+**Revised (2026-09-30):** a call the cooldown holds past 30 s no longer
+fails fast: `awaitJina` returns a `fetcher.DeferError` and the job waits
+for the pause (see "Waiting is not failing: jobs curio didn't send are
+deferred"). It is still a call never sent, and records nothing.
 
 ---
 
@@ -7519,6 +7533,14 @@ under the toolbar names the cause, with a Clear that drops it alone. The
 Library's Failures tab groups the failed and dead documents by cause and
 refetches a group by it. See "Dashboard: the Failures tab".
 
+**Revised (2026-09-30):** a call a shared cooldown holds back no longer
+fails its job: the job waits for the hold, for up to a day from its
+creation (see "Waiting is not failing: jobs curio didn't send are
+deferred"). A job still held after that fails with the causes above: a
+GitHub or YouTube fetch `rate_limited`, from the 429 its error carries; a
+Jina-bound one the origin's cause, since a held Jina call is Jina's own
+trouble.
+
 ---
 
 ## Dashboard: a design language under the CSP
@@ -8791,8 +8813,12 @@ waits for the hold, with its attempt refunded, for up to a day.
   A `DeferError` is never a `PermanentError`, and no fetcher wraps it in
   one. The limiter's wait stays inline: it is a steady pace, and its
   callers carry no deadline. An answer to a request that was sent is never
-  deferred: a GitHub 429 or rate-limit 403 with a long `Retry-After`, a
-  yt-dlp run that met `HTTP Error 429`, Jina's own 429 or CDN challenge.
+  itself a deferral: a GitHub 429 or rate-limit 403 with a long
+  `Retry-After`, a yt-dlp run that met `HTTP Error 429` and a Jina CDN
+  challenge each fail their attempt. Jina's own 429 differs only because
+  `tryJina` retries it inside the fetch, after the cooldown it set: when
+  that cooldown outlasts 30 s, the retry is held and the fetch defers
+  (unless the 429 answered the fetch's last Jina try, which fails).
   GitHub's `X-RateLimit-Reset` delay is clamped at 24 hours, as
   `Retry-After` already was: it becomes the cooldown, and so the time a
   deferred fetch waits for.
@@ -8811,7 +8837,11 @@ waits for the hold, with its attempt refunded, for up to a day.
      <Reason>`, one `job deferred` log line, and no permanent-failure hook;
   5. anything else, a deferral past the budget included: `MarkFailed` as
      before. The attempt counts, `last_error` is `Err`'s text, and at the
-     last attempt the hook reads the 429 in the chain: `rate_limited`.
+     last attempt the hook runs with it. A held GitHub or YouTube fetch
+     fails `rate_limited`, from the 429 in the chain; a held Jina-bound one
+     keeps the origin's cause (`anti_bot`, `login_wall`, or `unsupported`
+     for a PDF curio couldn't read), since Jina's own trouble never speaks
+     for the target (`speaker`, `internal/fetcher/cause.go`).
 
   `Until` is not clamped to the budget's end, so a job deferred at 23
   hours still waits for its hold and then gets one real try.
@@ -8874,10 +8904,10 @@ orphaned jobs").
 **Why a day, counted from `created_at`:** 24 of GitHub's hourly resets,
 time for about 700 repositories at 2 calls each without a token, and the
 longest `Retry-After` the fetchers honor. An upstream that holds curio off
-longer won't serve it: a visible `rate_limited` failure that `curio
-refetch` retries beats a document pending for days. `created_at` is
-already in the table, so there is no migration, and a refetch enqueues a
-new job with a new budget.
+longer won't serve it: a visible failure that `curio refetch` retries
+beats a document pending for days. `created_at` is already in the table,
+so there is no migration, and a refetch enqueues a new job with a new
+budget.
 
 **Why `last_error` for the reason:** the owner's choice, and no migration.
 A pending job's `last_error` already explained a retry; a deferral's
@@ -8913,7 +8943,10 @@ no surface needs: both wait for their `run_after`.
 **Recovering old failures:** documents that failed `rate_limited` before
 this change stay failed. Set `fetcher.github.token` first, then `curio
 refetch --all --cause=rate_limited`, or Failures → Rate limited → Refetch
-on the dashboard.
+on the dashboard. Jina-bound documents that failed on a pause are among
+the `anti_bot` and `login_wall` failures, with pages that failed for
+reasons of their own; `--cause=anti_bot` or `--cause=login_wall` refetches
+them with the rest of their group.
 
 **Not done here:** the host cache (a cached verdict is still a permanent
 failure), per-site Jina pacing, `AbuseAlleviationError`, and `MarkFailed`

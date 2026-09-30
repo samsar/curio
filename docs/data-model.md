@@ -300,7 +300,8 @@ Idle workers don't poll on a fixed tick. The store signals, per kind,
 when a job is enqueued or put back to pending in this process
 (`JobQueue.Enqueued`), and a worker wakes on that; between signals it
 polls, starting at 500 ms and backing off to 5 s, which is how it finds
-retries coming due and jobs other processes enqueued.
+retries and deferred jobs coming due and jobs other processes enqueued.
+`Defer` signals nothing: its job isn't runnable before its `run_after`.
 
 Every claim first waits on the queue gate (`queue_settings`, below): while
 the queue is paused, outside its daily schedule, or at the throttle's cap

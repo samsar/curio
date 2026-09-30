@@ -70,8 +70,8 @@ const (
 	// deferred. A day is 24 of GitHub's hourly resets, time for about 700
 	// repositories at 2 calls each without a token, and the longest
 	// Retry-After the fetchers honor. An upstream that holds curio off for
-	// longer won't serve it: a visible rate_limited failure that a refetch
-	// retries beats a document pending for days. The budget counts from
+	// longer won't serve it: a visible failure that a refetch retries beats
+	// a document pending for days. The budget counts from
 	// created_at, which the queue already keeps, and a refetch enqueues a
 	// new job with a new budget.
 	deferralBudget = 24 * time.Hour

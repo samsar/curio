@@ -1581,8 +1581,8 @@ components:
             A failed job's error. A pending or running job's is the error of
             the attempt it retries after, or, for a job deferred while an
             upstream's rate limit held curio back, what it waits for
-            ("waiting for GitHub's API rate limit to reset"). Absent once the
-            job is done.
+            ("waiting for GitHub's API rate limit to reset"). Cleared when
+            the job is done.
         run_after:
           type: string
           format: date-time

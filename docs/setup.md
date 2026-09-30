@@ -689,8 +689,10 @@ request to Jina, and the job goes back to the queue until the pause ends,
 without using up an attempt, then fetches the page again, whole (see
 "Documents waiting for a rate limit" below). A document still held after a
 day fails with `jina: not sent, cooldown has … left: HTTP 429 Too Many
-Requests`, a 429 curio reports for its own pause, not an answer from Jina;
-once Jina answers again, `curio refetch <id>`.
+Requests`, a 429 curio reports for its own pause, not an answer from Jina.
+It is recorded under the cause of the site's own answer (`anti_bot`,
+`login_wall`, or `unsupported` for a PDF curio couldn't read), not
+`rate_limited`; once Jina answers again, `curio refetch <id>`.
 
 **`curio doctor` reports `jina` degraded, paused or failing** — the daemon
 counts how each request to Jina Reader, the fallback for pages the native
@@ -738,11 +740,16 @@ repositories an hour, so a library with many github.com pages waits hours:
 set `fetcher.github.token` (any token, even one with no scopes, lifts the
 limit from 60 requests an hour to 5,000) and restart the daemon (`curio
 daemon stop`; the next command starts it). A job waits for up to a day from
-when it was queued; one still held after that fails as `rate_limited`,
-which `curio refetch --all --cause=rate_limited` retries. So do documents
-that failed `rate_limited` before curio waited for these limits: set the
-token first, then `curio refetch --all --cause=rate_limited`, or open
-Failures on the dashboard and refetch the Rate limited group.
+when it was queued; one still held after that fails. A GitHub or YouTube
+page fails as `rate_limited`, which `curio refetch --all
+--cause=rate_limited` retries; a page waiting for Jina fails under the
+cause of its site's own answer (`anti_bot`, `login_wall`, or `unsupported`
+for a PDF curio couldn't read), which `--cause` with that name retries,
+along with the pages that failed that way for reasons of their own. The
+same commands recover documents that failed on these limits before curio
+waited for them: set the token first, then `curio refetch --all
+--cause=rate_limited`, or open Failures on the dashboard and refetch the
+Rate limited group.
 
 **`jina: refused the target: HTTP 403 Forbidden: AbuseAlleviationError:
 Anonymous access to domain … blocked until …`** — Jina Reader refuses

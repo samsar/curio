@@ -781,7 +781,7 @@ func TestGitHubFetch_ReadmeRateLimitCooldownIsRetryable(t *testing.T) {
 
 // TestGitHub_HeldCallIsDeferred: a call the shared cooldown holds past
 // maxInlineRateLimitWait is not sent. The fetch is deferred until the
-// cooldown ends, around the retryable 429 it used to fail with, and still
+// cooldown ends, around a retryable 429 carrying the time left, and still
 // reads rate_limited.
 func TestGitHub_HeldCallIsDeferred(t *testing.T) {
 	var hits atomic.Int32
