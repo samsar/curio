@@ -36,10 +36,11 @@ const MaxEmbeddingDim = 8192
 // every row to it, server-side, and never shows it to clients.
 const LocalTenantID = "local"
 
-// MaxSearchK is the most documents one search or related query returns.
-// The chunk fan-out grows with k, so it also bounds the chunk queries'
+// MaxSearchK is the most documents one search or related query returns,
+// and the most one search ranks: its pages are windows of that ranking.
+// The chunk fan-out is sized from it, so it also bounds the chunk queries'
 // LIMIT. Config validates search.default_k against it, and the API a
-// request's k.
+// request's k and offset.
 const MaxSearchK = 100
 
 // NullableString is s as the value of a nullable text column: nil when s is
@@ -675,7 +676,6 @@ type ChunkHit struct {
 	ChunkID    string
 	DocumentID string
 	Score      float64
-	Snippet    string // BM25 only; empty for vector hits
 }
 
 // SearchFilters scopes a search to documents matching all of the set
@@ -725,11 +725,20 @@ type ChunkStore interface {
 	ReplaceForDocument(ctx context.Context, documentID, extractionID, title string, tags []string, chunks []ChunkInput) error
 
 	// BM25Search runs FTS5 MATCH against chunk text and returns the top
-	// matches for the given tenant, scoped by filters. Snippet is populated.
-	// Chunks of failed and dead documents are never returned: they come
-	// from an earlier fetch that no longer describes what the URL serves.
-	// Pending documents (a refetch in flight) are searched.
+	// matches for the given tenant, scoped by filters, best first, equal
+	// scores in the order the chunks were written. Chunks of failed and
+	// dead documents are never returned: they come from an earlier fetch
+	// that no longer describes what the URL serves. Pending documents (a
+	// refetch in flight) are searched.
 	BM25Search(ctx context.Context, tenantID, query string, limit int, filters SearchFilters) ([]ChunkHit, error)
+
+	// Snippets returns, by chunk ID, the snippet of each of chunkIDs for
+	// query, a MATCH expression as BM25Search takes it: the passage of its
+	// text around the matched terms, each between <em> and </em>. A chunk
+	// the query doesn't match, or that no longer exists, is absent. No IDs,
+	// or a blank query, which BM25Search matches nothing for, is no
+	// snippets, read with no query.
+	Snippets(ctx context.Context, query string, chunkIDs []string) (map[string]string, error)
 
 	// VectorSearch runs an approximate-nearest-neighbor query against
 	// chunks_vec, scoped by filters, and like BM25Search never returns
