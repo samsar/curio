@@ -433,8 +433,8 @@ func intQuery(r *http.Request, name string, def, lo, hi int) int {
 func offsetParam(r *http.Request) (int, error) { return positionParam(r, "offset", 0) }
 
 // positionParam reads the query parameter name, a position in a list: a
-// whole number of least or more is that position, absent or empty is
-// least, and anything else is a requestError naming the parameter. Unlike
+// whole number no smaller than least is that position, absent or empty
+// is least, and anything else is a requestError naming the parameter. Unlike
 // a sizing knob, a position is refused rather than defaulted: read as the
 // default, a wrong one would answer the start of the list for another part
 // of it (docs/decisions.md "Interests page by offset within a run").

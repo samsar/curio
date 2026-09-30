@@ -274,8 +274,8 @@ func TestInterests_Pages(t *testing.T) {
 // TestInterests_BadOffset: an offset that isn't a whole number of 0 or
 // more is a 400 naming it, answered before anything is read.
 func TestInterests_BadOffset(t *testing.T) {
-	runs, members := new(atomic.Int32), new(atomic.Int32)
-	s := newTestServer(t, func(d *Deps) { d.Insights = countingReads{d.Insights, runs, members} })
+	runs, interests := new(atomic.Int32), new(atomic.Int32)
+	s := newTestServer(t, func(d *Deps) { d.Insights = countingReads{d.Insights, runs, interests} })
 	c := s.seedInterest(t, "local", "Go", s.seedDocument(t, "https://example.com/a", store.DocStateFetched))
 	for _, offset := range []string{"-1", "1.5", "x", "99999999999999999999", "0x10"} {
 		for _, path := range []string{"/v1/interests", "/v1/interests/" + c.ID} {
@@ -285,7 +285,7 @@ func TestInterests_BadOffset(t *testing.T) {
 		}
 	}
 	assert.Zero(t, runs.Load(), "no run read")
-	assert.Zero(t, members.Load(), "no interest read")
+	assert.Zero(t, interests.Load(), "no interest read")
 
 	for _, offset := range []string{"", "0"} {
 		var got InterestListResponse
@@ -347,13 +347,13 @@ func TestInterests_RunID(t *testing.T) {
 // unless the rebuilds go on.
 type prunedMidRead struct {
 	store.InsightStore
-	pruned   *store.ClusterRun
-	ongoing  bool // every read of the latest run answers a pruned one
-	latestNs *atomic.Int32
+	pruned      *store.ClusterRun
+	ongoing     bool // every read of the latest run answers a pruned one
+	latestReads *atomic.Int32
 }
 
 func (p prunedMidRead) LatestRun(ctx context.Context, tenantID string, status store.ClusterRunStatus) (*store.ClusterRun, error) {
-	if p.latestNs.Add(1) == 1 || p.ongoing {
+	if p.latestReads.Add(1) == 1 || p.ongoing {
 		return p.pruned, nil
 	}
 	return p.InsightStore.LatestRun(ctx, tenantID, status)
@@ -387,7 +387,7 @@ func TestInterests_PrunedMidRead(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			latest := new(atomic.Int32)
 			s := newTestServer(t, func(d *Deps) {
-				d.Insights = prunedMidRead{InsightStore: d.Insights, pruned: pruned, ongoing: tc.ongoing, latestNs: latest}
+				d.Insights = prunedMidRead{InsightStore: d.Insights, pruned: pruned, ongoing: tc.ongoing, latestReads: latest}
 			})
 			rebuilt := s.seedRun(t, store.ClusterWithMembers{Cluster: store.Cluster{ID: "b1", Size: 2}},
 				store.ClusterWithMembers{Cluster: store.Cluster{ID: "b2", Size: 1}})

@@ -25,7 +25,7 @@ says it shows the newer one's.
 {{- template "rebuild-control" .Rebuild}}
 {{- if and .Rebuild.Enabled .Run}}<span class="no-js muted">Rebuild them with <code>curio interests rebuild</code>.</span>{{end}}</div>
 </div>
-{{if .RunChanged}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>The interests were rebuilt since the page you came from, so this page lists the new run's.{{if gt .Page 1}} <a href="{{.FirstPage}}">Start again from page 1</a>.{{end}}</p></div></div>
+{{if .RunChanged}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>The interests were rebuilt since the page you came from, so this page {{if .OutOfRange}}is past the new run's last{{else}}lists the new run's{{end}}.{{if gt .Page 1}} <a href="{{.FirstPage}}">Start again from page 1</a>.{{end}}</p></div></div>
 {{end}}
 {{- with .Run}}
 <section class="card mb-4" aria-label="Coverage"><div class="card-body"><div class="coverage">

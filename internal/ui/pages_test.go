@@ -281,6 +281,13 @@ func TestInterests_RunChanged(t *testing.T) {
 	out = render(t, r, PageInterests, page)
 	assert.Contains(t, out, "so this page lists the new run's.</p>", "the first page needs no way back to it")
 	assert.NotContains(t, out, "Start again")
+
+	page = interestsPage(11) // the new run is shorter: nothing to list
+	page.RunChanged = true
+	require.NotNil(t, page.OutOfRange())
+	out = render(t, r, PageInterests, page)
+	assert.Contains(t, out, "so this page is past the new run's last. <a")
+	assert.NotContains(t, out, "lists the new run's")
 }
 
 // TestInterests_OutOfRange: a page past the last keeps the head, the
