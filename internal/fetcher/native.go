@@ -1001,7 +1001,11 @@ var (
 //     p.finalURL.
 //   - the request settled on another site's landing page
 //     (looksLikeLandingPage). Needs p.finalURL.
-//   - the extracted title reads like a not-found page
+//   - the title is a not-found template (soft404TitleRE), whether or not
+//     an article was found: a not-found page whose body Readability can't
+//     extract, such as an app shell, is still dead, not a login wall for
+//     Jina to try. Its spaces are made plain first: the rule's \s is
+//     ASCII, and some sites pad their separators with no-break spaces.
 //
 // Returns the empty string when nothing looks dead; otherwise a short
 // reason string for diagnostics.
@@ -1019,7 +1023,7 @@ func looksLikeSoft404(p pageView, sourceURL string) string {
 		}
 	}
 
-	if p.found && soft404TitleRE.MatchString(p.title) {
+	if soft404TitleRE.MatchString(strings.Join(strings.Fields(p.title), " ")) {
 		return "title looks like a not-found page: " + p.title
 	}
 	return ""
@@ -1130,18 +1134,84 @@ func isLetters(s string) bool {
 	return s != "" && !strings.ContainsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) })
 }
 
-// soft404TitleRE matches titles of common not-found templates: "404 …",
-// "Error 404", a bare "Not Found", "Page not found", "This page doesn't
-// exist", "… page has been removed", etc. Curly and straight apostrophes
-// both appear in the wild.
-var soft404TitleRE = regexp.MustCompile(`(?i)(` +
-	`^\s*(error\s*)?404\b` +
-	`|^\s*not found\s*$` +
-	`|\b404\s+(error|not\s+found)\b` +
-	`|page\s+(not\s+found|doesn[’']?t\s+exist|does\s+not\s+exist|can[’']?t\s+be\s+found|cannot\s+be\s+found|could\s+not\s+be\s+found|no\s+longer\s+(exists|available)|is\s+missing)` +
-	`|page\b.{0,30}\b(has\s+been|was)\s+(removed|deleted)\b` +
-	`|couldn[’']?t\s+find\s+(this|that|the)\s+page` +
-	`)`)
+// soft404TitleRE matches the title of a not-found page: the whole title is
+// a not-found template, optionally opened by "Oops!" or "Sorry," and closed
+// by "(404)". A template is a status ("404", "Error 410", "410 Deleted by
+// author"), something gone ("Page not found", "This post has been
+// deleted", "The requested page could not be found"), a bare "Not found",
+// or "We can't find the page you're looking for". Up to two site names may
+// stand before it, each followed by a spaced separator, or by a colon when
+// the name is one word ("Palantir | Careers | Page Not Found", "reddit.com:
+// page not found"), and up to two after it, each after a spaced separator
+// ("Page not found | Free local classifieds - Kijiji"). A spaced separator
+// is one of | / · • – — - with whitespace on both sides.
+//
+// Anchored at both ends, because a dead verdict is sticky: a headline that
+// discusses a missing page ("How to fix 404 Not Found errors in Nginx",
+// "404 Media", "Product not found: lessons from a failed launch",
+// "Lessons from a failed launch: Product not found") is an article's. The
+// one rule anchored at the start only is the sentence "The page you're
+// looking for doesn't exist", which a Readability title can carry whole,
+// with whatever the page says next.
+//
+// The word lists are explicit: a word added to one needs a test row.
+var soft404TitleRE = func() *regexp.Regexp {
+	const (
+		// apos is an apostrophe, straight or curly.
+		apos = `[’']`
+		// site is a site's name beside the template.
+		site = `[^|]{1,60}?`
+		// sep separates a site's name from the template, with whitespace
+		// on both sides. A colon is none: after a template, it opens a
+		// headline ("Not Found: The Search for Amelia Earhart").
+		sep = `\s+[|/·•–—-]\s+`
+		// prefix is a site's name before the template: any name before a
+		// spaced separator, or one word before a colon ("reddit.com: page
+		// not found"). Several words before a colon open a headline
+		// ("Lessons from a failed launch: Product not found").
+		prefix = `(?:` + site + sep + `|[^\s|:]{1,60}\s*:\s+)`
+		// lead is an interjection opening the template.
+		lead = `(?:(?:oops|whoops|sorry|uh[\s-]?oh)[!.,:…]*\s+)?`
+		// code is a not-found status code: 404 Not Found or 410 Gone.
+		code = `(?:404|410)`
+		// status is the code, as a title gives it.
+		status = `(?:http\s+)?(?:error\s*)?` + code
+		// statusWords may follow a status, up to twice ("404 Error: Page
+		// Not Found").
+		statusWords = `(?:not\s+found|\(\s*not\s+found\s*\)|error|gone|page\s+not\s+found` +
+			`|deleted(?:\s+by\s+(?:the\s+)?author)?)`
+		// parenStatus closes a template with its status.
+		parenStatus = `(?:\s*\(\s*(?:error\s+)?` + code + `\s*\))?`
+		// thing is what a site says is gone.
+		thing = `(?:page|content|post|story|article|video|track|product|group|profile|user|item|listing)`
+		// youWanted says the thing was asked for.
+		youWanted = `(?:\s+you(?:` + apos + `re|\s+are|\s+were)?` +
+			`\s+(?:looking\s+for|requested|tried\s+to\s+(?:access|reach|visit)))?`
+		// gone says the thing is gone.
+		gone = `(?:(?:was\s+|is\s+)?not\s+found` +
+			`|(?:could\s+not|couldn` + apos + `?t|can` + apos + `?t|cannot)\s+be\s+found` +
+			`|(?:does\s+not|doesn` + apos + `?t)\s+exist` +
+			`|no\s+longer\s+(?:exists|available)` +
+			`|(?:is\s+no\s+longer|is\s+not|isn` + apos + `?t)\s+available` +
+			`|is\s+missing` +
+			`|(?:has\s+been|was)\s+(?:removed|deleted)(?:\s+by\s+(?:the|its)\s+(?:author|owner|user))?)`
+		// cantFind is the site saying it can't find the thing.
+		cantFind = `(?:we\s+)?(?:couldn` + apos + `?t|could\s+not|can` + apos + `?t|cannot)\s+find`
+		// template is the title less the site names around it.
+		template = lead + `(?:` +
+			status + `\.?(?:\s*[|:–—-]?\s*` + statusWords + `){0,2}` +
+			`|(?:(?:this|that|the)\s+)?(?:requested\s+)?` + thing + youWanted + `\s+` + gone +
+			`|not\s+found` +
+			`|` + cantFind + `\s+(?:this|that|the)\s+(?:requested\s+)?` + thing + youWanted +
+			`)` + parenStatus
+		// sentence is the one template anchored at the start only: the
+		// title may go on after it.
+		sentence = lead + `(?:the|this)\s+page\s+you(?:` + apos + `re|\s+are|\s+were)\s+looking\s+for\s+` + gone + `\b`
+	)
+	return regexp.MustCompile(`(?i)` +
+		`^\s*` + prefix + `{0,2}` + template + `[.!]*(?:` + sep + site + `){0,2}\s*$` +
+		`|^\s*` + sentence)
+}()
 
 // mediaType returns the lowercased media type from a Content-Type header,
 // dropping any "; charset=..." parameters.

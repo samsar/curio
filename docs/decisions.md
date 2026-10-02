@@ -153,6 +153,7 @@ when the entry was first committed.
 - 2026-09-30 — [A site's block is not its pages' verdict](#a-sites-block-is-not-its-pages-verdict)
 - 2026-09-30 — [Embedding drift: verified by re-embedding a sample](#embedding-drift-verified-by-re-embedding-a-sample)
 - 2026-10-02 — [Interests: corrections that teach the grouping (deferred)](#interests-corrections-that-teach-the-grouping-deferred)
+- 2026-10-02 — [Soft-404 titles: whole templates, not phrases](#soft-404-titles-whole-templates-not-phrases)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -1801,6 +1802,11 @@ like the origin's pages".
   positive; it is one only once the answer changes. The kill switch is the
   only override, daemon-wide, and it takes a daemon restart (there is no
   config reload).
+
+**Revised (2026-10-02):** the not-found title rule is a whole template,
+anchored at both ends with explicit word lists, no longer a phrase found
+anywhere in the title, and it reads the title whether or not an article
+was found. See "Soft-404 titles: whole templates, not phrases".
 
 ---
 
@@ -9452,6 +9458,187 @@ interests would mean building them twice. The measurements behind the
 rework are in the cluster-quality report of 2026-10-01: 325 interests for
 5,254 documents, a third with 4 or fewer members, 30% of documents in
 none.
+
+---
+
+## Soft-404 titles: whole templates, not phrases
+
+**Decision:** a title is a not-found verdict only when the whole title is
+a not-found template (`soft404TitleRE`, `internal/fetcher/native.go`):
+
+- **Site names around it.** Up to two before the template, each followed
+  by a spaced separator, or by a colon when the name is one word
+  ("Palantir | Careers | Page Not Found", "reddit.com: page not found"),
+  and up to two after it, each after a spaced separator ("Page not found |
+  Free local classifieds - Kijiji"). A spaced separator is one of
+  `| / · • – — -` with whitespace on both sides; a site's name is up to 60
+  characters other than `|`. Otherwise a colon opens a headline, after the
+  template ("Not Found: The Search for Amelia Earhart") or after several
+  words before it ("Lessons from a failed launch: Product not found").
+- **The template**, optionally opened by an interjection (oops, whoops,
+  sorry, uh oh) and closed by "(404)", "(410)" or "(Error 404)":
+  - a status: 404 or 410, after an optional "HTTP" and "Error", then up to
+    two of the status words not found, (not found), error, gone, page not
+    found, deleted, deleted by (the) author, each after an optional colon,
+    dash or pipe ("410 Deleted by author", "404. Page Not Found", "404
+    Error: Page Not Found");
+  - something gone: an optional this, that or the and "requested", one of
+    13 things (page, content, post, story, article, video, track, product,
+    group, profile, user, item, listing), an optional "you're looking for",
+    "you requested" or "you tried to access", then how it is gone (not
+    found, could not be found, doesn't exist, no longer exists, is no
+    longer available, is missing, has been removed, was deleted by its
+    author, and their variants);
+  - a bare "Not found";
+  - "We can't find the page" (couldn't, could not, cannot; the same 13
+    things), with an optional "you're looking for".
+- **One sentence anchored at the start only:** "The page you're looking
+  for" (this page; you are, you were) and how it is gone, whatever follows.
+  A Readability title can carry the page's whole first sentence.
+- **Explicit lists.** No `\w+`, `.*` or free-length gap stands for a word
+  inside the template; a word added to a list needs a row in
+  `TestSoft404TitleRE`. Every word and mark of the lists has one: the test
+  fails on each of 118 variants of the rule that drop one of them, or an
+  optional piece of the grammar. Straight and curly apostrophes both.
+- **Read whether or not an article was found** (`looksLikeSoft404`):
+  Readability takes the title from the page's metadata whatever it finds
+  in the body.
+- **Plain spaces.** The title is matched with its whitespace made plain
+  (`strings.Fields`), since Go's `\s` is ASCII and some sites pad their
+  separators with no-break spaces (Google Cloud's docs put a space and a
+  no-break space on each side of the `|` in "App Engine documentation |
+  Google Cloud Documentation"; 16 stored titles carry one). The reason
+  quotes the title as served.
+
+Unchanged: `judgePage`'s order (dead link first), the kill switch, which
+turns this rule off with the others, `ErrDeadLink` being permanent, never
+host-cached and never sent to Jina from the origin, the reason text
+(`title looks like a not-found page: <title>`), and `judgeJinaAnswer`'s
+reading of Jina's target-status warning.
+
+**Why:** 17 documents of the owner's library were stored `fetched`
+although they are not-found or deleted pages, and the old rule knew none
+of their titles: it knew a leading 404, a bare "Not Found", phrases
+starting with "page", and "couldn't find this page".
+
+- 11 × "410 Deleted by author — Medium" (medium.com ×9,
+  onezero.medium.com, levelup.gitconnected.com): 5 through Jina after the
+  origin's 403, 6 through Jina past an anti-bot host-cache entry (meta
+  `host_cache: anti-bot`). They made an interest of their own, "Deleted
+  Content".
+- 2 × "Product Not Found | The Home Depot Canada", "Meetup | Group not
+  found" and "This track was not found" (SoundCloud): through Jina after a
+  thin origin page.
+- "Content has been deleted - Quora": through Jina after the origin's 403.
+- aqr.com's "The page you are looking for does not exist or has been
+  moved. To find what you’re looking for, try one of the following:":
+  straight from the origin, through Readability.
+
+Jina's target-status warning would have made the Jina ones dead, and
+where it comes it does: java.dzone.com's and vimeo.com's pages died on
+"dead link (target answered HTTP 410 Gone)". Medium's answers for its 410
+and 404 pages carry none (no Medium document in the library is dead), and
+neither did LSAC's 403 page. There the title is the only signal: run on
+the old code, Medium's tombstone answer was stored on all three Jina
+routes.
+
+The old rule's phrases were unanchored, and its leading-404 alternative
+had no end. Over 51 realistic article titles it matched 16, among them
+"How to fix 404 Not Found errors in Nginx", "Fix the 404 error on your
+WordPress site", "404 Media", "404 Error Pages: 30 Creative Examples",
+"Creating a custom page not found handler in Express" and "Your page has
+been removed from Google's index: what now?". An origin article with such
+a title was judged dead through Readability, and a dead verdict is
+sticky: a refetch is refused without `--force`, and `--force` judges the
+same title again. So the rule is held to whole titles, as
+`errorPageTitleRE` and `challengeTitleRE` are.
+
+The article gate: a not-found page whose body Readability can't extract
+(an app shell) was "no article extracted", a page-level login wall sent to
+Jina. 4 dead documents were judged dead only by Jina after that, each
+spending a Jina request that a dead link never should: "404 - Not Found"
+(`f7b423fe`), "Page Not Found - Clarity Design System" (`9493db96`),
+"Palantir | Page Not Found" (`50676971`) and "RxJS - PAGE NOT FOUND"
+(`fff881fa`). With Jina off, or in trouble, they would have ended
+`failed`/`login_wall`. The anchored rule is the guard against false
+positives; the gate added none.
+
+**Corpus check** (read-only, 2026-10-02, through `looksLikeSoft404`): of
+the library's 5,203 stored titles (every `fetched` document), the new rule
+matches exactly the 17 tombstones and the old rule none. The old rule's 14
+dead verdicts (12 distinct titles, each a genuine not-found page; all 833
+dead documents still have their failed jobs) all still match. Of the 51
+article titles the new rule matches none, and it matches all 42 template
+variants tried.
+
+**Existing documents:** the rule judges fetches, not what is stored. The
+17 stay `fetched`, in search and in the latest clustering run, until they
+are refetched:
+
+| ID | Host | Title |
+|---|---|---|
+| `7f6fa07b`, `7c63ac42`, `88ebd4c0`, `453de608`, `8c6112ca`, `438e38a6`, `d5cd9688`, `db4436e7`, `55e21e00` | medium.com | 410 Deleted by author — Medium |
+| `5247c16c` | onezero.medium.com | 410 Deleted by author — Medium |
+| `1bdfb327` | levelup.gitconnected.com | 410 Deleted by author — Medium |
+| `11175b32`, `714ced09` | www.homedepot.ca | Product Not Found \| The Home Depot Canada |
+| `1e29e209` | www.meetup.com | Meetup \| Group not found |
+| `4bcccb00` | soundcloud.com | This track was not found |
+| `466d4d9e` | consultantsmind.quora.com | Content has been deleted - Quora |
+| `b8993401` | www.aqr.com | The page you are looking for does not exist or has been moved. … |
+
+The remedy is `curio refetch <id>` for each, with its full ID or its URL,
+once the daemon runs this fix. A refetch asks the site, judges the answer
+like any fetch, and records the state, cause and last error through the
+permanent-failure hook. Medium's origin answers curio with 403, and Jina
+currently meets Medium's Cloudflare challenge (one keyless request on
+2026-10-02 got "Just a moment..." and the CAPTCHA warning), so the 11
+Medium documents will most likely end `failed` (`anti_bot`) rather than
+`dead`; the other 6 should end `dead` (`dead_link`). Either state leaves
+search at once and leaves the interests at the next clustering run
+(`curio interests rebuild`, or the planned full rebuild). Their extraction
+files stay on disk: search and clustering filter by state when they read.
+
+There is no sweep at startup. SQL can't run the rule, so it can't be a
+migration; as startup work it would need a one-shot marker, a store write
+marking documents dead with no fetch or job behind it (bypassing the hook
+that records why), a verdict on a stale title without asking the site, and
+time before the daemon is ready, all for 17 documents.
+
+**Not done:**
+
+- **Tombstones only their body gives away.** 7 more stored documents are
+  not-found pages under a title no rule can read as one: Medium's 404 page,
+  titled just "Medium" (`7ad607e2`, `bd70c172`, `70233b2a`, `e0251c27`,
+  `2b976ea6`, `fddead8b`; body "PAGE NOT FOUND", "## 404"), and Bespoke's,
+  titled "Bespoke Interactive" (`abd7cbb3`; "# 404 / Sorry, but we can't
+  find the page you're looking for."). All 7 came through Jina without a
+  warning, and a refetch won't change them. A body rule needs its own
+  design and false-positive measurement: an article about status codes can
+  open with a 404 heading, and the origin path's text carries no heading
+  markers.
+- **LSAC's sign-in page** (`570bb74c`, "403 (access denied) error | The
+  Law School Admission Council", "Sorry, you must sign in to view this
+  content."): no tombstone, since the content exists behind a sign-in, so
+  this rule leaves it alone and `TestSoft404TitleRE` pins that. Reading it
+  as an error page is `errorPageTitleRE`'s business, a title shape that
+  rule doesn't know yet.
+- **Titles in other languages.** The lists are English, so javalobby.org's
+  404 page, titled "หน้าไม่พบ | JavaLobby" (Thai for "Page not found";
+  `3219e2f1`, `fa2c61a1`, through Jina without a warning), stays stored.
+- **A template beside site names, in an article's title.** A page about a
+  status, or a thread named after an error, can be titled with a template
+  and site names alone: Wikipedia's "HTTP 404 - Wikipedia" and "HTTP 410 -
+  Wikipedia", MDN's "404 Not Found - HTTP | MDN" (which the old
+  rule matched too) and "410 Gone - HTTP | MDN", "php - Error 404 - Stack
+  Overflow", "User not found - Auth0 Community", "Item not found -
+  Microsoft Q&A", or a one-word name before a colon ("Kubernetes: Error
+  404"). So can two kinds of headline: one whose subtitle follows a spaced
+  dash, which reads as a site's name ("Error 404 - How to Fix It", "404 Not
+  Found - What It Means and How to Fix It", the second matched by the old
+  rule too), and one that opens with the sentence ("The page you're looking
+  for doesn't exist: designing better 404 pages"). Such a page is judged
+  dead. None is among the 5,203 stored titles; the title alone can't tell
+  them from a site's not-found page.
 
 ---
 

@@ -30,13 +30,15 @@ import (
 )
 
 // makeArticleHTML returns a reasonably article-shaped page so Readability
-// will accept it as content. ~600+ chars of body.
+// will accept it as content. ~600+ chars of body. The page declares UTF-8:
+// Readability guesses the encoding of a page that doesn't.
 func makeArticleHTML(title, body string) string {
 	if body == "" {
 		body = strings.Repeat("This is a paragraph of an article. ", 30)
 	}
 	return `<!DOCTYPE html>
 <html><head>
+<meta charset="utf-8">
 <title>` + title + `</title>
 <meta name="author" content="Test Author">
 </head><body>
@@ -314,33 +316,98 @@ func TestNative_Hard404_DeadLink(t *testing.T) {
 	}
 }
 
-// TestNative_Soft404_TitleDetected: HTTP 200 carrying a not-found page
-// (long enough to dodge the thin-content check) is a dead link, not a
-// login wall — so it must NOT fall back to Jina.
+// TestNative_Soft404_TitleDetected: an origin page whose title is a
+// not-found template is a dead link, not a login wall, however
+// article-shaped its body: final at once, without Jina. An article whose
+// title discusses a missing page is stored.
 func TestNative_Soft404_TitleDetected(t *testing.T) {
-	body := strings.Repeat("The page you are looking for may have moved. Try the search box or browse our sitemap. ", 10)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`<html><head><title>404 - Page Not Found | Example Site</title></head>
-			<body><article><h1>Page not found</h1><p>` + body + `</p></article></body></html>`))
-	}))
-	defer srv.Close()
+	cases := []struct {
+		name  string
+		title string
+		dead  bool
+	}{
+		{"a not-found template", "404 - Page Not Found | Example Site", true},
+		// 11175b32 and 714ced09 reached the library through Jina.
+		{"home depot", "Product Not Found | The Home Depot Canada", true},
+		{"aqr's not-found sentence", aqrNotFoundTitle, true},
+		{"an article about a 404", "How to fix 404 Not Found errors in Nginx", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, jinaRequests, err := fetchServed(t, makeArticleHTML(tc.title, ""), true)
+			assert.Zero(t, jinaRequests, "a page judged at the origin costs no Jina request")
+			if !tc.dead {
+				require.NoError(t, err)
+				assert.Equal(t, "readability", res.Meta["via"])
+				assert.Equal(t, tc.title, res.Title)
+				return
+			}
+			require.ErrorIs(t, err, ErrDeadLink)
+			var pe *PermanentError
+			assert.ErrorAs(t, err, &pe)
+			assert.Contains(t, err.Error(), "not-found page")
+		})
+	}
+}
 
-	jinaCalls := 0
-	jina := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		jinaCalls++
-		_, _ = w.Write([]byte("Title: x\n\nMarkdown Content:\n" + strings.Repeat("body ", 100)))
-	}))
-	defer jina.Close()
+// TestNative_AppShellTitle: Readability finds no article in an app shell
+// but reads its title. A not-found title makes it a dead link, final at
+// once and without Jina, Jina on or off: the library's f7b423fe, 9493db96,
+// 50676971 and fff881fa each spent a Jina request to be judged dead. An
+// ordinary title leaves a login wall, which Jina may get past.
+func TestNative_AppShellTitle(t *testing.T) {
+	const notFound = "Palantir | Page Not Found"
+	cases := []struct {
+		name         string
+		title        string
+		jinaOn       bool
+		cause        store.FailureCause // empty for a page stored through Jina
+		reason       string
+		jinaRequests int32
+	}{
+		{"not-found title, Jina on", notFound, true, store.FailureCauseDeadLink, "not-found page", 0},
+		{"not-found title, Jina off", notFound, false, store.FailureCauseDeadLink, "not-found page", 0},
+		{"ordinary title, Jina on", "Palantir Careers", true, "", "", 1},
+		{"ordinary title, Jina off", "Palantir Careers", false, store.FailureCauseLoginWall, "no article extracted", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, jinaRequests, err := fetchServed(t, appShell(tc.title), tc.jinaOn)
+			assert.Equal(t, tc.jinaRequests, jinaRequests)
+			if tc.cause == "" {
+				require.NoError(t, err)
+				assert.Equal(t, "jina", res.Meta["via"])
+				return
+			}
+			require.Error(t, err)
+			assert.Equal(t, tc.cause, FailureCause(err), "%v", err)
+			assert.Contains(t, err.Error(), tc.reason)
+			_, permanent := errors.AsType[*PermanentError](err)
+			assert.True(t, permanent, "final once every extraction path answered: %v", err)
+		})
+	}
+}
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", DeadLinkDetection: true})
-	_, err := n.Fetch(context.Background(), srv.URL)
-	require.Error(t, err)
+// appShell is a single-page app's HTML: a title over an empty mount point,
+// with no article for Readability to find.
+func appShell(title string) string {
+	return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>` + title + `</title></head>` +
+		`<body><div id="app"></div><script src="/main.js"></script></body></html>`
+}
 
-	var pe *PermanentError
-	assert.ErrorAs(t, err, &pe)
-	assert.ErrorIs(t, err, ErrDeadLink)
-	assert.Contains(t, err.Error(), "not-found page")
-	assert.Equal(t, 0, jinaCalls)
+// fetchServed fetches causePage from an origin serving html, with dead-link
+// detection on and Jina, when on, answering an article. It returns what the
+// fetch returned and the number of Jina requests it made.
+func fetchServed(t *testing.T, html string, jinaOn bool) (res *Result, jinaRequests int32, err error) {
+	t.Helper()
+	var hits atomic.Int32
+	var jina *fakeAnswer
+	if jinaOn {
+		jina = new(*jinaArticlePage)
+		jina.hits = &hits
+	}
+	res, err = fakeNative(t, htmlPage(html), jina, true).Fetch(t.Context(), causePage)
+	return res, hits.Load(), err
 }
 
 // TestNative_Soft404_RedirectToHomepage: a specific path settling on the
@@ -399,8 +466,30 @@ func TestNative_DeadLinkDetectionDisabled(t *testing.T) {
 }
 
 func TestSoft404TitleRE(t *testing.T) {
-	dead := []string{
+	notFound := []string{
+		// The tombstones the library stored as articles: 7f6fa07b and 10
+		// more Medium stories, 11175b32 and 714ced09, 1e29e209, 4bcccb00,
+		// 466d4d9e, and b8993401's Readability title.
+		"410 Deleted by author — Medium",
+		"Product Not Found | The Home Depot Canada",
+		"Meetup | Group not found",
+		"This track was not found",
+		"Content has been deleted - Quora",
+		aqrNotFoundTitle,
+		// The titles the library's dead documents were judged by.
+		"404",
+		"404 - Not Found",
 		"404 Not Found",
+		"404. Page Not Found",
+		"Page Not Found - Apple Developer",
+		"Page Not Found - Clarity Design System",
+		"Page not found - Poynter",
+		"Page not found - Practice PPE Exams",
+		"Page not found - The School of Life",
+		"Page not found | General Motors Careers",
+		"Palantir | Page Not Found",
+		"RxJS - PAGE NOT FOUND",
+		// Common templates, alone or beside a site's name.
 		"404 - Page Not Found | Example",
 		"Error 404",
 		"error 404 – nothing here",
@@ -411,19 +500,133 @@ func TestSoft404TitleRE(t *testing.T) {
 		"Sorry, this page no longer exists",
 		"The page you requested has been removed",
 		"We couldn't find this page",
+		"Page not found | Free local classifieds - Kijiji",
+		"404 - Page Not Found | Example Site",
+		// Each status, status word and template.
+		"410 Gone",
+		"Error 410",
+		"HTTP 404",
+		"404 Error: Page Not Found",
+		"Page Not Found (404)",
+		"Error 404 - Not Found",
+		"Oops! Page not found",
+		"Story not found",
+		"User not found - Stack Overflow",
+		"This post has been deleted",
+		"This video has been removed",
+		"The requested page could not be found",
+		"We can't find the page you're looking for",
+		"This content is no longer available",
+		// Site names before and after it.
+		"reddit.com: page not found",
+		"Page not found · GitHub",
+		"Page not found / X",
+		"Page not found • Example",
+		"Palantir | Careers | Page Not Found",
+		"Page Not Found | Help Center | Example",
+		// Every other word and mark of the rule's lists, so that dropping
+		// one fails a row. Interjections:
+		"Whoops! Page not found",
+		"Uh oh, page not found",
+		"Uh-oh! Page not found",
+		"Oops. Page not found",
+		"Oops… page not found",
+		// Status words, and the status in parentheses:
+		"404 Error",
+		"404 (Not Found)",
+		"410 Deleted by the author",
+		"410 Deleted",
+		"Page not found (Error 404)",
+		// The marks between status words, unspaced: spaced, they are a
+		// site's separator.
+		"404|Page Not Found",
+		"404-Not Found",
+		"410–Gone",
+		"410—Gone",
+		// Things gone:
+		"Article not found",
+		"Profile not found",
+		"Item not found",
+		"Listing not found",
+		// What was asked for:
+		"The content you are looking for is no longer available",
+		"The post you were looking for has been removed",
+		"The page you tried to access is not available",
+		"The page you tried to reach does not exist",
+		"The page you tried to visit no longer exists",
+		// How it is gone:
+		"The requested product is not found",
+		"Page no longer available",
+		"This page couldn't be found",
+		"The page cannot be found",
+		"This video isn't available",
+		"This page is missing",
+		"This story was deleted",
+		"This video has been removed by the user",
+		"This post was deleted by its author",
+		"Content has been removed by the owner",
+		// Can't find it:
+		"We cannot find the requested page",
+		"We could not find that page",
+		"Can't find that page",
+		// Contractions typed without their apostrophe:
+		"This page doesnt exist",
+		"We cant find that page",
+		"We couldnt find this page",
+		"This video isnt available",
+		// A closing mark:
+		"Page not found!",
+		// The sentence, with whatever the page says next.
+		"The page you're looking for can't be found. Try the search box.",
+		"Sorry: the page you were looking for does not exist. It may have moved.",
+		"This page you are looking for no longer exists, sorry.",
 	}
-	for _, title := range dead {
+	for _, title := range notFound {
 		assert.True(t, soft404TitleRE.MatchString(title), "should match %q", title)
 	}
 
-	alive := []string{
+	articles := []string{
+		"", // a page without one, as judgeRedirect judges
 		"Understanding HTTP 404s and how to avoid them",
-		"How we redesigned our 404 experience", // "our 404 experience" — no boundary hit
+		"How we redesigned our 404 experience",
 		"Finding lost cities: places not found on any map",
 		"The Signal and the Noise",
 		"Go 1.25 release notes",
+		// Articles about a missing page. A rule that matches a phrase
+		// anywhere in the title, or a 404 at its start, matches each of
+		// these, and would judge the article dead for good.
+		"How to fix 404 Not Found errors in Nginx",
+		"Fix the 404 error on your WordPress site",
+		"404 Media",
+		"404 Media: The Future of Independent Journalism",
+		"404 Error Pages: 30 Creative Examples",
+		"Error 404 explained: causes and fixes",
+		"Error 404: How to Fix It",
+		"Creating a custom page not found handler in Express",
+		"Page Not Found Errors: A Guide",
+		"Your page has been removed from Google's index: what now?",
+		// A template's words inside a longer title.
+		"How to return a 410 Gone instead of a 404",
+		"Product-market fit not found: lessons from a failed startup",
+		"Why my content has been deleted from Instagram",
+		"User Not Found errors in Active Directory explained",
+		// A template before a colon opens a headline: a site's name after
+		// the template follows a spaced separator.
+		"410 Gone: Why HTTP Status Codes Matter",
+		"Product not found: lessons from a failed launch",
+		"Not Found: The Search for Amelia Earhart",
+		"Group Not Found: How We Lost Our Meetup",
+		// So do several words before a template: a site's name before a
+		// colon is one word.
+		"Lessons from a failed launch: Product not found",
+		"Kubernetes debugging: Error 404",
+		"Season 2, Episode 4: Not Found",
+		// Error pages, not tombstones: LSAC's sign-in page (570bb74c), whose
+		// content exists behind a login, and a help center's error page.
+		"403 (access denied) error | The Law School Admission Council",
+		"Error | BigCommerce Help Center",
 	}
-	for _, title := range alive {
+	for _, title := range articles {
 		assert.False(t, soft404TitleRE.MatchString(title), "should NOT match %q", title)
 	}
 }
@@ -951,6 +1154,97 @@ var (
 			"[Real Estate](https://www.kijiji.ca/b-real-estate/canada/c34l0) and more. ", 5)
 )
 
+// Not-found pages the library stored as articles through Jina, as Jina
+// rendered them, with no target-status warning. Each is long enough to pass
+// as an article under an ordinary title: only its own title gives it away.
+// Medium's and Quora's are whole; the others are trimmed of cookie banners,
+// navigation and trending lists.
+const (
+	// mediumTombstoneBody is 7f6fa07b's, titled "410 Deleted by author —
+	// Medium": Medium's page for a story its author deleted.
+	mediumTombstoneBody = "[Sitemap](https://medium.com/sitemap/sitemap.xml)\n\n" +
+		"[Open in app](https://play.google.com/store/apps/details?id=com.medium.reader&referrer=utm_source%3DmobileNavBar&source=---top_nav_layout_nav-------------------------------------------)\n\n" +
+		"Sign up\n\n" +
+		"[Sign in](https://medium.com/m/signin?operation=login&redirect=https%3A%2F%2Fmedium.com%2Fdesign-explosion%2Fdesign-explosions-mapping-on-ios-ad4ec6ba5c59&source=post_page---top_nav_layout_nav-----------------------global_nav--------------------)\n\n" +
+		"[](https://medium.com/?source=---top_nav_layout_nav-------------------------------------------)\n\n" +
+		"Get app\n\n" +
+		"[Write](https://medium.com/m/signin?operation=register&redirect=https%3A%2F%2Fmedium.com%2Fnew-story&source=---top_nav_layout_nav-----------------------new_post_topnav--------------------)\n\n" +
+		"[Search](https://medium.com/search?source=---top_nav_layout_nav-------------------------------------------)\n\n" +
+		"Sign up\n\n" +
+		"[Sign in](https://medium.com/m/signin?operation=login&redirect=https%3A%2F%2Fmedium.com%2Fdesign-explosion%2Fdesign-explosions-mapping-on-ios-ad4ec6ba5c59&source=post_page---top_nav_layout_nav-----------------------global_nav--------------------)\n\n" +
+		"![Image 1: Unknown user](https://miro.medium.com/v2/resize:fill:64:64/1*dmbNkD5D-u45r44go_cf0g.png)\n\n" +
+		"Error\n\n" +
+		"410\n\n" +
+		"The author deleted this Medium story."
+	// homeDepotNotFoundBody is 11175b32's, titled "Product Not Found | The
+	// Home Depot Canada".
+	homeDepotNotFoundBody = "[](http://www.homedepot.ca/)\n\n" +
+		"*   [Rental](http://www.homedepot.ca/en/home/tool-and-vehicle-rental.html)\n" +
+		"*   [Credit Services](http://www.homedepot.ca/en/home/credit-services.html)\n" +
+		"*   [For the Pro](http://www.homedepot.ca/en/home/pro.html)\n" +
+		"*   [Order Status](http://www.homedepot.ca/guest-order-details)\n" +
+		"*   [Customer Support](http://www.homedepot.ca/en/home/customer-support.html)\n\n" +
+		"[Account / Sign In](http://www.homedepot.ca/)\n\n" +
+		"[Cart](http://www.homedepot.ca/cart)\n\n" +
+		"*   [Shop by Department](http://www.homedepot.ca/)\n" +
+		"*   [Shop by Room](http://www.homedepot.ca/en/home/shop-by-room.html)\n" +
+		"*   [Ideas & How-to](http://www.homedepot.ca/en/home/ideas-how-to.html)\n\n" +
+		"Don’t miss out on our Pro Savings Event. Ends October 7.[Shop Now](http://www.homedepot.ca/en/home/categories/all/events/pro-savings-event.html?intid=HP_scarf_260924_EN_ProSavings)\n\n" +
+		"## How We Use Cookies\n\n" +
+		"We use cookies and similar technologies (“Cookies”) which are required for our website and app to function. " +
+		"We use optional Cookies to understand how people use our website/app, to improve our services, and to personalize offers/ads to you.\n\n" +
+		"Accept All\n\n" +
+		"Manage Cookie Preferences"
+	// meetupNotFoundBody is 1e29e209's, titled "Meetup | Group not found".
+	meetupNotFoundBody = "[Skip to content](http://www.meetup.com/leancoffeeto/#main)\n\n" +
+		"[](https://www.meetup.com/)\n\n" +
+		"Homepage\n\n" +
+		"English\n\n" +
+		"Log in Sign up\n\n" +
+		"![Image 2: searchPurple illustration](https://secure.meetupstatic.com/next/images/illustrations/search-purple.webp?w=384)\n\n" +
+		"# Group not found\n\n" +
+		"Sorry, the group you're looking for doesn't exist\n\n" +
+		".\n\n" +
+		"The people platform\n\n" +
+		"Create your own Meetup group.\n\n" +
+		"[Get Started](https://www.meetup.com/start?origin=groups&eventOrigin=page-footer)\n\n" +
+		"Your account\n\n" +
+		"*   [Sign up](https://www.meetup.com/register/?returnUri=https%3A%2F%2Fwww.meetup.com%2Fleancoffeeto%2F)\n" +
+		"*   [Log in](https://www.meetup.com/login/?returnUri=https%3A%2F%2Fwww.meetup.com%2Fleancoffeeto%2F)\n" +
+		"*   [Help](https://help.meetup.com/hc)\n\n" +
+		"© 2026 Bending Spoons US Inc."
+	// soundCloudNotFoundBody is 4bcccb00's, titled "This track was not found".
+	soundCloudNotFoundBody = "[SoundCloud](https://soundcloud.com/ \"Home\")\n\n" +
+		"*   [Home](https://soundcloud.com/discover)\n" +
+		"*   [Feed](https://soundcloud.com/feed)\n" +
+		"*   [Library](https://soundcloud.com/you/library)\n\n" +
+		"Search\n\n" +
+		"Sign in Create account\n\n" +
+		"[Upload](https://soundcloud.com/upload)\n\n" +
+		"[Bloomberg Opinion](https://soundcloud.com/bloombergview)\n\n" +
+		" This track was not found. Maybe it has been removed [Learn more](https://help.soundcloud.com/hc/articles/115003563948-Can-t-find-a-track-anymore)\n\n" +
+		" Trending tracks on SoundCloud \n\n" +
+		"*   [2006](https://soundcloud.com/tijan-ebrima/2006a1) [Dragnutz](https://soundcloud.com/tijan-ebrima)\n" +
+		"*   [Backwards](https://soundcloud.com/quavoofficial/backwards) [Quavo, T.I.](https://soundcloud.com/quavoofficial)\n\n" +
+		"[Legal](https://soundcloud.com/terms-of-use \"Terms of use\")· [Privacy](https://soundcloud.com/pages/privacy \"Privacy policy\")· " +
+		"[Cookie Policy](https://soundcloud.com/pages/cookies \"Cookie Policy\")"
+	// quoraDeletedBody is 466d4d9e's, titled "Content has been deleted -
+	// Quora".
+	quoraDeletedBody = "[](https://www.quora.com/)\n\n" +
+		"![Image 1: Icon for Consultantsmind](https://qph.cf2.quoracdn.net/main-thumb-ti-133003-100-xcdvpxbiwwtjxfewsbpsmuphiktubgku.jpeg)\n\n" +
+		"## [Consultantsmind](https://consultantsmind.quora.com/)\n\n" +
+		"## Consulting Blog\n\n" +
+		"This post has been deleted.\n\n" +
+		"[About](https://www.quora.com/about) · [Careers](https://www.quora.com/careers) · [Privacy](https://www.quora.com/about/privacy) · [Terms](https://www.quora.com/about/tos) · [Contact](https://www.quora.com/contact) · [Languages](https://www.quora.com/about/languages) · [Your Ad Choices](https://www.quora.com/about/your_ad_choices) · [Press](https://www.quora.com/press) · \n" +
+		"© Quora, Inc. 2026"
+)
+
+// aqrNotFoundTitle is b8993401's title, which the library stored from the
+// origin: Readability took the first sentence of aqr.com's not-found page
+// for it.
+const aqrNotFoundTitle = "The page you are looking for does not exist or has been moved. " +
+	"To find what you’re looking for, try one of the following:"
+
 // jinaHarness is a Native whose origin serves the thin page, or answers
 // with an error status, and whose fake Jina always answers reply. Both
 // count their requests.
@@ -1068,6 +1362,30 @@ func TestNative_JinaTargetStatus(t *testing.T) {
 	}
 }
 
+// TestNative_JinaTombstoneAfterOrigin403: Jina's answer for a page the
+// origin refused is Medium's page for a deleted story, without the
+// target-status warning that would say 410 (7f6fa07b and 4 more were stored
+// this way). Its title makes it a dead link: final, one Jina request, and
+// no host-cache entry, so the host's next page asks the origin again.
+func TestNative_JinaTombstoneAfterOrigin403(t *testing.T) {
+	h := newJinaHarness(t, http.StatusForbidden, true,
+		jinaReply("410 Deleted by author — Medium", nil, mediumTombstoneBody))
+
+	_, err := h.n.Fetch(t.Context(), h.origin.URL+"/a")
+	require.ErrorIs(t, err, ErrDeadLink)
+	assert.ErrorIs(t, err, ErrAntiBot, "the origin's side of the chain")
+	var pe *PermanentError
+	assert.ErrorAs(t, err, &pe)
+	assert.Contains(t, err.Error(), "not-found page")
+	assert.Equal(t, store.FailureCauseDeadLink, FailureCause(err))
+	assert.Equal(t, int32(1), h.jinaHits.Load())
+	assert.False(t, h.originCached())
+
+	_, err = h.n.Fetch(t.Context(), h.origin.URL+"/b")
+	require.ErrorIs(t, err, ErrDeadLink)
+	assert.Equal(t, int32(2), h.originHits.Load(), "the next page on the host reaches the origin")
+}
+
 // TestNative_JinaRejectsNonArticles: a 2xx Jina answer that is a challenge,
 // a block, a 403/503 error page without the target-status warning, a
 // not-found or a login page, or too thin, is Jina's verdict: one request,
@@ -1090,6 +1408,13 @@ func TestNative_JinaRejectsNonArticles(t *testing.T) {
 		{"perimeterx, by its text", "", nil, perimeterXBody, ErrAntiBot, "press & hold"},
 		{"captcha warning", "An article", []string{warnCaptcha}, longArticleBody, ErrAntiBot, "CAPTCHA"},
 		{"not-found title", "Page not found | Free local classifieds - Kijiji", nil, kijijiNotFoundBody, ErrDeadLink, "not-found page"},
+		// The library's tombstones: Jina's answers for them carry no
+		// target-status warning, so their titles tell.
+		{"medium tombstone", "410 Deleted by author — Medium", nil, mediumTombstoneBody, ErrDeadLink, "not-found page"},
+		{"home depot", "Product Not Found | The Home Depot Canada", nil, homeDepotNotFoundBody, ErrDeadLink, "not-found page"},
+		{"meetup", "Meetup | Group not found", nil, meetupNotFoundBody, ErrDeadLink, "not-found page"},
+		{"soundcloud", "This track was not found", nil, soundCloudNotFoundBody, ErrDeadLink, "not-found page"},
+		{"quora", "Content has been deleted - Quora", nil, quoraDeletedBody, ErrDeadLink, "not-found page"},
 		{"parked domain", "example.org", nil, parkedDomainBody, ErrLoginWall, "extracted text < 500 bytes"},
 		{"a byte under the floor", "A note", nil, strings.Repeat("x", minArticleBytes-1), ErrLoginWall, "extracted text < 500 bytes"},
 		{"atlassian", "Log in to continue - Log in with Atlassian account", nil, loginPageBody, ErrLoginWall, "login wall"},
@@ -1163,6 +1488,15 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 		{"a short post", `Jane Doe on X: "Shipping a new version of our SQLite extension today" / X`, nil, tweetBody, true},
 		{"at the floor", "A note", nil, strings.Repeat("x", minArticleBytes), true},
 		{"not-found title, detection off", "Page not found | Free local classifieds - Kijiji", nil, kijijiNotFoundBody, false},
+		{"tombstone, detection off", "410 Deleted by author — Medium", nil, mediumTombstoneBody, false},
+		{"an article about a 404", "How to fix 404 Not Found errors in Nginx", nil, article, true},
+		// The library's tombstones under an ordinary title: only their own
+		// titles make them dead.
+		{"medium tombstone's body", "An article", nil, mediumTombstoneBody, true},
+		{"home depot's body", "An article", nil, homeDepotNotFoundBody, true},
+		{"meetup's body", "An article", nil, meetupNotFoundBody, true},
+		{"soundcloud's body", "An article", nil, soundCloudNotFoundBody, true},
+		{"quora's body", "An article", nil, quoraDeletedBody, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1250,6 +1584,11 @@ func TestJudgePage_Order(t *testing.T) {
 		{"homepage before a challenge title", pageView{title: "Just a moment...", found: true, finalURL: at("https://example.com/")}, true, ErrDeadLink, "redirected to homepage", 0},
 		{"landing page before a challenge", pageView{title: "Just a moment...", text: challenge, found: true, finalURL: at("https://other.example/articles/")}, true, ErrDeadLink, "another site's landing page", 0},
 		{"detection off", pageView{title: "Page not found", text: challenge, found: true}, false, ErrAntiBot, "bot challenge", 0},
+		{"not-found title without an article", pageView{title: "Palantir | Page Not Found"}, true, ErrDeadLink, "not-found page", 0},
+		{"not-found title without an article, detection off", pageView{title: "Palantir | Page Not Found"}, false, ErrLoginWall, "no article extracted", loginWallPage},
+		// Google Cloud's docs pad their separators with no-break spaces; the
+		// reason quotes the title as served.
+		{"not-found title with no-break spaces", pageView{title: "Page not found  |  Google Cloud Documentation", text: long, found: true}, true, ErrDeadLink, "not-found page: Page not found  |  Google", 0},
 		{"challenge before an error page", pageView{title: "403 Forbidden", text: challenge, found: true}, true, ErrAntiBot, "bot challenge", 0},
 		{"challenge before a login redirect", pageView{title: "Just a moment...", text: long, found: true, finalURL: at("https://example.com/login")}, true, ErrAntiBot, "bot challenge", 0},
 		{"challenge title without an article", pageView{title: "Just a moment..."}, true, ErrAntiBot, "bot challenge", 0},
@@ -1629,12 +1968,16 @@ type fakeAnswer struct {
 	header      http.Header
 	contentType string
 	body        string
-	bodyErr     error // the body fails with it once body is read
-	err         error // the request fails with it instead
+	bodyErr     error         // the body fails with it once body is read
+	err         error         // the request fails with it instead
+	hits        *atomic.Int32 // counts the requests answered, when set
 }
 
 // respond is the answer a describes to a request for target.
 func (a fakeAnswer) respond(target string) (*fetchResponse, error) {
+	if a.hits != nil {
+		a.hits.Add(1)
+	}
 	if a.err != nil {
 		return nil, a.err
 	}
