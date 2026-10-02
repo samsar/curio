@@ -1175,12 +1175,13 @@ const (
 		"This post has been deleted.\n\n" +
 		"[About](https://www.quora.com/about) · [Careers](https://www.quora.com/careers) · [Privacy](https://www.quora.com/about/privacy) · [Terms](https://www.quora.com/about/tos) · [Contact](https://www.quora.com/contact) · [Languages](https://www.quora.com/about/languages) · [Your Ad Choices](https://www.quora.com/about/your_ad_choices) · [Press](https://www.quora.com/press) · \n" +
 		"© Quora, Inc. 2026"
-
-	// aqrNotFoundTitle is b8993401's title: Readability took the first
-	// sentence of aqr.com's not-found page for it.
-	aqrNotFoundTitle = "The page you are looking for does not exist or has been moved. " +
-		"To find what you’re looking for, try one of the following:"
 )
+
+// aqrNotFoundTitle is b8993401's title, which the library stored from the
+// origin: Readability took the first sentence of aqr.com's not-found page
+// for it.
+const aqrNotFoundTitle = "The page you are looking for does not exist or has been moved. " +
+	"To find what you’re looking for, try one of the following:"
 
 // jinaHarness is a Native whose origin serves the thin page, or answers
 // with an error status, and whose fake Jina always answers reply. Both
