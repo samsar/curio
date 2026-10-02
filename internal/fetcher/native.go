@@ -1004,7 +1004,8 @@ var (
 //   - the title is a not-found template (soft404TitleRE), whether or not
 //     an article was found: a not-found page whose body Readability can't
 //     extract, such as an app shell, is still dead, not a login wall for
-//     Jina to try.
+//     Jina to try. Its spaces are made plain first: the rule's \s is
+//     ASCII, and some sites pad their separators with no-break spaces.
 //
 // Returns the empty string when nothing looks dead; otherwise a short
 // reason string for diagnostics.
@@ -1022,7 +1023,7 @@ func looksLikeSoft404(p pageView, sourceURL string) string {
 		}
 	}
 
-	if soft404TitleRE.MatchString(p.title) {
+	if soft404TitleRE.MatchString(strings.Join(strings.Fields(p.title), " ")) {
 		return "title looks like a not-found page: " + p.title
 	}
 	return ""
@@ -1139,18 +1140,19 @@ func isLetters(s string) bool {
 // author"), something gone ("Page not found", "This post has been
 // deleted", "The requested page could not be found"), a bare "Not found",
 // or "We can't find the page you're looking for". Up to two site names may
-// stand before it, each followed by a spaced separator or a colon
-// ("Palantir | Careers | Page Not Found", "reddit.com: page not found"),
-// and up to two after it, each after a spaced separator ("Page not found |
-// Free local classifieds - Kijiji"). A spaced separator is one of
-// | / · • – — - with whitespace on both sides.
+// stand before it, each followed by a spaced separator, or by a colon when
+// the name is one word ("Palantir | Careers | Page Not Found", "reddit.com:
+// page not found"), and up to two after it, each after a spaced separator
+// ("Page not found | Free local classifieds - Kijiji"). A spaced separator
+// is one of | / · • – — - with whitespace on both sides.
 //
-// Anchored at both ends, because a dead verdict is sticky: a title that
+// Anchored at both ends, because a dead verdict is sticky: a headline that
 // discusses a missing page ("How to fix 404 Not Found errors in Nginx",
-// "404 Media", "Product not found: lessons from a failed launch") is an
-// article's. The one rule anchored at the start only is the sentence "The
-// page you're looking for doesn't exist", which a Readability title can
-// carry whole, with whatever the page says next.
+// "404 Media", "Product not found: lessons from a failed launch",
+// "Lessons from a failed launch: Product not found") is an article's. The
+// one rule anchored at the start only is the sentence "The page you're
+// looking for doesn't exist", which a Readability title can carry whole,
+// with whatever the page says next.
 //
 // The word lists are explicit: a word added to one needs a test row.
 var soft404TitleRE = func() *regexp.Regexp {
@@ -1159,13 +1161,15 @@ var soft404TitleRE = func() *regexp.Regexp {
 		apos = `[’']`
 		// site is a site's name beside the template.
 		site = `[^|]{1,60}?`
-		// sep separates the template from a site's name after it, with
-		// whitespace on both sides. A colon is none: after a template, it
-		// opens a headline ("Not Found: The Search for Amelia Earhart").
+		// sep separates a site's name from the template, with whitespace
+		// on both sides. A colon is none: after a template, it opens a
+		// headline ("Not Found: The Search for Amelia Earhart").
 		sep = `\s+[|/·•–—-]\s+`
-		// prefixSep separates a site's name from the template after it,
-		// where a colon serves too ("reddit.com: page not found").
-		prefixSep = `(?:\s+[|/·•–—-]|\s*:)\s+`
+		// prefix is a site's name before the template: any name before a
+		// spaced separator, or one word before a colon ("reddit.com: page
+		// not found"). Several words before a colon open a headline
+		// ("Lessons from a failed launch: Product not found").
+		prefix = `(?:` + site + sep + `|[^\s|:]{1,60}\s*:\s+)`
 		// lead is an interjection opening the template.
 		lead = `(?:(?:oops|whoops|sorry|uh[\s-]?oh)[!.,:…]*\s+)?`
 		// code is a not-found status code: 404 Not Found or 410 Gone.
@@ -1195,7 +1199,7 @@ var soft404TitleRE = func() *regexp.Regexp {
 		cantFind = `(?:we\s+)?(?:couldn` + apos + `?t|could\s+not|can` + apos + `?t|cannot)\s+find`
 		// template is the title less the site names around it.
 		template = lead + `(?:` +
-			status + `[.!]?(?:\s*[|:–—-]?\s*` + statusWords + `){0,2}` +
+			status + `\.?(?:\s*[|:–—-]?\s*` + statusWords + `){0,2}` +
 			`|(?:(?:this|that|the)\s+)?(?:requested\s+)?` + thing + youWanted + `\s+` + gone +
 			`|not\s+found` +
 			`|` + cantFind + `\s+(?:this|that|the)\s+(?:requested\s+)?` + thing + youWanted +
@@ -1205,7 +1209,7 @@ var soft404TitleRE = func() *regexp.Regexp {
 		sentence = lead + `(?:the|this)\s+page\s+you(?:` + apos + `re|\s+are|\s+were)\s+looking\s+for\s+` + gone + `\b`
 	)
 	return regexp.MustCompile(`(?i)` +
-		`^\s*(?:` + site + prefixSep + `){0,2}` + template + `[.!]*(?:` + sep + site + `){0,2}\s*$` +
+		`^\s*` + prefix + `{0,2}` + template + `[.!]*(?:` + sep + site + `){0,2}\s*$` +
 		`|^\s*` + sentence)
 }()
 

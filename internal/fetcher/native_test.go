@@ -521,8 +521,57 @@ func TestSoft404TitleRE(t *testing.T) {
 		"reddit.com: page not found",
 		"Page not found · GitHub",
 		"Page not found / X",
+		"Page not found • Example",
 		"Palantir | Careers | Page Not Found",
 		"Page Not Found | Help Center | Example",
+		// Every other word and mark of the rule's lists, so that dropping
+		// one fails a row. Interjections:
+		"Whoops! Page not found",
+		"Uh oh, page not found",
+		"Oops. Page not found",
+		"Oops… page not found",
+		// Status words, and the status in parentheses:
+		"404 Error",
+		"404 (Not Found)",
+		"410 Deleted by the author",
+		"Page not found (Error 404)",
+		// The marks between status words, unspaced: spaced, they are a
+		// site's separator.
+		"404|Page Not Found",
+		"404-Not Found",
+		"410–Gone",
+		"410—Gone",
+		// Things gone:
+		"Article not found",
+		"Profile not found",
+		"Item not found",
+		"Listing not found",
+		// What was asked for:
+		"The content you are looking for is no longer available",
+		"The post you were looking for has been removed",
+		"The page you tried to access is not available",
+		"The page you tried to reach does not exist",
+		"The page you tried to visit no longer exists",
+		// How it is gone:
+		"The requested product is not found",
+		"Page no longer available",
+		"This page couldn't be found",
+		"The page cannot be found",
+		"This video isn't available",
+		"This page is missing",
+		"This story was deleted",
+		"This video has been removed by the user",
+		"This post was deleted by its author",
+		"Content has been removed by the owner",
+		// Can't find it:
+		"We cannot find the requested page",
+		"We could not find that page",
+		// A closing mark:
+		"Page not found!",
+		// The sentence, with whatever the page says next.
+		"The page you're looking for can't be found. Try the search box.",
+		"Sorry: the page you were looking for does not exist. It may have moved.",
+		"This page you are looking for no longer exists, sorry.",
 	}
 	for _, title := range notFound {
 		assert.True(t, soft404TitleRE.MatchString(title), "should match %q", title)
@@ -559,6 +608,11 @@ func TestSoft404TitleRE(t *testing.T) {
 		"Product not found: lessons from a failed launch",
 		"Not Found: The Search for Amelia Earhart",
 		"Group Not Found: How We Lost Our Meetup",
+		// So do several words before a template: a site's name before a
+		// colon is one word.
+		"Lessons from a failed launch: Product not found",
+		"Kubernetes debugging: Error 404",
+		"Season 2, Episode 4: Not Found",
 		// Error pages, not tombstones: LSAC's sign-in page (570bb74c), whose
 		// content exists behind a login, and a help center's error page.
 		"403 (access denied) error | The Law School Admission Council",
@@ -1524,6 +1578,9 @@ func TestJudgePage_Order(t *testing.T) {
 		{"detection off", pageView{title: "Page not found", text: challenge, found: true}, false, ErrAntiBot, "bot challenge", 0},
 		{"not-found title without an article", pageView{title: "Palantir | Page Not Found"}, true, ErrDeadLink, "not-found page", 0},
 		{"not-found title without an article, detection off", pageView{title: "Palantir | Page Not Found"}, false, ErrLoginWall, "no article extracted", loginWallPage},
+		// Google Cloud's docs pad their separators with no-break spaces; the
+		// reason quotes the title as served.
+		{"not-found title with no-break spaces", pageView{title: "Page not found  |  Google Cloud Documentation", text: long, found: true}, true, ErrDeadLink, "not-found page: Page not found  |  Google", 0},
 		{"challenge before an error page", pageView{title: "403 Forbidden", text: challenge, found: true}, true, ErrAntiBot, "bot challenge", 0},
 		{"challenge before a login redirect", pageView{title: "Just a moment...", text: long, found: true, finalURL: at("https://example.com/login")}, true, ErrAntiBot, "bot challenge", 0},
 		{"challenge title without an article", pageView{title: "Just a moment..."}, true, ErrAntiBot, "bot challenge", 0},

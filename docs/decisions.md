@@ -9467,19 +9467,21 @@ none.
 a not-found template (`soft404TitleRE`, `internal/fetcher/native.go`):
 
 - **Site names around it.** Up to two before the template, each followed
-  by a spaced separator or a colon ("Palantir | Careers | Page Not Found",
-  "reddit.com: page not found"), and up to two after it, each after a
-  spaced separator ("Page not found | Free local classifieds - Kijiji"). A
-  spaced separator is one of `| / · • – — -` with whitespace on both
-  sides; a site's name is up to 60 characters other than `|`. A colon after
-  the template is no separator: it opens a headline ("Not Found: The Search
-  for Amelia Earhart").
+  by a spaced separator, or by a colon when the name is one word
+  ("Palantir | Careers | Page Not Found", "reddit.com: page not found"),
+  and up to two after it, each after a spaced separator ("Page not found |
+  Free local classifieds - Kijiji"). A spaced separator is one of
+  `| / · • – — -` with whitespace on both sides; a site's name is up to 60
+  characters other than `|`. Otherwise a colon opens a headline, after the
+  template ("Not Found: The Search for Amelia Earhart") or after several
+  words before it ("Lessons from a failed launch: Product not found").
 - **The template**, optionally opened by an interjection (oops, whoops,
   sorry, uh oh) and closed by "(404)", "(410)" or "(Error 404)":
   - a status: 404 or 410, after an optional "HTTP" and "Error", then up to
     two of the status words not found, (not found), error, gone, page not
-    found, deleted, deleted by (the) author ("410 Deleted by author", "404.
-    Page Not Found", "404 Error: Page Not Found");
+    found, deleted, deleted by (the) author, each after an optional colon,
+    dash or pipe ("410 Deleted by author", "404. Page Not Found", "404
+    Error: Page Not Found");
   - something gone: an optional this, that or the and "requested", one of
     13 things (page, content, post, story, article, video, track, product,
     group, profile, user, item, listing), an optional "you're looking for",
@@ -9495,10 +9497,18 @@ a not-found template (`soft404TitleRE`, `internal/fetcher/native.go`):
   A Readability title can carry the page's whole first sentence.
 - **Explicit lists.** No `\w+`, `.*` or free-length gap stands for a word
   inside the template; a word added to a list needs a row in
-  `TestSoft404TitleRE`. Straight and curly apostrophes both.
+  `TestSoft404TitleRE`. Every word and mark of the lists has one: the test
+  fails on each of 118 variants of the rule that drop one of them, or an
+  optional piece of the grammar. Straight and curly apostrophes both.
 - **Read whether or not an article was found** (`looksLikeSoft404`):
   Readability takes the title from the page's metadata whatever it finds
   in the body.
+- **Plain spaces.** The title is matched with its whitespace made plain
+  (`strings.Fields`), since Go's `\s` is ASCII and some sites pad their
+  separators with no-break spaces (Google Cloud's docs put a space and a
+  no-break space on each side of the `|` in "App Engine documentation |
+  Google Cloud Documentation"; 16 stored titles carry one). The reason
+  quotes the title as served.
 
 Unchanged: `judgePage`'s order (dead link first), the kill switch, which
 turns this rule off with the others, `ErrDeadLink` being permanent, never
@@ -9553,12 +9563,13 @@ spending a Jina request that a dead link never should: "404 - Not Found"
 `failed`/`login_wall`. The anchored rule is the guard against false
 positives; the gate added none.
 
-**Corpus check** (read-only, 2026-10-02): of the library's 5,203 stored
-titles (every `fetched` document), the new rule matches exactly the 17
-tombstones and the old rule none. The old rule's 14 dead verdicts (12
-distinct titles, each a genuine not-found page; all 833 dead documents
-still have their failed jobs) all still match. Of the 51 article titles
-the new rule matches none, and it matches all 42 template variants tried.
+**Corpus check** (read-only, 2026-10-02, through `looksLikeSoft404`): of
+the library's 5,203 stored titles (every `fetched` document), the new rule
+matches exactly the 17 tombstones and the old rule none. The old rule's 14
+dead verdicts (12 distinct titles, each a genuine not-found page; all 833
+dead documents still have their failed jobs) all still match. Of the 51
+article titles the new rule matches none, and it matches all 42 template
+variants tried.
 
 **Existing documents:** the rule judges fetches, not what is stored. The
 17 stay `fetched`, in search and in the latest clustering run, until they
@@ -9595,23 +9606,33 @@ time before the daemon is ready, all for 17 documents.
 
 **Not done:**
 
-- **Tombstones only their body gives away.** 9 more stored documents are
+- **Tombstones only their body gives away.** 7 more stored documents are
   not-found pages under a title no rule can read as one: Medium's 404 page,
   titled just "Medium" (`7ad607e2`, `bd70c172`, `70233b2a`, `e0251c27`,
-  `2b976ea6`, `fddead8b`; body "PAGE NOT FOUND", "## 404"), Bespoke's
-  (`abd7cbb3`; "# 404 / Sorry, but we can't find the page you're looking
-  for."), and javalobby.org's Thai 404 (`3219e2f1`, `fa2c61a1`). All came
-  through Jina without a warning, and a refetch won't change them. A body
-  rule needs its own design and false-positive measurement: an article
-  about status codes can open with a 404 heading, and the origin path's
-  text carries no heading markers.
+  `2b976ea6`, `fddead8b`; body "PAGE NOT FOUND", "## 404"), and Bespoke's,
+  titled "Bespoke Interactive" (`abd7cbb3`; "# 404 / Sorry, but we can't
+  find the page you're looking for."). All 7 came through Jina without a
+  warning, and a refetch won't change them. A body rule needs its own
+  design and false-positive measurement: an article about status codes can
+  open with a 404 heading, and the origin path's text carries no heading
+  markers.
 - **LSAC's sign-in page** (`570bb74c`, "403 (access denied) error | The
   Law School Admission Council", "Sorry, you must sign in to view this
   content."): no tombstone, since the content exists behind a sign-in, so
   this rule leaves it alone and `TestSoft404TitleRE` pins that. Reading it
   as an error page is `errorPageTitleRE`'s business, a title shape that
   rule doesn't know yet.
-- **Titles in other languages.** The lists are English.
+- **Titles in other languages.** The lists are English, so javalobby.org's
+  404 page, titled "หน้าไม่พบ | JavaLobby" (Thai for "Page not found";
+  `3219e2f1`, `fa2c61a1`, through Jina without a warning), stays stored.
+- **A template beside site names, in an article's title.** A page about a
+  status, or a thread named after an error, can be titled with a template
+  and site names alone: MDN's "404 Not Found - HTTP | MDN" (which the old
+  rule matched too) and "410 Gone - HTTP | MDN", "php - Error 404 - Stack
+  Overflow", "User not found - Auth0 Community", "Item not found -
+  Microsoft Q&A", or a one-word name before a colon ("Kubernetes: Error
+  404"). Such a page is judged dead. None is among the 5,203 stored
+  titles; the title alone can't tell them from a site's not-found page.
 
 ---
 
