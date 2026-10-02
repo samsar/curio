@@ -152,6 +152,7 @@ when the entry was first committed.
 - 2026-09-30 — [Waiting is not failing: jobs curio didn't send are deferred](#waiting-is-not-failing-jobs-curio-didnt-send-are-deferred) (revised)
 - 2026-09-30 — [A site's block is not its pages' verdict](#a-sites-block-is-not-its-pages-verdict)
 - 2026-09-30 — [Embedding drift: verified by re-embedding a sample](#embedding-drift-verified-by-re-embedding-a-sample)
+- 2026-10-02 — [Interests: corrections that teach the grouping (deferred)](#interests-corrections-that-teach-the-grouping-deferred)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -9386,6 +9387,71 @@ touches a fraction p of chunks, re-indexed documents dilute detection to a
 miss probability of (1 - p(1 - f))^48. The check runs within a minute of
 an upgrade while the daemon runs, or at its start (no index job runs while
 it is down), so f is small.
+
+---
+
+## Interests: corrections that teach the grouping (deferred)
+
+**Decision:** not built yet. The owner wants a way to correct the
+interests, and for curio to learn from the corrections: move a document
+to another interest or area, say a document doesn't belong where it is,
+rename an interest. This entry records the feature and what it needs, so
+the clustering rework (areas holding sub-interests, strays joined as loose
+fits or left Unsorted) leaves room for it. Nothing here is built.
+
+**What "learn" can mean, from cheapest to most ambitious:**
+
+1. **Corrections hold.** A document the owner moved stays where they put
+   it across rebuilds, and one marked "not here" stays out of that
+   interest. A rename stays too. This is the minimum: without it, the next
+   rebuild undoes the owner's work.
+2. **Neighbours follow.** When a stray or a new document is placed, the
+   corrected documents near it vote: if its nearest corrected neighbours
+   were moved to X, it leans to X, weighted by similarity. No model is
+   trained, and removing a correction removes its effect.
+3. **Groups take the corrections in.** Corrections become constraints on
+   the similarity graph before it is grouped: a moved document's edges to
+   its new interest's members are strengthened ("must link") and its edges
+   to the old one's weakened ("cannot link"). The grouping itself then
+   keeps corrected documents together, and their neighbours with them.
+4. **The space learns.** A projection of the embedding space, learned from
+   the accumulated corrections, so that documents like the corrected ones
+   land right from the start. This needs many corrections to learn
+   anything, more than one person's library usually gives.
+
+When this is built, 1 and 2 come first, 3 once corrections accumulate and
+1–2 visibly fall short, and 4 only if a measurement shows the first three
+aren't enough.
+
+**What it needs first:**
+
+- **Interests that keep their identity across rebuilds.** A correction
+  names an interest, and today every rebuild makes new interests with new
+  IDs. The rework's carry-over is that identity: a new interest that mostly
+  overlaps an old one (more than 70% of its members) takes the old one's ID
+  and label. A correction whose interest dissolves in a rebuild has to go
+  somewhere visible (kept with the documents corrected alongside it, or
+  back to Unsorted with a note), never silently dropped.
+- **Corrections stored apart from runs.** A rebuild replaces every run's
+  rows; corrections must outlive them. That means a table of (tenant,
+  document, interest, kind: moved | not here | renamed) that a rebuild
+  reads and never deletes.
+- **A change path.** The dashboard changes things only through `/v1`, as
+  JSON sent by `actions.js` (POST or PUT). The CLI and MCP get the same
+  endpoints, and the OpenAPI spec and its test cover them.
+- **A measurement.** The cluster-quality harness (branch
+  `research/cluster-quality`, `cmd/clusterreport`) should show that
+  corrections don't cost stability. That means replaying a set of
+  corrections, rebuilding, and checking that they hold and that the
+  untouched interests survive as often as without them.
+
+**Why deferred:** the rework comes first. It decides the shape (two
+levels) and the strays (loose fits plus Unsorted), and it brings the
+stable identities that corrections need. Building corrections on today's
+interests would mean building them twice. The measurements behind the
+rework are in the cluster-quality report of 2026-10-01: 325 interests for
+5,254 documents, a third with 4 or fewer members, 30% of documents in
+none.
 
 ---
 
