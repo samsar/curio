@@ -1001,7 +1001,10 @@ var (
 //     p.finalURL.
 //   - the request settled on another site's landing page
 //     (looksLikeLandingPage). Needs p.finalURL.
-//   - the extracted title is a not-found template (soft404TitleRE)
+//   - the title is a not-found template (soft404TitleRE), whether or not
+//     an article was found: a not-found page whose body Readability can't
+//     extract, such as an app shell, is still dead, not a login wall for
+//     Jina to try.
 //
 // Returns the empty string when nothing looks dead; otherwise a short
 // reason string for diagnostics.
@@ -1019,7 +1022,7 @@ func looksLikeSoft404(p pageView, sourceURL string) string {
 		}
 	}
 
-	if p.found && soft404TitleRE.MatchString(p.title) {
+	if soft404TitleRE.MatchString(p.title) {
 		return "title looks like a not-found page: " + p.title
 	}
 	return ""

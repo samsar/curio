@@ -350,6 +350,51 @@ func TestNative_Soft404_TitleDetected(t *testing.T) {
 	}
 }
 
+// TestNative_AppShellTitle: Readability finds no article in an app shell
+// but reads its title. A not-found title makes it a dead link, final at
+// once and without Jina, Jina on or off: the library's f7b423fe, 9493db96,
+// 50676971 and fff881fa each spent a Jina request to be judged dead. An
+// ordinary title leaves a login wall, which Jina may get past.
+func TestNative_AppShellTitle(t *testing.T) {
+	const notFound = "Palantir | Page Not Found"
+	cases := []struct {
+		name         string
+		title        string
+		jinaOn       bool
+		cause        store.FailureCause // empty for a page stored through Jina
+		reason       string
+		jinaRequests int32
+	}{
+		{"not-found title, Jina on", notFound, true, store.FailureCauseDeadLink, "not-found page", 0},
+		{"not-found title, Jina off", notFound, false, store.FailureCauseDeadLink, "not-found page", 0},
+		{"ordinary title, Jina on", "Palantir Careers", true, "", "", 1},
+		{"ordinary title, Jina off", "Palantir Careers", false, store.FailureCauseLoginWall, "no article extracted", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, jinaRequests, err := fetchServed(t, appShell(tc.title), tc.jinaOn)
+			assert.Equal(t, tc.jinaRequests, jinaRequests)
+			if tc.cause == "" {
+				require.NoError(t, err)
+				assert.Equal(t, "jina", res.Meta["via"])
+				return
+			}
+			require.Error(t, err)
+			assert.Equal(t, tc.cause, FailureCause(err), "%v", err)
+			assert.Contains(t, err.Error(), tc.reason)
+			_, permanent := errors.AsType[*PermanentError](err)
+			assert.True(t, permanent, "final once every extraction path answered: %v", err)
+		})
+	}
+}
+
+// appShell is a single-page app's HTML: a title over an empty mount point,
+// with no article for Readability to find.
+func appShell(title string) string {
+	return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>` + title + `</title></head>` +
+		`<body><div id="app"></div><script src="/main.js"></script></body></html>`
+}
+
 // fetchServed fetches causePage from an origin serving html, with dead-link
 // detection on and Jina, when on, answering an article. It returns what the
 // fetch returned and the number of Jina requests it made.
@@ -484,6 +529,7 @@ func TestSoft404TitleRE(t *testing.T) {
 	}
 
 	articles := []string{
+		"", // a page without one, as judgeRedirect judges
 		"Understanding HTTP 404s and how to avoid them",
 		"How we redesigned our 404 experience",
 		"Finding lost cities: places not found on any map",
@@ -1475,6 +1521,8 @@ func TestJudgePage_Order(t *testing.T) {
 		{"homepage before a challenge title", pageView{title: "Just a moment...", found: true, finalURL: at("https://example.com/")}, true, ErrDeadLink, "redirected to homepage", 0},
 		{"landing page before a challenge", pageView{title: "Just a moment...", text: challenge, found: true, finalURL: at("https://other.example/articles/")}, true, ErrDeadLink, "another site's landing page", 0},
 		{"detection off", pageView{title: "Page not found", text: challenge, found: true}, false, ErrAntiBot, "bot challenge", 0},
+		{"not-found title without an article", pageView{title: "Palantir | Page Not Found"}, true, ErrDeadLink, "not-found page", 0},
+		{"not-found title without an article, detection off", pageView{title: "Palantir | Page Not Found"}, false, ErrLoginWall, "no article extracted", loginWallPage},
 		{"challenge before an error page", pageView{title: "403 Forbidden", text: challenge, found: true}, true, ErrAntiBot, "bot challenge", 0},
 		{"challenge before a login redirect", pageView{title: "Just a moment...", text: long, found: true, finalURL: at("https://example.com/login")}, true, ErrAntiBot, "bot challenge", 0},
 		{"challenge title without an article", pageView{title: "Just a moment..."}, true, ErrAntiBot, "bot challenge", 0},
