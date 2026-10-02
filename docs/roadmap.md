@@ -265,6 +265,11 @@ eval harness shows measurably better retrieval than the v1 baseline.
 - Snapshot to WARC for dead-link insurance
 - Cross-source signal weighting ("read this thing, bookmarked this thing,
   highlighted this thing → strong interest")
+- Interest corrections: move a document to another interest, mark it as
+  not belonging, rename an interest, and have later rebuilds keep the
+  corrections and learn from them. This comes after the clustering rework,
+  which gives interests IDs that survive a rebuild (decisions.md
+  "Interests: corrections that teach the grouping (deferred)").
 - Insight clustering quality: split the ~60% "general-reading" mega-cluster
   (recursive split of oversized clusters → Leiden → better doc representation).
   See `docs/decisions.md` → "Insight clustering quality" for the diagnosis.
