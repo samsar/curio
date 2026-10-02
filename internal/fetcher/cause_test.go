@@ -115,6 +115,10 @@ func pastCachedHost(kind HostFailureKind, originErr string, jina fakeAnswer) fun
 // jinaArticlePage is Jina's answer rendering the article.
 var jinaArticlePage = jinaPage("An article", nil, longArticleBody)
 
+// jinaTombstone is Jina's answer rendering Medium's page for a deleted
+// story, with no target-status warning.
+var jinaTombstone = jinaPage("410 Deleted by author — Medium", nil, mediumTombstoneBody)
+
 // afterItsTurns paces n's Jina calls at the default rate a site, and hands
 // out every turn of causePage's site that starts within the inline cap, so
 // its next Jina call is deferred for a turn. It returns n.
@@ -249,6 +253,8 @@ func nativeCauseCases() []causeCase {
 			*jinaPage("Sign in - Google Accounts", nil, loginPageBody)), store.FailureCauseLoginWall},
 		{"cached host, target 404 through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
 			*jinaTarget(http.StatusNotFound)), store.FailureCauseDeadLink},
+		{"cached host, a tombstone through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaTombstone), store.FailureCauseDeadLink},
 		{"cached host, Jina's 500", pastCachedHost(HostFailAntiBot, cachedOrigin403,
 			answerStatus(http.StatusInternalServerError)), store.FailureCauseAntiBot},
 		{"cached login wall, Jina's 500", pastCachedHost(HostFailLoginWall, cachedOriginLogin,
@@ -296,6 +302,9 @@ func nativeCauseCases() []causeCase {
 		{"thin page, target 429 through Jina", viaFakes(thinOrigin, jinaTarget(http.StatusTooManyRequests)),
 			store.FailureCauseRateLimited},
 		{"thin page, target 404 through Jina", viaFakes(thinOrigin, jinaTarget(http.StatusNotFound)),
+			store.FailureCauseDeadLink},
+		{"thin page, a tombstone through Jina", viaFakes(thinOrigin, jinaTombstone), store.FailureCauseDeadLink},
+		{"origin 403, a tombstone through Jina", viaFakes(answerStatus(http.StatusForbidden), jinaTombstone),
 			store.FailureCauseDeadLink},
 		{"thin page, target 404 through Jina, detection off", viaFakesDetecting(thinOrigin,
 			jinaTarget(http.StatusNotFound), false), store.FailureCauseHTTPError},

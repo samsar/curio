@@ -504,6 +504,9 @@ func TestNative_CachedHostJinaOutcomes(t *testing.T) {
 		{"a refusal", fakeAnswer{status: http.StatusUnavailableForLegalReasons, contentType: "application/json",
 			body: jina451Body}, true, false, errJinaRefused},
 		{"the target's 404", *jinaTarget(http.StatusNotFound), true, false, ErrDeadLink},
+		// Six of the library's Medium tombstones were stored this way,
+		// 7c63ac42 among them.
+		{"a tombstone", *jinaTombstone, true, false, ErrDeadLink},
 		{"the target's 502", *jinaTarget(http.StatusBadGateway), false, false, errJinaTargetTrouble},
 		{"Jina's 500", answerStatus(http.StatusInternalServerError), false, false, ErrAntiBot},
 		{"Jina's long 429", limited, false, true, ErrAntiBot},
