@@ -528,12 +528,14 @@ func TestSoft404TitleRE(t *testing.T) {
 		// one fails a row. Interjections:
 		"Whoops! Page not found",
 		"Uh oh, page not found",
+		"Uh-oh! Page not found",
 		"Oops. Page not found",
 		"Oops… page not found",
 		// Status words, and the status in parentheses:
 		"404 Error",
 		"404 (Not Found)",
 		"410 Deleted by the author",
+		"410 Deleted",
 		"Page not found (Error 404)",
 		// The marks between status words, unspaced: spaced, they are a
 		// site's separator.
@@ -566,6 +568,12 @@ func TestSoft404TitleRE(t *testing.T) {
 		// Can't find it:
 		"We cannot find the requested page",
 		"We could not find that page",
+		"Can't find that page",
+		// Contractions typed without their apostrophe:
+		"This page doesnt exist",
+		"We cant find that page",
+		"We couldnt find this page",
+		"This video isnt available",
 		// A closing mark:
 		"Page not found!",
 		// The sentence, with whatever the page says next.

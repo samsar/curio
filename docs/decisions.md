@@ -9627,12 +9627,18 @@ time before the daemon is ready, all for 17 documents.
   `3219e2f1`, `fa2c61a1`, through Jina without a warning), stays stored.
 - **A template beside site names, in an article's title.** A page about a
   status, or a thread named after an error, can be titled with a template
-  and site names alone: MDN's "404 Not Found - HTTP | MDN" (which the old
+  and site names alone: Wikipedia's "HTTP 404 - Wikipedia" and "HTTP 410 -
+  Wikipedia", MDN's "404 Not Found - HTTP | MDN" (which the old
   rule matched too) and "410 Gone - HTTP | MDN", "php - Error 404 - Stack
   Overflow", "User not found - Auth0 Community", "Item not found -
   Microsoft Q&A", or a one-word name before a colon ("Kubernetes: Error
-  404"). Such a page is judged dead. None is among the 5,203 stored
-  titles; the title alone can't tell them from a site's not-found page.
+  404"). So can two kinds of headline: one whose subtitle follows a spaced
+  dash, which reads as a site's name ("Error 404 - How to Fix It", "404 Not
+  Found - What It Means and How to Fix It", the second matched by the old
+  rule too), and one that opens with the sentence ("The page you're looking
+  for doesn't exist: designing better 404 pages"). Such a page is judged
+  dead. None is among the 5,203 stored titles; the title alone can't tell
+  them from a site's not-found page.
 
 ---
 
