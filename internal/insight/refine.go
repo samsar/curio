@@ -19,12 +19,16 @@ const MergeThreshold = 0.85
 const LooseFitThreshold = 0.45
 
 // Centroids returns each interest's centroid, interests being the labels
-// 0..k-1 of labels (NoiseLabel for none): the unit mean of its members'
-// vectors, summed in float64 and returned as float32, the form a run
-// stores. A zero mean stays zero.
+// 0..k-1 of labels (NoiseLabel for none, k at most the number of points):
+// the unit mean of its members' vectors, summed in float64 and returned as
+// float32, the form a run stores. An unused label, or a zero mean, gets a
+// zero centroid.
 func Centroids(points []Point, labels []int) ([][]float32, error) {
 	if len(labels) != len(points) {
 		return nil, fmt.Errorf("insight: %d labels for %d points", len(labels), len(points))
+	}
+	if err := checkLabels("interest", labels); err != nil {
+		return nil, err
 	}
 	k := numLabels(labels)
 	if k == 0 {
@@ -33,7 +37,7 @@ func Centroids(points []Point, labels []int) ([][]float32, error) {
 	dim := len(points[0].Vector)
 	sums := make([][]float64, k)
 	for i, l := range labels {
-		if l < 0 {
+		if l == NoiseLabel {
 			continue
 		}
 		if len(points[i].Vector) != dim {
@@ -77,7 +81,7 @@ func Centroids(points []Point, labels []int) ([][]float32, error) {
 // re-derives the merge and an unchanged library stays identical. Neither
 // input is modified.
 func MergeNearDuplicates(points []Point, g Grouping, threshold float64) (Grouping, int, error) {
-	if err := g.Validate(len(points)); err != nil {
+	if err := checkStep(points, g, threshold); err != nil {
 		return Grouping{}, 0, err
 	}
 	interest := slices.Clone(g.Interest)
@@ -105,6 +109,22 @@ func MergeNearDuplicates(points []Point, g Grouping, threshold float64) (Groupin
 		Seeds: slices.Clone(g.Seeds), Splits: g.Splits,
 	}
 	return out, before - k, nil
+}
+
+// checkStep validates what the steps after a grouping take: a valid
+// grouping of the points, unit or zero vectors, and a finite threshold (a
+// NaN would compare false with every cosine, a NaN vector likewise).
+func checkStep(points []Point, g Grouping, threshold float64) error {
+	if math.IsNaN(threshold) || math.IsInf(threshold, 0) {
+		return fmt.Errorf("insight: threshold %g, want a finite value", threshold)
+	}
+	if err := g.Validate(len(points)); err != nil {
+		return err
+	}
+	if len(points) == 0 {
+		return nil
+	}
+	return checkUnitVectors(points)
 }
 
 // numLabels is k for labels numbered 0..k-1, NoiseLabel for none.
@@ -234,14 +254,11 @@ type Fit struct {
 // threshold or above and unsorted otherwise. centroids must be
 // Centroids(points, g.Interest). Inputs are not modified.
 func AssignStrays(points []Point, g Grouping, centroids [][]float32, threshold float64) ([]Fit, error) {
-	if err := g.Validate(len(points)); err != nil {
+	if err := checkStep(points, g, threshold); err != nil {
 		return nil, err
 	}
 	if len(points) == 0 {
 		return []Fit{}, nil
-	}
-	if err := checkUnitVectors(points); err != nil {
-		return nil, err
 	}
 	k := numLabels(g.Interest)
 	if len(centroids) != k {

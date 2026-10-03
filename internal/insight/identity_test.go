@@ -266,6 +266,8 @@ func TestCarry_RejectsBadInput(t *testing.T) {
 		want string
 	}{
 		{"duplicate old ID", CarryInput{Old: []OldGroup{{ID: "O"}, {ID: "O"}}}, "old group O appears twice"},
+		{"old group without an ID", CarryInput{Old: []OldGroup{{ID: "O"}, {Members: o[:2]}}, New: flat(o[:2]), Library: o},
+			"old group 1 has no ID"},
 		{"document in two old groups", CarryInput{Old: []OldGroup{{ID: "a", Members: o[:2]}, {ID: "b", Members: o[1:3]}}},
 			"document o01 is in two old groups"},
 		{"document in two new groups", CarryInput{New: flat(o[:2], o[1:3]), Library: o}, "document o01 is in two new groups"},

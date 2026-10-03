@@ -87,6 +87,20 @@ func TestKNNGraph_IsTheClusterersGraph(t *testing.T) {
 	assert.Empty(t, empty)
 	_, err = KNNGraph(context.Background(), []Point{{ID: "x", Vector: []float32{2, 0}}}, 7, 0.3)
 	require.Error(t, err, "not unit length")
+
+	// A k past the candidates keeps them all, without sizing anything by k.
+	all, err := KNNGraph(context.Background(), pts, 1<<60, 0.3)
+	require.NoError(t, err)
+	assert.Equal(t, unionGraph(serialNeighbors(vectorsOf(pts), len(pts), 0.3)), all)
+	one, err := KNNGraph(context.Background(), pts[:1], 1<<60, 0.3)
+	require.NoError(t, err)
+	assert.Equal(t, [][]louvain.Edge{{}}, one)
+	for _, k := range []int{0, -1, math.MinInt} {
+		_, err = KNNGraph(context.Background(), pts, k, 0.3)
+		require.Error(t, err, "k = %d", k)
+	}
+	_, err = KNNGraph(context.Background(), pts, 7, math.NaN())
+	require.Error(t, err, "a NaN threshold")
 }
 
 // TestNeighbourLists_DeriveBothGraphs: the one top-20 pass yields, edge for

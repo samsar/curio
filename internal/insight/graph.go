@@ -3,6 +3,7 @@ package insight
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"runtime"
@@ -31,8 +32,15 @@ const (
 // edge listed from both ends. Points must be unit length or zero, as for
 // Cluster. Neighbour ties are broken by index, so a caller that wants the
 // clusterer's exact graph passes points sorted by ID, as Cluster sorts
-// them. It is exported to measure partitions on that graph.
+// them. k must be at least 1 and minSim a number. It is exported to
+// measure partitions on that graph.
 func KNNGraph(ctx context.Context, points []Point, k int, minSim float64) ([][]louvain.Edge, error) {
+	if k < 1 {
+		return nil, fmt.Errorf("insight: %d nearest neighbours, want at least 1", k)
+	}
+	if math.IsNaN(minSim) {
+		return nil, errors.New("insight: a NaN minimum similarity")
+	}
 	if len(points) == 0 {
 		return [][]louvain.Edge{}, nil
 	}
@@ -111,13 +119,16 @@ func checkUnitVectors(points []Point) error {
 }
 
 // knnNeighbors returns each node's top-k neighbors with similarity >= minSim,
-// ordered by similarity descending, then index ascending. Building this is
-// essentially all of the clusterer's cost (O(n²·d)), and rows are
-// independent, so they are spread over GOMAXPROCS workers that share nothing
-// but a row counter; each worker writes only the slots of the rows it took.
+// ordered by similarity descending, then index ascending; k is at least 1.
+// Building this is essentially all of the clusterer's cost (O(n²·d)), and
+// rows are independent, so they are spread over GOMAXPROCS workers that share
+// nothing but a row counter; each worker writes only the slots of the rows it
+// took.
 func knnNeighbors(ctx context.Context, vecs [][]float32, k int, minSim float64) ([][]louvain.Edge, error) {
 	n := len(vecs)
 	out := make([][]louvain.Edge, n)
+	// A row has n-1 candidates, so a larger k keeps them all.
+	k = min(k, n-1)
 	var next atomic.Int64
 	var wg sync.WaitGroup
 	for range min(runtime.GOMAXPROCS(0), n) {

@@ -382,14 +382,14 @@ func corpusMean(dvs []store.DocVector, dim int) []float64 {
 }
 
 // unitResidual returns the unit vector of v, first subtracting mean when it is
-// non-nil. A zero residual yields a zero vector, so the point gets no edges and
-// falls out as noise.
+// not empty (it then has v's width). A zero residual yields a zero vector, so
+// the point gets no edges and falls out as noise.
 func unitResidual(v []float32, mean []float64) []float32 {
 	residual := make([]float64, len(v))
 	var sum float64
 	for i, x := range v {
 		r := float64(x)
-		if mean != nil {
+		if len(mean) > 0 {
 			r -= mean[i]
 		}
 		residual[i] = r

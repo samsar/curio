@@ -139,23 +139,32 @@ func (g Grouping) Validate(numPoints int) error {
 // labelSizes returns the size of each label 0..k-1 of labels, failing
 // unless every label is NoiseLabel or one of 0..k-1 and each is used.
 func labelSizes(what string, labels []int) ([]int, error) {
-	k := 0
-	for i, l := range labels {
-		if l < NoiseLabel {
-			return nil, fmt.Errorf("insight: point %d has %s %d", i, what, l)
-		}
-		k = max(k, l+1)
+	if err := checkLabels(what, labels); err != nil {
+		return nil, err
 	}
-	sizes := make([]int, k)
+	sizes := make([]int, numLabels(labels))
 	for _, l := range labels {
 		if l != NoiseLabel {
 			sizes[l]++
 		}
 	}
 	if gap := slices.Index(sizes, 0); gap >= 0 {
-		return nil, fmt.Errorf("insight: %s %d is unused among 0..%d", what, gap, k-1)
+		return nil, fmt.Errorf("insight: %s %d is unused among 0..%d", what, gap, len(sizes)-1)
 	}
 	return sizes, nil
+}
+
+// checkLabels fails unless every label is NoiseLabel or names a group of
+// the points: with every label used, a grouping of n points has at most n
+// groups, so a larger label is wrong, and sizing anything by it could
+// exhaust memory.
+func checkLabels(what string, labels []int) error {
+	for i, l := range labels {
+		if l < NoiseLabel || l >= len(labels) {
+			return fmt.Errorf("insight: point %d has %s %d", i, what, l)
+		}
+	}
+	return nil
 }
 
 // Grouper partitions a library's prepared vectors into areas and interests.

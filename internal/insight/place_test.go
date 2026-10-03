@@ -80,12 +80,22 @@ func TestRunSpace_PlacementKeepsEveryName(t *testing.T) {
 }
 
 func TestRunSpace_Rejects(t *testing.T) {
-	_, err := insight.NewRunSpace([]float64{0, 0}, [][]float32{{1, 0, 0}})
-	require.Error(t, err, "widths differ")
-	_, err = insight.NewRunSpace([]float64{math.NaN(), 0}, nil)
-	require.Error(t, err)
-	_, err = insight.NewRunSpace(nil, [][]float32{{1, 0}, {float32(math.Inf(1)), 0}})
-	require.Error(t, err)
+	for _, tc := range []struct {
+		name      string
+		mean      []float64
+		centroids [][]float32
+	}{
+		{"widths differ", []float64{0, 0}, [][]float32{{1, 0, 0}}},
+		{"a NaN mean", []float64{math.NaN(), 0}, nil},
+		{"an infinite centroid", nil, [][]float32{{1, 0}, {float32(math.Inf(1)), 0}}},
+		{"a centroid without width", nil, [][]float32{{}}},
+		{"a later centroid without width", nil, [][]float32{{1, 0}, {}}},
+		{"a centroid without the mean's width", []float64{0, 0}, [][]float32{{}}},
+		{"an empty mean, centroid widths differ", []float64{}, [][]float32{{1, 0}, {1, 0, 0}}},
+	} {
+		_, err := insight.NewRunSpace(tc.mean, tc.centroids)
+		require.Error(t, err, tc.name)
+	}
 
 	space, err := insight.NewRunSpace([]float64{1, 1}, [][]float32{{1, 0}, {0, 1}})
 	require.NoError(t, err)
@@ -103,6 +113,21 @@ func TestRunSpace_Rejects(t *testing.T) {
 	got, err := empty.Place([]float32{3, 4})
 	require.NoError(t, err)
 	assert.Equal(t, insight.Placement{Interest: -1}, got, "a run without interests")
+}
+
+// TestRunSpace_EmptyMeanIsNotCentered: a stored run without centering may
+// decode its mean as an empty, non-nil slice; it places as nil does.
+func TestRunSpace_EmptyMeanIsNotCentered(t *testing.T) {
+	centroids := [][]float32{{1, 0}, {0, 1}}
+	for _, mean := range [][]float64{nil, {}} {
+		space, err := insight.NewRunSpace(mean, centroids)
+		require.NoError(t, err)
+		got, err := space.Place([]float32{0, 2})
+		require.NoError(t, err)
+		assert.Equal(t, insight.Placement{Interest: 1, Similarity: 1, Joined: true}, got, "mean %#v", mean)
+		_, err = space.Place([]float32{1, 0, 0})
+		require.Error(t, err, "the centroids fix the width")
+	}
 }
 
 // dot is the cosine of two unit vectors, summed as package insight sums it.

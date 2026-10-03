@@ -63,6 +63,10 @@ func TestCentroids(t *testing.T) {
 	assert.Empty(t, none)
 	_, err = Centroids(pts, []int{0})
 	require.Error(t, err)
+	for _, bad := range []int{-2, 4, 1 << 40, math.MaxInt} {
+		_, err = Centroids(pts, []int{0, 0, bad, 1})
+		require.Error(t, err, "label %d", bad)
+	}
 }
 
 // TestMergeNearDuplicates_UntilNothingJoins: A and B are joined at 0.86,
@@ -130,10 +134,20 @@ func TestMergeNearDuplicates_Scope(t *testing.T) {
 	assert.Equal(t, flat.Seeds, merged.Seeds, "the seeds stay, so a warm start re-derives the merge")
 }
 
-func TestMergeNearDuplicates_RejectsAnInvalidGrouping(t *testing.T) {
+func TestMergeNearDuplicates_RejectsBadInput(t *testing.T) {
 	pts := copies("a", 3, unit32(1, 0))
+	g := flatGrouping([]int{0, 0, 0})
 	_, _, err := MergeNearDuplicates(pts, flatGrouping([]int{0, 0}), MergeThreshold)
-	require.Error(t, err)
+	require.Error(t, err, "a grouping of other points")
+	// A NaN compares false with every cosine, so it would join everything.
+	for _, th := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		_, _, err = MergeNearDuplicates(pts, g, th)
+		require.Error(t, err, "threshold %g", th)
+	}
+	nan := slices.Clone(pts)
+	nan[1].Vector = []float32{float32(math.NaN()), 0}
+	_, _, err = MergeNearDuplicates(nan, g, MergeThreshold)
+	require.Error(t, err, "a NaN vector")
 }
 
 func TestAssignStrays(t *testing.T) {
@@ -210,6 +224,8 @@ func TestAssignStrays(t *testing.T) {
 	require.Error(t, err, "centroid width")
 	_, err = AssignStrays(pts, g, [][]float32{{1, 0, float32(math.NaN())}, {0, 1, 0}}, LooseFitThreshold)
 	require.Error(t, err, "a NaN centroid")
+	_, err = AssignStrays(pts, g, cents, math.NaN())
+	require.Error(t, err, "a NaN threshold")
 }
 
 func TestNumberInterests(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
 	"math"
@@ -73,6 +74,11 @@ func TestGrouping_Validate(t *testing.T) {
 		{"short slice", func(g *Grouping) { g.Seeds = g.Seeds[1:] }, "grouping of 13 areas, 13 interests and 12 seeds for 13 points"},
 		{"unknown shape", func(g *Grouping) { g.Shape = "tree" }, `unknown shape "tree"`},
 		{"label below noise", func(g *Grouping) { g.Interest[0] = -2 }, "point 0 has interest -2"},
+		// Every label used makes at most one group per point, so a larger
+		// label is refused before anything is sized by it.
+		{"label past the points", func(g *Grouping) { g.Interest[1] = 13 }, "point 1 has interest 13"},
+		{"the largest label", func(g *Grouping) { g.Interest[2] = math.MaxInt }, fmt.Sprintf("point 2 has interest %d", math.MaxInt)},
+		{"a huge area", func(g *Grouping) { g.Area[3] = 1 << 40 }, "point 3 has area 1099511627776"},
 		{"gap in labels", func(g *Grouping) {
 			for i := 10; i < 13; i++ {
 				g.Interest[i] = 3

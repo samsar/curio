@@ -266,9 +266,10 @@ func b2i(b bool) int {
 	return 0
 }
 
-// check validates the input and returns the library as a set: unique old
-// IDs, no document in two groups of a level, new groups' members in the
-// library, and parents the area level knows.
+// check validates the input and returns the library as a set: old IDs
+// unique and not empty (an empty predecessor means a new group), no
+// document in two groups of a level, new groups' members in the library,
+// and parents the area level knows.
 func (in CarryInput) check() (map[string]bool, error) {
 	lib := make(map[string]bool, len(in.Library))
 	for _, id := range in.Library {
@@ -276,7 +277,10 @@ func (in CarryInput) check() (map[string]bool, error) {
 	}
 	ids := make(map[string]bool, len(in.Old))
 	seen := make(map[string]bool)
-	for _, g := range in.Old {
+	for o, g := range in.Old {
+		if g.ID == "" {
+			return nil, fmt.Errorf("insight: old group %d has no ID", o)
+		}
 		if ids[g.ID] {
 			return nil, fmt.Errorf("insight: old group %s appears twice", g.ID)
 		}
