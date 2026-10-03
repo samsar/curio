@@ -959,6 +959,11 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .interest .members a.from-bookmark { font-style: italic; }
 .interest .members a.untitled { font-family: var(--mono); font-size: 0.86em; }
 .interest .all { font-size: var(--fs-sm); font-weight: 540; }
+/* An area's interests: each name on one line, cut, its size beside it. */
+.interest .children > li { display: flex; align-items: baseline; gap: var(--s3); }
+.interest .children a { flex: 1; min-width: 0; }
+.interest .children .unlabeled { font-style: italic; }
+.interest .children .n { flex: none; color: var(--text-3); font-variant-numeric: tabular-nums; }
 
 .coverage { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s1); }
 .coverage .legend { margin-top: var(--s2); }

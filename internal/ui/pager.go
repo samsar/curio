@@ -7,7 +7,7 @@ import (
 
 // A numbered list shows a page of its rows at a time, the pages counted
 // from 1: a list whose rows never change between reads, such as a
-// clustering run's interests, where page N names the same rows every time.
+// rebuild's interests, where page N names the same rows every time.
 // The pager partial renders its Pager, and a page past the last its
 // PageOutOfRange. A live list pages by cursor instead (Load more).
 

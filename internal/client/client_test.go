@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -743,32 +744,149 @@ func TestInterests(t *testing.T) {
 	none, err := c.ListInterests(ctx, client.ListInterestsOpts{})
 	require.NoError(t, err)
 	assert.Empty(t, none.Items)
+	assert.Empty(t, none.RunID)
+	assert.Equal(t, client.StateNone, none.Next.State)
 
 	a := s.AddDocument(t, "https://example.com/a", store.DocStateFetched)
 	b := s.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	loose := s.AddDocument(t, "https://example.com/loose", store.DocStateFetched)
+	unsorted := s.AddDocument(t, "https://example.com/unsorted", store.DocStateFetched)
 	s.AddContent(t, a, "go")
-	cluster := s.AddInterest(t, "Go", a, b)
+	run := s.AddRun(t, apitest.RunSpec{Areas: []apitest.Area{{Label: "Programming", Interests: []apitest.Interest{
+		{Label: "Go", Members: []*store.Document{a, b}, Loose: []*store.Document{loose}},
+		{Label: "Rust", Size: 1}}}}, Unsorted: []*store.Document{unsorted}})
+	area, goID := run.Areas[0], run.Interests[0]
 
-	list, err := c.ListInterests(ctx, client.ListInterestsOpts{Limit: 5, Members: 1})
+	list, err := c.ListInterests(ctx, client.ListInterestsOpts{Limit: 5, Children: 1, Members: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 2, list.NumDocuments)
+	assert.Equal(t, run.ID, list.RunID)
 	assert.Equal(t, "apitest", list.Algo)
+	assert.Equal(t, "areas", list.Shape)
+	assert.Equal(t, 5, list.NumDocuments)
+	assert.Equal(t, 1, list.NumAreas)
+	assert.Equal(t, 2, list.NumInterests)
+	assert.Equal(t, 1, list.NumLoose)
+	assert.Equal(t, 1, list.NumUnsorted)
+	assert.Equal(t, 1, list.Total)
+	assert.Equal(t, client.StateCurrent, list.Next.State)
+	require.NotNil(t, list.Rebuild)
+	assert.Equal(t, "fresh", list.Rebuild.Kind)
 	require.Len(t, list.Items, 1)
-	assert.Equal(t, "Go", list.Items[0].Label)
-	require.Len(t, list.Items[0].Members, 1, "members=1")
-	assert.Equal(t, a.ID, list.Items[0].Members[0].DocID)
-	assert.NotEmpty(t, list.Items[0].Members[0].MarkdownPath)
+	got := list.Items[0]
+	assert.Equal(t, client.LevelArea, got.Level)
+	assert.Equal(t, "Programming", got.Label)
+	assert.Equal(t, 2, got.NumChildren)
+	require.Len(t, got.Children, 1, "children=1")
+	assert.Equal(t, goID, got.Children[0].ID)
+	assert.Equal(t, area, got.Children[0].ParentID)
+	require.Len(t, got.Children[0].Members, 1, "members=1")
+	assert.Equal(t, a.ID, got.Children[0].Members[0].DocID)
+	assert.Equal(t, "member", got.Children[0].Members[0].Fit)
+	assert.NotEmpty(t, got.Children[0].Members[0].MarkdownPath)
 
-	got, err := c.GetInterest(ctx, cluster.ID, 10)
+	flat, err := c.ListInterests(ctx, client.ListInterestsOpts{Level: client.LevelInterest, Offset: 1})
 	require.NoError(t, err)
-	assert.Equal(t, "Go", got.Label)
-	assert.Len(t, got.Members, 2)
-	_, err = c.GetInterest(ctx, "no-such-interest", 0)
+	assert.Equal(t, 2, flat.Total)
+	require.Len(t, flat.Items, 1)
+	assert.Equal(t, "Rust", flat.Items[0].Label)
+	assert.Equal(t, "Programming", flat.Items[0].ParentLabel)
+
+	one, err := c.GetInterest(ctx, goID, client.GetInterestOpts{Members: 10})
+	require.NoError(t, err)
+	assert.Equal(t, "Go", one.Label)
+	assert.Equal(t, 1, one.Loose)
+	require.Len(t, one.Members, 3, "members, then the loose fit")
+	assert.Equal(t, "loose", one.Members[2].Fit)
+	page, err := c.GetInterest(ctx, goID, client.GetInterestOpts{Members: 1, Offset: 2})
+	require.NoError(t, err)
+	require.Len(t, page.Members, 1)
+	assert.Equal(t, loose.ID, page.Members[0].DocID)
+	areaPage, err := c.GetInterest(ctx, area, client.GetInterestOpts{})
+	require.NoError(t, err)
+	assert.Len(t, areaPage.Children, 2)
+
+	pile, err := c.UnsortedInterests(ctx, client.UnsortedOpts{Limit: 10})
+	require.NoError(t, err)
+	assert.Equal(t, 1, pile.Total)
+	require.Len(t, pile.Items, 1)
+	assert.Equal(t, unsorted.ID, pile.Items[0].DocID)
+	assert.Equal(t, goID, pile.Items[0].NearestID)
+	assert.Equal(t, "Go", pile.Items[0].NearestLabel)
+
+	_, err = c.GetInterest(ctx, "no-such-interest", client.GetInterestOpts{})
 	requireStatus(t, err, http.StatusNotFound)
+	assert.Nil(t, client.RetiredOf(err), "a 404 retired nothing")
+
+	split := s.SplitInterest(t, run, goID, apitest.Interest{Label: "Go Web", Members: []*store.Document{a}},
+		apitest.Interest{Label: "Go Tools", Members: []*store.Document{b}})
+	_, err = c.GetInterest(ctx, goID, client.GetInterestOpts{})
+	requireStatus(t, err, http.StatusGone)
+	retired := client.RetiredOf(err)
+	require.NotNil(t, retired)
+	assert.Equal(t, goID, retired.ID)
+	assert.Equal(t, "Go", retired.Label)
+	assert.Equal(t, split.ID, retired.RunID)
+	assert.False(t, retired.RetiredAt.IsZero())
+	require.Len(t, retired.Successors, 2)
+	assert.Equal(t, "split", retired.Successors[0].Event)
+	assert.ElementsMatch(t, []string{"Go Web", "Go Tools"}, []string{retired.Successors[0].Label, retired.Successors[1].Label})
+	assert.Contains(t, err.Error(), `interest "Go" was retired by the rebuild of`)
+
+	changes, err := c.InterestChanges(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, split.ID, changes.RunID)
+	require.NotNil(t, changes.Rebuild)
+	assert.Equal(t, 1, changes.Rebuild.Split)
+	require.Len(t, changes.Events, 2)
+	assert.Equal(t, "split", changes.Events[0].Event)
+	assert.Equal(t, goID, changes.Events[0].From.ID)
+	assert.True(t, changes.Events[0].From.Retired)
 
 	rebuild, err := c.RebuildInterests(ctx)
 	require.NoError(t, err)
 	assert.NotEmpty(t, rebuild.JobID)
+	again, err := c.RebuildInterests(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, rebuild.JobID, again.JobID, "the rebuild already queued")
+}
+
+// TestRetiredOf_OnlyTheRetiredProblem: only a 410 of the retired-interest
+// problem type is read as a retired interest.
+func TestRetiredOf_OnlyTheRetiredProblem(t *testing.T) {
+	body := `{"type":"urn:curio:problem:interest-retired","title":"interest retired","status":410,` +
+		`"detail":"gone","id":"i1","level":"interest","retired_at":"2026-10-09T14:03:11Z","run_id":"r2",` +
+		`"successors":[{"id":"i2","level":"interest","event":"merged","shared":4,"retired":false}]}`
+	for name, tc := range map[string]struct {
+		status int
+		ctype  string
+		body   string
+		want   bool
+	}{
+		"retired":         {http.StatusGone, "application/problem+json", body, true},
+		"another status":  {http.StatusNotFound, "application/problem+json", body, false},
+		"another type":    {http.StatusGone, "application/problem+json", strings.Replace(body, "interest-retired", "other", 1), false},
+		"not a problem":   {http.StatusGone, "text/plain", body, false},
+		"without members": {http.StatusGone, "application/problem+json", `{"type":"urn:curio:problem:interest-retired","title":"gone","status":410}`, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.ctype)
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(srv.Close)
+			_, err := client.New(srv.URL).GetInterest(context.Background(), "i1", client.GetInterestOpts{})
+			require.Error(t, err)
+			r := client.RetiredOf(err)
+			if !tc.want {
+				assert.Nil(t, r)
+				return
+			}
+			require.NotNil(t, r)
+			assert.Equal(t, client.RetiredInterest{ID: "i1", Level: "interest", RetiredAt: time.Date(2026, 10, 9, 14, 3, 11, 0, time.UTC),
+				RunID: "r2", Successors: []client.InterestSuccessor{{ID: "i2", Level: "interest", Event: "merged", Shared: 4}}}, *r)
+		})
+	}
 }
 
 func countRows(t *testing.T, s *apitest.Server, table string) int {

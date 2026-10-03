@@ -104,15 +104,49 @@ func TestJobStatus_IsFinished(t *testing.T) {
 	}
 }
 
-func TestClusterRunStatus_IsFinished(t *testing.T) {
-	cases := map[store.ClusterRunStatus]bool{
-		store.ClusterRunRunning: false,
-		store.ClusterRunDone:    true,
-		store.ClusterRunFailed:  true,
-		"":                      false,
+func TestInterestRunStatus_IsFinished(t *testing.T) {
+	cases := map[store.InterestRunStatus]bool{
+		store.InterestRunRunning: false,
+		store.InterestRunDone:    true,
+		store.InterestRunFailed:  true,
+		"":                       false,
 	}
 	for status, want := range cases {
 		assert.Equal(t, want, status.IsFinished(), status)
+	}
+}
+
+// The interest enums' valid sets are migration 016's CHECK constraints.
+func TestInterestEnums_Valid(t *testing.T) {
+	cases := []struct {
+		name         string
+		valid        func(string) bool
+		good, others []string
+	}{
+		{"InterestRunStatus", func(s string) bool { return store.InterestRunStatus(s).Valid() },
+			[]string{"running", "done", "failed"}, []string{"", "Done", "pending"}},
+		{"RunTrigger", func(s string) bool { return store.RunTrigger(s).Valid() },
+			[]string{"first", "auto", "manual", "reindex", "params", "shape"}, []string{"", "Manual", "cron"}},
+		{"RunKind", func(s string) bool { return store.RunKind(s).Valid() },
+			[]string{"fresh", "warm"}, []string{"", "Warm", "hot"}},
+		{"InterestShape", func(s string) bool { return store.InterestShape(s).Valid() },
+			[]string{"flat", "areas"}, []string{"", "Flat", "tree"}},
+		{"InterestLevel", func(s string) bool { return store.InterestLevel(s).Valid() },
+			[]string{"area", "interest"}, []string{"", "Area", "topic"}},
+		{"LabelSource", func(s string) bool { return store.LabelSource(s).Valid() },
+			[]string{"llm", "terms", "user"}, []string{"", "LLM", "model"}},
+		{"InterestFit", func(s string) bool { return store.InterestFit(s).Valid() },
+			[]string{"member", "loose", "unsorted"}, []string{"", "Member", "new"}},
+		{"LineageEvent", func(s string) bool { return store.LineageEvent(s).Valid() },
+			[]string{"kept", "moved", "split", "merged"}, []string{"", "Kept", "dissolved", "new"}},
+	}
+	for _, tc := range cases {
+		for _, v := range tc.good {
+			assert.True(t, tc.valid(v), "%s %q", tc.name, v)
+		}
+		for _, v := range tc.others {
+			assert.False(t, tc.valid(v), "%s %q", tc.name, v)
+		}
 	}
 }
 

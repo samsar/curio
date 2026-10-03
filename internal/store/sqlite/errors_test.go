@@ -25,14 +25,18 @@ func TestConstraintErrors(t *testing.T) {
 			SavedAt: time.Now().UTC()}
 	}
 	require.NoError(t, bms.Create(ctx, newBookmark()))
-	run := &store.ClusterRun{TenantID: "local", Algo: "knn-graph"}
+	newRun := func(id string) *store.InterestRun {
+		return &store.InterestRun{ID: id, TenantID: "local", Trigger: store.RunTriggerManual, Grouper: "louvain",
+			RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}}
+	}
+	run := newRun("")
 	require.NoError(t, ins.CreateRun(ctx, run))
 
 	t.Run("unique (tenant, url, source)", func(t *testing.T) {
 		require.ErrorIs(t, bms.Create(ctx, newBookmark()), store.ErrConflict)
 	})
 	t.Run("text primary key", func(t *testing.T) {
-		err := ins.CreateRun(ctx, &store.ClusterRun{ID: run.ID, TenantID: "local", Algo: "knn-graph"})
+		err := ins.CreateRun(ctx, newRun(run.ID))
 		require.ErrorIs(t, err, store.ErrConflict)
 		assert.Contains(t, err.Error(), run.ID, "names the run")
 	})
@@ -66,29 +70,39 @@ func TestConstraintErrors(t *testing.T) {
 // TestInsights_MalformedTimestamps: a timestamp that doesn't parse is an
 // error, as in every other scanner, not a silently zero or nil time.
 func TestInsights_MalformedTimestamps(t *testing.T) {
-	ctx := context.Background()
-	db := newTestDB(t)
-	ins := NewInsights(db)
-	run := &store.ClusterRun{TenantID: "local", Algo: "knn-graph"}
-	require.NoError(t, ins.CreateRun(ctx, run))
-	_, err := db.Exec(`UPDATE cluster_runs SET status = 'done', finished_at = 'yesterday-ish' WHERE id = ?`, run.ID)
+	f := newInsightFixture(t, 7)
+	run := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(run)))
+	_, err := f.db.Exec(`UPDATE interest_runs SET finished_at = 'yesterday-ish' WHERE id = ?`, run.ID)
 	require.NoError(t, err)
-
-	_, err = ins.GetRun(ctx, run.ID)
+	_, err = f.ins.GetRun(f.ctx, run.ID)
 	require.ErrorContains(t, err, "yesterday-ish")
-	_, err = ins.LatestRun(ctx, "local", store.ClusterRunDone)
+	_, err = f.ins.LatestRun(f.ctx, "local", store.InterestRunDone)
 	require.ErrorContains(t, err, "yesterday-ish")
 
-	require.NoError(t, ins.ReplaceClusters(ctx, run.ID, []store.ClusterWithMembers{{Cluster: store.Cluster{TenantID: "local"}}}))
-	_, err = db.Exec(`UPDATE clusters SET created_at = 'not a time' WHERE run_id = ?`, run.ID)
+	_, err = f.db.Exec(`UPDATE interests SET labeled_at = 'not a time' WHERE id = 'area-1'`)
 	require.NoError(t, err)
-	_, err = ins.ListClusters(ctx, run.ID, 0, 0)
+	_, err = f.ins.TopGroups(f.ctx, run.ID, 0, 0)
+	require.ErrorContains(t, err, "not a time")
+	_, err = f.ins.GetInterest(f.ctx, "area-1")
 	require.ErrorContains(t, err, "not a time")
 }
 
-func TestInsights_FinishRun_UnknownRun(t *testing.T) {
-	err := NewInsights(newTestDB(t)).FinishRun(context.Background(), "no-such-run",
-		store.RunResult{Status: store.ClusterRunDone})
+// TestInsights_NotFound: a run, an identity, or a group the run doesn't
+// hold, is ErrNotFound naming it.
+func TestInsights_NotFound(t *testing.T) {
+	f := newInsightFixture(t, 7)
+	run := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(run)))
+
+	_, err := f.ins.GetRun(f.ctx, "no-such-run")
 	require.ErrorIs(t, err, store.ErrNotFound)
-	assert.Contains(t, err.Error(), "cluster run")
+	_, err = f.ins.GetInterest(f.ctx, "no-such-interest")
+	require.ErrorIs(t, err, store.ErrNotFound)
+	assert.Contains(t, err.Error(), "no-such-interest")
+	_, err = f.ins.GetGroup(f.ctx, run.ID, "no-such-interest")
+	require.ErrorIs(t, err, store.ErrNotFound)
+	_, err = f.ins.GetGroup(f.ctx, "no-such-run", "interest-1")
+	require.ErrorIs(t, err, store.ErrNotFound)
+	assert.Contains(t, err.Error(), "no-such-run")
 }

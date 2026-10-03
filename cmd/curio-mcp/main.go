@@ -10,6 +10,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -133,15 +134,8 @@ func registerTools(s *mcp.Server, d daemon) {
 	}, relatedHandler(d))
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name: "list_interests",
-		Description: "List the user's inferred interests: topic clusters discovered across their saved " +
-			"library, each with a label, summary, size, and representative documents (with doc_ids). " +
-			"Use this to understand what the user reads about at a high level, or to pick a topic to " +
-			"drill into with search_bookmarks / get_document. If empty with num_documents 0, clustering " +
-			"hasn't run yet or found no indexed documents (the user can run `curio interests rebuild` once " +
-			"documents are fetched). If empty with num_documents above 0, the last run grouped none of " +
-			"them: the library is too small or varied for the insight.min_similarity and " +
-			"insight.min_cluster_size thresholds, and rebuilding again won't change that.",
+		Name:        "list_interests",
+		Description: listInterestsDescription,
 	}, listInterestsHandler(d))
 }
 
@@ -292,98 +286,296 @@ func relatedHandler(d daemon) mcp.ToolHandlerFor[relatedInput, searchOutput] {
 
 // --- list_interests ---
 
+const listInterestsDescription = "List the user's interests: the topics curio found across their saved " +
+	"library, each with a label, summary, size, and representative documents (with doc_ids). In a large " +
+	"library interests are grouped into broad areas, and the outline lists each area with its largest " +
+	"interests; a small library has one level of interests. Pass an area's or interest's id to see all of " +
+	"an area's interests, or an interest's documents and loose fits (documents close to it but not " +
+	"grouped with it). IDs are stable across rebuilds; a retired id names the interests that took its " +
+	"documents. Use this to understand what the user reads " +
+	"about at a high level, or to pick a topic to drill into with search_bookmarks / get_document."
+
+// Defaults of list_interests' sizes.
+const (
+	defaultTopGroups          = 20
+	defaultInterestsPerArea   = 8
+	defaultMembersPerInterest = 2
+)
+
 type listInterestsInput struct {
-	Limit   int `json:"limit,omitempty" jsonschema:"max interests to return (default 20)"`
-	Members int `json:"members,omitempty" jsonschema:"documents to include per interest (default 5)"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"areas to list, or interests in a library of one level (default 20)"`
+	Interests int    `json:"interests,omitempty" jsonschema:"interests to list of each area (default 8)"`
+	Members   int    `json:"members,omitempty" jsonschema:"documents to list of each interest (default 2)"`
+	ID        string `json:"id,omitempty" jsonschema:"an area's or interest's id: lists all of an area's interests, or an interest's documents"`
 }
 
 type interestMemberOut struct {
 	DocID string `json:"doc_id"`
 	Title string `json:"title,omitempty"`
 	URL   string `json:"url"`
+	Loose bool   `json:"loose,omitempty"`
 }
 
 type interestOut struct {
-	ID       string              `json:"id"`
-	Label    string              `json:"label,omitempty"`
-	Summary  string              `json:"summary,omitempty"`
-	Size     int                 `json:"size"`
-	Cohesion float64             `json:"cohesion"`
-	Members  []interestMemberOut `json:"members,omitempty"`
+	ID      string              `json:"id"`
+	Label   string              `json:"label,omitempty"`
+	Summary string              `json:"summary,omitempty"`
+	Size    int                 `json:"size"`
+	Members []interestMemberOut `json:"members,omitempty"`
+}
+
+type areaOut struct {
+	ID       string        `json:"id"`
+	Label    string        `json:"label,omitempty"`
+	Summary  string        `json:"summary,omitempty"`
+	Size     int           `json:"size"`
+	Children []interestOut `json:"children,omitempty"`
+	// NumChildren is the area's interests, listed or not.
+	NumChildren int `json:"num_children"`
+}
+
+type successorOut struct {
+	ID    string `json:"id"`
+	Label string `json:"label,omitempty"`
+	Event string `json:"event"`
+}
+
+// changeCounts are what the latest rebuild did to the interests.
+type changeCounts struct {
+	New       int `json:"new"`
+	Split     int `json:"split"`
+	Merged    int `json:"merged"`
+	Moved     int `json:"moved"`
+	Dissolved int `json:"dissolved"`
+}
+
+type retiredOut struct {
+	ID         string         `json:"id"`
+	Label      string         `json:"label,omitempty"`
+	RetiredAt  time.Time      `json:"retired_at"`
+	Successors []successorOut `json:"successors"`
 }
 
 type listInterestsOutput struct {
-	Interests    []interestOut `json:"interests"`
+	RunID        string        `json:"run_id,omitempty"`
+	State        string        `json:"state"`
+	Shape        string        `json:"shape,omitempty"`
 	NumDocuments int           `json:"num_documents"`
-	NumClusters  int           `json:"num_clusters"`
-	NumNoise     int           `json:"num_noise"`
+	NumAreas     int           `json:"num_areas"`
+	NumInterests int           `json:"num_interests"`
+	NumUnsorted  int           `json:"num_unsorted"`
+	Areas        []areaOut     `json:"areas,omitempty"`
+	Interests    []interestOut `json:"interests,omitempty"`
+	Changes      *changeCounts `json:"changes,omitempty"`
+	// Retired is what became of a retired id asked for.
+	Retired *retiredOut `json:"retired,omitempty"`
 }
 
 func listInterestsHandler(d daemon) mcp.ToolHandlerFor[listInterestsInput, listInterestsOutput] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, in listInterestsInput) (*mcp.CallToolResult, listInterestsOutput, error) {
-		limit := in.Limit
-		if limit <= 0 {
-			limit = 20
-		}
-		members := in.Members
-		if members <= 0 {
-			members = 5
+		if id := strings.TrimSpace(in.ID); id != "" {
+			return listOneInterest(ctx, d, id, in.Members)
 		}
 		res, err := call(ctx, d, func(ctx context.Context) (*client.InterestList, error) {
-			return d.client.ListInterests(ctx, client.ListInterestsOpts{Limit: limit, Members: members})
+			return d.client.ListInterests(ctx, client.ListInterestsOpts{
+				Limit:    cmp.Or(in.Limit, defaultTopGroups),
+				Children: cmp.Or(in.Interests, defaultInterestsPerArea),
+				Members:  cmp.Or(in.Members, defaultMembersPerInterest),
+			})
 		})
 		if err != nil {
 			return nil, listInterestsOutput{}, fmt.Errorf("list interests: %w", err)
 		}
-		out := listInterestsOutput{
-			NumDocuments: res.NumDocuments,
-			NumClusters:  res.NumClusters,
-			NumNoise:     res.NumNoise,
-			Interests:    make([]interestOut, 0, len(res.Items)),
-		}
-		for _, it := range res.Items {
-			item := interestOut{
-				ID: it.ID, Label: it.Label, Summary: it.Summary,
-				Size: it.Size, Cohesion: it.Cohesion,
-			}
-			for _, m := range it.Members {
-				item.Members = append(item.Members, interestMemberOut{DocID: m.DocID, Title: m.Title, URL: m.URL})
-			}
-			out.Interests = append(out.Interests, item)
-		}
-		return textResult(formatInterests(out)), out, nil
+		out := outlineOutput(res)
+		return textResult(formatOutline(res, out)), out, nil
 	}
 }
 
-func formatInterests(out listInterestsOutput) string {
-	if len(out.Interests) == 0 {
-		return "No interests computed yet. Ask the user to run `curio interests rebuild`."
+// listOneInterest answers list_interests for one id: an area with all its
+// interests, an interest with its documents, or what became of a retired
+// one, which is no error: the model can follow its successors.
+func listOneInterest(ctx context.Context, d daemon, id string, members int) (*mcp.CallToolResult, listInterestsOutput, error) {
+	in, err := call(ctx, d, func(ctx context.Context) (*client.Interest, error) {
+		return d.client.GetInterest(ctx, id, client.GetInterestOpts{Members: members})
+	})
+	if r := client.RetiredOf(err); r != nil {
+		out := listInterestsOutput{State: client.StateCurrent, Retired: &retiredOut{ID: r.ID, Label: r.Label,
+			RetiredAt: r.RetiredAt, Successors: make([]successorOut, 0, len(r.Successors))}}
+		for _, s := range r.Successors {
+			out.Retired.Successors = append(out.Retired.Successors, successorOut{ID: s.ID, Label: s.Label, Event: s.Event})
+		}
+		return textResult(formatRetired(r)), out, nil
+	}
+	if err != nil {
+		return nil, listInterestsOutput{}, fmt.Errorf("get interest: %w", err)
+	}
+	out := listInterestsOutput{State: client.StateCurrent, RunID: in.RunID}
+	if in.Level == client.LevelArea {
+		out.Areas = []areaOut{toAreaOut(*in)}
+	} else {
+		out.Interests = []interestOut{toInterestOut(*in)}
+	}
+	return textResult(formatOne(*in)), out, nil
+}
+
+// outlineOutput is a list's structured output.
+func outlineOutput(res *client.InterestList) listInterestsOutput {
+	out := listInterestsOutput{RunID: res.RunID, State: res.Next.State, Shape: res.Shape, NumDocuments: res.NumDocuments,
+		NumAreas: res.NumAreas, NumInterests: res.NumInterests, NumUnsorted: res.NumUnsorted}
+	for _, it := range res.Items {
+		if it.Level == client.LevelArea {
+			out.Areas = append(out.Areas, toAreaOut(it))
+		} else {
+			out.Interests = append(out.Interests, toInterestOut(it))
+		}
+	}
+	if r := res.Rebuild; r != nil {
+		out.Changes = &changeCounts{New: r.Created, Split: r.Split, Merged: r.Merged, Moved: r.Moved, Dissolved: r.Dissolved}
+	}
+	return out
+}
+
+func toAreaOut(in client.Interest) areaOut {
+	out := areaOut{ID: in.ID, Label: in.Label, Summary: in.Summary, Size: in.Size, NumChildren: in.NumChildren}
+	for _, c := range in.Children {
+		out.Children = append(out.Children, toInterestOut(c))
+	}
+	return out
+}
+
+func toInterestOut(in client.Interest) interestOut {
+	out := interestOut{ID: in.ID, Label: in.Label, Summary: in.Summary, Size: in.Size}
+	for _, m := range in.Members {
+		out.Members = append(out.Members, interestMemberOut{DocID: m.DocID, Title: cmp.Or(m.Title, m.BookmarkTitle),
+			URL: m.URL, Loose: m.Fit == "loose"})
+	}
+	return out
+}
+
+// formatOutline is a list as text: a header with the counts and the
+// latest rebuild, each area with its interests and their documents (or
+// each interest, in a library of one level), then Unsorted's size and what
+// the latest rebuild changed. Without groups it says why.
+func formatOutline(res *client.InterestList, out listInterestsOutput) string {
+	if res.RunID == "" {
+		return noInterests(res.Next)
+	}
+	if res.Total == 0 {
+		return fmt.Sprintf("The latest rebuild found no interests among %s.", plural(res.NumDocuments, "document"))
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d interests across %d documents", len(out.Interests), out.NumDocuments)
-	if out.NumNoise > 0 {
-		fmt.Fprintf(&b, " (%d unclustered)", out.NumNoise)
+	if res.Shape == "areas" {
+		fmt.Fprintf(&b, "%s, ", plural(res.NumAreas, "area"))
+	}
+	fmt.Fprintf(&b, "%s across %s", plural(res.NumInterests, "interest"), plural(res.NumDocuments, "document"))
+	if r := res.Rebuild; r != nil && res.ComputedAt != nil {
+		fmt.Fprintf(&b, ". Rebuilt %s (%s, %s)", res.ComputedAt.UTC().Format("2006-01-02 15:04 UTC"), r.Kind, r.Trigger)
 	}
 	b.WriteString(":\n\n")
-	for i, it := range out.Interests {
-		label := it.Label
-		if label == "" {
-			label = "(unlabeled)"
-		}
-		fmt.Fprintf(&b, "%d. %s — %d docs\n", i+1, label, it.Size)
+	for i, it := range out.Areas {
+		fmt.Fprintf(&b, "%d. %s — %s, %s (area id: %s)\n", i+1, cmp.Or(it.Label, "(unlabeled area)"),
+			plural(it.Size, "doc"), plural(it.NumChildren, "interest"), it.ID)
 		if it.Summary != "" {
 			fmt.Fprintf(&b, "   %s\n", it.Summary)
 		}
-		for _, m := range it.Members {
-			t := m.Title
-			if t == "" {
-				t = m.URL
-			}
-			fmt.Fprintf(&b, "   - %s (doc_id: %s)\n", t, m.DocID)
+		for _, c := range it.Children {
+			writeInterest(&b, "   - ", "     ", c)
+		}
+		if more := it.NumChildren - len(it.Children); more > 0 {
+			fmt.Fprintf(&b, "   + %s (list_interests with this area's id)\n", plural(more, "more interest"))
 		}
 		b.WriteString("\n")
 	}
+	for i, it := range out.Interests {
+		writeInterest(&b, fmt.Sprintf("%d. ", i+1), "   ", it)
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "Unsorted: %s\n", plural(res.NumUnsorted, "document"))
+	if c := out.Changes; c != nil {
+		fmt.Fprintf(&b, "Latest rebuild: %d new, %d split, %d merged, %d moved, %d dissolved\n",
+			c.New, c.Split, c.Merged, c.Moved, c.Dissolved)
+	}
 	return b.String()
+}
+
+// writeInterest writes an interest and its documents: head starts its
+// line, indent its documents'.
+func writeInterest(b *strings.Builder, head, indent string, it interestOut) {
+	fmt.Fprintf(b, "%s%s — %s (interest id: %s)\n", head, cmp.Or(it.Label, "(unlabeled)"), plural(it.Size, "doc"), it.ID)
+	for _, m := range it.Members {
+		fit := ""
+		if m.Loose {
+			fit = ", loose fit"
+		}
+		fmt.Fprintf(b, "%s· %s (doc_id: %s%s)\n", indent, cmp.Or(m.Title, m.URL), m.DocID, fit)
+	}
+}
+
+// formatOne is one area with all its interests, or one interest with its
+// documents, as text.
+func formatOne(in client.Interest) string {
+	var b strings.Builder
+	if in.Level == client.LevelArea {
+		fmt.Fprintf(&b, "Area %s — %s, %s (area id: %s)\n", cmp.Or(in.Label, "(unlabeled)"),
+			plural(in.Size, "doc"), plural(in.NumChildren, "interest"), in.ID)
+		if in.Summary != "" {
+			fmt.Fprintf(&b, "%s\n", in.Summary)
+		}
+		b.WriteString("\n")
+		for _, c := range toAreaOut(in).Children {
+			writeInterest(&b, "- ", "  ", c)
+		}
+		return b.String()
+	}
+	it := toInterestOut(in)
+	if in.ParentID != "" {
+		fmt.Fprintf(&b, "In area %s (area id: %s)\n", cmp.Or(in.ParentLabel, "(unlabeled)"), in.ParentID)
+	}
+	writeInterest(&b, "", "", it)
+	if in.Summary != "" {
+		fmt.Fprintf(&b, "%s\n", in.Summary)
+	}
+	return b.String()
+}
+
+// formatRetired says when a retired id was retired, and which interests
+// took its documents.
+func formatRetired(r *client.RetiredInterest) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "The %s %s was retired by the rebuild of %s.", r.Level, cmp.Or(r.Label, r.ID),
+		r.RetiredAt.UTC().Format("2006-01-02 15:04 UTC"))
+	if len(r.Successors) == 0 {
+		b.WriteString(" It dissolved: its documents went to other interests or to Unsorted.")
+		return b.String()
+	}
+	b.WriteString(" Its documents went to:\n")
+	for _, s := range r.Successors {
+		fmt.Fprintf(&b, "- %s (%s; %s id: %s)\n", cmp.Or(s.Label, "(unlabeled)"), s.Event, s.Level, s.ID)
+	}
+	return b.String()
+}
+
+// plural is n and noun, "s" added unless n is 1.
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// noInterests says why there are no interests yet, from where the next
+// rebuild stands.
+func noInterests(next client.InterestsState) string {
+	switch next.State {
+	case client.StateQueued, client.StateRebuilding:
+		return "The library is being grouped for the first time; its interests appear when the rebuild finishes, " +
+			"in a couple of minutes."
+	case client.StateFailing:
+		return "No interests: the last rebuild failed: " + next.LastError
+	case client.StateOff:
+		return "Interests are turned off in the user's curio config (insight.enabled)."
+	}
+	return "No interests yet: the library hasn't been grouped."
 }
 
 // --- helpers ---

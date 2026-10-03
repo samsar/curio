@@ -68,12 +68,16 @@ func withSearch(d *Deps) {
 
 // uiSamples are a request to each of the dashboard's routes for s, by
 // route pattern: every route needs one, so TestDashboard_SecurityHeaders
-// covers each.
+// covers each. An area's page is a second sample of the route an
+// interest's page shares.
 func uiSamples(t *testing.T, s *testServer) map[string]string {
 	t.Helper()
 	doc := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
 	s.seedContent(t, doc, "# A\n\ntext")
-	interest := s.seedInterest(t, "local", "Kafka", doc)
+	f := s.newRun(t, store.InterestShapeAreas)
+	area := f.area("Streams")
+	interest := f.interest("Kafka", area, 0, []*store.Document{doc}, nil)
+	f.commit(t)
 	return map[string]string{
 		"/":                    "/",
 		"/ui/":                 "/ui/",
@@ -83,8 +87,9 @@ func uiSamples(t *testing.T, s *testServer) map[string]string {
 		"/ui/failures":         "/ui/failures",
 		"/ui/documents/{id}":   "/ui/documents/" + doc.ID,
 		"/ui/interests":        "/ui/interests",
-		"/ui/interests/{id}":   "/ui/interests/" + interest.ID,
+		"/ui/interests/{id}":   "/ui/interests/" + interest,
 		"/ui/static/{file}":    stylesheetURL(t, s),
+		"an area's page":       "/ui/interests/" + area,
 		"an unknown /ui/ page": "/ui/nope",
 	}
 }
@@ -134,11 +139,12 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 	assert.Equal(t, "text/html; charset=utf-8", notFound.contentType)
 	assert.Contains(t, notFound.body, `<nav aria-label="Main">`)
 	assertSecurityHeaders(t, notFound, ui.CSP)
-	// A numbered list's page past the last, one that isn't a number, and an
-	// interest that is gone.
+	// An area's page; a numbered list's page past the last, one that isn't
+	// a number; an interest that never was, and one a rebuild retired.
 	interest := samples["/ui/interests/{id}"]
 	for path, status := range map[string]int{
-		"/ui/interests?page=2": http.StatusNotFound, "/ui/interests?page=0": http.StatusBadRequest,
+		samples["an area's page"]: http.StatusOK,
+		"/ui/interests?page=2":    http.StatusNotFound, "/ui/interests?page=0": http.StatusBadRequest,
 		interest + "?page=2": http.StatusNotFound, interest + "?page=x": http.StatusBadRequest,
 		"/ui/interests/nope": http.StatusNotFound,
 	} {
@@ -146,6 +152,12 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 		assert.Equal(t, status, resp.status, path)
 		assertSecurityHeaders(t, resp, ui.CSP)
 	}
+	rebuilt := newTestServer(t)
+	e := rebuilt.seedEvents(t, rebuilt.docs(t, "member", 1), rebuilt.seedDocument(t, "https://example.com/loose",
+		store.DocStateFetched))
+	retired := rebuilt.do(t, request{method: http.MethodGet, path: "/ui/interests/" + e.i2})
+	assert.Equal(t, http.StatusGone, retired.status)
+	assertSecurityHeaders(t, retired, ui.CSP)
 	assertSecurityHeaders(t, s.do(t, request{method: http.MethodPost, path: "/ui/"}), ui.CSP)
 	for _, refused := range []request{
 		{method: http.MethodGet, path: "/ui/", origin: "https://attacker.example"},

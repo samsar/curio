@@ -627,6 +627,73 @@ func TestJobs_ClaimNext_ConcurrentClaimOnce(t *testing.T) {
 	assert.EqualValues(t, nWorkers, empties.Load(), "every worker stopped on an empty queue")
 }
 
+// TestJobs_EnqueueOnce_Concurrent: callers enqueueing a job of one kind at
+// once queue exactly one, and every caller gets its ID; a pending job of
+// another tenant or another kind, or a running one, doesn't count.
+func TestJobs_EnqueueOnce_Concurrent(t *testing.T) {
+	ctx := context.Background()
+	q := NewJobs(newTestDB(t))
+	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "other", Kind: store.JobKindCluster}))
+	require.NoError(t, q.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
+	running := enqueueWithStatus(t, q, store.JobKindCluster, store.JobStatusRunning, 1)
+	woken := q.Enqueued([]store.JobKind{store.JobKindCluster})
+
+	const callers = 16
+	var (
+		wg     sync.WaitGroup
+		ids    = make([]string, callers)
+		queued atomic.Int32
+		errs   = make(chan error, callers)
+	)
+	for i := range callers {
+		wg.Go(func() {
+			j := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(`{"trigger":"manual"}`)}
+			ok, err := q.EnqueueOnce(ctx, j)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if ok {
+				queued.Add(1)
+			}
+			ids[i] = j.ID
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	assert.EqualValues(t, 1, queued.Load(), "one caller queued it")
+	pending, err := q.ListWithDoc(ctx, "local", store.ListJobsOpts{Kind: store.JobKindCluster, Status: store.JobStatusPending})
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	for i, id := range ids {
+		assert.Equal(t, pending[0].ID, id, "caller %d", i)
+	}
+	assert.NotEqual(t, running.ID, pending[0].ID)
+	select {
+	case <-woken:
+	default:
+		t.Fatal("the insert woke the cluster workers")
+	}
+
+	again := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(`{"trigger":"first"}`)}
+	woken = q.Enqueued([]store.JobKind{store.JobKindCluster})
+	ok, err := q.EnqueueOnce(ctx, again)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, pending[0].ID, again.ID)
+	assert.JSONEq(t, `{"trigger":"manual"}`, string(again.Payload), "the pending job's, as queued")
+	assert.Equal(t, store.JobStatusPending, again.Status)
+	assert.False(t, again.CreatedAt.IsZero())
+	select {
+	case <-woken:
+		t.Fatal("nothing inserted, nobody woken")
+	default:
+	}
+}
+
 // enqueueWithStatus inserts a job directly in the given status, as if it had
 // already gone through the queue.
 func enqueueWithStatus(t *testing.T, q *Jobs, kind store.JobKind, status store.JobStatus, attempts int) *store.Job {

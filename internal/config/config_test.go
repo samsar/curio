@@ -154,10 +154,6 @@ func TestValidate(t *testing.T) {
 			"fetcher.native.jina_site_requests_per_minute must be at least 1, got 0"},
 		{"negative Jina requests a site", func(c *Config) { c.Fetcher.Native.JinaSiteRequestsPerMinute = -3 },
 			"fetcher.native.jina_site_requests_per_minute"},
-		{"zero min_similarity", func(c *Config) { c.Insight.MinSimilarity = 0 }, "insight.min_similarity"},
-		{"min_similarity above 1", func(c *Config) { c.Insight.MinSimilarity = 1.5 }, "insight.min_similarity"},
-		{"NaN min_similarity", func(c *Config) { c.Insight.MinSimilarity = math.NaN() }, "insight.min_similarity"},
-		{"infinite min_similarity", func(c *Config) { c.Insight.MinSimilarity = math.Inf(1) }, "insight.min_similarity"},
 		{"zero labeling timeout", func(c *Config) { c.Insight.LabelingTimeoutSeconds = 0 }, "insight.labeling_timeout_seconds"},
 		{"empty generation base_url", func(c *Config) { c.Generation.BaseURL = "" }, "generation.base_url"},
 		{"web2md without a bin", func(c *Config) { c.Fetcher.Default, c.Fetcher.Web2MD.Bin = "web2md", "" },
@@ -412,13 +408,34 @@ func writeConfig(t *testing.T, contents string) string {
 	return path
 }
 
-// TestLoad_NaNMinSimilarity: YAML's .nan must not slip through validation —
-// a NaN threshold rejects every graph edge and replaces the interests with an
-// empty run.
-func TestLoad_NaNMinSimilarity(t *testing.T) {
-	_, err := Load(writeConfig(t, "insight:\n  min_similarity: .nan\n"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "insight.min_similarity")
+// TestLoad_DeprecatedInsightKeys: the insight keys nothing reads any more
+// still load, whatever their value, including those validation used to
+// refuse, and the loaded config names the ones the file sets; a value of
+// the wrong type is still a parse error.
+func TestLoad_DeprecatedInsightKeys(t *testing.T) {
+	for _, tc := range []struct {
+		yaml string
+		want []string
+	}{
+		{"insight:\n  knn: 0\n  min_similarity: .nan\n  min_cluster_size: -1\n",
+			[]string{"insight.knn", "insight.min_similarity", "insight.min_cluster_size"}},
+		{"insight:\n  min_cluster_size: 3\n  min_similarity: 1.5\n",
+			[]string{"insight.min_similarity", "insight.min_cluster_size"}},
+		{"insight:\n  knn:\n", []string{"insight.knn"}},
+		{"insight:\n  labeling: terms\n", nil},
+		{"", nil},
+	} {
+		got, err := Load(writeConfig(t, tc.yaml))
+		require.NoError(t, err, tc.yaml)
+		assert.Equal(t, tc.want, got.DeprecatedKeys(), tc.yaml)
+	}
+	assert.Empty(t, Default().DeprecatedKeys())
+	d := Default().Insight
+	assert.Zero(t, d.KNN+d.MinClusterSize, "the defaults set none of them")
+	assert.Zero(t, d.MinSimilarity)
+
+	_, err := Load(writeConfig(t, "insight:\n  knn: abc\n"))
+	require.ErrorContains(t, err, "cannot unmarshal !!str `abc` into int")
 }
 
 func TestValidate_OneZeroWeightIsAllowed(t *testing.T) {

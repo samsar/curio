@@ -57,7 +57,7 @@ type Deps struct {
 	GenerationModel string // config.yaml's generation.model as the daemon loaded it, on healthz
 	Search          *search.Engine
 	Insights        store.InsightStore
-	InsightEnabled  bool                            // gates POST /v1/interests/rebuild (config insight.enabled)
+	InsightEnabled  bool                            // config insight.enabled: gates POST /v1/interests/rebuild, and "off" in the interests' state
 	Upstreams       func() []fetcher.UpstreamHealth // the health of the services fetches depend on; nil reports none
 	Gate            *jobs.QueueGate                 // the workers' queue gate, read and changed at /v1/queue
 	Drift           DriftMonitor                    // embedding drift, on healthz, reset by reindex-all; nil tracks none
@@ -219,6 +219,8 @@ func newRouter(deps Deps, origin localOrigin, pages dashboard) (chi.Router, erro
 
 		r.Route("/interests", func(r chi.Router) {
 			r.Get("/", deps.handleListInterests)
+			r.Get("/unsorted", deps.handleUnsorted)
+			r.Get("/changes", deps.handleInterestChanges)
 			r.Post("/rebuild", deps.handleRebuildInterests)
 			r.Get("/{id}", deps.handleGetInterest)
 		})

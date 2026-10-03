@@ -297,6 +297,14 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 		assert.Equal(collect, digestA, meta.EmbeddingModelDigest)
 		assert.Equal(collect, "0.34.4", meta.OllamaVersion)
 	}, 10*time.Second, 50*time.Millisecond, "the daemon records the build that makes the embeddings")
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		list, err := c.ListInterests(ctx, client.ListInterestsOpts{})
+		require.NoError(collect, err)
+		require.NotEmpty(collect, list.RunID)
+		require.NotNil(collect, list.Rebuild)
+		assert.Equal(collect, string(store.RunTriggerFirst), list.Rebuild.Trigger)
+		assert.Equal(collect, client.StateCurrent, list.Next.State)
+	}, 30*time.Second, 50*time.Millisecond, "a new home's daemon groups the library on its own, unasked")
 
 	created, err := c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: pages.URL + "/zymurgy"})
 	require.NoError(t, err)

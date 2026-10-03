@@ -141,6 +141,10 @@ func run(ctx context.Context, logLevel *slog.LevelVar) error {
 		return &refusal{err}
 	}
 	logLevel.Set(cfg.Daemon.SlogLevel())
+	if keys := cfg.DeprecatedKeys(); len(keys) > 0 {
+		slog.Warn("config: these keys no longer do anything and are ignored; remove them from config.yaml",
+			"keys", keys, "config", home.ConfigPath())
+	}
 
 	// A legacy home, or a config.yaml asking for another embedding model or
 	// width than the home's, is refused before anything touches the
@@ -240,7 +244,32 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 			return nil, err
 		}
 	}
+	if cfg.Insight.Enabled {
+		queueFirstRebuild(ctx, d.apiDeps.Insights, d.apiDeps.Queue)
+	}
 	return d, nil
+}
+
+// queueFirstRebuild queues a rebuild of a library no rebuild has grouped
+// yet: a new one, one whose interests an upgrade dropped, or one whose
+// first rebuild failed. A rebuild already pending, a requeued orphan
+// among them, is left to run. It runs after the orphans are settled and
+// before any worker claims, and is best effort: the daemon starts anyway,
+// and a rebuild can still be asked for.
+func queueFirstRebuild(ctx context.Context, insights store.InsightStore, queue store.JobQueue) {
+	switch _, err := insights.LatestRun(ctx, store.LocalTenantID, store.InterestRunDone); {
+	case err == nil:
+		return
+	case !errors.Is(err, store.ErrNotFound):
+		slog.Warn("interests: can't read the last rebuild, so none was enqueued", "err", err)
+		return
+	}
+	job, queued, err := jobs.EnqueueRebuild(ctx, queue, store.LocalTenantID, store.RunTriggerFirst)
+	if err != nil {
+		slog.Warn("interests: enqueue the first rebuild", "err", err)
+		return
+	}
+	slog.Info("interests: rebuild enqueued", "trigger", store.RunTriggerFirst, "job", job.ID, "queued", queued)
 }
 
 // migrationHooks log each migration and report it through startup, which
@@ -572,12 +601,13 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 	}), routes{ytdlp: ytdlp, githubToken: ghFetcher.HasToken()}, nil
 }
 
-// newInsightEngine builds the insight layer: cluster documents into labeled
-// interests. With insight.labeling = "llm" the LLM labeler is always wired:
-// whether Ollama and the model are up is decided at each rebuild, where the
-// engine falls back to term labels for any run that can't reach them. A
-// startup check would pin that verdict for the life of the process, and the
-// CLI often auto-starts the daemon before the Ollama app is running.
+// newInsightEngine builds the insight layer: group documents into labeled
+// areas and interests with the Louvain grouper. With insight.labeling =
+// "llm" the LLM labeler is always wired: whether Ollama and the model are
+// up is decided at each rebuild, where the engine falls back to term labels
+// for any run that can't reach them. A startup check would pin that verdict
+// for the life of the process, and the CLI often auto-starts the daemon
+// before the Ollama app is running.
 func newInsightEngine(ctx context.Context, cfg config.Config, docs store.DocumentStore,
 	chunks store.ChunkStore, insights store.InsightStore) (*insight.Engine, error) {
 	var llmLabeler insight.Labeler
@@ -591,17 +621,12 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 			return nil, err
 		}
 		llmLabeler = insight.NewLLMLabeler(gen)
-		// Cluster labels use the term fallback until the model is ready.
+		// Interest labels use the term fallback until the model is ready.
 		if cfg.Generation.AutoPull {
-			go gen.Client().KeepPulled(ctx, slog.With("used_for", "cluster labels"))
+			go gen.Client().KeepPulled(ctx, slog.With("used_for", "interest labels"))
 		}
 	}
-	clusterer := insight.NewKNNGraphClusterer(insight.KNNGraphOptions{
-		K:              cfg.Insight.KNN,
-		MinSimilarity:  cfg.Insight.MinSimilarity,
-		MinClusterSize: cfg.Insight.MinClusterSize,
-	})
-	return insight.New(docs, chunks, insights, clusterer, llmLabeler, insight.Config{
+	return insight.New(docs, chunks, insights, insight.NewLouvainGrouper(slog.Default()), llmLabeler, insight.Config{
 		Labeling:        cfg.Insight.Labeling,
 		Center:          cfg.Insight.CenterVectors,
 		LabelingTimeout: time.Duration(cfg.Insight.LabelingTimeoutSeconds) * time.Second,

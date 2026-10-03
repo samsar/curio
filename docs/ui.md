@@ -23,7 +23,7 @@ the dashboard does what these commands do:
 | a document's **Reindex** (once it has text) | re-chunks and re-embeds its text | `curio reindex <id>` |
 | a group's **Refetch N** on Failures | fetches again every document that failed for that cause | `curio refetch --all --cause <cause>` |
 | dead links' **Refetch N anyway…** on Failures, after you confirm | fetches every dead link again | `curio refetch --all --state dead --cause dead_link` |
-| **Rebuild** on Interests | groups the library into interests again | `curio interests rebuild` |
+| **Rebuild** on Interests | groups the library into interests again; a second click while one waits queues nothing more | `curio interests rebuild` |
 | **Pause** / **Resume** on Status | stops starting jobs, or starts them again | `curio pause`, `curio resume` |
 | **Throttle** on Status | runs fewer jobs at once (gentle), or all (normal) | `curio throttle gentle\|normal` |
 | **Keep awake** on Status | keeps the Mac from idle sleep while jobs run on AC power | `curio keep-awake on\|off` |
@@ -65,7 +65,8 @@ footer names the address the daemon listens on.
   it (All, Articles, Repos, Videos, PDFs). With nothing typed, the box
   says how many documents there are to search ("Search your 4,498
   documents"), and a quiet line at the foot of the screen names your six
-  largest interests, each linking to its page, and links to all of them.
+  largest areas (or interests, in a library too small for areas), each
+  linking to its page, and links to all of them.
   Type, and the same hybrid search as `curio search` runs as you type,
   limited to the type chosen, which the address keeps
   (`/ui/?q=kafka&content_type=pdf`). The results come 10 a page, with
@@ -154,17 +155,33 @@ footer names the address the daemon listens on.
   gigabyte of memory, and the text is shown as stored. Web and email
   addresses written out in the text without link markup show as text,
   not links: a GitHub README's bare URLs, say.
-- **Interests**: the topics the last clustering run found, largest first,
-  24 a page: how many there are, a bar of how many documents are in one
-  and how many in none, and a card for each with its size, how alike its
-  documents are, its summary and a few of its documents. An untitled
-  document is named by its bookmark's title, in italics. Numbered pages
-  under the cards lead through the rest (a phone shows "Page 2 of 10"
-  between Previous and Next). A rebuild that finishes while you page
-  through leads to the new run's page of that number, which says the
-  interests were rebuilt; a page past the last says how many pages there
-  are. An interest's page lists its documents by similarity, 50 a page,
-  ranked across the pages, with the run the interest comes from.
+- **Interests**: the topics the last rebuild found, largest first, 24 a
+  page. A library of about 1,000 documents or more is grouped in two
+  levels: areas, each holding interests ("29 areas holding 182 interests
+  in your library"); a smaller one in interests alone. The head says how
+  many there are, a bar shows how many documents are in an interest and
+  how many in none, and each card gives its size, how alike its documents
+  are and its summary. An area's card lists its five largest interests,
+  each linking to its page, and leads to all of them; an interest's card
+  shows a few of its documents. An untitled document is named by its
+  bookmark's title, in italics. Numbered pages under the cards lead through
+  the rest (a phone shows "Page 2 of 10" between Previous and Next). A
+  rebuild that finishes while you page through leads to the new run's page
+  of that number, which says the interests were rebuilt; a page past the
+  last says how many pages there are. Until the first rebuild is done the
+  page says the library is being grouped for the first time.
+  An area's page lists every one of its interests as cards. An interest's
+  page names its area above the title and lists its documents by
+  similarity, 50 a page, ranked across the pages, with the run the
+  interest comes from. After its documents come its loose fits, each
+  tagged "loose fit": documents close to the interest but not grouped with
+  it, which never name it.
+  An interest keeps its ID, and its page its address, across rebuilds
+  while it keeps most of its documents. One that a rebuild split, merged
+  into another or dissolved answers 410, saying when and what became of it
+  ("it merged into …"), with a way back to Interests. A link from before
+  the upgrade that brought areas answers 404: interests were regrouped
+  then.
   **Rebuild**, at the top, groups the library again. With insight turned
   off in config.yaml (`insight.enabled: false`), there is no Rebuild, and
   the page says so.

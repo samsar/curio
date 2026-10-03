@@ -64,9 +64,6 @@ type JobKind string
 // JobStatus is a job's place in the queue (jobs.status).
 type JobStatus string
 
-// ClusterRunStatus is a clustering run's state (cluster_runs.status).
-type ClusterRunStatus string
-
 // Throttle is how hard the daemon works through its queue
 // (queue_settings.throttle).
 type Throttle string
@@ -96,10 +93,6 @@ const (
 	JobStatusRunning JobStatus = "running"
 	JobStatusDone    JobStatus = "done"
 	JobStatusFailed  JobStatus = "failed"
-
-	ClusterRunRunning ClusterRunStatus = "running"
-	ClusterRunDone    ClusterRunStatus = "done"
-	ClusterRunFailed  ClusterRunStatus = "failed"
 
 	// ThrottleNormal runs every worker the daemon has.
 	ThrottleNormal Throttle = "normal"
@@ -282,11 +275,6 @@ func (t Throttle) Limit(kind JobKind, pool int) int {
 // document in pending with nothing left to move it on.
 func (s JobStatus) IsFinished() bool {
 	return s == JobStatusDone || s == JobStatusFailed
-}
-
-// IsFinished reports whether s is terminal (done or failed).
-func (s ClusterRunStatus) IsFinished() bool {
-	return s == ClusterRunDone || s == ClusterRunFailed
 }
 
 // Document is the universal content record, deduplicated by (tenant_id, url).
@@ -835,6 +823,13 @@ type JobQueue interface {
 	// document, which must exist: one that doesn't is an error wrapping
 	// ErrNotFound.
 	Enqueue(ctx context.Context, j *Job) error
+	// EnqueueOnce inserts j, as Enqueue does, unless j's tenant already
+	// has a pending job of j's kind: then it fills j in from that job (ID,
+	// payload, status, run_after and timestamps) and inserts nothing.
+	// queued reports whether it inserted. The check and the insert are one
+	// write transaction, so callers racing each other queue one job. A
+	// running job of the kind doesn't count.
+	EnqueueOnce(ctx context.Context, j *Job) (queued bool, err error)
 	// ClaimNext atomically marks the next runnable job (status=pending,
 	// run_after<=now) as running, counts the attempt (attempts+1), and
 	// returns it. Returns ErrNotFound if nothing is runnable.
@@ -1104,105 +1099,411 @@ func gapEnd(c time.Time) time.Time {
 	}
 }
 
-// ClusterRun is one execution of the clustering job. Clustering fully
-// recomputes from the corpus, so each run is a snapshot; the "current"
-// interests are the clusters of the latest run with Status == ClusterRunDone.
-type ClusterRun struct {
+// InterestRunStatus is an interest run's state (interest_runs.status).
+type InterestRunStatus string
+
+// Interest run statuses. A run starts running and ends done, when its
+// grouping is committed, or failed.
+const (
+	InterestRunRunning InterestRunStatus = "running"
+	InterestRunDone    InterestRunStatus = "done"
+	InterestRunFailed  InterestRunStatus = "failed"
+)
+
+// Valid reports whether s is one of the InterestRunStatus constants.
+func (s InterestRunStatus) Valid() bool {
+	switch s {
+	case InterestRunRunning, InterestRunDone, InterestRunFailed:
+		return true
+	}
+	return false
+}
+
+// IsFinished reports whether s is terminal (done or failed).
+func (s InterestRunStatus) IsFinished() bool {
+	return s == InterestRunDone || s == InterestRunFailed
+}
+
+// RunTrigger is what started an interest run (interest_runs.trigger).
+type RunTrigger string
+
+// Run triggers.
+const (
+	// RunTriggerFirst: the daemon found no done run at start.
+	RunTriggerFirst RunTrigger = "first"
+	// RunTriggerAuto: the library changed enough since the last run.
+	RunTriggerAuto RunTrigger = "auto"
+	// RunTriggerManual: someone asked for a rebuild.
+	RunTriggerManual RunTrigger = "manual"
+	// RunTriggerReindex: the library was re-embedded.
+	RunTriggerReindex RunTrigger = "reindex"
+	// RunTriggerParams: the grouper's parameters changed.
+	RunTriggerParams RunTrigger = "params"
+	// RunTriggerShape: the library crossed the gate between the shapes.
+	RunTriggerShape RunTrigger = "shape"
+)
+
+// Valid reports whether t is one of the RunTrigger constants.
+func (t RunTrigger) Valid() bool {
+	switch t {
+	case RunTriggerFirst, RunTriggerAuto, RunTriggerManual, RunTriggerReindex, RunTriggerParams, RunTriggerShape:
+		return true
+	}
+	return false
+}
+
+// RunKind is whether an interest run started from the previous grouping
+// (interest_runs.kind).
+type RunKind string
+
+// Run kinds.
+const (
+	RunKindFresh RunKind = "fresh"
+	RunKindWarm  RunKind = "warm"
+)
+
+// Valid reports whether k is one of the RunKind constants.
+func (k RunKind) Valid() bool { return k == RunKindFresh || k == RunKindWarm }
+
+// InterestShape is how a run's grouping is organized
+// (interest_runs.shape).
+type InterestShape string
+
+// Interest shapes.
+const (
+	// InterestShapeFlat is one level of interests.
+	InterestShapeFlat InterestShape = "flat"
+	// InterestShapeAreas is broad areas, each holding interests.
+	InterestShapeAreas InterestShape = "areas"
+)
+
+// Valid reports whether s is one of the InterestShape constants.
+func (s InterestShape) Valid() bool { return s == InterestShapeFlat || s == InterestShapeAreas }
+
+// InterestLevel is which level of a grouping an identity is
+// (interests.level).
+type InterestLevel string
+
+// Interest levels.
+const (
+	InterestLevelArea     InterestLevel = "area"
+	InterestLevelInterest InterestLevel = "interest"
+)
+
+// Valid reports whether l is one of the InterestLevel constants.
+func (l InterestLevel) Valid() bool { return l == InterestLevelArea || l == InterestLevelInterest }
+
+// LabelSource is what named an identity (interests.label_source).
+type LabelSource string
+
+// Label sources.
+const (
+	LabelSourceLLM   LabelSource = "llm"
+	LabelSourceTerms LabelSource = "terms"
+	// LabelSourceUser is a rename; nothing writes it yet.
+	LabelSourceUser LabelSource = "user"
+)
+
+// Valid reports whether s is one of the LabelSource constants.
+func (s LabelSource) Valid() bool {
+	return s == LabelSourceLLM || s == LabelSourceTerms || s == LabelSourceUser
+}
+
+// InterestFit is how a document of a run sits in its grouping
+// (interest_assignments.fit).
+type InterestFit string
+
+// Fits.
+const (
+	// InterestFitMember: the grouping put the document in an interest.
+	InterestFitMember InterestFit = "member"
+	// InterestFitLoose: in no interest, but close to one.
+	InterestFitLoose InterestFit = "loose"
+	// InterestFitUnsorted: close to none.
+	InterestFitUnsorted InterestFit = "unsorted"
+)
+
+// Valid reports whether f is one of the InterestFit constants.
+func (f InterestFit) Valid() bool {
+	return f == InterestFitMember || f == InterestFitLoose || f == InterestFitUnsorted
+}
+
+// LineageEvent is what a run did to an old identity toward a new one
+// (interest_lineage.event).
+type LineageEvent string
+
+// Lineage events. A dissolved identity and a new one have no lineage row:
+// the run that retired the one, or created the other, says so.
+const (
+	// LineageKept: the new group inherits the old identity, where it was.
+	LineageKept LineageEvent = "kept"
+	// LineageMoved: the new group inherits it, in another area.
+	LineageMoved LineageEvent = "moved"
+	// LineageSplit: a part of the old identity went to a group of its own.
+	LineageSplit LineageEvent = "split"
+	// LineageMerged: a part of it went to a group shared with others.
+	LineageMerged LineageEvent = "merged"
+)
+
+// Valid reports whether e is one of the LineageEvent constants.
+func (e LineageEvent) Valid() bool {
+	switch e {
+	case LineageKept, LineageMoved, LineageSplit, LineageMerged:
+		return true
+	}
+	return false
+}
+
+// RunOutcome is what an interest run found and did. CreateRun records what
+// a run sets out to do (Kind, SplitCheck, Shape), and CommitRun all of it.
+type RunOutcome struct {
+	Kind       RunKind
+	SplitCheck bool // whether the run ran the split check
+	Shape      InterestShape
+	// Mean is the mean the run centered the vectors on, nil when it
+	// didn't, for placing documents in its space.
+	Mean []float32
+
+	NumDocuments int // documents grouped: members, loose fits and unsorted
+	NumAreas     int
+	NumInterests int
+	NumLoose     int
+	NumUnsorted  int
+	// ChangedDocuments are the documents added or gone since the previous
+	// run, and ChangesSinceSplit those absorbed since the last split check.
+	ChangedDocuments  int
+	ChangesSinceSplit int
+
+	// What the run did to the previous run's interest identities. Kept
+	// includes Moved, and Kept + Created is the run's interests.
+	Kept, Created, Split, Merged, Moved, Dissolved int
+}
+
+// InterestRun is one rebuild of a tenant's interests. A done run never
+// changes; the tenant's current grouping is its latest done run.
+type InterestRun struct {
+	ID       string
+	TenantID string
+	Status   InterestRunStatus
+	Trigger  RunTrigger
+	Grouper  string          // the grouper's name, e.g. "louvain"
+	Params   json.RawMessage // the grouper's params and the engine's; nil means absent
+	// VectorsReadAt is when the run read the library's vectors; nil when
+	// unknown.
+	VectorsReadAt *time.Time
+	RunOutcome
+	Error      *string // set only for a failed run
+	StartedAt  time.Time
+	FinishedAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// Interest is an identity: an area or an interest as it outlives runs,
+// with its label. Label, Summary and LabelSource are empty until labeled.
+type Interest struct {
 	ID           string
 	TenantID     string
-	Status       ClusterRunStatus
-	Algo         string          // clusterer name, e.g. "knn-graph"
-	Params       json.RawMessage // clusterer params + the engine's "center"; nil means absent
-	NumDocuments int             // docs considered (those with vectors)
-	NumClusters  int
-	NumNoise     int // docs left unclustered
-	Error        *string
-	StartedAt    time.Time
-	FinishedAt   *time.Time
+	Level        InterestLevel
+	Label        string
+	Summary      string
+	LabelSource  LabelSource
+	CreatedRunID string     // the run that minted it
+	LabeledAt    *time.Time // when it was last labeled
+	// RetiredAt is when a run that no longer held it retired it, and
+	// RetiredRunID that run; nil and "" while it is live.
+	RetiredAt    *time.Time
+	RetiredRunID string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
 
-// RunResult is the outcome FinishRun records for a clustering run.
-type RunResult struct {
-	Status       ClusterRunStatus // done or failed
-	NumDocuments int              // docs considered (those with vectors)
-	NumClusters  int
-	NumNoise     int     // docs left unclustered
-	Error        *string // set only for failed runs
+// InterestGroup is an identity as one run found it. ParentID is an
+// interest's area, "" for an area or a flat interest; ParentLabel is that
+// area's label, on reads. Size counts its members and Loose its loose fits.
+// Centroid is the unit mean of an interest's members in the run's space,
+// nil for an area; only RunGroups reads it.
+type InterestGroup struct {
+	RunID string
+	Interest
+	ParentID    string
+	ParentLabel string
+	Size        int
+	Loose       int
+	Cohesion    float64
+	Centroid    []float32
 }
 
-// Cluster is one topic within a run: a labeled, sized group of documents.
-type Cluster struct {
-	ID        string
-	TenantID  string
-	RunID     string
-	Label     *string // topic name; nil until labeled
-	Summary   *string // one-line description; nil if none
-	Size      int     // member count (denormalized)
-	Cohesion  float64 // mean member cosine to the centroid, 0..1
-	CreatedAt time.Time
-	UpdatedAt time.Time
+// InterestAssignment is where one document sits in a run's grouping: a
+// member or a loose fit of InterestID, or unsorted (InterestID "") with
+// NearestID the interest it is closest to ("" when there is none) and
+// NearestLabel, on reads, that interest's label. Similarity is to
+// InterestID's centroid, or NearestID's. AreaID is the area whose community
+// holds the document, "" outside every area; the seeds are what the next
+// run's warm start reads, -1 for none.
+type InterestAssignment struct {
+	DocumentID   string
+	InterestID   string
+	AreaID       string
+	Fit          InterestFit
+	Similarity   float64
+	NearestID    string
+	NearestLabel string
+	AreaSeed     int
+	InterestSeed int
 }
 
-// ClusterMember links a cluster to one member document.
-type ClusterMember struct {
-	ClusterID  string
+// LineageRow is what a run did to an old identity toward a new one: Shared
+// is how many of the old identity's members the new one holds.
+type LineageRow struct {
+	RunID  string
+	OldID  string
+	NewID  string
+	Event  LineageEvent
+	Shared int
+}
+
+// Placement is a document placed into a run's grouping since it was
+// committed: into InterestID, or into Unsorted when that is "".
+type Placement struct {
+	RunID      string
 	DocumentID string
-	Similarity float64 // cosine to the cluster centroid, 0..1
+	InterestID string
+	Similarity float64
+	PlacedAt   time.Time
 }
 
-// ClusterWithMembers bundles a cluster and its members for an atomic write.
-type ClusterWithMembers struct {
-	Cluster Cluster
-	Members []ClusterMember
+// RunCommit is a run's grouping, written at once by CommitRun.
+type RunCommit struct {
+	RunID    string
+	TenantID string
+	// PriorRunID is the tenant's latest done run the grouping was built
+	// from, "" for none: a commit made from a run that is no longer the
+	// latest would undo what that one did.
+	PriorRunID string
+	Outcome    RunOutcome
+	// NewIdentities are the identities the run mints: ID, Level and the
+	// label fields; the run is their CreatedRunID.
+	NewIdentities []Interest
+	// Relabels are carried identities named anew: ID and the label fields.
+	Relabels []Interest
+	// Groups are the run's groups: ID (the identity), ParentID, Size,
+	// Loose, Cohesion and Centroid.
+	Groups      []InterestGroup
+	Assignments []InterestAssignment
+	// Lineage is the run's lineage; their RunID is the run's.
+	Lineage []LineageRow
 }
 
-// InsightStore persists clustering results (the insight layer). Clusters
-// and runs carry tenant_id; cluster_documents inherits tenant scope through
-// its parent cluster.
+// InsightStore persists interests: the runs that group a tenant's library,
+// the identities that outlive them, and what each run did to them. Runs
+// and identities carry tenant_id; groups, assignments and placements
+// inherit their tenant through their run.
+//
+// Paged reads return at most limit rows from offset in their order; limit
+// <= 0 means every one from offset, an offset at or past the end returns
+// none, and a negative one is an error before any read. A run's groups and
+// assignments are written once and never change, so these orders never do
+// either, and an offset names the same rows on every read of a run.
 type InsightStore interface {
-	// CreateRun inserts a new run (status defaults to running). Assigns ID
-	// and StartedAt if empty.
-	CreateRun(ctx context.Context, run *ClusterRun) error
-
-	// ReplaceClusters writes all clusters + memberships for a run in one
-	// transaction, replacing anything previously written for that run (so a
-	// job retry is idempotent). Does not change the run's status.
-	ReplaceClusters(ctx context.Context, runID string, clusters []ClusterWithMembers) error
-
-	// FinishRun records a run's outcome and sets finished_at. res.Status
-	// must be terminal (done or failed); anything else is an error and
-	// changes nothing. ErrNotFound if there is no such run.
-	FinishRun(ctx context.Context, runID string, res RunResult) error
-
-	// LatestRun returns the most recent run for the tenant matching status
-	// (empty status matches any). ErrNotFound if there is none.
-	LatestRun(ctx context.Context, tenantID string, status ClusterRunStatus) (*ClusterRun, error)
-
+	// CreateRun inserts a running run with its Trigger, Kind, SplitCheck,
+	// Shape, Grouper, Params and VectorsReadAt, and fills in its ID (when
+	// empty) and timestamps. A missing tenant or grouper, or an invalid
+	// enum, is an error, and nothing is written; a run that exists is
+	// ErrConflict.
+	CreateRun(ctx context.Context, run *InterestRun) error
+	// CommitRun writes c in one transaction: it fails with ErrConflict,
+	// writing nothing, unless c.PriorRunID is still the tenant's latest
+	// done run; inserts the new identities, relabels the carried ones,
+	// writes the groups, assignments and lineage; retires every live
+	// identity of the tenant that c.Groups doesn't hold, at the commit's
+	// time and by this run; and moves the run from running to done with
+	// c.Outcome. A run that isn't running is ErrConflict. Any failure
+	// rolls back all of it.
+	CommitRun(ctx context.Context, c RunCommit) error
+	// FailRun moves a running run to failed with msg, numDocuments and its
+	// finish time. A finished run is ErrConflict and left as it is; an
+	// unknown one ErrNotFound.
+	FailRun(ctx context.Context, runID string, numDocuments int, msg string) error
+	// LatestRun returns the tenant's newest run in status, any status when
+	// it is "". ErrNotFound if there is none.
+	LatestRun(ctx context.Context, tenantID string, status InterestRunStatus) (*InterestRun, error)
 	// GetRun returns a run by ID, or ErrNotFound.
-	GetRun(ctx context.Context, id string) (*ClusterRun, error)
+	GetRun(ctx context.Context, id string) (*InterestRun, error)
 
-	// ListClusters returns a run's clusters largest first: by size, then
-	// cohesion, both descending, then by ID. A run's clusters are written
-	// once and never change, so this order never changes either, and an
-	// offset names the same clusters on every read. It returns at most
-	// limit clusters from offset in that order; limit <= 0 means every
-	// one from offset. An offset at or past the end returns none, and a
-	// negative one is an error.
-	ListClusters(ctx context.Context, runID string, limit, offset int) ([]*Cluster, error)
+	// TopGroups returns a page of a run's top-level groups (its areas, or
+	// its interests in the flat shape), by size, then cohesion, both
+	// descending, then by ID.
+	TopGroups(ctx context.Context, runID string, limit, offset int) ([]InterestGroup, error)
+	// ChildGroups returns the interests of a run's areas, area by area in
+	// the order of areaIDs' identities, each area's in TopGroups' order,
+	// in one read.
+	ChildGroups(ctx context.Context, runID string, areaIDs []string) ([]InterestGroup, error)
+	// NestedGroups returns a page of an areas-shaped run's interests, each
+	// with its area's label, in TopGroups' order.
+	NestedGroups(ctx context.Context, runID string, limit, offset int) ([]InterestGroup, error)
+	// GetGroup returns the identity id as run found it, with its area's
+	// label; ErrNotFound when the run doesn't hold it.
+	GetGroup(ctx context.Context, runID, id string) (*InterestGroup, error)
 
-	// GetCluster returns a cluster by ID, or ErrNotFound.
-	GetCluster(ctx context.Context, id string) (*Cluster, error)
+	// Members returns a page of an interest's documents of fit (member or
+	// loose), most similar first, then by document ID.
+	Members(ctx context.Context, runID, interestID string, fit InterestFit, limit, offset int) ([]InterestAssignment, error)
+	// Unsorted returns a page of a run's unsorted documents, most similar
+	// to their nearest interest first, then by document ID, each with that
+	// interest's label.
+	Unsorted(ctx context.Context, runID string, limit, offset int) ([]InterestAssignment, error)
 
-	// ClusterMembers returns a cluster's member documents, most similar
-	// first, then by document ID: an order that never changes, as
-	// ListClusters' doesn't. limit and offset page through it as they do
-	// ListClusters'.
-	ClusterMembers(ctx context.Context, clusterID string, limit, offset int) ([]ClusterMember, error)
+	// RunAssignments returns every assignment of a run, in no particular
+	// order.
+	RunAssignments(ctx context.Context, runID string) ([]InterestAssignment, error)
+	// RunGroups returns every group of a run with its centroid, in no
+	// particular order.
+	RunGroups(ctx context.Context, runID string) ([]InterestGroup, error)
+	// RunLineage returns a run's lineage rows, by old identity, then new.
+	RunLineage(ctx context.Context, runID string) ([]LineageRow, error)
+	// Successors returns the run's lineage rows of the old identity oldID,
+	// by new identity.
+	Successors(ctx context.Context, runID, oldID string) ([]LineageRow, error)
 
-	// PruneRunsExcept deletes every run for the tenant except keepRunIDs,
-	// at least one, cascading their clusters + memberships. Keeps storage
-	// bounded to the current snapshot.
+	// GetInterest returns an identity by ID, live or retired, or
+	// ErrNotFound.
+	GetInterest(ctx context.Context, id string) (*Interest, error)
+	// GetInterests returns the tenant's identities with those IDs, in no
+	// particular order, in one read. An ID the tenant has none of is left
+	// out.
+	GetInterests(ctx context.Context, tenantID string, ids []string) ([]Interest, error)
+	// CreatedBy returns the identities a run minted, in no particular
+	// order.
+	CreatedBy(ctx context.Context, runID string) ([]Interest, error)
+	// RetiredBy returns the tenant's identities a run retired, in no
+	// particular order.
+	RetiredBy(ctx context.Context, tenantID, runID string) ([]Interest, error)
+
+	// Placements returns up to limit of the documents placed into a run's
+	// interest, or into its Unsorted when interestID is "", newest first.
+	Placements(ctx context.Context, runID, interestID string, limit int) ([]Placement, error)
+	// PlacementCounts counts a run's placements per interest, "" counting
+	// those in Unsorted. An interest with none is absent.
+	PlacementCounts(ctx context.Context, runID string) (map[string]int, error)
+
+	// PruneRunsExcept deletes every run of the tenant except keepRunIDs, at
+	// least one, with their groups, assignments and placements. Identities
+	// and lineage outlive them.
 	PruneRunsExcept(ctx context.Context, tenantID string, keepRunIDs ...string) error
+	// PruneRetired deletes the tenant's identities retired before the
+	// cutoff, with their lineage, and returns how many. Live identities
+	// are never deleted.
+	PruneRetired(ctx context.Context, tenantID string, before time.Time) (int, error)
+	// TrimLineage deletes the tenant's lineage rows of runs other than
+	// keepRunID whose old identity is live: what they say is told again,
+	// or superseded, by the runs since. A retired identity's rows stay,
+	// for its successors.
+	TrimLineage(ctx context.Context, tenantID, keepRunID string) error
+}
+
+// ClusterJobPayload is the payload of a cluster job: what asked for the
+// rebuild. A job queued before the trigger was recorded has none.
+type ClusterJobPayload struct {
+	Trigger RunTrigger `json:"trigger,omitempty"`
 }

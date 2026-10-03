@@ -505,6 +505,70 @@ func TestIndexHandler_MissingExtraction_Permanent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrPermanent)
 }
 
+// --- cluster ---
+
+// rebuildFunc adapts a function to Rebuilder.
+type rebuildFunc func(ctx context.Context, tenantID string, trigger store.RunTrigger) (string, error)
+
+func (f rebuildFunc) Rebuild(ctx context.Context, tenantID string, trigger store.RunTrigger) (string, error) {
+	return f(ctx, tenantID, trigger)
+}
+
+// TestClusterHandler_Trigger: the engine rebuilds for the trigger the
+// payload names; a payload with none, or one this version doesn't know,
+// is a manual rebuild.
+func TestClusterHandler_Trigger(t *testing.T) {
+	for payload, want := range map[string]store.RunTrigger{
+		`{"trigger":"first"}`:  store.RunTriggerFirst,
+		`{"trigger":"auto"}`:   store.RunTriggerAuto,
+		`{"trigger":"shape"}`:  store.RunTriggerShape,
+		`{"trigger":"manual"}`: store.RunTriggerManual,
+		`{"trigger":"cron"}`:   store.RunTriggerManual,
+		`{}`:                   store.RunTriggerManual,
+		`not json`:             store.RunTriggerManual,
+	} {
+		var got store.RunTrigger
+		var tenant string
+		deps := Deps{Insight: rebuildFunc(func(_ context.Context, tenantID string, trigger store.RunTrigger) (string, error) {
+			tenant, got = tenantID, trigger
+			return "run", nil
+		})}
+		job := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(payload)}
+		require.NoError(t, clusterHandler(deps)(context.Background(), job), payload)
+		assert.Equal(t, want, got, payload)
+		assert.Equal(t, "local", tenant)
+	}
+}
+
+func TestClusterHandler_Failures(t *testing.T) {
+	job := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(`{}`)}
+	err := clusterHandler(Deps{})(context.Background(), job)
+	require.ErrorIs(t, err, ErrPermanent, "no engine")
+
+	failing := rebuildFunc(func(context.Context, string, store.RunTrigger) (string, error) {
+		return "run", errors.New("ollama unreachable")
+	})
+	err = clusterHandler(Deps{Insight: failing})(context.Background(), job)
+	require.ErrorContains(t, err, "ollama unreachable")
+	assert.NotErrorIs(t, err, ErrPermanent, "retried")
+}
+
+// TestEnqueueRebuild: a rebuild is queued once while it is pending, with
+// its trigger in the payload.
+func TestEnqueueRebuild(t *testing.T) {
+	deps, _, _ := newTestDeps(t)
+	ctx := context.Background()
+	job, queued, err := EnqueueRebuild(ctx, deps.Queue, "local", store.RunTriggerFirst)
+	require.NoError(t, err)
+	assert.True(t, queued)
+	assert.JSONEq(t, `{"trigger":"first"}`, string(job.Payload))
+	again, queued, err := EnqueueRebuild(ctx, deps.Queue, "local", store.RunTriggerManual)
+	require.NoError(t, err)
+	assert.False(t, queued)
+	assert.Equal(t, job.ID, again.ID, "the pending one")
+	assert.Equal(t, store.RunTriggerFirst, clusterTrigger(again.Payload))
+}
+
 // --- pools ---
 
 // TestNewPools: the daemon's pools each claim one kind, and only the

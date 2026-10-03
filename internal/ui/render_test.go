@@ -54,9 +54,11 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 		") ![alt "+evilAttr+"](https://img.example/a.png)\n"), "https://example.com/post", false)
 	require.NoError(t, err)
 	member := Member{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Similarity: 0.8}
-	interest := Interest{ID: evilAttr, Label: evilScript, Summary: evilQuotes, Size: 7, Cohesion: 0.7,
+	interest := Interest{ID: evilAttr, ParentID: evilScript, ParentLabel: evilAttr, Label: evilScript,
+		Summary: evilQuotes, Size: 7, Loose: 1, Cohesion: 0.7,
 		Members: []Member{member, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes},
-			{DocumentID: evilScript, BookmarkTitle: evilAttr + evilScript, URL: evilURL}}}
+			{DocumentID: evilScript, BookmarkTitle: evilAttr + evilScript, URL: evilURL, Loose: true}}}
+	area := sampleArea(interest)
 
 	upstream := func(name, state string, enabled bool) Upstream {
 		return Upstream{Name: name, Enabled: enabled, State: state, LastSuccess: at, LastFailure: at,
@@ -148,9 +150,9 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 		PageInterests: Interests{
 			Layout: layout(NavInterests),
 			Page:   2, RunChanged: true,
-			Run: &InterestRun{ID: evilAttr + evilScript, ComputedAt: at, Algo: evilScript, Documents: 400, Noise: 3,
-				Interests: 60},
-			Interests: []Interest{interest, {ID: "unlabeled", Size: 1}},
+			Run: &InterestRun{ID: evilAttr + evilScript, ComputedAt: at, Algo: evilScript, Shape: "areas",
+				Documents: 400, Areas: 30, Interests: 60, Loose: 1, Unsorted: 2, Total: 30},
+			Interests: []Interest{area, {ID: "unlabeled", Area: true, Size: 1, NumChildren: 1}},
 			Rebuild: Rebuild{Enabled: true, Running: true, StartedAt: at, Shown: evilAttr, NewRun: evilScript,
 				RunError: evilScript},
 		},
@@ -337,15 +339,26 @@ func failuresVariants(layout Layout, panelErr *PanelError, counts *LibraryCounts
 	}
 }
 
+// sampleArea is an area holding in, hostile in every string.
+func sampleArea(in Interest) Interest {
+	return Interest{ID: evilScript + evilAttr, Area: true, Label: evilAttr, Summary: evilScript, Size: 628,
+		Loose: 4, Cohesion: 0.35, NumChildren: 10,
+		Children: []Interest{in, {ID: evilQuotes, Label: strings.Repeat("W", 200), Size: 86}, {ID: "unlabeled", Size: 3}}}
+}
+
 // interestsVariants are the Interests with a rebuild queued behind a
 // paused queue, one done and one failed since the run shown, insight off
-// without a run, the rebuild's reads failed, a poll's answer, the first,
-// a middle and the last of many pages, the first page of a newer run than
+// without a run, the library grouped for the first time, the rebuild's
+// reads failed, a poll's answer, the first, a middle and the last of many
+// pages of interests and of areas, the first page of a newer run than
 // asked for, and a page past the last of a run, of an empty run and
 // without one.
 func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
-	run := &InterestRun{ComputedAt: at, Documents: 3}
-	many := &InterestRun{ID: evilScript, ComputedAt: at, Algo: evilAttr, Documents: 4498, Noise: 2547, Interests: 1951}
+	run := &InterestRun{ComputedAt: at, Documents: 3, Shape: "flat"}
+	many := &InterestRun{ID: evilScript, ComputedAt: at, Algo: evilAttr, Shape: "flat", Documents: 4498, Loose: 47,
+		Unsorted: 2500, Interests: 1951, Total: 1951}
+	areas := &InterestRun{ID: evilAttr, ComputedAt: at, Algo: evilScript, Shape: "areas", Documents: 5254,
+		Unsorted: 402, Areas: 30, Interests: 187, Total: 30}
 	cards := func(n int) []Interest {
 		out := make([]Interest, 0, n)
 		for i := range n {
@@ -361,6 +374,7 @@ func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any 
 		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Shown: "run", NewRun: "failed",
 			RunError: evilScript}},
 		Interests{Layout: layout, Rebuild: Rebuild{}},
+		Interests{Layout: layout, Rebuild: Rebuild{Enabled: true, Running: true, StartedAt: at}},
 		Interests{Layout: layout, Rebuild: Rebuild{Enabled: true, Err: panelErr}},
 		Interests{Layout: layout, Poll: PollRebuild, Rebuild: Rebuild{Enabled: true, Running: true, Shown: evilAttr}},
 		Interests{Layout: layout, Page: 1, Run: many, Interests: cards(InterestsPageSize), Rebuild: rebuild},
@@ -368,16 +382,18 @@ func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any 
 		Interests{Layout: layout, Page: 82, Run: many, Interests: cards(7), Rebuild: rebuild},
 		Interests{Layout: layout, Page: 1, RunChanged: true, Run: many, Interests: cards(InterestsPageSize),
 			Rebuild: rebuild},
+		Interests{Layout: layout, Page: 2, Run: areas, Interests: []Interest{sampleArea(cards(1)[0])}, Rebuild: rebuild},
 		Interests{Layout: layout, Page: 83, RunChanged: true, Run: many, Rebuild: rebuild},
 		Interests{Layout: layout, Page: math.MaxInt, Run: &InterestRun{ID: evilAttr, ComputedAt: at, Documents: 5,
-			Noise: 5}, Rebuild: rebuild},
+			Unsorted: 5}, Rebuild: rebuild},
 		Interests{Layout: layout, Page: 2, Rebuild: Rebuild{Enabled: true}},
 	}
 }
 
 // interestVariants are an interest's page of members named every way, on
 // its first page, past its thousandth member, and past its last page, and
-// without a run time.
+// without a run time; an interest's last page, of loose fits; and an
+// area's page.
 func interestVariants(layout Layout) []any {
 	members := func(n int) []Member {
 		out := make([]Member, 0, n)
@@ -390,11 +406,16 @@ func interestVariants(layout Layout) []any {
 	big := Interest{ID: evilScript, Label: evilAttr, Summary: evilScript, Size: 1234, Cohesion: 0.6}
 	first, deep := big, big
 	first.Members, deep.Members = members(InterestMembersPageSize), members(InterestMembersPageSize)
+	loose := Interest{ID: evilAttr, ParentID: evilScript, Label: evilScript, Size: 50, Loose: 3,
+		Members: []Member{{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Loose: true, Similarity: 0.46}}}
 	return []any{
 		InterestPage{Layout: layout, Interest: first, Page: 1},
 		InterestPage{Layout: layout, Interest: deep, Page: 21},
 		InterestPage{Layout: layout, Interest: big, Page: 26},
 		InterestPage{Layout: layout, Interest: Interest{ID: evilAttr, Size: 1}, Page: 2},
+		InterestPage{Layout: layout, Interest: loose, Page: 2},
+		InterestPage{Layout: layout, Interest: sampleArea(loose)},
+		InterestPage{Layout: layout, Interest: Interest{ID: evilAttr, Area: true}},
 	}
 }
 
@@ -492,7 +513,13 @@ func partialSamples(t testing.TB) map[string][]any {
 		"full-error": {evilScript, ""},
 		"match": {Match{Segments: Highlight(evilScript + " <em>" + evilAttr + "</em>"), BM25: new(1.5)},
 			Match{Segments: Passage("", evilQuotes), Vector: new(0.2)}, Match{}},
-		"cohesion": {0.5},
+		"cohesion":      {0.5},
+		"cohesion-line": {0.5},
+		"interest-cards": {[]Interest{sampleArea(Interest{ID: evilAttr, Label: evilScript, Size: 7}),
+			{ID: evilScript, Label: evilAttr, Summary: evilScript, Size: 9,
+				Members: []Member{{DocumentID: evilAttr, BookmarkTitle: evilScript, URL: evilURL}}}}},
+		"area-card":     {sampleArea(Interest{ID: evilAttr, Size: 3}), Interest{ID: evilAttr, Area: true, NumChildren: 1}},
+		"interest-card": {Interest{ID: evilAttr, Label: evilScript, Summary: evilQuotes, Size: 3}},
 	}
 }
 
@@ -537,7 +564,7 @@ func TestEveryTemplateRenders(t *testing.T) {
 func pageTemplate(page, name string) bool {
 	switch name {
 	case "layout", "head", "header-search", "content", "document-page", "document-actions", "interests-page",
-		"failures-page", "failures-live", "layout.html", page + ".html":
+		"area-page", "interest-page", "failures-page", "failures-live", "layout.html", page + ".html":
 		return true
 	}
 	return false

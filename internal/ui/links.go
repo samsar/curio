@@ -26,8 +26,8 @@ func interestHref(id string) string { return "/ui/interests/" + url.PathEscape(i
 // (pager.go).
 const PageParam = "page"
 
-// interestsPageHref is page (from 1) of the interests of the clustering
-// run run: a page read from another run says so. The first page carries
+// interestsPageHref is page (from 1) of the interests of the rebuild run:
+// a page read from another run says so. The first page carries
 // no number, and no run when run is "".
 func interestsPageHref(page int, run string) string {
 	q := url.Values{}
@@ -118,12 +118,12 @@ func ParseDocumentBaseline(q url.Values) (DocumentBaseline, error) {
 }
 
 // interestsPollHref is the Interests' rebuild regions, for a page showing
-// the clustering run shown ("" for none).
+// the rebuild shown ("" for none).
 func interestsPollHref(shown string) string {
 	return navHref(NavInterests) + "?" + url.Values{PollParam: {PollRebuild}, runParam: {shown}}.Encode()
 }
 
-// ShownRun reads the clustering run an Interests URL names, "" for none:
+// ShownRun reads the rebuild an Interests URL names, "" for none:
 // for a poll, the run its page shows; for a page, the run the page it was
 // reached from showed.
 func ShownRun(q url.Values) string { return q.Get(runParam) }

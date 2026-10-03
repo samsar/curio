@@ -28,8 +28,8 @@ info:
         usually means a newer client talking to an older daemon, says to
         restart the daemon. Clients send only the optional fields they set.
       - List filters outside their enum are a 400. Sizing parameters
-        (`limit`, `members`, `k`, `window`) are never refused: a value
-        outside their range, or not a number, means their default.
+        (`limit`, `children`, `members`, `k`, `window`) are never refused:
+        a value outside their range, or not a number, means their default.
       - The bookmark, document and job lists return `{ items, next_cursor }`,
         `next_cursor` present exactly when another page follows. Documents
         and jobs come most recently updated first; bookmarks newest first
@@ -40,7 +40,8 @@ info:
         issued them; any other, or one a daemon upgrade invalidated, is a
         400, and the walk starts again.
       - Work that runs in the background answers 202: with a `job_id` to
-        poll at `GET /v1/jobs/{id}` (refetch, reindex, interests rebuild),
+        poll at `GET /v1/jobs/{id}` (refetch, reindex, interests rebuild,
+        which answers the rebuild already queued when there is one),
         or with `jobs_enqueued` for the bulk refetch-all and reindex-all,
         which have no parent job. Imports are synchronous per request; the
         fetches they enqueue are not.
@@ -94,7 +95,7 @@ tags:
   - name: search
     description: Hybrid BM25 + vector retrieval
   - name: insight
-    description: Inferred topic clusters ("interests")
+    description: Interests, and the areas holding them, that rebuilds find across the library
   - name: jobs
     description: Background work queue
   - name: system
@@ -664,27 +665,38 @@ paths:
     get:
       tags: [insight]
       operationId: listInterests
-      summary: List inferred interests (labeled topic clusters)
+      summary: List the latest rebuild's areas and interests
       description: >
-        Returns a page of the interests from the latest completed clustering
-        run, largest first (by size, then cohesion, then id), with run
-        metadata. An interest is a labeled cluster. Returns an empty list when
-        clustering has not run yet.
+        Returns a page of the latest rebuild's top-level groups, largest
+        first (by size, then cohesion, then id): its areas, each with its
+        largest interests, or, in a library of one level (shape flat), its
+        interests. With level=interest it lists every interest, each with
+        its area. The response carries what the run found and where the
+        next rebuild stands (next). Before the first rebuild is done the
+        list is empty, without the run fields, and next says why.
       parameters:
         - in: query
           name: limit
-          description: Max interests. Out of range or malformed means the default.
+          description: Max groups. Out of range or malformed means the default.
           schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
         - in: query
           name: offset
           description: >
-            How many interests to skip, in the list's order. An offset at or
+            How many groups to skip, in the list's order. An offset at or
             past the end answers an empty page of the run, not an error.
           schema: { type: integer, minimum: 0, default: 0 }
         - in: query
-          name: members
-          description: Member documents per interest; 0 for none. Out of range or malformed means the default.
+          name: children
+          description: Interests listed of each area; 0 for none. Out of range or malformed means the default.
           schema: { type: integer, minimum: 0, maximum: 100, default: 5 }
+        - in: query
+          name: members
+          description: Member documents listed of each interest; 0 for none. Out of range or malformed means the default.
+          schema: { type: integer, minimum: 0, maximum: 100, default: 3 }
+        - in: query
+          name: level
+          description: interest lists every interest, largest first, each with its area; absent lists the top-level groups.
+          schema: { type: string, enum: [interest] }
       responses:
         "200":
           description: OK
@@ -692,21 +704,76 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/InterestList" }
         "400":
+          description: An offset that isn't a whole number of 0 or more, or a level other than interest
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /v1/interests/unsorted:
+    get:
+      tags: [insight]
+      operationId: listUnsorted
+      summary: List the documents in no interest, nearest first
+      description: >
+        Returns a page of the latest rebuild's unsorted documents: those no
+        interest holds and none is close to. They come most similar to
+        their nearest interest first, then by document id, each naming
+        that interest. Also lists the documents placed in Unsorted since
+        the rebuild, newest first.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - in: query
+          name: offset
+          description: >
+            How many documents to skip, in the list's order. An offset at
+            or past the end answers an empty page, not an error.
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UnsortedPage" }
+        "400":
           description: An offset that isn't a whole number of 0 or more
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
         default: { $ref: "#/components/responses/Problem" }
 
+  /v1/interests/changes:
+    get:
+      tags: [insight]
+      operationId: interestChanges
+      summary: What the latest rebuild changed
+      description: >
+        The latest rebuild's events, without the identities it kept where
+        they were: the areas and interests it split, merged, moved,
+        dissolved and created, ordered by event (split, merged, moved,
+        dissolved, new), then level (areas first), then label and id.
+        Empty before the first rebuild is done.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InterestChanges" }
+        default: { $ref: "#/components/responses/Problem" }
+
   /v1/interests/rebuild:
     post:
       tags: [insight]
       operationId: rebuildInterests
-      summary: Recompute interests from the current corpus
-      description: Enqueues a clustering job. Poll the returned job id via /v1/jobs/{id}.
+      summary: Rebuild the interests now
+      description: >
+        Queues a rebuild of the interests and answers its job id, or, when
+        one is queued already, that one's: one rebuild waits at most. A
+        running rebuild doesn't count, so a request during one queues the
+        next. Poll the job at /v1/jobs/{id}.
       responses:
         "202":
-          description: Clustering job enqueued
+          description: A rebuild is queued
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JobRef" }
@@ -722,19 +789,28 @@ paths:
       - { $ref: "#/components/parameters/ID" }
       - in: query
         name: members
-        description: Member documents to include; 0 for none. Out of range or malformed means the default.
-        schema: { type: integer, minimum: 0, maximum: 1000, default: 100 }
+        description: >
+          For an interest, its member documents to include, then its loose
+          fits (default 100, max 1000); for an area, each of its
+          interests' members (default 3, max 100). 0 for none. Out of
+          range or malformed means the default.
+        schema: { type: integer, minimum: 0, maximum: 1000 }
       - in: query
         name: offset
         description: >
-          How many members to skip, most similar first (then by document id).
-          An offset at or past the end answers the interest without members,
-          not an error.
+          For an interest, how many of its members, then loose fits, to
+          skip, most similar first (then by document id). An offset at or
+          past the end answers the interest without members, not an
+          error. An area ignores it.
         schema: { type: integer, minimum: 0, default: 0 }
     get:
       tags: [insight]
       operationId: getInterest
-      summary: Get one interest with a page of its member documents
+      summary: Get one area, with its interests, or one interest, with a page of its documents
+      description: >
+        IDs last across rebuilds while the documents they name do. One a
+        rebuild retired answers 410 with the identities that took its
+        documents.
       responses:
         "200":
           description: OK
@@ -747,6 +823,11 @@ paths:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "410":
+          description: A rebuild retired it; the problem says when, and what took its documents
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/RetiredInterest" }
         default: { $ref: "#/components/responses/Problem" }
 
   # ---------- jobs ----------
@@ -1578,44 +1659,227 @@ components:
         url:            { type: string, format: uri }
         state:          { $ref: "#/components/schemas/DocState" }
         markdown_path:  { type: string, description: "Absolute on-disk path to the member's extracted markdown" }
-        similarity:     { type: number, description: "Cosine similarity to the cluster centroid (0..1)" }
-      required: [doc_id, url, state, similarity]
+        similarity:     { type: number, description: "Cosine similarity to the interest's centroid, in the rebuild's centered space (-1..1)" }
+        fit:
+          type: string
+          enum: [member, loose, new]
+          description: >
+            member: the rebuild grouped it in the interest; loose: in no
+            interest, but close to this one; new: placed into it since the
+            rebuild
+      required: [doc_id, url, state, similarity, fit]
+
+    InterestRef:
+      type: object
+      properties:
+        id:      { type: string, format: uuid }
+        label:   { type: string }
+        retired: { type: boolean, description: "A rebuild retired it: its id answers 410" }
+      required: [id, retired]
+
+    InterestEvent:
+      type: object
+      description: >
+        What a rebuild did to an identity: kept or moved it (moved into
+        another area, named by area), split part of it off into another,
+        merged part of it into another shared with others, dissolved it, or
+        created it (new).
+      properties:
+        event:  { type: string, enum: [kept, moved, split, merged, dissolved, new] }
+        level:  { type: string, enum: [area, interest] }
+        from:   { $ref: "#/components/schemas/InterestRef" }
+        to:     { $ref: "#/components/schemas/InterestRef" }
+        area:   { $ref: "#/components/schemas/InterestRef" }
+        shared: { type: integer, description: "How many of from's members to holds" }
+      required: [event, level]
 
     Interest:
       type: object
-      description: A labeled topic cluster, with a page of its members.
+      description: >
+        An area or an interest as the latest rebuild found it. Its id lasts
+        across rebuilds. An area carries num_children and some of its
+        interests; an interest some of its members, and on its own page its
+        loose fits after them, the documents placed into it since the
+        rebuild (new_members) and its events in the rebuild.
       properties:
-        id:       { type: string, format: uuid }
-        run_id:   { type: string, format: uuid, description: "The clustering run the interest belongs to" }
-        label:    { type: string, description: "Topic name; omitted when unlabeled" }
-        summary:  { type: string }
-        size:     { type: integer, description: "Number of member documents, across every page of them" }
-        cohesion: { type: number, description: "Mean member cosine to the cluster centroid (0..1)" }
+        id:           { type: string, format: uuid }
+        run_id:       { type: string, format: uuid, description: "The rebuild the response reads" }
+        level:        { type: string, enum: [area, interest] }
+        parent_id:    { type: string, format: uuid, description: "An interest's area; absent for an area or in a library of one level" }
+        parent_label: { type: string }
+        label:        { type: string, description: "Topic name; omitted when unlabeled" }
+        summary:      { type: string }
+        size:         { type: integer, description: "Member documents, across every page of them; an area's, its interests'" }
+        loose:        { type: integer, description: "Loose fits: documents in no interest, close to this one" }
+        new:          { type: integer, description: "Documents placed into it since the rebuild" }
+        cohesion:     { type: number, description: "Mean member cosine to the members' centroid" }
+        num_children: { type: integer, description: "An area's interests, listed or not" }
+        children:
+          type: array
+          items: { $ref: "#/components/schemas/ChildInterest" }
         members:
           type: array
           items: { $ref: "#/components/schemas/InterestMember" }
-      required: [id, run_id, size, cohesion]
+        new_members:
+          type: array
+          description: The documents placed into it since the rebuild, newest first, 20 at most
+          items: { $ref: "#/components/schemas/InterestMember" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/InterestEvent" }
+      required: [id, run_id, level, size, loose, new, cohesion]
+
+    ChildInterest:
+      type: object
+      description: One of an area's interests, as the area lists it.
+      properties:
+        id:           { type: string, format: uuid }
+        run_id:       { type: string, format: uuid }
+        level:        { type: string, enum: [interest] }
+        parent_id:    { type: string, format: uuid, description: "The area" }
+        parent_label: { type: string }
+        label:        { type: string, description: "Topic name; omitted when unlabeled" }
+        summary:      { type: string }
+        size:         { type: integer }
+        loose:        { type: integer }
+        new:          { type: integer }
+        cohesion:     { type: number }
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/InterestMember" }
+      required: [id, run_id, level, parent_id, size, loose, new, cohesion]
+
+    InterestRebuild:
+      type: object
+      description: >
+        What the latest rebuild was (what started it, and whether it
+        started from the previous grouping and ran the split check) and
+        what it did to the interests.
+      properties:
+        trigger:           { type: string, enum: [first, auto, manual, reindex, params, shape] }
+        kind:              { type: string, enum: [fresh, warm] }
+        split_check:       { type: boolean }
+        changed_documents: { type: integer, description: "Documents added or gone since the rebuild before" }
+        kept:              { type: integer, description: "Interests whose identity carried over, moved ones included" }
+        created:           { type: integer }
+        split:             { type: integer }
+        merged:            { type: integer }
+        moved:             { type: integer }
+        dissolved:         { type: integer }
+      required: [trigger, kind, split_check, changed_documents, kept, created, split, merged, moved, dissolved]
+
+    InterestsState:
+      type: object
+      description: >
+        Where the next rebuild stands: off (insight is disabled), rebuilding
+        (one runs), queued (one waits, perhaps behind the queue's gate),
+        failing (the newest rebuild failed, last_error saying why), current
+        (a rebuild is done) or none. Clients treat a state they don't know
+        as current.
+      properties:
+        state:      { type: string }
+        last_error: { type: string }
+      required: [state]
 
     InterestList:
       type: object
       description: >
-        Paged by offset within the run: a run's interests never change, so an
-        offset names the same interests on every read of that run. A rebuild
+        Paged by offset within the run: a run's groups never change, so an
+        offset names the same groups on every read of that run. A rebuild
         makes a new run, and a client sees it by comparing run_id across
-        pages; num_clusters is the run's total. Returned with the metadata of
-        the run that produced them; the run fields are absent before the
-        first clustering run.
+        pages; total is the run's groups the list counts. The run fields
+        are absent before the first rebuild is done.
       properties:
         run_id:        { type: string, format: uuid }
         computed_at:   { type: string, format: date-time }
-        algo:          { type: string, description: "Clusterer name, e.g. knn-graph" }
-        num_documents: { type: integer, description: "Documents considered in the run" }
-        num_clusters:  { type: integer }
-        num_noise:     { type: integer, description: "Documents left unclustered" }
+        algo:          { type: string, description: "Grouper name, e.g. louvain" }
+        shape:         { type: string, enum: [flat, areas], description: "areas: interests grouped into areas; flat: one level" }
+        num_documents: { type: integer, description: "Documents the run grouped: members, loose fits and unsorted" }
+        num_areas:     { type: integer }
+        num_interests: { type: integer }
+        num_loose:     { type: integer, description: "Documents in no interest, close to one" }
+        num_unsorted:  { type: integer, description: "Documents close to no interest" }
+        num_new:       { type: integer, description: "Documents placed since the rebuild" }
+        total:         { type: integer, description: "The run's groups this list counts: its areas, or its interests in the flat shape or with level=interest" }
+        rebuild:       { $ref: "#/components/schemas/InterestRebuild" }
+        next:          { $ref: "#/components/schemas/InterestsState" }
         items:
           type: array
           items: { $ref: "#/components/schemas/Interest" }
-      required: [num_documents, num_clusters, num_noise, items]
+      required: [num_documents, num_areas, num_interests, num_loose, num_unsorted, num_new, total, next, items]
+
+    UnsortedMember:
+      type: object
+      properties:
+        doc_id:         { type: string, format: uuid }
+        title:          { type: string, description: "The document's own title; omitted when it has none" }
+        bookmark_title: { type: string, description: "For an untitled document, its most recently saved bookmark's title, when that has one" }
+        url:            { type: string, format: uri }
+        state:          { $ref: "#/components/schemas/DocState" }
+        markdown_path:  { type: string, description: "Absolute on-disk path to its extracted markdown" }
+        similarity:     { type: number, description: "Cosine similarity to its nearest interest's centroid" }
+        nearest_id:     { type: string, format: uuid, description: "The interest it is nearest; absent when there is none, and for a document placed since" }
+        nearest_label:  { type: string }
+      required: [doc_id, url, state, similarity]
+
+    UnsortedPage:
+      type: object
+      properties:
+        run_id:  { type: string, format: uuid, description: "Absent before the first rebuild is done" }
+        total:   { type: integer, description: "The run's unsorted documents" }
+        num_new: { type: integer, description: "Documents placed in Unsorted since the rebuild" }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/UnsortedMember" }
+        new:
+          type: array
+          description: The documents placed in Unsorted since the rebuild, newest first, 20 at most
+          items: { $ref: "#/components/schemas/UnsortedMember" }
+      required: [total, num_new, items, new]
+
+    InterestChanges:
+      type: object
+      properties:
+        run_id:      { type: string, format: uuid, description: "Absent before the first rebuild is done" }
+        computed_at: { type: string, format: date-time }
+        rebuild:     { $ref: "#/components/schemas/InterestRebuild" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/InterestEvent" }
+      required: [events]
+
+    RetiredInterest:
+      description: >
+        A retired area or interest: an RFC 7807 problem of type
+        urn:curio:problem:interest-retired, plus when it was retired, by
+        which rebuild, and the identities that took its documents there.
+        None took them when it dissolved.
+      type: object
+      properties:
+        type:       { type: string, format: uri, enum: ["urn:curio:problem:interest-retired"] }
+        title:      { type: string }
+        status:     { type: integer, enum: [410] }
+        detail:     { type: string, description: "What became of it, in a sentence" }
+        instance:   { type: string, description: "The request path" }
+        request_id: { type: string, description: "The response's X-Request-Id; quote it against the daemon log" }
+        id:         { type: string, format: uuid }
+        level:      { type: string, enum: [area, interest] }
+        label:      { type: string }
+        retired_at: { type: string, format: date-time }
+        run_id:     { type: string, format: uuid, description: "The rebuild that retired it" }
+        successors:
+          type: array
+          items:
+            type: object
+            properties:
+              id:      { type: string, format: uuid }
+              level:   { type: string, enum: [area, interest] }
+              label:   { type: string }
+              event:   { type: string, enum: [split, merged] }
+              shared:  { type: integer, description: "How many of its members the successor took" }
+              retired: { type: boolean }
+            required: [id, level, event, shared, retired]
+      required: [type, title, status, id, level, retired_at, run_id, successors]
 
     # ---------- jobs ----------
 
