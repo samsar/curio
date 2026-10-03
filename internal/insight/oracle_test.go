@@ -33,6 +33,7 @@ const oracleTolerance = 0.01
 // r(n), the two find partitions of the same modularity within
 // oracleTolerance.
 func TestLouvain_MatchesGonum(t *testing.T) {
+	skipUnderRace(t)
 	t.Parallel()
 	ctx := context.Background()
 	var worst, shortfall float64

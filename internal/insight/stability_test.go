@@ -62,6 +62,7 @@ func changeDraw(n int, kind string, draw int) (prevIdx, newIdx []int) {
 // fresh keeps 86.8% · 100% and 83.2% · 93.0% of the names here, and about
 // 74% of interest names on the owner's library.
 func TestStability_NamesKeptAfterAChange(t *testing.T) {
+	skipUnderRace(t)
 	t.Parallel()
 	lib := fixtureLibrary(1)
 	n := len(lib.docs)
@@ -138,6 +139,7 @@ func cohesion(r run) float64 {
 // interests (measured 31): local moving and aggregation merge communities
 // but never split one, so this guards the split check.
 func TestStability_Chain(t *testing.T) {
+	skipUnderRace(t)
 	t.Parallel()
 	lib := fixtureLibrary(1)
 	fresh := rebuild(t, lib.docs, nil, false)
@@ -177,6 +179,7 @@ func TestStability_Chain(t *testing.T) {
 // the planted pair together. It guards the merge's repeated rounds, which
 // a single pass doesn't give (see TestMergeNearDuplicates_UntilNothingJoins).
 func TestStability_NoNearDuplicatesLeft(t *testing.T) {
+	skipUnderRace(t)
 	t.Parallel()
 	lib := fixtureLibrary(1)
 	n := len(lib.docs)

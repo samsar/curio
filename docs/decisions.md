@@ -9830,8 +9830,18 @@ piece of the pair's first topic back with the interest holding the pair.
 Each mechanism was disabled once to see its property fail: ignoring the
 prior (names kept fall to 86.8% and 83.2%), skipping the restarts (the
 unchanged library moves), never splitting (the chain ends at 31 against
-31), one merge pass (a pair at 0.85 is left). Under -race the package's
-tests take about 25 s on an M4 Max; `make test` went from 62 s to 66 s.
+31), one merge pass (a pair at 0.85 is left).
+
+**The property tests run without -race.** Each runs the whole pipeline
+many times over the fixture, where the race detector costs about ten times
+the CPU and finds nothing the concurrency tests don't already run under
+it. Under -race the package took 178 s on CI's 4-core Linux runner and
+pushed `internal/ui`'s time-bounded markdown test over its limit. So six
+of them (`skipUnderRace`: names kept, the chain, no near-duplicates left,
+idempotence, order invariance, the gonum oracle) skip under -race, and
+`make test` runs `./internal/insight/...` a second time without it. At
+`-cpu 4` on an M4 Max: 31 s of CPU under -race (from about 280 s), 18 s
+without.
 
 **Below the gate the split check carries the growth.** The chain property
 is pinned in the areas shape. In the flat shape r(n) rises as the library

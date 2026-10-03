@@ -16,6 +16,21 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
+// skipUnderRace skips a property test of the grouping under -race. Each
+// runs the whole pipeline many times over the fixture library, where the
+// race detector costs about ten times the CPU and finds nothing the
+// concurrency tests (the parallel neighbour pass, concurrent Group calls)
+// don't already run under it. On a 4-core CI runner they took three
+// minutes and pushed other packages' time-bounded tests over their limits.
+// `make test` runs this package a second time without -race, so they still
+// run on every push.
+func skipUnderRace(t *testing.T) {
+	t.Helper()
+	if raceDetector {
+		t.Skip("a property of the grouping: make test runs it without -race")
+	}
+}
+
 // The fixture library: a seeded synthetic library with two levels of
 // planted structure, the shape the owner's library has.
 //

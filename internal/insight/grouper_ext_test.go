@@ -35,6 +35,7 @@ func groupingByID(points []insight.Point, g insight.Grouping) byID {
 // check. The grouper works in ID order, and every numbering is by size and
 // smallest member ID.
 func TestLouvainGrouper_OrderInvariant(t *testing.T) {
+	skipUnderRace(t)
 	t.Parallel()
 	lib := fixtureLibrary(3)
 	n := len(lib.docs)
@@ -70,6 +71,7 @@ func TestLouvainGrouper_OrderInvariant(t *testing.T) {
 // a multi-level result is not a local optimum of the first level, and
 // without the restarts a warm start from it moves nodes.
 func TestLouvainGrouper_Idempotent(t *testing.T) {
+	skipUnderRace(t)
 	t.Parallel()
 	for _, tc := range []struct {
 		name string

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```sh
 make build               # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp (go build cache decides staleness)
-make test                # unit tests under -race; no network, no Ollama
+make test                # unit tests under -race; no network, no Ollama (then internal/insight/... again without -race: its grouping property tests skip under it)
 make test-integration    # needs network: fetches live sites (tag `integration`)
 make test-e2e            # builds curio-daemon, drives it through daemonctl + client against fake Ollama (tag `e2e`)
 make vet                 # go vet with the build tags
