@@ -25,8 +25,9 @@ func newInterestsCmd(env *daemonctl.Env) *cobra.Command {
 		Short: "Show the areas and interests curio found across your saved content",
 		Long: "Outline the areas and interests curio found in your library, largest first: a\n" +
 			"picture of what you read about. A library under about 1,000 documents gets one\n" +
-			"level of interests. Rebuilds run as the library changes; `curio interests\n" +
-			"rebuild` asks for one now. IDs last across rebuilds: `curio interests show <id>`.",
+			"level of interests. The daemon groups the library when it first starts, and\n" +
+			"`curio interests rebuild` groups it again, taking in the documents fetched\n" +
+			"since. IDs last across rebuilds: `curio interests show <id>`.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
@@ -133,9 +134,10 @@ func newInterestsRebuildCmd(env *daemonctl.Env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "rebuild",
 		Short: "Rebuild the interests now",
-		Long: "Queue a rebuild of the interests now, rather than when the library has changed\n" +
-			"enough. It starts from the current grouping and keeps the names and IDs of the\n" +
-			"interests that carry over. A rebuild already queued is the one it waits for.",
+		Long: "Queue a rebuild of the interests, which groups the documents fetched since the\n" +
+			"last one. It starts from the current grouping and keeps the names and IDs of the\n" +
+			"interests that carry over. With a rebuild already queued, it names that one\n" +
+			"rather than queuing another.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
@@ -374,11 +376,14 @@ func renderNoInterests(w io.Writer, res *client.InterestList, configPath string)
 		}
 		if res.NumDocuments == 0 {
 			fmt.Fprintf(w, "no interests: %s found no fetched, indexed documents\n", when)
-			fmt.Fprintln(w, "the next rebuild groups them once `curio status` shows documents fetched")
+			fmt.Fprintln(w, "run `curio interests rebuild` once `curio status` shows documents fetched")
 			return
 		}
-		fmt.Fprintf(w, "no interests: %s grouped none of its %s; they are all in Unsorted\n", when,
-			plural(res.NumDocuments, "document"))
+		where := "they are all in Unsorted"
+		if res.NumDocuments == 1 {
+			where = "it is in Unsorted"
+		}
+		fmt.Fprintf(w, "no interests: %s grouped none of its %s; %s\n", when, plural(res.NumDocuments, "document"), where)
 		fmt.Fprintln(w, "list them with `curio interests unsorted`")
 		return
 	}

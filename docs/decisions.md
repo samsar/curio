@@ -10097,7 +10097,13 @@ cluster job with trigger `first` and logs "interests: rebuild enqueued";
 a failed read or enqueue is one WARN and the daemon starts anyway. The
 condition is "no done run", not the design's "no run exists": a failed
 first rebuild is retried at the next start, and a `running` row left by a
-crash doesn't block it. The cluster job's payload is
+crash doesn't block it. Until rebuilds follow the library's changes,
+that and a request are the only rebuilds, and a new home's first one
+runs before `curio up` imports anything (the daemon step precedes the
+import) and commits an empty run. So no text promises another: the CLI's
+help says the library is grouped at the first start and on request, and
+an empty run's hint is "run `curio interests rebuild` once `curio status`
+shows documents fetched". The cluster job's payload is
 `store.ClusterJobPayload{Trigger}`; a missing or unknown trigger (`{}`
 from an older job) is `manual`. Every rebuild goes through
 `JobQueue.EnqueueOnce`, which inserts a job only when no pending job of

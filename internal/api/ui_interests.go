@@ -84,7 +84,7 @@ func interestRun(resp InterestListResponse) *ui.InterestRun {
 }
 
 // rebuild reads whether a rebuild is queued or running, from the queue's
-// cluster pool, and what the newest clustering run came to when it isn't
+// cluster pool, and what the newest rebuild came to when it isn't
 // shown, the run the page shows. The running rebuild's start is read only
 // while one runs, and no read walks the queued jobs, which an import
 // makes thousands of.

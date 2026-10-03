@@ -658,10 +658,13 @@ interests into areas, from the documents' embeddings (see
 `docs/decisions.md` "Interests: two levels, stable identities, automatic
 rebuilds"). It queues the first grouping when it starts and has none, and
 `curio interests rebuild` (or Rebuild on the Interests page) queues
-another; a second request while one waits returns the same job. A rebuild
-keeps an interest's ID and name when it keeps most of its documents, so
-links and IDs last; an interest that splits, merges into another or
-dissolves is retired, and its ID then answers with what became of it.
+another; a second request while one waits returns the same job. Nothing
+else rebuilds them: on a new home the first grouping runs before `curio
+up` imports anything and finds no documents, so run `curio interests
+rebuild` once `curio status` shows documents fetched. A rebuild keeps an
+interest's ID and name when it keeps most of its documents, so links and
+IDs last; an interest that splits, merges into another or dissolves is
+retired, and its ID then answers with what became of it.
 
 | Key | Default | What it does |
 |---|---|---|

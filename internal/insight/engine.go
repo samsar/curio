@@ -190,9 +190,9 @@ func (p plan) kind() store.RunKind {
 
 // The split check's cadence: it runs once the changes absorbed since the
 // last one reach splitEvery times the change threshold, max(minChanges,
-// ⌈changeShare of the prior's documents⌉). At automatic rebuilds every
-// threshold's worth of changes, that is every fourth rebuild, and a manual
-// one moves it closer only by the changes it absorbed.
+// ⌈changeShare of the prior's documents⌉). A library rebuilt at every
+// threshold's worth of changes is split-checked every fourth rebuild; a
+// rebuild sooner moves the check closer only by the changes it absorbed.
 const (
 	changeShare = 0.05
 	minChanges  = 5

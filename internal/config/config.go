@@ -197,18 +197,20 @@ type Insight struct {
 	// into one giant cluster. Turn off only if your embeddings are already
 	// isotropic.
 	CenterVectors bool `yaml:"center_vectors"`
-	// Labeling selects cluster naming: "llm" (default; needs a generation
-	// model, else falls back to deterministic term labels), "terms", or "off".
+	// Labeling selects how areas and interests are named: "llm" (default;
+	// needs a generation model, else falls back to deterministic term
+	// labels), "terms", or "off".
 	Labeling string `yaml:"labeling"`
-	// LabelingTimeoutSeconds bounds the total time one clustering run waits
-	// on the LLM labeler; clusters left when it runs out get term labels.
-	// Default 900. Keeps a hung Ollama from holding the single cluster worker.
+	// LabelingTimeoutSeconds bounds the total time one rebuild of the
+	// interests waits on the LLM labeler; groups left when it runs out get
+	// term labels. Default 900. Keeps a hung Ollama from holding the single
+	// cluster worker.
 	LabelingTimeoutSeconds int `yaml:"labeling_timeout_seconds"`
 }
 
-// Generation configures the LLM text-generation client, which labels
-// clusters. Separate from Embedding: a different model and endpoint. Only
-// used when a feature asks for it (insight.labeling = "llm").
+// Generation configures the LLM text-generation client, which names areas
+// and interests. Separate from Embedding: a different model and endpoint.
+// Only used when a feature asks for it (insight.labeling = "llm").
 type Generation struct {
 	Provider string `yaml:"provider"` // "ollama" (only provider in v1)
 	// Model is a chat/instruct model, default "qwen3:4b-instruct". Unlike

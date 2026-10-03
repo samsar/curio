@@ -746,21 +746,45 @@ func TestInterests_Empty(t *testing.T) {
 			filepath.Join(srv.Home.Path, "config.yaml")+" and restart the daemon\n", mustRun(t, srv, "interests"))
 	})
 	t.Run("no documents", func(t *testing.T) {
+		// A new home's first rebuild runs before curio up imports anything,
+		// and nothing rebuilds by itself after the import: the hint names
+		// the command that groups what was fetched since.
 		srv := apitest.Start(t)
 		srv.AddRun(t, apitest.RunSpec{})
-		out := mustRun(t, srv, "interests")
-		assert.Contains(t, out, "found no fetched, indexed documents")
-		assert.Contains(t, out, "`curio status`")
-		assert.NotContains(t, out, "no interests yet")
+		lines := strings.Split(strings.TrimSuffix(mustRun(t, srv, "interests"), "\n"), "\n")
+		require.Len(t, lines, 2)
+		assert.Regexp(t, `^no interests: the rebuild of \d{4}-\d{2}-\d{2} \d{2}:\d{2} found no fetched, indexed documents$`, lines[0])
+		assert.Equal(t, "run `curio interests rebuild` once `curio status` shows documents fetched", lines[1])
 	})
 	t.Run("nothing grouped", func(t *testing.T) {
-		srv := apitest.Start(t)
-		srv.AddRun(t, apitest.RunSpec{Unsorted: []*store.Document{srv.AddDocument(t, "https://example.com/a",
-			store.DocStateFetched)}})
-		out := mustRun(t, srv, "interests")
-		assert.Contains(t, out, "grouped none of its 1 document; they are all in Unsorted")
-		assert.NotContains(t, out, "min_similarity")
+		for n, want := range map[int]string{
+			1: "grouped none of its 1 document; it is in Unsorted\n",
+			2: "grouped none of its 2 documents; they are all in Unsorted\n",
+		} {
+			srv := apitest.Start(t)
+			var unsorted []*store.Document
+			for i := range n {
+				unsorted = append(unsorted, srv.AddDocument(t, fmt.Sprintf("https://example.com/%d", i), store.DocStateFetched))
+			}
+			srv.AddRun(t, apitest.RunSpec{Unsorted: unsorted})
+			out := mustRun(t, srv, "interests")
+			assert.Contains(t, out, want)
+			assert.Contains(t, out, "list them with `curio interests unsorted`\n")
+			assert.NotContains(t, out, "min_similarity")
+		}
 	})
+}
+
+// TestInterests_HelpDescribesRebuilds: the help says when the library is
+// grouped, at the daemon's first start and on request, and never promises
+// a rebuild nothing queues.
+func TestInterests_HelpDescribesRebuilds(t *testing.T) {
+	out := runArgs(t, "interests", "--help")
+	assert.Contains(t, out, "The daemon groups the library when it first starts")
+	assert.NotContains(t, out, "as the library changes")
+	out = runArgs(t, "interests", "rebuild", "--help")
+	assert.Contains(t, out, "Queue a rebuild of the interests, which groups the documents fetched since the")
+	assert.NotContains(t, out, "rather than when the library has changed")
 }
 
 func TestStatus(t *testing.T) {
