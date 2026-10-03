@@ -249,7 +249,10 @@ footer.site .container { display: flex; gap: var(--s4); justify-content: space-b
 .page-head > .titles { flex: 1 1 24rem; min-width: 0; }
 .page-head h1 { font-size: var(--fs-xl); }
 .page-head .lede { margin-top: var(--s2); color: var(--text-2); }
-.page-head .actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.page-head .actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); min-width: 0; max-width: 100%; }
+/* A group's title carries its kind's icon (an area's layers, Unsorted's
+   inbox) in the tertiary colour. */
+.page-head h1 > svg.icon { width: 1.25rem; height: 1.25rem; margin-right: var(--s2); color: var(--text-3); vertical-align: -0.12em; }
 
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); color: var(--text-3); font-size: var(--fs-sm); margin-bottom: var(--s2); min-width: 0; }
 .crumbs a { color: var(--text-3); }
@@ -549,6 +552,8 @@ col.c-when { width: 7.5rem; }
 col.c-sim { width: 9.5rem; }
 /* Room for a four-digit rank, "1,234", and the cell's padding, on a phone too. */
 col.c-rank { width: 3.5rem; }
+/* Unsorted's nearest interest: a label, cut on one line. */
+col.c-nearest { width: 16rem; }
 
 /* A document cell: its title on one line, where it lives under it, and,
    for a failed one, why, in at most two lines. */
@@ -739,6 +744,7 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .fill-danger { fill: var(--danger-dot); }
 .fill-neutral { fill: var(--neutral-dot); }
 .fill-accent { fill: var(--accent); }
+.fill-accent-soft { fill: var(--accent-border); }
 .fill-track { fill: var(--surface-3); }
 
 .legend { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); margin-top: var(--s3); font-size: var(--fs-sm); }
@@ -751,6 +757,8 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .swatch-warn { background: var(--warn-dot); }
 .swatch-danger { background: var(--danger-dot); }
 .swatch-accent { background: var(--accent); }
+.swatch-accent-soft { background: var(--accent-border); }
+.swatch-neutral { background: var(--neutral-dot); }
 .swatch-track { background: var(--surface-3); border: 1px solid var(--border-strong); }
 
 /* Stat tiles --------------------------------------------------------------- */
@@ -880,6 +888,12 @@ main.page:has(.landing) { padding-bottom: var(--s6); }
 .meta-row .sep { color: var(--border-strong); }
 .meta-row .text { color: var(--text-3); font-size: var(--fs-sm); }
 .doc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s5); padding-top: var(--s5); border-top: 1px solid var(--border); }
+/* Where the interests put the document: one line, its names cut. */
+.doc-place { display: flex; align-items: center; gap: var(--s2); min-width: 0; margin-top: var(--s3); color: var(--text-2); font-size: var(--fs-sm); }
+.doc-place svg { color: var(--text-3); }
+/* Its words and names flow as flex items, each name cut on a line of its
+   own when it is longer than one. */
+.doc-place .where { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.3rem; min-width: 0; }
 .doc-actions .action-status { margin-left: var(--s2); }
 /* The document's jobs in flight, and what came of them. */
 .doc-jobs { display: grid; gap: var(--s1); margin-top: var(--s3); font-size: var(--fs-sm); color: var(--text-2); }
@@ -936,10 +950,20 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 
 /* Interests ------------------------------------------------------------------ */
 
-/* The Interests' rebuild, in its head: queued or running, and what came of it. */
-.rebuild-state { font-size: var(--fs-sm); color: var(--text-2); }
+/* The Interests' rebuild, in its head: queued or running, or where
+   automatic rebuilds stand, said as Status's row says it, in lower case,
+   so the line starts it with a capital; a failure's error on one line,
+   cut, whole on hover. */
+.rebuild-state { font-size: var(--fs-sm); color: var(--text-2); min-width: 0; max-width: 100%; }
 .rebuild-state:empty { display: none; }
-.rebuild-state .failed { color: var(--danger); }
+.rebuild-state .interests-state::first-letter { text-transform: uppercase; }
+.rebuild-state .tone-warn { color: var(--warn); }
+.state-error { display: inline-block; max-width: 100%; vertical-align: bottom; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* An area or interest a line names (a label of any length, a model's):
+   one line, cut, whole on hover, so it never widens what holds it. */
+.ref { display: inline-block; max-width: min(28rem, 100%); vertical-align: bottom; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ref .unlabeled { font-style: italic; }
 
 .interest-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s4); list-style: none; padding: 0; }
 .interest { display: flex; flex-direction: column; padding: var(--s5); gap: var(--s3); }
@@ -947,8 +971,10 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .interest h2 a { color: var(--text); overflow-wrap: anywhere; }
 .interest h2 a:hover { color: var(--accent-text); text-decoration: none; }
 .interest h2 .unlabeled { color: var(--text-3); font-style: italic; font-weight: 500; }
+.interest h2 svg.icon { margin-right: var(--s2); color: var(--text-3); }
 .interest .stats { display: flex; align-items: center; gap: var(--s3); color: var(--text-3); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; flex-wrap: wrap; }
 .interest .stats b { color: var(--text); font-weight: 620; }
+.interest .stats .new b { color: var(--accent-text); }
 .interest .summary { color: var(--text-2); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 .interest .members { list-style: none; padding: 0; margin-top: auto; border-top: 1px solid var(--border); padding-top: var(--s3); display: grid; gap: 0.35rem; font-size: var(--fs-sm); }
 .interest .members > li { min-width: 0; }
@@ -959,11 +985,32 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .interest .members a.from-bookmark { font-style: italic; }
 .interest .members a.untitled { font-family: var(--mono); font-size: 0.86em; }
 .interest .all { font-size: var(--fs-sm); font-weight: 540; }
-/* An area's interests: each name on one line, cut, its size beside it. */
-.interest .children > li { display: flex; align-items: baseline; gap: var(--s3); }
-.interest .children a { flex: 1; min-width: 0; }
+/* An area's interests: each name on one line, cut, then a bar scaled to
+   the area's largest, and its size. */
+.interest .children > li { display: grid; grid-template-columns: minmax(0, 1fr) 3rem 2.5rem; align-items: center; gap: var(--s3); }
 .interest .children .unlabeled { font-style: italic; }
-.interest .children .n { flex: none; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.interest .children svg.stackbar { height: 0.375rem; }
+.interest .children .n { color: var(--text-3); font-variant-numeric: tabular-nums; text-align: right; }
+
+/* The lineage note's lines, and the changes page's. */
+.lineage, .event-lines, .successors { list-style: none; padding: 0; display: grid; gap: var(--s2); }
+.event-lines > li, .successors > li { min-width: 0; }
+.successors > li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s3); }
+
+/* An interest's bands in one card: the documents placed since, the
+   members, the loose fits; each band after the first under a rule. */
+.band + .band { border-top: 1px solid var(--border); }
+.band-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s3); padding: var(--s4) var(--s4) var(--s2); }
+.band-head h2 { font-size: var(--fs-base); }
+.band-head p { color: var(--text-3); font-size: var(--fs-sm); }
+.badge.fit-new { color: var(--accent-text); background: var(--accent-soft); border-color: var(--accent-border); }
+td .badge.fit-new { margin-top: var(--s1); }
+
+/* Unsorted's nearest interest: its own column on a wide screen, folded
+   under the document's name on a phone, a row whose name gives way. A
+   cut name is an atomic inline in a line of text, which a line that
+   doesn't fit drops whole; a flex item shrinks instead. */
+.nearest-sub { display: none; align-items: baseline; gap: 0.3rem; min-width: 0; margin-top: 0.15rem; color: var(--text-3); font-size: var(--fs-sm); white-space: nowrap; }
 
 .coverage { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s1); }
 .coverage .legend { margin-top: var(--s2); }
@@ -1078,8 +1125,11 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
   .explore-line li:nth-child(n+5) { display: none; }
   .explore-line { line-height: 2.2; }
 
-  /* The Library: Type and Updated fold into the line under the title. */
-  col.c-type, col.c-when, th.c-type, td.c-type, th.c-when, td.c-when { display: none; }
+  /* The Library: Type and Updated fold into the line under the title, and
+     Unsorted's nearest interest under the document's name. */
+  col.c-type, col.c-when, th.c-type, td.c-type, th.c-when, td.c-when,
+  col.c-nearest, th.c-nearest, td.c-nearest { display: none; }
+  .nearest-sub { display: flex; }
   table.data th, table.data td { padding-left: var(--s3); padding-right: var(--s3); }
   col.c-state { width: 5.75rem; }
   .doc-sub .narrow { display: inline; }

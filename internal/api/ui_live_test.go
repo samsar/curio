@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"html"
 	"log/slog"
 	"maps"
@@ -24,9 +25,11 @@ import (
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/ui/uitest"
 )
 
 // These tests drive the pages' live parts over the real API: what each
@@ -166,7 +169,7 @@ func (i readInsights) TopGroups(ctx context.Context, runID string, limit, offset
 }
 
 func (i readInsights) NestedGroups(ctx context.Context, runID string, limit, offset int) ([]store.InterestGroup, error) {
-	i.r.add("interests")
+	i.r.add("nested groups")
 	return i.InsightStore.NestedGroups(ctx, runID, limit, offset)
 }
 
@@ -208,6 +211,36 @@ func (i readInsights) RunLineage(ctx context.Context, runID string) ([]store.Lin
 func (i readInsights) GetInterests(ctx context.Context, tenantID string, ids []string) ([]store.Interest, error) {
 	i.r.add("identities")
 	return i.InsightStore.GetInterests(ctx, tenantID, ids)
+}
+
+func (i readInsights) GetInterest(ctx context.Context, id string) (*store.Interest, error) {
+	i.r.add("identity")
+	return i.InsightStore.GetInterest(ctx, id)
+}
+
+func (i readInsights) Successors(ctx context.Context, runID, oldID string) ([]store.LineageRow, error) {
+	i.r.add("successors")
+	return i.InsightStore.Successors(ctx, runID, oldID)
+}
+
+func (i readInsights) Unsorted(ctx context.Context, runID string, limit, offset int) ([]store.InterestAssignment, error) {
+	i.r.add("unsorted")
+	return i.InsightStore.Unsorted(ctx, runID, limit, offset)
+}
+
+func (i readInsights) CreatedBy(ctx context.Context, runID string) ([]store.Interest, error) {
+	i.r.add("created")
+	return i.InsightStore.CreatedBy(ctx, runID)
+}
+
+func (i readInsights) RetiredBy(ctx context.Context, tenantID, runID string) ([]store.Interest, error) {
+	i.r.add("retired")
+	return i.InsightStore.RetiredBy(ctx, tenantID, runID)
+}
+
+func (i readInsights) DocumentPlace(ctx context.Context, runID, documentID string) (*store.DocumentPlace, error) {
+	i.r.add("place")
+	return i.InsightStore.DocumentPlace(ctx, runID, documentID)
 }
 
 type readChunks struct {
@@ -609,8 +642,9 @@ func TestUI_DocumentPoll(t *testing.T) {
 }
 
 // TestUI_DocumentReads: the page reads the document, its text, related
-// documents, bookmarks and jobs; its poll the document and its jobs alone,
-// never the text, related documents or bookmarks. The jobs are asked for
+// documents, bookmarks and jobs, and its place in the interests (the
+// latest run, then one read of the place); its poll the document and its
+// jobs alone, never the text, related documents, bookmarks or place. The jobs are asked for
 // by document, a page of them and one more. A poll it doesn't take, or
 // without a baseline, is a 400 that reads nothing.
 func TestUI_DocumentReads(t *testing.T) {
@@ -618,8 +652,10 @@ func TestUI_DocumentReads(t *testing.T) {
 	srv := apitest.Start(t, countReads(r))
 	doc := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
 	srv.AddContent(t, doc, "# A\n\nthe text")
+	srv.AddInterest(t, "Kafka", doc)
 	page := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
-	assert.Equal(t, map[string]int{"document": 1, "extraction": 1, "related": 1, "bookmarks": 1, "jobs": 1}, r.take())
+	assert.Equal(t, map[string]int{"document": 1, "extraction": 1, "related": 1, "bookmarks": 1, "jobs": 1,
+		"done run": 1, "place": 1}, r.take(), "its line in the interests: the latest run, and the document's place")
 	require.Len(t, r.jobs, 1)
 	assert.Equal(t, doc.ID, r.jobs[0].DocumentID)
 	assert.GreaterOrEqual(t, r.jobs[0].Limit, 2, "a page of jobs and one more")
@@ -762,14 +798,16 @@ func TestUI_FailuresRefetch(t *testing.T) {
 	assert.Zero(t, n, "a stale repeat finds nothing to queue")
 }
 
-// TestUI_InterestsRebuild: the Rebuild button, disabled while a rebuild is
-// queued or running; the state of one, and why the queue holds it; then
-// what the newest run came to: its interests ready to load, or its
-// failure. The poller polls every 2 seconds exactly while one is in
-// flight.
+// TestUI_InterestsRebuild: the Rebuild button, disabled while the queue
+// holds a rebuild; the queue's state of one, and why it holds it; newer
+// interests offered on a poll. The poller polls every 2 seconds while a
+// rebuild is in flight and every 30 otherwise. A failure is the
+// scheduler's to report: a failed run, as a shutdown leaves one, says
+// nothing while the scheduler says the rebuilds are current.
 func TestUI_InterestsRebuild(t *testing.T) {
 	ctx := context.Background()
 	srv := apitest.Start(t)
+	srv.Scheduler.Set(insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: time.Now(), RebuildAt: 20})
 	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
 	srv.AddInterest(t, "Kafka", a)
 
@@ -778,7 +816,8 @@ func TestUI_InterestsRebuild(t *testing.T) {
 	require.NotNil(t, rebuild)
 	assert.Equal(t, "/v1/interests/rebuild", attr(rebuild, "data-path"))
 	assert.False(t, hasAttribute(rebuild, "aria-disabled"))
-	assert.Equal(t, "curio:changed from:body", pollerTrigger(t, body, "rebuild-poll"))
+	assert.Equal(t, "every 30s, curio:changed from:body", pollerTrigger(t, body, "rebuild-poll"),
+		"a rebuild the scheduler queues reaches an open page")
 	href := pollerHref(t, body, "rebuild-state")
 
 	job := enqueueRebuild(t, srv)
@@ -801,15 +840,130 @@ func TestUI_InterestsRebuild(t *testing.T) {
 	srv.AddInterest(t, "Kafka streams", a)
 	answer = getPage(t, srv, href, http.StatusOK)
 	assert.Contains(t, answer, `<p>New interests are ready: <a id="rebuild-reload" href="/ui/interests">reload</a></p>`)
-	assert.Equal(t, "curio:changed from:body", pollerTrigger(t, answer, "rebuild-poll"), "nothing in flight")
+	assert.Equal(t, "every 30s, curio:changed from:body", pollerTrigger(t, answer, "rebuild-poll"), "nothing in flight")
 	assert.Equal(t, href, pollerHref(t, answer, "rebuild-state"),
 		"the answer's poller still carries the run the page shows, not the newer one")
 
-	srv.AddFailedRun(t, "cluster: label: <ollama> unreachable")
+	srv.AddFailedRun(t, "cluster: context canceled")
 	body = getPage(t, srv, "/ui/interests", http.StatusOK)
 	assert.Contains(t, body, "Kafka streams", "the latest done run's interests")
-	assert.Contains(t, body, `The rebuild failed: cluster: label: &lt;ollama&gt; unreachable</p>`,
-		"a failure newer than the interests shown, reported on the page")
+	assert.NotContains(t, body, "failed", "a run a shutdown failed is no failure the scheduler counts")
+	assert.Regexp(t, `<p class="interests-state tone-ok">rebuilt <time[^>]*>just now</time> · 0 documents changed, next at 20</p>`,
+		body)
+}
+
+// TestUI_InterestsStates: the Interests' head, and its poll's answer, say
+// where automatic rebuilds stand as the scheduler's snapshot has it, each
+// state in the sentence curio status prints, escaped: held with its fix;
+// failing with its error, cut and whole on hover, though no failed run is
+// stored, and when it retries; due, the first, owed fresh for each reason,
+// or by count; current; none; nothing while unknown. Rebuild stays on
+// while rebuilds are held or failing.
+func TestUI_InterestsStates(t *testing.T) {
+	srv := apitest.Start(t)
+	srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/a", store.DocStateFetched))
+	href := pollerHref(t, getPage(t, srv, "/ui/interests", http.StatusOK), "rebuild-state")
+	now := time.Now()
+	long := strings.Repeat("x", 280) + `<script>alert(1)</script>"`
+	for _, tc := range []struct {
+		name string
+		snap insight.Snapshot
+		want string // a regexp
+	}{
+		{"held", insight.Snapshot{State: insight.StateHeld, HeldReason: "the embedding model's digest <changed>"},
+			`<p class="interests-state tone-warn">rebuilds held: the embedding model&#39;s digest &lt;changed&gt;; ` +
+				`run <code>curio reindex --all</code></p>`},
+		{"failing, retrying later", insight.Snapshot{State: insight.StateFailing, LastError: long,
+			RetryAt: now.Add(15 * time.Minute)},
+			`<p class="interests-state tone-warn">the last rebuild failed: <span class="state-error" title="x{280}&lt;script&gt;` +
+				`alert\(1\)&lt;/script&gt;&#34;">x{280}&lt;script&gt;alert\(1\)&lt;/sc…</span>; retrying <time[^>]*>in 1[45] min</time></p>`},
+		{"failing, its backoff past", insight.Snapshot{State: insight.StateFailing, LastError: "boom",
+			RetryAt: now.Add(-time.Minute)}, `the last rebuild failed: <span class="state-error" title="boom">boom</span>; ` +
+			`retrying once the library settles</p>`},
+		{"the first due", insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20},
+			`>the first grouping is due \(25 documents indexed\): waiting for the library to settle</p>`},
+		{"due after a reindex", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
+			FreshOwed: string(store.FreshReindex)}, `>a fresh rebuild is due: waiting for the re-embedding to finish</p>`},
+		{"due, asked for", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
+			FreshOwed: string(store.FreshManual)}, `>a fresh rebuild is due \(asked for\): waiting for the library to settle</p>`},
+		{"due, the params changed", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
+			FreshOwed: insight.FreshParams},
+			`>a fresh rebuild is due \(the grouping&#39;s parameters changed\): waiting for the library to settle</p>`},
+		{"due", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now, Changed: 300, RebuildAt: 263},
+			`>a rebuild is due \(300 changed, threshold 263\): waiting for the library to settle</p>`},
+		{"current", insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: now.Add(-2 * time.Hour),
+			LastKind: store.RunKindWarm, Changed: 37, RebuildAt: 263},
+			`<p class="interests-state tone-ok">rebuilt <time[^>]*>2 h ago</time> \(warm\) · 37 documents changed, next at 263</p>`},
+		{"none", insight.Snapshot{State: insight.StateNone, Changed: 7, RebuildAt: 20},
+			`>waiting for 20 indexed documents \(7 so far\)</p>`},
+		{"unknown", insight.Snapshot{State: insight.StateUnknown}, `<div class="rebuild-state" id="rebuild-state"></div>`},
+		{"queued, the queue holding none", insight.Snapshot{State: insight.StateQueued},
+			`<div class="rebuild-state" id="rebuild-state"></div>`},
+	} {
+		srv.Scheduler.Set(tc.snap)
+		for _, path := range []string{"/ui/interests", href} {
+			body := getPage(t, srv, path, http.StatusOK)
+			uitest.AssertInert(t, body)
+			assert.Regexp(t, tc.want, body, "%s: %s", tc.name, path)
+			assert.NotContains(t, body, "<script>alert", tc.name)
+			assert.False(t, hasAttribute(elementByID(pageDoc(t, body), "rebuild"), "aria-disabled"),
+				"%s: a rebuild asked for isn't held, and retries a failure now", tc.name)
+		}
+	}
+	var failed int
+	require.NoError(t, srv.DB.QueryRow(`SELECT count(*) FROM interest_runs WHERE status = 'failed'`).Scan(&failed))
+	assert.Zero(t, failed, "the failures shown are the scheduler's, with no failed run")
+
+	off := apitest.Start(t, func(d *api.Deps) { d.InsightEnabled = false })
+	body := getPage(t, off, "/ui/interests", http.StatusOK)
+	assert.Contains(t, body, `<div class="rebuild-state" id="rebuild-state"></div>`)
+	assert.Equal(t, "curio:changed from:body", pollerTrigger(t, body, "rebuild-poll"), "insight off: nothing to follow")
+}
+
+// TestUI_InterestsFirstGrouping: before the first rebuild is done, the
+// empty page follows the scheduler's state at load: grouped for the first
+// time while one is queued or running, due, waiting for documents, held,
+// or failing.
+func TestUI_InterestsFirstGrouping(t *testing.T) {
+	srv := apitest.Start(t)
+	for _, tc := range []struct {
+		snap insight.Snapshot
+		want string
+	}{
+		{insight.Snapshot{State: insight.StateQueued}, "<h2>Your library is being grouped for the first time</h2>"},
+		{insight.Snapshot{State: insight.StateRebuilding}, "<h2>Your library is being grouped for the first time</h2>"},
+		{insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20},
+			"The first grouping is due (25 documents indexed), and starts once the library settles."},
+		{insight.Snapshot{State: insight.StateNone, Changed: 7, RebuildAt: 20},
+			"once 20 documents are indexed; 7 are so far."},
+		{insight.Snapshot{State: insight.StateHeld, HeldReason: "the embeddings <drifted>"},
+			"Grouping is held: the embeddings &lt;drifted&gt;. Run <code>curio reindex --all</code>"},
+		{insight.Snapshot{State: insight.StateFailing, LastError: "label: <boom>"},
+			`The first grouping failed: <span class="state-error" title="label: &lt;boom&gt;">label: &lt;boom&gt;</span>.`},
+	} {
+		srv.Scheduler.Set(tc.snap)
+		assert.Contains(t, getPage(t, srv, "/ui/interests", http.StatusOK), tc.want, tc.snap.State)
+	}
+}
+
+// TestUI_InterestsClickRace: a rebuild asked for through the API while the
+// scheduler's snapshot still says current is queued on the very next poll,
+// which the queue answers: the button disabled, polling every 2 seconds.
+func TestUI_InterestsClickRace(t *testing.T) {
+	srv := apitest.Start(t)
+	current := insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: time.Now(), RebuildAt: 20}
+	srv.Scheduler.Set(current)
+	srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/a", store.DocStateFetched))
+	body := getPage(t, srv, "/ui/interests", http.StatusOK)
+	status, _ := postChange(t, srv, elementByID(pageDoc(t, body), "rebuild"))
+	require.Equal(t, http.StatusAccepted, status)
+	require.Equal(t, current, srv.Scheduler.Snapshot(), "the scheduler hasn't checked since")
+	assert.Equal(t, 1, srv.Scheduler.Kicks())
+
+	answer := getPage(t, srv, pollerHref(t, body, "rebuild-state"), http.StatusOK)
+	assert.Contains(t, answer, `<div class="rebuild-state" id="rebuild-state"><p>Rebuild queued</p></div>`)
+	assert.Equal(t, "true", attr(elementByID(pageDoc(t, answer), "rebuild"), "aria-disabled"))
+	assert.Equal(t, "every 2s, curio:changed from:body", pollerTrigger(t, answer, "rebuild-poll"))
 }
 
 // TestUI_InterestsRebuildPaged: past the first page, and past the last,
@@ -845,56 +999,73 @@ func TestUI_InterestsRebuildPaged(t *testing.T) {
 // TestUI_InterestsReads: the page reads a page of the top-level groups
 // and the run's placement counts; then, for interests, each card's
 // members and all their documents at once, and for areas their interests
-// in one read, without members; and the rebuild's state. A page past the
-// last reads no member; its poll reads the rebuild's state alone: the
-// queue and the newest run, never the interests. A running rebuild's
-// start is its one job read. An interest's page reads it, its run, its
-// members, the documents placed into it, their documents, and its
-// lineage, once each; an area's, its interests in one read. The search
-// home reads the run's largest groups and nothing of them.
+// in one read, without members; and the queue, never the newest run. A
+// page past the last reads no member; its poll reads the queue and the
+// latest done run, never the interests. A running rebuild's start is its
+// one job read. An interest's page reads it, its run, its members (and
+// loose fits), on its first page alone the documents placed into it, their
+// documents, and its lineage, once each; an area's, its interests in one
+// read and a page of their members. The search home reads the run's
+// largest groups and nothing of them.
 func TestUI_InterestsReads(t *testing.T) {
 	r := &reads{}
 	srv := apitest.Start(t, countReads(r))
 	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
 	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
-	flat := srv.AddInterests(t, apitest.Interest{Label: "Kafka", Size: 2, Members: []*store.Document{a, b}},
+	c := srv.AddDocument(t, "https://example.com/c", store.DocStateFetched)
+	flat := srv.AddInterests(t, apitest.Interest{Label: "Big", Size: 60, Members: []*store.Document{c}},
+		apitest.Interest{Label: "Kafka", Size: 2, Members: []*store.Document{a, b}},
 		apitest.Interest{Label: "Go", Size: 1}, apitest.Interest{Label: "Rust", Size: 1})
 	r.take()
 	body := getPage(t, srv, "/ui/interests", http.StatusOK)
-	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "new counts": 1, "members": 3, "member documents": 1,
-		"queue": 1, "newest run": 1}, r.take(), "no document or extraction read one by one")
+	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "new counts": 1, "members": 4, "member documents": 1,
+		"queue": 1}, r.take(), "no document read one by one, and no newest run")
 
 	getPage(t, srv, "/ui/interests?page=2", http.StatusNotFound)
-	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "new counts": 1, "queue": 1, "newest run": 1}, r.take())
+	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "new counts": 1, "queue": 1}, r.take())
 	getPage(t, srv, "/ui/interests?page=x", http.StatusBadRequest)
 	assert.Empty(t, r.take())
 
 	interest := map[string]int{"done run": 1, "interest": 1, "run": 1, "new counts": 1, "members": 1,
 		"new members": 1, "lineage": 1, "identities": 1}
-	getPage(t, srv, "/ui/interests/"+flat.Interests[0], http.StatusOK)
-	assert.Equal(t, with(interest, "member documents", 1), r.take())
 	getPage(t, srv, "/ui/interests/"+flat.Interests[1], http.StatusOK)
+	assert.Equal(t, with(interest, "member documents", 1), r.take())
+	getPage(t, srv, "/ui/interests/"+flat.Interests[2], http.StatusOK)
 	assert.Equal(t, interest, r.take(), "no member, no document read")
-	getPage(t, srv, "/ui/interests/"+flat.Interests[0]+"?page=2", http.StatusNotFound)
-	assert.Equal(t, with(interest, "members", 0), r.take(), "past its members, none read")
-	getPage(t, srv, "/ui/interests/"+flat.Interests[0]+"?page=x", http.StatusBadRequest)
+	getPage(t, srv, "/ui/interests/"+flat.Interests[0]+"?page=2", http.StatusOK)
+	assert.Equal(t, with(interest, "new members", 0), r.take(), "the documents placed since: the first page's")
+	getPage(t, srv, "/ui/interests/"+flat.Interests[1]+"?page=2", http.StatusNotFound)
+	assert.Equal(t, with(with(interest, "members", 0), "new members", 0), r.take(), "past its members, none read")
+	getPage(t, srv, "/ui/interests/"+flat.Interests[1]+"?page=x", http.StatusBadRequest)
 	assert.Empty(t, r.take())
 
 	href := pollerHref(t, body, "rebuild-state")
 	getPage(t, srv, href, http.StatusOK)
-	assert.Equal(t, map[string]int{"queue": 1, "newest run": 1}, r.take())
+	assert.Equal(t, map[string]int{"queue": 1, "done run": 1}, r.take())
 	getPage(t, srv, href+"&page=x", http.StatusOK)
-	assert.Equal(t, map[string]int{"queue": 1, "newest run": 1}, r.take(), "a poll ignores the page")
+	assert.Equal(t, map[string]int{"queue": 1, "done run": 1}, r.take(), "a poll ignores the page")
+
+	loose := srv.AddInterests(t, apitest.Interest{Label: "Kafka", Members: []*store.Document{a, b},
+		Loose: []*store.Document{c}})
+	r.take()
+	getPage(t, srv, "/ui/interests/"+loose.Interests[0], http.StatusOK)
+	assert.Equal(t, with(with(interest, "members", 2), "member documents", 1), r.take(),
+		"the members, then the loose fits on the page, their documents in one read")
 
 	areas := srv.AddAreas(t, apitest.Area{Label: "Streams", Interests: []apitest.Interest{
 		{Label: "Kafka", Members: []*store.Document{a}}, {Label: "Flink", Members: []*store.Document{b}}}})
 	r.take()
 	getPage(t, srv, "/ui/interests", http.StatusOK)
-	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "new counts": 1, "children": 1, "queue": 1,
-		"newest run": 1}, r.take(), "an area card names its interests, never their members")
+	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "new counts": 1, "children": 1, "queue": 1}, r.take(),
+		"an area card names its interests, never their members")
+	area := map[string]int{"done run": 1, "interest": 1, "run": 1, "new counts": 1, "children": 1, "members": 2,
+		"member documents": 1, "lineage": 1, "identities": 1}
 	getPage(t, srv, "/ui/interests/"+areas.Areas[0], http.StatusOK)
-	assert.Equal(t, map[string]int{"done run": 1, "interest": 1, "run": 1, "new counts": 1, "children": 1,
-		"members": 2, "member documents": 1, "lineage": 1, "identities": 1}, r.take())
+	assert.Equal(t, area, r.take())
+	getPage(t, srv, "/ui/interests/"+areas.Areas[0]+"?page=2", http.StatusNotFound)
+	assert.Equal(t, with(with(area, "members", 0), "member documents", 0), r.take(), "past its interests, no member read")
+	getPage(t, srv, "/ui/interests/"+areas.Areas[0]+"?page=x", http.StatusBadRequest)
+	assert.Empty(t, r.take())
 	getPage(t, srv, "/ui/", http.StatusOK)
 	assert.Equal(t, map[string]int{"stats": 1, "done run": 1, "interests": 1}, r.take(),
 		"the search home names the areas, never reading their interests or what was placed into them")
@@ -904,13 +1075,81 @@ func TestUI_InterestsReads(t *testing.T) {
 	require.NoError(t, err)
 	r.jobs = nil
 	getPage(t, srv, href, http.StatusOK)
-	assert.Equal(t, map[string]int{"queue": 1, "newest run": 1, "jobs": 1}, r.take())
+	assert.Equal(t, map[string]int{"queue": 1, "done run": 1, "jobs": 1}, r.take())
 	require.Len(t, r.jobs, 1)
 	assert.Equal(t, store.ListJobsOpts{Kind: store.JobKindCluster, Status: store.JobStatusRunning, Limit: 2}, r.jobs[0],
 		"the running one, never the queued")
 
 	getPage(t, srv, "/ui/interests?poll=jobs", http.StatusBadRequest)
 	assert.Empty(t, r.take())
+}
+
+// TestUI_UnsortedReads: Unsorted's page reads the latest run, a page of
+// its unsorted documents, the documents placed there since and the
+// counts, and every document at once; past the last, no document; a page
+// that isn't a number, nothing.
+func TestUI_UnsortedReads(t *testing.T) {
+	r := &reads{}
+	srv := apitest.Start(t, countReads(r))
+	docs := make([]*store.Document, 3)
+	for i := range docs {
+		docs[i] = srv.AddDocument(t, fmt.Sprintf("https://example.com/%d", i), store.DocStateFetched)
+	}
+	run := srv.AddRun(t, apitest.RunSpec{Interests: []apitest.Interest{{Label: "Kafka", Members: docs[:1]}},
+		Unsorted: docs[1:2]})
+	srv.Place(t, run, "", docs[2])
+	r.take()
+	getPage(t, srv, "/ui/interests/unsorted", http.StatusOK)
+	page := map[string]int{"done run": 1, "unsorted": 1, "new members": 1, "new counts": 1, "member documents": 1}
+	assert.Equal(t, page, r.take())
+	getPage(t, srv, "/ui/interests/unsorted?page=2&run="+run.ID, http.StatusNotFound)
+	assert.Equal(t, page, r.take(), "past the last: the documents placed there, read with the page's")
+	getPage(t, srv, "/ui/interests/unsorted?page=x", http.StatusBadRequest)
+	assert.Empty(t, r.take())
+}
+
+// TestUI_ChangesReads: the changes page reads the latest run, its lineage,
+// the identities it created and retired, and the identities its events
+// name, once each; the interests' areas only when it moved one.
+func TestUI_ChangesReads(t *testing.T) {
+	r := &reads{}
+	srv := apitest.Start(t, countReads(r))
+	d := make([]*store.Document, 4)
+	for i := range d {
+		d[i] = srv.AddDocument(t, fmt.Sprintf("https://example.com/%d", i), store.DocStateFetched)
+	}
+	first := srv.AddAreas(t, apitest.Area{Label: "Streams", Interests: []apitest.Interest{
+		{Label: "Kafka", Members: d[:2]}, {Label: "Flink", Members: d[2:3]}}},
+		apitest.Area{Label: "Money", Interests: []apitest.Interest{{Label: "Bonds", Members: d[3:]}}})
+	split := srv.SplitInterest(t, first, first.Interests[0], apitest.Interest{Label: "Kafka Connect", Members: d[:1]},
+		apitest.Interest{Label: "Kafka Streams", Members: d[1:2]})
+	r.take()
+	changes := map[string]int{"done run": 1, "lineage": 1, "created": 1, "retired": 1, "identities": 1}
+	getPage(t, srv, "/ui/interests/changes", http.StatusOK)
+	assert.Equal(t, changes, r.take())
+
+	srv.MoveInterest(t, split, split.Interests[2], split.Areas[1])
+	r.take()
+	getPage(t, srv, "/ui/interests/changes", http.StatusOK)
+	assert.Equal(t, with(changes, "nested groups", 1), r.take(), "the area a moved interest is in now")
+}
+
+// TestUI_GoneReads: a retired interest's page reads the latest run, misses
+// the group, then reads the identity, its successors and theirs; an ID
+// nothing knows stops at the identity.
+func TestUI_GoneReads(t *testing.T) {
+	r := &reads{}
+	srv := apitest.Start(t, countReads(r))
+	d := []*store.Document{srv.AddDocument(t, "https://example.com/a", store.DocStateFetched),
+		srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)}
+	first := srv.AddInterests(t, apitest.Interest{Label: "Kafka", Members: d})
+	srv.SplitInterest(t, first, first.Interests[0], apitest.Interest{Label: "A", Members: d[:1]},
+		apitest.Interest{Label: "B", Members: d[1:]})
+	r.take()
+	getPage(t, srv, "/ui/interests/"+first.Interests[0], http.StatusGone)
+	assert.Equal(t, map[string]int{"done run": 1, "interest": 1, "identity": 1, "successors": 1, "identities": 1}, r.take())
+	getPage(t, srv, "/ui/interests/00000000-0000-0000-0000-000000000000", http.StatusNotFound)
+	assert.Equal(t, map[string]int{"done run": 1, "interest": 1, "identity": 1}, r.take())
 }
 
 // with is reads with name's count set to n, none when n is 0.

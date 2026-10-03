@@ -185,27 +185,35 @@ the page can't remove one; the newest request is the one answered.
 {{- end}}
 
 {{/*
-Cards of areas or interests, as the Interests page and an area's page
-list them: an area names its largest interests and their sizes, an
-interest its most similar members.
+Cards of areas or interests, as an area's page lists them; the Interests
+page lists its items with Unsorted's card after them.
 */}}
 {{define "interest-cards" -}}
 <ul class="interest-grid" role="list">
-{{range .}}<li class="card interest">{{if .Area}}{{template "area-card" .}}{{else}}{{template "interest-card" .}}{{end}}</li>
+{{range .}}{{template "interest-item" .}}
 {{end}}</ul>
 {{- end}}
 
+{{/*
+An area's or an interest's card: an area names its largest interests,
+each with its size and a bar scaled to the largest, and leads to the rest;
+an interest shows its most similar members.
+*/}}
+{{define "interest-item" -}}
+<li class="card interest">{{if .Area}}{{template "area-card" .}}{{else}}{{template "interest-card" .}}{{end}}</li>
+{{- end}}
+
 {{define "area-card" -}}
-<h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled area</span>{{end}}</a></h2>
-<div class="stats"><span><b>{{num .Size}}</b> documents</span><span><b>{{num .NumChildren}}</b> {{if eq .NumChildren 1}}interest{{else}}interests{{end}}</span>{{template "cohesion" .Cohesion}}</div>
+<h2>{{template "icon" "layers"}}<a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled area</span>{{end}}</a></h2>
+<div class="stats"><span><b>{{num .Size}}</b> documents</span><span><b>{{num .NumChildren}}</b> {{if eq .NumChildren 1}}interest{{else}}interests{{end}}</span>{{with .New}}<span class="new"><b>{{num .}}</b> new</span>{{end}}</div>
 {{with .Summary}}<p class="summary">{{.}}</p>{{end}}
-{{with .Children}}<ul class="members children">{{range .}}<li><a href="{{interestHref .ID}}"{{with .Label}} title="{{.}}"{{end}}>{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a><span class="n">{{num .Size}}</span></li>{{end}}</ul>{{end}}
-<a class="all" href="{{interestHref .ID}}">All {{num .NumChildren}} {{if eq .NumChildren 1}}interest{{else}}interests{{end}} →</a>
+{{with .Children}}<ul class="members children">{{range .}}<li><a href="{{interestHref .ID}}" title="{{.Name}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a>{{template "stackbar" (childBar .Size $.Largest)}}<span class="n">{{num .Size}}</span></li>{{end}}</ul>{{end}}
+<a class="all" href="{{interestHref .ID}}">{{with .MoreChildren}}+ {{count . "more interest" "more interests"}}{{else}}All {{count .NumChildren "interest" "interests"}}{{end}} →</a>
 {{- end}}
 
 {{define "interest-card" -}}
 <h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a></h2>
-<div class="stats"><span><b>{{num .Size}}</b> documents</span>{{template "cohesion" .Cohesion}}</div>
+<div class="stats"><span><b>{{num .Size}}</b> documents</span>{{with .Loose}}<span><b>{{num .}}</b> {{if eq . 1}}loose fit{{else}}loose fits{{end}}</span>{{end}}{{with .New}}<span class="new"><b>{{num .}}</b> new</span>{{end}}{{template "cohesion" .Cohesion}}</div>
 {{with .Summary}}<p class="summary">{{.}}</p>{{end}}
 {{with .Members}}<ul class="members">{{range .}}{{with .Ref}}<li><a{{with .Class}} class="{{.}}"{{end}} href="{{documentHref .ID}}" title="{{.Hover}}">{{.Name}}</a></li>{{end}}{{end}}</ul>{{end}}
 <a class="all" href="{{interestHref .ID}}">All {{num .Size}} documents →</a>
@@ -214,4 +222,67 @@ interest its most similar members.
 {{/* An interest's cohesion: how alike its documents are, from 0 to 1. */}}
 {{define "cohesion" -}}
 <span class="meter-row" title="Cohesion: how alike its documents are"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>{{printf "%.2f" .}}</span>
+{{- end}}
+
+{{/* A document's similarity to an interest, from 0 to 1. */}}
+{{define "similarity" -}}
+<span class="meter-row"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>{{printf "%.2f" .}}</span>
+{{- end}}
+
+{{/* A day a rebuild ran, on the daemon's clock, its time on hover. */}}
+{{define "date" -}}
+<time datetime="{{datetime .}}" title="{{when .}}">{{localDay .}}</time>
+{{- end}}
+
+{{/*
+An InterestRef, or nothing for nil: its label on one line, cut, whole on
+hover, or what an unlabeled one is called, linking to its page; a retired
+one is marked, and its page says what became of it.
+*/}}
+{{define "interest-ref" -}}
+{{with .}}<a class="ref" href="{{interestHref .ID}}" title="{{.Name}}">{{if .Label}}{{.Label}}{{else}}<span class="unlabeled">{{.Name}}</span>{{end}}</a>{{if .Retired}} <span class="tag">retired</span>{{end}}{{end}}
+{{- end}}
+
+{{/*
+Where automatic rebuilds of the interests stand, an InterestsState, in the
+sentence curio status prints for it, its times as <time>s: lower case, as
+Status's rows read; the Interests' head starts it with a capital. Phrasing
+alone, so it sits inside a line of either.
+*/}}
+{{define "interests-state" -}}
+{{if eq .State "unknown"}}the daemon hasn't checked them yet
+{{- else if eq .State "off"}}off (insight.enabled: false)
+{{- else if eq .State "none"}}waiting for {{num .RebuildAt}} indexed documents ({{num .Changed}} so far)
+{{- else if eq .State "due"}}{{template "interests-due" .}}
+{{- else if eq .State "queued"}}a rebuild is queued
+{{- else if eq .State "rebuilding"}}rebuilding
+{{- else if eq .State "held"}}rebuilds held: {{.HeldReason}}; run <code>curio reindex --all</code>
+{{- else if eq .State "failing"}}the last rebuild failed: <span class="state-error" title="{{.LastError}}">{{shortError .LastError}}</span>; {{if .Retrying}}retrying {{template "reltime" .RetryAt}}{{else}}retrying once the library settles{{end}}
+{{- else}}rebuilt{{if not .LastRebuildAt.IsZero}} {{template "reltime" .LastRebuildAt}}{{end}}{{with .LastKind}} ({{.}}){{end}} · {{count .Changed "document" "documents"}} changed, next at {{num .RebuildAt}}{{end}}
+{{- end}}
+
+{{/* A rebuild that is due, and what it waits for. */}}
+{{define "interests-due" -}}
+{{if .LastRebuildAt.IsZero}}the first grouping is due ({{count .Changed "document" "documents"}} indexed): waiting for the library to settle
+{{- else if eq .FreshOwed "reindex"}}a fresh rebuild is due: waiting for the re-embedding to finish
+{{- else if .FreshOwed}}a fresh rebuild is due ({{freshReason .FreshOwed}}): waiting for the library to settle
+{{- else}}a rebuild is due ({{num .Changed}} changed, threshold {{num .RebuildAt}}): waiting for the library to settle{{end}}
+{{- end}}
+
+{{/*
+A NewBand: the documents placed since the rebuild, newest first, each
+tagged new and unranked, named as the Library names them, with its
+similarity; and how many more there are.
+*/}}
+{{define "new-band" -}}
+<section class="band" aria-labelledby="new-band"><div class="band-head"><h2 id="new-band">New since the last rebuild</h2><p>Placed by similarity; the next rebuild decides.</p></div>
+<div class="table-scroll"><table class="data">
+<colgroup><col><col class="c-sim"></colgroup>
+<thead><tr><th scope="col">Document</th><th scope="col">Similarity</th></tr></thead>
+<tbody>
+{{range .Members}}<tr class="{{fitClass .Fit}}"><td>{{template "doc-cell" .Cell}}<span class="badge plain {{fitClass .Fit}}">new</span></td><td>{{template "similarity" .Similarity}}</td></tr>
+{{end}}</tbody>
+</table></div>
+{{with .More}}<p class="table-note">and {{num .}} more</p>{{end}}
+</section>
 {{- end}}

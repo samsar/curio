@@ -322,15 +322,92 @@ func causeBar(cause string, n, most int) []BarSegment {
 	return barSegments([]barPart{{value: n, class: class}}, most)
 }
 
-// coverageBar draws the share of a rebuild's documents that are members of
-// an interest.
-func coverageBar(documents, outside int) []BarSegment {
-	return barSegments([]barPart{{value: clustered(documents, outside), class: "fill-accent"}}, documents)
+// coverageBar draws a run's coverage parts, in order, as shares of total,
+// each filled in its tone, but for the track's own: the part the bar
+// leaves over.
+func coverageBar(parts []CoveragePart, total int) []BarSegment {
+	bar := make([]barPart, 0, len(parts))
+	for _, p := range parts {
+		if p.Tone != toneTrack {
+			bar = append(bar, barPart{value: p.Count, class: "fill-" + p.Tone})
+		}
+	}
+	return barSegments(bar, total)
 }
 
-// clustered is how many of a run's documents are members of an interest:
-// those outside every one (loose fits and the unsorted) aside.
-func clustered(documents, outside int) int { return min(max(documents-outside, 0), max(documents, 0)) }
+// childBar draws an area's interest of size documents as a bar scaled to
+// largest, its largest interest's size: none when either is 0 or less.
+func childBar(size, largest int) []BarSegment {
+	return barSegments([]barPart{{value: size, class: "fill-accent"}}, largest)
+}
+
+// fitClass is the class of a document of fit in the interests (a member,
+// a loose fit, unsorted, or placed since the rebuild), or "" for a value
+// that isn't one: a class never comes from a stored string.
+func fitClass(fit string) string {
+	switch fit {
+	case fitMember, fitLoose, fitUnsorted, fitNew:
+		return "fit-" + fit
+	}
+	return ""
+}
+
+// eventLabel names a kind of rebuild event, as the changes page heads it;
+// one this build doesn't know is the other changes.
+func eventLabel(event string) string {
+	switch event {
+	case eventSplit:
+		return "Split"
+	case eventMerged:
+		return "Merged"
+	case eventMoved:
+		return "Moved"
+	case eventDissolved:
+		return "Dissolved"
+	case eventNew:
+		return "New"
+	}
+	return "Other changes"
+}
+
+// triggerLabel says what started a rebuild (store.RunTrigger), for people;
+// a value it doesn't know is shown as stored.
+func triggerLabel(trigger string) string {
+	switch store.RunTrigger(trigger) {
+	case store.RunTriggerFirst:
+		return "the library's first grouping"
+	case store.RunTriggerAuto:
+		return "automatic"
+	case store.RunTriggerManual:
+		return "asked for"
+	case store.RunTriggerReindex:
+		return "after a re-embedding"
+	case store.RunTriggerParams:
+		return "after the grouping's parameters changed"
+	case store.RunTriggerShape:
+		return "after the library's shape changed"
+	}
+	return trigger
+}
+
+// freshReason says why a fresh rebuild is owed, as curio status does; a
+// value it doesn't know is shown as stored.
+func freshReason(owed string) string {
+	switch owed {
+	case string(store.FreshManual):
+		return "asked for"
+	case freshParams:
+		return "the grouping's parameters changed"
+	}
+	return owed
+}
+
+// freshParams is the fresh rebuild owed when the grouping's parameters
+// changed (insight.FreshParams), which nothing stores.
+const freshParams = "params"
+
+// localDay is t's date on the daemon's clock: when a rebuild ran.
+func localDay(t time.Time) string { return t.Local().Format("Jan 2, 2006") }
 
 // throttleLabel is a throttle's name on its button.
 func throttleLabel(t store.Throttle) string {

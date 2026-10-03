@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/store"
 )
 
 func TestRelTime(t *testing.T) {
@@ -218,7 +219,6 @@ func TestPct(t *testing.T) {
 func TestBars(t *testing.T) {
 	assert.Empty(t, stateBar(nil), "no documents, no bar")
 	assert.Empty(t, stateBar([]Count{{Name: "fetched", Count: 0}, {Name: "failed", Count: -3}}))
-	assert.Empty(t, coverageBar(0, 0))
 	assert.Equal(t, []BarSegment{{Class: "fill-ok", X: "0.000", Width: "100.000"}},
 		stateBar([]Count{{Name: "failed", Count: -2}, {Name: "fetched", Count: 5}, {Name: evilAttr, Count: 9}}),
 		"one part is the whole bar; a negative part and a state that isn't one draw nothing")
@@ -243,10 +243,75 @@ func TestBars(t *testing.T) {
 	}
 	assert.Equal(t, 100_000, end, "ends at 100.000")
 
-	assert.Equal(t, []BarSegment{{Class: "fill-accent", X: "0.000", Width: "62.094"}}, coverageBar(3142, 1191))
-	assert.Empty(t, coverageBar(10, 10), "all noise")
-	assert.Equal(t, []BarSegment{{Class: "fill-accent", X: "0.000", Width: "100.000"}}, coverageBar(10, -5),
-		"never past the bar's end")
+}
+
+// TestCoverageBar: a run's documents and those placed since, in four
+// parts: members, loose fits and new, each where the last ended, and the
+// unsorted left to the track; the legend in the bar's order, the loose
+// fits and new only when there are any.
+func TestCoverageBar(t *testing.T) {
+	run := InterestRun{Documents: 3142, Loose: 191, Unsorted: 1000, New: 58}
+	assert.Equal(t, 1951, run.Members())
+	assert.Equal(t, 3200, run.CoverageTotal())
+	assert.Equal(t, []BarSegment{
+		{Class: "fill-accent", X: "0.000", Width: "60.969"},
+		{Class: "fill-accent-soft", X: "60.969", Width: "5.969"},
+		{Class: "fill-neutral", X: "66.938", Width: "1.812"},
+	}, run.Bar(), "the unsorted are the track's 31.25")
+	assert.Equal(t, []string{"accent", "accent-soft", "neutral", "track"}, tones(run.Legend()))
+	assert.Equal(t, []string{"loose fits", "loose fit"},
+		[]string{run.Legend()[1].Label(), CoveragePart{Count: 1, One: "loose fit", Many: "loose fits"}.Label()})
+
+	plain := InterestRun{Documents: 10, Unsorted: 4}
+	assert.Equal(t, []BarSegment{{Class: "fill-accent", X: "0.000", Width: "60.000"}}, plain.Bar())
+	assert.Equal(t, []string{"accent", "track"}, tones(plain.Legend()), "no loose fit or new document, no legend for them")
+
+	assert.Empty(t, InterestRun{}.Bar(), "nothing grouped, no bar")
+	assert.Empty(t, InterestRun{Documents: 10, Unsorted: 10}.Bar(), "all unsorted: the track")
+	assert.Zero(t, InterestRun{Documents: 3, Loose: 2, Unsorted: 4}.Members(), "never below none")
+}
+
+// tones are the parts' tones, in order.
+func tones(parts []CoveragePart) []string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, p.Tone)
+	}
+	return out
+}
+
+// TestChildBar: an area's interest is drawn against its largest, and a
+// largest of none draws nothing.
+func TestChildBar(t *testing.T) {
+	assert.Equal(t, []BarSegment{{Class: "fill-accent", X: "0.000", Width: "100.000"}}, childBar(86, 86))
+	assert.Equal(t, []BarSegment{{Class: "fill-accent", X: "0.000", Width: "50.000"}}, childBar(43, 86))
+	for _, tc := range []struct{ size, largest int }{{0, 86}, {5, 0}, {5, -1}} {
+		assert.Empty(t, childBar(tc.size, tc.largest), "%d of %d", tc.size, tc.largest)
+	}
+}
+
+// TestFixedSets: the classes and labels a page picks from a stored value
+// come from fixed sets; a value that isn't one gets no class, or reads as
+// stored where a label says so.
+func TestFixedSets(t *testing.T) {
+	for fit, want := range map[string]string{"member": "fit-member", "loose": "fit-loose", "unsorted": "fit-unsorted",
+		"new": "fit-new", evilAttr: "", "": ""} {
+		assert.Equal(t, want, fitClass(fit), fit)
+	}
+	for event, want := range map[string]string{"split": "Split", "merged": "Merged", "moved": "Moved",
+		"dissolved": "Dissolved", "new": "New", "kept": "Other changes", evilScript: "Other changes"} {
+		assert.Equal(t, want, eventLabel(event), event)
+	}
+	for _, trigger := range []store.RunTrigger{store.RunTriggerFirst, store.RunTriggerAuto, store.RunTriggerManual,
+		store.RunTriggerReindex, store.RunTriggerParams, store.RunTriggerShape} {
+		assert.NotEqual(t, string(trigger), triggerLabel(string(trigger)), "%s has words", trigger)
+	}
+	assert.Equal(t, evilScript, triggerLabel(evilScript), "one it doesn't know, as stored")
+	assert.Equal(t, "asked for", freshReason(string(store.FreshManual)))
+	assert.Equal(t, "the grouping's parameters changed", freshReason("params"))
+	assert.Equal(t, evilQuotes, freshReason(evilQuotes))
+	at := time.Date(2026, 10, 9, 23, 30, 0, 0, time.UTC)
+	assert.Equal(t, at.Local().Format("Jan 2, 2006"), localDay(at), "the daemon's day")
 }
 
 // TestCauseBar: a cause's bar is scaled to the cause with the most, dead

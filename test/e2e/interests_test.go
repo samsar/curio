@@ -28,10 +28,10 @@ func interestsTiming(settle time.Duration) string {
 	return fmt.Sprintf("interval=200ms,settle=%s,max_wait=30s,max_wait_first=30s", settle)
 }
 
-// topicWords give each page served its own vocabulary.
-var topicWords = strings.Fields("astronomy botany chemistry dentistry ecology forestry geology horology " +
-	"ichthyology journalism kinesiology linguistics mycology numismatics oceanography paleontology " +
-	"quantum robotics seismology topology urbanism virology woodworking xylography yachting zoology")
+// topicWords are what the pages served are about: page n about the n mod
+// 5th, so that every 20 pages hold 4 on each topic, enough for the
+// grouping to find interests among them.
+var topicWords = strings.Fields("astronomy botany chemistry dentistry ecology")
 
 // topicHTML is an article page about topic n, one of topicWords.
 func topicHTML(n int) string {
@@ -47,10 +47,19 @@ func topicHTML(n int) string {
 		title + "</h1>\n" + body.String() + "</article></body></html>"
 }
 
+// interestsEnv is a daemon on the interest timing, and the topic pages it
+// imports.
+type interestsEnv struct {
+	home  *curiohome.Home
+	ctl   *daemonctl.Controller
+	c     *client.Client
+	base  string // the daemon's URL
+	pages string // the topic pages' server's URL
+}
+
 // interestsDaemon starts a daemon for a new home on the interest timing,
-// serving topic pages at /topic/<n>, and returns its home, controller,
-// client and the pages' server URL.
-func interestsDaemon(t *testing.T, settle time.Duration) (*curiohome.Home, *daemonctl.Controller, *client.Client, string) {
+// serving topic pages at /topic/<n>.
+func interestsDaemon(t *testing.T, settle time.Duration) interestsEnv {
 	t.Helper()
 	t.Setenv("CURIO_E2E_INTERESTS", interestsTiming(settle))
 	_, ollamaURL := serveOllama(t, digestA, "0.34.4")
@@ -73,7 +82,7 @@ func interestsDaemon(t *testing.T, settle time.Duration) (*curiohome.Home, *daem
 		}
 	})
 	require.NoError(t, ctl.EnsureRunning(context.Background()), logTail(home))
-	return home, ctl, client.New("http://" + listen), pages.URL
+	return interestsEnv{home: home, ctl: ctl, c: client.New("http://" + listen), base: "http://" + listen, pages: pages.URL}
 }
 
 // importTopics imports the topic pages from first to last, inclusive.
@@ -98,11 +107,13 @@ func fetchedDocuments(c *client.Client) (int, error) {
 }
 
 // TestDaemon_AnImportIsGroupedUnasked: an import of 20 pages is grouped
-// once it settles, with no rebuild asked for: the first rebuild; and 5
-// more pages, 5% of 20 at the floor, are regrouped the same way.
+// once it settles, with no rebuild asked for: the first rebuild, which the
+// dashboard's interest pages show; and 5 more pages, 5% of 20 at the
+// floor, are regrouped the same way.
 func TestDaemon_AnImportIsGroupedUnasked(t *testing.T) {
 	ctx := context.Background()
-	home, ctl, c, pages := interestsDaemon(t, time.Second)
+	env := interestsDaemon(t, time.Second)
+	home, ctl, c, pages := env.home, env.ctl, env.c, env.pages
 
 	importTopics(t, c, pages, 0, 19)
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
@@ -116,6 +127,14 @@ func TestDaemon_AnImportIsGroupedUnasked(t *testing.T) {
 		require.NotNil(collect, health.Interests)
 		assert.Equal(collect, client.StateCurrent, health.Interests.State)
 	}, 30*time.Second, 50*time.Millisecond, "the first rebuild, unasked\n%s", logTail(home))
+	list, err := c.ListInterests(ctx, client.ListInterestsOpts{})
+	require.NoError(t, err)
+	require.NotEmpty(t, list.Items)
+	for _, path := range []string{"/ui/interests", "/ui/interests/" + list.Items[0].ID, "/ui/interests/unsorted",
+		"/ui/interests/changes"} {
+		_, body := getDashboard(t, env.base, path)
+		assert.Contains(t, body, `<a href="/ui/interests" aria-current="page">`, path)
+	}
 
 	importTopics(t, c, pages, 20, 24)
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
@@ -136,7 +155,8 @@ func TestDaemon_AnImportIsGroupedUnasked(t *testing.T) {
 // while the queue is paused waits, queued, and runs once it is resumed.
 func TestDaemon_APausedQueueHoldsTheRebuild(t *testing.T) {
 	ctx := context.Background()
-	home, ctl, c, pages := interestsDaemon(t, 3*time.Second)
+	env := interestsDaemon(t, 3*time.Second)
+	home, ctl, c, pages := env.home, env.ctl, env.c, env.pages
 
 	importTopics(t, c, pages, 0, 19)
 	require.Eventually(t, func() bool {

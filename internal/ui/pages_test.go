@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bytes"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"golang.org/x/net/html"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/ui/uitest"
 )
 
 // parse parses a rendered page.
@@ -214,7 +216,7 @@ func TestLibrary_Saved(t *testing.T) {
 // the page holds of them; the coverage bar's proportions are attributes.
 func interestsPage(page int) Interests {
 	v := Interests{Layout: Layout{Title: "Interests", Nav: NavInterests}, Page: page,
-		Run: &InterestRun{ID: "run-1", ComputedAt: time.Now(), Algo: "louvain", Shape: "flat", Documents: 3142,
+		Run: &InterestRun{ID: "run-1", ComputedAt: time.Now(), Kind: "warm", Shape: "flat", Documents: 3142,
 			Loose: 191, Unsorted: 1000, Interests: 222, Total: 222}}
 	for i := range min(InterestsPageSize, 222-PageOffset(page, InterestsPageSize)) {
 		v.Interests = append(v.Interests, Interest{ID: strconv.Itoa(i), Label: "Topic " + strconv.Itoa(i),
@@ -232,9 +234,12 @@ func TestInterests_Pages(t *testing.T) {
 	assert.Contains(t, out, `<p class="lede">222 interests curio found in your library, largest first.</p>`)
 	assert.NotContains(t, out, "largest;")
 	assert.Equal(t, InterestsPageSize, strings.Count(out, `<li class="card interest">`))
-	assert.Contains(t, out, `<rect class="fill-accent" x="0.000" y="0" width="62.094" height="10"/>`)
-	assert.Contains(t, out, `<span class="n">1,951</span> in an interest <span class="pct">62%</span>`)
-	assert.Contains(t, out, `<span class="n">1,191</span> in none <span class="pct">38%</span>`)
+	assert.Contains(t, out, `<rect class="fill-accent" x="0.000" y="0" width="62.094" height="10"/>`+
+		`<rect class="fill-accent-soft" x="62.094" y="0" width="6.079" height="10"/></svg>`)
+	assert.Contains(t, out, `<span class="item"><span class="swatch swatch-accent"></span><span class="n">1,951</span> in an interest <span class="pct">62%</span></span>`+
+		`<span class="item"><span class="swatch swatch-accent-soft"></span><span class="n">191</span> loose fits <span class="pct">6%</span></span>`+
+		`<span class="item"><span class="swatch swatch-track"></span><span class="n">1,000</span> unsorted <span class="pct">32%</span></span>`)
+	assert.Regexp(t, `<span class="item run">Run of \d{4}-\d\d-\d\d \d\d:\d\d · warm · 3,142 documents</span>`, out)
 	assert.NotContains(t, out, "style=")
 	assert.Contains(t, out, `<span class="pager-summary">Interests 1–24 of 222</span>`)
 	assert.Contains(t, out, `<a href="/ui/interests?run=run-1" aria-label="Page 1" aria-current="page">1</a>`)
@@ -337,15 +342,23 @@ func TestInterests_Areas(t *testing.T) {
 			Children: []Interest{{ID: "i1", Label: "AI Agent Engineering", Size: 86}, {ID: "i2", Size: 45}}}}}
 	out := render(t, r, PageInterests, v)
 	assert.Contains(t, out, `<p class="lede">30 areas holding 187 interests in your library, largest first.</p>`)
-	assert.Contains(t, out, `<h2><a href="/ui/interests/a1">Tech &lt;Skills&gt;</a></h2>`)
-	assert.Contains(t, out, `<span><b>10</b> interests</span>`)
+	assert.Regexp(t, `<h2><svg class="icon"[^>]*>.*?</svg><a href="/ui/interests/a1">Tech &lt;Skills&gt;</a></h2>`, out,
+		"an area carries the layers icon")
+	assert.Contains(t, out, `<div class="stats"><span><b>628</b> documents</span><span><b>10</b> interests</span></div>`,
+		"no new document, no new count")
 	assert.Contains(t, out, `<ul class="members children"><li><a href="/ui/interests/i1" title="AI Agent Engineering">`+
-		`AI Agent Engineering</a><span class="n">86</span></li><li><a href="/ui/interests/i2">`+
-		`<span class="unlabeled">Unlabeled interest</span></a><span class="n">45</span></li></ul>`)
-	assert.Contains(t, out, `<a class="all" href="/ui/interests/a1">All 10 interests →</a>`)
+		`AI Agent Engineering</a><svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">`+
+		`<rect class="fill-track" x="0" y="0" width="100" height="10"/>`+
+		`<rect class="fill-accent" x="0.000" y="0" width="100.000" height="10"/></svg><span class="n">86</span></li>`)
+	assert.Contains(t, out, `<li><a href="/ui/interests/i2" title="Unlabeled interest"><span class="unlabeled">Unlabeled interest</span></a>`+
+		`<svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">`+
+		`<rect class="fill-track" x="0" y="0" width="100" height="10"/>`+
+		`<rect class="fill-accent" x="0.000" y="0" width="52.326" height="10"/></svg><span class="n">45</span></li></ul>`,
+		"each bar scaled to the area's largest")
+	assert.Contains(t, out, `<a class="all" href="/ui/interests/a1">+ 8 more interests →</a>`)
 	assert.Contains(t, out, `<span class="pager-summary">Areas 1–1 of 30</span>`)
 	assert.Contains(t, out, `<span class="n">4,852</span> in an interest`)
-	assert.Contains(t, out, `<span class="n">402</span> in none`)
+	assert.Contains(t, out, `<span class="n">402</span> unsorted`)
 }
 
 // TestInterests_FirstGrouping: before the first rebuild is done, a rebuild
@@ -374,13 +387,19 @@ func TestInterestPage_AreaAndLoose(t *testing.T) {
 	r := newRenderer(t)
 	page := interestPage(2, 60)
 	page.Interest.ParentID, page.Interest.ParentLabel, page.Interest.Loose = "a1", "Cloud <and> AWS", 3
-	page.Interest.Members = append(page.Interest.Members, Member{DocumentID: "l1", Title: "Close", Loose: true,
+	page.Interest.Members = append(page.Interest.Members, Member{DocumentID: "l1", Title: "Close", Fit: "loose",
 		URL: "https://example.com/l1"})
 	out := render(t, r, PageInterest, page)
 	assert.Contains(t, out, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a>`+
-		`<span class="sep">›</span><a class="truncate" href="/ui/interests/a1" title="Cloud &lt;and&gt; AWS">Cloud &lt;and&gt; AWS</a></nav>`)
+		`<span class="sep">›</span><a class="truncate" href="/ui/interests/a1" title="Cloud &lt;and&gt; AWS">Cloud &lt;and&gt; AWS</a>`+
+		`<span class="sep">›</span><span class="truncate" aria-current="page" title="AWS Serverless Architecture">`+
+		`AWS Serverless Architecture</span></nav>`)
 	assert.Contains(t, out, `<span class="badge plain">3 loose fits</span>`)
-	assert.Equal(t, 1, strings.Count(out, ">loose fit</span>"))
+	assert.Equal(t, 1, strings.Count(out, `<h2 id="loose-fits">Loose fits</h2>`))
+	members, loose := strings.Index(out, `<tr class="fit-member">`), strings.Index(out, `id="loose-fits"`)
+	assert.Less(t, members, loose, "the members, then the loose fits")
+	assert.Equal(t, 1, strings.Count(out[loose:], `<tr class="fit-`), "the loose fit under its heading alone")
+	assert.Contains(t, out[loose:], `<td class="num muted">61</td>`, "ranked after the members")
 	assert.Contains(t, out, `<span class="pager-summary">Documents 51–61 of 63, most similar first</span>`)
 	assert.Equal(t, 2, page.Pages())
 
@@ -388,14 +407,15 @@ func TestInterestPage_AreaAndLoose(t *testing.T) {
 		Area: true, Size: 120, NumChildren: 2, Children: []Interest{{ID: "i1", Label: "AWS", Size: 70},
 			{ID: "i2", Label: "GCP", Size: 50}}}}
 	out = render(t, r, PageInterest, area)
-	assert.Contains(t, out, "<h1>Unlabeled area</h1>")
+	assert.Regexp(t, `<h1><svg class="icon"[^>]*>.*?</svg>Unlabeled area</h1>`, out)
+	assert.Contains(t, out, `<span class="truncate" aria-current="page" title="Unlabeled area">Unlabeled area</span></nav>`)
 	assert.Contains(t, out, `<span class="badge plain">2 interests</span>`)
 	assert.Equal(t, 2, strings.Count(out, `<li class="card interest">`))
 	assert.NotContains(t, out, "<table")
 	assert.Nil(t, area.Pager())
 	assert.Equal(t, 1, area.Pages())
 	area.Page = 2
-	assert.Nil(t, area.OutOfRange(), "an area's page is one page, whatever page is asked for")
+	assert.NotNil(t, area.OutOfRange(), "an area's interests are paged")
 }
 
 // TestInterests_MemberNames: a card names its members as the Library
@@ -426,7 +446,7 @@ func interestPage(page, size int) InterestPage {
 	first := PageOffset(page, InterestMembersPageSize)
 	for i := first; i < min(first+InterestMembersPageSize, size); i++ {
 		in.Members = append(in.Members, Member{DocumentID: "d" + strconv.Itoa(i), BookmarkTitle: "Saved " + strconv.Itoa(i),
-			URL: "https://example.com/" + strconv.Itoa(i), Similarity: 0.5})
+			URL: "https://example.com/" + strconv.Itoa(i), Similarity: 0.5, Fit: "member"})
 	}
 	return InterestPage{Layout: Layout{Title: in.Label, Nav: NavInterests}, Interest: in, Page: page}
 }
@@ -456,7 +476,7 @@ func TestInterestPage_Pages(t *testing.T) {
 	assert.Equal(t, 34, strings.Count(out, `<td class="num muted">`))
 	assert.Contains(t, out, `<span class="pager-summary">Documents 51–84 of 84, most similar first</span>`)
 	assert.Contains(t, out, `<a class="step" id="pager-prev" href="/ui/interests/i1" rel="prev">`)
-	assert.Equal(t, []int{51, 52}, []int{two.Ranked()[0].Rank, two.Ranked()[1].Rank})
+	assert.Equal(t, []int{51, 52}, []int{two.RankedMembers()[0].Rank, two.RankedMembers()[1].Rank})
 
 	deep := interestPage(25, 1300)
 	assert.Contains(t, render(t, r, PageInterest, deep), `<td class="num muted">1,201</td>`, "a rank grouped as a count")
@@ -473,7 +493,9 @@ func TestInterestPage_OutOfRange(t *testing.T) {
 	require.NotNil(t, page.OutOfRange())
 	page.Interest.Summary = "Guides to serverless AWS."
 	out := render(t, r, PageInterest, page)
-	assert.Contains(t, out, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a></nav>`)
+	assert.Contains(t, out, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a>`+
+		`<span class="sep">›</span><span class="truncate" aria-current="page" title="AWS Serverless Architecture">`+
+		`AWS Serverless Architecture</span></nav>`, "a flat interest: no area in its crumbs")
 	assert.Contains(t, out, "<h1>AWS Serverless Architecture</h1>")
 	assert.Contains(t, out, `<p class="lede">Guides to serverless AWS.</p>`)
 	assert.Contains(t, out, `<span class="badge badge-accent plain">84 documents</span>`)
@@ -1365,72 +1387,184 @@ func TestDocument_JobLines(t *testing.T) {
 		Current: base}), "nothing to say, nothing in it")
 }
 
-// TestRebuild: what came of the newest rebuild, reported once nothing is
-// in flight for a failure, and when its poller polls.
+// TestRebuild: the rebuild's poller polls every 2 seconds while a rebuild
+// is in flight, as the queue or the scheduler says, or a read failed;
+// every 30 seconds otherwise with insight on, so that a rebuild the
+// scheduler queues reaches an open page; and only after a change with
+// insight off. The line says the scheduler's state only when nothing is
+// in flight and it has something to say.
 func TestRebuild(t *testing.T) {
-	for _, tc := range []struct {
-		rebuild Rebuild
-		want    RebuildOutcome
-	}{
-		{Rebuild{}, RebuildNone},
-		{Rebuild{NewRun: "running", Running: true}, RebuildNone},
-		{Rebuild{NewRun: "done"}, RebuildReady},
-		{Rebuild{NewRun: "done", Queued: true}, RebuildReady},
-		{Rebuild{NewRun: "failed", RunError: "boom"}, RebuildFailed},
-		{Rebuild{NewRun: "failed", Queued: true}, RebuildNone},
-	} {
-		assert.Equal(t, tc.want, tc.rebuild.Outcome(), "%+v", tc.rebuild)
-	}
 	assert.Equal(t, ActionRebuild, Rebuild{}.Action().Kind)
+	const fast, idle, onChange = "every 2s, curio:changed from:body", "every 30s, curio:changed from:body",
+		"curio:changed from:body"
+	state := func(s string) InterestsState { return InterestsState{State: s} }
 	for _, tc := range []struct {
+		name    string
 		rebuild Rebuild
-		every   bool
-	}{{Rebuild{}, false}, {Rebuild{Queued: true}, true}, {Rebuild{Running: true}, true},
-		{Rebuild{Err: &PanelError{Message: "m"}}, true}} { // a read that failed tries again
+		trigger string
+		shows   bool
+	}{
+		{"insight off", Rebuild{State: state("off")}, onChange, false},
+		{"current", Rebuild{Enabled: true, State: state("current")}, idle, true},
+		{"none", Rebuild{Enabled: true, State: state("none")}, idle, true},
+		{"due", Rebuild{Enabled: true, State: state("due")}, idle, true},
+		{"held", Rebuild{Enabled: true, State: state("held")}, idle, true},
+		{"failing", Rebuild{Enabled: true, State: state("failing")}, idle, true},
+		{"unknown", Rebuild{Enabled: true, State: state("unknown")}, idle, false},
+		{"a state this build doesn't know", Rebuild{Enabled: true, State: state(evilAttr)}, idle, true},
+		{"queued, as the queue says", Rebuild{Enabled: true, Queued: true, State: state("current")}, fast, false},
+		{"running, as the queue says", Rebuild{Enabled: true, Running: true, State: state("held")}, fast, false},
+		{"queued, as the scheduler says", Rebuild{Enabled: true, State: state("queued")}, fast, false},
+		{"rebuilding, as the scheduler says", Rebuild{Enabled: true, State: state("rebuilding")}, fast, false},
+		{"a read failed", Rebuild{Enabled: true, Err: &PanelError{Message: "m"}, State: state("current")}, fast, true},
+	} {
 		p := tc.rebuild.Poller()
-		assert.Equal(t, tc.every, p.Every > 0)
-		assert.Equal(t, []string{"rebuild-state", "rebuild-control", "rebuild-poll"}, p.Regions)
+		assert.Equal(t, tc.trigger, p.Trigger(), tc.name)
+		assert.Equal(t, []string{"rebuild-state", "rebuild-control", "rebuild-poll"}, p.Regions, tc.name)
+		assert.Equal(t, tc.shows, tc.rebuild.ShowsState(), tc.name)
 	}
 	assert.Equal(t, "/ui/interests?poll=rebuild&run=r1", Rebuild{Shown: "r1"}.Poller().Href)
 }
 
+// TestInterestsState: each state of automatic rebuilds in the sentence
+// curio status prints for it, its times as <time>s and an error cut with
+// the whole of it on hover; a state this build doesn't know reads as
+// current. Each sentence is escaped and inert.
+func TestInterestsState(t *testing.T) {
+	set := newRenderer(t).pages[PageStatus]
+	now := time.Now()
+	long := strings.Repeat("E", 290) + evilScript
+	for _, tc := range []struct {
+		name  string
+		state InterestsState
+		want  string // a regexp
+	}{
+		{"unknown", InterestsState{State: "unknown"}, `^the daemon hasn't checked them yet$`},
+		{"off", InterestsState{State: "off"}, `^off \(insight\.enabled: false\)$`},
+		{"none", InterestsState{State: "none", Changed: 7, RebuildAt: 20},
+			`^waiting for 20 indexed documents \(7 so far\)$`},
+		{"the first due", InterestsState{State: "due", Changed: 25, RebuildAt: 20},
+			`^the first grouping is due \(25 documents indexed\): waiting for the library to settle$`},
+		{"due after a reindex", InterestsState{State: "due", LastRebuildAt: now, FreshOwed: "reindex"},
+			`^a fresh rebuild is due: waiting for the re-embedding to finish$`},
+		{"due, asked for", InterestsState{State: "due", LastRebuildAt: now, FreshOwed: "manual"},
+			`^a fresh rebuild is due \(asked for\): waiting for the library to settle$`},
+		{"due, the params changed", InterestsState{State: "due", LastRebuildAt: now, FreshOwed: "params"},
+			`^a fresh rebuild is due \(the grouping&#39;s parameters changed\): waiting for the library to settle$`},
+		{"due", InterestsState{State: "due", LastRebuildAt: now, Changed: 300, RebuildAt: 263},
+			`^a rebuild is due \(300 changed, threshold 263\): waiting for the library to settle$`},
+		{"queued", InterestsState{State: "queued"}, `^a rebuild is queued$`},
+		{"rebuilding", InterestsState{State: "rebuilding"}, `^rebuilding$`},
+		{"held", InterestsState{State: "held", HeldReason: "the embedding model's digest " + evilScript},
+			`^rebuilds held: the embedding model&#39;s digest &lt;script&gt;alert\(1\)&lt;/script&gt;; run <code>curio reindex --all</code>$`},
+		{"failing, retrying later", InterestsState{State: "failing", LastError: long, RetryAt: now.Add(15 * time.Minute)},
+			`^the last rebuild failed: <span class="state-error" title="E{290}&lt;script&gt;alert\(1\)&lt;/script&gt;">E{290}&lt;script&gt;al…</span>; retrying <time datetime="[^"]+" title="[^"]+">in 1[45] min</time>$`},
+		{"failing, its backoff past", InterestsState{State: "failing", LastError: "boom", RetryAt: now.Add(-time.Minute)},
+			`; retrying once the library settles$`},
+		{"failing, no backoff", InterestsState{State: "failing", LastError: "boom"}, `; retrying once the library settles$`},
+		{"current", InterestsState{State: "current", LastRebuildAt: now.Add(-2 * time.Hour), LastKind: "warm", Changed: 37,
+			RebuildAt: 276},
+			`^rebuilt <time datetime="[^"]+" title="[^"]+">2 h ago</time> \(warm\) · 37 documents changed, next at 276$`},
+		{"current, one change", InterestsState{State: "current", Changed: 1, RebuildAt: 263},
+			`^rebuilt · 1 document changed, next at 263$`},
+		{"a state it doesn't know", InterestsState{State: evilScript, Changed: 2, RebuildAt: 5},
+			`^rebuilt · 2 documents changed, next at 5$`},
+	} {
+		var buf bytes.Buffer
+		require.NoError(t, set.ExecuteTemplate(&buf, "interests-state", tc.state), tc.name)
+		uitest.AssertInert(t, buf.String())
+		assert.Regexp(t, tc.want, buf.String(), tc.name)
+	}
+	for state, tone := range map[string]string{"current": "ok", "none": "ok", "due": "ok", "queued": "ok",
+		"rebuilding": "ok", "held": "warn", "failing": "warn", "off": "neutral", "unknown": "neutral", evilAttr: "neutral"} {
+		assert.Equal(t, tone, InterestsState{State: state}.Tone(), state)
+	}
+}
+
 // TestInterests_Rebuild: the Rebuild button while insight is on, disabled
-// while a rebuild is in flight; the state of one; and, with insight off,
-// an empty page that says how to turn it on.
+// while the queue holds a rebuild, enabled while rebuilds are held or
+// failing; the line: the queue's state of one, else the scheduler's, else
+// nothing; newer interests offered; and, with insight off, an empty page
+// that says how to turn it on.
 func TestInterests_Rebuild(t *testing.T) {
 	r := newRenderer(t)
 	layout := Layout{Title: "Interests", Nav: NavInterests}
-	run := &InterestRun{Documents: 3}
+	run := &InterestRun{ID: "r1", Documents: 3}
 	page := func(b Rebuild) (string, *html.Node) {
 		out := render(t, r, PageInterests, Interests{Layout: layout, Run: run, Rebuild: b})
 		return out, parse(t, out)
 	}
-	out, doc := page(Rebuild{Enabled: true, Shown: "r1"})
+	current := InterestsState{State: "current", LastRebuildAt: time.Now().Add(-2 * time.Hour), LastKind: "warm",
+		Changed: 3, RebuildAt: 20}
+	out, doc := page(Rebuild{Enabled: true, Shown: "r1", State: current})
 	rebuild := byID(doc, "rebuild")
 	require.NotNil(t, rebuild)
 	assert.Equal(t, "/v1/interests/rebuild", attrValue(rebuild, "data-path"))
 	assert.False(t, hasAttr(rebuild, "aria-disabled"))
 	assert.Contains(t, out, `<span class="action-status" id="rebuild-status" role="status" aria-live="polite"></span>`)
 	assert.Contains(t, out, `<span class="no-js muted">Rebuild them with <code>curio interests rebuild</code>.</span>`)
-	assert.Contains(t, out, `hx-get="/ui/interests?poll=rebuild&amp;run=r1" hx-trigger="curio:changed from:body"`)
+	assert.Regexp(t, `<p class="interests-state tone-ok">rebuilt <time[^>]*>2 h ago</time> \(warm\) · 3 documents changed, next at 20</p>`, out)
+	assert.Contains(t, out, `hx-get="/ui/interests?poll=rebuild&amp;run=r1" hx-trigger="every 30s, curio:changed from:body"`)
 
-	out, doc = page(Rebuild{Enabled: true, Queued: true, Hold: "outside_schedule", Shown: "r1"})
+	out, doc = page(Rebuild{Enabled: true, Queued: true, Hold: "outside_schedule", Shown: "r1", State: current})
 	assert.Equal(t, "true", attrValue(byID(doc, "rebuild"), "aria-disabled"))
-	assert.Contains(t, out, `<p>Rebuild queued · <a id="rebuild-hold" href="/ui/status">the queue is closed: Outside its schedule</a></p>`)
+	assert.Contains(t, out, `<div class="rebuild-state" id="rebuild-state"><p>Rebuild queued · <a id="rebuild-hold" href="/ui/status">`+
+		`the queue is closed: Outside its schedule</a></p></div>`, "the queue's, not the snapshot's")
 	assert.Contains(t, out, `hx-trigger="every 2s, curio:changed from:body"`)
 	out, _ = page(Rebuild{Enabled: true, Running: true, StartedAt: time.Now().Add(-2 * time.Minute)})
 	assert.Regexp(t, `<p>Rebuilding · started <time[^>]*>2 min ago</time></p>`, out)
-	out, _ = page(Rebuild{Enabled: true, NewRun: "done"})
+	out, _ = page(Rebuild{Enabled: true, Ready: true, State: current})
 	assert.Contains(t, out, `<p>New interests are ready: <a id="rebuild-reload" href="/ui/interests">reload</a></p>`)
-	out, _ = page(Rebuild{Enabled: true, NewRun: "failed", RunError: "cluster: <boom>"})
-	assert.Contains(t, out, `<p class="failed" title="cluster: &lt;boom&gt;">The rebuild failed: cluster: &lt;boom&gt;</p>`)
 
-	off := render(t, r, PageInterests, Interests{Layout: layout})
+	for _, state := range []InterestsState{{State: "held", HeldReason: "the embeddings drifted"},
+		{State: "failing", LastError: "cluster: <boom>"}} {
+		out, doc = page(Rebuild{Enabled: true, State: state})
+		assert.False(t, hasAttr(byID(doc, "rebuild"), "aria-disabled"), "%s: a rebuild asked for still runs", state.State)
+		assert.Contains(t, out, `<p class="interests-state tone-warn">`, state.State)
+	}
+	assert.Contains(t, out, `the last rebuild failed: <span class="state-error" title="cluster: &lt;boom&gt;">cluster: &lt;boom&gt;</span>`)
+
+	out, doc = page(Rebuild{Enabled: true, State: InterestsState{State: "queued"}})
+	assert.Contains(t, out, `<div class="rebuild-state" id="rebuild-state"></div>`,
+		"a snapshot of a rebuild the queue no longer holds is behind it")
+	assert.False(t, hasAttr(byID(doc, "rebuild"), "aria-disabled"))
+	assert.Contains(t, out, `hx-trigger="every 2s, curio:changed from:body"`, "until the scheduler catches up")
+
+	off := render(t, r, PageInterests, Interests{Layout: layout, Rebuild: Rebuild{State: InterestsState{State: "off"}}})
 	assert.Nil(t, byID(parse(t, off), "rebuild"))
 	assert.Contains(t, off, "set <code>insight.enabled: true</code> in config.yaml")
 	assert.NotContains(t, off, "curio interests rebuild")
-	assert.Contains(t, render(t, r, PageInterests, Interests{Layout: layout, Rebuild: Rebuild{Enabled: true}}),
-		"once enough of it is indexed and it settles; <code>curio interests rebuild</code> groups it now.")
+	assert.Contains(t, off, `<div class="rebuild-state" id="rebuild-state"></div>`)
+	assert.Contains(t, off, `hx-trigger="curio:changed from:body"`)
+}
+
+// TestInterests_Empty: before the first rebuild is done, and none is in
+// flight, the page says why, as the scheduler last saw it.
+func TestInterests_Empty(t *testing.T) {
+	r := newRenderer(t)
+	for _, tc := range []struct {
+		state InterestsState
+		want  string
+	}{
+		{InterestsState{State: "due", Changed: 25, RebuildAt: 20},
+			"<p>The first grouping is due (25 documents indexed), and starts once the library settles.</p>"},
+		{InterestsState{State: "none", Changed: 7, RebuildAt: 20},
+			"<p>The library is grouped into them on its own once 20 documents are indexed; 7 are so far.</p>"},
+		{InterestsState{State: "none", Changed: 1, RebuildAt: 20}, "once 20 documents are indexed; 1 is so far.</p>"},
+		{InterestsState{State: "held", HeldReason: "the embeddings " + evilScript},
+			"<p>Grouping is held: the embeddings &lt;script&gt;alert(1)&lt;/script&gt;. Run <code>curio reindex --all</code>; " +
+				"the library is grouped once the re-embedding finishes.</p>"},
+		{InterestsState{State: "failing", LastError: evilAttr}, `<p>The first grouping failed: <span class="state-error" ` +
+			`title="&#34; onerror=&#34;alert(1)">&#34; onerror=&#34;alert(1)</span>. It is tried again once the library settles.</p>`},
+		{InterestsState{State: "unknown"},
+			"<p>The library is grouped into them on its own once enough of it is indexed and it settles.</p>"},
+	} {
+		out := render(t, r, PageInterests, Interests{Layout: Layout{Title: "Interests", Nav: NavInterests},
+			Rebuild: Rebuild{Enabled: true, State: tc.state}})
+		assert.Contains(t, out, "<h2>No interests yet</h2>", tc.state.State)
+		assert.Contains(t, out, tc.want, tc.state.State)
+		assert.Contains(t, out, "<p><code>curio interests rebuild</code> groups it now.</p>", tc.state.State)
+	}
 }
 
 // textOf is n's text.
@@ -1755,4 +1889,418 @@ func TestLibrary_CauseLine(t *testing.T) {
 		Filters: LibraryFilters{Host: "blocked.example"}})
 	assert.NotContains(t, out, "cause-line")
 	assert.NotContains(t, out, "clear-cause")
+}
+
+// TestInterests_Changes: for a week after a rebuild that split, merged or
+// dissolved interests, a note counts what it changed, dates it, and leads
+// to the changes; never for one that only kept, moved or created them,
+// past the week, or without a run. The note sits outside the polled
+// regions.
+func TestInterests_Changes(t *testing.T) {
+	r := newRenderer(t)
+	at := time.Date(2026, 10, 9, 14, 3, 0, 0, time.UTC)
+	withChanges := func(recent bool, c RunChanges) Interests {
+		v := interestsPage(1)
+		v.Run.ComputedAt, v.Run.Recent, v.Run.Changes = at, recent, c
+		return v
+	}
+	out := render(t, r, PageInterests, withChanges(true, RunChanges{Kept: 180, Split: 5, Merged: 1, Moved: 2, Created: 9}))
+	assert.Contains(t, out, `<div class="callout callout-info mb-4" role="note">`)
+	assert.Contains(t, out, `<p>Rebuilt on <time datetime="2026-10-09T14:03:00Z" title="`+when(at)+`">`+localDay(at)+
+		`</time>: 5 interests split, 1 merged, 2 moved, 9 new. <a href="/ui/interests/changes">What changed →</a></p>`)
+	note := strings.Index(out, `What changed →`)
+	assert.Less(t, note, strings.Index(out, `aria-label="Coverage"`), "above the coverage")
+	assert.Greater(t, note, strings.Index(out, `id="rebuild-control"`), "outside the head's live regions")
+	assert.Contains(t, render(t, r, PageInterests, withChanges(true, RunChanges{Dissolved: 1})),
+		"Rebuilt on", "a dissolved interest alone")
+
+	for name, v := range map[string]Interests{
+		"older than a week":    withChanges(false, RunChanges{Split: 5}),
+		"kept, moved, created": withChanges(true, RunChanges{Kept: 10, Moved: 3, Created: 4}),
+		"no run":               {Layout: Layout{Title: "Interests", Nav: NavInterests}},
+	} {
+		assert.NotContains(t, render(t, r, PageInterests, v), "What changed", name)
+	}
+	assert.Equal(t, "1 interest merged, 2 dissolved", RunChanges{Merged: 1, Dissolved: 2}.Summary())
+	assert.Empty(t, RunChanges{Kept: 3}.Summary())
+}
+
+// TestInterests_UnsortedCard: Unsorted's card is the last card on the last
+// page of the groups, and on a run without any; never on another page,
+// past the last, or when nothing is unsorted or placed there since. It
+// leads to Unsorted's first page of the run shown.
+func TestInterests_UnsortedCard(t *testing.T) {
+	r := newRenderer(t)
+	last := interestsPage(10)
+	last.Run.NewUnsorted = 2
+	out := render(t, r, PageInterests, last)
+	card := strings.Index(out, `<li class="card interest unsorted">`)
+	require.Positive(t, card)
+	assert.Greater(t, card, strings.LastIndex(out, `<li class="card interest">`), "after the groups")
+	assert.Less(t, card, strings.LastIndex(out, `</ul>`), "inside their list")
+	assert.Less(t, strings.LastIndex(out, `</ul>`), strings.Index(out, `<nav class="pager"`), "over the pager")
+	assert.Contains(t, out, `<a href="/ui/interests/unsorted?run=run-1">Unsorted</a></h2>`+"\n"+
+		`<div class="stats"><span><b>1,000</b> documents</span><span class="new"><b>2</b> new</span></div>`+"\n"+
+		`<p class="summary">Not close enough to any interest yet. Listed nearest first, each with the interest it is closest to.</p>`+"\n"+
+		`<a class="all" href="/ui/interests/unsorted?run=run-1">See them →</a>`)
+
+	assert.NotContains(t, render(t, r, PageInterests, interestsPage(1)), "card interest unsorted", "not the last page")
+	assert.NotContains(t, render(t, r, PageInterests, interestsPage(11)), "card interest unsorted", "past the last")
+	none := interestsPage(10)
+	none.Run.Unsorted = 0
+	assert.Nil(t, none.Unsorted(), "nothing unsorted or placed there")
+	none.Run.NewUnsorted = 1
+	assert.NotNil(t, none.Unsorted(), "placed there since")
+
+	empty := Interests{Layout: last.Layout, Run: &InterestRun{ID: "run-2", Documents: 5, Unsorted: 5}}
+	out = render(t, r, PageInterests, empty)
+	assert.Contains(t, out, "<h2>No interests in this run</h2>")
+	assert.Contains(t, out, `<a class="all" href="/ui/interests/unsorted?run=run-2">See them →</a>`, "a run without groups")
+}
+
+// TestInterests_Cards: an interest's card counts its loose fits and its
+// new documents when it has any; an area's leads to all its interests
+// when its card lists them all, and counts its new documents.
+func TestInterests_Cards(t *testing.T) {
+	r := newRenderer(t)
+	v := interestsPage(1)
+	v.Interests[0].Loose, v.Interests[0].New = 2, 3
+	v.Interests[1].Loose = 1
+	out := render(t, r, PageInterests, v)
+	assert.Contains(t, out, `<div class="stats"><span><b>84</b> documents</span><span><b>2</b> loose fits</span>`+
+		`<span class="new"><b>3</b> new</span><span class="meter-row"`)
+	assert.Contains(t, out, `<div class="stats"><span><b>83</b> documents</span><span><b>1</b> loose fit</span><span class="meter-row"`)
+	assert.Contains(t, out, `<div class="stats"><span><b>82</b> documents</span><span class="meter-row"`, "none of either")
+
+	area := Interest{ID: "a1", Area: true, Label: "Cloud", Size: 120, New: 4, NumChildren: 2,
+		Children: []Interest{{ID: "i1", Label: "AWS", Size: 70}, {ID: "i2", Label: "GCP", Size: 50}}}
+	out = render(t, r, PageInterests, Interests{Layout: v.Layout, Run: &InterestRun{ID: "r", Shape: "areas", Total: 1},
+		Interests: []Interest{area}})
+	assert.Contains(t, out, `<span><b>2</b> interests</span><span class="new"><b>4</b> new</span></div>`)
+	assert.Contains(t, out, `<a class="all" href="/ui/interests/a1">All 2 interests →</a>`, "every one listed")
+	area.NumChildren = 6
+	assert.Equal(t, 4, area.MoreChildren())
+	assert.Equal(t, 70, area.Largest())
+}
+
+// TestInterestPage_Lineage: an area's or interest's page says what the
+// latest rebuild did to it, a line an event, dated by the run's finish,
+// each identity linking to its page, a retired one marked; one that was
+// only kept says nothing, the run before it pruned.
+func TestInterestPage_Lineage(t *testing.T) {
+	r := newRenderer(t)
+	at := time.Date(2026, 10, 9, 14, 3, 0, 0, time.UTC)
+	self := &InterestRef{ID: "i1", Label: "Kafka"}
+	page := interestPage(1, 3)
+	page.RunAt = at
+	page.Interest.Events = []InterestEvent{
+		{Event: "kept", From: self, To: self, Shared: 3},
+		{Event: "split", From: &InterestRef{ID: "old", Label: "Streams <old>", Retired: true}, To: self, Shared: 4},
+		{Event: "split", From: self, To: &InterestRef{ID: "i6", Label: "Kafka Connect"}, Shared: 1},
+		{Event: "merged", From: &InterestRef{ID: "i2", Retired: true}, To: self, Shared: 2},
+		{Event: "moved", From: self, To: self},
+		{Event: "new", To: self},
+	}
+	page.Interest.ID, page.Interest.Label = "i1", "Kafka"
+	out := render(t, r, PageInterest, page)
+	assert.Contains(t, out, `<p class="callout-title">In the rebuild of <time datetime="2026-10-09T14:03:00Z" title="`+
+		when(at)+`">`+localDay(at)+`</time></p>`)
+	assert.Contains(t, out, `<ul class="lineage">`+"\n"+
+		`<li>Split off from <a class="ref" href="/ui/interests/old" title="Streams &lt;old&gt;">Streams &lt;old&gt;</a> <span class="tag">retired</span></li>`+"\n"+
+		`<li><a class="ref" href="/ui/interests/i6" title="Kafka Connect">Kafka Connect</a> split off from it (1 document)</li>`+"\n"+
+		`<li>Took in <a class="ref" href="/ui/interests/i2" title="Unlabeled interest"><span class="unlabeled">Unlabeled interest</span></a> <span class="tag">retired</span> (2 documents)</li>`+"\n"+
+		`<li>Moved here from another area</li>`+"\n"+
+		`<li>New in this rebuild</li>`+"\n"+
+		`</ul>`)
+	note := strings.Index(out, `role="note"`)
+	assert.Less(t, note, strings.Index(out, `<table`), "under the head, over the members")
+
+	page.Interest.Events = page.Interest.Events[:1]
+	assert.NotContains(t, render(t, r, PageInterest, page), `role="note"`, "kept alone says nothing")
+	page.Interest.Events, page.RunAt = []InterestEvent{{Event: "new", To: self}}, time.Time{}
+	assert.Contains(t, render(t, r, PageInterest, page), `<p class="callout-title">In the latest rebuild</p>`,
+		"a run that can't be read isn't dated")
+
+	area := InterestPage{Layout: page.Layout, Interest: Interest{ID: "a1", Area: true, Label: "Engineering",
+		NumChildren: 1, Children: []Interest{{ID: "i1", Label: "Kafka", Size: 3}},
+		Events: []InterestEvent{{Event: "split", Area: true, From: &InterestRef{ID: "a1", Area: true},
+			To: &InterestRef{ID: "a9", Area: true}, Shared: 40}}}}
+	assert.Contains(t, render(t, r, PageInterest, area), `<li><a class="ref" href="/ui/interests/a9" title="Unlabeled area">`+
+		`<span class="unlabeled">Unlabeled area</span></a> split off from it (40 documents)</li>`, "an area's note, of areas")
+}
+
+// TestInterestPage_NewBand: an interest's first page lists the documents
+// placed into it since, newest first, each tagged new and unranked, over
+// the ranked members, and how many more there are; later pages don't.
+func TestInterestPage_NewBand(t *testing.T) {
+	r := newRenderer(t)
+	page := interestPage(1, 60)
+	page.Interest.New = 23
+	page.Interest.NewMembers = []Member{{DocumentID: "n1", BookmarkTitle: "Placed <here>", URL: "https://example.com/n1",
+		Similarity: 0.61, Fit: "new"}, {DocumentID: "n2", URL: "https://example.com/n2", Similarity: 0.52, Fit: "new"}}
+	out := render(t, r, PageInterest, page)
+	assert.Contains(t, out, `<h2 id="new-band">New since the last rebuild</h2><p>Placed by similarity; the next rebuild decides.</p>`)
+	assert.Contains(t, out, `<tr class="fit-new"><td><a class="doc-title from-bookmark" href="/ui/documents/n1" title="Placed &lt;here&gt;">`+
+		`Placed &lt;here&gt;</a>`)
+	assert.Contains(t, out, `<span class="badge plain fit-new">new</span></td><td><span class="meter-row">`+
+		`<meter class="meter" min="0" max="1" value="0.61">0.61</meter>0.61</span></td></tr>`)
+	assert.Contains(t, out, `<p class="table-note">and 21 more</p>`)
+	band, members := strings.Index(out, `id="new-band"`), strings.Index(out, `<tr class="fit-member">`)
+	assert.Less(t, band, members, "above the ranked members")
+	assert.Equal(t, 50, strings.Count(out, `<td class="num muted">`), "the band is unranked")
+	assert.Contains(t, out, `<span class="badge plain fit-new">23 new</span>`, "the head counts them all")
+
+	page.Interest.New = 2
+	assert.NotContains(t, render(t, r, PageInterest, page), "more</p>", "all of them listed")
+	page.Page = 2
+	assert.NotContains(t, render(t, r, PageInterest, page), "New since the last rebuild", "the first page alone")
+}
+
+// TestAreaPage_Pages: an area's page lists its interests 24 a page under
+// the shared pager, its head counting all of them; a page past the last
+// keeps the head.
+func TestAreaPage_Pages(t *testing.T) {
+	r := newRenderer(t)
+	children := make([]Interest, 0, 6)
+	for i := range 6 {
+		children = append(children, Interest{ID: "i" + strconv.Itoa(i), Label: "Topic " + strconv.Itoa(i), Size: 30 - i})
+	}
+	page := InterestPage{Layout: Layout{Title: "Engineering", Nav: NavInterests}, Page: 2, Interest: Interest{ID: "a1",
+		Area: true, Label: "Engineering", Summary: "Building things.", Size: 400, Loose: 2, New: 5, NumChildren: 30,
+		Cohesion: 0.4, Children: children}}
+	out := render(t, r, PageInterest, page)
+	assert.Contains(t, out, `<span class="badge badge-accent plain">400 documents</span><span class="badge plain">30 interests</span>`+
+		`<span class="badge plain">2 loose fits</span><span class="badge plain fit-new">5 new</span>`)
+	assert.Contains(t, out, `<p class="lede">Building things.</p>`)
+	assert.Equal(t, 6, strings.Count(out, `<li class="card interest">`))
+	assert.Contains(t, out, `<span class="pager-summary">Interests 25–30 of 30</span>`)
+	assert.Contains(t, out, `<a class="step" id="pager-prev" href="/ui/interests/a1" rel="prev">`)
+	assert.Equal(t, 2, page.Pages())
+
+	page.Page, page.Interest.Children = 3, nil
+	require.NotNil(t, page.OutOfRange())
+	out = render(t, r, PageInterest, page)
+	assert.Contains(t, out, `<span class="badge plain">30 interests</span>`, "the head kept")
+	assert.Contains(t, out, "<h2>No page 3</h2>\n<p>This list has 2 pages.</p>")
+	assert.NotContains(t, out, "interest-grid")
+}
+
+// TestUnsorted_Page: the documents in no interest, nearest first, each
+// named as the Library names it with its nearest interest in a column of
+// its own, cut on one line, which a phone folds under the name; 50 a page
+// under the shared pager, whose links name the run; the documents placed
+// there since on the first page.
+func TestUnsorted_Page(t *testing.T) {
+	r := newRenderer(t)
+	docs := make([]UnsortedDoc, 0, 50)
+	for i := range 50 {
+		docs = append(docs, UnsortedDoc{Member: Member{DocumentID: "d" + strconv.Itoa(i), URL: "https://example.com/" +
+			strconv.Itoa(i), Similarity: 0.3, Fit: "unsorted"}, Nearest: InterestRef{ID: "k", Label: "Kafka <streams>"}})
+	}
+	docs[1].Nearest, docs[2].Nearest = InterestRef{ID: "u"}, InterestRef{}
+	page := Unsorted{Layout: Layout{Title: "Unsorted", Nav: NavInterests}, Page: 1, Run: "run-1", Total: 60, Documents: docs,
+		NumNew: 1, New: []Member{{DocumentID: "n1", Title: "Placed", URL: "https://example.com/n1", Fit: "new"}}}
+	out := render(t, r, PageUnsorted, page)
+	assert.Contains(t, out, `<span class="sep">›</span><span aria-current="page">Unsorted</span></nav>`)
+	assert.Contains(t, out, `<p class="lede">60 documents are in no interest: not close enough to any yet. `+
+		`Listed nearest first, each with the interest it is closest to.</p>`)
+	assert.Contains(t, out, `<span class="badge plain fit-new">1 new since the rebuild</span>`)
+	assert.Contains(t, out, `<colgroup><col><col class="c-nearest"><col class="c-sim"></colgroup>`)
+	assert.Contains(t, out, `<span class="nearest-sub">nearest <a class="ref" href="/ui/interests/k" title="Kafka &lt;streams&gt;">`+
+		`Kafka &lt;streams&gt;</a></span></td><td class="c-nearest"><a class="ref" href="/ui/interests/k" `+
+		`title="Kafka &lt;streams&gt;">Kafka &lt;streams&gt;</a></td>`)
+	assert.Contains(t, out, `<td class="c-nearest"><a class="ref" href="/ui/interests/u" title="Unlabeled interest">`+
+		`<span class="unlabeled">Unlabeled interest</span></a></td>`)
+	assert.Contains(t, out, `<td class="c-nearest"><span class="muted">none</span></td>`)
+	assert.Equal(t, 50, strings.Count(out, `<tr class="fit-unsorted">`))
+	assert.Contains(t, out, `<span class="pager-summary">Documents 1–50 of 60, nearest first</span>`)
+	assert.Contains(t, out, `<a class="step" id="pager-next" href="/ui/interests/unsorted?page=2&amp;run=run-1" rel="next">`)
+	assert.Contains(t, out, `<h2 id="new-band">New since the last rebuild</h2>`)
+
+	page.Page, page.Documents = 2, docs[:10]
+	out = render(t, r, PageUnsorted, page)
+	assert.NotContains(t, out, "New since the last rebuild", "the first page alone")
+	assert.Contains(t, out, "Page 2 of 2.</p>")
+	page.Page, page.Documents = 3, nil
+	require.NotNil(t, page.OutOfRange())
+	out = render(t, r, PageUnsorted, page)
+	assert.Contains(t, out, "<h2>No page 3</h2>")
+	assert.Contains(t, out, `<a class="btn" href="/ui/interests/unsorted?run=run-1">First page</a>`)
+
+	changed := Unsorted{Layout: page.Layout, Page: 2, RunChanged: true, Run: "run-2", Total: 60, Documents: docs[:10]}
+	assert.Contains(t, render(t, r, PageUnsorted, changed), `this page lists the new run's. `+
+		`<a href="/ui/interests/unsorted?run=run-2">Start again from page 1</a>.</p>`)
+
+	out = render(t, r, PageUnsorted, Unsorted{Layout: page.Layout, Run: "run-1", NumNew: 1, New: page.New})
+	assert.Contains(t, out, "<h2>Nothing unsorted</h2>")
+	assert.Contains(t, out, "New since the last rebuild", "the documents placed there since, still")
+	out = render(t, r, PageUnsorted, Unsorted{Layout: page.Layout})
+	assert.Contains(t, out, "<h2>No interests yet</h2>")
+	assert.Nil(t, Unsorted{Page: 4}.OutOfRange(), "no run, no pages to be past")
+}
+
+// TestChanges_Page: the latest rebuild's events under a heading a kind, in
+// the API's order, each naming its identities as links, retired ones
+// marked, with the documents a split or merge shares and the area a moved
+// interest is in now; a first grouping and a rebuild that changed nothing
+// in a line.
+func TestChanges_Page(t *testing.T) {
+	r := newRenderer(t)
+	at := time.Date(2026, 10, 9, 14, 3, 0, 0, time.UTC)
+	kafka := &InterestRef{ID: "k", Label: "Kafka"}
+	run := &ChangesRun{ComputedAt: at, Trigger: "manual", Kind: "warm",
+		Changes: RunChanges{Kept: 180, Split: 1, Merged: 1, Moved: 1, Dissolved: 1, Created: 1},
+		Events: []InterestEvent{
+			{Event: "split", From: kafka, To: &InterestRef{ID: "c", Label: "Kafka Connect"}, Shared: 1},
+			{Event: "merged", From: &InterestRef{ID: "j", Label: "Joins", Retired: true}, To: &InterestRef{ID: "s",
+				Label: "Streams"}, Shared: 2},
+			{Event: "moved", From: kafka, To: kafka, In: &InterestRef{ID: "e", Label: "Engineering", Area: true}},
+			{Event: "dissolved", From: &InterestRef{ID: "b", Label: "Bonds", Retired: true}},
+			{Event: "new", Area: true, To: &InterestRef{ID: "a", Label: "Cooking", Area: true}},
+		}}
+	out := render(t, r, PageChanges, Changes{Layout: Layout{Title: "What changed", Nav: NavInterests}, Run: run})
+	assert.Contains(t, out, `<p class="lede">The rebuild of <time datetime="2026-10-09T14:03:00Z" title="`+when(at)+`">`+
+		localDay(at)+`</time>: asked for, warm.</p>`)
+	assert.Contains(t, out, `<span class="text">1 interest split, 1 merged, 1 dissolved, 1 moved, 1 new</span>`+
+		`<span class="sep">·</span><span class="text">180 interests kept</span>`)
+	heads := make([]string, 0, 5)
+	for _, m := range regexp.MustCompile(`<h2 id="events-\d+">([^<]+)</h2>`).FindAllStringSubmatch(out, -1) {
+		heads = append(heads, m[1])
+	}
+	assert.Equal(t, []string{"Split", "Merged", "Moved", "Dissolved", "New"}, heads)
+	for _, line := range []string{
+		`<a class="ref" href="/ui/interests/c" title="Kafka Connect">Kafka Connect</a> split off from ` +
+			`<a class="ref" href="/ui/interests/k" title="Kafka">Kafka</a> (1 document)`,
+		`<a class="ref" href="/ui/interests/j" title="Joins">Joins</a> <span class="tag">retired</span> merged into ` +
+			`<a class="ref" href="/ui/interests/s" title="Streams">Streams</a> (2 documents)`,
+		`<a class="ref" href="/ui/interests/k" title="Kafka">Kafka</a> moved to ` +
+			`<a class="ref" href="/ui/interests/e" title="Engineering">Engineering</a>`,
+		`<a class="ref" href="/ui/interests/b" title="Bonds">Bonds</a> <span class="tag">retired</span> dissolved`,
+		`<li><span class="tag">area</span> <a class="ref" href="/ui/interests/a" title="Cooking">Cooking</a></li>`,
+	} {
+		assert.Contains(t, out, line)
+	}
+
+	first := &ChangesRun{ComputedAt: at, Trigger: "first", Kind: "fresh", Changes: RunChanges{Created: 1},
+		Events: []InterestEvent{{Event: "new", To: kafka}}}
+	assert.True(t, first.FirstGrouping())
+	out = render(t, r, PageChanges, Changes{Layout: Layout{Title: "What changed", Nav: NavInterests}, Run: first})
+	assert.Contains(t, out, "<h2>The library's first grouping</h2>")
+	assert.NotContains(t, out, `class="event-lines"`)
+	out = render(t, r, PageChanges, Changes{Layout: Layout{Title: "What changed", Nav: NavInterests},
+		Run: &ChangesRun{ComputedAt: at, Trigger: "auto", Kind: "warm", Changes: RunChanges{Kept: 3}}})
+	assert.Contains(t, out, "<h2>Nothing changed</h2>")
+	assert.Contains(t, render(t, r, PageChanges, Changes{Layout: Layout{Title: "What changed", Nav: NavInterests}}),
+		"<h2>No rebuild yet</h2>")
+	assert.False(t, ChangesRun{Changes: RunChanges{Kept: 1}, Events: []InterestEvent{{Event: "new"}}}.FirstGrouping(),
+		"a rebuild that kept some")
+}
+
+// TestGone_Page: a retired identity's page says what became of it, in a
+// sentence by its successors' events, dated by its retirement, each
+// successor linking to its page with what it took; an ID nothing knows
+// names what it may have been, and neither names a request or the logs.
+func TestGone_Page(t *testing.T) {
+	r := newRenderer(t)
+	at := time.Date(2026, 10, 3, 9, 30, 0, 0, time.UTC)
+	date := `<time datetime="2026-10-03T09:30:00Z" title="` + when(at) + `">` + localDay(at) + `</time>`
+	succ := func(event string, retired bool) Successor {
+		return Successor{InterestRef: InterestRef{ID: "s-" + event, Label: "To <" + event + ">", Retired: retired},
+			Event: event, Shared: 3}
+	}
+	layout := Layout{Title: "Kafka", Nav: NavInterests}
+	for _, tc := range []struct {
+		retired Retired
+		want    string
+	}{
+		{Retired{Label: "Kafka", RetiredAt: at, Successors: []Successor{succ("split", false), succ("split", true)}},
+			`<p class="lede">It split into these on ` + date + `.</p>`},
+		{Retired{Label: "Kafka", RetiredAt: at, Successors: []Successor{succ("merged", false)}},
+			`<p class="lede">It merged into this on ` + date + `.</p>`},
+		{Retired{Label: "Kafka", RetiredAt: at, Successors: []Successor{succ("merged", false), succ("merged", false)}},
+			`<p class="lede">It merged into these on ` + date + `.</p>`},
+		{Retired{Label: "Kafka", RetiredAt: at, Successors: []Successor{succ("split", false), succ("merged", false)}},
+			`<p class="lede">Its documents went to these on ` + date + `.</p>`},
+		{Retired{Label: "Kafka", RetiredAt: at}, `<p class="lede">It dissolved on ` + date + `, its documents going to ` +
+			`other interests or to <a href="/ui/interests/unsorted">Unsorted</a>.</p>`},
+	} {
+		out := render(t, r, PageRetired, Gone{Layout: layout, ID: "x", Retired: &tc.retired, RetentionDays: 180})
+		assert.Contains(t, out, "<h1>Kafka</h1>")
+		assert.Contains(t, out, tc.want)
+		assert.Contains(t, out, `<p><a href="/ui/interests">All interests →</a></p>`)
+		assert.NotContains(t, out, "daemon logs")
+		assert.NotContains(t, out, "Request ")
+	}
+	out := render(t, r, PageRetired, Gone{Layout: layout, Retired: &Retired{RetiredAt: at,
+		Successors: []Successor{succ("split", true), succ("merged", false)}}, RetentionDays: 180})
+	assert.Contains(t, out, "<h1>Unlabeled interest</h1>")
+	assert.Contains(t, out, `<li><a class="ref" href="/ui/interests/s-split" title="To &lt;split&gt;">To &lt;split&gt;</a> `+
+		`<span class="tag">retired</span><span class="muted">split off from it · 3 documents</span></li>`)
+	assert.Contains(t, out, `<span class="muted">took it in · 3 documents</span>`)
+	assert.Regexp(t, `<h1><svg class="icon"[^>]*>.*?</svg>Unlabeled area</h1>`,
+		render(t, r, PageRetired, Gone{Layout: layout, Retired: &Retired{Area: true, RetiredAt: at}}))
+
+	out = render(t, r, PageRetired, Gone{Layout: layout, ID: "no-such <id>", RetentionDays: 180})
+	assert.Contains(t, out, "<h1>No such interest</h1>")
+	assert.Contains(t, out, "Nothing in your interests has the ID <code>no-such &lt;id&gt;</code>.")
+	assert.Contains(t, out, "It may be from before curio's interests were regrouped by an upgrade, or name one that "+
+		"a rebuild split, merged or dissolved more than 180 days ago, which curio no longer remembers.")
+	assert.NotContains(t, out, "daemon logs")
+}
+
+// TestDocument_Place: a document's line says where the latest rebuild put
+// it, every name linking to its page, cut on one line, and sits outside
+// its live jobs.
+func TestDocument_Place(t *testing.T) {
+	r := newRenderer(t)
+	kafka := InterestRef{ID: "k", Label: "Kafka"}
+	area := InterestRef{ID: "e", Label: "Engineering", Area: true}
+	ref := func(r InterestRef) string {
+		return `<a class="ref" href="/ui/interests/` + r.ID + `" title="` + r.Name() + `">` + r.Label + `</a>`
+	}
+	for _, tc := range []struct {
+		place DocumentPlace
+		want  string
+	}{
+		{DocumentPlace{Fit: "member", Interest: kafka, Area: area}, `In ` + ref(area) + ` › ` + ref(kafka)},
+		{DocumentPlace{Fit: "member", Interest: kafka}, `In ` + ref(kafka)},
+		{DocumentPlace{Fit: "loose", Interest: kafka, Area: area}, `Loose fit of ` + ref(area) + ` › ` + ref(kafka)},
+		{DocumentPlace{Fit: "unsorted", Nearest: kafka}, `In <a href="/ui/interests/unsorted">Unsorted</a> · nearest ` + ref(kafka)},
+		{DocumentPlace{Fit: "unsorted"}, `In <a href="/ui/interests/unsorted">Unsorted</a></span>`},
+		{DocumentPlace{Fit: "new", Interest: kafka, Area: area}, `New since the last rebuild: in ` + ref(area) + ` › ` + ref(kafka)},
+		{DocumentPlace{Fit: "new"}, `New since the last rebuild: in <a href="/ui/interests/unsorted">Unsorted</a>`},
+	} {
+		doc := placedDocument(Layout{Title: "d", Nav: NavLibrary}, tc.place)
+		out := render(t, r, PageDocument, doc)
+		assert.Contains(t, out, `<p class="doc-place fit-`+tc.place.Fit+`">`, tc.place.Fit)
+		assert.Contains(t, out, tc.want, tc.place.Fit)
+		assert.Less(t, strings.Index(out, `class="doc-place`), strings.Index(out, `id="doc-jobs"`), "outside the jobs")
+	}
+	nowhere := placedDocument(Layout{Title: "d", Nav: NavLibrary}, DocumentPlace{})
+	nowhere.Place = nil
+	assert.NotContains(t, render(t, r, PageDocument, nowhere), "doc-place", "nowhere, no line")
+}
+
+// TestStatus_InterestsRow: Status's health card has a row for automatic
+// rebuilds of the interests, its dot by state and the sentence curio
+// status prints, refreshed with health.
+func TestStatus_InterestsRow(t *testing.T) {
+	r := newRenderer(t)
+	for _, tc := range []struct {
+		state InterestsState
+		row   string
+	}{
+		{InterestsState{State: "held", HeldReason: "the embeddings drifted"}, `<li><span class="label"><span class="dot dot-warn">` +
+			`</span>Interests</span><span class="value">rebuilds held: the embeddings drifted; run <code>curio reindex --all</code></span></li>`},
+		{InterestsState{State: "none", Changed: 3, RebuildAt: 20}, `<span class="dot dot-ok"></span>Interests</span>` +
+			`<span class="value">waiting for 20 indexed documents (3 so far)</span>`},
+		{InterestsState{State: "off"}, `<span class="dot dot-neutral"></span>Interests</span><span class="value">off (insight.enabled: false)</span>`},
+		{InterestsState{State: "unknown"}, `<span class="value">the daemon hasn't checked them yet</span>`},
+	} {
+		out := render(t, r, PageStatus, Status{Layout: Layout{Title: "Status", Nav: NavStatus}, Poll: PollHealth,
+			Health: &HealthPanel{OllamaReachable: true, Interests: tc.state}})
+		row := strings.Index(out, tc.row)
+		require.Positive(t, row, "%s:\n%s", tc.state.State, out)
+		assert.Greater(t, row, strings.Index(out, `id="health-live"`), "%s: in health's region", tc.state.State)
+	}
 }

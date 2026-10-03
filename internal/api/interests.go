@@ -32,11 +32,13 @@ type InterestMember struct {
 	Fit           string  `json:"fit"`
 }
 
-// The fits a member is listed with.
+// The fits a document is listed with: a member, a loose fit, unsorted, or
+// placed since the rebuild (new).
 const (
-	fitMember = string(store.InterestFitMember)
-	fitLoose  = string(store.InterestFitLoose)
-	fitNew    = "new"
+	fitMember   = string(store.InterestFitMember)
+	fitLoose    = string(store.InterestFitLoose)
+	fitUnsorted = string(store.InterestFitUnsorted)
+	fitNew      = "new"
 )
 
 // InterestRef names an identity an event involves.
@@ -169,22 +171,24 @@ func (d Deps) kickInterests() {
 // InterestListResponse is the body of GET /v1/interests: a page of the
 // latest rebuild's top-level groups, with what the run found and where the
 // next rebuild stands. The run fields are absent before the first rebuild
-// is done.
+// is done. NumNew counts the documents placed since the rebuild, and
+// NumNewUnsorted those of them placed into Unsorted.
 type InterestListResponse struct {
-	RunID        string             `json:"run_id,omitempty"`
-	ComputedAt   *time.Time         `json:"computed_at,omitempty"`
-	Algo         string             `json:"algo,omitempty"`
-	Shape        string             `json:"shape,omitempty"`
-	NumDocuments int                `json:"num_documents"`
-	NumAreas     int                `json:"num_areas"`
-	NumInterests int                `json:"num_interests"`
-	NumLoose     int                `json:"num_loose"`
-	NumUnsorted  int                `json:"num_unsorted"`
-	NumNew       int                `json:"num_new"`
-	Total        int                `json:"total"`
-	Rebuild      *InterestRebuild   `json:"rebuild,omitempty"`
-	Next         InterestsState     `json:"next"`
-	Items        []InterestResponse `json:"items"`
+	RunID          string             `json:"run_id,omitempty"`
+	ComputedAt     *time.Time         `json:"computed_at,omitempty"`
+	Algo           string             `json:"algo,omitempty"`
+	Shape          string             `json:"shape,omitempty"`
+	NumDocuments   int                `json:"num_documents"`
+	NumAreas       int                `json:"num_areas"`
+	NumInterests   int                `json:"num_interests"`
+	NumLoose       int                `json:"num_loose"`
+	NumUnsorted    int                `json:"num_unsorted"`
+	NumNew         int                `json:"num_new"`
+	NumNewUnsorted int                `json:"num_new_unsorted"`
+	Total          int                `json:"total"`
+	Rebuild        *InterestRebuild   `json:"rebuild,omitempty"`
+	Next           InterestsState     `json:"next"`
+	Items          []InterestResponse `json:"items"`
 }
 
 // UnsortedMember is a document in no interest, with the interest it is
@@ -365,6 +369,7 @@ func (d Deps) interests(ctx context.Context, opts interestsOpts) (InterestListRe
 	for _, n := range placed {
 		resp.NumNew += n
 	}
+	resp.NumNewUnsorted = placed[""]
 	for i := range resp.Items {
 		resp.Items[i].New = placed[resp.Items[i].ID]
 	}
@@ -551,6 +556,7 @@ func (d Deps) handleGetInterest(w http.ResponseWriter, r *http.Request) {
 		Members:     intQuery(r, "members", defaultOneInterestMembers, 0, maxOneInterestMembers),
 		AreaMembers: intQuery(r, "members", defaultInterestMembers, 0, maxInterestMembers),
 		Offset:      offset,
+		NewMembers:  maxNewMembers,
 	})
 	if err != nil {
 		d.writeLookupError(w, r, "interest", id, err)
@@ -565,6 +571,13 @@ type interestOpts struct {
 	// Offset; AreaMembers each of an area's interests' members.
 	Members, AreaMembers int
 	Offset               int
+	// NewMembers are the documents placed into an interest since the
+	// rebuild that it lists, newest first; 0 reads none.
+	NewMembers int
+	// Window, when set, is the page of an area's interests that is listed
+	// with members: Window of them from WindowOffset. Its count and new
+	// count are still every interest's. The JSON lists every interest.
+	Window, WindowOffset int
 }
 
 // interest returns the tenant's area or interest id as the latest rebuild
@@ -614,16 +627,18 @@ func (d Deps) describe(ctx context.Context, run *store.InterestRun, g store.Inte
 	}
 	resp.New = placed[g.ID]
 	if g.Level == store.InterestLevelArea {
-		// An area's page lists every interest it holds.
+		// Every interest of the area counts, and the window's are listed.
 		items := []InterestResponse{resp}
-		listed, err := d.withChildren(ctx, run.ID, items, math.MaxInt, placed)
-		if err != nil {
-			return InterestResponse{}, err
-		}
-		if err := d.withMembers(ctx, run.ID, listed, opts.AreaMembers); err != nil {
+		if _, err := d.withChildren(ctx, run.ID, items, math.MaxInt, placed); err != nil {
 			return InterestResponse{}, err
 		}
 		resp = items[0]
+		if opts.Window > 0 {
+			resp.Children = window(resp.Children, opts.WindowOffset, opts.Window)
+		}
+		if err := d.withMembers(ctx, run.ID, pointers(resp.Children), opts.AreaMembers); err != nil {
+			return InterestResponse{}, err
+		}
 	} else if err := d.withPage(ctx, run.ID, &resp, g, opts); err != nil {
 		return InterestResponse{}, err
 	}
@@ -633,9 +648,17 @@ func (d Deps) describe(ctx context.Context, run *store.InterestRun, g store.Inte
 	return resp, nil
 }
 
+// window is the size items of items from offset: none past the end.
+func window[T any](items []T, offset, size int) []T {
+	if offset >= len(items) {
+		return nil
+	}
+	return items[offset:min(len(items), offset+size)]
+}
+
 // withPage gives interest in its page of members, then loose fits, from
-// opts.Offset, and the documents placed into it since, newest first, in
-// one read of their documents.
+// opts.Offset, and up to opts.NewMembers of the documents placed into it
+// since, newest first, in one read of their documents.
 func (d Deps) withPage(ctx context.Context, runID string, in *InterestResponse, g store.InterestGroup, opts interestOpts) error {
 	var pages []memberPage
 	limit, offset := opts.Members, opts.Offset
@@ -654,11 +677,13 @@ func (d Deps) withPage(ctx context.Context, runID string, in *InterestResponse, 
 		}
 		pages = append(pages, memberPage{into: &in.Members, rows: rows, fit: fitLoose})
 	}
-	placed, err := d.Insights.Placements(ctx, runID, g.ID, maxNewMembers)
-	if err != nil {
-		return fmt.Errorf("interest %s: load new members: %w", g.ID, err)
+	if opts.NewMembers > 0 {
+		placed, err := d.Insights.Placements(ctx, runID, g.ID, opts.NewMembers)
+		if err != nil {
+			return fmt.Errorf("interest %s: load new members: %w", g.ID, err)
+		}
+		pages = append(pages, memberPage{into: &in.NewMembers, rows: placedRows(placed), fit: fitNew})
 	}
-	pages = append(pages, memberPage{into: &in.NewMembers, rows: placedRows(placed), fit: fitNew})
 	return d.hydrate(ctx, pages)
 }
 
@@ -895,6 +920,19 @@ func (d Deps) unsortedMembers(rows []store.InterestAssignment, docs map[string]s
 			Similarity: row.Similarity, NearestID: row.NearestID, NearestLabel: row.NearestLabel})
 	}
 	return out, nil
+}
+
+// documentPlace is where the latest done rebuild put document id: its
+// assignment, or the placement made since. The document page's line is
+// its one reader: the document's JSON, which the CLI and MCP share, leaves
+// it out. No done run, or a document it has nowhere, is an error wrapping
+// store.ErrNotFound.
+func (d Deps) documentPlace(ctx context.Context, id string) (*store.DocumentPlace, error) {
+	run, err := d.Insights.LatestRun(ctx, d.TenantID, store.InterestRunDone)
+	if err != nil {
+		return nil, err
+	}
+	return d.Insights.DocumentPlace(ctx, run.ID, id)
 }
 
 func (d Deps) handleInterestChanges(w http.ResponseWriter, r *http.Request) {

@@ -1,12 +1,14 @@
 {{/*
 The Interests: a page of the latest rebuild's top-level groups, largest
 first: its areas, each naming its largest interests, or its interests in
-the flat shape; and a rebuild. The rebuild's state and its button are live
-regions, which its poller (Rebuild.Poller) keeps current while a rebuild is
-queued or running; a poll's answer is those regions and the poller alone,
-and reads no interest. A newer run is offered as a reload, not swapped in.
-Links between pages name the run shown; a page asked for from another
-run's says it shows the newer one's.
+the flat shape; Unsorted's card after the last page's; and a rebuild. The
+rebuild's state and its button are live regions, which its poller
+(Rebuild.Poller) keeps current, every 2 seconds while a rebuild is queued
+or running and every 30 otherwise; a poll's answer is those regions and
+the poller alone, and reads no interest. A newer run is offered as a
+reload, not swapped in. Links between pages name the run shown; a page
+asked for from another run's says it shows the newer one's. For a week
+after a rebuild that split, merged or dissolved interests, a note says so.
 */}}
 {{define "content" -}}
 {{if .Poll}}{{template "rebuild-state" .Rebuild}}
@@ -28,54 +30,89 @@ run's says it shows the newer one's.
 </div>
 {{if .RunChanged}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>The interests were rebuilt since the page you came from, so this page {{if .OutOfRange}}is past the new run's last{{else}}lists the new run's{{end}}.{{if gt .Page 1}} <a href="{{.FirstPage}}">Start again from page 1</a>.{{end}}</p></div></div>
 {{end}}
-{{- with .Run}}
+{{- with .Run}}{{if .ShowsChanges}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>Rebuilt on {{template "date" .ComputedAt}}: {{.Changes.Summary}}. <a href="{{changesHref}}">What changed →</a></p></div></div>
+{{end}}
 <section class="card mb-4" aria-label="Coverage"><div class="card-body"><div class="coverage">
-{{template "stackbar" (coverageBar .Documents .Outside)}}
-<div class="legend"><span class="item"><span class="swatch swatch-accent"></span><span class="n">{{num .Clustered}}</span> in an interest <span class="pct">{{pct .Clustered .Documents}}</span></span><span class="item"><span class="swatch swatch-track"></span><span class="n">{{num .Outside}}</span> in none <span class="pct">{{pct .Outside .Documents}}</span></span><span class="item run">Run of {{when .ComputedAt}} · {{.Algo}} · {{num .Documents}} documents</span></div>
+{{template "stackbar" .Bar}}
+<div class="legend">{{range .Legend}}<span class="item"><span class="swatch swatch-{{.Tone}}"></span><span class="n">{{num .Count}}</span> {{.Label}} <span class="pct">{{pct .Count $.Run.CoverageTotal}}</span></span>{{end}}<span class="item run">Run of {{when .ComputedAt}}{{with .Kind}} · {{.}}{{end}} · {{count .Documents "document" "documents"}}</span></div>
 </div></div></section>
 {{end}}
 {{- if .OutOfRange}}{{template "out-of-range" .OutOfRange}}
-{{- else if .Run}}{{with .Interests}}
-{{template "interest-cards" .}}
-{{with $.Pager}}{{template "pager" .}}{{end}}
-{{else}}<div class="card"><div class="empty">
+{{- else if .Run}}{{if .Interests}}<ul class="interest-grid" role="list">
+{{range .Interests}}{{template "interest-item" .}}
+{{end}}{{with .Unsorted}}<li class="card interest unsorted">{{template "unsorted-card" .}}</li>
+{{end}}</ul>
+{{with .Pager}}{{template "pager" .}}{{end}}
+{{- else}}<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "sparkles"}}</div>
 <h2>No interests in this run</h2>
 <p>The last rebuild found no interests.</p>
-</div></div>{{end}}
+</div></div>
+{{with .Unsorted}}<ul class="interest-grid mt-4" role="list"><li class="card interest unsorted">{{template "unsorted-card" .}}</li></ul>{{end}}
+{{- end}}
 {{- else if .FirstGrouping}}<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "sparkles"}}</div>
 <h2>Your library is being grouped for the first time</h2>
 <p>Its interests show here once the rebuild finishes, in a couple of minutes on a large library.</p>
 </div></div>
-{{- else}}<div class="card"><div class="empty">
-<div class="empty-icon">{{template "icon" "sparkles"}}</div>
-<h2>No interests yet</h2>
-{{if .Rebuild.Enabled}}<p>The library is grouped into them on its own once enough of it is indexed and it settles; <code>curio interests rebuild</code> groups it now.</p>
-{{else}}<p>Finding them is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon.</p>{{end}}
-</div></div>{{end}}
+{{- else}}{{template "interests-empty" .Rebuild}}{{end}}
 {{template "poller" .Rebuild.Poller}}
 {{- end}}
 
 {{/*
-A Rebuild's state: queued, and why the queue holds it, or running, and
-since when; then what the newest run came to when the page doesn't show
-it. Its links have ids, so focus survives a poll; no live role.
+The Interests before the first rebuild is done, and none is in flight:
+why, as the scheduler last saw it, or how to turn insight on.
+*/}}
+{{define "interests-empty" -}}
+<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "sparkles"}}</div>
+<h2>No interests yet</h2>
+{{if not .Enabled}}<p>Finding them is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon.</p>
+{{- else}}{{with .State}}
+{{- if eq .State "due"}}<p>The first grouping is due ({{count .Changed "document" "documents"}} indexed), and starts once the library settles.</p>
+{{- else if eq .State "none"}}<p>The library is grouped into them on its own once {{num .RebuildAt}} documents are indexed; {{count .Changed "is" "are"}} so far.</p>
+{{- else if eq .State "held"}}<p>Grouping is held: {{.HeldReason}}. Run <code>curio reindex --all</code>; the library is grouped once the re-embedding finishes.</p>
+{{- else if eq .State "failing"}}<p>The first grouping failed: <span class="state-error" title="{{.LastError}}">{{shortError .LastError}}</span>. It is tried again {{if .Retrying}}{{template "reltime" .RetryAt}}{{else}}once the library settles{{end}}.</p>
+{{- else}}<p>The library is grouped into them on its own once enough of it is indexed and it settles.</p>{{end}}
+<p><code>curio interests rebuild</code> groups it now.</p>
+{{- end}}{{end}}
+</div></div>
+{{- end}}
+
+{{/*
+Unsorted's card, an UnsortedCard: the documents in no interest, those
+placed there since, and the way to them.
+*/}}
+{{define "unsorted-card" -}}
+<h2>{{template "icon" "inbox"}}<a href="{{.Href}}">Unsorted</a></h2>
+<div class="stats"><span><b>{{num .Documents}}</b> documents</span>{{with .New}}<span class="new"><b>{{num .}}</b> new</span>{{end}}</div>
+<p class="summary">Not close enough to any interest yet. Listed nearest first, each with the interest it is closest to.</p>
+<a class="all" href="{{.Href}}">See them →</a>
+{{- end}}
+
+{{/*
+A Rebuild's state, first match: the queue's read failed; a rebuild runs,
+since when; one is queued, and why the queue holds it; or where automatic
+rebuilds stand, as the scheduler last saw them. Then, in a poll's answer,
+newer interests to load. Its links have ids, so focus survives a poll; no
+live role.
 */}}
 {{define "rebuild-state" -}}
 <div class="rebuild-state" id="rebuild-state">
 {{- with .Err}}{{template "panel-error" .}}{{else}}
 {{- if .Running}}<p>Rebuilding{{if not .StartedAt.IsZero}} · started {{template "reltime" .StartedAt}}{{end}}</p>
-{{- else if .Queued}}<p>Rebuild queued{{with .Hold}} · <a id="rebuild-hold" href="{{navHref "status"}}">the queue is closed: {{queueReason .}}</a>{{end}}</p>{{end}}
-{{- if eq .Outcome "ready"}}<p>New interests are ready: <a id="rebuild-reload" href="{{navHref "interests"}}">reload</a></p>
-{{- else if eq .Outcome "failed"}}<p class="failed" title="{{.RunError}}">The rebuild failed: {{shortError .RunError}}</p>{{end}}
+{{- else if .Queued}}<p>Rebuild queued{{with .Hold}} · <a id="rebuild-hold" href="{{navHref "status"}}">the queue is closed: {{queueReason .}}</a>{{end}}</p>
+{{- else if .ShowsState}}<p class="interests-state tone-{{.State.Tone}}">{{template "interests-state" .State}}</p>{{end}}
+{{- if .Ready}}<p>New interests are ready: <a id="rebuild-reload" href="{{navHref "interests"}}">reload</a></p>{{end}}
 {{- end -}}
 </div>
 {{- end}}
 
 {{/*
-The Rebuild button, while insight is on: disabled while a rebuild is
-queued or running, the only change that replaces it.
+The Rebuild button, while insight is on: disabled while the queue holds a
+rebuild, queued or running, the only change that replaces it. A held or
+failing state leaves it on: a rebuild asked for isn't held, and retries a
+failure now.
 */}}
 {{define "rebuild-control" -}}
 <div class="rebuild-control js-only" id="rebuild-control">

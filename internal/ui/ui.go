@@ -27,8 +27,8 @@ var files embed.FS
 // pageNames are the pages: each is templates/<name>.html on top of the
 // layout, the partials and the icons.
 var pageNames = []string{
-	PageSearch, PageStatus, PageLibrary, PageFailures, PageDocument, PageInterests, PageInterest, PageError,
-	PageStarting,
+	PageSearch, PageStatus, PageLibrary, PageFailures, PageDocument, PageInterests, PageInterest, PageUnsorted,
+	PageChanges, PageRetired, PageError, PageStarting,
 }
 
 // Renderer renders the dashboard's pages and serves its assets. It is
@@ -105,6 +105,8 @@ func funcs(assets assetSet) template.FuncMap {
 		"documentHref":       documentHref,
 		"documentImagesHref": documentImagesHref,
 		"interestHref":       interestHref,
+		"unsortedHref":       unsortedHref,
+		"changesHref":        changesHref,
 		"libraryHref":        libraryHref,
 		"libraryMoreHref":    libraryMoreHref,
 		"clearFiltersHref":   clearFiltersHref,
@@ -121,6 +123,7 @@ func funcs(assets assetSet) template.FuncMap {
 		"ago":                ago,
 		"datetime":           datetime,
 		"day":                day,
+		"localDay":           localDay,
 		"duration":           duration,
 		"score":              score,
 		"host":               host,
@@ -139,8 +142,12 @@ func funcs(assets assetSet) template.FuncMap {
 		"count":              count,
 		"pct":                pct,
 		"stateBar":           stateBar,
-		"coverageBar":        coverageBar,
+		"childBar":           childBar,
 		"causeBar":           causeBar,
+		"fitClass":           fitClass,
+		"eventLabel":         eventLabel,
+		"triggerLabel":       triggerLabel,
+		"freshReason":        freshReason,
 		"queueReason":        queueReason,
 		"gentleHint":         gentleHint,
 		"jobKindLabel":       jobKindLabel,
