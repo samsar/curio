@@ -430,9 +430,10 @@ The interfaces with explicit swap paths:
    shipped `LouvainGrouper` makes areas and interests, warm-started from
    the previous run; `FlatGrouper` wraps an `insight.Clusterer` such as the
    kNN-graph baseline for tests and `cmd/clusterreport`, the developer's
-   report on a copy of a library) and naming (LLM or term labels). The scheduler reads its world through
-   `insight.Library` (`NewLibrary` over the stores), so its decisions are
-   tested on a simulated library and clock.
+   report on a copy of a library) and naming (LLM or term labels). The
+   scheduler reads its world through `insight.Library` (`NewLibrary` over
+   the stores), so its decisions are tested on a simulated library and
+   clock.
 
 Do not abstract until you have two impls. The interfaces above are commitments
 because we already know we want hosted mode, model swaps, and multiple fetchers.

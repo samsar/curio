@@ -10788,9 +10788,9 @@ A fresh `.backup` of the copy the research and PR 1 measured (taken on
 2026-10-01 after run `e6020c71`: schema 15, 5,254 fetched documents),
 read with `sqlite3 'file:…?immutable=1'`; an Apple M4 Max (12
 performance and 4 efficiency cores, 64 GB); never `~/.curio`, port 8765
-or a checkout's `./bin`. `make cluster-report` on it took 1 min 46 s of
-wall time (1,414 s of CPU, 8 s of it the vector read and 69 s the chain's
-51 groupings) at a peak RSS of 317 MB, and reproduced PR 1's in-process
+or a checkout's `./bin`. `make cluster-report` on it took 1 min 44 s of
+wall time (1,389 s of CPU, 8 s of it the vector read and 67 s the chain's
+51 groupings) at a peak RSS of 293 MB, and reproduced PR 1's in-process
 measurement number for number. Names kept are interests · areas, the mean
 of 3 draws with the worst in brackets.
 
@@ -10842,27 +10842,25 @@ interests check passed. The report on a backup of that home found the
 run identical to its own fresh grouping (ARI 1 at both levels, all 5,254
 fits the same) and gave the copy's fresh, warm and chain numbers again.
 
-**The labels.** No exact duplicate (`LabelKey`) among an area's
-interests, among the areas, or among all 187 interests. Three near pairs
-within a scope (token overlap of half or more): "Distributed Systems and
+**The labels.** No exact duplicate (`LabelKey`) among an area's interests,
+among the areas, or among all 187 interests. Three near pairs within a
+scope (token overlap of half or more): "Distributed Systems and
 Algorithms" and "Distributed System Design" in one area, "Game Engine
 Development" and "Puzzle Game Development" in another, and the areas
 "Digital Platform Economy" and "Digital Influencers and Platforms"; three
 more across areas. Every label has 2 to 6 words in title case, none reads
 as a preamble, a quote or a cut. Most area names cover their interests
 ("AWS Serverless Ecosystem", "Investment Theory and Psychology"). Areas
-that join unrelated topics are named by gluing two of them ("Career and
-Consumer Affairs" holds consumer rights and credit counselling) or by
-one ("Retail Design and Commerce" holds outdoor lighting, irrigation and
-watch buying guides; "Financial Technology and Markets" a "Wiki and
-Information Systems"). A few interests got catch-all names ("Miscellaneous
-Search Queries", "Unrelated Web Content"). An area of one interest
-repeats that interest's name ("Andreessen Horowitz Partners"), so the
-outline prints it twice; they are in different scopes, which the
-uniqueness rule allows. An area named "Deleted Content" (11 documents) is
-this copy's: it predates the refetch of the 17 stored tombstones on
-2026-10-02. The full label table stays outside the repo: it is the
-owner's reading.
+that join unrelated topics are named after two of them glued together, or
+after one, which leaves the others out ("Financial Technology and Markets"
+holds a "Wiki and Information Systems"). A few interests got catch-all
+names ("Miscellaneous Search Queries", "Unrelated Web Content"). An area
+of one interest repeats that interest's name ("Andreessen Horowitz
+Partners"), so the outline prints it twice; they are in different scopes,
+which the uniqueness rule allows. An area named "Deleted Content" (11
+documents) is this copy's: it predates the refetch of the 17 stored
+tombstones on 2026-10-02. The full label table stays outside the repo: it
+is the owner's reading.
 
 **Going back to 2.4.** 2.4.x runs goose v3.28.0, which ignores database
 versions it doesn't know, so a 2.4 daemon starts on a schema-17 database
@@ -10876,13 +10874,28 @@ TABLE … DROP COLUMN`, triggers included, and the chunk index's triggers
 need the vec0 module, which the CLI's SQLite lacks ("error in trigger
 trg_chunks_delete: no such module: vec0"). PR 2's `goose down` from 16
 worked because 016's down only drops and creates tables. So the release
-note's way back is a backup taken before the upgrade.
+note's way back is a copy taken before the upgrade, `curio daemon stop &&
+sqlite3 ~/.curio/curio.db ".backup $HOME/curio-2.4.db"` (a `~` inside the
+quoted argument is expanded by neither the shell nor sqlite3), put back
+once 2.4 is installed and nothing that uses curio's MCP tools runs, which
+would start the daemon again: `curio daemon stop && rm -f
+~/.curio/curio.db-wal ~/.curio/curio.db-shm && cp ~/curio-2.4.db
+~/.curio/curio.db`. The stop and the swap share a line after the install,
+so a daemon started after the swap is 2.4's, and `cp` leaves the copy in
+place, so a slip can be redone. Both lines ran as printed, under zsh with
+`HOME` at a scratch directory, between v2.4.1 built from its tag and this
+release's build (the `curio` in them ran with `CURIO_HOME` at the scratch
+home and the real `HOME`: with `HOME` moved, curio takes the scratch home
+for the default one, whose launchd label is the real agent's). The
+database came back byte for byte, and 2.4.1 started on it at schema 15
+with its 325 interests; 2.4.1 started on a schema-17 copy too, and
+answered `curio interests` with "no such table: cluster_runs".
 
 **Test times** under -race on an M4 Max, each package alone, before and
 after: `internal/insight/quality` 1.3 s and 1.4 s
 (`TestCohesion_MatchesTheEngine` now checks against `Centroids` and
 `AssignStrays`), `internal/api` 15.9 s and 16.4 s (one assertion more,
-no server), and `cmd/clusterreport`, new, 2.3 s. `make test`'s race-free
+no server), and `cmd/clusterreport`, new, 2.8 s. `make test`'s race-free
 pass is unchanged.
 
 ---
