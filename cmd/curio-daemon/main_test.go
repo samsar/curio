@@ -1079,8 +1079,6 @@ func TestStart_ChecksTheInterests(t *testing.T) {
 	})
 }
 
-// TestRun_WarnsOfDeprecatedKeys: a config.yaml that sets an insight key
-// nothing reads any more starts, with one warning that names the key.
 // TestHoldReason: a drift the sample verified holds the interests'
 // rebuilds as drifted, one it couldn't verify as perhaps drifted, and no
 // drift holds nothing.
@@ -1114,6 +1112,8 @@ func TestIndexing(t *testing.T) {
 	assert.True(t, got, "an index job")
 }
 
+// TestRun_WarnsOfDeprecatedKeys: a config.yaml that sets an insight key
+// nothing reads any more starts, with one warning that names the key.
 func TestRun_WarnsOfDeprecatedKeys(t *testing.T) {
 	listen := freeLoopbackAddr(t)
 	home := newHome(t, listen)
