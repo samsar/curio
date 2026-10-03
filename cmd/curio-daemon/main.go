@@ -244,32 +244,16 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 			return nil, err
 		}
 	}
-	if cfg.Insight.Enabled {
-		queueFirstRebuild(ctx, d.apiDeps.Insights, d.apiDeps.Queue)
+	// One check of the interests before the full API is up, so its first
+	// healthz has the scheduler's state. A rebuild that is due (a library
+	// whose interests an upgrade dropped) is queued once the drift monitor
+	// has its first verdict, by the scheduler's Run (DriftChecked). A check
+	// is best effort: one that can't read warns and the daemon starts
+	// anyway.
+	if d.scheduler != nil {
+		d.scheduler.Check(ctx)
 	}
 	return d, nil
-}
-
-// queueFirstRebuild queues a rebuild of a library no rebuild has grouped
-// yet: a new one, one whose interests an upgrade dropped, or one whose
-// first rebuild failed. A rebuild already pending, a requeued orphan
-// among them, is left to run. It runs after the orphans are settled and
-// before any worker claims, and is best effort: the daemon starts anyway,
-// and a rebuild can still be asked for.
-func queueFirstRebuild(ctx context.Context, insights store.InsightStore, queue store.JobQueue) {
-	switch _, err := insights.LatestRun(ctx, store.LocalTenantID, store.InterestRunDone); {
-	case err == nil:
-		return
-	case !errors.Is(err, store.ErrNotFound):
-		slog.Warn("interests: can't read the last rebuild, so none was enqueued", "err", err)
-		return
-	}
-	job, queued, err := jobs.EnqueueRebuild(ctx, queue, store.LocalTenantID, store.RunTriggerFirst)
-	if err != nil {
-		slog.Warn("interests: enqueue the first rebuild", "err", err)
-		return
-	}
-	slog.Info("interests: rebuild enqueued", "trigger", store.RunTriggerFirst, "job", job.ID, "queued", queued)
 }
 
 // migrationHooks log each migration and report it through startup, which
@@ -356,10 +340,11 @@ func syncMarkerSchemaVersion(home *curiohome.Home, meta curiohome.Meta, schemaVe
 
 // daemon is everything run starts once the database is ready.
 type daemon struct {
-	apiDeps api.Deps
-	pools   []jobs.Pool
-	drift   *drift.Monitor
-	keeper  *keepawake.Keeper
+	apiDeps   api.Deps
+	pools     []jobs.Pool
+	drift     *drift.Monitor
+	keeper    *keepawake.Keeper
+	scheduler *insight.Scheduler // nil with insight off
 }
 
 // newDaemon builds the stores, clients, engines and pools over db, whose
@@ -421,24 +406,6 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Log:          slog.Default(),
 	})
 
-	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights)
-	if err != nil {
-		return nil, err
-	}
-
-	pools := jobs.NewPools(jobs.Deps{
-		Home:        home,
-		Documents:   docs,
-		Extractions: exts,
-		Bookmarks:   bms,
-		Queue:       queue,
-		Dispatcher:  dispatcher,
-		Indexer:     idx,
-		Insight:     insightEngine,
-		Log:         slog.Default(),
-	}, sizes, jobs.WorkerOptions{Gate: gate, Log: slog.Default()})
-	// The Jina fallback is the one upstream whose health is tracked.
-	upstreams := func() []fetcher.UpstreamHealth { return []fetcher.UpstreamHealth{native.JinaHealth()} }
 	// A change of build is verified by re-embedding a sample through the
 	// indexer, so the requests are the ones that made the stored vectors,
 	// sent by the same embedder.
@@ -449,33 +416,143 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	// Built after start's marker writes: from here on the monitor is the
 	// marker's only writer.
 	driftMonitor := drift.New(home, emb.Client(), sampler, slog.Default())
+	drifted := driftHold(driftMonitor)
+	checked := driftChecked(driftMonitor.Report, time.Now(), time.Now)
+
+	jobDeps := jobs.Deps{
+		Home:        home,
+		Documents:   docs,
+		Extractions: exts,
+		Bookmarks:   bms,
+		Queue:       queue,
+		Dispatcher:  dispatcher,
+		Indexer:     idx,
+		Log:         slog.Default(),
+	}
+	// With insight off nothing is rebuilt or placed on its own: there is
+	// no placer and no scheduler, and a rebuild can't be asked for.
+	var (
+		placer    *insight.Placer
+		scheduler *insight.Scheduler
+	)
+	if cfg.Insight.Enabled {
+		placer = insight.NewPlacer(insights, chunks, placementHold(drifted, checked), slog.Default())
+		jobDeps.Placer = placer
+	}
+	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights, queue, placer, drifted)
+	if err != nil {
+		return nil, err
+	}
+	jobDeps.Insight = insightEngine
+	if cfg.Insight.Enabled {
+		if scheduler, err = newScheduler(insights, docs, queue, insightEngine, placer, drifted, checked); err != nil {
+			return nil, err
+		}
+		jobDeps.KickInterests = scheduler.Kick
+	}
+
+	pools := jobs.NewPools(jobDeps, sizes, jobs.WorkerOptions{Gate: gate, Log: slog.Default()})
+	// The Jina fallback is the one upstream whose health is tracked.
+	upstreams := func() []fetcher.UpstreamHealth { return []fetcher.UpstreamHealth{native.JinaHealth()} }
 	keeper := newKeeper(gate, queue, pools)
 
-	return &daemon{
-		apiDeps: api.Deps{
-			Home:            home,
-			Documents:       docs,
-			Extractions:     exts,
-			Bookmarks:       bms,
-			Chunks:          chunks,
-			Queue:           queue,
-			Embedder:        emb,
-			GenerationModel: cfg.Generation.Model,
-			Search:          engine,
-			Insights:        insights,
-			InsightEnabled:  cfg.Insight.Enabled,
-			Upstreams:       upstreams,
-			Gate:            gate,
-			Drift:           driftMonitor,
-			KeepAwake:       keeper,
-			YouTubeFetcher:  routed.ytdlp,
-			GitHubToken:     routed.githubToken,
-			Log:             slog.Default(),
+	apiDeps := api.Deps{
+		Home:            home,
+		Documents:       docs,
+		Extractions:     exts,
+		Bookmarks:       bms,
+		Chunks:          chunks,
+		Queue:           queue,
+		Embedder:        emb,
+		GenerationModel: cfg.Generation.Model,
+		Search:          engine,
+		Insights:        insights,
+		InsightEnabled:  cfg.Insight.Enabled,
+		Upstreams:       upstreams,
+		Gate:            gate,
+		Drift:           driftMonitor,
+		KeepAwake:       keeper,
+		YouTubeFetcher:  routed.ytdlp,
+		GitHubToken:     routed.githubToken,
+		Log:             slog.Default(),
+	}
+	if scheduler != nil {
+		apiDeps.Interests = scheduler
+	}
+	return &daemon{apiDeps: apiDeps, pools: pools, drift: driftMonitor, keeper: keeper, scheduler: scheduler}, nil
+}
+
+// driftHold says how the embeddings drifted, as the monitor last reported
+// (holdReason): what holds automatic rebuilds and placement, and what a
+// run built meanwhile notes.
+func driftHold(m *drift.Monitor) func() string {
+	return func() string { return holdReason(m.Report()) }
+}
+
+// driftCheckGrace is how long after the daemon starts the interests wait
+// for the embedding check's first verdict. The monitor keeps its report in
+// memory, so until it concludes a check a drift that predates the start
+// can't be seen; past the grace (Ollama down, say, where the check can't
+// conclude but grouping needs no Ollama), rebuilds and placement go ahead.
+const driftCheckGrace = 10 * time.Minute
+
+// driftChecked reports whether the drift monitor (its Report) has
+// concluded a check since started, or driftCheckGrace has passed by now
+// without one.
+func driftChecked(report func() drift.Report, started time.Time, now func() time.Time) func() bool {
+	return func() bool {
+		return !report().CheckedAt.IsZero() || now().Sub(started) >= driftCheckGrace
+	}
+}
+
+// placementHold is what holds placement: a drift, or the embedding check
+// not yet concluded since the daemon started, which the placer, holding
+// silently, treats alike.
+func placementHold(drifted func() string, checked func() bool) func() string {
+	return func() string {
+		if reason := drifted(); reason != "" {
+			return reason
+		}
+		if !checked() {
+			return "the embedding check hasn't concluded since the daemon started"
+		}
+		return ""
+	}
+}
+
+// holdReason says how the embeddings drifted by r, "" while they haven't.
+func holdReason(r drift.Report) string {
+	switch {
+	case !r.Drifted():
+		return ""
+	case r.Evidence.Verified:
+		return "the embeddings drifted"
+	default:
+		return "the embeddings may have drifted"
+	}
+}
+
+// newScheduler builds the interest scheduler over the stores, queuing
+// rebuilds through the queue, on the timing schedulerConfig gives.
+func newScheduler(insights store.InsightStore, docs store.DocumentStore, queue store.JobStore, engine *insight.Engine,
+	placer *insight.Placer, drifted func() string, checked func() bool) (*insight.Scheduler, error) {
+	timing, err := schedulerConfig()
+	if err != nil {
+		return nil, err
+	}
+	return insight.NewScheduler(insight.SchedulerOptions{
+		TenantID: store.LocalTenantID,
+		Library:  insight.NewLibrary(insights, docs, queue),
+		Enqueue: func(ctx context.Context, tenantID string, trigger store.RunTrigger) (*store.Job, bool, error) {
+			return jobs.EnqueueRebuild(ctx, queue, tenantID, trigger)
 		},
-		pools:  pools,
-		drift:  driftMonitor,
-		keeper: keeper,
-	}, nil
+		Drift:         drifted,
+		DriftChecked:  checked,
+		ParamsChanged: engine.ParamsChanged,
+		Placer:        placer,
+		Config:        timing,
+		Log:           slog.Default(),
+	}), nil
 }
 
 // newKeeper builds the keep-awake keeper over the queue gate's settings
@@ -602,14 +679,17 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 }
 
 // newInsightEngine builds the insight layer: group documents into labeled
-// areas and interests with the Louvain grouper. With insight.labeling =
-// "llm" the LLM labeler is always wired: whether Ollama and the model are
-// up is decided at each rebuild, where the engine falls back to term labels
-// for any run that can't reach them. A startup check would pin that verdict
-// for the life of the process, and the CLI often auto-starts the daemon
-// before the Ollama app is running.
-func newInsightEngine(ctx context.Context, cfg config.Config, docs store.DocumentStore,
-	chunks store.ChunkStore, insights store.InsightStore) (*insight.Engine, error) {
+// areas and interests with the Louvain grouper, placing the documents
+// indexed during a rebuild with placer (nil places none) once it commits,
+// and asking queue whether a re-embedding still drains.
+// With insight.labeling = "llm" the LLM labeler is always wired: whether
+// Ollama and the model are up is decided at each rebuild, where the engine
+// falls back to term labels for any run that can't reach them. A startup
+// check would pin that verdict for the life of the process, and the CLI
+// often auto-starts the daemon before the Ollama app is running.
+func newInsightEngine(ctx context.Context, cfg config.Config, docs store.DocumentStore, chunks store.ChunkStore,
+	insights store.InsightStore, queue store.JobStore, placer *insight.Placer, drifted func() string,
+) (*insight.Engine, error) {
 	var llmLabeler insight.Labeler
 	if cfg.Insight.Labeling == insight.LabelingLLM {
 		gen, err := generator.NewOllama(generator.OllamaOptions{
@@ -630,13 +710,28 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 		Labeling:        cfg.Insight.Labeling,
 		Center:          cfg.Insight.CenterVectors,
 		LabelingTimeout: time.Duration(cfg.Insight.LabelingTimeoutSeconds) * time.Second,
+		Placer:          placer,
+		Drift:           drifted,
+		Indexing:        indexing(queue),
 	}, slog.Default()), nil
 }
 
-// serve runs the worker pools, the embedding drift monitor and the
-// keep-awake keeper alongside the API until ctx is cancelled or the API
-// fails, then shuts them down within the documented budget: the keeper
-// releases its hold as its context ends.
+// indexing reports whether queue holds index jobs pending or running.
+func indexing(queue store.JobStore) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		counts, err := queue.QueueCounts(ctx)
+		if err != nil {
+			return false, err
+		}
+		index := counts[store.JobKindIndex]
+		return index.Pending+index.Running > 0, nil
+	}
+}
+
+// serve runs the worker pools, the embedding drift monitor, the interest
+// scheduler and the keep-awake keeper alongside the API until ctx is
+// cancelled or the API fails, then shuts them down within the documented
+// budget: the keeper releases its hold as its context ends.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -644,6 +739,9 @@ func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	var workers sync.WaitGroup
 	workers.Go(func() { d.drift.Run(ctx) })
 	workers.Go(func() { d.keeper.Run(ctx) })
+	if d.scheduler != nil {
+		workers.Go(func() { d.scheduler.Run(ctx) })
+	}
 	for _, p := range d.pools {
 		for range p.Size {
 			workers.Go(func() {

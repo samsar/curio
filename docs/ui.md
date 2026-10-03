@@ -23,7 +23,7 @@ the dashboard does what these commands do:
 | a document's **Reindex** (once it has text) | re-chunks and re-embeds its text | `curio reindex <id>` |
 | a group's **Refetch N** on Failures | fetches again every document that failed for that cause | `curio refetch --all --cause <cause>` |
 | dead links' **Refetch N anyway…** on Failures, after you confirm | fetches every dead link again | `curio refetch --all --state dead --cause dead_link` |
-| **Rebuild** on Interests | groups the library into interests again; a second click while one waits queues nothing more | `curio interests rebuild` |
+| **Rebuild** on Interests | rebuilds the interests now, rather than when the daemon would on its own; a second click while one waits queues nothing more | `curio interests rebuild` |
 | **Pause** / **Resume** on Status | stops starting jobs, or starts them again | `curio pause`, `curio resume` |
 | **Throttle** on Status | runs fewer jobs at once (gentle), or all (normal) | `curio throttle gentle\|normal` |
 | **Keep awake** on Status | keeps the Mac from idle sleep while jobs run on AC power | `curio keep-awake on\|off` |
@@ -182,9 +182,10 @@ footer names the address the daemon listens on.
   ("it merged into …"), with a way back to Interests. A link from before
   the upgrade that brought areas answers 404: interests were regrouped
   then.
-  **Rebuild**, at the top, groups the library again. With insight turned
-  off in config.yaml (`insight.enabled: false`), there is no Rebuild, and
-  the page says so.
+  **Rebuild**, at the top, groups the library again now; the daemon also
+  does on its own as the library changes. With insight turned off in
+  config.yaml (`insight.enabled: false`), there is no Rebuild, and the
+  page says so.
 - **Status**: what curio is doing, and whether what it needs works. What
   needs your attention comes first: Ollama not ready, the embeddings
   drifted, or may have drifted, since the library was indexed (what

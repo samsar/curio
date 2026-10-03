@@ -91,10 +91,10 @@ test:
 test-integration:
 	$(GO) test -race -count=1 -tags=$(GOTAGS),integration ./...
 
-## test-e2e: run the end-to-end test (builds and drives a real curio-daemon)
+## test-e2e: run the end-to-end test (builds and drives a real curio-daemon), and the daemon's tests in its e2e build
 .PHONY: test-e2e
 test-e2e:
-	$(GO) test -race -count=1 -tags=$(GOTAGS),e2e ./test/e2e/...
+	$(GO) test -race -count=1 -tags=$(GOTAGS),e2e ./test/e2e/... ./cmd/curio-daemon/...
 
 ## vet: go vet
 .PHONY: vet

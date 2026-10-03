@@ -31,8 +31,10 @@ const clusterPoolSize = 1
 //     failed, or dead, when its job gives up.
 //   - index: the index handler and the same hook.
 //   - cluster: corpus-wide clustering on one goroutine, so it neither
-//     starves the others nor runs twice at once. No hook: there is no
-//     document to mark.
+//     starves the others nor runs twice at once. Its hook records a
+//     rebuild the daemon left unfinished, and once a job's outcome is
+//     recorded the interest scheduler is asked to check, so its state
+//     moves on from rebuilding at once.
 func NewPools(d Deps, sizes PoolSizes, opts WorkerOptions) []Pool {
 	fetch := NewWorker(d.Queue, opts)
 	fetch.Register(store.JobKindFetch, fetchHandler(d))
@@ -44,6 +46,8 @@ func NewPools(d Deps, sizes PoolSizes, opts WorkerOptions) []Pool {
 
 	cluster := NewWorker(d.Queue, opts)
 	cluster.Register(store.JobKindCluster, clusterHandler(d))
+	cluster.OnPermanentFailure(store.JobKindCluster, abandonedRebuild(d))
+	cluster.OnFinished(store.JobKindCluster, func() { kick(d) })
 
 	return []Pool{
 		{Name: "fetch", Kind: store.JobKindFetch, Worker: fetch, Size: sizes.Fetch},

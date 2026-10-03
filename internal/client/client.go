@@ -58,6 +58,9 @@ type Health struct {
 	// GitHubToken is whether the daemon's GitHub fetcher sends a token;
 	// nil from a daemon that predates saying so.
 	GitHubToken *bool `json:"github_token,omitempty"`
+	// Interests is where automatic rebuilds of the interests stand; nil
+	// from a daemon that predates them.
+	Interests *InterestsState `json:"interests,omitempty"`
 }
 
 // EmbeddingDrift mirrors api.EmbeddingDrift: what changed in the build
@@ -776,21 +779,46 @@ type InterestRebuild struct {
 	Dissolved        int    `json:"dissolved"`
 }
 
-// The states of the next rebuild (InterestsState.State). A state this
+// The states of automatic rebuilds (InterestsState.State). A state this
 // client doesn't know reads as StateCurrent.
 const (
 	StateOff        = "off"
 	StateRebuilding = "rebuilding"
 	StateQueued     = "queued"
+	StateHeld       = "held"
 	StateFailing    = "failing"
+	StateDue        = "due"
 	StateCurrent    = "current"
 	StateNone       = "none"
+	// StateUnknown: the daemon hasn't checked yet.
+	StateUnknown = "unknown"
 )
 
-// InterestsState mirrors api.InterestsState.
+// Why the next rebuild is fresh (InterestsState.FreshOwed).
+const (
+	// FreshReindex: the library was re-embedded; the rebuild waits for the
+	// re-embedding to finish.
+	FreshReindex = "reindex"
+	// FreshManual: a fresh rebuild was asked for.
+	FreshManual = "manual"
+	// FreshParams: the grouping's parameters changed.
+	FreshParams = "params"
+)
+
+// InterestsState mirrors api.InterestsState: where automatic rebuilds of
+// the interests stand. Unset times are zero.
 type InterestsState struct {
-	State     string `json:"state"`
-	LastError string `json:"last_error,omitempty"`
+	State            string    `json:"state"`
+	LastRebuildAt    time.Time `json:"last_rebuild_at,omitzero"`
+	LastKind         string    `json:"last_kind,omitempty"`
+	LastTrigger      string    `json:"last_trigger,omitempty"`
+	ChangedDocuments int       `json:"changed_documents,omitempty"`
+	RebuildAt        int       `json:"rebuild_at,omitempty"`
+	DueSince         time.Time `json:"due_since,omitzero"`
+	FreshOwed        string    `json:"fresh_owed,omitempty"`
+	HeldReason       string    `json:"held_reason,omitempty"`
+	RetryAt          time.Time `json:"retry_at,omitzero"`
+	LastError        string    `json:"last_error,omitempty"`
 }
 
 // InterestList mirrors api.InterestListResponse.
@@ -920,11 +948,16 @@ type RebuildInterestsResponse struct {
 	JobID string `json:"job_id"`
 }
 
-// RebuildInterests queues a rebuild of the interests, or finds the one
-// already queued, and returns its job ID to poll.
-func (c *Client) RebuildInterests(ctx context.Context) (*RebuildInterestsResponse, error) {
+// RebuildInterests queues a rebuild of the interests now, or finds the
+// one already queued, and returns its job ID to poll. fresh makes it, or
+// the next, a fresh rebuild.
+func (c *Client) RebuildInterests(ctx context.Context, fresh bool) (*RebuildInterestsResponse, error) {
+	path := "/v1/interests/rebuild"
+	if fresh {
+		path += "?fresh=1"
+	}
 	var out RebuildInterestsResponse
-	if err := c.do(ctx, http.MethodPost, "/v1/interests/rebuild", nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

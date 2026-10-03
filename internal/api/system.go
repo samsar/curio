@@ -28,6 +28,9 @@ import (
 // GitHubToken says whether the GitHub fetcher sends a token, from
 // config.yaml or its environment: without one GitHub allows 60 API
 // requests an hour, which a library with many github.com pages exceeds.
+// Interests is where automatic rebuilds of the interests stand, the
+// scheduler's last check: interests are not health, so it never changes
+// Status.
 type Health struct {
 	Status          string           `json:"status"`
 	PID             int              `json:"pid"`
@@ -43,6 +46,7 @@ type Health struct {
 	Upstreams       []UpstreamHealth `json:"upstreams"`
 	YouTubeFetcher  string           `json:"youtube_fetcher,omitempty"`
 	GitHubToken     bool             `json:"github_token"`
+	Interests       InterestsState   `json:"interests"`
 }
 
 // EmbeddingDrift says what changed in the build that makes the home's
@@ -234,6 +238,7 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		Upstreams:       d.upstreams(),
 		YouTubeFetcher:  d.YouTubeFetcher,
 		GitHubToken:     d.GitHubToken,
+		Interests:       d.interestsState(),
 	}, nil
 }
 

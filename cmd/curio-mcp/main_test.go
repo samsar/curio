@@ -27,7 +27,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
-	"github.com/samsar/curio/internal/jobs"
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/porttest"
 	"github.com/samsar/curio/internal/store"
 )
@@ -600,6 +600,7 @@ func TestMCP_ListInterests_Areas(t *testing.T) {
 	run := srv.AddRun(t, apitest.RunSpec{Areas: []apitest.Area{{Label: "Programming", Interests: []apitest.Interest{
 		{Label: "Go", Members: []*store.Document{a, b}}, {Label: "Rust", Size: 1}, {Label: "Zig", Size: 1}}}},
 		Unsorted: []*store.Document{unsorted}})
+	srv.Scheduler.Set(insight.Snapshot{State: insight.StateCurrent, RebuildAt: 5})
 
 	res, out := listInterests(t, srv, map[string]any{"interests": 2, "members": 1})
 	require.False(t, res.IsError, textOf(res))
@@ -689,23 +690,30 @@ func TestMCP_ListInterests_ID(t *testing.T) {
 // why there are no interests.
 func TestMCP_ListInterests_Empty(t *testing.T) {
 	srv := apitest.Start(t)
-	res, out := listInterests(t, srv, nil)
-	assert.Equal(t, "No interests yet: the library hasn't been grouped.", textOf(res))
-	assert.Equal(t, "none", out.State)
-
-	_, _, err := jobs.EnqueueRebuild(context.Background(), srv.Deps.Queue, apitest.TenantID, store.RunTriggerFirst)
-	require.NoError(t, err)
-	res, out = listInterests(t, srv, nil)
-	assert.Contains(t, textOf(res), "being grouped for the first time")
-	assert.Equal(t, "queued", out.State)
-
-	failing := apitest.Start(t)
-	failing.AddFailedRun(t, "ollama unreachable")
-	res, _ = listInterests(t, failing, nil)
-	assert.Equal(t, "No interests: the last rebuild failed: ollama unreachable", textOf(res))
+	for _, tc := range []struct {
+		snap insight.Snapshot
+		want string
+	}{
+		{insight.Snapshot{State: insight.StateNone, Changed: 7, RebuildAt: 20},
+			"No interests yet: the library is grouped once 20 documents are indexed (7 so far)."},
+		{insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20},
+			"No interests yet: the library is grouped for the first time once it stops changing for a while."},
+		{insight.Snapshot{State: insight.StateQueued},
+			"The library is being grouped for the first time; its interests appear when the rebuild finishes, " +
+				"in a couple of minutes."},
+		{insight.Snapshot{State: insight.StateHeld, HeldReason: "the embeddings drifted"},
+			"No interests yet: rebuilds are held: the embeddings drifted. The user can run `curio reindex --all`."},
+		{insight.Snapshot{State: insight.StateFailing, LastError: "ollama unreachable"},
+			"No interests: the last rebuild failed: ollama unreachable"},
+	} {
+		srv.Scheduler.Set(tc.snap)
+		res, out := listInterests(t, srv, nil)
+		assert.Equal(t, tc.want, textOf(res))
+		assert.Equal(t, string(tc.snap.State), out.State)
+	}
 
 	off := apitest.Start(t, func(d *api.Deps) { d.InsightEnabled = false })
-	res, _ = listInterests(t, off, nil)
+	res, _ := listInterests(t, off, nil)
 	assert.Contains(t, textOf(res), "turned off")
 }
 

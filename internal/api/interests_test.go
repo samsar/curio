@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
 )
@@ -141,33 +142,19 @@ func (s *testServer) seedInterest(t *testing.T, tenant, label string, docs ...*s
 	return id
 }
 
-// seedFailedRun records a rebuild that failed with msg, the newest run.
-func (s *testServer) seedFailedRun(t *testing.T, msg string) string {
-	t.Helper()
-	ctx := context.Background()
-	run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerManual, Grouper: "test",
-		RunOutcome: store.RunOutcome{Kind: store.RunKindWarm, Shape: store.InterestShapeFlat}}
-	require.NoError(t, s.insights().CreateRun(ctx, run))
-	require.NoError(t, s.insights().FailRun(ctx, run.ID, 0, msg))
-	return run.ID
-}
-
 // insights is the test server's insight store, unwrapped: fixtures are
 // written as the engine writes them, whatever a test wraps the server's
 // store in.
 func (s *testServer) insights() store.InsightStore { return sqlite.NewInsights(s.db) }
 
-// placeDocument records doc placed into run's interest ("" for Unsorted)
-// since the run.
+// placeDocument places doc into run's interest ("" for Unsorted) since the
+// run, as the placer writes it: run must be the latest done run.
 func (s *testServer) placeDocument(t *testing.T, run, interest string, doc *store.Document) {
 	t.Helper()
-	var into any
-	if interest != "" {
-		into = interest
-	}
-	_, err := s.db.Exec(`INSERT INTO interest_placements (run_id, document_id, interest_id, similarity, placed_at)
-		VALUES (?, ?, ?, 0.6, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`, run, doc.ID, into)
+	placed, err := s.insights().PlaceDocument(context.Background(), "local",
+		store.Placement{RunID: run, DocumentID: doc.ID, InterestID: interest, Similarity: 0.6})
 	require.NoError(t, err)
+	require.True(t, placed, "placed into the latest done run")
 }
 
 // docs seeds n fetched documents under prefix.
@@ -277,7 +264,7 @@ func TestListInterests(t *testing.T) {
 	resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests"})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.JSONEq(t, `{"num_documents":0,"num_areas":0,"num_interests":0,"num_loose":0,"num_unsorted":0,
-		"num_new":0,"total":0,"next":{"state":"none"},"items":[]}`, resp.body,
+		"num_new":0,"total":0,"next":{"state":"none","rebuild_at":20},"items":[]}`, resp.body,
 		"no rebuild yet: an empty list, not an error")
 
 	a := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
@@ -298,7 +285,6 @@ func TestListInterests(t *testing.T) {
 	assert.Equal(t, 2, got.NumDocuments)
 	assert.Equal(t, 1, got.NumInterests)
 	assert.Equal(t, 1, got.Total, "the flat shape's top-level groups are its interests")
-	assert.Equal(t, InterestsState{State: stateCurrent}, got.Next)
 	require.NotNil(t, got.Rebuild)
 	assert.Equal(t, InterestRebuild{Trigger: "manual", Kind: "fresh", Created: 1}, *got.Rebuild)
 	require.Len(t, got.Items, 1)
@@ -378,45 +364,72 @@ func TestListInterests_Areas(t *testing.T) {
 	assert.Contains(t, p.Detail, `level "area"`)
 }
 
-// TestInterests_State: the list says where the next rebuild stands.
+// TestInterests_State: the list's next and healthz's interests are where
+// the scheduler's last check left rebuilds, on the wire in UTC, without
+// what doesn't apply; off with insight off, and unknown with no scheduler
+// to ask.
 func TestInterests_State(t *testing.T) {
-	ctx := context.Background()
-	state := func(s *testServer) InterestsState {
+	states := func(s *testServer) (next, health InterestsState) {
 		t.Helper()
-		var got InterestListResponse
-		s.getJSON(t, "/v1/interests", &got)
-		return got.Next
+		return getAs[InterestListResponse](t, s, "/v1/interests").Next, getAs[Health](t, s, "/v1/healthz").Interests
 	}
 	off := newTestServer(t, func(d *Deps) { d.InsightEnabled = false })
-	assert.Equal(t, InterestsState{State: stateOff}, state(off))
+	next, health := states(off)
+	assert.Equal(t, InterestsState{State: stateOff}, next)
+	assert.Equal(t, next, health)
+	none := newTestServer(t, func(d *Deps) { d.Interests = nil })
+	next, _ = states(none)
+	assert.Equal(t, InterestsState{State: "unknown"}, next)
 
 	s := newTestServer(t)
-	assert.Equal(t, InterestsState{State: stateNone}, state(s))
-	job, _, err := queueRebuild(ctx, s)
-	require.NoError(t, err)
-	assert.Equal(t, InterestsState{State: stateQueued}, state(s))
-	claimed, err := s.deps.Queue.ClaimNext(ctx, []store.JobKind{store.JobKindCluster})
-	require.NoError(t, err)
-	require.Equal(t, job.ID, claimed.ID)
-	assert.Equal(t, InterestsState{State: stateRebuilding}, state(s))
-	require.NoError(t, s.deps.Queue.MarkDone(ctx, job.ID))
+	zone := time.FixedZone("EDT", -4*3600)
+	at := func(h int) time.Time { return time.Date(2026, 10, 9, h, 0, 0, 0, zone) }
+	s.interests.set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: at(10), LastKind: store.RunKindWarm,
+		LastTrigger: store.RunTriggerAuto, Changed: 271, RebuildAt: 263, DueSince: at(11), FreshOwed: insight.FreshParams,
+		HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom", CheckedAt: at(13)})
+	next, health = states(s)
+	assert.Equal(t, InterestsState{State: "failing", LastRebuildAt: at(10).UTC(), LastKind: "warm", LastTrigger: "auto",
+		ChangedDocuments: 271, RebuildAt: 263, DueSince: at(11).UTC(), FreshOwed: "params",
+		HeldReason: "the embeddings drifted", RetryAt: at(12).UTC(), LastError: "boom"}, next)
+	assert.Equal(t, next, health, "one snapshot, two places")
 
-	s.seedFailedRun(t, "ollama unreachable")
-	assert.Equal(t, InterestsState{State: stateFailing, LastError: "ollama unreachable"}, state(s))
-	s.seedInterest(t, "local", "Go", s.seedDocument(t, "https://example.com/a", store.DocStateFetched))
-	assert.Equal(t, InterestsState{State: stateCurrent}, state(s))
-	s.seedFailedRun(t, "boom")
-	var got InterestListResponse
-	s.getJSON(t, "/v1/interests", &got)
-	assert.Equal(t, InterestsState{State: stateFailing, LastError: "boom"}, got.Next)
-	assert.Len(t, got.Items, 1, "a failed rebuild leaves the last one's interests")
+	s.interests.set(insight.Snapshot{State: insight.StateCurrent, RebuildAt: 263})
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	assert.Contains(t, resp.body, `"next":{"state":"current","rebuild_at":263}`, "what doesn't apply is left out")
 }
 
-// queueRebuild queues a rebuild, as the API does.
-func queueRebuild(ctx context.Context, s *testServer) (*store.Job, bool, error) {
-	job := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(`{"trigger":"manual"}`)}
-	queued, err := s.deps.Queue.EnqueueOnce(ctx, job)
-	return job, queued, err
+// TestRebuildInterests_Fresh: ?fresh=1 owes a fresh rebuild, even when it
+// answers a rebuild pending already, and never takes the place of a
+// re-embedding's; every request kicks the scheduler.
+func TestRebuildInterests_Fresh(t *testing.T) {
+	ctx := context.Background()
+	s := newTestServer(t)
+	rebuild := func(path string) string {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodPost, path: path})
+		require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+		var got map[string]string
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		return got["job_id"]
+	}
+	owed := func() store.FreshReason {
+		t.Helper()
+		st, err := s.insights().State(ctx, "local")
+		require.NoError(t, err)
+		return st.FreshOwed
+	}
+
+	pending := rebuild("/v1/interests/rebuild")
+	assert.Empty(t, owed(), "a plain request owes nothing")
+	assert.Equal(t, 1, s.interests.kicked())
+	assert.Equal(t, pending, rebuild("/v1/interests/rebuild?fresh=1"), "the pending rebuild")
+	assert.Equal(t, store.FreshManual, owed(), "owed, so the pending rebuild, or the next, is fresh")
+	assert.Equal(t, 2, s.interests.kicked())
+
+	require.NoError(t, s.insights().OweFresh(ctx, "local", store.FreshReindex))
+	rebuild("/v1/interests/rebuild?fresh=true")
+	assert.Equal(t, store.FreshReindex, owed(), "a re-embedding's stays owed")
 }
 
 func TestGetInterest(t *testing.T) {
@@ -426,6 +439,9 @@ func TestGetInterest(t *testing.T) {
 	e := s.seedEvents(t, members, loose)
 	placed := s.seedDocument(t, "https://example.com/placed", store.DocStateFetched)
 	s.placeDocument(t, e.second, e.i1, placed)
+
+	list := getAs[InterestListResponse](t, s, "/v1/interests")
+	assert.Equal(t, 1, list.NumNew, "the documents placed since the rebuild")
 
 	var area InterestResponse
 	s.getJSON(t, "/v1/interests/"+e.a1, &area)
@@ -838,8 +854,8 @@ func (e countingExtractions) GetByID(ctx context.Context, id string) (*store.Doc
 // TestInterests_Reads: a page of groups reads the latest run, the page,
 // the placement counts, its areas' interests in one read, each listed
 // interest's members, then all their documents at once, however many
-// groups and members; its state is one read of the queue and one of the
-// newest run. One interest reads its group, its members and loose fits,
+// groups and members; its state is the scheduler's snapshot, no read at
+// all. One interest reads its group, its members and loose fits,
 // its placements and its run's lineage, and its documents in one read.
 // Never a document or an extraction one by one.
 func TestInterests_Reads(t *testing.T) {
@@ -864,13 +880,12 @@ func TestInterests_Reads(t *testing.T) {
 	for _, tc := range []struct {
 		path                                      string
 		latest, pages, children, members, batches int32
-		queue, newest                             int32
 	}{
-		{"/v1/interests?children=5&members=2", 1, 1, 1, 3, 1, 1, 1},
-		{"/v1/interests?children=1&members=2", 1, 1, 1, 2, 1, 1, 1},
-		{"/v1/interests?members=0", 1, 1, 1, 0, 0, 1, 1},
-		{"/v1/interests?level=interest&members=2", 1, 1, 0, 3, 1, 1, 1},
-		{"/v1/interests?offset=2", 1, 1, 0, 0, 0, 1, 1},
+		{"/v1/interests?children=5&members=2", 1, 1, 1, 3, 1},
+		{"/v1/interests?children=1&members=2", 1, 1, 1, 2, 1},
+		{"/v1/interests?members=0", 1, 1, 1, 0, 0},
+		{"/v1/interests?level=interest&members=2", 1, 1, 0, 3, 1},
+		{"/v1/interests?offset=2", 1, 1, 0, 0, 0},
 	} {
 		*n, *docs = insightReads{}, documentReads{}
 		queue.Store(0)
@@ -881,8 +896,8 @@ func TestInterests_Reads(t *testing.T) {
 		assert.Equal(t, tc.members, n.members.Load(), "%s: members' reads", tc.path)
 		assert.Equal(t, int32(1), n.counts.Load(), "%s: placement counts", tc.path)
 		assert.Equal(t, tc.batches, docs.batches.Load(), "%s: documents' reads", tc.path)
-		assert.Equal(t, tc.queue, queue.Load(), "%s: the queue's counts", tc.path)
-		assert.Equal(t, tc.newest, n.newest.Load(), "%s: the newest run", tc.path)
+		assert.Zero(t, queue.Load(), "%s: the queue's counts", tc.path)
+		assert.Zero(t, n.newest.Load(), "%s: the newest run", tc.path)
 		assert.Zero(t, docs.documents.Load()+docs.extractions.Load(), "%s: no document read one by one", tc.path)
 	}
 

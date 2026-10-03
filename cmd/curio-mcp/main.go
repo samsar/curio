@@ -563,13 +563,20 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
-// noInterests says why there are no interests yet, from where the next
-// rebuild stands.
+// noInterests says why there are no interests yet, from where automatic
+// rebuilds stand.
 func noInterests(next client.InterestsState) string {
 	switch next.State {
 	case client.StateQueued, client.StateRebuilding:
 		return "The library is being grouped for the first time; its interests appear when the rebuild finishes, " +
 			"in a couple of minutes."
+	case client.StateNone:
+		return fmt.Sprintf("No interests yet: the library is grouped once %d documents are indexed (%d so far).",
+			next.RebuildAt, next.ChangedDocuments)
+	case client.StateDue:
+		return "No interests yet: the library is grouped for the first time once it stops changing for a while."
+	case client.StateHeld:
+		return "No interests yet: rebuilds are held: " + next.HeldReason + ". The user can run `curio reindex --all`."
 	case client.StateFailing:
 		return "No interests: the last rebuild failed: " + next.LastError
 	case client.StateOff:

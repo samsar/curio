@@ -25,6 +25,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
@@ -35,12 +36,45 @@ import (
 // testServer runs NewServer on a real loopback listener backed by real
 // SQLite stores.
 type testServer struct {
-	base    string // http://127.0.0.1:<port>
-	port    string
-	db      *sqlite.DB
-	deps    Deps
-	srv     *Server
-	startup *Startup
+	base      string // http://127.0.0.1:<port>
+	port      string
+	db        *sqlite.DB
+	deps      Deps
+	srv       *Server
+	startup   *Startup
+	interests *fakeInterests // the scheduler, unless an option replaced it
+}
+
+// fakeInterests is an interest scheduler whose snapshot a test sets, and
+// which counts its kicks.
+type fakeInterests struct {
+	mu    sync.Mutex
+	snap  insight.Snapshot
+	kicks int
+}
+
+func (f *fakeInterests) Snapshot() insight.Snapshot {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.snap
+}
+
+func (f *fakeInterests) Kick() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.kicks++
+}
+
+func (f *fakeInterests) set(s insight.Snapshot) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snap = s
+}
+
+func (f *fakeInterests) kicked() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.kicks
 }
 
 // testPools are the pool sizes the test server's queue gate reports limits
@@ -88,6 +122,8 @@ func newStartingTestServerUI(t *testing.T, pages UIOptions, options ...func(*Dep
 	gate, err := jobs.NewQueueGate(context.Background(), sqlite.NewQueueSettings(db), testPools, quiet)
 	require.NoError(t, err)
 
+	// A new home's scheduler: no rebuild, too few documents for the first.
+	interests := &fakeInterests{snap: insight.Snapshot{State: insight.StateNone, RebuildAt: insight.FirstRebuildAt}}
 	deps := Deps{
 		Home:           home,
 		Documents:      sqlite.NewDocuments(db),
@@ -97,6 +133,7 @@ func newStartingTestServerUI(t *testing.T, pages UIOptions, options ...func(*Dep
 		Queue:          sqlite.NewJobs(db),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
+		Interests:      interests,
 		Gate:           gate,
 		Log:            quiet,
 	}
@@ -124,7 +161,7 @@ func newStartingTestServerUI(t *testing.T, pages UIOptions, options ...func(*Dep
 	_, port, err := net.SplitHostPort(ln.Addr().String())
 	require.NoError(t, err)
 	return &testServer{base: "http://" + ln.Addr().String(), port: port, db: db, deps: deps,
-		srv: srv, startup: startup}
+		srv: srv, startup: startup, interests: interests}
 }
 
 // ready swaps in the full API, as the daemon does once it has started.

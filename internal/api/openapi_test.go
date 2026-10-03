@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
@@ -680,8 +681,8 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 // eventsFixture): the titled document and the named one are an interest's
 // members, the plain one its loose fit, and the untitled one and a titled
 // one are unsorted; a document is placed into the interest since, and one
-// into Unsorted; and a newer rebuild failed, which the list's state
-// reports.
+// into Unsorted; and the scheduler's state has every field set, as no one
+// check could, so the state's every property is sent.
 func seedInterestFixtures(t *testing.T, s *testServer, f contractFixtures) eventsFixture {
 	t.Helper()
 	unsorted := s.seedDocument(t, "https://example.com/unsorted", store.DocStateFetched)
@@ -690,7 +691,11 @@ func seedInterestFixtures(t *testing.T, s *testServer, f contractFixtures) event
 	e := s.seedEvents(t, []*store.Document{f.titled, f.named}, f.plain, f.untitled, unsorted)
 	s.placeDocument(t, e.second, e.i1, s.seedDocument(t, "https://example.com/placed", store.DocStateFetched))
 	s.placeDocument(t, e.second, "", s.seedDocument(t, "https://example.com/placed-unsorted", store.DocStateFetched))
-	s.seedFailedRun(t, "ollama unreachable: connection refused")
+	now := time.Now()
+	s.interests.set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: now.Add(-time.Hour),
+		LastKind: store.RunKindWarm, LastTrigger: store.RunTriggerAuto, Changed: 271, RebuildAt: 263,
+		DueSince: now.Add(-20 * time.Minute), FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted",
+		RetryAt: now.Add(15 * time.Minute), LastError: "ollama unreachable: connection refused", CheckedAt: now})
 	return e
 }
 

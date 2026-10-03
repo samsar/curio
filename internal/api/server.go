@@ -58,6 +58,7 @@ type Deps struct {
 	Search          *search.Engine
 	Insights        store.InsightStore
 	InsightEnabled  bool                            // config insight.enabled: gates POST /v1/interests/rebuild, and "off" in the interests' state
+	Interests       InterestScheduler               // the interest scheduler, whose snapshot healthz and next serve; nil with insight off
 	Upstreams       func() []fetcher.UpstreamHealth // the health of the services fetches depend on; nil reports none
 	Gate            *jobs.QueueGate                 // the workers' queue gate, read and changed at /v1/queue
 	Drift           DriftMonitor                    // embedding drift, on healthz, reset by reindex-all; nil tracks none

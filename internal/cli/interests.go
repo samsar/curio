@@ -25,9 +25,11 @@ func newInterestsCmd(env *daemonctl.Env) *cobra.Command {
 		Short: "Show the areas and interests curio found across your saved content",
 		Long: "Outline the areas and interests curio found in your library, largest first: a\n" +
 			"picture of what you read about. A library under about 1,000 documents gets one\n" +
-			"level of interests. The daemon groups the library when it first starts, and\n" +
-			"`curio interests rebuild` groups it again, taking in the documents fetched\n" +
-			"since. IDs last across rebuilds: `curio interests show <id>`.",
+			"level of interests. Rebuilds are automatic: the daemon groups the library once\n" +
+			"20 documents are indexed, then again after about 5% of it changes, each time\n" +
+			"the library settles; a document indexed in between joins its nearest interest\n" +
+			"at once. `curio interests rebuild` rebuilds now. IDs last across rebuilds:\n" +
+			"`curio interests show <id>`.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
@@ -41,7 +43,8 @@ func newInterestsCmd(env *daemonctl.Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			renderOutline(cmd.OutOrStdout(), res, outlinePage{flat: flat, offset: offset}, env.Home.ConfigPath())
+			renderOutline(cmd.OutOrStdout(), res, outlinePage{flat: flat, offset: offset, now: time.Now()},
+				env.Home.ConfigPath())
 			return nil
 		},
 	}
@@ -131,19 +134,24 @@ func newInterestsChangesCmd(env *daemonctl.Env) *cobra.Command {
 }
 
 func newInterestsRebuildCmd(env *daemonctl.Env) *cobra.Command {
-	return &cobra.Command{
+	var fresh bool
+	cmd := &cobra.Command{
 		Use:   "rebuild",
 		Short: "Rebuild the interests now",
-		Long: "Queue a rebuild of the interests, which groups the documents fetched since the\n" +
-			"last one. It starts from the current grouping and keeps the names and IDs of the\n" +
-			"interests that carry over. With a rebuild already queued, it names that one\n" +
-			"rather than queuing another.",
+		Long: "Queue a rebuild of the interests now, rather than when the daemon would on its\n" +
+			"own: it skips waiting for enough of the library to change and for the library\n" +
+			"to settle, but not the queue's pause or schedule. It takes in the documents\n" +
+			"indexed since the last rebuild, starting from the current grouping, and keeps\n" +
+			"the names and IDs of the interests that carry over. With a rebuild already\n" +
+			"queued, it names that one rather than queuing another.\n\n" +
+			"--fresh groups the library from scratch instead, for recovery or comparison;\n" +
+			"the names of the interests that survive still carry over.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			res, err := env.Client.RebuildInterests(cmd.Context())
+			res, err := env.Client.RebuildInterests(cmd.Context(), fresh)
 			if err != nil {
 				return err
 			}
@@ -153,13 +161,17 @@ func newInterestsRebuildCmd(env *daemonctl.Env) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&fresh, "fresh", false, "Group the library from scratch, not from the current grouping")
+	return cmd
 }
 
 // outlinePage is the part of the outline asked for: every interest
-// (flat), and how many groups come before the page.
+// (flat), and how many groups come before the page; and the time it is
+// written at.
 type outlinePage struct {
 	flat   bool
 	offset int
+	now    time.Time
 }
 
 // renderOutline writes the outline of res: its header, then its areas,
@@ -167,15 +179,23 @@ type outlinePage struct {
 // similar members; with flat, every interest with its area.
 func renderOutline(w io.Writer, res *client.InterestList, page outlinePage, configPath string) {
 	if res.RunID == "" || res.Total == 0 {
-		renderNoInterests(w, res, configPath)
+		renderNoInterests(w, res, configPath, page.now)
 		return
 	}
 	if res.Shape == "areas" {
 		fmt.Fprintf(w, "%s, ", plural(res.NumAreas, "area"))
 	}
-	fmt.Fprintf(w, "%s across %s (%s, %d unsorted)\n", plural(res.NumInterests, "interest"),
+	fmt.Fprintf(w, "%s across %s (%s, %d unsorted", plural(res.NumInterests, "interest"),
 		plural(res.NumDocuments, "document"), plural(res.NumLoose, "loose fit"), res.NumUnsorted)
-	fmt.Fprintln(w, rebuildLine(res.ComputedAt, res.Rebuild))
+	if res.NumNew > 0 {
+		fmt.Fprintf(w, ", %d new", res.NumNew)
+	}
+	fmt.Fprintln(w, ")")
+	line := rebuildLine(res.ComputedAt, res.Rebuild)
+	if next := nextText(res.Next, page.now); next != "" {
+		line += " · " + next
+	}
+	fmt.Fprintln(w, line)
 	fmt.Fprintln(w)
 	for _, in := range res.Items {
 		if in.Level == client.LevelArea {
@@ -207,6 +227,22 @@ func renderAreaLine(w io.Writer, area client.Interest) {
 	if more := area.NumChildren - len(area.Children); more > 0 {
 		fmt.Fprintf(w, "    + %d more: curio interests show %s\n", more, area.ID)
 	}
+}
+
+// nextText says, after a grouping's rebuild line, where the next rebuild
+// stands: what has changed against what makes it due, or why it waits.
+func nextText(s client.InterestsState, now time.Time) string {
+	switch s.State {
+	case client.StateUnknown, client.StateOff:
+		return ""
+	case client.StateDue, client.StateCurrent:
+		next := fmt.Sprintf("next after %d changes, %d so far", s.RebuildAt, s.ChangedDocuments)
+		if s.State == client.StateDue {
+			next += ": due, once the library settles"
+		}
+		return next
+	}
+	return interestsText(s, now)
 }
 
 // renderMembers writes documents, each with its doc_id and path, indented.
@@ -262,6 +298,13 @@ func renderInterest(w io.Writer, in *client.Interest, offset int) {
 	if next := offset + len(in.Members); next < in.Size+in.Loose && len(in.Members) > 0 {
 		fmt.Fprintf(w, "\n+ %d more: curio interests show %s --offset %d\n", in.Size+in.Loose-next, in.ID, next)
 	}
+	if len(in.NewMembers) > 0 {
+		fmt.Fprintln(w, "\nnew since the last rebuild:")
+		renderMembers(w, "  ", in.NewMembers)
+		if more := in.New - len(in.NewMembers); more > 0 {
+			fmt.Fprintf(w, "  + %d more, grouped at the next rebuild\n", more)
+		}
+	}
 }
 
 // renderSummary writes a summary wrapped, when there is one.
@@ -272,18 +315,38 @@ func renderSummary(w io.Writer, summary string) {
 }
 
 // renderUnsorted writes a page of the documents in no interest, each with
-// the interest it is nearest.
+// the interest it is nearest, then the newest of those placed in Unsorted
+// since the rebuild.
 func renderUnsorted(w io.Writer, page *client.UnsortedPage, offset int) {
 	if page.RunID == "" {
 		fmt.Fprintln(w, "no rebuild has finished yet, so no document is sorted or unsorted")
 		return
 	}
-	if page.Total == 0 {
+	if page.Total == 0 && page.NumNew == 0 {
 		fmt.Fprintln(w, "every document is in an interest or close to one")
 		return
 	}
-	fmt.Fprintf(w, "%s in no interest, nearest first\n\n", plural(page.Total, "document"))
-	for _, m := range page.Items {
+	fmt.Fprintf(w, "%s in no interest, nearest first\n", plural(page.Total, "document"))
+	renderUnsortedMembers(w, page.Items)
+	if next := offset + len(page.Items); next < page.Total && len(page.Items) > 0 {
+		fmt.Fprintf(w, "\n+ %d more: curio interests unsorted --offset %d\n", page.Total-next, next)
+	}
+	if page.NumNew > 0 {
+		fmt.Fprintf(w, "\n%s new since the last rebuild, near no interest:\n", plural(page.NumNew, "document"))
+		renderUnsortedMembers(w, page.New)
+		if more := page.NumNew - len(page.New); more > 0 {
+			fmt.Fprintf(w, "+ %d more, grouped at the next rebuild\n", more)
+		}
+	}
+}
+
+// renderUnsortedMembers writes documents in no interest, each with the
+// one it is nearest, after a blank line.
+func renderUnsortedMembers(w io.Writer, members []client.UnsortedMember) {
+	if len(members) > 0 {
+		fmt.Fprintln(w)
+	}
+	for _, m := range members {
 		fmt.Fprintf(w, "• %s\n", docName(m.Title, m.BookmarkTitle, m.URL))
 		fmt.Fprintf(w, "  doc_id: %s\n", m.DocID)
 		if m.MarkdownPath != "" {
@@ -292,9 +355,6 @@ func renderUnsorted(w io.Writer, page *client.UnsortedPage, offset int) {
 		if m.NearestID != "" {
 			fmt.Fprintf(w, "  nearest: %s (%s) %.2f\n", cmp.Or(m.NearestLabel, "(unlabeled)"), m.NearestID, m.Similarity)
 		}
-	}
-	if next := offset + len(page.Items); next < page.Total && len(page.Items) > 0 {
-		fmt.Fprintf(w, "\n+ %d more: curio interests unsorted --offset %d\n", page.Total-next, next)
 	}
 }
 
@@ -366,9 +426,9 @@ func rebuildLine(at *time.Time, r *client.InterestRebuild) string {
 	return b.String()
 }
 
-// renderNoInterests explains a list without groups: no rebuild done yet,
-// by where the next one stands, or a rebuild that grouped nothing.
-func renderNoInterests(w io.Writer, res *client.InterestList, configPath string) {
+// renderNoInterests explains a list without groups, at now: no rebuild
+// done yet, by where rebuilds stand, or a rebuild that grouped nothing.
+func renderNoInterests(w io.Writer, res *client.InterestList, configPath string, now time.Time) {
 	if res.RunID != "" {
 		when := "the last rebuild"
 		if res.ComputedAt != nil {
@@ -382,7 +442,8 @@ func renderNoInterests(w io.Writer, res *client.InterestList, configPath string)
 			case client.StateRebuilding:
 				fmt.Fprintln(w, "another rebuild is running; follow it with `curio jobs --kind cluster --all`")
 			default:
-				fmt.Fprintln(w, "run `curio interests rebuild` once `curio status` shows documents fetched")
+				fmt.Fprintln(w, "the library is regrouped on its own once enough documents are indexed; "+
+					"`curio interests rebuild` regroups it now")
 			}
 			return
 		}
@@ -394,17 +455,28 @@ func renderNoInterests(w io.Writer, res *client.InterestList, configPath string)
 		fmt.Fprintln(w, "list them with `curio interests unsorted`")
 		return
 	}
-	switch res.Next.State {
+	switch s := res.Next; s.State {
 	case client.StateQueued, client.StateRebuilding:
 		fmt.Fprintln(w, "your library is being grouped for the first time")
 		fmt.Fprintln(w, "its interests show here once the rebuild finishes; follow it with `curio jobs --kind cluster --all`")
+	case client.StateNone:
+		fmt.Fprintf(w, "no interests yet: the library is grouped on its own once %d documents are indexed (%d so far)\n",
+			s.RebuildAt, s.ChangedDocuments)
+		fmt.Fprintln(w, "`curio interests rebuild` groups it now")
+	case client.StateDue:
+		fmt.Fprintf(w, "no interests yet: the first grouping is due (%s indexed), and starts once the library settles\n",
+			plural(s.ChangedDocuments, "document"))
+		fmt.Fprintln(w, "`curio interests rebuild` groups it now")
+	case client.StateHeld:
+		fmt.Fprintf(w, "no interests yet: rebuilds are held: %s\n", s.HeldReason)
+		fmt.Fprintf(w, "run `%s`; `curio interests rebuild` groups the library now anyway\n", reindexFix)
 	case client.StateFailing:
-		fmt.Fprintf(w, "the last rebuild failed: %s\n", res.Next.LastError)
-		fmt.Fprintln(w, "`curio interests rebuild` tries again")
+		fmt.Fprintf(w, "the last rebuild failed: %s; %s\n", s.LastError, retryText(s, now))
+		fmt.Fprintln(w, "once the cause is fixed, `curio interests rebuild` tries again without waiting")
 	case client.StateOff:
 		fmt.Fprintf(w, "interests are turned off: set insight.enabled: true in %s and restart the daemon\n", configPath)
 	default:
-		fmt.Fprintln(w, "no interests yet: `curio interests rebuild` groups the library")
+		fmt.Fprintln(w, "no interests yet: `curio interests rebuild` groups the library now")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,14 +33,19 @@ func (s *servedVectors) DocumentVectors(context.Context, string) ([]store.DocVec
 // libraryEngine is fixture library 1 in a database, its documents created
 // with the fixture's IDs and with titles of their topic, and an engine
 // that groups the documents served with the shipped grouper and term
-// labels.
+// labels. Its clock times the runs' reads and the documents' indexing, a
+// second a step.
 type libraryEngine struct {
-	ctx    context.Context
-	lib    library
-	ins    *sqlitestore.Insights
-	served *servedVectors
-	engine *insight.Engine
-	tenant string
+	ctx     context.Context
+	lib     library
+	db      *sqlitestore.DB
+	docs    *sqlitestore.Documents
+	ins     *sqlitestore.Insights
+	served  *servedVectors
+	engine  *insight.Engine
+	tenant  string
+	clock   time.Time
+	fetched map[int]bool // the library's documents fetched in the database
 }
 
 func newLibraryEngine(t *testing.T) *libraryEngine {
@@ -54,18 +60,39 @@ func newLibraryEngine(t *testing.T) *libraryEngine {
 			title = fmt.Sprintf("Topic%02d Area%d piece %d", lib.topic[i], lib.area[i], i)
 		}
 		require.NoError(t, docs.Create(ctx, &store.Document{ID: dv.DocumentID, TenantID: store.LocalTenantID,
-			URL: "https://example.com/" + dv.DocumentID, Title: &title, State: store.DocStateFetched}))
+			URL: "https://example.com/" + dv.DocumentID, Title: &title}))
 	}
-	e := &libraryEngine{ctx: ctx, lib: lib, ins: sqlitestore.NewInsights(db), served: &servedVectors{},
-		tenant: store.LocalTenantID}
+	e := &libraryEngine{ctx: ctx, lib: lib, db: db, docs: docs, ins: sqlitestore.NewInsights(db),
+		served: &servedVectors{}, tenant: store.LocalTenantID, clock: time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC),
+		fetched: map[int]bool{}}
 	e.engine = insight.New(docs, e.served, e.ins, grouper(), nil,
-		insight.Config{Labeling: insight.LabelingTerms, Center: true}, slog.New(slog.DiscardHandler))
+		insight.Config{Labeling: insight.LabelingTerms, Center: true}, slog.New(slog.DiscardHandler)).
+		WithClock(func() time.Time { return e.clock })
 	return e
 }
 
-// rebuild groups the library's documents at idx.
+// rebuild groups the library's documents at idx: they are fetched, those
+// not fetched before indexed now, and the others failed.
 func (e *libraryEngine) rebuild(t *testing.T, idx []int, trigger store.RunTrigger) *store.InterestRun {
 	t.Helper()
+	want := make(map[int]bool, len(idx))
+	for _, i := range idx {
+		want[i] = true
+	}
+	for i, dv := range e.lib.docs {
+		switch {
+		case want[i] && !e.fetched[i]:
+			e.clock = e.clock.Add(time.Second)
+			require.NoError(t, e.docs.MarkFetched(e.ctx, dv.DocumentID))
+			_, err := e.db.Exec(`UPDATE documents SET indexed_at = ? WHERE id = ?`,
+				e.clock.Format("2006-01-02T15:04:05.000Z"), dv.DocumentID)
+			require.NoError(t, err)
+		case !want[i] && e.fetched[i]:
+			require.NoError(t, e.docs.MarkFailed(e.ctx, dv.DocumentID, store.FailureCauseOther))
+		}
+	}
+	e.fetched = want
+	e.clock = e.clock.Add(time.Second)
 	e.served.dvs = e.lib.subset(idx)
 	runID, err := e.engine.Rebuild(e.ctx, e.tenant, trigger)
 	require.NoError(t, err)

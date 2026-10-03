@@ -224,6 +224,58 @@ func TestReindexAll_DriftResetFailure(t *testing.T) {
 	assert.Equal(t, 2, s.count(t, "jobs"))
 }
 
+// TestReindexAll_OwesTheInterestsAFreshRebuild: reindexing the fetched
+// documents owes the interests a fresh rebuild, before any job is
+// enqueued, and asks the scheduler to check; another state, or no
+// document, owes nothing.
+func TestReindexAll_OwesTheInterestsAFreshRebuild(t *testing.T) {
+	for path, owes := range map[string]bool{
+		"/v1/documents/reindex-all":              true,
+		"/v1/documents/reindex-all?state=failed": false,
+	} {
+		t.Run(path, func(t *testing.T) {
+			s := newTestServer(t)
+			s.seedContent(t, s.seedDocument(t, "https://example.com/a", store.DocStateFetched), "# A")
+			resp := s.do(t, request{method: http.MethodPost, path: path})
+			require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+			st, err := s.insights().State(context.Background(), "local")
+			require.NoError(t, err)
+			if owes {
+				assert.Equal(t, store.FreshReindex, st.FreshOwed)
+			} else {
+				assert.Empty(t, st.FreshOwed)
+			}
+			assert.Equal(t, 1, s.interests.kicked())
+		})
+	}
+
+	empty := newTestServer(t)
+	resp := empty.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all"})
+	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+	st, err := empty.insights().State(context.Background(), "local")
+	require.NoError(t, err)
+	assert.Empty(t, st.FreshOwed, "nothing re-embedded, nothing owed")
+}
+
+// unowingInsights is an insight store that can't owe a fresh rebuild.
+type unowingInsights struct{ store.InsightStore }
+
+func (unowingInsights) OweFresh(context.Context, string, store.FreshReason) error {
+	return errors.New("database is locked")
+}
+
+// TestReindexAll_OweFailure: a fresh rebuild that can't be owed is a 500
+// with nothing enqueued, so no re-embedding goes on unowed.
+func TestReindexAll_OweFailure(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Insights = unowingInsights{d.Insights} })
+	s.seedContent(t, s.seedDocument(t, "https://example.com/a", store.DocStateFetched), "# A")
+	p := assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all"}),
+		http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, "enqueued no index job")
+	assert.Contains(t, p.Detail, "database is locked")
+	assert.Zero(t, s.count(t, "jobs"))
+}
+
 // TestGetDocumentContent_MissingFile: content deleted from disk is a 404
 // that says what to do, not a 500 carrying the absolute path.
 func TestGetDocumentContent_MissingFile(t *testing.T) {

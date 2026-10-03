@@ -313,17 +313,31 @@ bookmark file ──► importer ──► bookmark + document ──► fetch j
                               │       chunker ──► embedder (Ollama)
                               │                       │
                               │                       ▼
-                              │                  FTS5 + sqlite-vec
+                              │                  FTS5 + sqlite-vec ──► mark fetched (indexed_at)
+                              │                                              │
+                              │                                              ▼
+                              │                    Placer: into the nearest interest of the
+                              │                    current run, or Unsorted (best effort)
                               │
-                              └── daemon start (no grouping yet) or
-                                  curio interests rebuild ──► cluster job (one pending at most)
-                                                                  │
-                                                                  ▼
+                              └── interest scheduler (every minute, at start, on a kick):
+                                  enough changed or a fresh rebuild owed, the library
+                                  settled, no drift, no backoff ──► cluster job (one pending at most)
+                                  curio interests rebuild (now) ─────┘          │
+                                                                                ▼
                                     vectors ──► Grouper (warm from the last run's seeds)
                                     ──► merge near-duplicates ──► place strays
                                     ──► carry identities over ──► label the groups that need it
                                     ──► one commit: run, groups, assignments, lineage, retirements
+                                    ──► sweep: place what was indexed while it ran
 ```
+
+The scheduler (`insight.Scheduler`) counts the changes since the current
+run from the data (documents indexed since it read its vectors, assigned
+ones that left, its deleted assignments), so the count survives a restart;
+healthz and `GET /v1/interests` serve its last check, and a rebuild that
+fails is retried after a backoff it keeps in `insight_state`. See
+decisions.md "Interests: two levels, stable identities, automatic
+rebuilds".
 
 ## Fetcher strategy selection
 
@@ -416,7 +430,9 @@ The interfaces with explicit swap paths:
    shipped `LouvainGrouper` makes areas and interests, warm-started from
    the previous run; `FlatGrouper` wraps an `insight.Clusterer` such as the
    kNN-graph baseline for tests and the quality harness) and naming (LLM
-   or term labels).
+   or term labels). The scheduler reads its world through
+   `insight.Library` (`NewLibrary` over the stores), so its decisions are
+   tested on a simulated library and clock.
 
 Do not abstract until you have two impls. The interfaces above are commitments
 because we already know we want hosted mode, model swaps, and multiple fetchers.

@@ -507,16 +507,26 @@ func TestIndexHandler_MissingExtraction_Permanent(t *testing.T) {
 
 // --- cluster ---
 
-// rebuildFunc adapts a function to Rebuilder.
-type rebuildFunc func(ctx context.Context, tenantID string, trigger store.RunTrigger) (string, error)
+// fakeRebuilder is a Rebuilder that rebuilds with rebuild and records the
+// tenants whose abandoned rebuilds it was told of.
+type fakeRebuilder struct {
+	rebuild   func(ctx context.Context, tenantID string, trigger store.RunTrigger) (string, error)
+	abandoned []string
+}
 
-func (f rebuildFunc) Rebuild(ctx context.Context, tenantID string, trigger store.RunTrigger) (string, error) {
-	return f(ctx, tenantID, trigger)
+func (f *fakeRebuilder) Rebuild(ctx context.Context, tenantID string, trigger store.RunTrigger) (string, error) {
+	return f.rebuild(ctx, tenantID, trigger)
+}
+
+func (f *fakeRebuilder) Abandoned(_ context.Context, tenantID string) error {
+	f.abandoned = append(f.abandoned, tenantID)
+	return nil
 }
 
 // TestClusterHandler_Trigger: the engine rebuilds for the trigger the
 // payload names; a payload with none, or one this version doesn't know,
-// is a manual rebuild.
+// is a manual rebuild. Each rebuild asks the scheduler to check as it
+// starts.
 func TestClusterHandler_Trigger(t *testing.T) {
 	for payload, want := range map[string]store.RunTrigger{
 		`{"trigger":"first"}`:  store.RunTriggerFirst,
@@ -529,28 +539,60 @@ func TestClusterHandler_Trigger(t *testing.T) {
 	} {
 		var got store.RunTrigger
 		var tenant string
-		deps := Deps{Insight: rebuildFunc(func(_ context.Context, tenantID string, trigger store.RunTrigger) (string, error) {
+		kicks := 0
+		deps := Deps{Insight: &fakeRebuilder{rebuild: func(_ context.Context, tenantID string, trigger store.RunTrigger) (string, error) {
 			tenant, got = tenantID, trigger
 			return "run", nil
-		})}
-		job := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(payload)}
+		}}, KickInterests: func() { kicks++ }}
+		job := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(payload), Attempts: 1}
 		require.NoError(t, clusterHandler(deps)(context.Background(), job), payload)
 		assert.Equal(t, want, got, payload)
 		assert.Equal(t, "local", tenant)
+		assert.Equal(t, 1, kicks, payload)
 	}
 }
 
+// TestClusterHandler_Failures: a rebuild gets one attempt: every error is
+// permanent, the engine having counted it for the scheduler's backoff.
 func TestClusterHandler_Failures(t *testing.T) {
-	job := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(`{}`)}
+	job := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(`{}`), Attempts: 1}
 	err := clusterHandler(Deps{})(context.Background(), job)
 	require.ErrorIs(t, err, ErrPermanent, "no engine")
 
-	failing := rebuildFunc(func(context.Context, string, store.RunTrigger) (string, error) {
+	failing := &fakeRebuilder{rebuild: func(context.Context, string, store.RunTrigger) (string, error) {
 		return "run", errors.New("ollama unreachable")
-	})
+	}}
 	err = clusterHandler(Deps{Insight: failing})(context.Background(), job)
 	require.ErrorContains(t, err, "ollama unreachable")
-	assert.NotErrorIs(t, err, ErrPermanent, "retried")
+	assert.ErrorIs(t, err, ErrPermanent, "never retried by the queue")
+}
+
+// TestClusterHandler_AnOrphanIsRecordedNotRerun: a cluster job claimed a
+// second time was running when the daemon stopped: the handler records
+// the rebuild as abandoned, runs nothing, and fails the job.
+func TestClusterHandler_AnOrphanIsRecordedNotRerun(t *testing.T) {
+	r := &fakeRebuilder{rebuild: func(context.Context, string, store.RunTrigger) (string, error) {
+		t.Fatal("an orphaned rebuild runs again")
+		return "", nil
+	}}
+	job := &store.Job{TenantID: "local", Kind: store.JobKindCluster, Payload: []byte(`{"trigger":"auto"}`), Attempts: 2}
+	err := clusterHandler(Deps{Insight: r})(context.Background(), job)
+	require.ErrorIs(t, err, ErrPermanent)
+	assert.ErrorIs(t, err, errRebuildAbandoned)
+	assert.Equal(t, []string{"local"}, r.abandoned)
+}
+
+// TestAbandonedRebuild: the cluster pool's hook records an abandoned
+// rebuild for an orphan out of attempts only; a job its handler failed
+// counted its failure itself.
+func TestAbandonedRebuild(t *testing.T) {
+	r := &fakeRebuilder{}
+	hook := abandonedRebuild(Deps{Insight: r})
+	job := &store.Job{TenantID: "local", Kind: store.JobKindCluster}
+	require.NoError(t, hook(context.Background(), job, fmt.Errorf("%w: cluster: boom", ErrPermanent)))
+	assert.Empty(t, r.abandoned)
+	require.NoError(t, hook(context.Background(), job, errOrphanExhausted))
+	assert.Equal(t, []string{"local"}, r.abandoned)
 }
 
 // TestEnqueueRebuild: a rebuild is queued once while it is pending, with
@@ -571,8 +613,9 @@ func TestEnqueueRebuild(t *testing.T) {
 
 // --- pools ---
 
-// TestNewPools: the daemon's pools each claim one kind, and only the
-// per-document ones mark their document when a job gives up.
+// TestNewPools: the daemon's pools each claim one kind; the per-document
+// ones mark their document when a job gives up, and the cluster pool
+// records a rebuild left unfinished.
 func TestNewPools(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	type shape struct {
@@ -589,8 +632,10 @@ func TestNewPools(t *testing.T) {
 	assert.Equal(t, []shape{
 		{"fetch", []store.JobKind{store.JobKindFetch}, []store.JobKind{store.JobKindFetch}, 16},
 		{"index", []store.JobKind{store.JobKindIndex}, []store.JobKind{store.JobKindIndex}, 4},
-		{"cluster", []store.JobKind{store.JobKindCluster}, nil, 1},
+		{"cluster", []store.JobKind{store.JobKindCluster}, []store.JobKind{store.JobKindCluster}, 1},
 	}, got)
+	assert.Equal(t, []store.JobKind{store.JobKindCluster}, slices.Sorted(maps.Keys(pools[2].Worker.onFinished)),
+		"the scheduler is kicked once a rebuild's outcome is recorded")
 }
 
 // runPools runs every goroutine of pools until the returned stop is called.

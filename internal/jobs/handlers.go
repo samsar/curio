@@ -29,7 +29,21 @@ type Deps struct {
 	Dispatcher  fetcher.Dispatcher
 	Indexer     *indexer.Indexer
 	Insight     Rebuilder // the insight engine; nil unless the insight layer is wired
-	Log         *slog.Logger
+	// Placer places each document indexed into the current interests; nil
+	// places none (the insight layer off).
+	Placer Placer
+	// KickInterests asks the interest scheduler to check now: the cluster
+	// pool does when a rebuild starts and once its outcome is recorded.
+	// nil asks nobody.
+	KickInterests func()
+	Log           *slog.Logger
+}
+
+// Placer places a document just indexed into the current interests (the
+// insight layer's Placer). It is best effort and reports nothing: a
+// placement that fails never fails the index job.
+type Placer interface {
+	Place(ctx context.Context, tenantID, documentID string)
 }
 
 // markDocFailed is the permanent-failure hook of the fetch and index pools:
@@ -211,6 +225,7 @@ func fetchedMetadata(doc *store.Document, res *fetcher.Result, extractionID stri
 //  3. Pull the bookmark's tags (if any) for FTS boosting — best-effort.
 //  4. Run the Indexer.
 //  5. Mark the document fetched, which clears any failure cause.
+//  6. Place it into the current interests, best effort.
 func indexHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
 		doc, err := loadJobDocument(ctx, d, job)
@@ -270,6 +285,9 @@ func indexHandler(d Deps) HandlerFunc {
 
 		if err := d.Documents.MarkFetched(ctx, doc.ID); err != nil {
 			return fmt.Errorf("mark fetched: %w", err)
+		}
+		if d.Placer != nil {
+			d.Placer.Place(ctx, doc.TenantID, doc.ID)
 		}
 		return nil
 	}

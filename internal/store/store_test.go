@@ -363,3 +363,15 @@ func TestDailyWindow_NextStartAcrossDaylightSaving(t *testing.T) {
 		}
 	}
 }
+
+// TestMeanVector: the element-wise mean, summed in float64; nil with no
+// vector, and a vector of another width refused.
+func TestMeanVector(t *testing.T) {
+	var m store.MeanVector
+	assert.Nil(t, m.Mean())
+	require.NoError(t, m.Add([]float32{1, 0.1}))
+	require.NoError(t, m.Add([]float32{3, 0.3}))
+	assert.InDeltaSlice(t, []float32{2, 0.2}, m.Mean(), 1e-7)
+	require.ErrorContains(t, m.Add([]float32{1}), "a 1-dimensional vector for a mean of 2-dimensional ones")
+	assert.InDeltaSlice(t, []float32{2, 0.2}, m.Mean(), 1e-7, "the refused vector isn't added")
+}
