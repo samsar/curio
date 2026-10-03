@@ -83,7 +83,7 @@ func (h pageHandlers) home(r *http.Request) *ui.SearchHome {
 	} else {
 		home.Searchable = st.DocumentsByState[string(store.DocStateFetched)]
 	}
-	interests, err := h.d.interests(ctx, interestsOpts{Limit: homeInterests})
+	interests, err := h.d.interests(ctx, interestsOpts{Limit: homeInterests, Bare: true})
 	if err != nil {
 		h.quietError(r, err)
 		return home

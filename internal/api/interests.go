@@ -269,6 +269,9 @@ type interestsOpts struct {
 	// State reads where the next rebuild stands: the Interests page reads
 	// it apart, and the search home does without.
 	State bool
+	// Bare reads the groups alone, without the documents placed into them
+	// or an area's interests, for a list that only names them.
+	Bare bool
 }
 
 // interests returns a page of the latest done run's top-level groups (its
@@ -304,6 +307,12 @@ func (d Deps) interests(ctx context.Context, opts interestsOpts) (InterestListRe
 	resp.NumDocuments, resp.NumAreas, resp.NumInterests = run.NumDocuments, run.NumAreas, run.NumInterests
 	resp.NumLoose, resp.NumUnsorted, resp.Total = run.NumLoose, run.NumUnsorted, groupTotal(run, opts.Flat)
 	resp.Rebuild = rebuildOf(run)
+	for _, g := range groups {
+		resp.Items = append(resp.Items, interestResponse(run.ID, g))
+	}
+	if opts.Bare {
+		return resp, nil
+	}
 
 	placed, err := d.Insights.PlacementCounts(ctx, run.ID)
 	if err != nil {
@@ -312,10 +321,8 @@ func (d Deps) interests(ctx context.Context, opts interestsOpts) (InterestListRe
 	for _, n := range placed {
 		resp.NumNew += n
 	}
-	for _, g := range groups {
-		item := interestResponse(run.ID, g)
-		item.New = placed[g.ID]
-		resp.Items = append(resp.Items, item)
+	for i := range resp.Items {
+		resp.Items[i].New = placed[resp.Items[i].ID]
 	}
 	listed, members := pointers(resp.Items), opts.Members // the interests whose members are listed
 	if run.Shape == store.InterestShapeAreas && !opts.Flat {

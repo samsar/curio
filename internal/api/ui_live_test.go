@@ -850,7 +850,8 @@ func TestUI_InterestsRebuildPaged(t *testing.T) {
 // queue and the newest run, never the interests. A running rebuild's
 // start is its one job read. An interest's page reads it, its run, its
 // members, the documents placed into it, their documents, and its
-// lineage, once each; an area's, its interests in one read.
+// lineage, once each; an area's, its interests in one read. The search
+// home reads the run's largest groups and nothing of them.
 func TestUI_InterestsReads(t *testing.T) {
 	r := &reads{}
 	srv := apitest.Start(t, countReads(r))
@@ -894,6 +895,9 @@ func TestUI_InterestsReads(t *testing.T) {
 	getPage(t, srv, "/ui/interests/"+areas.Areas[0], http.StatusOK)
 	assert.Equal(t, map[string]int{"done run": 1, "interest": 1, "run": 1, "new counts": 1, "children": 1,
 		"members": 2, "member documents": 1, "lineage": 1, "identities": 1}, r.take())
+	getPage(t, srv, "/ui/", http.StatusOK)
+	assert.Equal(t, map[string]int{"stats": 1, "done run": 1, "interests": 1}, r.take(),
+		"the search home names the areas, never reading their interests or what was placed into them")
 
 	enqueueRebuild(t, srv)
 	_, err := srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})
