@@ -775,7 +775,7 @@ func TestInterests_Empty(t *testing.T) {
 		"failing": {insight.Snapshot{State: insight.StateFailing, LastError: "ollama unreachable",
 			RetryAt: time.Now().Add(-time.Minute)},
 			"the last rebuild failed: ollama unreachable; retrying once the library settles\n" +
-				"`curio interests rebuild` tries again now\n"},
+				"once the cause is fixed, `curio interests rebuild` tries again without waiting\n"},
 		"unknown": {insight.Snapshot{State: insight.StateUnknown},
 			"no interests yet: `curio interests rebuild` groups the library now\n"},
 	} {
@@ -1078,7 +1078,7 @@ func TestDoctor_Interests(t *testing.T) {
 		"failing": {insight.Snapshot{State: insight.StateFailing, LastError: "boom",
 			RetryAt: time.Now().Add(-time.Minute)}, "!",
 			"the last rebuild failed: boom; retrying once the library settles",
-			"`curio interests rebuild` tries again now; `curio daemon logs` has the details"},
+			"`curio daemon logs` has the details; once the cause is fixed, `curio interests rebuild` tries again without waiting"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := upWorld(t)

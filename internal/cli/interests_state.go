@@ -104,7 +104,7 @@ func interestsCheck(s client.InterestsState, now time.Time) (status checkStatus,
 			"run `" + reindexFix + "`: the interests are regrouped once the re-embedding finishes"
 	case client.StateFailing:
 		return statusWarn, fmt.Sprintf("the last rebuild failed: %s; %s", s.LastError, retryText(s, now)),
-			"`curio interests rebuild` tries again now; `curio daemon logs` has the details"
+			"`curio daemon logs` has the details; once the cause is fixed, `curio interests rebuild` tries again without waiting"
 	}
 	return statusOK, interestsText(s, now), ""
 }

@@ -472,7 +472,7 @@ func renderNoInterests(w io.Writer, res *client.InterestList, configPath string,
 		fmt.Fprintf(w, "run `%s`; `curio interests rebuild` groups the library now anyway\n", reindexFix)
 	case client.StateFailing:
 		fmt.Fprintf(w, "the last rebuild failed: %s; %s\n", s.LastError, retryText(s, now))
-		fmt.Fprintln(w, "`curio interests rebuild` tries again now")
+		fmt.Fprintln(w, "once the cause is fixed, `curio interests rebuild` tries again without waiting")
 	case client.StateOff:
 		fmt.Fprintf(w, "interests are turned off: set insight.enabled: true in %s and restart the daemon\n", configPath)
 	default:

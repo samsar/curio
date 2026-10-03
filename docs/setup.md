@@ -692,9 +692,10 @@ checks it:
   re-embedding finishes, the interests are regrouped from scratch.
 - **failing**: the last rebuild failed, and the line names the error. The
   daemon tries again 15 minutes after the first failure, doubling to every
-  4 hours; `curio interests rebuild` tries now, and `curio daemon logs`
-  has the details. A rebuild that kills the daemon is recorded as failed
-  rather than run again at the next start.
+  4 hours; `curio daemon logs` has the details, and once the cause is
+  fixed, `curio interests rebuild` tries without waiting. A rebuild that
+  kills the daemon is recorded as failed rather than run again at the
+  next start.
 
 `curio reindex --all` owes the interests a fresh rebuild: it waits until
 every index job is done and nothing was indexed for 10 minutes, however
