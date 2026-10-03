@@ -218,6 +218,7 @@ func TestReport_MatchesTheEngine(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, store.RunKindWarm, warm.Kind)
 	require.False(t, warm.SplitCheck, "55 changes are under 4 × 53")
+	require.Less(t, warm.Kept, first.NumInterests, "seed 33's warm rebuild renames an interest, which the comparison needs")
 	require.Equal(t, store.InterestShapeAreas, warm.Shape)
 
 	read, err = readLibrary(ctx, served, insights)

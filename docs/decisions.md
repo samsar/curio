@@ -10789,9 +10789,9 @@ A fresh `.backup` of the copy the research and PR 1 measured (taken on
 read with `sqlite3 'file:…?immutable=1'`; an Apple M4 Max (12
 performance and 4 efficiency cores, 64 GB); never `~/.curio`, port 8765
 or a checkout's `./bin`. `make cluster-report` on it took 1 min 44 s of
-wall time (1,389 s of CPU, 8 s of it the vector read and 67 s the chain's
-51 groupings) at a peak RSS of 293 MB, and reproduced PR 1's in-process
-measurement number for number. Names kept are interests · areas, the mean
+wall time, 8 s of it the vector read and 67 s the chain's 51 groupings
+(1,389 s of CPU in all), at a peak RSS of 293 MB, and reproduced PR 1's
+in-process measurement number for number. Names kept are interests · areas, the mean
 of 3 draws with the worst in brackets.
 
 - **Fresh:** the areas shape, 30 areas and 187 interests (190 before the

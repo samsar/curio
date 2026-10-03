@@ -83,7 +83,7 @@ linters:
             - "!**/internal/api/apitest/**"
           deny:
             - pkg: github.com/samsar/curio/internal/store/sqlite
-              desc: depend on the internal/store interfaces; only cmd/curio-daemon wires the SQLite implementation
+              desc: depend on the internal/store interfaces; only cmd/curio-daemon (and the dev tool cmd/clusterreport) wire the SQLite implementation
         # The dashboard's view layer and page handlers render what the
         # shared Deps functions return; they never query the database, so a
         # view can be rebuilt client-side from /v1 later.

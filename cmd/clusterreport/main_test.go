@@ -142,12 +142,15 @@ func TestRun_RefusesAnUnusableJSONPath(t *testing.T) {
 	dir := t.TempDir()
 	db := newCopy(t, dir, "copy.db", 1, sameVector)
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "reports"), 0o700))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "readonly"), 0o500))
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "readonly"), 0o700) })
 	before := snapshot(t, dir)
 	cases := []struct {
 		name, json, says string
 	}{
 		{"a directory", filepath.Join(dir, "reports"), "is a directory"},
 		{"in a missing directory", filepath.Join(dir, "missing", "report.json"), "no such file"},
+		{"in a directory it can't write to", filepath.Join(dir, "readonly", "report.json"), "permission denied"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

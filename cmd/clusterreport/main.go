@@ -164,5 +164,18 @@ func checkOutput(path string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("the -json file's directory %s is not a directory", dir)
 	}
+	// A directory the report can't write to would fail only at the end,
+	// after the whole measurement: try a temporary file there now.
+	probe, err := os.CreateTemp(dir, ".clusterreport-probe-*")
+	if err != nil {
+		return fmt.Errorf("the -json file's directory: %w", err)
+	}
+	name := probe.Name()
+	if err := probe.Close(); err != nil {
+		return fmt.Errorf("the -json file's directory: %w", err)
+	}
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("the -json file's directory: %w", err)
+	}
 	return nil
 }
