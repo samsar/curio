@@ -1433,10 +1433,10 @@ func (r InterestRun) Members() int { return max(r.Documents-r.Loose-r.Unsorted, 
 // over app.css's tokens: the accent, its border's, the neutral dot and the
 // bar's track.
 const (
-	toneAccent     = "accent"
-	toneAccentSoft = "accent-soft"
-	toneNeutral    = "neutral"
-	toneTrack      = "track"
+	toneAccent       = "accent"
+	toneAccentBorder = "accent-border"
+	toneNeutral      = "neutral"
+	toneTrack        = "track"
 )
 
 // CoveragePart is a part of the coverage bar and its legend: how many
@@ -1461,7 +1461,7 @@ func (p CoveragePart) Label() string {
 func (r InterestRun) Coverage() []CoveragePart {
 	return []CoveragePart{
 		{Count: r.Members(), One: "in an interest", Many: "in an interest", Tone: toneAccent},
-		{Count: r.Loose, One: "loose fit", Many: "loose fits", Tone: toneAccentSoft},
+		{Count: r.Loose, One: "loose fit", Many: "loose fits", Tone: toneAccentBorder},
 		{Count: r.New, One: "new since the rebuild", Many: "new since the rebuild", Tone: toneNeutral},
 		{Count: r.Unsorted, One: "unsorted", Many: "unsorted", Tone: toneTrack},
 	}

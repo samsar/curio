@@ -744,7 +744,7 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .fill-danger { fill: var(--danger-dot); }
 .fill-neutral { fill: var(--neutral-dot); }
 .fill-accent { fill: var(--accent); }
-.fill-accent-soft { fill: var(--accent-border); }
+.fill-accent-border { fill: var(--accent-border); }
 .fill-track { fill: var(--surface-3); }
 
 .legend { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); margin-top: var(--s3); font-size: var(--fs-sm); }
@@ -757,7 +757,7 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .swatch-warn { background: var(--warn-dot); }
 .swatch-danger { background: var(--danger-dot); }
 .swatch-accent { background: var(--accent); }
-.swatch-accent-soft { background: var(--accent-border); }
+.swatch-accent-border { background: var(--accent-border); }
 .swatch-neutral { background: var(--neutral-dot); }
 .swatch-track { background: var(--surface-3); border: 1px solid var(--border-strong); }
 

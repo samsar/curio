@@ -255,10 +255,10 @@ func TestCoverageBar(t *testing.T) {
 	assert.Equal(t, 3200, run.CoverageTotal())
 	assert.Equal(t, []BarSegment{
 		{Class: "fill-accent", X: "0.000", Width: "60.969"},
-		{Class: "fill-accent-soft", X: "60.969", Width: "5.969"},
+		{Class: "fill-accent-border", X: "60.969", Width: "5.969"},
 		{Class: "fill-neutral", X: "66.938", Width: "1.812"},
 	}, run.Bar(), "the unsorted are the track's 31.25")
-	assert.Equal(t, []string{"accent", "accent-soft", "neutral", "track"}, tones(run.Legend()))
+	assert.Equal(t, []string{"accent", "accent-border", "neutral", "track"}, tones(run.Legend()))
 	assert.Equal(t, []string{"loose fits", "loose fit"},
 		[]string{run.Legend()[1].Label(), CoveragePart{Count: 1, One: "loose fit", Many: "loose fits"}.Label()})
 

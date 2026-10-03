@@ -235,9 +235,9 @@ func TestInterests_Pages(t *testing.T) {
 	assert.NotContains(t, out, "largest;")
 	assert.Equal(t, InterestsPageSize, strings.Count(out, `<li class="card interest">`))
 	assert.Contains(t, out, `<rect class="fill-accent" x="0.000" y="0" width="62.094" height="10"/>`+
-		`<rect class="fill-accent-soft" x="62.094" y="0" width="6.079" height="10"/></svg>`)
+		`<rect class="fill-accent-border" x="62.094" y="0" width="6.079" height="10"/></svg>`)
 	assert.Contains(t, out, `<span class="item"><span class="swatch swatch-accent"></span><span class="n">1,951</span> in an interest <span class="pct">62%</span></span>`+
-		`<span class="item"><span class="swatch swatch-accent-soft"></span><span class="n">191</span> loose fits <span class="pct">6%</span></span>`+
+		`<span class="item"><span class="swatch swatch-accent-border"></span><span class="n">191</span> loose fits <span class="pct">6%</span></span>`+
 		`<span class="item"><span class="swatch swatch-track"></span><span class="n">1,000</span> unsorted <span class="pct">32%</span></span>`)
 	assert.Regexp(t, `<span class="item run">Run of \d{4}-\d\d-\d\d \d\d:\d\d · warm · 3,142 documents</span>`, out)
 	assert.NotContains(t, out, "style=")

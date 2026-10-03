@@ -2052,10 +2052,10 @@ func TestUI_InterestsCoverage(t *testing.T) {
 	page := getPage(t, srv, "/ui/interests", http.StatusOK)
 	uitest.AssertInert(t, page)
 	assert.Contains(t, page, `<rect class="fill-accent" x="0.000" y="0" width="37.500" height="10"/>`+
-		`<rect class="fill-accent-soft" x="37.500" y="0" width="12.500" height="10"/>`+
+		`<rect class="fill-accent-border" x="37.500" y="0" width="12.500" height="10"/>`+
 		`<rect class="fill-neutral" x="50.000" y="0" width="25.000" height="10"/></svg>`, "the unsorted, the track's last quarter")
 	assert.Contains(t, page, `<span class="n">3</span> in an interest <span class="pct">38%</span></span>`+
-		`<span class="item"><span class="swatch swatch-accent-soft"></span><span class="n">1</span> loose fit <span class="pct">13%</span></span>`+
+		`<span class="item"><span class="swatch swatch-accent-border"></span><span class="n">1</span> loose fit <span class="pct">13%</span></span>`+
 		`<span class="item"><span class="swatch swatch-neutral"></span><span class="n">2</span> new since the rebuild <span class="pct">25%</span></span>`+
 		`<span class="item"><span class="swatch swatch-track"></span><span class="n">2</span> unsorted <span class="pct">25%</span></span>`)
 	assert.Regexp(t, `<span class="item run">Run of [^<]+ · fresh · 6 documents</span>`, page)
