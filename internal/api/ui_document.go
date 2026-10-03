@@ -27,11 +27,12 @@ const (
 
 // document answers GET /ui/documents/{id}: the document's metadata and
 // current extraction, its rendered text, related documents and bookmarks,
-// its jobs in flight, and, while it is failed or dead, why it failed and
-// its last error. The text, related and bookmarks panels read on their
-// own, and one that fails shows its error while the rest renders. An
-// untitled document is named by its bookmark's title, as the Library
-// names it, read with the document.
+// its jobs in flight, while it is failed or dead why it failed and its
+// last error, and where the latest rebuild of the interests put it. The
+// text, related and bookmarks panels read on their own, and one that fails
+// shows its error while the rest renders; a place in the interests that
+// can't be read is left out. An untitled document is named by its
+// bookmark's title, as the Library names it, read with the document.
 //
 // Stored pages' remote images are off: each is its alt text, linking to
 // it. ?images=1, or ui.load_remote_images, shows the https ones, and only
@@ -79,6 +80,7 @@ func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 	vm.Text = h.documentText(r, resp, images)
 	vm.Related = h.relatedPanel(r, id)
 	vm.Bookmarks = h.bookmarksPanel(r, id)
+	vm.Place = h.documentPlace(r, id)
 	if failureCurrent(doc.State) {
 		vm.LastError, vm.FailureCause = doc.LastError, string(doc.FailureCause)
 	}

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -381,6 +382,111 @@ func (s *Server) AddRun(t testing.TB, spec RunSpec) Run {
 // returns the new run, a and b in id's place.
 func (s *Server) SplitInterest(t testing.TB, prev Run, id string, a, b Interest) Run {
 	t.Helper()
+	rb := s.rebuildOf(t, prev, id)
+	ids := []string{rb.interest(a, rb.parent[id]), rb.interest(b, rb.parent[id])}
+	rb.renearest(id, ids[0])
+	for i, in := range []Interest{a, b} {
+		rb.lineage(id, ids[i], store.LineageSplit, len(in.Members))
+	}
+	o := &rb.c.Outcome
+	o.NumInterests, o.Created, o.Split = rb.prev.NumInterests+1, 2, 1
+	s.commit(t, rb.commitBuilder)
+	return prev.replaced(rb.c.RunID, id, ids...)
+}
+
+// MergeInterests commits a rebuild after prev in which interests ids
+// merged into a new interest, into, in the first's area: every other group
+// carries over as it was, and the documents nearest one of ids are nearest
+// into. Each merged one shares the members of its own that into holds. It
+// returns the new run, into in the first's place.
+func (s *Server) MergeInterests(t testing.TB, prev Run, into Interest, ids ...string) Run {
+	t.Helper()
+	rb := s.rebuildOf(t, prev, ids...)
+	merged := rb.interest(into, rb.parent[ids[0]])
+	for _, id := range ids {
+		rb.renearest(id, merged)
+		shared := 0
+		for _, doc := range into.Members {
+			if slices.Contains(rb.members[id], doc.ID) {
+				shared++
+			}
+		}
+		rb.lineage(id, merged, store.LineageMerged, shared)
+	}
+	o := &rb.c.Outcome
+	o.NumInterests, o.Created, o.Merged = rb.prev.NumInterests-len(ids)+1, 1, len(ids)
+	s.commit(t, rb.commitBuilder)
+	out := prev.replaced(rb.c.RunID, ids[0], merged)
+	for _, id := range ids[1:] {
+		out = out.replaced(out.ID, id)
+	}
+	return out
+}
+
+// DissolveInterest commits a rebuild after prev in which interest id
+// dissolved: its members are unsorted, near no interest, and every other
+// group carries over as it was. It returns the new run, without id.
+func (s *Server) DissolveInterest(t testing.TB, prev Run, id string) Run {
+	t.Helper()
+	rb := s.rebuildOf(t, prev, id)
+	rb.renearest(id, "")
+	for _, doc := range rb.members[id] {
+		rb.c.Assignments = append(rb.c.Assignments, store.InterestAssignment{DocumentID: doc,
+			Fit: store.InterestFitUnsorted, Similarity: 0.2, AreaSeed: -1, InterestSeed: -1})
+	}
+	o := &rb.c.Outcome
+	o.NumInterests, o.Dissolved = rb.prev.NumInterests-1, 1
+	o.NumUnsorted += len(rb.members[id])
+	s.commit(t, rb.commitBuilder)
+	return prev.replaced(rb.c.RunID, id)
+}
+
+// MoveInterest commits a rebuild after prev in which interest id moved to
+// area, keeping its documents and its identity: every other group carries
+// over as it was.
+func (s *Server) MoveInterest(t testing.TB, prev Run, id, area string) Run {
+	t.Helper()
+	rb := s.rebuildOf(t, prev)
+	for i, g := range rb.c.Groups {
+		if g.ID == id {
+			rb.c.Groups[i].ParentID = area
+		}
+	}
+	for i, l := range rb.c.Lineage {
+		if l.OldID == id {
+			rb.c.Lineage[i].Event = store.LineageMoved
+		}
+	}
+	rb.c.Outcome.Moved = 1
+	s.commit(t, rb.commitBuilder)
+	return Run{ID: rb.c.RunID, Areas: prev.Areas, Interests: prev.Interests}
+}
+
+// Rebuild commits a rebuild after prev that kept every group as it was:
+// one that changed nothing.
+func (s *Server) Rebuild(t testing.TB, prev Run) Run {
+	t.Helper()
+	rb := s.rebuildOf(t, prev)
+	s.commit(t, rb.commitBuilder)
+	return Run{ID: rb.c.RunID, Areas: prev.Areas, Interests: prev.Interests}
+}
+
+// rebuild is a commit after a run, as the helpers that change one group
+// build it.
+type rebuild struct {
+	*commitBuilder
+	prev *store.InterestRun
+	// parent is each group's area in prev, "" for none, and members each
+	// interest's member documents there.
+	parent  map[string]string
+	members map[string][]string
+}
+
+// rebuildOf starts a warm rebuild after prev that carries over every group
+// of prev but those of replaced, as it was, each kept, with every
+// assignment but the replaced groups' members and loose fits.
+func (s *Server) rebuildOf(t testing.TB, prev Run, replaced ...string) *rebuild {
+	t.Helper()
 	ctx := context.Background()
 	run, err := s.insights().GetRun(ctx, prev.ID)
 	if err != nil {
@@ -394,44 +500,56 @@ func (s *Server) SplitInterest(t testing.TB, prev Run, id string, a, b Interest)
 	if err != nil {
 		t.Fatalf("read run %s's assignments: %v", prev.ID, err)
 	}
-	cb := s.newCommit(t, store.RunKindWarm, run.Shape)
-	parent := ""
+	rb := &rebuild{commitBuilder: s.newCommit(t, store.RunKindWarm, run.Shape), prev: run,
+		parent: map[string]string{}, members: map[string][]string{}}
 	for _, g := range groups {
-		if g.ID == id {
-			parent = g.ParentID
+		rb.parent[g.ID] = g.ParentID
+		if slices.Contains(replaced, g.ID) {
 			continue
 		}
-		cb.c.Groups = append(cb.c.Groups, store.InterestGroup{Interest: store.Interest{ID: g.ID}, ParentID: g.ParentID,
+		rb.c.Groups = append(rb.c.Groups, store.InterestGroup{Interest: store.Interest{ID: g.ID}, ParentID: g.ParentID,
 			Size: g.Size, Loose: g.Loose, Cohesion: g.Cohesion, Centroid: g.Centroid})
 		if g.Level == store.InterestLevelInterest {
-			cb.grouped += g.Size
+			rb.grouped += g.Size
 		}
-		cb.c.Lineage = append(cb.c.Lineage, store.LineageRow{OldID: g.ID, NewID: g.ID, Event: store.LineageKept, Shared: g.Size})
-	}
-	ids := []string{cb.interest(a, parent), cb.interest(b, parent)}
-	for i, in := range []Interest{a, b} {
-		cb.c.Lineage = append(cb.c.Lineage, store.LineageRow{OldID: id, NewID: ids[i], Event: store.LineageSplit,
-			Shared: len(in.Members)})
+		rb.lineage(g.ID, g.ID, store.LineageKept, g.Size)
 	}
 	for _, as := range assignments {
-		switch {
-		case as.InterestID == id:
-		case as.NearestID == id:
-			as.NearestID = ids[0]
-			cb.c.Assignments = append(cb.c.Assignments, as)
-		default:
-			cb.c.Assignments = append(cb.c.Assignments, as)
+		if as.Fit == store.InterestFitMember {
+			rb.members[as.InterestID] = append(rb.members[as.InterestID], as.DocumentID)
+		}
+		if !slices.Contains(replaced, as.InterestID) {
+			rb.c.Assignments = append(rb.c.Assignments, as)
 		}
 	}
-	o := &cb.c.Outcome
-	o.NumAreas, o.NumInterests = run.NumAreas, run.NumInterests+1
-	o.NumUnsorted = run.NumUnsorted
-	o.Kept, o.Created, o.Split = run.NumInterests-1, 2, 1
-	s.commit(t, cb)
-	out := Run{ID: cb.c.RunID, Areas: prev.Areas}
-	for _, in := range prev.Interests {
-		if in == id {
-			out.Interests = append(out.Interests, ids...)
+	o := &rb.c.Outcome
+	o.NumAreas, o.NumInterests, o.NumUnsorted = run.NumAreas, run.NumInterests, run.NumUnsorted
+	o.Kept = run.NumInterests - len(replaced)
+	return rb
+}
+
+// renearest makes the unsorted documents nearest id nearest to, "" for
+// none.
+func (rb *rebuild) renearest(id, to string) {
+	for i, as := range rb.c.Assignments {
+		if as.NearestID == id {
+			rb.c.Assignments[i].NearestID = to
+		}
+	}
+}
+
+// lineage records what the rebuild did to old toward next.
+func (rb *rebuild) lineage(old, next string, event store.LineageEvent, shared int) {
+	rb.c.Lineage = append(rb.c.Lineage, store.LineageRow{OldID: old, NewID: next, Event: event, Shared: shared})
+}
+
+// replaced is the run, with ID run, that the identities of r have become:
+// old's place taken by news, or old left out for none.
+func (r Run) replaced(run, old string, news ...string) Run {
+	out := Run{ID: run, Areas: r.Areas}
+	for _, in := range r.Interests {
+		if in == old {
+			out.Interests = append(out.Interests, news...)
 			continue
 		}
 		out.Interests = append(out.Interests, in)

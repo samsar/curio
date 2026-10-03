@@ -348,6 +348,22 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	assert.Empty(t, pidFile, "a clean exit empties the PID file")
 }
 
+// getDashboard gets path from the daemon at baseURL, which must answer
+// 200 under the dashboard's CSP, and returns its header and body.
+func getDashboard(t *testing.T, baseURL, path string) (http.Header, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL+path, nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", path, body)
+	assert.Equal(t, ui.CSP, resp.Header.Get("Content-Security-Policy"), path)
+	return resp.Header, string(body)
+}
+
 // stylesheetRE finds the stylesheet a dashboard page loads.
 var stylesheetRE = regexp.MustCompile(`<link rel="stylesheet" href="(/ui/static/[^"]+)">`)
 
@@ -359,16 +375,7 @@ func assertDashboard(t *testing.T, baseURL, docID string) {
 	t.Helper()
 	get := func(path string) (http.Header, string) {
 		t.Helper()
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL+path, nil)
-		require.NoError(t, err)
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", path, body)
-		assert.Equal(t, ui.CSP, resp.Header.Get("Content-Security-Policy"), path)
-		return resp.Header, string(body)
+		return getDashboard(t, baseURL, path)
 	}
 	_, home := get("/ui/")
 	assert.Contains(t, home, `<div class="landing">`, "the search home")

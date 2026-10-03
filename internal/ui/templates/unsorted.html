@@ -1,0 +1,49 @@
+{{/*
+Unsorted: the latest rebuild's documents in no interest, nearest one
+first, each with the interest it is closest to, 50 a page, and on the
+first page those placed into Unsorted since. Links between pages name the
+run shown, as the Interests' do; a page asked for from another run's says
+it shows the newer one's. On a phone the nearest interest folds under the
+document's name, as the Library folds its type and time.
+*/}}
+{{define "content" -}}
+<div class="page-head"><div class="titles">
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "interests"}}">Interests</a><span class="sep">›</span><span aria-current="page">Unsorted</span></nav>
+<h1>{{template "icon" "inbox"}}Unsorted</h1>
+<p class="lede">{{if .Run}}{{if .Total}}{{count .Total "document is" "documents are"}} in no interest: not close enough to any yet. Listed nearest first, each with the interest it is closest to.{{if and (gt .Page 1) (not .OutOfRange)}} Page {{num .Page}} of {{num .Pages}}.{{end}}{{else}}Documents in no interest: not close enough to any yet.{{end}}{{else}}Documents in no interest, once your library is grouped.{{end}}</p>
+{{with .NumNew}}<div class="meta-row"><span class="badge plain fit-new">{{num .}} new since the rebuild</span></div>{{end}}
+</div></div>
+{{if .RunChanged}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>The interests were rebuilt since the page you came from, so this page {{if .OutOfRange}}is past the new run's last{{else}}lists the new run's{{end}}.{{if gt .Page 1}} <a href="{{.FirstPage}}">Start again from page 1</a>.{{end}}</p></div></div>
+{{end}}
+{{- if not .Run}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "inbox"}}</div>
+<h2>No interests yet</h2>
+<p>Unsorted lists the documents the grouping leaves in no interest, once there is one. <a href="{{navHref "interests"}}">Interests</a> says when that will be.</p>
+</div></div>
+{{- else if .OutOfRange}}{{template "out-of-range" .OutOfRange}}
+{{- else}}{{with .NewBand}}<div class="card table-card mb-4">{{template "new-band" .}}</div>
+{{end}}
+{{- if .Documents}}<div class="card table-card">
+<div class="table-scroll">
+<table class="data">
+<colgroup><col><col class="c-nearest"><col class="c-sim"></colgroup>
+<thead><tr><th scope="col">Document</th><th scope="col" class="c-nearest">Nearest interest</th><th scope="col">Similarity</th></tr></thead>
+<tbody>
+{{range .Documents}}<tr class="{{fitClass "unsorted"}}"><td>{{template "doc-cell" .Cell}}<span class="nearest-sub">nearest {{template "nearest" .Nearest}}</span></td><td class="c-nearest">{{template "nearest" .Nearest}}</td><td>{{template "similarity" .Similarity}}</td></tr>
+{{end}}</tbody>
+</table>
+</div>
+</div>
+{{with .Pager}}{{template "pager" .}}{{end}}
+{{- else}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "circle-check"}}</div>
+<h2>Nothing unsorted</h2>
+<p>Every document the last rebuild grouped is in an interest, or a loose fit of one.</p>
+</div></div>{{end}}
+{{- end}}
+{{- end}}
+
+{{/* An unsorted document's nearest interest, or none. */}}
+{{define "nearest" -}}
+{{if .ID}}{{template "interest-ref" .}}{{else}}<span class="muted">none</span>{{end}}
+{{- end}}

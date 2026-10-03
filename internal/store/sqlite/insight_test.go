@@ -1071,3 +1071,72 @@ func TestInsights_Unplaced(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, assigned)
 }
+
+// TestInsights_DocumentPlace: where a run put a document, with its
+// interest's area and the labels: a member, a loose fit, an unsorted one
+// with its nearest interest and without one, a placement into an interest
+// and into Unsorted; nowhere, another run's and an unknown run's are
+// ErrNotFound. A flat run's interests have no area.
+func TestInsights_DocumentPlace(t *testing.T) {
+	f := newInsightFixture(t, 11)
+	d := f.docs
+	first := f.run(t, "local")
+	c := f.firstCommit(first)
+	c.Assignments = append(c.Assignments, unsorted(d[9], "", "", 0.1))
+	c.Outcome.NumDocuments, c.Outcome.NumUnsorted = 8, 3
+	require.NoError(t, f.ins.CommitRun(f.ctx, c))
+	for _, p := range []store.Placement{{RunID: first.ID, DocumentID: d[7], InterestID: "interest-2", Similarity: 0.6},
+		{RunID: first.ID, DocumentID: d[8], Similarity: 0.2}} {
+		placed, err := f.ins.PlaceDocument(f.ctx, "local", p)
+		require.NoError(t, err)
+		require.True(t, placed)
+	}
+
+	area := store.DocumentPlace{AreaID: "area-1", AreaLabel: "Area One"}
+	for doc, want := range map[string]store.DocumentPlace{
+		d[0]: {Fit: store.InterestFitMember, InterestID: "interest-1", InterestLabel: "Interest One",
+			AreaID: area.AreaID, AreaLabel: area.AreaLabel, Similarity: 0.9},
+		d[2]: {Fit: store.InterestFitLoose, InterestID: "interest-1", InterestLabel: "Interest One",
+			AreaID: area.AreaID, AreaLabel: area.AreaLabel, Similarity: 0.5},
+		d[6]: {Fit: store.InterestFitUnsorted, NearestID: "interest-2", NearestLabel: "Interest Two", Similarity: 0.2},
+		d[9]: {Fit: store.InterestFitUnsorted, Similarity: 0.1},
+		d[7]: {Placed: true, InterestID: "interest-2", InterestLabel: "Interest Two", AreaID: area.AreaID,
+			AreaLabel: area.AreaLabel, Similarity: 0.6},
+		d[8]: {Placed: true, Similarity: 0.2},
+	} {
+		got, err := f.ins.DocumentPlace(f.ctx, first.ID, doc)
+		require.NoError(t, err, doc)
+		assert.Equal(t, want, *got, doc)
+	}
+
+	second := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.secondCommit(second, first.ID)))
+	for _, tc := range []struct{ run, doc string }{
+		{first.ID, d[10]},     // neither assigned nor placed
+		{second.ID, d[7]},     // placed into the first run alone
+		{"no-such-run", d[0]}, // a run that doesn't exist
+		{first.ID, "no-such-doc"},
+	} {
+		_, err := f.ins.DocumentPlace(f.ctx, tc.run, tc.doc)
+		require.ErrorIs(t, err, store.ErrNotFound, "%s in %s", tc.doc, tc.run)
+	}
+	got, err := f.ins.DocumentPlace(f.ctx, second.ID, d[3])
+	require.NoError(t, err)
+	assert.Equal(t, "interest-3", got.InterestID, "the second run's own assignment")
+
+	flat := newInsightFixture(t, 1)
+	run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerManual, Grouper: "test",
+		RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}}
+	require.NoError(t, flat.ins.CreateRun(flat.ctx, run))
+	require.NoError(t, flat.ins.CommitRun(flat.ctx, store.RunCommit{RunID: run.ID, TenantID: "local",
+		Outcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat, NumDocuments: 1,
+			NumInterests: 1, Created: 1},
+		NewIdentities: []store.Interest{identity("flat-1", store.InterestLevelInterest, "", store.LabelSourceTerms)},
+		Groups:        []store.InterestGroup{group("flat-1", "", 1, 0, 0.9)},
+		Assignments:   []store.InterestAssignment{member(flat.docs[0], "flat-1", "", 0.7)},
+	}))
+	got, err = flat.ins.DocumentPlace(flat.ctx, run.ID, flat.docs[0])
+	require.NoError(t, err)
+	assert.Equal(t, store.DocumentPlace{Fit: store.InterestFitMember, InterestID: "flat-1", Similarity: 0.7}, *got,
+		"in no area, unlabeled")
+}

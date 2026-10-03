@@ -1858,13 +1858,14 @@ components:
         num_loose:     { type: integer, description: "Documents in no interest, close to one" }
         num_unsorted:  { type: integer, description: "Documents close to no interest" }
         num_new:       { type: integer, description: "Documents placed since the rebuild" }
+        num_new_unsorted: { type: integer, description: "Of num_new, the documents placed into Unsorted" }
         total:         { type: integer, description: "The run's groups this list counts: its areas, or its interests in the flat shape or with level=interest" }
         rebuild:       { $ref: "#/components/schemas/InterestRebuild" }
         next:          { $ref: "#/components/schemas/InterestsState" }
         items:
           type: array
           items: { $ref: "#/components/schemas/Interest" }
-      required: [num_documents, num_areas, num_interests, num_loose, num_unsorted, num_new, total, next, items]
+      required: [num_documents, num_areas, num_interests, num_loose, num_unsorted, num_new, num_new_unsorted, total, next, items]
 
     UnsortedMember:
       type: object

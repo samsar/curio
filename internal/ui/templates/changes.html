@@ -1,0 +1,54 @@
+{{/*
+What the latest rebuild changed: when it ran, what started it, its kind
+and counts, then its events under a heading per kind (split, merged,
+moved, dissolved, new), areas before interests. A first grouping, and a
+rebuild that changed nothing, are said in a line.
+*/}}
+{{define "content" -}}
+<div class="page-head"><div class="titles">
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "interests"}}">Interests</a><span class="sep">›</span><span aria-current="page">What changed</span></nav>
+<h1>What changed</h1>
+{{with .Run}}<p class="lede">The rebuild of {{template "date" .ComputedAt}}: {{triggerLabel .Trigger}}, {{.Kind}}.</p>
+<div class="meta-row">{{with .Changes.Summary}}<span class="text">{{.}}</span><span class="sep">·</span>{{end}}<span class="text">{{count .Changes.Kept "interest kept" "interests kept"}}</span></div>
+{{- else}}<p class="lede">What the latest rebuild of your interests split, merged, moved and dissolved.</p>{{end}}
+</div></div>
+{{with .Run}}
+{{- if .FirstGrouping}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "sparkles"}}</div>
+<h2>The library's first grouping</h2>
+<p>It made every area and interest there is, so it changed none. <a href="{{navHref "interests"}}">See them</a>.</p>
+</div></div>
+{{- else if not .Events}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "circle-check"}}</div>
+<h2>Nothing changed</h2>
+<p>The latest rebuild kept every area and interest as it was.</p>
+</div></div>
+{{- else}}<div class="stack">
+{{range $i, $g := .Groups}}<section class="card" aria-labelledby="events-{{$i}}">
+<div class="card-head"><h2 id="events-{{$i}}">{{eventLabel $g.Event}}</h2><span class="muted num">{{num (len $g.Events)}}</span></div>
+<div class="card-body"><ul class="event-lines">
+{{range $g.Events}}<li>{{template "event-line" .}}</li>
+{{end}}</ul></div>
+</section>
+{{end}}</div>{{end}}
+{{- else}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "sparkles"}}</div>
+<h2>No rebuild yet</h2>
+<p>Once your library is grouped, what each rebuild changes shows here.</p>
+</div></div>{{end}}
+{{- end}}
+
+{{/*
+One InterestEvent, from the rebuild's side: who split off from whom and
+merged into whom, with the documents they share; where an interest moved;
+what dissolved and what is new. An area's is tagged.
+*/}}
+{{define "event-line" -}}
+{{if .Area}}<span class="tag">area</span> {{end}}
+{{- if eq .Event "split"}}{{template "interest-ref" .To}} split off from {{template "interest-ref" .From}} ({{count .Shared "document" "documents"}})
+{{- else if eq .Event "merged"}}{{template "interest-ref" .From}} merged into {{template "interest-ref" .To}} ({{count .Shared "document" "documents"}})
+{{- else if eq .Event "moved"}}{{template "interest-ref" .To}} moved to {{with .In}}{{template "interest-ref" .}}{{else}}another area{{end}}
+{{- else if eq .Event "dissolved"}}{{template "interest-ref" .From}} dissolved
+{{- else if eq .Event "new"}}{{template "interest-ref" .To}}
+{{- else}}{{template "interest-ref" .From}}{{with .To}} → {{template "interest-ref" .}}{{end}}{{end}}
+{{- end}}

@@ -33,6 +33,14 @@ const (
 	evilQuotes = `'"<>&`
 )
 
+// Hostile labels, which a model writes as it likes: 300 characters
+// without a break, and a right-to-left override that turns the text after
+// it around.
+var (
+	evilLong = strings.Repeat("W", 300)
+	evilRTL  = "Kafka \u202estreams" + evilScript
+)
+
 func newRenderer(t testing.TB) *Renderer {
 	t.Helper()
 	r, err := New()
@@ -53,11 +61,13 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 	text, err := r.RenderMarkdown([]byte("# "+evilScript+"\n\n<img src=x onerror=alert(1)> [x]("+evilURL+
 		") ![alt "+evilAttr+"](https://img.example/a.png)\n"), "https://example.com/post", false)
 	require.NoError(t, err)
-	member := Member{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Similarity: 0.8}
-	interest := Interest{ID: evilAttr, ParentID: evilScript, ParentLabel: evilAttr, Label: evilScript,
-		Summary: evilQuotes, Size: 7, Loose: 1, Cohesion: 0.7,
-		Members: []Member{member, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes},
-			{DocumentID: evilScript, BookmarkTitle: evilAttr + evilScript, URL: evilURL, Loose: true}}}
+	member := Member{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Similarity: 0.8, Fit: "member"}
+	interest := Interest{ID: evilAttr, ParentID: evilScript, ParentLabel: evilLong, Label: evilScript,
+		Summary: evilQuotes, Size: 7, Loose: 1, New: 2, Cohesion: 0.7,
+		Members: []Member{member, {DocumentID: "doc", URL: "https://example.com/" + evilQuotes, Fit: "member"},
+			{DocumentID: evilScript, BookmarkTitle: evilAttr + evilScript, URL: evilURL, Fit: "loose"}},
+		NewMembers: []Member{{DocumentID: evilQuotes, BookmarkTitle: evilRTL, URL: evilURL, Similarity: 0.5, Fit: "new"}},
+		Events:     sampleEvents(evilAttr)}
 	area := sampleArea(interest)
 
 	upstream := func(name, state string, enabled bool) Upstream {
@@ -82,7 +92,8 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 					Verified: true, Detail: evilScript, Fix: evilQuotes},
 				Upstreams: []Upstream{upstream(evilScript, "failing", true), upstream("jina", "degraded", true),
 					upstream(evilAttr, "paused", true), upstream("jina", "failing", false),
-					upstream(evilQuotes, evilAttr, true), {Name: "jina", Enabled: true, State: "failing"}}},
+					upstream(evilQuotes, evilAttr, true), {Name: "jina", Enabled: true, State: "failing"}},
+				Interests: InterestsState{State: "failing", LastError: evilLong + evilScript, RetryAt: at}},
 			Failures: &FailuresPanel{Total: 17, Causes: []Count{{Name: evilScript, Count: 9},
 				{Name: string(store.FailureCauseAntiBot), Count: 5}, {Name: string(store.FailureCauseDeadLink), Count: 3}}},
 		},
@@ -146,17 +157,31 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 					{Kind: evilAttr, Waiting: true, Attempts: 1, RunAfter: at, LastError: evilScript + evilQuotes},
 					{Kind: "fetch", Waiting: true, RunAfter: at, LastError: evilAttr}},
 				AttemptLimit: 5, Hold: evilScript},
+			Place: &DocumentPlace{Fit: "member", Interest: InterestRef{ID: evilAttr, Label: evilLong},
+				Area: InterestRef{ID: evilScript, Label: evilRTL, Area: true}},
 		},
 		PageInterests: Interests{
 			Layout: layout(NavInterests),
 			Page:   2, RunChanged: true,
-			Run: &InterestRun{ID: evilAttr + evilScript, ComputedAt: at, Algo: evilScript, Shape: "areas",
-				Documents: 400, Areas: 30, Interests: 60, Loose: 1, Unsorted: 2, Total: 30},
+			Run: &InterestRun{ID: evilAttr + evilScript, ComputedAt: at, Kind: evilScript, Shape: "areas",
+				Documents: 400, Areas: 30, Interests: 60, Loose: 1, Unsorted: 2, New: 3, NewUnsorted: 1, Total: 30,
+				Changes: RunChanges{Kept: 50, Split: 2, Merged: 1, Moved: 1, Dissolved: 1, Created: 4}, Recent: true},
 			Interests: []Interest{area, {ID: "unlabeled", Area: true, Size: 1, NumChildren: 1}},
-			Rebuild: Rebuild{Enabled: true, Running: true, StartedAt: at, Shown: evilAttr, NewRun: evilScript,
-				RunError: evilScript},
+			Rebuild: Rebuild{Enabled: true, Running: true, StartedAt: at, Shown: evilAttr, Ready: true,
+				State: InterestsState{State: "held", HeldReason: evilScript}},
 		},
 		PageInterest: InterestPage{Layout: layout(NavInterests), Interest: interest, RunAt: at},
+		PageUnsorted: Unsorted{Layout: layout(NavInterests), Page: 1, RunChanged: true, Run: evilAttr, Total: 3,
+			Documents: sampleUnsorted(), NumNew: 30,
+			New: []Member{{DocumentID: evilAttr, BookmarkTitle: evilLong, URL: evilURL, Similarity: 0.2, Fit: "new"}}},
+		PageChanges: Changes{Layout: layout(NavInterests), Run: &ChangesRun{ComputedAt: at, Trigger: evilScript,
+			Kind: evilAttr, Changes: RunChanges{Kept: 9, Split: 1, Merged: 2, Moved: 1, Dissolved: 1, Created: 2},
+			Events: sampleChanges()}},
+		PageRetired: Gone{Layout: layout(NavInterests), ID: evilAttr, RetentionDays: 180,
+			Retired: &Retired{Label: evilRTL, RetiredAt: at, Successors: []Successor{
+				{InterestRef: InterestRef{ID: evilScript, Label: evilLong}, Event: "split", Shared: 12},
+				{InterestRef: InterestRef{ID: evilAttr, Retired: true}, Event: "merged", Shared: 1},
+				{InterestRef: InterestRef{ID: evilQuotes, Label: evilQuotes}, Event: evilScript, Shared: 3}}}},
 		PageError: ErrorPage{Layout: layout(NavNone), Status: http.StatusBadRequest, Title: evilScript,
 			Message: evilAttr, RequestID: evilQuotes, Retry: NavLibrary},
 		PageStarting: Starting{Layout: layout(NavNone), Phase: evilScript, Migrating: true, Applied: 1, Total: 6},
@@ -234,6 +259,9 @@ func sampleVariants(t testing.TB) map[string][]any {
 		PageDocument:  documentVariants(layout(NavLibrary), panelErr, at),
 		PageInterests: interestsVariants(layout(NavInterests), panelErr, at),
 		PageInterest:  interestVariants(layout(NavInterests)),
+		PageUnsorted:  unsortedVariants(layout(NavInterests)),
+		PageChanges:   changesVariants(layout(NavInterests), at),
+		PageRetired:   goneVariants(layout(NavInterests), at),
 		PageLibrary: {
 			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{State: evilAttr, Limit: 7}, Counts: counts,
 				Rows: []LibraryRow{row}, NextCursor: evilScript, PageSize: 7, Shown: 3},
@@ -286,6 +314,13 @@ func statusVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 			Progress: &ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 40, DueLater: 30,
 				NextDue: at, Running: 2, Finished: 9}}, ProgressWindow, true)}},
 		Status{Layout: layout, Poll: PollHealth, Health: &HealthPanel{OllamaDetail: evilScript}},
+		Status{Layout: layout, Poll: PollHealth, Health: &HealthPanel{OllamaReachable: true,
+			Interests: InterestsState{State: "held", HeldReason: evilLong + evilScript}}},
+		Status{Layout: layout, Poll: PollHealth, Health: &HealthPanel{OllamaReachable: true,
+			Interests: InterestsState{State: "failing", LastError: evilLong + evilAttr, RetryAt: at.Add(time.Hour)}}},
+		Status{Layout: layout, Counts: &CountsPanel{}, Queue: &QueuePanel{Open: true}, Progress: &ProgressPanel{},
+			Health: &HealthPanel{OllamaReachable: true, Interests: InterestsState{State: "current", LastRebuildAt: at,
+				LastKind: evilQuotes, Changed: 37, RebuildAt: 263}}, Failures: &FailuresPanel{}},
 	}
 }
 
@@ -307,6 +342,7 @@ func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 	failed := doc("failed", nil, DocumentJobs{Baseline: then, Current: then, Jobs: []JobLine{{Kind: "fetch",
 		Waiting: true, Attempts: 2, RunAfter: at, LastError: evilScript}}})
 	failed.Meta.BookmarkTitle = evilScript
+	placed := func(p DocumentPlace) Document { return placedDocument(layout, p) }
 	return []any{
 		doc("pending", nil, DocumentJobs{Baseline: then, Current: then, Jobs: queued, Hold: "paused"}),
 		doc("fetched", ext, DocumentJobs{Baseline: then, Current: then, Jobs: []JobLine{{Kind: "index", Running: true,
@@ -318,7 +354,23 @@ func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 		doc("fetched", ext, DocumentJobs{Err: panelErr}),
 		Document{Layout: layout, Poll: PollJobs, Meta: DocumentMeta{ID: evilAttr}, Jobs: DocumentJobs{DocumentID: evilAttr,
 			State: "pending", Baseline: then, Current: later, Jobs: queued, AttemptLimit: 5}},
+		placed(DocumentPlace{Fit: "member", Interest: InterestRef{ID: evilQuotes, Label: evilRTL}}),
+		placed(DocumentPlace{Fit: "loose", Interest: InterestRef{ID: evilQuotes}, Area: InterestRef{ID: evilAttr, Area: true}}),
+		placed(DocumentPlace{Fit: "unsorted", Nearest: InterestRef{ID: evilScript, Label: evilLong}}),
+		placed(DocumentPlace{Fit: "unsorted"}),
+		placed(DocumentPlace{Fit: "new", Interest: InterestRef{ID: evilAttr, Label: evilScript},
+			Area: InterestRef{ID: evilQuotes, Label: evilAttr, Area: true}}),
+		placed(DocumentPlace{Fit: "new"}),
+		placed(DocumentPlace{Fit: evilAttr, Interest: InterestRef{ID: evilAttr, Label: evilQuotes}}),
 	}
+}
+
+// placedDocument is a fetched document's page whose line in the interests
+// is place.
+func placedDocument(layout Layout, place DocumentPlace) Document {
+	return Document{Layout: layout, Meta: DocumentMeta{ID: evilAttr, URL: evilURL, State: "fetched"},
+		Text: TextPanel{State: TextNotFetched}, Place: &place,
+		Jobs: DocumentJobs{DocumentID: evilAttr, State: "fetched", AttemptLimit: 5}}
 }
 
 // failuresVariants are the Failures tab with nothing failed, the summary
@@ -342,41 +394,105 @@ func failuresVariants(layout Layout, panelErr *PanelError, counts *LibraryCounts
 // sampleArea is an area holding in, hostile in every string.
 func sampleArea(in Interest) Interest {
 	return Interest{ID: evilScript + evilAttr, Area: true, Label: evilAttr, Summary: evilScript, Size: 628,
-		Loose: 4, Cohesion: 0.35, NumChildren: 10,
-		Children: []Interest{in, {ID: evilQuotes, Label: strings.Repeat("W", 200), Size: 86}, {ID: "unlabeled", Size: 3}}}
+		Loose: 4, New: 3, Cohesion: 0.35, NumChildren: 10,
+		Children: []Interest{in, {ID: evilQuotes, Label: evilLong, Size: 86, New: 1}, {ID: "unlabeled", Size: 3},
+			{ID: "rtl", Label: evilRTL, Size: 2}},
+		Events: sampleEvents(evilScript + evilAttr)}
+}
+
+// sampleEvents are a rebuild's events about the group id, one of each line
+// its note says, from and to hostile identities, a retired one and an
+// unlabeled one among them; and a kept one, which says nothing.
+func sampleEvents(id string) []InterestEvent {
+	self := &InterestRef{ID: id, Label: evilScript}
+	return []InterestEvent{
+		{Event: "kept", From: self, To: self, Shared: 9},
+		{Event: "split", From: &InterestRef{ID: evilAttr, Label: evilLong, Retired: true}, To: self, Shared: 4},
+		{Event: "split", From: self, To: &InterestRef{ID: evilQuotes, Label: evilRTL}, Shared: 3},
+		{Event: "merged", From: &InterestRef{ID: evilScript, Retired: true}, To: self, Shared: 2},
+		{Event: "merged", From: self, To: &InterestRef{ID: "x", Label: evilQuotes}, Shared: 1},
+		{Event: "moved", From: self, To: self, In: &InterestRef{ID: evilAttr, Label: evilAttr, Area: true}},
+		{Event: "new", To: self},
+		{Event: evilScript, From: self, To: self},
+	}
+}
+
+// sampleUnsorted are unsorted documents: nearest a hostile interest,
+// nearest an unlabeled one, nearest a 300-character label, and nearest
+// none.
+func sampleUnsorted() []UnsortedDoc {
+	doc := func(i int, nearest InterestRef) UnsortedDoc {
+		return UnsortedDoc{Member: Member{DocumentID: evilAttr + strconv.Itoa(i), Title: evilScript,
+			BookmarkTitle: evilQuotes, URL: "https://example.com/" + evilQuotes + strconv.Itoa(i), Similarity: 0.3,
+			Fit: "unsorted"}, Nearest: nearest}
+	}
+	return []UnsortedDoc{doc(0, InterestRef{ID: evilAttr, Label: evilScript}), doc(1, InterestRef{ID: evilQuotes}),
+		doc(2, InterestRef{ID: evilScript, Label: evilLong}), doc(3, InterestRef{})}
+}
+
+// sampleChanges are a rebuild's events, as the API lists them: of every
+// kind, areas before interests, hostile identities, retired and live, and
+// an event this build doesn't know.
+func sampleChanges() []InterestEvent {
+	ref := func(id, label string, retired bool) *InterestRef {
+		return &InterestRef{ID: id, Label: label, Retired: retired}
+	}
+	return []InterestEvent{
+		{Event: "split", Area: true, From: ref(evilAttr, evilScript, false), To: &InterestRef{ID: "a2", Area: true},
+			Shared: 40},
+		{Event: "split", From: ref(evilScript, evilLong, true), To: ref(evilQuotes, evilRTL, false), Shared: 12},
+		{Event: "merged", From: ref("m1", evilAttr, true), To: ref("m2", evilQuotes, false), Shared: 1},
+		{Event: "merged", From: ref("m3", "", true), To: ref("m2", evilQuotes, false), Shared: 3},
+		{Event: "moved", From: ref("v1", evilScript, false), To: ref("v1", evilScript, false),
+			In: &InterestRef{ID: evilAttr, Label: evilLong, Area: true}},
+		{Event: "moved", From: ref("v2", "", false), To: ref("v2", "", false)},
+		{Event: "dissolved", From: ref("d1", evilRTL, true)},
+		{Event: "new", Area: true, To: &InterestRef{ID: "n1", Label: evilQuotes, Area: true}},
+		{Event: "new", To: ref("n2", "", false)},
+		{Event: evilScript, From: ref("o1", evilAttr, false), To: ref("o2", evilScript, false)},
+	}
 }
 
 // interestsVariants are the Interests with a rebuild queued behind a
-// paused queue, one done and one failed since the run shown, insight off
-// without a run, the library grouped for the first time, the rebuild's
-// reads failed, a poll's answer, the first, a middle and the last of many
-// pages of interests and of areas, the first page of a newer run than
-// asked for, and a page past the last of a run, of an empty run and
-// without one.
+// paused queue, newer interests ready, insight off without a run, the
+// library grouped for the first time (by the queue's word and by the
+// scheduler's), the rebuild's reads failed, the scheduler's every state,
+// a poll's answer in several, the first, a middle and the last of many
+// pages of interests and of areas (Unsorted's card on the last), the
+// first page of a newer run than asked for, a page past the last of a
+// run, of an empty run and without one, and a run without groups.
 func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 	run := &InterestRun{ComputedAt: at, Documents: 3, Shape: "flat"}
-	many := &InterestRun{ID: evilScript, ComputedAt: at, Algo: evilAttr, Shape: "flat", Documents: 4498, Loose: 47,
-		Unsorted: 2500, Interests: 1951, Total: 1951}
-	areas := &InterestRun{ID: evilAttr, ComputedAt: at, Algo: evilScript, Shape: "areas", Documents: 5254,
-		Unsorted: 402, Areas: 30, Interests: 187, Total: 30}
+	many := &InterestRun{ID: evilScript, ComputedAt: at, Kind: evilAttr, Shape: "flat", Documents: 4498, Loose: 47,
+		Unsorted: 2500, New: 12, NewUnsorted: 5, Interests: 1951, Total: 1951}
+	areas := &InterestRun{ID: evilAttr, ComputedAt: at, Kind: evilScript, Shape: "areas", Documents: 5254,
+		Unsorted: 402, Areas: 30, Interests: 187, Total: 30,
+		Changes: RunChanges{Kept: 180, Merged: 1, Created: 6}, Recent: true}
 	cards := func(n int) []Interest {
 		out := make([]Interest, 0, n)
 		for i := range n {
-			out = append(out, Interest{ID: evilAttr + strconv.Itoa(i), Label: evilScript, Size: 10, Cohesion: 0.6,
-				Members: []Member{{DocumentID: evilAttr, BookmarkTitle: evilScript, URL: evilURL}}})
+			out = append(out, Interest{ID: evilAttr + strconv.Itoa(i), Label: evilScript, Size: 10, Loose: i % 2,
+				New: i % 3, Cohesion: 0.6, Members: []Member{{DocumentID: evilAttr, BookmarkTitle: evilScript, URL: evilURL,
+					Fit: "member"}}})
 		}
 		return out
 	}
-	rebuild := Rebuild{Enabled: true, Shown: evilScript}
-	return []any{
+	rebuild := Rebuild{Enabled: true, Shown: evilScript, State: InterestsState{State: "current", LastRebuildAt: at,
+		LastKind: evilAttr, Changed: 3, RebuildAt: 263}}
+	state := func(s InterestsState) Rebuild { return Rebuild{Enabled: true, Shown: "run", State: s} }
+	states := sampleStates(at)
+	out := make([]any, 0, 18+3*len(states))
+	out = append(out,
 		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Queued: true, Hold: "paused", Shown: "run"}},
-		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Shown: "run", NewRun: "done"}},
-		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Shown: "run", NewRun: "failed",
-			RunError: evilScript}},
-		Interests{Layout: layout, Rebuild: Rebuild{}},
+		Interests{Layout: layout, Run: run, Rebuild: Rebuild{Enabled: true, Shown: "run", Ready: true}},
+		Interests{Layout: layout, Rebuild: Rebuild{State: InterestsState{State: "off"}}},
 		Interests{Layout: layout, Rebuild: Rebuild{Enabled: true, Running: true, StartedAt: at}},
+		Interests{Layout: layout, Rebuild: Rebuild{Enabled: true, State: InterestsState{State: "rebuilding"}}},
 		Interests{Layout: layout, Rebuild: Rebuild{Enabled: true, Err: panelErr}},
 		Interests{Layout: layout, Poll: PollRebuild, Rebuild: Rebuild{Enabled: true, Running: true, Shown: evilAttr}},
+		Interests{Layout: layout, Poll: PollRebuild, Rebuild: Rebuild{Enabled: true, Queued: true, Hold: evilScript,
+			Ready: true, Shown: evilAttr}},
+		Interests{Layout: layout, Poll: PollRebuild, Rebuild: Rebuild{Enabled: true, Err: panelErr}},
 		Interests{Layout: layout, Page: 1, Run: many, Interests: cards(InterestsPageSize), Rebuild: rebuild},
 		Interests{Layout: layout, Page: 51, Run: many, Interests: cards(InterestsPageSize), Rebuild: rebuild},
 		Interests{Layout: layout, Page: 82, Run: many, Interests: cards(7), Rebuild: rebuild},
@@ -387,35 +503,122 @@ func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any 
 		Interests{Layout: layout, Page: math.MaxInt, Run: &InterestRun{ID: evilAttr, ComputedAt: at, Documents: 5,
 			Unsorted: 5}, Rebuild: rebuild},
 		Interests{Layout: layout, Page: 2, Rebuild: Rebuild{Enabled: true}},
+		Interests{Layout: layout, Page: 1, Run: &InterestRun{ID: evilAttr, ComputedAt: at, Documents: 5, Unsorted: 5,
+			NewUnsorted: 2}, Rebuild: rebuild},
+	)
+	for _, s := range states {
+		out = append(out, Interests{Layout: layout, Run: run, Rebuild: state(s)}, Interests{Layout: layout,
+			Rebuild: state(s)}, Interests{Layout: layout, Poll: PollRebuild, Rebuild: state(s)})
+	}
+	return out
+}
+
+// sampleStates are automatic rebuilds in every state the scheduler
+// reports, and one this build doesn't know, hostile in every string.
+func sampleStates(at time.Time) []InterestsState {
+	return []InterestsState{
+		{State: "unknown"}, {State: "off"}, {State: "none", Changed: 7, RebuildAt: 20},
+		{State: "due", Changed: 25, RebuildAt: 20},
+		{State: "due", LastRebuildAt: at, FreshOwed: "reindex"},
+		{State: "due", LastRebuildAt: at, FreshOwed: evilScript},
+		{State: "due", LastRebuildAt: at, Changed: 300, RebuildAt: 263},
+		{State: "queued"}, {State: "rebuilding"},
+		{State: "held", HeldReason: evilLong + evilScript},
+		{State: "failing", LastError: evilLong + evilAttr, RetryAt: at.Add(time.Hour)},
+		{State: "failing", LastError: evilScript},
+		{State: "current", LastRebuildAt: at, LastKind: evilQuotes, Changed: 37, RebuildAt: 263},
+		{State: evilScript, LastKind: evilAttr},
 	}
 }
 
 // interestVariants are an interest's page of members named every way, on
-// its first page, past its thousandth member, and past its last page, and
-// without a run time; an interest's last page, of loose fits; and an
-// area's page.
+// its first page (the new band, with more than it lists), past its
+// thousandth member, and past its last page, and without a run time; an
+// interest's last page, of loose fits; an area's pages: one of many,
+// past the last, and with no interest; and groups whose rebuild did
+// nothing but keep them.
 func interestVariants(layout Layout) []any {
 	members := func(n int) []Member {
 		out := make([]Member, 0, n)
 		for i := range n {
 			out = append(out, Member{DocumentID: evilAttr + strconv.Itoa(i), BookmarkTitle: evilScript,
-				URL: "https://example.com/" + evilQuotes + strconv.Itoa(i), Similarity: 0.5})
+				URL: "https://example.com/" + evilQuotes + strconv.Itoa(i), Similarity: 0.5, Fit: "member"})
 		}
 		return out
 	}
-	big := Interest{ID: evilScript, Label: evilAttr, Summary: evilScript, Size: 1234, Cohesion: 0.6}
+	big := Interest{ID: evilScript, Label: evilAttr, Summary: evilScript, Size: 1234, New: 30, Cohesion: 0.6,
+		NewMembers: []Member{{DocumentID: evilAttr, Title: evilLong, URL: evilURL, Similarity: 0.6, Fit: "new"}}}
 	first, deep := big, big
 	first.Members, deep.Members = members(InterestMembersPageSize), members(InterestMembersPageSize)
-	loose := Interest{ID: evilAttr, ParentID: evilScript, Label: evilScript, Size: 50, Loose: 3,
-		Members: []Member{{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Loose: true, Similarity: 0.46}}}
+	loose := Interest{ID: evilAttr, ParentID: evilScript, ParentLabel: evilRTL, Label: evilScript, Size: 50, Loose: 3,
+		Members: []Member{{DocumentID: evilAttr, Title: evilScript, URL: evilURL, Fit: "loose", Similarity: 0.46}}}
+	area := sampleArea(loose)
+	area.NumChildren = 30
+	kept := Interest{ID: evilAttr, Label: evilLong, Size: 1, Events: []InterestEvent{{Event: "kept",
+		From: &InterestRef{ID: evilAttr}, To: &InterestRef{ID: evilAttr}, Shared: 1}}}
 	return []any{
 		InterestPage{Layout: layout, Interest: first, Page: 1},
 		InterestPage{Layout: layout, Interest: deep, Page: 21},
 		InterestPage{Layout: layout, Interest: big, Page: 26},
 		InterestPage{Layout: layout, Interest: Interest{ID: evilAttr, Size: 1}, Page: 2},
 		InterestPage{Layout: layout, Interest: loose, Page: 2},
-		InterestPage{Layout: layout, Interest: sampleArea(loose)},
+		InterestPage{Layout: layout, Interest: area, Page: 2},
+		InterestPage{Layout: layout, Interest: area, Page: 3},
 		InterestPage{Layout: layout, Interest: Interest{ID: evilAttr, Area: true}},
+		InterestPage{Layout: layout, Interest: kept, Page: 1},
+	}
+}
+
+// unsortedVariants are Unsorted before the first rebuild, on its first
+// page without new documents, a middle page of many, past the last, a
+// newer run than asked for past its first page, and a run with nothing
+// unsorted but some placed there since, and with neither.
+func unsortedVariants(layout Layout) []any {
+	return []any{
+		Unsorted{Layout: layout},
+		Unsorted{Layout: layout, Run: evilScript, Total: 4, Documents: sampleUnsorted()},
+		Unsorted{Layout: layout, Page: 5, Run: evilScript, Total: 600, Documents: sampleUnsorted(), NumNew: 2,
+			New: []Member{{DocumentID: evilAttr, URL: evilURL, Fit: "new"}}},
+		Unsorted{Layout: layout, Page: 13, Run: evilScript, Total: 600},
+		Unsorted{Layout: layout, Page: 2, RunChanged: true, Run: evilAttr, Total: 60, Documents: sampleUnsorted()},
+		Unsorted{Layout: layout, Run: evilAttr, NumNew: 1, New: []Member{{DocumentID: evilAttr, Title: evilRTL,
+			URL: evilURL, Fit: "new"}}},
+		Unsorted{Layout: layout, Run: evilAttr},
+	}
+}
+
+// changesVariants are the changes before the first rebuild, after the
+// first grouping, and after a rebuild that changed nothing.
+func changesVariants(layout Layout, at time.Time) []any {
+	first := []InterestEvent{{Event: "new", Area: true, To: &InterestRef{ID: "a", Label: evilScript, Area: true}},
+		{Event: "new", To: &InterestRef{ID: "i", Label: evilAttr}}}
+	return []any{
+		Changes{Layout: layout},
+		Changes{Layout: layout, Run: &ChangesRun{ComputedAt: at, Trigger: "first", Kind: "fresh",
+			Changes: RunChanges{Created: 2}, Events: first}},
+		Changes{Layout: layout, Run: &ChangesRun{ComputedAt: at, Trigger: "auto", Kind: "warm",
+			Changes: RunChanges{Kept: 12}}},
+	}
+}
+
+// goneVariants are a retired area that split, one that merged into one
+// and into several, one that dissolved, and an ID nothing knows.
+func goneVariants(layout Layout, at time.Time) []any {
+	successor := func(event string, n int) []Successor {
+		out := make([]Successor, 0, n)
+		for i := range n {
+			out = append(out, Successor{InterestRef: InterestRef{ID: evilAttr + strconv.Itoa(i), Label: evilScript,
+				Area: true}, Event: event, Shared: i + 1})
+		}
+		return out
+	}
+	retired := func(r Retired) Gone { return Gone{Layout: layout, ID: evilAttr, Retired: &r, RetentionDays: 180} }
+	return []any{
+		retired(Retired{Area: true, Label: evilLong, RetiredAt: at, Successors: successor("split", 2)}),
+		retired(Retired{RetiredAt: at, Successors: successor("merged", 1)}),
+		retired(Retired{Label: evilQuotes, RetiredAt: at, Successors: successor("merged", 3)}),
+		retired(Retired{Area: true, RetiredAt: at}),
+		Gone{Layout: layout, ID: evilScript + evilLong, RetentionDays: 180},
 	}
 }
 
@@ -467,7 +670,8 @@ func partialSamples(t testing.TB) map[string][]any {
 		"state-badge": {evilScript, "dead"},
 		"stackbar": {stateBar([]Count{{Name: "fetched", Count: 2}, {Name: "failed", Count: 1}}),
 			causeBar("dead_link", 819, 926), []BarSegment(nil),
-			[]BarSegment{{Class: evilAttr, X: evilScript, Width: evilQuotes}}},
+			[]BarSegment{{Class: evilAttr, X: evilScript, Width: evilQuotes}},
+			InterestRun{Documents: 5254, Loose: 5, Unsorted: 398, New: 60}.Bar(), childBar(45, 86), childBar(3, 0)},
 		"upstream-failure": {Upstream{Name: evilScript, LastFailure: at, LastFailureClass: evilScript}, Upstream{}},
 		"attention": {&HealthPanel{OllamaDetail: evilScript, Drift: &Drift{Fix: evilScript, Detail: evilAttr},
 			Upstreams: []Upstream{{Name: evilScript, Enabled: true, State: "failing"}}},
@@ -488,13 +692,17 @@ func partialSamples(t testing.TB) map[string][]any {
 			{Kind: evilAttr, Waiting: true, RunAfter: at, LastError: evilAttr + evilScript}},
 			Hold: evilScript, Current: DocumentBaseline{Extraction: evilScript}},
 			DocumentJobs{Err: &PanelError{Message: evilScript, RequestID: evilAttr}}},
-		"rebuild-state": {Rebuild{Queued: true, Hold: evilScript, NewRun: "done"},
-			Rebuild{NewRun: "failed", RunError: evilScript}, Rebuild{Err: &PanelError{Message: evilScript}}},
-		"rebuild-control": {Rebuild{Enabled: true, Queued: true}, Rebuild{}},
+		"rebuild-state":   rebuildSamples(at),
+		"rebuild-control": {Rebuild{Enabled: true, Queued: true}, Rebuild{}, Rebuild{Enabled: true}},
+		"interests-empty": rebuildSamples(at),
+		"interests-state": statesOf(sampleStates(at)),
+		"interests-due":   statesOf(sampleStates(at)[3:7]),
 		"action": {Action{Kind: evilAttr, Method: evilScript, Path: evilURL, body: map[string]any{evilAttr: evilScript},
 			Field: evilQuotes, Join: evilAttr, Status: evilScript, Done: evilQuotes, DoneOff: evilScript}, Action{}},
 		"poller": {DocumentJobs{DocumentID: evilAttr, Baseline: DocumentBaseline{Updated: at, Extraction: evilScript},
-			Jobs: []JobLine{{Kind: "fetch"}}}.Poller(), Rebuild{Shown: evilScript}.Poller(), Status{}.Pollers()[1]},
+			Jobs: []JobLine{{Kind: "fetch"}}}.Poller(), Rebuild{Shown: evilScript}.Poller(),
+			Rebuild{Enabled: true, Shown: evilScript}.Poller(),
+			Rebuild{Enabled: true, State: InterestsState{State: "queued"}}.Poller(), Status{}.Pollers()[1]},
 		"pager": {
 			newPager(pageSpan{Page: 5, Size: 24, Shown: 24, Total: 1951, Noun: evilScript, Suffix: evilAttr,
 				Href: func(page int) string { return interestsPageHref(page, evilAttr+evilScript) }}),
@@ -515,12 +723,67 @@ func partialSamples(t testing.TB) map[string][]any {
 			Match{Segments: Passage("", evilQuotes), Vector: new(0.2)}, Match{}},
 		"cohesion":      {0.5},
 		"cohesion-line": {0.5},
+		"similarity":    {0.5, 0.0, 1.0},
+		"date":          {at},
 		"interest-cards": {[]Interest{sampleArea(Interest{ID: evilAttr, Label: evilScript, Size: 7}),
-			{ID: evilScript, Label: evilAttr, Summary: evilScript, Size: 9,
-				Members: []Member{{DocumentID: evilAttr, BookmarkTitle: evilScript, URL: evilURL}}}}},
-		"area-card":     {sampleArea(Interest{ID: evilAttr, Size: 3}), Interest{ID: evilAttr, Area: true, NumChildren: 1}},
-		"interest-card": {Interest{ID: evilAttr, Label: evilScript, Summary: evilQuotes, Size: 3}},
+			{ID: evilScript, Label: evilAttr, Summary: evilScript, Size: 9, Loose: 2, New: 1,
+				Members: []Member{{DocumentID: evilAttr, BookmarkTitle: evilScript, URL: evilURL, Fit: "member"}}}}},
+		"interest-item": {sampleArea(Interest{ID: evilAttr, Size: 3}), Interest{ID: evilRTL, Label: evilLong, Size: 4}},
+		"area-card": {sampleArea(Interest{ID: evilAttr, Size: 3}), Interest{ID: evilAttr, Area: true, NumChildren: 1},
+			Interest{ID: evilAttr, Area: true, Label: evilRTL, NumChildren: 2,
+				Children: []Interest{{ID: "a", Label: evilLong, Size: 0}, {ID: "b", Size: 0}}}},
+		"interest-card": {Interest{ID: evilAttr, Label: evilScript, Summary: evilQuotes, Size: 3, Loose: 1, New: 2}},
+		"unsorted-card": {UnsortedCard{Documents: 398, New: 2, Href: unsortedHref(1, evilScript)},
+			UnsortedCard{Documents: 3, Href: unsortedHref(1, "")}},
+		"interest-ref": {(*InterestRef)(nil), &InterestRef{ID: evilAttr, Label: evilLong},
+			&InterestRef{ID: evilScript, Area: true, Retired: true}, InterestRef{ID: evilQuotes, Label: evilRTL}},
+		"nearest": {InterestRef{ID: evilAttr, Label: evilScript}, InterestRef{}},
+		"new-band": {&NewBand{Members: []Member{{DocumentID: evilAttr, Title: evilLong, URL: evilURL, Fit: "new"},
+			{DocumentID: evilScript, BookmarkTitle: evilRTL, URL: evilURL, Fit: evilAttr}}, More: 18}, &NewBand{}},
+		"ranked-row": {RankedMember{Rank: 1234, Member: Member{DocumentID: evilAttr, Title: evilScript, URL: evilURL,
+			Fit: "loose"}}, RankedMember{Member: Member{Fit: evilScript}}},
+		"event-line": eventsOf(sampleChanges()),
+		"fate": {Retired{Successors: []Successor{{Event: "split"}}}, Retired{Successors: []Successor{{Event: "merged"}}},
+			Retired{Successors: []Successor{{Event: "merged"}, {Event: "split"}}}, Retired{RetiredAt: at}},
+		"doc-place": {DocumentPlace{Fit: "member", Interest: InterestRef{ID: evilAttr, Label: evilScript},
+			Area: InterestRef{ID: evilQuotes, Area: true}}, DocumentPlace{Fit: "unsorted"},
+			DocumentPlace{Fit: "new", Interest: InterestRef{ID: evilAttr}}},
+		"place-path": {DocumentPlace{Interest: InterestRef{ID: evilAttr, Label: evilLong},
+			Area: InterestRef{ID: evilScript, Label: evilRTL, Area: true}}, DocumentPlace{Interest: InterestRef{ID: evilAttr}}},
 	}
+}
+
+// rebuildSamples are the Interests' rebuild in every state it shows: the
+// queue's read failed, a rebuild running and queued behind a closed queue,
+// newer interests ready, insight off, and the scheduler's every state.
+func rebuildSamples(at time.Time) []any {
+	states := sampleStates(at)
+	out := make([]any, 0, 5+len(states))
+	out = append(out, Rebuild{Err: &PanelError{Message: evilScript, RequestID: evilAttr}},
+		Rebuild{Enabled: true, Running: true, StartedAt: at}, Rebuild{Enabled: true, Queued: true, Hold: evilScript},
+		Rebuild{Enabled: true, Ready: true}, Rebuild{State: InterestsState{State: "off"}})
+	for _, s := range states {
+		out = append(out, Rebuild{Enabled: true, State: s})
+	}
+	return out
+}
+
+// statesOf are states as samples.
+func statesOf(states []InterestsState) []any {
+	out := make([]any, 0, len(states))
+	for _, s := range states {
+		out = append(out, s)
+	}
+	return out
+}
+
+// eventsOf are events as samples.
+func eventsOf(events []InterestEvent) []any {
+	out := make([]any, 0, len(events))
+	for _, e := range events {
+		out = append(out, e)
+	}
+	return out
 }
 
 // evilSearchHref is a page of the search for a hostile query and type.
@@ -564,7 +827,7 @@ func TestEveryTemplateRenders(t *testing.T) {
 func pageTemplate(page, name string) bool {
 	switch name {
 	case "layout", "head", "header-search", "content", "document-page", "document-actions", "interests-page",
-		"area-page", "interest-page", "failures-page", "failures-live", "layout.html", page + ".html":
+		"area-page", "interest-page", "lineage-note", "failures-page", "failures-live", "layout.html", page + ".html":
 		return true
 	}
 	return false
@@ -663,7 +926,7 @@ func TestPages_Navigation(t *testing.T) {
 			assert.Equal(t, []string{"/ui/status"}, current, page)
 		case PageLibrary, PageFailures, PageDocument:
 			assert.Equal(t, []string{"/ui/library"}, current, page)
-		case PageInterests, PageInterest:
+		case PageInterests, PageInterest, PageUnsorted, PageChanges, PageRetired:
 			assert.Equal(t, []string{"/ui/interests"}, current, page)
 		default:
 			assert.Empty(t, current, page)

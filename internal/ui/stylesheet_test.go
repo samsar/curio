@@ -141,13 +141,17 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "hidden", declarations(ruleFor(t, rules, "", "table.data td").body)["overflow"],
 		"a cell's content stays in its column")
 	for col, width := range map[string]string{"col.c-state": "7rem", "col.c-type": "6.5rem", "col.c-when": "7.5rem",
-		"col.c-sim": "9.5rem", "col.c-rank": "3.5rem"} {
+		"col.c-sim": "9.5rem", "col.c-rank": "3.5rem", "col.c-nearest": "16rem"} {
 		assert.Equal(t, width, declarations(ruleFor(t, rules, "", col).body)["width"], col)
 	}
 	const phone = "@media (max-width: 48rem)"
-	for _, folded := range []string{"col.c-type", "col.c-when", "th.c-type", "td.c-type", "th.c-when", "td.c-when"} {
+	for _, folded := range []string{"col.c-type", "col.c-when", "th.c-type", "td.c-type", "th.c-when", "td.c-when",
+		"col.c-nearest", "th.c-nearest", "td.c-nearest"} {
 		assert.Equal(t, "none", declarations(ruleFor(t, rules, phone, folded).body)["display"], folded)
 	}
+	// Unsorted's nearest interest folds under the document's name, as the
+	// Library's type and time do.
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".nearest-sub").body)["display"])
 	assert.Equal(t, "5.75rem", declarations(ruleFor(t, rules, phone, "col.c-state").body)["width"])
 	assert.Equal(t, "inline", declarations(ruleFor(t, rules, phone, ".doc-sub .narrow").body)["display"])
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, phone, ".doc-sub .wide").body)["display"],
@@ -187,6 +191,35 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "ellipsis", explore["text-overflow"], "an interest's name never widens the page")
 	assert.Equal(t, "hidden", explore["overflow"])
 	assert.NotEmpty(t, explore["max-width"])
+	// A label is a model's, of any length: on one line, cut, wherever a
+	// line names one: the crumbs, an area card's interests, Unsorted's
+	// nearest interest and every other identity a line links (.ref), the
+	// document page's line, and a rebuild's error in the Interests' head.
+	for _, selector := range []string{".truncate", ".interest .members a", ".ref", ".state-error"} {
+		cut := declarations(ruleFor(t, rules, "", selector).body)
+		assert.Equal(t, "nowrap", cut["white-space"], selector)
+		assert.Equal(t, "hidden", cut["overflow"], selector)
+		assert.Equal(t, "ellipsis", cut["text-overflow"], selector)
+	}
+	assert.Equal(t, "min(28rem, 100%)", declarations(ruleFor(t, rules, "", ".ref").body)["max-width"])
+	assert.Equal(t, "100%", declarations(ruleFor(t, rules, "", ".state-error").body)["max-width"])
+	// A cut name is an atomic inline: in a line of text that doesn't fit,
+	// the line drops it whole, so the lines that hold names lay them out
+	// as flex items, which shrink, and are cut, instead.
+	where := declarations(ruleFor(t, rules, "", ".doc-place .where").body)
+	assert.Equal(t, map[string]string{"display": "flex", "flex-wrap": "wrap", "min-width": "0"},
+		map[string]string{"display": where["display"], "flex-wrap": where["flex-wrap"], "min-width": where["min-width"]})
+	assert.Equal(t, "flex", declarations(ruleFor(t, rules, phone, ".nearest-sub").body)["display"])
+	assert.Equal(t, "0", declarations(ruleFor(t, rules, "", ".nearest-sub").body)["min-width"])
+	assert.Equal(t, "minmax(0, 1fr) 3rem 2.5rem",
+		declarations(ruleFor(t, rules, "", ".interest .children > li").body)["grid-template-columns"],
+		"an area card's interest: its name gives way to its bar and size")
+	// The Interests' head and its rebuild line never grow past the screen.
+	for _, selector := range []string{".page-head .actions", ".rebuild-state"} {
+		box := declarations(ruleFor(t, rules, "", selector).body)
+		assert.Equal(t, "0", box["min-width"], selector)
+		assert.Equal(t, "100%", box["max-width"], selector)
+	}
 	// A failure group's host tag never grows past its card: the host gives
 	// way, cut with an ellipsis, and its count stays.
 	assert.Equal(t, "100%", declarations(ruleFor(t, rules, "", ".hosts .tag").body)["max-width"])

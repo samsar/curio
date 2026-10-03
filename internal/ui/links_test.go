@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"math"
 	"net/url"
 	"strconv"
 	"testing"
@@ -259,6 +260,25 @@ func TestPageHrefs(t *testing.T) {
 		assert.Equal(t, url.Values{PageParam: {"3"}, "run": {run}}, u.Query(), "the run round-trips")
 		assert.Equal(t, run, ShownRun(u.Query()))
 	}
+
+	assert.Equal(t, "/ui/interests/unsorted", unsortedHref(1, ""))
+	assert.Equal(t, "/ui/interests/unsorted?run=r", unsortedHref(1, "r"))
+	assert.Equal(t, "/ui/interests/unsorted?page=2&run=r", unsortedHref(2, "r"))
+	assert.Equal(t, "/ui/interests/unsorted?page=2", unsortedHref(2, ""))
+	assert.Equal(t, "/ui/interests/unsorted", unsortedHref(-3, ""), "a page before the first is the first")
+	for _, run := range []string{"a&page=9&run=b #1", `"><script>`, "100%/x?", "../changes"} {
+		for _, page := range []int{1, 3, math.MaxInt} {
+			u := parseHref(t, unsortedHref(page, run))
+			assert.Equal(t, "/ui/interests/unsorted", u.Path, "the path is fixed")
+			want := url.Values{"run": {run}}
+			if page > 1 {
+				want.Set(PageParam, strconv.Itoa(page))
+			}
+			assert.Equal(t, want, u.Query(), "the run and page round-trip: %q, %d", run, page)
+			assert.Equal(t, run, ShownRun(u.Query()))
+		}
+	}
+	assert.Equal(t, "/ui/interests/changes", changesHref())
 
 	assert.Equal(t, "/ui/interests/i1", interestPageHref("i1", 1))
 	assert.Equal(t, "/ui/interests/i1?page=2", interestPageHref("i1", 2))

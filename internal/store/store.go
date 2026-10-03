@@ -1418,6 +1418,21 @@ type Placement struct {
 	PlacedAt   time.Time
 }
 
+// DocumentPlace is where one document sits in a run's grouping: the run's
+// assignment of it, or, when the run didn't assign it, the placement made
+// since (Placed). Fit is the assignment's fit, empty for a placement.
+// Interest is its interest, "" for Unsorted, and Area that interest's area,
+// "" for none; Nearest is an unsorted assignment's nearest interest, ""
+// when there is none. Each label is "" while unlabeled.
+type DocumentPlace struct {
+	Placed                    bool
+	Fit                       InterestFit
+	InterestID, InterestLabel string
+	AreaID, AreaLabel         string
+	NearestID, NearestLabel   string
+	Similarity                float64
+}
+
 // RunChanges are the documents that changed since a run R read its
 // vectors (InsightStore.Changes): what the next rebuild would see
 // differently. A document R couldn't group (it had no chunk, or a vector
@@ -1626,6 +1641,11 @@ type InsightStore interface {
 	PlacementCounts(ctx context.Context, runID string) (map[string]int, error)
 	// Assigned reports whether run assigned the document.
 	Assigned(ctx context.Context, runID, documentID string) (bool, error)
+	// DocumentPlace returns where run put the document: its assignment,
+	// or, when the run didn't assign it, its placement since, each with
+	// its interest's area and the labels, in one read. ErrNotFound when
+	// the run has neither, or there is no such run.
+	DocumentPlace(ctx context.Context, runID, documentID string) (*DocumentPlace, error)
 	// PlaceDocument writes p, placing a document into its run, or places
 	// it anew, only while p.RunID is the tenant's latest done run, the run
 	// didn't assign the document, and the document exists; written

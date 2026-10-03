@@ -113,6 +113,8 @@ func (h pageHandlers) routes(r chi.Router) {
 		r.Get("/failures", h.failures)
 		r.Get("/documents/{id}", h.document)
 		r.Get("/interests", h.interests)
+		r.Get("/interests/unsorted", h.unsorted)
+		r.Get("/interests/changes", h.changes)
 		r.Get("/interests/{id}", h.interest)
 		r.Get("/static/{file}", h.asset)
 	})

@@ -264,7 +264,7 @@ func TestListInterests(t *testing.T) {
 	resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests"})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.JSONEq(t, `{"num_documents":0,"num_areas":0,"num_interests":0,"num_loose":0,"num_unsorted":0,
-		"num_new":0,"total":0,"next":{"state":"none","rebuild_at":20},"items":[]}`, resp.body,
+		"num_new":0,"num_new_unsorted":0,"total":0,"next":{"state":"none","rebuild_at":20},"items":[]}`, resp.body,
 		"no rebuild yet: an empty list, not an error")
 
 	a := s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
@@ -442,6 +442,7 @@ func TestGetInterest(t *testing.T) {
 
 	list := getAs[InterestListResponse](t, s, "/v1/interests")
 	assert.Equal(t, 1, list.NumNew, "the documents placed since the rebuild")
+	assert.Zero(t, list.NumNewUnsorted, "placed into an interest")
 
 	var area InterestResponse
 	s.getJSON(t, "/v1/interests/"+e.a1, &area)
@@ -561,6 +562,9 @@ func TestUnsorted(t *testing.T) {
 	assert.Empty(t, got.Items[2].NearestID)
 	require.Len(t, got.New, 1)
 	assert.Equal(t, d[5].ID, got.New[0].DocID)
+	list := getAs[InterestListResponse](t, s, "/v1/interests")
+	assert.Equal(t, 1, list.NumNew)
+	assert.Equal(t, 1, list.NumNewUnsorted, "the list counts what was placed into Unsorted, for its card")
 
 	got = getAs[UnsortedPage](t, s, "/v1/interests/unsorted?limit=1&offset=1")
 	require.Len(t, got.Items, 1)
