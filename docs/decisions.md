@@ -71,7 +71,7 @@ when the entry was first committed.
 - 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
 - 2026-07-06 — [M6 (planned): RAG / Q&A synthesis + SOTA natural-language search](#m6-planned-rag--qa-synthesis--sota-natural-language-search)
 - 2026-07-06 — [nomic-embed-text task prefixes (`search_document:` / `search_query:`)](#nomic-embed-text-task-prefixes-search_document--search_query) (revised)
-- 2026-07-06 — [Insight clustering quality: the "general-reading" mega-cluster (known limitation)](#insight-clustering-quality-the-general-reading-mega-cluster-known-limitation)
+- 2026-07-06 — [Insight clustering quality: the "general-reading" mega-cluster (known limitation)](#insight-clustering-quality-the-general-reading-mega-cluster-known-limitation) (revised)
 - 2026-09-09 — [Host-cache hits are permanent failures](#host-cache-hits-are-permanent-failures) (revised)
 - 2026-09-24 — [Local API: loopback only, no token, browsers shut out](#local-api-loopback-only-no-token-browsers-shut-out) (revised)
 - 2026-09-24 — [Single daemon per home: flock on daemon.pid, bind before touching the DB](#single-daemon-per-home-flock-on-daemonpid-bind-before-touching-the-db) (revised)
@@ -88,7 +88,7 @@ when the entry was first committed.
 - 2026-09-24 — [URL normalization: fetch-equivalent and idempotent](#url-normalization-fetch-equivalent-and-idempotent)
 - 2026-09-24 — [Subprocess fetchers: kill the process group, cap the output](#subprocess-fetchers-kill-the-process-group-cap-the-output)
 - 2026-09-24 — [Chrome profiles carry their own User-Agent and sec-ch-ua](#chrome-profiles-carry-their-own-user-agent-and-sec-ch-ua) (revised)
-- 2026-09-24 — [Store boundary: consumers see interfaces, depguard enforces it](#store-boundary-consumers-see-interfaces-depguard-enforces-it)
+- 2026-09-24 — [Store boundary: consumers see interfaces, depguard enforces it](#store-boundary-consumers-see-interfaces-depguard-enforces-it) (revised)
 - 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert)
 - 2026-09-24 — [Bookmark ingest: one transaction, fetch only for new documents](#bookmark-ingest-one-transaction-fetch-only-for-new-documents)
 - 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down) (revised)
@@ -152,10 +152,11 @@ when the entry was first committed.
 - 2026-09-30 — [Waiting is not failing: jobs curio didn't send are deferred](#waiting-is-not-failing-jobs-curio-didnt-send-are-deferred) (revised)
 - 2026-09-30 — [A site's block is not its pages' verdict](#a-sites-block-is-not-its-pages-verdict)
 - 2026-09-30 — [Embedding drift: verified by re-embedding a sample](#embedding-drift-verified-by-re-embedding-a-sample) (revised)
-- 2026-10-02 — [Interests: corrections that teach the grouping (deferred)](#interests-corrections-that-teach-the-grouping-deferred)
+- 2026-10-02 — [Interests: corrections that teach the grouping (deferred)](#interests-corrections-that-teach-the-grouping-deferred) (revised)
 - 2026-10-02 — [Soft-404 titles: whole templates, not phrases](#soft-404-titles-whole-templates-not-phrases)
 - 2026-10-03 — [Louvain: ours, warm-started; gonum as a test oracle](#louvain-ours-warm-started-gonum-as-a-test-oracle) (revised)
 - 2026-10-03 — [Interests: two levels, stable identities, automatic rebuilds](#interests-two-levels-stable-identities-automatic-rebuilds)
+- 2026-10-03 — [Dashboard: two-level interests](#dashboard-two-level-interests)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -2278,6 +2279,18 @@ CLI / MCP. Note that the prefix fix is worthwhile regardless of clustering — i
 corrects genuinely wrong embedding usage and improves *search* quality (the
 primary use case).
 
+**Revised (2026-10-03):** by the interests rework the problem had become
+fragmentation, not one blob. On a copy of the owner's library embedded
+with qwen3-embedding (5,254 documents), `KNNGraphClusterer` at k 10, 0.5
+and minimum 3 made 325 interests, a third of them (34.5%) with 4 members
+or fewer, and left 30% of the documents in none. Two levels resolved it:
+30 areas holding 187 interests, 92% of the documents in an interest and
+8% unsorted (402, besides 3 loose fits). Both sides come from `make
+cluster-report` on one copy, the old clusterer as its baseline reproducing
+the stored run's 325 interests and 70.2% coverage (see "Interests: two
+levels, stable identities, automatic rebuilds", "Acceptance on a copy of
+the owner's library (PR 5)").
+
 ---
 
 ## Host-cache hits are permanent failures
@@ -3246,6 +3259,13 @@ violation; the lint rules do.
 consumer (search, insight, jobs, api) already takes `store.*` interfaces,
 and a hosted implementation has to provide these methods to serve the API
 anyway.
+
+**Revised (2026-10-03):** `cmd/clusterreport` imports
+`internal/store/sqlite` outside tests too, through its own exception in
+`store-boundary` (`!**/cmd/clusterreport/**`): a developer's report that
+migrates and reads a copy of a home's database, which `make build` and
+goreleaser never build (see "Interests: two levels, stable identities,
+automatic rebuilds", "The cluster report (PR 5)").
 
 ---
 
@@ -9557,6 +9577,27 @@ rework are in the cluster-quality report of 2026-10-01: 325 interests for
 5,254 documents, a third with 4 or fewer members, 30% of documents in
 none.
 
+**Revised (2026-10-03):** the interests rework is in, and with it what
+corrections need first, short of the corrections themselves (see
+"Interests: two levels, stable identities, automatic rebuilds"):
+
+- **In place:** identities that outlive runs (`interests`), carried over
+  by the 70% rule, with `interest_lineage` saying what became of each; a
+  retired identity kept 180 days with its successors, so a correction
+  naming one can find where its documents went; `label_source` accepting
+  `'user'`, with no writer yet, so renames need no table rebuild; and the
+  engine's steps in an order with room for the hooks: corrections that
+  hold and neighbours that follow (1 and 2 above) after the grouping and
+  before carry-over, and in `Placer` for the documents placed between
+  rebuilds, and groups that take corrections in (3) as a constraint on
+  `GroupInput`. The measurement is on main: `make cluster-report`
+  (`cmd/clusterreport`) runs the production pieces on a copy of a library
+  and reports names kept by warm rebuilds and along the chain, which a
+  replay of corrections would be measured against.
+- **Still missing:** the corrections table, the change path (`/v1`
+  endpoints, `actions.js` controls, the CLI and MCP) and the hooks
+  themselves.
+
 ---
 
 ## Soft-404 titles: whole templates, not phrases
@@ -9987,6 +10028,19 @@ cuts, under the 50 ms budget for Louvain); the merge and strays 69 ms.
 carry-over in that order, warm from the previous run's seeds when its
 grouper and params match, with the split check by absorbed changes (see
 "Interests: two levels, stable identities, automatic rebuilds").
+
+**Revised (2026-10-03):** fresh-rebuild stability, re-measured with ours,
+as Q1 promised: on the owner's copy, with the research's draws, `make
+cluster-report` finds that a fresh rebuild of the whole library after 5%
+added keeps 73.8% of interest names and 82.4% of area names (worst 70.7%
+· 79.3%), against gonum's 75.9% · 85.6% (worst 73.8% · 83.9%) in the
+research: ours is about as stable fresh as gonum's (the number is (d)'s
+above). A warm rebuild of the same draws keeps 96.2% · 97.8%. So a fresh
+rebuild, which follows `curio reindex --all`, a change of the grouper's
+params or `curio interests rebuild --fresh`, renames about a quarter of
+the interests, and the warm start is what keeps names (see "Interests:
+two levels, stable identities, automatic rebuilds", "Acceptance on a copy
+of the owner's library (PR 5)").
 
 ---
 
@@ -10639,6 +10693,188 @@ simulations run in parallel), `internal/jobs` 6.8 s and 7.4 s,
 `internal/store/sqlite` 7.7 s and 8.8 s, `internal/api` 14.8 s and 16.2 s,
 `cmd/curio-daemon` 6.4 s and 6.5 s, `internal/cli` 12.2 s and 13.2 s.
 
+### The cluster report (PR 5)
+
+**`make cluster-report DB=<copy> [JSON=<file>] [DRAWS=n] [SEED=n]`** runs
+`cmd/clusterreport` with `go run`: a developer's report on the grouping,
+on a `.backup` copy of a home's database. It opens the copy through the
+SQLite store and migrates it, its only write (a 2.4 home's copy is at
+schema 15). Before opening anything it refuses a database whose directory
+holds `daemon.pid`, naming the `sqlite3 -readonly <db> ".backup <copy>"`
+to take, and a path that doesn't exist, which opening would create. It
+reads the local tenant's `DocumentVectors`, drops non-finite vectors as
+the engine does, and needs `insight.FirstRebuildAt` (20) left.
+
+**The production pieces, in the engine's order.** `regroup` is
+`PreparePoints` (centered, the daemon's default) → `Group` →
+`MergeNearDuplicates` → `Centroids` → `AssignStrays`, with the inputs the
+engine passes: a first grouping starts from `ShapeFlat` without a prior, a
+fresh rebuild from the previous grouping's shape without its seeds, a warm
+rebuild from its shape and seeds. Names kept are `insight.Carry`'s, its
+input built as `previous.oldGroups` and `grouped.carry` build it (areas
+matched over area membership, interests over their members, a new
+interest's parent its area), as `Counts.Kept` over the old groups, and
+n/a for a level with none. Rather than refactor the engine to share the
+composition, `TestReport_MatchesTheEngine` holds the tool to
+`Engine.Rebuild`: on a seeded synthetic library of 1,100 documents in
+areas, plus one NaN vector, in a test database, the engine's fresh run of
+a draw's 95% is identical to the tool's fresh grouping through the
+stored-run comparison (the same documents, ARI 1 at both levels, every fit
+the same), and once the last 5% arrive the engine's warm run keeps the
+interests and areas the tool's warm rebuild of that draw says (23 of 25
+interests, 7 of 7 areas). With the merge left out of `regroup` it fails.
+It takes 0.9 s under -race, the package 2.3 s.
+
+**The draws** are the research's, so its numbers, PR 1's and these compare.
+Draw d of a 5% change is a permutation seeded 5001+d (added: its first
+round(5% of n) documents are held out of the previous library) or 5008+d
+(mixed: of half = round(2.5% of n), the first half are held out of the
+previous library and the next half removed from the new one). The chain's
+is seeded 8080+1010·d: 8 steps of round(5% of n) documents from 60% to
+100%, a first grouping at step 0 and a warm rebuild from the step before
+at each other, with the split check at steps 4 and 8, each step set
+against a first grouping of the same library. `-seed` adds to every seed.
+
+**What it reports**, as text and in the `-json` file (snake_case keys, null
+where nothing applies, written atomically at mode 0600 once every
+measurement has succeeded): the fresh grouping's shape and, per level,
+groups, coverage, sizes, cohesion (`quality.CohesionOf` over the
+grouping's own prepared vectors) and silhouette; interests before and
+after the merge, loose fits, unsorted, and near-duplicate interest pairs
+(at 0.85 within an area and anywhere, at the research's lenient 0.74
+anywhere); the baseline; names kept by a warm rebuild after 5% added and
+after a mixed 5%, and by a fresh rebuild after 5% added, per draw, mean
+and minimum; the chain's steps and summary (each draw's end against
+fresh, the gap furthest from 0, names kept at the split-check steps and
+at the others); and, when the copy holds a done run, that run: its row,
+label sources, the label table, exact (`insight.LabelKey`) and near
+(`quality.DuplicateLabels`) label pairs in each scope and among all
+interests, and its agreement with the fresh grouping. SIGINT or SIGTERM
+cancels every read and grouping, and the run then writes no JSON.
+
+**Labels come from a stored run.** The engine's sibling-aware labeling is
+unexported, reads titles through the document store and needs a model, so
+the tool labels none of its groupings. It reads a run the daemon built
+instead: a throwaway daemon's first rebuild of the same documents, which
+it checks is its own fresh grouping.
+
+**Not shipped** (Q9): `curio eval --clusters` would need an endpoint that
+hands every vector to the CLI, for a measurement only a developer runs.
+So the tool lives in `cmd/clusterreport` with its own exception in
+depguard's `store-boundary` rule (`!**/cmd/clusterreport/**`: it opens the
+SQLite store itself), and its non-test imports are the standard library,
+`internal/insight`, `internal/insight/quality`, `internal/store` and
+`internal/store/sqlite`; `go list -deps` names no gonum package. `make
+build` names the three commands it builds, where `./cmd/...` would have
+made the tool a fourth binary in `./bin`, and `.goreleaser.yaml` is
+unchanged: its builds, archives and formula list curio, curio-daemon and
+curio-mcp. `KNNGraphClusterer` stays one release as the report's baseline
+(k 10, 0.5, minimum 3, its clusters as the old engine stored them, no
+merge and no strays), then goes with that section.
+
+### Acceptance on a copy of the owner's library (PR 5)
+
+A fresh `.backup` of the copy the research and PR 1 measured (taken on
+2026-10-01 after run `e6020c71`: schema 15, 5,254 fetched documents),
+read with `sqlite3 'file:…?immutable=1'`; an Apple M4 Max (12
+performance and 4 efficiency cores, 64 GB); never `~/.curio`, port 8765
+or a checkout's `./bin`. `make cluster-report` on it took 1 min 46 s of
+wall time (1,414 s of CPU, 8 s of it the vector read and 69 s the chain's
+51 groupings) at a peak RSS of 317 MB, and reproduced PR 1's in-process
+measurement number for number. Names kept are interests · areas, the mean
+of 3 draws with the worst in brackets.
+
+- **Fresh:** the areas shape, 30 areas and 187 interests (190 before the
+  merge; PR 2's ranges are 29 ± 3 and 188 ± 10), 92.3% of the documents
+  in an interest, 3 loose fits, 402 unsorted; interest cohesion 0.6414
+  and silhouette 0.094, area cohesion 0.501. No near-duplicate pair at
+  0.85, within an area or anywhere; 10 at 0.74.
+- **Baseline** (`KNNGraphClusterer` at 10, 0.5, 3): 325 interests, 70.2%
+  of the documents in one, 34.5% of the interests with 4 members or fewer,
+  cohesion 0.776 and silhouette 0.163: the stored run `e6020c71` again.
+- **Warm rebuild:** after 5% added, 96.2% · 97.8% (95.4% · 96.6%); after
+  a mixed 5%, 94.3% · 95.6% (93.1% · 93.3%). The design's bar, 90% at
+  both levels, holds.
+- **Fresh rebuild after 5% added:** 73.8% · 82.4% (70.7% · 79.3%),
+  against gonum's 75.9% · 85.6% in the research (see the Revised note on
+  "Louvain: ours, warm-started; gonum as a test oracle").
+- **Chain, 60% to 100%:** it ends at 186, 185 and 180 interests (mean
+  183.7, 1.8% fewer) and 33, 31 and 29 areas, against 187 and 30 fresh,
+  with cohesion 0.6501, 0.6508 and 0.6495 (mean 0.6501) against 0.6414:
+  every draw within the design's 0.03 (+0.0087 on the mean). The gap
+  furthest from 0 at any step is −0.0246 (the first draw at 75%, the step
+  before a split check): warm steps drift below fresh between split
+  checks, and each check brings cohesion back above it.
+- **Names kept along the chain:** at the split-check steps 80.3% · 92.1%
+  (75.0% · 87.0%), against the research's 84% · 92% (worst 80%); at the
+  other steps 96.1% · 97.2% (91.0% · 92.3%). Our split check renames a
+  few more interests than the research's measured; a split rebuild stays
+  visible, as the design's risks say, and the bar it set, the chain's
+  cohesion, holds.
+
+**A fresh rebuild with gemma4:26b**, the owner's writing model, through a
+throwaway daemon: binaries from `make build BIN_DIR=<scratch>`, a scratch
+`CURIO_HOME` holding another backup of the copy with its 20 pending fetch
+jobs failed first (nothing was fetched), the marker of PR 4's scratch
+home, a config with a free loopback port, both Ollama URLs on the local
+Ollama, `generation.model: gemma4:26b`, auto-pull off for both models,
+`insight.labeling: llm` and `labeling_timeout_seconds: 600`. The start
+applied 016 (2 ms) and 017 (35 ms), the scheduler queued the first
+rebuild 1 s later, once the drift monitor's first check was in, and the
+log has one "interests rebuilt" line: trigger first, fresh, areas, 30
+areas and 187 interests, 3 loose, 402 unsorted; read_ms 10,040,
+group_ms 2,020, label_ms 138,047, labels_llm 217, labels_terms 0,
+persist_ms 45. Nothing fell back to term labels, and no model was pulled.
+The labels took 138 s against the design's estimate of 118 s, 0.64 s a
+name against 0.55 s: the sibling-aware prompts are longer. `curio
+interests` printed 30 areas and 187 interests, and `curio doctor`'s
+interests check passed. The report on a backup of that home found the
+run identical to its own fresh grouping (ARI 1 at both levels, all 5,254
+fits the same) and gave the copy's fresh, warm and chain numbers again.
+
+**The labels.** No exact duplicate (`LabelKey`) among an area's
+interests, among the areas, or among all 187 interests. Three near pairs
+within a scope (token overlap of half or more): "Distributed Systems and
+Algorithms" and "Distributed System Design" in one area, "Game Engine
+Development" and "Puzzle Game Development" in another, and the areas
+"Digital Platform Economy" and "Digital Influencers and Platforms"; three
+more across areas. Every label has 2 to 6 words in title case, none reads
+as a preamble, a quote or a cut. Most area names cover their interests
+("AWS Serverless Ecosystem", "Investment Theory and Psychology"). Areas
+that join unrelated topics are named by gluing two of them ("Career and
+Consumer Affairs" holds consumer rights and credit counselling) or by
+one ("Retail Design and Commerce" holds outdoor lighting, irrigation and
+watch buying guides; "Financial Technology and Markets" a "Wiki and
+Information Systems"). A few interests got catch-all names ("Miscellaneous
+Search Queries", "Unrelated Web Content"). An area of one interest
+repeats that interest's name ("Andreessen Horowitz Partners"), so the
+outline prints it twice; they are in different scopes, which the
+uniqueness rule allows. An area named "Deleted Content" (11 documents) is
+this copy's: it predates the refetch of the 17 stored tombstones on
+2026-10-02. The full label table stays outside the repo: it is the
+owner's reading.
+
+**Going back to 2.4.** 2.4.x runs goose v3.28.0, which ignores database
+versions it doesn't know, so a 2.4 daemon starts on a schema-17 database
+and its interests then fail on the tables 016 dropped. The down
+migrations are right: run through curio's own driver, which loads
+sqlite-vec, `DownTo(15)` on a migrated copy took 54 ms and left
+`sqlite_master` (type, name, tbl_name, sql) identical to the original
+copy's. goose's CLI can't run them on a real library, though: 017's down
+drops `documents.indexed_at`, SQLite checks the whole schema after `ALTER
+TABLE … DROP COLUMN`, triggers included, and the chunk index's triggers
+need the vec0 module, which the CLI's SQLite lacks ("error in trigger
+trg_chunks_delete: no such module: vec0"). PR 2's `goose down` from 16
+worked because 016's down only drops and creates tables. So the release
+note's way back is a backup taken before the upgrade.
+
+**Test times** under -race on an M4 Max, each package alone, before and
+after: `internal/insight/quality` 1.3 s and 1.4 s
+(`TestCohesion_MatchesTheEngine` now checks against `Centroids` and
+`AssignStrays`), `internal/api` 15.9 s and 16.4 s (one assertion more,
+no server), and `cmd/clusterreport`, new, 2.3 s. `make test`'s race-free
+pass is unchanged.
+
 ---
 
 ## Dashboard: two-level interests
@@ -10870,7 +11106,6 @@ Choices still open. Those settled since this list was started are at its
 end, pointing to the entries that decided them.
 
 - **Insight layer specifics:** trajectory analysis ("new this month"),
-  cross-cluster interest merging, and a standalone `interests` table,
   deferred until there's real usage data.
 - **Authentication for hosted mode:** the scheme (API keys vs OAuth vs SSO)
   is deferred. Nothing is stubbed in the local daemon, which trusts every
@@ -10938,3 +11173,7 @@ Resolved since they were listed here:
   documents go to state `dead`).
 - The eval harness the natural-language search options need: "Retrieval
   eval harness" (`curio eval --queries <qrels.yaml>`).
+- A standalone `interests` table and the merging of near-duplicate
+  interests: "Interests: two levels, stable identities, automatic
+  rebuilds" (identities that outlive runs, and `MergeNearDuplicates`
+  within each area).

@@ -179,13 +179,17 @@ topic clusters that feel like an accurate picture of what the user reads.
   until Ollama serves them (`ollama.Client.KeepPulled`).
 - `curio eval` (`internal/eval`) scores recall@k, precision@k, NDCG@k and
   MRR over a labeled query set.
-- Deferred: trajectory analysis ("new this month"), a standalone
-  interests table with cross-cluster merging, and `/v1/suggestions` (M5).
+- Deferred: trajectory analysis ("new this month") and `/v1/suggestions`
+  (M5). A standalone interests table and the merging of near-duplicate
+  interests came with the rework (below).
 - Known limitations: one large "general-reading" cluster takes about 60%
   of a real corpus next to good niche interests. It comes from mean-pooled
   document vectors, not a tunable knob (decisions.md "Insight clustering
   quality"). Label quality is bounded by the local generation model
-  (`qwen3:4b-instruct` by default, `generation.model`).
+  (`qwen3:4b-instruct` by default, `generation.model`). By the interests
+  rework the mega-cluster had become fragmentation (325 interests, 30% of
+  the documents in none), which two levels resolved (see that entry's
+  Revised note).
 - Since revised: the interests rework replaced the clusterer with a
   two-level grouping (areas holding interests) whose identities last
   across rebuilds, and the clusterer's knobs (`insight.knn`,
@@ -199,7 +203,12 @@ topic clusters that feel like an accurate picture of what the user reads.
   two-level pages (areas, interests with their lineage and new documents,
   Unsorted, what a rebuild changed, a retired ID's page, a document's
   place, the rebuilds' state on Interests and Status; decisions.md
-  "Dashboard: two-level interests"). The release's measurement is next.
+  "Dashboard: two-level interests"). Measured on a copy of the owner's
+  library with `make cluster-report` (`cmd/clusterreport`, a developer's
+  tool on the production pieces): 30 areas holding 187 interests, 92% of
+  the documents in an interest, and a warm rebuild after 5% added keeping
+  96% of interest names and 98% of area names (decisions.md, the rework
+  entry's "Acceptance on a copy of the owner's library (PR 5)").
 
 ## M5 — Suggestions and the digest
 
@@ -279,12 +288,14 @@ eval harness shows measurably better retrieval than the v1 baseline.
   highlighted this thing → strong interest")
 - Interest corrections: move a document to another interest, mark it as
   not belonging, rename an interest, and have later rebuilds keep the
-  corrections and learn from them. This comes after the clustering rework,
-  which gives interests IDs that survive a rebuild (decisions.md
-  "Interests: corrections that teach the grouping (deferred)").
-- Insight clustering quality: split the ~60% "general-reading" mega-cluster
-  (recursive split of oversized clusters → Leiden → better doc representation).
-  See `docs/decisions.md` → "Insight clustering quality" for the diagnosis.
+  corrections and learn from them. Not built yet; its prerequisites are
+  in place since the clustering rework: IDs that survive a rebuild, their
+  lineage, a `user` label source, and `make cluster-report` to measure
+  what corrections cost (decisions.md "Interests: corrections that teach
+  the grouping (deferred)").
+- Insight clustering quality, the ~60% "general-reading" mega-cluster:
+  done by the interests rework, two levels of areas holding interests (see
+  M4's status and `docs/decisions.md` → "Insight clustering quality").
 - Embedding model swap in place: today a home's embedding model and width
   are fixed when it is created, and another model means a new home (`curio
   up --fresh`) and a re-import (see `docs/decisions.md` → "Embedding model

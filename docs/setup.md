@@ -570,14 +570,15 @@ started the daemon, prints one line to stderr saying so and waits;
 and how many migrations are applied, and every other request gets 503
 until the daemon is ready. `curio daemon status` shows the same progress.
 
-The upgrade that brings interests in two levels (areas holding interests,
-with IDs that last across rebuilds) drops the interests curio had found:
-their IDs lasted one rebuild and can't seed the new grouping. The daemon
-queues the first grouping as soon as it has started, and until it is done
-the Interests page, `curio interests` and the MCP tool say the library is
-being grouped for the first time. It takes a couple of minutes on a
-library of a few thousand pages, mostly the writing model naming the
-groups; links to an interest from before the upgrade answer "not found".
+The upgrade from curio 2.4 or earlier, which brings interests in two
+levels (areas holding interests, with IDs that last across rebuilds), drops
+the interests curio had found: their IDs lasted one rebuild and can't seed
+the new grouping. The daemon queues the first grouping as soon as it has
+started, and until it is done the Interests page, `curio interests` and
+the MCP tool say the library is being grouped for the first time. It takes
+a couple of minutes on a library of a few thousand pages, mostly the
+writing model naming the groups; links to an interest from before the
+upgrade answer "not found".
 See "Interests" below.
 
 After you rebuild or upgrade curio, the daemon already running is still
@@ -676,11 +677,12 @@ the same job. `curio interests rebuild --fresh` groups the library from
 scratch rather than from the current grouping, for recovery or to compare;
 the interests that survive keep their names.
 
-The first grouping after an upgrade to this version runs on its own: the
-upgrade drops the old interests, and the daemon queues the first rebuild
-at once on a library that isn't importing. On the author's library of
-about 5,300 documents it reads the vectors in about 10 s and groups them
-in 2 s; labels with gemma4:26b take about 2 minutes more. Until it is done
+The first grouping after an upgrade from curio 2.4 or earlier runs on its
+own: the upgrade drops the old interests, and the daemon queues the first
+rebuild at once on a library that isn't importing. On the author's library
+of 5,254 documents it read the vectors in 10 s and grouped them in 2 s;
+naming the 217 areas and interests with gemma4:26b took 2 minutes 18 s
+more (the default qwen3:4b-instruct wasn't measured). Until it is done
 the Interests page says the library is being grouped for the first time.
 
 `curio status` says where rebuilds stand in one line, and `curio doctor`
