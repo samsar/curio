@@ -2024,6 +2024,17 @@ func finishedAgo(t *testing.T, srv *apitest.Server, run string, ago time.Duratio
 	require.NoError(t, err)
 }
 
+// placedAgo dates doc's placement into run ago before now. The store
+// stamps a placement with the millisecond of its write, so placements a
+// test makes in a loop tie, and their order is the index's, not the
+// newest first a test means.
+func placedAgo(t *testing.T, srv *apitest.Server, run string, doc *store.Document, ago time.Duration) {
+	t.Helper()
+	_, err := srv.DB.Exec(`UPDATE interest_placements SET placed_at = ? WHERE run_id = ? AND document_id = ?`,
+		time.Now().Add(-ago).UTC().Format("2006-01-02T15:04:05.000Z"), run, doc.ID)
+	require.NoError(t, err)
+}
+
 // TestUI_InterestsCoverage: the coverage bar draws the members, the loose
 // fits, the documents placed since and, left to the track, the unsorted,
 // as shares of the run's documents and those placed since; the legend
@@ -2169,13 +2180,22 @@ func TestUI_InterestLineage(t *testing.T) {
 		`href="/ui/interests/`+moved.Interests[0]+`" title="Kafka">Kafka</a> <span class="tag">retired</span></li>`)
 
 	run := srv.AddInterests(t, apitest.Interest{Label: "Placed into", Members: d[7:8]})
-	for _, doc := range d[8:30] {
+	finishedAgo(t, srv, run.ID, time.Hour)
+	placed := d[8:30]
+	for i, doc := range placed {
 		srv.Place(t, run, run.Interests[0], doc)
+		placedAgo(t, srv, run.ID, doc, time.Duration(len(placed)-i)*time.Minute)
 	}
 	save(t, srv, store.Bookmark{URL: d[29].URL, Title: new("Saved <as> this"), Source: store.SourceChrome})
 	band := getPage(t, srv, "/ui/interests/"+run.Interests[0], http.StatusOK)
 	assert.Contains(t, band, `<h2 id="new-band">New since the last rebuild</h2>`)
 	assert.Equal(t, 20, strings.Count(band, `<tr class="fit-new">`), "the newest 20")
+	for _, oldest := range placed[:2] {
+		assert.NotContains(t, band, `href="/ui/documents/`+oldest.ID+`"`, "the two placed first are left out")
+	}
+	newest, next := strings.Index(band, `href="/ui/documents/`+d[29].ID+`"`),
+		strings.Index(band, `href="/ui/documents/`+d[28].ID+`"`)
+	assert.True(t, newest >= 0 && newest < next, "newest first")
 	assert.Contains(t, band, `<p class="table-note">and 2 more</p>`)
 	assert.Contains(t, band, `<span class="badge plain fit-new">22 new</span>`)
 	assert.Contains(t, band, `title="Saved &lt;as&gt; this">Saved &lt;as&gt; this</a>`, "named by its bookmark")
