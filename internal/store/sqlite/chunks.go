@@ -457,11 +457,37 @@ func decodeVector(blob []byte, dim int) ([]float32, error) {
 	if len(blob) != 4*dim {
 		return nil, fmt.Errorf("embedding blob is %d bytes, want %d (dim %d)", len(blob), 4*dim, dim)
 	}
-	v := make([]float32, dim)
+	return decodeVectorBlob(blob)
+}
+
+// decodeVectorBlob decodes a vector of any width stored in decodeVector's
+// layout, nil for an empty or NULL blob. A blob whose length isn't a whole
+// number of components is an error.
+func decodeVectorBlob(blob []byte) ([]float32, error) {
+	if len(blob)%4 != 0 {
+		return nil, fmt.Errorf("vector blob is %d bytes, not a whole number of float32s", len(blob))
+	}
+	if len(blob) == 0 {
+		return nil, nil
+	}
+	v := make([]float32, len(blob)/4)
 	for i := range v {
 		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
 	}
 	return v, nil
+}
+
+// encodeVector stores v in decodeVector's layout, raw little-endian
+// float32; an empty v is NULL.
+func encodeVector(v []float32) any {
+	if len(v) == 0 {
+		return nil
+	}
+	blob := make([]byte, 4*len(v))
+	for i, x := range v {
+		binary.LittleEndian.PutUint32(blob[i*4:], math.Float32bits(x))
+	}
+	return blob
 }
 
 // documentVectorsSQL reads the chunk vectors of the tenant's documents in

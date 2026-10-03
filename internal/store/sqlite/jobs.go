@@ -47,6 +47,58 @@ func (s *Jobs) Enqueue(ctx context.Context, j *store.Job) error {
 	return nil
 }
 
+// The statements of EnqueueOnce. The pending check names the tenant as
+// +tenant_id: written plainly, SQLite (curio never runs ANALYZE) seeks
+// idx_jobs_tenant_status_updated and walks every pending job of the
+// tenant, thousands during an import; this way it seeks idx_jobs_claim,
+// whose (status, kind) prefix holds only the pending jobs of the kind.
+const (
+	// insertJobOnceSQL is insertJobSQL unless the tenant has a pending job
+	// of the kind: then it inserts nothing and returns no row.
+	insertJobOnceSQL = `
+	INSERT INTO jobs (id, tenant_id, kind, payload, document_id, status, attempts, run_after)
+	SELECT ?1, ?2, ?3, ?4, json_extract(?4, '$.document_id'), ?5, ?6, ?7
+	WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE status = ?5 AND kind = ?3 AND +tenant_id = ?2)
+	RETURNING run_after, created_at, updated_at`
+	// pendingJobSQL is the tenant's pending job of a kind that runs first.
+	// Its args are the status, the kind and the tenant.
+	pendingJobSQL = `SELECT ` + jobColumns + ` FROM jobs
+	WHERE status = ? AND kind = ? AND +tenant_id = ?
+	ORDER BY run_after, created_at LIMIT 1`
+)
+
+// EnqueueOnce implements store.JobQueue. The transaction begins
+// IMMEDIATE (see DB), so no claim or enqueue lands between the check and
+// the read of the job it found.
+func (s *Jobs) EnqueueOnce(ctx context.Context, j *store.Job) (bool, error) {
+	if j.Status != "" && j.Status != store.JobStatusPending {
+		return false, fmt.Errorf("enqueue once: a %s job is not queued", j.Status)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("enqueue once: begin: %w", err)
+	}
+	defer tx.Rollback()
+	err = insertJobWith(ctx, tx, insertJobOnceSQL, j)
+	queued := err == nil
+	if errors.Is(err, sql.ErrNoRows) {
+		var pending *store.Job
+		if pending, err = scanJob(tx.QueryRowContext(ctx, pendingJobSQL, store.JobStatusPending, j.Kind, j.TenantID)); err == nil {
+			*j = *pending
+		}
+	}
+	if err != nil {
+		return false, fmt.Errorf("enqueue once: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("enqueue once: commit: %w", err)
+	}
+	if queued {
+		s.db.enqueued.notify(j.Kind)
+	}
+	return queued, nil
+}
+
 // Enqueued implements store.JobQueue. Every enqueue path in this package
 // (Jobs, Documents, Bookmarks) signals through the *DB they share.
 func (s *Jobs) Enqueued(kinds []store.JobKind) <-chan struct{} {
@@ -73,6 +125,13 @@ const insertJobSQL = `
 // A payload naming a document that doesn't exist is an error wrapping
 // store.ErrNotFound.
 func insertJob(ctx context.Context, q rowQuerier, j *store.Job) error {
+	return insertJobWith(ctx, q, insertJobSQL, j)
+}
+
+// insertJobWith is insertJob with query, a statement taking insertJobSQL's
+// arguments and returning its row. One that inserts nothing is an error
+// wrapping sql.ErrNoRows.
+func insertJobWith(ctx context.Context, q rowQuerier, query string, j *store.Job) error {
 	if j.TenantID == "" {
 		return errors.New("jobs: tenant_id required")
 	}
@@ -93,7 +152,7 @@ func insertJob(ctx context.Context, q rowQuerier, j *store.Job) error {
 	}
 
 	var runAfter, createdAt, updatedAt string
-	err := q.QueryRowContext(ctx, insertJobSQL,
+	err := q.QueryRowContext(ctx, query,
 		j.ID, j.TenantID, j.Kind, string(j.Payload),
 		j.Status, j.Attempts, formatTime(j.RunAfter),
 	).Scan(&runAfter, &createdAt, &updatedAt)

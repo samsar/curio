@@ -322,15 +322,15 @@ func causeBar(cause string, n, most int) []BarSegment {
 	return barSegments([]barPart{{value: n, class: class}}, most)
 }
 
-// coverageBar draws the share of a clustering run's documents that are
-// in an interest.
-func coverageBar(documents, noise int) []BarSegment {
-	return barSegments([]barPart{{value: clustered(documents, noise), class: "fill-accent"}}, documents)
+// coverageBar draws the share of a rebuild's documents that are members of
+// an interest.
+func coverageBar(documents, outside int) []BarSegment {
+	return barSegments([]barPart{{value: clustered(documents, outside), class: "fill-accent"}}, documents)
 }
 
-// clustered is how many of a run's documents are in an interest: those
-// that aren't noise.
-func clustered(documents, noise int) int { return min(max(documents-noise, 0), max(documents, 0)) }
+// clustered is how many of a run's documents are members of an interest:
+// those outside every one (loose fits and the unsorted) aside.
+func clustered(documents, outside int) int { return min(max(documents-outside, 0), max(documents, 0)) }
 
 // throttleLabel is a throttle's name on its button.
 func throttleLabel(t store.Throttle) string {

@@ -7,6 +7,7 @@ package apitest
 
 import (
 	"context"
+	"errors"
 	"hash/crc32"
 	"log/slog"
 	"math"
@@ -239,96 +240,263 @@ func (s *Server) AddContent(t testing.TB, doc *store.Document, markdown string) 
 	return ext
 }
 
-// AddInterest records a finished clustering run whose one cluster, labeled
-// label, has docs as members: an interest as the API serves it.
-func (s *Server) AddInterest(t testing.TB, label string, docs ...*store.Document) *store.Cluster {
-	t.Helper()
-	ctx := context.Background()
-	ins := s.Deps.Insights
-	run := &store.ClusterRun{TenantID: TenantID, Algo: "apitest"}
-	if err := ins.CreateRun(ctx, run); err != nil {
-		t.Fatalf("create cluster run: %v", err)
-	}
-	c := store.Cluster{ID: uuid.NewString(), TenantID: TenantID, RunID: run.ID, Label: &label,
-		Size: len(docs), Cohesion: 0.9}
-	if err := ins.ReplaceClusters(ctx, run.ID, []store.ClusterWithMembers{{Cluster: c, Members: members(c.ID, docs)}}); err != nil {
-		t.Fatalf("write clusters: %v", err)
-	}
-	res := store.RunResult{Status: store.ClusterRunDone, NumDocuments: len(docs), NumClusters: 1}
-	if err := ins.FinishRun(ctx, run.ID, res); err != nil {
-		t.Fatalf("finish cluster run: %v", err)
-	}
-	return &c
-}
-
-// members are docs as the members of cluster id, in their order: each
-// less similar than the one before.
-func members(id string, docs []*store.Document) []store.ClusterMember {
-	out := make([]store.ClusterMember, len(docs))
-	for i, d := range docs {
-		out[i] = store.ClusterMember{ClusterID: id, DocumentID: d.ID, Similarity: 0.9 - 0.1*float64(i)}
-	}
-	return out
-}
-
-// Interest is an interest AddInterests records: its label, empty for an
-// unlabeled one, its size, and its members, most similar first, if any.
+// Interest is an interest a run the helpers commit holds: its label,
+// empty for an unlabeled one; its size, at least its members' count; its
+// members, most similar first, and its loose fits.
 type Interest struct {
 	Label   string
 	Size    int
 	Members []*store.Document
+	Loose   []*store.Document
 }
 
-// AddInterests records a finished clustering run whose clusters are
-// interests, over as many documents as their sizes add up to, with the
-// members they are given: enough for a page that lists interests by size.
-func (s *Server) AddInterests(t testing.TB, interests ...Interest) []*store.Cluster {
+// Area is an area a run the helpers commit holds, and its interests.
+type Area struct {
+	Label     string
+	Interests []Interest
+}
+
+// RunSpec is a run's grouping: areas holding interests, or interests
+// alone (the flat shape), and the documents in none, nearest the first
+// interest.
+type RunSpec struct {
+	Areas     []Area
+	Interests []Interest
+	Unsorted  []*store.Document
+}
+
+// Run is a run the helpers committed: its ID, and the identities of its
+// areas and interests in the order its spec gave them.
+type Run struct {
+	ID        string
+	Areas     []string
+	Interests []string
+}
+
+// AddInterest commits a flat run whose one interest, labeled label, has
+// docs as members: an interest as the API serves it.
+func (s *Server) AddInterest(t testing.TB, label string, docs ...*store.Document) Run {
 	t.Helper()
-	ctx := context.Background()
-	ins := s.Deps.Insights
-	run := &store.ClusterRun{TenantID: TenantID, Algo: "apitest"}
-	if err := ins.CreateRun(ctx, run); err != nil {
-		t.Fatalf("create cluster run: %v", err)
+	return s.AddRun(t, RunSpec{Interests: []Interest{{Label: label, Members: docs}}})
+}
+
+// AddInterests commits a flat run of interests: enough for a page that
+// lists interests by size.
+func (s *Server) AddInterests(t testing.TB, interests ...Interest) Run {
+	t.Helper()
+	return s.AddRun(t, RunSpec{Interests: interests})
+}
+
+// AddAreas commits a run of areas holding interests.
+func (s *Server) AddAreas(t testing.TB, areas ...Area) Run {
+	t.Helper()
+	return s.AddRun(t, RunSpec{Areas: areas})
+}
+
+// AddRun commits spec as a new grouping, built on the latest done run as
+// a rebuild is, which retires every identity before it, and prunes the
+// other runs, as the engine does.
+func (s *Server) AddRun(t testing.TB, spec RunSpec) Run {
+	t.Helper()
+	shape := store.InterestShapeFlat
+	if len(spec.Areas) > 0 {
+		shape = store.InterestShapeAreas
 	}
-	clusters := make([]*store.Cluster, 0, len(interests))
-	written := make([]store.ClusterWithMembers, 0, len(interests))
-	documents := 0
-	for _, in := range interests {
-		c := &store.Cluster{ID: uuid.NewString(), TenantID: TenantID, RunID: run.ID, Size: in.Size, Cohesion: 0.7}
-		if in.Label != "" {
-			c.Label = &in.Label
+	b := s.newCommit(t, store.RunKindFresh, shape)
+	out := Run{ID: b.c.RunID}
+	for _, in := range spec.Interests {
+		out.Interests = append(out.Interests, b.interest(in, ""))
+	}
+	for _, a := range spec.Areas {
+		id := b.identity(store.InterestLevelArea, a.Label)
+		group := store.InterestGroup{Interest: store.Interest{ID: id}, Cohesion: 0.4}
+		for _, in := range a.Interests {
+			out.Interests = append(out.Interests, b.interest(in, id))
+			group.Size += max(in.Size, len(in.Members))
+			group.Loose += len(in.Loose)
 		}
-		clusters = append(clusters, c)
-		written = append(written, store.ClusterWithMembers{Cluster: *c, Members: members(c.ID, in.Members)})
-		documents += in.Size
+		b.c.Groups = append(b.c.Groups, group)
+		out.Areas = append(out.Areas, id)
 	}
-	if err := ins.ReplaceClusters(ctx, run.ID, written); err != nil {
-		t.Fatalf("write clusters: %v", err)
+	for i, doc := range spec.Unsorted {
+		a := store.InterestAssignment{DocumentID: doc.ID, Fit: store.InterestFitUnsorted,
+			Similarity: 0.3 - 0.01*float64(i), AreaSeed: -1, InterestSeed: -1}
+		if len(out.Interests) > 0 {
+			a.NearestID = out.Interests[0]
+		}
+		b.c.Assignments = append(b.c.Assignments, a)
 	}
-	res := store.RunResult{Status: store.ClusterRunDone, NumDocuments: documents, NumClusters: len(interests)}
-	if err := ins.FinishRun(ctx, run.ID, res); err != nil {
-		t.Fatalf("finish cluster run: %v", err)
-	}
-	return clusters
+	o := &b.c.Outcome
+	o.NumAreas, o.NumInterests, o.Created = len(out.Areas), len(out.Interests), len(out.Interests)
+	o.NumUnsorted = len(spec.Unsorted)
+	s.commit(t, b)
+	return out
 }
 
-// AddEmptyClusterRun records a finished clustering run over numDocuments
-// documents that grouped none of them: every document is noise.
-func (s *Server) AddEmptyClusterRun(t testing.TB, numDocuments int) {
+// SplitInterest commits a rebuild after prev in which interest id split
+// into two new interests, a and b, in its area: every other group of prev
+// carries over as it was, and the documents nearest id are nearest a. It
+// returns the new run, a and b in id's place.
+func (s *Server) SplitInterest(t testing.TB, prev Run, id string, a, b Interest) Run {
 	t.Helper()
 	ctx := context.Background()
-	ins := s.Deps.Insights
-	run := &store.ClusterRun{TenantID: TenantID, Algo: "apitest"}
-	if err := ins.CreateRun(ctx, run); err != nil {
-		t.Fatalf("create cluster run: %v", err)
+	run, err := s.insights().GetRun(ctx, prev.ID)
+	if err != nil {
+		t.Fatalf("read run %s: %v", prev.ID, err)
 	}
-	if err := ins.ReplaceClusters(ctx, run.ID, nil); err != nil {
-		t.Fatalf("write clusters: %v", err)
+	groups, err := s.insights().RunGroups(ctx, prev.ID)
+	if err != nil {
+		t.Fatalf("read run %s's groups: %v", prev.ID, err)
 	}
-	res := store.RunResult{Status: store.ClusterRunDone, NumDocuments: numDocuments, NumNoise: numDocuments}
-	if err := ins.FinishRun(ctx, run.ID, res); err != nil {
-		t.Fatalf("finish cluster run: %v", err)
+	assignments, err := s.insights().RunAssignments(ctx, prev.ID)
+	if err != nil {
+		t.Fatalf("read run %s's assignments: %v", prev.ID, err)
 	}
+	cb := s.newCommit(t, store.RunKindWarm, run.Shape)
+	parent := ""
+	for _, g := range groups {
+		if g.ID == id {
+			parent = g.ParentID
+			continue
+		}
+		cb.c.Groups = append(cb.c.Groups, store.InterestGroup{Interest: store.Interest{ID: g.ID}, ParentID: g.ParentID,
+			Size: g.Size, Loose: g.Loose, Cohesion: g.Cohesion, Centroid: g.Centroid})
+		if g.Level == store.InterestLevelInterest {
+			cb.grouped += g.Size
+		}
+		cb.c.Lineage = append(cb.c.Lineage, store.LineageRow{OldID: g.ID, NewID: g.ID, Event: store.LineageKept, Shared: g.Size})
+	}
+	ids := []string{cb.interest(a, parent), cb.interest(b, parent)}
+	for i, in := range []Interest{a, b} {
+		cb.c.Lineage = append(cb.c.Lineage, store.LineageRow{OldID: id, NewID: ids[i], Event: store.LineageSplit,
+			Shared: len(in.Members)})
+	}
+	for _, as := range assignments {
+		switch {
+		case as.InterestID == id:
+		case as.NearestID == id:
+			as.NearestID = ids[0]
+			cb.c.Assignments = append(cb.c.Assignments, as)
+		default:
+			cb.c.Assignments = append(cb.c.Assignments, as)
+		}
+	}
+	o := &cb.c.Outcome
+	o.NumAreas, o.NumInterests = run.NumAreas, run.NumInterests+1
+	o.NumUnsorted = run.NumUnsorted
+	o.Kept, o.Created, o.Split = run.NumInterests-1, 2, 1
+	s.commit(t, cb)
+	out := Run{ID: cb.c.RunID, Areas: prev.Areas}
+	for _, in := range prev.Interests {
+		if in == id {
+			out.Interests = append(out.Interests, ids...)
+			continue
+		}
+		out.Interests = append(out.Interests, in)
+	}
+	return out
+}
+
+// AddFailedRun records a rebuild that failed with msg, the newest run,
+// and returns its ID.
+func (s *Server) AddFailedRun(t testing.TB, msg string) string {
+	t.Helper()
+	ctx := context.Background()
+	run := s.newRun(t, store.RunKindFresh, store.InterestShapeFlat)
+	if err := s.insights().FailRun(ctx, run.ID, 0, msg); err != nil {
+		t.Fatalf("fail run: %v", err)
+	}
+	return run.ID
+}
+
+// insights is the server's insight store, unwrapped: the helpers write
+// as the engine writes, whatever a test wraps the server's store in.
+func (s *Server) insights() store.InsightStore { return sqlite.NewInsights(s.DB) }
+
+// commitBuilder builds a commit the helpers make.
+type commitBuilder struct {
+	c store.RunCommit
+	// grouped counts the members of the commit's interests, which a size
+	// can give more of than it has assignments for.
+	grouped int
+}
+
+// newCommit creates a running run and starts its commit, built on the
+// latest done run.
+func (s *Server) newCommit(t testing.TB, kind store.RunKind, shape store.InterestShape) *commitBuilder {
+	t.Helper()
+	run := s.newRun(t, kind, shape)
+	b := &commitBuilder{c: store.RunCommit{RunID: run.ID, TenantID: TenantID,
+		Outcome: store.RunOutcome{Kind: kind, Shape: shape}}}
+	switch prior, err := s.insights().LatestRun(context.Background(), TenantID, store.InterestRunDone); {
+	case err == nil:
+		b.c.PriorRunID = prior.ID
+	case !errors.Is(err, store.ErrNotFound):
+		t.Fatalf("read the latest done run: %v", err)
+	}
+	return b
+}
+
+// newRun creates a running run.
+func (s *Server) newRun(t testing.TB, kind store.RunKind, shape store.InterestShape) *store.InterestRun {
+	t.Helper()
+	run := &store.InterestRun{TenantID: TenantID, Trigger: store.RunTriggerManual, Grouper: "apitest",
+		RunOutcome: store.RunOutcome{Kind: kind, Shape: shape}}
+	if err := s.insights().CreateRun(context.Background(), run); err != nil {
+		t.Fatalf("create interest run: %v", err)
+	}
+	return run
+}
+
+// commit commits b's run, counting its documents, and prunes the runs
+// before it.
+func (s *Server) commit(t testing.TB, b *commitBuilder) {
+	t.Helper()
+	ctx := context.Background()
+	c := b.c
+	o := &c.Outcome
+	for _, a := range c.Assignments {
+		if a.Fit == store.InterestFitLoose {
+			o.NumLoose++
+		}
+	}
+	o.NumDocuments = b.grouped + o.NumLoose + o.NumUnsorted
+	if err := s.insights().CommitRun(ctx, c); err != nil {
+		t.Fatalf("commit interest run: %v", err)
+	}
+	if err := s.insights().PruneRunsExcept(ctx, TenantID, c.RunID); err != nil {
+		t.Fatalf("prune interest runs: %v", err)
+	}
+}
+
+// identity mints a labeled identity at level and returns its ID.
+func (b *commitBuilder) identity(level store.InterestLevel, label string) string {
+	in := store.Interest{ID: uuid.NewString(), Level: level, Label: label}
+	if label != "" {
+		at := time.Now().UTC()
+		in.LabelSource, in.LabeledAt, in.Summary = store.LabelSourceLLM, &at, "About "+label+"."
+	}
+	b.c.NewIdentities = append(b.c.NewIdentities, in)
+	return in.ID
+}
+
+// interest adds in to the commit, in the area parent ("" for none), its
+// members each less similar than the one before, and returns its ID.
+func (b *commitBuilder) interest(in Interest, parent string) string {
+	id := b.identity(store.InterestLevelInterest, in.Label)
+	size := max(in.Size, len(in.Members))
+	b.grouped += size
+	b.c.Groups = append(b.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id}, ParentID: parent,
+		Size: size, Loose: len(in.Loose), Cohesion: 0.7})
+	for i, doc := range in.Members {
+		b.c.Assignments = append(b.c.Assignments, store.InterestAssignment{DocumentID: doc.ID, InterestID: id,
+			AreaID: parent, Fit: store.InterestFitMember, Similarity: 0.9 - 0.05*float64(i), AreaSeed: -1, InterestSeed: -1})
+	}
+	for i, doc := range in.Loose {
+		b.c.Assignments = append(b.c.Assignments, store.InterestAssignment{DocumentID: doc.ID, InterestID: id,
+			Fit: store.InterestFitLoose, Similarity: 0.5 - 0.01*float64(i), AreaSeed: -1, InterestSeed: -1})
+	}
+	return id
 }
 
 // Drift is an embedding drift monitor for api.Deps.Drift that reports the

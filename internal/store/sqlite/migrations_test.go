@@ -400,9 +400,9 @@ func TestMigration005_DropsSchemaVersion(t *testing.T) {
 
 // dumpRows reads every row query returns, as the driver hands the values
 // back, for comparing a table before and after a migration.
-func dumpRows(t *testing.T, db *DB, query string) [][]any {
+func dumpRows(t *testing.T, db *DB, query string, args ...any) [][]any {
 	t.Helper()
-	rows, err := db.Query(query)
+	rows, err := db.Query(query, args...)
 	require.NoError(t, err)
 	defer rows.Close()
 	cols, err := rows.Columns()
@@ -954,6 +954,142 @@ func TestMigration015_BookmarksSavedOrder(t *testing.T) {
 	_, err = p.UpTo(ctx, 15)
 	require.NoError(t, err)
 	assert.Contains(t, indexes(), "idx_bookmarks_tenant_saved", "Up runs again")
+}
+
+// TestMigration016_InterestsTwoLevels: 016 drops the cluster tables, today's
+// run with them, creates the two-level interest tables with their indexes,
+// and leaves every other row alone; its Down restores 015's schema byte for
+// byte, and Up runs again.
+func TestMigration016_InterestsTwoLevels(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 15)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, state) VALUES
+			('d1', 'local', 'https://example.com/1', 'fetched'),
+			('d2', 'local', 'https://example.com/2', 'fetched'),
+			('d3', 'local', 'https://example.com/3', 'pending');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, saved_at, source)
+			VALUES ('b1', 'local', 'd1', 'https://example.com/1', '2024-01-01T00:00:00.000Z', 'chrome');
+		INSERT INTO jobs (id, tenant_id, kind, payload, document_id, status)
+			VALUES ('j1', 'local', 'fetch', '{"document_id":"d3"}', 'd3', 'pending'),
+			       ('j2', 'local', 'cluster', '{}', NULL, 'done');
+		INSERT INTO cluster_runs (id, tenant_id, status, algo, num_documents, num_clusters)
+			VALUES ('r1', 'local', 'done', 'knn-graph', 2, 2);
+		INSERT INTO clusters (id, tenant_id, run_id, label, size) VALUES
+			('c1', 'local', 'r1', 'One', 1), ('c2', 'local', 'r1', 'Two', 1);
+		INSERT INTO cluster_documents (cluster_id, document_id, similarity) VALUES ('c1', 'd1', 0.9), ('c2', 'd2', 0.8);`)
+	require.NoError(t, err)
+	schemaBefore := schemaDump(t, db)
+	untouched := []string{
+		`SELECT * FROM documents ORDER BY id`,
+		`SELECT * FROM bookmarks ORDER BY id`,
+		`SELECT * FROM jobs ORDER BY id`,
+	}
+	rowsBefore := make(map[string][][]any, len(untouched))
+	for _, q := range untouched {
+		rowsBefore[q] = dumpRows(t, db, q)
+	}
+	named := func(kind string) map[string]string {
+		t.Helper()
+		out := map[string]string{}
+		for _, row := range dumpRows(t, db, `SELECT name, sql FROM sqlite_master WHERE type = ? AND sql IS NOT NULL`, kind) {
+			out[row[0].(string)] = row[1].(string)
+		}
+		return out
+	}
+
+	_, err = p.UpTo(ctx, 16)
+	require.NoError(t, err)
+	tables := named("table")
+	for _, gone := range []string{"cluster_runs", "clusters", "cluster_documents"} {
+		assert.NotContains(t, tables, gone)
+	}
+	for _, table := range []string{"interest_runs", "interests", "interest_groups", "interest_assignments",
+		"interest_placements", "interest_lineage", "insight_state"} {
+		assert.Contains(t, tables, table)
+	}
+	indexes := named("index")
+	for name, want := range map[string]string{
+		"idx_interest_runs_tenant_status": "CREATE INDEX idx_interest_runs_tenant_status ON interest_runs(tenant_id, status, started_at DESC)",
+		"idx_interests_retired": "CREATE INDEX idx_interests_retired ON interests(tenant_id, retired_run_id) " +
+			"WHERE retired_at IS NOT NULL",
+		"idx_interest_groups_list": "CREATE INDEX idx_interest_groups_list ON interest_groups(run_id, parent_id, " +
+			"size DESC, cohesion DESC, interest_id)",
+		"idx_interest_assignments_list": "CREATE INDEX idx_interest_assignments_list\n    ON interest_assignments(" +
+			"run_id, interest_id, fit, similarity DESC, document_id)",
+		"idx_interest_assignments_document": "CREATE INDEX idx_interest_assignments_document ON interest_assignments(document_id)",
+		"idx_interest_placements_list": "CREATE INDEX idx_interest_placements_list ON interest_placements(run_id, " +
+			"interest_id, placed_at DESC)",
+		"idx_interest_placements_document": "CREATE INDEX idx_interest_placements_document ON interest_placements(document_id)",
+	} {
+		assert.Equal(t, want, indexes[name], name)
+	}
+	for _, gone := range []string{"idx_cluster_runs_tenant_status", "idx_clusters_run", "idx_cluster_documents_document"} {
+		assert.NotContains(t, indexes, gone)
+	}
+	for _, q := range untouched {
+		assert.Equal(t, rowsBefore[q], dumpRows(t, db, q), q)
+	}
+	assertForeignKeysOnEverywhere(t, db)
+
+	_, err = p.DownTo(ctx, 15)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "015's schema, byte for byte")
+	for _, q := range untouched {
+		assert.Equal(t, rowsBefore[q], dumpRows(t, db, q), q)
+	}
+	var runs int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM cluster_runs`).Scan(&runs))
+	assert.Zero(t, runs, "the cluster tables come back empty")
+
+	_, err = p.UpTo(ctx, 16)
+	require.NoError(t, err, "Up runs again")
+}
+
+// TestMigration016_Constraints: the interest tables refuse what the store
+// never writes: an unknown enum, a fit that disagrees with its interest, a
+// nearest interest on a grouped document, and invalid params.
+func TestMigration016_Constraints(t *testing.T) {
+	db, _ := migratedTo(t, 16)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url) VALUES ('d1', 'local', 'https://example.com/1');
+		INSERT INTO interest_runs (id, tenant_id, trigger, kind, split_check, shape, grouper)
+			VALUES ('r1', 'local', 'first', 'fresh', 0, 'flat', 'louvain');
+		INSERT INTO interests (id, tenant_id, level, created_run_id) VALUES ('i1', 'local', 'interest', 'r1');`)
+	require.NoError(t, err)
+	for name, insert := range map[string]string{
+		"an unknown trigger": `INSERT INTO interest_runs (id, tenant_id, trigger, kind, split_check, shape, grouper)
+			VALUES ('r2', 'local', 'cron', 'fresh', 0, 'flat', 'louvain')`,
+		"a split check of 2": `INSERT INTO interest_runs (id, tenant_id, trigger, kind, split_check, shape, grouper)
+			VALUES ('r2', 'local', 'first', 'fresh', 2, 'flat', 'louvain')`,
+		"invalid params": `INSERT INTO interest_runs (id, tenant_id, trigger, kind, split_check, shape, grouper, params)
+			VALUES ('r2', 'local', 'first', 'fresh', 0, 'flat', 'louvain', '{')`,
+		"an unknown level":        `INSERT INTO interests (id, tenant_id, level, created_run_id) VALUES ('i2', 'local', 'topic', 'r1')`,
+		"an unknown label source": `INSERT INTO interests (id, tenant_id, level, created_run_id, label_source) VALUES ('i2', 'local', 'area', 'r1', 'gpt')`,
+		"no creating run":         `INSERT INTO interests (id, tenant_id, level) VALUES ('i2', 'local', 'area')`,
+		"a member of no interest": `INSERT INTO interest_assignments (run_id, document_id, fit, similarity, area_seed, interest_seed)
+			VALUES ('r1', 'd1', 'member', 0.5, -1, -1)`,
+		"an unsorted with an interest": `INSERT INTO interest_assignments
+			(run_id, document_id, interest_id, fit, similarity, area_seed, interest_seed)
+			VALUES ('r1', 'd1', 'i1', 'unsorted', 0.5, -1, -1)`,
+		"a member with a nearest": `INSERT INTO interest_assignments
+			(run_id, document_id, interest_id, fit, similarity, nearest_id, area_seed, interest_seed)
+			VALUES ('r1', 'd1', 'i1', 'member', 0.5, 'i1', -1, -1)`,
+		"an unknown event":              `INSERT INTO interest_lineage (run_id, old_id, new_id, event, shared) VALUES ('r1', 'i1', 'i1', 'renamed', 1)`,
+		"an unknown fresh rebuild owed": `INSERT INTO insight_state (tenant_id, fresh_owed) VALUES ('local', 'drift')`,
+	} {
+		_, err := db.Exec(insert)
+		assert.ErrorContains(t, err, "constraint failed", name)
+	}
+	for name, insert := range map[string]string{
+		"a user's label": `INSERT INTO interests (id, tenant_id, level, created_run_id, label_source) VALUES ('i2', 'local', 'area', 'r1', 'user')`,
+		"an unsorted with its nearest": `INSERT INTO interest_assignments
+			(run_id, document_id, fit, similarity, nearest_id, area_seed, interest_seed)
+			VALUES ('r1', 'd1', 'unsorted', 0.3, 'i1', -1, -1)`,
+	} {
+		_, err := db.Exec(insert)
+		assert.NoError(t, err, name)
+	}
 }
 
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over

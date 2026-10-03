@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -829,6 +830,13 @@ func TestRun_CancelWhileMigrating(t *testing.T) {
 	require.NoError(t, lock.Release())
 }
 
+// all returns every record.
+func (r *recorder) all() []slog.Record {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.records)
+}
+
 // messages returns the records at info with message msg, as attribute maps.
 func (r *recorder) messages(msg string) []map[string]any {
 	r.mu.Lock()
@@ -980,13 +988,116 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 	srv.Start()
 	t.Cleanup(srv.Close)
 
-	runID, err := eng.Rebuild(context.Background(), "local")
+	runID, err := eng.Rebuild(context.Background(), "local", store.RunTriggerManual)
 	require.NoError(t, err)
-	clusters, err := insights.ListClusters(context.Background(), runID, 0, 0)
+	run, err := insights.GetRun(context.Background(), runID)
 	require.NoError(t, err)
-	require.Len(t, clusters, 1)
-	require.NotNil(t, clusters[0].Label)
-	assert.Equal(t, "Reading List", *clusters[0].Label)
+	assert.Equal(t, "louvain", run.Grouper, "the Louvain grouper")
+	groups, err := insights.TopGroups(context.Background(), runID, 0, 0)
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+	assert.Equal(t, "Reading List", groups[0].Label)
+	assert.Equal(t, store.LabelSourceLLM, groups[0].LabelSource)
+}
+
+// clusterJobs lists home's pending cluster jobs' payloads.
+func clusterJobs(t *testing.T, db *sqlitestore.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT payload FROM jobs WHERE kind = 'cluster' AND status = 'pending'`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var payload string
+		require.NoError(t, rows.Scan(&payload))
+		out = append(out, payload)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// TestStart_QueuesTheFirstRebuild: a daemon starting on a library no
+// rebuild has grouped queues one, with trigger first, unless one is
+// already pending; a done rebuild, or insight off, queues none.
+func TestStart_QueuesTheFirstRebuild(t *testing.T) {
+	startOn := func(t *testing.T, home *curiohome.Home, enabled bool) (*sqlitestore.DB, *recorder) {
+		t.Helper()
+		cfg, err := config.Load(home.ConfigPath())
+		require.NoError(t, err)
+		cfg.Insight.Enabled = enabled
+		meta, err := home.Meta()
+		require.NoError(t, err)
+		db, err := sqlitestore.Open(context.Background(), home.DBPath())
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, db.Close()) })
+		logs := recordLogs(t)
+		_, err = start(context.Background(), cfg, home, meta, db, api.NewStartup())
+		require.NoError(t, err)
+		return db, logs
+	}
+
+	t.Run("a new home", func(t *testing.T) {
+		home := newHome(t, freeLoopbackAddr(t))
+		db, logs := startOn(t, home, true)
+		assert.Equal(t, []string{`{"trigger":"first"}`}, clusterJobs(t, db))
+		enqueued := logs.messages("interests: rebuild enqueued")
+		require.Len(t, enqueued, 1)
+		assert.Equal(t, store.RunTriggerFirst, enqueued[0]["trigger"])
+		assert.Equal(t, true, enqueued[0]["queued"])
+		assert.NotEmpty(t, enqueued[0]["job"])
+
+		_, logs = startOn(t, home, true)
+		assert.Len(t, clusterJobs(t, db), 1, "still the one, pending")
+		assert.Equal(t, false, logs.messages("interests: rebuild enqueued")[0]["queued"])
+	})
+	t.Run("a done rebuild", func(t *testing.T) {
+		home := newHome(t, freeLoopbackAddr(t))
+		db, err := sqlitestore.Open(context.Background(), home.DBPath())
+		require.NoError(t, err)
+		_, err = sqlitestore.Migrate(context.Background(), db)
+		require.NoError(t, err)
+		ins := sqlitestore.NewInsights(db)
+		run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerFirst, Grouper: "louvain",
+			RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}}
+		require.NoError(t, ins.CreateRun(context.Background(), run))
+		require.NoError(t, ins.CommitRun(context.Background(), store.RunCommit{RunID: run.ID, TenantID: "local",
+			Outcome: run.RunOutcome}))
+		require.NoError(t, db.Close())
+
+		db, logs := startOn(t, home, true)
+		assert.Empty(t, clusterJobs(t, db))
+		assert.Empty(t, logs.messages("interests: rebuild enqueued"))
+	})
+	t.Run("insight off", func(t *testing.T) {
+		db, _ := startOn(t, newHome(t, freeLoopbackAddr(t)), false)
+		assert.Empty(t, clusterJobs(t, db))
+	})
+}
+
+// TestRun_WarnsOfDeprecatedKeys: a config.yaml that sets an insight key
+// nothing reads any more starts, with one warning that names the key.
+func TestRun_WarnsOfDeprecatedKeys(t *testing.T) {
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen)
+	cfg, err := os.ReadFile(home.ConfigPath())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(home.ConfigPath(),
+		[]byte(strings.Replace(string(cfg), "insight:\n", "insight:\n  min_similarity: 0.3\n", 1)), 0o600))
+	logs := recordLogs(t)
+
+	_, stop := runDaemon(t, listen)
+	stop()
+
+	var warns []slog.Record
+	for _, rec := range logs.all() {
+		if rec.Level == slog.LevelWarn && strings.Contains(rec.Message, "no longer do anything") {
+			warns = append(warns, rec)
+		}
+	}
+	require.Len(t, warns, 1)
+	attrs := logs.messages(warns[0].Message)[0]
+	assert.Equal(t, []string{"insight.min_similarity"}, attrs["keys"])
+	assert.Equal(t, home.ConfigPath(), attrs["config"])
 }
 
 // TestRun_RefusalsExitZero: what run returns for a home or config.yaml it

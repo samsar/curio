@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"html"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -154,29 +155,59 @@ type readInsights struct {
 	r *reads
 }
 
-func (i readInsights) LatestRun(ctx context.Context, tenantID string, status store.ClusterRunStatus) (*store.ClusterRun, error) {
+func (i readInsights) LatestRun(ctx context.Context, tenantID string, status store.InterestRunStatus) (*store.InterestRun, error) {
 	i.r.add(cmp.Or(string(status), "newest") + " run")
 	return i.InsightStore.LatestRun(ctx, tenantID, status)
 }
 
-func (i readInsights) ListClusters(ctx context.Context, runID string, limit, offset int) ([]*store.Cluster, error) {
+func (i readInsights) TopGroups(ctx context.Context, runID string, limit, offset int) ([]store.InterestGroup, error) {
 	i.r.add("interests")
-	return i.InsightStore.ListClusters(ctx, runID, limit, offset)
+	return i.InsightStore.TopGroups(ctx, runID, limit, offset)
 }
 
-func (i readInsights) ClusterMembers(ctx context.Context, clusterID string, limit, offset int) ([]store.ClusterMember, error) {
+func (i readInsights) NestedGroups(ctx context.Context, runID string, limit, offset int) ([]store.InterestGroup, error) {
+	i.r.add("interests")
+	return i.InsightStore.NestedGroups(ctx, runID, limit, offset)
+}
+
+func (i readInsights) ChildGroups(ctx context.Context, runID string, areaIDs []string) ([]store.InterestGroup, error) {
+	i.r.add("children")
+	return i.InsightStore.ChildGroups(ctx, runID, areaIDs)
+}
+
+func (i readInsights) Members(ctx context.Context, runID, interestID string, fit store.InterestFit, limit, offset int) ([]store.InterestAssignment, error) {
 	i.r.add("members")
-	return i.InsightStore.ClusterMembers(ctx, clusterID, limit, offset)
+	return i.InsightStore.Members(ctx, runID, interestID, fit, limit, offset)
 }
 
-func (i readInsights) GetCluster(ctx context.Context, id string) (*store.Cluster, error) {
+func (i readInsights) GetGroup(ctx context.Context, runID, id string) (*store.InterestGroup, error) {
 	i.r.add("interest")
-	return i.InsightStore.GetCluster(ctx, id)
+	return i.InsightStore.GetGroup(ctx, runID, id)
 }
 
-func (i readInsights) GetRun(ctx context.Context, id string) (*store.ClusterRun, error) {
+func (i readInsights) GetRun(ctx context.Context, id string) (*store.InterestRun, error) {
 	i.r.add("run")
 	return i.InsightStore.GetRun(ctx, id)
+}
+
+func (i readInsights) PlacementCounts(ctx context.Context, runID string) (map[string]int, error) {
+	i.r.add("new counts")
+	return i.InsightStore.PlacementCounts(ctx, runID)
+}
+
+func (i readInsights) Placements(ctx context.Context, runID, interestID string, limit int) ([]store.Placement, error) {
+	i.r.add("new members")
+	return i.InsightStore.Placements(ctx, runID, interestID, limit)
+}
+
+func (i readInsights) RunLineage(ctx context.Context, runID string) ([]store.LineageRow, error) {
+	i.r.add("lineage")
+	return i.InsightStore.RunLineage(ctx, runID)
+}
+
+func (i readInsights) GetInterests(ctx context.Context, tenantID string, ids []string) ([]store.Interest, error) {
+	i.r.add("identities")
+	return i.InsightStore.GetInterests(ctx, tenantID, ids)
 }
 
 type readChunks struct {
@@ -343,11 +374,11 @@ func TestUI_LiveRegionsExist(t *testing.T) {
 	}
 }
 
-// enqueueRebuild queues a clustering run, as Rebuild does.
+// enqueueRebuild queues a rebuild of the interests, as Rebuild does.
 func enqueueRebuild(t *testing.T, srv *apitest.Server) *store.Job {
 	t.Helper()
-	job := &store.Job{TenantID: apitest.TenantID, Kind: store.JobKindCluster, Payload: json.RawMessage(`{}`)}
-	require.NoError(t, srv.Deps.Queue.Enqueue(context.Background(), job))
+	job, _, err := jobs.EnqueueRebuild(context.Background(), srv.Deps.Queue, apitest.TenantID, store.RunTriggerManual)
+	require.NoError(t, err)
 	return job
 }
 
@@ -774,7 +805,7 @@ func TestUI_InterestsRebuild(t *testing.T) {
 	assert.Equal(t, href, pollerHref(t, answer, "rebuild-state"),
 		"the answer's poller still carries the run the page shows, not the newer one")
 
-	failRun(t, srv, "cluster: label: <ollama> unreachable")
+	srv.AddFailedRun(t, "cluster: label: <ollama> unreachable")
 	body = getPage(t, srv, "/ui/interests", http.StatusOK)
 	assert.Contains(t, body, "Kafka streams", "the latest done run's interests")
 	assert.Contains(t, body, `The rebuild failed: cluster: label: &lt;ollama&gt; unreachable</p>`,
@@ -792,7 +823,7 @@ func TestUI_InterestsRebuildPaged(t *testing.T) {
 	for i := range 30 {
 		interests = append(interests, apitest.Interest{Label: "Topic " + strconv.Itoa(i), Size: 100 - i})
 	}
-	run := srv.AddInterests(t, interests...)[0].RunID
+	run := srv.AddInterests(t, interests...).ID
 	enqueueRebuild(t, srv)
 	_, err := srv.Deps.Gate.Update(ctx, jobsPause())
 	require.NoError(t, err)
@@ -811,46 +842,41 @@ func TestUI_InterestsRebuildPaged(t *testing.T) {
 	assert.Contains(t, answer, `<p>New interests are ready: <a id="rebuild-reload" href="/ui/interests">reload</a></p>`)
 }
 
-// failRun records a clustering run that failed with msg, as the insight
-// engine records a failed rebuild.
-func failRun(t *testing.T, srv *apitest.Server, msg string) {
-	t.Helper()
-	ctx := context.Background()
-	run := &store.ClusterRun{TenantID: apitest.TenantID, Algo: "apitest"}
-	require.NoError(t, srv.Deps.Insights.CreateRun(ctx, run))
-	require.NoError(t, srv.Deps.Insights.FinishRun(ctx, run.ID,
-		store.RunResult{Status: store.ClusterRunFailed, Error: &msg}))
-}
-
-// TestUI_InterestsReads: the page reads a page of the interests, each
-// card's members and all their documents at once, and the rebuild's
-// state; a page past the last reads no member; its poll reads the
-// rebuild's state alone: the queue and the newest run, never the
-// interests. A running rebuild's start is its one job read. An interest's
-// page reads it, its run, its members and their documents, once each.
+// TestUI_InterestsReads: the page reads a page of the top-level groups
+// and the run's placement counts; then, for interests, each card's
+// members and all their documents at once, and for areas their interests
+// in one read, without members; and the rebuild's state. A page past the
+// last reads no member; its poll reads the rebuild's state alone: the
+// queue and the newest run, never the interests. A running rebuild's
+// start is its one job read. An interest's page reads it, its run, its
+// members, the documents placed into it, their documents, and its
+// lineage, once each; an area's, its interests in one read.
 func TestUI_InterestsReads(t *testing.T) {
 	r := &reads{}
 	srv := apitest.Start(t, countReads(r))
 	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
 	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
-	interests := srv.AddInterests(t, apitest.Interest{Label: "Kafka", Size: 2, Members: []*store.Document{a, b}},
+	flat := srv.AddInterests(t, apitest.Interest{Label: "Kafka", Size: 2, Members: []*store.Document{a, b}},
 		apitest.Interest{Label: "Go", Size: 1}, apitest.Interest{Label: "Rust", Size: 1})
+	r.take()
 	body := getPage(t, srv, "/ui/interests", http.StatusOK)
-	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "members": 3, "member documents": 1, "queue": 1,
-		"newest run": 1}, r.take(), "no document or extraction read one by one")
+	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "new counts": 1, "members": 3, "member documents": 1,
+		"queue": 1, "newest run": 1}, r.take(), "no document or extraction read one by one")
 
 	getPage(t, srv, "/ui/interests?page=2", http.StatusNotFound)
-	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "queue": 1, "newest run": 1}, r.take())
+	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "new counts": 1, "queue": 1, "newest run": 1}, r.take())
 	getPage(t, srv, "/ui/interests?page=x", http.StatusBadRequest)
 	assert.Empty(t, r.take())
 
-	getPage(t, srv, "/ui/interests/"+interests[0].ID, http.StatusOK)
-	assert.Equal(t, map[string]int{"interest": 1, "run": 1, "members": 1, "member documents": 1}, r.take())
-	getPage(t, srv, "/ui/interests/"+interests[1].ID, http.StatusOK)
-	assert.Equal(t, map[string]int{"interest": 1, "run": 1, "members": 1}, r.take(), "no member, no document read")
-	getPage(t, srv, "/ui/interests/"+interests[0].ID+"?page=2", http.StatusNotFound)
-	assert.Equal(t, map[string]int{"interest": 1, "run": 1}, r.take())
-	getPage(t, srv, "/ui/interests/"+interests[0].ID+"?page=x", http.StatusBadRequest)
+	interest := map[string]int{"done run": 1, "interest": 1, "run": 1, "new counts": 1, "members": 1,
+		"new members": 1, "lineage": 1, "identities": 1}
+	getPage(t, srv, "/ui/interests/"+flat.Interests[0], http.StatusOK)
+	assert.Equal(t, with(interest, "member documents", 1), r.take())
+	getPage(t, srv, "/ui/interests/"+flat.Interests[1], http.StatusOK)
+	assert.Equal(t, interest, r.take(), "no member, no document read")
+	getPage(t, srv, "/ui/interests/"+flat.Interests[0]+"?page=2", http.StatusNotFound)
+	assert.Equal(t, with(interest, "members", 0), r.take(), "past its members, none read")
+	getPage(t, srv, "/ui/interests/"+flat.Interests[0]+"?page=x", http.StatusBadRequest)
 	assert.Empty(t, r.take())
 
 	href := pollerHref(t, body, "rebuild-state")
@@ -858,6 +884,16 @@ func TestUI_InterestsReads(t *testing.T) {
 	assert.Equal(t, map[string]int{"queue": 1, "newest run": 1}, r.take())
 	getPage(t, srv, href+"&page=x", http.StatusOK)
 	assert.Equal(t, map[string]int{"queue": 1, "newest run": 1}, r.take(), "a poll ignores the page")
+
+	areas := srv.AddAreas(t, apitest.Area{Label: "Streams", Interests: []apitest.Interest{
+		{Label: "Kafka", Members: []*store.Document{a}}, {Label: "Flink", Members: []*store.Document{b}}}})
+	r.take()
+	getPage(t, srv, "/ui/interests", http.StatusOK)
+	assert.Equal(t, map[string]int{"done run": 1, "interests": 1, "new counts": 1, "children": 1, "queue": 1,
+		"newest run": 1}, r.take(), "an area card names its interests, never their members")
+	getPage(t, srv, "/ui/interests/"+areas.Areas[0], http.StatusOK)
+	assert.Equal(t, map[string]int{"done run": 1, "interest": 1, "run": 1, "new counts": 1, "children": 1,
+		"members": 2, "member documents": 1, "lineage": 1, "identities": 1}, r.take())
 
 	enqueueRebuild(t, srv)
 	_, err := srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})
@@ -871,6 +907,17 @@ func TestUI_InterestsReads(t *testing.T) {
 
 	getPage(t, srv, "/ui/interests?poll=jobs", http.StatusBadRequest)
 	assert.Empty(t, r.take())
+}
+
+// with is reads with name's count set to n, none when n is 0.
+func with(reads map[string]int, name string, n int) map[string]int {
+	out := maps.Clone(reads)
+	if n == 0 {
+		delete(out, name)
+	} else {
+		out[name] = n
+	}
+	return out
 }
 
 // TestUI_InterestsInsightOff: with insight off there is no Rebuild, and

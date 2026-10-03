@@ -76,9 +76,12 @@ func badRequest(format string, args ...any) error {
 // errorStatus maps an error from a handler to a status and title.
 func errorStatus(err error) (int, string) {
 	var reqErr *requestError
+	var retired *retiredInterestError
 	switch {
 	case errors.As(err, &reqErr):
 		return http.StatusBadRequest, "bad request"
+	case errors.As(err, &retired):
+		return http.StatusGone, "interest retired"
 	case errors.Is(err, errBodyTooLarge):
 		return http.StatusRequestEntityTooLarge, "request body too large"
 	case errors.Is(err, store.ErrNotFound):
@@ -95,7 +98,19 @@ func errorStatus(err error) (int, string) {
 // (docs/decisions.md "Local API").
 func (d Deps) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, title := d.reportError(r, err)
+	if retired, ok := errors.AsType[*retiredInterestError](err); ok {
+		writeRetired(w, r, status, title, retired.body)
+		return
+	}
 	writeProblem(w, r, status, title, err.Error())
+}
+
+// writeRetired answers a retired interest: its problem, of type
+// InterestRetiredProblemType, with what became of it as extension members.
+func writeRetired(w http.ResponseWriter, r *http.Request, status int, title string, body RetiredInterest) {
+	body.Problem = Problem{Type: InterestRetiredProblemType, Title: title, Status: status, Detail: body.Detail,
+		Instance: r.URL.Path, RequestID: middleware.GetReqID(r.Context())}
+	sendProblem(w, body.Problem, body)
 }
 
 // reportError classifies err, from serving r, into the status and title

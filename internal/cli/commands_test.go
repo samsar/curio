@@ -25,6 +25,7 @@ import (
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/service/servicetest"
 	"github.com/samsar/curio/internal/setup"
 	"github.com/samsar/curio/internal/setup/setuptest"
@@ -565,30 +566,188 @@ func TestEval(t *testing.T) {
 	require.ErrorContains(t, err, "--queries is required")
 }
 
-func TestInterests(t *testing.T) {
+// TestInterests_Outline: in the areas shape, curio interests outlines
+// the areas, each with its largest interests and the way to the rest, then
+// Unsorted; IDs whole, ready to paste.
+func TestInterests_Outline(t *testing.T) {
 	srv := apitest.Start(t)
-	out := mustRun(t, srv, "interests")
-	assert.Contains(t, out, "no interests yet")
-
 	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
-	srv.AddContent(t, a, "go")
-	srv.AddInterest(t, "Go Programming", a, srv.AddDocument(t, "https://example.com/b", store.DocStateFetched))
-	out = mustRun(t, srv, "interests", "--members", "2")
-	assert.Contains(t, out, "1 interests across 2 documents")
-	assert.Contains(t, out, "Go Programming")
-	assert.Contains(t, out, "doc_id: "+a.ID)
+	loose := srv.AddDocument(t, "https://example.com/loose", store.DocStateFetched)
+	unsorted := srv.AddDocument(t, "https://example.com/unsorted", store.DocStateFetched)
+	children := make([]apitest.Interest, 0, 7)
+	children = append(children, apitest.Interest{Label: "Agents", Size: 86, Members: []*store.Document{a},
+		Loose: []*store.Document{loose}})
+	for i := range 6 {
+		children = append(children, apitest.Interest{Label: fmt.Sprintf("Topic %d", i), Size: 50 - i})
+	}
+	run := srv.AddRun(t, apitest.RunSpec{Areas: []apitest.Area{{Label: "Tech", Interests: children},
+		{Interests: []apitest.Interest{{Size: 12}}}}, Unsorted: []*store.Document{unsorted}})
 
-	out = mustRun(t, srv, "interests", "rebuild")
-	assert.Contains(t, out, "clustering job enqueued: ")
+	out := mustRun(t, srv, "interests", "--children", "2")
+	lines := strings.Split(out, "\n")
+	assert.Equal(t, "2 areas, 8 interests across 385 documents (1 loose fit, 1 unsorted)", lines[0])
+	assert.Regexp(t, `^rebuilt \d{4}-\d\d-\d\d \d\d:\d\d \(fresh, manual\)$`, lines[1])
+	assert.Contains(t, out, "\nTech — 371 docs, 7 interests  "+run.Areas[0]+"\n"+
+		"    Agents  86  "+run.Interests[0]+"\n"+
+		"    Topic 0  50  "+run.Interests[1]+"\n"+
+		"    + 5 more: curio interests show "+run.Areas[0]+"\n")
+	assert.Contains(t, out, "\n(unlabeled area) — 12 docs, 1 interest  "+run.Areas[1]+"\n"+
+		"    (unlabeled)  12  "+run.Interests[7]+"\n")
+	assert.True(t, strings.HasSuffix(out, "\nUnsorted — 1 doc: curio interests unsorted\n"), out)
+	assert.NotContains(t, out, "min_similarity")
+
+	out = mustRun(t, srv, "interests", "--limit", "1")
+	assert.Contains(t, out, "+ 1 more: curio interests --offset 1\n")
+	out = mustRun(t, srv, "interests", "--offset", "1")
+	assert.NotContains(t, out, "Tech")
+	assert.Contains(t, out, "(unlabeled area)")
+
+	flat := mustRun(t, srv, "interests", "--flat", "--limit", "2", "--members", "1")
+	assert.Contains(t, flat, "\nAgents — 86 docs  "+run.Interests[0]+"\n    in Tech  "+run.Areas[0]+"\n"+
+		"    • https://example.com/a\n      doc_id: "+a.ID+"\n")
+	assert.Contains(t, flat, "+ 6 more: curio interests --offset 2 --flat\n")
+}
+
+// TestInterests_Flat: in a library of one level, curio interests lists
+// interests with their members, each with its doc_id and path.
+func TestInterests_Flat(t *testing.T) {
+	srv := apitest.Start(t)
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	ext := srv.AddContent(t, a, "go")
+	run := srv.AddInterest(t, "Go Programming", a, srv.AddDocument(t, "https://example.com/b", store.DocStateFetched))
+
+	out := mustRun(t, srv, "interests", "--members", "2")
+	assert.True(t, strings.HasPrefix(out, "1 interest across 2 documents (0 loose fits, 0 unsorted)\n"), out)
+	assert.Contains(t, out, "\nGo Programming — 2 docs  "+run.Interests[0]+"\n"+
+		"    • https://example.com/a\n      doc_id: "+a.ID+"\n"+
+		"      path:   "+filepath.Join(srv.Home.ContentDir(), *ext.MarkdownPath)+"\n")
+	assert.NotContains(t, out, "areas")
+}
+
+// TestInterests_Show: show lists an area's interests, an interest's
+// members then its loose fits, and for a retired ID fails with what took
+// its documents.
+func TestInterests_Show(t *testing.T) {
+	srv := apitest.Start(t)
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	loose := srv.AddDocument(t, "https://example.com/loose", store.DocStateFetched)
+	run := srv.AddAreas(t, apitest.Area{Label: "Programming", Interests: []apitest.Interest{
+		{Label: "Go", Members: []*store.Document{a, b}, Loose: []*store.Document{loose}}, {Label: "Rust", Size: 1}}})
+	area, goID := run.Areas[0], run.Interests[0]
+
+	out := mustRun(t, srv, "interests", "show", area)
+	assert.Equal(t, "Programming — area of 3 docs, 2 interests  "+area+"\n"+
+		"About Programming.\n\n"+
+		"    Go  2  "+goID+"\n"+
+		"    Rust  1  "+run.Interests[1]+"\n", out)
+
+	out = mustRun(t, srv, "interests", "show", goID)
+	assert.Contains(t, out, "Go — 2 docs, 1 loose fit  "+goID+"\nin Programming  "+area+"\nAbout Go.\n")
+	assert.Contains(t, out, "\nmembers:\n  • https://example.com/a\n    doc_id: "+a.ID+"\n  • https://example.com/b\n")
+	assert.Contains(t, out, "\nloose fits:\n  • https://example.com/loose\n    doc_id: "+loose.ID+"\n")
+	out = mustRun(t, srv, "interests", "show", goID, "--members", "1")
+	assert.Contains(t, out, "+ 2 more: curio interests show "+goID+" --offset 1\n")
+	out = mustRun(t, srv, "interests", "show", goID, "--offset", "2")
+	assert.NotContains(t, out, "members:")
+	assert.Contains(t, out, "loose fits:")
+
+	split := srv.SplitInterest(t, run, goID, apitest.Interest{Label: "Go Web", Members: []*store.Document{a}},
+		apitest.Interest{Label: "Go Tools", Members: []*store.Document{b}})
+	_, err := runCLI(t, srv, "interests", "show", goID)
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Regexp(t, `^interest Go was retired by the rebuild of \d{4}-\d\d-\d\d \d\d:\d\d: its documents went to`, msg)
+	for i, label := range []string{"Go Web", "Go Tools"} {
+		assert.Contains(t, msg, "\n  "+label+" (split, 1 doc shared): curio interests show "+split.Interests[i])
+	}
+
+	_, err = runCLI(t, srv, "interests", "show", "no-such-interest")
+	require.EqualError(t, err, `interest "no-such-interest" not found`)
+}
+
+// TestInterests_Unsorted lists the documents in no interest, each with
+// the interest it is nearest.
+func TestInterests_Unsorted(t *testing.T) {
+	srv := apitest.Start(t)
+	assert.Contains(t, mustRun(t, srv, "interests", "unsorted"), "no rebuild has finished yet")
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	far := srv.AddDocument(t, "https://example.com/far", store.DocStateFetched)
+	_, err := srv.DB.Exec(`UPDATE documents SET title = 'Far away' WHERE id = ?`, far.ID)
+	require.NoError(t, err)
+	run := srv.AddRun(t, apitest.RunSpec{Interests: []apitest.Interest{{Label: "Go", Members: []*store.Document{a}}},
+		Unsorted: []*store.Document{far}})
+
+	out := mustRun(t, srv, "interests", "unsorted")
+	assert.Equal(t, "1 document in no interest, nearest first\n\n"+
+		"• Far away\n  doc_id: "+far.ID+"\n  nearest: Go ("+run.Interests[0]+") 0.30\n", out)
+}
+
+// TestInterests_Changes: changes says what the latest rebuild did, a
+// first grouping in a line.
+func TestInterests_Changes(t *testing.T) {
+	srv := apitest.Start(t)
+	assert.Contains(t, mustRun(t, srv, "interests", "changes"), "no rebuild has finished yet")
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	run := srv.AddInterest(t, "Go", a, b)
+	out := mustRun(t, srv, "interests", "changes")
+	assert.Regexp(t, `^rebuilt .* \(fresh, manual\)\nfirst grouping: every area and interest is new\n$`, out)
+
+	split := srv.SplitInterest(t, run, run.Interests[0], apitest.Interest{Label: "Go Web", Members: []*store.Document{a}},
+		apitest.Interest{Label: "Go Tools", Members: []*store.Document{b}})
+	out = mustRun(t, srv, "interests", "changes")
+	assert.Contains(t, out, "\nsplit:\n")
+	for i := range 2 {
+		assert.Contains(t, out, "  interest Go ("+run.Interests[0]+") → interest ")
+		assert.Contains(t, out, "("+split.Interests[i]+"), 1 doc shared\n")
+	}
+	assert.NotContains(t, out, "first grouping")
+}
+
+// TestInterests_Rebuild: rebuild queues one, and asking again while it is
+// queued answers the same job.
+func TestInterests_Rebuild(t *testing.T) {
+	srv := apitest.Start(t)
+	out := mustRun(t, srv, "interests", "rebuild")
+	id, ok := strings.CutPrefix(strings.Split(out, "\n")[0], "rebuild queued: job ")
+	require.True(t, ok, out)
+	assert.Contains(t, out, "follow it with `curio jobs show "+id+"`")
+	assert.Equal(t, out, mustRun(t, srv, "interests", "rebuild"), "the job already queued")
 	assert.Equal(t, 1, count(t, srv, `SELECT count(*) FROM jobs WHERE kind = 'cluster'`))
 }
 
-// A finished run that found no interests is reported as such, never as a run
-// still to do: rebuilding again would only repeat it.
-func TestInterests_EmptyRun(t *testing.T) {
+// TestInterests_Empty: before a rebuild has grouped anything, curio
+// interests says why from where the next rebuild stands; a rebuild that
+// found nothing says so.
+func TestInterests_Empty(t *testing.T) {
+	t.Run("none", func(t *testing.T) {
+		srv := apitest.Start(t)
+		assert.Equal(t, "no interests yet: `curio interests rebuild` groups the library\n", mustRun(t, srv, "interests"))
+	})
+	t.Run("queued and rebuilding", func(t *testing.T) {
+		srv := apitest.Start(t)
+		job, _, err := jobs.EnqueueRebuild(context.Background(), srv.Deps.Queue, apitest.TenantID, store.RunTriggerFirst)
+		require.NoError(t, err)
+		assert.Contains(t, mustRun(t, srv, "interests"), "your library is being grouped for the first time\n")
+		_, err = srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})
+		require.NoError(t, err)
+		require.NotEmpty(t, job.ID)
+		assert.Contains(t, mustRun(t, srv, "interests"), "your library is being grouped for the first time\n")
+	})
+	t.Run("failing", func(t *testing.T) {
+		srv := apitest.Start(t)
+		srv.AddFailedRun(t, "ollama unreachable")
+		assert.Contains(t, mustRun(t, srv, "interests"), "the last rebuild failed: ollama unreachable\n")
+	})
+	t.Run("off", func(t *testing.T) {
+		srv := apitest.Start(t, func(d *api.Deps) { d.InsightEnabled = false })
+		assert.Equal(t, "interests are turned off: set insight.enabled: true in "+
+			filepath.Join(srv.Home.Path, "config.yaml")+" and restart the daemon\n", mustRun(t, srv, "interests"))
+	})
 	t.Run("no documents", func(t *testing.T) {
 		srv := apitest.Start(t)
-		srv.AddEmptyClusterRun(t, 0)
+		srv.AddRun(t, apitest.RunSpec{})
 		out := mustRun(t, srv, "interests")
 		assert.Contains(t, out, "found no fetched, indexed documents")
 		assert.Contains(t, out, "`curio status`")
@@ -596,12 +755,11 @@ func TestInterests_EmptyRun(t *testing.T) {
 	})
 	t.Run("nothing grouped", func(t *testing.T) {
 		srv := apitest.Start(t)
-		srv.AddEmptyClusterRun(t, 35)
+		srv.AddRun(t, apitest.RunSpec{Unsorted: []*store.Document{srv.AddDocument(t, "https://example.com/a",
+			store.DocStateFetched)}})
 		out := mustRun(t, srv, "interests")
-		assert.Contains(t, out, "grouped none of its 35 documents")
-		assert.Contains(t, out, "insight.min_similarity or insight.min_cluster_size in "+
-			filepath.Join(srv.Home.Path, "config.yaml"))
-		assert.NotContains(t, out, "no interests yet")
+		assert.Contains(t, out, "grouped none of its 1 document; they are all in Unsorted")
+		assert.NotContains(t, out, "min_similarity")
 	})
 }
 

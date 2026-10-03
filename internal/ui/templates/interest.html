@@ -1,14 +1,32 @@
 {{/*
-An interest: its head, with the run it comes from, and a page of its
-members, most similar first, ranked across the pages.
+An area or an interest of the latest rebuild. An area: its head, and every
+interest it holds as the Interests page's cards. An interest: its head,
+with its area and the run it comes from, and a page of its members, then
+its loose fits, most similar first, ranked across the pages.
 */}}
 {{define "content" -}}
+{{if .Interest.Area}}{{template "area-page" .}}{{else}}{{template "interest-page" .}}{{end}}
+{{- end}}
+
+{{define "area-page" -}}
 <div class="page-head"><div class="titles">
 <nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "interests"}}">Interests</a></nav>
 {{with .Interest -}}
+<h1>{{with .Label}}{{.}}{{else}}Unlabeled area{{end}}</h1>
+{{with .Summary}}<p class="lede">{{.}}</p>{{end}}
+<div class="meta-row"><span class="badge badge-accent plain">{{num .Size}} documents</span><span class="badge plain">{{num .NumChildren}} {{if eq .NumChildren 1}}interest{{else}}interests{{end}}</span>{{template "cohesion-line" .Cohesion}}{{if not $.RunAt.IsZero}}<span class="sep">·</span><span class="text">run of {{when $.RunAt}}</span>{{end}}</div>
+{{- end}}
+</div></div>
+{{with .Interest.Children}}{{template "interest-cards" .}}{{end}}
+{{- end}}
+
+{{define "interest-page" -}}
+<div class="page-head"><div class="titles">
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "interests"}}">Interests</a>{{with .Interest}}{{if .ParentID}}<span class="sep">›</span><a class="truncate" href="{{interestHref .ParentID}}" title="{{with .ParentLabel}}{{.}}{{else}}Unlabeled area{{end}}">{{with .ParentLabel}}{{.}}{{else}}Unlabeled area{{end}}</a>{{end}}{{end}}</nav>
+{{with .Interest -}}
 <h1>{{with .Label}}{{.}}{{else}}Unlabeled interest{{end}}</h1>
 {{with .Summary}}<p class="lede">{{.}}</p>{{end}}
-<div class="meta-row"><span class="badge badge-accent plain">{{num .Size}} documents</span><span class="meter-row" title="Cohesion: how alike its documents are"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .Cohesion}}">{{printf "%.2f" .Cohesion}}</meter>cohesion {{printf "%.2f" .Cohesion}}</span>{{if not $.RunAt.IsZero}}<span class="sep">·</span><span class="text">run of {{when $.RunAt}}</span>{{end}}</div>
+<div class="meta-row"><span class="badge badge-accent plain">{{num .Size}} documents</span>{{if .Loose}}<span class="badge plain">{{num .Loose}} {{if eq .Loose 1}}loose fit{{else}}loose fits{{end}}</span>{{end}}{{template "cohesion-line" .Cohesion}}{{if not $.RunAt.IsZero}}<span class="sep">·</span><span class="text">run of {{when $.RunAt}}</span>{{end}}</div>
 {{- end}}
 </div></div>
 {{if .OutOfRange}}{{template "out-of-range" .OutOfRange}}
@@ -20,7 +38,7 @@ members, most similar first, ranked across the pages.
 <tbody>
 {{range .Ranked}}<tr>
 <td class="num muted">{{num .Rank}}</td>
-<td>{{template "doc-cell" .Cell}}</td>
+<td>{{template "doc-cell" .Cell}}{{if .Loose}} <span class="badge plain" title="Close to this interest, not grouped with it; never used to name it">loose fit</span>{{end}}</td>
 <td><span class="meter-row"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .Similarity}}">{{printf "%.2f" .Similarity}}</meter>{{printf "%.2f" .Similarity}}</span></td>
 </tr>
 {{end}}</tbody>
@@ -29,4 +47,9 @@ members, most similar first, ranked across the pages.
 </div>
 {{with .Pager}}{{template "pager" .}}{{end}}
 {{- end}}
+{{- end}}
+
+{{/* A group's cohesion in its head: how alike its documents are, from 0 to 1. */}}
+{{define "cohesion-line" -}}
+<span class="meter-row" title="Cohesion: how alike its documents are"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>cohesion {{printf "%.2f" .}}</span>
 {{- end}}

@@ -435,25 +435,6 @@ func TestQueryPlans(t *testing.T) {
 			avoid: []string{"idx_documents_tenant_", "idx_bookmarks_tenant_"},
 		},
 		{
-			// idx_clusters_run gives the size order; only clusters of the
-			// same size are sorted, by cohesion and ID.
-			name:  "ListClusters",
-			query: listClustersSQL, args: []any{"run", 24, 48},
-			first: "SEARCH clusters USING INDEX idx_clusters_run (run_id=?)",
-			want:  []string{"USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY"},
-			sorts: true,
-		},
-		{
-			// A cluster's members, sorted by similarity: no index holds
-			// them in that order (see "Interests page by offset within a
-			// run").
-			name:  "ClusterMembers",
-			query: clusterMembersSQL, args: []any{"cluster", 50, 50},
-			first: "SEARCH cluster_documents USING INDEX sqlite_autoindex_cluster_documents_1 (cluster_id=?)",
-			sorts: true,
-			avoid: []string{"idx_cluster_documents_document"},
-		},
-		{
 			// The document's bookmarks, read in the order they are listed.
 			name:  "ListByDocument",
 			query: listBookmarksByDocumentSQL, args: []any{"local", "doc"},
@@ -461,12 +442,32 @@ func TestQueryPlans(t *testing.T) {
 			avoid: []string{"idx_bookmarks_tenant_"},
 		},
 		{
+			// The foreign-key actions reach the document's rows in each
+			// table by its own index, never a scan of every run's.
 			name:  "document delete reaches its jobs",
 			query: deleteDocumentSQL, args: []any{"doc"},
-			want: []string{"SEARCH jobs USING COVERING INDEX idx_jobs_document (document_id=?)"},
+			want: []string{
+				"SEARCH jobs USING COVERING INDEX idx_jobs_document (document_id=?)",
+				"SEARCH interest_assignments USING COVERING INDEX idx_interest_assignments_document (document_id=?)",
+				"SEARCH interest_placements USING COVERING INDEX idx_interest_placements_document (document_id=?)",
+			},
+		},
+		{
+			// The pending check seeks the pending jobs of the kind, never a
+			// walk of the tenant's pending jobs (+tenant_id).
+			name:  "EnqueueOnce insert",
+			query: insertJobOnceSQL, args: []any{"job", "local", store.JobKindCluster, "{}", store.JobStatusPending, 0, "now"},
+			want:  []string{"SEARCH jobs USING INDEX idx_jobs_claim (status=? AND kind=?)"},
+			avoid: []string{"idx_jobs_tenant_"},
+		},
+		{
+			name:  "EnqueueOnce pending job",
+			query: pendingJobSQL, args: []any{store.JobStatusPending, store.JobKindCluster, "local"},
+			first: "SEARCH jobs USING INDEX idx_jobs_claim (status=? AND kind=?)",
+			avoid: []string{"idx_jobs_tenant_"},
 		},
 	}
-	for _, tc := range slices.Concat(cases, listPlanCases(t)) {
+	for _, tc := range slices.Concat(cases, listPlanCases(t), insightPlanCases()) {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := queryPlan(t, db, tc.query, tc.args...)
 			assert.True(t, strings.HasPrefix(plan, tc.first), "plan starts with %q:\n%s", tc.first, plan)
@@ -480,6 +481,135 @@ func TestQueryPlans(t *testing.T) {
 				assert.NotContains(t, plan, avoid)
 			}
 		})
+	}
+}
+
+// insightPlanCases pin the interest store's statements (see "Interests:
+// two levels, stable identities, automatic rebuilds"). Pages are read in
+// their index's order: only the interests of every area, read for a flat
+// list, and the latest run of any status, which ties on the rowid, sort.
+func insightPlanCases() []planCase {
+	const (
+		groupsList = "SEARCH g USING INDEX idx_interest_groups_list "
+		identity   = "SEARCH i USING INDEX sqlite_autoindex_interests_1 (id=?)"
+		parent     = "SEARCH p USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN"
+	)
+	done := store.InterestRunDone
+	return []planCase{
+		{
+			name: "LatestRun by status", query: latestRunSQL(runColumns, true), args: []any{"local", done},
+			first: "SEARCH interest_runs USING INDEX idx_interest_runs_tenant_status (tenant_id=? AND status=?)",
+			sorts: true,
+		},
+		{
+			name: "LatestRun", query: latestRunSQL(runColumns, false), args: []any{"local"},
+			first: "SEARCH interest_runs USING INDEX idx_interest_runs_tenant_status (tenant_id=?)",
+			sorts: true,
+		},
+		{
+			name: "TopGroups", query: topGroupsSQL, args: []any{"run", 24, 48},
+			first: groupsList + "(run_id=? AND parent_id=?)", want: []string{identity, parent},
+		},
+		{
+			// The JSON array's areas, each read in order.
+			name: "ChildGroups", query: childGroupsSQL, args: []any{"run", `["a","b"]`},
+			first: groupsList + "(run_id=? AND parent_id=?)", want: []string{"LIST SUBQUERY", identity},
+		},
+		{
+			name: "NestedGroups", query: nestedGroupsSQL, args: []any{"run", 24, 48},
+			first: groupsList + "(run_id=? AND parent_id>?)", want: []string{identity, parent},
+			sorts: true,
+		},
+		{
+			name: "GetGroup", query: getGroupSQL, args: []any{"run", "interest"},
+			first: "SEARCH g USING INDEX sqlite_autoindex_interest_groups_1 (run_id=? AND interest_id=?)",
+			want:  []string{identity, parent},
+		},
+		{
+			name: "RunGroups", query: runGroupsSQL, args: []any{"run"},
+			first: "SEARCH g USING INDEX sqlite_autoindex_interest_groups_1 (run_id=?)", want: []string{identity},
+		},
+		{
+			name: "Members", query: membersSQL, args: []any{"run", "interest", store.InterestFitMember, 50, 50},
+			first: "SEARCH interest_assignments USING COVERING INDEX idx_interest_assignments_list " +
+				"(run_id=? AND interest_id=? AND fit=?)",
+		},
+		{
+			name: "Unsorted", query: unsortedSQL, args: []any{"run", store.InterestFitUnsorted, 50, 50},
+			first: "SEARCH a USING INDEX idx_interest_assignments_list (run_id=? AND interest_id=? AND fit=?)",
+			want:  []string{"SEARCH n USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN"},
+		},
+		{
+			name: "RunAssignments", query: runAssignmentsSQL, args: []any{"run"},
+			first: "SEARCH interest_assignments USING INDEX", want: []string{"(run_id=?)"},
+		},
+		{
+			name: "RunLineage", query: runLineageSQL, args: []any{"run"},
+			first: "SEARCH interest_lineage USING INDEX sqlite_autoindex_interest_lineage_1 (run_id=?)",
+		},
+		{
+			name: "Successors", query: successorsSQL, args: []any{"run", "old"},
+			first: "SEARCH interest_lineage USING INDEX sqlite_autoindex_interest_lineage_1 (run_id=? AND old_id=?)",
+		},
+		{
+			name: "GetInterest", query: getInterestSQL, args: []any{"interest"},
+			first: "SEARCH interests USING INDEX sqlite_autoindex_interests_1 (id=?)",
+		},
+		{
+			name: "GetInterests", query: getInterestsSQL, args: []any{`["a","b"]`, "local"},
+			first: "SEARCH interests USING INDEX sqlite_autoindex_interests_1 (id=?)", avoid: []string{"idx_interests_retired"},
+		},
+		{
+			name: "CreatedBy", query: createdBySQL, args: []any{"run"},
+			first: "SEARCH g USING COVERING INDEX sqlite_autoindex_interest_groups_1 (run_id=?)", want: []string{identity},
+		},
+		{
+			name: "RetiredBy", query: retiredBySQL, args: []any{"local", "run"},
+			first: "SEARCH interests USING INDEX idx_interests_retired (tenant_id=? AND retired_run_id=?)",
+		},
+		{
+			name: "Placements", query: placementsSQL(false), args: []any{"run", "interest", 20},
+			first: "SEARCH interest_placements USING INDEX idx_interest_placements_list (run_id=? AND interest_id=?)",
+		},
+		{
+			name: "Placements in Unsorted", query: placementsSQL(true), args: []any{"run", 20},
+			first: "SEARCH interest_placements USING INDEX idx_interest_placements_list (run_id=? AND interest_id=?)",
+		},
+		{
+			name: "PlacementCounts", query: placementCountsSQL, args: []any{"run"},
+			first: "SEARCH interest_placements USING COVERING INDEX idx_interest_placements_list (run_id=?)",
+		},
+		{
+			// Each identity checked against the run's groups by its
+			// primary key.
+			name:  "CommitRun retire",
+			query: retireInterestsSQL, args: []any{"now", "run", "now", "local", "run"},
+			first: "SCAN interests",
+			want:  []string{"SEARCH g USING COVERING INDEX sqlite_autoindex_interest_groups_1 (run_id=? AND interest_id=?)"},
+		},
+		{
+			// The runs' groups, assignments and placements by their run.
+			name: "PruneRunsExcept", query: pruneRunsSQL(2), args: []any{"local", "a", "b"},
+			first: "SEARCH interest_runs USING INDEX idx_interest_runs_tenant_status (tenant_id=?)",
+			want: []string{
+				"SEARCH interest_groups USING COVERING INDEX sqlite_autoindex_interest_groups_1 (run_id=?)",
+				"SEARCH interest_assignments USING COVERING INDEX sqlite_autoindex_interest_assignments_1 (run_id=?)",
+				"SEARCH interest_placements USING COVERING INDEX idx_interest_placements_list (run_id=?)",
+			},
+		},
+		{
+			// The foreign keys of each deleted identity scan the tables
+			// that reference it: measured at about 1 ms an identity on
+			// the owner's library, once a rebuild, so no index serves
+			// them.
+			name: "PruneRetired", query: pruneRetiredSQL, args: []any{"local", "cutoff"},
+			first: "SEARCH interests USING INDEX idx_interests_retired (tenant_id=?)",
+		},
+		{
+			// The lineage, which the trim itself keeps small.
+			name: "TrimLineage", query: trimLineageSQL, args: []any{"run", "local"},
+			first: "SCAN interest_lineage",
+		},
 	}
 }
 

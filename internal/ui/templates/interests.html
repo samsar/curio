@@ -1,11 +1,12 @@
 {{/*
-The Interests: a page of the latest clustering run's, largest first, and a
-rebuild. The rebuild's state and its button are live regions, which its
-poller (Rebuild.Poller) keeps current while a rebuild is queued or
-running; a poll's answer is those regions and the poller alone, and reads
-no interest. A newer run is offered as a reload, not swapped in. Links
-between pages name the run shown; a page asked for from another run's
-says it shows the newer one's.
+The Interests: a page of the latest rebuild's top-level groups, largest
+first: its areas, each naming its largest interests, or its interests in
+the flat shape; and a rebuild. The rebuild's state and its button are live
+regions, which its poller (Rebuild.Poller) keeps current while a rebuild is
+queued or running; a poll's answer is those regions and the poller alone,
+and reads no interest. A newer run is offered as a reload, not swapped in.
+Links between pages name the run shown; a page asked for from another
+run's says it shows the newer one's.
 */}}
 {{define "content" -}}
 {{if .Poll}}{{template "rebuild-state" .Rebuild}}
@@ -17,7 +18,7 @@ says it shows the newer one's.
 {{define "interests-page" -}}
 <div class="page-head"><div class="titles">
 <h1>Interests</h1>
-{{with .Run}}<p class="lede">{{if .Interests}}{{count .Interests "topic" "topics"}} curio found in your library, largest first.{{if and (gt $.Page 1) (not $.OutOfRange)}} Page {{num $.Page}} of {{num $.Pages}}.{{end}}{{else}}The last clustering run found no topics in your library.{{end}}</p>
+{{with .Run}}<p class="lede">{{if .Total}}{{if .HasAreas}}{{count .Areas "area" "areas"}} holding {{count .Interests "interest" "interests"}} in your library, largest first.{{else}}{{count .Interests "interest" "interests"}} curio found in your library, largest first.{{end}}{{if and (gt $.Page 1) (not $.OutOfRange)}} Page {{num $.Page}} of {{num $.Pages}}.{{end}}{{else}}The last rebuild found no interests in your library.{{end}}</p>
 {{else}}<p class="lede">Topics curio finds in your library, by grouping pages alike.</p>{{end}}
 </div>
 <div class="actions">{{template "rebuild-state" .Rebuild}}
@@ -29,27 +30,24 @@ says it shows the newer one's.
 {{end}}
 {{- with .Run}}
 <section class="card mb-4" aria-label="Coverage"><div class="card-body"><div class="coverage">
-{{template "stackbar" (coverageBar .Documents .Noise)}}
-<div class="legend"><span class="item"><span class="swatch swatch-accent"></span><span class="n">{{num .Clustered}}</span> in an interest <span class="pct">{{pct .Clustered .Documents}}</span></span><span class="item"><span class="swatch swatch-track"></span><span class="n">{{num .Noise}}</span> in none <span class="pct">{{pct .Noise .Documents}}</span></span><span class="item run">Run of {{when .ComputedAt}} · {{.Algo}} · {{num .Documents}} documents</span></div>
+{{template "stackbar" (coverageBar .Documents .Outside)}}
+<div class="legend"><span class="item"><span class="swatch swatch-accent"></span><span class="n">{{num .Clustered}}</span> in an interest <span class="pct">{{pct .Clustered .Documents}}</span></span><span class="item"><span class="swatch swatch-track"></span><span class="n">{{num .Outside}}</span> in none <span class="pct">{{pct .Outside .Documents}}</span></span><span class="item run">Run of {{when .ComputedAt}} · {{.Algo}} · {{num .Documents}} documents</span></div>
 </div></div></section>
 {{end}}
 {{- if .OutOfRange}}{{template "out-of-range" .OutOfRange}}
 {{- else if .Run}}{{with .Interests}}
-<ul class="interest-grid" role="list">
-{{range .}}<li class="card interest">
-<h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a></h2>
-<div class="stats"><span><b>{{num .Size}}</b> documents</span>{{template "cohesion" .Cohesion}}</div>
-{{with .Summary}}<p class="summary">{{.}}</p>{{end}}
-{{with .Members}}<ul class="members">{{range .}}{{with .Ref}}<li><a{{with .Class}} class="{{.}}"{{end}} href="{{documentHref .ID}}" title="{{.Hover}}">{{.Name}}</a></li>{{end}}{{end}}</ul>{{end}}
-<a class="all" href="{{interestHref .ID}}">All {{num .Size}} documents →</a>
-</li>
-{{end}}</ul>
+{{template "interest-cards" .}}
 {{with $.Pager}}{{template "pager" .}}{{end}}
 {{else}}<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "sparkles"}}</div>
 <h2>No interests in this run</h2>
-<p>The last run found no interests.</p>
+<p>The last rebuild found no interests.</p>
 </div></div>{{end}}
+{{- else if .FirstGrouping}}<div class="card"><div class="empty">
+<div class="empty-icon">{{template "icon" "sparkles"}}</div>
+<h2>Your library is being grouped for the first time</h2>
+<p>Its interests show here once the rebuild finishes, in a couple of minutes on a large library.</p>
+</div></div>
 {{- else}}<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "sparkles"}}</div>
 <h2>No interests yet</h2>
@@ -83,9 +81,4 @@ queued or running, the only change that replaces it.
 <div class="rebuild-control js-only" id="rebuild-control">
 {{- if .Enabled}}<button class="btn" type="button" id="rebuild"{{if .InFlight}} aria-disabled="true" title="A rebuild is already queued or running"{{end}}{{template "action" .Action}}>{{template "icon" "refresh"}}Rebuild</button>{{end -}}
 </div>
-{{- end}}
-
-{{/* An interest's cohesion: how alike its documents are, from 0 to 1. */}}
-{{define "cohesion" -}}
-<span class="meter-row" title="Cohesion: how alike its documents are"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>{{printf "%.2f" .}}</span>
 {{- end}}

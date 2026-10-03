@@ -21,11 +21,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/porttest"
 	"github.com/samsar/curio/internal/store"
 )
@@ -569,4 +571,160 @@ func TestDegradedNote(t *testing.T) {
 	assert.Equal(t, "Note: semantic search unavailable; keyword-only results.", degradedNote(nil),
 		"a degraded response without warnings still gets the note")
 	assert.Equal(t, "Note: first; second.", degradedNote([]string{"first", "second"}))
+}
+
+// listInterests calls list_interests with args against srv, decoding its
+// structured output.
+func listInterests(t *testing.T, srv *apitest.Server, args map[string]any) (*mcp.CallToolResult, listInterestsOutput) {
+	t.Helper()
+	cs := connect(t, running(t, client.New(srv.URL)))
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_interests", Arguments: args})
+	require.NoError(t, err)
+	var out listInterestsOutput
+	if !res.IsError {
+		raw, err := json.Marshal(res.StructuredContent)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(raw, &out))
+	}
+	return res, out
+}
+
+// TestMCP_ListInterests_Areas: the outline lists each area, its interests
+// with their sizes and ids, their documents with doc_ids, then Unsorted's
+// size and what the latest rebuild changed.
+func TestMCP_ListInterests_Areas(t *testing.T) {
+	srv := apitest.Start(t)
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	unsorted := srv.AddDocument(t, "https://example.com/u", store.DocStateFetched)
+	run := srv.AddRun(t, apitest.RunSpec{Areas: []apitest.Area{{Label: "Programming", Interests: []apitest.Interest{
+		{Label: "Go", Members: []*store.Document{a, b}}, {Label: "Rust", Size: 1}, {Label: "Zig", Size: 1}}}},
+		Unsorted: []*store.Document{unsorted}})
+
+	res, out := listInterests(t, srv, map[string]any{"interests": 2, "members": 1})
+	require.False(t, res.IsError, textOf(res))
+	txt := textOf(res)
+	assert.Contains(t, txt, "1 area, 3 interests across 5 documents. Rebuilt ")
+	assert.Contains(t, txt, "1. Programming — 4 docs, 3 interests (area id: "+run.Areas[0]+")\n")
+	assert.Contains(t, txt, "   - Go — 2 docs (interest id: "+run.Interests[0]+")\n     · https://example.com/a (doc_id: "+a.ID+")\n")
+	assert.NotContains(t, txt, b.ID, "members=1")
+	assert.Contains(t, txt, "   + 1 more interest (list_interests with this area's id)\n")
+	assert.Contains(t, txt, "Unsorted: 1 document\n")
+	assert.Contains(t, txt, "Latest rebuild: 3 new, 0 split, 0 merged, 0 moved, 0 dissolved\n")
+
+	assert.Equal(t, run.ID, out.RunID)
+	assert.Equal(t, "current", out.State)
+	assert.Equal(t, "areas", out.Shape)
+	assert.Equal(t, 5, out.NumDocuments)
+	assert.Equal(t, 1, out.NumAreas)
+	assert.Equal(t, 3, out.NumInterests)
+	assert.Equal(t, 1, out.NumUnsorted)
+	assert.Empty(t, out.Interests)
+	require.Len(t, out.Areas, 1)
+	assert.Equal(t, 3, out.Areas[0].NumChildren)
+	require.Len(t, out.Areas[0].Children, 2)
+	assert.Equal(t, []interestMemberOut{{DocID: a.ID, URL: a.URL}}, out.Areas[0].Children[0].Members)
+	assert.Equal(t, &changeCounts{New: 3}, out.Changes)
+}
+
+// TestMCP_ListInterests_Flat: in a library of one level the outline lists
+// the interests with their documents.
+func TestMCP_ListInterests_Flat(t *testing.T) {
+	srv := apitest.Start(t)
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	run := srv.AddInterest(t, "Go", a)
+	res, out := listInterests(t, srv, nil)
+	txt := textOf(res)
+	assert.Contains(t, txt, "1 interest across 1 document.")
+	assert.NotContains(t, txt, "areas")
+	assert.Contains(t, txt, "1. Go — 1 doc (interest id: "+run.Interests[0]+")\n   · https://example.com/a (doc_id: "+a.ID+")\n")
+	assert.Equal(t, "flat", out.Shape)
+	require.Len(t, out.Interests, 1)
+	assert.Empty(t, out.Areas)
+}
+
+// TestMCP_ListInterests_ID: an id drills into an area's interests or an
+// interest's documents; a retired one is an answer naming its successors,
+// and an unknown one a tool error.
+func TestMCP_ListInterests_ID(t *testing.T) {
+	srv := apitest.Start(t)
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	loose := srv.AddDocument(t, "https://example.com/loose", store.DocStateFetched)
+	run := srv.AddAreas(t, apitest.Area{Label: "Programming", Interests: []apitest.Interest{
+		{Label: "Go", Members: []*store.Document{a, b}, Loose: []*store.Document{loose}}, {Label: "Rust", Size: 1}}})
+
+	res, out := listInterests(t, srv, map[string]any{"id": run.Areas[0]})
+	txt := textOf(res)
+	assert.Contains(t, txt, "Area Programming — 3 docs, 2 interests (area id: "+run.Areas[0]+")\n")
+	assert.Contains(t, txt, "- Go — 2 docs (interest id: "+run.Interests[0]+")\n")
+	assert.Contains(t, txt, "- Rust — 1 doc (interest id: "+run.Interests[1]+")\n")
+	require.Len(t, out.Areas, 1)
+	assert.Len(t, out.Areas[0].Children, 2)
+
+	res, out = listInterests(t, srv, map[string]any{"id": run.Interests[0]})
+	txt = textOf(res)
+	assert.Contains(t, txt, "In area Programming (area id: "+run.Areas[0]+")\n")
+	assert.Contains(t, txt, "· https://example.com/loose (doc_id: "+loose.ID+", loose fit)\n")
+	require.Len(t, out.Interests, 1)
+	assert.Len(t, out.Interests[0].Members, 3)
+	assert.True(t, out.Interests[0].Members[2].Loose)
+
+	split := srv.SplitInterest(t, run, run.Interests[0], apitest.Interest{Label: "Go Web", Members: []*store.Document{a}},
+		apitest.Interest{Label: "Go Tools", Members: []*store.Document{b}})
+	res, out = listInterests(t, srv, map[string]any{"id": run.Interests[0]})
+	assert.False(t, res.IsError, "a retired id is information to follow")
+	txt = textOf(res)
+	assert.Contains(t, txt, "The interest Go was retired by the rebuild of ")
+	assert.Contains(t, txt, "- Go Web (split; interest id: "+split.Interests[0]+")\n")
+	require.NotNil(t, out.Retired)
+	assert.Len(t, out.Retired.Successors, 2)
+
+	res, _ = listInterests(t, srv, map[string]any{"id": "no-such-interest"})
+	assert.True(t, res.IsError)
+	assert.Contains(t, textOf(res), `interest "no-such-interest" not found`)
+}
+
+// TestMCP_ListInterests_Empty: before the first rebuild, the outline says
+// why there are no interests.
+func TestMCP_ListInterests_Empty(t *testing.T) {
+	srv := apitest.Start(t)
+	res, out := listInterests(t, srv, nil)
+	assert.Equal(t, "No interests yet: the library hasn't been grouped.", textOf(res))
+	assert.Equal(t, "none", out.State)
+
+	_, _, err := jobs.EnqueueRebuild(context.Background(), srv.Deps.Queue, apitest.TenantID, store.RunTriggerFirst)
+	require.NoError(t, err)
+	res, out = listInterests(t, srv, nil)
+	assert.Contains(t, textOf(res), "being grouped for the first time")
+	assert.Equal(t, "queued", out.State)
+
+	failing := apitest.Start(t)
+	failing.AddFailedRun(t, "ollama unreachable")
+	res, _ = listInterests(t, failing, nil)
+	assert.Equal(t, "No interests: the last rebuild failed: ollama unreachable", textOf(res))
+
+	off := apitest.Start(t, func(d *api.Deps) { d.InsightEnabled = false })
+	res, _ = listInterests(t, off, nil)
+	assert.Contains(t, textOf(res), "turned off")
+}
+
+// TestMCP_ListInterests_Description: the tool tells the model what it
+// lists and that IDs last, and nothing about rebuilding or thresholds.
+func TestMCP_ListInterests_Description(t *testing.T) {
+	cs := connectMCP(t)
+	res, err := cs.ListTools(context.Background(), nil)
+	require.NoError(t, err)
+	var desc string
+	for _, tl := range res.Tools {
+		if tl.Name == "list_interests" {
+			desc = tl.Description
+		}
+	}
+	assert.Contains(t, desc, "grouped into broad areas")
+	assert.Contains(t, desc, "IDs are stable across rebuilds")
+	assert.Contains(t, desc, "a retired id names the interests that took its documents")
+	for _, gone := range []string{"curio interests rebuild", "min_similarity", "min_cluster_size"} {
+		assert.NotContains(t, desc, gone)
+	}
 }

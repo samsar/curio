@@ -13,19 +13,15 @@ import (
 	"github.com/samsar/curio/internal/ui"
 )
 
-const (
-	// interestCardMembers is how many of an interest's documents its card
-	// on the Interests page lists.
-	interestCardMembers = 3
-	// homeInterests is how many of the largest interests the search home
-	// names.
-	homeInterests = 6
-)
+// homeInterests is how many of the largest top-level groups the search
+// home names.
+const homeInterests = 6
 
-// interests answers GET /ui/interests: a page of the latest clustering
-// run's interests, largest first, each with a few members, as GET
-// /v1/interests lists them, and a rebuild of them. A page past the last is
-// a 404 that keeps the page's frame.
+// interests answers GET /ui/interests: a page of the latest rebuild's
+// top-level groups, largest first, as GET /v1/interests lists them: areas
+// naming their largest interests, or interests with a few members in the
+// flat shape; and a rebuild of them. A page past the last is a 404 that
+// keeps the page's frame.
 //
 // Its links between pages carry the run they show (?run=). The engine
 // prunes the previous run once a rebuild finishes, so a page asked for
@@ -49,8 +45,11 @@ func (h pageHandlers) interests(w http.ResponseWriter, r *http.Request) {
 			h.writePageError(w, r, err, ui.NavInterests)
 			return
 		}
+		// An area's card names its interests and their sizes, never their
+		// members.
 		resp, err := h.d.interests(r.Context(), interestsOpts{Limit: ui.InterestsPageSize,
-			Offset: ui.PageOffset(page, ui.InterestsPageSize), Members: interestCardMembers})
+			Offset: ui.PageOffset(page, ui.InterestsPageSize), Children: ui.AreaCardInterests,
+			Members: ui.InterestCardMembers})
 		if err != nil {
 			h.writePageError(w, r, err, ui.NavNone)
 			return
@@ -70,13 +69,14 @@ func (h pageHandlers) interests(w http.ResponseWriter, r *http.Request) {
 }
 
 // interestRun is the run a page of interests comes from, nil before the
-// first finished.
+// first is done.
 func interestRun(resp InterestListResponse) *ui.InterestRun {
 	if resp.RunID == "" {
 		return nil
 	}
-	run := &ui.InterestRun{ID: resp.RunID, Algo: resp.Algo, Documents: resp.NumDocuments, Noise: resp.NumNoise,
-		Interests: resp.NumClusters}
+	run := &ui.InterestRun{ID: resp.RunID, Algo: resp.Algo, Shape: resp.Shape, Documents: resp.NumDocuments,
+		Areas: resp.NumAreas, Interests: resp.NumInterests, Loose: resp.NumLoose, Unsorted: resp.NumUnsorted,
+		Total: resp.Total}
 	if resp.ComputedAt != nil {
 		run.ComputedAt = *resp.ComputedAt
 	}
@@ -125,10 +125,13 @@ func (h pageHandlers) rebuild(r *http.Request, shown string) ui.Rebuild {
 	return b
 }
 
-// interest answers GET /ui/interests/{id}: one interest and a page of its
-// members, most similar first, with the run it comes from. A page past the
-// last is a 404 that keeps the interest's head. Interests get new IDs with
-// every rebuild, so one that isn't found leads back to Interests.
+// interest answers GET /ui/interests/{id}: an area, with every interest it
+// holds; or an interest, with a page of its members, then its loose fits,
+// most similar first; each with the run it comes from. A page past the
+// last is a 404 that keeps the interest's head. A retired identity is a
+// 410 saying what became of it, and one the latest rebuild never heard of
+// a 404: interests were regrouped when curio was upgraded, and identities
+// from before then are gone.
 func (h pageHandlers) interest(w http.ResponseWriter, r *http.Request) {
 	page, err := pageParam(r)
 	if err != nil {
@@ -136,20 +139,29 @@ func (h pageHandlers) interest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	resp, err := h.d.interest(r.Context(), id, ui.InterestMembersPageSize,
-		ui.PageOffset(page, ui.InterestMembersPageSize))
-	if errors.Is(err, store.ErrNotFound) {
-		h.errorPage(w, r, http.StatusNotFound, "not found",
-			fmt.Sprintf("interest %q not found: interests get new IDs each time they are rebuilt", id), ui.NavInterests)
+	resp, err := h.d.interest(r.Context(), id, interestOpts{Members: ui.InterestMembersPageSize,
+		AreaMembers: ui.InterestCardMembers, Offset: ui.PageOffset(page, ui.InterestMembersPageSize)})
+	var retired *retiredInterestError
+	switch {
+	case errors.As(err, &retired):
+		h.errorPage(w, r, http.StatusGone, "interest retired", retired.Error(), ui.NavInterests)
 		return
-	}
-	if err != nil {
+	case errors.Is(err, store.ErrNotFound):
+		h.errorPage(w, r, http.StatusNotFound, "not found",
+			fmt.Sprintf("interest %q not found: interests were regrouped when curio was upgraded, "+
+				"so links from before then no longer work", id), ui.NavInterests)
+		return
+	case err != nil:
 		h.writePageError(w, r, err, ui.NavNone)
 		return
 	}
 	in := interestView(resp)
-	vm := ui.InterestPage{Layout: h.pages.layout(cmp.Or(in.Label, "Unlabeled interest"), ui.NavInterests),
-		Interest: in, Page: page, RunAt: h.runFinished(r, resp.RunID)}
+	title := cmp.Or(in.Label, "Unlabeled interest")
+	if in.Area {
+		title = cmp.Or(in.Label, "Unlabeled area")
+	}
+	vm := ui.InterestPage{Layout: h.pages.layout(title, ui.NavInterests), Interest: in, Page: page,
+		RunAt: h.runFinished(r, resp.RunID)}
 	status := http.StatusOK
 	if vm.OutOfRange() != nil {
 		status = http.StatusNotFound
@@ -157,9 +169,9 @@ func (h pageHandlers) interest(w http.ResponseWriter, r *http.Request) {
 	h.page(w, r, status, ui.PageInterest, vm)
 }
 
-// runFinished is when the clustering run id finished, for an interest's
-// run line, or zero when that is unknown: the page does without the line
-// for a run it can't read, logging why, and for one that is gone.
+// runFinished is when the rebuild id finished, for a group's run line, or
+// zero when that is unknown: the page does without the line for a run it
+// can't read, logging why, and for one that is gone.
 func (h pageHandlers) runFinished(r *http.Request, id string) time.Time {
 	run, err := h.d.Insights.GetRun(r.Context(), id)
 	switch {
@@ -172,11 +184,17 @@ func (h pageHandlers) runFinished(r *http.Request, id string) time.Time {
 	return time.Time{}
 }
 
+// interestView is an area or an interest in the page's terms.
 func interestView(in InterestResponse) ui.Interest {
-	out := ui.Interest{ID: in.ID, Label: in.Label, Summary: in.Summary, Size: in.Size, Cohesion: in.Cohesion}
+	out := ui.Interest{ID: in.ID, Area: in.Level == string(store.InterestLevelArea), ParentID: in.ParentID,
+		ParentLabel: in.ParentLabel, Label: in.Label, Summary: in.Summary, Size: in.Size, Loose: in.Loose,
+		Cohesion: in.Cohesion, NumChildren: in.NumChildren}
+	for _, c := range in.Children {
+		out.Children = append(out.Children, interestView(c))
+	}
 	for _, m := range in.Members {
 		out.Members = append(out.Members, ui.Member{DocumentID: m.DocID, Title: m.Title, BookmarkTitle: m.BookmarkTitle,
-			URL: m.URL, Similarity: m.Similarity})
+			URL: m.URL, Similarity: m.Similarity, Loose: m.Fit == fitLoose})
 	}
 	return out
 }

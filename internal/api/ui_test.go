@@ -732,27 +732,27 @@ func (c countingStates) CountByState(ctx context.Context, tenantID string) (map[
 	return c.DocumentStore.CountByState(ctx, tenantID)
 }
 
-// countingRuns counts the reads of the latest clustering run, which the
-// interests read makes, and of any interest's members.
+// countingRuns counts the reads of the latest rebuild, which the interests
+// read makes, and of any interest's members.
 type countingRuns struct {
 	store.InsightStore
 	calls, members *atomic.Int32
 }
 
-func (c countingRuns) LatestRun(ctx context.Context, tenantID string, status store.ClusterRunStatus) (*store.ClusterRun, error) {
+func (c countingRuns) LatestRun(ctx context.Context, tenantID string, status store.InterestRunStatus) (*store.InterestRun, error) {
 	c.calls.Add(1)
 	return c.InsightStore.LatestRun(ctx, tenantID, status)
 }
 
-func (c countingRuns) ClusterMembers(ctx context.Context, clusterID string, limit, offset int) ([]store.ClusterMember, error) {
+func (c countingRuns) Members(ctx context.Context, runID, interestID string, fit store.InterestFit, limit, offset int) ([]store.InterestAssignment, error) {
 	c.members.Add(1)
-	return c.InsightStore.ClusterMembers(ctx, clusterID, limit, offset)
+	return c.InsightStore.Members(ctx, runID, interestID, fit, limit, offset)
 }
 
-// failingRuns fails the latest clustering run's read.
+// failingRuns fails the latest rebuild's read.
 type failingRuns struct{ store.InsightStore }
 
-func (failingRuns) LatestRun(context.Context, string, store.ClusterRunStatus) (*store.ClusterRun, error) {
+func (failingRuns) LatestRun(context.Context, string, store.InterestRunStatus) (*store.InterestRun, error) {
 	return nil, fmt.Errorf("latest run: %w", errInjected)
 }
 
@@ -794,8 +794,8 @@ func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
 }
 
 // TestUI_SearchHome: without a query, the landing names the six largest
-// interests, largest first, with a link to all of them, and the box says
-// how many documents there are to search.
+// top-level groups, largest first, with a link to all of them, and the box
+// says how many documents there are to search.
 func TestUI_SearchHome(t *testing.T) {
 	srv := apitest.Start(t)
 	body := getPage(t, srv, "/ui/", http.StatusOK)
@@ -805,7 +805,7 @@ func TestUI_SearchHome(t *testing.T) {
 	assert.NotContains(t, body, "explore-line", "no run yet")
 
 	empty := apitest.Start(t)
-	empty.AddEmptyClusterRun(t, 5)
+	empty.AddRun(t, apitest.RunSpec{})
 	body = getPage(t, empty, "/ui/", http.StatusOK)
 	assert.Contains(t, body, `<div class="landing">`)
 	assert.NotContains(t, body, "explore-line", "a run without interests")
@@ -820,14 +820,23 @@ func TestUI_SearchHome(t *testing.T) {
 	for _, m := range links {
 		order = append(order, m[1])
 	}
-	assert.Equal(t, []string{in[1].ID, in[3].ID, in[5].ID, in[2].ID, in[6].ID, in[4].ID}, order, "the six largest, largest first")
+	ids := in.Interests
+	assert.Equal(t, []string{ids[1], ids[3], ids[5], ids[2], ids[6], ids[4]}, order, "the six largest, largest first")
 	assert.Contains(t, body, `<nav class="explore-line" aria-label="Your interests"><span class="label">Your interests</span><ul>`)
-	assert.Contains(t, body, `<li><a href="/ui/interests/`+in[1].ID+`" title="Mobile Ecosystems and Strategy">Mobile Ecosystems</a></li>`)
+	assert.Contains(t, body, `<li><a href="/ui/interests/`+ids[1]+`" title="Mobile Ecosystems and Strategy">Mobile Ecosystems</a></li>`)
 	assert.Contains(t, body, `title="Identity and Access Management">Identity and Access Management</a></li>`)
-	assert.Contains(t, body, `<li><a href="/ui/interests/`+in[2].ID+`"><span class="unlabeled">Unlabeled interest</span></a></li>`)
+	assert.Contains(t, body, `<li><a href="/ui/interests/`+ids[2]+`"><span class="unlabeled">Unlabeled interest</span></a></li>`)
 	assert.Contains(t, body, `title="Kafka &lt;streams&gt;">Kafka &lt;streams&gt;</a>`)
 	assert.Contains(t, body, `<a class="all" href="/ui/interests">All 7 →</a>`)
 	assert.NotContains(t, body, "Smallest topic")
+
+	areas := srv.AddAreas(t, apitest.Area{Label: "Engineering", Interests: []apitest.Interest{{Label: "Kafka", Size: 9}}},
+		apitest.Area{Label: "Investing", Interests: []apitest.Interest{{Label: "Bonds", Size: 3}}})
+	body = getPage(t, srv, "/ui/", http.StatusOK)
+	assert.Contains(t, body, `<li><a href="/ui/interests/`+areas.Areas[0]+`" title="Engineering">Engineering</a></li>`,
+		"the areas, in the areas shape")
+	assert.NotContains(t, body, "Kafka")
+	assert.Contains(t, body, `<a class="all" href="/ui/interests">All 2 →</a>`)
 
 	titled(t, srv, "https://example.com/a", "A", store.DocStateFetched)
 	srv.AddDocument(t, "https://example.com/pending", store.DocStatePending)
@@ -1691,37 +1700,112 @@ func TestUI_Interests(t *testing.T) {
 	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
 	c := srv.AddDocument(t, "https://example.com/c", store.DocStateFetched)
 	d := srv.AddDocument(t, "https://example.com/d", store.DocStateFetched)
-	interest := srv.AddInterest(t, "Stream <processing>", a, b, c, d)
+	interest := srv.AddInterest(t, "Stream <processing>", a, b, c, d).Interests[0]
 
 	list := getPage(t, srv, "/ui/interests", http.StatusOK)
-	assert.Contains(t, list, `<a href="/ui/interests/`+interest.ID+`">Stream &lt;processing&gt;</a>`)
+	assert.Contains(t, list, `<a href="/ui/interests/`+interest+`">Stream &lt;processing&gt;</a>`)
 	assert.Contains(t, list, "<b>4</b> documents")
-	assert.Contains(t, list, `<meter class="meter" min="0" max="1" value="0.90">0.90</meter>0.90</span>`, "cohesion")
+	assert.Contains(t, list, `<meter class="meter" min="0" max="1" value="0.70">0.70</meter>0.70</span>`, "cohesion")
 	assert.Contains(t, list, `<a href="/ui/documents/`+a.ID+`" title="Kafka partitions">Kafka partitions</a>`)
-	assert.Contains(t, list, "1 topic curio found in your library, largest first.</p>", "the run's count, all shown")
+	assert.Contains(t, list, "1 interest curio found in your library, largest first.</p>", "the run's count, all shown")
 	assert.Contains(t, list, `title="https://example.com/c">example.com/c</a>`, "a card lists 3 members")
 	assert.NotContains(t, list, "example.com/d", "and no more")
 	assert.NotContains(t, list, `class="pager"`, "one page")
 
-	one := getPage(t, srv, "/ui/interests/"+interest.ID, http.StatusOK)
+	one := getPage(t, srv, "/ui/interests/"+interest, http.StatusOK)
 	assert.Contains(t, one, "<h1>Stream &lt;processing&gt;</h1>")
 	assert.Contains(t, one, `<span class="badge badge-accent plain">4 documents</span>`)
 	assert.Regexp(t, `<span class="sep">·</span><span class="text">run of \d{4}-\d\d-\d\d \d\d:\d\d</span></div>`, one)
 	assert.Contains(t, one, `<a class="doc-title untitled" href="/ui/documents/`+b.ID+
 		`" title="https://example.com/b">example.com/b</a>`)
 	assert.Contains(t, one, `<td class="num muted">2</td>`, "ranked")
-	assert.Contains(t, one, `</meter>0.80</span></td>`)
+	assert.Contains(t, one, `</meter>0.85</span></td>`)
 	assert.NotContains(t, one, `class="pager"`, "one page")
+	assert.Contains(t, one, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a></nav>`,
+		"a flat interest has no area")
 
-	// Interests get new IDs with every rebuild: one not found leads back to
-	// them.
+	// An identity the upgrade's regrouping never knew leads back to the
+	// interests.
 	gone := getPage(t, srv, "/ui/interests/no-such-interest", http.StatusNotFound)
-	assert.Contains(t, gone, "<p>interest &#34;no-such-interest&#34; not found: interests get new IDs each time "+
-		"they are rebuilt</p>")
+	assert.Contains(t, gone, "<p>interest &#34;no-such-interest&#34; not found: interests were regrouped when curio "+
+		"was upgraded, so links from before then no longer work</p>")
 	assert.Contains(t, gone, `<a class="btn btn-primary" href="/ui/interests">Start over</a>`)
-	_, err := srv.DB.Exec(`UPDATE clusters SET tenant_id = 'other' WHERE id = ?`, interest.ID)
-	require.NoError(t, err)
-	getPage(t, srv, "/ui/interests/"+interest.ID, http.StatusNotFound)
+}
+
+// TestUI_InterestsAreas: in the areas shape, the Interests are area cards
+// naming their largest interests; an area's page lists every interest it
+// holds as cards; an interest's page names its area, and lists its loose
+// fits after its members, tagged, the pager counting both.
+func TestUI_InterestsAreas(t *testing.T) {
+	srv := apitest.Start(t)
+	a := titled(t, srv, "https://example.com/a", "Kafka partitions", store.DocStateFetched)
+	b := srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	loose := titled(t, srv, "https://example.com/loose", "Nearly Kafka", store.DocStateFetched)
+	children := make([]apitest.Interest, 0, 7)
+	children = append(children, apitest.Interest{Label: "Kafka", Members: []*store.Document{a, b},
+		Loose: []*store.Document{loose}})
+	for i := range 6 {
+		children = append(children, apitest.Interest{Label: fmt.Sprintf("Topic <%d>", i), Size: 10 - i})
+	}
+	run := srv.AddAreas(t, apitest.Area{Label: "Streams <and> logs", Interests: children},
+		apitest.Area{Interests: []apitest.Interest{{Label: "Bonds", Size: 3}}})
+	area, kafka := run.Areas[0], run.Interests[0]
+
+	list := getPage(t, srv, "/ui/interests", http.StatusOK)
+	assert.Contains(t, list, `<p class="lede">2 areas holding 8 interests in your library, largest first.</p>`)
+	assert.Contains(t, list, `<a href="/ui/interests/`+area+`">Streams &lt;and&gt; logs</a>`)
+	assert.Contains(t, list, `<span><b>7</b> interests</span>`)
+	assert.Contains(t, list, `<li><a href="/ui/interests/`+run.Interests[1]+`" title="Topic &lt;0&gt;">Topic &lt;0&gt;</a><span class="n">10</span></li>`)
+	assert.Equal(t, 5+1, strings.Count(list, `</a><span class="n">`), "5 interests a card")
+	assert.Contains(t, list, `<a class="all" href="/ui/interests/`+area+`">All 7 interests →</a>`)
+	assert.Contains(t, list, `<span class="unlabeled">Unlabeled area</span>`)
+	assert.NotContains(t, list, "Kafka partitions", "an area card names interests, not documents")
+	assert.Contains(t, list, `<span class="n">50</span> in an interest`, "members")
+	assert.Contains(t, list, `<span class="n">1</span> in none`, "the loose fit")
+
+	page := getPage(t, srv, "/ui/interests/"+area, http.StatusOK)
+	assert.Contains(t, page, "<h1>Streams &lt;and&gt; logs</h1>")
+	assert.Contains(t, page, `<span class="badge plain">7 interests</span>`)
+	assert.Equal(t, 7, strings.Count(page, `<li class="card interest">`), "every interest of the area")
+	assert.Contains(t, page, `<a href="/ui/documents/`+a.ID+`" title="Kafka partitions">Kafka partitions</a>`,
+		"each with its members")
+	assert.NotContains(t, page, `class="pager"`)
+
+	one := getPage(t, srv, "/ui/interests/"+kafka, http.StatusOK)
+	assert.Contains(t, one, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a>`+
+		`<span class="sep">›</span><a class="truncate" href="/ui/interests/`+area+`" title="Streams &lt;and&gt; logs">`+
+		`Streams &lt;and&gt; logs</a></nav>`)
+	assert.Contains(t, one, `<span class="badge plain">1 loose fit</span>`)
+	assert.Contains(t, one, `<td class="num muted">3</td>`, "the loose fit ranks after the members")
+	assert.Equal(t, 1, strings.Count(one, ">loose fit</span>"), "tagged, the members not")
+	assert.Contains(t, one, `title="Nearly Kafka">Nearly Kafka</a>`)
+}
+
+// TestUI_InterestsGrouping: before the first rebuild is done, the
+// Interests say the library is being grouped while one is queued or
+// running, and that there are none yet otherwise; a retired interest is a
+// 410 saying what became of it.
+func TestUI_InterestsGrouping(t *testing.T) {
+	srv := apitest.Start(t)
+	assert.Contains(t, getPage(t, srv, "/ui/interests", http.StatusOK), "<h2>No interests yet</h2>")
+	enqueueRebuild(t, srv)
+	body := getPage(t, srv, "/ui/interests", http.StatusOK)
+	assert.Contains(t, body, "<h2>Your library is being grouped for the first time</h2>")
+	assert.Contains(t, body, `<div class="rebuild-state" id="rebuild-state"><p>Rebuild queued</p></div>`)
+	assert.NotContains(t, body, "No interests yet")
+
+	d := make([]*store.Document, 3)
+	for i := range d {
+		d[i] = srv.AddDocument(t, fmt.Sprintf("https://example.com/%d", i), store.DocStateFetched)
+	}
+	first := srv.AddInterests(t, apitest.Interest{Label: "Kafka <streams>", Members: d})
+	srv.SplitInterest(t, first, first.Interests[0], apitest.Interest{Label: "Kafka Connect", Members: d[:2]},
+		apitest.Interest{Label: "Kafka <Streams>", Members: d[2:]})
+	gone := getPage(t, srv, "/ui/interests/"+first.Interests[0], http.StatusGone)
+	assert.Contains(t, gone, `interest &#34;Kafka &lt;streams&gt;&#34; was retired by the rebuild of `)
+	assert.Contains(t, gone, `it split into &#34;Kafka Connect&#34; and &#34;Kafka &lt;Streams&gt;&#34;</p>`)
+	assert.Contains(t, gone, `<a class="btn btn-primary" href="/ui/interests">Start over</a>`)
+	uitest.AssertInert(t, gone)
 }
 
 // TestUI_InterestsPages: the Interests show 24 cards a page, largest
@@ -1739,12 +1823,11 @@ func TestUI_InterestsPages(t *testing.T) {
 		interests = append(interests, apitest.Interest{Label: fmt.Sprintf("Topic %02d", i), Size: 100 - i})
 	}
 	interests[0].Members = []*store.Document{lens, bare}
-	clusters := srv.AddInterests(t, interests...)
-	run := clusters[0].RunID
+	run := srv.AddInterests(t, interests...).ID
 
 	first := getPage(t, srv, "/ui/interests", http.StatusOK)
 	assert.Equal(t, 24, strings.Count(first, `<li class="card interest">`))
-	assert.Contains(t, first, `<p class="lede">30 topics curio found in your library, largest first.</p>`)
+	assert.Contains(t, first, `<p class="lede">30 interests curio found in your library, largest first.</p>`)
 	assert.Contains(t, first, "Topic 23")
 	assert.NotContains(t, first, "Topic 24")
 	assert.Contains(t, first, `<span class="pager-summary">Interests 1–24 of 30</span>`)
@@ -1769,7 +1852,7 @@ func TestUI_InterestsPages(t *testing.T) {
 		assert.Equal(t, ui.CSP, p.header.Get("Content-Security-Policy"), path)
 		assert.Equal(t, "nosniff", p.header.Get("X-Content-Type-Options"), path)
 		assert.Equal(t, "no-referrer", p.header.Get("Referrer-Policy"), path)
-		assert.Contains(t, p.body, `<p class="lede">30 topics curio found in your library, largest first.</p>`, path)
+		assert.Contains(t, p.body, `<p class="lede">30 interests curio found in your library, largest first.</p>`, path)
 		assert.Contains(t, p.body, `aria-label="Coverage"`, path)
 		assert.Contains(t, p.body, `id="rebuild-poll"`, path)
 		assert.Contains(t, p.body, "<p>This list has 2 pages.</p>", path)
@@ -1791,7 +1874,7 @@ func TestUI_InterestsRunChanged(t *testing.T) {
 	for i := range 30 {
 		interests = append(interests, apitest.Interest{Label: fmt.Sprintf("Topic %02d", i), Size: 100 - i})
 	}
-	run := srv.AddInterests(t, interests...)[0].RunID
+	run := srv.AddInterests(t, interests...).ID
 	const old = "00000000-0000-0000-0000-000000000000"
 	body := getPage(t, srv, "/ui/interests?page=2&run="+old, http.StatusOK)
 	assert.Contains(t, body, `<div class="callout callout-info mb-4" role="note">`)
@@ -1813,8 +1896,7 @@ func TestUI_InterestPages(t *testing.T) {
 		docs = append(docs, srv.AddDocument(t, fmt.Sprintf("https://example.com/%02d", i), store.DocStateFetched))
 	}
 	save(t, srv, store.Bookmark{URL: docs[55].URL, Title: new("Saved <as> this"), Source: store.SourceSafari})
-	interest := srv.AddInterest(t, "Sixty", docs...)
-	href := "/ui/interests/" + interest.ID
+	href := "/ui/interests/" + srv.AddInterest(t, "Sixty", docs...).Interests[0]
 
 	first := getPage(t, srv, href, http.StatusOK)
 	assert.Equal(t, 50, strings.Count(first, `<td class="num muted">`))
@@ -1857,7 +1939,7 @@ func TestUI_InterestRunDegrades(t *testing.T) {
 				d.Log = slog.New(&rec)
 			})
 			interest := srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/a", store.DocStateFetched))
-			p := get(t, srv, "/ui/interests/"+interest.ID)
+			p := get(t, srv, "/ui/interests/"+interest.Interests[0])
 			require.Equal(t, http.StatusOK, p.status, p.body)
 			assert.Contains(t, p.body, "<h1>Kafka</h1>")
 			assert.NotContains(t, p.body, "run of")
@@ -1872,22 +1954,24 @@ func TestUI_InterestRunDegrades(t *testing.T) {
 	}
 }
 
-// failingRunRead fails the read of a clustering run by its ID with err.
+// failingRunRead fails the read of a rebuild by its ID with err.
 type failingRunRead struct {
 	store.InsightStore
 	err error
 }
 
-func (f failingRunRead) GetRun(context.Context, string) (*store.ClusterRun, error) { return nil, f.err }
+func (f failingRunRead) GetRun(context.Context, string) (*store.InterestRun, error) {
+	return nil, f.err
+}
 
 // TestUI_InterestsEmptyRun: a run that grouped nothing says so, rather
-// than counting zero topics "largest first".
+// than counting zero interests "largest first".
 func TestUI_InterestsEmptyRun(t *testing.T) {
 	srv := apitest.Start(t)
-	srv.AddEmptyClusterRun(t, 5)
+	srv.AddRun(t, apitest.RunSpec{})
 
 	page := getPage(t, srv, "/ui/interests", http.StatusOK)
-	assert.Contains(t, page, `<p class="lede">The last clustering run found no topics in your library.</p>`)
+	assert.Contains(t, page, `<p class="lede">The last rebuild found no interests in your library.</p>`)
 	assert.Contains(t, page, "<h2>No interests in this run</h2>")
 	assert.NotContains(t, page, "largest first")
 }
@@ -1900,8 +1984,9 @@ func jobsPause() jobs.QueueUpdate { return jobs.QueueUpdate{Paused: new(true)} }
 func fingerprint(t *testing.T, srv *apitest.Server) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	for _, table := range []string{"documents", "document_extractions", "bookmarks", "jobs", "chunks", "clusters",
-		"cluster_documents", "cluster_runs", "queue_settings"} {
+	for _, table := range []string{"documents", "document_extractions", "bookmarks", "jobs", "chunks", "interest_runs",
+		"interests", "interest_groups", "interest_assignments", "interest_placements", "interest_lineage",
+		"insight_state", "queue_settings"} {
 		rows, err := srv.DB.Query("SELECT * FROM " + table + " ORDER BY rowid")
 		require.NoError(t, err, table)
 		cols, err := rows.Columns()
@@ -1938,18 +2023,19 @@ func TestUI_GETNeverWrites(t *testing.T) {
 	failJob(t, srv, failed, "HTTP 503")
 	bookmark(t, srv, doc.URL, store.SourceChrome, "/Reading")
 	save(t, srv, store.Bookmark{URL: failed.URL, Title: new("Failed"), Source: store.SourceSafari})
-	interest := srv.AddInterest(t, "Kafka", doc)
-	paged := make([]apitest.Interest, 0, 30)
+	retired := srv.AddInterest(t, "Kafka", doc).Interests[0]
+	paged := make([]apitest.Interest, 0, 31)
+	paged = append(paged, apitest.Interest{Label: "Kafka", Size: 31, Members: []*store.Document{doc}})
 	for i := range 30 {
-		paged = append(paged, apitest.Interest{Label: fmt.Sprintf("Topic %d", i), Size: 30 - i,
-			Members: []*store.Document{doc}})
+		paged = append(paged, apitest.Interest{Label: fmt.Sprintf("Topic %d", i), Size: 30 - i})
 	}
-	run := srv.AddInterests(t, paged...)[0].RunID
+	pagedRun := srv.AddInterests(t, paged...)
+	run, interest := pagedRun.ID, pagedRun.Interests[0]
 	queued := srv.AddDocument(t, "https://example.com/queued", store.DocStateFetched)
 	_, err := srv.Deps.Documents.RequeueFetch(ctx, apitest.TenantID, queued.ID)
 	require.NoError(t, err)
 	enqueueRebuild(t, srv)
-	failRun(t, srv, "boom")
+	srv.AddFailedRun(t, "boom")
 	_, err = srv.Deps.Gate.Update(ctx, jobsPause())
 	require.NoError(t, err)
 	before := fingerprint(t, srv)
@@ -1979,13 +2065,14 @@ func TestUI_GETNeverWrites(t *testing.T) {
 		"/ui/?content_type=bogus", "/ui/search", "/ui/search?q=kafka", "/ui/status", "/ui/library",
 		"/ui/library?state=failed", "/ui/library?content_type=article&host=example.com&folder=/Reading", cursor, more,
 		"/ui/library?state=bogus", "/ui/documents/" + doc.ID, "/ui/documents/" + doc.ID + "?images=1",
-		"/ui/documents/" + failed.ID, "/ui/documents/nope", "/ui/interests", "/ui/interests/" + interest.ID, "/ui/nope",
+		"/ui/documents/" + failed.ID, "/ui/documents/nope", "/ui/interests", "/ui/interests/" + interest,
+		"/ui/interests/" + retired, "/ui/nope",
 		assetRE.FindStringSubmatch(home)[1], "/ui/static/nope.css", "/ui/status?poll=bogus",
 		"/ui/documents/" + doc.ID + "?poll=jobs", "/ui/interests?poll=live", "/ui/failures",
 		"/ui/failures?poll=bogus", "/ui/library?cause=other&host=example.com",
 		"/ui/interests?page=2&run=" + run, "/ui/interests?page=2&run=00000000-0000-0000-0000-000000000000",
-		"/ui/interests?page=3", "/ui/interests?page=x", "/ui/interests/" + interest.ID + "?page=2",
-		"/ui/interests/" + interest.ID + "?page=0",
+		"/ui/interests?page=3", "/ui/interests?page=x", "/ui/interests/" + interest + "?page=2",
+		"/ui/interests/" + interest + "?page=0",
 	} {
 		p := get(t, srv, path)
 		assert.Less(t, p.status, http.StatusInternalServerError, path)

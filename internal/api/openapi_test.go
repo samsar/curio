@@ -348,6 +348,15 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 	})
 	s.ready(t)
 
+	// Before the first rebuild: no run, nothing grouped, and no rebuild
+	// underway.
+	run([]exchange{
+		{"GET /v1/interests", get("/v1/interests"), http.StatusOK},
+		{"GET /v1/interests/unsorted", get("/v1/interests/unsorted"), http.StatusOK},
+		{"GET /v1/interests/changes", get("/v1/interests/changes"), http.StatusOK},
+	})
+	in := seedInterestFixtures(t, s, f)
+
 	// In order: the writes come after the reads of what they change.
 	run([]exchange{
 		{"GET /v1/healthz", get("/v1/healthz"), http.StatusOK},
@@ -405,11 +414,20 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/failures", get("/v1/failures"), http.StatusOK},
 
 		{"GET /v1/interests", get("/v1/interests"), http.StatusOK},
+		{"GET /v1/interests", get("/v1/interests?level=interest"), http.StatusOK},
 		{"GET /v1/interests", get("/v1/interests?offset=1"), http.StatusOK},
 		{"GET /v1/interests", get("/v1/interests?offset=-1"), http.StatusBadRequest},
-		{"GET /v1/interests/{id}", get("/v1/interests/" + f.interest), http.StatusOK},
-		{"GET /v1/interests/{id}", get("/v1/interests/" + f.interest + "?offset=1"), http.StatusOK},
-		{"GET /v1/interests/{id}", get("/v1/interests/" + f.interest + "?offset=x"), http.StatusBadRequest},
+		{"GET /v1/interests", get("/v1/interests?level=area"), http.StatusBadRequest},
+		{"GET /v1/interests/{id}", get("/v1/interests/" + in.a1), http.StatusOK},
+		{"GET /v1/interests/{id}", get("/v1/interests/" + in.i1), http.StatusOK},
+		{"GET /v1/interests/{id}", get("/v1/interests/" + in.i4), http.StatusOK},
+		{"GET /v1/interests/{id}", get("/v1/interests/" + in.i1 + "?offset=1"), http.StatusOK},
+		{"GET /v1/interests/{id}", get("/v1/interests/" + in.i1 + "?offset=x"), http.StatusBadRequest},
+		{"GET /v1/interests/{id}", get("/v1/interests/" + in.i2), http.StatusGone},
+		{"GET /v1/interests/{id}", get("/v1/interests/" + unknown), http.StatusNotFound},
+		{"GET /v1/interests/unsorted", get("/v1/interests/unsorted"), http.StatusOK},
+		{"GET /v1/interests/unsorted", get("/v1/interests/unsorted?offset=-1"), http.StatusBadRequest},
+		{"GET /v1/interests/changes", get("/v1/interests/changes"), http.StatusOK},
 		{"POST /v1/interests/rebuild", post("/v1/interests/rebuild"), http.StatusAccepted},
 
 		{"GET /v1/jobs", get("/v1/jobs?status=failed"), http.StatusOK},
@@ -566,12 +584,15 @@ func (seen propertiesSeen) missing(doc *openapi3.T, ops []*openapi3.Operation) [
 	return out
 }
 
-// contractFixtures are the IDs the contract test's requests name.
+// contractFixtures are what the contract test's requests name.
 type contractFixtures struct {
 	fetched, failed, dead string // documents
 	bookmark              string
 	failedJob             string
-	interest              string
+	// Documents the interest fixtures group: a titled one with content,
+	// the failed one, untitled and named by its bookmark, an indexed
+	// untitled one, also named by its bookmark, and a titled one.
+	titled, named, untitled, plain *store.Document
 }
 
 // seedContractFixtures fills s with a little of everything, so that every
@@ -581,8 +602,8 @@ type contractFixtures struct {
 // an extraction error message, an indexed untitled one, a document failed
 // as anti-bot and a dead one, four bookmarks (one with a folder and tags,
 // one of each untitled document with a title of its own), a failed job and
-// done ones, and an interest with a summary, whose members are a titled
-// document and the untitled failed one.
+// done ones. The interests come later (seedInterestFixtures), after the
+// requests of a library never grouped.
 func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	t.Helper()
 	ctx := context.Background()
@@ -626,7 +647,7 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	require.NoError(t, err)
 	dead := s.seedDocument(t, "https://example.com/dead", store.DocStateDead)
 	// A job due later, which the queue counts apart, with when it is due.
-	require.NoError(t, s.deps.Queue.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindCluster,
+	require.NoError(t, s.deps.Queue.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindIndex,
 		RunAfter: time.Now().Add(24 * time.Minute)}))
 
 	folder, title := "/Reading/Kafka", "A"
@@ -650,12 +671,27 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 		Source: store.SourceChrome, SavedAt: time.Now().UTC().Add(-2 * time.Hour)})
 	require.NoError(t, err)
 
-	// The failed document is untitled, and named by its bookmark.
-	interest := s.seedInterest(t, "local", "Kafka", a, failed)
-	_, err = s.db.Exec(`UPDATE clusters SET summary = 'Streaming with Kafka.' WHERE id = ?`, interest.ID)
-	require.NoError(t, err)
 	return contractFixtures{fetched: a.ID, failed: failed.ID, dead: dead.ID, bookmark: bookmark.ID,
-		failedJob: job.ID, interest: interest.ID}
+		failedJob: job.ID, titled: a, named: failed, untitled: untitled, plain: b}
+}
+
+// seedInterestFixtures commits two rebuilds of an areas-shaped library,
+// the second of which split, merged, moved, dissolved and created (see
+// eventsFixture): the titled document and the named one are an interest's
+// members, the plain one its loose fit, and the untitled one and a titled
+// one are unsorted; a document is placed into the interest since, and one
+// into Unsorted; and a newer rebuild failed, which the list's state
+// reports.
+func seedInterestFixtures(t *testing.T, s *testServer, f contractFixtures) eventsFixture {
+	t.Helper()
+	unsorted := s.seedDocument(t, "https://example.com/unsorted", store.DocStateFetched)
+	_, err := s.db.Exec(`UPDATE documents SET title = 'Far from everything' WHERE id = ?`, unsorted.ID)
+	require.NoError(t, err)
+	e := s.seedEvents(t, []*store.Document{f.titled, f.named}, f.plain, f.untitled, unsorted)
+	s.placeDocument(t, e.second, e.i1, s.seedDocument(t, "https://example.com/placed", store.DocStateFetched))
+	s.placeDocument(t, e.second, "", s.seedDocument(t, "https://example.com/placed-unsorted", store.DocStateFetched))
+	s.seedFailedRun(t, "ollama unreachable: connection refused")
+	return e
 }
 
 // unsavableBookmark is a bookmark store that can't save url, for an import

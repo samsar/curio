@@ -702,69 +702,214 @@ func (c *Client) RelatedDocuments(ctx context.Context, docID string, k int) (*Re
 	return &out, nil
 }
 
-// InterestMember mirrors api.InterestMember. MarkdownPath is the absolute
-// on-disk path to the member document's markdown.
+// InterestMember mirrors api.InterestMember: a member, a loose fit, or a
+// document placed into the interest since the rebuild (Fit says which).
+// MarkdownPath is the absolute on-disk path to its markdown.
 type InterestMember struct {
-	DocID        string  `json:"doc_id"`
-	Title        string  `json:"title,omitempty"`
-	URL          string  `json:"url"`
-	MarkdownPath string  `json:"markdown_path,omitempty"`
-	Similarity   float64 `json:"similarity"`
+	DocID         string  `json:"doc_id"`
+	Title         string  `json:"title,omitempty"`
+	BookmarkTitle string  `json:"bookmark_title,omitempty"`
+	URL           string  `json:"url"`
+	State         string  `json:"state"`
+	MarkdownPath  string  `json:"markdown_path,omitempty"`
+	Similarity    float64 `json:"similarity"`
+	Fit           string  `json:"fit"`
 }
 
-// Interest mirrors api.InterestResponse (a labeled cluster).
+// InterestRef mirrors api.InterestRef.
+type InterestRef struct {
+	ID      string `json:"id"`
+	Label   string `json:"label,omitempty"`
+	Retired bool   `json:"retired"`
+}
+
+// InterestEvent mirrors api.InterestEvent: kept, moved, split, merged,
+// dissolved or new.
+type InterestEvent struct {
+	Event  string       `json:"event"`
+	Level  string       `json:"level"`
+	From   *InterestRef `json:"from,omitempty"`
+	To     *InterestRef `json:"to,omitempty"`
+	Area   *InterestRef `json:"area,omitempty"`
+	Shared int          `json:"shared,omitempty"`
+}
+
+// Interest levels.
+const (
+	LevelArea     = "area"
+	LevelInterest = "interest"
+)
+
+// Interest mirrors api.InterestResponse: an area, with its interests, or
+// an interest, with its members.
 type Interest struct {
-	ID       string           `json:"id"`
-	Label    string           `json:"label,omitempty"`
-	Summary  string           `json:"summary,omitempty"`
-	Size     int              `json:"size"`
-	Cohesion float64          `json:"cohesion"`
-	Members  []InterestMember `json:"members,omitempty"`
+	ID          string           `json:"id"`
+	RunID       string           `json:"run_id"`
+	Level       string           `json:"level"`
+	ParentID    string           `json:"parent_id,omitempty"`
+	ParentLabel string           `json:"parent_label,omitempty"`
+	Label       string           `json:"label,omitempty"`
+	Summary     string           `json:"summary,omitempty"`
+	Size        int              `json:"size"`
+	Loose       int              `json:"loose"`
+	New         int              `json:"new"`
+	Cohesion    float64          `json:"cohesion"`
+	NumChildren int              `json:"num_children,omitempty"`
+	Children    []Interest       `json:"children,omitempty"`
+	Members     []InterestMember `json:"members,omitempty"`
+	NewMembers  []InterestMember `json:"new_members,omitempty"`
+	Events      []InterestEvent  `json:"events,omitempty"`
+}
+
+// InterestRebuild mirrors api.InterestRebuild: what the latest rebuild
+// was and did.
+type InterestRebuild struct {
+	Trigger          string `json:"trigger"`
+	Kind             string `json:"kind"`
+	SplitCheck       bool   `json:"split_check"`
+	ChangedDocuments int    `json:"changed_documents"`
+	Kept             int    `json:"kept"`
+	Created          int    `json:"created"`
+	Split            int    `json:"split"`
+	Merged           int    `json:"merged"`
+	Moved            int    `json:"moved"`
+	Dissolved        int    `json:"dissolved"`
+}
+
+// The states of the next rebuild (InterestsState.State). A state this
+// client doesn't know reads as StateCurrent.
+const (
+	StateOff        = "off"
+	StateRebuilding = "rebuilding"
+	StateQueued     = "queued"
+	StateFailing    = "failing"
+	StateCurrent    = "current"
+	StateNone       = "none"
+)
+
+// InterestsState mirrors api.InterestsState.
+type InterestsState struct {
+	State     string `json:"state"`
+	LastError string `json:"last_error,omitempty"`
 }
 
 // InterestList mirrors api.InterestListResponse.
 type InterestList struct {
-	RunID        string     `json:"run_id,omitempty"`
-	ComputedAt   *time.Time `json:"computed_at,omitempty"`
-	Algo         string     `json:"algo,omitempty"`
-	NumDocuments int        `json:"num_documents"`
-	NumClusters  int        `json:"num_clusters"`
-	NumNoise     int        `json:"num_noise"`
-	Items        []Interest `json:"items"`
+	RunID        string           `json:"run_id,omitempty"`
+	ComputedAt   *time.Time       `json:"computed_at,omitempty"`
+	Algo         string           `json:"algo,omitempty"`
+	Shape        string           `json:"shape,omitempty"`
+	NumDocuments int              `json:"num_documents"`
+	NumAreas     int              `json:"num_areas"`
+	NumInterests int              `json:"num_interests"`
+	NumLoose     int              `json:"num_loose"`
+	NumUnsorted  int              `json:"num_unsorted"`
+	NumNew       int              `json:"num_new"`
+	Total        int              `json:"total"`
+	Rebuild      *InterestRebuild `json:"rebuild,omitempty"`
+	Next         InterestsState   `json:"next"`
+	Items        []Interest       `json:"items"`
 }
 
-// ListInterestsOpts filters GET /v1/interests.
+// ListInterestsOpts filters GET /v1/interests. A zero size is the
+// daemon's default.
 type ListInterestsOpts struct {
-	Limit   int // max interests
-	Members int // members to include per interest (0 = server default)
+	Limit    int    // top-level groups
+	Offset   int    // groups to skip
+	Children int    // interests per area
+	Members  int    // members per interest
+	Level    string // LevelInterest lists every interest; "" the top-level groups
 }
 
 func (c *Client) ListInterests(ctx context.Context, opts ListInterestsOpts) (*InterestList, error) {
 	q := url.Values{}
-	if opts.Limit > 0 {
-		q.Set("limit", strconv.Itoa(opts.Limit))
-	}
-	if opts.Members > 0 {
-		q.Set("members", strconv.Itoa(opts.Members))
-	}
-	path := "/v1/interests"
-	if len(q) > 0 {
-		path += "?" + q.Encode()
+	setPositive(q, "limit", opts.Limit)
+	setPositive(q, "offset", opts.Offset)
+	setPositive(q, "children", opts.Children)
+	setPositive(q, "members", opts.Members)
+	if opts.Level != "" {
+		q.Set("level", opts.Level)
 	}
 	var out InterestList
-	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, withQuery("/v1/interests", q), nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) GetInterest(ctx context.Context, id string, members int) (*Interest, error) {
-	path := "/v1/interests/" + id
-	if members > 0 {
-		path += "?members=" + strconv.Itoa(members)
-	}
+// GetInterestOpts page GET /v1/interests/{id}. A zero Members is the
+// daemon's default.
+type GetInterestOpts struct {
+	Members int // an interest's members and loose fits; each of an area's interests' members
+	Offset  int // an interest's members and loose fits to skip
+}
+
+// GetInterest returns an area or an interest of the latest rebuild. A
+// retired one is an *APIError whose Retired says what became of it.
+func (c *Client) GetInterest(ctx context.Context, id string, opts GetInterestOpts) (*Interest, error) {
+	q := url.Values{}
+	setPositive(q, "members", opts.Members)
+	setPositive(q, "offset", opts.Offset)
 	var out Interest
-	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, withQuery("/v1/interests/"+url.PathEscape(id), q), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UnsortedMember mirrors api.UnsortedMember.
+type UnsortedMember struct {
+	DocID         string  `json:"doc_id"`
+	Title         string  `json:"title,omitempty"`
+	BookmarkTitle string  `json:"bookmark_title,omitempty"`
+	URL           string  `json:"url"`
+	State         string  `json:"state"`
+	MarkdownPath  string  `json:"markdown_path,omitempty"`
+	Similarity    float64 `json:"similarity"`
+	NearestID     string  `json:"nearest_id,omitempty"`
+	NearestLabel  string  `json:"nearest_label,omitempty"`
+}
+
+// UnsortedPage mirrors api.UnsortedPage.
+type UnsortedPage struct {
+	RunID  string           `json:"run_id,omitempty"`
+	Total  int              `json:"total"`
+	NumNew int              `json:"num_new"`
+	Items  []UnsortedMember `json:"items"`
+	New    []UnsortedMember `json:"new"`
+}
+
+// UnsortedOpts page GET /v1/interests/unsorted.
+type UnsortedOpts struct {
+	Limit  int
+	Offset int
+}
+
+// UnsortedInterests returns a page of the documents in no interest,
+// nearest first.
+func (c *Client) UnsortedInterests(ctx context.Context, opts UnsortedOpts) (*UnsortedPage, error) {
+	q := url.Values{}
+	setPositive(q, "limit", opts.Limit)
+	setPositive(q, "offset", opts.Offset)
+	var out UnsortedPage
+	if err := c.do(ctx, http.MethodGet, withQuery("/v1/interests/unsorted", q), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// InterestChanges mirrors api.InterestChanges.
+type InterestChanges struct {
+	RunID      string           `json:"run_id,omitempty"`
+	ComputedAt *time.Time       `json:"computed_at,omitempty"`
+	Rebuild    *InterestRebuild `json:"rebuild,omitempty"`
+	Events     []InterestEvent  `json:"events"`
+}
+
+// InterestChanges returns what the latest rebuild did.
+func (c *Client) InterestChanges(ctx context.Context) (*InterestChanges, error) {
+	var out InterestChanges
+	if err := c.do(ctx, http.MethodGet, "/v1/interests/changes", nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -775,13 +920,60 @@ type RebuildInterestsResponse struct {
 	JobID string `json:"job_id"`
 }
 
-// RebuildInterests triggers a fresh clustering run. Returns the job id to poll.
+// RebuildInterests queues a rebuild of the interests, or finds the one
+// already queued, and returns its job ID to poll.
 func (c *Client) RebuildInterests(ctx context.Context) (*RebuildInterestsResponse, error) {
 	var out RebuildInterestsResponse
 	if err := c.do(ctx, http.MethodPost, "/v1/interests/rebuild", nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// RetiredInterest mirrors api.RetiredInterest's members: what became of a
+// retired area or interest.
+type RetiredInterest struct {
+	ID         string              `json:"id"`
+	Level      string              `json:"level"`
+	Label      string              `json:"label,omitempty"`
+	RetiredAt  time.Time           `json:"retired_at"`
+	RunID      string              `json:"run_id"`
+	Successors []InterestSuccessor `json:"successors"`
+}
+
+// InterestSuccessor mirrors api.InterestSuccessor.
+type InterestSuccessor struct {
+	ID      string `json:"id"`
+	Level   string `json:"level"`
+	Label   string `json:"label,omitempty"`
+	Event   string `json:"event"`
+	Shared  int    `json:"shared"`
+	Retired bool   `json:"retired"`
+}
+
+// RetiredOf returns what became of a retired interest, if err is the
+// daemon's answer for one, and nil otherwise.
+func RetiredOf(err error) *RetiredInterest {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Retired
+	}
+	return nil
+}
+
+// setPositive sets name to n in q when n is positive.
+func setPositive(q url.Values, name string, n int) {
+	if n > 0 {
+		q.Set(name, strconv.Itoa(n))
+	}
+}
+
+// withQuery is path with q, when q has any value.
+func withQuery(path string, q url.Values) string {
+	if len(q) == 0 {
+		return path
+	}
+	return path + "?" + q.Encode()
 }
 
 // Queue mirrors api.QueueResponse: the queue gate's settings, whether the
@@ -875,6 +1067,9 @@ var ErrStarting = errors.New("daemon starting")
 // startingProblemType mirrors api.StartingProblemType.
 const startingProblemType = "urn:curio:problem:daemon-starting"
 
+// retiredProblemType mirrors api.InterestRetiredProblemType.
+const retiredProblemType = "urn:curio:problem:interest-retired"
+
 // Phases a starting daemon reports, mirroring api's. A daemon may report
 // one this client doesn't know; it is still starting.
 const (
@@ -936,6 +1131,9 @@ type APIError struct {
 	// Startup is what a starting daemon's healthz answer reported; nil for
 	// any other answer.
 	Startup *Startup
+	// Retired is what became of a retired interest, for the 410 the daemon
+	// answers it with; nil for any other answer.
+	Retired *RetiredInterest
 }
 
 // Error is the problem's detail, or its title when there is none. A server
@@ -1044,10 +1242,23 @@ func decodeError(resp *http.Response) *APIError {
 	}
 	apiErr := &APIError{Status: resp.StatusCode, Problem: p}
 	apiErr.Problem.RequestID = cmp.Or(apiErr.Problem.RequestID, resp.Header.Get("X-Request-Id"))
-	if apiErr.starting() {
+	switch {
+	case apiErr.starting():
 		apiErr.Startup = decodeStartup(body)
+	case apiErr.Status == http.StatusGone && p.Type == retiredProblemType:
+		apiErr.Retired = decodeRetired(body)
 	}
 	return apiErr
+}
+
+// decodeRetired reads the members a retired interest's problem adds, or
+// returns nil for one without them.
+func decodeRetired(body []byte) *RetiredInterest {
+	var r RetiredInterest
+	if json.Unmarshal(body, &r) != nil || r.ID == "" {
+		return nil
+	}
+	return &r
 }
 
 // decodeStartup reads the members a starting daemon's healthz answer adds

@@ -428,9 +428,12 @@ func (s Search) pageHref(page int) string { return searchHref(s.Query, s.Type, p
 // SearchHome is what the search page shows without a query, under the
 // box. Zero values are unknown: a read the home does without is left out.
 type SearchHome struct {
-	Searchable   int        // fetched documents
-	Interests    []Interest // the latest run's largest, largest first, without members
-	AllInterests int        // how many interests the run found
+	Searchable int // fetched documents
+	// Interests are the latest rebuild's largest top-level groups (areas,
+	// or interests in the flat shape), largest first, without members;
+	// AllInterests how many it has.
+	Interests    []Interest
+	AllInterests int
 }
 
 // Placeholder is the search box's placeholder: how many documents there
@@ -1163,9 +1166,10 @@ type DocumentBookmark struct {
 	SavedAt time.Time
 }
 
-// Interests is a page of the latest clustering run's interests, and a
-// rebuild of them. A poll's answer (Poll PollRebuild) holds the rebuild's
-// live regions alone, and reads no interest.
+// Interests is a page of the latest rebuild's top-level groups, its areas
+// each with its largest interests, or its interests in the flat shape, and
+// a rebuild of them. A poll's answer (Poll PollRebuild) holds the
+// rebuild's live regions alone, and reads no interest.
 type Interests struct {
 	Layout Layout
 	Poll   string
@@ -1175,8 +1179,8 @@ type Interests struct {
 	// run: the interests were rebuilt since, and this page is the newer
 	// run's.
 	RunChanged bool
-	Run        *InterestRun // nil before the first run finished
-	Interests  []Interest
+	Run        *InterestRun // nil before the first rebuild is done
+	Interests  []Interest   // the page's groups: areas, or flat interests
 	Rebuild    Rebuild
 }
 
@@ -1187,14 +1191,21 @@ const (
 	InterestMembersPageSize = 50
 )
 
+// Card counts: an area's card names its largest interests, and an
+// interest's its most similar members.
+const (
+	AreaCardInterests   = 5
+	InterestCardMembers = 3
+)
+
 func (v Interests) page() int { return max(v.Page, 1) }
 
-// Pages is how many pages the run's interests fill.
+// Pages is how many pages the run's top-level groups fill.
 func (v Interests) Pages() int {
 	if v.Run == nil {
 		return 0
 	}
-	return pageCount(v.Run.Interests, InterestsPageSize)
+	return pageCount(v.Run.Total, InterestsPageSize)
 }
 
 // OutOfRange is the page when it is past the last, nil otherwise.
@@ -1207,9 +1218,17 @@ func (v Interests) Pager() *Pager {
 	if v.Run == nil {
 		return nil
 	}
-	return newPager(pageSpan{Page: v.page(), Size: InterestsPageSize, Shown: len(v.Interests), Total: v.Run.Interests,
-		Noun: "Interests", Href: v.pageHref})
+	noun := "Interests"
+	if v.Run.HasAreas() {
+		noun = "Areas"
+	}
+	return newPager(pageSpan{Page: v.page(), Size: InterestsPageSize, Shown: len(v.Interests), Total: v.Run.Total,
+		Noun: noun, Href: v.pageHref})
 }
+
+// FirstGrouping reports whether the library is being grouped for the
+// first time: no rebuild is done, and one is queued or running.
+func (v Interests) FirstGrouping() bool { return v.Run == nil && v.Rebuild.InFlight() }
 
 // FirstPage is the first page of the run shown.
 func (v Interests) FirstPage() string { return v.pageHref(1) }
@@ -1225,8 +1244,8 @@ func (v Interests) pageHref(page int) string {
 }
 
 // Rebuild is the Interests page's rebuild: whether the page offers one,
-// whether one is queued or running, and what the newest clustering run
-// came to when it isn't the run the page shows.
+// whether one is queued or running, and what the newest rebuild came to
+// when it isn't the run the page shows.
 type Rebuild struct {
 	Enabled bool        // config.yaml's insight.enabled
 	Err     *PanelError // the queue or the runs couldn't be read
@@ -1263,9 +1282,9 @@ const (
 // yet replace it.
 func (b Rebuild) Outcome() RebuildOutcome {
 	switch {
-	case b.NewRun == string(store.ClusterRunDone):
+	case b.NewRun == string(store.InterestRunDone):
 		return RebuildReady
-	case b.NewRun == string(store.ClusterRunFailed) && !b.InFlight():
+	case b.NewRun == string(store.InterestRunFailed) && !b.InFlight():
 		return RebuildFailed
 	}
 	return RebuildNone
@@ -1287,30 +1306,51 @@ func (b Rebuild) Poller() Poller {
 	return p
 }
 
-// InterestRun is the clustering run the interests come from.
+// InterestRun is the rebuild the interests come from.
 type InterestRun struct {
 	ID         string
 	ComputedAt time.Time
 	Algo       string
+	Shape      string // flat or areas
 	Documents  int
-	Noise      int // documents in no interest
-	Interests  int // how many interests it found, shown or not
+	Areas      int
+	Interests  int
+	Loose      int // documents in no interest, close to one
+	Unsorted   int // documents close to none
+	// Total is how many top-level groups it has: its areas, or its
+	// interests in the flat shape.
+	Total int
 }
 
-// Clustered is how many of the run's documents are in an interest.
-func (r InterestRun) Clustered() int { return clustered(r.Documents, r.Noise) }
+// HasAreas reports whether the run groups its interests in areas.
+func (r InterestRun) HasAreas() bool { return r.Shape == string(store.InterestShapeAreas) }
 
-// Interest is one interest (a labeled cluster) and some of its members.
+// Outside is how many of the run's documents are in no interest: its
+// loose fits and the unsorted.
+func (r InterestRun) Outside() int { return r.Loose + r.Unsorted }
+
+// Clustered is how many of the run's documents are members of an
+// interest.
+func (r InterestRun) Clustered() int { return clustered(r.Documents, r.Outside()) }
+
+// Interest is an area or an interest, and some of its interests or its
+// members.
 type Interest struct {
-	ID       string
-	Label    string // empty while unlabeled
-	Summary  string
-	Size     int
-	Cohesion float64
-	Members  []Member
+	ID          string
+	Area        bool   // an area, which holds interests; an interest otherwise
+	ParentID    string // an interest's area, "" for none
+	ParentLabel string
+	Label       string // empty while unlabeled
+	Summary     string
+	Size        int // members: an area's interests'
+	Loose       int // loose fits: an area's interests'
+	Cohesion    float64
+	NumChildren int        // an area's interests
+	Children    []Interest // an area's largest interests
+	Members     []Member
 }
 
-// Member is a document of an interest.
+// Member is a document of an interest: one of its members, or a loose fit.
 type Member struct {
 	DocumentID string
 	Title      string
@@ -1319,6 +1359,8 @@ type Member struct {
 	BookmarkTitle string
 	URL           string
 	Similarity    float64
+	// Loose marks a loose fit: close to the interest, not grouped with it.
+	Loose bool
 }
 
 // Ref is how a list names the member.
@@ -1333,22 +1375,31 @@ func (m Member) Cell() DocCell {
 	return DocCell{Ref: ref, Where: ref.where()}
 }
 
-// InterestPage is one interest's page: its head, and a page of its members,
-// most similar first.
+// InterestPage is an area's page, with every interest it holds; or an
+// interest's, with a page of its members, then loose fits, most similar
+// first.
 type InterestPage struct {
-	Layout   Layout
-	Interest Interest // its Members are the page's; Size counts them all
+	Layout Layout
+	// Interest's Members are the page's; its Size and Loose count them
+	// all. An area's Children are all of them.
+	Interest Interest
 	// Page is the page of members shown, from 1; 0 is the first.
 	Page int
-	// RunAt is when the clustering run the interest comes from finished;
-	// zero when unknown.
+	// RunAt is when the rebuild the interest comes from finished; zero
+	// when unknown.
 	RunAt time.Time
 }
 
 func (p InterestPage) page() int { return max(p.Page, 1) }
 
-// Pages is how many pages the interest's members fill.
-func (p InterestPage) Pages() int { return pageCount(p.Interest.Size, InterestMembersPageSize) }
+// Pages is how many pages the interest's members and loose fits fill; an
+// area's interests fill one.
+func (p InterestPage) Pages() int {
+	if p.Interest.Area {
+		return 1
+	}
+	return pageCount(p.Interest.Size+p.Interest.Loose, InterestMembersPageSize)
+}
 
 // OutOfRange is the page when it is past the last, nil otherwise.
 func (p InterestPage) OutOfRange() *PageOutOfRange {
@@ -1357,14 +1408,18 @@ func (p InterestPage) OutOfRange() *PageOutOfRange {
 
 // Pager is the pager under the members, nil when they fit on one page.
 func (p InterestPage) Pager() *Pager {
+	if p.Interest.Area {
+		return nil
+	}
 	return newPager(pageSpan{Page: p.page(), Size: InterestMembersPageSize, Shown: len(p.Interest.Members),
-		Total: p.Interest.Size, Noun: "Documents", Suffix: ", most similar first", Href: p.pageHref})
+		Total: p.Interest.Size + p.Interest.Loose, Noun: "Documents", Suffix: ", most similar first", Href: p.pageHref})
 }
 
 func (p InterestPage) pageHref(page int) string { return interestPageHref(p.Interest.ID, page) }
 
-// RankedMember is a member and its rank among all the interest's members,
-// from 1, most similar first.
+// RankedMember is a member and its rank among all the interest's members
+// and loose fits, from 1, most similar first, the loose fits after the
+// members.
 type RankedMember struct {
 	Rank int
 	Member

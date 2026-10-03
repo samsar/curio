@@ -14,6 +14,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,10 @@ type Config struct {
 	Insight    Insight    `yaml:"insight"`
 	Generation Generation `yaml:"generation"`
 	UI         UI         `yaml:"ui"`
+
+	// deprecated are the keys the loaded file sets that nothing reads
+	// any more, for DeprecatedKeys.
+	deprecated []string
 }
 
 type Daemon struct {
@@ -170,20 +175,22 @@ type Chunking struct {
 	OverlapTokens int `yaml:"overlap_tokens"`
 }
 
-// Insight configures the insight layer (document clustering → interests).
+// Insight configures the insight layer (grouping documents into areas and
+// interests).
 type Insight struct {
-	// Enabled gates clustering. When false, POST /v1/interests/rebuild is
-	// refused; reading existing interests still works.
+	// Enabled gates grouping. When false, the daemon queues no rebuild and
+	// POST /v1/interests/rebuild is refused; reading existing interests
+	// still works.
 	Enabled bool `yaml:"enabled"`
-	// KNN is the neighbors-per-node in the clustering graph.
-	KNN int `yaml:"knn"`
-	// MinSimilarity is the cosine threshold to keep a graph edge (0..1). This
-	// is the main knob for cluster granularity — higher = tighter, more
-	// specific clusters and more noise; lower = broader clusters. The right
-	// value is corpus-dependent; tune it with the eval harness.
-	MinSimilarity float64 `yaml:"min_similarity"`
-	// MinClusterSize drops communities smaller than this to noise.
-	MinClusterSize int `yaml:"min_cluster_size"`
+	// KNN, MinSimilarity and MinClusterSize are deprecated and ignored:
+	// they tuned the flat clusterer the grouping replaced, whose constants
+	// are recorded on each run and changed in code (docs/decisions.md
+	// "Interests: two levels, stable identities, automatic rebuilds"). The
+	// strict decode still accepts the keys, with any value of their type,
+	// so a config.yaml that sets them loads; the daemon warns once.
+	KNN            int     `yaml:"knn,omitempty"`
+	MinSimilarity  float64 `yaml:"min_similarity,omitempty"`
+	MinClusterSize int     `yaml:"min_cluster_size,omitempty"`
 	// CenterVectors subtracts the corpus mean vector before clustering. Default
 	// true: many embedding models are anisotropic (vectors in a narrow cone),
 	// so without it raw cosines are uniformly high and the corpus collapses
@@ -283,11 +290,8 @@ func Default() Config {
 			OverlapTokens: 48,
 		},
 		Insight: Insight{
-			Enabled:        true,
-			KNN:            10,
-			MinSimilarity:  0.5,
-			MinClusterSize: 3,
-			CenterVectors:  true,
+			Enabled:       true,
+			CenterVectors: true,
 			// LLM labels by default (richer topic names + summaries). This
 			// needs a generation model, but with auto-pull the daemon fetches
 			// it on first start, and if it's ever unavailable the engine falls
@@ -335,6 +339,9 @@ func Load(path string) (Config, error) {
 	if err := cfg.applyLegacyWorkers(data); err != nil {
 		return Config{}, fmt.Errorf("invalid config %q: %w", path, err)
 	}
+	if err := cfg.recordDeprecatedKeys(data); err != nil {
+		return Config{}, fmt.Errorf("invalid config %q: %w", path, err)
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid config %q: %w", path, err)
 	}
@@ -374,6 +381,35 @@ func (c *Config) applyLegacyWorkers(data []byte) error {
 	c.Daemon.Workers = 0
 	return nil
 }
+
+// deprecatedInsightKeys are the insight keys nothing reads any more, in the
+// order DeprecatedKeys lists them.
+var deprecatedInsightKeys = []string{"knn", "min_similarity", "min_cluster_size"}
+
+// recordDeprecatedKeys notes which deprecated keys the file sets. Like
+// applyLegacyWorkers it keys off the keys present, not their values: any
+// value, the type's zero included, is a key the user wrote and should
+// remove.
+func (c *Config) recordDeprecatedKeys(data []byte) error {
+	var set struct {
+		Insight map[string]yaml.Node `yaml:"insight"`
+	}
+	// The strict decode in Load already accepted this document.
+	if err := yaml.Unmarshal(data, &set); err != nil {
+		return fmt.Errorf("re-read insight keys: %w", err)
+	}
+	for _, key := range deprecatedInsightKeys {
+		if _, ok := set.Insight[key]; ok {
+			c.deprecated = append(c.deprecated, "insight."+key)
+		}
+	}
+	return nil
+}
+
+// DeprecatedKeys lists the keys the loaded config.yaml sets that nothing
+// reads any more, as dotted paths in a fixed order; none for a Config Load
+// didn't read from a file.
+func (c Config) DeprecatedKeys() []string { return slices.Clone(c.deprecated) }
 
 // Validate checks invariants that the YAML schema can't enforce. Called by
 // Load; can also be called directly when constructing Config in tests. It
@@ -451,18 +487,6 @@ func (c Config) Validate() error {
 		return errors.New("fetcher.default must be set (native or web2md)")
 	default:
 		return fmt.Errorf("fetcher.default %q must be one of: native, web2md", c.Fetcher.Default)
-	}
-	if c.Insight.KNN <= 0 {
-		return fmt.Errorf("insight.knn must be positive, got %d", c.Insight.KNN)
-	}
-	if c.Insight.MinClusterSize <= 0 {
-		return fmt.Errorf("insight.min_cluster_size must be positive, got %d", c.Insight.MinClusterSize)
-	}
-	// Strictly positive: the clusterer treats a non-positive threshold as
-	// "unset" and substitutes its default, so 0 here would be silently ignored.
-	// Written so NaN (YAML .nan), which fails every comparison, is rejected.
-	if !(c.Insight.MinSimilarity > 0 && c.Insight.MinSimilarity <= 1) {
-		return fmt.Errorf("insight.min_similarity must be in (0, 1], got %g", c.Insight.MinSimilarity)
 	}
 	switch c.Insight.Labeling {
 	case "llm", "terms", "off":
