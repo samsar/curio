@@ -46,9 +46,15 @@ a job is on, once it has used one; and for a job that waits for a time,
 when it is due and why on a line of its own, the error a retry follows
 or the rate limit a fetch waits out, whole on hover. Then it offers a
 reload once there is something new to show: a new text, a failure, or
-another change. Interests does the same for a rebuild: queued or
-running, then "New interests are ready: reload", or why the rebuild
-failed. Failures refreshes its groups, and the count on its tab, after a
+another change. Interests says where its rebuilds stand: every 2 seconds
+while one is queued or running (and right after you click Rebuild),
+since when; then "New interests are ready: reload" once a newer rebuild
+is done. Otherwise it checks every 30 seconds, so a rebuild the daemon
+starts on its own shows up on an open page, and says what the daemon last
+found: when the interests were rebuilt and how much has changed since,
+that a rebuild is due and what it waits for, or that rebuilds are held
+(the embeddings drifted) or failing, with the error and when it is tried
+again. Failures refreshes its groups, and the count on its tab, after a
 refetch you make there and when you come back to its tab, never on a
 timer. Nothing refreshes while the tab is in the background; it catches
 up when you come back. If the daemon stops answering, a note says the
@@ -142,7 +148,11 @@ footer names the address the daemon listens on.
   its text, and beside it related documents, its bookmarks with their
   folders and tags, and its details: when it was added, updated and
   fetched (Jina Reader called out), its ID, where its markdown is, and
-  the `curio` commands that work for it. Under its head, **Refetch** and
+  the `curio` commands that work for it. Under its facts, a line says
+  where the last rebuild of the interests put it: "In Area › Interest", a
+  loose fit of one, in Unsorted with the interest it is nearest, or "New
+  since the last rebuild" with where it was placed; none before the first
+  rebuild. Under its head, **Refetch** and
   **Reindex**, and how its text was fetched; for a dead link, **Refetch
   anyway…**, which asks first. The text shown is at most the first 1
   MiB; the page says when it is cut and where the whole file is. A text
@@ -159,33 +169,69 @@ footer names the address the daemon listens on.
   page. A library of about 1,000 documents or more is grouped in two
   levels: areas, each holding interests ("29 areas holding 182 interests
   in your library"); a smaller one in interests alone. The head says how
-  many there are, a bar shows how many documents are in an interest and
-  how many in none, and each card gives its size, how alike its documents
-  are and its summary. An area's card lists its five largest interests,
-  each linking to its page, and leads to all of them; an interest's card
-  shows a few of its documents. An untitled document is named by its
-  bookmark's title, in italics. Numbered pages under the cards lead through
-  the rest (a phone shows "Page 2 of 10" between Previous and Next). A
-  rebuild that finishes while you page through leads to the new run's page
-  of that number, which says the interests were rebuilt; a page past the
-  last says how many pages there are. Until the first rebuild is done the
-  page says the library is being grouped for the first time.
-  An area's page lists every one of its interests as cards. An interest's
-  page names its area above the title and lists its documents by
-  similarity, 50 a page, ranked across the pages, with the run the
-  interest comes from. After its documents come its loose fits, each
-  tagged "loose fit": documents close to the interest but not grouped with
-  it, which never name it.
-  An interest keeps its ID, and its page its address, across rebuilds
+  many there are, and beside it where rebuilds stand: when the interests
+  were last rebuilt (fresh or warm) and how many documents changed since
+  against how many make the next due; that a rebuild is due, and what it
+  waits for (the library to settle, or a re-embedding to finish); queued,
+  and why the queue holds it; running, and since when; held, while the
+  embeddings may have drifted, with the fix (`curio reindex --all`); or
+  failing, with the error (whole on hover) and when it is tried again.
+  **Rebuild** groups the library again now, whatever that line says: a
+  rebuild you ask for isn't held, and it retries a failure at once; it is
+  disabled only while one is queued or running. For a week after a
+  rebuild that split, merged or dissolved interests, a note says how many
+  ("Rebuilt on Oct 9, 2026: 5 interests split, 1 merged, 9 new") and leads
+  to what changed. A bar shows where the run's documents, and those added
+  since, are: in an interest, a loose fit of one, new since the rebuild,
+  or unsorted, with their counts and shares under it. An area's card
+  counts its documents, its interests and those added since ("4 new"),
+  and lists its five largest interests, each with its size and a bar
+  against the largest, then "+ N more interests →" to the rest. An
+  interest's card counts its documents, its loose fits and its new ones,
+  and shows a few of its documents (an untitled one named by its
+  bookmark's title, in italics). After the last page's cards, **Unsorted**
+  counts the documents close to no interest and those placed there since.
+  Numbered pages under the cards lead through the rest (a phone shows
+  "Page 2 of 10" between Previous and Next). A rebuild that finishes while
+  you page through leads to the new run's page of that number, which says
+  the interests were rebuilt; a page past the last says how many pages
+  there are. Until the first rebuild is done the page says why: the
+  library is being grouped for the first time, the first grouping is due
+  once the library settles, how many documents it waits for, or that it
+  is held or failing.
+  With insight turned off in config.yaml (`insight.enabled: false`),
+  there is no Rebuild, and the page says how to turn it on.
+- **An area's page**: the area's summary, its documents, interests,
+  loose fits, new documents and cohesion, the run it comes from, and what
+  the last rebuild did to it; then its interests as cards, 24 a page.
+- **An interest's page**: Interests › its area › the interest above its
+  name, each cut on one line; its documents, loose fits, new documents,
+  cohesion and run. A note says what the last rebuild did to it, dated,
+  each name linking to its page: split off from another, another split
+  off from it, took in others, moved here from another area, or new; one
+  it only kept says nothing. On the first page, "New since the last
+  rebuild": the documents indexed since and placed into it by similarity,
+  newest first, each tagged new (the next rebuild decides for good); then
+  its documents by similarity, 50 a page, ranked across the pages; then,
+  under their own heading, its loose fits: documents close to it but not
+  grouped with it, which never name it.
+- **Unsorted** (`/ui/interests/unsorted`): the documents close to no
+  interest, nearest one first, 50 a page, each with the interest it is
+  nearest (on a phone, under the document's name) and how close; on the
+  first page, those placed there since.
+- **What changed** (`/ui/interests/changes`): the last rebuild, when it
+  ran, what started it and its counts, then what it split, merged, moved,
+  dissolved and created, under a heading each, areas first; a first
+  grouping, and a rebuild that changed nothing, say so in a line.
+- An interest keeps its ID, and its page its address, across rebuilds
   while it keeps most of its documents. One that a rebuild split, merged
-  into another or dissolved answers 410, saying when and what became of it
-  ("it merged into …"), with a way back to Interests. A link from before
-  the upgrade that brought areas answers 404: interests were regrouped
-  then.
-  **Rebuild**, at the top, groups the library again now; the daemon also
-  does on its own as the library changes. With insight turned off in
-  config.yaml (`insight.enabled: false`), there is no Rebuild, and the
-  page says so.
+  into another or dissolved answers 410 in the Interests' frame, saying
+  when and what became of it ("It split into these on Oct 9, 2026"), each
+  successor linking to its page with the documents it took (one retired
+  since is marked, and its page says what became of it). An ID nothing
+  knows answers 404: it may be from before an upgrade regrouped the
+  interests, or name one retired more than 180 days ago, which curio no
+  longer remembers.
 - **Status**: what curio is doing, and whether what it needs works. What
   needs your attention comes first: Ollama not ready, the embeddings
   drifted, or may have drifted, since the library was indexed (what
@@ -198,10 +244,12 @@ footer names the address the daemon listens on.
   and each pool's load and the jobs it finished in the last 10 minutes),
   and why documents failed (the five commonest causes as bars, each
   leading to its group on Failures, and **All failures →** to the tab);
-  beside them, health (the daemon, Ollama, the models, embedding drift,
-  the Jina Reader fallback and the YouTube fetcher, each with a status
-  dot), an estimate of when the queued work will be done, at the pace of
-  the last 10 minutes, and the jobs by status. The estimate counts only
+  beside them, health (the daemon, Ollama, the models, the interests,
+  embedding drift, the Jina Reader fallback and the YouTube fetcher,
+  each with a status dot; the interests' row says where their rebuilds
+  stand, in the line `curio status` prints, its dot a warning while they
+  are held or failing), an estimate of when the queued work will be done,
+  at the pace of the last 10 minutes, and the jobs by status. The estimate counts only
   the jobs that can run now: jobs due later (a retry backing off, a fetch
   waiting for a rate limit) are said apart, how many and when the first is
   due, and when they are all that is queued, the card says so instead of
@@ -256,5 +304,6 @@ pages, which the daemon checks. The rules, and why, are in
 [decisions.md](./decisions.md): "Dashboard: server-rendered pages in the
 daemon (phase 1)", "Dashboard: formatting budgets for stored markdown",
 "Dashboard: a design language under the CSP", "Dashboard: actions through
-/v1, sent by a first-party module", "Dashboard: the Failures tab" and
-"Local API: loopback only, no token, browsers shut out".
+/v1, sent by a first-party module", "Dashboard: the Failures tab",
+"Dashboard: two-level interests" and "Local API: loopback only, no token,
+browsers shut out".

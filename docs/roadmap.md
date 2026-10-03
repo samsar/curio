@@ -195,8 +195,11 @@ topic clusters that feel like an accurate picture of what the user reads.
   automatic rebuilds (a scheduler that queues one once about 5% of the
   library changed and it settled, held while the embeddings drifted,
   backing off after a failure) and placement of each document indexed
-  between rebuilds into its nearest interest. The dashboard's two-level
-  pages and the release's measurement are next.
+  between rebuilds into its nearest interest. So have the dashboard's
+  two-level pages (areas, interests with their lineage and new documents,
+  Unsorted, what a rebuild changed, a retired ID's page, a document's
+  place, the rebuilds' state on Interests and Status; decisions.md
+  "Dashboard: two-level interests"). The release's measurement is next.
 
 ## M5 — Suggestions and the digest
 
