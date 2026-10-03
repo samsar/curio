@@ -2143,9 +2143,10 @@ func TestUI_AreaPages(t *testing.T) {
 
 // TestUI_InterestLineage: an interest's page says what the latest rebuild
 // did to it, dated, each identity linked: it split off from one, another
-// split off from it, it took in others, it moved, it is new; one only
-// kept says nothing. Its first page lists the documents placed into it
-// since, and how many more there are.
+// split off from it, it took in others, it moved, it is new (one no old
+// interest reaches; a merge's isn't); one only kept says nothing. Its
+// first page lists the documents placed into it since, and how many more
+// there are.
 func TestUI_InterestLineage(t *testing.T) {
 	srv := apitest.Start(t)
 	d := docsOf(t, srv, "doc", 30)
@@ -2188,6 +2189,8 @@ func TestUI_InterestLineage(t *testing.T) {
 	}
 	save(t, srv, store.Bookmark{URL: d[29].URL, Title: new("Saved <as> this"), Source: store.SourceChrome})
 	band := getPage(t, srv, "/ui/interests/"+run.Interests[0], http.StatusOK)
+	assert.Regexp(t, `<ul class="lineage">\s*<li>New in this rebuild</li>\s*</ul>`, band,
+		"the rebuild created it, and no old interest reaches it")
 	assert.Contains(t, band, `<h2 id="new-band">New since the last rebuild</h2>`)
 	assert.Equal(t, 20, strings.Count(band, `<tr class="fit-new">`), "the newest 20")
 	for _, oldest := range placed[:2] {

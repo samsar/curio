@@ -95,19 +95,62 @@ func TestPercentile(t *testing.T) {
 	assert.True(t, math.IsNaN(Percentile(nil, 0.5)))
 }
 
-// TestCohesion_MatchesTheEngine pins the formula insight's summarize
-// stores: the mean of max(0, cos(member, normalized mean)).
+// TestCohesion_MatchesTheEngine: an interest's cohesion is the engine's
+// stored cohesion, the mean of its members' similarity to their float32
+// centroid (insight.Centroids, insight.AssignStrays), up to float32
+// rounding; and a member opposite its centroid counts 0, not a negative.
 func TestCohesion_MatchesTheEngine(t *testing.T) {
 	vecs := [][]float32{unit(1, 0), unit(0, 1), unit(1, 1), unit(-1, 0)}
 	groups := [][]int{{0, 1, 2}, {3}}
-	cents := Centroids(vecs, groups)
-	c := CohesionOf(vecs, groups, cents)
+	c := CohesionOf(vecs, groups, Centroids(vecs, groups))
 	// Centroid of the first group is (1,1)/√2: members score 1/√2, 1/√2, 1.
 	want := (2/math.Sqrt2 + 1) / 3
 	assert.InDelta(t, want, c.PerInterest[0], 1e-6)
 	assert.InDelta(t, 1, c.PerInterest[1], 1e-6)
 	assert.InDelta(t, (want+1)/2, c.Mean, 1e-6)
 	assert.InDelta(t, (3*want+1)/4, c.DocWeighted, 1e-6)
+
+	r := rand.New(rand.NewPCG(7, 7))
+	near := func(axis int) []float32 {
+		v := []float32{float32(r.NormFloat64() * 0.3), float32(r.NormFloat64() * 0.3), float32(r.NormFloat64() * 0.3)}
+		v[axis]++
+		return unit(v...)
+	}
+	labels := []int{0, 1, 0, 0, 1, insight.NoiseLabel, 1, 0}
+	points := make([]insight.Point, len(labels))
+	for i, l := range labels {
+		axis := 2
+		if l != insight.NoiseLabel {
+			axis = l
+		}
+		points[i] = insight.Point{ID: string(rune('a' + i)), Vector: near(axis)}
+	}
+	g := insight.Grouping{Shape: insight.ShapeFlat, Interest: labels, Area: make([]int, len(labels)),
+		Seeds: make([]insight.Seed, len(labels))}
+	for i := range g.Area {
+		g.Area[i], g.Seeds[i] = insight.NoiseLabel, insight.Seed{Area: -1, Interest: labels[i]}
+	}
+	cents, err := insight.Centroids(points, labels)
+	require.NoError(t, err)
+	fits, err := insight.AssignStrays(points, g, cents, insight.LooseFitThreshold)
+	require.NoError(t, err)
+	sums, members := make([]float64, 2), make([]int, 2)
+	for _, f := range fits {
+		if f.Kind == insight.FitMember {
+			sums[f.Interest] += f.Similarity
+			members[f.Interest]++
+		}
+	}
+	vecs = make([][]float32, len(points))
+	for i, p := range points {
+		vecs[i] = p.Vector
+	}
+	groups = Groups(labels)
+	require.Equal(t, [][]int{{0, 2, 3, 7}, {1, 4, 6}}, groups)
+	c = CohesionOf(vecs, groups, Centroids(vecs, groups))
+	for l, sum := range sums {
+		assert.InDelta(t, sum/float64(members[l]), c.PerInterest[l], 1e-6, "interest %d", l)
+	}
 
 	// A member opposite its centroid counts 0, not a negative.
 	vecs = [][]float32{unit(1, 0), unit(1, 0.1), unit(-1, 0)}
