@@ -215,7 +215,7 @@ failure and doubling up to every 5 minutes, until Ollama answers and the
 pull completes, so Ollama can start before or after the daemon. The first
 failure is logged at WARN in `~/.curio/logs/daemon.log`; retries, and the
 pulls they start, only at debug. Until the model is ready, index jobs retry
-with backoff and cluster labels fall back to term labels. Disable with
+with backoff and interest labels fall back to term labels. Disable with
 `embedding.auto_pull: false` / `generation.auto_pull: false` in
 `config.yaml` (e.g. on a metered connection), and pull manually instead.
 
@@ -500,7 +500,8 @@ curio schedule off            # at any time again
 `gentle` exists to keep the machine cool and quiet: embedding runs in
 Ollama's own process, so what spares the machine is fewer embed requests at
 once, one index job instead of four; lowering curio-daemon's priority
-wouldn't reach Ollama. Clustering runs one job at a time either way.
+wouldn't reach Ollama. Rebuilding the interests runs one job at a time
+either way.
 
 A pause and a schedule must both allow work. `curio resume` outside the
 window leaves the queue closed until the window opens; `curio schedule
