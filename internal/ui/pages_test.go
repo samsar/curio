@@ -214,8 +214,8 @@ func TestLibrary_Saved(t *testing.T) {
 // the page holds of them; the coverage bar's proportions are attributes.
 func interestsPage(page int) Interests {
 	v := Interests{Layout: Layout{Title: "Interests", Nav: NavInterests}, Page: page,
-		Run: &InterestRun{ID: "run-1", ComputedAt: time.Now(), Algo: "knn-graph", Documents: 3142, Noise: 1191,
-			Interests: 222}}
+		Run: &InterestRun{ID: "run-1", ComputedAt: time.Now(), Algo: "louvain", Shape: "flat", Documents: 3142,
+			Loose: 191, Unsorted: 1000, Interests: 222, Total: 222}}
 	for i := range min(InterestsPageSize, 222-PageOffset(page, InterestsPageSize)) {
 		v.Interests = append(v.Interests, Interest{ID: strconv.Itoa(i), Label: "Topic " + strconv.Itoa(i),
 			Size: 84 - i, Cohesion: 0.7})
@@ -229,7 +229,7 @@ func interestsPage(page int) Interests {
 func TestInterests_Pages(t *testing.T) {
 	r := newRenderer(t)
 	out := render(t, r, PageInterests, interestsPage(1))
-	assert.Contains(t, out, `<p class="lede">222 topics curio found in your library, largest first.</p>`)
+	assert.Contains(t, out, `<p class="lede">222 interests curio found in your library, largest first.</p>`)
 	assert.NotContains(t, out, "largest;")
 	assert.Equal(t, InterestsPageSize, strings.Count(out, `<li class="card interest">`))
 	assert.Contains(t, out, `<rect class="fill-accent" x="0.000" y="0" width="62.094" height="10"/>`)
@@ -243,7 +243,7 @@ func TestInterests_Pages(t *testing.T) {
 	assert.NotContains(t, out, `role="note"`, "no rebuild since")
 
 	out = render(t, r, PageInterests, interestsPage(2))
-	assert.Contains(t, out, `<p class="lede">222 topics curio found in your library, largest first. Page 2 of 10.</p>`)
+	assert.Contains(t, out, `<p class="lede">222 interests curio found in your library, largest first. Page 2 of 10.</p>`)
 	assert.Contains(t, out, `<span class="pager-summary">Interests 25–48 of 222</span>`)
 	assert.Contains(t, out, `<a class="step" id="pager-prev" href="/ui/interests?run=run-1" rel="prev">`)
 
@@ -256,9 +256,9 @@ func TestInterests_Pages(t *testing.T) {
 	assert.Nil(t, last.OutOfRange())
 
 	all := interestsPage(1)
-	all.Run.Interests = InterestsPageSize
+	all.Run.Interests, all.Run.Total = InterestsPageSize, InterestsPageSize
 	out = render(t, r, PageInterests, all)
-	assert.Contains(t, out, "24 topics curio found in your library, largest first.</p>")
+	assert.Contains(t, out, "24 interests curio found in your library, largest first.</p>")
 	assert.NotContains(t, out, `class="pager"`, "one page needs no pager")
 }
 
@@ -301,7 +301,7 @@ func TestInterests_OutOfRange(t *testing.T) {
 	require.NotNil(t, page.OutOfRange())
 	page.Rebuild = Rebuild{Enabled: true, Shown: "run-1"}
 	out := render(t, r, PageInterests, page)
-	assert.Contains(t, out, `<p class="lede">222 topics curio found in your library, largest first.</p>`)
+	assert.Contains(t, out, `<p class="lede">222 interests curio found in your library, largest first.</p>`)
 	assert.Contains(t, out, `aria-label="Coverage"`)
 	assert.Contains(t, out, `id="rebuild"`)
 	assert.Contains(t, out, `id="rebuild-poll"`)
@@ -311,7 +311,7 @@ func TestInterests_OutOfRange(t *testing.T) {
 	assert.NotContains(t, out, "interest-grid")
 	assert.NotContains(t, out, `class="pager"`)
 
-	empty := Interests{Layout: page.Layout, Page: 2, Run: &InterestRun{ID: "run-2", Documents: 5, Noise: 5}}
+	empty := Interests{Layout: page.Layout, Page: 2, Run: &InterestRun{ID: "run-2", Documents: 5, Unsorted: 5}}
 	out = render(t, r, PageInterests, empty)
 	assert.Contains(t, out, "<h2>No page 2</h2>\n<p>This list has 1 page.</p>")
 	assert.Contains(t, out, `<a class="btn" href="/ui/interests?run=run-2">First page</a></p>`)
@@ -323,6 +323,79 @@ func TestInterests_OutOfRange(t *testing.T) {
 	assert.Contains(t, out, `<a class="btn" href="/ui/interests">First page</a></p>`)
 	assert.NotContains(t, out, "No interests yet")
 	assert.Nil(t, Interests{Page: 1}.OutOfRange())
+}
+
+// TestInterests_Areas: in the areas shape the lede counts areas and
+// interests, each card is an area naming its largest interests and their
+// sizes, with the way to all of them, and the pager counts areas.
+func TestInterests_Areas(t *testing.T) {
+	r := newRenderer(t)
+	v := Interests{Layout: Layout{Title: "Interests", Nav: NavInterests}, Page: 1,
+		Run: &InterestRun{ID: "run-1", Shape: "areas", Documents: 5254, Unsorted: 402, Areas: 30, Interests: 187,
+			Total: 30},
+		Interests: []Interest{{ID: "a1", Area: true, Label: "Tech <Skills>", Size: 628, NumChildren: 10, Cohesion: 0.35,
+			Children: []Interest{{ID: "i1", Label: "AI Agent Engineering", Size: 86}, {ID: "i2", Size: 45}}}}}
+	out := render(t, r, PageInterests, v)
+	assert.Contains(t, out, `<p class="lede">30 areas holding 187 interests in your library, largest first.</p>`)
+	assert.Contains(t, out, `<h2><a href="/ui/interests/a1">Tech &lt;Skills&gt;</a></h2>`)
+	assert.Contains(t, out, `<span><b>10</b> interests</span>`)
+	assert.Contains(t, out, `<ul class="members children"><li><a href="/ui/interests/i1" title="AI Agent Engineering">`+
+		`AI Agent Engineering</a><span class="n">86</span></li><li><a href="/ui/interests/i2">`+
+		`<span class="unlabeled">Unlabeled interest</span></a><span class="n">45</span></li></ul>`)
+	assert.Contains(t, out, `<a class="all" href="/ui/interests/a1">All 10 interests →</a>`)
+	assert.Contains(t, out, `<span class="pager-summary">Areas 1–1 of 30</span>`)
+	assert.Contains(t, out, `<span class="n">4,852</span> in an interest`)
+	assert.Contains(t, out, `<span class="n">402</span> in none`)
+}
+
+// TestInterests_FirstGrouping: before the first rebuild is done, a rebuild
+// in flight is the library being grouped for the first time; without one,
+// there are no interests yet.
+func TestInterests_FirstGrouping(t *testing.T) {
+	r := newRenderer(t)
+	for _, b := range []Rebuild{{Enabled: true, Queued: true}, {Enabled: true, Running: true}} {
+		v := Interests{Layout: Layout{Title: "Interests", Nav: NavInterests}, Rebuild: b}
+		assert.True(t, v.FirstGrouping())
+		out := render(t, r, PageInterests, v)
+		assert.Contains(t, out, "<h2>Your library is being grouped for the first time</h2>")
+		assert.NotContains(t, out, "No interests yet")
+	}
+	v := Interests{Layout: Layout{Title: "Interests", Nav: NavInterests}, Rebuild: Rebuild{Enabled: true}}
+	assert.False(t, v.FirstGrouping())
+	assert.Contains(t, render(t, r, PageInterests, v), "<h2>No interests yet</h2>")
+	v.Run, v.Rebuild.Queued = &InterestRun{ID: "run-1"}, true
+	assert.False(t, v.FirstGrouping(), "a rebuild of interests already found")
+}
+
+// TestInterestPage_AreaAndLoose: an interest's page names its area, and
+// tags its loose fits, which its pager counts; an area's page lists its
+// interests as cards, unpaged.
+func TestInterestPage_AreaAndLoose(t *testing.T) {
+	r := newRenderer(t)
+	page := interestPage(2, 60)
+	page.Interest.ParentID, page.Interest.ParentLabel, page.Interest.Loose = "a1", "Cloud <and> AWS", 3
+	page.Interest.Members = append(page.Interest.Members, Member{DocumentID: "l1", Title: "Close", Loose: true,
+		URL: "https://example.com/l1"})
+	out := render(t, r, PageInterest, page)
+	assert.Contains(t, out, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a>`+
+		`<span class="sep">›</span><a class="truncate" href="/ui/interests/a1" title="Cloud &lt;and&gt; AWS">Cloud &lt;and&gt; AWS</a></nav>`)
+	assert.Contains(t, out, `<span class="badge plain">3 loose fits</span>`)
+	assert.Equal(t, 1, strings.Count(out, ">loose fit</span>"))
+	assert.Contains(t, out, `<span class="pager-summary">Documents 51–61 of 63, most similar first</span>`)
+	assert.Equal(t, 2, page.Pages())
+
+	area := InterestPage{Layout: Layout{Title: "Cloud", Nav: NavInterests}, Page: 1, Interest: Interest{ID: "a1",
+		Area: true, Size: 120, NumChildren: 2, Children: []Interest{{ID: "i1", Label: "AWS", Size: 70},
+			{ID: "i2", Label: "GCP", Size: 50}}}}
+	out = render(t, r, PageInterest, area)
+	assert.Contains(t, out, "<h1>Unlabeled area</h1>")
+	assert.Contains(t, out, `<span class="badge plain">2 interests</span>`)
+	assert.Equal(t, 2, strings.Count(out, `<li class="card interest">`))
+	assert.NotContains(t, out, "<table")
+	assert.Nil(t, area.Pager())
+	assert.Equal(t, 1, area.Pages())
+	area.Page = 2
+	assert.Nil(t, area.OutOfRange(), "an area's page is one page, whatever page is asked for")
 }
 
 // TestInterests_MemberNames: a card names its members as the Library

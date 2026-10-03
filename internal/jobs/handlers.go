@@ -16,7 +16,6 @@ import (
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/indexer"
-	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -29,7 +28,7 @@ type Deps struct {
 	Queue       store.JobQueue
 	Dispatcher  fetcher.Dispatcher
 	Indexer     *indexer.Indexer
-	Insight     *insight.Engine // nil unless the insight layer is wired
+	Insight     Rebuilder // the insight engine; nil unless the insight layer is wired
 	Log         *slog.Logger
 }
 

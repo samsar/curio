@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+
+	"github.com/samsar/curio/internal/insight"
 )
 
 // NearLabelJaccard is the token-set Jaccard index at or above which two
@@ -13,7 +15,7 @@ const NearLabelJaccard = 0.5
 // LabelDuplicates counts labels that repeat within one run.
 type LabelDuplicates struct {
 	// Exact counts pairs of interests whose labels are equal ignoring case,
-	// punctuation and spacing.
+	// punctuation and spacing: equal insight.LabelKey.
 	Exact int `json:"exact_pairs"`
 	// Near counts the other pairs whose label tokens overlap by at least
 	// NearLabelJaccard (Jaccard over lowercased words without stop words, a
@@ -34,7 +36,7 @@ func DuplicateLabels(labels []string) LabelDuplicates {
 	toks := make([][]string, len(labels))
 	for i, l := range labels {
 		toks[i] = labelTokens(l)
-		norm[i] = strings.Join(strings.FieldsFunc(strings.ToLower(l), notWord), " ")
+		norm[i] = insight.LabelKey(l)
 	}
 	in := make([]bool, len(labels))
 	for i := range labels {

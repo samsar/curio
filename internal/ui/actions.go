@@ -133,7 +133,7 @@ func reindexAction(id string) Action {
 		Status: documentStatus, Done: "Reindex requested"}
 }
 
-// rebuildAction queues a clustering run, which rebuilds the interests.
+// rebuildAction queues a rebuild of the interests.
 func rebuildAction() Action {
 	return Action{Kind: ActionRebuild, Method: http.MethodPost, Path: "/v1/interests/rebuild",
 		Status: rebuildStatus, Done: "Rebuild requested"}

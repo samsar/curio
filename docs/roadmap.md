@@ -185,9 +185,14 @@ topic clusters that feel like an accurate picture of what the user reads.
   of a real corpus next to good niche interests. It comes from mean-pooled
   document vectors, not a tunable knob (decisions.md "Insight clustering
   quality"). Label quality is bounded by the local generation model
-  (`qwen3:4b-instruct` by default, `generation.model`). `insight.min_similarity`
-  was tuned on nomic-embed-text vectors; re-tune it with `curio eval` on a
-  library indexed with `qwen3-embedding:0.6b`.
+  (`qwen3:4b-instruct` by default, `generation.model`).
+- Since revised: the interests rework replaced the clusterer with a
+  two-level grouping (areas holding interests) whose identities last
+  across rebuilds, and the clusterer's knobs (`insight.knn`,
+  `min_similarity`, `min_cluster_size`) are ignored (decisions.md
+  "Interests: two levels, stable identities, automatic rebuilds").
+  Storage, the engine and the read surfaces have landed; automatic
+  rebuilds and placement between them are next.
 
 ## M5 — Suggestions and the digest
 

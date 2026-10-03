@@ -36,10 +36,12 @@ The clients are written by hand: `internal/client` for the CLI and the
   them, and may be invalidated by a daemon upgrade: an invalid one, or
   one of another order, is a 400, and the client starts the walk again.
   There is no `total`. Two exceptions page by `offset`. `GET
-  /v1/interests` and `GET /v1/interests/{id}` page within a clustering
-  run, whose interests and members never change: an offset past the end is
-  an empty page, `num_clusters` and `size` are the totals, and a `run_id`
-  that differs between two pages shows a rebuild in between. `POST
+  /v1/interests`, `GET /v1/interests/{id}` and `GET
+  /v1/interests/unsorted` page within a grouping run, whose groups and
+  assignments never change once it commits: an offset past the end is an
+  empty page, `total` and `size` are the totals, and a `run_id` that
+  differs between two pages shows a rebuild in between. Interest IDs last
+  across rebuilds; a retired one answers 410 with its successors. `POST
   /v1/search` pages within the one ranking every request for a query gets,
   its best 100 documents at most: the response is the window `[offset,
   offset+k)`, `offset + k` is at most 100, an offset past the end is an

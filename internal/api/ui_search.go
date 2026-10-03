@@ -71,8 +71,9 @@ func searchPageParam(r *http.Request) (int, error) {
 }
 
 // home is what the search page shows without a query: how many documents
-// there are to search, for the box's placeholder, and the latest run's
-// largest interests, without their members. The home does without a read
+// there are to search, for the box's placeholder, and the latest
+// rebuild's largest top-level groups (areas, or interests in the flat
+// shape), without their interests or members. The home does without a read
 // that fails: it is logged, and what it was for is left out.
 func (h pageHandlers) home(r *http.Request) *ui.SearchHome {
 	ctx := r.Context()
@@ -82,12 +83,12 @@ func (h pageHandlers) home(r *http.Request) *ui.SearchHome {
 	} else {
 		home.Searchable = st.DocumentsByState[string(store.DocStateFetched)]
 	}
-	interests, err := h.d.interests(ctx, interestsOpts{Limit: homeInterests})
+	interests, err := h.d.interests(ctx, interestsOpts{Limit: homeInterests, Bare: true})
 	if err != nil {
 		h.quietError(r, err)
 		return home
 	}
-	home.AllInterests = interests.NumClusters
+	home.AllInterests = interests.Total
 	for _, in := range interests.Items {
 		home.Interests = append(home.Interests, interestView(in))
 	}

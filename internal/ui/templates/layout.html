@@ -183,3 +183,35 @@ the page can't remove one; the newest request is the one answered.
 {{define "poller" -}}
 <div id="{{.ID}}" hidden data-poll hx-get="{{.Href}}" hx-trigger="{{.Trigger}}" hx-swap="none" hx-select-oob="{{.Select}}" hx-sync="this:replace"></div>
 {{- end}}
+
+{{/*
+Cards of areas or interests, as the Interests page and an area's page
+list them: an area names its largest interests and their sizes, an
+interest its most similar members.
+*/}}
+{{define "interest-cards" -}}
+<ul class="interest-grid" role="list">
+{{range .}}<li class="card interest">{{if .Area}}{{template "area-card" .}}{{else}}{{template "interest-card" .}}{{end}}</li>
+{{end}}</ul>
+{{- end}}
+
+{{define "area-card" -}}
+<h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled area</span>{{end}}</a></h2>
+<div class="stats"><span><b>{{num .Size}}</b> documents</span><span><b>{{num .NumChildren}}</b> {{if eq .NumChildren 1}}interest{{else}}interests{{end}}</span>{{template "cohesion" .Cohesion}}</div>
+{{with .Summary}}<p class="summary">{{.}}</p>{{end}}
+{{with .Children}}<ul class="members children">{{range .}}<li><a href="{{interestHref .ID}}"{{with .Label}} title="{{.}}"{{end}}>{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a><span class="n">{{num .Size}}</span></li>{{end}}</ul>{{end}}
+<a class="all" href="{{interestHref .ID}}">All {{num .NumChildren}} {{if eq .NumChildren 1}}interest{{else}}interests{{end}} →</a>
+{{- end}}
+
+{{define "interest-card" -}}
+<h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a></h2>
+<div class="stats"><span><b>{{num .Size}}</b> documents</span>{{template "cohesion" .Cohesion}}</div>
+{{with .Summary}}<p class="summary">{{.}}</p>{{end}}
+{{with .Members}}<ul class="members">{{range .}}{{with .Ref}}<li><a{{with .Class}} class="{{.}}"{{end}} href="{{documentHref .ID}}" title="{{.Hover}}">{{.Name}}</a></li>{{end}}{{end}}</ul>{{end}}
+<a class="all" href="{{interestHref .ID}}">All {{num .Size}} documents →</a>
+{{- end}}
+
+{{/* An interest's cohesion: how alike its documents are, from 0 to 1. */}}
+{{define "cohesion" -}}
+<span class="meter-row" title="Cohesion: how alike its documents are"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>{{printf "%.2f" .}}</span>
+{{- end}}

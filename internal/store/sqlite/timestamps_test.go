@@ -206,15 +206,38 @@ func TestUpdatedAt_SetByEveryUpdate(t *testing.T) {
 			},
 		},
 		{
-			name: "Insights.FinishRun", table: "cluster_runs",
-			setup: func(t *testing.T, db *DB) string {
-				run := &store.ClusterRun{TenantID: "local", Algo: "test"}
-				require.NoError(t, NewInsights(db).CreateRun(ctx, run))
-				return run.ID
-			},
+			name: "Insights.CommitRun", table: "interest_runs",
+			setup: func(t *testing.T, db *DB) string { return insightFixtureOn(t, db, 7).run(t, "local").ID },
 			update: func(t *testing.T, db *DB, id string) {
-				require.NoError(t, NewInsights(db).FinishRun(ctx, id, store.RunResult{Status: store.ClusterRunDone}))
+				f := insightFixtureOn(t, db, 0)
+				f.docs = seededDocs(t, db)
+				require.NoError(t, f.ins.CommitRun(ctx, f.firstCommit(&store.InterestRun{ID: id, TenantID: "local"})))
 			},
+		},
+		{
+			name: "Insights.FailRun", table: "interest_runs",
+			setup: func(t *testing.T, db *DB) string { return insightFixtureOn(t, db, 0).run(t, "local").ID },
+			update: func(t *testing.T, db *DB, id string) {
+				require.NoError(t, NewInsights(db).FailRun(ctx, id, 0, "boom"))
+			},
+		},
+		{
+			name: "Insights.CommitRun relabel", table: "interests",
+			setup: func(t *testing.T, db *DB) string {
+				f := insightFixtureOn(t, db, 7)
+				require.NoError(t, f.ins.CommitRun(ctx, f.firstCommit(f.run(t, "local"))))
+				return "interest-1"
+			},
+			update: func(t *testing.T, db *DB, _ string) { commitSecond(t, db) },
+		},
+		{
+			name: "Insights.CommitRun retirement", table: "interests",
+			setup: func(t *testing.T, db *DB) string {
+				f := insightFixtureOn(t, db, 7)
+				require.NoError(t, f.ins.CommitRun(ctx, f.firstCommit(f.run(t, "local"))))
+				return "interest-2"
+			},
+			update: func(t *testing.T, db *DB, _ string) { commitSecond(t, db) },
 		},
 	}
 	for _, tc := range cases {
@@ -283,4 +306,26 @@ func TestUpdates_WriteOneRow(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM sqlite_master
 		WHERE type = 'trigger' AND name LIKE 'trg\_%\_updated\_at' ESCAPE '\'`).Scan(&triggers))
 	assert.Zero(t, triggers)
+}
+
+// seededDocs lists the documents insightFixtureOn seeded in db, in the
+// order it seeded them.
+func seededDocs(t *testing.T, db *DB) []string {
+	t.Helper()
+	rows := dumpRows(t, db, `SELECT id FROM documents ORDER BY url`)
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row[0].(string))
+	}
+	return out
+}
+
+// commitSecond commits the fixture's second run over db's first.
+func commitSecond(t *testing.T, db *DB) {
+	t.Helper()
+	f := insightFixtureOn(t, db, 0)
+	f.docs = seededDocs(t, db)
+	first, err := f.ins.LatestRun(context.Background(), "local", store.InterestRunDone)
+	require.NoError(t, err)
+	require.NoError(t, f.ins.CommitRun(context.Background(), f.secondCommit(f.run(t, "local"), first.ID)))
 }

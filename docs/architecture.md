@@ -173,7 +173,7 @@ MCP tools (implemented):
   with optional filters
 - `get_document(id)` — fetch a document's metadata + extracted markdown
 - `find_related(id, k)` — find documents similar to a given one (by embedding similarity over its indexed content)
-- `list_interests(limit?, members?)` — labeled interest clusters from the latest clustering run
+- `list_interests(limit?, interests?, members?, id?)` — an outline of the interests from the latest rebuild (areas with their largest interests, or interests alone in a small library), or one area or interest by its stable ID
 
 The sidecar starts the daemon when it starts, without waiting for it to
 finish starting, and again when a tool call finds it unreachable
@@ -315,10 +315,14 @@ bookmark file ──► importer ──► bookmark + document ──► fetch j
                               │                       ▼
                               │                  FTS5 + sqlite-vec
                               │
-                              └── curio interests rebuild ──► cluster job
+                              └── daemon start (no grouping yet) or
+                                  curio interests rebuild ──► cluster job (one pending at most)
                                                                   │
                                                                   ▼
-                                                        clusters / interests
+                                    vectors ──► Grouper (warm from the last run's seeds)
+                                    ──► merge near-duplicates ──► place strays
+                                    ──► carry identities over ──► label the groups that need it
+                                    ──► one commit: run, groups, assignments, lineage, retirements
 ```
 
 ## Fetcher strategy selection
@@ -403,13 +407,16 @@ The interfaces with explicit swap paths:
    OpenAI for cloud. A home's embedding model and vector width are fixed
    when it is created and recorded in its marker; another model means a
    new home (see [decisions](./decisions.md#embedding-model-and-per-home-width)).
-3. **`generator.Generator`** — LLM text generation, used for cluster labels.
+3. **`generator.Generator`** — LLM text generation, used for interest labels.
    Ollama impl.
 4. **`fetcher.Fetcher`** — content fetcher: `native` (Go HTTP + Readability,
    with Jina Reader as its fallback), `web2md`, `github`, `youtube`,
    selected per URL by the rules engine.
-5. **`insight.Clusterer`** and **`insight.Labeler`** — the clustering
-   algorithm (kNN graph) and cluster naming (LLM or term labels).
+5. **`insight.Grouper`** and **`insight.Labeler`** — the grouping (the
+   shipped `LouvainGrouper` makes areas and interests, warm-started from
+   the previous run; `FlatGrouper` wraps an `insight.Clusterer` such as the
+   kNN-graph baseline for tests and the quality harness) and naming (LLM
+   or term labels).
 
 Do not abstract until you have two impls. The interfaces above are commitments
 because we already know we want hosted mode, model swaps, and multiple fetchers.
@@ -429,11 +436,11 @@ External processes the daemon expects:
   `http://localhost:11434`; `curio up` starts or installs it when nothing
   answers there, and pulls the models. The daemon runs without it and
   degrades: search returns keyword-only results marked `degraded`, index jobs fail and retry
-  with backoff, cluster labels fall back to term labels, and `/v1/healthz`
+  with backoff, interest labels fall back to term labels, and `/v1/healthz`
   (and `curio doctor`) says what's wrong. It pulls the models it needs,
   retrying until Ollama answers. Generation is abstracted behind a
   `generator.Generator` interface (local Ollama `/api/generate` impl), used
-  for LLM cluster labels in the insight layer. Embed requests never let
+  for LLM interest labels in the insight layer. Embed requests never let
   Ollama truncate an input, and generate requests turn thinking off. The
   daemon records the embedding model's digest and Ollama's version in the
   marker and checks them every minute. A change is verified by
