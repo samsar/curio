@@ -594,6 +594,30 @@ func TestRebuild_SkipsNonFiniteVectors(t *testing.T) {
 	}
 }
 
+// TestRebuild_AllVectorsNonFinite: a library whose every vector is NaN or
+// infinite has nothing to group, like an empty one: the rebuild keeps the
+// prior run, writes no run row and retires no identity, so the interests
+// and their LLM names survive until the vectors are re-embedded.
+func TestRebuild_AllVectorsNonFinite(t *testing.T) {
+	f := newEngineFixture(t, 3, 4)
+	calls := 0
+	prior := f.rebuild(t, f.engine(nil, sizeNames(&calls), Config{Labeling: LabelingLLM, Center: true}))
+	live, labels := f.live(t), f.labels(t, prior.ID)
+	for _, dv := range f.vectors.dvs {
+		dv.Vector[0] = float32(math.NaN())
+	}
+
+	got := f.rebuild(t, f.engine(nil, sizeNames(&calls), Config{Labeling: LabelingLLM, Center: true}))
+	assert.Equal(t, prior.ID, got.ID)
+	latest, err := f.store.LatestRun(context.Background(), tenant, "")
+	require.NoError(t, err)
+	assert.Equal(t, prior.ID, latest.ID, "no new run row")
+	f.assertCurrentRun(t, prior.ID)
+	assert.Equal(t, live, f.live(t), "no identity retired")
+	assert.Equal(t, labels, f.labels(t, prior.ID), "the LLM names kept")
+	assert.Contains(t, f.logLine(t, "vectors have NaN or infinite values"), "count=7")
+}
+
 var errLocked = errors.New("database is locked")
 
 func TestRebuild_Failures(t *testing.T) {
