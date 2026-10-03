@@ -238,7 +238,7 @@ func (e *Engine) run(ctx context.Context, tenantID, runID string, dvs []store.Do
 	var clusterDur, labelDur time.Duration
 
 	if n > 0 {
-		points, err := preparePoints(dvs, e.cfg.Center)
+		points, _, err := PreparePoints(dvs, e.cfg.Center)
 		if err != nil {
 			return err
 		}
@@ -326,19 +326,30 @@ func (e *Engine) describe(ctx context.Context, tenantID string, points []Point, 
 	return cws, nil
 }
 
-// preparePoints turns document vectors into the unit vectors that both the
-// clusterer and summarize work on, mean-centering them first when center is
-// set (see Config.Center). Preparing once keeps a single n×d copy of the
-// corpus in memory.
-func preparePoints(dvs []store.DocVector, center bool) ([]Point, error) {
+// PreparePoints turns document vectors into the unit vectors every
+// grouping step works on, mean-centering them first when center is set (see
+// Config.Center), and returns the mean they were centered on: nil when not
+// centering or with fewer than two vectors. A grouping keeps the mean so a
+// document indexed later can be placed in the same space. Preparing once
+// keeps a single n×d copy of the corpus in memory. A vector of another
+// width, an empty one, or one with a NaN or infinite component is an error
+// naming its document: a non-finite component would make the mean NaN and
+// blame whichever healthy document a later check met first.
+func PreparePoints(dvs []store.DocVector, center bool) ([]Point, []float64, error) {
+	if len(dvs) == 0 {
+		return []Point{}, nil, nil
+	}
 	dim := len(dvs[0].Vector)
 	if dim == 0 {
-		return nil, fmt.Errorf("document %s has an empty vector", dvs[0].DocumentID)
+		return nil, nil, fmt.Errorf("document %s has an empty vector", dvs[0].DocumentID)
 	}
 	for _, dv := range dvs {
 		if len(dv.Vector) != dim {
-			return nil, fmt.Errorf("document %s has a %d-dimensional vector, want %d",
+			return nil, nil, fmt.Errorf("document %s has a %d-dimensional vector, want %d",
 				dv.DocumentID, len(dv.Vector), dim)
+		}
+		if nonFinite(dv) {
+			return nil, nil, fmt.Errorf("document %s has a NaN or infinite component", dv.DocumentID)
 		}
 	}
 	var mean []float64
@@ -349,7 +360,7 @@ func preparePoints(dvs []store.DocVector, center bool) ([]Point, error) {
 	for i, dv := range dvs {
 		points[i] = Point{ID: dv.DocumentID, Vector: unitResidual(dv.Vector, mean)}
 	}
-	return points, nil
+	return points, mean, nil
 }
 
 // corpusMean returns the element-wise mean of all vectors (dim-length), or nil
@@ -371,14 +382,14 @@ func corpusMean(dvs []store.DocVector, dim int) []float64 {
 }
 
 // unitResidual returns the unit vector of v, first subtracting mean when it is
-// non-nil. A zero residual yields a zero vector, so the point gets no edges and
-// falls out as noise.
+// not empty (it then has v's width). A zero residual yields a zero vector, so
+// the point gets no edges and falls out as noise.
 func unitResidual(v []float32, mean []float64) []float32 {
 	residual := make([]float64, len(v))
 	var sum float64
 	for i, x := range v {
 		r := float64(x)
-		if mean != nil {
+		if len(mean) > 0 {
 			r -= mean[i]
 		}
 		residual[i] = r

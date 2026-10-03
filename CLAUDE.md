@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```sh
 make build               # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp (go build cache decides staleness)
-make test                # unit tests under -race; no network, no Ollama
+make test                # unit tests under -race; no network, no Ollama (then internal/insight/... again without -race: its grouping property tests skip under it)
 make test-integration    # needs network: fetches live sites (tag `integration`)
 make test-e2e            # builds curio-daemon, drives it through daemonctl + client against fake Ollama (tag `e2e`)
 make vet                 # go vet with the build tags
@@ -165,7 +165,9 @@ Only host-wide verdicts are cached (`hostVerdict`): unreachable (NXDOMAIN, `ECON
 - `internal/setup/` — `curio up`'s steps, runner, UI and checks; see the `curio up` bullet above.
 - `internal/fetcher/` — Native (Go) and Web2MD (subprocess) backends behind the same `Fetcher` interface.
 - `internal/indexer/` — Chunker (paragraph-aware with hard char cap) + orchestrator (chunk → embed → store).
-- `internal/insight/` — M4 insight layer. Pluggable `Clusterer` (kNN-graph + label propagation), `Labeler` (term / LLM), and the `Engine` that clusters → labels → persists.
+- `internal/insight/` — M4 insight layer. Pluggable `Clusterer` (kNN-graph + label propagation), `Labeler` (term / LLM), and the `Engine` that clusters → labels → persists. Beside it, built and tested but not wired into the engine, daemon or API yet: the `Grouper` contract (areas holding interests, warm starts from `Seed`s, the split check; `GroupInput.Shape` is the previous grouping's shape, `Grouping.Shape` the one produced) with `LouvainGrouper` (both shapes, r(n), the gate with hysteresis, all on one top-20 neighbour pass in `graph.go`) and `FlatGrouper` (any `Clusterer`); `refine.go` (`MergeNearDuplicates` to a fixpoint, `AssignStrays`: member, loose fit or unsorted), `identity.go` (`Carry`: the 70% carry-over and lineage events), `place.go` (`RunSpace`: a new document against a run's mean and centroids). `PreparePoints` returns the centering mean. The stability properties run on the seeded fixture in `fixture_test.go`. See decisions.md "Louvain: ours, warm-started; gonum as a test oracle".
+- `internal/insight/louvain/` — Louvain on a validated `Graph`: `Run` (warm-startable; every result is a fixpoint of its own warm start), `RefineSplit` (the split check), `Modularity`. Standard library only (depguard `louvain-stdlib-only`); gonum's Louvain is its test oracle and never links into a binary (depguard `no-test-deps-in-prod`).
+- `internal/insight/quality/` — measurement only (tests, the cluster-quality report): coverage, sizes, cohesion, separation, silhouette, ARI/NMI, label duplicates; its modularity and `Inherit` delegate to `louvain` and `insight.Carry`.
 - `internal/generator/` — provider-agnostic LLM text generation (`Generator` interface + Ollama `/api/generate`). Separate from `internal/embedder`; used for cluster labels.
 - `internal/ollama/` — the one Ollama HTTP client both `embedder.Ollama` and `generator.Ollama` sit on (see the insight section).
 - `internal/eval/` — retrieval eval harness (recall@k / NDCG@k / MRR) behind `curio eval --queries`.

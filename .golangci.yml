@@ -138,6 +138,17 @@ linters:
               desc: porttest is test support; it finds ports for tests' daemons
             - pkg: github.com/getkin/kin-openapi
               desc: kin-openapi checks the API against its spec in tests; it must never link into a binary
+            - pkg: gonum.org/v1/gonum
+              desc: gonum's Louvain is the test oracle internal/insight/louvain is checked against; it must never link into a binary
+        # The Louvain package is self-contained: the standard library only,
+        # so the grouping algorithm can be read and checked on its own.
+        louvain-stdlib-only:
+          list-mode: strict
+          files:
+            - "**/internal/insight/louvain/**"
+            - "!$test"
+          allow:
+            - $gostd
     errcheck:
       # Errors that carry nothing to act on: a deferred Close on something
       # only read, and a Rollback, which is a no-op after Commit and whose
