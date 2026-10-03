@@ -478,14 +478,16 @@ func TestRefineSplit_NeverLowersModularity(t *testing.T) {
 }
 
 func TestGainOfSplit(t *testing.T) {
-	// Two disconnected pairs glued into one community: splitting gains.
+	// Two disconnected pairs glued into one community: Q is 0 glued and
+	// 2 × (2/4 − (2/4)²) = 1/2 split. In GainTolerance's units, times
+	// half the total degree (m = 2), the gain is 1.
 	g, err := NewGraph([][]Edge{
 		{{To: 1, Weight: 1}}, {{To: 0, Weight: 1}},
 		{{To: 3, Weight: 1}}, {{To: 2, Weight: 1}},
 	})
 	require.NoError(t, err)
 	lv := baseLevel(g)
-	assert.Greater(t, gainOfSplit(lv, []int{0, 0, 1, 1}, 2, 1), 0.0)
+	assert.InDelta(t, 1, gainOfSplit(lv, []int{0, 0, 1, 1}, 2, 1), 1e-15)
 	assert.InDelta(t, 0, gainOfSplit(lv, []int{0, 0, 0, 0}, 1, 1), 1e-12)
 }
 

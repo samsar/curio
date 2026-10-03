@@ -117,8 +117,9 @@ func subLevel(g *Graph, ms, local []int) *level {
 	return sub
 }
 
-// gainOfSplit is the change in modularity, times the total degree, from
-// splitting the community sub into numParts parts.
+// gainOfSplit is the change in modularity from splitting the community sub
+// into numParts parts, in GainTolerance's units: times half the total
+// degree, as local moving scores a move.
 func gainOfSplit(sub *level, parts []int, numParts int, resolution float64) float64 {
 	in := make([]float64, numParts)
 	tot := make([]float64, numParts)
@@ -134,11 +135,12 @@ func gainOfSplit(sub *level, parts []int, numParts int, resolution float64) floa
 			}
 		}
 	}
+	// Each term is a community's share of Q times the total degree.
 	gain := -(inAll - resolution*totAll*totAll/sub.m2)
 	for p := range numParts {
 		gain += in[p] - resolution*tot[p]*tot[p]/sub.m2
 	}
-	return gain
+	return gain / 2
 }
 
 // relabel numbers the communities of comm, any ints, 0..k-1 in the order of
