@@ -703,6 +703,17 @@ func TestInterests_Changes(t *testing.T) {
 		assert.Contains(t, out, "("+split.Interests[i]+"), 1 doc shared\n")
 	}
 	assert.NotContains(t, out, "first grouping")
+
+	// A kept area has no event, but a rebuild that kept every area and
+	// replaced every interest is no first grouping: each interest it
+	// replaced was retired, which is an event.
+	areas := srv.AddAreas(t, apitest.Area{Label: "Languages", Interests: []apitest.Interest{
+		{Label: "Rust", Members: []*store.Document{a, b}}}})
+	srv.SplitInterest(t, areas, areas.Interests[0], apitest.Interest{Label: "Rust Async", Members: []*store.Document{a}},
+		apitest.Interest{Label: "Rust Macros", Members: []*store.Document{b}})
+	out = mustRun(t, srv, "interests", "changes")
+	assert.Contains(t, out, "\nsplit:\n")
+	assert.NotContains(t, out, "first grouping")
 }
 
 // TestInterests_Rebuild: rebuild queues one, and asking again while it is
@@ -748,13 +759,24 @@ func TestInterests_Empty(t *testing.T) {
 	t.Run("no documents", func(t *testing.T) {
 		// A new home's first rebuild runs before curio up imports anything,
 		// and nothing rebuilds by itself after the import: the hint names
-		// the command that groups what was fetched since.
+		// the command that groups what was fetched since, unless a rebuild
+		// is already on its way.
 		srv := apitest.Start(t)
 		srv.AddRun(t, apitest.RunSpec{})
-		lines := strings.Split(strings.TrimSuffix(mustRun(t, srv, "interests"), "\n"), "\n")
-		require.Len(t, lines, 2)
-		assert.Regexp(t, `^no interests: the rebuild of \d{4}-\d{2}-\d{2} \d{2}:\d{2} found no fetched, indexed documents$`, lines[0])
-		assert.Equal(t, "run `curio interests rebuild` once `curio status` shows documents fetched", lines[1])
+		hint := func() string {
+			t.Helper()
+			lines := strings.Split(strings.TrimSuffix(mustRun(t, srv, "interests"), "\n"), "\n")
+			require.Len(t, lines, 2)
+			assert.Regexp(t, `^no interests: the rebuild of \d{4}-\d{2}-\d{2} \d{2}:\d{2} found no fetched, indexed documents$`, lines[0])
+			return lines[1]
+		}
+		assert.Equal(t, "run `curio interests rebuild` once `curio status` shows documents fetched", hint())
+		_, _, err := jobs.EnqueueRebuild(context.Background(), srv.Deps.Queue, apitest.TenantID, store.RunTriggerManual)
+		require.NoError(t, err)
+		assert.Equal(t, "another rebuild is queued; follow it with `curio jobs --kind cluster --all`", hint())
+		_, err = srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})
+		require.NoError(t, err)
+		assert.Equal(t, "another rebuild is running; follow it with `curio jobs --kind cluster --all`", hint())
 	})
 	t.Run("nothing grouped", func(t *testing.T) {
 		for n, want := range map[int]string{

@@ -376,7 +376,14 @@ func renderNoInterests(w io.Writer, res *client.InterestList, configPath string)
 		}
 		if res.NumDocuments == 0 {
 			fmt.Fprintf(w, "no interests: %s found no fetched, indexed documents\n", when)
-			fmt.Fprintln(w, "run `curio interests rebuild` once `curio status` shows documents fetched")
+			switch res.Next.State {
+			case client.StateQueued:
+				fmt.Fprintln(w, "another rebuild is queued; follow it with `curio jobs --kind cluster --all`")
+			case client.StateRebuilding:
+				fmt.Fprintln(w, "another rebuild is running; follow it with `curio jobs --kind cluster --all`")
+			default:
+				fmt.Fprintln(w, "run `curio interests rebuild` once `curio status` shows documents fetched")
+			}
 			return
 		}
 		where := "they are all in Unsorted"
