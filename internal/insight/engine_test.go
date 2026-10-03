@@ -241,13 +241,13 @@ func TestPreparePoints_CenteringSeparatesAnisotropic(t *testing.T) {
 	}
 	c := NewKNNGraphClusterer(KNNGraphOptions{})
 
-	raw, err := preparePoints(dvs, false)
+	raw, _, err := PreparePoints(dvs, false)
 	require.NoError(t, err)
 	labels, err := c.Cluster(context.Background(), raw)
 	require.NoError(t, err)
 	assert.Equal(t, 1, distinctClusters(labels), "raw cosines are ~0.98, so all six collapse into one cluster")
 
-	centered, err := preparePoints(dvs, true)
+	centered, _, err := PreparePoints(dvs, true)
 	require.NoError(t, err)
 	labels, err = c.Cluster(context.Background(), centered)
 	require.NoError(t, err)
@@ -274,9 +274,44 @@ func TestPreparePoints_RejectsBadDims(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := preparePoints(tc.dvs, true)
+			_, _, err := PreparePoints(tc.dvs, true)
 			require.EqualError(t, err, tc.want)
 		})
+	}
+}
+
+func TestPreparePoints_Mean(t *testing.T) {
+	dvs := []store.DocVector{
+		{DocumentID: "a", Vector: []float32{3, 1}},
+		{DocumentID: "b", Vector: []float32{1, 3}},
+	}
+	points, mean, err := PreparePoints(dvs, true)
+	require.NoError(t, err)
+	assert.Equal(t, []float64{2, 2}, mean, "the mean the points were centered on")
+	assert.InDeltaSlice(t, []float32{float32(math.Sqrt2) / 2, -float32(math.Sqrt2) / 2}, points[0].Vector, 1e-7)
+
+	_, mean, err = PreparePoints(dvs, false)
+	require.NoError(t, err)
+	assert.Nil(t, mean, "not centering")
+	_, mean, err = PreparePoints(dvs[:1], true)
+	require.NoError(t, err)
+	assert.Nil(t, mean, "nothing to center against")
+
+	points, mean, err = PreparePoints(nil, true)
+	require.NoError(t, err)
+	assert.Empty(t, points)
+	assert.NotNil(t, points)
+	assert.Nil(t, mean)
+}
+
+func TestPreparePoints_RejectsNonFinite(t *testing.T) {
+	for _, x := range []float32{float32(math.NaN()), float32(math.Inf(-1))} {
+		dvs := []store.DocVector{
+			{DocumentID: "a", Vector: []float32{1, 0}},
+			{DocumentID: "b", Vector: []float32{x, 0}},
+		}
+		_, _, err := PreparePoints(dvs, true)
+		require.EqualError(t, err, "document b has a NaN or infinite component")
 	}
 }
 
