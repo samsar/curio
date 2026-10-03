@@ -840,7 +840,8 @@ func (d Deps) handleUnsorted(w http.ResponseWriter, r *http.Request) {
 		d.writeError(w, r, err)
 		return
 	}
-	resp, err := d.unsorted(r.Context(), intQuery(r, "limit", defaultInterestLimit, 1, maxInterestLimit), offset)
+	resp, err := d.unsorted(r.Context(), unsortedOpts{Limit: intQuery(r, "limit", defaultInterestLimit, 1, maxInterestLimit),
+		Offset: offset, NewMembers: maxNewMembers})
 	if err != nil {
 		d.writeError(w, r, err)
 		return
@@ -848,14 +849,23 @@ func (d Deps) handleUnsorted(w http.ResponseWriter, r *http.Request) {
 	d.writeJSON(w, r, http.StatusOK, resp)
 }
 
+// unsortedOpts are what a page of Unsorted lists.
+type unsortedOpts struct {
+	// Limit unsorted documents from Offset.
+	Limit, Offset int
+	// NewMembers are the documents placed into Unsorted since the rebuild
+	// that it lists, newest first; 0 reads none.
+	NewMembers int
+}
+
 // unsorted returns a page of the latest rebuild's unsorted documents, most
 // similar to their nearest interest first, and the newest documents placed
 // in Unsorted since, reading every document in one read.
-func (d Deps) unsorted(ctx context.Context, limit, offset int) (UnsortedPage, error) {
+func (d Deps) unsorted(ctx context.Context, opts unsortedOpts) (UnsortedPage, error) {
 	resp := UnsortedPage{Items: []UnsortedMember{}, New: []UnsortedMember{}}
-	run, rows, err := d.unsortedPage(ctx, limit, offset)
-	if err == nil && len(rows) == 0 && offset < run.NumUnsorted {
-		run, rows, err = d.unsortedPage(ctx, limit, offset) // pruned mid-read: see interests
+	run, rows, err := d.unsortedPage(ctx, opts.Limit, opts.Offset)
+	if err == nil && len(rows) == 0 && opts.Offset < run.NumUnsorted {
+		run, rows, err = d.unsortedPage(ctx, opts.Limit, opts.Offset) // pruned mid-read: see interests
 	}
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -864,9 +874,11 @@ func (d Deps) unsorted(ctx context.Context, limit, offset int) (UnsortedPage, er
 		return UnsortedPage{}, err
 	}
 	resp.RunID, resp.Total = run.ID, run.NumUnsorted
-	placed, err := d.Insights.Placements(ctx, run.ID, "", maxNewMembers)
-	if err != nil {
-		return UnsortedPage{}, err
+	var placed []store.Placement
+	if opts.NewMembers > 0 {
+		if placed, err = d.Insights.Placements(ctx, run.ID, "", opts.NewMembers); err != nil {
+			return UnsortedPage{}, err
+		}
 	}
 	counts, err := d.Insights.PlacementCounts(ctx, run.ID)
 	if err != nil {

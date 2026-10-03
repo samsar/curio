@@ -246,7 +246,11 @@ func (h pageHandlers) unsorted(w http.ResponseWriter, r *http.Request) {
 		h.writePageError(w, r, err, ui.NavInterests)
 		return
 	}
-	resp, err := h.d.unsorted(r.Context(), ui.InterestMembersPageSize, ui.PageOffset(page, ui.InterestMembersPageSize))
+	opts := unsortedOpts{Limit: ui.InterestMembersPageSize, Offset: ui.PageOffset(page, ui.InterestMembersPageSize)}
+	if page == 1 {
+		opts.NewMembers = maxNewMembers
+	}
+	resp, err := h.d.unsorted(r.Context(), opts)
 	if err != nil {
 		h.writePageError(w, r, err, ui.NavNone)
 		return

@@ -29,6 +29,7 @@ import (
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/ui"
 	"github.com/samsar/curio/internal/ui/uitest"
 )
 
@@ -1084,26 +1085,31 @@ func TestUI_InterestsReads(t *testing.T) {
 	assert.Empty(t, r.take())
 }
 
-// TestUI_UnsortedReads: Unsorted's page reads the latest run, a page of
-// its unsorted documents, the documents placed there since and the
-// counts, and every document at once; past the last, no document; a page
-// that isn't a number, nothing.
+// TestUI_UnsortedReads: Unsorted's first page reads the latest run, a
+// page of its unsorted documents, the documents placed there since and
+// the counts, and every document at once; a later page leaves out the
+// placements its band would show, and one past the last reads no
+// document; a page that isn't a number, nothing.
 func TestUI_UnsortedReads(t *testing.T) {
 	r := &reads{}
 	srv := apitest.Start(t, countReads(r))
-	docs := make([]*store.Document, 3)
+	docs := make([]*store.Document, ui.InterestMembersPageSize+3)
 	for i := range docs {
 		docs[i] = srv.AddDocument(t, fmt.Sprintf("https://example.com/%d", i), store.DocStateFetched)
 	}
+	last := len(docs) - 1
 	run := srv.AddRun(t, apitest.RunSpec{Interests: []apitest.Interest{{Label: "Kafka", Members: docs[:1]}},
-		Unsorted: docs[1:2]})
-	srv.Place(t, run, "", docs[2])
+		Unsorted: docs[1:last]})
+	srv.Place(t, run, "", docs[last])
 	r.take()
 	getPage(t, srv, "/ui/interests/unsorted", http.StatusOK)
-	page := map[string]int{"done run": 1, "unsorted": 1, "new members": 1, "new counts": 1, "member documents": 1}
-	assert.Equal(t, page, r.take())
-	getPage(t, srv, "/ui/interests/unsorted?page=2&run="+run.ID, http.StatusNotFound)
-	assert.Equal(t, page, r.take(), "past the last: the documents placed there, read with the page's")
+	first := map[string]int{"done run": 1, "unsorted": 1, "new members": 1, "new counts": 1, "member documents": 1}
+	assert.Equal(t, first, r.take())
+	getPage(t, srv, "/ui/interests/unsorted?page=2&run="+run.ID, http.StatusOK)
+	later := with(first, "new members", 0)
+	assert.Equal(t, later, r.take(), "the band is the first page's")
+	getPage(t, srv, "/ui/interests/unsorted?page=3&run="+run.ID, http.StatusNotFound)
+	assert.Equal(t, with(later, "member documents", 0), r.take(), "past the last")
 	getPage(t, srv, "/ui/interests/unsorted?page=x", http.StatusBadRequest)
 	assert.Empty(t, r.take())
 }

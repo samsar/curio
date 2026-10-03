@@ -10706,12 +10706,12 @@ done run, the group, its run, the counts, its members (and loose fits
 when they are on the page), on its first page alone the documents placed
 into it, their documents in one read, and the lineage and its identities;
 an area's, the same with its interests in one read and their members for
-the page alone. Unsorted reads the done run, its page, the placements into
-Unsorted and their count, and every document at once; the changes page the
-done run, the lineage, the identities the run created and retired and
-those its events name, and the nested groups only when it moved an
-interest; a retired ID the done run, the miss, the identity, its
-successors and theirs. `TestUI_InterestsReads`, `TestUI_UnsortedReads`,
+the page alone. Unsorted reads the done run, its page, the placement
+counts, on its first page alone the placements into Unsorted, and every
+document at once; the changes page the done run, the lineage, the
+identities the run created and retired and those its events name, and
+the nested groups only when it moved an interest; a retired ID the done
+run, the miss, the identity, its successors and theirs. `TestUI_InterestsReads`, `TestUI_UnsortedReads`,
 `TestUI_ChangesReads`, `TestUI_GoneReads` and `TestUI_DocumentReads` pin
 each.
 
