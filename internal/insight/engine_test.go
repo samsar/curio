@@ -935,6 +935,28 @@ func TestRebuild_CarriedDuplicateIsRelabeled(t *testing.T) {
 	assert.Equal(t, byLabel["LLM 6"], got[6].ID, "renamed, not replaced")
 }
 
+// TestRebuild_CarriedDuplicateWithoutAName: the smaller of two carried
+// interests with one label, which no term label can name apart because
+// its titles use only its sibling's words, loses its label rather than
+// keep a duplicate.
+func TestRebuild_CarriedDuplicateWithoutAName(t *testing.T) {
+	f := newEngineFixture(t, 3, 4)
+	terms := f.engine(nil, nil, Config{Labeling: LabelingTerms})
+	first := f.groups(t, f.rebuild(t, terms).ID)
+	// Every word of the smaller group's titles ("group0 topic0 item0" to
+	// "item2").
+	const shared = "Group0 Topic0 Item0 Item1 Item2"
+	_, err := f.db.Exec(`UPDATE interests SET label = ? WHERE id IN (?, ?)`, shared, first[3].ID, first[4].ID)
+	require.NoError(t, err)
+
+	second := f.groups(t, f.rebuild(t, terms).ID)
+	assert.Equal(t, shared, second[4].Label, "the larger keeps the label")
+	assert.Equal(t, first[3].ID, second[3].ID, "the identity is kept")
+	assert.Empty(t, second[3].Label)
+	assert.Empty(t, second[3].LabelSource)
+	assert.Nil(t, second[3].LabeledAt)
+}
+
 // TestRebuild_LabelsAreUniqueInTheirScope: a model that answers one name
 // for every group still leaves no two labels with one key in an area, nor
 // two areas alike: each group that repeats a name is asked once more,

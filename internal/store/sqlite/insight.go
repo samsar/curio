@@ -300,6 +300,9 @@ func (s *Insights) FailRun(ctx context.Context, runID string, numDocuments int, 
 	return runTransitioned(ctx, s.db, res, runID)
 }
 
+// runStatusSQL reads a run's status by its primary key.
+const runStatusSQL = `SELECT status FROM interest_runs WHERE id = ?`
+
 // runTransitioned turns a transition of a running run that changed nothing
 // into its error, reading the run through q: ErrNotFound for a run that
 // doesn't exist, ErrConflict for one that isn't running.
@@ -312,7 +315,7 @@ func runTransitioned(ctx context.Context, q rowQuerier, res sql.Result, runID st
 		return nil
 	}
 	var status store.InterestRunStatus
-	err = q.QueryRowContext(ctx, `SELECT status FROM interest_runs WHERE id = ?`, runID).Scan(&status)
+	err = q.QueryRowContext(ctx, runStatusSQL, runID).Scan(&status)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return fmt.Errorf("interest run %s: %w", runID, store.ErrNotFound)
@@ -346,8 +349,11 @@ func (s *Insights) LatestRun(ctx context.Context, tenantID string, status store.
 	return scanRun(s.db.QueryRowContext(ctx, latestRunSQL(runColumns, status != ""), args...))
 }
 
+// getRunSQL reads a run by its primary key.
+const getRunSQL = `SELECT ` + runColumns + ` FROM interest_runs WHERE id = ?`
+
 func (s *Insights) GetRun(ctx context.Context, id string) (*store.InterestRun, error) {
-	return scanRun(s.db.QueryRowContext(ctx, `SELECT `+runColumns+` FROM interest_runs WHERE id = ?`, id))
+	return scanRun(s.db.QueryRowContext(ctx, getRunSQL, id))
 }
 
 // interestColumns are an identity's, in scanInterest's order.

@@ -606,7 +606,7 @@ func TestInsights_TrimLineage(t *testing.T) {
 }
 
 // TestInsights_Tenants: a tenant's commit retires and reads only its own
-// identities, and its prune takes only its own runs.
+// identities, and its prunes and lineage trim take only its own rows.
 func TestInsights_Tenants(t *testing.T) {
 	f := newInsightFixture(t, 7)
 	theirs := f.run(t, "other")
@@ -627,6 +627,9 @@ func TestInsights_Tenants(t *testing.T) {
 			}
 		}
 	}
+	// A row of a run other than the one local's trim keeps, whose identity
+	// is live: what the trim deletes, were it local's.
+	c.Lineage = []store.LineageRow{{OldID: "other-interest-1", NewID: "other-interest-1", Event: store.LineageKept, Shared: 2}}
 	require.NoError(t, f.ins.CommitRun(f.ctx, c))
 	theirLive := f.live(t, "other")
 
@@ -646,6 +649,9 @@ func TestInsights_Tenants(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, theirLive, f.live(t, "other"))
 	require.NoError(t, f.ins.TrimLineage(f.ctx, "local", second.ID))
+	lineage, err := f.ins.RunLineage(f.ctx, theirs.ID)
+	require.NoError(t, err)
+	assert.Len(t, lineage, 1, "another tenant's lineage is never trimmed")
 }
 
 // TestInsights_Placements: a run's placements into an interest or into

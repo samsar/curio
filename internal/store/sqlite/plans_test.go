@@ -493,9 +493,18 @@ func insightPlanCases() []planCase {
 		groupsList = "SEARCH g USING INDEX idx_interest_groups_list "
 		identity   = "SEARCH i USING INDEX sqlite_autoindex_interests_1 (id=?)"
 		parent     = "SEARCH p USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN"
+		runByID    = "SEARCH interest_runs USING INDEX sqlite_autoindex_interest_runs_1 (id=?)"
 	)
 	done := store.InterestRunDone
 	return []planCase{
+		{name: "GetRun", query: getRunSQL, args: []any{"run"}, first: runByID},
+		{name: "run status", query: runStatusSQL, args: []any{"run"}, first: runByID},
+		{name: "CommitRun finish", query: commitRunSQL, args: unbound(commitRunSQL), first: runByID},
+		{name: "FailRun", query: failRunSQL, args: unbound(failRunSQL), first: runByID},
+		{
+			name: "CommitRun relabel", query: relabelInterestSQL, args: unbound(relabelInterestSQL),
+			first: "SEARCH interests USING INDEX sqlite_autoindex_interests_1 (id=?)",
+		},
 		{
 			name: "LatestRun by status", query: latestRunSQL(runColumns, true), args: []any{"local", done},
 			first: "SEARCH interest_runs USING INDEX idx_interest_runs_tenant_status (tenant_id=? AND status=?)",
@@ -612,6 +621,10 @@ func insightPlanCases() []planCase {
 		},
 	}
 }
+
+// unbound is a NULL for each of query's parameters, for a statement whose
+// plan its WHERE's shape decides alone.
+func unbound(query string) []any { return make([]any, strings.Count(query, "?")) }
 
 // queryVector is a query embedding in sqlite-vec's format.
 func queryVector(t *testing.T) []byte {
