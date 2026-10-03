@@ -68,14 +68,17 @@ linters:
     depguard:
       rules:
         # Consumers depend on the internal/store interfaces. Only the daemon's
-        # main wires the SQLite implementation (plus tests and the
-        # test-support packages that build real stores).
+        # main wires the SQLite implementation (plus tests, the test-support
+        # packages that build real stores, and cmd/clusterreport, the
+        # developer's report that reads a copy of a home's database and is
+        # never built into a release).
         store-boundary:
           list-mode: lax
           files:
             - "$all"
             - "!$test"
             - "!**/cmd/curio-daemon/**"
+            - "!**/cmd/clusterreport/**"
             - "!**/internal/store/sqlite/**"
             - "!**/internal/api/apitest/**"
           deny:
