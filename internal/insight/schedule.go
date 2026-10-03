@@ -18,8 +18,8 @@ import (
 // unmeasured.
 const (
 	// FirstRebuildAt is how many fetched documents a library with no done
-	// rebuild waits for before its first: 35 is the smallest library the
-	// grouping was measured on.
+	// rebuild waits for before its first: below 35, the smallest library
+	// the grouping was measured on; unmeasured.
 	FirstRebuildAt = 20
 	// ChangePercent is the share of a run's documents that, changed since
 	// it, make the next rebuild due; MinChanges is the fewest, which keeps
@@ -247,6 +247,12 @@ type SchedulerOptions struct {
 	// Drift says how the embeddings drifted, "" while they haven't: it
 	// holds automatic rebuilds. nil reports no drift.
 	Drift func() string
+	// DriftChecked reports whether the embedding check has concluded since
+	// the daemon started. Until it has, Drift can't report a drift that
+	// predates the start, so no rebuild is queued and Run's sweep waits;
+	// unlike a drift, this holds silently and asks nothing of the user.
+	// nil reports it has.
+	DriftChecked func() bool
 	// ParamsChanged reports whether a run was grouped by another grouper,
 	// or with other params, than a rebuild now would be
 	// (Engine.ParamsChanged). nil reports none.
@@ -286,6 +292,7 @@ type Scheduler struct {
 	lib           Library
 	enqueue       func(context.Context, string, store.RunTrigger) (*store.Job, bool, error)
 	drift         func() string
+	driftChecked  func() bool
 	paramsChanged func(*store.InterestRun) bool
 	placer        *Placer
 	cfg           SchedulerConfig
@@ -309,6 +316,7 @@ func NewScheduler(opts SchedulerOptions) *Scheduler {
 		lib:           opts.Library,
 		enqueue:       opts.Enqueue,
 		drift:         opts.Drift,
+		driftChecked:  opts.DriftChecked,
 		paramsChanged: opts.ParamsChanged,
 		placer:        opts.Placer,
 		cfg:           opts.Config.WithDefaults(),
@@ -341,6 +349,9 @@ func (s *Scheduler) Kick() {
 // Run sweeps unplaced documents into the current grouping, then checks at
 // once, every Interval and at every kick, until ctx ends.
 func (s *Scheduler) Run(ctx context.Context) {
+	if !s.waitDriftChecked(ctx) {
+		return
+	}
 	if s.placer != nil {
 		s.sweep(ctx)
 	}
@@ -355,6 +366,26 @@ func (s *Scheduler) Run(ctx context.Context) {
 		case <-s.kick:
 		}
 	}
+}
+
+// waitDriftChecked waits until the embedding check has concluded since the
+// daemon started (DriftChecked), checking every second, so that Run's sweep
+// and first checks see a drift that holds them. It reports false when ctx
+// ends first.
+func (s *Scheduler) waitDriftChecked(ctx context.Context) bool {
+	if s.driftChecked == nil || s.driftChecked() {
+		return true
+	}
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for !s.driftChecked() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+		}
+	}
+	return true
 }
 
 // sweep places what a daemon that stopped left unplaced: documents indexed
@@ -426,6 +457,7 @@ func (s *Scheduler) read(ctx context.Context) (inputs, error) {
 	if s.drift != nil {
 		in.drift = s.drift()
 	}
+	in.driftUnchecked = s.driftChecked != nil && !s.driftChecked()
 	if r.Done != nil && s.paramsChanged != nil {
 		in.paramsChanged = s.paramsChanged(r.Done)
 	}
@@ -471,8 +503,9 @@ func (s *Scheduler) queue(ctx context.Context, v verdict, now time.Time) error {
 // inputs are what a check decides on.
 type inputs struct {
 	Reading
-	drift         string // how the embeddings drifted; "" when they didn't
-	paramsChanged bool   // the done run's grouper or params aren't today's
+	drift          string // how the embeddings drifted; "" when they didn't
+	driftUnchecked bool   // the embedding check hasn't concluded since the daemon started
+	paramsChanged  bool   // the done run's grouper or params aren't today's
 }
 
 // verdict is what a check decided: the snapshot, whether a rebuild is due,
@@ -530,7 +563,7 @@ func decide(in inputs, now, dueSince time.Time, cfg SchedulerConfig) verdict {
 	}
 
 	v := verdict{snap: s, due: due}
-	if due && in.drift == "" && !backingOff && settled(r, now, dueSince, cfg) {
+	if due && in.drift == "" && !in.driftUnchecked && !backingOff && settled(r, now, dueSince, cfg) {
 		v.trigger = triggerOf(r, s.FreshOwed)
 	}
 	return v
@@ -572,6 +605,8 @@ func waitingFor(in inputs, now time.Time) string {
 	switch {
 	case in.drift != "":
 		return "the embeddings to be re-indexed"
+	case in.driftUnchecked:
+		return "the first embedding check since the daemon started"
 	case now.Before(RetryAt(in.State)):
 		return "the retry after a failed rebuild"
 	case in.State.FreshOwed == store.FreshReindex:

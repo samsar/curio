@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,6 +157,9 @@ type sim struct {
 	s     *Scheduler
 	logs  *bytes.Buffer
 	drift string
+	// unchecked says the embedding check hasn't concluded since the
+	// daemon started (DriftChecked).
+	unchecked bool
 	// rebuild is what a queued rebuild does once the check that queued it
 	// is done: commit, by default.
 	rebuild func(w *world, readAt time.Time)
@@ -177,6 +181,7 @@ func (m *sim) scheduler(params bool) *Scheduler {
 	return NewScheduler(SchedulerOptions{
 		TenantID: "local", Library: m.w, Enqueue: m.w.enqueue,
 		Drift:         func() string { return m.drift },
+		DriftChecked:  func() bool { return !m.unchecked },
 		ParamsChanged: func(*store.InterestRun) bool { return params },
 		Now:           m.w.clock,
 		Log:           slog.New(slog.NewTextHandler(m.logs, nil)),
@@ -324,6 +329,51 @@ func TestScheduler_DriftHolds(t *testing.T) {
 	m.drift = ""
 	m.step(0)
 	require.Len(t, m.w.enqueues, 1, "the hold lifted, the long-due rebuild goes")
+}
+
+// TestScheduler_WaitsForTheFirstDriftCheck: right after a start, before
+// the embedding check's first verdict, a rebuild that is due waits,
+// silently: due, not held, nothing asked of the user. A drift that predates
+// the start would otherwise only show after a rebuild of vectors from two
+// builds was queued.
+func TestScheduler_WaitsForTheFirstDriftCheck(t *testing.T) {
+	t.Parallel()
+	m := newSim(t, newWorld(5254), false)
+	m.unchecked = true
+	m.runFor(time.Hour, spread(400, 10*time.Minute))
+	assert.Empty(t, m.w.enqueues)
+	assert.Equal(t, StateDue, m.s.Snapshot().State)
+	assert.Empty(t, m.lines("interests: rebuilds held"), "no hold, so no fix to run")
+	due := m.lines("interests: rebuild due")
+	require.Len(t, due, 1)
+	assert.Contains(t, due[0], "the first embedding check since the daemon started")
+
+	m.unchecked = false
+	m.step(0)
+	require.Len(t, m.w.enqueues, 1, "the verdict came clean: the due rebuild goes")
+}
+
+// TestScheduler_RunWaitsForTheFirstDriftCheck: Run neither sweeps nor
+// checks before the embedding check's first verdict, so a drift that
+// predates the start holds the start's placements and rebuilds too.
+func TestScheduler_RunWaitsForTheFirstDriftCheck(t *testing.T) {
+	w := newWorld(100)
+	var checked atomic.Bool
+	s := NewScheduler(SchedulerOptions{TenantID: "local", Library: w, Enqueue: w.enqueue, Now: w.clock,
+		DriftChecked: checked.Load, Config: SchedulerConfig{Interval: time.Hour}, Log: slog.New(slog.DiscardHandler)})
+	ctx, cancel := context.WithCancel(context.Background())
+	var running sync.WaitGroup
+	running.Go(func() { s.Run(ctx) })
+	t.Cleanup(func() {
+		cancel()
+		running.Wait()
+	})
+
+	s.Kick()
+	assert.Never(t, func() bool { return s.Snapshot().State != StateUnknown }, 1500*time.Millisecond, 50*time.Millisecond,
+		"no check before the verdict")
+	checked.Store(true)
+	require.Eventually(t, func() bool { return s.Snapshot().State == StateCurrent }, 5*time.Second, 10*time.Millisecond)
 }
 
 // TestScheduler_ARebuildQueuedBeforeAHold: a rebuild queued before the

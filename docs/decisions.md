@@ -10395,6 +10395,21 @@ again is of the old vectors. Only the CLI's note that the interests will
 be regrouped waits for `insight.enabled` (config.yaml, as `curio ui` reads
 `daemon.ui`).
 
+**After a start, the interests wait for the drift check's first verdict.**
+The drift monitor keeps its report in memory, so a daemon restarted during
+an unresolved drift reports none until the monitor concludes its first
+check, a few seconds later, or up to a sample verification's bound when the
+build changed. A rebuild due through the drift (changes accumulated while
+held) would be queued at start in that window and group vectors of two
+builds, and placements would go into the old build's space. So until the
+monitor's first verdict (`drift.Report.CheckedAt` set, clean or drifted),
+the scheduler queues nothing (`SchedulerOptions.DriftChecked`; the snapshot
+says due, the due line waits for "the first embedding check since the
+daemon started", and nothing is asked of the user), `Run` holds its sweep,
+and placement is held. When the check can't conclude (Ollama down: grouping
+needs no Ollama), the wait ends 10 minutes after the start
+(`driftCheckGrace`), and rebuilds and placement go ahead.
+
 **Fresh rebuilds owed** (`insight_state.fresh_owed`, `fresh_owed_at`):
 
 - `reindex`, written by reindex-all, always wins and is owed from now;

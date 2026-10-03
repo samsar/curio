@@ -1020,9 +1020,9 @@ func clusterJobs(t *testing.T, db *sqlitestore.DB) []string {
 
 // TestStart_ChecksTheInterests: a daemon checks the interests once before
 // its API is up and any worker claims: a library no rebuild has grouped,
-// with 20 documents indexed and nothing since, gets its first rebuild
-// queued; a new, empty one gets none and is reported waiting; with
-// insight off there is no scheduler.
+// with 20 documents indexed and nothing since, is due, its first rebuild
+// waiting for the drift monitor's first verdict; a new, empty one is
+// reported waiting for documents; with insight off there is no scheduler.
 func TestStart_ChecksTheInterests(t *testing.T) {
 	startOn := func(t *testing.T, home *curiohome.Home, enabled bool) (*daemon, *sqlitestore.DB, *recorder) {
 		t.Helper()
@@ -1064,12 +1064,16 @@ func TestStart_ChecksTheInterests(t *testing.T) {
 		}
 		require.NoError(t, db.Close())
 
+		// The first rebuild is due at start, but waits for the drift
+		// monitor's first verdict, which comes once the daemon serves
+		// (Scheduler.Run, TestScheduler_RunWaitsForTheFirstDriftCheck).
 		d, db, logs := startOn(t, home, true)
-		assert.Equal(t, []string{`{"trigger":"first"}`}, clusterJobs(t, db))
-		enqueued := logs.messages("interests: rebuild enqueued")
-		require.Len(t, enqueued, 1)
-		assert.Equal(t, store.RunTriggerFirst, enqueued[0]["trigger"])
-		assert.Equal(t, insight.StateQueued, d.scheduler.Snapshot().State)
+		assert.Empty(t, clusterJobs(t, db))
+		assert.Empty(t, logs.messages("interests: rebuild enqueued"))
+		due := logs.messages("interests: rebuild due")
+		require.Len(t, due, 1)
+		assert.Equal(t, "the first embedding check since the daemon started", due[0]["waiting_for"])
+		assert.Equal(t, insight.StateDue, d.scheduler.Snapshot().State)
 	})
 	t.Run("insight off", func(t *testing.T) {
 		d, db, _ := startOn(t, newHome(t, freeLoopbackAddr(t)), false)
@@ -1091,6 +1095,34 @@ func TestHoldReason(t *testing.T) {
 	} {
 		assert.Equal(t, want, holdReason(r))
 	}
+}
+
+// TestDriftChecked: after a start, the interests wait for the drift
+// monitor's first verdict, a clean one or a drift alike, or for the grace
+// to pass without one; placement is held meanwhile too, as by a drift.
+func TestDriftChecked(t *testing.T) {
+	started := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	now := started
+	var report drift.Report
+	checked := driftChecked(func() drift.Report { return report }, started, func() time.Time { return now })
+	hold := placementHold(func() string { return holdReason(report) }, checked)
+
+	assert.False(t, checked(), "no verdict yet")
+	assert.Equal(t, "the embedding check hasn't concluded since the daemon started", hold())
+	report = drift.Report{CheckedAt: started.Add(time.Second)}
+	assert.True(t, checked(), "a clean verdict")
+	assert.Empty(t, hold())
+	report = drift.Report{Changes: []drift.Change{{What: "OllamaVersion", Recorded: "0.34.4", Current: "0.35.0"}},
+		Evidence: drift.Evidence{Verified: true}, CheckedAt: started.Add(time.Second)}
+	assert.True(t, checked(), "a drift is a verdict too")
+	assert.Equal(t, "the embeddings drifted", hold(), "and holds as a drift")
+
+	report = drift.Report{} // the monitor can't check: Ollama is down
+	now = started.Add(driftCheckGrace - time.Second)
+	assert.False(t, checked())
+	now = started.Add(driftCheckGrace)
+	assert.True(t, checked(), "past the grace, the interests go ahead")
+	assert.Empty(t, hold())
 }
 
 // TestIndexing: the engine's re-embedding check reads the index jobs

@@ -245,10 +245,11 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 		}
 	}
 	// One check of the interests before the full API is up, so its first
-	// healthz has the scheduler's state, and before any worker claims, so
-	// a rebuild that is due (a library whose interests an upgrade dropped)
-	// is queued now. A check is best effort: one that can't read warns and
-	// the daemon starts anyway.
+	// healthz has the scheduler's state. A rebuild that is due (a library
+	// whose interests an upgrade dropped) is queued once the drift monitor
+	// has its first verdict, by the scheduler's Run (DriftChecked). A check
+	// is best effort: one that can't read warns and the daemon starts
+	// anyway.
 	if d.scheduler != nil {
 		d.scheduler.Check(ctx)
 	}
@@ -416,6 +417,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	// marker's only writer.
 	driftMonitor := drift.New(home, emb.Client(), sampler, slog.Default())
 	drifted := driftHold(driftMonitor)
+	checked := driftChecked(driftMonitor.Report, time.Now(), time.Now)
 
 	jobDeps := jobs.Deps{
 		Home:        home,
@@ -434,7 +436,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		scheduler *insight.Scheduler
 	)
 	if cfg.Insight.Enabled {
-		placer = insight.NewPlacer(insights, chunks, drifted, slog.Default())
+		placer = insight.NewPlacer(insights, chunks, placementHold(drifted, checked), slog.Default())
 		jobDeps.Placer = placer
 	}
 	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights, queue, placer, drifted)
@@ -443,7 +445,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	}
 	jobDeps.Insight = insightEngine
 	if cfg.Insight.Enabled {
-		if scheduler, err = newScheduler(insights, docs, queue, insightEngine, placer, drifted); err != nil {
+		if scheduler, err = newScheduler(insights, docs, queue, insightEngine, placer, drifted, checked); err != nil {
 			return nil, err
 		}
 		jobDeps.KickInterests = scheduler.Kick
@@ -487,6 +489,37 @@ func driftHold(m *drift.Monitor) func() string {
 	return func() string { return holdReason(m.Report()) }
 }
 
+// driftCheckGrace is how long after the daemon starts the interests wait
+// for the embedding check's first verdict. The monitor keeps its report in
+// memory, so until it concludes a check a drift that predates the start
+// can't be seen; past the grace (Ollama down, say, where the check can't
+// conclude but grouping needs no Ollama), rebuilds and placement go ahead.
+const driftCheckGrace = 10 * time.Minute
+
+// driftChecked reports whether the drift monitor (its Report) has
+// concluded a check since started, or driftCheckGrace has passed by now
+// without one.
+func driftChecked(report func() drift.Report, started time.Time, now func() time.Time) func() bool {
+	return func() bool {
+		return !report().CheckedAt.IsZero() || now().Sub(started) >= driftCheckGrace
+	}
+}
+
+// placementHold is what holds placement: a drift, or the embedding check
+// not yet concluded since the daemon started, which the placer, holding
+// silently, treats alike.
+func placementHold(drifted func() string, checked func() bool) func() string {
+	return func() string {
+		if reason := drifted(); reason != "" {
+			return reason
+		}
+		if !checked() {
+			return "the embedding check hasn't concluded since the daemon started"
+		}
+		return ""
+	}
+}
+
 // holdReason says how the embeddings drifted by r, "" while they haven't.
 func holdReason(r drift.Report) string {
 	switch {
@@ -502,7 +535,7 @@ func holdReason(r drift.Report) string {
 // newScheduler builds the interest scheduler over the stores, queuing
 // rebuilds through the queue, on the timing schedulerConfig gives.
 func newScheduler(insights store.InsightStore, docs store.DocumentStore, queue store.JobStore, engine *insight.Engine,
-	placer *insight.Placer, drifted func() string) (*insight.Scheduler, error) {
+	placer *insight.Placer, drifted func() string, checked func() bool) (*insight.Scheduler, error) {
 	timing, err := schedulerConfig()
 	if err != nil {
 		return nil, err
@@ -514,6 +547,7 @@ func newScheduler(insights store.InsightStore, docs store.DocumentStore, queue s
 			return jobs.EnqueueRebuild(ctx, queue, tenantID, trigger)
 		},
 		Drift:         drifted,
+		DriftChecked:  checked,
 		ParamsChanged: engine.ParamsChanged,
 		Placer:        placer,
 		Config:        timing,
