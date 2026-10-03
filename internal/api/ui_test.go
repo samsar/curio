@@ -1770,6 +1770,8 @@ func TestUI_InterestsAreas(t *testing.T) {
 	assert.Contains(t, page, `<a href="/ui/documents/`+a.ID+`" title="Kafka partitions">Kafka partitions</a>`,
 		"each with its members")
 	assert.NotContains(t, page, `class="pager"`)
+	assert.Equal(t, 7, strings.Count(getPage(t, srv, "/ui/interests/"+area+"?page=2", http.StatusOK),
+		`<li class="card interest">`), "an area's page is one page, whatever ?page says")
 
 	one := getPage(t, srv, "/ui/interests/"+kafka, http.StatusOK)
 	assert.Contains(t, one, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a>`+

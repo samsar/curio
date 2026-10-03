@@ -127,11 +127,12 @@ func (h pageHandlers) rebuild(r *http.Request, shown string) ui.Rebuild {
 
 // interest answers GET /ui/interests/{id}: an area, with every interest it
 // holds; or an interest, with a page of its members, then its loose fits,
-// most similar first; each with the run it comes from. A page past the
-// last is a 404 that keeps the interest's head. A retired identity is a
-// 410 saying what became of it, and one the latest rebuild never heard of
-// a 404: interests were regrouped when curio was upgraded, and identities
-// from before then are gone.
+// most similar first; each with the run it comes from. A page past an
+// interest's last is a 404 that keeps the interest's head; an area's page
+// is one page, whatever ?page says. A retired identity is a 410 saying
+// what became of it, and one the latest rebuild never heard of a 404:
+// interests were regrouped when curio was upgraded, and identities from
+// before then are gone.
 func (h pageHandlers) interest(w http.ResponseWriter, r *http.Request) {
 	page, err := pageParam(r)
 	if err != nil {

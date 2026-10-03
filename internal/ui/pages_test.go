@@ -394,6 +394,8 @@ func TestInterestPage_AreaAndLoose(t *testing.T) {
 	assert.NotContains(t, out, "<table")
 	assert.Nil(t, area.Pager())
 	assert.Equal(t, 1, area.Pages())
+	area.Page = 2
+	assert.Nil(t, area.OutOfRange(), "an area's page is one page, whatever page is asked for")
 }
 
 // TestInterests_MemberNames: a card names its members as the Library

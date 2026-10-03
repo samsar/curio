@@ -1401,8 +1401,13 @@ func (p InterestPage) Pages() int {
 	return pageCount(p.Interest.Size+p.Interest.Loose, InterestMembersPageSize)
 }
 
-// OutOfRange is the page when it is past the last, nil otherwise.
+// OutOfRange is the page when it is past the last, nil otherwise. An
+// area's page is never out of range: it shows all its interests whatever
+// page is asked for, as the API ignores an area's offset.
 func (p InterestPage) OutOfRange() *PageOutOfRange {
+	if p.Interest.Area {
+		return nil
+	}
 	return outOfRange(p.page(), p.Pages(), p.pageHref)
 }
 
