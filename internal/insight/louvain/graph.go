@@ -20,8 +20,9 @@ type Edge struct {
 }
 
 // Graph is a weighted undirected graph NewGraph has validated: no
-// self-loops, positive finite weights, each node's edges strictly ascending
-// by neighbour, and every edge listed from both ends with the same weight.
+// self-loops, positive finite weights whose total is finite too, each
+// node's edges strictly ascending by neighbour, and every edge listed from
+// both ends with the same weight.
 type Graph struct {
 	adj [][]Edge
 	k   []float64 // degree
@@ -57,7 +58,13 @@ func NewGraph(adj [][]Edge) (*Graph, error) {
 			}
 		}
 	}
-	return newGraph(adj), nil
+	g := newGraph(adj)
+	// Finite weights can still add up to +Inf, and every gain is then NaN:
+	// Run would leave each node alone without saying why.
+	if math.IsInf(g.m2, 0) {
+		return nil, fmt.Errorf("%w: the total degree overflows float64", ErrInvalidGraph)
+	}
+	return g, nil
 }
 
 // checkEdge validates one edge of node i on its own.

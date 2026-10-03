@@ -9843,6 +9843,27 @@ fresh, and at 16.0, 18.3 and 15.0 with it every 4th step. The rebuilds
 that wire the grouper in have to run the split check regularly in both
 shapes.
 
+**One big step needs the split check too.** A warm pass whose Prior knows
+only part of the library is coarse without it: on a 900-document flat
+fixture, a Prior from 10%, 30% or 50% of the documents gave 7, 6 and 9
+interests against 13 fresh (13 with the split check), and on the areas
+fixture a Prior from 50% or 55% gave 32 and 28 interests against 36 (31
+and 32 with it). Only a Prior that knows none of the points makes the pass
+fresh. So the scheduler has to run the split check whenever one rebuild
+absorbs a large change, not only by cadence; counting the split check in
+changes (four times the rebuild threshold) does this, since an import of
+that size crosses it in one rebuild.
+
+**The shape gate reads two partitions.** The flip from areas to flat reads
+coverage on the warm area partition, the flip from flat to areas on a
+fresh one, so a library whose warm coverage is under 70% while its fresh
+coverage is 80% or more would bounce areas → flat → areas on unchanged
+rebuilds, each a fresh pass. A fuzzer found it with the gate's constants
+lowered; at the shipped ones, 240 synthetic libraries with coverage
+between 0.70 and 0.85 bounced none, and warm and fresh coverage differed by
+0.007 at most. Left as is; if it ever shows, the flip to flat can read a
+fresh area partition too (about 4 ms at 5,000 nodes, no second graph).
+
 **Benchmarks** (Apple M4 Max, 16 cores; `bench_test.go` in both
 packages): on a synthetic 5,000 × 1,024 library (132 areas and about 450
 interests, more than the owner's library makes), the neighbour pass

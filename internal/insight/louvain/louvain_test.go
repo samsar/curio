@@ -175,6 +175,14 @@ func TestNewGraph_Rejects(t *testing.T) {
 			"node 0: edge to 2 has no edge back"},
 		{"weight differs back", func(a [][]Edge) [][]Edge { a[1][0].Weight = math.Nextafter(0.5, 1); return a },
 			"node 0: edge to 1 weighs 0.5, but 0.5000000000000001 back"},
+		{"total degree overflows", func(a [][]Edge) [][]Edge {
+			for _, row := range a {
+				for k := range row {
+					row[k].Weight = math.MaxFloat64 / 2
+				}
+			}
+			return a
+		}, "the total degree overflows float64"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
