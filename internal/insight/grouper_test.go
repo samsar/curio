@@ -311,6 +311,39 @@ func TestLouvainGrouper_ShapeFollowsTheGate(t *testing.T) {
 	assert.Equal(t, fresh, flat, "a change of shape is a fresh pass: Prior and Split are ignored")
 }
 
+// TestLouvainGrouper_PriorWithoutThePointsIsFresh: a Prior holding a seed
+// for none of the points, empty or about other documents, groups as a
+// fresh pass does, Split ignored, at either shape. A warm start from it
+// would start every point beside its first neighbours.
+func TestLouvainGrouper_PriorWithoutThePointsIsFresh(t *testing.T) {
+	lg := NewLouvainGrouper(nil)
+	for _, tc := range []struct {
+		shape  Shape
+		points []Point
+	}{
+		{ShapeFlat, syntheticCorpus(8, 600, 32, 20, 1.0)},
+		{ShapeAreas, syntheticCorpus(7, 1200, 32, 25, 1.0)},
+	} {
+		fresh, err := lg.Group(context.Background(), GroupInput{Shape: tc.shape, Points: tc.points})
+		require.NoError(t, err)
+		require.Equal(t, tc.shape, fresh.Shape)
+		// The premise: a warm start knowing one point groups otherwise.
+		one, err := lg.Group(context.Background(), GroupInput{
+			Shape: tc.shape, Points: tc.points, Prior: map[string]Seed{tc.points[0].ID: fresh.Seeds[0]},
+		})
+		require.NoError(t, err)
+		require.NotEqual(t, fresh.Interest, one.Interest, "%s: the premise", tc.shape)
+
+		for _, prior := range []map[string]Seed{{}, {"elsewhere": {Area: 0, Interest: 0}}} {
+			for _, split := range []bool{false, true} {
+				got, err := lg.Group(context.Background(), GroupInput{Shape: tc.shape, Points: tc.points, Prior: prior, Split: split})
+				require.NoError(t, err)
+				assert.Equal(t, fresh, got, "%s, prior %v, split %v", tc.shape, prior, split)
+			}
+		}
+	}
+}
+
 func TestFlatGrouper(t *testing.T) {
 	c := NewKNNGraphClusterer(KNNGraphOptions{})
 	fg := FlatGrouper(c)

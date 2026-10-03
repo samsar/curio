@@ -45,14 +45,16 @@ type GroupInput struct {
 	// Shape is the shape of the grouping Prior came from, ShapeFlat when
 	// there is none: the state the gate between the shapes moves from.
 	Shape Shape
-	// Prior holds the previous grouping's seeds by document ID; nil makes
-	// a fresh pass. Entries for IDs not in Points are ignored, and a point
-	// without one starts beside the neighbours it is most strongly
-	// connected to (see package louvain).
+	// Prior holds the previous grouping's seeds by document ID. Entries
+	// for IDs not in Points are ignored, and a point without one starts
+	// beside the neighbours it is most strongly connected to (see package
+	// louvain). A Prior with a seed for none of the points (nil or empty
+	// included) makes a fresh pass: started from nothing, every point
+	// would join its first neighbours, coarser than a fresh pass groups.
 	Prior map[string]Seed
 	// Split runs the check that parts a community grown into two topics.
-	// It is ignored on a fresh pass (no Prior, or a change of shape),
-	// which is its own split check.
+	// It is ignored on a fresh pass (no seed for any point, or a change of
+	// shape), which is its own split check.
 	Split bool
 }
 
@@ -352,7 +354,8 @@ func (lg *LouvainGrouper) Group(ctx context.Context, in GroupInput) (Grouping, e
 	if err != nil {
 		return Grouping{}, fmt.Errorf("insight: nearest neighbours: %w", err)
 	}
-	p := &groupPass{ctx: ctx, c: lg.c, points: sorted, ids: idsOf(sorted), lists: lists, prior: in.Prior, split: in.Split}
+	ids := idsOf(sorted)
+	p := &groupPass{ctx: ctx, c: lg.c, points: sorted, ids: ids, lists: lists, prior: seedsFor(in.Prior, ids), split: in.Split}
 	g, err := p.group(in.Shape)
 	if err != nil {
 		return Grouping{}, err
@@ -416,6 +419,15 @@ func (p *groupPass) group(cur Shape) (Grouping, error) {
 	// From flat, the area pass above was fresh: a flat grouping has no
 	// areas to start from.
 	return p.interests(areaGraph, areaComm, areas, sameShape)
+}
+
+// seedsFor returns prior when it holds a seed for one of ids, nil when it
+// holds none: the pass is then fresh.
+func seedsFor(prior map[string]Seed, ids []string) map[string]Seed {
+	if slices.ContainsFunc(ids, func(id string) bool { _, ok := prior[id]; return ok }) {
+		return prior
+	}
+	return nil
 }
 
 // warmFrom reports whether a pass at a shape the previous grouping also had

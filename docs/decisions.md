@@ -9721,7 +9721,10 @@ list's first 10 at cosine 0.40 or above, which is exactly the top-10 graph
 shapes needs the area pass's coverage on that graph, so it lives in the
 grouper: `GroupInput.Shape` is the shape the previous grouping had (the
 hysteresis state) and `Grouping.Shape` the shape produced; a grouping
-whose shape changed was computed fresh.
+whose shape changed was computed fresh. So is one whose `Prior` holds a
+seed for none of its points (nil, empty, or about other documents): a
+warm start from it would start every point beside its first neighbours,
+which on the fixture gave 28 interests where a fresh pass gives 36.
 
 **The merge repeats until nothing joins.** One pass over centroids can
 leave a pair at the threshold: A and B at 0.86 join, and their joined
