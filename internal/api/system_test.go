@@ -16,6 +16,7 @@ import (
 	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/store"
 )
@@ -310,4 +311,20 @@ func TestHealth_Upstreams(t *testing.T) {
 			"window_seconds": float64(900), "recent": map[string]any{},
 			"cooldown_until": "2026-09-27T14:50:01Z"}, got[4])
 	})
+}
+
+// TestHealth_InterestsReadNothing: healthz serves the scheduler's last
+// snapshot and reads no store for it, so a database that fails every call
+// doesn't fail it.
+func TestHealth_InterestsReadNothing(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) {
+		// Any call through these panics: nothing implements them.
+		d.Insights = struct{ store.InsightStore }{}
+		d.Queue = struct{ store.JobStore }{}
+	})
+	s.interests.set(insight.Snapshot{State: insight.StateDue, Changed: 300, RebuildAt: 263})
+	var h Health
+	s.getJSON(t, "/v1/healthz", &h)
+	assert.Equal(t, InterestsState{State: "due", ChangedDocuments: 300, RebuildAt: 263}, h.Interests)
+	assert.Equal(t, "ok", h.Status, "interests are not health")
 }

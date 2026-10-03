@@ -23,20 +23,31 @@ import (
 
 const tenant = "local"
 
-// vectorSource serves canned document vectors; the engine reads nothing else
-// from the chunk store.
+// vectorSource serves canned document vectors: each document's mean, and
+// that vector as its one chunk's. The engine and the placer read nothing
+// else from the chunk store.
 type vectorSource struct {
 	store.ChunkStore
 	dvs []store.DocVector
+	err error // what DocumentVectors fails with, when set
 }
 
 func (v *vectorSource) DocumentVectors(context.Context, string) ([]store.DocVector, error) {
-	return v.dvs, nil
+	return v.dvs, v.err
+}
+
+func (v *vectorSource) EmbeddingsForDocument(_ context.Context, documentID string) ([]store.ChunkEmbedding, error) {
+	for _, dv := range v.dvs {
+		if dv.DocumentID == documentID {
+			return []store.ChunkEmbedding{{ChunkID: "chunk-" + documentID, Embedding: dv.Vector}}, nil
+		}
+	}
+	return nil, nil
 }
 
 // faultyInsights wraps the real insight store. LatestRun fails with latestErr
 // and CommitRun with commitErr when set, and failed records every run
-// FailRun failed.
+// FailRun or RecordFailure failed.
 type faultyInsights struct {
 	store.InsightStore
 	latestErr, commitErr error
@@ -65,6 +76,14 @@ func (f *faultyInsights) FailRun(ctx context.Context, runID string, numDocuments
 	return nil
 }
 
+func (f *faultyInsights) RecordFailure(ctx context.Context, tenantID, runID string, numDocuments int, msg string) (store.InsightState, error) {
+	st, err := f.InsightStore.RecordFailure(ctx, tenantID, runID, numDocuments, msg)
+	if err == nil && runID != "" {
+		f.failed = append(f.failed, runID)
+	}
+	return st, err
+}
+
 // faultyDocs wraps the real document store; GetByID fails for the IDs in fail.
 type faultyDocs struct {
 	store.DocumentStore
@@ -80,7 +99,9 @@ func (f *faultyDocs) GetByID(ctx context.Context, id string) (*store.Document, e
 
 // engineFixture is a real SQLite document + insight store with a corpus of
 // well-separated groups: group g has sizes[g] documents whose vectors all
-// point along basis axis g.
+// point along basis axis g. Its clock is the engines', and the time each
+// document is indexed at, a second a step, so what a run counts as changed
+// never hangs on two clocks' milliseconds.
 type engineFixture struct {
 	db       *sqlitestore.DB
 	docs     *faultyDocs
@@ -89,6 +110,7 @@ type engineFixture struct {
 	vectors  *vectorSource
 	dim      int
 	added    int // documents add created, for unique URLs
+	clock    time.Time
 	logs     bytes.Buffer
 }
 
@@ -101,6 +123,7 @@ func newEngineFixture(t *testing.T, sizes ...int) *engineFixture {
 		store:   sqlitestore.NewInsights(db),
 		vectors: &vectorSource{},
 		dim:     max(len(sizes), 2),
+		clock:   time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC),
 	}
 	f.insights = &faultyInsights{InsightStore: f.store}
 	for g, n := range sizes {
@@ -109,7 +132,14 @@ func newEngineFixture(t *testing.T, sizes ...int) *engineFixture {
 	return f
 }
 
-// add creates n documents along axis g and returns their IDs.
+// tick moves the clock a second on and returns it.
+func (f *engineFixture) tick() time.Time {
+	f.clock = f.clock.Add(time.Second)
+	return f.clock
+}
+
+// add creates n documents along axis g, fetched and indexed now, and
+// returns their IDs.
 func (f *engineFixture) add(t *testing.T, g, n int) []string {
 	t.Helper()
 	ids := make([]string, 0, n)
@@ -117,9 +147,9 @@ func (f *engineFixture) add(t *testing.T, g, n int) []string {
 		i := f.added
 		f.added++
 		title := fmt.Sprintf("group%d topic%d item%d", g, g, i)
-		d := &store.Document{TenantID: tenant, URL: fmt.Sprintf("https://example.com/%d/%d", g, i),
-			Title: &title, State: store.DocStateFetched}
+		d := &store.Document{TenantID: tenant, URL: fmt.Sprintf("https://example.com/%d/%d", g, i), Title: &title}
 		require.NoError(t, f.docs.Create(context.Background(), d))
+		f.indexed(t, d.ID)
 		v := make([]float32, f.dim)
 		v[g] = 1
 		f.vectors.dvs = append(f.vectors.dvs, store.DocVector{DocumentID: d.ID, Vector: v})
@@ -128,16 +158,44 @@ func (f *engineFixture) add(t *testing.T, g, n int) []string {
 	return ids
 }
 
+// indexed marks a document fetched, its vectors written now.
+func (f *engineFixture) indexed(t *testing.T, id string) {
+	t.Helper()
+	require.NoError(t, f.docs.MarkFetched(context.Background(), id))
+	_, err := f.db.Exec(`UPDATE documents SET indexed_at = ? WHERE id = ?`, f.tick().Format(storeTime), id)
+	require.NoError(t, err)
+}
+
+// storeTime is the store's timestamp layout.
+const storeTime = "2006-01-02T15:04:05.000Z"
+
+// failed marks the documents failed, and serves their vectors no more.
+func (f *engineFixture) failed(t *testing.T, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		require.NoError(t, f.docs.MarkFailed(context.Background(), id, store.FailureCauseOther))
+	}
+	f.vectors.dvs = slices.DeleteFunc(f.vectors.dvs, func(dv store.DocVector) bool { return slices.Contains(ids, dv.DocumentID) })
+}
+
 func (f *engineFixture) engine(g Grouper, llm Labeler, cfg Config) *Engine {
 	if g == nil {
 		g = FlatGrouper(byAxis)
 	}
-	return New(f.docs, f.vectors, f.insights, g, llm, cfg, slog.New(slog.NewTextHandler(&f.logs, nil)))
+	e := New(f.docs, f.vectors, f.insights, g, llm, cfg, slog.New(slog.NewTextHandler(&f.logs, nil)))
+	e.now = func() time.Time { return f.clock }
+	return e
+}
+
+// placer is a Placer over the fixture's stores, logging to its logs.
+func (f *engineFixture) placer() *Placer {
+	return NewPlacer(f.insights, f.vectors, nil, slog.New(slog.NewTextHandler(&f.logs, nil)))
 }
 
 // rebuild runs a manual Rebuild that must succeed and returns its run.
 func (f *engineFixture) rebuild(t *testing.T, e *Engine) *store.InterestRun {
 	t.Helper()
+	f.tick()
 	runID, err := e.Rebuild(context.Background(), tenant, store.RunTriggerManual)
 	require.NoError(t, err)
 	run, err := f.store.GetRun(context.Background(), runID)
@@ -452,7 +510,7 @@ func TestRebuild_FreshWhenTheGroupingIs(t *testing.T) {
 	t.Run("no seed for any point", func(t *testing.T) {
 		f := newEngineFixture(t, 3, 4)
 		f.rebuild(t, f.engine(nil, nil, Config{}))
-		f.vectors.dvs = nil
+		f.failed(t, f.vectorIDs()...)
 		f.add(t, 0, 3)
 		f.add(t, 1, 4)
 		second := f.rebuild(t, f.engine(nil, nil, Config{}))
@@ -511,6 +569,15 @@ func TestRebuild_SplitCheckCadence(t *testing.T) {
 	assert.Zero(t, fresh.ChangesSinceSplit)
 }
 
+// vectorIDs are the documents whose vectors the fixture serves.
+func (f *engineFixture) vectorIDs() []string {
+	ids := make([]string, 0, len(f.vectors.dvs))
+	for _, dv := range f.vectors.dvs {
+		ids = append(ids, dv.DocumentID)
+	}
+	return ids
+}
+
 // TestRebuild_ChangeCount: the documents added since the prior, plus those
 // it grouped that are gone: failed, pending again, or deleted, whose rows
 // went with them.
@@ -521,13 +588,39 @@ func TestRebuild_ChangeCount(t *testing.T) {
 	deleted, failed := f.vectors.dvs[0].DocumentID, f.vectors.dvs[1].DocumentID
 	_, err := f.db.Exec(`DELETE FROM documents WHERE id = ?`, deleted)
 	require.NoError(t, err)
-	f.vectors.dvs = slices.DeleteFunc(f.vectors.dvs, func(dv store.DocVector) bool {
-		return dv.DocumentID == deleted || dv.DocumentID == failed
-	})
+	f.vectors.dvs = slices.DeleteFunc(f.vectors.dvs, func(dv store.DocVector) bool { return dv.DocumentID == deleted })
+	f.failed(t, failed)
 	f.add(t, 1, 3)
 	run := f.rebuild(t, e)
 	assert.Equal(t, 5, run.ChangedDocuments, "3 added, 2 gone")
 	assert.Equal(t, 9, run.NumDocuments)
+}
+
+// TestRebuild_ReindexedMembersCount: a member the prior grouped, indexed
+// again since, is a change: it raises the run's changed_documents, and
+// brings the split check closer.
+func TestRebuild_ReindexedMembersCount(t *testing.T) {
+	f := newEngineFixture(t, 10, 10) // the threshold is 5: a split check every 20 changes
+	g := &recordingGrouper{Grouper: FlatGrouper(byAxis)}
+	e := f.engine(g, nil, Config{})
+	f.rebuild(t, e)
+	ids := f.vectorIDs()
+	for _, id := range ids[:6] {
+		f.indexed(t, id)
+	}
+	run := f.rebuild(t, e)
+	assert.Equal(t, store.RunKindWarm, run.Kind)
+	assert.Equal(t, 6, run.ChangedDocuments, "6 reindexed")
+	assert.Equal(t, 6, run.ChangesSinceSplit)
+	assert.False(t, run.SplitCheck)
+
+	for _, id := range ids[6:20] {
+		f.indexed(t, id)
+	}
+	run = f.rebuild(t, e)
+	assert.Equal(t, 14, run.ChangedDocuments)
+	assert.True(t, run.SplitCheck, "6 + 14 reindexed reach 4 × 5")
+	assert.True(t, g.splits[len(g.splits)-1])
 }
 
 func TestRebuild_EmptyCorpus(t *testing.T) {
@@ -541,16 +634,9 @@ func TestRebuild_EmptyCorpus(t *testing.T) {
 	t.Run("a prior done run is kept without a new row", func(t *testing.T) {
 		f := newEngineFixture(t, 3, 4)
 		prior := f.rebuild(t, f.engine(nil, nil, Config{}))
-		live := f.live(t)
 		f.vectors.dvs = nil
 
-		got := f.rebuild(t, f.engine(nil, nil, Config{}))
-		assert.Equal(t, prior.ID, got.ID)
-		latest, err := f.store.LatestRun(context.Background(), tenant, "")
-		require.NoError(t, err)
-		assert.Equal(t, prior.ID, latest.ID, "no new run row")
-		f.assertCurrentRun(t, prior.ID)
-		assert.Equal(t, live, f.live(t), "no identity retired")
+		f.assertNothingToGroup(t, f.engine(nil, nil, Config{}), prior)
 	})
 	t.Run("a store error is not mistaken for no prior run", func(t *testing.T) {
 		f := newEngineFixture(t, 3, 4)
@@ -595,27 +681,44 @@ func TestRebuild_SkipsNonFiniteVectors(t *testing.T) {
 }
 
 // TestRebuild_AllVectorsNonFinite: a library whose every vector is NaN or
-// infinite has nothing to group, like an empty one: the rebuild keeps the
-// prior run, writes no run row and retires no identity, so the interests
-// and their LLM names survive until the vectors are re-embedded.
+// infinite has nothing to group, like an empty one: the rebuild fails
+// keeping the prior run, writes no run row and retires no identity, so the
+// interests and their LLM names survive until the vectors are re-embedded.
 func TestRebuild_AllVectorsNonFinite(t *testing.T) {
 	f := newEngineFixture(t, 3, 4)
 	calls := 0
 	prior := f.rebuild(t, f.engine(nil, sizeNames(&calls), Config{Labeling: LabelingLLM, Center: true}))
-	live, labels := f.live(t), f.labels(t, prior.ID)
+	labels := f.labels(t, prior.ID)
 	for _, dv := range f.vectors.dvs {
 		dv.Vector[0] = float32(math.NaN())
 	}
 
-	got := f.rebuild(t, f.engine(nil, sizeNames(&calls), Config{Labeling: LabelingLLM, Center: true}))
-	assert.Equal(t, prior.ID, got.ID)
-	latest, err := f.store.LatestRun(context.Background(), tenant, "")
+	f.assertNothingToGroup(t, f.engine(nil, sizeNames(&calls), Config{Labeling: LabelingLLM, Center: true}), prior)
+	assert.Equal(t, labels, f.labels(t, prior.ID), "the LLM names kept")
+	assert.Contains(t, f.logLine(t, "vectors have NaN or infinite values"), "count=7")
+}
+
+// assertNothingToGroup runs a rebuild that finds no vector to group, and
+// checks that it failed and counted, so the scheduler backs off, keeping
+// prior: no new run row, prior current, no identity retired.
+func (f *engineFixture) assertNothingToGroup(t *testing.T, e *Engine, prior *store.InterestRun) {
+	t.Helper()
+	ctx := context.Background()
+	live := f.live(t)
+
+	runID, err := e.Rebuild(ctx, tenant, store.RunTriggerAuto)
+	require.ErrorIs(t, err, errNothingToGroup)
+	assert.Empty(t, runID)
+	latest, err := f.store.LatestRun(ctx, tenant, "")
 	require.NoError(t, err)
 	assert.Equal(t, prior.ID, latest.ID, "no new run row")
 	f.assertCurrentRun(t, prior.ID)
 	assert.Equal(t, live, f.live(t), "no identity retired")
-	assert.Equal(t, labels, f.labels(t, prior.ID), "the LLM names kept")
-	assert.Contains(t, f.logLine(t, "vectors have NaN or infinite values"), "count=7")
+	st, err := f.store.State(ctx, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, 1, st.Failures, "it counts as a failed rebuild")
+	assert.Contains(t, st.LastError, "nothing to group")
+	assert.Contains(t, f.logLine(t, "interests: rebuild failed"), "level=WARN")
 }
 
 var errLocked = errors.New("database is locked")
@@ -745,8 +848,249 @@ func TestRebuild_CanceledRunIsMarkedFailed(t *testing.T) {
 			require.ErrorIs(t, err, context.Canceled)
 			assert.Contains(t, f.insights.failed, runID, "the run is marked failed although its context is gone")
 			f.assertCurrentRun(t, prior.ID)
+			st, err := f.store.State(context.Background(), tenant)
+			require.NoError(t, err)
+			assert.Zero(t, st.Failures, "a cancelled rebuild failed nothing: its job runs again")
+			assert.NotContains(t, f.logs.String(), "interests: rebuild failed")
 		})
 	}
+}
+
+// TestRebuild_FailuresAreCounted: every failed rebuild but a cancelled one
+// counts, whether it failed before creating a run or after, with a warning
+// that says when the next is tried; a done rebuild clears them.
+func TestRebuild_FailuresAreCounted(t *testing.T) {
+	ctx := context.Background()
+	f := newEngineFixture(t, 3, 4)
+	state := func() store.InsightState {
+		t.Helper()
+		st, err := f.store.State(ctx, tenant)
+		require.NoError(t, err)
+		return st
+	}
+
+	f.vectors.err = errLocked
+	runID, err := f.engine(nil, nil, Config{}).Rebuild(ctx, tenant, store.RunTriggerAuto)
+	require.ErrorIs(t, err, errLocked)
+	assert.Empty(t, runID)
+	assert.Equal(t, 1, state().Failures, "a vector read that failed counts")
+	assert.Contains(t, state().LastError, "read document vectors")
+	warning := f.logLine(t, "interests: rebuild failed")
+	assert.Contains(t, warning, "level=WARN")
+	assert.Contains(t, warning, "failures=1")
+	assert.Contains(t, warning, "retry_at="+RetryAt(state()).Format("2006-01-02T15:04:05"))
+
+	f.vectors.err = nil
+	failing := groupFunc(func(context.Context, GroupInput) (Grouping, error) { return Grouping{}, errors.New("boom") })
+	runID, err = f.engine(failing, nil, Config{}).Rebuild(ctx, tenant, store.RunTriggerAuto)
+	require.ErrorContains(t, err, "boom")
+	assert.Equal(t, 2, state().Failures, "so does a run that failed")
+	assert.Contains(t, state().LastError, "boom")
+	run, err := f.store.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, store.InterestRunFailed, run.Status)
+
+	f.rebuild(t, f.engine(nil, nil, Config{}))
+	assert.Equal(t, store.InsightState{}, state(), "a done rebuild clears them")
+}
+
+// TestRebuild_Abandoned: a rebuild a daemon left unfinished fails the runs
+// it left running and counts one failure, with a warning.
+func TestRebuild_Abandoned(t *testing.T) {
+	ctx := context.Background()
+	f := newEngineFixture(t, 3, 4)
+	prior := f.rebuild(t, f.engine(nil, nil, Config{}))
+	left := &store.InterestRun{TenantID: tenant, Trigger: store.RunTriggerAuto, Grouper: "test",
+		RunOutcome: store.RunOutcome{Kind: store.RunKindWarm, Shape: store.InterestShapeFlat}}
+	require.NoError(t, f.store.CreateRun(ctx, left))
+
+	require.NoError(t, f.engine(nil, nil, Config{}).Abandoned(ctx, tenant))
+	run, err := f.store.GetRun(ctx, left.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.InterestRunFailed, run.Status)
+	require.NotNil(t, run.Error)
+	assert.Contains(t, *run.Error, "the daemon stopped during this rebuild")
+	st, err := f.store.State(ctx, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, 1, st.Failures)
+	assert.Contains(t, f.logLine(t, "interests: rebuild failed"), "failures=1")
+	f.assertCurrentRun(t, prior.ID)
+}
+
+// TestRebuild_FreshOwed: a fresh rebuild owed makes the next rebuild fresh,
+// which consumes it; one owed after a run read its vectors survives that
+// run's commit, warm or fresh.
+func TestRebuild_FreshOwed(t *testing.T) {
+	ctx := context.Background()
+	f := newEngineFixture(t, 3, 4)
+	e := f.engine(nil, nil, Config{})
+	f.rebuild(t, e)
+	state := func() store.InsightState {
+		t.Helper()
+		st, err := f.store.State(ctx, tenant)
+		require.NoError(t, err)
+		return st
+	}
+	// owe owes a fresh rebuild for reason as of the fixture's clock.
+	owe := func(reason store.FreshReason) {
+		t.Helper()
+		require.NoError(t, f.store.OweFresh(ctx, tenant, reason))
+		_, err := f.db.Exec(`UPDATE insight_state SET fresh_owed_at = ?`, f.tick().Format(storeTime))
+		require.NoError(t, err)
+	}
+	// owingWhileGrouping owes reason while the grouping runs, after the
+	// run read its vectors.
+	owingWhileGrouping := func(reason store.FreshReason) *Engine {
+		return f.engine(groupFunc(func(ctx context.Context, in GroupInput) (Grouping, error) {
+			owe(reason)
+			return FlatGrouper(byAxis).Group(ctx, in)
+		}), nil, Config{})
+	}
+
+	owe(store.FreshManual)
+	fresh := f.rebuild(t, e)
+	assert.Equal(t, store.RunKindFresh, fresh.Kind, "owed: fresh though warm-eligible")
+	assert.Equal(t, 2, fresh.Kept, "the names carry over")
+	assert.Equal(t, store.InsightState{}, state(), "consumed")
+
+	warm := f.rebuild(t, f.engine(nil, nil, Config{}))
+	require.Equal(t, store.RunKindWarm, warm.Kind)
+
+	// The stub grouper's params differ from the axis grouper's, so this
+	// run is fresh too; it read its vectors before the owe.
+	stub := f.rebuild(t, owingWhileGrouping(store.FreshReindex))
+	require.Equal(t, store.RunKindFresh, stub.Kind)
+	assert.Equal(t, store.FreshReindex, state().FreshOwed, "owed after the fresh run read: kept")
+
+	f.rebuild(t, e)
+	assert.Equal(t, store.InsightState{}, state())
+	again := f.rebuild(t, e)
+	require.Equal(t, store.RunKindWarm, again.Kind)
+	warmOwed := f.engine(&owingGrouper{Grouper: FlatGrouper(byAxis), owe: func() { owe(store.FreshReindex) }}, nil, Config{})
+	run := f.rebuild(t, warmOwed)
+	require.Equal(t, store.RunKindWarm, run.Kind)
+	assert.Equal(t, store.FreshReindex, state().FreshOwed, "a warm run never consumes it")
+}
+
+// TestRebuild_AReindexOwedMidDrain: a rebuild that finds index jobs left
+// before or after it reads the vectors, while a re-embedding owes a fresh
+// rebuild, groups fresh but leaves that rebuild owed, its vectors perhaps
+// of both builds; the first that finds none either side consumes it. A
+// queue it can't read fails the rebuild.
+func TestRebuild_AReindexOwedMidDrain(t *testing.T) {
+	ctx := context.Background()
+	f := newEngineFixture(t, 3, 4)
+	f.rebuild(t, f.engine(nil, nil, Config{}))
+	require.NoError(t, f.store.OweFresh(ctx, tenant, store.FreshReindex))
+	_, err := f.db.Exec(`UPDATE insight_state SET fresh_owed_at = ?`, f.tick().Format(storeTime))
+	require.NoError(t, err)
+	// indexing's engine finds index jobs left before it reads the vectors,
+	// and after, as told.
+	indexing := func(before, after bool, err error) *Engine {
+		vectors := &readVectors{vectorSource: f.vectors}
+		e := f.engine(nil, nil, Config{Indexing: func(context.Context) (bool, error) {
+			if vectors.read {
+				return after, err
+			}
+			return before, err
+		}})
+		e.chunks = vectors
+		return e
+	}
+	owed := func() store.FreshReason {
+		t.Helper()
+		st, err := f.store.State(ctx, tenant)
+		require.NoError(t, err)
+		return st.FreshOwed
+	}
+
+	for name, left := range map[string][2]bool{
+		"index jobs left after the read":  {false, true},
+		"the drain ended during the read": {true, false},
+	} {
+		run := f.rebuild(t, indexing(left[0], left[1], nil))
+		assert.Equal(t, store.RunKindFresh, run.Kind, name)
+		assert.Equal(t, store.FreshReindex, owed(), "%s: still owed", name)
+	}
+
+	f.tick()
+	_, err = indexing(false, false, errLocked).Rebuild(ctx, tenant, store.RunTriggerManual)
+	require.ErrorIs(t, err, errLocked)
+	assert.Equal(t, store.FreshReindex, owed())
+
+	run := f.rebuild(t, indexing(false, false, nil))
+	assert.Equal(t, store.RunKindFresh, run.Kind)
+	assert.Empty(t, owed(), "drained: consumed")
+}
+
+// readVectors serves a vectorSource's vectors, and notes it did.
+type readVectors struct {
+	*vectorSource
+	read bool
+}
+
+func (r *readVectors) DocumentVectors(ctx context.Context, tenantID string) ([]store.DocVector, error) {
+	r.read = true
+	return r.vectorSource.DocumentVectors(ctx, tenantID)
+}
+
+// owingGrouper runs owe as it groups, keeping its grouper's name and
+// params, so a warm-eligible run stays warm.
+type owingGrouper struct {
+	Grouper
+	owe func()
+}
+
+func (o *owingGrouper) Group(ctx context.Context, in GroupInput) (Grouping, error) {
+	o.owe()
+	return o.Grouper.Group(ctx, in)
+}
+
+// TestRebuild_ParamsChanged: a run grouped by this grouper with today's
+// params hasn't; another grouper's, or other params', has.
+func TestRebuild_ParamsChanged(t *testing.T) {
+	f := newEngineFixture(t, 3, 4)
+	run := f.rebuild(t, f.engine(nil, nil, Config{}))
+	assert.False(t, f.engine(nil, nil, Config{}).ParamsChanged(run))
+	assert.True(t, f.engine(nil, nil, Config{Center: true}).ParamsChanged(run))
+	assert.True(t, f.engine(areasByAxis(0, 1), nil, Config{}).ParamsChanged(run))
+}
+
+// TestRebuild_PlacesWhatWasIndexedMeanwhile: the documents indexed while a
+// rebuild ran are placed in its run once it commits, and the replaced
+// run's placements go with it.
+func TestRebuild_PlacesWhatWasIndexedMeanwhile(t *testing.T) {
+	ctx := context.Background()
+	f := newEngineFixture(t, 3, 5)
+	placer := f.placer()
+	first := f.rebuild(t, f.engine(nil, nil, Config{Placer: placer}))
+	early := f.add(t, 0, 1)
+	placer.Place(ctx, tenant, early[0])
+	counts, err := f.store.PlacementCounts(ctx, first.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, counts[f.groups(t, first.ID)[3].ID], "placed into the first run")
+
+	var during []string
+	indexing := groupFunc(func(ctx context.Context, in GroupInput) (Grouping, error) {
+		during = f.add(t, 1, 2)
+		return FlatGrouper(byAxis).Group(ctx, in)
+	})
+	f.logs.Reset()
+	second := f.rebuild(t, f.engine(indexing, nil, Config{Placer: placer}))
+	assert.Equal(t, 9, second.NumDocuments, "the early document is grouped, the two indexed meanwhile aren't")
+	placed, err := f.store.Placements(ctx, second.ID, f.groups(t, second.ID)[5].ID, 0)
+	require.NoError(t, err)
+	got := make([]string, 0, len(placed))
+	for _, p := range placed {
+		got = append(got, p.DocumentID)
+	}
+	assert.ElementsMatch(t, during, got, "placed into their interest after the commit")
+	assert.Contains(t, f.logLine(t, "interests rebuilt"), " placed_after=2")
+	_, err = f.store.GetRun(ctx, first.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	var left int
+	require.NoError(t, f.db.QueryRow(`SELECT count(*) FROM interest_placements WHERE run_id = ?`, first.ID).Scan(&left))
+	assert.Zero(t, left, "the first run's placements went with it")
 }
 
 // TestRebuild_LogLine: a rebuild says what it did in one INFO line.
@@ -759,10 +1103,17 @@ func TestRebuild_LogLine(t *testing.T) {
 		"run=" + run.ID, "trigger=manual", "kind=fresh", "split_check=false", "shape=areas", "documents=22",
 		"areas=2", "interests=4", "kept=0", "created=4", "split=0", "merged=0", "moved=0", "dissolved=0",
 		"areas_kept=0", "areas_created=2", "areas_dissolved=0", "loose=0", "unsorted=0", "changed=0",
-		"read_ms=", "group_ms=", "label_ms=", "labels_llm=0", "labels_terms=6", "persist_ms=",
+		"read_ms=", "group_ms=", "label_ms=", "labels_llm=0", "labels_terms=6", "persist_ms=", "placed_after=0",
 	} {
 		assert.Contains(t, line, " "+field, field)
 	}
+	assert.NotContains(t, line, "embeddings_drifted")
+
+	f.logs.Reset()
+	drifted := Config{Drift: func() string { return "the embeddings drifted" }}
+	f.rebuild(t, f.engine(areasByAxis(0, 0, 1, 1), nil, drifted))
+	assert.Contains(t, f.logLine(t, "interests rebuilt"), " embeddings_drifted=true",
+		"a rebuild asked for while the embeddings drifted says so")
 }
 
 // TestRebuild_TwoLevels: a grouping in areas is committed with each area's

@@ -1,6 +1,9 @@
 package insight
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Hooks for the package insight_test tests, which measure groupings with
 // package quality (which imports this package).
@@ -18,4 +21,11 @@ func (lg *LouvainGrouper) WithNeighbours(f func(ctx context.Context, vecs [][]fl
 	c := *lg
 	c.neighbours = f
 	return &c
+}
+
+// WithClock returns e reading the time its runs read the vectors from now,
+// so a test sets the times documents are indexed at against it.
+func (e *Engine) WithClock(now func() time.Time) *Engine {
+	e.now = now
+	return e
 }

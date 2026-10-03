@@ -1092,6 +1092,67 @@ func TestMigration016_Constraints(t *testing.T) {
 	}
 }
 
+// TestMigration017_InterestsScheduling: 017 gives every fetched document
+// its updated_at as indexed_at and no other one any, indexes it, and
+// rebuilds insight_state keeping a re-embedding's fresh rebuild owed (from
+// its updated_at) and the failures; its Down restores 016's schema byte for
+// byte, dropping what 016 can't hold, and Up runs again.
+func TestMigration017_InterestsScheduling(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 16)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, state, failure_cause, updated_at) VALUES
+			('fetched', 'local', 'https://example.com/1', 'fetched', NULL, '2026-09-01T10:00:00.000Z'),
+			('pending', 'local', 'https://example.com/2', 'pending', NULL, '2026-09-02T10:00:00.000Z'),
+			('failed', 'local', 'https://example.com/3', 'failed', 'other', '2026-09-03T10:00:00.000Z');
+		INSERT INTO insight_state (tenant_id, fresh_owed, failures, last_failure_at, updated_at) VALUES
+			('reindexed', 'reindex', 0, NULL, '2026-09-04T10:00:00.000Z'),
+			('regrouped', 'params', 2, '2026-09-05T09:00:00.000Z', '2026-09-05T10:00:00.000Z');`)
+	require.NoError(t, err)
+	schemaBefore := schemaDump(t, db)
+
+	_, err = p.UpTo(ctx, 17)
+	require.NoError(t, err)
+	assert.Equal(t, [][]any{
+		{"failed", nil}, {"fetched", "2026-09-01T10:00:00.000Z"}, {"pending", nil},
+	}, dumpRows(t, db, `SELECT id, indexed_at FROM documents ORDER BY id`))
+	var index string
+	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'idx_documents_tenant_indexed'`).Scan(&index))
+	assert.Equal(t, "CREATE INDEX idx_documents_tenant_indexed ON documents(tenant_id, indexed_at)", index)
+	assert.Equal(t, [][]any{
+		{"regrouped", nil, nil, int64(2), "2026-09-05T09:00:00.000Z", nil},
+		{"reindexed", "reindex", "2026-09-04T10:00:00.000Z", int64(0), nil, nil},
+	}, dumpRows(t, db, `SELECT tenant_id, fresh_owed, fresh_owed_at, failures, last_failure_at, last_error
+		FROM insight_state ORDER BY tenant_id`))
+	var table string
+	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'insight_state'`).Scan(&table))
+	assert.True(t, strings.HasPrefix(table, "CREATE TABLE insight_state ("), "insight_state keeps the text 017 wrote: %s", table)
+	for name, insert := range map[string]string{
+		"a reason with no writer": `INSERT INTO insight_state (tenant_id, fresh_owed, fresh_owed_at) VALUES ('t', 'params', 'now')`,
+		"a reason with no time":   `INSERT INTO insight_state (tenant_id, fresh_owed) VALUES ('t', 'manual')`,
+		"a time with no reason":   `INSERT INTO insight_state (tenant_id, fresh_owed_at) VALUES ('t', 'now')`,
+	} {
+		_, err := db.Exec(insert)
+		assert.ErrorContains(t, err, "constraint failed", name)
+	}
+	_, err = db.Exec(`UPDATE insight_state SET fresh_owed = 'manual', fresh_owed_at = updated_at, last_error = 'boom'
+		WHERE tenant_id = 'regrouped'`)
+	require.NoError(t, err)
+	assertForeignKeysOnEverywhere(t, db)
+
+	_, err = p.DownTo(ctx, 16)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "016's schema, byte for byte")
+	assert.Equal(t, [][]any{
+		{"regrouped", nil, int64(2), "2026-09-05T09:00:00.000Z"},
+		{"reindexed", "reindex", int64(0), nil},
+	}, dumpRows(t, db, `SELECT tenant_id, fresh_owed, failures, last_failure_at FROM insight_state ORDER BY tenant_id`),
+		"a manual rebuild owed, which 016 can't hold, is dropped")
+
+	_, err = p.UpTo(ctx, 17)
+	require.NoError(t, err, "Up runs again")
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `

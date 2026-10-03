@@ -81,6 +81,11 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 	for _, u := range health.Upstreams {
 		fmt.Fprint(w, failingWarning(u))
 	}
+	if s := health.Interests; s != nil {
+		if line := interestsLine(*s, time.Now()); line != "" {
+			fmt.Fprintln(w, line)
+		}
+	}
 
 	sctx, scancel := context.WithTimeout(ctx, 1*time.Second)
 	defer scancel()

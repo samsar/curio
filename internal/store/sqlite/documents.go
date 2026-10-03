@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -187,9 +188,12 @@ func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Doc
 
 // markFailedSQL and markFetchedSQL write a document's state and failure
 // cause together, so no write can leave the one without the other.
+// markFetchedSQL is also the one write of indexed_at: SQLite reads 'now'
+// once per statement, so it equals the updated_at written with it.
 const (
 	markFailedSQL  = `UPDATE documents SET state = ?, failure_cause = ?, updated_at = ` + sqlNow + ` WHERE id = ?`
-	markFetchedSQL = `UPDATE documents SET state = ?, failure_cause = NULL, updated_at = ` + sqlNow + ` WHERE id = ?`
+	markFetchedSQL = `UPDATE documents SET state = ?, failure_cause = NULL, updated_at = ` + sqlNow +
+		`, indexed_at = ` + sqlNow + ` WHERE id = ?`
 )
 
 func (s *Documents) MarkFailed(ctx context.Context, id string, cause store.FailureCause) error {
@@ -438,6 +442,21 @@ func (s *Documents) CountByState(ctx context.Context, tenantID string) (map[stor
 		return nil, fmt.Errorf("count documents: %w", err)
 	}
 	return out, nil
+}
+
+// lastIndexedSQL is the tenant's latest indexed_at, read from the end of
+// its range of idx_documents_tenant_indexed.
+const lastIndexedSQL = `SELECT max(indexed_at) FROM documents WHERE tenant_id = ?`
+
+func (s *Documents) LastIndexedAt(ctx context.Context, tenantID string) (time.Time, error) {
+	var last sql.NullString
+	if err := s.db.QueryRowContext(ctx, lastIndexedSQL, tenantID).Scan(&last); err != nil {
+		return time.Time{}, fmt.Errorf("last indexed time: %w", err)
+	}
+	if !last.Valid {
+		return time.Time{}, nil
+	}
+	return parseTime(last.String)
 }
 
 // failureSummarySQL reads the cause and URL of each of the tenant's failed

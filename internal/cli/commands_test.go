@@ -25,7 +25,7 @@ import (
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
-	"github.com/samsar/curio/internal/jobs"
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/service/servicetest"
 	"github.com/samsar/curio/internal/setup"
 	"github.com/samsar/curio/internal/setup/setuptest"
@@ -512,10 +512,17 @@ func TestReindex(t *testing.T) {
 	assert.Contains(t, out, "reindex enqueued for document "+fetched.ID)
 
 	out = mustRun(t, srv, "reindex", "--all")
-	assert.Contains(t, out, "reindex enqueued for documents in state=fetched: 1 jobs")
+	assert.Contains(t, out, "reindex enqueued for documents in state=fetched: 1 jobs\n"+
+		"interests are regrouped from scratch once the re-embedding finishes; documents indexed meanwhile join them then\n")
 
 	out = mustRun(t, srv, "reindex", "--all", "--state", "pending")
 	assert.Contains(t, out, "documents in state=pending: 0 jobs")
+	assert.NotContains(t, out, "interests", "no re-embedding of the library, no regrouping")
+
+	require.NoError(t, os.WriteFile(srv.Home.ConfigPath(), []byte("insight:\n  enabled: false\n"), 0o600))
+	out = mustRun(t, srv, "reindex", "--all")
+	assert.Contains(t, out, "documents in state=fetched: 1 jobs")
+	assert.NotContains(t, out, "interests", "no insight layer, no regrouping")
 
 	_, err := runCLI(t, srv, "reindex")
 	require.ErrorContains(t, err, "provide a document ID or URL, or pass --all")
@@ -582,11 +589,13 @@ func TestInterests_Outline(t *testing.T) {
 	}
 	run := srv.AddRun(t, apitest.RunSpec{Areas: []apitest.Area{{Label: "Tech", Interests: children},
 		{Interests: []apitest.Interest{{Size: 12}}}}, Unsorted: []*store.Document{unsorted}})
+	srv.Place(t, run, run.Interests[0], srv.AddDocument(t, "https://example.com/new", store.DocStateFetched))
+	srv.Scheduler.Set(insight.Snapshot{State: insight.StateCurrent, Changed: 1, RebuildAt: 20})
 
 	out := mustRun(t, srv, "interests", "--children", "2")
 	lines := strings.Split(out, "\n")
-	assert.Equal(t, "2 areas, 8 interests across 385 documents (1 loose fit, 1 unsorted)", lines[0])
-	assert.Regexp(t, `^rebuilt \d{4}-\d\d-\d\d \d\d:\d\d \(fresh, manual\)$`, lines[1])
+	assert.Equal(t, "2 areas, 8 interests across 385 documents (1 loose fit, 1 unsorted, 1 new)", lines[0])
+	assert.Regexp(t, `^rebuilt \d{4}-\d\d-\d\d \d\d:\d\d \(fresh, manual\) · next after 20 changes, 1 so far$`, lines[1])
 	assert.Contains(t, out, "\nTech — 371 docs, 7 interests  "+run.Areas[0]+"\n"+
 		"    Agents  86  "+run.Interests[0]+"\n"+
 		"    Topic 0  50  "+run.Interests[1]+"\n"+
@@ -651,6 +660,11 @@ func TestInterests_Show(t *testing.T) {
 	out = mustRun(t, srv, "interests", "show", goID, "--offset", "2")
 	assert.NotContains(t, out, "members:")
 	assert.Contains(t, out, "loose fits:")
+	newer := srv.AddDocument(t, "https://example.com/newer", store.DocStateFetched)
+	srv.Place(t, run, goID, newer)
+	out = mustRun(t, srv, "interests", "show", goID)
+	assert.True(t, strings.HasSuffix(out, "\nnew since the last rebuild:\n  • https://example.com/newer\n"+
+		"    doc_id: "+newer.ID+"\n"), out)
 
 	split := srv.SplitInterest(t, run, goID, apitest.Interest{Label: "Go Web", Members: []*store.Document{a}},
 		apitest.Interest{Label: "Go Tools", Members: []*store.Document{b}})
@@ -681,6 +695,12 @@ func TestInterests_Unsorted(t *testing.T) {
 	out := mustRun(t, srv, "interests", "unsorted")
 	assert.Equal(t, "1 document in no interest, nearest first\n\n"+
 		"• Far away\n  doc_id: "+far.ID+"\n  nearest: Go ("+run.Interests[0]+") 0.30\n", out)
+
+	arrived := srv.AddDocument(t, "https://example.com/arrived", store.DocStateFetched)
+	srv.Place(t, run, "", arrived)
+	out = mustRun(t, srv, "interests", "unsorted")
+	assert.True(t, strings.HasSuffix(out, "\n1 document new since the last rebuild, near no interest:\n\n"+
+		"• https://example.com/arrived\n  doc_id: "+arrived.ID+"\n"), out)
 }
 
 // TestInterests_Changes: changes says what the latest rebuild did, a
@@ -717,66 +737,78 @@ func TestInterests_Changes(t *testing.T) {
 }
 
 // TestInterests_Rebuild: rebuild queues one, and asking again while it is
-// queued answers the same job.
+// queued answers the same job; --fresh makes it, or the next, fresh.
 func TestInterests_Rebuild(t *testing.T) {
 	srv := apitest.Start(t)
 	out := mustRun(t, srv, "interests", "rebuild")
 	id, ok := strings.CutPrefix(strings.Split(out, "\n")[0], "rebuild queued: job ")
 	require.True(t, ok, out)
 	assert.Contains(t, out, "follow it with `curio jobs show "+id+"`")
-	assert.Equal(t, out, mustRun(t, srv, "interests", "rebuild"), "the job already queued")
+	assert.Equal(t, out, mustRun(t, srv, "interests", "rebuild", "--fresh"), "the job already queued")
 	assert.Equal(t, 1, count(t, srv, `SELECT count(*) FROM jobs WHERE kind = 'cluster'`))
+	st, err := srv.Deps.Insights.State(context.Background(), apitest.TenantID)
+	require.NoError(t, err)
+	assert.Equal(t, store.FreshManual, st.FreshOwed, "a fresh rebuild is owed")
 }
 
 // TestInterests_Empty: before a rebuild has grouped anything, curio
-// interests says why from where the next rebuild stands; a rebuild that
-// found nothing says so.
+// interests says why from where rebuilds stand; a rebuild that found
+// nothing says so.
 func TestInterests_Empty(t *testing.T) {
-	t.Run("none", func(t *testing.T) {
-		srv := apitest.Start(t)
-		assert.Equal(t, "no interests yet: `curio interests rebuild` groups the library\n", mustRun(t, srv, "interests"))
-	})
-	t.Run("queued and rebuilding", func(t *testing.T) {
-		srv := apitest.Start(t)
-		job, _, err := jobs.EnqueueRebuild(context.Background(), srv.Deps.Queue, apitest.TenantID, store.RunTriggerFirst)
-		require.NoError(t, err)
-		assert.Contains(t, mustRun(t, srv, "interests"), "your library is being grouped for the first time\n")
-		_, err = srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})
-		require.NoError(t, err)
-		require.NotEmpty(t, job.ID)
-		assert.Contains(t, mustRun(t, srv, "interests"), "your library is being grouped for the first time\n")
-	})
-	t.Run("failing", func(t *testing.T) {
-		srv := apitest.Start(t)
-		srv.AddFailedRun(t, "ollama unreachable")
-		assert.Contains(t, mustRun(t, srv, "interests"), "the last rebuild failed: ollama unreachable\n")
-	})
+	for name, tc := range map[string]struct {
+		snap insight.Snapshot
+		want string
+	}{
+		"none": {insight.Snapshot{State: insight.StateNone, Changed: 7, RebuildAt: 20},
+			"no interests yet: the library is grouped on its own once 20 documents are indexed (7 so far)\n" +
+				"`curio interests rebuild` groups it now\n"},
+		"due": {insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20},
+			"no interests yet: the first grouping is due (25 documents indexed), and starts once the library settles\n" +
+				"`curio interests rebuild` groups it now\n"},
+		"queued": {insight.Snapshot{State: insight.StateQueued},
+			"your library is being grouped for the first time\n"},
+		"rebuilding": {insight.Snapshot{State: insight.StateRebuilding},
+			"your library is being grouped for the first time\n"},
+		"held": {insight.Snapshot{State: insight.StateHeld, HeldReason: "the embeddings drifted"},
+			"no interests yet: rebuilds are held: the embeddings drifted\n" +
+				"run `curio reindex --all`; `curio interests rebuild` groups the library now anyway\n"},
+		"failing": {insight.Snapshot{State: insight.StateFailing, LastError: "ollama unreachable",
+			RetryAt: time.Now().Add(-time.Minute)},
+			"the last rebuild failed: ollama unreachable; retrying once the library settles\n" +
+				"once the cause is fixed, `curio interests rebuild` tries again without waiting\n"},
+		"unknown": {insight.Snapshot{State: insight.StateUnknown},
+			"no interests yet: `curio interests rebuild` groups the library now\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.Start(t)
+			srv.Scheduler.Set(tc.snap)
+			assert.True(t, strings.HasPrefix(mustRun(t, srv, "interests"), tc.want), name)
+		})
+	}
 	t.Run("off", func(t *testing.T) {
 		srv := apitest.Start(t, func(d *api.Deps) { d.InsightEnabled = false })
 		assert.Equal(t, "interests are turned off: set insight.enabled: true in "+
 			filepath.Join(srv.Home.Path, "config.yaml")+" and restart the daemon\n", mustRun(t, srv, "interests"))
 	})
 	t.Run("no documents", func(t *testing.T) {
-		// A new home's first rebuild runs before curio up imports anything,
-		// and nothing rebuilds by itself after the import: the hint names
-		// the command that groups what was fetched since, unless a rebuild
-		// is already on its way.
+		// A rebuild asked for before anything was fetched: the library is
+		// regrouped on its own, unless a rebuild is already on its way.
 		srv := apitest.Start(t)
 		srv.AddRun(t, apitest.RunSpec{})
-		hint := func() string {
+		hint := func(state insight.RebuildState) string {
 			t.Helper()
+			srv.Scheduler.Set(insight.Snapshot{State: state})
 			lines := strings.Split(strings.TrimSuffix(mustRun(t, srv, "interests"), "\n"), "\n")
 			require.Len(t, lines, 2)
 			assert.Regexp(t, `^no interests: the rebuild of \d{4}-\d{2}-\d{2} \d{2}:\d{2} found no fetched, indexed documents$`, lines[0])
 			return lines[1]
 		}
-		assert.Equal(t, "run `curio interests rebuild` once `curio status` shows documents fetched", hint())
-		_, _, err := jobs.EnqueueRebuild(context.Background(), srv.Deps.Queue, apitest.TenantID, store.RunTriggerManual)
-		require.NoError(t, err)
-		assert.Equal(t, "another rebuild is queued; follow it with `curio jobs --kind cluster --all`", hint())
-		_, err = srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})
-		require.NoError(t, err)
-		assert.Equal(t, "another rebuild is running; follow it with `curio jobs --kind cluster --all`", hint())
+		assert.Equal(t, "the library is regrouped on its own once enough documents are indexed; "+
+			"`curio interests rebuild` regroups it now", hint(insight.StateCurrent))
+		assert.Equal(t, "another rebuild is queued; follow it with `curio jobs --kind cluster --all`",
+			hint(insight.StateQueued))
+		assert.Equal(t, "another rebuild is running; follow it with `curio jobs --kind cluster --all`",
+			hint(insight.StateRebuilding))
 	})
 	t.Run("nothing grouped", func(t *testing.T) {
 		for n, want := range map[int]string{
@@ -797,16 +829,55 @@ func TestInterests_Empty(t *testing.T) {
 	})
 }
 
-// TestInterests_HelpDescribesRebuilds: the help says when the library is
-// grouped, at the daemon's first start and on request, and never promises
-// a rebuild nothing queues.
+// TestInterests_HelpDescribesRebuilds: the help says rebuilds are
+// automatic, and that rebuild means now.
 func TestInterests_HelpDescribesRebuilds(t *testing.T) {
 	out := runArgs(t, "interests", "--help")
-	assert.Contains(t, out, "The daemon groups the library when it first starts")
-	assert.NotContains(t, out, "as the library changes")
+	assert.Contains(t, out, "Rebuilds are automatic: the daemon groups the library once\n20 documents are indexed")
+	assert.Contains(t, out, "`curio interests rebuild` rebuilds now")
 	out = runArgs(t, "interests", "rebuild", "--help")
-	assert.Contains(t, out, "Queue a rebuild of the interests, which groups the documents fetched since the")
-	assert.NotContains(t, out, "rather than when the library has changed")
+	assert.Contains(t, out, "Queue a rebuild of the interests now, rather than when the daemon would on its\nown")
+	assert.Contains(t, out, "--fresh")
+}
+
+// TestStatus_Interests: status says in a line where automatic rebuilds of
+// the interests stand, and nothing before the daemon's first check.
+func TestStatus_Interests(t *testing.T) {
+	hourAgo := time.Now().Add(-2*time.Hour - time.Minute)
+	retry := time.Now().Add(time.Hour)
+	for name, tc := range map[string]struct {
+		snap insight.Snapshot
+		want string
+	}{
+		"current": {insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: hourAgo, LastKind: store.RunKindWarm,
+			Changed: 37, RebuildAt: 276}, "interests: rebuilt 2 h ago (warm) · 37 documents changed, next at 276"},
+		"none": {insight.Snapshot{State: insight.StateNone, Changed: 7, RebuildAt: 20},
+			"interests: waiting for 20 indexed documents (7 so far)"},
+		"due": {insight.Snapshot{State: insight.StateDue, LastRebuildAt: hourAgo, Changed: 271, RebuildAt: 263},
+			"interests: a rebuild is due (271 changed, threshold 263): waiting for the library to settle"},
+		"due, re-embedding": {insight.Snapshot{State: insight.StateDue, LastRebuildAt: hourAgo,
+			FreshOwed: string(store.FreshReindex)},
+			"interests: a fresh rebuild is due: waiting for the re-embedding to finish"},
+		"queued":     {insight.Snapshot{State: insight.StateQueued}, "interests: a rebuild is queued"},
+		"rebuilding": {insight.Snapshot{State: insight.StateRebuilding}, "interests: rebuilding"},
+		"held": {insight.Snapshot{State: insight.StateHeld, HeldReason: "the embeddings drifted"},
+			"interests: rebuilds held: the embeddings drifted; run `curio reindex --all`"},
+		"failing": {insight.Snapshot{State: insight.StateFailing, LastError: "ollama unreachable", RetryAt: retry},
+			"interests: the last rebuild failed (ollama unreachable); retrying at " + clockTime(retry, time.Now())},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.Start(t)
+			srv.Scheduler.Set(tc.snap)
+			out := mustRun(t, srv, "status")
+			assert.Contains(t, out, "\n"+tc.want+"\n")
+			assert.Equal(t, 1, strings.Count(out, "interests:"))
+		})
+	}
+	off := apitest.Start(t, func(d *api.Deps) { d.InsightEnabled = false })
+	assert.Contains(t, mustRun(t, off, "status"), "\ninterests: off (insight.enabled: false)\n")
+	unknown := apitest.Start(t)
+	unknown.Scheduler.Set(insight.Snapshot{State: insight.StateUnknown})
+	assert.NotContains(t, mustRun(t, unknown, "status"), "interests:", "the daemon hasn't checked yet")
 }
 
 func TestStatus(t *testing.T) {
@@ -904,7 +975,7 @@ func TestDoctor(t *testing.T) {
 	out, err := w.run(t, "doctor")
 	require.NoError(t, err, out)
 	for _, name := range []string{"machine", "curio home", "config", "ollama", "models", "daemon", "launchd",
-		"embeddings", "github", "fetcher", "content dir"} {
+		"embeddings", "interests", "github", "fetcher", "content dir"} {
 		line, _ := doctorLine(t, out, name)
 		assert.Equal(t, "✓", markerOf(line), line)
 	}
@@ -983,6 +1054,40 @@ func TestDoctorAndStatus_EmbeddingDrift(t *testing.T) {
 			require.NoError(t, err, out)
 			assert.Contains(t, out, fmt.Sprintf("✓ %-22s no drift reported since the library was indexed\n", "embeddings"))
 			assert.Contains(t, out, "all checks passed")
+		})
+	}
+}
+
+// TestDoctor_Interests: doctor checks where automatic rebuilds stand:
+// held and failing warn, each with its fix; any other state passes,
+// saying it.
+func TestDoctor_Interests(t *testing.T) {
+	for name, tc := range map[string]struct {
+		snap         insight.Snapshot
+		marker, line string
+		hint         string
+	}{
+		"current": {insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: time.Now().Add(-5 * time.Minute),
+			LastKind: store.RunKindFresh, Changed: 0, RebuildAt: 263}, "✓",
+			"rebuilt 5 min ago (fresh) · 0 documents changed, next at 263", ""},
+		"none": {insight.Snapshot{State: insight.StateNone, RebuildAt: 20}, "✓",
+			"waiting for 20 indexed documents (0 so far)", ""},
+		"held": {insight.Snapshot{State: insight.StateHeld, HeldReason: "the embeddings may have drifted"}, "!",
+			"rebuilds held: the embeddings may have drifted",
+			"run `curio reindex --all`: the interests are regrouped once the re-embedding finishes"},
+		"failing": {insight.Snapshot{State: insight.StateFailing, LastError: "boom",
+			RetryAt: time.Now().Add(-time.Minute)}, "!",
+			"the last rebuild failed: boom; retrying once the library settles",
+			"`curio daemon logs` has the details; once the cause is fixed, `curio interests rebuild` tries again without waiting"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := upWorld(t)
+			w.srv.Scheduler.Set(tc.snap)
+			out, _ := w.run(t, "doctor")
+			line, hint := doctorLine(t, out, "interests")
+			assert.Equal(t, tc.marker, markerOf(line), line)
+			assert.Contains(t, line, tc.line)
+			assert.Equal(t, tc.hint, hint)
 		})
 	}
 }

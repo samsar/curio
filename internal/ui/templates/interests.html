@@ -51,7 +51,7 @@ run's says it shows the newer one's.
 {{- else}}<div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "sparkles"}}</div>
 <h2>No interests yet</h2>
-{{if .Rebuild.Enabled}}<p><code>curio interests rebuild</code> groups the library into them.</p>
+{{if .Rebuild.Enabled}}<p>The library is grouped into them on its own once enough of it is indexed and it settles; <code>curio interests rebuild</code> groups it now.</p>
 {{else}}<p>Finding them is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon.</p>{{end}}
 </div></div>{{end}}
 {{template "poller" .Rebuild.Poller}}

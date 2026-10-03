@@ -39,26 +39,6 @@ func (p *previous) seeds() map[string]Seed {
 	return out
 }
 
-// changed counts the documents added or gone since the run: those read now
-// that it didn't group, and those it grouped that aren't read now, failed,
-// pending again or deleted. A deleted document's rows went with it, so the
-// run's document count tells those apart from the rows left.
-func (p *previous) changed(dvs []store.DocVector) int {
-	grouped := make(map[string]bool, len(p.assignments))
-	for _, a := range p.assignments {
-		grouped[a.DocumentID] = true
-	}
-	added, still := 0, 0
-	for _, dv := range dvs {
-		if grouped[dv.DocumentID] {
-			still++
-		} else {
-			added++
-		}
-	}
-	return added + p.run.NumDocuments - still
-}
-
 // oldGroups returns the run's areas and interests as carry-over matches
 // them, each sorted by ID: an area's members are every document its
 // community held, whatever its fit; an interest's are the documents it

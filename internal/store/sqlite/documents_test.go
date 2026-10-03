@@ -570,3 +570,44 @@ func TestDocuments_Create_CauseMustFitTheState(t *testing.T) {
 	}
 	assert.Zero(t, countRows(t, db, "documents"))
 }
+
+// TestDocuments_IndexedAt: MarkFetched writes indexed_at, equal to the
+// updated_at it writes, and no other write touches it; LastIndexedAt is
+// the tenant's latest, zero before any.
+func TestDocuments_IndexedAt(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	docs := NewDocuments(db)
+	indexedAt := func(id string) any {
+		t.Helper()
+		return dumpRows(t, db, `SELECT indexed_at FROM documents WHERE id = ?`, id)[0][0]
+	}
+
+	last, err := docs.LastIndexedAt(ctx, "local")
+	require.NoError(t, err)
+	assert.True(t, last.IsZero(), "nothing indexed yet")
+
+	ids := seedDocs(t, db, "local", "https://example.com/a", "https://example.com/b")
+	other := seedDocs(t, db, "other", "https://example.com/c")
+	assert.Nil(t, indexedAt(ids[0]), "a new document was never indexed")
+	require.NoError(t, docs.MarkFetched(ctx, ids[0]))
+	row := dumpRows(t, db, `SELECT indexed_at, updated_at FROM documents WHERE id = ?`, ids[0])[0]
+	require.NotNil(t, row[0])
+	assert.Equal(t, row[1], row[0], "one 'now' for both columns")
+	first := indexedAt(ids[0])
+
+	require.NoError(t, docs.MarkFailed(ctx, ids[0], store.FailureCauseOther))
+	_, err = docs.RequeueFetch(ctx, "local", ids[0])
+	require.NoError(t, err)
+	assert.Equal(t, first, indexedAt(ids[0]), "only MarkFetched writes it")
+
+	_, err = db.Exec(`UPDATE documents SET indexed_at = ? WHERE id = ?`, "2026-09-01T10:00:00.000Z", ids[0])
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE documents SET indexed_at = ? WHERE id = ?`, "2026-09-02T10:00:00.000Z", ids[1])
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE documents SET indexed_at = ? WHERE id = ?`, "2026-09-03T10:00:00.000Z", other[0])
+	require.NoError(t, err)
+	last, err = docs.LastIndexedAt(ctx, "local")
+	require.NoError(t, err)
+	assert.Equal(t, time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC), last, "the tenant's latest, another tenant's left out")
+}

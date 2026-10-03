@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/store"
 )
@@ -101,24 +102,69 @@ type InterestRebuild struct {
 	Dissolved        int    `json:"dissolved"`
 }
 
-// InterestsState is where the next rebuild stands: off, rebuilding,
-// queued, failing (the newest run failed, with its error), current (a
-// rebuild is done) or none. Clients treat a state they don't know as
-// current.
+// InterestsState is where automatic rebuilds of the interests stand, as
+// the interest scheduler's last check found them (insight.Snapshot): on
+// healthz, and as GET /v1/interests' next. State is one of the scheduler's
+// (insight.RebuildState), or off with the insight layer off; it is unknown
+// only before the daemon's first check, and clients read a state they
+// don't know as current. The fields that don't apply are left out.
 type InterestsState struct {
-	State     string `json:"state"`
-	LastError string `json:"last_error,omitempty"`
+	State string `json:"state"`
+	// The done rebuild's finish, kind and trigger.
+	LastRebuildAt time.Time `json:"last_rebuild_at,omitzero"`
+	LastKind      string    `json:"last_kind,omitempty"`
+	LastTrigger   string    `json:"last_trigger,omitempty"`
+	// ChangedDocuments have changed since the done rebuild, and RebuildAt
+	// make the next due; before the first, the fetched documents and how
+	// many the first waits for.
+	ChangedDocuments int       `json:"changed_documents,omitempty"`
+	RebuildAt        int       `json:"rebuild_at,omitempty"`
+	DueSince         time.Time `json:"due_since,omitzero"`
+	FreshOwed        string    `json:"fresh_owed,omitempty"`
+	HeldReason       string    `json:"held_reason,omitempty"`
+	RetryAt          time.Time `json:"retry_at,omitzero"`
+	LastError        string    `json:"last_error,omitempty"`
 }
 
-// The states of the next rebuild.
-const (
-	stateOff        = "off"
-	stateRebuilding = "rebuilding"
-	stateQueued     = "queued"
-	stateFailing    = "failing"
-	stateCurrent    = "current"
-	stateNone       = "none"
-)
+// stateOff is the state of rebuilds with the insight layer off: there is
+// no scheduler.
+const stateOff = "off"
+
+// InterestScheduler queues the interests' rebuilds as the library changes:
+// the daemon's is an *insight.Scheduler.
+type InterestScheduler interface {
+	// Snapshot is where rebuilds stood at the last check; no database
+	// read.
+	Snapshot() insight.Snapshot
+	// Kick asks for a check now, without waiting for it.
+	Kick()
+}
+
+// interestsState is where automatic rebuilds stand: the scheduler's
+// snapshot, never a query.
+func (d Deps) interestsState() InterestsState {
+	switch {
+	case !d.InsightEnabled:
+		return InterestsState{State: stateOff}
+	case d.Interests == nil:
+		return InterestsState{State: string(insight.StateUnknown)}
+	}
+	s := d.Interests.Snapshot()
+	return InterestsState{
+		State: string(s.State), LastRebuildAt: s.LastRebuildAt.UTC(), LastKind: string(s.LastKind),
+		LastTrigger: string(s.LastTrigger), ChangedDocuments: s.Changed, RebuildAt: s.RebuildAt,
+		DueSince: s.DueSince.UTC(), FreshOwed: s.FreshOwed, HeldReason: s.HeldReason, RetryAt: s.RetryAt.UTC(),
+		LastError: s.LastError,
+	}
+}
+
+// kickInterests asks the scheduler to check now, when there is one: after
+// a change of what it decides on.
+func (d Deps) kickInterests() {
+	if d.Interests != nil {
+		d.Interests.Kick()
+	}
+}
 
 // InterestListResponse is the body of GET /v1/interests: a page of the
 // latest rebuild's top-level groups, with what the run found and where the
@@ -266,7 +312,7 @@ type interestsOpts struct {
 	// Flat lists every interest, each with its area, rather than the
 	// top-level groups.
 	Flat bool
-	// State reads where the next rebuild stands: the Interests page reads
+	// State says where the next rebuild stands: the Interests page reads
 	// it apart, and the search home does without.
 	State bool
 	// Bare reads the groups alone, without the documents placed into them
@@ -296,9 +342,7 @@ func (d Deps) interests(ctx context.Context, opts interestsOpts) (InterestListRe
 		return InterestListResponse{}, err
 	}
 	if opts.State {
-		if resp.Next, err = d.interestsState(ctx, run != nil); err != nil {
-			return InterestListResponse{}, err
-		}
+		resp.Next = d.interestsState()
 	}
 	if run == nil {
 		return resp, nil
@@ -478,37 +522,6 @@ func (d Deps) memberDocuments(ctx context.Context, ids []string) (map[string]sto
 		byID[doc.ID] = doc
 	}
 	return byID, nil
-}
-
-// interestsState is where the next rebuild stands, from one read of the
-// queue's counts and one of the newest run: done says whether a done run
-// exists.
-func (d Deps) interestsState(ctx context.Context, done bool) (InterestsState, error) {
-	if !d.InsightEnabled {
-		return InterestsState{State: stateOff}, nil
-	}
-	counts, err := d.Queue.QueueCounts(ctx)
-	if err != nil {
-		return InterestsState{}, err
-	}
-	switch c := counts[store.JobKindCluster]; {
-	case c.Running > 0:
-		return InterestsState{State: stateRebuilding}, nil
-	case c.Pending > 0:
-		return InterestsState{State: stateQueued}, nil
-	}
-	newest, err := d.Insights.LatestRun(ctx, d.TenantID, "")
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-	case err != nil:
-		return InterestsState{}, err
-	case newest.Status == store.InterestRunFailed:
-		return InterestsState{State: stateFailing, LastError: deref(newest.Error)}, nil
-	}
-	if done {
-		return InterestsState{State: stateCurrent}, nil
-	}
-	return InterestsState{State: stateNone}, nil
 }
 
 // rebuildOf is what run was and did.
@@ -1009,8 +1022,12 @@ func refID(r *InterestRef) string {
 	return r.ID
 }
 
-// handleRebuildInterests queues a rebuild of the interests and returns 202
-// + job_id: the new job's, or the pending one's when one is queued already.
+// handleRebuildInterests queues a rebuild of the interests now and returns
+// 202 + job_id: the new job's, or the pending one's when one is queued
+// already. The scheduler's threshold, settle window, drift hold and
+// backoff don't apply; the queue's gate does. With ?fresh=1 the rebuild is
+// fresh: a fresh rebuild is owed, which the job reads when it runs, so the
+// request holds when the job that answers it was pending already.
 // Refused with 409 when the insight layer is disabled in config.
 func (d Deps) handleRebuildInterests(w http.ResponseWriter, r *http.Request) {
 	if !d.InsightEnabled {
@@ -1018,10 +1035,17 @@ func (d Deps) handleRebuildInterests(w http.ResponseWriter, r *http.Request) {
 			"the insight layer is disabled; set insight.enabled: true in config.yaml")
 		return
 	}
+	if boolParam(r, "fresh") {
+		if err := d.Insights.OweFresh(r.Context(), d.TenantID, store.FreshManual); err != nil {
+			d.writeError(w, r, err)
+			return
+		}
+	}
 	job, _, err := jobs.EnqueueRebuild(r.Context(), d.Queue, d.TenantID, store.RunTriggerManual)
 	if err != nil {
 		d.writeError(w, r, err)
 		return
 	}
+	d.kickInterests()
 	d.writeJSON(w, r, http.StatusAccepted, map[string]string{"job_id": job.ID})
 }

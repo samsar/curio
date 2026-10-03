@@ -657,19 +657,55 @@ agent.
 The daemon groups the library into interests, and a large library's
 interests into areas, from the documents' embeddings (see
 `docs/decisions.md` "Interests: two levels, stable identities, automatic
-rebuilds"). It queues the first grouping when it starts and has none, and
-`curio interests rebuild` (or Rebuild on the Interests page) queues
-another; a second request while one waits returns the same job. Nothing
-else rebuilds them: on a new home the first grouping runs before `curio
-up` imports anything and finds no documents, so run `curio interests
-rebuild` once `curio status` shows documents fetched. A rebuild keeps an
-interest's ID and name when it keeps most of its documents, so links and
-IDs last; an interest that splits, merges into another or dissolves is
-retired, and its ID then answers with what became of it.
+rebuilds"). Rebuilds are automatic: the first once 20 documents are
+indexed and the library settles (nothing indexed for 10 minutes, or 30
+minutes at most), then another each time about 5% of the library has
+changed since the last (documents added, failed, deleted or re-indexed;
+at least 5), again once it settles, or every 2 hours during an import that
+doesn't. A document indexed between rebuilds joins its nearest interest at
+once, or Unsorted when none is near: the interest's page lists it as new
+until the next rebuild groups it. A rebuild keeps an interest's ID and
+name when it keeps most of its documents, so links and IDs last; an
+interest that splits, merges into another or dissolves is retired, and
+its ID then answers with what became of it.
+
+`curio interests rebuild` (or Rebuild on the Interests page) rebuilds now,
+without waiting for changes or a quiet library, though a paused or
+scheduled queue still holds it; a second request while one waits returns
+the same job. `curio interests rebuild --fresh` groups the library from
+scratch rather than from the current grouping, for recovery or to compare;
+the interests that survive keep their names.
+
+The first grouping after an upgrade to this version runs on its own: the
+upgrade drops the old interests, and the daemon queues the first rebuild
+at once on a library that isn't importing. On the author's library of
+about 5,300 documents it reads the vectors in about 10 s and groups them
+in 2 s; labels with gemma4:26b take about 2 minutes more. Until it is done
+the Interests page says the library is being grouped for the first time.
+
+`curio status` says where rebuilds stand in one line, and `curio doctor`
+checks it:
+
+- **held**: the embeddings drifted (`curio doctor`'s embeddings check says
+  how), so no rebuild runs and no document is placed on its own: they
+  would mix vectors of two builds. Run `curio reindex --all`; once the
+  re-embedding finishes, the interests are regrouped from scratch.
+- **failing**: the last rebuild failed, and the line names the error. The
+  daemon tries again 15 minutes after the first failure, doubling to every
+  4 hours; `curio daemon logs` has the details, and once the cause is
+  fixed, `curio interests rebuild` tries without waiting. A rebuild that
+  kills the daemon is recorded as failed rather than run again at the
+  next start.
+
+`curio reindex --all` owes the interests a fresh rebuild: it waits until
+every index job is done and nothing was indexed for 10 minutes, however
+long the re-embedding takes, so it never groups vectors of two builds.
+Until then the interests keep their last grouping and new documents
+aren't placed.
 
 | Key | Default | What it does |
 |---|---|---|
-| `insight.enabled` | true | off: no rebuild is queued or accepted; existing interests stay readable |
+| `insight.enabled` | true | off: no rebuild is queued, on its own or asked for, and no document is placed; existing interests stay readable |
 | `insight.labeling` | `llm` | `llm` (the writing model, falling back to term labels), `terms` (words the titles share), or `off` |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild; the rest get term labels |
 | `insight.center_vectors` | true | subtract the library's mean vector before grouping |
