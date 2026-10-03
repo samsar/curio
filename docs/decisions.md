@@ -147,14 +147,15 @@ when the entry was first committed.
 - 2026-09-29 — [Dashboard: actions through /v1, sent by a first-party module](#dashboard-actions-through-v1-sent-by-a-first-party-module) (revised)
 - 2026-09-29 — [Library: a Date saved order lists saves](#library-a-date-saved-order-lists-saves) (revised)
 - 2026-09-29 — [Dashboard: the Failures tab](#dashboard-the-failures-tab)
-- 2026-09-29 — [Interests page by offset within a run](#interests-page-by-offset-within-a-run)
+- 2026-09-29 — [Interests page by offset within a run](#interests-page-by-offset-within-a-run) (revised)
 - 2026-09-29 — [Search pages by offset within a fixed-depth pool](#search-pages-by-offset-within-a-fixed-depth-pool)
 - 2026-09-30 — [Waiting is not failing: jobs curio didn't send are deferred](#waiting-is-not-failing-jobs-curio-didnt-send-are-deferred) (revised)
 - 2026-09-30 — [A site's block is not its pages' verdict](#a-sites-block-is-not-its-pages-verdict)
 - 2026-09-30 — [Embedding drift: verified by re-embedding a sample](#embedding-drift-verified-by-re-embedding-a-sample)
 - 2026-10-02 — [Interests: corrections that teach the grouping (deferred)](#interests-corrections-that-teach-the-grouping-deferred)
 - 2026-10-02 — [Soft-404 titles: whole templates, not phrases](#soft-404-titles-whole-templates-not-phrases)
-- 2026-10-03 — [Louvain: ours, warm-started; gonum as a test oracle](#louvain-ours-warm-started-gonum-as-a-test-oracle)
+- 2026-10-03 — [Louvain: ours, warm-started; gonum as a test oracle](#louvain-ours-warm-started-gonum-as-a-test-oracle) (revised)
+- 2026-10-03 — [Interests: two levels, stable identities, automatic rebuilds](#interests-two-levels-stable-identities-automatic-rebuilds)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -2050,6 +2051,18 @@ then the failure, which the dashboard's Interests page reports (see
 current interests are still the latest done run's. `LatestRun` breaks a tie
 on `started_at`, kept to the millisecond, by insertion order.
 
+
+**Revised (2026-10-03):** the engine no longer runs `KNNGraphClusterer`.
+It groups with `LouvainGrouper` behind `insight.Grouper`, in two levels
+when the library is large enough, warm-started from the previous run, and
+carries identities across rebuilds (see "Interests: two levels, stable
+identities, automatic rebuilds"). `KNNGraphClusterer` stays as the
+quality harness's baseline, usable through `FlatGrouper`, and its knobs
+(`insight.knn`, `min_similarity`, `min_cluster_size`) are ignored. The
+noise bucket is now the unsorted (`num_unsorted`, `GET
+/v1/interests/unsorted`), and one surface remains, `/v1/interests`, with
+`/unsorted` and `/changes` beside it.
+
 ---
 
 ## LLM generation client (`generator.Generator`)
@@ -2608,6 +2621,15 @@ is the home's width: `Validate` takes any value in [1,
 refuses a value that differs from the one the home's marker records, since
 `chunks_vec` is sized from the marker. See "Embedding model and per-home
 width".
+
+
+**Revised (2026-10-03):** `insight.knn`, `insight.min_similarity` and
+`insight.min_cluster_size` no longer do anything. The strict decoder still
+accepts them with any value of their type, `Default()` and `Validate`
+ignore them, and `Load` records which the file sets, by presence as for
+`daemon.workers` (`Config.DeprecatedKeys`); the daemon logs one WARN at
+start naming them, with the fix: remove them. See "Interests: two levels,
+stable identities, automatic rebuilds".
 
 ---
 
@@ -8639,6 +8661,34 @@ A rebuild started from page 2 was queued behind the paused queue,
 reload", and the poller stopped polling; page 2 of the old run then showed
 the new run's, with the note.
 
+
+**Revised (2026-10-03):** interests now have identities that outlive
+runs (see "Interests: two levels, stable identities, automatic rebuilds").
+Offset paging stays exact for the same reason as before: a run's groups
+and assignments are written once, in one transaction (`CommitRun`), and
+never change. What changed:
+
+- An interest keeps its ID across rebuilds while it keeps most of its
+  documents, so the next page of an interest's members after a rebuild is
+  the same interest's. The 404 that said "interests get new IDs each time
+  they are rebuilt" is gone. A retired ID (split, merged or dissolved) is
+  a 410, `urn:curio:problem:interest-retired`, naming its successors (in
+  the dashboard, a 410 page saying what became of it); an ID nothing knows,
+  such as one from before migration 016, is a 404 saying interests were
+  regrouped when curio was upgraded.
+- The pages are of the run's top-level groups (areas, or interests in a
+  library too small for areas) by `size DESC, cohesion DESC, interest_id`,
+  and an interest's members, then its loose fits, by `similarity DESC,
+  document_id`. `num_clusters` is now `total`. Migration 016's covering
+  indexes (`idx_interest_groups_list`, `idx_interest_assignments_list`)
+  serve both orders without a sort, so "No new index" no longer holds.
+- Documents placed between rebuilds are listed apart (`new`,
+  `new_members`), never inside the offset-paged lists, which they would
+  shift; PR 3 writes them.
+- The re-read rules are unchanged, plus one: a group missing from the run
+  that was read is looked up in the newest done run, then as an identity,
+  a 410 if it was retired meanwhile.
+
 ---
 
 ## Search pages by offset within a fixed-depth pool
@@ -9883,6 +9933,281 @@ fresh, 18 ms warm with the split check (both Louvain levels and the graph
 cuts, under the 50 ms budget for Louvain); the merge and strays 69 ms.
 `louvain.Run` on a 5,000-node area graph: 4.3 ms fresh, 1.1 ms warm,
 4.7 ms warm with the split check and the run after it.
+
+
+**Revised (2026-10-03):** the daemon now calls it. The engine groups with
+`insight.NewLouvainGrouper` and runs the merge, the strays and
+carry-over in that order, warm from the previous run's seeds when its
+grouper and params match, with the split check by absorbed changes (see
+"Interests: two levels, stable identities, automatic rebuilds").
+
+---
+
+## Interests: two levels, stable identities, automatic rebuilds
+
+**Decision:** interests are stored as runs of a grouping whose groups are
+identities that outlive the runs. Migration 016 replaces 004's
+`cluster_runs`, `clusters` and `cluster_documents` with `interest_runs`,
+`interests` (the identities), `interest_groups`, `interest_assignments`,
+`interest_placements`, `interest_lineage` and `insight_state`
+(`docs/data-model.md` describes each column). The engine groups with
+`LouvainGrouper` in two levels, areas holding interests, from the previous
+run's seeds when it can, and carries identities over, so an interest keeps
+its ID, label and links across rebuilds while it keeps most of its
+documents. One that a rebuild split, merged or dissolved is retired, and
+its ID answers 410 naming what took its documents. This is the storage,
+engine and read side; PR 3 completes the automatic part (migration 017,
+the scheduler that queues rebuilds as the library changes, and placement
+of new documents between rebuilds). Until then a rebuild runs at the
+daemon's first start without a grouping and when asked for.
+
+**The schema follows the design's sketch, with these refinements** (each
+also in the migration's header comment):
+
+- `interest_assignments.area_id`: carry-over matches areas by their
+  community's members, and `interest_id` plus the groups' `parent_id`
+  can't rebuild that for a document in an area but in no interest (8 in a
+  fresh grouping of the author's library).
+- `interests.retired_run_id`, and `idx_interests_retired (tenant_id,
+  retired_run_id) WHERE retired_at IS NOT NULL`: the changes a run made and
+  the 410 name the run that retired an identity, which `retired_at` alone
+  doesn't say. No foreign key: runs are pruned.
+- `interests.created_run_id` is NOT NULL: every identity is minted by a
+  run.
+- `label_source` accepts `'user'` now, with no writer until renames: four
+  tables reference `interests`, so widening the CHECK later would need the
+  rebuild recipe (`migrations/README.md`).
+- `idx_interest_assignments_document` and
+  `idx_interest_placements_document`: without them EXPLAIN shows a
+  document delete scanning both tables (`SCAN interest_assignments`),
+  where `cluster_documents` sought `idx_cluster_documents_document`.
+- CHECKs tie `fit` to `interest_id` (unsorted exactly when NULL) and keep
+  `nearest_id` to unsorted rows.
+- `insight_state` has no `shape`: the current done run's `shape` is the
+  hysteresis state the grouper reads, and nothing wrote the two together.
+
+Run-scoped tables inherit their tenant through `interest_runs`; runs and
+identities carry `tenant_id`. Today's run is dropped, not converted (Q6):
+its IDs lasted one run and nothing in it could seed a warm start. Down
+drops the seven tables and recreates 004's with 004's own CREATE text, so
+the schema is 015's byte for byte (tested, and checked on a copy of the
+owner's library below).
+
+**`CommitRun` is one `BEGIN IMMEDIATE` transaction,** so a run is
+committed whole or not at all (`ReplaceClusters` and `FinishRun` were two,
+and a crash between them left a run with clusters still `running`). In
+order: the tenant's latest done run must be `RunCommit.PriorRunID` (else
+`ErrConflict`, nothing written), so two rebuilds can't both commit from
+one prior; the new identities; relabels (label, summary, label_source,
+labeled_at); groups, assignments and lineage through statements prepared
+once per commit; the retirement of every live identity of the tenant the
+run's groups don't hold (`retired_at` and `retired_run_id`, one commit
+timestamp); and the run's move from `running` to `done` with its outcome
+(a run that isn't running is `ErrConflict`). A done run never changes.
+After the commit, best effort, each failure one WARN: `PruneRunsExcept`
+the new run (groups, assignments and placements cascade; identities and
+lineage stay), `TrimLineage` (rows of earlier runs whose old identity is
+still live: without it every rebuild adds a "kept" row per surviving
+group, about 200, forever), and `PruneRetired` of identities retired
+before now − 180 days (`insight.RetiredRetention`), their lineage
+cascading. 180 days keeps an old link's answer useful for half a year.
+Measured at C speed on the review's synthetic run over a copy of the
+owner's library: the commit of 5,254 assignments and 223 groups about
+31 ms, pruning one run 14 ms, deleting 50 retired identities 64 ms (the FK
+checks scan the child tables once per identity; acceptable once per
+rebuild, so no further index). On the acceptance run below the whole
+commit and prune took 32 to 48 ms.
+
+**The engine's order** (`insight.Engine.Rebuild`): read the latest done
+run (the prior; no run is written when this or the vector read fails) →
+read the vectors, dropping non-finite ones → with no vectors and a prior,
+keep the prior and write nothing, so a library momentarily without vectors
+retires nothing → read the prior's assignments and groups → plan → create
+the run → prepare the points (center, normalize) → `Group`, warm from the
+prior's seeds when eligible → `MergeNearDuplicates` → `Centroids` →
+`AssignStrays` → `Carry`, areas then interests → label → `CommitRun` →
+prune. Any error after the run is created marks it failed on a 10 s
+context detached from the job's and keeps the previous run current. One
+INFO line, "interests rebuilt", carries the run, trigger, kind,
+split_check, shape, counts, what carry-over did at both levels, and
+read_ms, group_ms, label_ms and persist_ms.
+
+- **Fresh or warm.** Warm-eligible means a prior exists, made by this
+  grouper (`prior.Grouper == Grouper.Name()`) with byte-equal params (the
+  grouper's constants plus `center`, canonical JSON); a change of either
+  makes the next run fresh. Carry-over applies to fresh runs too, so names
+  survive a change of params by overlap. The recorded kind is fresh unless
+  the run was warm-eligible, the grouping kept the input's shape, and the
+  prior held a seed for at least one point.
+- **Changes.** With P the documents the prior assigned and N those read
+  now: changed = |N \ P| + (prior.num_documents − |P ∩ N|), so a document
+  deleted, failed, dead or pending counts as gone. Reindexed documents
+  count from PR 3.
+- **The split check until PR 3.** Q3's rule: with T = max(5, ⌈5% of the
+  prior's documents⌉), a warm-eligible run splits when the changes since
+  the last split check plus this run's reach 4·T; a fresh or split run
+  resets the count, any other adds to it. At automatic rebuilds every T
+  changes that is every fourth rebuild, and a manual rebuild moves it
+  closer only by the changes it absorbs. Rejected, on the owner's library
+  copy (PR 1's pipeline, in-process): **always splitting on a manual
+  rebuild**: the first split check after a fresh grouping of an unchanged
+  library splits 9 communities and renames 2 of 30 areas, and after a 5%
+  addition a warm rebuild with the split check keeps 88.9–94.3% of interest
+  names and 90.0–96.7% of area names, against 95.0–98.3% and 96.7–100%
+  without it (87.4–89.9% against 93.1–96.4% on a mixed 5% change): every
+  click would visibly rename. **Never splitting**: warm starts drift (one
+  5% step ends at 168–178 interests against 187 fresh), and one big step
+  needs the split check (see "Louvain: ours, warm-started").
+- **What is written.** An interest's size is its members, its loose its
+  loose fits, its cohesion the mean member similarity, its centroid the
+  `Centroids` row; an area's size and loose are its interests' sums, its
+  cohesion the mean cosine of those members to their unit mean, with no
+  centroid. One assignment per point: a member or loose fit with its
+  cosine to the interest's centroid, or unsorted with its nearest interest
+  and the cosine to it; `area_id` from the merged grouping; seeds from
+  `Grouping.Seeds`. A new group inherits its predecessor's ID, label,
+  summary and label_source; the others get new UUIDs.
+
+**Labels.** Only these groups are named: new ones; carried ones without a
+label (labeling was off); carried term labels when the LLM is wanted,
+keeping the term label when it doesn't answer; and of two carried labels
+with one key in one scope (an area's interests, the areas, or every
+interest in the flat shape) the smaller group (size, then ID). A carried
+LLM label is never regenerated otherwise, so a warm rebuild of an
+unchanged library makes no labeler call. In the areas shape the areas go
+largest first, and within each its interests to name, largest first, each
+seeing its area's name when it has one and every sibling name so far;
+then the areas to name, largest first, each from its interests' names and
+sizes and up to 12 representative titles taken round-robin (each
+interest's most central, then each one's second), seeing the other areas'
+names. `ClusterInfo` gains `Siblings`, `Area`, `Children` and `Taken`; the
+prompts ask for a name different from the siblings'. A reply whose key
+(`insight.LabelKey`: lowercased runs of letters and digits, the quality
+harness's comparison, now one function) is empty or taken is asked once
+more with `Taken`, then falls back to a term label that skips every token
+a sibling name uses (and stays empty when nothing is left). The fallback
+and budget rules are unchanged. This fixes the two "AI Agent Engineering"
+interests of 86 and 45 documents one area held. A flat run's interest
+prompt says "Other topics are already named:" (it has no area to say
+"Its other topics").
+
+**The first rebuild, and one pending job.** After `RecoverOrphans`, when
+`insight.enabled` and the tenant has no *done* run, the daemon queues a
+cluster job with trigger `first` and logs "interests: rebuild enqueued";
+a failed read or enqueue is one WARN and the daemon starts anyway. The
+condition is "no done run", not the design's "no run exists": a failed
+first rebuild is retried at the next start, and a `running` row left by a
+crash doesn't block it. The cluster job's payload is
+`store.ClusterJobPayload{Trigger}`; a missing or unknown trigger (`{}`
+from an older job) is `manual`. Every rebuild goes through
+`JobQueue.EnqueueOnce`, which inserts a job only when no pending job of
+its kind exists for its tenant and otherwise returns that one, in one
+`BEGIN IMMEDIATE` transaction; `POST /v1/interests/rebuild` answers the
+new or the pending job's ID, and a running job doesn't count, so a click
+during a rebuild queues the next one. The pending check is written
+`+tenant_id = ?`: written plainly, EXPLAIN on the owner's library shows
+the NOT EXISTS seeking `idx_jobs_tenant_status_updated (tenant_id=? AND
+status=?)` and walking every pending job of the tenant, thousands during
+an import; with the `+` it seeks `idx_jobs_claim (status=? AND kind=?)`,
+which holds only pending cluster jobs. Both statements are pinned. The
+daemon no longer reads `insight.knn`, `min_similarity` or
+`min_cluster_size`.
+
+**The API** (`api/openapi.yaml`): `GET /v1/interests` (limit 1–500, 50;
+offset; children 0–100, 5; members 0–100, 3; `level=interest` for every
+interest with its area) lists the run's top-level groups, areas or flat
+interests, by size, cohesion, then ID, with `total`, the counts
+(`num_areas`, `num_interests`, `num_loose`, `num_unsorted`), the run's
+`rebuild` (trigger, kind, split_check, changed_documents and what it did)
+and `next`, the rebuild state: `off`, `rebuilding`, `queued`, `failing`
+(with `last_error`), `current` or `none`, in that order, for one queue
+read and one newest-run read. `due` and `held` come with PR 3; clients
+read an unknown state as current. `GET /v1/interests/{id}` answers an area
+with all its interests, or an interest with its area, a page of members
+then loose fits (each with `fit`), its newest placements and its events in
+the latest rebuild. A retired ID is a 410 `urn:curio:problem:interest-retired`
+with `id`, `level`, `label`, `retired_at`, `run_id` (the run that retired
+it) and `successors` from that run's lineage (split or merged, with the
+documents shared), and a detail sentence naming them; an unknown ID is a
+404. `GET /v1/interests/unsorted` lists the unsorted nearest first with
+their nearest interest, and `GET /v1/interests/changes` the latest
+rebuild's split, merged, moved, dissolved and new events. Placements are
+listed apart (`new`, `new_members`) and are empty until PR 3 writes them.
+Renamed fields have no aliases: `num_noise` is `num_unsorted`,
+`num_clusters` is `total`. The consistency rules keep today's: a page
+that reads no groups below `total` is read once more from the newest run,
+and a group gone from the run read is looked up again, a 410 if it was
+retired meanwhile; a live identity no done run holds is a logged 500.
+`internal/client`, `curio interests` (an outline of areas with their
+largest interests, `--flat`, `show`, `unsorted`, `changes`, `rebuild`),
+the MCP tool and the dashboard (area cards, an area's page, loose fits on
+an interest's page, a 410 page in the dashboard's frame) read through
+them.
+
+**Deprecated keys.** `insight.knn`, `insight.min_similarity` and
+`insight.min_cluster_size` stay in the strict decoder, with any value of
+their type (0, −1, 1.5 and `.nan` load), are neither defaulted nor
+validated, and are recorded by presence, as `daemon.workers` is; the
+daemon logs one WARN at start naming them. The new grouping's constants
+are recorded in each run's params and changed in code (Q5). Rejected:
+refusing the keys (an upgrade would refuse to start over a key nothing
+reads) and keeping them meaningful (they tuned a clusterer the engine no
+longer runs).
+
+**Departures from the implementation spec.** `PreparePoints` runs after
+the run is created, not before: a corpus whose vectors can't be prepared
+(mixed widths) is then a failed run with its error, which the `failing`
+state and the Interests page report, instead of a job error alone. The
+410 page in the dashboard says what became of the identity in its detail
+sentence, without links to the successors (the JSON and the CLI give
+their IDs); PR 4 redesigns the pages.
+
+**Acceptance on a copy of the owner's library.** Every run used a fresh
+`sqlite3 -readonly ~/.curio/curio.db ".backup …"` copy (5,237 fetched
+documents, schema 15), a scratch `CURIO_HOME` with the owner's marker, a
+config with a free loopback port, `insight.labeling: terms` and auto-pull
+off, and binaries built by `make build BIN_DIR=<scratch>`; never
+`~/.curio`, port 8765 or a checkout's `./bin`. The numbers are from the
+"interests rebuilt" log line.
+
+- **Migration and the first rebuild.** 016 applied at start in 9 ms; the
+  daemon queued the first rebuild itself ("interests: rebuild enqueued",
+  trigger first) and it ran fresh in the areas shape: 29 areas, 182
+  interests, 2 loose fits, 400 unsorted, 211 term labels; read_ms 9,284 +
+  group_ms 2,004 = 11.3 s (under 20 s), label_ms 59, persist_ms 32. The
+  vector read is most of it, as the review measured (9.2 s).
+- **A 5% hold-out, then warm.** 262 of the 5,237 fetched documents
+  (Python `random.sample`, seed 1) were set to `pending` in a second copy
+  before the daemon's first start. Its first rebuild, fresh: 28 areas and
+  168 interests over 4,975 documents (read 8,722 ms, group 1,791 ms).
+  With the documents set back to `fetched`, `POST /v1/interests/rebuild`
+  ran warm with `split_check` false and 262 changed: 28 areas and 168
+  interests, 167 interests kept, 1 merged into another (27 documents
+  shared), 1 new, every area kept; persist_ms 48. `GET
+  /v1/interests/{id}` for each of the first run's identities: 28 of 28
+  areas and 167 of 168 interests answered 200 (100% and 99.4%), the merged
+  one 410 naming its successor.
+- **Down and up.** `goose -dir migrations sqlite3 <copy> down` on a copy
+  migrated to 16 left `sqlite_master` (type, name, tbl_name, sql)
+  identical to the original copy's, and `up` again gave the same 016
+  schema as the daemon's migration.
+- **In a browser.** Headless Chrome through the DevTools protocol at 1440
+  and 390 px, light and dark, against the hold-out copy's daemon with its
+  queue paused and Ollama unreachable, a hostile area and interest label
+  seeded (markup, 270 characters without a break, an RTL override): the
+  Interests page, an area's page, an interest's page with a loose fit, a
+  retired ID's 410, an unknown ID's 404 and the search home. No CSP
+  violation, no sideways scroll, no element outside its card, and no
+  inline script. The check caught the crumb naming a long area label
+  running 1,200 px past a phone's width; it is now cut on one line with
+  the whole label in `title=`.
+
+**Test times** under `-race` on an M4 Max, before and after:
+`internal/insight` 7.5 s and 7.8 s, `internal/store/sqlite` 7.0 s and
+7.5 s, `internal/api` 13.6 s and 14.6 s, `internal/ui` 51.3 s and 51.2 s.
+The engine's fixture-library test (2,000 documents, several rebuilds)
+skips under -race and runs in `make test`'s second, race-free pass of
+`./internal/insight/...`. gonum stays test-only.
 
 ---
 

@@ -569,6 +569,16 @@ started the daemon, prints one line to stderr saying so and waits;
 and how many migrations are applied, and every other request gets 503
 until the daemon is ready. `curio daemon status` shows the same progress.
 
+The upgrade that brings interests in two levels (areas holding interests,
+with IDs that last across rebuilds) drops the interests curio had found:
+their IDs lasted one rebuild and can't seed the new grouping. The daemon
+queues the first grouping as soon as it has started, and until it is done
+the Interests page, `curio interests` and the MCP tool say the library is
+being grouped for the first time. It takes a couple of minutes on a
+library of a few thousand pages, mostly the writing model naming the
+groups; links to an interest from before the upgrade answer "not found".
+See "Interests" below.
+
 After you rebuild or upgrade curio, the daemon already running is still
 the old build. `curio up` restarts it; `curio daemon start` says so,
 naming both versions: run `curio daemon stop`, and the next command starts
@@ -641,6 +651,32 @@ stops nothing; `curio daemon status` and `curio doctor` say the agent has
 no session to run in; and the CLI starts the daemon itself, as without an
 agent.
 
+## Interests
+
+The daemon groups the library into interests, and a large library's
+interests into areas, from the documents' embeddings (see
+`docs/decisions.md` "Interests: two levels, stable identities, automatic
+rebuilds"). It queues the first grouping when it starts and has none, and
+`curio interests rebuild` (or Rebuild on the Interests page) queues
+another; a second request while one waits returns the same job. A rebuild
+keeps an interest's ID and name when it keeps most of its documents, so
+links and IDs last; an interest that splits, merges into another or
+dissolves is retired, and its ID then answers with what became of it.
+
+| Key | Default | What it does |
+|---|---|---|
+| `insight.enabled` | true | off: no rebuild is queued or accepted; existing interests stay readable |
+| `insight.labeling` | `llm` | `llm` (the writing model, falling back to term labels), `terms` (words the titles share), or `off` |
+| `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild; the rest get term labels |
+| `insight.center_vectors` | true | subtract the library's mean vector before grouping |
+
+`insight.knn`, `insight.min_similarity` and `insight.min_cluster_size` are
+deprecated and ignored: they tuned the clusterer the grouping replaced,
+whose constants are now recorded on each rebuild and changed only in code.
+A `config.yaml` that sets them still loads, whatever their values, and the
+daemon logs one warning naming them each time it starts. Remove them from
+`config.yaml`.
+
 ## Config: time budgets for Ollama calls
 
 Each bounds how long one kind of work waits on Ollama; all are validated as
@@ -653,7 +689,7 @@ while indexing fails that index job, and the job queue retries it.
 | `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 32 chunks per request), including the time it waits behind other requests inside Ollama |
 | `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded`. Keep it well under 30: the CLI and MCP give up on a request after 30 s, so a hung Ollama would surface as a client timeout instead |
 | `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried |
-| `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one clustering run; the rest get term labels |
+| `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild of the interests; the rest get term labels |
 
 ## Troubleshooting
 

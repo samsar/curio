@@ -63,10 +63,14 @@ the system through different reference tables because the metadata about
 
 - `bookmarks`, `history_entries`, `highlights` (reference tables)
 - `jobs`
-- `cluster_runs`, `clusters` (insight layer)
+- `interest_runs`, `interests` (insight layer: runs and the identities
+  that outlive them), and `insight_state`
 
-Child tables (`documents`, `chunks`, `document_extractions`,
-`cluster_documents`) **do not** carry `tenant_id`. They are reached only
+Child tables (`documents`, `chunks`, `document_extractions`, and the
+run-scoped `interest_groups`, `interest_assignments` and
+`interest_placements`, which inherit their tenant through `interest_runs`)
+**do not** carry `tenant_id`. `interest_lineage` is reached through the
+identities it names. They are reached only
 through a parent reference, so the JOIN implicitly enforces tenant scoping. This keeps row size sane and avoids the
 redundancy of marking every chunk with a tenant when its document already
 belongs (transitively) to a tenant via its references.
@@ -334,65 +338,196 @@ schedule is a window of the daemon's local wall clock, from
 `schedule_start` up to `schedule_end`, wrapping midnight when the end is
 the smaller.
 
-### `cluster_runs`
+### Interests (migration 016)
 
-One row per clustering execution. The clusters of the latest `done` run are
-what surface as interests.
+Interests come in two levels: areas, each holding interests, in a library
+large enough to have them, and interests alone in a smaller one (the
+run's `shape`, `areas` or `flat`). A rebuild is a run; the groups it found
+are identities that outlive it, so an interest keeps its ID, label and
+links across rebuilds while it keeps most of its documents. Migration 016
+replaced 004's `cluster_runs`, `clusters` and `cluster_documents` (one
+flat partition per run, under IDs that lasted that run alone) and dropped
+their rows: nothing in them could seed the new grouping, and the daemon
+regroups the library at its first start after the migration. The
+reasoning and measurements are in `decisions.md` "Interests: two levels,
+stable identities, automatic rebuilds".
+
+Vectors (`mean`, `centroid`) are float32 little-endian BLOBs, NULL when
+absent.
+
+#### `interest_runs`
+
+One row per rebuild attempt, `running → done | failed`. The tenant's
+latest `done` run is the current grouping; a done run never changes.
 
 ```
-cluster_runs
-  id                UUID PK
-  tenant_id         TEXT NOT NULL
-  status            TEXT                       -- 'running' | 'done' | 'failed'
-  algo              TEXT                       -- clusterer name, e.g. 'knn-graph'
-  params            JSON                       -- clusterer parameters + the engine's center flag
-  num_documents     INTEGER
-  num_clusters      INTEGER
-  num_noise         INTEGER
-  error             TEXT                       -- nullable
-  started_at        TIMESTAMP
-  finished_at       TIMESTAMP                  -- nullable
+interest_runs
+  id                  UUID PK
+  tenant_id           TEXT NOT NULL
+  status              TEXT     -- 'running' (default) | 'done' | 'failed'
+  trigger             TEXT     -- what queued it: 'first' | 'manual' | 'auto' | 'reindex' | 'params' | 'shape'
+  kind                TEXT     -- 'fresh' | 'warm' (started from the previous run's seeds)
+  split_check         INTEGER  -- 0 | 1: it ran the split check
+  shape               TEXT     -- 'flat' | 'areas'
+  grouper             TEXT     -- the grouper's name, e.g. 'louvain'
+  params              JSON     -- the grouper's constants + the engine's center flag; a change makes the next run fresh
+  vectors_read_at     TIMESTAMP  -- when it read the document vectors
+  mean                BLOB     -- the centering mean; NULL when not centered
+  num_documents, num_areas, num_interests, num_loose, num_unsorted   INTEGER
+  changed_documents   INTEGER  -- documents added or gone since the previous run
+  changes_since_split INTEGER  -- changes absorbed since the last split check
+  kept, created, split, merged, moved, dissolved   INTEGER  -- what it did to interest identities
+  error               TEXT     -- set when failed
+  started_at, finished_at, created_at, updated_at
+```
+
+`idx_interest_runs_tenant_status (tenant_id, status, started_at DESC)`
+finds the latest done run, which every read starts from. A rebuild that
+commits prunes the runs before it (their groups, assignments and
+placements cascade); one that fails is kept beside the current run until
+the next rebuild, so a reader can see why.
+
+#### `interests`
+
+The identities, areas and interests alike. An identity carries the label;
+a run's groups reference it.
+
+```
+interests
+  id              UUID PK
+  tenant_id       TEXT NOT NULL
+  level           TEXT     -- 'area' | 'interest'
+  label, summary  TEXT     -- NULL until labeled
+  label_source    TEXT     -- 'llm' | 'terms' | 'user'
+  created_run_id  UUID NOT NULL   -- the run that minted it (no FK: runs are pruned)
+  labeled_at      TIMESTAMP
+  retired_at      TIMESTAMP       -- set by the run that no longer holds it
+  retired_run_id  UUID            -- that run (no FK)
   created_at, updated_at
 ```
 
-### `clusters`
+A run that doesn't hold a live identity retires it. A retired identity is
+kept 180 days with its lineage, so an old link can say what became of it
+(`GET /v1/interests/{id}` answers 410 with its successors), then deleted.
+`idx_interests_retired (tenant_id, retired_run_id) WHERE retired_at IS NOT
+NULL` serves both "what did this run retire" and the retention sweep.
 
-One row per cluster within a run. `cohesion` is the mean member cosine to the
-cluster centroid (the normalized mean of its members' vectors).
+Refinements over the design's sketch, and why:
+
+- `retired_run_id` (and its index): the changes a run made, and the 410,
+  name the run that retired an identity, which `retired_at` alone doesn't
+  say.
+- `created_run_id` is NOT NULL: every identity is minted by a run, and a
+  run's new identities are read through it.
+- `label_source` accepts `'user'` before anything writes it (renames come
+  later): four tables reference `interests`, so widening the CHECK later
+  would mean rebuilding the table.
+
+#### `interest_groups`
+
+An identity as one run found it.
 
 ```
-clusters
-  id                UUID PK
-  tenant_id         TEXT NOT NULL
-  run_id            UUID NOT NULL FK           -- → cluster_runs(id), ON DELETE CASCADE
-  label             TEXT                       -- nullable; topic name
-  summary           TEXT                       -- nullable
-  size              INTEGER
-  cohesion          REAL                       -- mean member cosine to centroid, 0..1
-  created_at, updated_at
+interest_groups
+  run_id       UUID NOT NULL FK   -- → interest_runs(id), ON DELETE CASCADE
+  interest_id  UUID NOT NULL FK   -- → interests(id)
+  parent_id    UUID FK            -- an interest's area; NULL for areas and flat interests
+  size         INTEGER            -- members (an area: its interests' members)
+  loose        INTEGER            -- loose fits
+  cohesion     REAL               -- an interest: mean member cosine to its centroid
+  centroid     BLOB               -- an interest's members' unit mean; NULL for areas
+  PRIMARY KEY (run_id, interest_id)
 ```
 
-### `cluster_documents`
+`idx_interest_groups_list (run_id, parent_id, size DESC, cohesion DESC,
+interest_id)` serves the top-level page, an area's interests and every
+interest of a run in the order the API pages them.
 
-Cluster membership, one row per (cluster, document). Noise docs simply have no
-row.
+#### `interest_assignments`
+
+Every document a run grouped, once.
 
 ```
-cluster_documents
-  cluster_id        UUID NOT NULL FK           -- → clusters(id), ON DELETE CASCADE
-  document_id       UUID NOT NULL FK           -- → documents(id), ON DELETE CASCADE
-  similarity        REAL                       -- cosine to centroid, 0..1
-  PRIMARY KEY (cluster_id, document_id)
+interest_assignments
+  run_id         UUID NOT NULL FK   -- → interest_runs(id), ON DELETE CASCADE
+  document_id    UUID NOT NULL FK   -- → documents(id), ON DELETE CASCADE
+  interest_id    UUID FK            -- NULL: unsorted
+  area_id        UUID FK            -- the area whose community holds it; NULL in the flat shape and outside every area
+  fit            TEXT               -- 'member' | 'loose' | 'unsorted'
+  similarity     REAL               -- to its interest's centroid; unsorted: to the nearest interest
+  nearest_id     UUID FK            -- unsorted only; NULL when there is no interest
+  area_seed, interest_seed  INTEGER -- the next warm start's seeds; -1 for none
+  PRIMARY KEY (run_id, document_id),
+  CHECK ((fit = 'unsorted') = (interest_id IS NULL)),
+  CHECK (fit = 'unsorted' OR nearest_id IS NULL)
 ```
+
+A member names its interest; a loose fit sits close to an interest it
+wasn't grouped with (shown after its members, never used to name it);
+unsorted documents are in no interest. Refinements: `area_id`, because
+carry-over matches areas by their communities, which `interest_id` and the
+groups' `parent_id` can't rebuild for a document in an area but in no
+interest (8 of them in a fresh grouping of the author's library); the
+CHECKs, so a row can't be half one fit; and
+`idx_interest_assignments_document (document_id)`, so deleting a document
+seeks its rows instead of scanning every kept run's.
+`idx_interest_assignments_list (run_id, interest_id, fit, similarity DESC,
+document_id)` serves members, loose fits and the unsorted, each most
+similar first.
+
+#### `interest_placements`
+
+Documents placed into the current grouping between rebuilds, newest first
+per interest (`interest_id` NULL: unsorted). Read by the API and the
+dashboard; nothing writes them yet (placement arrives with automatic
+rebuilds). They go with their run.
+
+```
+interest_placements
+  run_id       UUID NOT NULL FK   -- → interest_runs(id), ON DELETE CASCADE
+  document_id  UUID NOT NULL FK   -- → documents(id), ON DELETE CASCADE
+  interest_id  UUID FK            -- NULL: unsorted
+  similarity   REAL
+  placed_at    TIMESTAMP
+  PRIMARY KEY (run_id, document_id)
+```
+
+Indexed by `(run_id, interest_id, placed_at DESC)` and, for document
+deletes, `(document_id)`.
+
+#### `interest_lineage`
+
+What each run did to an old identity, toward each new one. It outlives
+runs: an old link's 410 names its successors from it.
+
+```
+interest_lineage
+  run_id  UUID NOT NULL           -- no FK: runs are pruned
+  old_id  UUID NOT NULL FK        -- → interests(id), ON DELETE CASCADE
+  new_id  UUID NOT NULL FK        -- → interests(id), ON DELETE CASCADE
+  event   TEXT                    -- 'kept' | 'split' | 'merged' | 'moved'
+  shared  INTEGER                 -- the old identity's members the new one holds
+  PRIMARY KEY (run_id, old_id, new_id)
+```
+
+Each rebuild trims the rows of earlier runs whose old identity is still
+live, which would otherwise add a "kept" row per surviving group forever;
+a retired identity's rows stay until its retention ends.
+
+#### `insight_state`
+
+Per tenant, what a rebuild can't derive from its runs: a fresh grouping
+owed (`fresh_owed`: `reindex`, `params` or `shape`), and failures in a row
+(`failures`, `last_failure_at`). Created for automatic rebuilds, which
+come next; nothing reads or writes it yet. It has no shape column: the
+current done run's `shape` is the state the grouper reads, and two copies
+could disagree.
 
 ### Deferred insight tables (not in v1)
 
-Sketched for completeness; not yet built. In M4, interests are surfaced
-directly from labeled clusters (no standalone `interests` table), and
-suggestions arrive with M5.
+Sketched for completeness; not yet built. Suggestions arrive with M5.
 
 ```
-interests    (tenant_id, name, summary, evidence_cluster_ids JSON, confidence)
 suggestions  (tenant_id, kind, payload JSON, created_at, dismissed_at)
 ```
 
