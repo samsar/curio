@@ -10248,10 +10248,16 @@ and whenever kicked: by a rebuild requested through the API, by
 reindex-all, by a cluster job starting, and by the cluster pool once a
 job's outcome is recorded (`Worker.OnFinished`: a kick from the end of the
 handler would read the job still running). Each check reads, through the
-narrow `insight.Library` (`NewLibrary` over the stores): the latest done
-run R and `Changes(R)`, the fetched documents, `LastIndexedAt`, the queue's
-cluster and index counts, and `insight_state`; the drift report and
-`Engine.ParamsChanged(R)` come from injected functions. A pure `decide`
+narrow `insight.Library` (`NewLibrary` over the stores): the queue's
+cluster and index counts, the latest done run R and `Changes(R)`, the
+fetched documents, `LastIndexedAt`, and `insight_state`; the drift report
+and `Engine.ParamsChanged(R)` come from injected functions. The reads are
+separate statements, and the queue goes first: a rebuild that commits
+during the read was then queued or running, so the check is busy. In the
+other order a check could read the done run from before a rebuild
+committed and the queue after its job was done, and queue a second
+rebuild from changes the first had absorbed; the cluster job's start kick
+made that check likely whenever a rebuild took milliseconds. A pure `decide`
 turns that into the snapshot and whether to queue, so the rules are tested
 over a simulated library and clock. A check runs under its own 30 s
 timeout; one that can't read keeps the last snapshot and warns once a

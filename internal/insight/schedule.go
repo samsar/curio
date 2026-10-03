@@ -198,8 +198,20 @@ type storeLibrary struct {
 	queue    store.JobStore
 }
 
+// Read reads the queue before the library, each in its own statement. A
+// rebuild that commits during the read was pending or running when the
+// queue was read, so the check is busy and queues nothing. Read the other
+// way round, a check could see the done run from before a rebuild
+// committed and the queue after its job was done, and queue that rebuild
+// again from a change count it had already consumed.
 func (l storeLibrary) Read(ctx context.Context, tenantID string) (Reading, error) {
 	var r Reading
+	queued, err := l.queue.QueueCounts(ctx)
+	if err != nil {
+		return Reading{}, err
+	}
+	cluster, index := queued[store.JobKindCluster], queued[store.JobKindIndex]
+	r.ClusterPending, r.ClusterRunning, r.IndexBusy = cluster.Pending, cluster.Running, index.Pending+index.Running
 	done, err := l.insights.LatestRun(ctx, tenantID, store.InterestRunDone)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -219,12 +231,6 @@ func (l storeLibrary) Read(ctx context.Context, tenantID string) (Reading, error
 	if r.LastIndexed, err = l.docs.LastIndexedAt(ctx, tenantID); err != nil {
 		return Reading{}, err
 	}
-	queued, err := l.queue.QueueCounts(ctx)
-	if err != nil {
-		return Reading{}, err
-	}
-	cluster, index := queued[store.JobKindCluster], queued[store.JobKindIndex]
-	r.ClusterPending, r.ClusterRunning, r.IndexBusy = cluster.Pending, cluster.Running, index.Pending+index.Running
 	if r.State, err = l.insights.State(ctx, tenantID); err != nil {
 		return Reading{}, err
 	}

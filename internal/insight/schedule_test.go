@@ -684,3 +684,53 @@ func TestLibrary_ReadsTheStores(t *testing.T) {
 	t.Cleanup(func() { assert.NoError(t, other.Close()) })
 	assert.Equal(t, got, read(other), "another handle, as after a restart, reads the same")
 }
+
+// finishingInsights is the insight store of a check whose read straddles
+// a rebuild's end: once its first LatestRun has read, finish runs, then
+// that read is returned.
+type finishingInsights struct {
+	store.InsightStore
+	finish func()
+}
+
+func (f *finishingInsights) LatestRun(ctx context.Context, tenantID string, status store.InterestRunStatus) (*store.InterestRun, error) {
+	run, err := f.InsightStore.LatestRun(ctx, tenantID, status)
+	if finish := f.finish; finish != nil {
+		f.finish = nil
+		finish()
+	}
+	return run, err
+}
+
+// TestLibrary_ARebuildEndingDuringARead: a check whose read straddles a
+// running rebuild's commit and its job's end finds the rebuild running,
+// and queues none from the done run it read from before the commit; the
+// next check finds the new run current.
+func TestLibrary_ARebuildEndingDuringARead(t *testing.T) {
+	ctx := context.Background()
+	f := newEngineFixture(t, FirstRebuildAt)
+	queue := sqlitestore.NewJobs(f.db)
+	require.NoError(t, queue.Enqueue(ctx, &store.Job{TenantID: tenant, Kind: store.JobKindCluster}))
+	job, err := queue.ClaimNext(ctx, []store.JobKind{store.JobKindCluster})
+	require.NoError(t, err)
+	e := f.engine(nil, nil, Config{})
+	insights := &finishingInsights{InsightStore: f.store, finish: func() {
+		f.tick()
+		_, err := e.Rebuild(ctx, tenant, store.RunTriggerFirst)
+		require.NoError(t, err)
+		require.NoError(t, queue.MarkDone(ctx, job.ID))
+	}}
+	var enqueued []store.RunTrigger
+	s := NewScheduler(SchedulerOptions{TenantID: tenant, Library: NewLibrary(insights, f.docs, queue),
+		Enqueue: func(_ context.Context, _ string, trigger store.RunTrigger) (*store.Job, bool, error) {
+			enqueued = append(enqueued, trigger)
+			return &store.Job{ID: "job"}, true, nil
+		},
+		Now: func() time.Time { return f.clock.Add(time.Hour) }, Log: slog.New(slog.DiscardHandler)})
+
+	s.Check(ctx)
+	assert.Equal(t, StateRebuilding, s.Snapshot().State)
+	s.Check(ctx)
+	assert.Equal(t, StateCurrent, s.Snapshot().State)
+	assert.Empty(t, enqueued, "the rebuild that ended is not queued again")
+}
