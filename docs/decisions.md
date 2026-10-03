@@ -10465,8 +10465,10 @@ crashed, was killed, or outran the shutdown grace)", and one failure, in
 one transaction) without running it; the cluster pool's hook does the same
 for an orphan `RecoverOrphans` fails for good, and counts nothing for the
 handler's own failures. Accepted: a crash between `CommitRun` and
-`MarkDone`, a millisecond window, counts a spurious failure, which costs one
-rebuild 15 minutes later.
+`MarkDone` counts a spurious failure, which costs one rebuild 15 minutes
+later. That window holds the post-commit prune (32 to 48 ms on the
+owner's library) and placement sweep (0.39 s for 262 documents, bounded
+at 2 minutes).
 
 ### Placement
 
