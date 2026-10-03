@@ -117,7 +117,6 @@ type grouped struct {
 	ids       []string // the points' document IDs
 	mean      []float64
 	g         Grouping // after the merge
-	merged    int
 	centroids [][]float32
 	fits      []Fit
 	// groups are the areas, numbered as g.Area numbers them, then the
@@ -137,7 +136,7 @@ type grouped struct {
 // is fresh unless the plan was warm and the grouping took the prior's
 // seeds: it kept the prior's shape, and the prior seeded one of its points.
 func newGrouped(points []Point, mean []float64, in GroupInput, g Grouping, prior *previous, p plan) (*grouped, error) {
-	merged, n, err := MergeNearDuplicates(points, g, MergeThreshold)
+	merged, _, err := MergeNearDuplicates(points, g, MergeThreshold)
 	if err != nil {
 		return nil, fmt.Errorf("merge near-duplicate interests: %w", err)
 	}
@@ -149,7 +148,7 @@ func newGrouped(points []Point, mean []float64, in GroupInput, g Grouping, prior
 	if err != nil {
 		return nil, fmt.Errorf("place strays: %w", err)
 	}
-	gr := &grouped{ids: idsOf(points), mean: mean, g: merged, merged: n, centroids: cents, fits: fits,
+	gr := &grouped{ids: idsOf(points), mean: mean, g: merged, centroids: cents, fits: fits,
 		kind: store.RunKindFresh, changed: p.changed}
 	if p.warm && g.Shape == in.Shape && seedsFor(in.Prior, gr.ids) != nil {
 		gr.kind = store.RunKindWarm
