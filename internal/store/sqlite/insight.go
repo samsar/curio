@@ -973,6 +973,50 @@ func (s *Insights) Assigned(ctx context.Context, runID, documentID string) (bool
 	return assigned, nil
 }
 
+// documentPlaceSQL is where a run put a document: from the run's row, its
+// assignment and its placement, each interest's group in the run for its
+// area, and the labels, every one a seek of a primary key. A row of NULLs
+// past the run is a document the run has nowhere. Its args are the run and
+// the document.
+const documentPlaceSQL = `
+SELECT a.fit, a.interest_id, ai.label, ag.parent_id, ap.label, a.nearest_id, an.label, a.similarity,
+       pl.document_id IS NOT NULL, pl.interest_id, pi.label, pg.parent_id, pp.label, pl.similarity
+FROM interest_runs r
+LEFT JOIN interest_assignments a ON a.run_id = r.id AND a.document_id = ?2
+LEFT JOIN interests ai ON ai.id = a.interest_id
+LEFT JOIN interest_groups ag ON ag.run_id = r.id AND ag.interest_id = a.interest_id
+LEFT JOIN interests ap ON ap.id = ag.parent_id
+LEFT JOIN interests an ON an.id = a.nearest_id
+LEFT JOIN interest_placements pl ON pl.run_id = r.id AND pl.document_id = ?2
+LEFT JOIN interests pi ON pi.id = pl.interest_id
+LEFT JOIN interest_groups pg ON pg.run_id = r.id AND pg.interest_id = pl.interest_id
+LEFT JOIN interests pp ON pp.id = pg.parent_id
+WHERE r.id = ?1`
+
+func (s *Insights) DocumentPlace(ctx context.Context, runID, documentID string) (*store.DocumentPlace, error) {
+	var fit, interest, interestLabel, area, areaLabel, nearest, nearestLabel sql.NullString
+	var placedInterest, placedLabel, placedArea, placedAreaLabel sql.NullString
+	var sim, placedSim sql.NullFloat64
+	var placed bool
+	err := s.db.QueryRowContext(ctx, documentPlaceSQL, runID, documentID).Scan(&fit, &interest, &interestLabel,
+		&area, &areaLabel, &nearest, &nearestLabel, &sim, &placed, &placedInterest, &placedLabel, &placedArea,
+		&placedAreaLabel, &placedSim)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, fmt.Errorf("run %s: %w", runID, store.ErrNotFound)
+	case err != nil:
+		return nil, fmt.Errorf("where run %s put document %s: %w", runID, documentID, err)
+	case fit.Valid:
+		return &store.DocumentPlace{Fit: store.InterestFit(fit.String), InterestID: interest.String,
+			InterestLabel: interestLabel.String, AreaID: area.String, AreaLabel: areaLabel.String,
+			NearestID: nearest.String, NearestLabel: nearestLabel.String, Similarity: sim.Float64}, nil
+	case placed:
+		return &store.DocumentPlace{Placed: true, InterestID: placedInterest.String, InterestLabel: placedLabel.String,
+			AreaID: placedArea.String, AreaLabel: placedAreaLabel.String, Similarity: placedSim.Float64}, nil
+	}
+	return nil, fmt.Errorf("document %s in run %s: %w", documentID, runID, store.ErrNotFound)
+}
+
 func (s *Insights) PlaceDocument(ctx context.Context, tenantID string, p store.Placement) (bool, error) {
 	res, err := s.db.ExecContext(ctx, placeDocumentSQL, p.RunID, p.DocumentID, nullIfEmpty(p.InterestID), p.Similarity,
 		formatTime(time.Now()), tenantID, store.InterestRunDone)

@@ -662,6 +662,25 @@ func insightPlanCases() []planCase {
 		},
 		{name: "Assigned", query: assignedSQL, args: []any{"run", "doc"}, want: []string{assignment("interest_assignments")}},
 		{
+			// A document page's line: the run, the document's assignment
+			// and placement, each interest's group for its area, and the
+			// labels, every one by its primary key.
+			name: "DocumentPlace", query: documentPlaceSQL, args: []any{"run", "doc"},
+			first: "SEARCH r USING COVERING INDEX sqlite_autoindex_interest_runs_1 (id=?)",
+			want: []string{
+				"SEARCH a USING INDEX sqlite_autoindex_interest_assignments_1 (run_id=? AND document_id=?) LEFT-JOIN",
+				"SEARCH pl USING INDEX sqlite_autoindex_interest_placements_1 (run_id=? AND document_id=?) LEFT-JOIN",
+				"SEARCH ag USING INDEX sqlite_autoindex_interest_groups_1 (run_id=? AND interest_id=?) LEFT-JOIN",
+				"SEARCH pg USING INDEX sqlite_autoindex_interest_groups_1 (run_id=? AND interest_id=?) LEFT-JOIN",
+				"SEARCH ai USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN",
+				"SEARCH ap USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN",
+				"SEARCH an USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN",
+				"SEARCH pi USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN",
+				"SEARCH pp USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN",
+			},
+			avoid: []string{"SCAN"},
+		},
+		{
 			// The guard: the latest done run, which ties on the rowid, and
 			// the document's assignment and row.
 			name:  "PlaceDocument",
