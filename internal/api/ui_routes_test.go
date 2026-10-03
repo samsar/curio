@@ -47,6 +47,8 @@ func TestDashboard_Routes(t *testing.T) {
 		"GET /ui/documents/{id}",
 		"GET /ui/failures",
 		"GET /ui/interests",
+		"GET /ui/interests/changes",
+		"GET /ui/interests/unsorted",
 		"GET /ui/interests/{id}",
 		"GET /ui/library",
 		"GET /ui/search",
@@ -79,18 +81,20 @@ func uiSamples(t *testing.T, s *testServer) map[string]string {
 	interest := f.interest("Kafka", area, 0, []*store.Document{doc}, nil)
 	f.commit(t)
 	return map[string]string{
-		"/":                    "/",
-		"/ui/":                 "/ui/",
-		"/ui/search":           "/ui/search?q=text",
-		"/ui/status":           "/ui/status",
-		"/ui/library":          "/ui/library?state=fetched",
-		"/ui/failures":         "/ui/failures",
-		"/ui/documents/{id}":   "/ui/documents/" + doc.ID,
-		"/ui/interests":        "/ui/interests",
-		"/ui/interests/{id}":   "/ui/interests/" + interest,
-		"/ui/static/{file}":    stylesheetURL(t, s),
-		"an area's page":       "/ui/interests/" + area,
-		"an unknown /ui/ page": "/ui/nope",
+		"/":                      "/",
+		"/ui/":                   "/ui/",
+		"/ui/search":             "/ui/search?q=text",
+		"/ui/status":             "/ui/status",
+		"/ui/library":            "/ui/library?state=fetched",
+		"/ui/failures":           "/ui/failures",
+		"/ui/documents/{id}":     "/ui/documents/" + doc.ID,
+		"/ui/interests":          "/ui/interests",
+		"/ui/interests/unsorted": "/ui/interests/unsorted",
+		"/ui/interests/changes":  "/ui/interests/changes",
+		"/ui/interests/{id}":     "/ui/interests/" + interest,
+		"/ui/static/{file}":      stylesheetURL(t, s),
+		"an area's page":         "/ui/interests/" + area,
+		"an unknown /ui/ page":   "/ui/nope",
 	}
 }
 
@@ -139,14 +143,17 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 	assert.Equal(t, "text/html; charset=utf-8", notFound.contentType)
 	assert.Contains(t, notFound.body, `<nav aria-label="Main">`)
 	assertSecurityHeaders(t, notFound, ui.CSP)
-	// An area's page; a numbered list's page past the last, one that isn't
-	// a number; an interest that never was, and one a rebuild retired.
-	interest := samples["/ui/interests/{id}"]
+	// An area's page, and its page past the last; a numbered list's page
+	// past the last, one that isn't a number; the changes; an interest
+	// that never was, and one a rebuild retired.
+	interest, area := samples["/ui/interests/{id}"], samples["an area's page"]
 	for path, status := range map[string]int{
-		samples["an area's page"]: http.StatusOK,
-		"/ui/interests?page=2":    http.StatusNotFound, "/ui/interests?page=0": http.StatusBadRequest,
+		area: http.StatusOK, area + "?page=2": http.StatusNotFound,
+		"/ui/interests?page=2": http.StatusNotFound, "/ui/interests?page=0": http.StatusBadRequest,
 		interest + "?page=2": http.StatusNotFound, interest + "?page=x": http.StatusBadRequest,
-		"/ui/interests/nope": http.StatusNotFound,
+		"/ui/interests/unsorted?page=99": http.StatusNotFound, "/ui/interests/unsorted?page=x": http.StatusBadRequest,
+		"/ui/interests/changes": http.StatusOK,
+		"/ui/interests/nope":    http.StatusNotFound,
 	} {
 		resp := s.do(t, request{method: http.MethodGet, path: path})
 		assert.Equal(t, status, resp.status, path)
@@ -451,4 +458,17 @@ func TestSearchHome_ClientGone(t *testing.T) {
 	for _, info := range infos {
 		assert.EqualValues(t, statusClientClosedRequest, info["status"])
 	}
+}
+
+// TestDashboard_AnotherTenantsInterest: another tenant's interest is none
+// of this one's: its page is the 404 of an ID nothing knows, naming
+// nothing of it.
+func TestDashboard_AnotherTenantsInterest(t *testing.T) {
+	s := newTestServer(t)
+	theirs := s.seedInterest(t, "other", "Rust", s.seedDocument(t, "https://example.com/a", store.DocStateFetched))
+	resp := s.do(t, request{method: http.MethodGet, path: "/ui/interests/" + theirs})
+	assert.Equal(t, http.StatusNotFound, resp.status)
+	assertSecurityHeaders(t, resp, ui.CSP)
+	assert.Contains(t, resp.body, "<h1>No such interest</h1>")
+	assert.NotContains(t, resp.body, "Rust")
 }

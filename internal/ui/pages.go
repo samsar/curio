@@ -18,7 +18,10 @@ const (
 	PageFailures  = "failures"  // Failures
 	PageDocument  = "document"  // Document
 	PageInterests = "interests" // Interests
-	PageInterest  = "interest"  // Interest
+	PageInterest  = "interest"  // InterestPage
+	PageUnsorted  = "unsorted"  // Unsorted
+	PageChanges   = "changes"   // Changes
+	PageRetired   = "retired"   // Gone
 	PageError     = "error"     // ErrorPage
 	PageStarting  = "starting"  // Starting
 )
@@ -272,6 +275,8 @@ type HealthPanel struct {
 	Drift           *Drift // nil when the embeddings haven't drifted
 	Upstreams       []Upstream
 	YouTubeFetcher  string // the yt-dlp videos go to; empty for none
+	// Interests is where automatic rebuilds of the interests stand.
+	Interests InterestsState
 }
 
 // Drift is what changed in the build that makes the embeddings since the
@@ -967,6 +972,10 @@ type Document struct {
 	Related      RelatedPanel
 	Bookmarks    BookmarksPanel
 	Jobs         DocumentJobs
+	// Place is where the latest rebuild put it, or placed it since; nil
+	// when it has it nowhere, before the first, or when that couldn't be
+	// read.
+	Place *DocumentPlace
 }
 
 // Refetch is the document's Refetch button; ForcedRefetch is the one that
@@ -1167,9 +1176,10 @@ type DocumentBookmark struct {
 }
 
 // Interests is a page of the latest rebuild's top-level groups, its areas
-// each with its largest interests, or its interests in the flat shape, and
-// a rebuild of them. A poll's answer (Poll PollRebuild) holds the
-// rebuild's live regions alone, and reads no interest.
+// each with its largest interests, or its interests in the flat shape;
+// Unsorted's card after the last page's; and a rebuild of them. A poll's
+// answer (Poll PollRebuild) holds the rebuild's live regions alone, and
+// reads no interest.
 type Interests struct {
 	Layout Layout
 	Poll   string
@@ -1184,8 +1194,9 @@ type Interests struct {
 	Rebuild    Rebuild
 }
 
-// Page sizes of the numbered lists of interests and of an interest's
-// members. 24 cards fill rows of 3, 2 and 1.
+// Page sizes of the numbered lists of interests (the Interests' and an
+// area's) and of an interest's members, or of Unsorted. 24 cards fill rows
+// of 3, 2 and 1.
 const (
 	InterestsPageSize       = 24
 	InterestMembersPageSize = 50
@@ -1197,6 +1208,10 @@ const (
 	AreaCardInterests   = 5
 	InterestCardMembers = 3
 )
+
+// ChangesNoticeFor is how long after a rebuild the Interests page tells
+// what it split, merged or dissolved.
+const ChangesNoticeFor = 7 * 24 * time.Hour
 
 func (v Interests) page() int { return max(v.Page, 1) }
 
@@ -1227,11 +1242,25 @@ func (v Interests) Pager() *Pager {
 }
 
 // FirstGrouping reports whether the library is being grouped for the
-// first time: no rebuild is done, and one is queued or running.
-func (v Interests) FirstGrouping() bool { return v.Run == nil && v.Rebuild.InFlight() }
+// first time: no rebuild is done, and one is queued or running, as the
+// queue or the scheduler says.
+func (v Interests) FirstGrouping() bool {
+	return v.Run == nil && (v.Rebuild.InFlight() || v.Rebuild.State.InFlight())
+}
 
 // FirstPage is the first page of the run shown.
 func (v Interests) FirstPage() string { return v.pageHref(1) }
+
+// Unsorted is Unsorted's card, last on the last page of the groups, or
+// alone on a run without any; nil on the other pages, past the last, and
+// when nothing is unsorted or placed there since.
+func (v Interests) Unsorted() *UnsortedCard {
+	r := v.Run
+	if r == nil || r.Unsorted+r.NewUnsorted <= 0 || v.OutOfRange() != nil || v.page() < v.Pages() {
+		return nil
+	}
+	return &UnsortedCard{Documents: r.Unsorted, New: r.NewUnsorted, Href: unsortedHref(1, r.ID)}
+}
 
 // pageHref is page of the run shown: every link between pages names the
 // run, so that a page asked for after a rebuild knows it changed.
@@ -1243,12 +1272,75 @@ func (v Interests) pageHref(page int) string {
 	return interestsPageHref(page, run)
 }
 
+// UnsortedCard is the Interests' card of the documents in no interest: how
+// many the run left unsorted, how many were placed there since, and its
+// page.
+type UnsortedCard struct {
+	Documents, New int
+	Href           string
+}
+
+// InterestsState is where automatic rebuilds of the interests stand, as
+// the scheduler's last check found them: one of its states, or off with
+// insight off; a state this build doesn't know reads as current. The
+// interests-state partial says it as `curio status` does. Changed and
+// RebuildAt are the documents changed since the rebuild and how many make
+// the next one due; before the first, the documents indexed and how many
+// the first waits for. The fields a state doesn't use are zero.
+type InterestsState struct {
+	State         string
+	LastRebuildAt time.Time
+	LastKind      string
+	Changed       int
+	RebuildAt     int
+	FreshOwed     string
+	HeldReason    string
+	RetryAt       time.Time
+	LastError     string
+}
+
+// The states automatic rebuilds are in (insight.RebuildState), and off.
+const (
+	rebuildsRebuilding = "rebuilding"
+	rebuildsQueued     = "queued"
+	rebuildsHeld       = "held"
+	rebuildsFailing    = "failing"
+	rebuildsDue        = "due"
+	rebuildsCurrent    = "current"
+	rebuildsNone       = "none"
+	rebuildsUnknown    = "unknown"
+	rebuildsOff        = "off"
+)
+
+// InFlight reports whether the scheduler saw a rebuild queued or running.
+func (s InterestsState) InFlight() bool {
+	return s.State == rebuildsQueued || s.State == rebuildsRebuilding
+}
+
+// Retrying reports whether a failed rebuild waits for its backoff, which
+// ends at RetryAt; past it, the next waits for the library to settle.
+func (s InterestsState) Retrying() bool { return s.RetryAt.After(time.Now()) }
+
+// Tone is the state's status dot: ok while rebuilds run on their own,
+// warn while they are held or failing, neutral when they are off, the
+// daemon hasn't checked, or the state is one this build doesn't know.
+func (s InterestsState) Tone() string {
+	switch s.State {
+	case rebuildsCurrent, rebuildsNone, rebuildsDue, rebuildsQueued, rebuildsRebuilding:
+		return "ok"
+	case rebuildsHeld, rebuildsFailing:
+		return "warn"
+	}
+	return "neutral"
+}
+
 // Rebuild is the Interests page's rebuild: whether the page offers one,
-// whether one is queued or running, and what the newest rebuild came to
-// when it isn't the run the page shows.
+// whether one is queued or running, as the queue says, where automatic
+// rebuilds stand otherwise, as the scheduler says, and, in a poll's
+// answer, whether a newer rebuild is done than the one the page shows.
 type Rebuild struct {
 	Enabled bool        // config.yaml's insight.enabled
-	Err     *PanelError // the queue or the runs couldn't be read
+	Err     *PanelError // the queue, or a poll's latest run, couldn't be read
 	Queued  bool
 	Running bool
 	// StartedAt is when the running rebuild started; zero when unknown.
@@ -1256,52 +1348,53 @@ type Rebuild struct {
 	// Hold is why the queue holds a queued rebuild, the gate's reason; ""
 	// while it is open.
 	Hold string
+	// State is the scheduler's snapshot.
+	State InterestsState
 	// Shown is the run the page shows, "" for none: the latest done one.
 	Shown string
-	// NewRun is the status of the newest run, of any status, when it isn't
-	// Shown, and RunError its error: "" when it is.
-	NewRun   string
-	RunError string
+	// Ready is set in a poll's answer when the latest done run isn't
+	// Shown: newer interests are ready to load.
+	Ready bool
 }
 
-// InFlight reports whether a rebuild is queued or running.
+// InFlight reports whether the queue holds a rebuild, queued or running.
+// The queue, not the scheduler's snapshot, says so: the queue is read
+// after a click's rebuild is queued, and the snapshot only at the
+// scheduler's next check.
 func (b Rebuild) InFlight() bool { return b.Queued || b.Running }
 
-// RebuildOutcome is what came of the newest rebuild, for the page to say.
-type RebuildOutcome string
-
-// What came of a rebuild.
-const (
-	RebuildNone   RebuildOutcome = ""
-	RebuildReady  RebuildOutcome = "ready"  // a newer run's interests are ready
-	RebuildFailed RebuildOutcome = "failed" // the newest run failed
-)
-
-// Outcome is what came of the newest rebuild: a newer done run is ready to
-// load; a failed one is reported once no rebuild is in flight, which may
-// yet replace it.
-func (b Rebuild) Outcome() RebuildOutcome {
-	switch {
-	case b.NewRun == string(store.InterestRunDone):
-		return RebuildReady
-	case b.NewRun == string(store.InterestRunFailed) && !b.InFlight():
-		return RebuildFailed
+// ShowsState reports whether the rebuild's line says where automatic
+// rebuilds stand: nothing is in flight and the snapshot has something to
+// say. A snapshot of a rebuild queued or running that the queue no longer
+// holds is behind it; unknown and off say nothing here.
+func (b Rebuild) ShowsState() bool {
+	if b.InFlight() {
+		return false
 	}
-	return RebuildNone
+	switch b.State.State {
+	case rebuildsQueued, rebuildsRebuilding, rebuildsUnknown, rebuildsOff:
+		return false
+	}
+	return true
 }
 
 // Action is the Rebuild button's.
 func (Rebuild) Action() Action { return rebuildAction() }
 
 // Poller is the rebuild's poller: every 2 seconds while a rebuild is in
-// flight or the queue or runs couldn't be read, and after every change the
-// page makes, carrying the run the page shows. It lists itself, so its
-// answer decides whether it keeps polling.
+// flight, as the queue or the scheduler says, or a read failed; every 30
+// seconds otherwise while insight is on, so that a rebuild the scheduler
+// queues reaches an open page; and after every change the page makes,
+// carrying the run the page shows. It lists itself, so its answer decides
+// how it keeps polling.
 func (b Rebuild) Poller() Poller {
 	p := Poller{ID: rebuildPoller, Href: interestsPollHref(b.Shown), OnChange: true,
 		Regions: []string{rebuildStateID, rebuildControlID, rebuildPoller}}
-	if b.Err != nil || b.InFlight() {
+	switch {
+	case b.Err != nil || b.InFlight() || b.State.InFlight():
 		p.Every = pollEvery
+	case b.Enabled:
+		p.Every = idlePollEvery
 	}
 	return p
 }
@@ -1310,31 +1403,126 @@ func (b Rebuild) Poller() Poller {
 type InterestRun struct {
 	ID         string
 	ComputedAt time.Time
-	Algo       string
+	Kind       string // fresh or warm
 	Shape      string // flat or areas
 	Documents  int
 	Areas      int
 	Interests  int
 	Loose      int // documents in no interest, close to one
 	Unsorted   int // documents close to none
+	// New counts the documents placed since the rebuild, and NewUnsorted
+	// those of them placed into Unsorted.
+	New, NewUnsorted int
 	// Total is how many top-level groups it has: its areas, or its
 	// interests in the flat shape.
 	Total int
+	// Changes are what it did to the interests before it, and Recent is
+	// set while it finished less than ChangesNoticeFor ago.
+	Changes RunChanges
+	Recent  bool
 }
 
 // HasAreas reports whether the run groups its interests in areas.
 func (r InterestRun) HasAreas() bool { return r.Shape == string(store.InterestShapeAreas) }
 
-// Outside is how many of the run's documents are in no interest: its
-// loose fits and the unsorted.
-func (r InterestRun) Outside() int { return r.Loose + r.Unsorted }
+// Members is how many of the run's documents are members of an interest:
+// its loose fits and the unsorted aside.
+func (r InterestRun) Members() int { return max(r.Documents-r.Loose-r.Unsorted, 0) }
 
-// Clustered is how many of the run's documents are members of an
-// interest.
-func (r InterestRun) Clustered() int { return clustered(r.Documents, r.Outside()) }
+// The tones of the coverage bar's parts, each a fill- and swatch- class
+// over app.css's tokens: the accent, its border's, the neutral dot and the
+// bar's track.
+const (
+	toneAccent       = "accent"
+	toneAccentBorder = "accent-border"
+	toneNeutral      = "neutral"
+	toneTrack        = "track"
+)
+
+// CoveragePart is a part of the coverage bar and its legend: how many
+// documents it counts, what it calls them, and its tone.
+type CoveragePart struct {
+	Count     int
+	One, Many string
+	Tone      string
+}
+
+// Label is what the part calls its count.
+func (p CoveragePart) Label() string {
+	if p.Count == 1 {
+		return p.One
+	}
+	return p.Many
+}
+
+// Coverage are the parts of the run's documents and of those placed since,
+// in the bar's order: members, loose fits, new, and unsorted, which the
+// track is left to show.
+func (r InterestRun) Coverage() []CoveragePart {
+	return []CoveragePart{
+		{Count: r.Members(), One: "in an interest", Many: "in an interest", Tone: toneAccent},
+		{Count: r.Loose, One: "loose fit", Many: "loose fits", Tone: toneAccentBorder},
+		{Count: r.New, One: "new since the rebuild", Many: "new since the rebuild", Tone: toneNeutral},
+		{Count: r.Unsorted, One: "unsorted", Many: "unsorted", Tone: toneTrack},
+	}
+}
+
+// CoverageTotal is what the bar's parts are shares of: the run's documents
+// and those placed since.
+func (r InterestRun) CoverageTotal() int { return r.Documents + r.New }
+
+// Bar is the coverage bar.
+func (r InterestRun) Bar() []BarSegment { return coverageBar(r.Coverage(), r.CoverageTotal()) }
+
+// Legend is the bar's legend, in its order: the members and the unsorted,
+// and the loose fits and new documents when there are any.
+func (r InterestRun) Legend() []CoveragePart {
+	var out []CoveragePart
+	for _, p := range r.Coverage() {
+		if p.Count > 0 || p.Tone == toneAccent || p.Tone == toneTrack {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ShowsChanges reports whether the page tells what the run changed: it
+// finished less than ChangesNoticeFor ago, and split, merged or dissolved
+// an interest.
+func (r InterestRun) ShowsChanges() bool { return r.Recent && r.Changes.Notable() }
+
+// RunChanges is what a rebuild did to the interests before it: how many it
+// split, merged, moved and dissolved, and how many it created; and to how
+// many it did nothing but keep them.
+type RunChanges struct {
+	Kept, Split, Merged, Moved, Dissolved, Created int
+}
+
+// Notable reports whether the rebuild split, merged or dissolved an
+// interest: names the reader knew changed.
+func (c RunChanges) Notable() bool { return c.Split+c.Merged+c.Dissolved > 0 }
+
+// Summary counts what the rebuild changed, each count only when it has
+// one: "5 interests split, 1 merged, 2 moved, 9 new"; "" for nothing.
+func (c RunChanges) Summary() string {
+	var parts []string
+	for _, n := range []struct {
+		count int
+		what  string
+	}{{c.Split, "split"}, {c.Merged, "merged"}, {c.Dissolved, "dissolved"}, {c.Moved, "moved"}, {c.Created, "new"}} {
+		switch {
+		case n.count <= 0:
+		case len(parts) == 0:
+			parts = append(parts, count(n.count, "interest", "interests")+" "+n.what)
+		default:
+			parts = append(parts, num(n.count)+" "+n.what)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
 
 // Interest is an area or an interest, and some of its interests or its
-// members.
+// members, and on its own page what the latest rebuild did to it.
 type Interest struct {
 	ID          string
 	Area        bool   // an area, which holds interests; an interest otherwise
@@ -1344,13 +1532,134 @@ type Interest struct {
 	Summary     string
 	Size        int // members: an area's interests'
 	Loose       int // loose fits: an area's interests'
+	New         int // documents placed since the rebuild: an area's interests'
 	Cohesion    float64
 	NumChildren int        // an area's interests
-	Children    []Interest // an area's largest interests
+	Children    []Interest // some of an area's interests, largest first
 	Members     []Member
+	// NewMembers are the newest of the documents placed into an interest
+	// since the rebuild.
+	NewMembers []Member
+	// Events are what the latest rebuild did to it.
+	Events []InterestEvent
 }
 
-// Member is a document of an interest: one of its members, or a loose fit.
+// Name is the group's label, or what an unlabeled one is called.
+func (in Interest) Name() string { return groupName(in.Label, in.Area) }
+
+// Parent is an interest's area as an identity a page names, or nil.
+func (in Interest) Parent() *InterestRef {
+	if in.ParentID == "" {
+		return nil
+	}
+	return &InterestRef{ID: in.ParentID, Label: in.ParentLabel, Area: true}
+}
+
+// Largest is the size of an area's largest interest listed, which their
+// bars are scaled to: 0 for none.
+func (in Interest) Largest() int {
+	largest := 0
+	for _, c := range in.Children {
+		largest = max(largest, c.Size)
+	}
+	return largest
+}
+
+// MoreChildren is how many of an area's interests its card leaves out.
+func (in Interest) MoreChildren() int { return max(in.NumChildren-len(in.Children), 0) }
+
+// groupName is a group's label, or what an unlabeled area or interest is
+// called.
+func groupName(label string, area bool) string {
+	switch {
+	case label != "":
+		return label
+	case area:
+		return "Unlabeled area"
+	}
+	return "Unlabeled interest"
+}
+
+// InterestRef names an area or an interest a page links to: by its label,
+// on one line, or by what an unlabeled one is called; a retired one is
+// marked, and its link leads to the page that says what became of it.
+type InterestRef struct {
+	ID, Label string
+	Area      bool
+	Retired   bool
+}
+
+// Name is the identity's label, or what an unlabeled one is called.
+func (r InterestRef) Name() string { return groupName(r.Label, r.Area) }
+
+// InterestEvent is what the latest rebuild did to an area or an interest
+// (Area): kept, moved (In is the area the interest is in now), split or
+// merged, from From toward To, which holds Shared of From's members;
+// dissolved, From alone; or new, To alone.
+type InterestEvent struct {
+	Event    string
+	Area     bool
+	From, To *InterestRef
+	In       *InterestRef
+	Shared   int
+}
+
+// The events a rebuild records that a page tells apart (store.LineageEvent
+// but kept, which says nothing, and the two without a lineage row).
+const (
+	eventSplit     = "split"
+	eventMerged    = "merged"
+	eventMoved     = "moved"
+	eventDissolved = "dissolved"
+	eventNew       = "new"
+)
+
+// LineageLine is one line of a group's lineage note, from its own side:
+// Kind is one of the lineage kinds below, Other the identity it names, nil
+// for moved and new, and Shared the documents it shares.
+type LineageLine struct {
+	Kind   string
+	Other  *InterestRef
+	Shared int
+}
+
+// The lines of a lineage note.
+const (
+	lineageSplitFrom  = "split-from"  // it split off from Other
+	lineageSplitOff   = "split-off"   // Other split off from it
+	lineageTookIn     = "took-in"     // it took in Other, merged into it
+	lineageMergedInto = "merged-into" // part of it merged into Other
+	lineageMoved      = "moved"       // it moved here from another area
+	lineageNew        = "new"         // the rebuild created it
+)
+
+// Lineage is the group's lineage note, a line for each event of the latest
+// rebuild that changed it, in the events' order. Kept alone says nothing:
+// the run before is pruned, so what it gained and lost can't be told.
+func (in Interest) Lineage() []LineageLine {
+	var out []LineageLine
+	is := func(r *InterestRef) bool { return r != nil && r.ID == in.ID }
+	for _, e := range in.Events {
+		switch {
+		case e.Event == eventSplit && is(e.To):
+			out = append(out, LineageLine{Kind: lineageSplitFrom, Other: e.From, Shared: e.Shared})
+		case e.Event == eventSplit && is(e.From):
+			out = append(out, LineageLine{Kind: lineageSplitOff, Other: e.To, Shared: e.Shared})
+		case e.Event == eventMerged && is(e.To):
+			out = append(out, LineageLine{Kind: lineageTookIn, Other: e.From, Shared: e.Shared})
+		case e.Event == eventMerged && is(e.From):
+			out = append(out, LineageLine{Kind: lineageMergedInto, Other: e.To, Shared: e.Shared})
+		case e.Event == eventMoved && is(e.To):
+			out = append(out, LineageLine{Kind: lineageMoved})
+		case e.Event == eventNew && is(e.To):
+			out = append(out, LineageLine{Kind: lineageNew})
+		}
+	}
+	return out
+}
+
+// Member is a document of an interest, of Fit: one of its members, a loose
+// fit, or a document placed into it since the rebuild (new).
 type Member struct {
 	DocumentID string
 	Title      string
@@ -1359,9 +1668,18 @@ type Member struct {
 	BookmarkTitle string
 	URL           string
 	Similarity    float64
-	// Loose marks a loose fit: close to the interest, not grouped with it.
-	Loose bool
+	Fit           string
 }
+
+// The fits a document has in the interests: a member, a loose fit (close
+// to an interest, not grouped with it), unsorted (close to none), or new
+// (placed since the rebuild).
+const (
+	fitMember   = "member"
+	fitLoose    = "loose"
+	fitUnsorted = "unsorted"
+	fitNew      = "new"
+)
 
 // Ref is how a list names the member.
 func (m Member) Ref() DocRef {
@@ -1375,15 +1693,34 @@ func (m Member) Cell() DocCell {
 	return DocCell{Ref: ref, Where: ref.where()}
 }
 
-// InterestPage is an area's page, with every interest it holds; or an
-// interest's, with a page of its members, then loose fits, most similar
-// first.
+// NewBand is a list's band of the documents placed since the rebuild,
+// newest first, above its ranked documents: those listed, and how many
+// more there are.
+type NewBand struct {
+	Members []Member
+	More    int
+}
+
+// newBand is the band of members, of new in all, on page: the first page
+// alone shows it, and none when nothing was placed.
+func newBand(page int, members []Member, all int) *NewBand {
+	if page > 1 || len(members) == 0 {
+		return nil
+	}
+	return &NewBand{Members: members, More: max(all-len(members), 0)}
+}
+
+// InterestPage is an area's page, with a page of its interests; or an
+// interest's, with the documents placed into it since, then a page of its
+// members, then its loose fits, most similar first. Either says what the
+// latest rebuild did to it.
 type InterestPage struct {
 	Layout Layout
 	// Interest's Members are the page's; its Size and Loose count them
-	// all. An area's Children are all of them.
+	// all. An area's Children are the page's, and NumChildren counts them
+	// all.
 	Interest Interest
-	// Page is the page of members shown, from 1; 0 is the first.
+	// Page is the page shown, from 1; 0 is the first.
 	Page int
 	// RunAt is when the rebuild the interest comes from finished; zero
 	// when unknown.
@@ -1392,35 +1729,39 @@ type InterestPage struct {
 
 func (p InterestPage) page() int { return max(p.Page, 1) }
 
-// Pages is how many pages the interest's members and loose fits fill; an
-// area's interests fill one.
+// Pages is how many pages an area's interests fill, or an interest's
+// members and loose fits.
 func (p InterestPage) Pages() int {
 	if p.Interest.Area {
-		return 1
+		return pageCount(p.Interest.NumChildren, InterestsPageSize)
 	}
 	return pageCount(p.Interest.Size+p.Interest.Loose, InterestMembersPageSize)
 }
 
-// OutOfRange is the page when it is past the last, nil otherwise. An
-// area's page is never out of range: it shows all its interests whatever
-// page is asked for, as the API ignores an area's offset.
+// OutOfRange is the page when it is past the last, nil otherwise.
 func (p InterestPage) OutOfRange() *PageOutOfRange {
-	if p.Interest.Area {
-		return nil
-	}
 	return outOfRange(p.page(), p.Pages(), p.pageHref)
 }
 
-// Pager is the pager under the members, nil when they fit on one page.
+// Pager is the pager under the interests or the members, nil when they
+// fit on one page.
 func (p InterestPage) Pager() *Pager {
-	if p.Interest.Area {
-		return nil
+	in := p.Interest
+	if in.Area {
+		return newPager(pageSpan{Page: p.page(), Size: InterestsPageSize, Shown: len(in.Children),
+			Total: in.NumChildren, Noun: "Interests", Href: p.pageHref})
 	}
-	return newPager(pageSpan{Page: p.page(), Size: InterestMembersPageSize, Shown: len(p.Interest.Members),
-		Total: p.Interest.Size + p.Interest.Loose, Noun: "Documents", Suffix: ", most similar first", Href: p.pageHref})
+	return newPager(pageSpan{Page: p.page(), Size: InterestMembersPageSize, Shown: len(in.Members),
+		Total: in.Size + in.Loose, Noun: "Documents", Suffix: ", most similar first", Href: p.pageHref})
 }
 
 func (p InterestPage) pageHref(page int) string { return interestPageHref(p.Interest.ID, page) }
+
+// NewBand is the documents placed into the interest since the rebuild, on
+// its first page.
+func (p InterestPage) NewBand() *NewBand {
+	return newBand(p.page(), p.Interest.NewMembers, p.Interest.New)
+}
 
 // RankedMember is a member and its rank among all the interest's members
 // and loose fits, from 1, most similar first, the loose fits after the
@@ -1430,15 +1771,207 @@ type RankedMember struct {
 	Member
 }
 
-// Ranked are the page's members with their ranks, which continue from the
-// pages before.
-func (p InterestPage) Ranked() []RankedMember {
+// RankedMembers are the page's members with their ranks, which continue
+// from the pages before.
+func (p InterestPage) RankedMembers() []RankedMember { return p.ranked(fitMember) }
+
+// RankedLoose are the page's loose fits with their ranks, which continue
+// from the members'.
+func (p InterestPage) RankedLoose() []RankedMember { return p.ranked(fitLoose) }
+
+// ranked are the page's documents of fit, ranked: the page lists the
+// members, then the loose fits, so ranks run on across both.
+func (p InterestPage) ranked(fit string) []RankedMember {
 	first := PageOffset(p.page(), InterestMembersPageSize) + 1
-	out := make([]RankedMember, 0, len(p.Interest.Members))
+	var out []RankedMember
 	for i, m := range p.Interest.Members {
-		out = append(out, RankedMember{Rank: first + i, Member: m})
+		if m.Fit == fit {
+			out = append(out, RankedMember{Rank: first + i, Member: m})
+		}
 	}
 	return out
+}
+
+// Unsorted is a page of the latest rebuild's unsorted documents, nearest
+// an interest first, each with the interest it is nearest, and on the
+// first page the documents placed into Unsorted since.
+type Unsorted struct {
+	Layout Layout
+	// Page is the page shown, from 1; 0 is the first.
+	Page int
+	// RunChanged is set when the page was asked for from a page of another
+	// run, as on the Interests.
+	RunChanged bool
+	// Run is the rebuild the page is of, "" before the first is done.
+	Run string
+	// Total is how many documents the run left unsorted, and Documents the
+	// page's.
+	Total     int
+	Documents []UnsortedDoc
+	// New are the newest documents placed into Unsorted since the
+	// rebuild, of NumNew.
+	New    []Member
+	NumNew int
+}
+
+// UnsortedDoc is an unsorted document: in no interest, and nearest
+// Nearest, whose ID is "" when there is no interest.
+type UnsortedDoc struct {
+	Member
+	Nearest InterestRef
+}
+
+func (u Unsorted) page() int { return max(u.Page, 1) }
+
+// Pages is how many pages the unsorted documents fill.
+func (u Unsorted) Pages() int { return pageCount(u.Total, InterestMembersPageSize) }
+
+// OutOfRange is the page when it is past the last, nil otherwise, and
+// nil before the first rebuild, which the page says instead.
+func (u Unsorted) OutOfRange() *PageOutOfRange {
+	if u.Run == "" {
+		return nil
+	}
+	return outOfRange(u.page(), u.Pages(), u.pageHref)
+}
+
+// Pager is the pager under the documents, nil when they fit on one page.
+func (u Unsorted) Pager() *Pager {
+	return newPager(pageSpan{Page: u.page(), Size: InterestMembersPageSize, Shown: len(u.Documents), Total: u.Total,
+		Noun: "Documents", Suffix: ", nearest first", Href: u.pageHref})
+}
+
+// NewBand is the documents placed into Unsorted since the rebuild, on the
+// first page.
+func (u Unsorted) NewBand() *NewBand { return newBand(u.page(), u.New, u.NumNew) }
+
+// FirstPage is the first page of the run shown.
+func (u Unsorted) FirstPage() string { return u.pageHref(1) }
+
+// pageHref is page of the run shown, as the Interests' pages are.
+func (u Unsorted) pageHref(page int) string { return unsortedHref(page, u.Run) }
+
+// Changes is what the latest rebuild changed, its events grouped by kind.
+type Changes struct {
+	Layout Layout
+	Run    *ChangesRun // nil before the first rebuild is done
+}
+
+// ChangesRun is a rebuild and what it did: when it finished, what started
+// it and its kind, its counts, and its events, kept aside, areas before
+// interests within each kind.
+type ChangesRun struct {
+	ComputedAt time.Time
+	Trigger    string
+	Kind       string
+	Changes    RunChanges
+	Events     []InterestEvent
+}
+
+// FirstGrouping reports whether the rebuild was the library's first
+// grouping: it kept nothing, and everything it did was create.
+func (r ChangesRun) FirstGrouping() bool {
+	if r.Changes.Kept > 0 || len(r.Events) == 0 {
+		return false
+	}
+	for _, e := range r.Events {
+		if e.Event != eventNew {
+			return false
+		}
+	}
+	return true
+}
+
+// EventGroup is the events of one kind.
+type EventGroup struct {
+	Event  string
+	Events []InterestEvent
+}
+
+// Groups are the events by kind, in the order the API lists them.
+func (r ChangesRun) Groups() []EventGroup {
+	var out []EventGroup
+	for _, e := range r.Events {
+		if n := len(out); n > 0 && out[n-1].Event == e.Event {
+			out[n-1].Events = append(out[n-1].Events, e)
+			continue
+		}
+		out = append(out, EventGroup{Event: e.Event, Events: []InterestEvent{e}})
+	}
+	return out
+}
+
+// Gone is the page of an area or interest a link names that the latest
+// rebuild doesn't hold: one a rebuild retired (Retired), whose page is a
+// 410 saying what became of it, or an ID nothing knows, a 404.
+type Gone struct {
+	Layout  Layout
+	ID      string
+	Retired *Retired // nil for an ID nothing knows
+	// RetentionDays is how long a retired identity is remembered.
+	RetentionDays int
+}
+
+// Retired is a retired area or interest: when a rebuild retired it, and
+// the identities that took its documents there.
+type Retired struct {
+	Area       bool
+	Label      string
+	RetiredAt  time.Time
+	Successors []Successor
+}
+
+// Name is the identity's label, or what an unlabeled one is called.
+func (r Retired) Name() string { return groupName(r.Label, r.Area) }
+
+// Successor is an identity that took part of a retired one's documents:
+// it split off from it or it merged into it, sharing Shared of them.
+type Successor struct {
+	InterestRef
+	Event  string
+	Shared int
+}
+
+// The fates of a retired identity, which its page's sentence says: it
+// split into its successors, merged into them, both (its documents went
+// to them), or dissolved.
+const (
+	fateSplit     = "split"
+	fateMerged    = "merged"
+	fateMixed     = "mixed"
+	fateDissolved = "dissolved"
+)
+
+// Fate is how the retired identity's sentence goes, from its successors'
+// events.
+func (r Retired) Fate() string {
+	if len(r.Successors) == 0 {
+		return fateDissolved
+	}
+	fate := r.Successors[0].Event
+	for _, s := range r.Successors[1:] {
+		if s.Event != fate {
+			return fateMixed
+		}
+	}
+	switch fate {
+	case eventSplit:
+		return fateSplit
+	case eventMerged:
+		return fateMerged
+	}
+	return fateMixed
+}
+
+// DocumentPlace is where the latest rebuild put a document, or where it
+// was placed since: a member or a loose fit of Interest, in Area when the
+// interest has one; unsorted, nearest Nearest; or new, placed into
+// Interest, or into Unsorted. An identity whose ID is "" is none.
+type DocumentPlace struct {
+	Fit      string
+	Interest InterestRef
+	Area     InterestRef
+	Nearest  InterestRef
 }
 
 // ErrorPage is a page's error: its status and message, and the request ID

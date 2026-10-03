@@ -23,6 +23,7 @@ so a poll never replaces a button, and only their status announces.
 {{- if not .PublishedAt.IsZero}}<span class="sep">·</span><span class="text">published {{day .PublishedAt}}</span>{{end}}
 {{- with .Language}}<span class="sep">·</span><span class="text">{{.}}</span>{{end}}</div>
 {{end}}
+{{- with .Place}}{{template "doc-place" .}}{{end}}
 {{if eq .Meta.State "failed"}}
 <div class="callout callout-danger mt-4" role="alert">{{template "icon" "alert-circle"}}
 <p class="callout-title">{{or (causeLabel .FailureCause) "Couldn't fetch this page"}}</p>
@@ -149,6 +150,26 @@ a poll; no live role.
 {{- else if eq .Outcome "updated"}}<p class="job-outcome">Updated: <a id="doc-reload" href="{{documentHref .DocumentID}}">reload</a></p>{{end}}
 {{- end -}}
 </div>
+{{- end}}
+
+{{/*
+Where the latest rebuild put the document, a DocumentPlace: in an area's
+interest, a loose fit of one, in Unsorted with the interest it is nearest,
+or placed since into an interest or Unsorted. Each name is on one line,
+cut, whole on hover, linking to its page.
+*/}}
+{{define "doc-place" -}}
+<p class="doc-place {{fitClass .Fit}}">{{template "icon" "sparkles"}}<span class="where">
+{{- if eq .Fit "loose"}}Loose fit of {{template "place-path" .}}
+{{- else if eq .Fit "unsorted"}}In <a href="{{unsortedHref 1 ""}}">Unsorted</a>{{if .Nearest.ID}} · nearest {{template "interest-ref" .Nearest}}{{end}}
+{{- else if eq .Fit "new"}}New since the last rebuild: in {{if .Interest.ID}}{{template "place-path" .}}{{else}}<a href="{{unsortedHref 1 ""}}">Unsorted</a>{{end}}
+{{- else}}In {{template "place-path" .}}{{end -}}
+</span></p>
+{{- end}}
+
+{{/* A DocumentPlace's interest, after its area when it has one. */}}
+{{define "place-path" -}}
+{{if .Area.ID}}{{template "interest-ref" .Area}} › {{end}}{{template "interest-ref" .Interest}}
 {{- end}}
 
 {{/* A failed document's whole error, one click away. */}}

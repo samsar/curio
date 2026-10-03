@@ -35,6 +35,12 @@ const changedEvent = "curio:changed"
 // flight.
 const pollEvery = 2 * time.Second
 
+// idlePollEvery is how often the Interests poll while no rebuild is in
+// flight: the scheduler checks once a minute, and may queue a rebuild at
+// any check, so an open page learns of it within half a check of the
+// queue's taking it.
+const idlePollEvery = 30 * time.Second
+
 // Trigger is the poller's hx-trigger.
 func (p Poller) Trigger() string {
 	var on []string

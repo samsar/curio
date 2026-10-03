@@ -1,0 +1,39 @@
+{{/*
+An area or interest a link names that the latest rebuild doesn't hold, in
+the Interests' frame. A retired one (a 410): when a rebuild retired it
+and what took its documents, each successor linking to its page, one
+retired since marked. An ID nothing knows (a 404): what it may have been.
+Neither is a fault, so neither names a request or the daemon's log.
+*/}}
+{{define "content" -}}
+<div class="page-head"><div class="titles">
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "interests"}}">Interests</a></nav>
+{{with .Retired}}<h1>{{if .Area}}{{template "icon" "layers"}}{{end}}{{.Name}}</h1>
+<p class="lede">{{template "fate" .}}</p>
+{{- else}}<h1>No such interest</h1>
+<p class="lede">Nothing in your interests has the ID <code>{{.ID}}</code>.</p>{{end}}
+</div></div>
+{{with .Retired}}{{with .Successors}}<section class="card mb-4" aria-labelledby="successors">
+<div class="card-head"><h2 id="successors">Where its documents went</h2></div>
+<div class="card-body"><ul class="successors">
+{{range .}}<li>{{template "interest-ref" .InterestRef}}<span class="muted">{{if eq .Event "split"}}split off from it{{else if eq .Event "merged"}}took it in{{else}}took part of it{{end}} · {{count .Shared "document" "documents"}}</span></li>
+{{end}}</ul></div>
+</section>{{end}}
+{{- else}}<div class="card mb-4"><div class="empty">
+<div class="empty-icon">{{template "icon" "search-x"}}</div>
+<h2>It may be an old link</h2>
+<p>It may be from before curio's interests were regrouped by an upgrade, or name one that a rebuild split, merged or dissolved more than {{num .RetentionDays}} days ago, which curio no longer remembers.</p>
+</div></div>{{end}}
+<p><a href="{{navHref "interests"}}">All interests →</a></p>
+{{- end}}
+
+{{/*
+What became of a retired identity, a Retired, in a sentence chosen by
+its successors' events and dated by its retirement.
+*/}}
+{{define "fate" -}}
+{{if eq .Fate "dissolved"}}It dissolved on {{template "date" .RetiredAt}}, its documents going to other interests or to <a href="{{unsortedHref 1 ""}}">Unsorted</a>.
+{{- else if eq .Fate "split"}}It split into these on {{template "date" .RetiredAt}}.
+{{- else if eq .Fate "merged"}}It merged into {{if eq (len .Successors) 1}}this{{else}}these{{end}} on {{template "date" .RetiredAt}}.
+{{- else}}Its documents went to these on {{template "date" .RetiredAt}}.{{end}}
+{{- end}}

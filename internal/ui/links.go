@@ -27,9 +27,20 @@ func interestHref(id string) string { return "/ui/interests/" + url.PathEscape(i
 const PageParam = "page"
 
 // interestsPageHref is page (from 1) of the interests of the rebuild run:
-// a page read from another run says so. The first page carries
-// no number, and no run when run is "".
+// a page read from another run says so. The first page carries no number,
+// and no run when run is "".
 func interestsPageHref(page int, run string) string {
+	return runPageHref(navHref(NavInterests), page, run)
+}
+
+// unsortedHref is page (from 1) of the rebuild run's unsorted documents,
+// named as interestsPageHref names a page of its groups.
+func unsortedHref(page int, run string) string {
+	return runPageHref("/ui/interests/unsorted", page, run)
+}
+
+// runPageHref is page (from 1) at path of a list of the rebuild run's.
+func runPageHref(path string, page int, run string) string {
 	q := url.Values{}
 	if page > 1 {
 		q.Set(PageParam, strconv.Itoa(page))
@@ -38,12 +49,16 @@ func interestsPageHref(page int, run string) string {
 		q.Set(runParam, run)
 	}
 	if len(q) == 0 {
-		return navHref(NavInterests)
+		return path
 	}
-	return navHref(NavInterests) + "?" + q.Encode()
+	return path + "?" + q.Encode()
 }
 
-// interestPageHref is page (from 1) of interest id's members.
+// changesHref is the page of what the latest rebuild changed.
+func changesHref() string { return "/ui/interests/changes" }
+
+// interestPageHref is page (from 1) of interest id's members, or of an
+// area's interests.
 func interestPageHref(id string, page int) string {
 	if page <= 1 {
 		return interestHref(id)

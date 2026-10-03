@@ -8176,6 +8176,17 @@ and reads their members' documents at once: 1.8 ms and 34 KB where the
 table above has 5.8 ms and 63 KB for 50 cards. See "Interests page by
 offset within a run".
 
+**Revised (2026-10-03):** the Interests' poll reads the queue (whether a
+rebuild is queued or running), the latest done run (newer interests to
+offer as a reload) and the interest scheduler's snapshot (held, failing,
+due, current, none), never the newest run of any status: a failure is the
+one `insight_state` counts, so a rebuild that failed before creating a run
+is reported, and a run a shutdown cancelled isn't. The full page no longer
+reads a run for the rebuild at all. The poller polls every 2 seconds while
+a rebuild is in flight and every 30 seconds otherwise, so a rebuild the
+scheduler queues reaches an open page. See "Dashboard: two-level
+interests".
+
 ---
 
 ## Library: a Date saved order lists saves
@@ -8703,6 +8714,16 @@ never change. What changed:
 - The re-read rules are unchanged, plus one: a group missing from the run
   that was read is looked up in the newest done run, then as an identity,
   a 410 if it was retired meanwhile.
+
+**Revised (2026-10-03):** two more of the dashboard's lists page by offset
+within a run: an area's interests, 24 a page, cut from the one read of
+them in Go (`GET /v1/interests/{area}` still lists every one), and
+Unsorted, 50 a page nearest first, whose links name the run as the
+Interests' do; past the last, each is a 404 that keeps the head. A retired
+ID's page is a 410 in the Interests' frame naming its successors, and an
+unknown ID's 404 no longer says the interests were regrouped by an
+upgrade: it may as well name one retired more than 180 days ago, which
+`PruneRetired` deleted. See "Dashboard: two-level interests".
 
 ---
 
@@ -10617,6 +10638,229 @@ packages run together: `internal/insight` 8.3 s and 9.2 s (the heavier
 simulations run in parallel), `internal/jobs` 6.8 s and 7.4 s,
 `internal/store/sqlite` 7.7 s and 8.8 s, `internal/api` 14.8 s and 16.2 s,
 `cmd/curio-daemon` 6.4 s and 6.5 s, `internal/cli` 12.2 s and 13.2 s.
+
+---
+
+## Dashboard: two-level interests
+
+**Decision:** the dashboard shows the two-level interests the engine
+builds (see "Interests: two levels, stable identities, automatic
+rebuilds"), on pages that follow the grouping's places: the Interests
+page (areas, or interests below the area gate), an area's page, an
+interest's page, Unsorted (`/ui/interests/unsorted`), what the latest
+rebuild changed (`/ui/interests/changes`), and a retired or unknown ID's
+page; a document's page says where the latest rebuild put it, and
+Status's health card where automatic rebuilds stand. Rebuild stays the
+only change the pages make, sent by actions.js to `POST
+/v1/interests/rebuild` (no fresh rebuild, Q10).
+
+**In flight from the queue, the rest from the scheduler.** The Interests'
+rebuild line says, first match: the queue's read failed; a rebuild runs,
+since its claim; one is queued, and why a closed queue holds it; then the
+scheduler's snapshot (`Deps.interestsState`, a memory read): held, with
+its reason and `curio reindex --all`; failing, with the error (cut, whole
+on hover) and when it retries; due, with what it waits for; current, when
+it was rebuilt, its kind and the changes against the threshold; none, the
+documents so far against the 20 the first waits for; and nothing for
+unknown, off, or a snapshot of a rebuild queued or running that the queue
+no longer holds. In flight comes from the queue because a click's rebuild
+is in the queue the moment its 202 answers, and the page's poll follows
+that answer, where the snapshot is refreshed by an asynchronous Kick and
+can lag the click by a check or two: a snapshot-only line would answer
+"current" to the click (`TestUI_InterestsClickRace` holds the race: a
+rebuild queued through the API while the fake scheduler still says current
+is "Rebuild queued" on the next poll, its button disabled, polling every
+2 seconds). Each state says what `curio status` says for it
+(`interestsText`): one partial (`interests-state`) words it for the
+Interests' head and for Status's row, in lower case as the rows read, and
+the head capitalizes it in CSS. Rebuild stays enabled while rebuilds are
+held or failing: a rebuild asked for isn't held by drift, and retries a
+failure now.
+
+**Failures are the scheduler's.** The line used to report the newest run
+of any status when it wasn't the one shown. A rebuild that fails before
+creating a run (nothing to group) or that a dead daemon left
+(`RecordAbandoned`) left no failed run to read, so it went unsaid, while a
+run a shutdown cancelled (`FailRun`, which counts no failure) read as "The
+rebuild failed". The snapshot's failing state comes from `insight_state`,
+which counts exactly the failures, so the page reads no run of any status
+any more, and `ui.Rebuild` no longer carries one.
+
+**Two cadences.** The poller polls every 2 seconds while a rebuild is in
+flight by the queue's word or the snapshot's, or a read failed, and every
+30 seconds otherwise (`idlePollEvery`) with insight on: the scheduler
+checks once a minute and may queue a rebuild at any check, which an open
+page would otherwise never learn of, since its poller stopped once nothing
+was in flight. With insight off it polls only after a change. The 30-second
+poll reads the queue and the latest done run: two index reads, about half a
+millisecond (below).
+
+**Reads.** The full page reads the latest done run, its page of groups,
+the placement counts, each card's members (or the areas' interests in
+one read) and their documents at once, and the queue: the newest run is
+no longer read, since the page has just read the latest done one. Its poll
+reads the queue and the latest done run, to offer newer interests as a
+reload, plus the running rebuild's job while one runs; never the
+interests, members, counts or documents. An interest's page reads the
+done run, the group, its run, the counts, its members (and loose fits
+when they are on the page), on its first page alone the documents placed
+into it, their documents in one read, and the lineage and its identities;
+an area's, the same with its interests in one read and their members for
+the page alone. Unsorted reads the done run, its page, the placement
+counts, on its first page alone the placements into Unsorted, and every
+document at once; the changes page the done run, the lineage, the
+identities the run created and retired and those its events name, and
+the nested groups only when it moved an interest; a retired ID the done
+run, the miss, the identity, its successors and theirs.
+`TestUI_InterestsReads`, `TestUI_UnsortedReads`, `TestUI_ChangesReads`,
+`TestUI_GoneReads` and `TestUI_DocumentReads` pin each.
+
+**An area's interests are paged in Go.** An area's page shows 24 of its
+interests a page, as the Interests page shows groups, under the shared
+pager; a page past the last is a 404 that keeps the head and reads no
+member. `describe` reads every interest of the area in one read, which the
+count and the area's new documents need anyway, then lists members for
+the page's window alone (`interestOpts.Window`, which only the page
+sets): `GET /v1/interests/{area}` still lists every one, and the spec is
+unchanged. An area of the owner's library holds at most 12 interests, so
+paging costs nothing measurable there; it bounds the page for a library
+that grows an area of hundreds.
+
+**The coverage bar.** Four parts, over the run's documents and those
+placed since (`NumDocuments + NumNew`): members (`NumDocuments −
+NumLoose − NumUnsorted`, never below 0) in the accent, loose fits in the
+accent's border colour, new since the rebuild in the neutral dot, and
+unsorted as the track's remainder; the legend follows in the bar's order,
+the loose fits and new documents only when there are any. The tones are a
+fixed Go set (`CoveragePart`), each a `fill-`/`swatch-` class over
+app.css's tokens. `GET /v1/interests` gains `num_new_unsorted`, the
+placements into Unsorted, from the `PlacementCounts` read the list makes
+already, for Unsorted's card; no endpoint reads more.
+
+**Areas, Unsorted and what changed.** An area's card names its five
+largest interests, each cut on one line with its size and a bar scaled to
+the largest (a largest of 0 draws only the track), and ends "+ N more
+interests →", or "All N interests →" when it lists them all. Unsorted's
+card closes the last page of groups (or stands alone on a run without
+any), leading to Unsorted's first page of the run shown. For a week after
+a rebuild that split, merged or dissolved interests (the handler compares
+its finish with now: templates do no time math), a note counts them and
+leads to the changes. An interest's page carries a lineage note, a line
+an event, dated by the run's finish, each identity linked; one the
+rebuild only kept says nothing, since the run before is pruned and what
+it gained and lost can't be told. The changes page lists the run's events
+under a heading a kind, areas first; it links retired identities too,
+whose page says what became of them.
+
+**A retired or unknown ID is no fault.** A retired identity's 410 and an
+unknown one's 404 are pages in the Interests' frame, Interests current,
+with no request ID or "see `curio daemon logs`", which read as a fault for
+an expected answer. The 410 names the identity, says in one sentence,
+chosen by its successors' events and dated by its retirement in local
+time, whether it split into them, merged into one or more, went to both,
+or dissolved (its documents going to other interests or to Unsorted), and
+lists the successors, each linked, a successor retired since marked. The
+404 claimed interests "were regrouped when curio was upgraded", which is
+false for an identity `PruneRetired` deleted after
+`insight.RetiredRetention` (180 days): it now names both possibilities
+without asserting either, the days computed from the constant. A 500 from
+the read stays the error page, and the JSON 410 and 404 problems are
+unchanged.
+
+**A document's place: one read, the page's alone.** The design scopes the
+line to the dashboard ("A document's place in the current run | Document
+page | Both primary keys"). `InsightStore.DocumentPlace` reads it in one
+statement: from the run's row, the document's assignment and placement,
+each interest's group in the run for its area, and the labels, every
+table sought by its primary key (pinned, no SCAN). The page reads the
+latest done run, then the place; no run or no place is no line, and a
+failed read is logged once and left out. The document's JSON, which the
+CLI and MCP share, leaves it out; a later change can add it to `/v1`.
+
+**Tests.** The rule suites cover every new route, page, partial, link
+builder and state: routes, security headers (with an area's page past the
+last, Unsorted past the last and not a number, changes, a retired and an
+unknown ID), GET-only, the crawl that writes nothing (the new pages, every
+line kind, their polls), every template with hostile samples (labels with
+markup, 300 characters without a break and a right-to-left override),
+navigation, live regions in every rebuild state, the stylesheet's new
+columns, folds and cuts, icons and links. `apitest` gains merges,
+dissolutions, moves and a rebuild that changes nothing beside splits. The
+e2e test that imports 20 pages now serves them on five topics, four pages
+each, so the first grouping finds interests, and GETs the Interests, an
+interest's page, Unsorted and the changes from the real daemon.
+
+**Measured** on a throwaway daemon over a copy of the owner's library
+(`sqlite3 'file:…?immutable=1' ".backup …"`, schema 15, 5,254 fetched
+documents), in the state the browser check below left it (a warm rebuild:
+30 areas, 166 interests, 406 unsorted, the queue paused), Ollama
+unreachable, median of 21 curl timings after one warm-up, before (cb81804)
+and after on the same machine and copy:
+
+| Request | Before | After |
+|---|---|---|
+| `/ui/interests` | 1.61 ms, 36.7 KB | 1.94 ms, 66.5 KB |
+| its page 2 | 0.74 ms, 10.1 KB | 0.81 ms, 14.6 KB |
+| the largest area's page | 1.09 ms, 12.2 KB | 1.10 ms, 13.2 KB |
+| the largest interest's page (115 members) | 1.42 ms, 28.4 KB | 1.40 ms, 29.3 KB |
+| its page 2 | 1.42 ms, 29.4 KB | 1.36 ms, 30.4 KB |
+| `/ui/interests/unsorted` | (no page) | 1.45 ms, 45.9 KB |
+| `/ui/interests/changes` | (no page) | 1.35 ms, 11.5 KB |
+| a document's page | 42.8 ms, 9.1 KB | 43.7 ms, 9.8 KB |
+| `/ui/interests?poll=rebuild` | 0.42 ms, 3.7 KB | 0.43 ms, 3.9 KB |
+| `/ui/status?poll=health` | 0.47 ms, 5.1 KB | 0.48 ms, 5.4 KB |
+| `GET /v1/interests` | 4.85 ms, 217 KB | 4.63 ms, 217 KB |
+
+Both targets hold: the Interests under 3 ms, an interest's page under 2
+ms. The Interests' 30 KB more are the area cards' bars, 120 SVGs of about
+230 bytes; a document's page is its related documents' vector search, as
+before, and its place one primary-key read.
+
+**Checked in a browser.** Headless Chrome through the DevTools protocol
+at 1440 and 390 px, light and dark, against binaries built by `make build
+BIN_DIR=<scratch>` from the branch, on a scratch `CURIO_HOME` (the owner's
+marker, a free loopback port, `insight.labeling: terms`, auto-pull off,
+both Ollama URLs on a dead loopback port) over that copy, its 20 pending
+jobs failed first so nothing was fetched; never `~/.curio`, port 8765 or a
+checkout's `./bin`. 262 fetched documents (Python `random.Random(1).sample`
+of this copy's sorted fetched IDs) were held out as pending before the
+first start, which applied 016 and 017 and said the first grouping was
+due; `curio interests rebuild` grouped the rest fresh (31 areas, 177
+interests, 4,992 documents). A hostile area and interest label were then
+seeded (markup, 270 characters without a break, a U+202E override), the
+262 set back to fetched with `indexed_at` now, and the queue paused: once
+the drift check's grace passed (Ollama down, ten minutes), the start's
+sweep placed all 262 (176 into interests, 86 into Unsorted), and the
+scheduler queued a rebuild behind the paused queue. Resumed, it ran warm
+(trigger auto, 262 changed): 30 areas, 166 interests, 164 kept, 13 merged,
+5 moved, 2 new. The pages: the Interests with the first grouping due,
+due with a run, queued ("Rebuild queued · the queue is closed: Paused",
+the button disabled), rebuilding and ready (one page left open through
+the rebuild, in each width: "Rebuilding · started just now" after 2.5 s,
+then "New interests are ready: reload" with the current line, from its
+own polls), and current with the week's note; its pages 1, 2 and past
+the last; the largest area's page; an interest with its new band, its
+page 2, one with a loose fit under its heading, one that took in three
+others and moved; Unsorted's pages 1, 2 and past the last, with its new
+arrivals; the changes after the first grouping and after the warm
+rebuild; a merged interest's and a merged area's 410; an unknown ID's
+404; a document's page for a member, a loose fit, an unsorted document
+and two placed since; Status; and the search home. The held and failing
+lines, with a 300-character hostile reason and error, were checked on the
+Interests and Status through an uncommitted overlay build that faked the
+snapshot, on a copy of the home. On every page: no CSP violation or
+script error, no sideways scroll at 390, no element outside its card, no
+inline script; long labels cut on one line with the whole on hover; the
+phone's pager read Previous · "Page N of M" · Next. The check caught one
+defect, fixed here: a name cut on one line is an atomic inline, so a
+line that held it in running text with `white-space: nowrap` (Unsorted's
+nearest interest folded under a phone's document name, and a document's
+place line) dropped the whole name for an ellipsis; both now lay their
+words and names out as flex items, which shrink and cut the name.
+
+**Test times** under `-race` on an M4 Max, each package alone, before and
+after: `internal/api` 16.2 s and 18.1 s (the new pages' tests start about
+25 more servers), `internal/ui` 49.5 s and 52.5 s.
 
 ---
 
