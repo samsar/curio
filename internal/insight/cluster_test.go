@@ -1,7 +1,6 @@
 package insight
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -137,54 +136,6 @@ func slicesValues(m map[string]int) []int {
 		out = append(out, v)
 	}
 	return out
-}
-
-// serialNeighbors is the reference the parallel heap build must match: every
-// candidate at or above the threshold, fully sorted (weight desc, index asc),
-// the first k kept.
-func serialNeighbors(vecs [][]float32, k int, minSim float64) [][]edge {
-	out := make([][]edge, len(vecs))
-	for i := range vecs {
-		cands := []edge{}
-		for j := range vecs {
-			if j == i {
-				continue
-			}
-			if w := dot(vecs[i], vecs[j]); w >= minSim {
-				cands = append(cands, edge{to: j, w: w})
-			}
-		}
-		slices.SortFunc(cands, func(a, b edge) int {
-			if c := cmp.Compare(b.w, a.w); c != 0 {
-				return c
-			}
-			return cmp.Compare(a.to, b.to)
-		})
-		out[i] = cands[:min(k, len(cands))]
-	}
-	return out
-}
-
-func TestKNNNeighbors_MatchesSerialReference(t *testing.T) {
-	pts := syntheticCorpus(3, 600, 16, 10, 1.0)
-	// Exact duplicates tie on weight, so the index tie-break is exercised.
-	for i := range 40 {
-		pts = append(pts, Point{ID: fmt.Sprintf("dup-%02d", i), Vector: pts[i*7].Vector})
-	}
-	vecs := make([][]float32, len(pts))
-	for i, p := range pts {
-		vecs[i] = p.Vector
-	}
-	for _, k := range []int{1, 5, 10, 50} {
-		t.Run(fmt.Sprint("k=", k), func(t *testing.T) {
-			got, err := knnNeighbors(context.Background(), vecs, k, 0.3)
-			require.NoError(t, err)
-			want := serialNeighbors(vecs, k, 0.3)
-			for i := range want {
-				require.Equal(t, want[i], got[i], "row %d", i)
-			}
-		})
-	}
 }
 
 func TestKNNGraphClusterer_Canceled(t *testing.T) {

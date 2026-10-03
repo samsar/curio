@@ -78,9 +78,13 @@ build:
 	$(GO) build -trimpath -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/ ./cmd/...
 
 ## test: run unit tests under -race (no network, no Ollama)
+# The grouping's property tests skip under -race (each runs the whole
+# pipeline many times, single-threaded, at ten times the CPU), so the
+# insight packages run a second time without it.
 .PHONY: test
 test:
 	$(GO) test -race -count=1 -tags=$(GOTAGS) ./...
+	$(GO) test -count=1 -tags=$(GOTAGS) ./internal/insight/...
 
 ## test-integration: run integration tests (needs network; fetches live sites)
 .PHONY: test-integration
