@@ -154,6 +154,7 @@ when the entry was first committed.
 - 2026-09-30 — [Embedding drift: verified by re-embedding a sample](#embedding-drift-verified-by-re-embedding-a-sample)
 - 2026-10-02 — [Interests: corrections that teach the grouping (deferred)](#interests-corrections-that-teach-the-grouping-deferred)
 - 2026-10-02 — [Soft-404 titles: whole templates, not phrases](#soft-404-titles-whole-templates-not-phrases)
+- 2026-10-03 — [Louvain: ours, warm-started; gonum as a test oracle](#louvain-ours-warm-started-gonum-as-a-test-oracle)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -9639,6 +9640,200 @@ time before the daemon is ready, all for 17 documents.
   for doesn't exist: designing better 404 pages"). Such a page is judged
   dead. None is among the 5,203 stored titles; the title alone can't tell
   them from a site's not-found page.
+
+---
+
+## Louvain: ours, warm-started; gonum as a test oracle
+
+**Decision:** the interests rework groups with its own Louvain,
+`internal/insight/louvain`, for fresh and warm passes alike, and gonum's
+`community.Modularize` is only a test oracle, imported from `_test.go`
+files and denied to the binaries by depguard. The grouping library around
+it (`internal/insight`: `Grouper`, `LouvainGrouper`, `FlatGrouper`, the
+merge, the strays, carry-over, placement; `internal/insight/quality`) is
+built and tested, and nothing in the daemon calls it yet: the engine still
+runs `KNNGraphClusterer`.
+
+**Why ours:**
+
+- **The warm start.** A rebuild starts from the previous grouping's
+  communities, which is what keeps names across rebuilds; gonum takes no
+  starting partition.
+- **Speed.** On the owner's library (5,254 documents) both levels take
+  9.8 ms fresh and 9.6 ms warm with the split check, against gonum's
+  263 ms.
+- **No dependency in the binary.** The package imports the standard
+  library only (depguard `louvain-stdlib-only`), and `go list -deps
+  ./cmd/...` names no gonum package.
+
+**The algorithm** (package doc of `louvain`):
+
+- **Objective:** Newman-Girvan modularity with resolution γ; local moving
+  in a seeded permutation per level, then aggregation, until a level merges
+  nothing.
+- **Fixpoint.** The top level of a multi-level result is not a local
+  optimum of the first level, so a warm start from it moves nodes. In the
+  review of this change, a warm rebuild of an unchanged 2,000-document
+  two-level fixture gave interest ARI 0.86 to 0.90 and kept 95 to 97% of
+  names, on 4 fixtures of 4. `Run` restarts from its own result until a
+  restart changes nothing, so `Run(g, r) = r` for every result r: an
+  unchanged library rebuilds into the identical grouping, and names kept
+  after 5% added rose from 94.9% (worst 83.8%) to 97.6% (worst 94.7%) in
+  that review. Every restart that changes the partition raises modularity,
+  so the loop ends; it cost about 0.6 ms at 5,000 nodes there.
+- **Ties:** a node moves only when its best community beats staying by
+  more than `GainTolerance` (1e-12, in edge-weight units: the modularity
+  gain times half the total degree); candidates are compared in ascending
+  community number, so the smallest wins.
+- **Start rule:** with a starting partition, a node without one starts in
+  the community it is most strongly connected to among those already
+  assigned (node order, ties to the smallest), or alone; a node without
+  edges is always alone, since no move changes modularity for it.
+- **Caps:** 100 local-moving passes per level and 20 restarts. Each is
+  reported in `Stats`; a Group call that hits one logs one WARN naming the
+  pass (area, interest or flat), its node count and the cap.
+- **The split check** (`RefineSplit`) runs Louvain inside each community
+  alone, each node keeping its full degree and the graph its total degree,
+  and keeps a split only when it raises modularity by more than the
+  tolerance; the grouper runs Louvain again from its result. The research
+  code's "largest part keeps the community's number" had no effect (its
+  output was renumbered by first member), so it is gone.
+- **Validation:** `NewGraph` rejects a neighbour out of range, a
+  self-loop, a row not strictly ascending, a weight that isn't positive
+  and finite, and an edge without the same weight back (`ErrInvalidGraph`);
+  `Run` rejects a starting partition of the wrong length and a resolution
+  that isn't finite and positive, and returns ctx's error, no partial
+  result, when ctx ends.
+
+**The oracle.** On the graphs a grouping cuts at the shipped settings (the
+area graph and each area's subgraph at γ = 1, the flat graph at r(n) for
+35, 300, 1,000 and 2,000 documents; 27 graphs over two fixtures),
+`TestLouvain_MatchesGonum` holds |Q_ours − Q_gonum| ≤ 0.01. Measured: at
+most 0.0087, ours above gonum's (the restarts polish a partition), and at
+most 0.0058 below. `quality`'s modularity delegates to
+`louvain.Modularity`, which matches gonum's `community.Q` to 1e-9.
+
+**One neighbour pass serves both shapes.** A grouping makes one O(n²·d)
+pass for every point's 20 nearest neighbours of positive similarity; the
+flat graph is the union of those lists, the area graph the union of each
+list's first 10 at cosine 0.40 or above, which is exactly the top-10 graph
+(tested edge for edge against two separate builds). The gate between the
+shapes needs the area pass's coverage on that graph, so it lives in the
+grouper: `GroupInput.Shape` is the shape the previous grouping had (the
+hysteresis state) and `Grouping.Shape` the shape produced; a grouping
+whose shape changed was computed fresh.
+
+**The merge repeats until nothing joins.** One pass over centroids can
+leave a pair at the threshold: A and B at 0.86 join, and their joined
+centroid reaches D at 0.871, which neither did at 0.84. `MergeNearDuplicates`
+repeats with the joined centroids until a round joins nothing. It changes
+nothing on the owner's library, where one pass already takes the fresh
+grouping's 3 strict pairs to none (190 interests to 187). Seeds are the
+communities before the merge, so a warm start re-derives the merge.
+
+**Carry-over** (`Carry`) passes an identity only by the 70% rule (integer
+comparisons, 10·shared > 7·size; successors at 4·shared ≥ size). A new
+group that took no old group above 70% is a new identity, whatever merged
+into it; a merge needs no input of its own, since it shows as one new group
+taking 25% or more of two old groups. Per old group the flags (kept, moved,
+split, merged, dissolved) aren't exclusive. "Moved" needs areas on both
+sides, so a change of shape never moves anything. `quality.Inherit` is an
+adapter over it.
+
+**Measured on a copy of the owner's library** (5,254 documents, schema
+15, the copy read with `DocumentVectors` and nothing else, never `~/.curio`
+or the daemon):
+
+- **`KNNGraphClusterer` unchanged.** At k 10, 0.5 and minimum 3 it
+  reproduces the stored run `e6020c71` exactly (325 interests).
+- **(a) A fresh grouping**, ours against gonum on the same graphs: 30
+  areas against 29; 190 interests against 188, 187 against 185 after the
+  merge; mean interest cohesion 0.645 against 0.655 (0.641 and 0.651 after
+  the merge); area modularity 0.833 against 0.830; 92.3% of documents in an
+  interest, 3 loose fits, 402 unsorted. The research measured ours at 31
+  and 193 with cohesion 0.646. Times: the neighbour pass 1.98 s, Group
+  without it 24 ms (23 ms warm with the split check), the merge and strays
+  0.10 s: a grouping takes about 2.1 s.
+- **(b) Names kept by a warm rebuild** through the whole pipeline, 3 draws
+  each (the research's draws): 5% added, 96.2% of interests and 97.8% of
+  areas (worst 95.4% · 96.6%); 5% mixed, 94.3% · 95.6% (worst 93.1% ·
+  93.3%). The research measured 93% · 97% and 93% · 94%.
+- **(c) A topic arriving all at once.** Held out by a fixed rule (the fresh
+  grouping's interests at the 25th, 50th and 75th size percentile of those
+  with 20 members or more: 25, 34 and 46 documents; the area nearest the
+  median size: 152), grouped without it, then added back in one change.
+  Recovery is the share of the topic in interests where it is the majority;
+  the fresh grouping recovers each fully, since each is one of its
+  interests:
+
+  | Held out | Beside neighbours | + split check | Alone | + split check |
+  |---|---|---|---|---|
+  | 25 documents | 0.00 | 0.00 | 0.00 | 0.00 |
+  | 34 documents | 0.00 | 0.97 | 0.97 | 0.97 |
+  | 46 documents | 0.00 | 0.80 | 0.80 | 0.80 |
+  | 152 documents (an area) | 0.82 | 0.90 | 0.92 | 0.92 |
+
+  Names kept in these cases were the same or higher with "alone", and on
+  (b)'s draws starting new documents alone kept 96.8% · 99.0% (added) and
+  94.1% · 95.6% (mixed). The rule fixed before measuring adopts "alone" only if it
+  reaches 0.9 of the fresh recovery on every hold-out; it doesn't (0.00 and
+  0.80), so the strongest-neighbour start stays. Neither start recovers the
+  25-document topic: on the warm start its documents settle in another area
+  than the fresh grouping gives them and 23 of 25 join an interest of 87
+  there, and the split check doesn't part them. The split check does
+  recover the 34- and 46-document topics under either start, so a split
+  check triggered by growth (any group grown by more than half since its
+  last check) would bring that forward; it is not built.
+- **(d) Visiting order:** a seeded hash of the document ID (FNV-1a,
+  aggregated nodes taking their smallest key) against the seeded
+  permutation. Fresh: 32 areas and 198 interests, cohesion 0.006 higher
+  (beyond the 0.005 the rule allows), area modularity 0.0002 lower. Names
+  kept, hash against permutation: fresh after 5% added 74.9% · 80.4%
+  against 73.8% · 82.4%; warm added 95.8% · 97.8% against 96.2% · 97.8%;
+  warm mixed 95.0% · 94.9% against 94.3% · 95.6%. Lower in three of six,
+  so the permutation stays.
+- **(e) r(n)** with ours on the research's draws (10 per size, each
+  prepared alone), interests mean (range), gonum on the same graphs after:
+  35 documents 4.5 (3–6) against 4.1 (3–6); 100, 5.0 (4–6) against 5.1
+  (4–7); 300, 11.2 (9–13) against 11.3 (10–13); 1,000, 26.5 (25–31)
+  against 26.2 (21–30). Coverage 100% throughout, every draw flat (1,000
+  random documents stay under the area gate's 80%), and no draw of 35
+  gives none.
+
+**The fixture** (`fixture_test.go`): 2,000 seeded documents in 8 areas of
+3 to 8 topics of skewed sizes, a planted near-duplicate pair of topics
+(centroid cosine about 0.94), 8% generalists in a separate subspace that
+end up unsorted, and a common offset so centering matters. The stability
+properties run on it through the whole pipeline, each threshold the
+design's target, with its measured value:
+
+| Property | Threshold | Measured |
+|---|---|---|
+| Unchanged library, warm (also from a split run) | identical, every name | identical, 100% · 100% |
+| 5% added, names kept (mean of 3) | ≥ 90% · ≥ 90% | 96.3% · 100% |
+| 5% mixed, names kept (mean of 3) | ≥ 90% · ≥ 88% | 93.2% · 96.7% |
+| Chain 60% → 100%, split every 4th: interests, cohesion against fresh | within 10%, within 0.03 | 33 against 36 (−8.3%), −0.002 |
+| The same chain without the split check | fewer interests | 31 |
+| No pair at 0.85 within a scope after the merge | none | none (7 joined, the planted pair among them) |
+| Placement keeps every name | 100% | 100% |
+| 35 documents of 4 topics, 10 seeds | ≥ 2 interests each | 4 each |
+| Shuffled input, fresh, warm, warm with the split check | identical per document | identical |
+
+Each mechanism was disabled once to see its property fail: ignoring the
+prior (names kept fall to 86.8% and 83.2%), skipping the restarts (the
+unchanged library moves), never splitting (the chain ends at 31 against
+31), one merge pass (a pair at 0.85 is left). Under -race the package's
+tests take about 25 s on an M4 Max; `make test` went from 62 s to 66 s.
+
+**Benchmarks** (Apple M4 Max, 16 cores; `bench_test.go` in both
+packages): on a synthetic 5,000 × 1,024 library (132 areas and about 450
+interests, more than the owner's library makes), the neighbour pass
+1.70 s; Group with the merge and strays 1.80 s fresh and 1.81 s warm with
+the split check (under the 3 s budget); Group without the pass 17 ms
+fresh, 18 ms warm with the split check (both Louvain levels and the graph
+cuts, under the 50 ms budget for Louvain); the merge and strays 69 ms.
+`louvain.Run` on a 5,000-node area graph: 4.3 ms fresh, 1.1 ms warm,
+4.7 ms warm with the split check and the run after it.
 
 ---
 
