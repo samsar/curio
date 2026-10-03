@@ -13,6 +13,12 @@
 //
 //	sqlite3 -readonly ~/.curio/curio.db ".backup copy.db"
 //	clusterreport -db copy.db [-json report.json] [-draws 3] [-seed 0]
+//
+// A read-only open needs the database's -shm file, which a daemon that
+// stopped cleanly removed with its WAL; the main file then holds
+// everything, and an immutable open copies it:
+//
+//	sqlite3 "file:$HOME/.curio/curio.db?immutable=1" ".backup copy.db"
 package main
 
 import (
@@ -114,7 +120,7 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 // measurement succeeded.
 func measureAndReport(ctx context.Context, opts options, stdout io.Writer, log *slog.Logger) error {
 	if opts.json != "" {
-		if err := checkOutputDir(opts.json); err != nil {
+		if err := checkOutput(opts.json); err != nil {
 			return err
 		}
 	}
@@ -140,9 +146,16 @@ func measureAndReport(ctx context.Context, opts options, stdout io.Writer, log *
 	return nil
 }
 
-// checkOutputDir fails unless the JSON file's directory exists, before
-// minutes of measuring.
-func checkOutputDir(path string) error {
+// checkOutput fails, before minutes of measuring, unless the JSON file
+// can take its place: its directory exists, and the path isn't a directory
+// itself, which the final rename can't replace.
+func checkOutput(path string) error {
+	switch info, err := os.Stat(path); {
+	case err == nil && info.IsDir():
+		return fmt.Errorf("the -json file %s is a directory", path)
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("the -json file: %w", err)
+	}
 	dir := filepath.Dir(path)
 	info, err := os.Stat(dir)
 	if err != nil {

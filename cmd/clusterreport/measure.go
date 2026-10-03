@@ -261,18 +261,26 @@ func freshOf(gp *grouping) freshReport {
 // (NoiseLabel for none).
 func levelOf(vecs [][]float32, labels []int) level {
 	groups := quality.Groups(labels)
-	l := level{Groups: len(groups), Coverage: quality.Coverage(labels), Sizes: quality.SizesOf(groups, len(labels))}
-	if len(groups) > 0 {
-		l.Cohesion = new(quality.CohesionOf(vecs, groups, quality.Centroids(vecs, groups)).Mean)
-	}
+	l := level{Groups: len(groups), Coverage: quality.Coverage(labels), Sizes: quality.SizesOf(groups, len(labels)),
+		Cohesion: meanCohesion(vecs, groups)}
 	if len(groups) > 1 {
 		l.Silhouette = new(quality.Silhouette(vecs, labels))
 	}
 	return l
 }
 
+// meanCohesion is the mean cohesion of groups, nil without any.
+func meanCohesion(vecs [][]float32, groups [][]int) *float64 {
+	if len(groups) == 0 {
+		return nil
+	}
+	return new(quality.CohesionOf(vecs, groups, quality.Centroids(vecs, groups)).Mean)
+}
+
 // cohesionOf is a grouping's mean interest cohesion, nil without interests.
-func cohesionOf(gp *grouping) *float64 { return levelOf(gp.vectors(), gp.g.Interest).Cohesion }
+func cohesionOf(gp *grouping) *float64 {
+	return meanCohesion(gp.vectors(), quality.Groups(gp.g.Interest))
+}
 
 // nearDuplicatesOf counts the pairs of g's interests whose centroids are
 // near-duplicates: at the merge's threshold within one area (none should

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
 )
@@ -84,13 +86,17 @@ func TestRun_Usage(t *testing.T) {
 	}
 }
 
-// snapshot is a directory's files with their contents.
+// snapshot is a directory's files, not its subdirectories, with their
+// contents.
 func snapshot(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	out := map[string]string{}
 	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
 		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		require.NoError(t, err)
 		out[e.Name()] = string(data)
@@ -114,6 +120,7 @@ func TestRun_RefusesAHome(t *testing.T) {
 		assert.Empty(t, stdout)
 		assert.Contains(t, stderr, "daemon.pid")
 		assert.Contains(t, stderr, `sqlite3 -readonly `+path+` ".backup <copy>"`)
+		assert.Contains(t, stderr, `sqlite3 'file:`+path+`?immutable=1' ".backup <copy>"`, "for a stopped daemon's")
 	}
 	assert.Equal(t, before, snapshot(t, home), "no database, -wal, -shm or JSON file written beside it")
 	after, err := os.Stat(db)
@@ -127,6 +134,30 @@ func TestRun_RefusesAMissingDatabase(t *testing.T) {
 	assert.Equal(t, exitFailure, code)
 	assert.Contains(t, stderr, "no such file")
 	assert.Empty(t, snapshot(t, dir), "nothing created in its place")
+}
+
+// TestRun_RefusesAnUnusableJSONPath: a -json path the report couldn't
+// write at the end is refused before the database is opened.
+func TestRun_RefusesAnUnusableJSONPath(t *testing.T) {
+	dir := t.TempDir()
+	db := newCopy(t, dir, "copy.db", 1, sameVector)
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "reports"), 0o700))
+	before := snapshot(t, dir)
+	cases := []struct {
+		name, json, says string
+	}{
+		{"a directory", filepath.Join(dir, "reports"), "is a directory"},
+		{"in a missing directory", filepath.Join(dir, "missing", "report.json"), "no such file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runReport(context.Background(), "-db", db, "-json", tc.json)
+			assert.Equal(t, exitFailure, code)
+			assert.Empty(t, stdout)
+			assert.Contains(t, stderr, tc.says)
+			assert.Equal(t, before, snapshot(t, dir), "the database untouched, nothing written")
+		})
+	}
 }
 
 func TestRun_WritesNoJSONOnFailure(t *testing.T) {
@@ -194,4 +225,63 @@ func TestRun_DegenerateLibrary(t *testing.T) {
 		assert.True(t, slices.Contains([]string{"copy.db", "copy.db-wal", "copy.db-shm", "report.json"}, name),
 			"no temporary file left: %s", name)
 	}
+}
+
+// TestRun_FlatLibrary runs the whole report on a library small enough for
+// the flat shape, whose latest run the engine made: every section measures
+// interests, every area is n/a, and the stored run is the report's fresh
+// grouping.
+func TestRun_FlatLibrary(t *testing.T) {
+	dir := t.TempDir()
+	lib := newSynthetic(300, 1)
+	db := newCopy(t, dir, "copy.db", len(lib.docs), func(i int) []float32 { return lib.docs[i].Vector })
+	runID := firstRebuild(t, db)
+	out := filepath.Join(dir, "report.json")
+
+	code, stdout, stderr := runReport(context.Background(), "-db", db, "-json", out, "-draws", "1")
+	require.Equal(t, exitOK, code, stderr)
+	assert.Contains(t, stdout, "Fresh grouping of the whole library: flat shape")
+	assert.Contains(t, stdout, "Stored run "+runID+": trigger first, fresh, flat shape")
+	assert.Contains(t, stdout, "identical: true")
+
+	raw, err := os.ReadFile(out)
+	require.NoError(t, err)
+	var rep report
+	require.NoError(t, json.Unmarshal(raw, &rep))
+	assert.Equal(t, insight.ShapeFlat, rep.Fresh.Shape)
+	assert.Nil(t, rep.Fresh.Areas)
+	assert.Positive(t, rep.Fresh.Interests.Groups)
+	assert.Positive(t, rep.Baseline.Interests.Groups)
+	for name, k := range map[string]kept{
+		"warm, added": rep.Warm.Added.Mean, "warm, mixed": rep.Warm.Mixed.Mean, "fresh rebuild": rep.FreshRebuild.Mean,
+		"chain, split checks": rep.Chain.SplitSteps.Mean, "chain, other steps": rep.Chain.OtherSteps.Mean,
+	} {
+		assert.NotNil(t, k.Interests, name)
+		assert.Nil(t, k.Areas, "%s: no areas to keep in the flat shape", name)
+	}
+	assert.Len(t, rep.Chain.Steps, chainSteps+1)
+	assert.NotNil(t, rep.Chain.WorstGap)
+	require.NotNil(t, rep.StoredRun)
+	ag := rep.StoredRun.Agreement
+	assert.Equal(t, len(lib.docs), ag.Shared)
+	assert.Nil(t, ag.AreasARI)
+	assert.True(t, ag.Identical, "the engine's run is the report's fresh grouping")
+}
+
+// firstRebuild runs the engine's first rebuild, with term labels, on the
+// database at path, and returns the run's ID.
+func firstRebuild(t *testing.T, path string) string {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, path)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+	width, err := sqlite.VectorIndexWidth(ctx, db)
+	require.NoError(t, err)
+	quiet := slog.New(slog.DiscardHandler)
+	engine := insight.New(sqlite.NewDocuments(db), sqlite.NewChunks(db, width), sqlite.NewInsights(db),
+		insight.NewLouvainGrouper(quiet), nil, insight.Config{Labeling: insight.LabelingTerms, Center: true}, quiet)
+	id, err := engine.Rebuild(ctx, store.LocalTenantID, store.RunTriggerFirst)
+	require.NoError(t, err)
+	return id
 }

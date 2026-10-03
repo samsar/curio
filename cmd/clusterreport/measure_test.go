@@ -94,6 +94,24 @@ func handGrouping(area, interest []int) *grouping {
 	return &grouping{ids: ids, g: g}
 }
 
+// withFits gives gp's documents their fits: a member of its interest, a
+// loose fit of the interest loose names for it, or unsorted.
+func withFits(gp *grouping, loose map[int]int) *grouping {
+	gp.fits = make([]insight.Fit, len(gp.ids))
+	for i, l := range gp.g.Interest {
+		in, isLoose := loose[i]
+		switch {
+		case l != insight.NoiseLabel:
+			gp.fits[i] = insight.Fit{Kind: insight.FitMember, Interest: l}
+		case isLoose:
+			gp.fits[i] = insight.Fit{Kind: insight.FitLoose, Interest: in}
+		default:
+			gp.fits[i] = insight.Fit{Kind: insight.FitUnsorted, Interest: insight.NoiseLabel}
+		}
+	}
+	return gp
+}
+
 func TestNamesKept(t *testing.T) {
 	const x = insight.NoiseLabel
 	// Two areas of ten, each holding two interests of five; the last
@@ -118,6 +136,15 @@ func TestNamesKept(t *testing.T) {
 		{"an interest split in half", handGrouping(areas, interests),
 			handGrouping(areas, []int{0, 0, 0, 4, 4, 1, 1, 1, 1, x, 2, 2, 2, 2, 2, 3, 3, 3, 3, x}),
 			kept{Interests: share(0.75), Areas: share(1)}},
+		// Interest 0's three members stay together, and the two documents
+		// that fitted it loosely join interest 1. An interest's name follows
+		// its members alone, as the engine's carry-over does: counted with
+		// its loose fits, interest 0 would keep three of five, too few.
+		{"loose fits are not members",
+			withFits(handGrouping(areas, []int{0, 0, 0, x, x, 1, 1, 1, 1, x, 2, 2, 2, 2, 2, 3, 3, 3, 3, x}),
+				map[int]int{3: 0, 4: 0}),
+			handGrouping(areas, []int{0, 0, 0, 1, 1, 1, 1, 1, 1, x, 2, 2, 2, 2, 2, 3, 3, 3, 3, x}),
+			kept{Interests: share(1), Areas: share(1)}},
 		{"flat: no areas to keep", handGrouping(nil, interests), handGrouping(nil, interests),
 			kept{Interests: share(1)}},
 		{"from flat to areas", handGrouping(nil, interests), handGrouping(areas, interests),

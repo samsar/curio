@@ -11,13 +11,12 @@ import (
 // grouping is one rebuild's grouping of a document set, as the engine
 // holds it before carry-over: every slice index-aligned with the points.
 type grouping struct {
-	ids       []string
-	points    []insight.Point
-	raw       insight.Grouping // Group's, before the merge
-	g         insight.Grouping // after the merge
-	merged    int
-	centroids [][]float32
-	fits      []insight.Fit
+	ids    []string
+	points []insight.Point
+	raw    insight.Grouping // Group's, before the merge
+	g      insight.Grouping // after the merge
+	merged int
+	fits   []insight.Fit
 }
 
 // regroup groups dvs as a rebuild does, in Engine.group's and
@@ -55,7 +54,7 @@ func regroup(ctx context.Context, gr insight.Grouper, dvs []store.DocVector, sha
 	for i, p := range points {
 		ids[i] = p.ID
 	}
-	return &grouping{ids: ids, points: points, raw: raw, g: merged, merged: n, centroids: cents, fits: fits}, nil
+	return &grouping{ids: ids, points: points, raw: raw, g: merged, merged: n, fits: fits}, nil
 }
 
 // seeds is the Prior a warm rebuild from this grouping reads: what the

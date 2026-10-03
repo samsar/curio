@@ -95,7 +95,8 @@ func checkCopy(path string) error {
 	}
 	switch _, err := os.Stat(filepath.Join(filepath.Dir(resolved), "daemon.pid")); {
 	case err == nil:
-		return fmt.Errorf("%w; take one with: sqlite3 -readonly %s \".backup <copy>\"", errLiveHome, path)
+		return fmt.Errorf("%w; take one with: sqlite3 -readonly %s \".backup <copy>\" (or, if its daemon is "+
+			"stopped and that fails, sqlite3 'file:%s?immutable=1' \".backup <copy>\")", errLiveHome, path, path)
 	case !errors.Is(err, os.ErrNotExist):
 		return fmt.Errorf("look for daemon.pid beside the database: %w", err)
 	}

@@ -102,7 +102,9 @@ test-e2e:
 # A developer's tool: go run, so nothing lands in ./bin. It migrates the
 # database it reads and refuses a home's own (a directory holding
 # daemon.pid); take a copy with sqlite3 -readonly ~/.curio/curio.db
-# ".backup <copy>". See cmd/clusterreport.
+# ".backup <copy>", or with the daemon stopped, sqlite3
+# "file:$HOME/.curio/curio.db?immutable=1" ".backup <copy>". See
+# cmd/clusterreport.
 .PHONY: cluster-report
 cluster-report:
 	@test -n "$(DB)" || { echo 'usage: make cluster-report DB=<copy of curio.db> [JSON=<file>] [DRAWS=n] [SEED=n]' >&2; exit 2; }

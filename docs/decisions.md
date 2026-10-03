@@ -10701,9 +10701,13 @@ on a `.backup` copy of a home's database. It opens the copy through the
 SQLite store and migrates it, its only write (a 2.4 home's copy is at
 schema 15). Before opening anything it refuses a database whose directory
 holds `daemon.pid`, naming the `sqlite3 -readonly <db> ".backup <copy>"`
-to take, and a path that doesn't exist, which opening would create. It
-reads the local tenant's `DocumentVectors`, drops non-finite vectors as
-the engine does, and needs `insight.FirstRebuildAt` (20) left.
+to take, and a path that doesn't exist, which opening would create. A
+read-only open needs the database's `-shm` file, which a daemon that
+stopped cleanly removed with its WAL, so for a stopped home the refusal
+also names `sqlite3 'file:<db>?immutable=1' ".backup <copy>"`: the main
+file then holds everything. It reads the local tenant's
+`DocumentVectors`, drops non-finite vectors as the engine does, and needs
+`insight.FirstRebuildAt` (20) left.
 
 **The production pieces, in the engine's order.** `regroup` is
 `PreparePoints` (centered, the daemon's default) → `Group` →
@@ -10718,12 +10722,18 @@ n/a for a level with none. Rather than refactor the engine to share the
 composition, `TestReport_MatchesTheEngine` holds the tool to
 `Engine.Rebuild`: on a seeded synthetic library of 1,100 documents in
 areas, plus one NaN vector, in a test database, the engine's fresh run of
-a draw's 95% is identical to the tool's fresh grouping through the
-stored-run comparison (the same documents, ARI 1 at both levels, every fit
-the same), and once the last 5% arrive the engine's warm run keeps the
-interests and areas the tool's warm rebuild of that draw says (23 of 25
-interests, 7 of 7 areas). With the merge left out of `regroup` it fails.
-It takes 0.9 s under -race, the package 2.3 s.
+a draw's 95% (6 areas, 24 interests, 8 loose fits) is identical to the
+tool's fresh grouping through the stored-run comparison (the same
+documents, ARI 1 at both levels, every fit the same), and once the last
+5% arrive the engine's warm run keeps the interests and areas the tool's
+warm rebuild of that draw says (23 of 24 interests, 6 of 6 areas). It
+fails with the merge or the centering left out of `regroup`, every stray
+left unsorted, the split check forced on, a warm pass started from the
+flat shape, or the previous library passed as the new one; a unit case
+holds names kept to members alone, as the engine's carry-over counts
+them. It takes 0.9 s under -race, the package 2.8 s, with
+`TestRun_FlatLibrary` running the whole report on a 300-document library
+in the flat shape whose run the engine made.
 
 **The draws** are the research's, so its numbers, PR 1's and these compare.
 Draw d of a 5% change is a permutation seeded 5001+d (added: its first
