@@ -869,6 +869,29 @@ func TestRebuild_LabelingBudget(t *testing.T) {
 	assert.Contains(t, warn, "deadline exceeded")
 }
 
+// TestRebuild_FallbackReasonIsTheFallbacks: the fallback WARN names why a
+// group fell back, not a later group's taken name that its retry resolved.
+func TestRebuild_FallbackReasonIsTheFallbacks(t *testing.T) {
+	f := newEngineFixture(t, 3, 4, 5)
+	llm := labelFunc(func(_ context.Context, info ClusterInfo) (Label, error) {
+		switch {
+		case info.Size == 5: // labeled first: an unusable reply falls back
+			return Label{}, fmt.Errorf("%w: no NAME line", ErrUnparseableLabel)
+		case info.Taken != "":
+			return Label{Name: "Beta"}, nil
+		default: // sizes 4 then 3: the second takes 4's name, then retries
+			return Label{Name: "Alpha"}, nil
+		}
+	})
+	run := f.rebuild(t, f.engine(nil, llm, Config{Labeling: LabelingLLM}))
+	assert.Equal(t, "Alpha", f.labels(t, run.ID)[4])
+	assert.Equal(t, "Beta", f.labels(t, run.ID)[3], "the retry found a free name")
+	warn := f.logLine(t, "llm labeling fell back")
+	assert.Contains(t, warn, "groups=1 of=3")
+	assert.Contains(t, warn, "no NAME line")
+	assert.NotContains(t, warn, "was taken")
+}
+
 func TestRebuild_LabelsLargestGroupsFirst(t *testing.T) {
 	f := newEngineFixture(t, 3, 4, 5, 6, 7)
 	var order []int

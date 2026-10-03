@@ -287,7 +287,6 @@ func (l *labeling) ask(info ClusterInfo, taken map[string]bool) (Label, bool, er
 				return lab, true, nil
 			}
 			info.Taken = lab.Name
-			l.reason = fmt.Errorf("the name %q was taken", lab.Name)
 			continue
 		case l.ctx.Err() != nil:
 			return Label{}, false, fmt.Errorf("label groups: %w", l.ctx.Err())
@@ -298,6 +297,9 @@ func (l *labeling) ask(info ClusterInfo, taken map[string]bool) (Label, bool, er
 		l.reason = err
 		return Label{}, false, nil
 	}
+	// Both replies took a name: the group falls back, and only now is that
+	// the reason. A retry that found a free name leaves it alone.
+	l.reason = fmt.Errorf("the name %q was taken", info.Taken)
 	return Label{}, false, nil
 }
 
