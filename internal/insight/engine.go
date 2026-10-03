@@ -54,6 +54,11 @@ type Config struct {
 	// built meanwhile, which only a request makes, says so in its log
 	// line. nil reports no drift.
 	Drift func() string
+	// Indexing reports whether index jobs are pending or running. A run
+	// that finds them once it has read the vectors, while a re-embedding
+	// owes a fresh rebuild, read some of the old build's (a rebuild asked
+	// for mid-drain), so it leaves that rebuild owed. nil reports none.
+	Indexing func(ctx context.Context) (bool, error)
 }
 
 // Engine rebuilds a tenant's interests: read the document vectors → prepare
@@ -117,22 +122,22 @@ func New(
 // since the last one reach four times the change threshold (see plan).
 //
 // Once grouping starts, the attempt is an interest run that ends done or
-// failed (a failed run's ID comes back with the error). Two paths create no
-// run: with no vectors to group and a prior, the prior's ID is returned, so
-// a library momentarily without vectors (a refetch of every document, say)
-// retires nothing; and a failure before the run is created (reading the
-// prior, the vectors or the tenant's state) returns "" and the error. Every
-// failure but a cancellation counts as one failed rebuild of the tenant's
-// (InsightStore.RecordFailure), which the scheduler backs off from.
+// failed (a failed run's ID comes back with the error). A failure before
+// the run is created returns "" and the error: reading the prior, the
+// vectors or the tenant's state, or finding no vector to group while a
+// prior stands (errNothingToGroup), which keeps the prior, so a library
+// momentarily without vectors (a refetch of every document, say) retires
+// nothing. Every failure but a cancellation counts as one failed rebuild of
+// the tenant's (InsightStore.RecordFailure), which the scheduler backs off
+// from.
 func (e *Engine) Rebuild(ctx context.Context, tenantID string, trigger store.RunTrigger) (string, error) {
 	in, err := e.read(ctx, tenantID)
+	if err == nil && len(in.dvs) == 0 && in.prior != nil {
+		err = errNothingToGroup
+	}
 	if err != nil {
 		e.recordFailure(ctx, tenantID, "", 0, err)
 		return "", err
-	}
-	if len(in.dvs) == 0 && in.prior != nil {
-		e.log.Info("interests: no document vectors; keeping the last run", "tenant", tenantID, "run", in.prior.run.ID)
-		return in.prior.run.ID, nil
 	}
 	p := e.plan(in)
 	run := &store.InterestRun{TenantID: tenantID, Trigger: trigger, Grouper: e.grouper.Name(), Params: in.params,
@@ -149,6 +154,16 @@ func (e *Engine) Rebuild(ctx context.Context, tenantID string, trigger store.Run
 	return run.ID, nil
 }
 
+// errNothingToGroup fails a rebuild that finds no vector to group while a
+// done run stands: every fetched document was indexed without a chunk, or
+// its vector is NaN or infinite. Committing nothing keeps that run's
+// interests, which an empty grouping would retire; counting a failure
+// moves the scheduler's next attempt past its backoff. A rebuild that
+// succeeded changing nothing would leave the library as due as it was, and
+// the scheduler would queue the same rebuild again the moment it finished.
+var errNothingToGroup = errors.New("nothing to group: no fetched document has a usable vector; " +
+	"the last interests stand")
+
 // input is what a rebuild reads before it plans.
 type input struct {
 	prior  *previous // the latest done run, nil for none
@@ -158,13 +173,18 @@ type input struct {
 	// after the vectors: what this rebuild absorbs.
 	changes store.RunChanges
 	state   store.InsightState
-	params  []byte // this rebuild's grouper and engine params
-	read    time.Duration
+	// midReindex: a re-embedding owes a fresh rebuild, and index jobs
+	// were left once the vectors were read (Config.Indexing).
+	midReindex bool
+	params     []byte // this rebuild's grouper and engine params
+	read       time.Duration
 }
 
 // read reads what a rebuild starts from: the prior with its assignments and
 // groups, the vectors (non-finite ones dropped), the changes since the
-// prior, the tenant's state, and the params.
+// prior, the tenant's state, whether a re-embedding owed is still
+// draining, and the params. The queue is read after the vectors, so a
+// re-embedding begun before or during their read has jobs left then.
 func (e *Engine) read(ctx context.Context, tenantID string) (input, error) {
 	var in input
 	priorRun, err := e.insights.LatestRun(ctx, tenantID, store.InterestRunDone)
@@ -191,6 +211,11 @@ func (e *Engine) read(ctx context.Context, tenantID string) (input, error) {
 	}
 	if in.state, err = e.insights.State(ctx, tenantID); err != nil {
 		return input{}, err
+	}
+	if in.state.FreshOwed == store.FreshReindex && e.cfg.Indexing != nil {
+		if in.midReindex, err = e.cfg.Indexing(ctx); err != nil {
+			return input{}, fmt.Errorf("read whether the re-embedding is still draining: %w", err)
+		}
 	}
 	if in.params, err = e.runParams(); err != nil {
 		return input{}, err
@@ -290,6 +315,7 @@ func (e *Engine) run(ctx context.Context, run *store.InterestRun, in input, p pl
 
 	start = time.Now()
 	c := gr.commit(run, in.prior, labels)
+	c.ReadMidReindex = in.midReindex
 	if err := e.insights.CommitRun(ctx, c); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}

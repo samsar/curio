@@ -1430,7 +1430,7 @@ func TestInterests_Rebuild(t *testing.T) {
 	assert.Contains(t, off, "set <code>insight.enabled: true</code> in config.yaml")
 	assert.NotContains(t, off, "curio interests rebuild")
 	assert.Contains(t, render(t, r, PageInterests, Interests{Layout: layout, Rebuild: Rebuild{Enabled: true}}),
-		"<code>curio interests rebuild</code> groups the library into them.")
+		"once enough of it is indexed and it settles; <code>curio interests rebuild</code> groups it now.")
 }
 
 // textOf is n's text.

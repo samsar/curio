@@ -437,7 +437,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		placer = insight.NewPlacer(insights, chunks, drifted, slog.Default())
 		jobDeps.Placer = placer
 	}
-	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights, placer, drifted)
+	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights, queue, placer, drifted)
 	if err != nil {
 		return nil, err
 	}
@@ -480,19 +480,22 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	return &daemon{apiDeps: apiDeps, pools: pools, drift: driftMonitor, keeper: keeper, scheduler: scheduler}, nil
 }
 
-// driftHold says how the embeddings drifted, "" while they haven't: what
-// holds automatic rebuilds and placement, and what a run built meanwhile
-// notes.
+// driftHold says how the embeddings drifted, as the monitor last reported
+// (holdReason): what holds automatic rebuilds and placement, and what a
+// run built meanwhile notes.
 func driftHold(m *drift.Monitor) func() string {
-	return func() string {
-		switch r := m.Report(); {
-		case !r.Drifted():
-			return ""
-		case r.Evidence.Verified:
-			return "the embeddings drifted"
-		default:
-			return "the embeddings may have drifted"
-		}
+	return func() string { return holdReason(m.Report()) }
+}
+
+// holdReason says how the embeddings drifted by r, "" while they haven't.
+func holdReason(r drift.Report) string {
+	switch {
+	case !r.Drifted():
+		return ""
+	case r.Evidence.Verified:
+		return "the embeddings drifted"
+	default:
+		return "the embeddings may have drifted"
 	}
 }
 
@@ -643,14 +646,16 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 
 // newInsightEngine builds the insight layer: group documents into labeled
 // areas and interests with the Louvain grouper, placing the documents
-// indexed during a rebuild with placer (nil places none) once it commits.
+// indexed during a rebuild with placer (nil places none) once it commits,
+// and asking queue whether a re-embedding still drains.
 // With insight.labeling = "llm" the LLM labeler is always wired: whether
 // Ollama and the model are up is decided at each rebuild, where the engine
 // falls back to term labels for any run that can't reach them. A startup
 // check would pin that verdict for the life of the process, and the CLI
 // often auto-starts the daemon before the Ollama app is running.
 func newInsightEngine(ctx context.Context, cfg config.Config, docs store.DocumentStore, chunks store.ChunkStore,
-	insights store.InsightStore, placer *insight.Placer, drifted func() string) (*insight.Engine, error) {
+	insights store.InsightStore, queue store.JobStore, placer *insight.Placer, drifted func() string,
+) (*insight.Engine, error) {
 	var llmLabeler insight.Labeler
 	if cfg.Insight.Labeling == insight.LabelingLLM {
 		gen, err := generator.NewOllama(generator.OllamaOptions{
@@ -673,7 +678,20 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 		LabelingTimeout: time.Duration(cfg.Insight.LabelingTimeoutSeconds) * time.Second,
 		Placer:          placer,
 		Drift:           drifted,
+		Indexing:        indexing(queue),
 	}, slog.Default()), nil
+}
+
+// indexing reports whether queue holds index jobs pending or running.
+func indexing(queue store.JobStore) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		counts, err := queue.QueueCounts(ctx)
+		if err != nil {
+			return false, err
+		}
+		index := counts[store.JobKindIndex]
+		return index.Pending+index.Running > 0, nil
+	}
 }
 
 // serve runs the worker pools, the embedding drift monitor, the interest

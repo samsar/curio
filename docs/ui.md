@@ -182,9 +182,10 @@ footer names the address the daemon listens on.
   ("it merged into …"), with a way back to Interests. A link from before
   the upgrade that brought areas answers 404: interests were regrouped
   then.
-  **Rebuild**, at the top, groups the library again. With insight turned
-  off in config.yaml (`insight.enabled: false`), there is no Rebuild, and
-  the page says so.
+  **Rebuild**, at the top, groups the library again now; the daemon also
+  does on its own as the library changes. With insight turned off in
+  config.yaml (`insight.enabled: false`), there is no Rebuild, and the
+  page says so.
 - **Status**: what curio is doing, and whether what it needs works. What
   needs your attention comes first: Ollama not ready, the embeddings
   drifted, or may have drifted, since the library was indexed (what

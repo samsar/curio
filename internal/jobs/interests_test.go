@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -158,6 +159,89 @@ func TestWorker_OnFinishedSeesTheOutcome(t *testing.T) {
 	stop := startWorker(t, w)
 	defer stop()
 	assert.Equal(t, store.JobStatusDone, <-seen)
+}
+
+// TestPools_NothingToGroupBacksOff: a rebuild that finds no vector to group
+// keeps the done run and changes nothing the scheduler reads but the
+// failures it counts, so the check the end of the job kicks queues no
+// other until the backoff passes. Were it to succeed changing nothing, the
+// rebuild would still be due, and each would queue the next at once. The
+// library's documents were indexed without a chunk; the scheduler, on a
+// clock past the settle window, checks through Run, at the kicks the pools
+// and the test give it.
+func TestPools_NothingToGroupBacksOff(t *testing.T) {
+	deps, db, _ := newTestDeps(t)
+	ctx := context.Background()
+	ins := sqlitestore.NewInsights(db)
+	engine := insight.New(deps.Documents, sqlitestore.NewChunks(db, sqlitetest.Width(t, db)), ins,
+		insight.NewLouvainGrouper(quietLog), nil, insight.Config{}, quietLog)
+	deps.Insight = engine
+	start := time.Now()
+	var clock atomic.Pointer[time.Time]
+	at := func(d time.Duration) { now := start.Add(d); clock.Store(&now) }
+	at(5 * time.Minute)
+	sched := insight.NewScheduler(insight.SchedulerOptions{
+		TenantID: "local",
+		Library:  insight.NewLibrary(ins, deps.Documents, sqlitestore.NewJobs(db)),
+		Enqueue: func(ctx context.Context, tenantID string, trigger store.RunTrigger) (*store.Job, bool, error) {
+			return EnqueueRebuild(ctx, deps.Queue, tenantID, trigger)
+		},
+		ParamsChanged: engine.ParamsChanged,
+		Config:        insight.SchedulerConfig{Settle: time.Minute, Interval: time.Hour},
+		Now:           func() time.Time { return *clock.Load() },
+		Log:           quietLog,
+	})
+	deps.KickInterests = sched.Kick
+	added := 0
+	chunkless := func(n int) {
+		for range n {
+			added++
+			doc := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/%d", added)}
+			require.NoError(t, deps.Documents.Create(ctx, doc))
+			require.NoError(t, deps.Documents.MarkFetched(ctx, doc.ID))
+		}
+	}
+	count := func(c require.TestingT, query string) int {
+		var n int
+		require.NoError(c, db.QueryRow(query).Scan(&n))
+		return n
+	}
+	settlesAt := func(state insight.RebuildState, jobs int) {
+		t.Helper()
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, state, sched.Snapshot().State)
+			assert.Zero(c, count(c, `SELECT count(*) FROM jobs WHERE kind = 'cluster' AND status IN ('pending', 'running')`))
+		}, 5*time.Second, 10*time.Millisecond)
+		assert.Equal(t, jobs, count(t, `SELECT count(*) FROM jobs WHERE kind = 'cluster'`))
+	}
+
+	chunkless(insight.FirstRebuildAt)
+	pool := NewPools(deps, PoolSizes{Fetch: 1, Index: 1}, WorkerOptions{PollInterval: 10 * time.Millisecond, Log: quietLog})[2]
+	stopWorker := startWorker(t, pool.Worker)
+	defer stopWorker()
+	runCtx, cancel := context.WithCancel(ctx)
+	stopped := make(chan struct{})
+	go func() { sched.Run(runCtx); close(stopped) }()
+	defer func() { cancel(); <-stopped }()
+	settlesAt(insight.StateCurrent, 1)
+	assert.Equal(t, 1, count(t, `SELECT count(*) FROM interest_runs WHERE status = 'done' AND num_documents = 0`),
+		"the first rebuild records an empty grouping")
+
+	chunkless(insight.MinChanges)
+	sched.Kick()
+	settlesAt(insight.StateFailing, 2)
+	first := sched.Snapshot()
+	assert.Contains(t, first.LastError, "no fetched document has a usable vector")
+	assert.WithinDuration(t, start.Add(insight.RetryAfter), first.RetryAt, time.Minute)
+
+	at(insight.RetryAfter + time.Minute)
+	sched.Kick()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.True(c, sched.Snapshot().RetryAt.After(first.RetryAt), "the retry failed too")
+	}, 5*time.Second, 10*time.Millisecond)
+	settlesAt(insight.StateFailing, 3)
+	assert.WithinDuration(t, start.Add(insight.RetryDelay(2)), sched.Snapshot().RetryAt, time.Minute)
+	assert.Equal(t, 1, count(t, `SELECT count(*) FROM interest_runs`), "the empty grouping stands alone")
 }
 
 // doneRunWith commits a run of one interest whose centroid is centroid,

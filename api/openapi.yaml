@@ -1834,9 +1834,9 @@ components:
             Why the next rebuild will be fresh: the library was re-embedded
             (it waits for the re-embedding to finish), one was asked for, or
             the grouping's parameters changed.
-        held_reason: { type: string, description: "How the embeddings drifted, while that holds rebuilds" }
-        retry_at:    { type: string, format: date-time, description: "When the next rebuild is tried after the failed ones" }
-        last_error:  { type: string, description: "Why the last rebuild failed, while rebuilds are failing" }
+        held_reason: { type: string, description: "How the embeddings drifted; only with state held" }
+        retry_at:    { type: string, format: date-time, description: "When the next rebuild is tried after the failed ones; only with state failing" }
+        last_error:  { type: string, description: "Why the last rebuild failed; only with state failing" }
       required: [state]
 
     InterestList:

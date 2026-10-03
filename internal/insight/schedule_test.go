@@ -326,6 +326,46 @@ func TestScheduler_DriftHolds(t *testing.T) {
 	require.Len(t, m.w.enqueues, 1, "the hold lifted, the long-due rebuild goes")
 }
 
+// TestScheduler_ARebuildQueuedBeforeAHold: a rebuild queued before the
+// embeddings drifted, or past the failures' backoff, still runs, so the
+// state says queued, then rebuilding, with neither the hold nor the
+// backoff; the hold is warned about once it holds, and the backoff shown
+// once nothing holds rebuilds but it.
+func TestScheduler_ARebuildQueuedBeforeAHold(t *testing.T) {
+	w := newWorld(100)
+	w.fail(simStart.Add(-time.Minute))
+	w.clusterPending = 1
+	m := newSim(t, w, false)
+	m.drift = "the embeddings drifted"
+	m.step(0)
+	snap := m.s.Snapshot()
+	assert.Equal(t, StateQueued, snap.State)
+	assert.Empty(t, snap.HeldReason)
+	assert.Zero(t, snap.RetryAt)
+	assert.Empty(t, snap.LastError)
+	w.clusterPending, w.clusterRunning = 0, 1
+	m.step(0)
+	assert.Equal(t, Snapshot{State: StateRebuilding, LastKind: store.RunKindWarm, LastTrigger: store.RunTriggerAuto,
+		LastRebuildAt: *w.done.FinishedAt, RebuildAt: 5, CheckedAt: w.now}, m.s.Snapshot())
+	assert.Empty(t, m.lines("interests: rebuilds held"), "nothing is held yet")
+
+	w.clusterRunning = 0
+	m.step(0)
+	snap = m.s.Snapshot()
+	assert.Equal(t, StateHeld, snap.State)
+	assert.Equal(t, "the embeddings drifted", snap.HeldReason)
+	assert.Zero(t, snap.RetryAt, "the hold comes first")
+	assert.Len(t, m.lines("interests: rebuilds held"), 1)
+
+	m.drift = ""
+	m.step(0)
+	snap = m.s.Snapshot()
+	assert.Equal(t, StateFailing, snap.State)
+	assert.Empty(t, snap.HeldReason)
+	assert.Equal(t, w.state.LastFailureAt.Add(RetryAfter), snap.RetryAt)
+	assert.Equal(t, "boom", snap.LastError)
+}
+
 // TestScheduler_TheFirstRebuild: a library with no done rebuild waits for
 // 20 documents, then for the library to settle, or MaxWaitFirst.
 func TestScheduler_TheFirstRebuild(t *testing.T) {
@@ -400,7 +440,7 @@ func TestScheduler_AQueuedRebuildBlocks(t *testing.T) {
 
 // TestScheduler_NothingToGroup: a done run with no fetched document left
 // (a refetch of the whole library in flight) is current, however many
-// left it: a rebuild would keep the run and change nothing.
+// left it: a rebuild would have nothing to group, and fail.
 func TestScheduler_NothingToGroup(t *testing.T) {
 	w := newWorld(40)
 	for id := range w.indexedAt {

@@ -653,7 +653,7 @@ func insightPlanCases() []planCase {
 		{name: "State", query: insightStateSQL, args: []any{"local"}, first: stateByTenant},
 		{name: "clear failures", query: clearFailuresSQL, args: []any{"now", "local"}, first: stateByTenant},
 		{
-			name: "consume the fresh rebuild owed", query: consumeFreshSQL, args: []any{"now", "local", "run"},
+			name: "consume the fresh rebuild owed", query: consumeFreshSQL, args: []any{"now", "local", "run", false, "reindex"},
 			first: stateByTenant, want: []string{runByID},
 		},
 		{

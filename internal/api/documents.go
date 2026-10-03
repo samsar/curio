@@ -485,7 +485,8 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 // the current grouping's seeds and centroids are of the old vectors.
 // Owing it first means a failure part way can leave a fresh rebuild owed
 // for nothing re-embedded, which costs one rebuild, never a grouping of
-// mixed vectors.
+// mixed vectors. It is owed with the insight layer off too: the grouping
+// the layer finds when it is turned on again is of the old vectors.
 func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	state, err := docStateParam(r)
 	if err != nil {

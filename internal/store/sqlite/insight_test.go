@@ -935,30 +935,35 @@ func TestInsights_RecordAbandoned(t *testing.T) {
 
 // TestInsights_CommitConsumesTheFreshRebuildOwed: a fresh run that read its
 // vectors at or after the fresh rebuild was owed consumes it; a warm run,
-// or a fresh one that read before, leaves it owed.
+// or a fresh one that read before, leaves it owed, and so does one that
+// read mid-reindex when a re-embedding owes it.
 func TestInsights_CommitConsumesTheFreshRebuildOwed(t *testing.T) {
 	owedAt := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
-		name     string
-		kind     store.RunKind
-		readAt   time.Time
-		consumed bool
+		name       string
+		owed       store.FreshReason
+		kind       store.RunKind
+		readAt     time.Time
+		midReindex bool
+		consumed   bool
 	}{
-		{"fresh, read after", store.RunKindFresh, owedAt.Add(time.Second), true},
-		{"fresh, read as it was owed", store.RunKindFresh, owedAt, true},
-		{"fresh, read before", store.RunKindFresh, owedAt.Add(-time.Second), false},
-		{"warm", store.RunKindWarm, owedAt.Add(time.Second), false},
+		{"fresh, read after", store.FreshReindex, store.RunKindFresh, owedAt.Add(time.Second), false, true},
+		{"fresh, read as it was owed", store.FreshReindex, store.RunKindFresh, owedAt, false, true},
+		{"fresh, read before", store.FreshReindex, store.RunKindFresh, owedAt.Add(-time.Second), false, false},
+		{"warm", store.FreshReindex, store.RunKindWarm, owedAt.Add(time.Second), false, false},
+		{"fresh, read mid-reindex", store.FreshReindex, store.RunKindFresh, owedAt.Add(time.Second), true, false},
+		{"fresh, asked for, read mid-reindex", store.FreshManual, store.RunKindFresh, owedAt.Add(time.Second), true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newInsightFixture(t, 7)
-			require.NoError(t, f.ins.OweFresh(f.ctx, "local", store.FreshReindex))
+			require.NoError(t, f.ins.OweFresh(f.ctx, "local", tc.owed))
 			_, err := f.db.Exec(`UPDATE insight_state SET fresh_owed_at = ?`, formatTime(owedAt))
 			require.NoError(t, err)
 			run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerReindex, Grouper: "test",
 				VectorsReadAt: &tc.readAt, RunOutcome: store.RunOutcome{Kind: tc.kind, Shape: store.InterestShapeAreas}}
 			require.NoError(t, f.ins.CreateRun(f.ctx, run))
 			c := f.firstCommit(run)
-			c.Outcome.Kind = tc.kind
+			c.Outcome.Kind, c.ReadMidReindex = tc.kind, tc.midReindex
 			require.NoError(t, f.ins.CommitRun(f.ctx, c))
 
 			st, err := f.ins.State(f.ctx, "local")
@@ -966,7 +971,7 @@ func TestInsights_CommitConsumesTheFreshRebuildOwed(t *testing.T) {
 			if tc.consumed {
 				assert.Equal(t, store.InsightState{}, st)
 			} else {
-				assert.Equal(t, store.InsightState{FreshOwed: store.FreshReindex, FreshOwedAt: owedAt}, st)
+				assert.Equal(t, store.InsightState{FreshOwed: tc.owed, FreshOwedAt: owedAt}, st)
 			}
 		})
 	}

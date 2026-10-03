@@ -600,7 +600,7 @@ func TestMCP_ListInterests_Areas(t *testing.T) {
 	run := srv.AddRun(t, apitest.RunSpec{Areas: []apitest.Area{{Label: "Programming", Interests: []apitest.Interest{
 		{Label: "Go", Members: []*store.Document{a, b}}, {Label: "Rust", Size: 1}, {Label: "Zig", Size: 1}}}},
 		Unsorted: []*store.Document{unsorted}})
-	srv.Interests.Set(insight.Snapshot{State: insight.StateCurrent, RebuildAt: 5})
+	srv.Scheduler.Set(insight.Snapshot{State: insight.StateCurrent, RebuildAt: 5})
 
 	res, out := listInterests(t, srv, map[string]any{"interests": 2, "members": 1})
 	require.False(t, res.IsError, textOf(res))
@@ -706,7 +706,7 @@ func TestMCP_ListInterests_Empty(t *testing.T) {
 		{insight.Snapshot{State: insight.StateFailing, LastError: "ollama unreachable"},
 			"No interests: the last rebuild failed: ollama unreachable"},
 	} {
-		srv.Interests.Set(tc.snap)
+		srv.Scheduler.Set(tc.snap)
 		res, out := listInterests(t, srv, nil)
 		assert.Equal(t, tc.want, textOf(res))
 		assert.Equal(t, string(tc.snap.State), out.State)

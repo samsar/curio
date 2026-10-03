@@ -519,6 +519,11 @@ func TestReindex(t *testing.T) {
 	assert.Contains(t, out, "documents in state=pending: 0 jobs")
 	assert.NotContains(t, out, "interests", "no re-embedding of the library, no regrouping")
 
+	require.NoError(t, os.WriteFile(srv.Home.ConfigPath(), []byte("insight:\n  enabled: false\n"), 0o600))
+	out = mustRun(t, srv, "reindex", "--all")
+	assert.Contains(t, out, "documents in state=fetched: 1 jobs")
+	assert.NotContains(t, out, "interests", "no insight layer, no regrouping")
+
 	_, err := runCLI(t, srv, "reindex")
 	require.ErrorContains(t, err, "provide a document ID or URL, or pass --all")
 }
@@ -585,7 +590,7 @@ func TestInterests_Outline(t *testing.T) {
 	run := srv.AddRun(t, apitest.RunSpec{Areas: []apitest.Area{{Label: "Tech", Interests: children},
 		{Interests: []apitest.Interest{{Size: 12}}}}, Unsorted: []*store.Document{unsorted}})
 	srv.Place(t, run, run.Interests[0], srv.AddDocument(t, "https://example.com/new", store.DocStateFetched))
-	srv.Interests.Set(insight.Snapshot{State: insight.StateCurrent, Changed: 1, RebuildAt: 20})
+	srv.Scheduler.Set(insight.Snapshot{State: insight.StateCurrent, Changed: 1, RebuildAt: 20})
 
 	out := mustRun(t, srv, "interests", "--children", "2")
 	lines := strings.Split(out, "\n")
@@ -776,7 +781,7 @@ func TestInterests_Empty(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.Start(t)
-			srv.Interests.Set(tc.snap)
+			srv.Scheduler.Set(tc.snap)
 			assert.True(t, strings.HasPrefix(mustRun(t, srv, "interests"), tc.want), name)
 		})
 	}
@@ -792,7 +797,7 @@ func TestInterests_Empty(t *testing.T) {
 		srv.AddRun(t, apitest.RunSpec{})
 		hint := func(state insight.RebuildState) string {
 			t.Helper()
-			srv.Interests.Set(insight.Snapshot{State: state})
+			srv.Scheduler.Set(insight.Snapshot{State: state})
 			lines := strings.Split(strings.TrimSuffix(mustRun(t, srv, "interests"), "\n"), "\n")
 			require.Len(t, lines, 2)
 			assert.Regexp(t, `^no interests: the rebuild of \d{4}-\d{2}-\d{2} \d{2}:\d{2} found no fetched, indexed documents$`, lines[0])
@@ -862,7 +867,7 @@ func TestStatus_Interests(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.Start(t)
-			srv.Interests.Set(tc.snap)
+			srv.Scheduler.Set(tc.snap)
 			out := mustRun(t, srv, "status")
 			assert.Contains(t, out, "\n"+tc.want+"\n")
 			assert.Equal(t, 1, strings.Count(out, "interests:"))
@@ -871,7 +876,7 @@ func TestStatus_Interests(t *testing.T) {
 	off := apitest.Start(t, func(d *api.Deps) { d.InsightEnabled = false })
 	assert.Contains(t, mustRun(t, off, "status"), "\ninterests: off (insight.enabled: false)\n")
 	unknown := apitest.Start(t)
-	unknown.Interests.Set(insight.Snapshot{State: insight.StateUnknown})
+	unknown.Scheduler.Set(insight.Snapshot{State: insight.StateUnknown})
 	assert.NotContains(t, mustRun(t, unknown, "status"), "interests:", "the daemon hasn't checked yet")
 }
 
@@ -1077,7 +1082,7 @@ func TestDoctor_Interests(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := upWorld(t)
-			w.srv.Interests.Set(tc.snap)
+			w.srv.Scheduler.Set(tc.snap)
 			out, _ := w.run(t, "doctor")
 			line, hint := doctorLine(t, out, "interests")
 			assert.Equal(t, tc.marker, markerOf(line), line)

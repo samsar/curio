@@ -353,16 +353,17 @@ the smaller.
 ### Interests (migration 016)
 
 Interests come in two levels: areas, each holding interests, in a library
-large enough to have them, and interests alone in a smaller one (the
-run's `shape`, `areas` or `flat`). A rebuild is a run; the groups it found
-are identities that outlive it, so an interest keeps its ID, label and
-links across rebuilds while it keeps most of its documents. Migration 016
+large enough to have them, and interests alone in a smaller one (the run's
+`shape`, `areas` or `flat`). A rebuild is a run; the groups it found are
+identities that outlive it, so an interest keeps its ID, label and links
+across rebuilds while it keeps most of its documents. Migration 016
 replaced 004's `cluster_runs`, `clusters` and `cluster_documents` (one
 flat partition per run, under IDs that lasted that run alone) and dropped
 their rows: nothing in them could seed the new grouping, and the daemon
-regroups the library at its first start after the migration. The
-reasoning and measurements are in `decisions.md` "Interests: two levels,
-stable identities, automatic rebuilds".
+regroups the library on its own once it holds 20 fetched documents and
+nothing has been indexed for 10 minutes (at once on a library already
+quiet). The reasoning and measurements are in `decisions.md` "Interests:
+two levels, stable identities, automatic rebuilds".
 
 Vectors (`mean`, `centroid`) are float32 little-endian BLOBs, NULL when
 absent.
@@ -548,12 +549,14 @@ insight_state
 re-embedding to drain, and placement holds meanwhile); `curio interests
 rebuild --fresh` owes `manual`, which never replaces `reindex`. A fresh
 run clears it in its commit only when it was owed at or before the run
-read its vectors, so one owed again during a rebuild survives it. A change
-of the grouper's params needs no row: each run records them. Every failed
-rebuild but a cancelled one adds a failure; the scheduler waits 15
-minutes after the first, doubling to 4 hours; a done rebuild clears them.
-There is no shape column: the current done run's `shape` is the state the
-grouper reads, and two copies could disagree.
+read its vectors, so one owed again during a rebuild survives it, and a
+`reindex` one only when no index job was left once the run read them, so a
+rebuild asked for mid-drain leaves it owed. A change of the grouper's
+params needs no row: each run records them. Every failed rebuild but a
+cancelled one adds a failure; the scheduler waits 15 minutes after the
+first, doubling to 4 hours; a done rebuild clears them. There is no shape
+column: the current done run's `shape` is the state the grouper reads, and
+two copies could disagree.
 
 ### Deferred insight tables (not in v1)
 

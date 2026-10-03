@@ -184,10 +184,13 @@ const (
 	WHERE tenant_id = ? AND failures > 0`
 	// consumeFreshSQL clears the fresh rebuild the tenant owes when it was
 	// owed at or before a fresh run read its vectors; one owed again since
-	// stays owed. Its args are the time, the tenant and the run.
+	// stays owed, and so does a re-embedding's when the run read them
+	// mid-reindex. Its args are the time, the tenant, the run, whether it
+	// read mid-reindex, and FreshReindex.
 	consumeFreshSQL = `
 	UPDATE insight_state SET fresh_owed = NULL, fresh_owed_at = NULL, updated_at = ?
-	WHERE tenant_id = ? AND fresh_owed_at <= (SELECT vectors_read_at FROM interest_runs WHERE id = ?)`
+	WHERE tenant_id = ? AND fresh_owed_at <= (SELECT vectors_read_at FROM interest_runs WHERE id = ?)
+		AND NOT (? AND fresh_owed = ?)`
 )
 
 // commitState is what a commit changes in the tenant's insight_state,
@@ -200,7 +203,8 @@ func commitState(ctx context.Context, tx *sql.Tx, c store.RunCommit, now string)
 	if c.Outcome.Kind != store.RunKindFresh {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, consumeFreshSQL, now, c.TenantID, c.RunID); err != nil {
+	if _, err := tx.ExecContext(ctx, consumeFreshSQL, now, c.TenantID, c.RunID, c.ReadMidReindex,
+		store.FreshReindex); err != nil {
 		return fmt.Errorf("clear the fresh rebuild owed: %w", err)
 	}
 	return nil

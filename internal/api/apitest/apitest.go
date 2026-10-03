@@ -56,47 +56,47 @@ type Server struct {
 	// Startup is the progress the server reports until Ready, for a server
 	// from StartNotReady: its phase is initializing until a test sets it.
 	Startup *api.Startup
-	// Interests is the interest scheduler healthz and the interests' next
+	// Scheduler is the interest scheduler healthz and the interests' next
 	// report, unless an opt replaced it: a new home's at first.
-	Interests *Interests
+	Scheduler *Scheduler
 
 	srv *api.Server
 }
 
-// Interests is an interest scheduler whose snapshot a test sets, and which
+// Scheduler is an interest scheduler whose snapshot a test sets, and which
 // counts the kicks it is given. Safe for concurrent use.
-type Interests struct {
+type Scheduler struct {
 	mu    sync.Mutex
 	snap  insight.Snapshot
 	kicks int
 }
 
 // Snapshot implements api.InterestScheduler.
-func (i *Interests) Snapshot() insight.Snapshot {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	return i.snap
+func (s *Scheduler) Snapshot() insight.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snap
 }
 
 // Kick implements api.InterestScheduler.
-func (i *Interests) Kick() {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.kicks++
+func (s *Scheduler) Kick() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.kicks++
 }
 
-// Set makes s the snapshot reported from now on.
-func (i *Interests) Set(s insight.Snapshot) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.snap = s
+// Set makes snap the snapshot reported from now on.
+func (s *Scheduler) Set(snap insight.Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snap = snap
 }
 
 // Kicks is how many kicks the scheduler was given.
-func (i *Interests) Kicks() int {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	return i.kicks
+func (s *Scheduler) Kicks() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.kicks
 }
 
 // DefaultUI is how the daemon serves the dashboard with config.yaml's
@@ -156,7 +156,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 	if err != nil {
 		t.Fatalf("queue gate: %v", err)
 	}
-	interests := &Interests{snap: insight.Snapshot{State: insight.StateNone, RebuildAt: insight.FirstRebuildAt}}
+	scheduler := &Scheduler{snap: insight.Snapshot{State: insight.StateNone, RebuildAt: insight.FirstRebuildAt}}
 	deps := api.Deps{
 		Home:           home,
 		Documents:      docs,
@@ -167,7 +167,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 		Search:         search.New(chunks, docs, emb, search.Config{Log: quiet}),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
-		Interests:      interests,
+		Interests:      scheduler,
 		Gate:           gate,
 		TenantID:       TenantID,
 		Log:            quiet,
@@ -197,7 +197,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 		}
 	})
 	return &Server{URL: "http://" + ln.Addr().String(), Home: home, DB: db, Deps: deps, Embedder: emb,
-		Startup: startup, Interests: interests, srv: srv}
+		Startup: startup, Scheduler: scheduler, srv: srv}
 }
 
 // Ready swaps in the full API, as the daemon does once it has started. It

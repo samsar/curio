@@ -634,16 +634,9 @@ func TestRebuild_EmptyCorpus(t *testing.T) {
 	t.Run("a prior done run is kept without a new row", func(t *testing.T) {
 		f := newEngineFixture(t, 3, 4)
 		prior := f.rebuild(t, f.engine(nil, nil, Config{}))
-		live := f.live(t)
 		f.vectors.dvs = nil
 
-		got := f.rebuild(t, f.engine(nil, nil, Config{}))
-		assert.Equal(t, prior.ID, got.ID)
-		latest, err := f.store.LatestRun(context.Background(), tenant, "")
-		require.NoError(t, err)
-		assert.Equal(t, prior.ID, latest.ID, "no new run row")
-		f.assertCurrentRun(t, prior.ID)
-		assert.Equal(t, live, f.live(t), "no identity retired")
+		f.assertNothingToGroup(t, f.engine(nil, nil, Config{}), prior)
 	})
 	t.Run("a store error is not mistaken for no prior run", func(t *testing.T) {
 		f := newEngineFixture(t, 3, 4)
@@ -688,27 +681,44 @@ func TestRebuild_SkipsNonFiniteVectors(t *testing.T) {
 }
 
 // TestRebuild_AllVectorsNonFinite: a library whose every vector is NaN or
-// infinite has nothing to group, like an empty one: the rebuild keeps the
-// prior run, writes no run row and retires no identity, so the interests
-// and their LLM names survive until the vectors are re-embedded.
+// infinite has nothing to group, like an empty one: the rebuild fails
+// keeping the prior run, writes no run row and retires no identity, so the
+// interests and their LLM names survive until the vectors are re-embedded.
 func TestRebuild_AllVectorsNonFinite(t *testing.T) {
 	f := newEngineFixture(t, 3, 4)
 	calls := 0
 	prior := f.rebuild(t, f.engine(nil, sizeNames(&calls), Config{Labeling: LabelingLLM, Center: true}))
-	live, labels := f.live(t), f.labels(t, prior.ID)
+	labels := f.labels(t, prior.ID)
 	for _, dv := range f.vectors.dvs {
 		dv.Vector[0] = float32(math.NaN())
 	}
 
-	got := f.rebuild(t, f.engine(nil, sizeNames(&calls), Config{Labeling: LabelingLLM, Center: true}))
-	assert.Equal(t, prior.ID, got.ID)
-	latest, err := f.store.LatestRun(context.Background(), tenant, "")
+	f.assertNothingToGroup(t, f.engine(nil, sizeNames(&calls), Config{Labeling: LabelingLLM, Center: true}), prior)
+	assert.Equal(t, labels, f.labels(t, prior.ID), "the LLM names kept")
+	assert.Contains(t, f.logLine(t, "vectors have NaN or infinite values"), "count=7")
+}
+
+// assertNothingToGroup runs a rebuild that finds no vector to group, and
+// checks that it failed and counted, so the scheduler backs off, keeping
+// prior: no new run row, prior current, no identity retired.
+func (f *engineFixture) assertNothingToGroup(t *testing.T, e *Engine, prior *store.InterestRun) {
+	t.Helper()
+	ctx := context.Background()
+	live := f.live(t)
+
+	runID, err := e.Rebuild(ctx, tenant, store.RunTriggerAuto)
+	require.ErrorIs(t, err, errNothingToGroup)
+	assert.Empty(t, runID)
+	latest, err := f.store.LatestRun(ctx, tenant, "")
 	require.NoError(t, err)
 	assert.Equal(t, prior.ID, latest.ID, "no new run row")
 	f.assertCurrentRun(t, prior.ID)
 	assert.Equal(t, live, f.live(t), "no identity retired")
-	assert.Equal(t, labels, f.labels(t, prior.ID), "the LLM names kept")
-	assert.Contains(t, f.logLine(t, "vectors have NaN or infinite values"), "count=7")
+	st, err := f.store.State(ctx, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, 1, st.Failures, "it counts as a failed rebuild")
+	assert.Contains(t, st.LastError, "nothing to group")
+	assert.Contains(t, f.logLine(t, "interests: rebuild failed"), "level=WARN")
 }
 
 var errLocked = errors.New("database is locked")
@@ -960,6 +970,42 @@ func TestRebuild_FreshOwed(t *testing.T) {
 	run := f.rebuild(t, warmOwed)
 	require.Equal(t, store.RunKindWarm, run.Kind)
 	assert.Equal(t, store.FreshReindex, state().FreshOwed, "a warm run never consumes it")
+}
+
+// TestRebuild_AReindexOwedMidDrain: a rebuild that finds index jobs left
+// once it read the vectors, while a re-embedding owes a fresh rebuild,
+// groups fresh but leaves that rebuild owed, its vectors perhaps of both
+// builds; the first that finds none consumes it. A queue it can't read
+// fails the rebuild.
+func TestRebuild_AReindexOwedMidDrain(t *testing.T) {
+	ctx := context.Background()
+	f := newEngineFixture(t, 3, 4)
+	f.rebuild(t, f.engine(nil, nil, Config{}))
+	require.NoError(t, f.store.OweFresh(ctx, tenant, store.FreshReindex))
+	_, err := f.db.Exec(`UPDATE insight_state SET fresh_owed_at = ?`, f.tick().Format(storeTime))
+	require.NoError(t, err)
+	indexing := func(busy bool, err error) *Engine {
+		return f.engine(nil, nil, Config{Indexing: func(context.Context) (bool, error) { return busy, err }})
+	}
+	owed := func() store.FreshReason {
+		t.Helper()
+		st, err := f.store.State(ctx, tenant)
+		require.NoError(t, err)
+		return st.FreshOwed
+	}
+
+	run := f.rebuild(t, indexing(true, nil))
+	assert.Equal(t, store.RunKindFresh, run.Kind)
+	assert.Equal(t, store.FreshReindex, owed(), "read mid-drain: still owed")
+
+	f.tick()
+	_, err = indexing(false, errLocked).Rebuild(ctx, tenant, store.RunTriggerManual)
+	require.ErrorIs(t, err, errLocked)
+	assert.Equal(t, store.FreshReindex, owed())
+
+	run = f.rebuild(t, indexing(false, nil))
+	assert.Equal(t, store.RunKindFresh, run.Kind)
+	assert.Empty(t, owed(), "drained: consumed")
 }
 
 // owingGrouper runs owe as it groups, keeping its grouper's name and

@@ -156,9 +156,10 @@ type Snapshot struct {
 	// FreshOwed is why the next rebuild must be fresh: a store.FreshReason
 	// or FreshParams.
 	FreshOwed string
-	// HeldReason is the drift that holds automatic rebuilds.
+	// HeldReason is the drift that holds automatic rebuilds, while held.
 	HeldReason string
-	// RetryAt and LastError are the failed rebuilds' backoff and error.
+	// RetryAt and LastError are the failed rebuilds' backoff and error,
+	// while failing.
 	RetryAt   time.Time
 	LastError string
 	CheckedAt time.Time
@@ -262,8 +263,8 @@ const checkTimeout = 30 * time.Second
 //   - due: no done rebuild and FirstRebuildAt documents fetched, a fresh
 //     rebuild owed against a done one, a failed rebuild to retry, or
 //     Threshold of the done rebuild's documents changed since it; and at
-//     least one document fetched, without which a rebuild would keep the
-//     done one and change nothing;
+//     least one document fetched, without which a rebuild would have
+//     nothing to group;
 //   - not held: no embedding drift, and the failed rebuilds' backoff past;
 //   - settled: nothing indexed for Settle, or due MaxWait already
 //     (MaxWaitFirst with no done rebuild). A fresh rebuild a re-embedding
@@ -380,9 +381,9 @@ func (s *Scheduler) Check(ctx context.Context) {
 		s.checkFailed(ctx, "interests: can't check whether a rebuild is due; the last state stands", err)
 		return
 	}
-	s.noteHold(in.drift)
 
 	v := decide(in, now, s.dueSince, s.cfg)
+	s.noteHold(v.snap, in.drift)
 	if !v.due {
 		s.dueSince, s.loggedDue = time.Time{}, false
 	} else if s.dueSince.IsZero() {
@@ -397,7 +398,7 @@ func (s *Scheduler) Check(ctx context.Context) {
 		}
 	case v.due && !s.loggedDue:
 		s.log.Info("interests: rebuild due", "tenant", s.tenant, "changed", snap.Changed, "rebuild_at", snap.RebuildAt,
-			"fresh_owed", snap.FreshOwed, "waiting_for", waitingFor(in, snap, now))
+			"fresh_owed", snap.FreshOwed, "waiting_for", waitingFor(in, now))
 		s.loggedDue = true
 	}
 	s.snap.Store(&snap)
@@ -437,13 +438,15 @@ func (s *Scheduler) checkFailed(ctx context.Context, msg string, err error) {
 	}
 }
 
-// noteHold warns once when automatic rebuilds start being held.
-func (s *Scheduler) noteHold(reason string) {
+// noteHold warns once a drift episode, at the first check that finds it
+// holding automatic rebuilds: a rebuild queued or running before it was
+// reported still runs.
+func (s *Scheduler) noteHold(snap Snapshot, drift string) {
 	switch {
-	case reason == "":
+	case drift == "":
 		s.loggedHeld = false
-	case !s.loggedHeld:
-		s.log.Warn("interests: rebuilds held", "tenant", s.tenant, "reason", reason, "fix", HoldFix)
+	case snap.State == StateHeld && !s.loggedHeld:
+		s.log.Warn("interests: rebuilds held", "tenant", s.tenant, "reason", drift, "fix", HoldFix)
 		s.loggedHeld = true
 	}
 }
@@ -478,8 +481,7 @@ type verdict struct {
 // rebuild became due, zero when it wasn't at the last check.
 func decide(in inputs, now, dueSince time.Time, cfg SchedulerConfig) verdict {
 	r := in.Reading
-	s := Snapshot{CheckedAt: now, HeldReason: in.drift, FreshOwed: string(r.State.FreshOwed),
-		Changed: r.Fetched, RebuildAt: cfg.FirstRebuildAt}
+	s := Snapshot{CheckedAt: now, FreshOwed: string(r.State.FreshOwed), Changed: r.Fetched, RebuildAt: cfg.FirstRebuildAt}
 	if r.Done != nil {
 		s.LastKind, s.LastTrigger = r.Done.Kind, r.Done.Trigger
 		if r.Done.FinishedAt != nil {
@@ -491,10 +493,7 @@ func decide(in inputs, now, dueSince time.Time, cfg SchedulerConfig) verdict {
 		}
 	}
 	retrying := r.State.Failures > 0
-	if retrying {
-		s.RetryAt, s.LastError = RetryAt(r.State), r.State.LastError
-	}
-	backingOff := now.Before(s.RetryAt)
+	backingOff := now.Before(RetryAt(r.State))
 
 	// A fresh rebuild owed makes one due only against a done one: the
 	// first is fresh anyway, and waits for its documents.
@@ -513,9 +512,9 @@ func decide(in inputs, now, dueSince time.Time, cfg SchedulerConfig) verdict {
 	case r.ClusterPending > 0:
 		s.State = StateQueued
 	case in.drift != "":
-		s.State = StateHeld
+		s.State, s.HeldReason = StateHeld, in.drift
 	case retrying:
-		s.State = StateFailing
+		s.State, s.RetryAt, s.LastError = StateFailing, RetryAt(r.State), r.State.LastError
 	case due:
 		s.State = StateDue
 	case r.Done != nil:
@@ -563,11 +562,11 @@ func triggerOf(r Reading, freshOwed string) store.RunTrigger {
 }
 
 // waitingFor says what a due rebuild waits for, for its log line.
-func waitingFor(in inputs, s Snapshot, now time.Time) string {
+func waitingFor(in inputs, now time.Time) string {
 	switch {
 	case in.drift != "":
 		return "the embeddings to be re-indexed"
-	case now.Before(s.RetryAt):
+	case now.Before(RetryAt(in.State)):
 		return "the retry after a failed rebuild"
 	case in.State.FreshOwed == store.FreshReindex:
 		return "the re-embedding to finish"

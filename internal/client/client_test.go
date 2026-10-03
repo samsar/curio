@@ -852,7 +852,7 @@ func TestInterests(t *testing.T) {
 	st, err := s.Deps.Insights.State(ctx, apitest.TenantID)
 	require.NoError(t, err)
 	assert.Equal(t, store.FreshManual, st.FreshOwed, "fresh reached the daemon")
-	assert.Equal(t, 2, s.Interests.Kicks())
+	assert.Equal(t, 2, s.Scheduler.Kicks())
 }
 
 // TestInterestsState: the client reads every field of where automatic
@@ -861,7 +861,7 @@ func TestInterestsState(t *testing.T) {
 	s, c := start(t)
 	ctx := context.Background()
 	at := func(h int) time.Time { return time.Date(2026, 10, 9, h, 0, 0, 0, time.UTC) }
-	s.Interests.Set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: at(10), LastKind: store.RunKindWarm,
+	s.Scheduler.Set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: at(10), LastKind: store.RunKindWarm,
 		LastTrigger: store.RunTriggerAuto, Changed: 271, RebuildAt: 263, DueSince: at(11),
 		FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom"})
 	want := client.InterestsState{State: client.StateFailing, LastRebuildAt: at(10), LastKind: "warm",

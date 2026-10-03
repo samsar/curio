@@ -1494,6 +1494,12 @@ type RunCommit struct {
 	Assignments []InterestAssignment
 	// Lineage is the run's lineage; their RunID is the run's.
 	Lineage []LineageRow
+	// ReadMidReindex says the run read its vectors while index jobs were
+	// pending or running and a re-embedding owed a fresh rebuild: some of
+	// the vectors may be of the old build, so the commit leaves that
+	// rebuild owed (FreshReindex), for one that reads the new build's
+	// alone.
+	ReadMidReindex bool
 }
 
 // InsightStore persists interests: the runs that group a tenant's library,
@@ -1524,8 +1530,9 @@ type InsightStore interface {
 	// c.Outcome. It also clears the tenant's failures, a done rebuild
 	// being what they count up to, and, for a fresh run, the fresh
 	// rebuild owed when it was owed at or before the run read its vectors
-	// (one owed again since is still owed). A run that isn't running is
-	// ErrConflict. Any failure rolls back all of it.
+	// (one owed again since is still owed), unless a re-embedding owes it
+	// and c.ReadMidReindex. A run that isn't running is ErrConflict. Any
+	// failure rolls back all of it.
 	CommitRun(ctx context.Context, c RunCommit) error
 	// FailRun moves a running run to failed with msg, numDocuments and its
 	// finish time, counting no failure: for a rebuild that was cancelled.

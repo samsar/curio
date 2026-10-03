@@ -39,8 +39,8 @@ Documents must already have content: --all targets state=fetched by default
 and, in any state, skips documents that were never fetched.
 
 Re-embedding the fetched documents also regroups the interests from scratch
-once the re-embedding finishes: until then they keep their last grouping,
-and documents indexed meanwhile join them then.`,
+once the re-embedding finishes (with insight.enabled): until then they keep
+their last grouping, and documents indexed meanwhile join them then.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
@@ -48,7 +48,7 @@ and documents indexed meanwhile join them then.`,
 			}
 
 			if all {
-				return reindexAll(cmd.Context(), cmd.OutOrStdout(), env.Client, state)
+				return reindexAll(cmd.Context(), cmd.OutOrStdout(), env.Client, state, env.Config.Insight.Enabled)
 			}
 			if len(args) != 1 {
 				return errors.New("provide a document ID or URL, or pass --all")
@@ -76,7 +76,10 @@ func reindexOne(ctx context.Context, w io.Writer, c *client.Client, docID string
 	return nil
 }
 
-func reindexAll(ctx context.Context, w io.Writer, c *client.Client, state string) error {
+// reindexAll re-embeds the documents with content in state; interests
+// says whether config.yaml has the insight layer on, so that re-embedding
+// the fetched ones regroups the interests.
+func reindexAll(ctx context.Context, w io.Writer, c *client.Client, state string, interests bool) error {
 	resp, err := c.ReindexAll(ctx, state)
 	if err != nil {
 		return err
@@ -86,7 +89,7 @@ func reindexAll(ctx context.Context, w io.Writer, c *client.Client, state string
 		label = "documents in state=" + state
 	}
 	fmt.Fprintf(w, "reindex enqueued for %s: %d jobs\n", label, resp.JobsEnqueued)
-	if (state == "" || state == "fetched") && resp.JobsEnqueued > 0 {
+	if interests && (state == "" || state == "fetched") && resp.JobsEnqueued > 0 {
 		fmt.Fprintln(w, "interests are regrouped from scratch once the re-embedding finishes; "+
 			"documents indexed meanwhile join them then")
 	}

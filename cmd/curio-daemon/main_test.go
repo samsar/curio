@@ -29,6 +29,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/store"
@@ -974,7 +975,7 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 		chunks.dvs = append(chunks.dvs, store.DocVector{DocumentID: d.ID, Vector: []float32{1, 0, 0}})
 	}
 
-	eng, err := newInsightEngine(context.Background(), cfg, docs, chunks, insights, nil, nil)
+	eng, err := newInsightEngine(context.Background(), cfg, docs, chunks, insights, sqlitestore.NewJobs(db), nil, nil)
 	require.NoError(t, err)
 
 	// Ollama starts only now.
@@ -1080,6 +1081,39 @@ func TestStart_ChecksTheInterests(t *testing.T) {
 
 // TestRun_WarnsOfDeprecatedKeys: a config.yaml that sets an insight key
 // nothing reads any more starts, with one warning that names the key.
+// TestHoldReason: a drift the sample verified holds the interests'
+// rebuilds as drifted, one it couldn't verify as perhaps drifted, and no
+// drift holds nothing.
+func TestHoldReason(t *testing.T) {
+	changed := []drift.Change{{What: "ModelDigest", Recorded: "sha256:a", Current: "sha256:b"}}
+	for want, r := range map[string]drift.Report{
+		"":                                {},
+		"the embeddings drifted":          {Changes: changed, Evidence: drift.Evidence{Verified: true}},
+		"the embeddings may have drifted": {Changes: changed, Evidence: drift.Evidence{Reason: "Ollama is unreachable"}},
+	} {
+		assert.Equal(t, want, holdReason(r))
+	}
+}
+
+// TestIndexing: the engine's re-embedding check reads the index jobs
+// pending or running, no other kind.
+func TestIndexing(t *testing.T) {
+	ctx := context.Background()
+	queue := sqlitestore.NewJobs(sqlitetest.NewDB(t))
+	busy := indexing(queue)
+	got, err := busy(ctx)
+	require.NoError(t, err)
+	assert.False(t, got, "an empty queue")
+	require.NoError(t, queue.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch}))
+	got, err = busy(ctx)
+	require.NoError(t, err)
+	assert.False(t, got, "a fetch job")
+	require.NoError(t, queue.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindIndex}))
+	got, err = busy(ctx)
+	require.NoError(t, err)
+	assert.True(t, got, "an index job")
+}
+
 func TestRun_WarnsOfDeprecatedKeys(t *testing.T) {
 	listen := freeLoopbackAddr(t)
 	home := newHome(t, listen)
