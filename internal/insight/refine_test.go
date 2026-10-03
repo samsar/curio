@@ -166,8 +166,23 @@ func TestAssignStrays(t *testing.T) {
 	g.Area[20] = 1 // in area 1, but in none of its interests
 	cents, err := Centroids(pts, g.Interest)
 	require.NoError(t, err)
+	before := struct {
+		pts   []Point
+		g     Grouping
+		cents [][]float32
+	}{make([]Point, len(pts)), g, make([][]float32, len(cents))}
+	for i, p := range pts {
+		before.pts[i] = Point{ID: p.ID, Vector: slices.Clone(p.Vector)}
+	}
+	for l, c := range cents {
+		before.cents[l] = slices.Clone(c)
+	}
+	before.g.Area, before.g.Interest, before.g.Seeds = slices.Clone(g.Area), slices.Clone(g.Interest), slices.Clone(g.Seeds)
 	fits, err := AssignStrays(pts, g, cents, LooseFitThreshold)
 	require.NoError(t, err)
+	assert.Equal(t, before.pts, pts, "inputs are not modified")
+	assert.Equal(t, before.g, g)
+	assert.Equal(t, before.cents, cents)
 	assert.Equal(t, Fit{Kind: FitMember, Interest: 0, Similarity: 1}, fits[0])
 	assert.Equal(t, Fit{Kind: FitMember, Interest: 1, Similarity: 1}, fits[10])
 	assert.Equal(t, Fit{Kind: FitLoose, Interest: 0, Similarity: float64(hi)}, fits[20], "just above: a loose fit, here of another area's interest")
