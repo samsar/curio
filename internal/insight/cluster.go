@@ -1,13 +1,21 @@
-// Package insight implements curio's insight layer: it clusters documents by
+// Package insight implements curio's insight layer: it groups documents by
 // embedding similarity into labeled topic "interests".
 //
 // The design keeps the algorithm swappable. A Clusterer takes points (a doc ID
 // + its vector) and returns a per-point label array (like scikit-learn's
 // labels_, with -1 for noise); everything above it — centroid/cohesion math,
-// labeling, persistence — is algorithm-agnostic. The shipped implementation is
+// labeling, persistence — is algorithm-agnostic. The engine runs
 // KNNGraphClusterer (a kNN graph + deterministic label propagation, with a
-// noise bucket); a density-based HDBSCAN implementation could drop in behind
-// the same interface later, validated against the same eval harness.
+// noise bucket).
+//
+// A Grouper is the richer contract: broad areas holding interests, started
+// from the previous grouping, with a check that splits a group grown into two
+// topics. LouvainGrouper implements it with package louvain on the same kNN
+// graph, and FlatGrouper adapts any Clusterer. The steps around it don't
+// depend on the algorithm: merging near-duplicate interests and finding where
+// strays fit (MergeNearDuplicates, AssignStrays), carrying identities from one
+// grouping to the next (Carry), and placing a new document into a stored
+// grouping (RunSpace).
 package insight
 
 import (
