@@ -10711,9 +10711,9 @@ counts, on its first page alone the placements into Unsorted, and every
 document at once; the changes page the done run, the lineage, the
 identities the run created and retired and those its events name, and
 the nested groups only when it moved an interest; a retired ID the done
-run, the miss, the identity, its successors and theirs. `TestUI_InterestsReads`, `TestUI_UnsortedReads`,
-`TestUI_ChangesReads`, `TestUI_GoneReads` and `TestUI_DocumentReads` pin
-each.
+run, the miss, the identity, its successors and theirs.
+`TestUI_InterestsReads`, `TestUI_UnsortedReads`, `TestUI_ChangesReads`,
+`TestUI_GoneReads` and `TestUI_DocumentReads` pin each.
 
 **An area's interests are paged in Go.** An area's page shows 24 of its
 interests a page, as the Interests page shows groups, under the shared
@@ -10722,9 +10722,9 @@ member. `describe` reads every interest of the area in one read, which the
 count and the area's new documents need anyway, then lists members for
 the page's window alone (`interestOpts.Window`, which only the page
 sets): `GET /v1/interests/{area}` still lists every one, and the spec is
-unchanged. An area of the owner's library holds at most 12 interests, so paging
-costs nothing measurable there; it bounds the page for a library that
-grows an area of hundreds.
+unchanged. An area of the owner's library holds at most 12 interests, so
+paging costs nothing measurable there; it bounds the page for a library
+that grows an area of hundreds.
 
 **The coverage bar.** Four parts, over the run's documents and those
 placed since (`NumDocuments + NumNew`): members (`NumDocuments −
