@@ -550,8 +550,8 @@ re-embedding to drain, and placement holds meanwhile); `curio interests
 rebuild --fresh` owes `manual`, which never replaces `reindex`. A fresh
 run clears it in its commit only when it was owed at or before the run
 read its vectors, so one owed again during a rebuild survives it, and a
-`reindex` one only when no index job was left once the run read them, so a
-rebuild asked for mid-drain leaves it owed. A change of the grouper's
+`reindex` one only when no index job was left before or after the run read
+them, so a rebuild asked for mid-drain leaves it owed. A change of the grouper's
 params needs no row: each run records them. Every failed rebuild but a
 cancelled one adds a failure; the scheduler waits 15 minutes after the
 first, doubling to 4 hours; a done rebuild clears them. There is no shape

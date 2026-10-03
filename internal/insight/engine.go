@@ -55,9 +55,10 @@ type Config struct {
 	// line. nil reports no drift.
 	Drift func() string
 	// Indexing reports whether index jobs are pending or running. A run
-	// that finds them once it has read the vectors, while a re-embedding
-	// owes a fresh rebuild, read some of the old build's (a rebuild asked
-	// for mid-drain), so it leaves that rebuild owed. nil reports none.
+	// that finds them before or after it reads the vectors, while a
+	// re-embedding owes a fresh rebuild, may have read some of the old
+	// build's (a rebuild asked for mid-drain), so it leaves that rebuild
+	// owed. nil reports none.
 	Indexing func(ctx context.Context) (bool, error)
 }
 
@@ -174,7 +175,7 @@ type input struct {
 	changes store.RunChanges
 	state   store.InsightState
 	// midReindex: a re-embedding owes a fresh rebuild, and index jobs
-	// were left once the vectors were read (Config.Indexing).
+	// were left before or after the vectors were read (Config.Indexing).
 	midReindex bool
 	params     []byte // this rebuild's grouper and engine params
 	read       time.Duration
@@ -183,8 +184,10 @@ type input struct {
 // read reads what a rebuild starts from: the prior with its assignments and
 // groups, the vectors (non-finite ones dropped), the changes since the
 // prior, the tenant's state, whether a re-embedding owed is still
-// draining, and the params. The queue is read after the vectors, so a
-// re-embedding begun before or during their read has jobs left then.
+// draining, and the params. The queue is read on both sides of the
+// vectors: a drain that ends during their read (seconds, on a large
+// library) has jobs left before it, and a re-embedding owed before the
+// read but enqueued during it has jobs left after.
 func (e *Engine) read(ctx context.Context, tenantID string) (input, error) {
 	var in input
 	priorRun, err := e.insights.LatestRun(ctx, tenantID, store.InterestRunDone)
@@ -192,6 +195,10 @@ func (e *Engine) read(ctx context.Context, tenantID string) (input, error) {
 	case errors.Is(err, store.ErrNotFound): // the tenant's first rebuild
 	case err != nil:
 		return input{}, fmt.Errorf("read the latest done run: %w", err)
+	}
+	draining, err := e.indexing(ctx)
+	if err != nil {
+		return input{}, err
 	}
 	in.readAt = e.now().UTC()
 	start := time.Now()
@@ -212,15 +219,31 @@ func (e *Engine) read(ctx context.Context, tenantID string) (input, error) {
 	if in.state, err = e.insights.State(ctx, tenantID); err != nil {
 		return input{}, err
 	}
-	if in.state.FreshOwed == store.FreshReindex && e.cfg.Indexing != nil {
-		if in.midReindex, err = e.cfg.Indexing(ctx); err != nil {
-			return input{}, fmt.Errorf("read whether the re-embedding is still draining: %w", err)
+	if in.state.FreshOwed == store.FreshReindex {
+		if !draining {
+			if draining, err = e.indexing(ctx); err != nil {
+				return input{}, err
+			}
 		}
+		in.midReindex = draining
 	}
 	if in.params, err = e.runParams(); err != nil {
 		return input{}, err
 	}
 	return in, nil
+}
+
+// indexing reports whether index jobs are pending or running
+// (Config.Indexing).
+func (e *Engine) indexing(ctx context.Context) (bool, error) {
+	if e.cfg.Indexing == nil {
+		return false, nil
+	}
+	busy, err := e.cfg.Indexing(ctx)
+	if err != nil {
+		return false, fmt.Errorf("read whether index jobs are left: %w", err)
+	}
+	return busy, nil
 }
 
 // readPrior reads what a rebuild starts from of the prior run: its

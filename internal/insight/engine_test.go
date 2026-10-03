@@ -973,10 +973,10 @@ func TestRebuild_FreshOwed(t *testing.T) {
 }
 
 // TestRebuild_AReindexOwedMidDrain: a rebuild that finds index jobs left
-// once it read the vectors, while a re-embedding owes a fresh rebuild,
-// groups fresh but leaves that rebuild owed, its vectors perhaps of both
-// builds; the first that finds none consumes it. A queue it can't read
-// fails the rebuild.
+// before or after it reads the vectors, while a re-embedding owes a fresh
+// rebuild, groups fresh but leaves that rebuild owed, its vectors perhaps
+// of both builds; the first that finds none either side consumes it. A
+// queue it can't read fails the rebuild.
 func TestRebuild_AReindexOwedMidDrain(t *testing.T) {
 	ctx := context.Background()
 	f := newEngineFixture(t, 3, 4)
@@ -984,8 +984,18 @@ func TestRebuild_AReindexOwedMidDrain(t *testing.T) {
 	require.NoError(t, f.store.OweFresh(ctx, tenant, store.FreshReindex))
 	_, err := f.db.Exec(`UPDATE insight_state SET fresh_owed_at = ?`, f.tick().Format(storeTime))
 	require.NoError(t, err)
-	indexing := func(busy bool, err error) *Engine {
-		return f.engine(nil, nil, Config{Indexing: func(context.Context) (bool, error) { return busy, err }})
+	// indexing's engine finds index jobs left before it reads the vectors,
+	// and after, as told.
+	indexing := func(before, after bool, err error) *Engine {
+		vectors := &readVectors{vectorSource: f.vectors}
+		e := f.engine(nil, nil, Config{Indexing: func(context.Context) (bool, error) {
+			if vectors.read {
+				return after, err
+			}
+			return before, err
+		}})
+		e.chunks = vectors
+		return e
 	}
 	owed := func() store.FreshReason {
 		t.Helper()
@@ -994,18 +1004,34 @@ func TestRebuild_AReindexOwedMidDrain(t *testing.T) {
 		return st.FreshOwed
 	}
 
-	run := f.rebuild(t, indexing(true, nil))
-	assert.Equal(t, store.RunKindFresh, run.Kind)
-	assert.Equal(t, store.FreshReindex, owed(), "read mid-drain: still owed")
+	for name, left := range map[string][2]bool{
+		"index jobs left after the read":  {false, true},
+		"the drain ended during the read": {true, false},
+	} {
+		run := f.rebuild(t, indexing(left[0], left[1], nil))
+		assert.Equal(t, store.RunKindFresh, run.Kind, name)
+		assert.Equal(t, store.FreshReindex, owed(), "%s: still owed", name)
+	}
 
 	f.tick()
-	_, err = indexing(false, errLocked).Rebuild(ctx, tenant, store.RunTriggerManual)
+	_, err = indexing(false, false, errLocked).Rebuild(ctx, tenant, store.RunTriggerManual)
 	require.ErrorIs(t, err, errLocked)
 	assert.Equal(t, store.FreshReindex, owed())
 
-	run = f.rebuild(t, indexing(false, nil))
+	run := f.rebuild(t, indexing(false, false, nil))
 	assert.Equal(t, store.RunKindFresh, run.Kind)
 	assert.Empty(t, owed(), "drained: consumed")
+}
+
+// readVectors serves a vectorSource's vectors, and notes it did.
+type readVectors struct {
+	*vectorSource
+	read bool
+}
+
+func (r *readVectors) DocumentVectors(ctx context.Context, tenantID string) ([]store.DocVector, error) {
+	r.read = true
+	return r.vectorSource.DocumentVectors(ctx, tenantID)
 }
 
 // owingGrouper runs owe as it groups, keeping its grouper's name and

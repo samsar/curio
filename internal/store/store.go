@@ -1494,11 +1494,11 @@ type RunCommit struct {
 	Assignments []InterestAssignment
 	// Lineage is the run's lineage; their RunID is the run's.
 	Lineage []LineageRow
-	// ReadMidReindex says the run read its vectors while index jobs were
-	// pending or running and a re-embedding owed a fresh rebuild: some of
-	// the vectors may be of the old build, so the commit leaves that
-	// rebuild owed (FreshReindex), for one that reads the new build's
-	// alone.
+	// ReadMidReindex says index jobs were pending or running before or
+	// after the run read its vectors, while a re-embedding owed a fresh
+	// rebuild: some of the vectors may be of the old build, so the commit
+	// leaves that rebuild owed (FreshReindex), for one that reads the new
+	// build's alone.
 	ReadMidReindex bool
 }
 

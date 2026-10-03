@@ -10424,11 +10424,13 @@ anyway, and waits for its 20 documents. A rebuild asked for during a
 re-embedding plans fresh, but its vectors are of both builds: consuming
 the owe would make the next automatic rebuild warm, from seeds grouped on
 that mix, and resume placement against its centroids while the drain
-goes on. So once it has read the vectors the engine asks the queue
-whether index jobs are pending or running (`Config.Indexing`, the
-scheduler's drain signal, read after the vectors so a re-embedding begun
-before or during their read still has jobs then), and a run that finds
-some commits with `ReadMidReindex`, which leaves a `reindex` owe in place
+goes on. So the engine asks the queue whether index jobs are pending or
+running (`Config.Indexing`, the scheduler's drain signal) both before and
+after it reads the vectors: a drain that ends during the read (about 10 s
+on the owner's library) has jobs left before it, and a re-embedding owed
+before the read but enqueued during it has jobs left after. A run that
+finds some either side commits with `ReadMidReindex`, which leaves a
+`reindex` owe in place
 (a `manual` one is consumed as usual: it asked for this rebuild). The
 check can't hold an owe for good: the scheduler queues a re-embedding's
 rebuild only with no index job left, so the run that finds one is one an
