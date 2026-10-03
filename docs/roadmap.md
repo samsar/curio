@@ -191,8 +191,12 @@ topic clusters that feel like an accurate picture of what the user reads.
   across rebuilds, and the clusterer's knobs (`insight.knn`,
   `min_similarity`, `min_cluster_size`) are ignored (decisions.md
   "Interests: two levels, stable identities, automatic rebuilds").
-  Storage, the engine and the read surfaces have landed; automatic
-  rebuilds and placement between them are next.
+  Storage, the engine and the read surfaces have landed, and so have
+  automatic rebuilds (a scheduler that queues one once about 5% of the
+  library changed and it settled, held while the embeddings drifted,
+  backing off after a failure) and placement of each document indexed
+  between rebuilds into its nearest interest. The dashboard's two-level
+  pages and the release's measurement are next.
 
 ## M5 — Suggestions and the digest
 

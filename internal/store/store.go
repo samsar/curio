@@ -364,8 +364,10 @@ type DocumentStore interface {
 	// cause. ErrNotFound if there is no such document.
 	MarkFailed(ctx context.Context, id string, cause FailureCause) error
 	// MarkFetched records that a document was fetched and indexed: its
-	// state becomes fetched, and it has no failure cause. ErrNotFound if
-	// there is no such document.
+	// state becomes fetched, it has no failure cause, and its indexed_at,
+	// when its vectors were written, is now (the time its updated_at gets
+	// in the same statement). It is the only write of indexed_at.
+	// ErrNotFound if there is no such document.
 	MarkFetched(ctx context.Context, id string) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
 
@@ -409,6 +411,10 @@ type DocumentStore interface {
 	// CountByState counts the tenant's documents per state. States with no
 	// documents are absent from the map.
 	CountByState(ctx context.Context, tenantID string) (map[DocState]int, error)
+	// LastIndexedAt is when the tenant last had a document's vectors
+	// written (MarkFetched): the latest indexed_at, of a document fetched
+	// now or since refetched. Zero when no document was ever indexed.
+	LastIndexedAt(ctx context.Context, tenantID string) (time.Time, error)
 	// FailureSummary counts the tenant's failed and dead documents by
 	// failure cause, naming for each cause at most topHosts of the hosts
 	// its documents are on.
@@ -704,6 +710,43 @@ type ChunkEmbedding struct {
 type DocVector struct {
 	DocumentID string
 	Vector     []float32
+}
+
+// MeanVector is the element-wise mean of the vectors added to it, summed in
+// float64 and rounded to float32 once. DocumentVectors pools each
+// document's chunk vectors with it, and the insight layer a document it
+// places between rebuilds, so the two see one vector for the same chunks.
+// The zero value has no vectors.
+type MeanVector struct {
+	sum []float64
+	n   int
+}
+
+// Add adds v to the mean. Every vector must have the first one's width:
+// one of another width is an error, and is not added.
+func (m *MeanVector) Add(v []float32) error {
+	if m.n == 0 {
+		m.sum = make([]float64, len(v))
+	} else if len(v) != len(m.sum) {
+		return fmt.Errorf("a %d-dimensional vector for a mean of %d-dimensional ones", len(v), len(m.sum))
+	}
+	for i, x := range v {
+		m.sum[i] += float64(x)
+	}
+	m.n++
+	return nil
+}
+
+// Mean returns the mean of the vectors added, nil when there were none.
+func (m *MeanVector) Mean() []float32 {
+	if m.n == 0 {
+		return nil
+	}
+	mean := make([]float32, len(m.sum))
+	for i, s := range m.sum {
+		mean[i] = float32(s / float64(m.n))
+	}
+	return mean
 }
 
 // ChunkSample is how many documents ChunkStore.SampleChunks represents by
@@ -1269,8 +1312,10 @@ type RunOutcome struct {
 	NumInterests int
 	NumLoose     int
 	NumUnsorted  int
-	// ChangedDocuments are the documents added or gone since the previous
-	// run, and ChangesSinceSplit those absorbed since the last split check.
+	// ChangedDocuments are the documents that changed since the previous
+	// run read its vectors (RunChanges: added, left, deleted or
+	// reindexed), and ChangesSinceSplit those absorbed since the last
+	// split check.
 	ChangedDocuments  int
 	ChangesSinceSplit int
 
@@ -1373,6 +1418,62 @@ type Placement struct {
 	PlacedAt   time.Time
 }
 
+// RunChanges are the documents that changed since a run R read its
+// vectors (InsightStore.Changes): what the next rebuild would see
+// differently. A document R couldn't group (it had no chunk, or a vector
+// R dropped as non-finite) was indexed before R's read, so it never
+// counts.
+type RunChanges struct {
+	// Added are fetched, indexed at or after R's read, and not assigned
+	// in R (placed since or not).
+	Added int
+	// Left were assigned in R and are pending (a refetch in flight),
+	// failed or dead now.
+	Left int
+	// Deleted were assigned in R and are gone: their assignments went
+	// with them.
+	Deleted int
+	// Reindexed were assigned in R and are fetched, indexed again at or
+	// after R's read.
+	Reindexed int
+}
+
+// Total is every change: what the scheduler holds to the threshold, and a
+// run records as its ChangedDocuments.
+func (c RunChanges) Total() int { return c.Added + c.Left + c.Deleted + c.Reindexed }
+
+// FreshReason is why a tenant's next rebuild must be fresh, not warm from
+// the current grouping (insight_state.fresh_owed).
+type FreshReason string
+
+// Fresh reasons.
+const (
+	// FreshReindex: `curio reindex --all` re-embedded the library, so the
+	// current grouping's seeds came from vectors no longer stored.
+	FreshReindex FreshReason = "reindex"
+	// FreshManual: someone asked for a fresh rebuild.
+	FreshManual FreshReason = "manual"
+)
+
+// Valid reports whether r is one of the FreshReason constants.
+func (r FreshReason) Valid() bool { return r == FreshReindex || r == FreshManual }
+
+// InsightState is what a tenant's rebuilds can't derive from runs
+// (insight_state): the fresh rebuild owed, and the failures since the last
+// done rebuild. The zero value is a tenant that owes nothing and has no
+// failure.
+type InsightState struct {
+	// FreshOwed is why the next rebuild must be fresh, "" when it needn't
+	// be, and FreshOwedAt when it was last owed; zero with it.
+	FreshOwed   FreshReason
+	FreshOwedAt time.Time
+	// Failures counts the rebuilds that failed since the last done one;
+	// LastFailureAt and LastError are the latest's, zero without one.
+	Failures      int
+	LastFailureAt time.Time
+	LastError     string
+}
+
 // RunCommit is a run's grouping, written at once by CommitRun.
 type RunCommit struct {
 	RunID    string
@@ -1396,9 +1497,11 @@ type RunCommit struct {
 }
 
 // InsightStore persists interests: the runs that group a tenant's library,
-// the identities that outlive them, and what each run did to them. Runs
-// and identities carry tenant_id; groups, assignments and placements
-// inherit their tenant through their run.
+// the identities that outlive them, what each run did to them, the
+// documents placed between rebuilds, and what the tenant's next rebuild
+// can't derive from runs (InsightState). Runs and identities carry
+// tenant_id; groups, assignments and placements inherit their tenant
+// through their run.
 //
 // Paged reads return at most limit rows from offset in their order; limit
 // <= 0 means every one from offset, an offset at or past the end returns
@@ -1418,13 +1521,41 @@ type InsightStore interface {
 	// writes the groups, assignments and lineage; retires every live
 	// identity of the tenant that c.Groups doesn't hold, at the commit's
 	// time and by this run; and moves the run from running to done with
-	// c.Outcome. A run that isn't running is ErrConflict. Any failure
-	// rolls back all of it.
+	// c.Outcome. It also clears the tenant's failures, a done rebuild
+	// being what they count up to, and, for a fresh run, the fresh
+	// rebuild owed when it was owed at or before the run read its vectors
+	// (one owed again since is still owed). A run that isn't running is
+	// ErrConflict. Any failure rolls back all of it.
 	CommitRun(ctx context.Context, c RunCommit) error
 	// FailRun moves a running run to failed with msg, numDocuments and its
-	// finish time. A finished run is ErrConflict and left as it is; an
-	// unknown one ErrNotFound.
+	// finish time, counting no failure: for a rebuild that was cancelled.
+	// A finished run is ErrConflict and left as it is; an unknown one
+	// ErrNotFound.
 	FailRun(ctx context.Context, runID string, numDocuments int, msg string) error
+	// RecordFailure counts a failed rebuild of the tenant: one more
+	// failure, failing now with msg. With a runID it also fails that run,
+	// as FailRun does, in the same transaction (a run that isn't running
+	// is ErrConflict, and nothing is written); with "" the rebuild failed
+	// before it created one. It returns the tenant's state after.
+	RecordFailure(ctx context.Context, tenantID, runID string, numDocuments int, msg string) (InsightState, error)
+	// RecordAbandoned counts a rebuild of the tenant that a daemon left
+	// unfinished as one failure with msg, and fails every running run of
+	// the tenant with msg, in one transaction. It returns the tenant's
+	// state after.
+	RecordAbandoned(ctx context.Context, tenantID, msg string) (InsightState, error)
+	// State returns the tenant's insight state; the zero value when it has
+	// none.
+	State(ctx context.Context, tenantID string) (InsightState, error)
+	// OweFresh records that the tenant's next rebuild must be fresh, for
+	// reason, owed from now. FreshReindex always is; FreshManual is
+	// written only when nothing, or a manual rebuild, is owed, so it never
+	// takes the place of a re-embedding's. An invalid reason is an error.
+	OweFresh(ctx context.Context, tenantID string, reason FreshReason) error
+	// Changes counts the documents of run's tenant that changed since run
+	// read its vectors (its StartedAt when unknown), from one read
+	// snapshot. The run is the tenant's done run; its NumDocuments tells
+	// the deleted documents from its assignments left.
+	Changes(ctx context.Context, run *InterestRun) (RunChanges, error)
 	// LatestRun returns the tenant's newest run in status, any status when
 	// it is "". ErrNotFound if there is none.
 	LatestRun(ctx context.Context, tenantID string, status InterestRunStatus) (*InterestRun, error)
@@ -1486,6 +1617,24 @@ type InsightStore interface {
 	// PlacementCounts counts a run's placements per interest, "" counting
 	// those in Unsorted. An interest with none is absent.
 	PlacementCounts(ctx context.Context, runID string) (map[string]int, error)
+	// Assigned reports whether run assigned the document.
+	Assigned(ctx context.Context, runID, documentID string) (bool, error)
+	// PlaceDocument writes p, placing a document into its run, or places
+	// it anew, only while p.RunID is the tenant's latest done run, the run
+	// didn't assign the document, and the document exists; written
+	// reports whether it did. p.PlacedAt is ignored: the placement is
+	// timed by the write.
+	PlaceDocument(ctx context.Context, tenantID string, p Placement) (written bool, err error)
+	// PlaceMany writes the placements into runID, in one transaction,
+	// while runID is the tenant's latest done run: a document placed
+	// already keeps its placement, and a document gone is left out. It
+	// returns how many it wrote; none when the run is no longer the
+	// latest. Each placement's RunID and PlacedAt are ignored.
+	PlaceMany(ctx context.Context, tenantID, runID string, ps []Placement) (int, error)
+	// Unplaced lists the tenant's fetched documents indexed at or after
+	// since that runID neither assigned nor placed, in no particular
+	// order.
+	Unplaced(ctx context.Context, tenantID, runID string, since time.Time) ([]string, error)
 
 	// PruneRunsExcept deletes every run of the tenant except keepRunIDs, at
 	// least one, with their groups, assignments and placements. Identities

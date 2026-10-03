@@ -23,6 +23,7 @@ import (
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -768,7 +769,7 @@ func TestInterests(t *testing.T) {
 	assert.Equal(t, 1, list.NumLoose)
 	assert.Equal(t, 1, list.NumUnsorted)
 	assert.Equal(t, 1, list.Total)
-	assert.Equal(t, client.StateCurrent, list.Next.State)
+	assert.Equal(t, client.StateNone, list.Next.State, "the scheduler's state, which the test sets")
 	require.NotNil(t, list.Rebuild)
 	assert.Equal(t, "fresh", list.Rebuild.Kind)
 	require.Len(t, list.Items, 1)
@@ -842,12 +843,38 @@ func TestInterests(t *testing.T) {
 	assert.Equal(t, goID, changes.Events[0].From.ID)
 	assert.True(t, changes.Events[0].From.Retired)
 
-	rebuild, err := c.RebuildInterests(ctx)
+	rebuild, err := c.RebuildInterests(ctx, false)
 	require.NoError(t, err)
 	assert.NotEmpty(t, rebuild.JobID)
-	again, err := c.RebuildInterests(ctx)
+	again, err := c.RebuildInterests(ctx, true)
 	require.NoError(t, err)
 	assert.Equal(t, rebuild.JobID, again.JobID, "the rebuild already queued")
+	st, err := s.Deps.Insights.State(ctx, apitest.TenantID)
+	require.NoError(t, err)
+	assert.Equal(t, store.FreshManual, st.FreshOwed, "fresh reached the daemon")
+	assert.Equal(t, 2, s.Interests.Kicks())
+}
+
+// TestInterestsState: the client reads every field of where automatic
+// rebuilds stand, on healthz and as the list's next.
+func TestInterestsState(t *testing.T) {
+	s, c := start(t)
+	ctx := context.Background()
+	at := func(h int) time.Time { return time.Date(2026, 10, 9, h, 0, 0, 0, time.UTC) }
+	s.Interests.Set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: at(10), LastKind: store.RunKindWarm,
+		LastTrigger: store.RunTriggerAuto, Changed: 271, RebuildAt: 263, DueSince: at(11),
+		FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom"})
+	want := client.InterestsState{State: client.StateFailing, LastRebuildAt: at(10), LastKind: "warm",
+		LastTrigger: "auto", ChangedDocuments: 271, RebuildAt: 263, DueSince: at(11), FreshOwed: client.FreshReindex,
+		HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom"}
+
+	health, err := c.Healthz(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, health.Interests)
+	assert.Equal(t, want, *health.Interests)
+	list, err := c.ListInterests(ctx, client.ListInterestsOpts{})
+	require.NoError(t, err)
+	assert.Equal(t, want, list.Next)
 }
 
 // TestRetiredOf_OnlyTheRetiredProblem: only a 410 of the retired-interest

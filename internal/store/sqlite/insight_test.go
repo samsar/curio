@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"math"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -750,4 +751,318 @@ func TestChunks_DocumentVectors(t *testing.T) {
 	dvs2, err := ch.DocumentVectors(ctx, "local")
 	require.NoError(t, err)
 	assert.Len(t, dvs2, 2)
+}
+
+// indexed marks the documents fetched, their vectors written at at.
+func (f *insightFixture) indexed(t *testing.T, at time.Time, ids ...string) {
+	t.Helper()
+	docs := NewDocuments(f.db)
+	for _, id := range ids {
+		require.NoError(t, docs.MarkFetched(f.ctx, id))
+		_, err := f.db.Exec(`UPDATE documents SET indexed_at = ? WHERE id = ?`, formatTime(at), id)
+		require.NoError(t, err)
+	}
+}
+
+// doneRun commits the first commit as a run that read its vectors at
+// readAt, and returns it as LatestRun reads it.
+func (f *insightFixture) doneRun(t *testing.T, readAt time.Time) *store.InterestRun {
+	t.Helper()
+	run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerFirst, Grouper: "test", VectorsReadAt: &readAt,
+		RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeAreas}}
+	require.NoError(t, f.ins.CreateRun(f.ctx, run))
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(run)))
+	done, err := f.ins.GetRun(f.ctx, run.ID)
+	require.NoError(t, err)
+	return done
+}
+
+// TestInsights_Changes: the documents changed since a run read its
+// vectors, each kind counted once at a time; those the run couldn't group,
+// indexed before its read, never; and the same count after a restart.
+func TestInsights_Changes(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "curio.db")
+	db, err := Open(ctx, path)
+	require.NoError(t, err)
+	_, err = Migrate(ctx, db)
+	require.NoError(t, err)
+	f := insightFixtureOn(t, db, 10)
+	d := f.docs
+	readAt := time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)
+	// d7 had no chunk and d8 a non-finite vector: both indexed before the
+	// run read, neither assigned.
+	f.indexed(t, readAt.Add(-time.Hour), d...)
+	run := f.doneRun(t, readAt)
+	changes := func(ins *Insights) store.RunChanges {
+		t.Helper()
+		c, err := ins.Changes(ctx, run)
+		require.NoError(t, err)
+		return c
+	}
+	assert.Equal(t, store.RunChanges{}, changes(f.ins), "nothing changed since the read")
+
+	docs := NewDocuments(db)
+	f.indexed(t, readAt.Add(time.Second), d[9]) // after the read, before the next check
+	_, err = db.Exec(`DELETE FROM documents WHERE id = ?`, d[0])
+	require.NoError(t, err)
+	_, err = docs.RequeueFetch(ctx, "local", d[1])
+	require.NoError(t, err)
+	require.NoError(t, docs.MarkFailed(ctx, d[2], store.FailureCauseDeadLink))
+	f.indexed(t, readAt, d[3]) // in the millisecond the run read: counted
+	got := changes(f.ins)
+	assert.Equal(t, store.RunChanges{Added: 1, Left: 2, Deleted: 1, Reindexed: 1}, got)
+	assert.Equal(t, 5, got.Total())
+
+	f.indexed(t, readAt.Add(2*time.Second), d[1])
+	assert.Equal(t, store.RunChanges{Added: 1, Left: 1, Deleted: 1, Reindexed: 2}, changes(f.ins),
+		"a refetch left while pending, and is reindexed once fetched again")
+
+	before := changes(f.ins)
+	require.NoError(t, db.Close())
+	reopened, err := Open(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, reopened.Close()) })
+	assert.Equal(t, before, changes(NewInsights(reopened)), "the count is derived: a restart keeps it")
+}
+
+// TestInsights_OweFresh: a re-embedding's fresh rebuild is always owed, from
+// now; a manual one only when nothing, or a manual one, is owed.
+func TestInsights_OweFresh(t *testing.T) {
+	f := newInsightFixture(t, 0)
+	state := func() store.InsightState {
+		t.Helper()
+		st, err := f.ins.State(f.ctx, "local")
+		require.NoError(t, err)
+		return st
+	}
+	assert.Equal(t, store.InsightState{}, state(), "no row: nothing owed")
+	backdate := func() {
+		t.Helper()
+		_, err := f.db.Exec(`UPDATE insight_state SET fresh_owed_at = '2026-01-01T00:00:00.000Z'`)
+		require.NoError(t, err)
+	}
+	early := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	require.NoError(t, f.ins.OweFresh(f.ctx, "local", store.FreshManual))
+	assert.Equal(t, store.FreshManual, state().FreshOwed)
+	assert.WithinDuration(t, time.Now(), state().FreshOwedAt, time.Minute)
+	backdate()
+	require.NoError(t, f.ins.OweFresh(f.ctx, "local", store.FreshManual))
+	assert.True(t, state().FreshOwedAt.After(early), "asked again, owed from now")
+
+	require.NoError(t, f.ins.OweFresh(f.ctx, "local", store.FreshReindex))
+	assert.Equal(t, store.FreshReindex, state().FreshOwed)
+	backdate()
+	require.NoError(t, f.ins.OweFresh(f.ctx, "local", store.FreshManual))
+	assert.Equal(t, store.InsightState{FreshOwed: store.FreshReindex, FreshOwedAt: early}, state(),
+		"a manual request never takes a re-embedding's place")
+	require.NoError(t, f.ins.OweFresh(f.ctx, "local", store.FreshReindex))
+	assert.True(t, state().FreshOwedAt.After(early), "a second re-embedding owes it from now")
+
+	require.ErrorContains(t, f.ins.OweFresh(f.ctx, "local", "shape"), "not one of the FreshReason constants")
+	other, err := f.ins.State(f.ctx, "other")
+	require.NoError(t, err)
+	assert.Equal(t, store.InsightState{}, other, "per tenant")
+}
+
+// TestInsights_RecordFailure: a failed rebuild counts one failure, failing
+// its run in the same transaction when there is one, and a done rebuild
+// clears them.
+func TestInsights_RecordFailure(t *testing.T) {
+	f := newInsightFixture(t, 7)
+	st, err := f.ins.RecordFailure(f.ctx, "local", "", 0, "read the vectors: database is locked")
+	require.NoError(t, err)
+	assert.Equal(t, 1, st.Failures)
+	assert.Equal(t, "read the vectors: database is locked", st.LastError)
+	assert.WithinDuration(t, time.Now(), st.LastFailureAt, time.Minute)
+
+	run := f.run(t, "local")
+	st, err = f.ins.RecordFailure(f.ctx, "local", run.ID, 7, "group: boom")
+	require.NoError(t, err)
+	assert.Equal(t, 2, st.Failures)
+	assert.Equal(t, "group: boom", st.LastError)
+	failed, err := f.ins.GetRun(f.ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.InterestRunFailed, failed.Status)
+	assert.Equal(t, 7, failed.NumDocuments)
+	require.NotNil(t, failed.Error)
+	assert.Equal(t, "group: boom", *failed.Error)
+
+	_, err = f.ins.RecordFailure(f.ctx, "local", run.ID, 7, "again")
+	require.ErrorIs(t, err, store.ErrConflict, "a run that isn't running")
+	got, err := f.ins.State(f.ctx, "local")
+	require.NoError(t, err)
+	assert.Equal(t, st, got, "and nothing counted")
+
+	done := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(done)))
+	got, err = f.ins.State(f.ctx, "local")
+	require.NoError(t, err)
+	assert.Equal(t, store.InsightState{}, got, "a done rebuild clears the failures")
+}
+
+// TestInsights_RecordAbandoned: a rebuild a daemon left unfinished fails
+// every running run of the tenant's, and counts one failure.
+func TestInsights_RecordAbandoned(t *testing.T) {
+	f := newInsightFixture(t, 7)
+	done := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(done)))
+	left, again, other := f.run(t, "local"), f.run(t, "local"), f.run(t, "other")
+
+	st, err := f.ins.RecordAbandoned(f.ctx, "local", "the daemon stopped")
+	require.NoError(t, err)
+	assert.Equal(t, 1, st.Failures)
+	assert.Equal(t, "the daemon stopped", st.LastError)
+	for id, want := range map[string]store.InterestRunStatus{
+		done.ID: store.InterestRunDone, left.ID: store.InterestRunFailed, again.ID: store.InterestRunFailed,
+		other.ID: store.InterestRunRunning,
+	} {
+		run, err := f.ins.GetRun(f.ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, want, run.Status, id)
+		if want == store.InterestRunFailed {
+			require.NotNil(t, run.Error)
+			assert.Equal(t, "the daemon stopped", *run.Error)
+			assert.NotNil(t, run.FinishedAt)
+		}
+	}
+
+	st, err = f.ins.RecordAbandoned(f.ctx, "local", "the daemon stopped")
+	require.NoError(t, err)
+	assert.Equal(t, 2, st.Failures, "one failure each, a running run or not")
+}
+
+// TestInsights_CommitConsumesTheFreshRebuildOwed: a fresh run that read its
+// vectors at or after the fresh rebuild was owed consumes it; a warm run,
+// or a fresh one that read before, leaves it owed.
+func TestInsights_CommitConsumesTheFreshRebuildOwed(t *testing.T) {
+	owedAt := time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		kind     store.RunKind
+		readAt   time.Time
+		consumed bool
+	}{
+		{"fresh, read after", store.RunKindFresh, owedAt.Add(time.Second), true},
+		{"fresh, read as it was owed", store.RunKindFresh, owedAt, true},
+		{"fresh, read before", store.RunKindFresh, owedAt.Add(-time.Second), false},
+		{"warm", store.RunKindWarm, owedAt.Add(time.Second), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInsightFixture(t, 7)
+			require.NoError(t, f.ins.OweFresh(f.ctx, "local", store.FreshReindex))
+			_, err := f.db.Exec(`UPDATE insight_state SET fresh_owed_at = ?`, formatTime(owedAt))
+			require.NoError(t, err)
+			run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerReindex, Grouper: "test",
+				VectorsReadAt: &tc.readAt, RunOutcome: store.RunOutcome{Kind: tc.kind, Shape: store.InterestShapeAreas}}
+			require.NoError(t, f.ins.CreateRun(f.ctx, run))
+			c := f.firstCommit(run)
+			c.Outcome.Kind = tc.kind
+			require.NoError(t, f.ins.CommitRun(f.ctx, c))
+
+			st, err := f.ins.State(f.ctx, "local")
+			require.NoError(t, err)
+			if tc.consumed {
+				assert.Equal(t, store.InsightState{}, st)
+			} else {
+				assert.Equal(t, store.InsightState{FreshOwed: store.FreshReindex, FreshOwedAt: owedAt}, st)
+			}
+		})
+	}
+}
+
+// TestInsights_PlaceDocument: a placement into the latest done run is
+// written, and written anew; one into a run a rebuild replaced, of a
+// document the run assigned, or of a document gone, writes nothing.
+func TestInsights_PlaceDocument(t *testing.T) {
+	f := newInsightFixture(t, 9)
+	d := f.docs
+	first := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(first)))
+	place := func(run, doc, interest string, sim float64) bool {
+		t.Helper()
+		written, err := f.ins.PlaceDocument(f.ctx, "local", store.Placement{RunID: run, DocumentID: doc,
+			InterestID: interest, Similarity: sim})
+		require.NoError(t, err)
+		return written
+	}
+
+	assert.True(t, place(first.ID, d[7], "interest-1", 0.6))
+	assert.True(t, place(first.ID, d[8], "", 0.2), "into Unsorted")
+	assert.True(t, place(first.ID, d[7], "interest-2", 0.7), "a document indexed again is placed anew")
+	got, err := f.ins.Placements(f.ctx, first.ID, "interest-2", 0)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, d[7], got[0].DocumentID)
+	assert.InDelta(t, 0.7, got[0].Similarity, 1e-9)
+	assert.WithinDuration(t, time.Now(), got[0].PlacedAt, time.Minute)
+
+	assert.False(t, place(first.ID, d[0], "interest-2", 0.9), "the run assigned it")
+	assert.False(t, place(first.ID, "no-such-document", "interest-1", 0.5), "a document gone")
+	assert.False(t, place("no-such-run", d[7], "interest-1", 0.5))
+
+	second := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.secondCommit(second, first.ID)))
+	placed, err := f.ins.PlaceDocument(f.ctx, "local", store.Placement{RunID: first.ID, DocumentID: d[8],
+		InterestID: "interest-1", Similarity: 0.5})
+	require.NoError(t, err)
+	assert.False(t, placed, "a run a rebuild replaced")
+	other, err := f.ins.PlaceDocument(f.ctx, "other", store.Placement{RunID: second.ID, DocumentID: d[8], Similarity: 0.1})
+	require.NoError(t, err)
+	assert.False(t, other, "another tenant's run")
+}
+
+// TestInsights_PlaceMany: the sweep's placements go into the latest done
+// run, never over a placement made since, and leave out documents gone;
+// into a replaced run, none.
+func TestInsights_PlaceMany(t *testing.T) {
+	f := newInsightFixture(t, 10)
+	d := f.docs
+	first := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(first)))
+	_, err := f.ins.PlaceDocument(f.ctx, "local", store.Placement{RunID: first.ID, DocumentID: d[7],
+		InterestID: "interest-2", Similarity: 0.8})
+	require.NoError(t, err)
+
+	n, err := f.ins.PlaceMany(f.ctx, "local", first.ID, []store.Placement{
+		{DocumentID: d[7], InterestID: "interest-1", Similarity: 0.5},
+		{DocumentID: d[8], InterestID: "interest-1", Similarity: 0.6},
+		{DocumentID: d[9], Similarity: 0.1},
+		{DocumentID: "no-such-document", Similarity: 0.1},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	counts, err := f.ins.PlacementCounts(f.ctx, first.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"interest-1": 1, "interest-2": 1, "": 1}, counts, "the fast path's placement kept")
+
+	second := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.secondCommit(second, first.ID)))
+	n, err = f.ins.PlaceMany(f.ctx, "local", first.ID, []store.Placement{{DocumentID: d[9], Similarity: 0.1}})
+	require.NoError(t, err)
+	assert.Zero(t, n, "a run a rebuild replaced")
+}
+
+// TestInsights_Unplaced: the fetched documents indexed since a time that a
+// run neither assigned nor placed.
+func TestInsights_Unplaced(t *testing.T) {
+	f := newInsightFixture(t, 10)
+	d := f.docs
+	readAt := time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)
+	f.indexed(t, readAt.Add(-time.Hour), d[:8]...)
+	run := f.doneRun(t, readAt)
+	f.indexed(t, readAt.Add(time.Minute), d[3], d[8], d[9])
+	_, err := f.ins.PlaceDocument(f.ctx, "local", store.Placement{RunID: run.ID, DocumentID: d[9], Similarity: 0.1})
+	require.NoError(t, err)
+
+	got, err := f.ins.Unplaced(f.ctx, "local", run.ID, readAt)
+	require.NoError(t, err)
+	assert.Equal(t, []string{d[8]}, got, "d3 is assigned, d7 indexed before the read, d9 placed")
+	assigned, err := f.ins.Assigned(f.ctx, run.ID, d[3])
+	require.NoError(t, err)
+	assert.True(t, assigned)
+	assigned, err = f.ins.Assigned(f.ctx, run.ID, d[8])
+	require.NoError(t, err)
+	assert.False(t, assigned)
 }

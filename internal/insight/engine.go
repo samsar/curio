@@ -47,6 +47,13 @@ type Config struct {
 	// grouping. No default is applied here — the config layer owns it
 	// (default true).
 	Center bool
+	// Placer places, once a rebuild commits, the documents indexed while
+	// it ran; nil places none.
+	Placer *Placer
+	// Drift says how the embeddings drifted, "" while they haven't: a run
+	// built meanwhile, which only a request makes, says so in its log
+	// line. nil reports no drift.
+	Drift func() string
 }
 
 // Engine rebuilds a tenant's interests: read the document vectors → prepare
@@ -62,6 +69,7 @@ type Engine struct {
 	termLabeler *TermLabeler
 	cfg         Config
 	log         *slog.Logger
+	now         func() time.Time // when a run reads the vectors
 }
 
 // New constructs an Engine. llmLabeler may be nil, in which case labeling
@@ -96,63 +104,98 @@ func New(
 		termLabeler: NewTermLabeler(),
 		cfg:         cfg,
 		log:         log,
+		now:         time.Now,
 	}
 }
 
 // Rebuild regroups the tenant's library and returns the run's ID.
 //
 // It starts from the tenant's latest done run, the prior: warm, from the
-// prior's seeds, when the prior was made by this grouper with these params,
-// fresh otherwise; identities carry over from the prior either way. The
-// split check runs once the changes absorbed since the last one reach four
-// times the change threshold (see plan).
+// prior's seeds, when the prior was made by this grouper with these params
+// and no fresh rebuild is owed, fresh otherwise; identities carry over
+// from the prior either way. The split check runs once the changes absorbed
+// since the last one reach four times the change threshold (see plan).
 //
 // Once grouping starts, the attempt is an interest run that ends done or
 // failed (a failed run's ID comes back with the error). Two paths create no
 // run: with no vectors to group and a prior, the prior's ID is returned, so
 // a library momentarily without vectors (a refetch of every document, say)
 // retires nothing; and a failure before the run is created (reading the
-// prior or the vectors) returns "" and the error.
+// prior, the vectors or the tenant's state) returns "" and the error. Every
+// failure but a cancellation counts as one failed rebuild of the tenant's
+// (InsightStore.RecordFailure), which the scheduler backs off from.
 func (e *Engine) Rebuild(ctx context.Context, tenantID string, trigger store.RunTrigger) (string, error) {
+	in, err := e.read(ctx, tenantID)
+	if err != nil {
+		e.recordFailure(ctx, tenantID, "", 0, err)
+		return "", err
+	}
+	if len(in.dvs) == 0 && in.prior != nil {
+		e.log.Info("interests: no document vectors; keeping the last run", "tenant", tenantID, "run", in.prior.run.ID)
+		return in.prior.run.ID, nil
+	}
+	p := e.plan(in)
+	run := &store.InterestRun{TenantID: tenantID, Trigger: trigger, Grouper: e.grouper.Name(), Params: in.params,
+		VectorsReadAt: &in.readAt, RunOutcome: store.RunOutcome{Kind: p.kind(), SplitCheck: p.split, Shape: p.shape}}
+	if err := e.insights.CreateRun(ctx, run); err != nil {
+		err = fmt.Errorf("create run: %w", err)
+		e.recordFailure(ctx, tenantID, "", len(in.dvs), err)
+		return "", err
+	}
+	if err := e.run(ctx, run, in, p); err != nil {
+		e.recordFailure(ctx, tenantID, run.ID, len(in.dvs), err)
+		return run.ID, err
+	}
+	return run.ID, nil
+}
+
+// input is what a rebuild reads before it plans.
+type input struct {
+	prior  *previous // the latest done run, nil for none
+	readAt time.Time // when the vectors were read
+	dvs    []store.DocVector
+	// changes are what changed since the prior read its vectors, read
+	// after the vectors: what this rebuild absorbs.
+	changes store.RunChanges
+	state   store.InsightState
+	params  []byte // this rebuild's grouper and engine params
+	read    time.Duration
+}
+
+// read reads what a rebuild starts from: the prior with its assignments and
+// groups, the vectors (non-finite ones dropped), the changes since the
+// prior, the tenant's state, and the params.
+func (e *Engine) read(ctx context.Context, tenantID string) (input, error) {
+	var in input
 	priorRun, err := e.insights.LatestRun(ctx, tenantID, store.InterestRunDone)
 	switch {
 	case errors.Is(err, store.ErrNotFound): // the tenant's first rebuild
 	case err != nil:
-		return "", fmt.Errorf("read the latest done run: %w", err)
+		return input{}, fmt.Errorf("read the latest done run: %w", err)
 	}
-	readAt := time.Now().UTC()
+	in.readAt = e.now().UTC()
+	start := time.Now()
 	dvs, err := e.chunks.DocumentVectors(ctx, tenantID)
 	if err != nil {
-		return "", fmt.Errorf("read document vectors: %w", err)
+		return input{}, fmt.Errorf("read document vectors: %w", err)
 	}
-	t := timings{read: time.Since(readAt)}
-	dvs = e.dropNonFinite(tenantID, dvs)
-	if len(dvs) == 0 && priorRun != nil {
-		e.log.Info("interests: no document vectors; keeping the last run", "tenant", tenantID, "run", priorRun.ID)
-		return priorRun.ID, nil
-	}
-	params, err := e.runParams()
-	if err != nil {
-		return "", err
-	}
-	var prior *previous
+	in.read = time.Since(start)
+	in.dvs = e.dropNonFinite(tenantID, dvs)
 	if priorRun != nil {
-		if prior, err = e.readPrior(ctx, priorRun); err != nil {
-			return "", err
+		if in.changes, err = e.insights.Changes(ctx, priorRun); err != nil {
+			return input{}, err
+		}
+		if in.prior, err = e.readPrior(ctx, priorRun); err != nil {
+			return input{}, err
 		}
 	}
-
-	p := e.plan(prior, params, dvs)
-	run := &store.InterestRun{TenantID: tenantID, Trigger: trigger, Grouper: e.grouper.Name(), Params: params,
-		VectorsReadAt: &readAt, RunOutcome: store.RunOutcome{Kind: p.kind(), SplitCheck: p.split, Shape: p.shape}}
-	if err := e.insights.CreateRun(ctx, run); err != nil {
-		return "", fmt.Errorf("create run: %w", err)
+	if in.state, err = e.insights.State(ctx, tenantID); err != nil {
+		return input{}, err
 	}
-	if err := e.run(ctx, run, prior, p, dvs, t); err != nil {
-		e.recordFailure(ctx, tenantID, run.ID, len(dvs), err)
-		return run.ID, err
+	if in.params, err = e.runParams(); err != nil {
+		return input{}, err
 	}
-	return run.ID, nil
+	return in, nil
 }
 
 // readPrior reads what a rebuild starts from of the prior run: its
@@ -171,11 +214,11 @@ func (e *Engine) readPrior(ctx context.Context, run *store.InterestRun) (*previo
 
 // plan is what a rebuild sets out to do, decided before it groups.
 type plan struct {
-	// warm: the prior was made by this grouper with these params, so the
-	// grouping can start from its seeds.
+	// warm: the prior was made by this grouper with these params, and no
+	// fresh rebuild is owed, so the grouping can start from its seeds.
 	warm  bool
 	shape store.InterestShape // the prior's shape, or flat
-	// changed counts the documents added or gone since the prior.
+	// changed counts the documents changed since the prior.
 	changed int
 	split   bool
 }
@@ -188,29 +231,38 @@ func (p plan) kind() store.RunKind {
 	return store.RunKindFresh
 }
 
-// The split check's cadence: it runs once the changes absorbed since the
-// last one reach splitEvery times the change threshold, max(minChanges,
-// ⌈changeShare of the prior's documents⌉). A library rebuilt at every
-// threshold's worth of changes is split-checked every fourth rebuild; a
-// rebuild sooner moves the check closer only by the changes it absorbed.
-const (
-	changeShare = 0.05
-	minChanges  = 5
-	splitEvery  = 4
-)
+// splitEvery is the split check's cadence: it runs once the changes
+// absorbed since the last one reach splitEvery times the change Threshold
+// of the prior's documents. A library rebuilt at every threshold's worth
+// of changes is split-checked every fourth rebuild; a rebuild sooner moves
+// the check closer only by the changes it absorbed.
+const splitEvery = 4
 
-func (e *Engine) plan(prior *previous, params []byte, dvs []store.DocVector) plan {
-	if prior == nil {
+func (e *Engine) plan(in input) plan {
+	if in.prior == nil {
 		return plan{shape: store.InterestShapeFlat}
 	}
+	prior := in.prior.run
 	p := plan{
-		warm:    prior.run.Grouper == e.grouper.Name() && bytes.Equal(prior.run.Params, params),
-		shape:   prior.run.Shape,
-		changed: prior.changed(dvs),
+		warm:    in.state.FreshOwed == "" && !e.paramsChanged(prior, in.params),
+		shape:   prior.Shape,
+		changed: in.changes.Total(),
 	}
-	threshold := max(minChanges, int(math.Ceil(changeShare*float64(prior.run.NumDocuments))))
-	p.split = p.warm && prior.run.ChangesSinceSplit+p.changed >= splitEvery*threshold
+	p.split = p.warm && prior.ChangesSinceSplit+p.changed >= splitEvery*Threshold(prior.NumDocuments)
 	return p
+}
+
+// ParamsChanged reports whether run was grouped by another grouper, or
+// with other params, than a rebuild now would be: the next rebuild is then
+// fresh, and the scheduler owes it. Params that don't encode report no
+// change: the rebuild fails on them, and says why.
+func (e *Engine) ParamsChanged(run *store.InterestRun) bool {
+	params, err := e.runParams()
+	return err == nil && e.paramsChanged(run, params)
+}
+
+func (e *Engine) paramsChanged(run *store.InterestRun, params []byte) bool {
+	return run.Grouper != e.grouper.Name() || !bytes.Equal(run.Params, params)
 }
 
 // timings are how long each part of a rebuild took, for its log line.
@@ -219,10 +271,11 @@ type timings struct {
 }
 
 // run does the work of one rebuild after its run is created: group, label
-// and commit, then prune.
-func (e *Engine) run(ctx context.Context, run *store.InterestRun, prior *previous, p plan, dvs []store.DocVector, t timings) error {
+// and commit, then prune and place the documents indexed meanwhile.
+func (e *Engine) run(ctx context.Context, run *store.InterestRun, in input, p plan) error {
+	t := timings{read: in.read}
 	start := time.Now()
-	gr, err := e.group(ctx, prior, p, dvs)
+	gr, err := e.group(ctx, in.prior, p, in.dvs)
 	if err != nil {
 		return err
 	}
@@ -236,14 +289,30 @@ func (e *Engine) run(ctx context.Context, run *store.InterestRun, prior *previou
 	t.label = time.Since(start)
 
 	start = time.Now()
-	c := gr.commit(run, prior, labels)
+	c := gr.commit(run, in.prior, labels)
 	if err := e.insights.CommitRun(ctx, c); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 	e.prune(ctx, run.TenantID, run.ID)
 	t.persist = time.Since(start)
-	e.logRebuilt(run, c, gr, stats, t)
+	e.logRebuilt(run, c, gr, stats, t, e.sweep(ctx, run.TenantID))
 	return nil
+}
+
+// sweep places the documents indexed while the rebuild ran into it, best
+// effort, and returns how many it placed.
+func (e *Engine) sweep(ctx context.Context, tenantID string) int {
+	if e.cfg.Placer == nil {
+		return 0
+	}
+	placed, err := e.cfg.Placer.Sweep(ctx, tenantID)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		e.log.Debug("interests: the placement sweep after the rebuild was cancelled", "tenant", tenantID, "err", err)
+	case err != nil:
+		e.log.Warn("interests: the placement sweep after the rebuild failed", "tenant", tenantID, "err", err)
+	}
+	return placed
 }
 
 // group runs the grouping steps: Group, from the prior's seeds when the
@@ -280,10 +349,11 @@ func (e *Engine) prune(ctx context.Context, tenantID, runID string) {
 	}
 }
 
-// logRebuilt writes the rebuild's one INFO line.
-func (e *Engine) logRebuilt(run *store.InterestRun, c store.RunCommit, gr *grouped, stats labelStats, t timings) {
+// logRebuilt writes the rebuild's one INFO line; placed is how many
+// documents the sweep after it placed.
+func (e *Engine) logRebuilt(run *store.InterestRun, c store.RunCommit, gr *grouped, stats labelStats, t timings, placed int) {
 	o, areas := c.Outcome, gr.areas.Counts
-	e.log.Info("interests rebuilt",
+	args := []any{
 		"tenant", run.TenantID, "run", run.ID, "trigger", run.Trigger, "kind", o.Kind, "split_check", o.SplitCheck,
 		"shape", o.Shape, "documents", o.NumDocuments, "areas", o.NumAreas, "interests", o.NumInterests,
 		"kept", o.Kept, "created", o.Created, "split", o.Split, "merged", o.Merged, "moved", o.Moved,
@@ -291,7 +361,12 @@ func (e *Engine) logRebuilt(run *store.InterestRun, c store.RunCommit, gr *group
 		"areas_dissolved", areas.Dissolved, "loose", o.NumLoose, "unsorted", o.NumUnsorted,
 		"changed", o.ChangedDocuments, "read_ms", t.read.Milliseconds(), "group_ms", t.group.Milliseconds(),
 		"label_ms", t.label.Milliseconds(), "labels_llm", stats.llm, "labels_terms", stats.terms,
-		"persist_ms", t.persist.Milliseconds())
+		"persist_ms", t.persist.Milliseconds(), "placed_after", placed,
+	}
+	if e.cfg.Drift != nil && e.cfg.Drift() != "" {
+		args = append(args, "embeddings_drifted", true)
+	}
+	e.log.Info("interests rebuilt", args...)
 }
 
 // maxLoggedIDs bounds how many document IDs one warning lists.
@@ -329,20 +404,60 @@ func nonFinite(dv store.DocVector) bool {
 	})
 }
 
-// bookkeepingTimeout bounds recording a failed run. It runs detached from the
-// run's context, which is often why the run failed (daemon shutdown), so the
-// row doesn't stay "running" forever.
+// bookkeepingTimeout bounds recording a failed rebuild. It runs detached
+// from the rebuild's context, which is often why it failed (daemon
+// shutdown), so a run doesn't stay "running" forever.
 const bookkeepingTimeout = 10 * time.Second
 
-// recordFailure marks the run failed and prunes stale runs, keeping the last
-// good run's interests and this failure.
+// abandonedMessage is the error of a rebuild a daemon left unfinished.
+const abandonedMessage = "the daemon stopped during this rebuild (it crashed, was killed, or outran the shutdown grace)"
+
+// recordFailure records a failed rebuild, failing its run (runID, "" when
+// it failed before creating one) and pruning stale runs, which keeps the
+// last good run's interests and this failure. A failure counts, and is
+// warned about with its retry time, unless the rebuild was cancelled: a
+// rebuild the daemon's shutdown cut short is requeued and runs again, so it
+// failed nothing.
 func (e *Engine) recordFailure(ctx context.Context, tenantID, runID string, numDocuments int, cause error) {
 	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookkeepingTimeout)
 	defer cancel()
-	if err := e.insights.FailRun(bctx, runID, numDocuments, cause.Error()); err != nil {
-		e.log.Warn("interests: mark the run failed", "run", runID, "err", err)
+	switch {
+	case ctx.Err() != nil || errors.Is(cause, context.Canceled):
+		e.log.Debug("interests: rebuild cancelled", "tenant", tenantID, "run", runID, "err", cause)
+		if runID == "" {
+			return
+		}
+		if err := e.insights.FailRun(bctx, runID, numDocuments, cause.Error()); err != nil {
+			e.log.Warn("interests: mark the cancelled run failed", "run", runID, "err", err)
+		}
+	default:
+		st, err := e.insights.RecordFailure(bctx, tenantID, runID, numDocuments, cause.Error())
+		if err != nil {
+			e.log.Warn("interests: record a failed rebuild", "tenant", tenantID, "run", runID, "err", err,
+				"rebuild_err", cause)
+		} else {
+			e.log.Warn("interests: rebuild failed", "tenant", tenantID, "run", runID, "err", cause,
+				"failures", st.Failures, "retry_at", RetryAt(st))
+		}
+		if runID == "" {
+			return
+		}
 	}
 	e.pruneStaleRuns(bctx, tenantID, runID)
+}
+
+// Abandoned records a rebuild of the tenant's that a daemon left
+// unfinished (it crashed, was killed, or outran the shutdown grace): its
+// running runs fail, and it counts as one failed rebuild, so the scheduler
+// backs off rather than run what may have killed the daemon again at once.
+func (e *Engine) Abandoned(ctx context.Context, tenantID string) error {
+	st, err := e.insights.RecordAbandoned(ctx, tenantID, abandonedMessage)
+	if err != nil {
+		return fmt.Errorf("record the rebuild the daemon left unfinished: %w", err)
+	}
+	e.log.Warn("interests: rebuild failed", "tenant", tenantID, "err", abandonedMessage, "failures", st.Failures,
+		"retry_at", RetryAt(st))
+	return nil
 }
 
 // runParams is the JSON recorded on a run: the grouper's parameters plus the

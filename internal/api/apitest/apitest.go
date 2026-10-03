@@ -26,6 +26,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/drift"
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
@@ -55,8 +56,47 @@ type Server struct {
 	// Startup is the progress the server reports until Ready, for a server
 	// from StartNotReady: its phase is initializing until a test sets it.
 	Startup *api.Startup
+	// Interests is the interest scheduler healthz and the interests' next
+	// report, unless an opt replaced it: a new home's at first.
+	Interests *Interests
 
 	srv *api.Server
+}
+
+// Interests is an interest scheduler whose snapshot a test sets, and which
+// counts the kicks it is given. Safe for concurrent use.
+type Interests struct {
+	mu    sync.Mutex
+	snap  insight.Snapshot
+	kicks int
+}
+
+// Snapshot implements api.InterestScheduler.
+func (i *Interests) Snapshot() insight.Snapshot {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.snap
+}
+
+// Kick implements api.InterestScheduler.
+func (i *Interests) Kick() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.kicks++
+}
+
+// Set makes s the snapshot reported from now on.
+func (i *Interests) Set(s insight.Snapshot) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.snap = s
+}
+
+// Kicks is how many kicks the scheduler was given.
+func (i *Interests) Kicks() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.kicks
 }
 
 // DefaultUI is how the daemon serves the dashboard with config.yaml's
@@ -116,6 +156,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 	if err != nil {
 		t.Fatalf("queue gate: %v", err)
 	}
+	interests := &Interests{snap: insight.Snapshot{State: insight.StateNone, RebuildAt: insight.FirstRebuildAt}}
 	deps := api.Deps{
 		Home:           home,
 		Documents:      docs,
@@ -126,6 +167,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 		Search:         search.New(chunks, docs, emb, search.Config{Log: quiet}),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
+		Interests:      interests,
 		Gate:           gate,
 		TenantID:       TenantID,
 		Log:            quiet,
@@ -155,7 +197,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 		}
 	})
 	return &Server{URL: "http://" + ln.Addr().String(), Home: home, DB: db, Deps: deps, Embedder: emb,
-		Startup: startup, srv: srv}
+		Startup: startup, Interests: interests, srv: srv}
 }
 
 // Ready swaps in the full API, as the daemon does once it has started. It
@@ -395,6 +437,20 @@ func (s *Server) SplitInterest(t testing.TB, prev Run, id string, a, b Interest)
 		out.Interests = append(out.Interests, in)
 	}
 	return out
+}
+
+// Place places doc into run's interest, "" for its Unsorted, since the
+// run, as the placer writes it: run must be the latest done run.
+func (s *Server) Place(t testing.TB, run Run, interest string, doc *store.Document) {
+	t.Helper()
+	placed, err := s.insights().PlaceDocument(context.Background(), TenantID,
+		store.Placement{RunID: run.ID, DocumentID: doc.ID, InterestID: interest, Similarity: 0.5})
+	if err != nil {
+		t.Fatalf("place document %s: %v", doc.ID, err)
+	}
+	if !placed {
+		t.Fatalf("place document %s: run %s isn't the latest done run, or assigned it", doc.ID, run.ID)
+	}
 }
 
 // AddFailedRun records a rebuild that failed with msg, the newest run,

@@ -29,6 +29,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
@@ -973,7 +974,7 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 		chunks.dvs = append(chunks.dvs, store.DocVector{DocumentID: d.ID, Vector: []float32{1, 0, 0}})
 	}
 
-	eng, err := newInsightEngine(context.Background(), cfg, docs, chunks, insights)
+	eng, err := newInsightEngine(context.Background(), cfg, docs, chunks, insights, nil, nil)
 	require.NoError(t, err)
 
 	// Ollama starts only now.
@@ -1000,7 +1001,7 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 	assert.Equal(t, store.LabelSourceLLM, groups[0].LabelSource)
 }
 
-// clusterJobs lists home's pending cluster jobs' payloads.
+// clusterJobs lists the pending cluster jobs' payloads.
 func clusterJobs(t *testing.T, db *sqlitestore.DB) []string {
 	t.Helper()
 	rows, err := db.Query(`SELECT payload FROM jobs WHERE kind = 'cluster' AND status = 'pending'`)
@@ -1016,11 +1017,13 @@ func clusterJobs(t *testing.T, db *sqlitestore.DB) []string {
 	return out
 }
 
-// TestStart_QueuesTheFirstRebuild: a daemon starting on a library no
-// rebuild has grouped queues one, with trigger first, unless one is
-// already pending; a done rebuild, or insight off, queues none.
-func TestStart_QueuesTheFirstRebuild(t *testing.T) {
-	startOn := func(t *testing.T, home *curiohome.Home, enabled bool) (*sqlitestore.DB, *recorder) {
+// TestStart_ChecksTheInterests: a daemon checks the interests once before
+// its API is up and any worker claims: a library no rebuild has grouped,
+// with 20 documents indexed and nothing since, gets its first rebuild
+// queued; a new, empty one gets none and is reported waiting; with
+// insight off there is no scheduler.
+func TestStart_ChecksTheInterests(t *testing.T) {
+	startOn := func(t *testing.T, home *curiohome.Home, enabled bool) (*daemon, *sqlitestore.DB, *recorder) {
 		t.Helper()
 		cfg, err := config.Load(home.ConfigPath())
 		require.NoError(t, err)
@@ -1031,46 +1034,47 @@ func TestStart_QueuesTheFirstRebuild(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { assert.NoError(t, db.Close()) })
 		logs := recordLogs(t)
-		_, err = start(context.Background(), cfg, home, meta, db, api.NewStartup())
+		d, err := start(context.Background(), cfg, home, meta, db, api.NewStartup())
 		require.NoError(t, err)
-		return db, logs
+		return d, db, logs
 	}
 
 	t.Run("a new home", func(t *testing.T) {
-		home := newHome(t, freeLoopbackAddr(t))
-		db, logs := startOn(t, home, true)
-		assert.Equal(t, []string{`{"trigger":"first"}`}, clusterJobs(t, db))
-		enqueued := logs.messages("interests: rebuild enqueued")
-		require.Len(t, enqueued, 1)
-		assert.Equal(t, store.RunTriggerFirst, enqueued[0]["trigger"])
-		assert.Equal(t, true, enqueued[0]["queued"])
-		assert.NotEmpty(t, enqueued[0]["job"])
-
-		_, logs = startOn(t, home, true)
-		assert.Len(t, clusterJobs(t, db), 1, "still the one, pending")
-		assert.Equal(t, false, logs.messages("interests: rebuild enqueued")[0]["queued"])
+		d, db, logs := startOn(t, newHome(t, freeLoopbackAddr(t)), true)
+		assert.Empty(t, clusterJobs(t, db))
+		assert.Empty(t, logs.messages("interests: rebuild enqueued"))
+		require.NotNil(t, d.scheduler)
+		snap := d.scheduler.Snapshot()
+		assert.Equal(t, insight.StateNone, snap.State, "checked before the API is up")
+		assert.Equal(t, insight.FirstRebuildAt, snap.RebuildAt)
+		assert.Equal(t, d.scheduler, d.apiDeps.Interests, "the API serves its snapshot")
 	})
-	t.Run("a done rebuild", func(t *testing.T) {
+	t.Run("a library to group", func(t *testing.T) {
 		home := newHome(t, freeLoopbackAddr(t))
 		db, err := sqlitestore.Open(context.Background(), home.DBPath())
 		require.NoError(t, err)
 		_, err = sqlitestore.Migrate(context.Background(), db)
 		require.NoError(t, err)
-		ins := sqlitestore.NewInsights(db)
-		run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerFirst, Grouper: "louvain",
-			RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}}
-		require.NoError(t, ins.CreateRun(context.Background(), run))
-		require.NoError(t, ins.CommitRun(context.Background(), store.RunCommit{RunID: run.ID, TenantID: "local",
-			Outcome: run.RunOutcome}))
+		for i := range insight.FirstRebuildAt {
+			_, err := db.Exec(`INSERT INTO documents (id, tenant_id, url, state, indexed_at)
+				VALUES (?, 'local', ?, 'fetched', '2026-01-01T00:00:00.000Z')`,
+				fmt.Sprintf("doc-%d", i), fmt.Sprintf("https://example.com/%d", i))
+			require.NoError(t, err)
+		}
 		require.NoError(t, db.Close())
 
-		db, logs := startOn(t, home, true)
-		assert.Empty(t, clusterJobs(t, db))
-		assert.Empty(t, logs.messages("interests: rebuild enqueued"))
+		d, db, logs := startOn(t, home, true)
+		assert.Equal(t, []string{`{"trigger":"first"}`}, clusterJobs(t, db))
+		enqueued := logs.messages("interests: rebuild enqueued")
+		require.Len(t, enqueued, 1)
+		assert.Equal(t, store.RunTriggerFirst, enqueued[0]["trigger"])
+		assert.Equal(t, insight.StateQueued, d.scheduler.Snapshot().State)
 	})
 	t.Run("insight off", func(t *testing.T) {
-		db, _ := startOn(t, newHome(t, freeLoopbackAddr(t)), false)
+		d, db, _ := startOn(t, newHome(t, freeLoopbackAddr(t)), false)
 		assert.Empty(t, clusterJobs(t, db))
+		assert.Nil(t, d.scheduler)
+		assert.Nil(t, d.apiDeps.Interests, "no scheduler, so the API reports off")
 	})
 }
 

@@ -120,6 +120,7 @@ documents
   current_extraction_id UUID                   -- FK to latest successful extraction
   state                 TEXT NOT NULL          -- 'pending' | 'fetched' | 'failed' | 'dead'
   failure_cause         TEXT                   -- why a failed or dead document failed; NULL otherwise
+  indexed_at            TIMESTAMP              -- when its vectors were last written; NULL until it is fetched
   created_at, updated_at
   UNIQUE (tenant_id, url)
 ```
@@ -141,6 +142,17 @@ index `idx_documents_tenant_cause_updated (tenant_id, failure_cause,
 updated_at, id) WHERE failure_cause IS NOT NULL` serves the cause filters
 and the failure summary, and holds only the documents that failed. See
 [Failure causes: recorded when a document fails](./decisions.md#failure-causes-recorded-when-a-document-fails).
+
+`indexed_at` (migration 017) is when the document's vectors were last
+written: the index step's `MarkFetched` sets it, in the statement that
+marks the document fetched and to the same instant as `updated_at`, and no
+other write touches it (a refetch leaves it, so it says when the vectors
+the document still has were written). The interests read it: what changed
+since a rebuild is counted from it, and the scheduler waits until nothing
+was indexed for a while. `idx_documents_tenant_indexed (tenant_id,
+indexed_at)` serves both: the documents indexed since a time, and the
+latest time. 017 set it to `updated_at` for every document fetched then,
+which `MarkFetched` alone leaves fetched.
 
 ### `document_extractions`
 
@@ -374,7 +386,7 @@ interest_runs
   vectors_read_at     TIMESTAMP  -- when it read the document vectors
   mean                BLOB     -- the centering mean; NULL when not centered
   num_documents, num_areas, num_interests, num_loose, num_unsorted   INTEGER
-  changed_documents   INTEGER  -- documents added or gone since the previous run
+  changed_documents   INTEGER  -- documents added, left, deleted or reindexed since the previous run read its vectors
   changes_since_split INTEGER  -- changes absorbed since the last split check
   kept, created, split, merged, moved, dissolved   INTEGER  -- what it did to interest identities
   error               TEXT     -- set when failed
@@ -478,9 +490,11 @@ similar first.
 #### `interest_placements`
 
 Documents placed into the current grouping between rebuilds, newest first
-per interest (`interest_id` NULL: unsorted). Read by the API and the
-dashboard; nothing writes them yet (placement arrives with automatic
-rebuilds). They go with their run.
+per interest (`interest_id` NULL: unsorted, `similarity` then to the
+nearest interest). The index step writes one when it marks a document
+fetched, and a sweep after each rebuild, and at the daemon's start, those
+it missed; every write checks its run is still the latest done one and
+didn't group the document. They go with their run.
 
 ```
 interest_placements
@@ -516,12 +530,30 @@ a retired identity's rows stay until its retention ends.
 
 #### `insight_state`
 
-Per tenant, what a rebuild can't derive from its runs: a fresh grouping
-owed (`fresh_owed`: `reindex`, `params` or `shape`), and failures in a row
-(`failures`, `last_failure_at`). Created for automatic rebuilds, which
-come next; nothing reads or writes it yet. It has no shape column: the
-current done run's `shape` is the state the grouper reads, and two copies
-could disagree.
+Per tenant, what a rebuild can't derive from its runs (rebuilt by
+migration 017):
+
+```
+insight_state
+  tenant_id        TEXT PK
+  fresh_owed       TEXT     -- 'reindex' | 'manual': the next rebuild must be fresh; NULL when it needn't be
+  fresh_owed_at    TIMESTAMP  -- when it was last owed; NULL exactly when fresh_owed is
+  failures         INTEGER  -- rebuilds failed since the last done one
+  last_failure_at  TIMESTAMP
+  last_error       TEXT
+  updated_at       TIMESTAMP
+```
+
+`curio reindex --all` owes `reindex` (the scheduler waits for the
+re-embedding to drain, and placement holds meanwhile); `curio interests
+rebuild --fresh` owes `manual`, which never replaces `reindex`. A fresh
+run clears it in its commit only when it was owed at or before the run
+read its vectors, so one owed again during a rebuild survives it. A change
+of the grouper's params needs no row: each run records them. Every failed
+rebuild but a cancelled one adds a failure; the scheduler waits 15
+minutes after the first, doubling to 4 hours; a done rebuild clears them.
+There is no shape column: the current done run's `shape` is the state the
+grouper reads, and two copies could disagree.
 
 ### Deferred insight tables (not in v1)
 

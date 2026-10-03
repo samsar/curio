@@ -36,7 +36,11 @@ every job is enqueued, the daemon takes the build serving now as the new
 baseline.
 
 Documents must already have content: --all targets state=fetched by default
-and, in any state, skips documents that were never fetched.`,
+and, in any state, skips documents that were never fetched.
+
+Re-embedding the fetched documents also regroups the interests from scratch
+once the re-embedding finishes: until then they keep their last grouping,
+and documents indexed meanwhile join them then.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
@@ -82,5 +86,9 @@ func reindexAll(ctx context.Context, w io.Writer, c *client.Client, state string
 		label = "documents in state=" + state
 	}
 	fmt.Fprintf(w, "reindex enqueued for %s: %d jobs\n", label, resp.JobsEnqueued)
+	if (state == "" || state == "fetched") && resp.JobsEnqueued > 0 {
+		fmt.Fprintln(w, "interests are regrouped from scratch once the re-embedding finishes; "+
+			"documents indexed meanwhile join them then")
+	}
 	return nil
 }

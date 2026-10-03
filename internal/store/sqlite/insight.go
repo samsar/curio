@@ -14,11 +14,11 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// Insights implements store.InsightStore over migration 016's tables:
-// interest_runs, the identities in interests, and each run's
-// interest_groups, interest_assignments and interest_placements, with the
-// interest_lineage that outlives runs. The current grouping is the latest
-// done run's.
+// Insights implements store.InsightStore over migration 016's tables, as
+// 017 left them: interest_runs, the identities in interests, and each
+// run's interest_groups, interest_assignments and interest_placements, with
+// the interest_lineage that outlives runs, and each tenant's
+// insight_state. The current grouping is the latest done run's.
 type Insights struct {
 	db *DB
 }
@@ -165,8 +165,43 @@ func (s *Insights) CommitRun(ctx context.Context, c store.RunCommit) error {
 	if err := runTransitioned(ctx, tx, res, c.RunID); err != nil {
 		return fmt.Errorf("commit interest run: %w", err)
 	}
+	if err := commitState(ctx, tx, c, now); err != nil {
+		return fmt.Errorf("commit interest run %s: %w", c.RunID, err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit interest run %s: %w", c.RunID, err)
+	}
+	return nil
+}
+
+// The statements a commit runs on the tenant's insight_state, both on its
+// primary key.
+const (
+	// clearFailuresSQL resets the tenant's failures: a done rebuild is what
+	// they count up to. Its args are the time and the tenant.
+	clearFailuresSQL = `
+	UPDATE insight_state SET failures = 0, last_failure_at = NULL, last_error = NULL, updated_at = ?
+	WHERE tenant_id = ? AND failures > 0`
+	// consumeFreshSQL clears the fresh rebuild the tenant owes when it was
+	// owed at or before a fresh run read its vectors; one owed again since
+	// stays owed. Its args are the time, the tenant and the run.
+	consumeFreshSQL = `
+	UPDATE insight_state SET fresh_owed = NULL, fresh_owed_at = NULL, updated_at = ?
+	WHERE tenant_id = ? AND fresh_owed_at <= (SELECT vectors_read_at FROM interest_runs WHERE id = ?)`
+)
+
+// commitState is what a commit changes in the tenant's insight_state,
+// inside its transaction: no failures, and for a fresh run, the fresh
+// rebuild it consumed.
+func commitState(ctx context.Context, tx *sql.Tx, c store.RunCommit, now string) error {
+	if _, err := tx.ExecContext(ctx, clearFailuresSQL, now, c.TenantID); err != nil {
+		return fmt.Errorf("clear the failures: %w", err)
+	}
+	if c.Outcome.Kind != store.RunKindFresh {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, consumeFreshSQL, now, c.TenantID, c.RunID); err != nil {
+		return fmt.Errorf("clear the fresh rebuild owed: %w", err)
 	}
 	return nil
 }
@@ -298,6 +333,147 @@ func (s *Insights) FailRun(ctx context.Context, runID string, numDocuments int, 
 		return fmt.Errorf("fail interest run %s: %w", runID, err)
 	}
 	return runTransitioned(ctx, s.db, res, runID)
+}
+
+// insightStateColumns are a tenant's insight_state, in scanInsightState's
+// order.
+const insightStateColumns = `fresh_owed, fresh_owed_at, failures, last_failure_at, last_error`
+
+// The insight_state statements, each on its primary key.
+const (
+	insightStateSQL = `SELECT ` + insightStateColumns + ` FROM insight_state WHERE tenant_id = ?`
+	// oweFreshSQL owes the tenant a fresh rebuild, for a reason, from a
+	// time: always for a re-embedding, and for a manual request unless a
+	// re-embedding's is owed. Its args are the tenant, the reason, the
+	// time and store.FreshReindex.
+	oweFreshSQL = `
+	INSERT INTO insight_state (tenant_id, fresh_owed, fresh_owed_at, updated_at) VALUES (?1, ?2, ?3, ?3)
+	ON CONFLICT (tenant_id) DO UPDATE SET fresh_owed = excluded.fresh_owed, fresh_owed_at = excluded.fresh_owed_at,
+		updated_at = excluded.updated_at
+	WHERE excluded.fresh_owed = ?4 OR insight_state.fresh_owed IS NOT ?4`
+	// recordFailureSQL counts one more failed rebuild of the tenant's,
+	// failing at a time with an error, and returns the row. Its args are
+	// the tenant, the time and the error.
+	recordFailureSQL = `
+	INSERT INTO insight_state (tenant_id, failures, last_failure_at, last_error, updated_at) VALUES (?1, 1, ?2, ?3, ?2)
+	ON CONFLICT (tenant_id) DO UPDATE SET failures = insight_state.failures + 1,
+		last_failure_at = excluded.last_failure_at, last_error = excluded.last_error, updated_at = excluded.updated_at
+	RETURNING ` + insightStateColumns
+)
+
+func (s *Insights) State(ctx context.Context, tenantID string) (store.InsightState, error) {
+	st, err := scanInsightState(s.db.QueryRowContext(ctx, insightStateSQL, tenantID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.InsightState{}, nil
+	}
+	if err != nil {
+		return store.InsightState{}, fmt.Errorf("read insight state: %w", err)
+	}
+	return st, nil
+}
+
+func (s *Insights) OweFresh(ctx context.Context, tenantID string, reason store.FreshReason) error {
+	if !reason.Valid() {
+		return fmt.Errorf("owe a fresh rebuild: reason %q is not one of the FreshReason constants", reason)
+	}
+	if _, err := s.db.ExecContext(ctx, oweFreshSQL, tenantID, reason, formatTime(time.Now()), store.FreshReindex); err != nil {
+		return fmt.Errorf("owe a fresh rebuild (%s): %w", reason, err)
+	}
+	return nil
+}
+
+func (s *Insights) RecordFailure(ctx context.Context, tenantID, runID string, numDocuments int, msg string) (store.InsightState, error) {
+	return s.withFailure(ctx, tenantID, msg, func(tx *sql.Tx, now string) error {
+		if runID == "" {
+			return nil
+		}
+		res, err := tx.ExecContext(ctx, failRunSQL,
+			store.InterestRunFailed, numDocuments, msg, now, now, runID, store.InterestRunRunning)
+		if err != nil {
+			return fmt.Errorf("fail interest run %s: %w", runID, err)
+		}
+		return runTransitioned(ctx, tx, res, runID)
+	})
+}
+
+// abandonRunsSQL fails every running run of a tenant's. Its args are the
+// status, the error, the time twice, the tenant and the running status.
+const abandonRunsSQL = `
+	UPDATE interest_runs SET status = ?, error = ?, finished_at = ?, updated_at = ?
+	WHERE tenant_id = ? AND status = ?`
+
+func (s *Insights) RecordAbandoned(ctx context.Context, tenantID, msg string) (store.InsightState, error) {
+	return s.withFailure(ctx, tenantID, msg, func(tx *sql.Tx, now string) error {
+		_, err := tx.ExecContext(ctx, abandonRunsSQL,
+			store.InterestRunFailed, msg, now, now, tenantID, store.InterestRunRunning)
+		if err != nil {
+			return fmt.Errorf("fail the running interest runs: %w", err)
+		}
+		return nil
+	})
+}
+
+// withFailure runs fail, then counts one failed rebuild of the tenant's
+// with msg, in one transaction at one time, and returns the tenant's state
+// after.
+func (s *Insights) withFailure(ctx context.Context, tenantID, msg string, fail func(tx *sql.Tx, now string) error) (store.InsightState, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return store.InsightState{}, fmt.Errorf("record a failed rebuild: begin: %w", err)
+	}
+	defer tx.Rollback()
+	now := formatTime(time.Now())
+	if err := fail(tx, now); err != nil {
+		return store.InsightState{}, fmt.Errorf("record a failed rebuild: %w", err)
+	}
+	st, err := scanInsightState(tx.QueryRowContext(ctx, recordFailureSQL, tenantID, now, msg))
+	if err != nil {
+		return store.InsightState{}, fmt.Errorf("record a failed rebuild: count it: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return store.InsightState{}, fmt.Errorf("record a failed rebuild: commit: %w", err)
+	}
+	return st, nil
+}
+
+// changesSQL counts what changed since a run read its vectors, in one
+// statement so every count is of one snapshot: the fetched documents
+// indexed since, unassigned and assigned (a range of
+// idx_documents_tenant_indexed each, the run's assignment checked by its
+// primary key); the documents the run assigned that are pending, failed or
+// dead now; and the run's assignments left. The third is driven from the
+// documents in those states on idx_documents_tenant_state_updated, a few
+// thousand at most: driven from the run's assignments with d.tenant_id = ?,
+// SQLite walks every document of the tenant (see "Interests page by offset
+// within a run"). Its args are the tenant, the time, the fetched state,
+// the run, then the pending, failed and dead states.
+const changesSQL = `
+	SELECT
+		(SELECT count(*) FROM documents d
+		 WHERE d.tenant_id = ?1 AND d.indexed_at >= ?2 AND d.state = ?3
+		   AND NOT EXISTS (SELECT 1 FROM interest_assignments a WHERE a.run_id = ?4 AND a.document_id = d.id)),
+		(SELECT count(*) FROM documents d
+		 WHERE d.tenant_id = ?1 AND d.indexed_at >= ?2 AND d.state = ?3
+		   AND EXISTS (SELECT 1 FROM interest_assignments a WHERE a.run_id = ?4 AND a.document_id = d.id)),
+		(SELECT count(*) FROM documents d
+		 WHERE d.tenant_id = ?1 AND d.state IN (?5, ?6, ?7)
+		   AND EXISTS (SELECT 1 FROM interest_assignments a WHERE a.run_id = ?4 AND a.document_id = d.id)),
+		(SELECT count(*) FROM interest_assignments WHERE run_id = ?4)`
+
+func (s *Insights) Changes(ctx context.Context, run *store.InterestRun) (store.RunChanges, error) {
+	since := run.StartedAt
+	if run.VectorsReadAt != nil {
+		since = *run.VectorsReadAt
+	}
+	var c store.RunChanges
+	var assigned int
+	err := s.db.QueryRowContext(ctx, changesSQL, run.TenantID, formatTime(since), store.DocStateFetched, run.ID,
+		store.DocStatePending, store.DocStateFailed, store.DocStateDead).Scan(&c.Added, &c.Reindexed, &c.Left, &assigned)
+	if err != nil {
+		return store.RunChanges{}, fmt.Errorf("count the changes since run %s: %w", run.ID, err)
+	}
+	c.Deleted = run.NumDocuments - assigned
+	return c, nil
 }
 
 // runStatusSQL reads a run's status by its primary key.
@@ -742,6 +918,143 @@ func (s *Insights) PlacementCounts(ctx context.Context, runID string) (map[strin
 	return out, nil
 }
 
+// The placement statements. A placement is guarded by its run being the
+// tenant's latest done run (latestRunSQL's order, on
+// idx_interest_runs_tenant_status), so one made from a run a rebuild has
+// replaced writes nothing; a document the run assigned, or one deleted, is
+// left out, each checked by its primary key.
+const (
+	// assignedSQL reports whether a run assigned a document, by the
+	// assignments' primary key.
+	assignedSQL = `SELECT EXISTS (SELECT 1 FROM interest_assignments WHERE run_id = ? AND document_id = ?)`
+	// placeDocumentSQL places a document into a run, or places it anew.
+	// Its args are the run, the document, the interest, the similarity,
+	// the time, the tenant and the done status.
+	placeDocumentSQL = `
+	INSERT INTO interest_placements (run_id, document_id, interest_id, similarity, placed_at)
+	SELECT ?1, ?2, ?3, ?4, ?5
+	WHERE ?1 = (SELECT id FROM interest_runs WHERE tenant_id = ?6 AND status = ?7
+	            ORDER BY started_at DESC, rowid DESC LIMIT 1)
+	  AND NOT EXISTS (SELECT 1 FROM interest_assignments WHERE run_id = ?1 AND document_id = ?2)
+	  AND EXISTS (SELECT 1 FROM documents WHERE id = ?2)
+	ON CONFLICT (run_id, document_id) DO UPDATE SET interest_id = excluded.interest_id,
+		similarity = excluded.similarity, placed_at = excluded.placed_at`
+	// placeIfAbsentSQL places a document into a run unless it is placed
+	// already, inside PlaceMany's transaction, which checked the run. Its
+	// args are the run, the document, the interest, the similarity and
+	// the time.
+	placeIfAbsentSQL = `
+	INSERT INTO interest_placements (run_id, document_id, interest_id, similarity, placed_at)
+	SELECT ?1, ?2, ?3, ?4, ?5
+	WHERE NOT EXISTS (SELECT 1 FROM interest_assignments WHERE run_id = ?1 AND document_id = ?2)
+	  AND EXISTS (SELECT 1 FROM documents WHERE id = ?2)
+	ON CONFLICT (run_id, document_id) DO NOTHING`
+	// unplacedSQL lists the fetched documents indexed since a time that a
+	// run neither assigned nor placed: a range of
+	// idx_documents_tenant_indexed, each checked against both primary
+	// keys. Its args are the tenant, the time, the fetched state and the
+	// run.
+	unplacedSQL = `
+	SELECT d.id FROM documents d
+	WHERE d.tenant_id = ?1 AND d.indexed_at >= ?2 AND d.state = ?3
+	  AND NOT EXISTS (SELECT 1 FROM interest_assignments a WHERE a.run_id = ?4 AND a.document_id = d.id)
+	  AND NOT EXISTS (SELECT 1 FROM interest_placements p WHERE p.run_id = ?4 AND p.document_id = d.id)`
+)
+
+func (s *Insights) Assigned(ctx context.Context, runID, documentID string) (bool, error) {
+	var assigned bool
+	if err := s.db.QueryRowContext(ctx, assignedSQL, runID, documentID).Scan(&assigned); err != nil {
+		return false, fmt.Errorf("is document %s assigned in run %s: %w", documentID, runID, err)
+	}
+	return assigned, nil
+}
+
+func (s *Insights) PlaceDocument(ctx context.Context, tenantID string, p store.Placement) (bool, error) {
+	res, err := s.db.ExecContext(ctx, placeDocumentSQL, p.RunID, p.DocumentID, nullIfEmpty(p.InterestID), p.Similarity,
+		formatTime(time.Now()), tenantID, store.InterestRunDone)
+	if err != nil {
+		return false, fmt.Errorf("place document %s in run %s: %w", p.DocumentID, p.RunID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("place document %s in run %s: rows affected: %w", p.DocumentID, p.RunID, err)
+	}
+	return n > 0, nil
+}
+
+func (s *Insights) PlaceMany(ctx context.Context, tenantID, runID string, ps []store.Placement) (int, error) {
+	if len(ps) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("place documents in run %s: begin: %w", runID, err)
+	}
+	defer tx.Rollback()
+	var latest string
+	err = tx.QueryRowContext(ctx, latestRunSQL("id", true), tenantID, store.InterestRunDone).Scan(&latest)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("place documents in run %s: read the latest done run: %w", runID, err)
+	}
+	if latest != runID {
+		return 0, nil
+	}
+	placed, err := placeEach(ctx, tx, runID, ps, formatTime(time.Now()))
+	if err != nil {
+		return 0, fmt.Errorf("place documents in run %s: %w", runID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("place documents in run %s: commit: %w", runID, err)
+	}
+	return placed, nil
+}
+
+// placeEach writes each placement into runID unless the document is placed
+// already, through one prepared statement, and returns how many it wrote.
+func placeEach(ctx context.Context, tx *sql.Tx, runID string, ps []store.Placement, now string) (placed int, err error) {
+	stmt, err := tx.PrepareContext(ctx, placeIfAbsentSQL)
+	if err != nil {
+		return 0, fmt.Errorf("prepare: %w", err)
+	}
+	defer func() {
+		if cerr := stmt.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close the statement: %w", cerr))
+		}
+	}()
+	for _, p := range ps {
+		res, err := stmt.ExecContext(ctx, runID, p.DocumentID, nullIfEmpty(p.InterestID), p.Similarity, now)
+		if err != nil {
+			return 0, fmt.Errorf("place document %s: %w", p.DocumentID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("place document %s: rows affected: %w", p.DocumentID, err)
+		}
+		placed += int(n)
+	}
+	return placed, nil
+}
+
+func (s *Insights) Unplaced(ctx context.Context, tenantID, runID string, since time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, unplacedSQL, tenantID, formatTime(since), store.DocStateFetched, runID)
+	if err != nil {
+		return nil, fmt.Errorf("documents run %s didn't place: %w", runID, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan an unplaced document: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("documents run %s didn't place: %w", runID, err)
+	}
+	return out, nil
+}
+
 // pruneRunsSQL deletes the tenant's runs but keep of them, cascading their
 // groups, assignments and placements.
 func pruneRunsSQL(keep int) string {
@@ -835,6 +1148,35 @@ func scanRun(sc interface{ Scan(...any) error }) (*store.InterestRun, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+// scanInsightState scans insightStateColumns; a missing row is
+// sql.ErrNoRows.
+func scanInsightState(sc interface{ Scan(...any) error }) (store.InsightState, error) {
+	var (
+		st                                store.InsightState
+		owed, owedAt, failedAt, lastError sql.NullString
+	)
+	if err := sc.Scan(&owed, &owedAt, &st.Failures, &failedAt, &lastError); err != nil {
+		return store.InsightState{}, err
+	}
+	st.FreshOwed, st.LastError = store.FreshReason(owed.String), lastError.String
+	var err error
+	if st.FreshOwedAt, err = parseNullTime(owedAt); err != nil {
+		return store.InsightState{}, err
+	}
+	if st.LastFailureAt, err = parseNullTime(failedAt); err != nil {
+		return store.InsightState{}, err
+	}
+	return st, nil
+}
+
+// parseNullTime parses a nullable timestamp: the zero time for NULL.
+func parseNullTime(s sql.NullString) (time.Time, error) {
+	if !s.Valid {
+		return time.Time{}, nil
+	}
+	return parseTime(s.String)
 }
 
 // interestScan holds an identity's nullable columns while they are

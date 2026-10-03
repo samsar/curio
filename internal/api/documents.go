@@ -480,7 +480,12 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 // documents are every searchable one with content (failed and dead ones are
 // never searched), so once their jobs are in, the whole library is being
 // re-embedded by the build serving now. Vectors from both builds mix until
-// the jobs finish.
+// the jobs finish. So before it enqueues them it owes the interests a
+// fresh rebuild, which the scheduler queues once the re-embedding drains:
+// the current grouping's seeds and centroids are of the old vectors.
+// Owing it first means a failure part way can leave a fresh rebuild owed
+// for nothing re-embedded, which costs one rebuild, never a grouping of
+// mixed vectors.
 func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	state, err := docStateParam(r)
 	if err != nil {
@@ -495,6 +500,13 @@ func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 		d.writeError(w, r, err)
 		return
 	}
+	if state == store.DocStateFetched && len(ids) > 0 {
+		if err := d.Insights.OweFresh(r.Context(), d.TenantID, store.FreshReindex); err != nil {
+			d.writeError(w, r, fmt.Errorf("enqueued no index job: %w", err))
+			return
+		}
+	}
+	defer d.kickInterests()
 	for i, id := range ids {
 		if _, err := d.enqueueIndex(r.Context(), id); err != nil {
 			d.writeError(w, r, fmt.Errorf("enqueued %d of %d index jobs before failing: %w", i, len(ids), err))

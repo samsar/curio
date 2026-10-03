@@ -585,8 +585,13 @@ paths:
         drift baseline is reset: the recorded model digest and Ollama
         version are cleared, and the daemon's next check records the build
         serving now, which clears embedding_drift on healthz. A failed
-        reset is a 500 whose detail says all the jobs were enqueued. Other
-        states leave the baseline alone.
+        reset is a 500 whose detail says all the jobs were enqueued. Before
+        it enqueues them, a state=fetched run with documents owes the
+        interests a fresh rebuild (fresh_owed reindex on the interests'
+        state), which the daemon queues once the re-embedding has drained:
+        until then interests keep their last grouping and new documents
+        aren't placed. Other states leave the baseline and the interests
+        alone.
       responses:
         "202":
           description: Index jobs enqueued
@@ -770,7 +775,20 @@ paths:
         Queues a rebuild of the interests and answers its job id, or, when
         one is queued already, that one's: one rebuild waits at most. A
         running rebuild doesn't count, so a request during one queues the
-        next. Poll the job at /v1/jobs/{id}.
+        next. The daemon rebuilds on its own as the library changes; a
+        request skips what it waits for (enough changes, a quiet library,
+        an embedding drift's hold, a failed rebuild's backoff), but not the
+        queue's gate. Poll the job at /v1/jobs/{id}.
+      parameters:
+        - in: query
+          name: fresh
+          description: >
+            1 or true (any case) makes the rebuild fresh, grouping the
+            library from scratch rather than from the current grouping;
+            names that survive still carry over. It is owed until a fresh
+            rebuild that read the library after the request commits, so it
+            holds when a pending rebuild is answered.
+          schema: { type: string }
       responses:
         "202":
           description: A rebuild is queued
@@ -1117,7 +1135,8 @@ components:
             or CURIO_GITHUB_TOKEN in the daemon's environment). Without one
             GitHub allows 60 API requests an hour; with any token, even one
             with no scopes, 5,000.
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, ollama_reachable, upstreams, github_token]
+        interests: { $ref: "#/components/schemas/InterestsState" }
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, ollama_reachable, upstreams, github_token, interests]
 
     EmbeddingDrift:
       description: >
@@ -1759,7 +1778,7 @@ components:
         trigger:           { type: string, enum: [first, auto, manual, reindex, params, shape] }
         kind:              { type: string, enum: [fresh, warm] }
         split_check:       { type: boolean }
-        changed_documents: { type: integer, description: "Documents added or gone since the rebuild before" }
+        changed_documents: { type: integer, description: "Documents added, left, deleted or reindexed since the rebuild before read the library" }
         kept:              { type: integer, description: "Interests whose identity carried over, moved ones included" }
         created:           { type: integer }
         split:             { type: integer }
@@ -1771,14 +1790,53 @@ components:
     InterestsState:
       type: object
       description: >
-        Where the next rebuild stands: off (insight is disabled), rebuilding
-        (one runs), queued (one waits, perhaps behind the queue's gate),
-        failing (the newest rebuild failed, last_error saying why), current
-        (a rebuild is done) or none. Clients treat a state they don't know
-        as current.
+        Where automatic rebuilds of the interests stand, as the daemon's
+        last check found them (it checks every minute and whenever a
+        rebuild is asked for, starts or ends): the same on healthz and as
+        GET /v1/interests' next. The daemon queues a rebuild once enough of
+        the library changed (rebuild_at), or a fresh one is owed, and
+        nothing was indexed for a while. The fields that don't apply are
+        left out.
       properties:
-        state:      { type: string }
-        last_error: { type: string }
+        state:
+          type: string
+          description: >
+            The first that holds: rebuilding (one runs); queued (one waits,
+            perhaps behind the queue's gate); held (the embeddings drifted,
+            held_reason says how: nothing is rebuilt or placed on its own
+            until `curio reindex --all`); failing (the last rebuild failed,
+            last_error says why; the next is tried at retry_at); due (enough
+            changed, or a fresh rebuild is owed, and the library hasn't
+            settled yet); current (the last rebuild is current); none (no
+            rebuild yet, and too few documents for the first). off with the
+            insight layer disabled, and unknown only before the daemon's
+            first check. Clients read a state they don't know as current.
+        last_rebuild_at:   { type: string, format: date-time, description: "When the last rebuild finished" }
+        last_kind:         { type: string, enum: [fresh, warm] }
+        last_trigger:      { type: string, enum: [first, auto, manual, reindex, params, shape] }
+        changed_documents:
+          type: integer
+          description: >
+            Documents added, left (failed, dead or refetching), deleted or
+            reindexed since the last rebuild read the library; before the
+            first, the fetched documents. Absent when none.
+        rebuild_at:
+          type: integer
+          description: >
+            How many changed documents make the next rebuild due: 5% of the
+            last rebuild's documents, at least 5; before the first, the 20
+            fetched documents it waits for.
+        due_since:   { type: string, format: date-time, description: "When the rebuild became due, while it is" }
+        fresh_owed:
+          type: string
+          enum: [reindex, manual, params]
+          description: >
+            Why the next rebuild will be fresh: the library was re-embedded
+            (it waits for the re-embedding to finish), one was asked for, or
+            the grouping's parameters changed.
+        held_reason: { type: string, description: "How the embeddings drifted, while that holds rebuilds" }
+        retry_at:    { type: string, format: date-time, description: "When the next rebuild is tried after the failed ones" }
+        last_error:  { type: string, description: "Why the last rebuild failed, while rebuilds are failing" }
       required: [state]
 
     InterestList:

@@ -63,7 +63,9 @@ func buildAndRun(m *testing.M) int {
 		return 1
 	}
 	daemonBin = filepath.Join(dir, "curio-daemon")
-	build := exec.Command("go", "build", "-tags=sqlite_fts5,sqlite_json", "-o", daemonBin, "./cmd/curio-daemon")
+	// With the e2e tag the daemon reads the interest scheduler's timing
+	// from CURIO_E2E_INTERESTS, which the interest tests shorten.
+	build := exec.Command("go", "build", "-tags=sqlite_fts5,sqlite_json,e2e", "-o", daemonBin, "./cmd/curio-daemon")
 	build.Dir = filepath.Dir(strings.TrimSpace(string(gomod)))
 	build.Stdout, build.Stderr = os.Stderr, os.Stderr
 	if err := build.Run(); err != nil {
@@ -297,14 +299,13 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 		assert.Equal(collect, digestA, meta.EmbeddingModelDigest)
 		assert.Equal(collect, "0.34.4", meta.OllamaVersion)
 	}, 10*time.Second, 50*time.Millisecond, "the daemon records the build that makes the embeddings")
-	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		list, err := c.ListInterests(ctx, client.ListInterestsOpts{})
-		require.NoError(collect, err)
-		require.NotEmpty(collect, list.RunID)
-		require.NotNil(collect, list.Rebuild)
-		assert.Equal(collect, string(store.RunTriggerFirst), list.Rebuild.Trigger)
-		assert.Equal(collect, client.StateCurrent, list.Next.State)
-	}, 30*time.Second, 50*time.Millisecond, "a new home's daemon groups the library on its own, unasked")
+	list, err := c.ListInterests(ctx, client.ListInterestsOpts{})
+	require.NoError(t, err)
+	assert.Empty(t, list.RunID, "a new home groups nothing: it waits for 20 indexed documents")
+	assert.Equal(t, client.StateNone, list.Next.State)
+	assert.Equal(t, 20, list.Next.RebuildAt)
+	require.NotNil(t, health.Interests)
+	assert.Equal(t, list.Next, *health.Interests, "healthz reports the same")
 
 	created, err := c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: pages.URL + "/zymurgy"})
 	require.NoError(t, err)

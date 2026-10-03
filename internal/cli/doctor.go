@@ -146,8 +146,8 @@ func (r *doctorReport) print(w io.Writer) {
 }
 
 // runOwnChecks adds the checks curio up has no part in: the upstreams
-// fetches depend on, as the daemon reports them, the fetcher, and whether
-// the content directory is writable. They read config.yaml, or the
+// fetches depend on and the interests' rebuilds, as the daemon reports
+// them, the fetcher, and whether the content directory is writable. They read config.yaml, or the
 // defaults when it doesn't load (its own check says why); with no home
 // there is no daemon or content directory to check.
 func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport) {
@@ -182,6 +182,11 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 			}
 			if health.GitHubToken != nil {
 				githubToken = *health.GitHubToken
+			}
+			// Where automatic rebuilds of the interests stand.
+			if s := health.Interests; s != nil {
+				status, detail, hint := interestsCheck(*s, time.Now())
+				r.add("interests", status, detail, hint)
 			}
 		}
 	}

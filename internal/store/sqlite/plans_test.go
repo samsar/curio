@@ -319,6 +319,16 @@ func TestQueryPlans(t *testing.T) {
 			sorts: true,
 		},
 		{
+			name:  "MarkFetched",
+			query: markFetchedSQL, args: []any{store.DocStateFetched, "doc"},
+			first: "SEARCH documents USING INDEX sqlite_autoindex_documents_1 (id=?)",
+		},
+		{
+			name:  "LastIndexedAt",
+			query: lastIndexedSQL, args: []any{"local"},
+			first: "SEARCH documents USING COVERING INDEX idx_documents_tenant_indexed (tenant_id=?)",
+		},
+		{
 			name:  "RequeueFetchByStates",
 			query: resetStatesSQL(2, false),
 			args:  []any{store.DocStatePending, "local", store.DocStateFailed, store.DocStateFetched},
@@ -494,6 +504,9 @@ func insightPlanCases() []planCase {
 		identity   = "SEARCH i USING INDEX sqlite_autoindex_interests_1 (id=?)"
 		parent     = "SEARCH p USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN"
 		runByID    = "SEARCH interest_runs USING INDEX sqlite_autoindex_interest_runs_1 (id=?)"
+		// The upserts of insight_state (OweFresh, RecordFailure) insert
+		// VALUES and conflict on this primary key; they have no plan.
+		stateByTenant = "SEARCH insight_state USING INDEX sqlite_autoindex_insight_state_1 (tenant_id=?)"
 	)
 	done := store.InterestRunDone
 	return []planCase{
@@ -619,7 +632,69 @@ func insightPlanCases() []planCase {
 			name: "TrimLineage", query: trimLineageSQL, args: []any{"run", "local"},
 			first: "SCAN interest_lineage",
 		},
+		{
+			// The documents indexed since, twice, and the run's assigned
+			// documents in the states that left it, each checked against
+			// the run's assignments; never the run's assignments joined
+			// to the tenant's documents.
+			name:  "Changes",
+			query: changesSQL,
+			args: []any{"local", "since", store.DocStateFetched, "run", store.DocStatePending, store.DocStateFailed,
+				store.DocStateDead},
+			want: []string{
+				"SEARCH d USING INDEX idx_documents_tenant_indexed (tenant_id=? AND indexed_at>?)\nCORRELATED SCALAR SUBQUERY",
+				"SEARCH d USING INDEX idx_documents_tenant_indexed (tenant_id=? AND indexed_at>?)\n" + assignment("a EXISTS"),
+				"SEARCH d USING COVERING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)\n" +
+					assignment("a EXISTS"),
+				"SEARCH interest_assignments USING COVERING INDEX sqlite_autoindex_interest_assignments_1 (run_id=?)",
+			},
+			avoid: []string{"SCAN d", "SCAN a", "SCAN interest_assignments"},
+		},
+		{name: "State", query: insightStateSQL, args: []any{"local"}, first: stateByTenant},
+		{name: "clear failures", query: clearFailuresSQL, args: []any{"now", "local"}, first: stateByTenant},
+		{
+			name: "consume the fresh rebuild owed", query: consumeFreshSQL, args: []any{"now", "local", "run"},
+			first: stateByTenant, want: []string{runByID},
+		},
+		{
+			name: "RecordAbandoned", query: abandonRunsSQL, args: unbound(abandonRunsSQL),
+			first: "SEARCH interest_runs USING INDEX idx_interest_runs_tenant_status (tenant_id=? AND status=?)",
+		},
+		{name: "Assigned", query: assignedSQL, args: []any{"run", "doc"}, want: []string{assignment("interest_assignments")}},
+		{
+			// The guard: the latest done run, which ties on the rowid, and
+			// the document's assignment and row.
+			name:  "PlaceDocument",
+			query: placeDocumentSQL, args: []any{"run", "doc", "interest", 0.5, "now", "local", done},
+			want: []string{
+				"SEARCH documents EXISTS USING COVERING INDEX sqlite_autoindex_documents_1 (id=?)",
+				"SEARCH interest_runs USING INDEX idx_interest_runs_tenant_status (tenant_id=? AND status=?)",
+				assignment("interest_assignments"),
+			},
+			sorts: true,
+		},
+		{
+			name: "PlaceMany", query: placeIfAbsentSQL, args: []any{"run", "doc", "interest", 0.5, "now"},
+			want: []string{
+				"SEARCH documents EXISTS USING COVERING INDEX sqlite_autoindex_documents_1 (id=?)",
+				assignment("interest_assignments"),
+			},
+		},
+		{
+			name: "Unplaced", query: unplacedSQL, args: []any{"local", "since", store.DocStateFetched, "run"},
+			first: "SEARCH d USING INDEX idx_documents_tenant_indexed (tenant_id=? AND indexed_at>?)",
+			want: []string{
+				assignment("a"),
+				"SEARCH p USING COVERING INDEX sqlite_autoindex_interest_placements_1 (run_id=? AND document_id=?)",
+			},
+		},
 	}
+}
+
+// assignment is the plan row of a search for one assignment of a run's,
+// named name, by its primary key.
+func assignment(name string) string {
+	return "SEARCH " + name + " USING COVERING INDEX sqlite_autoindex_interest_assignments_1 (run_id=? AND document_id=?)"
 }
 
 // unbound is a NULL for each of query's parameters, for a statement whose

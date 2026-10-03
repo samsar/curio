@@ -516,21 +516,14 @@ func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.
 	defer rows.Close()
 
 	var (
-		out     []store.DocVector
-		curDoc  string
-		acc     []float64 // running sum for the current document
-		n       int       // chunk count for the current document
-		haveDoc bool
+		out    []store.DocVector
+		curDoc string
+		mean   store.MeanVector // the current document's chunks so far
 	)
 	flush := func() {
-		if !haveDoc || n == 0 {
-			return
+		if v := mean.Mean(); v != nil {
+			out = append(out, store.DocVector{DocumentID: curDoc, Vector: v})
 		}
-		mean := make([]float32, len(acc))
-		for i, sum := range acc {
-			mean[i] = float32(sum / float64(n))
-		}
-		out = append(out, store.DocVector{DocumentID: curDoc, Vector: mean})
 	}
 
 	for rows.Next() {
@@ -547,15 +540,11 @@ func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.
 		}
 		if docID != curDoc {
 			flush()
-			curDoc = docID
-			haveDoc = true
-			acc = make([]float64, s.dim)
-			n = 0
+			curDoc, mean = docID, store.MeanVector{}
 		}
-		for i, f := range vec {
-			acc[i] += float64(f)
+		if err := mean.Add(vec); err != nil {
+			return nil, fmt.Errorf("document %s: %w", docID, err)
 		}
-		n++
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

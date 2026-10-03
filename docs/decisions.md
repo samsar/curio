@@ -151,7 +151,7 @@ when the entry was first committed.
 - 2026-09-29 — [Search pages by offset within a fixed-depth pool](#search-pages-by-offset-within-a-fixed-depth-pool)
 - 2026-09-30 — [Waiting is not failing: jobs curio didn't send are deferred](#waiting-is-not-failing-jobs-curio-didnt-send-are-deferred) (revised)
 - 2026-09-30 — [A site's block is not its pages' verdict](#a-sites-block-is-not-its-pages-verdict)
-- 2026-09-30 — [Embedding drift: verified by re-embedding a sample](#embedding-drift-verified-by-re-embedding-a-sample)
+- 2026-09-30 — [Embedding drift: verified by re-embedding a sample](#embedding-drift-verified-by-re-embedding-a-sample) (revised)
 - 2026-10-02 — [Interests: corrections that teach the grouping (deferred)](#interests-corrections-that-teach-the-grouping-deferred)
 - 2026-10-02 — [Soft-404 titles: whole templates, not phrases](#soft-404-titles-whole-templates-not-phrases)
 - 2026-10-03 — [Louvain: ours, warm-started; gonum as a test oracle](#louvain-ours-warm-started-gonum-as-a-test-oracle) (revised)
@@ -2578,6 +2578,21 @@ shutdown is an interruption like any other (`Requeue`), and `ErrPermanent`
 in its chain wins over it. `Defer` moves only a `running` row, like the
 other transitions, and `MarkDone` now clears `last_error`. See "Waiting is
 not failing: jobs curio didn't send are deferred".
+
+**Revised (2026-10-03):** a `cluster` job, a rebuild of the interests, gets
+one attempt. Every rebuild error is permanent, and the engine counts it as
+a failed rebuild in `insight_state`, which the interest scheduler retries
+after its own backoff (15 minutes doubling to 4 hours); the queue's five
+attempts 30 seconds apart would re-read every vector four more times
+within minutes. An interrupted rebuild is still requeued with its attempt
+refunded, so a cluster job claimed a second time can only be an orphan:
+its handler records the rebuild as failed (`Rebuilder.Abandoned`: the runs
+it left running fail, and one failure counts) and runs nothing, since what
+killed the daemon would kill it again at every launchd restart, each one
+costing every running fetch and index job an attempt. The cluster pool's
+permanent-failure hook does the same for an orphan `RecoverOrphans` fails
+for good. See "Interests: two levels, stable identities, automatic
+rebuilds".
 
 ---
 
@@ -8684,7 +8699,7 @@ never change. What changed:
   serve both orders without a sort, so "No new index" no longer holds.
 - Documents placed between rebuilds are listed apart (`new`,
   `new_members`), never inside the offset-paged lists, which they would
-  shift; PR 3 writes them.
+  shift; the index step and the sweep after each rebuild write them.
 - The re-read rules are unchanged, plus one: a group missing from the run
   that was read is looked up in the newest done run, then as an identity,
   a 410 if it was retired meanwhile.
@@ -9445,6 +9460,17 @@ miss probability of (1 - p(1 - f))^48. The check runs within a minute of
 an upgrade while the daemon runs, or at its start (no index job runs while
 it is down), so f is small.
 
+**Revised (2026-10-03):** a reported drift, verified or not, holds the
+interests' automatic rebuilds and the placement of new documents: the
+library then mixes vectors of two builds, and the current grouping's
+centroids are the old build's. The interests stay as they were, and their
+state is `held`, with the drift and the fix (`curio reindex --all`). A
+rebuild asked for still runs, and its log line says it was built while the
+embeddings drifted. `reindex-all` also owes the interests a fresh rebuild,
+which waits for the re-embedding to drain. A change the sample shows to
+be the same build changes nothing. See "Interests: two levels, stable
+identities, automatic rebuilds".
+
 ---
 
 ## Interests: corrections that teach the grouping (deferred)
@@ -9955,11 +9981,12 @@ identities that outlive the runs. Migration 016 replaces 004's
 run's seeds when it can, and carries identities over, so an interest keeps
 its ID, label and links across rebuilds while it keeps most of its
 documents. One that a rebuild split, merged or dissolved is retired, and
-its ID answers 410 naming what took its documents. This is the storage,
-engine and read side; PR 3 completes the automatic part (migration 017,
-the scheduler that queues rebuilds as the library changes, and placement
-of new documents between rebuilds). Until then a rebuild runs at the
-daemon's first start without a grouping and when asked for.
+its ID answers 410 naming what took its documents. Rebuilds are
+automatic: the daemon's scheduler queues one once enough of the library
+changed and it settled, holds them while the embeddings drifted and after
+a failure, and each document indexed between rebuilds is placed into its
+nearest interest at once (see "Automatic rebuilds" and "Placement" below,
+and migration 017).
 
 **The schema follows the design's sketch, with these refinements** (each
 also in the migration's header comment):
@@ -10039,11 +10066,15 @@ read_ms, group_ms, label_ms and persist_ms.
   survive a change of params by overlap. The recorded kind is fresh unless
   the run was warm-eligible, the grouping kept the input's shape, and the
   prior held a seed for at least one point.
-- **Changes.** With P the documents the prior assigned and N those read
-  now: changed = |N \ P| + (prior.num_documents − |P ∩ N|), so a document
-  deleted, failed, dead or pending counts as gone. Reindexed documents
-  count from PR 3.
-- **The split check until PR 3.** Q3's rule: with T = max(5, ⌈5% of the
+- **Changes.** What changed since the prior read its vectors, counted
+  from the data (`InsightStore.Changes`, see "The change count is
+  derived" below): added, left (failed, dead or pending again), deleted
+  and reindexed documents. The engine reads it right after the vectors, and
+  the one count is the run's `changed_documents` and feeds the split
+  check's cadence. (PR 2 counted |N \ P| + (prior.num_documents − |P ∩ N|)
+  over the vectors read, which missed reindexed documents and which no
+  scheduler could read.)
+- **The split check.** Q3's rule: with T = max(5, ⌈5% of the
   prior's documents⌉), a warm-eligible run splits when the changes since
   the last split check plus this run's reach 4·T; a fresh or split run
   resets the count, any other adds to it. At automatic rebuilds every T
@@ -10091,19 +10122,7 @@ interests of 86 and 45 documents one area held. A flat run's interest
 prompt says "Other topics are already named:" (it has no area to say
 "Its other topics").
 
-**The first rebuild, and one pending job.** After `RecoverOrphans`, when
-`insight.enabled` and the tenant has no *done* run, the daemon queues a
-cluster job with trigger `first` and logs "interests: rebuild enqueued";
-a failed read or enqueue is one WARN and the daemon starts anyway. The
-condition is "no done run", not the design's "no run exists": a failed
-first rebuild is retried at the next start, and a `running` row left by a
-crash doesn't block it. Until rebuilds follow the library's changes,
-that and a request are the only rebuilds, and a new home's first one
-runs before `curio up` imports anything (the daemon step precedes the
-import) and commits an empty run. So no text promises another: the CLI's
-help says the library is grouped at the first start and on request, and
-an empty run's hint is "run `curio interests rebuild` once `curio status`
-shows documents fetched". The cluster job's payload is
+**One pending job.** The cluster job's payload is
 `store.ClusterJobPayload{Trigger}`; a missing or unknown trigger (`{}`
 from an older job) is `manual`. Every rebuild goes through
 `JobQueue.EnqueueOnce`, which inserts a job only when no pending job of
@@ -10117,7 +10136,10 @@ status=?)` and walking every pending job of the tenant, thousands during
 an import; with the `+` it seeks `idx_jobs_claim (status=? AND kind=?)`,
 which holds only pending cluster jobs. Both statements are pinned. The
 daemon no longer reads `insight.knn`, `min_similarity` or
-`min_cluster_size`.
+`min_cluster_size`. (PR 2 queued a `first` rebuild at every start without
+a done run, whatever the library held: a new home committed an empty run
+before `curio up` imported anything, and nothing backed off. The
+scheduler replaced it.)
 
 **The API** (`api/openapi.yaml`): `GET /v1/interests` (limit 1–500, 50;
 offset; children 0–100, 5; members 0–100, 3; `level=interest` for every
@@ -10125,10 +10147,9 @@ interest with its area) lists the run's top-level groups, areas or flat
 interests, by size, cohesion, then ID, with `total`, the counts
 (`num_areas`, `num_interests`, `num_loose`, `num_unsorted`), the run's
 `rebuild` (trigger, kind, split_check, changed_documents and what it did)
-and `next`, the rebuild state: `off`, `rebuilding`, `queued`, `failing`
-(with `last_error`), `current` or `none`, in that order, for one queue
-read and one newest-run read. `due` and `held` come with PR 3; clients
-read an unknown state as current. `GET /v1/interests/{id}` answers an area
+and `next`, where automatic rebuilds stand: the scheduler's snapshot,
+the same as healthz's `interests` (see "healthz and the snapshot" below);
+clients read an unknown state as current. `GET /v1/interests/{id}` answers an area
 with all its interests, or an interest with its area, a page of members
 then loose fits (each with `fit`), its newest placements and its events in
 the latest rebuild. A retired ID is a 410 `urn:curio:problem:interest-retired`
@@ -10138,7 +10159,7 @@ documents shared), and a detail sentence naming them; an unknown ID is a
 404. `GET /v1/interests/unsorted` lists the unsorted nearest first with
 their nearest interest, and `GET /v1/interests/changes` the latest
 rebuild's split, merged, moved, dissolved and new events. Placements are
-listed apart (`new`, `new_members`) and are empty until PR 3 writes them.
+listed apart (`new`, `new_members`, and Unsorted's `new`).
 Renamed fields have no aliases: `num_noise` is `num_unsorted`,
 `num_clusters` is `total`. The consistency rules keep today's: a page
 that reads no groups below `total` is read once more from the newest run,
@@ -10214,6 +10235,329 @@ off, and binaries built by `make build BIN_DIR=<scratch>`; never
 The engine's fixture-library test (2,000 documents, several rebuilds)
 skips under -race and runs in `make test`'s second, race-free pass of
 `./internal/insight/...`. gonum stays test-only.
+
+### Automatic rebuilds
+
+**The scheduler** (`insight.Scheduler`) runs in the daemon beside the
+drift monitor, and only with `insight.enabled`. It checks at start, once
+synchronously before the API is up and any worker claims (so the first
+healthz has its state, and a rebuild that is due, such as an upgraded
+library's first, is queued before anything else runs), then every minute
+and whenever kicked: by a rebuild requested through the API, by
+reindex-all, by a cluster job starting, and by the cluster pool once a
+job's outcome is recorded (`Worker.OnFinished`: a kick from the end of the
+handler would read the job still running). Each check reads, through the
+narrow `insight.Library` (`NewLibrary` over the stores): the latest done
+run R and `Changes(R)`, the fetched documents, `LastIndexedAt`, the queue's
+cluster and index counts, and `insight_state`; the drift report and
+`Engine.ParamsChanged(R)` come from injected functions. A pure `decide`
+turns that into the snapshot and whether to queue, so the rules are tested
+over a simulated library and clock. A check runs under its own 30 s
+timeout; one that can't read keeps the last snapshot and warns once a
+streak. It queues a rebuild (`jobs.EnqueueRebuild`) when all hold:
+
+- no rebuild is queued or running;
+- due: no done run and 20 documents fetched; a fresh rebuild owed against
+  a done run; failures past their backoff; or `Changes(R).Total()` ≥
+  `Threshold(R.num_documents)`; and in every case at least one fetched
+  document;
+- not held: no embedding drift reported, and the backoff passed;
+- settled: nothing indexed for 10 minutes, or due for 2 hours already (30
+  minutes with no done run); a re-embedding's fresh rebuild only once no
+  index job is pending or running and nothing was indexed for 10
+  minutes, with no cap.
+
+The trigger is `first` (no done run), then `reindex`, then `params`, then
+`auto` (the library's changes, a retry, or a fresh rebuild asked for
+whose own job failed). A request through the API queues a rebuild whatever
+the scheduler says (threshold, settle window, drift and backoff don't
+apply; the queue's gate does), and the scheduler queues none while one is
+queued or running. States, the first that holds: `rebuilding`, `queued`,
+`held`, `failing`, `due`, `current`, `none`; `unknown` only before the
+first check succeeds, and `off` (from the API) with insight off. Logs:
+"interests: rebuild due" (changed, rebuild_at, fresh_owed, waiting_for)
+and the WARN "interests: rebuilds held" (reason, fix `curio reindex --all`)
+once an episode, never a line per check; "interests: rebuild enqueued"
+(trigger, changed, waited, job, queued) each time.
+
+The values, exported constants in `internal/insight/schedule.go` and
+shared with the engine where both use them (`Threshold`, `RetryDelay`):
+
+| Value | | Basis |
+|---|---|---|
+| First rebuild | 20 fetched documents (`FirstRebuildAt`) | 35 is the smallest library measured; unmeasured |
+| Threshold | max(5, ⌈5% of R's documents⌉) (`Threshold`) | owner; the floor unmeasured |
+| Settle window | 10 minutes with nothing indexed (`SettleWindow`) | unmeasured |
+| Longest wait once due | 2 h; 30 min with no done run (`MaxWait`, `MaxWaitFirst`) | unmeasured |
+| Check | every minute (`CheckInterval`), and on kicks | |
+| Backoff | 15 min, doubling to 4 h (`RetryDelay`) | mirrors the drift check |
+
+Pinned on a fake clock by simulations (`schedule_test.go`: pure Go, no
+SQLite, no sleeps; a rebuild queued runs at once, reading a second after
+its check): 2,000 documents indexed over 30 minutes into the owner's
+5,254 give one rebuild, at 40 minutes (due at 4, the last indexed at
+29.5); a 5-hour import at the owner's index rate (50 a minute) is rebuilt
+exactly MaxWait after each rebuild became due, to the check (at 2:06 and
+4:18, never two within 2 hours), and once more 10 minutes after it ends; a
+drift reported through the import queues nothing, says held, and warns
+once; 19 documents never, 20 once settled or after 30 minutes; a library
+of 30 after 5 changes, not 2; a queued rebuild blocks; a done run with no
+fetched document left stays current; retries come 16, 31, 61, 121, 241 and
+241 minutes apart (each failure a second after its check), a new scheduler
+over the same state keeps the backoff, and a success ends it; a
+re-embedding drained over 3 hours is rebuilt once, 10 minutes after the
+last index job, and never while the queue is paused; a change of params at
+once.
+
+**When a rebuild became due is kept in memory**, so a restart starts its
+`MaxWait` again; the change count, the fresh rebuild owed and the backoff
+are stored, so a restart changes nothing else. Storing it would add a
+writer for a cap that only matters during an import of hours, where a
+restart costs at most one more wait.
+
+**The change count is derived** (`InsightStore.Changes(R)`), with since =
+R's `vectors_read_at` (its `started_at` when unknown):
+
+- added: fetched, `indexed_at` ≥ since, not assigned in R (placed or not);
+- reindexed: fetched, `indexed_at` ≥ since, assigned in R;
+- left: assigned in R, now pending (a refetch in flight), failed or dead;
+- deleted: R's `num_documents` less R's assignment rows (they cascade).
+
+One statement of four scalar subqueries, so the counts come from one
+snapshot. A refetch counts as left while pending, then as reindexed. The
+design said "added = fetched now, with no assignment in R", which counts
+forever every document R couldn't group: one indexed without a chunk
+(`indexer.Index` succeeds with none, and the document is marked fetched)
+or one R dropped as non-finite. With T of them, 5 in any library under
+100 documents, every check would be due and a rebuild run at every check.
+Counting only documents indexed since R read its vectors ends that: such
+a document was indexed before. So migration 017 adds `documents.indexed_at`,
+written by `MarkFetched` alone, in its statement and to the same instant as
+`updated_at`, backfilled exactly from `updated_at` for the fetched
+documents (only `MarkFetched` leaves a document fetched), and indexed
+`(tenant_id, indexed_at)` for the range and for `LastIndexedAt`'s seek. The
+comparison is `>=`, so a document indexed in the millisecond R read is
+never missed: at worst it is a phantom change of one. "Left" is driven from
+the documents in those states on `idx_documents_tenant_state_updated`, each
+checked against R's assignment by its primary key: driven from R's
+assignments with `d.tenant_id = ?`, EXPLAIN on the owner's copy shows
+SQLite walking `idx_documents_tenant_state_updated (tenant_id=?)` through
+every document of the tenant. The count needs no counter kept by the index
+handler, the failure hook, refetch and delete, and survives a restart (on
+the copy below: 262 changed before a restart and after it).
+
+**Nothing to group, nothing queued.** With no vectors and a prior, the
+engine keeps the prior and writes nothing, so a rebuild due over a library
+with no fetched document (a reindex-all while the embedding model is
+missing fails every index job) would be queued at every check. A rebuild is
+due only with a fetched document; the state is then `current`. Accepted: a
+library whose every fetched document lacks vectors still queues a no-op
+rebuild each settled check.
+
+**A re-embedding drains first.** `curio reindex --all` (state fetched, at
+least one document) owes a fresh rebuild before it enqueues anything (a
+failure there is a 500 with nothing enqueued; one later leaves a fresh
+rebuild owed, which costs at most one rebuild), beside `Drift.Rebaseline`.
+The owner's library indexed at most 3,017 documents in an hour (its
+busiest, on 2026-09-28, with `index_workers` 4), so re-embedding its 5,254
+takes about 1.75 hours, plus the settle window: the 2-hour cap would fire
+mid-drain on a larger library or a slower machine and build the "fresh"
+grouping from vectors of two builds, which is what the drift hold exists
+to prevent. So that rebuild settles only once no index job is pending or
+running and nothing was indexed for 10 minutes, with no cap: a queue
+paused mid-drain holds it, since its index jobs stay pending. The old
+interests keep showing meanwhile, and placement holds.
+
+**Fresh rebuilds owed** (`insight_state.fresh_owed`, `fresh_owed_at`):
+
+- `reindex`, written by reindex-all, always wins and is owed from now;
+- `manual`, written by `POST /v1/interests/rebuild?fresh=1` (`curio
+  interests rebuild --fresh`, Q10), only when nothing or `manual` is owed:
+  it never replaces `reindex`. It is stored, not put in the job's payload,
+  because `EnqueueOnce` may answer a pending job, whose payload can't
+  change;
+- `params` is derived: every done run records its grouper and canonical
+  params, and `Engine.ParamsChanged(R)` is the comparison warm eligibility
+  makes, so it stops being owed when a run with the new params commits,
+  and nothing could go stale. The snapshot shows it as `fresh_owed:
+  params`;
+- `shape` has nothing to schedule: the gate between the shapes needs the
+  area pass's coverage of the graph, so it is decided inside every
+  rebuild, and the rebuild that crosses it is the next ordinary one (a
+  library growing past 1,000 documents accumulates 5% changes). 017
+  narrows the CHECK to the two reasons with a writer.
+
+The engine reads the state after the vectors: owed, the plan is fresh. The
+commit clears it, in its transaction, only for a fresh run whose
+`vectors_read_at` is at or after `fresh_owed_at`: a warm run never
+consumes it, and one owed again while a run grouped (a second reindex-all,
+or a warm run whose plan read the state before the owe) survives. A fresh
+rebuild owed with no done run makes nothing due: the first is fresh
+anyway, and waits for its 20 documents. Accepted: a rebuild asked for
+during a re-embedding plans fresh and, reading after the owe, consumes it;
+the documents re-embedded after it count as changes for the next.
+
+**Rebuild failures: one attempt, the scheduler's backoff.** PR 2's handler
+let the queue retry a failed rebuild (5 attempts, 30 seconds doubling),
+which re-read every vector, about 10 s on the owner's library, four more
+times within 15 minutes, against the design's backoff; and counting each
+attempt as a failure would have pushed the first scheduled retry to 4
+hours. Now every rebuild error is permanent (`ErrPermanent`), and the
+engine counts every failure but a cancellation in `insight_state`
+(`RecordFailure`: one more failure, `last_failure_at`, `last_error`,
+failing the run in the same transaction, or alone when the rebuild failed
+before creating one), with one WARN "interests: rebuild failed" (err,
+failures, retry_at). A cancelled rebuild (shutdown) fails its run, counts
+nothing, and its job is requeued with the attempt refunded. A done commit
+clears the failures. retry_at = `last_failure_at` + `RetryDelay(failures)`,
+stored, so a restart keeps it; failures make a rebuild due once it passes.
+
+A rebuild that kills the daemon (an OOM or jetsam kill, SIGKILL, a fatal
+runtime error; a handler panic is already recovered) looped: `RecoverOrphans`
+requeued its job with the attempt kept, the cluster worker claimed it at
+the next start, and after five crashes PR 2 queued a fresh `first` at the
+next start: a crash per launchd restart (10 s) for good, each one costing
+every running fetch and index job an attempt. Now a cluster job claimed
+with `Attempts > 1` is that orphan (nothing else claims one twice: errors
+are permanent, interruptions refund), and its handler records it as
+abandoned (`Rebuilder.Abandoned`, `RecordAbandoned`: every running run of
+the tenant failed with "the daemon stopped during this rebuild (it
+crashed, was killed, or outran the shutdown grace)", and one failure, in
+one transaction) without running it; the cluster pool's hook does the same
+for an orphan `RecoverOrphans` fails for good, and counts nothing for the
+handler's own failures. Accepted: a crash between `CommitRun` and
+`MarkDone`, a millisecond window, counts a spurious failure, which costs one
+rebuild 15 minutes later.
+
+### Placement
+
+`insight.Placer` places each document indexed between rebuilds into the
+latest done run, where the run grouped (`RunSpace`: centered on the run's
+stored mean, normalized, nearest centroid): its interest at a cosine of
+0.45 (`LooseFitThreshold`) or more, else Unsorted with its cosine to the
+nearest interest. The document's vector is the mean of all its chunk
+vectors in float64 (`store.MeanVector`, which `DocumentVectors` pools
+with too, so placement sees what the next rebuild will; not find-related's
+first-64 cap). The run's space, its interests' centroids by ID, is cached
+per run and read again once a newer run is done.
+
+- **The fast path**: the index handler calls `Place` right after
+  `MarkFetched`, before the job is marked done. In order, it does nothing
+  while the embeddings drifted, before a done run, while a re-embedding's
+  fresh rebuild is owed, or for a document the run assigned (a refetched
+  or reindexed one keeps its assignment until the next rebuild, and counts
+  as a change). It writes one row with one guarded statement
+  (`PlaceDocument`: only while the run is still the tenant's latest done
+  run, the run didn't assign the document and the document exists; ON
+  CONFLICT it places it anew, so a document indexed again moves), and a
+  run replaced meanwhile or a document deleted writes nothing. It never
+  fails the job: it has its own 10 s timeout, recovers its own panics
+  (the worker's recovery would fail the index job and mark the document
+  failed), and logs a failure once a run at WARN ("interests: placement
+  failed", run, document, err), the rest at DEBUG. A cancellation and a
+  document without chunks log at DEBUG and write nothing.
+- **The sweep** (`Sweep`): after each commit and its prune, and once when
+  the scheduler starts, it places every fetched document indexed since the
+  run read its vectors that the run neither assigned nor placed (`Unplaced`:
+  a range of `idx_documents_tenant_indexed`, both primary keys): those
+  indexed while a rebuild ran, and any whose fast path failed. It writes
+  them in one transaction with the guard checked once, ON CONFLICT DO
+  NOTHING, so it never overwrites a newer fast-path placement; a document
+  whose vector can't be placed (another width, a non-finite value) is left
+  out with one WARN rather than stalling the rest. The "interests rebuilt"
+  line counts them (`placed_after`).
+
+Measured on the owner's library copy below: one `Place` takes 2.1 ms
+(median; p95 10 ms, mean 3.0 ms over 261), the first of a run 11 ms as it
+reads the run's space (196 groups); a sweep of 262 documents 0.39 s in the
+daemon (0.78 s on a cold copy); a scheduler check's reads 1.3 ms (median,
+40 ms cold).
+
+### healthz and the snapshot
+
+`/v1/healthz` gains `interests` and `GET /v1/interests` serves the same as
+`next` (`InterestsState`, one schema): the scheduler's last snapshot
+(`Scheduler.Snapshot`, an atomic pointer), never a query per request:
+state; the done run's `last_rebuild_at`, `last_kind`, `last_trigger`;
+`changed_documents` and `rebuild_at` (with no done run, the fetched
+documents and 20); `due_since`, `fresh_owed`, `held_reason`, `retry_at`,
+`last_error`, each only when it applies. `off` with insight off (no
+scheduler is built, nor a placer), `unknown` only before the first check
+succeeds; clients read a state they don't know as current. Interests
+aren't health: `status` stays ok. `curio status` prints one line from it
+("interests: rebuilt 2 h ago (warm) · 37 documents changed, next at 276",
+the due, held or failing sentence, none while unknown), `curio doctor` an
+interests check (! held, with `curio reindex --all`; ! failing, with the
+error and the retry time; ✓ otherwise), and `curio interests` and its
+empty states say rebuilds are automatic and `rebuild` means now. The
+"interests rebuilt" line adds `placed_after`, and `embeddings_drifted=true`
+for a rebuild asked for while the embeddings drifted.
+
+### Tests and the e2e knob
+
+The fake-clock simulations above, the store's counts and writes on
+`sqlitetest` (each component of the count, its restart, the owe rules,
+the guarded writes, the commit's clears), the engine through the store
+(reindexed members raise the count and the split cadence; failures counted
+but cancellations; fresh owed and consumed; documents indexed while a
+rebuild groups are placed after its commit and the replaced run's
+placements pruned), the placer (holds, warnings once per run, the cache
+across runs under -race), the jobs (one attempt; an orphan recorded, not
+rerun, with a real queue and engine; placement never failing an index
+job), the API (the snapshot on both surfaces with stores that fail every
+call; reindex-all's owe before its jobs), the CLI and the MCP text. Two
+end-to-end tests need minutes of settling with the design's values, so
+the daemon reads its scheduler timing from `CURIO_E2E_INTERESTS`
+(`interval`, `settle`, `max_wait`, `max_wait_first`; an unknown key
+refuses to start) only when built with the `e2e` tag
+(`cmd/curio-daemon/schedule_e2e.go`, with a `!e2e` twin that returns the
+defaults): a release has no knob, config key or environment read. It
+leaves the backoff out: the engine and the scheduler share `RetryDelay`,
+and no end-to-end test fails a rebuild. `make test-e2e` also runs the
+daemon's unit tests in its e2e build, which test the knob's parser. An
+import of 20 pages is grouped unasked (trigger `first`), and 5 more pages
+regroup it (trigger `auto`); a rebuild queued while the queue is paused
+stays queued, then runs once it resumes. `make test-e2e` took 11.2 s
+before and 18.4 s after (the two tests 2.6 s and 4.5 s; the daemon's
+e2e-built unit tests 5.6 s more).
+
+### Acceptance on a copy of the owner's library (PR 3)
+
+A fresh `sqlite3 -readonly ~/.curio/curio.db ".backup …"` copy (schema 15,
+5,237 fetched documents), a scratch `CURIO_HOME` with the owner's marker,
+a config with a free loopback port, `insight.labeling: terms`, auto-pull
+off and both Ollama URLs on a dead loopback port, and binaries built by
+`make build BIN_DIR=<scratch> GOTAGS=sqlite_fts5,sqlite_json,e2e`, run
+with `CURIO_E2E_INTERESTS='interval=5s,settle=60s'`; never `~/.curio`,
+port 8765 or a checkout's `./bin`. The hold-out is PR 2's: Python
+`random.Random(1).sample` of the sorted fetched IDs, 262, the same 262.
+
+- **The first rebuild.** With the 262 set to `pending`, the daemon's
+  start applied 016 (7 ms) and 017 (10 ms), and its synchronous check
+  queued the first rebuild at once ("interests: rebuild enqueued",
+  trigger first, changed 4,975, a check of about 2 ms): fresh, areas, 28
+  areas and 168 interests over 4,975 documents, read 8,794 ms, group 1,797
+  ms, persist 30 ms. healthz then said `current`, `rebuild_at` 249.
+- **The re-add.** Stopped, the 262 set back to `fetched` with `indexed_at`
+  now, and started: the start's sweep placed all 262 into the first run in
+  about 0.39 s, 188 into an interest (71.8%, the design measured 65-72%)
+  and 74 into Unsorted; healthz said `due`, 262 changed against 249, and
+  the same 262 after a restart within the settle window. Exactly one
+  "interests: rebuild enqueued" followed, trigger auto, 60 s after the
+  re-add was indexed: warm, `split_check` false, 262 changed, 28 areas and
+  168 interests, 167 kept, 1 merged, 1 new, every area kept (read 7,789
+  ms, group 1,987 ms, persist 49 ms), PR 2's warm result again.
+- **Names kept.** `GET /v1/interests/{id}` for each of the first run's 196
+  identities: 28 of 28 areas and 167 of 168 interests answered 200 (100%
+  and 99.4%), the merged one 410.
+- **Placements.** The first run's 262 placements went with it when the
+  warm run pruned it, and the warm run, which grouped them, has none.
+
+**Test times (PR 3)** under `-race` on an M4 Max, before and after, the
+packages run together: `internal/insight` 8.3 s and 9.2 s (the heavier
+simulations run in parallel), `internal/jobs` 6.8 s and 7.4 s,
+`internal/store/sqlite` 7.7 s and 8.8 s, `internal/api` 14.8 s and 16.2 s,
+`cmd/curio-daemon` 6.4 s and 6.5 s, `internal/cli` 12.2 s and 13.2 s.
 
 ---
 

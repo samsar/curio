@@ -103,6 +103,7 @@ type Worker struct {
 	queue       store.JobQueue
 	handlers    map[store.JobKind]HandlerFunc
 	onPermFail  map[store.JobKind]PermFailHook
+	onFinished  map[store.JobKind]func()
 	idleDelays  backoff // between polls while there is nothing to claim
 	log         *slog.Logger
 	retryDelays backoff // between attempts of a failed bookkeeping write
@@ -143,6 +144,7 @@ func NewWorker(q store.JobQueue, opts WorkerOptions) *Worker {
 		queue:       q,
 		handlers:    map[store.JobKind]HandlerFunc{},
 		onPermFail:  map[store.JobKind]PermFailHook{},
+		onFinished:  map[store.JobKind]func(){},
 		idleDelays:  backoff{initial: poll, max: max(maxPoll, poll)},
 		log:         opts.Log,
 		retryDelays: bookkeepingRetry,
@@ -174,6 +176,14 @@ func (w *Worker) Register(kind store.JobKind, h HandlerFunc) {
 // that still fails is logged; it doesn't re-fail the job.
 func (w *Worker) OnPermanentFailure(kind store.JobKind, h PermFailHook) {
 	w.onPermFail[kind] = h
+}
+
+// OnFinished attaches fn, called once the outcome of each job of kind it
+// handled is recorded, whatever the outcome: for a watcher that reads the
+// queue, which sees the job done, failed or back in the queue by then. It
+// must not block.
+func (w *Worker) OnFinished(kind store.JobKind, fn func()) {
+	w.onFinished[kind] = fn
 }
 
 // RecoverOrphans settles jobs of this worker's kinds that a previous daemon
@@ -369,6 +379,9 @@ func (w *Worker) tryOne(ctx context.Context, kinds []store.JobKind) bool {
 	start := time.Now()
 	err = w.invoke(ctx, log, job)
 	w.finish(ctx, log, job, err, time.Since(start))
+	if fn := w.onFinished[job.Kind]; fn != nil {
+		fn()
+	}
 	return true
 }
 
