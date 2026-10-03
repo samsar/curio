@@ -8,8 +8,8 @@
 // for a point in no interest) over the same prepared unit vectors the engine
 // clusters (insight.PreparePoints), so every similarity is the cosine in the
 // space the clustering saw. Nothing reads a store or calls a model. It serves
-// tests, measurements of a grouping, and a developer's cluster-report tool;
-// no part of curio's binaries uses it.
+// tests and cmd/clusterreport, the developer's report on a grouping (make
+// cluster-report); no part of curio's binaries uses it.
 //
 // Percentiles are linear interpolations between the closest ranks (numpy's
 // default): for n sorted values the p-th percentile sits at rank p·(n-1).

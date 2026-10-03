@@ -71,11 +71,13 @@ help:
 
 ## build: build curio, curio-daemon and curio-mcp into ./bin
 # Always runs go build: its cache decides what is stale, including the
-# migrations embedded from outside internal/.
+# migrations embedded from outside internal/. The three commands are named:
+# cmd/clusterreport is a developer's tool (make cluster-report), never built
+# into ./bin or shipped.
 .PHONY: build
 build:
 	@mkdir -p $(BIN_DIR)
-	$(GO) build -trimpath -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/ ./cmd/...
+	$(GO) build -trimpath -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/ ./cmd/curio ./cmd/curio-daemon ./cmd/curio-mcp
 
 ## test: run unit tests under -race (no network, no Ollama)
 # The grouping's property tests skip under -race (each runs the whole
@@ -95,6 +97,18 @@ test-integration:
 .PHONY: test-e2e
 test-e2e:
 	$(GO) test -race -count=1 -tags=$(GOTAGS),e2e ./test/e2e/... ./cmd/curio-daemon/...
+
+## cluster-report: measure the interests grouping on a copy of a home's database (DB=<copy> [JSON=<file>] [DRAWS=n] [SEED=n])
+# A developer's tool: go run, so nothing lands in ./bin. It migrates the
+# database it reads and refuses a home's own (a directory holding
+# daemon.pid); take a copy with sqlite3 -readonly ~/.curio/curio.db
+# ".backup <copy>", or with the daemon stopped, sqlite3
+# "file:$HOME/.curio/curio.db?immutable=1" ".backup <copy>". See
+# cmd/clusterreport.
+.PHONY: cluster-report
+cluster-report:
+	@test -n "$(DB)" || { echo 'usage: make cluster-report DB=<copy of curio.db> [JSON=<file>] [DRAWS=n] [SEED=n]' >&2; exit 2; }
+	$(GO) run -tags=$(GOTAGS) ./cmd/clusterreport -db "$(DB)" $(if $(JSON),-json "$(JSON)") $(if $(DRAWS),-draws $(DRAWS)) $(if $(SEED),-seed $(SEED))
 
 ## vet: go vet
 .PHONY: vet

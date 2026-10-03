@@ -17,9 +17,12 @@ import (
 //
 // An interest's cohesion is the mean over its members of max(0, cos(member,
 // centroid)), the centroid being the normalized mean of the members' vectors
-// (Centroids). This is exactly the value the engine stores as
-// clusters.cohesion (insight's summarize), whose schema comment calls the
-// centroid a "medoid": no medoid is involved.
+// (Centroids). The engine stores an interest's cohesion
+// (interest_groups.cohesion) as the mean of its members' similarity to the
+// same centroid, rounded to float32 as a run stores it, without the clamp:
+// the two agree up to that rounding unless a member is opposite its own
+// interest's centroid, which a grouping's interests don't hold in
+// practice.
 type Cohesion struct {
 	// Mean is the unweighted mean over interests: the mean of the stored
 	// cohesion column.
