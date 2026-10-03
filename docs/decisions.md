@@ -9817,16 +9817,31 @@ design's target, with its measured value:
 | 5% mixed, names kept (mean of 3) | ≥ 90% · ≥ 88% | 93.2% · 96.7% |
 | Chain 60% → 100%, split every 4th: interests, cohesion against fresh | within 10%, within 0.03 | 33 against 36 (−8.3%), −0.002 |
 | The same chain without the split check | fewer interests | 31 |
-| No pair at 0.85 within a scope after the merge | none | none (7 joined, the planted pair among them) |
+| No pair at 0.85 within a scope after the merge | none | none (7 joined fresh, 7 warm with the split check) |
 | Placement keeps every name | 100% | 100% |
 | 35 documents of 4 topics, 10 seeds | ≥ 2 interests each | 4 each |
 | Shuffled input, fresh, warm, warm with the split check | identical per document | identical |
+
+On fixture 1 Louvain itself keeps the planted pair in one interest; the
+merge joins the five pieces it cuts one topic into and three pairs of the
+fresh grouping, and in the warm one with the split check it also puts a
+piece of the pair's first topic back with the interest holding the pair.
 
 Each mechanism was disabled once to see its property fail: ignoring the
 prior (names kept fall to 86.8% and 83.2%), skipping the restarts (the
 unchanged library moves), never splitting (the chain ends at 31 against
 31), one merge pass (a pair at 0.85 is left). Under -race the package's
 tests take about 25 s on an M4 Max; `make test` went from 62 s to 66 s.
+
+**Below the gate the split check carries the growth.** The chain property
+is pinned in the areas shape. In the flat shape r(n) rises as the library
+grows, and warm starts never split a community, so a growing library falls
+behind the interests r(n) asks for unless the split check runs. On three
+900-document flat fixtures, the chain from 60% to 100% ends at 10.0, 10.7
+and 8.3 interests (means of 3 draws) without it, against 16, 20 and 16
+fresh, and at 16.0, 18.3 and 15.0 with it every 4th step. The rebuilds
+that wire the grouper in have to run the split check regularly in both
+shapes.
 
 **Benchmarks** (Apple M4 Max, 16 cores; `bench_test.go` in both
 packages): on a synthetic 5,000 × 1,024 library (132 areas and about 450

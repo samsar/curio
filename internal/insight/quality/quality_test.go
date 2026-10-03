@@ -355,3 +355,10 @@ func TestInherit(t *testing.T) {
 	assert.InDelta(t, 1, same.Carried, 1e-12)
 	assert.Equal(t, Inheritance{Heirs: map[int]int{}}, Inherit([]int{n}, []int{n}))
 }
+
+// TestInherit_DifferentLengths: labelings of different points share
+// nothing, however alike their labels.
+func TestInherit_DifferentLengths(t *testing.T) {
+	assert.Equal(t, Inheritance{Heirs: map[int]int{}}, Inherit([]int{0, 0, 0}, []int{0, 0}))
+	assert.Equal(t, Inheritance{Heirs: map[int]int{}}, Inherit(nil, []int{0, 0, 0}))
+}

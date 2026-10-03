@@ -169,10 +169,13 @@ func TestStability_Chain(t *testing.T) {
 
 // TestStability_NoNearDuplicatesLeft: after the merge no two interests of
 // one scope (an area, or the whole grouping in the flat shape) have
-// centroids at the merge threshold or above, fresh or warm (measured: the
-// merge joins 7 interests of the fresh grouping, the planted pair among
-// them). It guards the merge's repeated rounds, which a single pass
-// doesn't give (see TestMergeNearDuplicates_UntilNothingJoins).
+// centroids at the merge threshold or above, fresh or warm. Measured: the
+// merge joins 7 interests of the fresh grouping (the five pieces Louvain
+// cut one topic into, and three pairs) and 7 of the warm one with the
+// split check, among them a piece of the planted pair's first topic that
+// it puts back with the interest holding the pair; Louvain itself keeps
+// the planted pair together. It guards the merge's repeated rounds, which
+// a single pass doesn't give (see TestMergeNearDuplicates_UntilNothingJoins).
 func TestStability_NoNearDuplicatesLeft(t *testing.T) {
 	t.Parallel()
 	lib := fixtureLibrary(1)

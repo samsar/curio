@@ -10,12 +10,13 @@
 //
 // A Grouper is the richer contract: broad areas holding interests, started
 // from the previous grouping, with a check that splits a group grown into two
-// topics. LouvainGrouper implements it with package louvain on the same kNN
-// graph, and FlatGrouper adapts any Clusterer. The steps around it don't
-// depend on the algorithm: merging near-duplicate interests and finding where
-// strays fit (MergeNearDuplicates, AssignStrays), carrying identities from one
-// grouping to the next (Carry), and placing a new document into a stored
-// grouping (RunSpace).
+// topics. LouvainGrouper implements it with package louvain on kNN graphs of
+// its own (every point's 20 nearest neighbours, and for areas the first 10 of
+// them at cosine 0.40 or above), and FlatGrouper adapts any Clusterer. The
+// steps around it don't depend on the algorithm: merging near-duplicate
+// interests and finding where strays fit (MergeNearDuplicates, AssignStrays),
+// carrying identities from one grouping to the next (Carry), and placing a
+// new document into a stored grouping (RunSpace).
 package insight
 
 import (

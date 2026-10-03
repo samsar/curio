@@ -17,6 +17,17 @@ import (
 func TestRunSpace_JudgesLikeTheStrayStep(t *testing.T) {
 	lib := fixtureLibrary(1)
 	r := rebuild(t, lib.docs, nil, false)
+	// The premise, so the strays' half of the check isn't empty: the
+	// fixture's generalists are strays, as fixture_test.go plants them.
+	generalists := 0
+	for i, f := range r.fits {
+		if lib.topic[i] < 0 {
+			generalists++
+			require.Equal(t, insight.FitUnsorted, f.Kind, "generalist %s", lib.docs[i].DocumentID)
+		}
+	}
+	require.Positive(t, generalists)
+
 	space, err := insight.NewRunSpace(r.mean, r.centroids)
 	require.NoError(t, err)
 	for i, dv := range lib.docs {
