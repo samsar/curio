@@ -16,7 +16,8 @@ import (
 // answers keep and Readability mostly drops, and the code blocks, which
 // show code, never what the page is. A notice counts only in the page's
 // opening, where it is what the page is; further in, a page discusses or
-// quotes it.
+// quotes it. A quoted line (a markdown blockquote) is another page's words
+// wherever it stands: a question quoting the error it got is no notice.
 //
 // A page's text is go-readability's RenderText from the origin, plain text
 // with each block on a line of its own, or the markdown body of Jina's
@@ -93,6 +94,9 @@ type textLine struct {
 	// heading reports a markdown heading: "## 404", or a line over a
 	// setext underline.
 	heading bool
+	// quote reports a blockquoted line ("> 404 Not Found"): another page's
+	// words, which the notice rules never read.
+	quote bool
 	// at is the page's own text before the line, in bytes.
 	at int
 }
@@ -165,13 +169,13 @@ func readPageText(text string) pageText {
 		if above >= 0 && setextUnderlineRE.MatchString(strings.TrimSpace(raw)) {
 			t.lines[above].heading = true
 		}
-		line, link, heading := readLine(raw)
+		line, link, heading, quote := readLine(raw)
 		if line == "" {
 			above = -1
 			continue
 		}
 		above = len(t.lines)
-		t.lines = append(t.lines, textLine{text: line, link: link, heading: heading, at: t.own})
+		t.lines = append(t.lines, textLine{text: line, link: link, heading: heading, quote: quote, at: t.own})
 		if !link {
 			t.own += len(line) + 1
 		}
@@ -180,22 +184,25 @@ func readPageText(text string) pageText {
 }
 
 // readLine reduces a line of a page's text to the words it shows, with its
-// whitespace made plain, and reports whether it holds only links and
-// whether it is an ATX heading ("## 404"). A line that shows nothing, a
-// thematic break or a setext underline among them, reads as "".
-func readLine(raw string) (line string, link, heading bool) {
+// whitespace made plain, and reports whether it holds only links, whether
+// it is an ATX heading ("## 404") and whether it is blockquoted ("> 404").
+// A line that shows nothing, a thematic break or a setext underline among
+// them, reads as "".
+func readLine(raw string) (line string, link, heading, quote bool) {
 	line = mdImageRE.ReplaceAllString(raw, "")
 	link = linkLineRE.MatchString(line)
 	line = strings.TrimSpace(mdLinkRE.ReplaceAllString(line, "$1"))
 	if ruleLineRE.MatchString(line) {
-		return "", false, false
+		return "", false, false, false
 	}
 	marks := blockMarkRE.FindString(line)
-	// Of the markers, only a heading's holds a "#".
+	// Of the markers, only a heading's holds a "#" and only a blockquote's
+	// a ">".
 	heading = strings.Contains(marks, "#")
+	quote = strings.Contains(marks, ">")
 	line = emphasisMarks.Replace(line[len(marks):])
 	line = mdEscapeRE.ReplaceAllString(line, "$1")
-	return plain(line), link, heading
+	return plain(line), link, heading, quote
 }
 
 // plain makes a line's whitespace plain: each run of it, no-break spaces
@@ -241,7 +248,7 @@ func (t *pageText) opening() iter.Seq[textLine] {
 // (notFound). It returns the reason, or the empty string.
 func (t *pageText) notFoundNotice() string {
 	for l := range t.opening() {
-		if l.notFound() {
+		if !l.quote && l.notFound() {
 			return "text reads like a not-found page: " + quoteLine(l.text)
 		}
 	}
@@ -271,7 +278,7 @@ func (t *pageText) parkedDomain(target string) string {
 		if l.at >= parkedNoticeBytes {
 			break
 		}
-		if parkedNotice(l.text, host) {
+		if !l.quote && parkedNotice(l.text, host) {
 			return "text reads like a parked domain: " + quoteLine(l.text)
 		}
 	}

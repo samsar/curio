@@ -1805,6 +1805,7 @@ func TestJudgePage_Order(t *testing.T) {
 		{"landing page before a challenge", pageView{title: "Just a moment...", text: challenge, found: true, finalURL: at("https://other.example/articles/")}, true, ErrDeadLink, "another site's landing page", 0},
 		{"detection off", pageView{title: "Page not found", text: challenge, found: true}, false, ErrAntiBot, "bot challenge", 0},
 		{"not-found notice before a challenge title", pageView{title: "Just a moment...", text: "PAGE NOT FOUND\n\n" + long, found: true}, true, ErrDeadLink, `text reads like a not-found page: "PAGE NOT FOUND"`, 0},
+		{"not-found notice before a parked domain's", pageView{title: "example.com", text: "Page not found\n\nThis domain is for sale!", found: true}, true, ErrDeadLink, `text reads like a not-found page: "Page not found"`, 0},
 		{"parked domain before a sign-in form", pageView{title: "HeadlineLogic News Portal", text: flappyRoyaleParkedBody, found: true}, true, ErrDeadLink, "text reads like a parked domain", 0},
 		{"a sign-in form, detection off", pageView{title: "HeadlineLogic News Portal", text: flappyRoyaleParkedBody, found: true}, false, ErrLoginWall, "page is a sign-in form", loginWallPage},
 		{"not-found title without an article", pageView{title: "Palantir | Page Not Found"}, true, ErrDeadLink, "not-found page", 0},

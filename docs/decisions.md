@@ -11186,7 +11186,11 @@ title, for four kinds of page that aren't the page asked for
   a link line: its words are no part of the page's own text, which counts
   the bytes of every other line with its line break. A line is recorded as
   a heading when it had an ATX marker ("## 404") or stands over a setext
-  underline. A fenced code block (three or more backticks or tildes, to
+  underline, and as quoted when it had a blockquote marker ("> 404 Not
+  Found"): a quoted line is own text, but the notice rules never read it,
+  since a page quoting an error (a Stack Overflow question showing what
+  its server answered) is about it, not it. No library verdict rests on a
+  quoted line. A fenced code block (three or more backticks or tildes, to
   its closing fence or the end of the text) is the page going on: its
   lines count as own text, but no rule reads them, since code is never
   the page's notice. From the origin the text is go-readability's
@@ -11256,7 +11260,7 @@ title, for four kinds of page that aren't the page asked for
   own lines beginning within its first 256 bytes of own text
   (`signInFormBytes`) include a password field ("Password", optionally
   followed by ":" or "*", any case) and a sign-in line (`loginTitleRE`:
-  "Log in", "Sign in"). Reason: `page is a sign-in form`.
+  "Log in", "Sign in", "Join now"). Reason: `page is a sign-in form`.
 
 `judgePage`'s order, pinned by `TestJudgePage_Order`: dead link (URL
 rules, not-found title, then the opening's not-found notice and parked
@@ -11358,19 +11362,23 @@ lines), each run through the line's regexps; one long line of brackets or
 escapes costs up to 7 ms, and 64 KiB of menu lines about 2 ms.
 
 **Accepted risks.** A page whose opening holds a not-found template line
-is judged dead, as such a title is: an article that quotes a notice before
-its first paragraph, or a status-code cheat sheet that opens with its
-list. So is a page with a heading that is a status code alone, a count
-given as a heading among them: LessWrong gives a post's karma as a heading
+is judged dead, as such a title is: an article that prints a notice on a
+line of its own before its first paragraph, or a status-code cheat sheet
+that opens with its list. A notice quoted as a blockquote ("> 404 Not
+Found", as a Stack Overflow question quotes the error it got) is never
+read. A page with a heading that is a status code alone is judged dead
+too, a count given as a heading among them: LessWrong gives a post's karma as a heading
 (`25e40719`'s "# 480"), so a post there whose karma is 404 or 410 when it
 is fetched is judged dead, and stays so until a forced refetch finds
-another score. From the origin, code is plain text, so an
-article that shows a not-found page in a code block before its first
-paragraph is judged dead there, though not through Jina. A page that says
-in its first 256 bytes of own text that this domain is for sale is a
-parked domain, an article headlined "This Domain Is For Sale" among them.
-None of these is among the 4,654. A short page led by a sign-in form is a
-login wall, and goes to Jina like any.
+another score. From the origin, code is plain text, so an article that
+shows a not-found page in a code block before its first paragraph is
+judged dead there, though not through Jina. A page that says in its first
+256 bytes of own text that this domain is for sale is a parked domain, an
+article headlined "This Domain Is For Sale" among them. None of the 4,654
+is misjudged this way (`25e40719`'s karma was 480). A short page led by a
+sign-in form is a login wall, and goes to Jina like any; `loginTitleRE`
+also takes "Join now" and "Join LinkedIn" as its sign-in line, so a
+sign-up form of 1 KiB or less with a password field is one too.
 
 **Not done** (what the rules still miss):
 

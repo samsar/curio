@@ -92,7 +92,7 @@ func TestReadPageText(t *testing.T) {
 				{text: "About this page", at: 62},
 				{text: "- Kofi Yeboah, April 22, 2026", at: 78},
 				{text: "1. Not a list item", at: 108},
-				{text: "Sorry, we can't find the page you're looking for.", at: 127},
+				{text: "Sorry, we can't find the page you're looking for.", quote: true, at: 127},
 				{text: "Page not found | Google Cloud", at: 177},
 			}},
 		{"headings, ATX and setext",
@@ -102,7 +102,7 @@ func TestReadPageText(t *testing.T) {
 				{text: "404", heading: true, at: 4},
 				{text: "Not Found", heading: true, at: 8},
 				{text: "A line", at: 18},
-				{text: "Quoted", heading: true, at: 25},
+				{text: "Quoted", heading: true, quote: true, at: 25},
 			}},
 		{"code blocks, counted as own text and left out",
 			"Intro\n\n```sh\n$ curl -I https://example.com/gone\n\nHTTP/1.1 404 Not Found\n```\n\n" +
@@ -227,6 +227,12 @@ func TestPageText_NotFoundNotice(t *testing.T) {
 		{"a status code as a story card's heading", "#### [404](https://medium.com/@writer/404-5f1c2a7b9e3d)", ""},
 		{"a template in a menu", "*   [Page not found](https://landingfolio.com/inspiration/page-not-found)", ""},
 		{"a template in a code block", "What nginx answers:\n\n```\n404 Not Found\n```", ""},
+		// A question quoting the error it got, as Stack Overflow's come
+		// through Jina.
+		{"a template quoted", "When I open the admin page I get:\n\n> HTTP Status 404 - Not Found", ""},
+		{"a status line quoted", "Every request answers\n\n> 404 Not Found", ""},
+		{"a status code quoted as a heading", "> ## 404", ""},
+		{"a sentence quoted", "> The page you requested was not found.", ""},
 		{"a sentence going on", "The page you're looking for was not found on our old server, so we moved it.", ""},
 	}
 	for _, tc := range cases {
@@ -285,6 +291,11 @@ func TestPageText_ParkedDomain(t *testing.T) {
 		{"a predicate going on with a comma", "https://blog.example/", "This domain is for sale, says the registrar", false},
 		{"no subject, a sentence after", "https://cars.example/", "is parked. The owner left.", false},
 		{"other related links", "https://blog.example/", "Related Links", false},
+		{"a notice quoted", "http://example.org/", "The registrar's page said:\n\n> This domain is for sale!", false},
+		{"registered with no registrar's domain", "http://headlime.io/", "This domain has been registered with the city.", false},
+		{"a totally awesome idea, said of something else", "http://aptfolk.com/", "Our app is a totally awesome idea still being worked on.", false},
+		{"managed by easyDNS, another site", "http://www.profitguide.com/", "example.com is yet another domain managed by easyDNS", false},
+		{"managed by easyDNS, going on", "http://www.profitguide.com/", "profitguide.com is yet another domain managed by easyDNS, and here is our blog", false},
 		{"after an intro paragraph", "https://blog.example/expired",
 			strings.Repeat("Domains lapse more often than you think. ", 6) + "\n\nThis domain is for sale!", false},
 		{"past the opening (Home Depot's category pages, 25d11cf0)", "https://www.homedepot.ca/en/home/categories/x.html",
