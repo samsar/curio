@@ -478,9 +478,12 @@ func descend(ctx context.Context, pos []XY, edges []edge, epochs int, alpha floa
 	for _, e := range edges {
 		maxW = math.Max(maxW, e.w)
 	}
+	// A sample is an edge in one direction: its head moves toward its tail
+	// every every epochs, and away from random points perNeg apart.
 	type sample struct {
-		head, tail int
-		every      float64 // epochs per sample
+		head, tail    int
+		every, perNeg float64
+		next, nextNeg float64 // the epoch of its next sample, and of its next negative one
 	}
 	var samples []sample
 	for _, e := range edges {
@@ -488,13 +491,13 @@ func descend(ctx context.Context, pos []XY, edges []edge, epochs int, alpha floa
 			continue
 		}
 		every := maxW / e.w
-		samples = append(samples, sample{e.lo, e.hi, every}, sample{e.hi, e.lo, every})
+		samples = append(samples, sample{head: e.lo, tail: e.hi, every: every}, sample{head: e.hi, tail: e.lo, every: every})
 	}
 	slices.SortFunc(samples, func(a, b sample) int { return cmp.Or(cmp.Compare(a.head, b.head), cmp.Compare(a.tail, b.tail)) })
-	next := make([]float64, len(samples))
-	nextNeg := make([]float64, len(samples))
-	for x, s := range samples {
-		next[x], nextNeg[x] = s.every, s.every/negativeRate
+	for x := range samples {
+		s := &samples[x]
+		s.perNeg = s.every / negativeRate
+		s.next, s.nextNeg = s.every, s.perNeg
 	}
 	rng := rand.New(rand.NewPCG(seed, sgdStream)) //nolint:gosec // G404: seeded negative samples, not a secret
 	n := len(pos)
@@ -504,37 +507,40 @@ func descend(ctx context.Context, pos []XY, edges []edge, epochs int, alpha floa
 		}
 		rate := alpha * (1 - float64(epoch)/float64(epochs))
 		e := float64(epoch)
-		for x, s := range samples {
-			if next[x] > e {
+		for x := range samples {
+			s := &samples[x]
+			if s.next > e {
 				continue
 			}
-			cur, other := &pos[s.head], &pos[s.tail]
-			dx, dy := cur.X-other.X, cur.Y-other.Y
-			if d2 := dx*dx + dy*dy; d2 > 0 {
+			// The head moves through its negative samples in locals,
+			// written back once.
+			cx, cy := pos[s.head].X, pos[s.head].Y
+			if dx, dy := cx-pos[s.tail].X, cy-pos[s.tail].Y; dx*dx+dy*dy > 0 {
+				d2 := dx*dx + dy*dy
 				pb := power(d2)
 				g := -2 * curveA * curveB * (pb / d2) / (curveA*pb + 1)
 				gx, gy := clip(g*dx)*rate, clip(g*dy)*rate
-				cur.X, cur.Y = cur.X+gx, cur.Y+gy
-				other.X, other.Y = other.X-gx, other.Y-gy
+				cx, cy = cx+gx, cy+gy
+				pos[s.tail] = XY{pos[s.tail].X - gx, pos[s.tail].Y - gy}
 			}
-			next[x] += s.every
-			perNeg := s.every / negativeRate
-			negatives := int((e - nextNeg[x]) / perNeg)
+			s.next += s.every
+			negatives := int((e - s.nextNeg) / s.perNeg)
 			for range negatives {
 				k := rng.IntN(n)
 				if k == s.head {
 					continue
 				}
-				dx, dy := cur.X-pos[k].X, cur.Y-pos[k].Y
+				dx, dy := cx-pos[k].X, cy-pos[k].Y
 				d2 := dx*dx + dy*dy
 				if d2 <= 0 {
 					continue
 				}
 				g := 2 * curveB / ((0.001 + d2) * (curveA*power(d2) + 1))
-				cur.X += clip(g*dx) * rate
-				cur.Y += clip(g*dy) * rate
+				cx += clip(g*dx) * rate
+				cy += clip(g*dy) * rate
 			}
-			nextNeg[x] += float64(negatives) * perNeg
+			pos[s.head] = XY{cx, cy}
+			s.nextNeg += float64(negatives) * s.perNeg
 		}
 	}
 	return nil
