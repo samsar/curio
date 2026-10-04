@@ -37,16 +37,16 @@ canvas; and the details panel, a bottom sheet on a phone.
 <div class="interest-map js-only" id="interest-map" data-src="{{.Src}}" data-page="{{.PageHref}}" data-document-page="{{.DocumentPrefix}}" data-interest-page="{{.InterestPrefix}}" data-unsorted-page="{{.UnsortedPage}}" data-interests-page="{{.Views.ListHref}}" data-view="{{.Query.View}}"{{with .Selected}} data-select="{{.}}"{{end}}>
 <div class="map-toolbar">
 <div class="segmented map-tabs" role="tablist" aria-label="Map views">
-<button type="button" role="tab" id="map-tab-similarity" aria-controls="map-stage" aria-selected="{{if .ByInterest}}false{{else}}true{{end}}" tabindex="{{if .ByInterest}}-1{{else}}0{{end}}">By similarity</button>
-<button type="button" role="tab" id="map-tab-interests" aria-controls="map-stage" aria-selected="{{if .ByInterest}}true{{else}}false{{end}}" tabindex="{{if .ByInterest}}0{{else}}-1{{end}}">By interest</button>
+<button type="button" role="tab" id="map-tab-similarity" aria-controls="map-stage" aria-selected="{{if .ByGroup}}false{{else}}true{{end}}" tabindex="{{if .ByGroup}}-1{{else}}0{{end}}">By similarity</button>
+<button type="button" role="tab" id="map-tab-groups" aria-controls="map-stage" aria-selected="{{if .ByGroup}}true{{else}}false{{end}}" tabindex="{{if .ByGroup}}0{{else}}-1{{end}}">By group</button>
 </div>
 <div class="map-search">{{template "icon" "search"}}<input class="input" id="map-search" type="search" role="combobox" aria-expanded="false" aria-controls="map-hits" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Find an area, interest or document" aria-label="Find an area, interest or document on the map">
 <ul class="map-hits" id="map-hits" role="listbox" aria-label="Matches"></ul></div>
 </div>
 <div class="map-body">
-<section class="map-stage" id="map-stage" role="tabpanel" aria-labelledby="map-tab-{{if .ByInterest}}interests{{else}}similarity{{end}}">
+<section class="map-stage" id="map-stage" role="tabpanel" aria-labelledby="map-tab-{{if .ByGroup}}groups{{else}}similarity{{end}}">
 <canvas class="map-canvas" id="map-canvas-similarity" aria-label="Every document, near the documents most like it"></canvas>
-<canvas class="map-canvas" id="map-canvas-interests" aria-label="Areas holding their interests, each document a dot in its interest"></canvas>
+<canvas class="map-canvas" id="map-canvas-groups" aria-label="Areas holding their interests, each document a dot in its interest"></canvas>
 <nav class="map-crumbs" id="map-crumbs" aria-label="Where you are on the map"></nav>
 <div class="map-zoom"><button class="map-icon-btn" type="button" id="map-zoom-in" aria-label="Zoom in" title="Zoom in (+)">{{template "icon" "plus"}}</button><button class="map-icon-btn" type="button" id="map-zoom-out" aria-label="Zoom out" title="Zoom out (-)">{{template "icon" "minus"}}</button><button class="map-icon-btn" type="button" id="map-zoom-fit" aria-label="Show the whole map" title="Show the whole map (0)">{{template "icon" "maximize"}}</button></div>
 <div class="map-legend" id="map-legend"></div>

@@ -2316,7 +2316,7 @@ func TestMapPage_Ready(t *testing.T) {
 	page := MapPage{Layout: Layout{Title: "Interest map", Nav: NavInterests}, State: MapReady,
 		Run: &MapRun{Shape: "areas", Documents: 5237, Areas: 29, Interests: 182,
 			FinishedAt: time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)},
-		Query: MapQuery{View: MapViewInterests, Select: MapSelection{Kind: MapSelectInterest, ID: `"><script>alert(1)</script>`}}}
+		Query: MapQuery{View: MapViewGroups, Select: MapSelection{Kind: MapSelectInterest, ID: `"><script>alert(1)</script>`}}}
 	out := render(t, r, PageMap, page)
 	uitest.AssertInert(t, out)
 	assert.Contains(t, out, "<title>Interest map · curio</title>")
@@ -2329,14 +2329,14 @@ func TestMapPage_Ready(t *testing.T) {
 	assert.Equal(t, "interest-map js-only", attrValue(root, "class"))
 	for attr, want := range map[string]string{"data-src": "/v1/interests/map", "data-page": "/ui/interests/map",
 		"data-document-page": "/ui/documents/", "data-interest-page": "/ui/interests/",
-		"data-unsorted-page": "/ui/interests/unsorted", "data-interests-page": "/ui/interests", "data-view": "interests",
+		"data-unsorted-page": "/ui/interests/unsorted", "data-interests-page": "/ui/interests", "data-view": "groups",
 		"data-select": `interest:"><script>alert(1)</script>`} {
 		assert.Equal(t, want, attrValue(root, attr), attr)
 	}
 	assert.Equal(t, "false", attrValue(byID(doc, "map-tab-similarity"), "aria-selected"))
-	assert.Equal(t, "true", attrValue(byID(doc, "map-tab-interests"), "aria-selected"))
-	assert.Equal(t, "0", attrValue(byID(doc, "map-tab-interests"), "tabindex"))
-	assert.Equal(t, "map-tab-interests", attrValue(byID(doc, "map-stage"), "aria-labelledby"))
+	assert.Equal(t, "true", attrValue(byID(doc, "map-tab-groups"), "aria-selected"))
+	assert.Equal(t, "0", attrValue(byID(doc, "map-tab-groups"), "tabindex"))
+	assert.Equal(t, "map-tab-groups", attrValue(byID(doc, "map-stage"), "aria-labelledby"))
 	search := byID(doc, "map-search")
 	for attr, want := range map[string]string{"role": "combobox", "aria-expanded": "false", "aria-controls": "map-hits"} {
 		assert.Equal(t, want, attrValue(search, attr), attr)

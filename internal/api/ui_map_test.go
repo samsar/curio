@@ -146,7 +146,7 @@ func TestInterestMapPage_ReadsOneRun(t *testing.T) {
 	}
 	assert.Zero(t, reads.total(), "a refused query reads nothing")
 
-	mapPage(t, s, "?view=interests&select=document:"+url.QueryEscape(d[0].ID), http.StatusOK)
+	mapPage(t, s, "?view=groups&select=document:"+url.QueryEscape(d[0].ID), http.StatusOK)
 	assert.EqualValues(t, 1, reads.latest.Load())
 	assert.EqualValues(t, 1, reads.total(), "the latest run, and nothing else")
 }
