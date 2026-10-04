@@ -473,8 +473,9 @@ External processes the daemon expects:
   fetcher's fallback for anti-bot and login-wall pages and PDFs it can't
   read; off with `fetcher.native.jina_fallback: false`. Requests to it
   identify as curio, not as a browser. Its answers are judged like the
-  origin's before they are stored: challenge, block, error, not-found and
-  login pages are rejected. A redirect onto another site is judged where it
+  origin's before they are stored: challenge, block, error, not-found,
+  parked-domain, login and sign-in pages are rejected, by their title or
+  by what their text opens with. A redirect onto another site is judged where it
   lands, without Jina: a landing page is a dead link and a login page final,
   even when it answers 403 or 503 (then only a login path counts: no page is
   read). Requests go at 20 a minute (200 with a key), and at 6 a minute for

@@ -5005,6 +5005,18 @@ onto the homepage or another site's landing page (detection on) or onto
 another site's login path is that verdict, never `ErrAntiBot`; only a
 403/503 no redirect verdict explains is still host-wide and Jina-eligible.
 
+**Revised (2026-10-03):** the page's text is read too (see "Page text:
+not-found notices, parked domains and sign-in forms"). The order is now:
+
+1. dead link, with detection on: the URL rules, a not-found title, then a
+   not-found notice or a parked domain's in the page's opening;
+2. bot challenge, whose phrases now include Google's unusual-traffic page
+   and Fastly's client challenge;
+3. error page; 4. login wall by redirect; 5. no article; 6. thin; 7. a
+   login-page title, as before;
+8. a sign-in form: a short page whose text opens with a password field
+   and a sign-in line.
+
 ---
 
 ## Jina answers are judged like the origin's pages
@@ -5108,6 +5120,15 @@ bullet above said Jina's `Retry-After` went on to the job. It never did:
 the job queue retries on its own backoff (`retryBackoff`) and reads no
 `Retry-After`, so Jina's only sets the length of Jina's cooldown. The
 bullet now says so.
+
+**Revised (2026-10-03):** a parked domain's page is a dead link by its
+text (`text reads like a parked domain: …`), final and uncached like any
+dead link a Jina answer gives, whatever its size; before, it was rejected
+only when under 500 bytes, and then as a thin page. A not-found notice
+under an ordinary title, Google's unusual-traffic page and a page that is
+only a sign-in form are judged by their text too, which Jina's link URLs
+had carried past the thin floor. See "Page text: not-found notices,
+parked domains and sign-in forms".
 
 ---
 
@@ -9779,6 +9800,23 @@ time before the daemon is ready, all for 17 documents.
   dead. None is among the 5,203 stored titles; the title alone can't tell
   them from a site's not-found page.
 
+**Revised (2026-10-03):** the first and third "Not done" items are done;
+see "Page text: not-found notices, parked domains and sign-in forms". A
+page's text is now read for a not-found notice: a line of its opening
+(its own lines, links left out, up to its first line of prose within its
+first 2 KiB) that is a not-found template as a whole, or that opens with
+a not-found sentence. The body rule's worry, that an article can open with
+a 404 heading and the origin's text carries no heading markers, is met by
+reading only the opening and whole lines: measured, the line structure
+survives on both paths (go-readability's `RenderText` puts each block on
+its own line), and no stored article has a notice in its opening. Medium's
+404 ×6 and Bespoke's are dead by their text, and so are javalobby.org's
+two, whose "## 404 - หน้าไม่พบ" reads as a status and a site's name. The
+template's words (`notFoundLead`, `notFoundThing`, `notFoundYouWanted`,
+`notFoundGone`, `notFoundCantFind`) moved out of `soft404TitleRE` into one
+definition that `notFoundSentenceRE` shares; the title rule matches
+exactly what it did.
+
 ---
 
 ## Louvain: ours, warm-started; gonum as a test oracle
@@ -11120,6 +11158,246 @@ words and names out as flex items, which shrink and cut the name.
 **Test times** under `-race` on an M4 Max, each package alone, before and
 after: `internal/api` 16.2 s and 18.1 s (the new pages' tests start about
 25 more servers), `internal/ui` 49.5 s and 52.5 s.
+
+---
+
+## Page text: not-found notices, parked domains and sign-in forms
+
+**Decision:** `judgePage` reads a page's text, not only its URL and
+title, for four kinds of page that aren't the page asked for
+(`internal/fetcher/pagetext.go`):
+
+- **The text view** (`readPageText`, once per `judgePage` call, pure). It
+  reads at most the first 64 KiB of the text (`pageTextScanBytes`), up to
+  the last line break within them, as lines: markdown images dropped,
+  links reduced to their text, heading, blockquote, list and task-box
+  markers, `**`, `__`, backslash escapes, thematic breaks and setext
+  underlines dropped, whitespace (no-break spaces included) made plain,
+  empty lines dropped. A line that holds only links, after an optional
+  list, heading or emphasis marker (Jina's menus, story cards, footers), is
+  a link line: its words are no part of the page's own text, which counts
+  the bytes of every other line with its line break. From the origin the
+  text is go-readability's `RenderText`, which puts each block on its own
+  line and has no link markup, so every line is own text and passes
+  through unchanged.
+- **The opening:** the own lines that begin within the first 2 KiB of own
+  text (`openingBytes`), up to and including the first line longer than
+  200 bytes (`proseLineBytes`), the first line of prose.
+- **A not-found notice** (dead link, with detection on): a line of the
+  opening that is a not-found template as a whole (`soft404TitleRE`,
+  unchanged), or that opens with a not-found sentence
+  (`notFoundSentenceRE`): "we can't find (this|that|the) <thing> [you're
+  looking for]" or "(this|that|the) [requested] <thing> [you requested]
+  <gone>", ended by "." or "!", in `soft404TitleRE`'s words. Those words
+  (`notFoundLead`, `notFoundThing`, `notFoundYouWanted`, `notFoundGone`,
+  `notFoundCantFind`, `notFoundApos`) now have one definition, which both
+  rules are built from. Reason: `text reads like a not-found page:
+  "PAGE NOT FOUND"`.
+- **A parked domain** (dead link, with detection on): a line of the
+  opening that is an optional subject and one predicate
+  (`parkedDomainRE`). Subjects: "this domain", "the domain (name)",
+  "domain", or a domain name, which counts only when it is the requested
+  host or its site (`siteOf`), "www." and case ignored. Predicates: is or
+  may be for sale, is parked, (registration) has expired, has been
+  (recently) registered with or at a domain, Hover's "is a totally awesome
+  idea still being worked on", easyDNS's "is yet another domain managed by
+  …". With a subject, the predicate ends the line or is followed by ".",
+  "!" or ":"; without one, it is the whole line (GoDaddy's "is for sale!"
+  under the domain's name). A search-ads parking page's heading, "Related
+  searches" or "Related search topics" alone on its line
+  (`parkingHeadingRE`), counts too. Reason: `text reads like a parked
+  domain: "is for sale!"`. The content is gone, so it is a dead link like
+  a not-found page: permanent, never sent to Jina from the origin, never
+  host-cached (each page of a parked host gets its own request and the
+  same verdict), under the kill switch.
+- **Two bot checks' phrases** join `challengePhrases`: Google's
+  unusual-traffic page ("our systems have detected unusual traffic from
+  your computer network") and Fastly's client challenge ("a required part
+  of this site couldn't load"). The 2 KiB bound on raw text
+  (`maxChallengeBytes`) is unchanged.
+- **A sign-in form** (`ErrLoginWall`, page-level, the last check): a page
+  read whole, with at most 1 KiB of own text (`signInPageBytes`), whose
+  own lines beginning within its first 256 bytes of own text
+  (`signInFormBytes`) include a password field ("Password", optionally
+  followed by ":" or "*", any case) and a sign-in line (`loginTitleRE`:
+  "Log in", "Sign in"). Reason: `page is a sign-in form`.
+
+`judgePage`'s order, pinned by `TestJudgePage_Order`: dead link (URL
+rules, not-found title, then the opening's not-found notice and parked
+domain) → bot challenge → error page → login wall by redirect → no article
+→ thin → login title → sign-in form. No sentinel is new: the verdicts are
+`ErrDeadLink`, `ErrAntiBot` and `ErrLoginWall`, which `FailureCause`
+already classifies. The fallback policy, `settle`, `hostVerdict`, the host
+cache and `judgeRedirect` are unchanged: a text verdict is page-level and
+never cached; a dead link from the origin never goes to Jina; an anti-bot
+or login-wall verdict from the origin goes to Jina; a text verdict on a
+Jina answer is a dead link (final, uncached) or `errJinaRejected`. The
+not-found and parked rules obey `fetcher.native.dead_link_detection`; the
+challenge phrases and the sign-in form, like their title rules, have no
+switch. Reasons quote page text only through `strconv.Quote`, cut on a
+rune boundary to 120 bytes (`quoteLine`).
+
+**Why text rules:** 73 of the 4,654 documents stored through Readability
+or Jina on the 2026-10-03 backup copy are such pages, and nothing but
+their text gives them away. Their titles are a site's name ("Medium",
+"Quartz", "Instagram"), the URL asked for (Google's), empty, or not
+English ("หน้าไม่พบ | JavaLobby"). Jina's answers keep link and image URLs,
+so a page of a few words clears the 500-byte thin floor: wetwalls.ca's
+parking page is 9,150 bytes around 199 of words, the sign-in walls 1.7 to
+4.7 KB around 99 to 506. And Jina's answers carried neither its
+target-status warning nor its CAPTCHA warning. They made interests of
+their own: "Miscellaneous Search Queries" (19 of its 21 documents are
+Google's page), "Domain Name Listings" (18 of 21 parked domains) and
+"Meta Platforms Documentation" (9 of 11 Instagram and Facebook walls).
+
+- **Not-found pages (15):** Medium's 404 ×6, titled "Medium" ("PAGE NOT
+  FOUND", "## 404"); The Week's, untitled; Bespoke's ("Bespoke
+  Interactive", "# 404"); javalobby.org's ×2 under a Thai title; LinkedIn's
+  ×2 ("Top Content on LinkedIn"); Quartz's Next.js 404; Advisor
+  Perspectives' ("404 Error: Not Found", 19.3 KB into the answer); and
+  bomatoronto.org's, through Readability under the site's name ("Page Not
+  Found", "Sorry! The page you requested was not found."). 14 came
+  through Jina, stored 2026-09-28 to 30 by builds that already judged Jina
+  answers. The "Soft-404 titles" entry put a body rule off because an
+  article can open with a 404 heading and the origin's text has no heading
+  markers; measured, the line structure survives on both paths, and the
+  opening, own text only, keeps articles out.
+- **Parked domains (21):** GoDaddy's and Afternic's sale pages ×12, the
+  domain's name dropped, leaving "is for sale!"; HugeDomains ×2 and
+  omegacoder.com through Readability; Namecheap's expired and
+  just-registered pages; Hover's; easyDNS's; a search-ads parking page;
+  and flappyroyale.io's news portal ("This domain name may be for
+  sale."). No rule read "for sale": only a parked page under 500 bytes was
+  ever caught, as a thin login wall rather than a dead link.
+- **Bot checks (26):** Google's unusual-traffic page ×25, 530 to 1,580
+  bytes, under the 2 KiB bound but in words no phrase matched, titled with
+  the search URL; and PerlMonks' Fastly "Client Challenge", a title
+  `challengeTitleRE` doesn't know.
+- **Sign-in walls (11):** Instagram ×7, Facebook ×2 and LinkedIn ×2, under
+  titles `loginTitleRE` doesn't match ("Instagram", "Facebook", "LinkedIn
+  Login, Sign in | LinkedIn").
+
+**Anchoring.** A rule reads whole lines, or a sentence that opens one, and
+only in the opening, and only own text. A notice is what a page is when it
+opens the page; further in, a page discusses or quotes one. A link's text
+is never read: landingfolio's menu holds "[404](…)", and a story card's
+title can say anything. Each bound, measured on the copy:
+
+| Bound | Value | Flagged pages | Nearest page it keeps stored |
+|---|---|---|---|
+| `pageTextScanBytes` | 64 KiB | notices at most 19.3 KB into the text | none further in |
+| `openingBytes` | 2 KiB of own text | notices at most 857 bytes in (bomatoronto; Quartz 495) | a Home Depot category's "Related Searches" at 6.9 KB, after a 591-byte line; HTTP Made Really Easy's "404 Not Found" at 7.9 KB, after a 693-byte paragraph; a business listing's "Related Searches" at 39 KB |
+| `proseLineBytes` | 200 | at most 86 bytes in the longest line before a notice; LinkedIn's notice is itself the first long line (217 bytes) | no matching line within 2 KiB after a long line |
+| `signInPageBytes` | 1 KiB of own text | walls of 99, 171 and 506 bytes | a sign-up form (577, no sign-in line), a parking page (628, a dead link first), then pages of 7.7 KB and more with a password field near their top (Letterboxd, Stack Overflow's questions under their sign-up dialog) |
+| `signInFormBytes` | 256 bytes of own text | password fields at 70, 98 and 209 | Pinterest's sign-in modal over a deleted pin (331), an image page with a portfolio sidebar (511), IGDA Toronto's public Facebook page (541), all under 1 KiB |
+| `maxChallengeBytes` | 2 KiB, unchanged | Google's pages 530 to 1,580 bytes | — |
+
+Google's page quotes the search URL twice, so a search URL longer than
+about 870 characters would push Jina's answer past 2 KiB and out of the
+phrase rule. The library's longest is 642, a 1,580-byte answer. Measuring
+the bound on own text would change nothing in the library, so it stays.
+
+**Precision, with the shipped code** on the 2026-10-03 backup copy (5,237
+fetched documents; read-only). 4,654 reach `judgePage`: 3,370 through
+Readability, whose text was rebuilt from the stored markdown (goldmark,
+then go-readability's `render.InnerText`, with `url_canonical` as the
+final URL), and 1,284 through Jina, whose stored markdown is the body
+`judgeJinaAnswer` saw, judged through it with no warnings. The other 583
+(310 GitHub API, 235 yt-dlp, 38 local PDF) never do. The old code flags
+none of the 4,654; the new code flags 73 and changes nothing else: 15
+not-found notices and 21 parked domains (`dead_link`), 26 bot checks
+(`anti_bot`), 11 sign-in forms (`login_wall`). They cover 67 of the 69
+documents a review of the library's junk had listed (the 2 left are
+Remodelista's paywall, below), and 6 it hadn't, each reviewed and each
+junk: flappyroyale.io's parking page (`9225309d`), PerlMonks' Fastly
+challenge (`134358fc`), Advisor Perspectives' 404 (`d932fad2`), Quartz's
+404 (`3ef6449a`) and LinkedIn's sign-in wall ×2 (`9dffe504`, `e1e79ffd`).
+No article is flagged. `judgePage` costs at most 6 ms on a pathological
+64 KiB text (one line of brackets or escapes), and about 2 ms on 64 KiB of
+menu lines.
+
+**Accepted risks.** A page whose opening holds a not-found template line
+is judged dead, as such a title is: an article that quotes a notice before
+its first paragraph, or a status-code cheat sheet that opens with its
+list. None is among the 4,654. A short page led by a sign-in form is a
+login wall, and goes to Jina like any.
+
+**Not done** (what the rules still miss):
+
+- Remodelista's metered paywall ×2 (`62b3ba53`, `d6ec70f0`, "You have
+  reached your limit of three (3) free posts…", 2.3 KB of own text through
+  Readability): a paywall phrase list would be one site's wording, and
+  paywalled pages elsewhere often carry a real excerpt.
+- Notices outside the grammar or in another language without a status
+  line: "can't seem to find", "We can’t find that idea!",
+  battle.net's "Profile Unavailable" ×4, X's "Account suspended",
+  Substack's "This post didn't load". Several are temporary, and a dead
+  verdict is sticky.
+- Notices after a line of prose or past 2 KiB of own text.
+- Sign-in walls with a longer preamble, another password label, or an
+  email-first flow (Notion, X).
+- Parking pages in other words, and domains taken over for spam
+  (framelessgrid.com's SIP777 casino portal, `80029943`).
+- A bot check over 2 KiB.
+
+**Existing documents:** the rules judge fetches, not what is stored. The
+73 stay `fetched` until refetched; they are fetched, so no `--force` is
+needed. With the daemon running this change:
+
+```sh
+for id in <ids>; do curio refetch "$id"; done
+```
+
+- Not-found notices, expected `dead` (`dead_link`):
+  2b976ea6-0c21-4589-ab97-23ed74afeb56 2b977a4b-665e-438e-9d4a-f5585d633a01
+  3219e2f1-4b64-4735-b1ee-c43a1c01825c 3ef4dab9-78f7-484f-bba1-1e91892641f7
+  3ef6449a-da28-4677-8720-48aa14145f48 40303d6f-8998-4980-b128-639e628f139d
+  70233b2a-896a-4022-98ad-e8b5bfa42f71 7ad607e2-b500-490f-9d3b-12aa6aa34e69
+  abd7cbb3-0eac-42c3-a454-0d872c6dc509 b94ed7b8-186b-4ff9-8b21-13fabb111e41
+  bd70c172-6209-49df-b2e5-660c7a685599 d932fad2-60ab-4b63-b932-621566608933
+  e0251c27-6579-46b4-8997-9008f31b1caf fa2c61a1-2ddf-4b84-b462-2f4e69662dec
+  fddead8b-a3d5-4dbb-997e-d82eb01b394b
+- Parked domains, expected `dead` (`dead_link`):
+  0fce584d-7ebb-49e5-8acc-84a00a959657 1e76c977-22a2-4218-81be-f9c048edf4cd
+  397f7090-58da-48fa-863d-89515183f04e 433eee32-d2a2-41cc-aaff-ac2eac2a5db9
+  4e100057-3231-4cd1-af99-04b646bd42e5 4e50ec79-9a7a-4d41-9040-6e3282da5c70
+  5b84d76b-ab37-43e5-abb5-719b5287b463 64748bb6-f61c-4ca2-8dc5-4a83f88d4548
+  7808c035-24fc-4860-aec4-2e5bb2fb2945 890a18f8-300f-45da-8658-cf1a9651b5a9
+  9225309d-e421-4c83-b7f1-08724dcfd30b 94a6dad7-0406-493b-8561-0fe0faf5d3ec
+  9a0e2012-e670-444e-bcd5-7f1578518990 9d57ab40-7fbc-4fd8-ae2a-2bcbb70e25e6
+  b576dab4-565d-47d8-993a-ad1b5a40c55c b767c66d-0e10-496e-a900-2f70e563da07
+  c57c0457-bb9c-48d8-84f0-a769fcb927c1 cd8c2a4e-28ae-4e85-bb12-6fbf3a445810
+  d173f130-6192-4e98-a039-f5304779dadb d4dc7287-2d5e-4591-a836-bba2abb0dc83
+  fcb281ad-5239-4197-a90e-9bb06b4a7fb5
+- Bot checks, expected `failed` (`anti_bot`):
+  0ea6643c-002c-4437-9045-2d4986bfecd2 11d6697f-3dc0-4224-abaa-349bb7d71aef
+  134358fc-fdcc-40c7-b6af-db64fc003e3b 16cc372f-3440-4251-ac0c-6d8a9de4bc11
+  1f0dcd53-53f2-48a7-903e-659b4070913a 2d6f2339-47fd-4f83-b653-b43cd1a98cb5
+  2ee8f08a-fc7e-44ee-997a-907b8061b5fd 2fbb7da1-0d65-4f89-95a7-d8125042b048
+  3969830b-25c1-49de-9cda-61079028ce36 3c4f78e9-b725-4a29-bc66-2551ebc802e8
+  5153994a-abad-4054-ba94-976d1f8cd119 5b240d4c-9f14-40a9-940c-1233435ce65f
+  5e7acd77-de98-4189-b939-a7d8bb224695 602d34de-269a-4fdf-8c11-312148a92ee4
+  63848523-c6e0-4b71-bd96-cc164f4c5eb1 7be2d137-c5b0-4850-bd72-1a92f6a5f86b
+  7eea839b-1774-44d7-b5a0-caee07890861 8aff06a0-fe38-449a-9b45-9712c37cecba
+  af9dc68c-b44c-41d0-b051-4b72d9ce6103 c5e4a490-26f3-49f0-9983-6683ba71ab3c
+  d6cb1653-dfdd-4574-b2c7-0e56941836a7 e0d420ce-0e8b-44a6-b618-766a8c91e77d
+  e7cc72ef-90e0-4599-9526-475668728e9d f12e42ac-f2f6-4ae2-91aa-2300b9e1b46e
+  f314b37f-4d49-4f49-8684-0a81689320b3 f4e4af63-72c8-4f68-9753-72dc650aef5d
+- Sign-in forms, expected `failed` (`login_wall`):
+  0866b543-a601-4fba-aa30-bd4c2a7b9792 2992618b-de69-4abd-ab7c-b71b9c8f153a
+  2a8f7621-9949-4d80-b6f9-6783ec42438f 4ff5da11-353d-406a-88de-7b7066f222fa
+  56b91dcd-cc06-48f2-afdd-c51bdd7d8289 685992c4-46dc-42d7-94b8-304f5f9690a3
+  748c75b7-94c4-4e5f-9cd0-543649baf595 9dffe504-1bd5-41b0-9b85-eafc553d0f4d
+  bd2f791a-823c-4b14-9e07-767ac77b3247 daa45ce8-bf38-473b-91c0-c6b7b2045a94
+  e1e79ffd-6146-4fe9-aa44-37c0ae2210bb
+
+A refetch asks the site again and judges what comes back, so a site that
+changed decides otherwise. Not-found and parked pages should end `dead`.
+Google's pages should end `failed` (`anti_bot`) unless Google serves its
+results, and the walls `failed` (`login_wall`). Each leaves search once
+its refetch ends it failed or dead. The interests change only at the next
+rebuild, `curio interests rebuild`: 73 changed documents are below the
+automatic rebuild's threshold (5% of the library, 262 documents).
 
 ---
 

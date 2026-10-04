@@ -813,6 +813,28 @@ daemon-wide (404 and 410 are retried, soft 404s stored), restart the daemon
 documents (`curio refetch --all --state=dead`, or `curio refetch <id>
 --force`).
 
+**`dead link (text reads like a not-found page: "…")`** or **`dead link
+(text reads like a parked domain: "…")`** on a document — the page
+answered, but under a title that doesn't say so, its text opens by saying
+the page is gone ("PAGE NOT FOUND", "We can’t find the page you’re looking
+for.") or that the domain is for sale, parked, expired or just registered
+("is for sale!", "Domain registration has expired."). The reason quotes
+the line. Only the page's opening counts: its own lines, menus and other
+lines of links left out, up to its first paragraph and within its first
+2 KiB, so an article that quotes such a notice further in is stored. A
+forced refetch (`curio refetch <id> --force`) judges the same text again,
+so it only helps once the site serves the page itself again. The only
+override is `fetcher.native.dead_link_detection: false` and a restart, as
+above, which turns off every dead-link rule.
+
+**`login wall or thin content (page is a sign-in form)`** on a document —
+the page is a sign-in form and nothing else: at most 1 KiB of text, menus
+left out, whose first lines hold a password field and a "Log in" or "Sign
+in" line (Instagram's and Facebook's walls). The content is behind an
+account curio doesn't have. curio asks Jina Reader for the page, and the
+document fails as `login_wall` when Jina gets the same form. A page that
+shows its content first and a sign-in box after it is stored.
+
 **`jina: r.jina.ai's CDN challenged the request`** — Jina Reader's
 Cloudflare refused curio. Jina calls pause for 10 minutes (or the answer's
 `Retry-After`), with one warning in the daemon log when a challenge starts
