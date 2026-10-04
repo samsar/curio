@@ -2,8 +2,10 @@ package insight
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -232,4 +234,155 @@ func TestPlacer_Sweep(t *testing.T) {
 	again, err := p.Sweep(ctx, tenant)
 	require.NoError(t, err)
 	assert.Zero(t, again)
+}
+
+// insideCircle reports whether a dot of radius dot at x, y lies inside c,
+// what rounding leaves aside.
+func insideCircle(x, y, dot float64, c store.Circle) bool {
+	return math.Hypot(x-c.X, y-c.Y)+dot <= c.R+0.02
+}
+
+// circleOf is interest id's zoom circle in run.
+func (f *engineFixture) circleOf(t *testing.T, runID, id string) store.Circle {
+	t.Helper()
+	gs, err := f.store.RunGroups(context.Background(), runID)
+	require.NoError(t, err)
+	for _, g := range gs {
+		if g.ID == id {
+			require.NotNil(t, g.Map)
+			return store.Circle{X: g.Map.ZoomX, Y: g.Map.ZoomY, R: g.Map.ZoomR}
+		}
+	}
+	t.Fatalf("run %s has no interest %s", runID, id)
+	return store.Circle{}
+}
+
+// placeOf is document id's placement in run, with its place on the map.
+func (f *engineFixture) placeOf(t *testing.T, runID, id string) store.MapPlace {
+	t.Helper()
+	got, err := f.store.MapPositions(context.Background(), runID, []string{id})
+	require.NoError(t, err)
+	require.Len(t, got, 1, "document %s has a place", id)
+	return got[0]
+}
+
+// TestPlacer_PlacesOnTheMap: a document placed into a run with a built map
+// gets a place on both views: one whose vector is a mapped member's sits
+// within 1% of the map of it, inside its interest's circle; one far from
+// every interest inside Unsorted's disc; and placing it again puts it in
+// the same place.
+func TestPlacer_PlacesOnTheMap(t *testing.T) {
+	ctx := context.Background()
+	f := mapLibrary(t, "d")
+	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	as, err := f.store.RunAssignments(ctx, run.ID)
+	require.NoError(t, err)
+	var member store.InterestAssignment
+	for _, a := range as {
+		if a.Fit == store.InterestFitMember {
+			member = a
+			break
+		}
+	}
+	var memberVec []float32
+	for _, dv := range f.vectors.dvs {
+		if dv.DocumentID == member.DocumentID {
+			memberVec = slices.Clone(dv.Vector)
+		}
+	}
+	p := f.placer()
+	twin := f.addVector(t, memberVec)
+	p.Place(ctx, tenant, twin)
+	got := f.placeOf(t, run.ID, twin)
+	assert.Equal(t, member.InterestID, got.InterestID)
+	assert.LessOrEqual(t, math.Hypot(got.Map.MapX-member.Map.MapX, got.Map.MapY-member.Map.MapY), 0.01*store.MapExtent)
+	assert.True(t, insideCircle(got.Map.ZoomX, got.Map.ZoomY, run.Map.DotRadius, f.circleOf(t, run.ID, member.InterestID)))
+
+	far := make([]float32, mapDims)
+	far[mapDims-1] = 1
+	stray := f.addVector(t, far)
+	p.Place(ctx, tenant, stray)
+	got = f.placeOf(t, run.ID, stray)
+	assert.Empty(t, got.InterestID, "into Unsorted")
+	assert.True(t, insideCircle(got.Map.ZoomX, got.Map.ZoomY, run.Map.DotRadius, run.Map.Unsorted))
+
+	p.Place(ctx, tenant, stray)
+	assert.Equal(t, got, f.placeOf(t, run.ID, stray), "placed again, the same place")
+	assert.Empty(t, f.lines("level=WARN"))
+}
+
+// TestPlacer_NoMapNoPlace: a placement into a run whose map failed, or one
+// from before maps, has no place on the map.
+func TestPlacer_NoMapNoPlace(t *testing.T) {
+	ctx := context.Background()
+	f := mapLibrary(t, "d")
+	failing := func(context.Context, MapInput) (*Map, error) { return nil, errors.New("no room") }
+	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}).WithMapper(failing))
+	doc := f.addAround(t, "d", 0, 1, rand.New(rand.NewPCG(1, 1)))[0]
+	f.placer().Place(ctx, tenant, doc)
+	assert.Equal(t, 1, len(f.placedInto(t, run.ID)))
+	got, err := f.store.MapPositions(ctx, run.ID, []string{doc})
+	require.NoError(t, err)
+	assert.Empty(t, got, "placed without a place")
+
+	run = f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	_, err = f.db.Exec(`UPDATE interest_runs SET map_status = NULL, map_kind = NULL, map_error = NULL, map_ms = NULL,
+		map_params = NULL, map_dot_radius = NULL, map_unsorted_x = NULL, map_unsorted_y = NULL, map_unsorted_r = NULL`)
+	require.NoError(t, err)
+	doc = f.addAround(t, "d", 1, 1, rand.New(rand.NewPCG(2, 2)))[0]
+	f.placer().Place(ctx, tenant, doc)
+	got, err = f.store.MapPositions(ctx, run.ID, []string{doc})
+	require.NoError(t, err)
+	assert.Empty(t, got, "a run without a map")
+}
+
+// TestPlacer_PlaceFallsBack: when the neighbour search fails, the
+// placement is still written, at the fallback place inside its circle,
+// and the run warns once.
+func TestPlacer_PlaceFallsBack(t *testing.T) {
+	ctx := context.Background()
+	f := mapLibrary(t, "d")
+	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	f.vectors.searchErr = errLocked
+	p := f.placer()
+	docs := f.addAround(t, "d", 0, 2, rand.New(rand.NewPCG(3, 3)))
+	for _, doc := range docs {
+		p.Place(ctx, tenant, doc)
+	}
+	for _, doc := range docs {
+		got := f.placeOf(t, run.ID, doc)
+		require.NotEmpty(t, got.InterestID)
+		assert.True(t, insideCircle(got.Map.ZoomX, got.Map.ZoomY, run.Map.DotRadius, f.circleOf(t, run.ID, got.InterestID)))
+		assert.True(t, got.Map.MapX >= 0 && got.Map.MapX <= store.MapExtent && got.Map.MapY >= 0 && got.Map.MapY <= store.MapExtent)
+	}
+	warnings := f.lines("level=WARN")
+	require.Len(t, warnings, 1, "one warning a run")
+	assert.Contains(t, warnings[0], "fell back")
+	assert.Contains(t, warnings[0], "database is locked")
+}
+
+// TestPlacer_SweepPastItsBudget: a sweep that has spent its neighbour
+// budget still places every document, at the fallback place: on the
+// document map, by its interest's anchor.
+func TestPlacer_SweepPastItsBudget(t *testing.T) {
+	ctx := context.Background()
+	f := mapLibrary(t, "d")
+	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	docs := f.addAround(t, "d", 2, 3, rand.New(rand.NewPCG(4, 4)))
+	placed, err := f.placer().WithNeighbourBudget(0).Sweep(ctx, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, 3, placed)
+	gs, err := f.store.RunGroups(ctx, run.ID)
+	require.NoError(t, err)
+	anchors := map[string][2]float64{}
+	for _, g := range gs {
+		anchors[g.ID] = [2]float64{g.Map.AnchorX, g.Map.AnchorY}
+	}
+	for _, doc := range docs {
+		got := f.placeOf(t, run.ID, doc)
+		a := anchors[got.InterestID]
+		assert.InDelta(t, placeOffset*store.MapExtent, math.Hypot(got.Map.MapX-a[0], got.Map.MapY-a[1]), 0.02,
+			"%s sits by its interest's anchor", doc)
+		assert.True(t, insideCircle(got.Map.ZoomX, got.Map.ZoomY, run.Map.DotRadius, f.circleOf(t, run.ID, got.InterestID)))
+	}
 }

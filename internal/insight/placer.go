@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
+	"math"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +31,31 @@ const (
 // errNoVectors is a document with no chunk vector: nothing to place.
 var errNoVectors = errors.New("the document has no vectors")
 
+// A placed document's place on a built map: near its most similar mapped
+// documents, found by a vector search of its chunks' (VectorSearch, 40 ms
+// on the owner's library, where the rest of a placement takes 2 ms).
+const (
+	// neighbourChunks is how many chunks the search reads: about 24
+	// documents on the owner's library.
+	neighbourChunks = 50
+	// placeAnchors is how many of the most similar mapped documents a
+	// place blends, on each view.
+	placeAnchors = 5
+	// placeTemperature: a neighbour's weight falls by e for every
+	// placeTemperature its nearness (minus half its squared distance to the
+	// document's vector) is below the nearest's, so the nearest dominates
+	// and a document identical to a mapped one sits on it.
+	placeTemperature = 0.02
+	// placeOffset is how far, as a share of the map, a placed dot sits from
+	// where its neighbours put it, at its ID's hash angle, so it never sits
+	// exactly on another.
+	placeOffset = 0.004
+	// sweepNeighbourBudget bounds the time a sweep spends searching: past
+	// it, the documents left take the fallback place, and the placement
+	// itself never waits on it.
+	sweepNeighbourBudget = 60 * time.Second
+)
+
 // Placer puts documents indexed between rebuilds into the tenant's
 // current grouping, the latest done run: each into its nearest interest
 // when the cosine to its centroid reaches LooseFitThreshold, into Unsorted
@@ -41,11 +69,27 @@ type Placer struct {
 	chunks   store.ChunkStore
 	drift    func() string
 	log      *slog.Logger
+	// neighbourBudget is a sweep's sweepNeighbourBudget.
+	neighbourBudget time.Duration
 
-	mu     sync.Mutex
-	cached *runPlacement // the latest run's space, nil before the first placement
-	warned bool          // a failure was warned about, for the run failed names
-	failed string        // that run, "" for a failure before one was read
+	mu        sync.Mutex
+	cached    *runPlacement // the latest run's space, nil before the first placement
+	failures  runWarnings   // placements that failed
+	fallbacks runWarnings   // places that fell back for a failure
+}
+
+// runWarnings tells the first of a kind of failure in a run, to warn about,
+// from the rest, logged at debug. Its owner's mutex guards it.
+type runWarnings struct {
+	run    string // the run the last was in, "" for one before a run was read
+	warned bool
+}
+
+// first notes a failure in runID and reports whether it is the run's first.
+func (w *runWarnings) first(runID string) bool {
+	first := w.run != runID || !w.warned
+	w.run, w.warned = runID, true
+	return first
 }
 
 // NewPlacer returns a Placer over the stores; drift says how the
@@ -54,7 +98,7 @@ func NewPlacer(insights store.InsightStore, chunks store.ChunkStore, drift func(
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Placer{insights: insights, chunks: chunks, drift: drift, log: log}
+	return &Placer{insights: insights, chunks: chunks, drift: drift, log: log, neighbourBudget: sweepNeighbourBudget}
 }
 
 // Place places a document just indexed into the tenant's current
@@ -104,9 +148,10 @@ func (p *Placer) place(ctx context.Context, tenantID, documentID string) (runID 
 		if err != nil {
 			return err
 		}
+		p.position(ctx, tenantID, rp, &pl, true)
 		// The run may have been replaced since it was read: the write
 		// checks.
-		_, err = p.insights.PlaceDocument(ctx, tenantID, pl)
+		_, err = p.insights.PlaceDocument(ctx, tenantID, pl.Placement)
 		return err
 	})
 	return runID, err
@@ -119,6 +164,8 @@ func (p *Placer) place(ctx context.Context, tenantID, documentID string) (runID 
 // returns how many it placed. A document whose vectors can't be placed
 // (another width, a non-finite value) is left out with a warning, so one
 // can't stall the rest; any other failure, a panic included, is its error.
+// Searching for neighbours on the map stops once it has taken the
+// sweep's neighbour budget: the documents left take the fallback place.
 func (p *Placer) Sweep(ctx context.Context, tenantID string) (placed int, err error) {
 	ctx, cancel := context.WithTimeout(ctx, sweepTimeout)
 	defer cancel()
@@ -149,6 +196,7 @@ func (p *Placer) sweep(ctx context.Context, tenantID string) (int, error) {
 	ps := make([]store.Placement, 0, len(ids))
 	var skipped []string
 	var skipErr error
+	var searched time.Duration
 	for _, id := range ids {
 		vec, err := p.vector(ctx, id)
 		switch {
@@ -162,7 +210,10 @@ func (p *Placer) sweep(ctx context.Context, tenantID string) (int, error) {
 			skipped, skipErr = append(skipped, id), cmp.Or(skipErr, err)
 			continue
 		}
-		ps = append(ps, pl)
+		start := time.Now()
+		p.position(ctx, tenantID, rp, &pl, searched < p.neighbourBudget)
+		searched += time.Since(start)
+		ps = append(ps, pl.Placement)
 	}
 	if len(skipped) > 0 {
 		p.log.Warn("interests: the sweep left out documents it can't place", "run", run.ID, "count", len(skipped),
@@ -234,23 +285,34 @@ func (p *Placer) vector(ctx context.Context, documentID string) ([]float32, erro
 // first of a run, debug for the rest, so a broken store doesn't log a
 // warning per document indexed.
 func (p *Placer) failure(runID string, args ...any) {
+	p.logOnce(&p.failures, runID, "interests: placement failed", args...)
+}
+
+// logOnce logs msg about runID: a warning for the first of w's kind in the
+// run, debug for the rest.
+func (p *Placer) logOnce(w *runWarnings, runID, msg string, args ...any) {
 	p.mu.Lock()
-	first := p.failed != runID || !p.warned
-	p.failed, p.warned = runID, true
+	first := w.first(runID)
 	p.mu.Unlock()
 	level := slog.LevelDebug
 	if first {
 		level = slog.LevelWarn
 	}
-	p.log.Log(context.Background(), level, "interests: placement failed", append([]any{"run", runID}, args...)...)
+	p.log.Log(context.Background(), level, msg, append([]any{"run", runID}, args...)...)
 }
 
 // runPlacement is a run's space as the Placer caches it: the interests'
-// centroids, by interest ID, around the run's mean.
+// centroids, by interest ID, around the run's mean; and, when the run's
+// map is built, each interest's circle and anchor, Unsorted's disc and the
+// dots' radius.
 type runPlacement struct {
 	runID     string
 	space     *RunSpace
 	interests []string // a centroid's interest, by index
+	mapped    bool
+	places    map[string]store.GroupMap // by interest ID
+	unsorted  store.Circle
+	dotRadius float64
 }
 
 func newRunPlacement(run *store.InterestRun, groups []store.InterestGroup) (*runPlacement, error) {
@@ -264,6 +326,16 @@ func newRunPlacement(run *store.InterestRun, groups []store.InterestGroup) (*run
 	for i, g := range interests {
 		rp.interests[i], centroids[i] = g.ID, g.Centroid
 	}
+	if m := run.Map; m != nil && m.Status == store.MapBuilt {
+		rp.mapped, rp.unsorted, rp.dotRadius = true, m.Unsorted, m.DotRadius
+		rp.places = make(map[string]store.GroupMap, len(interests))
+		for _, g := range interests {
+			if g.Map == nil {
+				return nil, fmt.Errorf("interest %s has no place on the run's built map", g.ID)
+			}
+			rp.places[g.ID] = *g.Map
+		}
+	}
 	mean := make([]float64, len(run.Mean))
 	for i, x := range run.Mean {
 		mean[i] = float64(x)
@@ -276,19 +348,189 @@ func newRunPlacement(run *store.InterestRun, groups []store.InterestGroup) (*run
 	return rp, nil
 }
 
+// placed is a placement and what its place on the map starts from: the
+// document's vector and its nearest interest, "" for none.
+type placed struct {
+	store.Placement
+	vec     []float32
+	nearest string
+}
+
 // place is where vec, documentID's vector, goes: an interest it joins, or
 // Unsorted with its cosine to the nearest.
-func (rp *runPlacement) place(documentID string, vec []float32) (store.Placement, error) {
+func (rp *runPlacement) place(documentID string, vec []float32) (placed, error) {
 	pl, err := rp.space.Place(vec)
 	if err != nil {
-		return store.Placement{}, fmt.Errorf("document %s: %w", documentID, err)
+		return placed{}, fmt.Errorf("document %s: %w", documentID, err)
 	}
-	out := store.Placement{RunID: rp.runID, DocumentID: documentID, Similarity: pl.Similarity}
+	out := placed{Placement: store.Placement{RunID: rp.runID, DocumentID: documentID, Similarity: pl.Similarity},
+		vec: vec}
+	if pl.Interest >= 0 {
+		out.nearest = rp.interests[pl.Interest]
+	}
 	if pl.Joined {
-		out.InterestID = rp.interests[pl.Interest]
+		out.InterestID = out.nearest
 	}
 	return out, nil
 }
+
+// position gives pl its place on the run's map, when the map is built:
+// near its most similar mapped documents when search is set and finds
+// some, else the fallback place. A failed search falls back: a warning for
+// the run's first, debug after.
+func (p *Placer) position(ctx context.Context, tenantID string, rp *runPlacement, pl *placed, search bool) {
+	if !rp.mapped {
+		return
+	}
+	var near []mapNeighbour
+	if search {
+		err := recovered(func() error {
+			var err error
+			near, err = p.neighbours(ctx, tenantID, rp.runID, pl)
+			return err
+		})
+		if err != nil {
+			p.logOnce(&p.fallbacks, rp.runID, "interests: a placement's place on the map fell back",
+				"document", pl.DocumentID, "err", err)
+		}
+	}
+	pl.Map = rp.position(pl, near)
+}
+
+// mapNeighbour is a mapped document near a placed one: its nearness (minus
+// half its squared distance to the placed document's vector) and its place.
+type mapNeighbour struct {
+	nearness float64
+	place    store.MapPlace
+}
+
+// neighbours are the mapped documents nearest pl's vector, nearest first,
+// ties to the lower ID: its vector search's documents, each at its nearest
+// chunk, that have a place on the run's map.
+func (p *Placer) neighbours(ctx context.Context, tenantID, runID string, pl *placed) ([]mapNeighbour, error) {
+	hits, err := p.chunks.VectorSearch(ctx, tenantID, pl.vec, neighbourChunks,
+		store.SearchFilters{ExcludeDocumentID: pl.DocumentID})
+	if err != nil {
+		return nil, fmt.Errorf("search the document's neighbours: %w", err)
+	}
+	nearness := map[string]float64{}
+	var ids []string
+	for _, h := range hits {
+		if h.Score <= 0 {
+			continue
+		}
+		d := 1/h.Score - 1 // VectorSearch scores a distance d as 1/(1+d)
+		if prev, ok := nearness[h.DocumentID]; !ok {
+			ids = append(ids, h.DocumentID)
+			nearness[h.DocumentID] = -d * d / 2
+		} else {
+			nearness[h.DocumentID] = math.Max(prev, -d*d/2)
+		}
+	}
+	places, err := p.insights.MapPositions(ctx, runID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("read the neighbours' places: %w", err)
+	}
+	out := make([]mapNeighbour, len(places))
+	for i, place := range places {
+		out[i] = mapNeighbour{nearness: nearness[place.DocumentID], place: place}
+	}
+	slices.SortFunc(out, func(a, b mapNeighbour) int {
+		return cmp.Or(cmp.Compare(b.nearness, a.nearness), strings.Compare(a.place.DocumentID, b.place.DocumentID))
+	})
+	return out, nil
+}
+
+// position is pl's place on the map. On the document map: the weighted
+// mean of its placeAnchors nearest neighbours' places, else the anchor of
+// the interest it joined (its nearest, in Unsorted; the map's centre with
+// none). In the zoom view: the weighted mean of its nearest neighbours in
+// its own circle (its interest's, or Unsorted's disc), else a point of its
+// own inside the circle: halfway out at its hash angle in an interest's,
+// seven tenths out toward its nearest interest in Unsorted's. Each is
+// moved placeOffset (a dot, in the zoom view) along its hash angle so it
+// never sits exactly on another dot, kept inside its circle and the map,
+// and rounded as the layouts round.
+func (rp *runPlacement) position(pl *placed, near []mapNeighbour) *store.MapPosition {
+	ux, uy := hashDirection(pl.DocumentID)
+	var mapX, mapY float64
+	if x, y, ok := blend(near, func(store.MapPlace) bool { return true }, func(p store.MapPosition) (float64, float64) {
+		return p.MapX, p.MapY
+	}); ok {
+		mapX, mapY = x, y
+	} else if g, ok := rp.places[cmp.Or(pl.InterestID, pl.nearest)]; ok {
+		mapX, mapY = g.AnchorX, g.AnchorY
+	} else {
+		mapX, mapY = store.MapExtent/2, store.MapExtent/2
+	}
+	shift := placeOffset * store.MapExtent
+	mapX, mapY = clampToMap(mapX+shift*ux), clampToMap(mapY+shift*uy)
+
+	circle := rp.unsorted
+	if g, ok := rp.places[pl.InterestID]; ok && pl.InterestID != "" {
+		circle = store.Circle{X: g.ZoomX, Y: g.ZoomY, R: g.ZoomR}
+	}
+	room := math.Max(circle.R-rp.dotRadius-0.01, 0) // a whole dot inside, whatever rounding does
+	sameCircle := func(m store.MapPlace) bool { return m.InterestID == pl.InterestID }
+	zoomX, zoomY, ok := blend(near, sameCircle, func(p store.MapPosition) (float64, float64) { return p.ZoomX, p.ZoomY })
+	switch {
+	case ok:
+		zoomX, zoomY = zoomX+rp.dotRadius*ux, zoomY+rp.dotRadius*uy
+	case pl.InterestID != "":
+		zoomX, zoomY = circle.X+room/2*ux, circle.Y+room/2*uy
+	default:
+		dx, dy := ux, uy
+		if g, ok := rp.places[pl.nearest]; ok && (g.ZoomX != circle.X || g.ZoomY != circle.Y) {
+			d := math.Hypot(g.ZoomX-circle.X, g.ZoomY-circle.Y)
+			dx, dy = (g.ZoomX-circle.X)/d, (g.ZoomY-circle.Y)/d
+		}
+		zoomX, zoomY = circle.X+0.7*room*dx, circle.Y+0.7*room*dy
+	}
+	if d := math.Hypot(zoomX-circle.X, zoomY-circle.Y); d > room {
+		zoomX, zoomY = circle.X+(zoomX-circle.X)*room/d, circle.Y+(zoomY-circle.Y)*room/d
+	}
+	return &store.MapPosition{MapX: roundPlace(mapX), MapY: roundPlace(mapY), ZoomX: roundPlace(clampToMap(zoomX)),
+		ZoomY: roundPlace(clampToMap(zoomY))}
+}
+
+// blend is the weighted mean, by at, of the places of the placeAnchors
+// nearest of near that keep holds; ok is false for none. The nearest
+// weighs 1, and each other e^((nearness − nearest's)/placeTemperature).
+func blend(near []mapNeighbour, keep func(store.MapPlace) bool, at func(store.MapPosition) (float64, float64)) (x, y float64, ok bool) {
+	var sum, best float64
+	used := 0
+	for _, n := range near {
+		if !keep(n.place) {
+			continue
+		}
+		if used == 0 {
+			best = n.nearness
+		}
+		w := math.Exp((n.nearness - best) / placeTemperature)
+		px, py := at(n.place.Map)
+		x, y, sum = x+w*px, y+w*py, sum+w
+		if used++; used == placeAnchors {
+			break
+		}
+	}
+	if used == 0 {
+		return 0, 0, false
+	}
+	return x / sum, y / sum, true
+}
+
+// hashDirection is the unit vector at the angle of id's FNV-1a hash.
+func hashDirection(id string) (float64, float64) {
+	h := fnv.New64a()
+	h.Write([]byte(id)) // a hash.Hash's Write never fails
+	a := 2 * math.Pi * float64(h.Sum64()>>11) / (1 << 53)
+	return math.Cos(a), math.Sin(a)
+}
+
+func clampToMap(v float64) float64 { return math.Max(0, math.Min(store.MapExtent, v)) }
+
+// roundPlace rounds to 0.01, as the layouts do.
+func roundPlace(v float64) float64 { return math.Round(v*100) / 100 }
 
 // recovered runs fn and returns its error, a panic turned into one, with
 // the stack: placement runs in the index worker, whose recovery would fail

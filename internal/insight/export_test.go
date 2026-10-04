@@ -41,3 +41,10 @@ func (e *Engine) WithMapTimeout(d time.Duration) *Engine {
 	e.mapTimeout = d
 	return e
 }
+
+// WithNeighbourBudget returns p giving a sweep's neighbour searches d in
+// place of sweepNeighbourBudget.
+func (p *Placer) WithNeighbourBudget(d time.Duration) *Placer {
+	p.neighbourBudget = d
+	return p
+}

@@ -2,6 +2,7 @@ package insight
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,12 +25,41 @@ import (
 const tenant = "local"
 
 // vectorSource serves canned document vectors: each document's mean, and
-// that vector as its one chunk's. The engine and the placer read nothing
-// else from the chunk store.
+// that vector as its one chunk's, which VectorSearch searches by brute
+// force. The engine and the placer read nothing else from the chunk store.
 type vectorSource struct {
 	store.ChunkStore
-	dvs []store.DocVector
-	err error // what DocumentVectors fails with, when set
+	dvs       []store.DocVector
+	err       error // what DocumentVectors fails with, when set
+	searchErr error // what VectorSearch fails with, when set
+}
+
+func (v *vectorSource) VectorSearch(_ context.Context, _ string, q []float32, limit int, f store.SearchFilters) ([]store.ChunkHit, error) {
+	if v.searchErr != nil {
+		return nil, v.searchErr
+	}
+	type hit struct {
+		store.ChunkHit
+		d float64
+	}
+	var hits []hit
+	for _, dv := range v.dvs {
+		if dv.DocumentID == f.ExcludeDocumentID {
+			continue
+		}
+		var d2 float64
+		for i, x := range dv.Vector {
+			d2 += (float64(x) - float64(q[i])) * (float64(x) - float64(q[i]))
+		}
+		d := math.Sqrt(d2)
+		hits = append(hits, hit{store.ChunkHit{ChunkID: "chunk-" + dv.DocumentID, DocumentID: dv.DocumentID, Score: 1 / (1 + d)}, d})
+	}
+	slices.SortFunc(hits, func(a, b hit) int { return cmp.Or(cmp.Compare(a.d, b.d), strings.Compare(a.DocumentID, b.DocumentID)) })
+	out := make([]store.ChunkHit, 0, limit)
+	for _, h := range hits[:min(limit, len(hits))] {
+		out = append(out, h.ChunkHit)
+	}
+	return out, nil
 }
 
 func (v *vectorSource) DocumentVectors(context.Context, string) ([]store.DocVector, error) {
