@@ -11627,7 +11627,16 @@ library small and centred.
   distinct, each spread multiplies every distance between them, and a
   start with no overlap at all comes in a bounded number of tries. Each
   push moves a pair 1e-3 past touching, so sweeps end rather than creep
-  toward it.
+  toward it. Packing is the last step that moves circles at every level,
+  cold or warm: compaction only takes moves that overlap nothing, an
+  area's interior and the fit to the map are translations and one
+  uniform scale, and the warm view packs once more after its alignment
+  (below), so no overlap rests on a transform being exact. The view then
+  checks its output before returning it: the circles of each level
+  apart, every interest inside its area, every dot inside its circle, up
+  to what rounding to 0.01 can take (0.035). A view that fails the check
+  fails its map, which the rebuild commits as failed rather than drawing
+  overlapping circles.
 - **Dots on lattice slots.** An interest's documents aim at their own
   first two principal components, turned or reflected (weighted Procrustes)
   toward the circles of its 6 most similar interests, with radii replaced
@@ -11644,9 +11653,20 @@ library small and centred.
   new one at its lineage predecessor's place (the old identity it shares
   the most members with), else beside its 3 most similar placed groups and
   then by stress majorization against the placed ones, which stay put. The
-  circles are packed without compaction, and the whole is turned (or
-  reflected) and moved onto the previous places, never scaled: radii are
-  absolute. The spec's short refinement of the carried places toward
+  circles are packed without compaction; the whole is then turned (or
+  reflected) and moved back onto the previous places, never scaled (radii
+  are absolute), and packed again. The turn is the plane's closed-form
+  best rotation or reflection, exact at any rank. Two placed groups at a
+  level, or collinear ones, give a rank-one fit, for which the factor
+  first used (through mᵀm's eigenvectors, dividing by the smaller
+  singular value, there rounding noise) was far from orthogonal in 494 of
+  1,000 random cases: it squeezed the new groups toward the line through
+  the placed ones, and the review found overlapping circles in 13 of
+  17,696 random warm hierarchies. A rotation wins unless a reflection
+  fits better by 1e-9 of the fit, since a rank-one fit can't tell mirror
+  images apart and rounding alone would pick one. `FuzzZoomWarm` draws
+  hierarchies warm from another's view, groups renamed with and without
+  starts. The spec's short refinement of the carried places toward
   MDS's distances (5 iterations of stress majorization) moved the engine
   fixture's interest centres about eight times as far (4.5% to 6.0% of
   their diameter, aligned, against 0.3% to 0.9%), so there is none. An
@@ -11689,10 +11709,11 @@ transaction (10 ms on the owner's copy); its down drops them in reverse
 order, since SQLite refuses to drop a column a later column's CHECK names,
 and leaves `sqlite_master` as 017 had it (a test compares them). `CommitRun`
 writes it all in its one transaction; `checkCommit` refuses, before
-anything is written, a built map missing a place, a place off the map or
-not finite, a circle or dot radius not above 0, places without a built
-map, and a similar list on an area, longer than 3, naming anything but
-another interest of the commit, or with a cosine not finite. The map's
+anything is written, a map (built or failed) without valid JSON params,
+a built map missing a place, a place off the map or not finite, a circle
+or dot radius not above 0, places without a built map, and a similar
+list on an area, longer than 3, naming anything but another interest of
+the commit, or with a cosine not finite. The map's
 reads index a similar interest among the run's interests, so an area in a
 list would be a run they answer 500 for. A group says which it is: a
 commit's groups carry their identity's `Level` (the store refuses one
@@ -11704,7 +11725,8 @@ a commit tells an area that holds no document from an interest.
 The map runs between carry-over and labelling (`group → map → label →
 commit`), so the points it needs are let go before labelling, which may
 take 15 minutes. It runs under its own 2-minute deadline. An error, the
-deadline, a panic (recovered, its stack logged) or a map `Map.Validate`
+deadline, a panic (recovered, its stack logged), a zoom view that fails
+its own check (circles apart, contents inside) or a map `Map.Validate`
 refuses commits the run without one: `RunMap{Status: failed}` with one
 line of at most 512 characters, one WARN "interests: map failed", and
 `map=failed` on the "interests rebuilt" line. A map is the grouping's
@@ -11835,6 +11857,17 @@ shares with the previous map moved 1.34% served and aligned, the 174
 interests' centres 0.45% served and 0.28% aligned. Neither log has a
 WARN or an ERROR.
 
+Both were run again, each on a fresh backup, once the warm zoom view's
+alignment was exactly rigid and packing came last (the final binaries).
+Every map value in the report's JSON, timings aside, is the same as
+above (the cold map 6.0 s, peak RSS 324 MB). The daemon's run is the same
+too: 404 `no_map`, a fresh map in 5,853 ms (912,227 bytes, 52 ms the
+first time), its reuse (`map_ms=0`, every position the same), the sweep
+placing the 262 in about 12 s (every one inside its circle, 186 in
+interests), and the warm rebuild in 2,757 ms (956,295 bytes) with the
+same displacement, every position equal to the earlier run's: the fix
+changed nothing on this library. No WARN or ERROR.
+
 ### The fixture tables
 
 Floors are 0.03 under what was measured and bounds 1.5 times it.
@@ -11860,20 +11893,27 @@ the map's cluster purity is 1.000 and so is the space's, and a floor at
 
 ### Tests and their times
 
-`FuzzZoom` holds the zoom view's invariants over random small hierarchies,
-its seed corpus in `go test`; gonum checks the PCA, classical MDS and the
-Rayleigh–Ritz steps' eigensolver to 1e-6 (test-only: no binary imports it
-or `quality`). The heavy property tests skip under -race and run in `make
-test`'s race-free pass.
+`FuzzZoom` holds the zoom view's invariants over random small hierarchies
+and `FuzzZoomWarm` over hierarchies drawn warm from another's view, their
+seed corpora in `go test` (the first warm seed is the review's
+reproduction of the rank-one alignment); gonum checks the PCA, classical
+MDS, the Rayleigh–Ritz steps' eigensolver and the alignment's polar
+factor (on full, rank-one and zero matrices) to 1e-6 or better
+(test-only: no binary imports it or `quality`). The heavy property tests
+skip under -race and run in `make test`'s race-free pass.
+`TestReport_MatchesTheEngine` holds both of the report's maps to the
+engine's, the warm one's zoom view included: it renames the engine's
+first run's groups to the report's keys by their members, so the
+comparison costs no further map.
 
 Times under -race on the M4 Max, in `make test`, before and after:
-`internal/insight` 14.8 s and 21.8 s, `internal/insight/layout` (new)
-12.0 s (10.3 s alone), `cmd/clusterreport` 3.4 s and 8.3 s (7.5 s alone,
+`internal/insight` 14.8 s and 21.1 s, `internal/insight/layout` (new)
+12.5 s (10.3 s alone), `cmd/clusterreport` 3.4 s and 8.3 s (7.3 s alone,
 against the 2.8 s PR 5 recorded: it draws and compares two maps; its
-tests now run in parallel), `internal/store/sqlite` 9.4 s and 9.8 s,
-`internal/api` 20.5 s and 22.4 s. The race-free pass: `internal/insight`
-5.6 s and 14.3 s (the fixture's maps), `layout` 10.4 s. `make test` took
-1 min 14 s and 1 min 20 s.
+tests now run in parallel), `internal/store/sqlite` 9.4 s and 10.0 s,
+`internal/api` 20.5 s and 22.0 s. The race-free pass: `internal/insight`
+5.6 s and 14.8 s (the fixture's maps), `layout` 9.8 s. `make test` took
+1 min 14 s and 1 min 21 s.
 
 ### Known limits
 

@@ -375,10 +375,11 @@ documents inside its area's), every position in a square of side 1000.
 The map's status and its view-wide values are on `interest_runs`, each
 group's circle and label anchor on `interest_groups`, each document's two
 positions on `interest_assignments` and `interest_placements`. All are
-nullable columns, NULL for a run from before 018 and for a map that
-failed; CHECKs keep a run from being half a map and a row from being half
-placed. See `decisions.md` "Interest map: two views of each regrouping,
-drawn when it is built".
+nullable columns. A run from before 018 has every one NULL; a run whose
+map failed records its status, error, time and params, and no positions
+anywhere. CHECKs keep a run from being half a map and a row from being
+half placed. See `decisions.md` "Interest map: two views of each
+regrouping, drawn when it is built".
 
 #### `interest_runs`
 
