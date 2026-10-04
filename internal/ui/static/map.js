@@ -545,17 +545,18 @@
     return measured.get(key);
   }
 
-  // cut is text, cut with an ellipsis to fit max px.
+  // cut is text, cut with an ellipsis to fit max px: between code points, as quote cuts, never inside an emoji.
   function cut(text, font, max) {
     if (width(text, font) <= max) {
       return text;
     }
-    let [lo, hi] = [0, text.length];
+    const chars = Array.from(text);
+    let [lo, hi] = [0, chars.length];
     while (lo < hi) {
       const mid = (lo + hi + 1) >> 1;
-      [lo, hi] = width(text.slice(0, mid) + '…', font) <= max ? [mid, hi] : [lo, mid - 1];
+      [lo, hi] = width(chars.slice(0, mid).join('') + '…', font) <= max ? [mid, hi] : [lo, mid - 1];
     }
-    return text.slice(0, lo).trimEnd() + '…';
+    return chars.slice(0, lo).join('').trimEnd() + '…';
   }
 
   // wrap is text in lines of at most max px, lines of them at most, the last cut.
@@ -589,11 +590,12 @@
   // makeView is a view on its canvas: its size, its d3.zoom, its frames, drawn one requestAnimationFrame at a
   // time on a dirty flag, its fitting and its flights. spec draws it (world, maxK, draw, pick, click, frame).
   // touched is whether it was moved off the whole map's fit, by a gesture, a zoom button or key, or a flight to
-  // a selection: a resize keeps such a view's middle and zoom, and fits the whole map again otherwise.
+  // a selection: a resize keeps such a view's middle and zoom, and fits the whole map again otherwise. flight is
+  // the last flight land started, which a resize sends on while it is on its way.
   function makeView(name, spec) {
     const canvas = canvases[name];
     const v = Object.assign({name, canvas, ctx: canvas.getContext('2d'), t: d3.zoomIdentity, w: 0, h: 0, ratio: 1,
-      fitK: 1, touched: false, queued: false, hover: null, tip: null, labelHits: []}, spec);
+      fitK: 1, touched: false, flight: null, queued: false, hover: null, tip: null, labelHits: []}, spec);
     v.zoom = d3.zoom().clickDistance(clickSlop).on('zoom', guarded(e => {
       v.t = e.transform;
       if (e.sourceEvent) {
@@ -603,20 +605,15 @@
     }));
     d3.select(canvas).call(v.zoom).on('dblclick.zoom', null);
     // A double click's second click is its own: the first already went up a level.
-    listen(canvas, 'click', e => e.detail <= 1 && v.click(v, v.pick(v, ...pointer(v, e))));
-    listen(canvas, 'dblclick', e => !v.pick(v, ...pointer(v, e)) && land(v, null, flightMs));
-    listen(canvas, 'pointermove', e => e.pointerType === 'mouse' && hoverAt(v, ...pointer(v, e)));
+    listen(canvas, 'click', e => e.detail <= 1 && v.click(v, v.pick(v, ...d3.pointer(e, canvas))));
+    listen(canvas, 'dblclick', e => !v.pick(v, ...d3.pointer(e, canvas)) && land(v, null, flightMs));
+    listen(canvas, 'pointermove', e => e.pointerType === 'mouse' && hoverAt(v, ...d3.pointer(e, canvas)));
     listen(canvas, 'pointerleave', () => hoverAt(v));
     // Safari pinches with gesture events, which scale the page; its ctrl+wheel, which d3 zooms by, carries the
     // pinch too, so the gestures are only stopped.
     ['gesturestart', 'gesturechange', 'gestureend'].forEach(type => canvas.addEventListener(type,
       e => e.preventDefault()));
     return v;
-  }
-
-  function pointer(v, e) {
-    const r = v.canvas.getBoundingClientRect();
-    return [e.clientX - r.left, e.clientY - r.top];
   }
 
   // request draws v in the next frame, once however often it is asked, while it is the view shown.
@@ -641,7 +638,9 @@
   }
 
   // resize follows the canvas's size and pixel ratio, sizing its backing store by its attributes, and the controls
-  // over the stage, which move with it: fitted again while untouched, and otherwise about the canvas's middle.
+  // over the stage, which move with it: fitted again while untouched, and otherwise about the canvas's middle; a
+  // flight on its way flies on, for the time it has left, to its frame as the stage now is. It draws at once:
+  // sizing the backing store empties it, and the frame being painted mustn't show it empty.
   function resize(v) {
     measureChrome();
     const r = v.canvas.getBoundingClientRect();
@@ -649,7 +648,7 @@
     if (r.width === v.w && r.height === v.h && ratio === v.ratio) {
       return;
     }
-    const before = {w: v.w, h: v.h, t: v.t};
+    const [w0, h0, t0, flight] = [v.w, v.h, v.t, d3.active(v.canvas) && v.flight];
     Object.assign(v, {w: r.width, h: r.height, ratio});
     v.canvas.width = Math.max(1, Math.round(r.width * ratio));
     v.canvas.height = Math.max(1, Math.round(r.height * ratio));
@@ -658,10 +657,12 @@
     const [sw, sh] = [(world.x1 - world.x0) * panSlack, (world.y1 - world.y0) * panSlack];
     v.zoom.scaleExtent([v.fitK * minZoom, v.maxK(v)])
       .translateExtent([[world.x0 - sw, world.y0 - sh], [world.x1 + sw, world.y1 + sh]]);
-    const k = before.t.k;
-    jump(v, !v.touched || !before.w ? fitAll(v) : centreOn(v, (before.w / 2 - before.t.x) / k,
-      (before.h / 2 - before.t.y) / k, k, {x0: 0, y0: 0, x1: v.w, y1: v.h}));
-    request(v);
+    jump(v, !v.touched || !w0 ? fitAll(v) : centreOn(v, (w0 / 2 - t0.x) / t0.k, (h0 / 2 - t0.y) / t0.k, t0.k,
+      {x0: 0, y0: 0, x1: v.w, y1: v.h}));
+    if (flight) {
+      land(v, flight.sel, flight.end - d3.now());
+    }
+    draw(v);
   }
 
   // visible is the part of the stage on the screen, which fits and flights aim at: below the sticky header,
@@ -692,17 +693,15 @@
 
   const fitAll = v => fitTransform(v, v.world(v), fitPad);
 
-  // land flies v to sel's frame, the whole map's for none: touched on a selection, untouched on the whole map.
+  // land flies v to sel's frame, the whole map's for none, in ms (at once under reduced motion): touched on a
+  // selection, untouched on the whole map.
   function land(v, sel, ms) {
-    v.touched = !!sel;
-    flyTo(v, v.frame(v, sel), ms);
-  }
-
-  function flyTo(v, t, ms) {
-    if (ms && !reducedMotion.matches) {
-      d3.select(v.canvas).transition().duration(ms).call(v.zoom.transform, t);
+    const fly = ms > 0 && !reducedMotion.matches;
+    Object.assign(v, {touched: !!sel, flight: fly ? {sel, end: d3.now() + ms} : null});
+    if (fly) {
+      d3.select(v.canvas).transition().duration(ms).call(v.zoom.transform, v.frame(v, sel));
     } else {
-      jump(v, t);
+      jump(v, v.frame(v, sel));
     }
   }
 
@@ -710,7 +709,7 @@
 
   // zoomBy scales v about its middle, for a zoom button or key: the user's zoom, as a wheel's is.
   function zoomBy(v, factor) {
-    v.touched = true;
+    Object.assign(v, {touched: true, flight: null});
     d3.select(v.canvas).transition().duration(reducedMotion.matches ? 0 : stepMs).call(v.zoom.scaleBy, factor);
   }
 

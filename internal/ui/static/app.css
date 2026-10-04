@@ -1125,10 +1125,12 @@ td .badge.fit-new { margin-top: var(--s1); }
 .map-open { justify-self: start; }
 .map-hits:empty, .map-crumbs:empty, .map-legend:empty, .map-status:empty, .map-kicker:empty,
 .map-panel-head h2:empty, .map-panel-body:empty { display: none; }
-/* The map's controls and the panel's head wait for the map: until it is
-   drawn, or when it can't be, the panel's title is empty. */
+/* The map's controls and the panel wait for the map, the stage taking the
+   panel's column (a phone's sheet waits too): until it is drawn, or when
+   it can't be, the panel's title is empty. */
 .interest-map:has(.map-panel-head h2:empty) .map-zoom,
-.map-panel-head:has(h2:empty) { display: none; }
+.map-panel:has(.map-panel-head h2:empty) { display: none; }
+.map-body:has(.map-panel-head h2:empty) { grid-template-columns: minmax(0, 1fr); }
 
 /* A group's colour in the panel's rows: its palette slot's token. */
 .a0 { background: var(--area-0); }
@@ -1306,7 +1308,6 @@ td .badge.fit-new { margin-top: var(--s1); }
   .map-crumbs { right: 7.5rem; }
   .map-panel { position: fixed; z-index: 25; left: 0; right: 0; bottom: 0; border-bottom: 0; border-radius: var(--r-lg) var(--r-lg) 0 0; box-shadow: var(--shadow-lg); padding-bottom: env(safe-area-inset-bottom, 0px); }
   .map-panel:not(.is-open) .map-panel-body { display: none; }
-  .map-panel:has(.map-panel-head h2:empty) { display: none; }
   .map-panel.is-open { max-height: 55vh; }
   .map-panel:not(.is-open) .map-panel-head h2 { -webkit-line-clamp: 1; line-clamp: 1; }
   .map-sheet-toggle { display: inline-grid; }
