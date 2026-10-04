@@ -41,11 +41,11 @@ const (
 func separate(ctx context.Context, pos []XY, r []float64, gap float64) ([]XY, error) {
 	base := spreadCoincident(pos)
 	for {
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("layout: packing: %w", err)
-		}
 		cand := slices.Clone(base)
 		for range separationSweeps {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("layout: packing: %w", err)
+			}
 			if !pushApart(cand, r, gap) {
 				break
 			}

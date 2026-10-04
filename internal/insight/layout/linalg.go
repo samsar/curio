@@ -13,8 +13,9 @@ import (
 
 // symEigen returns the eigenvalues of the symmetric matrix a, largest first
 // (ties in their original order), and the eigenvectors as rows, by cyclic
-// Jacobi rotations; a is not modified. It is for the small matrices of
-// classical MDS and the Rayleigh-Ritz steps: O(n³) a sweep.
+// Jacobi rotations; a is not modified. It is O(n³) a sweep and never checks
+// a context, so it is only for the Rayleigh-Ritz steps' pcaBlock rows and
+// the plane's 2×2 forms.
 func symEigen(a [][]float64) ([]float64, [][]float64) {
 	n := len(a)
 	m := make([][]float64, n)
@@ -386,40 +387,24 @@ func cosine(a, b []float32) float64 {
 	return ab / math.Sqrt(aa*bb)
 }
 
-// classicalMDS embeds the distance matrix dm in the plane by Torgerson's
-// method: the top two eigenpairs of the double-centred squared distances.
-func classicalMDS(dm [][]float64) []XY {
-	n := len(dm)
-	switch n {
-	case 0:
-		return nil
-	case 1:
-		return []XY{{}}
+// principalPlane places unit (or zero) vectors in the plane by classical
+// MDS on their chord distances |a − b|. The double-centred squared chords
+// are the centred vectors' Gram matrix, so its top two eigenvectors scaled
+// by their roots are the vectors' first two principal components: found
+// through the vectors by principalAxes, linear in their number an
+// iteration and checking ctx, where decomposing the n×n matrix would be
+// cubic in it.
+func principalPlane(ctx context.Context, vectors [][]float32, seed uint64) ([]XY, error) {
+	set := newRowSet(vectors, nil)
+	axes, _, err := principalAxes(ctx, set, 2, seed)
+	if err != nil {
+		return nil, err
 	}
-	b := make([][]float64, n)
-	rowMean := make([]float64, n)
-	var all float64
-	for i := range dm {
-		b[i] = make([]float64, n)
-		for j := range dm {
-			d2 := dm[i][j] * dm[i][j]
-			b[i][j] = d2
-			rowMean[i] += d2 / float64(n)
-		}
-		all += rowMean[i] / float64(n)
+	out := make([]XY, len(vectors))
+	for k := range out {
+		out[k] = planar(set.project(k, axes))
 	}
-	for i := range b {
-		for j := range b {
-			b[i][j] = -0.5 * (b[i][j] - rowMean[i] - rowMean[j] + all)
-		}
-	}
-	vals, vecs := symEigen(b)
-	s0, s1 := math.Sqrt(math.Max(vals[0], 0)), math.Sqrt(math.Max(vals[1], 0))
-	out := make([]XY, n)
-	for i := range out {
-		out[i] = XY{vecs[0][i] * s0, vecs[1][i] * s1}
-	}
-	return out
+	return out, nil
 }
 
 // stressIterations caps stress majorization; it stops sooner once an

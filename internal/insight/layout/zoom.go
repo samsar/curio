@@ -459,7 +459,8 @@ func (z *zoomer) priorPlace(g zoomGroup) (Circle, bool) {
 // interests inside an area (interior), whose previous area is frame, nil
 // when it has none. Cold, it places their centroids by MDS (at the top,
 // metric MDS: stress majorization seeded by classical; inside an area,
-// classical alone), scales that to the circles, packs and compacts them.
+// classical alone, the centroids' principal plane), scales that to the
+// circles, packs and compacts them.
 // Warm (a prior holding one of them), each starts at its previous place, an
 // interior one relative to frame's centre and only when it lay inside
 // frame, a new one beside its most similar placed groups and then by MDS
@@ -476,10 +477,13 @@ func (z *zoomer) arrange(gs []zoomGroup, frame *Circle, interior bool, gap float
 	for i, g := range gs {
 		r[i] = g.radius
 	}
-	dm := cosineDistances(gs)
+	dm, err := cosineDistances(z.ctx, gs)
+	if err != nil {
+		return nil, err
+	}
 	starts, placed := z.starts(gs, frame, interior)
 	if !slices.Contains(placed, true) {
-		return z.arrangeCold(dm, r, gap, !interior)
+		return z.arrangeCold(gs, dm, r, gap, !interior)
 	}
 	return z.arrangeWarm(dm, r, gap, starts, placed)
 }
@@ -508,35 +512,48 @@ func (z *zoomer) starts(gs []zoomGroup, frame *Circle, interior bool) ([]XY, []b
 	return starts, placed
 }
 
-func (z *zoomer) arrangeCold(dm [][]float64, r []float64, gap float64, metric bool) ([]XY, error) {
-	n := len(r)
+func (z *zoomer) arrangeCold(gs []zoomGroup, dm [][]float64, r []float64, gap float64, metric bool) ([]XY, error) {
+	n := len(gs)
 	if n == 1 {
 		return []XY{{}}, nil
 	}
-	chord := make([][]float64, n)
-	for i := range chord {
-		chord[i] = make([]float64, n)
-		for j := range chord[i] {
-			chord[i][j] = math.Sqrt(2 * dm[i][j])
-		}
+	centroids := make([][]float32, n)
+	for i, g := range gs {
+		centroids[i] = g.centroid
 	}
-	pos, target := classicalMDS(chord), chord
+	pos, err := principalPlane(z.ctx, centroids, z.seed)
+	if err != nil {
+		return nil, err
+	}
+	target := dm
 	if metric {
-		var err error
 		if pos, err = stressMajorize(z.ctx, dm, pos, nil, stressIterations); err != nil {
 			return nil, err
 		}
-		target = dm
+	} else {
+		target = chords(dm)
 	}
 	s := touchingScale(target, r, gap)
 	for i := range pos {
 		pos[i] = XY{pos[i].X * s, pos[i].Y * s}
 	}
-	pos, err := separate(z.ctx, pos, r, gap)
-	if err != nil {
+	if pos, err = separate(z.ctx, pos, r, gap); err != nil {
 		return nil, err
 	}
 	return pos, compact(z.ctx, pos, r, gap)
+}
+
+// chords are the distances |a − b| between unit vectors a cosine distance
+// apart, √(2·dm): what classical MDS lays out.
+func chords(dm [][]float64) [][]float64 {
+	out := make([][]float64, len(dm))
+	for i := range dm {
+		out[i] = make([]float64, len(dm))
+		for j, d := range dm[i] {
+			out[i][j] = math.Sqrt(2 * d)
+		}
+	}
+	return out
 }
 
 func (z *zoomer) arrangeWarm(dm [][]float64, r []float64, gap float64, starts []XY, placed []bool) ([]XY, error) {
@@ -640,18 +657,21 @@ func touchingScale(dm [][]float64, r []float64, gap float64) float64 {
 
 // cosineDistances are 1 − cosine between the groups' centroids, never
 // below 0.
-func cosineDistances(gs []zoomGroup) [][]float64 {
+func cosineDistances(ctx context.Context, gs []zoomGroup) ([][]float64, error) {
 	dm := make([][]float64, len(gs))
 	for i := range gs {
 		dm[i] = make([]float64, len(gs))
 	}
 	for i := range gs {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("layout: the groups' distances: %w", err)
+		}
 		for j := i + 1; j < len(gs); j++ {
 			d := math.Max(0, 1-cosine(gs[i].centroid, gs[j].centroid))
 			dm[i][j], dm[j][i] = d, d
 		}
 	}
-	return dm
+	return dm, nil
 }
 
 // placeDocs gives every document its dot: an interest's inside its circle,

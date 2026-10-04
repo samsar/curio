@@ -432,5 +432,5 @@ func assertMapFloors(t *testing.T, maps [3]mapMeasures) {
 // mapFloors are the fixture's floors and bounds. Measured per draw: NP5
 // 0.223, 0.222 and 0.224 (a cold map's 0.200 each); documents moved 1.20%,
 // 1.46% and 1.23% of the first map's diameter, and interests' centres
-// 0.50%, 0.92% and 0.69%.
-var mapFloors = struct{ np5, docShift, interestShift float64 }{np5: 0.192, docShift: 0.0219, interestShift: 0.0138}
+// 0.50%, 0.90% and 0.65%.
+var mapFloors = struct{ np5, docShift, interestShift float64 }{np5: 0.192, docShift: 0.0219, interestShift: 0.0135}

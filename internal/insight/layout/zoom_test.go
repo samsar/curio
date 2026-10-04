@@ -263,11 +263,11 @@ func inverse(perm []int) []int {
 }
 
 // TestZoom_WarmIsStable: after 5% more documents arrive, a warm view from
-// the previous one moves the interests' centres by a mean of at most 0.38%
-// of the previous centres' diameter (measured per draw: 0.38%, 0.22%,
-// 0.31%); held to 1.5 times that.
+// the previous one moves the interests' centres by a mean of at most 0.46%
+// of the previous centres' diameter (measured per draw: 0.46%, 0.46%,
+// 0.39%); held to 1.5 times that.
 func TestZoom_WarmIsStable(t *testing.T) {
-	const measured = 0.0038
+	const measured = 0.0046
 	lib := standard.build(9)
 	for draw := range 3 {
 		perm := shuffle(len(lib.keys), uint64(200+draw))
@@ -306,8 +306,9 @@ func centres(in layout.ZoomInput, z layout.ZoomLayout) map[string][2]float64 {
 }
 
 // TestZoom_Cancelled: a context cancelled before the call lays nothing
-// out; one cancelled while the circles are packed stops it; both errors
-// wrap context.Canceled.
+// out; one cancelled while the groups' distances are measured, the first
+// step after the call's own check, or later, stops it; every error wraps
+// context.Canceled.
 func TestZoom_Cancelled(t *testing.T) {
 	in := small.build(10).zoomInput(true, "g")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -315,7 +316,11 @@ func TestZoom_Cancelled(t *testing.T) {
 	_, err := layout.Zoom(ctx, in)
 	require.ErrorIs(t, err, context.Canceled)
 
-	_, err = layout.Zoom(&cancelAfter{Context: context.Background(), n: 3}, in)
+	_, err = layout.Zoom(&cancelAfter{Context: context.Background(), n: 1}, in)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Contains(t, err.Error(), "distances")
+
+	_, err = layout.Zoom(&cancelAfter{Context: context.Background(), n: 6}, in)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
