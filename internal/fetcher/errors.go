@@ -72,12 +72,13 @@ var (
 
 	// ErrDeadLink marks a URL whose content is gone: a hard 404/410 (from
 	// the origin, or reported by Jina for the target), or a "soft 404": HTTP
-	// 200 carrying a not-found page, or a redirect that settled on the
-	// site's homepage or on another site's landing page, whatever that page
-	// answered: 2xx, 403 or 503. Always wrapped in a PermanentError; a dead
-	// link the origin reports is never routed to Jina. Never host-cached: a
-	// dead path says nothing about the rest of the host, nor a landing page
-	// about the site that redirected there or the site it belongs to.
+	// 200 carrying a not-found page or a parked domain's, or a redirect that
+	// settled on the site's homepage or on another site's landing page,
+	// whatever that page answered: 2xx, 403 or 503. Always wrapped in a
+	// PermanentError; a dead link the origin reports is never routed to
+	// Jina. Never host-cached: a dead path says nothing about the rest of
+	// the host, nor a landing page about the site that redirected there or
+	// the site it belongs to.
 	ErrDeadLink = errors.New("dead link (content is gone)")
 
 	// ErrHostUnreachable marks a host that doesn't resolve or refuses

@@ -630,8 +630,9 @@ var (
 
 // pageView is what the page verdicts look at: a page's title and text,
 // whether an article was found in it, and the URL the request settled on.
-// finalURL is nil when the answer doesn't say where the request ended up,
-// as with Jina's.
+// The text is the article's plain text from the origin (articleView), and
+// the markdown body of a Jina answer, link URLs and all. finalURL is nil
+// when the answer doesn't say where the request ended up, as with Jina's.
 type pageView struct {
 	title    string
 	text     string
@@ -658,10 +659,11 @@ func articleView(article readability.Article, finalURL *url.URL) (pageView, erro
 // run in this order:
 //
 //  1. Dead link, with dead-link detection on: the request settled on the
-//     site's homepage or on another site's landing page, or the title reads
-//     like a not-found page. First, because a tombstone page is usually
-//     thin: the later checks would call it a login wall and send it to
-//     Jina, which can't help with a page that no longer exists.
+//     site's homepage or on another site's landing page, the title reads
+//     like a not-found page, or the page's opening holds a not-found notice
+//     or a parked domain's (pageText). First, because a tombstone page is
+//     usually thin: the later checks would call it a login wall and send it
+//     to Jina, which can't help with a page that no longer exists.
 //  2. Bot challenge: a challenge or block interstitial served with a 2xx.
 //  3. Error page: an error page served with a 2xx, judged like the status
 //     it names.
@@ -671,6 +673,8 @@ func articleView(article readability.Article, finalURL *url.URL) (pageView, erro
 //  5. No article found.
 //  6. Thin: less than minArticleBytes of text.
 //  7. A login-page title.
+//  8. A sign-in form: a short page whose text opens with a password field
+//     and a sign-in line.
 //
 // A redirect onto another site that none of these flags is judged like any
 // page, and stored when it passes.
@@ -680,8 +684,15 @@ func articleView(article readability.Article, finalURL *url.URL) (pageView, erro
 // errSiteLoginWall or ErrLoginWall. A dead link and an offsite login wall
 // are final; the caller makes them a PermanentError.
 func (n *Native) judgePage(target string, p pageView) error {
+	text := readPageText(p.text)
 	if n.deadLinkDetection {
 		if reason := looksLikeSoft404(p, target); reason != "" {
+			return deadLink(reason)
+		}
+		if reason := text.notFoundNotice(); reason != "" {
+			return deadLink(reason)
+		}
+		if reason := text.parkedDomain(target); reason != "" {
 			return deadLink(reason)
 		}
 	}
@@ -693,6 +704,9 @@ func (n *Native) judgePage(target string, p pageView) error {
 	}
 	if reason, scope := looksLikeLoginWall(p, target); reason != "" {
 		return loginWall(reason, scope)
+	}
+	if reason := text.signInForm(); reason != "" {
+		return loginWall(reason, loginWallPage)
 	}
 	return nil
 }
@@ -793,6 +807,10 @@ var (
 		"press & hold to confirm you are a human",
 		"request unsuccessful. incapsula incident id",
 		"please enable js and disable any ad blocker",
+		// Google's "unusual traffic" page (/sorry/), titled with the URL asked for.
+		"our systems have detected unusual traffic from your computer network",
+		// Fastly's "Client Challenge" page.
+		"a required part of this site couldn't load",
 	}
 )
 
@@ -993,7 +1011,10 @@ var (
 // looksLikeSoft404 detects "soft 404s": pages that answer HTTP 200 but
 // whose content says the resource is gone (CMS not-found templates,
 // deleted articles redirecting to the site root, retired sites sending
-// every old URL to their successor's front door). Three signals:
+// every old URL to their successor's front door). It reads the URLs and
+// the title; judgePage then reads the page's text for a not-found notice
+// or a parked domain (pageText), which judgeRedirect, with no page to
+// read, never does. Three signals:
 //
 //   - the request for a page settled on the site's homepage (same site,
 //     www. or not). A source path that is only an index document names no
@@ -1155,10 +1176,20 @@ func isLetters(s string) bool {
 // with whatever the page says next.
 //
 // The word lists are explicit: a word added to one needs a test row.
-var soft404TitleRE = func() *regexp.Regexp {
+//
+// notFoundLineRE is the same templates less the sentence, so anchored at
+// both ends: the text rules read a line of a page with it (pagetext.go),
+// where a sentence may go on to say something else, and notFoundSentenceRE
+// asks for the sentence's end. statusCodeLineRE matches a template that is
+// a status code alone, site names around it ("404", "Votes: 404", "404 ·
+// Followers"): on a line of a page's text, that is as often a count as a
+// notice.
+var soft404TitleRE, notFoundLineRE, statusCodeLineRE = notFoundTemplates()
+
+// notFoundTemplates builds soft404TitleRE, notFoundLineRE and
+// statusCodeLineRE from one set of words.
+func notFoundTemplates() (title, line, statusCode *regexp.Regexp) {
 	const (
-		// apos is an apostrophe, straight or curly.
-		apos = `[’']`
 		// site is a site's name beside the template.
 		site = `[^|]{1,60}?`
 		// sep separates a site's name from the template, with whitespace
@@ -1170,8 +1201,6 @@ var soft404TitleRE = func() *regexp.Regexp {
 		// not found"). Several words before a colon open a headline
 		// ("Lessons from a failed launch: Product not found").
 		prefix = `(?:` + site + sep + `|[^\s|:]{1,60}\s*:\s+)`
-		// lead is an interjection opening the template.
-		lead = `(?:(?:oops|whoops|sorry|uh[\s-]?oh)[!.,:…]*\s+)?`
 		// code is a not-found status code: 404 Not Found or 410 Gone.
 		code = `(?:404|410)`
 		// status is the code, as a title gives it.
@@ -1182,36 +1211,53 @@ var soft404TitleRE = func() *regexp.Regexp {
 			`|deleted(?:\s+by\s+(?:the\s+)?author)?)`
 		// parenStatus closes a template with its status.
 		parenStatus = `(?:\s*\(\s*(?:error\s+)?` + code + `\s*\))?`
-		// thing is what a site says is gone.
-		thing = `(?:page|content|post|story|article|video|track|product|group|profile|user|item|listing)`
-		// youWanted says the thing was asked for.
-		youWanted = `(?:\s+you(?:` + apos + `re|\s+are|\s+were)?` +
-			`\s+(?:looking\s+for|requested|tried\s+to\s+(?:access|reach|visit)))?`
-		// gone says the thing is gone.
-		gone = `(?:(?:was\s+|is\s+)?not\s+found` +
-			`|(?:could\s+not|couldn` + apos + `?t|can` + apos + `?t|cannot)\s+be\s+found` +
-			`|(?:does\s+not|doesn` + apos + `?t)\s+exist` +
-			`|no\s+longer\s+(?:exists|available)` +
-			`|(?:is\s+no\s+longer|is\s+not|isn` + apos + `?t)\s+available` +
-			`|is\s+missing` +
-			`|(?:has\s+been|was)\s+(?:removed|deleted)(?:\s+by\s+(?:the|its)\s+(?:author|owner|user))?)`
-		// cantFind is the site saying it can't find the thing.
-		cantFind = `(?:we\s+)?(?:couldn` + apos + `?t|could\s+not|can` + apos + `?t|cannot)\s+find`
 		// template is the title less the site names around it.
-		template = lead + `(?:` +
+		template = notFoundLead + `(?:` +
 			status + `\.?(?:\s*[|:–—-]?\s*` + statusWords + `){0,2}` +
-			`|(?:(?:this|that|the)\s+)?(?:requested\s+)?` + thing + youWanted + `\s+` + gone +
+			`|(?:(?:this|that|the)\s+)?(?:requested\s+)?` + notFoundThing + notFoundYouWanted + `\s+` + notFoundGone +
 			`|not\s+found` +
-			`|` + cantFind + `\s+(?:this|that|the)\s+(?:requested\s+)?` + thing + youWanted +
+			`|` + notFoundCantFind + `\s+(?:this|that|the)\s+(?:requested\s+)?` + notFoundThing + notFoundYouWanted +
 			`)` + parenStatus
 		// sentence is the one template anchored at the start only: the
 		// title may go on after it.
-		sentence = lead + `(?:the|this)\s+page\s+you(?:` + apos + `re|\s+are|\s+were)\s+looking\s+for\s+` + gone + `\b`
+		sentence = notFoundLead + `(?:the|this)\s+page\s+you(?:` + notFoundApos + `re|\s+are|\s+were)\s+looking\s+for\s+` +
+			notFoundGone + `\b`
 	)
-	return regexp.MustCompile(`(?i)` +
-		`^\s*` + prefix + `{0,2}` + template + `[.!]*(?:` + sep + site + `){0,2}\s*$` +
-		`|^\s*` + sentence)
-}()
+	// whole is a template with the site names around it, the whole of a
+	// title or a line.
+	whole := func(inner string) string {
+		return `^\s*` + prefix + `{0,2}` + inner + `[.!]*(?:` + sep + site + `){0,2}\s*$`
+	}
+	return regexp.MustCompile(`(?i)` + whole(template) + `|^\s*` + sentence),
+		regexp.MustCompile(`(?i)` + whole(template)),
+		regexp.MustCompile(`(?i)` + whole(code))
+}
+
+// The words a not-found notice is made of, shared by the title rule
+// (soft404TitleRE) and the text rules (notFoundLineRE, notFoundSentenceRE).
+// The lists are explicit: a word added to one needs a row in each rule's
+// test (TestSoft404TitleRE, TestNotFoundSentenceRE).
+const (
+	// notFoundApos is an apostrophe, straight or curly.
+	notFoundApos = `[’']`
+	// notFoundLead is an interjection opening a notice.
+	notFoundLead = `(?:(?:oops|whoops|sorry|uh[\s-]?oh)[!.,:…]*\s+)?`
+	// notFoundThing is what a site says is gone.
+	notFoundThing = `(?:page|content|post|story|article|video|track|product|group|profile|user|item|listing)`
+	// notFoundYouWanted says the thing was asked for.
+	notFoundYouWanted = `(?:\s+you(?:` + notFoundApos + `re|\s+are|\s+were)?` +
+		`\s+(?:looking\s+for|requested|tried\s+to\s+(?:access|reach|visit)))?`
+	// notFoundGone says the thing is gone.
+	notFoundGone = `(?:(?:was\s+|is\s+)?not\s+found` +
+		`|(?:could\s+not|couldn` + notFoundApos + `?t|can` + notFoundApos + `?t|cannot)\s+be\s+found` +
+		`|(?:does\s+not|doesn` + notFoundApos + `?t)\s+exist` +
+		`|no\s+longer\s+(?:exists|available)` +
+		`|(?:is\s+no\s+longer|is\s+not|isn` + notFoundApos + `?t)\s+available` +
+		`|is\s+missing` +
+		`|(?:has\s+been|was)\s+(?:removed|deleted)(?:\s+by\s+(?:the|its)\s+(?:author|owner|user))?)`
+	// notFoundCantFind is the site saying it can't find the thing.
+	notFoundCantFind = `(?:we\s+)?(?:couldn` + notFoundApos + `?t|could\s+not|can` + notFoundApos + `?t|cannot)\s+find`
+)
 
 // mediaType returns the lowercased media type from a Content-Type header,
 // dropping any "; charset=..." parameters.

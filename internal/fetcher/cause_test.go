@@ -207,6 +207,8 @@ func nativeCauseCases() []causeCase {
 		{"origin 404", viaFakes(answerStatus(http.StatusNotFound), nil), store.FailureCauseDeadLink},
 		{"origin 410", viaFakes(answerStatus(http.StatusGone), nil), store.FailureCauseDeadLink},
 		{"a not-found title", viaFakes(htmlPage(makeArticleHTML("Page not found", "")), nil), store.FailureCauseDeadLink},
+		{"a not-found notice", viaFakes(htmlPage(bomaTorontoNotFoundHTML), nil), store.FailureCauseDeadLink},
+		{"a parked domain", viaFakes(htmlPage(hugeDomainsForSaleHTML), nil), store.FailureCauseDeadLink},
 		{"a redirect onto the homepage", func(t *testing.T) error {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != "/" {
@@ -255,6 +257,12 @@ func nativeCauseCases() []causeCase {
 			*jinaTarget(http.StatusNotFound)), store.FailureCauseDeadLink},
 		{"cached host, a tombstone through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
 			*jinaTombstone), store.FailureCauseDeadLink},
+		{"cached host, a not-found notice through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaPage("Medium", nil, mediumNotFoundBody)), store.FailureCauseDeadLink},
+		{"cached host, Google's unusual-traffic page through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaPage(googleSorryTitle, nil, googleSorryBody)), store.FailureCauseAntiBot},
+		{"cached host, a sign-in form through Jina", pastCachedHost(HostFailAntiBot, cachedOrigin403,
+			*jinaPage("Instagram", nil, instagramSignInBody)), store.FailureCauseLoginWall},
 		{"cached host, Jina's 500", pastCachedHost(HostFailAntiBot, cachedOrigin403,
 			answerStatus(http.StatusInternalServerError)), store.FailureCauseAntiBot},
 		{"cached login wall, Jina's 500", pastCachedHost(HostFailLoginWall, cachedOriginLogin,
@@ -304,11 +312,20 @@ func nativeCauseCases() []causeCase {
 		{"thin page, target 404 through Jina", viaFakes(thinOrigin, jinaTarget(http.StatusNotFound)),
 			store.FailureCauseDeadLink},
 		{"thin page, a tombstone through Jina", viaFakes(thinOrigin, jinaTombstone), store.FailureCauseDeadLink},
+		{"thin page, a not-found notice through Jina", viaFakes(thinOrigin, jinaPage("Medium", nil, mediumNotFoundBody)),
+			store.FailureCauseDeadLink},
+		{"thin page, a parked domain through Jina", viaFakes(thinOrigin, jinaPage("", nil, hoverParkedBody)),
+			store.FailureCauseDeadLink},
+		{"thin page, Google's unusual-traffic page through Jina", viaFakes(thinOrigin,
+			jinaPage(googleSorryTitle, nil, googleSorryBody)), store.FailureCauseAntiBot},
+		{"thin page, a sign-in form through Jina", viaFakes(thinOrigin, jinaPage("Instagram", nil, instagramSignInBody)),
+			store.FailureCauseLoginWall},
 		{"origin 403, a tombstone through Jina", viaFakes(answerStatus(http.StatusForbidden), jinaTombstone),
 			store.FailureCauseDeadLink},
 		{"thin page, target 404 through Jina, detection off", viaFakesDetecting(thinOrigin,
 			jinaTarget(http.StatusNotFound), false), store.FailureCauseHTTPError},
 
+		{"a sign-in form, Jina off", viaFakes(htmlPage(signInPageHTML), nil), store.FailureCauseLoginWall},
 		{"a redirect onto another site's login page", func(t *testing.T) error {
 			src := newCrossSiteRedirect(t, "/login?next=/docs", makeArticleHTML("Your account", ""))
 			return fetchFrom(t, "", src+"/docs/quarterly-report")
