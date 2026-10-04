@@ -224,12 +224,12 @@ footer names the address the daemon listens on.
   nearest; for a document, its site, interest, area, fit and similarity,
   **Open document**, and the other documents of its interest (of the
   interest it is nearest, for an unsorted one) closest to that
-  interest's centre. Each also links to its own page. The breadcrumb over the map (Library › area › interest ›
-  document) leads back up, and the search box finds areas, interests and
-  documents by name or site (arrows, Enter, Escape). Keys: `/` searches,
-  Escape goes up a level, `0` shows the whole map, `+` and `-` zoom, and
-  the arrows, Home and End move between the tabs. The address keeps the
-  tab and the selection
+  interest's centre. Each also links to its own page. The breadcrumb
+  over the map (Library › area › interest › document) leads back up, and
+  the search box finds areas, interests and documents by name or site
+  (arrows, Enter, Escape). Keys: `/` searches, Escape goes up a level,
+  `0` shows the whole map, `+` and `-` zoom, and the arrows, Home and
+  End move between the tabs. The address keeps the tab and the selection
   (`/ui/interests/map?view=zoom&select=interest:<id>`, `area:<id>`,
   `document:<id>` or `unsorted`), so a reload or Back shows the same; an
   ID no longer on the map shows the whole map and says so, and an area

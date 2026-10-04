@@ -12314,7 +12314,11 @@ and hidden once the map is drawn) says in its kind's words:
 Try again runs the one read again; there is no retry of its own and no
 timer. An exception in setup, a frame or a handler (each runs through
 one guard) is reported once in the status line, the canvases are cleared
-and drawing stops: never an error a frame, never half a map.
+and drawing stops: never an error a frame, never half a map. Until the
+map is drawn, or when it can't be, the panel's title is empty, and by
+that the panel (a phone's sheet), its head and the zoom buttons wait at
+every width, the stage taking the panel's column: a failure is the
+status line on the stage, never beside an empty bordered panel.
 
 ### Stored strings
 
@@ -12328,10 +12332,12 @@ title turns nothing beside it, its row's similarity included). Links are
 class is `a` and a slot the model computed, never a stored string; `el`
 sets only class, id, title, role, aria-*, type, tabindex and dir. On the
 canvas a label wraps to three lines and is cut to a width, a title to
-one; the panel's heading shows six lines at most, room for most of a
-title the API has cut to 200 characters, and anything longer is cut,
-whole on hover. The cache of measured widths starts over past 20,000
-entries and on a change of theme.
+one, between code points, as the status line's quotes are, so an emoji
+is never halved into a lone surrogate before the ellipsis; the panel's
+heading shows six lines at most, room for most of a title the API has
+cut to 200 characters, and anything longer is cut, whole on hover. The
+cache of measured widths starts over past 20,000 entries and on a change
+of theme.
 
 ### Colour
 
@@ -12377,8 +12383,7 @@ Escape close it. The stage fills the screen between the sticky header
 and the closed sheet once the page is scrolled to it, and an opening
 sheet scrolls it there, so the map left above the sheet is as tall as it
 can be. Fits and flights aim at the part of the stage on the screen:
-below the header, above the window's foot or the sheet. Both were found
-in the browser: a flight first landed a document under the open sheet.
+below the header, above the window's foot or the sheet.
 
 The prototype's portrait swap, x and y exchanged on a tall screen, was
 dropped. It is a reflection: a phone would show a mirror image of the
@@ -12415,8 +12420,14 @@ fitted again. One the user has zoomed or panned (the wheel, a pinch, a
 drag, the zoom buttons or keys) or flown to a selection keeps its zoom
 and the point at the canvas's middle. A phone's collapsing toolbar
 resizes the stage, which is sized on `100dvh`, so this happens while
-scrolling too. The panel is rendered before a view is first fitted,
-since on a phone the sheet it fills sets how much of the stage shows.
+scrolling too. A flight on its way when the stage resizes flies on, for
+the time it has left, to its frame as the stage now is (`d3.active`
+says whether it is still on its way, so one a gesture stopped isn't
+resumed); a zoom step a resize interrupts stops where it is. A resize
+draws at once, in the frame it lands in: sizing a canvas's backing store
+empties it, and a draw in the next frame would let that frame paint an
+empty canvas. The panel is rendered before a view is first fitted, since
+on a phone the sheet it fills sets how much of the stage shows.
 
 ### What only a browser checks, and how
 
@@ -12429,7 +12440,7 @@ stub Ollama answering only the drift check, labels by terms, the queue
 paused once the map was drawn), a hostile copy, and responses swapped in
 by `Fetch` interception. Every run counted CSP violations (a
 `securitypolicyviolation` listener and the console), exceptions and
-dialogs: none.
+dialogs: none. Screenshots of each were read at both widths.
 
 - **Desktop, 1440×900 at DPR 2** (40 checks): the canvas 834×594 with its
   foot at 868 px; both tabs in both themes; a live theme switch
@@ -12456,8 +12467,22 @@ dialogs: none.
   by a document's click, keeps its scale and its middle when the window
   loses 40 px; at 390 px with touch, two presses of + survive the
   viewport losing 44 px and getting them back, with no drift; an
-  untouched phone view is fitted again exactly as a fresh load. The
-  build before the fixes below fails 8 of them.
+  untouched phone view is fitted again exactly as a fresh load. A
+  build that measured the controls only when a tab or the status line
+  changed, and fitted a view zoomed by the buttons or keys again on a
+  resize, fails 8 of them.
+- **Resize frames and flights** (12 checks): an observer made after
+  map.js's reads the canvas in each frame a resize lands in, before it
+  is painted; on both tabs at DPR 1 and 2, the window shrinking and
+  growing in height and width, and once mid-flight, every such frame
+  holds the map. A resize 200 to 650 ms into a flight (a search's to an
+  area, one to a document on Zoom in, `0`'s to the whole map) lands
+  exactly where a flight started after it would, and one after a wheel
+  stopped a flight keeps the wheel's zoom and middle. A build that drew
+  a resize in the next frame, and kept a flight's place but not its
+  course, fails 8 of them: it painted no pixel in any resize's frame,
+  and stopped a search's flight at a scale of about 0.8 against its
+  target's 2.20.
 - **Intercepted responses** (11 checks): a 404 problem, a 500 problem then
   Try again succeeding, invalid JSON, a short column, an index out of
   range, a refused connection, each with its message and nothing drawn;
@@ -12468,32 +12493,15 @@ dialogs: none.
   one with markup, one interest unlabeled; at 1440 light and 390 dark, no
   element the data describes, no dialog, no sideways scroll, every stored
   string in a `dir=auto` element apart from its number, the unlabeled one
-  in italics.
+  in italics. And (11 checks) a title of 60 emoji and an interest label
+  of 60 more, on both tabs, among the titles, in the tooltip and as the
+  selection's label: every string the map hands `fillText` or
+  `strokeText` is free of lone surrogates, and both are drawn cut. A
+  build that cut between UTF-16 code units drew the title's cut with a
+  lone surrogate before its ellipsis.
 - **The page's states** from scratch configs and edited copies (map off,
   no map, a failed map) and with JavaScript off, at both widths.
 - **The colour rule**, as above.
-
-Screenshots of each were read before these numbers were taken; what they
-showed and was fixed: the document's title repeated under the panel's
-heading, the panel's heading growing with a 500-character label, the
-zoom and clear buttons showing before the map loads or when it can't, a
-failed map's card scrolling sideways at 390 px, the document page's place
-line squeezing its first word onto a line of its own beside Show on map,
-and the empty panel's head showing its padding and border while a failed
-map's status line explained. Reading the code turned up two more: `wrap`
-added an empty line to a label shorter than its limit, and the first
-resize took its fit's scale through a clamp to the previous one.
-
-Review turned up two resize defects the first resize check, which only
-measured the backing store, missed. The controls' boxes were measured
-when a tab or the status line changed, never on a resize, so after a
-window grew two area names stayed hidden behind the legend's old place.
-And the zoom buttons and keys, which zoom by a transition with no input
-event, didn't count as the user's zoom, so the next resize (a phone's
-toolbar collapsing is one) threw it away. Fixing them turned up two
-more: a kept view put the canvas's old middle in the middle of the part
-on screen, which on a phone drifts with every resize; and a phone's
-first fit measured the sheet before it held anything.
 
 ### Measurements
 
