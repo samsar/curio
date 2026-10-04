@@ -198,3 +198,52 @@ func nodeAttr(n *html.Node, key string) string {
 func hasNodeAttr(n *html.Node, key string) bool {
 	return slices.ContainsFunc(n.Attr, func(a html.Attribute) bool { return a.Key == key })
 }
+
+// TestInterestMap_ReadsOnly holds the interest map's page to reading: the
+// one /v1 path it names, which static/map.js GETs, is routed as GET
+// /v1/interests/map and documented; it carries no change and no htmx
+// request; and the pages it addresses and links to are the dashboard's
+// own, as links.go builds them.
+func TestInterestMap_ReadsOnly(t *testing.T) {
+	s := newTestServer(t)
+	router, err := newRouter(s.deps, testOrigin(t), testDashboard(t, pagesOn))
+	require.NoError(t, err)
+	index, err := methodIndex(router)
+	require.NoError(t, err)
+	ops := specOperations(loadSpec(t))
+
+	d := s.docs(t, "reads-only", 2)
+	f := s.newRun(t, store.InterestShapeAreas)
+	f.interest("Kafka", f.area("Engineering"), 0, d, nil)
+	f.mapped()
+	f.commit(t)
+	resp := s.do(t, request{method: http.MethodGet, path: "/ui/interests/map"})
+	require.Equal(t, http.StatusOK, resp.status)
+	page, err := html.Parse(strings.NewReader(resp.body))
+	require.NoError(t, err)
+
+	var root *html.Node
+	for n := range page.Descendants() {
+		if n.Type != html.ElementNode {
+			continue
+		}
+		for _, attr := range []string{"data-method", "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete"} {
+			assert.False(t, hasNodeAttr(n, attr), "<%s %s>", n.Data, attr)
+		}
+		if nodeAttr(n, "id") == "interest-map" {
+			root = n
+		}
+	}
+	require.NotNil(t, root, "the map's shell")
+	src, err := url.Parse(nodeAttr(root, "data-src"))
+	require.NoError(t, err)
+	assert.Empty(t, src.Scheme+src.Host+src.RawQuery, "a path of the daemon's")
+	pattern := index.Find(chi.NewRouteContext(), http.MethodGet, src.Path)
+	require.Equal(t, "/v1/interests/map", pattern)
+	assert.Contains(t, ops, "GET "+pattern, "the spec documents it")
+	for attr, want := range map[string]string{"data-page": "/ui/interests/map", "data-document-page": "/ui/documents/",
+		"data-interest-page": "/ui/interests/", "data-unsorted-page": "/ui/interests/unsorted",
+		"data-interests-page": "/ui/interests"} {
+		assert.Equal(t, want, nodeAttr(root, attr), attr)
+	}
+}

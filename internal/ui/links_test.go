@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -287,4 +288,69 @@ func TestPageHrefs(t *testing.T) {
 		assert.Equal(t, "/ui/interests/"+url.PathEscape(id), u.EscapedPath(), "one path segment")
 		assert.Equal(t, url.Values{PageParam: {"4"}}, u.Query())
 	}
+}
+
+// TestParseMapQuery: the map's view and selection as the address writes
+// them, an ID after a selection's first colon, colons and all; and every
+// other form refused, naming the forms there are.
+func TestParseMapQuery(t *testing.T) {
+	for query, want := range map[string]MapQuery{
+		"":                             {View: MapViewAll},
+		"view=all":                     {View: MapViewAll},
+		"view=zoom":                    {View: MapViewZoom},
+		"select=unsorted":              {View: MapViewAll, Select: MapSelection{Kind: MapSelectUnsorted}},
+		"select=area%3Aa1":             {View: MapViewAll, Select: MapSelection{Kind: MapSelectArea, ID: "a1"}},
+		"select=interest:i1":           {View: MapViewAll, Select: MapSelection{Kind: MapSelectInterest, ID: "i1"}},
+		"view=zoom&select=document:d1": {View: MapViewZoom, Select: MapSelection{Kind: MapSelectDocument, ID: "d1"}},
+		"select=document:a:b:c":        {View: MapViewAll, Select: MapSelection{Kind: MapSelectDocument, ID: "a:b:c"}},
+	} {
+		q, err := url.ParseQuery(query)
+		require.NoError(t, err)
+		got, err := ParseMapQuery(q)
+		require.NoError(t, err, query)
+		assert.Equal(t, want, got, query)
+	}
+	for _, query := range []string{"view=map", "select=nope", "select=area:", "select=:x", "select=planet:x",
+		"select=unsorted:x", "select=area:" + strings.Repeat("a", maxMapSelectID+1)} {
+		q, err := url.ParseQuery(query)
+		require.NoError(t, err)
+		_, err = ParseMapQuery(q)
+		require.Error(t, err, query)
+		if strings.HasPrefix(query, "view") {
+			assert.Contains(t, err.Error(), "want all or zoom", query)
+		} else {
+			assert.Contains(t, err.Error(), "want unsorted, area:<id>, interest:<id> or document:<id>", query)
+		}
+	}
+	_, err := ParseMapQuery(url.Values{"select": {"area:" + strings.Repeat("a", maxMapSelectID)}})
+	assert.NoError(t, err, "an ID of the longest length")
+}
+
+// TestMapHref: the map's address leaves out the default view and the
+// library, and every selection round-trips through ParseMapQuery, however
+// odd its ID.
+func TestMapHref(t *testing.T) {
+	assert.Equal(t, "/ui/interests/map", mapHref(MapQuery{}))
+	assert.Equal(t, "/ui/interests/map", mapHref(MapQuery{View: MapViewAll}))
+	assert.Equal(t, "/ui/interests/map?view=zoom", mapHref(MapQuery{View: MapViewZoom}))
+	assert.Equal(t, "/ui/interests/map?select=area%3Aa1", mapHref(MapQuery{Select: MapSelection{Kind: MapSelectArea,
+		ID: "a1"}}))
+	assert.Equal(t, "/ui/interests/map?select=unsorted&view=zoom", mapHref(MapQuery{View: MapViewZoom,
+		Select: MapSelection{Kind: MapSelectUnsorted}}))
+	for _, kind := range []string{MapSelectArea, MapSelectInterest, MapSelectDocument} {
+		for _, id := range []string{"i1", "a/b?#&=", evilAttr, evilScript, "x:y"} {
+			for _, view := range []string{MapViewAll, MapViewZoom} {
+				want := MapQuery{View: view, Select: MapSelection{Kind: kind, ID: id}}
+				u := parseHref(t, mapHref(want))
+				assert.Equal(t, "/ui/interests/map", u.Path)
+				got, err := ParseMapQuery(u.Query())
+				require.NoError(t, err)
+				assert.Equal(t, want, got, "%s %q %s", kind, id, view)
+			}
+		}
+	}
+	u := parseHref(t, mapHref(MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectUnsorted}}))
+	got, err := ParseMapQuery(u.Query())
+	require.NoError(t, err)
+	assert.Equal(t, MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectUnsorted}}, got)
 }

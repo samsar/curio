@@ -156,7 +156,7 @@ a poll; no live role.
 Where the latest rebuild put the document, a DocumentPlace: in an area's
 interest, a loose fit of one, in Unsorted with the interest it is nearest,
 or placed since into an interest or Unsorted. Each name is on one line,
-cut, whole on hover, linking to its page.
+cut, whole on hover, linking to its page; then the way to it on the map.
 */}}
 {{define "doc-place" -}}
 <p class="doc-place {{fitClass .Fit}}">{{template "icon" "sparkles"}}<span class="where">
@@ -164,7 +164,7 @@ cut, whole on hover, linking to its page.
 {{- else if eq .Fit "unsorted"}}In <a href="{{unsortedHref 1 ""}}">Unsorted</a>{{if .Nearest.ID}} · nearest {{template "interest-ref" .Nearest}}{{end}}
 {{- else if eq .Fit "new"}}New since the last rebuild: in {{if .Interest.ID}}{{template "place-path" .}}{{else}}<a href="{{unsortedHref 1 ""}}">Unsorted</a>{{end}}
 {{- else}}In {{template "place-path" .}}{{end -}}
-</span></p>
+{{template "map-link" .MapHref}}</span></p>
 {{- end}}
 
 {{/* A DocumentPlace's interest, after its area when it has one. */}}

@@ -16,7 +16,7 @@ most similar first, ranked across the pages.
 <nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "interests"}}">Interests</a><span class="sep">›</span><span class="truncate" aria-current="page" title="{{.Name}}">{{.Name}}</span></nav>
 <h1>{{template "icon" "layers"}}{{.Name}}</h1>
 {{with .Summary}}<p class="lede">{{.}}</p>{{end}}
-<div class="meta-row"><span class="badge badge-accent plain">{{count .Size "document" "documents"}}</span><span class="badge plain">{{count .NumChildren "interest" "interests"}}</span>{{with .Loose}}<span class="badge plain">{{count . "loose fit" "loose fits"}}</span>{{end}}{{with .New}}<span class="badge plain fit-new">{{num .}} new</span>{{end}}{{template "cohesion-line" .Cohesion}}{{if not $.RunAt.IsZero}}<span class="sep">·</span><span class="text">run of {{when $.RunAt}}</span>{{end}}</div>
+<div class="meta-row"><span class="badge badge-accent plain">{{count .Size "document" "documents"}}</span><span class="badge plain">{{count .NumChildren "interest" "interests"}}</span>{{with .Loose}}<span class="badge plain">{{count . "loose fit" "loose fits"}}</span>{{end}}{{with .New}}<span class="badge plain fit-new">{{num .}} new</span>{{end}}{{template "cohesion-line" .Cohesion}}{{if not $.RunAt.IsZero}}<span class="sep">·</span><span class="text">run of {{when $.RunAt}}</span>{{end}}{{template "map-link" $.MapHref}}</div>
 {{- end}}
 </div></div>
 {{template "lineage-note" .}}
@@ -32,7 +32,7 @@ most similar first, ranked across the pages.
 <nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "interests"}}">Interests</a>{{with .Parent}}<span class="sep">›</span><a class="truncate" href="{{interestHref .ID}}" title="{{.Name}}">{{.Name}}</a>{{end}}<span class="sep">›</span><span class="truncate" aria-current="page" title="{{.Name}}">{{.Name}}</span></nav>
 <h1>{{.Name}}</h1>
 {{with .Summary}}<p class="lede">{{.}}</p>{{end}}
-<div class="meta-row"><span class="badge badge-accent plain">{{count .Size "document" "documents"}}</span>{{with .Loose}}<span class="badge plain">{{count . "loose fit" "loose fits"}}</span>{{end}}{{with .New}}<span class="badge plain fit-new">{{num .}} new</span>{{end}}{{template "cohesion-line" .Cohesion}}{{if not $.RunAt.IsZero}}<span class="sep">·</span><span class="text">run of {{when $.RunAt}}</span>{{end}}</div>
+<div class="meta-row"><span class="badge badge-accent plain">{{count .Size "document" "documents"}}</span>{{with .Loose}}<span class="badge plain">{{count . "loose fit" "loose fits"}}</span>{{end}}{{with .New}}<span class="badge plain fit-new">{{num .}} new</span>{{end}}{{template "cohesion-line" .Cohesion}}{{if not $.RunAt.IsZero}}<span class="sep">·</span><span class="text">run of {{when $.RunAt}}</span>{{end}}{{template "map-link" $.MapHref}}</div>
 {{- end}}
 </div></div>
 {{template "lineage-note" .}}

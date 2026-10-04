@@ -57,6 +57,114 @@ func runPageHref(path string, page int, run string) string {
 // changesHref is the page of what the latest rebuild changed.
 func changesHref() string { return "/ui/interests/changes" }
 
+// The interest map's views, as its view parameter names them: All
+// documents, the default, which links leave out, and Zoom in.
+const (
+	MapViewAll  = "all"
+	MapViewZoom = "zoom"
+)
+
+// What the interest map's select parameter names: kind:id for an area, an
+// interest or a document, or Unsorted alone.
+const (
+	MapSelectArea     = "area"
+	MapSelectInterest = "interest"
+	MapSelectDocument = "document"
+	MapSelectUnsorted = "unsorted"
+)
+
+// The interest map's query parameters.
+const (
+	mapViewParam   = "view"
+	mapSelectParam = "select"
+)
+
+// maxMapSelectID is the longest ID a selection may name, in bytes: well
+// over a UUID's 36, and short enough that no query is a page's worth.
+const maxMapSelectID = 128
+
+// MapQuery is what an interest map URL asks for: a view, MapViewAll or
+// MapViewZoom, and what is selected in it, the zero MapSelection for the
+// library.
+type MapQuery struct {
+	View   string
+	Select MapSelection
+}
+
+// MapSelection is what the map has selected: an area, an interest or a
+// document by ID, or Unsorted; the zero value is the library.
+type MapSelection struct {
+	Kind, ID string
+}
+
+// String is the selection as the select parameter writes it: kind:id,
+// unsorted, or "" for the library.
+func (s MapSelection) String() string {
+	switch s.Kind {
+	case "":
+		return ""
+	case MapSelectUnsorted:
+		return s.Kind
+	}
+	return s.Kind + ":" + s.ID
+}
+
+// mapHref is the interest map showing q: the default view and the library
+// are left out, so the plain map is /ui/interests/map. static/map.js keeps
+// its address in this form as the view and selection change.
+func mapHref(q MapQuery) string {
+	const path = "/ui/interests/map"
+	v := url.Values{}
+	if sel := q.Select.String(); sel != "" {
+		v.Set(mapSelectParam, sel)
+	}
+	if q.View != "" && q.View != MapViewAll {
+		v.Set(mapViewParam, q.View)
+	}
+	if len(v) == 0 {
+		return path
+	}
+	return path + "?" + v.Encode()
+}
+
+// ParseMapQuery reads the interest map's query, as mapHref writes it: no
+// view is All documents, and no selection the library. A view or a
+// selection of another form is an error naming the forms there are,
+// answered before the page reads anything. A selection's ID is everything
+// after its first colon, so an ID may hold colons of its own.
+func ParseMapQuery(q url.Values) (MapQuery, error) {
+	out := MapQuery{View: MapViewAll}
+	switch view := q.Get(mapViewParam); view {
+	case "", MapViewAll:
+	case MapViewZoom:
+		out.View = view
+	default:
+		return MapQuery{}, fmt.Errorf("%s %q: want %s or %s", mapViewParam, view, MapViewAll, MapViewZoom)
+	}
+	sel := q.Get(mapSelectParam)
+	if sel == "" {
+		return out, nil
+	}
+	if sel == MapSelectUnsorted {
+		out.Select = MapSelection{Kind: MapSelectUnsorted}
+		return out, nil
+	}
+	kind, id, _ := strings.Cut(sel, ":")
+	switch {
+	case kind != MapSelectArea && kind != MapSelectInterest && kind != MapSelectDocument, id == "":
+		return MapQuery{}, fmt.Errorf("%s %q: %s", mapSelectParam, sel, mapSelectForms)
+	case len(id) > maxMapSelectID:
+		return MapQuery{}, fmt.Errorf("%s: an ID of %d bytes, over the %d one may have: %s", mapSelectParam, len(id),
+			maxMapSelectID, mapSelectForms)
+	}
+	out.Select = MapSelection{Kind: kind, ID: id}
+	return out, nil
+}
+
+// mapSelectForms names the selections the map takes, for a refusal.
+const mapSelectForms = "want " + MapSelectUnsorted + ", " + MapSelectArea + ":<id>, " + MapSelectInterest +
+	":<id> or " + MapSelectDocument + ":<id>"
+
 // interestPageHref is page (from 1) of interest id's members, or of an
 // area's interests.
 func interestPageHref(id string, page int) string {

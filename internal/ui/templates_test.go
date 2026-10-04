@@ -39,10 +39,12 @@ var inlineCode = map[string]*regexp.Regexp{
 var scriptRE = regexp.MustCompile(`(?is)<script(\s[^>]*)?>(.*?)</script>`)
 
 // builtInGoRE finds the attributes whose values Go builds, a change's
-// (actions.go) and a poll's (links.go), capturing each value, quoted or
-// not; a template action in it may hold quotes of its own. htmx reads
-// data-hx-get as hx-get.
-var builtInGoRE = regexp.MustCompile(`(?i)\s(data-(?:method|path|body|field|join)|(?:data-)?hx-get)\s*=\s*` +
+// (actions.go), a poll's (links.go) and the interest map's addresses
+// (data-src, data-page and the data-*-page prefixes), capturing each
+// value, quoted or not; a template action in it may hold quotes of its
+// own. htmx reads data-hx-get as hx-get.
+var builtInGoRE = regexp.MustCompile(`(?i)\s(data-(?:method|path|body|field|join|src|(?:[a-z]+-)*page)|` +
+	`(?:data-)?hx-get)\s*=\s*` +
 	`("(?:\{\{.*?\}\}|[^"])*"|'(?:\{\{.*?\}\}|[^'])*'|(?:\{\{.*?\}\}|[^\s>])*)`)
 
 // oneActionRE matches a value that is exactly one template action.
@@ -100,13 +102,16 @@ func TestTemplatesHaveNoInlineCode(t *testing.T) {
 		`<button data-method="POST">`, `<button data-path="/v1/documents/{{.ID}}/refetch">`,
 		`<button data-body='{"paused":true}'>`, `<button data-body="{{.A}}{{.B}}">`, `<input data-field="keep_awake">`,
 		`<form data-join="-">`, `<div hx-get="/ui/status?poll=live">`, `<div HX-GET={{.A}}x>`, `<div hx-get="">`,
-		`<button data-method=POST>`,
+		`<button data-method=POST>`, `<div data-src="/v1/interests/map">`, `<div data-page="/ui/interests/map">`,
+		`<div data-document-page="/ui/documents/{{.ID}}">`, `<div data-interest-page='{{.A}}/'>`,
 	} {
 		assert.NotEmpty(t, inlineCodeProblems(bad), bad)
 	}
 	assert.Empty(t, inlineCodeProblems(`{{/* no hx-on, no <style>, no onclick= */}}`), "comments may name them")
 	assert.Empty(t, inlineCodeProblems(`<button data-method="{{.Method}}" data-path="{{.Path}}"{{with .Body}} data-body="{{.}}"{{end}}>`+
-		`<div hx-get="{{navHref "search"}}" data-hx-get='{{.Href}}'>`), "values built in Go")
+		`<div hx-get="{{navHref "search"}}" data-hx-get='{{.Href}}'>`+
+		`<div data-src="{{.Src}}" data-page="{{.PageHref}}" data-unsorted-page="{{.UnsortedPage}}" data-view="all">`),
+		"values built in Go")
 }
 
 // hiddenTagRE finds a tag carrying the hidden attribute.

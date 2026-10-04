@@ -775,12 +775,14 @@ func TestInterests_BadOffset(t *testing.T) {
 // insightReads counts the insight store's reads a response makes.
 type insightReads struct {
 	latest, newest, pages, groups, children, members, counts, placements, lineage, identities atomic.Int32
+	runGroups, mapDocuments                                                                   atomic.Int32
 }
 
 // total is every read counted.
 func (n *insightReads) total() int32 {
 	return n.latest.Load() + n.newest.Load() + n.pages.Load() + n.groups.Load() + n.children.Load() +
-		n.members.Load() + n.counts.Load() + n.placements.Load() + n.lineage.Load() + n.identities.Load()
+		n.members.Load() + n.counts.Load() + n.placements.Load() + n.lineage.Load() + n.identities.Load() +
+		n.runGroups.Load() + n.mapDocuments.Load()
 }
 
 // countingInsights counts reads into n.
@@ -846,6 +848,16 @@ func (c countingInsights) GetInterests(ctx context.Context, tenantID string, ids
 func (c countingInsights) GetInterest(ctx context.Context, id string) (*store.Interest, error) {
 	c.n.identities.Add(1)
 	return c.InsightStore.GetInterest(ctx, id)
+}
+
+func (c countingInsights) RunGroups(ctx context.Context, runID string) ([]store.InterestGroup, error) {
+	c.n.runGroups.Add(1)
+	return c.InsightStore.RunGroups(ctx, runID)
+}
+
+func (c countingInsights) MapDocuments(ctx context.Context, runID string) ([]store.MapDocument, error) {
+	c.n.mapDocuments.Add(1)
+	return c.InsightStore.MapDocuments(ctx, runID)
 }
 
 // countingQueue counts the queue's reads of its counts.

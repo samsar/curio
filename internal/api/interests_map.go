@@ -180,6 +180,27 @@ func (d Deps) handleInterestMap(w http.ResponseWriter, r *http.Request) {
 	d.writeJSON(w, r, http.StatusOK, resp)
 }
 
+// mapRun is the latest done rebuild, whose map the endpoint serves and the
+// map page draws, so that the two never disagree about whether there is
+// one. A run with a built map comes with a nil error; a missing map is a
+// *mapUnavailableError, with the run when there is one, for the page's
+// counts. With the map off it reads nothing.
+func (d Deps) mapRun(ctx context.Context) (*store.InterestRun, error) {
+	if d.MapOff {
+		return nil, mapOffError()
+	}
+	run, err := d.Insights.LatestRun(ctx, d.TenantID, store.InterestRunDone)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, unavailable(nil)
+	case err != nil:
+		return nil, err
+	case run.Map == nil || run.Map.Status != store.MapBuilt:
+		return run, unavailable(run)
+	}
+	return run, nil
+}
+
 // interestMap is the latest done rebuild's map. A missing map is a
 // *mapUnavailableError, and so is every map with the map off, which reads
 // nothing. The run, its groups and its documents are three reads, outside
@@ -188,18 +209,10 @@ func (d Deps) handleInterestMap(w http.ResponseWriter, r *http.Request) {
 // read once more from the newer run, and a second change is answered as
 // read.
 func (d Deps) interestMap(ctx context.Context) (InterestMapResponse, error) {
-	if d.MapOff {
-		return InterestMapResponse{}, mapOffError()
-	}
 	for attempt := 0; ; attempt++ {
-		run, err := d.Insights.LatestRun(ctx, d.TenantID, store.InterestRunDone)
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			return InterestMapResponse{}, unavailable(nil)
-		case err != nil:
+		run, err := d.mapRun(ctx)
+		if err != nil {
 			return InterestMapResponse{}, err
-		case run.Map == nil || run.Map.Status != store.MapBuilt:
-			return InterestMapResponse{}, unavailable(run)
 		}
 		groups, err := d.Insights.RunGroups(ctx, run.ID)
 		if err != nil {

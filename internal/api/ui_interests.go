@@ -189,7 +189,7 @@ func (h pageHandlers) interest(w http.ResponseWriter, r *http.Request) {
 	}
 	in := interestView(resp)
 	vm := ui.InterestPage{Layout: h.pages.layout(in.Name(), ui.NavInterests), Interest: in, Page: page,
-		RunAt: h.runFinished(r, resp.RunID)}
+		RunAt: h.runFinished(r, resp.RunID), MapOff: h.d.MapOff}
 	status := http.StatusOK
 	if vm.OutOfRange() != nil {
 		status = http.StatusNotFound
@@ -257,7 +257,8 @@ func (h pageHandlers) unsorted(w http.ResponseWriter, r *http.Request) {
 	}
 	shown := ui.ShownRun(r.URL.Query())
 	vm := ui.Unsorted{Layout: h.pages.layout("Unsorted", ui.NavInterests), Page: page, Run: resp.RunID,
-		RunChanged: shown != "" && resp.RunID != "" && shown != resp.RunID, Total: resp.Total, NumNew: resp.NumNew}
+		RunChanged: shown != "" && resp.RunID != "" && shown != resp.RunID, Total: resp.Total, NumNew: resp.NumNew,
+		MapOff: h.d.MapOff}
 	for _, m := range resp.Items {
 		doc := ui.UnsortedDoc{Member: unsortedMember(m, fitUnsorted)}
 		if m.NearestID != "" {
@@ -359,7 +360,7 @@ func (h pageHandlers) documentPlace(r *http.Request, id string) *ui.DocumentPlac
 		h.quietError(r, err)
 		return nil
 	}
-	out := &ui.DocumentPlace{Fit: string(p.Fit),
+	out := &ui.DocumentPlace{DocumentID: id, Fit: string(p.Fit), MapOff: h.d.MapOff,
 		Interest: ui.InterestRef{ID: p.InterestID, Label: p.InterestLabel},
 		Area:     ui.InterestRef{ID: p.AreaID, Label: p.AreaLabel, Area: true},
 		Nearest:  ui.InterestRef{ID: p.NearestID, Label: p.NearestLabel}}

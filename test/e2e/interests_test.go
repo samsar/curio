@@ -119,8 +119,9 @@ func fetchedDocuments(c *client.Client) (int, error) {
 
 // TestDaemon_AnImportIsGroupedUnasked: an import of 20 pages is grouped
 // once it settles, with no rebuild asked for: the first rebuild, which the
-// dashboard's interest pages show; and 5 more pages, 5% of 20 at the
-// floor, are regrouped the same way.
+// dashboard's interest pages show, its map's page the shell its script
+// draws in; and 5 more pages, 5% of 20 at the floor, are regrouped the
+// same way.
 func TestDaemon_AnImportIsGroupedUnasked(t *testing.T) {
 	ctx := context.Background()
 	env := interestsDaemon(t, time.Second)
@@ -142,10 +143,13 @@ func TestDaemon_AnImportIsGroupedUnasked(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, list.Items)
 	for _, path := range []string{"/ui/interests", "/ui/interests/" + list.Items[0].ID, "/ui/interests/unsorted",
-		"/ui/interests/changes"} {
+		"/ui/interests/changes", "/ui/interests/map"} {
 		_, body := getDashboard(t, env.base, path)
 		assert.Contains(t, body, `<a href="/ui/interests" aria-current="page">`, path)
 	}
+	_, body := getDashboard(t, env.base, "/ui/interests/map?view=zoom&select=interest%3A"+list.Items[0].ID)
+	assert.Contains(t, body, `id="interest-map" data-src="/v1/interests/map"`)
+	assert.Contains(t, body, `data-select="interest:`+list.Items[0].ID+`"`)
 	// The rebuild drew its map; no client wraps it yet.
 	var drawn struct {
 		RunID     string `json:"run_id"`
@@ -250,6 +254,9 @@ func TestDaemon_TheMapSwitch(t *testing.T) {
 	}
 	getAPIStatus(t, env.base, "/v1/interests/map", http.StatusNotFound, &problem)
 	assert.Equal(t, "map_off", problem.Reason)
+	_, page := getDashboard(t, env.base, "/ui/interests/map")
+	assert.Contains(t, page, "<h2>The map is off</h2>", "the page says what the endpoint does")
+	assert.NotContains(t, page, `id="interest-map"`)
 
 	stopped, err := ctl.Stop(ctx)
 	require.NoError(t, err)

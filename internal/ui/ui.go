@@ -28,7 +28,17 @@ var files embed.FS
 // layout, the partials and the icons.
 var pageNames = []string{
 	PageSearch, PageStatus, PageLibrary, PageFailures, PageDocument, PageInterests, PageInterest, PageUnsorted,
-	PageChanges, PageRetired, PageError, PageStarting,
+	PageChanges, PageMap, PageRetired, PageError, PageStarting,
+}
+
+// mapScripts are the scripts the interest map's page loads after htmx and
+// actions.js, in order, and no other page does: d3's modules, vendored as
+// npm publishes them, each after the modules it reads from the d3 global
+// as it loads, then map.js, which draws the map with them.
+var mapScripts = []string{
+	"d3-dispatch-3.0.1.min.js", "d3-selection-3.0.0.min.js", "d3-timer-3.0.1.min.js", "d3-color-3.1.0.min.js",
+	"d3-interpolate-3.0.1.min.js", "d3-ease-3.0.1.min.js", "d3-transition-3.0.1.min.js", "d3-drag-3.0.0.min.js",
+	"d3-zoom-3.0.0.min.js", "d3-quadtree-3.0.1.min.js", "map.js",
 }
 
 // Renderer renders the dashboard's pages and serves its assets. It is
@@ -153,6 +163,7 @@ func funcs(assets assetSet) template.FuncMap {
 		"jobKindLabel":       jobKindLabel,
 		"viaLabel":           viaLabel,
 		"contentTypes":       func() []string { return contentTypes },
+		"mapScripts":         func() []string { return mapScripts },
 	}
 }
 

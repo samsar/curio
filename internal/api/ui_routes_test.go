@@ -48,6 +48,7 @@ func TestDashboard_Routes(t *testing.T) {
 		"GET /ui/failures",
 		"GET /ui/interests",
 		"GET /ui/interests/changes",
+		"GET /ui/interests/map",
 		"GET /ui/interests/unsorted",
 		"GET /ui/interests/{id}",
 		"GET /ui/library",
@@ -91,6 +92,7 @@ func uiSamples(t *testing.T, s *testServer) map[string]string {
 		"/ui/interests":          "/ui/interests",
 		"/ui/interests/unsorted": "/ui/interests/unsorted",
 		"/ui/interests/changes":  "/ui/interests/changes",
+		"/ui/interests/map":      "/ui/interests/map?view=zoom&select=interest%3A" + interest,
 		"/ui/interests/{id}":     "/ui/interests/" + interest,
 		"/ui/static/{file}":      stylesheetURL(t, s),
 		"an area's page":         "/ui/interests/" + area,
@@ -144,16 +146,18 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 	assert.Contains(t, notFound.body, `<nav aria-label="Main">`)
 	assertSecurityHeaders(t, notFound, ui.CSP)
 	// An area's page, and its page past the last; a numbered list's page
-	// past the last, one that isn't a number; the changes; an interest
-	// that never was, and one a rebuild retired.
+	// past the last, one that isn't a number; the changes; the map's page
+	// asked for a selection or a view it hasn't; an interest that never
+	// was, and one a rebuild retired.
 	interest, area := samples["/ui/interests/{id}"], samples["an area's page"]
 	for path, status := range map[string]int{
 		area: http.StatusOK, area + "?page=2": http.StatusNotFound,
 		"/ui/interests?page=2": http.StatusNotFound, "/ui/interests?page=0": http.StatusBadRequest,
 		interest + "?page=2": http.StatusNotFound, interest + "?page=x": http.StatusBadRequest,
 		"/ui/interests/unsorted?page=99": http.StatusNotFound, "/ui/interests/unsorted?page=x": http.StatusBadRequest,
-		"/ui/interests/changes": http.StatusOK,
-		"/ui/interests/nope":    http.StatusNotFound,
+		"/ui/interests/changes":         http.StatusOK,
+		"/ui/interests/map?select=nope": http.StatusBadRequest, "/ui/interests/map?view=map": http.StatusBadRequest,
+		"/ui/interests/nope": http.StatusNotFound,
 	} {
 		resp := s.do(t, request{method: http.MethodGet, path: path})
 		assert.Equal(t, status, resp.status, path)

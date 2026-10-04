@@ -139,6 +139,12 @@ func rebuildAction() Action {
 		Status: rebuildStatus, Done: "Rebuild requested"}
 }
 
+// interestMapAPIPath is where static/map.js reads the interest map: a
+// read, the one /v1 path a page names that no Action sends to, which
+// TestInterestMap_ReadsOnly, in internal/api, holds to the router and to
+// api/openapi.yaml as the Actions are held.
+const interestMapAPIPath = "/v1/interests/map"
+
 // queueAction is a change of the queue's settings: body holds the fields
 // PUT /v1/queue changes.
 func queueAction(kind ActionKind, body map[string]any, done string) Action {

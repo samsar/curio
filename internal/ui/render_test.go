@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"io/fs"
 	"iter"
 	"math"
 	"net/http"
@@ -157,7 +158,7 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 					{Kind: evilAttr, Waiting: true, Attempts: 1, RunAfter: at, LastError: evilScript + evilQuotes},
 					{Kind: "fetch", Waiting: true, RunAfter: at, LastError: evilAttr}},
 				AttemptLimit: 5, Hold: evilScript},
-			Place: &DocumentPlace{Fit: "member", Interest: InterestRef{ID: evilAttr, Label: evilLong},
+			Place: &DocumentPlace{DocumentID: evilAttr, Fit: "member", Interest: InterestRef{ID: evilAttr, Label: evilLong},
 				Area: InterestRef{ID: evilScript, Label: evilRTL, Area: true}},
 		},
 		PageInterests: Interests{
@@ -174,6 +175,9 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 		PageUnsorted: Unsorted{Layout: layout(NavInterests), Page: 1, RunChanged: true, Run: evilAttr, Total: 3,
 			Documents: sampleUnsorted(), NumNew: 30,
 			New: []Member{{DocumentID: evilAttr, BookmarkTitle: evilLong, URL: evilURL, Similarity: 0.2, Fit: "new"}}},
+		PageMap: MapPage{Layout: layout(NavInterests), State: MapReady, Run: &MapRun{Shape: "areas", Documents: 5237,
+			Areas: 29, Interests: 182, FinishedAt: at}, Rebuilds: InterestsState{State: "current", LastRebuildAt: at},
+			Query: MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectInterest, ID: evilAttr + evilScript}}},
 		PageChanges: Changes{Layout: layout(NavInterests), Run: &ChangesRun{ComputedAt: at, Trigger: evilScript,
 			Kind: evilAttr, Changes: RunChanges{Kept: 9, Split: 1, Merged: 2, Moved: 1, Dissolved: 1, Created: 2},
 			Events: sampleChanges()}},
@@ -261,6 +265,7 @@ func sampleVariants(t testing.TB) map[string][]any {
 		PageInterest:  interestVariants(layout(NavInterests)),
 		PageUnsorted:  unsortedVariants(layout(NavInterests)),
 		PageChanges:   changesVariants(layout(NavInterests), at),
+		PageMap:       mapVariants(layout(NavInterests), at),
 		PageRetired:   goneVariants(layout(NavInterests), at),
 		PageLibrary: {
 			Library{Layout: layout(NavLibrary), Filters: LibraryFilters{State: evilAttr, Limit: 7}, Counts: counts,
@@ -362,6 +367,8 @@ func documentVariants(layout Layout, panelErr *PanelError, at time.Time) []any {
 			Area: InterestRef{ID: evilQuotes, Label: evilAttr, Area: true}}),
 		placed(DocumentPlace{Fit: "new"}),
 		placed(DocumentPlace{Fit: evilAttr, Interest: InterestRef{ID: evilAttr, Label: evilQuotes}}),
+		placed(DocumentPlace{DocumentID: evilAttr + evilScript, Fit: "member", Interest: InterestRef{ID: evilQuotes}}),
+		placed(DocumentPlace{DocumentID: evilAttr, Fit: "unsorted", MapOff: true}),
 	}
 }
 
@@ -566,6 +573,8 @@ func interestVariants(layout Layout) []any {
 		InterestPage{Layout: layout, Interest: area, Page: 3},
 		InterestPage{Layout: layout, Interest: Interest{ID: evilAttr, Area: true}},
 		InterestPage{Layout: layout, Interest: kept, Page: 1},
+		InterestPage{Layout: layout, Interest: area, Page: 1, MapOff: true},
+		InterestPage{Layout: layout, Interest: loose, Page: 1, MapOff: true},
 	}
 }
 
@@ -584,6 +593,35 @@ func unsortedVariants(layout Layout) []any {
 		Unsorted{Layout: layout, Run: evilAttr, NumNew: 1, New: []Member{{DocumentID: evilAttr, Title: evilRTL,
 			URL: evilURL, Fit: "new"}}},
 		Unsorted{Layout: layout, Run: evilAttr},
+		Unsorted{Layout: layout, Run: evilAttr, Total: 4, Documents: sampleUnsorted(), MapOff: true},
+	}
+}
+
+// mapVariants are the interest map's page drawing a flat run's map with
+// nothing selected, a document and Unsorted selected; and without a map,
+// in each state: no rebuild yet (where rebuilds stand, insight off), a
+// rebuild that drew none, a map that failed (a long, hostile error), and
+// the map turned off.
+func mapVariants(layout Layout, at time.Time) []any {
+	flat := &MapRun{Shape: "flat", Documents: 1, Interests: 1, FinishedAt: at}
+	areas := &MapRun{Shape: "areas", Documents: 5237, Areas: 29, Interests: 182}
+	page := func(state MapState, run *MapRun, q MapQuery) MapPage {
+		return MapPage{Layout: layout, State: state, Run: run, Query: q,
+			Rebuilds: InterestsState{State: "none", Changed: 7, RebuildAt: 20}}
+	}
+	failed := page(MapFailed, areas, MapQuery{})
+	failed.Error = strings.Repeat("the map took longer than 2m0s ", 16) + evilScript + evilAttr
+	off := page(MapNoRun, nil, MapQuery{})
+	off.Rebuilds = InterestsState{State: "off"}
+	return []any{
+		page(MapReady, flat, MapQuery{View: MapViewAll}),
+		page(MapReady, areas, MapQuery{View: MapViewAll, Select: MapSelection{Kind: MapSelectDocument, ID: evilQuotes}}),
+		page(MapReady, areas, MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectUnsorted}}),
+		page(MapNoRun, nil, MapQuery{View: MapViewZoom}),
+		off,
+		page(MapNoMap, areas, MapQuery{}),
+		failed,
+		page(MapOff, nil, MapQuery{Select: MapSelection{Kind: MapSelectArea, ID: evilScript}}),
 	}
 }
 
@@ -665,6 +703,9 @@ func partialSamples(t testing.TB) map[string][]any {
 			DocCell{Ref: DocRef{URL: evilURL}}},
 		"library-head": {LibraryHead{Counts: &LibraryCounts{Documents: 3, Bookmarks: 4},
 			Views: LibraryViews{Failed: 2, Counted: true}}, LibraryHead{Views: LibraryViews{OnFailures: true}}},
+		"interests-subnav": {InterestsViews{}, InterestsViews{OnMap: true}},
+		"map-link": {"", mapHref(MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectDocument,
+			ID: evilAttr + evilScript}})},
 		"library-subnav": {LibraryViews{},
 			LibraryViews{OnFailures: true, Failed: 2971, Counted: true}},
 		"state-badge": {evilScript, "dead"},
@@ -827,7 +868,8 @@ func TestEveryTemplateRenders(t *testing.T) {
 func pageTemplate(page, name string) bool {
 	switch name {
 	case "layout", "head", "header-search", "content", "document-page", "document-actions", "interests-page",
-		"area-page", "interest-page", "lineage-note", "failures-page", "failures-live", "layout.html", page + ".html":
+		"area-page", "interest-page", "lineage-note", "failures-page", "failures-live", "map-shell", "map-none",
+		"layout.html", page + ".html":
 		return true
 	}
 	return false
@@ -926,7 +968,7 @@ func TestPages_Navigation(t *testing.T) {
 			assert.Equal(t, []string{"/ui/status"}, current, page)
 		case PageLibrary, PageFailures, PageDocument:
 			assert.Equal(t, []string{"/ui/library"}, current, page)
-		case PageInterests, PageInterest, PageUnsorted, PageChanges, PageRetired:
+		case PageInterests, PageInterest, PageUnsorted, PageChanges, PageMap, PageRetired:
 			assert.Equal(t, []string{"/ui/interests"}, current, page)
 		default:
 			assert.Empty(t, current, page)
@@ -972,7 +1014,14 @@ func TestAssets(t *testing.T) {
 			}
 		}
 	}
-	require.Len(t, refs, 3, "the stylesheet, htmx and actions.js")
+	require.Len(t, refs, 14, "the stylesheet, htmx, actions.js, the d3 modules and map.js")
+	entries, err := fs.ReadDir(files, "static")
+	require.NoError(t, err)
+	for _, e := range entries {
+		hashed, err := r.assets.url(e.Name())
+		require.NoError(t, err)
+		assert.Contains(t, refs, hashed, "a page loads %s", e.Name())
+	}
 	types := map[string]string{".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8"}
 	for _, ref := range refs {
 		file := strings.TrimPrefix(ref, AssetPrefix)
@@ -992,17 +1041,30 @@ func TestAssets(t *testing.T) {
 	}
 }
 
+// scriptRefRE finds the scripts a page loads, by file, less its hash.
+var scriptRefRE = regexp.MustCompile(`<script src="/ui/static/([a-z0-9.-]+)\.[0-9a-f]{16}\.js" defer></script>`)
+
 // TestPages_Scripts: every page loads htmx, then actions.js, each deferred
-// and under its hashed name.
+// and under its hashed name; the interest map's page, with a map to draw,
+// loads the d3 modules after them, in mapScripts' order, then map.js, and
+// no other page, nor the map's without a map, loads any of them.
 func TestPages_Scripts(t *testing.T) {
 	r := newRenderer(t)
-	actionsJS := regexp.MustCompile(`<script src="/ui/static/actions\.[0-9a-f]{16}\.js" defer></script>`)
+	base := []string{"htmx-2.0.11.min", "actions"}
 	for page, data := range eachSample(t, r) {
 		out := render(t, r, page, data)
-		loc := actionsJS.FindStringIndex(out)
-		require.NotNil(t, loc, page)
-		assert.Less(t, strings.Index(out, `<script src="/ui/static/htmx-`), loc[0], "%s: after htmx", page)
-		assert.Equal(t, 2, strings.Count(out, "<script"), page)
+		var loaded []string
+		for _, m := range scriptRefRE.FindAllStringSubmatch(out, -1) {
+			loaded = append(loaded, m[1])
+		}
+		want := base
+		if m, ok := data.(MapPage); ok && m.Ready() {
+			want = append(slices.Clone(base), "d3-dispatch-3.0.1.min", "d3-selection-3.0.0.min", "d3-timer-3.0.1.min",
+				"d3-color-3.1.0.min", "d3-interpolate-3.0.1.min", "d3-ease-3.0.1.min", "d3-transition-3.0.1.min",
+				"d3-drag-3.0.0.min", "d3-zoom-3.0.0.min", "d3-quadtree-3.0.1.min", "map")
+		}
+		assert.Equal(t, want, loaded, page)
+		assert.Equal(t, len(want), strings.Count(out, "<script"), page)
 	}
 }
 

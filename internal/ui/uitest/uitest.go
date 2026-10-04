@@ -30,7 +30,11 @@ import (
 //     scheme or host, no empty or dot segment);
 //   - an hx-get that isn't a path under /ui/, and any htmx attribute that
 //     changes something (hx-post, hx-put, hx-patch, hx-delete): changes go
-//     through actions.js, data- prefixed forms included.
+//     through actions.js, data- prefixed forms included;
+//   - what the interest map's script reads (data-src) other than a clean
+//     path under /v1/, and a page it addresses or links to (data-page, and
+//     a data-*-page prefix it appends an ID to) other than a clean path
+//     under /ui/ without a query.
 func Problems(page string) []string {
 	root, err := html.Parse(strings.NewReader(page))
 	if err != nil {
@@ -105,6 +109,14 @@ func elementProblems(n *html.Node, ids map[string]bool) []string {
 			if !cleanAPIPath(a.Val) {
 				problems = append(problems, key+"="+strconv.Quote(a.Val)+" on <"+n.Data+">: changes go to a path under /v1/")
 			}
+		case key == "data-src":
+			if !cleanAPIPath(a.Val) {
+				problems = append(problems, key+"="+strconv.Quote(a.Val)+" on <"+n.Data+">: the map reads a path under /v1/")
+			}
+		case strings.HasPrefix(key, "data-") && strings.HasSuffix(key, "-page"): // data-page too
+			if !pagePrefix(a.Val) {
+				problems = append(problems, key+"="+strconv.Quote(a.Val)+" on <"+n.Data+">: the map leads to a path under /ui/")
+			}
 		case name == "hx-get":
 			if !strings.HasPrefix(a.Val, "/ui/") {
 				problems = append(problems, key+"="+strconv.Quote(a.Val)+" on <"+n.Data+">: htmx reads pages under /ui/ only")
@@ -130,12 +142,27 @@ var htmxChanges = []string{"hx-post", "hx-put", "hx-patch", "hx-delete"}
 // dot segment, escaped or not, that would lead it elsewhere.
 func cleanAPIPath(p string) bool {
 	path, _, _ := strings.Cut(p, "?")
-	if !strings.HasPrefix(path, "/v1/") || strings.ContainsAny(path, "\\#") {
+	return cleanPath(path, "/v1/", false)
+}
+
+// pagePrefix reports whether p is a clean path under /ui/, as cleanAPIPath
+// has it, with no query, and which may end in a slash: a page, or the
+// prefix of one that map.js appends an escaped ID to.
+func pagePrefix(p string) bool {
+	return !strings.Contains(p, "?") && cleanPath(p, "/ui/", true)
+}
+
+// cleanPath reports whether path is under root and resolves to itself: no
+// backslash or fragment, and no dot segment, escaped or not, nor an empty
+// one, but a last when open allows it.
+func cleanPath(path, root string, open bool) bool {
+	if !strings.HasPrefix(path, root) || strings.ContainsAny(path, "\\#") {
 		return false
 	}
-	for _, seg := range strings.Split(path, "/")[1:] {
+	segs := strings.Split(path, "/")[1:]
+	for i, seg := range segs {
 		dots := strings.ReplaceAll(strings.ToLower(seg), "%2e", ".")
-		if seg == "" || dots == "." || dots == ".." {
+		if seg == "" && (!open || i < len(segs)-1) || dots == "." || dots == ".." {
 			return false
 		}
 	}

@@ -28,6 +28,7 @@ after a rebuild that split, merged or dissolved interests, a note says so.
 {{- template "rebuild-control" .Rebuild}}
 {{- if and .Rebuild.Enabled .Run}}<span class="no-js muted">Rebuild them with <code>curio interests rebuild</code>.</span>{{end}}</div>
 </div>
+{{template "interests-subnav" .Views}}
 {{if .RunChanged}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>The interests were rebuilt since the page you came from, so this page {{if .OutOfRange}}is past the new run's last{{else}}lists the new run's{{end}}.{{if gt .Page 1}} <a href="{{.FirstPage}}">Start again from page 1</a>.{{end}}</p></div></div>
 {{end}}
 {{- with .Run}}{{if .ShowsChanges}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>Rebuilt on {{template "date" .ComputedAt}}: {{.Changes.Summary}}. <a href="{{changesHref}}">What changed →</a></p></div></div>

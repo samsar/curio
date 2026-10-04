@@ -1,0 +1,100 @@
+{{/*
+The interest map: the Interests' head, with Map current in their subnav,
+then, when the latest rebuild drew a map, the shell static/map.js draws it
+into, or else a card saying why there is none (no rebuild yet, one that
+drew no map, a map that failed, or the map turned off). Only a page with a
+map loads the map's scripts.
+
+The shell is js-only, and a no-js card stands in for it. map.js reads the
+map from the root's data-src, keeps its address on data-page, and links
+to the pages of what it shows by data-document-page, data-interest-page,
+data-unsorted-page and data-interests-page, prefixes it appends an escaped
+ID to, if any: every URL it uses is one of these, built in Go. data-view
+and data-select are the view and the selection the address asked for,
+which it shows once it has drawn the map. Everything map.js fills starts
+empty, and app.css hides it while it is, but for the status line, which
+says the map is loading until it is drawn.
+*/}}
+{{define "head"}}{{if .Ready}}{{range mapScripts}}<script src="{{asset .}}" defer></script>
+{{end}}{{end}}{{end}}
+
+{{define "content" -}}
+<div class="page-head"><div class="titles">
+<h1>Interests</h1>
+{{with .Run}}<p class="lede">{{count .Documents "document" "documents"}} {{if .HasAreas}}in {{count .Areas "area" "areas"}} holding {{count .Interests "interest" "interests"}}{{else}}in {{count .Interests "interest" "interests"}}{{end}}{{if not .FinishedAt.IsZero}}, as the rebuild of {{template "date" .FinishedAt}} grouped them{{end}}.</p>
+{{- else}}<p class="lede">Your library by similarity: every document a dot, near the documents most like it.</p>{{end}}
+</div></div>
+{{template "interests-subnav" .Views}}
+{{if .Ready}}{{template "map-shell" .}}{{else}}{{template "map-none" .}}{{end}}
+{{- end}}
+
+{{/*
+The map's shell: the views' tabs and the search; the stage, whose
+breadcrumb, zoom buttons, legend and status line sit over the view's
+canvas; and the details panel, a bottom sheet on a phone.
+*/}}
+{{define "map-shell" -}}
+<div class="interest-map js-only" id="interest-map" data-src="{{.Src}}" data-page="{{.PageHref}}" data-document-page="{{.DocumentPrefix}}" data-interest-page="{{.InterestPrefix}}" data-unsorted-page="{{.UnsortedPage}}" data-interests-page="{{.Views.ListHref}}" data-view="{{.Query.View}}"{{with .Selected}} data-select="{{.}}"{{end}}>
+<div class="map-toolbar">
+<div class="segmented map-tabs" role="tablist" aria-label="Map views">
+<button type="button" role="tab" id="map-tab-all" aria-controls="map-stage" aria-selected="{{if .Zoomed}}false{{else}}true{{end}}" tabindex="{{if .Zoomed}}-1{{else}}0{{end}}">All documents</button>
+<button type="button" role="tab" id="map-tab-zoom" aria-controls="map-stage" aria-selected="{{if .Zoomed}}true{{else}}false{{end}}" tabindex="{{if .Zoomed}}0{{else}}-1{{end}}">Zoom in</button>
+</div>
+<div class="map-search">{{template "icon" "search"}}<input class="input" id="map-search" type="search" role="combobox" aria-expanded="false" aria-controls="map-hits" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Find an area, interest or document" aria-label="Find an area, interest or document on the map">
+<ul class="map-hits" id="map-hits" role="listbox" aria-label="Matches"></ul></div>
+</div>
+<div class="map-body">
+<section class="map-stage" id="map-stage" role="tabpanel" aria-labelledby="map-tab-{{if .Zoomed}}zoom{{else}}all{{end}}">
+<canvas class="map-canvas" id="map-canvas-all" aria-label="Every document, near the documents most like it"></canvas>
+<canvas class="map-canvas" id="map-canvas-zoom" aria-label="Areas holding their interests, each document a dot in its interest"></canvas>
+<nav class="map-crumbs" id="map-crumbs" aria-label="Where you are on the map"></nav>
+<div class="map-zoom"><button class="map-icon-btn" type="button" id="map-zoom-in" aria-label="Zoom in" title="Zoom in (+)">{{template "icon" "plus"}}</button><button class="map-icon-btn" type="button" id="map-zoom-out" aria-label="Zoom out" title="Zoom out (-)">{{template "icon" "minus"}}</button><button class="map-icon-btn" type="button" id="map-zoom-fit" aria-label="Show the whole map" title="Show the whole map (0)">{{template "icon" "maximize"}}</button></div>
+<div class="map-legend" id="map-legend"></div>
+<p class="map-status" id="map-status" role="status" aria-live="polite">Loading the map…</p>
+</section>
+<aside class="map-panel" id="map-panel" aria-label="Details">
+<div class="map-panel-head">
+<p class="map-kicker" id="map-panel-kicker"></p>
+<h2 id="map-panel-title" tabindex="-1"></h2>
+<div class="map-panel-buttons"><button class="map-icon-btn map-sheet-toggle" type="button" id="map-sheet-toggle" aria-expanded="false" aria-controls="map-panel-body" aria-label="Show the details">{{template "icon" "chevron-up"}}</button><button class="map-icon-btn" type="button" id="map-clear" aria-label="Back to the library" title="Back to the library (Esc)">{{template "icon" "x"}}</button></div>
+</div>
+<div class="map-panel-body" id="map-panel-body"></div>
+</aside>
+</div>
+</div>
+<div class="card no-js"><div class="empty">
+<div class="empty-icon">{{template "icon" "map"}}</div>
+<h2>The map needs JavaScript</h2>
+<p>Your browser draws it. Without JavaScript, the <a href="{{.Views.ListHref}}">list of your interests</a> shows the same areas and interests.</p>
+</div></div>
+{{- end}}
+
+{{/*
+Why there is no map, by the page's state: no rebuild yet (where rebuilds
+stand, or how to turn insight on), a rebuild that drew none, a map that
+failed (its error cut on one line, whole on hover), or the map turned
+off. Each says what draws it.
+*/}}
+{{define "map-none" -}}
+<div class="card"><div class="empty map-none">
+<div class="empty-icon">{{template "icon" "map"}}</div>
+{{- if eq .State "no_run"}}
+<h2>No interests yet</h2>
+{{if eq .Rebuilds.State "off"}}<p>Finding them is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon. The first rebuild of the interests draws the map.</p>
+{{- else}}<p class="interests-state">{{template "interests-state" .Rebuilds}}.</p>
+<p>The first rebuild of the interests draws the map. <a href="{{.Views.ListHref}}">Interests</a> says when that will be.</p>{{end}}
+{{- else if eq .State "no_map"}}
+<h2>No map yet</h2>
+{{if eq .Rebuilds.State "off"}}<p>The latest rebuild drew no map, and finding interests is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon. The next rebuild draws the map.</p>
+{{- else}}<p>The latest rebuild drew no map, so a rebuild to draw it is due. <a href="{{.Views.ListHref}}">Interests</a> rebuilds them now, and so does <code>curio interests rebuild</code>.</p>{{end}}
+{{- else if eq .State "map_failed"}}
+<h2>The map failed</h2>
+<p>The latest rebuild couldn't draw it: <span class="state-error" title="{{.Error}}">{{shortError .Error}}</span></p>
+{{if eq .Rebuilds.State "off"}}<p>Finding interests is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon. The next rebuild draws the map again.</p>
+{{- else}}<p>The next rebuild draws it again, or rebuild them now from <a href="{{.Views.ListHref}}">Interests</a> or with <code>curio interests rebuild</code>. If it keeps failing, <code>curio daemon logs</code> says why, and <code>insight.map: false</code> in config.yaml turns the map off.</p>{{end}}
+{{- else}}
+<h2>The map is off</h2>
+<p>config.yaml turns it off (<code>insight.map: false</code>). Remove the setting, or set it to true, and restart the daemon: a rebuild then draws the map.</p>
+{{- end}}
+</div></div>
+{{- end}}
