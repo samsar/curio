@@ -405,3 +405,63 @@ func TestInherit_DifferentLengths(t *testing.T) {
 	assert.Equal(t, Inheritance{Heirs: map[int]int{}}, Inherit([]int{0, 0, 0}, []int{0, 0}))
 	assert.Equal(t, Inheritance{Heirs: map[int]int{}}, Inherit(nil, []int{0, 0, 0}))
 }
+
+// TestMapNeighboursAndPreservation: a map's nearest neighbours, ties to
+// the lower index, and the share of each point's space neighbours the map
+// keeps among its own.
+func TestMapNeighboursAndPreservation(t *testing.T) {
+	// Four points on a line, 0 and 3 at the ends; 1 is as far from 0 as
+	// from 2, and the tie goes to 0.
+	pos := [][2]float64{{0, 0}, {1, 0}, {2, 0}, {5, 0}}
+	assert.Equal(t, [][]int{{1, 2}, {0, 2}, {1, 0}, {2, 1}}, MapNeighbours(pos, 2))
+
+	near := [][]int{{1, 2}, {0, 3}, {3, 1}, {}}
+	// Point 0 keeps both, 1 keeps 0 of {0, 3}, 2 keeps 1 of {3, 1}; 3 has
+	// none and is left out.
+	assert.InDelta(t, (1+0.5+0.5)/3, NeighbourPreservation(near, pos, 2), 1e-12)
+	assert.InDelta(t, 1, NeighbourPreservation([][]int{{1}, {0}}, [][2]float64{{0, 0}, {1, 1}}, 5),
+		1e-12, "a point with fewer neighbours than k is measured on those it has")
+	assert.Zero(t, NeighbourPreservation([][]int{{}, {}}, [][2]float64{{0, 0}, {1, 1}}, 5))
+}
+
+// TestMapAndSpacePurity: the share of each labelled point's nearest
+// labelled points that share its label, on the map and in the space.
+func TestMapAndSpacePurity(t *testing.T) {
+	pos := [][2]float64{{0, 0}, {1, 0}, {10, 0}, {11, 0}, {0.5, 0}}
+	labels := []int{0, 0, 1, 1, Noise}
+	// The unlabelled point between 0 and 1 is skipped: each point's
+	// nearest labelled one is its own label's.
+	assert.InDelta(t, 1, MapPurity(pos, labels, 1), 1e-12)
+	// With k = 2 each point's second is the other label's.
+	assert.InDelta(t, 0.5, MapPurity(pos, labels, 2), 1e-12)
+	near := [][]int{{4, 2, 1}, {0, 3}, {0}, {2}, {0}}
+	// 0's first labelled neighbours: 2 (other), 1 (same); 1's: 0, 3; 2's:
+	// 0; 3's: 2.
+	assert.InDelta(t, (0.5+0.5+0+1)/4, SpacePurity(near, labels, 2), 1e-12)
+	assert.Zero(t, MapPurity(pos[:1], labels[:1], 1))
+}
+
+// TestDisplace: the shared points' shift as served and after the best
+// similarity transform, a share of the previous map's diameter.
+func TestDisplace(t *testing.T) {
+	prev := map[string][2]float64{"a": {0, 0}, "b": {10, 0}, "c": {0, 10}, "gone": {5, 5}}
+	// next is prev turned a quarter, mirrored, doubled and moved, with
+	// one point new.
+	next := map[string][2]float64{}
+	for k, p := range prev {
+		if k != "gone" {
+			next[k] = [2]float64{100 + 2*p[1], 50 + 2*p[0]}
+		}
+	}
+	next["new"] = [2]float64{0, 0}
+	d := Displace(prev, next)
+	assert.Equal(t, 3, d.Shared)
+	assert.InDelta(t, 0, d.AlignedMean, 1e-9)
+	assert.InDelta(t, 0, d.AlignedMax, 1e-9)
+	diameter := math.Hypot(10, 10)
+	// a (0,0) went to (100,50), b (10,0) to (100,70), c (0,10) to (120,50).
+	assert.InDelta(t, (math.Hypot(100, 50)+math.Hypot(90, 70)+math.Hypot(120, 40))/3/diameter, d.Mean, 1e-9)
+	assert.InDelta(t, math.Hypot(120, 40)/diameter, d.Max, 1e-9)
+	assert.Equal(t, Displacement{}, Displace(prev, map[string][2]float64{"other": {1, 1}}))
+	assert.InDelta(t, diameter, Diameter([][2]float64{{0, 0}, {10, 0}, {0, 10}, {5, 5}, {2, 2}}), 1e-12)
+}

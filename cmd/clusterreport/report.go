@@ -35,8 +35,70 @@ type report struct {
 	Warm             warmReport     `json:"warm"`
 	FreshRebuild     keptReport     `json:"fresh_rebuild"`
 	Chain            chainReport    `json:"chain"`
+	Map              mapReport      `json:"map"`
 	StoredRun        *storedReport  `json:"stored_run"`
 	TimingsMS        timings        `json:"timings_ms"`
+}
+
+// mapReport is the map's measures: a cold map of the whole library, how far
+// another seed moves it, warm maps after each kind of 5% change, and the
+// process's peak resident set.
+type mapReport struct {
+	Cold coldMapReport `json:"cold"`
+	// SeedToSeed is how far a cold map with the next seed moves the
+	// documents, aligned, a share of the map's diameter.
+	SeedToSeed float64 `json:"seed_to_seed_aligned"`
+	Warm       struct {
+		Added warmMapsReport `json:"added"`
+		Mixed warmMapsReport `json:"mixed"`
+	} `json:"warm"`
+	PeakRSSBytes int64 `json:"peak_rss_bytes"`
+}
+
+// coldMapReport is a cold map of the whole library: what drawing it took,
+// how well its document map keeps neighbourhoods (NP5, NP15) and areas
+// (purity@5, against the space's), nil in the flat shape.
+type coldMapReport struct {
+	TookMS          int64    `json:"took_ms"`
+	AllocBytes      uint64   `json:"alloc_bytes"`
+	NP5             float64  `json:"np5"`
+	NP15            float64  `json:"np15"`
+	AreaPurity      *float64 `json:"area_purity"`
+	SpaceAreaPurity *float64 `json:"space_area_purity"`
+}
+
+// warmMapsReport is the warm maps of one kind of change over the draws:
+// each draw's, and the mean and the largest of their mean displacements.
+type warmMapsReport struct {
+	Draws     []warmMapDraw `json:"draws"`
+	Documents displacement  `json:"documents"`
+	Interests displacement  `json:"interests"`
+	MeanNP5   float64       `json:"mean_np5"`
+}
+
+// warmMapDraw is one draw: a cold map of the previous library, then a warm
+// map of the new one from it, how far it moved the documents (on the
+// document map) and the interests' centres (in the zoom view), and its NP5.
+type warmMapDraw struct {
+	Draw      uint         `json:"draw"`
+	Seed      uint64       `json:"seed"`
+	Kind      string       `json:"kind"`
+	ColdMS    int64        `json:"cold_ms"`
+	WarmMS    int64        `json:"warm_ms"`
+	Documents displacement `json:"documents"`
+	Interests displacement `json:"interests"`
+	NP5       float64      `json:"np5"`
+}
+
+// displacement is how far shared points moved, each a share of the
+// previous map's diameter: the mean and the largest, as served and after
+// the best similarity transform. Over draws, Mean is the mean of the
+// draws' means and Max the largest.
+type displacement struct {
+	Mean        float64 `json:"mean"`
+	Max         float64 `json:"max"`
+	AlignedMean float64 `json:"aligned_mean"`
+	AlignedMax  float64 `json:"aligned_max"`
 }
 
 // level measures one level of a grouping. Cohesion is the mean over its
@@ -240,6 +302,7 @@ type timings struct {
 	Warm         int64 `json:"warm"`
 	FreshRebuild int64 `json:"fresh_rebuild"`
 	Chain        int64 `json:"chain"`
+	Map          int64 `json:"map"`
 	StoredRun    int64 `json:"stored_run"`
 	Total        int64 `json:"total"`
 }
@@ -307,6 +370,7 @@ func (r *report) text(b *bytes.Buffer) {
 	keptBlock(b, "added", r.FreshRebuild)
 
 	r.Chain.text(b)
+	r.Map.text(b)
 	if r.StoredRun == nil {
 		fmt.Fprintf(b, "\nStored run: none (the copy has no done interests run)\n")
 	} else {
@@ -314,10 +378,51 @@ func (r *report) text(b *bytes.Buffer) {
 	}
 
 	t := r.TimingsMS
-	fmt.Fprintf(b, "\nTimings: read %s, fresh %s, baseline %s, warm %s, fresh rebuild %s, chain %s, stored run %s; total %s\n",
+	fmt.Fprintf(b, "\nTimings: read %s, fresh %s, baseline %s, warm %s, fresh rebuild %s, chain %s, map %s, stored run %s; total %s\n",
 		seconds(t.Read), seconds(t.Fresh), seconds(t.Baseline), seconds(t.Warm), seconds(t.FreshRebuild),
-		seconds(t.Chain), seconds(t.StoredRun), seconds(t.Total))
+		seconds(t.Chain), seconds(t.Map), seconds(t.StoredRun), seconds(t.Total))
 }
+
+func (m *mapReport) text(b *bytes.Buffer) {
+	c := m.Cold
+	fmt.Fprintf(b, "\nMap: a cold map of the whole library in %s (%s allocated); peak resident set %s\n",
+		seconds(c.TookMS), megabytes(float64(c.AllocBytes)), megabytes(float64(m.PeakRSSBytes)))
+	fmt.Fprintf(b, "  document map: NP5 %.3f, NP15 %.3f; area purity@5 %s on the map, %s in the space\n",
+		c.NP5, c.NP15, fmtFloat(c.AreaPurity, "%.3f"), fmtFloat(c.SpaceAreaPurity, "%.3f"))
+	fmt.Fprintf(b, "  another seed moves its documents %s of its diameter, aligned\n", percent2(m.SeedToSeed))
+	fmt.Fprintf(b, "  warm after a 5%% change, moved (served · aligned): documents on the document map, interests' centres in the zoom view\n")
+	m.Warm.Added.text(b, "added", c.NP5)
+	m.Warm.Mixed.text(b, "mixed", c.NP5)
+}
+
+func (w *warmMapsReport) text(b *bytes.Buffer, kind string, coldNP5 float64) {
+	if len(w.Draws) == 0 {
+		fmt.Fprintf(b, "  %-6s none\n", kind)
+		return
+	}
+	for i, d := range w.Draws {
+		name := ""
+		if i == 0 {
+			name = kind
+		}
+		fmt.Fprintf(b, "  %-6s %-20s documents %s, interests %s; NP5 %.3f (%s); cold %s, warm %s\n", name,
+			fmt.Sprintf("draw %d (seed %d)", d.Draw, d.Seed), servedAligned(d.Documents.Mean, d.Documents.AlignedMean),
+			servedAligned(d.Interests.Mean, d.Interests.AlignedMean), d.NP5, d.Kind, seconds(d.ColdMS), seconds(d.WarmMS))
+	}
+	fmt.Fprintf(b, "  %-6s %-20s documents %s, interests %s; NP5 %.3f against a cold map's %.3f\n", "", "mean",
+		servedAligned(w.Documents.Mean, w.Documents.AlignedMean), servedAligned(w.Interests.Mean, w.Interests.AlignedMean),
+		w.MeanNP5, coldNP5)
+	fmt.Fprintf(b, "  %-6s %-20s documents %s, interests %s\n", "", "worst",
+		servedAligned(w.Documents.Max, w.Documents.AlignedMax), servedAligned(w.Interests.Max, w.Interests.AlignedMax))
+}
+
+func servedAligned(served, aligned float64) string {
+	return percent2(served) + " · " + percent2(aligned)
+}
+
+func percent2(v float64) string { return fmt.Sprintf("%.2f%%", 100*v) }
+
+func megabytes(n float64) string { return fmt.Sprintf("%.0f MB", n/(1<<20)) }
 
 func levelHeader(b *bytes.Buffer) {
 	fmt.Fprintf(b, "  %-10s %6s %9s %7s %7s %5s %6s %9s %10s\n",

@@ -356,6 +356,7 @@ func TestLoad_StrictKeys(t *testing.T) {
 		{name: "jina site pace typo", yaml: "fetcher:\n  native:\n    jina_requests_per_site: 3\n",
 			wantKey: "jina_requests_per_site"},
 		{name: "ui key typo", yaml: "ui:\n  load_images: true\n", wantKey: "load_images"},
+		{name: "insight key typo", yaml: "insight:\n  maps: false\n", wantKey: "maps"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -379,6 +380,23 @@ func TestLoad_UI(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, got.Daemon.UI)
 	assert.True(t, got.UI.LoadRemoteImages)
+}
+
+// TestLoad_InsightMap: the interest map is on unless config.yaml turns it
+// off; a value that isn't a bool is a parse error.
+func TestLoad_InsightMap(t *testing.T) {
+	assert.True(t, Default().Insight.Map, "on by default")
+	got, err := Load(writeConfig(t, "insight:\n  labeling: terms\n"))
+	require.NoError(t, err)
+	assert.True(t, got.Insight.Map, "a config.yaml that doesn't name it keeps it on")
+	got, err = Load(writeConfig(t, "insight:\n  map: false\n"))
+	require.NoError(t, err)
+	assert.False(t, got.Insight.Map)
+	assert.Empty(t, got.DeprecatedKeys())
+	require.NoError(t, got.Validate())
+
+	_, err = Load(writeConfig(t, "insight:\n  map: sometimes\n"))
+	require.ErrorContains(t, err, "cannot unmarshal !!str `sometimes` into bool")
 }
 
 func TestLoad_CommentOnlyFile_ReturnsDefaults(t *testing.T) {

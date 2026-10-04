@@ -38,7 +38,13 @@ type world struct {
 	readErr, enqueueErr            error
 	enqueues                       []enqueued
 	added                          int
+	nextMap                        *store.RunMap // the map the next commit draws
 }
+
+// simMap is the map the simulations' rebuilds draw unless a test says
+// otherwise.
+var simMap = &store.RunMap{Status: store.MapBuilt, Kind: store.RunKindFresh, Took: 3 * time.Second, Params: []byte(`{}`),
+	DotRadius: 1, Unsorted: store.Circle{X: 900, Y: 500, R: 40}}
 
 // enqueued is a rebuild the scheduler queued, and when.
 type enqueued struct {
@@ -50,9 +56,11 @@ type enqueued struct {
 var simStart = time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
 
 // newWorld is a library of n documents grouped by a done run that read
-// them an hour before simStart; with n 0 there is no run and no document.
+// them an hour before simStart, and drew its map; with n 0 there is no run
+// and no document.
 func newWorld(n int) *world {
-	w := &world{now: simStart, indexedAt: map[string]time.Time{}, pending: map[string]bool{}, assigned: map[string]bool{}}
+	w := &world{now: simStart, indexedAt: map[string]time.Time{}, pending: map[string]bool{}, assigned: map[string]bool{},
+		nextMap: simMap}
 	if n > 0 {
 		w.index(n, simStart.Add(-2*time.Hour))
 		w.commit(simStart.Add(-time.Hour))
@@ -72,8 +80,8 @@ func (w *world) index(n int, at time.Time) []string {
 	return ids
 }
 
-// commit commits a run that read the vectors at readAt: every fetched
-// document indexed before.
+// commit commits a run that read the vectors at readAt, every fetched
+// document indexed before, and drew nextMap.
 func (w *world) commit(readAt time.Time) {
 	w.assigned = map[string]bool{}
 	for id, at := range w.indexedAt {
@@ -84,7 +92,7 @@ func (w *world) commit(readAt time.Time) {
 	finished := readAt.Add(time.Second)
 	w.done = &store.InterestRun{ID: fmt.Sprintf("run-%d", readAt.Unix()), Status: store.InterestRunDone,
 		Trigger: store.RunTriggerAuto, VectorsReadAt: &readAt, FinishedAt: &finished,
-		RunOutcome: store.RunOutcome{Kind: store.RunKindWarm, NumDocuments: len(w.assigned)}}
+		RunOutcome: store.RunOutcome{Kind: store.RunKindWarm, NumDocuments: len(w.assigned), Map: w.nextMap}}
 	w.state.Failures, w.state.LastFailureAt, w.state.LastError = 0, time.Time{}, ""
 	if w.state.FreshOwed != "" && !w.state.FreshOwedAt.After(readAt) {
 		w.state.FreshOwed, w.state.FreshOwedAt = "", time.Time{}
@@ -160,6 +168,8 @@ type sim struct {
 	// unchecked says the embedding check hasn't concluded since the
 	// daemon started (DriftChecked).
 	unchecked bool
+	// mapOff is insight.map: false, for a scheduler built after it is set.
+	mapOff bool
 	// rebuild is what a queued rebuild does once the check that queued it
 	// is done: commit, by default.
 	rebuild func(w *world, readAt time.Time)
@@ -183,6 +193,7 @@ func (m *sim) scheduler(params bool) *Scheduler {
 		Drift:         func() string { return m.drift },
 		DriftChecked:  func() bool { return !m.unchecked },
 		ParamsChanged: func(*store.InterestRun) bool { return params },
+		MapOff:        m.mapOff,
 		Now:           m.w.clock,
 		Log:           slog.New(slog.NewTextHandler(m.logs, nil)),
 	})
@@ -286,6 +297,8 @@ func TestScheduler_AnImportSettlesOnce(t *testing.T) {
 	require.Len(t, queued, 1)
 	assert.Contains(t, queued[0], "trigger=auto")
 	assert.Contains(t, queued[0], "waited=36m0s")
+	assert.True(t, strings.HasSuffix(queued[0], " queued=true\n"), "nothing said of a map: %s", queued[0])
+	assert.NotContains(t, due[0], "map_owed")
 	assert.Equal(t, StateCurrent, m.s.Snapshot().State)
 }
 
@@ -396,7 +409,7 @@ func TestScheduler_ARebuildQueuedBeforeAHold(t *testing.T) {
 	w.clusterPending, w.clusterRunning = 0, 1
 	m.step(0)
 	assert.Equal(t, Snapshot{State: StateRebuilding, LastKind: store.RunKindWarm, LastTrigger: store.RunTriggerAuto,
-		LastRebuildAt: *w.done.FinishedAt, RebuildAt: 5, CheckedAt: w.now}, m.s.Snapshot())
+		LastRebuildAt: *w.done.FinishedAt, RebuildAt: 5, Map: simMapState, CheckedAt: w.now}, m.s.Snapshot())
 	assert.Empty(t, m.lines("interests: rebuilds held"), "nothing is held yet")
 
 	w.clusterRunning = 0
@@ -649,8 +662,181 @@ func TestScheduler_Snapshot(t *testing.T) {
 	assert.Equal(t, Snapshot{
 		State: StateDue, LastRebuildAt: *w.done.FinishedAt, LastKind: store.RunKindWarm,
 		LastTrigger: store.RunTriggerAuto, Changed: 300, RebuildAt: 263, DueSince: simStart.Add(CheckInterval),
-		CheckedAt: simStart.Add(CheckInterval),
+		Map: simMapState, CheckedAt: simStart.Add(CheckInterval),
 	}, snap)
+}
+
+// simMapState is simMap as a snapshot gives it.
+var simMapState = MapState{Status: store.MapBuilt, Kind: store.RunKindFresh, Took: 3 * time.Second}
+
+// TestDecide_Map: a check's snapshot gives the done rebuild's map as the
+// run records it, none for a run that drew none, off with the map off
+// whatever the run drew, and nothing with no done rebuild and the map on.
+func TestDecide_Map(t *testing.T) {
+	ran := func(m *store.RunMap) *store.InterestRun {
+		return &store.InterestRun{RunOutcome: store.RunOutcome{Map: m}}
+	}
+	failed := &store.RunMap{Status: store.MapFailed, Error: "the map took longer than 2m0s", Took: 2 * time.Minute,
+		Params: []byte(`{}`)}
+	reused := &store.RunMap{Status: store.MapBuilt, Kind: store.RunKindWarm, Params: []byte(`{}`), DotRadius: 1,
+		Unsorted: store.Circle{X: 900, Y: 500, R: 40}}
+	for name, tc := range map[string]struct {
+		done *store.InterestRun
+		off  bool
+		want MapState
+	}{
+		"no done rebuild":              {},
+		"no done rebuild, the map off": {off: true, want: MapState{Status: MapOff}},
+		"a run that drew no map":       {done: ran(nil), want: MapState{Status: MapNone}},
+		"a built map":                  {done: ran(simMap), want: simMapState},
+		"a reused map, in no time":     {done: ran(reused), want: MapState{Status: store.MapBuilt, Kind: store.RunKindWarm}},
+		"a failed map": {done: ran(failed),
+			want: MapState{Status: store.MapFailed, Took: 2 * time.Minute, Error: failed.Error}},
+		"a run that drew none, map off":  {done: ran(nil), off: true, want: MapState{Status: MapOff}},
+		"a built map, the map off since": {done: ran(simMap), off: true, want: MapState{Status: MapOff}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := inputs{Reading: Reading{Done: tc.done, Fetched: 100}, mapOff: tc.off}
+			v := decide(in, simStart, time.Time{}, SchedulerConfig{}.WithDefaults())
+			assert.Equal(t, tc.want, v.snap.Map)
+			assert.Equal(t, tc.want.Status == MapNone, v.mapOwed, "a map owed only by a run that drew none, the map on")
+		})
+	}
+}
+
+// mapless is a world whose done rebuild drew no map, as one from before
+// maps, committed by curio 2.5.x, or with the map off.
+func mapless(n int) *world {
+	w := newWorld(n)
+	w.done.Map = nil
+	return w
+}
+
+// TestScheduler_AMapOwed: a done rebuild that drew no map makes a rebuild
+// due, queued once with trigger auto and saying the map is owed; the check
+// after its commit finds it current with its map built, and nothing more
+// is queued.
+func TestScheduler_AMapOwed(t *testing.T) {
+	t.Parallel()
+	m := newSim(t, mapless(5254), false)
+	m.step(0)
+	require.Len(t, m.w.enqueues, 1, "the library is quiet: at once")
+	assert.Equal(t, store.RunTriggerAuto, m.w.enqueues[0].trigger)
+	queued := m.lines("interests: rebuild enqueued")
+	require.Len(t, queued, 1)
+	assert.Contains(t, queued[0], "trigger=auto changed=0")
+	assert.Contains(t, queued[0], "map_owed=true")
+	m.step(0)
+	snap := m.s.Snapshot()
+	assert.Equal(t, StateCurrent, snap.State)
+	assert.Equal(t, simMapState, snap.Map)
+	m.runFor(24*time.Hour, quiet)
+	assert.Len(t, m.w.enqueues, 1)
+}
+
+// TestScheduler_AMapOwedKeepsTheRules: a rebuild a map owes waits as any
+// due rebuild does: for the library to settle, saying so with the map
+// owed; for a drift to clear, held; for the embedding check's first
+// verdict; for a failed rebuild's backoff; and for a rebuild queued or
+// running. With nothing fetched, or the map off, none is due.
+func TestScheduler_AMapOwedKeepsTheRules(t *testing.T) {
+	t.Parallel()
+	t.Run("the library settling", func(t *testing.T) {
+		m := newSim(t, mapless(5254), false)
+		m.step(3)
+		snap := m.s.Snapshot()
+		assert.Equal(t, StateDue, snap.State)
+		assert.Equal(t, MapState{Status: MapNone}, snap.Map)
+		assert.Equal(t, 3, snap.Changed)
+		due := m.lines("interests: rebuild due")
+		require.Len(t, due, 1)
+		assert.Contains(t, due[0], `waiting_for="the library to settle"`)
+		assert.Contains(t, due[0], "map_owed=true")
+		m.runFor(time.Hour, quiet)
+		require.Len(t, m.w.enqueues, 1)
+		assert.Equal(t, 11*time.Minute, m.at()[0], "10 minutes after the last, indexed at 0.5 minutes")
+	})
+	t.Run("a drift", func(t *testing.T) {
+		m := newSim(t, mapless(5254), false)
+		m.drift = "the embeddings drifted"
+		m.runFor(time.Hour, quiet)
+		assert.Empty(t, m.w.enqueues)
+		snap := m.s.Snapshot()
+		assert.Equal(t, StateHeld, snap.State)
+		assert.Equal(t, MapState{Status: MapNone}, snap.Map)
+		m.drift = ""
+		m.step(0)
+		assert.Len(t, m.w.enqueues, 1, "the drift cleared")
+	})
+	t.Run("the first drift check", func(t *testing.T) {
+		m := newSim(t, mapless(5254), false)
+		m.unchecked = true
+		m.runFor(time.Hour, quiet)
+		assert.Empty(t, m.w.enqueues)
+		assert.Equal(t, StateDue, m.s.Snapshot().State)
+		m.unchecked = false
+		m.step(0)
+		assert.Len(t, m.w.enqueues, 1)
+	})
+	t.Run("a failed rebuild's backoff", func(t *testing.T) {
+		w := mapless(5254)
+		w.fail(simStart)
+		m := newSim(t, w, false)
+		m.runFor(14*time.Minute, quiet)
+		assert.Empty(t, m.w.enqueues)
+		assert.Equal(t, StateFailing, m.s.Snapshot().State)
+		m.runFor(2*time.Minute, quiet)
+		require.Len(t, m.w.enqueues, 1)
+		assert.Equal(t, 15*time.Minute, m.at()[0], "once RetryAfter passed")
+	})
+	t.Run("a rebuild queued", func(t *testing.T) {
+		w := mapless(5254)
+		w.clusterPending = 1
+		m := newSim(t, w, false)
+		m.runFor(time.Hour, quiet)
+		assert.Empty(t, m.w.enqueues)
+		assert.Equal(t, StateQueued, m.s.Snapshot().State)
+	})
+	t.Run("nothing fetched", func(t *testing.T) {
+		w := mapless(40)
+		for id := range w.indexedAt {
+			w.pending[id] = true
+			delete(w.indexedAt, id)
+		}
+		m := newSim(t, w, false)
+		m.runFor(time.Hour, quiet)
+		assert.Empty(t, m.w.enqueues)
+		assert.Equal(t, StateCurrent, m.s.Snapshot().State)
+	})
+	t.Run("the map off", func(t *testing.T) {
+		m := newSim(t, mapless(5254), false)
+		m.mapOff = true
+		m.s = m.scheduler(false)
+		m.runFor(24*time.Hour, quiet)
+		assert.Empty(t, m.w.enqueues)
+		snap := m.s.Snapshot()
+		assert.Equal(t, StateCurrent, snap.State)
+		assert.Equal(t, MapState{Status: MapOff}, snap.Map)
+	})
+}
+
+// TestScheduler_AFailedMapOwesNothing: a map that fails, here the one a
+// map owed rebuild draws, makes nothing due: the check after says current
+// with the map failed, and no rebuild is queued for a day.
+func TestScheduler_AFailedMapOwesNothing(t *testing.T) {
+	t.Parallel()
+	w := mapless(5254)
+	w.nextMap = &store.RunMap{Status: store.MapFailed, Error: "the map took longer than 2m0s", Took: 2 * time.Minute,
+		Params: []byte(`{}`)}
+	m := newSim(t, w, false)
+	m.step(0)
+	require.Len(t, m.w.enqueues, 1)
+	m.runFor(24*time.Hour, quiet)
+	assert.Len(t, m.w.enqueues, 1, "no second rebuild")
+	snap := m.s.Snapshot()
+	assert.Equal(t, StateCurrent, snap.State)
+	assert.Equal(t, MapState{Status: store.MapFailed, Took: 2 * time.Minute, Error: "the map took longer than 2m0s"}, snap.Map)
+	assert.Empty(t, m.lines("interests: rebuild due"))
 }
 
 // TestScheduler_KicksKeepTheSnapshotCurrent: Run checks at every kick, so

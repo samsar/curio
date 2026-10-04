@@ -63,9 +63,10 @@ func datetime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 // anywhere west of UTC.
 func day(t time.Time) string { return t.UTC().Format("Jan 2, 2006") }
 
-// host is u's host, with its port and without userinfo, or "" when u has
-// none or doesn't parse.
-func host(u string) string {
+// Host is u's host, with its port and without userinfo, or "" when u has
+// none or doesn't parse: how the dashboard, and the interest map's
+// documents, name a document's site.
+func Host(u string) string {
 	parsed, err := url.Parse(u)
 	if err != nil {
 		return ""

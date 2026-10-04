@@ -436,7 +436,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		scheduler *insight.Scheduler
 	)
 	if cfg.Insight.Enabled {
-		placer = insight.NewPlacer(insights, chunks, placementHold(drifted, checked), slog.Default())
+		placer = insight.NewPlacer(insights, chunks, insight.PlacerOptions{Drift: placementHold(drifted, checked),
+			MapOff: !cfg.Insight.Map, Log: slog.Default()})
 		jobDeps.Placer = placer
 	}
 	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights, queue, placer, drifted)
@@ -445,7 +446,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	}
 	jobDeps.Insight = insightEngine
 	if cfg.Insight.Enabled {
-		if scheduler, err = newScheduler(insights, docs, queue, insightEngine, placer, drifted, checked); err != nil {
+		scheduler, err = newScheduler(insights, docs, queue, insightEngine, placer, drifted, checked, !cfg.Insight.Map)
+		if err != nil {
 			return nil, err
 		}
 		jobDeps.KickInterests = scheduler.Kick
@@ -468,6 +470,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Search:          engine,
 		Insights:        insights,
 		InsightEnabled:  cfg.Insight.Enabled,
+		MapOff:          !cfg.Insight.Map,
 		Upstreams:       upstreams,
 		Gate:            gate,
 		Drift:           driftMonitor,
@@ -533,9 +536,10 @@ func holdReason(r drift.Report) string {
 }
 
 // newScheduler builds the interest scheduler over the stores, queuing
-// rebuilds through the queue, on the timing schedulerConfig gives.
+// rebuilds through the queue, on the timing schedulerConfig gives; mapOff
+// is insight.map: false.
 func newScheduler(insights store.InsightStore, docs store.DocumentStore, queue store.JobStore, engine *insight.Engine,
-	placer *insight.Placer, drifted func() string, checked func() bool) (*insight.Scheduler, error) {
+	placer *insight.Placer, drifted func() string, checked func() bool, mapOff bool) (*insight.Scheduler, error) {
 	timing, err := schedulerConfig()
 	if err != nil {
 		return nil, err
@@ -549,6 +553,7 @@ func newScheduler(insights store.InsightStore, docs store.DocumentStore, queue s
 		Drift:         drifted,
 		DriftChecked:  checked,
 		ParamsChanged: engine.ParamsChanged,
+		MapOff:        mapOff,
 		Placer:        placer,
 		Config:        timing,
 		Log:           slog.Default(),
@@ -713,6 +718,7 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 		Placer:          placer,
 		Drift:           drifted,
 		Indexing:        indexing(queue),
+		MapOff:          !cfg.Insight.Map,
 	}, slog.Default()), nil
 }
 

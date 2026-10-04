@@ -236,6 +236,9 @@ func nextText(s client.InterestsState, now time.Time) string {
 	case client.StateUnknown, client.StateOff:
 		return ""
 	case client.StateDue, client.StateCurrent:
+		if mapOwed(s) {
+			return "a rebuild is due to draw the map, once the library settles"
+		}
 		next := fmt.Sprintf("next after %d changes, %d so far", s.RebuildAt, s.ChangedDocuments)
 		if s.State == client.StateDue {
 			next += ": due, once the library settles"

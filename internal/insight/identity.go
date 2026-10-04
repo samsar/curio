@@ -77,6 +77,21 @@ type Carried struct {
 	Counts CarryCounts
 }
 
+// Starts are where the level's new groups start on the map, per new group:
+// the old ID of the lineage row sharing the most of its members, ties to
+// the lower old ID; "" for a carried group, and for a new one no row
+// reaches.
+func (c Carried) Starts() []string {
+	out := make([]string, len(c.Predecessor))
+	most := make([]int, len(c.Predecessor))
+	for _, l := range c.Lineage {
+		if c.Predecessor[l.New] == "" && l.Shared > most[l.New] {
+			out[l.New], most[l.New] = l.OldID, l.Shared
+		}
+	}
+	return out
+}
+
 // Fate is what a grouping did to one old group. The flags aren't exclusive:
 // an heir and a split-off part make Kept and Split, and without an heir a
 // part merged into a shared group and another into a group of its own make

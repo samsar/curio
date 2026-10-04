@@ -819,6 +819,30 @@ type InterestsState struct {
 	HeldReason       string    `json:"held_reason,omitempty"`
 	RetryAt          time.Time `json:"retry_at,omitzero"`
 	LastError        string    `json:"last_error,omitempty"`
+	// Map is nil from a daemon that predates it, and whenever it says
+	// nothing of the map.
+	Map *InterestsMap `json:"map,omitempty"`
+}
+
+// The statuses of the interest map (InterestsMap.Status). A status this
+// client doesn't know is shown as it is.
+const (
+	MapBuilt  = "built"
+	MapFailed = "failed"
+	// MapNone: the done rebuild drew no map; with the map on, a rebuild is
+	// due to draw it.
+	MapNone = "none"
+	// MapOff: insight.map is false.
+	MapOff = "off"
+)
+
+// InterestsMap mirrors api.InterestsMap: the done rebuild's map. TookMS is
+// nil for a map neither built nor failed.
+type InterestsMap struct {
+	Status string `json:"status"`
+	Kind   string `json:"kind,omitempty"`
+	TookMS *int64 `json:"took_ms,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // InterestList mirrors api.InterestListResponse.

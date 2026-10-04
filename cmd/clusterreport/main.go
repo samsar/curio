@@ -2,10 +2,12 @@
 // copy of a home's database: the quality of a fresh grouping, how many
 // names a warm rebuild keeps after a 5% change and a fresh rebuild after
 // 5% added, an 8-step chain of warm rebuilds from 60% to 100% of the
-// library, the clusterer the grouping replaced as a baseline, and the
-// copy's latest stored run with its labels. It runs the production pieces
-// in the engine's order (see regroup) and prints a text report; -json
-// writes every number as well.
+// library, the clusterer the grouping replaced as a baseline, the interest
+// map (a cold map's neighbourhoods and areas, how far a warm map moves
+// after a 5% change and another seed moves a cold one, and what drawing it
+// costs), and the copy's latest stored run with its labels. It runs the
+// production pieces in the engine's order (see regroup, and BuildMap for
+// the map) and prints a text report; -json writes every number as well.
 //
 // It is a developer's tool, run by `make cluster-report` and never
 // shipped. It migrates the database it is given, so it refuses a

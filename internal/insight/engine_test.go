@@ -2,6 +2,7 @@ package insight
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,12 +25,45 @@ import (
 const tenant = "local"
 
 // vectorSource serves canned document vectors: each document's mean, and
-// that vector as its one chunk's. The engine and the placer read nothing
-// else from the chunk store.
+// that vector as its one chunk's, which VectorSearch searches by brute
+// force. The engine and the placer read nothing else from the chunk store.
 type vectorSource struct {
 	store.ChunkStore
 	dvs []store.DocVector
 	err error // what DocumentVectors fails with, when set
+	// search, when set, runs first in VectorSearch, which fails with its
+	// error.
+	search func(ctx context.Context) error
+}
+
+func (v *vectorSource) VectorSearch(ctx context.Context, _ string, q []float32, limit int, f store.SearchFilters) ([]store.ChunkHit, error) {
+	if v.search != nil {
+		if err := v.search(ctx); err != nil {
+			return nil, err
+		}
+	}
+	type hit struct {
+		store.ChunkHit
+		d float64
+	}
+	var hits []hit
+	for _, dv := range v.dvs {
+		if dv.DocumentID == f.ExcludeDocumentID {
+			continue
+		}
+		var d2 float64
+		for i, x := range dv.Vector {
+			d2 += (float64(x) - float64(q[i])) * (float64(x) - float64(q[i]))
+		}
+		d := math.Sqrt(d2)
+		hits = append(hits, hit{store.ChunkHit{ChunkID: "chunk-" + dv.DocumentID, DocumentID: dv.DocumentID, Score: 1 / (1 + d)}, d})
+	}
+	slices.SortFunc(hits, func(a, b hit) int { return cmp.Or(cmp.Compare(a.d, b.d), strings.Compare(a.DocumentID, b.DocumentID)) })
+	out := make([]store.ChunkHit, 0, limit)
+	for _, h := range hits[:min(limit, len(hits))] {
+		out = append(out, h.ChunkHit)
+	}
+	return out, nil
 }
 
 func (v *vectorSource) DocumentVectors(context.Context, string) ([]store.DocVector, error) {
@@ -182,15 +216,18 @@ func (f *engineFixture) engine(g Grouper, llm Labeler, cfg Config) *Engine {
 	if g == nil {
 		g = FlatGrouper(byAxis)
 	}
-	e := New(f.docs, f.vectors, f.insights, g, llm, cfg, slog.New(slog.NewTextHandler(&f.logs, nil)))
+	e := New(f.docs, f.vectors, f.insights, g, llm, cfg, f.log())
 	e.now = func() time.Time { return f.clock }
 	return e
 }
 
 // placer is a Placer over the fixture's stores, logging to its logs.
 func (f *engineFixture) placer() *Placer {
-	return NewPlacer(f.insights, f.vectors, nil, slog.New(slog.NewTextHandler(&f.logs, nil)))
+	return NewPlacer(f.insights, f.vectors, PlacerOptions{Log: f.log()})
 }
+
+// log is a logger to the fixture's logs.
+func (f *engineFixture) log() *slog.Logger { return slog.New(slog.NewTextHandler(&f.logs, nil)) }
 
 // rebuild runs a manual Rebuild that must succeed and returns its run.
 func (f *engineFixture) rebuild(t *testing.T, e *Engine) *store.InterestRun {
@@ -381,10 +418,18 @@ func TestRebuild_First(t *testing.T) {
 	}
 }
 
-// assertInvariants checks a committed run against its rows: every document
-// once, a member, a loose fit or unsorted; and the tenant's live
-// identities exactly the run's groups.
+// assertInvariants checks a committed run against its rows: its grouping
+// (assertGrouping), and its map (assertMapped).
 func (f *engineFixture) assertInvariants(t *testing.T, run *store.InterestRun) {
+	t.Helper()
+	gs, as := f.assertGrouping(t, run)
+	assertMapped(t, run, gs, as)
+}
+
+// assertGrouping checks a committed run's grouping against its rows, and
+// returns them: every document once, a member, a loose fit or unsorted;
+// and the tenant's live identities exactly the run's groups.
+func (f *engineFixture) assertGrouping(t *testing.T, run *store.InterestRun) ([]store.InterestGroup, []store.InterestAssignment) {
 	t.Helper()
 	as, err := f.store.RunAssignments(context.Background(), run.ID)
 	require.NoError(t, err)
@@ -408,6 +453,25 @@ func (f *engineFixture) assertInvariants(t *testing.T, run *store.InterestRun) {
 	assert.Equal(t, run.NumDocuments, members+run.NumLoose+run.NumUnsorted)
 	slices.Sort(ids)
 	assert.Equal(t, ids, f.live(t), "the live identities are the run's groups")
+	return gs, as
+}
+
+// assertMapped checks a run has a map, built with a place for every group
+// and assignment, or failed with none, and every interest its similar
+// interests.
+func assertMapped(t *testing.T, run *store.InterestRun, gs []store.InterestGroup, as []store.InterestAssignment) {
+	t.Helper()
+	require.NotNil(t, run.Map, "every run draws a map")
+	built := run.Map.Status == store.MapBuilt
+	for _, g := range gs {
+		assert.Equal(t, built, g.Map != nil, "group %s's place", g.ID)
+		if g.Level == store.InterestLevelInterest {
+			assert.NotNil(t, g.Similar, "interest %s's similar interests", g.ID)
+		}
+	}
+	for _, a := range as {
+		assert.Equal(t, built, a.Map != nil, "document %s's place", a.DocumentID)
+	}
 }
 
 func TestRebuild_RecordsRunParams(t *testing.T) {
@@ -629,6 +693,9 @@ func TestRebuild_EmptyCorpus(t *testing.T) {
 		run := f.rebuild(t, f.engine(nil, nil, Config{}))
 		assert.Equal(t, store.InterestRunDone, run.Status)
 		assert.Equal(t, store.InterestShapeFlat, run.Shape)
+		require.NotNil(t, run.Map)
+		assert.Equal(t, store.MapBuilt, run.Map.Status, "an empty map: Unsorted's disc alone")
+		run.Map = nil
 		assert.Equal(t, store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}, run.RunOutcome)
 	})
 	t.Run("a prior done run is kept without a new row", func(t *testing.T) {
@@ -791,7 +858,7 @@ func TestRebuild_Failures(t *testing.T) {
 		f := newEngineFixture(t, 3, 4)
 		prior := f.rebuild(t, f.engine(nil, nil, Config{}))
 		latest := &latestFailsLater{faultyInsights: f.insights}
-		e := New(f.docs, f.vectors, latest, failing, nil, Config{}, slog.New(slog.NewTextHandler(&f.logs, nil)))
+		e := New(f.docs, f.vectors, latest, failing, nil, Config{}, f.log())
 		runID, err := e.Rebuild(context.Background(), tenant, store.RunTriggerManual)
 		require.Error(t, err)
 
@@ -1104,6 +1171,7 @@ func TestRebuild_LogLine(t *testing.T) {
 		"areas=2", "interests=4", "kept=0", "created=4", "split=0", "merged=0", "moved=0", "dissolved=0",
 		"areas_kept=0", "areas_created=2", "areas_dissolved=0", "loose=0", "unsorted=0", "changed=0",
 		"read_ms=", "group_ms=", "label_ms=", "labels_llm=0", "labels_terms=6", "persist_ms=", "placed_after=0",
+		"map=built", "map_kind=fresh", "map_ms=",
 	} {
 		assert.Contains(t, line, " "+field, field)
 	}

@@ -78,6 +78,12 @@ type Grouping struct {
 	// Splits counts the communities the split check divided, at every
 	// level.
 	Splits int
+	// Neighbours are each point's nearest neighbours by cosine in the
+	// grouping's space, best first, ties to the lower index, index-aligned
+	// with GroupInput.Points (input order), as the grouper found them; nil
+	// when it didn't. The interest map reuses them. No step changes a list
+	// in place: a grouping may share them with another.
+	Neighbours [][]louvain.Edge
 }
 
 // Validate checks g's invariants for numPoints points: aligned slices,
@@ -133,6 +139,25 @@ func (g Grouping) Validate(numPoints int) error {
 	for c, n := range interestSizes {
 		if n < MinInterestSize {
 			return fmt.Errorf("insight: interest %d has %d members, want at least %d", c, n, MinInterestSize)
+		}
+	}
+	return g.checkNeighbours(numPoints)
+}
+
+// checkNeighbours checks the neighbour lists, when there are any: one per
+// point, each neighbour another point, at a finite similarity.
+func (g Grouping) checkNeighbours(numPoints int) error {
+	if g.Neighbours == nil {
+		return nil
+	}
+	if len(g.Neighbours) != numPoints {
+		return fmt.Errorf("insight: %d neighbour lists for %d points", len(g.Neighbours), numPoints)
+	}
+	for i, es := range g.Neighbours {
+		for _, e := range es {
+			if e.To < 0 || e.To >= numPoints || e.To == i || math.IsNaN(e.Weight) || math.IsInf(e.Weight, 0) {
+				return fmt.Errorf("insight: point %d has neighbour %d at similarity %g", i, e.To, e.Weight)
+			}
 		}
 	}
 	return nil
@@ -364,6 +389,7 @@ func (lg *LouvainGrouper) Group(ctx context.Context, in GroupInput) (Grouping, e
 		lg.log.Warn("interests: louvain stopped at a cap, so the grouping may not be optimal",
 			"pass", p.caps.pass, "nodes", p.caps.nodes, "cap", p.caps.cap, "limit", p.caps.limit, "hits", p.caps.hits)
 	}
+	g.Neighbours = lists
 	return g.unsorted(order), nil
 }
 
@@ -652,7 +678,9 @@ func byID(points []Point) ([]int, []Point) {
 	return order, sorted
 }
 
-// unsorted maps a grouping of the ID-sorted points back to the input order.
+// unsorted maps a grouping of the ID-sorted points back to the input
+// order, its neighbour lists into new ones, each re-sorted best first with
+// ties to the lower input index.
 func (g Grouping) unsorted(order []int) Grouping {
 	out := Grouping{
 		Shape: g.Shape, Area: make([]int, len(order)), Interest: make([]int, len(order)),
@@ -660,6 +688,18 @@ func (g Grouping) unsorted(order []int) Grouping {
 	}
 	for i, idx := range order {
 		out.Area[idx], out.Interest[idx], out.Seeds[idx] = g.Area[i], g.Interest[i], g.Seeds[i]
+	}
+	if g.Neighbours == nil {
+		return out
+	}
+	out.Neighbours = make([][]louvain.Edge, len(order))
+	for i, idx := range order {
+		es := make([]louvain.Edge, len(g.Neighbours[i]))
+		for k, e := range g.Neighbours[i] {
+			es[k] = louvain.Edge{To: order[e.To], Weight: e.Weight}
+		}
+		slices.SortFunc(es, func(a, b louvain.Edge) int { return cmp.Or(cmp.Compare(b.Weight, a.Weight), cmp.Compare(a.To, b.To)) })
+		out.Neighbours[idx] = es
 	}
 	return out
 }

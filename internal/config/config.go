@@ -183,6 +183,13 @@ type Insight struct {
 	// POST /v1/interests/rebuild is refused; reading existing interests
 	// still works.
 	Enabled bool `yaml:"enabled"`
+	// Map draws the interest map with every rebuild, and gives a document
+	// placed between rebuilds a place on it. Default true. Off, a rebuild
+	// saves the seconds its map takes, a placement its neighbour search,
+	// and GET /v1/interests/map answers 404 map_off; on again, the next
+	// rebuild draws the map, and the placement sweep gives the documents
+	// placed meanwhile their places.
+	Map bool `yaml:"map"`
 	// KNN, MinSimilarity and MinClusterSize are deprecated and ignored:
 	// they tuned the flat clusterer the grouping replaced, whose constants
 	// are recorded on each run and changed in code (docs/decisions.md
@@ -294,6 +301,7 @@ func Default() Config {
 		},
 		Insight: Insight{
 			Enabled:       true,
+			Map:           true,
 			CenterVectors: true,
 			// LLM labels by default (richer topic names + summaries). This
 			// needs a generation model, but with auto-pull the daemon fetches

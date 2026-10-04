@@ -126,6 +126,34 @@ type InterestsState struct {
 	HeldReason       string    `json:"held_reason,omitempty"`
 	RetryAt          time.Time `json:"retry_at,omitzero"`
 	LastError        string    `json:"last_error,omitempty"`
+	// Map is the done rebuild's map: absent before the first check, with
+	// the insight layer off, and with no done rebuild unless the map is
+	// off.
+	Map *InterestsMap `json:"map,omitempty"`
+}
+
+// InterestsMap is the done rebuild's map as the scheduler's last check
+// found it (insight.MapState). Status is built or failed, none (the
+// rebuild drew none: with the map on, a rebuild is due to draw it), or off
+// (insight.map: false). Kind is a built map's; TookMS a built or failed
+// map's, a reused map's 0 included; Error a failed map's.
+type InterestsMap struct {
+	Status string `json:"status"`
+	Kind   string `json:"kind,omitempty"`
+	TookMS *int64 `json:"took_ms,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// interestsMap is m on the wire, nil for none.
+func interestsMap(m insight.MapState) *InterestsMap {
+	switch m.Status {
+	case "":
+		return nil
+	case store.MapBuilt, store.MapFailed:
+		took := m.Took.Milliseconds()
+		return &InterestsMap{Status: string(m.Status), Kind: string(m.Kind), TookMS: &took, Error: m.Error}
+	}
+	return &InterestsMap{Status: string(m.Status)}
 }
 
 // stateOff is the state of rebuilds with the insight layer off: there is
@@ -156,7 +184,7 @@ func (d Deps) interestsState() InterestsState {
 		State: string(s.State), LastRebuildAt: s.LastRebuildAt.UTC(), LastKind: string(s.LastKind),
 		LastTrigger: string(s.LastTrigger), ChangedDocuments: s.Changed, RebuildAt: s.RebuildAt,
 		DueSince: s.DueSince.UTC(), FreshOwed: s.FreshOwed, HeldReason: s.HeldReason, RetryAt: s.RetryAt.UTC(),
-		LastError: s.LastError,
+		LastError: s.LastError, Map: interestsMap(s.Map),
 	}
 }
 
@@ -257,6 +285,16 @@ const InterestRetiredProblemType = "urn:curio:problem:interest-retired"
 type retiredInterestError struct{ body RetiredInterest }
 
 func (e *retiredInterestError) Error() string { return e.body.Detail }
+
+func (*retiredInterestError) problem() (int, string, string) {
+	return http.StatusGone, "interest retired", InterestRetiredProblemType
+}
+
+func (e *retiredInterestError) withProblem(p Problem) any {
+	b := e.body
+	b.Problem = p
+	return b
+}
 
 // Sizes for the interest endpoints. The list previews a few members of each
 // interest; one interest shows many more.

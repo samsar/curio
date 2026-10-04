@@ -126,7 +126,7 @@ func funcs(assets assetSet) template.FuncMap {
 		"localDay":           localDay,
 		"duration":           duration,
 		"score":              score,
-		"host":               host,
+		"host":               Host,
 		"shortURL":           shortURL,
 		"urlTrail":           urlTrail,
 		"shortError":         shortError,

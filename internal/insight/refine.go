@@ -78,8 +78,8 @@ func Centroids(points []Point, labels []int) ([][]float32, error) {
 // which can bring a third within reach. It returns g with its interests
 // renumbered as a Grouping numbers them, and how many interests were merged
 // away. Area and Seeds are left as they were, so a warm start from the seeds
-// re-derives the merge and an unchanged library stays identical. Neither
-// input is modified.
+// re-derives the merge and an unchanged library stays identical, and the
+// neighbour lists are passed on as they are. Neither input is modified.
 func MergeNearDuplicates(points []Point, g Grouping, threshold float64) (Grouping, int, error) {
 	if err := checkStep(points, g, threshold); err != nil {
 		return Grouping{}, 0, err
@@ -106,7 +106,7 @@ func MergeNearDuplicates(points []Point, g Grouping, threshold float64) (Groupin
 	}
 	out := Grouping{
 		Shape: g.Shape, Area: slices.Clone(g.Area), Interest: interest,
-		Seeds: slices.Clone(g.Seeds), Splits: g.Splits,
+		Seeds: slices.Clone(g.Seeds), Splits: g.Splits, Neighbours: g.Neighbours,
 	}
 	return out, before - k, nil
 }

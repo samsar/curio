@@ -355,6 +355,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/interests", get("/v1/interests"), http.StatusOK},
 		{"GET /v1/interests/unsorted", get("/v1/interests/unsorted"), http.StatusOK},
 		{"GET /v1/interests/changes", get("/v1/interests/changes"), http.StatusOK},
+		{"GET /v1/interests/map", get("/v1/interests/map"), http.StatusNotFound},
 	})
 	in := seedInterestFixtures(t, s, f)
 
@@ -429,6 +430,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/interests/unsorted", get("/v1/interests/unsorted"), http.StatusOK},
 		{"GET /v1/interests/unsorted", get("/v1/interests/unsorted?offset=-1"), http.StatusBadRequest},
 		{"GET /v1/interests/changes", get("/v1/interests/changes"), http.StatusOK},
+		{"GET /v1/interests/map", get("/v1/interests/map"), http.StatusNotFound}, // drawn before maps
 		{"POST /v1/interests/rebuild", post("/v1/interests/rebuild"), http.StatusAccepted},
 
 		{"GET /v1/jobs", get("/v1/jobs?status=failed"), http.StatusOK},
@@ -458,6 +460,12 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 	// A drift no sample could verify.
 	monitor.set(driftedUnverified(time.Now()))
 	run([]exchange{{"GET /v1/healthz", get("/v1/healthz"), http.StatusOK}})
+
+	// A rebuild whose map failed, then one that drew its map.
+	seedFailedMap(t, s, f)
+	run([]exchange{{"GET /v1/interests/map", get("/v1/interests/map"), http.StatusNotFound}})
+	seedMap(t, s, f)
+	run([]exchange{{"GET /v1/interests/map", get("/v1/interests/map"), http.StatusOK}})
 
 	assert.Equal(t, slices.Sorted(maps.Keys(ops)), slices.Sorted(maps.Keys(exercised)),
 		"every documented operation is exercised")
@@ -695,8 +703,47 @@ func seedInterestFixtures(t *testing.T, s *testServer, f contractFixtures) event
 	s.interests.set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: now.Add(-time.Hour),
 		LastKind: store.RunKindWarm, LastTrigger: store.RunTriggerAuto, Changed: 271, RebuildAt: 263,
 		DueSince: now.Add(-20 * time.Minute), FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted",
-		RetryAt: now.Add(15 * time.Minute), LastError: "ollama unreachable: connection refused", CheckedAt: now})
+		RetryAt: now.Add(15 * time.Minute), LastError: "ollama unreachable: connection refused",
+		Map: insight.MapState{Status: store.MapFailed, Kind: store.RunKindWarm, Took: 2 * time.Minute,
+			Error: "the map took longer than 2m0s"},
+		CheckedAt: now})
 	return e
+}
+
+// seedFailedMap commits a rebuild whose map failed.
+func seedFailedMap(t *testing.T, s *testServer, f contractFixtures) {
+	t.Helper()
+	r := s.newRun(t, store.InterestShapeFlat)
+	r.interest("Kafka brokers", "", 0, []*store.Document{f.plain}, nil)
+	r.c.Outcome.Map = &store.RunMap{Status: store.MapFailed, Error: "the map took longer than 2m0s",
+		Params: []byte(`{"seed":1}`), Took: 2 * time.Minute}
+	r.commit(t)
+}
+
+// seedMap commits a rebuild that drew its map: an area of two labelled
+// interests, one with a loose fit, an unsorted document with its nearest
+// interest, and a document placed since.
+func seedMap(t *testing.T, s *testServer, f contractFixtures) {
+	t.Helper()
+	docs := s.docs(t, "mapped", 4)
+	r := s.newRun(t, store.InterestShapeAreas)
+	area := r.area("Streaming")
+	kafka := r.interest("Kafka", area, 0, []*store.Document{f.titled, docs[0]}, []*store.Document{docs[1]})
+	r.interest("Joins", area, 0, docs[2:3], nil)
+	r.unsorted(kafka, f.untitled)
+	r.mapped()
+	s.placeMapped(t, r.commit(t), kafka, docs[3], mapPlace(500, 121, 301))
+}
+
+// TestOpenAPI_MapOffMatchesTheSchema: the map's 404 with the map off is
+// the documented operation's response.
+func TestOpenAPI_MapOffMatchesTheSchema(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.MapOff = true })
+	op := specOperations(strictSpec(t))["GET /v1/interests/map"]
+	require.NotNil(t, op)
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests/map"})
+	require.Equal(t, http.StatusNotFound, resp.status, resp.body)
+	checkResponse(t, op, resp, "GET /v1/interests/map with the map off", propertiesSeen{})
 }
 
 // unsavableBookmark is a bookmark store that can't save url, for an import

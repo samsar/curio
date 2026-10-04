@@ -18,7 +18,64 @@ func interestsLine(s client.InterestsState, now time.Time) string {
 	if s.State == client.StateUnknown {
 		return ""
 	}
-	return "interests: " + interestsText(s, now)
+	return "interests: " + interestsSummary(s, now)
+}
+
+// interestsSummary is interestsText followed by where the interest map
+// stands, as status's line and doctor's check say it.
+func interestsSummary(s client.InterestsState, now time.Time) string {
+	text := interestsText(s, now)
+	if m := mapText(s.Map); m != "" {
+		text += " · " + m
+	}
+	return text
+}
+
+// mapText says where the interest map stands: built, how and how fast;
+// failed, and why; or off. It says nothing of none, which a rebuild due
+// to draw the map says itself, or without a map; a status this curio
+// doesn't know is shown as it is.
+func mapText(m *client.InterestsMap) string {
+	if m == nil {
+		return ""
+	}
+	switch m.Status {
+	case client.MapNone:
+		return ""
+	case client.MapBuilt:
+		var how []string
+		if m.Kind != "" {
+			how = append(how, m.Kind)
+		}
+		if m.TookMS != nil {
+			how = append(how, "in "+tookText(*m.TookMS))
+		}
+		if len(how) == 0 {
+			return "map built"
+		}
+		return "map built (" + strings.Join(how, ", ") + ")"
+	case client.MapFailed:
+		return "map failed (" + m.Error + ")"
+	case client.MapOff:
+		return "map off (insight.map: false)"
+	}
+	return "map " + m.Status
+}
+
+// tookText is ms milliseconds, to a tenth of a second from a second up.
+func tookText(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
+	if d >= time.Second {
+		d = d.Round(100 * time.Millisecond)
+	}
+	return d.String()
+}
+
+// mapOwed reports whether s is a rebuild due only to draw the map: the
+// done rebuild drew none, with the map on, and nothing else makes one due.
+func mapOwed(s client.InterestsState) bool {
+	return s.State == client.StateDue && s.Map != nil && s.Map.Status == client.MapNone && s.FreshOwed == "" &&
+		s.ChangedDocuments < s.RebuildAt
 }
 
 // interestsText says where automatic rebuilds stand, at now, in a
@@ -71,6 +128,8 @@ func dueText(s client.InterestsState) string {
 		return "a fresh rebuild is due: waiting for the re-embedding to finish"
 	case s.FreshOwed != "":
 		return "a fresh rebuild is due (" + freshReason(s.FreshOwed) + "): waiting for the library to settle"
+	case mapOwed(s):
+		return "a rebuild is due to draw the map: waiting for the library to settle"
 	}
 	return fmt.Sprintf("a rebuild is due (%d changed, threshold %d): waiting for the library to settle",
 		s.ChangedDocuments, s.RebuildAt)
@@ -96,17 +155,22 @@ func retryText(s client.InterestsState, now time.Time) string {
 }
 
 // interestsCheck is doctor's check of where automatic rebuilds stand: a
-// warning while they are held or failing, each with its fix.
+// warning while they are held or failing, and then while the last
+// rebuild's map failed, each with its fix.
 func interestsCheck(s client.InterestsState, now time.Time) (status checkStatus, detail, hint string) {
-	switch s.State {
-	case client.StateHeld:
+	switch {
+	case s.State == client.StateHeld:
 		return statusWarn, "rebuilds held: " + s.HeldReason,
 			"run `" + reindexFix + "`: the interests are regrouped once the re-embedding finishes"
-	case client.StateFailing:
+	case s.State == client.StateFailing:
 		return statusWarn, fmt.Sprintf("the last rebuild failed: %s; %s", s.LastError, retryText(s, now)),
 			"`curio daemon logs` has the details; once the cause is fixed, `curio interests rebuild` tries again without waiting"
+	case s.Map != nil && s.Map.Status == client.MapFailed:
+		return statusWarn, "the last rebuild's interest map failed: " + s.Map.Error,
+			"`curio interests rebuild` draws it again, and `curio daemon logs` has the details; " +
+				"if it keeps failing, `insight.map: false` in config.yaml turns the map off"
 	}
-	return statusOK, interestsText(s, now), ""
+	return statusOK, interestsSummary(s, now), ""
 }
 
 // ago says how long ago d was, roughly: "just now", "5 min ago", "2 h
