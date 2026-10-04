@@ -165,7 +165,8 @@ footer names the address the daemon listens on.
   gigabyte of memory, and the text is shown as stored. Web and email
   addresses written out in the text without link markup show as text,
   not links: a GitHub README's bare URLs, say.
-- **Interests**: the topics the last rebuild found, largest first, 24 a
+- **Interests**: the topics the last rebuild found, in two views, **List**
+  and **Map**, under the head. The List: the topics, largest first, 24 a
   page. A library of about 1,000 documents or more is grouped in two
   levels: areas, each holding interests ("29 areas holding 182 interests
   in your library"); a smaller one in interests alone. The head says how
@@ -201,6 +202,47 @@ footer names the address the daemon listens on.
   is held or failing.
   With insight turned off in config.yaml (`insight.enabled: false`),
   there is no Rebuild, and the page says how to turn it on.
+- **Interest map** (`/ui/interests/map`), the Interests' Map: the last
+  rebuild's grouping drawn in your browser, in two tabs. **All
+  documents** (the default) draws every document as a dot near the
+  documents most like it, coloured by its area (by its interest in a
+  library too small for areas), and names the areas, then the interests
+  as you zoom in, then titles. **Zoom in** draws each area as a disc
+  holding its interests' circles, sized by their documents, each
+  document a dot in its interest, and Unsorted as a dashed disc beside
+  them. A grey dot is unsorted, a hollow ring a loose fit, and a dot
+  ringed in the accent new since the rebuild. Scroll, pinch or use + and
+  − to zoom, drag to pan, and double-click empty space (or the fit
+  button, top right) to see the whole map again. A click selects: on All
+  documents a document, or an area's or interest's name; on Zoom in a
+  closed area first, then an interest inside it, then a document once
+  its interest is open. A click on empty space goes up a level. The
+  other tab shows the same selection. The panel beside the map says what
+  is selected: for the library, its counts and its areas; for an area,
+  its interests; for an interest, its closest documents and its most
+  similar interests; for Unsorted, the interests its documents are
+  nearest; for a document, its site, interest, area, fit and similarity,
+  **Open document**, and the other documents of its interest (of the
+  interest it is nearest, for an unsorted one) closest to that
+  interest's centre. Each also links to its own page. The breadcrumb
+  over the map (Library › area › interest › document) leads back up, and
+  the search box finds areas, interests and documents by name or site
+  (arrows, Enter, Escape). Keys: `/` searches, Escape goes up a level,
+  `0` shows the whole map, `+` and `-` zoom, and the arrows, Home and
+  End move between the tabs. The address keeps the tab and the selection
+  (`/ui/interests/map?view=zoom&select=interest:<id>`, `area:<id>`,
+  `document:<id>` or `unsorted`), so a reload or Back shows the same; an
+  ID no longer on the map shows the whole map and says so, and an area
+  or interest's note links to its page, which says what became of it.
+  **Show on map** on an area's, an interest's, Unsorted's and a
+  document's page opens the map there. On a phone the panel is a sheet
+  at the foot of the screen: its head names the selection, and it opens
+  when you select something (its arrow and Escape close it). The map
+  needs JavaScript, and doesn't refresh itself: reload after a rebuild.
+  Without a map the page says why: no rebuild yet, the last rebuild drew
+  none (a rebuild to draw it is due; Interests or `curio interests
+  rebuild` draws one now), the map failed (with its error), or the map
+  is off (`insight.map: false` in config.yaml).
 - **An area's page**: the area's summary, its documents, interests,
   loose fits, new documents and cohesion, the run it comes from, and what
   the last rebuild did to it; then its interests as cards, 24 a page.
@@ -300,10 +342,13 @@ as an image, a frame or a script. A page can still send your tab to a
 dashboard page, as a link you follow does; that only shows you the page,
 since opening a page changes nothing. A change is sent only by the
 dashboard's own script, to the daemon's API as JSON, from the daemon's own
-pages, which the daemon checks. The rules, and why, are in
+pages, which the daemon checks. The interest map's script only reads the
+map from the API, and changes nothing; the d3 modules it draws with are
+copies of their published files, served by the daemon and pinned by
+their checksums. The rules, and why, are in
 [decisions.md](./decisions.md): "Dashboard: server-rendered pages in the
 daemon (phase 1)", "Dashboard: formatting budgets for stored markdown",
 "Dashboard: a design language under the CSP", "Dashboard: actions through
 /v1, sent by a first-party module", "Dashboard: the Failures tab",
-"Dashboard: two-level interests" and "Local API: loopback only, no token,
-browsers shut out".
+"Dashboard: two-level interests", "Dashboard: the interest map" and "Local
+API: loopback only, no token, browsers shut out".

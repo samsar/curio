@@ -42,6 +42,17 @@
   --danger: #b42318; --danger-soft: #fdf0ef; --danger-border: #f5c7c2; --danger-dot: #e5484d;
   --neutral: #4a5160; --neutral-soft: #f1f2f4; --neutral-border: #dcdfe4; --neutral-dot: #8b919c;
 
+  /* The interest map's area colours (static/map.js): 10 hue families in 3
+     lightness tiers, slot tier * 10 + family, the tiers L 0.50, 0.57 and
+     0.64 in OKLCH (0.66, 0.74, 0.82 dark), each at least 3:1 against the
+     surface, as small marks need (TestStylesheet). */
+  --area-0: #2063b0; --area-1: #9c4700; --area-2: #04755b; --area-3: #7e5e01; --area-4: #983c75;
+  --area-5: #2f751d; --area-6: #6a4fa9; --area-7: #a43a41; --area-8: #016f82; --area-9: #626a03;
+  --area-10: #3d78c2; --area-11: #b25d25; --area-12: #048c6d; --area-13: #977103; --area-14: #ab5489;
+  --area-15: #4a893b; --area-16: #7e65bb; --area-17: #b75357; --area-18: #04869c; --area-19: #767f04;
+  --area-20: #578ed4; --area-21: #c67544; --area-22: #1ea381; --area-23: #ad8522; --area-24: #bf6d9d;
+  --area-25: #639e56; --area-26: #927ccd; --area-27: #cb6c6d; --area-28: #079db6; --area-29: #8a9434;
+
   /* Type */
   --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
@@ -94,6 +105,12 @@
     --warn: #f3c060;   --warn-soft: rgba(230, 160, 20, 0.12); --warn-border: rgba(240, 180, 60, 0.3); --warn-dot: #f0a623;
     --danger: #ff8a80; --danger-soft: rgba(229, 72, 77, 0.13); --danger-border: rgba(255, 110, 100, 0.3); --danger-dot: #ff5f57;
     --neutral: #b3b8c2; --neutral-soft: rgba(160, 166, 178, 0.12); --neutral-border: rgba(160, 166, 178, 0.26); --neutral-dot: #8d939e;
+    --area-0: #5894e0; --area-1: #d07843; --area-2: #05ab86; --area-3: #b68b16; --area-4: #c96fa4;
+    --area-5: #65a556; --area-6: #9881d9; --area-7: #d66f71; --area-8: #04a3be; --area-9: #909b2f;
+    --area-10: #75aef5; --area-11: #e79363; --area-12: #4bc39f; --area-13: #cda448; --area-14: #e08bbc;
+    --area-15: #81bd74; --area-16: #b09bee; --area-17: #ed8b8b; --area-18: #31bdda; --area-19: #a8b455;
+    --area-20: #9dc7fe; --area-21: #f9b189; --area-22: #7dd9ba; --area-23: #e2bf76; --area-24: #f3aad3;
+    --area-25: #a2d496; --area-26: #c8b7ff; --area-27: #feaaa9; --area-28: #70d5ed; --area-29: #c2cc80;
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.35);
     --shadow-lg: 0 10px 34px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
@@ -111,6 +128,12 @@
   --warn: #f3c060; --warn-soft: rgba(230, 160, 20, 0.12); --warn-border: rgba(240, 180, 60, 0.3); --warn-dot: #f0a623;
   --danger: #ff8a80; --danger-soft: rgba(229, 72, 77, 0.13); --danger-border: rgba(255, 110, 100, 0.3); --danger-dot: #ff5f57;
   --neutral: #b3b8c2; --neutral-soft: rgba(160, 166, 178, 0.12); --neutral-border: rgba(160, 166, 178, 0.26); --neutral-dot: #8d939e;
+  --area-0: #5894e0; --area-1: #d07843; --area-2: #05ab86; --area-3: #b68b16; --area-4: #c96fa4;
+  --area-5: #65a556; --area-6: #9881d9; --area-7: #d66f71; --area-8: #04a3be; --area-9: #909b2f;
+  --area-10: #75aef5; --area-11: #e79363; --area-12: #4bc39f; --area-13: #cda448; --area-14: #e08bbc;
+  --area-15: #81bd74; --area-16: #b09bee; --area-17: #ed8b8b; --area-18: #31bdda; --area-19: #a8b455;
+  --area-20: #9dc7fe; --area-21: #f9b189; --area-22: #7dd9ba; --area-23: #e2bf76; --area-24: #f3aad3;
+  --area-25: #a2d496; --area-26: #c8b7ff; --area-27: #feaaa9; --area-28: #70d5ed; --area-29: #c2cc80;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.35);
   --shadow-lg: 0 10px 34px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
@@ -368,7 +391,7 @@ input, select, button, textarea { font: inherit; color: inherit; }
   font-size: var(--fs-sm); font-weight: 540; cursor: pointer;
 }
 .segmented a:hover, .segmented button:hover { color: var(--text); text-decoration: none; }
-.segmented [aria-current="page"], .segmented [aria-pressed="true"] {
+.segmented [aria-current="page"], .segmented [aria-pressed="true"], .segmented [aria-selected="true"] {
   background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm), 0 0 0 1px var(--border);
 }
 .segmented .count { color: var(--text-3); font-variant-numeric: tabular-nums; font-weight: 500; }
@@ -1016,6 +1039,142 @@ td .badge.fit-new { margin-top: var(--s1); }
 .coverage .legend { margin-top: var(--s2); }
 .coverage .legend .run { margin-left: auto; color: var(--text-3); }
 
+/* Interest map ------------------------------------------------------------- */
+
+/* The interest map, which static/map.js draws: a toolbar of the views'
+   tabs and the search, then the stage, its canvas under the breadcrumb,
+   the zoom buttons, the legend and the status line, beside a 20rem details
+   panel, a bottom sheet on a phone. Both take the window's height less the
+   page's head, so the whole map is in view. map.js sets no style: it sizes
+   the canvases by their attributes, and what it fills starts empty, hidden
+   while it is. */
+.interest-map { display: grid; gap: var(--s3); }
+.map-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s3); }
+.map-search { position: relative; width: 22rem; max-width: 100%; }
+.map-search > svg.icon { position: absolute; left: 0.7rem; top: 50%; transform: translateY(-50%); color: var(--text-3); pointer-events: none; }
+.map-search .input { width: 100%; padding-left: 2.1rem; }
+.map-hits { position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; right: 0; max-height: min(60vh, 26rem); overflow: auto; margin: 0; padding: 4px; list-style: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); box-shadow: var(--shadow-lg); }
+.map-hits li { display: grid; grid-template-columns: 5.25rem minmax(0, 1fr); gap: 0 var(--s2); align-items: baseline; padding: 0.4rem 0.5rem; border-radius: var(--r-sm); cursor: pointer; }
+.map-hits li[aria-selected="true"], .map-hits li:hover { background: var(--accent-soft); }
+.map-hits .kind { grid-row: span 2; color: var(--text-3); font-size: var(--fs-xs); letter-spacing: 0.05em; text-transform: uppercase; }
+.map-hits .name, .map-hits .meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-hits .meta { grid-column: 2; color: var(--text-3); font-size: var(--fs-xs); }
+.map-hits li.none { display: block; background: none; color: var(--text-3); cursor: default; }
+
+.map-body { display: grid; grid-template-columns: minmax(0, 1fr) 20rem; gap: var(--s3); height: clamp(24rem, calc(100dvh - 19rem), 60rem); }
+.map-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); }
+.map-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+.map-canvas:active { cursor: grabbing; }
+.map-canvas.is-pointing { cursor: pointer; }
+
+.map-crumbs { position: absolute; z-index: 2; top: var(--s2); left: var(--s2); right: 8rem; display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--s1); font-size: var(--fs-sm); pointer-events: none; }
+.map-crumbs > * { pointer-events: auto; }
+.map-crumb, .map-crumb-here { max-width: 22ch; padding: 2px var(--s2); border: 0; border-radius: var(--r-sm); background: var(--surface); box-shadow: var(--shadow-sm); font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-crumb { color: var(--accent-text); cursor: pointer; }
+.map-crumb-here { max-width: 28ch; color: var(--text); font-weight: 600; }
+.map-crumb-sep { color: var(--text-3); }
+
+.map-zoom { position: absolute; z-index: 2; top: var(--s2); right: var(--s2); display: flex; gap: var(--s1); }
+.map-icon-btn { display: inline-grid; place-items: center; width: 2rem; height: 2rem; padding: 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); color: var(--text-2); box-shadow: var(--shadow-sm); cursor: pointer; }
+.map-icon-btn:hover { border-color: var(--border-strong); color: var(--text); }
+
+.map-legend { position: absolute; z-index: 2; left: var(--s2); bottom: var(--s2); max-width: calc(100% - 1rem); display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); padding: 0.3rem 0.6rem; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); color: var(--text-3); font-size: var(--fs-xs); pointer-events: none; }
+.map-key-item { display: inline-flex; align-items: center; gap: 0.35rem; }
+.map-key { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%; }
+.map-key-unsorted { background: var(--neutral-dot); }
+.map-key-loose { border: 1.5px solid var(--text-3); }
+.map-key-new { background: var(--text-3); box-shadow: 0 0 0 1.5px var(--surface), 0 0 0 3px var(--accent); }
+.map-key-disc { width: 0.75rem; height: 0.75rem; border: 1.5px dashed var(--text-3); }
+
+/* The status line says the map is loading, why it didn't load, or a note,
+   over the stage's middle; it is empty, and hidden, once the map is drawn. */
+.map-status { position: absolute; z-index: 3; top: 3rem; left: 50%; transform: translateX(-50%); width: max-content; max-width: min(34rem, calc(100% - 2rem)); display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); padding: var(--s3) var(--s4); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-lg); color: var(--text-2); font-size: var(--fs-sm); }
+.map-status-meta { color: var(--text-3); font-size: var(--fs-xs); }
+
+.map-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); }
+.map-panel-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 2px var(--s2); padding: var(--s4) var(--s4) var(--s3); border-bottom: 1px solid var(--border); }
+.map-kicker { display: flex; align-items: center; gap: 0.4rem; min-width: 0; color: var(--text-3); font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+/* The selection's name: six lines at most, room for most of a title the
+   map has cut to 200 characters; anything longer is cut, whole on hover. */
+.map-panel-head h2 { grid-column: 1; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6; line-clamp: 6; overflow: hidden; font-size: var(--fs-md); line-height: 1.35; }
+.map-panel-buttons { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: var(--s1); }
+.map-sheet-toggle { display: none; }
+.map-panel-body { flex: 1; min-height: 0; overflow: auto; display: grid; align-content: start; gap: var(--s4); padding: var(--s3) var(--s4) var(--s4); }
+.map-stats { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); color: var(--text-3); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.map-stats b { color: var(--text); font-weight: 620; }
+.map-about { color: var(--text-2); font-size: var(--fs-sm); }
+.map-section h3 { margin-bottom: var(--s1); color: var(--text-3); font-size: 0.6875rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.map-rows { list-style: none; padding: 0; display: grid; gap: 1px; }
+.map-row { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--s2); padding: 0.3rem 0.4rem; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }
+.map-row:hover { background: var(--surface-2); }
+.map-row-doc { grid-template-columns: minmax(0, 1fr) auto; }
+/* A row's name, and a document's host under its title: each on one line,
+   cut, whole on hover. */
+.map-row-name { display: flex; align-items: baseline; gap: 0.3rem; min-width: 0; }
+.map-row-doc .map-row-name { display: grid; }
+.map-row-name > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-row-sub { color: var(--text-3); font-size: var(--fs-xs); }
+.map-row .n { color: var(--text-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.map-elsewhere { color: var(--accent-text); font-size: var(--fs-xs); }
+.map-new { margin-right: 0.35rem; color: var(--accent-text); font-weight: 600; }
+.map-swatch { width: 0.625rem; height: 0.625rem; flex: none; border-radius: 3px; background: var(--neutral-dot); }
+.is-unlabeled { color: var(--text-3); font-style: italic; }
+.map-link-button { display: block; max-width: 100%; padding: 0; border: 0; background: none; color: var(--accent-text); font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-link-button:hover { text-decoration: underline; }
+.map-fit { font-weight: 600; }
+.map-open { justify-self: start; }
+.map-hits:empty, .map-crumbs:empty, .map-legend:empty, .map-status:empty, .map-kicker:empty,
+.map-panel-head h2:empty, .map-panel-body:empty { display: none; }
+/* The map's controls and the panel wait for the map, the stage taking the
+   panel's column (a phone's sheet waits too): until it is drawn, or when
+   it can't be, the panel's title is empty. */
+.interest-map:has(.map-panel-head h2:empty) .map-zoom,
+.map-panel:has(.map-panel-head h2:empty) { display: none; }
+.map-body:has(.map-panel-head h2:empty) { grid-template-columns: minmax(0, 1fr); }
+
+/* A group's colour in the panel's rows: its palette slot's token. */
+.a0 { background: var(--area-0); }
+.a1 { background: var(--area-1); }
+.a2 { background: var(--area-2); }
+.a3 { background: var(--area-3); }
+.a4 { background: var(--area-4); }
+.a5 { background: var(--area-5); }
+.a6 { background: var(--area-6); }
+.a7 { background: var(--area-7); }
+.a8 { background: var(--area-8); }
+.a9 { background: var(--area-9); }
+.a10 { background: var(--area-10); }
+.a11 { background: var(--area-11); }
+.a12 { background: var(--area-12); }
+.a13 { background: var(--area-13); }
+.a14 { background: var(--area-14); }
+.a15 { background: var(--area-15); }
+.a16 { background: var(--area-16); }
+.a17 { background: var(--area-17); }
+.a18 { background: var(--area-18); }
+.a19 { background: var(--area-19); }
+.a20 { background: var(--area-20); }
+.a21 { background: var(--area-21); }
+.a22 { background: var(--area-22); }
+.a23 { background: var(--area-23); }
+.a24 { background: var(--area-24); }
+.a25 { background: var(--area-25); }
+.a26 { background: var(--area-26); }
+.a27 { background: var(--area-27); }
+.a28 { background: var(--area-28); }
+.a29 { background: var(--area-29); }
+
+/* Why there is no map: the sentence curio status prints, as a sentence,
+   and a failed map's error cut on one line, which a line no wider than
+   the card holds: a grid item is as wide as its content's one line. */
+.map-none .interests-state::first-letter { text-transform: uppercase; }
+.map-none > p { min-width: 0; max-width: min(34rem, 100%); }
+
+/* Show on map, beside a group's or a document's place. */
+.map-link { display: inline-flex; align-items: center; gap: 0.3rem; font-size: var(--fs-sm); white-space: nowrap; }
+.map-link svg { width: 0.875rem; height: 0.875rem; }
+.doc-place .map-link { flex: none; margin-left: var(--s2); }
+
 /* Failures ------------------------------------------------------------------- */
 
 /* The Failures tab's one action status, over the totals its refetches
@@ -1134,6 +1293,26 @@ td .badge.fit-new { margin-top: var(--s1); }
   col.c-state { width: 5.75rem; }
   .doc-sub .narrow { display: inline; }
   .doc-sub .wide { display: none; }
+
+  /* The interest map: the toolbar stacks, the legend goes, and the panel
+     is a sheet over the page's foot, once there is a map: its head alone
+     until it opens, which the page's foot leaves room for. The stage fills
+     the screen between the header and the closed sheet once the page
+     scrolls it up, as an opening sheet does. */
+  .map-toolbar { flex-direction: column; align-items: stretch; }
+  .map-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .map-tabs [role="tab"] { justify-content: center; }
+  .map-search { width: 100%; }
+  .map-body { grid-template-columns: minmax(0, 1fr); height: clamp(18rem, calc(100dvh - var(--header-h) - 6.5rem), 48rem); }
+  .map-legend { display: none; }
+  .map-crumbs { right: 7.5rem; }
+  .map-panel { position: fixed; z-index: 25; left: 0; right: 0; bottom: 0; border-bottom: 0; border-radius: var(--r-lg) var(--r-lg) 0 0; box-shadow: var(--shadow-lg); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  .map-panel:not(.is-open) .map-panel-body { display: none; }
+  .map-panel.is-open { max-height: 55vh; }
+  .map-panel:not(.is-open) .map-panel-head h2 { -webkit-line-clamp: 1; line-clamp: 1; }
+  .map-sheet-toggle { display: inline-grid; }
+  .map-panel.is-open .map-sheet-toggle svg { transform: rotate(180deg); }
+  main.page:has(.interest-map) { padding-bottom: 6rem; }
 
   .pager-pages a:not(.step), .pager-pages .gap { display: none; }
   .pager-pages .of { display: inline-grid; color: var(--text-3); }

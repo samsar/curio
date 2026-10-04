@@ -279,8 +279,11 @@ eval harness shows measurably better retrieval than the v1 baseline.
   search results, 10 a page over one ranking of the best 100, their
   passages without markdown and their scores behind Show scores
   (decisions.md "Search pages by offset within a fixed-depth pool").
-  Phase 3 brings richer views (an interest map, suspect pages, HTML export
-  upload). See
+  Phase 3's interest map has shipped: the Interests' Map, the latest
+  rebuild's grouping drawn in the browser in two views, drawn by each
+  rebuild (decisions.md "Interest map: two views of each regrouping,
+  drawn when it is built" and "Dashboard: the interest map"). Suspect
+  pages and HTML export upload remain. See
   `docs/ui.md` and decisions.md "Dashboard: server-rendered pages in the
   daemon (phase 1)".
 - Snapshot to WARC for dead-link insurance

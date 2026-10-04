@@ -121,6 +121,20 @@ role.
 <nav class="subnav" id="library-subnav" aria-label="Library views"><a id="subnav-documents" href="{{navHref "library"}}"{{if not .OnFailures}} aria-current="page"{{end}}>Documents</a><a id="subnav-failures" href="{{failuresHref}}"{{if .OnFailures}} aria-current="page"{{end}}>Failures{{if .Counted}} <span class="count">{{num .Failed}}</span>{{end}}</a></nav>
 {{- end}}
 
+{{/*
+The Interests' subnav, an InterestsViews: the List of the interests and
+their Map, the current one marked. Only whole pages carry it, never a
+polled region.
+*/}}
+{{define "interests-subnav" -}}
+<nav class="subnav" aria-label="Interests views"><a href="{{.ListHref}}"{{if not .OnMap}} aria-current="page"{{end}}>List</a><a href="{{.MapHref}}"{{if .OnMap}} aria-current="page"{{end}}>Map</a></nav>
+{{- end}}
+
+{{/* A link to a group or a document on the interest map, when it has one. */}}
+{{define "map-link" -}}
+{{with .}}<a class="map-link" href="{{.}}">{{template "icon" "map"}}Show on map</a>{{end}}
+{{- end}}
+
 {{/* A document state as a badge: a dot (hollow for dead) and the state. */}}
 {{define "state-badge" -}}
 <span class="badge {{stateClass .}}">{{.}}</span>
