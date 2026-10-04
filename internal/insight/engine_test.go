@@ -408,6 +408,25 @@ func (f *engineFixture) assertInvariants(t *testing.T, run *store.InterestRun) {
 	assert.Equal(t, run.NumDocuments, members+run.NumLoose+run.NumUnsorted)
 	slices.Sort(ids)
 	assert.Equal(t, ids, f.live(t), "the live identities are the run's groups")
+	assertMapped(t, run, gs, as)
+}
+
+// assertMapped checks a run has a map, built with a place for every group
+// and assignment, or failed with none, and every interest its similar
+// interests.
+func assertMapped(t *testing.T, run *store.InterestRun, gs []store.InterestGroup, as []store.InterestAssignment) {
+	t.Helper()
+	require.NotNil(t, run.Map, "every run draws a map")
+	built := run.Map.Status == store.MapBuilt
+	for _, g := range gs {
+		assert.Equal(t, built, g.Map != nil, "group %s's place", g.ID)
+		if g.Level == store.InterestLevelInterest {
+			assert.NotNil(t, g.Similar, "interest %s's similar interests", g.ID)
+		}
+	}
+	for _, a := range as {
+		assert.Equal(t, built, a.Map != nil, "document %s's place", a.DocumentID)
+	}
 }
 
 func TestRebuild_RecordsRunParams(t *testing.T) {
@@ -629,6 +648,9 @@ func TestRebuild_EmptyCorpus(t *testing.T) {
 		run := f.rebuild(t, f.engine(nil, nil, Config{}))
 		assert.Equal(t, store.InterestRunDone, run.Status)
 		assert.Equal(t, store.InterestShapeFlat, run.Shape)
+		require.NotNil(t, run.Map)
+		assert.Equal(t, store.MapBuilt, run.Map.Status, "an empty map: Unsorted's disc alone")
+		run.Map = nil
 		assert.Equal(t, store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}, run.RunOutcome)
 	})
 	t.Run("a prior done run is kept without a new row", func(t *testing.T) {
@@ -1104,6 +1126,7 @@ func TestRebuild_LogLine(t *testing.T) {
 		"areas=2", "interests=4", "kept=0", "created=4", "split=0", "merged=0", "moved=0", "dissolved=0",
 		"areas_kept=0", "areas_created=2", "areas_dissolved=0", "loose=0", "unsorted=0", "changed=0",
 		"read_ms=", "group_ms=", "label_ms=", "labels_llm=0", "labels_terms=6", "persist_ms=", "placed_after=0",
+		"map=built", "map_kind=fresh", "map_ms=",
 	} {
 		assert.Contains(t, line, " "+field, field)
 	}

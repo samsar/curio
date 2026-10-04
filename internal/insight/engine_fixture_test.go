@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/insight"
+	"github.com/samsar/curio/internal/insight/quality"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
@@ -127,11 +128,13 @@ func (e *libraryEngine) snapshot(t *testing.T, runID string) snapshot {
 // identities, mean of 3 draws (measured 96.3% · 100%; per draw 97.1%,
 // 91.9% and 100% of interests), without the split check, retiring only
 // what carry-over gave no heir; and a rebuild of the unchanged library
-// changes nothing.
+// changes nothing, its map included. The maps are held to floors on the
+// same draws (mapFloors).
 func TestEngine_FixtureLibrary(t *testing.T) {
 	skipUnderRace(t)
 	t.Parallel()
 	var kept [3][2]float64
+	var maps [3]mapMeasures
 	t.Run("draws", func(t *testing.T) {
 		for d := range kept {
 			t.Run(strconv.Itoa(d), func(t *testing.T) {
@@ -142,6 +145,7 @@ func TestEngine_FixtureLibrary(t *testing.T) {
 				require.Equal(t, store.RunKindFresh, first.Kind)
 				require.Equal(t, store.InterestShapeAreas, first.Shape)
 				before := e.snapshot(t, first.ID)
+				firstMap := e.mapOf(t, first.ID)
 
 				warm := e.rebuild(t, newIdx, store.RunTriggerManual)
 				assert.Equal(t, store.RunKindWarm, warm.Kind)
@@ -150,13 +154,18 @@ func TestEngine_FixtureLibrary(t *testing.T) {
 				assert.Equal(t, 100, warm.ChangesSinceSplit)
 				kept[d][0], kept[d][1] = e.identitiesKept(t, before)
 				e.assertLineage(t, before, warm)
+				maps[d] = e.measureMaps(t, firstMap, warm, newIdx)
 
 				after := e.snapshot(t, warm.ID)
 				again := e.rebuild(t, newIdx, store.RunTriggerManual)
-				assert.Equal(t, after, e.snapshot(t, again.ID), "an unchanged library: the same groups, identities, labels and assignments")
+				assert.Equal(t, after, e.snapshot(t, again.ID),
+					"an unchanged library: the same groups, identities, labels, assignments and places")
+				assert.Equal(t, warm.Map.DotRadius, again.Map.DotRadius)
+				assert.Equal(t, warm.Map.Unsorted, again.Map.Unsorted)
 			})
 		}
 	})
+	assertMapFloors(t, maps)
 	var interests, areas float64
 	for _, k := range kept {
 		interests += k[0] / 3
@@ -282,3 +291,145 @@ func (r runGroups) newGroups(level store.InterestLevel, areas []string) []insigh
 	}
 	return out
 }
+
+// mapMeasures are one draw's maps, measured: the warm run's document map's
+// NP5 and area purity@5, the space's purity, a cold map's NP5 of the same
+// library, and how far the warm run moved the documents and the interests'
+// centres from the first run's.
+type mapMeasures struct {
+	np5, purity, spacePurity, coldNP5 float64
+	docShift, interestShift           float64
+}
+
+// runMap is a run's places on its map: its documents' on the document map
+// and its interests' centres in the zoom view.
+type runMap struct{ docs, interests map[string][2]float64 }
+
+// mapOf reads run's map, before a later run prunes it.
+func (e *libraryEngine) mapOf(t *testing.T, runID string) runMap {
+	t.Helper()
+	return runMap{docs: docPlaces(e.mapPlaces(t, runID)), interests: e.interestCentres(t, runID)}
+}
+
+// measureMaps measures a draw's maps: first, the map of the library before,
+// and warm's of the library at idx.
+func (e *libraryEngine) measureMaps(t *testing.T, first runMap, warm *store.InterestRun, idx []int) mapMeasures {
+	t.Helper()
+	points, _, err := insight.PreparePoints(e.lib.subset(idx), true)
+	require.NoError(t, err)
+	vecs := make([][]float32, len(points))
+	for i, p := range points {
+		vecs[i] = p.Vector
+	}
+	pass, err := lists.get(e.ctx, vecs)
+	require.NoError(t, err)
+	near := make([][]int, len(pass))
+	for i, es := range pass {
+		for _, edge := range es {
+			near[i] = append(near[i], edge.To)
+		}
+	}
+	at := e.mapPlaces(t, warm.ID)
+	pos := make([][2]float64, len(points))
+	areas := make([]int, len(points))
+	areaIndex := map[string]int{}
+	for i, p := range points {
+		pos[i] = [2]float64{at[p.ID].Map.MapX, at[p.ID].Map.MapY}
+		areas[i] = quality.Noise
+		if a := at[p.ID]; a.Fit != store.InterestFitUnsorted && a.AreaID != "" {
+			if _, ok := areaIndex[a.AreaID]; !ok {
+				areaIndex[a.AreaID] = len(areaIndex)
+			}
+			areas[i] = areaIndex[a.AreaID]
+		}
+	}
+	m := mapMeasures{np5: quality.NeighbourPreservation(near, pos, 5), purity: quality.MapPurity(pos, areas, 5),
+		spacePurity: quality.SpacePurity(near, areas, 5)}
+
+	r := group(t, grouper(), e.lib.subset(idx), insight.GroupInput{Shape: insight.ShapeFlat})
+	cold, err := insight.BuildMap(e.ctx, coldInput(r))
+	require.NoError(t, err)
+	coldPos := make([][2]float64, len(points))
+	for i, d := range cold.Docs {
+		coldPos[i] = [2]float64{d.MapX, d.MapY}
+	}
+	m.coldNP5 = quality.NeighbourPreservation(near, coldPos, 5)
+
+	m.docShift = quality.Displace(first.docs, docPlaces(at)).Mean
+	m.interestShift = quality.Displace(first.interests, e.interestCentres(t, warm.ID)).Mean
+	return m
+}
+
+// coldInput is the map input of a grouping drawn from nothing.
+func coldInput(r run) insight.MapInput {
+	in := insight.MapInput{Points: r.points, Grouping: r.g, Centroids: r.centroids, Fits: r.fits, Center: true,
+		Seed: insight.MapSeed}
+	for a := range numGroups(r.g.Area) {
+		in.AreaKeys = append(in.AreaKeys, fmt.Sprintf("a%d", a))
+	}
+	for l := range numGroups(r.g.Interest) {
+		in.InterestKeys = append(in.InterestKeys, fmt.Sprintf("i%d", l))
+	}
+	return in
+}
+
+// mapPlaces are a run's assignments, by document.
+func (e *libraryEngine) mapPlaces(t *testing.T, runID string) map[string]store.InterestAssignment {
+	t.Helper()
+	as, err := e.ins.RunAssignments(e.ctx, runID)
+	require.NoError(t, err)
+	out := make(map[string]store.InterestAssignment, len(as))
+	for _, a := range as {
+		require.NotNil(t, a.Map)
+		out[a.DocumentID] = a
+	}
+	return out
+}
+
+func docPlaces(as map[string]store.InterestAssignment) map[string][2]float64 {
+	out := make(map[string][2]float64, len(as))
+	for id, a := range as {
+		out[id] = [2]float64{a.Map.MapX, a.Map.MapY}
+	}
+	return out
+}
+
+// interestCentres are a run's interests' centres in the zoom view, by
+// identity.
+func (e *libraryEngine) interestCentres(t *testing.T, runID string) map[string][2]float64 {
+	t.Helper()
+	gs, err := e.ins.RunGroups(e.ctx, runID)
+	require.NoError(t, err)
+	out := map[string][2]float64{}
+	for _, g := range gs {
+		if g.Level == store.InterestLevelInterest {
+			require.NotNil(t, g.Map)
+			out[g.ID] = [2]float64{g.Map.ZoomX, g.Map.ZoomY}
+		}
+	}
+	return out
+}
+
+// assertMapFloors holds the draws' maps to floors set 0.03 under what they
+// measured and bounds 1.5 times what they measured (docs/decisions.md,
+// "Interest map", the fixture table): the warm map's NP5, its area purity
+// against the space's, how far it moved the documents and the interests'
+// centres, and its NP5 against a cold map's of the same library.
+func assertMapFloors(t *testing.T, maps [3]mapMeasures) {
+	t.Helper()
+	for d, m := range maps {
+		t.Logf("draw %d: NP5 %.3f (cold %.3f), area purity@5 %.3f (space %.3f), documents moved %.4f, "+
+			"interests' centres %.4f", d, m.np5, m.coldNP5, m.purity, m.spacePurity, m.docShift, m.interestShift)
+		assert.GreaterOrEqual(t, m.np5, mapFloors.np5, "draw %d", d)
+		assert.GreaterOrEqual(t, m.purity, m.spacePurity-0.05, "draw %d", d)
+		assert.LessOrEqual(t, m.docShift, mapFloors.docShift, "draw %d", d)
+		assert.LessOrEqual(t, m.interestShift, mapFloors.interestShift, "draw %d", d)
+		assert.InDelta(t, m.coldNP5, m.np5, 0.02, "draw %d: warm against cold", d)
+	}
+}
+
+// mapFloors are the fixture's floors and bounds. Measured per draw: NP5
+// 0.216, 0.215 and 0.214 (a cold map's 0.201 each); documents moved 2.57%,
+// 2.55% and 2.74% of the first map's diameter, and interests' centres
+// 0.50%, 0.92% and 0.69%.
+var mapFloors = struct{ np5, docShift, interestShift float64 }{np5: 0.18, docShift: 0.041, interestShift: 0.0138}

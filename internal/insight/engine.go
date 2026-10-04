@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/samsar/curio/internal/store"
@@ -64,8 +66,9 @@ type Config struct {
 
 // Engine rebuilds a tenant's interests: read the document vectors → prepare
 // (center, normalize) → group, from the previous grouping when it can →
-// merge near-duplicates → place strays → carry identities over → label the
-// groups that need it → commit the run in one transaction → prune.
+// merge near-duplicates → place strays → carry identities over → draw the
+// map → label the groups that need it → commit the run in one transaction →
+// prune.
 type Engine struct {
 	docs        store.DocumentStore
 	chunks      store.ChunkStore
@@ -76,7 +79,15 @@ type Engine struct {
 	cfg         Config
 	log         *slog.Logger
 	now         func() time.Time // when a run reads the vectors
+	// buildMap draws a run's map (BuildMap), within mapTimeout.
+	buildMap   func(ctx context.Context, in MapInput) (*Map, error)
+	mapTimeout time.Duration
 }
+
+// mapTimeout bounds drawing a run's map: about ten times what the owner's
+// 5,000 documents take cold. A map that runs out of time fails, and the
+// run commits without one.
+const mapTimeout = 2 * time.Minute
 
 // New constructs an Engine. llmLabeler may be nil, in which case labeling
 // always uses the deterministic term labeler regardless of cfg.Labeling.
@@ -111,6 +122,8 @@ func New(
 		cfg:         cfg,
 		log:         log,
 		now:         time.Now,
+		buildMap:    BuildMap,
+		mapTimeout:  mapTimeout,
 	}
 }
 
@@ -207,7 +220,7 @@ func (e *Engine) read(ctx context.Context, tenantID string) (input, error) {
 		return input{}, fmt.Errorf("read document vectors: %w", err)
 	}
 	in.read = time.Since(start)
-	in.dvs = e.dropNonFinite(tenantID, dvs)
+	in.dvs = byDocumentID(e.dropNonFinite(tenantID, dvs))
 	if priorRun != nil {
 		if in.changes, err = e.insights.Changes(ctx, priorRun); err != nil {
 			return input{}, err
@@ -313,21 +326,43 @@ func (e *Engine) paramsChanged(run *store.InterestRun, params []byte) bool {
 	return run.Grouper != e.grouper.Name() || !bytes.Equal(run.Params, params)
 }
 
+// byDocumentID is dvs in document ID order, the order the store reads them
+// in: a copy when it isn't, so what the map draws never hangs on it.
+func byDocumentID(dvs []store.DocVector) []store.DocVector {
+	byID := func(a, b store.DocVector) int { return strings.Compare(a.DocumentID, b.DocumentID) }
+	if slices.IsSortedFunc(dvs, byID) {
+		return dvs
+	}
+	sorted := slices.Clone(dvs)
+	slices.SortFunc(sorted, byID)
+	return sorted
+}
+
 // timings are how long each part of a rebuild took, for its log line.
 type timings struct {
 	read, group, label, persist time.Duration
 }
 
-// run does the work of one rebuild after its run is created: group, label
-// and commit, then prune and place the documents indexed meanwhile.
+// run does the work of one rebuild after its run is created: group, draw
+// the map, label and commit, then prune and place the documents indexed
+// meanwhile.
 func (e *Engine) run(ctx context.Context, run *store.InterestRun, in input, p plan) error {
 	t := timings{read: in.read}
 	start := time.Now()
-	gr, err := e.group(ctx, in.prior, p, in.dvs)
+	gr, points, err := e.group(ctx, in.prior, p, in.dvs)
 	if err != nil {
 		return err
 	}
 	t.group = time.Since(start)
+
+	drawn, err := e.drawMap(ctx, run, in, gr, points)
+	if err != nil {
+		return err
+	}
+	// The map was the last reader of the points, which nothing reads past
+	// here, and of the neighbour lists: labelling can take minutes without
+	// them.
+	gr.g.Neighbours = nil
 
 	start = time.Now()
 	labels, stats, err := e.label(ctx, gr)
@@ -337,7 +372,7 @@ func (e *Engine) run(ctx context.Context, run *store.InterestRun, in input, p pl
 	t.label = time.Since(start)
 
 	start = time.Now()
-	c := gr.commit(run, in.prior, labels)
+	c := gr.commit(run, in.prior, labels, drawn)
 	c.ReadMidReindex = in.midReindex
 	if err := e.insights.CommitRun(ctx, c); err != nil {
 		return fmt.Errorf("commit: %w", err)
@@ -346,6 +381,100 @@ func (e *Engine) run(ctx context.Context, run *store.InterestRun, in input, p pl
 	t.persist = time.Since(start)
 	e.logRebuilt(run, c, gr, stats, t, e.sweep(ctx, run.TenantID))
 	return nil
+}
+
+// drawMap draws the run's map within mapTimeout. A map that fails, runs out
+// of time, panics or draws something invalid is no failure of the rebuild:
+// it comes back failed, with why, after one warning, and the run commits
+// without one. Only the rebuild's own cancellation is an error.
+func (e *Engine) drawMap(ctx context.Context, run *store.InterestRun, in input, gr *grouped, points []Point) (drawnMap, error) {
+	params, err := MapParams(e.cfg.Center, MapSeed)
+	if err != nil {
+		return drawnMap{}, err
+	}
+	start := time.Now()
+	mctx, cancel := context.WithTimeout(ctx, e.mapTimeout)
+	defer cancel()
+	m, stack, err := e.callMapper(mctx, e.mapInput(in, gr, points))
+	d := drawnMap{m: m, took: time.Since(start), params: params}
+	if ctx.Err() != nil {
+		return drawnMap{}, fmt.Errorf("draw the map: %w", ctx.Err())
+	}
+	if err == nil {
+		err = m.Validate(len(gr.ids), gr.numAreas, len(gr.groups)-gr.numAreas)
+	}
+	if err == nil {
+		return d, nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("the map took longer than %v: %w", e.mapTimeout, err)
+	}
+	d.m, d.failed = nil, oneLine(err.Error(), maxMapError)
+	args := []any{"tenant", run.TenantID, "run", run.ID, "err", d.failed, "map_ms", d.took.Milliseconds()}
+	if stack != "" {
+		args = append(args, "stack", stack)
+	}
+	e.log.Warn("interests: map failed", args...)
+	return d, nil
+}
+
+// maxMapError is the longest a failed map's error is kept.
+const maxMapError = 512
+
+// callMapper calls the engine's map builder, turning a panic into an error
+// that starts "panic:" and returning its stack apart, for the log.
+func (e *Engine) callMapper(ctx context.Context, in MapInput) (m *Map, stack string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			m, stack, err = nil, string(debug.Stack()), fmt.Errorf("panic: %v", r)
+		}
+	}()
+	m, err = e.buildMap(ctx, in)
+	return m, "", err
+}
+
+// oneLine is s on one line, cut to at most limit runes.
+func oneLine(s string, limit int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > limit {
+		s = string(r[:limit-1]) + "…"
+	}
+	return s
+}
+
+// mapInput is what the map of grouping gr draws from: the prior's map is
+// always the one aligned to, and the document map may start from it unless
+// a re-embedding owes a fresh rebuild or the embeddings drifted, since
+// either moved the vectors under it.
+func (e *Engine) mapInput(in input, gr *grouped, points []Point) MapInput {
+	mi := MapInput{Points: points, Grouping: gr.g, Centroids: gr.centroids, Fits: gr.fits,
+		AreaKeys: gr.keys(0, gr.numAreas), InterestKeys: gr.keys(gr.numAreas, len(gr.groups)),
+		AreaStarts: starts(gr.areas), InterestStarts: starts(gr.interests), Unchanged: in.changes.Total() == 0,
+		Center: e.cfg.Center, Seed: MapSeed}
+	if in.prior != nil && in.prior.mapPrior != nil {
+		mi.Prior = in.prior.mapPrior
+		drifted := e.cfg.Drift != nil && e.cfg.Drift() != ""
+		mi.WarmDocs = in.state.FreshOwed != store.FreshReindex && !drifted
+	}
+	return mi
+}
+
+// drawnMap is the map step's outcome: the map, or why there is none, how
+// long it took and its params.
+type drawnMap struct {
+	m      *Map
+	failed string
+	took   time.Duration
+	params []byte
+}
+
+// runMap is the run's record of the map.
+func (d drawnMap) runMap() *store.RunMap {
+	if d.m == nil {
+		return &store.RunMap{Status: store.MapFailed, Error: d.failed, Took: d.took, Params: d.params}
+	}
+	return &store.RunMap{Status: store.MapBuilt, Kind: d.m.Kind, Took: d.took, Params: d.params,
+		DotRadius: d.m.DotRadius, Unsorted: d.m.Unsorted}
 }
 
 // sweep places the documents indexed while the rebuild ran into it, best
@@ -366,11 +495,12 @@ func (e *Engine) sweep(ctx context.Context, tenantID string) int {
 
 // group runs the grouping steps: Group, from the prior's seeds when the
 // plan is warm, then the merge of near-duplicates, the strays, and the
-// carry-over of identities.
-func (e *Engine) group(ctx context.Context, prior *previous, p plan, dvs []store.DocVector) (*grouped, error) {
+// carry-over of identities. It returns the prepared points too, for the
+// map.
+func (e *Engine) group(ctx context.Context, prior *previous, p plan, dvs []store.DocVector) (*grouped, []Point, error) {
 	points, mean, err := PreparePoints(dvs, e.cfg.Center)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	in := GroupInput{Points: points, Shape: Shape(p.shape), Split: p.split}
 	if p.warm {
@@ -378,9 +508,10 @@ func (e *Engine) group(ctx context.Context, prior *previous, p plan, dvs []store
 	}
 	g, err := e.grouper.Group(ctx, in)
 	if err != nil {
-		return nil, fmt.Errorf("group: %w", err)
+		return nil, nil, fmt.Errorf("group: %w", err)
 	}
-	return newGrouped(points, mean, in, g, prior, p)
+	gr, err := newGrouped(points, mean, in, g, prior, p)
+	return gr, points, err
 }
 
 // prune drops the runs before this one and what they alone held: the
@@ -411,6 +542,7 @@ func (e *Engine) logRebuilt(run *store.InterestRun, c store.RunCommit, gr *group
 		"changed", o.ChangedDocuments, "read_ms", t.read.Milliseconds(), "group_ms", t.group.Milliseconds(),
 		"label_ms", t.label.Milliseconds(), "labels_llm", stats.llm, "labels_terms", stats.terms,
 		"persist_ms", t.persist.Milliseconds(), "placed_after", placed,
+		"map", c.Outcome.Map.Status, "map_kind", c.Outcome.Map.Kind, "map_ms", c.Outcome.Map.Took.Milliseconds(),
 	}
 	if e.cfg.Drift != nil && e.cfg.Drift() != "" {
 		args = append(args, "embeddings_drifted", true)

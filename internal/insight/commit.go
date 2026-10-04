@@ -6,12 +6,15 @@ import (
 
 // commit is the grouping as CommitRun writes it for run, built from prior
 // (nil for none), with each group's label as labels give it, index-aligned
-// with gr.groups. It is pure: what it writes follows from its inputs.
-func (gr *grouped) commit(run *store.InterestRun, prior *previous, labels []groupLabel) store.RunCommit {
+// with gr.groups, each interest's most similar interests, and the map
+// drawn. It is pure: what it writes follows from its inputs.
+func (gr *grouped) commit(run *store.InterestRun, prior *previous, labels []groupLabel, drawn drawnMap) store.RunCommit {
 	c := store.RunCommit{RunID: run.ID, TenantID: run.TenantID, Outcome: gr.outcome()}
+	c.Outcome.Map = drawn.runMap()
 	if prior != nil {
 		c.PriorRunID = prior.run.ID
 	}
+	similar := similarTo(gr.centroids)
 	for k, g := range gr.groups {
 		lab := labels[k]
 		identity := store.Interest{ID: g.id, Level: g.level, Label: lab.label.Name, Summary: lab.label.Summary,
@@ -27,6 +30,17 @@ func (gr *grouped) commit(run *store.InterestRun, prior *previous, labels []grou
 		if g.parent >= 0 {
 			group.ParentID = gr.groups[g.parent].id
 		}
+		if l := k - gr.numAreas; l >= 0 {
+			group.Similar = make([]store.SimilarInterest, len(similar[l]))
+			for x, s := range similar[l] {
+				group.Similar[x] = store.SimilarInterest{ID: gr.interestID(s.interest), Cosine: s.cosine}
+			}
+		}
+		if m := drawn.m; m != nil && k < gr.numAreas {
+			group.Map = &m.Areas[k]
+		} else if m != nil {
+			group.Map = &m.Interests[k-gr.numAreas]
+		}
 		c.Groups = append(c.Groups, group)
 	}
 	c.Assignments = make([]store.InterestAssignment, len(gr.ids))
@@ -41,6 +55,9 @@ func (gr *grouped) commit(run *store.InterestRun, prior *previous, labels []grou
 			a.InterestID = gr.interestID(f.Interest)
 		case f.Interest >= 0:
 			a.NearestID = gr.interestID(f.Interest)
+		}
+		if drawn.m != nil {
+			a.Map = &drawn.m.Docs[i]
 		}
 		c.Assignments[i] = a
 	}

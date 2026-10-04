@@ -29,3 +29,15 @@ func (e *Engine) WithClock(now func() time.Time) *Engine {
 	e.now = now
 	return e
 }
+
+// WithMapper returns e drawing its runs' maps with f in place of BuildMap.
+func (e *Engine) WithMapper(f func(ctx context.Context, in MapInput) (*Map, error)) *Engine {
+	e.buildMap = f
+	return e
+}
+
+// WithMapTimeout returns e giving a map d to draw in place of mapTimeout.
+func (e *Engine) WithMapTimeout(d time.Duration) *Engine {
+	e.mapTimeout = d
+	return e
+}

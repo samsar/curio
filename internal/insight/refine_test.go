@@ -1,6 +1,7 @@
 package insight
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"slices"
@@ -236,4 +237,19 @@ func TestNumberInterests(t *testing.T) {
 	interest := []int{5, 5, 9, 9, 7, 7, 3, NoiseLabel}
 	area := []int{1, 1, 0, 0, 0, 0, 0, NoiseLabel}
 	assert.Equal(t, []int{3, 3, 0, 0, 1, 1, 2, NoiseLabel}, numberInterests(interest, area, ids))
+}
+
+// TestMergeNearDuplicates_KeepsTheNeighbours: the merge passes the
+// grouping's neighbour lists on as they are.
+func TestMergeNearDuplicates_KeepsTheNeighbours(t *testing.T) {
+	points := slices.Concat(copies("a", 3, []float32{1, 0}), copies("b", 3, []float32{0.99, 0.141}),
+		copies("c", 3, []float32{0, 1}))
+	g := flatGrouping([]int{0, 0, 0, 1, 1, 1, 2, 2, 2})
+	lists, err := nearestNeighbours(context.Background(), vectorsOf(points))
+	require.NoError(t, err)
+	g.Neighbours = lists
+	merged, n, err := MergeNearDuplicates(points, g, MergeThreshold)
+	require.NoError(t, err)
+	require.Equal(t, 1, n, "a and b merged")
+	assert.Equal(t, g.Neighbours, merged.Neighbours)
 }

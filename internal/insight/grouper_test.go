@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -99,6 +100,20 @@ func TestGrouping_Validate(t *testing.T) {
 		}, "area 1 has 3 members, want at least 10"},
 		{"small interest", func(g *Grouping) { g.Interest[12] = NoiseLabel }, "interest 2 has 2 members, want at least 3"},
 		{"area in the flat shape", func(g *Grouping) { g.Shape = ShapeFlat }, "point 0 has area 0 (seed 0) in the flat shape"},
+		{"neighbour lists for other points", func(g *Grouping) { g.Neighbours = make([][]louvain.Edge, 12) },
+			"12 neighbour lists for 13 points"},
+		{"a neighbour past the points", func(g *Grouping) {
+			g.Neighbours = make([][]louvain.Edge, 13)
+			g.Neighbours[4] = []louvain.Edge{{To: 13, Weight: 0.5}}
+		}, "point 4 has neighbour 13 at similarity 0.5"},
+		{"its own neighbour", func(g *Grouping) {
+			g.Neighbours = make([][]louvain.Edge, 13)
+			g.Neighbours[6] = []louvain.Edge{{To: 6, Weight: 1}}
+		}, "point 6 has neighbour 6 at similarity 1"},
+		{"a NaN similarity", func(g *Grouping) {
+			g.Neighbours = make([][]louvain.Edge, 13)
+			g.Neighbours[0] = []louvain.Edge{{To: 1, Weight: math.NaN()}}
+		}, "point 0 has neighbour 1 at similarity NaN"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -262,6 +277,30 @@ func TestLouvainGrouper_OneGraphPass(t *testing.T) {
 			assert.Equal(t, int32(1), passes.Load())
 		})
 	}
+}
+
+// TestLouvainGrouper_Neighbours: a grouping carries its one neighbour pass,
+// in the input's order: each point's lists are the pass over the points as
+// given, its indexes the input's, though the grouper worked in ID order.
+func TestLouvainGrouper_Neighbours(t *testing.T) {
+	pts := syntheticCorpus(9, 400, 16, 8, 0.8)
+	perm := rand.New(rand.NewPCG(3, 4)).Perm(len(pts))
+	shuffled := make([]Point, len(pts))
+	for x, i := range perm {
+		shuffled[x] = pts[i]
+	}
+	g, err := NewLouvainGrouper(nil).Group(context.Background(), GroupInput{Shape: ShapeFlat, Points: shuffled})
+	require.NoError(t, err)
+	want, err := nearestNeighbours(context.Background(), vectorsOf(shuffled))
+	require.NoError(t, err)
+	assert.Equal(t, [][]louvain.Edge(want), g.Neighbours)
+	require.NoError(t, g.Validate(len(shuffled)))
+
+	flat, err := FlatGrouper(clusterFunc(func(_ context.Context, points []Point) ([]int, error) {
+		return make([]int, len(points)), nil
+	})).Group(context.Background(), GroupInput{Shape: ShapeFlat, Points: shuffled})
+	require.NoError(t, err)
+	assert.Nil(t, flat.Neighbours, "a clusterer finds none")
 }
 
 // TestInterests_AreaWithoutAnInterestIsOne: an area whose interest pass
