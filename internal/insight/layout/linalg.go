@@ -525,38 +525,35 @@ func procrustes(src, dst []XY, scaled bool) transform {
 	return t
 }
 
-// polar returns the orthogonal factor R = U·Vᵀ of m's SVD U·S·Vᵀ, which
-// maximises trace(Rᵀm) over rotations and reflections, and the sum of m's
-// singular values. A zero m gives the identity.
+// reflectionMargin is the share by which the best reflection must fit
+// better than the best rotation for polar to take it. With m of rank one
+// (two points, or collinear ones) the two fit exactly alike, and rounding
+// alone would choose between mirror images; a turn keeps every point on the
+// side it was laid out on.
+const reflectionMargin = 1e-9
+
+// polar returns the orthogonal factor R of m's polar decomposition, the
+// rotation or reflection that maximises trace(Rᵀm), and that trace. In the
+// plane both have closed forms, exact whatever m's rank: the best rotation
+// reaches hypot(m00 + m11, m01 − m10), the best reflection hypot(m00 − m11,
+// m01 + m10), and the larger is the sum of m's singular values. (Factoring
+// through mᵀm's eigenvectors would divide by the smaller singular value,
+// rounding noise when m has rank one, and leave R far from orthogonal.) The
+// rotation wins unless the reflection is better by reflectionMargin; a zero
+// m gives the identity.
 func polar(m [2][2]float64) ([2][2]float64, float64) {
-	// mᵀm = V·S²·Vᵀ.
-	a := m[0][0]*m[0][0] + m[1][0]*m[1][0]
-	b := m[0][0]*m[0][1] + m[1][0]*m[1][1]
-	c := m[0][1]*m[0][1] + m[1][1]*m[1][1]
-	vals, vecs := symEigen([][]float64{{a, b}, {b, c}})
-	s0, s1 := math.Sqrt(math.Max(vals[0], 0)), math.Sqrt(math.Max(vals[1], 0))
-	if s0 == 0 {
+	rot := math.Hypot(m[0][0]+m[1][1], m[0][1]-m[1][0])
+	ref := math.Hypot(m[0][0]-m[1][1], m[0][1]+m[1][0])
+	switch {
+	case rot == 0 && ref == 0:
 		return [2][2]float64{{1, 0}, {0, 1}}, 0
+	case rot >= ref*(1-reflectionMargin):
+		c, s := (m[0][0]+m[1][1])/rot, (m[0][1]-m[1][0])/rot
+		return [2][2]float64{{c, s}, {-s, c}}, rot
+	default:
+		c, s := (m[0][0]-m[1][1])/ref, (m[0][1]+m[1][0])/ref
+		return [2][2]float64{{c, s}, {s, -c}}, ref
 	}
-	v0 := [2]float64{vecs[0][0], vecs[0][1]}
-	v1 := [2]float64{-v0[1], v0[0]}
-	mv := func(v [2]float64) [2]float64 {
-		return [2]float64{m[0][0]*v[0] + m[0][1]*v[1], m[1][0]*v[0] + m[1][1]*v[1]}
-	}
-	u0 := mv(v0)
-	u0 = [2]float64{u0[0] / s0, u0[1] / s0}
-	u1 := [2]float64{-u0[1], u0[0]}
-	if s1 > 1e-12*s0 {
-		u1 = mv(v1)
-		u1 = [2]float64{u1[0] / s1, u1[1] / s1}
-	}
-	var r [2][2]float64
-	for i := range 2 {
-		for j := range 2 {
-			r[i][j] = u0[i]*v0[j] + u1[i]*v1[j]
-		}
-	}
-	return r, s0 + s1
 }
 
 func centroid(p []XY) XY {

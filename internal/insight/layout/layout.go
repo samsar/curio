@@ -69,13 +69,15 @@ type Neighbour struct {
 
 // Params returns every constant that changes what the views draw, for the
 // caller to record with a map; a change of any should make the next map
-// start cold. Only the golden angle, a mathematical constant, and the
-// lattice's spacing, latticeGap's, are left out (TestParams_NameEveryConstant).
+// start cold. Only the golden angle, a mathematical constant, the lattice's
+// spacing, latticeGap's, and the slack a zoom view's check allows rounding
+// are left out (TestParams_NameEveryConstant).
 func Params() map[string]any {
 	return map[string]any{
 		"algorithm_version": algorithmVersion,
 		"extent":            Extent,
 		"fill":              fill,
+		"reflection_margin": reflectionMargin,
 		"doc_map": map[string]any{
 			"neighbours":         mapNeighbours,
 			"curve_a":            curveA,

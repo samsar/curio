@@ -349,7 +349,13 @@ func (z *zoomer) draw() (ZoomLayout, error) {
 	for k, p := range docs {
 		out.Docs[z.origDoc[k]] = f.point(p)
 	}
-	return out, out.check()
+	if err := out.check(); err != nil {
+		return ZoomLayout{}, err
+	}
+	if err := z.checkPacked(out); err != nil {
+		return ZoomLayout{}, err
+	}
+	return out, nil
 }
 
 // check fails unless every circle and dot of the view is on the map.
@@ -373,6 +379,73 @@ func (l ZoomLayout) check() error {
 	for k, p := range l.Docs {
 		if err := checkPoint(fmt.Sprintf("document %d", k), p); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// roundingSlack is the most that rounding to 0.01 takes from the room
+// between two circles, or between a circle and a circle or dot inside it:
+// each centre moves up to 0.005·√2 and each radius up to 0.01.
+const roundingSlack = 0.035
+
+// checkPacked fails unless the view keeps what the packing and the lattice
+// guarantee, up to rounding: an area's interests inside it and apart, the
+// top-level circles and Unsorted's disc apart, and every dot inside its
+// circle. A view that broke one would draw overlapping circles, so its map
+// fails instead.
+func (z *zoomer) checkPacked(l ZoomLayout) error {
+	top := l.Interests
+	if len(z.areas) > 0 {
+		top = l.Areas
+	}
+	if i, j, ok := apart(slices.Concat(top, []Circle{l.Unsorted})); !ok {
+		return fmt.Errorf("layout: top-level circles %d and %d overlap (%d is Unsorted's)", i, j, len(top))
+	}
+	for _, area := range z.areas {
+		inner := make([]Circle, len(area.interests))
+		for x, i := range area.interests {
+			inner[x] = l.Interests[z.interests[i].orig]
+			if !within(inner[x], l.Areas[area.orig]) {
+				return fmt.Errorf("layout: interest %d lies outside area %d", z.interests[i].orig, area.orig)
+			}
+		}
+		if x, y, ok := apart(inner); !ok {
+			return fmt.Errorf("layout: interests %d and %d of area %d overlap",
+				z.interests[area.interests[x]].orig, z.interests[area.interests[y]].orig, area.orig)
+		}
+	}
+	for _, g := range z.interests {
+		if err := z.dotsWithin(l, g.docs, l.Interests[g.orig]); err != nil {
+			return err
+		}
+	}
+	return z.dotsWithin(l, z.unsorted, l.Unsorted)
+}
+
+// apart reports whether no two circles overlap, and, when two do, which.
+func apart(cs []Circle) (int, int, bool) {
+	for i, a := range cs {
+		for j := i + 1; j < len(cs); j++ {
+			if b := cs[j]; math.Hypot(a.X-b.X, a.Y-b.Y) < a.R+b.R-roundingSlack {
+				return i, j, false
+			}
+		}
+	}
+	return 0, 0, true
+}
+
+// within reports whether inner lies inside outer.
+func within(inner, outer Circle) bool {
+	return math.Hypot(inner.X-outer.X, inner.Y-outer.Y)+inner.R <= outer.R+roundingSlack
+}
+
+// dotsWithin fails unless every one of docs has its dot inside c.
+func (z *zoomer) dotsWithin(l ZoomLayout, docs []int, c Circle) error {
+	for _, k := range docs {
+		p := l.Docs[z.origDoc[k]]
+		if !within(Circle{p.X, p.Y, l.DotRadius}, c) {
+			return fmt.Errorf("layout: document %d lies outside its circle", z.origDoc[k])
 		}
 	}
 	return nil
@@ -465,9 +538,11 @@ func (z *zoomer) priorPlace(g zoomGroup) (Circle, bool) {
 // interior one relative to frame's centre and only when it lay inside
 // frame, a new one beside its most similar placed groups and then by MDS
 // against the others, which stay put; the circles are packed, uncompacted,
-// and the whole turned and moved (never scaled: radii are absolute) onto
-// the previous places. Refining the carried places toward MDS's distances
-// as well moved the interests' centres eight times as far.
+// the whole turned and moved (never scaled: radii are absolute) back onto
+// the previous places, and packed once more, so the packing, not the
+// transform, has the last word on overlaps. Refining the carried places
+// toward MDS's distances as well moved the interests' centres eight times
+// as far.
 func (z *zoomer) arrange(gs []zoomGroup, frame *Circle, interior bool, gap float64) ([]XY, error) {
 	n := len(gs)
 	if n == 0 {
@@ -585,7 +660,10 @@ func (z *zoomer) arrangeWarm(dm [][]float64, r []float64, gap float64, starts []
 	for i := range pos {
 		pos[i] = t.apply(pos[i])
 	}
-	return pos, nil
+	// The alignment is rigid, so this moves nothing that rounding didn't
+	// bring within the gap; it is here so that no overlap ever rests on
+	// the transform being exact.
+	return separate(z.ctx, pos, r, gap)
 }
 
 // besidePlaced is the similarity-weighted mean of the starts of group i's

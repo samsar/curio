@@ -231,3 +231,89 @@ func TestProcrustes(t *testing.T) {
 		assert.InDelta(t, 1, procrustes(src, dst, false).scale, 0)
 	}
 }
+
+// TestPolar_IsOrthogonal: polar's factor is a rotation or a reflection and
+// reaches the sum of m's singular values (gonum's SVD), whatever m's rank:
+// full, one (m = a·bᵀ, as two points or collinear ones give), or zero. A
+// rank-one m, which a turn fits as well as a mirror, gets the turn.
+func TestPolar_IsOrthogonal(t *testing.T) {
+	r := rand.New(rand.NewPCG(3, 4))
+	for c := range 3000 {
+		var m [2][2]float64
+		rank := c % 3
+		a, b := [2]float64{r.NormFloat64(), r.NormFloat64()}, [2]float64{r.NormFloat64(), r.NormFloat64()}
+		for i := range 2 {
+			for j := range 2 {
+				switch rank {
+				case 1:
+					m[i][j] = 2 * a[i] * b[j]
+				case 2:
+					m[i][j] = r.NormFloat64()
+				}
+			}
+		}
+		rot, sum := polar(m)
+		for i := range 2 {
+			for j := range 2 {
+				var dot float64
+				for k := range 2 {
+					dot += rot[k][i] * rot[k][j]
+				}
+				want := 0.0
+				if i == j {
+					want = 1
+				}
+				require.InDelta(t, want, dot, 1e-12, "case %d (rank %d): RᵀR[%d][%d]", c, rank, i, j)
+			}
+		}
+		var svd mat.SVD
+		require.True(t, svd.Factorize(mat.NewDense(2, 2, []float64{m[0][0], m[0][1], m[1][0], m[1][1]}), mat.SVDNone))
+		values := svd.Values(nil)
+		var trace float64
+		for i := range 2 {
+			for j := range 2 {
+				trace += rot[i][j] * m[i][j]
+			}
+		}
+		require.InDelta(t, values[0]+values[1], sum, 1e-9*(1+sum), "case %d (rank %d): the sum of singular values", c, rank)
+		require.InDelta(t, sum, trace, 1e-9*(1+sum), "case %d (rank %d): R reaches it", c, rank)
+		if rank < 2 {
+			require.InDelta(t, 1, rot[0][0]*rot[1][1]-rot[0][1]*rot[1][0], 1e-12, "case %d (rank %d): a turn", c, rank)
+		}
+	}
+}
+
+// TestProcrustes_Degenerate: an unscaled alignment of two points, or of
+// collinear ones, is rigid, keeping the distance between any two points of
+// the plane, and maps the points onto a moved copy of themselves.
+func TestProcrustes_Degenerate(t *testing.T) {
+	r := rand.New(rand.NewPCG(5, 6))
+	for c := range 500 {
+		n := 2 + c%4
+		dir := XY{r.NormFloat64(), r.NormFloat64()}
+		src := make([]XY, n)
+		for i := range src {
+			s := r.NormFloat64() * 50
+			src[i] = XY{3 + s*dir.X, -7 + s*dir.Y}
+		}
+		angle, mirror := r.Float64()*2*math.Pi, c%2 == 1
+		to := XY{r.NormFloat64() * 100, r.NormFloat64() * 100}
+		dst := make([]XY, n)
+		for i, p := range src {
+			if mirror {
+				p.Y = -p.Y
+			}
+			dst[i] = XY{to.X + p.X*math.Cos(angle) - p.Y*math.Sin(angle), to.Y + p.X*math.Sin(angle) + p.Y*math.Cos(angle)}
+		}
+		tr := procrustes(src, dst, false)
+		for i, p := range src {
+			got := tr.apply(p)
+			require.InDelta(t, dst[i].X, got.X, 1e-8, "case %d: point %d", c, i)
+			require.InDelta(t, dst[i].Y, got.Y, 1e-8, "case %d: point %d", c, i)
+		}
+		for range 5 {
+			p, q := XY{r.NormFloat64() * 100, r.NormFloat64() * 100}, XY{r.NormFloat64() * 100, r.NormFloat64() * 100}
+			require.InDelta(t, dist(p, q), dist(tr.apply(p), tr.apply(q)), 1e-9*dist(p, q), "case %d: rigid", c)
+		}
+	}
+}

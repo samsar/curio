@@ -15,13 +15,14 @@ import (
 )
 
 // TestParams_NameEveryConstant: Params names every constant of the package
-// but the two it leaves out on purpose, so a constant added or changed
+// but the three it leaves out on purpose, so a constant added or changed
 // later can't change what the views draw while a prior map recorded
 // without it still starts the next one warm or is reused.
 func TestParams_NameEveryConstant(t *testing.T) {
 	leftOut := map[string]bool{
 		"goldenAngle":    true, // a mathematical constant
 		"latticeSpacing": true, // latticeGap's
+		"roundingSlack":  true, // checks a view, draws nothing
 	}
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
