@@ -394,4 +394,30 @@ const (
 		"- [x] \n\n" +
 		"Keep me signed in\n\n" +
 		"Sign in"
+
+	// An article the library stores whose opening holds a count on a line
+	// of its own, as a status code alone would be.
+
+	// stackOverflowQuestionBody is 85a60cef's: its score, 444, on a line of
+	// its own, as 147 of the library's 154 Stack Exchange questions give
+	// theirs. Trimmed after the question.
+	stackOverflowQuestionBody = "This question shows research effort; it is useful and clear\n\n" +
+		"444\n\n" +
+		"This question does not show any research effort; it is unclear or not useful\n\n" +
+		"Save this question.\n\n" +
+		"[](https://stackoverflow.com/posts/17074365/timeline)\n\n" +
+		"Show activity on this post.\n\n" +
+		"I recently downloaded [Xcode](http://en.wikipedia.org/wiki/Xcode) 5 DP to test my apps in iOS 7. The first thing I noticed and confirmed is that my view's bounds is not always resized to account for the status bar and navigation bar.\n\n" +
+		"In `viewDidLayoutSubviews`, I print the view's bounds:\n\n" +
+		"> {{0, 0}, {320, 568}}\n\n" +
+		"This results in my content appearing below the navigation bar and status bar.\n\n" +
+		"I know I could account for the height myself by getting the main screen's height, subtracting the status bar's height and navigation bar's height, but that seems like unnecessary extra work.\n\n" +
+		"How can I fix this issue?\n\n" +
+		"**Update:**\n\n" +
+		"I've found a solution for this specific problem. Set the navigation bar's translucent property to NO:\n\n" +
+		"```\nself.navigationController.navigationBar.translucent = NO;\n```\n\n" +
+		"This will fix the view from being framed underneath the navigation bar and status bar."
+
+	// stackOverflowQuestionTitle is 85a60cef's title.
+	stackOverflowQuestionTitle = "Status bar and navigation bar appear over my view's bounds in iOS 7"
 )

@@ -1176,7 +1176,19 @@ func isLetters(s string) bool {
 // with whatever the page says next.
 //
 // The word lists are explicit: a word added to one needs a test row.
-var soft404TitleRE = func() *regexp.Regexp {
+//
+// notFoundLineRE is the same templates less the sentence, so anchored at
+// both ends: the text rules read a line of a page with it (pagetext.go),
+// where a sentence may go on to say something else, and notFoundSentenceRE
+// asks for the sentence's end. statusCodeLineRE matches a template that is
+// a status code alone, site names around it ("404", "Votes: 404", "404 ·
+// Followers"): on a line of a page's text, that is as often a count as a
+// notice.
+var soft404TitleRE, notFoundLineRE, statusCodeLineRE = notFoundTemplates()
+
+// notFoundTemplates builds soft404TitleRE, notFoundLineRE and
+// statusCodeLineRE from one set of words.
+func notFoundTemplates() (title, line, statusCode *regexp.Regexp) {
 	const (
 		// site is a site's name beside the template.
 		site = `[^|]{1,60}?`
@@ -1211,15 +1223,20 @@ var soft404TitleRE = func() *regexp.Regexp {
 		sentence = notFoundLead + `(?:the|this)\s+page\s+you(?:` + notFoundApos + `re|\s+are|\s+were)\s+looking\s+for\s+` +
 			notFoundGone + `\b`
 	)
-	return regexp.MustCompile(`(?i)` +
-		`^\s*` + prefix + `{0,2}` + template + `[.!]*(?:` + sep + site + `){0,2}\s*$` +
-		`|^\s*` + sentence)
-}()
+	// whole is a template with the site names around it, the whole of a
+	// title or a line.
+	whole := func(inner string) string {
+		return `^\s*` + prefix + `{0,2}` + inner + `[.!]*(?:` + sep + site + `){0,2}\s*$`
+	}
+	return regexp.MustCompile(`(?i)` + whole(template) + `|^\s*` + sentence),
+		regexp.MustCompile(`(?i)` + whole(template)),
+		regexp.MustCompile(`(?i)` + whole(code))
+}
 
 // The words a not-found notice is made of, shared by the title rule
-// (soft404TitleRE) and the text rule (notFoundSentenceRE). The lists are
-// explicit: a word added to one needs a row in each rule's test
-// (TestSoft404TitleRE, TestNotFoundSentenceRE).
+// (soft404TitleRE) and the text rules (notFoundLineRE, notFoundSentenceRE).
+// The lists are explicit: a word added to one needs a row in each rule's
+// test (TestSoft404TitleRE, TestNotFoundSentenceRE).
 const (
 	// notFoundApos is an apostrophe, straight or curly.
 	notFoundApos = `[’']`

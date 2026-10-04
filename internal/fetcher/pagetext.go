@@ -13,15 +13,16 @@ import (
 // with the site's name, a parked domain, a sign-in form. They read a page's
 // own words: its lines with markdown reduced to the words they show, less
 // the lines that hold only links (navigation, cards, footers), which Jina's
-// answers keep and Readability mostly drops. A notice counts only in the
-// page's opening, where it is what the page is; further in, a page
-// discusses or quotes it.
+// answers keep and Readability mostly drops, and the code blocks, which
+// show code, never what the page is. A notice counts only in the page's
+// opening, where it is what the page is; further in, a page discusses or
+// quotes it.
 //
 // A page's text is go-readability's RenderText from the origin, plain text
 // with each block on a line of its own, or the markdown body of Jina's
-// answer. Plain text has no link markup, so every line of it is own text,
-// and it passes through the markdown reduction unchanged but for a line
-// that opens like a marker ("1. ", "- ").
+// answer. Plain text has no link markup, code fences or headings, so every
+// line of it is own text, and it passes through the markdown reduction
+// unchanged but for a line that opens like a marker ("1. ", "- ").
 
 const (
 	// pageTextScanBytes is how much of a page's text the text rules read.
@@ -43,6 +44,13 @@ const (
 	// before any of the library's notices is 86 bytes; LinkedIn's notice is
 	// itself the first long line (217 bytes).
 	proseLineBytes = 200
+
+	// parkedNoticeBytes is how far into a page's own text a parked domain's
+	// notice may begin. The library's parking pages say so at most 54
+	// bytes in (flappyroyale.io's, under its sign-in box); a search
+	// results page puts its "Related searches" after its results, within
+	// openingBytes.
+	parkedNoticeBytes = 256
 
 	// signInPageBytes is the most own text a page that is only a sign-in
 	// form holds. The library's sign-in walls hold 99, 171 and 506 bytes.
@@ -82,6 +90,9 @@ type textLine struct {
 	// link reports a line that holds only links; its words are no part of
 	// the page's own text.
 	link bool
+	// heading reports a markdown heading: "## 404", or a line over a
+	// setext underline.
+	heading bool
 	// at is the page's own text before the line, in bytes.
 	at int
 }
@@ -108,6 +119,13 @@ var (
 	// ruleLineRE matches a thematic break ("* * *") or a setext heading's
 	// underline ("====").
 	ruleLineRE = regexp.MustCompile(`^(?:(?:[*_-]\s*){3,}|=+|-+)$`)
+	// setextUnderlineRE matches a setext heading's underline, which makes
+	// the line right above it a heading.
+	setextUnderlineRE = regexp.MustCompile(`^(?:=+|-+)$`)
+	// codeFenceRE matches the fence opening a code block: three or more
+	// backticks with none after them ("```go"), its first group, or three or
+	// more tildes, its second.
+	codeFenceRE = regexp.MustCompile("^(?:(`{3,})[^`]*|(~{3,}).*)$")
 	// blockMarkRE matches the markers opening a line: headings,
 	// blockquotes, list items and task boxes ("- [x]").
 	blockMarkRE = regexp.MustCompile(`^(?:#{1,6}(?:\s+|$)|>\s?|[*+-]\s+|\d{1,3}[.)]\s+|\[[ xX]\]\s*)+`)
@@ -119,7 +137,8 @@ var (
 
 // readPageText reads at most the first pageTextScanBytes of a page's text
 // into lines. It stops at the last line break within them, if there is one:
-// part of a line would read as a shorter line.
+// part of a line would read as a shorter line. A fenced code block's lines
+// count as own text, the page going on, but no rule reads them.
 func readPageText(text string) pageText {
 	t := pageText{whole: true}
 	if len(text) > pageTextScanBytes {
@@ -128,12 +147,31 @@ func readPageText(text string) pageText {
 			text = text[:i]
 		}
 	}
+	var fence string // the open code block's fence; "" outside one
+	above := -1      // the index in t.lines of the line just above; -1 if none
 	for raw := range strings.Lines(text) {
-		line, link := readLine(raw)
-		if line == "" {
+		if fence != "" {
+			if closesFence(raw, fence) {
+				fence = ""
+			} else if code := plain(raw); code != "" {
+				t.own += len(code) + 1
+			}
 			continue
 		}
-		t.lines = append(t.lines, textLine{text: line, link: link, at: t.own})
+		if fence = codeFence(raw); fence != "" {
+			above = -1
+			continue
+		}
+		if above >= 0 && setextUnderlineRE.MatchString(strings.TrimSpace(raw)) {
+			t.lines[above].heading = true
+		}
+		line, link, heading := readLine(raw)
+		if line == "" {
+			above = -1
+			continue
+		}
+		above = len(t.lines)
+		t.lines = append(t.lines, textLine{text: line, link: link, heading: heading, at: t.own})
 		if !link {
 			t.own += len(line) + 1
 		}
@@ -142,19 +180,45 @@ func readPageText(text string) pageText {
 }
 
 // readLine reduces a line of a page's text to the words it shows, with its
-// whitespace made plain, and reports whether it holds only links. A line
-// that shows nothing, a thematic break or a setext underline among them,
-// reads as "".
-func readLine(raw string) (line string, link bool) {
+// whitespace made plain, and reports whether it holds only links and
+// whether it is an ATX heading ("## 404"). A line that shows nothing, a
+// thematic break or a setext underline among them, reads as "".
+func readLine(raw string) (line string, link, heading bool) {
 	line = mdImageRE.ReplaceAllString(raw, "")
 	link = linkLineRE.MatchString(line)
 	line = strings.TrimSpace(mdLinkRE.ReplaceAllString(line, "$1"))
 	if ruleLineRE.MatchString(line) {
-		return "", false
+		return "", false, false
 	}
-	line = emphasisMarks.Replace(blockMarkRE.ReplaceAllString(line, ""))
+	marks := blockMarkRE.FindString(line)
+	// Of the markers, only a heading's holds a "#".
+	heading = strings.Contains(marks, "#")
+	line = emphasisMarks.Replace(line[len(marks):])
 	line = mdEscapeRE.ReplaceAllString(line, "$1")
-	return strings.Join(strings.Fields(line), " "), link
+	return plain(line), link, heading
+}
+
+// plain makes a line's whitespace plain: each run of it, no-break spaces
+// included, one space, and none at the ends.
+func plain(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// codeFence returns the fence a line opens a code block with, or the
+// empty string.
+func codeFence(raw string) string {
+	m := codeFenceRE.FindStringSubmatch(strings.TrimSpace(raw))
+	if m == nil {
+		return ""
+	}
+	return m[1] + m[2]
+}
+
+// closesFence reports whether a line closes the code block fence opened:
+// the fence's mark, as many times or more, and nothing else.
+func closesFence(raw, fence string) bool {
+	s := strings.TrimSpace(raw)
+	return len(s) >= len(fence) && strings.Trim(s, fence[:1]) == ""
 }
 
 // opening yields the page's opening: its own lines that begin within its
@@ -173,25 +237,40 @@ func (t *pageText) opening() iter.Seq[textLine] {
 	}
 }
 
-// notFoundNotice reports a not-found notice in the page's opening: a line
-// that is a not-found template as a whole, as a title would be
-// (soft404TitleRE), or that opens with a not-found sentence
-// (notFoundSentenceRE). It returns the reason, or the empty string.
+// notFoundNotice reports a not-found notice in the page's opening
+// (notFound). It returns the reason, or the empty string.
 func (t *pageText) notFoundNotice() string {
 	for l := range t.opening() {
-		if soft404TitleRE.MatchString(l.text) || notFoundSentenceRE.MatchString(l.text) {
+		if l.notFound() {
 			return "text reads like a not-found page: " + quoteLine(l.text)
 		}
 	}
 	return ""
 }
 
-// parkedDomain reports a parked domain's notice in the page's opening, for
-// a request for target (parkedNotice). It returns the reason, or the empty
+// notFound reports whether a line is a not-found notice: a not-found
+// template as a whole, as a title would be (notFoundLineRE), or a line
+// opening with a not-found sentence (notFoundSentenceRE). A status code
+// alone (statusCodeLineRE) counts only as a heading: on a line of its own,
+// "404" is as often a question's score, a profile's followers or a line of
+// a command's output.
+func (l textLine) notFound() bool {
+	if notFoundSentenceRE.MatchString(l.text) {
+		return true
+	}
+	return notFoundLineRE.MatchString(l.text) && (l.heading || !statusCodeLineRE.MatchString(l.text))
+}
+
+// parkedDomain reports a parked domain's notice in the lines of the page's
+// opening that begin within its first parkedNoticeBytes of own text, for a
+// request for target (parkedNotice). It returns the reason, or the empty
 // string.
 func (t *pageText) parkedDomain(target string) string {
 	host := strings.TrimPrefix(hostOf(target), "www.")
 	for l := range t.opening() {
+		if l.at >= parkedNoticeBytes {
+			break
+		}
 		if parkedNotice(l.text, host) {
 			return "text reads like a parked domain: " + quoteLine(l.text)
 		}
@@ -273,7 +352,7 @@ var (
 	// "This track was not found. Maybe it has been removed", "Sorry! The
 	// page you requested was not found.". Without its end, the sentence may
 	// go on to say something else ("The page you requested was not found
-	// in 2019, but…"); a line that is the template alone is soft404TitleRE's.
+	// in 2019, but…"); a line that is the template alone is notFoundLineRE's.
 	notFoundSentenceRE = regexp.MustCompile(`(?i)^` + notFoundLead + `(?:` +
 		notFoundCantFind + `\s+(?:this|that|the)\s+(?:requested\s+)?` + notFoundThing + notFoundYouWanted +
 		`|(?:this|that|the)\s+(?:requested\s+)?` + notFoundThing + notFoundYouWanted + `\s+` + notFoundGone +

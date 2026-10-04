@@ -1416,7 +1416,6 @@ func TestNative_JinaRejectsNonArticles(t *testing.T) {
 		{"soundcloud", "This track was not found", nil, soundCloudNotFoundBody, ErrDeadLink, "not-found page"},
 		{"quora", "Content has been deleted - Quora", nil, quoraDeletedBody, ErrDeadLink, "not-found page"},
 		// The same tombstones under an ordinary title: their text tells.
-		{"medium tombstone's body", "An article", nil, mediumTombstoneBody, ErrDeadLink, `not-found page: "410"`},
 		{"meetup's body", "An article", nil, meetupNotFoundBody, ErrDeadLink, `not-found page: "Group not found"`},
 		{"soundcloud's body", "An article", nil, soundCloudNotFoundBody, ErrDeadLink, `not-found page: "This track was not found.`},
 		{"quora's body", "An article", nil, quoraDeletedBody, ErrDeadLink, `not-found page: "This post has been deleted."`},
@@ -1500,6 +1499,11 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 		"then asked me to verify you are human. A 404 would have been kinder. " +
 		strings.Repeat("The rest of this essay is about why these checks fail real readers. ", 34)
 	article := strings.Repeat("A paragraph of a real article about the subject in its title. ", 10)
+	// scored is 85a60cef's question with its score set.
+	scored := func(score string) string {
+		require.Contains(t, stackOverflowQuestionBody, "\n444\n")
+		return strings.Replace(stackOverflowQuestionBody, "\n444\n", "\n"+score+"\n", 1)
+	}
 	// intro is an article's first paragraph: prose, which ends its opening.
 	intro := "A 404 page is what a visitor sees when a link points nowhere. Most sites treat it as an afterthought, " +
 		"but it is often the first page a new reader meets, and a good one keeps them on the site. Here is what the best ones do."
@@ -1530,8 +1534,12 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 		{"not-found title, detection off", "Page not found | Free local classifieds - Kijiji", nil, kijijiNotFoundBody, false},
 		{"tombstone, detection off", "410 Deleted by author — Medium", nil, mediumTombstoneBody, false},
 		{"an article about a 404", "How to fix 404 Not Found errors in Nginx", nil, article, true},
-		// Home Depot's not-found page says so in its title alone: under an
-		// ordinary title, its text is a menu and a cookie notice.
+		// The library's tombstones whose text tells nothing under an
+		// ordinary title; their own titles make them dead. Medium's gives
+		// its status as "410" on a line of its own, not as a heading, as a
+		// page gives a count; Home Depot's text is a menu and a cookie
+		// notice.
+		{"medium tombstone's body", "An article", nil, mediumTombstoneBody, true},
 		{"home depot's body", "An article", nil, homeDepotNotFoundBody, true},
 		// Articles that quote a notice, or show one, after their opening.
 		{"an article quoting a 404 page", "The anatomy of a great 404 page", nil,
@@ -1542,7 +1550,17 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 			"*   [Inspiration](https://landingfolio.com/inspiration)\n*   [404](https://landingfolio.com/inspiration/404)\n\n" + article, true},
 		{"an essay showing a notice later", "What a dead link tells you", nil,
 			intro + "\n\nThe page said only this:\n\nPage not found\n\n" + article, true},
+		{"a notice going on", "Where our archive went", nil,
+			"The page you're looking for was not found on our old server, so we moved it.\n\n" + article, true},
+		{"a notice in a code block", "Custom error pages in nginx", nil,
+			"# Custom error pages in nginx\n\nWhat a missing page answers by default:\n\n" +
+				"```\n$ curl -i https://example.com/missing\nHTTP/1.1 404 Not Found\nServer: nginx\n\n404 Not Found\n```\n\n" + article, true},
 		{"another site for sale", "Twitter.com is for sale", nil, "Twitter.com is for sale\n\n" + article, true},
+		{"a search results page", "nginx 404 page - Google Search", nil, searchResults(), true},
+		// A status code alone on a line is as often a count: a question's
+		// score (85a60cef's is 444).
+		{"a question scored 404", stackOverflowQuestionTitle, nil, scored("404"), true},
+		{"a question scored 410", stackOverflowQuestionTitle, nil, scored("410"), true},
 		// Pages with a sign-in box that aren't only one.
 		{"a public page, its sign-in box last", "IGDA Toronto", nil, "# IGDA Toronto\n\n## Intro\n\n" + intro + "\n\n" +
 			strings.Repeat("[See all photos](https://www.facebook.com/IGDAToronto/photos)\n\n", 4) +

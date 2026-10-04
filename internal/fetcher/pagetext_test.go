@@ -1,6 +1,8 @@
 package fetcher
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -31,7 +33,7 @@ func TestReadPageText(t *testing.T) {
 				{text: "Sign up", at: 0},
 				{text: "Sign in", link: true, at: 8},
 				{text: "PAGE NOT FOUND", at: 8},
-				{text: "404", at: 23},
+				{text: "404", heading: true, at: 23},
 			}},
 		{"instagram's footer (bd2f791a)",
 			"[Meta](https://about.meta.com/)\n\n" +
@@ -59,7 +61,7 @@ func TestReadPageText(t *testing.T) {
 				"[Aleksander Teisseyre](https://medium.com/@alekteis)[in DualPathway](http://blog.palantir.com/dualpathway)\n\n" +
 				"Sep 12, 2026",
 			[]textLine{
-				{text: "The Edge of the Possible", link: true},
+				{text: "The Edge of the Possible", link: true, heading: true},
 				{text: "Aleksander Teisseyrein DualPathway", link: true},
 				{text: "Sep 12, 2026"},
 			}},
@@ -75,8 +77,8 @@ func TestReadPageText(t *testing.T) {
 			"Sorry, you have been blocked\n============================\n\n" +
 				"You are unable to access example.com\n------------------------------------",
 			[]textLine{
-				{text: "Sorry, you have been blocked", at: 0},
-				{text: "You are unable to access example.com", at: 29},
+				{text: "Sorry, you have been blocked", heading: true, at: 0},
+				{text: "You are unable to access example.com", heading: true, at: 29},
 			}},
 		{"prose with a link, emphasis and escapes",
 			"Please try searching our site or [start again on our homepage](https://theweek.com/).\n" +
@@ -93,6 +95,26 @@ func TestReadPageText(t *testing.T) {
 				{text: "Sorry, we can't find the page you're looking for.", at: 127},
 				{text: "Page not found | Google Cloud", at: 177},
 			}},
+		{"headings, ATX and setext",
+			"## 404\n\n404\n===\n\nNot Found\n---------\n\nA line\n\n---\n\n> # Quoted",
+			[]textLine{
+				{text: "404", heading: true, at: 0},
+				{text: "404", heading: true, at: 4},
+				{text: "Not Found", heading: true, at: 8},
+				{text: "A line", at: 18},
+				{text: "Quoted", heading: true, at: 25},
+			}},
+		{"code blocks, counted as own text and left out",
+			"Intro\n\n```sh\n$ curl -I https://example.com/gone\n\nHTTP/1.1 404 Not Found\n```\n\n" +
+				"~~~~\n404\n~~~\n~~~~\n\n```x``` is no fence\n\nAfter",
+			[]textLine{
+				{text: "Intro", at: 0},
+				{text: "```x``` is no fence", at: 72},
+				{text: "After", at: 92},
+			}},
+		{"a code block left open runs to the end",
+			"Intro\n\n```\nPage not found\n\nPassword",
+			[]textLine{{text: "Intro", at: 0}}},
 		{"plain text from the origin (40303d6f)",
 			"Page Not Found\nSorry! The page you requested was not found.\n\n\tRichmond-Adelaide Centre 130 Adelaide Street West",
 			[]textLine{
@@ -173,6 +195,49 @@ func TestNotFoundSentenceRE(t *testing.T) {
 	}
 }
 
+// TestPageText_NotFoundNotice: a line of the opening is a not-found notice
+// when it is a not-found template as a whole or opens with a not-found
+// sentence; a status code alone, site names around it, only when it is a
+// heading. A code block holds none.
+func TestPageText_NotFoundNotice(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want string // the line the reason quotes; "" for no notice
+	}{
+		{"a template", "Page not found", "Page not found"},
+		{"a status with its words (d932fad2)", "404 Error: Not Found", "404 Error: Not Found"},
+		{"a status named an error", "Error 410", "Error 410"},
+		{"a status code as a heading (abd7cbb3)", "# 404", "404"},
+		{"a status code as a setext heading", "410\n===", "410"},
+		{"a status code and a site's name, as a heading (fa2c61a1)", "## 404 - หน้าไม่พบ", "404 - หน้าไม่พบ"},
+		{"a sentence", "The page you're looking for doesn't exist. Try the search.",
+			"The page you're looking for doesn't exist. Try the search."},
+
+		{"a status code alone: a question's score (85a60cef)",
+			"This question shows research effort; it is useful and clear\n\n404\n\n" +
+				"This question does not show any research effort; it is unclear or not useful", ""},
+		{"a status code alone: a profile's counts", "404\n\nFollowing\n\n410\n\nFollowers", ""},
+		{"a status code and a label", "Votes: 404", ""},
+		{"a status code and a separator", "410 · Followers", ""},
+		{"a heading's status code from the origin, its markers gone", "404\nWhat the page is about.", ""},
+		{"a status code in a menu", "*   [404](https://landingfolio.com/inspiration/404)", ""},
+		{"a template in a code block", "What nginx answers:\n\n```\n404 Not Found\n```", ""},
+		{"a sentence going on", "The page you're looking for was not found on our old server, so we moved it.", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := readPageText(tc.text)
+			reason := text.notFoundNotice()
+			if tc.want == "" {
+				assert.Empty(t, reason)
+				return
+			}
+			assert.Equal(t, "text reads like a not-found page: "+strconv.Quote(tc.want), reason)
+		})
+	}
+}
+
 // TestPageText_ParkedDomain: each subject, predicate and the parking-page
 // heading, in the library's words, is a parked domain's notice on the page
 // it names; a line that only resembles one, or names another site, isn't.
@@ -216,7 +281,17 @@ func TestPageText_ParkedDomain(t *testing.T) {
 			strings.Repeat("Domains lapse more often than you think. ", 6) + "\n\nThis domain is for sale!", false},
 		{"past the opening (Home Depot's category pages, 25d11cf0)", "https://www.homedepot.ca/en/home/categories/x.html",
 			strings.Repeat("Paint sprayers for every job, from fences to cabinets.\n", 40) + "Related Searches", false},
+		{"a notice beginning a byte inside parkedNoticeBytes", "http://example.org/",
+			strings.Repeat("a", 126) + "\n" + strings.Repeat("b", 127) + "\nThis domain is for sale!", true},
+		{"a notice beginning at parkedNoticeBytes", "http://example.org/",
+			strings.Repeat("a", 127) + "\n" + strings.Repeat("b", 127) + "\nThis domain is for sale!", false},
+		{"a search results page's related searches", "https://www.google.com/search?q=nginx+404+page", searchResults(), false},
 	}
+	results, inOpening := readPageText(searchResults()), false
+	for l := range results.opening() {
+		inOpening = inOpening || l.text == "Related searches"
+	}
+	require.True(t, inOpening, "the results page's related searches are in its opening")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			text := readPageText(tc.text)
@@ -297,6 +372,21 @@ func TestQuoteLine(t *testing.T) {
 	assert.True(t, strings.HasPrefix(thai, strings.TrimSuffix(inner, "…")))
 
 	assert.Equal(t, `"say \"hi\"\tnow"`, quoteLine("say \"hi\"\tnow"), "quoted as Go quotes it")
+}
+
+// searchResults is a search results page as Jina renders Google's: ten
+// results, each a heading of links, its address and a snippet, then the
+// related searches.
+func searchResults() string {
+	var b strings.Builder
+	for i := range 10 {
+		fmt.Fprintf(&b, "### [Custom error pages in nginx, part %d](https://example.com/nginx/%d)\n\n"+
+			"[example.com › nginx › %d](https://example.com/nginx/%d)\n\n", i, i, i, i)
+		b.WriteString("Sep 4, 2026 — How to serve a custom 404 page from nginx with the error_page directive, " +
+			"check it with curl, and keep the status a real 404 so that search engines drop the page.\n\n")
+	}
+	b.WriteString("Related searches\n\n*   [nginx 404 page](https://www.google.com/search?q=nginx+404+page)\n")
+	return b.String()
 }
 
 // navItem is a line of a menu, as Jina renders it.
