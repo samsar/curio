@@ -71,12 +71,13 @@ func assertZoom(t testing.TB, in layout.ZoomInput, z layout.ZoomLayout) {
 		byCircle[in.Interest[k]] = append(byCircle[in.Interest[k]], p)
 	}
 	for l, dots := range byCircle {
+		closest := math.Inf(1)
 		for a := range dots {
 			for b := a + 1; b < len(dots); b++ {
-				require.GreaterOrEqual(t, math.Hypot(dots[a].X-dots[b].X, dots[a].Y-dots[b].Y), 2*z.DotRadius-tolerance,
-					"two dots of circle %d overlap", l)
+				closest = math.Min(closest, math.Hypot(dots[a].X-dots[b].X, dots[a].Y-dots[b].Y))
 			}
 		}
+		require.GreaterOrEqual(t, closest, 2*z.DotRadius-tolerance, "two dots of circle %d overlap", l)
 	}
 }
 

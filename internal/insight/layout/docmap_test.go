@@ -6,6 +6,7 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -263,18 +264,21 @@ func TestDocMap_WarmIsStable(t *testing.T) {
 	const measured = 0.0035
 	lib := standard.build(2)
 	for draw := range 3 {
-		perm := shuffle(len(lib.keys), uint64(100+draw))
-		held := perm[:len(perm)/20]
-		prevLib := lib.subset(without(len(lib.keys), held))
-		prev := docMap(t, prevLib.docInput(1))
-		in := lib.docInput(1)
-		in.Prior, in.Warm = priorOf(prevLib.keys, prev), true
-		next := docMap(t, in)
-		d := quality.Displace(keyed(prevLib.keys, prev), keyed(lib.keys, next))
-		t.Logf("draw %d: mean displacement %.4f (aligned %.4f) of %d shared", draw, d.Mean, d.AlignedMean, d.Shared)
-		assert.Equal(t, len(prevLib.keys), d.Shared)
-		assert.LessOrEqual(t, d.Mean, 1.5*measured)
-		assert.LessOrEqual(t, d.Mean, 0.03)
+		t.Run(strconv.Itoa(draw), func(t *testing.T) {
+			t.Parallel()
+			perm := shuffle(len(lib.keys), uint64(100+draw))
+			held := perm[:len(perm)/20]
+			prevLib := lib.subset(without(len(lib.keys), held))
+			prev := docMap(t, prevLib.docInput(1))
+			in := lib.docInput(1)
+			in.Prior, in.Warm = priorOf(prevLib.keys, prev), true
+			next := docMap(t, in)
+			d := quality.Displace(keyed(prevLib.keys, prev), keyed(lib.keys, next))
+			t.Logf("mean displacement %.4f (aligned %.4f) of %d shared", d.Mean, d.AlignedMean, d.Shared)
+			assert.Equal(t, len(prevLib.keys), d.Shared)
+			assert.LessOrEqual(t, d.Mean, 1.5*measured)
+			assert.LessOrEqual(t, d.Mean, 0.03)
+		})
 	}
 }
 
