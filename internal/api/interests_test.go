@@ -402,6 +402,39 @@ func TestInterests_State(t *testing.T) {
 	assert.Contains(t, resp.body, `"next":{"state":"current","rebuild_at":263}`, "what doesn't apply is left out")
 }
 
+// TestInterests_StateMap: the state's map is the snapshot's, in both
+// places: a built map's kind and time, a reused one's 0 ms said; a failed
+// map's time and error; none and off alone; and no map with no status.
+func TestInterests_StateMap(t *testing.T) {
+	s := newTestServer(t)
+	for name, tc := range map[string]struct {
+		snap insight.MapState
+		want string
+	}{
+		"built": {insight.MapState{Status: store.MapBuilt, Kind: store.RunKindFresh, Took: 5951 * time.Millisecond},
+			`"map":{"status":"built","kind":"fresh","took_ms":5951}`},
+		"reused": {insight.MapState{Status: store.MapBuilt, Kind: store.RunKindWarm},
+			`"map":{"status":"built","kind":"warm","took_ms":0}`},
+		"failed": {insight.MapState{Status: store.MapFailed, Took: 2 * time.Minute, Error: "the map took longer than 2m0s"},
+			`"map":{"status":"failed","took_ms":120000,"error":"the map took longer than 2m0s"}`},
+		"none": {insight.MapState{Status: insight.MapNone}, `"map":{"status":"none"}`},
+		"off":  {insight.MapState{Status: insight.MapOff}, `"map":{"status":"off"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s.interests.set(insight.Snapshot{State: insight.StateCurrent, RebuildAt: 263, Map: tc.snap})
+			for _, path := range []string{"/v1/interests", "/v1/healthz"} {
+				resp := s.do(t, request{method: http.MethodGet, path: path})
+				require.Equal(t, http.StatusOK, resp.status, resp.body)
+				assert.Contains(t, resp.body, `"rebuild_at":263,`+tc.want+`}`, path)
+			}
+		})
+	}
+	s.interests.set(insight.Snapshot{State: insight.StateNone, RebuildAt: 20})
+	next, health := getAs[InterestListResponse](t, s, "/v1/interests").Next, getAs[Health](t, s, "/v1/healthz").Interests
+	assert.Nil(t, next.Map, "no done rebuild, the map on")
+	assert.Equal(t, next, health)
+}
+
 // TestRebuildInterests_Fresh: ?fresh=1 owes a fresh rebuild, even when it
 // answers a rebuild pending already, and never takes the place of a
 // re-embedding's; every request kicks the scheduler.

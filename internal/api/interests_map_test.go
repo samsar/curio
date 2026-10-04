@@ -306,7 +306,7 @@ func mapProblem(t *testing.T, s *testServer) InterestMapUnavailable {
 }
 
 // TestInterestMap_Unavailable: without a map the endpoint answers 404 with
-// why: no rebuild yet, one from before maps, or one whose map failed.
+// why: no rebuild yet, one that drew no map, or one whose map failed.
 func TestInterestMap_Unavailable(t *testing.T) {
 	s := newTestServer(t)
 	problem := func() InterestMapUnavailable {
@@ -325,7 +325,8 @@ func TestInterestMap_Unavailable(t *testing.T) {
 	p = problem()
 	assert.Equal(t, "no_map", p.Reason)
 	assert.Equal(t, before, p.RunID)
-	assert.Contains(t, p.Detail, "curio interests rebuild")
+	assert.Equal(t, "the latest rebuild drew no map: a rebuild to draw it is due, "+
+		"and `curio interests rebuild` draws it now", p.Detail)
 
 	f = s.newRun(t, store.InterestShapeFlat)
 	f.interest("Kafka, again", "", 0, d, nil)
@@ -335,7 +336,8 @@ func TestInterestMap_Unavailable(t *testing.T) {
 	assert.Equal(t, "map_failed", p.Reason)
 	assert.Equal(t, failed, p.RunID)
 	assert.Equal(t, "the map took longer than 2m0s", p.MapError)
-	assert.Contains(t, p.Detail, "the next rebuild draws it again")
+	assert.Equal(t, "the latest rebuild's map failed (the map took longer than 2m0s): the next rebuild, "+
+		"once enough of the library changes, or `curio interests rebuild`, draws it again", p.Detail)
 }
 
 // unreadableInsights is an insight store that can't be read: any call

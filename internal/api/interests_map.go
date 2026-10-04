@@ -154,10 +154,12 @@ func unavailable(run *store.InterestRun) error {
 	case run == nil:
 	case run.Map == nil:
 		b.Reason, b.RunID = mapNoMap, run.ID
-		b.Detail = "the latest rebuild predates maps: the next one draws it, and `curio interests rebuild` rebuilds now"
+		b.Detail = "the latest rebuild drew no map: a rebuild to draw it is due, " +
+			"and `curio interests rebuild` draws it now"
 	default:
 		b.Reason, b.RunID, b.MapError = mapFailed, run.ID, run.Map.Error
-		b.Detail = fmt.Sprintf("the latest rebuild's map failed (%s): the next rebuild draws it again", run.Map.Error)
+		b.Detail = fmt.Sprintf("the latest rebuild's map failed (%s): the next rebuild, once enough of the library "+
+			"changes, or `curio interests rebuild`, draws it again", run.Map.Error)
 	}
 	return &mapUnavailableError{body: b}
 }

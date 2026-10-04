@@ -703,7 +703,10 @@ func seedInterestFixtures(t *testing.T, s *testServer, f contractFixtures) event
 	s.interests.set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: now.Add(-time.Hour),
 		LastKind: store.RunKindWarm, LastTrigger: store.RunTriggerAuto, Changed: 271, RebuildAt: 263,
 		DueSince: now.Add(-20 * time.Minute), FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted",
-		RetryAt: now.Add(15 * time.Minute), LastError: "ollama unreachable: connection refused", CheckedAt: now})
+		RetryAt: now.Add(15 * time.Minute), LastError: "ollama unreachable: connection refused",
+		Map: insight.MapState{Status: store.MapFailed, Kind: store.RunKindWarm, Took: 2 * time.Minute,
+			Error: "the map took longer than 2m0s"},
+		CheckedAt: now})
 	return e
 }
 

@@ -232,6 +232,55 @@ func TestRebuild_MapOff(t *testing.T) {
 	assert.NotContains(t, line, "map_ms")
 }
 
+// TestRebuild_DrawsTheMapAPriorLacked: a rebuild of an unchanged library
+// whose done rebuild drew no map, here with the map off, is warm and keeps
+// every identity, label and assignment, asking no labeler, and draws its
+// map fresh.
+func TestRebuild_DrawsTheMapAPriorLacked(t *testing.T) {
+	f := mapLibrary(t, "d")
+	calls := 0
+	first := f.rebuild(t, f.engine(nil, sizeNames(&calls), Config{Labeling: LabelingLLM, Center: true, MapOff: true}))
+	require.Nil(t, first.Map)
+	require.Positive(t, calls)
+	groups, fits := f.groups(t, first.ID), f.fits(t, first.ID)
+	unasked := labelFunc(func(context.Context, ClusterInfo) (Label, error) {
+		t.Error("an unchanged library asks no labeler")
+		return Label{}, errors.New("unasked")
+	})
+	f.logs.Reset()
+
+	second := f.rebuild(t, f.engine(nil, unasked, Config{Labeling: LabelingLLM, Center: true}))
+	assert.Equal(t, store.RunKindWarm, second.Kind)
+	assert.Zero(t, second.Created+second.Dissolved+second.ChangedDocuments)
+	got := f.groups(t, second.ID)
+	for size, g := range groups {
+		assert.Equal(t, g.ID, got[size].ID, "size %d", size)
+		assert.Equal(t, g.Label, got[size].Label, "size %d", size)
+		assert.Equal(t, g.LabeledAt, got[size].LabeledAt, "size %d: not relabeled", size)
+	}
+	assert.Equal(t, fits, f.fits(t, second.ID))
+	require.NotNil(t, second.Map)
+	assert.Equal(t, store.MapBuilt, second.Map.Status)
+	assert.Equal(t, store.RunKindFresh, second.Map.Kind, "no map to start from")
+	f.assertInvariants(t, second)
+	line := f.logLine(t, "interests rebuilt")
+	assert.Contains(t, line, " labels_llm=0 labels_terms=0 ")
+	assert.Contains(t, line, " map=built map_kind=fresh ")
+}
+
+// fits are where a run put each document: its interest, "" for none, and
+// its fit, by document ID.
+func (f *engineFixture) fits(t *testing.T, runID string) map[string][2]string {
+	t.Helper()
+	as, err := f.store.RunAssignments(context.Background(), runID)
+	require.NoError(t, err)
+	out := make(map[string][2]string, len(as))
+	for _, a := range as {
+		out[a.DocumentID] = [2]string{a.InterestID, string(a.Fit)}
+	}
+	return out
+}
+
 // TestRebuild_MapStartsWarm: a rebuild after a change draws its map warm
 // from the previous one, which moves the documents less than a map drawn
 // from nothing; an unchanged library's map is the previous one verbatim.

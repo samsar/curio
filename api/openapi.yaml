@@ -1830,9 +1830,9 @@ components:
         last check found them (it checks every minute and whenever a
         rebuild is asked for, starts or ends): the same on healthz and as
         GET /v1/interests' next. The daemon queues a rebuild once enough of
-        the library changed (rebuild_at), or a fresh one is owed, and
-        nothing was indexed for a while. The fields that don't apply are
-        left out.
+        the library changed (rebuild_at), a fresh one is owed, or, with the
+        map on, the last rebuild drew no map, and nothing was indexed for a
+        while. The fields that don't apply are left out.
       properties:
         state:
           type: string
@@ -1847,6 +1847,8 @@ components:
             rebuild yet, and too few documents for the first). off with the
             insight layer disabled, and unknown only before the daemon's
             first check. Clients read a state they don't know as current.
+            due with map.status none, fresh_owed absent and fewer than
+            rebuild_at changed is a rebuild due to draw the map.
         last_rebuild_at:   { type: string, format: date-time, description: "When the last rebuild finished" }
         last_kind:         { type: string, enum: [fresh, warm] }
         last_trigger:      { type: string, enum: [first, auto, manual, reindex, params, shape] }
@@ -1873,7 +1875,29 @@ components:
         held_reason: { type: string, description: "How the embeddings drifted; only with state held" }
         retry_at:    { type: string, format: date-time, description: "When the next rebuild is tried after the failed ones; only with state failing" }
         last_error:  { type: string, description: "Why the last rebuild failed; only with state failing" }
+        map:         { $ref: "#/components/schemas/InterestsMapState" }
       required: [state]
+
+    InterestsMapState:
+      type: object
+      description: >
+        The last rebuild's map (GET /v1/interests/map), as the same check
+        found it. Absent while state is unknown or off, and before the first
+        rebuild unless the map is off.
+      properties:
+        status:
+          type: string
+          enum: [built, failed, none, off]
+          description: >
+            built; failed (error says why; the next rebuild, or `curio
+            interests rebuild`, tries again); none (the last rebuild drew
+            no map: it predates maps, or ran with the map off; with the map
+            on, a rebuild is due to draw it); off (insight.map: false in
+            config.yaml, so no rebuild draws one).
+        kind:    { type: string, enum: [fresh, warm], description: "How a built map was drawn: warm from the map before, or fresh" }
+        took_ms: { type: integer, description: "How long a built or failed map took; 0 for a map reused as it was" }
+        error:   { type: string, description: "Why the map failed; only with status failed" }
+      required: [status]
 
     InterestList:
       type: object
@@ -2092,10 +2116,12 @@ components:
         No map: an RFC 7807 problem of type
         urn:curio:problem:interest-map-unavailable, with why. no_run: no
         rebuild is done yet, and the first draws the map. no_map: the
-        latest rebuild drew no map (it predates maps, or the map was off);
-        the next draws it. map_failed: the latest rebuild's map failed
-        (map_error says why); the next tries again. map_off: the map is
-        off (insight.map: false in config.yaml), and nothing is read.
+        latest rebuild drew no map (it predates maps, or the map was off),
+        so a rebuild to draw it is due. map_failed: the latest rebuild's
+        map failed (map_error says why); the next rebuild, once enough of
+        the library changes, or `curio interests rebuild` tries again.
+        map_off: the map is off (insight.map: false in config.yaml), and
+        nothing is read.
       type: object
       properties:
         type:       { type: string, format: uri, enum: ["urn:curio:problem:interest-map-unavailable"] }

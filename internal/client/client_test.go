@@ -863,10 +863,13 @@ func TestInterestsState(t *testing.T) {
 	at := func(h int) time.Time { return time.Date(2026, 10, 9, h, 0, 0, 0, time.UTC) }
 	s.Scheduler.Set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: at(10), LastKind: store.RunKindWarm,
 		LastTrigger: store.RunTriggerAuto, Changed: 271, RebuildAt: 263, DueSince: at(11),
-		FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom"})
+		FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom",
+		Map: insight.MapState{Status: store.MapFailed, Took: 2 * time.Minute, Error: "the map took longer than 2m0s"}})
+	took := int64(120000)
 	want := client.InterestsState{State: client.StateFailing, LastRebuildAt: at(10), LastKind: "warm",
 		LastTrigger: "auto", ChangedDocuments: 271, RebuildAt: 263, DueSince: at(11), FreshOwed: client.FreshReindex,
-		HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom"}
+		HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom",
+		Map: &client.InterestsMap{Status: client.MapFailed, TookMS: &took, Error: "the map took longer than 2m0s"}}
 
 	health, err := c.Healthz(ctx)
 	require.NoError(t, err)

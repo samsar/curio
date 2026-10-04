@@ -429,9 +429,6 @@ func (e *Engine) drawMap(ctx context.Context, run *store.InterestRun, in input, 
 // maxMapError is the longest a failed map's error is kept.
 const maxMapError = 512
 
-// mapOff is the "interests rebuilt" line's map with the map off.
-const mapOff = "off"
-
 // callMapper calls the engine's map builder, turning a panic into an error
 // that starts "panic:" and returning its stack apart, for the log.
 func (e *Engine) callMapper(ctx context.Context, in MapInput) (m *Map, stack string, err error) {
@@ -561,7 +558,7 @@ func (e *Engine) logRebuilt(run *store.InterestRun, c store.RunCommit, gr *group
 	if m := o.Map; m != nil {
 		args = append(args, "map", m.Status, "map_kind", m.Kind, "map_ms", m.Took.Milliseconds())
 	} else {
-		args = append(args, "map", mapOff)
+		args = append(args, "map", MapOff)
 	}
 	if e.cfg.Drift != nil && e.cfg.Drift() != "" {
 		args = append(args, "embeddings_drifted", true)

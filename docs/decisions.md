@@ -10402,8 +10402,10 @@ streak. It queues a rebuild (`jobs.EnqueueRebuild`) when all hold:
 
 - no rebuild is queued or running;
 - due: no done run and 20 documents fetched; a fresh rebuild owed against
-  a done run; failures past their backoff; or `Changes(R).Total()` ≥
-  `Threshold(R.num_documents)`; and in every case at least one fetched
+  a done run; failures past their backoff; `Changes(R).Total()` ≥
+  `Threshold(R.num_documents)`; or, with the map on, R without a map (the
+  interest map, below: a run from before maps, one curio 2.5.x committed,
+  or one made with the map off); and in every case at least one fetched
   document;
 - not held: no embedding drift reported, and the backoff passed;
 - settled: nothing indexed for 10 minutes, or due for 2 hours already (30
@@ -10412,8 +10414,19 @@ streak. It queues a rebuild (`jobs.EnqueueRebuild`) when all hold:
   minutes, with no cap.
 
 The trigger is `first` (no done run), then `reindex`, then `params`, then
-`auto` (the library's changes, a retry, or a fresh rebuild asked for whose
-own job failed). A request through the API queues a rebuild whatever the
+`auto` (the library's changes, a retry, a map owed, or a fresh rebuild
+asked for whose own job failed). A map owed has no trigger of its own:
+016's `CHECK` on `interest_runs.trigger` would need the table rebuilt, and
+curio 2.5.x would read a run it doesn't know; it owes no fresh rebuild
+either, so the rebuild is planned warm whenever any would be, and on an
+unchanged library keeps every identity, assignment and label and asks no
+labeler. A map that failed owes nothing: what fails one (a library too
+large for the 2-minute bound, a view that fails its own check, a panic)
+fails it again on the same library, each retry costs a whole rebuild, and
+a backoff would need state `CommitRun` doesn't keep (`insight_state`
+counts failed rebuilds, and a done commit clears them); the failure shows
+on healthz and in doctor with its fix, and every later rebuild draws the
+map again. A request through the API queues a rebuild whatever the
 scheduler says (threshold, settle window, drift and backoff don't apply;
 the queue's gate does), and the scheduler queues none while one is queued
 or running. States, the first that holds: `rebuilding`, `queued`, `held`,
@@ -10424,7 +10437,7 @@ rebuild due" (changed, rebuild_at, fresh_owed, waiting_for) and the WARN
 episode (the hold's when a check first finds the state `held`: a rebuild
 queued before the drift was reported still runs), never a line per check;
 "interests: rebuild enqueued" (trigger, changed, waited, job, queued) each
-time.
+time. Both of a rebuild the map owes add `map_owed=true`.
 
 The values, exported constants in `internal/insight/schedule.go` and
 shared with the engine where both use them (`Threshold`, `RetryDelay`):
@@ -10453,7 +10466,14 @@ fetched document left stays current; retries come 16, 31, 61, 121, 241 and
 over the same state keeps the backoff, and a success ends it; a
 re-embedding drained over 3 hours is rebuilt once, 10 minutes after the
 last index job, and never while the queue is paused; a change of params at
-once.
+once. A done run without a map is rebuilt once, at once on a quiet library
+(trigger `auto`, `map_owed=true`) and 10 minutes after the last document
+indexed otherwise, and the check after its commit finds it current; held
+while the embeddings drifted, before the first drift verdict, during a
+failure's backoff and while a rebuild is queued; never with nothing
+fetched or the map off; and a map that fails on that rebuild queues no
+second one in a day of checks (the sim's runs draw a built map unless a
+test says otherwise).
 
 **When a rebuild became due is kept in memory**, so a restart starts its
 `MaxWait` again; the change count, the fresh rebuild owed and the backoff
@@ -10682,15 +10702,27 @@ documents and 20); `due_since`, `fresh_owed`, `held_reason`, `retry_at`,
 `last_error`, each only when it applies: `held_reason` with state `held`,
 `retry_at` and `last_error` with `failing`, so a rebuild queued or running
 while the embeddings drifted, or past failures, reads as just that (it
-runs). `off` with insight off (no
+runs); and `map`, R's map as the check read it with R (`insight.MapState`,
+no read of its own): `status` built (with `kind` and `took_ms`), failed
+(`took_ms` and `error`), none (R drew no map: with the map on, a rebuild
+is due to draw it) or off (`insight.map: false`, whatever R drew), absent
+with no done run unless the map is off. `took_ms` is a pointer on the wire,
+so a reused map's 0 is said. `off` with insight off (no
 scheduler is built, nor a placer), `unknown` only before the first check
 succeeds; clients read a state they don't know as current. Interests
 aren't health: `status` stays ok. `curio status` prints one line from it
-("interests: rebuilt 2 h ago (warm) · 37 documents changed, next at 276",
-the due, held or failing sentence, none while unknown), `curio doctor` an
-interests check (! held, with `curio reindex --all`; ! failing, with the
-error and the retry time; ✓ otherwise), and `curio interests` and its
-empty states say rebuilds are automatic and `rebuild` means now. The
+("interests: rebuilt 2 h ago (warm) · 37 documents changed, next at 276 ·
+map built (warm, in 2.8s)", the due, held or failing sentence, then the
+map built, failed with its error, or off; none while unknown), `curio
+doctor` an interests check (! held, with `curio reindex --all`; ! failing,
+with the error and the retry time; ! the map failed, with its error,
+`curio interests rebuild`, the logs, and `insight.map: false` if it keeps
+failing; ✓ otherwise, naming the map), and `curio interests` and its
+empty states say rebuilds are automatic and `rebuild` means now. A due
+rebuild is told as one to draw the map when that is all it waits for
+(map none, no fresh rebuild owed, fewer than `rebuild_at` changed), never
+as "0 changed, threshold 263": clients infer it from the state, which
+carries no reason of its own. The
 "interests rebuilt" line adds `placed_after`, and `embeddings_drifted=true`
 for a rebuild asked for while the embeddings drifted.
 
@@ -10706,8 +10738,9 @@ placements pruned), the placer (holds, warnings once per run, the cache
 across runs under -race), the jobs (one attempt; an orphan recorded, not
 rerun, with a real queue and engine; placement never failing an index
 job), the API (the snapshot on both surfaces with stores that fail every
-call; reindex-all's owe before its jobs), the CLI and the MCP text. Two
-end-to-end tests need minutes of settling with the design's values, so
+call; reindex-all's owe before its jobs), the CLI and the MCP text. The
+interests' end-to-end tests need minutes of settling with the design's
+values, so
 the daemon reads its scheduler timing from `CURIO_E2E_INTERESTS`
 (`interval`, `settle`, `max_wait`, `max_wait_first`; an unknown key
 refuses to start) only when built with the `e2e` tag
@@ -11747,7 +11780,12 @@ line of at most 512 characters, one WARN "interests: map failed", and
 `map=failed` on the "interests rebuilt" line. A map is the grouping's
 picture; losing one is no reason to lose the grouping, and the next
 rebuild draws it again. Only the rebuild's own cancellation fails the run,
-as before.
+as before. A failed map makes no rebuild due on its own ("Automatic
+rebuilds" says why); it shows instead, as `interests.map` on healthz
+(status failed, with its error) and as a `!` in `curio doctor`, whose fix
+is `curio interests rebuild`, the logs, and `insight.map: false` if it
+keeps failing. A run that drew no map, by contrast, owes one: the
+scheduler makes a rebuild due to draw it.
 
 ### Placement
 
@@ -11861,25 +11899,34 @@ second change is answered as read, as `GET /v1/interests` does.
 `insight.enabled: false` couldn't: a rebuild draws no map (no `BuildMap`,
 none of its 2 minutes) and commits its run without one, as a run from
 before 018, saying `map=off` on its line; a placement gets no place,
-searching for no neighbours and reading no places; and `GET
+searching for no neighbours and reading no places; `GET
 /v1/interests/map` answers 404 `map_off` without reading anything, its
-detail naming the setting. On the owner's library that saves the map's
-5.6 to 6.1 s cold and 2.8 to 3.0 s warm a rebuild, up to the 2-minute
-bound on a library too large for it, and `Place`'s neighbour search, 44
-ms median a document against 0.74 ms without. `similar` is still
-written: it is the grouping's, a few milliseconds, and keeping it makes a
-run the same whether the map is on or off. Turned on again, the placements
-made meanwhile into a run whose map was built before have no place: they
-are off the map, and the sweep places them again. Every field that
-carries the switch is a negative (`insight.Config.MapOff`,
-`PlacerOptions.MapOff`, `api.Deps.MapOff`), so a zero value keeps the map
-on, and every test, `cmd/clusterreport` and the engine fixtures draw it as
-before. The reason is `map_off` of its own rather than `no_map` with a
-detail: a client acts on `reason`, and `no_map` says the next rebuild
-draws the map and `curio interests rebuild` draws one now, neither true
+detail naming the setting; and the scheduler owes no map, its snapshot's
+map saying `off`, which doctor passes. On the owner's library that saves
+the map's 5.6 to 6.1 s cold and 2.8 to 3.0 s warm a rebuild, up to the
+2-minute bound on a library too large for it, and `Place`'s neighbour
+search, 44 ms median a document against 0.74 ms without. `similar` is
+still written: it is the grouping's, a few milliseconds, and keeping it
+makes a run the same whether the map is on or off.
+
+Turned on again, a run committed with the map off has no map, which makes
+a rebuild due to draw it, and placements made meanwhile into a run whose
+map was built before have no place: they are off the map, and the sweep
+places them again. Every field that carries the switch is a negative
+(`insight.Config.MapOff`, `PlacerOptions.MapOff`,
+`SchedulerOptions.MapOff`, `api.Deps.MapOff`), so a zero value keeps the
+map on, and every test, `cmd/clusterreport` and the engine fixtures draw
+it as before. The reason is `map_off` of its own rather than `no_map` with
+a detail: a client acts on `reason`, and `no_map` says a rebuild to draw
+the map is due and `curio interests rebuild` draws one now, neither true
 while it is off. A `RunMap` is built, failed (always with an error: one
 that says nothing is "the map failed without saying why"), or nil for
 none drawn, so a map that was never drawn can't be recorded as failed.
+`TestDaemon_TheMapSwitch` runs it end to end: a home with the map off
+groups an import unasked with no map (404 `map_off`, healthz map `off`);
+started again without the key, its daemon queues a rebuild unasked
+(trigger `auto`, nothing changed), and the map answers with every
+document. It adds 2.6 s to `make test-e2e`.
 
 ### Measurements on a copy of the owner's library
 
@@ -12006,8 +12053,10 @@ tests now run in parallel), `internal/store/sqlite` 9.4 s and 10.0 s,
   800 and 1,200 interests of 1,024 dimensions takes 0.5, 1.8, 6.4 and
   14.3 s, and notices a 2 s deadline within 10 ms. Past the bound it
   rebuilds without a map, and the endpoint says so.
-- A run from before 018 has no map until the next rebuild (`no_map`
-  says `curio interests rebuild` draws one now).
+- A run from before 018, one curio 2.5.x committed, or one made with the
+  map off has no map until the rebuild it owes (`no_map` meanwhile): due
+  at once, queued once the library is quiet and the drift check has its
+  first verdict, 10 minutes after a start whose Ollama is down.
 - A placed document's place is an approximation, never a prior for the
   next map: the next rebuild lays it out with the rest.
 - Positions are the same on one platform, not across architectures.

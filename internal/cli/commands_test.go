@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -617,6 +618,28 @@ func TestInterests_Outline(t *testing.T) {
 	assert.Contains(t, flat, "+ 6 more: curio interests --offset 2 --flat\n")
 }
 
+// TestInterests_NextDrawsTheMap: after the rebuild line, curio interests
+// says a rebuild is due to draw the map when that is all it waits for,
+// and the changes against the threshold otherwise.
+func TestInterests_NextDrawsTheMap(t *testing.T) {
+	srv := apitest.Start(t)
+	a := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	srv.AddRun(t, apitest.RunSpec{Areas: []apitest.Area{{Label: "Tech", Interests: []apitest.Interest{
+		{Label: "Agents", Size: 1, Members: []*store.Document{a}}}}}})
+	for _, tc := range []struct {
+		changed int
+		want    string
+	}{
+		{0, "a rebuild is due to draw the map, once the library settles"},
+		{30, "next after 20 changes, 30 so far: due, once the library settles"},
+	} {
+		srv.Scheduler.Set(insight.Snapshot{State: insight.StateDue, Changed: tc.changed, RebuildAt: 20,
+			Map: insight.MapState{Status: insight.MapNone}})
+		lines := strings.Split(mustRun(t, srv, "interests"), "\n")
+		assert.Regexp(t, `^rebuilt \d{4}-\d\d-\d\d \d\d:\d\d \(fresh, manual\) · `+regexp.QuoteMeta(tc.want)+`$`, lines[1])
+	}
+}
+
 // TestInterests_Flat: in a library of one level, curio interests lists
 // interests with their members, each with its doc_id and path.
 func TestInterests_Flat(t *testing.T) {
@@ -864,6 +887,31 @@ func TestStatus_Interests(t *testing.T) {
 			"interests: rebuilds held: the embeddings drifted; run `curio reindex --all`"},
 		"failing": {insight.Snapshot{State: insight.StateFailing, LastError: "ollama unreachable", RetryAt: retry},
 			"interests: the last rebuild failed (ollama unreachable); retrying at " + clockTime(retry, time.Now())},
+		"current, its map built": {insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: hourAgo,
+			LastKind: store.RunKindWarm, Changed: 37, RebuildAt: 276, Map: insight.MapState{Status: store.MapBuilt,
+				Kind: store.RunKindFresh, Took: 5951 * time.Millisecond}},
+			"interests: rebuilt 2 h ago (warm) · 37 documents changed, next at 276 · map built (fresh, in 6s)"},
+		"current, its map reused": {insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: hourAgo,
+			LastKind: store.RunKindWarm, RebuildAt: 276, Map: insight.MapState{Status: store.MapBuilt,
+				Kind: store.RunKindWarm}},
+			"interests: rebuilt 2 h ago (warm) · 0 documents changed, next at 276 · map built (warm, in 0s)"},
+		"current, its map failed": {insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: hourAgo,
+			LastKind: store.RunKindWarm, Changed: 37, RebuildAt: 276, Map: insight.MapState{Status: store.MapFailed,
+				Took: 2 * time.Minute, Error: "the map took longer than 2m0s"}},
+			"interests: rebuilt 2 h ago (warm) · 37 documents changed, next at 276 · " +
+				"map failed (the map took longer than 2m0s)"},
+		"due, to draw the map": {insight.Snapshot{State: insight.StateDue, LastRebuildAt: hourAgo, RebuildAt: 263,
+			Map: insight.MapState{Status: insight.MapNone}},
+			"interests: a rebuild is due to draw the map: waiting for the library to settle"},
+		"due, past the threshold, without a map": {insight.Snapshot{State: insight.StateDue, LastRebuildAt: hourAgo,
+			Changed: 271, RebuildAt: 263, Map: insight.MapState{Status: insight.MapNone}},
+			"interests: a rebuild is due (271 changed, threshold 263): waiting for the library to settle"},
+		"current, the map off": {insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: hourAgo,
+			LastKind: store.RunKindWarm, Changed: 37, RebuildAt: 276, Map: insight.MapState{Status: insight.MapOff}},
+			"interests: rebuilt 2 h ago (warm) · 37 documents changed, next at 276 · map off (insight.map: false)"},
+		"waiting, the map off": {insight.Snapshot{State: insight.StateNone, Changed: 7, RebuildAt: 20,
+			Map: insight.MapState{Status: insight.MapOff}},
+			"interests: waiting for 20 indexed documents (7 so far) · map off (insight.map: false)"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := apitest.Start(t)
@@ -1079,6 +1127,27 @@ func TestDoctor_Interests(t *testing.T) {
 			RetryAt: time.Now().Add(-time.Minute)}, "!",
 			"the last rebuild failed: boom; retrying once the library settles",
 			"`curio daemon logs` has the details; once the cause is fixed, `curio interests rebuild` tries again without waiting"},
+		"current, its map built": {insight.Snapshot{State: insight.StateCurrent,
+			LastRebuildAt: time.Now().Add(-5 * time.Minute), LastKind: store.RunKindWarm, RebuildAt: 263,
+			Map: insight.MapState{Status: store.MapBuilt, Kind: store.RunKindWarm, Took: 2757 * time.Millisecond}}, "✓",
+			"rebuilt 5 min ago (warm) · 0 documents changed, next at 263 · map built (warm, in 2.8s)", ""},
+		"its map failed": {insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: time.Now().Add(-5 * time.Minute),
+			RebuildAt: 263, Map: insight.MapState{Status: store.MapFailed, Took: 2 * time.Minute,
+				Error: "the map took longer than 2m0s"}}, "!",
+			"the last rebuild's interest map failed: the map took longer than 2m0s",
+			"`curio interests rebuild` draws it again, and `curio daemon logs` has the details; " +
+				"if it keeps failing, `insight.map: false` in config.yaml turns the map off"},
+		"failing, its map failed too": {insight.Snapshot{State: insight.StateFailing, LastError: "boom",
+			RetryAt: time.Now().Add(-time.Minute), Map: insight.MapState{Status: store.MapFailed, Error: "no room"}}, "!",
+			"the last rebuild failed: boom",
+			"`curio daemon logs` has the details; once the cause is fixed, `curio interests rebuild` tries again without waiting"},
+		"due, to draw the map": {insight.Snapshot{State: insight.StateDue, LastRebuildAt: time.Now().Add(-time.Hour),
+			RebuildAt: 263, Map: insight.MapState{Status: insight.MapNone}}, "✓",
+			"a rebuild is due to draw the map: waiting for the library to settle", ""},
+		"the map off": {insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: time.Now().Add(-5 * time.Minute),
+			RebuildAt: 263, Map: insight.MapState{Status: insight.MapOff}}, "✓",
+			"rebuilt 5 min ago · 0 documents changed, next at 263 · map off (insight.map: false)", ""},
+		"unknown": {insight.Snapshot{State: insight.StateUnknown}, "✓", "the daemon hasn't checked them yet", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := upWorld(t)
