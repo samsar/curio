@@ -447,20 +447,20 @@ func (f *engineFixture) circleIn(t *testing.T, run *store.InterestRun, p store.M
 // nothing.
 func TestPlacer_SweepRepairsWhat250Left(t *testing.T) {
 	ctx := context.Background()
-	for name, leave := range map[string]func(f *engineFixture, p store.Placement){
-		"placed by 2.5.0's index job": func(f *engineFixture, p store.Placement) {
+	for name, leave := range map[string]func(t *testing.T, f *engineFixture, p store.Placement){
+		"placed by 2.5.0's index job": func(t *testing.T, f *engineFixture, p store.Placement) {
 			require.True(t, curio250.PlaceDocument(t, f.db, tenant, p))
 		},
-		"placed by 2.5.0's sweep": func(f *engineFixture, p store.Placement) {
+		"placed by 2.5.0's sweep": func(t *testing.T, f *engineFixture, p store.Placement) {
 			p.InterestID = ""
 			require.True(t, curio250.PlaceIfAbsent(t, f.db, p))
 		},
-		"moved by 2.5.0 into another interest": func(f *engineFixture, p store.Placement) {
+		"moved by 2.5.0 into another interest": func(t *testing.T, f *engineFixture, p store.Placement) {
 			f.placer().Place(ctx, tenant, p.DocumentID)
 			require.NotEqual(t, p.InterestID, f.placeOf(t, p.RunID, p.DocumentID).InterestID)
 			require.True(t, curio250.PlaceDocument(t, f.db, tenant, p))
 		},
-		"moved by 2.5.0 into Unsorted": func(f *engineFixture, p store.Placement) {
+		"moved by 2.5.0 into Unsorted": func(t *testing.T, f *engineFixture, p store.Placement) {
 			f.placer().Place(ctx, tenant, p.DocumentID)
 			p.InterestID = ""
 			require.True(t, curio250.PlaceDocument(t, f.db, tenant, p))
@@ -472,7 +472,7 @@ func TestPlacer_SweepRepairsWhat250Left(t *testing.T) {
 			doc := f.addAround(t, "d", 0, 1, rand.New(rand.NewPCG(7, 7)))[0]
 			// Axis 3's interest, the smallest: never axis 0's.
 			other := f.groups(t, run.ID)[12].ID
-			leave(f, store.Placement{RunID: run.ID, DocumentID: doc, InterestID: other, Similarity: 0.6})
+			leave(t, f, store.Placement{RunID: run.ID, DocumentID: doc, InterestID: other, Similarity: 0.6})
 
 			placed, err := f.placer().Sweep(ctx, tenant)
 			require.NoError(t, err)
@@ -521,9 +521,9 @@ func TestPlacer_NoChurn(t *testing.T) {
 	assert.Zero(t, again)
 }
 
-// onRead is a chunk store that calls at once, at its read of the vectors
-// of the document after the first n, and fails that read with at's error
-// unless it is nil.
+// onRead is a chunk store that runs its hook, at, when it reads the
+// vectors of the document after the first n, and fails that read with
+// at's error unless it is nil.
 type onRead struct {
 	*vectorSource
 	n     int
