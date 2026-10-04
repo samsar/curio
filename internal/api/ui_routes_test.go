@@ -92,7 +92,7 @@ func uiSamples(t *testing.T, s *testServer) map[string]string {
 		"/ui/interests":          "/ui/interests",
 		"/ui/interests/unsorted": "/ui/interests/unsorted",
 		"/ui/interests/changes":  "/ui/interests/changes",
-		"/ui/interests/map":      "/ui/interests/map?view=interests&select=interest%3A" + interest,
+		"/ui/interests/map":      "/ui/interests/map?view=groups&select=interest%3A" + interest,
 		"/ui/interests/{id}":     "/ui/interests/" + interest,
 		"/ui/static/{file}":      stylesheetURL(t, s),
 		"an area's page":         "/ui/interests/" + area,

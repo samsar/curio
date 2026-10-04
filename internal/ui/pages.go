@@ -2082,8 +2082,8 @@ func (p MapPage) Ready() bool { return p.State == MapReady }
 // Views is the Interests' subnav, the Map current.
 func (MapPage) Views() InterestsViews { return InterestsViews{OnMap: true} }
 
-// ByInterest reports whether the page opens on the By interest view.
-func (p MapPage) ByInterest() bool { return p.Query.View == MapViewInterests }
+// ByGroup reports whether the page opens on the By group view.
+func (p MapPage) ByGroup() bool { return p.Query.View == MapViewGroups }
 
 // Selected is the selection asked for, as the select parameter writes it.
 func (p MapPage) Selected() string { return p.Query.Select.String() }
