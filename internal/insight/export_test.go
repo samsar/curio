@@ -55,3 +55,10 @@ func (p *Placer) WithNeighbourTimeout(d time.Duration) *Placer {
 	p.neighbourTimeout = d
 	return p
 }
+
+// WithSweepBatch returns p writing a sweep's placements n at a time in
+// place of sweepBatch.
+func (p *Placer) WithSweepBatch(n int) *Placer {
+	p.batch = n
+	return p
+}

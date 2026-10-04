@@ -10654,11 +10654,16 @@ per run and read again once a newer run is done.
   run read its vectors that the run neither assigned nor placed (`Unplaced`:
   a range of `idx_documents_tenant_indexed`, both primary keys): those
   indexed while a rebuild ran, and any whose fast path failed. It writes
-  them in one transaction with the guard checked once, ON CONFLICT DO
-  NOTHING, so it never overwrites a newer fast-path placement; a document
-  whose vector can't be placed (another width, a non-finite value) is left
-  out with one WARN rather than stalling the rest. The "interests rebuilt"
-  line counts them (`placed_after`).
+  them as it goes, 64 at a time (`sweepBatch`), each batch one transaction
+  with the guard checked once, keeping a placement made already (unless
+  it is off the interest map: "Interest map", Placement), so it never
+  overwrites a newer fast-path placement, and a run replaced mid-sweep
+  takes none of the batches after; a document whose vector can't be
+  placed (another width, a non-finite value) is left out with one WARN
+  rather than stalling the rest. A sweep that fails, or runs out of its 2
+  minutes, keeps what it wrote and returns it with the error; the next
+  sweep places the rest. The "interests rebuilt" line counts them
+  (`placed_after`).
 
 Measured on the owner's library copy below: one `Place` takes 2.1 ms
 (median; p95 10 ms, mean 3.0 ms over 261), the first of a run 11 ms as it
@@ -11771,7 +11776,15 @@ placement reports itself. The search and read have 2 s of their own
 (`neighbourTimeout`, 50 times the measured search), so one that stalls
 falls back and leaves the rest of the placement's 10 s to its write. A
 sweep searches for at most 60 s (`sweepNeighbourBudget`), the rest taking
-the fallback, so a large sweep still fits its 2 minutes.
+the fallback, so a large sweep still fits its 2 minutes. It writes as it
+goes, 64 placements a batch (`sweepBatch`: about 2.8 s of searches at 44
+ms each, against a write of a few milliseconds), each batch a short
+transaction of its own, so the write lock is never held across a search,
+and a sweep that fails or runs out of time keeps all but its last batch:
+it returns what it wrote with the error, and the next sweep, at the next
+start or rebuild, places the rest. It doesn't write its last batch on a
+detached context after its own ended: that batch is redone, and stopping
+the daemon stays as quick as it was.
 
 On a copy of the owner's library (50,278 chunks), through the store:
 `Place` took 44.0 ms median and 49.6 ms p95 with the map, against 0.74 ms

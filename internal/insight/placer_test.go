@@ -520,3 +520,96 @@ func TestPlacer_NoChurn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, again)
 }
+
+// onRead is a chunk store that calls at once, at its read of the vectors
+// of the document after the first n, and fails that read with at's error
+// unless it is nil.
+type onRead struct {
+	*vectorSource
+	n     int
+	reads int
+	at    func(ctx context.Context) error
+}
+
+func (o *onRead) EmbeddingsForDocument(ctx context.Context, documentID string) ([]store.ChunkEmbedding, error) {
+	if o.reads++; o.reads == o.n+1 {
+		if err := o.at(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return o.vectorSource.EmbeddingsForDocument(ctx, documentID)
+}
+
+// failingPlaceMany is an insight store whose PlaceMany fails from its
+// call after the first n.
+type failingPlaceMany struct {
+	store.InsightStore
+	n int
+}
+
+func (f *failingPlaceMany) PlaceMany(ctx context.Context, tenantID, runID string, ps []store.Placement) (int, error) {
+	if f.n == 0 {
+		return 0, errLocked
+	}
+	f.n--
+	return f.InsightStore.PlaceMany(ctx, tenantID, runID, ps)
+}
+
+// TestPlacer_SweepWritesInBatches: a sweep writes its placements a batch
+// at a time, every one in the end; one whose context ends, or whose write
+// fails, keeps the batches written before and returns their count with
+// the error, and the next sweep places the rest.
+func TestPlacer_SweepWritesInBatches(t *testing.T) {
+	setup := func(t *testing.T) (*engineFixture, *store.InterestRun) {
+		t.Helper()
+		f := mapLibrary(t, "d")
+		run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+		f.addAround(t, "new", 1, 7, rand.New(rand.NewPCG(9, 9)))
+		return f, run
+	}
+	t.Run("every one", func(t *testing.T) {
+		f, run := setup(t)
+		placed, err := f.placer().WithSweepBatch(2).Sweep(context.Background(), tenant)
+		require.NoError(t, err)
+		assert.Equal(t, 7, placed)
+		assert.Len(t, f.placedInto(t, run.ID), 7)
+	})
+	t.Run("the context ends", func(t *testing.T) {
+		f, run := setup(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		chunks := &onRead{vectorSource: f.vectors, n: 5, at: func(ctx context.Context) error {
+			cancel()
+			return ctx.Err()
+		}}
+		p := NewPlacer(f.insights, chunks, nil, slog.New(slog.NewTextHandler(&f.logs, nil))).WithSweepBatch(2)
+		placed, err := p.Sweep(ctx, tenant)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, 4, placed, "two batches of two; the fifth document's was never written")
+		assert.Len(t, f.placedInto(t, run.ID), 4)
+
+		placed, err = f.placer().Sweep(context.Background(), tenant)
+		require.NoError(t, err)
+		assert.Equal(t, 3, placed, "the next sweep places the rest")
+	})
+	t.Run("a write fails", func(t *testing.T) {
+		f, run := setup(t)
+		insights := &failingPlaceMany{InsightStore: f.insights, n: 1}
+		p := NewPlacer(insights, f.vectors, nil, slog.New(slog.NewTextHandler(&f.logs, nil))).WithSweepBatch(3)
+		placed, err := p.Sweep(context.Background(), tenant)
+		require.ErrorIs(t, err, errLocked)
+		assert.Equal(t, 3, placed, "the first batch")
+		assert.Len(t, f.placedInto(t, run.ID), 3)
+	})
+	t.Run("a rebuild commits meanwhile", func(t *testing.T) {
+		f, _ := setup(t)
+		chunks := &onRead{vectorSource: f.vectors, n: 4, at: func(context.Context) error {
+			f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+			return nil
+		}}
+		p := NewPlacer(f.insights, chunks, nil, slog.New(slog.NewTextHandler(&f.logs, nil))).WithSweepBatch(2)
+		placed, err := p.Sweep(context.Background(), tenant)
+		require.NoError(t, err)
+		assert.Equal(t, 4, placed, "the batches after the commit write nothing into the run it replaced")
+	})
+}

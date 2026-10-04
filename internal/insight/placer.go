@@ -26,6 +26,12 @@ const (
 	// vectors: a few thousand documents indexed while a rebuild ran fit
 	// in it.
 	sweepTimeout = 2 * time.Minute
+	// sweepBatch is how many placements a sweep writes at once, each batch
+	// in a transaction of its own: about 2.8 s of neighbour searches at the
+	// owner's 44 ms each, against a write of a few milliseconds, so the
+	// write lock is never held across a search, and a sweep cut short
+	// keeps all but its last batch.
+	sweepBatch = 64
 )
 
 // errNoVectors is a document with no chunk vector: nothing to place.
@@ -77,6 +83,7 @@ type Placer struct {
 	// neighbourTimeout a placement's.
 	neighbourBudget  time.Duration
 	neighbourTimeout time.Duration
+	batch            int // a sweep's sweepBatch
 
 	mu        sync.Mutex
 	cached    *runPlacement // the latest run's space, nil before the first placement
@@ -105,7 +112,7 @@ func NewPlacer(insights store.InsightStore, chunks store.ChunkStore, drift func(
 		log = slog.Default()
 	}
 	return &Placer{insights: insights, chunks: chunks, drift: drift, log: log, neighbourBudget: sweepNeighbourBudget,
-		neighbourTimeout: neighbourTimeout}
+		neighbourTimeout: neighbourTimeout, batch: sweepBatch}
 }
 
 // Place places a document just indexed into the tenant's current
@@ -170,25 +177,26 @@ func (p *Placer) place(ctx context.Context, tenantID, documentID string) (runID 
 // placement failed. On a built map it places again, with a place, those
 // placed off it (InsightStore.Unplaced): with no place, or outside their
 // circle, as 2.5.x leaves them. A document placed meanwhile on the map
-// keeps that placement. It returns how many it placed. A document whose vectors can't be placed
-// (another width, a non-finite value) is left out with a warning, so one
-// can't stall the rest; any other failure, a panic included, is its error.
-// Searching for neighbours on the map stops once it has taken the
-// sweep's neighbour budget: the documents left take the fallback place.
+// keeps that placement. A document whose vectors can't be placed (another
+// width, a non-finite value) is left out with a warning, so one can't
+// stall the rest. Searching for neighbours on the map stops once it has
+// taken the sweep's neighbour budget: the documents left take the
+// fallback place. It writes as it goes, sweepBatch placements at a time,
+// and returns how many it placed: on any other failure, a panic or its
+// context ending included, those with the error, the rest left for the
+// next sweep.
 func (p *Placer) Sweep(ctx context.Context, tenantID string) (placed int, err error) {
 	ctx, cancel := context.WithTimeout(ctx, sweepTimeout)
 	defer cancel()
-	err = recovered(func() error {
-		placed, err = p.sweep(ctx, tenantID)
-		return err
-	})
+	err = recovered(func() error { return p.sweep(ctx, tenantID, &placed) })
 	return placed, err
 }
 
-func (p *Placer) sweep(ctx context.Context, tenantID string) (int, error) {
+// sweep is Sweep, counting what it writes in placed as it goes.
+func (p *Placer) sweep(ctx context.Context, tenantID string, placed *int) error {
 	run, ok, err := p.target(ctx, tenantID)
 	if err != nil || !ok {
-		return 0, err
+		return err
 	}
 	since := run.StartedAt
 	if run.VectorsReadAt != nil {
@@ -196,15 +204,27 @@ func (p *Placer) sweep(ctx context.Context, tenantID string) (int, error) {
 	}
 	ids, err := p.insights.Unplaced(ctx, tenantID, run.ID, since)
 	if err != nil || len(ids) == 0 {
-		return 0, err
+		return err
 	}
 	rp, err := p.space(ctx, run)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	ps := make([]store.Placement, 0, len(ids))
+	batch := make([]store.Placement, 0, min(len(ids), p.batch))
+	write := func() error {
+		n, err := p.insights.PlaceMany(ctx, tenantID, run.ID, batch)
+		*placed += n
+		batch = batch[:0]
+		return err
+	}
 	var skipped []string
 	var skipErr error
+	defer func() {
+		if len(skipped) > 0 {
+			p.log.Warn("interests: the sweep left out documents it can't place", "run", run.ID, "count", len(skipped),
+				"document_ids", skipped[:min(len(skipped), maxLoggedIDs)], "err", skipErr)
+		}
+	}()
 	var searched time.Duration
 	for _, id := range ids {
 		vec, err := p.vector(ctx, id)
@@ -212,7 +232,7 @@ func (p *Placer) sweep(ctx context.Context, tenantID string) (int, error) {
 		case errors.Is(err, errNoVectors):
 			continue
 		case err != nil:
-			return 0, err
+			return err
 		}
 		pl, err := rp.place(id, vec)
 		if err != nil {
@@ -222,13 +242,13 @@ func (p *Placer) sweep(ctx context.Context, tenantID string) (int, error) {
 		start := time.Now()
 		p.position(ctx, tenantID, rp, &pl, searched < p.neighbourBudget)
 		searched += time.Since(start)
-		ps = append(ps, pl.Placement)
+		if batch = append(batch, pl.Placement); len(batch) == p.batch {
+			if err := write(); err != nil {
+				return err
+			}
+		}
 	}
-	if len(skipped) > 0 {
-		p.log.Warn("interests: the sweep left out documents it can't place", "run", run.ID, "count", len(skipped),
-			"document_ids", skipped[:min(len(skipped), maxLoggedIDs)], "err", skipErr)
-	}
-	return p.insights.PlaceMany(ctx, tenantID, run.ID, ps)
+	return write()
 }
 
 // target is the run to place into: the tenant's latest done run, unless
