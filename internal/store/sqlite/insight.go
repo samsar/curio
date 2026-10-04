@@ -297,9 +297,10 @@ func checkGroups(groups []store.InterestGroup, minted []store.Interest) error {
 	return nil
 }
 
-// checkMap checks the commit's map against its rows: a built one places
-// every group and assignment on the map, each circle with a positive
-// radius; a failed one, or none, places nothing.
+// checkMap checks the commit's map against its rows: a map, built or
+// failed, records the params it was drawn with; a built one places every
+// group and assignment on the map, each circle with a positive radius; a
+// failed one, or none, places nothing.
 func checkMap(c store.RunCommit) error {
 	m := c.Outcome.Map
 	built := m != nil && m.Status == store.MapBuilt
@@ -307,6 +308,8 @@ func checkMap(c store.RunCommit) error {
 	case m == nil:
 	case !m.Status.Valid():
 		return fmt.Errorf("map status %q is not one of the MapStatus constants", m.Status)
+	case !json.Valid(m.Params):
+		return fmt.Errorf("the map's params %q are not JSON", m.Params)
 	case !built && (m.Error == "" || m.Kind != ""):
 		return fmt.Errorf("a failed map has error %q and kind %q", m.Error, m.Kind)
 	case built && (!m.Kind.Valid() || m.Error != ""):

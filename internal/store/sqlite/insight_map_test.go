@@ -106,11 +106,11 @@ func TestInsights_MapRoundTrip(t *testing.T) {
 	}
 }
 
-// TestInsights_MapRefusesBadCommits: a map that doesn't fit its rows, a
-// group without its identity's level, or a similar list that isn't an
-// interest's or names anything but other interests of the commit, is an
-// error before anything is written: the run stays running and no identity
-// is minted.
+// TestInsights_MapRefusesBadCommits: a map that doesn't fit its rows or
+// records no params, a group without its identity's level, or a similar
+// list that isn't an interest's or names anything but other interests of
+// the commit, is an error before anything is written: the run stays
+// running and no identity is minted.
 func TestInsights_MapRefusesBadCommits(t *testing.T) {
 	for name, tc := range map[string]struct {
 		spoil func(c *store.RunCommit)
@@ -130,7 +130,13 @@ func TestInsights_MapRefusesBadCommits(t *testing.T) {
 		"a built map without a kind":   {func(c *store.RunCommit) { c.Outcome.Map.Kind = "" }, "a built map has kind"},
 		"no map, with places":          {func(c *store.RunCommit) { c.Outcome.Map = nil }, "with the map built: false"},
 		"an unknown map status":        {func(c *store.RunCommit) { c.Outcome.Map.Status = "drawn" }, "map status"},
-		"a group without a level":      {func(c *store.RunCommit) { c.Groups[2].Level = "" }, `has level ""`},
+		"a map without its params":     {func(c *store.RunCommit) { c.Outcome.Map.Params = nil }, "params"},
+		"a map's params not JSON":      {func(c *store.RunCommit) { c.Outcome.Map.Params = []byte(`{"seed":`) }, "params"},
+		"a failed map without its params": {func(c *store.RunCommit) {
+			*c = unplaced(*c)
+			c.Outcome.Map = &store.RunMap{Status: store.MapFailed, Error: "boom"}
+		}, "params"},
+		"a group without a level": {func(c *store.RunCommit) { c.Groups[2].Level = "" }, `has level ""`},
 		"a group of another level than its identity": {
 			func(c *store.RunCommit) { c.Groups[2].Level = store.InterestLevelArea }, "its new identity interest"},
 		"a failed map with places": {func(c *store.RunCommit) {
