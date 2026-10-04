@@ -11,7 +11,7 @@ document's name, as the Library folds its type and time.
 <nav class="crumbs" aria-label="Breadcrumb"><a href="{{navHref "interests"}}">Interests</a><span class="sep">›</span><span aria-current="page">Unsorted</span></nav>
 <h1>{{template "icon" "inbox"}}Unsorted</h1>
 <p class="lede">{{if .Run}}{{if .Total}}{{count .Total "document is" "documents are"}} in no interest: not close enough to any yet. Listed nearest first, each with the interest it is closest to.{{if and (gt .Page 1) (not .OutOfRange)}} Page {{num .Page}} of {{num .Pages}}.{{end}}{{else}}Documents in no interest: not close enough to any yet.{{end}}{{else}}Documents in no interest, once your library is grouped.{{end}}</p>
-{{with .NumNew}}<div class="meta-row"><span class="badge plain fit-new">{{num .}} new since the rebuild</span></div>{{end}}
+{{if or .NumNew .MapHref}}<div class="meta-row">{{with .NumNew}}<span class="badge plain fit-new">{{num .}} new since the rebuild</span>{{end}}{{template "map-link" .MapHref}}</div>{{end}}
 </div></div>
 {{if .RunChanged}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>The interests were rebuilt since the page you came from, so this page {{if .OutOfRange}}is past the new run's last{{else}}lists the new run's{{end}}.{{if gt .Page 1}} <a href="{{.FirstPage}}">Start again from page 1</a>.{{end}}</p></div></div>
 {{end}}

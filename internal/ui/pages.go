@@ -21,6 +21,7 @@ const (
 	PageInterest  = "interest"  // InterestPage
 	PageUnsorted  = "unsorted"  // Unsorted
 	PageChanges   = "changes"   // Changes
+	PageMap       = "map"       // MapPage
 	PageRetired   = "retired"   // Gone
 	PageError     = "error"     // ErrorPage
 	PageStarting  = "starting"  // Starting
@@ -1241,6 +1242,21 @@ func (v Interests) Pager() *Pager {
 		Noun: noun, Href: v.pageHref})
 }
 
+// Views is the Interests' subnav, the List current.
+func (Interests) Views() InterestsViews { return InterestsViews{} }
+
+// InterestsViews is the Interests' subnav (the interests-subnav partial):
+// the List of the interests and their Map, the current one marked.
+type InterestsViews struct {
+	OnMap bool
+}
+
+// ListHref is the List's page, the Interests.
+func (InterestsViews) ListHref() string { return navHref(NavInterests) }
+
+// MapHref is the Map's page, with nothing selected.
+func (InterestsViews) MapHref() string { return mapHref(MapQuery{}) }
+
 // FirstGrouping reports whether the library is being grouped for the
 // first time: no rebuild is done, and one is queued or running, as the
 // queue or the scheduler says.
@@ -1725,6 +1741,22 @@ type InterestPage struct {
 	// RunAt is when the rebuild the interest comes from finished; zero
 	// when unknown.
 	RunAt time.Time
+	// MapOff is set with the interest map off (insight.map: false), which
+	// leaves out the link to the group on it.
+	MapOff bool
+}
+
+// MapHref is the interest map with the area or the interest selected, ""
+// with the map off.
+func (p InterestPage) MapHref() string {
+	if p.MapOff {
+		return ""
+	}
+	kind := MapSelectInterest
+	if p.Interest.Area {
+		kind = MapSelectArea
+	}
+	return mapHref(MapQuery{Select: MapSelection{Kind: kind, ID: p.Interest.ID}})
 }
 
 func (p InterestPage) page() int { return max(p.Page, 1) }
@@ -1812,6 +1844,18 @@ type Unsorted struct {
 	// rebuild, of NumNew.
 	New    []Member
 	NumNew int
+	// MapOff is set with the interest map off, which leaves out the link
+	// to Unsorted on it.
+	MapOff bool
+}
+
+// MapHref is the interest map with Unsorted selected: "" with the map off,
+// and before the first rebuild, when there is no Unsorted to show.
+func (u Unsorted) MapHref() string {
+	if u.MapOff || u.Run == "" {
+		return ""
+	}
+	return mapHref(MapQuery{Select: MapSelection{Kind: MapSelectUnsorted}})
 }
 
 // UnsortedDoc is an unsorted document: in no interest, and nearest
@@ -1963,16 +2007,105 @@ func (r Retired) Fate() string {
 	return fateMixed
 }
 
-// DocumentPlace is where the latest rebuild put a document, or where it
-// was placed since: a member or a loose fit of Interest, in Area when the
-// interest has one; unsorted, nearest Nearest; or new, placed into
-// Interest, or into Unsorted. An identity whose ID is "" is none.
+// DocumentPlace is where the latest rebuild put document DocumentID, or
+// where it was placed since: a member or a loose fit of Interest, in Area
+// when the interest has one; unsorted, nearest Nearest; or new, placed
+// into Interest, or into Unsorted. An identity whose ID is "" is none.
+// MapOff is set with the interest map off, which leaves out the link to
+// the document on it.
 type DocumentPlace struct {
-	Fit      string
-	Interest InterestRef
-	Area     InterestRef
-	Nearest  InterestRef
+	DocumentID string
+	Fit        string
+	Interest   InterestRef
+	Area       InterestRef
+	Nearest    InterestRef
+	MapOff     bool
 }
+
+// MapHref is the interest map with the document selected, "" with the map
+// off.
+func (p DocumentPlace) MapHref() string {
+	if p.MapOff || p.DocumentID == "" {
+		return ""
+	}
+	return mapHref(MapQuery{Select: MapSelection{Kind: MapSelectDocument, ID: p.DocumentID}})
+}
+
+// MapState is what the interest map's page shows: the map, or why there
+// is none, a state for each reason GET /v1/interests/map gives for its
+// 404, under that reason's name.
+type MapState string
+
+// The interest map page's states.
+const (
+	MapReady  MapState = "ready"
+	MapNoRun  MapState = "no_run"
+	MapNoMap  MapState = "no_map"
+	MapFailed MapState = "map_failed"
+	MapOff    MapState = "map_off"
+)
+
+// MapPage is the interest map's page, under the Interests' head with Map
+// current in their subnav: when the latest rebuild drew a map, the shell
+// static/map.js draws it into, which reads the map from the API itself;
+// otherwise why there is no map.
+type MapPage struct {
+	Layout Layout
+	State  MapState
+	// Error is a failed map's error.
+	Error string
+	// Run is the rebuild the map is of, or would be of: nil before the
+	// first, and with the map off.
+	Run *MapRun
+	// Rebuilds is where automatic rebuilds stand, which the page says
+	// before the first rebuild.
+	Rebuilds InterestsState
+	// Query is the view and the selection asked for, which map.js shows
+	// once it has drawn the map.
+	Query MapQuery
+}
+
+// MapRun is the rebuild a map is of: its shape, its counts and when it
+// finished.
+type MapRun struct {
+	Shape                       string
+	Documents, Areas, Interests int
+	FinishedAt                  time.Time
+}
+
+// HasAreas reports whether the run groups its interests in areas.
+func (r MapRun) HasAreas() bool { return r.Shape == string(store.InterestShapeAreas) }
+
+// Ready reports whether there is a map to draw.
+func (p MapPage) Ready() bool { return p.State == MapReady }
+
+// Views is the Interests' subnav, the Map current.
+func (MapPage) Views() InterestsViews { return InterestsViews{OnMap: true} }
+
+// Zoomed reports whether the page opens on the Zoom in view.
+func (p MapPage) Zoomed() bool { return p.Query.View == MapViewZoom }
+
+// Selected is the selection asked for, as the select parameter writes it.
+func (p MapPage) Selected() string { return p.Query.Select.String() }
+
+// The data attributes map.js reads: where it reads the map, and the pages
+// it addresses and links to, each a prefix it appends an escaped ID to.
+// They are built here so that map.js holds no URL of its own.
+
+// Src is where map.js reads the map.
+func (MapPage) Src() string { return interestMapAPIPath }
+
+// PageHref is the map's own page, which map.js keeps its address on.
+func (MapPage) PageHref() string { return mapHref(MapQuery{}) }
+
+// DocumentPrefix is a document's page, less its ID.
+func (MapPage) DocumentPrefix() string { return documentHref("") }
+
+// InterestPrefix is an area's or an interest's page, less its ID.
+func (MapPage) InterestPrefix() string { return interestHref("") }
+
+// UnsortedPage is Unsorted's first page, of the latest rebuild.
+func (MapPage) UnsortedPage() string { return unsortedHref(1, "") }
 
 // ErrorPage is a page's error: its status and message, and the request ID
 // the daemon logged it under.

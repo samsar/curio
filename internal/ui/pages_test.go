@@ -459,7 +459,8 @@ func TestInterestPage_Pages(t *testing.T) {
 	one := interestPage(1, 84)
 	one.RunAt = time.Date(2026, 9, 28, 10, 34, 0, 0, time.Local)
 	out := render(t, r, PageInterest, one)
-	assert.Contains(t, out, `cohesion 0.59</span><span class="sep">·</span><span class="text">run of 2026-09-28 10:34</span></div>`)
+	assert.Contains(t, out, `cohesion 0.59</span><span class="sep">·</span><span class="text">run of 2026-09-28 10:34</span>`+
+		`<a class="map-link" href="/ui/interests/map?select=interest%3Ai1">`)
 	assert.NotContains(t, out, "showing")
 	assert.Contains(t, out, `<td class="num muted">1</td>`)
 	assert.Contains(t, out, `<td class="num muted">50</td>`)
@@ -2302,5 +2303,162 @@ func TestStatus_InterestsRow(t *testing.T) {
 		row := strings.Index(out, tc.row)
 		require.Positive(t, row, "%s:\n%s", tc.state.State, out)
 		assert.Greater(t, row, strings.Index(out, `id="health-live"`), "%s: in health's region", tc.state.State)
+	}
+}
+
+// TestMapPage_Ready: with a map to draw, the page is the Interests' head,
+// the subnav with Map current, and the shell map.js fills: its root
+// carrying where to read the map and the pages it leads to, the view and
+// the selection asked for; the tabs, the search, the stage and the panel,
+// each part it fills empty; and a card standing in without JavaScript.
+func TestMapPage_Ready(t *testing.T) {
+	r := newRenderer(t)
+	page := MapPage{Layout: Layout{Title: "Interest map", Nav: NavInterests}, State: MapReady,
+		Run: &MapRun{Shape: "areas", Documents: 5237, Areas: 29, Interests: 182,
+			FinishedAt: time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)},
+		Query: MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectInterest, ID: `"><script>alert(1)</script>`}}}
+	out := render(t, r, PageMap, page)
+	uitest.AssertInert(t, out)
+	assert.Contains(t, out, "<title>Interest map · curio</title>")
+	assert.Contains(t, out, `<p class="lede">5,237 documents in 29 areas holding 182 interests, as the rebuild of `)
+	assert.Contains(t, out, `<nav class="subnav" aria-label="Interests views"><a href="/ui/interests">List</a>`+
+		`<a href="/ui/interests/map" aria-current="page">Map</a></nav>`)
+	doc := parse(t, out)
+	root := byID(doc, "interest-map")
+	require.NotNil(t, root)
+	assert.Equal(t, "interest-map js-only", attrValue(root, "class"))
+	for attr, want := range map[string]string{"data-src": "/v1/interests/map", "data-page": "/ui/interests/map",
+		"data-document-page": "/ui/documents/", "data-interest-page": "/ui/interests/",
+		"data-unsorted-page": "/ui/interests/unsorted", "data-interests-page": "/ui/interests", "data-view": "zoom",
+		"data-select": `interest:"><script>alert(1)</script>`} {
+		assert.Equal(t, want, attrValue(root, attr), attr)
+	}
+	assert.Equal(t, "false", attrValue(byID(doc, "map-tab-all"), "aria-selected"))
+	assert.Equal(t, "true", attrValue(byID(doc, "map-tab-zoom"), "aria-selected"))
+	assert.Equal(t, "0", attrValue(byID(doc, "map-tab-zoom"), "tabindex"))
+	assert.Equal(t, "map-tab-zoom", attrValue(byID(doc, "map-stage"), "aria-labelledby"))
+	search := byID(doc, "map-search")
+	for attr, want := range map[string]string{"role": "combobox", "aria-expanded": "false", "aria-controls": "map-hits"} {
+		assert.Equal(t, want, attrValue(search, attr), attr)
+	}
+	assert.False(t, hasAttr(search, "name"), "the map's search sends nothing")
+	for _, id := range []string{"map-hits", "map-crumbs", "map-legend", "map-panel-kicker", "map-panel-title",
+		"map-panel-body"} {
+		require.NotNil(t, byID(doc, id), id)
+		assert.Nil(t, byID(doc, id).FirstChild, "%s starts empty", id)
+	}
+	status := byID(doc, "map-status")
+	assert.Equal(t, "status", attrValue(status, "role"))
+	assert.Equal(t, "polite", attrValue(status, "aria-live"))
+	assert.Equal(t, "Loading the map…", textOf(status))
+	assert.Equal(t, "-1", attrValue(byID(doc, "map-panel-title"), "tabindex"))
+	assert.Equal(t, "map-panel-body", attrValue(byID(doc, "map-sheet-toggle"), "aria-controls"))
+	assert.Contains(t, out, `<div class="card no-js"><div class="empty">`)
+	assert.Contains(t, out, `<h2>The map needs JavaScript</h2>`)
+
+	page.Query = MapQuery{View: MapViewAll}
+	root = byID(parse(t, render(t, r, PageMap, page)), "interest-map")
+	assert.Equal(t, "all", attrValue(root, "data-view"))
+	assert.False(t, hasAttr(root, "data-select"), "the library: no selection")
+}
+
+// TestMapPage_None: without a map, the page says why, in a card of its
+// own for each reason, with what draws it, and loads none of the map's
+// scripts.
+func TestMapPage_None(t *testing.T) {
+	r := newRenderer(t)
+	page := func(state MapState) MapPage {
+		return MapPage{Layout: Layout{Title: "Interest map", Nav: NavInterests}, State: state,
+			Rebuilds: InterestsState{State: "none", Changed: 3, RebuildAt: 20}}
+	}
+	for _, tc := range []struct {
+		page MapPage
+		want []string
+	}{
+		{page(MapNoRun), []string{"<h2>No interests yet</h2>", `<p class="interests-state">waiting for 20 indexed ` +
+			`documents (3 so far).</p>`, "The first rebuild of the interests draws the map."}},
+		{func() MapPage { p := page(MapNoRun); p.Rebuilds = InterestsState{State: "off"}; return p }(),
+			[]string{"set <code>insight.enabled: true</code> in config.yaml and restart the daemon"}},
+		{page(MapNoMap), []string{"<h2>No map yet</h2>", "a rebuild to draw it is due",
+			`<a href="/ui/interests">Interests</a> rebuilds them now`, "<code>curio interests rebuild</code>"}},
+		{func() MapPage { p := page(MapFailed); p.Error = strings.Repeat("e", 300) + "<b>"; return p }(),
+			[]string{"<h2>The map failed</h2>", `<span class="state-error" title="` + strings.Repeat("e", 300) +
+				`&lt;b&gt;">`, "<code>curio daemon logs</code>", "<code>insight.map: false</code>"}},
+		{page(MapOff), []string{"<h2>The map is off</h2>", "(<code>insight.map: false</code>). Remove the setting, " +
+			"or set it to true, and restart the daemon"}},
+	} {
+		out := render(t, r, PageMap, tc.page)
+		uitest.AssertInert(t, out)
+		for _, want := range tc.want {
+			assert.Contains(t, out, want, tc.page.State)
+		}
+		assert.NotContains(t, out, `id="interest-map"`, tc.page.State)
+		assert.NotContains(t, out, "d3-", tc.page.State)
+		assert.Contains(t, out, `<a href="/ui/interests/map" aria-current="page">Map</a>`, tc.page.State)
+	}
+	failed := page(MapFailed)
+	failed.Error = strings.Repeat("the map took too long ", 30)
+	out := render(t, r, PageMap, failed)
+	assert.Contains(t, out, shortError(failed.Error)+"</span>", "the error cut, whole on hover")
+	assert.NotEqual(t, failed.Error, shortError(failed.Error))
+}
+
+// TestInterests_Subnav: the Interests' head leads to their map, in the
+// whole page and never in a poll's answer.
+func TestInterests_Subnav(t *testing.T) {
+	r := newRenderer(t)
+	subnav := `<nav class="subnav" aria-label="Interests views"><a href="/ui/interests" aria-current="page">List</a>` +
+		`<a href="/ui/interests/map">Map</a></nav>`
+	page := interestsPage(1)
+	assert.Contains(t, render(t, r, PageInterests, page), subnav)
+	page.Poll = PollRebuild
+	assert.NotContains(t, render(t, r, PageInterests, page), `aria-label="Interests views"`)
+}
+
+// TestShowOnMap: an area's, an interest's, Unsorted's and a document's
+// pages link to them on the map, the selection one escaped query value;
+// none with the map off, nor Unsorted's before the first rebuild.
+func TestShowOnMap(t *testing.T) {
+	r := newRenderer(t)
+	links := func(out string) []string {
+		var hrefs []string
+		for n := range parse(t, out).Descendants() {
+			if n.Type == html.ElementNode && attrValue(n, "class") == "map-link" {
+				hrefs = append(hrefs, attrValue(n, "href"))
+				assert.Equal(t, "Show on map", textOf(n))
+			}
+		}
+		return hrefs
+	}
+	layout := Layout{Title: "t", Nav: NavInterests}
+	area := InterestPage{Layout: layout, Interest: Interest{ID: "a/1", Area: true, Label: "Area"}}
+	interest := InterestPage{Layout: layout, Interest: Interest{ID: "i 1", Label: "Kafka"}}
+	unsorted := Unsorted{Layout: layout, Run: "r1"}
+	doc := placedDocument(Layout{Title: "d", Nav: NavLibrary}, DocumentPlace{DocumentID: "d&1", Fit: "member",
+		Interest: InterestRef{ID: "k", Label: "Kafka"}})
+	for _, tc := range []struct {
+		page string
+		data any
+		href string
+	}{
+		{PageInterest, area, "/ui/interests/map?select=area%3Aa%2F1"},
+		{PageInterest, interest, "/ui/interests/map?select=interest%3Ai+1"},
+		{PageUnsorted, unsorted, "/ui/interests/map?select=unsorted"},
+		{PageDocument, doc, "/ui/interests/map?select=document%3Ad%261"},
+	} {
+		out := render(t, r, tc.page, tc.data)
+		uitest.AssertInert(t, out)
+		assert.Equal(t, []string{tc.href}, links(out))
+	}
+	area.MapOff, interest.MapOff, unsorted.MapOff = true, true, true
+	off := *doc.Place
+	off.MapOff = true
+	doc.Place = &off
+	for _, tc := range []struct {
+		page string
+		data any
+	}{{PageInterest, area}, {PageInterest, interest}, {PageUnsorted, unsorted}, {PageDocument, doc},
+		{PageUnsorted, Unsorted{Layout: layout}}} {
+		assert.Empty(t, links(render(t, r, tc.page, tc.data)), tc.page)
 	}
 }

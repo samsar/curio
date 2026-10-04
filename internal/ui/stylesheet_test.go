@@ -2,8 +2,10 @@ package ui
 
 import (
 	"io/fs"
+	"math"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -268,6 +270,65 @@ func TestStylesheet(t *testing.T) {
 	for _, m := range regexp.MustCompile(`url\(\s*["']?([^"')]*)`).FindAllStringSubmatch(css, -1) {
 		assert.True(t, strings.HasPrefix(m[1], "data:"), "url(%s", m[1])
 	}
+}
+
+// TestStylesheet_InterestMap: the map's palette is legible as small marks
+// in both themes, every colour 3:1 or more against the surface, Unsorted's
+// neutral too, and no two slots alike; its canvases leave touch to the
+// map; what map.js fills hides while empty; the tabs are the segmented
+// control; and on a phone the panel is a bottom sheet.
+func TestStylesheet_InterestMap(t *testing.T) {
+	rules := cssRules(t, stylesheet(t))
+	light := declarations(ruleFor(t, rules, "", ":root").body)
+	dark := declarations(ruleFor(t, rules, "@media (prefers-color-scheme: dark)", `:root:not([data-theme="light"])`).body)
+	hexRE := regexp.MustCompile(`^#[0-9a-f]{6}$`)
+	for name, theme := range map[string]map[string]string{"light": light, "dark": dark} {
+		seen := map[string]string{}
+		for s := range 30 {
+			token := "--area-" + strconv.Itoa(s)
+			colour := theme[token]
+			require.Regexp(t, hexRE, colour, "%s %s", name, token)
+			assert.Empty(t, seen[colour], "%s %s repeats %s", name, token, seen[colour])
+			seen[colour] = token
+			assert.GreaterOrEqual(t, contrast(t, colour, theme["--surface"]), 3.0, "%s %s", name, token)
+		}
+		assert.GreaterOrEqual(t, contrast(t, theme["--neutral-dot"], theme["--surface"]), 3.0, "%s unsorted", name)
+	}
+
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".map-canvas").body)["touch-action"])
+	for _, selector := range []string{".map-hits:empty", ".map-crumbs:empty", ".map-legend:empty", ".map-status:empty",
+		".map-kicker:empty", ".map-panel-head h2:empty", ".map-panel-body:empty"} {
+		assert.Equal(t, "none", declarations(ruleFor(t, rules, "", selector).body)["display"], selector)
+	}
+	ruleFor(t, rules, "", `.segmented [aria-selected="true"]`)
+	const phone = "@media (max-width: 48rem)"
+	assert.Equal(t, "fixed", declarations(ruleFor(t, rules, phone, ".map-panel").body)["position"])
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, phone, ".map-panel:not(.is-open) .map-panel-body").body)["display"])
+	assert.Equal(t, "55vh", declarations(ruleFor(t, rules, phone, ".map-panel.is-open").body)["max-height"])
+	assert.Equal(t, "6rem", declarations(ruleFor(t, rules, phone, "main.page:has(.interest-map)").body)["padding-bottom"],
+		"the page's foot clears the closed sheet")
+}
+
+// contrast is WCAG 2's contrast ratio of two #rrggbb colours.
+func contrast(t *testing.T, a, b string) float64 {
+	t.Helper()
+	la, lb := luminance(t, a), luminance(t, b)
+	return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+}
+
+// luminance is a #rrggbb colour's relative luminance.
+func luminance(t *testing.T, colour string) float64 {
+	t.Helper()
+	rgb, err := strconv.ParseUint(strings.TrimPrefix(colour, "#"), 16, 32)
+	require.NoError(t, err, colour)
+	channel := func(shift uint) float64 {
+		c := float64(rgb>>shift&0xff) / 255
+		if c <= 0.04045 {
+			return c / 12.92
+		}
+		return math.Pow((c+0.055)/1.055, 2.4)
+	}
+	return 0.2126*channel(16) + 0.7152*channel(8) + 0.0722*channel(0)
 }
 
 // TestStylesheet_Parse: the rule reader finds rules inside at-rules and

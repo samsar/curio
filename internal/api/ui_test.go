@@ -1716,7 +1716,8 @@ func TestUI_Interests(t *testing.T) {
 	one := getPage(t, srv, "/ui/interests/"+interest, http.StatusOK)
 	assert.Contains(t, one, "<h1>Stream &lt;processing&gt;</h1>")
 	assert.Contains(t, one, `<span class="badge badge-accent plain">4 documents</span>`)
-	assert.Regexp(t, `<span class="sep">·</span><span class="text">run of \d{4}-\d\d-\d\d \d\d:\d\d</span></div>`, one)
+	assert.Regexp(t, `<span class="sep">·</span><span class="text">run of \d{4}-\d\d-\d\d \d\d:\d\d</span>`+
+		`<a class="map-link" href="/ui/interests/map\?select=interest%3A`+interest+`">`, one)
 	assert.Contains(t, one, `<a class="doc-title untitled" href="/ui/documents/`+b.ID+
 		`" title="https://example.com/b">example.com/b</a>`)
 	assert.Contains(t, one, `<td class="num muted">2</td>`, "ranked")
@@ -2362,7 +2363,8 @@ func TestUI_DocumentPlace(t *testing.T) {
 		uitest.AssertInert(t, body)
 		assert.Contains(t, body, want, doc.URL)
 	}
-	assert.Contains(t, getPage(t, srv, "/ui/documents/"+d[0].ID, http.StatusOK), `In `+area+` › `+kafka+`</span></p>`)
+	assert.Contains(t, getPage(t, srv, "/ui/documents/"+d[0].ID, http.StatusOK), `In `+area+` › `+kafka+
+		`<a class="map-link" href="/ui/interests/map?select=document%3A`+d[0].ID+`">`)
 	assert.Contains(t, getPage(t, srv, "/ui/documents/"+d[1].ID, http.StatusOK), `Loose fit of `+area+` › `+kafka)
 	assert.Contains(t, getPage(t, srv, "/ui/documents/"+d[2].ID, http.StatusOK),
 		`In <a href="/ui/interests/unsorted">Unsorted</a> · nearest `+kafka)
