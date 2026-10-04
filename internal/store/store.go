@@ -1782,7 +1782,7 @@ type InsightStore interface {
 	// order. When the run's map is built, it lists too those placed off
 	// it: with no place on the map, or with their zoom dot's centre
 	// outside their circle (their interest's, or Unsorted's disc), as
-	// 2.5.x leaves them.
+	// placing with the map off and 2.5.x leave them.
 	Unplaced(ctx context.Context, tenantID, runID string, since time.Time) ([]string, error)
 
 	// PruneRunsExcept deletes every run of the tenant except keepRunIDs, at

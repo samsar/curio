@@ -436,7 +436,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		scheduler *insight.Scheduler
 	)
 	if cfg.Insight.Enabled {
-		placer = insight.NewPlacer(insights, chunks, placementHold(drifted, checked), slog.Default())
+		placer = insight.NewPlacer(insights, chunks, insight.PlacerOptions{Drift: placementHold(drifted, checked),
+			MapOff: !cfg.Insight.Map, Log: slog.Default()})
 		jobDeps.Placer = placer
 	}
 	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights, queue, placer, drifted)
@@ -468,6 +469,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Search:          engine,
 		Insights:        insights,
 		InsightEnabled:  cfg.Insight.Enabled,
+		MapOff:          !cfg.Insight.Map,
 		Upstreams:       upstreams,
 		Gate:            gate,
 		Drift:           driftMonitor,
@@ -713,6 +715,7 @@ func newInsightEngine(ctx context.Context, cfg config.Config, docs store.Documen
 		Placer:          placer,
 		Drift:           drifted,
 		Indexing:        indexing(queue),
+		MapOff:          !cfg.Insight.Map,
 	}, slog.Default()), nil
 }
 

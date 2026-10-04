@@ -287,7 +287,7 @@ func TestIndexHandler_PlacesTheDocument(t *testing.T) {
 			dim := sqlitetest.Width(t, db)
 			ins := sqlitestore.NewInsights(db)
 			run, interest := doneRunWith(t, ins, unit(dim, alternate))
-			deps.Placer = insight.NewPlacer(ins, sqlitestore.NewChunks(db, dim), nil, quietLog)
+			deps.Placer = insight.NewPlacer(ins, sqlitestore.NewChunks(db, dim), insight.PlacerOptions{Log: quietLog})
 			doc := &store.Document{TenantID: "local", URL: "https://example.com/new", ContentType: store.ContentTypeArticle}
 			require.NoError(t, deps.Documents.Create(ctx, doc))
 			require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
@@ -336,7 +336,7 @@ func TestIndexHandler_PlacementNeverFailsTheJob(t *testing.T) {
 			doneRunWith(t, ins, unit(dim, false))
 			var logs bytes.Buffer
 			deps.Placer = insight.NewPlacer(failingPlacements{InsightStore: ins, panic: panics},
-				sqlitestore.NewChunks(db, dim), nil, slog.New(slog.NewTextHandler(&logs, nil)))
+				sqlitestore.NewChunks(db, dim), insight.PlacerOptions{Log: slog.New(slog.NewTextHandler(&logs, nil))})
 			docs := make([]string, 0, 2)
 			for i := range 2 {
 				doc := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/%d", i),

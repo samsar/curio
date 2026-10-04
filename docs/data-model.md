@@ -546,11 +546,12 @@ interest_placements
 Indexed by `(run_id, interest_id, placed_at DESC)` and, for document
 deletes, `(document_id)`.
 
-The positions are NULL on a run without a built map, and on a placement
-curio 2.5.x wrote: it places with none, and moving a placement into
-another interest leaves the place it had, outside its new circle. On a
-built map such a placement is off the map: `GET /v1/interests/map` leaves
-it out, and the next sweep places it again, with a place.
+The positions are NULL on a run without a built map, on a placement made
+with `insight.map: false`, and on one curio 2.5.x wrote: it places with
+none, and moving a placement into another interest leaves the place it
+had, outside its new circle. On a built map such a placement is off the
+map: `GET /v1/interests/map` leaves it out, and the next sweep with the
+map on places it again, with a place.
 
 #### `interest_lineage`
 

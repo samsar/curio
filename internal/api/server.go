@@ -58,6 +58,7 @@ type Deps struct {
 	Search          *search.Engine
 	Insights        store.InsightStore
 	InsightEnabled  bool                            // config insight.enabled: gates POST /v1/interests/rebuild, and "off" in the interests' state
+	MapOff          bool                            // config insight.map: false: GET /v1/interests/map answers 404 map_off
 	Interests       InterestScheduler               // the interest scheduler, whose snapshot healthz and next serve; nil with insight off
 	Upstreams       func() []fetcher.UpstreamHealth // the health of the services fetches depend on; nil reports none
 	Gate            *jobs.QueueGate                 // the workers' queue gate, read and changed at /v1/queue

@@ -11855,6 +11855,32 @@ would be `BEGIN IMMEDIATE`), so a rebuild that commits mid-read is caught
 by reading `LatestRun` again: a different run is read once more, and a
 second change is answered as read, as `GET /v1/interests` does.
 
+### The switch (`insight.map`)
+
+`insight.map: false` turns the map off and leaves the grouping on, which
+`insight.enabled: false` couldn't: a rebuild draws no map (no `BuildMap`,
+none of its 2 minutes) and commits its run without one, as a run from
+before 018, saying `map=off` on its line; a placement gets no place,
+searching for no neighbours and reading no places; and `GET
+/v1/interests/map` answers 404 `map_off` without reading anything, its
+detail naming the setting. On the owner's library that saves the map's
+5.6 to 6.1 s cold and 2.8 to 3.0 s warm a rebuild, up to the 2-minute
+bound on a library too large for it, and `Place`'s neighbour search, 44
+ms median a document against 0.74 ms without. `similar` is still
+written: it is the grouping's, a few milliseconds, and keeping it makes a
+run the same whether the map is on or off. Turned on again, the placements
+made meanwhile into a run whose map was built before have no place: they
+are off the map, and the sweep places them again. Every field that
+carries the switch is a negative (`insight.Config.MapOff`,
+`PlacerOptions.MapOff`, `api.Deps.MapOff`), so a zero value keeps the map
+on, and every test, `cmd/clusterreport` and the engine fixtures draw it as
+before. The reason is `map_off` of its own rather than `no_map` with a
+detail: a client acts on `reason`, and `no_map` says the next rebuild
+draws the map and `curio interests rebuild` draws one now, neither true
+while it is off. A `RunMap` is built, failed (always with an error: one
+that says nothing is "the map failed without saying why"), or nil for
+none drawn, so a map that was never drawn can't be recorded as failed.
+
 ### Measurements on a copy of the owner's library
 
 A fresh `.backup` of the copy the design measured (5,237 fetched

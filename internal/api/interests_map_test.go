@@ -290,22 +290,28 @@ func TestInterestMap_Flat(t *testing.T) {
 	assert.Equal(t, []int{-1, -1, -1}, resp.Documents.Area)
 }
 
+// mapProblem is the map endpoint's 404, which says why there is no map.
+func mapProblem(t *testing.T, s *testServer) InterestMapUnavailable {
+	t.Helper()
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests/map"})
+	require.Equal(t, http.StatusNotFound, resp.status, resp.body)
+	assert.Equal(t, "application/problem+json", resp.contentType)
+	var p InterestMapUnavailable
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &p))
+	assert.Equal(t, InterestMapProblemType, p.Type)
+	assert.Equal(t, "interest map unavailable", p.Title)
+	assert.Equal(t, http.StatusNotFound, p.Status)
+	assert.Equal(t, "/v1/interests/map", p.Instance)
+	return p
+}
+
 // TestInterestMap_Unavailable: without a map the endpoint answers 404 with
 // why: no rebuild yet, one from before maps, or one whose map failed.
 func TestInterestMap_Unavailable(t *testing.T) {
 	s := newTestServer(t)
 	problem := func() InterestMapUnavailable {
 		t.Helper()
-		resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests/map"})
-		require.Equal(t, http.StatusNotFound, resp.status, resp.body)
-		assert.Equal(t, "application/problem+json", resp.contentType)
-		var p InterestMapUnavailable
-		require.NoError(t, json.Unmarshal([]byte(resp.body), &p))
-		assert.Equal(t, InterestMapProblemType, p.Type)
-		assert.Equal(t, "interest map unavailable", p.Title)
-		assert.Equal(t, http.StatusNotFound, p.Status)
-		assert.Equal(t, "/v1/interests/map", p.Instance)
-		return p
+		return mapProblem(t, s)
 	}
 	p := problem()
 	assert.Equal(t, "no_run", p.Reason)
@@ -330,6 +336,22 @@ func TestInterestMap_Unavailable(t *testing.T) {
 	assert.Equal(t, failed, p.RunID)
 	assert.Equal(t, "the map took longer than 2m0s", p.MapError)
 	assert.Contains(t, p.Detail, "the next rebuild draws it again")
+}
+
+// unreadableInsights is an insight store that can't be read: any call
+// panics, which the server answers 500.
+type unreadableInsights struct{ store.InsightStore }
+
+// TestInterestMap_Off: with the map off, the endpoint answers 404 map_off,
+// naming the setting that turns it on, and reads nothing.
+func TestInterestMap_Off(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.MapOff, d.Insights = true, unreadableInsights{} })
+	p := mapProblem(t, s)
+	assert.Equal(t, "map_off", p.Reason)
+	assert.Empty(t, p.RunID)
+	assert.Empty(t, p.MapError)
+	assert.Equal(t, "the interest map is off (insight.map: false in config.yaml): remove the setting, "+
+		"or set it to true, and restart the daemon", p.Detail)
 }
 
 // rebuildMidRead is an insight store whose latest done run changes between

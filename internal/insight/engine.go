@@ -2,6 +2,7 @@ package insight
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,9 @@ type Config struct {
 	// build's (a rebuild asked for mid-drain), so it leaves that rebuild
 	// owed. nil reports none.
 	Indexing func(ctx context.Context) (bool, error)
+	// MapOff is insight.map: false. A rebuild then draws no map, and its
+	// run commits with none, as a run from before maps has.
+	MapOff bool
 }
 
 // Engine rebuilds a tenant's interests: read the document vectors → prepare
@@ -355,9 +359,11 @@ func (e *Engine) run(ctx context.Context, run *store.InterestRun, in input, p pl
 	}
 	t.group = time.Since(start)
 
-	drawn, err := e.drawMap(ctx, run, in, gr, points)
-	if err != nil {
-		return err
+	var drawn drawnMap
+	if !e.cfg.MapOff {
+		if drawn, err = e.drawMap(ctx, run, in, gr, points); err != nil {
+			return err
+		}
 	}
 	// The map was the last reader of the points, which nothing reads past
 	// here, and of the neighbour lists: labelling can take minutes without
@@ -409,7 +415,9 @@ func (e *Engine) drawMap(ctx context.Context, run *store.InterestRun, in input, 
 	if errors.Is(err, context.DeadlineExceeded) {
 		err = fmt.Errorf("the map took longer than %v: %w", e.mapTimeout, err)
 	}
-	d.m, d.failed = nil, oneLine(err.Error(), maxMapError)
+	// A failed map always says why: one that said nothing would read as
+	// none drawn.
+	d.m, d.failed = nil, cmp.Or(oneLine(err.Error(), maxMapError), "the map failed without saying why")
 	args := []any{"tenant", run.TenantID, "run", run.ID, "err", d.failed, "map_ms", d.took.Milliseconds()}
 	if stack != "" {
 		args = append(args, "stack", stack)
@@ -420,6 +428,9 @@ func (e *Engine) drawMap(ctx context.Context, run *store.InterestRun, in input, 
 
 // maxMapError is the longest a failed map's error is kept.
 const maxMapError = 512
+
+// mapOff is the "interests rebuilt" line's map with the map off.
+const mapOff = "off"
 
 // callMapper calls the engine's map builder, turning a panic into an error
 // that starts "panic:" and returning its stack apart, for the log.
@@ -460,7 +471,8 @@ func (e *Engine) mapInput(in input, gr *grouped, points []Point) MapInput {
 }
 
 // drawnMap is the map step's outcome: the map, or why there is none, how
-// long it took and its params.
+// long it took and its params. The zero value is no map drawn, the map
+// being off.
 type drawnMap struct {
 	m      *Map
 	failed string
@@ -468,13 +480,16 @@ type drawnMap struct {
 	params []byte
 }
 
-// runMap is the run's record of the map.
+// runMap is the run's record of the map: nil when none was drawn.
 func (d drawnMap) runMap() *store.RunMap {
-	if d.m == nil {
+	switch {
+	case d.m != nil:
+		return &store.RunMap{Status: store.MapBuilt, Kind: d.m.Kind, Took: d.took, Params: d.params,
+			DotRadius: d.m.DotRadius, Unsorted: d.m.Unsorted}
+	case d.failed != "":
 		return &store.RunMap{Status: store.MapFailed, Error: d.failed, Took: d.took, Params: d.params}
 	}
-	return &store.RunMap{Status: store.MapBuilt, Kind: d.m.Kind, Took: d.took, Params: d.params,
-		DotRadius: d.m.DotRadius, Unsorted: d.m.Unsorted}
+	return nil
 }
 
 // sweep places the documents indexed while the rebuild ran into it, best
@@ -542,7 +557,11 @@ func (e *Engine) logRebuilt(run *store.InterestRun, c store.RunCommit, gr *group
 		"changed", o.ChangedDocuments, "read_ms", t.read.Milliseconds(), "group_ms", t.group.Milliseconds(),
 		"label_ms", t.label.Milliseconds(), "labels_llm", stats.llm, "labels_terms", stats.terms,
 		"persist_ms", t.persist.Milliseconds(), "placed_after", placed,
-		"map", c.Outcome.Map.Status, "map_kind", c.Outcome.Map.Kind, "map_ms", c.Outcome.Map.Took.Milliseconds(),
+	}
+	if m := o.Map; m != nil {
+		args = append(args, "map", m.Status, "map_kind", m.Kind, "map_ms", m.Took.Milliseconds())
+	} else {
+		args = append(args, "map", mapOff)
 	}
 	if e.cfg.Drift != nil && e.cfg.Drift() != "" {
 		args = append(args, "embeddings_drifted", true)

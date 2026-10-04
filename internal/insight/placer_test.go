@@ -92,7 +92,7 @@ func TestPlacer_Holds(t *testing.T) {
 
 	run := f.rebuild(t, f.engine(nil, nil, Config{}))
 	doc := f.add(t, 0, 1)[0]
-	drifted := NewPlacer(f.insights, f.vectors, func() string { return "the embeddings drifted" }, nil)
+	drifted := NewPlacer(f.insights, f.vectors, PlacerOptions{Drift: func() string { return "the embeddings drifted" }})
 	drifted.Place(ctx, tenant, doc)
 	assert.Empty(t, f.placedInto(t, run.ID), "held while the embeddings drifted")
 
@@ -135,7 +135,7 @@ func TestPlacer_FailuresWarnOncePerRun(t *testing.T) {
 	e := f.engine(nil, nil, Config{})
 	first := f.rebuild(t, e)
 	faulty := &faultyPlacements{faultyInsights: f.insights, err: errLocked}
-	p := NewPlacer(faulty, f.vectors, nil, f.debugLog())
+	p := NewPlacer(faulty, f.vectors, PlacerOptions{Log: f.debugLog()})
 	p.Place(ctx, tenant, f.add(t, 0, 1)[0])
 	faulty.err, faulty.panic = nil, true
 	p.Place(ctx, tenant, f.add(t, 1, 1)[0])
@@ -399,7 +399,7 @@ func TestPlacer_CancelledSearchIsQuiet(t *testing.T) {
 		return ctx.Err()
 	}
 	doc := f.addAround(t, "d", 0, 1, rand.New(rand.NewPCG(6, 6)))[0]
-	NewPlacer(f.insights, f.vectors, nil, f.debugLog()).Place(ctx, tenant, doc)
+	NewPlacer(f.insights, f.vectors, PlacerOptions{Log: f.debugLog()}).Place(ctx, tenant, doc)
 	assert.Empty(t, f.lines("level=WARN"))
 	assert.Len(t, f.lines("fell back"), 1, "at debug")
 	assert.Len(t, f.lines("placement cancelled"), 1)
@@ -582,7 +582,7 @@ func TestPlacer_SweepWritesInBatches(t *testing.T) {
 			cancel()
 			return ctx.Err()
 		}}
-		p := NewPlacer(f.insights, chunks, nil, slog.New(slog.NewTextHandler(&f.logs, nil))).WithSweepBatch(2)
+		p := NewPlacer(f.insights, chunks, PlacerOptions{Log: f.log()}).WithSweepBatch(2)
 		placed, err := p.Sweep(ctx, tenant)
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Equal(t, 4, placed, "two batches of two; the fifth document's was never written")
@@ -595,7 +595,7 @@ func TestPlacer_SweepWritesInBatches(t *testing.T) {
 	t.Run("a write fails", func(t *testing.T) {
 		f, run := setup(t)
 		insights := &failingPlaceMany{InsightStore: f.insights, n: 1}
-		p := NewPlacer(insights, f.vectors, nil, slog.New(slog.NewTextHandler(&f.logs, nil))).WithSweepBatch(3)
+		p := NewPlacer(insights, f.vectors, PlacerOptions{Log: f.log()}).WithSweepBatch(3)
 		placed, err := p.Sweep(context.Background(), tenant)
 		require.ErrorIs(t, err, errLocked)
 		assert.Equal(t, 3, placed, "the first batch")
@@ -607,9 +607,71 @@ func TestPlacer_SweepWritesInBatches(t *testing.T) {
 			f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
 			return nil
 		}}
-		p := NewPlacer(f.insights, chunks, nil, slog.New(slog.NewTextHandler(&f.logs, nil))).WithSweepBatch(2)
+		p := NewPlacer(f.insights, chunks, PlacerOptions{Log: f.log()}).WithSweepBatch(2)
 		placed, err := p.Sweep(context.Background(), tenant)
 		require.NoError(t, err)
 		assert.Equal(t, 4, placed, "the batches after the commit write nothing into the run it replaced")
 	})
+}
+
+// countingSearches is a chunk store that counts its vector searches.
+type countingSearches struct {
+	*vectorSource
+	searches int
+}
+
+func (c *countingSearches) VectorSearch(ctx context.Context, tenantID string, q []float32, limit int, f store.SearchFilters) ([]store.ChunkHit, error) {
+	c.searches++
+	return c.vectorSource.VectorSearch(ctx, tenantID, q, limit, f)
+}
+
+// countingPositions is an insight store that counts its reads of places on
+// the map.
+type countingPositions struct {
+	store.InsightStore
+	reads int
+}
+
+func (c *countingPositions) MapPositions(ctx context.Context, runID string, ids []string) ([]store.MapPlace, error) {
+	c.reads++
+	return c.InsightStore.MapPositions(ctx, runID, ids)
+}
+
+// TestPlacer_MapOff: with the map off, the placer places documents into
+// a run whose map is built without a place on it, searching for no
+// neighbours and reading no places; once the map is on again, a sweep
+// gives each its place, inside its circle.
+func TestPlacer_MapOff(t *testing.T) {
+	ctx := context.Background()
+	f := mapLibrary(t, "d")
+	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	require.Equal(t, store.MapBuilt, run.Map.Status)
+	chunks := &countingSearches{vectorSource: f.vectors}
+	insights := &countingPositions{InsightStore: f.insights}
+	off := NewPlacer(insights, chunks, PlacerOptions{MapOff: true, Log: f.log()})
+	r := rand.New(rand.NewPCG(10, 10))
+	docs := f.addAround(t, "d", 0, 1, r)
+	off.Place(ctx, tenant, docs[0])
+	docs = append(docs, f.addAround(t, "d", 1, 2, r)...)
+	placed, err := off.Sweep(ctx, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, 2, placed)
+	again, err := off.Sweep(ctx, tenant)
+	require.NoError(t, err)
+	assert.Zero(t, again, "placing without a place repairs nothing")
+	assert.Zero(t, chunks.searches, "no neighbour searched")
+	assert.Zero(t, insights.reads, "no place read")
+	assert.Len(t, f.placedInto(t, run.ID), 3)
+	none, err := f.store.MapPositions(ctx, run.ID, docs)
+	require.NoError(t, err)
+	assert.Empty(t, none, "placed without places")
+
+	placed, err = f.placer().Sweep(ctx, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, 3, placed, "the map on again, each gets its place")
+	for _, doc := range docs {
+		got := f.placeOf(t, run.ID, doc)
+		assert.True(t, insideCircle(got.Map.ZoomX, got.Map.ZoomY, run.Map.DotRadius, f.circleIn(t, run, got)))
+	}
+	assert.Empty(t, f.lines("level=WARN"))
 }

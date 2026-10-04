@@ -112,12 +112,13 @@ type MapDocumentColumns struct {
 // InterestMapProblemType is the problem type of a map that isn't there.
 const InterestMapProblemType = "urn:curio:problem:interest-map-unavailable"
 
-// Why there is no map: no rebuild is done, the latest predates maps, or its
-// map failed.
+// Why there is no map: no rebuild is done, the latest drew none, its map
+// failed, or the map is off.
 const (
 	mapNoRun  = "no_run"
 	mapNoMap  = "no_map"
 	mapFailed = "map_failed"
+	mapIsOff  = "map_off"
 )
 
 // InterestMapUnavailable is the 404 problem of a map that isn't there:
@@ -161,6 +162,13 @@ func unavailable(run *store.InterestRun) error {
 	return &mapUnavailableError{body: b}
 }
 
+// mapOffError is the map switched off in config.yaml.
+func mapOffError() error {
+	return &mapUnavailableError{body: InterestMapUnavailable{Reason: mapIsOff, Problem: Problem{
+		Detail: "the interest map is off (insight.map: false in config.yaml): remove the setting, " +
+			"or set it to true, and restart the daemon"}}}
+}
+
 func (d Deps) handleInterestMap(w http.ResponseWriter, r *http.Request) {
 	resp, err := d.interestMap(r.Context())
 	if err != nil {
@@ -171,12 +179,16 @@ func (d Deps) handleInterestMap(w http.ResponseWriter, r *http.Request) {
 }
 
 // interestMap is the latest done rebuild's map. A missing map is a
-// *mapUnavailableError. The run, its groups and its documents are three
-// reads, outside a transaction (every one of this store's takes the write
-// lock): a rebuild that commits between them prunes the run read, so the
-// map is read once more from the newer run, and a second change is answered
-// as read.
+// *mapUnavailableError, and so is every map with the map off, which reads
+// nothing. The run, its groups and its documents are three reads, outside
+// a transaction (every one of this store's takes the write lock): a
+// rebuild that commits between them prunes the run read, so the map is
+// read once more from the newer run, and a second change is answered as
+// read.
 func (d Deps) interestMap(ctx context.Context) (InterestMapResponse, error) {
+	if d.MapOff {
+		return InterestMapResponse{}, mapOffError()
+	}
 	for attempt := 0; ; attempt++ {
 		run, err := d.Insights.LatestRun(ctx, d.TenantID, store.InterestRunDone)
 		switch {
@@ -349,10 +361,11 @@ func documentColumns(docs []store.MapDocument, interestAt map[string]int, intere
 
 // onMap reports whether d has a place on the map: any place, for a
 // document the run assigned; for one placed since, a dot whose centre lies
-// inside circle, its interest's or Unsorted's disc. 2.5.x places documents
-// with no place, and moving one into another interest keeps the place it
-// had. Such a document is left out until the placement sweep repairs it,
-// rather than drawn in a circle it isn't in or given a place no row holds.
+// inside circle, its interest's or Unsorted's disc. Placing with the map
+// off gives a document no place, and so does 2.5.x, where moving one into
+// another interest keeps the place it had. Such a document is left out
+// until the placement sweep repairs it, rather than drawn in a circle it
+// isn't in or given a place no row holds.
 func onMap(d store.MapDocument, circle MapCircle) bool {
 	if d.Map == nil {
 		return false

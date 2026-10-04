@@ -732,6 +732,17 @@ func seedMap(t *testing.T, s *testServer, f contractFixtures) {
 	s.placeMapped(t, r.commit(t), kafka, docs[3], mapPlace(500, 121, 301))
 }
 
+// TestOpenAPI_MapOffMatchesTheSchema: the map's 404 with the map off is
+// the documented operation's response.
+func TestOpenAPI_MapOffMatchesTheSchema(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.MapOff = true })
+	op := specOperations(strictSpec(t))["GET /v1/interests/map"]
+	require.NotNil(t, op)
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests/map"})
+	require.Equal(t, http.StatusNotFound, resp.status, resp.body)
+	checkResponse(t, op, resp, "GET /v1/interests/map with the map off", propertiesSeen{})
+}
+
 // unsavableBookmark is a bookmark store that can't save url, for an import
 // that reports an error.
 type unsavableBookmark struct {

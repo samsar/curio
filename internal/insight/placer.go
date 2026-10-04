@@ -69,8 +69,9 @@ const (
 // Placer puts documents indexed between rebuilds into the tenant's
 // current grouping, the latest done run: each into its nearest interest
 // when the cosine to its centroid reaches LooseFitThreshold, into Unsorted
-// otherwise, in the space the run grouped in (RunSpace). The run's space
-// is cached until a newer run is done. Placement is held while the
+// otherwise, in the space the run grouped in (RunSpace), with a place on
+// the run's map when it is built and the map is on. The run's space is
+// cached until a newer run is done. Placement is held while the
 // embeddings drifted or a re-embedding's fresh rebuild is owed: the run's
 // centroids came from vectors the library no longer holds. It is safe for
 // concurrent use.
@@ -79,6 +80,7 @@ type Placer struct {
 	chunks   store.ChunkStore
 	drift    func() string
 	log      *slog.Logger
+	mapOff   bool
 	// neighbourBudget is a sweep's sweepNeighbourBudget, and
 	// neighbourTimeout a placement's.
 	neighbourBudget  time.Duration
@@ -105,14 +107,26 @@ func (w *runWarnings) first(runID string) bool {
 	return first
 }
 
-// NewPlacer returns a Placer over the stores; drift says how the
-// embeddings drifted, "" while they haven't (nil reports no drift).
-func NewPlacer(insights store.InsightStore, chunks store.ChunkStore, drift func() string, log *slog.Logger) *Placer {
+// PlacerOptions are what a Placer works with besides its stores.
+type PlacerOptions struct {
+	// Drift says how the embeddings drifted, "" while they haven't: it
+	// holds placement. nil reports no drift.
+	Drift func() string
+	// MapOff is insight.map: false. A placement then gets no place on the
+	// map, even on a run whose map is built, and searches for no
+	// neighbours; the sweep repairs it once the map is on again.
+	MapOff bool
+	Log    *slog.Logger // default slog.Default()
+}
+
+// NewPlacer returns a Placer over the stores.
+func NewPlacer(insights store.InsightStore, chunks store.ChunkStore, opts PlacerOptions) *Placer {
+	log := opts.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Placer{insights: insights, chunks: chunks, drift: drift, log: log, neighbourBudget: sweepNeighbourBudget,
-		neighbourTimeout: neighbourTimeout, batch: sweepBatch}
+	return &Placer{insights: insights, chunks: chunks, drift: opts.Drift, log: log, mapOff: opts.MapOff,
+		neighbourBudget: sweepNeighbourBudget, neighbourTimeout: neighbourTimeout, batch: sweepBatch}
 }
 
 // Place places a document just indexed into the tenant's current
@@ -176,7 +190,8 @@ func (p *Placer) place(ctx context.Context, tenantID, documentID string) (runID 
 // assigned nor placed: those indexed while a rebuild ran, and any whose
 // placement failed. On a built map it places again, with a place, those
 // placed off it (InsightStore.Unplaced): with no place, or outside their
-// circle, as 2.5.x leaves them. A document placed meanwhile on the map
+// circle, as placing with the map off and 2.5.x leave them; with the map
+// off, it can't, and keeps them. A document placed meanwhile on the map
 // keeps that placement. A document whose vectors can't be placed (another
 // width, a non-finite value) is left out with a warning, so one can't
 // stall the rest. Searching for neighbours on the map stops once it has
@@ -282,7 +297,7 @@ func (p *Placer) space(ctx context.Context, run *store.InterestRun) (*runPlaceme
 	if err != nil {
 		return nil, err
 	}
-	rp, err := newRunPlacement(run, groups)
+	rp, err := newRunPlacement(run, groups, !p.mapOff)
 	if err != nil {
 		return nil, fmt.Errorf("run %s: %w", run.ID, err)
 	}
@@ -332,8 +347,8 @@ func (p *Placer) logOnce(w *runWarnings, runID, msg string, args ...any) {
 
 // runPlacement is a run's space as the Placer caches it: the interests'
 // centroids, by interest ID, around the run's mean; and, when the run's
-// map is built, each interest's circle and anchor, Unsorted's disc and the
-// dots' radius.
+// map is built and placements go on it, each interest's circle and
+// anchor, Unsorted's disc and the dots' radius.
 type runPlacement struct {
 	runID     string
 	space     *RunSpace
@@ -344,7 +359,9 @@ type runPlacement struct {
 	dotRadius float64
 }
 
-func newRunPlacement(run *store.InterestRun, groups []store.InterestGroup) (*runPlacement, error) {
+// newRunPlacement is run's space, with its groups; with mapped, its map
+// too, when it is built.
+func newRunPlacement(run *store.InterestRun, groups []store.InterestGroup, mapped bool) (*runPlacement, error) {
 	interests := slices.DeleteFunc(slices.Clone(groups), func(g store.InterestGroup) bool {
 		return g.Level != store.InterestLevelInterest
 	})
@@ -355,7 +372,7 @@ func newRunPlacement(run *store.InterestRun, groups []store.InterestGroup) (*run
 	for i, g := range interests {
 		rp.interests[i], centroids[i] = g.ID, g.Centroid
 	}
-	if m := run.Map; m != nil && m.Status == store.MapBuilt {
+	if m := run.Map; mapped && m != nil && m.Status == store.MapBuilt {
 		rp.mapped, rp.unsorted, rp.dotRadius = true, m.Unsorted, m.DotRadius
 		rp.places = make(map[string]store.GroupMap, len(interests))
 		for _, g := range interests {
@@ -403,11 +420,12 @@ func (rp *runPlacement) place(documentID string, vec []float32) (placed, error) 
 	return out, nil
 }
 
-// position gives pl its place on the run's map, when the map is built:
-// near its most similar mapped documents when search is set and finds
-// some within neighbourTimeout, else the fallback place. A failed search
-// falls back: a warning for the run's first, debug after, and debug alone
-// when ctx ended, which the placement reports itself.
+// position gives pl its place on the run's map, when the map is built and
+// placements go on it (runPlacement.mapped): near its most similar mapped
+// documents when search is set and finds some within neighbourTimeout,
+// else the fallback place. A failed search falls back: a warning for the
+// run's first, debug after, and debug alone when ctx ended, which the
+// placement reports itself.
 func (p *Placer) position(ctx context.Context, tenantID string, rp *runPlacement, pl *placed, search bool) {
 	if !rp.mapped {
 		return

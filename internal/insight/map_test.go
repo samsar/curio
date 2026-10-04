@@ -156,6 +156,8 @@ func TestRebuild_MapFailures(t *testing.T) {
 		{"a long error", func(context.Context, MapInput) (*Map, error) {
 			return nil, errors.New(strings.Repeat("no room for the lattice,\n", 40))
 		}, "no room for the lattice, no room"},
+		{"an error that says nothing", func(context.Context, MapInput) (*Map, error) { return nil, errors.New("") },
+			"the map failed without saying why"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := mapLibrary(t, "d")
@@ -201,6 +203,33 @@ func TestRebuild_MapFailures(t *testing.T) {
 		assert.Zero(t, st.Failures, "no failure counted")
 		assert.NotContains(t, f.logs.String(), "interests: map failed")
 	})
+}
+
+// TestRebuild_MapOff: with the map off a rebuild draws none, never
+// calling the mapper, and commits its run without one: no place on any
+// group or assignment, the similar interests listed all the same, and
+// map=off on its line, with no kind or time.
+func TestRebuild_MapOff(t *testing.T) {
+	f := mapLibrary(t, "d")
+	mapper := func(context.Context, MapInput) (*Map, error) {
+		t.Error("the map is off: nothing draws it")
+		return nil, errors.New("off")
+	}
+	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true, MapOff: true}).WithMapper(mapper))
+	assert.Equal(t, store.InterestRunDone, run.Status)
+	assert.Nil(t, run.Map)
+	gs, as := f.assertGrouping(t, run)
+	for _, g := range gs {
+		assert.Nil(t, g.Map, g.ID)
+		assert.Len(t, g.Similar, 3, "the three others")
+	}
+	for _, a := range as {
+		assert.Nil(t, a.Map, a.DocumentID)
+	}
+	line := f.logLine(t, "interests rebuilt")
+	assert.True(t, strings.HasSuffix(strings.TrimSpace(line), " map=off"), line)
+	assert.NotContains(t, line, "map_kind")
+	assert.NotContains(t, line, "map_ms")
 }
 
 // TestRebuild_MapStartsWarm: a rebuild after a change draws its map warm

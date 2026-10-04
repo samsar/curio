@@ -1104,10 +1104,10 @@ const (
 	// offMapSQL holds when placement p is off its run's built map: the
 	// run's map is built, and p has no place on it, or its zoom dot's
 	// centre lies outside its circle, its interest's or, placed into
-	// Unsorted, Unsorted's disc. 2.5.x leaves such placements: it places
-	// with no place, and moving a placement into another interest keeps
-	// the place it had. The run and the interest's group are read by their
-	// primary keys.
+	// Unsorted, Unsorted's disc. Placing with the map off leaves such
+	// placements, and so does 2.5.x: it places with no place, and moving a
+	// placement into another interest keeps the place it had. The run and
+	// the interest's group are read by their primary keys.
 	offMapSQL = `EXISTS (
 	SELECT 1 FROM interest_runs r
 	LEFT JOIN interest_groups g ON g.run_id = r.id AND g.interest_id = p.interest_id

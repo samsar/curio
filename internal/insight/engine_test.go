@@ -216,15 +216,18 @@ func (f *engineFixture) engine(g Grouper, llm Labeler, cfg Config) *Engine {
 	if g == nil {
 		g = FlatGrouper(byAxis)
 	}
-	e := New(f.docs, f.vectors, f.insights, g, llm, cfg, slog.New(slog.NewTextHandler(&f.logs, nil)))
+	e := New(f.docs, f.vectors, f.insights, g, llm, cfg, f.log())
 	e.now = func() time.Time { return f.clock }
 	return e
 }
 
 // placer is a Placer over the fixture's stores, logging to its logs.
 func (f *engineFixture) placer() *Placer {
-	return NewPlacer(f.insights, f.vectors, nil, slog.New(slog.NewTextHandler(&f.logs, nil)))
+	return NewPlacer(f.insights, f.vectors, PlacerOptions{Log: f.log()})
 }
+
+// log is a logger to the fixture's logs.
+func (f *engineFixture) log() *slog.Logger { return slog.New(slog.NewTextHandler(&f.logs, nil)) }
 
 // rebuild runs a manual Rebuild that must succeed and returns its run.
 func (f *engineFixture) rebuild(t *testing.T, e *Engine) *store.InterestRun {
@@ -415,10 +418,18 @@ func TestRebuild_First(t *testing.T) {
 	}
 }
 
-// assertInvariants checks a committed run against its rows: every document
-// once, a member, a loose fit or unsorted; and the tenant's live
-// identities exactly the run's groups.
+// assertInvariants checks a committed run against its rows: its grouping
+// (assertGrouping), and its map (assertMapped).
 func (f *engineFixture) assertInvariants(t *testing.T, run *store.InterestRun) {
+	t.Helper()
+	gs, as := f.assertGrouping(t, run)
+	assertMapped(t, run, gs, as)
+}
+
+// assertGrouping checks a committed run's grouping against its rows, and
+// returns them: every document once, a member, a loose fit or unsorted;
+// and the tenant's live identities exactly the run's groups.
+func (f *engineFixture) assertGrouping(t *testing.T, run *store.InterestRun) ([]store.InterestGroup, []store.InterestAssignment) {
 	t.Helper()
 	as, err := f.store.RunAssignments(context.Background(), run.ID)
 	require.NoError(t, err)
@@ -442,7 +453,7 @@ func (f *engineFixture) assertInvariants(t *testing.T, run *store.InterestRun) {
 	assert.Equal(t, run.NumDocuments, members+run.NumLoose+run.NumUnsorted)
 	slices.Sort(ids)
 	assert.Equal(t, ids, f.live(t), "the live identities are the run's groups")
-	assertMapped(t, run, gs, as)
+	return gs, as
 }
 
 // assertMapped checks a run has a map, built with a place for every group
@@ -847,7 +858,7 @@ func TestRebuild_Failures(t *testing.T) {
 		f := newEngineFixture(t, 3, 4)
 		prior := f.rebuild(t, f.engine(nil, nil, Config{}))
 		latest := &latestFailsLater{faultyInsights: f.insights}
-		e := New(f.docs, f.vectors, latest, failing, nil, Config{}, slog.New(slog.NewTextHandler(&f.logs, nil)))
+		e := New(f.docs, f.vectors, latest, failing, nil, Config{}, f.log())
 		runID, err := e.Rebuild(context.Background(), tenant, store.RunTriggerManual)
 		require.Error(t, err)
 

@@ -783,11 +783,12 @@ paths:
         by id, then those placed since, by id; documents failed or dead
         since are left out, and so is a document placed since with no place
         on the map, or with its dot outside its circle (as curio 2.5.x
-        leaves one), until the daemon's next placement sweep places it
-        again. One response holds the whole map, unpaged. A
+        leaves one, or placing with the map off), until the daemon's next
+        placement sweep places it again. One response holds the whole map, unpaged. A
         rebuild that commits while the map is read is answered from the
-        newer run. Without a map (no rebuild yet, a rebuild from before
-        maps, or one whose map failed) it answers 404 saying which.
+        newer run. Without a map (no rebuild yet, a rebuild that drew
+        none, one whose map failed, or the map switched off in
+        config.yaml) it answers 404 saying which.
       responses:
         "200":
           description: OK
@@ -2091,9 +2092,10 @@ components:
         No map: an RFC 7807 problem of type
         urn:curio:problem:interest-map-unavailable, with why. no_run: no
         rebuild is done yet, and the first draws the map. no_map: the
-        latest rebuild predates maps; the next draws it. map_failed: the
-        latest rebuild's map failed (map_error says why); the next tries
-        again.
+        latest rebuild drew no map (it predates maps, or the map was off);
+        the next draws it. map_failed: the latest rebuild's map failed
+        (map_error says why); the next tries again. map_off: the map is
+        off (insight.map: false in config.yaml), and nothing is read.
       type: object
       properties:
         type:       { type: string, format: uri, enum: ["urn:curio:problem:interest-map-unavailable"] }
@@ -2102,8 +2104,8 @@ components:
         detail:     { type: string, description: "Why, in a sentence a page can show" }
         instance:   { type: string, description: "The request path" }
         request_id: { type: string, description: "The response's X-Request-Id; quote it against the daemon log" }
-        reason:     { type: string, enum: [no_run, no_map, map_failed] }
-        run_id:     { type: string, format: uuid, description: "The latest rebuild; absent for no_run" }
+        reason:     { type: string, enum: [no_run, no_map, map_failed, map_off] }
+        run_id:     { type: string, format: uuid, description: "The latest rebuild; absent for no_run and map_off" }
         map_error:  { type: string, description: "Why its map failed; map_failed only" }
       required: [type, title, status, reason]
 

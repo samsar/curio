@@ -29,7 +29,7 @@ The clients are written by hand: `internal/client` for the CLI and the
   retired interest's 410 (`urn:curio:problem:interest-retired`, what took
   its documents) and the interest map's 404
   (`urn:curio:problem:interest-map-unavailable`, `reason` `no_run`,
-  `no_map` or `map_failed`).
+  `no_map`, `map_failed` or `map_off`).
 - **Pagination** on `GET /v1/bookmarks`, `/v1/documents` and `/v1/jobs` is
   cursor-based, not offset. A response carries `next_cursor` exactly when
   another page follows; pass it back as `?cursor=` for that page. Documents
