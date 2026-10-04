@@ -391,31 +391,51 @@ func TestDocMap_WarmFromASharedPoint(t *testing.T) {
 }
 
 // TestDocMap_RefusesBadInput: what the map can't lay out is an error,
-// never a panic.
+// never a panic, each for its own reason.
 func TestDocMap_RefusesBadInput(t *testing.T) {
 	base := func() layout.DocMapInput { return small.build(6).subset([]int{0, 1, 2, 3}).docInput(1) }
-	for name, spoil := range map[string]func(in *layout.DocMapInput){
-		"fewer vectors":         func(in *layout.DocMapInput) { in.Vectors = in.Vectors[:3] },
-		"fewer neighbour lists": func(in *layout.DocMapInput) { in.Neighbours = in.Neighbours[:3] },
-		"a duplicate key":       func(in *layout.DocMapInput) { in.Keys[1] = in.Keys[0] },
-		"an empty key":          func(in *layout.DocMapInput) { in.Keys[2] = "" },
-		"a neighbour past n":    func(in *layout.DocMapInput) { in.Neighbours[0] = []layout.Neighbour{{Index: 4, Similarity: 0.5}} },
-		"a negative neighbour":  func(in *layout.DocMapInput) { in.Neighbours[0] = []layout.Neighbour{{Index: -1, Similarity: 0.5}} },
-		"its own neighbour":     func(in *layout.DocMapInput) { in.Neighbours[1] = []layout.Neighbour{{Index: 1, Similarity: 1}} },
-		"a neighbour twice":     func(in *layout.DocMapInput) { in.Neighbours[1] = []layout.Neighbour{{2, 0.5}, {2, 0.5}} },
-		"a NaN similarity":      func(in *layout.DocMapInput) { in.Neighbours[1] = []layout.Neighbour{{2, math.NaN()}} },
-		"a NaN component":       func(in *layout.DocMapInput) { in.Vectors[3] = []float32{float32(math.NaN())} },
-		"an infinite component": func(in *layout.DocMapInput) { in.Vectors[3][0] = float32(math.Inf(1)) },
-		"vectors of two widths": func(in *layout.DocMapInput) { in.Vectors[3] = in.Vectors[3][:5] },
-		"an infinite prior":     func(in *layout.DocMapInput) { in.Prior = map[string]layout.XY{"x": {X: math.Inf(1)}} },
+	for name, tc := range map[string]struct {
+		spoil func(in *layout.DocMapInput)
+		want  string
+	}{
+		"fewer vectors":         {func(in *layout.DocMapInput) { in.Vectors = in.Vectors[:3] }, "3 vectors for 4 keys"},
+		"fewer neighbour lists": {func(in *layout.DocMapInput) { in.Neighbours = in.Neighbours[:3] }, "3 neighbour lists"},
+		"a duplicate key":       {func(in *layout.DocMapInput) { in.Keys[1] = in.Keys[0] }, "appears twice"},
+		"an empty key":          {func(in *layout.DocMapInput) { in.Keys[2] = "" }, "key 2 is empty"},
+		"a neighbour past n": {func(in *layout.DocMapInput) {
+			in.Neighbours[0] = []layout.Neighbour{{Index: 4, Similarity: 0.5}}
+		}, "has neighbour 4 of 4"},
+		"a negative neighbour": {func(in *layout.DocMapInput) {
+			in.Neighbours[0] = []layout.Neighbour{{Index: -1, Similarity: 0.5}}
+		}, "has neighbour -1 of 4"},
+		"its own neighbour": {func(in *layout.DocMapInput) {
+			in.Neighbours[1] = []layout.Neighbour{{Index: 1, Similarity: 1}}
+		}, "its own neighbour"},
+		"a neighbour twice": {func(in *layout.DocMapInput) {
+			in.Neighbours[1] = []layout.Neighbour{{2, 0.5}, {2, 0.5}}
+		}, "lists neighbour 2 twice"},
+		"a NaN similarity": {func(in *layout.DocMapInput) {
+			in.Neighbours[1] = []layout.Neighbour{{2, math.NaN()}}
+		}, "non-finite similarity"},
+		"a NaN component": {func(in *layout.DocMapInput) {
+			in.Vectors[3] = slices.Repeat([]float32{float32(math.NaN())}, len(in.Vectors[3]))
+		}, "vector 3 has a NaN or infinite component"},
+		"an infinite component": {func(in *layout.DocMapInput) {
+			in.Vectors[3][0] = float32(math.Inf(1))
+		}, "vector 3 has a NaN or infinite component"},
+		"vectors of two widths": {func(in *layout.DocMapInput) { in.Vectors[3] = in.Vectors[3][:5] }, "vector 3 has dim 5"},
+		"an infinite prior": {func(in *layout.DocMapInput) {
+			in.Prior = map[string]layout.XY{"x": {X: math.Inf(1)}}
+		}, "prior position"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			in := base()
 			in.Vectors = slices.Clone(in.Vectors)
 			in.Vectors[3] = slices.Clone(in.Vectors[3])
-			spoil(&in)
+			tc.spoil(&in)
 			_, err := layout.DocMap(context.Background(), in)
 			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
 			assert.False(t, errors.Is(err, context.Canceled))
 		})
 	}

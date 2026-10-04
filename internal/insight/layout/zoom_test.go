@@ -352,41 +352,54 @@ func TestZoom_CancelledAtEveryCheck(t *testing.T) {
 }
 
 // TestZoom_RefusesBadInput: what the view can't draw is an error, never a
-// panic.
+// panic, each for its own reason.
 func TestZoom_RefusesBadInput(t *testing.T) {
 	base := func() layout.ZoomInput { return small.build(11).zoomInput(true, "g") }
-	for name, spoil := range map[string]func(in *layout.ZoomInput){
-		"fewer vectors":      func(in *layout.ZoomInput) { in.Vectors = in.Vectors[1:] },
-		"fewer interests":    func(in *layout.ZoomInput) { in.Interest = in.Interest[1:] },
-		"fewer nearest":      func(in *layout.ZoomInput) { in.Nearest = in.Nearest[1:] },
-		"fewer similarities": func(in *layout.ZoomInput) { in.Similarity = in.Similarity[1:] },
-		"a duplicate key":    func(in *layout.ZoomInput) { in.Keys[1] = in.Keys[0] },
-		"an interest past k": func(in *layout.ZoomInput) { in.Interest[0] = len(in.Interests) },
-		"a nearest past k":   func(in *layout.ZoomInput) { in.Interest[0], in.Nearest[0] = -1, len(in.Interests) },
-		"a NaN similarity":   func(in *layout.ZoomInput) { in.Similarity[0] = math.NaN() },
-		"a NaN component":    func(in *layout.ZoomInput) { in.Vectors[0] = slices.Repeat([]float32{float32(math.NaN())}, 40) },
-		"an empty interest": func(in *layout.ZoomInput) {
+	for name, tc := range map[string]struct {
+		spoil func(in *layout.ZoomInput)
+		want  string
+	}{
+		"fewer vectors":      {func(in *layout.ZoomInput) { in.Vectors = in.Vectors[1:] }, "299 vectors for 300"},
+		"fewer interests":    {func(in *layout.ZoomInput) { in.Interest = in.Interest[1:] }, "299 interests, 300 nearest and 300"},
+		"fewer nearest":      {func(in *layout.ZoomInput) { in.Nearest = in.Nearest[1:] }, "300 interests, 299 nearest and 300"},
+		"fewer similarities": {func(in *layout.ZoomInput) { in.Similarity = in.Similarity[1:] }, "300 nearest and 299 similarities"},
+		"a duplicate key":    {func(in *layout.ZoomInput) { in.Keys[1] = in.Keys[0] }, "appears twice"},
+		"an interest past k": {func(in *layout.ZoomInput) { in.Interest[0] = len(in.Interests) }, "document 0 is in interest"},
+		"a nearest past k": {func(in *layout.ZoomInput) {
+			in.Interest[0], in.Nearest[0] = -1, len(in.Interests)
+		}, "document 0 is nearest interest"},
+		"a NaN similarity": {func(in *layout.ZoomInput) { in.Similarity[0] = math.NaN() }, "document 0 has a non-finite similarity"},
+		"a NaN component": {func(in *layout.ZoomInput) {
+			in.Vectors[0] = slices.Repeat([]float32{float32(math.NaN())}, len(in.Vectors[0]))
+		}, "vector 0 has a NaN or infinite component"},
+		"an empty interest": {func(in *layout.ZoomInput) {
 			in.Interests = append(in.Interests, layout.Group{Key: "e", Area: 0, Centroid: in.Interests[0].Centroid})
-		},
-		"an empty area": func(in *layout.ZoomInput) {
+		}, "holds no document"},
+		"an empty area": {func(in *layout.ZoomInput) {
 			in.Areas = append(in.Areas, layout.Group{Key: "e", Centroid: in.Areas[0].Centroid})
-		},
-		"an interest in no area": func(in *layout.ZoomInput) { in.Interests[0].Area = -1 },
-		"an area past the areas": func(in *layout.ZoomInput) { in.Interests[0].Area = len(in.Areas) },
-		"a duplicate group key":  func(in *layout.ZoomInput) { in.Areas[0].Key = in.Interests[0].Key },
-		"a short centroid":       func(in *layout.ZoomInput) { in.Interests[0].Centroid = in.Interests[0].Centroid[:3] },
-		"a zero prior dot":       func(in *layout.ZoomInput) { in.Prior = &layout.ZoomPrior{} },
-		"a prior of no radius": func(in *layout.ZoomInput) {
+		}, "holds no interest"},
+		"an interest in no area": {func(in *layout.ZoomInput) { in.Interests[0].Area = -1 }, "interest 0 is in area -1"},
+		"an area past the areas": {func(in *layout.ZoomInput) { in.Interests[0].Area = len(in.Areas) }, "interest 0 is in area"},
+		"a duplicate group key":  {func(in *layout.ZoomInput) { in.Areas[0].Key = in.Interests[0].Key }, "appears twice"},
+		"a short centroid": {func(in *layout.ZoomInput) {
+			in.Interests[0].Centroid = in.Interests[0].Centroid[:3]
+		}, "a centroid of dim 3"},
+		"a NaN centroid": {func(in *layout.ZoomInput) {
+			in.Areas[0].Centroid = slices.Repeat([]float32{float32(math.NaN())}, len(in.Areas[0].Centroid))
+		}, "a non-finite centroid"},
+		"a zero prior dot": {func(in *layout.ZoomInput) { in.Prior = &layout.ZoomPrior{} }, "dot radius 0 is not positive"},
+		"a prior of no radius": {func(in *layout.ZoomInput) {
 			in.Prior = &layout.ZoomPrior{DotRadius: 1, Places: map[string]layout.Circle{"x": {}}}
-		},
+		}, `the prior place of "x"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			in := base()
 			in.Interests, in.Areas = slices.Clone(in.Interests), slices.Clone(in.Areas)
 			in.Vectors = slices.Clone(in.Vectors)
-			spoil(&in)
+			tc.spoil(&in)
 			_, err := layout.Zoom(context.Background(), in)
 			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
 }
