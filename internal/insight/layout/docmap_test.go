@@ -166,25 +166,28 @@ func assertSpans(t *testing.T, pos []layout.XY) {
 	}
 }
 
-// TestDocMap_KeepsNeighbourhoods holds the cold map of the standard library
-// (1,600 points, 12 planted clusters of 6 subtopics in 4 areas, 48
-// dimensions) to floors 0.03 under what it measured: NP5 (the share of each
-// point's 5 nearest by cosine among its 5 nearest on the map), measured
-// 0.339, at or above 0.309; area purity@5, measured 1.000, at or above
-// 0.97; and NP5 at least 0.10 above the points' own first two principal
-// components', measured 0.078.
+// TestDocMap_KeepsNeighbourhoods holds the cold map of the overlapping
+// library (1,600 points, 12 planted clusters of 6 subtopics in 4 areas, 48
+// dimensions, the clusters overlapping) to floors 0.03 under what it
+// measured: NP5 (the share of each point's 5 nearest by cosine among its 5
+// nearest on the map), measured 0.182, at or above 0.152; cluster
+// purity@5 (the share of a point's 5 nearest on the map in its cluster),
+// measured 0.896 against the space's 0.816, at or above 0.866; and NP5 at
+// least 0.10 above the points' own first two principal components',
+// measured 0.032.
 func TestDocMap_KeepsNeighbourhoods(t *testing.T) {
 	skipUnderRace(t)
-	lib := standard.build(1)
+	lib := overlapping.build(1)
 	in := lib.docInput(1)
 	pos := positions(docMap(t, in))
 	near := indexes(in.Neighbours)
 	np5 := quality.NeighbourPreservation(near, pos, 5)
-	purity := quality.MapPurity(pos, lib.area, 5)
+	purity := quality.MapPurity(pos, lib.cluster, 5)
 	pca := quality.NeighbourPreservation(near, principalComponents(lib.vectors), 5)
-	t.Logf("NP5 %.3f, area purity@5 %.3f, PCA's NP5 %.3f", np5, purity, pca)
-	assert.GreaterOrEqual(t, np5, 0.309)
-	assert.GreaterOrEqual(t, purity, 0.97)
+	t.Logf("NP5 %.3f, cluster purity@5 %.3f (the space's %.3f), PCA's NP5 %.3f", np5, purity,
+		quality.SpacePurity(near, lib.cluster, 5), pca)
+	assert.GreaterOrEqual(t, np5, 0.152)
+	assert.GreaterOrEqual(t, purity, 0.866)
 	assert.GreaterOrEqual(t, np5, pca+0.10)
 }
 

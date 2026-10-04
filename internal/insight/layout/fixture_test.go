@@ -40,15 +40,22 @@ type library struct {
 // subtopics is how many subtopics a cluster holds.
 const subtopics = 6
 
-// libraryShape sizes a library.
+// libraryShape sizes a library. blur widens the points' spread around
+// their subtopic, 0.45, by that much, so planted clusters overlap.
 type libraryShape struct {
 	points, areas, clustersPerArea, dims int
-	generalists                          float64
+	generalists, blur                    float64
 }
 
-// standard is the quality tests' library: 1,600 points in 12 clusters of 4
-// areas, in 48 dimensions, 6% generalists.
+// standard is the stability tests' library: 1,600 points in 12 clusters
+// of 4 areas, in 48 dimensions, 6% generalists. Its clusters are apart: a
+// map keeps every point's 5 nearest in its cluster.
 var standard = libraryShape{points: 1600, areas: 4, clustersPerArea: 3, dims: 48, generalists: 0.06}
+
+// overlapping is standard with its points spread twice as wide (blur 0.9),
+// so its clusters overlap: 82% of a point's 5 nearest by cosine share its
+// cluster, and a map that loses the clusters shows it.
+var overlapping = libraryShape{points: 1600, areas: 4, clustersPerArea: 3, dims: 48, generalists: 0.06, blur: 0.9}
 
 func (s libraryShape) build(seed uint64) library {
 	r := rand.New(rand.NewPCG(seed, 0x1a7))
@@ -95,7 +102,7 @@ func (s libraryShape) build(seed uint64) library {
 			v = unit(topic, s.dims)
 		} else {
 			cl = r.IntN(len(centers))
-			v = around(centers[cl][r.IntN(subtopics)], 0.45)
+			v = around(centers[cl][r.IntN(subtopics)], 0.45+s.blur)
 		}
 		lib.keys = append(lib.keys, fmt.Sprintf("p-%05d", i))
 		lib.vectors = append(lib.vectors, unitF32(v))
