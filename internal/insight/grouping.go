@@ -274,17 +274,3 @@ func (gr *grouped) keys(from, to int) []string {
 	}
 	return out
 }
-
-// starts are where a level's new groups start on the map: the old identity
-// of the lineage row sharing the most of its members, ties to the lower old
-// ID; "" for a carried group, and for a new one no row reaches.
-func starts(c Carried) []string {
-	out := make([]string, len(c.Predecessor))
-	most := make([]int, len(c.Predecessor))
-	for _, l := range c.Lineage {
-		if c.Predecessor[l.New] == "" && l.Shared > most[l.New] {
-			out[l.New], most[l.New] = l.OldID, l.Shared
-		}
-	}
-	return out
-}

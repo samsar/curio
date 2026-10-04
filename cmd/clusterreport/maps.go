@@ -59,19 +59,20 @@ func carriedKeys(prev, next *grouping) (mapKeys, error) {
 	return k, nil
 }
 
-// keysOf are a level's keys and starts from its carry-over.
+// keysOf are a level's keys and starts from its carry-over, the starts the
+// engine's (Carried.Starts) under the report's keys.
 func keysOf(c insight.Carried, key func(string) string, fresh string) (keys, starts []string) {
-	keys, starts = make([]string, len(c.Predecessor)), make([]string, len(c.Predecessor))
-	most := make([]int, len(c.Predecessor))
+	keys = make([]string, len(c.Predecessor))
 	for j, p := range c.Predecessor {
 		keys[j] = key(p)
 		if p == "" {
 			keys[j] = fmt.Sprintf(fresh, j)
 		}
 	}
-	for _, l := range c.Lineage {
-		if c.Predecessor[l.New] == "" && l.Shared > most[l.New] {
-			starts[l.New], most[l.New] = key(l.OldID), l.Shared
+	starts = c.Starts()
+	for j, s := range starts {
+		if s != "" {
+			starts[j] = key(s)
 		}
 	}
 	return keys, starts

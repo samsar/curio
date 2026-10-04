@@ -449,7 +449,7 @@ func oneLine(s string, limit int) string {
 func (e *Engine) mapInput(in input, gr *grouped, points []Point) MapInput {
 	mi := MapInput{Points: points, Grouping: gr.g, Centroids: gr.centroids, Fits: gr.fits,
 		AreaKeys: gr.keys(0, gr.numAreas), InterestKeys: gr.keys(gr.numAreas, len(gr.groups)),
-		AreaStarts: starts(gr.areas), InterestStarts: starts(gr.interests), Unchanged: in.changes.Total() == 0,
+		AreaStarts: gr.areas.Starts(), InterestStarts: gr.interests.Starts(), Unchanged: in.changes.Total() == 0,
 		Center: e.cfg.Center, Seed: MapSeed}
 	if in.prior != nil && in.prior.mapPrior != nil {
 		mi.Prior = in.prior.mapPrior

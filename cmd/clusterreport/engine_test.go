@@ -146,7 +146,8 @@ func (s *servedVectors) DocumentVectors(context.Context, string) ([]store.DocVec
 // report's warm rebuild of the same draw says. The library's seed is one
 // whose warm rebuild renames an interest and whose split check would
 // rename more, so a pipeline that keeps too many names, or runs the check,
-// shows.
+// shows. Each run's map, both views, is the report's map of the same
+// grouping, the warm one drawn from the first.
 func TestReport_MatchesTheEngine(t *testing.T) {
 	t.Parallel() // its maps take seconds under -race, as TestRun_FlatLibrary's do
 	ctx := context.Background()
@@ -249,35 +250,23 @@ func TestReport_MatchesTheEngine(t *testing.T) {
 			"and its live areas")
 
 		// The engine's warm map started from its first run's: so does the
-		// report's, given that run's places.
+		// report's, given that run's places under the report's keys, its
+		// groups named as its carry-over names them. Both views are the
+		// engine's, value for value, so the report's keys find the places
+		// the engine's identities find.
 		keys, err := carriedKeys(before, next)
 		require.NoError(t, err)
-		prior := insight.NewPriorMap(firstRun.run, firstRun.groups, firstRun.assignments)
-		warmMap, err := whole.drawMap(next, keys, prior, insight.MapSeed)
+		warmMap, err := whole.drawMap(next, keys, labelledPrior(t, firstRun, before), insight.MapSeed)
 		require.NoError(t, err)
 		assert.Equal(t, store.RunKindWarm, warmMap.m.Kind)
 		require.NotNil(t, after.stored)
-		assert.Equal(t, docMapOf(t, after.stored.assignments), docPlaces(next, warmMap.m),
-			"the engine's warm document map is the report's")
+		assertSameMap(t, after.stored, next, warmMap.m)
 	})
-}
-
-// docMapOf are stored assignments' places on the document map, by
-// document.
-func docMapOf(t *testing.T, as []store.InterestAssignment) map[string][2]float64 {
-	t.Helper()
-	out := make(map[string][2]float64, len(as))
-	for _, a := range as {
-		require.NotNil(t, a.Map, "document %s has a place", a.DocumentID)
-		out[a.DocumentID] = [2]float64{a.Map.MapX, a.Map.MapY}
-	}
-	return out
 }
 
 // assertSameMap checks the stored run's map is the report's map m of gp,
 // value for value: the dots' radius and Unsorted's disc, every document's
-// four coordinates, and every group's circle and anchor, groups matched by
-// their members (an area by the documents its community holds).
+// four coordinates, and every group's circle and anchor.
 func assertSameMap(t *testing.T, stored *storedRun, gp *grouping, m *insight.Map) {
 	t.Helper()
 	require.NotNil(t, stored.run.Map)
@@ -288,10 +277,29 @@ func assertSameMap(t *testing.T, stored *storedRun, gp *grouping, m *insight.Map
 	for i, id := range gp.ids {
 		at[id] = i
 	}
-	areaMembers, interestMembers := map[string][]string{}, map[string][]string{}
 	for _, a := range stored.assignments {
 		require.NotNil(t, a.Map)
 		assert.Equal(t, m.Docs[at[a.DocumentID]], *a.Map, "document %s", a.DocumentID)
+	}
+	require.Len(t, stored.groups, len(m.Areas)+len(m.Interests))
+	areas, interests := storedGroups(t, stored, gp)
+	for _, g := range stored.groups {
+		require.NotNil(t, g.Map, g.ID)
+		if a, ok := areas[g.ID]; ok {
+			assert.Equal(t, m.Areas[a], *g.Map, "area %s", g.ID)
+			continue
+		}
+		assert.Equal(t, m.Interests[interests[g.ID]], *g.Map, "interest %s", g.ID)
+	}
+}
+
+// storedGroups match the stored run's groups to gp's, by their members:
+// each area's identity to its index in gp (by the documents its community
+// holds), and each interest's (by its members).
+func storedGroups(t *testing.T, stored *storedRun, gp *grouping) (areas, interests map[string]int) {
+	t.Helper()
+	areaMembers, interestMembers := map[string][]string{}, map[string][]string{}
+	for _, a := range stored.assignments {
 		if a.AreaID != "" {
 			areaMembers[a.AreaID] = append(areaMembers[a.AreaID], a.DocumentID)
 		}
@@ -306,19 +314,50 @@ func assertSameMap(t *testing.T, stored *storedRun, gp *grouping, m *insight.Map
 	for l, docs := range membersBy(gp, gp.g.Interest, true) {
 		toolInterest[docs] = l
 	}
-	require.Len(t, stored.groups, len(m.Areas)+len(m.Interests))
+	areas, interests = map[string]int{}, map[string]int{}
 	for _, g := range stored.groups {
-		require.NotNil(t, g.Map, g.ID)
 		if g.Level == store.InterestLevelArea {
 			a, ok := toolArea[strings.Join(sorted(areaMembers[g.ID]), ",")]
 			require.True(t, ok, "area %s is one of the report's", g.ID)
-			assert.Equal(t, m.Areas[a], *g.Map, "area %s", g.ID)
+			areas[g.ID] = a
 			continue
 		}
 		l, ok := toolInterest[strings.Join(sorted(interestMembers[g.ID]), ",")]
 		require.True(t, ok, "interest %s is one of the report's", g.ID)
-		assert.Equal(t, m.Interests[l], *g.Map, "interest %s", g.ID)
+		interests[g.ID] = l
 	}
+	return areas, interests
+}
+
+// labelledPrior is the stored run's map as the next map reads it, its
+// groups named by the label keys of gp, the run's grouping as the report
+// draws it: the prior in which the report's carried keys find places.
+func labelledPrior(t *testing.T, stored *storedRun, gp *grouping) *insight.PriorMap {
+	t.Helper()
+	prior := insight.NewPriorMap(stored.run, stored.groups, stored.assignments)
+	require.NotNil(t, prior)
+	areas, interests := storedGroups(t, stored, gp)
+	labels := labelKeys(gp)
+	key := func(id string) string {
+		if a, ok := areas[id]; ok {
+			return labels.areas[a]
+		}
+		if l, ok := interests[id]; ok {
+			return labels.interests[l]
+		}
+		return id
+	}
+	groups := make(map[string]insight.PriorGroup, len(prior.Groups))
+	for id, g := range prior.Groups {
+		g.ParentID = key(g.ParentID)
+		groups[key(id)] = g
+	}
+	prior.Groups = groups
+	for id, d := range prior.Docs {
+		d.InterestID, d.AreaID = key(d.InterestID), key(d.AreaID)
+		prior.Docs[id] = d
+	}
+	return prior
 }
 
 // membersBy are each group's documents of labels, joined in ID order: an
