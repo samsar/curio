@@ -35,9 +35,11 @@ const (
 	// the median a cold descent ends at (measured 0.31 to 0.38 for 300 to
 	// 5,000 points), so the descent starts where it would settle rather
 	// than expanding a map squeezed into the cold start's box, which moved
-	// the shared points ten times as far.
+	// the shared points ten times as far. A rate of 0.1 rather than the
+	// prototype's 0.25 moved the owner's documents a quarter less, its
+	// neighbourhoods kept as well (docs/decisions.md, "Interest map").
 	warmEpochs     = 200
-	warmAlpha      = 0.25
+	warmAlpha      = 0.1
 	warmEdgeLength = 0.3
 	// The start is scaled into [0, initExtent] with initNoise of seeded
 	// noise, as umap-learn does.
@@ -48,8 +50,10 @@ const (
 	pullQuantile = 0.97
 	pullSoftness = 0.25
 	// minAligned is the fewest points shared with a previous map that it
-	// is aligned to.
+	// is aligned to; an aligned map keeps the previous map's frame while
+	// it fits the square and spans minFrame of it.
 	minAligned = 3
+	minFrame   = 0.9
 )
 
 // The fuzzy set's search for each point's bandwidth σ: bisection until the
@@ -101,11 +105,14 @@ func DocMap(ctx context.Context, in DocMapInput) ([]XY, error) {
 		return []XY{}, nil
 	}
 	p := newDocProblem(in, order)
-	pos, err := p.layout(ctx)
+	pos, aligned, err := p.layout(ctx)
 	if err != nil {
 		return nil, err
 	}
 	f := fitBox(boxOf(pos), 0)
+	if aligned && keepsFrame(boxOf(pos)) {
+		f = fit{scale: 1}
+	}
 	out := make([]XY, n)
 	for k, i := range order {
 		out[i] = f.point(pos[k])
@@ -185,16 +192,17 @@ func newDocProblem(in DocMapInput, order []int) docProblem {
 	return p
 }
 
-// layout lays the points out, before the fit to the map.
-func (p docProblem) layout(ctx context.Context) ([]XY, error) {
+// layout lays the points out, before the fit to the map, and reports
+// whether it aligned them to the prior.
+func (p docProblem) layout(ctx context.Context) ([]XY, bool, error) {
 	n := len(p.keys)
 	if n == 1 {
-		return []XY{{}}, nil
+		return []XY{{}}, false, nil
 	}
 	edges := fuzzyGraph(p.lists)
 	start, warm, err := p.start(ctx, edges)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	epochs, alpha := coldEpochs, coldAlpha
 	switch {
@@ -204,11 +212,19 @@ func (p docProblem) layout(ctx context.Context) ([]XY, error) {
 		epochs = coldEpochsLarge
 	}
 	if err := descend(ctx, start, edges, epochs, alpha, p.seed); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	pullIn(start)
-	p.orient(start)
-	return start, nil
+	return start, p.orient(start), nil
+}
+
+// keepsFrame reports whether a map aligned to the previous one may stay in
+// the previous map's frame rather than be fit anew: it lies inside the
+// square and its longer side spans at least minFrame of it. Fitting an
+// aligned map anew moved the owner's documents twice as far as the
+// alignment had.
+func keepsFrame(b bbox) bool {
+	return b.x0 >= 0 && b.y0 >= 0 && b.x1 <= Extent && b.y1 <= Extent && math.Max(b.x1-b.x0, b.y1-b.y0) >= minFrame*Extent
 }
 
 // start is where the descent starts: from the prior when the map is warm
@@ -622,8 +638,8 @@ func pullIn(pos []XY) {
 // orient turns the map: onto the prior, by the least-squares similarity
 // transform of the points they share, when they share minAligned; else its
 // principal axis horizontal, each axis's sign such that its third moment is
-// not negative.
-func (p docProblem) orient(pos []XY) {
+// not negative. It reports whether it aligned the map to the prior.
+func (p docProblem) orient(pos []XY) bool {
 	var src, dst []XY
 	for k, key := range p.keys {
 		if q, ok := p.prior[key]; ok {
@@ -635,9 +651,10 @@ func (p docProblem) orient(pos []XY) {
 		for k := range pos {
 			pos[k] = t.apply(pos[k])
 		}
-		return
+		return true
 	}
 	levelAxes(pos)
+	return false
 }
 
 // levelAxes rotates pos about its centroid so its principal axis is

@@ -169,8 +169,8 @@ func assertSpans(t *testing.T, pos []layout.XY) {
 // (1,600 points, 12 planted clusters of 6 subtopics in 4 areas, 48
 // dimensions) to floors 0.03 under what it measured: NP5 (the share of each
 // point's 5 nearest by cosine among its 5 nearest on the map), measured
-// 0.334, at or above 0.30; area purity@5, measured 1.000, at or above 0.97;
-// and NP5 at least 0.10 above the points' own first two principal
+// 0.339, at or above 0.309; area purity@5, measured 1.000, at or above
+// 0.97; and NP5 at least 0.10 above the points' own first two principal
 // components', measured 0.078.
 func TestDocMap_KeepsNeighbourhoods(t *testing.T) {
 	skipUnderRace(t)
@@ -182,7 +182,7 @@ func TestDocMap_KeepsNeighbourhoods(t *testing.T) {
 	purity := quality.MapPurity(pos, lib.area, 5)
 	pca := quality.NeighbourPreservation(near, principalComponents(lib.vectors), 5)
 	t.Logf("NP5 %.3f, area purity@5 %.3f, PCA's NP5 %.3f", np5, purity, pca)
-	assert.GreaterOrEqual(t, np5, 0.30)
+	assert.GreaterOrEqual(t, np5, 0.309)
 	assert.GreaterOrEqual(t, purity, 0.97)
 	assert.GreaterOrEqual(t, np5, pca+0.10)
 }
@@ -255,12 +255,12 @@ func principalComponents(vecs [][]float32) [][2]float64 {
 }
 
 // TestDocMap_WarmIsStable: after 5% more points arrive, a warm map from the
-// previous one moves the points they share by a mean of at most 0.71% of
-// the previous map's diameter (measured per draw: 0.65%, 0.71%, 0.64%);
+// previous one moves the points they share by a mean of at most 0.35% of
+// the previous map's diameter (measured per draw: 0.29%, 0.33%, 0.35%);
 // held to 1.5 times that and never above 3%.
 func TestDocMap_WarmIsStable(t *testing.T) {
 	skipUnderRace(t)
-	const measured = 0.0071
+	const measured = 0.0035
 	lib := standard.build(2)
 	for draw := range 3 {
 		perm := shuffle(len(lib.keys), uint64(100+draw))

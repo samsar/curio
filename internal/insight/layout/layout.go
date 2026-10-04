@@ -19,7 +19,9 @@
 // every value rounded to 0.01 (a circle's radius up and a dot's down, so a
 // dot inside a circle stays inside it). The longer side of a view spans fill
 // of the Extent, except that a zoom view's dots are never wider than 1% of
-// it, which keeps a tiny library small and centred.
+// it, which keeps a tiny library small and centred, and that a document map
+// aligned to a previous one keeps that map's frame while it lies inside the
+// square and spans at least 90% of it, so the documents it shares stay put.
 //
 // Determinism: a layout depends only on its input, never on the input's order,
 // map order, GOMAXPROCS or the clock. Documents are worked on in key order,
@@ -92,6 +94,7 @@ func Params() map[string]any {
 			"pull_in_quantile":   pullQuantile,
 			"pull_in_softness":   pullSoftness,
 			"min_aligned":        minAligned,
+			"min_frame":          minFrame,
 		},
 		"zoom": map[string]any{
 			"lattice_gap":        latticeGap,
