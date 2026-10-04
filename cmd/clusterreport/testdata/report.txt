@@ -40,6 +40,18 @@ Chain: 60% to 100% of the library in 5% steps, warm, the split check every 4th
   names kept at the split-check steps: mean 81.9% · 94.4%, min 79.9% · 93.3%
   names kept at the other steps: mean n/a · n/a, min n/a · n/a
 
+Map: a cold map of the whole library in 6.9 s (412 MB allocated); peak resident set 1900 MB
+  document map: NP5 0.294, NP15 0.361; area purity@5 0.863 on the map, 0.869 in the space
+  another seed moves its documents 1.64% of its diameter, aligned
+  warm after a 5% change, moved (served · aligned): documents on the document map, interests' centres in the zoom view
+  added  draw 0 (seed 5001)   documents 1.34% · 1.20%, interests 0.60% · 0.50%; NP5 0.290 (warm); cold 6.5 s, warm 2.6 s
+         mean                 documents 1.34% · 1.20%, interests 0.60% · 0.50%; NP5 0.290 against a cold map's 0.294
+         worst                documents 1.34% · 1.20%, interests 0.60% · 0.50%
+  mixed  draw 0 (seed 5008)   documents 1.41% · 1.31%, interests 0.71% · 0.62%; NP5 0.291 (warm); cold 6.5 s, warm 2.6 s
+         draw 1 (seed 5009)   documents 1.27% · 1.19%, interests 0.55% · 0.49%; NP5 0.290 (warm); cold 6.5 s, warm 2.6 s
+         mean                 documents 1.34% · 1.25%, interests 0.63% · 0.56%; NP5 0.291 against a cold map's 0.294
+         worst                documents 1.41% · 1.31%, interests 0.71% · 0.62%
+
 Stored run run-1: trigger first, fresh, areas shape, split check false, finished 2026-10-03T12:00:00Z
   5254 documents, 2 areas, 3 interests, 3 loose fits, 402 unsorted; 0 changed
   interests kept 0, created 5, split 0, merged 0, moved 0, dissolved 0
@@ -56,4 +68,4 @@ Stored run run-1: trigger first, fresh, areas shape, split check false, finished
     Personal Finance (120, terms)
       Index Investing (60, llm)
 
-Timings: read 8.4 s, fresh 2.1 s, baseline 2.0 s, warm 23.3 s, fresh rebuild 2.0 s, chain 69.7 s, stored run 0.0 s; total 107.5 s
+Timings: read 8.4 s, fresh 2.1 s, baseline 2.0 s, warm 23.3 s, fresh rebuild 2.0 s, chain 69.7 s, map 61.0 s, stored run 0.0 s; total 168.5 s

@@ -208,6 +208,13 @@ func (m *measurer) measure(lib *library) (*report, error) {
 	}
 
 	t = time.Now()
+	m.log.Info("measuring a cold map of the whole library")
+	if _, err := m.coldMap(full, &rep.Map); err != nil {
+		return nil, fmt.Errorf("map: %w", err)
+	}
+	rep.TimingsMS.Map += time.Since(t).Milliseconds()
+
+	t = time.Now()
 	if rep.Chain, err = m.chain(full); err != nil {
 		return nil, fmt.Errorf("chain: %w", err)
 	}
@@ -223,6 +230,9 @@ func (m *measurer) measure(lib *library) (*report, error) {
 		rep.TimingsMS.StoredRun = time.Since(t).Milliseconds()
 	}
 	rep.TimingsMS.Total = time.Since(start).Milliseconds() + rep.TimingsMS.Read
+	if rep.Map.PeakRSSBytes, err = peakRSS(); err != nil {
+		return nil, err
+	}
 	return rep, nil
 }
 
@@ -320,19 +330,27 @@ func (m *measurer) baseline(full *grouping) (baselineReport, error) {
 	return baselineReport{Clusterer: c.Name(), Params: c.Params(), Interests: levelOf(full.vectors(), g.Interest)}, nil
 }
 
-// changes measures the warm rebuilds after a 5% change, and the fresh
-// rebuilds after 5% added on the same draws.
+// changes measures the warm rebuilds after a 5% change, and their warm
+// maps, and the fresh rebuilds after 5% added on the same draws.
 func (m *measurer) changes(rep *report) error {
-	var freshTime time.Duration
+	var freshTime, mapTime time.Duration
 	t := time.Now()
 	for _, kind := range []changeKind{changeAdded, changeMixed} {
 		var warm, fresh []keptDraw
+		var drawnMaps []warmMapDraw
 		for d := range m.draws {
-			prev, k, err := m.warmDraw(kind, d)
+			prev, next, k, err := m.warmDraw(kind, d)
 			if err != nil {
 				return fmt.Errorf("warm rebuild, %s draw %d: %w", kind, d, err)
 			}
 			warm = append(warm, k)
+			mt := time.Now()
+			w, err := m.warmMap(kind, d, prev, next)
+			if err != nil {
+				return fmt.Errorf("warm map, %s draw %d: %w", kind, d, err)
+			}
+			drawnMaps = append(drawnMaps, w)
+			mapTime += time.Since(mt)
 			if kind != changeAdded {
 				continue
 			}
@@ -347,35 +365,52 @@ func (m *measurer) changes(rep *report) error {
 		if kind == changeAdded {
 			rep.Warm.Added = summarize(warm)
 			rep.FreshRebuild = summarize(fresh)
+			rep.Map.Warm.Added = summarizeMaps(drawnMaps)
 		} else {
 			rep.Warm.Mixed = summarize(warm)
+			rep.Map.Warm.Mixed = summarizeMaps(drawnMaps)
 		}
 	}
-	rep.TimingsMS.Warm = (time.Since(t) - freshTime).Milliseconds()
+	rep.TimingsMS.Warm = (time.Since(t) - freshTime - mapTime).Milliseconds()
 	rep.TimingsMS.FreshRebuild = freshTime.Milliseconds()
+	rep.TimingsMS.Map = mapTime.Milliseconds()
 	return nil
+}
+
+// summarizeMaps takes the mean and the largest of the draws' mean
+// displacements, and their mean NP5.
+func summarizeMaps(draws []warmMapDraw) warmMapsReport {
+	w := warmMapsReport{Draws: draws}
+	for _, d := range draws {
+		for _, p := range []struct{ sum, of *displacement }{{&w.Documents, &d.Documents}, {&w.Interests, &d.Interests}} {
+			p.sum.Mean += p.of.Mean / float64(len(draws))
+			p.sum.AlignedMean += p.of.AlignedMean / float64(len(draws))
+			p.sum.Max = max(p.sum.Max, p.of.Mean)
+			p.sum.AlignedMax = max(p.sum.AlignedMax, p.of.AlignedMean)
+		}
+		w.MeanNP5 += d.NP5 / float64(len(draws))
+	}
+	return w
 }
 
 // warmDraw measures draw d of a change of kind: a first grouping of the
 // previous library, then a warm rebuild of the new one from it without the
-// split check. It returns the previous grouping too.
-func (m *measurer) warmDraw(kind changeKind, d uint) (*grouping, keptDraw, error) {
+// split check. It returns both groupings too.
+func (m *measurer) warmDraw(kind changeKind, d uint) (prev, next *grouping, k keptDraw, err error) {
 	prevIdx, newIdx := changeDraw(len(m.docs), kind, d, m.seed)
-	prev, err := m.first(m.subset(prevIdx))
-	if err != nil {
-		return nil, keptDraw{}, err
+	if prev, err = m.first(m.subset(prevIdx)); err != nil {
+		return nil, nil, keptDraw{}, err
 	}
-	next, err := m.warm(m.subset(newIdx), prev, false)
-	if err != nil {
-		return nil, keptDraw{}, err
+	if next, err = m.warm(m.subset(newIdx), prev, false); err != nil {
+		return nil, nil, keptDraw{}, err
 	}
-	k, err := namesKept(prev, next)
+	names, err := namesKept(prev, next)
 	if err != nil {
-		return nil, keptDraw{}, err
+		return nil, nil, keptDraw{}, err
 	}
-	m.log.Info("warm rebuild", "change", kind, "draw", d, "interests_kept", fmtShare(k.Interests),
-		"areas_kept", fmtShare(k.Areas))
-	return prev, keptDraw{Draw: d, Seed: changeSeed(kind, d, m.seed), kept: k}, nil
+	m.log.Info("warm rebuild", "change", kind, "draw", d, "interests_kept", fmtShare(names.Interests),
+		"areas_kept", fmtShare(names.Areas))
+	return prev, next, keptDraw{Draw: d, Seed: changeSeed(kind, d, m.seed), kept: names}, nil
 }
 
 // freshRebuildDraw measures the names a fresh rebuild of the whole library

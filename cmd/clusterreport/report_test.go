@@ -80,7 +80,33 @@ func fixedReport() *report {
 			Agreement: agreement{Shared: 5254, AreasARI: share(1), InterestsARI: share(1), SameFits: 5254, Identical: true},
 		},
 		TimingsMS: timings{Read: 8382, Fresh: 2137, Baseline: 1974, Warm: 23338, FreshRebuild: 2030, Chain: 69656,
-			StoredRun: 4, Total: 107521},
+			Map: 61012, StoredRun: 4, Total: 168533},
+	}
+	rep.Map = mapReport{
+		Cold: coldMapReport{TookMS: 6912, AllocBytes: 412 << 20, NP5: 0.2941, NP15: 0.3612, AreaPurity: share(0.8631),
+			SpaceAreaPurity: share(0.8693)},
+		SeedToSeed: 0.0164, PeakRSSBytes: 1900 << 20,
+	}
+	rep.Map.Warm.Added = warmMapsReport{
+		Draws: []warmMapDraw{
+			{Draw: 0, Seed: 5001, Kind: "warm", ColdMS: 6540, WarmMS: 2611, NP5: 0.2902,
+				Documents: displacement{Mean: 0.0134, Max: 0.21, AlignedMean: 0.012, AlignedMax: 0.2},
+				Interests: displacement{Mean: 0.006, Max: 0.04, AlignedMean: 0.005, AlignedMax: 0.03}},
+		},
+		Documents: displacement{Mean: 0.0134, Max: 0.0134, AlignedMean: 0.012, AlignedMax: 0.012},
+		Interests: displacement{Mean: 0.006, Max: 0.006, AlignedMean: 0.005, AlignedMax: 0.005}, MeanNP5: 0.2902,
+	}
+	rep.Map.Warm.Mixed = warmMapsReport{
+		Draws: []warmMapDraw{
+			{Draw: 0, Seed: 5008, Kind: "warm", ColdMS: 6498, WarmMS: 2588, NP5: 0.2915,
+				Documents: displacement{Mean: 0.0141, Max: 0.25, AlignedMean: 0.0131, AlignedMax: 0.24},
+				Interests: displacement{Mean: 0.0071, Max: 0.05, AlignedMean: 0.0062, AlignedMax: 0.04}},
+			{Draw: 1, Seed: 5009, Kind: "warm", ColdMS: 6503, WarmMS: 2570, NP5: 0.2899,
+				Documents: displacement{Mean: 0.0127, Max: 0.19, AlignedMean: 0.0119, AlignedMax: 0.18},
+				Interests: displacement{Mean: 0.0055, Max: 0.03, AlignedMean: 0.0049, AlignedMax: 0.03}},
+		},
+		Documents: displacement{Mean: 0.0134, Max: 0.0141, AlignedMean: 0.0125, AlignedMax: 0.0131},
+		Interests: displacement{Mean: 0.0063, Max: 0.0071, AlignedMean: 0.00555, AlignedMax: 0.0062}, MeanNP5: 0.2907,
 	}
 	rep.Chain.Fresh.Areas, rep.Chain.Fresh.Interests, rep.Chain.Fresh.Cohesion = 30, 187, share(0.6414)
 	rep.StoredRun.Duplicates.Scopes = []scopeDuplicates{{Scope: "Software Engineering",

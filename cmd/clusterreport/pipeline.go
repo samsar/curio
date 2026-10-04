@@ -11,12 +11,13 @@ import (
 // grouping is one rebuild's grouping of a document set, as the engine
 // holds it before carry-over: every slice index-aligned with the points.
 type grouping struct {
-	ids    []string
-	points []insight.Point
-	raw    insight.Grouping // Group's, before the merge
-	g      insight.Grouping // after the merge
-	merged int
-	fits   []insight.Fit
+	ids       []string
+	points    []insight.Point
+	raw       insight.Grouping // Group's, before the merge
+	g         insight.Grouping // after the merge
+	merged    int
+	centroids [][]float32
+	fits      []insight.Fit
 }
 
 // regroup groups dvs as a rebuild does, in Engine.group's and
@@ -54,7 +55,7 @@ func regroup(ctx context.Context, gr insight.Grouper, dvs []store.DocVector, sha
 	for i, p := range points {
 		ids[i] = p.ID
 	}
-	return &grouping{ids: ids, points: points, raw: raw, g: merged, merged: n, fits: fits}, nil
+	return &grouping{ids: ids, points: points, raw: raw, g: merged, merged: n, centroids: cents, fits: fits}, nil
 }
 
 // seeds is the Prior a warm rebuild from this grouping reads: what the
@@ -109,19 +110,28 @@ type kept struct {
 	Areas     *float64 `json:"areas"`
 }
 
-// namesKept carries prev's identities into next by insight.Carry, built as
+// namesKept is the share of prev's identities that carry into next.
+func namesKept(prev, next *grouping) (kept, error) {
+	areas, interests, err := carryOver(prev, next)
+	if err != nil {
+		return kept{}, err
+	}
+	return kept{Interests: keptShare(interests), Areas: keptShare(areas)}, nil
+}
+
+// carryOver carries prev's identities into next by insight.Carry, built as
 // the engine builds it (previous.oldGroups, grouped.carry): areas matched
 // over area membership, then interests over their members, a new
 // interest's parent its area when next has areas. Old groups are named by
 // their zero-padded labels.
-func namesKept(prev, next *grouping) (kept, error) {
-	areas, err := insight.Carry(insight.CarryInput{
+func carryOver(prev, next *grouping) (areas, interests insight.Carried, err error) {
+	areas, err = insight.Carry(insight.CarryInput{
 		Old:     oldGroups(prev, prev.g.Area, nil),
 		New:     newGroups(next, next.g.Area, false),
 		Library: next.ids,
 	})
 	if err != nil {
-		return kept{}, fmt.Errorf("carry areas over: %w", err)
+		return insight.Carried{}, insight.Carried{}, fmt.Errorf("carry areas over: %w", err)
 	}
 	in := insight.CarryInput{
 		Old:     oldGroups(prev, prev.g.Interest, prev.g.Area),
@@ -131,11 +141,10 @@ func namesKept(prev, next *grouping) (kept, error) {
 	if next.g.Shape == insight.ShapeAreas {
 		in.Areas = &areas
 	}
-	interests, err := insight.Carry(in)
-	if err != nil {
-		return kept{}, fmt.Errorf("carry interests over: %w", err)
+	if interests, err = insight.Carry(in); err != nil {
+		return insight.Carried{}, insight.Carried{}, fmt.Errorf("carry interests over: %w", err)
 	}
-	return kept{Interests: keptShare(interests), Areas: keptShare(areas)}, nil
+	return areas, interests, nil
 }
 
 // oldGroups are a grouping's groups at the level labels gives, each with
