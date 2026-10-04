@@ -177,7 +177,7 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			New: []Member{{DocumentID: evilAttr, BookmarkTitle: evilLong, URL: evilURL, Similarity: 0.2, Fit: "new"}}},
 		PageMap: MapPage{Layout: layout(NavInterests), State: MapReady, Run: &MapRun{Shape: "areas", Documents: 5237,
 			Areas: 29, Interests: 182, FinishedAt: at}, Rebuilds: InterestsState{State: "current", LastRebuildAt: at},
-			Query: MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectInterest, ID: evilAttr + evilScript}}},
+			Query: MapQuery{View: MapViewInterests, Select: MapSelection{Kind: MapSelectInterest, ID: evilAttr + evilScript}}},
 		PageChanges: Changes{Layout: layout(NavInterests), Run: &ChangesRun{ComputedAt: at, Trigger: evilScript,
 			Kind: evilAttr, Changes: RunChanges{Kept: 9, Split: 1, Merged: 2, Moved: 1, Dissolved: 1, Created: 2},
 			Events: sampleChanges()}},
@@ -614,10 +614,10 @@ func mapVariants(layout Layout, at time.Time) []any {
 	off := page(MapNoRun, nil, MapQuery{})
 	off.Rebuilds = InterestsState{State: "off"}
 	return []any{
-		page(MapReady, flat, MapQuery{View: MapViewAll}),
-		page(MapReady, areas, MapQuery{View: MapViewAll, Select: MapSelection{Kind: MapSelectDocument, ID: evilQuotes}}),
-		page(MapReady, areas, MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectUnsorted}}),
-		page(MapNoRun, nil, MapQuery{View: MapViewZoom}),
+		page(MapReady, flat, MapQuery{View: MapViewSimilarity}),
+		page(MapReady, areas, MapQuery{View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectDocument, ID: evilQuotes}}),
+		page(MapReady, areas, MapQuery{View: MapViewInterests, Select: MapSelection{Kind: MapSelectUnsorted}}),
+		page(MapNoRun, nil, MapQuery{View: MapViewInterests}),
 		off,
 		page(MapNoMap, areas, MapQuery{}),
 		failed,
@@ -704,7 +704,7 @@ func partialSamples(t testing.TB) map[string][]any {
 		"library-head": {LibraryHead{Counts: &LibraryCounts{Documents: 3, Bookmarks: 4},
 			Views: LibraryViews{Failed: 2, Counted: true}}, LibraryHead{Views: LibraryViews{OnFailures: true}}},
 		"interests-subnav": {InterestsViews{}, InterestsViews{OnMap: true}},
-		"map-link": {"", mapHref(MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectDocument,
+		"map-link": {"", mapHref(MapQuery{View: MapViewInterests, Select: MapSelection{Kind: MapSelectDocument,
 			ID: evilAttr + evilScript}})},
 		"library-subnav": {LibraryViews{},
 			LibraryViews{OnFailures: true, Failed: 2971, Counted: true}},

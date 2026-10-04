@@ -147,7 +147,7 @@ func TestDaemon_AnImportIsGroupedUnasked(t *testing.T) {
 		_, body := getDashboard(t, env.base, path)
 		assert.Contains(t, body, `<a href="/ui/interests" aria-current="page">`, path)
 	}
-	_, body := getDashboard(t, env.base, "/ui/interests/map?view=zoom&select=interest%3A"+list.Items[0].ID)
+	_, body := getDashboard(t, env.base, "/ui/interests/map?view=interests&select=interest%3A"+list.Items[0].ID)
 	assert.Contains(t, body, `id="interest-map" data-src="/v1/interests/map"`)
 	assert.Contains(t, body, `data-select="interest:`+list.Items[0].ID+`"`)
 	// The rebuild drew its map; no client wraps it yet.
