@@ -1110,8 +1110,8 @@ https://errors.edgesuite.net/18.2f3c1702.1726000000.1a2b3c4d`
 Press & Hold to confirm you are a human (and not a bot).
 
 Reference ID 5f2c1a40-7b3e-11ef-9d2a-0242ac120002`
-	// parkedDomainBody is a parked domain's page, 340 bytes. Nothing but
-	// its length gives it away.
+	// parkedDomainBody is a parked domain's page at Sedo, 340 bytes, which
+	// opens by offering the domain for sale.
 	parkedDomainBody = `example.org
 ===========
 
@@ -1388,9 +1388,9 @@ func TestNative_JinaTombstoneAfterOrigin403(t *testing.T) {
 
 // TestNative_JinaRejectsNonArticles: a 2xx Jina answer that is a challenge,
 // a block, a 403/503 error page without the target-status warning, a
-// not-found or a login page, or too thin, is Jina's verdict: one request,
-// never stored, never cached. Behind a thin origin page it fails the fetch
-// permanently.
+// not-found page, a parked domain, a login page or a sign-in form, or too
+// thin, is Jina's verdict: one request, never stored, never cached. Behind
+// a thin origin page it fails the fetch permanently.
 func TestNative_JinaRejectsNonArticles(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1415,7 +1415,43 @@ func TestNative_JinaRejectsNonArticles(t *testing.T) {
 		{"meetup", "Meetup | Group not found", nil, meetupNotFoundBody, ErrDeadLink, "not-found page"},
 		{"soundcloud", "This track was not found", nil, soundCloudNotFoundBody, ErrDeadLink, "not-found page"},
 		{"quora", "Content has been deleted - Quora", nil, quoraDeletedBody, ErrDeadLink, "not-found page"},
-		{"parked domain", "example.org", nil, parkedDomainBody, ErrLoginWall, "extracted text < 500 bytes"},
+		// The same tombstones under an ordinary title: their text tells.
+		{"medium tombstone's body", "An article", nil, mediumTombstoneBody, ErrDeadLink, `not-found page: "410"`},
+		{"meetup's body", "An article", nil, meetupNotFoundBody, ErrDeadLink, `not-found page: "Group not found"`},
+		{"soundcloud's body", "An article", nil, soundCloudNotFoundBody, ErrDeadLink, `not-found page: "This track was not found.`},
+		{"quora's body", "An article", nil, quoraDeletedBody, ErrDeadLink, `not-found page: "This post has been deleted."`},
+		// Not-found pages under titles that are the site's name, a URL,
+		// nothing, or not English: only their text tells.
+		{"medium's 404", "Medium", nil, mediumNotFoundBody, ErrDeadLink, `text reads like a not-found page: "PAGE NOT FOUND"`},
+		{"the week, untitled", "", nil, theWeekNotFoundBody, ErrDeadLink, `not-found page: "The page you're looking for can't be found."`},
+		{"bespoke", "Bespoke Interactive", nil, bespokeNotFoundBody, ErrDeadLink, `not-found page: "404"`},
+		{"javalobby, in Thai", "หน้าไม่พบ | JavaLobby", nil, javaLobbyNotFoundBody, ErrDeadLink, `not-found page: "404 - หน้าไม่พบ"`},
+		{"linkedin, its first long line", "Top Content on LinkedIn", nil, linkedInNotFoundBody, ErrDeadLink,
+			`not-found page: "We can’t find the page you’re looking for.The page`},
+		{"quartz", "Quartz", nil, quartzNotFoundBody, ErrDeadLink, `not-found page: "404"`},
+		{"advisor perspectives, behind its menus", "Advisor Perspectives", nil, advisorPerspectivesNotFoundBody, ErrDeadLink,
+			`not-found page: "404 Error: Not Found"`},
+		// Parked, for-sale and expired domains.
+		{"parked domain", "example.org", nil, parkedDomainBody, ErrDeadLink, `text reads like a parked domain: "This domain may be for sale!"`},
+		{"godaddy", "app.io is for sale — Get a price in 24 hours", nil, goDaddyForSaleBody, ErrDeadLink, `parked domain: "is for sale!"`},
+		{"namecheap, expired", "icefilms.info is registered at Namecheap", nil, namecheapExpiredBody, ErrDeadLink,
+			`parked domain: "Domain registration has expired."`},
+		{"namecheap, registered", "", nil, namecheapRegisteredBody, ErrDeadLink,
+			`parked domain: "has been recently registered with namecheap.com"`},
+		{"hover", "", nil, hoverParkedBody, ErrDeadLink, `parked domain: "is a totally awesome idea still being worked on."`},
+		{"easydns", "Parked Domain | easyDNS", nil, easyDNSParkedBody, ErrDeadLink, `parked domain: "is yet another domain managed by easyDNS"`},
+		{"search-ads parking", "", nil, searchAdsParkingBody, ErrDeadLink, `parked domain: "Related Search Topics"`},
+		{"parking with a sign-in box", "HeadlineLogic News Portal", nil, flappyRoyaleParkedBody, ErrDeadLink,
+			`parked domain: "This domain name may be for sale.`},
+		// Bot checks whose title gives nothing away.
+		{"google's unusual traffic", googleSorryTitle, nil, googleSorryBody, ErrAntiBot,
+			`bot challenge: page says "our systems have detected unusual traffic from your computer network"`},
+		{"fastly", "Client Challenge", nil, fastlyChallengeBody, ErrAntiBot,
+			`bot challenge: page says "a required part of this site couldn't load"`},
+		// Sign-in walls whose link URLs carry them past the thin floor.
+		{"instagram", "Instagram", nil, instagramSignInBody, ErrLoginWall, "page is a sign-in form"},
+		{"facebook", "Facebook", nil, facebookSignInBody, ErrLoginWall, "page is a sign-in form"},
+		{"linkedin's sign-in", "LinkedIn Login, Sign in | LinkedIn", nil, linkedInSignInBody, ErrLoginWall, "page is a sign-in form"},
 		{"a byte under the floor", "A note", nil, strings.Repeat("x", minArticleBytes-1), ErrLoginWall, "extracted text < 500 bytes"},
 		{"atlassian", "Log in to continue - Log in with Atlassian account", nil, loginPageBody, ErrLoginWall, "login wall"},
 		{"google docs", "Google Docs: Sign-in", nil, loginPageBody, ErrLoginWall, "login wall"},
@@ -1452,9 +1488,10 @@ func TestNative_JinaRejectsNonArticles(t *testing.T) {
 }
 
 // TestNative_JinaAcceptsArticles: informational warnings, articles about
-// bot checks and logins, titles that start like a challenge's, a short
-// post and a body of exactly minArticleBytes are all stored, settled on the
-// URL requested.
+// bot checks, logins and missing pages, titles that start like a
+// challenge's, a notice after a page's opening, a sign-in box beside
+// content, a short post and a body of exactly minArticleBytes are all
+// stored, settled on the URL requested.
 func TestNative_JinaAcceptsArticles(t *testing.T) {
 	// botEssay quotes challenge phrases in 3 KB of text, past the 2 KiB
 	// up to which a page's text is searched for them.
@@ -1463,6 +1500,9 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 		"then asked me to verify you are human. A 404 would have been kinder. " +
 		strings.Repeat("The rest of this essay is about why these checks fail real readers. ", 34)
 	article := strings.Repeat("A paragraph of a real article about the subject in its title. ", 10)
+	// intro is an article's first paragraph: prose, which ends its opening.
+	intro := "A 404 page is what a visitor sees when a link points nowhere. Most sites treat it as an afterthought, " +
+		"but it is often the first page a new reader meets, and a good one keeps them on the site. Here is what the best ones do."
 	cases := []struct {
 		name      string
 		title     string
@@ -1490,13 +1530,30 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 		{"not-found title, detection off", "Page not found | Free local classifieds - Kijiji", nil, kijijiNotFoundBody, false},
 		{"tombstone, detection off", "410 Deleted by author — Medium", nil, mediumTombstoneBody, false},
 		{"an article about a 404", "How to fix 404 Not Found errors in Nginx", nil, article, true},
-		// The library's tombstones under an ordinary title: only their own
-		// titles make them dead.
-		{"medium tombstone's body", "An article", nil, mediumTombstoneBody, true},
+		// Home Depot's not-found page says so in its title alone: under an
+		// ordinary title, its text is a menu and a cookie notice.
 		{"home depot's body", "An article", nil, homeDepotNotFoundBody, true},
-		{"meetup's body", "An article", nil, meetupNotFoundBody, true},
-		{"soundcloud's body", "An article", nil, soundCloudNotFoundBody, true},
-		{"quora's body", "An article", nil, quoraDeletedBody, true},
+		// Articles that quote a notice, or show one, after their opening.
+		{"an article quoting a 404 page", "The anatomy of a great 404 page", nil,
+			"# The anatomy of a great 404 page\n\n" + intro + "\n\n> Sorry, we can't find the page you're looking for.\n\n" + article, true},
+		{"a status-code article", "HTTP status codes explained", nil,
+			"# HTTP status codes explained\n\n" + intro + "\n\n## 404 Not Found\n\nThe server has nothing at that path.\n\n" + article, true},
+		{"landingfolio's 404 in its menu", "Landing page inspiration", nil,
+			"*   [Inspiration](https://landingfolio.com/inspiration)\n*   [404](https://landingfolio.com/inspiration/404)\n\n" + article, true},
+		{"an essay showing a notice later", "What a dead link tells you", nil,
+			intro + "\n\nThe page said only this:\n\nPage not found\n\n" + article, true},
+		{"another site for sale", "Twitter.com is for sale", nil, "Twitter.com is for sale\n\n" + article, true},
+		// Pages with a sign-in box that aren't only one.
+		{"a public page, its sign-in box last", "IGDA Toronto", nil, "# IGDA Toronto\n\n## Intro\n\n" + intro + "\n\n" +
+			strings.Repeat("[See all photos](https://www.facebook.com/IGDAToronto/photos)\n\n", 4) +
+			"Our next event is up!\n\nEmail or phone number\n\nPassword\n\nLog In\n\n" +
+			"[Forgot password?](https://www.facebook.com/recover)", true},
+		{"a long page, a sign-in box at its top", "A Whitelist for Phone Calls? - Slashdot", nil,
+			"Log in\n\nNickname:\n\nPassword:\n\n[Forgot your password?](https://slashdot.org/my/mailpassword)\n\n" + longArticleBody, true},
+		{"a sign-up form", "Institutional-caliber research", nil, "Fill in the form below to get instant access.\n\n" +
+			"- Username\n- Password\n- Password Confirmation\n- First Name\n- Last Name\n\n" + article, true},
+		{"a login tutorial", "Build a login form with React", nil,
+			"# Build a login form with React\n\nLog in\n\nPassword\n\n" + longArticleBody, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1511,6 +1568,128 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 		})
 	}
 }
+
+// TestNative_TextVerdictsAtTheOrigin: an origin page whose text opens with a
+// not-found notice or a parked domain's is a dead link, final at once and
+// without Jina; one that is only a sign-in form is a page-level login wall,
+// which Jina is asked about once. No verdict caches the host. The same
+// notice after an article's intro is the article's.
+func TestNative_TextVerdictsAtTheOrigin(t *testing.T) {
+	cases := []struct {
+		name         string
+		target       string
+		html         string
+		cause        store.FailureCause // empty for a page stored
+		reason       string
+		jinaRequests int32
+	}{
+		{"bomatoronto's not-found page (40303d6f)", causePage, bomaTorontoNotFoundHTML,
+			store.FailureCauseDeadLink, `text reads like a not-found page: "Page Not Found"`, 0},
+		{"the notice after an intro", causePage, bomaTorontoQuotingHTML, "", "", 0},
+		{"hugedomains (64748bb6)", causePage, hugeDomainsForSaleHTML,
+			store.FailureCauseDeadLink, `text reads like a parked domain: "This domain is for sale: $5,795"`, 0},
+		{"omegacoder, under its own name (1e76c977)", "http://omegacoder.com/?p=46", omegaCoderForSaleHTML,
+			store.FailureCauseDeadLink, `text reads like a parked domain: "omegacoder.com is for sale!"`, 0},
+		{"a sign-in page", causePage, signInPageHTML, store.FailureCauseLoginWall,
+			"(after native: login wall or thin content (page is a sign-in form))", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int32
+			jina := jinaPage("Instagram", nil, instagramSignInBody)
+			jina.hits = &hits
+			n := fakeNative(t, htmlPage(tc.html), jina, true)
+			res, err := n.Fetch(t.Context(), tc.target)
+			assert.Equal(t, tc.jinaRequests, hits.Load())
+			assert.False(t, hostCached(n, hostOf(tc.target)), "a page's verdict is the page's")
+			if tc.cause == "" {
+				require.NoError(t, err)
+				assert.Equal(t, "readability", res.Meta["via"])
+				return
+			}
+			require.Error(t, err)
+			assert.Equal(t, tc.cause, FailureCause(err), "%v", err)
+			assert.Contains(t, err.Error(), tc.reason)
+			assert.NotErrorIs(t, err, errSiteLoginWall)
+			_, permanent := errors.AsType[*PermanentError](err)
+			assert.True(t, permanent, "final once every extraction path answered: %v", err)
+		})
+	}
+}
+
+// TestNative_JinaSignInFormAfterOrigin403: behind an origin 403, Jina's
+// sign-in form is a rejection like a thin answer's. The origin's host-wide
+// verdict is cached and the fetch left to its retry; the host's next page,
+// past the cache, fails for good as a login wall.
+func TestNative_JinaSignInFormAfterOrigin403(t *testing.T) {
+	h := newJinaHarness(t, http.StatusForbidden, true, jinaReply("Instagram", nil, instagramSignInBody))
+
+	_, err := h.n.Fetch(t.Context(), h.origin.URL+"/a")
+	require.ErrorIs(t, err, ErrLoginWall)
+	assert.Contains(t, err.Error(), "page is a sign-in form")
+	_, permanent := errors.AsType[*PermanentError](err)
+	assert.False(t, permanent, "the first failure for a host gets one more attempt: %v", err)
+	assert.True(t, h.originCached())
+
+	_, err = h.n.Fetch(t.Context(), h.origin.URL+"/b")
+	require.ErrorContains(t, err, "(cached: ")
+	_, permanent = errors.AsType[*PermanentError](err)
+	assert.True(t, permanent, "%v", err)
+	assert.Equal(t, store.FailureCauseLoginWall, FailureCause(err))
+	assert.Equal(t, int32(1), h.originHits.Load())
+	assert.Equal(t, int32(2), h.jinaHits.Load())
+}
+
+// Origin pages whose text alone gives them away, rebuilt from what the
+// library stored of them.
+const (
+	// bomaTorontoNotFoundHTML is 40303d6f's page, titled with the site's
+	// name: its article is the notice.
+	bomaTorontoNotFoundHTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>- Building Owners &amp; Managers Association of the Greater Toronto Area</title></head><body>
+<nav><ul><li><a href="/about">About</a></li><li><a href="/membership">Membership</a></li><li><a href="/events">Events</a></li></ul></nav>
+<main><div id="MPContentArea"><h2>Page Not Found</h2><p>Sorry! The page you requested was not found.</p>
+<p>Use the navigation above or search the site to find what you were looking for. BOMA Toronto represents the owners and managers of commercial buildings across the Greater Toronto Area, with programs for members, awards, and events throughout the year.</p></div></main>
+<footer><p>© 2026 BOMA Toronto. All rights reserved. 20 Toronto Street, Suite 820, Toronto, Ontario.</p></footer></body></html>`
+
+	// bomaTorontoQuotingHTML is an article that quotes the notice after its
+	// intro.
+	bomaTorontoQuotingHTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>What our members see when a page moves</title></head><body>
+<main><article><h1>What our members see when a page moves</h1>
+<p>We rebuilt the association's site this spring, and some of the old addresses our members had bookmarked for years stopped working. This note explains what changed, what a visitor sees now, and how we keep the old links alive.</p>
+<h2>Page Not Found</h2><p>Sorry! The page you requested was not found.</p>
+<p>That is the notice a visitor met before the redirects went in. Every old page now redirects to its new address, and the notice shows only for pages that never existed. Members who still meet it can write to the office and we will add the missing redirect.</p></article></main></body></html>`
+
+	// hugeDomainsForSaleHTML is 64748bb6's page, where heistmade.com
+	// redirected.
+	hugeDomainsForSaleHTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>HeistMade.com is for sale | HugeDomains</title></head><body><main>
+<p>This domain is for sale: $5,795</p><p>Buy now for $5,795 or pay $241.46 per month for 24 months</p>
+<h2>Since 2005, we've helped thousands of people get the perfect domain name</h2>
+<p>HugeDomains provides a 100% satisfaction guarantee on every domain name that we sell through our website. If you buy a domain and are unhappy with it, we will accept the return within 30 days and issue a full refund – no questions asked.</p>
+<p>In most cases access to the domain will be available within one to two hours of purchase, however access to domains purchased after business hours will be available within the next business day.</p>
+</main></body></html>`
+
+	// omegaCoderForSaleHTML is 1e76c977's page, at omegacoder.com, titled
+	// with the site's name.
+	omegaCoderForSaleHTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>OmegaCoder</title></head><body><main>
+<p>EN/中</p><h2>omegacoder.com is for sale!</h2>
+<p>OmegaCoder suggests a high-level coding solution combining precision and innovation. It implies expertise in advanced technology and efficient problem-solving. The name conveys professionalism and reliability suitable for tech-driven services or products.</p>
+<h3>Purchase Process &amp; Instructions</h3>
+<p>This is an independent private domain showcase page, not a commercial platform. The domain and its owner are not affiliated with any company, brand, or trademark.</p>
+<p>Premium domain names are rare and available on a first-come, first-served basis. Listing will be removed immediately upon sale. Please contact promptly to secure your domain.</p>
+</main></body></html>`
+
+	// signInPageHTML is a sign-in page over 500 bytes of text, Instagram's
+	// as an origin would serve it.
+	signInPageHTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Instagram</title></head><body><main>
+<div><p>See everyday moments from your close friends.</p>
+<p>Log into Instagram</p><p>Mobile number, username or email</p><p>Password</p><p>Log in</p><p>Forgot password?</p>
+<p>Log in with Facebook</p><p>Create new account</p></div>
+<div><p>Meta · About · Blog · Jobs · Help · API · Privacy · Terms · Locations · Popular · Instagram Lite · Meta AI · Threads · Contact Uploading &amp; Non-Users · Meta Verified</p>
+<p>Get the app to share what you're up to with the people you follow, and to see their stories, reels and messages wherever you are.</p>
+<p>English · Español · Français · Deutsch · Italiano · Português · 日本語 · 한국어 · 中文(简体)</p>
+<p>© 2026 Instagram from Meta</p></div>
+</main></body></html>`
+)
 
 // TestNative_ChallengePageFallsBackToJina: a bot challenge served with 200
 // is anti-bot, not a thin page, and never stored: with Jina off it fails
@@ -1558,11 +1737,24 @@ var challengePages = map[string]string{
 <noscript><div class="h2"><span id="challenge-error-text">Enable JavaScript and cookies to continue</span></div></noscript>
 <div id="challenge-body-text" class="core-msg spacer">example.com needs to review the security of your connection before proceeding.</div>
 </div></div></body></html>`,
+	// Google's unusual-traffic page, titled with the search URL.
+	"google": `<html><head><meta http-equiv="content-type" content="text/html; charset=utf-8"><title>https://www.google.com/search?q=opendune</title></head>
+<body style="font-family: arial, sans-serif; background-color: #fff; color: #000; padding:20px; font-size:18px;"><div style="max-width:400px;"><hr noshade size="1" style="color:#ccc; background-color:#ccc;"><br>
+<form id="captcha-form" action="index" method="post"><div id="recaptcha" class="g-recaptcha"></div></form>
+<hr noshade size="1" style="color:#ccc; background-color:#ccc;"><div style="font-size:13px;"><b>About this page</b><br><br>Our systems have detected unusual traffic from your computer network.  This page checks to see if it&#39;s really you sending the requests, and not a robot.  <a href="#">Why did this happen?</a><br><br>
+<div id="infoDiv" style="display:none; background-color:#eee; padding:10px; margin:0 0 15px 0; line-height:1.4em;">This page appears when Google automatically detects requests coming from your computer network which appear to be in violation of the <a href="//www.google.com/policies/terms/">Terms of Service</a>. The block will expire shortly after those requests stop.</div>
+IP address: 2600:1900:0:2d12::1101<br>Time: 2026-09-28T07:05:20Z<br>URL: https://www.google.com/search?q=opendune<br></div></div></body></html>`,
+	// Fastly's client challenge, with JavaScript off.
+	"fastly": `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Client Challenge</title></head><body>
+<noscript><div class="noscript-msg">JavaScript is disabled in your browser.</div></noscript>
+<div id="loading-error" class="msg"><p>A required part of this site couldn’t load. This may be due to a browser extension, network issues, or browser settings. Please check your connection, disable any ad blockers, or try using a different browser.</p></div>
+</body></html>`,
 }
 
 // TestJudgePage_Order pins the order of the page verdicts: dead links
-// first (another site's landing page included), then challenges, then
-// error pages, then the login-wall checks, redirects before content.
+// first (another site's landing page and the text's notices included), then
+// challenges, then error pages, then the login-wall checks, redirects before
+// content and the sign-in form last.
 func TestJudgePage_Order(t *testing.T) {
 	at := func(raw string) *url.URL {
 		u, err := url.Parse(raw)
@@ -1584,6 +1776,9 @@ func TestJudgePage_Order(t *testing.T) {
 		{"homepage before a challenge title", pageView{title: "Just a moment...", found: true, finalURL: at("https://example.com/")}, true, ErrDeadLink, "redirected to homepage", 0},
 		{"landing page before a challenge", pageView{title: "Just a moment...", text: challenge, found: true, finalURL: at("https://other.example/articles/")}, true, ErrDeadLink, "another site's landing page", 0},
 		{"detection off", pageView{title: "Page not found", text: challenge, found: true}, false, ErrAntiBot, "bot challenge", 0},
+		{"not-found notice before a challenge title", pageView{title: "Just a moment...", text: "PAGE NOT FOUND\n\n" + long, found: true}, true, ErrDeadLink, `text reads like a not-found page: "PAGE NOT FOUND"`, 0},
+		{"parked domain before a sign-in form", pageView{title: "HeadlineLogic News Portal", text: flappyRoyaleParkedBody, found: true}, true, ErrDeadLink, "text reads like a parked domain", 0},
+		{"a sign-in form, detection off", pageView{title: "HeadlineLogic News Portal", text: flappyRoyaleParkedBody, found: true}, false, ErrLoginWall, "page is a sign-in form", loginWallPage},
 		{"not-found title without an article", pageView{title: "Palantir | Page Not Found"}, true, ErrDeadLink, "not-found page", 0},
 		{"not-found title without an article, detection off", pageView{title: "Palantir | Page Not Found"}, false, ErrLoginWall, "no article extracted", loginWallPage},
 		// Google Cloud's docs pad their separators with no-break spaces; the
@@ -1602,6 +1797,9 @@ func TestJudgePage_Order(t *testing.T) {
 		{"no article", pageView{title: "Log in"}, true, ErrLoginWall, "no article extracted", loginWallPage},
 		{"thin before a login title", pageView{title: "Log in", text: "short", found: true}, true, ErrLoginWall, "extracted text < 500 bytes", loginWallPage},
 		{"login title", pageView{title: "Log in", text: long, found: true}, true, ErrLoginWall, "title looks like a login wall", loginWallPage},
+		{"thin before a sign-in form", pageView{title: "Instagram", text: "Log in\n\nPassword", found: true}, true, ErrLoginWall, "extracted text < 500 bytes", loginWallPage},
+		{"login title before a sign-in form", pageView{title: "Log in", text: instagramSignInBody, found: true}, true, ErrLoginWall, "title looks like a login wall", loginWallPage},
+		{"sign-in form", pageView{title: "Instagram", text: instagramSignInBody, found: true}, true, ErrLoginWall, "page is a sign-in form", loginWallPage},
 		{"article", pageView{title: "A real article", text: long, found: true, finalURL: at(target)}, true, nil, "", 0},
 		{"article on another site", pageView{title: "A real article", text: long, found: true, finalURL: at("https://other.example/2019/a-post-about-caching")}, true, nil, "", 0},
 	}
@@ -1619,6 +1817,52 @@ func TestJudgePage_Order(t *testing.T) {
 				assert.Equal(t, tc.scope == loginWallSite, errors.Is(err, errSiteLoginWall), "site-wide: %v", err)
 				assert.Equal(t, tc.scope == loginWallOffsite, errors.Is(err, errOffsiteLoginWall), "offsite: %v", err)
 			}
+		})
+	}
+}
+
+// TestJudgePage_TextNotices pins where a notice in a page's text counts: in
+// its opening (its own lines up to its first line of prose, within its first
+// openingBytes of own text), read from its first pageTextScanBytes, never in
+// a link, and only with dead-link detection on.
+func TestJudgePage_TextNotices(t *testing.T) {
+	const notice = "Page not found\n"
+	// own is lines of own text, size bytes each with its line break.
+	own := func(lines, size int) string { return strings.Repeat(strings.Repeat("a", size-1)+"\n", lines) }
+	// rest is the page after its opening, long enough not to be thin.
+	rest := "\n" + strings.Repeat("The rest of the page goes on about its subject. ", 20)
+	linkedIn := "We can’t find the page you’re looking for.The page you’re looking for may have been moved, or may no " +
+		"longer exist. Try going back to the previous page or check out top LinkedIn content from expert professionals."
+	require.Greater(t, len(linkedIn), proseLineBytes)
+	cases := []struct {
+		name      string
+		text      string
+		detection bool
+		dead      bool
+	}{
+		{"a notice first", notice + rest, true, true},
+		{"a notice after a line of proseLineBytes", own(1, proseLineBytes+1) + notice + rest, true, true},
+		{"a notice after a longer line", own(1, proseLineBytes+2) + notice + rest, true, false},
+		{"a notice that is the first long line (3ef4dab9)", linkedIn + rest, true, true},
+		{"a notice beginning a byte inside the opening", own(1, 127) + own(15, 128) + notice + rest, true, true},
+		{"a notice beginning at openingBytes", own(16, 128) + notice + rest, true, false},
+		{"a notice behind a menu", navigation(pageTextScanBytes-1024) + notice + rest, true, true},
+		{"a notice past pageTextScanBytes", navigation(pageTextScanBytes) + notice + rest, true, false},
+		{"a 404 in a menu", "*   [404](https://example.com/inspiration/404)\n" + rest, true, false},
+		{"a not-found template, detection off", notice + rest, false, false},
+		{"a not-found sentence, detection off", "Sorry! The page you requested was not found.\n" + rest, false, false},
+		{"a parked domain, detection off", "This domain is for sale!\n" + rest, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := &Native{deadLinkDetection: tc.detection}
+			err := n.judgePage("https://example.com/blog/a-post", pageView{title: "A post", text: tc.text, found: true})
+			if !tc.dead {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, ErrDeadLink)
+			assert.Contains(t, err.Error(), "text reads like a not-found page")
 		})
 	}
 }
@@ -1717,9 +1961,14 @@ func TestLooksLikeChallenge_Phrases(t *testing.T) {
 		{"reddit, curly apostrophe", redditBlockBody, true},
 		{"incapsula", "Request unsuccessful. Incapsula incident ID: 123000450123456789-12345678901234567", true},
 		{"ad blocker", "Please enable JS and disable any ad blocker", true},
+		{"google's unusual traffic (16cc372f)", googleSorryBody, true},
+		{"google's unusual traffic, the library's longest (e7cc72ef)", googleSorryLongBody, true},
+		{"fastly, curly apostrophe (134358fc)", fastlyChallengeBody, true},
 		{"short page, no phrase", "A short note about our release.", false},
 		{"3 KB article quoting one", strings.Repeat("An essay on bot checks. ", 128) +
 			"Enable JavaScript and cookies to continue, the page said.", false},
+		{"3 KB article quoting google's", strings.Repeat("Google's sorry page is familiar to anyone who searches a lot. ", 50) +
+			"Our systems have detected unusual traffic from your computer network, it says.", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
