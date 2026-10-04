@@ -11664,8 +11664,13 @@ and leaves `sqlite_master` as 017 had it (a test compares them). `CommitRun`
 writes it all in its one transaction; `checkCommit` refuses, before
 anything is written, a built map missing a place, a place off the map or
 not finite, a circle or dot radius not above 0, places without a built
-map, and a similar list longer than 3, naming a group not among the
-commit's interests (or itself), or with a cosine not finite.
+map, and a similar list on an area, longer than 3, naming anything but
+another interest of the commit, or with a cosine not finite. The map's
+reads index a similar interest among the run's interests, so an area in a
+list would be a run they answer 500 for. A group says which it is: a
+commit's groups carry their identity's `Level` (the store refuses one
+without, and one that isn't its new identity's), since nothing else in
+a commit tells an area that holds no document from an interest.
 
 ### Failure, and the bound
 

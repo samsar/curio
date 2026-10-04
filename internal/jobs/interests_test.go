@@ -256,7 +256,8 @@ func doneRunWith(t *testing.T, ins *sqlitestore.Insights, centroid []float32) (*
 	require.NoError(t, ins.CommitRun(ctx, store.RunCommit{RunID: run.ID, TenantID: "local",
 		Outcome:       store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat, NumInterests: 1},
 		NewIdentities: []store.Interest{{ID: interest, Level: store.InterestLevelInterest}},
-		Groups:        []store.InterestGroup{{Interest: store.Interest{ID: interest}, Size: 1, Cohesion: 1, Centroid: centroid}},
+		Groups: []store.InterestGroup{{Interest: store.Interest{ID: interest, Level: store.InterestLevelInterest}, Size: 1,
+			Cohesion: 1, Centroid: centroid}},
 	}))
 	return run, interest
 }

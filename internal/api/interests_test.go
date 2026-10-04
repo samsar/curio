@@ -59,7 +59,8 @@ func (s *testServer) newTenantRun(t *testing.T, tenant string, shape store.Inter
 // ID; its size and loose fits are its interests', given later.
 func (f *runFixture) area(label string, carried ...string) string {
 	id := f.identity(store.InterestLevelArea, label, carried...)
-	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id}, Cohesion: 0.4})
+	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelArea},
+		Cohesion: 0.4})
 	f.c.Outcome.NumAreas++
 	return id
 }
@@ -70,8 +71,8 @@ func (f *runFixture) area(label string, carried ...string) string {
 func (f *runFixture) interest(label, area string, size int, members, loose []*store.Document, carried ...string) string {
 	id := f.identity(store.InterestLevelInterest, label, carried...)
 	size = max(size, len(members))
-	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id}, ParentID: area,
-		Size: size, Loose: len(loose), Cohesion: 0.8})
+	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelInterest},
+		ParentID: area, Size: size, Loose: len(loose), Cohesion: 0.8})
 	for i := range f.c.Groups {
 		if f.c.Groups[i].ID == area {
 			f.c.Groups[i].Size += size

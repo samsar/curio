@@ -55,9 +55,14 @@ func identity(id string, level store.InterestLevel, label string, source store.L
 		LabeledAt: &labeledAt}
 }
 
-func group(id, parent string, size, loose int, cohesion float64, centroid ...float32) store.InterestGroup {
-	return store.InterestGroup{Interest: store.Interest{ID: id}, ParentID: parent, Size: size, Loose: loose,
-		Cohesion: cohesion, Centroid: centroid}
+func areaGroup(id string, size, loose int, cohesion float64) store.InterestGroup {
+	return store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelArea}, Size: size, Loose: loose,
+		Cohesion: cohesion}
+}
+
+func interestGroup(id, parent string, size, loose int, cohesion float64, centroid ...float32) store.InterestGroup {
+	return store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelInterest}, ParentID: parent,
+		Size: size, Loose: loose, Cohesion: cohesion, Centroid: centroid}
 }
 
 func member(doc, interest, area string, sim float64, seeds ...int) store.InterestAssignment {
@@ -94,9 +99,9 @@ func (f *insightFixture) firstCommit(run *store.InterestRun) store.RunCommit {
 			identity("interest-2", store.InterestLevelInterest, "Interest Two", store.LabelSourceTerms),
 		},
 		Groups: []store.InterestGroup{
-			group("area-1", "", 4, 1, 0.4),
-			group("interest-1", "area-1", 2, 1, 0.8, 1, 0),
-			group("interest-2", "area-1", 2, 0, 0.7, 0, 1),
+			areaGroup("area-1", 4, 1, 0.4),
+			interestGroup("interest-1", "area-1", 2, 1, 0.8, 1, 0),
+			interestGroup("interest-2", "area-1", 2, 0, 0.7, 0, 1),
 		},
 		Assignments: []store.InterestAssignment{
 			member(d[0], "interest-1", "area-1", 0.9, 0, 0), member(d[1], "interest-1", "area-1", 0.8, 0, 0),
@@ -120,9 +125,9 @@ func (f *insightFixture) secondCommit(run *store.InterestRun, prior string) stor
 		NewIdentities: []store.Interest{identity("interest-3", store.InterestLevelInterest, "Interest Three", store.LabelSourceLLM)},
 		Relabels:      []store.Interest{relabeled},
 		Groups: []store.InterestGroup{
-			group("area-1", "", 4, 0, 0.4),
-			group("interest-1", "area-1", 2, 0, 0.8, 1, 0),
-			group("interest-3", "area-1", 2, 0, 0.7, 0, 1),
+			areaGroup("area-1", 4, 0, 0.4),
+			interestGroup("interest-1", "area-1", 2, 0, 0.8, 1, 0),
+			interestGroup("interest-3", "area-1", 2, 0, 0.7, 0, 1),
 		},
 		Assignments: []store.InterestAssignment{
 			member(d[0], "interest-1", "area-1", 0.9), member(d[1], "interest-1", "area-1", 0.8),
@@ -462,10 +467,10 @@ func TestInsights_PagedOrders(t *testing.T) {
 	// Written out of order: the ties on size and cohesion come by ID, and
 	// the ties on similarity by document ID.
 	c.Groups = []store.InterestGroup{
-		group("area-tie-b", "", 2, 0, 0.5), group("area-small", "", 1, 0, 0.9), group("area-big", "", 5, 0, 0.1),
-		group("area-tie-a", "", 2, 0, 0.5), group("area-cohesive", "", 2, 0, 0.8),
-		group("in-c", "area-tie-a", 1, 0, 0.5), group("in-a", "area-big", 5, 0, 0.5),
-		group("in-b", "area-tie-a", 1, 0, 0.5),
+		areaGroup("area-tie-b", 2, 0, 0.5), areaGroup("area-small", 1, 0, 0.9), areaGroup("area-big", 5, 0, 0.1),
+		areaGroup("area-tie-a", 2, 0, 0.5), areaGroup("area-cohesive", 2, 0, 0.8),
+		interestGroup("in-c", "area-tie-a", 1, 0, 0.5), interestGroup("in-a", "area-big", 5, 0, 0.5),
+		interestGroup("in-b", "area-tie-a", 1, 0, 0.5),
 	}
 	c.Assignments = []store.InterestAssignment{member(d[3], "in-a", "area-big", 0.5), member(d[0], "in-a", "area-big", 0.9),
 		member(d[4], "in-a", "area-big", 0.5), member(d[1], "in-a", "area-big", 0.5), member(d[2], "in-a", "area-big", 0.7)}
@@ -1132,7 +1137,7 @@ func TestInsights_DocumentPlace(t *testing.T) {
 		Outcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat, NumDocuments: 1,
 			NumInterests: 1, Created: 1},
 		NewIdentities: []store.Interest{identity("flat-1", store.InterestLevelInterest, "", store.LabelSourceTerms)},
-		Groups:        []store.InterestGroup{group("flat-1", "", 1, 0, 0.9)},
+		Groups:        []store.InterestGroup{interestGroup("flat-1", "", 1, 0, 0.9)},
 		Assignments:   []store.InterestAssignment{member(flat.docs[0], "flat-1", "", 0.7)},
 	}))
 	got, err = flat.ins.DocumentPlace(flat.ctx, run.ID, flat.docs[0])

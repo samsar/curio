@@ -482,7 +482,8 @@ interest_groups
 
 The five map columns are all set (with `zoom_r` above 0) or all NULL;
 `similar` is set for every interest of a run from 018 on, map or no map,
-and is valid JSON when set.
+never for an area, and is valid JSON when set; it names only other
+interests of the run (`CommitRun` refuses anything else).
 
 `idx_interest_groups_list (run_id, parent_id, size DESC, cohesion DESC,
 interest_id)` serves the top-level page, an area's interests and every

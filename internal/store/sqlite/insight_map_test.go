@@ -106,49 +106,66 @@ func TestInsights_MapRoundTrip(t *testing.T) {
 	}
 }
 
-// TestInsights_MapRefusesBadCommits: a map that doesn't fit its rows is an
+// TestInsights_MapRefusesBadCommits: a map that doesn't fit its rows, a
+// group without its identity's level, or a similar list that isn't an
+// interest's or names anything but other interests of the commit, is an
 // error before anything is written: the run stays running and no identity
 // is minted.
 func TestInsights_MapRefusesBadCommits(t *testing.T) {
-	for name, spoil := range map[string]func(c *store.RunCommit){
-		"a built map missing a document's place": func(c *store.RunCommit) { c.Assignments[2].Map = nil },
-		"a built map missing a group's place":    func(c *store.RunCommit) { c.Groups[1].Map = nil },
-		"a NaN position":                         func(c *store.RunCommit) { c.Assignments[0].Map.MapX = math.NaN() },
-		"a position off the map":                 func(c *store.RunCommit) { c.Assignments[0].Map.ZoomY = 1000.5 },
-		"a circle off the map":                   func(c *store.RunCommit) { c.Groups[0].Map.ZoomX = 990 },
-		"a circle of no radius":                  func(c *store.RunCommit) { c.Groups[0].Map.ZoomR = 0 },
-		"a dot of no radius":                     func(c *store.RunCommit) { c.Outcome.Map.DotRadius = 0 },
-		"Unsorted's disc of no radius":           func(c *store.RunCommit) { c.Outcome.Map.Unsorted.R = -1 },
-		"a built map without a kind":             func(c *store.RunCommit) { c.Outcome.Map.Kind = "" },
-		"a failed map with places": func(c *store.RunCommit) {
+	for name, tc := range map[string]struct {
+		spoil func(c *store.RunCommit)
+		why   string
+	}{
+		"a built map missing a document's place": {func(c *store.RunCommit) { c.Assignments[2].Map = nil },
+			"has a place on the map: false"},
+		"a built map missing a group's place": {func(c *store.RunCommit) { c.Groups[1].Map = nil },
+			"has a place on the map: false"},
+		"a NaN position": {func(c *store.RunCommit) { c.Assignments[0].Map.MapX = math.NaN() }, "is not on the map"},
+		"a position off the map": {func(c *store.RunCommit) { c.Assignments[0].Map.ZoomY = 1000.5 },
+			"is not on the map"},
+		"a circle off the map":         {func(c *store.RunCommit) { c.Groups[0].Map.ZoomX = 990 }, "is not on the map"},
+		"a circle of no radius":        {func(c *store.RunCommit) { c.Groups[0].Map.ZoomR = 0 }, "is not on the map"},
+		"a dot of no radius":           {func(c *store.RunCommit) { c.Outcome.Map.DotRadius = 0 }, "dot radius"},
+		"Unsorted's disc of no radius": {func(c *store.RunCommit) { c.Outcome.Map.Unsorted.R = -1 }, "disc of Unsorted"},
+		"a built map without a kind":   {func(c *store.RunCommit) { c.Outcome.Map.Kind = "" }, "a built map has kind"},
+		"no map, with places":          {func(c *store.RunCommit) { c.Outcome.Map = nil }, "with the map built: false"},
+		"an unknown map status":        {func(c *store.RunCommit) { c.Outcome.Map.Status = "drawn" }, "map status"},
+		"a group without a level":      {func(c *store.RunCommit) { c.Groups[2].Level = "" }, `has level ""`},
+		"a group of another level than its identity": {
+			func(c *store.RunCommit) { c.Groups[2].Level = store.InterestLevelArea }, "its new identity interest"},
+		"a failed map with places": {func(c *store.RunCommit) {
 			c.Outcome.Map = &store.RunMap{Status: store.MapFailed, Error: "boom", Params: []byte(`{}`)}
-		},
-		"a failed map without its error": func(c *store.RunCommit) {
+		}, "with the map built: false"},
+		"a failed map without its error": {func(c *store.RunCommit) {
 			*c = unplaced(*c)
 			c.Outcome.Map = &store.RunMap{Status: store.MapFailed, Params: []byte(`{}`)}
-		},
-		"no map, with places":   func(c *store.RunCommit) { c.Outcome.Map = nil },
-		"an unknown map status": func(c *store.RunCommit) { c.Outcome.Map.Status = "drawn" },
-		"a similar interest the commit lacks": func(c *store.RunCommit) {
+		}, "a failed map has error"},
+		"a similar interest the commit lacks": {func(c *store.RunCommit) {
 			c.Groups[1].Similar = []store.SimilarInterest{{ID: "interest-9", Cosine: 0.5}}
-		},
-		"an interest similar to itself": func(c *store.RunCommit) {
+		}, "as a similar interest"},
+		"an area as a similar interest": {func(c *store.RunCommit) {
+			c.Groups[1].Similar = []store.SimilarInterest{{ID: "area-1", Cosine: 0.5}}
+		}, "as a similar interest"},
+		"an area listing similar interests": {func(c *store.RunCommit) {
+			c.Groups[0].Similar = []store.SimilarInterest{{ID: "interest-1", Cosine: 0.5}}
+		}, "area area-1 lists similar interests"},
+		"an interest similar to itself": {func(c *store.RunCommit) {
 			c.Groups[1].Similar = []store.SimilarInterest{{ID: c.Groups[1].ID, Cosine: 1}}
-		},
-		"four similar interests": func(c *store.RunCommit) {
-			s := store.SimilarInterest{ID: "area-1", Cosine: 0.5}
+		}, "as a similar interest"},
+		"four similar interests": {func(c *store.RunCommit) {
+			s := store.SimilarInterest{ID: "interest-2", Cosine: 0.5}
 			c.Groups[1].Similar = []store.SimilarInterest{s, s, s, s}
-		},
-		"a NaN cosine": func(c *store.RunCommit) {
-			c.Groups[1].Similar = []store.SimilarInterest{{ID: "area-1", Cosine: math.NaN()}}
-		},
+		}, "at most 3"},
+		"a NaN cosine": {func(c *store.RunCommit) {
+			c.Groups[1].Similar = []store.SimilarInterest{{ID: "interest-2", Cosine: math.NaN()}}
+		}, "at cosine NaN"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newInsightFixture(t, 7)
 			run := f.run(t, "local")
 			c := mapped(f.firstCommit(run))
-			spoil(&c)
-			require.Error(t, f.ins.CommitRun(f.ctx, c))
+			tc.spoil(&c)
+			require.ErrorContains(t, f.ins.CommitRun(f.ctx, c), tc.why)
 			got, err := f.ins.GetRun(f.ctx, run.ID)
 			require.NoError(t, err)
 			assert.Equal(t, store.InterestRunRunning, got.Status)

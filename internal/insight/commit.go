@@ -25,7 +25,7 @@ func (gr *grouped) commit(run *store.InterestRun, prior *previous, labels []grou
 		case lab.relabeled:
 			c.Relabels = append(c.Relabels, identity)
 		}
-		group := store.InterestGroup{Interest: store.Interest{ID: g.id}, Size: g.size(), Loose: g.loose,
+		group := store.InterestGroup{Interest: store.Interest{ID: g.id, Level: g.level}, Size: g.size(), Loose: g.loose,
 			Cohesion: g.cohesion, Centroid: g.centroid}
 		if g.parent >= 0 {
 			group.ParentID = gr.groups[g.parent].id

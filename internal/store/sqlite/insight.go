@@ -248,7 +248,7 @@ func checkCommit(c store.RunCommit) error {
 				c.RunID, l.OldID, l.NewID, l.RunID, l.Event)
 		}
 	}
-	if err := checkSimilar(c.Groups); err != nil {
+	if err := checkGroups(c.Groups, c.NewIdentities); err != nil {
 		return fmt.Errorf("insights: commit of run %s: %w", c.RunID, err)
 	}
 	if err := checkMap(c); err != nil {
@@ -257,23 +257,40 @@ func checkCommit(c store.RunCommit) error {
 	return nil
 }
 
-// maxSimilar is the most similar interests a group lists.
+// maxSimilar is the most similar interests an interest lists.
 const maxSimilar = 3
 
-// checkSimilar checks each group's similar interests: at most maxSimilar,
-// each another group of the commit, with a finite cosine.
-func checkSimilar(groups []store.InterestGroup) error {
-	ids := make(map[string]bool, len(groups))
+// checkGroups checks each group's level, which must be its identity's when
+// the run mints it, and the similar interests: only an interest lists them,
+// at most maxSimilar, each another interest of the commit with a finite
+// cosine. The map's reads index an interest's similar interests among the
+// run's interests, so an area in a list would be a run they can't serve.
+func checkGroups(groups []store.InterestGroup, minted []store.Interest) error {
+	mintedAs := make(map[string]store.InterestLevel, len(minted))
+	for _, in := range minted {
+		mintedAs[in.ID] = in.Level
+	}
+	interests := make(map[string]bool, len(groups))
 	for _, g := range groups {
-		ids[g.ID] = true
+		level, ok := mintedAs[g.ID]
+		switch {
+		case !g.Level.Valid():
+			return fmt.Errorf("group %s has level %q", g.ID, g.Level)
+		case ok && level != g.Level:
+			return fmt.Errorf("group %s has level %s, its new identity %s", g.ID, g.Level, level)
+		}
+		interests[g.ID] = g.Level == store.InterestLevelInterest
 	}
 	for _, g := range groups {
-		if len(g.Similar) > maxSimilar {
+		switch {
+		case g.Similar != nil && g.Level != store.InterestLevelInterest:
+			return fmt.Errorf("%s %s lists similar interests", g.Level, g.ID)
+		case len(g.Similar) > maxSimilar:
 			return fmt.Errorf("interest %s lists %d similar interests, at most %d", g.ID, len(g.Similar), maxSimilar)
 		}
 		for _, sim := range g.Similar {
-			if !ids[sim.ID] || sim.ID == g.ID || !finite(sim.Cosine) {
-				return fmt.Errorf("interest %s lists %q at cosine %g as similar", g.ID, sim.ID, sim.Cosine)
+			if !interests[sim.ID] || sim.ID == g.ID || !finite(sim.Cosine) {
+				return fmt.Errorf("interest %s lists %q at cosine %g as a similar interest", g.ID, sim.ID, sim.Cosine)
 			}
 		}
 	}

@@ -1600,9 +1600,9 @@ type RunCommit struct {
 	NewIdentities []Interest
 	// Relabels are carried identities named anew: ID and the label fields.
 	Relabels []Interest
-	// Groups are the run's groups: ID (the identity), ParentID, Size,
-	// Loose, Cohesion, Centroid, an interest's Similar and, with a built
-	// map, Map.
+	// Groups are the run's groups: ID (the identity) and its Level,
+	// ParentID, Size, Loose, Cohesion, Centroid, an interest's Similar
+	// (other interests of the run) and, with a built map, Map.
 	Groups []InterestGroup
 	// Assignments are the run's documents, each with its Map when the
 	// map is built.
@@ -1644,15 +1644,16 @@ type InsightStore interface {
 	// time and by this run; and moves the run from running to done with
 	// c.Outcome, its map's status and positions with it. A built map must
 	// give every group and assignment a place inside [0, MapExtent], and
-	// a failed map, or none, gives none; an interest's similar interests
-	// are at most three of the commit's interests with finite cosines.
-	// Anything else is an error before anything is written. It also clears
-	// the tenant's failures, a done rebuild
-	// being what they count up to, and, for a fresh run, the fresh
-	// rebuild owed when it was owed at or before the run read its vectors
-	// (one owed again since is still owed), unless a re-embedding owes it
-	// and c.ReadMidReindex. A run that isn't running is ErrConflict. Any
-	// failure rolls back all of it.
+	// a failed map, or none, gives none; every group has a valid level,
+	// its new identity's when it has one; only an interest lists similar
+	// interests, at most three other interests of the commit with finite
+	// cosines. Anything else is an error before anything is written. It
+	// also clears the tenant's failures, a done rebuild being what they
+	// count up to, and, for a fresh run, the fresh rebuild owed when it
+	// was owed at or before the run read its vectors (one owed again since
+	// is still owed), unless a re-embedding owes it and c.ReadMidReindex.
+	// A run that isn't running is ErrConflict. Any failure rolls back all
+	// of it.
 	CommitRun(ctx context.Context, c RunCommit) error
 	// FailRun moves a running run to failed with msg, numDocuments and its
 	// finish time, counting no failure: for a rebuild that was cancelled.
@@ -1770,9 +1771,9 @@ type InsightStore interface {
 	// PlaceMany writes the placements into runID, with their places on
 	// the map, in one transaction, while runID is the tenant's latest done
 	// run: a document placed already keeps its placement, and a document
-	// gone is left out. It
-	// returns how many it wrote; none when the run is no longer the
-	// latest. Each placement's RunID and PlacedAt are ignored.
+	// gone is left out. It returns how many it wrote; none when the run is
+	// no longer the latest. Each placement's RunID and PlacedAt are
+	// ignored.
 	PlaceMany(ctx context.Context, tenantID, runID string, ps []Placement) (int, error)
 	// Unplaced lists the tenant's fetched documents indexed at or after
 	// since that runID neither assigned nor placed, in no particular
