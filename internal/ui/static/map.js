@@ -127,8 +127,7 @@
   // At most 90 titles a frame, each at least 40 px wide: more is unreadable, less says nothing.
   const maxTitles = 90;
   const minTitlePx = 40;
-  // A label wraps to 3 lines at most, an interest's circle carries its name from 15 px across, and a tooltip's
-  // lines are cut at 300 px.
+  // Labels wrap to 3 lines at most, an interest's circle carries its name from 15 px across, tooltips cut at 300 px.
   const maxLabelLines = 3;
   const nameCirclePx = 15;
   const tipMaxPx = 300;
@@ -917,8 +916,7 @@
   };
 
   // allLabels names what the zoom allows on All documents: the selected group first, then the areas (the
-  // interests, once zoomed in or in the flat shape) at their anchors, largest first, then the titles of the
-  // documents nearest the middle.
+  // interests, once zoomed in or in the flat shape) at their anchors, largest first, then titles, middle first.
   function allLabels(v, ctx, m, r) {
     const t = v.t;
     const [sx, sy] = [x => x * t.k + t.x, y => y * t.k + t.y];
@@ -1319,12 +1317,14 @@
     }
   }
 
-  // syncAddress keeps the address on the view and the selection, as mapHref writes them, without adding to
-  // the history: a reload, or Back from a page it led to, shows the same.
+  // syncAddress keeps the address on the view and the selection as mapHref writes them, never adding to the history,
+  // best effort: Safari and Firefox throw past a rate limit on replaceState, and that must never stop the map.
   function syncAddress() {
     const params = {select: selectionParam(state.model, state.sel), view: state.view === 'all' ? '' : state.view};
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value)).toString();
-    history.replaceState(history.state, '', query ? mapPage + '?' + query : mapPage);
+    try {
+      history.replaceState(history.state, '', query ? mapPage + '?' + query : mapPage);
+    } catch { /* throttled: the address catches up at the next change */ }
   }
 
   // activate shows view name, its tab, canvas and legend, flown to the selection or fitted to the whole map. The

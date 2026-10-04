@@ -104,6 +104,30 @@ func TestInterestMapPage_AgreesWithTheEndpoint(t *testing.T) {
 	assert.Contains(t, mapPage(t, off, "", http.StatusOK).body, "<h2>The map is off</h2>")
 }
 
+// TestInterestMapPage_InsightOff: with finding interests turned off, a run
+// that drew no map, or whose map failed, sends the reader to the setting:
+// a rebuild would be refused (409).
+func TestInterestMapPage_InsightOff(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.InsightEnabled = false })
+	d := s.docs(t, "off", 2)
+	f := s.newRun(t, store.InterestShapeAreas)
+	f.interest("Kafka", f.area("Engineering"), 0, d, nil)
+	f.commit(t)
+	page := mapPage(t, s, "", http.StatusOK).body
+	assert.Contains(t, page, "<h2>No map yet</h2>")
+	assert.Contains(t, page, "set <code>insight.enabled: true</code> in config.yaml")
+	assert.NotContains(t, page, "curio interests rebuild", "a rebuild would be refused")
+
+	f = s.newRun(t, store.InterestShapeAreas)
+	f.interest("Kafka", f.area("Engineering"), 0, d, nil)
+	f.c.Outcome.Map = &store.RunMap{Status: store.MapFailed, Error: "no room", Params: []byte(`{}`)}
+	f.commit(t)
+	page = mapPage(t, s, "", http.StatusOK).body
+	assert.Contains(t, page, "<h2>The map failed</h2>")
+	assert.Contains(t, page, "set <code>insight.enabled: true</code> in config.yaml")
+	assert.NotContains(t, page, "curio interests rebuild", "a rebuild would be refused")
+}
+
 // TestInterestMapPage_ReadsOneRun: with a map to draw, the page reads the
 // latest run once and nothing more: map.js reads the map itself. A query
 // the map can't show is a 400 before anything is read.

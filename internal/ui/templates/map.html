@@ -85,11 +85,13 @@ off. Each says what draws it.
 <p>The first rebuild of the interests draws the map. <a href="{{.Views.ListHref}}">Interests</a> says when that will be.</p>{{end}}
 {{- else if eq .State "no_map"}}
 <h2>No map yet</h2>
-<p>The latest rebuild drew no map, so a rebuild to draw it is due. <a href="{{.Views.ListHref}}">Interests</a> rebuilds them now, and so does <code>curio interests rebuild</code>.</p>
+{{if eq .Rebuilds.State "off"}}<p>The latest rebuild drew no map, and finding interests is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon. The next rebuild draws the map.</p>
+{{- else}}<p>The latest rebuild drew no map, so a rebuild to draw it is due. <a href="{{.Views.ListHref}}">Interests</a> rebuilds them now, and so does <code>curio interests rebuild</code>.</p>{{end}}
 {{- else if eq .State "map_failed"}}
 <h2>The map failed</h2>
 <p>The latest rebuild couldn't draw it: <span class="state-error" title="{{.Error}}">{{shortError .Error}}</span></p>
-<p>The next rebuild draws it again, or rebuild them now from <a href="{{.Views.ListHref}}">Interests</a> or with <code>curio interests rebuild</code>. If it keeps failing, <code>curio daemon logs</code> says why, and <code>insight.map: false</code> in config.yaml turns the map off.</p>
+{{if eq .Rebuilds.State "off"}}<p>Finding interests is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon. The next rebuild draws the map again.</p>
+{{- else}}<p>The next rebuild draws it again, or rebuild them now from <a href="{{.Views.ListHref}}">Interests</a> or with <code>curio interests rebuild</code>. If it keeps failing, <code>curio daemon logs</code> says why, and <code>insight.map: false</code> in config.yaml turns the map off.</p>{{end}}
 {{- else}}
 <h2>The map is off</h2>
 <p>config.yaml turns it off (<code>insight.map: false</code>). Remove the setting, or set it to true, and restart the daemon: a rebuild then draws the map.</p>

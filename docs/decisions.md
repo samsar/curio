@@ -12516,10 +12516,19 @@ On the owner's copy (an Apple M4 Max, 1440×900 at DPR 2):
 | longest animation frame while wheel-zooming | 3.0 ms | ≤ 33 ms |
 
 From a Chrome trace of 24 wheel steps 40 ms apart, on the final build.
-The same on a synthetic response ten times as large (the owner's map
-tiled ten times, 52,370 documents, 10,206,683 bytes, served by
-interception): the first draw in 391 to 407 ms, the longest task 15.8
-ms, the longest animation frame 13.7 ms.
+That trace stops at about 7.4 times the fitted zoom, short of the 9
+times (`allTitlesFrom`) where every visible title is placed, so the SRE
+review traced deeper: 40 wheel steps to the 60-times cap, a pan, and
+back. On the owner's copy the longest frame on All documents was 16 to
+27 ms (Zoom in under 19 ms), with no task over 50 ms at load and a heap
+of 8 to 16 MB. On a synthetic response ten times as large (the owner's
+map tiled ten times, 52,370 documents, 10,206,683 bytes, served by
+interception) the first draw took about 400 ms, one task at load 267 to
+280 ms (parsing and indexing), the longest frame on All documents 48 to
+52 ms with every title placed, and the heap 25 to 73 MB. Fine at the
+owner's size; at ten times, the title pass would be the first thing to
+bound (an overlap estimate before `cut()`, or a cap on the documents it
+tries).
 
 ### Known limits
 
