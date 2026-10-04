@@ -1,7 +1,7 @@
 /* The interest map (/ui/interests/map): the latest rebuild's grouping in
    two views, drawn on canvases from GET /v1/interests/map, read once: All
    documents, each document a dot at its place on the document map,
-   coloured by its area, and Zoom in, each area a disc holding its
+   coloured by its area, and By interest, each area a disc holding its
    interests' circles, each document a dot in its interest, Unsorted a disc
    of its own. Both show one selection, as the panel and the address do.
 
@@ -88,7 +88,7 @@
   const flightPad = 0.86;
   const discPad = 0.92;
   const minShownShare = 0.35;
-  // On All documents, a flight to an area or Unsorted of over 20 documents leaves out their outer 4% each way.
+  // On By similarity, a flight to an area or Unsorted of over 20 documents leaves out their outer 4% each way.
   const trimShare = 0.04;
   const trimFrom = 20;
   // The zoom buttons and keys scale by 1.6: three steps take a group's neighbourhood to the whole stage.
@@ -99,7 +99,7 @@
   // A view zooms out to half the whole map, and pans until half the stage is past its edge: never lost.
   const minZoom = 0.5;
   const panSlack = 0.5;
-  // All documents zooms in to 60 times the whole map, a flight to 14 times. Zoom in zooms in to twice the whole
+  // By similarity zooms in to 60 times the whole map, a flight to 14 times. By interest zooms in to twice the whole
   // map, or on until a dot's radius is 12 px, and a flight to a document until it is 6 px.
   const maxZoomAll = 60;
   const maxFlightAll = 14;
@@ -108,18 +108,18 @@
   const documentDotPx = 6;
   // A press that moves under 4 px is a click; more is a drag, which never selects.
   const clickSlop = 4;
-  // A dot's radius on All documents is 1.7 px times the root of the zoom over the fit's, from 1.6 to 6 CSS px; on
-  // Zoom in it is to scale, but never under 0.5 px, where a dot would vanish.
+  // A dot's radius on By similarity is 1.7 px times the root of the zoom over the fit's, from 1.6 to 6 CSS px; on
+  // By interest it is to scale, but never under 0.5 px, where a dot would vanish.
   const dotGrowth = 1.7;
   const dotMinPx = 1.6;
   const dotMaxPx = 6;
   const minScaledDotPx = 0.5;
-  // All documents names areas below 2.6 times the fit's zoom, interests from there, and titles from 9 times.
+  // By similarity names areas below 2.6 times the fit's zoom, interests from there, and titles from 9 times.
   const allInterestsFrom = 2.6;
   const allTitlesFrom = 9;
-  // Zoom in opens a disc spanning 30% of the stage's shorter side: its name gives way to its contents'.
+  // By interest opens a disc spanning 30% of the stage's shorter side: its name gives way to its contents'.
   const openShare = 0.3;
-  // Zoom in titles documents once a dot's radius is 5 px, and picks one from 8 px: big enough to aim at. Titled,
+  // By interest titles documents once a dot's radius is 5 px, and picks one from 8 px: big enough to aim at. Titled,
   // an interest's name sits over its circle on 2 lines, leaving the circle to its documents' titles.
   const titlesDotPx = 5;
   const pickDotPx = 8;
@@ -155,15 +155,15 @@
   const [stage, status, panel, panelBody, panelTitle, kicker, crumbs, legend, search, hitList, sheetToggle,
     clearButton] = ['map-stage', 'map-status', 'map-panel', 'map-panel-body', 'map-panel-title', 'map-panel-kicker',
     'map-crumbs', 'map-legend', 'map-search', 'map-hits', 'map-sheet-toggle', 'map-clear'].map($);
-  const tabs = {all: $('map-tab-all'), zoom: $('map-tab-zoom')};
-  const canvases = {all: $('map-canvas-all'), zoom: $('map-canvas-zoom')};
+  const tabs = {similarity: $('map-tab-similarity'), interests: $('map-tab-interests')};
+  const canvases = {similarity: $('map-canvas-similarity'), interests: $('map-canvas-interests')};
   const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
   const phone = matchMedia(phoneQuery);
 
   // The map's state: the model, once read; the view shown; the selection, null for the library; the
   // documents a selected group stands out with; whether a failure stopped the map.
-  const state = {model: null, view: root.dataset.view === 'zoom' ? 'zoom' : 'all', sel: null, highlight: null,
-    stopped: false};
+  const state = {model: null, view: root.dataset.view === 'interests' ? 'interests' : 'similarity', sel: null,
+    highlight: null, stopped: false};
   const views = {};
 
   // ------------------------------------------------------------------ DOM pieces
@@ -489,7 +489,7 @@
     return param === 'unsorted' ? {kind: param} : i >= 0 ? {kind, i} : undefined;
   }
 
-  // focusArea is the area a selection is in, which Zoom in keeps bright: -1 for none, -2 for Unsorted.
+  // focusArea is the area a selection is in, which By interest keeps bright: -1 for none, -2 for Unsorted.
   function focusArea(m, sel) {
     const inInterest = sel && sel.kind === 'document' && m.docs.interest[sel.i] >= 0;
     return !sel || m.flat ? -1 : sel.kind === 'area' ? sel.i : sel.kind === 'interest' ? m.interests[sel.i].area :
@@ -501,7 +501,7 @@
     return sel.kind === 'unsorted' ? m.unsortedDocs : (sel.kind === 'area' ? m.areaDocs : m.interestDocs)[sel.i];
   }
 
-  // highlighted marks the documents a selected group stands out with on All documents; null for none.
+  // highlighted marks the documents a selected group stands out with on By similarity; null for none.
   function highlighted(m, sel) {
     if (!sel || sel.kind === 'document') {
       return null;
@@ -870,7 +870,7 @@
   const key = (cls, text) => el('span', {class: 'map-key-item'}, el('i', {class: 'map-key ' + cls,
     'aria-hidden': 'true'}), plain(text));
 
-  // ------------------------------------------------------------------ All documents
+  // ------------------------------------------------------------------ By similarity
   const allView = {
     world(v) {
       const m = state.model;
@@ -915,7 +915,7 @@
       (m.flat ? 'interest' : 'area') + ': grey dots are unsorted, rings loose fits, ringed dots new since the rebuild.',
   };
 
-  // allLabels names what the zoom allows on All documents: the selected group first, then the areas (the
+  // allLabels names what the zoom allows on By similarity: the selected group first, then the areas (the
   // interests, once zoomed in or in the flat shape) at their anchors, largest first, then titles, middle first.
   function allLabels(v, ctx, m, r) {
     const t = v.t;
@@ -950,7 +950,7 @@
     writeLabels(ctx, pending);
   }
 
-  // ------------------------------------------------------------------ Zoom in
+  // ------------------------------------------------------------------ By interest
   const zoomView = {
     world(v) {
       const m = state.model;
@@ -1040,7 +1040,7 @@
       ', sized by its documents, each a dot inside it, with Unsorted the dashed disc beside them.',
   };
 
-  // zoomLabels names what Zoom in shows at this zoom, the selection first: closed areas beside their discs,
+  // zoomLabels names what By interest shows at this zoom, the selection first: closed areas beside their discs,
   // Unsorted's disc, interests in open areas (every one, in the flat shape), and documents once their dots are big.
   function zoomLabels(v, ctx, m, r, focus) {
     const {t, w, h} = v;
@@ -1135,7 +1135,7 @@
     return [
       stats([num(m.n), 'documents'], !m.flat && [num(m.areas.length), 'areas'], [num(m.interests.length),
         'interests'], [num(m.unsortedDocs.length), 'unsorted'], m.newDocs.length && [num(m.newDocs.length), 'new']),
-      words('p', 'map-about', (state.view === 'zoom' ? zoomView : allView).about(m)),
+      words('p', 'map-about', (state.view === 'interests' ? zoomView : allView).about(m)),
       section(m.flat ? 'Interests' : 'Areas', rows(m.top.map((g, i) => groupRow(m, m.flat ? 'interest' : 'area', i,
         num(g.size))).concat(groupRow(m, 'unsorted', -1, num(m.unsortedDocs.length))))),
     ];
@@ -1180,7 +1180,7 @@
     const fresh = newIn(m, m.unsortedDocs);
     return [
       stats([num(m.unsortedDocs.length), 'documents'], fresh && [num(fresh), 'new']),
-      words('p', 'map-about', 'Documents close to no interest yet. ' + (state.view === 'zoom' ?
+      words('p', 'map-about', 'Documents close to no interest yet. ' + (state.view === 'interests' ?
         'They share the dashed disc beside the map, each on the side of its nearest interest.' :
         'Each sits among the documents most like it, too far from any interest to count as a fit.')),
       nearest.length && section('Nearest interests', rows(nearest.map(([i, n]) => groupRow(m, 'interest', i,
@@ -1320,8 +1320,9 @@
   // syncAddress keeps the address on the view and the selection as mapHref writes them, never adding to the history,
   // best effort: Safari and Firefox throw past a rate limit on replaceState, and that must never stop the map.
   function syncAddress() {
-    const params = {select: selectionParam(state.model, state.sel), view: state.view === 'all' ? '' : state.view};
-    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value)).toString();
+    const view = state.view === 'similarity' ? '' : state.view;
+    const query = new URLSearchParams(Object.entries({select: selectionParam(state.model, state.sel), view})
+      .filter(([, value]) => value)).toString();
     try {
       history.replaceState(history.state, '', query ? mapPage + '?' + query : mapPage);
     } catch { /* throttled: the address catches up at the next change */ }
@@ -1345,7 +1346,7 @@
     }
     const v = views[name];
     hoverAt(v);
-    legend.replaceChildren(...(name === 'zoom' ? zoomView : allView).legend(state.model));
+    legend.replaceChildren(...(name === 'interests' ? zoomView : allView).legend(state.model));
     renderPanel();
     resize(v);
     land(v, state.sel, flightMs);
@@ -1389,10 +1390,10 @@
 
   // tabKeys move between the tabs, as the ARIA tabs pattern does: arrows, Home and End.
   function tabKeys(e) {
-    const to = {ArrowRight: 'other', ArrowLeft: 'other', Home: 'all', End: 'zoom'}[e.key];
+    const to = {ArrowRight: 'other', ArrowLeft: 'other', Home: 'similarity', End: 'interests'}[e.key];
     if (to) {
       e.preventDefault();
-      activate(to === 'other' ? (state.view === 'all' ? 'zoom' : 'all') : to, true);
+      activate(to === 'other' ? (state.view === 'similarity' ? 'interests' : 'similarity') : to, true);
     }
   }
 
@@ -1412,7 +1413,7 @@
     Object.values(views).forEach(v => new ResizeObserver(guarded(() => v.name === state.view && resize(v)))
       .observe(v.canvas));
     Object.entries(tabs).forEach(([name, tab]) => listen(tab, 'click', () => activate(name, false)));
-    listen(tabs.all.parentElement, 'keydown', tabKeys);
+    listen(tabs.similarity.parentElement, 'keydown', tabKeys);
     listen(panelBody, 'click', chosen);
     listen(crumbs, 'click', chosen);
     listen($('map-zoom-in'), 'click', () => zoomBy(views[state.view], zoomStep));
@@ -1452,8 +1453,8 @@
   function setUp(data) {
     readTheme();
     state.model = buildModel(data);
-    views.all = makeView('all', allView);
-    views.zoom = makeView('zoom', zoomView);
+    views.similarity = makeView('similarity', allView);
+    views.interests = makeView('interests', zoomView);
     wire();
     const first = state.view;
     state.view = '';

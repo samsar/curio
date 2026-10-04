@@ -12169,13 +12169,20 @@ No step needed a database restore, and no log has a WARN or an ERROR.
 **Decision:** the Interests gain a second view, the Map
 (`/ui/interests/map`), which draws the latest rebuild's map (`GET
 /v1/interests/map`, "Interest map: two views of each regrouping") in the
-browser on two canvases: **All documents**, the default (every document a
-dot at its place on the document map, coloured by its area), and **Zoom
-in** (areas as discs holding their interests' circles, each document a dot
-in its interest, Unsorted a dashed disc). One selection (the library, an
-area, an interest, Unsorted or a document) is shared by both, and a
-details panel, a breadcrumb, a search and the address follow it. This is
-dashboard phase 3's map, PR 2/2.
+browser on two canvases: **By similarity**, the default (every document a
+dot at its place on the document map, coloured by its area), and **By
+interest** (areas as discs holding their interests' circles, each
+document a dot in its interest, Unsorted a dashed disc). One selection
+(the library, an area, an interest, Unsorted or a document) is shared by
+both, and a details panel, a breadcrumb, a search and the address follow
+it. This is dashboard phase 3's map, PR 2/2.
+
+**The views' names** say what places a document, since both views zoom
+and both hold every document: by similarity to other documents, or by
+the interest it is in. The prototypes' "All documents" and "Zoom in"
+described neither (the owner, 2026-10-04). The address names them the
+same way: `view=similarity`, the default, which links leave out, and
+`view=interests`.
 
 ### Where it lives
 
@@ -12362,7 +12369,7 @@ serve.
 
 ### Deep links and the address
 
-`?view=all|zoom&select=area:<id>|interest:<id>|document:<id>|unsorted`,
+`?view=similarity|interests&select=area:<id>|interest:<id>|document:<id>|unsorted`,
 read in Go by `ui.ParseMapQuery` (an ID is everything after the first
 colon, at most 128 bytes; any other form is a 400 naming the forms) and
 written by `mapHref`, which leaves out the default view and the library.
@@ -12476,7 +12483,7 @@ dialogs: none. Screenshots of each were read at both widths.
   is painted; on both tabs at DPR 1 and 2, the window shrinking and
   growing in height and width, and once mid-flight, every such frame
   holds the map. A resize 200 to 650 ms into a flight (a search's to an
-  area, one to a document on Zoom in, `0`'s to the whole map) lands
+  area, one to a document by interest, `0`'s to the whole map) lands
   exactly where a flight started after it would, and one after a wheel
   stopped a flight keeps the wheel's zoom and middle. A build that drew
   a resize in the next frame, and kept a flight's place but not its
@@ -12519,12 +12526,12 @@ From a Chrome trace of 24 wheel steps 40 ms apart, on the final build.
 That trace stops at about 7.4 times the fitted zoom, short of the 9
 times (`allTitlesFrom`) where every visible title is placed, so the SRE
 review traced deeper: 40 wheel steps to the 60-times cap, a pan, and
-back. On the owner's copy the longest frame on All documents was 16 to
-27 ms (Zoom in under 19 ms), with no task over 50 ms at load and a heap
+back. On the owner's copy the longest frame by similarity was 16 to
+27 ms (by interest under 19 ms), with no task over 50 ms at load and a heap
 of 8 to 16 MB. On a synthetic response ten times as large (the owner's
 map tiled ten times, 52,370 documents, 10,206,683 bytes, served by
 interception) the first draw took about 400 ms, one task at load 267 to
-280 ms (parsing and indexing), the longest frame on All documents 48 to
+280 ms (parsing and indexing), the longest frame by similarity 48 to
 52 ms with every title placed, and the heap 25 to 73 MB. Fine at the
 owner's size; at ten times, the title pass would be the first thing to
 bound (an overlap estimate before `cut()`, or a cap on the documents it

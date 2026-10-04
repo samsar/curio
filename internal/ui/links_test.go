@@ -295,14 +295,14 @@ func TestPageHrefs(t *testing.T) {
 // other form refused, naming the forms there are.
 func TestParseMapQuery(t *testing.T) {
 	for query, want := range map[string]MapQuery{
-		"":                             {View: MapViewAll},
-		"view=all":                     {View: MapViewAll},
-		"view=zoom":                    {View: MapViewZoom},
-		"select=unsorted":              {View: MapViewAll, Select: MapSelection{Kind: MapSelectUnsorted}},
-		"select=area%3Aa1":             {View: MapViewAll, Select: MapSelection{Kind: MapSelectArea, ID: "a1"}},
-		"select=interest:i1":           {View: MapViewAll, Select: MapSelection{Kind: MapSelectInterest, ID: "i1"}},
-		"view=zoom&select=document:d1": {View: MapViewZoom, Select: MapSelection{Kind: MapSelectDocument, ID: "d1"}},
-		"select=document:a:b:c":        {View: MapViewAll, Select: MapSelection{Kind: MapSelectDocument, ID: "a:b:c"}},
+		"":                                  {View: MapViewSimilarity},
+		"view=similarity":                   {View: MapViewSimilarity},
+		"view=interests":                    {View: MapViewInterests},
+		"select=unsorted":                   {View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectUnsorted}},
+		"select=area%3Aa1":                  {View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectArea, ID: "a1"}},
+		"select=interest:i1":                {View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectInterest, ID: "i1"}},
+		"view=interests&select=document:d1": {View: MapViewInterests, Select: MapSelection{Kind: MapSelectDocument, ID: "d1"}},
+		"select=document:a:b:c":             {View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectDocument, ID: "a:b:c"}},
 	} {
 		q, err := url.ParseQuery(query)
 		require.NoError(t, err)
@@ -317,7 +317,7 @@ func TestParseMapQuery(t *testing.T) {
 		_, err = ParseMapQuery(q)
 		require.Error(t, err, query)
 		if strings.HasPrefix(query, "view") {
-			assert.Contains(t, err.Error(), "want all or zoom", query)
+			assert.Contains(t, err.Error(), "want similarity or interests", query)
 		} else {
 			assert.Contains(t, err.Error(), "want unsorted, area:<id>, interest:<id> or document:<id>", query)
 		}
@@ -331,15 +331,15 @@ func TestParseMapQuery(t *testing.T) {
 // odd its ID.
 func TestMapHref(t *testing.T) {
 	assert.Equal(t, "/ui/interests/map", mapHref(MapQuery{}))
-	assert.Equal(t, "/ui/interests/map", mapHref(MapQuery{View: MapViewAll}))
-	assert.Equal(t, "/ui/interests/map?view=zoom", mapHref(MapQuery{View: MapViewZoom}))
+	assert.Equal(t, "/ui/interests/map", mapHref(MapQuery{View: MapViewSimilarity}))
+	assert.Equal(t, "/ui/interests/map?view=interests", mapHref(MapQuery{View: MapViewInterests}))
 	assert.Equal(t, "/ui/interests/map?select=area%3Aa1", mapHref(MapQuery{Select: MapSelection{Kind: MapSelectArea,
 		ID: "a1"}}))
-	assert.Equal(t, "/ui/interests/map?select=unsorted&view=zoom", mapHref(MapQuery{View: MapViewZoom,
+	assert.Equal(t, "/ui/interests/map?select=unsorted&view=interests", mapHref(MapQuery{View: MapViewInterests,
 		Select: MapSelection{Kind: MapSelectUnsorted}}))
 	for _, kind := range []string{MapSelectArea, MapSelectInterest, MapSelectDocument} {
 		for _, id := range []string{"i1", "a/b?#&=", evilAttr, evilScript, "x:y"} {
-			for _, view := range []string{MapViewAll, MapViewZoom} {
+			for _, view := range []string{MapViewSimilarity, MapViewInterests} {
 				want := MapQuery{View: view, Select: MapSelection{Kind: kind, ID: id}}
 				u := parseHref(t, mapHref(want))
 				assert.Equal(t, "/ui/interests/map", u.Path)
@@ -349,8 +349,8 @@ func TestMapHref(t *testing.T) {
 			}
 		}
 	}
-	u := parseHref(t, mapHref(MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectUnsorted}}))
+	u := parseHref(t, mapHref(MapQuery{View: MapViewInterests, Select: MapSelection{Kind: MapSelectUnsorted}}))
 	got, err := ParseMapQuery(u.Query())
 	require.NoError(t, err)
-	assert.Equal(t, MapQuery{View: MapViewZoom, Select: MapSelection{Kind: MapSelectUnsorted}}, got)
+	assert.Equal(t, MapQuery{View: MapViewInterests, Select: MapSelection{Kind: MapSelectUnsorted}}, got)
 }

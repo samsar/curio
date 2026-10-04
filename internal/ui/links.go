@@ -57,11 +57,11 @@ func runPageHref(path string, page int, run string) string {
 // changesHref is the page of what the latest rebuild changed.
 func changesHref() string { return "/ui/interests/changes" }
 
-// The interest map's views, as its view parameter names them: All
-// documents, the default, which links leave out, and Zoom in.
+// The interest map's views, as its view parameter names them: By
+// similarity, the default, which links leave out, and By interest.
 const (
-	MapViewAll  = "all"
-	MapViewZoom = "zoom"
+	MapViewSimilarity = "similarity"
+	MapViewInterests  = "interests"
 )
 
 // What the interest map's select parameter names: kind:id for an area, an
@@ -83,8 +83,8 @@ const (
 // over a UUID's 36, and short enough that no query is a page's worth.
 const maxMapSelectID = 128
 
-// MapQuery is what an interest map URL asks for: a view, MapViewAll or
-// MapViewZoom, and what is selected in it, the zero MapSelection for the
+// MapQuery is what an interest map URL asks for: a view, MapViewSimilarity or
+// MapViewInterests, and what is selected in it, the zero MapSelection for the
 // library.
 type MapQuery struct {
 	View   string
@@ -118,7 +118,7 @@ func mapHref(q MapQuery) string {
 	if sel := q.Select.String(); sel != "" {
 		v.Set(mapSelectParam, sel)
 	}
-	if q.View != "" && q.View != MapViewAll {
+	if q.View != "" && q.View != MapViewSimilarity {
 		v.Set(mapViewParam, q.View)
 	}
 	if len(v) == 0 {
@@ -128,18 +128,18 @@ func mapHref(q MapQuery) string {
 }
 
 // ParseMapQuery reads the interest map's query, as mapHref writes it: no
-// view is All documents, and no selection the library. A view or a
+// view is By similarity, and no selection the library. A view or a
 // selection of another form is an error naming the forms there are,
 // answered before the page reads anything. A selection's ID is everything
 // after its first colon, so an ID may hold colons of its own.
 func ParseMapQuery(q url.Values) (MapQuery, error) {
-	out := MapQuery{View: MapViewAll}
+	out := MapQuery{View: MapViewSimilarity}
 	switch view := q.Get(mapViewParam); view {
-	case "", MapViewAll:
-	case MapViewZoom:
+	case "", MapViewSimilarity:
+	case MapViewInterests:
 		out.View = view
 	default:
-		return MapQuery{}, fmt.Errorf("%s %q: want %s or %s", mapViewParam, view, MapViewAll, MapViewZoom)
+		return MapQuery{}, fmt.Errorf("%s %q: want %s or %s", mapViewParam, view, MapViewSimilarity, MapViewInterests)
 	}
 	sel := q.Get(mapSelectParam)
 	if sel == "" {
