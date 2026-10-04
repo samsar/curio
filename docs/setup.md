@@ -819,9 +819,12 @@ answered, but under a title that doesn't say so, its text opens by saying
 the page is gone ("PAGE NOT FOUND", "We can’t find the page you’re looking
 for.") or that the domain is for sale, parked, expired or just registered
 ("is for sale!", "Domain registration has expired."). The reason quotes
-the line. Only the page's opening counts: its own lines, menus and other
-lines of links left out, up to its first paragraph and within its first
-2 KiB, so an article that quotes such a notice further in is stored. A
+the line. Only the page's opening counts: its own lines, menus, other
+lines of links and code blocks left out, up to its first paragraph and
+within its first 2 KiB (a parked domain's notice within its first 256
+bytes), so an article that quotes such a notice further in is stored. A
+status code alone ("404") counts only as a heading: on a plain line it is
+as often a count, such as a question's score. A
 forced refetch (`curio refetch <id> --force`) judges the same text again,
 so it only helps once the site serves the page itself again. The only
 override is `fetcher.native.dead_link_detection: false` and a restart, as

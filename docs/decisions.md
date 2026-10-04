@@ -5012,8 +5012,11 @@ not-found notices, parked domains and sign-in forms"). The order is now:
    not-found notice or a parked domain's in the page's opening;
 2. bot challenge, whose phrases now include Google's unusual-traffic page
    and Fastly's client challenge;
-3. error page; 4. login wall by redirect; 5. no article; 6. thin; 7. a
-   login-page title, as before;
+3. error page, as before;
+4. login wall by redirect, as before;
+5. no article, as before;
+6. thin, as before;
+7. a login-page title, as before;
 8. a sign-in form: a short page whose text opens with a password field
    and a sign-in line.
 
@@ -9800,22 +9803,25 @@ time before the daemon is ready, all for 17 documents.
   dead. None is among the 5,203 stored titles; the title alone can't tell
   them from a site's not-found page.
 
-**Revised (2026-10-03):** the first and third "Not done" items are done;
-see "Page text: not-found notices, parked domains and sign-in forms". A
-page's text is now read for a not-found notice: a line of its opening
-(its own lines, links left out, up to its first line of prose within its
-first 2 KiB) that is a not-found template as a whole, or that opens with
-a not-found sentence. The body rule's worry, that an article can open with
-a 404 heading and the origin's text carries no heading markers, is met by
-reading only the opening and whole lines: measured, the line structure
-survives on both paths (go-readability's `RenderText` puts each block on
-its own line), and no stored article has a notice in its opening. Medium's
-404 ×6 and Bespoke's are dead by their text, and so are javalobby.org's
-two, whose "## 404 - หน้าไม่พบ" reads as a status and a site's name. The
-template's words (`notFoundLead`, `notFoundThing`, `notFoundYouWanted`,
-`notFoundGone`, `notFoundCantFind`) moved out of `soft404TitleRE` into one
-definition that `notFoundSentenceRE` shares; the title rule matches
-exactly what it did.
+**Revised (2026-10-03):** the first "Not done" item is done; see "Page
+text: not-found notices, parked domains and sign-in forms". A page's text
+is now read for a not-found notice: a line of its opening (its own lines,
+links and code left out, up to its first line of prose within its first
+2 KiB) that is a not-found template as a whole, or that opens with a
+not-found sentence. The body rule's worry, that an article can open with
+a 404 heading and the origin's text carries no heading markers, is met in
+two ways. Only the opening and whole lines are read: measured, the line
+structure survives on both paths (go-readability's `RenderText` puts each
+block on its own line), and no stored article has a notice in its
+opening. And a status code alone counts only as a markdown heading, which
+the origin's text never has: on a line of its own, "404" is as often a
+question's score. Medium's 404 ×6 and Bespoke's are dead by their text.
+Titles in other languages are still not read: javalobby.org's two pages
+are dead only because their text opens with "## 404 - หน้าไม่พบ", a status
+heading beside a site's name. The template's words (`notFoundLead`,
+`notFoundThing`, `notFoundYouWanted`, `notFoundGone`, `notFoundCantFind`)
+moved out of `soft404TitleRE` into one definition that the text rules
+share; the title rule matches exactly what it did.
 
 ---
 
@@ -11176,22 +11182,45 @@ title, for four kinds of page that aren't the page asked for
   empty lines dropped. A line that holds only links, after an optional
   list, heading or emphasis marker (Jina's menus, story cards, footers), is
   a link line: its words are no part of the page's own text, which counts
-  the bytes of every other line with its line break. From the origin the
-  text is go-readability's `RenderText`, which puts each block on its own
-  line and has no link markup, so every line is own text and passes
-  through unchanged.
+  the bytes of every other line with its line break. A line is recorded as
+  a heading when it had an ATX marker ("## 404") or stands over a setext
+  underline. A fenced code block (three or more backticks or tildes, to
+  its closing fence or the end of the text) is the page going on: its
+  lines count as own text, but no rule reads them, since code is never
+  the page's notice. From the origin the text is go-readability's
+  `RenderText`, which puts each block on its own line and has no link
+  markup, heading markers or code fences, so every line is own text, none
+  a heading, and passes through unchanged.
 - **The opening:** the own lines that begin within the first 2 KiB of own
   text (`openingBytes`), up to and including the first line longer than
   200 bytes (`proseLineBytes`), the first line of prose.
 - **A not-found notice** (dead link, with detection on): a line of the
-  opening that is a not-found template as a whole (`soft404TitleRE`,
-  unchanged), or that opens with a not-found sentence
+  opening that is a not-found template as a whole (`notFoundLineRE`:
+  `soft404TitleRE`'s templates, anchored at both ends; the title's one
+  sentence anchored at its start only is left out, since a line can go on
+  after it: "The page you're looking for was not found on our old server,
+  so we moved it."), or that opens with a not-found sentence
   (`notFoundSentenceRE`): "we can't find (this|that|the) <thing> [you're
   looking for]" or "(this|that|the) [requested] <thing> [you requested]
   <gone>", ended by "." or "!", in `soft404TitleRE`'s words. Those words
   (`notFoundLead`, `notFoundThing`, `notFoundYouWanted`, `notFoundGone`,
-  `notFoundCantFind`, `notFoundApos`) now have one definition, which both
-  rules are built from. Reason: `text reads like a not-found page:
+  `notFoundCantFind`, `notFoundApos`) now have one definition, which
+  every rule is built from, and one function (`notFoundTemplates`) builds
+  `soft404TitleRE`, unchanged, beside `notFoundLineRE` and
+  `statusCodeLineRE`. A template that
+  is a status code alone, site names around it (`statusCodeLineRE`:
+  "404", "Votes: 404", "410 · Followers"), counts only as a heading ("#
+  404", or "404" over a setext underline): on a line of its own, a number
+  is as often a count. 147 of the library's 154 Stack Exchange questions
+  give their score on a line of its own in their opening (7 of those
+  scores between 300 and 999), 288 documents in all have a line that is a
+  number alone there, and X profiles give their counts the same way: a
+  bookmarked question whose score passed through 404 would otherwise go
+  dead for good, since a refetch judges the same text. Medium's
+  tombstone, whose text gives "410" on a plain line, is dead by its title
+  alone. Every status-code line among the flagged pages is a heading;
+  Bespoke's "# 404" and javalobby.org's "## 404 - หน้าไม่พบ" are the
+  verdicts that rest on one. Reason: `text reads like a not-found page:
   "PAGE NOT FOUND"`.
 - **A parked domain** (dead link, with detection on): a line of the
   opening that is an optional subject and one predicate
@@ -11205,11 +11234,14 @@ title, for four kinds of page that aren't the page asked for
   "!" or ":"; without one, it is the whole line (GoDaddy's "is for sale!"
   under the domain's name). A search-ads parking page's heading, "Related
   searches" or "Related search topics" alone on its line
-  (`parkingHeadingRE`), counts too. Reason: `text reads like a parked
-  domain: "is for sale!"`. The content is gone, so it is a dead link like
-  a not-found page: permanent, never sent to Jina from the origin, never
-  host-cached (each page of a parked host gets its own request and the
-  same verdict), under the kill switch.
+  (`parkingHeadingRE`), counts too. Only the opening's lines that begin
+  within its first 256 bytes of own text are read (`parkedNoticeBytes`):
+  a parking page says what it is first, and a search results page, which
+  Jina does get, puts its "Related searches" after its results. Reason:
+  `text reads like a parked domain: "is for sale!"`. The content is gone,
+  so it is a dead link like a not-found page: permanent, never sent to
+  Jina from the origin, never host-cached (each page of a parked host gets
+  its own request and the same verdict), under the kill switch.
 - **Two bot checks' phrases** join `challengePhrases`: Google's
   unusual-traffic page ("our systems have detected unusual traffic from
   your computer network") and Fastly's client challenge ("a required part
@@ -11246,9 +11278,10 @@ so a page of a few words clears the 500-byte thin floor: wetwalls.ca's
 parking page is 9,150 bytes around 199 of words, the sign-in walls 1.7 to
 4.7 KB around 99 to 506. And Jina's answers carried neither its
 target-status warning nor its CAPTCHA warning. They made interests of
-their own: "Miscellaneous Search Queries" (19 of its 21 documents are
-Google's page), "Domain Name Listings" (18 of 21 parked domains) and
-"Meta Platforms Documentation" (9 of 11 Instagram and Facebook walls).
+their own: "Miscellaneous Search Queries" (21 documents, 19 of them
+Google's page), "Domain Name Listings" (21 documents, 18 of them parked
+domains) and "Meta Platforms Documentation" (11 documents, 9 of them
+Instagram and Facebook walls).
 
 - **Not-found pages (15):** Medium's 404 ×6, titled "Medium" ("PAGE NOT
   FOUND", "## 404"); The Week's, untitled; Bespoke's ("Bespoke
@@ -11260,8 +11293,9 @@ Google's page), "Domain Name Listings" (18 of 21 parked domains) and
   through Jina, stored 2026-09-28 to 30 by builds that already judged Jina
   answers. The "Soft-404 titles" entry put a body rule off because an
   article can open with a 404 heading and the origin's text has no heading
-  markers; measured, the line structure survives on both paths, and the
-  opening, own text only, keeps articles out.
+  markers; measured, the line structure survives on both paths, the
+  opening, own text only, keeps articles out, and a status code alone
+  counts only as a heading.
 - **Parked domains (21):** GoDaddy's and Afternic's sale pages ×12, the
   domain's name dropped, leaving "is for sale!"; HugeDomains ×2 and
   omegacoder.com through Readability; Namecheap's expired and
@@ -11281,12 +11315,14 @@ Google's page), "Domain Name Listings" (18 of 21 parked domains) and
 only in the opening, and only own text. A notice is what a page is when it
 opens the page; further in, a page discusses or quotes one. A link's text
 is never read: landingfolio's menu holds "[404](…)", and a story card's
-title can say anything. Each bound, measured on the copy:
+title can say anything. Nor is a code block's, and a status code alone
+counts only as a heading. Each bound, measured on the copy:
 
 | Bound | Value | Flagged pages | Nearest page it keeps stored |
 |---|---|---|---|
 | `pageTextScanBytes` | 64 KiB | notices at most 19.3 KB into the text | none further in |
 | `openingBytes` | 2 KiB of own text | notices at most 857 bytes in (bomatoronto; Quartz 495) | a Home Depot category's "Related Searches" at 6.9 KB, after a 591-byte line; HTTP Made Really Easy's "404 Not Found" at 7.9 KB, after a 693-byte paragraph; a business listing's "Related Searches" at 39 KB |
+| `parkedNoticeBytes` | 256 bytes of own text | parking notices at most 54 bytes in (flappyroyale.io's, under its sign-in box) | none in the library; a search results page's "Related searches" after ten results, about 1.8 KB in |
 | `proseLineBytes` | 200 | at most 86 bytes in the longest line before a notice; LinkedIn's notice is itself the first long line (217 bytes) | no matching line within 2 KiB after a long line |
 | `signInPageBytes` | 1 KiB of own text | walls of 99, 171 and 506 bytes | a sign-up form (577, no sign-in line), a parking page (628, a dead link first), then pages of 7.7 KB and more with a password field near their top (Letterboxd, Stack Overflow's questions under their sign-up dialog) |
 | `signInFormBytes` | 256 bytes of own text | password fields at 70, 98 and 209 | Pinterest's sign-in modal over a deleted pin (331), an image page with a portfolio sidebar (511), IGDA Toronto's public Facebook page (541), all under 1 KiB |
@@ -11312,14 +11348,21 @@ Remodelista's paywall, below), and 6 it hadn't, each reviewed and each
 junk: flappyroyale.io's parking page (`9225309d`), PerlMonks' Fastly
 challenge (`134358fc`), Advisor Perspectives' 404 (`d932fad2`), Quartz's
 404 (`3ef6449a`) and LinkedIn's sign-in wall ×2 (`9dffe504`, `e1e79ffd`).
-No article is flagged. `judgePage` costs at most 6 ms on a pathological
-64 KiB text (one line of brackets or escapes), and about 2 ms on 64 KiB of
-menu lines.
+No article is flagged. `judgePage` costs at most about 8 ms on a
+pathological 64 KiB text. The worst is many short lines (64 KiB of 2-byte
+lines), each run through the line's regexps; one long line of brackets or
+escapes costs up to 7 ms, and 64 KiB of menu lines about 2 ms.
 
 **Accepted risks.** A page whose opening holds a not-found template line
 is judged dead, as such a title is: an article that quotes a notice before
 its first paragraph, or a status-code cheat sheet that opens with its
-list. None is among the 4,654. A short page led by a sign-in form is a
+list. So is a page with a heading that is a status code alone, a count
+given as a heading among them. From the origin, code is plain text, so an
+article that shows a not-found page in a code block before its first
+paragraph is judged dead there, though not through Jina. A page that says
+in its first 256 bytes of own text that this domain is for sale is a
+parked domain, an article headlined "This Domain Is For Sale" among them.
+None of these is among the 4,654. A short page led by a sign-in form is a
 login wall, and goes to Jina like any.
 
 **Not done** (what the rules still miss):
@@ -11334,6 +11377,8 @@ login wall, and goes to Jina like any.
   Substack's "This post didn't load". Several are temporary, and a dead
   verdict is sticky.
 - Notices after a line of prose or past 2 KiB of own text.
+- A not-found page from the origin whose only notice is a status code
+  heading (`<h1>404</h1>`): the origin's text has no heading markers.
 - Sign-in walls with a longer preamble, another password label, or an
   email-first flow (Notion, X).
 - Parking pages in other words, and domains taken over for spam
