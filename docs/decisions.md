@@ -12407,9 +12407,16 @@ zoom, none with Cmd, Ctrl or Alt held or while typing. Everything the
 canvas selects, the panel and the search reach as buttons and links.
 Under prefers-reduced-motion every flight lands at once. The canvases
 redraw on a change of theme (the media query, or `data-theme` on
-`<html>`), at a new size (a `ResizeObserver`; a view on the whole map is
-fitted again, one on a selection keeps its middle) and at a new pixel
-ratio, capped at 2.
+`<html>`), at a new pixel ratio, capped at 2, and at a new size (a
+`ResizeObserver`). A resize measures the stage's controls again, so
+labels keep off the breadcrumb, the zoom buttons, the legend and the
+status line where they now are. A view still on the whole map's fit is
+fitted again. One the user has zoomed or panned (the wheel, a pinch, a
+drag, the zoom buttons or keys) or flown to a selection keeps its zoom
+and the point at the canvas's middle. A phone's collapsing toolbar
+resizes the stage, which is sized on `100dvh`, so this happens while
+scrolling too. The panel is rendered before a view is first fitted,
+since on a phone the sheet it fills sets how much of the stage shows.
 
 ### What only a browser checks, and how
 
@@ -12442,6 +12449,15 @@ dialogs: none.
   head on screen; a touch pinch zooming; a tap selecting an area and
   opening the sheet; a selected document landing above the open sheet;
   Escape closing the sheet first; the toggle.
+- **Resizes** (15 checks): on both tabs, a view loaded at 1440×900 and
+  grown to 1440×1250 draws, pixel for pixel, what a fresh load at
+  1440×1250 draws, so no label sits where a control was or under where
+  one is; a zoom by the buttons, the keys or the wheel, and one followed
+  by a document's click, keeps its scale and its middle when the window
+  loses 40 px; at 390 px with touch, two presses of + survive the
+  viewport losing 44 px and getting them back, with no drift; an
+  untouched phone view is fitted again exactly as a fresh load. The
+  build before the fixes below fails 8 of them.
 - **Intercepted responses** (11 checks): a 404 problem, a 500 problem then
   Try again succeeding, invalid JSON, a short column, an index out of
   range, a refused connection, each with its message and nothing drawn;
@@ -12461,11 +12477,23 @@ Screenshots of each were read before these numbers were taken; what they
 showed and was fixed: the document's title repeated under the panel's
 heading, the panel's heading growing with a 500-character label, the
 zoom and clear buttons showing before the map loads or when it can't, a
-failed map's card scrolling sideways at 390 px, and the document page's
-place line squeezing its first word onto a line of its own beside Show on
-map. Reading the code turned up two more: `wrap` added an empty line to a
-label shorter than its limit, and the first resize took its fit's scale
-through a clamp to the previous one.
+failed map's card scrolling sideways at 390 px, the document page's place
+line squeezing its first word onto a line of its own beside Show on map,
+and the empty panel's head showing its padding and border while a failed
+map's status line explained. Reading the code turned up two more: `wrap`
+added an empty line to a label shorter than its limit, and the first
+resize took its fit's scale through a clamp to the previous one.
+
+Review turned up two resize defects the first resize check, which only
+measured the backing store, missed. The controls' boxes were measured
+when a tab or the status line changed, never on a resize, so after a
+window grew two area names stayed hidden behind the legend's old place.
+And the zoom buttons and keys, which zoom by a transition with no input
+event, didn't count as the user's zoom, so the next resize (a phone's
+toolbar collapsing is one) threw it away. Fixing them turned up two
+more: a kept view put the canvas's old middle in the middle of the part
+on screen, which on a phone drifts with every resize; and a phone's
+first fit measured the sheet before it held anything.
 
 ### Measurements
 
@@ -12475,15 +12503,15 @@ On the owner's copy (an Apple M4 Max, 1440×900 at DPR 2):
 |---|---|---|
 | the page, served | under 1 ms, 8.2 KB | |
 | the map, served | 958,870 bytes in 15 ms | |
-| navigation to the first draw | 55 to 90 ms (three loads) | ≤ 500 ms |
-| longest main-thread task while wheel-zooming | 6.7 ms | |
-| longest animation frame while wheel-zooming | 3.6 ms | ≤ 33 ms |
+| navigation to the first draw | 60 to 93 ms (six loads) | ≤ 500 ms |
+| longest main-thread task while wheel-zooming | 5.4 ms | |
+| longest animation frame while wheel-zooming | 3.0 ms | ≤ 33 ms |
 
-From a Chrome trace of 24 wheel steps 40 ms apart. The same on a
-synthetic response ten times as large (the owner's map tiled ten times,
-52,370 documents, 10,206,683 bytes, served by interception): the first
-draw in 453 ms, the longest task 16.6 ms, the longest animation frame
-14.7 ms.
+From a Chrome trace of 24 wheel steps 40 ms apart, on the final build.
+The same on a synthetic response ten times as large (the owner's map
+tiled ten times, 52,370 documents, 10,206,683 bytes, served by
+interception): the first draw in 391 to 407 ms, the longest task 15.8
+ms, the longest animation frame 13.7 ms.
 
 ### Known limits
 
@@ -12493,8 +12521,10 @@ draw in 453 ms, the longest task 16.6 ms, the longest animation frame
   has no map to read.
 - The page doesn't refresh itself: reload after a rebuild.
 - Safari's trackpad pinch is checked by hand.
-- Labels are placed by a greedy pass, largest first: a crowded view names
-  what fits and leaves the rest to zooming in.
+- Labels are placed by a greedy pass, the selection's first, then the
+  largest: a crowded view names what fits and leaves the rest to zooming
+  in, and which names fit can differ with the screen's font metrics (at
+  1440×1250 two area names show at DPR 1 that don't at DPR 2).
 
 ---
 

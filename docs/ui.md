@@ -222,8 +222,9 @@ footer names the address the daemon listens on.
   its interests; for an interest, its closest documents and its most
   similar interests; for Unsorted, the interests its documents are
   nearest; for a document, its site, interest, area, fit and similarity,
-  **Open document**, and the documents most like it. Each also links to
-  its own page. The breadcrumb over the map (Library › area › interest ›
+  **Open document**, and the other documents of its interest (of the
+  interest it is nearest, for an unsorted one) closest to that
+  interest's centre. Each also links to its own page. The breadcrumb over the map (Library › area › interest ›
   document) leads back up, and the search box finds areas, interests and
   documents by name or site (arrows, Enter, Escape). Keys: `/` searches,
   Escape goes up a level, `0` shows the whole map, `+` and `-` zoom, and
