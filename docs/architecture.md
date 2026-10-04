@@ -343,8 +343,10 @@ decisions.md "Interests: two levels, stable identities, automatic
 rebuilds". Each rebuild also draws the interest map (`insight.BuildMap`
 over package `layout`, standard library only): the document map and the
 zoom view, warm from the previous run's map when it can, within two
-minutes; a map that fails is no failure of the rebuild.
-`GET /v1/interests/map` serves the latest one whole. See decisions.md
+minutes; a map that fails is no failure of the rebuild, and a run that
+drew none (`insight.map: false`, or one from before maps) makes a rebuild
+due to draw it once the map is on. `GET /v1/interests/map` serves the
+latest one whole, and healthz says where it stands. See decisions.md
 "Interest map: two views of each regrouping, drawn when it is built".
 
 ## Fetcher strategy selection

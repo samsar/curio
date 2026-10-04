@@ -732,6 +732,12 @@ A `config.yaml` that sets them still loads, whatever their values, and the
 daemon logs one warning naming them each time it starts. Remove them from
 `config.yaml`.
 
+Going back to curio 2.5.x needs no database restore: it runs on the
+database as it is, and once you upgrade again the map is drawn anew (see
+`docs/decisions.md` "Interest map", "Going back to 2.5.x"). Remove
+`insight.map` from `config.yaml` first, though: 2.5.x doesn't know the key,
+so its daemon refuses to start and its commands refuse to run.
+
 ## Config: time budgets for Ollama calls
 
 Each bounds how long one kind of work waits on Ollama; all are validated as

@@ -784,9 +784,9 @@ paths:
         since are left out, and so is a document placed since with no place
         on the map, or with its dot outside its circle (as curio 2.5.x
         leaves one, or placing with the map off), until the daemon's next
-        placement sweep places it again. One response holds the whole map, unpaged. A
-        rebuild that commits while the map is read is answered from the
-        newer run. Without a map (no rebuild yet, a rebuild that drew
+        placement sweep places it again. One response holds the whole
+        map, unpaged. A rebuild that commits while the map is read is
+        answered from the newer run. Without a map (no rebuild yet, a rebuild that drew
         none, one whose map failed, or the map switched off in
         config.yaml) it answers 404 saying which.
       responses:

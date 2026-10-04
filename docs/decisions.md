@@ -11854,7 +11854,11 @@ library, and 4 ms after, with all 5,237 fetched documents in range.
 `PlaceMany`'s conflict reads the run and the group by their primary keys.
 `PlaceDocument`, the fast path, places anew whatever it finds, as before.
 Tests write 2.5.0's two statements verbatim (`sqlitetest/curio250`) and
-hold the store, the endpoint and the sweep to each shape they leave.
+hold the store, the endpoint and the sweep to each shape they leave; on a
+copy of the owner's library a start's sweep repaired 100 placements 2.5.0
+made in 5.1 s, and 5 it moved in 1.1 s ("Going back to 2.5.x", below).
+Placing with the map off leaves placements with no place too, which the
+sweep repairs the same way once the map is on again.
 
 ### The API
 
@@ -12043,6 +12047,98 @@ tests now run in parallel), `internal/store/sqlite` 9.4 s and 10.0 s,
 `internal/api` 20.5 s and 22.0 s. The race-free pass: `internal/insight`
 5.6 s and 14.8 s (the fixture's maps), `layout` 9.8 s. `make test` took
 1 min 14 s and 1 min 21 s.
+
+### Going back to 2.5.x, and the upgrade
+
+**The upgrade, measured.** A fresh `.backup` of the schema-17 copy (one
+done run of 5,237 documents, 29 areas and 182 interests; no fetch or index
+job pending or running; the queue unpaused) under this branch's release
+build (`make build BIN_DIR=<scratch>`), in a scratch home on a free
+loopback port, both Ollama URLs on a dead port, auto-pull off, labels by
+terms. The daemon applied 018 in 10 ms. Its first healthz, 2 s after the
+start, said `due` with `map` `none`, and the map answered 404 `no_map`;
+"interests: rebuild due" said `changed=0`, `map_owed=true`, waiting for
+the first embedding check. With Ollama down that check never concludes,
+so the scheduler waited out its 10-minute grace and queued the rebuild
+then (`waited=10m0s`, `trigger=auto changed=0 map_owed=true`); the library
+had been quiet for a day, so it was settled. The rebuild committed 17 s
+later: `trigger=auto kind=warm changed=0`, every area and interest kept
+(29 and 182, none created), `labels_llm=0 labels_terms=0`, `read_ms=9114
+group_ms=1985`, `map=built map_kind=fresh map_ms=5604`. The map then
+answered 200 with all 5,237 documents (4,835 members, 2 loose, 400
+unsorted) in 958,869 bytes, 52 ms the first time and 17 ms after, and
+healthz said `current` with the map built (fresh, 5,604 ms). No WARN or
+ERROR in the log.
+
+**Going back to 2.5.x.** curio 2.5.x starts on a schema-18 database
+without migrating: its goose ignores versions it doesn't know. It reads
+and writes none of 018's columns, which their CHECKs allow all NULL, so it
+commits runs with no map, places documents with no place, and its
+re-placement of a document (the `DO UPDATE` of its `PlaceDocument`) moves
+it to another interest, or into Unsorted, keeping the place it had. Back
+on 2.6 none of that needs a hand: a run 2.5.x committed has no map, so the
+map answers 404 `no_map` until the rebuild it owes draws one (Automatic
+rebuilds), and placements without a place, or moved outside their circle,
+are left out of the map until the start sweep places them again
+(Placement). No database restore is needed. Before going back, remove
+`insight.map` from `config.yaml`: 2.5.x decodes it strictly, so its daemon
+refuses to start (one ERROR, "field map not found in type config.Insight",
+and exit 0, which launchd's `KeepAlive {SuccessfulExit: false}` doesn't
+restart) and its CLI's `Discover` fails on the same parse; both checked
+with v2.5.0's binaries.
+
+018's down needn't run, and neither goose's CLI nor `sqlite3` can run it
+on a real library: SQLite checks the whole schema after `ALTER TABLE …
+DROP COLUMN`, triggers included, and the chunk index's triggers need the
+vec0 module neither loads (goose v3.27.0's CLI: "error in trigger
+trg_chunks_delete: no such module: vec0"; `sqlite3`: "SQL logic error").
+Through curio's own driver, which loads sqlite-vec, `DownTo(17)` on a
+migrated copy of the owner's library took 41 ms (0.4 s for the process),
+`PRAGMA integrity_check` said ok, and `sqlite_master` (type, name,
+tbl_name, sql: 251 rows) equalled 017's.
+
+**The round trip, measured** after these fixes, on another fresh
+`.backup` of the schema-17 copy in a scratch home, this branch's daemon
+and a copy of v2.5.0's (`/opt/homebrew/Cellar/curio/2.5.0`) taking turns.
+Ollama was a stub answering `/api/tags` (the marker's model) and
+`/api/version` alone, so each start's drift check concluded at once with
+nothing to re-embed, rather than after the 10-minute grace; nothing asked
+it for an embedding. Before the first start 100 fetched documents were
+set pending, as if refetching.
+
+1. This branch applied 018; healthz said `due` with `map` `none`, the map
+   404 `no_map`. The rebuild the map owed was queued a second after the
+   start (`trigger=auto changed=100 map_owed=true`: 100 is under the
+   threshold of 262) and committed 17 s later, warm, with
+   `map=built map_kind=fresh map_ms=5527`; the map answered 200 with
+   5,137 documents.
+2. The 100 made fetched again (indexed after that run read its vectors),
+   2.5.0 started on schema 18 without migrating and its start sweep placed
+   all 100 within a second: 100 rows, none with a place. (Its
+   `/v1/interests/map` is a 404 for an interest named "map".)
+3. This branch again: the map answered 200 at once with the 100 left out
+   (5,137 documents); its start sweep placed the 100 again within 5.1 s,
+   and the map then served all 5,237, the 100 as `new`, each dot inside
+   its circle.
+4. 2.5.0's re-placement needs an index job, so embeddings; it ran instead
+   as 2.5.0's `PlaceDocument` statement verbatim, as the tests run it,
+   moving 5 of the 100: 3 into the interest farthest from their own, 2
+   into Unsorted. This branch, started again, answered the map at once
+   without those 5 (5,232 documents); 1.1 s later its sweep had placed the
+   5 again (`placed=5`), each inside its circle.
+5. 2.5.0 again committed a rebuild on request in 11 s (`trigger=manual
+   kind=warm`, all 5,237 documents), its run with no map (`map_status`
+   NULL).
+6. Back on this branch, healthz said `due` with `map` `none` and the map
+   404 `no_map`. The 100 had been indexed 20 s before, so the rebuild the
+   map owed waited for the library to settle, and was queued unasked once
+   nothing had been indexed for 10 minutes (`trigger=auto changed=0
+   waited=10m1s map_owed=true`). It committed 16 s later, warm, every area
+   and interest kept (27 and 171), no label asked for, `map=built
+   map_kind=fresh map_ms=5511`, and the map answered 200 with all 5,237
+   documents (954,384 bytes, 39 ms).
+
+No step needed a database restore, and no log has a WARN or an ERROR.
 
 ### Known limits
 
