@@ -25,10 +25,11 @@ import (
 // runFixture builds a run's commit on the test server's store: the
 // identities it mints or carries, its groups and assignments, its lineage.
 type runFixture struct {
-	s       *testServer
-	tenant  string
-	c       store.RunCommit
-	grouped int
+	s         *testServer
+	tenant    string
+	c         store.RunCommit
+	grouped   int
+	interests []string // the run's interests, in the order added
 }
 
 // newRun starts a run of the local tenant in shape, built on its latest
@@ -58,7 +59,8 @@ func (s *testServer) newTenantRun(t *testing.T, tenant string, shape store.Inter
 // ID; its size and loose fits are its interests', given later.
 func (f *runFixture) area(label string, carried ...string) string {
 	id := f.identity(store.InterestLevelArea, label, carried...)
-	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id}, Cohesion: 0.4})
+	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelArea},
+		Cohesion: 0.4})
 	f.c.Outcome.NumAreas++
 	return id
 }
@@ -69,8 +71,8 @@ func (f *runFixture) area(label string, carried ...string) string {
 func (f *runFixture) interest(label, area string, size int, members, loose []*store.Document, carried ...string) string {
 	id := f.identity(store.InterestLevelInterest, label, carried...)
 	size = max(size, len(members))
-	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id}, ParentID: area,
-		Size: size, Loose: len(loose), Cohesion: 0.8})
+	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelInterest},
+		ParentID: area, Size: size, Loose: len(loose), Cohesion: 0.8})
 	for i := range f.c.Groups {
 		if f.c.Groups[i].ID == area {
 			f.c.Groups[i].Size += size
@@ -88,6 +90,7 @@ func (f *runFixture) interest(label, area string, size int, members, loose []*st
 	f.grouped += size
 	f.c.Outcome.NumInterests++
 	f.c.Outcome.NumLoose += len(loose)
+	f.interests = append(f.interests, id)
 	return id
 }
 
@@ -397,6 +400,39 @@ func TestInterests_State(t *testing.T) {
 	resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests"})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.Contains(t, resp.body, `"next":{"state":"current","rebuild_at":263}`, "what doesn't apply is left out")
+}
+
+// TestInterests_StateMap: the state's map is the snapshot's, in both
+// places: a built map's kind and time, a reused one's 0 ms said; a failed
+// map's time and error; none and off alone; and no map with no status.
+func TestInterests_StateMap(t *testing.T) {
+	s := newTestServer(t)
+	for name, tc := range map[string]struct {
+		snap insight.MapState
+		want string
+	}{
+		"built": {insight.MapState{Status: store.MapBuilt, Kind: store.RunKindFresh, Took: 5951 * time.Millisecond},
+			`"map":{"status":"built","kind":"fresh","took_ms":5951}`},
+		"reused": {insight.MapState{Status: store.MapBuilt, Kind: store.RunKindWarm},
+			`"map":{"status":"built","kind":"warm","took_ms":0}`},
+		"failed": {insight.MapState{Status: store.MapFailed, Took: 2 * time.Minute, Error: "the map took longer than 2m0s"},
+			`"map":{"status":"failed","took_ms":120000,"error":"the map took longer than 2m0s"}`},
+		"none": {insight.MapState{Status: insight.MapNone}, `"map":{"status":"none"}`},
+		"off":  {insight.MapState{Status: insight.MapOff}, `"map":{"status":"off"}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s.interests.set(insight.Snapshot{State: insight.StateCurrent, RebuildAt: 263, Map: tc.snap})
+			for _, path := range []string{"/v1/interests", "/v1/healthz"} {
+				resp := s.do(t, request{method: http.MethodGet, path: path})
+				require.Equal(t, http.StatusOK, resp.status, resp.body)
+				assert.Contains(t, resp.body, `"rebuild_at":263,`+tc.want+`}`, path)
+			}
+		})
+	}
+	s.interests.set(insight.Snapshot{State: insight.StateNone, RebuildAt: 20})
+	next, health := getAs[InterestListResponse](t, s, "/v1/interests").Next, getAs[Health](t, s, "/v1/healthz").Interests
+	assert.Nil(t, next.Map, "no done rebuild, the map on")
+	assert.Equal(t, next, health)
 }
 
 // TestRebuildInterests_Fresh: ?fresh=1 owes a fresh rebuild, even when it

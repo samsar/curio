@@ -317,7 +317,8 @@ bookmark file ──► importer ──► bookmark + document ──► fetch j
                               │                                              │
                               │                                              ▼
                               │                    Placer: into the nearest interest of the
-                              │                    current run, or Unsorted (best effort)
+                              │                    current run, or Unsorted, with its place on
+                              │                    the run's map (best effort)
                               │
                               └── interest scheduler (every minute, at start, on a kick):
                                   enough changed or a fresh rebuild owed, the library
@@ -326,8 +327,10 @@ bookmark file ──► importer ──► bookmark + document ──► fetch j
                                                                                 ▼
                                     vectors ──► Grouper (warm from the last run's seeds)
                                     ──► merge near-duplicates ──► place strays
-                                    ──► carry identities over ──► label the groups that need it
-                                    ──► one commit: run, groups, assignments, lineage, retirements
+                                    ──► carry identities over ──► draw the map (both views)
+                                    ──► label the groups that need it
+                                    ──► one commit: run, groups, assignments, lineage,
+                                        retirements, the map's places
                                     ──► sweep: place what was indexed while it ran
 ```
 
@@ -337,7 +340,14 @@ ones that left, its deleted assignments), so the count survives a restart;
 healthz and `GET /v1/interests` serve its last check, and a rebuild that
 fails is retried after a backoff it keeps in `insight_state`. See
 decisions.md "Interests: two levels, stable identities, automatic
-rebuilds".
+rebuilds". Each rebuild also draws the interest map (`insight.BuildMap`
+over package `layout`, standard library only): the document map and the
+zoom view, warm from the previous run's map when it can, within two
+minutes; a map that fails is no failure of the rebuild, and a run that
+drew none (`insight.map: false`, or one from before maps) makes a rebuild
+due to draw it once the map is on. `GET /v1/interests/map` serves the
+latest one whole, and healthz says where it stands. See decisions.md
+"Interest map: two views of each regrouping, drawn when it is built".
 
 ## Fetcher strategy selection
 

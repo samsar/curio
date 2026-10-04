@@ -818,7 +818,7 @@ func (r DocRef) where() string {
 	if r.Named() {
 		return shortURL(r.URL)
 	}
-	return host(r.URL)
+	return Host(r.URL)
 }
 
 // DocCell is a document as a list's first column shows it (the doc-cell

@@ -138,6 +138,41 @@ const (
 // done run's own record says (Engine.ParamsChanged), so nothing stores it.
 const FreshParams = "params"
 
+// The map statuses a Snapshot gives besides the store's built and failed.
+const (
+	// MapNone: the done rebuild drew no map. It predates maps, curio 2.5.x
+	// committed it, or the map was off; with the map on, a rebuild is due
+	// to draw one.
+	MapNone store.MapStatus = "none"
+	// MapOff: insight.map is false, so no rebuild draws a map.
+	MapOff store.MapStatus = "off"
+)
+
+// MapState is the done rebuild's map as a check found it: built, with its
+// kind and how long it took; failed, with how long it took and why; none;
+// or off. The zero value, no status, is no done rebuild with the map on.
+type MapState struct {
+	Status store.MapStatus
+	Kind   store.RunKind
+	Took   time.Duration
+	Error  string
+}
+
+// mapState is the map of done, nil for no done rebuild, as a Snapshot
+// gives it.
+func mapState(done *store.InterestRun, off bool) MapState {
+	switch {
+	case off:
+		return MapState{Status: MapOff}
+	case done == nil:
+		return MapState{}
+	case done.Map == nil:
+		return MapState{Status: MapNone}
+	}
+	m := done.Map
+	return MapState{Status: m.Status, Kind: m.Kind, Took: m.Took, Error: m.Error}
+}
+
 // Snapshot is where a tenant's automatic rebuilds stood at a check. The
 // fields that don't apply are zero.
 type Snapshot struct {
@@ -162,6 +197,8 @@ type Snapshot struct {
 	// while failing.
 	RetryAt   time.Time
 	LastError string
+	// Map is the done rebuild's map, read with it: no read of its own.
+	Map       MapState
 	CheckedAt time.Time
 }
 
@@ -257,6 +294,9 @@ type SchedulerOptions struct {
 	// or with other params, than a rebuild now would be
 	// (Engine.ParamsChanged). nil reports none.
 	ParamsChanged func(*store.InterestRun) bool
+	// MapOff is insight.map: false. A done rebuild without a map then owes
+	// none, and the snapshot's map says off.
+	MapOff bool
 	// Placer sweeps once when Run starts; nil sweeps nothing.
 	Placer *Placer
 	Config SchedulerConfig
@@ -273,10 +313,12 @@ const checkTimeout = 30 * time.Second
 //
 //   - no rebuild is queued or running;
 //   - due: no done rebuild and FirstRebuildAt documents fetched, a fresh
-//     rebuild owed against a done one, a failed rebuild to retry, or
-//     Threshold of the done rebuild's documents changed since it; and at
-//     least one document fetched, without which a rebuild would have
-//     nothing to group;
+//     rebuild owed against a done one, a failed rebuild to retry,
+//     Threshold of the done rebuild's documents changed since it, or, with
+//     the map on, a done rebuild that drew no map (a failed map owes
+//     none: what failed it fails again on the same library, and every
+//     later rebuild tries again); and at least one document fetched,
+//     without which a rebuild would have nothing to group;
 //   - not held: no embedding drift, and the failed rebuilds' backoff past;
 //   - settled: nothing indexed for Settle, or due MaxWait already
 //     (MaxWaitFirst with no done rebuild). A fresh rebuild a re-embedding
@@ -294,6 +336,7 @@ type Scheduler struct {
 	drift         func() string
 	driftChecked  func() bool
 	paramsChanged func(*store.InterestRun) bool
+	mapOff        bool
 	placer        *Placer
 	cfg           SchedulerConfig
 	now           func() time.Time
@@ -318,6 +361,7 @@ func NewScheduler(opts SchedulerOptions) *Scheduler {
 		drift:         opts.Drift,
 		driftChecked:  opts.DriftChecked,
 		paramsChanged: opts.ParamsChanged,
+		mapOff:        opts.MapOff,
 		placer:        opts.Placer,
 		cfg:           opts.Config.WithDefaults(),
 		now:           opts.Now,
@@ -396,7 +440,7 @@ func (s *Scheduler) sweep(ctx context.Context) {
 	case err != nil && ctx.Err() != nil:
 		s.log.Debug("interests: the start's placement sweep was cancelled", "err", err)
 	case err != nil:
-		s.log.Warn("interests: the start's placement sweep failed", "tenant", s.tenant, "err", err)
+		s.log.Warn("interests: the start's placement sweep failed", "tenant", s.tenant, "placed", placed, "err", err)
 	case placed > 0:
 		s.log.Info("interests: placed the documents indexed since the last rebuild", "tenant", s.tenant,
 			"placed", placed)
@@ -435,7 +479,7 @@ func (s *Scheduler) Check(ctx context.Context) {
 		}
 	case v.due && !s.loggedDue:
 		s.log.Info("interests: rebuild due", "tenant", s.tenant, "changed", snap.Changed, "rebuild_at", snap.RebuildAt,
-			"fresh_owed", snap.FreshOwed, "waiting_for", waitingFor(in, now))
+			"fresh_owed", snap.FreshOwed, "waiting_for", waitingFor(in, now), v.mapOwedAttr())
 		s.loggedDue = true
 	}
 	s.snap.Store(&snap)
@@ -458,6 +502,7 @@ func (s *Scheduler) read(ctx context.Context) (inputs, error) {
 		in.drift = s.drift()
 	}
 	in.driftUnchecked = s.driftChecked != nil && !s.driftChecked()
+	in.mapOff = s.mapOff
 	if r.Done != nil && s.paramsChanged != nil {
 		in.paramsChanged = s.paramsChanged(r.Done)
 	}
@@ -496,7 +541,7 @@ func (s *Scheduler) queue(ctx context.Context, v verdict, now time.Time) error {
 		return fmt.Errorf("enqueue a rebuild (%s): %w", v.trigger, err)
 	}
 	s.log.Info("interests: rebuild enqueued", "tenant", s.tenant, "trigger", v.trigger, "changed", v.snap.Changed,
-		"waited", now.Sub(s.dueSince).Round(time.Second).String(), "job", job.ID, "queued", queued)
+		"waited", now.Sub(s.dueSince).Round(time.Second).String(), "job", job.ID, "queued", queued, v.mapOwedAttr())
 	return nil
 }
 
@@ -506,21 +551,35 @@ type inputs struct {
 	drift          string // how the embeddings drifted; "" when they didn't
 	driftUnchecked bool   // the embedding check hasn't concluded since the daemon started
 	paramsChanged  bool   // the done run's grouper or params aren't today's
+	mapOff         bool   // insight.map is false
 }
 
-// verdict is what a check decided: the snapshot, whether a rebuild is due,
-// and the trigger of the one to queue now, "" for none.
+// verdict is what a check decided: the snapshot, whether a rebuild is due
+// and whether a map the done one lacks is among the reasons, and the
+// trigger of the one to queue now, "" for none.
 type verdict struct {
 	snap    Snapshot
 	due     bool
+	mapOwed bool
 	trigger store.RunTrigger
+}
+
+// mapOwedAttr is the attribute that says, on a due or enqueued rebuild's
+// log line, that the done rebuild owes its map; otherwise the empty
+// attribute, which handlers leave out.
+func (v verdict) mapOwedAttr() slog.Attr {
+	if !v.mapOwed {
+		return slog.Attr{}
+	}
+	return slog.Bool("map_owed", true)
 }
 
 // decide is a check's decision, for in read at now: dueSince is when the
 // rebuild became due, zero when it wasn't at the last check.
 func decide(in inputs, now, dueSince time.Time, cfg SchedulerConfig) verdict {
 	r := in.Reading
-	s := Snapshot{CheckedAt: now, FreshOwed: string(r.State.FreshOwed), Changed: r.Fetched, RebuildAt: cfg.FirstRebuildAt}
+	s := Snapshot{CheckedAt: now, FreshOwed: string(r.State.FreshOwed), Changed: r.Fetched, RebuildAt: cfg.FirstRebuildAt,
+		Map: mapState(r.Done, in.mapOff)}
 	if r.Done != nil {
 		s.LastKind, s.LastTrigger = r.Done.Kind, r.Done.Trigger
 		if r.Done.FinishedAt != nil {
@@ -534,11 +593,13 @@ func decide(in inputs, now, dueSince time.Time, cfg SchedulerConfig) verdict {
 	retrying := r.State.Failures > 0
 	backingOff := now.Before(RetryAt(r.State))
 
-	// A fresh rebuild owed makes one due only against a done one: the
-	// first is fresh anyway, and waits for its documents.
+	// A fresh rebuild owed, or a map, makes one due only against a done
+	// one (MapNone has one): the first is fresh anyway, draws its map, and
+	// waits for its documents.
 	busy := r.ClusterPending > 0 || r.ClusterRunning > 0
 	owed := r.Done != nil && s.FreshOwed != ""
-	due := !busy && r.Fetched > 0 && (s.Changed >= s.RebuildAt || owed || (retrying && !backingOff))
+	mapOwed := s.Map.Status == MapNone
+	due := !busy && r.Fetched > 0 && (s.Changed >= s.RebuildAt || owed || mapOwed || (retrying && !backingOff))
 	if due {
 		if dueSince.IsZero() {
 			dueSince = now
@@ -562,7 +623,7 @@ func decide(in inputs, now, dueSince time.Time, cfg SchedulerConfig) verdict {
 		s.State = StateNone
 	}
 
-	v := verdict{snap: s, due: due}
+	v := verdict{snap: s, due: due, mapOwed: due && mapOwed}
 	if due && in.drift == "" && !in.driftUnchecked && !backingOff && settled(r, now, dueSince, cfg) {
 		v.trigger = triggerOf(r, s.FreshOwed)
 	}

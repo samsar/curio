@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"time"
 
@@ -15,10 +16,11 @@ import (
 )
 
 // Insights implements store.InsightStore over migration 016's tables, as
-// 017 left them: interest_runs, the identities in interests, and each
-// run's interest_groups, interest_assignments and interest_placements, with
-// the interest_lineage that outlives runs, and each tenant's
-// insight_state. The current grouping is the latest done run's.
+// 017 and 018 left them: interest_runs, the identities in interests, and
+// each run's interest_groups, interest_assignments and interest_placements,
+// with the interest_lineage that outlives runs, and each tenant's
+// insight_state. The current grouping is the latest done run's, and its map
+// lives on the same rows.
 type Insights struct {
 	db *DB
 }
@@ -91,12 +93,14 @@ const (
 	UPDATE interests SET label = ?, summary = ?, label_source = ?, labeled_at = ?, updated_at = ?
 	WHERE id = ? AND tenant_id = ? AND retired_at IS NULL`
 	insertGroupSQL = `
-	INSERT INTO interest_groups (run_id, interest_id, parent_id, size, loose, cohesion, centroid)
-	VALUES (?, ?, ?, ?, ?, ?, ?)`
+	INSERT INTO interest_groups (run_id, interest_id, parent_id, size, loose, cohesion, centroid,
+		zoom_x, zoom_y, zoom_r, anchor_x, anchor_y, similar)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	insertAssignmentSQL = `
 	INSERT INTO interest_assignments
-		(run_id, document_id, interest_id, area_id, fit, similarity, nearest_id, area_seed, interest_seed)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		(run_id, document_id, interest_id, area_id, fit, similarity, nearest_id, area_seed, interest_seed,
+		map_x, map_y, zoom_x, zoom_y)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	insertLineageSQL = `
 	INSERT INTO interest_lineage (run_id, old_id, new_id, event, shared) VALUES (?, ?, ?, ?, ?)`
 	// retireInterestsSQL retires every live identity of the tenant that the
@@ -109,12 +113,14 @@ const (
 	WHERE tenant_id = ? AND retired_at IS NULL
 	  AND NOT EXISTS (SELECT 1 FROM interest_groups g WHERE g.run_id = ? AND g.interest_id = interests.id)`
 	// commitRunSQL moves a running run of the tenant's to done with its
-	// outcome.
+	// outcome and its map (mapArgs).
 	commitRunSQL = `
 	UPDATE interest_runs SET status = ?, kind = ?, split_check = ?, shape = ?, mean = ?,
 		num_documents = ?, num_areas = ?, num_interests = ?, num_loose = ?, num_unsorted = ?,
 		changed_documents = ?, changes_since_split = ?,
 		kept = ?, created = ?, split = ?, merged = ?, moved = ?, dissolved = ?,
+		map_status = ?, map_kind = ?, map_error = ?, map_ms = ?, map_params = ?, map_dot_radius = ?,
+		map_unsorted_x = ?, map_unsorted_y = ?, map_unsorted_r = ?,
 		finished_at = ?, updated_at = ?
 	WHERE id = ? AND tenant_id = ? AND status = ?`
 )
@@ -153,12 +159,13 @@ func (s *Insights) CommitRun(ctx context.Context, c store.RunCommit) error {
 		return fmt.Errorf("commit interest run %s: retire interests: %w", c.RunID, err)
 	}
 	o := c.Outcome
-	res, err := tx.ExecContext(ctx, commitRunSQL,
-		store.InterestRunDone, o.Kind, o.SplitCheck, o.Shape, encodeVector(o.Mean),
+	args := slices.Concat([]any{store.InterestRunDone, o.Kind, o.SplitCheck, o.Shape, encodeVector(o.Mean),
 		o.NumDocuments, o.NumAreas, o.NumInterests, o.NumLoose, o.NumUnsorted,
 		o.ChangedDocuments, o.ChangesSinceSplit,
-		o.Kept, o.Created, o.Split, o.Merged, o.Moved, o.Dissolved,
-		now, now, c.RunID, c.TenantID, store.InterestRunRunning)
+		o.Kept, o.Created, o.Split, o.Merged, o.Moved, o.Dissolved},
+		mapArgs(o.Map),
+		[]any{now, now, c.RunID, c.TenantID, store.InterestRunRunning})
+	res, err := tx.ExecContext(ctx, commitRunSQL, args...)
 	if err != nil {
 		return fmt.Errorf("commit interest run %s: finish it: %w", c.RunID, err)
 	}
@@ -241,8 +248,104 @@ func checkCommit(c store.RunCommit) error {
 				c.RunID, l.OldID, l.NewID, l.RunID, l.Event)
 		}
 	}
+	if err := checkGroups(c.Groups, c.NewIdentities); err != nil {
+		return fmt.Errorf("insights: commit of run %s: %w", c.RunID, err)
+	}
+	if err := checkMap(c); err != nil {
+		return fmt.Errorf("insights: commit of run %s: %w", c.RunID, err)
+	}
 	return nil
 }
+
+// maxSimilar is the most similar interests an interest lists.
+const maxSimilar = 3
+
+// checkGroups checks each group's level, which must be its identity's when
+// the run mints it, and the similar interests: only an interest lists them,
+// at most maxSimilar, each another interest of the commit with a finite
+// cosine. The map's reads index an interest's similar interests among the
+// run's interests, so an area in a list would be a run they can't serve.
+func checkGroups(groups []store.InterestGroup, minted []store.Interest) error {
+	mintedAs := make(map[string]store.InterestLevel, len(minted))
+	for _, in := range minted {
+		mintedAs[in.ID] = in.Level
+	}
+	interests := make(map[string]bool, len(groups))
+	for _, g := range groups {
+		level, ok := mintedAs[g.ID]
+		switch {
+		case !g.Level.Valid():
+			return fmt.Errorf("group %s has level %q", g.ID, g.Level)
+		case ok && level != g.Level:
+			return fmt.Errorf("group %s has level %s, its new identity %s", g.ID, g.Level, level)
+		}
+		interests[g.ID] = g.Level == store.InterestLevelInterest
+	}
+	for _, g := range groups {
+		switch {
+		case g.Similar != nil && g.Level != store.InterestLevelInterest:
+			return fmt.Errorf("%s %s lists similar interests", g.Level, g.ID)
+		case len(g.Similar) > maxSimilar:
+			return fmt.Errorf("interest %s lists %d similar interests, at most %d", g.ID, len(g.Similar), maxSimilar)
+		}
+		for _, sim := range g.Similar {
+			if !interests[sim.ID] || sim.ID == g.ID || !finite(sim.Cosine) {
+				return fmt.Errorf("interest %s lists %q at cosine %g as a similar interest", g.ID, sim.ID, sim.Cosine)
+			}
+		}
+	}
+	return nil
+}
+
+// checkMap checks the commit's map against its rows: a map, built or
+// failed, records the params it was drawn with; a built one places every
+// group and assignment on the map, each circle with a positive radius; a
+// failed one, or none, places nothing.
+func checkMap(c store.RunCommit) error {
+	m := c.Outcome.Map
+	built := m != nil && m.Status == store.MapBuilt
+	switch {
+	case m == nil:
+	case !m.Status.Valid():
+		return fmt.Errorf("map status %q is not one of the MapStatus constants", m.Status)
+	case !json.Valid(m.Params):
+		return fmt.Errorf("the map's params %q are not JSON", m.Params)
+	case !built && (m.Error == "" || m.Kind != ""):
+		return fmt.Errorf("a failed map has error %q and kind %q", m.Error, m.Kind)
+	case built && (!m.Kind.Valid() || m.Error != ""):
+		return fmt.Errorf("a built map has kind %q and error %q", m.Kind, m.Error)
+	case built && (!finite(m.DotRadius) || m.DotRadius <= 0 || m.DotRadius > store.MapExtent):
+		return fmt.Errorf("the map's dot radius %g is not on the map", m.DotRadius)
+	case built && (!(m.Unsorted.R > 0) || !onMap(m.Unsorted.X, m.Unsorted.Y, m.Unsorted.R)):
+		return fmt.Errorf("the disc of Unsorted %+v is not on the map", m.Unsorted)
+	}
+	for _, g := range c.Groups {
+		switch p := g.Map; {
+		case built != (p != nil):
+			return fmt.Errorf("group %s has a place on the map: %v, with the map built: %v", g.ID, p != nil, built)
+		case p != nil && (!(p.ZoomR > 0) || !onMap(p.ZoomX, p.ZoomY, p.ZoomR) || !onMap(p.AnchorX, p.AnchorY, 0)):
+			return fmt.Errorf("group %s's place %+v is not on the map", g.ID, *p)
+		}
+	}
+	for _, a := range c.Assignments {
+		switch p := a.Map; {
+		case built != (p != nil):
+			return fmt.Errorf("document %s has a place on the map: %v, with the map built: %v", a.DocumentID, p != nil, built)
+		case p != nil && (!onMap(p.MapX, p.MapY, 0) || !onMap(p.ZoomX, p.ZoomY, 0)):
+			return fmt.Errorf("document %s's place %+v is not on the map", a.DocumentID, *p)
+		}
+	}
+	return nil
+}
+
+// onMap reports whether a circle (a point when r is 0) lies inside the
+// map, r never negative.
+func onMap(x, y, r float64) bool {
+	return finite(x) && finite(y) && finite(r) && r >= 0 && x-r >= 0 && x+r <= store.MapExtent &&
+		y-r >= 0 && y+r <= store.MapExtent
+}
+
+func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
 
 // commitWriter writes a commit's rows inside its transaction, each kind
 // through a statement prepared once.
@@ -300,9 +403,21 @@ func (w commitWriter) relabels() error {
 
 func (w commitWriter) groups() error {
 	gs := w.c.Groups
+	similar := make([]any, len(gs))
+	for i, g := range gs {
+		if g.Similar == nil {
+			continue
+		}
+		raw, err := json.Marshal(g.Similar)
+		if err != nil {
+			return fmt.Errorf("encode the similar interests of %s: %w", g.ID, err)
+		}
+		similar[i] = string(raw)
+	}
 	return w.each("group", insertGroupSQL, len(gs), func(i int) []any {
 		g := gs[i]
-		return []any{w.c.RunID, g.ID, nullIfEmpty(g.ParentID), g.Size, g.Loose, g.Cohesion, encodeVector(g.Centroid)}
+		return slices.Concat([]any{w.c.RunID, g.ID, nullIfEmpty(g.ParentID), g.Size, g.Loose, g.Cohesion,
+			encodeVector(g.Centroid)}, groupMapArgs(g.Map), []any{similar[i]})
 	})
 }
 
@@ -310,9 +425,45 @@ func (w commitWriter) assignments() error {
 	as := w.c.Assignments
 	return w.each("assignment", insertAssignmentSQL, len(as), func(i int) []any {
 		a := as[i]
-		return []any{w.c.RunID, a.DocumentID, nullIfEmpty(a.InterestID), nullIfEmpty(a.AreaID), a.Fit, a.Similarity,
-			nullIfEmpty(a.NearestID), a.AreaSeed, a.InterestSeed}
+		return slices.Concat([]any{w.c.RunID, a.DocumentID, nullIfEmpty(a.InterestID), nullIfEmpty(a.AreaID), a.Fit,
+			a.Similarity, nullIfEmpty(a.NearestID), a.AreaSeed, a.InterestSeed}, positionArgs(a.Map))
 	})
+}
+
+// mapArgs are a run's map columns, in commitRunSQL's order: all NULL
+// without a map, NULL where a failed one has nothing.
+func mapArgs(m *store.RunMap) []any {
+	out := make([]any, 9)
+	if m == nil {
+		return out
+	}
+	out[0], out[3] = m.Status, m.Took.Milliseconds()
+	if len(m.Params) > 0 {
+		out[4] = string(m.Params)
+	}
+	if m.Status == store.MapFailed {
+		out[2] = m.Error
+		return out
+	}
+	out[1], out[5] = m.Kind, m.DotRadius
+	out[6], out[7], out[8] = m.Unsorted.X, m.Unsorted.Y, m.Unsorted.R
+	return out
+}
+
+// groupMapArgs are a group's map columns, all NULL without a place.
+func groupMapArgs(g *store.GroupMap) []any {
+	if g == nil {
+		return make([]any, 5)
+	}
+	return []any{g.ZoomX, g.ZoomY, g.ZoomR, g.AnchorX, g.AnchorY}
+}
+
+// positionArgs are a document's map columns, all NULL without a place.
+func positionArgs(p *store.MapPosition) []any {
+	if p == nil {
+		return make([]any, 4)
+	}
+	return []any{p.MapX, p.MapY, p.ZoomX, p.ZoomY}
 }
 
 func (w commitWriter) lineage() error {
@@ -507,7 +658,9 @@ func runTransitioned(ctx context.Context, q rowQuerier, res sql.Result, runID st
 
 const runColumns = `id, tenant_id, status, trigger, kind, split_check, shape, grouper, params, vectors_read_at, mean,
 	num_documents, num_areas, num_interests, num_loose, num_unsorted, changed_documents, changes_since_split,
-	kept, created, split, merged, moved, dissolved, error, started_at, finished_at, created_at, updated_at`
+	kept, created, split, merged, moved, dissolved, error, started_at, finished_at, created_at, updated_at,
+	map_status, map_kind, map_error, map_ms, map_params, map_dot_radius, map_unsorted_x, map_unsorted_y,
+	map_unsorted_r`
 
 // latestRunSQL is the tenant's newest run, of a status when byStatus,
 // reading columns. It seeks idx_interest_runs_tenant_status. started_at is
@@ -565,9 +718,10 @@ var (
 	// sorted: every area's are read.
 	nestedGroupsSQL = groupSelect + ` WHERE g.run_id = ? AND g.parent_id IS NOT NULL` + groupOrder + ` LIMIT ? OFFSET ?`
 	getGroupSQL     = groupSelect + ` WHERE g.run_id = ? AND g.interest_id = ?`
-	// runGroupsSQL is every group of a run, with its centroid.
+	// runGroupsSQL is every group of a run, with its centroid, its place
+	// on the map and its similar interests.
 	runGroupsSQL = `SELECT g.run_id, ` + qualify("i", interestColumns) + `, g.parent_id, p.label, g.size, g.loose,
-	g.cohesion, g.centroid FROM interest_groups g
+	g.cohesion, g.centroid, g.zoom_x, g.zoom_y, g.zoom_r, g.anchor_x, g.anchor_y, g.similar FROM interest_groups g
 	JOIN interests i ON i.id = g.interest_id
 	LEFT JOIN interests p ON p.id = g.parent_id
 	WHERE g.run_id = ?`
@@ -668,7 +822,8 @@ const (
 	ORDER BY a.similarity DESC, a.document_id LIMIT ? OFFSET ?`
 	// runAssignmentsSQL is every assignment of a run, by its primary key.
 	runAssignmentsSQL = `
-	SELECT document_id, interest_id, area_id, fit, similarity, nearest_id, area_seed, interest_seed
+	SELECT document_id, interest_id, area_id, fit, similarity, nearest_id, area_seed, interest_seed,
+		map_x, map_y, zoom_x, zoom_y
 	FROM interest_assignments WHERE run_id = ?`
 )
 
@@ -735,11 +890,12 @@ func (s *Insights) RunAssignments(ctx context.Context, runID string) ([]store.In
 	for rows.Next() {
 		var a store.InterestAssignment
 		var interest, area, nearest sql.NullString
+		var pos positionScan
 		if err := rows.Scan(&a.DocumentID, &interest, &area, &a.Fit, &a.Similarity, &nearest,
-			&a.AreaSeed, &a.InterestSeed); err != nil {
+			&a.AreaSeed, &a.InterestSeed, &pos.mapX, &pos.mapY, &pos.zoomX, &pos.zoomY); err != nil {
 			return nil, fmt.Errorf("scan assignment: %w", err)
 		}
-		a.InterestID, a.AreaID, a.NearestID = interest.String, area.String, nearest.String
+		a.InterestID, a.AreaID, a.NearestID, a.Map = interest.String, area.String, nearest.String, pos.position()
 		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {
@@ -931,38 +1087,63 @@ const (
 	// assignedSQL reports whether a run assigned a document, by the
 	// assignments' primary key.
 	assignedSQL = `SELECT EXISTS (SELECT 1 FROM interest_assignments WHERE run_id = ? AND document_id = ?)`
-	// placeDocumentSQL places a document into a run, or places it anew.
-	// Its args are the run, the document, the interest, the similarity,
-	// the time, the tenant and the done status.
+	// placeDocumentSQL places a document into a run, or places it anew,
+	// with its place on the map. Its args are the run, the document, the
+	// interest, the similarity, the time, the tenant, the done status and
+	// the four positions (positionArgs).
 	placeDocumentSQL = `
-	INSERT INTO interest_placements (run_id, document_id, interest_id, similarity, placed_at)
-	SELECT ?1, ?2, ?3, ?4, ?5
+	INSERT INTO interest_placements (run_id, document_id, interest_id, similarity, placed_at, map_x, map_y, zoom_x, zoom_y)
+	SELECT ?1, ?2, ?3, ?4, ?5, ?8, ?9, ?10, ?11
 	WHERE ?1 = (SELECT id FROM interest_runs WHERE tenant_id = ?6 AND status = ?7
 	            ORDER BY started_at DESC, rowid DESC LIMIT 1)
 	  AND NOT EXISTS (SELECT 1 FROM interest_assignments WHERE run_id = ?1 AND document_id = ?2)
 	  AND EXISTS (SELECT 1 FROM documents WHERE id = ?2)
 	ON CONFLICT (run_id, document_id) DO UPDATE SET interest_id = excluded.interest_id,
-		similarity = excluded.similarity, placed_at = excluded.placed_at`
-	// placeIfAbsentSQL places a document into a run unless it is placed
-	// already, inside PlaceMany's transaction, which checked the run. Its
-	// args are the run, the document, the interest, the similarity and
-	// the time.
-	placeIfAbsentSQL = `
-	INSERT INTO interest_placements (run_id, document_id, interest_id, similarity, placed_at)
-	SELECT ?1, ?2, ?3, ?4, ?5
+		similarity = excluded.similarity, placed_at = excluded.placed_at, map_x = excluded.map_x,
+		map_y = excluded.map_y, zoom_x = excluded.zoom_x, zoom_y = excluded.zoom_y`
+	// offMapSQL holds when placement p is off its run's built map: the
+	// run's map is built, and p has no place on it, or its zoom dot's
+	// centre lies outside its circle, its interest's or, placed into
+	// Unsorted, Unsorted's disc. Placing with the map off leaves such
+	// placements, and so does 2.5.x: it places with no place, and moving a
+	// placement into another interest keeps the place it had. The run and
+	// the interest's group are read by their primary keys.
+	offMapSQL = `EXISTS (
+	SELECT 1 FROM interest_runs r
+	LEFT JOIN interest_groups g ON g.run_id = r.id AND g.interest_id = p.interest_id
+	WHERE r.id = p.run_id AND r.map_status = '` + string(store.MapBuilt) + `'
+	  AND (p.map_x IS NULL
+	    OR (p.zoom_x - coalesce(g.zoom_x, r.map_unsorted_x)) * (p.zoom_x - coalesce(g.zoom_x, r.map_unsorted_x))
+	     + (p.zoom_y - coalesce(g.zoom_y, r.map_unsorted_y)) * (p.zoom_y - coalesce(g.zoom_y, r.map_unsorted_y))
+	     > coalesce(g.zoom_r, r.map_unsorted_r) * coalesce(g.zoom_r, r.map_unsorted_r)))`
+	// placeOrRepairSQL places a document into a run unless it is placed
+	// already, inside PlaceMany's transaction, which checked the run: a
+	// placement off the run's built map (offMapSQL) is replaced by one
+	// with a place, and any other is kept. Its args are the run, the
+	// document, the interest, the similarity, the time and the four
+	// positions.
+	placeOrRepairSQL = `
+	INSERT INTO interest_placements AS p (run_id, document_id, interest_id, similarity, placed_at, map_x, map_y,
+		zoom_x, zoom_y)
+	SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
 	WHERE NOT EXISTS (SELECT 1 FROM interest_assignments WHERE run_id = ?1 AND document_id = ?2)
 	  AND EXISTS (SELECT 1 FROM documents WHERE id = ?2)
-	ON CONFLICT (run_id, document_id) DO NOTHING`
+	ON CONFLICT (run_id, document_id) DO UPDATE SET interest_id = excluded.interest_id,
+		similarity = excluded.similarity, placed_at = excluded.placed_at, map_x = excluded.map_x,
+		map_y = excluded.map_y, zoom_x = excluded.zoom_x, zoom_y = excluded.zoom_y
+	WHERE excluded.map_x IS NOT NULL AND ` + offMapSQL
 	// unplacedSQL lists the fetched documents indexed since a time that a
-	// run neither assigned nor placed: a range of
-	// idx_documents_tenant_indexed, each checked against both primary
-	// keys. Its args are the tenant, the time, the fetched state and the
-	// run.
+	// run neither assigned nor placed, or placed off its built map
+	// (offMapSQL): a range of idx_documents_tenant_indexed, each checked
+	// against the run's assignments and placements, and a placement's run
+	// and group, by their primary keys. Its args are the tenant, the time,
+	// the fetched state and the run.
 	unplacedSQL = `
 	SELECT d.id FROM documents d
+	LEFT JOIN interest_placements p ON p.run_id = ?4 AND p.document_id = d.id
 	WHERE d.tenant_id = ?1 AND d.indexed_at >= ?2 AND d.state = ?3
 	  AND NOT EXISTS (SELECT 1 FROM interest_assignments a WHERE a.run_id = ?4 AND a.document_id = d.id)
-	  AND NOT EXISTS (SELECT 1 FROM interest_placements p WHERE p.run_id = ?4 AND p.document_id = d.id)`
+	  AND (p.document_id IS NULL OR ` + offMapSQL + `)`
 )
 
 func (s *Insights) Assigned(ctx context.Context, runID, documentID string) (bool, error) {
@@ -1018,8 +1199,9 @@ func (s *Insights) DocumentPlace(ctx context.Context, runID, documentID string) 
 }
 
 func (s *Insights) PlaceDocument(ctx context.Context, tenantID string, p store.Placement) (bool, error) {
-	res, err := s.db.ExecContext(ctx, placeDocumentSQL, p.RunID, p.DocumentID, nullIfEmpty(p.InterestID), p.Similarity,
-		formatTime(time.Now()), tenantID, store.InterestRunDone)
+	args := slices.Concat([]any{p.RunID, p.DocumentID, nullIfEmpty(p.InterestID), p.Similarity,
+		formatTime(time.Now()), tenantID, store.InterestRunDone}, positionArgs(p.Map))
+	res, err := s.db.ExecContext(ctx, placeDocumentSQL, args...)
 	if err != nil {
 		return false, fmt.Errorf("place document %s in run %s: %w", p.DocumentID, p.RunID, err)
 	}
@@ -1058,9 +1240,10 @@ func (s *Insights) PlaceMany(ctx context.Context, tenantID, runID string, ps []s
 }
 
 // placeEach writes each placement into runID unless the document is placed
-// already, through one prepared statement, and returns how many it wrote.
+// already on its map (placeOrRepairSQL), through one prepared statement,
+// and returns how many it wrote.
 func placeEach(ctx context.Context, tx *sql.Tx, runID string, ps []store.Placement, now string) (placed int, err error) {
-	stmt, err := tx.PrepareContext(ctx, placeIfAbsentSQL)
+	stmt, err := tx.PrepareContext(ctx, placeOrRepairSQL)
 	if err != nil {
 		return 0, fmt.Errorf("prepare: %w", err)
 	}
@@ -1070,7 +1253,8 @@ func placeEach(ctx context.Context, tx *sql.Tx, runID string, ps []store.Placeme
 		}
 	}()
 	for _, p := range ps {
-		res, err := stmt.ExecContext(ctx, runID, p.DocumentID, nullIfEmpty(p.InterestID), p.Similarity, now)
+		args := slices.Concat([]any{runID, p.DocumentID, nullIfEmpty(p.InterestID), p.Similarity, now}, positionArgs(p.Map))
+		res, err := stmt.ExecContext(ctx, args...)
 		if err != nil {
 			return 0, fmt.Errorf("place document %s: %w", p.DocumentID, err)
 		}
@@ -1081,6 +1265,105 @@ func placeEach(ctx context.Context, tx *sql.Tx, runID string, ps []store.Placeme
 		placed += int(n)
 	}
 	return placed, nil
+}
+
+// The map's reads. A run's documents are read by its rows' primary keys,
+// in document ID order, each with its document by its primary key and an
+// untitled one's bookmark title (bookmarkTitleSQL), leaving out those now
+// failed or dead; never a walk of the tenant's documents.
+const (
+	// mapAssignedSQL is a run's assigned documents. Its args are the run
+	// and the failed and dead states.
+	mapAssignedSQL = `
+	SELECT a.document_id, a.fit, a.interest_id, a.nearest_id, a.similarity, a.map_x, a.map_y, a.zoom_x, a.zoom_y,
+		coalesce(d.title, ''), d.url, ` + bookmarkTitleSQL + `
+	FROM interest_assignments a JOIN documents d ON d.id = a.document_id
+	WHERE a.run_id = ? AND d.state NOT IN (?, ?)
+	ORDER BY a.document_id`
+	// mapPlacedSQL is the documents placed into a run since. Its args are
+	// the run and the failed and dead states.
+	mapPlacedSQL = `
+	SELECT p.document_id, NULL, p.interest_id, NULL, p.similarity, p.map_x, p.map_y, p.zoom_x, p.zoom_y,
+		coalesce(d.title, ''), d.url, ` + bookmarkTitleSQL + `
+	FROM interest_placements p JOIN documents d ON d.id = p.document_id
+	WHERE p.run_id = ? AND d.state NOT IN (?, ?)
+	ORDER BY p.document_id`
+	// mapPositionsSQL is the places on a run's map of a JSON array of
+	// documents, each looked up in the run's assignments and placements
+	// by their primary keys. Its args are the run and the array.
+	mapPositionsSQL = `
+	SELECT j.value, CASE WHEN a.document_id IS NOT NULL THEN a.interest_id ELSE p.interest_id END,
+		coalesce(a.map_x, p.map_x), coalesce(a.map_y, p.map_y), coalesce(a.zoom_x, p.zoom_x), coalesce(a.zoom_y, p.zoom_y)
+	FROM json_each(?2) j
+	LEFT JOIN interest_assignments a ON a.run_id = ?1 AND a.document_id = j.value
+	LEFT JOIN interest_placements p ON p.run_id = ?1 AND p.document_id = j.value
+	WHERE coalesce(a.map_x, p.map_x) IS NOT NULL`
+)
+
+func (s *Insights) MapDocuments(ctx context.Context, runID string) ([]store.MapDocument, error) {
+	assigned, err := s.mapDocuments(ctx, mapAssignedSQL, false, runID)
+	if err != nil {
+		return nil, err
+	}
+	placed, err := s.mapDocuments(ctx, mapPlacedSQL, true, runID)
+	if err != nil {
+		return nil, err
+	}
+	return append(assigned, placed...), nil
+}
+
+func (s *Insights) mapDocuments(ctx context.Context, query string, placed bool, runID string) ([]store.MapDocument, error) {
+	rows, err := s.db.QueryContext(ctx, query, runID, store.DocStateFailed, store.DocStateDead)
+	if err != nil {
+		return nil, fmt.Errorf("read the map's documents: %w", err)
+	}
+	defer rows.Close()
+	var out []store.MapDocument
+	for rows.Next() {
+		d := store.MapDocument{Placed: placed}
+		var fit, interest, nearest sql.NullString
+		var pos positionScan
+		if err := rows.Scan(&d.DocumentID, &fit, &interest, &nearest, &d.Similarity, &pos.mapX, &pos.mapY, &pos.zoomX,
+			&pos.zoomY, &d.Title, &d.URL, &d.BookmarkTitle); err != nil {
+			return nil, fmt.Errorf("scan a document of the map: %w", err)
+		}
+		d.Fit, d.InterestID, d.NearestID = store.InterestFit(fit.String), interest.String, nearest.String
+		d.Map = pos.position()
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the map's documents: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Insights) MapPositions(ctx context.Context, runID string, ids []string) ([]store.MapPlace, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("map positions: encode IDs: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, mapPositionsSQL, runID, string(list))
+	if err != nil {
+		return nil, fmt.Errorf("map positions: %w", err)
+	}
+	defer rows.Close()
+	var out []store.MapPlace
+	for rows.Next() {
+		var p store.MapPlace
+		var interest sql.NullString
+		if err := rows.Scan(&p.DocumentID, &interest, &p.Map.MapX, &p.Map.MapY, &p.Map.ZoomX, &p.Map.ZoomY); err != nil {
+			return nil, fmt.Errorf("scan a map position: %w", err)
+		}
+		p.InterestID = interest.String
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("map positions: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Insights) Unplaced(ctx context.Context, tenantID, runID string, since time.Time) ([]string, error) {
@@ -1161,12 +1444,14 @@ func scanRun(sc interface{ Scan(...any) error }) (*store.InterestRun, error) {
 		finished                   sql.NullString
 		mean                       []byte
 		started, created, modified string
+		m                          mapScan
 	)
 	o := &r.RunOutcome
 	err := sc.Scan(&r.ID, &r.TenantID, &r.Status, &r.Trigger, &o.Kind, &o.SplitCheck, &o.Shape, &r.Grouper,
 		&params, &readAt, &mean, &o.NumDocuments, &o.NumAreas, &o.NumInterests, &o.NumLoose, &o.NumUnsorted,
 		&o.ChangedDocuments, &o.ChangesSinceSplit, &o.Kept, &o.Created, &o.Split, &o.Merged, &o.Moved, &o.Dissolved,
-		&errMsg, &started, &finished, &created, &modified)
+		&errMsg, &started, &finished, &created, &modified,
+		&m.status, &m.kind, &m.err, &m.ms, &m.params, &m.dot, &m.x, &m.y, &m.r)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -1177,6 +1462,7 @@ func scanRun(sc interface{ Scan(...any) error }) (*store.InterestRun, error) {
 		r.Params = json.RawMessage(params.String)
 	}
 	r.Error = nullableString(errMsg)
+	o.Map = m.runMap()
 	if o.Mean, err = decodeVectorBlob(mean); err != nil {
 		return nil, fmt.Errorf("interest run %s: mean: %w", r.ID, err)
 	}
@@ -1196,6 +1482,40 @@ func scanRun(sc interface{ Scan(...any) error }) (*store.InterestRun, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+// mapScan holds a run's map columns while they are scanned.
+type mapScan struct {
+	status, kind, err, params sql.NullString
+	ms                        sql.NullInt64
+	dot, x, y, r              sql.NullFloat64
+}
+
+// runMap is the scanned map, nil for none: the schema's CHECK keeps the
+// columns of a status together.
+func (m mapScan) runMap() *store.RunMap {
+	if !m.status.Valid {
+		return nil
+	}
+	out := &store.RunMap{Status: store.MapStatus(m.status.String), Kind: store.RunKind(m.kind.String),
+		Error: m.err.String, Took: time.Duration(m.ms.Int64) * time.Millisecond, DotRadius: m.dot.Float64,
+		Unsorted: store.Circle{X: m.x.Float64, Y: m.y.Float64, R: m.r.Float64}}
+	if m.params.Valid && m.params.String != "" {
+		out.Params = json.RawMessage(m.params.String)
+	}
+	return out
+}
+
+// positionScan holds a document's map columns while they are scanned.
+type positionScan struct{ mapX, mapY, zoomX, zoomY sql.NullFloat64 }
+
+// position is the scanned place, nil for none: the schema's CHECK keeps
+// the four together.
+func (p positionScan) position() *store.MapPosition {
+	if !p.mapX.Valid {
+		return nil
+	}
+	return &store.MapPosition{MapX: p.mapX.Float64, MapY: p.mapY.Float64, ZoomX: p.zoomX.Float64, ZoomY: p.zoomY.Float64}
 }
 
 // scanInsightState scans insightStateColumns; a missing row is
@@ -1268,18 +1588,21 @@ func scanInterest(sc interface{ Scan(...any) error }) (store.Interest, error) {
 	return in, s.fill(&in)
 }
 
-// scanGroup scans groupSelect's columns, and the centroid after them when
-// centroid is set.
-func scanGroup(sc interface{ Scan(...any) error }, centroid bool) (store.InterestGroup, error) {
+// scanGroup scans groupSelect's columns, and when whole runGroupsSQL's
+// after them: the centroid, the place on the map and the similar
+// interests.
+func scanGroup(sc interface{ Scan(...any) error }, whole bool) (store.InterestGroup, error) {
 	var (
 		g             store.InterestGroup
 		s             interestScan
 		parent, label sql.NullString
 		blob          []byte
+		place         [5]sql.NullFloat64
+		similar       sql.NullString
 	)
 	dest := slices.Concat([]any{&g.RunID}, s.dest(&g.Interest), []any{&parent, &label, &g.Size, &g.Loose, &g.Cohesion})
-	if centroid {
-		dest = append(dest, &blob)
+	if whole {
+		dest = append(dest, &blob, &place[0], &place[1], &place[2], &place[3], &place[4], &similar)
 	}
 	if err := sc.Scan(dest...); err != nil {
 		return store.InterestGroup{}, fmt.Errorf("scan interest group: %w", err)
@@ -1291,6 +1614,15 @@ func scanGroup(sc interface{ Scan(...any) error }, centroid bool) (store.Interes
 	var err error
 	if g.Centroid, err = decodeVectorBlob(blob); err != nil {
 		return store.InterestGroup{}, fmt.Errorf("interest %s: centroid: %w", g.ID, err)
+	}
+	if place[0].Valid {
+		g.Map = &store.GroupMap{ZoomX: place[0].Float64, ZoomY: place[1].Float64, ZoomR: place[2].Float64,
+			AnchorX: place[3].Float64, AnchorY: place[4].Float64}
+	}
+	if similar.Valid {
+		if err := json.Unmarshal([]byte(similar.String), &g.Similar); err != nil {
+			return store.InterestGroup{}, fmt.Errorf("interest %s: similar interests: %w", g.ID, err)
+		}
 	}
 	return g, nil
 }

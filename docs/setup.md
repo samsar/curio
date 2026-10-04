@@ -699,6 +699,18 @@ checks it:
   kills the daemon is recorded as failed rather than run again at the
   next start.
 
+Each rebuild also draws the interest map (`GET /v1/interests/map`), and
+the status line ends with it: `map built (warm, in 2.8s)`, `map failed
+(<why>)`, or `map off (insight.map: false)`. A rebuild that drew no map,
+such as the last one before an upgrade to curio 2.6 or one made with the
+map off, makes a rebuild due to draw it, which the line says ("a rebuild
+is due to draw the map"); it is queued once the library is quiet, as any
+rebuild is, and asks the writing model for nothing on an unchanged
+library. A failed map makes nothing due: `curio doctor` warns with its
+error, `curio interests rebuild` draws it again, `curio daemon logs` has
+the details, and if it keeps failing (a library too large to draw in 2
+minutes), `insight.map: false` turns the map off.
+
 `curio reindex --all` owes the interests a fresh rebuild: it waits until
 every index job is done and nothing was indexed for 10 minutes, however
 long the re-embedding takes, so it never groups vectors of two builds.
@@ -708,6 +720,7 @@ aren't placed.
 | Key | Default | What it does |
 |---|---|---|
 | `insight.enabled` | true | off: no rebuild is queued, on its own or asked for, and no document is placed; existing interests stay readable |
+| `insight.map` | true | off: rebuilds draw no interest map and placed documents get no place on it, saving a few seconds a rebuild (up to 2 minutes on a very large library) and a neighbour search per indexed document; `GET /v1/interests/map` answers 404 `map_off`. On again: if a rebuild committed while it was off, a rebuild to draw the map is due at once; either way the daemon's start sweep gives the documents placed meanwhile their places |
 | `insight.labeling` | `llm` | `llm` (the writing model, falling back to term labels), `terms` (words the titles share), or `off` |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild; the rest get term labels |
 | `insight.center_vectors` | true | subtract the library's mean vector before grouping |
@@ -718,6 +731,12 @@ whose constants are now recorded on each rebuild and changed only in code.
 A `config.yaml` that sets them still loads, whatever their values, and the
 daemon logs one warning naming them each time it starts. Remove them from
 `config.yaml`.
+
+Going back to curio 2.5.x needs no database restore: it runs on the
+database as it is, and once you upgrade again the map is drawn anew (see
+`docs/decisions.md` "Interest map", "Going back to 2.5.x"). Remove
+`insight.map` from `config.yaml` first, though: 2.5.x doesn't know the key,
+so its daemon refuses to start and its commands refuse to run.
 
 ## Config: time budgets for Ollama calls
 

@@ -350,7 +350,7 @@ schedule is a window of the daemon's local wall clock, from
 `schedule_start` up to `schedule_end`, wrapping midnight when the end is
 the smaller.
 
-### Interests (migration 016)
+### Interests (migrations 016 to 018)
 
 Interests come in two levels: areas, each holding interests, in a library
 large enough to have them, and interests alone in a smaller one (the run's
@@ -367,6 +367,19 @@ two levels, stable identities, automatic rebuilds".
 
 Vectors (`mean`, `centroid`) are float32 little-endian BLOBs, NULL when
 absent.
+
+Migration 018 keeps each run's interest map on the same rows: two views
+of the grouping, the document map (every document placed so that similar
+documents sit together) and the zoom view (each interest a circle of its
+documents inside its area's), every position in a square of side 1000.
+The map's status and its view-wide values are on `interest_runs`, each
+group's circle and label anchor on `interest_groups`, each document's two
+positions on `interest_assignments` and `interest_placements`. All are
+nullable columns. A run from before 018 has every one NULL; a run whose
+map failed records its status, error, time and params, and no positions
+anywhere. CHECKs keep a run from being half a map and a row from being
+half placed. See `decisions.md` "Interest map: two views of each
+regrouping, drawn when it is built".
 
 #### `interest_runs`
 
@@ -392,7 +405,20 @@ interest_runs
   kept, created, split, merged, moved, dissolved   INTEGER  -- what it did to interest identities
   error               TEXT     -- set when failed
   started_at, finished_at, created_at, updated_at
+  -- the map (018):
+  map_status          TEXT     -- 'built' | 'failed'; NULL: none drawn (a run from before 018, or one not done)
+  map_kind            TEXT     -- a built map's: 'fresh' | 'warm' (its document map started from the previous run's)
+  map_error           TEXT     -- a failed map's, one line
+  map_ms              INTEGER  -- how long drawing it took
+  map_params          JSON     -- every layout constant, the seed and center; another value starts the next map cold
+  map_dot_radius      REAL     -- a built map's dot radius in the zoom view
+  map_unsorted_x, map_unsorted_y, map_unsorted_r  REAL  -- a built map's Unsorted disc
 ```
+
+A CHECK on `map_unsorted_r` ties the map's columns together: a NULL status
+leaves every one NULL; `failed` sets the error, time and params and no
+dot radius or disc; `built` sets the kind, time, params, a dot radius
+above 0 and the disc with a radius above 0, and no error.
 
 `idx_interest_runs_tenant_status (tenant_id, status, started_at DESC)`
 finds the latest done run, which every read starts from. A rebuild that
@@ -449,8 +475,16 @@ interest_groups
   loose        INTEGER            -- loose fits
   cohesion     REAL               -- an interest: mean member cosine to its centroid
   centroid     BLOB               -- an interest's members' unit mean; NULL for areas
+  zoom_x, zoom_y, zoom_r  REAL    -- its circle in the zoom view (018)
+  anchor_x, anchor_y      REAL    -- its label's anchor on the document map (018)
+  similar      JSON               -- an interest's 3 most similar interests, [{"id", "cosine"}] (018)
   PRIMARY KEY (run_id, interest_id)
 ```
+
+The five map columns are all set (with `zoom_r` above 0) or all NULL;
+`similar` is set for every interest of a run from 018 on, map or no map,
+never for an area, and is valid JSON when set; it names only other
+interests of the run (`CommitRun` refuses anything else).
 
 `idx_interest_groups_list (run_id, parent_id, size DESC, cohesion DESC,
 interest_id)` serves the top-level page, an area's interests and every
@@ -470,6 +504,7 @@ interest_assignments
   similarity     REAL               -- to its interest's centroid; unsorted: to the nearest interest
   nearest_id     UUID FK            -- unsorted only; NULL when there is no interest
   area_seed, interest_seed  INTEGER -- the next warm start's seeds; -1 for none
+  map_x, map_y, zoom_x, zoom_y  REAL -- its place on the document map and in the zoom view (018); all or none
   PRIMARY KEY (run_id, document_id),
   CHECK ((fit = 'unsorted') = (interest_id IS NULL)),
   CHECK (fit = 'unsorted' OR nearest_id IS NULL)
@@ -504,11 +539,19 @@ interest_placements
   interest_id  UUID FK            -- NULL: unsorted
   similarity   REAL
   placed_at    TIMESTAMP
+  map_x, map_y, zoom_x, zoom_y  REAL  -- its place on the run's map, near its most similar mapped documents (018); all or none
   PRIMARY KEY (run_id, document_id)
 ```
 
 Indexed by `(run_id, interest_id, placed_at DESC)` and, for document
 deletes, `(document_id)`.
+
+The positions are NULL on a run without a built map, on a placement made
+with `insight.map: false`, and on a placement curio 2.5.x made, which
+writes none; when 2.5.x moves a placement into another interest, it keeps
+the place it had, outside its new circle. On a built map either is off
+the map: `GET /v1/interests/map` leaves it out, and the next sweep with the
+map on places it again, with a place.
 
 #### `interest_lineage`
 

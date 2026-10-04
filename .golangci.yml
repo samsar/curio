@@ -152,6 +152,15 @@ linters:
             - "!$test"
           allow:
             - $gostd
+        # So is the interest map's layout package: it takes plain vectors,
+        # neighbour lists and groups, and imports nothing of curio's.
+        layout-stdlib-only:
+          list-mode: strict
+          files:
+            - "**/internal/insight/layout/**"
+            - "!$test"
+          allow:
+            - $gostd
     errcheck:
       # Errors that carry nothing to act on: a deferred Close on something
       # only read, and a Rollback, which is a no-op after Commit and whose

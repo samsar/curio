@@ -258,6 +258,23 @@ func TestCarry_MovedOrKept(t *testing.T) {
 	assert.Equal(t, EventKept, toFlat.Lineage[0].Event)
 }
 
+// TestCarried_Starts: a new group starts at the old group it shares the
+// most members with, the lower old ID on a tie; a carried group, and a new
+// one no lineage row reaches, at none.
+func TestCarried_Starts(t *testing.T) {
+	c := Carried{
+		Predecessor: []string{"K", "", "", ""},
+		Lineage: []LineageRow{
+			{OldID: "A", New: 1, Event: EventSplit, Shared: 4},
+			{OldID: "B", New: 1, Event: EventMerged, Shared: 9},
+			{OldID: "B", New: 2, Event: EventSplit, Shared: 5},
+			{OldID: "C", New: 2, Event: EventSplit, Shared: 5},
+			{OldID: "K", New: 0, Event: EventKept, Shared: 20},
+		},
+	}
+	assert.Equal(t, []string{"", "B", "B", ""}, c.Starts())
+}
+
 func TestCarry_RejectsBadInput(t *testing.T) {
 	o := docs("o", 0, 10)
 	cases := []struct {

@@ -4,9 +4,12 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -61,6 +64,15 @@ type interestsEnv struct {
 // serving topic pages at /topic/<n>.
 func interestsDaemon(t *testing.T, settle time.Duration) interestsEnv {
 	t.Helper()
+	env := newInterestsEnv(t, settle)
+	require.NoError(t, env.ctl.EnsureRunning(context.Background()), logTail(env.home))
+	return env
+}
+
+// newInterestsEnv is interestsDaemon's home and pages, with no daemon
+// started yet.
+func newInterestsEnv(t *testing.T, settle time.Duration) interestsEnv {
+	t.Helper()
 	t.Setenv("CURIO_E2E_INTERESTS", interestsTiming(settle))
 	_, ollamaURL := serveOllama(t, digestA, "0.34.4")
 	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +93,6 @@ func interestsDaemon(t *testing.T, settle time.Duration) interestsEnv {
 			_ = syscall.Kill(st.PID, syscall.SIGKILL)
 		}
 	})
-	require.NoError(t, ctl.EnsureRunning(context.Background()), logTail(home))
 	return interestsEnv{home: home, ctl: ctl, c: client.New("http://" + listen), base: "http://" + listen, pages: pages.URL}
 }
 
@@ -135,6 +146,16 @@ func TestDaemon_AnImportIsGroupedUnasked(t *testing.T) {
 		_, body := getDashboard(t, env.base, path)
 		assert.Contains(t, body, `<a href="/ui/interests" aria-current="page">`, path)
 	}
+	// The rebuild drew its map; no client wraps it yet.
+	var drawn struct {
+		RunID     string `json:"run_id"`
+		Documents struct {
+			ID []string `json:"id"`
+		} `json:"documents"`
+	}
+	getAPI(t, env.base, "/v1/interests/map", &drawn)
+	assert.Equal(t, list.RunID, drawn.RunID)
+	assert.Len(t, drawn.Documents.ID, 20)
 
 	importTopics(t, c, pages, 20, 24)
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
@@ -191,4 +212,94 @@ func TestDaemon_APausedQueueHoldsTheRebuild(t *testing.T) {
 	stopped, err := ctl.Stop(ctx)
 	require.NoError(t, err)
 	assert.True(t, stopped)
+}
+
+// TestDaemon_TheMapSwitch: with insight.map off, an import is grouped
+// unasked without a map: the map answers 404 map_off and healthz says the
+// map is off. Turned on again, the daemon queues a rebuild unasked to draw
+// it, and the map answers with every document.
+func TestDaemon_TheMapSwitch(t *testing.T) {
+	ctx := context.Background()
+	env := newInterestsEnv(t, time.Second)
+	home, ctl, c := env.home, env.ctl, env.c
+	cfg, err := os.ReadFile(home.ConfigPath())
+	require.NoError(t, err)
+	on := string(cfg)
+	off := strings.Replace(on, "insight:\n  labeling: terms\n", "insight:\n  labeling: terms\n  map: false\n", 1)
+	require.NotEqual(t, on, off)
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(off), 0o600))
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+
+	importTopics(t, c, env.pages, 0, 19)
+	var first string
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		list, err := c.ListInterests(ctx, client.ListInterestsOpts{})
+		require.NoError(collect, err)
+		require.NotNil(collect, list.Rebuild)
+		assert.Equal(collect, 20, list.NumDocuments)
+		first = list.RunID
+		health, err := c.Healthz(ctx)
+		require.NoError(collect, err)
+		require.NotNil(collect, health.Interests)
+		assert.Equal(collect, client.StateCurrent, health.Interests.State)
+		require.NotNil(collect, health.Interests.Map)
+		assert.Equal(collect, client.MapOff, health.Interests.Map.Status)
+	}, 30*time.Second, 50*time.Millisecond, "grouped without a map\n%s", logTail(home))
+	var problem struct {
+		Reason string `json:"reason"`
+	}
+	getAPIStatus(t, env.base, "/v1/interests/map", http.StatusNotFound, &problem)
+	assert.Equal(t, "map_off", problem.Reason)
+
+	stopped, err := ctl.Stop(ctx)
+	require.NoError(t, err)
+	require.True(t, stopped)
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(on), 0o600))
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		list, err := c.ListInterests(ctx, client.ListInterestsOpts{})
+		require.NoError(collect, err)
+		require.NotNil(collect, list.Rebuild)
+		assert.NotEqual(collect, first, list.RunID, "rebuilt")
+		assert.Equal(collect, string(store.RunTriggerAuto), list.Rebuild.Trigger)
+		assert.Zero(collect, list.Rebuild.ChangedDocuments)
+		health, err := c.Healthz(ctx)
+		require.NoError(collect, err)
+		require.NotNil(collect, health.Interests)
+		require.NotNil(collect, health.Interests.Map)
+		assert.Equal(collect, client.MapBuilt, health.Interests.Map.Status)
+	}, 30*time.Second, 50*time.Millisecond, "the map on again, a rebuild draws it unasked\n%s", logTail(home))
+	var drawn struct {
+		Documents struct {
+			ID []string `json:"id"`
+		} `json:"documents"`
+	}
+	getAPI(t, env.base, "/v1/interests/map", &drawn)
+	assert.Len(t, drawn.Documents.ID, 20)
+
+	stopped, err = ctl.Stop(ctx)
+	require.NoError(t, err)
+	assert.True(t, stopped)
+}
+
+// getAPI gets path from the daemon at baseURL, which must answer 200, into
+// v.
+func getAPI(t *testing.T, baseURL, path string, v any) {
+	t.Helper()
+	getAPIStatus(t, baseURL, path, http.StatusOK, v)
+}
+
+// getAPIStatus gets path from the daemon at baseURL, which must answer
+// status, into v.
+func getAPIStatus(t *testing.T, baseURL, path string, status int, v any) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL+path, nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, status, resp.StatusCode, "%s: %s", path, body)
+	require.NoError(t, json.Unmarshal(body, v), path)
 }

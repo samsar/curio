@@ -504,6 +504,10 @@ func insightPlanCases() []planCase {
 		identity   = "SEARCH i USING INDEX sqlite_autoindex_interests_1 (id=?)"
 		parent     = "SEARCH p USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN"
 		runByID    = "SEARCH interest_runs USING INDEX sqlite_autoindex_interest_runs_1 (id=?)"
+		// What tells a placement off its run's map (offMapSQL): the run
+		// and the interest's group, by their primary keys.
+		runOfPlacement   = "SEARCH r USING INDEX sqlite_autoindex_interest_runs_1 (id=?)"
+		groupOfPlacement = "SEARCH g USING INDEX sqlite_autoindex_interest_groups_1 (run_id=? AND interest_id=?) LEFT-JOIN"
 		// The upserts of insight_state (OweFresh, RecordFailure) insert
 		// VALUES and conflict on this primary key; they have no plan.
 		stateByTenant = "SEARCH insight_state USING INDEX sqlite_autoindex_insight_state_1 (tenant_id=?)"
@@ -549,7 +553,7 @@ func insightPlanCases() []planCase {
 		},
 		{
 			name: "RunGroups", query: runGroupsSQL, args: []any{"run"},
-			first: "SEARCH g USING INDEX sqlite_autoindex_interest_groups_1 (run_id=?)", want: []string{identity},
+			first: "SEARCH g USING INDEX idx_interest_groups_list (run_id=?)", want: []string{identity},
 		},
 		{
 			name: "Members", query: membersSQL, args: []any{"run", "interest", store.InterestFitMember, 50, 50},
@@ -684,7 +688,7 @@ func insightPlanCases() []planCase {
 			// The guard: the latest done run, which ties on the rowid, and
 			// the document's assignment and row.
 			name:  "PlaceDocument",
-			query: placeDocumentSQL, args: []any{"run", "doc", "interest", 0.5, "now", "local", done},
+			query: placeDocumentSQL, args: []any{"run", "doc", "interest", 0.5, "now", "local", done, 1.0, 2.0, 3.0, 4.0},
 			want: []string{
 				"SEARCH documents EXISTS USING COVERING INDEX sqlite_autoindex_documents_1 (id=?)",
 				"SEARCH interest_runs USING INDEX idx_interest_runs_tenant_status (tenant_id=? AND status=?)",
@@ -693,19 +697,53 @@ func insightPlanCases() []planCase {
 			sorts: true,
 		},
 		{
-			name: "PlaceMany", query: placeIfAbsentSQL, args: []any{"run", "doc", "interest", 0.5, "now"},
+			// The guard, and on a conflict the placement's run and its
+			// interest's group, to tell whether it is off the run's map.
+			name: "PlaceMany", query: placeOrRepairSQL, args: []any{"run", "doc", "interest", 0.5, "now", 1.0, 2.0, 3.0, 4.0},
 			want: []string{
 				"SEARCH documents EXISTS USING COVERING INDEX sqlite_autoindex_documents_1 (id=?)",
 				assignment("interest_assignments"),
+				runOfPlacement, groupOfPlacement,
+			},
+			avoid: []string{"SCAN"},
+		},
+		{
+			// A run's assigned documents in document ID order, from its
+			// primary key, each document by its own and an untitled one's
+			// bookmarks by theirs: never a walk of the tenant's documents.
+			name: "MapDocuments assigned", query: mapAssignedSQL, args: []any{"run", store.DocStateFailed, store.DocStateDead},
+			first: "SEARCH a USING INDEX sqlite_autoindex_interest_assignments_1 (run_id=?)",
+			want:  []string{"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)", untitledBookmarkTitle},
+			avoid: []string{"SCAN d", "idx_documents_tenant_", "idx_bookmarks_tenant_"},
+		},
+		{
+			name: "MapDocuments placed", query: mapPlacedSQL, args: []any{"run", store.DocStateFailed, store.DocStateDead},
+			first: "SEARCH p USING INDEX sqlite_autoindex_interest_placements_1 (run_id=?)",
+			want:  []string{"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)", untitledBookmarkTitle},
+			avoid: []string{"SCAN d", "idx_documents_tenant_", "idx_bookmarks_tenant_"},
+		},
+		{
+			// Each document of the array in the run's assignments and
+			// placements, by their primary keys.
+			name: "MapPositions", query: mapPositionsSQL, args: []any{"run", `["a","b"]`},
+			first: "SCAN j VIRTUAL TABLE INDEX",
+			want: []string{
+				"SEARCH a USING INDEX sqlite_autoindex_interest_assignments_1 (run_id=? AND document_id=?) LEFT-JOIN",
+				"SEARCH p USING INDEX sqlite_autoindex_interest_placements_1 (run_id=? AND document_id=?) LEFT-JOIN",
 			},
 		},
 		{
+			// The documents indexed since, each checked against the run's
+			// assignments and placements, and a placement's run and group,
+			// by their primary keys.
 			name: "Unplaced", query: unplacedSQL, args: []any{"local", "since", store.DocStateFetched, "run"},
 			first: "SEARCH d USING INDEX idx_documents_tenant_indexed (tenant_id=? AND indexed_at>?)",
 			want: []string{
 				assignment("a"),
-				"SEARCH p USING COVERING INDEX sqlite_autoindex_interest_placements_1 (run_id=? AND document_id=?)",
+				"SEARCH p USING INDEX sqlite_autoindex_interest_placements_1 (run_id=? AND document_id=?) LEFT-JOIN",
+				runOfPlacement, groupOfPlacement,
 			},
+			avoid: []string{"SCAN"},
 		},
 	}
 }

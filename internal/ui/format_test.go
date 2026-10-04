@@ -75,7 +75,7 @@ func TestHost(t *testing.T) {
 		"HTTPS://Example.COM/Path":            "Example.COM",
 		"https://xn--bcher-kva.example/books": "xn--bcher-kva.example",
 	} {
-		assert.Equal(t, want, host(u), u)
+		assert.Equal(t, want, Host(u), u)
 	}
 }
 

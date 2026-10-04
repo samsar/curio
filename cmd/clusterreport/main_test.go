@@ -235,6 +235,7 @@ func TestRun_DegenerateLibrary(t *testing.T) {
 // interests, every area is n/a, and the stored run is the report's fresh
 // grouping.
 func TestRun_FlatLibrary(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	lib := newSynthetic(300, 1)
 	db := newCopy(t, dir, "copy.db", len(lib.docs), func(i int) []float32 { return lib.docs[i].Vector })
@@ -264,6 +265,18 @@ func TestRun_FlatLibrary(t *testing.T) {
 	}
 	assert.Len(t, rep.Chain.Steps, chainSteps+1)
 	assert.NotNil(t, rep.Chain.WorstGap)
+	assert.Contains(t, stdout, "Map: a cold map of the whole library")
+	assert.Positive(t, rep.Map.Cold.NP5)
+	assert.GreaterOrEqual(t, rep.Map.Cold.NP15, rep.Map.Cold.NP5, "more neighbours, more kept")
+	assert.Nil(t, rep.Map.Cold.AreaPurity, "no areas in the flat shape")
+	assert.Positive(t, rep.Map.SeedToSeed)
+	assert.Positive(t, rep.Map.PeakRSSBytes)
+	for kind, w := range map[changeKind]warmMapsReport{changeAdded: rep.Map.Warm.Added, changeMixed: rep.Map.Warm.Mixed} {
+		require.Len(t, w.Draws, 1, kind)
+		assert.Equal(t, "warm", w.Draws[0].Kind, "%s: the map started from the previous one", kind)
+		assert.Positive(t, w.Documents.Mean, kind)
+		assert.Less(t, w.Documents.Mean, 0.5, kind)
+	}
 	require.NotNil(t, rep.StoredRun)
 	ag := rep.StoredRun.Agreement
 	assert.Equal(t, len(lib.docs), ag.Shared)
