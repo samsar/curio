@@ -58,10 +58,10 @@ func runPageHref(path string, page int, run string) string {
 func changesHref() string { return "/ui/interests/changes" }
 
 // The interest map's views, as its view parameter names them: By
-// similarity, the default, which links leave out, and By interest.
+// similarity, the default, which links leave out, and By group.
 const (
 	MapViewSimilarity = "similarity"
-	MapViewInterests  = "interests"
+	MapViewGroups     = "groups"
 )
 
 // What the interest map's select parameter names: kind:id for an area, an
@@ -84,7 +84,7 @@ const (
 const maxMapSelectID = 128
 
 // MapQuery is what an interest map URL asks for: a view, MapViewSimilarity or
-// MapViewInterests, and what is selected in it, the zero MapSelection for the
+// MapViewGroups, and what is selected in it, the zero MapSelection for the
 // library.
 type MapQuery struct {
 	View   string
@@ -136,10 +136,10 @@ func ParseMapQuery(q url.Values) (MapQuery, error) {
 	out := MapQuery{View: MapViewSimilarity}
 	switch view := q.Get(mapViewParam); view {
 	case "", MapViewSimilarity:
-	case MapViewInterests:
+	case MapViewGroups:
 		out.View = view
 	default:
-		return MapQuery{}, fmt.Errorf("%s %q: want %s or %s", mapViewParam, view, MapViewSimilarity, MapViewInterests)
+		return MapQuery{}, fmt.Errorf("%s %q: want %s or %s", mapViewParam, view, MapViewSimilarity, MapViewGroups)
 	}
 	sel := q.Get(mapSelectParam)
 	if sel == "" {

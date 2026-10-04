@@ -207,14 +207,14 @@ footer names the address the daemon listens on.
   similarity** (the default) draws every document as a dot near the
   documents most like it, coloured by its area (by its interest in a
   library too small for areas), and names the areas, then the interests
-  as you zoom in, then titles. **By interest** draws each area as a disc
+  as you zoom in, then titles. **By group** draws each area as a disc
   holding its interests' circles, sized by their documents, each
   document a dot in its interest, and Unsorted as a dashed disc beside
   them. A grey dot is unsorted, a hollow ring a loose fit, and a dot
   ringed in the accent new since the rebuild. Scroll, pinch or use + and
   − to zoom, drag to pan, and double-click empty space (or the fit
   button, top right) to see the whole map again. A click selects: by
-  similarity a document, or an area's or interest's name; by interest a
+  similarity a document, or an area's or interest's name; by group a
   closed area first, then an interest inside it, then a document once
   its interest is open. A click on empty space goes up a level. The
   other tab shows the same selection. The panel beside the map says what
@@ -230,7 +230,7 @@ footer names the address the daemon listens on.
   (arrows, Enter, Escape). Keys: `/` searches, Escape goes up a level,
   `0` shows the whole map, `+` and `-` zoom, and the arrows, Home and
   End move between the tabs. The address keeps the tab and the selection
-  (`/ui/interests/map?view=interests&select=interest:<id>`, `area:<id>`,
+  (`/ui/interests/map?view=groups&select=interest:<id>`, `area:<id>`,
   `document:<id>` or `unsorted`), so a reload or Back shows the same; an
   ID no longer on the map shows the whole map and says so, and an area
   or interest's note links to its page, which says what became of it.
