@@ -824,11 +824,11 @@ lines of links and code blocks left out, up to its first paragraph and
 within its first 2 KiB (a parked domain's notice within its first 256
 bytes), so an article that quotes such a notice further in is stored. A
 status code alone ("404") counts only as a heading: on a plain line it is
-as often a count, such as a question's score. A
-forced refetch (`curio refetch <id> --force`) judges the same text again,
-so it only helps once the site serves the page itself again. The only
-override is `fetcher.native.dead_link_detection: false` and a restart, as
-above, which turns off every dead-link rule.
+as often a count, such as a question's score. A forced refetch (`curio
+refetch <id> --force`) judges the same text again, so it only helps once
+the site serves the page itself again. The only override is
+`fetcher.native.dead_link_detection: false` and a restart, as above, which
+turns off every dead-link rule.
 
 **`login wall or thin content (page is a sign-in form)`** on a document —
 the page is a sign-in form and nothing else: at most 1 KiB of text, menus

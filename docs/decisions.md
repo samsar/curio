@@ -9809,13 +9809,15 @@ is now read for a not-found notice: a line of its opening (its own lines,
 links and code left out, up to its first line of prose within its first
 2 KiB) that is a not-found template as a whole, or that opens with a
 not-found sentence. The body rule's worry, that an article can open with
-a 404 heading and the origin's text carries no heading markers, is met in
-two ways. Only the opening and whole lines are read: measured, the line
-structure survives on both paths (go-readability's `RenderText` puts each
-block on its own line), and no stored article has a notice in its
-opening. And a status code alone counts only as a markdown heading, which
-the origin's text never has: on a line of its own, "404" is as often a
-question's score. Medium's 404 ×6 and Bespoke's are dead by their text.
+a 404 heading and the origin's text carries no heading markers, was
+measured rather than removed. Only the opening and whole lines are read:
+the line structure survives on both paths (go-readability's `RenderText`
+puts each block on its own line), and no stored article has a notice in
+its opening. An article that does open with a not-found heading ("## 404
+Not Found") is judged dead, a risk the new entry accepts. A status code
+alone counts only as a markdown heading, which the origin's text never
+has, because on a line of its own "404" is as often a question's score.
+Medium's 404 ×6 and Bespoke's are dead by their text.
 Titles in other languages are still not read: javalobby.org's two pages
 are dead only because their text opens with "## 404 - หน้าไม่พบ", a status
 heading beside a site's name. The template's words (`notFoundLead`,
@@ -11190,7 +11192,8 @@ title, for four kinds of page that aren't the page asked for
   the page's notice. From the origin the text is go-readability's
   `RenderText`, which puts each block on its own line and has no link
   markup, heading markers or code fences, so every line is own text, none
-  a heading, and passes through unchanged.
+  a heading, and passes through unchanged but for a line that opens like a
+  marker ("1. ", "- ").
 - **The opening:** the own lines that begin within the first 2 KiB of own
   text (`openingBytes`), up to and including the first line longer than
   200 bytes (`proseLineBytes`), the first line of prose.
@@ -11207,21 +11210,20 @@ title, for four kinds of page that aren't the page asked for
   `notFoundCantFind`, `notFoundApos`) now have one definition, which
   every rule is built from, and one function (`notFoundTemplates`) builds
   `soft404TitleRE`, unchanged, beside `notFoundLineRE` and
-  `statusCodeLineRE`. A template that
-  is a status code alone, site names around it (`statusCodeLineRE`:
-  "404", "Votes: 404", "410 · Followers"), counts only as a heading ("#
-  404", or "404" over a setext underline): on a line of its own, a number
-  is as often a count. 147 of the library's 154 Stack Exchange questions
-  give their score on a line of its own in their opening (7 of those
-  scores between 300 and 999), 288 documents in all have a line that is a
-  number alone there, and X profiles give their counts the same way: a
-  bookmarked question whose score passed through 404 would otherwise go
-  dead for good, since a refetch judges the same text. Medium's
-  tombstone, whose text gives "410" on a plain line, is dead by its title
-  alone. Every status-code line among the flagged pages is a heading;
-  Bespoke's "# 404" and javalobby.org's "## 404 - หน้าไม่พบ" are the
-  verdicts that rest on one. Reason: `text reads like a not-found page:
-  "PAGE NOT FOUND"`.
+  `statusCodeLineRE`. A template that is a status code alone, site names
+  around it (`statusCodeLineRE`: "404", "Votes: 404", "410 · Followers"),
+  counts only as a heading ("# 404", or "404" over a setext underline): on
+  a line of its own, a number is as often a count. 157 documents have a
+  number alone on a line of their opening (list ordinals such as "3."
+  aside): 24 of the 147 Stack Exchange questions whose text shows their
+  score give it that way (two of those scores between 300 and 999: 307
+  and 444), and 7 X profiles their counts. A bookmarked question whose
+  score passed through 404 would otherwise go dead for good, since a
+  refetch judges the same text. Medium's tombstone, whose text gives "410"
+  on a plain line, is dead by its title alone. Every status-code line
+  among the flagged pages is a heading; Bespoke's "# 404" and
+  javalobby.org's "## 404 - หน้าไม่พบ" are the verdicts that rest on one.
+  Reason: `text reads like a not-found page: "PAGE NOT FOUND"`.
 - **A parked domain** (dead link, with detection on): a line of the
   opening that is an optional subject and one predicate
   (`parkedDomainRE`). Subjects: "this domain", "the domain (name)",
@@ -11232,8 +11234,10 @@ title, for four kinds of page that aren't the page asked for
   idea still being worked on", easyDNS's "is yet another domain managed by
   …". With a subject, the predicate ends the line or is followed by ".",
   "!" or ":"; without one, it is the whole line (GoDaddy's "is for sale!"
-  under the domain's name). A search-ads parking page's heading, "Related
-  searches" or "Related search topics" alone on its line
+  under the domain's name). An expiry needs a subject, as Namecheap's
+  "Domain registration has expired." has: "Registration has expired."
+  alone is as likely an event's sign-up page. A search-ads parking page's
+  heading, "Related searches" or "Related search topics" alone on its line
   (`parkingHeadingRE`), counts too. Only the opening's lines that begin
   within its first 256 bytes of own text are read (`parkedNoticeBytes`):
   a parking page says what it is first, and a search results page, which
@@ -11357,7 +11361,10 @@ escapes costs up to 7 ms, and 64 KiB of menu lines about 2 ms.
 is judged dead, as such a title is: an article that quotes a notice before
 its first paragraph, or a status-code cheat sheet that opens with its
 list. So is a page with a heading that is a status code alone, a count
-given as a heading among them. From the origin, code is plain text, so an
+given as a heading among them: LessWrong gives a post's karma as a heading
+(`25e40719`'s "# 480"), so a post there whose karma is 404 or 410 when it
+is fetched is judged dead, and stays so until a forced refetch finds
+another score. From the origin, code is plain text, so an
 article that shows a not-found page in a code block before its first
 paragraph is judged dead there, though not through Jina. A page that says
 in its first 256 bytes of own text that this domain is for sale is a
