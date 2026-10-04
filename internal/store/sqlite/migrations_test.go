@@ -1249,16 +1249,20 @@ func TestMigration018_Constraints(t *testing.T) {
 		_, err := db.Exec(update)
 		assert.ErrorContains(t, err, "constraint failed", name)
 	}
-	for name, update := range map[string]string{
-		"a built map": `UPDATE interest_runs SET ` + built,
-		"a failed map": `UPDATE interest_runs SET map_kind = NULL, map_dot_radius = NULL, map_unsorted_x = NULL,
-			map_unsorted_y = NULL, map_unsorted_r = NULL, ` + failed,
-		"a placed group":     `UPDATE interest_groups SET zoom_x = 1, zoom_y = 2, zoom_r = 3, anchor_x = 1, anchor_y = 2, similar = '[{"id":"i1","cosine":0.5}]'`,
-		"a placed document":  `UPDATE interest_assignments SET map_x = 1, map_y = 2, zoom_x = 3, zoom_y = 4`,
-		"a placed placement": `UPDATE interest_placements SET map_x = 1, map_y = 2, zoom_x = 3, zoom_y = 4`,
+	// Each sets every map column of its row, so none depends on another's
+	// having run.
+	for _, tc := range []struct{ name, update string }{
+		{"a built map", `UPDATE interest_runs SET map_error = NULL, ` + built},
+		{"a failed map", `UPDATE interest_runs SET map_kind = NULL, map_dot_radius = NULL, map_unsorted_x = NULL,
+			map_unsorted_y = NULL, map_unsorted_r = NULL, ` + failed},
+		{"a built map again", `UPDATE interest_runs SET map_error = NULL, ` + built},
+		{"a placed group", `UPDATE interest_groups SET zoom_x = 1, zoom_y = 2, zoom_r = 3, anchor_x = 1, anchor_y = 2,
+			similar = '[{"id":"i1","cosine":0.5}]'`},
+		{"a placed document", `UPDATE interest_assignments SET map_x = 1, map_y = 2, zoom_x = 3, zoom_y = 4`},
+		{"a placed placement", `UPDATE interest_placements SET map_x = 1, map_y = 2, zoom_x = 3, zoom_y = 4`},
 	} {
-		_, err := db.Exec(update)
-		assert.NoError(t, err, name)
+		_, err := db.Exec(tc.update)
+		assert.NoError(t, err, tc.name)
 	}
 }
 

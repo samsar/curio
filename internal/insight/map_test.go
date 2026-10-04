@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -133,9 +134,10 @@ func TestRebuild_DrawsTheMap(t *testing.T) {
 }
 
 // TestRebuild_MapFailures: a map that fails, runs out of time or panics
-// fails alone: the run is done without one, says why, warns once and says
-// map=failed. A rebuild cancelled while its map is drawn fails as
-// cancelled and counts no failure.
+// fails alone: the run is done without one, says why on one line of at
+// most maxMapError runes, warns once and says map=failed. A rebuild
+// cancelled while its map is drawn fails as cancelled and counts no
+// failure.
 func TestRebuild_MapFailures(t *testing.T) {
 	blocks := func(ctx context.Context, _ MapInput) (*Map, error) {
 		<-ctx.Done()
@@ -151,6 +153,9 @@ func TestRebuild_MapFailures(t *testing.T) {
 		{"a panic", func(context.Context, MapInput) (*Map, error) { panic("lost the lattice") }, "panic: lost the lattice"},
 		{"an invalid map", func(context.Context, MapInput) (*Map, error) { return &Map{Kind: store.RunKindFresh}, nil },
 			"insight: a map of 0 documents"},
+		{"a long error", func(context.Context, MapInput) (*Map, error) {
+			return nil, errors.New(strings.Repeat("no room for the lattice,\n", 40))
+		}, "no room for the lattice, no room"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := mapLibrary(t, "d")
@@ -160,6 +165,11 @@ func TestRebuild_MapFailures(t *testing.T) {
 			assert.Equal(t, store.MapFailed, run.Map.Status)
 			assert.True(t, strings.HasPrefix(run.Map.Error, tc.reason), "the reason %q", run.Map.Error)
 			assert.NotContains(t, run.Map.Error, "\n", "one line")
+			assert.LessOrEqual(t, utf8.RuneCountInString(run.Map.Error), maxMapError)
+			if tc.name == "a long error" {
+				assert.Equal(t, maxMapError, utf8.RuneCountInString(run.Map.Error))
+				assert.True(t, strings.HasSuffix(run.Map.Error, "…"), "cut")
+			}
 			assert.NotEmpty(t, run.Map.Params)
 			f.assertInvariants(t, run)
 			warning := f.logLine(t, "interests: map failed")

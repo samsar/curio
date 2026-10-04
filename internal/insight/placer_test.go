@@ -321,7 +321,7 @@ func TestPlacer_NoMapNoPlace(t *testing.T) {
 	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}).WithMapper(failing))
 	doc := f.addAround(t, "d", 0, 1, rand.New(rand.NewPCG(1, 1)))[0]
 	f.placer().Place(ctx, tenant, doc)
-	assert.Equal(t, 1, len(f.placedInto(t, run.ID)))
+	assert.Contains(t, f.placedInto(t, run.ID), doc, "placed")
 	got, err := f.store.MapPositions(ctx, run.ID, []string{doc})
 	require.NoError(t, err)
 	assert.Empty(t, got, "placed without a place")
@@ -332,6 +332,7 @@ func TestPlacer_NoMapNoPlace(t *testing.T) {
 	require.NoError(t, err)
 	doc = f.addAround(t, "d", 1, 1, rand.New(rand.NewPCG(2, 2)))[0]
 	f.placer().Place(ctx, tenant, doc)
+	assert.Contains(t, f.placedInto(t, run.ID), doc, "placed")
 	got, err = f.store.MapPositions(ctx, run.ID, []string{doc})
 	require.NoError(t, err)
 	assert.Empty(t, got, "a run without a map")

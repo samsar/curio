@@ -160,8 +160,10 @@ func TestEngine_FixtureLibrary(t *testing.T) {
 				again := e.rebuild(t, newIdx, store.RunTriggerManual)
 				assert.Equal(t, after, e.snapshot(t, again.ID),
 					"an unchanged library: the same groups, identities, labels, assignments and places")
-				assert.Equal(t, warm.Map.DotRadius, again.Map.DotRadius)
-				assert.Equal(t, warm.Map.Unsorted, again.Map.Unsorted)
+				require.NotNil(t, again.Map)
+				want, got := *warm.Map, *again.Map
+				want.Took, got.Took = 0, 0
+				assert.Equal(t, want, got, "the same map: status, kind, params, dots and Unsorted's disc")
 			})
 		}
 	})
