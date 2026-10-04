@@ -241,7 +241,11 @@ func keepsFrame(b bbox) bool {
 func (p docProblem) start(ctx context.Context, edges []edge) ([]XY, bool, error) {
 	rng := rand.New(rand.NewPCG(p.seed, initStream)) //nolint:gosec // G404: seeded noise, not a secret
 	if p.warm {
-		if pos, ok := p.warmStart(edges, rng); ok {
+		pos, ok, err := p.warmStart(ctx, edges, rng)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok {
 			return pos, true, nil
 		}
 	}
@@ -300,7 +304,7 @@ func (p docProblem) coldStart(ctx context.Context, rng *rand.Rand) ([]XY, error)
 // at the similarity-weighted mean of its neighbours that have a start,
 // found in passes, and a point no pass reaches at a seeded spot near the
 // centre. ok is false when the prior holds none of the points.
-func (p docProblem) warmStart(edges []edge, rng *rand.Rand) ([]XY, bool) {
+func (p docProblem) warmStart(ctx context.Context, edges []edge, rng *rand.Rand) ([]XY, bool, error) {
 	n := len(p.keys)
 	pos := make([]XY, n)
 	placed := make([]bool, n)
@@ -312,7 +316,7 @@ func (p docProblem) warmStart(edges []edge, rng *rand.Rand) ([]XY, bool) {
 		}
 	}
 	if box.empty() {
-		return nil, false
+		return nil, false, nil
 	}
 	scale := 1.0
 	if side := math.Max(box.x1-box.x0, box.y1-box.y0); side > 0 {
@@ -336,6 +340,9 @@ func (p docProblem) warmStart(edges []edge, rng *rand.Rand) ([]XY, bool) {
 		}
 	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, false, fmt.Errorf("layout: doc map warm start: %w", err)
+		}
 		var reached []int
 		next := slices.Clone(pos)
 		for k := range pos {
@@ -362,7 +369,7 @@ func (p docProblem) warmStart(edges []edge, rng *rand.Rand) ([]XY, bool) {
 			pos[k] = XY{centre.X + (rng.Float64() - 0.5), centre.Y + (rng.Float64() - 0.5)}
 		}
 	}
-	return pos, true
+	return pos, true, nil
 }
 
 // besideNeighbours is the similarity-weighted mean of the starts of point

@@ -1642,9 +1642,10 @@ type InsightStore interface {
 	// writes the groups, assignments and lineage; retires every live
 	// identity of the tenant that c.Groups doesn't hold, at the commit's
 	// time and by this run; and moves the run from running to done with
-	// c.Outcome, its map's status and positions with it. A built map must
-	// give every group and assignment a place inside [0, MapExtent], and
-	// a failed map, or none, gives none; every group has a valid level,
+	// c.Outcome, its map's status and positions with it. A map, built or
+	// failed, must record the layout's params as valid JSON; a built map
+	// must give every group and assignment a place inside [0, MapExtent],
+	// and a failed map, or none, gives none; every group has a valid level,
 	// its new identity's when it has one; only an interest lists similar
 	// interests, at most three other interests of the commit with finite
 	// cosines. Anything else is an error before anything is written. It

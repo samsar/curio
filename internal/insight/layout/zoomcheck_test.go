@@ -98,3 +98,26 @@ func fourInterests(areas bool) ZoomInput {
 	}
 	return in
 }
+
+// TestScaledDistances_HoldsTheFitNearTouching: a warm level whose placed
+// groups sit far apart at nearly one place fits no scale past maxFitScale
+// times the touching scale, nor one under it by that factor; a fit within
+// the bounds is kept.
+func TestScaledDistances_HoldsTheFitNearTouching(t *testing.T) {
+	r := []float64{5, 5, 5}
+	const gap = 3.0
+	placed := []bool{true, true, false}
+	near := [][]float64{{0, 0.00018, 0.5}, {0.00018, 0, 0.5}, {0.5, 0.5, 0}}
+	touching := touchingScale(near, r, gap)
+	require.InDelta(t, 26.0, touching, 1e-9, "the median pair touches")
+	// Two placed groups at nearly one place, drawn 39 dot radii apart, fit
+	// a scale of about 216,667.
+	out := scaledDistances(near, []XY{{0, 0}, {39, 0}, {0, 0}}, placed, r, gap)
+	assert.InDelta(t, maxFitScale*touching*0.5, out[0][2], 1e-9, "held from above")
+
+	apart := [][]float64{{0, 0.5, 0.5}, {0.5, 0, 0.5}, {0.5, 0.5, 0}}
+	out = scaledDistances(apart, []XY{{0, 0}, {20, 0}, {0, 0}}, placed, r, gap)
+	assert.InDelta(t, 20.0, out[0][1], 1e-9, "a fit of 40 is kept")
+	out = scaledDistances(apart, []XY{{0, 0}, {1, 0}, {0, 0}}, placed, r, gap)
+	assert.InDelta(t, touching/maxFitScale*0.5, out[0][1], 1e-9, "held from below")
+}

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -358,6 +359,21 @@ func TestDocMap_Cancelled(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Contains(t, err.Error(), "descent")
 	assert.Nil(t, l.Points)
+
+	// Warm from a prior holding every other point, the passes that start
+	// the rest check the context too: some cancellation stops the map there.
+	for i, k := range lib.keys {
+		if i%2 == 1 {
+			delete(in.Prior, k)
+		}
+	}
+	var inWarmStart bool
+	for n := 0; n < 1000 && !inWarmStart; n++ {
+		_, err = layout.DocMap(&cancelAfter{Context: context.Background(), n: n}, in)
+		require.ErrorIs(t, err, context.Canceled, "cancelled after %d checks", n)
+		inWarmStart = strings.Contains(err.Error(), "warm start")
+	}
+	assert.True(t, inWarmStart, "a cancellation stops the warm start")
 }
 
 // TestDocMap_WarmFromASharedPoint: a warm map starts from the prior only

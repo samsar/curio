@@ -32,6 +32,12 @@ const (
 	// minDistance is the distance between centroids under which two groups
 	// count as one place when the layout is scaled to the circles.
 	minDistance = 1e-6
+	// maxFitScale holds a warm level's fitted scale within this factor of
+	// the touching scale, either way. Two placed groups at nearly one
+	// place but drawn apart would otherwise inflate the fit without bound,
+	// and a warm view never compacts. On the owner's library the fit is
+	// 1.1 to 1.9 times the touching scale.
+	maxFitScale = 4.0
 )
 
 // Group is an area or an interest of the grouping the zoom view draws.
@@ -692,8 +698,9 @@ func besidePlaced(dm [][]float64, starts []XY, placed []bool, i int) XY {
 }
 
 // scaledDistances are dm in dot radii: scaled by the least-squares fit of
-// the placed groups' distances to theirs, or, with fewer than two placed
-// groups apart, so that similar circles about touch.
+// the placed groups' distances to theirs, held within maxFitScale of the
+// scale at which similar circles about touch, or, with fewer than two
+// placed groups apart, by that scale.
 func scaledDistances(dm [][]float64, starts []XY, placed []bool, r []float64, gap float64) [][]float64 {
 	var num, den float64
 	for i := range starts {
@@ -704,9 +711,10 @@ func scaledDistances(dm [][]float64, starts []XY, placed []bool, r []float64, ga
 			}
 		}
 	}
-	s := touchingScale(dm, r, gap)
+	touching := touchingScale(dm, r, gap)
+	s := touching
 	if den > 0 && num > 0 {
-		s = num / den
+		s = min(max(num/den, touching/maxFitScale), touching*maxFitScale)
 	}
 	out := make([][]float64, len(dm))
 	for i := range dm {

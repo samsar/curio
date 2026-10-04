@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/ui"
 )
 
 // mapped gives the run a built map: every group and assignment a place,
@@ -80,7 +81,7 @@ func TestInterestMap(t *testing.T) {
 
 	f := s.newRun(t, store.InterestShapeAreas)
 	area := f.area("Engineering")
-	kafka := f.interest("Kafka", area, 0, d[0:2], []*store.Document{d[2]})
+	kafka := f.interest("Kafka", area, 0, []*store.Document{d[0], d[1], d[6]}, []*store.Document{d[2]})
 	joins := f.interest("Joins", area, 0, d[3:4], nil)
 	f.unsorted(kafka, d[4])
 	f.unsorted("", d[5])
@@ -90,6 +91,8 @@ func TestInterestMap(t *testing.T) {
 	s.placeMapped(t, run, joins, placed, 700)
 	s.placeMapped(t, run, "", placedUnsorted, 800)
 	_, err = s.db.Exec(`UPDATE documents SET state = 'failed', failure_cause = 'other' WHERE id = ?`, d[5].ID)
+	require.NoError(t, err)
+	_, err = s.db.Exec(`UPDATE documents SET state = 'dead', failure_cause = 'dead_link' WHERE id = ?`, d[6].ID)
 	require.NoError(t, err)
 
 	resp := getAs[InterestMapResponse](t, s, "/v1/interests/map")
@@ -106,7 +109,7 @@ func TestInterestMap(t *testing.T) {
 
 	c := resp.Documents
 	n := len(c.ID)
-	assert.Equal(t, 7, n, "six the rebuild assigned, less the failed one, and two placed")
+	assert.Equal(t, 7, n, "seven the rebuild assigned, less the failed and the dead one, and two placed")
 	for _, col := range [][]any{anys(c.Title), anys(c.Host), anys(c.Interest), anys(c.Nearest), anys(c.Area), anys(c.Fit),
 		anys(c.Similarity), anys(c.MX), anys(c.MY), anys(c.ZX), anys(c.ZY)} {
 		assert.Len(t, col, n)
@@ -138,6 +141,13 @@ func TestInterestMap(t *testing.T) {
 	assert.Equal(t, "Saved as this", c.Title[mapAt(t, resp, d[2].ID)], "the bookmark's title")
 	assert.Equal(t, "example.com", c.Title[mapAt(t, resp, d[3].ID)], "the host")
 	assert.Equal(t, "example.com", c.Host[mapAt(t, resp, d[3].ID)])
+}
+
+// TestMapTitle_FallsBackToTheURL: a document with no title, no bookmark
+// title and no host is named by its URL.
+func TestMapTitle_FallsBackToTheURL(t *testing.T) {
+	const u = "file:///Users/me/notes.html"
+	assert.Equal(t, u, mapTitle(store.MapDocument{URL: u}, ui.Host(u)))
 }
 
 func anys[T any](xs []T) []any {

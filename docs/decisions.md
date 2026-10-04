@@ -157,6 +157,7 @@ when the entry was first committed.
 - 2026-10-03 — [Louvain: ours, warm-started; gonum as a test oracle](#louvain-ours-warm-started-gonum-as-a-test-oracle) (revised)
 - 2026-10-03 — [Interests: two levels, stable identities, automatic rebuilds](#interests-two-levels-stable-identities-automatic-rebuilds) (revised)
 - 2026-10-03 — [Dashboard: two-level interests](#dashboard-two-level-interests)
+- 2026-10-03 — [Page text: not-found notices, parked domains and sign-in forms](#page-text-not-found-notices-parked-domains-and-sign-in-forms)
 - 2026-10-04 — [Interest map: two views of each regrouping, drawn when it is built](#interest-map-two-views-of-each-regrouping-drawn-when-it-is-built)
 - 2026-09-25 — [Open questions](#open-questions)
 
@@ -11653,6 +11654,15 @@ library small and centred.
   new one at its lineage predecessor's place (the old identity it shares
   the most members with), else beside its 3 most similar placed groups and
   then by stress majorization against the placed ones, which stay put. The
+  distances it majorizes are scaled by the least-squares fit of the placed
+  groups' distances to their places, held within 4 times the touching
+  scale either way (`maxFitScale`): two placed groups at nearly one place
+  but drawn apart inflated the fit without bound (a review stress test
+  found an area's two interests 0.00018 apart in cosine and 39 dot radii
+  apart on the map, a fit of about 222,000 and an area 239,027 dot radii
+  wide), and a warm view never compacts. On the owner's library the fit is
+  1.1 to 1.9 times the touching scale (16 warm levels of the cluster
+  report), so the bound changes nothing there. The
   circles are packed without compaction; the whole is then turned (or
   reflected) and moved back onto the previous places, never scaled (radii
   are absolute), and packed again. The turn is the plane's closed-form

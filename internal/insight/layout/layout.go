@@ -116,6 +116,7 @@ func Params() map[string]any {
 			"max_dot_share":      maxDotShare,
 			"start_neighbours":   startNeighbours,
 			"min_distance":       minDistance,
+			"max_fit_scale":      maxFitScale,
 			"stress_iterations":  stressIterations,
 			"stress_tolerance":   stressTolerance,
 			"separation_sweeps":  separationSweeps,
