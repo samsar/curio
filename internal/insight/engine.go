@@ -500,7 +500,7 @@ func (e *Engine) sweep(ctx context.Context, tenantID string) int {
 	case err != nil && ctx.Err() != nil:
 		e.log.Debug("interests: the placement sweep after the rebuild was cancelled", "tenant", tenantID, "err", err)
 	case err != nil:
-		e.log.Warn("interests: the placement sweep after the rebuild failed", "tenant", tenantID, "err", err)
+		e.log.Warn("interests: the placement sweep after the rebuild failed", "tenant", tenantID, "placed", placed, "err", err)
 	}
 	return placed
 }

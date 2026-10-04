@@ -11889,8 +11889,9 @@ the repaired row comes to hold, and hide that it needs repair. Assigned
 documents aren't checked: `CommitRun` refuses a built map that leaves one
 without a place, and the zoom view checks its dots. No map
 is a 404 `urn:curio:problem:interest-map-unavailable` with `reason`
-`no_run`, `no_map` (a run from before maps) or `map_failed` (with
-`map_error`), and a detail the page can show. It and the retired
+`no_run`, `no_map` (a run committed without a map: from before maps, by
+curio 2.5.x, or with the map off), `map_failed` (with `map_error`) or
+`map_off` (the switch, below), and a detail the page can show. It and the retired
 interest's 410 now share one mechanism, an error that carries its own
 problem body (`problemError`). No read path can open a transaction (each
 would be `BEGIN IMMEDIATE`), so a rebuild that commits mid-read is caught
@@ -12094,8 +12095,8 @@ vec0 module neither loads (goose v3.27.0's CLI: "error in trigger
 trg_chunks_delete: no such module: vec0"; `sqlite3`: "SQL logic error").
 Through curio's own driver, which loads sqlite-vec, `DownTo(17)` on a
 migrated copy of the owner's library took 41 ms (0.4 s for the process),
-`PRAGMA integrity_check` said ok, and `sqlite_master` (type, name,
-tbl_name, sql: 251 rows) equalled 017's.
+`PRAGMA integrity_check` said ok, and a dump of `sqlite_master` (type,
+name, tbl_name, sql; 251 lines) was byte-identical to 017's.
 
 **The round trip, measured** after these fixes, on another fresh
 `.backup` of the schema-17 copy in a scratch home, this branch's daemon

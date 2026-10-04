@@ -440,7 +440,7 @@ func (s *Scheduler) sweep(ctx context.Context) {
 	case err != nil && ctx.Err() != nil:
 		s.log.Debug("interests: the start's placement sweep was cancelled", "err", err)
 	case err != nil:
-		s.log.Warn("interests: the start's placement sweep failed", "tenant", s.tenant, "err", err)
+		s.log.Warn("interests: the start's placement sweep failed", "tenant", s.tenant, "placed", placed, "err", err)
 	case placed > 0:
 		s.log.Info("interests: placed the documents indexed since the last rebuild", "tenant", s.tenant,
 			"placed", placed)

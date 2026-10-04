@@ -720,7 +720,7 @@ aren't placed.
 | Key | Default | What it does |
 |---|---|---|
 | `insight.enabled` | true | off: no rebuild is queued, on its own or asked for, and no document is placed; existing interests stay readable |
-| `insight.map` | true | off: rebuilds draw no interest map and placed documents get no place on it, saving a few seconds a rebuild (up to 2 minutes on a very large library) and a neighbour search per indexed document; `GET /v1/interests/map` answers 404 `map_off`. On again, a rebuild to draw the map is due at once, and the daemon gives the documents placed meanwhile their places |
+| `insight.map` | true | off: rebuilds draw no interest map and placed documents get no place on it, saving a few seconds a rebuild (up to 2 minutes on a very large library) and a neighbour search per indexed document; `GET /v1/interests/map` answers 404 `map_off`. On again: if a rebuild committed while it was off, a rebuild to draw the map is due at once; either way the daemon's start sweep gives the documents placed meanwhile their places |
 | `insight.labeling` | `llm` | `llm` (the writing model, falling back to term labels), `terms` (words the titles share), or `off` |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild; the rest get term labels |
 | `insight.center_vectors` | true | subtract the library's mean vector before grouping |
