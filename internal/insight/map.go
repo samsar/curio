@@ -145,8 +145,8 @@ func NewPriorMap(run *store.InterestRun, groups []store.InterestGroup, assignmen
 // and interest (by the grouping's numbering) its circle and anchor.
 type Map struct {
 	// Kind is warm when the document map started from the prior's, or is
-	// it; fresh otherwise, a map allowed to start warm from a prior that
-	// shares none of its documents included.
+	// it; fresh otherwise, as for a map allowed to start warm from a prior
+	// that shares none of its documents.
 	Kind      store.RunKind
 	Params    []byte
 	DotRadius float64

@@ -3662,6 +3662,20 @@ the same trap, planned on the test database as a seek of the primary key
 for three IDs, which its pin used, and as a walk of the tenant's documents
 from four on. See "Search pages by offset within a fixed-depth pool".
 
+**Revised (2026-10-04):** migration 018's map columns add no index.
+`RunGroups` now seeks `idx_interest_groups_list` on `run_id` where it took
+the primary key's index: the old statement plans the same way on 018's
+table and as before on 017's, so it is the wider table, not the query,
+that moved SQLite's choice. Either seeks the run's groups alone, and the
+pin names the new one. `MapDocuments` (a run's assignments, then its
+placements, each from its primary key in document ID order, each document
+by its primary key, an untitled one's bookmark title by
+`idx_bookmarks_document`) and `MapPositions` (a JSON array of IDs against
+both primary keys) are pinned, and refuse a walk of the tenant's documents.
+A document's delete still seeks `idx_interest_assignments_document` and
+`idx_interest_placements_document`. See "Interest map: two views of each
+regrouping, drawn when it is built".
+
 ---
 
 ## Chunks: external-content FTS, derived rows kept by triggers
@@ -11523,7 +11537,7 @@ grouping's own neighbour lists:
   gradients clipped to ±4, the rate decaying linearly. Cold: 500 epochs up
   to 10,000 points and 200 above, from rate 1. The prototype's 200 epochs
   on the owner's library gave NP5 0.278 in 3.2 s of descent against 0.294
-  in 7.1 s; at 6.2 s for the whole cold map, 500 stay. One goroutine, one
+  in 7.1 s; at 6.1 s for the whole cold map, 500 stay. One goroutine, one
   seeded PCG, edges in key order, the context checked every epoch.
 - **Warm start** (`warmEpochs` 200 from rate `warmAlpha` 0.1): the prior's
   places, scaled so the median length of the graph's edges between points
@@ -11565,7 +11579,13 @@ grouping's own neighbour lists:
   `TestEngine_FixtureLibrary` holds an unchanged warm rebuild's rows
   equal). A reused or warm-started map is kind `warm`. Map params stay out
   of `runParams`: changing the layout never makes a grouping fresh or owes
-  a rebuild.
+  a rebuild. `layout.Params` names every constant that changes what the
+  views draw, streams and tolerances included (a test parses the package
+  and refuses one it leaves out), since a missed one would let a prior
+  drawn with the old value start, or be reused as, the new map. A map
+  allowed to start warm from a prior that shares none of its documents
+  (the library replaced) starts cold, and `DocMap` says so: its kind is
+  `fresh`.
 - **Anchors:** an interest's label anchor is the coordinate-wise median of
   its members' places, snapped to the member nearest it (ties to the lower
   document ID), so a label sits on its documents even when the median
@@ -11587,8 +11607,15 @@ library small and centred.
   area's: the unit mean of its interests' members). Inside an area its
   interests are placed by classical MDS; at the top, the areas (the
   interests in the flat shape) by metric MDS, stress majorization seeded
-  by classical MDS. Distances are scaled so the median pair of circles
-  about touches. Then they are packed (interests 3 apart, areas 8, an
+  by classical MDS. Classical MDS of unit vectors' chord distances is
+  their first two principal components (the double-centred squared
+  chords are the centred vectors' Gram matrix), so it is found by the
+  document map's subspace iteration through the centroids, linear in
+  their number an iteration and checking the context, never by
+  decomposing the n×n matrix: the Jacobi solver that first did was cubic
+  and blind to the deadline (28.7 s for a flat view of 800 interests, 23 s
+  to notice a 2 s deadline). Distances are scaled so the median pair of
+  circles about touches. Then they are packed (interests 3 apart, areas 8, an
   area's rim 3 off its interests) and, cold, compacted: each circle pulled
   toward the centroid, a move taken only when it overlaps nothing, for up
   to 40 rounds. Unsorted's disc goes to the right of the content, 12
@@ -11690,25 +11717,29 @@ as before.
 A document placed between rebuilds needs both places: the API sends no
 nulls, and computing them per request would need every placed document's
 vector. With the run's map built, the placer searches the document's
-neighbours (`VectorSearch` of its mean vector, 50 chunks, itself
-excluded, each document at its nearest chunk), reads their places
-(`MapPositions`, one statement on both primary keys), and takes the 5
-nearest that have one. Each weighs e^((n − n₁)/0.02), where n is minus half
-its squared distance (cosine − 1 for unit vectors) and n₁ the nearest's: a
-document identical to a mapped one sits on it, and one between two sits
-between them. The document map's place blends all five; the zoom view's
-only those in the same circle (its interest's, or Unsorted's), so the
-dot stays inside, the circle being convex. Each is then moved 0.4% of the
-map (one dot, in the zoom view) at an angle from FNV-1a of the document's
-ID, so it never lands exactly on another, kept inside its circle and the
-map, and rounded as the layouts round. Without neighbours (none mapped,
-the search or read failed, or the sweep's budget spent): the anchor of the
-interest it joined (its nearest, in Unsorted), and in the zoom view a point
-halfway out at its hash angle in its interest's circle, or seven tenths
-out toward its nearest interest in Unsorted's. A failure there never fails
-the placement: one WARN per run, then DEBUG. A sweep searches for at most
-60 s (`sweepNeighbourBudget`), the rest taking the fallback, so a large
-sweep still fits its 2 minutes.
+neighbours (`VectorSearch` of its mean vector, 50 chunks, itself excluded,
+each document at its nearest chunk), reads their places (`MapPositions`,
+one statement on both primary keys), and takes the 5 nearest that have
+one. Each weighs e^((n − n₁)/0.02), where n is minus half its squared
+distance (cosine − 1 for unit vectors) and n₁ the nearest's: a document
+identical to a mapped one sits on it, and one between two sits between
+them. The document map's place blends all five; the zoom view's only those
+in the same circle (its interest's, or Unsorted's), so the dot stays
+inside, the circle being convex. Each is then moved 0.4% of the map (one
+dot, in the zoom view) at an angle from FNV-1a of the document's ID, so it
+never lands exactly on another, kept inside its circle and the map, and
+rounded as the layouts round. Without neighbours (none mapped, the search
+or read failed, or the sweep's budget spent): the anchor of the interest
+it joined (its nearest, in Unsorted), and in the zoom view a point halfway
+out at its hash angle in its interest's circle, or seven tenths out toward
+its nearest interest in Unsorted's. A failure there never fails the
+placement: one WARN per run, then DEBUG, and DEBUG alone when the
+placement's own context ended (the daemon stopping mid-index), which the
+placement reports itself. The search and read have 2 s of their own
+(`neighbourTimeout`, 50 times the measured search), so one that stalls
+falls back and leaves the rest of the placement's 10 s to its write. A
+sweep searches for at most 60 s (`sweepNeighbourBudget`), the rest taking
+the fallback, so a large sweep still fits its 2 minutes.
 
 On a copy of the owner's library (50,278 chunks), through the store:
 `Place` took 44.0 ms median and 49.6 ms p95 with the map, against 0.74 ms
@@ -11753,52 +11784,56 @@ documents, a run of 29 areas and 182 interests, schema 17), on an Apple
 M4 Max; never `~/.curio`, port 8765 or a checkout's `./bin`; labels by
 terms, auto-pull off, both Ollama URLs on a dead port.
 
-`make cluster-report` (3 min 24 s of wall time, 88 s of it the maps),
+`make cluster-report` (3 min 12 s of wall time, 87 s of it the maps),
 whose maps `TestReport_MatchesTheEngine` holds to the engine's (checked
 once to fail when the tool draws with another seed):
 
 | | measured | target |
 |---|---|---|
-| cold map, 5,237 documents | 6.2 s, 748 MB allocated, peak RSS 312 MB | ≤ 15 s |
+| cold map, 5,237 documents | 6.1 s, 809 MB allocated, peak RSS 327 MB | ≤ 15 s |
 | document map NP5 · NP15 | 0.299 · 0.364 | NP5 ≥ 0.27 |
 | area purity@5, map · space | 0.869 · 0.869 | ≥ 0.83 |
 | another seed, aligned | 2.36% | ≤ 3.0% |
 | warm after 5% added: documents, served · aligned | 1.81% · 1.35% (worst 2.79% · 1.44%) | aligned ≤ 2.0% |
 | warm after a mixed 5%: documents | 1.31% · 1.31% (worst 1.41% · 1.41%) | aligned ≤ 2.0% |
-| warm after 5% added: interests' centres | 1.31% · 1.10% (worst 1.74% · 1.45%) | ≤ 1.5% |
-| warm after a mixed 5%: interests' centres | 1.56% · 1.95% (worst 1.90% · 2.41%) | ≤ 1.5% |
-| warm map | 3.0 to 3.1 s; NP5 0.309 (added), 0.311 (mixed) against a cold map's 0.299 | ≤ 6 s |
+| warm after 5% added: interests' centres | 1.30% · 1.09% (worst 2.00% · 1.55%) | ≤ 1.5% |
+| warm after a mixed 5%: interests' centres | 1.57% · 1.98% (worst 2.02% · 2.50%) | ≤ 1.5% |
+| warm map | 2.9 to 3.0 s; NP5 0.309 (added), 0.311 (mixed) against a cold map's 0.299 | ≤ 6 s |
 
 Displacement is the mean shift of the shared documents (or carried
 interests' centres) over the previous map's diameter, as served and after
 a least-squares similarity alignment; three draws each. The mixed draws'
-interest centres miss the 1.5% by 0.06 points served. A mixed change
+interest centres miss the 1.5% by 0.07 points served. A mixed change
 also removes documents: an interest that lost some gets a smaller circle,
 and as radii are absolute its area repacks around it, which a rigid
 alignment can't absorb (the similarity alignment, which minimizes squared
-shift, reads 1.95%). The one variant measured that pulls carried
+shift, reads 1.98%). The one variant measured that pulls carried
 interests toward their similarities, the warm refinement above, moved
 them eight times as far. A 5% addition, the common change, moves them
-1.31%.
+1.30%. These are the numbers with the centroids' principal plane as
+classical MDS; with the Jacobi solver it replaced (the same layout up to
+each axis's sign) they were 1.31% and 1.56%, the cold map 6.2 s.
 
 A throwaway daemon on another backup: binaries from `make build
 BIN_DIR=<scratch>`, a scratch home with the marker of PR 3's and a config
 on a free loopback port, and the 262 documents PR 3 held out set pending
-before the start. It applied 018 in 10 ms. `GET /v1/interests/map` on the
+before the start. It applied 018 in 9 ms. `GET /v1/interests/map` on the
 copy's run from before 018 answered 404 `no_map`. A requested rebuild
 (4,975 documents, 28 areas, 174 interests) logged `map=built
-map_kind=fresh map_ms=5413`, and the map answered 200 with its 4,975
-documents (4,578 members, 7 loose, 390 unsorted) in 912,026 bytes, 51 ms
+map_kind=fresh map_ms=5951`, and the map answered 200 with its 4,975
+documents (4,578 members, 7 loose, 390 unsorted) in 912,225 bytes, 39 ms
 the first time and 14 ms after (the handler's time in the access log). A
 second rebuild of the unchanged library logged `map_kind=warm map_ms=0`,
 every position and circle the same. The 262, made fetched again, were
 placed by the start's sweep once the drift monitor's 10 minutes were up,
-in about 12 s, all with places, 186 into interests. The scheduler's
-automatic rebuild (`changed` 262) drew its map warm in 2,928 ms: 5,237
-documents and 175 interests in 956,302 bytes, served in 17 ms; the 4,975
-documents it shares with the previous map moved 1.34% served and
-aligned, the 174 interests' centres 0.38% served and 0.28% aligned. The
-log has no WARN or ERROR.
+in about 12 s; read from a second daemon run the same way, right after
+its sweep, the map served all 262 as `new`, each inside its circle, 186
+in interests and 76 in Unsorted. The scheduler's automatic rebuild
+(`changed` 262) drew its map warm in 2,756 ms: 5,237 documents and 175
+interests in 956,295 bytes, served in 32 ms; the 4,975 documents it
+shares with the previous map moved 1.34% served and aligned, the 174
+interests' centres 0.45% served and 0.28% aligned. Neither log has a
+WARN or an ERROR.
 
 ### The fixture tables
 
@@ -11806,42 +11841,49 @@ Floors are 0.03 under what was measured and bounds 1.5 times it.
 
 | test | measured | floor or bound |
 |---|---|---|
-| `TestDocMap_KeepsNeighbourhoods` (1,600 points, 12 planted clusters of 6 subtopics in 4 areas, 48 dimensions): NP5 | 0.339 | ≥ 0.309 |
-| … area purity@5 | 1.000 | ≥ 0.97 |
-| … NP5 over the points' own PCA projection (0.078) | +0.261 | ≥ +0.10 |
+| `TestDocMap_KeepsNeighbourhoods` (1,600 points, 12 planted clusters of 6 subtopics in 4 areas, 48 dimensions, the clusters overlapping): NP5 | 0.182 | ≥ 0.152 |
+| … cluster purity@5 (the space's 0.816) | 0.896 | ≥ 0.866 |
+| … NP5 over the points' own PCA projection (0.032) | +0.150 | ≥ +0.10 |
 | `TestDocMap_WarmIsStable`, 5% added, mean shift | 0.29%, 0.35%, 0.33% | ≤ 0.53%, and ≤ 3% |
-| `TestZoom_WarmIsStable`, 5% added, interests' centres | 0.38%, 0.22%, 0.31% | ≤ 0.57% |
+| `TestZoom_WarmIsStable`, 5% added, interests' centres | 0.46%, 0.46%, 0.39% | ≤ 0.69% |
 | `TestEngine_FixtureLibrary` (fixture library 1, through the engine, 5% added): warm NP5 | 0.223, 0.222, 0.224 (a cold map's 0.200) | ≥ 0.192, and ≥ the cold map's − 0.02 |
 | … area purity@5 on the map | 0.995, 0.997, 0.996 (the space's 0.986) | ≥ the space's − 0.05 |
 | … documents' mean shift | 1.20%, 1.46%, 1.23% | ≤ 2.19% |
-| … interests' centres | 0.50%, 0.92%, 0.69% | ≤ 1.38% |
+| … interests' centres | 0.50%, 0.90%, 0.65% | ≤ 1.35% |
 
 The engine's warm NP5 beats the cold one's (it starts from a settled
-map), so that check is one-sided: no worse than 0.02 under it.
+map), so that check is one-sided: no worse than 0.02 under it. The
+neighbourhood test's library has its points spread twice as wide as the
+stability tests' (`overlapping`): on those, whose clusters lie apart,
+the map's cluster purity is 1.000 and so is the space's, and a floor at
+0.97 would hardly ever catch the map losing its clusters.
 
 ### Tests and their times
 
-`FuzzZoom` holds the zoom view's invariants over random small
-hierarchies, its seed corpus in `go test`; gonum checks the PCA and the
-symmetric eigensolver to 1e-6 (test-only: no binary imports it or
-`quality`). The heavy property tests skip under -race and run in `make
+`FuzzZoom` holds the zoom view's invariants over random small hierarchies,
+its seed corpus in `go test`; gonum checks the PCA, classical MDS and the
+Rayleigh–Ritz steps' eigensolver to 1e-6 (test-only: no binary imports it
+or `quality`). The heavy property tests skip under -race and run in `make
 test`'s race-free pass.
 
 Times under -race on the M4 Max, in `make test`, before and after:
-`internal/insight` 14.8 s and 21.3 s, `internal/insight/layout` (new)
-10.5 s (8.2 s alone), `cmd/clusterreport` 3.4 s and 8.2 s (7.4 s alone,
+`internal/insight` 14.8 s and 21.8 s, `internal/insight/layout` (new)
+12.0 s (10.3 s alone), `cmd/clusterreport` 3.4 s and 8.3 s (7.5 s alone,
 against the 2.8 s PR 5 recorded: it draws and compares two maps; its
-tests now run in parallel), `internal/store/sqlite` 9.4 s and 10.0 s,
-`internal/api` 20.5 s and 23.3 s. The race-free pass: `internal/insight`
-5.6 s and 14.6 s (the fixture's maps), `layout` 9.0 s. `make test` took
-1 min 14 s and 1 min 21 s.
+tests now run in parallel), `internal/store/sqlite` 9.4 s and 9.8 s,
+`internal/api` 20.5 s and 22.4 s. The race-free pass: `internal/insight`
+5.6 s and 14.3 s (the fixture's maps), `layout` 10.4 s. `make test` took
+1 min 14 s and 1 min 20 s.
 
 ### Known limits
 
 - A library above about 100,000 documents may not draw its map in 2
-  minutes (cold, 5,237 take 6.2 s; the descent is linear in the edges,
-  the zoom view's packing quadratic in the circles of one level); it
-  rebuilds without one, and the endpoint says so.
+  minutes (cold, 5,237 take 6.1 s): the descent is linear in the edges,
+  but the zoom view is quadratic in the circles of one level (stress
+  majorization, the distances and the packing). A flat view of 200, 400,
+  800 and 1,200 interests of 1,024 dimensions takes 0.5, 1.8, 6.4 and
+  14.3 s, and notices a 2 s deadline within 10 ms. Past the bound it
+  rebuilds without a map, and the endpoint says so.
 - A run from before 018 has no map until the next rebuild (`no_map`
   says `curio interests rebuild` draws one now).
 - A placed document's place is an approximation, never a prior for the
