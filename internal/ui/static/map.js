@@ -1,18 +1,16 @@
 /* The interest map (/ui/interests/map): the latest rebuild's grouping in
-   two views, drawn on canvases from GET /v1/interests/map, read once. All
-   documents draws each document as a dot at its place on the document map,
-   coloured by its area; Zoom in draws each area as a disc holding its
-   interests' circles, each document a dot in its interest, and Unsorted as
-   a disc of its own. One selection, which the details panel, the
-   breadcrumb and the address show, is shared by both.
+   two views, drawn on canvases from GET /v1/interests/map, read once: All
+   documents, each document a dot at its place on the document map,
+   coloured by its area, and Zoom in, each area a disc holding its
+   interests' circles, each document a dot in its interest, Unsorted a disc
+   of its own. Both show one selection, as the panel and the address do.
 
    Its rules (TestMapScript): one strict IIFE that reads the map from its
-   root's data-src and sends nothing; every address it uses comes from its
-   root's data attributes, built in Go; a stored string reaches the page
-   only through textContent, the title property or the canvas's fillText,
-   in an element of its own with dir=auto; no inline style (the canvases
-   are sized by their attributes, the sheet by a class); and no timer of its
-   own. No string or regexp here holds a comment's opening.
+   root's data-src and sends nothing; every address comes from the root's
+   data attributes, built in Go; a stored string reaches the page only
+   through textContent, the title property or fillText, in an element of
+   its own with dir=auto; no inline style and no timer of its own. No
+   string or regexp here holds a comment's opening.
 
    It reads the d3 global these modules, vendored unchanged from npm and
    loaded before it in this order, build up: d3-dispatch 3.0.1,
@@ -73,7 +71,9 @@
 
   // ------------------------------------------------------------------ constants
   // The one read may take 30 s: inside the daemon's 2-minute write timeout, and ample for 10 times a big library.
+  // A bad value in it is quoted to 80 characters: enough to tell what it is, short enough for the status line.
   const fetchDeadlineMs = 30000;
+  const maxQuoted = 80;
   // The area palette, app.css's --area-0 to --area-29: 10 hue families in 3 lightness tiers, a slot being
   // tier * paletteFamilies + family (TestMapScript holds these to the tokens).
   const paletteFamilies = 10;
@@ -82,44 +82,58 @@
   const touchShare = 0.01;
   // Backing stores follow the screen up to 2 pixels a CSS pixel: past that, the dots cost more than they show.
   const maxPixelRatio = 2;
-  // A view fits the whole map into 90% of the stage, and a flight's target into 86%.
+  // A view fits the whole map into 90% of the stage, a flight's target into 86%, and an area's or Unsorted's
+  // disc into 92%, aiming at the part of the stage on the screen, or the whole stage when under 35% of it shows.
   const fitPad = 0.9;
   const flightPad = 0.86;
+  const discPad = 0.92;
+  const minShownShare = 0.35;
+  // On All documents, a flight to an area or Unsorted of over 20 documents leaves out their outer 4% each way.
+  const trimShare = 0.04;
+  const trimFrom = 20;
   // The zoom buttons and keys scale by 1.6: three steps take a group's neighbourhood to the whole stage.
   const zoomStep = 1.6;
-  // A view zooms out to half the whole map, and pans until half the stage is past its edge: never lost.
-  const minZoom = 0.5;
-  const panSlack = 0.5;
-  // All documents zooms in to 60 times the whole map; Zoom in, until a document's dot is 24 px across.
-  const maxZoomAll = 60;
-  const maxDotPx = 24;
   // Flights take 700 ms, a zoom step 250 ms; none takes any time under prefers-reduced-motion.
   const flightMs = 700;
   const stepMs = 250;
+  // A view zooms out to half the whole map, and pans until half the stage is past its edge: never lost.
+  const minZoom = 0.5;
+  const panSlack = 0.5;
+  // All documents zooms in to 60 times the whole map, a flight to 14 times. Zoom in zooms in to twice the whole
+  // map, or on until a dot's radius is 12 px, and a flight to a document until it is 6 px.
+  const maxZoomAll = 60;
+  const maxFlightAll = 14;
+  const maxZoomIn = 2;
+  const maxDotPx = 12;
+  const documentDotPx = 6;
   // A press that moves under 4 px is a click; more is a drag, which never selects.
   const clickSlop = 4;
-  // All documents' dots grow with the root of the zoom over the fit's, from 1.6 to 6 CSS px.
+  // A dot's radius on All documents is 1.7 px times the root of the zoom over the fit's, from 1.6 to 6 CSS px; on
+  // Zoom in it is to scale, but never under 0.5 px, where a dot would vanish.
+  const dotGrowth = 1.7;
   const dotMinPx = 1.6;
   const dotMaxPx = 6;
+  const minScaledDotPx = 0.5;
   // All documents names areas below 2.6 times the fit's zoom, interests from there, and titles from 9 times.
   const allInterestsFrom = 2.6;
   const allTitlesFrom = 9;
   // Zoom in opens a disc spanning 30% of the stage's shorter side: its name gives way to its contents'.
   const openShare = 0.3;
-  // Zoom in titles documents once their dots are 5 px across, and picks one from 8 px: big enough to aim at.
+  // Zoom in titles documents once a dot's radius is 5 px, and picks one from 8 px: big enough to aim at. Titled,
+  // an interest's name sits over its circle on 2 lines, leaving the circle to its documents' titles.
   const titlesDotPx = 5;
   const pickDotPx = 8;
-  // An interest's circle carries its name from 15 px across.
-  const nameCirclePx = 15;
+  const titledLines = 2;
   // At most 90 titles a frame, each at least 40 px wide: more is unreadable, less says nothing.
   const maxTitles = 90;
   const minTitlePx = 40;
-  // A label wraps to 3 lines at most.
+  // A label wraps to 3 lines at most, an interest's circle carries its name from 15 px across, and a tooltip's
+  // lines are cut at 300 px.
   const maxLabelLines = 3;
+  const nameCirclePx = 15;
+  const tipMaxPx = 300;
   // Measured widths kept, past which the cache starts over, so it can't grow without bound.
   const maxMeasured = 20000;
-  // A tooltip's lines are cut at 300 px.
-  const tipMaxPx = 300;
   // Search needs 2 characters, and lists 12 matches at most, so many of each kind.
   const minQuery = 2;
   const maxHits = 12;
@@ -317,10 +331,16 @@
       }
       const bad = docs[name].findIndex(x => !valid(x));
       if (bad >= 0) {
-        return 'documents.' + name + '[' + bad + '] is ' + JSON.stringify(docs[name][bad]);
+        return 'documents.' + name + '[' + bad + '] is ' + quote(docs[name][bad]);
       }
     }
     return '';
+  }
+
+  // quote is x as JSON, cut to maxQuoted characters.
+  function quote(x) {
+    const chars = Array.from(String(JSON.stringify(x)));
+    return chars.length > maxQuoted ? chars.slice(0, maxQuoted).join('') + '…' : chars.join('');
   }
 
   // ------------------------------------------------------------------ model
@@ -333,7 +353,7 @@
     const m = {flat, docs, n: docs.id.length, areas: data.areas, interests: data.interests,
       extent: data.map.extent, dotRadius: data.map.dot_radius, disc: data.map.unsorted,
       interestDocs: data.interests.map(() => []), areaDocs: data.areas.map(() => []), unsortedDocs: [],
-      areaInterests: data.areas.map(() => []), neutralDocs: [], newDocs: [], unsortedCount: 0};
+      areaInterests: data.areas.map(() => []), neutralDocs: [], newDocs: []};
     m.top = flat ? m.interests : m.areas;
     m.topOf = flat ? docs.interest : docs.area;
     m.groupDocs = m.top.map(() => []);
@@ -346,7 +366,6 @@
       if (docs.fit[d] === 'new') {
         m.newDocs.push(d);
       }
-      m.unsortedCount += docs.fit[d] === 'unsorted' ? 1 : 0;
     }
     const closest = (a, b) => (docs.fit[a] === 'loose') - (docs.fit[b] === 'loose') ||
       docs.similarity[b] - docs.similarity[a];
@@ -366,28 +385,26 @@
   // colourSlots gives each top-level group a palette slot, in the response's order, largest first: the hue
   // family whose groups already coloured touch it least on the document map, ties to the family used least so
   // far, then the lower; its tier, how many groups already hold that family. Touch is how many pairs of their
-  // documents lie within touchShare of the map's side of each other. On the owner's map it leaves no two
-  // areas whose documents touch in one family, where slots in plain order put 53 touching pairs in one.
+  // documents lie within touchShare of the map's side of each other, counted under the later group. On the
+  // owner's map no two areas whose documents touch share a family, where plain order puts 53 such pairs in one.
   function colourSlots(m) {
     const touch = m.top.map(() => new Map());
     const r = touchShare * m.extent;
     const {mx, my} = m.docs;
-    for (let d = 0; d < m.n; d++) {
-      const a = m.topOf[d];
-      visit(m.allTree, mx[d] - r, my[d] - r, mx[d] + r, my[d] + r, e => {
+    m.groupDocs.forEach((list, a) => list.forEach(d => visit(m.allTree, mx[d] - r, my[d] - r, mx[d] + r, my[d] + r,
+      e => {
         const b = m.topOf[e];
-        if (a >= 0 && e > d && b >= 0 && b !== a && (mx[e] - mx[d]) ** 2 + (my[e] - my[d]) ** 2 <= r * r) {
-          touch[a].set(b, (touch[a].get(b) || 0) + 1);
-          touch[b].set(a, (touch[b].get(a) || 0) + 1);
+        if (e > d && b >= 0 && b !== a && (mx[e] - mx[d]) ** 2 + (my[e] - my[d]) ** 2 <= r * r) {
+          const [later, earlier] = a > b ? [a, b] : [b, a];
+          touch[later].set(earlier, (touch[later].get(earlier) || 0) + 1);
         }
-      });
-    }
+      })));
     const used = new Array(paletteFamilies).fill(0);
     const family = [];
     return m.top.map((_, g) => {
       const weight = new Array(paletteFamilies).fill(0);
-      touch[g].forEach((w, other) => {
-        weight[family[other]] += other < g ? w : 0;
+      touch[g].forEach((w, earlier) => {
+        weight[family[earlier]] += w;
       });
       let best = 0;
       for (let f = 1; f < paletteFamilies; f++) {
@@ -462,9 +479,12 @@
     return sel.kind + ':' + (sel.kind === 'document' ? m.docs.id[sel.i] : groupOf(m, sel).id);
   }
 
+  // kindAndID splits a selection param at its first colon, as ParseMapQuery does.
+  const kindAndID = param => [param.slice(0, param.indexOf(':')), param.slice(param.indexOf(':') + 1)];
+
   // resolve is the selection param names in ParseMapQuery's form: undefined when it isn't on the map.
   function resolve(m, param) {
-    const [kind, id] = [param.slice(0, param.indexOf(':')), param.slice(param.indexOf(':') + 1)];
+    const [kind, id] = kindAndID(param);
     const ids = {area: m.areas.map(a => a.id), interest: m.interests.map(it => it.id), document: m.docs.id}[kind];
     const i = ids ? ids.indexOf(id) : -1;
     return param === 'unsorted' ? {kind: param} : i >= 0 ? {kind, i} : undefined;
@@ -556,7 +576,7 @@
   }
 
   // ------------------------------------------------------------------ views
-  // The stage's controls, in the canvases' coordinates, measured when they change: labels keep off them.
+  // The stage's controls, in the canvases' coordinates, measured as they or the stage change: labels keep off them.
   let chrome = [];
 
   function measureChrome() {
@@ -568,6 +588,8 @@
 
   // makeView is a view on its canvas: its size, its d3.zoom, its frames, drawn one requestAnimationFrame at a
   // time on a dirty flag, its fitting and its flights. spec draws it (world, maxK, draw, pick, click, frame).
+  // touched is whether it was moved off the whole map's fit, by a gesture, a zoom button or key, or a flight to
+  // a selection: a resize keeps such a view's middle and zoom, and fits the whole map again otherwise.
   function makeView(name, spec) {
     const canvas = canvases[name];
     const v = Object.assign({name, canvas, ctx: canvas.getContext('2d'), t: d3.zoomIdentity, w: 0, h: 0, ratio: 1,
@@ -618,9 +640,10 @@
     drawTip(v, ctx);
   }
 
-  // resize follows the canvas's size and pixel ratio, sizing its backing store by its attributes: fitted
-  // again while the view shows the whole map, and otherwise about the point it had in its middle.
+  // resize follows the canvas's size and pixel ratio, sizing its backing store by its attributes, and the controls
+  // over the stage, which move with it: fitted again while untouched, and otherwise about the canvas's middle.
   function resize(v) {
+    measureChrome();
     const r = v.canvas.getBoundingClientRect();
     const ratio = Math.min(devicePixelRatio || 1, maxPixelRatio);
     if (r.width === v.w && r.height === v.h && ratio === v.ratio) {
@@ -636,8 +659,8 @@
     v.zoom.scaleExtent([v.fitK * minZoom, v.maxK(v)])
       .translateExtent([[world.x0 - sw, world.y0 - sh], [world.x1 + sw, world.y1 + sh]]);
     const k = before.t.k;
-    jump(v, !v.touched || !before.w ? fitAll(v) :
-      centreOn(v, (before.w / 2 - before.t.x) / k, (before.h / 2 - before.t.y) / k, k));
+    jump(v, !v.touched || !before.w ? fitAll(v) : centreOn(v, (before.w / 2 - before.t.x) / k,
+      (before.h / 2 - before.t.y) / k, k, {x0: 0, y0: 0, x1: v.w, y1: v.h}));
     request(v);
   }
 
@@ -649,7 +672,7 @@
     const bottom = phone.matches ? panel.getBoundingClientRect().top : document.documentElement.clientHeight;
     const y0 = Math.max(0, (header ? header.getBoundingClientRect().bottom : 0) - at.top);
     const y1 = Math.min(v.h, bottom - at.top);
-    return y1 - y0 >= 0.35 * v.h ? {x0: 0, y0, x1: v.w, y1} : {x0: 0, y0: 0, x1: v.w, y1: v.h};
+    return y1 - y0 >= minShownShare * v.h ? {x0: 0, y0, x1: v.w, y1} : {x0: 0, y0: 0, x1: v.w, y1: v.h};
   }
 
   // fitTransform fits box, in world units, into pad of the visible stage, zoomed in no further than maxK.
@@ -660,17 +683,16 @@
     return centreOn(v, (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, Math.min(k, maxK || Infinity));
   }
 
-  // centreOn is the transform at zoom k, held to the extent, with (x, y) in the middle of the visible stage.
-  function centreOn(v, x, y, k) {
-    const s = visible(v);
+  // centreOn is the transform at zoom k, held to the extent, with (x, y) in the middle of s, a box of the stage:
+  // the part on the screen, unless another is given.
+  function centreOn(v, x, y, k, s = visible(v)) {
     k = Math.max(v.fitK * minZoom, Math.min(k, v.maxK(v)));
     return d3.zoomIdentity.translate((s.x0 + s.x1) / 2 - k * x, (s.y0 + s.y1) / 2 - k * y).scale(k);
   }
 
   const fitAll = v => fitTransform(v, v.world(v), fitPad);
 
-  // land flies v to sel's frame, the whole map's for none. Resized, a view on a selection keeps its middle; one
-  // on the whole map is fitted again.
+  // land flies v to sel's frame, the whole map's for none: touched on a selection, untouched on the whole map.
   function land(v, sel, ms) {
     v.touched = !!sel;
     flyTo(v, v.frame(v, sel), ms);
@@ -685,14 +707,18 @@
   }
 
   const jump = (v, t) => d3.select(v.canvas).interrupt().call(v.zoom.transform, t);
-  const zoomBy = (v, factor) => d3.select(v.canvas).transition().duration(reducedMotion.matches ? 0 : stepMs)
-    .call(v.zoom.scaleBy, factor);
 
-  // bounds boxes list's places (xs, ys), less its outer 4% each way with trim: outliers don't set a frame.
+  // zoomBy scales v about its middle, for a zoom button or key: the user's zoom, as a wheel's is.
+  function zoomBy(v, factor) {
+    v.touched = true;
+    d3.select(v.canvas).transition().duration(reducedMotion.matches ? 0 : stepMs).call(v.zoom.scaleBy, factor);
+  }
+
+  // bounds boxes list's places (xs, ys), less its outer trimShare each way with trim.
   function bounds(list, xs, ys, trim) {
     const [sx, sy] = [xs, ys].map(at => list.map(d => at[d]).sort((a, b) => a - b));
-    const [lo, hi] = trim && list.length > 20 ? [Math.floor(list.length * 0.04), Math.ceil(list.length * 0.96) - 1] :
-      [0, list.length - 1];
+    const [lo, hi] = trim && list.length > trimFrom ? [Math.floor(list.length * trimShare),
+      Math.ceil(list.length * (1 - trimShare)) - 1] : [0, list.length - 1];
     return {x0: sx[lo], y0: sy[lo], x1: sx[hi], y1: sy[hi]};
   }
 
@@ -854,7 +880,7 @@
         {x0: 0, y0: 0, x1: m.extent, y1: m.extent};
     },
     maxK: v => v.fitK * maxZoomAll,
-    dotPx: v => Math.min(dotMaxPx, Math.max(dotMinPx, 1.7 * Math.sqrt(v.t.k / v.fitK))),
+    dotPx: v => Math.min(dotMaxPx, Math.max(dotMinPx, dotGrowth * Math.sqrt(v.t.k / v.fitK))),
     draw(v, ctx) {
       const m = state.model;
       const {t, hover} = v;
@@ -862,12 +888,9 @@
       const xy = d => [m.docs.mx[d] * t.k + t.x, m.docs.my[d] * t.k + t.y];
       const hi = state.highlight;
       documentPasses(ctx, v, m, xy, r, hi ? d => (hi[d] ? 0.95 : 0.17) : () => 0.88, hi ? [0.17, 0.95] : [0.88]);
-      if (hover && hover.kind === 'document') {
-        ring(ctx, ...xy(hover.i), r + 3, theme.text3, 1.5);
-      }
-      if (state.sel && state.sel.kind === 'document') {
-        ring(ctx, ...xy(state.sel.i), r + 3, theme.accent, 2.5);
-      }
+      const mark = (s, colour, w) => s && s.kind === 'document' && ring(ctx, ...xy(s.i), r + 3, colour, w);
+      mark(hover, theme.text3, 1.5);
+      mark(state.sel, theme.accent, 2.5);
       allLabels(v, ctx, m, r);
     },
     pick(v, x, y) {
@@ -886,7 +909,7 @@
       }
       const list = sel ? membersOf(m, sel) : [];
       return list.length ? fitTransform(v, grow(bounds(list, m.docs.mx, m.docs.my, sel.kind !== 'interest'), 10),
-        flightPad, v.fitK * 14) : fitAll(v);
+        flightPad, v.fitK * maxFlightAll) : fitAll(v);
     },
     legend: m => [words('span', '', 'Each dot is a document, coloured by its ' + (m.flat ? 'interest' : 'area')),
       key('map-key-unsorted', 'unsorted'), key('map-key-loose', 'loose fit'), key('map-key-new', 'new')],
@@ -938,7 +961,7 @@
         y0: Math.min(a.y0, c.y0), x1: Math.max(a.x1, c.x1), y1: Math.max(a.y1, c.y1)}));
       return {x0: b.x0, y0: b.y0 - 0.03 * m.extent, x1: b.x1, y1: b.y1};
     },
-    maxK: v => Math.max(v.fitK * 2, maxDotPx / 2 / state.model.dotRadius),
+    maxK: v => Math.max(v.fitK * maxZoomIn, maxDotPx / state.model.dotRadius),
     draw(v, ctx) {
       const m = state.model;
       const {t} = v;
@@ -967,16 +990,12 @@
         const colour = theme.area[m.slots[m.flat ? i : it.area]] || theme.neutral;
         disc(it.zoom, colour, colour, 0.12 * shade(it.area), 0.55 * shade(it.area));
       });
-      const r = Math.max(m.dotRadius * t.k, 0.5);
+      const r = Math.max(m.dotRadius * t.k, minScaledDotPx);
       const xy = d => [m.docs.zx[d] * t.k + t.x, m.docs.zy[d] * t.k + t.y];
       const areaOf = d => (m.docs.interest[d] >= 0 ? m.docs.area[d] : -2);
       documentPasses(ctx, v, m, xy, r, d => shade(areaOf(d)), focus === -1 ? [1] : [0.4, 1]);
-      const emphasis = (s, colour, w) => {
-        if (s) {
-          ring(ctx, ...(s.kind === 'document' ? [...xy(s.i), r + 2.5] : at(s.kind === 'unsorted' ? m.disc :
-            groupOf(m, s).zoom)), colour, w);
-        }
-      };
+      const emphasis = (s, colour, w) => s && ring(ctx, ...(s.kind === 'document' ? [...xy(s.i), r + 2.5] :
+        at(s.kind === 'unsorted' ? m.disc : groupOf(m, s).zoom)), colour, w);
       emphasis(v.hover, theme.text3, 1.5);
       emphasis(sel, theme.accent, 2.2);
       emphasis(sel && sel.kind === 'document' && parentOf(m, sel), theme.accent, 1.2);
@@ -1013,10 +1032,10 @@
       if (sel && sel.kind === 'document') {
         const i = m.docs.interest[sel.i];
         const k = fitTransform(v, around(i >= 0 ? m.interests[i].zoom : m.disc), flightPad).k;
-        return centreOn(v, m.docs.zx[sel.i], m.docs.zy[sel.i], Math.max(k, 6 / m.dotRadius));
+        return centreOn(v, m.docs.zx[sel.i], m.docs.zy[sel.i], Math.max(k, documentDotPx / m.dotRadius));
       }
       return !sel ? fitAll(v) : fitTransform(v, around(sel.kind === 'unsorted' ? m.disc : groupOf(m, sel).zoom),
-        sel.kind === 'interest' ? flightPad : 0.92);
+        sel.kind === 'interest' ? flightPad : discPad);
     },
     legend: m => [words('span', '', 'Circles are interests, sized by their documents' + (m.flat ? '' :
       ', in their areas\' discs')), key('map-key-disc', 'Unsorted')],
@@ -1024,8 +1043,8 @@
       ', sized by its documents, each a dot inside it, with Unsorted the dashed disc beside them.',
   };
 
-  // zoomLabels names what Zoom in shows at this zoom: closed areas beside their discs, Unsorted's disc,
-  // interests in open areas (every one, in the flat shape), and documents once their dots are big.
+  // zoomLabels names what Zoom in shows at this zoom, the selection first: closed areas beside their discs,
+  // Unsorted's disc, interests in open areas (every one, in the flat shape), and documents once their dots are big.
   function zoomLabels(v, ctx, m, r, focus) {
     const {t, w, h} = v;
     const [sx, sy, sr] = [x => x * t.k + t.x, y => y * t.k + t.y, c => c.r * t.k];
@@ -1033,30 +1052,36 @@
     const closed = c => sr(c) <= openShare * Math.min(w, h);
     const colourOf = a => (focus >= 0 && a !== focus ? theme.text3 : theme.text);
     const areaFont = fontOf(650, phone.matches ? 11.5 : 12.5);
-    const pending = [];
-    m.areas.forEach((a, i) => {
-      const c = a.zoom;
-      const lines = on(c) && closed(c) ? wrap(groupName(m, 'area', i), areaFont, Math.max(Math.min(2.2 * sr(c), 210),
-        120), maxLabelLines) : [];
-      [sy(c.y) - sr(c) - 4 - lines.length * 15, sy(c.y) + sr(c) + 4].some(y => lines.length &&
-        label(v, pending, lines, sx(c.x), y, areaFont, colourOf(i), 15, {kind: 'area', i}));
-    });
-    if (on(m.disc) && closed(m.disc)) {
-      label(v, pending, ['Unsorted · ' + num(m.unsortedDocs.length)], sx(m.disc.x), sy(m.disc.y) - sr(m.disc) - 19,
-        areaFont, theme.text2, 15, {kind: 'unsorted'});
-    }
     const titled = m.dotRadius * t.k >= titlesDotPx;
-    for (const i of m.interestsBySize) {
-      const [c, area] = [m.interests[i].zoom, m.interests[i].area];
-      if (sr(c) < nameCirclePx || !on(c) || area >= 0 && closed(m.areas[area].zoom)) {
-        continue;
-      }
-      const px = sr(c) > 70 ? 13 : 11.5;
-      const font = fontOf(600, px);
-      const lines = wrap(groupName(m, 'interest', i), font, Math.max(1.7 * sr(c), titled ? 160 : 60),
-        titled ? 2 : maxLabelLines);
-      label(v, pending, lines, sx(c.x), titled ? sy(c.y) - sr(c) - 4 - lines.length * px * 1.2 :
-        sy(c.y) - lines.length * px * 0.6, font, colourOf(area), px * 1.2, {kind: 'interest', i});
+    const pending = [];
+    const place = {
+      area(i) {
+        const c = m.areas[i].zoom;
+        const lines = on(c) && closed(c) ? wrap(groupName(m, 'area', i), areaFont, Math.max(Math.min(2.2 * sr(c), 210),
+          120), maxLabelLines) : [];
+        [sy(c.y) - sr(c) - 4 - lines.length * 15, sy(c.y) + sr(c) + 4].some(y => lines.length &&
+          label(v, pending, lines, sx(c.x), y, areaFont, colourOf(i), 15, {kind: 'area', i}));
+      },
+      unsorted: () => on(m.disc) && closed(m.disc) && label(v, pending, ['Unsorted · ' + num(m.unsortedDocs.length)],
+        sx(m.disc.x), sy(m.disc.y) - sr(m.disc) - 19, areaFont, theme.text2, 15, {kind: 'unsorted'}),
+      interest(i) {
+        const [c, area] = [m.interests[i].zoom, m.interests[i].area];
+        if (sr(c) < nameCirclePx || !on(c) || area >= 0 && closed(m.areas[area].zoom)) {
+          return;
+        }
+        const px = sr(c) > 70 ? 13 : 11.5;
+        const font = fontOf(600, px);
+        const lines = wrap(groupName(m, 'interest', i), font, Math.max(1.7 * sr(c), titled ? 160 : 60),
+          titled ? titledLines : maxLabelLines);
+        label(v, pending, lines, sx(c.x), titled ? sy(c.y) - sr(c) - 4 - lines.length * px * 1.2 :
+          sy(c.y) - lines.length * px * 0.6, font, colourOf(area), px * 1.2, {kind: 'interest', i});
+      },
+    };
+    const groups = m.areas.map((_, i) => ({kind: 'area', i})).concat({kind: 'unsorted'},
+      m.interestsBySize.map(i => ({kind: 'interest', i})));
+    const sel = state.sel && state.sel.kind !== 'document' ? state.sel : null;
+    for (const g of sel ? [sel].concat(groups.filter(g => !same(g, sel))) : groups) {
+      place[g.kind](g.i);
     }
     if (titled) {
       const shown = m.interests.flatMap((it, i) => (on(it.zoom) ? m.interestDocs[i] : []))
@@ -1112,7 +1137,7 @@
   function libraryPanel(m) {
     return [
       stats([num(m.n), 'documents'], !m.flat && [num(m.areas.length), 'areas'], [num(m.interests.length),
-        'interests'], [num(m.unsortedCount), 'unsorted'], m.newDocs.length && [num(m.newDocs.length), 'new']),
+        'interests'], [num(m.unsortedDocs.length), 'unsorted'], m.newDocs.length && [num(m.newDocs.length), 'new']),
       words('p', 'map-about', (state.view === 'zoom' ? zoomView : allView).about(m)),
       section(m.flat ? 'Interests' : 'Areas', rows(m.top.map((g, i) => groupRow(m, m.flat ? 'interest' : 'area', i,
         num(g.size))).concat(groupRow(m, 'unsorted', -1, num(m.unsortedDocs.length))))),
@@ -1169,7 +1194,6 @@
     ];
   }
 
-  // The words for a document's fit.
   const fitNames = {member: 'Member', loose: 'Loose fit', unsorted: 'Unsorted', new: 'New since the last rebuild'};
 
   function documentPanel(m, d) {
@@ -1260,14 +1284,12 @@
       hitList.children[found.cursor].scrollIntoView({block: 'nearest'});
     } else if (e.key === 'Enter' && found.cursor >= 0 && hitList.childElementCount) {
       pickHit(found.hits[found.cursor].sel);
+    } else if (e.key === 'Escape' && hitList.childElementCount) {
+      renderHits(false);
+    } else if (e.key === 'Escape' && search.value) {
+      search.value = '';
     } else if (e.key === 'Escape') {
-      if (hitList.childElementCount) {
-        renderHits(false);
-      } else if (search.value) {
-        search.value = '';
-      } else {
-        search.blur();
-      }
+      search.blur();
     } else {
       return;
     }
@@ -1306,7 +1328,8 @@
     history.replaceState(history.state, '', query ? mapPage + '?' + query : mapPage);
   }
 
-  // activate shows view name, its tab, canvas and legend, flown to the selection or fitted to the whole map.
+  // activate shows view name, its tab, canvas and legend, flown to the selection or fitted to the whole map. The
+  // panel is rendered first: a phone's sheet, which fits keep clear of, is only as tall as what it holds.
   function activate(name, focusTab) {
     if (name === state.view) {
       return;
@@ -1324,10 +1347,9 @@
     const v = views[name];
     hoverAt(v);
     legend.replaceChildren(...(name === 'zoom' ? zoomView : allView).legend(state.model));
-    measureChrome();
+    renderPanel();
     resize(v);
     land(v, state.sel, flightMs);
-    renderPanel();
     syncAddress();
   }
 
@@ -1375,26 +1397,23 @@
     }
   }
 
-  // chosen selects what a control of the panel or the breadcrumb leads to, moving the keyboard to the panel.
-  function chosen(e) {
-    const control = e.target.closest('button');
-    if (control && targets.has(control)) {
-      choose(targets.get(control), {fly: true, focus: true});
+  // onTarget is a click handler calling fn with where the control of selector under the click leads, if anywhere.
+  const onTarget = (selector, fn) => e => {
+    const control = e.target.closest(selector);
+    if (targets.has(control)) {
+      fn(targets.get(control));
     }
-  }
+  };
+
+  // chosen selects what a control of the panel or the breadcrumb leads to, moving the keyboard to the panel.
+  const chosen = onTarget('button', sel => choose(sel, {fly: true, focus: true}));
 
   // wire connects the controls, once: no listener or observer is made per selection or per frame.
   function wire() {
     Object.values(views).forEach(v => new ResizeObserver(guarded(() => v.name === state.view && resize(v)))
       .observe(v.canvas));
-    const tablist = tabs.all.parentElement;
-    listen(tablist, 'click', e => {
-      const tab = e.target.closest('[role="tab"]');
-      if (tab) {
-        activate(tab === tabs.zoom ? 'zoom' : 'all', false);
-      }
-    });
-    listen(tablist, 'keydown', tabKeys);
+    Object.entries(tabs).forEach(([name, tab]) => listen(tab, 'click', () => activate(name, false)));
+    listen(tabs.all.parentElement, 'keydown', tabKeys);
     listen(panelBody, 'click', chosen);
     listen(crumbs, 'click', chosen);
     listen($('map-zoom-in'), 'click', () => zoomBy(views[state.view], zoomStep));
@@ -1407,12 +1426,7 @@
     listen(search, 'blur', () => renderHits(false));
     listen(search, 'keydown', searchKeys);
     listen(hitList, 'mousedown', e => e.preventDefault());
-    listen(hitList, 'click', e => {
-      const option = e.target.closest('li');
-      if (option && targets.has(option)) {
-        pickHit(targets.get(option));
-      }
-    });
+    listen(hitList, 'click', onTarget('li', pickHit));
     listen(document, 'keydown', pageKeys);
     const retheme = () => {
       readTheme();
@@ -1455,7 +1469,7 @@
 
   // missing says what the address asked for isn't on the map: a group a rebuild retired, or a document.
   function missing(asked) {
-    const [kind, id] = [asked.slice(0, asked.indexOf(':')), asked.slice(asked.indexOf(':') + 1)];
+    const [kind, id] = kindAndID(asked);
     if (kind === 'document') {
       say(words('span', '', 'That document isn\'t on the map: it may have failed since the rebuild, or not been ' +
         'placed yet.'));
@@ -1474,11 +1488,7 @@
       return;
     }
     say();
-    try {
-      setUp(result.data);
-    } catch (e) {
-      stop(e);
-    }
+    guarded(setUp)(result.data);
   }
 
   if (typeof d3 !== 'object' || !d3.zoom || !d3.quadtree || !d3.transition) {

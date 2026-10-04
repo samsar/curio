@@ -300,8 +300,16 @@ func TestStylesheet_InterestMap(t *testing.T) {
 		".map-kicker:empty", ".map-panel-head h2:empty", ".map-panel-body:empty"} {
 		assert.Equal(t, "none", declarations(ruleFor(t, rules, "", selector).body)["display"], selector)
 	}
+	// Until the map is drawn, or when it can't be, the panel's title is empty: the zoom buttons and the
+	// panel's head wait, and so does a phone's sheet.
+	for _, selector := range []string{".interest-map:has(.map-panel-head h2:empty) .map-zoom",
+		".map-panel-head:has(h2:empty)"} {
+		assert.Equal(t, "none", declarations(ruleFor(t, rules, "", selector).body)["display"], selector)
+	}
 	ruleFor(t, rules, "", `.segmented [aria-selected="true"]`)
 	const phone = "@media (max-width: 48rem)"
+	assert.Equal(t, "none",
+		declarations(ruleFor(t, rules, phone, ".map-panel:has(.map-panel-head h2:empty)").body)["display"])
 	assert.Equal(t, "fixed", declarations(ruleFor(t, rules, phone, ".map-panel").body)["position"])
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, phone, ".map-panel:not(.is-open) .map-panel-body").body)["display"])
 	assert.Equal(t, "55vh", declarations(ruleFor(t, rules, phone, ".map-panel.is-open").body)["max-height"])
