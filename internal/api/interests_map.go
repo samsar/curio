@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/ui"
 )
 
 // InterestMapResponse is the body of GET /v1/interests/map: the latest
@@ -330,7 +330,7 @@ func documentColumns(docs []store.MapDocument, interestAt map[string]int, intere
 		if d.Placed {
 			fit = fitNew
 		}
-		h := hostOf(d.URL)
+		h := ui.Host(d.URL)
 		c.ID, c.Title, c.Host = append(c.ID, d.DocumentID), append(c.Title, mapTitle(d, h)), append(c.Host, h)
 		c.Interest, c.Nearest, c.Area = append(c.Interest, interest), append(c.Nearest, nearest), append(c.Area, area)
 		c.Fit, c.Similarity = append(c.Fit, fit), append(c.Similarity, d.Similarity)
@@ -353,14 +353,4 @@ func mapTitle(d store.MapDocument, host string) string {
 		}
 	}
 	return ""
-}
-
-// hostOf is u's host, with its port and without userinfo, or "" when u has
-// none or doesn't parse: the dashboard's host.
-func hostOf(u string) string {
-	parsed, err := url.Parse(u)
-	if err != nil {
-		return ""
-	}
-	return parsed.Host
 }
