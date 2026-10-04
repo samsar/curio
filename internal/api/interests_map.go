@@ -118,7 +118,7 @@ const (
 	mapNoRun  = "no_run"
 	mapNoMap  = "no_map"
 	mapFailed = "map_failed"
-	mapIsOff  = "map_off"
+	mapOff    = "map_off"
 )
 
 // InterestMapUnavailable is the 404 problem of a map that isn't there:
@@ -166,7 +166,7 @@ func unavailable(run *store.InterestRun) error {
 
 // mapOffError is the map switched off in config.yaml.
 func mapOffError() error {
-	return &mapUnavailableError{body: InterestMapUnavailable{Reason: mapIsOff, Problem: Problem{
+	return &mapUnavailableError{body: InterestMapUnavailable{Reason: mapOff, Problem: Problem{
 		Detail: "the interest map is off (insight.map: false in config.yaml): remove the setting, " +
 			"or set it to true, and restart the daemon"}}}
 }

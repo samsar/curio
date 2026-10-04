@@ -554,9 +554,9 @@ type inputs struct {
 	mapOff         bool   // insight.map is false
 }
 
-// verdict is what a check decided: the snapshot, whether a rebuild is due,
-// whether the done one drew no map that it owes, and the trigger of the
-// one to queue now, "" for none.
+// verdict is what a check decided: the snapshot, whether a rebuild is due
+// and whether a map the done one lacks is among the reasons, and the
+// trigger of the one to queue now, "" for none.
 type verdict struct {
 	snap    Snapshot
 	due     bool
