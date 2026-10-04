@@ -284,7 +284,9 @@ func (t *pageText) parkedDomain(target string) string {
 // or its site (siteOf): a page may report another site's sale. Without a
 // subject, the predicate must be the whole line, as GoDaddy's "is for
 // sale!" under the domain's name; a line that goes on after it is about
-// something else ("is for sale for $10 million").
+// something else ("is parked. The owner left."). An expiry counts only
+// with its subject: "Registration has expired." alone is as likely an
+// event's sign-up page.
 func parkedNotice(line, host string) bool {
 	if parkingHeadingRE.MatchString(line) {
 		return true
@@ -293,12 +295,15 @@ func parkedNotice(line, host string) bool {
 	if m == nil {
 		return false
 	}
-	if domain := m[parkedDomainRE.SubexpIndex("domain")]; domain != "" {
+	group := func(name string) string { return m[parkedDomainRE.SubexpIndex(name)] }
+	if domain := group("domain"); domain != "" {
 		domain = strings.TrimPrefix(strings.ToLower(domain), "www.")
 		return domain == host || domain == siteOf(host)
 	}
-	return m[parkedDomainRE.SubexpIndex("subject")] != "" ||
-		strings.Trim(m[parkedDomainRE.SubexpIndex("rest")], ".!") == ""
+	if group("subject") != "" {
+		return true
+	}
+	return group("expired") == "" && strings.Trim(group("rest"), ".!") == ""
 }
 
 // signInForm reports a page that is only a sign-in form: read whole, with
@@ -363,15 +368,16 @@ var (
 	// predicate, and the rest of the line, which must open with ".", "!" or
 	// ":" ("This domain is for sale: $5,795", "This domain name may be for
 	// sale. Click here…"). The predicates are what registrars and parking
-	// services say: for sale, parked, expired, just registered, Hover's "is
-	// a totally awesome idea still being worked on" and easyDNS's "is yet
+	// services say: for sale, parked, expired (a group of its own, which
+	// parkedNotice holds to a subject), just registered, Hover's "is a
+	// totally awesome idea still being worked on" and easyDNS's "is yet
 	// another domain managed by easyDNS". The list is explicit: a predicate
 	// added to it needs a test row.
 	parkedDomainRE = regexp.MustCompile(`(?i)^` +
 		`(?:(?:(?P<subject>(?:(?:this|the)\s+)?domain(?:\s+name)?)|(?P<domain>` + domainName + `))\s+)?` +
 		`(?:(?:is|may\s+be)\s+for\s+sale` +
 		`|is\s+parked` +
-		`|(?:registration\s+)?has\s+expired` +
+		`|(?P<expired>(?:registration\s+)?has\s+expired)` +
 		`|has\s+been\s+(?:recently\s+)?registered\s+(?:with|at)\s+` + domainName +
 		`|is\s+a\s+totally\s+awesome\s+idea\s+still\s+being\s+worked\s+on` +
 		`|is\s+yet\s+another\s+domain\s+managed\s+by\s+\S+` +

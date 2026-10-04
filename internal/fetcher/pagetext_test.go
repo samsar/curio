@@ -222,6 +222,10 @@ func TestPageText_NotFoundNotice(t *testing.T) {
 		{"a status code and a separator", "410 · Followers", ""},
 		{"a heading's status code from the origin, its markers gone", "404\nWhat the page is about.", ""},
 		{"a status code in a menu", "*   [404](https://landingfolio.com/inspiration/404)", ""},
+		// Link lines that would be notices if their text were read: a
+		// story card's heading, and a menu item.
+		{"a status code as a story card's heading", "#### [404](https://medium.com/@writer/404-5f1c2a7b9e3d)", ""},
+		{"a template in a menu", "*   [Page not found](https://landingfolio.com/inspiration/page-not-found)", ""},
 		{"a template in a code block", "What nginx answers:\n\n```\n404 Not Found\n```", ""},
 		{"a sentence going on", "The page you're looking for was not found on our old server, so we moved it.", ""},
 	}
@@ -240,7 +244,8 @@ func TestPageText_NotFoundNotice(t *testing.T) {
 
 // TestPageText_ParkedDomain: each subject, predicate and the parking-page
 // heading, in the library's words, is a parked domain's notice on the page
-// it names; a line that only resembles one, or names another site, isn't.
+// it names; a line that only resembles one, an expiry without its subject,
+// or a notice naming another site isn't.
 func TestPageText_ParkedDomain(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -262,6 +267,7 @@ func TestPageText_ParkedDomain(t *testing.T) {
 		{"its site's name, from a subdomain", "http://blog.omegacoder.com/x", "omegacoder.com is for sale!", true},
 		{"domain, registration expired (397f7090)", "http://www.icefilms.info/", "Domain registration has expired.", true},
 		{"expired", "http://www.icefilms.info/", "This domain has expired.", true},
+		{"expired, its own name", "http://www.icefilms.info/", "icefilms.info has expired.", true},
 		{"registered with (b767c66d)", "http://headlime.io/", "has been recently registered with namecheap.com", true},
 		{"registered at", "http://headlime.io/", "This domain has been registered at Namecheap.com.", true},
 		{"parked (easyDNS's link, fcb281ad)", "http://www.profitguide.com/", "This Domain is Parked: Learn more", true},
@@ -274,6 +280,8 @@ func TestPageText_ParkedDomain(t *testing.T) {
 		{"another site's sale", "https://news.example/twitter-sale", "Twitter.com is for sale", false},
 		{"another site's sale, a headline", "https://news.example/twitter-sale", "Twitter.com is for sale: what it means for users", false},
 		{"a predicate going on", "https://cars.example/", "is for sale for $10 million", false},
+		{"an expiry without its subject", "https://events.example/meetup", "Registration has expired.", false},
+		{"an expiry alone", "https://shop.example/coupon", "has expired", false},
 		{"a predicate going on with a comma", "https://blog.example/", "This domain is for sale, says the registrar", false},
 		{"no subject, a sentence after", "https://cars.example/", "is parked. The owner left.", false},
 		{"other related links", "https://blog.example/", "Related Links", false},
@@ -345,6 +353,10 @@ func TestPageText_SignInForm(t *testing.T) {
 		{"a sign-up form", "Fill in the form below to get instant access.\n\n- Username\n- Password\n- Password Confirmation\n" +
 			"- First Name\n- Last Name\n- E-mail Address", false},
 		{"a field that isn't one", "Log in\n\nForgot password?\n\nPassword reset", false},
+		// A sign-up form whose only sign-in line is a link: read, the link
+		// would make it a sign-in form.
+		{"a sign-up form, its sign-in line a link", "[Log in](https://example.com/login)\n\n" +
+			"Create your account\n\nEmail\n\nPassword\n\nSign up", false},
 		{"read in part", "Log in\n\nPassword\n\n" + navigation(pageTextScanBytes), false},
 	}
 	for _, tc := range cases {

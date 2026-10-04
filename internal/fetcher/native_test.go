@@ -1488,9 +1488,9 @@ func TestNative_JinaRejectsNonArticles(t *testing.T) {
 
 // TestNative_JinaAcceptsArticles: informational warnings, articles about
 // bot checks, logins and missing pages, titles that start like a
-// challenge's, a notice after a page's opening, a sign-in box beside
-// content, a short post and a body of exactly minArticleBytes are all
-// stored, settled on the URL requested.
+// challenge's, a notice after a page's opening or in a link, a sign-in box
+// beside content, a sign-in link, a short post and a body of exactly
+// minArticleBytes are all stored, settled on the URL requested.
 func TestNative_JinaAcceptsArticles(t *testing.T) {
 	// botEssay quotes challenge phrases in 3 KB of text, past the 2 KiB
 	// up to which a page's text is searched for them.
@@ -1548,6 +1548,12 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 			"# HTTP status codes explained\n\n" + intro + "\n\n## 404 Not Found\n\nThe server has nothing at that path.\n\n" + article, true},
 		{"landingfolio's 404 in its menu", "Landing page inspiration", nil,
 			"*   [Inspiration](https://landingfolio.com/inspiration)\n*   [404](https://landingfolio.com/inspiration/404)\n\n" + article, true},
+		// Link lines whose text, read, would be a notice.
+		{"a not-found template in a menu", "Landing page inspiration", nil,
+			"*   [Inspiration](https://landingfolio.com/inspiration)\n" +
+				"*   [Page not found](https://landingfolio.com/inspiration/page-not-found)\n\n" + article, true},
+		{"a story card titled 404", "Web design – Medium", nil,
+			"#### [404](https://medium.com/@writer/404-5f1c2a7b9e3d)\n\n" + article, true},
 		{"an essay showing a notice later", "What a dead link tells you", nil,
 			intro + "\n\nThe page said only this:\n\nPage not found\n\n" + article, true},
 		{"a notice going on", "Where our archive went", nil,
@@ -1570,6 +1576,10 @@ func TestNative_JinaAcceptsArticles(t *testing.T) {
 			"Log in\n\nNickname:\n\nPassword:\n\n[Forgot your password?](https://slashdot.org/my/mailpassword)\n\n" + longArticleBody, true},
 		{"a sign-up form", "Institutional-caliber research", nil, "Fill in the form below to get instant access.\n\n" +
 			"- Username\n- Password\n- Password Confirmation\n- First Name\n- Last Name\n\n" + article, true},
+		// Its only sign-in line is a link, whose text is never read.
+		{"a sign-up form linking to sign-in", "Create your account", nil,
+			"[Log in](https://example.com/login)\n\n# Create your account\n\nEmail\n\nPassword\n\nSign up\n\n" +
+				strings.Repeat("[Terms of service](https://example.com/legal/terms-of-service)\n\n", 8), true},
 		{"a login tutorial", "Build a login form with React", nil,
 			"# Build a login form with React\n\nLog in\n\nPassword\n\n" + longArticleBody, true},
 	}
@@ -1866,7 +1876,8 @@ func TestJudgePage_TextNotices(t *testing.T) {
 		{"a notice beginning at openingBytes", own(16, 128) + notice + rest, true, false},
 		{"a notice behind a menu", navigation(pageTextScanBytes-1024) + notice + rest, true, true},
 		{"a notice past pageTextScanBytes", navigation(pageTextScanBytes) + notice + rest, true, false},
-		{"a 404 in a menu", "*   [404](https://example.com/inspiration/404)\n" + rest, true, false},
+		{"a template in a menu", "*   [Page not found](https://example.com/inspiration/page-not-found)\n" + rest, true, false},
+		{"a status code as a story card's heading", "#### [404](https://example.com/@writer/404-5f1c2a7b9e3d)\n" + rest, true, false},
 		{"a not-found template, detection off", notice + rest, false, false},
 		{"a not-found sentence, detection off", "Sorry! The page you requested was not found.\n" + rest, false, false},
 		{"a parked domain, detection off", "This domain is for sale!\n" + rest, false, false},

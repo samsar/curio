@@ -399,8 +399,8 @@ const (
 	// of its own, as a status code alone would be.
 
 	// stackOverflowQuestionBody is 85a60cef's: its score, 444, on a line of
-	// its own, as 147 of the library's 154 Stack Exchange questions give
-	// theirs. Trimmed after the question.
+	// its own in its opening, as 24 of the library's Stack Exchange
+	// questions give theirs. Trimmed after the question.
 	stackOverflowQuestionBody = "This question shows research effort; it is useful and clear\n\n" +
 		"444\n\n" +
 		"This question does not show any research effort; it is unclear or not useful\n\n" +
