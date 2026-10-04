@@ -1771,14 +1771,18 @@ type InsightStore interface {
 	PlaceDocument(ctx context.Context, tenantID string, p Placement) (written bool, err error)
 	// PlaceMany writes the placements into runID, with their places on
 	// the map, in one transaction, while runID is the tenant's latest done
-	// run: a document placed already keeps its placement, and a document
-	// gone is left out. It returns how many it wrote; none when the run is
-	// no longer the latest. Each placement's RunID and PlacedAt are
-	// ignored.
+	// run: a document placed already keeps its placement, unless that
+	// placement is off the run's built map (as Unplaced says) and the new
+	// one has a place, which replaces it; a document gone is left out. It
+	// returns how many it wrote; none when the run is no longer the
+	// latest. Each placement's RunID and PlacedAt are ignored.
 	PlaceMany(ctx context.Context, tenantID, runID string, ps []Placement) (int, error)
 	// Unplaced lists the tenant's fetched documents indexed at or after
 	// since that runID neither assigned nor placed, in no particular
-	// order.
+	// order. When the run's map is built, it lists too those placed off
+	// it: with no place on the map, or with their zoom dot's centre
+	// outside their circle (their interest's, or Unsorted's disc), as
+	// 2.5.x leaves them.
 	Unplaced(ctx context.Context, tenantID, runID string, since time.Time) ([]string, error)
 
 	// PruneRunsExcept deletes every run of the tenant except keepRunIDs, at

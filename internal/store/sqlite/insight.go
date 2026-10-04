@@ -1101,26 +1101,49 @@ const (
 	ON CONFLICT (run_id, document_id) DO UPDATE SET interest_id = excluded.interest_id,
 		similarity = excluded.similarity, placed_at = excluded.placed_at, map_x = excluded.map_x,
 		map_y = excluded.map_y, zoom_x = excluded.zoom_x, zoom_y = excluded.zoom_y`
-	// placeIfAbsentSQL places a document into a run unless it is placed
-	// already, inside PlaceMany's transaction, which checked the run. Its
-	// args are the run, the document, the interest, the similarity, the
-	// time and the four positions.
-	placeIfAbsentSQL = `
-	INSERT INTO interest_placements (run_id, document_id, interest_id, similarity, placed_at, map_x, map_y, zoom_x, zoom_y)
+	// offMapSQL holds when placement p is off its run's built map: the
+	// run's map is built, and p has no place on it, or its zoom dot's
+	// centre lies outside its circle, its interest's or, placed into
+	// Unsorted, Unsorted's disc. 2.5.x leaves such placements: it places
+	// with no place, and moving a placement into another interest keeps
+	// the place it had. The run and the interest's group are read by their
+	// primary keys.
+	offMapSQL = `EXISTS (
+	SELECT 1 FROM interest_runs r
+	LEFT JOIN interest_groups g ON g.run_id = r.id AND g.interest_id = p.interest_id
+	WHERE r.id = p.run_id AND r.map_status = '` + string(store.MapBuilt) + `'
+	  AND (p.map_x IS NULL
+	    OR (p.zoom_x - coalesce(g.zoom_x, r.map_unsorted_x)) * (p.zoom_x - coalesce(g.zoom_x, r.map_unsorted_x))
+	     + (p.zoom_y - coalesce(g.zoom_y, r.map_unsorted_y)) * (p.zoom_y - coalesce(g.zoom_y, r.map_unsorted_y))
+	     > coalesce(g.zoom_r, r.map_unsorted_r) * coalesce(g.zoom_r, r.map_unsorted_r)))`
+	// placeOrRepairSQL places a document into a run unless it is placed
+	// already, inside PlaceMany's transaction, which checked the run: a
+	// placement off the run's built map (offMapSQL) is replaced by one
+	// with a place, and any other is kept. Its args are the run, the
+	// document, the interest, the similarity, the time and the four
+	// positions.
+	placeOrRepairSQL = `
+	INSERT INTO interest_placements AS p (run_id, document_id, interest_id, similarity, placed_at, map_x, map_y,
+		zoom_x, zoom_y)
 	SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
 	WHERE NOT EXISTS (SELECT 1 FROM interest_assignments WHERE run_id = ?1 AND document_id = ?2)
 	  AND EXISTS (SELECT 1 FROM documents WHERE id = ?2)
-	ON CONFLICT (run_id, document_id) DO NOTHING`
+	ON CONFLICT (run_id, document_id) DO UPDATE SET interest_id = excluded.interest_id,
+		similarity = excluded.similarity, placed_at = excluded.placed_at, map_x = excluded.map_x,
+		map_y = excluded.map_y, zoom_x = excluded.zoom_x, zoom_y = excluded.zoom_y
+	WHERE excluded.map_x IS NOT NULL AND ` + offMapSQL
 	// unplacedSQL lists the fetched documents indexed since a time that a
-	// run neither assigned nor placed: a range of
-	// idx_documents_tenant_indexed, each checked against both primary
-	// keys. Its args are the tenant, the time, the fetched state and the
-	// run.
+	// run neither assigned nor placed, or placed off its built map
+	// (offMapSQL): a range of idx_documents_tenant_indexed, each checked
+	// against the run's assignments and placements, and a placement's run
+	// and group, by their primary keys. Its args are the tenant, the time,
+	// the fetched state and the run.
 	unplacedSQL = `
 	SELECT d.id FROM documents d
+	LEFT JOIN interest_placements p ON p.run_id = ?4 AND p.document_id = d.id
 	WHERE d.tenant_id = ?1 AND d.indexed_at >= ?2 AND d.state = ?3
 	  AND NOT EXISTS (SELECT 1 FROM interest_assignments a WHERE a.run_id = ?4 AND a.document_id = d.id)
-	  AND NOT EXISTS (SELECT 1 FROM interest_placements p WHERE p.run_id = ?4 AND p.document_id = d.id)`
+	  AND (p.document_id IS NULL OR ` + offMapSQL + `)`
 )
 
 func (s *Insights) Assigned(ctx context.Context, runID, documentID string) (bool, error) {
@@ -1217,9 +1240,10 @@ func (s *Insights) PlaceMany(ctx context.Context, tenantID, runID string, ps []s
 }
 
 // placeEach writes each placement into runID unless the document is placed
-// already, through one prepared statement, and returns how many it wrote.
+// already on its map (placeOrRepairSQL), through one prepared statement,
+// and returns how many it wrote.
 func placeEach(ctx context.Context, tx *sql.Tx, runID string, ps []store.Placement, now string) (placed int, err error) {
-	stmt, err := tx.PrepareContext(ctx, placeIfAbsentSQL)
+	stmt, err := tx.PrepareContext(ctx, placeOrRepairSQL)
 	if err != nil {
 		return 0, fmt.Errorf("prepare: %w", err)
 	}

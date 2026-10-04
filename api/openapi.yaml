@@ -781,7 +781,10 @@ paths:
         interests. Every position lies in a square of side map.extent. The
         documents are columns of equal length: those the rebuild assigned,
         by id, then those placed since, by id; documents failed or dead
-        since are left out. One response holds the whole map, unpaged. A
+        since are left out, and so is a document placed since with no place
+        on the map, or with its dot outside its circle (as curio 2.5.x
+        leaves one), until the daemon's next placement sweep places it
+        again. One response holds the whole map, unpaged. A
         rebuild that commits while the map is read is answered from the
         newer run. Without a map (no rebuild yet, a rebuild from before
         maps, or one whose map failed) it answers 404 saying which.

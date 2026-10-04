@@ -729,7 +729,7 @@ func seedMap(t *testing.T, s *testServer, f contractFixtures) {
 	r.interest("Joins", area, 0, docs[2:3], nil)
 	r.unsorted(kafka, f.untitled)
 	r.mapped()
-	s.placeMapped(t, r.commit(t), kafka, docs[3], 500)
+	s.placeMapped(t, r.commit(t), kafka, docs[3], mapPlace(500, 121, 301))
 }
 
 // unsavableBookmark is a bookmark store that can't save url, for an import

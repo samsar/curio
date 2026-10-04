@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest/curio250"
 	"github.com/samsar/curio/internal/ui"
 )
 
@@ -42,14 +43,20 @@ func (f *runFixture) mapped() {
 	}
 }
 
-// placeMapped places doc into run's interest ("" for Unsorted) with a
-// place on the map.
-func (s *testServer) placeMapped(t *testing.T, run, interest string, doc *store.Document, x float64) {
+// placeMapped places doc into run's interest ("" for Unsorted) at place on
+// the map.
+func (s *testServer) placeMapped(t *testing.T, run, interest string, doc *store.Document, place store.MapPosition) {
 	t.Helper()
 	placed, err := s.insights().PlaceDocument(context.Background(), "local", store.Placement{RunID: run, DocumentID: doc.ID,
-		InterestID: interest, Similarity: 0.6, Map: &store.MapPosition{MapX: x, MapY: x, ZoomX: x, ZoomY: x}})
+		InterestID: interest, Similarity: 0.6, Map: &place})
 	require.NoError(t, err)
 	require.True(t, placed)
+}
+
+// mapPlace is a place on the document map at x, x and in the zoom view at
+// zx, zy.
+func mapPlace(x, zx, zy float64) store.MapPosition {
+	return store.MapPosition{MapX: x, MapY: x, ZoomX: zx, ZoomY: zy}
 }
 
 // mapAt is the index of document id in the map's columns.
@@ -66,8 +73,9 @@ func mapAt(t *testing.T, resp InterestMapResponse, id string) int {
 
 // TestInterestMap: the latest rebuild's map, every column one value per
 // document: members, a loose fit and an unsorted one as the rebuild put
-// them, documents placed since into an interest and into Unsorted as new,
-// and none failed or dead since; each title by its fallbacks.
+// them (wherever their places are), documents placed since into an
+// interest and into Unsorted as new, and none failed or dead since; each
+// title by its fallbacks.
 func TestInterestMap(t *testing.T) {
 	s := newTestServer(t)
 	d := s.docs(t, "map", 7)
@@ -88,8 +96,8 @@ func TestInterestMap(t *testing.T) {
 	f.mapped()
 	run := f.commit(t)
 	placed, placedUnsorted := s.docs(t, "placed", 1)[0], s.docs(t, "placed-unsorted", 1)[0]
-	s.placeMapped(t, run, joins, placed, 700)
-	s.placeMapped(t, run, "", placedUnsorted, 800)
+	s.placeMapped(t, run, joins, placed, mapPlace(700, 142, 301))
+	s.placeMapped(t, run, "", placedUnsorted, mapPlace(800, 905, 495))
 	_, err = s.db.Exec(`UPDATE documents SET state = 'failed', failure_cause = 'other' WHERE id = ?`, d[5].ID)
 	require.NoError(t, err)
 	_, err = s.db.Exec(`UPDATE documents SET state = 'dead', failure_cause = 'dead_link' WHERE id = ?`, d[6].ID)
@@ -135,12 +143,117 @@ func TestInterestMap(t *testing.T) {
 		assert.Equal(t, want.nearest, c.Nearest[i], want.doc.URL)
 		assert.Equal(t, want.area, c.Area[i], want.doc.URL)
 	}
-	assert.InDelta(t, 700, c.ZX[mapAt(t, resp, placed.ID)], 0)
+	assert.InDelta(t, 700, c.MX[mapAt(t, resp, placed.ID)], 0)
+	assert.InDelta(t, 142, c.ZX[mapAt(t, resp, placed.ID)], 0)
 	assert.Equal(t, "A title on two lines", c.Title[mapAt(t, resp, d[0].ID)])
 	assert.Equal(t, strings.Repeat("é", 200), c.Title[mapAt(t, resp, d[1].ID)])
 	assert.Equal(t, "Saved as this", c.Title[mapAt(t, resp, d[2].ID)], "the bookmark's title")
 	assert.Equal(t, "example.com", c.Title[mapAt(t, resp, d[3].ID)], "the host")
 	assert.Equal(t, "example.com", c.Host[mapAt(t, resp, d[3].ID)])
+}
+
+// TestInterestMap_LeavesOutDocumentsOffTheMap: a document 2.5.0 placed
+// on a built map is left out of it, and the rest of the map is as it was:
+// one placed with no place, by its index jobs or its sweep, and one moved
+// into another interest or into Unsorted, which keeps a place outside its
+// new circle.
+func TestInterestMap_LeavesOutDocumentsOffTheMap(t *testing.T) {
+	for name, tc := range map[string]struct {
+		onMap bool // the document is on the map before 2.5.0 writes
+		write func(t *testing.T, s *testServer, p store.Placement)
+	}{
+		"placed by 2.5.0's index job": {write: func(t *testing.T, s *testServer, p store.Placement) {
+			require.True(t, curio250.PlaceDocument(t, s.db, "local", p))
+		}},
+		"placed by 2.5.0's sweep": {write: func(t *testing.T, s *testServer, p store.Placement) {
+			p.InterestID = ""
+			require.True(t, curio250.PlaceIfAbsent(t, s.db, p))
+		}},
+		"moved by 2.5.0 into another interest": {onMap: true, write: func(t *testing.T, s *testServer, p store.Placement) {
+			require.True(t, curio250.PlaceDocument(t, s.db, "local", p))
+		}},
+		"moved by 2.5.0 into Unsorted": {onMap: true, write: func(t *testing.T, s *testServer, p store.Placement) {
+			p.InterestID = ""
+			require.True(t, curio250.PlaceDocument(t, s.db, "local", p))
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestServer(t)
+			d := s.docs(t, "map", 4)
+			f := s.newRun(t, store.InterestShapeAreas)
+			area := f.area("Engineering")
+			kafka := f.interest("Kafka", area, 0, d[:2], nil)
+			joins := f.interest("Joins", area, 0, d[2:3], nil)
+			f.unsorted(kafka, d[3])
+			f.mapped()
+			run := f.commit(t)
+			docs := s.docs(t, "placed", 3)
+			s.placeMapped(t, run, kafka, docs[0], mapPlace(700, 121, 301))
+			s.placeMapped(t, run, "", docs[1], mapPlace(800, 905, 495))
+			off := docs[2]
+			if tc.onMap {
+				s.placeMapped(t, run, kafka, off, mapPlace(750, 122, 302))
+			}
+			before := getAs[InterestMapResponse](t, s, "/v1/interests/map")
+			want := before
+			if tc.onMap {
+				want = without(t, before, off.ID)
+			}
+
+			tc.write(t, s, store.Placement{RunID: run, DocumentID: off.ID, InterestID: joins, Similarity: 0.6})
+			got := getAs[InterestMapResponse](t, s, "/v1/interests/map")
+			assert.Equal(t, want, got)
+			assert.NotContains(t, got.Documents.ID, off.ID)
+			assert.Len(t, got.Documents.ID, 6, "the four the rebuild assigned and two placed on the map")
+		})
+	}
+}
+
+// without is resp without document id.
+func without(t *testing.T, resp InterestMapResponse, id string) InterestMapResponse {
+	t.Helper()
+	i := mapAt(t, resp, id)
+	c := &resp.Documents
+	c.ID, c.Title, c.Host, c.Fit = drop(c.ID, i), drop(c.Title, i), drop(c.Host, i), drop(c.Fit, i)
+	c.Interest, c.Nearest, c.Area = drop(c.Interest, i), drop(c.Nearest, i), drop(c.Area, i)
+	c.Similarity, c.MX, c.MY, c.ZX, c.ZY = drop(c.Similarity, i), drop(c.MX, i), drop(c.MY, i), drop(c.ZX, i), drop(c.ZY, i)
+	return resp
+}
+
+// drop is xs without its i-th element, in a new slice.
+func drop[T any](xs []T, i int) []T { return slices.Delete(slices.Clone(xs), i, i+1) }
+
+// TestMapResponse_Inconsistencies: a document, with a place on the map or
+// without, in an interest the run lacks, and an interest similar to one
+// the run lacks, are errors, not documents left out.
+func TestMapResponse_Inconsistencies(t *testing.T) {
+	finished := time.Now()
+	run := &store.InterestRun{ID: "run", FinishedAt: &finished, RunOutcome: store.RunOutcome{Shape: store.InterestShapeFlat,
+		Map: &store.RunMap{Status: store.MapBuilt, Kind: store.RunKindFresh, DotRadius: 1,
+			Unsorted: store.Circle{X: 900, Y: 500, R: 60}}}}
+	place := &store.GroupMap{ZoomX: 100, ZoomY: 100, ZoomR: 10, AnchorX: 1, AnchorY: 1}
+	kafka := store.InterestGroup{Interest: store.Interest{ID: "kafka", Level: store.InterestLevelInterest}, Size: 1, Map: place}
+	for name, tc := range map[string]struct {
+		groups []store.InterestGroup
+		docs   []store.MapDocument
+		err    string
+	}{
+		"a document in an interest the run lacks": {groups: []store.InterestGroup{kafka},
+			docs: []store.MapDocument{{DocumentID: "d", Placed: true, InterestID: "joins",
+				Map: &store.MapPosition{ZoomX: 100, ZoomY: 100}}},
+			err: "document d: interest joins isn't one of the run's"},
+		"one without a place": {groups: []store.InterestGroup{kafka},
+			docs: []store.MapDocument{{DocumentID: "d", Placed: true, InterestID: "joins"}},
+			err:  "document d: interest joins isn't one of the run's"},
+		"a similar interest the run lacks": {groups: []store.InterestGroup{{Interest: kafka.Interest, Size: 1, Map: place,
+			Similar: []store.SimilarInterest{{ID: "joins", Cosine: 0.5}}}},
+			err: "interest kafka of run run is similar to joins, which the run lacks"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := mapResponse(run, tc.groups, tc.docs)
+			require.EqualError(t, err, tc.err)
+		})
+	}
 }
 
 // TestMapTitle_FallsBackToTheURL: a document with no title, no bookmark

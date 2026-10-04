@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest/curio250"
 )
 
 // placedInto returns where run placed each document: its interest, "" for
@@ -209,11 +210,13 @@ func TestPlacer_Sweep(t *testing.T) {
 	ctx := context.Background()
 	f := newEngineFixture(t, 3, 4)
 	run := f.rebuild(t, f.engine(nil, nil, Config{}))
-	axis0 := f.groups(t, run.ID)[3].ID
+	axis0 := f.groups(t, run.ID)[3]
 	p := f.placer()
 	fast := f.add(t, 1, 1)[0]
 	p.Place(ctx, tenant, fast)
-	_, err := f.db.Exec(`UPDATE interest_placements SET interest_id = ? WHERE document_id = ?`, axis0, fast)
+	// Moved into axis 0's interest, on the map: at its circle's centre.
+	_, err := f.db.Exec(`UPDATE interest_placements SET interest_id = ?, zoom_x = ?, zoom_y = ? WHERE document_id = ?`,
+		axis0.ID, axis0.Map.ZoomX, axis0.Map.ZoomY, fast)
 	require.NoError(t, err)
 	swept := f.add(t, 0, 2)
 	broken := f.addVector(t, []float32{float32(math.NaN()), 1})
@@ -222,9 +225,9 @@ func TestPlacer_Sweep(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, placed)
 	got := f.placedInto(t, run.ID)
-	assert.Equal(t, axis0, got[fast].InterestID, "the fast path's placement stands")
+	assert.Equal(t, axis0.ID, got[fast].InterestID, "the fast path's placement stands")
 	for _, id := range swept {
-		assert.Equal(t, axis0, got[id].InterestID)
+		assert.Equal(t, axis0.ID, got[id].InterestID)
 	}
 	assert.NotContains(t, got, broken)
 	warning := f.lines("level=WARN")
@@ -426,4 +429,94 @@ func TestPlacer_SweepPastItsBudget(t *testing.T) {
 			"%s sits by its interest's anchor", doc)
 		assert.True(t, insideCircle(got.Map.ZoomX, got.Map.ZoomY, run.Map.DotRadius, f.circleOf(t, run.ID, got.InterestID)))
 	}
+}
+
+// circleIn is where placement p of run should sit in the zoom view: its
+// interest's circle, or Unsorted's disc.
+func (f *engineFixture) circleIn(t *testing.T, run *store.InterestRun, p store.MapPlace) store.Circle {
+	t.Helper()
+	if p.InterestID == "" {
+		return run.Map.Unsorted
+	}
+	return f.circleOf(t, run.ID, p.InterestID)
+}
+
+// TestPlacer_SweepRepairsWhat250Left: a placement 2.5.0 left on a built
+// map, with no place or with one outside its new circle, is placed again
+// by one sweep, which counts it, inside its circle; a second sweep writes
+// nothing.
+func TestPlacer_SweepRepairsWhat250Left(t *testing.T) {
+	ctx := context.Background()
+	for name, leave := range map[string]func(f *engineFixture, p store.Placement){
+		"placed by 2.5.0's index job": func(f *engineFixture, p store.Placement) {
+			require.True(t, curio250.PlaceDocument(t, f.db, tenant, p))
+		},
+		"placed by 2.5.0's sweep": func(f *engineFixture, p store.Placement) {
+			p.InterestID = ""
+			require.True(t, curio250.PlaceIfAbsent(t, f.db, p))
+		},
+		"moved by 2.5.0 into another interest": func(f *engineFixture, p store.Placement) {
+			f.placer().Place(ctx, tenant, p.DocumentID)
+			require.NotEqual(t, p.InterestID, f.placeOf(t, p.RunID, p.DocumentID).InterestID)
+			require.True(t, curio250.PlaceDocument(t, f.db, tenant, p))
+		},
+		"moved by 2.5.0 into Unsorted": func(f *engineFixture, p store.Placement) {
+			f.placer().Place(ctx, tenant, p.DocumentID)
+			p.InterestID = ""
+			require.True(t, curio250.PlaceDocument(t, f.db, tenant, p))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := mapLibrary(t, "d")
+			run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+			doc := f.addAround(t, "d", 0, 1, rand.New(rand.NewPCG(7, 7)))[0]
+			// Axis 3's interest, the smallest: never axis 0's.
+			other := f.groups(t, run.ID)[12].ID
+			leave(f, store.Placement{RunID: run.ID, DocumentID: doc, InterestID: other, Similarity: 0.6})
+
+			placed, err := f.placer().Sweep(ctx, tenant)
+			require.NoError(t, err)
+			assert.Equal(t, 1, placed)
+			got := f.placeOf(t, run.ID, doc)
+			assert.NotEqual(t, other, got.InterestID, "placed where the placer puts it")
+			assert.True(t, insideCircle(got.Map.ZoomX, got.Map.ZoomY, run.Map.DotRadius, f.circleIn(t, run, got)))
+			again, err := f.placer().Sweep(ctx, tenant)
+			require.NoError(t, err)
+			assert.Zero(t, again)
+			assert.Empty(t, f.lines("level=WARN"))
+		})
+	}
+}
+
+// TestPlacer_NoChurn: what the placer itself places on a built map, by
+// the fast path or a sweep, into interests and into Unsorted, is never
+// placed again by a sweep.
+func TestPlacer_NoChurn(t *testing.T) {
+	ctx := context.Background()
+	f := mapLibrary(t, "d")
+	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	r := rand.New(rand.NewPCG(8, 8))
+	p := f.placer()
+	for g := range 4 {
+		for _, doc := range f.addAround(t, "fast", g, 3, r) {
+			p.Place(ctx, tenant, doc)
+		}
+	}
+	far := make([]float32, mapDims)
+	far[mapDims-1] = 1
+	p.Place(ctx, tenant, f.addVector(t, far))
+	for g := range 4 {
+		f.addAround(t, "swept", g, 3, r)
+	}
+	f.addVector(t, far)
+	placed, err := p.Sweep(ctx, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, 13, placed)
+	counts, err := f.store.PlacementCounts(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Positive(t, counts[""], "some in Unsorted")
+
+	again, err := p.Sweep(ctx, tenant)
+	require.NoError(t, err)
+	assert.Zero(t, again)
 }

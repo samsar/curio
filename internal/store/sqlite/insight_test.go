@@ -773,10 +773,16 @@ func (f *insightFixture) indexed(t *testing.T, at time.Time, ids ...string) {
 // readAt, and returns it as LatestRun reads it.
 func (f *insightFixture) doneRun(t *testing.T, readAt time.Time) *store.InterestRun {
 	t.Helper()
+	return f.doneRunOf(t, readAt, f.firstCommit)
+}
+
+// doneRunOf is doneRun committing what commit makes of the run.
+func (f *insightFixture) doneRunOf(t *testing.T, readAt time.Time, commit func(*store.InterestRun) store.RunCommit) *store.InterestRun {
+	t.Helper()
 	run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerFirst, Grouper: "test", VectorsReadAt: &readAt,
 		RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeAreas}}
 	require.NoError(t, f.ins.CreateRun(f.ctx, run))
-	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(run)))
+	require.NoError(t, f.ins.CommitRun(f.ctx, commit(run)))
 	done, err := f.ins.GetRun(f.ctx, run.ID)
 	require.NoError(t, err)
 	return done

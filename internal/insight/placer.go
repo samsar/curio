@@ -167,8 +167,10 @@ func (p *Placer) place(ctx context.Context, tenantID, documentID string) (runID 
 // Sweep places, under the same holds as Place, every fetched document
 // indexed since the current run read its vectors that the run neither
 // assigned nor placed: those indexed while a rebuild ran, and any whose
-// placement failed. A document placed meanwhile keeps that placement. It
-// returns how many it placed. A document whose vectors can't be placed
+// placement failed. On a built map it places again, with a place, those
+// placed off it (InsightStore.Unplaced): with no place, or outside their
+// circle, as 2.5.x leaves them. A document placed meanwhile on the map
+// keeps that placement. It returns how many it placed. A document whose vectors can't be placed
 // (another width, a non-finite value) is left out with a warning, so one
 // can't stall the rest; any other failure, a panic included, is its error.
 // Searching for neighbours on the map stops once it has taken the

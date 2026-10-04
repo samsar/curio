@@ -83,16 +83,17 @@ type MapSimilar struct {
 	Cosine   float64 `json:"cosine"`
 }
 
-// MapDocumentColumns are the map's documents as columns. Interest is the
-// interest a document is in (a member, a loose fit, or placed into it), -1
-// for Unsorted; Nearest an unsorted document's nearest interest, -1
-// otherwise (a document placed into Unsorted names none); Area the area of
-// Interest, -1 for none or in the flat shape. Fit is member, loose,
-// unsorted, or new (placed since the rebuild); Similarity the cosine to
-// Interest's centroid, or for Unsorted to the nearest interest's. Title is
-// the document's title, else its newest bookmark's, else its host, else its
-// URL, on one line and cut to 200 characters. MX and MY are its place on the
-// document map, ZX and ZY in the zoom view.
+// MapDocumentColumns are the map's documents as columns, those off the map
+// left out (onMap). Interest is the interest a document is in (a member, a
+// loose fit, or placed into it), -1 for Unsorted; Nearest an unsorted
+// document's nearest interest, -1 otherwise (a document placed into
+// Unsorted names none); Area the area of Interest, -1 for none or in the
+// flat shape. Fit is member, loose, unsorted, or new (placed since the
+// rebuild); Similarity the cosine to Interest's centroid, or for Unsorted
+// to the nearest interest's. Title is the document's title, else its
+// newest bookmark's, else its host, else its URL, on one line and cut to
+// 200 characters. MX and MY are its place on the document map, ZX and ZY
+// in the zoom view.
 type MapDocumentColumns struct {
 	ID         []string  `json:"id"`
 	Title      []string  `json:"title"`
@@ -204,8 +205,8 @@ func (d Deps) interestMap(ctx context.Context) (InterestMapResponse, error) {
 	}
 }
 
-// mapResponse is a run's built map in the wire shape. A group or document
-// of it without a place, or naming a group the run lacks, is an
+// mapResponse is a run's built map in the wire shape. A group without a
+// place, or a group or document naming a group the run lacks, is an
 // inconsistency, not a missing resource.
 func mapResponse(run *store.InterestRun, groups []store.InterestGroup, docs []store.MapDocument) (InterestMapResponse, error) {
 	if run.FinishedAt == nil {
@@ -249,7 +250,7 @@ func mapResponse(run *store.InterestRun, groups []store.InterestGroup, docs []st
 		resp.Interests = append(resp.Interests, in)
 	}
 	var err error
-	resp.Documents, err = documentColumns(docs, interestAt, resp.Interests)
+	resp.Documents, err = documentColumns(docs, interestAt, resp.Interests, resp.Map.Unsorted)
 	return resp, err
 }
 
@@ -292,8 +293,10 @@ func anchorOf(g *store.GroupMap) MapPoint { return MapPoint{X: g.AnchorX, Y: g.A
 // mapTitleRunes is the longest a map document's title is.
 const mapTitleRunes = 200
 
-// documentColumns are the map's documents as columns.
-func documentColumns(docs []store.MapDocument, interestAt map[string]int, interests []MapInterest) (MapDocumentColumns, error) {
+// documentColumns are the map's documents as columns, leaving out those
+// off the map (onMap).
+func documentColumns(docs []store.MapDocument, interestAt map[string]int, interests []MapInterest,
+	unsorted MapCircle) (MapDocumentColumns, error) {
 	n := len(docs)
 	c := MapDocumentColumns{ID: make([]string, 0, n), Title: make([]string, 0, n), Host: make([]string, 0, n),
 		Interest: make([]int, 0, n), Nearest: make([]int, 0, n), Area: make([]int, 0, n), Fit: make([]string, 0, n),
@@ -310,12 +313,16 @@ func documentColumns(docs []store.MapDocument, interestAt map[string]int, intere
 		return i, nil
 	}
 	for _, d := range docs {
-		if d.Map == nil {
-			return MapDocumentColumns{}, fmt.Errorf("document %s has no place on the run's map", d.DocumentID)
-		}
 		interest, err := index(d.InterestID)
 		if err != nil {
 			return MapDocumentColumns{}, fmt.Errorf("document %s: %w", d.DocumentID, err)
+		}
+		circle := unsorted
+		if interest >= 0 {
+			circle = interests[interest].Zoom
+		}
+		if !onMap(d, circle) {
+			continue
 		}
 		nearest := -1
 		if !d.Placed && d.Fit == store.InterestFitUnsorted {
@@ -338,6 +345,23 @@ func documentColumns(docs []store.MapDocument, interestAt map[string]int, intere
 		c.ZX, c.ZY = append(c.ZX, d.Map.ZoomX), append(c.ZY, d.Map.ZoomY)
 	}
 	return c, nil
+}
+
+// onMap reports whether d has a place on the map: any place, for a
+// document the run assigned; for one placed since, a dot whose centre lies
+// inside circle, its interest's or Unsorted's disc. 2.5.x places documents
+// with no place, and moving one into another interest keeps the place it
+// had. Such a document is left out until the placement sweep repairs it,
+// rather than drawn in a circle it isn't in or given a place no row holds.
+func onMap(d store.MapDocument, circle MapCircle) bool {
+	if d.Map == nil {
+		return false
+	}
+	if !d.Placed {
+		return true
+	}
+	dx, dy := d.Map.ZoomX-circle.X, d.Map.ZoomY-circle.Y
+	return dx*dx+dy*dy <= circle.R*circle.R
 }
 
 // mapTitle names a document on the map: its title, else its newest

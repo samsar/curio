@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"maps"
 	"math"
 	"slices"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest/curio250"
 )
 
 // builtMap is a built map of a commit: kind, time, params, the dots'
@@ -217,15 +219,17 @@ func TestInsights_MapPrunedWithItsRun(t *testing.T) {
 
 // TestInsights_PlacementsWithPlaces: PlaceDocument writes a placement's
 // place on the map, and placing it anew moves it; PlaceMany writes them
-// too, but keeps a placement made already, with its place.
+// too, but keeps a placement made already on the map, with its place.
 func TestInsights_PlacementsWithPlaces(t *testing.T) {
 	f := newInsightFixture(t, 10)
 	d := f.docs
 	run := f.run(t, "local")
 	require.NoError(t, f.ins.CommitRun(f.ctx, mapped(f.firstCommit(run))))
+	// at is a place whose zoom dot lies inside both interests' circles.
 	at := func(x float64) *store.MapPosition {
-		return &store.MapPosition{MapX: x, MapY: x + 1, ZoomX: x + 2, ZoomY: x + 3}
+		return &store.MapPosition{MapX: x, MapY: x + 1, ZoomX: 300 + x/100, ZoomY: 400 + x/100}
 	}
+	inUnsorted := &store.MapPosition{MapX: 400, MapY: 401, ZoomX: 905, ZoomY: 495}
 	place := func(doc, interest string, p *store.MapPosition) {
 		t.Helper()
 		written, err := f.ins.PlaceDocument(f.ctx, "local", store.Placement{RunID: run.ID, DocumentID: doc,
@@ -252,14 +256,14 @@ func TestInsights_PlacementsWithPlaces(t *testing.T) {
 
 	n, err := f.ins.PlaceMany(f.ctx, "local", run.ID, []store.Placement{
 		{DocumentID: d[7], InterestID: "interest-1", Similarity: 0.5, Map: at(300)},
-		{DocumentID: d[8], Similarity: 0.1, Map: at(400)},
+		{DocumentID: d[8], Similarity: 0.1, Map: inUnsorted},
 		{DocumentID: d[9], InterestID: "interest-1", Similarity: 0.5},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, n)
 	got := places()
 	assert.Equal(t, *at(200), got[d[7]].Map, "the placement made already keeps its place")
-	assert.Equal(t, store.MapPlace{DocumentID: d[8], Map: *at(400)}, got[d[8]], "into Unsorted")
+	assert.Equal(t, store.MapPlace{DocumentID: d[8], Map: *inUnsorted}, got[d[8]], "into Unsorted")
 	assert.NotContains(t, got, d[9], "a placement without a place")
 	assert.Equal(t, store.MapPlace{DocumentID: d[0], InterestID: "interest-1", Map: store.MapPosition{MapX: 10, MapY: 20,
 		ZoomX: 300, ZoomY: 400}}, got[d[0]], "an assignment's")
@@ -281,7 +285,7 @@ func TestInsights_MapDocuments(t *testing.T) {
 	require.NoError(t, f.ins.CommitRun(f.ctx, c))
 	for _, doc := range []string{d[9], d[8]} {
 		_, err := f.ins.PlaceDocument(f.ctx, "local", store.Placement{RunID: run.ID, DocumentID: doc, InterestID: "interest-2",
-			Similarity: 0.4, Map: &store.MapPosition{MapX: 5, MapY: 6, ZoomX: 7, ZoomY: 8}})
+			Similarity: 0.4, Map: &store.MapPosition{MapX: 5, MapY: 6, ZoomX: 330, ZoomY: 410}})
 		require.NoError(t, err)
 	}
 	_, err := f.db.Exec(`UPDATE documents SET state = 'failed', failure_cause = 'other' WHERE id = ?`, d[1])
@@ -313,7 +317,7 @@ func TestInsights_MapDocuments(t *testing.T) {
 		byID[doc.DocumentID] = doc
 	}
 	assert.Equal(t, store.MapDocument{DocumentID: d[9], Placed: true, InterestID: "interest-2", Similarity: 0.4,
-		Map: &store.MapPosition{MapX: 5, MapY: 6, ZoomX: 7, ZoomY: 8}, URL: "https://example.com/j"}, byID[d[9]])
+		Map: &store.MapPosition{MapX: 5, MapY: 6, ZoomX: 330, ZoomY: 410}, URL: "https://example.com/j"}, byID[d[9]])
 	five := byID[d[5]]
 	assert.Equal(t, store.InterestFitUnsorted, five.Fit)
 	assert.Equal(t, "interest-1", five.NearestID)
@@ -323,4 +327,133 @@ func TestInsights_MapDocuments(t *testing.T) {
 	assert.Equal(t, "A title", byID[d[3]].Title)
 	assert.Empty(t, byID[d[3]].BookmarkTitle)
 	assert.Equal(t, "Newer", byID[d[4]].BookmarkTitle, "the newest bookmark whose title isn't blank")
+}
+
+// Places on mapped's map: inside interest-1's circle, outside interest-2's
+// and Unsorted's disc; and inside interest-2's.
+var (
+	inInterestOne = &store.MapPosition{MapX: 1, MapY: 2, ZoomX: 262, ZoomY: 401}
+	inInterestTwo = &store.MapPosition{MapX: 3, MapY: 4, ZoomX: 330, ZoomY: 410}
+)
+
+// offTheMap are the placements 2.5.0 leaves on a built map, each made of
+// doc in run: a new one with no place, from its index jobs or its sweep,
+// and one moved into another interest or into Unsorted, which keeps the
+// place it had, outside its new circle.
+var offTheMap = map[string]func(t *testing.T, f *insightFixture, run, doc string){
+	"placed by 2.5.0's index job": func(t *testing.T, f *insightFixture, run, doc string) {
+		require.True(t, curio250.PlaceDocument(t, f.db, "local", store.Placement{RunID: run, DocumentID: doc,
+			InterestID: "interest-1", Similarity: 0.6}))
+	},
+	"placed by 2.5.0's sweep": func(t *testing.T, f *insightFixture, run, doc string) {
+		require.True(t, curio250.PlaceIfAbsent(t, f.db, store.Placement{RunID: run, DocumentID: doc, Similarity: 0.2}))
+	},
+	"moved by 2.5.0 into another interest": func(t *testing.T, f *insightFixture, run, doc string) {
+		f.placeOnMap(t, run, doc, "interest-1", inInterestOne)
+		require.True(t, curio250.PlaceDocument(t, f.db, "local", store.Placement{RunID: run, DocumentID: doc,
+			InterestID: "interest-2", Similarity: 0.6}))
+	},
+	"moved by 2.5.0 into Unsorted": func(t *testing.T, f *insightFixture, run, doc string) {
+		f.placeOnMap(t, run, doc, "interest-1", inInterestOne)
+		require.True(t, curio250.PlaceDocument(t, f.db, "local", store.Placement{RunID: run, DocumentID: doc,
+			Similarity: 0.2}))
+	},
+}
+
+// placeOnMap places doc into run's interest at p, as the placer does.
+func (f *insightFixture) placeOnMap(t *testing.T, run, doc, interest string, p *store.MapPosition) {
+	t.Helper()
+	written, err := f.ins.PlaceDocument(f.ctx, "local", store.Placement{RunID: run, DocumentID: doc, InterestID: interest,
+		Similarity: 0.6, Map: p})
+	require.NoError(t, err)
+	require.True(t, written)
+}
+
+// TestInsights_PlacementsOffTheMap: on a built map, each placement 2.5.0
+// leaves is off the map: Unplaced lists it, and PlaceMany replaces it with
+// a placement that has a place, and keeps that one after. A placement
+// without a place replaces nothing, and one on the map is neither listed
+// nor replaced.
+func TestInsights_PlacementsOffTheMap(t *testing.T) {
+	readAt := time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)
+	for name, leave := range offTheMap {
+		t.Run(name, func(t *testing.T) {
+			f := newInsightFixture(t, 9)
+			d := f.docs
+			f.indexed(t, readAt.Add(-time.Hour), d[:7]...)
+			run := f.doneRunOf(t, readAt, func(r *store.InterestRun) store.RunCommit { return mapped(f.firstCommit(r)) })
+			f.indexed(t, readAt.Add(time.Minute), d[7], d[8])
+			f.placeOnMap(t, run.ID, d[8], "interest-2", inInterestTwo)
+			leave(t, f, run.ID, d[7])
+			unplaced := func() []string {
+				t.Helper()
+				got, err := f.ins.Unplaced(f.ctx, "local", run.ID, readAt)
+				require.NoError(t, err)
+				return got
+			}
+			placeMany := func(ps ...store.Placement) int {
+				t.Helper()
+				n, err := f.ins.PlaceMany(f.ctx, "local", run.ID, ps)
+				require.NoError(t, err)
+				return n
+			}
+
+			assert.Equal(t, []string{d[7]}, unplaced(), "off the map; d8 is on it")
+			assert.Zero(t, placeMany(store.Placement{DocumentID: d[7], InterestID: "interest-2", Similarity: 0.5}),
+				"a placement without a place repairs nothing")
+			assert.Equal(t, 1, placeMany(
+				store.Placement{DocumentID: d[7], InterestID: "interest-2", Similarity: 0.5, Map: inInterestTwo},
+				store.Placement{DocumentID: d[8], InterestID: "interest-1", Similarity: 0.5, Map: inInterestOne},
+			), "d7 repaired, d8 kept")
+			got, err := f.ins.MapPositions(f.ctx, run.ID, []string{d[7], d[8]})
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []store.MapPlace{
+				{DocumentID: d[7], InterestID: "interest-2", Map: *inInterestTwo},
+				{DocumentID: d[8], InterestID: "interest-2", Map: *inInterestTwo},
+			}, got)
+			assert.Empty(t, unplaced(), "on the map now")
+			assert.Zero(t, placeMany(store.Placement{DocumentID: d[7], InterestID: "interest-1", Similarity: 0.5,
+				Map: inInterestOne}), "the repaired placement is kept")
+		})
+	}
+}
+
+// TestInsights_PlacementsWithoutABuiltMap: a run with no map, or one whose
+// map failed, has no placement off its map: Unplaced lists what the run
+// neither assigned nor placed, as before maps, and PlaceMany keeps every
+// placement made, 2.5.0's included.
+func TestInsights_PlacementsWithoutABuiltMap(t *testing.T) {
+	readAt := time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)
+	for name, m := range map[string]*store.RunMap{
+		"no map":       nil,
+		"a failed map": {Status: store.MapFailed, Error: "the map took longer than 2m0s", Params: []byte(`{}`)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newInsightFixture(t, 13)
+			d := f.docs
+			f.indexed(t, readAt.Add(-time.Hour), d[:7]...)
+			run := f.doneRunOf(t, readAt, func(r *store.InterestRun) store.RunCommit {
+				c := f.firstCommit(r)
+				c.Outcome.Map = m
+				return c
+			})
+			f.indexed(t, readAt.Add(time.Minute), d[7:]...)
+			placed := d[7:11]
+			for i, name := range slices.Sorted(maps.Keys(offTheMap)) {
+				offTheMap[name](t, f, run.ID, placed[i])
+			}
+			f.placeOnMap(t, run.ID, d[11], "interest-2", nil)
+
+			got, err := f.ins.Unplaced(f.ctx, "local", run.ID, readAt)
+			require.NoError(t, err)
+			assert.Equal(t, []string{d[12]}, got)
+			ps := make([]store.Placement, 0, 5)
+			for _, doc := range d[7:12] {
+				ps = append(ps, store.Placement{DocumentID: doc, InterestID: "interest-1", Similarity: 0.5, Map: inInterestOne})
+			}
+			n, err := f.ins.PlaceMany(f.ctx, "local", run.ID, ps)
+			require.NoError(t, err)
+			assert.Zero(t, n, "every placement made is kept")
+		})
+	}
 }

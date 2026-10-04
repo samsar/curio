@@ -11780,6 +11780,31 @@ search is the cost, 40 ms median, 43 ms p95). A sweep of the 262
 held-out documents placed them all in 11.8 s, every one with places, 186
 into interests.
 
+**Placements off the map.** curio 2.5.x starts on a database 018
+migrated, since goose ignores versions it doesn't know, and knows nothing
+of the map: its index jobs and its sweep place documents with no place,
+and its `PlaceDocument` re-places one (`ON CONFLICT DO UPDATE`) without
+touching the place columns, so a placement it moves into another interest,
+or into Unsorted, keeps a dot drawn in the circle it left. A placement is
+*off the map* when its run's map is built and it has no place, or its zoom
+dot's centre lies outside its circle, its interest's or Unsorted's disc
+(dx² + dy² > r²). One SQL predicate (`offMapSQL`) says so for both
+`Unplaced`, which lists such placements with the documents the run neither
+assigned nor placed, and `PlaceMany`, whose upsert replaces such a row
+with a placement that has a place and keeps any other. So the sweep, at
+the daemon's start and after each rebuild, repairs them; with no built
+map nothing is off it, and both answer as before. The placer never draws
+a dot outside its circle (its room is r − dot − 0.01, and rounding moves a
+dot at most 0.0071), so nothing it placed itself is placed again
+(`TestPlacer_NoChurn`). `Unplaced` stays a range of
+`idx_documents_tenant_indexed` with primary-key seeks (the assignment, the
+placement, its run and its group): 54 ms on a fresh copy of the owner's
+library, and 4 ms after, with all 5,237 fetched documents in range.
+`PlaceMany`'s conflict reads the run and the group by their primary keys.
+`PlaceDocument`, the fast path, places anew whatever it finds, as before.
+Tests write 2.5.0's two statements verbatim (`sqlitetest/curio250`) and
+hold the store, the endpoint and the sweep to each shape they leave.
+
 ### The API
 
 `GET /v1/interests/map` answers the latest done run's map whole, unpaged
@@ -11799,7 +11824,15 @@ with none or in the flat shape), `fit` (`member`, `loose`, `unsorted`, or
 prototype's `interest`, meaning the nearest interest for an unsorted
 document, made one column's meaning depend on another's; `nearest` costs
 about 15 KB on the owner's library. Assigned documents come first, then
-placed ones, each by ID; documents now failed or dead are left out. No map
+placed ones, each by ID; documents now failed or dead are left out, and so
+is a placement off the map (above) until the sweep repairs it. That was a
+500 for the whole map at first, as an inconsistency, and 2.5.x writes
+them. Computing a place per request instead was turned down: a placement
+into Unsorted records no nearest interest, so its fallback would sit at
+the map's centre, and a place stored nowhere would differ from the one
+the repaired row comes to hold, and hide that it needs repair. Assigned
+documents aren't checked: `CommitRun` refuses a built map that leaves one
+without a place, and the zoom view checks its dots. No map
 is a 404 `urn:curio:problem:interest-map-unavailable` with `reason`
 `no_run`, `no_map` (a run from before maps) or `map_failed` (with
 `map_error`), and a detail the page can show. It and the retired

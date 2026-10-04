@@ -504,6 +504,10 @@ func insightPlanCases() []planCase {
 		identity   = "SEARCH i USING INDEX sqlite_autoindex_interests_1 (id=?)"
 		parent     = "SEARCH p USING INDEX sqlite_autoindex_interests_1 (id=?) LEFT-JOIN"
 		runByID    = "SEARCH interest_runs USING INDEX sqlite_autoindex_interest_runs_1 (id=?)"
+		// What tells a placement off its run's map (offMapSQL): the run
+		// and the interest's group, by their primary keys.
+		runOfPlacement   = "SEARCH r USING INDEX sqlite_autoindex_interest_runs_1 (id=?)"
+		groupOfPlacement = "SEARCH g USING INDEX sqlite_autoindex_interest_groups_1 (run_id=? AND interest_id=?) LEFT-JOIN"
 		// The upserts of insight_state (OweFresh, RecordFailure) insert
 		// VALUES and conflict on this primary key; they have no plan.
 		stateByTenant = "SEARCH insight_state USING INDEX sqlite_autoindex_insight_state_1 (tenant_id=?)"
@@ -693,11 +697,15 @@ func insightPlanCases() []planCase {
 			sorts: true,
 		},
 		{
-			name: "PlaceMany", query: placeIfAbsentSQL, args: []any{"run", "doc", "interest", 0.5, "now", 1.0, 2.0, 3.0, 4.0},
+			// The guard, and on a conflict the placement's run and its
+			// interest's group, to tell whether it is off the run's map.
+			name: "PlaceMany", query: placeOrRepairSQL, args: []any{"run", "doc", "interest", 0.5, "now", 1.0, 2.0, 3.0, 4.0},
 			want: []string{
 				"SEARCH documents EXISTS USING COVERING INDEX sqlite_autoindex_documents_1 (id=?)",
 				assignment("interest_assignments"),
+				runOfPlacement, groupOfPlacement,
 			},
+			avoid: []string{"SCAN"},
 		},
 		{
 			// A run's assigned documents in document ID order, from its
@@ -725,12 +733,17 @@ func insightPlanCases() []planCase {
 			},
 		},
 		{
+			// The documents indexed since, each checked against the run's
+			// assignments and placements, and a placement's run and group,
+			// by their primary keys.
 			name: "Unplaced", query: unplacedSQL, args: []any{"local", "since", store.DocStateFetched, "run"},
 			first: "SEARCH d USING INDEX idx_documents_tenant_indexed (tenant_id=? AND indexed_at>?)",
 			want: []string{
 				assignment("a"),
-				"SEARCH p USING COVERING INDEX sqlite_autoindex_interest_placements_1 (run_id=? AND document_id=?)",
+				"SEARCH p USING INDEX sqlite_autoindex_interest_placements_1 (run_id=? AND document_id=?) LEFT-JOIN",
+				runOfPlacement, groupOfPlacement,
 			},
+			avoid: []string{"SCAN"},
 		},
 	}
 }
