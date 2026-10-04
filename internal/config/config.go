@@ -137,7 +137,8 @@ type Native struct {
 	// as permanently dead (doc state `dead`, no retries, no Jina).
 	// Default true; the kill switch exists because the soft-404 heuristics
 	// (not-found titles, redirects onto a homepage or another site's
-	// landing page) can false-positive on unusual corpora.
+	// landing page, and a not-found notice or a parked domain's in a page's
+	// text) can false-positive on unusual corpora.
 	DeadLinkDetection bool `yaml:"dead_link_detection"`
 	// Backend selects the HTTP transport: "chrome" (default) parrots a
 	// Chrome TLS+HTTP/2 fingerprint via uTLS to clear JA3/Akamai bot
