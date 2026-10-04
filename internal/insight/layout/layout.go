@@ -69,7 +69,8 @@ type Neighbour struct {
 
 // Params returns every constant that changes what the views draw, for the
 // caller to record with a map; a change of any should make the next map
-// start cold.
+// start cold. Only the golden angle, a mathematical constant, and the
+// lattice's spacing, latticeGap's, are left out (TestParams_NameEveryConstant).
 func Params() map[string]any {
 	return map[string]any{
 		"algorithm_version": algorithmVersion,
@@ -95,6 +96,11 @@ func Params() map[string]any {
 			"pull_in_softness":   pullSoftness,
 			"min_aligned":        minAligned,
 			"min_frame":          minFrame,
+			"sigma_bisections":   sigmaBisections,
+			"sigma_tolerance":    sigmaTolerance,
+			"min_sigma_share":    minSigmaShare,
+			"init_stream":        initStream,
+			"descent_stream":     sgdStream,
 		},
 		"zoom": map[string]any{
 			"lattice_gap":        latticeGap,
@@ -106,12 +112,19 @@ func Params() map[string]any {
 			"unsorted_gap":       unsortedGap,
 			"orienting_similar":  orientingSimilar,
 			"max_dot_share":      maxDotShare,
+			"start_neighbours":   startNeighbours,
+			"min_distance":       minDistance,
 			"stress_iterations":  stressIterations,
+			"stress_tolerance":   stressTolerance,
 			"separation_sweeps":  separationSweeps,
+			"separation_slack":   separationSlack,
+			"overlap_tolerance":  overlapTolerance,
+			"coincident":         coincident,
 			"spread_factor":      spreadFactor,
 			"compaction_rounds":  compactionRounds,
 		},
-		"pca": map[string]any{"block": pcaBlock, "max_iterations": pcaMaxIterations, "tolerance": pcaTolerance},
+		"pca": map[string]any{"block": pcaBlock, "max_iterations": pcaMaxIterations, "tolerance": pcaTolerance,
+			"chunk": pcaChunk, "stream": pcaStream, "jacobi_sweeps": jacobiSweeps},
 	}
 }
 
