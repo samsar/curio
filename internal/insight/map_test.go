@@ -324,14 +324,24 @@ func TestRebuild_MapRules(t *testing.T) {
 		more := func(f *engineFixture) { f.addAround(t, "d", 3, 8, rand.New(rand.NewPCG(11, 12))) }
 		f := mapLibrary(t, "d")
 		e := f.engine(nil, nil, Config{Center: true})
-		prior := f.places(t, f.rebuild(t, e).ID)
+		first := f.rebuild(t, e)
+		// A quarter turn of the stored map about its centre puts the
+		// previous map in a frame a map drawn from nothing never takes, so
+		// only the alignment can bring the fresh map back to it. Unturned,
+		// a cold map's frame is nearly the previous one's, and which of the
+		// two lies closer is a matter of rounding.
+		_, err := f.db.Exec(`UPDATE interest_assignments SET map_x = ? - map_y, map_y = map_x WHERE run_id = ?`,
+			layout.Extent, first.ID)
+		require.NoError(t, err)
+		prior := f.places(t, first.ID)
 		more(f)
 		require.NoError(t, f.store.OweFresh(ctx, tenant, store.FreshReindex))
 		run := f.rebuild(t, e)
 		assert.Equal(t, store.RunKindFresh, run.Map.Kind)
 		aligned := meanShift(docMap(prior), docMap(f.places(t, run.ID)))
 		cold := meanShift(docMap(prior), docMap(coldControl(t, more)))
-		assert.Less(t, aligned, cold, "aligned: closer to the previous map than one drawn from nothing")
+		// 132 against 514 on arm64; without the alignment the two are equal.
+		assert.Less(t, aligned, cold/2, "aligned: far closer to the previous map than one drawn from nothing")
 	})
 	t.Run("a drift is fresh", func(t *testing.T) {
 		f := mapLibrary(t, "d")
