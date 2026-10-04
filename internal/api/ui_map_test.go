@@ -146,7 +146,7 @@ func TestInterestMapPage_ReadsOneRun(t *testing.T) {
 	}
 	assert.Zero(t, reads.total(), "a refused query reads nothing")
 
-	mapPage(t, s, "?view=zoom&select=document:"+url.QueryEscape(d[0].ID), http.StatusOK)
+	mapPage(t, s, "?view=interests&select=document:"+url.QueryEscape(d[0].ID), http.StatusOK)
 	assert.EqualValues(t, 1, reads.latest.Load())
 	assert.EqualValues(t, 1, reads.total(), "the latest run, and nothing else")
 }
@@ -166,7 +166,7 @@ func TestInterestMapPage_HostileSelection(t *testing.T) {
 	root := mapRoot(t, resp.body)
 	require.NotNil(t, root)
 	assert.Equal(t, "interest:"+id, nodeAttr(root, "data-select"))
-	assert.Equal(t, "all", nodeAttr(root, "data-view"))
+	assert.Equal(t, "similarity", nodeAttr(root, "data-view"))
 	assert.NotContains(t, resp.body, "<script>alert")
 }
 

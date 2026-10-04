@@ -110,7 +110,7 @@ func TestTemplatesHaveNoInlineCode(t *testing.T) {
 	assert.Empty(t, inlineCodeProblems(`{{/* no hx-on, no <style>, no onclick= */}}`), "comments may name them")
 	assert.Empty(t, inlineCodeProblems(`<button data-method="{{.Method}}" data-path="{{.Path}}"{{with .Body}} data-body="{{.}}"{{end}}>`+
 		`<div hx-get="{{navHref "search"}}" data-hx-get='{{.Href}}'>`+
-		`<div data-src="{{.Src}}" data-page="{{.PageHref}}" data-unsorted-page="{{.UnsortedPage}}" data-view="all">`),
+		`<div data-src="{{.Src}}" data-page="{{.PageHref}}" data-unsorted-page="{{.UnsortedPage}}" data-view="similarity">`),
 		"values built in Go")
 }
 
