@@ -6,6 +6,7 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -322,6 +323,32 @@ func TestZoom_Cancelled(t *testing.T) {
 
 	_, err = layout.Zoom(&cancelAfter{Context: context.Background(), n: 6}, in)
 	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestZoom_CancelledAtEveryCheck: a context cancelled at any of a warm
+// view's checks stops it with an error wrapping context.Canceled; among
+// them are the checks while new groups start beside the placed ones and
+// while dots take their slots.
+func TestZoom_CancelledAtEveryCheck(t *testing.T) {
+	prev := hierarchy([]byte{149, 176, 99, 16})
+	in := hierarchy([]byte{81, 107, 167, 58, 16, 183, 87, 163})
+	in.Prior = priorZoom(prev, zoom(t, prev))
+	in.Interests = slices.Clone(in.Interests)
+	in.Interests[0].Key = "new-i0"
+	counted := &cancelAfter{Context: context.Background(), n: math.MaxInt}
+	_, err := layout.Zoom(counted, in)
+	require.NoError(t, err)
+	steps := map[string]bool{"starting new groups": false, "placing dots": false}
+	for n := range math.MaxInt - counted.n {
+		_, err := layout.Zoom(&cancelAfter{Context: context.Background(), n: n}, in)
+		require.ErrorIs(t, err, context.Canceled, "cancelled at check %d", n)
+		for step := range steps {
+			steps[step] = steps[step] || strings.Contains(err.Error(), step)
+		}
+	}
+	for step, seen := range steps {
+		assert.True(t, seen, "a check while %s", step)
+	}
 }
 
 // TestZoom_RefusesBadInput: what the view can't draw is an error, never a

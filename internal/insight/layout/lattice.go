@@ -2,6 +2,8 @@ package layout
 
 import (
 	"cmp"
+	"context"
+	"fmt"
 	"math"
 	"slices"
 )
@@ -91,10 +93,13 @@ func (l *lattice) circleFor(m int) (radius float64, slots int) {
 // lattice around c: in order, each takes the free slot nearest its target,
 // ties to the lower slot. Two documents never share a slot, so no two dots
 // overlap, at O(len(targets)·slots).
-func (l *lattice) assignSlots(c XY, slots int, targets []XY) []XY {
+func (l *lattice) assignSlots(ctx context.Context, c XY, slots int, targets []XY) ([]XY, error) {
 	taken := make([]bool, slots)
 	out := make([]XY, len(targets))
 	for t, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("layout: placing dots: %w", err)
+		}
 		best, bestD := -1, math.Inf(1)
 		for s := range slots {
 			if taken[s] {
@@ -108,5 +113,5 @@ func (l *lattice) assignSlots(c XY, slots int, targets []XY) []XY {
 		taken[best] = true
 		out[t] = XY{c.X + l.points[best].X, c.Y + l.points[best].Y}
 	}
-	return out
+	return out, nil
 }

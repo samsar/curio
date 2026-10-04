@@ -636,9 +636,13 @@ func (z *zoomer) arrangeWarm(dm [][]float64, r []float64, gap float64, starts []
 	pos := slices.Clone(starts)
 	mobile := make([]bool, n)
 	for i := range n {
-		if !placed[i] {
-			pos[i], mobile[i] = besidePlaced(dm, starts, placed, i), true
+		if placed[i] {
+			continue
 		}
+		if err := z.ctx.Err(); err != nil {
+			return nil, fmt.Errorf("layout: starting new groups: %w", err)
+		}
+		pos[i], mobile[i] = besidePlaced(dm, starts, placed, i), true
 	}
 	if slices.Contains(mobile, true) {
 		var err error
@@ -761,10 +765,14 @@ func (z *zoomer) placeDocs(interestAt []XY, unsorted Circle, unsortedSlots int) 
 		if err != nil {
 			return nil, err
 		}
-		z.assign(out, g.docs, interestAt[i], g.radius, g.slots, targets)
+		if err := z.assign(out, g.docs, interestAt[i], g.radius, g.slots, targets); err != nil {
+			return nil, err
+		}
 	}
 	at := XY{unsorted.X, unsorted.Y}
-	z.assign(out, z.unsorted, at, unsorted.R, unsortedSlots, z.unsortedTargets(interestAt, at))
+	if err := z.assign(out, z.unsorted, at, unsorted.R, unsortedSlots, z.unsortedTargets(interestAt, at)); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -779,9 +787,9 @@ type target struct {
 // assign ranks the targets (by key, then document), spreads the ranks over
 // the circle's radius so it fills evenly, and gives each, innermost first,
 // the free slot nearest where it would like its dot.
-func (z *zoomer) assign(out []XY, docs []int, c XY, radius float64, slots int, targets []target) {
+func (z *zoomer) assign(out []XY, docs []int, c XY, radius float64, slots int, targets []target) error {
 	if len(docs) == 0 {
-		return
+		return nil
 	}
 	slices.SortFunc(targets, func(a, b target) int { return cmp.Or(cmp.Compare(a.key, b.key), cmp.Compare(a.doc, b.doc)) })
 	inner := radius - 1
@@ -790,10 +798,14 @@ func (z *zoomer) assign(out []XY, docs []int, c XY, radius float64, slots int, t
 		rr := inner * math.Sqrt((float64(rank)+0.5)/float64(len(targets)))
 		want[rank] = XY{c.X + rr*math.Cos(t.angle), c.Y + rr*math.Sin(t.angle)}
 	}
-	got := z.lat.assignSlots(c, slots, want)
+	got, err := z.lat.assignSlots(z.ctx, c, slots, want)
+	if err != nil {
+		return err
+	}
 	for rank, t := range targets {
 		out[t.doc] = got[rank]
 	}
+	return nil
 }
 
 // interestTargets are where interest i's documents would like their dots:
