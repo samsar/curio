@@ -1322,6 +1322,91 @@ type RunOutcome struct {
 	// What the run did to the previous run's interest identities. Kept
 	// includes Moved, and Kept + Created is the run's interests.
 	Kept, Created, Split, Merged, Moved, Dissolved int
+
+	// Map is the map the run drew of its grouping, nil when it drew none:
+	// a run from before maps were drawn, or one not done.
+	Map *RunMap
+}
+
+// MapExtent is the side of the square both of the interest map's views
+// fit: every position, and every circle's extent, lies in [0, MapExtent].
+const MapExtent = 1000.0
+
+// MapStatus is whether a run drew its map (interest_runs.map_status).
+type MapStatus string
+
+// Map statuses.
+const (
+	MapBuilt  MapStatus = "built"
+	MapFailed MapStatus = "failed"
+)
+
+// Valid reports whether s is one of the MapStatus constants.
+func (s MapStatus) Valid() bool { return s == MapBuilt || s == MapFailed }
+
+// RunMap is the map a run drew of its grouping: built, with its kind
+// (warm when the document map started from the previous run's), the zoom
+// view's dot radius and Unsorted's disc; or failed, with why. Either way
+// how long it took and the params it was drawn with. Positions are on the
+// run's groups and documents.
+type RunMap struct {
+	Status    MapStatus
+	Kind      RunKind // a built map's; "" for a failed one
+	Error     string  // a failed map's, one line
+	Took      time.Duration
+	Params    json.RawMessage
+	DotRadius float64 // a built map's
+	Unsorted  Circle  // a built map's
+}
+
+// Circle is a circle on the map.
+type Circle struct{ X, Y, R float64 }
+
+// GroupMap is an area or an interest on a built map: its circle in the
+// zoom view and its label's anchor on the document map.
+type GroupMap struct {
+	ZoomX, ZoomY, ZoomR float64
+	AnchorX, AnchorY    float64
+}
+
+// MapPosition is a document's place on a built map: on the document map
+// and in the zoom view.
+type MapPosition struct {
+	MapX, MapY   float64
+	ZoomX, ZoomY float64
+}
+
+// SimilarInterest is one of an interest's most similar interests in its
+// run, by the cosine of their centroids.
+type SimilarInterest struct {
+	ID     string  `json:"id"`
+	Cosine float64 `json:"cosine"`
+}
+
+// MapDocument is a document of a run's map: assigned by the run, with its
+// fit, or placed since (Placed, no fit), in InterestID ("" for Unsorted),
+// an unsorted assignment's NearestID, its similarity, its place on the map
+// (nil when the row has none), and its document's title, URL and, when it
+// has no title, its newest bookmark's title.
+type MapDocument struct {
+	DocumentID    string
+	Placed        bool
+	Fit           InterestFit
+	InterestID    string
+	NearestID     string
+	Similarity    float64
+	Map           *MapPosition
+	Title         string
+	URL           string
+	BookmarkTitle string
+}
+
+// MapPlace is a document's place in a run's map: the interest it is
+// assigned or placed into ("" for Unsorted) and its positions.
+type MapPlace struct {
+	DocumentID string
+	InterestID string
+	Map        MapPosition
 }
 
 // InterestRun is one rebuild of a tenant's interests. A done run never
@@ -1377,6 +1462,11 @@ type InterestGroup struct {
 	Loose       int
 	Cohesion    float64
 	Centroid    []float32
+	// Map is the group on its run's built map, nil without one; Similar
+	// are an interest's most similar interests, nil for an area. Only
+	// RunGroups reads them.
+	Map     *GroupMap
+	Similar []SimilarInterest
 }
 
 // InterestAssignment is where one document sits in a run's grouping: a
@@ -1396,6 +1486,9 @@ type InterestAssignment struct {
 	NearestLabel string
 	AreaSeed     int
 	InterestSeed int
+	// Map is the document's place on the run's built map, nil without
+	// one; only RunAssignments reads it.
+	Map *MapPosition
 }
 
 // LineageRow is what a run did to an old identity toward a new one: Shared
@@ -1416,6 +1509,10 @@ type Placement struct {
 	InterestID string
 	Similarity float64
 	PlacedAt   time.Time
+	// Map is the document's place on its run's built map, nil without
+	// one. PlaceDocument and PlaceMany write it; Placements doesn't read
+	// it (MapPositions and MapDocuments do).
+	Map *MapPosition
 }
 
 // DocumentPlace is where one document sits in a run's grouping: the run's
@@ -1504,8 +1601,11 @@ type RunCommit struct {
 	// Relabels are carried identities named anew: ID and the label fields.
 	Relabels []Interest
 	// Groups are the run's groups: ID (the identity), ParentID, Size,
-	// Loose, Cohesion and Centroid.
-	Groups      []InterestGroup
+	// Loose, Cohesion, Centroid, an interest's Similar and, with a built
+	// map, Map.
+	Groups []InterestGroup
+	// Assignments are the run's documents, each with its Map when the
+	// map is built.
 	Assignments []InterestAssignment
 	// Lineage is the run's lineage; their RunID is the run's.
 	Lineage []LineageRow
@@ -1542,7 +1642,12 @@ type InsightStore interface {
 	// writes the groups, assignments and lineage; retires every live
 	// identity of the tenant that c.Groups doesn't hold, at the commit's
 	// time and by this run; and moves the run from running to done with
-	// c.Outcome. It also clears the tenant's failures, a done rebuild
+	// c.Outcome, its map's status and positions with it. A built map must
+	// give every group and assignment a place inside [0, MapExtent], and
+	// a failed map, or none, gives none; an interest's similar interests
+	// are at most three of the commit's interests with finite cosines.
+	// Anything else is an error before anything is written. It also clears
+	// the tenant's failures, a done rebuild
 	// being what they count up to, and, for a fresh run, the fresh
 	// rebuild owed when it was owed at or before the run read its vectors
 	// (one owed again since is still owed), unless a re-embedding owes it
@@ -1610,9 +1715,19 @@ type InsightStore interface {
 	// RunAssignments returns every assignment of a run, in no particular
 	// order.
 	RunAssignments(ctx context.Context, runID string) ([]InterestAssignment, error)
-	// RunGroups returns every group of a run with its centroid, in no
-	// particular order.
+	// RunGroups returns every group of a run with its centroid, its
+	// place on the run's map and its similar interests, in no particular
+	// order.
 	RunGroups(ctx context.Context, runID string) ([]InterestGroup, error)
+	// MapDocuments returns the documents of a run's map: those it
+	// assigned, by ID, then those placed into it since, by ID, leaving out
+	// the documents now failed or dead (pending ones stay), each with its
+	// title, URL and an untitled one's bookmark title, in two reads.
+	MapDocuments(ctx context.Context, runID string) ([]MapDocument, error)
+	// MapPositions returns, of the documents ids, those the run assigned
+	// or placed with a place on its map, each with the interest it is in
+	// ("" for Unsorted), in no particular order, in one read.
+	MapPositions(ctx context.Context, runID string, ids []string) ([]MapPlace, error)
 	// RunLineage returns a run's lineage rows, by old identity, then new.
 	RunLineage(ctx context.Context, runID string) ([]LineageRow, error)
 	// Successors returns the run's lineage rows of the old identity oldID,
@@ -1647,14 +1762,15 @@ type InsightStore interface {
 	// the run has neither, or there is no such run.
 	DocumentPlace(ctx context.Context, runID, documentID string) (*DocumentPlace, error)
 	// PlaceDocument writes p, placing a document into its run, or places
-	// it anew, only while p.RunID is the tenant's latest done run, the run
-	// didn't assign the document, and the document exists; written
-	// reports whether it did. p.PlacedAt is ignored: the placement is
-	// timed by the write.
+	// it anew, its place on the map (p.Map) with it, only while p.RunID is
+	// the tenant's latest done run, the run didn't assign the document, and
+	// the document exists; written reports whether it did. p.PlacedAt is
+	// ignored: the placement is timed by the write.
 	PlaceDocument(ctx context.Context, tenantID string, p Placement) (written bool, err error)
-	// PlaceMany writes the placements into runID, in one transaction,
-	// while runID is the tenant's latest done run: a document placed
-	// already keeps its placement, and a document gone is left out. It
+	// PlaceMany writes the placements into runID, with their places on
+	// the map, in one transaction, while runID is the tenant's latest done
+	// run: a document placed already keeps its placement, and a document
+	// gone is left out. It
 	// returns how many it wrote; none when the run is no longer the
 	// latest. Each placement's RunID and PlacedAt are ignored.
 	PlaceMany(ctx context.Context, tenantID, runID string, ps []Placement) (int, error)

@@ -1153,6 +1153,115 @@ func TestMigration017_InterestsScheduling(t *testing.T) {
 	require.NoError(t, err, "Up runs again")
 }
 
+// TestMigration018_InterestMap: 018 adds the map's columns, a run
+// committed before it reads back without a map and its rows without
+// places; its Down restores 017's schema byte for byte, and Up runs again.
+func TestMigration018_InterestMap(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 17)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, state) VALUES ('d1', 'local', 'https://example.com/1', 'fetched');
+		INSERT INTO interest_runs (id, tenant_id, status, trigger, kind, split_check, shape, grouper, num_documents,
+			num_interests, finished_at)
+			VALUES ('r1', 'local', 'done', 'first', 'fresh', 0, 'flat', 'louvain', 1, 1, '2026-10-01T00:00:00.000Z');
+		INSERT INTO interests (id, tenant_id, level, created_run_id) VALUES ('i1', 'local', 'interest', 'r1');
+		INSERT INTO interest_groups (run_id, interest_id, size, loose, cohesion) VALUES ('r1', 'i1', 1, 0, 0.9);
+		INSERT INTO interest_assignments (run_id, document_id, interest_id, fit, similarity, area_seed, interest_seed)
+			VALUES ('r1', 'd1', 'i1', 'member', 0.9, -1, 0);`)
+	require.NoError(t, err)
+	schemaBefore := schemaDump(t, db)
+
+	_, err = p.UpTo(ctx, 18)
+	require.NoError(t, err)
+	for table, columns := range map[string][]string{
+		"interest_runs": {"map_status", "map_kind", "map_error", "map_ms", "map_params", "map_dot_radius",
+			"map_unsorted_x", "map_unsorted_y", "map_unsorted_r"},
+		"interest_groups":      {"zoom_x", "zoom_y", "zoom_r", "anchor_x", "anchor_y", "similar"},
+		"interest_assignments": {"map_x", "map_y", "zoom_x", "zoom_y"},
+		"interest_placements":  {"map_x", "map_y", "zoom_x", "zoom_y"},
+	} {
+		for _, column := range columns {
+			assert.True(t, hasColumn(t, db, table, column), "%s.%s", table, column)
+		}
+	}
+	ins := NewInsights(db)
+	run, err := ins.GetRun(ctx, "r1")
+	require.NoError(t, err)
+	assert.Nil(t, run.Map, "a run from before maps drew none")
+	groups, err := ins.RunGroups(ctx, "r1")
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+	assert.Nil(t, groups[0].Map)
+	assert.Nil(t, groups[0].Similar)
+	assignments, err := ins.RunAssignments(ctx, "r1")
+	require.NoError(t, err)
+	require.Len(t, assignments, 1)
+	assert.Nil(t, assignments[0].Map)
+	assertForeignKeysOnEverywhere(t, db)
+
+	_, err = p.DownTo(ctx, 17)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "017's schema, byte for byte")
+
+	_, err = p.UpTo(ctx, 18)
+	require.NoError(t, err, "Up runs again")
+}
+
+// TestMigration018_Constraints: the map's columns refuse what the store
+// never writes: an unknown status or kind, invalid params or similar
+// interests, a run half a map, and a group or a document half placed.
+func TestMigration018_Constraints(t *testing.T) {
+	db, _ := migratedTo(t, 18)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url) VALUES ('d1', 'local', 'https://example.com/1');
+		INSERT INTO interest_runs (id, tenant_id, trigger, kind, split_check, shape, grouper)
+			VALUES ('r1', 'local', 'first', 'fresh', 0, 'flat', 'louvain');
+		INSERT INTO interests (id, tenant_id, level, created_run_id) VALUES ('i1', 'local', 'interest', 'r1');
+		INSERT INTO interest_groups (run_id, interest_id, size, loose, cohesion) VALUES ('r1', 'i1', 1, 0, 0.9);
+		INSERT INTO interest_assignments (run_id, document_id, interest_id, fit, similarity, area_seed, interest_seed)
+			VALUES ('r1', 'd1', 'i1', 'member', 0.9, -1, 0);
+		INSERT INTO interest_placements (run_id, document_id, similarity, placed_at) VALUES ('r1', 'd1', 0.2, 'now');`)
+	require.NoError(t, err)
+	const built = `map_status = 'built', map_kind = 'warm', map_ms = 10, map_params = '{}', map_dot_radius = 2,
+		map_unsorted_x = 1, map_unsorted_y = 2, map_unsorted_r = 3`
+	const failed = `map_status = 'failed', map_error = 'boom', map_ms = 10, map_params = '{}'`
+	refused := map[string]string{
+		"an unknown status":                 `UPDATE interest_runs SET ` + built + `, map_status = 'drawn'`,
+		"an unknown kind":                   `UPDATE interest_runs SET ` + built + `, map_kind = 'cold'`,
+		"invalid params":                    `UPDATE interest_runs SET ` + built + `, map_params = '{'`,
+		"no map, but params":                `UPDATE interest_runs SET map_params = '{}'`,
+		"a built map with an error":         `UPDATE interest_runs SET ` + built + `, map_error = 'boom'`,
+		"a built map without a kind":        `UPDATE interest_runs SET ` + built + `, map_kind = NULL`,
+		"a built map of no dot":             `UPDATE interest_runs SET ` + built + `, map_dot_radius = 0`,
+		"a built map without Unsorted":      `UPDATE interest_runs SET ` + built + `, map_unsorted_y = NULL`,
+		"a built map of no Unsorted radius": `UPDATE interest_runs SET ` + built + `, map_unsorted_r = 0`,
+		"a failed map without its error":    `UPDATE interest_runs SET ` + failed + `, map_error = NULL`,
+		"a failed map with a dot":           `UPDATE interest_runs SET ` + failed + `, map_dot_radius = 2`,
+		"a failed map with a kind":          `UPDATE interest_runs SET ` + failed + `, map_kind = 'warm'`,
+		"a failed map without its time":     `UPDATE interest_runs SET ` + failed + `, map_ms = NULL`,
+		"a group half placed":               `UPDATE interest_groups SET zoom_x = 1, zoom_y = 2, zoom_r = 3`,
+		"a group of no radius":              `UPDATE interest_groups SET zoom_x = 1, zoom_y = 2, zoom_r = 0, anchor_x = 1, anchor_y = 2`,
+		"invalid similar interests":         `UPDATE interest_groups SET similar = '[{'`,
+		"an assignment half placed":         `UPDATE interest_assignments SET map_x = 1, map_y = 2`,
+		"a placement half placed":           `UPDATE interest_placements SET map_x = 1, map_y = 2, zoom_x = 3`,
+	}
+	for name, update := range refused {
+		_, err := db.Exec(update)
+		assert.ErrorContains(t, err, "constraint failed", name)
+	}
+	for name, update := range map[string]string{
+		"a built map": `UPDATE interest_runs SET ` + built,
+		"a failed map": `UPDATE interest_runs SET map_kind = NULL, map_dot_radius = NULL, map_unsorted_x = NULL,
+			map_unsorted_y = NULL, map_unsorted_r = NULL, ` + failed,
+		"a placed group":     `UPDATE interest_groups SET zoom_x = 1, zoom_y = 2, zoom_r = 3, anchor_x = 1, anchor_y = 2, similar = '[{"id":"i1","cosine":0.5}]'`,
+		"a placed document":  `UPDATE interest_assignments SET map_x = 1, map_y = 2, zoom_x = 3, zoom_y = 4`,
+		"a placed placement": `UPDATE interest_placements SET map_x = 1, map_y = 2, zoom_x = 3, zoom_y = 4`,
+	} {
+		_, err := db.Exec(update)
+		assert.NoError(t, err, name)
+	}
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `
