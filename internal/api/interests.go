@@ -258,6 +258,16 @@ type retiredInterestError struct{ body RetiredInterest }
 
 func (e *retiredInterestError) Error() string { return e.body.Detail }
 
+func (*retiredInterestError) problem() (int, string, string) {
+	return http.StatusGone, "interest retired", InterestRetiredProblemType
+}
+
+func (e *retiredInterestError) withProblem(p Problem) any {
+	b := e.body
+	b.Problem = p
+	return b
+}
+
 // Sizes for the interest endpoints. The list previews a few members of each
 // interest; one interest shows many more.
 const (

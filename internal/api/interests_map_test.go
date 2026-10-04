@@ -1,0 +1,254 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/samsar/curio/internal/store"
+)
+
+// mapped gives the run a built map: every group and assignment a place,
+// each from its order, and every interest the others as similar
+// interests, at most three.
+func (f *runFixture) mapped() {
+	f.c.Outcome.Map = &store.RunMap{Status: store.MapBuilt, Kind: store.RunKindWarm, Took: 2500 * time.Millisecond,
+		Params: []byte(`{"seed":1}`), DotRadius: 1.5, Unsorted: store.Circle{X: 900, Y: 500, R: 60}}
+	for i := range f.c.Groups {
+		g := &f.c.Groups[i]
+		x := float64(i)
+		g.Map = &store.GroupMap{ZoomX: 100 + 20*x, ZoomY: 300, ZoomR: 10, AnchorX: 50 + x, AnchorY: 60 + x}
+		if !slices.Contains(f.interests, g.ID) {
+			continue
+		}
+		g.Similar = []store.SimilarInterest{}
+		for _, other := range f.interests {
+			if other != g.ID && len(g.Similar) < 3 {
+				g.Similar = append(g.Similar, store.SimilarInterest{ID: other, Cosine: 0.5 - 0.01*float64(len(g.Similar))})
+			}
+		}
+	}
+	for i := range f.c.Assignments {
+		x := float64(i)
+		f.c.Assignments[i].Map = &store.MapPosition{MapX: 10 + x, MapY: 20 + x, ZoomX: 30 + x, ZoomY: 40 + x}
+	}
+}
+
+// placeMapped places doc into run's interest ("" for Unsorted) with a
+// place on the map.
+func (s *testServer) placeMapped(t *testing.T, run, interest string, doc *store.Document, x float64) {
+	t.Helper()
+	placed, err := s.insights().PlaceDocument(context.Background(), "local", store.Placement{RunID: run, DocumentID: doc.ID,
+		InterestID: interest, Similarity: 0.6, Map: &store.MapPosition{MapX: x, MapY: x, ZoomX: x, ZoomY: x}})
+	require.NoError(t, err)
+	require.True(t, placed)
+}
+
+// mapAt is the index of document id in the map's columns.
+func mapAt(t *testing.T, resp InterestMapResponse, id string) int {
+	t.Helper()
+	for i, d := range resp.Documents.ID {
+		if d == id {
+			return i
+		}
+	}
+	t.Fatalf("document %s is not on the map", id)
+	return -1
+}
+
+// TestInterestMap: the latest rebuild's map, every column one value per
+// document: members, a loose fit and an unsorted one as the rebuild put
+// them, documents placed since into an interest and into Unsorted as new,
+// and none failed or dead since; each title by its fallbacks.
+func TestInterestMap(t *testing.T) {
+	s := newTestServer(t)
+	d := s.docs(t, "map", 7)
+	_, err := s.db.Exec(`UPDATE documents SET title = ? WHERE id = ?`, "  A   title\n on two lines ", d[0].ID)
+	require.NoError(t, err)
+	_, err = s.db.Exec(`UPDATE documents SET title = ? WHERE id = ?`, strings.Repeat("é", 250), d[1].ID)
+	require.NoError(t, err)
+	_, err = s.deps.Bookmarks.Ingest(context.Background(), &store.Bookmark{TenantID: "local", URL: d[2].URL,
+		Title: new("Saved as this"), Source: store.SourceChrome, SavedAt: time.Now().UTC()})
+	require.NoError(t, err)
+
+	f := s.newRun(t, store.InterestShapeAreas)
+	area := f.area("Engineering")
+	kafka := f.interest("Kafka", area, 0, d[0:2], []*store.Document{d[2]})
+	joins := f.interest("Joins", area, 0, d[3:4], nil)
+	f.unsorted(kafka, d[4])
+	f.unsorted("", d[5])
+	f.mapped()
+	run := f.commit(t)
+	placed, placedUnsorted := s.docs(t, "placed", 1)[0], s.docs(t, "placed-unsorted", 1)[0]
+	s.placeMapped(t, run, joins, placed, 700)
+	s.placeMapped(t, run, "", placedUnsorted, 800)
+	_, err = s.db.Exec(`UPDATE documents SET state = 'failed', failure_cause = 'other' WHERE id = ?`, d[5].ID)
+	require.NoError(t, err)
+
+	resp := getAs[InterestMapResponse](t, s, "/v1/interests/map")
+	assert.Equal(t, run, resp.RunID)
+	assert.Equal(t, "areas", resp.Shape)
+	assert.Equal(t, InterestMapView{Kind: "warm", TookMS: 2500, Extent: 1000, DotRadius: 1.5,
+		Unsorted: MapCircle{X: 900, Y: 500, R: 60}}, resp.Map)
+	require.Len(t, resp.Areas, 1)
+	assert.Equal(t, area, resp.Areas[0].ID)
+	require.Len(t, resp.Interests, 2)
+	assert.Equal(t, []string{kafka, joins}, []string{resp.Interests[0].ID, resp.Interests[1].ID}, "largest first")
+	assert.Equal(t, 0, resp.Interests[0].Area)
+	assert.Equal(t, []MapSimilar{{Interest: 1, Cosine: 0.5}}, resp.Interests[0].Similar)
+
+	c := resp.Documents
+	n := len(c.ID)
+	assert.Equal(t, 7, n, "six the rebuild assigned, less the failed one, and two placed")
+	for _, col := range [][]any{anys(c.Title), anys(c.Host), anys(c.Interest), anys(c.Nearest), anys(c.Area), anys(c.Fit),
+		anys(c.Similarity), anys(c.MX), anys(c.MY), anys(c.ZX), anys(c.ZY)} {
+		assert.Len(t, col, n)
+	}
+	assert.ElementsMatch(t, []string{placed.ID, placedUnsorted.ID}, c.ID[n-2:], "the placed ones last")
+	assert.True(t, c.ID[n-2] < c.ID[n-1], "by ID")
+	for _, want := range []struct {
+		doc               *store.Document
+		fit               string
+		interest, nearest int
+		area              int
+	}{
+		{d[0], "member", 0, -1, 0},
+		{d[2], "loose", 0, -1, 0},
+		{d[3], "member", 1, -1, 0},
+		{d[4], "unsorted", -1, 0, -1},
+		{placed, "new", 1, -1, 0},
+		{placedUnsorted, "new", -1, -1, -1},
+	} {
+		i := mapAt(t, resp, want.doc.ID)
+		assert.Equal(t, want.fit, c.Fit[i], want.doc.URL)
+		assert.Equal(t, want.interest, c.Interest[i], want.doc.URL)
+		assert.Equal(t, want.nearest, c.Nearest[i], want.doc.URL)
+		assert.Equal(t, want.area, c.Area[i], want.doc.URL)
+	}
+	assert.InDelta(t, 700, c.ZX[mapAt(t, resp, placed.ID)], 0)
+	assert.Equal(t, "A title on two lines", c.Title[mapAt(t, resp, d[0].ID)])
+	assert.Equal(t, strings.Repeat("é", 200), c.Title[mapAt(t, resp, d[1].ID)])
+	assert.Equal(t, "Saved as this", c.Title[mapAt(t, resp, d[2].ID)], "the bookmark's title")
+	assert.Equal(t, "example.com", c.Title[mapAt(t, resp, d[3].ID)], "the host")
+	assert.Equal(t, "example.com", c.Host[mapAt(t, resp, d[3].ID)])
+}
+
+func anys[T any](xs []T) []any {
+	out := make([]any, len(xs))
+	for i, x := range xs {
+		out[i] = x
+	}
+	return out
+}
+
+// TestInterestMap_Flat: a flat run's map has no areas, and every
+// document's area is -1.
+func TestInterestMap_Flat(t *testing.T) {
+	s := newTestServer(t)
+	d := s.docs(t, "flat", 3)
+	f := s.newRun(t, store.InterestShapeFlat)
+	f.interest("Kafka", "", 0, d[:2], nil)
+	f.unsorted("", d[2])
+	f.mapped()
+	f.commit(t)
+	resp := getAs[InterestMapResponse](t, s, "/v1/interests/map")
+	assert.Empty(t, resp.Areas)
+	assert.NotNil(t, resp.Areas, "an empty list, never null")
+	require.Len(t, resp.Interests, 1)
+	assert.Equal(t, -1, resp.Interests[0].Area)
+	assert.Empty(t, resp.Interests[0].Similar)
+	assert.Equal(t, []int{-1, -1, -1}, resp.Documents.Area)
+}
+
+// TestInterestMap_Unavailable: without a map the endpoint answers 404 with
+// why: no rebuild yet, one from before maps, or one whose map failed.
+func TestInterestMap_Unavailable(t *testing.T) {
+	s := newTestServer(t)
+	problem := func() InterestMapUnavailable {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/interests/map"})
+		require.Equal(t, http.StatusNotFound, resp.status, resp.body)
+		assert.Equal(t, "application/problem+json", resp.contentType)
+		var p InterestMapUnavailable
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &p))
+		assert.Equal(t, InterestMapProblemType, p.Type)
+		assert.Equal(t, "interest map unavailable", p.Title)
+		assert.Equal(t, http.StatusNotFound, p.Status)
+		assert.Equal(t, "/v1/interests/map", p.Instance)
+		return p
+	}
+	p := problem()
+	assert.Equal(t, "no_run", p.Reason)
+	assert.Empty(t, p.RunID)
+	assert.Contains(t, p.Detail, "the first one draws the map")
+
+	d := s.docs(t, "u", 2)
+	f := s.newRun(t, store.InterestShapeFlat)
+	f.interest("Kafka", "", 0, d, nil)
+	before := f.commit(t)
+	p = problem()
+	assert.Equal(t, "no_map", p.Reason)
+	assert.Equal(t, before, p.RunID)
+	assert.Contains(t, p.Detail, "curio interests rebuild")
+
+	f = s.newRun(t, store.InterestShapeFlat)
+	f.interest("Kafka, again", "", 0, d, nil)
+	f.c.Outcome.Map = &store.RunMap{Status: store.MapFailed, Error: "the map took longer than 2m0s", Params: []byte(`{}`)}
+	failed := f.commit(t)
+	p = problem()
+	assert.Equal(t, "map_failed", p.Reason)
+	assert.Equal(t, failed, p.RunID)
+	assert.Equal(t, "the map took longer than 2m0s", p.MapError)
+	assert.Contains(t, p.Detail, "the next rebuild draws it again")
+}
+
+// rebuildMidRead is an insight store whose latest done run changes between
+// reads, as rebuilds that commit while a map is read leave it.
+type rebuildMidRead struct {
+	store.InsightStore
+	runs  []string // the runs LatestRun answers, in turn, the last for ever after
+	reads int
+}
+
+func (r *rebuildMidRead) LatestRun(ctx context.Context, _ string, _ store.InterestRunStatus) (*store.InterestRun, error) {
+	id := r.runs[min(r.reads, len(r.runs)-1)]
+	r.reads++
+	return r.GetRun(ctx, id)
+}
+
+// TestInterestMap_RereadsAcrossARebuild: a rebuild that commits while the
+// map is read is answered from the newer run, read once more; one that
+// changes it again is answered as read.
+func TestInterestMap_RereadsAcrossARebuild(t *testing.T) {
+	s := newTestServer(t)
+	d := s.docs(t, "r", 3)
+	runs := make([]string, 0, 3)
+	for i := range 3 {
+		f := s.newRun(t, store.InterestShapeFlat)
+		f.interest("Kafka", "", 0, d[i:i+1], nil)
+		f.mapped()
+		runs = append(runs, f.c.RunID)
+		ctx := context.Background()
+		f.c.Outcome.NumDocuments = 1
+		require.NoError(t, s.insights().CommitRun(ctx, f.c))
+	}
+	// Read run 0, then find run 1: read run 1, and find it still latest.
+	s.deps.Insights = &rebuildMidRead{InsightStore: s.insights(), runs: []string{runs[0], runs[1]}}
+	resp, err := s.deps.interestMap(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, runs[1], resp.RunID)
+	assert.Equal(t, []string{d[1].ID}, resp.Documents.ID)
+
+	// Read run 0, find run 1, read it, find run 2: answered as read.
+	s.deps.Insights = &rebuildMidRead{InsightStore: s.insights(), runs: []string{runs[0], runs[1], runs[1], runs[2]}}
+	resp, err = s.deps.interestMap(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, runs[1], resp.RunID)
+}

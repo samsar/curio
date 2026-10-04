@@ -766,6 +766,38 @@ paths:
               schema: { $ref: "#/components/schemas/InterestChanges" }
         default: { $ref: "#/components/responses/Problem" }
 
+  /v1/interests/map:
+    get:
+      tags: [insight]
+      operationId: interestMap
+      summary: The latest rebuild's map, both views, in one response
+      description: >
+        The map the latest rebuild drew of its grouping: every document on
+        the document map (mx, my), where documents near each other in the
+        embedding space sit near each other, and in the zoom view (zx, zy),
+        a dot inside its interest's circle, inside its area's, or inside
+        Unsorted's disc; each area's and interest's circle and its label's
+        anchor on the document map; and each interest's most similar
+        interests. Every position lies in a square of side map.extent. The
+        documents are columns of equal length: those the rebuild assigned,
+        by id, then those placed since, by id; documents failed or dead
+        since are left out. One response holds the whole map, unpaged. A
+        rebuild that commits while the map is read is answered from the
+        newer run. Without a map (no rebuild yet, a rebuild from before
+        maps, or one whose map failed) it answers 404 saying which.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InterestMap" }
+        "404":
+          description: The latest rebuild has no map; reason says why
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/InterestMapUnavailable" }
+        default: { $ref: "#/components/responses/Problem" }
+
   /v1/interests/rebuild:
     post:
       tags: [insight]
@@ -1939,6 +1971,138 @@ components:
               retired: { type: boolean }
             required: [id, level, event, shared, retired]
       required: [type, title, status, id, level, retired_at, run_id, successors]
+
+    InterestMap:
+      type: object
+      description: >
+        A rebuild's map. Indexes name a position in areas or interests, -1
+        for none. Areas come largest first (by size, then cohesion, then
+        id), interests area by area in that order, each area's largest
+        first (in the flat shape, the interests largest first).
+      properties:
+        run_id:      { type: string, format: uuid }
+        computed_at: { type: string, format: date-time, description: "When the rebuild finished" }
+        shape:       { type: string, enum: [flat, areas] }
+        map:
+          type: object
+          properties:
+            kind:       { type: string, enum: [fresh, warm], description: "warm when the document map started from the previous rebuild's" }
+            took_ms:    { type: integer }
+            extent:     { type: number, description: "The side of the square every position lies in" }
+            dot_radius: { type: number, description: "A document's dot's radius in the zoom view" }
+            unsorted:   { $ref: "#/components/schemas/MapCircle" }
+          required: [kind, took_ms, extent, dot_radius, unsorted]
+        areas:
+          type: array
+          description: Empty in the flat shape
+          items:
+            type: object
+            properties:
+              id:       { type: string, format: uuid }
+              label:    { type: string }
+              size:     { type: integer }
+              cohesion: { type: number }
+              zoom:     { $ref: "#/components/schemas/MapCircle" }
+              anchor:   { $ref: "#/components/schemas/MapPoint" }
+            required: [id, size, cohesion, zoom, anchor]
+        interests:
+          type: array
+          items:
+            type: object
+            properties:
+              id:       { type: string, format: uuid }
+              area:     { type: integer, description: "Its area's index; -1 in the flat shape" }
+              label:    { type: string }
+              size:     { type: integer }
+              cohesion: { type: number }
+              zoom:     { $ref: "#/components/schemas/MapCircle" }
+              anchor:   { $ref: "#/components/schemas/MapPoint" }
+              similar:
+                type: array
+                description: Its most similar interests, most similar first, three at most
+                items:
+                  type: object
+                  properties:
+                    interest: { type: integer, description: "The interest's index" }
+                    cosine:   { type: number, description: "The cosine of the two interests' centroids" }
+                  required: [interest, cosine]
+            required: [id, area, size, cohesion, zoom, anchor, similar]
+        documents:
+          type: object
+          description: Columns, each holding one value per document, in one order
+          properties:
+            id:    { type: array, items: { type: string, format: uuid } }
+            title:
+              type: array
+              description: >
+                Its title, else its newest bookmark's, else its host, else
+                its URL, on one line, cut to 200 characters
+              items: { type: string }
+            host:  { type: array, items: { type: string }, description: "Its URL's host, empty for none" }
+            interest:
+              type: array
+              description: The interest it is in (a member, a loose fit, or placed into it); -1 for Unsorted
+              items: { type: integer }
+            nearest:
+              type: array
+              description: >
+                An unsorted document's nearest interest; -1 for every other,
+                and for a document placed into Unsorted
+              items: { type: integer }
+            area:
+              type: array
+              description: The area of its interest; -1 for none, and in the flat shape
+              items: { type: integer }
+            fit:
+              type: array
+              description: member, loose, unsorted, or new (placed since the rebuild)
+              items: { type: string, enum: [member, loose, unsorted, new] }
+            similarity:
+              type: array
+              description: The cosine to its interest's centroid; in Unsorted, to its nearest interest's
+              items: { type: number }
+            mx: { type: array, items: { type: number }, description: "On the document map" }
+            my: { type: array, items: { type: number } }
+            zx: { type: array, items: { type: number }, description: "In the zoom view" }
+            zy: { type: array, items: { type: number } }
+          required: [id, title, host, interest, nearest, area, fit, similarity, mx, my, zx, zy]
+      required: [run_id, computed_at, shape, map, areas, interests, documents]
+
+    MapCircle:
+      type: object
+      properties:
+        x: { type: number }
+        y: { type: number }
+        r: { type: number }
+      required: [x, y, r]
+
+    MapPoint:
+      type: object
+      properties:
+        x: { type: number }
+        y: { type: number }
+      required: [x, y]
+
+    InterestMapUnavailable:
+      description: >
+        No map: an RFC 7807 problem of type
+        urn:curio:problem:interest-map-unavailable, with why. no_run: no
+        rebuild is done yet, and the first draws the map. no_map: the
+        latest rebuild predates maps; the next draws it. map_failed: the
+        latest rebuild's map failed (map_error says why); the next tries
+        again.
+      type: object
+      properties:
+        type:       { type: string, format: uri, enum: ["urn:curio:problem:interest-map-unavailable"] }
+        title:      { type: string }
+        status:     { type: integer, enum: [404] }
+        detail:     { type: string, description: "Why, in a sentence a page can show" }
+        instance:   { type: string, description: "The request path" }
+        request_id: { type: string, description: "The response's X-Request-Id; quote it against the daemon log" }
+        reason:     { type: string, enum: [no_run, no_map, map_failed] }
+        run_id:     { type: string, format: uuid, description: "The latest rebuild; absent for no_run" }
+        map_error:  { type: string, description: "Why its map failed; map_failed only" }
+      required: [type, title, status, reason]
 
     # ---------- jobs ----------
 

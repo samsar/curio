@@ -4,7 +4,9 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -135,6 +137,16 @@ func TestDaemon_AnImportIsGroupedUnasked(t *testing.T) {
 		_, body := getDashboard(t, env.base, path)
 		assert.Contains(t, body, `<a href="/ui/interests" aria-current="page">`, path)
 	}
+	// The rebuild drew its map; no client wraps it yet.
+	var drawn struct {
+		RunID     string `json:"run_id"`
+		Documents struct {
+			ID []string `json:"id"`
+		} `json:"documents"`
+	}
+	getAPI(t, env.base, "/v1/interests/map", &drawn)
+	assert.Equal(t, list.RunID, drawn.RunID)
+	assert.Len(t, drawn.Documents.ID, 20)
 
 	importTopics(t, c, pages, 20, 24)
 	require.EventuallyWithT(t, func(collect *assert.CollectT) {
@@ -191,4 +203,19 @@ func TestDaemon_APausedQueueHoldsTheRebuild(t *testing.T) {
 	stopped, err := ctl.Stop(ctx)
 	require.NoError(t, err)
 	assert.True(t, stopped)
+}
+
+// getAPI gets path from the daemon at baseURL, which must answer 200, into
+// v.
+func getAPI(t *testing.T, baseURL, path string, v any) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL+path, nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", path, body)
+	require.NoError(t, json.Unmarshal(body, v), path)
 }

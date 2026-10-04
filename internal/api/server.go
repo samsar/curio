@@ -222,6 +222,7 @@ func newRouter(deps Deps, origin localOrigin, pages dashboard) (chi.Router, erro
 			r.Get("/", deps.handleListInterests)
 			r.Get("/unsorted", deps.handleUnsorted)
 			r.Get("/changes", deps.handleInterestChanges)
+			r.Get("/map", deps.handleInterestMap)
 			r.Post("/rebuild", deps.handleRebuildInterests)
 			r.Get("/{id}", deps.handleGetInterest)
 		})

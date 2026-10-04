@@ -24,7 +24,12 @@ The clients are written by hand: `internal/client` for the CLI and the
   response carries an `X-Request-Id` header; a problem repeats it as
   `request_id` and names the request path in `instance`. The daemon logs
   every 5xx with its request ID, so `curio daemon logs` finds the cause.
-  A 404 names what is missing (`document "…" not found`).
+  A 404 names what is missing (`document "…" not found`). A few carry a
+  problem type of their own, with extension members saying more: a
+  retired interest's 410 (`urn:curio:problem:interest-retired`, what took
+  its documents) and the interest map's 404
+  (`urn:curio:problem:interest-map-unavailable`, `reason` `no_run`,
+  `no_map` or `map_failed`).
 - **Pagination** on `GET /v1/bookmarks`, `/v1/documents` and `/v1/jobs` is
   cursor-based, not offset. A response carries `next_cursor` exactly when
   another page follows; pass it back as `?cursor=` for that page. Documents
@@ -47,7 +52,10 @@ The clients are written by hand: `internal/client` for the CLI and the
   offset+k)`, `offset + k` is at most 100, an offset past the end is an
   empty window, `total` counts the ranking and `capped` says more matched
   than it holds. A search is ranked again for every page, so a document
-  indexed between two pages can shift them.
+  indexed between two pages can shift them. And one response is not paged
+  at all: `GET /v1/interests/map` is the latest grouping run's whole map,
+  its documents as parallel columns (about 1 MB for 5,000 documents);
+  a `run_id` that differs between two reads shows a rebuild in between.
 - **Startup**: the daemon answers from the moment it binds its port. Until
   it is ready (while it migrates its database, say), every request gets
   `503` with a `Retry-After` header and a problem of type

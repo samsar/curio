@@ -25,10 +25,11 @@ import (
 // runFixture builds a run's commit on the test server's store: the
 // identities it mints or carries, its groups and assignments, its lineage.
 type runFixture struct {
-	s       *testServer
-	tenant  string
-	c       store.RunCommit
-	grouped int
+	s         *testServer
+	tenant    string
+	c         store.RunCommit
+	grouped   int
+	interests []string // the run's interests, in the order added
 }
 
 // newRun starts a run of the local tenant in shape, built on its latest
@@ -88,6 +89,7 @@ func (f *runFixture) interest(label, area string, size int, members, loose []*st
 	f.grouped += size
 	f.c.Outcome.NumInterests++
 	f.c.Outcome.NumLoose += len(loose)
+	f.interests = append(f.interests, id)
 	return id
 }
 
