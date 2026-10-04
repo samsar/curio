@@ -320,17 +320,51 @@ func TestRebuild_MapIsDeterministic(t *testing.T) {
 	assert.Equal(t, got[0], got[2], "the vectors in another order")
 }
 
-// TestBuildMap_RefusesBadInput: what doesn't describe one grouping is an
-// error.
-func TestBuildMap_RefusesBadInput(t *testing.T) {
+// twoInterests is the map input of six documents in two flat interests.
+func twoInterests(t *testing.T) MapInput {
+	t.Helper()
 	points := slices.Concat(copies("a", 3, []float32{1, 0}), copies("b", 3, []float32{0, 1}))
 	g := flatGrouping([]int{0, 0, 0, 1, 1, 1})
 	cents, err := Centroids(points, g.Interest)
 	require.NoError(t, err)
 	fits, err := AssignStrays(points, g, cents, LooseFitThreshold)
 	require.NoError(t, err)
-	good := MapInput{Points: points, Grouping: g, Centroids: cents, Fits: fits, InterestKeys: []string{"i0", "i1"},
+	return MapInput{Points: points, Grouping: g, Centroids: cents, Fits: fits, InterestKeys: []string{"i0", "i1"},
 		AreaKeys: []string{}}
+}
+
+// TestBuildMap_WarmFromASharedDocument: a map allowed to start warm is
+// warm when its prior shares a document, and fresh when the prior shares
+// none, as when the whole library was replaced.
+func TestBuildMap_WarmFromASharedDocument(t *testing.T) {
+	ctx := context.Background()
+	in := twoInterests(t)
+	cold, err := BuildMap(ctx, in)
+	require.NoError(t, err)
+	require.Equal(t, store.RunKindFresh, cold.Kind)
+	priorOf := func(rename func(id string) string) *PriorMap {
+		p := &PriorMap{Params: cold.Params, Shape: ShapeFlat, DotRadius: cold.DotRadius, Unsorted: cold.Unsorted,
+			Docs: map[string]PriorDoc{}, Groups: map[string]PriorGroup{}}
+		for i, pt := range in.Points {
+			p.Docs[rename(pt.ID)] = PriorDoc{Map: cold.Docs[i]}
+		}
+		return p
+	}
+	in.WarmDocs = true
+	in.Prior = priorOf(func(id string) string { return id })
+	m, err := BuildMap(ctx, in)
+	require.NoError(t, err)
+	assert.Equal(t, store.RunKindWarm, m.Kind, "the prior's documents")
+	in.Prior = priorOf(func(id string) string { return "gone-" + id })
+	m, err = BuildMap(ctx, in)
+	require.NoError(t, err)
+	assert.Equal(t, store.RunKindFresh, m.Kind, "none of the prior's documents")
+}
+
+// TestBuildMap_RefusesBadInput: what doesn't describe one grouping is an
+// error.
+func TestBuildMap_RefusesBadInput(t *testing.T) {
+	good := twoInterests(t)
 	m, err := BuildMap(context.Background(), good)
 	require.NoError(t, err)
 	require.NoError(t, m.Validate(6, 0, 2))

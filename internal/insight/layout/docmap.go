@@ -91,33 +91,41 @@ type DocMapInput struct {
 	Seed uint64
 }
 
-// DocMap lays out the points of in on the map, index-aligned with in.Keys.
-func DocMap(ctx context.Context, in DocMapInput) ([]XY, error) {
+// DocMapLayout is the document map: a point per key, index-aligned with
+// DocMapInput.Keys, and whether the layout started from the prior, which
+// a warm input does only when the prior holds one of its points.
+type DocMapLayout struct {
+	Points []XY
+	Warm   bool
+}
+
+// DocMap lays out the points of in on the map.
+func DocMap(ctx context.Context, in DocMapInput) (DocMapLayout, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("layout: doc map: %w", err)
+		return DocMapLayout{}, fmt.Errorf("layout: doc map: %w", err)
 	}
 	order, err := in.check()
 	if err != nil {
-		return nil, err
+		return DocMapLayout{}, err
 	}
 	n := len(order)
 	if n == 0 {
-		return []XY{}, nil
+		return DocMapLayout{Points: []XY{}}, nil
 	}
 	p := newDocProblem(in, order)
-	pos, aligned, err := p.layout(ctx)
+	pos, warm, aligned, err := p.layout(ctx)
 	if err != nil {
-		return nil, err
+		return DocMapLayout{}, err
 	}
 	f := fitBox(boxOf(pos), 0)
 	if aligned && keepsFrame(boxOf(pos)) {
 		f = fit{scale: 1}
 	}
-	out := make([]XY, n)
+	out := DocMapLayout{Points: make([]XY, n), Warm: warm}
 	for k, i := range order {
-		out[i] = f.point(pos[k])
-		if err := checkPoint("point "+in.Keys[i], out[i]); err != nil {
-			return nil, err
+		out.Points[i] = f.point(pos[k])
+		if err := checkPoint("point "+in.Keys[i], out.Points[i]); err != nil {
+			return DocMapLayout{}, err
 		}
 	}
 	return out, nil
@@ -193,16 +201,16 @@ func newDocProblem(in DocMapInput, order []int) docProblem {
 }
 
 // layout lays the points out, before the fit to the map, and reports
-// whether it aligned them to the prior.
-func (p docProblem) layout(ctx context.Context) ([]XY, bool, error) {
+// whether it started from the prior and whether it aligned them to it.
+func (p docProblem) layout(ctx context.Context) (pos []XY, warm, aligned bool, err error) {
 	n := len(p.keys)
 	if n == 1 {
-		return []XY{{}}, false, nil
+		return []XY{{}}, false, false, nil
 	}
 	edges := fuzzyGraph(p.lists)
 	start, warm, err := p.start(ctx, edges)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	epochs, alpha := coldEpochs, coldAlpha
 	switch {
@@ -212,10 +220,10 @@ func (p docProblem) layout(ctx context.Context) ([]XY, bool, error) {
 		epochs = coldEpochsLarge
 	}
 	if err := descend(ctx, start, edges, epochs, alpha, p.seed); err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	pullIn(start)
-	return start, p.orient(start), nil
+	return start, warm, p.orient(start), nil
 }
 
 // keepsFrame reports whether a map aligned to the previous one may stay in

@@ -21,9 +21,9 @@ var small = libraryShape{points: 300, areas: 2, clustersPerArea: 3, dims: 40, ge
 
 func docMap(t *testing.T, in layout.DocMapInput) []layout.XY {
 	t.Helper()
-	pos, err := layout.DocMap(context.Background(), in)
+	l, err := layout.DocMap(context.Background(), in)
 	require.NoError(t, err)
-	return pos
+	return l.Points
 }
 
 // TestDocMap_Deterministic: the same input twice gives the same positions;
@@ -345,16 +345,46 @@ func TestDocMap_Cancelled(t *testing.T) {
 	in := lib.docInput(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	pos, err := layout.DocMap(ctx, in)
+	l, err := layout.DocMap(ctx, in)
 	require.ErrorIs(t, err, context.Canceled)
-	assert.Nil(t, pos)
+	assert.Nil(t, l.Points)
 
 	// Warm, the descent starts at once: a few checks in, it is under way.
 	in.Prior, in.Warm = priorOf(lib.keys, docMap(t, in)), true
-	pos, err = layout.DocMap(&cancelAfter{Context: context.Background(), n: 20}, in)
+	l, err = layout.DocMap(&cancelAfter{Context: context.Background(), n: 20}, in)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Contains(t, err.Error(), "descent")
-	assert.Nil(t, pos)
+	assert.Nil(t, l.Points)
+}
+
+// TestDocMap_WarmFromASharedPoint: a warm map starts from the prior only
+// when the prior holds one of its points, and says which it did; a cold
+// one never does.
+func TestDocMap_WarmFromASharedPoint(t *testing.T) {
+	lib := small.build(6)
+	in := lib.docInput(1)
+	prior := docMap(t, in)
+	others := make([]string, len(lib.keys))
+	for i, k := range lib.keys {
+		others[i] = "gone-" + k
+	}
+	for _, tc := range []struct {
+		name       string
+		prior      map[string]layout.XY
+		warm, want bool
+	}{
+		{"warm, the same points", priorOf(lib.keys, prior), true, true},
+		{"warm, none of the points", priorOf(others, prior), true, false},
+		{"cold", priorOf(lib.keys, prior), false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := in
+			in.Prior, in.Warm = tc.prior, tc.warm
+			l, err := layout.DocMap(context.Background(), in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, l.Warm)
+		})
+	}
 }
 
 // TestDocMap_RefusesBadInput: what the map can't lay out is an error,

@@ -145,7 +145,8 @@ func NewPriorMap(run *store.InterestRun, groups []store.InterestGroup, assignmen
 // and interest (by the grouping's numbering) its circle and anchor.
 type Map struct {
 	// Kind is warm when the document map started from the prior's, or is
-	// it; fresh otherwise.
+	// it; fresh otherwise, a map allowed to start warm from a prior that
+	// shares none of its documents included.
 	Kind      store.RunKind
 	Params    []byte
 	DotRadius float64
@@ -202,10 +203,8 @@ func (b mapBuild) build() (*Map, error) {
 	warmDocs := in.WarmDocs && sameParams
 	warmZoom := sameParams && in.Prior.Shape == in.Grouping.Shape
 	m := &Map{Kind: store.RunKindFresh, Params: b.params, Docs: make([]store.MapPosition, len(in.Points))}
-	if warmDocs {
-		m.Kind = store.RunKindWarm
-	}
 	if warmDocs && in.Unchanged && b.samePoints() {
+		m.Kind = store.RunKindWarm
 		if warmZoom && b.sameGrouping() {
 			return b.priorMap(m), nil
 		}
@@ -304,7 +303,8 @@ func (b mapBuild) priorMap(m *Map) *Map {
 }
 
 // docMap draws the document map into m: from the grouping's neighbour
-// lists, or one pass of its own.
+// lists, or one pass of its own. m is warm when the layout started from
+// the prior, which a warm one does only when the prior shares a document.
 func (b mapBuild) docMap(m *Map, warm bool) error {
 	in := b.in
 	lists := in.Grouping.Neighbours
@@ -322,11 +322,14 @@ func (b mapBuild) docMap(m *Map, warm bool) error {
 			dm.Prior[id] = layout.XY{X: d.Map.MapX, Y: d.Map.MapY}
 		}
 	}
-	pos, err := layout.DocMap(b.ctx, dm)
+	l, err := layout.DocMap(b.ctx, dm)
 	if err != nil {
 		return fmt.Errorf("insight: the document map: %w", err)
 	}
-	for i, p := range pos {
+	if l.Warm {
+		m.Kind = store.RunKindWarm
+	}
+	for i, p := range l.Points {
 		m.Docs[i].MapX, m.Docs[i].MapY = p.X, p.Y
 	}
 	return nil
