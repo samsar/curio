@@ -133,8 +133,10 @@ all fetch/index/search/insight workflows.
   is the home at `/ui/`, then the Library (documents most recently
   updated first, or in its Date saved order the saves, newest saved
   first, and its Failures tab at `/ui/failures`, the failed and dead
-  documents grouped by cause), the Interests, and Status at `/ui/status`
-  (the queue, health, progress and why documents failed).
+  documents grouped by cause), the Interests (and their map at
+  `/ui/interests/map`, drawn in the browser by `static/map.js` from `GET
+  /v1/interests/map` with ten vendored d3 modules), and Status at
+  `/ui/status` (the queue, health, progress and why documents failed).
   Page handlers in `internal/api/ui*.go` read through the same functions
   as the JSON handlers, and `internal/ui` renders them with
   `html/template`, a sanitized render of each document's markdown, one
@@ -346,8 +348,10 @@ zoom view, warm from the previous run's map when it can, within two
 minutes; a map that fails is no failure of the rebuild, and a run that
 drew none (`insight.map: false`, or one from before maps) makes a rebuild
 due to draw it once the map is on. `GET /v1/interests/map` serves the
-latest one whole, and healthz says where it stands. See decisions.md
-"Interest map: two views of each regrouping, drawn when it is built".
+latest one whole, healthz says where it stands, and the dashboard's
+Interests draw it (`/ui/interests/map`). See decisions.md "Interest map:
+two views of each regrouping, drawn when it is built" and "Dashboard: the
+interest map".
 
 ## Fetcher strategy selection
 

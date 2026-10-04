@@ -11539,6 +11539,9 @@ documents placed between rebuilds a place on it, and `GET
 /v1/interests/map` serves it whole. This is dashboard phase 3's back end;
 the pages that draw it come next.
 
+**Revised (map PR 2/2):** the page that draws it, under the Interests, is
+"Dashboard: the interest map".
+
 ### The document map
 
 UMAP (McInnes, Healy and Melville, 2018), as umap-learn does it, on the
@@ -12158,6 +12161,340 @@ No step needed a database restore, and no log has a WARN or an ERROR.
   next map: the next rebuild lays it out with the rest.
 - Positions are the same on one platform, not across architectures.
 - The response grows with the library, about 185 bytes a document.
+
+---
+
+## Dashboard: the interest map
+
+**Decision:** the Interests gain a second view, the Map
+(`/ui/interests/map`), which draws the latest rebuild's map (`GET
+/v1/interests/map`, "Interest map: two views of each regrouping") in the
+browser on two canvases: **All documents**, the default (every document a
+dot at its place on the document map, coloured by its area), and **Zoom
+in** (areas as discs holding their interests' circles, each document a dot
+in its interest, Unsorted a dashed disc). One selection (the library, an
+area, an interest, Unsorted or a document) is shared by both, and a
+details panel, a breadcrumb, a search and the address follow it. This is
+dashboard phase 3's map, PR 2/2.
+
+### Where it lives
+
+Under Interests, as Failures is under the Library: a **List | Map**
+subnav (the `interests-subnav` partial) on the Interests page and the
+map's, never a fifth navigation item, and never in a polled region (the
+Interests' poll answer leaves it out; `TestLiveRegions` is unchanged).
+**Show on map** links lead into it with the thing selected: an area's
+page (`select=area:<id>`), an interest's, Unsorted's (`select=unsorted`)
+and a document page's place line (`select=document:<id>`), each built in
+Go by a view model's `MapHref` over `mapHref`. With `insight.map: false`
+none of them shows (a negative, `MapOff`, threaded into `InterestPage`,
+`Unsorted` and `DocumentPlace`, so the zero value keeps the map on); the
+subnav's Map stays and leads to the page that says the map is off.
+
+### One read, the endpoint's own
+
+The page reads the latest run and nothing else, through `Deps.mapRun`,
+the head of `interestMap` pulled out so both use it: no run, a run with
+no map, a failed map and the switch off are the same `*mapUnavailableError`
+the endpoint answers 404 with, which the page shows as its states
+(`ui.MapState`s named after the endpoint's reasons, every one a 200, as
+the Interests are before their first rebuild); a run with a built map is
+the shell map.js draws into. The page never reads the map itself, which
+is about 1 MB for the owner's library: map.js reads it, once
+(`TestInterestMapPage_ReadsOneRun` counts one `LatestRun` and nothing
+more; `TestInterestMapPage_AgreesWithTheEndpoint` drives every state
+through both). The view and the selection the address asks for are
+checked before anything is read: a malformed one is a 400.
+
+**No ETag or Cache-Control on the map.** For a fixed run the response
+still changes when a document is placed, fails or dies (it is left out),
+is refetched under a new title, or gains a newer bookmark's title, so a
+correct validator reads about as many rows as the map does. The map is
+served in 14 to 15 ms (958,870 bytes on the owner's library), loopback
+transfer costs nothing, and on a 304 fetch() still hands the script the
+cached body to parse: a validator would save the daemon about 15 ms a
+page load. The page reads the map once a load and doesn't poll.
+
+### Canvas, and d3's zoom and quadtree, vendored
+
+The map is drawn on two canvases, one a view: 5,237 dots, their labels
+and rings redrawn every frame of a gesture, which as SVG would be as many
+nodes styled one by one. Pan and zoom (the wheel, a trackpad pinch,
+which browsers send as ctrl+wheel, a touch pinch, a drag), the animated
+flights between selections, and hit testing are d3's: `d3-zoom` with its
+transitions, and `d3-quadtree`. Writing those is a pile of edge cases
+(wheel delta modes, two-finger touch, click versus drag, interrupted
+transitions) that d3 has had right for years; its full bundle (280 KB)
+brings unused code, d3-dsv's `new Function` among it. So the ten modules
+the two need are vendored, 70,150 bytes (25.8 KB gzipped), none holding
+`eval(` or `Function(`: d3-dispatch 3.0.1, d3-selection 3.0.0, d3-timer
+3.0.1, d3-color 3.1.0, d3-interpolate 3.0.1, d3-ease 3.0.1,
+d3-transition 3.0.1, d3-drag 3.0.0, d3-zoom 3.0.0 and d3-quadtree 3.0.1,
+each its npm `dist/*.min.js`, byte for byte the tarball's, jsDelivr's and
+the prototype's copies. `TestD3IsPinned` holds each one's SHA-256, size,
+upstream banner and the absence of both; updating one means replacing it
+and its constants, and reading its changes for anything that evaluates
+code or injects style, as htmx's pin says.
+
+They are UMD builds that extend the `d3` global as they load, so each
+loads after those it reads: one Go list, `mapScripts`, the order the
+template ranges over, deferred (which keeps document order), after htmx
+and actions.js, then map.js. Only the map's page with a map to draw loads
+them (`TestPages_Scripts`), and every file of `static/` is loaded by some
+page (`TestAssets`). In headless Chrome under the dashboard's exact CSP,
+the wheel, ctrl+wheel, a drag, an animated transition, the quadtree and a
+touch pinch at 390 px all worked with no violation; the only style d3
+writes is `-webkit-tap-highlight-color`, through the CSSOM on touch
+devices, which the CSP allows.
+
+**Licences.** d3 is ISC, but for d3-ease, which is BSD 3-Clause (Robert
+Penner's easing): its second condition asks for the notice in the
+materials shipped with a binary, and the daemon embeds the file. map.js's
+opening comment names each module at its version and carries both
+notices in full, as `icons.html` carries Lucide's (`TestMapScript_Notices`).
+
+### map.js's rules
+
+One strict IIFE, as actions.js is, at most 1,500 lines of at most 120
+columns (`TestMapScript`). It holds the two views, the panel, the search
+and the controller the prototype built, in the repository's style, in one
+file: assets are served under hashed names, which rules out imports
+between them. A larger map.js is a reason to cut code, not to raise the
+cap. Outside its comments it uses nothing that evaluates code or writes
+markup (`innerHTML` and its kin, `DOMParser`, `.html(`), no timer (d3's
+transitions, and one `requestAnimationFrame` at a time on a dirty flag, do
+the waiting), no storage, no `window.` or `globalThis`, no `console.`,
+no inline style (`.style`, a `style` attribute), no handler property or
+attribute, no `location` (the address changes through
+`history.replaceState`), no method, mode or credentials for fetch, and
+no address of its own (`/ui/`, `/v1/`, `http:`). It makes exactly one
+`fetch(`, with a deadline. Every address comes from its root's data
+attributes, built in Go: `data-src` (`/v1/interests/map`, beside
+actions.go's paths), `data-page`, and the prefixes it appends an escaped
+ID to, `data-document-page`, `data-interest-page`, `data-unsorted-page`
+and `data-interests-page`. uitest refuses a `data-src` that isn't a clean
+path under `/v1/` and a `data-page` or `data-*-page` that isn't one under
+`/ui/` (no query, no dot or empty segment, no scheme or host), and
+`TestInterestMap_ReadsOnly` holds the page to the router and the spec as
+`TestDashboard_ActionsMatchTheAPI` holds the Actions: its one `/v1` path
+is routed as `GET /v1/interests/map` and documented, and it carries no
+`data-method` and no htmx request.
+
+Every listener and observer is made once, at setup: the panel, the
+breadcrumb and the search's list each have one delegated listener, which
+reads where a control leads from a `WeakMap` (no data attribute for it),
+so nothing is added per selection or per frame. The tooltip is drawn on
+the canvas, beside the pointer, not positioned by inline style; the
+canvases are sized by their width and height attributes; the phone's
+sheet opens by a class.
+
+### Failures, loud and recoverable
+
+The one read has 30 s (`AbortSignal.timeout`): inside the daemon's
+2-minute write timeout, and ample for a response that grows about 185
+bytes a document. Its outcome is the map's data or one typed failure,
+which the status line (`role=status`, the page's one live region, empty
+and hidden once the map is drawn) says in its kind's words:
+
+- a **404 problem**, the map gone between the page's render and the read
+  (a rebuild committed a run without one, say): its detail and a link to
+  the Interests, with no Try again, since it won't pass by trying;
+- **any other refusal**: "Couldn't load the map:" its detail, else its
+  title, else its status, the response's `X-Request-Id`, `curio daemon
+  logs`, and **Try again**;
+- **no answer** or the deadline: curio-daemon didn't answer (in 30
+  seconds), with Try again;
+- **data that doesn't make sense**: checked in one pass before anything
+  is built, every column as long as `documents.id`, every index in range
+  or -1 (a flat map's areas -1 alone), every similar interest in range,
+  every circle, anchor and place finite and every radius positive: the
+  first problem, with its column and index, and the request ID; nothing
+  is drawn.
+
+Try again runs the one read again; there is no retry of its own and no
+timer. An exception in setup, a frame or a handler (each runs through
+one guard) is reported once in the status line, the canvases are cleared
+and drawing stops: never an error a frame, never half a map.
+
+### Stored strings
+
+Titles, labels, hosts, IDs and problem details are the web's or a
+model's, of any length, and may hold markup or bidi overrides. Each
+reaches the page only through `textContent`, the `title` property or the
+canvas's `fillText`, in an element of its own with `dir=auto` (the HTML
+user-agent stylesheet isolates an element with `dir`, so a U+202E in a
+title turns nothing beside it, its row's similarity included). Links are
+`<a>`s whose `href` is a prefix and `encodeURIComponent(id)`; a swatch's
+class is `a` and a slot the model computed, never a stored string; `el`
+sets only class, id, title, role, aria-*, type, tabindex and dir. On the
+canvas a label wraps to three lines and is cut to a width, a title to
+one; the panel's heading shows six lines at most, room for most of a
+title the API has cut to 200 characters, and anything longer is cut,
+whole on hover. The cache of measured widths starts over past 20,000
+entries and on a change of theme.
+
+### Colour
+
+Top-level groups (areas; interests in the flat shape) take one of 30
+palette slots, 10 hue families in 3 lightness tiers (slot = tier × 10 +
+family; `--area-0` to `--area-29`, computed in OKLCH at L 0.50, 0.57 and
+0.64 light, 0.66, 0.74 and 0.82 dark, each brought into gamut). Every
+token, and `--neutral-dot` for Unsorted, is at least 3:1 against
+`--surface` in its theme (`TestStylesheet_InterestMap`; the floors are
+3.18 light and 5.48 dark), where 9 of the prototype's 29 light colours
+were under 2.3:1. Groups take slots in the response's order, largest
+first: a group's family is the one whose groups already coloured touch it
+least on the document map (the pairs of their documents within 1% of the
+map's side of each other, found through the quadtree), ties to the family
+used least so far, then the lower; its tier is how many groups already
+hold that family, mod 3. On the owner's map, 1,846 pairs of documents of
+different areas touch: slots in plain order put 53 of them in one family,
+the rule none. A throwaway script computed the rule from the same response
+on a grid instead of a quadtree, and the panel's swatches were its slots
+exactly. The prototype coloured by area centroids, which the API doesn't
+serve.
+
+### Deep links and the address
+
+`?view=all|zoom&select=area:<id>|interest:<id>|document:<id>|unsorted`,
+read in Go by `ui.ParseMapQuery` (an ID is everything after the first
+colon, at most 128 bytes; any other form is a 400 naming the forms) and
+written by `mapHref`, which leaves out the default view and the library.
+The page hands them to map.js as `data-view` and `data-select`; it shows
+the selection after the first draw, without a flight. An ID not on the
+map leaves the whole map shown with a note, an area's or interest's
+linking to its page, which says what became of it (a retired ID's 410).
+map.js keeps the address in `mapHref`'s form with `history.replaceState`,
+never `pushState`: a reload, or Back from Open document, shows the same
+tab and selection, and the history doesn't grow with every click.
+
+### On a phone
+
+At 48rem and below the toolbar stacks, the legend goes, and the panel is
+a bottom sheet: closed, its head alone, naming the selection; selecting
+anything opens it (55vh at most, its body scrolling); its toggle and
+Escape close it. The stage fills the screen between the sticky header
+and the closed sheet once the page is scrolled to it, and an opening
+sheet scrolls it there, so the map left above the sheet is as tall as it
+can be. Fits and flights aim at the part of the stage on the screen:
+below the header, above the window's foot or the sheet. Both were found
+in the browser: a flight first landed a document under the open sheet.
+
+The prototype's portrait swap, x and y exchanged on a tall screen, was
+dropped. It is a reflection: a phone would show a mirror image of the
+desktop's map, and the owner would learn two maps, for about 1.4 times
+the scale and only while the sheet is closed. One orientation keeps
+places meaningful across devices and spares hit testing, anchors,
+flights and deep links a transform.
+
+**Safari's trackpad pinch** sends GestureEvents, which d3-zoom doesn't
+handle (d3/d3-zoom#229), and Safari 15+ sends the same pinch as
+ctrl+wheel too: the canvases `preventDefault` gesturestart,
+gesturechange and gestureend, so the page itself never zooms over the
+map, and the zoom comes from the ctrl+wheel through d3, once. No headless
+browser emulates it: the owner checks it by hand.
+
+### Accessibility
+
+The tabs follow the ARIA tabs pattern (tablist, aria-selected, a roving
+tabindex, the arrows, Home and End); the search is a combobox over a
+listbox with `aria-activedescendant` (arrows, Enter, Escape closing the
+list, then clearing, then leaving the box); the breadcrumb's last item
+has `aria-current`; a choice in the panel or the breadcrumb moves focus
+to the panel's heading, a canvas click doesn't. Keys: `/` searches,
+Escape closes the sheet or goes up a level, `0` fits, `+`, `=` and `-`
+zoom, none with Cmd, Ctrl or Alt held or while typing. Everything the
+canvas selects, the panel and the search reach as buttons and links.
+Under prefers-reduced-motion every flight lands at once. The canvases
+redraw on a change of theme (the media query, or `data-theme` on
+`<html>`), at a new size (a `ResizeObserver`; a view on the whole map is
+fitted again, one on a selection keeps its middle) and at a new pixel
+ratio, capped at 2.
+
+### What only a browser checks, and how
+
+No JavaScript runs in CI: `TestMapScript`, the palette pin and the
+read-only check hold map.js's rules; everything else was checked in
+headless Chrome over CDP by throwaway scripts outside the repository,
+against a scratch daemon on a fresh `.backup` of the owner's copy (binaries
+from `make build BIN_DIR=<scratch>`, a scratch home and loopback port, a
+stub Ollama answering only the drift check, labels by terms, the queue
+paused once the map was drawn), a hostile copy, and responses swapped in
+by `Fetch` interception. Every run counted CSP violations (a
+`securitypolicyviolation` listener and the console), exceptions and
+dialogs: none.
+
+- **Desktop, 1440×900 at DPR 2** (40 checks): the canvas 834×594 with its
+  foot at 868 px; both tabs in both themes; a live theme switch
+  recolouring without a reload; deep links of every kind, and unknown
+  IDs' notes; clicks selecting an area, then its interest, then a
+  document with no flight, then empty space selecting the parent; the
+  wheel, ctrl+wheel (2^0.4 a 200 px step, as d3 computes it), a drag
+  panning without selecting, `0`, `+`, `-`, the zoom buttons and a double
+  click; the tabs' arrows, Home and End; search by `/`, typing, the arrows
+  and Enter, and Escape's three steps; a choice in the panel focusing its
+  heading; a tab switch keeping the selection; the address kept with the
+  history's length unchanged; a reload and Back from Open document
+  restoring tab and selection; a reduced-motion flight landing at once; a
+  resize resizing the backing store.
+- **Phone, 390×844 at DPR 3 with touch** (14 checks): no sideways scroll
+  in either theme, the canvas spanning the content width, the sheet's
+  head on screen; a touch pinch zooming; a tap selecting an area and
+  opening the sheet; a selected document landing above the open sheet;
+  Escape closing the sheet first; the toggle.
+- **Intercepted responses** (11 checks): a 404 problem, a 500 problem then
+  Try again succeeding, invalid JSON, a short column, an index out of
+  range, a refused connection, each with its message and nothing drawn;
+  a flat map and an all-unsorted map drawing both tabs.
+- **The hostile copy** (15 checks): titles `<img src=x
+  onerror=alert(1)>`, a literal `<script>`, one with U+202E and 200
+  unbroken characters; an area and an interest label of 500 characters,
+  one with markup, one interest unlabeled; at 1440 light and 390 dark, no
+  element the data describes, no dialog, no sideways scroll, every stored
+  string in a `dir=auto` element apart from its number, the unlabeled one
+  in italics.
+- **The page's states** from scratch configs and edited copies (map off,
+  no map, a failed map) and with JavaScript off, at both widths.
+- **The colour rule**, as above.
+
+Screenshots of each were read before these numbers were taken; what they
+showed and was fixed: the document's title repeated under the panel's
+heading, the panel's heading growing with a 500-character label, the
+zoom and clear buttons showing before the map loads or when it can't, a
+failed map's card scrolling sideways at 390 px, and the document page's
+place line squeezing its first word onto a line of its own beside Show on
+map. Reading the code turned up two more: `wrap` added an empty line to a
+label shorter than its limit, and the first resize took its fit's scale
+through a clamp to the previous one.
+
+### Measurements
+
+On the owner's copy (an Apple M4 Max, 1440×900 at DPR 2):
+
+| | measured | target |
+|---|---|---|
+| the page, served | under 1 ms, 8.2 KB | |
+| the map, served | 958,870 bytes in 15 ms | |
+| navigation to the first draw | 55 to 90 ms (three loads) | ≤ 500 ms |
+| longest main-thread task while wheel-zooming | 6.7 ms | |
+| longest animation frame while wheel-zooming | 3.6 ms | ≤ 33 ms |
+
+From a Chrome trace of 24 wheel steps 40 ms apart. The same on a
+synthetic response ten times as large (the owner's map tiled ten times,
+52,370 documents, 10,206,683 bytes, served by interception): the first
+draw in 453 ms, the longest task 16.6 ms, the longest animation frame
+14.7 ms.
+
+### Known limits
+
+- The map is read whole, about 185 bytes a document: 10 MB for 50,000
+  documents still draws in under half a second, and a library past the
+  map's own bound (about 100,000 documents; "Interest map", Known limits)
+  has no map to read.
+- The page doesn't refresh itself: reload after a rebuild.
+- Safari's trackpad pinch is checked by hand.
+- Labels are placed by a greedy pass, largest first: a crowded view names
+  what fits and leaves the rest to zooming in.
 
 ---
 
