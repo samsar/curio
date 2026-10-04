@@ -29,14 +29,18 @@ const tenant = "local"
 // force. The engine and the placer read nothing else from the chunk store.
 type vectorSource struct {
 	store.ChunkStore
-	dvs       []store.DocVector
-	err       error // what DocumentVectors fails with, when set
-	searchErr error // what VectorSearch fails with, when set
+	dvs []store.DocVector
+	err error // what DocumentVectors fails with, when set
+	// search, when set, runs first in VectorSearch, which fails with its
+	// error.
+	search func(ctx context.Context) error
 }
 
-func (v *vectorSource) VectorSearch(_ context.Context, _ string, q []float32, limit int, f store.SearchFilters) ([]store.ChunkHit, error) {
-	if v.searchErr != nil {
-		return nil, v.searchErr
+func (v *vectorSource) VectorSearch(ctx context.Context, _ string, q []float32, limit int, f store.SearchFilters) ([]store.ChunkHit, error) {
+	if v.search != nil {
+		if err := v.search(ctx); err != nil {
+			return nil, err
+		}
 	}
 	type hit struct {
 		store.ChunkHit

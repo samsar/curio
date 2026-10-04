@@ -48,3 +48,10 @@ func (p *Placer) WithNeighbourBudget(d time.Duration) *Placer {
 	p.neighbourBudget = d
 	return p
 }
+
+// WithNeighbourTimeout returns p giving a placement's neighbour search d in
+// place of neighbourTimeout.
+func (p *Placer) WithNeighbourTimeout(d time.Duration) *Placer {
+	p.neighbourTimeout = d
+	return p
+}

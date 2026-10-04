@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -343,7 +344,7 @@ func TestPlacer_PlaceFallsBack(t *testing.T) {
 	ctx := context.Background()
 	f := mapLibrary(t, "d")
 	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
-	f.vectors.searchErr = errLocked
+	f.vectors.search = func(context.Context) error { return errLocked }
 	p := f.placer()
 	docs := f.addAround(t, "d", 0, 2, rand.New(rand.NewPCG(3, 3)))
 	for _, doc := range docs {
@@ -359,6 +360,45 @@ func TestPlacer_PlaceFallsBack(t *testing.T) {
 	require.Len(t, warnings, 1, "one warning a run")
 	assert.Contains(t, warnings[0], "fell back")
 	assert.Contains(t, warnings[0], "database is locked")
+}
+
+// TestPlacer_StalledSearchFallsBack: a neighbour search that stalls gives
+// up after its own timeout, short of the placement's, so the placement is
+// still written, at the fallback place, and the run warns once.
+func TestPlacer_StalledSearchFallsBack(t *testing.T) {
+	ctx := context.Background()
+	f := mapLibrary(t, "d")
+	run := f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	f.vectors.search = func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	doc := f.addAround(t, "d", 0, 1, rand.New(rand.NewPCG(5, 5)))[0]
+	f.placer().WithNeighbourTimeout(20*time.Millisecond).Place(ctx, tenant, doc)
+	got := f.placeOf(t, run.ID, doc)
+	assert.True(t, insideCircle(got.Map.ZoomX, got.Map.ZoomY, run.Map.DotRadius, f.circleOf(t, run.ID, got.InterestID)))
+	warnings := f.lines("level=WARN")
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "fell back")
+	assert.Contains(t, warnings[0], "deadline exceeded")
+}
+
+// TestPlacer_CancelledSearchIsQuiet: a search that fails because the
+// placement's own context ended, as when the daemon stops mid-index,
+// warns about nothing: the placement reports its cancellation at debug.
+func TestPlacer_CancelledSearchIsQuiet(t *testing.T) {
+	f := mapLibrary(t, "d")
+	f.rebuild(t, f.engine(nil, nil, Config{Center: true}))
+	ctx, cancel := context.WithCancel(context.Background())
+	f.vectors.search = func(ctx context.Context) error {
+		cancel()
+		return ctx.Err()
+	}
+	doc := f.addAround(t, "d", 0, 1, rand.New(rand.NewPCG(6, 6)))[0]
+	NewPlacer(f.insights, f.vectors, nil, f.debugLog()).Place(ctx, tenant, doc)
+	assert.Empty(t, f.lines("level=WARN"))
+	assert.Len(t, f.lines("fell back"), 1, "at debug")
+	assert.Len(t, f.lines("placement cancelled"), 1)
 }
 
 // TestPlacer_SweepPastItsBudget: a sweep that has spent its neighbour

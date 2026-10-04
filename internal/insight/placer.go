@@ -54,6 +54,10 @@ const (
 	// it, the documents left take the fallback place, and the placement
 	// itself never waits on it.
 	sweepNeighbourBudget = 60 * time.Second
+	// neighbourTimeout bounds one placement's search and read of its
+	// neighbours: a search that stalls takes the fallback place and leaves
+	// the rest of placeTimeout to the placement's write.
+	neighbourTimeout = 2 * time.Second
 )
 
 // Placer puts documents indexed between rebuilds into the tenant's
@@ -69,8 +73,10 @@ type Placer struct {
 	chunks   store.ChunkStore
 	drift    func() string
 	log      *slog.Logger
-	// neighbourBudget is a sweep's sweepNeighbourBudget.
-	neighbourBudget time.Duration
+	// neighbourBudget is a sweep's sweepNeighbourBudget, and
+	// neighbourTimeout a placement's.
+	neighbourBudget  time.Duration
+	neighbourTimeout time.Duration
 
 	mu        sync.Mutex
 	cached    *runPlacement // the latest run's space, nil before the first placement
@@ -98,7 +104,8 @@ func NewPlacer(insights store.InsightStore, chunks store.ChunkStore, drift func(
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Placer{insights: insights, chunks: chunks, drift: drift, log: log, neighbourBudget: sweepNeighbourBudget}
+	return &Placer{insights: insights, chunks: chunks, drift: drift, log: log, neighbourBudget: sweepNeighbourBudget,
+		neighbourTimeout: neighbourTimeout}
 }
 
 // Place places a document just indexed into the tenant's current
@@ -376,8 +383,9 @@ func (rp *runPlacement) place(documentID string, vec []float32) (placed, error) 
 
 // position gives pl its place on the run's map, when the map is built:
 // near its most similar mapped documents when search is set and finds
-// some, else the fallback place. A failed search falls back: a warning for
-// the run's first, debug after.
+// some within neighbourTimeout, else the fallback place. A failed search
+// falls back: a warning for the run's first, debug after, and debug alone
+// when ctx ended, which the placement reports itself.
 func (p *Placer) position(ctx context.Context, tenantID string, rp *runPlacement, pl *placed, search bool) {
 	if !rp.mapped {
 		return
@@ -385,13 +393,19 @@ func (p *Placer) position(ctx context.Context, tenantID string, rp *runPlacement
 	var near []mapNeighbour
 	if search {
 		err := recovered(func() error {
+			sctx, cancel := context.WithTimeout(ctx, p.neighbourTimeout)
+			defer cancel()
 			var err error
-			near, err = p.neighbours(ctx, tenantID, rp.runID, pl)
+			near, err = p.neighbours(sctx, tenantID, rp.runID, pl)
 			return err
 		})
-		if err != nil {
-			p.logOnce(&p.fallbacks, rp.runID, "interests: a placement's place on the map fell back",
-				"document", pl.DocumentID, "err", err)
+		const msg = "interests: a placement's place on the map fell back"
+		switch {
+		case err == nil:
+		case ctx.Err() != nil:
+			p.log.Debug(msg, "run", rp.runID, "document", pl.DocumentID, "err", err)
+		default:
+			p.logOnce(&p.fallbacks, rp.runID, msg, "document", pl.DocumentID, "err", err)
 		}
 	}
 	pl.Map = rp.position(pl, near)
