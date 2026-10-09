@@ -4,7 +4,7 @@ go 1.26.8
 
 require (
 	charm.land/huh/v2 v2.0.3
-	codeberg.org/readeck/go-readability/v2 v2.1.2
+	codeberg.org/readeck/go-readability/v2 v2.1.3
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
 	github.com/andybalholm/brotli v1.2.6
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
