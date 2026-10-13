@@ -13042,9 +13042,9 @@ step applies the next rules change (a version bump) to every home.
 
 **Cards, staleness and the cards job.** A changed card text queues a
 `cards` job in the transaction that changed it (`EnqueueOnce`: at most one
-pending per tenant, a running one not counting; the commit wakes the
-pool), so a stale card always has a job pending or running and no caller
-can forget to queue one; a write rolled back queues nothing. The sketch
+pending per tenant, a running one not counting), so a stale card always
+has a job pending or running and no caller can forget to queue one; a
+write rolled back queues nothing. The sketch
 queued from the callers (after an import, after `MarkFetched`, after
 reindex-all, at start); `MarkFetched` changes no card, so a document whose
 index failed would never have had its card embedded. The job runs on its
@@ -13067,6 +13067,30 @@ embedded again; the drift sampler stays chunks-only. `document_cards_vec`
 is created by `EnsureVectorIndex` at the home's width with its delete
 trigger, under the rules `chunks_vec` follows, and a new card vector
 table makes every card stale.
+
+**The cards job runs 10 s after the change that queued it.** It is
+queued `sqlite.CardsJobDelay` (10 s) ahead, and its commit wakes no
+worker: the cards pool's idle poll, at most 5 s apart, finds it once it is
+due, as it finds a deferred job. Every card change inside the window finds
+it pending and shares it, so a burst (an import's ingests, then its
+fetches seconds apart) shares one job and one embed request a batch.
+Queued to run at once and waking the pool, every card-changing write made
+while no job was pending queued one that embedded a card or two: through
+the daemon's pools, 60 pages saved and fetched 40 ms apart left 61 cards
+jobs, against 1 with the window. Nothing prunes finished jobs but `curio
+jobs prune --older-than` and `curio jobs delete --status` ("Jobs
+lifecycle"), so the rows add up: a 5,000-page import, fetched at the setup
+estimate's 25 to 45 pages a minute (1.9 to 3.3 hours), left about one
+cards job per card-changing fetch, ≈5,000 rows beside its ≈10,000 fetch
+and index rows, and now leaves about one per 12 to 13 s of fetching (the
+window and the idle poll), ≈520 to 940. Each job saved is an Ollama
+request and three writes (the claim, `PutCardVectors`, `MarkDone`). 10 s
+rather than 30 to 60: a just-fetched page's card vector comes within about
+15 s, the queue drains (`curio status --follow`, keep-awake) seconds after
+the last fetch, and the fields list finds a page saved a moment ago, in
+the transaction that saved it, meanwhile. A longer window would save
+little more, a cards batch being one request either way at import rates,
+and would need an e2e timing knob; the window has no config key.
 
 **The fusion.** The chunk lists are fused by RRF and collapsed exactly as
 before. Then each document list adds `weight/(rrf_k + rank)` to its

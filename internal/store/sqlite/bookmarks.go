@@ -131,11 +131,10 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 	}
 	// The bookmark's title and folder are the document's to be searched by,
 	// whatever its state.
-	queued, err := refreshFields(ctx, tx, b.TenantID, docID)
-	if err != nil {
+	if err := s.db.refreshFields(ctx, tx, b.TenantID, docID); err != nil {
 		return store.IngestResult{}, err
 	}
-	if err := s.db.commitNotify(tx, cardsWake(queued, wake...)...); err != nil {
+	if err := s.db.commitNotify(tx, wake...); err != nil {
 		return store.IngestResult{}, fmt.Errorf("commit ingest: %w", err)
 	}
 
@@ -185,13 +184,12 @@ func (s *Bookmarks) Create(ctx context.Context, b *store.Bookmark) error {
 	if b.UpdatedAt, err = parseTime(updatedAt); err != nil {
 		return err
 	}
-	var queued bool
 	if b.DocumentID != nil {
-		if queued, err = refreshFields(ctx, tx, b.TenantID, *b.DocumentID); err != nil {
+		if err := s.db.refreshFields(ctx, tx, b.TenantID, *b.DocumentID); err != nil {
 			return err
 		}
 	}
-	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit bookmark insert: %w", err)
 	}
 	return nil
@@ -453,13 +451,12 @@ func (s *Bookmarks) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("delete bookmark: %w", err)
 	}
-	var queued bool
 	if docID.Valid {
-		if queued, err = refreshFields(ctx, tx, tenantID, docID.String); err != nil {
+		if err := s.db.refreshFields(ctx, tx, tenantID, docID.String); err != nil {
 			return err
 		}
 	}
-	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete bookmark: commit: %w", err)
 	}
 	return nil
@@ -492,11 +489,10 @@ func (s *Bookmarks) LinkDocument(ctx context.Context, bookmarkID, documentID str
 	if was.Valid {
 		ids = append(ids, was.String)
 	}
-	queued, err := refreshFields(ctx, tx, tenantID, ids...)
-	if err != nil {
+	if err := s.db.refreshFields(ctx, tx, tenantID, ids...); err != nil {
 		return err
 	}
-	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("link bookmark: commit: %w", err)
 	}
 	return nil

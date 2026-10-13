@@ -280,18 +280,20 @@ func TestRefreshFields_DocumentLeavesItsHost(t *testing.T) {
 
 // TestRefreshFields_QueuesCards: a write that changes a card queues one
 // cards job, at most one pending per tenant, in its own transaction, so
-// one that rolls back leaves none; one that changes no card queues
-// nothing.
+// one that rolls back leaves none, and wakes no worker; one that changes
+// no card queues nothing. The window is 0, so the job is claimable at
+// once.
 func TestRefreshFields_QueuesCards(t *testing.T) {
 	e := newFieldsEnv(t)
+	e.db.SetCardsJobDelay(0)
 	q := NewJobs(e.db)
 	woken := q.Enqueued([]store.JobKind{store.JobKindCards})
 	b := e.ingest("https://example.com/a", store.SourceChrome, "A title", "")
 	assert.Equal(t, 1, e.pendingCardsJobs())
 	select {
 	case <-woken:
+		t.Fatal("the commit woke the cards worker")
 	default:
-		t.Fatal("the commit woke no cards worker")
 	}
 	var payload string
 	require.NoError(t, e.db.QueryRow(`SELECT payload FROM jobs WHERE kind = ?`, store.JobKindCards).Scan(&payload))
@@ -325,6 +327,72 @@ func TestRefreshFields_QueuesCards(t *testing.T) {
 	assert.Zero(t, e.pendingCardsJobs())
 }
 
+// TestCardsJob_QueuedAWindowAhead: every path that queues the cards job
+// queues it the cards window ahead, waking no worker, so the card changes
+// inside the window share it; once it runs, the next change opens a new
+// window.
+func TestCardsJob_QueuedAWindowAhead(t *testing.T) {
+	const window = 10 * time.Second
+	for _, tc := range []struct {
+		name  string
+		queue func(e *fieldsEnv)
+	}{
+		{"a card change", func(e *fieldsEnv) { e.ingest("https://example.com/a", store.SourceChrome, "A title", "") }},
+		{"ResetCards", func(e *fieldsEnv) {
+			_, err := NewDocumentIndex(e.db, vecDim).ResetCards(e.ctx, "local")
+			require.NoError(e.t, err)
+		}},
+		{"EnsureDocumentFields", func(e *fieldsEnv) {
+			_, err := e.db.Exec(`INSERT INTO documents (id, tenant_id, url) VALUES ('d', 'local', 'https://example.com/d')`)
+			require.NoError(e.t, err)
+			_, err = EnsureDocumentFields(e.ctx, e.db)
+			require.NoError(e.t, err)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newFieldsEnv(t)
+			e.db.SetCardsJobDelay(window)
+			q := NewJobs(e.db)
+			woken := q.Enqueued([]store.JobKind{store.JobKindCards})
+			queued := time.Now().UTC()
+			tc.queue(e)
+			assert.Equal(t, 1, e.pendingCardsJobs())
+			e.assertCardsJobDue(queued.Add(window))
+			select {
+			case <-woken:
+				t.Fatal("the commit woke the cards worker")
+			default:
+			}
+
+			e.ingest("https://example.com/b", store.SourceChrome, "Inside the window", "")
+			assert.Equal(t, 1, e.pendingCardsJobs(), "a change inside the window shares the job")
+			_, err := q.ClaimNext(e.ctx, []store.JobKind{store.JobKindCards})
+			require.ErrorIs(t, err, store.ErrNotFound, "not claimable before the window ends")
+
+			_, err = e.db.Exec(`UPDATE jobs SET run_after = ? WHERE kind = ?`, formatTime(queued), store.JobKindCards)
+			require.NoError(t, err, "the window ends")
+			_, err = q.ClaimNext(e.ctx, []store.JobKind{store.JobKindCards})
+			require.NoError(t, err)
+			queued = time.Now().UTC()
+			e.ingest("https://example.com/c", store.SourceChrome, "After it ran", "")
+			assert.Equal(t, 1, e.pendingCardsJobs(), "the running job doesn't count")
+			e.assertCardsJobDue(queued.Add(window))
+		})
+	}
+}
+
+// assertCardsJobDue asserts the pending cards job is due within a second
+// after due, as the store keeps it, to the millisecond.
+func (e *fieldsEnv) assertCardsJobDue(due time.Time) {
+	e.t.Helper()
+	var stored string
+	require.NoError(e.t, e.db.QueryRow(`SELECT run_after FROM jobs WHERE kind = ? AND status = ?`,
+		store.JobKindCards, store.JobStatusPending).Scan(&stored))
+	runAfter, err := parseTime(stored)
+	require.NoError(e.t, err)
+	assert.WithinRange(e.t, runAfter, due.Truncate(time.Millisecond), due.Add(time.Second))
+}
+
 // TestRefreshFields_NoChangeWritesNothing: a write that changes nothing a
 // document's fields are derived from writes no derived row, no index
 // entry and no job: a refused ingest, and a second source's bookmark
@@ -340,6 +408,7 @@ func TestRefreshFields_NoChangeWritesNothing(t *testing.T) {
 		require.NoError(t, e.db.QueryRow(`SELECT total_changes()`).Scan(&n))
 		return n
 	}
+	e.db.SetCardsJobDelay(0)
 	e.ingest("https://example.com/a", store.SourceChrome, "Same title", "/Bookmarks Bar/Same")
 	_, err := NewJobs(e.db).ClaimNext(e.ctx, []store.JobKind{store.JobKindCards})
 	require.NoError(t, err, "the cards job runs: a change would queue another")

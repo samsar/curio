@@ -54,7 +54,7 @@ func BenchmarkRefreshFields_LargeHost(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, err := refreshFields(ctx, tx, "local", id); err != nil {
+		if err := db.refreshFields(ctx, tx, "local", id); err != nil {
 			b.Fatal(err)
 		}
 		if err := tx.Rollback(); err != nil {

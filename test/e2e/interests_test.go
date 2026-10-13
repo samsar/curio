@@ -120,7 +120,9 @@ func fetchedDocuments(c *client.Client) (int, error) {
 
 // TestDaemon_ImportedPagesGetCards: once an import's queue settles, every
 // document's card holds the title its fetch found, and has a vector of
-// that text.
+// that text. The queue settles once the cards job has run,
+// sqlite.CardsJobDelay after the last card change and up to an idle poll
+// later.
 func TestDaemon_ImportedPagesGetCards(t *testing.T) {
 	env := interestsDaemon(t, time.Hour)
 	ctx := context.Background()
@@ -134,7 +136,7 @@ func TestDaemon_ImportedPagesGetCards(t *testing.T) {
 		for _, k := range q.Kinds {
 			assert.Zero(c, k.Pending+k.Running, "%s jobs left", k.Kind)
 		}
-	}, 30*time.Second, 50*time.Millisecond, logTail(env.home))
+	}, 60*time.Second, 50*time.Millisecond, logTail(env.home))
 
 	db, err := sqlitestore.Open(ctx, env.home.DBPath())
 	require.NoError(t, err)

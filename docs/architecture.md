@@ -365,7 +365,9 @@ Every write that changes what a document was saved as (creating it, a
 fetch, saving, deleting or relinking a bookmark) derives its search
 fields and its card again (`internal/docmeta`) in its own transaction,
 and a card whose text changed queues the cards job there too: at most one
-pending per tenant. The cards job embeds the stale cards in batches of
+pending per tenant, due 10 s later (`sqlite.CardsJobDelay`), so the
+changes of a burst share it and it runs about 10 s after the change that
+queued it. The cards job embeds the stale cards in batches of
 32, under the queue gate like any job; an Ollama that doesn't answer
 defers it rather than failing it. See decisions.md "Metadata search: a
 fields index and a card per document".

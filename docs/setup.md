@@ -793,7 +793,9 @@ keywords alone (BM25 and the fields) and says so (`degraded`).
 
 The cards are embedded by queued work, the `cards` job, on a pool of its
 own: after an import, after a fetch changes what a page is saved as, and
-at the daemon's start when any card is stale. Like the other jobs it
+at the daemon's start when any card is stale. It runs about 10 s after
+the change that queued it, so the changes of an import share one job;
+until then the fields list finds the page. Like the other jobs it
 waits while the queue is paused or outside its schedule, and while Ollama
 doesn't answer it waits too, retrying for up to a day. `curio reindex
 --all` embeds every card again. Upgrading to 2.7 derives every document's

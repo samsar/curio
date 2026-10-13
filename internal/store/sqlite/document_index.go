@@ -281,11 +281,10 @@ func (x *DocumentIndex) ResetCards(ctx context.Context, tenantID string) (int, e
 	if err != nil {
 		return 0, fmt.Errorf("reset cards: %w", err)
 	}
-	queued, err := queueCards(ctx, tx, tenantID)
-	if err != nil {
+	if err := x.db.queueCards(ctx, tx, tenantID); err != nil {
 		return 0, err
 	}
-	if err := x.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("reset cards: commit: %w", err)
 	}
 	return int(n), nil

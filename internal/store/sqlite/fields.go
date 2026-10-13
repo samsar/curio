@@ -22,7 +22,8 @@ import (
 // can forget to, and the derived rows commit or roll back with the write.
 // refreshFields is the only writer of document_fields and of
 // document_cards.text. A card whose text it changes is stale, and the
-// same transaction queues the cards job that embeds it.
+// same transaction queues the cards job that embeds it, CardsJobDelay
+// ahead.
 //
 // A document's display site name is agreed across its host: its own
 // declared name, else the name its host's documents agree on
@@ -120,10 +121,8 @@ type hostRow struct {
 // again, the host a document is on and any it has left, and rewrites the
 // host's other documents that take the agreed name. A document that no
 // longer exists is skipped: its rows went with it. When any card's text
-// changed, it queues a cards job, at most one pending per tenant, and
-// reports whether it queued one, for the caller's commit to wake the
-// cards worker (DB.commitNotify).
-func refreshFields(ctx context.Context, tx *sql.Tx, tenantID string, ids ...string) (cardsQueued bool, err error) {
+// changed, it queues the tenant's cards job (queueCards).
+func (d *DB) refreshFields(ctx context.Context, tx *sql.Tx, tenantID string, ids ...string) error {
 	f := &fieldsTx{tx: tx, tenantID: tenantID}
 
 	refreshed := map[string]bool{}
@@ -141,7 +140,7 @@ func refreshFields(ctx context.Context, tx *sql.Tx, tenantID string, ids ...stri
 		refreshed[id] = true
 		own, oldHost, ok, err := f.derive(ctx, id)
 		if err != nil {
-			return false, fmt.Errorf("derive the fields of document %s: %w", id, err)
+			return fmt.Errorf("derive the fields of document %s: %w", id, err)
 		}
 		if !ok {
 			continue
@@ -155,13 +154,13 @@ func refreshFields(ctx context.Context, tx *sql.Tx, tenantID string, ids ...stri
 	}
 	for _, host := range slices.Sorted(maps.Keys(changes)) {
 		if err := f.agree(ctx, host, *changes[host], refreshed); err != nil {
-			return false, fmt.Errorf("agree the site name of host %q: %w", host, err)
+			return fmt.Errorf("agree the site name of host %q: %w", host, err)
 		}
 	}
 	if !f.cardsChanged {
-		return false, nil
+		return nil
 	}
-	return queueCards(ctx, tx, tenantID)
+	return d.queueCards(ctx, tx, tenantID)
 }
 
 // derive reads document id's inputs and derives what it says of itself.
@@ -304,27 +303,28 @@ func (f *fieldsTx) writeCard(ctx context.Context, id, text string) error {
 	return nil
 }
 
-// queueCards queues the tenant's cards job inside tx, unless one is
-// pending already (JobQueue.EnqueueOnce's rule), and reports whether it
-// queued one.
-func queueCards(ctx context.Context, tx *sql.Tx, tenantID string) (bool, error) {
-	err := insertJobWith(ctx, tx, insertJobOnceSQL, &store.Job{TenantID: tenantID, Kind: store.JobKindCards})
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
-	case err != nil:
-		return false, fmt.Errorf("queue the cards job: %w", err)
-	}
-	return true, nil
-}
+// CardsJobDelay is how far ahead a write that changed a card queues the
+// cards job. It is longer than the gaps between the card-changing writes
+// of a burst (an import's ingests, then its fetches seconds apart), so a
+// burst shares one job, where a job run at once would embed a card or two
+// and leave a row in jobs for every fetch. And it is short against what
+// waits on it: the fields list finds a page saved a moment ago, in the
+// transaction that saved it, so only the cards list waits for its vector.
+const CardsJobDelay = 10 * time.Second
 
-// cardsWake is the job kinds a commit wakes when queued says a cards job
-// was queued: the cards worker's, or none.
-func cardsWake(queued bool, kinds ...store.JobKind) []store.JobKind {
-	if queued {
-		kinds = append(kinds, store.JobKindCards)
+// queueCards queues the tenant's cards job inside tx, run_after the DB's
+// cards window ahead, unless one is pending already (JobQueue.EnqueueOnce's
+// rule): every card change inside the window finds that job pending and
+// shares it. It wakes no worker, since the job isn't claimable yet; the
+// cards pool's idle poll finds it once it is due, as it finds a deferred
+// job.
+func (d *DB) queueCards(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	job := &store.Job{TenantID: tenantID, Kind: store.JobKindCards, RunAfter: time.Now().UTC().Add(d.cardsJobDelay)}
+	err := insertJobWith(ctx, tx, insertJobOnceSQL, job)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("queue the cards job: %w", err)
 	}
-	return kinds
+	return nil
 }
 
 // maxFieldsBatch caps the documents EnsureDocumentFields refreshes in one
@@ -445,11 +445,10 @@ func refreshBatch(ctx context.Context, db *DB, b fieldsBatch) error {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
-	queued, err := refreshFields(ctx, tx, b.tenantID, b.ids...)
-	if err != nil {
+	if err := db.refreshFields(ctx, tx, b.tenantID, b.ids...); err != nil {
 		return err
 	}
-	if err := db.commitNotify(tx, cardsWake(queued)...); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
@@ -493,11 +492,10 @@ func queueCardsJob(ctx context.Context, db *DB, tenantID string) error {
 		return fmt.Errorf("queue the cards job: begin: %w", err)
 	}
 	defer tx.Rollback()
-	queued, err := queueCards(ctx, tx, tenantID)
-	if err != nil {
+	if err := db.queueCards(ctx, tx, tenantID); err != nil {
 		return err
 	}
-	if err := db.commitNotify(tx, cardsWake(queued)...); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("queue the cards job: commit: %w", err)
 	}
 	return nil

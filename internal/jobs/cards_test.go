@@ -110,6 +110,51 @@ func TestCardsJob_EmbedsTheStaleCards(t *testing.T) {
 	assert.Len(t, emb.sent(), 3, "nothing stale, nothing sent")
 }
 
+// TestCardsJob_SharedByABurst: an import's burst of card changes, 60
+// pages saved, then fetched and indexed through the daemon's pools, shares
+// the one cards job its first change queued, the window ahead; once the
+// window ends, the cards pool's idle poll finds the job and it embeds
+// every card. The window is an hour, so the burst ends inside it however
+// slow the machine, and the test ends it by hand. Queued to run at once
+// and waking the pool, as cards jobs were before the window, the same
+// burst left 61 cards jobs with its fetches 40 ms apart, as a network
+// spaces them, and 2 to 12 with this fetcher's instant answers, the pool
+// racing the fetches.
+func TestCardsJob_SharedByABurst(t *testing.T) {
+	const pages = 60
+	deps, db, _ := newTestDeps(t)
+	db.SetCardsJobDelay(time.Hour)
+	ctx := context.Background()
+	for i := range pages {
+		_, err := deps.Bookmarks.Ingest(ctx, &store.Bookmark{TenantID: "local", Source: store.SourceChrome,
+			URL: fmt.Sprintf("https://example.com/p/%d", i), Title: new(fmt.Sprint("Saved ", i)), SavedAt: time.Now().UTC()})
+		require.NoError(t, err)
+	}
+	stop := runPools(NewPools(deps, PoolSizes{Fetch: 1, Index: 1},
+		WorkerOptions{PollInterval: 10 * time.Millisecond, MaxPollInterval: 50 * time.Millisecond, Log: quietLog}))
+	defer stop()
+	count := func(c require.TestingT, query string, args ...any) int {
+		var n int
+		require.NoError(c, db.QueryRow(query, args...).Scan(&n))
+		return n
+	}
+	const openJobs = `SELECT count(*) FROM jobs WHERE kind = ? AND status IN ('pending', 'running')`
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Zero(c, count(c, openJobs, store.JobKindFetch))
+		assert.Zero(c, count(c, openJobs, store.JobKindIndex))
+	}, 30*time.Second, 10*time.Millisecond, "the burst settles")
+	assert.Equal(t, pages, staleCards(t, deps), "every card waits for the window")
+
+	_, err := db.Exec(`UPDATE jobs SET run_after = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE kind = ?`,
+		store.JobKindCards)
+	require.NoError(t, err, "the window ends")
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Zero(c, count(c, openJobs, store.JobKindCards))
+	}, 30*time.Second, 10*time.Millisecond, "the cards job runs")
+	assert.Zero(t, staleCards(t, deps))
+	assert.Equal(t, 1, count(t, `SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindCards))
+}
+
 // TestCardsJob_Failures: an embedding model that doesn't answer defers the
 // job without spending its attempt; another error is retried after its
 // backoff; one the model can't take fails it for good. The cards stay

@@ -347,7 +347,9 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	assert.False(t, res.Degraded, "semantic search ran: %v", res.Warnings)
 	assert.True(t, ollama.embedded("Paragraph 1 on zymurgy"), "the index job embedded the article's text")
 	assert.Positive(t, ollama.queryEmbeds.Load(), "the search embedded the query")
-	assert.Eventually(t, func() bool { return ollama.embedded("An Introduction to Zymurgy — ") }, 10*time.Second,
+	// The cards job runs sqlite.CardsJobDelay after the change that queued
+	// it, once the cards pool's idle poll, up to 5 s apart, finds it due.
+	assert.Eventually(t, func() bool { return ollama.embedded("An Introduction to Zymurgy — ") }, 30*time.Second,
 		50*time.Millisecond, "the cards job embedded the card the fetch gave the document")
 
 	assertDashboard(t, baseURL, docID)

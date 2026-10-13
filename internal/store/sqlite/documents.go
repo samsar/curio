@@ -81,11 +81,10 @@ func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 	if doc.UpdatedAt, err = parseTime(updatedAt); err != nil {
 		return err
 	}
-	queued, err := refreshFields(ctx, tx, doc.TenantID, doc.ID)
-	if err != nil {
+	if err := s.db.refreshFields(ctx, tx, doc.TenantID, doc.ID); err != nil {
 		return err
 	}
-	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit document insert: %w", err)
 	}
 	*d = doc
@@ -139,11 +138,10 @@ func (s *Documents) ApplyFetch(ctx context.Context, id string, m store.FetchedMe
 	if err != nil {
 		return fmt.Errorf("apply fetch to document %s: %w", id, err)
 	}
-	queued, err := refreshFields(ctx, tx, tenantID, id)
-	if err != nil {
+	if err := s.db.refreshFields(ctx, tx, tenantID, id); err != nil {
 		return err
 	}
-	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("apply fetch to document %s: commit: %w", id, err)
 	}
 	return nil
@@ -592,11 +590,10 @@ func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionI
 	if err != nil {
 		return fmt.Errorf("set current extraction: %w", err)
 	}
-	queued, err := refreshFields(ctx, tx, tenantID, docID)
-	if err != nil {
+	if err := s.db.refreshFields(ctx, tx, tenantID, docID); err != nil {
 		return err
 	}
-	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("set current extraction: commit: %w", err)
 	}
 	return nil

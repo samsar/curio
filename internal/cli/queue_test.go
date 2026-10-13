@@ -131,14 +131,15 @@ func TestKeepAwakeCommand(t *testing.T) {
 }
 
 // TestStatus_QueueLoad: status shows each pool's running jobs against its
-// limit, and what waits.
+// limit, and what waits: the page's fetch, and the job that embeds its
+// card once the cards window ends.
 func TestStatus_QueueLoad(t *testing.T) {
 	srv := apitest.Start(t)
 	mustRun(t, srv, "add", "https://example.com/a")
 	out := mustRun(t, srv, "status")
 	assert.Contains(t, out, "queue:     open\n"+
 		"           fetch 0/16 running, 1 pending   index 0/4 running, 0 pending   cluster 0/1 running, 0 pending"+
-		"   cards 0/1 running, 1 pending\n")
+		"   cards 0/1 running, 1 pending (1 due later)\n")
 }
 
 // TestStatus_QueueLoadDueLater: a pool whose pending jobs include some
@@ -211,9 +212,9 @@ func TestStatus_KeepAwake(t *testing.T) {
 	mustRun(t, srv, "add", "https://example.com/a")
 	mustRun(t, srv, "keep-awake", "on")
 	out := mustRun(t, srv, "status")
-	assert.Contains(t, out, "cards 0/1 running, 1 pending\n"+
+	assert.Contains(t, out, "cards 0/1 running, 1 pending (1 due later)\n"+
 		"keep-awake: on, holding the Mac awake (AC power, 2 jobs queued)\n",
-		"right after the pool loads; the page's fetch and its card")
+		"right after the pool loads; the page's fetch and its card, due once the cards window ends")
 
 	srv = apitest.Start(t, func(d *api.Deps) {
 		d.KeepAwake = keepAwakeStub{Enabled: true, Power: keepawake.PowerBattery}

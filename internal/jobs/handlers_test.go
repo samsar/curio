@@ -67,6 +67,9 @@ func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 	t.Helper()
 
 	db := sqlitetest.NewDB(t)
+	// A card change queues a cards job claimable at once, so no test waits
+	// out the window; TestCardsJob_SharedByABurst runs with one.
+	db.SetCardsJobDelay(0)
 	dim := sqlitetest.Width(t, db)
 	home, err := curiohome.Init(t.TempDir(), "fake", dim)
 	require.NoError(t, err)

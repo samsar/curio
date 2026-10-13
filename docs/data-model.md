@@ -293,7 +293,9 @@ document_cards
   `idx_document_cards_stale (document_id) WHERE embedded_text IS NOT text`
   holds the stale ones alone, which the cards job pages through. A write
   that changes a card's text queues the tenant's cards job in its own
-  transaction.
+  transaction, due 10 s later (`sqlite.CardsJobDelay`), so the card
+  changes of a burst share one job; it runs about 10 s after the change
+  that queued it.
 - `document_cards_vec` is sqlite-vec, keyed on `document_id`, at the
   home's width, as `chunks_vec` is: created in Go by
   `sqlite.EnsureVectorIndex`, with the trigger that deletes a card's
@@ -396,7 +398,9 @@ when a job is enqueued or put back to pending in this process
 (`JobQueue.Enqueued`), and a worker wakes on that; between signals it
 polls, starting at 500 ms and backing off to 5 s, which is how it finds
 retries and deferred jobs coming due and jobs other processes enqueued.
-`Defer` signals nothing: its job isn't runnable before its `run_after`.
+`Defer` signals nothing: its job isn't runnable before its `run_after`;
+nor does queueing the cards job, which is due `sqlite.CardsJobDelay`
+later.
 
 Every claim first waits on the queue gate (`queue_settings`, below): while
 the queue is paused, outside its daily schedule, or at the throttle's cap
