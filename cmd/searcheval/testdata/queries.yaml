@@ -1,0 +1,40 @@
+# The synthetic library's query file (see library_test.go): each query's
+# one keyword matches a few documents, and its vector sits on the line the
+# documents' vectors are spread along, so every ranking can be worked out
+# by hand.
+queries:
+  - id: q-alpha
+    kind: topic
+    tags: [owner]
+    query: alpha
+    relevant:
+      - {url: "https://example.com/doc/05", grade: 2}
+      - https://example.com/doc/04
+      - https://example.com/doc/missing
+
+  - id: q-beta
+    kind: keyword
+    tags: [owner, recent]
+    note: doc 22 failed and doc 21 has no chunks; doc 20 is pending, with chunks
+    query: beta
+    relevant:
+      - {url: "https://example.com/doc/20", grade: 2}
+      - {url: "https://example.com/doc/22", grade: 2}
+      - https://example.com/doc/21
+      - https://example.com/doc/13
+
+  - id: q-gamma
+    kind: topic
+    query: gamma
+    relevant:
+      - {url: "https://example.com/doc/00", grade: 2}
+      - https://example.com/doc/09
+
+  - id: q-delta
+    tags: [recent]
+    note: doc 23 is dead
+    query: delta
+    relevant:
+      - {url: "https://example.com/doc/16", grade: 2}
+      - https://example.com/doc/23
+      - https://example.com/doc/11
