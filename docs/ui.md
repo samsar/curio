@@ -96,8 +96,10 @@ footer names the address the daemon listens on.
   line in place of the passages says what it was saved as ("Saved as
   “Queues” in Tech / Streams", or the parts it has, or the browser it
   came from). A page that failed or went dead is found that way only,
-  since its text is never searched: a second line says the page is no
-  longer available, with a link to its original address. When semantic
+  since its text is never searched: a second line says a dead page is no
+  longer available, or that a failed one couldn't be read (it may still
+  be there, behind a sign-in or a bot check), with a link to its original
+  address. When semantic
   search is unavailable (Ollama down), the keyword results come under a
   warning. The old address, `/ui/search?q=…`, leads here with its query.
 - **Library**: every document, most recently updated first. Tabs choose

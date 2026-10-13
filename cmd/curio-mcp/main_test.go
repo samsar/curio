@@ -36,7 +36,8 @@ import (
 // stores each /v1/search request body in lastSearch. The query "offline" gets
 // a degraded (keyword-only) search response, and "saved" savedHits.
 // savedHits are hits that matched on what they were saved as, without a
-// passage: a pending document, and a dead one named by its bookmark.
+// passage: a pending document, a dead one named by its bookmark, and a
+// failed one.
 var savedHits = []map[string]any{
 	{
 		"document": map[string]any{"id": "doc-saved", "url": "https://example.com/saved", "title": "Saved page",
@@ -52,6 +53,13 @@ var savedHits = []map[string]any{
 		"score":          0.2,
 		"bookmark_title": "Gone but saved",
 		"bookmarks":      []map[string]any{{"title": "Gone but saved", "source": "chrome", "saved_at": "2026-09-01T00:00:00Z"}},
+	},
+	{
+		"document": map[string]any{"id": "doc-walled", "url": "https://example.com/walled", "title": "Walled page",
+			"content_type": "unknown", "state": "failed"},
+		"score": 0.1,
+		"bookmarks": []map[string]any{{"folder_path": "/Bookmarks Bar/Later", "source": "chrome",
+			"saved_at": "2026-08-01T00:00:00Z"}},
 	},
 }
 
@@ -497,8 +505,9 @@ func TestMCP_SearchBookmarks(t *testing.T) {
 }
 
 // TestMCP_SearchHitsWithoutMatches: a hit without a passage says it
-// matched its bookmark, with what it was saved as, and a failed or dead
-// one that its page is gone; every hit names its state.
+// matched its bookmark, with what it was saved as, its folder without the
+// browser's root; a dead one says its page is gone, a failed one that it
+// couldn't be read; every hit names its state.
 func TestMCP_SearchHitsWithoutMatches(t *testing.T) {
 	cs := connectMCP(t)
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
@@ -508,12 +517,14 @@ func TestMCP_SearchHitsWithoutMatches(t *testing.T) {
 	require.NoError(t, err)
 	txt := textOf(res)
 	assert.Contains(t, txt, "1. Saved page\n")
-	assert.Contains(t, txt, "   matched its bookmark: saved as \"Saved for later\" in /Reading\n",
+	assert.Contains(t, txt, "   matched its bookmark: saved as \"Saved for later\" in Reading\n",
 		"the newest bookmark with a title")
 	assert.Contains(t, txt, "2. Gone but saved\n", "an untitled hit named by its bookmark")
 	assert.Contains(t, txt, "   matched its bookmark: saved as \"Gone but saved\"\n")
-	assert.Contains(t, txt, "   the page is no longer available (dead); only its bookmark is saved\n")
-	assert.Equal(t, 1, strings.Count(txt, "no longer available"))
+	assert.Contains(t, txt, "   the page is no longer available (dead); its bookmark matched\n")
+	assert.Contains(t, txt, "   matched its bookmark: saved in Later\n")
+	assert.Contains(t, txt, "   the page couldn't be read (failed); its bookmark matched\n")
+	assert.Equal(t, 2, strings.Count(txt, "); its bookmark matched"), "the pending page is still there")
 
 	raw, err := json.Marshal(res.StructuredContent)
 	require.NoError(t, err)
@@ -521,9 +532,11 @@ func TestMCP_SearchHitsWithoutMatches(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &out))
 	assert.Equal(t, []docHit{
 		{DocID: "doc-saved", Title: "Saved page", URL: "https://example.com/saved", Score: 0.3, State: "pending",
-			SavedTitle: "Saved for later", Folder: "/Reading"},
+			SavedTitle: "Saved for later", Folder: "Reading"},
 		{DocID: "doc-gone", Title: "Gone but saved", URL: "https://example.com/gone", Score: 0.2, State: "dead",
 			SavedTitle: "Gone but saved"},
+		{DocID: "doc-walled", Title: "Walled page", URL: "https://example.com/walled", Score: 0.1, State: "failed",
+			Folder: "Later"},
 	}, out.Results)
 
 	alpha, err := cs.CallTool(context.Background(), &mcp.CallToolParams{

@@ -952,8 +952,8 @@ func TestSearchHit_MatchKind(t *testing.T) {
 
 // TestSearchHit_Saved: a hit without matches says what it was saved as,
 // from its newest titled bookmark, the parts it has, its folder without
-// the browser's root; or where it was saved from. A failed or dead hit's
-// page is gone.
+// the browser's root; or where it was saved from. A dead hit's page is
+// gone, and a failed one's couldn't be read.
 func TestSearchHit_Saved(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -973,9 +973,9 @@ func TestSearchHit_Saved(t *testing.T) {
 	} {
 		assert.Equal(t, tc.want, SearchHit{Bookmarks: tc.bookmarks}.Saved(), tc.name)
 	}
-	for state, gone := range map[string]bool{"failed": true, "dead": true, "pending": false, "fetched": false,
-		evilAttr: false} {
-		assert.Equal(t, gone, SearchHit{State: state}.Gone(), state)
+	for state, want := range map[string]string{"failed": "the page couldn't be read",
+		"dead": "the page is no longer available", "pending": "", "fetched": "", evilAttr: ""} {
+		assert.Equal(t, want, SearchHit{State: state}.Unavailable(), state)
 	}
 }
 

@@ -74,7 +74,7 @@ text/template keeps a block's default over an empty define.
 {{with .Ref}}<h2 class="result-title"><a href="{{documentHref .ID}}" title="{{.Hover}}"{{with .Class}} class="{{.}}"{{end}}>{{.Name}}</a></h2>{{end}}
 {{range .ShownMatches}}{{template "match" .}}{{end}}
 {{- if not .Matches}}{{with .Saved}}<p class="saved-as" title="{{.}}">{{.}}</p>{{end}}{{end}}
-{{- if .Gone}}<p class="saved-gone">Saved — the page is no longer available{{with outbound .URL}} · <a href="{{.}}" rel="noopener noreferrer" target="_blank">the original address</a>{{end}}</p>{{end}}
+{{- with .Unavailable}}<p class="saved-gone">Saved — {{.}}{{with outbound $hit.URL}} · <a href="{{.}}" rel="noopener noreferrer" target="_blank">the original address</a>{{end}}</p>{{end}}
 <div class="result-foot">{{with .ContentType}}<span class="tag">{{.}}</span>{{end}}{{with .MatchKind}}<span class="badge badge-accent plain">{{.}}</span>{{end}}<span class="score">score {{printf "%.4f" .Score}}</span>
 {{- with .MoreMatches}}<details><summary>{{count (len .) "more passage" "more passages"}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
 </li>

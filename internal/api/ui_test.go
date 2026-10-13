@@ -564,25 +564,30 @@ func addSightings(t *testing.T, srv *apitest.Server, n int) {
 }
 
 // TestUI_SearchSavedHits: a result found by what it was saved as has no
-// passage: one line in its place says what it was saved as, and a dead or
-// failed document's page is said to be gone, with its original address;
-// the result says it matched on bookmark details.
+// passage: one line in its place says what it was saved as, and a dead
+// document's page is said to be gone, a failed one's not to be readable,
+// each with its original address; the result says it matched on bookmark
+// details.
 func TestUI_SearchSavedHits(t *testing.T) {
 	srv := apitest.Start(t, apitest.DocumentLists)
 	srv.AddDocument(t, "https://example.com/gone", store.DocStateDead)
 	srv.AddBookmark(t, "https://example.com/gone", store.SourceChrome, `Sourdough <b>"starters"</b>`,
 		"/Bookmarks Bar/Baking")
+	srv.AddDocument(t, "https://example.com/walled", store.DocStateFailed)
+	srv.AddBookmark(t, "https://example.com/walled", store.SourceChrome, "Sourdough levain", "")
 	srv.AddBookmark(t, "https://example.com/later", store.SourceSafari, "Sourdough hydration", "")
 
 	body := getPage(t, srv, "/ui/?q=sourdough", http.StatusOK)
-	assert.Equal(t, 2, strings.Count(body, `<li class="result">`))
+	assert.Equal(t, 3, strings.Count(body, `<li class="result">`))
 	assert.Contains(t, body, `<p class="saved-as" title="Saved as “Sourdough &lt;b&gt;&#34;starters&#34;&lt;/b&gt;” in Baking">`+
 		`Saved as “Sourdough &lt;b&gt;&#34;starters&#34;&lt;/b&gt;” in Baking</p>`)
 	assert.Contains(t, body, `<p class="saved-gone">Saved — the page is no longer available · `+
 		`<a href="https://example.com/gone" rel="noopener noreferrer" target="_blank">the original address</a></p>`)
+	assert.Contains(t, body, `<p class="saved-gone">Saved — the page couldn&#39;t be read · `+
+		`<a href="https://example.com/walled" rel="noopener noreferrer" target="_blank">the original address</a></p>`)
 	assert.Contains(t, body, `<p class="saved-as" title="Saved as “Sourdough hydration”">`)
-	assert.Equal(t, 1, strings.Count(body, `class="saved-gone"`), "the pending page is still there")
-	assert.Equal(t, 2, strings.Count(body, `<span class="badge badge-accent plain">bookmark details</span>`))
+	assert.Equal(t, 2, strings.Count(body, `class="saved-gone"`), "the pending page is still there")
+	assert.Equal(t, 3, strings.Count(body, `<span class="badge badge-accent plain">bookmark details</span>`))
 	assert.NotContains(t, body, `class="snippet"`)
 }
 

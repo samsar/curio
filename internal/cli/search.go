@@ -9,6 +9,7 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/docmeta"
 	"github.com/samsar/curio/internal/textutil"
 )
 
@@ -103,21 +104,35 @@ func renderSearchResults(w io.Writer, res *client.SearchResponse) {
 }
 
 // renderSavedAs says what a hit without a matching passage matched on:
-// the bookmark it was saved as, and for a failed or dead document, that
-// the page is gone.
+// the bookmark it was saved as, and for a failed or dead document, why it
+// has no page to read.
 func renderSavedAs(w io.Writer, hit client.SearchHit) {
 	if saved := savedAs(hit.Bookmarks); saved != "" {
 		for _, line := range wrapLines("saved as: "+saved, 100) {
 			fmt.Fprintf(w, "    %s\n", line)
 		}
 	}
-	if hit.Document.State == "failed" || hit.Document.State == "dead" {
-		fmt.Fprintf(w, "    page no longer available (%s); its bookmark matched\n", hit.Document.State)
+	if why := unavailable(hit.Document.State); why != "" {
+		fmt.Fprintf(w, "    %s (%s); its bookmark matched\n", why, hit.Document.State)
 	}
 }
 
+// unavailable says why a document of state has no page to read: a dead
+// page is gone, and a failed one couldn't be read, though it may still be
+// there; "" for any other state.
+func unavailable(state string) string {
+	switch state {
+	case "dead":
+		return "page no longer available"
+	case "failed":
+		return "page couldn't be read"
+	}
+	return ""
+}
+
 // savedAs is the bookmark a hit was saved as, from the newest with a title
-// (else the newest): its title and folder, the parts it has, joined by
+// (else the newest): its title and its folder as search reads it, without
+// the browser's root (docmeta.FolderText), the parts it has, joined by
 // " · ".
 func savedAs(bookmarks []client.SearchHitBookmark) string {
 	if len(bookmarks) == 0 {
@@ -131,7 +146,7 @@ func savedAs(bookmarks []client.SearchHitBookmark) string {
 		}
 	}
 	var parts []string
-	for _, p := range []string{b.Title, b.FolderPath} {
+	for _, p := range []string{b.Title, docmeta.FolderText([]string{b.FolderPath})} {
 		if p != "" {
 			parts = append(parts, p)
 		}

@@ -5,9 +5,11 @@
 //
 // Every function is pure: no I/O, and the same inputs give the same
 // outputs under the rules RulesVersion names. The store
-// (internal/store/sqlite) is its only production caller, for every write
-// and for the refresh at start that applies a change of the rules, so a
-// document's derived rows have one implementation.
+// (internal/store/sqlite) derives every document's rows through it, for
+// every write and for the refresh at start that applies a change of the
+// rules, so those rows have one implementation. The dashboard, curio
+// search and curio-mcp reuse FolderText alone, to show a bookmark's folder
+// as search reads it.
 package docmeta
 
 import (

@@ -597,10 +597,18 @@ func (h SearchHit) Saved() string {
 	return "Saved from " + sourceName(b.Source)
 }
 
-// Gone reports whether the hit's page is no longer available: its document
-// failed or is dead, and only what it was saved as is left.
-func (h SearchHit) Gone() bool {
-	return h.State == string(store.DocStateFailed) || h.State == string(store.DocStateDead)
+// Unavailable says why the hit has no page to read, when only what it
+// was saved as is left: a dead page is gone, and a failed one couldn't be
+// read, though it may well still be there (behind a sign-in or a bot
+// check, or slow to answer). "" for a page curio has read or may yet.
+func (h SearchHit) Unavailable() string {
+	switch h.State {
+	case string(store.DocStateDead):
+		return "the page is no longer available"
+	case string(store.DocStateFailed):
+		return "the page couldn't be read"
+	}
+	return ""
 }
 
 // sourceName names a bookmark's source for people; one it doesn't know is

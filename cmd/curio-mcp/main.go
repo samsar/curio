@@ -23,6 +23,7 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/docmeta"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -120,7 +121,8 @@ func registerTools(s *mcp.Server, d daemon) {
 			"and what they were saved as (bookmark titles, folders, site, author). " +
 			"Returns the most relevant documents with snippets, their doc_id and state. " +
 			"A result without a snippet matched on its bookmark (saved_title, folder); " +
-			"one whose state is failed or dead is a page that is no longer available, only its bookmark saved. " +
+			"one whose state is dead is a page that is no longer available, and one whose state is failed a page " +
+			"curio couldn't read. " +
 			"Optionally filter by content type, bookmark source, or URL host.",
 	}, searchHandler(d))
 
@@ -149,12 +151,14 @@ type docHit struct {
 	Title string  `json:"title"`
 	URL   string  `json:"url"`
 	Score float64 `json:"score"`
-	// State is the document's: pending, fetched, failed or dead. A failed
-	// or dead document's page is no longer available.
+	// State is the document's: pending, fetched, failed or dead. A dead
+	// document's page is no longer available, and a failed one's couldn't
+	// be read.
 	State   string `json:"state"`
 	Snippet string `json:"snippet,omitempty"`
 	// SavedTitle and Folder are what a hit without a snippet was saved as,
-	// the bookmark it matched on.
+	// the bookmark it matched on; the folder as search reads it, without
+	// the browser's root.
 	SavedTitle string `json:"saved_title,omitempty"`
 	Folder     string `json:"folder,omitempty"`
 }
@@ -638,7 +642,8 @@ func hitTitle(hit client.SearchHit) string {
 }
 
 // savedAs is the bookmark a hit was saved as: the newest with a title, else
-// the newest, by its title and folder.
+// the newest, by its title and its folder as search reads it
+// (docmeta.FolderText).
 func savedAs(bookmarks []client.SearchHitBookmark) (title, folder string) {
 	if len(bookmarks) == 0 {
 		return "", ""
@@ -650,11 +655,21 @@ func savedAs(bookmarks []client.SearchHitBookmark) (title, folder string) {
 			break
 		}
 	}
-	return b.Title, b.FolderPath
+	return b.Title, docmeta.FolderText([]string{b.FolderPath})
 }
 
-// gone reports whether a document of state has no page to read any more.
-func gone(state string) bool { return state == "failed" || state == "dead" }
+// unavailable says why a document of state has no page to read: a dead
+// page is gone, and a failed one couldn't be read, though it may still be
+// there; "" for any other state.
+func unavailable(state string) string {
+	switch state {
+	case "dead":
+		return "the page is no longer available"
+	case "failed":
+		return "the page couldn't be read"
+	}
+	return ""
+}
 
 func firstSnippet(m []client.ChunkMatch) string {
 	if len(m) == 0 {
@@ -700,8 +715,8 @@ func formatHits(label string, hits []docHit) string {
 		default:
 			b.WriteString("   matched its bookmark\n")
 		}
-		if gone(h.State) {
-			fmt.Fprintf(&b, "   the page is no longer available (%s); only its bookmark is saved\n", h.State)
+		if why := unavailable(h.State); why != "" {
+			fmt.Fprintf(&b, "   %s (%s); its bookmark matched\n", why, h.State)
 		}
 		b.WriteString("\n")
 	}
