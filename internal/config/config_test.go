@@ -67,6 +67,8 @@ search:
   rrf_k: 80
   bm25_weight: 0.5
   vector_weight: 1.5
+  fields_weight: 0.75
+  cards_weight: 0.25
   collapse: "top3_avg"
 chunking:
   size_tokens: 1024
@@ -83,6 +85,8 @@ chunking:
 	assert.Equal(t, "/usr/local/bin/web2md", got.Fetcher.Web2MD.Bin)
 	assert.Equal(t, 60, got.Fetcher.Web2MD.TimeoutSeconds)
 	assert.Equal(t, 20, got.Search.DefaultK)
+	assert.InDelta(t, 0.75, got.Search.FieldsWeight, 0)
+	assert.InDelta(t, 0.25, got.Search.CardsWeight, 0)
 	assert.Equal(t, "top3_avg", got.Search.Collapse)
 	assert.Equal(t, 1024, got.Chunking.SizeTokens)
 	assert.Equal(t, 128, got.Chunking.OverlapTokens)
@@ -145,7 +149,13 @@ func TestValidate(t *testing.T) {
 		{"NaN vector weight", func(c *Config) { c.Search.VectorWeight = math.NaN() }, "search.vector_weight"},
 		{"negative vector weight", func(c *Config) { c.Search.VectorWeight = -0.5 }, "search.vector_weight"},
 		{"infinite vector weight", func(c *Config) { c.Search.VectorWeight = math.Inf(-1) }, "search.vector_weight"},
-		{"both weights zero", func(c *Config) { c.Search.BM25Weight, c.Search.VectorWeight = 0, 0 }, "must not both be 0"},
+		{"NaN fields weight", func(c *Config) { c.Search.FieldsWeight = math.NaN() }, "search.fields_weight"},
+		{"negative fields weight", func(c *Config) { c.Search.FieldsWeight = -0.25 }, "search.fields_weight"},
+		{"infinite cards weight", func(c *Config) { c.Search.CardsWeight = math.Inf(1) }, "search.cards_weight"},
+		{"negative cards weight", func(c *Config) { c.Search.CardsWeight = -1 }, "search.cards_weight"},
+		{"every weight zero", func(c *Config) {
+			c.Search.BM25Weight, c.Search.VectorWeight, c.Search.FieldsWeight, c.Search.CardsWeight = 0, 0, 0, 0
+		}, "search.bm25_weight, vector_weight, fields_weight and cards_weight must not all be 0"},
 		{"zero embed timeout", func(c *Config) { c.Search.EmbedTimeoutSeconds = 0 }, "search.embed_timeout_seconds"},
 		{"zero rrf_k", func(c *Config) { c.Search.RRFK = 0 }, "search.rrf_k"},
 		{"bad collapse", func(c *Config) { c.Search.Collapse = "average" }, "search.collapse"},
@@ -460,6 +470,17 @@ func TestValidate_OneZeroWeightIsAllowed(t *testing.T) {
 	cfg := Default()
 	cfg.Search.BM25Weight = 0 // vector-only ranking
 	assert.NoError(t, cfg.Validate())
+	for _, only := range []func(*Search){
+		func(s *Search) { s.BM25Weight = 1 },
+		func(s *Search) { s.VectorWeight = 1 },
+		func(s *Search) { s.FieldsWeight = 1 },
+		func(s *Search) { s.CardsWeight = 1 },
+	} {
+		cfg := Default()
+		cfg.Search.BM25Weight, cfg.Search.VectorWeight, cfg.Search.FieldsWeight, cfg.Search.CardsWeight = 0, 0, 0, 0
+		only(&cfg.Search)
+		assert.NoError(t, cfg.Validate(), "any one list alone ranks: %+v", cfg.Search)
+	}
 }
 
 // TestDefault_Roles: without generation.roles, the one role writes with

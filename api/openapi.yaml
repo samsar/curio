@@ -628,20 +628,31 @@ paths:
     post:
       tags: [search]
       operationId: search
-      summary: Hybrid BM25 + vector search
+      summary: Hybrid search over the documents' text and what they were saved as
       description: >
-        Runs BM25 and vector retrieval concurrently and fuses them with RRF.
+        Runs four lists concurrently and fuses them with RRF: BM25 and
+        vector retrieval over the documents' chunks, and, each weighted by
+        config (search.fields_weight, search.cards_weight), the fields list
+        (BM25 over each document's title, the titles and folders it was
+        bookmarked under, its site and its author) and the cards list (the
+        vector of each document's card). The chunk lists' documents are
+        ranked by their best chunks, then each document list adds its
+        reciprocal ranks to its documents.
         Every request ranks the same pool, the best 100 documents at most,
         whatever k and offset it sends, and returns its window of that
         ranking, [offset, offset+k): pages of one query tile one ranking,
         and a request without an offset gets its first k. total counts the
         ranking, and capped says more matched than it holds.
-        Failed and dead documents are not searched: they may keep the chunks
-        of an earlier fetch, which no longer describe what the URL serves. A
-        pending document (a refetch in flight) is. If the embedding model is
-        unavailable (Ollama down, or slower than search.embed_timeout_seconds),
-        the keyword results are still returned with degraded=true and a
-        warning explaining why; a keyword-index failure is a 500.
+        The chunks of failed and dead documents are not searched: they may
+        be of an earlier fetch, which no longer describes what the URL
+        serves. The document lists reach documents in every state, by what
+        they were saved as, so such a document can be a hit without
+        matches. A pending document (a refetch in flight) is searched. If
+        the embedding model is unavailable (Ollama down, or slower than
+        search.embed_timeout_seconds), both vector lists are dropped and the
+        keyword results are still returned with degraded=true and a warning
+        explaining why; a failure of the keyword index or the fields index
+        is a 500.
       requestBody:
         required: true
         content:
@@ -1702,11 +1713,15 @@ components:
           type: boolean
           description: >
             Present and true when semantic search was unavailable and items
-            are keyword-only (BM25) results.
+            are keyword-only results: BM25 over the chunks and, when it is
+            weighted, the fields list.
         warnings:
           type: array
           items: { type: string }
-          description: Why the results are degraded; present only when there is something to report.
+          description: >
+            Why the results are degraded, and, when the cards list is
+            weighted, that the results are without it; present only when
+            there is something to report.
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }

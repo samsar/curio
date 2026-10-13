@@ -575,7 +575,7 @@ func TestUI_SearchPages(t *testing.T) {
 	embeds, mu := 0, new(sync.Mutex)
 	srv := apitest.Start(t, func(d *api.Deps) {
 		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &embeds, mu: mu}
-		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	addSightings(t, srv, 25)
 	ranking := make([]string, 0, 25)
@@ -701,7 +701,7 @@ func TestUI_SearchNamedByBookmark(t *testing.T) {
 // keyword results under the engine's warning.
 func TestUI_SearchDegraded(t *testing.T) {
 	srv := apitest.Start(t, func(d *api.Deps) {
-		d.Search = search.New(d.Chunks, d.Documents, failingEmbedder{}, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, failingEmbedder{}, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	doc := titled(t, srv, "https://example.com/kafka", "Kafka partitions", store.DocStateFetched)
 	srv.AddContent(t, doc, "kafka partitions")
@@ -732,7 +732,7 @@ func TestUI_SearchEmptyQuery(t *testing.T) {
 	calls, mu := 0, new(sync.Mutex)
 	srv := apitest.Start(t, func(d *api.Deps) {
 		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &calls, mu: mu}
-		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	for _, q := range []string{"", "?q=", "?q=%20%20", "?content_type=video"} {
 		assert.Contains(t, getPage(t, srv, "/ui/"+q, http.StatusOK), `<div class="landing">`, q)
@@ -910,7 +910,7 @@ func TestUI_SearchType(t *testing.T) {
 	embeds, mu := 0, new(sync.Mutex)
 	srv := apitest.Start(t, func(d *api.Deps) {
 		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &embeds, mu: mu}
-		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	article := titled(t, srv, "https://example.com/article", "Kafka article", store.DocStateFetched)
 	srv.AddContent(t, article, "kafka partitions explained")

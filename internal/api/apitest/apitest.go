@@ -153,6 +153,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 	quiet := slog.New(slog.DiscardHandler)
 	docs := sqlite.NewDocuments(db)
 	chunks := sqlite.NewChunks(db, emb.Dim)
+	index := sqlite.NewDocumentIndex(db, emb.Dim)
 	gate, err := jobs.NewQueueGate(context.Background(), sqlite.NewQueueSettings(db), Pools, quiet)
 	if err != nil {
 		t.Fatalf("queue gate: %v", err)
@@ -164,9 +165,9 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 		Extractions:    sqlite.NewExtractions(db),
 		Bookmarks:      sqlite.NewBookmarks(db),
 		Chunks:         chunks,
-		Index:          sqlite.NewDocumentIndex(db, emb.Dim),
+		Index:          index,
 		Queue:          sqlite.NewJobs(db),
-		Search:         search.New(chunks, docs, emb, search.Config{Log: quiet}),
+		Search:         search.New(chunks, docs, index, emb, search.Config{Log: quiet}),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
 		Interests:      scheduler,

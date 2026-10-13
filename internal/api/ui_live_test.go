@@ -71,7 +71,7 @@ func countReads(r *reads) func(*api.Deps) {
 		d.Bookmarks = readBookmarks{d.Bookmarks, r}
 		d.Insights = readInsights{d.Insights, r}
 		d.Embedder = pinger{reads: r}
-		d.Search = search.New(readChunks{d.Chunks, r}, d.Documents, apitest.Embedder{Dim: config.Default().Embedding.Dim},
+		d.Search = search.New(readChunks{d.Chunks, r}, d.Documents, d.Index, apitest.Embedder{Dim: config.Default().Embedding.Dim},
 			search.Config{Log: slog.New(slog.DiscardHandler)})
 	}
 }

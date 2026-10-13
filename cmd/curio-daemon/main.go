@@ -405,7 +405,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		ChunkOverlap:   cfg.Chunking.OverlapTokens,
 		DocumentPrefix: cfg.Embedding.DocumentPrefix,
 	})
-	engine := search.New(chunks, docs, emb, search.ConfigFrom(cfg))
+	engine := search.New(chunks, docs, index, emb, search.ConfigFrom(cfg))
 
 	// A change of build is verified by re-embedding a sample through the
 	// indexer, so the requests are the ones that made the stored vectors,

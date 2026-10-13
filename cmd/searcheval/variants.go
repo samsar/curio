@@ -26,6 +26,7 @@ type variant struct {
 type env struct {
 	docs     store.DocumentStore
 	chunks   store.ChunkStore
+	index    store.DocumentIndex
 	embedder search.Embedder
 	cfg      config.Config
 	log      *slog.Logger
@@ -116,7 +117,7 @@ type engineRanker struct{ engine *search.Engine }
 
 func newEngineRanker(e env, cfg search.Config) engineRanker {
 	cfg.Log = e.log
-	return engineRanker{engine: search.New(e.chunks, e.docs, e.embedder, cfg)}
+	return engineRanker{engine: search.New(e.chunks, e.docs, e.index, e.embedder, cfg)}
 }
 
 // errDegraded is a search that came back keyword-only: scoring it would

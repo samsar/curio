@@ -42,7 +42,12 @@ func TestConfigFrom_MapsEveryKey(t *testing.T) {
 			case int:
 				v.SetInt(int64(was + 1))
 			case float64:
-				v.SetFloat(was / 2)
+				// A list on by default is halved; one off is turned on.
+				if was == 0 {
+					v.SetFloat(0.5)
+				} else {
+					v.SetFloat(was / 2)
+				}
 			case string:
 				other, ok := otherSearchStrings[field.Name]
 				require.True(t, ok, "add a valid non-default value for %s to otherSearchStrings", field.Name)

@@ -40,7 +40,7 @@ func newSearchServer(t *testing.T, emb search.Embedder, cfg search.Config, optio
 	t.Helper()
 	cfg.Log = slog.New(slog.DiscardHandler)
 	s := newTestServer(t, append([]func(*Deps){func(d *Deps) {
-		d.Search = search.New(d.Chunks, d.Documents, emb, cfg)
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, cfg)
 	}}, options...)...)
 	s.indexKafka(t, 0, 3)
 	return s
@@ -371,7 +371,7 @@ func TestRelatedDocuments_HitDeletedMidQuery(t *testing.T) {
 	docs := &vanishingDocs{gone: map[string]bool{}}
 	s := newSearchServer(t, okEmbedder(), search.Config{}, func(d *Deps) {
 		docs.DocumentStore = d.Documents
-		d.Search = search.New(d.Chunks, docs, okEmbedder(), search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, docs, d.Index, okEmbedder(), search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	ids := s.documentIDsByURL(t)
 	docs.gone[ids[1]] = true

@@ -57,7 +57,7 @@ func TestEngine_QueryPrefixApplied(t *testing.T) {
 	emb := &fakeEmbedder{dim: dim, byText: map[string][]float32{
 		"search_query: zzqterm": filledVec(dim, 0.10),
 	}}
-	eng := New(chunks, docs, emb, Config{QueryPrefix: "search_query: "})
+	eng := New(chunks, docs, unusedIndex{}, emb, Config{QueryPrefix: "search_query: "})
 
 	res, err := eng.Search(context.Background(), Request{TenantID: "local", Query: "zzqterm", K: 3})
 	require.NoError(t, err)
@@ -77,7 +77,7 @@ func TestEngine_DefaultQueryPrefix(t *testing.T) {
 		seen = append(seen, texts...)
 		return [][]float32{filledVec(dim, 0.10)}, nil
 	})
-	eng := New(chunks, docs, emb, Config{QueryPrefix: config.Default().Embedding.QueryPrefix})
+	eng := New(chunks, docs, unusedIndex{}, emb, Config{QueryPrefix: config.Default().Embedding.QueryPrefix})
 
 	_, err := eng.Search(context.Background(), Request{TenantID: "local", Query: "mvcc concurrency", K: 3})
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestEngine_HybridSearch(t *testing.T) {
 	emb := &fakeEmbedder{dim: dim, byText: map[string][]float32{
 		"mvcc concurrency": filledVec(dim, 0.10), // closest to postgres chunk
 	}}
-	engine := New(chunks, docs, emb, Config{})
+	engine := New(chunks, docs, unusedIndex{}, emb, Config{})
 
 	res, err := engine.Search(context.Background(), Request{
 		TenantID: "local",
@@ -155,7 +155,7 @@ func TestEngine_BM25OnlyMatch(t *testing.T) {
 	docs, chunks, _ := seedCorpus(t, db)
 
 	emb := &fakeEmbedder{dim: dim, byText: nil} // returns the default far-away vector
-	engine := New(chunks, docs, emb, Config{})
+	engine := New(chunks, docs, unusedIndex{}, emb, Config{})
 
 	res, err := engine.Search(context.Background(), Request{
 		TenantID: "local",
@@ -171,7 +171,7 @@ func TestEngine_RequiresQuery(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
-	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{})
+	engine := New(chunks, docs, unusedIndex{}, &fakeEmbedder{dim: dim}, Config{})
 
 	_, err := engine.Search(context.Background(), Request{TenantID: "local"})
 	require.Error(t, err)
@@ -182,7 +182,7 @@ func TestEngine_PerHitScoresExposed(t *testing.T) {
 	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
 	emb := &fakeEmbedder{dim: dim, byText: map[string][]float32{"mvcc": filledVec(dim, 0.10)}}
-	engine := New(chunks, docs, emb, Config{})
+	engine := New(chunks, docs, unusedIndex{}, emb, Config{})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "mvcc", K: 3})
 	require.NoError(t, err)
@@ -227,7 +227,7 @@ func TestEngine_Related_RanksByProximity(t *testing.T) {
 
 	// Related needs no embedder — it reads stored vectors. The fake is
 	// only here to satisfy the constructor.
-	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{})
+	engine := New(chunks, docs, unusedIndex{}, &fakeEmbedder{dim: dim}, Config{})
 
 	res, err := engine.Related(context.Background(), RelatedRequest{
 		TenantID:   "local",
@@ -255,7 +255,7 @@ func TestEngine_Related_UnindexedDocIsEmpty(t *testing.T) {
 	d := &store.Document{TenantID: "local", URL: "https://example.com/pending", ContentType: store.ContentTypeArticle}
 	require.NoError(t, docs.Create(ctx, d))
 
-	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{})
+	engine := New(chunks, docs, unusedIndex{}, &fakeEmbedder{dim: dim}, Config{})
 	res, err := engine.Related(ctx, RelatedRequest{TenantID: "local", DocumentID: d.ID, K: 5})
 	require.NoError(t, err)
 	assert.Empty(t, res.Items)
@@ -266,7 +266,7 @@ func TestEngine_Related_UnknownDocIsNotFound(t *testing.T) {
 	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
 
-	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{})
+	engine := New(chunks, docs, unusedIndex{}, &fakeEmbedder{dim: dim}, Config{})
 	_, err := engine.Related(context.Background(), RelatedRequest{
 		TenantID:   "local",
 		DocumentID: "00000000-0000-0000-0000-000000000000",
@@ -316,7 +316,7 @@ func TestEngine_DegradesToKeywordResults(t *testing.T) {
 			db := sqlitetest.NewDB(t)
 			docs, chunks, _ := seedCorpus(t, db)
 			var logs bytes.Buffer
-			engine := New(chunks, docs, tc.emb, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+			engine := New(chunks, docs, unusedIndex{}, tc.emb, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
 
 			res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
 			require.NoError(t, err)
@@ -342,7 +342,7 @@ func TestEngine_QueryTooLongDegrades(t *testing.T) {
 		return nil, fmt.Errorf("ollama embed: %w: HTTP 400: {\"error\":\"the input length exceeds the context length\"}",
 			embedder.ErrInputTooLong)
 	})
-	engine := New(chunks, docs, tooLong, Config{Log: slog.New(slog.DiscardHandler)})
+	engine := New(chunks, docs, unusedIndex{}, tooLong, Config{Log: slog.New(slog.DiscardHandler)})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
 	require.NoError(t, err)
@@ -359,7 +359,7 @@ func TestEngine_DegradedWithoutKeywordTerms(t *testing.T) {
 	// retriever: the result is empty, but still a success with a warning.
 	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
-	engine := New(chunks, docs, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
+	engine := New(chunks, docs, unusedIndex{}, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "the and of", K: 3})
 	require.NoError(t, err)
@@ -371,7 +371,7 @@ func TestEngine_DegradedWithoutKeywordTerms(t *testing.T) {
 func TestEngine_EmbedTimeoutDegrades(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
-	engine := New(chunks, docs, hangingEmbedder(make(chan struct{})), Config{
+	engine := New(chunks, docs, unusedIndex{}, hangingEmbedder(make(chan struct{})), Config{
 		EmbedTimeout: 50 * time.Millisecond,
 		Log:          slog.New(slog.DiscardHandler),
 	})
@@ -390,7 +390,7 @@ func TestEngine_CallerContextEndIsAnError(t *testing.T) {
 		db := sqlitetest.NewDB(t)
 		docs, chunks, _ := seedCorpus(t, db)
 		entered := make(chan struct{})
-		engine := New(chunks, docs, hangingEmbedder(entered), Config{Log: slog.New(slog.DiscardHandler)})
+		engine := New(chunks, docs, unusedIndex{}, hangingEmbedder(entered), Config{Log: slog.New(slog.DiscardHandler)})
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -405,7 +405,7 @@ func TestEngine_CallerContextEndIsAnError(t *testing.T) {
 	t.Run("deadline", func(t *testing.T) {
 		db := sqlitetest.NewDB(t)
 		docs, chunks, _ := seedCorpus(t, db)
-		engine := New(chunks, docs, hangingEmbedder(make(chan struct{})), Config{Log: slog.New(slog.DiscardHandler)})
+		engine := New(chunks, docs, unusedIndex{}, hangingEmbedder(make(chan struct{})), Config{Log: slog.New(slog.DiscardHandler)})
 
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
@@ -441,7 +441,7 @@ func TestEngine_ChunkLookupFailureKeepsHitsAndIsLogged(t *testing.T) {
 	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
 	var logs bytes.Buffer
-	engine := New(brokenChunkLookup{chunks}, docs, &fakeEmbedder{dim: dim}, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	engine := New(brokenChunkLookup{chunks}, docs, unusedIndex{}, &fakeEmbedder{dim: dim}, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
 	require.NoError(t, err)
@@ -474,7 +474,7 @@ func TestEngine_HitDeletedMidQueryIsSkipped(t *testing.T) {
 	dim := sqlitetest.Width(t, db)
 	docs, chunks, docIDs := seedCorpus(t, db) // postgres, btree, llm
 	gone := vanishingDocs{docs, map[string]bool{docIDs[1]: true}}
-	engine := New(chunks, gone, &fakeEmbedder{dim: dim, byText: map[string][]float32{
+	engine := New(chunks, gone, unusedIndex{}, &fakeEmbedder{dim: dim, byText: map[string][]float32{
 		"database": filledVec(dim, 0.20), // nearest the btree chunk
 	}}, Config{})
 	ids := func(hits []Hit) []string {
@@ -540,7 +540,7 @@ func TestEngine_KeywordFailureIsFatalAndStopsTheVectorLeg(t *testing.T) {
 		}
 		return errDisk
 	}}
-	engine := New(broken, docs, emb, Config{EmbedTimeout: time.Hour, Log: slog.New(slog.DiscardHandler)})
+	engine := New(broken, docs, unusedIndex{}, emb, Config{EmbedTimeout: time.Hour, Log: slog.New(slog.DiscardHandler)})
 
 	_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
 	require.ErrorIs(t, err, errDisk)
@@ -574,7 +574,7 @@ func TestEngine_LegsRunConcurrently(t *testing.T) {
 		markBM25Started()
 		return awaitLeg(ctx, embedStarted, "vector")
 	}}
-	engine := New(rendezvous, docs, emb, Config{EmbedTimeout: time.Hour})
+	engine := New(rendezvous, docs, unusedIndex{}, emb, Config{EmbedTimeout: time.Hour})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
 	require.NoError(t, err)
@@ -639,7 +639,7 @@ func hitIDs(hits []Hit) []string {
 func TestEngine_PagesTileTheRanking(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := sightings(t, db, 110)
-	engine := New(chunks, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	engine := New(chunks, docs, unusedIndex{}, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
 	ctx := context.Background()
 
 	whole, err := engine.Search(ctx, Request{TenantID: "local", Query: "zebra", K: 100})
@@ -666,7 +666,7 @@ func TestEngine_PagesTileTheRanking(t *testing.T) {
 func TestEngine_KOnlyIsTheFirstPage(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := sightings(t, db, 110)
-	engine := New(chunks, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	engine := New(chunks, docs, unusedIndex{}, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
 	ctx := context.Background()
 
 	ten, err := engine.Search(ctx, Request{TenantID: "local", Query: "zebra", K: 10})
@@ -682,7 +682,7 @@ func TestEngine_KOnlyIsTheFirstPage(t *testing.T) {
 func TestEngine_SmallPool(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := sightings(t, db, 37)
-	engine := New(chunks, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	engine := New(chunks, docs, unusedIndex{}, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
 	for _, tc := range []struct{ offset, items int }{{0, 10}, {30, 7}, {37, 0}, {40, 0}} {
 		res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra", Offset: tc.offset})
 		require.NoError(t, err, "offset %d", tc.offset)
@@ -691,7 +691,7 @@ func TestEngine_SmallPool(t *testing.T) {
 		assert.False(t, res.Capped, "offset %d", tc.offset)
 	}
 
-	degraded := New(chunks, docs, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
+	degraded := New(chunks, docs, unusedIndex{}, failingEmbedder(), Config{Log: slog.New(slog.DiscardHandler)})
 	res, err := degraded.Search(context.Background(), Request{TenantID: "local", Query: "zebra", Offset: 30})
 	require.NoError(t, err)
 	assert.True(t, res.Degraded)
@@ -765,7 +765,7 @@ func TestEngine_HydratesOnlyTheWindow(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := sightings(t, db, 110)
 	cd, cc := &countingDocs{DocumentStore: docs}, &countingChunks{ChunkStore: chunks}
-	engine := New(cc, cd, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	engine := New(cc, cd, unusedIndex{}, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra", K: 10, Offset: 60})
 	require.NoError(t, err)
@@ -782,7 +782,7 @@ func TestEngine_FixedFanout(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := sightings(t, db, 60)
 	cc := &countingChunks{ChunkStore: chunks}
-	engine := New(cc, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	engine := New(cc, docs, unusedIndex{}, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
 	for _, req := range []Request{{K: 1}, {K: 10}, {K: 100}, {K: 1, Offset: 50}, {K: 10, Offset: 50}} {
 		req.TenantID, req.Query = "local", "zebra"
 		_, err := engine.Search(context.Background(), req)
@@ -806,7 +806,7 @@ func TestEngine_TiesRankByID(t *testing.T) {
 	// them the other way, so copies i and n-1-i fuse to the same score.
 	docs, chunks, ids := seedMatching(t, db, n, func(int) string { return "the same syndicated zebra post" },
 		func(i int) float32 { return 0.1 + float32(i)*0.01 })
-	engine := New(chunks, docs, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
+	engine := New(chunks, docs, unusedIndex{}, zebraEmbedder(sqlitetest.Width(t, db)), Config{})
 	page := func(offset int) []Hit {
 		res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra", K: 10, Offset: offset})
 		require.NoError(t, err)
@@ -841,7 +841,7 @@ func TestEngine_TiesRankByID(t *testing.T) {
 func TestEngine_OffsetContract(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	docs, chunks, _ := seedCorpus(t, db)
-	engine := New(chunks, docs, &fakeEmbedder{dim: sqlitetest.Width(t, db)}, Config{DefaultK: 10})
+	engine := New(chunks, docs, unusedIndex{}, &fakeEmbedder{dim: sqlitetest.Width(t, db)}, Config{DefaultK: 10})
 	for _, tc := range []struct{ k, offset int }{{10, -1}, {10, 91}, {0, 91}, {100, 1}, {10, math.MaxInt}, {0, math.MaxInt}} {
 		_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "database", K: tc.k, Offset: tc.offset})
 		assert.Error(t, err, "k %d, offset %d", tc.k, tc.offset)
@@ -851,7 +851,7 @@ func TestEngine_OffsetContract(t *testing.T) {
 		assert.NoError(t, err, "k %d, offset %d", tc.k, tc.offset)
 	}
 	assert.Equal(t, 10, engine.DefaultK())
-	assert.Equal(t, 10, New(chunks, docs, &fakeEmbedder{}, Config{}).DefaultK(), "the default's default")
+	assert.Equal(t, 10, New(chunks, docs, unusedIndex{}, &fakeEmbedder{}, Config{}).DefaultK(), "the default's default")
 }
 
 // TestEngine_SnippetsForTheWindow: one read makes the snippets of the
@@ -864,7 +864,7 @@ func TestEngine_SnippetsForTheWindow(t *testing.T) {
 	cc := &countingChunks{ChunkStore: chunks}
 	// "mvcc" matches the postgres chunk's words; the vector leg returns all
 	// three chunks.
-	engine := New(cc, docs, &fakeEmbedder{dim: dim, byText: map[string][]float32{"mvcc": filledVec(dim, 0.10)}}, Config{})
+	engine := New(cc, docs, unusedIndex{}, &fakeEmbedder{dim: dim, byText: map[string][]float32{"mvcc": filledVec(dim, 0.10)}}, Config{})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "mvcc", K: 3})
 	require.NoError(t, err)
@@ -902,7 +902,7 @@ func TestEngine_SnippetFailureKeepsHitsAndIsLogged(t *testing.T) {
 	docs, chunks, _ := seedCorpus(t, db)
 	var logs bytes.Buffer
 	cc := &countingChunks{ChunkStore: chunks, snippetsErr: errors.New("database is locked")}
-	engine := New(cc, docs, &fakeEmbedder{dim: dim}, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
+	engine := New(cc, docs, unusedIndex{}, &fakeEmbedder{dim: dim}, Config{Log: slog.New(slog.NewTextHandler(&logs, nil))})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "attention token", K: 3})
 	require.NoError(t, err)
@@ -926,7 +926,7 @@ func TestEngine_KContract(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	dim := sqlitetest.Width(t, db)
 	docs, chunks, _ := seedCorpus(t, db)
-	engine := New(chunks, docs, &fakeEmbedder{dim: dim}, Config{DefaultK: 2})
+	engine := New(chunks, docs, unusedIndex{}, &fakeEmbedder{dim: dim}, Config{DefaultK: 2})
 
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zzqterm"})
 	require.NoError(t, err)
@@ -953,7 +953,7 @@ func TestEngine_ZeroWeight(t *testing.T) {
 	search := func(t *testing.T, emb Embedder, cfg Config, query string) *Result {
 		t.Helper()
 		cfg.Log = slog.New(slog.DiscardHandler)
-		res, err := New(chunks, docs, emb, cfg).Search(context.Background(),
+		res, err := New(chunks, docs, unusedIndex{}, emb, cfg).Search(context.Background(),
 			Request{TenantID: "local", Query: query, K: 10})
 		require.NoError(t, err)
 		for _, it := range res.Items {
@@ -1007,3 +1007,7 @@ func TestEngine_ZeroWeight(t *testing.T) {
 		assert.Equal(t, []string{ids[0]}, hitIDs(res.Items), "the keyword results")
 	})
 }
+
+// unusedIndex is the document index of an engine whose document lists are
+// off, which never reads it: any call panics.
+type unusedIndex struct{ store.DocumentIndex }

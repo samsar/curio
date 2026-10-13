@@ -71,7 +71,7 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 	log.Info("judgments resolved", "judgments", rep.Library.Judgments, "missing", rep.Library.Missing,
 		"unsearchable", rep.Library.Unsearchable)
 
-	e := env{docs: lib.Documents, chunks: lib.Chunks, embedder: emb, cfg: cfg, log: log}
+	e := env{docs: lib.Documents, chunks: lib.Chunks, index: lib.Index, embedder: emb, cfg: cfg, log: log}
 	for _, v := range opts.variants {
 		vr, err := runVariant(ctx, v, e, qf.set, judged)
 		if err != nil {
