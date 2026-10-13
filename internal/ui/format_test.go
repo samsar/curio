@@ -307,6 +307,11 @@ func TestFixedSets(t *testing.T) {
 		assert.NotEqual(t, string(trigger), triggerLabel(string(trigger)), "%s has words", trigger)
 	}
 	assert.Equal(t, evilScript, triggerLabel(evilScript), "one it doesn't know, as stored")
+	for kind, want := range map[store.JobKind]string{store.JobKindFetch: "Fetch", store.JobKindIndex: "Index",
+		store.JobKindImport: "Import", store.JobKindCluster: "Rebuild", store.JobKindSummarize: "Summary",
+		store.JobKindCards: "Cards", store.JobKind(evilScript): "Job"} {
+		assert.Equal(t, want, jobKindLabel(string(kind)), kind)
+	}
 	assert.Equal(t, "asked for", freshReason(string(store.FreshManual)))
 	assert.Equal(t, "the grouping's parameters changed", freshReason("params"))
 	assert.Equal(t, evilQuotes, freshReason(evilQuotes))

@@ -101,7 +101,7 @@ func TestListJobs(t *testing.T) {
 
 	for query, detail := range map[string]string{
 		"?status=bogus": `status "bogus" must be one of: pending, running, done, failed`,
-		"?kind=bogus":   `kind "bogus" must be one of: fetch, index, import, cluster, summarize`,
+		"?kind=bogus":   `kind "bogus" must be one of: fetch, index, import, cluster, summarize, cards`,
 	} {
 		p := assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/jobs" + query}), http.StatusBadRequest)
 		assert.Equal(t, detail, p.Detail, query)

@@ -277,8 +277,8 @@ source-specific fields.
 jobs
   id            UUID PK
   tenant_id     TEXT NOT NULL
-  kind          TEXT NOT NULL                  -- 'fetch' | 'index' | 'cluster'; 'import' and 'summarize'
-                                               --   are reserved: allowed by the CHECK, never enqueued
+  kind          TEXT NOT NULL                  -- 'fetch' | 'index' | 'cluster' | 'cards'; 'import' and
+                                               --   'summarize' are reserved: allowed by the CHECK, never enqueued
   payload       JSON NOT NULL
   document_id   UUID FK                        -- → documents(id), ON DELETE SET NULL
   status        TEXT NOT NULL                  -- 'pending' | 'running' | 'done' | 'failed'

@@ -237,7 +237,8 @@ func TestQueueGate_Throttle(t *testing.T) {
 	assert.True(t, gentle.Admit(store.JobKindIndex, 0, now).Open())
 	assert.Equal(t, ReasonThrottled, gentle.Admit(store.JobKindIndex, 1, now).Closed)
 
-	for _, kind := range []store.JobKind{store.JobKindCluster, store.JobKindSummarize, store.JobKindImport} {
+	for _, kind := range []store.JobKind{store.JobKindCluster, store.JobKindCards, store.JobKindSummarize,
+		store.JobKindImport} {
 		assert.True(t, gentle.Admit(kind, 100, now).Open(), kind)
 	}
 	normal, _ := newGate(t, store.DefaultQueueSettings())

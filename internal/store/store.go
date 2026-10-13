@@ -88,6 +88,9 @@ const (
 	JobKindImport    JobKind = "import"
 	JobKindCluster   JobKind = "cluster"
 	JobKindSummarize JobKind = "summarize"
+	// JobKindCards embeds the documents' cards that are stale: a corpus-wide
+	// job, at most one pending per tenant.
+	JobKindCards JobKind = "cards"
 
 	JobStatusPending JobStatus = "pending"
 	JobStatusRunning JobStatus = "running"
@@ -220,7 +223,7 @@ func (s JobStatus) Valid() bool {
 // Valid reports whether k is one of the JobKind constants.
 func (k JobKind) Valid() bool {
 	switch k {
-	case JobKindFetch, JobKindIndex, JobKindImport, JobKindCluster, JobKindSummarize:
+	case JobKindFetch, JobKindIndex, JobKindImport, JobKindCluster, JobKindSummarize, JobKindCards:
 		return true
 	}
 	return false
@@ -237,8 +240,9 @@ func (t Throttle) Valid() bool {
 
 // Gentle throttle caps: how many jobs of a kind run at once under
 // ThrottleGentle. Index jobs are what keep Ollama, and so the machine,
-// busy; capping fetches spares the network and extraction. Cluster runs
-// one at a time anyway, and kinds without a cap are never throttled.
+// busy; capping fetches spares the network and extraction. Cluster and
+// cards run one at a time anyway, and kinds without a cap are never
+// throttled.
 const (
 	gentleFetchCap = 4
 	gentleIndexCap = 1
@@ -256,7 +260,7 @@ func (t Throttle) Cap(kind JobKind) (int, bool) {
 		return gentleFetchCap, true
 	case JobKindIndex:
 		return gentleIndexCap, true
-	case JobKindImport, JobKindCluster, JobKindSummarize:
+	case JobKindImport, JobKindCluster, JobKindSummarize, JobKindCards:
 	}
 	return 0, false
 }

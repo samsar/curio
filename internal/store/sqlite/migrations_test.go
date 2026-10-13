@@ -1266,6 +1266,155 @@ func TestMigration018_Constraints(t *testing.T) {
 	}
 }
 
+// TestMigration019_MetadataSearch: 019 adds the derived search tables and
+// the cards kind; the jobs it rebuilds keep every column of every row, and
+// refuse a kind they don't know. Its Down drops the cards jobs and gives
+// 018's schema back byte for byte, and Up runs again.
+func TestMigration019_MetadataSearch(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 18)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, title, state) VALUES
+			('d1', 'local', 'https://example.com/1', 'One', 'fetched'),
+			('d2', 'local', 'https://example.com/2', NULL, 'pending');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path)
+			VALUES ('b1', 'local', 'd1', 'https://example.com/1', 'Saved one', '2026-10-01T00:00:00.000Z', 'chrome',
+				'/Bookmarks Bar/Reading');
+		INSERT INTO jobs (id, tenant_id, kind, payload, document_id, status, attempts, run_after, last_error,
+		                  created_at, updated_at, started_at) VALUES
+			('fetch-d1', 'local', 'fetch', '{"document_id":"d1"}', 'd1', 'done', 1, '2026-10-01T00:00:00.000Z', NULL,
+			 '2026-10-01T00:00:00.000Z', '2026-10-01T00:01:00.000Z', '2026-10-01T00:00:30.000Z'),
+			('index-d2', 'local', 'index', '{"document_id":"d2"}', 'd2', 'pending', 2, '2026-10-02T00:00:00.000Z',
+			 'waiting for an upstream', '2026-10-01T00:00:00.000Z', '2026-10-01T00:02:00.000Z', NULL),
+			('cluster', 'local', 'cluster', '{"trigger":"auto"}', NULL, 'failed', 1, '2026-10-01T00:00:00.000Z', 'boom',
+			 '2026-10-01T00:00:00.000Z', '2026-10-01T00:03:00.000Z', '2026-10-01T00:02:30.000Z');`)
+	require.NoError(t, err)
+	const jobColumnsQ = `SELECT id, tenant_id, kind, payload, status, attempts, run_after, last_error,
+		created_at, updated_at, started_at, document_id FROM jobs ORDER BY id`
+	const rowsQ = `SELECT * FROM %s ORDER BY id`
+	jobsBefore := dumpRows(t, db, jobColumnsQ)
+	docsBefore := dumpRows(t, db, fmt.Sprintf(rowsQ, "documents"))
+	bookmarksBefore := dumpRows(t, db, fmt.Sprintf(rowsQ, "bookmarks"))
+	schemaBefore := schemaDump(t, db)
+
+	_, err = p.UpTo(ctx, 19)
+	require.NoError(t, err)
+	assert.Equal(t, jobsBefore, dumpRows(t, db, jobColumnsQ), "the rebuild keeps every job as it was")
+	assert.Equal(t, docsBefore, dumpRows(t, db, fmt.Sprintf(rowsQ, "documents")))
+	assert.Equal(t, bookmarksBefore, dumpRows(t, db, fmt.Sprintf(rowsQ, "bookmarks")))
+	for table, columns := range map[string][]string{
+		"document_fields": {"seq", "document_id", "tenant_id", "host", "declared_site", "title_suffixes", "site_name",
+			"title", "bookmark_titles", "folders", "site", "author", "rules"},
+		"document_cards": {"document_id", "text", "embedded_text", "embedded_at"},
+	} {
+		for _, column := range columns {
+			assert.True(t, hasColumn(t, db, table, column), "%s.%s", table, column)
+		}
+	}
+	assert.Empty(t, dumpRows(t, db, `SELECT * FROM document_fields`), "the store derives the rows, not the migration")
+	assert.Empty(t, dumpRows(t, db, `SELECT * FROM document_cards`))
+	var jobsTable string
+	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'jobs'`).Scan(&jobsTable))
+	assert.True(t, strings.HasPrefix(jobsTable, "CREATE TABLE jobs ("), "jobs keeps the text 019 wrote: %s", jobsTable)
+	_, err = db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload) VALUES ('cards', 'local', 'cards', '{}')`)
+	require.NoError(t, err, "a cards job inserts")
+	_, err = db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload) VALUES ('bogus', 'local', 'bogus', '{}')`)
+	assert.ErrorContains(t, err, "constraint failed", "a kind the CHECK doesn't name")
+	_, err = db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, document_id) VALUES ('orphan', 'local', 'fetch', '{}',
+		'no-such-document')`)
+	assert.ErrorContains(t, err, "FOREIGN KEY constraint failed", "jobs keep their document's foreign key")
+	assert.Empty(t, dumpRows(t, db, `PRAGMA foreign_key_check`))
+	assertForeignKeysOnEverywhere(t, db)
+
+	_, err = p.DownTo(ctx, 18)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "018's schema, byte for byte")
+	assert.Equal(t, jobsBefore, dumpRows(t, db, jobColumnsQ), "the cards job is gone, the others kept")
+
+	_, err = p.UpTo(ctx, 19)
+	require.NoError(t, err, "Up runs again")
+}
+
+// TestMigration019_FieldsIndexFollowsTheRows: the triggers keep
+// document_fields_fts in step with document_fields through inserts,
+// updates and deletes, and a write of the columns the index doesn't hold
+// leaves it alone.
+func TestMigration019_FieldsIndexFollowsTheRows(t *testing.T) {
+	ctx := context.Background()
+	db, _ := migratedTo(t, 19)
+	// total_changes() counts the rows a connection's statements and their
+	// triggers wrote, so one connection makes every statement.
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, conn.Close()) })
+	exec := func(q string, args ...any) {
+		t.Helper()
+		_, err := conn.ExecContext(ctx, q, args...)
+		require.NoError(t, err)
+	}
+	totalChanges := func() int {
+		t.Helper()
+		var n int
+		require.NoError(t, conn.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&n))
+		return n
+	}
+	match := func(q string) []string {
+		t.Helper()
+		rows, err := conn.QueryContext(ctx, `SELECT f.document_id FROM document_fields_fts
+			JOIN document_fields f ON f.seq = document_fields_fts.rowid
+			WHERE document_fields_fts MATCH ? ORDER BY f.document_id`, q)
+		require.NoError(t, err)
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			require.NoError(t, rows.Scan(&id))
+			ids = append(ids, id)
+		}
+		require.NoError(t, rows.Err())
+		return ids
+	}
+	integrity := func() {
+		t.Helper()
+		exec(`INSERT INTO document_fields_fts (document_fields_fts) VALUES ('integrity-check')`)
+	}
+
+	exec(`INSERT INTO documents (id, tenant_id, url) VALUES ('d1', 'local', 'https://example.com/1'),
+		('d2', 'local', 'https://example.org/2')`)
+	exec(`INSERT INTO document_fields (document_id, tenant_id, host, title, bookmark_titles, folders, site, author, rules)
+		VALUES ('d1', 'local', 'example.com', 'Kafka streams', 'Saved kafka notes', 'Reading / Queues', 'example', 'Ada', 1),
+		       ('d2', 'local', 'example.org', 'Postgres internals', '', 'Databases', 'example', 'Grace', 1)`)
+	integrity()
+	assert.Equal(t, []string{"d1"}, match("kafka"))
+	assert.Equal(t, []string{"d1"}, match("queues"))
+	assert.Equal(t, []string{"d2"}, match("grace"))
+	assert.Equal(t, []string{"d1", "d2"}, match("example"))
+
+	before := totalChanges()
+	for _, set := range []string{"host = 'other.example'", "site_name = 'Example'", "declared_site = 'Example'",
+		"title_suffixes = 'Example'", "rules = 2"} {
+		exec(`UPDATE document_fields SET ` + set + ` WHERE document_id = 'd1'`)
+	}
+	assert.Equal(t, before+5, totalChanges(), "the rows alone changed: no trigger wrote the index")
+	integrity()
+
+	before = totalChanges()
+	exec(`UPDATE document_fields SET title = 'Postgres replication', author = 'Edgar' WHERE document_id = 'd1'`)
+	assert.Greater(t, totalChanges(), before+1, "the row, and the index's delete and insert")
+	integrity()
+	assert.Empty(t, match("kafka streams"), "the old title is gone")
+	assert.Equal(t, []string{"d1"}, match("kafka"), "the bookmark title still holds it")
+	assert.Equal(t, []string{"d1", "d2"}, match("postgres"))
+	assert.Equal(t, []string{"d1"}, match("edgar"))
+	assert.Empty(t, match("ada"))
+
+	exec(`DELETE FROM documents WHERE id = 'd2'`)
+	integrity()
+	assert.Equal(t, []string{"d1"}, match("postgres"), "the cascade took d2's row and its entry")
+	assert.Empty(t, match("grace"))
+	assert.Empty(t, dumpRows(t, db, `SELECT * FROM document_fields WHERE document_id = 'd2'`))
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `

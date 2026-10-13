@@ -1128,7 +1128,7 @@ components:
 
     JobKind:
       type: string
-      enum: [fetch, index, import, cluster, summarize]
+      enum: [fetch, index, import, cluster, summarize, cards]
 
     Source:
       type: string
