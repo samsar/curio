@@ -295,6 +295,10 @@ another. The daemon reports each role's model on `/v1/healthz`
 (`generation_roles`), and the dashboard's Status page shows it as the
 Writing model.
 
+Going back to curio 2.6.x, remove `generation.roles` from `config.yaml`
+first: 2.6.x doesn't know the key, so its daemon refuses to start and its
+commands refuse to run.
+
 ### The embedding model is the home's
 
 The embedding model and the width of its vectors are fixed when a home is

@@ -12800,6 +12800,12 @@ restarts. The Status page's Writing model names the roles' models, or
 `generation.model` when none is in use. `curio status` names no writing
 model, and is unchanged.
 
+**Going back to 2.6.x:** 2.6 decodes config.yaml strictly and doesn't
+know `generation.roles` ("field roles not found in type
+config.Generation", checked with v2.6.0's config loader), so its daemon
+refuses to start and its CLI fails on the same parse; remove the key
+first, as setup.md says.
+
 ---
 
 ## Open questions
