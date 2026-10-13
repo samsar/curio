@@ -12671,11 +12671,16 @@ fails the run, naming the query, as `curio eval` refuses one. The copy's
 vector width must be config.yaml's `embedding.dim`.
 
 **On a copy:** the tool migrates what it reads, so `internal/devtool`
-refuses a database beside `daemon.pid` before opening anything, and says
-how to take a copy. devtool builds the copy's stores for both developer's
-tools, so neither imports the SQLite implementation outside its tests; the
-store boundary's exception moved from `cmd/clusterreport` to devtool, and a
-depguard rule keeps devtool out of everything shipped.
+refuses a database beside `daemon.pid` or the home's marker
+(`.curio-meta.json`), and a file with more than one hard link, before
+opening anything, and says how to take a copy. The path checks alone let a
+hard link to a home's `curio.db` through, and migrating it under that name
+beside its daemon would give one database two WALs; a link count over one
+refuses it whichever name is given, so a copy is a file of its own.
+devtool builds the copy's stores for both developer's tools, so neither
+imports the SQLite implementation outside its tests; the store boundary's
+exception moved from `cmd/clusterreport` to devtool, and a depguard rule
+keeps devtool out of everything shipped.
 
 **Judgments, resolved once:** missing (no document has the URL);
 unsearchable (the document failed or is dead, or has no chunks); otherwise

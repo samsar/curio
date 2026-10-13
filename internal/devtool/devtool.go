@@ -19,10 +19,16 @@ import (
 	"github.com/samsar/curio/internal/store/sqlite"
 )
 
-// ErrLiveHome refuses a database beside daemon.pid: a tool migrates the
-// database it reads, which a home's own daemon must do itself.
-var ErrLiveHome = errors.New("refusing a database in a home's directory (it holds daemon.pid): " +
-	"the tool migrates what it reads, so point it at a copy")
+// ErrLiveHome refuses a database beside daemon.pid or the home's marker: a
+// tool migrates the database it reads, which a home's own daemon must do
+// itself.
+var ErrLiveHome = errors.New("refusing a database in a home's directory")
+
+// ErrHardLinked refuses a database file with more than one hard link:
+// another of its names may be a home's curio.db, which the path checks
+// can't see, and migrating it under this name, beside its daemon, would
+// give one database two -wal files.
+var ErrHardLinked = errors.New("refusing a database with more than one hard link")
 
 // Copy is an open copy of a home's database, migrated to this curio's
 // schema, with its stores.
@@ -40,8 +46,9 @@ type Copy struct {
 }
 
 // OpenCopy opens the database at path, a copy of a home's: it refuses a
-// home's own (ErrLiveHome), and anything that isn't an existing file,
-// before opening anything, then migrates it, the only write.
+// home's own (ErrLiveHome, ErrHardLinked), and anything that isn't an
+// existing file, before opening anything, then migrates it, the only
+// write.
 func OpenCopy(ctx context.Context, path string) (*Copy, error) {
 	if err := checkCopy(path); err != nil {
 		return nil, err
@@ -78,9 +85,15 @@ func migrate(ctx context.Context, path string, db *sqlite.DB) (*Copy, error) {
 // Close closes the database.
 func (c *Copy) Close() error { return c.db.Close() }
 
-// checkCopy fails unless path is an existing file outside a home: Open
-// would create a missing one, and a directory holding daemon.pid is a
-// home, whose daemon may be running.
+// homeFiles are the files whose presence beside a database makes its
+// directory a home: daemon.pid, which every daemon that ever started there
+// leaves, and the marker, which a home has from its first moment.
+var homeFiles = []string{curiohome.PIDFileName, curiohome.MarkerFile}
+
+// checkCopy fails unless path is an existing file of its own outside a
+// home: Open would create a missing one, a directory holding daemon.pid or
+// the marker is a home, whose daemon may be running, and a file with
+// another hard link may be a home's under another name.
 func checkCopy(path string) error {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -93,12 +106,22 @@ func checkCopy(path string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("the database %s is not a file", path)
 	}
-	switch _, err := os.Stat(filepath.Join(filepath.Dir(resolved), curiohome.PIDFileName)); {
-	case err == nil:
-		return fmt.Errorf("%w; take one with: sqlite3 -readonly %s \".backup <copy>\" (or, if its daemon is "+
-			"stopped and that fails, sqlite3 'file:%s?immutable=1' \".backup <copy>\")", ErrLiveHome, path, path)
-	case !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("look for %s beside the database: %w", curiohome.PIDFileName, err)
+	for _, name := range homeFiles {
+		switch _, err := os.Lstat(filepath.Join(filepath.Dir(resolved), name)); {
+		case err == nil:
+			return fmt.Errorf("%w (it holds %s): the tool migrates what it reads, so point it at a copy; "+
+				"take one with: sqlite3 -readonly %s \".backup <copy>\" (or, if its daemon is stopped and that "+
+				"fails, sqlite3 'file:%s?immutable=1' \".backup <copy>\")", ErrLiveHome, name, path, path)
+		case !errors.Is(err, os.ErrNotExist):
+			return fmt.Errorf("look for %s beside the database: %w", name, err)
+		}
+	}
+	if links := hardLinks(info); links != "" {
+		// A read through this name wouldn't see the home's -wal either, so
+		// the copy is taken from the home's own path.
+		return fmt.Errorf("%w (%s has %s): another of its names may be a home's curio.db, and the tool "+
+			"migrates what it reads, so point it at a copy of its own; take one from the home with: "+
+			"sqlite3 -readonly <home>/curio.db \".backup <copy>\"", ErrHardLinked, path, links)
 	}
 	return nil
 }

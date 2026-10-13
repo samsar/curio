@@ -81,31 +81,82 @@ func TestOpenCopy_ReadsTheWidth(t *testing.T) {
 	assert.Equal(t, 8, c.Width)
 }
 
-// TestOpenCopy_RefusesAHome: a database beside daemon.pid is refused, by
-// its own path or through a link from elsewhere, before anything opens
-// it: no -wal or -shm file, its time unchanged. The refusal says how to
-// take a copy.
+// TestOpenCopy_RefusesAHome: a database beside daemon.pid, or beside the
+// home's marker alone, is refused, by its own path or through a link from
+// elsewhere, before anything opens it: no -wal or -shm file, its time
+// unchanged. The refusal names the file and says how to take a copy.
 func TestOpenCopy_RefusesAHome(t *testing.T) {
+	for _, signal := range []string{"daemon.pid", ".curio-meta.json"} {
+		t.Run(signal, func(t *testing.T) {
+			home := t.TempDir()
+			db, _ := newDatabase(t, home, "curio.db", goose.MaxVersion)
+			require.NoError(t, os.WriteFile(filepath.Join(home, signal), []byte("4242\n"), 0o600))
+			link := filepath.Join(t.TempDir(), "link.db")
+			require.NoError(t, os.Symlink(db, link))
+			before := files(t, home)
+			stat, err := os.Stat(db)
+			require.NoError(t, err)
+
+			for _, path := range []string{db, link} {
+				_, err := OpenCopy(context.Background(), path)
+				require.ErrorIs(t, err, ErrLiveHome)
+				assert.Contains(t, err.Error(), "(it holds "+signal+")")
+				assert.Contains(t, err.Error(), `sqlite3 -readonly `+path+` ".backup <copy>"`)
+				assert.Contains(t, err.Error(), `sqlite3 'file:`+path+`?immutable=1' ".backup <copy>"`)
+			}
+			assert.Equal(t, before, files(t, home), "no -wal or -shm file beside it")
+			after, err := os.Stat(db)
+			require.NoError(t, err)
+			assert.Equal(t, stat.ModTime(), after.ModTime())
+		})
+	}
+}
+
+// TestOpenCopy_RefusesAHardLink: a hard link to a home's database, from a
+// directory that isn't a home, is refused before anything opens it, and
+// so is the home's own name for it, and any file with another link: the
+// path checks can't tell a home's file by another name. The refusal says
+// to take a copy from the home.
+func TestOpenCopy_RefusesAHardLink(t *testing.T) {
 	home := t.TempDir()
 	db, _ := newDatabase(t, home, "curio.db", goose.MaxVersion)
 	require.NoError(t, os.WriteFile(filepath.Join(home, "daemon.pid"), []byte("4242\n"), 0o600))
-	link := filepath.Join(t.TempDir(), "link.db")
-	require.NoError(t, os.Symlink(db, link))
+	elsewhere := t.TempDir()
+	link := filepath.Join(elsewhere, "copy.db")
+	require.NoError(t, os.Link(db, link))
+	symlink := filepath.Join(t.TempDir(), "symlink.db")
+	require.NoError(t, os.Symlink(link, symlink))
 	before := files(t, home)
 	stat, err := os.Stat(db)
 	require.NoError(t, err)
 
-	for _, path := range []string{db, link} {
+	for _, path := range []string{link, symlink} {
 		_, err := OpenCopy(context.Background(), path)
-		require.ErrorIs(t, err, ErrLiveHome)
-		assert.Contains(t, err.Error(), "daemon.pid")
-		assert.Contains(t, err.Error(), `sqlite3 -readonly `+path+` ".backup <copy>"`)
-		assert.Contains(t, err.Error(), `sqlite3 'file:`+path+`?immutable=1' ".backup <copy>"`)
+		require.ErrorIs(t, err, ErrHardLinked, path)
+		assert.Contains(t, err.Error(), "("+path+" has 2 hard links)")
+		assert.Contains(t, err.Error(), `sqlite3 -readonly <home>/curio.db ".backup <copy>"`)
 	}
-	assert.Equal(t, before, files(t, home), "no -wal or -shm file beside it")
+	_, err = OpenCopy(context.Background(), db)
+	require.ErrorIs(t, err, ErrLiveHome, "the home's own name is refused for its home first")
+	assert.Equal(t, before, files(t, home), "no -wal or -shm file in the home")
+	assert.Equal(t, map[string]string{"copy.db": files(t, home)["curio.db"]}, files(t, elsewhere),
+		"none beside the link")
 	after, err := os.Stat(db)
 	require.NoError(t, err)
 	assert.Equal(t, stat.ModTime(), after.ModTime())
+
+	// Two names for one copy, neither in a home: refused all the same.
+	copies := t.TempDir()
+	one, _ := newDatabase(t, copies, "one.db", goose.MaxVersion)
+	require.NoError(t, os.Link(one, filepath.Join(copies, "two.db")))
+	_, err = OpenCopy(context.Background(), one)
+	require.ErrorIs(t, err, ErrHardLinked)
+
+	// Once the other name is gone, the file is a copy of its own.
+	require.NoError(t, os.Remove(filepath.Join(copies, "two.db")))
+	c, err := OpenCopy(context.Background(), one)
+	require.NoError(t, err)
+	require.NoError(t, c.Close())
 }
 
 func TestOpenCopy_RefusesWhatIsNoFile(t *testing.T) {

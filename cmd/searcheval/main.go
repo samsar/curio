@@ -11,7 +11,8 @@
 //
 // It is a developer's tool, run by `make search-eval` and never shipped.
 // It migrates the database it is given, so it refuses a directory holding
-// daemon.pid: take a copy first,
+// daemon.pid or .curio-meta.json, and a file with another hard link: take
+// a copy first,
 //
 //	sqlite3 -readonly ~/.curio/curio.db ".backup copy.db"
 //	searcheval -db copy.db -queries my-queries.yaml [-config ~/.curio/config.yaml]

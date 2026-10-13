@@ -101,7 +101,8 @@ test-e2e:
 ## cluster-report: measure the interests grouping on a copy of a home's database (DB=<copy> [JSON=<file>] [DRAWS=n] [SEED=n])
 # A developer's tool: go run, so nothing lands in ./bin. It migrates the
 # database it reads and refuses a home's own (a directory holding
-# daemon.pid); take a copy with sqlite3 -readonly ~/.curio/curio.db
+# daemon.pid or .curio-meta.json, or a file with another hard link); take
+# a copy with sqlite3 -readonly ~/.curio/curio.db
 # ".backup <copy>", or with the daemon stopped, sqlite3
 # "file:$HOME/.curio/curio.db?immutable=1" ".backup <copy>". See
 # cmd/clusterreport.
