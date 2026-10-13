@@ -105,7 +105,7 @@ func TestMinOllama(t *testing.T) {
 	v, m := minOllama(p)
 	assert.Empty(t, v)
 	assert.Empty(t, m)
-	p.generation = &wanted{Model: knownModel("gemma4:26b-a4b-it-qat")}
+	p.writing = []wanted{{Model: knownModel("gemma4:26b-a4b-it-qat")}}
 	v, m = minOllama(p)
 	assert.Equal(t, "0.30.6", v)
 	assert.Equal(t, "gemma4:26b-a4b-it-qat", m)

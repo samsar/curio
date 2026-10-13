@@ -461,3 +461,107 @@ func TestValidate_OneZeroWeightIsAllowed(t *testing.T) {
 	cfg.Search.BM25Weight = 0 // vector-only ranking
 	assert.NoError(t, cfg.Validate())
 }
+
+// TestDefault_Roles: without generation.roles, the one role writes with
+// generation's own settings, and it is in use.
+func TestDefault_Roles(t *testing.T) {
+	d := Default()
+	assert.Nil(t, d.Generation.Roles)
+	assert.Equal(t, ModelSpec{Provider: "ollama", Model: "qwen3:4b-instruct", BaseURL: "http://localhost:11434",
+		TimeoutSeconds: 120}, d.Generation.Role(RoleLabels))
+	assert.Equal(t, []Role{RoleLabels}, d.RolesInUse())
+	assert.Equal(t, []Role{RoleLabels}, Roles())
+	assert.Equal(t, "interest labels", RoleLabels.UsedFor())
+	assert.Empty(t, Role("lables").UsedFor())
+}
+
+// TestLoad_Roles: a role inherits every field it leaves out, or sets to 0
+// or "", from generation, whose own model stays as set.
+func TestLoad_Roles(t *testing.T) {
+	got, err := Load(writeConfig(t, `generation:
+  model: gemma4:26b
+  base_url: http://127.0.0.1:11500
+  timeout_seconds: 300
+  roles:
+    labels:
+      model: qwen3:4b-instruct
+      timeout_seconds: 0
+`))
+	require.NoError(t, err)
+	assert.Equal(t, "gemma4:26b", got.Generation.Model)
+	assert.Equal(t, ModelSpec{Provider: "ollama", Model: "qwen3:4b-instruct", BaseURL: "http://127.0.0.1:11500",
+		TimeoutSeconds: 300}, got.Generation.Role(RoleLabels))
+
+	got, err = Load(writeConfig(t, "generation:\n  roles:\n    labels:\n      base_url: http://127.0.0.1:11600\n"+
+		"      timeout_seconds: 30\n"))
+	require.NoError(t, err)
+	assert.Equal(t, ModelSpec{Provider: "ollama", Model: "qwen3:4b-instruct", BaseURL: "http://127.0.0.1:11600",
+		TimeoutSeconds: 30}, got.Generation.Role(RoleLabels))
+}
+
+// TestRolesInUse: labels is in use only while insight is on and labels
+// with an LLM.
+func TestRolesInUse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		label   string
+		want    []Role
+	}{
+		{"llm", true, "llm", []Role{RoleLabels}},
+		{"insight off", false, "llm", nil},
+		{"term labels", true, "terms", nil},
+		{"no labels", true, "off", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Insight.Enabled, cfg.Insight.Labeling = tc.enabled, tc.label
+			assert.Equal(t, tc.want, cfg.RolesInUse())
+		})
+	}
+}
+
+// TestLoad_RoleErrors: a role Roles doesn't list, a setting of a role's
+// the daemon would refuse, and a key a role doesn't have each fail the
+// load, naming the key.
+func TestLoad_RoleErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml, want string
+	}{
+		{"an unknown role", "generation:\n  roles:\n    lables:\n      model: m:1\n",
+			`generation.roles: unknown role "lables"; the roles are: labels`},
+		{"unknown roles, the first in order", "generation:\n  roles:\n    zeta: {}\n    alpha: {}\n",
+			`unknown role "alpha"`},
+		{"another provider", "generation:\n  roles:\n    labels:\n      provider: openai\n",
+			`generation.roles.labels.provider "openai" is not supported; the only provider is "ollama"`},
+		{"a base_url the client refuses", "generation:\n  roles:\n    labels:\n      base_url: ftp://x\n",
+			"generation.roles.labels.base_url: "},
+		{"a negative timeout", "generation:\n  roles:\n    labels:\n      timeout_seconds: -1\n",
+			"generation.roles.labels.timeout_seconds must be positive, got -1"},
+		{"an unknown key", "generation:\n  roles:\n    labels:\n      models: m:1\n", "field models not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tc.yaml))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// TestValidate_GenerationMessages: generation's own errors are exactly
+// these messages, whole, though its roles go through the same checks.
+func TestValidate_GenerationMessages(t *testing.T) {
+	for _, tc := range []struct {
+		mutate func(*Generation)
+		want   string
+	}{
+		{func(g *Generation) { g.Provider = "openai" }, `generation.provider "openai" is not supported; the only provider is "ollama"`},
+		{func(g *Generation) { g.Model = "" }, "generation.model must not be empty"},
+		{func(g *Generation) { g.BaseURL = "" }, "generation.base_url must not be empty"},
+		{func(g *Generation) { g.TimeoutSeconds = 0 }, "generation.timeout_seconds must be positive, got 0"},
+	} {
+		cfg := Default()
+		tc.mutate(&cfg.Generation)
+		assert.EqualError(t, cfg.Validate(), tc.want)
+	}
+}

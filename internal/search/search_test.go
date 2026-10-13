@@ -937,3 +937,73 @@ func TestEngine_KContract(t *testing.T) {
 		assert.Error(t, err, "k=%d", k)
 	}
 }
+
+// TestEngine_ZeroWeight: a retriever weighted 0 ranks nothing: the other's
+// documents alone are the results, each with a score, and the total counts
+// them alone. A vector weight of 0 skips the vector leg, so the query is
+// never embedded and the search never degrades; a BM25 weight of 0 still
+// runs BM25, and falls back to its results when the vector leg fails.
+func TestEngine_ZeroWeight(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	docs, chunks, ids := seedCorpus(t, db) // postgres 0.10, btree 0.20, llm 0.30
+	// The query's vector is nearest the llm chunk; its one keyword is the
+	// postgres chunk's alone.
+	emb := &fakeEmbedder{dim: dim, byText: map[string][]float32{"PostgreSQL": filledVec(dim, 0.30)}}
+	search := func(t *testing.T, emb Embedder, cfg Config, query string) *Result {
+		t.Helper()
+		cfg.Log = slog.New(slog.DiscardHandler)
+		res, err := New(chunks, docs, emb, cfg).Search(context.Background(),
+			Request{TenantID: "local", Query: query, K: 10})
+		require.NoError(t, err)
+		for _, it := range res.Items {
+			assert.Positive(t, it.Score, it.Document.URL)
+		}
+		return res
+	}
+	// unused fails the way a down Ollama does, counting its calls.
+	unused := func(calls *atomic.Int32) Embedder {
+		return embedFunc(func(context.Context, []string) ([][]float32, error) {
+			calls.Add(1)
+			return nil, errRefused
+		})
+	}
+
+	t.Run("vector weight 0", func(t *testing.T) {
+		res := search(t, emb, Config{BM25Weight: 1, VectorWeight: 0}, "PostgreSQL")
+		assert.Equal(t, []string{ids[0]}, hitIDs(res.Items), "BM25's document alone")
+		assert.Equal(t, 1, res.Total)
+		assert.Zero(t, res.VectorHits, "no vector search")
+	})
+	t.Run("vector weight 0, the embedding model down", func(t *testing.T) {
+		var calls atomic.Int32
+		res := search(t, unused(&calls), Config{BM25Weight: 1, VectorWeight: 0}, "PostgreSQL")
+		assert.Zero(t, calls.Load(), "the query is never embedded")
+		assert.False(t, res.Degraded)
+		assert.Empty(t, res.Warnings)
+		assert.Equal(t, []string{ids[0]}, hitIDs(res.Items))
+		assert.Zero(t, res.VectorHits)
+		assert.Zero(t, res.Timings.Embed, "no embed")
+		assert.Zero(t, res.Timings.Vector, "no vector search")
+		assert.Positive(t, res.Timings.BM25)
+	})
+	t.Run("vector weight 0, no keyword terms", func(t *testing.T) {
+		var calls atomic.Int32
+		res := search(t, unused(&calls), Config{BM25Weight: 1, VectorWeight: 0}, "the and of")
+		assert.Zero(t, calls.Load())
+		assert.False(t, res.Degraded, "nothing to search is no failure")
+		assert.Empty(t, res.Items)
+		assert.Zero(t, res.Total)
+	})
+	t.Run("bm25 weight 0", func(t *testing.T) {
+		res := search(t, emb, Config{BM25Weight: 0, VectorWeight: 1}, "PostgreSQL")
+		assert.Equal(t, []string{ids[2], ids[1], ids[0]}, hitIDs(res.Items), "the vector leg's order alone")
+		assert.Equal(t, 3, res.Total)
+		assert.Positive(t, res.BM25Hits, "BM25 still ran")
+	})
+	t.Run("bm25 weight 0, degraded", func(t *testing.T) {
+		res := search(t, failingEmbedder(), Config{BM25Weight: 0, VectorWeight: 1}, "PostgreSQL")
+		assert.True(t, res.Degraded)
+		assert.Equal(t, []string{ids[0]}, hitIDs(res.Items), "the keyword results")
+	})
+}

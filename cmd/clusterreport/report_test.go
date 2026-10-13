@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/devtool"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/insight/quality"
 	"github.com/samsar/curio/internal/store"
@@ -146,7 +147,7 @@ func TestReport_TextIsOneWrite(t *testing.T) {
 
 func TestReport_JSONSaysNullForNA(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.json")
-	require.NoError(t, writeJSON(path, fixedReport()))
+	require.NoError(t, devtool.WriteJSON(path, fixedReport()))
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 	var rep map[string]any

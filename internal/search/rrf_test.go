@@ -69,3 +69,16 @@ func ids(s []ScoredID) []string {
 	}
 	return out
 }
+
+// TestFuse_ZeroWeightLeavesItsItemsOut: a list weighted 0 adds no item to
+// the output, not even at score 0; the others keep their order.
+func TestFuse_ZeroWeightLeavesItsItemsOut(t *testing.T) {
+	out := Fuse([][]RankedItem{
+		{{"a", 1}, {"b", 2}},
+		{{"b", 1}, {"c", 2}},
+	}, []float64{1, 0}, 60)
+	assert.Equal(t, []string{"a", "b"}, ids(out))
+	for _, s := range out {
+		assert.Positive(t, s.Score, s.ID)
+	}
+}

@@ -21,7 +21,8 @@
 #       slices/maps, range-over-int, net/http constants, errors.New for
 #       constant messages
 #   prealloc, misspell  small wins
-#   depguard       the store boundary and test-only dependencies
+#   depguard       the store boundary, test-only and developer's-tool-only
+#                  dependencies
 #   nolintlint     keeps suppressions specific and explained
 
 version: "2"
@@ -69,21 +70,33 @@ linters:
       rules:
         # Consumers depend on the internal/store interfaces. Only the daemon's
         # main wires the SQLite implementation (plus tests, the test-support
-        # packages that build real stores, and cmd/clusterreport, the
-        # developer's report that reads a copy of a home's database and is
-        # never built into a release).
+        # packages that build real stores, and internal/devtool, which opens
+        # a copy of a home's database for the developer's tools and is never
+        # built into a release).
         store-boundary:
           list-mode: lax
           files:
             - "$all"
             - "!$test"
             - "!**/cmd/curio-daemon/**"
-            - "!**/cmd/clusterreport/**"
+            - "!**/internal/devtool/**"
             - "!**/internal/store/sqlite/**"
             - "!**/internal/api/apitest/**"
           deny:
             - pkg: github.com/samsar/curio/internal/store/sqlite
-              desc: depend on the internal/store interfaces; only cmd/curio-daemon (and the dev tool cmd/clusterreport) wire the SQLite implementation
+              desc: depend on the internal/store interfaces; only cmd/curio-daemon (and internal/devtool, for the developer's tools) wire the SQLite implementation
+        # internal/devtool is the developer's tools' way to the SQLite
+        # implementation; nothing shipped may link it.
+        devtool-for-dev-tools:
+          list-mode: lax
+          files:
+            - "$all"
+            - "!**/cmd/clusterreport/**"
+            - "!**/cmd/searcheval/**"
+            - "!**/internal/devtool/**"
+          deny:
+            - pkg: github.com/samsar/curio/internal/devtool
+              desc: devtool is for the developer's tools (cmd/clusterreport, cmd/searcheval); shipped code opens databases through cmd/curio-daemon
         # The dashboard's view layer and page handlers render what the
         # shared Deps functions return; they never query the database, so a
         # view can be rebuilt client-side from /v1 later.

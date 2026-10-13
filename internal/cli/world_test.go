@@ -87,7 +87,9 @@ func upWorldFrom(t *testing.T, start func(testing.TB, ...func(*api.Deps)) *apite
 	t.Helper()
 	w := newWorld(t, embedModel, genModel)
 	srv := start(t, append([]func(*api.Deps){func(d *api.Deps) {
-		d.GenerationModel = genModel
+		// config.yaml's labels role, in use with its defaults, writes with
+		// generation.model.
+		d.GenerationModel, d.GenerationRoles = genModel, map[string]string{"labels": genModel}
 		d.GitHubToken = true
 	}}, opts...)...)
 	w.srv, w.home, w.daemonURL = srv, srv.Home.Path, srv.URL

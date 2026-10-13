@@ -54,7 +54,8 @@ type Deps struct {
 	Chunks          store.ChunkStore
 	Queue           store.JobStore
 	Embedder        embedder.Embedder
-	GenerationModel string // config.yaml's generation.model as the daemon loaded it, on healthz
+	GenerationModel string            // config.yaml's generation.model as the daemon loaded it, on healthz
+	GenerationRoles map[string]string // each role in use and the model it writes with, on healthz; nil reports none
 	Search          *search.Engine
 	Insights        store.InsightStore
 	InsightEnabled  bool                            // config insight.enabled: gates POST /v1/interests/rebuild, and "off" in the interests' state

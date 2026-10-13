@@ -16,9 +16,10 @@ import (
 // Health is the /v1/healthz response. PID and Home identify which daemon
 // answered: clients use them to confirm the process on the port is the one
 // serving their $CURIO_HOME before trusting or signalling it.
-// GenerationModel is the generation.model the daemon started with, which
+// GenerationModel is the generation.model the daemon started with, and
+// GenerationRoles each role in use with the model it writes with, which
 // `curio up` compares with config.yaml's to know when a restart would
-// change it. Upstreams are the services fetches depend on; like Ollama, a
+// change them. Upstreams are the services fetches depend on; like Ollama, a
 // failing one doesn't make the daemon unhealthy, and neither does
 // EmbeddingDrift: a change of the embedding build that a re-embedded
 // sample of the library showed, or couldn't rule out, changed the vectors.
@@ -32,21 +33,22 @@ import (
 // scheduler's last check: interests are not health, so it never changes
 // Status.
 type Health struct {
-	Status          string           `json:"status"`
-	PID             int              `json:"pid"`
-	Home            string           `json:"home"`
-	Version         string           `json:"version"`
-	SchemaVersion   int              `json:"schema_version"`
-	EmbeddingModel  string           `json:"embedding_model"`
-	EmbeddingDim    int              `json:"embedding_dim"`
-	EmbeddingDrift  *EmbeddingDrift  `json:"embedding_drift,omitempty"`
-	GenerationModel string           `json:"generation_model"`
-	OllamaReachable bool             `json:"ollama_reachable"`
-	OllamaDetail    string           `json:"ollama_detail,omitempty"`
-	Upstreams       []UpstreamHealth `json:"upstreams"`
-	YouTubeFetcher  string           `json:"youtube_fetcher,omitempty"`
-	GitHubToken     bool             `json:"github_token"`
-	Interests       InterestsState   `json:"interests"`
+	Status          string            `json:"status"`
+	PID             int               `json:"pid"`
+	Home            string            `json:"home"`
+	Version         string            `json:"version"`
+	SchemaVersion   int               `json:"schema_version"`
+	EmbeddingModel  string            `json:"embedding_model"`
+	EmbeddingDim    int               `json:"embedding_dim"`
+	EmbeddingDrift  *EmbeddingDrift   `json:"embedding_drift,omitempty"`
+	GenerationModel string            `json:"generation_model"`
+	GenerationRoles map[string]string `json:"generation_roles"`
+	OllamaReachable bool              `json:"ollama_reachable"`
+	OllamaDetail    string            `json:"ollama_detail,omitempty"`
+	Upstreams       []UpstreamHealth  `json:"upstreams"`
+	YouTubeFetcher  string            `json:"youtube_fetcher,omitempty"`
+	GitHubToken     bool              `json:"github_token"`
+	Interests       InterestsState    `json:"interests"`
 }
 
 // EmbeddingDrift says what changed in the build that makes the home's
@@ -233,6 +235,7 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		EmbeddingDim:    meta.EmbeddingDim,
 		EmbeddingDrift:  d.embeddingDrift(),
 		GenerationModel: d.GenerationModel,
+		GenerationRoles: d.generationRoles(),
 		OllamaReachable: reachable,
 		OllamaDetail:    detail,
 		Upstreams:       d.upstreams(),
@@ -240,6 +243,15 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		GitHubToken:     d.GitHubToken,
 		Interests:       d.interestsState(),
 	}, nil
+}
+
+// generationRoles is the roles in use and their models: an empty object,
+// never null, when none is.
+func (d Deps) generationRoles() map[string]string {
+	if d.GenerationRoles == nil {
+		return map[string]string{}
+	}
+	return d.GenerationRoles
 }
 
 // Stats is the /v1/stats response.

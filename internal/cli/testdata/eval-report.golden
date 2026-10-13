@@ -1,0 +1,14 @@
+query                                    rel  R@10   P@10   NDCG@10  RR
+how neural networks learn                2    1.000  0.200  0.920    1.000
+rust ownership and borrowing             1    0.000  0.000  0.000    0.000
+designing resilient distributed systems  2    1.000  0.200  0.693    0.500
+MEAN                                          0.667  0.133  0.538    0.500
+
+3 queries · NDCG@10 0.538 · recall@10 0.667 · MRR 0.500
+query                                    rel  R@2    P@2    NDCG@2  RR
+how neural networks learn                2    0.500  0.500  0.613   1.000
+rust ownership and borrowing             1    0.000  0.000  0.000   0.000
+designing resilient distributed systems  2    0.500  0.500  0.387   0.500
+MEAN                                          0.333  0.333  0.333   0.500
+
+3 queries · NDCG@2 0.333 · recall@2 0.333 · MRR 0.500

@@ -74,9 +74,6 @@ func NewOllama(opts OllamaOptions) (*Ollama, error) {
 
 func (o *Ollama) Model() string { return o.client.Model() }
 
-// Client is the underlying Ollama client, for keeping the model pulled.
-func (o *Ollama) Client() *ollama.Client { return o.client }
-
 // Ping checks that Ollama is reachable and the configured model is available;
 // see ollama.Client.Ping.
 func (o *Ollama) Ping(ctx context.Context) error { return o.client.Ping(ctx) }

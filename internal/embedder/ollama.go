@@ -70,7 +70,8 @@ func NewOllama(opts OllamaOptions) (*Ollama, error) {
 func (o *Ollama) Dimensions() int { return o.dim }
 func (o *Ollama) Model() string   { return o.client.Model() }
 
-// Client is the underlying Ollama client, for keeping the model pulled.
+// Client is the underlying Ollama client, which reads the model's digest
+// and Ollama's version for the drift monitor.
 func (o *Ollama) Client() *ollama.Client { return o.client }
 
 // Ping reports whether Ollama is reachable with the model pulled; see

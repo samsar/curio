@@ -436,7 +436,10 @@ The interfaces with explicit swap paths:
    when it is created and recorded in its marker; another model means a
    new home (see [decisions](./decisions.md#embedding-model-and-per-home-width)).
 3. **`generator.Generator`** — LLM text generation, used for interest labels.
-   Ollama impl.
+   Ollama impl. Each use of a writing model is a role (`labels` today),
+   whose provider and model `generation.roles` can set apart from
+   `generation`'s; `generator.New` builds a role's model, the one place a
+   provider is picked.
 4. **`fetcher.Fetcher`** — content fetcher: `native` (Go HTTP + Readability,
    with Jina Reader as its fallback), `web2md`, `github`, `youtube`,
    selected per URL by the rules engine.

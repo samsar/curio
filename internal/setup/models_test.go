@@ -75,6 +75,33 @@ func TestUp_NoWritingModel(t *testing.T) {
 	assert.Equal(t, []string{embedModel}, h.ollama.Pulls())
 }
 
+// TestUp_RoleModel: a role config.yaml gives its own model writes with
+// it, whatever generation.model says, and the plan says it is kept; with
+// every role on its own model, generation.model's notes are gone, and a
+// --generation-model has nothing to change.
+func TestUp_RoleModel(t *testing.T) {
+	h := newHarness(t)
+	home := h.writeHome("qwen3:4b-instruct")
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(strings.Replace(mustRead(t, home.ConfigPath()),
+		"generation:\n", "generation:\n  roles:\n    labels:\n      model: gemma4:12b\n", 1)), 0o600))
+
+	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
+	require.NotNil(t, res.Fix)
+	assert.Equal(t, "pull qwen3-embedding:0.6b (639 MB) and gemma4:12b (7.6 GB)", res.Fix.Summary)
+	assert.Equal(t, []string{"keeping generation.roles.labels.model: gemma4:12b from config.yaml"}, res.Notes)
+
+	res = checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{GenerationModel: "gemma4:26b"}), "models")
+	assert.True(t, res.Blocked())
+	assert.Contains(t, res.Detail, "gives every writing role its own model in generation.roles")
+
+	ui := setuptest.NewUI(t, setuptest.Yes().About("Pull"), setuptest.Yes().About("launchd"))
+	_, _, err := h.up(ui, setup.Options{})
+	require.NoError(t, err, "%v", ui.Events())
+	assert.Equal(t, []string{embedModel, "gemma4:12b"}, h.ollama.Pulls())
+	res = checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
+	assert.Equal(t, "qwen3-embedding:0.6b for search and gemma4:12b for writing: present", res.Detail)
+}
+
 // TestUp_ModelsDeclined: n to `Use these?` ends the run, naming the flag
 // that picks another model.
 func TestUp_ModelsDeclined(t *testing.T) {
