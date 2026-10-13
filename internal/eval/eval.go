@@ -310,7 +310,7 @@ func parseJudgment(node *yaml.Node) (Judgment, error) {
 		case !seen["grade"]:
 			return Judgment{}, errors.New("an entry without a grade (a URL alone is grade 1)")
 		}
-	case yaml.SequenceNode, yaml.DocumentNode:
+	case yaml.SequenceNode, yaml.DocumentNode, yaml.AliasNode:
 		return Judgment{}, errors.New("an entry is a URL or a {url, grade} mapping")
 	}
 	u, err := urlutil.Normalize(j.URL)
