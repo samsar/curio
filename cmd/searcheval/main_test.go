@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -110,6 +111,19 @@ func TestRun_Refusals(t *testing.T) {
 			assert.NoFileExists(t, out)
 		})
 	}
+}
+
+// TestRun_LogsNoQueryText: a degraded search's warning reaches stderr
+// without the query's text, which the engine names in it; the run names
+// the query by id.
+func TestRun_LogsNoQueryText(t *testing.T) {
+	fx := newFixture(t)
+	fx.ollama.failOn("gamma")
+	res := runEval(t, fx.args(queries)...)
+	require.Equal(t, exitFailure, res.code)
+	assert.Contains(t, res.stderr, `msg="semantic search unavailable; returning keyword-only results"`)
+	assert.Contains(t, res.stderr, "query q-gamma")
+	assert.NotContains(t, strings.ReplaceAll(res.stderr, "q-gamma", ""), "gamma")
 }
 
 // TestRun_RefusesAnUnusableJSONPath: a -json path the report couldn't be

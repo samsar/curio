@@ -12706,9 +12706,11 @@ holds the comparison, so any report can be the next run's baseline.
 **Private by construction:** a real test set names what its owner reads
 and searches for. The query file and every JSON report (which holds the
 queries' text and the judged URLs) stay out of the repository; the text
-report names queries by id alone; tests use a synthetic example.com
-library whose every expected score is derived by hand in its comments.
-Numbers from the owner's set are recorded here in aggregate only.
+report and the log name queries by id alone (the log drops the query text
+the engine's degraded-search warning carries); tests use a synthetic
+example.com library whose every expected score is derived by hand in its
+comments. Numbers from the owner's set are recorded here in aggregate
+only.
 
 **Acceptance on a copy of the owner's library** (50 queries, 666
 judgments: 0 missing, 136 unsearchable; the owner's config.yaml): the

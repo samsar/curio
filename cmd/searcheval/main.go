@@ -74,12 +74,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		complain(stderr, usage.String())
 		return exitUsage
 	}
-	log := slog.New(slog.NewTextHandler(stderr, nil))
+	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{ReplaceAttr: dropQueryText}))
 	if err := evaluate(ctx, opts, stdout, log); err != nil {
 		complain(stderr, fmt.Sprintf("searcheval: %v\n", err))
 		return exitFailure
 	}
 	return exitOK
+}
+
+// dropQueryText leaves a query's text out of the log. The engine names it
+// in a degraded search's warning; the tool names queries by id alone, as
+// its report does, so a private test set stays off the terminal and out of
+// any log a run is kept in.
+func dropQueryText(groups []string, a slog.Attr) slog.Attr {
+	if len(groups) == 0 && a.Key == "query" {
+		return slog.Attr{}
+	}
+	return a
 }
 
 // complain writes msg to stderr. A failed write there has no one left to
