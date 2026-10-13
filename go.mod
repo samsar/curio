@@ -1,6 +1,6 @@
 module github.com/samsar/curio
 
-go 1.26.8
+go 1.26.9
 
 require (
 	charm.land/huh/v2 v2.0.3
@@ -23,7 +23,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.12.1
 	github.com/yuin/goldmark v1.8.6
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
