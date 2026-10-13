@@ -937,3 +937,44 @@ func TestEngine_KContract(t *testing.T) {
 		assert.Error(t, err, "k=%d", k)
 	}
 }
+
+// TestEngine_ZeroWeight: a retriever weighted 0 ranks nothing: the other's
+// documents alone are the results, each with a score, and the total counts
+// them alone. A keyword-only search still falls back to the keyword
+// results when the vector leg fails.
+func TestEngine_ZeroWeight(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	docs, chunks, ids := seedCorpus(t, db) // postgres 0.10, btree 0.20, llm 0.30
+	// The query's vector is nearest the llm chunk; its one keyword is the
+	// postgres chunk's alone.
+	emb := &fakeEmbedder{dim: dim, byText: map[string][]float32{"PostgreSQL": filledVec(dim, 0.30)}}
+	search := func(t *testing.T, emb Embedder, cfg Config) *Result {
+		t.Helper()
+		cfg.Log = slog.New(slog.DiscardHandler)
+		res, err := New(chunks, docs, emb, cfg).Search(context.Background(),
+			Request{TenantID: "local", Query: "PostgreSQL", K: 10})
+		require.NoError(t, err)
+		for _, it := range res.Items {
+			assert.Positive(t, it.Score, it.Document.URL)
+		}
+		return res
+	}
+
+	t.Run("vector weight 0", func(t *testing.T) {
+		res := search(t, emb, Config{BM25Weight: 1, VectorWeight: 0})
+		assert.Equal(t, []string{ids[0]}, hitIDs(res.Items), "BM25's document alone")
+		assert.Equal(t, 1, res.Total)
+		assert.Positive(t, res.VectorHits, "the vector leg still ran")
+	})
+	t.Run("bm25 weight 0", func(t *testing.T) {
+		res := search(t, emb, Config{BM25Weight: 0, VectorWeight: 1})
+		assert.Equal(t, []string{ids[2], ids[1], ids[0]}, hitIDs(res.Items), "the vector leg's order alone")
+		assert.Equal(t, 3, res.Total)
+	})
+	t.Run("bm25 weight 0, degraded", func(t *testing.T) {
+		res := search(t, failingEmbedder(), Config{BM25Weight: 0, VectorWeight: 1})
+		assert.True(t, res.Degraded)
+		assert.Equal(t, []string{ids[0]}, hitIDs(res.Items), "the keyword results")
+	})
+}

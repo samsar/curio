@@ -432,6 +432,16 @@ ranks its documents, and returns the window `[offset, offset+k)` of that
 ranking; see "Search pages by offset within a fixed-depth pool".
 `find_related` keeps `max(50, 8·k)`.
 
+**Revised (2026-10-13):** a zero weight now does what the knobs above say.
+`Fuse` used to add every item of a list weighted 0 at score 0, so with
+`search.vector_weight: 0` the vector leg's documents were still ranked, after
+the keyword matches, in document-ID order, and counted in `total`. On a small
+library, where the vector leg returns every chunk, a keyword-only search
+ranked the whole library. `Fuse` now skips a list weighted 0, so an item only
+it holds is not in the ranking. The zero-weight leg still runs, so a config
+with `bm25_weight: 0` still falls back to the keyword results (weight 1) when
+the vector leg fails. The default 1/1 weights rank exactly as before.
+
 ---
 
 ## BM25 query sanitization: OR + stopwords
