@@ -150,10 +150,10 @@ func fetchHandler(d Deps) HandlerFunc {
 			MarkdownPath: &relPath,
 			ErrorMessage: store.NullableString(res.PartialReason),
 		}
-		if res.Meta != nil {
+		if meta := extractionMeta(res); meta != nil {
 			// Meta is diagnostic; one value JSON can't hold (a NaN, say)
 			// shouldn't cost the document its content.
-			if b, err := json.Marshal(res.Meta); err != nil {
+			if b, err := json.Marshal(meta); err != nil {
 				d.Log.Warn("fetch: dropping extraction meta that doesn't encode",
 					"document_id", doc.ID, "fetcher", f.Name(), "err", err)
 			} else {
@@ -199,6 +199,20 @@ func loadJobDocument(ctx context.Context, d Deps, job *store.Job) (*store.Docume
 		return nil, fmt.Errorf("load document: %w", err)
 	}
 	return doc, nil
+}
+
+// extractionMeta is what an extraction records of res: the fetcher's
+// meta, and the site name the page declared, under
+// store.ExtractionMetaSiteName, when it declared one.
+func extractionMeta(res *fetcher.Result) map[string]any {
+	meta := res.Meta
+	if res.SiteName != "" {
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta[store.ExtractionMetaSiteName] = res.SiteName
+	}
+	return meta
 }
 
 // fetchedMetadata maps a fetch result onto the document columns it

@@ -118,6 +118,12 @@ const (
 	SourceHTML    = "html" // Netscape HTML export, any browser
 )
 
+// ExtractionMetaSiteName is the key of an extraction's extraction_meta
+// that holds the site name its page declared, when it declared one. The
+// fetch handler writes it, and the store's derivation of the document's
+// search fields reads it.
+const ExtractionMetaSiteName = "site"
+
 // FailureCause is why a failed or dead document failed
 // (documents.failure_cause): what the site did, as the fetcher read it, or
 // the step that gave up. Unlike the enums above it has no CHECK constraint

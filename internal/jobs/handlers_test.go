@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -222,6 +223,32 @@ func TestFetchHandler_ExtractionStatus(t *testing.T) {
 			require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindIndex).Scan(&indexJobs))
 			assert.Equal(t, 1, indexJobs)
 		})
+	}
+}
+
+// TestFetchHandler_SiteName: the site name the page declares is recorded
+// in its extraction's meta under store.ExtractionMetaSiteName, beside the
+// fetcher's own meta, and is absent when it declares none.
+func TestFetchHandler_SiteName(t *testing.T) {
+	for declared, want := range map[string]map[string]any{
+		"The Example Times": {"via": "test", store.ExtractionMetaSiteName: "The Example Times"},
+		"":                  {"via": "test"},
+	} {
+		deps, _, ff := newTestDeps(t)
+		ff.res.SiteName = declared
+		ctx := context.Background()
+		doc := &store.Document{TenantID: "local", URL: "https://example.com/article"}
+		require.NoError(t, deps.Documents.Create(ctx, doc))
+
+		require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+
+		got, err := deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(t, err)
+		ext, err := deps.Extractions.GetByID(ctx, *got.CurrentExtractionID)
+		require.NoError(t, err)
+		var meta map[string]any
+		require.NoError(t, json.Unmarshal(ext.ExtractionMeta, &meta))
+		assert.Equal(t, want, meta, "declared %q", declared)
 	}
 }
 

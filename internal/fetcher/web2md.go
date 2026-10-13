@@ -144,9 +144,7 @@ func parseWeb2MDOutput(raw []byte, sourceURL string) (*Result, error) {
 		if fm.Via != "" {
 			r.Meta["via"] = fm.Via
 		}
-		if fm.Site != "" {
-			r.Meta["site"] = fm.Site
-		}
+		r.SiteName = fm.Site
 		if fm.Source != "" && fm.Source != sourceURL {
 			r.FinalURL = fm.Source
 		}

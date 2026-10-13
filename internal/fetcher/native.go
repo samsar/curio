@@ -556,9 +556,9 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		Title:       article.Title(),
 		Author:      article.Byline(),
 		Language:    article.Language(),
+		SiteName:    article.SiteName(),
 		Meta: map[string]any{
 			"via":       "readability",
-			"site":      article.SiteName(),
 			"transport": n.rt.name(),
 		},
 	}
