@@ -15,31 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // testSiteInterval is the default spacing of one site's Jina requests.
 const testSiteInterval = time.Minute / DefaultJinaSiteRequestsPerMinute
-
-func TestSiteOf(t *testing.T) {
-	cases := map[string]string{
-		"mobile.twitter.com": "twitter.com",
-		"www.forbes.com":     "forbes.com",
-		"forbes.com":         "forbes.com",
-		"Forbes.COM.":        "forbes.com",
-		"akveo.github.io":    "akveo.github.io", // github.io is a public suffix
-		"www.bbc.co.uk":      "bbc.co.uk",
-		"github.io":          "github.io",
-		"co.uk":              "co.uk",
-		"localhost":          "localhost",
-		"intranet":           "intranet",
-		"127.0.0.1":          "127.0.0.1",
-		"::1":                "::1",
-		"":                   "",
-	}
-	for host, want := range cases {
-		assert.Equal(t, want, siteOf(host), host)
-	}
-}
 
 // TestSitePacer_Take: 20 pages of one site at one instant get the turns
 // within the inline cap, an interval apart, and the rest deferrals an
@@ -272,7 +252,7 @@ func pacedNative(t *testing.T, fc *fakeClock, origin fakeAnswer, jina func(n int
 			return origin.respond(target)
 		}
 		mu.Lock()
-		site := siteOf(hostOf(page))
+		site := urlutil.Site(hostOf(page))
 		sent[site] = append(sent[site], fc.now())
 		calls++
 		answer := jina(calls)

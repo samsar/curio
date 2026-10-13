@@ -1,0 +1,151 @@
+docmeta rules v1
+
+document 0 "https://www.example.com/one"
+  Host "example.com"
+  HostWords "example"
+  DeclaredSite "Example Times"
+  TitleSuffix "Example Times"
+  FolderText "Tech"
+  Derive declared_site "Example Times" title_suffixes "Example Times" title "Why queues fail | Example Times" bookmark_titles "Queues" folders "Tech" author "Ada"
+
+document 1 "https://example.com/two"
+  Host "example.com"
+  HostWords "example"
+  DeclaredSite ""
+  TitleSuffix "Example Times"
+  FolderText "Tech / Queues"
+  Derive declared_site "" title_suffixes "Example Times" title "Backpressure - Example Times" bookmark_titles "Backpressure - Example Times" folders "Tech / Queues" author ""
+
+document 2 "https://blog.example.org/a"
+  Host "blog.example.org"
+  HostWords "example blog"
+  DeclaredSite ""
+  TitleSuffix "Example Notes"
+  FolderText ""
+  Derive declared_site "" title_suffixes "Example Notes" title "Notes on caching · Example Notes" bookmark_titles "" folders "" author ""
+
+document 3 "https://blog.example.org/b"
+  Host "blog.example.org"
+  HostWords "example blog"
+  DeclaredSite ""
+  TitleSuffix "Example Notes"
+  FolderText ""
+  Derive declared_site "" title_suffixes "Example Notes" title "More caching · Example Notes" bookmark_titles "" folders "" author ""
+
+document 4 "https://blog.example.org/c"
+  Host "blog.example.org"
+  HostWords "example blog"
+  DeclaredSite ""
+  TitleSuffix ""
+  FolderText ""
+  Derive declared_site "" title_suffixes "" title "Untitled" bookmark_titles "" folders "" author ""
+
+document 5 "https://news.ycombinator.com/item?id=1"
+  Host "news.ycombinator.com"
+  HostWords "ycombinator news"
+  DeclaredSite ""
+  TitleSuffix ""
+  FolderText ""
+  Derive declared_site "" title_suffixes "" title "Show: a thing" bookmark_titles "Show HN" folders "" author ""
+
+document 6 "https://ben-evans.com/essays"
+  Host "ben-evans.com"
+  HostWords "ben evans"
+  DeclaredSite ""
+  TitleSuffix ""
+  FolderText "Reading / Essays"
+  Derive declared_site "" title_suffixes "Benedict\nbenedict" title "" bookmark_titles "Essays – Benedict\nessays – benedict" folders "Reading / Essays" author ""
+
+document 7 "https://bücher.example/ü"
+  Host "bücher.example"
+  HostWords "bücher"
+  DeclaredSite ""
+  TitleSuffix "Bücherei"
+  FolderText ""
+  Derive declared_site "" title_suffixes "Bücherei" title "Bücher über Bücher — Bücherei" bookmark_titles "Bücher" folders "" author "Ünal"
+
+document 8 "https://xn--bcher-kva.ch/"
+  Host "xn--bcher-kva.ch"
+  HostWords "xn bcher kva"
+  DeclaredSite ""
+  TitleSuffix ""
+  FolderText ""
+  Derive declared_site "" title_suffixes "" title "Punycode — xn--bcher-kva.ch" bookmark_titles "" folders "" author ""
+
+document 9 "http://127.0.0.1:8765/ui/"
+  Host "127.0.0.1"
+  HostWords "127 0 0 1"
+  DeclaredSite ""
+  TitleSuffix "Local"
+  FolderText ""
+  Derive declared_site "" title_suffixes "Local" title "Dashboard - Local" bookmark_titles "" folders "" author ""
+
+document 10 "https://user.github.io/project"
+  Host "user.github.io"
+  HostWords "user"
+  DeclaredSite ""
+  TitleSuffix ""
+  FolderText "Code / <i>"
+  Derive declared_site "" title_suffixes "GitHub Pages" title "Project · user.github.io" bookmark_titles "<b>\"Project\"</b> | GitHub Pages" folders "Code / <i>" author ""
+
+document 11 "not a url"
+  Host ""
+  HostWords ""
+  DeclaredSite ""
+  TitleSuffix ""
+  FolderText ""
+  Derive declared_site "" title_suffixes "" title "| — ·" bookmark_titles "" folders "" author "long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author"
+
+host "example.com" agrees on "Example Times"
+
+host "blog.example.org" agrees on "Example Notes"
+
+host "news.ycombinator.com" agrees on "Hacker News"
+
+host "ben-evans.com" agrees on "Benedict Evans"
+
+host "bücher.example" agrees on ""
+
+host "xn--bcher-kva.ch" agrees on ""
+
+host "127.0.0.1" agrees on ""
+
+host "user.github.io" agrees on ""
+
+host "" agrees on ""
+
+fields 0 site_name "Example Times" site "Example Times example"
+  card "Why queues fail | Example Times — Queues — Example Times — Ada — Tech"
+
+fields 1 site_name "Example Times" site "Example Times example"
+  card "Backpressure - Example Times — Example Times — Tech / Queues"
+
+fields 2 site_name "Example Notes" site "Example Notes example blog"
+  card "Notes on caching · Example Notes — Example Notes"
+
+fields 3 site_name "Example Notes" site "Example Notes example blog"
+  card "More caching · Example Notes — Example Notes"
+
+fields 4 site_name "Example Notes" site "Example Notes example blog"
+  card "Untitled — Example Notes"
+
+fields 5 site_name "Hacker News" site "Hacker News ycombinator news"
+  card "Show: a thing — Show HN — Hacker News"
+
+fields 6 site_name "Benedict Evans" site "Benedict Evans ben evans"
+  card "Essays – Benedict — Benedict Evans — Reading / Essays"
+
+fields 7 site_name "" site "bücher"
+  card "Bücher über Bücher — Bücherei — Bücher — bücher.example — Ünal"
+
+fields 8 site_name "" site "xn bcher kva"
+  card "Punycode — xn--bcher-kva.ch — xn--bcher-kva.ch"
+
+fields 9 site_name "" site "127 0 0 1"
+  card "Dashboard - Local — 127.0.0.1"
+
+fields 10 site_name "" site "user"
+  card "Project · user.github.io — <b>\"Project\"</b> | GitHub Pages — user.github.io — Code / <i>"
+
+fields 11 site_name "" site ""
+  card "| — · — long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author long author"

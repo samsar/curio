@@ -1,13 +1,10 @@
 package fetcher
 
 import (
-	"net"
 	"slices"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/net/publicsuffix"
 )
 
 // DefaultJinaSiteRequestsPerMinute is how many Jina Reader requests curio
@@ -28,28 +25,10 @@ const DefaultJinaSiteRequestsPerMinute = 6
 // to a request.
 const sitePaceSweepEvery = time.Minute
 
-// siteOf is the site a Jina request for a page on host counts against: its
-// registrable domain, so mobile.twitter.com and twitter.com are one site,
-// as www.forbes.com and forbes.com are. A host without one is its own site:
-// an IP address, a name under no public suffix (localhost, intranet), a
-// public suffix itself (github.io), or a name publicsuffix can't read.
-func siteOf(host string) string {
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-	if net.ParseIP(host) != nil {
-		return host
-	}
-	site, err := publicsuffix.EffectiveTLDPlusOne(host)
-	if err != nil {
-		// No registrable domain: the host is the most specific site there is.
-		return host
-	}
-	return site
-}
-
-// sitePacer spaces the Jina Reader requests for each site (siteOf) at
-// least interval apart, and holds a site's pages while Jina Reader blocks
-// the site. Every fetch worker shares one, under one lock that no wait is
-// made under. It answers three questions:
+// sitePacer spaces the Jina Reader requests for each site (urlutil.Site)
+// at least interval apart, and holds a site's pages while Jina Reader
+// blocks the site. Every fetch worker shares one, under one lock that no
+// wait is made under. It answers three questions:
 //
 //   - take: when may a page's request go? A turn that starts within the
 //     inline cap is waited for; a later one defers the fetch. Deferred pages

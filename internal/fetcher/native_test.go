@@ -27,6 +27,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // makeArticleHTML returns a reasonably article-shaped page so Readability
@@ -2488,7 +2489,7 @@ func blockingJina(t *testing.T, fc *fakeClock, logs *logRecorder, origin, block 
 		if !isJina {
 			return origin.respond(target)
 		}
-		site := siteOf(hostOf(page))
+		site := urlutil.Site(hostOf(page))
 		mu.Lock()
 		hits[site]++
 		mu.Unlock()
