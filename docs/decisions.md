@@ -2236,15 +2236,16 @@ among them, found the BM25 and vector fusion curio already does to be
 their baseline, and none that writes a searchable card for each document,
 turns a query's dates or sites into filters on what was saved, or is
 measured on its owner's own library; what would lead builds on curio's
-engine, interests and job queue. M6 goes ahead of M5, as six PRs over two
-releases, each measured with `make search-eval` on the owner's graded test
-set against the run before it. PR 1 is the foundations: the evaluation
+engine, interests and job queue. M6 goes ahead of M5, in two releases,
+each PR measured with `make search-eval` on the owner's graded test set
+against the run before it. PR 1 is the foundations: the evaluation
 ("Search evaluation: graded, per kind, on a copy, never in the repo") and
 model roles ("Model roles: a provider and model per use, inheriting
 generation's"), with the zero-weight fix to "Hybrid search" the
-evaluation's BM25-only variant needed. The later PRs add metadata search
-and document cards, query understanding, LLM-written card fields,
-reranking and the cited answer loop.
+evaluation's BM25-only variant needed. The rest of 2.7: metadata search
+with a card per document, real saved dates and filters, chunks embedded
+with their context, and query understanding. 2.8: LLM-written card
+fields, reranking by kind of question and the cited answer loop.
 
 ---
 

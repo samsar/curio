@@ -9,8 +9,8 @@ package pointers), where the result deviates from the plan, and what was
 deferred. Design reasoning lives in `docs/decisions.md`.
 
 **Where things stand:** M0–M4 are shipped. M6 is under way ahead of M5: its
-first PR, the search evaluation and model roles, has shipped. **Next: M6's
-second PR.**
+first PR, the search evaluation and model roles, is merged. **Next: M6's
+metadata search.**
 
 ## M0 — Walking skeleton
 
@@ -244,13 +244,22 @@ eval harness shows measurably better retrieval than the v1 baseline.
 
 **Status: in progress.** The approved design settles build vs. adopt:
 curio builds its own, measured against the owner's graded test set
-(decisions.md "M6 (planned)", Revised 2026-10-13). It is six PRs over two
-releases, each shown to help with `make search-eval` against the run before
-it. PR 1, the foundations, has shipped; the later PRs add metadata search
-and document cards, query understanding, LLM-written card fields,
-reranking and the cited answer loop.
+(decisions.md "M6 (planned)", Revised 2026-10-13). It ships in two
+releases, each PR shown to help with `make search-eval` against the run
+before it:
 
-- PR 1, shipped: `cmd/searcheval` (`make search-eval`), the developer's
+1. **2.7, better search.** The foundations (below); metadata search
+   (bookmark titles, folders, site names and authors as searchable fields,
+   and an embedded card per document, which also reach failed and dead
+   bookmarks); real saved dates and the date, site and folder filters;
+   chunks embedded with their title, site and heading (one re-embedding);
+   and understanding the question (one LLM call for its intent, filters,
+   rewrites and the names it points at).
+2. **2.8, cards and answers.** LLM-written card fields, reranking by kind
+   of question, and the cited answer loop (`curio ask`, `/v1/ask`, the
+   dashboard's Ask mode, better MCP search).
+
+- PR 1, merged: `cmd/searcheval` (`make search-eval`), the developer's
   search evaluation: the production engine on a copy of a home's database,
   every query ranked 100 deep, scored per kind and tag, per variant
   (`hybrid`, `bm25`, `vector`) and per stage, compared with a baseline
