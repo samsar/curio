@@ -633,14 +633,16 @@ paths:
       operationId: search
       summary: Hybrid search over the documents' text and what they were saved as
       description: >
-        Runs four lists concurrently and fuses them with RRF: BM25 and
+        Runs five lists concurrently and fuses them with RRF: BM25 and
         vector retrieval over the documents' chunks, and, each weighted by
-        config (search.fields_weight, search.cards_weight), the fields list
-        (BM25 over each document's title, the titles and folders it was
-        bookmarked under, its site and its author) and the cards list (the
-        vector of each document's card). The chunk lists' documents are
-        ranked by their best chunks, then each document list adds its
-        reciprocal ranks to its documents.
+        config (search.fields_weight, search.cards_weight,
+        search.title_weight), the fields list (BM25 over each document's
+        title, the titles and folders it was bookmarked under, its site and
+        its author), the cards list (the vector of each document's card)
+        and the title list (for a query of two distinct terms or more, the
+        documents whose title and bookmark titles hold every one of them).
+        The chunk lists' documents are ranked by their best chunks, then
+        each document list adds its reciprocal ranks to its documents.
         Every request ranks the same pool, the best 100 documents at most,
         whatever k and offset it sends, and returns its window of that
         ranking, [offset, offset+k): pages of one query tile one ranking,
@@ -655,7 +657,7 @@ paths:
         search.embed_timeout_seconds), both vector lists are dropped and the
         keyword results are still returned with degraded=true and a warning
         explaining why; a failure of the keyword index or the fields index
-        is a 500.
+        (the fields and title lists) is a 500.
       requestBody:
         required: true
         content:
@@ -1736,8 +1738,8 @@ components:
           type: boolean
           description: >
             Present and true when semantic search was unavailable and items
-            are keyword-only results: BM25 over the chunks and, when it is
-            weighted, the fields list.
+            are keyword-only results: BM25 over the chunks and, when they
+            are weighted, the fields and title lists.
         warnings:
           type: array
           items: { type: string }

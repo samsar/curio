@@ -220,6 +220,29 @@ func TestSanitizeBM25Query(t *testing.T) {
 	}
 }
 
+// TestTitleQuery: the title list's query ANDs the distinct terms the
+// sanitizer keeps, quoted alike, but those with no letter or digit, and
+// is empty for fewer than two.
+func TestTitleQuery(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"zebra stripes", `"zebra" AND "stripes"`},
+		{"Find me the zebra and its stripes", `"zebra" AND "stripes"`},
+		{"zebra -- stripes ' ''", `"zebra" AND "stripes"`},
+		{`zebra "stripes"`, `"zebra" AND "stripes"`},
+		{"state-of-the-art don't", `"state-of-the-art" AND "don't"`},
+		{"Zebra zebra ZEBRA stripes", `"Zebra" AND "stripes"`},
+		{"zebra 2026", `"zebra" AND "2026"`},
+		{"zebra", ""},
+		{"zebra Zebra", ""},
+		{"zebra --", ""},
+		{"the and of for", ""},
+		{",,, ??? ---", ""},
+		{"", ""},
+	} {
+		assert.Equal(t, c.want, titleQuery(c.in), c.in)
+	}
+}
+
 func TestEngine_Related_RanksByProximity(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	dim := sqlitetest.Width(t, db)

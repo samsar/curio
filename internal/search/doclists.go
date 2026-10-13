@@ -15,7 +15,7 @@ import (
 const documentListDepth = 2 * store.MaxSearchK
 
 // documentList is a list that ranks whole documents, not chunks: the
-// fields list or the cards list, its weight, its hits best first, and
+// fields, cards or title list, its weight, its hits best first, and
 // whether it is semantic, read with the query's embedding, which a
 // degraded search drops.
 type documentList struct {
@@ -26,11 +26,12 @@ type documentList struct {
 
 // addDocumentLists adds each list's reciprocal rank, weight/(k + rank),
 // rank 1-based, to its documents in ranked, the documents the chunk lists
-// ranked, in list order; a document only a list found joins ranked with
-// no chunks. A list weighted 0 adds nothing. Sums are taken in a fixed
-// order (the chunks' collapsed score, then each list in order) and the
-// result sorted by score, then document ID, so a ranking computed again
-// for every page puts every document in the same place.
+// ranked, in list order (Search's: fields, cards, then titles); a
+// document only a list found joins ranked with no chunks. A list weighted
+// 0 adds nothing. Sums are taken in a fixed order (the chunks' collapsed
+// score, then each list in order) and the result sorted by score, then
+// document ID, so a ranking computed again for every page puts every
+// document in the same place.
 func addDocumentLists(ranked []docScore, lists []documentList, k int) []docScore {
 	at := make(map[string]int, len(ranked))
 	for i, d := range ranked {

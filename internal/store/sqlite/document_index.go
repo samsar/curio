@@ -44,25 +44,61 @@ const (
 	fieldsAuthorWeight         = 1.0
 )
 
-// fieldsBM25 is bm25() over document_fields_fts with the columns' weights,
-// in the order the index declares them.
-var fieldsBM25 = "bm25(document_fields_fts, " + strings.Join([]string{
-	formatWeight(fieldsTitleWeight), formatWeight(fieldsBookmarkTitlesWeight), formatWeight(fieldsFoldersWeight),
-	formatWeight(fieldsSiteWeight), formatWeight(fieldsAuthorWeight),
-}, ", ") + ")"
+// The weights the title list's bm25 gives each column: what a document
+// was titled and saved as, and nothing else, the columns its match is
+// held to (titlesColumns).
+const (
+	titlesTitleWeight          = 1.0
+	titlesBookmarkTitlesWeight = 1.0
+	titlesFoldersWeight        = 0.0
+	titlesSiteWeight           = 0.0
+	titlesAuthorWeight         = 0.0
+)
+
+// titlesColumns is the FTS5 column filter SearchTitles' match is held to.
+const titlesColumns = "{title bookmark_titles}"
+
+// fieldsBM25 and titlesBM25 are bm25() over document_fields_fts with the
+// fields list's and the title list's column weights.
+var (
+	fieldsBM25 = documentFieldsBM25(fieldsTitleWeight, fieldsBookmarkTitlesWeight, fieldsFoldersWeight,
+		fieldsSiteWeight, fieldsAuthorWeight)
+	titlesBM25 = documentFieldsBM25(titlesTitleWeight, titlesBookmarkTitlesWeight, titlesFoldersWeight,
+		titlesSiteWeight, titlesAuthorWeight)
+)
+
+// documentFieldsBM25 is bm25() over document_fields_fts with weights for
+// its columns, in the order the index declares them.
+func documentFieldsBM25(title, bookmarkTitles, folders, site, author float64) string {
+	weights := []string{formatWeight(title), formatWeight(bookmarkTitles), formatWeight(folders), formatWeight(site),
+		formatWeight(author)}
+	return "bm25(document_fields_fts, " + strings.Join(weights, ", ") + ")"
+}
 
 func formatWeight(w float64) string { return strconv.FormatFloat(w, 'f', -1, 64) }
 
-// fieldsQuery builds SearchFields' query: it starts from the FTS MATCH,
-// reaches each hit's fields by rowid (document_fields.seq) and its
-// document by primary key for the tenant and the filters. No state is
+// fieldsQuery builds SearchFields' query (documentFieldsQuery).
+func fieldsQuery(tenantID, query string, limit int, filters store.SearchFilters) (string, []any) {
+	return documentFieldsQuery(fieldsBM25, query, tenantID, limit, filters)
+}
+
+// titlesQuery builds SearchTitles' query: query held to the title
+// columns, ranked by their bm25 alone (documentFieldsQuery).
+func titlesQuery(tenantID, query string, limit int, filters store.SearchFilters) (string, []any) {
+	return documentFieldsQuery(titlesBM25, titlesColumns+" : ("+query+")", tenantID, limit, filters)
+}
+
+// documentFieldsQuery builds a search of the documents' fields, ranked by
+// rank, a bm25() over document_fields_fts: it starts from the FTS MATCH
+// of match, reaches each hit's fields by rowid (document_fields.seq) and
+// its document by primary key for the tenant and the filters. No state is
 // left out: a document's fields describe what it was saved as, which
 // stays true whatever its fetch found. Equal scores are ordered by seq,
 // so the ranking is the same on every search.
-func fieldsQuery(tenantID, query string, limit int, filters store.SearchFilters) (string, []any) {
+func documentFieldsQuery(rank, match, tenantID string, limit int, filters store.SearchFilters) (string, []any) {
 	filterSQL, filterArgs := buildFilterClause(filters)
 	q := `
-	SELECT f.document_id, ` + fieldsBM25 + ` AS score
+	SELECT f.document_id, ` + rank + ` AS score
 	FROM document_fields_fts
 	JOIN document_fields f ON f.seq = document_fields_fts.rowid
 	JOIN documents d       ON d.id = f.document_id
@@ -70,21 +106,44 @@ func fieldsQuery(tenantID, query string, limit int, filters store.SearchFilters)
 	  AND d.tenant_id = ?` + filterSQL + `
 	ORDER BY score, f.seq
 	LIMIT ?`
-	args := slices.Concat([]any{query, tenantID}, filterArgs)
+	args := slices.Concat([]any{match, tenantID}, filterArgs)
 	return q, append(args, limit)
 }
 
-// SearchFields implements store.DocumentIndex. bm25() is lower for a
-// better match, so a hit's score is its negation, higher better.
+// SearchFields implements store.DocumentIndex.
 func (x *DocumentIndex) SearchFields(ctx context.Context, tenantID, query string, limit int,
 	f store.SearchFilters) ([]store.DocumentHit, error) {
 	if strings.TrimSpace(query) == "" || limit <= 0 {
 		return nil, nil
 	}
 	q, args := fieldsQuery(tenantID, query, limit, f)
-	rows, err := x.db.QueryContext(ctx, q, args...)
+	hits, err := x.searchDocumentFields(ctx, q, args)
 	if err != nil {
 		return nil, fmt.Errorf("search fields: %w", err)
+	}
+	return hits, nil
+}
+
+// SearchTitles implements store.DocumentIndex.
+func (x *DocumentIndex) SearchTitles(ctx context.Context, tenantID, query string, limit int,
+	f store.SearchFilters) ([]store.DocumentHit, error) {
+	if strings.TrimSpace(query) == "" || limit <= 0 {
+		return nil, nil
+	}
+	q, args := titlesQuery(tenantID, query, limit, f)
+	hits, err := x.searchDocumentFields(ctx, q, args)
+	if err != nil {
+		return nil, fmt.Errorf("search titles: %w", err)
+	}
+	return hits, nil
+}
+
+// searchDocumentFields runs a documentFieldsQuery. bm25() is lower for a
+// better match, so a hit's score is its negation, higher better.
+func (x *DocumentIndex) searchDocumentFields(ctx context.Context, q string, args []any) ([]store.DocumentHit, error) {
+	rows, err := x.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	var out []store.DocumentHit
@@ -92,13 +151,13 @@ func (x *DocumentIndex) SearchFields(ctx context.Context, tenantID, query string
 		var h store.DocumentHit
 		var bm25 float64
 		if err := rows.Scan(&h.DocumentID, &bm25); err != nil {
-			return nil, fmt.Errorf("search fields: %w", err)
+			return nil, err
 		}
 		h.Score = -bm25
 		out = append(out, h)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("search fields: %w", err)
+		return nil, err
 	}
 	return out, nil
 }

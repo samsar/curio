@@ -244,8 +244,10 @@ row claimed nomic-embed-text at 768 for every home.
 ### `document_fields` and `document_cards` (migration 019)
 
 What a document is searched by besides its text: its fields, which the
-fields list matches with BM25, and its card, the short text whose vector
-the cards list searches. Every document of every state has both, derived
+fields list matches with BM25 and the title list by its `title` and
+`bookmark_titles` alone (every term of the query in one or the other, an
+FTS5 column filter over the same index), and its card, the short text
+whose vector the cards list searches. Every document of every state has both, derived
 in Go (`internal/docmeta`) from the document, its current extraction's
 declared site name and its bookmarks, and written only by the store's
 refresh (`refreshFields` in `internal/store/sqlite/fields.go`), in the

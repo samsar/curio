@@ -63,6 +63,7 @@ type searchProvenance struct {
 	VectorWeight        float64 `json:"vector_weight"`
 	FieldsWeight        float64 `json:"fields_weight"`
 	CardsWeight         float64 `json:"cards_weight"`
+	TitleWeight         float64 `json:"title_weight"`
 	RRFK                int     `json:"rrf_k"`
 	Collapse            string  `json:"collapse"`
 	EmbedTimeoutSeconds int     `json:"embed_timeout_seconds"`
@@ -153,8 +154,9 @@ func newReport(opts options, cfg config.Config, lib *devtool.Copy, qf queryFile,
 		Embedding: embeddingProvenance{Provider: cfg.Embedding.Provider, Model: cfg.Embedding.Model,
 			Dim: cfg.Embedding.Dim, BaseURL: cfg.Embedding.BaseURL, QueryPrefix: cfg.Embedding.QueryPrefix},
 		Search: searchProvenance{BM25Weight: cfg.Search.BM25Weight, VectorWeight: cfg.Search.VectorWeight,
-			FieldsWeight: cfg.Search.FieldsWeight, CardsWeight: cfg.Search.CardsWeight, RRFK: cfg.Search.RRFK,
-			Collapse: cfg.Search.Collapse, EmbedTimeoutSeconds: cfg.Search.EmbedTimeoutSeconds},
+			FieldsWeight: cfg.Search.FieldsWeight, CardsWeight: cfg.Search.CardsWeight,
+			TitleWeight: cfg.Search.TitleWeight, RRFK: cfg.Search.RRFK, Collapse: cfg.Search.Collapse,
+			EmbedTimeoutSeconds: cfg.Search.EmbedTimeoutSeconds},
 		K: store.MaxSearchK, Variants: names, Baseline: opts.baseline,
 	}, Library: libraryReport{FieldsMS: ms(lib.Fields.Took), CardsMS: ms(cards.took), CardsEmbedded: cards.embedded}}
 	for _, q := range qf.set.Queries {
@@ -269,9 +271,9 @@ func (r *report) queryCount() int {
 // searchSettings are the embedding model and search keys a run used.
 func searchSettings(p provenance) string {
 	s := p.Search
-	return fmt.Sprintf("embedding %s; bm25_weight %g, vector_weight %g, fields_weight %g, cards_weight %g, rrf_k %d, "+
-		"collapse %s, embed_timeout_seconds %d", p.Embedding.Model, s.BM25Weight, s.VectorWeight, s.FieldsWeight,
-		s.CardsWeight, s.RRFK, s.Collapse, s.EmbedTimeoutSeconds)
+	return fmt.Sprintf("embedding %s; bm25_weight %g, vector_weight %g, fields_weight %g, cards_weight %g, "+
+		"title_weight %g, rrf_k %d, collapse %s, embed_timeout_seconds %d", p.Embedding.Model, s.BM25Weight,
+		s.VectorWeight, s.FieldsWeight, s.CardsWeight, s.TitleWeight, s.RRFK, s.Collapse, s.EmbedTimeoutSeconds)
 }
 
 // shortHash is a SHA-256's first 12 hex digits.

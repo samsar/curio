@@ -81,6 +81,82 @@ func TestDocumentIndex_SearchFields(t *testing.T) {
 	assert.Empty(t, hits, "a blank query matches nothing")
 }
 
+// TestDocumentIndex_SearchTitles: the title list finds the tenant's
+// documents of every state whose title and bookmark titles hold every
+// phrase of the query between them, never by a word only their folders,
+// site or author hold; scoped by the filters, best first, equal matches
+// in the order their fields were first written.
+func TestDocumentIndex_SearchTitles(t *testing.T) {
+	e := newFieldsEnv(t)
+	ix := NewDocumentIndex(e.db, vecDim)
+	const query = `"kafka" AND "retention"`
+	search := func(t *testing.T, query string, limit int, f store.SearchFilters) []string {
+		t.Helper()
+		hits, err := ix.SearchTitles(e.ctx, "local", query, limit, f)
+		require.NoError(t, err)
+		for _, h := range hits {
+			assert.Positive(t, h.Score)
+		}
+		return nilIfEmpty(hitIDs(hits))
+	}
+
+	states := []store.DocState{store.DocStateFetched, store.DocStatePending, store.DocStateFailed, store.DocStateDead}
+	byState := make([]string, 0, len(states))
+	for _, st := range states {
+		id := *e.ingest("https://example.com/"+string(st), store.SourceChrome, "Kafka retention tuning", "").DocumentID
+		if cause := stateCause(st); cause != "" {
+			require.NoError(t, e.docs.MarkFailed(e.ctx, id, cause))
+		} else if st == store.DocStateFetched {
+			require.NoError(t, e.docs.MarkFetched(e.ctx, id, 0))
+		}
+		byState = append(byState, id)
+	}
+	split := &store.Document{TenantID: "local", URL: "https://example.com/split", Title: store.NullableString("Kafka")}
+	require.NoError(t, e.docs.Create(e.ctx, split))
+	e.ingest(split.URL, store.SourceSafari, "Retention", "")
+	for _, url := range []string{"https://example.com/partial", "https://example.com/folder",
+		"https://retention.example/site", "https://example.com/author"} {
+		e.ingest(url, store.SourceChrome, "Kafka streams", "")
+	}
+	e.ingest("https://example.com/folder", store.SourceFirefox, "Kafka streams", "/Bookmarks Bar/Retention")
+	authored := *e.ingest("https://example.com/author", store.SourceFirefox, "Kafka streams", "").DocumentID
+	e.fetch(authored, "Kafka streams", "Retention Smith", "")
+	theirs := &store.Document{TenantID: "other", URL: "https://example.com/theirs",
+		Title: store.NullableString("Kafka retention")}
+	require.NoError(t, e.docs.Create(e.ctx, theirs))
+
+	assert.Equal(t, append([]string{split.ID}, byState...), search(t, query, 10, store.SearchFilters{}),
+		"the words split between the title and a bookmark's best, as the shorter row; then every state, in the "+
+			"order their fields were written; never a document missing a word in its titles, nor another tenant's")
+	assert.Equal(t, []string{split.ID, byState[0]}, search(t, query, 2, store.SearchFilters{}), "at most the limit")
+
+	video := &store.Document{TenantID: "local", URL: "https://other.example/talk", ContentType: store.ContentTypeVideo,
+		Title: store.NullableString("Kafka retention, the talk")}
+	require.NoError(t, e.docs.Create(e.ctx, video))
+	for name, tc := range map[string]struct {
+		f    store.SearchFilters
+		want []string
+	}{
+		"host":   {store.SearchFilters{Host: []string{"other.example"}}, []string{video.ID}},
+		"type":   {store.SearchFilters{ContentType: []string{string(store.ContentTypeVideo)}}, []string{video.ID}},
+		"source": {store.SearchFilters{Source: []string{store.SourceSafari}}, []string{split.ID}},
+	} {
+		assert.Equal(t, tc.want, search(t, query, 10, tc.f), name)
+	}
+
+	retitled := &store.Document{TenantID: "local", URL: "https://example.org/retitled",
+		Title: store.NullableString("Kafka retention basics")}
+	require.NoError(t, e.docs.Create(e.ctx, retitled))
+	assert.Contains(t, search(t, query, 10, store.SearchFilters{}), retitled.ID)
+	e.fetch(retitled.ID, "Stream compaction guide", "", "")
+	assert.NotContains(t, search(t, query, 10, store.SearchFilters{}), retitled.ID,
+		"its old title, which no bookmark holds, is gone with the fetch")
+	assert.Equal(t, []string{retitled.ID}, search(t, `"stream" AND "compaction"`, 10, store.SearchFilters{}))
+
+	assert.Nil(t, search(t, "  ", 10, store.SearchFilters{}), "a blank query reads nothing")
+	assert.Nil(t, search(t, query, 0, store.SearchFilters{}), "nor does a limit of 0")
+}
+
 func nilIfEmpty(ids []string) []string {
 	if len(ids) == 0 {
 		return nil

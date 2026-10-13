@@ -308,8 +308,9 @@ func (f *fieldsTx) writeCard(ctx context.Context, id, text string) error {
 // of a burst (an import's ingests, then its fetches seconds apart), so a
 // burst shares one job, where a job run at once would embed a card or two
 // and leave a row in jobs for every fetch. And it is short against what
-// waits on it: the fields list finds a page saved a moment ago, in the
-// transaction that saved it, so only the cards list waits for its vector.
+// waits on it: the fields and title lists find a page saved a moment ago,
+// in the transaction that saved it, so only the cards list waits for its
+// vector.
 const CardsJobDelay = 10 * time.Second
 
 // queueCards queues the tenant's cards job inside tx, run_after the DB's

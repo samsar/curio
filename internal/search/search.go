@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/sync/errgroup"
 
@@ -18,18 +19,20 @@ import (
 
 // Engine runs hybrid search.
 //
-//  1. Four lists, concurrently, each reading the same pool whatever the
+//  1. Five lists, concurrently, each reading the same pool whatever the
 //     request asks for: BM25 over chunks_fts and the fields list over the
-//     documents' fields, from the same sanitized query; and, from one
-//     embedding of the query, vector ANN over chunks_vec and over the
-//     documents' card vectors. A list weighted 0 is not read, and the
-//     query is embedded only when a semantic list is weighted.
+//     documents' fields, from the same sanitized query; the title list
+//     over the documents' titles and bookmark titles alone, from the AND
+//     of the query's terms (titleQuery); and, from one embedding of the
+//     query, vector ANN over chunks_vec and over the documents' card
+//     vectors. A list weighted 0 is not read, and the query is embedded
+//     only when a semantic list is weighted.
 //  2. RRF fuse the two ranked chunk lists
 //  3. Collapse chunks → documents (best chunk per doc, configurable), and
 //     rank them
-//  4. Add each document list's reciprocal ranks to its documents, fields
-//     then cards, a document only they found joining without chunks, and
-//     rank them again
+//  4. Add each document list's reciprocal ranks to its documents, fields,
+//     cards, then titles, a document only they found joining without
+//     chunks, and rank them again
 //  5. Return the requested window of that ranking, [Offset, Offset+K), with
 //     each document's best chunks and the BM25 snippets of those alone
 //
@@ -49,6 +52,7 @@ type Engine struct {
 	vectorW      float64
 	fieldsW      float64
 	cardsW       float64
+	titleW       float64
 	rrfK         int
 	collapse     CollapseStrategy
 	preFanout    int    // minimum chunks to pull from each retriever before fusion
@@ -77,18 +81,19 @@ const (
 
 // Config wires an Engine. Zero-value fields use sensible defaults.
 type Config struct {
-	// BM25Weight, VectorWeight, FieldsWeight and CardsWeight weigh each
-	// list in RRF. All four zero means unset: 1.0 for each chunk list, and
-	// the document lists off. A zero switches that list's contribution
-	// off, and a zero document weight leaves its list unread. With
-	// VectorWeight and CardsWeight both zero the query is never embedded,
-	// so a down or hung embedding model costs the search nothing and never
-	// degrades it. A zero BM25Weight still runs BM25, whose results are the
-	// fallback when the semantic lists fail.
+	// BM25Weight, VectorWeight, FieldsWeight, CardsWeight and TitleWeight
+	// weigh each list in RRF. All five zero means unset: 1.0 for each
+	// chunk list, and the document lists off. A zero switches that list's
+	// contribution off, and a zero document weight leaves its list unread.
+	// With VectorWeight and CardsWeight both zero the query is never
+	// embedded, so a down or hung embedding model costs the search nothing
+	// and never degrades it. A zero BM25Weight still runs BM25, whose
+	// results are the fallback when the semantic lists fail.
 	BM25Weight   float64
 	VectorWeight float64
 	FieldsWeight float64
 	CardsWeight  float64
+	TitleWeight  float64
 	RRFK         int
 	Collapse     CollapseStrategy
 	// PreFanout is the fewest chunks a retriever returns before fusion:
@@ -112,11 +117,12 @@ type Config struct {
 	QueryPrefix string
 }
 
-// New builds an engine over the stores. index must not be nil; with both
-// document weights zero it is never read.
+// New builds an engine over the stores. index must not be nil; with every
+// document weight zero it is never read.
 func New(chunks store.ChunkStore, docs store.DocumentStore, index store.DocumentIndex, embedder Embedder,
 	cfg Config) *Engine {
-	if cfg.BM25Weight == 0 && cfg.VectorWeight == 0 && cfg.FieldsWeight == 0 && cfg.CardsWeight == 0 {
+	if cfg.BM25Weight == 0 && cfg.VectorWeight == 0 && cfg.FieldsWeight == 0 && cfg.CardsWeight == 0 &&
+		cfg.TitleWeight == 0 {
 		cfg.BM25Weight, cfg.VectorWeight = 1.0, 1.0
 	}
 	if cfg.RRFK == 0 {
@@ -146,6 +152,7 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, index store.Document
 		vectorW:      cfg.VectorWeight,
 		fieldsW:      cfg.FieldsWeight,
 		cardsW:       cfg.CardsWeight,
+		titleW:       cfg.TitleWeight,
 		rrfK:         cfg.RRFK,
 		collapse:     cfg.Collapse,
 		preFanout:    cfg.PreFanout,
@@ -204,8 +211,8 @@ type Result struct {
 	Total  int
 	Capped bool
 	// Degraded is set when the semantic lists failed and Items are
-	// keyword-only (BM25, and the fields list when it is weighted);
-	// Warnings then says why.
+	// keyword-only (BM25, and the fields and title lists when they are
+	// weighted); Warnings then says why.
 	Degraded bool
 	Warnings []string
 	// Timings are how long Search's stages took; Related sets none.
@@ -221,6 +228,7 @@ type Timings struct {
 	Embed   time.Duration // embedding the query
 	BM25    time.Duration // the keyword search
 	Fields  time.Duration // the fields list's search
+	Titles  time.Duration // the title list's search
 	Vector  time.Duration // the vector search
 	Cards   time.Duration // the card vectors' search
 	Fuse    time.Duration // RRF, resolving the chunks to their documents, and ranking those with the document lists
@@ -238,8 +246,8 @@ type Timings struct {
 // then show on both pages or on neither. See docs/decisions.md "Search
 // pages by offset within a fixed-depth pool".
 //
-// The lists fail asymmetrically. BM25 and the fields list are local
-// SQLite and always available, so a failure of either is a bug or
+// The lists fail asymmetrically. BM25, the fields list and the title list
+// are local SQLite and always available, so a failure of any is a bug or
 // corruption and fails the search. The semantic lists depend on an
 // embedding model in another process (Ollama), which may be down, still
 // starting, or hung — legitimately optional at query time — so a failure
@@ -278,6 +286,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	var (
 		bm25Hits  []store.ChunkHit
 		fieldHits []store.DocumentHit
+		titleHits []store.DocumentHit
 		semantic  semanticHits
 	)
 	// Each list writes its own stages' fields, read only after Wait.
@@ -308,6 +317,20 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 			})
 		}
 	}
+	// The title list reads only a query of at least two terms, every one of
+	// which a document's titles must hold.
+	if titleMatch := titleQuery(req.Query); e.titleW > 0 && titleMatch != "" {
+		g.Go(func() error {
+			start := time.Now()
+			hits, err := e.index.SearchTitles(gctx, req.TenantID, titleMatch, documentListDepth, req.Filters)
+			timings.Titles = time.Since(start)
+			if err != nil {
+				return fmt.Errorf("titles: %w", err)
+			}
+			titleHits = hits
+			return nil
+		})
+	}
 	// A semantic list weighted 0 would contribute nothing to the ranking,
 	// and reading it would still wait on the embedding model, up to
 	// embedTimeout, and degrade the search when that model is down.
@@ -333,6 +356,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	docLists := []documentList{
 		{weight: e.fieldsW, hits: fieldHits},
 		{weight: e.cardsW, hits: semantic.cards, semantic: true},
+		{weight: e.titleW, hits: titleHits},
 	}
 	if semantic.err != nil {
 		res.Degraded = true
@@ -825,14 +849,50 @@ func topChunkIDs(perChunk map[string]float64, n int) []string {
 // See docs/decisions.md "BM25 query sanitization: OR + stopwords" for the
 // design rationale and the natural-language-search work we may revisit.
 func sanitizeBM25Query(q string) string {
-	tokens := wordTokenRE.FindAllString(q, -1)
-	if len(tokens) == 0 {
+	return phrases(keywordTerms(q), " OR ")
+}
+
+// titleListMinTerms is the fewest distinct terms a query needs for the
+// title list to read it. With one term the AND is no more precise than the
+// fields list's OR held to the titles, and at the default weights eight
+// times as heavy: measured on one-word queries, it filled half the first
+// page with documents whose titles hold the word. See docs/decisions.md
+// "Metadata search: a fields index and a card per document".
+const titleListMinTerms = 2
+
+// titleQuery is the title list's MATCH expression for q: the AND of its
+// distinct keyword terms, compared case-insensitively, each quoted as
+// sanitizeBM25Query quotes it. A term with no letter or digit is dropped:
+// FTS5 tokenizes it to an empty phrase, which makes an AND match nothing.
+// "" when fewer than titleListMinTerms terms remain.
+func titleQuery(q string) string {
+	terms := keywordTerms(q)
+	seen := make(map[string]bool, len(terms))
+	distinct := terms[:0]
+	for _, t := range terms {
+		key := strings.ToLower(t)
+		if seen[key] || !strings.ContainsFunc(t, isLetterOrDigit) {
+			continue
+		}
+		seen[key] = true
+		distinct = append(distinct, t)
+	}
+	if len(distinct) < titleListMinTerms {
 		return ""
 	}
-	parts := make([]string, 0, len(tokens))
+	return phrases(distinct, " AND ")
+}
+
+func isLetterOrDigit(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }
+
+// keywordTerms are the terms the keyword lists read a query by: its
+// word-like tokens (wordTokenRE), in order, less the stopwords, each
+// without double quotes, since FTS5 has no escape for `"` inside a quoted
+// phrase and the only safe move is to drop them.
+func keywordTerms(q string) []string {
+	tokens := wordTokenRE.FindAllString(q, -1)
+	terms := make([]string, 0, len(tokens))
 	for _, t := range tokens {
-		// Strip any embedded double quotes — FTS5 has no escape for `"`
-		// inside a quoted phrase, the only safe move is to drop them.
 		t = strings.ReplaceAll(t, `"`, "")
 		if t == "" {
 			continue
@@ -840,12 +900,19 @@ func sanitizeBM25Query(q string) string {
 		if _, stop := bm25Stopwords[strings.ToLower(t)]; stop {
 			continue
 		}
-		parts = append(parts, `"`+t+`"`)
+		terms = append(terms, t)
 	}
-	if len(parts) == 0 {
-		return ""
+	return terms
+}
+
+// phrases joins terms, each quoted as an FTS5 phrase, with op: "" for
+// none.
+func phrases(terms []string, op string) string {
+	quoted := make([]string, len(terms))
+	for i, t := range terms {
+		quoted[i] = `"` + t + `"`
 	}
-	return strings.Join(parts, " OR ")
+	return strings.Join(quoted, op)
 }
 
 // wordTokenRE matches runs of letters, digits, apostrophes, and hyphens —

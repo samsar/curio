@@ -409,13 +409,14 @@ user tune per-domain without recompiling.
 
 ```
 query ──► keywords ──┬──► BM25 over the chunks (chunks_fts) ────────► top N chunks
-                     └──► fields (document_fields_fts) ──────────────► top 200 documents
+                     ├──► fields (document_fields_fts) ──────────────► top 200 documents
+                     └──► titles, every term (2 or more) ────────────► top 200 documents
       ──► embed once ──┬─► vector ANN over the chunks (chunks_vec) ──► top N chunks
           (Ollama)     └─► card ANN (document_cards_vec) ────────────► top 200 documents
 
 the chunk lists ──► RRF fusion (k=60) ──► collapse chunks → documents
-                ──► each document list adds weight/(60 + rank), fields then cards;
-                    a document only they found joins with no chunks; rank again
+                ──► each document list adds weight/(60 + rank), fields, cards, then
+                    titles; a document only they found joins with no chunks; rank again
                 ──► the window [offset, offset+k), hydrated, with the BM25 snippets
                     of its chunks, and for a hit without any, its bookmarks
 
@@ -430,20 +431,24 @@ made for its chunks alone, in one query. `find_related` sizes its pool
 from its k instead, `max(50, 8·k)`.
 
 The keyword lists run beside the semantic ones, each pair concurrently,
-and metadata filters (content type, host, source) apply inside all four.
+and metadata filters (content type, host, source) apply inside all five.
 The chunk lists don't return failed or dead documents: they keep the
 chunks of an earlier fetch, which no longer describe what the URL serves.
 The document lists match what a document was saved as (its title, its
 bookmarks' titles and folders, its site and author, and its card's
 vector), so they reach documents of every state, a dead one included,
-which comes back with no passage. A failure of BM25 or the fields list
-fails the search. A failure of either semantic list — Ollama down, or no
-answer within `search.embed_timeout_seconds` — drops both, and returns
-the keyword lists' results marked `degraded` with a warning. Knobs in
-config: the four lists' weights in RRF (`bm25_weight`, `vector_weight`,
-`fields_weight`, `cards_weight`; 0 switches a list off), chunk-to-doc
-collapse strategy (max vs sum vs top-3-avg), `default_k`, and
-`embed_timeout_seconds`.
+which comes back with no passage. The title list is the precise one: for
+a query of two distinct terms or more, the documents whose title and
+bookmark titles hold every one of them, so a bookmark searched by what it
+was saved as reaches the first page even with no text and no card
+vector. A failure of BM25, the fields list or the title list fails the
+search. A failure of either semantic list — Ollama down, or no answer
+within `search.embed_timeout_seconds` — drops both, and returns the
+keyword lists' results marked `degraded` with a warning. Knobs in config:
+the five lists' weights in RRF (`bm25_weight`, `vector_weight`,
+`fields_weight`, `cards_weight`, `title_weight`; 0 switches a list off),
+chunk-to-doc collapse strategy (max vs sum vs top-3-avg), `default_k`,
+and `embed_timeout_seconds`.
 
 ## Pluggability: where interfaces live
 

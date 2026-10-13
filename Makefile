@@ -111,7 +111,7 @@ cluster-report:
 	@test -n "$(DB)" || { echo 'usage: make cluster-report DB=<copy of curio.db> [JSON=<file>] [DRAWS=n] [SEED=n]' >&2; exit 2; }
 	$(GO) run -tags=$(GOTAGS) ./cmd/clusterreport -db "$(DB)" $(if $(JSON),-json "$(JSON)") $(if $(DRAWS),-draws $(DRAWS)) $(if $(SEED),-seed $(SEED))
 
-## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards])
+## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles])
 # A developer's tool: go run, so nothing lands in ./bin; built with the
 # release's version stamp, which the report records. It migrates the
 # database it reads and refuses a home's own, like cluster-report, and
@@ -120,7 +120,7 @@ cluster-report:
 # file and the JSON report out of the repository. See cmd/searcheval.
 .PHONY: search-eval
 search-eval:
-	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards]' >&2; exit 2; }
+	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles]' >&2; exit 2; }
 	$(GO) run -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" ./cmd/searcheval -db "$(DB)" -queries "$(QUERIES)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(BASELINE),-baseline "$(BASELINE)") $(if $(VARIANTS),-variants "$(VARIANTS)")
 
 ## vet: go vet

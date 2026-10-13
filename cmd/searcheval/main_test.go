@@ -23,7 +23,7 @@ func TestRun_Usage(t *testing.T) {
 		{"an unknown flag", []string{"-db", "x.db", "-queries", "q.yaml", "-k", "5"}, exitUsage,
 			"flag provided but not defined"},
 		{"an unknown variant", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "hybrid,rerank"}, exitUsage,
-			`unknown variant "rerank" in -variants (the variants are: hybrid, bm25, vector, fields, cards)`},
+			`unknown variant "rerank" in -variants (the variants are: hybrid, bm25, vector, fields, cards, titles)`},
 		{"a variant twice", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "bm25,hybrid,bm25"}, exitUsage,
 			`variant "bm25" named twice`},
 		{"no variant", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", ""}, exitUsage, `unknown variant ""`},
@@ -36,7 +36,7 @@ func TestRun_Usage(t *testing.T) {
 			assert.Empty(t, res.stdout)
 			assert.Contains(t, res.stderr, tc.says)
 			assert.Contains(t, res.stderr, "usage: searcheval -db <copy of curio.db> -queries <file> "+
-				"[-config <config.yaml>] [-json <file>] [-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards]")
+				"[-config <config.yaml>] [-json <file>] [-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards,titles]")
 		})
 	}
 }

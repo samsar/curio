@@ -17,6 +17,7 @@ func TestConfigFrom_Default(t *testing.T) {
 		VectorWeight: 1,
 		FieldsWeight: 0.25,
 		CardsWeight:  0.5,
+		TitleWeight:  2,
 		RRFK:         60,
 		Collapse:     CollapseMax,
 		QueryPrefix:  config.QwenQueryPrefix,

@@ -220,11 +220,11 @@ func closeClientConns() {
 }
 
 // DocumentLists is an option for Start that searches with the document
-// lists on: the fields and the cards, each weighted 1 beside the chunk
-// lists, so a document can be found by what it was saved as.
+// lists on: the fields, the cards and the titles, each weighted 1 beside
+// the chunk lists, so a document can be found by what it was saved as.
 func DocumentLists(d *api.Deps) {
 	d.Search = search.New(d.Chunks, d.Documents, d.Index, Embedder{Dim: config.Default().Embedding.Dim},
-		search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, Log: d.Log})
+		search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, TitleWeight: 1, Log: d.Log})
 }
 
 // AddBookmark saves url from source as title in folder through ingest, as

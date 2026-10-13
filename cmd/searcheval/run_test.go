@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -258,7 +259,8 @@ func TestRun_TextReport(t *testing.T) {
 	for _, label := range []string{"all", "kind topic", "kind keyword", "tag owner", "tag recent"} {
 		assert.Contains(t, out, "\n"+label+" ", label)
 	}
-	for _, stage := range []string{"embed", "bm25", "fields", "vector", "cards", "fuse", "hydrate", "total"} {
+	assert.Contains(t, out, "fields_weight 0, cards_weight 0, title_weight 0, rrf_k 60")
+	for _, stage := range []string{"embed", "bm25", "fields", "titles", "vector", "cards", "fuse", "hydrate", "total"} {
 		assert.Regexp(t, `\n`+stage+` +\d+\.\d +\d+\.\d\n`, out, stage)
 	}
 	// The grade-2 ranks: hybrid's, then BM25's, where gamma's grade-2
@@ -350,7 +352,7 @@ func TestRun_Provenance(t *testing.T) {
 	assert.Equal(t, []string{"vector", "hybrid"}, p.Variants, "in the order given")
 	assert.Empty(t, p.Baseline)
 	for _, v := range rep.Variants {
-		for _, stage := range []string{"embed", "bm25", "fields", "vector", "cards", "fuse", "hydrate", "total"} {
+		for _, stage := range []string{"embed", "bm25", "fields", "titles", "vector", "cards", "fuse", "hydrate", "total"} {
 			assert.Contains(t, v.LatencyMS, stage, v.Name)
 		}
 	}
@@ -409,11 +411,49 @@ func TestRun_DocumentListVariants(t *testing.T) {
 	// BM25 runs under every variant, weighted or not: it is what a search
 	// whose semantic lists fail falls back on.
 	zero := percentiles{}
-	for name, stages := range map[string][]string{"bm25": {"fields", "cards", "embed"}, "vector": {"fields", "cards"},
-		"fields": {"vector", "cards", "embed"}, "cards": {"vector", "fields"}} {
+	for name, stages := range map[string][]string{"bm25": {"fields", "titles", "cards", "embed"},
+		"vector": {"fields", "titles", "cards"}, "fields": {"titles", "vector", "cards", "embed"},
+		"cards": {"vector", "fields", "titles"}} {
 		for _, stage := range stages {
 			assert.Equal(t, zero, byName[name].LatencyMS[stage], "%s never runs %s", name, stage)
 		}
+	}
+}
+
+// TestRun_TitlesVariant: the titles variant finds the failed and the dead
+// documents first, and alone, by the titles they were saved under, which
+// no chunk list returns, and reads no list but BM25 and its own.
+func TestRun_TitlesVariant(t *testing.T) {
+	fx := newFixture(t)
+	qs := filepath.Join(fx.dir, "saved-titles.yaml")
+	require.NoError(t, os.WriteFile(qs, []byte(`queries:
+  - id: q-beta-archive
+    kind: keyword
+    query: Beta archive
+    relevant:
+      - {url: "https://example.com/doc/22", grade: 2}
+  - id: q-delta-notes
+    kind: keyword
+    query: the delta field notes
+    relevant:
+      - {url: "https://example.com/doc/23", grade: 2}
+`), 0o600))
+	out := filepath.Join(fx.dir, "report.json")
+	res := runEval(t, fx.args(qs, "-json", out, "-variants", "titles")...)
+	require.Equal(t, exitOK, res.code, res.stderr)
+	rep := readReport(t, out)
+	require.Len(t, rep.Variants, 1)
+	v := rep.Variants[0]
+	for i, doc := range []int{22, 23} {
+		q := v.Queries[i]
+		assert.Equal(t, []rankedReport{{Rank: 1, DocumentID: fmt.Sprintf("doc-%02d", doc), URL: docURL(doc)}}, q.Ranking,
+			"%s: the saved title's document alone", q.ID)
+		require.Len(t, q.Judgments, 1)
+		assert.Equal(t, searchable, q.Judgments[0].Status, q.ID)
+	}
+	assert.Zero(t, v.Groups[0].Unsearchable, "the title list reaches every state")
+	for _, stage := range []string{"embed", "fields", "vector", "cards"} {
+		assert.Equal(t, percentiles{}, v.LatencyMS[stage], "the titles variant never runs %s", stage)
 	}
 }
 

@@ -12809,25 +12809,26 @@ own database was refused, naming `daemon.pid`, with the directory left
 as it was.
 
 **Revised (2026-10-13), metadata search:** the variants are `hybrid`
-(config.yaml's weights), then `bm25`, `vector`, `fields` and `cards`, each
-one list at weight 1, each a `search.Config`. Before any query the tool
-brings the copy up to date the way the daemon's start does
+(config.yaml's weights), then `bm25`, `vector`, `fields`, `cards` and
+`titles`, each one list at weight 1, each a `search.Config`. Before any
+query the tool brings the copy up to date the way the daemon's start does
 (`devtool.OpenCopy` migrates, sizes both vector indexes at the copy's
 width and refreshes the document fields) and embeds the stale cards
 through `Indexer.EmbedStaleCards`, the cards job's own loop, with
-config.yaml's document prefix and embed timeout, logging its progress.
-The report adds `library.fields_ms`, `cards_ms` and `cards_embedded`: run
-facts, like the timings, left out of the determinism comparison (a
-second run on the same copy embeds no card). Reachability is per
-variant: a judgment resolves once to facts (the document exists, its
-state, whether it has chunks), and is searchable for a variant when any
-list it weights above 0 can return its document: the chunk lists one
-neither failed nor dead with chunks, the document lists any document.
-`library.unsearchable` keeps its first meaning, what the chunk lists
-can't return, and the text report says so. Provenance adds the two
-weights, the stages `fields` and `cards`; the format stays 1, every
-change additive, and PR 1's report still loads as a baseline (a test
-loads one).
+config.yaml's document prefix and embed timeout, logging its progress. The
+report adds `library.fields_ms`, `cards_ms` and `cards_embedded`: run
+facts, like the timings, left out of the determinism comparison (a second
+run on the same copy embeds no card). Reachability is per variant: a
+judgment resolves once to facts (the document exists, its state, whether
+it has chunks), and is searchable for a variant when any list it weights
+above 0 can return its document: the chunk lists one neither failed nor
+dead with chunks, the document lists any document. `library.unsearchable`
+keeps its first meaning, what the chunk lists can't return, and the text
+report says so. Provenance adds the three weights (`search.fields_weight`,
+`cards_weight` and `title_weight`, which the text report prints with the
+others), and the stages `fields`, `titles` (after `fields`) and `cards`;
+the format stays 1, every change additive, and PR 1's report still loads
+as a baseline (a test loads one; its missing weights read as 0).
 
 ---
 
@@ -12912,8 +12913,12 @@ folders, site and author (`document_fields_fts`), and the **cards** list,
 a KNN over each document's card, a short text of the same facts embedded
 once (`document_cards_vec`). Both reach every document of every state, so
 a bookmark whose page failed or went dead is found again by its title,
-folder or site. The defaults, chosen by measurement on the owner's
-library, are `search.fields_weight` 0.25 and `search.cards_weight` 0.5.
+folder or site. A third, the **title** list, finds for a query of two
+distinct terms or more the documents whose title and bookmark titles hold
+every one of them, so such a bookmark, searched by what it was saved as,
+reaches the first page. The defaults, chosen by measurement on the
+owner's library, are `search.fields_weight` 0.25, `search.cards_weight`
+0.5 and `search.title_weight` 2.
 
 **Why:** the chunk lists see a page's text, its document title and its
 tags. What its owner remembers a bookmark by, the title they saved it
@@ -12993,8 +12998,8 @@ one thing in one way: `SavedAs` picks the bookmark (the newest whose
 title isn't blank, else the newest) and names its folder as search reads
 it (`FolderText`), and `Unavailable` words a dead or failed page. Those
 present; no row is derived through them, so they are outside
-`RulesVersion`. `refreshFields` runs inside the transaction of every write that
-changes an input: `Documents.Create`, `ApplyFetch` (now one `BEGIN
+`RulesVersion`. `refreshFields` runs inside the transaction of every
+write that changes an input: `Documents.Create`, `ApplyFetch` (now one `BEGIN
 IMMEDIATE` transaction), and `SetCurrentExtraction`; `Bookmarks.Ingest`
 (new and existing documents), `Create` (when it links a document),
 `Delete` (on the document it linked) and `LinkDocument` (on the old and
@@ -13068,50 +13073,77 @@ is created by `EnsureVectorIndex` at the home's width with its delete
 trigger, under the rules `chunks_vec` follows, and a new card vector
 table makes every card stale.
 
-**The cards job runs 10 s after the change that queued it.** It is
-queued `sqlite.CardsJobDelay` (10 s) ahead, and its commit wakes no
-worker: the cards pool's idle poll, at most 5 s apart, finds it once it is
-due, as it finds a deferred job. Every card change inside the window finds
-it pending and shares it, so a burst (an import's ingests, then its
-fetches seconds apart) shares one job and one embed request a batch.
-Queued to run at once and waking the pool, every card-changing write made
-while no job was pending queued one that embedded a card or two: through
-the daemon's pools, 60 pages saved and fetched 40 ms apart left 61 cards
-jobs, against 1 with the window. Nothing prunes finished jobs but `curio
-jobs prune --older-than` and `curio jobs delete --status` ("Jobs
-lifecycle"), so the rows add up: a 5,000-page import, fetched at the setup
-estimate's 25 to 45 pages a minute (1.9 to 3.3 hours), left about one
-cards job per card-changing fetch, ≈5,000 rows beside its ≈10,000 fetch
-and index rows, and now leaves about one per 12 to 13 s of fetching (the
-window and the idle poll), ≈520 to 940. Each job saved is an Ollama
-request and three writes (the claim, `PutCardVectors`, `MarkDone`). 10 s
-rather than 30 to 60: a just-fetched page's card vector comes within about
-15 s, the queue drains (`curio status --follow`, keep-awake) seconds after
-the last fetch, and the fields list finds a page saved a moment ago, in
-the transaction that saved it, meanwhile. A longer window would save
-little more, a cards batch being one request either way at import rates,
-and would need an e2e timing knob; the window has no config key.
+**The cards job runs 10 s after the change that queued it.** It is queued
+`sqlite.CardsJobDelay` (10 s) ahead, and its commit wakes no worker: the
+cards pool's idle poll, at most 5 s apart, finds it once it is due, as it
+finds a deferred job. Every card change inside the window finds it pending
+and shares it, so a burst (an import's ingests, then its fetches seconds
+apart) shares one job and one embed request a batch. Queued to run at once
+and waking the pool, every card-changing write made while no job was
+pending queued one that embedded a card or two: through the daemon's
+pools, 60 pages saved and fetched 40 ms apart left 61 cards jobs, against
+1 with the window. Nothing prunes finished jobs but `curio jobs prune
+--older-than` and `curio jobs delete --status` ("Jobs lifecycle"), so the
+rows add up: a 5,000-page import, fetched at the setup estimate's 25 to 45
+pages a minute (1.9 to 3.3 hours), left about one cards job per
+card-changing fetch, ≈5,000 rows beside its ≈10,000 fetch and index rows,
+and now leaves about one per 12 to 13 s of fetching (the window and the
+idle poll), ≈520 to 940. Each job saved is an Ollama request and three
+writes (the claim, `PutCardVectors`, `MarkDone`). 10 s rather than 30 to
+60: a just-fetched page's card vector comes within about 15 s, the queue
+drains (`curio status --follow`, keep-awake) seconds after the last fetch,
+and the fields and title lists find a page saved a moment ago, in the
+transaction that saved it, meanwhile. A longer window would save little
+more, a cards batch being one request either way at import rates, and
+would need an e2e timing knob; the window has no config key.
 
 **The fusion.** The chunk lists are fused by RRF and collapsed exactly as
 before. Then each document list adds `weight/(rrf_k + rank)` to its
-documents, rank 1-based, the fields before the cards, and a document only
-they found joins with no chunks; the result is sorted by score, then
-document ID. Sums are taken in that fixed order. Both lists are read 200
-deep (`2 × store.MaxSearchK`) whatever the window, so every page of a
-query is cut from one ranking ("Search pages by offset within a
-fixed-depth pool"), and `total` and `capped` count documents only they
-found. The fields list breaks ties by `seq`, the cards list by distance,
-then document ID, over-fetching the KNN (`min(limit × 10, 1000)`) for its
-filters. The fields list runs beside BM25 on the same sanitized query;
-the query is embedded once for both semantic lists, which run side by
-side, so a config that set `vector_weight: 0` to keep search off Ollama
-embeds the query again for the cards list until it sets `cards_weight: 0`
-too (docs/setup.md says so for the upgrade). Any failure in the semantic
-leg drops both semantic lists (one rule, one warning, ", without the
-document cards" added when the cards were on); BM25 and the fields list
-still rank, and a fields failure fails the search, as BM25's does. The
-lists are a slice, so later work adds lists or stages without reshaping
-it.
+documents, rank 1-based, the fields, then the cards, then the titles, and
+a document only they found joins with no chunks; the result is sorted by
+score, then document ID. Sums are taken in that fixed order, the title
+list's last, so at `title_weight` 0 every sum, and so every ranking, is
+what the fields and cards alone give. All three are read 200 deep (`2 ×
+store.MaxSearchK`) whatever the window, so every page of a query is cut
+from one ranking ("Search pages by offset within a fixed-depth pool"), and
+`total` and `capped` count documents only they found. The fields and title
+lists break ties by `seq`, the cards list by distance, then document ID,
+over-fetching the KNN (`min(limit × 10, 1000)`) for its filters. The
+fields list runs beside BM25 on the same sanitized query; the query is
+embedded once for both semantic lists, which run side by side, so a config
+that set `vector_weight: 0` to keep search off Ollama embeds the query
+again for the cards list until it sets `cards_weight: 0` too
+(docs/setup.md says so for the upgrade). Any failure in the semantic leg
+drops both semantic lists (one rule, one warning, ", without the document
+cards" added when the cards were on); BM25 and the fields and title lists
+still rank, and a failure of either of those two fails the search, as
+BM25's does. The lists are a slice, so later work adds lists or stages
+without reshaping it.
+
+**The title list.** `DocumentIndex.SearchTitles` runs the query against
+the same index held to two columns, `{title bookmark_titles} : (…)`, and
+ranks by bm25 over them alone (column weights 1, 1, 0, 0, 0, named
+beside the fields list's); it joins and filters as the fields list does,
+through one SQL builder, returns every state and breaks ties by `seq`
+(its plan is pinned, driven from the MATCH). Search owns the query: the
+AND of the query's distinct terms, compared without case, from the
+sanitizer's own tokens and stopwords, each quoted as BM25's are
+(`titleQuery`). A term with no letter or digit is dropped: FTS5
+tokenizes it to an empty phrase, and an AND holding one matches nothing
+(`{title bookmark_titles} : ("-" AND "science")` matches no row on the
+bundled SQLite 3.53.4). The store owns the schema, the column filter and
+the weights, as for BM25 and the fields. The list is read only for a
+query of two distinct terms or more (`titleListMinTerms`), 200 deep, at
+`search.title_weight`, 2 by default. It is a keyword list: a degraded
+search keeps it, and its failure fails the search. The arithmetic of the
+default: rank 1 in the title list alone is 2/61, a tie with a document
+both chunk lists rank first, and with the fields list's rank 1 beside it,
+2.25/61, above any document only the chunk lists found; so a page saved a
+moment ago, with no chunks and no card vector yet, reaches the top. An
+AND is precise where the fields list's OR is not: on the 50 graded
+queries it matched anything for 5 (a median of 1 document, at most 7),
+and it matched every one of the 372 known-item queries below (a median
+of 1, at most 15).
 
 **Failed, dead and pending documents.** The chunk lists still leave
 failed and dead documents out, so a failed fetch's stale text is never
@@ -13199,20 +13231,94 @@ copy's queue was paused, ran once it was resumed, one attempt, 7,560
 cards in 107.8 s; no WARN or ERROR in the log. `ListByDocuments` for 10
 documents took 31 µs at p50 (58 µs at p95).
 
+**The title list, measured.** Before it, a document only the fields and
+cards found scored at most `(fields_weight + cards_weight) / (rrf_k + 1)`,
+0.0123, under any document with a chunk in roughly the top 21 of either
+chunk list, and the vector list returns 800 chunks for every query. So a
+known item, a bookmark searched by what it was saved as, was reachable but
+never findable, which the 50 graded queries don't measure. A second,
+private set measures it, built by a seeded script from a copy of the
+owner's library and kept out of the repository like the first: 198
+bookmarks, stratified by state (64 fetched, 2 pending, 66 failed, 66 dead)
+and by source (Chrome and Safari about half each, 2 saved by hand), and
+372 queries, 198 by the saved title (one trailing site suffix removed) and
+174 by a fragment of it (3 to 5 of its content words); every query has 3
+content words or more and matches no more than 20 documents' titles. Each
+list alone ranks these items well (the fields: S@1 0.985 by title and
+0.965 by fragment for the failed and dead ones; the cards: 0.962 and
+0.825): the fusion is what buried them. Hybrid, the owner's config.yaml,
+each weight on a copy prepared once (migration 019 applied, fields
+derived, 7,557 cards embedded):
+
+| | failed + dead by title (132): S@1 / S@10 / MRR | by fragment (114) | fetched by title (64): S@1 / S@10 |
+|---|---|---|---|
+| PR 1 | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 | 0.86 / 0.97 |
+| fields and cards (title 0) | 0.000 / 0.000 / 0.024 | 0.000 / 0.000 / 0.023 | 0.906 / 0.984 |
+| title 0.5 | 0.000 / 0.424 / 0.101 | 0.000 / 0.430 / 0.103 | 0.984 / 1.000 |
+| title 1 | 0.083 / 0.955 / 0.319 | 0.053 / 0.930 / 0.308 | 1.000 / 1.000 |
+| title 1.5 | 0.455 / 0.992 / 0.666 | 0.447 / 1.000 / 0.667 | 1.000 / 1.000 |
+| **title 2** | **0.977 / 1.000 / 0.982** | **0.956 / 1.000 / 0.978** | 1.000 / 1.000 |
+| title 3 | 0.977 / 1.000 / 0.982 | 0.965 / 1.000 / 0.982 | 0.984 / 1.000 |
+
+Before the title list the failed and dead items' median rank was 45 (131
+of 132 within the 100, the best 14th); at 2 it is 1, and both pending
+items are first. On the 50 graded queries every title weight from 0.5 to
+3 gives the same: all nDCG@10 0.655 (0.654 without the list, 0.590 for PR
+1), owner-tagged nDCG@10 0.342 and R@10 0.297, keyword R@10 0.864, and
+the worst kind against PR 1 temporal, −0.033, as before; two rankings
+moved (one at 0.5), one keyword query (nDCG@10 0.783 to 0.821) and one
+reorder. At
+weight 0 every ranking of both sets is the one fields and cards alone
+gave. The bars, set before these runs: the 50 queries within 0.01 of
+the first pass (all nDCG@10 0.644 or more, owner-tagged 0.332), keyword
+R@10 0.84 or more and no kind more than 0.05 under PR 1, as the fields
+and cards were held to; and, new, the failed and dead known items on the
+first page. Weight 2 is the smallest of the grid that puts almost every
+one first: rank 1 in the title list alone ties a document both chunk
+lists rank first, and the fields list's rank 1 beside it lifts the item
+over it; 3 is no better. Latency, back to back in one session, three
+rounds of PR 1's `searcheval` (built from main, on a schema-18 copy),
+then this branch's at weight 0, then at 2: hybrid total p50 147.8, 147.6
+and 144.4 ms for PR 1, 142.5, 145.3 and 144.9 at 0, 143.7, 143.7 and
+142.4 at 2; the title stage itself 0.4 ms at p50 and 0.7 at p95 on the
+50 queries, and at most 3.1 ms on the known items, beside BM25.
+
+**Rejected, measured on the same sets.**
+
+- Fusing documents, not chunks (each chunk list collapsed to a document
+  ranking first, then RRF over the four): at the shipped weights the
+  known items stay off the first page (S@10 0.00, median rank 81) and
+  all nDCG@10 falls to 0.634; fields 1 and cards 1 reach S@10 0.49 with
+  evidence queries 0.069 under PR 1; fields 2 and cards 1 reach 0.81
+  with all nDCG@10 0.586 and evidence 0.110 under. It would also have
+  rewritten the chunk fusion the first pass calibrated.
+- Weighing the fields list higher: its OR matches too much to be heavy.
+  fields 1 reaches S@10 0.41 (owner-tagged R@10 0.194, evidence −0.080);
+  fields 2 reaches 0.89 by title and 0.82 by fragment with all nDCG@10
+  0.573 and world-hop queries 0.184 under PR 1; with cards 1 as well,
+  0.92 and 0.91, all 0.610, world hop −0.107. Each fails a bar.
+- An AND over all five fields at weight 2: the same on the 50 queries,
+  slightly worse on the known items (fragment S@1 0.947 against 0.956).
+- A minimum of one term: on the judged sets the same as two (no judged
+  query has a single word), but on 40 unjudged one-word probes (words in
+  20 to 200 titles) it replaced half the first 10 (5.0 of 10 kept), the
+  documents whose titles hold the word rising from 4.1 to 7.4 a page and
+  failed or dead ones from 0 to 0.7: with one term the AND is the fields
+  list's OR held to the titles, at the defaults eight times as heavy.
+
 **Known limitations.**
 
-- A document found only by the document lists ranks below most
-  documents the chunk lists found. Its score is at most
-  `(fields_weight + cards_weight) / (rrf_k + 1)`, 0.0123 with the
-  defaults, under any document with a chunk in either chunk list's top
-  21, and on a library of more than 800 chunks the vector list returns
-  800 for any query. On the scratch daemon, 60 failed or dead bookmarks
-  searched by their own titles all came back within the 100, none in the
-  first 20, at a median rank of 45, and a synthetic bookmark found by a
-  word no chunk holds ranked 27th, behind documents only the vector list
-  found. The ranking puts them in reach (R@100 +0.074) but not on the
-  first page; raising them is a change to the fusion, to be measured
-  like this one.
+- A one-word query, or one whose words a bookmark holds only between its
+  title and its site or folders, doesn't engage the title list: such a
+  bookmark is found by the fields and cards alone, at their weights, and
+  may still rank past the first page.
+- Short topical queries now rank first the documents whose titles hold
+  every word, failed and dead ones among them. On 40 unjudged two-word
+  probes (pairs in 5 to 60 titles) at weight 2 the first 10 kept 5.6 of
+  their documents (5.9 at 1.5), documents with both words in a title rose
+  from 2.5 to 6.3 a page and failed or dead ones from 0 to 1.2. No judged
+  query is that short; judge some before moving the weight or the
+  minimum.
 - A re-import doesn't update a bookmark's title or folder: `Ingest` keeps
   the first save of a URL from a source (`ON CONFLICT DO NOTHING`), so the
   fields keep the title and folder it was first saved with.
@@ -13221,8 +13327,9 @@ documents took 31 µs at p50 (58 µs at p95).
   them, or nothing does.
 - A page is embedded twice during an import: its card at ingest (title,
   bookmark, site), and again after its fetch brings a title, author or
-  site name. A card is one short input, next to the page's chunks; the
-  first embed is what lets a page that never fetches be found.
+  site name, unless the fetch lands in the same cards window. A card is
+  one short input, next to the page's chunks; the first embed is what
+  lets a page that never fetches be found by meaning.
 
 **Going back to 2.6.x.** 2.6 runs goose v3.28.0, which ignores database
 versions it doesn't know (as 2.5's does: "Going back to 2.5.x"), so its
@@ -13231,11 +13338,11 @@ daemon starts on a schema-19 database. It writes none of the new tables
 and triggers) and never claims a cards job. Back on 2.7, the start
 derives the fields of the documents 2.6 created; a document 2.6 fetched,
 or whose bookmarks it changed, keeps the fields it had until its next
-write or the next rules bump. Remove `search.fields_weight` and
-`search.cards_weight` from config.yaml first: 2.6 decodes it strictly
-("field fields_weight not found in type config.Search", checked with
-v2.6.0's config loader), so its daemon refuses to start and its CLI fails
-on the same parse.
+write or the next rules bump. Remove `search.fields_weight`,
+`search.cards_weight` and `search.title_weight` from config.yaml first:
+2.6 decodes it strictly ("field fields_weight not found in type
+config.Search", checked with v2.6.0's config loader), so its daemon
+refuses to start and its CLI fails on the same parse.
 
 **How to revisit:** a rule change (a generic name, a separator, the
 table) is a change in `internal/docmeta` and a `RulesVersion` bump with a

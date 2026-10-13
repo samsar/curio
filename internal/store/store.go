@@ -870,12 +870,12 @@ type CardVector struct {
 
 // DocumentIndex searches documents by what they were saved as, not by
 // their text: the fields index over each document's title, the titles and
-// folders it was bookmarked under, its site and its author, and the
-// vectors of the documents' cards. Every document, whatever its state,
-// has its fields and a card: the stores derive them in the transaction of
-// every write that changes what they are derived from. A card has a
-// vector once the cards job has embedded it, and is stale while its text
-// differs from the text its vector was made from.
+// folders it was bookmarked under, its site and its author, searched whole
+// or by the titles alone, and the vectors of the documents' cards. Every
+// document, whatever its state, has its fields and a card: the stores
+// derive them in the transaction of every write that changes what they are
+// derived from. A card has a vector once the cards job has embedded it, and
+// is stale while its text differs from the text its vector was made from.
 type DocumentIndex interface {
 	// SearchFields runs query, a MATCH expression as
 	// ChunkStore.BM25Search takes it, against the tenant's documents'
@@ -883,6 +883,14 @@ type DocumentIndex interface {
 	// first, equal scores in the order their fields were first written.
 	// Documents of every state are returned.
 	SearchFields(ctx context.Context, tenantID, query string, limit int, f SearchFilters) ([]DocumentHit, error)
+	// SearchTitles runs query, a MATCH expression of ANDed phrases as
+	// search builds it, against the tenant's documents' title and
+	// bookmark titles alone, scoped by f, and returns at most limit
+	// documents, best first by bm25 over those two columns, equal scores
+	// in the order their fields were first written. Documents of every
+	// state are returned. A blank query, or a limit of 0 or less, reads
+	// nothing.
+	SearchTitles(ctx context.Context, tenantID, query string, limit int, f SearchFilters) ([]DocumentHit, error)
 	// SearchCards returns at most limit of the tenant's documents whose
 	// card vectors are nearest embedding, scoped by f, nearest first,
 	// equal distances by document ID. Documents of every state are

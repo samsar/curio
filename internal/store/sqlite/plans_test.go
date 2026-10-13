@@ -513,6 +513,7 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 	fieldsQ, fieldsArgs := fieldsQuery("local", `"kafka"`, 200, store.SearchFilters{})
 	fieldsSourceQ, fieldsSourceArgs := fieldsQuery("local", `"kafka"`, 200,
 		store.SearchFilters{Source: []string{store.SourceChrome}})
+	titlesQ, titlesArgs := titlesQuery("local", `"kafka" AND "retention"`, 200, store.SearchFilters{})
 	cardsQ, cardsArgs := cardsQuery("local", queryVector(t), 200, store.SearchFilters{})
 	const (
 		document     = "SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)"
@@ -538,6 +539,14 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 			want:  []string{"SEARCH b EXISTS USING INDEX idx_bookmarks_document (document_id=?)"},
 			sorts: true,
 			avoid: []string{"idx_bookmarks_tenant_"},
+		},
+		{
+			// As SearchFields: the MATCH, held to the title columns, drives.
+			name:  "SearchTitles",
+			query: titlesQ, args: titlesArgs,
+			first: "SCAN document_fields_fts VIRTUAL TABLE",
+			want:  []string{"SEARCH f USING INTEGER PRIMARY KEY (rowid=?)", document},
+			sorts: true,
 		},
 		{
 			// A KNN scan of document_cards_vec, then each card's document

@@ -281,7 +281,7 @@ func writeConfig(t *testing.T, dir, baseURL, search string) string {
 	t.Helper()
 	path := filepath.Join(dir, "config.yaml")
 	cfg := fmt.Sprintf("embedding:\n  model: %s\n  dim: %d\n  base_url: %s\n  query_prefix: \"\"\n"+
-		"search:\n  fields_weight: 0\n  cards_weight: 0\n%s", testModel, testDim, baseURL, search)
+		"search:\n  fields_weight: 0\n  cards_weight: 0\n  title_weight: 0\n%s", testModel, testDim, baseURL, search)
 	require.NoError(t, os.WriteFile(path, []byte(cfg), 0o600))
 	return path
 }

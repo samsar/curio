@@ -106,7 +106,7 @@ func dropQueryText(groups []string, a slog.Attr) slog.Attr {
 func complain(stderr io.Writer, msg string) { _, _ = io.WriteString(stderr, msg) }
 
 const usageLine = "usage: searcheval -db <copy of curio.db> -queries <file> [-config <config.yaml>] [-json <file>] " +
-	"[-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards]\n"
+	"[-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards,titles]\n"
 
 // parseFlags parses args, writing what is wrong and the usage to out on a
 // usage error, and the usage alone for -h.

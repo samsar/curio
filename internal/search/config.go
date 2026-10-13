@@ -19,6 +19,7 @@ func ConfigFrom(c config.Config) Config {
 		VectorWeight: c.Search.VectorWeight,
 		FieldsWeight: c.Search.FieldsWeight,
 		CardsWeight:  c.Search.CardsWeight,
+		TitleWeight:  c.Search.TitleWeight,
 		RRFK:         c.Search.RRFK,
 		Collapse:     CollapseStrategy(c.Search.Collapse),
 		QueryPrefix:  c.Embedding.QueryPrefix,

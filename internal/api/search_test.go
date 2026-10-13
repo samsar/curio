@@ -77,11 +77,12 @@ func okEmbedder() search.Embedder {
 }
 
 // TestSearch_HitWithoutMatches: a dead document found only by its
-// bookmark's title is a hit with no matches, its state dead, and carries
-// the bookmarks it was saved under; a document its chunks matched carries
-// none.
+// bookmark's title, searched by that title, is the first hit, with no
+// matches, its state dead, and carries the bookmarks it was saved under; a
+// document its chunks matched carries none.
 func TestSearch_HitWithoutMatches(t *testing.T) {
-	s := newSearchServer(t, okEmbedder(), search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1})
+	s := newSearchServer(t, okEmbedder(), search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1,
+		TitleWeight: 2})
 	ctx := context.Background()
 	dead := s.seedDocument(t, "https://example.com/gone", store.DocStateDead)
 	title, folder := "Kafka retention, explained", "/Bookmarks Bar/Streams"
@@ -90,7 +91,7 @@ func TestSearch_HitWithoutMatches(t *testing.T) {
 		FolderPath: &folder, Source: store.SourceChrome, SavedAt: saved})
 	require.NoError(t, err)
 
-	resp := s.search(t, `{"query":"kafka retention"}`)
+	resp := s.search(t, `{"query":"Kafka retention, explained"}`)
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	var raw struct {
 		Items []map[string]json.RawMessage `json:"items"`
@@ -98,6 +99,7 @@ func TestSearch_HitWithoutMatches(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(resp.body), &raw))
 	got := decodeSearch(t, resp)
 	require.Len(t, got.Items, 4)
+	assert.Equal(t, dead.ID, got.Items[0].Document.ID, "the title list ranks it above the chunks' matches")
 	for i, hit := range got.Items {
 		if hit.Document.ID != dead.ID {
 			assert.NotEmpty(t, hit.Matches, hit.Document.URL)

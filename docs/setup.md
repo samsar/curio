@@ -771,13 +771,15 @@ so its daemon refuses to start and its commands refuse to run.
 
 ## Search
 
-Search ranks four lists and fuses them: the passages of each page's text
+Search ranks five lists and fuses them: the passages of each page's text
 by keywords (BM25) and by meaning (the vectors), and each document by
 what it was saved as: its title, bookmark titles, folders, site and
-author by keywords (the *fields*), and its *card*, a short text of the
-same facts, by meaning. The document lists also find bookmarks whose page
-failed or went dead, shown without a passage. Each list's weight is a
-key under `search:`, and 0 turns that list off:
+author by keywords (the *fields*), its title and bookmark titles holding
+every word of a query of two words or more (the *titles*), and its
+*card*, a short text of the same facts, by meaning. The document lists
+also find bookmarks whose page failed or went dead, shown without a
+passage. Each list's weight is a key under `search:`, and 0 turns that
+list off:
 
 | Key | Default | What it does |
 |---|---|---|
@@ -785,28 +787,31 @@ key under `search:`, and 0 turns that list off:
 | `search.vector_weight` | 1 | the passages by meaning |
 | `search.fields_weight` | 0.25 | the documents by their saved title, bookmark titles, folders, site and author |
 | `search.cards_weight` | 0.5 | the documents by their cards' meaning |
+| `search.title_weight` | 2 | the documents whose title or bookmark titles hold every word of the query, for a query of two words or more: what puts a bookmark you search for by the title you saved it under on the first page |
 
-Each weight is a number, 0 or more, and not all four may be 0. With
+Each weight is a number, 0 or more, and not all five may be 0. With
 `vector_weight` and `cards_weight` both 0 the query is never embedded, so
 search never waits on Ollama. When Ollama doesn't answer, search ranks by
-keywords alone (BM25 and the fields) and says so (`degraded`).
+keywords alone (BM25, the fields and the titles) and says so
+(`degraded`).
 
 The cards are embedded by queued work, the `cards` job, on a pool of its
 own: after an import, after a fetch changes what a page is saved as, and
 at the daemon's start when any card is stale. It runs about 10 s after
 the change that queued it, so the changes of an import share one job;
-until then the fields list finds the page. Like the other jobs it
-waits while the queue is paused or outside its schedule, and while Ollama
-doesn't answer it waits too, retrying for up to a day. `curio reindex
+until then the fields and title lists find the page. Like the other jobs
+it waits while the queue is paused or outside its schedule, and while
+Ollama doesn't answer it waits too, retrying for up to a day. `curio reindex
 --all` embeds every card again. Upgrading to 2.7 derives every document's
 fields at the daemon's first start (seconds for thousands of documents)
 and queues the cards job, which embeds one card per document. If you set
 `vector_weight: 0` to keep search off Ollama, set `cards_weight: 0` too:
 the cards list embeds the query as well.
 
-Going back to curio 2.6.x, remove `search.fields_weight` and
-`search.cards_weight` from `config.yaml` first: 2.6.x doesn't know the
-keys, so its daemon refuses to start and its commands refuse to run.
+Going back to curio 2.6.x, remove `search.fields_weight`,
+`search.cards_weight` and `search.title_weight` from `config.yaml` first:
+2.6.x doesn't know the keys, so its daemon refuses to start and its
+commands refuse to run.
 
 ## Config: time budgets for Ollama calls
 
