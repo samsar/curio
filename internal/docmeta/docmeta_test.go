@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -352,10 +354,11 @@ var goldenDocuments = []Document{
 	{URL: "not a url", Title: "  |  —  ·  ", Author: strings.Repeat("long author ", 30)},
 }
 
-// TestRulesGolden: every function's output over goldenDocuments is the one
-// recorded for RulesVersion. A change to any of them needs a new version,
-// so the store re-derives every home's rows: bump RulesVersion, then
-// record its golden with -update (which never overwrites one).
+// TestRulesGolden: the rules' tables and limits, and every function's
+// output over goldenDocuments, are the ones recorded for RulesVersion. A
+// change to any of them needs a new version, so the store re-derives
+// every home's rows: bump RulesVersion, then record its golden with
+// -update (which never overwrites one).
 func TestRulesGolden(t *testing.T) {
 	path := filepath.Join("testdata", fmt.Sprintf("rules_v%d.golden", RulesVersion))
 	got := renderGolden()
@@ -370,12 +373,13 @@ func TestRulesGolden(t *testing.T) {
 	assert.Equal(t, string(want), got, "the rules' output changed: bump RulesVersion and record its golden")
 }
 
-// renderGolden derives goldenDocuments, each with its own functions'
-// outputs, then each host's agreed name and every document's fields and
-// card, as text.
+// renderGolden writes the rules' tables and limits, then derives
+// goldenDocuments, each with its own functions' outputs, then each host's
+// agreed name and every document's fields and card, as text.
 func renderGolden() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "docmeta rules v%d\n", RulesVersion)
+	renderTables(&b)
 	owns := make([]Own, len(goldenDocuments))
 	byHost := map[string][]HostDocument{}
 	var hosts []string
@@ -408,4 +412,17 @@ func renderGolden() string {
 		fmt.Fprintf(&b, "\nfields %d site_name %q site %q\n  card %q\n", i, f.SiteName, f.Site, f.Card())
 	}
 	return b.String()
+}
+
+// renderTables writes the tables and limits the rules apply, so editing
+// one changes the golden even where no golden document meets the edit: a
+// curated host, a generic name, a root label, a separator or a cap.
+func renderTables(b *strings.Builder) {
+	fmt.Fprintf(b, "\nlimits field %d declared_site %d title_suffix %d-%d card_part %d card %d\n", MaxFieldBytes,
+		maxDeclaredSiteBytes, minTitleSuffixBytes, maxTitleSuffixBytes, maxCardPartBytes, MaxCardBytes)
+	fmt.Fprintf(b, "card_separator %q\ntitle_separators %q\n", cardSeparator, titleSeparators)
+	fmt.Fprintf(b, "root_labels %q\ngeneric_site_names %q\n", rootLabels, genericSiteNames)
+	for _, host := range slices.Sorted(maps.Keys(curatedSiteNames)) {
+		fmt.Fprintf(b, "curated %q %q\n", host, curatedSiteNames[host])
+	}
 }
