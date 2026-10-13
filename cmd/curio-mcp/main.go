@@ -116,8 +116,11 @@ func call[T any](ctx context.Context, d daemon, fn func(context.Context) (T, err
 func registerTools(s *mcp.Server, d daemon) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "search_bookmarks",
-		Description: "Hybrid keyword + semantic search over the user's saved bookmarks and articles. " +
-			"Returns the most relevant documents with snippets and their doc_id. " +
+		Description: "Hybrid keyword + semantic search over the user's saved bookmarks and articles: their text, " +
+			"and what they were saved as (bookmark titles, folders, site, author). " +
+			"Returns the most relevant documents with snippets, their doc_id and state. " +
+			"A result without a snippet matched on its bookmark (saved_title, folder); " +
+			"one whose state is failed or dead is a page that is no longer available, only its bookmark saved. " +
 			"Optionally filter by content type, bookmark source, or URL host.",
 	}, searchHandler(d))
 
@@ -142,11 +145,18 @@ func registerTools(s *mcp.Server, d daemon) {
 // --- shared shapes ---
 
 type docHit struct {
-	DocID   string  `json:"doc_id"`
-	Title   string  `json:"title"`
-	URL     string  `json:"url"`
-	Score   float64 `json:"score"`
-	Snippet string  `json:"snippet,omitempty"`
+	DocID string  `json:"doc_id"`
+	Title string  `json:"title"`
+	URL   string  `json:"url"`
+	Score float64 `json:"score"`
+	// State is the document's: pending, fetched, failed or dead. A failed
+	// or dead document's page is no longer available.
+	State   string `json:"state"`
+	Snippet string `json:"snippet,omitempty"`
+	// SavedTitle and Folder are what a hit without a snippet was saved as,
+	// the bookmark it matched on.
+	SavedTitle string `json:"saved_title,omitempty"`
+	Folder     string `json:"folder,omitempty"`
 }
 
 type searchOutput struct {
@@ -595,13 +605,18 @@ func toSearchOutput(items []client.SearchHit, excludeID string) searchOutput {
 		if hit.Document.ID == excludeID {
 			continue
 		}
-		out.Results = append(out.Results, docHit{
+		h := docHit{
 			DocID:   hit.Document.ID,
-			Title:   docTitle(hit.Document),
+			Title:   hitTitle(hit),
 			URL:     hit.Document.URL,
 			Score:   hit.Score,
+			State:   hit.Document.State,
 			Snippet: firstSnippet(hit.Matches),
-		})
+		}
+		if len(hit.Matches) == 0 {
+			h.SavedTitle, h.Folder = savedAs(hit.Bookmarks)
+		}
+		out.Results = append(out.Results, h)
 	}
 	return out
 }
@@ -613,6 +628,34 @@ func docTitle(d client.Document) string {
 	return d.URL
 }
 
+// hitTitle names a hit: its document's title, else its newest titled
+// bookmark's, else its URL.
+func hitTitle(hit client.SearchHit) string {
+	if t := hit.Document.Title; (t == nil || strings.TrimSpace(*t) == "") && hit.BookmarkTitle != "" {
+		return hit.BookmarkTitle
+	}
+	return docTitle(hit.Document)
+}
+
+// savedAs is the bookmark a hit was saved as: the newest with a title, else
+// the newest, by its title and folder.
+func savedAs(bookmarks []client.SearchHitBookmark) (title, folder string) {
+	if len(bookmarks) == 0 {
+		return "", ""
+	}
+	b := bookmarks[0]
+	for _, c := range bookmarks {
+		if c.Title != "" {
+			b = c
+			break
+		}
+	}
+	return b.Title, b.FolderPath
+}
+
+// gone reports whether a document of state has no page to read any more.
+func gone(state string) bool { return state == "failed" || state == "dead" }
+
 func firstSnippet(m []client.ChunkMatch) string {
 	if len(m) == 0 {
 		return ""
@@ -623,6 +666,18 @@ func firstSnippet(m []client.ChunkMatch) string {
 	}
 	// Strip the FTS emphasis markers — noise for an LLM reader.
 	return strings.TrimSpace(strings.NewReplacer("<em>", "", "</em>", "").Replace(s))
+}
+
+// savedAsText says what a bookmark was saved as: `saved as "title" in
+// folder`, or the part it has.
+func savedAsText(title, folder string) string {
+	switch {
+	case title != "" && folder != "":
+		return fmt.Sprintf("saved as %q in %s", title, folder)
+	case title != "":
+		return fmt.Sprintf("saved as %q", title)
+	}
+	return "saved in " + folder
 }
 
 func textResult(s string) *mcp.CallToolResult {
@@ -637,8 +692,16 @@ func formatHits(label string, hits []docHit) string {
 	fmt.Fprintf(&b, "%d results for %q:\n\n", len(hits), label)
 	for i, h := range hits {
 		fmt.Fprintf(&b, "%d. %s\n   %s\n   doc_id: %s  (score %.4f)\n", i+1, h.Title, h.URL, h.DocID, h.Score)
-		if h.Snippet != "" {
+		switch {
+		case h.Snippet != "":
 			fmt.Fprintf(&b, "   %s\n", h.Snippet)
+		case h.SavedTitle != "" || h.Folder != "":
+			fmt.Fprintf(&b, "   matched its bookmark: %s\n", savedAsText(h.SavedTitle, h.Folder))
+		default:
+			b.WriteString("   matched its bookmark\n")
+		}
+		if gone(h.State) {
+			fmt.Fprintf(&b, "   the page is no longer available (%s); only its bookmark is saved\n", h.State)
 		}
 		b.WriteString("\n")
 	}

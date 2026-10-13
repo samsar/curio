@@ -1673,9 +1673,29 @@ components:
             documents list names it.
         matches:
           type: array
-          description: Top matching chunks for this document, in score order
+          description: >
+            Top matching chunks for this document, in score order. Absent
+            for a hit that matched on what it was saved as alone (its saved
+            title, folders, site, author or card), as a failed or dead
+            document, whose chunks are never searched, always does.
           items: { $ref: "#/components/schemas/ChunkMatch" }
+        bookmarks:
+          type: array
+          description: >
+            Present only on a hit without matches: the bookmarks it was
+            saved under, newest saved first, at most one per source, which
+            say what it matched on.
+          items: { $ref: "#/components/schemas/SearchHitBookmark" }
       required: [document, score]
+
+    SearchHitBookmark:
+      type: object
+      properties:
+        title:       { type: string, description: "The bookmark's title; omitted when it has none" }
+        folder_path: { type: string, description: "The folder it was saved in, as the browser named it; omitted for none" }
+        source:      { $ref: "#/components/schemas/Source" }
+        saved_at:    { type: string, format: date-time }
+      required: [source, saved_at]
 
     ChunkMatch:
       type: object

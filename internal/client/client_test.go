@@ -763,6 +763,29 @@ func TestSearchAndRelated(t *testing.T) {
 	requireStatus(t, err, http.StatusNotFound)
 }
 
+// TestSearch_HitWithoutMatches: a hit found by what it was saved as, with
+// no passage, decodes the bookmarks it was saved under; an untitled one
+// its bookmark's title.
+func TestSearch_HitWithoutMatches(t *testing.T) {
+	s := apitest.Start(t, apitest.DocumentLists)
+	c := client.New(s.URL)
+	s.AddDocument(t, "https://example.com/gone", store.DocStateDead)
+	s.AddBookmark(t, "https://example.com/gone", store.SourceSafari, "Sourdough starters", "/Favorites/Baking")
+
+	res, err := c.Search(context.Background(), client.SearchRequest{Query: "sourdough"})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 1)
+	hit := res.Items[0]
+	assert.Equal(t, "dead", hit.Document.State)
+	assert.Empty(t, hit.Matches)
+	assert.Equal(t, "Sourdough starters", hit.BookmarkTitle)
+	require.Len(t, hit.Bookmarks, 1)
+	assert.Equal(t, "Sourdough starters", hit.Bookmarks[0].Title)
+	assert.Equal(t, "/Favorites/Baking", hit.Bookmarks[0].FolderPath)
+	assert.Equal(t, store.SourceSafari, hit.Bookmarks[0].Source)
+	assert.False(t, hit.Bookmarks[0].SavedAt.IsZero())
+}
+
 func TestInterests(t *testing.T) {
 	s, c := start(t)
 	ctx := context.Background()

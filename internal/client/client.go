@@ -418,13 +418,25 @@ type SearchFilters struct {
 	Source      []string `json:"source,omitempty"`
 }
 
-// SearchHit is the part of api.SearchHitResponse the CLI reads: it leaves
-// out bookmark_title, which only the dashboard shows.
+// SearchHit is the part of api.SearchHitResponse the CLI and MCP read.
 type SearchHit struct {
-	Document     Document     `json:"document"`
-	Score        float64      `json:"score"`
-	MarkdownPath string       `json:"markdown_path,omitempty"`
-	Matches      []ChunkMatch `json:"matches,omitempty"`
+	Document      Document     `json:"document"`
+	Score         float64      `json:"score"`
+	MarkdownPath  string       `json:"markdown_path,omitempty"`
+	BookmarkTitle string       `json:"bookmark_title,omitempty"`
+	Matches       []ChunkMatch `json:"matches,omitempty"`
+	// Bookmarks are what a hit without Matches was saved as, newest saved
+	// first: it matched on them, not on a passage. A daemon older than
+	// metadata search sends none.
+	Bookmarks []SearchHitBookmark `json:"bookmarks,omitempty"`
+}
+
+// SearchHitBookmark mirrors api.SearchHitBookmark.
+type SearchHitBookmark struct {
+	Title      string    `json:"title,omitempty"`
+	FolderPath string    `json:"folder_path,omitempty"`
+	Source     string    `json:"source"`
+	SavedAt    time.Time `json:"saved_at"`
 }
 
 // ChunkMatch mirrors api.ChunkMatchJSON.

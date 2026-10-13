@@ -350,6 +350,41 @@ func (s *Bookmarks) ListByDocument(ctx context.Context, tenantID, documentID str
 	return out, nil
 }
 
+// listBookmarksByDocumentsSQL reads the bookmarks of the documents a JSON
+// array names, each seeking idx_bookmarks_document, so the SQL is the same
+// however many IDs there are. The tenant is checked on the rows found
+// (+tenant_id), never walked. Its args are the array and the tenant.
+const listBookmarksByDocumentsSQL = "SELECT " + bookmarkColumns +
+	" FROM bookmarks WHERE document_id IN (SELECT value FROM json_each(?)) AND +tenant_id = ?" +
+	" ORDER BY document_id, saved_at DESC, id DESC"
+
+func (s *Bookmarks) ListByDocuments(ctx context.Context, tenantID string, ids []string) (map[string][]*store.Bookmark, error) {
+	out := map[string][]*store.Bookmark{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("list bookmarks of documents: encode their IDs: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, listBookmarksByDocumentsSQL, string(list), tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("list bookmarks of documents: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		b, err := scanBookmark(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list bookmarks of documents: %w", err)
+		}
+		out[*b.DocumentID] = append(out[*b.DocumentID], b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list bookmarks of documents: %w", err)
+	}
+	return out, nil
+}
+
 // countBookmarksSQL counts a tenant's bookmarks. Its arg is the tenant.
 const countBookmarksSQL = `SELECT count(*) FROM bookmarks WHERE tenant_id = ?`
 

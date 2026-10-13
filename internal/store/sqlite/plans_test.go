@@ -452,6 +452,15 @@ func TestQueryPlans(t *testing.T) {
 			avoid: []string{"idx_bookmarks_tenant_"},
 		},
 		{
+			// Each document's bookmarks by its ID, never a walk of the
+			// tenant's bookmarks; the few found are sorted.
+			name:  "ListByDocuments",
+			query: listBookmarksByDocumentsSQL, args: []any{`["a","b","c"]`, "local"},
+			want:  []string{"SEARCH bookmarks USING INDEX idx_bookmarks_document (document_id=?)"},
+			sorts: true,
+			avoid: []string{"idx_bookmarks_tenant_"},
+		},
+		{
 			// The foreign-key actions reach the document's rows in each
 			// table by its own index, never a scan of every run's.
 			name:  "document delete reaches its jobs",

@@ -555,6 +555,11 @@ type BookmarkStore interface {
 	// newest saved first (by SavedAt, then by ID, descending). It is
 	// unpaged: a URL has at most one bookmark per source.
 	ListByDocument(ctx context.Context, tenantID, documentID string) ([]*Bookmark, error)
+	// ListByDocuments returns the tenant's bookmarks of each of ids, by
+	// document, each document's newest saved first, in one read however
+	// many there are. A document with none, or that isn't the tenant's, is
+	// absent. No IDs return none.
+	ListByDocuments(ctx context.Context, tenantID string, ids []string) (map[string][]*Bookmark, error)
 	Delete(ctx context.Context, id string) error
 	LinkDocument(ctx context.Context, bookmarkID, documentID string) error
 

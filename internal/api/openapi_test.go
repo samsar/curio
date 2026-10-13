@@ -292,7 +292,10 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			}
 			return [][]float32{unitVec()}, nil
 		})
-		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+		// The fields list on, so a failed document is a hit without
+		// matches, with the bookmarks it was saved under.
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{BM25Weight: 1, VectorWeight: 1,
+			FieldsWeight: 1, Log: slog.New(slog.DiscardHandler)})
 		d.Embedder = pingingEmbedder{err: fmt.Errorf("%w: connection refused", ollama.ErrUnreachable)}
 		d.Drift = monitor
 		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
@@ -413,6 +416,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","k":10,"offset":91}`),
 			http.StatusBadRequest},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka offline"}`), http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"blocked"}`), http.StatusOK},
 		{"GET /v1/failures", get("/v1/failures"), http.StatusOK},
 
 		{"GET /v1/interests", get("/v1/interests"), http.StatusOK},
@@ -670,9 +674,9 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 	require.NoError(t, err)
 	// The failed document's, which names it in the document list and
 	// carries its failure in the bookmark list.
-	blockedTitle := "A blocked page"
+	blockedTitle, blockedFolder := "A blocked page", "/Reading/Later"
 	_, err = s.deps.Bookmarks.Ingest(ctx, &store.Bookmark{TenantID: "local", URL: failed.URL, Title: &blockedTitle,
-		Source: store.SourceSafari, SavedAt: time.Now().UTC().Add(-time.Hour)})
+		FolderPath: &blockedFolder, Source: store.SourceSafari, SavedAt: time.Now().UTC().Add(-time.Hour)})
 	require.NoError(t, err)
 	// The untitled indexed document's, which names it among search hits.
 	connectTitle := "Kafka Connect notes"

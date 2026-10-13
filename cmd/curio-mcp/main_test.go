@@ -34,7 +34,27 @@ import (
 
 // fakeDaemon serves the subset of the curio HTTP API the MCP tools call and
 // stores each /v1/search request body in lastSearch. The query "offline" gets
-// a degraded (keyword-only) search response.
+// a degraded (keyword-only) search response, and "saved" savedHits.
+// savedHits are hits that matched on what they were saved as, without a
+// passage: a pending document, and a dead one named by its bookmark.
+var savedHits = []map[string]any{
+	{
+		"document": map[string]any{"id": "doc-saved", "url": "https://example.com/saved", "title": "Saved page",
+			"content_type": "article", "state": "pending"},
+		"score": 0.3,
+		"bookmarks": []map[string]any{
+			{"folder_path": "/Inbox", "source": "safari", "saved_at": "2026-10-02T00:00:00Z"},
+			{"title": "Saved for later", "folder_path": "/Reading", "source": "chrome", "saved_at": "2026-10-01T00:00:00Z"},
+		},
+	},
+	{
+		"document":       map[string]any{"id": "doc-gone", "url": "https://example.com/gone", "content_type": "unknown", "state": "dead"},
+		"score":          0.2,
+		"bookmark_title": "Gone but saved",
+		"bookmarks":      []map[string]any{{"title": "Gone but saved", "source": "chrome", "saved_at": "2026-09-01T00:00:00Z"}},
+	},
+}
+
 func fakeDaemon(t *testing.T, lastSearch *atomic.Value) http.Handler {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -55,9 +75,12 @@ func fakeDaemon(t *testing.T, lastSearch *atomic.Value) http.Handler {
 				"matches": []map[string]any{{"chunk_id": "c1", "text": "alpha body", "snippet": "alpha <em>body</em>"}},
 			}},
 		}
-		if req["query"] == "offline" {
+		switch req["query"] {
+		case "offline":
 			resp["degraded"] = true
 			resp["warnings"] = []string{"semantic search unavailable (connection refused); keyword-only results"}
+		case "saved":
+			resp["items"] = savedHits
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	})
@@ -471,6 +494,46 @@ func TestMCP_SearchBookmarks(t *testing.T) {
 	assert.Contains(t, txt, "Alpha")
 	assert.Contains(t, txt, "doc_id: doc-1")
 	assert.NotContains(t, txt, "<em>", "FTS emphasis markers should be stripped")
+}
+
+// TestMCP_SearchHitsWithoutMatches: a hit without a passage says it
+// matched its bookmark, with what it was saved as, and a failed or dead
+// one that its page is gone; every hit names its state.
+func TestMCP_SearchHitsWithoutMatches(t *testing.T) {
+	cs := connectMCP(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "search_bookmarks",
+		Arguments: map[string]any{"query": "saved"},
+	})
+	require.NoError(t, err)
+	txt := textOf(res)
+	assert.Contains(t, txt, "1. Saved page\n")
+	assert.Contains(t, txt, "   matched its bookmark: saved as \"Saved for later\" in /Reading\n",
+		"the newest bookmark with a title")
+	assert.Contains(t, txt, "2. Gone but saved\n", "an untitled hit named by its bookmark")
+	assert.Contains(t, txt, "   matched its bookmark: saved as \"Gone but saved\"\n")
+	assert.Contains(t, txt, "   the page is no longer available (dead); only its bookmark is saved\n")
+	assert.Equal(t, 1, strings.Count(txt, "no longer available"))
+
+	raw, err := json.Marshal(res.StructuredContent)
+	require.NoError(t, err)
+	var out searchOutput
+	require.NoError(t, json.Unmarshal(raw, &out))
+	assert.Equal(t, []docHit{
+		{DocID: "doc-saved", Title: "Saved page", URL: "https://example.com/saved", Score: 0.3, State: "pending",
+			SavedTitle: "Saved for later", Folder: "/Reading"},
+		{DocID: "doc-gone", Title: "Gone but saved", URL: "https://example.com/gone", Score: 0.2, State: "dead",
+			SavedTitle: "Gone but saved"},
+	}, out.Results)
+
+	alpha, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "search_bookmarks", Arguments: map[string]any{"query": "alpha"},
+	})
+	require.NoError(t, err)
+	raw, err = json.Marshal(alpha.StructuredContent)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"state":"fetched"`, "every hit names its state")
+	assert.NotContains(t, string(raw), "saved_title", "a hit with a passage matched on it")
 }
 
 func TestMCP_GetDocument(t *testing.T) {

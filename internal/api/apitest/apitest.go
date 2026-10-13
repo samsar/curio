@@ -219,6 +219,27 @@ func closeClientConns() {
 	http.DefaultClient.CloseIdleConnections()
 }
 
+// DocumentLists is an option for Start that searches with the document
+// lists on: the fields and the cards, each weighted 1 beside the chunk
+// lists, so a document can be found by what it was saved as.
+func DocumentLists(d *api.Deps) {
+	d.Search = search.New(d.Chunks, d.Documents, d.Index, Embedder{Dim: config.Default().Embedding.Dim},
+		search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, Log: d.Log})
+}
+
+// AddBookmark saves url from source as title in folder through ingest, as
+// an import saves it, and returns the bookmark: its document is the
+// tenant's of url, created pending when there was none.
+func (s *Server) AddBookmark(t testing.TB, url, source, title, folder string) *store.Bookmark {
+	t.Helper()
+	b := &store.Bookmark{TenantID: TenantID, URL: url, Source: source, SavedAt: time.Now().UTC(),
+		Title: store.NullableString(title), FolderPath: store.NullableString(folder)}
+	if _, err := s.Deps.Bookmarks.Ingest(context.Background(), b); err != nil {
+		t.Fatalf("save bookmark %s: %v", url, err)
+	}
+	return b
+}
+
 // AddDocument creates a document with no content in state. A failed one
 // failed for store.FailureCauseOther and a dead one for a dead link, the
 // causes the store requires of them; AddFailedDocument names the cause.

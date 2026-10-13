@@ -858,6 +858,11 @@ ol.results { list-style: none; padding: 0; }
 .result-title a:hover { color: var(--accent-text); text-decoration: none; }
 .snippet { margin-top: var(--s2); color: var(--text-2); line-height: 1.6; overflow-wrap: anywhere; }
 .snippet + .snippet { margin-top: var(--s1); padding-top: var(--s1); }
+/* A result that matched on what it was saved as: one line in its
+   passage's place, cut to fit, the whole in its title; and for a page
+   that is gone, a second. */
+.saved-as { margin-top: var(--s2); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.saved-gone { margin-top: var(--s1); color: var(--text-3); font-size: var(--fs-sm); }
 .result-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s3); }
 .result-foot details { font-size: var(--fs-sm); color: var(--text-3); }
 .result-foot summary { cursor: pointer; }

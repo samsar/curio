@@ -91,6 +91,48 @@ func TestBookmarks_ListByDocument(t *testing.T) {
 	assert.Nil(t, b.DocumentID)
 }
 
+// TestBookmarks_ListByDocuments: the tenant's bookmarks of each document
+// asked for, newest saved first, in one read; documents with none, or
+// another tenant's, are absent.
+func TestBookmarks_ListByDocuments(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	saved := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	ingest := func(url, source string, savedAt time.Time) *store.Bookmark {
+		t.Helper()
+		b := newIngestBookmark(url, source)
+		b.SavedAt = savedAt
+		_, err := bms.Ingest(ctx, b)
+		require.NoError(t, err)
+		return b
+	}
+	aOld := ingest("https://example.com/a", store.SourceChrome, saved)
+	aNew := ingest("https://example.com/a", store.SourceSafari, saved.Add(time.Hour))
+	b := ingest("https://example.com/b", store.SourceFirefox, saved)
+	other := ingest("https://example.com/other", store.SourceChrome, saved)
+	theirs := &store.Bookmark{TenantID: "other-tenant", URL: "https://example.com/theirs", Source: store.SourceChrome,
+		SavedAt: saved}
+	_, err := bms.Ingest(ctx, theirs)
+	require.NoError(t, err)
+
+	got, err := bms.ListByDocuments(ctx, "local", []string{*aOld.DocumentID, *b.DocumentID, *theirs.DocumentID,
+		"no-such-document"})
+	require.NoError(t, err)
+	ids := map[string][]string{}
+	for doc, list := range got {
+		for _, bm := range list {
+			ids[doc] = append(ids[doc], bm.ID)
+		}
+	}
+	assert.Equal(t, map[string][]string{*aOld.DocumentID: {aNew.ID, aOld.ID}, *b.DocumentID: {b.ID}}, ids)
+	assert.NotContains(t, got, *other.DocumentID, "a document not asked for")
+
+	none, err := bms.ListByDocuments(ctx, "local", nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}
+
 func newIngestBookmark(url, source string) *store.Bookmark {
 	return &store.Bookmark{TenantID: "local", URL: url, Source: source, SavedAt: time.Now().UTC()}
 }

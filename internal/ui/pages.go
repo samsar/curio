@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/samsar/curio/internal/docmeta"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -525,8 +526,17 @@ type SearchHit struct {
 	BookmarkTitle string
 	URL           string
 	ContentType   string
+	State         string  // the document's
 	Score         float64 // the fused score
 	Matches       []Match
+	// Bookmarks are what a hit without Matches was saved as, newest saved
+	// first: it matched on them, not on a passage.
+	Bookmarks []SavedBookmark
+}
+
+// SavedBookmark is one bookmark a hit was saved under.
+type SavedBookmark struct {
+	Title, FolderPath, Source string
 }
 
 // Ref names the hit as a list names a document: by its title, by its
@@ -536,9 +546,13 @@ func (h SearchHit) Ref() DocRef {
 }
 
 // MatchKind says which retrievers found the hit's matching chunks, in
-// words: keyword search's words, the vector search's meaning, or both; ""
-// when it has no matches.
+// words: keyword search's words, the vector search's meaning, or both;
+// and for a hit without matches, which matched on what it was saved as,
+// its bookmark details.
 func (h SearchHit) MatchKind() string {
+	if len(h.Matches) == 0 {
+		return "bookmark details"
+	}
 	keyword, meaning := false, false
 	for _, m := range h.Matches {
 		keyword = keyword || m.BM25 != nil
@@ -553,6 +567,58 @@ func (h SearchHit) MatchKind() string {
 		return "meaning only"
 	}
 	return ""
+}
+
+// Saved says what a hit without matches was saved as, in place of its
+// passages: the newest of its bookmarks with a title, else the newest, as
+// `Saved as "<title>" in <folder>`, the parts it has, or `Saved from
+// <source>`; "" for a hit with no bookmark. The folder is named as search
+// reads it, without the browser's root.
+func (h SearchHit) Saved() string {
+	if len(h.Bookmarks) == 0 {
+		return ""
+	}
+	b := h.Bookmarks[0]
+	for _, c := range h.Bookmarks {
+		if c.Title != "" {
+			b = c
+			break
+		}
+	}
+	folder := docmeta.FolderText([]string{b.FolderPath})
+	switch {
+	case b.Title != "" && folder != "":
+		return "Saved as “" + b.Title + "” in " + folder
+	case b.Title != "":
+		return "Saved as “" + b.Title + "”"
+	case folder != "":
+		return "Saved in " + folder
+	}
+	return "Saved from " + sourceName(b.Source)
+}
+
+// Gone reports whether the hit's page is no longer available: its document
+// failed or is dead, and only what it was saved as is left.
+func (h SearchHit) Gone() bool {
+	return h.State == string(store.DocStateFailed) || h.State == string(store.DocStateDead)
+}
+
+// sourceName names a bookmark's source for people; one it doesn't know is
+// shown as stored.
+func sourceName(source string) string {
+	switch source {
+	case store.SourceChrome:
+		return "Chrome"
+	case store.SourceSafari:
+		return "Safari"
+	case store.SourceFirefox:
+		return "Firefox"
+	case store.SourceHTML:
+		return "a bookmarks file"
+	case store.SourceManual:
+		return "curio"
+	}
+	return source
 }
 
 // shownMatches is how many of a hit's matches its result shows; the rest

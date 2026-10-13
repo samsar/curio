@@ -67,8 +67,11 @@ func renderSearchResults(w io.Writer, res *client.SearchResponse) {
 		len(res.Items), res.Query, res.BM25Hits, res.VectorHits)
 	for i, hit := range res.Items {
 		title := hit.Document.URL
-		if hit.Document.Title != nil && *hit.Document.Title != "" {
+		switch {
+		case hit.Document.Title != nil && *hit.Document.Title != "":
 			title = *hit.Document.Title
+		case hit.BookmarkTitle != "":
+			title = hit.BookmarkTitle
 		}
 		fmt.Fprintf(w, "%2d. %s\n", i+1, title)
 		fmt.Fprintf(w, "    %s   (score %.4f)\n", hit.Document.URL, hit.Score)
@@ -92,9 +95,48 @@ func renderSearchResults(w io.Writer, res *client.SearchResponse) {
 			for _, line := range wrapLines(snippet, 100) {
 				fmt.Fprintf(w, "    %s\n", line)
 			}
+		} else {
+			renderSavedAs(w, hit)
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+// renderSavedAs says what a hit without a matching passage matched on:
+// the bookmark it was saved as, and for a failed or dead document, that
+// the page is gone.
+func renderSavedAs(w io.Writer, hit client.SearchHit) {
+	if saved := savedAs(hit.Bookmarks); saved != "" {
+		for _, line := range wrapLines("saved as: "+saved, 100) {
+			fmt.Fprintf(w, "    %s\n", line)
+		}
+	}
+	if hit.Document.State == "failed" || hit.Document.State == "dead" {
+		fmt.Fprintf(w, "    page no longer available (%s); its bookmark matched\n", hit.Document.State)
+	}
+}
+
+// savedAs is the bookmark a hit was saved as, from the newest with a title
+// (else the newest): its title and folder, the parts it has, joined by
+// " · ".
+func savedAs(bookmarks []client.SearchHitBookmark) string {
+	if len(bookmarks) == 0 {
+		return ""
+	}
+	b := bookmarks[0]
+	for _, c := range bookmarks {
+		if c.Title != "" {
+			b = c
+			break
+		}
+	}
+	var parts []string
+	for _, p := range []string{b.Title, b.FolderPath} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 // truncate caps s at n runes, marking a cut with "...". Widths count runes,

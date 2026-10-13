@@ -12,6 +12,11 @@ With JavaScript off, the form is a plain GET. #results carries no class
 of its own: htmx swaps only its children, so each state's width is its
 child's, and a swap leaves the page as a plain GET of it renders.
 
+A result that matched on what it was saved as alone, its bookmark's
+title or folder, its site or its card, has no passage: in its place, one
+line, cut to fit, says what it was saved as. A failed or dead document's
+page is gone, which a line says, with its original address.
+
 Paging: the pager's links are plain links to ?q=&page=, built in Go;
 htmx boosts them to swap #results the same way, push their URL and bring
 the top of the results into view. The box and the pager share one
@@ -68,6 +73,8 @@ text/template keeps a block's default over an empty define.
 <div class="result-where"><span class="fav">{{template "icon" (typeIcon .ContentType)}}</span><span class="path" title="{{.URL}}">{{with host .URL}}<b>{{.}}</b>{{with urlTrail $hit.URL}} › {{.}}{{end}}{{else}}{{.URL}}{{end}}</span></div>
 {{with .Ref}}<h2 class="result-title"><a href="{{documentHref .ID}}" title="{{.Hover}}"{{with .Class}} class="{{.}}"{{end}}>{{.Name}}</a></h2>{{end}}
 {{range .ShownMatches}}{{template "match" .}}{{end}}
+{{- if not .Matches}}{{with .Saved}}<p class="saved-as" title="{{.}}">{{.}}</p>{{end}}{{end}}
+{{- if .Gone}}<p class="saved-gone">Saved — the page is no longer available{{with outbound .URL}} · <a href="{{.}}" rel="noopener noreferrer" target="_blank">the original address</a>{{end}}</p>{{end}}
 <div class="result-foot">{{with .ContentType}}<span class="tag">{{.}}</span>{{end}}{{with .MatchKind}}<span class="badge badge-accent plain">{{.}}</span>{{end}}<span class="score">score {{printf "%.4f" .Score}}</span>
 {{- with .MoreMatches}}<details><summary>{{count (len .) "more passage" "more passages"}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
 </li>

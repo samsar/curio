@@ -76,6 +76,41 @@ func okEmbedder() search.Embedder {
 	})
 }
 
+// TestSearch_HitWithoutMatches: a dead document found only by its
+// bookmark's title is a hit with no matches, its state dead, and carries
+// the bookmarks it was saved under; a document its chunks matched carries
+// none.
+func TestSearch_HitWithoutMatches(t *testing.T) {
+	s := newSearchServer(t, okEmbedder(), search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1})
+	ctx := context.Background()
+	dead := s.seedDocument(t, "https://example.com/gone", store.DocStateDead)
+	title, folder := "Kafka retention, explained", "/Bookmarks Bar/Streams"
+	saved := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	_, err := s.deps.Bookmarks.Ingest(ctx, &store.Bookmark{TenantID: "local", URL: dead.URL, Title: &title,
+		FolderPath: &folder, Source: store.SourceChrome, SavedAt: saved})
+	require.NoError(t, err)
+
+	resp := s.search(t, `{"query":"kafka retention"}`)
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var raw struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &raw))
+	got := decodeSearch(t, resp)
+	require.Len(t, got.Items, 4)
+	for i, hit := range got.Items {
+		if hit.Document.ID != dead.ID {
+			assert.NotEmpty(t, hit.Matches, hit.Document.URL)
+			assert.NotContains(t, raw.Items[i], "bookmarks", "a hit its chunks matched carries no bookmarks")
+			continue
+		}
+		assert.NotContains(t, raw.Items[i], "matches", "no passage matched")
+		assert.Equal(t, "dead", hit.Document.State)
+		assert.Equal(t, []SearchHitBookmark{{Title: title, FolderPath: folder, Source: store.SourceChrome,
+			SavedAt: saved}}, hit.Bookmarks)
+	}
+}
+
 func TestSearch_KBounds(t *testing.T) {
 	s := newSearchServer(t, okEmbedder(), search.Config{DefaultK: 2})
 	for _, body := range []string{`{"query":"kafka","k":-1}`, `{"query":"kafka","k":101}`} {
