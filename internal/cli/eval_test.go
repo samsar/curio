@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -58,4 +61,25 @@ func TestRankQueries(t *testing.T) {
 		assert.Contains(t, err.Error(), `"second"`)
 		assert.Contains(t, err.Error(), "connection refused")
 	})
+}
+
+// TestRenderEvalReport_Unchanged: curio eval's report, for the example
+// query set and a fixed ranking at two cutoffs, is byte for byte what it
+// was before judgments had grades (testdata/eval-report.golden, written by
+// that code), and says nothing of kinds or tags.
+func TestRenderEvalReport_Unchanged(t *testing.T) {
+	qs, err := eval.LoadQuerySet(filepath.Join("..", "..", "docs", "eval.example.yaml"))
+	require.NoError(t, err)
+	ranked := [][]string{
+		{"https://distill.pub/2017/momentum/", "https://example.com/other", "https://colah.github.io/posts/2015-08-Backprop/"},
+		{"https://example.com/a", "https://example.com/b"},
+		{"https://example.com/c", "https://aphyr.com/posts/288-the-network-is-reliable",
+			"https://martinfowler.com/articles/microservices.html"},
+	}
+	var out bytes.Buffer
+	require.NoError(t, renderEvalReport(&out, eval.Evaluate(qs, ranked, 10)))
+	require.NoError(t, renderEvalReport(&out, eval.Evaluate(qs, ranked, 2)))
+	golden, err := os.ReadFile(filepath.Join("testdata", "eval-report.golden"))
+	require.NoError(t, err)
+	assert.Equal(t, string(golden), out.String())
 }
