@@ -2245,7 +2245,7 @@ components:
           description: When the schedule next opens the queue; present exactly when reason is outside_schedule.
         kinds:
           type: array
-          description: The worker pools' kinds, in the order fetch, index, cluster.
+          description: The worker pools' kinds, in the order fetch, index, cluster, cards.
           items: { $ref: "#/components/schemas/QueueKind" }
       required: [paused, throttle, keep_awake, keep_awake_active, state, kinds]
 

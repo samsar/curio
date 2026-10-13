@@ -12,7 +12,8 @@ type Pool struct {
 }
 
 // PoolSizes is how many goroutines run the fetch and index pools. The
-// cluster pool always has clusterPoolSize.
+// cluster pool always has clusterPoolSize, and the cards pool
+// cardsPoolSize.
 type PoolSizes struct {
 	Fetch, Index int
 }
@@ -35,6 +36,9 @@ const clusterPoolSize = 1
 //     rebuild the daemon left unfinished, and once a job's outcome is
 //     recorded the interest scheduler is asked to check, so its state
 //     moves on from rebuilding at once.
+//   - cards: the stale document cards embedded on one goroutine, so card
+//     work never takes an index slot and runs once at a time. No hook: a
+//     cards job that fails marks no document.
 func NewPools(d Deps, sizes PoolSizes, opts WorkerOptions) []Pool {
 	fetch := NewWorker(d.Queue, opts)
 	fetch.Register(store.JobKindFetch, fetchHandler(d))
@@ -49,9 +53,13 @@ func NewPools(d Deps, sizes PoolSizes, opts WorkerOptions) []Pool {
 	cluster.OnPermanentFailure(store.JobKindCluster, abandonedRebuild(d))
 	cluster.OnFinished(store.JobKindCluster, func() { kick(d) })
 
+	cards := NewWorker(d.Queue, opts)
+	cards.Register(store.JobKindCards, cardsHandler(d))
+
 	return []Pool{
 		{Name: "fetch", Kind: store.JobKindFetch, Worker: fetch, Size: sizes.Fetch},
 		{Name: "index", Kind: store.JobKindIndex, Worker: index, Size: sizes.Index},
 		{Name: "cluster", Kind: store.JobKindCluster, Worker: cluster, Size: clusterPoolSize},
+		{Name: "cards", Kind: store.JobKindCards, Worker: cards, Size: cardsPoolSize},
 	}
 }

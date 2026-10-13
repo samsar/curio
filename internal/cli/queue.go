@@ -11,15 +11,16 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/store"
 )
 
 func newPauseCmd(env *daemonctl.Env) *cobra.Command {
 	return &cobra.Command{
 		Use:   "pause",
 		Short: "Stop starting jobs; running ones finish, and the pause survives restarts",
-		Long: `Pause the queue: the daemon starts no new fetch, index or clustering job
-until 'curio resume'. Jobs already running finish. The pause is stored, so
-it holds across daemon restarts. Starts the daemon if it isn't running.`,
+		Long: `Pause the queue: the daemon starts no new fetch, index, clustering or cards
+job until 'curio resume'. Jobs already running finish. The pause is stored,
+so it holds across daemon restarts. Starts the daemon if it isn't running.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return updateQueue(cmd, env, client.QueueUpdate{Paused: new(true)})
@@ -185,13 +186,13 @@ func withSettings(q *client.Queue, state string, schedule bool) string {
 	return strings.Join(parts, ", ")
 }
 
-// throttledLimits lists the limits of the kinds a throttle caps, e.g.
-// "fetch 4, index 1". Clustering runs one job at a time whatever the
-// throttle, so its limit says nothing.
+// throttledLimits lists the limits of the kinds q's throttle caps, e.g.
+// "fetch 4, index 1". Clustering and the cards run one job at a time
+// whatever the throttle, so their limits say nothing.
 func throttledLimits(q *client.Queue) string {
 	var parts []string
 	for _, k := range q.Kinds {
-		if k.Kind != "cluster" {
+		if _, capped := store.Throttle(q.Throttle).Cap(store.JobKind(k.Kind)); capped {
 			parts = append(parts, fmt.Sprintf("%s %d", k.Kind, k.Limit))
 		}
 	}

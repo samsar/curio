@@ -52,6 +52,7 @@ type Deps struct {
 	Extractions     store.ExtractionStore
 	Bookmarks       store.BookmarkStore
 	Chunks          store.ChunkStore
+	Index           store.DocumentIndex // the documents' fields and cards; reindex-all makes the cards stale
 	Queue           store.JobStore
 	Embedder        embedder.Embedder
 	GenerationModel string            // config.yaml's generation.model as the daemon loaded it, on healthz

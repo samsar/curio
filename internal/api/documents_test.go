@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -221,6 +222,66 @@ func TestReindexAll_DriftResetFailure(t *testing.T) {
 		http.StatusInternalServerError)
 	assert.Contains(t, p.Detail, "enqueued all 2 index jobs")
 	assert.Contains(t, p.Detail, "permission denied")
+	assert.Equal(t, 2, s.count(t, requestJobs))
+}
+
+// TestReindexAll_ResetsTheCards: reindexing the fetched documents makes
+// every card stale and queues one cards job, so the cards are embedded
+// again by the build serving now; another state leaves them alone.
+func TestReindexAll_ResetsTheCards(t *testing.T) {
+	for path, reset := range map[string]bool{
+		"/v1/documents/reindex-all":              true,
+		"/v1/documents/reindex-all?state=failed": false,
+	} {
+		t.Run(path, func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestServer(t)
+			for _, u := range []string{"https://example.com/a", "https://example.com/b"} {
+				s.seedContent(t, s.seedDocument(t, u, store.DocStateFetched), "# Page")
+			}
+			stale, err := s.deps.Index.StaleCards(ctx, "local", "", 10)
+			require.NoError(t, err)
+			require.Len(t, stale, 2)
+			vectors := make([]store.CardVector, len(stale))
+			for i, c := range stale {
+				vectors[i] = store.CardVector{DocumentID: c.DocumentID, Text: c.Text,
+					Embedding: make([]float32, config.Default().Embedding.Dim)}
+			}
+			_, err = s.deps.Index.PutCardVectors(ctx, vectors)
+			require.NoError(t, err)
+			_, err = s.db.Exec(`DELETE FROM jobs WHERE kind = ?`, store.JobKindCards)
+			require.NoError(t, err)
+
+			resp := s.do(t, request{method: http.MethodPost, path: path})
+			require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+			stale, err = s.deps.Index.StaleCards(ctx, "local", "", 10)
+			require.NoError(t, err)
+			want, jobs := 0, 0
+			if reset {
+				want, jobs = 2, 1
+			}
+			assert.Len(t, stale, want)
+			assert.Equal(t, jobs, s.count(t, "jobs WHERE kind = 'cards' AND status = 'pending'"))
+		})
+	}
+}
+
+// failingResetCards is a document index whose cards can't be reset.
+type failingResetCards struct{ store.DocumentIndex }
+
+func (failingResetCards) ResetCards(context.Context, string) (int, error) { return 0, errInjected }
+
+// TestReindexAll_CardsResetFailure: cards that can't be made stale are a
+// 500 that says every index job was enqueued, which they were.
+func TestReindexAll_CardsResetFailure(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Index = failingResetCards{d.Index} })
+	s.seedContent(t, s.seedDocument(t, "https://example.com/a", store.DocStateFetched), "# A")
+	s.seedContent(t, s.seedDocument(t, "https://example.com/b", store.DocStateFetched), "# B")
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all"}),
+		http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, "enqueued all 2 index jobs, but resetting the document cards failed")
+	assert.Contains(t, p.Detail, "injected")
 	assert.Equal(t, 2, s.count(t, requestJobs))
 }
 

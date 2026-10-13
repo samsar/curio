@@ -99,6 +99,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 		Queue:       queue,
 		Dispatcher:  dispatcher,
 		Indexer:     idx,
+		Cards:       sqlitestore.NewDocumentIndex(db, dim),
 		Log:         quietLog,
 	}, db, ff
 }
@@ -699,6 +700,7 @@ func TestNewPools(t *testing.T) {
 		{"fetch", []store.JobKind{store.JobKindFetch}, []store.JobKind{store.JobKindFetch}, 16},
 		{"index", []store.JobKind{store.JobKindIndex}, []store.JobKind{store.JobKindIndex}, 4},
 		{"cluster", []store.JobKind{store.JobKindCluster}, []store.JobKind{store.JobKindCluster}, 1},
+		{"cards", []store.JobKind{store.JobKindCards}, nil, 1},
 	}, got)
 	assert.Equal(t, []store.JobKind{store.JobKindCluster}, slices.Sorted(maps.Keys(pools[2].Worker.onFinished)),
 		"the scheduler is kicked once a rebuild's outcome is recorded")

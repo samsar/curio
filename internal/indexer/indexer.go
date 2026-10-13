@@ -9,13 +9,15 @@ import (
 	"github.com/samsar/curio/internal/store"
 )
 
-// Indexer orchestrates the chunk → embed → write step for one extraction.
+// Indexer orchestrates the chunk → embed → write step for one extraction,
+// and embeds the documents' stale cards.
 //
 // It does NOT fetch, write markdown to disk, or update document state —
 // those are the fetch-job handler's responsibilities. The indexer's job is
 // strictly: given an extraction's markdown, replace the document's chunks
-// in BM25 and vector indices. Idempotent thanks to
-// ChunkStore.ReplaceForDocument.
+// in BM25 and vector indices, idempotent thanks to
+// ChunkStore.ReplaceForDocument; and given the cards the store made stale,
+// store their vectors.
 type Indexer struct {
 	chunks    store.ChunkStore
 	embedder  embedder.Embedder
@@ -118,6 +120,48 @@ func (i *Indexer) EmbedChunks(ctx context.Context, texts []string) ([][]float32,
 		prefixed[j] = i.docPrefix + t
 	}
 	return i.embed(ctx, prefixed)
+}
+
+// EmbedStaleCards embeds the tenant's stale cards (store.DocumentIndex),
+// in one pass by document: a batch of at most the batch size at a time,
+// each embedded as chunks are (EmbedChunks, the document prefix applied)
+// and its vectors stored in one transaction (PutCardVectors), which keeps
+// a vector only for a card that still holds the text embedded. A card that
+// changes behind the pass is left to the cards job its write queued. ctx
+// is checked before every batch; the batches stored before a failure stay
+// stored. embedded counts the vectors stored.
+func (i *Indexer) EmbedStaleCards(ctx context.Context, cards store.DocumentIndex, tenantID string) (int, error) {
+	embedded := 0
+	for after := ""; ; {
+		if err := ctx.Err(); err != nil {
+			return embedded, fmt.Errorf("indexer: stopped after %d cards: %w", embedded, err)
+		}
+		batch, err := cards.StaleCards(ctx, tenantID, after, i.batchSize)
+		if err != nil {
+			return embedded, fmt.Errorf("indexer: read stale cards: %w", err)
+		}
+		if len(batch) == 0 {
+			return embedded, nil
+		}
+		texts := make([]string, len(batch))
+		for j, c := range batch {
+			texts[j] = c.Text
+		}
+		vectors, err := i.EmbedChunks(ctx, texts)
+		if err != nil {
+			return embedded, fmt.Errorf("indexer: embed cards: %w", err)
+		}
+		put := make([]store.CardVector, len(batch))
+		for j, c := range batch {
+			put[j] = store.CardVector{DocumentID: c.DocumentID, Text: c.Text, Embedding: vectors[j]}
+		}
+		n, err := cards.PutCardVectors(ctx, put)
+		if err != nil {
+			return embedded, fmt.Errorf("indexer: store card vectors: %w", err)
+		}
+		embedded += n
+		after = batch[len(batch)-1].DocumentID
+	}
 }
 
 // embed embeds texts in consecutive batches of at most batchSize, preserving

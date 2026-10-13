@@ -402,3 +402,104 @@ func TestIndexer_CanceledBetweenBatchesWritesNothing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, stored, 1, "the previous single chunk is untouched")
 }
+
+// seedCards creates n documents of tenant, each with its card, stale.
+func seedCards(t *testing.T, db *sqlitestore.DB, tenant string, n int) {
+	t.Helper()
+	docs := sqlitestore.NewDocuments(db)
+	for i := range n {
+		require.NoError(t, docs.Create(context.Background(), &store.Document{TenantID: tenant,
+			URL: fmt.Sprintf("https://example.com/%03d", i), Title: new(fmt.Sprint("Page ", i))}))
+	}
+}
+
+// TestIndexer_EmbedStaleCards: every stale card is embedded, a batch of
+// at most EmbedBatchSize to a request, with the document prefix, as chunks
+// are; the vectors are stored, and the cards are no longer stale.
+func TestIndexer_EmbedStaleCards(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	cards := sqlitestore.NewDocumentIndex(db, dim)
+	seedCards(t, db, "local", 70)
+	seedCards(t, db, "other", 3)
+	emb := &batchRecorder{dim: dim}
+	idx := New(sqlitestore.NewChunks(db, dim), emb, Options{DocumentPrefix: "search_document: "})
+
+	n, err := idx.EmbedStaleCards(context.Background(), cards, "local")
+	require.NoError(t, err)
+	assert.Equal(t, 70, n)
+	sizes := make([]int, len(emb.batches))
+	for i, b := range emb.batches {
+		sizes[i] = len(b)
+		for _, text := range b {
+			assert.True(t, strings.HasPrefix(text, "search_document: Page "), "%q", text)
+		}
+	}
+	assert.Equal(t, []int{32, 32, 6}, sizes)
+	stale, err := cards.StaleCards(context.Background(), "local", "", 100)
+	require.NoError(t, err)
+	assert.Empty(t, stale)
+	theirs, err := cards.StaleCards(context.Background(), "other", "", 100)
+	require.NoError(t, err)
+	assert.Len(t, theirs, 3, "another tenant's cards are its own job's")
+
+	emb.batches = nil
+	n, err = idx.EmbedStaleCards(context.Background(), cards, "local")
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	assert.Empty(t, emb.batches, "nothing stale, nothing sent")
+}
+
+// cancelAfterPut is a card index that cancels a pass once it stores a
+// batch, as a shutdown between two batches would.
+type cancelAfterPut struct {
+	store.DocumentIndex
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterPut) PutCardVectors(ctx context.Context, cards []store.CardVector) (int, error) {
+	defer c.cancel()
+	return c.DocumentIndex.PutCardVectors(ctx, cards)
+}
+
+// TestIndexer_EmbedStaleCards_StopsBetweenBatches: a pass cut short keeps
+// the batches it stored, and sends nothing more.
+func TestIndexer_EmbedStaleCards_StopsBetweenBatches(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	cards := sqlitestore.NewDocumentIndex(db, dim)
+	seedCards(t, db, "local", 40)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	emb := &batchRecorder{dim: dim}
+
+	n, err := New(sqlitestore.NewChunks(db, dim), emb, Options{}).EmbedStaleCards(ctx,
+		cancelAfterPut{cards, cancel}, "local")
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 32, n)
+	assert.Len(t, emb.batches, 1, "no batch is sent after cancellation")
+	stale, err := cards.StaleCards(context.Background(), "local", "", 100)
+	require.NoError(t, err)
+	assert.Len(t, stale, 8, "the first batch stays embedded")
+}
+
+// TestIndexer_EmbedStaleCards_EmbedFailure: a batch the embedder fails
+// stores nothing of it, keeps the batches before, and says why.
+func TestIndexer_EmbedStaleCards_EmbedFailure(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	cards := sqlitestore.NewDocumentIndex(db, dim)
+	seedCards(t, db, "local", 40)
+	calls := 0
+	emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
+		if calls++; calls > 1 {
+			return nil, embedder.ErrInputTooLong
+		}
+		return slices.Repeat([][]float32{make([]float32, dim)}, len(texts)), nil
+	})
+
+	n, err := New(sqlitestore.NewChunks(db, dim), emb, Options{}).EmbedStaleCards(context.Background(), cards, "local")
+	require.ErrorIs(t, err, embedder.ErrInputTooLong)
+	assert.Contains(t, err.Error(), "embed cards")
+	assert.Equal(t, 32, n)
+}

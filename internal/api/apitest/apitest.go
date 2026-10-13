@@ -164,6 +164,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 		Extractions:    sqlite.NewExtractions(db),
 		Bookmarks:      sqlite.NewBookmarks(db),
 		Chunks:         chunks,
+		Index:          sqlite.NewDocumentIndex(db, emb.Dim),
 		Queue:          sqlite.NewJobs(db),
 		Search:         search.New(chunks, docs, emb, search.Config{Log: quiet}),
 		Insights:       sqlite.NewInsights(db),

@@ -28,7 +28,8 @@ type Deps struct {
 	Queue       store.JobQueue
 	Dispatcher  fetcher.Dispatcher
 	Indexer     *indexer.Indexer
-	Insight     Rebuilder // the insight engine; nil unless the insight layer is wired
+	Cards       store.DocumentIndex // the documents' cards, which the cards job embeds
+	Insight     Rebuilder           // the insight engine; nil unless the insight layer is wired
 	// Placer places each document indexed into the current interests; nil
 	// places none (the insight layer off).
 	Placer Placer

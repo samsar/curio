@@ -138,7 +138,7 @@ type QueueState struct {
 	// outside_schedule.
 	OpensAt time.Time
 	// Limits is how many jobs of each pool's kind may run at once while the
-	// queue is open: fetch, index, then cluster.
+	// queue is open: fetch, index, cluster, then cards.
 	Limits []KindLimit
 }
 
@@ -172,6 +172,7 @@ func (g *QueueGate) state(st *gateState, now time.Time) QueueState {
 			{store.JobKindFetch, st.settings.Throttle.Limit(store.JobKindFetch, g.pools.Fetch)},
 			{store.JobKindIndex, st.settings.Throttle.Limit(store.JobKindIndex, g.pools.Index)},
 			{store.JobKindCluster, st.settings.Throttle.Limit(store.JobKindCluster, clusterPoolSize)},
+			{store.JobKindCards, st.settings.Throttle.Limit(store.JobKindCards, cardsPoolSize)},
 		},
 	}
 }

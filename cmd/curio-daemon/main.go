@@ -367,6 +367,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	exts := sqlitestore.NewExtractions(db)
 	bms := sqlitestore.NewBookmarks(db)
 	chunks := sqlitestore.NewChunks(db, dim)
+	index := sqlitestore.NewDocumentIndex(db, dim)
 	queue := sqlitestore.NewJobs(db)
 	insights := sqlitestore.NewInsights(db)
 
@@ -427,6 +428,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Queue:       queue,
 		Dispatcher:  dispatcher,
 		Indexer:     idx,
+		Cards:       index,
 		Log:         slog.Default(),
 	}
 	// With insight off nothing is rebuilt or placed on its own: there is
@@ -464,6 +466,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Extractions:     exts,
 		Bookmarks:       bms,
 		Chunks:          chunks,
+		Index:           index,
 		Queue:           queue,
 		Embedder:        emb,
 		GenerationModel: cfg.Generation.Model,

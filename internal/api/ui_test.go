@@ -225,7 +225,9 @@ func TestUI_Status(t *testing.T) {
 	assert.Contains(t, body, `<th scope="col" class="num">Finished, 10m</th>`)
 	assert.Contains(t, body, `<td>fetch</td><td class="num">0 of 16</td><td class="num">1</td><td class="num">0</td>`,
 		"the new page's fetch job")
-	assert.Contains(t, body, `<span class="why">Working: 1 job waiting</span>`)
+	assert.Contains(t, body, `<td>cards</td><td class="num">0 of 1</td><td class="num">1</td><td class="num">0</td>`,
+		"the cards job the writes queued")
+	assert.Contains(t, body, `<span class="why">Working: 2 jobs waiting</span>`)
 	assert.Contains(t, body, `id="queue-pause" data-kind="pause"`)
 	assert.Contains(t, body, "1 job queued, and none finished in the last 10m.")
 	assert.Contains(t, body, `qwen3-embedding:0.6b<span class="sub">1024 dimensions</span>`)
