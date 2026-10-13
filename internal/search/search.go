@@ -19,7 +19,8 @@ import (
 // Engine runs hybrid search.
 //
 //  1. BM25 over chunks_fts and vector ANN over chunks_vec, concurrently,
-//     each reading the same pool of chunks whatever the request asks for
+//     each reading the same pool of chunks whatever the request asks for;
+//     a zero vector weight skips the vector leg
 //  2. RRF fuse the two ranked chunk lists
 //  3. Collapse chunks → documents (best chunk per doc, configurable), and
 //     rank them
@@ -27,8 +28,8 @@ import (
 //     each document's best chunks and the BM25 snippets of those alone
 //
 // The Embedder dependency is used only on the query side — to vectorize
-// the user's query before VectorSearch. Documents are embedded by the
-// indexer at write time.
+// the user's query before VectorSearch, never with a zero vector weight.
+// Documents are embedded by the indexer at write time.
 type Engine struct {
 	chunks       store.ChunkStore
 	docs         store.DocumentStore
@@ -65,7 +66,10 @@ const (
 type Config struct {
 	// BM25Weight and VectorWeight weigh each retriever in RRF. Both zero
 	// means unset (1.0 each); a single zero switches that retriever's
-	// contribution off.
+	// contribution off. A zero VectorWeight also skips the vector leg: the
+	// query is never embedded, so a down or hung embedding model costs the
+	// search nothing and never degrades it. A zero BM25Weight still runs
+	// BM25, whose results are the fallback when the vector leg fails.
 	BM25Weight   float64
 	VectorWeight float64
 	RRFK         int
@@ -238,7 +242,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	// so we tokenize down to safe terms before handing to FTS5. The vector
 	// path keeps the original text since the embedder handles language fine.
 	// Empty after sanitization (e.g. query was all punctuation) means BM25
-	// contributes nothing; vector search still runs.
+	// contributes nothing; vector search still runs, unless weighted 0.
 	var bm25Hits, vecHits []store.ChunkHit
 	var vecErr error
 	// Each leg writes its own stages' fields, read only after Wait.
@@ -257,12 +261,17 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 			return nil
 		})
 	}
-	g.Go(func() error {
-		// Never fatal: returning nil keeps a vector failure from canceling
-		// the BM25 leg.
-		vecHits, vecErr = e.vectorLeg(gctx, req, fanout, &timings)
-		return nil
-	})
+	// A vector leg weighted 0 would contribute nothing to the ranking, and
+	// running it would still wait on the embedding model, up to
+	// embedTimeout, and degrade the search when that model is down.
+	if e.vectorW != 0 {
+		g.Go(func() error {
+			// Never fatal: returning nil keeps a vector failure from canceling
+			// the BM25 leg.
+			vecHits, vecErr = e.vectorLeg(gctx, req, fanout, &timings)
+			return nil
+		})
+	}
 	err := g.Wait()
 	if cerr := ctx.Err(); cerr != nil {
 		return nil, fmt.Errorf("search: %w", cerr)

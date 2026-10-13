@@ -187,7 +187,7 @@ func TestRun_ScoresTheLibrary(t *testing.T) {
 
 // TestRun_TheBM25VariantRanksOnlyItsMatches: with the vector weight 0 the
 // engine ranks the keyword's documents alone, never the vector leg's at
-// score 0.
+// score 0, and embeds no query.
 func TestRun_TheBM25VariantRanksOnlyItsMatches(t *testing.T) {
 	fx := newFixture(t)
 	out := filepath.Join(fx.dir, "report.json")
@@ -203,6 +203,7 @@ func TestRun_TheBM25VariantRanksOnlyItsMatches(t *testing.T) {
 		ranked = append(ranked, ids)
 	}
 	assert.Equal(t, [][]string{{"doc-03", "doc-05"}, {"doc-12", "doc-20"}, {"doc-07"}, {"doc-18", "doc-16"}}, ranked)
+	assert.Equal(t, []string{warmUpText}, fx.ollama.embeds, "the warm-up alone")
 }
 
 // TestRun_Judgments: each judgment says what it is in the copy: missing,

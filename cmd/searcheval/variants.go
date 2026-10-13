@@ -73,7 +73,7 @@ var variants = []variant{
 	},
 	{
 		name:        "bm25",
-		description: "BM25 alone: the engine with the vector weight 0",
+		description: "BM25 alone: the engine with the vector weight 0, which never embeds the query",
 		build: func(e env) (ranker, error) {
 			cfg := search.ConfigFrom(e.cfg)
 			cfg.BM25Weight, cfg.VectorWeight = 1, 0

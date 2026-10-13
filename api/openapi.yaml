@@ -1682,7 +1682,7 @@ components:
         query:       { type: string }
         took_ms:     { type: integer, description: "Time the search took, in milliseconds" }
         bm25_hits:   { type: integer, description: "How many chunks BM25 returned before fusion" }
-        vector_hits: { type: integer, description: "How many chunks the vector index returned before fusion (0 when degraded)" }
+        vector_hits: { type: integer, description: "How many chunks the vector index returned before fusion (0 when degraded, and with search.vector_weight 0, which skips the vector search)" }
         total:
           type: integer
           description: >

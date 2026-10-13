@@ -440,9 +440,13 @@ ranking; see "Search pages by offset within a fixed-depth pool".
 the keyword matches, in document-ID order, and counted in `total`. On a small
 library, where the vector leg returns every chunk, a keyword-only search
 ranked the whole library. `Fuse` now skips a list weighted 0, so an item only
-it holds is not in the ranking. The zero-weight leg still runs, so a config
-with `bm25_weight: 0` still falls back to the keyword results (weight 1) when
-the vector leg fails. The default 1/1 weights rank exactly as before.
+it holds is not in the ranking. A vector weight of 0 also skips the vector
+leg: the query is never embedded, so a keyword-only search doesn't wait up to
+`embed_timeout_seconds` on a hung Ollama, isn't marked degraded (with a WARN)
+when Ollama is down, and reports `vector_hits` 0 and no embed or vector
+time. A BM25 weight of 0 still runs BM25, so a config with `bm25_weight: 0`
+still falls back to the keyword results (weight 1) when the vector leg
+fails. The default 1/1 weights rank exactly as before.
 
 ---
 

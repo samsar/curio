@@ -160,7 +160,8 @@ type Search struct {
 	RRFK     int `yaml:"rrf_k"`
 	// BM25Weight and VectorWeight weigh each retriever in RRF: finite, not
 	// negative, not both zero. A zero switches that retriever's
-	// contribution off.
+	// contribution off; a zero VectorWeight also leaves the query
+	// unembedded, so search never waits on or degrades for Ollama.
 	BM25Weight   float64 `yaml:"bm25_weight"`
 	VectorWeight float64 `yaml:"vector_weight"`
 	Collapse     string  `yaml:"collapse"` // max | sum | top3_avg
