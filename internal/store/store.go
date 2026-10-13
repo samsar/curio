@@ -839,6 +839,65 @@ type ChunkStore interface {
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
 }
 
+// DocumentHit is a document a document list found, with its score in
+// that list: higher is better, whatever the list, as for ChunkHit.
+type DocumentHit struct {
+	DocumentID string
+	Score      float64
+}
+
+// Card is a document's card, the short text it is embedded by, as the
+// cards job reads it to embed.
+type Card struct {
+	DocumentID string
+	Text       string
+}
+
+// CardVector is a card's vector and the text it was made from.
+type CardVector struct {
+	DocumentID string
+	Text       string
+	Embedding  []float32
+}
+
+// DocumentIndex searches documents by what they were saved as, not by
+// their text: the fields index over each document's title, the titles and
+// folders it was bookmarked under, its site and its author, and the
+// vectors of the documents' cards. Every document, whatever its state,
+// has its fields and a card: the stores derive them in the transaction of
+// every write that changes what they are derived from. A card has a
+// vector once the cards job has embedded it, and is stale while its text
+// differs from the text its vector was made from.
+type DocumentIndex interface {
+	// SearchFields runs query, a MATCH expression as
+	// ChunkStore.BM25Search takes it, against the tenant's documents'
+	// fields, scoped by f, and returns at most limit documents, best
+	// first, equal scores in the order their fields were first written.
+	// Documents of every state are returned.
+	SearchFields(ctx context.Context, tenantID, query string, limit int, f SearchFilters) ([]DocumentHit, error)
+	// SearchCards returns at most limit of the tenant's documents whose
+	// card vectors are nearest embedding, scoped by f, nearest first,
+	// equal distances by document ID. Documents of every state are
+	// returned. It over-fetches neighbors, as ChunkStore.VectorSearch
+	// does, so filtered-out cards don't crowd out its hits. embedding
+	// must be the index's width.
+	SearchCards(ctx context.Context, tenantID string, embedding []float32, limit int, f SearchFilters) ([]DocumentHit, error)
+	// StaleCards returns at most limit of the tenant's stale cards, by
+	// document ID, from the first after after ("" for the start).
+	StaleCards(ctx context.Context, tenantID, after string, limit int) ([]Card, error)
+	// PutCardVectors stores each card's vector, in one transaction, for a
+	// card whose text is still the text the vector was made from; a card
+	// whose text changed since is left stale, without the vector. A
+	// vector of another width than the index's is an error, and nothing
+	// is written. written counts the vectors stored.
+	PutCardVectors(ctx context.Context, cards []CardVector) (written int, err error)
+	// ResetCards makes every one of the tenant's cards stale, keeping
+	// their vectors searchable until they are embedded again, and queues
+	// a cards job, at most one pending per tenant, in one transaction.
+	// It returns how many cards it made stale.
+	ResetCards(ctx context.Context, tenantID string) (int, error)
+}
+
 // DocumentJobPayload is the payload of a job that works on one document
 // (fetch and index).
 type DocumentJobPayload struct {

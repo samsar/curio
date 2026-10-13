@@ -95,11 +95,11 @@ func newIngestBookmark(url, source string) *store.Bookmark {
 	return &store.Bookmark{TenantID: "local", URL: url, Source: source, SavedAt: time.Now().UTC()}
 }
 
-type rowCounts struct{ documents, bookmarks, jobs int }
+type rowCounts struct{ documents, bookmarks, fetchJobs int }
 
 func countIngestRows(t *testing.T, db *DB) rowCounts {
 	t.Helper()
-	return rowCounts{countRows(t, db, "documents"), countRows(t, db, "bookmarks"), countRows(t, db, "jobs")}
+	return rowCounts{countRows(t, db, "documents"), countRows(t, db, "bookmarks"), countFetchJobs(t, db)}
 }
 
 func TestBookmarks_Ingest_NewURL(t *testing.T) {

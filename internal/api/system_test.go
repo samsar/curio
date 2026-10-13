@@ -40,7 +40,8 @@ func TestStats(t *testing.T) {
 	assert.Equal(t, 4, got.BookmarksTotal)
 	assert.Equal(t, 4, got.DocumentsTotal)
 	assert.Equal(t, map[string]int{"fetched": 2, "failed": 1, "pending": 1}, got.DocumentsByState)
-	assert.Equal(t, map[string]int{"done": 2, "running": 1}, got.JobsByStatus)
+	assert.Equal(t, map[string]int{"done": 2, "running": 1, "pending": 1}, got.JobsByStatus,
+		"the fetch jobs, and the cards job the documents' writes queued")
 }
 
 var errInjected = errors.New("injected")

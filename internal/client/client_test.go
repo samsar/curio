@@ -629,7 +629,7 @@ func TestFailureCauses(t *testing.T) {
 		assert.Equal(t, "pending", got.State)
 		assert.Empty(t, got.FailureCause)
 	}
-	assert.Equal(t, 2, countRows(t, s, "jobs"))
+	assert.Equal(t, 2, countRows(t, s, "jobs WHERE kind = 'fetch'"))
 }
 
 func TestJobs(t *testing.T) {
@@ -665,7 +665,7 @@ func TestJobs(t *testing.T) {
 			break
 		}
 	}
-	assert.Len(t, seen, 4, "every job, over two pages")
+	assert.Len(t, seen, 5, "every job, the cards job the document's write queued among them, over two pages")
 
 	job, err := c.GetJob(ctx, failed.Items[0].ID)
 	require.NoError(t, err)
@@ -703,7 +703,7 @@ func TestStatsAndMetrics(t *testing.T) {
 	assert.Equal(t, 1, stats.BookmarksTotal)
 	assert.Equal(t, 2, stats.DocumentsTotal)
 	assert.Equal(t, map[string]int{"pending": 1, "fetched": 1}, stats.DocumentsByState)
-	assert.Equal(t, map[string]int{"pending": 1}, stats.JobsByStatus)
+	assert.Equal(t, map[string]int{"pending": 2}, stats.JobsByStatus, "the fetch, and the cards job the writes queued")
 
 	_, err = s.DB.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, started_at, updated_at)
 		VALUES ('j1', 'local', 'index', '{}', 'done',

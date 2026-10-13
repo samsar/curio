@@ -477,7 +477,7 @@ func TestQueryPlans(t *testing.T) {
 			avoid: []string{"idx_jobs_tenant_"},
 		},
 	}
-	for _, tc := range slices.Concat(cases, listPlanCases(t), insightPlanCases()) {
+	for _, tc := range slices.Concat(cases, listPlanCases(t), insightPlanCases(), documentIndexPlanCases(t)) {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := queryPlan(t, db, tc.query, tc.args...)
 			assert.True(t, strings.HasPrefix(plan, tc.first), "plan starts with %q:\n%s", tc.first, plan)
@@ -491,6 +491,131 @@ func TestQueryPlans(t *testing.T) {
 				assert.NotContains(t, plan, avoid)
 			}
 		})
+	}
+}
+
+// documentIndexPlanCases pin the document lists' searches, the cards
+// job's reads and writes, and the statements that keep the fields and
+// cards in step (see "Metadata search: a fields index and a card per
+// document"). Each document's derived rows are reached by its keys, and a
+// host's through idx_document_fields_host, so a write costs reads of its
+// own host's rows, never of the library's.
+func documentIndexPlanCases(t *testing.T) []planCase {
+	fieldsQ, fieldsArgs := fieldsQuery("local", `"kafka"`, 200, store.SearchFilters{})
+	fieldsSourceQ, fieldsSourceArgs := fieldsQuery("local", `"kafka"`, 200,
+		store.SearchFilters{Source: []string{store.SourceChrome}})
+	cardsQ, cardsArgs := cardsQuery("local", queryVector(t), 200, store.SearchFilters{})
+	const (
+		document     = "SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)"
+		fieldsByDoc  = "SEARCH document_fields USING INDEX sqlite_autoindex_document_fields_1 (document_id=?)"
+		cardByDoc    = "SEARCH document_cards USING INDEX sqlite_autoindex_document_cards_1 (document_id=?)"
+		noTableScans = "SCAN"
+	)
+	return []planCase{
+		{
+			// The MATCH drives; each hit's fields by rowid and document by
+			// primary key, whatever the document's state.
+			name:  "SearchFields",
+			query: fieldsQ, args: fieldsArgs,
+			first: "SCAN document_fields_fts VIRTUAL TABLE",
+			want:  []string{"SEARCH f USING INTEGER PRIMARY KEY (rowid=?)", document},
+			// ORDER BY the bm25 score.
+			sorts: true,
+		},
+		{
+			name:  "SearchFields by source",
+			query: fieldsSourceQ, args: fieldsSourceArgs,
+			first: "SCAN document_fields_fts VIRTUAL TABLE",
+			want:  []string{"SEARCH b EXISTS USING INDEX idx_bookmarks_document (document_id=?)"},
+			sorts: true,
+			avoid: []string{"idx_bookmarks_tenant_"},
+		},
+		{
+			// A KNN scan of document_cards_vec, then each card's document
+			// by primary key.
+			name:  "SearchCards",
+			query: cardsQ, args: cardsArgs,
+			first: "SCAN v VIRTUAL TABLE INDEX 0:3",
+			want:  []string{document},
+			sorts: true,
+		},
+		{
+			// The stale cards alone, from the cursor, in order.
+			name:  "StaleCards",
+			query: staleCardsSQL, args: []any{"after", "local", 32},
+			first: "SEARCH c USING INDEX idx_document_cards_stale (document_id>?)",
+			want:  []string{document},
+			avoid: []string{"idx_documents_tenant_"},
+		},
+		{
+			name:  "PutCardVectors mark",
+			query: markCardEmbeddedSQL, args: []any{"text", "doc"},
+			first: cardByDoc,
+		},
+		{
+			// The tenant's documents, each card by its primary key.
+			name:  "ResetCards",
+			query: resetCardsSQL, args: []any{"local"},
+			first: cardByDoc,
+			want:  []string{"LIST SUBQUERY", "SEARCH documents USING COVERING INDEX idx_documents_tenant_"},
+		},
+		{
+			name:  "refreshFields inputs",
+			query: fieldsInputsSQL, args: []any{"$.site", "doc", "local"},
+			first: document,
+			want: []string{
+				"SEARCH e USING INDEX sqlite_autoindex_document_extractions_1 (id=?)",
+				"SEARCH f USING INDEX sqlite_autoindex_document_fields_1 (document_id=?)",
+			},
+		},
+		{
+			// In the order the fields list them, with no sort.
+			name:  "refreshFields bookmarks",
+			query: fieldsBookmarksSQL, args: []any{"doc"},
+			first: "SEARCH bookmarks USING INDEX idx_bookmarks_document (document_id=?)",
+		},
+		{
+			name:  "refreshFields host",
+			query: hostFieldsSQL, args: []any{"local", "example.com"},
+			first: "SEARCH document_fields USING INDEX idx_document_fields_host (tenant_id=? AND host=?)",
+		},
+		{
+			name:  "refreshFields sibling",
+			query: siblingFieldsSQL, args: []any{"doc"},
+			first: fieldsByDoc,
+		},
+		{
+			name:  "refreshFields site",
+			query: setSiteSQL, args: []any{"Name", "Name host", "doc"},
+			first: fieldsByDoc,
+		},
+		{
+			// An upsert finds its conflict through the unique key it names.
+			name:  "refreshFields fields upsert",
+			query: upsertFieldsSQL, args: unbound(upsertFieldsSQL),
+			avoid: []string{noTableScans},
+		},
+		{
+			name:  "refreshFields card upsert",
+			query: upsertCardSQL, args: []any{"doc", "text"},
+			avoid: []string{noTableScans},
+		},
+		{
+			// Every document once, its fields by primary key.
+			name:  "EnsureDocumentFields documents",
+			query: unrefreshedSQL, args: []any{1},
+			first: "SCAN d",
+			want:  []string{"SEARCH f USING INDEX sqlite_autoindex_document_fields_1 (document_id=?) LEFT-JOIN"},
+		},
+		{
+			// The stale cards alone, never every document.
+			name:  "EnsureDocumentFields stale cards",
+			query: staleCardsByTenantSQL,
+			first: "SCAN c USING INDEX idx_document_cards_stale",
+			want:  []string{document},
+			// GROUP BY tenant.
+			sorts: true,
+		},
 	}
 }
 
@@ -780,6 +905,19 @@ func TestQueryPlans_ChunkVectorDeleteIsPointLookup(t *testing.T) {
 
 	plan := queryPlan(t, db, `DELETE FROM chunks_vec WHERE chunk_id = ?`, "chunk")
 	assert.Regexp(t, regexp.MustCompile(`SCAN chunks_vec VIRTUAL TABLE INDEX \d+:2`), plan)
+}
+
+// TestQueryPlans_CardVectorDeleteIsPointLookup: the card delete trigger,
+// and PutCardVectors replacing a vector, remove it by its primary key, as
+// the chunks' do.
+func TestQueryPlans_CardVectorDeleteIsPointLookup(t *testing.T) {
+	db := newTestDB(t)
+	var trigger string
+	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'trg_document_cards_delete'`).Scan(&trigger))
+	require.Contains(t, trigger, "DELETE FROM document_cards_vec WHERE document_id = old.document_id")
+
+	plan := queryPlan(t, db, deleteCardVectorSQL, "doc")
+	assert.Regexp(t, regexp.MustCompile(`SCAN document_cards_vec VIRTUAL TABLE INDEX \d+:2`), plan)
 }
 
 // TestQueryPlans_SampleChunksReadsVectorsByID: every vector the sample

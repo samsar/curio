@@ -30,9 +30,9 @@ import (
 var vecOnce sync.Once
 
 // Pool policy. A connection is held by every transaction and by every write
-// waiting out busy_timeout, so the cap sits above the daemon's default 21
-// worker goroutines (16 fetch, 4 index, 1 cluster) with room for the API;
-// at the cap, reads would queue behind the waiting writers. Idle
+// waiting out busy_timeout, so the cap sits above the daemon's default 22
+// worker goroutines (16 fetch, 4 index, 1 cluster, 1 cards) with room for
+// the API; at the cap, reads would queue behind the waiting writers. Idle
 // connections are kept up to the cap because opening one (pragmas,
 // sqlite-vec) costs about 0.7 ms against a few microseconds for a query on
 // a pooled one, and database/sql's default of two idle connections had the

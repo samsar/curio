@@ -235,6 +235,10 @@ func (s *testServer) do(t *testing.T, req request) response {
 	return newResponse(t, resp, r.URL.Path)
 }
 
+// requestJobs are the jobs the tests' requests queue, for count: every
+// write of a document or a bookmark may queue a cards job beside them.
+const requestJobs = "jobs WHERE kind <> 'cards'"
+
 func (s *testServer) count(t *testing.T, table string) int {
 	t.Helper()
 	var n int
@@ -433,7 +437,7 @@ func TestServer_CSRFBookmarkExploit(t *testing.T) {
 	}
 	assert.Zero(t, s.count(t, "bookmarks"))
 	assert.Zero(t, s.count(t, "documents"))
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 }
 
 // TestServer_CSRFRefetchAllExploit replays a body-less cross-site POST, which
@@ -446,7 +450,7 @@ func TestServer_CSRFRefetchAllExploit(t *testing.T) {
 		resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=dead", origin: origin})
 		assertProblem(t, resp, http.StatusForbidden)
 	}
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 }
 
 func TestServer_JSONBodies(t *testing.T) {

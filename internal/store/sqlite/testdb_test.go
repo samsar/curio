@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-// vecDim is the width of this package's test databases' vector index: a
-// new home's, so newTestDB resizes the table migration 001 creates, as the
-// daemon does for a new home.
+// vecDim is the width of this package's test databases' vector indexes: a
+// new home's, so newTestDB resizes the table migration 001 creates, and
+// creates the cards', as the daemon does for a new home.
 const vecDim = 1024
 
 // newTestDB is sqlitetest.NewDB for this package's own tests, which can't

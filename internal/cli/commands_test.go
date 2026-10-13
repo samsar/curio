@@ -343,8 +343,9 @@ func TestJobs(t *testing.T) {
 	assert.Contains(t, out, "payload: {}")
 	assert.Contains(t, out, "next attempt:")
 
-	out = mustRun(t, srv, "jobs", "--all", "--limit", "2")
-	assert.Contains(t, out, "2 job(s)")
+	// Four jobs: the three, and the cards job the document's write queued.
+	out = mustRun(t, srv, "jobs", "--all", "--limit", "3")
+	assert.Contains(t, out, "3 job(s)")
 	out = runArgs(t, nextPage(t, out)...)
 	assert.Contains(t, out, "1 job(s)")
 	_, err = runCLI(t, srv, "jobs", "--limit", "501")
@@ -395,7 +396,7 @@ func TestRefetch(t *testing.T) {
 
 	_, err := runCLI(t, srv, "refetch", dead.ID)
 	require.Error(t, err, "a dead document needs --force")
-	assert.Zero(t, count(t, srv, `SELECT count(*) FROM jobs`))
+	assert.Zero(t, count(t, srv, `SELECT count(*) FROM jobs WHERE kind = 'fetch'`))
 
 	out := mustRun(t, srv, "refetch", dead.ID, "--force")
 	assert.Contains(t, out, "refetch enqueued for document "+dead.ID)
@@ -431,7 +432,7 @@ func TestRefetch_Cause(t *testing.T) {
 	require.ErrorContains(t, err, `cause "bogus" must be one of: `+failureCauses)
 	_, err = runCLI(t, srv, "refetch", "--all", "--cause", "dead_link")
 	require.ErrorContains(t, err, "dead links are refetched only with state=dead")
-	assert.Zero(t, count(t, srv, `SELECT count(*) FROM jobs`))
+	assert.Zero(t, count(t, srv, `SELECT count(*) FROM jobs WHERE kind = 'fetch'`))
 
 	out := mustRun(t, srv, "refetch", "--all", "--cause", "anti_bot")
 	assert.Contains(t, out, "refetch enqueued for documents with cause=anti_bot: 2 jobs")
@@ -460,7 +461,7 @@ func TestRefetch_Cause(t *testing.T) {
 		require.EqualError(t, err, "--state and --cause filter --all", strings.Join(args, " "))
 	}
 	assert.Zero(t, requests.Load(), "the daemon is never contacted")
-	assert.Equal(t, 4, count(t, srv, `SELECT count(*) FROM jobs`), "nothing more is enqueued")
+	assert.Equal(t, 4, count(t, srv, `SELECT count(*) FROM jobs WHERE kind = 'fetch'`), "nothing more is enqueued")
 }
 
 // TestRefetch_CauseHelp: --cause's help names every cause the store has, in
@@ -939,7 +940,7 @@ func TestStatus(t *testing.T) {
 	assert.Contains(t, out, "bookmarks: 1")
 	assert.Contains(t, out, "documents: 2")
 	assert.Contains(t, out, "fetched=1  pending=1")
-	assert.Contains(t, out, "jobs:      pending=1")
+	assert.Contains(t, out, "jobs:      pending=2", "the fetch, and the cards job the writes queued")
 	assert.Contains(t, out, "disk:")
 }
 

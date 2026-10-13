@@ -31,15 +31,21 @@ var ErrLiveHome = errors.New("refusing a database in a home's directory")
 var ErrHardLinked = errors.New("refusing a database with more than one hard link")
 
 // Copy is an open copy of a home's database, migrated to this curio's
-// schema, with its stores.
+// schema and brought up to date as the daemon brings a home's at start,
+// with its stores.
 type Copy struct {
 	Path string
 	// Schema is the version the migrations left it at.
 	Schema int64
-	// Width is its vector index's width, which its chunks are read at.
-	Width     int
+	// Width is its vector indexes' width, which its chunks and cards are
+	// read at.
+	Width int
+	// Fields is what deriving its documents' search fields did.
+	Fields    sqlite.FieldsRefresh
 	Documents store.DocumentStore
+	Bookmarks store.BookmarkStore
 	Chunks    store.ChunkStore
+	Index     store.DocumentIndex
 	Insights  store.InsightStore
 
 	db *sqlite.DB
@@ -47,8 +53,10 @@ type Copy struct {
 
 // OpenCopy opens the database at path, a copy of a home's: it refuses a
 // home's own (ErrLiveHome, ErrHardLinked), and anything that isn't an
-// existing file, before opening anything, then migrates it, the only
-// write.
+// existing file, before opening anything. Then it does what the daemon
+// does at start, its only writes: migrates it, makes every vector index
+// as wide as its chunks' (sqlite.EnsureVectorIndex), and derives the
+// search fields of the documents without them (sqlite.EnsureDocumentFields).
 func OpenCopy(ctx context.Context, path string) (*Copy, error) {
 	if err := checkCopy(path); err != nil {
 		return nil, err
@@ -67,8 +75,8 @@ func OpenCopy(ctx context.Context, path string) (*Copy, error) {
 	return c, nil
 }
 
-// migrate brings db, opened from path, to this curio's schema and builds
-// its stores.
+// migrate brings db, opened from path, to this curio's schema and up to
+// date, and builds its stores.
 func migrate(ctx context.Context, path string, db *sqlite.DB) (*Copy, error) {
 	schema, err := sqlite.Migrate(ctx, db)
 	if err != nil {
@@ -78,8 +86,16 @@ func migrate(ctx context.Context, path string, db *sqlite.DB) (*Copy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read the vector index's width in %s: %w", path, err)
 	}
-	return &Copy{Path: path, Schema: schema, Width: width, Documents: sqlite.NewDocuments(db),
-		Chunks: sqlite.NewChunks(db, width), Insights: sqlite.NewInsights(db), db: db}, nil
+	if err := sqlite.EnsureVectorIndex(ctx, db, width); err != nil {
+		return nil, fmt.Errorf("size the vector indexes of %s: %w", path, err)
+	}
+	fields, err := sqlite.EnsureDocumentFields(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &Copy{Path: path, Schema: schema, Width: width, Fields: fields, Documents: sqlite.NewDocuments(db),
+		Bookmarks: sqlite.NewBookmarks(db), Chunks: sqlite.NewChunks(db, width),
+		Index: sqlite.NewDocumentIndex(db, width), Insights: sqlite.NewInsights(db), db: db}, nil
 }
 
 // Close closes the database.

@@ -431,5 +431,5 @@ func TestUp_ImportNothingToFetch(t *testing.T) {
 	code, stdout, stderr := w.exit(t, "up", "--import", "html:"+htmlFixture)
 	require.Equal(t, 0, code, "%s\n%v", stderr, ui.Events())
 	assert.Contains(t, stdout, "\nImported 2 new bookmarks from bookmarks.html; their pages were in the library already.\n")
-	assert.Zero(t, count(t, w.srv, `SELECT count(*) FROM jobs`))
+	assert.Zero(t, count(t, w.srv, `SELECT count(*) FROM jobs WHERE kind = 'fetch'`))
 }

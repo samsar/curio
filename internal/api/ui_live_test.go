@@ -573,7 +573,7 @@ func TestUI_DocumentJobs(t *testing.T) {
 	assert.Regexp(t, `<li>Fetch waiting, due <time datetime="[^"]+" title="[^"]+">[^<]+</time> · attempt 2 of 5`+
 		`<span class="visually-hidden">: </span><span class="job-why" title="HTTP 503">HTTP 503</span></li>`, body)
 
-	_, err = srv.Deps.Queue.ClaimNext(ctx, nil)
+	_, err = srv.Deps.Queue.ClaimNext(ctx, []store.JobKind{store.JobKindFetch})
 	require.ErrorIs(t, err, store.ErrNotFound, "backing off")
 	_, err = srv.DB.ExecContext(ctx, `UPDATE jobs SET run_after = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE document_id = ?`, doc.ID)
 	require.NoError(t, err)

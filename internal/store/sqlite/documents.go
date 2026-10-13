@@ -47,8 +47,13 @@ func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 	doc.State = state
 	doc.ContentType = cmp.Or(doc.ContentType, store.ContentTypeUnknown)
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin document insert: %w", err)
+	}
+	defer tx.Rollback()
 	var createdAt, updatedAt string
-	err = s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO documents (
 			id, tenant_id, url, url_canonical, content_type, title, author,
 			published_at, language, word_count, state, failure_cause
@@ -76,6 +81,13 @@ func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 	if doc.UpdatedAt, err = parseTime(updatedAt); err != nil {
 		return err
 	}
+	queued, err := refreshFields(ctx, tx, doc.TenantID, doc.ID)
+	if err != nil {
+		return err
+	}
+	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+		return fmt.Errorf("commit document insert: %w", err)
+	}
 	*d = doc
 	return nil
 }
@@ -101,20 +113,40 @@ func newDocumentState(state store.DocState, cause store.FailureCause) (store.Doc
 	return cause.State(), nil
 }
 
+// ApplyFetch writes the fetch and derives the document's search fields
+// again in one transaction: its title, author and the site name its new
+// extraction declares are among what they are derived from.
 func (s *Documents) ApplyFetch(ctx context.Context, id string, m store.FetchedMetadata) error {
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("apply fetch to document %s: begin: %w", id, err)
+	}
+	defer tx.Rollback()
+	var tenantID string
+	err = tx.QueryRowContext(ctx, `
 		UPDATE documents SET
 			content_type = ?, url_canonical = ?, title = ?, author = ?, language = ?,
 			published_at = ?, current_extraction_id = ?, state = ?, failure_cause = NULL,
 			updated_at = `+sqlNow+`
-		WHERE id = ?`,
+		WHERE id = ?
+		RETURNING tenant_id`,
 		m.ContentType, strPtr(m.URLCanonical), strPtr(m.Title), strPtr(m.Author), strPtr(m.Language),
 		timePtr(m.PublishedAt), m.ExtractionID, store.DocStatePending,
-		id)
+		id).Scan(&tenantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("document %s: %w", id, store.ErrNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("apply fetch to document %s: %w", id, err)
 	}
-	return ensureRow(res, "document")
+	queued, err := refreshFields(ctx, tx, tenantID, id)
+	if err != nil {
+		return err
+	}
+	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+		return fmt.Errorf("apply fetch to document %s: commit: %w", id, err)
+	}
+	return nil
 }
 
 func (s *Documents) GetByID(ctx context.Context, id string) (*store.Document, error) {
@@ -536,14 +568,33 @@ func urlAuthority(u string) string {
 	return strings.ToLower(rest)
 }
 
+// SetCurrentExtraction points the document at another extraction and
+// derives its search fields again, in one transaction: the site name its
+// page declared is the extraction's.
 func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionID string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE documents SET current_extraction_id = ?, updated_at = `+sqlNow+` WHERE id = ?`,
-		extractionID, docID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set current extraction: begin: %w", err)
+	}
+	defer tx.Rollback()
+	var tenantID string
+	err = tx.QueryRowContext(ctx,
+		`UPDATE documents SET current_extraction_id = ?, updated_at = `+sqlNow+` WHERE id = ? RETURNING tenant_id`,
+		extractionID, docID).Scan(&tenantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("document %s: %w", docID, store.ErrNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("set current extraction: %w", err)
 	}
-	return ensureRow(res, "document")
+	queued, err := refreshFields(ctx, tx, tenantID, docID)
+	if err != nil {
+		return err
+	}
+	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+		return fmt.Errorf("set current extraction: commit: %w", err)
+	}
+	return nil
 }
 
 func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID string) (*store.Job, error) {

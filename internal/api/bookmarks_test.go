@@ -44,7 +44,7 @@ func TestCreateBookmark_RejectsUnfetchableURLs(t *testing.T) {
 		})
 	}
 	assert.Zero(t, s.count(t, "documents"))
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 }
 
 // TestImportBookmarks_FiltersUnfetchableURLs: the import endpoint keeps
@@ -125,7 +125,7 @@ func TestCreateBookmark_EnqueueFailure(t *testing.T) {
 	assertProblem(t, resp, http.StatusInternalServerError)
 	assert.Zero(t, s.count(t, "documents"))
 	assert.Zero(t, s.count(t, "bookmarks"))
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 
 	restore()
 	resp, got := s.createBookmark(t, "https://example.com/a")
@@ -146,7 +146,7 @@ func TestCreateBookmark_KnownDocument(t *testing.T) {
 	assert.Equal(t, string(store.DocStateFetched), got.Bookmark.DocumentState)
 	require.NotNil(t, got.Bookmark.DocumentID)
 	assert.Equal(t, doc.ID, *got.Bookmark.DocumentID)
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 
 	resp, _ = s.createBookmark(t, "https://example.com/a")
 	p := assertProblem(t, resp, http.StatusConflict)
@@ -162,7 +162,7 @@ func TestImportBookmarks_EnqueueFailure(t *testing.T) {
 	assert.NotEmpty(t, got.Errors)
 	assert.Zero(t, s.count(t, "documents"))
 	assert.Zero(t, s.count(t, "bookmarks"))
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 
 	restore()
 	got = s.importBookmarks(t, store.SourceChrome, "https://example.com/a")
@@ -193,7 +193,7 @@ func TestImportBookmarks_OneFetchPerDocument(t *testing.T) {
 
 	assert.Equal(t, 1, s.count(t, "documents"))
 	assert.Equal(t, 4, s.count(t, "bookmarks"))
-	assert.Equal(t, 1, s.count(t, "jobs"))
+	assert.Equal(t, 1, s.count(t, requestJobs))
 }
 
 // countingIngest counts the Ingest calls that reach the store.
@@ -563,11 +563,11 @@ func TestImportBookmarks_DryRunIsTheImport(t *testing.T) {
 		"file:///etc/hosts",
 		"https://example.com/theirs",
 	}
-	before := [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, "jobs")}
+	before := [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, requestJobs)}
 	docsBefore := s.documentURLs(t)
 
 	preview := s.dryRun(t, store.SourceChrome, batch...)
-	assert.Equal(t, before, [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, "jobs")},
+	assert.Equal(t, before, [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, requestJobs)},
 		"a dry run writes nothing")
 	assert.True(t, preview.DryRun)
 	assert.Equal(t, []string{"https://example.com/new-1", "https://example.com/new-2"}, preview.NewURLs)
@@ -606,7 +606,7 @@ func TestImportBookmarks_DryRunAtScale(t *testing.T) {
 	}
 	s.importBookmarks(t, store.SourceChrome, urls[:2000]...)
 	s.importBookmarks(t, store.SourceSafari, urls[2000:3000]...)
-	before := [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, "jobs")}
+	before := [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, requestJobs)}
 
 	got := s.dryRun(t, store.SourceChrome, urls...)
 	assert.Equal(t, 10_000, got.Total)
@@ -614,7 +614,7 @@ func TestImportBookmarks_DryRunAtScale(t *testing.T) {
 	assert.Equal(t, 8000, got.Created)
 	assert.Equal(t, 7000, got.JobsEnqueued)
 	assert.Equal(t, urls[3000:], got.NewURLs)
-	assert.Equal(t, before, [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, "jobs")})
+	assert.Equal(t, before, [3]int{s.count(t, "bookmarks"), s.count(t, "documents"), s.count(t, requestJobs)})
 }
 
 // TestImportBookmarks_DryRunValidates: a dry run is held to the import's

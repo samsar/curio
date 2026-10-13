@@ -221,6 +221,15 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 		}
 		return nil, err
 	}
+	// Derives the search fields of the documents a new home, an upgrade or
+	// a change of the derivation's rules left without them, before any
+	// search reads them.
+	fields, err := sqlitestore.EnsureDocumentFields(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("document fields refreshed", "documents", fields.Documents, "hosts", fields.Hosts,
+		"cards_stale", fields.CardsStale, "took_ms", fields.Took.Milliseconds())
 	// sqlite-vec's build flags say whether a released binary has its NEON
 	// distance kernels. Only this log line reads them, so a sqlite-vec that
 	// words its vec_debug() differently costs the line its flags, not the

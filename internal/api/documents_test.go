@@ -48,7 +48,7 @@ func TestRefetchDocument(t *testing.T) {
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/" + dead.ID + "/refetch"})
 	assertProblem(t, resp, http.StatusConflict)
 	assert.Equal(t, store.DocStateDead, s.docState(t, dead.ID))
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 
 	resp = s.do(t, request{method: http.MethodPost, path: "/v1/documents/" + dead.ID + "/refetch?force=1"})
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
@@ -87,12 +87,12 @@ func TestRefetchAll(t *testing.T) {
 
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=bogus"})
 	assertProblem(t, resp, http.StatusBadRequest)
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 
 	resp = s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all"})
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
 	assert.JSONEq(t, `{"jobs_enqueued":3}`, resp.body, "dead documents are skipped by default")
-	assert.Equal(t, 3, s.count(t, "jobs"))
+	assert.Equal(t, 3, s.count(t, requestJobs))
 
 	resp = s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=dead"})
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
@@ -127,7 +127,7 @@ func TestRefetchAll_Cause(t *testing.T) {
 		p := assertProblem(t, refetchAll(query), http.StatusBadRequest)
 		assert.Contains(t, p.Detail, "dead links are refetched only with state=dead", query)
 	}
-	assert.Zero(t, s.count(t, "jobs"), "a refused refetch enqueues nothing")
+	assert.Zero(t, s.count(t, requestJobs), "a refused refetch enqueues nothing")
 
 	resp := refetchAll("cause=anti_bot")
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
@@ -158,7 +158,7 @@ func TestRefetchAll_Cause(t *testing.T) {
 		assert.Equal(t, store.DocStatePending, s.docState(t, doc.ID))
 		assert.Equal(t, 1, jobsFor(doc))
 	}
-	assert.Equal(t, 4, s.count(t, "jobs"))
+	assert.Equal(t, 4, s.count(t, requestJobs))
 }
 
 func TestRefetchAll_StoreFailure(t *testing.T) {
@@ -221,7 +221,7 @@ func TestReindexAll_DriftResetFailure(t *testing.T) {
 		http.StatusInternalServerError)
 	assert.Contains(t, p.Detail, "enqueued all 2 index jobs")
 	assert.Contains(t, p.Detail, "permission denied")
-	assert.Equal(t, 2, s.count(t, "jobs"))
+	assert.Equal(t, 2, s.count(t, requestJobs))
 }
 
 // TestReindexAll_OwesTheInterestsAFreshRebuild: reindexing the fetched
@@ -273,7 +273,7 @@ func TestReindexAll_OweFailure(t *testing.T) {
 		http.StatusInternalServerError)
 	assert.Contains(t, p.Detail, "enqueued no index job")
 	assert.Contains(t, p.Detail, "database is locked")
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 }
 
 // TestGetDocumentContent_MissingFile: content deleted from disk is a 404
@@ -301,7 +301,7 @@ func TestReindexAll_OnlyDocumentsWithContent(t *testing.T) {
 
 	assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all?state=bogus"}),
 		http.StatusBadRequest)
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all?state=pending"})
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)

@@ -34,7 +34,7 @@ func TestDeleteJobs_FinishedOnly(t *testing.T) {
 		assertProblem(t, resp, http.StatusBadRequest)
 		assert.Contains(t, resp.body, "only finished jobs")
 	}
-	assert.Equal(t, 4, s.count(t, "jobs"))
+	assert.Equal(t, 4, s.count(t, requestJobs))
 
 	resp := s.do(t, request{method: http.MethodDelete, path: "/v1/jobs?status=done"})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
@@ -82,7 +82,10 @@ func TestListJobs(t *testing.T) {
 		return got
 	}
 
-	assert.Len(t, list("").Items, 3)
+	assert.Len(t, list("").Items, 4, "the three, and the cards job the document's write queued")
+	cards := list("?kind=cards")
+	require.Len(t, cards.Items, 1)
+	assert.Equal(t, "pending", cards.Items[0].Status)
 
 	done := list("?status=done&kind=index")
 	require.Len(t, done.Items, 1)

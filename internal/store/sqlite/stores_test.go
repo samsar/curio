@@ -1024,6 +1024,15 @@ func countRows(t *testing.T, db *DB, table string) int {
 	return n
 }
 
+// countFetchJobs counts the fetch jobs: every write of a document or a
+// bookmark may queue a cards job beside them.
+func countFetchJobs(t *testing.T, db *DB) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow("SELECT count(*) FROM jobs WHERE kind = ?", store.JobKindFetch).Scan(&n))
+	return n
+}
+
 func TestDocuments_RequeueFetch(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -1055,7 +1064,7 @@ func TestDocuments_RequeueFetch_NotFound(t *testing.T) {
 		_, err := docs.RequeueFetch(context.Background(), "local", id)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	}
-	assert.Zero(t, countRows(t, db, "jobs"))
+	assert.Zero(t, countFetchJobs(t, db))
 	assert.Equal(t, store.DocStatePending, docState(t, docs, other.ID), "another tenant's document is untouched")
 }
 
@@ -1068,7 +1077,7 @@ func TestDocuments_RequeueFetch_Atomic(t *testing.T) {
 	_, err := docs.RequeueFetch(context.Background(), "local", d.ID)
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, d.ID), "the state reset rolled back with the insert")
-	assert.Zero(t, countRows(t, db, "jobs"))
+	assert.Zero(t, countFetchJobs(t, db))
 }
 
 func TestDocuments_RequeueFetchByStates(t *testing.T) {
@@ -1087,7 +1096,7 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 		[]store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed}, "")
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
-	assert.Equal(t, 3, countRows(t, db, "jobs"))
+	assert.Equal(t, 3, countFetchJobs(t, db))
 
 	for st, d := range byState {
 		if st == store.DocStateDead {
@@ -1149,7 +1158,7 @@ func TestDocuments_RequeueFetchByStates_Cause(t *testing.T) {
 	n, err = docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateDead}, store.FailureCauseDeadLink)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
-	assert.Equal(t, 3, countRows(t, db, "jobs"))
+	assert.Equal(t, 3, countFetchJobs(t, db))
 }
 
 func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
@@ -1164,7 +1173,7 @@ func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, a.ID))
 	assert.Equal(t, store.DocStateFetched, docState(t, docs, b.ID))
-	assert.Zero(t, countRows(t, db, "jobs"))
+	assert.Zero(t, countFetchJobs(t, db))
 }
 
 // ---------- keyset pages ----------

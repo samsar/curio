@@ -228,14 +228,22 @@ func TestFetchHandler_ExtractionStatus(t *testing.T) {
 
 // TestFetchHandler_SiteName: the site name the page declares is recorded
 // in its extraction's meta under store.ExtractionMetaSiteName, beside the
-// fetcher's own meta, and is absent when it declares none.
+// fetcher's own meta, and is absent when it declares none; the document's
+// search fields take it as its site's name, unless it is a platform's.
 func TestFetchHandler_SiteName(t *testing.T) {
-	for declared, want := range map[string]map[string]any{
-		"The Example Times": {"via": "test", store.ExtractionMetaSiteName: "The Example Times"},
-		"":                  {"via": "test"},
-	} {
-		deps, _, ff := newTestDeps(t)
-		ff.res.SiteName = declared
+	cases := []struct {
+		declared string
+		meta     map[string]any
+		siteName string
+	}{
+		{"The Example Times", map[string]any{"via": "test", store.ExtractionMetaSiteName: "The Example Times"},
+			"The Example Times"},
+		{"Medium", map[string]any{"via": "test", store.ExtractionMetaSiteName: "Medium"}, ""},
+		{"", map[string]any{"via": "test"}, ""},
+	}
+	for _, tc := range cases {
+		deps, db, ff := newTestDeps(t)
+		ff.res.SiteName = tc.declared
 		ctx := context.Background()
 		doc := &store.Document{TenantID: "local", URL: "https://example.com/article"}
 		require.NoError(t, deps.Documents.Create(ctx, doc))
@@ -248,7 +256,12 @@ func TestFetchHandler_SiteName(t *testing.T) {
 		require.NoError(t, err)
 		var meta map[string]any
 		require.NoError(t, json.Unmarshal(ext.ExtractionMeta, &meta))
-		assert.Equal(t, want, meta, "declared %q", declared)
+		assert.Equal(t, tc.meta, meta, "declared %q", tc.declared)
+		var declaredSite, siteName string
+		require.NoError(t, db.QueryRow(`SELECT declared_site, site_name FROM document_fields WHERE document_id = ?`,
+			doc.ID).Scan(&declaredSite, &siteName))
+		assert.Equal(t, tc.siteName, declaredSite, "declared %q", tc.declared)
+		assert.Equal(t, tc.siteName, siteName, "declared %q", tc.declared)
 	}
 }
 

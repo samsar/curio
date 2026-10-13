@@ -129,7 +129,13 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 		}
 		wake = append(wake, store.JobKindFetch)
 	}
-	if err := s.db.commitNotify(tx, wake...); err != nil {
+	// The bookmark's title and folder are the document's to be searched by,
+	// whatever its state.
+	queued, err := refreshFields(ctx, tx, b.TenantID, docID)
+	if err != nil {
+		return store.IngestResult{}, err
+	}
+	if err := s.db.commitNotify(tx, cardsWake(queued, wake...)...); err != nil {
 		return store.IngestResult{}, fmt.Errorf("commit ingest: %w", err)
 	}
 
@@ -152,8 +158,13 @@ func (s *Bookmarks) Create(ctx context.Context, b *store.Bookmark) error {
 		return err
 	}
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin bookmark insert: %w", err)
+	}
+	defer tx.Rollback()
 	var createdAt, updatedAt string
-	err = s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path, tags)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING created_at, updated_at`,
@@ -171,8 +182,19 @@ func (s *Bookmarks) Create(ctx context.Context, b *store.Bookmark) error {
 	if b.CreatedAt, err = parseTime(createdAt); err != nil {
 		return err
 	}
-	b.UpdatedAt, err = parseTime(updatedAt)
-	return err
+	if b.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return err
+	}
+	var queued bool
+	if b.DocumentID != nil {
+		if queued, err = refreshFields(ctx, tx, b.TenantID, *b.DocumentID); err != nil {
+			return err
+		}
+	}
+	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+		return fmt.Errorf("commit bookmark insert: %w", err)
+	}
+	return nil
 }
 
 // validateBookmark checks the fields every bookmark insert requires.
@@ -377,22 +399,72 @@ func (s *Bookmarks) PreviewIngest(ctx context.Context, tenantID, source string, 
 	return out, nil
 }
 
+// Delete deletes the bookmark and derives the search fields of the
+// document it linked again, in one transaction, without its title and
+// folder.
 func (s *Bookmarks) Delete(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM bookmarks WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("delete bookmark: begin: %w", err)
+	}
+	defer tx.Rollback()
+	var tenantID string
+	var docID sql.NullString
+	err = tx.QueryRowContext(ctx, `DELETE FROM bookmarks WHERE id = ? RETURNING tenant_id, document_id`, id).
+		Scan(&tenantID, &docID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("bookmark %s: %w", id, store.ErrNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("delete bookmark: %w", err)
 	}
-	return ensureRow(res, "bookmark")
+	var queued bool
+	if docID.Valid {
+		if queued, err = refreshFields(ctx, tx, tenantID, docID.String); err != nil {
+			return err
+		}
+	}
+	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+		return fmt.Errorf("delete bookmark: commit: %w", err)
+	}
+	return nil
 }
 
+// LinkDocument links the bookmark to another document and derives the
+// search fields of both documents again, in one transaction: the
+// bookmark's title and folder move with it.
 func (s *Bookmarks) LinkDocument(ctx context.Context, bookmarkID, documentID string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE bookmarks SET document_id = ?, updated_at = `+sqlNow+` WHERE id = ?`,
-		documentID, bookmarkID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("link bookmark: begin: %w", err)
+	}
+	defer tx.Rollback()
+	var tenantID string
+	var was sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT tenant_id, document_id FROM bookmarks WHERE id = ?`, bookmarkID).
+		Scan(&tenantID, &was)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("bookmark %s: %w", bookmarkID, store.ErrNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("link bookmark: %w", err)
 	}
-	return ensureRow(res, "bookmark")
+	if _, err := tx.ExecContext(ctx, `UPDATE bookmarks SET document_id = ?, updated_at = `+sqlNow+` WHERE id = ?`,
+		documentID, bookmarkID); err != nil {
+		return fmt.Errorf("link bookmark: %w", err)
+	}
+	ids := []string{documentID}
+	if was.Valid {
+		ids = append(ids, was.String)
+	}
+	queued, err := refreshFields(ctx, tx, tenantID, ids...)
+	if err != nil {
+		return err
+	}
+	if err := s.db.commitNotify(tx, cardsWake(queued)...); err != nil {
+		return fmt.Errorf("link bookmark: commit: %w", err)
+	}
+	return nil
 }
 
 // bookmarkColumns is the column list scanBookmark expects, in order.
