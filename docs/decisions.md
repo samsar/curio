@@ -4243,7 +4243,7 @@ property from the spec, or adding one no fixture sets, fails the test.
 ## Toolchain: the go directive is the build toolchain, govulncheck gates it
 
 **Decision:** The `go` line in `go.mod` names the exact toolchain CI and
-releases build with (`go 1.26.8`), and there is still no `toolchain`
+releases build with (`go 1.26.9`), and there is still no `toolchain`
 directive. setup-go installs it from `go-version-file`, and the Makefile
 exports `GOTOOLCHAIN=go<directive>`, so every local target runs it too; the
 go command downloads it once when a machine's default Go differs.
