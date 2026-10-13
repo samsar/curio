@@ -961,6 +961,7 @@ func TestQueue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, &client.Queue{Throttle: client.ThrottleNormal, State: client.QueueOpen, Kinds: []client.QueueKind{
 		{Kind: "fetch", Limit: apitest.Pools.Fetch}, {Kind: "index", Limit: apitest.Pools.Index}, {Kind: "cluster", Limit: 1},
+		{Kind: "cards", Limit: 1},
 	}}, q)
 
 	later := time.Now().UTC().Add(24 * time.Minute).Truncate(time.Millisecond)

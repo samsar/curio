@@ -750,7 +750,8 @@ func TestWorker_FullFetchIndexChain(t *testing.T) {
 	// wait on the jobs themselves.
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		var n int
-		require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
+		require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ? AND kind IN (?, ?)`, store.JobStatusDone,
+			store.JobKindFetch, store.JobKindIndex).Scan(&n))
 		assert.Equal(c, 2, n, "fetch + index should both be done")
 	}, 5*time.Second, 20*time.Millisecond)
 	stop()
@@ -948,7 +949,8 @@ func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
 			require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 			runPoolsUntil(t, deps, func(c *assert.CollectT) {
 				var n int
-				require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
+				require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ? AND kind IN (?, ?)`, store.JobStatusDone,
+					store.JobKindFetch, store.JobKindIndex).Scan(&n))
 				assert.Equal(c, 2, n, "fetch + index should both be done")
 			})
 			before, err := deps.Documents.GetByID(ctx, doc.ID)
