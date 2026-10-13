@@ -393,10 +393,11 @@ func TestRefetch(t *testing.T) {
 	srv := apitest.Start(t)
 	dead := srv.AddDocument(t, "https://example.com/gone", store.DocStateDead)
 	failed := srv.AddDocument(t, "https://example.com/failed", store.DocStateFailed)
+	seeded := count(t, srv, `SELECT count(*) FROM jobs`)
 
 	_, err := runCLI(t, srv, "refetch", dead.ID)
 	require.Error(t, err, "a dead document needs --force")
-	assert.Zero(t, count(t, srv, `SELECT count(*) FROM jobs WHERE kind = 'fetch'`))
+	assert.Equal(t, seeded, count(t, srv, `SELECT count(*) FROM jobs`))
 
 	out := mustRun(t, srv, "refetch", dead.ID, "--force")
 	assert.Contains(t, out, "refetch enqueued for document "+dead.ID)
@@ -427,12 +428,13 @@ func TestRefetch_Cause(t *testing.T) {
 		t.Helper()
 		return count(t, srv, `SELECT count(*) FROM jobs WHERE document_id = ?`, doc.ID)
 	}
+	seeded := count(t, srv, `SELECT count(*) FROM jobs`)
 
 	_, err := runCLI(t, srv, "refetch", "--all", "--cause", "bogus")
 	require.ErrorContains(t, err, `cause "bogus" must be one of: `+failureCauses)
 	_, err = runCLI(t, srv, "refetch", "--all", "--cause", "dead_link")
 	require.ErrorContains(t, err, "dead links are refetched only with state=dead")
-	assert.Zero(t, count(t, srv, `SELECT count(*) FROM jobs WHERE kind = 'fetch'`))
+	assert.Equal(t, seeded, count(t, srv, `SELECT count(*) FROM jobs`))
 
 	out := mustRun(t, srv, "refetch", "--all", "--cause", "anti_bot")
 	assert.Contains(t, out, "refetch enqueued for documents with cause=anti_bot: 2 jobs")

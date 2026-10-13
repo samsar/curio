@@ -95,7 +95,7 @@ func TestStarting_RefusesEverythingElse(t *testing.T) {
 		body: `{"url":"https://example.com/a"}`})
 	assert.Equal(t, http.StatusServiceUnavailable, resp.status, resp.body)
 	assert.Zero(t, s.count(t, "bookmarks"), "nothing a starting daemon refused has run")
-	assert.Zero(t, s.count(t, requestJobs))
+	assert.Zero(t, s.count(t, "jobs"))
 }
 
 // TestStarting_Root: while starting, / is refused like any other path

@@ -137,11 +137,15 @@ func newIngestBookmark(url, source string) *store.Bookmark {
 	return &store.Bookmark{TenantID: "local", URL: url, Source: source, SavedAt: time.Now().UTC()}
 }
 
-type rowCounts struct{ documents, bookmarks, fetchJobs int }
+// rowCounts are the rows an ingest writes: its document, its bookmark, the
+// document's fetch job and the cards job a changed card queues, at most
+// one.
+type rowCounts struct{ documents, bookmarks, fetchJobs, cardsJobs int }
 
 func countIngestRows(t *testing.T, db *DB) rowCounts {
 	t.Helper()
-	return rowCounts{countRows(t, db, "documents"), countRows(t, db, "bookmarks"), countFetchJobs(t, db)}
+	return rowCounts{countRows(t, db, "documents"), countRows(t, db, "bookmarks"), countFetchJobs(t, db),
+		countRows(t, db, "jobs WHERE kind = 'cards'")}
 }
 
 func TestBookmarks_Ingest_NewURL(t *testing.T) {
@@ -163,7 +167,7 @@ func TestBookmarks_Ingest_NewURL(t *testing.T) {
 	require.NotNil(t, b.DocumentID)
 	assert.False(t, b.CreatedAt.IsZero())
 	assert.False(t, b.UpdatedAt.IsZero())
-	assert.Equal(t, rowCounts{1, 1, 1}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{1, 1, 1, 1}, countIngestRows(t, db))
 
 	doc, err := NewDocuments(db).GetByID(ctx, *b.DocumentID)
 	require.NoError(t, err)
@@ -204,7 +208,7 @@ func TestBookmarks_Ingest_KnownURL(t *testing.T) {
 	assert.Nil(t, res.FetchJob)
 	assert.Equal(t, store.DocStateFetched, res.DocumentState)
 	assert.Equal(t, *first.DocumentID, *second.DocumentID, "input DocumentID is ignored")
-	assert.Equal(t, rowCounts{1, 2, 1}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{1, 2, 1, 1}, countIngestRows(t, db))
 }
 
 func TestBookmarks_Ingest_Duplicate(t *testing.T) {
@@ -236,7 +240,7 @@ func TestBookmarks_Ingest_Atomic(t *testing.T) {
 	b := newIngestBookmark("https://example.com/post", store.SourceChrome)
 	_, err := bms.Ingest(ctx, b)
 	require.ErrorContains(t, err, "injected")
-	assert.Equal(t, rowCounts{0, 0, 0}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{0, 0, 0, 0}, countIngestRows(t, db))
 
 	_, err = db.Exec(`DROP TRIGGER t_fail`)
 	require.NoError(t, err)
@@ -244,7 +248,7 @@ func TestBookmarks_Ingest_Atomic(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.DocumentCreated)
 	require.NotNil(t, res.FetchJob)
-	assert.Equal(t, rowCounts{1, 1, 1}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{1, 1, 1, 1}, countIngestRows(t, db))
 }
 
 // TestBookmarks_Ingest_Concurrent: synced browsers import the same URL at
@@ -276,7 +280,7 @@ func TestBookmarks_Ingest_Concurrent(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	assert.Equal(t, rowCounts{nURLs, nURLs * len(sources), nURLs}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{nURLs, nURLs * len(sources), nURLs, 1}, countIngestRows(t, db))
 	rows, err := db.Query(`SELECT count(*) FROM jobs GROUP BY json_extract(payload, '$.document_id')`)
 	require.NoError(t, err)
 	defer rows.Close()

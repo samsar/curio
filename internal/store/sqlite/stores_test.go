@@ -1087,12 +1087,13 @@ func TestDocuments_RequeueFetch_NotFound(t *testing.T) {
 	docs := NewDocuments(db)
 	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs"}
 	require.NoError(t, docs.Create(context.Background(), other))
+	seeded := countRows(t, db, "jobs")
 
 	for _, id := range []string{uuid.NewString(), other.ID} {
 		_, err := docs.RequeueFetch(context.Background(), "local", id)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	}
-	assert.Zero(t, countFetchJobs(t, db))
+	assert.Equal(t, seeded, countRows(t, db, "jobs"))
 	assert.Equal(t, store.DocStatePending, docState(t, docs, other.ID), "another tenant's document is untouched")
 }
 
@@ -1100,12 +1101,13 @@ func TestDocuments_RequeueFetch_Atomic(t *testing.T) {
 	db := newTestDB(t)
 	docs := NewDocuments(db)
 	d := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
+	seeded := countRows(t, db, "jobs")
 	failJobInserts(t, db)
 
 	_, err := docs.RequeueFetch(context.Background(), "local", d.ID)
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, d.ID), "the state reset rolled back with the insert")
-	assert.Zero(t, countFetchJobs(t, db))
+	assert.Equal(t, seeded, countRows(t, db, "jobs"))
 }
 
 func TestDocuments_RequeueFetchByStates(t *testing.T) {
@@ -1194,6 +1196,7 @@ func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
 	docs := NewDocuments(db)
 	a := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
 	b := seedDoc(t, docs, "https://example.com/b", store.DocStateFetched)
+	seeded := countRows(t, db, "jobs")
 	failJobInserts(t, db)
 
 	_, err := docs.RequeueFetchByStates(context.Background(), "local",
@@ -1201,7 +1204,7 @@ func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, a.ID))
 	assert.Equal(t, store.DocStateFetched, docState(t, docs, b.ID))
-	assert.Zero(t, countFetchJobs(t, db))
+	assert.Equal(t, seeded, countRows(t, db, "jobs"))
 }
 
 // ---------- keyset pages ----------
