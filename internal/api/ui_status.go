@@ -137,7 +137,7 @@ func estimateProgress(q QueueResponse, m MetricsResponse) ui.Progress {
 
 func healthPanel(h Health) ui.HealthPanel {
 	p := ui.HealthPanel{Version: h.Version, OllamaReachable: h.OllamaReachable, OllamaDetail: h.OllamaDetail,
-		EmbeddingModel: h.EmbeddingModel, EmbeddingDim: h.EmbeddingDim, GenerationModel: writingModels(h),
+		EmbeddingModel: h.EmbeddingModel, EmbeddingDim: h.EmbeddingDim, WritingModel: writingModels(h),
 		YouTubeFetcher: h.YouTubeFetcher, Interests: interestsStateView(h.Interests)}
 	if d := h.EmbeddingDrift; d != nil {
 		p.Drift = &ui.Drift{Verified: d.Verification.Verified, Detail: d.Verification.Detail, Fix: d.Fix}
@@ -161,17 +161,14 @@ func healthPanel(h Health) ui.HealthPanel {
 }
 
 // writingModels is what the daemon writes with: the distinct models of the
-// roles in use, in the roles' sorted order, or generation.model when none
-// is.
+// roles in use, in the roles' sorted order, and "" when none is. Not
+// generation.model then: the daemon neither pulls nor calls it.
 func writingModels(h Health) string {
 	var models []string
 	for _, role := range slices.Sorted(maps.Keys(h.GenerationRoles)) {
 		if m := h.GenerationRoles[role]; !slices.Contains(models, m) {
 			models = append(models, m)
 		}
-	}
-	if len(models) == 0 {
-		return h.GenerationModel
 	}
 	return strings.Join(models, ", ")
 }

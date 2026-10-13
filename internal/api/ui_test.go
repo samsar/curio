@@ -245,13 +245,15 @@ func TestUI_Status(t *testing.T) {
 }
 
 // TestUI_StatusWritingModel: the Writing model line names the model each
-// role in use writes with, and generation.model when none is in use.
+// role in use writes with, and says none is in use when none is, never
+// generation.model, which the daemon then neither pulls nor calls.
 func TestUI_StatusWritingModel(t *testing.T) {
 	for _, tc := range []struct {
 		roles map[string]string
 		want  string
 	}{
-		{nil, "gemma4:26b"},
+		{nil, "none in use"},
+		{map[string]string{}, "none in use"},
 		{map[string]string{"labels": "gemma4:26b"}, "gemma4:26b"},
 		{map[string]string{"labels": "qwen3:4b-instruct"}, "qwen3:4b-instruct"},
 	} {

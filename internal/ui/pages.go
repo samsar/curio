@@ -272,10 +272,12 @@ type HealthPanel struct {
 	OllamaDetail    string
 	EmbeddingModel  string
 	EmbeddingDim    int
-	GenerationModel string
-	Drift           *Drift // nil when the embeddings haven't drifted
-	Upstreams       []Upstream
-	YouTubeFetcher  string // the yt-dlp videos go to; empty for none
+	// WritingModel is the models the roles in use write with, and empty
+	// when no role is in use: no writing model is then built or pulled.
+	WritingModel   string
+	Drift          *Drift // nil when the embeddings haven't drifted
+	Upstreams      []Upstream
+	YouTubeFetcher string // the yt-dlp videos go to; empty for none
 	// Interests is where automatic rebuilds of the interests stand.
 	Interests InterestsState
 }

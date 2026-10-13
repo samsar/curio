@@ -12797,8 +12797,9 @@ role config.yaml and the daemon both use, the daemon's model with
 config.yaml's, and restarts the daemon once, "to write with" the new ones;
 a daemon that reports no roles is another build, which the version check
 restarts. The Status page's Writing model names the roles' models, or
-`generation.model` when none is in use. `curio status` names no writing
-model, and is unchanged.
+says none is in use when none is: `generation.model` alone is a model
+the daemon neither pulls nor calls (insight off, say). `curio status`
+names no writing model, and is unchanged.
 
 **Going back to 2.6.x:** 2.6 decodes config.yaml strictly and doesn't
 know `generation.roles` ("field roles not found in type

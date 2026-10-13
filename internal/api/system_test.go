@@ -351,5 +351,6 @@ func TestWritingModels(t *testing.T) {
 	assert.Equal(t, "a:1, b:2", writingModels(Health{GenerationModel: "g:1",
 		GenerationRoles: map[string]string{"zeta": "b:2", "alpha": "a:1", "mid": "b:2"}}),
 		"distinct models, in the roles' sorted order")
-	assert.Equal(t, "g:1", writingModels(Health{GenerationModel: "g:1", GenerationRoles: map[string]string{}}))
+	assert.Empty(t, writingModels(Health{GenerationModel: "g:1", GenerationRoles: map[string]string{}}),
+		"no role in use: not generation.model, which nothing calls")
 }

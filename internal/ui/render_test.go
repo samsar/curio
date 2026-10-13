@@ -88,7 +88,7 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			Progress: &ProgressPanel{Progress: EstimateProgress([]KindWork{{Kind: "fetch", Pending: 30, Finished: 12}},
 				ProgressWindow, true), Reason: evilScript},
 			Health: &HealthPanel{Version: evilQuotes, OllamaDetail: evilScript, EmbeddingModel: evilAttr,
-				EmbeddingDim: 1024, GenerationModel: evilScript, YouTubeFetcher: evilAttr,
+				EmbeddingDim: 1024, WritingModel: evilScript, YouTubeFetcher: evilAttr,
 				Drift: &Drift{Changes: []DriftChange{{What: evilScript, Recorded: evilAttr, Current: evilURL}},
 					Verified: true, Detail: evilScript, Fix: evilQuotes},
 				Upstreams: []Upstream{upstream(evilScript, "failing", true), upstream("jina", "degraded", true),
