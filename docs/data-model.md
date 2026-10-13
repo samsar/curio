@@ -116,7 +116,7 @@ documents
   author                TEXT
   published_at          TIMESTAMP
   language              TEXT
-  word_count            INTEGER
+  word_count            INTEGER                -- words of the text last indexed; NULL until its first index
   current_extraction_id UUID                   -- FK to latest successful extraction
   state                 TEXT NOT NULL          -- 'pending' | 'fetched' | 'failed' | 'dead'
   failure_cause         TEXT                   -- why a failed or dead document failed; NULL otherwise
@@ -154,6 +154,13 @@ indexed_at)` serves both: the documents indexed since a time, and the
 latest time. 017 set it to `updated_at` for every document fetched then,
 which `MarkFetched` alone leaves fetched.
 
+`word_count` is how many words the markdown last indexed holds, in the
+chunker's own unit (whitespace-separated words, inline data URLs left out:
+`indexer.WordCount`). `MarkFetched` writes it in the statement that marks
+the document fetched, so it describes the extraction whose chunks are
+stored; nothing else writes it, and a document indexed before it was
+written has none until its next index.
+
 ### `document_extractions`
 
 Each fetch attempt produces a new extraction row. Lets us keep history of how a
@@ -174,6 +181,12 @@ document_extractions
 
 `documents.current_extraction_id` points at the latest successful row. Older
 rows are kept for diff/history (could be GC'd by a future retention job).
+
+`extraction_meta` is the fetcher's diagnostics, and, under `site`
+(`store.ExtractionMetaSiteName`), the site name the page declared
+(`og:site_name`), when it declared one: the fetch handler writes it, and
+the document's search fields are derived from it, so the raw value stays
+on the extraction for a change of the rules to derive again.
 
 ### `chunks`
 
@@ -209,21 +222,87 @@ because SQLite keeps those across VACUUM, where an implicit rowid could be
 renumbered and detach the index from its rows.
 
 A document that fails or goes dead keeps the chunks of its last successful
-fetch; search and find-related leave failed and dead documents out, and a
-refetch that succeeds re-indexes them.
+fetch; the chunk searches and find-related leave failed and dead documents
+out, and a refetch that succeeds re-indexes them. Search can still find
+such a document by what it was saved as (`document_fields`,
+`document_cards`), with no passage.
 
-Only `chunks_vec` depends on the embedding model: it holds that model's
-vectors, and its width is the home's, recorded in `.curio-meta.json` when
-the home is created (1024 for the default `qwen3-embedding:0.6b`). No
-migration can know that width, so migration 001 creates the table at
-FLOAT[768] and the daemon's `sqlite.EnsureVectorIndex`, after migrating,
-recreates it at the marker's width while it is empty; it never rebuilds a
-table that holds vectors. The daemon refuses to start when `config.yaml`'s
+Only `chunks_vec`, and `document_cards_vec` beside it, depend on the
+embedding model: they hold that model's vectors, and their width is the
+home's, recorded in `.curio-meta.json` when the home is created (1024 for
+the default `qwen3-embedding:0.6b`). No migration can know that width, so
+migration 001 creates `chunks_vec` at FLOAT[768] and the daemon's
+`sqlite.EnsureVectorIndex`, after migrating, recreates it at the marker's
+width while it is empty, and creates `document_cards_vec`; it never
+rebuilds a table that holds vectors. The daemon refuses to start when `config.yaml`'s
 embedding model or width differs from the marker's, or the marker predates
 home format 2 (see
 [embedding model and per-home width](./decisions.md#embedding-model-and-per-home-width)).
 The database records neither: migration 012 dropped `schema_meta`, whose
 row claimed nomic-embed-text at 768 for every home.
+
+### `document_fields` and `document_cards` (migration 019)
+
+What a document is searched by besides its text: its fields, which the
+fields list matches with BM25, and its card, the short text whose vector
+the cards list searches. Every document of every state has both, derived
+in Go (`internal/docmeta`) from the document, its current extraction's
+declared site name and its bookmarks, and written only by the store's
+refresh (`refreshFields` in `internal/store/sqlite/fields.go`), in the
+transaction of every write that changes what they are derived from:
+creating a document, a fetch, a change of its current extraction, and
+saving, deleting or relinking a bookmark. Neither is written with `INSERT
+OR REPLACE`, and like `chunks` neither carries `updated_at`: a derived
+row's write never reorders the Library.
+
+```
+document_fields
+  seq             INTEGER PK               -- rowid of the row's document_fields_fts entry
+  document_id     UUID NOT NULL UNIQUE FK  -- ON DELETE CASCADE
+  tenant_id       TEXT NOT NULL
+  host            TEXT NOT NULL            -- the URL's host, without port or "www."
+  declared_site   TEXT NOT NULL            -- the site name its page declares, unless generic or the host itself
+  title_suffixes  TEXT NOT NULL            -- the site names its title and bookmark titles end with, one a line
+  site_name       TEXT NOT NULL            -- its declared name, else the name its host agrees on, else ''
+  title           TEXT NOT NULL            -- searched
+  bookmark_titles TEXT NOT NULL            -- searched: its bookmarks' distinct titles, one a line
+  folders         TEXT NOT NULL            -- searched: its folders, without the browser's root, one a line
+  site            TEXT NOT NULL            -- searched: site_name and the host's words
+  author          TEXT NOT NULL            -- searched
+  rules           INTEGER NOT NULL         -- the docmeta.RulesVersion it was derived by
+
+document_cards
+  document_id     UUID PK FK               -- ON DELETE CASCADE
+  text            TEXT NOT NULL            -- the card: title, saved titles, site, author, folders
+  embedded_text   TEXT                     -- the text its vector was made from; NULL before
+  embedded_at     TIMESTAMP
+```
+
+- `document_fields_fts` is an external-content FTS5 index over the five
+  searched columns (`content_rowid = seq`, the `chunks_fts` tokenizer),
+  kept in step by triggers. The update trigger names the searched columns
+  alone, so a write of the agreement's inputs, the agreed name or the
+  rules version never re-tokenizes a row.
+- `site_name` is agreed across a host: a document's own declared name,
+  else the declared name most of its host's documents hold, else the title
+  suffix at least two of them carry, else a short curated table of public
+  sites. `idx_document_fields_host (tenant_id, host)` serves the read of a
+  host's rows each write makes to agree it; a write that changes the name
+  rewrites the host's other rows without a declared name.
+- A card is stale while `embedded_text IS NOT text`;
+  `idx_document_cards_stale (document_id) WHERE embedded_text IS NOT text`
+  holds the stale ones alone, which the cards job pages through. A write
+  that changes a card's text queues the tenant's cards job in its own
+  transaction.
+- `document_cards_vec` is sqlite-vec, keyed on `document_id`, at the
+  home's width, as `chunks_vec` is: created in Go by
+  `sqlite.EnsureVectorIndex`, with the trigger that deletes a card's
+  vector with its card (`trg_document_cards_delete`), never by a
+  migration, which can't know the width. A new card vector table makes
+  every card stale.
+- `sqlite.EnsureDocumentFields`, at daemon start, derives the rows of the
+  documents without them or derived by older rules, a few hosts per
+  transaction, and queues the cards job where cards are stale.
 
 ### `bookmarks` (reference table)
 

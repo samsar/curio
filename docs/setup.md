@@ -341,9 +341,10 @@ The fix is
 curio reindex --all
 ```
 
-which re-embeds every fetched document and takes the build serving now as
-the new baseline. Search mixes old and new vectors until the index jobs
-finish. The daemon never reindexes by itself.
+which re-embeds every fetched document and every document's card, and
+takes the build serving now as the new baseline. Search mixes old and new
+vectors until the index jobs and the cards job finish. The daemon never
+reindexes by itself.
 
 ## Fetcher options
 
@@ -767,6 +768,41 @@ database as it is, and once you upgrade again the map is drawn anew (see
 `docs/decisions.md` "Interest map", "Going back to 2.5.x"). Remove
 `insight.map` from `config.yaml` first, though: 2.5.x doesn't know the key,
 so its daemon refuses to start and its commands refuse to run.
+
+## Search
+
+Search ranks four lists and fuses them: the passages of each page's text
+by keywords (BM25) and by meaning (the vectors), and each document by
+what it was saved as: its title, bookmark titles, folders, site and
+author by keywords (the *fields*), and its *card*, a short text of the
+same facts, by meaning. The document lists also find bookmarks whose page
+failed or went dead, shown without a passage. Each list's weight is a
+key under `search:`, and 0 turns that list off:
+
+| Key | Default | What it does |
+|---|---|---|
+| `search.bm25_weight` | 1 | the passages by keywords |
+| `search.vector_weight` | 1 | the passages by meaning |
+| `search.fields_weight` | 0.25 | the documents by their saved title, bookmark titles, folders, site and author |
+| `search.cards_weight` | 0.5 | the documents by their cards' meaning |
+
+Each weight is a number, 0 or more, and not all four may be 0. With
+`vector_weight` and `cards_weight` both 0 the query is never embedded, so
+search never waits on Ollama. When Ollama doesn't answer, search ranks by
+keywords alone (BM25 and the fields) and says so (`degraded`).
+
+The cards are embedded by queued work, the `cards` job, on a pool of its
+own: after an import, after a fetch changes what a page is saved as, and
+at the daemon's start when any card is stale. Like the other jobs it
+waits while the queue is paused or outside its schedule, and while Ollama
+doesn't answer it waits too, retrying for up to a day. `curio reindex
+--all` embeds every card again. Upgrading to 2.7 derives every document's
+fields at the daemon's first start (seconds for thousands of documents)
+and queues the cards job, which embeds one card per document.
+
+Going back to curio 2.6.x, remove `search.fields_weight` and
+`search.cards_weight` from `config.yaml` first: 2.6.x doesn't know the
+keys, so its daemon refuses to start and its commands refuse to run.
 
 ## Config: time budgets for Ollama calls
 

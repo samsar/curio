@@ -9,8 +9,9 @@ package pointers), where the result deviates from the plan, and what was
 deferred. Design reasoning lives in `docs/decisions.md`.
 
 **Where things stand:** M0–M4 are shipped. M6 is under way ahead of M5: its
-first PR, the search evaluation and model roles, is merged. **Next: M6's
-metadata search.**
+first PR, the search evaluation and model roles, is merged, and its
+second, metadata search, is done. **Next: the rest of M6's 2.7 search
+work.**
 
 ## M0 — Walking skeleton
 
@@ -272,6 +273,23 @@ before it:
   exactly (decisions.md "Search evaluation: graded, per kind, on a copy,
   never in the repo" and "Model roles: a provider and model per use,
   inheriting generation's").
+- PR 2a, done: metadata search. Each document's title, bookmark titles,
+  folders, site and author are searchable fields (`document_fields`, BM25)
+  and make its card, a short text embedded once by a `cards` job on a pool
+  of its own (`document_cards`); site names come from the page, else the
+  name its host's pages agree on, else a short table of public sites.
+  Both lists are fused into the ranking after the chunks, weighted by
+  `search.fields_weight` and `search.cards_weight` (0.25 and 0.5, chosen
+  on the owner's copy), and both reach failed and dead bookmarks, which
+  every client shows without a passage, saying what they were saved as.
+  `documents.word_count` is written at last. `searcheval` gains the
+  `fields` and `cards` variants, reachability per variant and the card
+  fill. On the owner's copy, all queries' nDCG@10 went from 0.590 to 0.654
+  and the owner-tagged ones' from 0.288 to 0.342, with search's p50
+  within 4 ms of PR 1's; a page found only by what it was saved as still
+  ranks below most pages whose text matched, which a later change to the
+  fusion can lift (decisions.md "Metadata search: a fields index and a
+  card per document").
 
 ## M7 — Hosted mode
 

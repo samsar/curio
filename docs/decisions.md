@@ -89,7 +89,7 @@ when the entry was first committed.
 - 2026-09-24 — [Subprocess fetchers: kill the process group, cap the output](#subprocess-fetchers-kill-the-process-group-cap-the-output)
 - 2026-09-24 — [Chrome profiles carry their own User-Agent and sec-ch-ua](#chrome-profiles-carry-their-own-user-agent-and-sec-ch-ua) (revised)
 - 2026-09-24 — [Store boundary: consumers see interfaces, depguard enforces it](#store-boundary-consumers-see-interfaces-depguard-enforces-it) (revised)
-- 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert)
+- 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert) (revised)
 - 2026-09-24 — [Bookmark ingest: one transaction, fetch only for new documents](#bookmark-ingest-one-transaction-fetch-only-for-new-documents)
 - 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down) (revised)
 - 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders) (revised)
@@ -122,7 +122,7 @@ when the entry was first committed.
 - 2026-09-26 — [YouTube: a shared cooldown after a 429](#youtube-a-shared-cooldown-after-a-429) (revised)
 - 2026-09-26 — [Page verdicts: one judge for every page, bot challenges included](#page-verdicts-one-judge-for-every-page-bot-challenges-included) (revised)
 - 2026-09-26 — [Jina answers are judged like the origin's pages](#jina-answers-are-judged-like-the-origins-pages) (revised)
-- 2026-09-26 — [Search leaves out failed and dead documents](#search-leaves-out-failed-and-dead-documents)
+- 2026-09-26 — [Search leaves out failed and dead documents](#search-leaves-out-failed-and-dead-documents) (revised)
 - 2026-09-27 — [Cross-site redirects: judged where they land](#cross-site-redirects-judged-where-they-land)
 - 2026-09-27 — [Error pages whose status is hidden](#error-pages-whose-status-is-hidden)
 - 2026-09-27 — [Jina requests identify as curio](#jina-requests-identify-as-curio) (revised)
@@ -159,8 +159,9 @@ when the entry was first committed.
 - 2026-10-03 — [Dashboard: two-level interests](#dashboard-two-level-interests)
 - 2026-10-03 — [Page text: not-found notices, parked domains and sign-in forms](#page-text-not-found-notices-parked-domains-and-sign-in-forms)
 - 2026-10-04 — [Interest map: two views of each regrouping, drawn when it is built](#interest-map-two-views-of-each-regrouping-drawn-when-it-is-built)
-- 2026-10-13 — [Search evaluation: graded, per kind, on a copy, never in the repo](#search-evaluation-graded-per-kind-on-a-copy-never-in-the-repo)
+- 2026-10-13 — [Search evaluation: graded, per kind, on a copy, never in the repo](#search-evaluation-graded-per-kind-on-a-copy-never-in-the-repo) (revised)
 - 2026-10-13 — [Model roles: a provider and model per use, inheriting generation's](#model-roles-a-provider-and-model-per-use-inheriting-generations)
+- 2026-10-13 — [Metadata search: a fields index and a card per document](#metadata-search-a-fields-index-and-a-card-per-document)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -447,6 +448,23 @@ when Ollama is down, and reports `vector_hits` 0 and no embed or vector
 time. A BM25 weight of 0 still runs BM25, so a config with `bm25_weight: 0`
 still falls back to the keyword results (weight 1) when the vector leg
 fails. The default 1/1 weights rank exactly as before.
+
+**Revised (2026-10-13), metadata search:** search ranks four lists. The two
+chunk lists, BM25 and vector, are fused and collapsed as above; then two
+lists of whole documents, the fields (BM25 over each document's saved
+title, folders, site and author) and the cards (a KNN over each document's
+embedded card), each add `weight/(rrf_k + rank)` to their documents, and a
+document only they found joins with no chunks. Their weights are
+`search.fields_weight` and `search.cards_weight`, each finite and not
+negative with 0 switching the list off; the four must not all be 0, and
+all four 0 in `search.Config` means unset (1, 1, 0, 0). The query is
+embedded once, for both semantic lists, and only when `vector_weight` or
+`cards_weight` is above 0. Degradation stays one rule: any failure in the
+semantic leg (the embed, either KNN) drops both semantic lists, and BM25
+(at weight 1) and the fields list (at its weight, a local SQLite read like
+BM25, whose failure fails the search) still rank; the warning adds
+", without the document cards" when the cards were on. See "Metadata
+search: a fields index and a card per document".
 
 ---
 
@@ -3340,10 +3358,7 @@ get-or-create stays private to the store (see "Bookmark ingest" below).
 UPDATE by id that points `current_extraction_id` at the new extraction,
 writes `content_type`, `url_canonical`, `title`, `author`, `language` and
 `published_at` exactly as given (nil writes NULL), and sets the state to
-`pending` until the index step marks it `fetched`. Since metadata search
-it is one transaction with the refresh of the document's search fields,
-which its title, author and declared site name feed (see "Metadata
-search: a fields index and a card per document").
+`pending` until the index step marks it `fetched`.
 
 **Why:** `Upsert` served two callers with different needs. Its ON CONFLICT
 branch COALESCEd every nullable column, so a refetch could never clear an
@@ -3355,12 +3370,19 @@ had just created.
 **Verbatim writes:** those columns describe `current_extraction_id`, so a
 value the new extraction lacks must not survive from the old one. Clients
 already fall back to the URL or the bookmark title when `title` is NULL.
-`word_count` is left alone: `MarkFetched` writes it, in the statement that
-marks the document fetched, from the markdown the index step chunked
-(`indexer.WordCount`, the chunker's own unit: whitespace-separated words,
-inline data URLs left out), so the count always describes the extraction
-whose chunks are stored. Nothing backfills it; a document gets its count
-at its next index.
+`word_count` is left alone because no fetcher sets it.
+
+**Revised (2026-10-13):** nothing wrote `word_count`, so it was NULL for
+every document, though the API and the Document page show it. Now
+`MarkFetched` writes it, in the statement that marks the document
+fetched, from the markdown the index step chunked (`indexer.WordCount`,
+the chunker's own unit: whitespace-separated words, inline data URLs left
+out), so the count always describes the extraction whose chunks are
+stored. `ApplyFetch` still leaves it alone. Nothing backfills it; a
+document gets its count at its next index. `ApplyFetch` is now one
+transaction with the refresh of the document's search fields, which its
+title, author and declared site name feed (see "Metadata search: a fields
+index and a card per document").
 
 ---
 
@@ -3744,6 +3766,26 @@ both primary keys) are pinned, and refuse a walk of the tenant's documents.
 A document's delete still seeks `idx_interest_assignments_document` and
 `idx_interest_placements_document`. See "Interest map: two views of each
 regrouping, drawn when it is built".
+
+**Revised (2026-10-13):** migration 019's tables bring two indexes and
+their pins. `idx_document_fields_host (tenant_id, host)` serves the one
+read of a host's rows each fields refresh makes to agree its site name;
+`idx_document_cards_stale`, a partial index of the cards whose embedded
+text isn't their text, serves the cards job's keyset pass over the stale
+cards and the startup count of tenants with any, so neither reads a
+fresh card. The fields search is driven from the FTS MATCH, each hit's
+row by rowid and its document by primary key; the card search from the
+vec0 KNN, each document by primary key; a card vector's delete is a vec0
+point lookup, as a chunk vector's is. The refresh's reads (a document's
+inputs, its bookmarks in their order with no sort, a sibling by its
+unique key) and its upserts (by `document_id`, never a scan), the
+startup scan for fields that are missing or of older rules (each
+document once, its row by the unique key), `ResetCards` and
+`ListByDocuments` (a JSON array of IDs, each document's bookmarks by
+`idx_bookmarks_document`) are pinned. The stale-card read and the
+bookmarks by documents write their tenant `+d.tenant_id` and
+`+tenant_id`, so neither walks a tenant index. See "Metadata search: a
+fields index and a card per document".
 
 ---
 
@@ -5264,6 +5306,19 @@ pending/failed/dead documents have no indexed chunks.
 `EmbeddingsForDocument` and `DocumentVectors` are unchanged: a failed or
 dead source document still has vectors for find-related, and clustering
 already reads fetched documents only.
+
+**Revised (2026-10-13), by the owner:** search finds failed and dead
+documents again, by what they were saved as, never by their stale text.
+The chunk retrievers still leave them out, as above, so no passage of a
+failed fetch's old extraction is ever shown or ranked. The document lists
+of metadata search (the fields and the cards) reach every document of
+every state: a bookmark whose page is gone is still the bookmark its
+owner is looking for, and its title, folders and site are what they
+remember it by. About three in ten documents of the owner's library are
+failed or dead. Such a hit has no passages; the API sends the bookmarks
+it was saved under in their place, and every client says the page is no
+longer available. find-related is unchanged. See "Metadata search: a
+fields index and a card per document".
 
 ---
 
@@ -12750,6 +12805,27 @@ every delta +0.000 and no query moved, and pointing the tool at the home's
 own database was refused, naming `daemon.pid`, with the directory left
 as it was.
 
+**Revised (2026-10-13), metadata search:** the variants are `hybrid`
+(config.yaml's weights), then `bm25`, `vector`, `fields` and `cards`, each
+one list at weight 1, each a `search.Config`. Before any query the tool
+brings the copy up to date the way the daemon's start does
+(`devtool.OpenCopy` migrates, sizes both vector indexes at the copy's
+width and refreshes the document fields) and embeds the stale cards
+through `Indexer.EmbedStaleCards`, the cards job's own loop, with
+config.yaml's document prefix and embed timeout, logging its progress.
+The report adds `library.fields_ms`, `cards_ms` and `cards_embedded`: run
+facts, like the timings, left out of the determinism comparison (a
+second run on the same copy embeds no card). Reachability is per
+variant: a judgment resolves once to facts (the document exists, its
+state, whether it has chunks), and is searchable for a variant when any
+list it weights above 0 can return its document: the chunk lists one
+neither failed nor dead with chunks, the document lists any document.
+`library.unsearchable` keeps its first meaning, what the chunk lists
+can't return, and the text report says so. Provenance adds the two
+weights, the stages `fields` and `cards`; the format stays 1, every
+change additive, and PR 1's report still loads as a baseline (a test
+loads one).
+
 ---
 
 ## Model roles: a provider and model per use, inheriting generation's
@@ -12821,6 +12897,310 @@ know `generation.roles` ("field roles not found in type
 config.Generation", checked with v2.6.0's config loader), so its daemon
 refuses to start and its CLI fails on the same parse; remove the key
 first, as setup.md says.
+
+---
+
+## Metadata search: a fields index and a card per document
+
+**Decision:** search finds a document by what it was saved as, not only
+by its text. Two lists of whole documents join the two chunk lists: the
+**fields** list, BM25 over each document's title, bookmark titles,
+folders, site and author (`document_fields_fts`), and the **cards** list,
+a KNN over each document's card, a short text of the same facts embedded
+once (`document_cards_vec`). Both reach every document of every state, so
+a bookmark whose page failed or went dead is found again by its title,
+folder or site. The defaults, chosen by measurement on the owner's
+library, are `search.fields_weight` 0.25 and `search.cards_weight` 0.5.
+
+**Why:** the chunk lists see a page's text, its document title and its
+tags. What its owner remembers a bookmark by, the title they saved it
+under, the folder they filed it in, the site it came from, was searched
+by nothing, and about three in ten documents of the owner's library have
+no text search may use at all (failed or dead). Queries that name a site
+or a person were among the weakest kinds in PR 1's evaluation (nDCG@10
+0.380), and the owner's own searches, the owner-tagged queries, scored
+0.288.
+
+**What is searched.** Each field is cut to 2 KiB on a rune boundary:
+
+- `title`: the document's title.
+- `bookmark_titles`: its bookmarks' distinct titles, oldest saved first.
+- `folders`: its bookmarks' folder paths without the browser's root label
+  (Bookmarks Bar, Other Bookmarks, Favorites, …, compared without case
+  and only as the first segment), segments joined with " / ". The root
+  says nothing a query would name; a folder of that name deeper down is
+  the owner's and stays. A test holds the importers' root labels to the
+  list.
+- `site`: the document's display site name and its host's words: the
+  registrable label with hyphens as spaces, then every subdomain label but
+  `www` (`ben-evans.com` → "ben evans", `blog.example.co.uk` → "example
+  blog"), through the public suffix list, so a TLD is never a word.
+- `author`.
+
+BM25 weighs the columns 1, 1, 0.5, 1, 1: a folder names a category many
+documents share, so it counts half. The card is the title; the bookmark
+titles that differ from it; the display site name, else the host; the
+author; the folders: each part's whitespace collapsed, cut to 300 bytes,
+empty parts dropped, joined with " — " (at most `docmeta.MaxCardBytes`).
+
+**Site names.** A page's `og:site_name` (`fetcher.Result.SiteName`, from
+readability and web2md's front matter; Jina, GitHub, YouTube and PDFs
+declare none) is stored raw in the extraction's meta under `site` and
+cleaned when derived: whitespace collapsed, 120 bytes, and dropped when it
+names a platform rather than the site (Medium, Substack, WordPress,
+Tumblr, Blogger, Google Docs, Wikimedia, AWS) or is the host itself. A
+document's display name is its own declared name, else the name its host
+agrees on: the declared name most of its documents hold (one is enough),
+else the title suffix (the text after a title's last " | ", " – ", " — ",
+" - " or " · ", 2 to 60 bytes, with a letter, neither generic nor the
+host) at least two of its documents carry, else a curated table of at most
+25 well-known public sites whose domain doesn't spell their name (20
+today, such as `stratechery.com` → Stratechery, `hbr.org` → Harvard
+Business Review), else none. Ties go to byte order. The table is general
+and short; growing it to win a query is out of bounds.
+
+**Two tables, not an FTS over documents.** The fields come from three
+tables (the document, its current extraction's meta, its bookmarks) and
+from rules only Go can apply (the public suffix list, root labels, the
+host's agreement). An FTS5 index over `documents` would hold only what a
+documents column holds, and a contentless or view-backed one couldn't be
+kept in step by triggers across bookmarks and extractions. So
+`document_fields` (migration 019) holds one derived row per document, with
+an integer `seq` for the external-content FTS's rowid (`documents` is keyed
+by a UUID) and the agreement's inputs beside the searched text:
+`declared_site` and `title_suffixes` per row, so agreeing a host's name is
+one indexed read of its rows (`idx_document_fields_host`), never its
+documents' titles and bookmarks. The FTS update trigger names the five
+searched columns alone, so writing those inputs, `site_name` or `rules`
+never re-tokenizes a row. `document_cards` holds the card's `text` and the
+`embedded_text` its vector was made from; a card is stale while they
+differ, and `idx_document_cards_stale`, a partial index of exactly those,
+is what the cards job pages through. Neither table carries `updated_at`,
+like `chunks`.
+
+**One writer.** `refreshFields` (`internal/store/sqlite/fields.go`) is the
+only writer of `document_fields` and of `document_cards.text`, and
+`internal/docmeta` the only derivation: pure functions, standard library,
+`urlutil` and `textutil` alone (depguard `docmeta-pure`), versioned by
+`docmeta.RulesVersion` with a golden file per version. It runs inside the
+transaction of every write that changes an input: `Documents.Create`,
+`ApplyFetch` (now one `BEGIN IMMEDIATE` transaction), and
+`SetCurrentExtraction`; `Bookmarks.Ingest` (new and existing documents),
+`Create` (when it links a document), `Delete` (on the document it linked)
+and `LinkDocument` (on the old and the new). State is no input, so
+`MarkFetched`, `MarkFailed` and the refetches don't run it. It upserts
+each row `ON CONFLICT … DO UPDATE … WHERE` something changed (never
+`INSERT OR REPLACE`, which would fire the delete triggers), agrees the
+host's name, and when that changed rewrites the site and card of the
+host's other documents without a declared name. A write that changes no
+input writes nothing (a test counts `total_changes()`), and a property
+test holds any order of creates, ingests, fetches and deletes to the
+fields a full derivation of the final data gives. `urlutil.Site`, the
+registrable domain, moved from the fetcher, whose site pacing uses it too.
+
+**Why not on `documents`.** The research sketch put the display name in a
+`documents.site_name` column. It changes when a sibling is fetched or
+saved, so writing it there would either set `updated_at` on documents that
+didn't change, reordering the Library (on the first start after the
+upgrade, about two thirds of the owner's documents would have jumped to
+its top), or need an exception to "every UPDATE sets `updated_at`". The
+raw declared value stays on the extraction, so a change of rules derives
+again from it.
+
+**Cost per write.** One indexed read of the host's rows and Go counting:
+a per-host votes table was considered and isn't needed at curio's scale.
+Measured (`BenchmarkRefreshFields_LargeHost`, `BenchmarkIngest`): a refresh
+on a host of 5,000 documents takes about 3 ms; saving a new page's
+bookmark in a 7,500-document library takes 0.72 to 0.86 ms on a host of
+350 and 0.52 to 0.70 ms on a host of ten, against 0.27 and 0.26 ms before,
+under the 1 ms the design allowed.
+
+**A startup refresh, not a SQL backfill.** Migration 019 creates the
+tables empty. `sqlite.EnsureDocumentFields`, after `EnsureVectorIndex` and
+before the full API is up, derives every document whose row is missing or
+was derived by another `RulesVersion`, whole hosts at a time, up to 1,000
+documents a transaction, so a run cut short keeps what it committed and
+the next resumes; then it queues a cards job for every tenant with stale
+cards. One INFO line, "document fields refreshed" (documents, hosts,
+cards_stale, took_ms); a failure fails the start like a migration's. The
+sketch's SQL backfill would have been a second implementation of the
+rules, and it already disagreed with the Go one (it stripped two root
+labels and made every dot of the host a word, TLDs included). The same
+step applies the next rules change (a version bump) to every home.
+`devtool.OpenCopy` runs it too.
+
+**Cards, staleness and the cards job.** A changed card text queues a
+`cards` job in the transaction that changed it (`EnqueueOnce`: at most one
+pending per tenant, a running one not counting; the commit wakes the
+pool), so a stale card always has a job pending or running and no caller
+can forget to queue one; a write rolled back queues nothing. The sketch
+queued from the callers (after an import, after `MarkFetched`, after
+reindex-all, at start); `MarkFetched` changes no card, so a document whose
+index failed would never have had its card embedded. The job runs on its
+own one-goroutine pool, under the queue gate (uncapped by the gentle
+throttle, which caps fetch and index), so card work never takes an index
+slot. It pages through the stale cards 32 at a time
+(`Indexer.EmbedStaleCards`, one embed call and one `PutCardVectors`
+transaction a batch, with the document prefix); `PutCardVectors` stores a
+vector only while the card still holds the text embedded, so a card
+changed meanwhile stays stale for the job its writer queued. An embed
+that got no answer (`ollama.ErrUnreachable`) defers the job, its attempt
+refunded, for half its age, between 1 and 30 minutes, within the day's
+deferral budget ("Waiting is not failing"); input too long and a wrong
+width are permanent; anything else retries through the queue. Cards are
+never marked failed: stale ones wait for the next job, which any card
+change, a reindex-all or the next start queues. `POST
+/v1/documents/reindex-all` makes every card stale (`ResetCards`, which
+queues the job), keeping the old vectors searchable until they are
+embedded again; the drift sampler stays chunks-only. `document_cards_vec`
+is created by `EnsureVectorIndex` at the home's width with its delete
+trigger, under the rules `chunks_vec` follows, and a new card vector
+table makes every card stale.
+
+**The fusion.** The chunk lists are fused by RRF and collapsed exactly as
+before. Then each document list adds `weight/(rrf_k + rank)` to its
+documents, rank 1-based, the fields before the cards, and a document only
+they found joins with no chunks; the result is sorted by score, then
+document ID. Sums are taken in that fixed order. Both lists are read 200
+deep (`2 × store.MaxSearchK`) whatever the window, so every page of a
+query is cut from one ranking ("Search pages by offset within a
+fixed-depth pool"), and `total` and `capped` count documents only they
+found. The fields list breaks ties by `seq`, the cards list by distance,
+then document ID, over-fetching the KNN (`min(limit × 10, 1000)`) for its
+filters. The fields list runs beside BM25 on the same sanitized query;
+the query is embedded once for both semantic lists, which run side by
+side. Any failure in the semantic leg drops both semantic lists (one rule,
+one warning, ", without the document cards" added when the cards were
+on); BM25 and the fields list still rank, and a fields failure fails the
+search, as BM25's does. The lists are a slice, so later work adds lists
+or stages without reshaping it.
+
+**Failed, dead and pending documents.** The chunk lists still leave
+failed and dead documents out, so a failed fetch's stale text is never
+ranked or shown; the document lists reach every state ("Search leaves out
+failed and dead documents", Revised). A pending document is in the chunk
+lists once it has chunks (a refetch keeps its last ones), and before its
+first index in the document lists alone, so a bookmark saved a moment ago
+is found by its title. A hit only the document lists found has no
+passages. The API
+sends, on a hit without matches only, the bookmarks it was saved under
+(`bookmarks`: title, folder, source, saved; one `ListByDocuments` read per
+response), the dashboard shows "Saved as …" in place of a passage and,
+for a failed or dead page, that it is no longer available, with a link to
+the original; `curio search` and MCP `search_bookmarks` say the same.
+
+**Word counts.** `documents.word_count` was never written; `MarkFetched`
+now writes it ("Documents: explicit Create and ApplyFetch", Revised).
+
+**Measured** on a copy of the owner's library (7,557 documents, 50
+graded queries, 666 judgments), each run on its own fresh copy of it with
+the owner's config.yaml, against PR 1's baseline. Deriving every
+document's fields took 0.76 to 0.81 s; embedding its 7,557 cards took 105
+to 111 s with Ollama otherwise idle. With both weights 0 the pipeline
+reproduced PR 1's ranking exactly (every group delta +0.000, all 50
+rankings identical): the new code leaves the chunk ranking alone. The
+grid, hybrid, each cell all queries' nDCG@10 / owner-tagged nDCG@10 /
+owner-tagged R@10 / keyword R@10 (PR 1: 0.590 / 0.288 / 0.268 / 0.845):
+
+| fields \ cards | 0 | 0.5 | 1 |
+|---|---|---|---|
+| 0 | 0.590 / 0.288 / 0.268 / 0.845 | 0.637 / 0.341 / 0.303 / 0.864 | 0.656 / 0.340 / 0.207 / 0.864 |
+| 0.25 | 0.605 / 0.294 / 0.295 / 0.845 | **0.654 / 0.342 / 0.297 / 0.864** | 0.664 / 0.336 / 0.201 / 0.864 |
+| 0.5 | 0.613 / 0.307 / 0.295 / 0.827 | 0.660 / 0.331 / 0.287 / 0.845 | 0.668 / 0.343 / 0.201 / 0.864 |
+
+Each list adds to the chunk lists' ranking (fields 0.25 alone +0.015,
+cards 0.5 alone +0.047), and the two together add most. The cards at
+weight 1 cost the owner-tagged queries a quarter of their recall at 10
+(0.20 against 0.27), and the fields at 0.5 without the cards cost the
+keyword queries recall (0.827); the rule below keeps both out.
+
+**The defaults, 0.25 and 0.5.** The rule set before the grid ran: the
+best all-queries nDCG@10 among the points keeping owner-tagged R@10 at
+PR 1's 0.268 or more and keyword R@10 at 0.84 or more, ties within 0.005
+to the higher owner-tagged nDCG@10, then the lower total weight. Its
+literal pick, 0.5 / 0.5 (0.660), misses the bar the defaults must clear
+for owner-tagged nDCG@10 (0.331 against 0.34), with evidence queries
+0.048 under PR 1, at the limit of the 0.05 a kind may fall; so the
+default is 0.25 / 0.5, the best point (0.654, 0.006 below) that clears
+every bar. Neither list is off. With the defaults, against PR 1:
+
+| | nDCG@10 | R@10 | R@100 | MRR |
+|---|---|---|---|---|
+| all (50) | 0.590 → 0.654 | 0.567 → 0.599 | 0.725 → 0.799 | 0.772 → 0.824 |
+| owner-tagged (8) | 0.288 → 0.342 | 0.268 → 0.297 | 0.482 → 0.466 | 0.559 → 0.630 |
+
+and nDCG@10 by kind: vague reference +0.155, site or person +0.174, code
++0.097, list +0.049, world hop +0.028, keyword +0.020 (R@10 0.845 →
+0.864), evidence +0.002, analytic +0.000, temporal −0.033. 19 queries
+moved by 0.05 or more, 17 of them up. Every judgment is now reachable
+(136 were out of the chunk lists' reach: failed, dead or chunkless). Each
+list alone, all queries' nDCG@10: BM25 0.463, vector 0.558, fields 0.443,
+cards 0.595.
+
+**Latency**, measured back to back on one machine state: PR 1's
+`searcheval` (built from main), this branch's with the defaults, then PR
+1's again. Hybrid total p50 143.5 and 146.6 ms for PR 1, 146.9 ms with
+the defaults; p95 196.3 and 197.3 ms, and 197.9 ms. By stage, p50 / p95,
+PR 1 then the defaults: embed 39.2 / 49.8 and 37.8 / 50.2; BM25 30.7 /
+108.9 and 31.7 / 100.7; fields — and 1.8 / 5.7; vector 67.5 / 82.0 and
+76.8 / 98.0; cards — and 17.8 / 25.4; fuse 0.4 / 0.8 and 0.6 / 0.9;
+hydrate 33.9 / 64.1 and 31.7 / 60.5. The fields list runs beside BM25
+and the card KNN beside the chunk KNN, so neither adds its own time to
+the total: the chunk KNN's p50 rose about 9 ms running beside the card
+KNN (PR 1's two runs differ by 3.6 ms there), and the total's p50 by 3.4
+ms against the first PR 1 run and 0.3 ms against the second.
+
+**The upgrade, measured.** This branch's build on a scratch home with a
+copy of the owner's database (fetch jobs removed): migration 019 applied
+in 347 ms; "document fields refreshed" derived 7,560 documents on 3,213
+hosts in 805 ms with 7,560 cards stale; the cards job, held while the
+copy's queue was paused, ran once it was resumed, one attempt, 7,560
+cards in 107.8 s; no WARN or ERROR in the log. `ListByDocuments` for 10
+documents took 31 µs at p50 (58 µs at p95).
+
+**Known limitations.**
+
+- A document found only by the document lists ranks below most
+  documents the chunk lists found. Its score is at most
+  `(fields_weight + cards_weight) / (rrf_k + 1)`, 0.0123 with the
+  defaults, under any document with a chunk in either chunk list's top
+  21, and on a library of more than 800 chunks the vector list returns
+  800 for any query. On the scratch daemon, 60 failed or dead bookmarks
+  searched by their own titles all came back within the 100, none in the
+  first 20, at a median rank of 45, and a synthetic bookmark found by a
+  word no chunk holds ranked 27th, behind documents only the vector list
+  found. The ranking puts them in reach (R@100 +0.074) but not on the
+  first page; raising them is a change to the fusion, to be measured
+  like this one.
+- A re-import doesn't update a bookmark's title or folder: `Ingest` keeps
+  the first save of a URL from a source (`ON CONFLICT DO NOTHING`), so the
+  fields keep the title and folder it was first saved with.
+- Pages read through Jina Reader declare no site name (its answer carries
+  no `og:site_name`); their host's agreement or the curated table names
+  them, or nothing does.
+- A page is embedded twice during an import: its card at ingest (title,
+  bookmark, site), and again after its fetch brings a title, author or
+  site name. A card is one short input, next to the page's chunks; the
+  first embed is what lets a page that never fetches be found.
+
+**Going back to 2.6.x.** 2.6 runs goose v3.28.0, which ignores database
+versions it doesn't know (as 2.5's does: "Going back to 2.5.x"), so its
+daemon starts on a schema-19 database. It writes none of the new tables
+(deleting a document still removes its rows, through their foreign keys
+and triggers) and never claims a cards job. Back on 2.7, the start
+derives the fields of the documents 2.6 created; a document 2.6 fetched,
+or whose bookmarks it changed, keeps the fields it had until its next
+write or the next rules bump. Remove `search.fields_weight` and
+`search.cards_weight` from config.yaml first: 2.6 decodes it strictly
+("field fields_weight not found in type config.Search", checked with
+v2.6.0's config loader), so its daemon refuses to start and its CLI fails
+on the same parse.
+
+**How to revisit:** a rule change (a generic name, a separator, the
+table) is a change in `internal/docmeta` and a `RulesVersion` bump with a
+new golden file; the next start derives every document again and the
+cards job embeds the cards that changed. The weights are config; measure
+any change with `make search-eval` against the last report.
 
 ---
 

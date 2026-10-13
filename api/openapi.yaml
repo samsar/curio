@@ -580,12 +580,15 @@ paths:
         Index jobs change no document state, so a partial run strands
         nothing; a failure stops the run and the 500 says how many jobs were
         enqueued before it. There is no parent job to poll. With
-        state=fetched, the default, the fetched documents are every
-        searchable one, so once all their jobs are enqueued the embedding
-        drift baseline is reset: the recorded model digest and Ollama
-        version are cleared, and the daemon's next check records the build
-        serving now, which clears embedding_drift on healthz. A failed
-        reset is a 500 whose detail says all the jobs were enqueued. Before
+        state=fetched, the default, the fetched documents are every one
+        whose chunks search reads, so once all their jobs are enqueued
+        every document's card is made stale and the cards job queued (each
+        card's old vector stays searchable until it is embedded again), and
+        the embedding drift baseline is reset: the recorded model digest
+        and Ollama version are cleared, and the daemon's next check records
+        the build serving now, which clears embedding_drift on healthz. A
+        failure of either is a 500 whose detail says all the jobs were
+        enqueued. Before
         it enqueues them, a state=fetched run with documents owes the
         interests a fresh rebuild (fresh_owed reindex on the interests'
         state), which the daemon queues once the re-embedding has drained:
