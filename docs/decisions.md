@@ -68,8 +68,8 @@ when the entry was first committed.
 - 2026-07-05 — [find_related: stored-vector mean-pooling, not title search](#find_related-stored-vector-mean-pooling-not-title-search) (revised)
 - 2026-07-06 — [Insight layer: kNN-graph clustering + labeled interests (M4)](#insight-layer-knn-graph-clustering--labeled-interests-m4) (revised)
 - 2026-07-06 — [LLM generation client (`generator.Generator`)](#llm-generation-client-generatorgenerator) (revised)
-- 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness)
-- 2026-07-06 — [M6 (planned): RAG / Q&A synthesis + SOTA natural-language search](#m6-planned-rag--qa-synthesis--sota-natural-language-search)
+- 2026-07-06 — [Retrieval eval harness](#retrieval-eval-harness) (revised)
+- 2026-07-06 — [M6 (planned): RAG / Q&A synthesis + SOTA natural-language search](#m6-planned-rag--qa-synthesis--sota-natural-language-search) (revised)
 - 2026-07-06 — [nomic-embed-text task prefixes (`search_document:` / `search_query:`)](#nomic-embed-text-task-prefixes-search_document--search_query) (revised)
 - 2026-07-06 — [Insight clustering quality: the "general-reading" mega-cluster (known limitation)](#insight-clustering-quality-the-general-reading-mega-cluster-known-limitation) (revised)
 - 2026-09-09 — [Host-cache hits are permanent failures](#host-cache-hits-are-permanent-failures) (revised)
@@ -159,6 +159,8 @@ when the entry was first committed.
 - 2026-10-03 — [Dashboard: two-level interests](#dashboard-two-level-interests)
 - 2026-10-03 — [Page text: not-found notices, parked domains and sign-in forms](#page-text-not-found-notices-parked-domains-and-sign-in-forms)
 - 2026-10-04 — [Interest map: two views of each regrouping, drawn when it is built](#interest-map-two-views-of-each-regrouping-drawn-when-it-is-built)
+- 2026-10-13 — [Search evaluation: graded, per kind, on a copy, never in the repo](#search-evaluation-graded-per-kind-on-a-copy-never-in-the-repo)
+- 2026-10-13 — [Model roles: a provider and model per use, inheriting generation's](#model-roles-a-provider-and-model-per-use-inheriting-generations)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -2149,6 +2151,15 @@ that keeps trying".
   restarts a home with another writing model and finds the marker
   unchanged but for `updated_at`.
 
+**Revised (2026-10-13):** each use of a writing model is now a role, and
+`generation.roles.<role>` can give one its own provider, model, base URL
+or timeout, the rest inherited from `generation`. Callers build a role's
+model with `generator.New(cfg.Generation.Role(r))`, the one switch on the
+provider, never `NewOllama` directly. The daemon builds the labeler, and
+pulls a writing model, only for a role in use: with insight off it no
+longer pulls a model nothing uses. See "Model roles: a provider and model
+per use, inheriting generation's".
+
 ---
 
 ## Retrieval eval harness
@@ -2186,6 +2197,16 @@ the wrong thing):
   if it were the hybrid pipeline. `--k` must be at least 1 (checked locally);
   above 100 the API's 400 surfaces.
 
+**Revised (2026-10-13):** the query file is graded and grouped: an entry
+is a URL (grade 1) or `{url, grade: 2}`, and a query may carry an `id`, a
+`kind`, `tags` and a `note`, every key checked. nDCG is graded, and at
+grade 1 equals the binary formula, so `curio eval` prints exactly what it
+did for every file it read before, held by a golden file the old code
+wrote; it reports no kinds or tags. The developer's measurement of search
+is now `cmd/searcheval`, on a copy of a home's database, per kind and tag
+and per stage, against a baseline: see "Search evaluation: graded, per
+kind, on a copy, never in the repo".
+
 ---
 
 ## M6 (planned): RAG / Q&A synthesis + SOTA natural-language search
@@ -2208,6 +2229,22 @@ taste call. Do not start building the RAG loop until this is settled.
 M6; RAG/search is the larger, more foundational body of work, and suggestions
 build on good retrieval regardless. This renumber pushed the former "Hosted
 mode" milestone to M7.
+
+**Revised (2026-10-13):** the owner approved M6's design, and it settles
+build vs. adopt: curio builds its own. A survey of the local tools, qmd
+among them, found the BM25 and vector fusion curio already does to be
+their baseline, and none that writes a searchable card for each document,
+turns a query's dates or sites into filters on what was saved, or is
+measured on its owner's own library; what would lead builds on curio's
+engine, interests and job queue. M6 goes ahead of M5, as six PRs over two releases, each measured
+with `make search-eval` on the owner's graded test set against the run
+before it. PR 1 is the foundations: the evaluation ("Search evaluation:
+graded, per kind, on a copy, never in the repo") and model roles ("Model
+roles: a provider and model per use, inheriting generation's"), with the
+zero-weight fix to "Hybrid search" the evaluation's BM25-only variant
+needed. The later PRs add metadata search and document cards, query
+understanding, LLM-written card fields, reranking and the cited answer
+loop.
 
 ---
 
@@ -3278,6 +3315,14 @@ anyway.
 migrates and reads a copy of a home's database, which `make build` and
 goreleaser never build (see "Interests: two levels, stable identities,
 automatic rebuilds", "The cluster report (PR 5)").
+
+**Revised (2026-10-13):** the exception is now `internal/devtool`'s
+(`!**/internal/devtool/**`), which opens a copy of a home's database and
+builds its stores for both developer's tools, `cmd/clusterreport` and
+`cmd/searcheval`; neither imports `internal/store/sqlite` outside its
+tests. A `devtool-for-dev-tools` rule denies `internal/devtool` to
+everything but those two and devtool itself (see "Search evaluation:
+graded, per kind, on a copy, never in the repo").
 
 ---
 
@@ -12560,6 +12605,186 @@ tries).
   largest: a crowded view names what fits and leaves the rest to zooming
   in, and which names fit can differ with the screen's font metrics (at
   1440×1250 two area names show at DPR 1 that don't at DPR 2).
+
+---
+
+## Search evaluation: graded, per kind, on a copy, never in the repo
+
+**Decision:** M6's changes to search are measured by `cmd/searcheval`
+(`make search-eval`), a developer's tool that runs the production search
+engine on a copy of a home's database against a graded query file, and
+scores every query 100 deep, per query, per kind and per tag, for each
+variant of the pipeline asked for, with each stage's latency. A run can be
+compared with an earlier one query by query. `curio eval` stays as it was.
+
+**Why:** `curio eval` measures the daemon's search over HTTP at the
+user's k, with binary relevance and one mean: enough to say a setting
+helped on average, not where it helped, what it cost in latency, or that
+queries of one kind fell while another rose. M6 changes several stages of
+search, each judged against the run before it; that needs the same
+queries, the real pipeline at a fixed depth, and a comparison that refuses
+to compare different queries.
+
+**The format** (`internal/eval`, `docs/search-eval.example.yaml`): a query
+has its text and its judgments, each a URL (grade 1, relevant) or `{url,
+grade: 2}` (what the query is after), and optionally an `id` (unique, so a
+baseline can match it across edits), a `kind`, `tags` and a `note`. Every
+key is checked, at every level, as config.yaml's are: a `tag:` for `tags:`
+would otherwise drop a query from its group without a word. Grades are 1
+and 2 only: the format defines no others, a grade it doesn't define is
+more likely a typo than a meaning, and an unbounded grade overflows the
+gain 2^g−1 to +Inf, which makes nDCG NaN; widening the scale is one
+constant and these docs. URLs are normalized as stored URLs are, and
+duplicates keep the higher grade at the first one's place. Errors name the
+file, the query's index and id, and an entry's line. Today's qrels files
+load unchanged.
+
+**The metrics:** graded nDCG@10 (gain 2^g−1; the ideal DCG over every
+judgment, ranked or not), recall@10 and @100, recall@10 of the grade-2
+judgments (n/a for a query without one, and the group mean skips it), RR
+and its mean, success@1, @5 and @10, and the first judged rank. Missing
+and unsearchable judgments stay in every denominator and in the ideal: the
+score says how the library and the pipeline together serve the query. At
+grade 1 graded nDCG is binary nDCG, which a seeded test holds against the
+old formula, and `curio eval` prints byte for byte what it did.
+
+**Groups:** all, then each kind and each tag in the order it first
+appears. A query with two tags is in both; one without a kind is in no
+kind's group; a kind and a tag of one name are two groups.
+
+**The pipeline, unchanged:** `search.ConfigFrom` is the one mapping from
+config.yaml to the engine, and the daemon uses it too; a test changes every
+key of the search section by reflection, so a key added later fails until
+it is mapped. Each query asks for k = `store.MaxSearchK` (100) at offset
+0, the pool every search ranks ("Search pages by offset within a
+fixed-depth pool"), so R@100 is the whole ranking's recall. Queries embed
+through config.yaml's Ollama, pinged (10 s) and warmed up first, never
+pulled from; the engine's own embed timeout applies, and a degraded search
+fails the run, naming the query, as `curio eval` refuses one. The copy's
+vector width must be config.yaml's `embedding.dim`.
+
+**On a copy:** the tool migrates what it reads, so `internal/devtool`
+refuses a database beside `daemon.pid` before opening anything, and says
+how to take a copy. devtool builds the copy's stores for both developer's
+tools, so neither imports the SQLite implementation outside its tests; the
+store boundary's exception moved from `cmd/clusterreport` to devtool, and a
+depguard rule keeps devtool out of everything shipped.
+
+**Judgments, resolved once:** missing (no document has the URL);
+unsearchable (the document failed or is dead, or has no chunks); otherwise
+searchable, a pending document with chunks included, since search reads
+those.
+
+**Variants:** an ordered registry, `hybrid` (production), `bm25` and
+`vector` (the engine with the other weight at 0); later PRs register their
+own, each a ranker that reports its stages. The BM25-only variant is what
+showed that a zero weight still ranked the other leg's documents at score
+0 ("Hybrid search", Revised 2026-10-13).
+
+**Stage timings:** `search.Result.Timings` (embed, BM25, vector, fuse,
+hydrate, total), each leg writing its own fields, read after the legs
+join. The BM25 leg runs alongside the embed and the vector search, so the
+stages add up to more than the total. The HTTP API never reports them.
+The tool reports nearest-rank p50 and p95 per stage, and the whole rank
+call as total.
+
+**Deterministic:** two runs on one copy differ only in `generated_at` and
+the timings.
+
+**Baselines:** a baseline made from the same bytes (the query file's
+SHA-256) is matched by index; one made from an edited file, by id, when
+every query on both sides has one and the ids are the same; anything else
+is refused before the copy is opened, naming both hashes and up to 10 ids
+found on one side only. The comparison shows each group's deltas, the
+queries whose nDCG@10 moved by 0.05 or more, the variants one run lacks,
+and what else differs (database, schema, embedding model or prefix,
+search settings, curio version). The JSON names its baseline but never
+holds the comparison, so any report can be the next run's baseline.
+
+**Private by construction:** a real test set names what its owner reads
+and searches for. The query file and every JSON report (which holds the
+queries' text and the judged URLs) stay out of the repository; the text
+report names queries by id alone; tests use a synthetic example.com
+library whose every expected score is derived by hand in its comments.
+Numbers from the owner's set are recorded here in aggregate only.
+
+**Acceptance on a copy of the owner's library** (50 queries, 666
+judgments: 0 missing, 136 unsearchable; the owner's config.yaml): the
+hybrid variant reproduces the baseline recorded through `/v1/search`
+exactly, the top 10 and the whole top 100 of all 50 queries. Owner-tagged
+queries R@10 0.268, nDCG@10 0.288; keyword queries R@10 0.845; the 49
+non-analytic queries R@10 0.579, R@100 0.740, MRR 0.787, nDCG@10 0.602. For
+reference, BM25 alone: owner 0.252 / 0.217, non-analytic 0.447 / 0.639 /
+0.640 / 0.469, keyword R@10 0.745; vector alone: owner 0.097 / 0.152,
+non-analytic 0.514 / 0.735 / 0.732 / 0.569, keyword 0.845. With Ollama
+otherwise idle, a hybrid query took 135 ms at p50 and 184 ms at p95 (embed
+37 / 49, BM25 30 / 95, vector 63 / 83, fuse 0.5 / 0.7, hydrate 32 / 63),
+7.3 s for the 50. A second run with the first as its baseline showed
+every delta +0.000 and no query moved, and pointing the tool at the home's
+own database was refused, naming `daemon.pid`, with the directory left
+as it was.
+
+---
+
+## Model roles: a provider and model per use, inheriting generation's
+
+**Decision:** each use of a writing model is a role (`config.Role`),
+declared once with what it writes and when it is in use. `labels`, the
+interest and area labels, is the only one today, in use while insight is
+on and labels with an LLM (`Config.RolesInUse`). `generation.roles.<role>`
+gives a role its own `provider`, `model`, `base_url` or `timeout_seconds`;
+a field it leaves out, or sets to "" or 0, is `generation`'s
+(`Generation.Role`). A role's model is built through `generator.New`, the
+one switch on the provider.
+
+**Why:** M6 adds uses of an LLM, and the best model differs by use: a
+small, fast one to parse a query, a large one to write an answer. Each
+should be set on its own without repeating its server and timeout, and a
+provider added later should change one function, not every caller.
+
+**`generation.roles`, not a top-level `models:` section:** inheriting
+from the parent reads naturally, configs without it are untouched,
+`curio up`'s config writer needs no change, and the embedding model stays
+apart: it is the home's contract, not a setting.
+
+**Strict, and checked once:** the strict decode refuses an unknown key
+inside a role; a role name is a map key, which it accepts, so `Validate`
+refuses an unknown one, naming the roles. One `validateModelSpec` checks
+`generation`'s own fields, with the messages they always had, and each
+role the file sets as it resolves, in sorted order so the first error is
+always the same.
+
+**`generator.New(config.ModelSpec)`:** generator reads config, never the
+reverse: config is read by every binary and must not link the clients in.
+An unknown provider is an error and a nil `Generator`, never a nil pointer
+in a non-nil interface.
+
+**Only roles in use cost anything.** The daemon builds the labeler only
+while the labels role is in use. It used to build it, and auto-pull the
+writing model, whenever `insight.labeling` was `llm`, insight on or off,
+while `curio up` told the user no writing model was pulled: a
+multi-gigabyte download nothing used.
+
+**Each model pulled once:** `pullTargets` lists the embedding model (with
+`embedding.auto_pull`), then each role in use's model (with
+`generation.auto_pull`, which covers every Ollama role), one target per
+base URL, its trailing slash dropped, and model, each kept pulled by one
+`KeepPulled` whose log names every use ("embeddings, interest labels").
+
+**Surfaces:** healthz adds `generation_roles`, each role in use and the
+model it writes with, always an object (`{}` when none is in use);
+`generation_model` stays, and a client reads the roles as nil from a
+daemon older than them. `curio up` and doctor's models check pull and
+check each role's model: a role's own is kept from config.yaml with a
+note, and `generation.model`'s pick, its notes and `--generation-model`
+apply only while some role in use inherits it (with none, the flag is
+refused: it would change nothing). The daemon check compares, for each
+role config.yaml and the daemon both use, the daemon's model with
+config.yaml's, and restarts the daemon once, "to write with" the new ones;
+a daemon that reports no roles is another build, which the version check
+restarts. The Status page's Writing model names the roles' models, or
+`generation.model` when none is in use. `curio status` names no writing
+model, and is unchanged.
 
 ---
 
