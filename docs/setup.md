@@ -70,8 +70,9 @@ does it, asking before each step:
 5. **The daemon**, kept running by its launchd agent (see "Keep the daemon
    running"): installed, running this curio's `curio-daemon`, and
    restarted when it runs another build or another writing model than
-   `config.yaml`'s. Over ssh, with no desktop session for the agent, the
-   daemon is started on demand instead, with a warning.
+   `config.yaml`'s, or none for a use of one `config.yaml` turned on.
+   Over ssh, with no desktop session for the agent, the daemon is started
+   on demand instead, with a warning.
 6. **Your bookmarks**, when the library has none (a new home's hasn't).
    curio up offers what it finds, each with how many of its bookmarks are
    new to the library (and how many pages that fetches, when some are
@@ -291,7 +292,8 @@ generation:
 An unknown role, or an unknown key inside one, fails the config. `curio
 up` and `curio doctor` check, and `curio up` pulls, the model each role in
 use writes with, and `curio up` restarts a daemon that writes with
-another. The daemon reports each role's model on `/v1/healthz`
+another, or with none (a role whose feature was turned on since it
+started). The daemon reports each role's model on `/v1/healthz`
 (`generation_roles`), and the dashboard's Status page shows it as the
 Writing model.
 

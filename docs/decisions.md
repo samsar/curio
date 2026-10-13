@@ -12793,11 +12793,14 @@ check each role's model: a role's own is kept from config.yaml with a
 note, and `generation.model`'s pick, its notes and `--generation-model`
 apply only while some role in use inherits it (with none, the flag is
 refused: it would change nothing). The daemon check compares, for each
-role config.yaml and the daemon both use, the daemon's model with
-config.yaml's, and restarts the daemon once, "to write with" the new ones;
-a daemon that reports no roles is another build, which the version check
-restarts. The Status page's Writing model names the roles' models, or
-says none is in use when none is: `generation.model` alone is a model
+role config.yaml uses, the daemon's model with config.yaml's, a role the
+daemon doesn't use (insight turned on since it started) counting as a
+change, and restarts the daemon once, "to write with" the new ones; a
+role only the daemon uses restarts nothing, since curio up pulls nothing
+for it, and a daemon that reports no roles (`generation_roles` absent,
+where one using none sends `{}`) is another build, which the version
+check restarts. The Status page's Writing model names the roles' models,
+or says none is in use when none is: `generation.model` alone is a model
 the daemon neither pulls nor calls (insight off, say). `curio status`
 names no writing model, and is unchanged.
 

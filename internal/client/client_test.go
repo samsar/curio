@@ -57,12 +57,19 @@ func TestHealthz_GenerationModel(t *testing.T) {
 }
 
 // TestHealthz_GenerationRoles: the roles a daemon reports reach Health;
-// one that predates them reports none, nil.
+// one that uses none reports an empty map, and one that predates them
+// nil, which curio up tells apart.
 func TestHealthz_GenerationRoles(t *testing.T) {
 	s := apitest.Start(t, func(d *api.Deps) { d.GenerationRoles = map[string]string{"labels": "gemma4:12b"} })
 	h, err := client.New(s.URL).Healthz(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"labels": "gemma4:12b"}, h.GenerationRoles)
+
+	none := apitest.Start(t, func(d *api.Deps) { d.GenerationRoles = nil })
+	h, err = client.New(none.URL).Healthz(context.Background())
+	require.NoError(t, err)
+	assert.NotNil(t, h.GenerationRoles)
+	assert.Empty(t, h.GenerationRoles)
 
 	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

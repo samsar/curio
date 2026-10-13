@@ -116,6 +116,34 @@ func TestUp_DaemonWritesNothing(t *testing.T) {
 	assert.Zero(t, h.agent.Count("Restart"))
 }
 
+// TestUp_DaemonRoleNowInUse: after insight is turned on in config.yaml,
+// curio up pulls the labels role's model and restarts a daemon that
+// started without the role, once, and the new daemon labels with it.
+func TestUp_DaemonRoleNowInUse(t *testing.T) {
+	h := newHarness(t)
+	home := h.writeHome(genModel)
+	insightOff := "insight:\n  enabled: false\n"
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(mustRead(t, home.ConfigPath())+insightOff), 0o600))
+	ui := setuptest.NewUI(t, setuptest.Yes().About("Pull qwen3-embedding:0.6b"), setuptest.Yes().About("launchd"))
+	_, _, err := h.up(ui, setup.Options{})
+	require.NoError(t, err, "%v", ui.Events())
+	require.Empty(t, healthz(t, h).GenerationRoles)
+	require.Equal(t, []string{embedModel}, h.ollama.Pulls())
+
+	require.NoError(t, os.WriteFile(home.ConfigPath(),
+		[]byte(strings.Replace(mustRead(t, home.ConfigPath()), insightOff, "", 1)), 0o600))
+	ui = setuptest.NewUI(t, setuptest.Yes().About("Pull "+genModel), setuptest.Yes().About("Restart"))
+	plan, _, err := h.up(ui, setup.Options{})
+	require.NoError(t, err, "%v", ui.Events())
+	assert.Equal(t, []string{"models", "daemon"}, stepsOf(plan.Fixes()))
+	assert.Contains(t, item(t, plan, "daemon").Detail,
+		"it writes interest labels with no model, not config.yaml's "+genModel)
+	assert.Equal(t, []string{embedModel, genModel}, h.ollama.Pulls())
+	assert.Equal(t, 1, h.agent.Count("Restart"))
+	assert.True(t, ui.Said("restarted curio-daemon to write with "+genModel))
+	assert.Equal(t, map[string]string{"labels": genModel}, healthz(t, h).GenerationRoles)
+}
+
 // TestUp_DaemonNoGUISession: over ssh the agent can't be installed; the
 // daemon is started on demand instead, with a warning, and the check
 // passes with one.

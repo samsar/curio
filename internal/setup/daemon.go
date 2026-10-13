@@ -111,10 +111,11 @@ func (w *world) checkDaemon(ctx context.Context) Result {
 }
 
 // daemonProblems lists what is wrong with the daemon itself: not running,
-// another build, another writing model for a role. A daemon that doesn't
-// report its roles (one from before them) is never restarted for its
-// models: it runs another build, which the version check restarts. What
-// answered with an error, when nothing served, is asked again for it.
+// another build, another writing model for a role, or none for a role
+// config.yaml uses. A daemon that doesn't report its roles (one from
+// before them) is never restarted for its models: it runs another build,
+// which the version check restarts. What answered with an error, when
+// nothing served, is asked again for it.
 func (w *world) daemonProblems(ctx context.Context, env daemonctl.Env, st daemonctl.Status, cfg config.Config) []string {
 	var problems []string
 	running := ""
@@ -122,7 +123,7 @@ func (w *world) daemonProblems(ctx context.Context, env daemonctl.Env, st daemon
 	case st.Health != nil:
 		running = st.Health.Version
 		for _, c := range writingChanges(st.Health, cfg) {
-			problems = append(problems, fmt.Sprintf("it writes with %s, not config.yaml's %s", c.running, c.configured))
+			problems = append(problems, c.problem())
 		}
 	case st.Startup != nil:
 		running = st.Startup.Version
@@ -229,9 +230,9 @@ func programProblem(path string) string {
 // Apply validates the home again, as the daemon will, then installs the
 // agent, which starts the daemon and waits until it serves (a migration is
 // reported through ui), restarts a daemon of another build
-// (EnsureVersion), and one running another writing model than
-// config.yaml's. Over ssh, or with no service manager, the daemon is
-// started on demand instead.
+// (EnsureVersion), and one that writes for a role config.yaml uses with
+// another model, or with none. Over ssh, or with no service manager, the
+// daemon is started on demand instead.
 func (s *daemonStep) Apply(ctx context.Context, ui UI) error {
 	w := s.w
 	hs := w.readHome()
@@ -294,19 +295,46 @@ func (s *daemonStep) Apply(ctx context.Context, ui UI) error {
 	return nil
 }
 
-// writingChange is a model a role writes with in the daemon, running, and
-// the one config.yaml gives it, configured, which a restart switches to.
-type writingChange struct{ running, configured string }
+// writingChange is what a restart changes in how the daemon writes for a
+// role: the model config.yaml gives it, configured, in place of the one
+// the daemon writes with, running, or, for a role config.yaml uses and the
+// daemon doesn't (insight turned on since it started), none, with added
+// naming the role.
+type writingChange struct {
+	running, configured string
+	added               config.Role
+}
 
-// writingChanges are the roles config.yaml and the daemon both use whose
-// models differ, each change once, in the roles' order; none for a daemon
-// that doesn't report its roles.
+// problem says what the change finds wrong with the daemon.
+func (c writingChange) problem() string {
+	if c.added != "" {
+		return fmt.Sprintf("it writes %s with no model, not config.yaml's %s", c.added.UsedFor(), c.configured)
+	}
+	return fmt.Sprintf("it writes with %s, not config.yaml's %s", c.running, c.configured)
+}
+
+// writingChanges are the roles config.yaml uses that the daemon writes
+// with another model, each such change once, and those it doesn't use, in
+// the roles' order. A role the daemon uses and config.yaml no longer does
+// is none: curio up pulls nothing for it, and, like any other change to
+// config.yaml, it takes effect at the daemon's next start. A daemon that
+// doesn't report its roles has none: it predates them, and the version
+// check restarts it.
 func writingChanges(h *client.Health, cfg config.Config) []writingChange {
+	if h.GenerationRoles == nil {
+		return nil
+	}
 	var out []writingChange
 	for _, r := range cfg.RolesInUse() {
 		running, used := h.GenerationRoles[string(r)]
 		c := writingChange{running: running, configured: cfg.Generation.Role(r).Model}
-		if used && c.running != c.configured && !slices.Contains(out, c) {
+		switch {
+		case !used:
+			c.added = r
+		case c.running == c.configured:
+			continue
+		}
+		if !slices.Contains(out, c) {
 			out = append(out, c)
 		}
 	}
