@@ -24,9 +24,9 @@
 #             URLs are normalized as curio stores them, so a URL pasted from
 #             a browser matches.
 #
-# Every key is checked: one the format doesn't define is an error, not
-# ignored. The format is curio eval's too, which scores grade-1 judgments as
-# it always did (see docs/eval.example.yaml).
+# Every key is checked: one the format doesn't define, or one given twice,
+# is an error, not ignored. `curio eval` reads the same format; a file of
+# URLs alone, like docs/eval.example.yaml, judges every one at grade 1.
 
 queries:
   - id: sourdough-starter
@@ -44,13 +44,13 @@ queries:
     tags: [networking]
     query: tcp slow start congestion window
     relevant:
-      - {url: "https://example.org/notes/tcp-congestion-control", grade: 2}
-      - https://example.org/notes/bufferbloat
+      - {url: "https://example.com/notes/tcp-congestion-control", grade: 2}
+      - https://example.com/notes/bufferbloat
 
   - id: trip-planning
     kind: topic
     tags: [travel, baking]
     query: bakeries worth a detour on a trip
     relevant:
-      - https://example.net/travel/bakery-map
-      - {url: "https://example.net/travel/lisbon-pasteis", grade: 2}
+      - https://example.com/travel/bakery-map
+      - {url: "https://example.com/travel/lisbon-pasteis", grade: 2}

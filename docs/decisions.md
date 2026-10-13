@@ -12630,7 +12630,9 @@ has its text and its judgments, each a URL (grade 1, relevant) or `{url,
 grade: 2}` (what the query is after), and optionally an `id` (unique, so a
 baseline can match it across edits), a `kind`, `tags` and a `note`. Every
 key is checked, at every level, as config.yaml's are: a `tag:` for `tags:`
-would otherwise drop a query from its group without a word. Grades are 1
+would otherwise drop a query from its group without a word, and a key
+given twice (two files concatenated, an entry with two urls) would drop
+one of its values, so it is refused too, as is a null tag. Grades are 1
 and 2 only: the format defines no others, a grade it doesn't define is
 more likely a typo than a meaning, and an unbounded grade overflows the
 gain 2^g−1 to +Inf, which makes nDCG NaN; widening the scale is one

@@ -112,18 +112,45 @@ func queryNodes(data []byte) ([]*yaml.Node, error) {
 	}
 }
 
-// checkKeys fails unless node is a mapping whose keys are all among keys;
-// what names it in the error.
+// checkKeys fails unless node is a mapping whose keys are all among keys,
+// each at most once; what names it in the error. A repeated key is
+// refused, not overwritten: a file concatenated from two would otherwise
+// lose the second's queries without a word.
 func checkKeys(node *yaml.Node, what string, keys ...string) error {
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("line %d: %s is a mapping of %s", node.Line, what, strings.Join(keys, ", "))
 	}
+	firstAt := make(map[string]int, len(keys))
 	for i := 0; i < len(node.Content); i += 2 {
-		if key := node.Content[i]; !slices.Contains(keys, key.Value) {
+		key := node.Content[i]
+		if !slices.Contains(keys, key.Value) {
 			return fmt.Errorf("line %d: unknown key %q (%s has %s)", key.Line, key.Value, what, strings.Join(keys, ", "))
 		}
+		if line, seen := firstAt[key.Value]; seen {
+			return fmt.Errorf("line %d: key %q repeated (first at line %d)", key.Line, key.Value, line)
+		}
+		firstAt[key.Value] = key.Line
 	}
 	return nil
+}
+
+// scalarField is the first value of a mapping's key when it is a
+// non-null scalar, "" otherwise: what names a query whose keys are wrong,
+// read without decoding it.
+func scalarField(node *yaml.Node, key string) string {
+	if node.Kind != yaml.MappingNode {
+		return ""
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		k, v := node.Content[i], node.Content[i+1]
+		if k.Value == key {
+			if v.Kind != yaml.ScalarNode || v.ShortTag() == "!!null" {
+				return ""
+			}
+			return v.Value
+		}
+	}
+	return ""
 }
 
 // ident names q in an error: its id, or its text when it has none; empty
@@ -139,30 +166,28 @@ func (q Query) ident() string {
 }
 
 // parseQuery reads one query of the file. On an error it still returns
-// the id and text it read, which name the query in the error.
+// the id and text it found, which name the query in the error.
 func parseQuery(node *yaml.Node) (Query, error) {
+	named := Query{ID: scalarField(node, "id"), Query: scalarField(node, "query")}
+	if err := checkKeys(node, "a query", "id", "kind", "tags", "note", "query", "relevant"); err != nil {
+		return named, err
+	}
 	var raw struct {
 		ID       string      `yaml:"id"`
 		Kind     string      `yaml:"kind"`
-		Tags     []string    `yaml:"tags"`
+		Tags     []yaml.Node `yaml:"tags"`
 		Note     string      `yaml:"note"`
 		Query    string      `yaml:"query"`
 		Relevant []yaml.Node `yaml:"relevant"`
 	}
-	// Decoded before the keys are checked, which an unknown one fails, so
-	// that error can name the query too.
-	decodeErr := node.Decode(&raw)
-	if err := checkKeys(node, "a query", "id", "kind", "tags", "note", "query", "relevant"); err != nil {
-		return Query{ID: raw.ID, Query: raw.Query}, err
-	}
-	if decodeErr != nil {
-		return Query{ID: raw.ID, Query: raw.Query}, decodeErr
+	if err := node.Decode(&raw); err != nil {
+		return named, err
 	}
 	q := Query{ID: raw.ID, Kind: raw.Kind, Note: raw.Note, Query: raw.Query}
 	if q.Query == "" {
 		return q, errors.New("empty text")
 	}
-	tags, err := uniqueTags(raw.Tags)
+	tags, err := parseTags(raw.Tags)
 	if err != nil {
 		return q, err
 	}
@@ -177,13 +202,19 @@ func parseQuery(node *yaml.Node) (Query, error) {
 	return q, err
 }
 
-// uniqueTags refuses an empty tag, which would name a group of nothing,
-// and keeps a repeated one once, so a query counts once in its group.
-func uniqueTags(tags []string) ([]string, error) {
+// parseTags reads a query's tags. An empty or null one is refused, since
+// it would name a group of nothing (decoded straight into strings, a null
+// would vanish instead), and a repeated one is kept once, so a query
+// counts once in its group.
+func parseTags(nodes []yaml.Node) ([]string, error) {
 	var out []string
-	for _, t := range tags {
+	for i := range nodes {
+		var t string
+		if err := nodes[i].Decode(&t); err != nil {
+			return nil, err
+		}
 		if t == "" {
-			return nil, errors.New("an empty tag")
+			return nil, fmt.Errorf("line %d: an empty tag", nodes[i].Line)
 		}
 		if !slices.Contains(out, t) {
 			out = append(out, t)
@@ -214,7 +245,7 @@ func parseJudgments(nodes []yaml.Node) ([]Judgment, error) {
 }
 
 // parseJudgment reads one relevant entry: a URL, at grade 1, or a mapping
-// of exactly url and grade. The URL is canonicalized with
+// of exactly url and grade, each once. The URL is canonicalized with
 // urlutil.Normalize, as the daemon does before storing a document, so a
 // URL pasted from a browser — with a fragment, tracking parameters, or a
 // youtu.be link — still matches.
@@ -227,15 +258,19 @@ func parseJudgment(node *yaml.Node) (Judgment, error) {
 			return Judgment{}, err
 		}
 	case yaml.MappingNode:
-		var hasURL, hasGrade bool
+		seen := make(map[string]bool, 2)
 		for i := 0; i < len(node.Content); i += 2 {
 			key, val := node.Content[i], node.Content[i+1]
+			if seen[key.Value] {
+				return Judgment{}, fmt.Errorf("key %q repeated", key.Value)
+			}
+			seen[key.Value] = true
 			var err error
 			switch key.Value {
 			case "url":
-				hasURL, err = true, val.Decode(&j.URL)
+				err = val.Decode(&j.URL)
 			case "grade":
-				hasGrade, err = true, decodeGrade(val, &j.Grade)
+				err = decodeGrade(val, &j.Grade)
 			default:
 				err = fmt.Errorf("unknown key %q (an entry's keys are url and grade)", key.Value)
 			}
@@ -244,9 +279,9 @@ func parseJudgment(node *yaml.Node) (Judgment, error) {
 			}
 		}
 		switch {
-		case !hasURL:
+		case !seen["url"]:
 			return Judgment{}, errors.New("an entry without a url")
-		case !hasGrade:
+		case !seen["grade"]:
 			return Judgment{}, errors.New("an entry without a grade (a URL alone is grade 1)")
 		}
 	case yaml.SequenceNode, yaml.DocumentNode, yaml.AliasNode:
