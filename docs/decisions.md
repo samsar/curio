@@ -5316,9 +5316,11 @@ every state: a bookmark whose page is gone is still the bookmark its
 owner is looking for, and its title, folders and site are what they
 remember it by. About three in ten documents of the owner's library are
 failed or dead. Such a hit has no passages; the API sends the bookmarks
-it was saved under in their place, and every client says the page is no
-longer available. find-related is unchanged. See "Metadata search: a
-fields index and a card per document".
+it was saved under in their place, and every client shows a dead page
+as no longer available and a failed one as one curio couldn't read, a
+page often still there behind a sign-in, a bot check or a timeout.
+find-related is unchanged. See "Metadata search: a fields index and a
+card per document".
 
 ---
 
@@ -9352,11 +9354,12 @@ together:
     expiry.
 - **Jina requests are paced per site** (`sitePacer`,
   `internal/fetcher/sitepace.go`). A site is the registrable domain
-  (`siteOf`, `publicsuffix.EffectiveTLDPlusOne`: mobile.twitter.com and
-  twitter.com are one site), or the host itself for an IP address, a name
-  under no public suffix, or a public suffix. A site gets
-  `fetcher.native.jina_site_requests_per_minute` requests a minute (default
-  6, `DefaultJinaSiteRequestsPerMinute`: turns 10 s apart), key or not.
+  (`siteOf` (now `urlutil.Site`), `publicsuffix.EffectiveTLDPlusOne`:
+  mobile.twitter.com and twitter.com are one site), or the host itself for
+  an IP address, a name under no public suffix, or a public suffix. A site
+  gets `fetcher.native.jina_site_requests_per_minute` requests a minute
+  (default 6, `DefaultJinaSiteRequestsPerMinute`: turns 10 s apart), key or
+  not.
   `awaitJina` clears each request in order: the shared cooldown's
   pre-check (a held request spends no turn), the site's turn, the shared
   limiter and cooldown (`pace`, unchanged), a send-time guard, and the
@@ -11412,19 +11415,19 @@ title, for four kinds of page that aren't the page asked for
   among the flagged pages is a heading; Bespoke's "# 404" and
   javalobby.org's "## 404 - หน้าไม่พบ" are the verdicts that rest on one.
   Reason: `text reads like a not-found page: "PAGE NOT FOUND"`.
-- **A parked domain** (dead link, with detection on): a line of the
-  opening that is an optional subject and one predicate
-  (`parkedDomainRE`). Subjects: "this domain", "the domain (name)",
-  "domain", or a domain name, which counts only when it is the requested
-  host or its site (`siteOf`), "www." and case ignored. Predicates: is or
-  may be for sale, is parked, (registration) has expired, has been
-  (recently) registered with or at a domain, Hover's "is a totally awesome
-  idea still being worked on", easyDNS's "is yet another domain managed by
-  …". With a subject, the predicate ends the line or is followed by ".",
-  "!" or ":"; without one, it is the whole line (GoDaddy's "is for sale!"
-  under the domain's name). An expiry needs a subject, as Namecheap's
-  "Domain registration has expired." has: "Registration has expired."
-  alone is as likely an event's sign-up page. A search-ads parking page's
+- **A parked domain** (dead link, with detection on): a line of the opening
+  that is an optional subject and one predicate (`parkedDomainRE`).
+  Subjects: "this domain", "the domain (name)", "domain", or a domain name,
+  which counts only when it is the requested host or its site (`siteOf` (now
+  `urlutil.Site`)), "www." and case ignored. Predicates: is or may be for
+  sale, is parked, (registration) has expired, has been (recently)
+  registered with or at a domain, Hover's "is a totally awesome idea still
+  being worked on", easyDNS's "is yet another domain managed by …". With a
+  subject, the predicate ends the line or is followed by ".", "!" or ":";
+  without one, it is the whole line (GoDaddy's "is for sale!" under the
+  domain's name). An expiry needs a subject, as Namecheap's "Domain
+  registration has expired." has: "Registration has expired." alone is as
+  likely an event's sign-up page. A search-ads parking page's
   heading, "Related searches" or "Related search topics" alone on its line
   (`parkingHeadingRE`), counts too. Only the opening's lines that begin
   within its first 256 bytes of own text are read (`parkedNoticeBytes`):
