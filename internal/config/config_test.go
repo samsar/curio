@@ -548,8 +548,8 @@ func TestLoad_RoleErrors(t *testing.T) {
 	}
 }
 
-// TestValidate_GenerationMessages: generation's own errors read as they
-// did before roles shared their checks.
+// TestValidate_GenerationMessages: generation's own errors are exactly
+// these messages, whole, though its roles go through the same checks.
 func TestValidate_GenerationMessages(t *testing.T) {
 	for _, tc := range []struct {
 		mutate func(*Generation)

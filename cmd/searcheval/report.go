@@ -171,9 +171,9 @@ func newQueryReport(i int, q eval.Query, score eval.QueryScore, r ranking, judge
 		Judgments: make([]judgmentReport, 0, len(q.Relevant)), Ranking: make([]rankedReport, 0, len(r.docs)),
 		TimingsMS: make(map[string]float64, len(r.stages))}
 	rankOf := make(map[string]int, len(r.docs))
-	for i, d := range r.docs {
-		rankOf[d.url] = i + 1
-		qr.Ranking = append(qr.Ranking, rankedReport{Rank: i + 1, DocumentID: d.id, URL: d.url})
+	for pos, d := range r.docs {
+		rankOf[d.url] = pos + 1
+		qr.Ranking = append(qr.Ranking, rankedReport{Rank: pos + 1, DocumentID: d.id, URL: d.url})
 	}
 	for _, j := range q.Relevant {
 		res := judged[j.URL]

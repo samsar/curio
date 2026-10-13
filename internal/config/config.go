@@ -611,11 +611,12 @@ func validateGeneration(g Generation) error {
 		return err
 	}
 	set := slices.Sorted(maps.Keys(g.Roles))
+	known := Roles()
 	for _, r := range set {
-		if r.UsedFor() == "" {
-			names := make([]string, 0, len(roles))
-			for _, d := range roles {
-				names = append(names, string(d.role))
+		if !slices.Contains(known, r) {
+			names := make([]string, len(known))
+			for i, k := range known {
+				names[i] = string(k)
 			}
 			return fmt.Errorf("generation.roles: unknown role %q; the roles are: %s", r, strings.Join(names, ", "))
 		}

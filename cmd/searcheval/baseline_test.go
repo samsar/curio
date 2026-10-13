@@ -128,11 +128,20 @@ func TestBaseline_MatchedByID(t *testing.T) {
 	require.Equal(t, 1, strings.Count(string(data), docURL(9)))
 	require.NoError(t, os.WriteFile(edited, []byte(strings.Replace(string(data), docURL(9), docURL(1), 1)), 0o600))
 
+	oldNDCG := (3/l2(4) + 1/l2(11)) / idealGamma
+	newNDCG := (3/l2(4) + 1/l2(3)) / idealGamma
+	second := baselineRun(t, fx, "second.json", edited)
+	c := compareVariants(readReport(t, second).Variants[0], readReport(t, first).Variants[0], true)
+	require.Len(t, c.moved, 1, "only the edited query moves")
+	assert.Equal(t, "q-gamma", c.moved[0].label)
+	assert.InDelta(t, oldNDCG, c.moved[0].old, 1e-9)
+	assert.InDelta(t, newNDCG, c.moved[0].new, 1e-9)
+
 	res := runEval(t, fx.args(edited, "-baseline", first)...)
 	require.Equal(t, exitOK, res.code, res.stderr)
 	assert.Contains(t, res.stdout, "queries matched by id: the query file changed since the baseline")
 	assert.Contains(t, res.stdout, fmt.Sprintf("nDCG@10 moved by 0.05 or more:\n  q-gamma  %.3f → %.3f\n",
-		(3/l2(4)+1/l2(11))/idealGamma, (3/l2(4)+1/l2(3))/idealGamma))
+		oldNDCG, newNDCG))
 }
 
 // TestBaseline_Refused: a baseline whose queries can't be matched, or that

@@ -64,9 +64,9 @@ func TestRankQueries(t *testing.T) {
 }
 
 // TestRenderEvalReport_Unchanged: curio eval's report, for the example
-// query set and a fixed ranking at two cutoffs, is byte for byte what it
-// was before judgments had grades (testdata/eval-report.golden, written by
-// that code), and says nothing of kinds or tags.
+// query set and a fixed ranking at two cutoffs, is byte for byte the
+// golden (testdata/eval-report.golden): a file of grade-1 judgments scores
+// as binary relevance does, and the report says nothing of kinds or tags.
 func TestRenderEvalReport_Unchanged(t *testing.T) {
 	qs, err := eval.LoadQuerySet(filepath.Join("..", "..", "docs", "eval.example.yaml"))
 	require.NoError(t, err)
