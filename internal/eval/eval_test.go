@@ -173,6 +173,7 @@ func TestParseQuerySet_Errors(t *testing.T) {
 		{"empty text", head + "  - id: second\n    relevant: [https://example.com/b]\n", []string{"query 1", `id "second"`, "empty text"}},
 		{"no judgments", head + "  - id: second\n    query: q\n    relevant: []\n", []string{"query 1", "no relevant documents"}},
 		{"an empty file", "", []string{"has no queries"}},
+		{"two documents", head + "---\n" + head, []string{"line 5", "a second YAML document"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -184,4 +185,26 @@ func TestParseQuerySet_Errors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParseQuerySet_Aliases: an anchored entry or query reused by alias
+// reads as the original, as yaml.v3 decodes aliases everywhere else.
+func TestParseQuerySet_Aliases(t *testing.T) {
+	const data = `queries:
+  - &q
+    id: first
+    query: one
+    relevant: [&u https://example.com/a, {url: https://example.com/b, grade: 2}]
+  - id: second
+    query: two
+    relevant: [*u]
+`
+	qs, err := ParseQuerySet([]byte(data), "set.yaml")
+	require.NoError(t, err)
+	require.Len(t, qs.Queries, 2)
+	assert.Equal(t, []Judgment{{URL: "https://example.com/a", Grade: 1}}, qs.Queries[1].Relevant)
+
+	_, err = ParseQuerySet([]byte(data+"  - *q\n"), "set.yaml")
+	require.Error(t, err, "the aliased query repeats the first's id")
+	assert.Contains(t, err.Error(), `queries 0 and 2 have the same id "first"`)
 }

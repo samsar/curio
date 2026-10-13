@@ -234,3 +234,20 @@ func TestReport_NoComparisonInJSON(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{"format", "generated_at", "provenance", "library", "variants"}, keys)
 }
+
+// TestCompareVariants_GroupsOnOneSide: a group only one side has is named
+// with its side, never compared, and the groups both have still are.
+func TestCompareVariants_GroupsOnOneSide(t *testing.T) {
+	group := func(typ eval.GroupType, name string, ndcg float64) groupReport {
+		return groupReport{GroupScore: eval.GroupScore{Type: typ, Name: name, NDCGAt10: ndcg}}
+	}
+	cur := variantReport{Groups: []groupReport{group(eval.GroupAll, "", 0.6), group(eval.GroupKind, "lookup", 0.5)}}
+	base := variantReport{Groups: []groupReport{group(eval.GroupAll, "", 0.5), group(eval.GroupKind, "keyword", 0.9)}}
+	c := compareVariants(cur, base, false)
+	require.Len(t, c.groups, 3)
+	assert.Equal(t, "all", c.groups[0].label)
+	assert.Empty(t, c.groups[0].only)
+	assert.InDelta(t, 0.1, *c.groups[0].deltas[4], 1e-9, "nDCG@10's delta")
+	assert.Equal(t, groupDelta{label: "kind lookup", only: "this run"}, c.groups[1])
+	assert.Equal(t, groupDelta{label: "kind keyword", only: "the baseline"}, c.groups[2])
+}

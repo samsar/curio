@@ -77,8 +77,8 @@ func TestEvaluate(t *testing.T) {
 	assert.InDelta(t, 0.5, rep.MRR, 1e-9)
 }
 
-// binaryNDCG is nDCG@k with binary gains, as curio eval computed it before
-// grades: the reference graded nDCG must equal at grade 1.
+// binaryNDCG is nDCG@k with binary gains, the reference graded nDCG must
+// equal when every judgment is grade 1.
 func binaryNDCG(ranked []string, relevant map[string]bool, k int) float64 {
 	if len(relevant) == 0 || k <= 0 {
 		return 0

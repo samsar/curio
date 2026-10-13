@@ -1,8 +1,10 @@
 package eval
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -86,23 +88,36 @@ func ParseQuerySet(data []byte, name string) (*QuerySet, error) {
 	return qs, nil
 }
 
-// queryNodes are the file's queries, unparsed: none for an empty file.
+// queryNodes are the file's queries, unparsed: none for an empty file. The
+// file is one YAML document: a second, as two files concatenated give,
+// is refused rather than dropped.
 func queryNodes(data []byte) ([]*yaml.Node, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	switch err := dec.Decode(&doc); {
+	case errors.Is(err, io.EOF):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	var next yaml.Node
+	switch err := dec.Decode(&next); {
+	case err == nil:
+		return nil, fmt.Errorf("line %d: a second YAML document (a query file is one)", next.Line)
+	case !errors.Is(err, io.EOF):
 		return nil, err
 	}
 	if len(doc.Content) == 0 {
 		return nil, nil
 	}
-	root := doc.Content[0]
+	root := resolve(doc.Content[0])
 	if err := checkKeys(root, "the file", "queries"); err != nil {
 		return nil, err
 	}
 	if len(root.Content) == 0 {
 		return nil, nil
 	}
-	switch queries := root.Content[1]; {
+	switch queries := resolve(root.Content[1]); {
 	case queries.ShortTag() == "!!null":
 		return nil, nil
 	case queries.Kind != yaml.SequenceNode:
@@ -110,6 +125,15 @@ func queryNodes(data []byte) ([]*yaml.Node, error) {
 	default:
 		return queries.Content, nil
 	}
+}
+
+// resolve is the node an alias names, or node itself: an anchored query
+// or entry reused by alias reads as the original.
+func resolve(node *yaml.Node) *yaml.Node {
+	if node.Kind == yaml.AliasNode {
+		return node.Alias
+	}
+	return node
 }
 
 // checkKeys fails unless node is a mapping whose keys are all among keys,
@@ -168,6 +192,7 @@ func (q Query) ident() string {
 // parseQuery reads one query of the file. On an error it still returns
 // the id and text it found, which name the query in the error.
 func parseQuery(node *yaml.Node) (Query, error) {
+	node = resolve(node)
 	named := Query{ID: scalarField(node, "id"), Query: scalarField(node, "query")}
 	if err := checkKeys(node, "a query", "id", "kind", "tags", "note", "query", "relevant"); err != nil {
 		return named, err
@@ -250,6 +275,7 @@ func parseJudgments(nodes []yaml.Node) ([]Judgment, error) {
 // URL pasted from a browser — with a fragment, tracking parameters, or a
 // youtu.be link — still matches.
 func parseJudgment(node *yaml.Node) (Judgment, error) {
+	node = resolve(node)
 	var j Judgment
 	switch node.Kind {
 	case yaml.ScalarNode:
@@ -284,7 +310,7 @@ func parseJudgment(node *yaml.Node) (Judgment, error) {
 		case !seen["grade"]:
 			return Judgment{}, errors.New("an entry without a grade (a URL alone is grade 1)")
 		}
-	case yaml.SequenceNode, yaml.DocumentNode, yaml.AliasNode:
+	case yaml.SequenceNode, yaml.DocumentNode:
 		return Judgment{}, errors.New("an entry is a URL or a {url, grade} mapping")
 	}
 	u, err := urlutil.Normalize(j.URL)
