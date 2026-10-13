@@ -26,9 +26,11 @@ func newEvalCmd(env *daemonctl.Env) *cobra.Command {
 		Long: "Run a set of queries with known-relevant documents through search and\n" +
 			"report ranking metrics (recall@k, precision@k, NDCG@k, MRR).\n\n" +
 			"The query set is a YAML file of {query, relevant: [urls]} entries; see\n" +
-			"docs/eval.example.yaml. Run it before and after changing a search\n" +
-			"setting (the BM25/vector weights, say) to compare them on the same\n" +
-			"ground truth.",
+			"docs/eval.example.yaml. A judgment may also be {url, grade: 2}, what the\n" +
+			"query is after, which NDCG weighs higher (docs/search-eval.example.yaml);\n" +
+			"the other metrics count any grade as relevant.\n\n" +
+			"Run it before and after changing a search setting (the BM25/vector\n" +
+			"weights, say) to compare them on the same ground truth.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if queriesPath == "" {

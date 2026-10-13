@@ -51,7 +51,8 @@ const (
 // The fake is curio-daemon as far as curio up and the CLI see it: it
 // holds the home's lock ($CURIO_HOME), and serves, on config.yaml's
 // daemon.listen, a healthz naming itself, its version, config.yaml's
-// writing model and its YouTube route (YTDLPMarkerVar); stats reporting a
+// writing models (generation.model, and each role in use with its own) and
+// its YouTube route (YTDLPMarkerVar); stats reporting a
 // library of 3 bookmarks; the queue, whose settings it keeps; and imports,
 // counting every valid URL as new, until SIGTERM. What changes something
 // is recorded in the home's logs (DaemonRequests).
@@ -125,9 +126,14 @@ type fakeDaemon struct {
 func (f *fakeDaemon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/v1/healthz":
+		roles := map[string]string{}
+		for _, r := range f.cfg.RolesInUse() {
+			roles[string(r)] = f.cfg.Generation.Role(r).Model
+		}
 		health := map[string]any{"status": "ok", "pid": os.Getpid(), "home": f.home.Path, "version": f.version,
-			"generation_model": f.cfg.Generation.Model, "embedding_model": f.cfg.Embedding.Model,
-			"embedding_dim": f.cfg.Embedding.Dim, "ollama_reachable": true, "upstreams": []any{}}
+			"generation_model": f.cfg.Generation.Model, "generation_roles": roles,
+			"embedding_model": f.cfg.Embedding.Model, "embedding_dim": f.cfg.Embedding.Dim, "ollama_reachable": true,
+			"upstreams": []any{}}
 		if f.ytdlp != "" {
 			health["youtube_fetcher"] = f.ytdlp
 		}

@@ -2,13 +2,9 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
-	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -305,27 +301,6 @@ type timings struct {
 	Map          int64 `json:"map"`
 	StoredRun    int64 `json:"stored_run"`
 	Total        int64 `json:"total"`
-}
-
-// writeJSON writes rep to path atomically: a temporary file beside it,
-// renamed over it once written. os.CreateTemp makes it 0600.
-func writeJSON(path string, rep *report) error {
-	raw, err := json.MarshalIndent(rep, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode the JSON report: %w", err)
-	}
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return fmt.Errorf("write the JSON report: %w", err)
-	}
-	_, werr := f.Write(append(raw, '\n'))
-	if err := errors.Join(werr, f.Close()); err != nil {
-		return errors.Join(fmt.Errorf("write the JSON report: %w", err), os.Remove(f.Name()))
-	}
-	if err := os.Rename(f.Name(), path); err != nil {
-		return errors.Join(fmt.Errorf("write the JSON report: %w", err), os.Remove(f.Name()))
-	}
-	return nil
 }
 
 // writeText renders the report and writes it to w in one write.

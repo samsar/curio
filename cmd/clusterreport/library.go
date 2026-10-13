@@ -7,15 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/samsar/curio/internal/devtool"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/store"
-	"github.com/samsar/curio/internal/store/sqlite"
 )
 
 // library is what the report reads from the copy.
@@ -36,39 +34,23 @@ type storedRun struct {
 	assignments []store.InterestAssignment
 }
 
-// errLiveHome refuses a database beside daemon.pid: the report migrates the
-// database it reads, which a home's own daemon must do itself.
-var errLiveHome = errors.New("refusing a database in a home's directory (it holds daemon.pid): " +
-	"the report migrates what it reads, so point it at a copy")
-
 // openLibrary reads the library from the database at path, a copy of a
-// home's: it refuses a home's own (errLiveHome) before opening anything,
-// then migrates it, the only write, and reads the vectors and the latest
-// done run.
+// home's: devtool.OpenCopy refuses a home's own before opening anything,
+// then migrates it, the only write; the library is the vectors and the
+// latest done run.
 func openLibrary(ctx context.Context, path string, log *slog.Logger) (*library, error) {
-	if err := checkCopy(path); err != nil {
-		return nil, err
-	}
 	start := time.Now()
-	db, err := sqlite.Open(ctx, path)
+	c, err := devtool.OpenCopy(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		if err := db.Close(); err != nil {
+		if err := c.Close(); err != nil {
 			log.Warn("close the database", "path", path, "err", err)
 		}
 	}()
-	version, err := sqlite.Migrate(ctx, db)
-	if err != nil {
-		return nil, fmt.Errorf("migrate %s: %w", path, err)
-	}
-	width, err := sqlite.VectorIndexWidth(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-	log.Info("reading the library", "path", path, "schema", version, "embedding_width", width)
-	lib, err := readLibrary(ctx, sqlite.NewChunks(db, width), sqlite.NewInsights(db))
+	log.Info("reading the library", "path", path, "schema", c.Schema, "embedding_width", c.Width)
+	lib, err := readLibrary(ctx, c.Chunks, c.Insights)
 	if err != nil {
 		return nil, err
 	}
@@ -76,31 +58,6 @@ func openLibrary(ctx context.Context, path string, log *slog.Logger) (*library, 
 	log.Info("read the library", "documents", len(lib.docs), "dropped_non_finite", lib.dropped,
 		"stored_run", lib.stored != nil, "ms", lib.read.Milliseconds())
 	return lib, nil
-}
-
-// checkCopy fails unless path is an existing file outside a home: Open
-// would create a missing one, and a directory holding daemon.pid is a
-// home, whose daemon may be running.
-func checkCopy(path string) error {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return fmt.Errorf("the database: %w", err)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return fmt.Errorf("the database: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("the database %s is not a file", path)
-	}
-	switch _, err := os.Stat(filepath.Join(filepath.Dir(resolved), "daemon.pid")); {
-	case err == nil:
-		return fmt.Errorf("%w; take one with: sqlite3 -readonly %s \".backup <copy>\" (or, if its daemon is "+
-			"stopped and that fails, sqlite3 'file:%s?immutable=1' \".backup <copy>\")", errLiveHome, path, path)
-	case !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("look for daemon.pid beside the database: %w", err)
-	}
-	return nil
 }
 
 // readLibrary reads the local tenant's document vectors, dropping those

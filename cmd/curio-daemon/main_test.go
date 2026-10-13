@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -975,7 +977,7 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 		chunks.dvs = append(chunks.dvs, store.DocVector{DocumentID: d.ID, Vector: []float32{1, 0, 0}})
 	}
 
-	eng, err := newInsightEngine(context.Background(), cfg, docs, chunks, insights, sqlitestore.NewJobs(db), nil, nil)
+	eng, err := newInsightEngine(cfg, docs, chunks, insights, sqlitestore.NewJobs(db), nil, nil)
 	require.NoError(t, err)
 
 	// Ollama starts only now.
@@ -1000,6 +1002,200 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 	require.Len(t, groups, 1)
 	assert.Equal(t, "Reading List", groups[0].Label)
 	assert.Equal(t, store.LabelSourceLLM, groups[0].LabelSource)
+}
+
+// threeArticles is a library of three fetched documents with one vector
+// between them, which a rebuild groups into one interest.
+func threeArticles(t *testing.T) (*sqlitestore.Documents, *docVectors, *sqlitestore.Insights, *sqlitestore.Jobs) {
+	t.Helper()
+	db := sqlitetest.NewDB(t)
+	docs := sqlitestore.NewDocuments(db)
+	chunks := &docVectors{}
+	for i := range 3 {
+		title := fmt.Sprintf("Article %d", i)
+		d := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/%d", i),
+			Title: &title, State: store.DocStateFetched}
+		require.NoError(t, docs.Create(context.Background(), d))
+		chunks.dvs = append(chunks.dvs, store.DocVector{DocumentID: d.ID, Vector: []float32{1, 0, 0}})
+	}
+	return docs, chunks, sqlitestore.NewInsights(db), sqlitestore.NewJobs(db)
+}
+
+// rebuildLabel rebuilds eng's interests and returns the one interest's
+// label and what named it.
+func rebuildLabel(t *testing.T, eng *insight.Engine, insights store.InsightStore) (string, store.LabelSource) {
+	t.Helper()
+	runID, err := eng.Rebuild(context.Background(), "local", store.RunTriggerManual)
+	require.NoError(t, err)
+	groups, err := insights.TopGroups(context.Background(), runID, 0, 0)
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+	return groups[0].Label, groups[0].LabelSource
+}
+
+// TestNewInsightEngine_LabelsRole: interest labels are written by the
+// labels role's model, at its own server, not generation.model.
+func TestNewInsightEngine_LabelsRole(t *testing.T) {
+	var asked []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+		}
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		mu.Lock()
+		asked = append(asked, req.Model)
+		mu.Unlock()
+		fmt.Fprint(w, `{"response":"NAME: Reading List\nSUMMARY: Things to read.","done":true}`)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := config.Default()
+	cfg.Generation.Model, cfg.Generation.BaseURL = "gemma4:26b", "http://127.0.0.1:1"
+	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {Model: "role-model", BaseURL: srv.URL}}
+	cfg.Insight.CenterVectors = false
+	docs, chunks, insights, queue := threeArticles(t)
+
+	eng, err := newInsightEngine(cfg, docs, chunks, insights, queue, nil, nil)
+	require.NoError(t, err)
+	label, source := rebuildLabel(t, eng, insights)
+	assert.Equal(t, "Reading List", label)
+	assert.Equal(t, store.LabelSourceLLM, source)
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, asked)
+	for _, m := range asked {
+		assert.Equal(t, "role-model", m)
+	}
+}
+
+// TestNewInsightEngine_InsightOffWritesNothing: with insight off, the
+// labels role isn't in use, so even with insight.labeling llm the engine
+// gets no LLM labeler, and the daemon pulls no writing model.
+func TestNewInsightEngine_InsightOffWritesNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := config.Default()
+	cfg.Insight.Enabled, cfg.Insight.Labeling, cfg.Insight.CenterVectors = false, "llm", false
+	cfg.Generation.BaseURL = srv.URL
+	docs, chunks, insights, queue := threeArticles(t)
+
+	eng, err := newInsightEngine(cfg, docs, chunks, insights, queue, nil, nil)
+	require.NoError(t, err)
+	_, source := rebuildLabel(t, eng, insights)
+	assert.Equal(t, store.LabelSourceTerms, source)
+	for _, target := range pullTargets(cfg) {
+		assert.Equal(t, "embeddings", target.usedFor, "only the embedding model is pulled")
+	}
+	assert.Empty(t, generationRoles(cfg))
+}
+
+func TestPullTargets(t *testing.T) {
+	const local = "http://localhost:11434"
+	embeddings := pullTarget{baseURL: local, model: "qwen3-embedding:0.6b", usedFor: "embeddings", timeout: time.Minute}
+	labels := pullTarget{baseURL: local, model: "qwen3:4b-instruct", usedFor: "interest labels", timeout: 2 * time.Minute}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*config.Config)
+		want   []pullTarget
+	}{
+		{"the defaults", func(*config.Config) {}, []pullTarget{embeddings, labels}},
+		{"no embedding auto-pull", func(c *config.Config) { c.Embedding.AutoPull = false }, []pullTarget{labels}},
+		{"no generation auto-pull", func(c *config.Config) { c.Generation.AutoPull = false }, []pullTarget{embeddings}},
+		{"insight off", func(c *config.Config) { c.Insight.Enabled = false }, []pullTarget{embeddings}},
+		{"term labels", func(c *config.Config) { c.Insight.Labeling = "terms" }, []pullTarget{embeddings}},
+		{"labels on the embedding model", func(c *config.Config) {
+			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {Model: "qwen3-embedding:0.6b"}}
+		}, []pullTarget{{baseURL: local, model: "qwen3-embedding:0.6b", usedFor: "embeddings, interest labels",
+			timeout: time.Minute}}},
+		{"one server with and without a trailing slash", func(c *config.Config) {
+			c.Generation.BaseURL = local + "/"
+			c.Generation.Model = "qwen3-embedding:0.6b"
+		}, []pullTarget{{baseURL: local, model: "qwen3-embedding:0.6b", usedFor: "embeddings, interest labels",
+			timeout: time.Minute}}},
+		{"the labels role on its own server", func(c *config.Config) {
+			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {BaseURL: "http://127.0.0.1:11500/"}}
+		}, []pullTarget{embeddings, {baseURL: "http://127.0.0.1:11500", model: "qwen3:4b-instruct",
+			usedFor: "interest labels", timeout: 2 * time.Minute}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			tc.mutate(&cfg)
+			require.NoError(t, cfg.Validate())
+			assert.Equal(t, tc.want, pullTargets(cfg))
+		})
+	}
+}
+
+// TestGenerationRoles: healthz's roles are those in use, each with the
+// model it resolves to.
+func TestGenerationRoles(t *testing.T) {
+	cfg := config.Default()
+	assert.Equal(t, map[string]string{"labels": "qwen3:4b-instruct"}, generationRoles(cfg))
+	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {Model: "gemma4:12b"}}
+	assert.Equal(t, map[string]string{"labels": "gemma4:12b"}, generationRoles(cfg))
+	cfg.Insight.Labeling = "terms"
+	assert.Equal(t, map[string]string{}, generationRoles(cfg))
+}
+
+// syncBuffer is a bytes.Buffer safe for a logger's concurrent writes and
+// the test's reads.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestKeepPulled: each target is pulled once, its log lines naming what it
+// is used for.
+func TestKeepPulled(t *testing.T) {
+	var mu sync.Mutex
+	pulls := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			fmt.Fprint(w, `{"models":[]}`)
+		case "/api/pull":
+			var req struct {
+				Model string `json:"model"`
+			}
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			mu.Lock()
+			pulls[req.Model]++
+			mu.Unlock()
+			fmt.Fprintln(w, `{"status":"success"}`)
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	var logs syncBuffer
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	require.NoError(t, keepPulled(ctx, []pullTarget{
+		{baseURL: srv.URL, model: "a:1", usedFor: "embeddings, interest labels", timeout: 5 * time.Second},
+		{baseURL: srv.URL, model: "b:1", usedFor: "interest labels", timeout: 5 * time.Second},
+	}, slog.New(slog.NewJSONHandler(&logs, nil))))
+	require.Eventually(t, func() bool { return strings.Count(logs.String(), `"msg":"ollama model ready"`) == 2 },
+		10*time.Second, 10*time.Millisecond)
+	assert.Contains(t, logs.String(), `"msg":"ollama model ready","used_for":"embeddings, interest labels","model":"a:1"`)
+	assert.Contains(t, logs.String(), `"msg":"ollama model ready","used_for":"interest labels","model":"b:1"`)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, map[string]int{"a:1": 1, "b:1": 1}, pulls)
 }
 
 // clusterJobs lists the pending cluster jobs' payloads.

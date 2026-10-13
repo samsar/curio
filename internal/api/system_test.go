@@ -124,6 +124,24 @@ func TestHealth_GenerationModel(t *testing.T) {
 	}
 }
 
+// TestHealth_GenerationRoles: healthz names each role the daemon uses and
+// its model, and says {} when it uses none, never null.
+func TestHealth_GenerationRoles(t *testing.T) {
+	for _, tc := range []struct {
+		roles map[string]string
+		want  string
+	}{
+		{map[string]string{"labels": "qwen3:4b-instruct"}, `"generation_roles":{"labels":"qwen3:4b-instruct"}`},
+		{map[string]string{}, `"generation_roles":{}`},
+		{nil, `"generation_roles":{}`},
+	} {
+		s := newTestServer(t, func(d *Deps) { d.GenerationRoles = tc.roles })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		assert.Contains(t, resp.body, tc.want)
+	}
+}
+
 // TestHealth_YouTubeFetcher: healthz names the yt-dlp the daemon routes
 // YouTube videos to, and leaves the field out when there is none.
 func TestHealth_YouTubeFetcher(t *testing.T) {
@@ -327,4 +345,12 @@ func TestHealth_InterestsReadNothing(t *testing.T) {
 	s.getJSON(t, "/v1/healthz", &h)
 	assert.Equal(t, InterestsState{State: "due", ChangedDocuments: 300, RebuildAt: 263}, h.Interests)
 	assert.Equal(t, "ok", h.Status, "interests are not health")
+}
+
+func TestWritingModels(t *testing.T) {
+	assert.Equal(t, "a:1, b:2", writingModels(Health{GenerationModel: "g:1",
+		GenerationRoles: map[string]string{"zeta": "b:2", "alpha": "a:1", "mid": "b:2"}}),
+		"distinct models, in the roles' sorted order")
+	assert.Empty(t, writingModels(Health{GenerationModel: "g:1", GenerationRoles: map[string]string{}}),
+		"no role in use: not generation.model, which nothing calls")
 }

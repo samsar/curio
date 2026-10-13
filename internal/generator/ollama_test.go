@@ -237,5 +237,5 @@ func TestNewOllama_Validation(t *testing.T) {
 	g, err := NewOllama(OllamaOptions{Model: "m"})
 	require.NoError(t, err)
 	assert.Equal(t, "m", g.Model())
-	assert.Equal(t, ollama.DefaultBaseURL, g.Client().BaseURL())
+	assert.Equal(t, ollama.DefaultBaseURL, g.client.BaseURL())
 }

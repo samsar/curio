@@ -36,22 +36,25 @@ func New(baseURL string) *Client {
 // Health mirrors api.Health. PID and Home are zero for a daemon that
 // predates them, which also means it holds no single-instance lock, and
 // Upstreams and GenerationModel are empty for one that predates them.
+// GenerationRoles is nil from a daemon that predates roles, and empty from
+// one that uses none.
 // EmbeddingDrift is nil unless the daemon reports a drift: the build that
 // makes the embeddings changed, and a re-embedded sample showed the
 // vectors did, or couldn't be checked.
 type Health struct {
-	Status          string           `json:"status"`
-	PID             int              `json:"pid,omitempty"`
-	Home            string           `json:"home,omitempty"`
-	Version         string           `json:"version"`
-	SchemaVersion   int              `json:"schema_version"`
-	EmbeddingModel  string           `json:"embedding_model"`
-	EmbeddingDim    int              `json:"embedding_dim"`
-	EmbeddingDrift  *EmbeddingDrift  `json:"embedding_drift,omitempty"`
-	GenerationModel string           `json:"generation_model,omitempty"`
-	OllamaReachable bool             `json:"ollama_reachable"`
-	OllamaDetail    string           `json:"ollama_detail,omitempty"`
-	Upstreams       []UpstreamHealth `json:"upstreams,omitempty"`
+	Status          string            `json:"status"`
+	PID             int               `json:"pid,omitempty"`
+	Home            string            `json:"home,omitempty"`
+	Version         string            `json:"version"`
+	SchemaVersion   int               `json:"schema_version"`
+	EmbeddingModel  string            `json:"embedding_model"`
+	EmbeddingDim    int               `json:"embedding_dim"`
+	EmbeddingDrift  *EmbeddingDrift   `json:"embedding_drift,omitempty"`
+	GenerationModel string            `json:"generation_model,omitempty"`
+	GenerationRoles map[string]string `json:"generation_roles,omitempty"`
+	OllamaReachable bool              `json:"ollama_reachable"`
+	OllamaDetail    string            `json:"ollama_detail,omitempty"`
+	Upstreams       []UpstreamHealth  `json:"upstreams,omitempty"`
 	// YouTubeFetcher is the yt-dlp the daemon routes YouTube videos to;
 	// empty when they go to its default fetcher, or it predates saying so.
 	YouTubeFetcher string `json:"youtube_fetcher,omitempty"`

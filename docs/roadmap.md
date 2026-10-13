@@ -8,7 +8,9 @@ original goal and plan; the **Status** notes under it say what shipped (with
 package pointers), where the result deviates from the plan, and what was
 deferred. Design reasoning lives in `docs/decisions.md`.
 
-**Where things stand:** M0–M4 are shipped. **Next: M5.**
+**Where things stand:** M0–M4 are shipped. M6 is under way ahead of M5: its
+first PR, the search evaluation and model roles, is merged. **Next: M6's
+metadata search.**
 
 ## M0 — Walking skeleton
 
@@ -221,7 +223,8 @@ topic clusters that feel like an accurate picture of what the user reads.
 **Done when:** the user opens `~/.curio/digest/<week>.md` and finds it worth
 reading.
 
-**Status: not started.** This is next.
+**Status: not started.** M6 went first: better retrieval is what
+suggestions build on.
 
 ## M6 — RAG / Q&A synthesis + SOTA search
 
@@ -239,7 +242,36 @@ search state-of-the-art.
 **Done when:** `curio ask "..."` returns a synthesized, cited answer and the
 eval harness shows measurably better retrieval than the v1 baseline.
 
-**Status: not started.** The build-vs-adopt decision comes first.
+**Status: in progress.** The approved design settles build vs. adopt:
+curio builds its own, measured against the owner's graded test set
+(decisions.md "M6 (planned)", Revised 2026-10-13). It ships in two
+releases, each PR shown to help with `make search-eval` against the run
+before it:
+
+1. **2.7, better search.** The foundations (below); metadata search
+   (bookmark titles, folders, site names and authors as searchable fields,
+   and an embedded card per document, which also reach failed and dead
+   bookmarks); real saved dates and the date, site and folder filters;
+   chunks embedded with their title, site and heading (one re-embedding);
+   and understanding the question (one LLM call for its intent, filters,
+   rewrites and the names it points at).
+2. **2.8, cards and answers.** LLM-written card fields, reranking by kind
+   of question, and the cited answer loop (`curio ask`, `/v1/ask`, the
+   dashboard's Ask mode, better MCP search).
+
+- PR 1, merged: `cmd/searcheval` (`make search-eval`), the developer's
+  search evaluation: the production engine on a copy of a home's database,
+  every query ranked 100 deep, scored per kind and tag, per variant
+  (`hybrid`, `bm25`, `vector`) and per stage, compared with a baseline
+  report query by query. `internal/eval` reads the graded query format
+  (`docs/search-eval.example.yaml`; `curio eval`'s output is unchanged) and
+  scores it. Model roles: `generation.roles` gives each use of a writing
+  model its own provider and model (`labels` today), built through
+  `generator.New`. A zero RRF weight now switches its retriever off. On a
+  copy of the owner's library the tool reproduces the recorded baseline
+  exactly (decisions.md "Search evaluation: graded, per kind, on a copy,
+  never in the repo" and "Model roles: a provider and model per use,
+  inheriting generation's").
 
 ## M7 — Hosted mode
 

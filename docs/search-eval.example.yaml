@@ -1,0 +1,56 @@
+# Example graded query file for `make search-eval` (cmd/searcheval).
+#
+# The developer's search evaluation runs the daemon's search engine on a copy
+# of a home's database and scores its ranking, 100 deep, against these
+# judgments, per query and per group of queries:
+#
+#   sqlite3 -readonly ~/.curio/curio.db ".backup /tmp/copy.db"
+#   make search-eval DB=/tmp/copy.db QUERIES=my-queries.yaml \
+#       [CONFIG=~/.curio/config.yaml] [JSON=/tmp/run.json] \
+#       [BASELINE=/tmp/previous-run.json] [VARIANTS=hybrid,bm25,vector]
+#
+# A real test set names what you read and what you search for: keep it, and
+# every report made with it, outside the repository. This file is synthetic.
+#
+# Each query has:
+#   id        optional; names the query in reports, and matches it against a
+#             baseline made before the file changed. Unique when set.
+#   kind      optional; queries of one kind are scored as a group.
+#   tags      optional; each tag is a group of its own, too.
+#   note      optional; a comment on the query, never scored.
+#   query     the text, as you would type it into search.
+#   relevant  the documents judged relevant, by URL: a URL alone is grade 1
+#             (relevant), {url: ..., grade: 2} is what the query is after.
+#             URLs are normalized as curio stores them, so a URL pasted from
+#             a browser matches.
+#
+# Every key is checked: one the format doesn't define, or one given twice,
+# is an error, not ignored. `curio eval` reads the same format; a file of
+# URLs alone, like docs/eval.example.yaml, judges every one at grade 1.
+
+queries:
+  - id: sourdough-starter
+    kind: topic
+    tags: [baking]
+    note: the feeding schedule is what this is after
+    query: keeping a sourdough starter alive
+    relevant:
+      - {url: "https://example.com/baking/starter-feeding", grade: 2}
+      - https://example.com/baking/levain-basics
+      - https://example.com/forum/starter-smells-like-acetone
+
+  - id: tcp-slow-start
+    kind: keyword
+    tags: [networking]
+    query: tcp slow start congestion window
+    relevant:
+      - {url: "https://example.com/notes/tcp-congestion-control", grade: 2}
+      - https://example.com/notes/bufferbloat
+
+  - id: trip-planning
+    kind: topic
+    tags: [travel, baking]
+    query: bakeries worth a detour on a trip
+    relevant:
+      - https://example.com/travel/bakery-map
+      - {url: "https://example.com/travel/lisbon-pasteis", grade: 2}

@@ -39,7 +39,9 @@ type RankedItem struct {
 //   - weights:  one float per ranked list; nil means all weights = 1.0
 //   - k:        smoothing constant; pass 60 unless you have a reason
 //
-// Output is sorted by score descending (higher = better).
+// A list weighted 0 contributes nothing: an item only it holds is not in
+// the output, rather than ranked last at score 0, so a zero weight switches
+// its retriever off. Output is sorted by score descending (higher = better).
 func Fuse(rankedLists [][]RankedItem, weights []float64, k int) []ScoredID {
 	if k <= 0 {
 		k = 60
@@ -56,6 +58,9 @@ func Fuse(rankedLists [][]RankedItem, weights []float64, k int) []ScoredID {
 		w := 1.0
 		if li < len(weights) {
 			w = weights[li]
+		}
+		if w == 0 {
+			continue
 		}
 		for _, item := range list {
 			if item.Rank < 1 {

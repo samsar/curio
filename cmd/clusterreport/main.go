@@ -11,7 +11,8 @@
 //
 // It is a developer's tool, run by `make cluster-report` and never
 // shipped. It migrates the database it is given, so it refuses a
-// directory holding daemon.pid: take a copy first,
+// directory holding daemon.pid or .curio-meta.json, and a file with
+// another hard link: take a copy first,
 //
 //	sqlite3 -readonly ~/.curio/curio.db ".backup copy.db"
 //	clusterreport -db copy.db [-json report.json] [-draws 3] [-seed 0]
@@ -33,8 +34,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
+
+	"github.com/samsar/curio/internal/devtool"
 )
 
 func main() {
@@ -122,7 +124,7 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 // measurement succeeded.
 func measureAndReport(ctx context.Context, opts options, stdout io.Writer, log *slog.Logger) error {
 	if opts.json != "" {
-		if err := checkOutput(opts.json); err != nil {
+		if err := devtool.CheckOutput(opts.json); err != nil {
 			return err
 		}
 	}
@@ -141,43 +143,9 @@ func measureAndReport(ctx context.Context, opts options, stdout io.Writer, log *
 	if opts.json == "" {
 		return nil
 	}
-	if err := writeJSON(opts.json, rep); err != nil {
+	if err := devtool.WriteJSON(opts.json, rep); err != nil {
 		return err
 	}
 	log.Info("wrote the JSON report", "path", opts.json)
-	return nil
-}
-
-// checkOutput fails, before minutes of measuring, unless the JSON file
-// can take its place: its directory exists, and the path isn't a directory
-// itself, which the final rename can't replace.
-func checkOutput(path string) error {
-	switch info, err := os.Stat(path); {
-	case err == nil && info.IsDir():
-		return fmt.Errorf("the -json file %s is a directory", path)
-	case err != nil && !errors.Is(err, os.ErrNotExist):
-		return fmt.Errorf("the -json file: %w", err)
-	}
-	dir := filepath.Dir(path)
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("the -json file's directory: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("the -json file's directory %s is not a directory", dir)
-	}
-	// A directory the report can't write to would fail only at the end,
-	// after the whole measurement: try a temporary file there now.
-	probe, err := os.CreateTemp(dir, ".clusterreport-probe-*")
-	if err != nil {
-		return fmt.Errorf("the -json file's directory: %w", err)
-	}
-	name := probe.Name()
-	if err := probe.Close(); err != nil {
-		return fmt.Errorf("the -json file's directory: %w", err)
-	}
-	if err := os.Remove(name); err != nil {
-		return fmt.Errorf("the -json file's directory: %w", err)
-	}
 	return nil
 }
