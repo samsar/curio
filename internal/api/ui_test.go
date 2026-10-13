@@ -1535,6 +1535,10 @@ func TestUI_Document(t *testing.T) {
 	assert.NotContains(t, body, `class="callout callout-danger`)
 	assert.Contains(t, body, "<code>curio refetch "+doc.ID+"</code>")
 	assert.Contains(t, body, "<code>curio reindex "+doc.ID+"</code>")
+	assert.NotContains(t, body, " words</span>", "no count before an index")
+	require.NoError(t, srv.Deps.Documents.MarkFetched(context.Background(), doc.ID, 1234))
+	assert.Contains(t, getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK),
+		`<span class="text">1,234 words</span>`, "an index's count")
 
 	for _, on := range []string{"1", "true"} {
 		images := getPageCSP(t, srv, "/ui/documents/"+doc.ID+"?images="+on, http.StatusOK, ui.CSPWithImages)

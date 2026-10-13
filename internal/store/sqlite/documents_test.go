@@ -512,7 +512,7 @@ func TestDocuments_FailureCauseFollowsState(t *testing.T) {
 		require.NoError(t, docs.MarkFailed(ctx, d.ID, cause))
 		assertCauseInvariant(t, db, "MarkFailed "+string(cause))
 	}
-	require.NoError(t, docs.MarkFetched(ctx, d.ID))
+	require.NoError(t, docs.MarkFetched(ctx, d.ID, 0))
 	assertCauseInvariant(t, db, "MarkFetched")
 
 	// A fetch job that succeeds for a failed document, say one a refetch
@@ -590,7 +590,7 @@ func TestDocuments_IndexedAt(t *testing.T) {
 	ids := seedDocs(t, db, "local", "https://example.com/a", "https://example.com/b")
 	other := seedDocs(t, db, "other", "https://example.com/c")
 	assert.Nil(t, indexedAt(ids[0]), "a new document was never indexed")
-	require.NoError(t, docs.MarkFetched(ctx, ids[0]))
+	require.NoError(t, docs.MarkFetched(ctx, ids[0], 0))
 	row := dumpRows(t, db, `SELECT indexed_at, updated_at FROM documents WHERE id = ?`, ids[0])[0]
 	require.NotNil(t, row[0])
 	assert.Equal(t, row[1], row[0], "one 'now' for both columns")

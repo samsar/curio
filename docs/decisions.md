@@ -3340,7 +3340,10 @@ get-or-create stays private to the store (see "Bookmark ingest" below).
 UPDATE by id that points `current_extraction_id` at the new extraction,
 writes `content_type`, `url_canonical`, `title`, `author`, `language` and
 `published_at` exactly as given (nil writes NULL), and sets the state to
-`pending` until the index step marks it `fetched`.
+`pending` until the index step marks it `fetched`. Since metadata search
+it is one transaction with the refresh of the document's search fields,
+which its title, author and declared site name feed (see "Metadata
+search: a fields index and a card per document").
 
 **Why:** `Upsert` served two callers with different needs. Its ON CONFLICT
 branch COALESCEd every nullable column, so a refetch could never clear an
@@ -3352,7 +3355,12 @@ had just created.
 **Verbatim writes:** those columns describe `current_extraction_id`, so a
 value the new extraction lacks must not survive from the old one. Clients
 already fall back to the URL or the bookmark title when `title` is NULL.
-`word_count` is left alone because no fetcher sets it.
+`word_count` is left alone: `MarkFetched` writes it, in the statement that
+marks the document fetched, from the markdown the index step chunked
+(`indexer.WordCount`, the chunker's own unit: whitespace-separated words,
+inline data URLs left out), so the count always describes the extraction
+whose chunks are stored. Nothing backfills it; a document gets its count
+at its next index.
 
 ---
 

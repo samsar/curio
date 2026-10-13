@@ -330,8 +330,14 @@ func TestGetDocument(t *testing.T) {
 	assert.Equal(t, filepath.Join(s.deps.Home.ContentDir(), *ext.MarkdownPath), got.CurrentExtraction.MarkdownPath,
 		"an absolute path, like every other path the API returns")
 	assert.Equal(t, map[string]any{"via": "test"}, got.CurrentExtraction.ExtractionMeta)
+	assert.Nil(t, got.WordCount, "no count before an index")
 
 	assert.Empty(t, got.FailureCause)
+
+	require.NoError(t, s.deps.Documents.MarkFetched(context.Background(), doc.ID, 1234))
+	resp = s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + doc.ID})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	assert.Contains(t, resp.body, `"word_count":1234`, "an index's count")
 
 	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
 	resp = s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + bare.ID})

@@ -80,7 +80,7 @@ func TestUpdatedAt_SetByEveryUpdate(t *testing.T) {
 			name: "Documents.MarkFetched", table: "documents",
 			setup: func(t *testing.T, db *DB) string { return newDoc(t, db, store.DocStatePending).ID },
 			update: func(t *testing.T, db *DB, id string) {
-				require.NoError(t, NewDocuments(db).MarkFetched(ctx, id))
+				require.NoError(t, NewDocuments(db).MarkFetched(ctx, id, 0))
 			},
 		},
 		{
@@ -299,7 +299,7 @@ func TestUpdates_WriteOneRow(t *testing.T) {
 		return n
 	}
 	before := totalChanges()
-	require.NoError(t, docs.MarkFetched(ctx, d.ID))
+	require.NoError(t, docs.MarkFetched(ctx, d.ID, 0))
 	assert.Equal(t, 1, totalChanges()-before)
 
 	var triggers int

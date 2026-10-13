@@ -505,6 +505,32 @@ func TestIndexHandler_HappyPath(t *testing.T) {
 	require.NotEmpty(t, hits, "indexed content should be searchable")
 }
 
+// TestIndexHandler_WordCount: indexing records how many words the indexed
+// text holds; a reindex of a shorter extraction lowers it, and an empty
+// one sets it to 0.
+func TestIndexHandler_WordCount(t *testing.T) {
+	deps, _, ff := newTestDeps(t)
+	ctx := context.Background()
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/counted"}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+	for _, tc := range []struct {
+		markdown string
+		words    int
+	}{
+		{"# Title\n\n" + strings.Repeat("word ", 40), 42},
+		{"Three short words", 3},
+		{"", 0},
+	} {
+		ff.res.Markdown = tc.markdown
+		require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+		require.NoError(t, indexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)))
+		got, err := deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.WordCount, "%q", tc.markdown)
+		assert.Equal(t, tc.words, *got.WordCount, "%q", tc.markdown)
+	}
+}
+
 // TestIndexHandler_BookmarkTagsAreSearchable proves a bookmark's tags reach
 // chunks_fts: a tag word that does NOT appear in the body is searchable
 // after indexing.

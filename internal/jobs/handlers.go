@@ -238,7 +238,8 @@ func fetchedMetadata(doc *store.Document, res *fetcher.Result, extractionID stri
 //  2. Read the markdown file off disk.
 //  3. Pull the bookmark's tags (if any) for FTS boosting — best-effort.
 //  4. Run the Indexer.
-//  5. Mark the document fetched, which clears any failure cause.
+//  5. Mark the document fetched, which clears any failure cause and
+//     records how many words the indexed text holds.
 //  6. Place it into the current interests, best effort.
 func indexHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
@@ -297,7 +298,7 @@ func indexHandler(d Deps) HandlerFunc {
 			return fmt.Errorf("index: %w", err)
 		}
 
-		if err := d.Documents.MarkFetched(ctx, doc.ID); err != nil {
+		if err := d.Documents.MarkFetched(ctx, doc.ID, indexer.WordCount(string(md))); err != nil {
 			return fmt.Errorf("mark fetched: %w", err)
 		}
 		if d.Placer != nil {

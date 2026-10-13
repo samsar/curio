@@ -92,7 +92,7 @@ func newLibrary(t *testing.T, dir string) string {
 		case 23:
 			require.NoError(t, docs.MarkFailed(ctx, doc.ID, store.FailureCauseDeadLink))
 		default:
-			require.NoError(t, docs.MarkFetched(ctx, doc.ID))
+			require.NoError(t, docs.MarkFetched(ctx, doc.ID, 0))
 		}
 	}
 	return path

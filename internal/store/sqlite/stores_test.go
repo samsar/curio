@@ -180,11 +180,39 @@ func TestDocuments_MarkFailed(t *testing.T) {
 		assert.Equal(t, cause, got.FailureCause)
 	}
 
-	require.NoError(t, docs.MarkFetched(ctx, d.ID))
+	require.NoError(t, docs.MarkFetched(ctx, d.ID, 0))
 	got, err := docs.GetByID(ctx, d.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFetched, got.State)
 	assert.Empty(t, got.FailureCause)
+}
+
+// TestDocuments_MarkFetched_WordCount: marking a document fetched records
+// the indexed text's word count, which a later index replaces, smaller or
+// none; a negative count is refused and writes nothing.
+func TestDocuments_MarkFetched_WordCount(t *testing.T) {
+	ctx := context.Background()
+	docs := NewDocuments(newTestDB(t))
+	d := seedDoc(t, docs, "https://example.com/y", store.DocStatePending)
+	words := func() *int {
+		t.Helper()
+		got, err := docs.GetByID(ctx, d.ID)
+		require.NoError(t, err)
+		return got.WordCount
+	}
+	assert.Nil(t, words(), "no count before an index")
+	for _, n := range []int{1200, 300, 0} {
+		require.NoError(t, docs.MarkFetched(ctx, d.ID, n))
+		require.NotNil(t, words())
+		assert.Equal(t, n, *words())
+	}
+	require.NoError(t, docs.MarkFailed(ctx, d.ID, store.FailureCauseOther))
+	err := docs.MarkFetched(ctx, d.ID, -1)
+	require.ErrorContains(t, err, "a word count of -1")
+	got, err := docs.GetByID(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateFailed, got.State, "nothing written")
+	assert.Equal(t, 0, *got.WordCount)
 }
 
 // TestDocuments_MarkFailed_Refused: a cause that isn't one writes nothing,
@@ -202,7 +230,7 @@ func TestDocuments_MarkFailed_Refused(t *testing.T) {
 	}
 
 	assert.ErrorIs(t, docs.MarkFailed(ctx, uuid.NewString(), store.FailureCauseOther), store.ErrNotFound)
-	assert.ErrorIs(t, docs.MarkFetched(ctx, uuid.NewString()), store.ErrNotFound)
+	assert.ErrorIs(t, docs.MarkFetched(ctx, uuid.NewString(), 0), store.ErrNotFound)
 }
 
 // ---------- ExtractionStore ----------

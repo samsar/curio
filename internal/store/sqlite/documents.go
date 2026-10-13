@@ -220,11 +220,13 @@ func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Doc
 
 // markFailedSQL and markFetchedSQL write a document's state and failure
 // cause together, so no write can leave the one without the other.
-// markFetchedSQL is also the one write of indexed_at: SQLite reads 'now'
-// once per statement, so it equals the updated_at written with it.
+// markFetchedSQL is also the one write of indexed_at and word_count: the
+// count describes the text whose chunks were just indexed, and SQLite
+// reads 'now' once per statement, so indexed_at equals the updated_at
+// written with it.
 const (
 	markFailedSQL  = `UPDATE documents SET state = ?, failure_cause = ?, updated_at = ` + sqlNow + ` WHERE id = ?`
-	markFetchedSQL = `UPDATE documents SET state = ?, failure_cause = NULL, updated_at = ` + sqlNow +
+	markFetchedSQL = `UPDATE documents SET state = ?, failure_cause = NULL, word_count = ?, updated_at = ` + sqlNow +
 		`, indexed_at = ` + sqlNow + ` WHERE id = ?`
 )
 
@@ -239,8 +241,11 @@ func (s *Documents) MarkFailed(ctx context.Context, id string, cause store.Failu
 	return ensureRow(res, "document")
 }
 
-func (s *Documents) MarkFetched(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, markFetchedSQL, store.DocStateFetched, id)
+func (s *Documents) MarkFetched(ctx context.Context, id string, words int) error {
+	if words < 0 {
+		return fmt.Errorf("mark document %s fetched: a word count of %d", id, words)
+	}
+	res, err := s.db.ExecContext(ctx, markFetchedSQL, store.DocStateFetched, words, id)
 	if err != nil {
 		return fmt.Errorf("mark document %s fetched: %w", id, err)
 	}

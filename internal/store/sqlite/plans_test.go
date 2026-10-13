@@ -320,7 +320,7 @@ func TestQueryPlans(t *testing.T) {
 		},
 		{
 			name:  "MarkFetched",
-			query: markFetchedSQL, args: []any{store.DocStateFetched, "doc"},
+			query: markFetchedSQL, args: []any{store.DocStateFetched, 100, "doc"},
 			first: "SEARCH documents USING INDEX sqlite_autoindex_documents_1 (id=?)",
 		},
 		{

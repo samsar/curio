@@ -33,7 +33,7 @@ func TestDocumentIndex_SearchFields(t *testing.T) {
 		if cause := stateCause(st); cause != "" {
 			require.NoError(t, e.docs.MarkFailed(e.ctx, id, cause))
 		} else if st == store.DocStateFetched {
-			require.NoError(t, e.docs.MarkFetched(e.ctx, id))
+			require.NoError(t, e.docs.MarkFetched(e.ctx, id, 0))
 		}
 		byState[st] = id
 	}

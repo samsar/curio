@@ -374,11 +374,13 @@ type DocumentStore interface {
 	// cause. ErrNotFound if there is no such document.
 	MarkFailed(ctx context.Context, id string, cause FailureCause) error
 	// MarkFetched records that a document was fetched and indexed: its
-	// state becomes fetched, it has no failure cause, and its indexed_at,
-	// when its vectors were written, is now (the time its updated_at gets
-	// in the same statement). It is the only write of indexed_at.
-	// ErrNotFound if there is no such document.
-	MarkFetched(ctx context.Context, id string) error
+	// state becomes fetched, it has no failure cause, its word count is
+	// words, the length of the text whose chunks were indexed, and its
+	// indexed_at, when its vectors were written, is now (the time its
+	// updated_at gets in the same statement). It is the only write of
+	// indexed_at and of word_count. A negative count is an error, and
+	// nothing is written. ErrNotFound if there is no such document.
+	MarkFetched(ctx context.Context, id string, words int) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
 
 	// ApplyFetch records a successful fetch on a document: it points
@@ -387,7 +389,8 @@ type DocumentStore interface {
 	// with no failure cause, until the index step marks it fetched. A nil
 	// field clears its column: those columns describe the current
 	// extraction, so none may keep a value from an earlier one. word_count
-	// is left alone. ErrNotFound if there is no such document.
+	// is left alone: MarkFetched writes it, with the chunks it counts.
+	// ErrNotFound if there is no such document.
 	ApplyFetch(ctx context.Context, id string, m FetchedMetadata) error
 
 	// RequeueFetch resets the tenant's document to pending, clearing its
