@@ -177,6 +177,22 @@ type Result struct {
 	// Warnings then says why.
 	Degraded bool
 	Warnings []string
+	// Timings are how long Search's stages took; Related sets none.
+	Timings Timings
+}
+
+// Timings are how long each stage of a search took, for measuring a
+// ranking change against its latency; the API never reports them. The
+// BM25 leg runs alongside the embed and the vector search, so the stages
+// add up to more than Total. A stage that didn't run is 0, and one that
+// failed counts up to its failure.
+type Timings struct {
+	Embed   time.Duration // embedding the query
+	BM25    time.Duration // the keyword search
+	Vector  time.Duration // the vector search
+	Fuse    time.Duration // RRF, resolving the chunks to their documents, and ranking those
+	Hydrate time.Duration // reading the window's documents, their chunks and the snippets
+	Total   time.Duration // the whole search
 }
 
 // Search runs the hybrid pipeline end-to-end.
@@ -196,6 +212,7 @@ type Result struct {
 // discarding them. If the caller's own context ends, Search returns that
 // error, never a degraded success.
 func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
+	began := time.Now()
 	if req.Query == "" {
 		return nil, errors.New("search: query is required")
 	}
@@ -224,11 +241,15 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	// contributes nothing; vector search still runs.
 	var bm25Hits, vecHits []store.ChunkHit
 	var vecErr error
+	// Each leg writes its own stages' fields, read only after Wait.
+	var timings Timings
 	g, gctx := errgroup.WithContext(ctx)
 	ftsQuery := sanitizeBM25Query(req.Query)
 	if ftsQuery != "" {
 		g.Go(func() error {
+			start := time.Now()
 			hits, err := e.chunks.BM25Search(gctx, req.TenantID, ftsQuery, fanout, req.Filters)
+			timings.BM25 = time.Since(start)
 			if err != nil {
 				return fmt.Errorf("bm25: %w", err)
 			}
@@ -239,7 +260,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	g.Go(func() error {
 		// Never fatal: returning nil keeps a vector failure from canceling
 		// the BM25 leg.
-		vecHits, vecErr = e.vectorLeg(gctx, req, fanout)
+		vecHits, vecErr = e.vectorLeg(gctx, req, fanout, &timings)
 		return nil
 	})
 	err := g.Wait()
@@ -262,6 +283,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		// against the vector list; a zero weight would erase the ranking.
 		lists, weights = lists[:1], []float64{1}
 	}
+	fuseStart := time.Now()
 	fused := Fuse(lists, weights, e.rrfK)
 
 	// Map chunk_id -> (bm25 score, vector score, document_id)
@@ -289,7 +311,9 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	ranked := rankDocuments(scored, e.collapse)
+	timings.Fuse = time.Since(fuseStart)
 	res.Total, res.Capped = min(len(ranked), store.MaxSearchK), len(ranked) > store.MaxSearchK
+	hydrateStart := time.Now()
 	items, err := e.hydrate(ctx, ranked, req.Offset, req.K, bm25ByID, vecByID)
 	if err != nil {
 		return nil, err
@@ -297,9 +321,12 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	if err := e.attachSnippets(ctx, ftsQuery, items); err != nil {
 		return nil, err
 	}
+	timings.Hydrate = time.Since(hydrateStart)
 	res.BM25Hits = len(bm25Hits)
 	res.VectorHits = len(vecHits)
 	res.Items = items
+	timings.Total = time.Since(began)
+	res.Timings = timings
 	return res, nil
 }
 
@@ -307,18 +334,24 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 func (e *Engine) DefaultK() int { return e.defaultK }
 
 // vectorLeg embeds the query under its own deadline, so a hung embedding
-// model costs at most embedTimeout, and runs the ANN search.
-func (e *Engine) vectorLeg(ctx context.Context, req Request, fanout int) ([]store.ChunkHit, error) {
+// model costs at most embedTimeout, and runs the ANN search. It records
+// how long each took in t.Embed and t.Vector, and writes nothing else of
+// t: the BM25 leg writes its own field alongside.
+func (e *Engine) vectorLeg(ctx context.Context, req Request, fanout int, t *Timings) ([]store.ChunkHit, error) {
 	ectx, cancel := context.WithTimeout(ctx, e.embedTimeout)
 	defer cancel()
+	start := time.Now()
 	vecs, err := e.embedder.Embed(ectx, []string{e.queryPrefix + req.Query})
+	t.Embed = time.Since(start)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 	if len(vecs) != 1 {
 		return nil, fmt.Errorf("embed query: got %d vectors, want 1", len(vecs))
 	}
+	start = time.Now()
 	hits, err := e.chunks.VectorSearch(ctx, req.TenantID, vecs[0], fanout, req.Filters)
+	t.Vector = time.Since(start)
 	if err != nil {
 		return nil, fmt.Errorf("vector search: %w", err)
 	}
