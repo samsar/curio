@@ -28,11 +28,13 @@ func TestSearch_HitsWithoutMatches(t *testing.T) {
 	assert.Contains(t, out, " 1. Sourdough", "an untitled hit is named by its bookmark")
 	assert.Contains(t, out, "    saved as: Sourdough hydration · Baking\n", "its folder without the browser's root")
 	assert.Contains(t, out, "    saved as: Sourdough starters\n")
-	assert.Contains(t, out, "    page no longer available (dead); its bookmark matched\n")
-	assert.Contains(t, out, "    page couldn't be read (failed); its bookmark matched\n")
+	assert.Contains(t, out, "    the page is no longer available (dead); its bookmark matched\n")
+	assert.Contains(t, out, "    the page couldn't be read (failed); its bookmark matched\n")
 	assert.Equal(t, 2, strings.Count(out, "; its bookmark matched"), "the pending page is still there")
 }
 
+// TestSavedAs: the line names the parts the bookmark docmeta.SavedAs
+// picks has, joined by " · ".
 func TestSavedAs(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -41,8 +43,6 @@ func TestSavedAs(t *testing.T) {
 	}{
 		{"none", nil, ""},
 		{"title and folder", []client.SearchHitBookmark{{Title: "T", FolderPath: "/F/G"}}, "T · F / G"},
-		{"the newest titled one", []client.SearchHitBookmark{{FolderPath: "/Newest"}, {Title: "Older", FolderPath: "/O"}},
-			"Older · O"},
 		{"a folder alone", []client.SearchHitBookmark{{FolderPath: "/Favorites/F"}}, "F"},
 		{"a root alone", []client.SearchHitBookmark{{Title: "T", FolderPath: "/Bookmarks Bar"}}, "T"},
 		{"nothing to say", []client.SearchHitBookmark{{Source: store.SourceChrome}}, ""},

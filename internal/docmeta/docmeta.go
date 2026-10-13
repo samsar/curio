@@ -7,9 +7,13 @@
 // outputs under the rules RulesVersion names. The store
 // (internal/store/sqlite) derives every document's rows through it, for
 // every write and for the refresh at start that applies a change of the
-// rules, so those rows have one implementation. The dashboard, curio
-// search and curio-mcp reuse FolderText alone, to show a bookmark's folder
-// as search reads it.
+// rules, so those rows have one implementation.
+//
+// The search surfaces (the dashboard, curio search and curio-mcp) reuse
+// what a hit without a passage is shown by: SavedAs, the bookmark it was
+// saved as with its folder as search reads it (FolderText), and
+// Unavailable, why its page can't be read. Those present a hit; no row is
+// derived through them, so they are outside the rules RulesVersion names.
 package docmeta
 
 import (

@@ -618,7 +618,8 @@ func toSearchOutput(items []client.SearchHit, excludeID string) searchOutput {
 			Snippet: firstSnippet(hit.Matches),
 		}
 		if len(hit.Matches) == 0 {
-			h.SavedTitle, h.Folder = savedAs(hit.Bookmarks)
+			saved, _ := docmeta.SavedAs(docmetaBookmarks(hit.Bookmarks))
+			h.SavedTitle, h.Folder = saved.Title, saved.Folder
 		}
 		out.Results = append(out.Results, h)
 	}
@@ -641,34 +642,13 @@ func hitTitle(hit client.SearchHit) string {
 	return docTitle(hit.Document)
 }
 
-// savedAs is the bookmark a hit was saved as: the newest with a title, else
-// the newest, by its title and its folder as search reads it
-// (docmeta.FolderText).
-func savedAs(bookmarks []client.SearchHitBookmark) (title, folder string) {
-	if len(bookmarks) == 0 {
-		return "", ""
+// docmetaBookmarks are bookmarks as docmeta reads them.
+func docmetaBookmarks(bookmarks []client.SearchHitBookmark) []docmeta.Bookmark {
+	out := make([]docmeta.Bookmark, len(bookmarks))
+	for i, b := range bookmarks {
+		out[i] = docmeta.Bookmark{Title: b.Title, FolderPath: b.FolderPath}
 	}
-	b := bookmarks[0]
-	for _, c := range bookmarks {
-		if c.Title != "" {
-			b = c
-			break
-		}
-	}
-	return b.Title, docmeta.FolderText([]string{b.FolderPath})
-}
-
-// unavailable says why a document of state has no page to read: a dead
-// page is gone, and a failed one couldn't be read, though it may still be
-// there; "" for any other state.
-func unavailable(state string) string {
-	switch state {
-	case "dead":
-		return "the page is no longer available"
-	case "failed":
-		return "the page couldn't be read"
-	}
-	return ""
+	return out
 }
 
 func firstSnippet(m []client.ChunkMatch) string {
@@ -715,7 +695,7 @@ func formatHits(label string, hits []docHit) string {
 		default:
 			b.WriteString("   matched its bookmark\n")
 		}
-		if why := unavailable(h.State); why != "" {
+		if why := docmeta.Unavailable(h.State); why != "" {
 			fmt.Fprintf(&b, "   %s (%s); its bookmark matched\n", why, h.State)
 		}
 		b.WriteString("\n")

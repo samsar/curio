@@ -112,46 +112,31 @@ func renderSavedAs(w io.Writer, hit client.SearchHit) {
 			fmt.Fprintf(w, "    %s\n", line)
 		}
 	}
-	if why := unavailable(hit.Document.State); why != "" {
+	if why := docmeta.Unavailable(hit.Document.State); why != "" {
 		fmt.Fprintf(w, "    %s (%s); its bookmark matched\n", why, hit.Document.State)
 	}
 }
 
-// unavailable says why a document of state has no page to read: a dead
-// page is gone, and a failed one couldn't be read, though it may still be
-// there; "" for any other state.
-func unavailable(state string) string {
-	switch state {
-	case "dead":
-		return "page no longer available"
-	case "failed":
-		return "page couldn't be read"
-	}
-	return ""
-}
-
-// savedAs is the bookmark a hit was saved as, from the newest with a title
-// (else the newest): its title and its folder as search reads it, without
-// the browser's root (docmeta.FolderText), the parts it has, joined by
-// " · ".
+// savedAs is what the bookmark docmeta.SavedAs picks says: its title and
+// its folder, the parts it has, joined by " · ".
 func savedAs(bookmarks []client.SearchHitBookmark) string {
-	if len(bookmarks) == 0 {
-		return ""
-	}
-	b := bookmarks[0]
-	for _, c := range bookmarks {
-		if c.Title != "" {
-			b = c
-			break
-		}
-	}
+	saved, _ := docmeta.SavedAs(docmetaBookmarks(bookmarks))
 	var parts []string
-	for _, p := range []string{b.Title, docmeta.FolderText([]string{b.FolderPath})} {
+	for _, p := range []string{saved.Title, saved.Folder} {
 		if p != "" {
 			parts = append(parts, p)
 		}
 	}
 	return strings.Join(parts, " · ")
+}
+
+// docmetaBookmarks are bookmarks as docmeta reads them.
+func docmetaBookmarks(bookmarks []client.SearchHitBookmark) []docmeta.Bookmark {
+	out := make([]docmeta.Bookmark, len(bookmarks))
+	for i, b := range bookmarks {
+		out[i] = docmeta.Bookmark{Title: b.Title, FolderPath: b.FolderPath}
+	}
+	return out
 }
 
 // truncate caps s at n runes, marking a cut with "...". Widths count runes,

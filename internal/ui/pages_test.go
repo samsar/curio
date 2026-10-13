@@ -951,9 +951,8 @@ func TestSearchHit_MatchKind(t *testing.T) {
 }
 
 // TestSearchHit_Saved: a hit without matches says what it was saved as,
-// from its newest titled bookmark, the parts it has, its folder without
-// the browser's root; or where it was saved from. A dead hit's page is
-// gone, and a failed one's couldn't be read.
+// by the bookmark docmeta.SavedAs picks, the parts it has; or, with
+// neither a title nor a folder, where that bookmark was saved from.
 func TestSearchHit_Saved(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -963,19 +962,15 @@ func TestSearchHit_Saved(t *testing.T) {
 		{"none", nil, ""},
 		{"title and folder", []SavedBookmark{{Title: "Queues", FolderPath: "/Bookmarks Bar/Tech/Streams"}},
 			"Saved as “Queues” in Tech / Streams"},
-		{"the newest titled one", []SavedBookmark{{FolderPath: "/Newest"}, {Title: "Older", Source: "chrome"}},
-			"Saved as “Older”"},
+		{"a title alone", []SavedBookmark{{Title: "Queues", Source: "chrome"}}, "Saved as “Queues”"},
 		{"a folder alone", []SavedBookmark{{FolderPath: "/Favorites/Later", Source: "safari"}}, "Saved in Later"},
 		{"a root alone", []SavedBookmark{{FolderPath: "/Bookmarks Bar", Source: "chrome"}}, "Saved from Chrome"},
+		{"the newest's source", []SavedBookmark{{Source: "safari"}, {Source: "chrome"}}, "Saved from Safari"},
 		{"a source alone", []SavedBookmark{{Source: "html"}}, "Saved from a bookmarks file"},
 		{"by hand", []SavedBookmark{{Source: "manual"}}, "Saved from curio"},
 		{"an unknown source", []SavedBookmark{{Source: evilScript}}, "Saved from " + evilScript},
 	} {
 		assert.Equal(t, tc.want, SearchHit{Bookmarks: tc.bookmarks}.Saved(), tc.name)
-	}
-	for state, want := range map[string]string{"failed": "the page couldn't be read",
-		"dead": "the page is no longer available", "pending": "", "fetched": "", evilAttr: ""} {
-		assert.Equal(t, want, SearchHit{State: state}.Unavailable(), state)
 	}
 }
 

@@ -12988,8 +12988,12 @@ only writer of `document_fields` and of `document_cards.text`, and
 `docmeta.RulesVersion` with a golden file per version that records the
 rules' tables and limits and their outputs over a synthetic sample, so an
 edit to a table no sample document meets still needs a new version. The
-search surfaces reuse its `FolderText` alone, to show a folder as search
-reads it. `refreshFields` runs inside the transaction of every write that
+search surfaces show a hit without a passage through it, so the three say
+one thing in one way: `SavedAs` picks the bookmark (the newest whose
+title isn't blank, else the newest) and names its folder as search reads
+it (`FolderText`), and `Unavailable` words a dead or failed page. Those
+present; no row is derived through them, so they are outside
+`RulesVersion`. `refreshFields` runs inside the transaction of every write that
 changes an input: `Documents.Create`, `ApplyFetch` (now one `BEGIN
 IMMEDIATE` transaction), and `SetCurrentExtraction`; `Bookmarks.Ingest`
 (new and existing documents), `Create` (when it links a document),
@@ -13099,7 +13103,8 @@ place of a passage, its folder as search reads it (`docmeta.FolderText`,
 without the browser's root), and, with a link to the original, that a
 dead page is no longer available or that a failed one couldn't be read: a
 failed page is often still there, behind a sign-in, a bot check or a
-timeout. `curio search` and MCP `search_bookmarks` say the same.
+timeout. `curio search` and MCP `search_bookmarks` say the same, in the
+same words (`docmeta.Unavailable`).
 
 **Word counts.** `documents.word_count` was never written; `MarkFetched`
 now writes it ("Documents: explicit Create and ApplyFetch", Revised).

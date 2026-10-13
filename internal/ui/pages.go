@@ -570,46 +570,31 @@ func (h SearchHit) MatchKind() string {
 }
 
 // Saved says what a hit without matches was saved as, in place of its
-// passages: the newest of its bookmarks with a title, else the newest, as
-// `Saved as "<title>" in <folder>`, the parts it has, or `Saved from
-// <source>`; "" for a hit with no bookmark. The folder is named as search
-// reads it, without the browser's root.
+// passages: the bookmark docmeta.SavedAs picks, as `Saved as "<title>" in
+// <folder>`, the parts it has, or `Saved from <source>`; "" for a hit with
+// no bookmark.
 func (h SearchHit) Saved() string {
-	if len(h.Bookmarks) == 0 {
-		return ""
+	bookmarks := make([]docmeta.Bookmark, len(h.Bookmarks))
+	for i, b := range h.Bookmarks {
+		bookmarks[i] = docmeta.Bookmark{Title: b.Title, FolderPath: b.FolderPath}
 	}
-	b := h.Bookmarks[0]
-	for _, c := range h.Bookmarks {
-		if c.Title != "" {
-			b = c
-			break
-		}
-	}
-	folder := docmeta.FolderText([]string{b.FolderPath})
+	saved, ok := docmeta.SavedAs(bookmarks)
 	switch {
-	case b.Title != "" && folder != "":
-		return "Saved as “" + b.Title + "” in " + folder
-	case b.Title != "":
-		return "Saved as “" + b.Title + "”"
-	case folder != "":
-		return "Saved in " + folder
+	case !ok:
+		return ""
+	case saved.Title != "" && saved.Folder != "":
+		return "Saved as “" + saved.Title + "” in " + saved.Folder
+	case saved.Title != "":
+		return "Saved as “" + saved.Title + "”"
+	case saved.Folder != "":
+		return "Saved in " + saved.Folder
 	}
-	return "Saved from " + sourceName(b.Source)
+	return "Saved from " + sourceName(h.Bookmarks[saved.Index].Source)
 }
 
 // Unavailable says why the hit has no page to read, when only what it
-// was saved as is left: a dead page is gone, and a failed one couldn't be
-// read, though it may well still be there (behind a sign-in or a bot
-// check, or slow to answer). "" for a page curio has read or may yet.
-func (h SearchHit) Unavailable() string {
-	switch h.State {
-	case string(store.DocStateDead):
-		return "the page is no longer available"
-	case string(store.DocStateFailed):
-		return "the page couldn't be read"
-	}
-	return ""
-}
+// was saved as is left (docmeta.Unavailable).
+func (h SearchHit) Unavailable() string { return docmeta.Unavailable(h.State) }
 
 // sourceName names a bookmark's source for people; one it doesn't know is
 // shown as stored.
