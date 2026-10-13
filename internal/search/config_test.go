@@ -15,6 +15,8 @@ func TestConfigFrom_Default(t *testing.T) {
 	assert.Equal(t, Config{
 		BM25Weight:   1,
 		VectorWeight: 1,
+		FieldsWeight: 0.25,
+		CardsWeight:  0.5,
 		RRFK:         60,
 		Collapse:     CollapseMax,
 		QueryPrefix:  config.QwenQueryPrefix,

@@ -375,10 +375,15 @@ func Default() Config {
 			},
 		},
 		Search: Search{
-			DefaultK:            10,
-			RRFK:                60,
-			BM25Weight:          1.0,
-			VectorWeight:        1.0,
+			DefaultK:     10,
+			RRFK:         60,
+			BM25Weight:   1.0,
+			VectorWeight: 1.0,
+			// Measured on the owner's library over fields 0, 0.25, 0.5 ×
+			// cards 0, 0.5, 1: see decisions.md "Metadata search: a fields
+			// index and a card per document".
+			FieldsWeight:        0.25,
+			CardsWeight:         0.5,
 			Collapse:            "max",
 			EmbedTimeoutSeconds: 10,
 		},
