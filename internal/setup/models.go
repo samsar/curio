@@ -4,17 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
-	"github.com/samsar/curio/internal/insight"
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/ollama"
 )
 
-// pickSource is where the writing model came from.
+// pickSource is where generation.model's pick came from.
 type pickSource int
 
 const (
-	noWritingModel    pickSource = iota // interest labels use none
+	noWritingModel    pickSource = iota // no role in use writes with generation.model
 	fromAdvisor                         // curio picked it for this Mac, or the user chose from its tiers
 	fromFlag                            // --generation-model
 	fromConfig                          // config.yaml's generation.model
@@ -27,43 +28,57 @@ type wanted struct {
 	baseURL string
 }
 
-// picks are the models the home needs: the embedding model always, and a
-// writing model when interest labels use one.
+// picks are the models the home needs: the embedding model always, and
+// the writing model of each role in use.
 type picks struct {
-	embedding  wanted
-	generation *wanted // nil: no writing model is pulled
-	source     pickSource
-	advice     Advice // curio's pick for this Mac
-	notes      []string
+	embedding wanted
+	// generation is generation.model's pick, which a role without a model
+	// of its own writes with; nil when no role in use does.
+	generation *wanted
+	// writing are the roles' writing models, one per model and server.
+	writing []wanted
+	source  pickSource
+	advice  Advice // curio's pick for this Mac
+	notes   []string
 }
 
 // curios reports whether curio picked the writing model, which the user
 // is asked about.
 func (p picks) curios() bool { return p.source == fromAdvisor }
 
-// all is every model picked.
+// all is every model picked, each once.
 func (p picks) all() []wanted {
-	if p.generation == nil {
-		return []wanted{p.embedding}
+	out := []wanted{p.embedding}
+	for _, m := range p.writing {
+		if !slices.ContainsFunc(out, m.same) {
+			out = append(out, m)
+		}
 	}
-	return []wanted{p.embedding, *p.generation}
+	return out
+}
+
+// same reports whether o is the same model on the same server as m.
+func (m wanted) same(o wanted) bool {
+	return m.Name == o.Name && strings.TrimRight(m.baseURL, "/") == strings.TrimRight(o.baseURL, "/")
 }
 
 // String names the picks: "qwen3-embedding:0.6b for search and gemma4:26b
 // for writing".
 func (p picks) String() string {
 	s := p.embedding.Name + " for search"
-	if p.generation != nil {
-		s += " and " + p.generation.Name + " for writing"
+	if len(p.writing) > 0 {
+		s += " and " + names(p.writing) + " for writing"
 	}
 	return s
 }
 
 // pick decides the models, reading the home as it is: the embedding model
-// is the home's, or a new home's (--embedding-model, or the default); the
-// writing model is config.yaml's, kept whatever the flags say, or the
-// flag, or curio's pick for this Mac. A --generation-model config.yaml
-// contradicts is an error: curio up never rewrites a value the user set.
+// is the home's, or a new home's (--embedding-model, or the default). A
+// role in use whose model config.yaml's generation.roles sets writes with
+// that one; the others with generation.model, which is config.yaml's,
+// kept whatever the flags say, or the flag, or curio's pick for this Mac.
+// A --generation-model config.yaml contradicts is an error: curio up never
+// rewrites a value the user set.
 func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 	cfg := w.baseConfig(hs)
 	machine, err := w.probeMachine(ctx)
@@ -77,18 +92,60 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 	}
 	p.embedding = wanted{knownModel(embedding), cfg.Embedding.BaseURL}
 
-	if !cfg.Insight.Enabled || cfg.Insight.Labeling != insight.LabelingLLM {
+	roles := cfg.RolesInUse()
+	if len(roles) == 0 {
 		p.notes = append(p.notes, "no writing model is pulled: interest labels don't use one "+
 			"(insight.enabled false, or insight.labeling not llm)")
 		return p, nil
 	}
+	var inheriting []config.Role
+	for _, r := range roles {
+		own := cfg.Generation.Roles[r].Model
+		if own == "" {
+			inheriting = append(inheriting, r)
+			continue
+		}
+		p.addWriting(wanted{knownModel(own), cfg.Generation.Role(r).BaseURL})
+		p.notes = append(p.notes, fmt.Sprintf("keeping generation.roles.%s.model: %s from config.yaml", r, own))
+	}
+	if len(inheriting) == 0 {
+		if flag := w.opts.GenerationModel; flag != "" {
+			return p, fmt.Errorf("--generation-model %s: %s gives every writing role its own model in generation.roles, "+
+				"so generation.model writes nothing; to switch, edit generation.roles there and run curio up again",
+				flag, hs.home.ConfigPath())
+		}
+		return p, nil
+	}
+	model, err := w.pickGeneration(cfg, hs, &p)
+	if err != nil {
+		return p, err
+	}
+	p.generation = &wanted{knownModel(model), cfg.Generation.BaseURL}
+	for _, r := range inheriting {
+		p.addWriting(wanted{p.generation.Model, cfg.Generation.Role(r).BaseURL})
+	}
+	return p, nil
+}
+
+// addWriting adds m to the writing models unless it is there already.
+func (p *picks) addWriting(m wanted) {
+	if !slices.ContainsFunc(p.writing, m.same) {
+		p.writing = append(p.writing, m)
+	}
+}
+
+// pickGeneration picks generation.model, for the roles that write with
+// it: config.yaml's, kept whatever the flags say, or the flag, or curio's
+// pick for this Mac. It records where the pick came from, and its notes,
+// in p.
+func (w *world) pickGeneration(cfg config.Config, hs homeState, p *picks) (string, error) {
 	flag := w.opts.GenerationModel
 	var model string
 	switch {
 	case w.keepsConfig(hs) && hs.setsGeneration:
 		model, p.source = cfg.Generation.Model, fromConfig
 		if flag != "" && flag != model {
-			return p, fmt.Errorf("--generation-model %s: %s sets generation.model: %s, and curio up never rewrites "+
+			return "", fmt.Errorf("--generation-model %s: %s sets generation.model: %s, and curio up never rewrites "+
 				"a value you set; to switch, edit generation.model there and run curio up again",
 				flag, hs.home.ConfigPath(), model)
 		}
@@ -96,7 +153,7 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 	case w.keepsConfig(hs):
 		model, p.source = cfg.Generation.Model, fromDaemonDefault
 		if flag != "" {
-			return p, fmt.Errorf("--generation-model %s: %s sets no generation.model, and curio up never edits "+
+			return "", fmt.Errorf("--generation-model %s: %s sets no generation.model, and curio up never edits "+
 				"an existing config.yaml; set generation.model: %s there and run curio up again",
 				flag, hs.home.ConfigPath(), flag)
 		}
@@ -111,8 +168,7 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 	default:
 		model, p.source = p.advice.Generation.Name, fromAdvisor
 	}
-	p.generation = &wanted{knownModel(model), cfg.Generation.BaseURL}
-	return p, nil
+	return model, nil
 }
 
 // generationToWrite is the writing model a new config.yaml records.

@@ -244,6 +244,23 @@ func TestUI_Status(t *testing.T) {
 	assert.Contains(t, body, `id="queue-pause" data-kind="resume"`)
 }
 
+// TestUI_StatusWritingModel: the Writing model line names the model each
+// role in use writes with, and generation.model when none is in use.
+func TestUI_StatusWritingModel(t *testing.T) {
+	for _, tc := range []struct {
+		roles map[string]string
+		want  string
+	}{
+		{nil, "gemma4:26b"},
+		{map[string]string{"labels": "gemma4:26b"}, "gemma4:26b"},
+		{map[string]string{"labels": "qwen3:4b-instruct"}, "qwen3:4b-instruct"},
+	} {
+		srv := apitest.Start(t, func(d *api.Deps) { d.GenerationModel, d.GenerationRoles = "gemma4:26b", tc.roles })
+		body := getPage(t, srv, "/ui/status", http.StatusOK)
+		assert.Contains(t, body, `<span class="dot"></span>Writing model</span><span class="value">`+tc.want+`</span>`)
+	}
+}
+
 // TestUI_StatusDueLater: jobs that can't run before a later time (a hold
 // on GitHub) read as waiting for the first of them on the queue's state
 // line and in the progress, never as work nor as a stall; once a job is

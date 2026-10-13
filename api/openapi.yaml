@@ -1147,7 +1147,16 @@ components:
         embedding_model:  { type: string, description: "The model that made this home's vectors, as its marker records" }
         embedding_dim:    { type: integer, description: "This home's vector width, fixed when it was created" }
         embedding_drift:  { $ref: "#/components/schemas/EmbeddingDrift" }
-        generation_model: { type: string, description: "The generation.model the daemon started with (config.yaml's, or the default); it takes a restart to change" }
+        generation_model: { type: string, description: "The generation.model the daemon started with (config.yaml's, or the default), which roles without a model of their own write with; it takes a restart to change" }
+        generation_roles:
+          type: object
+          description: >
+            Each writing role the daemon uses (labels: interest and area
+            labels, while insight is on and labels with an LLM) and the
+            model it writes with: generation.roles' model for the role, or
+            generation.model. Empty when no role is in use. It takes a
+            restart to change.
+          additionalProperties: { type: string }
         ollama_reachable: { type: boolean }
         ollama_detail:    { type: string, description: "Why Ollama isn't usable; present only when it isn't" }
         upstreams:
@@ -1172,7 +1181,7 @@ components:
             GitHub allows 60 API requests an hour; with any token, even one
             with no scopes, 5,000.
         interests: { $ref: "#/components/schemas/InterestsState" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, ollama_reachable, upstreams, github_token, interests]
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests]
 
     EmbeddingDrift:
       description: >

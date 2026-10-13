@@ -210,7 +210,7 @@ pulled.
 
 You can skip the `ollama pull` steps: the daemon **auto-pulls** the models
 it needs — the embedding model and, when insight labeling is on, the
-writing model. It pulls in the background and keeps retrying, 5 s after a
+writing model (each model once, however many uses share it). It pulls in the background and keeps retrying, 5 s after a
 failure and doubling up to every 5 minutes, until Ollama answers and the
 pull completes, so Ollama can start before or after the daemon. The first
 failure is logged at WARN in `~/.curio/logs/daemon.log`; retries, and the
@@ -270,6 +270,29 @@ names none):
 
 A model that can't turn thinking off answers the request with an error,
 and its interests get term labels; pick another.
+
+Each use of a writing model is a *role*, and `generation.roles` gives a
+role a model of its own. Today there is one role, `labels` (the interest
+and area labels); a role is in use only while its feature is on, so with
+`insight.enabled: false`, or `insight.labeling` other than `llm`, no
+writing model is built, pulled or checked. A role's entry takes the keys
+`generation` does, `provider`, `model`, `base_url` and `timeout_seconds`,
+and each it leaves out (or sets to `""` or 0) is `generation`'s:
+
+```yaml
+generation:
+  model: gemma4:26b             # what roles without a model of their own write with
+  roles:
+    labels:
+      model: qwen3:4b-instruct  # interest labels write with this; the rest is generation's
+```
+
+An unknown role, or an unknown key inside one, fails the config. `curio
+up` and `curio doctor` check, and `curio up` pulls, the model each role in
+use writes with, and `curio up` restarts a daemon that writes with
+another. The daemon reports each role's model on `/v1/healthz`
+(`generation_roles`), and the dashboard's Status page shows it as the
+Writing model.
 
 ### The embedding model is the home's
 
@@ -749,7 +772,7 @@ while indexing fails that index job, and the job queue retries it.
 |---|---|---|
 | `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 32 chunks per request), including the time it waits behind other requests inside Ollama |
 | `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded`. Keep it well under 30: the CLI and MCP give up on a request after 30 s, so a hung Ollama would surface as a client timeout instead |
-| `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried |
+| `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried. A role's `generation.roles.<role>.timeout_seconds` replaces it for that role |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild of the interests; the rest get term labels |
 
 ## Troubleshooting

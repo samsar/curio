@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -25,6 +27,7 @@ import (
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/keepawake"
+	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
@@ -377,11 +380,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	if err != nil {
 		return nil, err
 	}
-	// Pull the embedding model in the background, retrying until Ollama
-	// serves it, so a fresh install self-heals instead of failing every index
-	// job. Startup isn't blocked; index jobs retry with backoff meanwhile.
-	if cfg.Embedding.AutoPull {
-		go emb.Client().KeepPulled(ctx, slog.With("used_for", "embeddings"))
+	if err := keepPulled(ctx, pullTargets(cfg), slog.Default()); err != nil {
+		return nil, err
 	}
 
 	native := newNativeFetcher(cfg)
@@ -431,7 +431,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 			MapOff: !cfg.Insight.Map, Log: slog.Default()})
 		jobDeps.Placer = placer
 	}
-	insightEngine, err := newInsightEngine(ctx, cfg, docs, chunks, insights, queue, placer, drifted)
+	insightEngine, err := newInsightEngine(cfg, docs, chunks, insights, queue, placer, drifted)
 	if err != nil {
 		return nil, err
 	}
@@ -458,6 +458,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Queue:           queue,
 		Embedder:        emb,
 		GenerationModel: cfg.Generation.Model,
+		GenerationRoles: generationRoles(cfg),
 		Search:          engine,
 		Insights:        insights,
 		InsightEnabled:  cfg.Insight.Enabled,
@@ -674,33 +675,93 @@ func newDispatcher(cfg config.Config, home *curiohome.Home, nativeFetcher *fetch
 	}), routes{ytdlp: ytdlp, githubToken: ghFetcher.HasToken()}, nil
 }
 
+// pullTarget is a model the daemon keeps pulled on one Ollama server.
+type pullTarget struct {
+	baseURL string
+	model   string
+	// usedFor names every use of the model, joined: "embeddings, interest
+	// labels".
+	usedFor string
+	// timeout is the first use's per-request timeout, which bounds the
+	// check whether the model is there; a pull is bounded by its progress.
+	timeout time.Duration
+}
+
+// pullTargets are the models the daemon keeps pulled: the embedding model
+// with embedding.auto_pull, then, with generation.auto_pull, the writing
+// model of each role in use, each pulled once however many uses share it
+// on one server. A role not in use pulls nothing: its multi-gigabyte model
+// would serve no one.
+func pullTargets(cfg config.Config) []pullTarget {
+	var out []pullTarget
+	add := func(baseURL, model, usedFor string, timeoutSeconds int) {
+		baseURL = strings.TrimRight(baseURL, "/")
+		for i := range out {
+			if out[i].baseURL == baseURL && out[i].model == model {
+				out[i].usedFor += ", " + usedFor
+				return
+			}
+		}
+		out = append(out, pullTarget{baseURL: baseURL, model: model, usedFor: usedFor,
+			timeout: time.Duration(timeoutSeconds) * time.Second})
+	}
+	if cfg.Embedding.AutoPull {
+		add(cfg.Embedding.BaseURL, cfg.Embedding.Model, "embeddings", cfg.Embedding.TimeoutSeconds)
+	}
+	if cfg.Generation.AutoPull {
+		for _, r := range cfg.RolesInUse() {
+			if spec := cfg.Generation.Role(r); spec.Provider == config.ProviderOllama {
+				add(spec.BaseURL, spec.Model, r.UsedFor(), spec.TimeoutSeconds)
+			}
+		}
+	}
+	return out
+}
+
+// keepPulled pulls each target in the background, retrying until Ollama
+// serves it, so a fresh install self-heals instead of failing every index
+// job. Startup isn't blocked: index jobs retry with backoff meanwhile, and
+// interest labels use the term fallback until their model is ready.
+func keepPulled(ctx context.Context, targets []pullTarget, log *slog.Logger) error {
+	for _, t := range targets {
+		c, err := ollama.New(t.baseURL, t.model, t.timeout)
+		if err != nil {
+			return fmt.Errorf("keep %s pulled for %s: %w", t.model, t.usedFor, err)
+		}
+		go c.KeepPulled(ctx, log.With("used_for", t.usedFor))
+	}
+	return nil
+}
+
+// generationRoles maps each role in use to the model it writes with, for
+// healthz.
+func generationRoles(cfg config.Config) map[string]string {
+	out := map[string]string{}
+	for _, r := range cfg.RolesInUse() {
+		out[string(r)] = cfg.Generation.Role(r).Model
+	}
+	return out
+}
+
 // newInsightEngine builds the insight layer: group documents into labeled
 // areas and interests with the Louvain grouper, placing the documents
 // indexed during a rebuild with placer (nil places none) once it commits,
 // and asking queue whether a re-embedding still drains.
-// With insight.labeling = "llm" the LLM labeler is always wired: whether
+// While the labels role is in use the LLM labeler is always wired: whether
 // Ollama and the model are up is decided at each rebuild, where the engine
 // falls back to term labels for any run that can't reach them. A startup
 // check would pin that verdict for the life of the process, and the CLI
 // often auto-starts the daemon before the Ollama app is running.
-func newInsightEngine(ctx context.Context, cfg config.Config, docs store.DocumentStore, chunks store.ChunkStore,
+func newInsightEngine(cfg config.Config, docs store.DocumentStore, chunks store.ChunkStore,
 	insights store.InsightStore, queue store.JobStore, placer *insight.Placer, drifted func() string,
 ) (*insight.Engine, error) {
 	var llmLabeler insight.Labeler
-	if cfg.Insight.Labeling == insight.LabelingLLM {
-		gen, err := generator.NewOllama(generator.OllamaOptions{
-			BaseURL: cfg.Generation.BaseURL,
-			Model:   cfg.Generation.Model,
-			Timeout: time.Duration(cfg.Generation.TimeoutSeconds) * time.Second,
-		})
+	if slices.Contains(cfg.RolesInUse(), config.RoleLabels) {
+		gen, err := generator.New(cfg.Generation.Role(config.RoleLabels))
 		if err != nil {
 			return nil, err
 		}
 		llmLabeler = insight.NewLLMLabeler(gen)
-		// Interest labels use the term fallback until the model is ready.
-		if cfg.Generation.AutoPull {
-			go gen.Client().KeepPulled(ctx, slog.With("used_for", "interest labels"))
-		}
 	}
 	return insight.New(docs, chunks, insights, insight.NewLouvainGrouper(slog.Default()), llmLabeler, insight.Config{
 		Labeling:        cfg.Insight.Labeling,

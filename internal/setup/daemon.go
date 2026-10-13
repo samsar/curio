@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/samsar/curio/internal/client"
@@ -110,8 +111,9 @@ func (w *world) checkDaemon(ctx context.Context) Result {
 }
 
 // daemonProblems lists what is wrong with the daemon itself: not running,
-// another build, another writing model. A daemon that doesn't report its
-// writing model (one from before it did) is never restarted for it. What
+// another build, another writing model for a role. A daemon that doesn't
+// report its roles (one from before them) is never restarted for its
+// models: it runs another build, which the version check restarts. What
 // answered with an error, when nothing served, is asked again for it.
 func (w *world) daemonProblems(ctx context.Context, env daemonctl.Env, st daemonctl.Status, cfg config.Config) []string {
 	var problems []string
@@ -119,8 +121,8 @@ func (w *world) daemonProblems(ctx context.Context, env daemonctl.Env, st daemon
 	switch {
 	case st.Health != nil:
 		running = st.Health.Version
-		if m := st.Health.GenerationModel; m != "" && m != cfg.Generation.Model {
-			problems = append(problems, fmt.Sprintf("it writes with %s, not config.yaml's %s", m, cfg.Generation.Model))
+		for _, c := range writingChanges(st.Health, cfg) {
+			problems = append(problems, fmt.Sprintf("it writes with %s, not config.yaml's %s", c.running, c.configured))
 		}
 	case st.Startup != nil:
 		running = st.Startup.Version
@@ -277,13 +279,38 @@ func (s *daemonStep) Apply(ctx context.Context, ui UI) error {
 	if err != nil {
 		return err
 	}
-	if h.GenerationModel != "" && h.GenerationModel != cfg.Generation.Model {
+	if changes := writingChanges(h, cfg); len(changes) > 0 {
 		if err := ctl.Restart(ctx); err != nil {
 			return err
 		}
-		ui.Info("restarted curio-daemon to write with " + cfg.Generation.Model)
+		var models []string
+		for _, c := range changes {
+			if !slices.Contains(models, c.configured) {
+				models = append(models, c.configured)
+			}
+		}
+		ui.Info("restarted curio-daemon to write with " + strings.Join(models, " and "))
 	}
 	return nil
+}
+
+// writingChange is a model a role writes with in the daemon, running, and
+// the one config.yaml gives it, configured, which a restart switches to.
+type writingChange struct{ running, configured string }
+
+// writingChanges are the roles config.yaml and the daemon both use whose
+// models differ, each change once, in the roles' order; none for a daemon
+// that doesn't report its roles.
+func writingChanges(h *client.Health, cfg config.Config) []writingChange {
+	var out []writingChange
+	for _, r := range cfg.RolesInUse() {
+		running, used := h.GenerationRoles[string(r)]
+		c := writingChange{running: running, configured: cfg.Generation.Role(r).Model}
+		if used && c.running != c.configured && !slices.Contains(out, c) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // migratingNotice says why the step waits on the daemon.

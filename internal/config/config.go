@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"os"
@@ -216,9 +217,11 @@ type Insight struct {
 	LabelingTimeoutSeconds int `yaml:"labeling_timeout_seconds"`
 }
 
-// Generation configures the LLM text-generation client, which names areas
-// and interests. Separate from Embedding: a different model and endpoint.
-// Only used when a feature asks for it (insight.labeling = "llm").
+// Generation configures the LLM text-generation client. Separate from
+// Embedding: a different model and endpoint. Each use of a writing model
+// is a Role, which writes with these settings unless Roles gives it its
+// own; a role is in use only while the feature it serves is on
+// (RolesInUse).
 type Generation struct {
 	Provider string `yaml:"provider"` // "ollama" (only provider in v1)
 	// Model is a chat/instruct model, default "qwen3:4b-instruct". Unlike
@@ -227,9 +230,93 @@ type Generation struct {
 	Model          string `yaml:"model"`
 	BaseURL        string `yaml:"base_url"`        // Ollama server; can share the embedder's
 	TimeoutSeconds int    `yaml:"timeout_seconds"` // per-request; generation is slow
-	// AutoPull downloads the generation model via Ollama at startup if it isn't
-	// present locally. Default true. Set false on metered/offline setups.
+	// AutoPull downloads the writing models of the roles in use via Ollama
+	// at startup if they aren't present locally, whichever model each role
+	// resolves to. Default true. Set false on metered/offline setups.
 	AutoPull bool `yaml:"auto_pull"`
+	// Roles gives a role its own provider, model, base URL or timeout. A
+	// field a role leaves out, or sets to "" or 0, is the one above (Role).
+	// The keys are the roles Roles lists; any other is an error.
+	Roles map[Role]ModelSpec `yaml:"roles"`
+}
+
+// ModelSpec is a writing model and where it runs.
+type ModelSpec struct {
+	Provider       string `yaml:"provider"`
+	Model          string `yaml:"model"`
+	BaseURL        string `yaml:"base_url"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+}
+
+// Role is a use curio puts a writing model to.
+type Role string
+
+// RoleLabels names the interests and their areas.
+const RoleLabels Role = "labels"
+
+// roles are every role, in the order they are listed and pulled: what
+// each writes, and whether the feature it writes for is on.
+var roles = []struct {
+	role    Role
+	usedFor string
+	inUse   func(Config) bool
+}{
+	{RoleLabels, "interest labels", func(c Config) bool {
+		return c.Insight.Enabled && c.Insight.Labeling == labelingLLM
+	}},
+}
+
+// Roles lists every role.
+func Roles() []Role {
+	out := make([]Role, len(roles))
+	for i, r := range roles {
+		out[i] = r.role
+	}
+	return out
+}
+
+// UsedFor says what r writes, as logs and the setup wizard name it; empty
+// for a role Roles doesn't list.
+func (r Role) UsedFor() string {
+	for _, d := range roles {
+		if d.role == r {
+			return d.usedFor
+		}
+	}
+	return ""
+}
+
+// Role is the model r writes with: generation's provider, model, base URL
+// and timeout, with each field r's entry in Roles sets laid over them.
+func (g Generation) Role(r Role) ModelSpec {
+	spec := ModelSpec{Provider: g.Provider, Model: g.Model, BaseURL: g.BaseURL, TimeoutSeconds: g.TimeoutSeconds}
+	own := g.Roles[r]
+	if own.Provider != "" {
+		spec.Provider = own.Provider
+	}
+	if own.Model != "" {
+		spec.Model = own.Model
+	}
+	if own.BaseURL != "" {
+		spec.BaseURL = own.BaseURL
+	}
+	if own.TimeoutSeconds != 0 {
+		spec.TimeoutSeconds = own.TimeoutSeconds
+	}
+	return spec
+}
+
+// RolesInUse lists the roles whose feature is on, in Roles' order: labels
+// while insight is enabled and labels its interests with an LLM. A role
+// not in use has no writing model to build, pull or check.
+func (c Config) RolesInUse() []Role {
+	var out []Role
+	for _, r := range roles {
+		if r.inUse(c) {
+			out = append(out, r.role)
+		}
+	}
+	return out
 }
 
 // UI configures the dashboard's pages (daemon.ui turns them on).
@@ -252,7 +339,7 @@ func Default() Config {
 			UI:           true,
 		},
 		Embedding: Embedding{
-			Provider:       providerOllama,
+			Provider:       ProviderOllama,
 			Model:          "qwen3-embedding:0.6b",
 			Dim:            1024,
 			BaseURL:        "http://localhost:11434",
@@ -313,7 +400,7 @@ func Default() Config {
 			LabelingTimeoutSeconds: 900,
 		},
 		Generation: Generation{
-			Provider:       providerOllama,
+			Provider:       ProviderOllama,
 			Model:          "qwen3:4b-instruct",
 			BaseURL:        "http://localhost:11434",
 			TimeoutSeconds: 120,
@@ -322,8 +409,12 @@ func Default() Config {
 	}
 }
 
-// providerOllama is the only embedding and generation provider implemented.
-const providerOllama = "ollama"
+// ProviderOllama is the only embedding and generation provider
+// implemented: Validate refuses any other.
+const ProviderOllama = "ollama"
+
+// labelingLLM is insight.labeling's value for labels an LLM writes.
+const labelingLLM = "llm"
 
 // Load reads config.yaml from path. A missing file is not an error; the
 // defaults are returned. An empty or partial file overlays onto defaults.
@@ -438,9 +529,9 @@ func (c Config) Validate() error {
 	if c.Daemon.IndexWorkers <= 0 {
 		return fmt.Errorf("daemon.index_workers must be positive, got %d", c.Daemon.IndexWorkers)
 	}
-	if c.Embedding.Provider != providerOllama {
+	if c.Embedding.Provider != ProviderOllama {
 		return fmt.Errorf("embedding.provider %q is not supported; the only provider is %q",
-			c.Embedding.Provider, providerOllama)
+			c.Embedding.Provider, ProviderOllama)
 	}
 	if c.Embedding.Model == "" {
 		return errors.New("embedding.model must not be empty")
@@ -500,7 +591,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("fetcher.default %q must be one of: native, web2md", c.Fetcher.Default)
 	}
 	switch c.Insight.Labeling {
-	case "llm", "terms", "off":
+	case labelingLLM, "terms", "off":
 	default:
 		return fmt.Errorf("insight.labeling %q must be one of: llm, terms, off", c.Insight.Labeling)
 	}
@@ -508,18 +599,50 @@ func (c Config) Validate() error {
 		return fmt.Errorf("insight.labeling_timeout_seconds must be positive, got %d",
 			c.Insight.LabelingTimeoutSeconds)
 	}
-	if c.Generation.Provider != providerOllama {
-		return fmt.Errorf("generation.provider %q is not supported; the only provider is %q",
-			c.Generation.Provider, providerOllama)
-	}
-	if c.Generation.Model == "" {
-		return errors.New("generation.model must not be empty")
-	}
-	if err := validateBaseURL("generation.base_url", c.Generation.BaseURL); err != nil {
+	return validateGeneration(c.Generation)
+}
+
+// validateGeneration checks generation's own settings, then each role
+// generation.roles sets, as the role resolves them, in sorted order so
+// the first error is always the same one.
+func validateGeneration(g Generation) error {
+	own := ModelSpec{Provider: g.Provider, Model: g.Model, BaseURL: g.BaseURL, TimeoutSeconds: g.TimeoutSeconds}
+	if err := validateModelSpec("generation", own); err != nil {
 		return err
 	}
-	if c.Generation.TimeoutSeconds <= 0 {
-		return fmt.Errorf("generation.timeout_seconds must be positive, got %d", c.Generation.TimeoutSeconds)
+	set := slices.Sorted(maps.Keys(g.Roles))
+	for _, r := range set {
+		if r.UsedFor() == "" {
+			names := make([]string, 0, len(roles))
+			for _, d := range roles {
+				names = append(names, string(d.role))
+			}
+			return fmt.Errorf("generation.roles: unknown role %q; the roles are: %s", r, strings.Join(names, ", "))
+		}
+	}
+	for _, r := range set {
+		if err := validateModelSpec("generation.roles."+string(r), g.Role(r)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateModelSpec checks a writing model's settings, key naming them in
+// the errors: a provider curio implements, a model, an Ollama address the
+// client accepts, and a positive timeout.
+func validateModelSpec(key string, s ModelSpec) error {
+	if s.Provider != ProviderOllama {
+		return fmt.Errorf("%s.provider %q is not supported; the only provider is %q", key, s.Provider, ProviderOllama)
+	}
+	if s.Model == "" {
+		return fmt.Errorf("%s.model must not be empty", key)
+	}
+	if err := validateBaseURL(key+".base_url", s.BaseURL); err != nil {
+		return err
+	}
+	if s.TimeoutSeconds <= 0 {
+		return fmt.Errorf("%s.timeout_seconds must be positive, got %d", key, s.TimeoutSeconds)
 	}
 	return nil
 }
