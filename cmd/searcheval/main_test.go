@@ -23,7 +23,7 @@ func TestRun_Usage(t *testing.T) {
 		{"an unknown flag", []string{"-db", "x.db", "-queries", "q.yaml", "-k", "5"}, exitUsage,
 			"flag provided but not defined"},
 		{"an unknown variant", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "hybrid,rerank"}, exitUsage,
-			`unknown variant "rerank" in -variants (the variants are: hybrid, bm25, vector)`},
+			`unknown variant "rerank" in -variants (the variants are: hybrid, bm25, vector, fields, cards)`},
 		{"a variant twice", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "bm25,hybrid,bm25"}, exitUsage,
 			`variant "bm25" named twice`},
 		{"no variant", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", ""}, exitUsage, `unknown variant ""`},
@@ -36,7 +36,7 @@ func TestRun_Usage(t *testing.T) {
 			assert.Empty(t, res.stdout)
 			assert.Contains(t, res.stderr, tc.says)
 			assert.Contains(t, res.stderr, "usage: searcheval -db <copy of curio.db> -queries <file> "+
-				"[-config <config.yaml>] [-json <file>] [-baseline <previous -json>] [-variants hybrid,bm25,vector]")
+				"[-config <config.yaml>] [-json <file>] [-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards]")
 		})
 	}
 }
@@ -67,7 +67,7 @@ func TestRun_Refusals(t *testing.T) {
 			return []string{"-db", fx.db, "-queries", queries, "-config", filepath.Join(fx.dir, "nope.yaml")}
 		}, []string{"the -config file", "no such file"}},
 		{"a config with an unknown key", func(t *testing.T, fx *fixture) []string {
-			fx.config = writeConfig(t, fx.dir, fx.ollama.url, "search:\n  rrf: 60\n")
+			fx.config = writeConfig(t, fx.dir, fx.ollama.url, "  rrf: 60\n")
 			return fx.args(queries)
 		}, []string{"field rrf not found"}},
 		{"a config of another width", func(t *testing.T, fx *fixture) []string {
@@ -139,7 +139,7 @@ func TestRun_RetriesADegradedSearch(t *testing.T) {
 	out := filepath.Join(fx.dir, "report.json")
 	res := runEval(t, fx.args(queries, "-json", out)...)
 	require.Equal(t, exitOK, res.code, res.stderr)
-	assert.Equal(t, []string{warmUpText, "alpha", "beta", "gamma", "gamma", "delta"}, fx.ollama.embeds,
+	assert.Equal(t, []string{warmUpText, "alpha", "beta", "gamma", "gamma", "delta"}, fx.ollama.sent(),
 		"gamma embedded twice, the rest once")
 	assert.Equal(t, 1, strings.Count(res.stderr, "ranking the query again"))
 	assert.Contains(t, res.stderr,

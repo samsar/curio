@@ -139,7 +139,10 @@ func TestRun_ScoresTheLibrary(t *testing.T) {
 	require.Equal(t, exitOK, res.code, res.stderr)
 	rep := readReport(t, out)
 
-	assert.Equal(t, libraryReport{Judgments: 12, Missing: 1, Unsearchable: 3}, rep.Library)
+	assert.Equal(t, 12, rep.Library.Judgments)
+	assert.Equal(t, 1, rep.Library.Missing)
+	assert.Equal(t, 3, rep.Library.Unsearchable, "the chunk lists' unsearchable")
+	assert.Equal(t, libraryDocs, rep.Library.CardsEmbedded, "every card, embedded before any query")
 	require.Len(t, rep.Variants, 3)
 	for _, v := range rep.Variants {
 		ws := wants[v.Name]
@@ -203,7 +206,7 @@ func TestRun_TheBM25VariantRanksOnlyItsMatches(t *testing.T) {
 		ranked = append(ranked, ids)
 	}
 	assert.Equal(t, [][]string{{"doc-03", "doc-05"}, {"doc-12", "doc-20"}, {"doc-07"}, {"doc-18", "doc-16"}}, ranked)
-	assert.Equal(t, []string{warmUpText}, fx.ollama.embeds, "the warm-up alone")
+	assert.Equal(t, []string{warmUpText}, fx.ollama.sent(), "the warm-up alone: no query is embedded")
 }
 
 // TestRun_Judgments: each judgment says what it is in the copy: missing,
@@ -247,14 +250,15 @@ func TestRun_TextReport(t *testing.T) {
 	require.Equal(t, exitOK, res.code, res.stderr)
 	out := res.stdout
 	assert.Contains(t, out, "Search evaluation of "+fx.db)
-	assert.Contains(t, out, "4 queries, 12 judgments: 1 missing, 3 unsearchable")
+	assert.Contains(t, out, "4 queries, 12 judgments: 1 missing, 3 the chunk lists can't return")
+	assert.Regexp(t, `\nLibrary: document fields derived in \d+ ms; 24 cards embedded in \d+\.\d s\n`, out)
 	assert.Contains(t, out, "variants hybrid, bm25")
 	assert.Contains(t, out, "\nhybrid: the daemon's search")
 	assert.Contains(t, out, "\nbm25: BM25 alone")
 	for _, label := range []string{"all", "kind topic", "kind keyword", "tag owner", "tag recent"} {
 		assert.Contains(t, out, "\n"+label+" ", label)
 	}
-	for _, stage := range []string{"embed", "bm25", "vector", "fuse", "hydrate", "total"} {
+	for _, stage := range []string{"embed", "bm25", "fields", "vector", "cards", "fuse", "hydrate", "total"} {
 		assert.Regexp(t, `\n`+stage+` +\d+\.\d +\d+\.\d\n`, out, stage)
 	}
 	// The grade-2 ranks: hybrid's, then BM25's, where gamma's grade-2
@@ -297,12 +301,19 @@ func TestRun_Deterministic(t *testing.T) {
 	reports := make([]map[string]any, 0, 2)
 	for _, name := range []string{"a.json", "b.json"} {
 		out := filepath.Join(fx.dir, name)
-		require.Equal(t, exitOK, runEval(t, fx.args(queries, "-json", out, "-variants", "hybrid,bm25,vector")...).code)
+		require.Equal(t, exitOK, runEval(t, fx.args(queries, "-json", out, "-variants",
+			"hybrid,bm25,vector,fields,cards")...).code)
 		raw, err := os.ReadFile(out)
 		require.NoError(t, err)
 		var rep map[string]any
 		require.NoError(t, json.Unmarshal(raw, &rep))
 		delete(rep, "generated_at")
+		// Facts of the run: the first derives and embeds what the second
+		// finds done.
+		library := rep["library"].(map[string]any)
+		for _, fact := range []string{"fields_ms", "cards_ms", "cards_embedded"} {
+			delete(library, fact)
+		}
 		for _, v := range rep["variants"].([]any) {
 			variant := v.(map[string]any)
 			delete(variant, "wall_ms")
@@ -334,12 +345,12 @@ func TestRun_Provenance(t *testing.T) {
 	assert.Equal(t, embeddingProvenance{Provider: "ollama", Model: testModel, Dim: testDim, BaseURL: fx.ollama.url},
 		p.Embedding)
 	assert.Equal(t, searchProvenance{BM25Weight: 1, VectorWeight: 1, RRFK: 60, Collapse: "max", EmbedTimeoutSeconds: 10},
-		p.Search)
+		p.Search, "the document lists weighted 0, as the fixture's config sets them")
 	assert.Equal(t, store.MaxSearchK, p.K)
 	assert.Equal(t, []string{"vector", "hybrid"}, p.Variants, "in the order given")
 	assert.Empty(t, p.Baseline)
 	for _, v := range rep.Variants {
-		for _, stage := range []string{"embed", "bm25", "vector", "fuse", "hydrate", "total"} {
+		for _, stage := range []string{"embed", "bm25", "fields", "vector", "cards", "fuse", "hydrate", "total"} {
 			assert.Contains(t, v.LatencyMS, stage, v.Name)
 		}
 	}
@@ -350,5 +361,95 @@ func TestRun_Provenance(t *testing.T) {
 func TestRun_EmbedsTheQueries(t *testing.T) {
 	fx := newFixture(t)
 	require.Equal(t, exitOK, runEval(t, fx.args(queries)...).code)
-	assert.Equal(t, []string{warmUpText, "alpha", "beta", "gamma", "delta"}, fx.ollama.embeds)
+	assert.Equal(t, []string{warmUpText, "alpha", "beta", "gamma", "delta"}, fx.ollama.sent())
+}
+
+// TestRun_DocumentListVariants: the fields and cards variants find the
+// dead document by what it was saved as, which the chunk lists never
+// return: the same judgment is unsearchable for bm25 and searchable for
+// fields and cards, whose groups count no unsearchable judgment. bm25 and
+// vector never read the document lists, and each document list variant
+// reads no other list but BM25.
+func TestRun_DocumentListVariants(t *testing.T) {
+	fx := newFixture(t)
+	out := filepath.Join(fx.dir, "report.json")
+	res := runEval(t, fx.args(queries, "-json", out, "-variants", "bm25,vector,fields,cards")...)
+	require.Equal(t, exitOK, res.code, res.stderr)
+	rep := readReport(t, out)
+	require.Len(t, rep.Variants, 4)
+	byName := map[string]variantReport{}
+	for _, v := range rep.Variants {
+		byName[v.Name] = v
+	}
+	dead := func(v variantReport) judgmentReport {
+		t.Helper()
+		for _, j := range v.Queries[3].Judgments {
+			if j.URL == docURL(23) {
+				return j
+			}
+		}
+		t.Fatalf("%s: no judgment of the dead document", v.Name)
+		return judgmentReport{}
+	}
+	assert.Equal(t, unsearchable, dead(byName["bm25"]).Status)
+	assert.Nil(t, dead(byName["bm25"]).Rank)
+	for _, name := range []string{"fields", "cards"} {
+		j := dead(byName[name])
+		assert.Equal(t, searchable, j.Status, name)
+		require.NotNil(t, j.Rank, name)
+		assert.Equal(t, 1, *j.Rank, "%s ranks the dead document first for delta", name)
+		all := byName[name].Groups[0]
+		assert.Equal(t, 1, all.Missing, name)
+		assert.Zero(t, all.Unsearchable, "%s can return every document the copy has", name)
+	}
+	assert.Equal(t, []rankedReport{{Rank: 1, DocumentID: "doc-23", URL: docURL(23)}}, byName["fields"].Queries[3].Ranking,
+		"the fields list finds only what was saved as delta")
+	assert.Equal(t, 3, byName["bm25"].Groups[0].Unsearchable)
+
+	// BM25 runs under every variant, weighted or not: it is what a search
+	// whose semantic lists fail falls back on.
+	zero := percentiles{}
+	for name, stages := range map[string][]string{"bm25": {"fields", "cards", "embed"}, "vector": {"fields", "cards"},
+		"fields": {"vector", "cards", "embed"}, "cards": {"vector", "fields"}} {
+		for _, stage := range stages {
+			assert.Equal(t, zero, byName[name].LatencyMS[stage], "%s never runs %s", name, stage)
+		}
+	}
+}
+
+// TestRun_FillsTheCardsOnce: the first run on a copy embeds its cards and
+// says how long that and deriving its fields took; the next finds them
+// done.
+func TestRun_FillsTheCardsOnce(t *testing.T) {
+	fx := newFixture(t)
+	reports := make([]libraryReport, 0, 2)
+	for _, name := range []string{"first.json", "second.json"} {
+		out := filepath.Join(fx.dir, name)
+		require.Equal(t, exitOK, runEval(t, fx.args(queries, "-json", out, "-variants", "cards")...).code)
+		reports = append(reports, readReport(t, out).Library)
+	}
+	assert.Equal(t, libraryDocs, reports[0].CardsEmbedded)
+	assert.Positive(t, reports[0].CardsMS)
+	assert.Positive(t, reports[0].FieldsMS, "the copy's fields derived when it was opened")
+	assert.Zero(t, reports[1].CardsEmbedded)
+	assert.Equal(t, libraryDocs, fx.ollama.cards(), "each card embedded once")
+}
+
+// TestRun_ComparesWithAFormerReport: a report written before the document
+// lists, which has no fields or cards weight and no fields or cards
+// stage, is a baseline; with the document lists weighted 0, the hybrid
+// ranks as it did.
+func TestRun_ComparesWithAFormerReport(t *testing.T) {
+	fx := newFixture(t)
+	res := runEval(t, fx.args(queries, "-variants", "hybrid,bm25,vector", "-baseline",
+		filepath.Join("testdata", "pr1-report.json"))...)
+	require.Equal(t, exitOK, res.code, res.stderr)
+	assert.Contains(t, res.stdout, "queries matched by index")
+	for _, variant := range []string{"hybrid", "bm25", "vector"} {
+		assert.Contains(t, res.stdout, "\nAgainst the baseline's "+variant+":\n")
+	}
+	for _, label := range []string{"all", "kind topic", "kind keyword", "tag owner", "tag recent"} {
+		assert.Len(t, deltaRow(label).FindAllString(res.stdout, -1), 3, "%s, in every variant", label)
+	}
+	assert.Equal(t, 3, strings.Count(res.stdout, "nDCG@10: none moved by 0.05 or more"))
 }

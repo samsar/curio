@@ -17,11 +17,17 @@
 //	sqlite3 -readonly ~/.curio/curio.db ".backup copy.db"
 //	searcheval -db copy.db -queries my-queries.yaml [-config ~/.curio/config.yaml]
 //
-// It embeds each query through the Ollama config.yaml names, as the
-// daemon does, and never pulls a model. An Ollama too busy to embed a
-// query within search.embed_timeout_seconds degrades that search, which
-// is ranked again once; a second degraded search fails the run: run it
-// again with Ollama idle.
+// Before any query runs it brings the copy up to date as the daemon would
+// at start (the document fields derived, the card vector index sized),
+// and embeds every stale card as the daemon's cards job does: the first
+// run on a copy embeds them all, a few minutes for a large library, and a
+// later one on the same copy none.
+//
+// It embeds each query, and the cards, through the Ollama config.yaml
+// names, as the daemon does, and never pulls a model. An Ollama too busy
+// to embed a query within search.embed_timeout_seconds degrades that
+// search, which is ranked again once; a second degraded search fails the
+// run: run it again with Ollama idle.
 package main
 
 import (
@@ -100,7 +106,7 @@ func dropQueryText(groups []string, a slog.Attr) slog.Attr {
 func complain(stderr io.Writer, msg string) { _, _ = io.WriteString(stderr, msg) }
 
 const usageLine = "usage: searcheval -db <copy of curio.db> -queries <file> [-config <config.yaml>] [-json <file>] " +
-	"[-baseline <previous -json>] [-variants hybrid,bm25,vector]\n"
+	"[-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards]\n"
 
 // parseFlags parses args, writing what is wrong and the usage to out on a
 // usage error, and the usage alone for -h.

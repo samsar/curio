@@ -14,11 +14,13 @@ import (
 )
 
 // variant is a way of ranking the library for a query: the production
-// pipeline, or a change to it measured against it.
+// pipeline, or a change to it measured against it. config is the engine's
+// configuration for it, from config.yaml's; its weights also say which
+// lists it ranks with, and so which documents it can return (reach).
 type variant struct {
 	name        string
 	description string
-	build       func(env) (ranker, error)
+	config      func(config.Config) search.Config
 }
 
 // env is what a variant builds its ranker from: the copy's stores, the
@@ -69,27 +71,48 @@ func (r ranking) urls() []string {
 var variants = []variant{
 	{
 		name:        "hybrid",
-		description: "the daemon's search: BM25 and vector search fused by RRF, as config.yaml sets them",
-		build:       func(e env) (ranker, error) { return newEngineRanker(e, search.ConfigFrom(e.cfg)), nil },
+		description: "the daemon's search: every list config.yaml weights, fused by RRF",
+		config:      search.ConfigFrom,
 	},
 	{
 		name:        "bm25",
-		description: "BM25 alone: the engine with the vector weight 0, which never embeds the query",
-		build: func(e env) (ranker, error) {
-			cfg := search.ConfigFrom(e.cfg)
-			cfg.BM25Weight, cfg.VectorWeight = 1, 0
-			return newEngineRanker(e, cfg), nil
-		},
+		description: "BM25 alone: the engine with only the BM25 weight, which never embeds the query",
+		config:      only(1, 0, 0, 0),
 	},
 	{
 		name:        "vector",
-		description: "vector search alone: the engine with the BM25 weight 0",
-		build: func(e env) (ranker, error) {
-			cfg := search.ConfigFrom(e.cfg)
-			cfg.BM25Weight, cfg.VectorWeight = 0, 1
-			return newEngineRanker(e, cfg), nil
-		},
+		description: "vector search alone: the engine with only the vector weight",
+		config:      only(0, 1, 0, 0),
 	},
+	{
+		name:        "fields",
+		description: "the fields list alone: BM25 over what each document was saved as, which never embeds the query",
+		config:      only(0, 0, 1, 0),
+	},
+	{
+		name:        "cards",
+		description: "the cards list alone: the engine with only the cards weight",
+		config:      only(0, 0, 0, 1),
+	},
+}
+
+// only is the production configuration with the four lists weighted bm25,
+// vector, fields and cards.
+func only(bm25, vector, fields, cards float64) func(config.Config) search.Config {
+	return func(c config.Config) search.Config {
+		cfg := search.ConfigFrom(c)
+		cfg.BM25Weight, cfg.VectorWeight, cfg.FieldsWeight, cfg.CardsWeight = bm25, vector, fields, cards
+		return cfg
+	}
+}
+
+// build is v's ranker over e.
+func (v variant) build(e env) ranker { return newEngineRanker(e, v.config(e.cfg)) }
+
+// reach is which documents v's lists can return.
+func (v variant) reach(c config.Config) reach {
+	cfg := v.config(c)
+	return reach{chunks: cfg.BM25Weight > 0 || cfg.VectorWeight > 0, documents: cfg.FieldsWeight > 0 || cfg.CardsWeight > 0}
 }
 
 // variantNames are the registered variants' names, in order.
@@ -135,7 +158,9 @@ func (r engineRanker) rank(ctx context.Context, query string) (ranking, error) {
 	out := ranking{docs: make([]rankedDoc, len(res.Items)), stages: []stage{
 		{"embed", res.Timings.Embed},
 		{"bm25", res.Timings.BM25},
+		{"fields", res.Timings.Fields},
 		{"vector", res.Timings.Vector},
+		{"cards", res.Timings.Cards},
 		{"fuse", res.Timings.Fuse},
 		{"hydrate", res.Timings.Hydrate},
 	}}
