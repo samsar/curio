@@ -100,6 +100,14 @@ type derivedDoc struct {
 	own docmeta.Own
 }
 
+// hostChange is what refreshFields changes on one host: the refreshed
+// documents on it, and those whose stored fields were on it and that are
+// now on another.
+type hostChange struct {
+	on   []derivedDoc
+	left []string
+}
+
 // hostRow is what one of a host's documents contributes to the name the
 // host agrees on, and the name it has.
 type hostRow struct {
@@ -119,8 +127,13 @@ func refreshFields(ctx context.Context, tx *sql.Tx, tenantID string, ids ...stri
 	f := &fieldsTx{tx: tx, tenantID: tenantID}
 
 	refreshed := map[string]bool{}
-	onHost := map[string][]derivedDoc{}
-	hosts := map[string]bool{}
+	changes := map[string]*hostChange{}
+	change := func(host string) *hostChange {
+		if changes[host] == nil {
+			changes[host] = &hostChange{}
+		}
+		return changes[host]
+	}
 	for _, id := range ids {
 		if refreshed[id] {
 			continue
@@ -133,14 +146,15 @@ func refreshFields(ctx context.Context, tx *sql.Tx, tenantID string, ids ...stri
 		if !ok {
 			continue
 		}
-		onHost[own.Host] = append(onHost[own.Host], derivedDoc{id: id, own: own})
-		hosts[own.Host] = true
-		if oldHost.Valid {
-			hosts[oldHost.String] = true
+		here := change(own.Host)
+		here.on = append(here.on, derivedDoc{id: id, own: own})
+		if oldHost.Valid && oldHost.String != own.Host {
+			before := change(oldHost.String)
+			before.left = append(before.left, id)
 		}
 	}
-	for _, host := range slices.Sorted(maps.Keys(hosts)) {
-		if err := f.agree(ctx, host, onHost[host], refreshed); err != nil {
+	for _, host := range slices.Sorted(maps.Keys(changes)) {
+		if err := f.agree(ctx, host, *changes[host], refreshed); err != nil {
 			return false, fmt.Errorf("agree the site name of host %q: %w", host, err)
 		}
 	}
@@ -190,19 +204,21 @@ func (f *fieldsTx) bookmarks(ctx context.Context, id string) ([]docmeta.Bookmark
 	return out, nil
 }
 
-// agree agrees host's site name over its documents as they are once docs,
-// the refreshed documents now on it, are written and the other refreshed
-// ones have left it, then writes docs' fields and cards and rewrites every
-// other document of the host whose name the agreement changed.
-func (f *fieldsTx) agree(ctx context.Context, host string, docs []derivedDoc, refreshed map[string]bool) error {
+// agree agrees host's site name over its documents as they are once
+// change is applied, the refreshed documents on it written and those that
+// left it gone, then writes the fields and cards of those on it and
+// rewrites every other document of the host whose name the agreement
+// changed. refreshed holds every document the refresh derives, which agree
+// never renames.
+func (f *fieldsTx) agree(ctx context.Context, host string, change hostChange, refreshed map[string]bool) error {
 	rows, err := f.hostRows(ctx, host)
 	if err != nil {
 		return err
 	}
-	for id := range refreshed {
+	for _, id := range change.left {
 		delete(rows, id)
 	}
-	for _, d := range docs {
+	for _, d := range change.on {
 		rows[d.id] = hostRow{declared: d.own.DeclaredSite, suffixes: d.own.TitleSuffixes}
 	}
 	contributions := make([]docmeta.HostDocument, 0, len(rows))
@@ -211,7 +227,7 @@ func (f *fieldsTx) agree(ctx context.Context, host string, docs []derivedDoc, re
 	}
 	agreed := docmeta.AgreedName(host, contributions)
 
-	for _, d := range docs {
+	for _, d := range change.on {
 		if err := f.write(ctx, d.id, d.own.Fields(agreed)); err != nil {
 			return fmt.Errorf("write the fields of document %s: %w", d.id, err)
 		}

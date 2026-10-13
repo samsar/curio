@@ -59,6 +59,14 @@ func (e *fieldsEnv) ingest(url, source, title, folder string) *store.Bookmark {
 // page declaring site.
 func (e *fieldsEnv) fetch(id, title, author, site string) {
 	e.t.Helper()
+	require.NoError(e.t, e.docs.ApplyFetch(e.ctx, id, store.FetchedMetadata{ExtractionID: e.extraction(id, site),
+		ContentType: store.ContentTypeArticle, Title: store.NullableString(title), Author: store.NullableString(author)}))
+}
+
+// extraction stores an extraction of document id from a page declaring
+// site, and returns its ID.
+func (e *fieldsEnv) extraction(id, site string) string {
+	e.t.Helper()
 	ext := &store.DocumentExtraction{DocumentID: id, Fetcher: "test", Status: store.ExtractionStatusOK}
 	if site != "" {
 		meta, err := json.Marshal(map[string]any{"via": "test", store.ExtractionMetaSiteName: site})
@@ -66,8 +74,7 @@ func (e *fieldsEnv) fetch(id, title, author, site string) {
 		ext.ExtractionMeta = meta
 	}
 	require.NoError(e.t, e.exts.Create(e.ctx, ext))
-	require.NoError(e.t, e.docs.ApplyFetch(e.ctx, id, store.FetchedMetadata{ExtractionID: ext.ID,
-		ContentType: store.ContentTypeArticle, Title: store.NullableString(title), Author: store.NullableString(author)}))
+	return ext.ID
 }
 
 // fieldsRow is a document's fields as stored.
@@ -241,6 +248,36 @@ func TestRefreshFields_Agreement(t *testing.T) {
 	}
 }
 
+// TestRefreshFields_DocumentLeavesItsHost: a document whose fields were
+// derived under another host, as a change of the rules can leave it, no
+// longer counts in that host's agreement once refreshed, and the host's
+// documents that took its name lose it. The host it left sorts before the
+// one it is on, so the host it left is agreed while its stored row still
+// names it.
+func TestRefreshFields_DocumentLeavesItsHost(t *testing.T) {
+	e := newFieldsEnv(t)
+	moved := &store.Document{TenantID: "local", URL: "https://zeta.example/1"}
+	require.NoError(t, e.docs.Create(e.ctx, moved))
+	e.fetch(moved.ID, "Post", "", "Zeta Weekly")
+	sibling := &store.Document{TenantID: "local", URL: "https://old.example/2"}
+	require.NoError(t, e.docs.Create(e.ctx, sibling))
+	_, err := e.db.Exec(`UPDATE document_fields SET host = 'old.example', rules = 0 WHERE document_id = ?`, moved.ID)
+	require.NoError(t, err)
+	_, err = e.db.Exec(`UPDATE document_fields SET site_name = 'Zeta Weekly', site = 'Zeta Weekly old'
+		WHERE document_id = ?`, sibling.ID)
+	require.NoError(t, err)
+	_, err = e.db.Exec(`UPDATE document_cards SET text = 'Zeta Weekly' WHERE document_id = ?`, sibling.ID)
+	require.NoError(t, err)
+
+	got, err := EnsureDocumentFields(e.ctx, e.db)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.Documents)
+	assert.Equal(t, "zeta.example", e.fields(moved.ID).Host)
+	assert.Empty(t, e.fields(sibling.ID).SiteName, "the name only the document that left declared")
+	assert.Equal(t, "old.example", e.card(sibling.ID))
+	assert.Equal(t, e.derived(), e.rederived())
+}
+
 // TestRefreshFields_QueuesCards: a write that changes a card queues one
 // cards job, at most one pending per tenant, in its own transaction, so
 // one that rolls back leaves none; one that changes no card queues
@@ -341,8 +378,9 @@ func TestRefreshFields_DeletedDocument(t *testing.T) {
 }
 
 // TestRefreshFields_AnyOrderEndsAsAFullDerivation: whatever writes a
-// library sees, in whatever order, its derived rows end as a derivation
-// of the final data from scratch would leave them.
+// library sees, every write that changes an input among them, in whatever
+// order, its derived rows end as a derivation of the final data from
+// scratch would leave them.
 func TestRefreshFields_AnyOrderEndsAsAFullDerivation(t *testing.T) {
 	hosts := []string{"https://www.alpha.example", "https://blog.beta.example", "https://gamma.example",
 		"https://paulgraham.com"}
@@ -351,40 +389,69 @@ func TestRefreshFields_AnyOrderEndsAsAFullDerivation(t *testing.T) {
 		"Essay · Gamma", "Untitled - 2026"}
 	folders := []string{"", "/Bookmarks Bar/Tech", "/Favorites/Reading/Later", "/Other Bookmarks", "/Tech/Deep"}
 	sites := []string{"", "", "Alpha Weekly", "Medium", "gamma.example", "Beta Blog", "Gamma Times"}
-	for seed := range uint64(6) {
+	for seed := range uint64(8) {
 		t.Run(fmt.Sprint("seed ", seed), func(t *testing.T) {
 			e := newFieldsEnv(t)
 			r := rand.New(rand.NewPCG(seed, 42))
 			pick := func(list []string) string { return list[r.IntN(len(list))] }
 			url := func() string { return fmt.Sprintf("%s/%d", pick(hosts), r.IntN(12)) }
+			// doc is a document of the library, when url() names one.
+			doc := func() (*store.Document, bool) {
+				d, err := e.docs.GetByURL(e.ctx, "local", url())
+				if errors.Is(err, store.ErrNotFound) {
+					return nil, false
+				}
+				require.NoError(t, err)
+				return d, true
+			}
 			var bookmarks []string
-			for range 120 {
-				switch r.IntN(4) {
-				case 0:
+			for range 300 {
+				switch r.IntN(7) {
+				case 0: // Documents.Create
 					err := e.docs.Create(e.ctx, &store.Document{TenantID: "local", URL: url()})
 					if !errors.Is(err, store.ErrConflict) {
 						require.NoError(t, err)
 					}
-				case 1:
+				case 1: // Bookmarks.Ingest
 					b := e.bookmark(url(), pick(sources), pick(titles), pick(folders))
 					if _, err := e.bms.Ingest(e.ctx, b); !errors.Is(err, store.ErrConflict) {
 						require.NoError(t, err)
 						bookmarks = append(bookmarks, b.ID)
 					}
-				case 2:
-					doc, err := e.docs.GetByURL(e.ctx, "local", url())
-					if errors.Is(err, store.ErrNotFound) {
-						continue
+				case 2: // Documents.ApplyFetch
+					if d, ok := doc(); ok {
+						e.fetch(d.ID, pick(titles), pick([]string{"", "Ada", "Grace"}), pick(sites))
 					}
-					require.NoError(t, err)
-					e.fetch(doc.ID, pick(titles), pick([]string{"", "Ada", "Grace"}), pick(sites))
-				case 3:
+				case 3: // Bookmarks.Delete
 					if len(bookmarks) == 0 {
 						continue
 					}
 					i := r.IntN(len(bookmarks))
 					require.NoError(t, e.bms.Delete(e.ctx, bookmarks[i]))
 					bookmarks = append(bookmarks[:i], bookmarks[i+1:]...)
+				case 4: // Bookmarks.Create, linked to a document
+					d, ok := doc()
+					if !ok {
+						continue
+					}
+					b := e.bookmark(d.URL, pick(sources), pick(titles), pick(folders))
+					b.DocumentID = &d.ID
+					if err := e.bms.Create(e.ctx, b); !errors.Is(err, store.ErrConflict) {
+						require.NoError(t, err)
+						bookmarks = append(bookmarks, b.ID)
+					}
+				case 5: // Bookmarks.LinkDocument
+					d, ok := doc()
+					if !ok || len(bookmarks) == 0 {
+						continue
+					}
+					require.NoError(t, e.bms.LinkDocument(e.ctx, bookmarks[r.IntN(len(bookmarks))], d.ID))
+				case 6: // Documents.SetCurrentExtraction
+					d, ok := doc()
+					if !ok {
+						continue
+					}
+					require.NoError(t, e.docs.SetCurrentExtraction(e.ctx, d.ID, e.extraction(d.ID, pick(sites))))
 				}
 			}
 			var docs int
