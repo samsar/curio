@@ -940,9 +940,10 @@ func TestEngine_KContract(t *testing.T) {
 
 // TestEngine_ZeroWeight: a retriever weighted 0 ranks nothing: the other's
 // documents alone are the results, each with a score, and the total counts
-// them alone. A vector weight of 0 skips the vector leg, so the query is
-// never embedded and the search never degrades; a BM25 weight of 0 still
-// runs BM25, and falls back to its results when the vector leg fails.
+// them alone. A vector weight of 0, with the cards' 0 as here, skips the
+// semantic leg, so the query is never embedded and the search never
+// degrades; a BM25 weight of 0 still runs BM25, and falls back to its
+// results when the vector leg fails.
 func TestEngine_ZeroWeight(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	dim := sqlitetest.Width(t, db)

@@ -12982,21 +12982,25 @@ like `chunks`.
 only writer of `document_fields` and of `document_cards.text`, and
 `internal/docmeta` the only derivation: pure functions, standard library,
 `urlutil` and `textutil` alone (depguard `docmeta-pure`), versioned by
-`docmeta.RulesVersion` with a golden file per version. It runs inside the
-transaction of every write that changes an input: `Documents.Create`,
-`ApplyFetch` (now one `BEGIN IMMEDIATE` transaction), and
-`SetCurrentExtraction`; `Bookmarks.Ingest` (new and existing documents),
-`Create` (when it links a document), `Delete` (on the document it linked)
-and `LinkDocument` (on the old and the new). State is no input, so
-`MarkFetched`, `MarkFailed` and the refetches don't run it. It upserts
-each row `ON CONFLICT … DO UPDATE … WHERE` something changed (never
-`INSERT OR REPLACE`, which would fire the delete triggers), agrees the
-host's name, and when that changed rewrites the site and card of the
-host's other documents without a declared name. A write that changes no
-input writes nothing (a test counts `total_changes()`), and a property
-test holds any order of creates, ingests, fetches and deletes to the
-fields a full derivation of the final data gives. `urlutil.Site`, the
-registrable domain, moved from the fetcher, whose site pacing uses it too.
+`docmeta.RulesVersion` with a golden file per version that records the
+rules' tables and limits and their outputs over a synthetic sample, so an
+edit to a table no sample document meets still needs a new version. The
+search surfaces reuse its `FolderText` alone, to show a folder as search
+reads it. `refreshFields` runs inside the transaction of every write that
+changes an input: `Documents.Create`, `ApplyFetch` (now one `BEGIN
+IMMEDIATE` transaction), and `SetCurrentExtraction`; `Bookmarks.Ingest`
+(new and existing documents), `Create` (when it links a document),
+`Delete` (on the document it linked) and `LinkDocument` (on the old and
+the new). State is no input, so `MarkFetched`, `MarkFailed` and the
+refetches don't run it. It upserts each row `ON CONFLICT … DO UPDATE …
+WHERE` something changed (never `INSERT OR REPLACE`, which would fire the
+delete triggers), agrees the host's name, and when that changed rewrites
+the site and card of the host's other documents without a declared name.
+A write that changes no input writes nothing (a test counts
+`total_changes()`), and a property test holds any order of the seven
+writes to the fields a full derivation of the final data gives.
+`urlutil.Site`, the registrable domain, moved from the fetcher, whose
+site pacing uses it too.
 
 **Why not on `documents`.** The research sketch put the display name in a
 `documents.site_name` column. It changes when a sibling is fetched or
@@ -13069,11 +13073,14 @@ found. The fields list breaks ties by `seq`, the cards list by distance,
 then document ID, over-fetching the KNN (`min(limit × 10, 1000)`) for its
 filters. The fields list runs beside BM25 on the same sanitized query;
 the query is embedded once for both semantic lists, which run side by
-side. Any failure in the semantic leg drops both semantic lists (one rule,
-one warning, ", without the document cards" added when the cards were
-on); BM25 and the fields list still rank, and a fields failure fails the
-search, as BM25's does. The lists are a slice, so later work adds lists
-or stages without reshaping it.
+side, so a config that set `vector_weight: 0` to keep search off Ollama
+embeds the query again for the cards list until it sets `cards_weight: 0`
+too (docs/setup.md says so for the upgrade). Any failure in the semantic
+leg drops both semantic lists (one rule, one warning, ", without the
+document cards" added when the cards were on); BM25 and the fields list
+still rank, and a fields failure fails the search, as BM25's does. The
+lists are a slice, so later work adds lists or stages without reshaping
+it.
 
 **Failed, dead and pending documents.** The chunk lists still leave
 failed and dead documents out, so a failed fetch's stale text is never
@@ -13082,12 +13089,14 @@ failed and dead documents", Revised). A pending document is in the chunk
 lists once it has chunks (a refetch keeps its last ones), and before its
 first index in the document lists alone, so a bookmark saved a moment ago
 is found by its title. A hit only the document lists found has no
-passages. The API
-sends, on a hit without matches only, the bookmarks it was saved under
-(`bookmarks`: title, folder, source, saved; one `ListByDocuments` read per
-response), the dashboard shows "Saved as …" in place of a passage and,
-for a failed or dead page, that it is no longer available, with a link to
-the original; `curio search` and MCP `search_bookmarks` say the same.
+passages. The API sends, on a hit without matches only, the bookmarks it
+was saved under (`bookmarks`: title, folder, source, saved; one
+`ListByDocuments` read per response). The dashboard shows "Saved as …" in
+place of a passage, its folder as search reads it (`docmeta.FolderText`,
+without the browser's root), and, with a link to the original, that a
+dead page is no longer available or that a failed one couldn't be read: a
+failed page is often still there, behind a sign-in, a bot check or a
+timeout. `curio search` and MCP `search_bookmarks` say the same.
 
 **Word counts.** `documents.word_count` was never written; `MarkFetched`
 now writes it ("Documents: explicit Create and ApplyFetch", Revised).

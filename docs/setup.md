@@ -798,7 +798,9 @@ waits while the queue is paused or outside its schedule, and while Ollama
 doesn't answer it waits too, retrying for up to a day. `curio reindex
 --all` embeds every card again. Upgrading to 2.7 derives every document's
 fields at the daemon's first start (seconds for thousands of documents)
-and queues the cards job, which embeds one card per document.
+and queues the cards job, which embeds one card per document. If you set
+`vector_weight: 0` to keep search off Ollama, set `cards_weight: 0` too:
+the cards list embeds the query as well.
 
 Going back to curio 2.6.x, remove `search.fields_weight` and
 `search.cards_weight` from `config.yaml` first: 2.6.x doesn't know the
