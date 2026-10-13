@@ -12666,9 +12666,11 @@ it is mapped. Each query asks for k = `store.MaxSearchK` (100) at offset
 0, the pool every search ranks ("Search pages by offset within a
 fixed-depth pool"), so R@100 is the whole ranking's recall. Queries embed
 through config.yaml's Ollama, pinged (10 s) and warmed up first, never
-pulled from; the engine's own embed timeout applies, and a degraded search
-fails the run, naming the query, as `curio eval` refuses one. The copy's
-vector width must be config.yaml's `embedding.dim`.
+pulled from; the engine's own embed timeout applies. A degraded search is
+ranked again once, with a WARN naming the query by id: the Ollama may be
+the daemon's, busy indexing, and one slow embed shouldn't cost the run. A
+second fails the run, naming the query, as `curio eval` refuses one. The
+copy's vector width must be config.yaml's `embedding.dim`.
 
 **On a copy:** the tool migrates what it reads, so `internal/devtool`
 refuses a database beside `daemon.pid` or the home's marker
@@ -12685,7 +12687,9 @@ keeps devtool out of everything shipped.
 **Judgments, resolved once:** missing (no document has the URL);
 unsearchable (the document failed or is dead, or has no chunks); otherwise
 searchable, a pending document with chunks included, since search reads
-those.
+those. Whether a document has chunks is read through
+`EmbeddingsForDocument`, its vectors read and dropped: the store has no
+cheaper read of it, and it runs once per judged URL before any query.
 
 **Variants:** an ordered registry, `hybrid` (production), `bm25` and
 `vector` (the engine with the other weight at 0); later PRs register their

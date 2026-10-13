@@ -84,11 +84,11 @@ func TestRun_Refusals(t *testing.T) {
 			fx.config = writeConfig(t, fx.dir, closedURL(t), "")
 			return fx.args(queries)
 		}, []string{"no Ollama answers at http://127.0.0.1:", testModel}},
-		{"an embed failing mid-run", func(_ *testing.T, fx *fixture) []string {
+		{"an embed failing mid-run, twice", func(_ *testing.T, fx *fixture) []string {
 			fx.ollama.failOn("gamma")
 			return fx.args(queries)
-		}, []string{"variant hybrid, query q-gamma", "keyword-only", "semantic search unavailable",
-			"model runner has unexpectedly stopped"}},
+		}, []string{"ranking the query again", "variant hybrid, query q-gamma", "keyword-only",
+			"semantic search unavailable", "model runner has unexpectedly stopped"}},
 		{"a query file with a mistake", func(t *testing.T, fx *fixture) []string {
 			path := filepath.Join(fx.dir, "typo.yaml")
 			require.NoError(t, os.WriteFile(path, []byte("queries:\n  - id: a\n    tag: [x]\n    query: q\n"+
@@ -124,6 +124,33 @@ func TestRun_LogsNoQueryText(t *testing.T) {
 	assert.Contains(t, res.stderr, `msg="semantic search unavailable; returning keyword-only results"`)
 	assert.Contains(t, res.stderr, "query q-gamma")
 	assert.NotContains(t, strings.ReplaceAll(res.stderr, "q-gamma", ""), "gamma")
+}
+
+// TestRun_RetriesADegradedSearch: a query whose search comes back
+// keyword-only once is ranked again, logged by id without its text, and
+// scored as the run without the failure scores it.
+func TestRun_RetriesADegradedSearch(t *testing.T) {
+	clean := newFixture(t)
+	want := filepath.Join(clean.dir, "want.json")
+	require.Equal(t, exitOK, runEval(t, clean.args(queries, "-json", want)...).code)
+
+	fx := newFixture(t)
+	fx.ollama.failOnce("gamma")
+	out := filepath.Join(fx.dir, "report.json")
+	res := runEval(t, fx.args(queries, "-json", out)...)
+	require.Equal(t, exitOK, res.code, res.stderr)
+	assert.Equal(t, []string{warmUpText, "alpha", "beta", "gamma", "gamma", "delta"}, fx.ollama.embeds,
+		"gamma embedded twice, the rest once")
+	assert.Equal(t, 1, strings.Count(res.stderr, "ranking the query again"))
+	assert.Contains(t, res.stderr,
+		`msg="a search came back keyword-only; ranking the query again" variant=hybrid query_id=q-gamma`)
+	assert.NotContains(t, strings.ReplaceAll(res.stderr, "q-gamma", ""), "gamma", "no query text")
+	got, wanted := readReport(t, out).Variants[0].Queries, readReport(t, want).Variants[0].Queries
+	require.Len(t, got, len(wanted))
+	for i := range got {
+		assert.Equal(t, wanted[i].QueryScore, got[i].QueryScore, got[i].ID)
+		assert.Equal(t, wanted[i].Ranking, got[i].Ranking, got[i].ID)
+	}
 }
 
 // TestRun_RefusesAnUnusableJSONPath: a -json path the report couldn't be

@@ -234,6 +234,9 @@ func resolve(ctx context.Context, docs store.DocumentStore, chunks store.ChunkSt
 		r.status = unsearchable
 		return r, nil
 	}
+	// Whether it has chunks is all this needs, but the store has no read of
+	// a document's chunk count, and reading its vectors costs a few KiB a
+	// chunk, once per judged URL, before any query runs.
 	embs, err := chunks.EmbeddingsForDocument(ctx, doc.ID)
 	if err != nil {
 		return resolved{}, fmt.Errorf("read the chunks of the judged %s: %w", url, err)
@@ -248,8 +251,11 @@ func resolve(ctx context.Context, docs store.DocumentStore, chunks store.ChunkSt
 const totalStage = "total"
 
 // runVariant ranks every query once, in file order, with v, and scores
-// each ranking. A ranking that fails, a degraded search among them, fails
-// the variant, naming the query.
+// each ranking. A ranking that fails fails the variant, naming the query,
+// except a degraded search, which is ranked again once first: the Ollama
+// the queries embed through may be the daemon's, busy indexing, and one
+// query's embed outlasting the engine's timeout shouldn't throw away the
+// run. The query's timings are its last ranking's.
 func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, judged map[string]resolved) (variantReport, error) {
 	rk, err := v.build(e)
 	if err != nil {
@@ -263,6 +269,13 @@ func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, judged
 	for i, q := range qs.Queries {
 		start := time.Now()
 		r, err := rk.rank(ctx, q.Query)
+		if errors.Is(err, errDegraded) {
+			// Named by id, as the report names queries: never the text.
+			e.log.Warn("a search came back keyword-only; ranking the query again", "variant", v.name,
+				"query_id", queryLabel(q.ID, i), "err", err)
+			start = time.Now()
+			r, err = rk.rank(ctx, q.Query)
+		}
 		total := time.Since(start)
 		if err != nil {
 			return variantReport{}, fmt.Errorf("variant %s, query %s: %w", v.name, queryLabel(q.ID, i), err)

@@ -20,7 +20,8 @@
 // It embeds each query through the Ollama config.yaml names, as the
 // daemon does, and never pulls a model. An Ollama too busy to embed a
 // query within search.embed_timeout_seconds degrades that search, which
-// fails the run: run it again with Ollama idle.
+// is ranked again once; a second degraded search fails the run: run it
+// again with Ollama idle.
 package main
 
 import (

@@ -116,14 +116,14 @@ type fakeOllama struct {
 	url string
 
 	mu       sync.Mutex
-	models   []string        // what /api/tags lists
-	failText map[string]bool // texts /api/embed answers 500 for
-	embeds   []string        // every text embedded, in order
+	models   []string       // what /api/tags lists
+	failText map[string]int // texts /api/embed answers 500 for, and how many more times; -1 for always
+	embeds   []string       // every text embedded, in order
 }
 
 func newFakeOllama(t *testing.T) *fakeOllama {
 	t.Helper()
-	f := &fakeOllama{models: []string{testModel}, failText: map[string]bool{}}
+	f := &fakeOllama{models: []string{testModel}, failText: map[string]int{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/tags":
@@ -182,7 +182,10 @@ func (f *fakeOllama) embed(t *testing.T, w http.ResponseWriter, r *http.Request)
 	}{}
 	for _, text := range req.Input {
 		f.embeds = append(f.embeds, text)
-		if f.failText[text] {
+		if n := f.failText[text]; n != 0 {
+			if n > 0 {
+				f.failText[text] = n - 1
+			}
 			http.Error(w, `{"error":"model runner has unexpectedly stopped"}`, http.StatusInternalServerError)
 			return
 		}
@@ -197,11 +200,19 @@ func (f *fakeOllama) embed(t *testing.T, w http.ResponseWriter, r *http.Request)
 	}
 }
 
-// failOn makes /api/embed fail for text.
+// failOn makes /api/embed fail for text, every time.
 func (f *fakeOllama) failOn(text string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.failText[text] = true
+	f.failText[text] = -1
+}
+
+// failOnce makes /api/embed fail for text the next time alone, as an
+// Ollama busy with the daemon's indexing does.
+func (f *fakeOllama) failOnce(text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failText[text] = 1
 }
 
 // withModels sets what /api/tags lists.
