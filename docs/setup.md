@@ -210,9 +210,10 @@ pulled.
 
 You can skip the `ollama pull` steps: the daemon **auto-pulls** the models
 it needs — the embedding model and, when insight labeling is on, the
-writing model (each model once, however many uses share it). It pulls in the background and keeps retrying, 5 s after a
-failure and doubling up to every 5 minutes, until Ollama answers and the
-pull completes, so Ollama can start before or after the daemon. The first
+writing model, each model once however many uses share it. It pulls in
+the background and keeps retrying, 5 s after a failure and doubling up to
+every 5 minutes, until Ollama answers and the pull completes, so Ollama
+can start before or after the daemon. The first
 failure is logged at WARN in `~/.curio/logs/daemon.log`; retries, and the
 pulls they start, only at debug. Until the model is ready, index jobs retry
 with backoff and interest labels fall back to term labels. Disable with
