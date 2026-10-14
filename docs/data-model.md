@@ -300,9 +300,10 @@ document_cards
   documents that declare each name and carry each suffix, and triggers on
   `document_fields` keep it equal to what the rows contribute (a row's
   insert adds its declared name and each suffix, its delete withdraws
-  them, deleting a count that reaches 0, and an update that changes them
-  moves them), so no write, a cascade delete included, can leave it
-  behind. A write reads the host's two leaders
+  them, each vote row by its primary key (`+votes` keeps the votes term
+  off `idx_site_name_votes_lead`), deleting a count that reaches 0, and an
+  update that changes them moves them), so no write, a cascade delete
+  included, can leave it behind. A write reads the host's two leaders
   (`idx_site_name_votes_lead (tenant_id, host, kind, votes DESC, name)`,
   one seek each) and then the host's rows without a declared name that
   hold another name, two ranges of `idx_document_fields_site (tenant_id,

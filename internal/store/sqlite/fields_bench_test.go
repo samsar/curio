@@ -76,6 +76,59 @@ func BenchmarkApplyFetch(b *testing.B) {
 	}
 }
 
+// BenchmarkApplyFetch_SuffixMoves times a fetch that moves a document's
+// title suffix from one name to another on a host whose documents carry
+// 500, 5,000 or 20,000 distinct suffixes, each held by two of them, under
+// a leader ten hold, so no fetch renames the host. Each move withdraws the
+// old suffix's vote and adds the new one's, every vote row reached by its
+// primary key, so the time is the same whatever the count of the host's
+// names held by two documents or more (the vote triggers' "+votes").
+func BenchmarkApplyFetch_SuffixMoves(b *testing.B) {
+	for _, names := range []int{500, 5000, 20000} {
+		b.Run(fmt.Sprintf("%d names", names), func(b *testing.B) {
+			db := newTestDB(b)
+			db.SetCardsJobDelay(time.Hour)
+			ctx := context.Background()
+			// Two documents a name, ten under the leader, and the one
+			// that moves; their fields derived as a start derives them.
+			if _, err := db.Exec(`WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?1)
+				INSERT INTO documents (id, tenant_id, url, title)
+				SELECT printf('doc-%06d', i), 'local', printf('https://many.example/%d', i),
+				       CASE WHEN i < ?2 THEN printf('Post %d | Name %d', i, i / 2)
+				            ELSE printf('Post %d | Many Example', i) END
+				FROM n`, 2*names+11, 2*names); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := EnsureDocumentFields(ctx, db); err != nil {
+				b.Fatal(err)
+			}
+			var held int
+			if err := db.QueryRow(`SELECT count(*) FROM site_name_votes
+				WHERE tenant_id = 'local' AND host = 'many.example' AND kind = 'suffix' AND votes >= 2`).Scan(&held); err != nil {
+				b.Fatal(err)
+			}
+			if held != names+1 {
+				b.Fatalf("%d suffixes held by two documents or more, want %d", held, names+1)
+			}
+			id := fmt.Sprintf("doc-%06d", 2*names+10)
+			ext := &store.DocumentExtraction{DocumentID: id, Fetcher: "bench", Status: store.ExtractionStatusOK}
+			if err := NewExtractions(db).Create(ctx, ext); err != nil {
+				b.Fatal(err)
+			}
+			docs := NewDocuments(db)
+			i := 0
+			for b.Loop() {
+				title := fmt.Sprintf("Fetched %d | Name %d", i, 1+i%2)
+				if err := docs.ApplyFetch(ctx, id, store.FetchedMetadata{ExtractionID: ext.ID,
+					ContentType: store.ContentTypeArticle, Title: &title}); err != nil {
+					b.Fatal(err)
+				}
+				i++
+			}
+		})
+	}
+}
+
 // BenchmarkRefreshFields_Rename times a refresh that changes the name a
 // host of 5,000 documents agrees on: its first document's page now
 // declares a name, which every sibling without one of its own takes, its

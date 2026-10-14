@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -486,7 +487,8 @@ func TestQueryPlans(t *testing.T) {
 			avoid: []string{"idx_jobs_tenant_"},
 		},
 	}
-	for _, tc := range slices.Concat(cases, listPlanCases(t), insightPlanCases(), documentIndexPlanCases(t)) {
+	for _, tc := range slices.Concat(cases, listPlanCases(t), insightPlanCases(), documentIndexPlanCases(t),
+		voteTriggerPlanCases(t, db)) {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := queryPlan(t, db, tc.query, tc.args...)
 			assert.True(t, strings.HasPrefix(plan, tc.first), "plan starts with %q:\n%s", tc.first, plan)
@@ -660,6 +662,77 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 			sorts: true,
 		},
 	}
+}
+
+// voteTriggerPlanCases pin the statements of migration 019's vote
+// triggers, each planned on its own, since EXPLAIN QUERY PLAN of a write
+// shows none of the triggers it fires. Each statement is read from its
+// trigger as the database holds it, with its old.* and new.* references
+// bound as parameters, so a pin follows the trigger's text. A withdrawal
+// reaches its vote rows by the primary key, one seek a name, never a range
+// of the host's names in idx_site_name_votes_lead (what "votes > 1" would
+// read there grows with the names two of the host's documents hold); an
+// addition is driven by the row's own values, its conflict found by the
+// primary key.
+func voteTriggerPlanCases(t *testing.T, db *DB) []planCase {
+	const byKey = "SEARCH site_name_votes USING PRIMARY KEY (tenant_id=? AND host=? AND kind=? AND name=?)"
+	values := map[string]any{"tenant_id": "local", "host": "example.com", "declared_site": "Example",
+		"title_suffixes": `["Example","Example Notes"]`}
+	ref := regexp.MustCompile(`\b(?:old|new)\.(\w+)`)
+	body := regexp.MustCompile(`(?s)\bBEGIN\b(.*)\bEND$`)
+	triggers := []struct {
+		name       string
+		statements int
+	}{
+		{"trg_document_fields_votes_insert", 2},
+		{"trg_document_fields_votes_delete", 4},
+		{"trg_document_fields_votes_update", 6},
+	}
+	cases := make([]planCase, 0, 12)
+	for _, tr := range triggers {
+		var text string
+		require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`,
+			tr.name).Scan(&text))
+		m := body.FindStringSubmatch(text)
+		require.NotNil(t, m, "the body of %s:\n%s", tr.name, text)
+		var statements []string
+		for s := range strings.SplitSeq(m[1], ";") {
+			if s = strings.TrimSpace(s); s != "" {
+				statements = append(statements, s)
+			}
+		}
+		require.Len(t, statements, tr.statements, "the statements of %s", tr.name)
+		for i, s := range statements {
+			var args []any
+			for _, r := range ref.FindAllStringSubmatch(s, -1) {
+				v, ok := values[r[1]]
+				require.True(t, ok, "a value for %s in %s", r[0], tr.name)
+				args = append(args, v)
+			}
+			verb, _, _ := strings.Cut(s, " ")
+			kind := voteDeclared
+			if strings.Contains(s, "'"+voteSuffix+"'") {
+				kind = voteSuffix
+			}
+			tc := planCase{name: fmt.Sprintf("%s %d: %s %s", tr.name, i+1, verb, kind),
+				query: ref.ReplaceAllString(s, "?"), args: args,
+				avoid: []string{"idx_site_name_votes_lead", "SCAN site_name_votes"}}
+			switch {
+			case verb == "INSERT" && kind == voteSuffix:
+				// DISTINCT over the row's own array.
+				tc.first, tc.sorts = "SCAN json_each VIRTUAL TABLE", true
+			case verb == "INSERT":
+				tc.first = "SCAN CONSTANT ROW"
+			case kind == voteSuffix:
+				tc.first = byKey
+				tc.want = []string{"LIST SUBQUERY", "SCAN json_each VIRTUAL TABLE"}
+			default:
+				tc.first = byKey
+			}
+			cases = append(cases, tc)
+		}
+	}
+	return cases
 }
 
 // insightPlanCases pin the interest store's statements (see "Interests:

@@ -84,7 +84,12 @@ CREATE INDEX idx_site_name_votes_lead ON site_name_votes(tenant_id, host, kind, 
 -- A row's votes: its declared name, when it has one, and each of its
 -- suffixes, DISTINCT so a document counts once for a suffix whatever its
 -- array holds. A vote row at 1 is deleted rather than decremented, as the
--- CHECK requires, so a name nobody holds has no row.
+-- CHECK requires, so a name nobody holds has no row. Every withdrawal
+-- reaches its vote rows by the primary key, one seek a name: the unary
+-- plus in "+votes" keeps the votes term off idx_site_name_votes_lead,
+-- which would otherwise serve "votes > 1" as a range of every name of the
+-- host's kind held by two documents or more, a cost growing with the host
+-- (plans_test.go pins each statement).
 CREATE TRIGGER trg_document_fields_votes_insert AFTER INSERT ON document_fields BEGIN
     INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
         SELECT new.tenant_id, new.host, 'declared', new.declared_site, 1 WHERE new.declared_site <> ''
@@ -97,16 +102,16 @@ END;
 CREATE TRIGGER trg_document_fields_votes_delete AFTER DELETE ON document_fields BEGIN
     DELETE FROM site_name_votes
         WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'declared' AND name = old.declared_site
-          AND votes = 1;
+          AND +votes = 1;
     UPDATE site_name_votes SET votes = votes - 1
         WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'declared' AND name = old.declared_site
-          AND votes > 1;
+          AND +votes > 1;
     DELETE FROM site_name_votes
         WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'suffix'
-          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND votes = 1;
+          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND +votes = 1;
     UPDATE site_name_votes SET votes = votes - 1
         WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'suffix'
-          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND votes > 1;
+          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND +votes > 1;
 END;
 
 -- A move of the votes: the old row's withdrawn, the new row's added. It
@@ -119,16 +124,16 @@ WHEN (old.tenant_id, old.host, old.declared_site, old.title_suffixes)
      IS NOT (new.tenant_id, new.host, new.declared_site, new.title_suffixes) BEGIN
     DELETE FROM site_name_votes
         WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'declared' AND name = old.declared_site
-          AND votes = 1;
+          AND +votes = 1;
     UPDATE site_name_votes SET votes = votes - 1
         WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'declared' AND name = old.declared_site
-          AND votes > 1;
+          AND +votes > 1;
     DELETE FROM site_name_votes
         WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'suffix'
-          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND votes = 1;
+          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND +votes = 1;
     UPDATE site_name_votes SET votes = votes - 1
         WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'suffix'
-          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND votes > 1;
+          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND +votes > 1;
     INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
         SELECT new.tenant_id, new.host, 'declared', new.declared_site, 1 WHERE new.declared_site <> ''
         ON CONFLICT DO UPDATE SET votes = votes + 1;

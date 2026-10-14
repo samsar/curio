@@ -13059,17 +13059,28 @@ Triggers keep the counts, not Go: the counts are then a function of the
 `document_fields` rows that no write can bypass, a cascade delete of a
 document, a test's direct UPDATE or a later writer included, and they
 commit or roll back with the row, as the FTS index does. A Go-kept table
-would need its own delete path and could drift. Each row's insert adds
-its declared name and each distinct suffix, its delete withdraws them
+would need its own delete path and could drift. Each row's insert adds its
+declared name and each distinct suffix, its delete withdraws them
 (deleting a count that reaches 0, which the `votes > 0` CHECK requires),
-and an update that changes what it contributes moves them. A property
-test recounts the votes after any order of the seven writes. A document
-deleted outside the store's writes withdraws its votes at once, and its
-host's other documents keep the name they hold until the host's next
-write, which renames them: the misnamed read runs on every refresh. The
-suffixes are a JSON array (CHECKed to be one) because a trigger can split
-one with `json_each` and can't split a list a line, a trigger holding no
-CTE; `docmeta` keeps its list a line, and the store encodes the array.
+and an update that changes what it contributes moves them. A withdrawal
+reaches each of its vote rows by the primary key, one seek a name: its
+`votes` term is written `+votes`, which keeps it off
+`idx_site_name_votes_lead`. Written plainly, the suffixes' `votes > 1` was
+served by that index as a range of every suffix of the host that two of
+its documents carry, so a fetch that moved a document's suffix took 0.30,
+0.60 and 1.6 ms on a host of 500, 5,000 and 20,000 such suffixes, and
+takes 0.28, 0.31 and 0.31 ms by the key
+(`BenchmarkApplyFetch_SuffixMoves`). EXPLAIN QUERY PLAN of a write shows
+none of the triggers it fires, so `plans_test.go` pins each trigger
+statement on its own, read from the trigger as the database holds it with
+its `old.*` and `new.*` bound as parameters. A property test recounts the
+votes after any order of the seven writes. A document deleted outside the
+store's writes withdraws its votes at once, and its host's other documents
+keep the name they hold until the host's next write, which renames them:
+the misnamed read runs on every refresh. The suffixes are a JSON array
+(CHECKed to be one) because a trigger can split one with `json_each` and
+can't split a list a line, a trigger holding no CTE; `docmeta` keeps its
+list a line, and the store encodes the array.
 
 Measured on one machine, back to back with the branch before the votes
 (probes over a library of one host, the p50 of 200 calls, the median of
