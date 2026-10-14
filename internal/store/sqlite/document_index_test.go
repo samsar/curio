@@ -343,7 +343,8 @@ func TestDocumentIndex_ReembedKeepsTheVectorSlot(t *testing.T) {
 	require.Len(t, hits, 1)
 	assert.InDelta(t, 1.0, hits[0].Score, 1e-6, "the new vector is the one stored")
 
-	// What PutCardVectors no longer does.
+	// Only an update in place keeps the slot: a delete and an insert give
+	// the vector a new rowid.
 	vec, err := sqlitevec.SerializeFloat32(fillVec(0.3))
 	require.NoError(t, err)
 	_, err = e.db.Exec(`DELETE FROM document_cards_vec WHERE document_id = ?`, id)
