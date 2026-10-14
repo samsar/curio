@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/samsar/curio/internal/docmeta"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -525,8 +526,17 @@ type SearchHit struct {
 	BookmarkTitle string
 	URL           string
 	ContentType   string
+	State         string  // the document's
 	Score         float64 // the fused score
 	Matches       []Match
+	// Bookmarks are what a hit without Matches was saved as, newest saved
+	// first: it matched on them, not on a passage.
+	Bookmarks []SavedBookmark
+}
+
+// SavedBookmark is one bookmark a hit was saved under.
+type SavedBookmark struct {
+	Title, FolderPath, Source string
 }
 
 // Ref names the hit as a list names a document: by its title, by its
@@ -536,9 +546,13 @@ func (h SearchHit) Ref() DocRef {
 }
 
 // MatchKind says which retrievers found the hit's matching chunks, in
-// words: keyword search's words, the vector search's meaning, or both; ""
-// when it has no matches.
+// words: keyword search's words, the vector search's meaning, or both;
+// and for a hit without matches, which matched on what it was saved as,
+// its bookmark details.
 func (h SearchHit) MatchKind() string {
+	if len(h.Matches) == 0 {
+		return "bookmark details"
+	}
 	keyword, meaning := false, false
 	for _, m := range h.Matches {
 		keyword = keyword || m.BM25 != nil
@@ -553,6 +567,51 @@ func (h SearchHit) MatchKind() string {
 		return "meaning only"
 	}
 	return ""
+}
+
+// Saved says what a hit without matches was saved as, in place of its
+// passages: the bookmark docmeta.SavedAs picks, as `Saved as "<title>" in
+// <folder>`, the parts it has, or `Saved from <source>`; "" for a hit with
+// no bookmark.
+func (h SearchHit) Saved() string {
+	bookmarks := make([]docmeta.Bookmark, len(h.Bookmarks))
+	for i, b := range h.Bookmarks {
+		bookmarks[i] = docmeta.Bookmark{Title: b.Title, FolderPath: b.FolderPath}
+	}
+	saved, ok := docmeta.SavedAs(bookmarks)
+	switch {
+	case !ok:
+		return ""
+	case saved.Title != "" && saved.Folder != "":
+		return "Saved as “" + saved.Title + "” in " + saved.Folder
+	case saved.Title != "":
+		return "Saved as “" + saved.Title + "”"
+	case saved.Folder != "":
+		return "Saved in " + saved.Folder
+	}
+	return "Saved from " + sourceName(h.Bookmarks[saved.Index].Source)
+}
+
+// Unavailable says why the hit has no page to read, when only what it
+// was saved as is left (docmeta.Unavailable).
+func (h SearchHit) Unavailable() string { return docmeta.Unavailable(h.State) }
+
+// sourceName names a bookmark's source for people; one it doesn't know is
+// shown as stored.
+func sourceName(source string) string {
+	switch source {
+	case store.SourceChrome:
+		return "Chrome"
+	case store.SourceSafari:
+		return "Safari"
+	case store.SourceFirefox:
+		return "Firefox"
+	case store.SourceHTML:
+		return "a bookmarks file"
+	case store.SourceManual:
+		return "curio"
+	}
+	return source
 }
 
 // shownMatches is how many of a hit's matches its result shows; the rest

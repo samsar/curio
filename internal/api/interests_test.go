@@ -1120,7 +1120,7 @@ func TestRebuildInterests(t *testing.T) {
 	}
 	first := rebuild()
 	assert.Equal(t, first, rebuild(), "the pending one")
-	assert.Equal(t, 1, s.count(t, "jobs"))
+	assert.Equal(t, 1, s.count(t, requestJobs))
 	job, err := s.deps.Queue.GetByID(ctx, first)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"trigger":"manual"}`, string(job.Payload))
@@ -1130,7 +1130,7 @@ func TestRebuildInterests(t *testing.T) {
 	require.Equal(t, first, claimed.ID)
 	second := rebuild()
 	assert.NotEqual(t, first, second, "a running rebuild doesn't count")
-	assert.Equal(t, 2, s.count(t, "jobs"))
+	assert.Equal(t, 2, s.count(t, requestJobs))
 
 	disabled := newTestServer(t, func(d *Deps) { d.InsightEnabled = false })
 	assertProblem(t, disabled.do(t, request{method: http.MethodPost, path: "/v1/interests/rebuild"}), http.StatusConflict)

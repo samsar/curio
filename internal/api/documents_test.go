@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -44,11 +45,12 @@ func (s *testServer) failJobInserts(t *testing.T) (restore func()) {
 func TestRefetchDocument(t *testing.T) {
 	s := newTestServer(t)
 	dead := s.seedDocument(t, "https://example.com/gone", store.DocStateDead)
+	seeded := s.count(t, "jobs")
 
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/" + dead.ID + "/refetch"})
 	assertProblem(t, resp, http.StatusConflict)
 	assert.Equal(t, store.DocStateDead, s.docState(t, dead.ID))
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Equal(t, seeded, s.count(t, "jobs"))
 
 	resp = s.do(t, request{method: http.MethodPost, path: "/v1/documents/" + dead.ID + "/refetch?force=1"})
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
@@ -84,15 +86,16 @@ func TestRefetchAll(t *testing.T) {
 	for _, st := range []store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed, store.DocStateDead} {
 		s.seedDocument(t, "https://example.com/"+string(st), st)
 	}
+	seeded := s.count(t, "jobs")
 
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=bogus"})
 	assertProblem(t, resp, http.StatusBadRequest)
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Equal(t, seeded, s.count(t, "jobs"))
 
 	resp = s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all"})
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
 	assert.JSONEq(t, `{"jobs_enqueued":3}`, resp.body, "dead documents are skipped by default")
-	assert.Equal(t, 3, s.count(t, "jobs"))
+	assert.Equal(t, 3, s.count(t, requestJobs))
 
 	resp = s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=dead"})
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
@@ -111,6 +114,7 @@ func TestRefetchAll_Cause(t *testing.T) {
 	gone := []*store.Document{s.seedFailedDocument(t, "https://d.example/1", store.FailureCauseDeadLink),
 		s.seedFailedDocument(t, "https://d.example/2", store.FailureCauseDeadLink)}
 	fetched := s.seedDocument(t, "https://e.example/1", store.DocStateFetched)
+	seeded := s.count(t, "jobs")
 	refetchAll := func(query string) response {
 		return s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?" + query})
 	}
@@ -127,7 +131,7 @@ func TestRefetchAll_Cause(t *testing.T) {
 		p := assertProblem(t, refetchAll(query), http.StatusBadRequest)
 		assert.Contains(t, p.Detail, "dead links are refetched only with state=dead", query)
 	}
-	assert.Zero(t, s.count(t, "jobs"), "a refused refetch enqueues nothing")
+	assert.Equal(t, seeded, s.count(t, "jobs"), "a refused refetch enqueues nothing")
 
 	resp := refetchAll("cause=anti_bot")
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
@@ -158,7 +162,7 @@ func TestRefetchAll_Cause(t *testing.T) {
 		assert.Equal(t, store.DocStatePending, s.docState(t, doc.ID))
 		assert.Equal(t, 1, jobsFor(doc))
 	}
-	assert.Equal(t, 4, s.count(t, "jobs"))
+	assert.Equal(t, 4, s.count(t, requestJobs))
 }
 
 func TestRefetchAll_StoreFailure(t *testing.T) {
@@ -221,7 +225,67 @@ func TestReindexAll_DriftResetFailure(t *testing.T) {
 		http.StatusInternalServerError)
 	assert.Contains(t, p.Detail, "enqueued all 2 index jobs")
 	assert.Contains(t, p.Detail, "permission denied")
-	assert.Equal(t, 2, s.count(t, "jobs"))
+	assert.Equal(t, 2, s.count(t, requestJobs))
+}
+
+// TestReindexAll_ResetsTheCards: reindexing the fetched documents makes
+// every card stale and queues one cards job, so the cards are embedded
+// again by the build serving now; another state leaves them alone.
+func TestReindexAll_ResetsTheCards(t *testing.T) {
+	for path, reset := range map[string]bool{
+		"/v1/documents/reindex-all":              true,
+		"/v1/documents/reindex-all?state=failed": false,
+	} {
+		t.Run(path, func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestServer(t)
+			for _, u := range []string{"https://example.com/a", "https://example.com/b"} {
+				s.seedContent(t, s.seedDocument(t, u, store.DocStateFetched), "# Page")
+			}
+			stale, err := s.deps.Index.StaleCards(ctx, "local", "", 10)
+			require.NoError(t, err)
+			require.Len(t, stale, 2)
+			vectors := make([]store.CardVector, len(stale))
+			for i, c := range stale {
+				vectors[i] = store.CardVector{DocumentID: c.DocumentID, Text: c.Text,
+					Embedding: make([]float32, config.Default().Embedding.Dim)}
+			}
+			_, err = s.deps.Index.PutCardVectors(ctx, vectors)
+			require.NoError(t, err)
+			_, err = s.db.Exec(`DELETE FROM jobs WHERE kind = ?`, store.JobKindCards)
+			require.NoError(t, err)
+
+			resp := s.do(t, request{method: http.MethodPost, path: path})
+			require.Equal(t, http.StatusAccepted, resp.status, resp.body)
+			stale, err = s.deps.Index.StaleCards(ctx, "local", "", 10)
+			require.NoError(t, err)
+			want, jobs := 0, 0
+			if reset {
+				want, jobs = 2, 1
+			}
+			assert.Len(t, stale, want)
+			assert.Equal(t, jobs, s.count(t, "jobs WHERE kind = 'cards' AND status = 'pending'"))
+		})
+	}
+}
+
+// failingResetCards is a document index whose cards can't be reset.
+type failingResetCards struct{ store.DocumentIndex }
+
+func (failingResetCards) ResetCards(context.Context, string) (int, error) { return 0, errInjected }
+
+// TestReindexAll_CardsResetFailure: cards that can't be made stale are a
+// 500 that says every index job was enqueued, which they were.
+func TestReindexAll_CardsResetFailure(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Index = failingResetCards{d.Index} })
+	s.seedContent(t, s.seedDocument(t, "https://example.com/a", store.DocStateFetched), "# A")
+	s.seedContent(t, s.seedDocument(t, "https://example.com/b", store.DocStateFetched), "# B")
+
+	p := assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all"}),
+		http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, "enqueued all 2 index jobs, but resetting the document cards failed")
+	assert.Contains(t, p.Detail, "injected")
+	assert.Equal(t, 2, s.count(t, requestJobs))
 }
 
 // TestReindexAll_OwesTheInterestsAFreshRebuild: reindexing the fetched
@@ -269,11 +333,12 @@ func (unowingInsights) OweFresh(context.Context, string, store.FreshReason) erro
 func TestReindexAll_OweFailure(t *testing.T) {
 	s := newTestServer(t, func(d *Deps) { d.Insights = unowingInsights{d.Insights} })
 	s.seedContent(t, s.seedDocument(t, "https://example.com/a", store.DocStateFetched), "# A")
+	seeded := s.count(t, "jobs")
 	p := assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all"}),
 		http.StatusInternalServerError)
 	assert.Contains(t, p.Detail, "enqueued no index job")
 	assert.Contains(t, p.Detail, "database is locked")
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Equal(t, seeded, s.count(t, "jobs"))
 }
 
 // TestGetDocumentContent_MissingFile: content deleted from disk is a 404
@@ -298,10 +363,11 @@ func TestReindexAll_OnlyDocumentsWithContent(t *testing.T) {
 	fetching := s.seedDocument(t, "https://example.com/fetching", store.DocStatePending)
 	withContent := s.seedDocument(t, "https://example.com/fetched-once", store.DocStatePending)
 	s.seedContent(t, withContent, "# Fetched once")
+	seeded := s.count(t, "jobs")
 
 	assertProblem(t, s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all?state=bogus"}),
 		http.StatusBadRequest)
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Equal(t, seeded, s.count(t, "jobs"))
 
 	resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/reindex-all?state=pending"})
 	require.Equal(t, http.StatusAccepted, resp.status, resp.body)
@@ -330,8 +396,14 @@ func TestGetDocument(t *testing.T) {
 	assert.Equal(t, filepath.Join(s.deps.Home.ContentDir(), *ext.MarkdownPath), got.CurrentExtraction.MarkdownPath,
 		"an absolute path, like every other path the API returns")
 	assert.Equal(t, map[string]any{"via": "test"}, got.CurrentExtraction.ExtractionMeta)
+	assert.Nil(t, got.WordCount, "no count before an index")
 
 	assert.Empty(t, got.FailureCause)
+
+	require.NoError(t, s.deps.Documents.MarkFetched(context.Background(), doc.ID, 1234))
+	resp = s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + doc.ID})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	assert.Contains(t, resp.body, `"word_count":1234`, "an index's count")
 
 	bare := s.seedDocument(t, "https://example.com/b", store.DocStatePending)
 	resp = s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + bare.ID})

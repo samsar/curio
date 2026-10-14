@@ -1,0 +1,1871 @@
+{
+  "format": 1,
+  "generated_at": "2026-10-13T19:46:02.580431Z",
+  "provenance": {
+    "version": "dev",
+    "commit": "none",
+    "database": "/tmp/searcheval/copy.db",
+    "schema": 18,
+    "width": 8,
+    "queries": "testdata/queries.yaml",
+    "queries_sha256": "842e023815485d59b72a13f68c0ae4fbcc00517645673296791794e73bcb3396",
+    "config": "/tmp/searcheval/config.yaml",
+    "embedding": {
+      "provider": "ollama",
+      "model": "test-embed:1",
+      "dim": 8,
+      "base_url": "http://127.0.0.1:11434",
+      "query_prefix": ""
+    },
+    "search": {
+      "bm25_weight": 1,
+      "vector_weight": 1,
+      "rrf_k": 60,
+      "collapse": "max",
+      "embed_timeout_seconds": 10
+    },
+    "k": 100,
+    "variants": [
+      "hybrid",
+      "bm25",
+      "vector"
+    ],
+    "baseline": ""
+  },
+  "library": {
+    "judgments": 12,
+    "missing": 1,
+    "unsearchable": 3
+  },
+  "variants": [
+    {
+      "name": "hybrid",
+      "description": "the daemon's search: BM25 and vector search fused by RRF, as config.yaml sets them",
+      "wall_ms": 2.810709,
+      "latency_ms": {
+        "bm25": {
+          "p50": 0.089083,
+          "p95": 0.144875
+        },
+        "embed": {
+          "p50": 0.090584,
+          "p95": 0.129416
+        },
+        "fuse": {
+          "p50": 0.011,
+          "p95": 0.013167
+        },
+        "hydrate": {
+          "p50": 0.360208,
+          "p95": 0.436125
+        },
+        "total": {
+          "p50": 0.584583,
+          "p95": 1.017833
+        },
+        "vector": {
+          "p50": 0.085042,
+          "p95": 0.430167
+        }
+      },
+      "groups": [
+        {
+          "type": "all",
+          "name": "",
+          "n": 4,
+          "n_high": 4,
+          "recall_at_10": 0.7083333333333333,
+          "recall_at_100": 0.7083333333333333,
+          "high_recall_at_10": 0.875,
+          "mrr": 0.5833333333333333,
+          "ndcg_at_10": 0.5417478426064563,
+          "success_at_1": 0.25,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 1,
+          "unsearchable": 3
+        },
+        {
+          "type": "kind",
+          "name": "topic",
+          "n": 2,
+          "n_high": 2,
+          "recall_at_10": 0.8333333333333333,
+          "recall_at_100": 0.8333333333333333,
+          "high_recall_at_10": 1,
+          "mrr": 0.41666666666666663,
+          "ndcg_at_10": 0.5359832908999116,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 1,
+          "unsearchable": 0
+        },
+        {
+          "type": "kind",
+          "name": "keyword",
+          "n": 1,
+          "n_high": 1,
+          "recall_at_10": 0.5,
+          "recall_at_100": 0.5,
+          "high_recall_at_10": 0.5,
+          "mrr": 1,
+          "ndcg_at_10": 0.5668497246114405,
+          "success_at_1": 1,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 0,
+          "unsearchable": 2
+        },
+        {
+          "type": "tag",
+          "name": "owner",
+          "n": 2,
+          "n_high": 2,
+          "recall_at_10": 0.5833333333333333,
+          "recall_at_100": 0.5833333333333333,
+          "high_recall_at_10": 0.75,
+          "mrr": 0.75,
+          "ndcg_at_10": 0.5730435926467107,
+          "success_at_1": 0.5,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 1,
+          "unsearchable": 2
+        },
+        {
+          "type": "tag",
+          "name": "recent",
+          "n": 2,
+          "n_high": 2,
+          "recall_at_10": 0.5833333333333333,
+          "recall_at_100": 0.5833333333333333,
+          "high_recall_at_10": 0.75,
+          "mrr": 0.75,
+          "ndcg_at_10": 0.5475123943130008,
+          "success_at_1": 0.5,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 0,
+          "unsearchable": 3
+        }
+      ],
+      "queries": [
+        {
+          "index": 0,
+          "id": "q-alpha",
+          "kind": "topic",
+          "tags": [
+            "owner"
+          ],
+          "query": "alpha",
+          "recall_at_10": 0.6666666666666666,
+          "recall_at_100": 0.6666666666666666,
+          "high_recall_at_10": 1,
+          "ndcg_at_10": 0.5792374606819809,
+          "rr": 0.5,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 2,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/05",
+              "document_id": "doc-05",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 2
+            },
+            {
+              "url": "https://example.com/doc/04",
+              "document_id": "doc-04",
+              "grade": 1,
+              "status": "searchable",
+              "rank": 3
+            },
+            {
+              "url": "https://example.com/doc/missing",
+              "document_id": "",
+              "grade": 1,
+              "status": "missing",
+              "rank": null
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-03",
+              "url": "https://example.com/doc/03"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-05",
+              "url": "https://example.com/doc/05"
+            },
+            {
+              "rank": 3,
+              "document_id": "doc-04",
+              "url": "https://example.com/doc/04"
+            },
+            {
+              "rank": 4,
+              "document_id": "doc-02",
+              "url": "https://example.com/doc/02"
+            },
+            {
+              "rank": 5,
+              "document_id": "doc-01",
+              "url": "https://example.com/doc/01"
+            },
+            {
+              "rank": 6,
+              "document_id": "doc-06",
+              "url": "https://example.com/doc/06"
+            },
+            {
+              "rank": 7,
+              "document_id": "doc-00",
+              "url": "https://example.com/doc/00"
+            },
+            {
+              "rank": 8,
+              "document_id": "doc-07",
+              "url": "https://example.com/doc/07"
+            },
+            {
+              "rank": 9,
+              "document_id": "doc-08",
+              "url": "https://example.com/doc/08"
+            },
+            {
+              "rank": 10,
+              "document_id": "doc-09",
+              "url": "https://example.com/doc/09"
+            },
+            {
+              "rank": 11,
+              "document_id": "doc-10",
+              "url": "https://example.com/doc/10"
+            },
+            {
+              "rank": 12,
+              "document_id": "doc-11",
+              "url": "https://example.com/doc/11"
+            },
+            {
+              "rank": 13,
+              "document_id": "doc-12",
+              "url": "https://example.com/doc/12"
+            },
+            {
+              "rank": 14,
+              "document_id": "doc-13",
+              "url": "https://example.com/doc/13"
+            },
+            {
+              "rank": 15,
+              "document_id": "doc-14",
+              "url": "https://example.com/doc/14"
+            },
+            {
+              "rank": 16,
+              "document_id": "doc-15",
+              "url": "https://example.com/doc/15"
+            },
+            {
+              "rank": 17,
+              "document_id": "doc-16",
+              "url": "https://example.com/doc/16"
+            },
+            {
+              "rank": 18,
+              "document_id": "doc-17",
+              "url": "https://example.com/doc/17"
+            },
+            {
+              "rank": 19,
+              "document_id": "doc-18",
+              "url": "https://example.com/doc/18"
+            },
+            {
+              "rank": 20,
+              "document_id": "doc-19",
+              "url": "https://example.com/doc/19"
+            },
+            {
+              "rank": 21,
+              "document_id": "doc-20",
+              "url": "https://example.com/doc/20"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.144875,
+            "embed": 0.129416,
+            "fuse": 0.011,
+            "hydrate": 0.414291,
+            "total": 1.017833,
+            "vector": 0.430167
+          }
+        },
+        {
+          "index": 1,
+          "id": "q-beta",
+          "kind": "keyword",
+          "tags": [
+            "owner",
+            "recent"
+          ],
+          "query": "beta",
+          "recall_at_10": 0.5,
+          "recall_at_100": 0.5,
+          "high_recall_at_10": 0.5,
+          "ndcg_at_10": 0.5668497246114405,
+          "rr": 1,
+          "success_at_1": 1,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 1,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/20",
+              "document_id": "doc-20",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 1
+            },
+            {
+              "url": "https://example.com/doc/22",
+              "document_id": "doc-22",
+              "grade": 2,
+              "status": "unsearchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/21",
+              "document_id": "doc-21",
+              "grade": 1,
+              "status": "unsearchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/13",
+              "document_id": "doc-13",
+              "grade": 1,
+              "status": "searchable",
+              "rank": 9
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-20",
+              "url": "https://example.com/doc/20"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-12",
+              "url": "https://example.com/doc/12"
+            },
+            {
+              "rank": 3,
+              "document_id": "doc-19",
+              "url": "https://example.com/doc/19"
+            },
+            {
+              "rank": 4,
+              "document_id": "doc-18",
+              "url": "https://example.com/doc/18"
+            },
+            {
+              "rank": 5,
+              "document_id": "doc-17",
+              "url": "https://example.com/doc/17"
+            },
+            {
+              "rank": 6,
+              "document_id": "doc-16",
+              "url": "https://example.com/doc/16"
+            },
+            {
+              "rank": 7,
+              "document_id": "doc-15",
+              "url": "https://example.com/doc/15"
+            },
+            {
+              "rank": 8,
+              "document_id": "doc-14",
+              "url": "https://example.com/doc/14"
+            },
+            {
+              "rank": 9,
+              "document_id": "doc-13",
+              "url": "https://example.com/doc/13"
+            },
+            {
+              "rank": 10,
+              "document_id": "doc-11",
+              "url": "https://example.com/doc/11"
+            },
+            {
+              "rank": 11,
+              "document_id": "doc-10",
+              "url": "https://example.com/doc/10"
+            },
+            {
+              "rank": 12,
+              "document_id": "doc-09",
+              "url": "https://example.com/doc/09"
+            },
+            {
+              "rank": 13,
+              "document_id": "doc-08",
+              "url": "https://example.com/doc/08"
+            },
+            {
+              "rank": 14,
+              "document_id": "doc-07",
+              "url": "https://example.com/doc/07"
+            },
+            {
+              "rank": 15,
+              "document_id": "doc-06",
+              "url": "https://example.com/doc/06"
+            },
+            {
+              "rank": 16,
+              "document_id": "doc-05",
+              "url": "https://example.com/doc/05"
+            },
+            {
+              "rank": 17,
+              "document_id": "doc-04",
+              "url": "https://example.com/doc/04"
+            },
+            {
+              "rank": 18,
+              "document_id": "doc-03",
+              "url": "https://example.com/doc/03"
+            },
+            {
+              "rank": 19,
+              "document_id": "doc-02",
+              "url": "https://example.com/doc/02"
+            },
+            {
+              "rank": 20,
+              "document_id": "doc-01",
+              "url": "https://example.com/doc/01"
+            },
+            {
+              "rank": 21,
+              "document_id": "doc-00",
+              "url": "https://example.com/doc/00"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.089083,
+            "embed": 0.117458,
+            "fuse": 0.012,
+            "hydrate": 0.360208,
+            "total": 0.584583,
+            "vector": 0.084958
+          }
+        },
+        {
+          "index": 2,
+          "id": "q-gamma",
+          "kind": "topic",
+          "tags": [],
+          "query": "gamma",
+          "recall_at_10": 1,
+          "recall_at_100": 1,
+          "high_recall_at_10": 1,
+          "ndcg_at_10": 0.4927291211178423,
+          "rr": 0.3333333333333333,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 3,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/00",
+              "document_id": "doc-00",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 3
+            },
+            {
+              "url": "https://example.com/doc/09",
+              "document_id": "doc-09",
+              "grade": 1,
+              "status": "searchable",
+              "rank": 10
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-07",
+              "url": "https://example.com/doc/07"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-01",
+              "url": "https://example.com/doc/01"
+            },
+            {
+              "rank": 3,
+              "document_id": "doc-00",
+              "url": "https://example.com/doc/00"
+            },
+            {
+              "rank": 4,
+              "document_id": "doc-02",
+              "url": "https://example.com/doc/02"
+            },
+            {
+              "rank": 5,
+              "document_id": "doc-03",
+              "url": "https://example.com/doc/03"
+            },
+            {
+              "rank": 6,
+              "document_id": "doc-04",
+              "url": "https://example.com/doc/04"
+            },
+            {
+              "rank": 7,
+              "document_id": "doc-05",
+              "url": "https://example.com/doc/05"
+            },
+            {
+              "rank": 8,
+              "document_id": "doc-06",
+              "url": "https://example.com/doc/06"
+            },
+            {
+              "rank": 9,
+              "document_id": "doc-08",
+              "url": "https://example.com/doc/08"
+            },
+            {
+              "rank": 10,
+              "document_id": "doc-09",
+              "url": "https://example.com/doc/09"
+            },
+            {
+              "rank": 11,
+              "document_id": "doc-10",
+              "url": "https://example.com/doc/10"
+            },
+            {
+              "rank": 12,
+              "document_id": "doc-11",
+              "url": "https://example.com/doc/11"
+            },
+            {
+              "rank": 13,
+              "document_id": "doc-12",
+              "url": "https://example.com/doc/12"
+            },
+            {
+              "rank": 14,
+              "document_id": "doc-13",
+              "url": "https://example.com/doc/13"
+            },
+            {
+              "rank": 15,
+              "document_id": "doc-14",
+              "url": "https://example.com/doc/14"
+            },
+            {
+              "rank": 16,
+              "document_id": "doc-15",
+              "url": "https://example.com/doc/15"
+            },
+            {
+              "rank": 17,
+              "document_id": "doc-16",
+              "url": "https://example.com/doc/16"
+            },
+            {
+              "rank": 18,
+              "document_id": "doc-17",
+              "url": "https://example.com/doc/17"
+            },
+            {
+              "rank": 19,
+              "document_id": "doc-18",
+              "url": "https://example.com/doc/18"
+            },
+            {
+              "rank": 20,
+              "document_id": "doc-19",
+              "url": "https://example.com/doc/19"
+            },
+            {
+              "rank": 21,
+              "document_id": "doc-20",
+              "url": "https://example.com/doc/20"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.050166,
+            "embed": 0.090584,
+            "fuse": 0.013167,
+            "hydrate": 0.436125,
+            "total": 0.63925,
+            "vector": 0.090667
+          }
+        },
+        {
+          "index": 3,
+          "id": "q-delta",
+          "kind": "",
+          "tags": [
+            "recent"
+          ],
+          "query": "delta",
+          "recall_at_10": 0.6666666666666666,
+          "recall_at_100": 0.6666666666666666,
+          "high_recall_at_10": 1,
+          "ndcg_at_10": 0.5281750640145612,
+          "rr": 0.5,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 2,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/16",
+              "document_id": "doc-16",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 2
+            },
+            {
+              "url": "https://example.com/doc/23",
+              "document_id": "doc-23",
+              "grade": 1,
+              "status": "unsearchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/11",
+              "document_id": "doc-11",
+              "grade": 1,
+              "status": "searchable",
+              "rank": 10
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-18",
+              "url": "https://example.com/doc/18"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-16",
+              "url": "https://example.com/doc/16"
+            },
+            {
+              "rank": 3,
+              "document_id": "doc-17",
+              "url": "https://example.com/doc/17"
+            },
+            {
+              "rank": 4,
+              "document_id": "doc-15",
+              "url": "https://example.com/doc/15"
+            },
+            {
+              "rank": 5,
+              "document_id": "doc-19",
+              "url": "https://example.com/doc/19"
+            },
+            {
+              "rank": 6,
+              "document_id": "doc-14",
+              "url": "https://example.com/doc/14"
+            },
+            {
+              "rank": 7,
+              "document_id": "doc-20",
+              "url": "https://example.com/doc/20"
+            },
+            {
+              "rank": 8,
+              "document_id": "doc-13",
+              "url": "https://example.com/doc/13"
+            },
+            {
+              "rank": 9,
+              "document_id": "doc-12",
+              "url": "https://example.com/doc/12"
+            },
+            {
+              "rank": 10,
+              "document_id": "doc-11",
+              "url": "https://example.com/doc/11"
+            },
+            {
+              "rank": 11,
+              "document_id": "doc-10",
+              "url": "https://example.com/doc/10"
+            },
+            {
+              "rank": 12,
+              "document_id": "doc-09",
+              "url": "https://example.com/doc/09"
+            },
+            {
+              "rank": 13,
+              "document_id": "doc-08",
+              "url": "https://example.com/doc/08"
+            },
+            {
+              "rank": 14,
+              "document_id": "doc-07",
+              "url": "https://example.com/doc/07"
+            },
+            {
+              "rank": 15,
+              "document_id": "doc-06",
+              "url": "https://example.com/doc/06"
+            },
+            {
+              "rank": 16,
+              "document_id": "doc-05",
+              "url": "https://example.com/doc/05"
+            },
+            {
+              "rank": 17,
+              "document_id": "doc-04",
+              "url": "https://example.com/doc/04"
+            },
+            {
+              "rank": 18,
+              "document_id": "doc-03",
+              "url": "https://example.com/doc/03"
+            },
+            {
+              "rank": 19,
+              "document_id": "doc-02",
+              "url": "https://example.com/doc/02"
+            },
+            {
+              "rank": 20,
+              "document_id": "doc-01",
+              "url": "https://example.com/doc/01"
+            },
+            {
+              "rank": 21,
+              "document_id": "doc-00",
+              "url": "https://example.com/doc/00"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.096458,
+            "embed": 0.088417,
+            "fuse": 0.007459,
+            "hydrate": 0.359375,
+            "total": 0.553875,
+            "vector": 0.085042
+          }
+        }
+      ]
+    },
+    {
+      "name": "bm25",
+      "description": "BM25 alone: the engine with the vector weight 0, which never embeds the query",
+      "wall_ms": 0.426708,
+      "latency_ms": {
+        "bm25": {
+          "p50": 0.041084,
+          "p95": 0.055667
+        },
+        "embed": {
+          "p50": 0,
+          "p95": 0
+        },
+        "fuse": {
+          "p50": 0.000625,
+          "p95": 0.001083
+        },
+        "hydrate": {
+          "p50": 0.058209,
+          "p95": 0.062958
+        },
+        "total": {
+          "p50": 0.102375,
+          "p95": 0.120417
+        },
+        "vector": {
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "groups": [
+        {
+          "type": "all",
+          "name": "",
+          "n": 4,
+          "n_high": 4,
+          "recall_at_10": 0.22916666666666663,
+          "recall_at_100": 0.22916666666666663,
+          "high_recall_at_10": 0.625,
+          "mrr": 0.375,
+          "ndcg_at_10": 0.3103566588115182,
+          "success_at_1": 0,
+          "success_at_5": 0.75,
+          "success_at_10": 0.75,
+          "missing": 1,
+          "unsearchable": 3
+        },
+        {
+          "type": "kind",
+          "name": "topic",
+          "n": 2,
+          "n_high": 2,
+          "recall_at_10": 0.16666666666666666,
+          "recall_at_100": 0.16666666666666666,
+          "high_recall_at_10": 0.5,
+          "mrr": 0.25,
+          "ndcg_at_10": 0.22909966685803995,
+          "success_at_1": 0,
+          "success_at_5": 0.5,
+          "success_at_10": 0.5,
+          "missing": 1,
+          "unsearchable": 0
+        },
+        {
+          "type": "kind",
+          "name": "keyword",
+          "n": 1,
+          "n_high": 1,
+          "recall_at_10": 0.25,
+          "recall_at_100": 0.25,
+          "high_recall_at_10": 0.5,
+          "mrr": 0.5,
+          "ndcg_at_10": 0.32502796781391297,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 0,
+          "unsearchable": 2
+        },
+        {
+          "type": "tag",
+          "name": "owner",
+          "n": 2,
+          "n_high": 2,
+          "recall_at_10": 0.29166666666666663,
+          "recall_at_100": 0.29166666666666663,
+          "high_recall_at_10": 0.75,
+          "mrr": 0.5,
+          "ndcg_at_10": 0.39161365076499643,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 1,
+          "unsearchable": 2
+        },
+        {
+          "type": "tag",
+          "name": "recent",
+          "n": 2,
+          "n_high": 2,
+          "recall_at_10": 0.29166666666666663,
+          "recall_at_100": 0.29166666666666663,
+          "high_recall_at_10": 0.75,
+          "mrr": 0.5,
+          "ndcg_at_10": 0.39161365076499643,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 0,
+          "unsearchable": 3
+        }
+      ],
+      "queries": [
+        {
+          "index": 0,
+          "id": "q-alpha",
+          "kind": "topic",
+          "tags": [
+            "owner"
+          ],
+          "query": "alpha",
+          "recall_at_10": 0.3333333333333333,
+          "recall_at_100": 0.3333333333333333,
+          "high_recall_at_10": 1,
+          "ndcg_at_10": 0.4581993337160799,
+          "rr": 0.5,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 2,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/05",
+              "document_id": "doc-05",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 2
+            },
+            {
+              "url": "https://example.com/doc/04",
+              "document_id": "doc-04",
+              "grade": 1,
+              "status": "searchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/missing",
+              "document_id": "",
+              "grade": 1,
+              "status": "missing",
+              "rank": null
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-03",
+              "url": "https://example.com/doc/03"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-05",
+              "url": "https://example.com/doc/05"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.053167,
+            "embed": 0,
+            "fuse": 0.001083,
+            "hydrate": 0.062958,
+            "total": 0.120417,
+            "vector": 0
+          }
+        },
+        {
+          "index": 1,
+          "id": "q-beta",
+          "kind": "keyword",
+          "tags": [
+            "owner",
+            "recent"
+          ],
+          "query": "beta",
+          "recall_at_10": 0.25,
+          "recall_at_100": 0.25,
+          "high_recall_at_10": 0.5,
+          "ndcg_at_10": 0.32502796781391297,
+          "rr": 0.5,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 2,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/20",
+              "document_id": "doc-20",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 2
+            },
+            {
+              "url": "https://example.com/doc/22",
+              "document_id": "doc-22",
+              "grade": 2,
+              "status": "unsearchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/21",
+              "document_id": "doc-21",
+              "grade": 1,
+              "status": "unsearchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/13",
+              "document_id": "doc-13",
+              "grade": 1,
+              "status": "searchable",
+              "rank": null
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-12",
+              "url": "https://example.com/doc/12"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-20",
+              "url": "https://example.com/doc/20"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.041084,
+            "embed": 0,
+            "fuse": 0.000625,
+            "hydrate": 0.059417,
+            "total": 0.104291,
+            "vector": 0
+          }
+        },
+        {
+          "index": 2,
+          "id": "q-gamma",
+          "kind": "topic",
+          "tags": [],
+          "query": "gamma",
+          "recall_at_10": 0,
+          "recall_at_100": 0,
+          "high_recall_at_10": 0,
+          "ndcg_at_10": 0,
+          "rr": 0,
+          "success_at_1": 0,
+          "success_at_5": 0,
+          "success_at_10": 0,
+          "first_rank": 0,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/00",
+              "document_id": "doc-00",
+              "grade": 2,
+              "status": "searchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/09",
+              "document_id": "doc-09",
+              "grade": 1,
+              "status": "searchable",
+              "rank": null
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-07",
+              "url": "https://example.com/doc/07"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.055667,
+            "embed": 0,
+            "fuse": 0.0005,
+            "hydrate": 0.034375,
+            "total": 0.093666,
+            "vector": 0
+          }
+        },
+        {
+          "index": 3,
+          "id": "q-delta",
+          "kind": "",
+          "tags": [
+            "recent"
+          ],
+          "query": "delta",
+          "recall_at_10": 0.3333333333333333,
+          "recall_at_100": 0.3333333333333333,
+          "high_recall_at_10": 1,
+          "ndcg_at_10": 0.4581993337160799,
+          "rr": 0.5,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 2,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/16",
+              "document_id": "doc-16",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 2
+            },
+            {
+              "url": "https://example.com/doc/23",
+              "document_id": "doc-23",
+              "grade": 1,
+              "status": "unsearchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/11",
+              "document_id": "doc-11",
+              "grade": 1,
+              "status": "searchable",
+              "rank": null
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-18",
+              "url": "https://example.com/doc/18"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-16",
+              "url": "https://example.com/doc/16"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.040542,
+            "embed": 0,
+            "fuse": 0.000625,
+            "hydrate": 0.058209,
+            "total": 0.102375,
+            "vector": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "vector",
+      "description": "vector search alone: the engine with the BM25 weight 0",
+      "wall_ms": 2.167708,
+      "latency_ms": {
+        "bm25": {
+          "p50": 0.043625,
+          "p95": 0.059709
+        },
+        "embed": {
+          "p50": 0.083958,
+          "p95": 0.090042
+        },
+        "fuse": {
+          "p50": 0.008625,
+          "p95": 0.022042
+        },
+        "hydrate": {
+          "p50": 0.344709,
+          "p95": 0.378625
+        },
+        "total": {
+          "p50": 0.516083,
+          "p95": 0.576291
+        },
+        "vector": {
+          "p50": 0.077791,
+          "p95": 0.08775
+        }
+      },
+      "groups": [
+        {
+          "type": "all",
+          "name": "",
+          "n": 4,
+          "n_high": 4,
+          "recall_at_10": 0.7083333333333333,
+          "recall_at_100": 0.7083333333333333,
+          "high_recall_at_10": 0.875,
+          "mrr": 0.625,
+          "ndcg_at_10": 0.5409785421411811,
+          "success_at_1": 0.25,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 1,
+          "unsearchable": 3
+        },
+        {
+          "type": "kind",
+          "name": "topic",
+          "n": 2,
+          "n_high": 2,
+          "recall_at_10": 0.8333333333333333,
+          "recall_at_100": 0.8333333333333333,
+          "high_recall_at_10": 1,
+          "mrr": 0.5,
+          "ndcg_at_10": 0.5332053179552615,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 1,
+          "unsearchable": 0
+        },
+        {
+          "type": "kind",
+          "name": "keyword",
+          "n": 1,
+          "n_high": 1,
+          "recall_at_10": 0.5,
+          "recall_at_100": 0.5,
+          "high_recall_at_10": 0.5,
+          "mrr": 1,
+          "ndcg_at_10": 0.5693284686396406,
+          "success_at_1": 1,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 0,
+          "unsearchable": 2
+        },
+        {
+          "type": "tag",
+          "name": "owner",
+          "n": 2,
+          "n_high": 2,
+          "recall_at_10": 0.5833333333333333,
+          "recall_at_100": 0.5833333333333333,
+          "high_recall_at_10": 0.75,
+          "mrr": 0.75,
+          "ndcg_at_10": 0.5174156416911406,
+          "success_at_1": 0.5,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 1,
+          "unsearchable": 2
+        },
+        {
+          "type": "tag",
+          "name": "recent",
+          "n": 2,
+          "n_high": 2,
+          "recall_at_10": 0.5833333333333333,
+          "recall_at_100": 0.5833333333333333,
+          "high_recall_at_10": 0.75,
+          "mrr": 0.75,
+          "ndcg_at_10": 0.5487517663271009,
+          "success_at_1": 0.5,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "missing": 0,
+          "unsearchable": 3
+        }
+      ],
+      "queries": [
+        {
+          "index": 0,
+          "id": "q-alpha",
+          "kind": "topic",
+          "tags": [
+            "owner"
+          ],
+          "query": "alpha",
+          "recall_at_10": 0.6666666666666666,
+          "recall_at_100": 0.6666666666666666,
+          "high_recall_at_10": 1,
+          "ndcg_at_10": 0.4655028147426407,
+          "rr": 0.5,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 2,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/05",
+              "document_id": "doc-05",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 4
+            },
+            {
+              "url": "https://example.com/doc/04",
+              "document_id": "doc-04",
+              "grade": 1,
+              "status": "searchable",
+              "rank": 2
+            },
+            {
+              "url": "https://example.com/doc/missing",
+              "document_id": "",
+              "grade": 1,
+              "status": "missing",
+              "rank": null
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-03",
+              "url": "https://example.com/doc/03"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-04",
+              "url": "https://example.com/doc/04"
+            },
+            {
+              "rank": 3,
+              "document_id": "doc-02",
+              "url": "https://example.com/doc/02"
+            },
+            {
+              "rank": 4,
+              "document_id": "doc-05",
+              "url": "https://example.com/doc/05"
+            },
+            {
+              "rank": 5,
+              "document_id": "doc-01",
+              "url": "https://example.com/doc/01"
+            },
+            {
+              "rank": 6,
+              "document_id": "doc-06",
+              "url": "https://example.com/doc/06"
+            },
+            {
+              "rank": 7,
+              "document_id": "doc-00",
+              "url": "https://example.com/doc/00"
+            },
+            {
+              "rank": 8,
+              "document_id": "doc-07",
+              "url": "https://example.com/doc/07"
+            },
+            {
+              "rank": 9,
+              "document_id": "doc-08",
+              "url": "https://example.com/doc/08"
+            },
+            {
+              "rank": 10,
+              "document_id": "doc-09",
+              "url": "https://example.com/doc/09"
+            },
+            {
+              "rank": 11,
+              "document_id": "doc-10",
+              "url": "https://example.com/doc/10"
+            },
+            {
+              "rank": 12,
+              "document_id": "doc-11",
+              "url": "https://example.com/doc/11"
+            },
+            {
+              "rank": 13,
+              "document_id": "doc-12",
+              "url": "https://example.com/doc/12"
+            },
+            {
+              "rank": 14,
+              "document_id": "doc-13",
+              "url": "https://example.com/doc/13"
+            },
+            {
+              "rank": 15,
+              "document_id": "doc-14",
+              "url": "https://example.com/doc/14"
+            },
+            {
+              "rank": 16,
+              "document_id": "doc-15",
+              "url": "https://example.com/doc/15"
+            },
+            {
+              "rank": 17,
+              "document_id": "doc-16",
+              "url": "https://example.com/doc/16"
+            },
+            {
+              "rank": 18,
+              "document_id": "doc-17",
+              "url": "https://example.com/doc/17"
+            },
+            {
+              "rank": 19,
+              "document_id": "doc-18",
+              "url": "https://example.com/doc/18"
+            },
+            {
+              "rank": 20,
+              "document_id": "doc-19",
+              "url": "https://example.com/doc/19"
+            },
+            {
+              "rank": 21,
+              "document_id": "doc-20",
+              "url": "https://example.com/doc/20"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.055,
+            "embed": 0.082958,
+            "fuse": 0.009042,
+            "hydrate": 0.338958,
+            "total": 0.516083,
+            "vector": 0.0795
+          }
+        },
+        {
+          "index": 1,
+          "id": "q-beta",
+          "kind": "keyword",
+          "tags": [
+            "owner",
+            "recent"
+          ],
+          "query": "beta",
+          "recall_at_10": 0.5,
+          "recall_at_100": 0.5,
+          "high_recall_at_10": 0.5,
+          "ndcg_at_10": 0.5693284686396406,
+          "rr": 1,
+          "success_at_1": 1,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 1,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/20",
+              "document_id": "doc-20",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 1
+            },
+            {
+              "url": "https://example.com/doc/22",
+              "document_id": "doc-22",
+              "grade": 2,
+              "status": "unsearchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/21",
+              "document_id": "doc-21",
+              "grade": 1,
+              "status": "unsearchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/13",
+              "document_id": "doc-13",
+              "grade": 1,
+              "status": "searchable",
+              "rank": 8
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-20",
+              "url": "https://example.com/doc/20"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-19",
+              "url": "https://example.com/doc/19"
+            },
+            {
+              "rank": 3,
+              "document_id": "doc-18",
+              "url": "https://example.com/doc/18"
+            },
+            {
+              "rank": 4,
+              "document_id": "doc-17",
+              "url": "https://example.com/doc/17"
+            },
+            {
+              "rank": 5,
+              "document_id": "doc-16",
+              "url": "https://example.com/doc/16"
+            },
+            {
+              "rank": 6,
+              "document_id": "doc-15",
+              "url": "https://example.com/doc/15"
+            },
+            {
+              "rank": 7,
+              "document_id": "doc-14",
+              "url": "https://example.com/doc/14"
+            },
+            {
+              "rank": 8,
+              "document_id": "doc-13",
+              "url": "https://example.com/doc/13"
+            },
+            {
+              "rank": 9,
+              "document_id": "doc-12",
+              "url": "https://example.com/doc/12"
+            },
+            {
+              "rank": 10,
+              "document_id": "doc-11",
+              "url": "https://example.com/doc/11"
+            },
+            {
+              "rank": 11,
+              "document_id": "doc-10",
+              "url": "https://example.com/doc/10"
+            },
+            {
+              "rank": 12,
+              "document_id": "doc-09",
+              "url": "https://example.com/doc/09"
+            },
+            {
+              "rank": 13,
+              "document_id": "doc-08",
+              "url": "https://example.com/doc/08"
+            },
+            {
+              "rank": 14,
+              "document_id": "doc-07",
+              "url": "https://example.com/doc/07"
+            },
+            {
+              "rank": 15,
+              "document_id": "doc-06",
+              "url": "https://example.com/doc/06"
+            },
+            {
+              "rank": 16,
+              "document_id": "doc-05",
+              "url": "https://example.com/doc/05"
+            },
+            {
+              "rank": 17,
+              "document_id": "doc-04",
+              "url": "https://example.com/doc/04"
+            },
+            {
+              "rank": 18,
+              "document_id": "doc-03",
+              "url": "https://example.com/doc/03"
+            },
+            {
+              "rank": 19,
+              "document_id": "doc-02",
+              "url": "https://example.com/doc/02"
+            },
+            {
+              "rank": 20,
+              "document_id": "doc-01",
+              "url": "https://example.com/doc/01"
+            },
+            {
+              "rank": 21,
+              "document_id": "doc-00",
+              "url": "https://example.com/doc/00"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.040583,
+            "embed": 0.083958,
+            "fuse": 0.006167,
+            "hydrate": 0.344709,
+            "total": 0.514875,
+            "vector": 0.074541
+          }
+        },
+        {
+          "index": 2,
+          "id": "q-gamma",
+          "kind": "topic",
+          "tags": [],
+          "query": "gamma",
+          "recall_at_10": 1,
+          "recall_at_100": 1,
+          "high_recall_at_10": 1,
+          "ndcg_at_10": 0.6009078211678822,
+          "rr": 0.5,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 2,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/00",
+              "document_id": "doc-00",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 2
+            },
+            {
+              "url": "https://example.com/doc/09",
+              "document_id": "doc-09",
+              "grade": 1,
+              "status": "searchable",
+              "rank": 10
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-01",
+              "url": "https://example.com/doc/01"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-00",
+              "url": "https://example.com/doc/00"
+            },
+            {
+              "rank": 3,
+              "document_id": "doc-02",
+              "url": "https://example.com/doc/02"
+            },
+            {
+              "rank": 4,
+              "document_id": "doc-03",
+              "url": "https://example.com/doc/03"
+            },
+            {
+              "rank": 5,
+              "document_id": "doc-04",
+              "url": "https://example.com/doc/04"
+            },
+            {
+              "rank": 6,
+              "document_id": "doc-05",
+              "url": "https://example.com/doc/05"
+            },
+            {
+              "rank": 7,
+              "document_id": "doc-06",
+              "url": "https://example.com/doc/06"
+            },
+            {
+              "rank": 8,
+              "document_id": "doc-07",
+              "url": "https://example.com/doc/07"
+            },
+            {
+              "rank": 9,
+              "document_id": "doc-08",
+              "url": "https://example.com/doc/08"
+            },
+            {
+              "rank": 10,
+              "document_id": "doc-09",
+              "url": "https://example.com/doc/09"
+            },
+            {
+              "rank": 11,
+              "document_id": "doc-10",
+              "url": "https://example.com/doc/10"
+            },
+            {
+              "rank": 12,
+              "document_id": "doc-11",
+              "url": "https://example.com/doc/11"
+            },
+            {
+              "rank": 13,
+              "document_id": "doc-12",
+              "url": "https://example.com/doc/12"
+            },
+            {
+              "rank": 14,
+              "document_id": "doc-13",
+              "url": "https://example.com/doc/13"
+            },
+            {
+              "rank": 15,
+              "document_id": "doc-14",
+              "url": "https://example.com/doc/14"
+            },
+            {
+              "rank": 16,
+              "document_id": "doc-15",
+              "url": "https://example.com/doc/15"
+            },
+            {
+              "rank": 17,
+              "document_id": "doc-16",
+              "url": "https://example.com/doc/16"
+            },
+            {
+              "rank": 18,
+              "document_id": "doc-17",
+              "url": "https://example.com/doc/17"
+            },
+            {
+              "rank": 19,
+              "document_id": "doc-18",
+              "url": "https://example.com/doc/18"
+            },
+            {
+              "rank": 20,
+              "document_id": "doc-19",
+              "url": "https://example.com/doc/19"
+            },
+            {
+              "rank": 21,
+              "document_id": "doc-20",
+              "url": "https://example.com/doc/20"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.059709,
+            "embed": 0.085042,
+            "fuse": 0.022042,
+            "hydrate": 0.348625,
+            "total": 0.541291,
+            "vector": 0.077791
+          }
+        },
+        {
+          "index": 3,
+          "id": "q-delta",
+          "kind": "",
+          "tags": [
+            "recent"
+          ],
+          "query": "delta",
+          "recall_at_10": 0.6666666666666666,
+          "recall_at_100": 0.6666666666666666,
+          "high_recall_at_10": 1,
+          "ndcg_at_10": 0.5281750640145612,
+          "rr": 0.5,
+          "success_at_1": 0,
+          "success_at_5": 1,
+          "success_at_10": 1,
+          "first_rank": 2,
+          "judgments": [
+            {
+              "url": "https://example.com/doc/16",
+              "document_id": "doc-16",
+              "grade": 2,
+              "status": "searchable",
+              "rank": 2
+            },
+            {
+              "url": "https://example.com/doc/23",
+              "document_id": "doc-23",
+              "grade": 1,
+              "status": "unsearchable",
+              "rank": null
+            },
+            {
+              "url": "https://example.com/doc/11",
+              "document_id": "doc-11",
+              "grade": 1,
+              "status": "searchable",
+              "rank": 10
+            }
+          ],
+          "ranking": [
+            {
+              "rank": 1,
+              "document_id": "doc-17",
+              "url": "https://example.com/doc/17"
+            },
+            {
+              "rank": 2,
+              "document_id": "doc-16",
+              "url": "https://example.com/doc/16"
+            },
+            {
+              "rank": 3,
+              "document_id": "doc-18",
+              "url": "https://example.com/doc/18"
+            },
+            {
+              "rank": 4,
+              "document_id": "doc-15",
+              "url": "https://example.com/doc/15"
+            },
+            {
+              "rank": 5,
+              "document_id": "doc-19",
+              "url": "https://example.com/doc/19"
+            },
+            {
+              "rank": 6,
+              "document_id": "doc-14",
+              "url": "https://example.com/doc/14"
+            },
+            {
+              "rank": 7,
+              "document_id": "doc-20",
+              "url": "https://example.com/doc/20"
+            },
+            {
+              "rank": 8,
+              "document_id": "doc-13",
+              "url": "https://example.com/doc/13"
+            },
+            {
+              "rank": 9,
+              "document_id": "doc-12",
+              "url": "https://example.com/doc/12"
+            },
+            {
+              "rank": 10,
+              "document_id": "doc-11",
+              "url": "https://example.com/doc/11"
+            },
+            {
+              "rank": 11,
+              "document_id": "doc-10",
+              "url": "https://example.com/doc/10"
+            },
+            {
+              "rank": 12,
+              "document_id": "doc-09",
+              "url": "https://example.com/doc/09"
+            },
+            {
+              "rank": 13,
+              "document_id": "doc-08",
+              "url": "https://example.com/doc/08"
+            },
+            {
+              "rank": 14,
+              "document_id": "doc-07",
+              "url": "https://example.com/doc/07"
+            },
+            {
+              "rank": 15,
+              "document_id": "doc-06",
+              "url": "https://example.com/doc/06"
+            },
+            {
+              "rank": 16,
+              "document_id": "doc-05",
+              "url": "https://example.com/doc/05"
+            },
+            {
+              "rank": 17,
+              "document_id": "doc-04",
+              "url": "https://example.com/doc/04"
+            },
+            {
+              "rank": 18,
+              "document_id": "doc-03",
+              "url": "https://example.com/doc/03"
+            },
+            {
+              "rank": 19,
+              "document_id": "doc-02",
+              "url": "https://example.com/doc/02"
+            },
+            {
+              "rank": 20,
+              "document_id": "doc-01",
+              "url": "https://example.com/doc/01"
+            },
+            {
+              "rank": 21,
+              "document_id": "doc-00",
+              "url": "https://example.com/doc/00"
+            }
+          ],
+          "timings_ms": {
+            "bm25": 0.043625,
+            "embed": 0.090042,
+            "fuse": 0.008625,
+            "hydrate": 0.378625,
+            "total": 0.576291,
+            "vector": 0.08775
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -13,8 +13,9 @@ import (
 )
 
 // NewDB returns a fresh database under t.TempDir() with every migration
-// applied and a vector index as wide as a new home's (the default
-// embedding.dim), closed when the test ends. It lives on disk rather than
+// applied and vector indexes, the chunks' and the document cards', as
+// wide as a new home's (the default embedding.dim), closed when the test
+// ends. It lives on disk rather than
 // in ":memory:" because database/sql pools connections, and each in-memory
 // connection would see a different database.
 func NewDB(t testing.TB) *sqlite.DB {
@@ -22,7 +23,7 @@ func NewDB(t testing.TB) *sqlite.DB {
 	return NewDBWithDim(t, config.Default().Embedding.Dim)
 }
 
-// NewDBWithDim is NewDB with a vector index dim wide, sized the way the
+// NewDBWithDim is NewDB with vector indexes dim wide, sized the way the
 // daemon sizes a home's (sqlite.EnsureVectorIndex).
 func NewDBWithDim(t testing.TB, dim int) *sqlite.DB {
 	t.Helper()
@@ -40,7 +41,7 @@ func NewDBWithDim(t testing.TB, dim int) *sqlite.DB {
 		t.Fatalf("migrate test database: %v", err)
 	}
 	if err := sqlite.EnsureVectorIndex(ctx, db, dim); err != nil {
-		t.Fatalf("size test database's vector index: %v", err)
+		t.Fatalf("size test database's vector indexes: %v", err)
 	}
 	return db
 }

@@ -52,6 +52,7 @@ type Deps struct {
 	Extractions     store.ExtractionStore
 	Bookmarks       store.BookmarkStore
 	Chunks          store.ChunkStore
+	Index           store.DocumentIndex // the documents' fields and cards; reindex-all makes the cards stale
 	Queue           store.JobStore
 	Embedder        embedder.Embedder
 	GenerationModel string            // config.yaml's generation.model as the daemon loaded it, on healthz
@@ -67,6 +68,7 @@ type Deps struct {
 	KeepAwake       KeepAwake                       // whether the Mac is held awake, on /v1/queue; nil reports it isn't
 	YouTubeFetcher  string                          // the yt-dlp YouTube videos go to, on healthz; empty when they go to the default fetcher
 	GitHubToken     bool                            // the GitHub fetcher sends a token, on healthz
+	DocumentFields  DocumentFields                  // what the daemon's start did to the documents' search fields, on healthz
 	TenantID        string                          // default store.LocalTenantID
 	Log             *slog.Logger
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/samsar/curio/internal/devtool"
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/eval"
+	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/store"
 )
@@ -63,15 +64,19 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 	if err != nil {
 		return err
 	}
+	cards, err := fillCards(ctx, lib, emb, cfg, log)
+	if err != nil {
+		return err
+	}
 	judged, err := resolveJudgments(ctx, lib.Documents, lib.Chunks, qf.set)
 	if err != nil {
 		return err
 	}
-	rep := newReport(opts, cfg, lib, qf, judged)
+	rep := newReport(opts, cfg, lib, qf, judged, cards)
 	log.Info("judgments resolved", "judgments", rep.Library.Judgments, "missing", rep.Library.Missing,
-		"unsearchable", rep.Library.Unsearchable)
+		"unsearchable_by_chunks", rep.Library.Unsearchable)
 
-	e := env{docs: lib.Documents, chunks: lib.Chunks, embedder: emb, cfg: cfg, log: log}
+	e := env{docs: lib.Documents, chunks: lib.Chunks, index: lib.Index, embedder: emb, cfg: cfg, log: log}
 	for _, v := range opts.variants {
 		vr, err := runVariant(ctx, v, e, qf.set, judged)
 		if err != nil {
@@ -180,23 +185,75 @@ func connectEmbedder(ctx context.Context, cfg config.Config) (*embedder.Ollama, 
 	return emb, nil
 }
 
-// judgmentStatus is whether a search can return a judged document.
+// fillCards embeds the copy's stale cards as the daemon's cards job does
+// (Indexer.EmbedStaleCards), through the query embedder, which config.yaml
+// configures as the daemon's, with its document prefix, logging how far it
+// got as the job does. Before it, OpenCopy derived the copy's fields; a
+// copy filled before has no stale card left.
+func fillCards(ctx context.Context, lib *devtool.Copy, emb *embedder.Ollama, cfg config.Config,
+	log *slog.Logger) (cardsFill, error) {
+	idx := indexer.New(lib.Chunks, emb, indexer.Options{DocumentPrefix: cfg.Embedding.DocumentPrefix, Log: log})
+	log.Info("embedding the stale cards", "stale", lib.Fields.CardsStale)
+	start := time.Now()
+	n, err := idx.EmbedStaleCards(ctx, lib.Index, store.LocalTenantID)
+	took := time.Since(start)
+	if err != nil {
+		return cardsFill{}, fmt.Errorf("embed the copy's cards (%d embedded first): %w", n, err)
+	}
+	log.Info("cards embedded", "embedded", n, "took_ms", took.Milliseconds())
+	return cardsFill{embedded: n, took: took}, nil
+}
+
+// cardsFill is what fillCards did.
+type cardsFill struct {
+	embedded int
+	took     time.Duration
+}
+
+// judgmentStatus is whether a variant's search can return a judged
+// document.
 type judgmentStatus string
 
 const (
 	searchable judgmentStatus = "searchable"
 	// missing: no document in the copy has the URL.
 	missing judgmentStatus = "missing"
-	// unsearchable: the document is failed or dead, or has no chunks, and
-	// search never returns it. A pending document with chunks is searched.
+	// unsearchable: none of the variant's lists can return the document.
 	unsearchable judgmentStatus = "unsearchable"
 )
 
-// resolved is a judged URL's document in the copy, and whether search can
-// return it.
+// reach is which documents a search's lists can return: the chunk lists
+// one that is neither failed nor dead and has chunks (a pending document
+// with chunks is searched); the document lists any document, whatever its
+// state.
+type reach struct{ chunks, documents bool }
+
+// chunkReach is the chunk lists' alone, which library.unsearchable counts
+// by, as before the document lists were.
+var chunkReach = reach{chunks: true}
+
+// resolved is a judged URL's document in the copy, and what decides which
+// lists can return it.
 type resolved struct {
 	documentID string // empty when missing
-	status     judgmentStatus
+	state      store.DocState
+	// hasChunks: the document has chunks; read only for a document that is
+	// neither failed nor dead, whose chunks the chunk lists search.
+	hasChunks bool
+}
+
+// status is whether a search reaching by can return the judgment's
+// document.
+func (r resolved) status(by reach) judgmentStatus {
+	switch {
+	case r.documentID == "":
+		return missing
+	case by.documents:
+		return searchable
+	case by.chunks && r.state != store.DocStateFailed && r.state != store.DocStateDead && r.hasChunks:
+		return searchable
+	}
+	return unsearchable
 }
 
 // resolveJudgments looks every judged URL up in the copy, once whatever
@@ -220,18 +277,18 @@ func resolveJudgments(ctx context.Context, docs store.DocumentStore, chunks stor
 	return out, nil
 }
 
-// resolve finds url's document and says whether search can return it.
+// resolve finds url's document and what decides which lists can return
+// it.
 func resolve(ctx context.Context, docs store.DocumentStore, chunks store.ChunkStore, url string) (resolved, error) {
 	doc, err := docs.GetByURL(ctx, store.LocalTenantID, url)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return resolved{status: missing}, nil
+		return resolved{}, nil
 	case err != nil:
 		return resolved{}, fmt.Errorf("look up the judged %s: %w", url, err)
 	}
-	r := resolved{documentID: doc.ID, status: searchable}
+	r := resolved{documentID: doc.ID, state: doc.State}
 	if doc.State == store.DocStateFailed || doc.State == store.DocStateDead {
-		r.status = unsearchable
 		return r, nil
 	}
 	// Whether it has chunks is all this needs, but the store has no read of
@@ -241,9 +298,7 @@ func resolve(ctx context.Context, docs store.DocumentStore, chunks store.ChunkSt
 	if err != nil {
 		return resolved{}, fmt.Errorf("read the chunks of the judged %s: %w", url, err)
 	}
-	if len(embs) == 0 {
-		r.status = unsearchable
-	}
+	r.hasChunks = len(embs) > 0
 	return r, nil
 }
 
@@ -257,10 +312,7 @@ const totalStage = "total"
 // query's embed outlasting the engine's timeout shouldn't throw away the
 // run. The query's timings are its last ranking's.
 func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, judged map[string]resolved) (variantReport, error) {
-	rk, err := v.build(e)
-	if err != nil {
-		return variantReport{}, fmt.Errorf("variant %s: %w", v.name, err)
-	}
+	rk, by := v.build(e), v.reach(e.cfg)
 	e.log.Info("running a variant", "variant", v.name, "queries", len(qs.Queries))
 	began := time.Now()
 	vr := variantReport{Name: v.name, Description: v.description, Queries: make([]queryReport, 0, len(qs.Queries))}
@@ -288,7 +340,7 @@ func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, judged
 			took[s.name] = append(took[s.name], s.took)
 		}
 		scores[i] = eval.ScoreQuery(q, r.urls())
-		vr.Queries = append(vr.Queries, newQueryReport(i, q, scores[i], r, judged))
+		vr.Queries = append(vr.Queries, newQueryReport(i, q, scores[i], r, judged, by))
 	}
 	vr.WallMS = ms(time.Since(began))
 	vr.LatencyMS = latencies(took)

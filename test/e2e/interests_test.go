@@ -22,6 +22,7 @@ import (
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/store"
+	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 )
 
 // interestsTiming is the interest scheduler's timing for these tests
@@ -115,6 +116,42 @@ func fetchedDocuments(c *client.Client) (int, error) {
 		return 0, err
 	}
 	return stats.DocumentsByState[string(store.DocStateFetched)], nil
+}
+
+// TestDaemon_ImportedPagesGetCards: once an import's queue settles, every
+// document's card holds the title its fetch found, and has a vector of
+// that text. The queue settles once the cards job has run,
+// sqlite.CardsJobDelay after the last card change and up to an idle poll
+// later.
+func TestDaemon_ImportedPagesGetCards(t *testing.T) {
+	env := interestsDaemon(t, time.Hour)
+	ctx := context.Background()
+	importTopics(t, env.c, env.pages, 0, 9)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		n, err := fetchedDocuments(env.c)
+		require.NoError(c, err)
+		assert.Equal(c, 10, n)
+		q, err := env.c.Queue(ctx)
+		require.NoError(c, err)
+		for _, k := range q.Kinds {
+			assert.Zero(c, k.Pending+k.Running, "%s jobs left", k.Kind)
+		}
+	}, 60*time.Second, 50*time.Millisecond, logTail(env.home))
+
+	db, err := sqlitestore.Open(ctx, env.home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	var cards, stale, vectors int
+	require.NoError(t, db.QueryRow(`SELECT count(*), count(*) FILTER (WHERE embedded_text IS NOT text)
+		FROM document_cards`).Scan(&cards, &stale))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM document_cards_vec`).Scan(&vectors))
+	assert.Equal(t, 10, cards)
+	assert.Zero(t, stale, "every card is embedded as it reads now")
+	assert.Equal(t, 10, vectors)
+	var card string
+	require.NoError(t, db.QueryRow(`SELECT c.text FROM document_cards c JOIN documents d ON d.id = c.document_id
+		WHERE d.url = ?`, env.pages+"/topic/3").Scan(&card))
+	assert.True(t, strings.HasPrefix(card, "A Field Guide to dentistry, Volume 3 — "), card)
 }
 
 // TestDaemon_AnImportIsGroupedUnasked: an import of 20 pages is grouped

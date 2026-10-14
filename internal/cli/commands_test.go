@@ -343,8 +343,9 @@ func TestJobs(t *testing.T) {
 	assert.Contains(t, out, "payload: {}")
 	assert.Contains(t, out, "next attempt:")
 
-	out = mustRun(t, srv, "jobs", "--all", "--limit", "2")
-	assert.Contains(t, out, "2 job(s)")
+	// Four jobs: the three, and the cards job the document's write queued.
+	out = mustRun(t, srv, "jobs", "--all", "--limit", "3")
+	assert.Contains(t, out, "3 job(s)")
 	out = runArgs(t, nextPage(t, out)...)
 	assert.Contains(t, out, "1 job(s)")
 	_, err = runCLI(t, srv, "jobs", "--limit", "501")
@@ -392,10 +393,11 @@ func TestRefetch(t *testing.T) {
 	srv := apitest.Start(t)
 	dead := srv.AddDocument(t, "https://example.com/gone", store.DocStateDead)
 	failed := srv.AddDocument(t, "https://example.com/failed", store.DocStateFailed)
+	seeded := count(t, srv, `SELECT count(*) FROM jobs`)
 
 	_, err := runCLI(t, srv, "refetch", dead.ID)
 	require.Error(t, err, "a dead document needs --force")
-	assert.Zero(t, count(t, srv, `SELECT count(*) FROM jobs`))
+	assert.Equal(t, seeded, count(t, srv, `SELECT count(*) FROM jobs`))
 
 	out := mustRun(t, srv, "refetch", dead.ID, "--force")
 	assert.Contains(t, out, "refetch enqueued for document "+dead.ID)
@@ -426,12 +428,13 @@ func TestRefetch_Cause(t *testing.T) {
 		t.Helper()
 		return count(t, srv, `SELECT count(*) FROM jobs WHERE document_id = ?`, doc.ID)
 	}
+	seeded := count(t, srv, `SELECT count(*) FROM jobs`)
 
 	_, err := runCLI(t, srv, "refetch", "--all", "--cause", "bogus")
 	require.ErrorContains(t, err, `cause "bogus" must be one of: `+failureCauses)
 	_, err = runCLI(t, srv, "refetch", "--all", "--cause", "dead_link")
 	require.ErrorContains(t, err, "dead links are refetched only with state=dead")
-	assert.Zero(t, count(t, srv, `SELECT count(*) FROM jobs`))
+	assert.Equal(t, seeded, count(t, srv, `SELECT count(*) FROM jobs`))
 
 	out := mustRun(t, srv, "refetch", "--all", "--cause", "anti_bot")
 	assert.Contains(t, out, "refetch enqueued for documents with cause=anti_bot: 2 jobs")
@@ -460,7 +463,7 @@ func TestRefetch_Cause(t *testing.T) {
 		require.EqualError(t, err, "--state and --cause filter --all", strings.Join(args, " "))
 	}
 	assert.Zero(t, requests.Load(), "the daemon is never contacted")
-	assert.Equal(t, 4, count(t, srv, `SELECT count(*) FROM jobs`), "nothing more is enqueued")
+	assert.Equal(t, 4, count(t, srv, `SELECT count(*) FROM jobs WHERE kind = 'fetch'`), "nothing more is enqueued")
 }
 
 // TestRefetch_CauseHelp: --cause's help names every cause the store has, in
@@ -939,7 +942,7 @@ func TestStatus(t *testing.T) {
 	assert.Contains(t, out, "bookmarks: 1")
 	assert.Contains(t, out, "documents: 2")
 	assert.Contains(t, out, "fetched=1  pending=1")
-	assert.Contains(t, out, "jobs:      pending=1")
+	assert.Contains(t, out, "jobs:      pending=2", "the fetch, and the cards job the writes queued")
 	assert.Contains(t, out, "disk:")
 }
 
@@ -1023,7 +1026,7 @@ func TestDoctor(t *testing.T) {
 	out, err := w.run(t, "doctor")
 	require.NoError(t, err, out)
 	for _, name := range []string{"machine", "curio home", "config", "ollama", "models", "daemon", "launchd",
-		"embeddings", "interests", "github", "fetcher", "content dir"} {
+		"embeddings", "interests", "search fields", "cards", "github", "fetcher", "content dir"} {
 		line, _ := doctorLine(t, out, name)
 		assert.Equal(t, "✓", markerOf(line), line)
 	}
@@ -1159,6 +1162,46 @@ func TestDoctor_Interests(t *testing.T) {
 			assert.Equal(t, tc.hint, hint)
 		})
 	}
+}
+
+// TestDoctor_SearchFields: a daemon whose start couldn't check the
+// search fields fails doctor's check, which says when the start ran and
+// that a restart fixes it.
+func TestDoctor_SearchFields(t *testing.T) {
+	checked := time.Now()
+	w := upWorld(t, func(d *api.Deps) {
+		d.DocumentFields = api.DocumentFields{CheckedAt: checked, Error: "derive document fields: disk I/O error"}
+	})
+	out, err := w.run(t, "doctor")
+	require.Error(t, err)
+	line, hint := doctorLine(t, out, "search fields")
+	assert.Equal(t, fmt.Sprintf("✗ %-22s the daemon's start (%s) couldn't check them: derive document fields: "+
+		"disk I/O error; search may miss documents", "search fields", localTime(checked)), line)
+	assert.Contains(t, hint, "restart the daemon: `curio daemon stop`")
+	assert.Contains(t, out, "1 failure(s), 0 warning(s)")
+}
+
+// TestDoctor_Cards: cards left to embed pass doctor while their job waits
+// to run, and warn once no cards job is queued, with the restart that
+// queues one.
+func TestDoctor_Cards(t *testing.T) {
+	w := upWorld(t)
+	w.srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	w.srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	out, err := w.run(t, "doctor")
+	require.NoError(t, err, out)
+	line, hint := doctorLine(t, out, "cards")
+	assert.Equal(t, "✓", markerOf(line), line)
+	assert.Contains(t, line, "2 cards to embed; the cards job runs at ")
+	assert.Empty(t, hint)
+
+	_, err = w.srv.DB.Exec(`DELETE FROM jobs WHERE kind = 'cards'`)
+	require.NoError(t, err)
+	out, err = w.run(t, "doctor")
+	require.NoError(t, err, out)
+	line, hint = doctorLine(t, out, "cards")
+	assert.Equal(t, fmt.Sprintf("! %-22s 2 cards to embed, and no cards job is queued to embed them", "cards"), line)
+	assert.Contains(t, hint, "its start queues the job")
 }
 
 func TestReindex_HelpNamesDrift(t *testing.T) {

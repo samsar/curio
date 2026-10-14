@@ -32,8 +32,8 @@ build, or Ollama was upgraded, since the library was indexed, and a sample
 of the library re-embedded by the build serving now doesn't match the
 stored vectors (or couldn't be checked), so new queries no longer match
 them. A change whose sample matches is recorded without a warning. Once
-every job is enqueued, the daemon takes the build serving now as the new
-baseline.
+every job is enqueued, the daemon queues every document's card to be
+embedded again and takes the build serving now as the new baseline.
 
 Documents must already have content: --all targets state=fetched by default
 and, in any state, skips documents that were never fetched.

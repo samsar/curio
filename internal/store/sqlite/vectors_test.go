@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -28,6 +29,16 @@ func vectorWidth(t *testing.T, db *DB) int {
 	return width
 }
 
+func cardVectorWidth(t *testing.T, db *DB) int {
+	t.Helper()
+	width, err := vectorIndexWidth(context.Background(), db, "document_cards_vec")
+	require.NoError(t, err)
+	return width
+}
+
+// dropVectorIndexSQL drops chunks_vec, for tests that start without one.
+var dropVectorIndexSQL = vectorIndexes[0].dropSQL()
+
 // schemaVersion is SQLite's schema cookie, which every DDL statement bumps.
 func schemaVersion(t *testing.T, db *DB) int {
 	t.Helper()
@@ -46,18 +57,63 @@ func vectorCount(t *testing.T, db *DB) int {
 func TestEnsureVectorIndex_ResizesTheMigrationsEmptyTable(t *testing.T) {
 	db := migratedDB(t)
 	require.Equal(t, 768, vectorWidth(t, db))
+	require.Zero(t, cardVectorWidth(t, db), "the migrations create no card vectors")
 
 	require.NoError(t, EnsureVectorIndex(context.Background(), db, 1024))
 	assert.Equal(t, 1024, vectorWidth(t, db))
+	assert.Equal(t, 1024, cardVectorWidth(t, db), "the cards' at the same width")
 }
 
 func TestEnsureVectorIndex_SameWidthIssuesNoDDL(t *testing.T) {
 	db := migratedDB(t)
+	require.NoError(t, EnsureVectorIndex(context.Background(), db, 768))
 	before := schemaVersion(t, db)
 
 	require.NoError(t, EnsureVectorIndex(context.Background(), db, 768))
 	assert.Equal(t, before, schemaVersion(t, db), "nothing was dropped or created")
 	assert.Equal(t, 768, vectorWidth(t, db))
+	assert.Equal(t, 768, cardVectorWidth(t, db))
+}
+
+// TestEnsureVectorIndex_CardVectors: the card vector table comes with the
+// trigger that deletes a card's vector with its card, and every time it
+// is created, the cards it doesn't hold vectors of become stale; one that
+// holds vectors of another width is refused, as chunks_vec is.
+func TestEnsureVectorIndex_CardVectors(t *testing.T) {
+	ctx := context.Background()
+	db := migratedDB(t)
+	require.NoError(t, EnsureVectorIndex(ctx, db, 768))
+	var trigger string
+	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'trg_document_cards_delete'`).Scan(&trigger))
+	assert.Contains(t, trigger, "DELETE FROM document_cards_vec WHERE document_id = old.document_id")
+
+	ids := seedDocs(t, db, "local", "https://example.com/a", "https://example.com/b")
+	_, err := db.Exec(`UPDATE document_cards SET embedded_text = text, embedded_at = 'then'`)
+	require.NoError(t, err)
+	_, err = db.Exec(`DROP TABLE document_cards_vec`)
+	require.NoError(t, err)
+	require.NoError(t, EnsureVectorIndex(ctx, db, 768))
+	slices.Sort(ids)
+	assert.Equal(t, [][]any{{ids[0], nil, nil}, {ids[1], nil, nil}}, dumpRows(t, db,
+		`SELECT document_id, embedded_text, embedded_at FROM document_cards ORDER BY document_id`),
+		"a new table: every card stale")
+
+	vec, err := sqlitevec.SerializeFloat32(make([]float32, 768))
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO document_cards_vec (document_id, embedding) VALUES (?, ?)`, ids[0], vec)
+	require.NoError(t, err)
+	before := schemaVersion(t, db)
+	err = EnsureVectorIndex(ctx, db, 1024)
+	var widthErr *VectorWidthError
+	require.ErrorAs(t, err, &widthErr)
+	assert.Equal(t, VectorWidthError{Path: db.Path(), Table: "document_cards_vec", Have: 768, Want: 1024}, *widthErr)
+	assert.Equal(t, before, schemaVersion(t, db), "nothing changed")
+
+	_, err = db.Exec(`DELETE FROM documents WHERE id = ?`, ids[0])
+	require.NoError(t, err)
+	var vectors int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM document_cards_vec`).Scan(&vectors))
+	assert.Zero(t, vectors, "the card's vector went with its document")
 }
 
 func TestEnsureVectorIndex_CreatesAMissingTable(t *testing.T) {
@@ -83,8 +139,8 @@ func TestEnsureVectorIndex_RefusesATableWithVectors(t *testing.T) {
 	err := EnsureVectorIndex(ctx, db, 1024)
 	var widthErr *VectorWidthError
 	require.ErrorAs(t, err, &widthErr)
-	assert.Equal(t, VectorWidthError{Path: db.Path(), Have: 768, Want: 1024}, *widthErr)
-	for _, want := range []string{db.Path(), "768-dimensional", "embedding width is 1024"} {
+	assert.Equal(t, VectorWidthError{Path: db.Path(), Table: "chunks_vec", Have: 768, Want: 1024}, *widthErr)
+	for _, want := range []string{db.Path(), "chunks_vec", "768-dimensional", "embedding width is 1024"} {
 		assert.Contains(t, err.Error(), want)
 	}
 	assert.Equal(t, before, schemaVersion(t, db), "nothing changed")

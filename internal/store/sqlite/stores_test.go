@@ -180,11 +180,39 @@ func TestDocuments_MarkFailed(t *testing.T) {
 		assert.Equal(t, cause, got.FailureCause)
 	}
 
-	require.NoError(t, docs.MarkFetched(ctx, d.ID))
+	require.NoError(t, docs.MarkFetched(ctx, d.ID, 0))
 	got, err := docs.GetByID(ctx, d.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DocStateFetched, got.State)
 	assert.Empty(t, got.FailureCause)
+}
+
+// TestDocuments_MarkFetched_WordCount: marking a document fetched records
+// the indexed text's word count, which a later index replaces, smaller or
+// none; a negative count is refused and writes nothing.
+func TestDocuments_MarkFetched_WordCount(t *testing.T) {
+	ctx := context.Background()
+	docs := NewDocuments(newTestDB(t))
+	d := seedDoc(t, docs, "https://example.com/y", store.DocStatePending)
+	words := func() *int {
+		t.Helper()
+		got, err := docs.GetByID(ctx, d.ID)
+		require.NoError(t, err)
+		return got.WordCount
+	}
+	assert.Nil(t, words(), "no count before an index")
+	for _, n := range []int{1200, 300, 0} {
+		require.NoError(t, docs.MarkFetched(ctx, d.ID, n))
+		require.NotNil(t, words())
+		assert.Equal(t, n, *words())
+	}
+	require.NoError(t, docs.MarkFailed(ctx, d.ID, store.FailureCauseOther))
+	err := docs.MarkFetched(ctx, d.ID, -1)
+	require.ErrorContains(t, err, "a word count of -1")
+	got, err := docs.GetByID(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocStateFailed, got.State, "nothing written")
+	assert.Equal(t, 0, *got.WordCount)
 }
 
 // TestDocuments_MarkFailed_Refused: a cause that isn't one writes nothing,
@@ -202,7 +230,7 @@ func TestDocuments_MarkFailed_Refused(t *testing.T) {
 	}
 
 	assert.ErrorIs(t, docs.MarkFailed(ctx, uuid.NewString(), store.FailureCauseOther), store.ErrNotFound)
-	assert.ErrorIs(t, docs.MarkFetched(ctx, uuid.NewString()), store.ErrNotFound)
+	assert.ErrorIs(t, docs.MarkFetched(ctx, uuid.NewString(), 0), store.ErrNotFound)
 }
 
 // ---------- ExtractionStore ----------
@@ -1024,6 +1052,15 @@ func countRows(t *testing.T, db *DB, table string) int {
 	return n
 }
 
+// countFetchJobs counts the fetch jobs: every write of a document or a
+// bookmark may queue a cards job beside them.
+func countFetchJobs(t *testing.T, db *DB) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow("SELECT count(*) FROM jobs WHERE kind = ?", store.JobKindFetch).Scan(&n))
+	return n
+}
+
 func TestDocuments_RequeueFetch(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -1050,12 +1087,13 @@ func TestDocuments_RequeueFetch_NotFound(t *testing.T) {
 	docs := NewDocuments(db)
 	other := &store.Document{TenantID: "other", URL: "https://example.com/theirs"}
 	require.NoError(t, docs.Create(context.Background(), other))
+	seeded := countRows(t, db, "jobs")
 
 	for _, id := range []string{uuid.NewString(), other.ID} {
 		_, err := docs.RequeueFetch(context.Background(), "local", id)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	}
-	assert.Zero(t, countRows(t, db, "jobs"))
+	assert.Equal(t, seeded, countRows(t, db, "jobs"))
 	assert.Equal(t, store.DocStatePending, docState(t, docs, other.ID), "another tenant's document is untouched")
 }
 
@@ -1063,12 +1101,13 @@ func TestDocuments_RequeueFetch_Atomic(t *testing.T) {
 	db := newTestDB(t)
 	docs := NewDocuments(db)
 	d := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
+	seeded := countRows(t, db, "jobs")
 	failJobInserts(t, db)
 
 	_, err := docs.RequeueFetch(context.Background(), "local", d.ID)
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, d.ID), "the state reset rolled back with the insert")
-	assert.Zero(t, countRows(t, db, "jobs"))
+	assert.Equal(t, seeded, countRows(t, db, "jobs"))
 }
 
 func TestDocuments_RequeueFetchByStates(t *testing.T) {
@@ -1087,7 +1126,7 @@ func TestDocuments_RequeueFetchByStates(t *testing.T) {
 		[]store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed}, "")
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
-	assert.Equal(t, 3, countRows(t, db, "jobs"))
+	assert.Equal(t, 3, countFetchJobs(t, db))
 
 	for st, d := range byState {
 		if st == store.DocStateDead {
@@ -1149,7 +1188,7 @@ func TestDocuments_RequeueFetchByStates_Cause(t *testing.T) {
 	n, err = docs.RequeueFetchByStates(ctx, "local", []store.DocState{store.DocStateDead}, store.FailureCauseDeadLink)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
-	assert.Equal(t, 3, countRows(t, db, "jobs"))
+	assert.Equal(t, 3, countFetchJobs(t, db))
 }
 
 func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
@@ -1157,6 +1196,7 @@ func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
 	docs := NewDocuments(db)
 	a := seedDoc(t, docs, "https://example.com/a", store.DocStateFailed)
 	b := seedDoc(t, docs, "https://example.com/b", store.DocStateFetched)
+	seeded := countRows(t, db, "jobs")
 	failJobInserts(t, db)
 
 	_, err := docs.RequeueFetchByStates(context.Background(), "local",
@@ -1164,7 +1204,7 @@ func TestDocuments_RequeueFetchByStates_Atomic(t *testing.T) {
 	require.ErrorContains(t, err, "injected")
 	assert.Equal(t, store.DocStateFailed, docState(t, docs, a.ID))
 	assert.Equal(t, store.DocStateFetched, docState(t, docs, b.ID))
-	assert.Zero(t, countRows(t, db, "jobs"))
+	assert.Equal(t, seeded, countRows(t, db, "jobs"))
 }
 
 // ---------- keyset pages ----------

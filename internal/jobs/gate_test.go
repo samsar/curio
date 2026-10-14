@@ -237,7 +237,8 @@ func TestQueueGate_Throttle(t *testing.T) {
 	assert.True(t, gentle.Admit(store.JobKindIndex, 0, now).Open())
 	assert.Equal(t, ReasonThrottled, gentle.Admit(store.JobKindIndex, 1, now).Closed)
 
-	for _, kind := range []store.JobKind{store.JobKindCluster, store.JobKindSummarize, store.JobKindImport} {
+	for _, kind := range []store.JobKind{store.JobKindCluster, store.JobKindCards, store.JobKindSummarize,
+		store.JobKindImport} {
 		assert.True(t, gentle.Admit(kind, 100, now).Open(), kind)
 	}
 	normal, _ := newGate(t, store.DefaultQueueSettings())
@@ -247,8 +248,11 @@ func TestQueueGate_Throttle(t *testing.T) {
 }
 
 func TestQueueGate_State(t *testing.T) {
+	// The cluster and cards pools have one goroutine, which no throttle
+	// caps.
 	limits := func(fetch, index, cluster int) []KindLimit {
-		return []KindLimit{{store.JobKindFetch, fetch}, {store.JobKindIndex, index}, {store.JobKindCluster, cluster}}
+		return []KindLimit{{store.JobKindFetch, fetch}, {store.JobKindIndex, index}, {store.JobKindCluster, cluster},
+			{store.JobKindCards, 1}}
 	}
 	schedule := window(t, "22:00-07:00")
 	cases := []struct {

@@ -146,7 +146,7 @@ func TestCreateBookmark_KnownDocument(t *testing.T) {
 	assert.Equal(t, string(store.DocStateFetched), got.Bookmark.DocumentState)
 	require.NotNil(t, got.Bookmark.DocumentID)
 	assert.Equal(t, doc.ID, *got.Bookmark.DocumentID)
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Zero(t, s.count(t, requestJobs))
 
 	resp, _ = s.createBookmark(t, "https://example.com/a")
 	p := assertProblem(t, resp, http.StatusConflict)
@@ -193,7 +193,7 @@ func TestImportBookmarks_OneFetchPerDocument(t *testing.T) {
 
 	assert.Equal(t, 1, s.count(t, "documents"))
 	assert.Equal(t, 4, s.count(t, "bookmarks"))
-	assert.Equal(t, 1, s.count(t, "jobs"))
+	assert.Equal(t, 1, s.count(t, requestJobs))
 }
 
 // countingIngest counts the Ingest calls that reach the store.

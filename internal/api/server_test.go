@@ -130,6 +130,7 @@ func newStartingTestServerUI(t *testing.T, pages UIOptions, options ...func(*Dep
 		Extractions:    sqlite.NewExtractions(db),
 		Bookmarks:      sqlite.NewBookmarks(db),
 		Chunks:         sqlite.NewChunks(db, defaults.Dim),
+		Index:          sqlite.NewDocumentIndex(db, defaults.Dim),
 		Queue:          sqlite.NewJobs(db),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
@@ -234,6 +235,11 @@ func (s *testServer) do(t *testing.T, req request) response {
 	defer resp.Body.Close()
 	return newResponse(t, resp, r.URL.Path)
 }
+
+// requestJobs are the jobs the tests' requests queue, for count: every
+// write of a document or a bookmark may queue a cards job beside them. A
+// request that must write nothing is held to every job instead.
+const requestJobs = "jobs WHERE kind <> 'cards'"
 
 func (s *testServer) count(t *testing.T, table string) int {
 	t.Helper()
@@ -441,12 +447,13 @@ func TestServer_CSRFBookmarkExploit(t *testing.T) {
 func TestServer_CSRFRefetchAllExploit(t *testing.T) {
 	s := newTestServer(t)
 	s.seedDocument(t, "https://example.com/gone", store.DocStateDead)
+	seeded := s.count(t, "jobs")
 
 	for _, origin := range []string{"https://attacker.example", "null"} {
 		resp := s.do(t, request{method: http.MethodPost, path: "/v1/documents/refetch-all?state=dead", origin: origin})
 		assertProblem(t, resp, http.StatusForbidden)
 	}
-	assert.Zero(t, s.count(t, "jobs"))
+	assert.Equal(t, seeded, s.count(t, "jobs"))
 }
 
 func TestServer_JSONBodies(t *testing.T) {

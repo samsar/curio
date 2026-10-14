@@ -47,8 +47,13 @@ func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 	doc.State = state
 	doc.ContentType = cmp.Or(doc.ContentType, store.ContentTypeUnknown)
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin document insert: %w", err)
+	}
+	defer tx.Rollback()
 	var createdAt, updatedAt string
-	err = s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO documents (
 			id, tenant_id, url, url_canonical, content_type, title, author,
 			published_at, language, word_count, state, failure_cause
@@ -76,6 +81,12 @@ func (s *Documents) Create(ctx context.Context, d *store.Document) error {
 	if doc.UpdatedAt, err = parseTime(updatedAt); err != nil {
 		return err
 	}
+	if err := s.db.refreshFields(ctx, tx, doc.TenantID, doc.ID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit document insert: %w", err)
+	}
 	*d = doc
 	return nil
 }
@@ -101,20 +112,39 @@ func newDocumentState(state store.DocState, cause store.FailureCause) (store.Doc
 	return cause.State(), nil
 }
 
+// ApplyFetch writes the fetch and derives the document's search fields
+// again in one transaction: its title, author and the site name its new
+// extraction declares are among what they are derived from.
 func (s *Documents) ApplyFetch(ctx context.Context, id string, m store.FetchedMetadata) error {
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("apply fetch to document %s: begin: %w", id, err)
+	}
+	defer tx.Rollback()
+	var tenantID string
+	err = tx.QueryRowContext(ctx, `
 		UPDATE documents SET
 			content_type = ?, url_canonical = ?, title = ?, author = ?, language = ?,
 			published_at = ?, current_extraction_id = ?, state = ?, failure_cause = NULL,
 			updated_at = `+sqlNow+`
-		WHERE id = ?`,
+		WHERE id = ?
+		RETURNING tenant_id`,
 		m.ContentType, strPtr(m.URLCanonical), strPtr(m.Title), strPtr(m.Author), strPtr(m.Language),
 		timePtr(m.PublishedAt), m.ExtractionID, store.DocStatePending,
-		id)
+		id).Scan(&tenantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("document %s: %w", id, store.ErrNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("apply fetch to document %s: %w", id, err)
 	}
-	return ensureRow(res, "document")
+	if err := s.db.refreshFields(ctx, tx, tenantID, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("apply fetch to document %s: commit: %w", id, err)
+	}
+	return nil
 }
 
 func (s *Documents) GetByID(ctx context.Context, id string) (*store.Document, error) {
@@ -188,11 +218,13 @@ func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Doc
 
 // markFailedSQL and markFetchedSQL write a document's state and failure
 // cause together, so no write can leave the one without the other.
-// markFetchedSQL is also the one write of indexed_at: SQLite reads 'now'
-// once per statement, so it equals the updated_at written with it.
+// markFetchedSQL is also the one write of indexed_at and word_count: the
+// count describes the text whose chunks were just indexed, and SQLite
+// reads 'now' once per statement, so indexed_at equals the updated_at
+// written with it.
 const (
 	markFailedSQL  = `UPDATE documents SET state = ?, failure_cause = ?, updated_at = ` + sqlNow + ` WHERE id = ?`
-	markFetchedSQL = `UPDATE documents SET state = ?, failure_cause = NULL, updated_at = ` + sqlNow +
+	markFetchedSQL = `UPDATE documents SET state = ?, failure_cause = NULL, word_count = ?, updated_at = ` + sqlNow +
 		`, indexed_at = ` + sqlNow + ` WHERE id = ?`
 )
 
@@ -207,8 +239,11 @@ func (s *Documents) MarkFailed(ctx context.Context, id string, cause store.Failu
 	return ensureRow(res, "document")
 }
 
-func (s *Documents) MarkFetched(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, markFetchedSQL, store.DocStateFetched, id)
+func (s *Documents) MarkFetched(ctx context.Context, id string, words int) error {
+	if words < 0 {
+		return fmt.Errorf("mark document %s fetched: a word count of %d", id, words)
+	}
+	res, err := s.db.ExecContext(ctx, markFetchedSQL, store.DocStateFetched, words, id)
 	if err != nil {
 		return fmt.Errorf("mark document %s fetched: %w", id, err)
 	}
@@ -536,14 +571,32 @@ func urlAuthority(u string) string {
 	return strings.ToLower(rest)
 }
 
+// SetCurrentExtraction points the document at another extraction and
+// derives its search fields again, in one transaction: the site name its
+// page declared is the extraction's.
 func (s *Documents) SetCurrentExtraction(ctx context.Context, docID, extractionID string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE documents SET current_extraction_id = ?, updated_at = `+sqlNow+` WHERE id = ?`,
-		extractionID, docID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set current extraction: begin: %w", err)
+	}
+	defer tx.Rollback()
+	var tenantID string
+	err = tx.QueryRowContext(ctx,
+		`UPDATE documents SET current_extraction_id = ?, updated_at = `+sqlNow+` WHERE id = ? RETURNING tenant_id`,
+		extractionID, docID).Scan(&tenantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("document %s: %w", docID, store.ErrNotFound)
+	}
 	if err != nil {
 		return fmt.Errorf("set current extraction: %w", err)
 	}
-	return ensureRow(res, "document")
+	if err := s.db.refreshFields(ctx, tx, tenantID, docID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set current extraction: commit: %w", err)
+	}
+	return nil
 }
 
 func (s *Documents) RequeueFetch(ctx context.Context, tenantID, documentID string) (*store.Job, error) {

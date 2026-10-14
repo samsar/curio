@@ -153,11 +153,13 @@ all fetch/index/search/insight workflows.
   becomes Status", "Dashboard: actions through /v1, sent by a
   first-party module", "Library: a Date saved order lists saves" and
   "Dashboard: the Failures tab"
-- Internal worker pools process jobs from the SQLite-backed queue. They
-  claim through the queue gate (`jobs.QueueGate`), which holds claims back
-  while the queue is paused, outside its daily schedule, or at the
-  throttle's cap; its settings live in SQLite (`queue_settings`) and are
-  read and changed at `GET`/`PUT /v1/queue`
+- Internal worker pools process jobs from the SQLite-backed queue: fetch,
+  index, cluster (one goroutine) and cards (one goroutine, which embeds
+  the documents' stale cards). They claim through the queue gate
+  (`jobs.QueueGate`), which holds claims back while the queue is paused,
+  outside its daily schedule, or at the throttle's cap; its settings live
+  in SQLite (`queue_settings`) and are read and changed at `GET`/`PUT
+  /v1/queue`
 
 ### `curio-mcp` (sidecar)
 
@@ -301,7 +303,13 @@ what is new, which writes nothing.
 
 ```
 bookmark file ──► importer ──► bookmark + document ──► fetch job (new documents only)
-                                                          │
+                                │                         │
+                                ▼                         │
+                  fields + card, derived in the           │
+                  same transaction (again on each         │
+                  fetch and bookmark change)              │
+                  ──► cards job ──► embedder              │
+                  ──► card vectors                        │
                                                           ▼
                               ┌──► fetcher (per-domain strategy)
                               │           │
@@ -353,6 +361,21 @@ Interests draw it (`/ui/interests/map`). See decisions.md "Interest map:
 two views of each regrouping, drawn when it is built" and "Dashboard: the
 interest map".
 
+Every write that changes what a document was saved as (creating it, a
+fetch, saving, deleting or relinking a bookmark) derives its search
+fields and its card again (`internal/docmeta`) in its own transaction,
+and a card whose text changed queues the cards job there too: at most one
+pending per tenant, due 10 s later (`sqlite.CardsJobDelay`), so the
+changes of a burst share it and it runs about 10 s after the change that
+queued it. The cards job embeds the stale cards in batches of 32, under
+the queue gate like any job, logging how far it got every 500 cards; an
+Ollama that doesn't answer defers it, 1 to 5 minutes, rather than failing
+it, and one that fails for good queues the next an hour ahead while cards
+are stale. `/v1/stats` counts the cards left to embed (`cards_stale`),
+which `curio status` prints and `curio doctor` holds to a cards job
+pending or running. See decisions.md "Metadata search: a fields index and
+a card per document".
+
 ## Fetcher strategy selection
 
 Data-driven, not hardcoded. `$CURIO_HOME/fetcher_rules.yaml` lists rules
@@ -386,23 +409,22 @@ next fetch uses the new rules — no restart. Invalid edits keep the last
 good rules; deleting the file reverts to the built-in defaults. Lets the
 user tune per-domain without recompiling.
 
-## Search: hybrid BM25 + vector
+## Search: hybrid BM25 + vector, over text and what was saved
 
 ```
-        ┌──► BM25 (FTS5) ─────────────────────────────────► top N chunks ─┐
-query ──┤                                                                 │
-        └──► embed (Ollama) ──► vector ANN (sqlite-vec) ──► top N chunks ─┤
-                                                                          ▼
-                                                                 RRF fusion (k=60)
-                                                                          │
-                                                                          ▼
-                                                   collapse chunks → documents, rank them
-                                                                          │
-                                                                          ▼
-                                                  the window [offset, offset+k), hydrated,
-                                                  with the BM25 snippets of its chunks
+query ──► keywords ──┬──► BM25 over the chunks (chunks_fts) ────────► top N chunks
+                     ├──► fields (document_fields_fts) ──────────────► top 200 documents
+                     └──► titles, every term (2 or more) ────────────► top 200 documents
+      ──► embed once ──┬─► vector ANN over the chunks (chunks_vec) ──► top N chunks
+          (Ollama)     └─► card ANN (document_cards_vec) ────────────► top 200 documents
 
-N = 800 = 8 × MaxSearchK, for every search
+the chunk lists ──► RRF fusion (k=60) ──► collapse chunks → documents
+                ──► each document list adds weight/(60 + rank), fields, cards, then
+                    titles; a document only they found joins with no chunks; rank again
+                ──► the window [offset, offset+k), hydrated, with the BM25 snippets
+                    of its chunks, and for a hit without any, its bookmarks
+
+N = 800 = 8 × MaxSearchK, for every search; 200 = 2 × MaxSearchK
 ```
 
 Every search reads the same pool, whatever its k and offset, so the
@@ -412,14 +434,25 @@ gets its first k. Only the window is hydrated, and BM25's snippets are
 made for its chunks alone, in one query. `find_related` sizes its pool
 from its k instead, `max(50, 8·k)`.
 
-The two legs run concurrently, and metadata filters (content type, host,
-source) apply inside both. Neither leg returns failed or dead documents: they
-keep the chunks of an earlier fetch, which no longer describe what the URL
-serves. A BM25 failure fails the search. A vector-leg failure — Ollama
-down, or no answer within `search.embed_timeout_seconds` — returns the BM25
-results marked `degraded` with a warning. Knobs in config:
-BM25/vector weights in RRF, chunk-to-doc collapse strategy (max vs sum vs
-top-3-avg), `default_k`, and `embed_timeout_seconds`.
+The keyword lists run beside the semantic ones, each pair concurrently,
+and metadata filters (content type, host, source) apply inside all five.
+The chunk lists don't return failed or dead documents: they keep the
+chunks of an earlier fetch, which no longer describe what the URL serves.
+The document lists match what a document was saved as (its title, its
+bookmarks' titles and folders, its site and author, and its card's
+vector), so they reach documents of every state, a dead one included,
+which comes back with no passage. The title list is the precise one: for
+a query of two distinct terms or more, the documents whose title and
+bookmark titles hold every one of them, so a bookmark searched by what it
+was saved as reaches the first page even with no text and no card
+vector. A failure of BM25, the fields list or the title list fails the
+search. A failure of either semantic list — Ollama down, or no answer
+within `search.embed_timeout_seconds` — drops both, and returns the
+keyword lists' results marked `degraded` with a warning. Knobs in config:
+the five lists' weights in RRF (`bm25_weight`, `vector_weight`,
+`fields_weight`, `cards_weight`, `title_weight`; 0 switches a list off),
+chunk-to-doc collapse strategy (max vs sum vs top-3-avg), `default_k`,
+and `embed_timeout_seconds`.
 
 ## Pluggability: where interfaces live
 
@@ -470,7 +503,7 @@ External processes the daemon expects:
   `http://localhost:11434`; `curio up` starts or installs it when nothing
   answers there, and pulls the models. The daemon runs without it and
   degrades: search returns keyword-only results marked `degraded`, index jobs fail and retry
-  with backoff, interest labels fall back to term labels, and `/v1/healthz`
+  with backoff, the cards job waits, interest labels fall back to term labels, and `/v1/healthz`
   (and `curio doctor`) says what's wrong. It pulls the models it needs,
   retrying until Ollama answers. Generation is abstracted behind a
   `generator.Generator` interface (local Ollama `/api/generate` impl), used

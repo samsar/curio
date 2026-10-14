@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +67,9 @@ func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 	t.Helper()
 
 	db := sqlitetest.NewDB(t)
+	// A card change queues a cards job claimable at once, so no test waits
+	// out the window; TestCardsJob_SharedByABurst runs with one.
+	db.SetCardsJobDelay(0)
 	dim := sqlitetest.Width(t, db)
 	home, err := curiohome.Init(t.TempDir(), "fake", dim)
 	require.NoError(t, err)
@@ -98,6 +102,7 @@ func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 		Queue:       queue,
 		Dispatcher:  dispatcher,
 		Indexer:     idx,
+		Cards:       sqlitestore.NewDocumentIndex(db, dim),
 		Log:         quietLog,
 	}, db, ff
 }
@@ -222,6 +227,45 @@ func TestFetchHandler_ExtractionStatus(t *testing.T) {
 			require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindIndex).Scan(&indexJobs))
 			assert.Equal(t, 1, indexJobs)
 		})
+	}
+}
+
+// TestFetchHandler_SiteName: the site name the page declares is recorded
+// in its extraction's meta under store.ExtractionMetaSiteName, beside the
+// fetcher's own meta, and is absent when it declares none; the document's
+// search fields take it as its site's name, unless it is a platform's.
+func TestFetchHandler_SiteName(t *testing.T) {
+	cases := []struct {
+		declared string
+		meta     map[string]any
+		siteName string
+	}{
+		{"The Example Times", map[string]any{"via": "test", store.ExtractionMetaSiteName: "The Example Times"},
+			"The Example Times"},
+		{"Medium", map[string]any{"via": "test", store.ExtractionMetaSiteName: "Medium"}, ""},
+		{"", map[string]any{"via": "test"}, ""},
+	}
+	for _, tc := range cases {
+		deps, db, ff := newTestDeps(t)
+		ff.res.SiteName = tc.declared
+		ctx := context.Background()
+		doc := &store.Document{TenantID: "local", URL: "https://example.com/article"}
+		require.NoError(t, deps.Documents.Create(ctx, doc))
+
+		require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+
+		got, err := deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(t, err)
+		ext, err := deps.Extractions.GetByID(ctx, *got.CurrentExtractionID)
+		require.NoError(t, err)
+		var meta map[string]any
+		require.NoError(t, json.Unmarshal(ext.ExtractionMeta, &meta))
+		assert.Equal(t, tc.meta, meta, "declared %q", tc.declared)
+		var declaredSite, siteName string
+		require.NoError(t, db.QueryRow(`SELECT declared_site, site_name FROM document_fields WHERE document_id = ?`,
+			doc.ID).Scan(&declaredSite, &siteName))
+		assert.Equal(t, tc.siteName, declaredSite, "declared %q", tc.declared)
+		assert.Equal(t, tc.siteName, siteName, "declared %q", tc.declared)
 	}
 }
 
@@ -465,6 +509,32 @@ func TestIndexHandler_HappyPath(t *testing.T) {
 	require.NotEmpty(t, hits, "indexed content should be searchable")
 }
 
+// TestIndexHandler_WordCount: indexing records how many words the indexed
+// text holds; a reindex of a shorter extraction lowers it, and an empty
+// one sets it to 0.
+func TestIndexHandler_WordCount(t *testing.T) {
+	deps, _, ff := newTestDeps(t)
+	ctx := context.Background()
+	doc := &store.Document{TenantID: "local", URL: "https://example.com/counted"}
+	require.NoError(t, deps.Documents.Create(ctx, doc))
+	for _, tc := range []struct {
+		markdown string
+		words    int
+	}{
+		{"# Title\n\n" + strings.Repeat("word ", 40), 42},
+		{"Three short words", 3},
+		{"", 0},
+	} {
+		ff.res.Markdown = tc.markdown
+		require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+		require.NoError(t, indexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)))
+		got, err := deps.Documents.GetByID(ctx, doc.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.WordCount, "%q", tc.markdown)
+		assert.Equal(t, tc.words, *got.WordCount, "%q", tc.markdown)
+	}
+}
+
 // TestIndexHandler_BookmarkTagsAreSearchable proves a bookmark's tags reach
 // chunks_fts: a tag word that does NOT appear in the body is searchable
 // after indexing.
@@ -614,8 +684,8 @@ func TestEnqueueRebuild(t *testing.T) {
 // --- pools ---
 
 // TestNewPools: the daemon's pools each claim one kind; the per-document
-// ones mark their document when a job gives up, and the cluster pool
-// records a rebuild left unfinished.
+// ones mark their document when a job gives up, the cluster pool records
+// a rebuild left unfinished, and the cards pool queues the next cards job.
 func TestNewPools(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	type shape struct {
@@ -633,6 +703,7 @@ func TestNewPools(t *testing.T) {
 		{"fetch", []store.JobKind{store.JobKindFetch}, []store.JobKind{store.JobKindFetch}, 16},
 		{"index", []store.JobKind{store.JobKindIndex}, []store.JobKind{store.JobKindIndex}, 4},
 		{"cluster", []store.JobKind{store.JobKindCluster}, []store.JobKind{store.JobKindCluster}, 1},
+		{"cards", []store.JobKind{store.JobKindCards}, []store.JobKind{store.JobKindCards}, 1},
 	}, got)
 	assert.Equal(t, []store.JobKind{store.JobKindCluster}, slices.Sorted(maps.Keys(pools[2].Worker.onFinished)),
 		"the scheduler is kicked once a rebuild's outcome is recorded")
@@ -682,7 +753,8 @@ func TestWorker_FullFetchIndexChain(t *testing.T) {
 	// wait on the jobs themselves.
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		var n int
-		require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
+		require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ? AND kind IN (?, ?)`, store.JobStatusDone,
+			store.JobKindFetch, store.JobKindIndex).Scan(&n))
 		assert.Equal(c, 2, n, "fetch + index should both be done")
 	}, 5*time.Second, 20*time.Millisecond)
 	stop()
@@ -880,7 +952,8 @@ func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
 			require.NoError(t, deps.Queue.Enqueue(ctx, docJob(t, store.JobKindFetch, doc.ID)))
 			runPoolsUntil(t, deps, func(c *assert.CollectT) {
 				var n int
-				require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ?`, store.JobStatusDone).Scan(&n))
+				require.NoError(c, db.QueryRow(`SELECT count(*) FROM jobs WHERE status = ? AND kind IN (?, ?)`, store.JobStatusDone,
+					store.JobKindFetch, store.JobKindIndex).Scan(&n))
 				assert.Equal(c, 2, n, "fetch + index should both be done")
 			})
 			before, err := deps.Documents.GetByID(ctx, doc.ID)

@@ -90,7 +90,7 @@ follow, the last line is the command that shows the next page.`,
 	cmd.Flags().BoolVar(&failedOnly, "failed", false, "Shortcut for --status=failed")
 	cmd.Flags().BoolVar(&showAll, "all", false, "Show every status instead of just done")
 	cmd.Flags().StringVar(&status, "status", "", "pending|running|done|failed (overrides defaults)")
-	cmd.Flags().StringVar(&kind, "kind", "", "fetch|index|import|cluster|summarize")
+	cmd.Flags().StringVar(&kind, "kind", "", "fetch|index|import|cluster|summarize|cards")
 	cmd.Flags().IntVar(&limit, "limit", 50, "Rows per page, 1-500")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Token from the \"next page:\" line of a previous page")
 	return cmd
@@ -141,7 +141,7 @@ func renderJob(w io.Writer, j client.Job) {
 		}
 	}
 	// Payload is debugging signal when no DocURL was joined (import,
-	// cluster, summarize jobs). For fetch/index it's redundant with
+	// cluster, summarize, cards jobs). For fetch/index it's redundant with
 	// the URL we just printed.
 	if j.DocURL == "" && len(j.Payload) > 0 {
 		fmt.Fprintf(w, "  payload: %s\n", condense(string(j.Payload)))

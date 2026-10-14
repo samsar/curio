@@ -66,7 +66,7 @@ func TestDashboard_Routes(t *testing.T) {
 // embed to the same vector.
 func withSearch(d *Deps) {
 	emb := countingEmbedder{new(atomic.Int32)}
-	d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+	d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 }
 
 // uiSamples are a request to each of the dashboard's routes for s, by
@@ -331,7 +331,7 @@ func (e countingEmbedder) Embed(_ context.Context, texts []string) ([][]float32,
 func TestDashboard_CrossSiteSubresource(t *testing.T) {
 	var embeds atomic.Int32
 	s := newTestServer(t, func(d *Deps) {
-		d.Search = search.New(d.Chunks, d.Documents, countingEmbedder{&embeds}, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, countingEmbedder{&embeds}, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	path := "/ui/?q=kafka"
 	for _, refused := range []string{path, "/ui/", "/ui/search?q=kafka"} {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -37,13 +38,25 @@ type Filters struct {
 // Surfaced here so CLI consumers can `cat` / open the file without a
 // second round-trip to /v1/documents/{id}. BookmarkTitle names an untitled
 // document: its newest titled bookmark's title, as the documents list has
-// it.
+// it. A hit without Matches matched on what it was saved as, and carries
+// its Bookmarks, newest saved first, to say so; a hit with matches carries
+// none.
 type SearchHitResponse struct {
-	Document      DocumentResponse `json:"document"`
-	Score         float64          `json:"score"`
-	MarkdownPath  string           `json:"markdown_path,omitempty"`
-	BookmarkTitle string           `json:"bookmark_title,omitempty"`
-	Matches       []ChunkMatchJSON `json:"matches,omitempty"`
+	Document      DocumentResponse    `json:"document"`
+	Score         float64             `json:"score"`
+	MarkdownPath  string              `json:"markdown_path,omitempty"`
+	BookmarkTitle string              `json:"bookmark_title,omitempty"`
+	Matches       []ChunkMatchJSON    `json:"matches,omitempty"`
+	Bookmarks     []SearchHitBookmark `json:"bookmarks,omitempty"`
+}
+
+// SearchHitBookmark mirrors the openapi schema: one bookmark a hit without
+// matches was saved under.
+type SearchHitBookmark struct {
+	Title      string    `json:"title,omitempty"`
+	FolderPath string    `json:"folder_path,omitempty"`
+	Source     string    `json:"source"`
+	SavedAt    time.Time `json:"saved_at"`
 }
 
 // ChunkMatchJSON mirrors the openapi schema; pointer scores let us emit
@@ -160,8 +173,9 @@ func validateSearchFilters(f Filters) error {
 }
 
 // searchHitsToResponse maps engine hits to wire hits, populating each
-// hit's markdown path from its current extraction and naming the untitled
-// ones by their bookmarks (bookmarkTitles).
+// hit's markdown path from its current extraction, naming the untitled
+// ones by their bookmarks (bookmarkTitles), and giving each hit without
+// matches the bookmarks it was saved under (savedUnder).
 //
 // One extra DB hit per result to surface the markdown path. K is at most
 // store.MaxSearchK (100), so this stays small; GetByIDsWithLastError, which
@@ -169,6 +183,10 @@ func validateSearchFilters(f Filters) error {
 // serve every hit in one read if it ever shows in latency.
 func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]SearchHitResponse, error) {
 	titles, err := d.bookmarkTitles(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
+	saved, err := d.savedUnder(ctx, hits)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +213,35 @@ func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]Se
 			MarkdownPath:  mdPath,
 			BookmarkTitle: titles[hit.Document.ID],
 			Matches:       matches,
+			Bookmarks:     saved[hit.Document.ID],
 		})
+	}
+	return out, nil
+}
+
+// savedUnder is, by document, the bookmarks each hit without matches was
+// saved under, newest saved first: what it matched on, when no passage
+// did. It reads them all at once, and nothing when every hit has matches.
+func (d Deps) savedUnder(ctx context.Context, hits []search.Hit) (map[string][]SearchHitBookmark, error) {
+	var bare []string
+	for _, hit := range hits {
+		if len(hit.Chunks) == 0 {
+			bare = append(bare, hit.Document.ID)
+		}
+	}
+	out := map[string][]SearchHitBookmark{}
+	if len(bare) == 0 {
+		return out, nil
+	}
+	byDoc, err := d.Bookmarks.ListByDocuments(ctx, d.TenantID, bare)
+	if err != nil {
+		return nil, fmt.Errorf("read the bookmarks of the hits without matches: %w", err)
+	}
+	for doc, bms := range byDoc {
+		for _, b := range bms {
+			out[doc] = append(out[doc], SearchHitBookmark{Title: strings.TrimSpace(deref(b.Title)),
+				FolderPath: deref(b.FolderPath), Source: b.Source, SavedAt: b.SavedAt})
+		}
 	}
 	return out, nil
 }

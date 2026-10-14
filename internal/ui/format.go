@@ -455,6 +455,8 @@ func jobKindLabel(kind string) string {
 		return "Rebuild"
 	case store.JobKindSummarize:
 		return "Summary"
+	case store.JobKindCards:
+		return "Cards"
 	}
 	return "Job"
 }

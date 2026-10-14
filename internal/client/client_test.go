@@ -629,7 +629,7 @@ func TestFailureCauses(t *testing.T) {
 		assert.Equal(t, "pending", got.State)
 		assert.Empty(t, got.FailureCause)
 	}
-	assert.Equal(t, 2, countRows(t, s, "jobs"))
+	assert.Equal(t, 2, countRows(t, s, "jobs WHERE kind = 'fetch'"))
 }
 
 func TestJobs(t *testing.T) {
@@ -665,7 +665,7 @@ func TestJobs(t *testing.T) {
 			break
 		}
 	}
-	assert.Len(t, seen, 4, "every job, over two pages")
+	assert.Len(t, seen, 5, "every job, the cards job the document's write queued among them, over two pages")
 
 	job, err := c.GetJob(ctx, failed.Items[0].ID)
 	require.NoError(t, err)
@@ -703,7 +703,7 @@ func TestStatsAndMetrics(t *testing.T) {
 	assert.Equal(t, 1, stats.BookmarksTotal)
 	assert.Equal(t, 2, stats.DocumentsTotal)
 	assert.Equal(t, map[string]int{"pending": 1, "fetched": 1}, stats.DocumentsByState)
-	assert.Equal(t, map[string]int{"pending": 1}, stats.JobsByStatus)
+	assert.Equal(t, map[string]int{"pending": 2}, stats.JobsByStatus, "the fetch, and the cards job the writes queued")
 
 	_, err = s.DB.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, status, started_at, updated_at)
 		VALUES ('j1', 'local', 'index', '{}', 'done',
@@ -761,6 +761,29 @@ func TestSearchAndRelated(t *testing.T) {
 
 	_, err = c.RelatedDocuments(ctx, "no-such-document", 0)
 	requireStatus(t, err, http.StatusNotFound)
+}
+
+// TestSearch_HitWithoutMatches: a hit found by what it was saved as, with
+// no passage, decodes the bookmarks it was saved under; an untitled one
+// its bookmark's title.
+func TestSearch_HitWithoutMatches(t *testing.T) {
+	s := apitest.Start(t, apitest.DocumentLists)
+	c := client.New(s.URL)
+	s.AddDocument(t, "https://example.com/gone", store.DocStateDead)
+	s.AddBookmark(t, "https://example.com/gone", store.SourceSafari, "Sourdough starters", "/Favorites/Baking")
+
+	res, err := c.Search(context.Background(), client.SearchRequest{Query: "sourdough"})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 1)
+	hit := res.Items[0]
+	assert.Equal(t, "dead", hit.Document.State)
+	assert.Empty(t, hit.Matches)
+	assert.Equal(t, "Sourdough starters", hit.BookmarkTitle)
+	require.Len(t, hit.Bookmarks, 1)
+	assert.Equal(t, "Sourdough starters", hit.Bookmarks[0].Title)
+	assert.Equal(t, "/Favorites/Baking", hit.Bookmarks[0].FolderPath)
+	assert.Equal(t, store.SourceSafari, hit.Bookmarks[0].Source)
+	assert.False(t, hit.Bookmarks[0].SavedAt.IsZero())
 }
 
 func TestInterests(t *testing.T) {
@@ -961,6 +984,7 @@ func TestQueue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, &client.Queue{Throttle: client.ThrottleNormal, State: client.QueueOpen, Kinds: []client.QueueKind{
 		{Kind: "fetch", Limit: apitest.Pools.Fetch}, {Kind: "index", Limit: apitest.Pools.Index}, {Kind: "cluster", Limit: 1},
+		{Kind: "cards", Limit: 1},
 	}}, q)
 
 	later := time.Now().UTC().Add(24 * time.Minute).Truncate(time.Millisecond)

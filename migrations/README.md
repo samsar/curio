@@ -8,12 +8,22 @@ SQLite schema migrations, managed by [`pressly/goose`](https://github.com/pressl
 
 ## Running
 
-The daemon runs pending migrations at startup. Manual control via:
+The daemon runs pending migrations at startup, through the driver that
+loads sqlite-vec; it is the supported migrator. The goose CLI has no
+sqlite-vec, so it can show where a database stands:
 
 ```sh
-goose -dir migrations sqlite3 ~/.curio/curio.db up
-goose -dir migrations sqlite3 ~/.curio/curio.db status
+goose -dir migrations sqlite3 ~/.curio/curio.db status   # make migrate-status
 ```
+
+but it can't create a new database (001 creates `chunks_vec`, a vec0
+table), apply 019 to a schema-18 database, or run 019's Down: 019 renames
+`jobs` out of the way, which makes SQLite parse every trigger again, and
+`chunks_vec`'s triggers name a vec0 table (019's Down also drops
+`document_cards_vec`, which needs the module). Each fails with `no such
+module: vec0` and rolls back, leaving the version where it was (checked
+with goose v3.27.0). `make migrate-up` runs the CLI's `up`, so it works
+only for migrations that need no sqlite-vec.
 
 ## Required pragmas
 
@@ -55,15 +65,21 @@ The embedding model and the vector width are the home's, recorded in its
 marker, `.curio-meta.json`, when the home is created; no table records
 them. 012 dropped `schema_meta`, which held the model and width 001
 hard-coded (`nomic-embed-text`, 768) and which nothing read. The daemon
-sizes `chunks_vec` from the marker after migrating
-(`sqlite.EnsureVectorIndex`), so the FLOAT[768] in 001 only ever describes
-an empty table.
+sizes `chunks_vec`, and creates `document_cards_vec`, from the marker
+after migrating (`sqlite.EnsureVectorIndex`), so the FLOAT[768] in 001
+only ever describes an empty table.
 
 ## Adding a migration
 
 1. Create `migrations/NNN_description.sql` with `-- +goose Up` and `-- +goose Down`
    blocks.
-2. Test against a fresh DB: `goose up` → apply, `goose down` → revert cleanly.
+2. Test it in `internal/store/sqlite/migrations_test.go`, through the
+   daemon's driver: `migratedTo` brings a database to the version before
+   it, the test seeds rows and records `schemaDump`, applies the new
+   version, checks what it did, then `DownTo` the version before and
+   compares `schemaDump` byte for byte, and applies it again. The goose
+   CLI can't stand in for this once a migration touches a database with
+   vec0 tables (see Running).
 3. Never edit an applied migration. Add a new one that fixes the old one.
    The one exception is a fix that leaves the resulting schema exactly as it
    was, proven by a test comparing `sqlite_master` before and after: 002 was
@@ -85,14 +101,18 @@ an empty table.
   `chunks_vec` at the marker's width and refuses to rebuild one that holds
   vectors, and another width means a new home. See
   [`../docs/decisions.md#embedding-model-and-per-home-width`](../docs/decisions.md#embedding-model-and-per-home-width).
-- **Reshaping `chunks_vec`** (a column, a partition key, a distance
-  metric): not a SQL migration, which can't know the home's width. Its
-  definition lives in `internal/store/sqlite/vectors.go`
-  (`createVectorIndexPrefix`/`Suffix`), and every new database gets its
-  `chunks_vec` from there after the migrations run, recreating whatever
-  empty table they left: a reshape made only in a migration would be
-  undone on every new home. Change it there, and bring existing tables
-  along in that Go step.
+- **Reshaping `chunks_vec` or `document_cards_vec`** (a column, a
+  partition key, a distance metric): not a SQL migration, which can't know
+  the home's width. Their definitions live in
+  `internal/store/sqlite/vectors.go` (`vectorIndexes`, each table's CREATE
+  framed around the width), and `sqlite.EnsureVectorIndex` creates them
+  from there after the migrations run: it recreates the empty `chunks_vec`
+  001 left at FLOAT[768], and creates `document_cards_vec` with the
+  trigger that deletes a card's vector with its card
+  (`trg_document_cards_delete`), which no migration creates, since a
+  trigger naming a table that doesn't exist yet fails when it fires. A
+  reshape made only in a migration would be undone on every new home.
+  Change it there, and bring existing tables along in that Go step.
 - **Changing the FTS5 tokenizer**: recreate `chunks_fts` with the new
   tokenizer and repopulate it with FTS5's rebuild command,
   `INSERT INTO chunks_fts (chunks_fts) VALUES ('rebuild')`. It is an

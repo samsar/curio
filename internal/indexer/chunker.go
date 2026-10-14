@@ -143,6 +143,13 @@ func ChunkText(markdown string, opts ChunkOptions) []Chunk {
 	return enforceCharLimit(chunks, maxChars)
 }
 
+// WordCount is how many words markdown holds, in the chunker's own unit:
+// whitespace-separated words of the text it chunks, inline data URLs
+// left out (sanitizeForEmbedding). It is 0 for blank markdown.
+func WordCount(markdown string) int {
+	return len(strings.Fields(sanitizeForEmbedding(markdown)))
+}
+
 // sanitizeForEmbedding removes content that's useless to the embedder and
 // dangerous to chunk: inline base64 image data URLs.
 //

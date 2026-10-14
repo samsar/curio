@@ -16,6 +16,27 @@ func TestChunkText_Empty(t *testing.T) {
 	assert.Empty(t, ChunkText("    \n\n  \n", ChunkOptions{}))
 }
 
+// TestWordCount: a document's word count is the chunker's unit over the
+// text it chunks: without overlap, and with no chunk cut by the byte
+// cap, the words of its chunks add up to it.
+func TestWordCount(t *testing.T) {
+	assert.Zero(t, WordCount(""))
+	assert.Zero(t, WordCount(" \n\t "))
+	assert.Equal(t, 3, WordCount("an ![chart](data:image/png;base64,iVBORw0KGgo=) image"),
+		"an inline image counts as one word, its bytes as none")
+
+	md := "# Queues\n\nWhy queues fail, and what backpressure does about it.\n\n" +
+		"## Consumers\n### Groups\n\n" + strings.Repeat("Consumer groups scale reads across brokers. ", 60) +
+		"\n\nA closing paragraph.\n\n# Trailing heading"
+	chunks := ChunkText(md, ChunkOptions{SizeTokens: 50, OverlapTokens: 0})
+	require.Greater(t, len(chunks), 3, "several chunks")
+	sum := 0
+	for _, c := range chunks {
+		sum += c.TokenCount
+	}
+	assert.Equal(t, sum, WordCount(md))
+}
+
 func TestChunkText_FitsInOneChunk(t *testing.T) {
 	got := ChunkText("hello world goodbye", ChunkOptions{SizeTokens: 100, OverlapTokens: 10})
 	assert.Len(t, got, 1)

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -34,7 +35,12 @@ import (
 //
 // Documents 0 to 19 are fetched; 20 is pending with its chunk, which search
 // reads; 21 is pending without a chunk; 22 failed and 23 is dead, both with
-// their chunks, which search leaves out.
+// their chunks, which the chunk lists leave out.
+//
+// The failed 22 and the dead 23 were bookmarked (savedAs), which the
+// document lists find them by: their fields hold the bookmark's title, and
+// their cards, "<title> — example.com", are embedded where the query their
+// title names is (cardAt), so the cards list ranks each first for it.
 const (
 	libraryDocs = 24
 	testDim     = 8
@@ -53,6 +59,14 @@ var keywords = map[int]string{
 // documents' line.
 var queryAt = map[string]float32{"alpha": 3.25, "beta": 20.25, "gamma": 0.75, "delta": 16.6}
 
+// savedAs are the bookmarks the failed and the dead documents were saved
+// as.
+var savedAs = map[int]string{22: "Beta archive", 23: "Delta field notes"}
+
+// cardAt is where the bookmarked documents' cards are embedded: at the
+// query their titles name.
+var cardAt = map[string]float32{"Beta archive — example.com": 20.25, "Delta field notes — example.com": 16.6}
+
 func docURL(i int) string { return fmt.Sprintf("https://example.com/doc/%02d", i) }
 
 // newLibrary writes the synthetic library's database at dir/copy.db and
@@ -68,9 +82,15 @@ func newLibrary(t *testing.T, dir string) string {
 	require.NoError(t, err)
 	require.NoError(t, sqlite.EnsureVectorIndex(ctx, db, testDim))
 	docs, extractions, chunks := sqlite.NewDocuments(db), sqlite.NewExtractions(db), sqlite.NewChunks(db, testDim)
+	bookmarks := sqlite.NewBookmarks(db)
 	for i := range libraryDocs {
 		doc := &store.Document{ID: fmt.Sprintf("doc-%02d", i), TenantID: store.LocalTenantID, URL: docURL(i)}
 		require.NoError(t, docs.Create(ctx, doc))
+		if title, ok := savedAs[i]; ok {
+			_, err := bookmarks.Ingest(ctx, &store.Bookmark{TenantID: store.LocalTenantID, URL: docURL(i),
+				Title: &title, Source: store.SourceChrome, SavedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)})
+			require.NoError(t, err)
+		}
 		if i == 21 {
 			continue // pending, never fetched: no chunk
 		}
@@ -92,7 +112,7 @@ func newLibrary(t *testing.T, dir string) string {
 		case 23:
 			require.NoError(t, docs.MarkFailed(ctx, doc.ID, store.FailureCauseDeadLink))
 		default:
-			require.NoError(t, docs.MarkFetched(ctx, doc.ID))
+			require.NoError(t, docs.MarkFetched(ctx, doc.ID, 0))
 		}
 	}
 	return path
@@ -110,8 +130,9 @@ func at(x float32) []float32 {
 var farAway = at(1000)
 
 // fakeOllama is an Ollama with testModel pulled, which embeds each
-// query of testdata/queries.yaml at its place on the line (queryAt), and
-// any other text far away. It fails a test that asks it to pull.
+// query of testdata/queries.yaml at its place on the line (queryAt), each
+// bookmarked document's card at its own (cardAt), and any other text far
+// away. It fails a test that asks it to pull.
 type fakeOllama struct {
 	url string
 
@@ -192,12 +213,42 @@ func (f *fakeOllama) embed(t *testing.T, w http.ResponseWriter, r *http.Request)
 		v := farAway
 		if x, ok := queryAt[text]; ok {
 			v = at(x)
+		} else if x, ok := cardAt[text]; ok {
+			v = at(x)
 		}
 		out.Embeddings = append(out.Embeddings, v)
 	}
 	if err := json.NewEncoder(w).Encode(out); err != nil {
 		t.Errorf("encode the embeddings: %v", err)
 	}
+}
+
+// sent is what the fake embedded besides the cards: the warm-up and the
+// queries, in order. The cards, which name the library's host, are
+// embedded before any query.
+func (f *fakeOllama) sent() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, text := range f.embeds {
+		if !strings.Contains(text, "example.com") {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+// cards is how many cards the fake embedded.
+func (f *fakeOllama) cards() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, text := range f.embeds {
+		if strings.Contains(text, "example.com") {
+			n++
+		}
+	}
+	return n
 }
 
 // failOn makes /api/embed fail for text, every time.
@@ -223,13 +274,14 @@ func (f *fakeOllama) withModels(models ...string) {
 }
 
 // writeConfig writes a config.yaml in dir for the synthetic library,
-// embedding through the Ollama at baseURL with no query prefix, with
-// extra appended, and returns its path.
-func writeConfig(t *testing.T, dir, baseURL, extra string) string {
+// embedding through the Ollama at baseURL with no query prefix, its search
+// the chunk lists alone (the document lists weighted 0) and search's keys
+// (each a line indented under search:) besides, and returns its path.
+func writeConfig(t *testing.T, dir, baseURL, search string) string {
 	t.Helper()
 	path := filepath.Join(dir, "config.yaml")
-	cfg := fmt.Sprintf("embedding:\n  model: %s\n  dim: %d\n  base_url: %s\n  query_prefix: \"\"\n%s",
-		testModel, testDim, baseURL, extra)
+	cfg := fmt.Sprintf("embedding:\n  model: %s\n  dim: %d\n  base_url: %s\n  query_prefix: \"\"\n"+
+		"search:\n  fields_weight: 0\n  cards_weight: 0\n  title_weight: 0\n%s", testModel, testDim, baseURL, search)
 	require.NoError(t, os.WriteFile(path, []byte(cfg), 0o600))
 	return path
 }

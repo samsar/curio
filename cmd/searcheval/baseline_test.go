@@ -76,7 +76,7 @@ func TestBaseline_SameRun(t *testing.T) {
 func TestBaseline_ExactDeltas(t *testing.T) {
 	fx := newFixture(t)
 	first := baselineRun(t, fx, "first.json", queries)
-	fx.config = writeConfig(t, fx.dir, fx.ollama.url, "search:\n  bm25_weight: 0.5\n")
+	fx.config = writeConfig(t, fx.dir, fx.ollama.url, "  bm25_weight: 0.5\n")
 	second := baselineRun(t, fx, "second.json", queries, "-baseline", first)
 
 	oldNDCG := (3/l2(3) + 1/l2(11)) / idealDelta

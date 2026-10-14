@@ -90,9 +90,18 @@ footer names the address the daemon listens on.
   and each result's fused score, and stays on while you type and page. A
   page with no title of its own is named by its bookmark's title, in
   italics, as the Library names it, and so is a related document on a
-  document's page. When semantic search is unavailable (Ollama down),
-  the keyword results come under a warning. The old address,
-  `/ui/search?q=…`, leads here with its query.
+  document's page. A result can also match on what it was saved as
+  (its bookmark's title or folder, its site, its author, its card)
+  without a passage: it says it matched on "bookmark details", and one
+  line in place of the passages says what it was saved as ("Saved as
+  “Queues” in Tech / Streams", or the parts it has, or the browser it
+  came from). A page that failed or went dead is found that way only,
+  since its text is never searched: a second line says a dead page is no
+  longer available, or that a failed one couldn't be read (it may still
+  be there, behind a sign-in or a bot check), with a link to its original
+  address. When semantic
+  search is unavailable (Ollama down), the keyword results come under a
+  warning. The old address, `/ui/search?q=…`, leads here with its query.
 - **Library**: every document, most recently updated first. Tabs choose
   the state (All, Fetched, Pending, Failed, Dead), each with its count
   when the state is the only filter; with a type, host, folder or cause

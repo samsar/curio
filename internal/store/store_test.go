@@ -82,7 +82,7 @@ func TestJobStatus_Valid(t *testing.T) {
 
 func TestJobKind_Valid(t *testing.T) {
 	for _, k := range []store.JobKind{store.JobKindFetch, store.JobKindIndex, store.JobKindImport,
-		store.JobKindCluster, store.JobKindSummarize} {
+		store.JobKindCluster, store.JobKindSummarize, store.JobKindCards} {
 		assert.True(t, k.Valid(), k)
 	}
 	for _, k := range []store.JobKind{"", "bogus", "Fetch", "done"} {
@@ -227,6 +227,7 @@ func TestThrottle_Limit(t *testing.T) {
 		{store.ThrottleGentle, store.JobKindFetch, 2, 2},
 		{store.ThrottleGentle, store.JobKindIndex, 4, 1},
 		{store.ThrottleGentle, store.JobKindCluster, 1, 1},
+		{store.ThrottleGentle, store.JobKindCards, 1, 1},
 		{store.ThrottleGentle, store.JobKindImport, 8, 8},
 		{store.ThrottleNormal, store.JobKindFetch, 16, 16},
 		{store.ThrottleNormal, store.JobKindIndex, 4, 4},

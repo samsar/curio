@@ -195,7 +195,7 @@ func (f *engineFixture) add(t *testing.T, g, n int) []string {
 // indexed marks a document fetched, its vectors written now.
 func (f *engineFixture) indexed(t *testing.T, id string) {
 	t.Helper()
-	require.NoError(t, f.docs.MarkFetched(context.Background(), id))
+	require.NoError(t, f.docs.MarkFetched(context.Background(), id, 0))
 	_, err := f.db.Exec(`UPDATE documents SET indexed_at = ? WHERE id = ?`, f.tick().Format(storeTime), id)
 	require.NoError(t, err)
 }

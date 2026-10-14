@@ -153,6 +153,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 	quiet := slog.New(slog.DiscardHandler)
 	docs := sqlite.NewDocuments(db)
 	chunks := sqlite.NewChunks(db, emb.Dim)
+	index := sqlite.NewDocumentIndex(db, emb.Dim)
 	gate, err := jobs.NewQueueGate(context.Background(), sqlite.NewQueueSettings(db), Pools, quiet)
 	if err != nil {
 		t.Fatalf("queue gate: %v", err)
@@ -164,12 +165,15 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 		Extractions:    sqlite.NewExtractions(db),
 		Bookmarks:      sqlite.NewBookmarks(db),
 		Chunks:         chunks,
+		Index:          index,
 		Queue:          sqlite.NewJobs(db),
-		Search:         search.New(chunks, docs, emb, search.Config{Log: quiet}),
+		Search:         search.New(chunks, docs, index, emb, search.Config{Log: quiet}),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
 		Interests:      scheduler,
 		Gate:           gate,
+		// The new home's fields, checked as the daemon's start checks them.
+		DocumentFields: api.DocumentFields{CheckedAt: time.Now()},
 		TenantID:       TenantID,
 		Log:            quiet,
 	}
@@ -215,6 +219,27 @@ func (s *Server) Ready() error {
 // idle, longer than the API allows itself to drain.
 func closeClientConns() {
 	http.DefaultClient.CloseIdleConnections()
+}
+
+// DocumentLists is an option for Start that searches with the document
+// lists on: the fields, the cards and the titles, each weighted 1 beside
+// the chunk lists, so a document can be found by what it was saved as.
+func DocumentLists(d *api.Deps) {
+	d.Search = search.New(d.Chunks, d.Documents, d.Index, Embedder{Dim: config.Default().Embedding.Dim},
+		search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, TitleWeight: 1, Log: d.Log})
+}
+
+// AddBookmark saves url from source as title in folder through ingest, as
+// an import saves it, and returns the bookmark: its document is the
+// tenant's of url, created pending when there was none.
+func (s *Server) AddBookmark(t testing.TB, url, source, title, folder string) *store.Bookmark {
+	t.Helper()
+	b := &store.Bookmark{TenantID: TenantID, URL: url, Source: source, SavedAt: time.Now().UTC(),
+		Title: store.NullableString(title), FolderPath: store.NullableString(folder)}
+	if _, err := s.Deps.Bookmarks.Ingest(context.Background(), b); err != nil {
+		t.Fatalf("save bookmark %s: %v", url, err)
+	}
+	return b
 }
 
 // AddDocument creates a document with no content in state. A failed one

@@ -28,7 +28,8 @@ type Deps struct {
 	Queue       store.JobQueue
 	Dispatcher  fetcher.Dispatcher
 	Indexer     *indexer.Indexer
-	Insight     Rebuilder // the insight engine; nil unless the insight layer is wired
+	Cards       store.DocumentIndex // the documents' cards, which the cards job embeds
+	Insight     Rebuilder           // the insight engine; nil unless the insight layer is wired
 	// Placer places each document indexed into the current interests; nil
 	// places none (the insight layer off).
 	Placer Placer
@@ -150,10 +151,10 @@ func fetchHandler(d Deps) HandlerFunc {
 			MarkdownPath: &relPath,
 			ErrorMessage: store.NullableString(res.PartialReason),
 		}
-		if res.Meta != nil {
+		if meta := extractionMeta(res); meta != nil {
 			// Meta is diagnostic; one value JSON can't hold (a NaN, say)
 			// shouldn't cost the document its content.
-			if b, err := json.Marshal(res.Meta); err != nil {
+			if b, err := json.Marshal(meta); err != nil {
 				d.Log.Warn("fetch: dropping extraction meta that doesn't encode",
 					"document_id", doc.ID, "fetcher", f.Name(), "err", err)
 			} else {
@@ -201,6 +202,20 @@ func loadJobDocument(ctx context.Context, d Deps, job *store.Job) (*store.Docume
 	return doc, nil
 }
 
+// extractionMeta is what an extraction records of res: the fetcher's
+// meta, and the site name the page declared, under
+// store.ExtractionMetaSiteName, when it declared one.
+func extractionMeta(res *fetcher.Result) map[string]any {
+	meta := res.Meta
+	if res.SiteName != "" {
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta[store.ExtractionMetaSiteName] = res.SiteName
+	}
+	return meta
+}
+
 // fetchedMetadata maps a fetch result onto the document columns it
 // describes. A fetcher that can't tell the content type keeps the
 // document's current one.
@@ -224,7 +239,8 @@ func fetchedMetadata(doc *store.Document, res *fetcher.Result, extractionID stri
 //  2. Read the markdown file off disk.
 //  3. Pull the bookmark's tags (if any) for FTS boosting — best-effort.
 //  4. Run the Indexer.
-//  5. Mark the document fetched, which clears any failure cause.
+//  5. Mark the document fetched, which clears any failure cause and
+//     records how many words the indexed text holds.
 //  6. Place it into the current interests, best effort.
 func indexHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
@@ -283,7 +299,7 @@ func indexHandler(d Deps) HandlerFunc {
 			return fmt.Errorf("index: %w", err)
 		}
 
-		if err := d.Documents.MarkFetched(ctx, doc.ID); err != nil {
+		if err := d.Documents.MarkFetched(ctx, doc.ID, indexer.WordCount(string(md))); err != nil {
 			return fmt.Errorf("mark fetched: %w", err)
 		}
 		if d.Placer != nil {

@@ -167,7 +167,7 @@ func TestReport_MatchesTheEngine(t *testing.T) {
 	}
 	fetch := func(dvs ...store.DocVector) {
 		for _, dv := range dvs {
-			require.NoError(t, docs.MarkFetched(ctx, dv.DocumentID))
+			require.NoError(t, docs.MarkFetched(ctx, dv.DocumentID, 0))
 		}
 	}
 	served := &servedVectors{}

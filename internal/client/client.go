@@ -64,6 +64,18 @@ type Health struct {
 	// Interests is where automatic rebuilds of the interests stand; nil
 	// from a daemon that predates them.
 	Interests *InterestsState `json:"interests,omitempty"`
+	// DocumentFields is what the daemon's start did to the documents'
+	// search fields; nil from a daemon that predates saying so.
+	DocumentFields *DocumentFields `json:"document_fields,omitempty"`
+}
+
+// DocumentFields mirrors api.DocumentFields: when the daemon's start
+// checked the documents' search fields, whether it rebuilt their index,
+// and why it couldn't check or derive them, when it couldn't.
+type DocumentFields struct {
+	CheckedAt time.Time `json:"checked_at"`
+	Rebuilt   bool      `json:"rebuilt"`
+	Error     string    `json:"error,omitempty"`
 }
 
 // EmbeddingDrift mirrors api.EmbeddingDrift: what changed in the build
@@ -173,13 +185,15 @@ func (c *Client) Healthz(ctx context.Context) (*Health, error) {
 	return &h, nil
 }
 
-// Stats mirrors api.Stats.
+// Stats mirrors api.Stats. CardsStale is 0 from a daemon that predates
+// counting the cards left to embed.
 type Stats struct {
 	Version          string         `json:"version"`
 	BookmarksTotal   int            `json:"bookmarks_total"`
 	DocumentsTotal   int            `json:"documents_total"`
 	DocumentsByState map[string]int `json:"documents_by_state,omitempty"`
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
+	CardsStale       int            `json:"cards_stale"`
 }
 
 // Metrics mirrors api.MetricsResponse.
@@ -418,13 +432,25 @@ type SearchFilters struct {
 	Source      []string `json:"source,omitempty"`
 }
 
-// SearchHit is the part of api.SearchHitResponse the CLI reads: it leaves
-// out bookmark_title, which only the dashboard shows.
+// SearchHit is the part of api.SearchHitResponse the CLI and MCP read.
 type SearchHit struct {
-	Document     Document     `json:"document"`
-	Score        float64      `json:"score"`
-	MarkdownPath string       `json:"markdown_path,omitempty"`
-	Matches      []ChunkMatch `json:"matches,omitempty"`
+	Document      Document     `json:"document"`
+	Score         float64      `json:"score"`
+	MarkdownPath  string       `json:"markdown_path,omitempty"`
+	BookmarkTitle string       `json:"bookmark_title,omitempty"`
+	Matches       []ChunkMatch `json:"matches,omitempty"`
+	// Bookmarks are what a hit without Matches was saved as, newest saved
+	// first: it matched on them, not on a passage. A daemon older than
+	// metadata search sends none.
+	Bookmarks []SearchHitBookmark `json:"bookmarks,omitempty"`
+}
+
+// SearchHitBookmark mirrors api.SearchHitBookmark.
+type SearchHitBookmark struct {
+	Title      string    `json:"title,omitempty"`
+	FolderPath string    `json:"folder_path,omitempty"`
+	Source     string    `json:"source"`
+	SavedAt    time.Time `json:"saved_at"`
 }
 
 // ChunkMatch mirrors api.ChunkMatchJSON.

@@ -360,7 +360,7 @@ func TestSampler_OverTheIndexedLibrary(t *testing.T) {
 		require.NoError(t, exts.Create(ctx, e))
 		require.NoError(t, idx.Index(ctx, indexer.IndexInput{DocumentID: d.ID, ExtractionID: e.ID,
 			Markdown: fmt.Sprintf("Document %d opens here.\n\nIt goes on for a while.\n\nAnd ends.", i)}))
-		require.NoError(t, docs.MarkFetched(ctx, d.ID))
+		require.NoError(t, docs.MarkFetched(ctx, d.ID, 0))
 	}
 	sampler, err := NewSampler(chunks, idx, time.Minute)
 	require.NoError(t, err)

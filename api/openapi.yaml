@@ -580,12 +580,15 @@ paths:
         Index jobs change no document state, so a partial run strands
         nothing; a failure stops the run and the 500 says how many jobs were
         enqueued before it. There is no parent job to poll. With
-        state=fetched, the default, the fetched documents are every
-        searchable one, so once all their jobs are enqueued the embedding
-        drift baseline is reset: the recorded model digest and Ollama
-        version are cleared, and the daemon's next check records the build
-        serving now, which clears embedding_drift on healthz. A failed
-        reset is a 500 whose detail says all the jobs were enqueued. Before
+        state=fetched, the default, the fetched documents are every one
+        whose chunks search reads, so once all their jobs are enqueued
+        every document's card is made stale and the cards job queued (each
+        card's old vector stays searchable until it is embedded again), and
+        the embedding drift baseline is reset: the recorded model digest
+        and Ollama version are cleared, and the daemon's next check records
+        the build serving now, which clears embedding_drift on healthz. A
+        failure of either is a 500 whose detail says all the jobs were
+        enqueued. Before
         it enqueues them, a state=fetched run with documents owes the
         interests a fresh rebuild (fresh_owed reindex on the interests'
         state), which the daemon queues once the re-embedding has drained:
@@ -628,20 +631,33 @@ paths:
     post:
       tags: [search]
       operationId: search
-      summary: Hybrid BM25 + vector search
+      summary: Hybrid search over the documents' text and what they were saved as
       description: >
-        Runs BM25 and vector retrieval concurrently and fuses them with RRF.
+        Runs five lists concurrently and fuses them with RRF: BM25 and
+        vector retrieval over the documents' chunks, and, each weighted by
+        config (search.fields_weight, search.cards_weight,
+        search.title_weight), the fields list (BM25 over each document's
+        title, the titles and folders it was bookmarked under, its site and
+        its author), the cards list (the vector of each document's card)
+        and the title list (for a query of two distinct terms or more, the
+        documents whose title and bookmark titles hold every one of them).
+        The chunk lists' documents are ranked by their best chunks, then
+        each document list adds its reciprocal ranks to its documents.
         Every request ranks the same pool, the best 100 documents at most,
         whatever k and offset it sends, and returns its window of that
         ranking, [offset, offset+k): pages of one query tile one ranking,
         and a request without an offset gets its first k. total counts the
         ranking, and capped says more matched than it holds.
-        Failed and dead documents are not searched: they may keep the chunks
-        of an earlier fetch, which no longer describe what the URL serves. A
-        pending document (a refetch in flight) is. If the embedding model is
-        unavailable (Ollama down, or slower than search.embed_timeout_seconds),
-        the keyword results are still returned with degraded=true and a
-        warning explaining why; a keyword-index failure is a 500.
+        The chunks of failed and dead documents are not searched: they may
+        be of an earlier fetch, which no longer describes what the URL
+        serves. The document lists reach documents in every state, by what
+        they were saved as, so such a document can be a hit without
+        matches. A pending document (a refetch in flight) is searched. If
+        the embedding model is unavailable (Ollama down, or slower than
+        search.embed_timeout_seconds), both vector lists are dropped and the
+        keyword results are still returned with degraded=true and a warning
+        explaining why; a failure of the keyword index or the fields index
+        (the fields and title lists) is a 500.
       requestBody:
         required: true
         content:
@@ -1128,7 +1144,7 @@ components:
 
     JobKind:
       type: string
-      enum: [fetch, index, import, cluster, summarize]
+      enum: [fetch, index, import, cluster, summarize, cards]
 
     Source:
       type: string
@@ -1181,7 +1197,28 @@ components:
             GitHub allows 60 API requests an hour; with any token, even one
             with no scopes, 5,000.
         interests: { $ref: "#/components/schemas/InterestsState" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests]
+        document_fields: { $ref: "#/components/schemas/DocumentFieldsCheck" }
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields]
+
+    DocumentFieldsCheck:
+      description: >
+        What the daemon's start did to the documents' search fields, the
+        rows the fields, title and cards lists search: it checks their
+        full-text index against them and rebuilds the index when the two
+        disagree, then derives the fields of documents without them. Fixed
+        at start, not a check made for the request; a restart checks again.
+        A start that fails here still serves, and status stays ok, but
+        search may miss documents until a start succeeds.
+      type: object
+      properties:
+        checked_at: { type: string, format: date-time, description: "When the start checked" }
+        rebuilt:
+          type: boolean
+          description: "Whether the index disagreed with the fields and was rebuilt"
+        error:
+          type: string
+          description: "Why the start couldn't check or derive the fields; present only when it couldn't"
+      required: [checked_at, rebuilt]
 
     EmbeddingDrift:
       description: >
@@ -1360,7 +1397,14 @@ components:
           type: object
           description: Jobs per status; statuses with none are absent.
           additionalProperties: { type: integer }
-      required: [version, bookmarks_total, documents_total]
+        cards_stale:
+          type: integer
+          description: >
+            The documents' cards left to embed: those whose text changed
+            since their vector was made, or that have none. The cards job
+            embeds them; a backlog that stays with no cards job pending or
+            running is one `curio doctor` warns of.
+      required: [version, bookmarks_total, documents_total, cards_stale]
 
     Metrics:
       type: object
@@ -1662,9 +1706,29 @@ components:
             documents list names it.
         matches:
           type: array
-          description: Top matching chunks for this document, in score order
+          description: >
+            Top matching chunks for this document, in score order. Absent
+            for a hit that matched on what it was saved as alone (its saved
+            title, folders, site, author or card), as a failed or dead
+            document, whose chunks are never searched, always does.
           items: { $ref: "#/components/schemas/ChunkMatch" }
+        bookmarks:
+          type: array
+          description: >
+            Present only on a hit without matches: the bookmarks it was
+            saved under, newest saved first, at most one per source, which
+            say what it matched on.
+          items: { $ref: "#/components/schemas/SearchHitBookmark" }
       required: [document, score]
+
+    SearchHitBookmark:
+      type: object
+      properties:
+        title:       { type: string, description: "The bookmark's title; omitted when it has none" }
+        folder_path: { type: string, description: "The folder it was saved in, as the browser named it; omitted for none" }
+        source:      { $ref: "#/components/schemas/Source" }
+        saved_at:    { type: string, format: date-time }
+      required: [source, saved_at]
 
     ChunkMatch:
       type: object
@@ -1702,11 +1766,15 @@ components:
           type: boolean
           description: >
             Present and true when semantic search was unavailable and items
-            are keyword-only (BM25) results.
+            are keyword-only results: BM25 over the chunks and, when they
+            are weighted, the fields and title lists.
         warnings:
           type: array
           items: { type: string }
-          description: Why the results are degraded; present only when there is something to report.
+          description: >
+            Why the results are degraded, and, when the cards list is
+            weighted, that the results are without it; present only when
+            there is something to report.
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }
@@ -2245,7 +2313,7 @@ components:
           description: When the schedule next opens the queue; present exactly when reason is outside_schedule.
         kinds:
           type: array
-          description: The worker pools' kinds, in the order fetch, index, cluster.
+          description: The worker pools' kinds, in the order fetch, index, cluster, cards.
           items: { $ref: "#/components/schemas/QueueKind" }
       required: [paused, throttle, keep_awake, keep_awake_active, state, kinds]
 

@@ -101,10 +101,14 @@ func searchResults(resp SearchResponse) *ui.SearchResults {
 	for _, item := range resp.Items {
 		hit := ui.SearchHit{DocumentID: item.Document.ID, Title: deref(item.Document.Title),
 			BookmarkTitle: strings.TrimSpace(item.BookmarkTitle), URL: item.Document.URL,
-			ContentType: item.Document.ContentType, Score: item.Score}
+			ContentType: item.Document.ContentType, State: item.Document.State, Score: item.Score}
 		for _, m := range item.Matches {
 			hit.Matches = append(hit.Matches, ui.Match{Segments: ui.Passage(m.Snippet, m.Text), BM25: m.BM25Score,
 				Vector: m.VectorScore})
+		}
+		for _, b := range item.Bookmarks {
+			hit.Bookmarks = append(hit.Bookmarks, ui.SavedBookmark{Title: b.Title, FolderPath: b.FolderPath,
+				Source: b.Source})
 		}
 		res.Hits = append(res.Hits, hit)
 	}
