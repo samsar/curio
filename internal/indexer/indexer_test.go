@@ -487,24 +487,98 @@ func TestIndexer_EmbedStaleCards_StopsBetweenBatches(t *testing.T) {
 }
 
 // TestIndexer_EmbedStaleCards_EmbedFailure: a batch the embedder fails
-// stores nothing of it, keeps the batches before, and says why.
+// stores nothing of it, keeps the batches before, and says why; a wrong
+// width, the model's and not a card's, is never retried a card at a time.
 func TestIndexer_EmbedStaleCards_EmbedFailure(t *testing.T) {
+	for _, failure := range []error{errors.New("ollama: HTTP 500"), embedder.ErrWrongDimension} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			db := sqlitetest.NewDB(t)
+			dim := sqlitetest.Width(t, db)
+			cards := sqlitestore.NewDocumentIndex(db, dim)
+			seedCards(t, db, "local", 40)
+			calls := 0
+			emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
+				if calls++; calls > 1 {
+					return nil, failure
+				}
+				return slices.Repeat([][]float32{make([]float32, dim)}, len(texts)), nil
+			})
+
+			n, err := New(sqlitestore.NewChunks(db, dim), emb, Options{}).EmbedStaleCards(context.Background(), cards,
+				"local")
+			require.ErrorIs(t, err, failure)
+			assert.Contains(t, err.Error(), "embed cards")
+			assert.Equal(t, 32, n)
+			assert.Equal(t, 2, calls, "the failed batch isn't split")
+		})
+	}
+}
+
+// TestIndexer_EmbedStaleCards_ACardTooLong: a card the model can't take
+// fails its batch, which is then embedded a card at a time: the card is
+// marked unembeddable, with a WARN, its batch's other cards and every
+// batch after it are embedded, and later passes leave it alone.
+func TestIndexer_EmbedStaleCards_ACardTooLong(t *testing.T) {
 	db := sqlitetest.NewDB(t)
 	dim := sqlitetest.Width(t, db)
 	cards := sqlitestore.NewDocumentIndex(db, dim)
-	seedCards(t, db, "local", 40)
-	calls := 0
+	seedCards(t, db, "local", 69)
+	docs := sqlitestore.NewDocuments(db)
+	long := &store.Document{TenantID: "local", URL: "https://example.com/long", Title: new("Refused")}
+	require.NoError(t, docs.Create(context.Background(), long))
+	stale, err := cards.StaleCards(context.Background(), "local", "", 100)
+	require.NoError(t, err)
+	require.Len(t, stale, 70)
+	// The requests to expect: each batch of 32 in document order, and the
+	// one holding the long card again a card at a time.
+	var want []int
+	for batch := range slices.Chunk(stale, EmbedBatchSize) {
+		want = append(want, len(batch))
+		if slices.ContainsFunc(batch, func(c store.Card) bool { return c.DocumentID == long.ID }) {
+			want = append(want, slices.Repeat([]int{1}, len(batch))...)
+		}
+	}
+
+	var sizes []int
 	emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
-		if calls++; calls > 1 {
-			return nil, embedder.ErrInputTooLong
+		sizes = append(sizes, len(texts))
+		if slices.ContainsFunc(texts, func(text string) bool { return strings.HasPrefix(text, "Refused") }) {
+			return nil, fmt.Errorf("ollama embed: %w: HTTP 400: the input length exceeds the context length",
+				embedder.ErrInputTooLong)
 		}
 		return slices.Repeat([][]float32{make([]float32, dim)}, len(texts)), nil
 	})
+	var logs bytes.Buffer
+	idx := New(sqlitestore.NewChunks(db, dim), emb, Options{Log: slog.New(slog.NewJSONHandler(&logs, nil))})
+	n, err := idx.EmbedStaleCards(context.Background(), cards, "local")
+	require.NoError(t, err)
+	assert.Equal(t, 69, n)
+	assert.Equal(t, want, sizes, "the failing batch once, then its cards singly, then the batches after it")
+	left, err := cards.StaleCards(context.Background(), "local", "", 100)
+	require.NoError(t, err)
+	assert.Empty(t, left, "the long card is recorded, not stale")
+	var embeddedText string
+	var embeddedAt *string
+	require.NoError(t, db.QueryRow(`SELECT embedded_text, embedded_at FROM document_cards WHERE document_id = ?`,
+		long.ID).Scan(&embeddedText, &embeddedAt))
+	assert.Equal(t, "Refused — example.com", embeddedText)
+	assert.Nil(t, embeddedAt, "recorded as a text the model can't take")
+	var warning struct {
+		Msg        string `json:"msg"`
+		Level      string `json:"level"`
+		DocumentID string `json:"document_id"`
+		Bytes      int    `json:"bytes"`
+	}
+	require.NoError(t, json.Unmarshal(logs.Bytes(), &warning), logs.String())
+	assert.Equal(t, "WARN", warning.Level)
+	assert.Equal(t, long.ID, warning.DocumentID)
+	assert.Equal(t, len(embeddedText), warning.Bytes)
 
-	n, err := New(sqlitestore.NewChunks(db, dim), emb, Options{}).EmbedStaleCards(context.Background(), cards, "local")
-	require.ErrorIs(t, err, embedder.ErrInputTooLong)
-	assert.Contains(t, err.Error(), "embed cards")
-	assert.Equal(t, 32, n)
+	sizes = nil
+	n, err = idx.EmbedStaleCards(context.Background(), cards, "local")
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	assert.Empty(t, sizes, "a later pass leaves the card alone")
 }
 
 // TestIndexer_EmbedStaleCards_LogsProgress: a pass says how far it got

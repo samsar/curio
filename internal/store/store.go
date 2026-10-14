@@ -876,6 +876,10 @@ type CardVector struct {
 // derive them in the transaction of every write that changes what they are
 // derived from. A card has a vector once the cards job has embedded it, and
 // is stale while its text differs from the text its vector was made from.
+// A card whose text the embedding model can't take is marked unembeddable
+// instead: it holds that text as embedded, with no vector, so it isn't
+// stale and isn't searched by meaning until its text changes or
+// ResetCards makes it stale again.
 type DocumentIndex interface {
 	// SearchFields runs query, a MATCH expression as
 	// ChunkStore.BM25Search takes it, against the tenant's documents'
@@ -910,6 +914,12 @@ type DocumentIndex interface {
 	// vector of another width than the index's is an error, and nothing
 	// is written. written counts the vectors stored.
 	PutCardVectors(ctx context.Context, cards []CardVector) (written int, err error)
+	// MarkUnembeddable records, in one transaction, that the embedding
+	// model can't take each card's text, for a card that still holds it:
+	// the card is no longer stale, and any vector it had is deleted. A
+	// card whose text changed since is left stale. marked counts the
+	// cards recorded.
+	MarkUnembeddable(ctx context.Context, cards []Card) (marked int, err error)
 	// ResetCards makes every one of the tenant's cards stale, keeping
 	// their vectors searchable until they are embedded again, and queues
 	// a cards job, at most one pending per tenant, in one transaction.

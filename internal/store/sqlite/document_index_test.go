@@ -410,3 +410,60 @@ func TestDocumentIndex_CountStaleCards(t *testing.T) {
 	assert.Zero(t, count("local"))
 	assert.Equal(t, 1, count("other"), "another tenant's cards are theirs")
 }
+
+// TestDocumentIndex_MarkUnembeddable: a card the model can't take, still
+// holding the text read, is no longer stale and loses the vector it had;
+// one whose text changed since stays stale; a later change of its text,
+// or ResetCards, makes it stale again.
+func TestDocumentIndex_MarkUnembeddable(t *testing.T) {
+	e := newFieldsEnv(t)
+	ix := NewDocumentIndex(e.db, vecDim)
+	ids := make([]string, 0, 3)
+	for i := range 3 {
+		ids = append(ids, *e.ingest(fmt.Sprintf("https://example.com/%d", i), store.SourceChrome,
+			fmt.Sprint("Title ", i), "").DocumentID)
+	}
+	slices.Sort(ids)
+	e.embedStaleCards(ix, 0.1)
+	_, err := ix.ResetCards(e.ctx, "local")
+	require.NoError(t, err)
+	read, err := ix.StaleCards(e.ctx, "local", "", 10)
+	require.NoError(t, err)
+	require.Len(t, read, 3)
+
+	changed := ids[1]
+	e.fetch(changed, "A new title", "", "")
+	marked, err := ix.MarkUnembeddable(e.ctx, read)
+	require.NoError(t, err)
+	assert.Equal(t, 2, marked, "the card that changed since is left")
+	stale, err := ix.StaleCards(e.ctx, "local", "", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []store.Card{{DocumentID: changed, Text: e.card(changed)}}, stale)
+	for _, id := range []string{ids[0], ids[2]} {
+		assert.Equal(t, [][]any{{e.card(id), nil}},
+			dumpRows(t, e.db, `SELECT embedded_text, embedded_at FROM document_cards WHERE document_id = ?`, id),
+			"its text held as embedded, with no time")
+	}
+	hits, err := ix.SearchCards(e.ctx, "local", fillVec(0.1), 10, store.SearchFilters{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{changed}, hitIDs(hits), "the marked cards' vectors are gone")
+
+	staleIDs := func() []string {
+		t.Helper()
+		stale, err := ix.StaleCards(e.ctx, "local", "", 10)
+		require.NoError(t, err)
+		out := make([]string, 0, len(stale))
+		for _, c := range stale {
+			out = append(out, c.DocumentID)
+		}
+		return out
+	}
+	e.fetch(ids[0], "Another title", "", "")
+	assert.Equal(t, ids[:2], staleIDs(), "a change of its text makes a card stale again")
+	_, err = ix.ResetCards(e.ctx, "local")
+	require.NoError(t, err)
+	assert.Equal(t, ids, staleIDs(), "and so does ResetCards")
+	marked, err = ix.MarkUnembeddable(e.ctx, nil)
+	require.NoError(t, err)
+	assert.Zero(t, marked)
+}

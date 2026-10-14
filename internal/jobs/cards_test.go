@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,9 +22,11 @@ import (
 )
 
 // cardsEmbedder embeds every text as a zero vector, or fails with err; it
-// records the batches it was sent.
+// refuses as too long a request holding a text that contains refuse, when
+// set, and records the batches it was sent.
 type cardsEmbedder struct {
-	dim int
+	dim    int
+	refuse string
 
 	mu      sync.Mutex
 	err     error
@@ -38,6 +41,9 @@ func (e *cardsEmbedder) Embed(_ context.Context, texts []string) ([][]float32, e
 	e.batches = append(e.batches, slices.Clone(texts))
 	if e.err != nil {
 		return nil, e.err
+	}
+	if e.refuse != "" && slices.ContainsFunc(texts, func(text string) bool { return strings.Contains(text, e.refuse) }) {
+		return nil, fmt.Errorf("%w: HTTP 400: the input length exceeds the context length", embedder.ErrInputTooLong)
 	}
 	return slices.Repeat([][]float32{make([]float32, e.dim)}, len(texts)), nil
 }
@@ -157,8 +163,8 @@ func TestCardsJob_SharedByABurst(t *testing.T) {
 
 // TestCardsJob_Failures: an embedding model that doesn't answer defers the
 // job without spending its attempt; another error is retried after its
-// backoff; one the model can't take fails it for good. The cards stay
-// stale, and no document is marked.
+// backoff; a model answering at another width fails it for good. The
+// cards stay stale, and no document is marked.
 func TestCardsJob_Failures(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -170,7 +176,8 @@ func TestCardsJob_Failures(t *testing.T) {
 		{"unreachable", fmt.Errorf("%w: dial tcp: connection refused", ollama.ErrUnreachable),
 			store.JobStatusPending, 0, "waiting for the embedding model to answer"},
 		{"other", errors.New("ollama: HTTP 500: oops"), store.JobStatusPending, 1, "ollama: HTTP 500: oops"},
-		{"permanent", embedder.ErrInputTooLong, store.JobStatusFailed, 1, "permanent failure: cards: "},
+		{"permanent", fmt.Errorf("%w: got 768 dimensions, want 1024", embedder.ErrWrongDimension),
+			store.JobStatusFailed, 1, "permanent failure: cards: "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,6 +205,24 @@ func TestCardsJob_Failures(t *testing.T) {
 			assert.Equal(t, map[store.DocState]int{store.DocStatePending: 3}, counts, "no document is marked")
 		})
 	}
+}
+
+// TestCardsJob_ACardTooLong: a card the model can't take doesn't fail the
+// job: the job ends done, every other card embedded, and the card set
+// aside, no longer stale.
+func TestCardsJob_ACardTooLong(t *testing.T) {
+	emb := &cardsEmbedder{refuse: "Page 7 "}
+	deps, db := newCardsDeps(t, 40, emb)
+	job := cardsJob(t, db)
+	runPoolsUntil(t, deps, func(c *assert.CollectT) {
+		got, err := deps.Queue.GetByID(context.Background(), job.ID)
+		require.NoError(c, err)
+		assert.Equal(c, store.JobStatusDone, got.Status)
+	})
+	assert.Zero(t, staleCards(t, deps))
+	var vectors int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM document_cards_vec`).Scan(&vectors))
+	assert.Equal(t, 39, vectors, "every card but the one the model can't take")
 }
 
 // TestCardsJob_DeferralGrowsWithAge: a cards job waits half its age for

@@ -29,7 +29,10 @@
 --
 -- document_cards is the short text a document is embedded by, its card;
 -- embedded_text is the text its vector in document_cards_vec was made
--- from, so a card is stale exactly when the two differ.
+-- from, so a card is stale exactly when the two differ. embedded_text
+-- equal to text with embedded_at NULL means the embedding model couldn't
+-- take that text: the card has no vector and isn't stale, until its text
+-- changes or a reindex-all makes it stale again.
 -- document_cards_vec, at the home's width, and the trigger that deletes a
 -- card's vector with it are created in Go (sqlite.EnsureVectorIndex),
 -- together: a migration can't know the width, and a trigger naming a

@@ -359,6 +359,52 @@ func putCardVector(ctx context.Context, tx *sql.Tx, id string, vec []byte) error
 	return nil
 }
 
+// The statements of MarkUnembeddable. A card the embedding model can't
+// take holds its text as embedded with no time and no vector, so it is out
+// of idx_document_cards_stale and out of the KNN; only a card that still
+// holds the text is marked, under PutCardVectors' guard. Its vector is
+// deleted by primary key, a vec0 point lookup: one made from an earlier
+// text would otherwise still stand for it.
+const (
+	markCardUnembeddableSQL = `UPDATE document_cards SET embedded_text = ?1, embedded_at = NULL
+	WHERE document_id = ?2 AND text = ?1`
+	dropCardVectorSQL = `DELETE FROM document_cards_vec WHERE document_id = ?`
+)
+
+// MarkUnembeddable implements store.DocumentIndex.
+func (x *DocumentIndex) MarkUnembeddable(ctx context.Context, cards []store.Card) (int, error) {
+	if len(cards) == 0 {
+		return 0, nil
+	}
+	tx, err := x.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("mark cards unembeddable: begin: %w", err)
+	}
+	defer tx.Rollback()
+	marked := 0
+	for _, c := range cards {
+		res, err := tx.ExecContext(ctx, markCardUnembeddableSQL, c.Text, c.DocumentID)
+		if err != nil {
+			return 0, fmt.Errorf("mark cards unembeddable: document %s: %w", c.DocumentID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("mark cards unembeddable: document %s: %w", c.DocumentID, err)
+		}
+		if n == 0 {
+			continue // the card changed since it was read: it stays stale
+		}
+		if _, err := tx.ExecContext(ctx, dropCardVectorSQL, c.DocumentID); err != nil {
+			return 0, fmt.Errorf("mark cards unembeddable: document %s: delete its vector: %w", c.DocumentID, err)
+		}
+		marked++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("mark cards unembeddable: commit: %w", err)
+	}
+	return marked, nil
+}
+
 // resetCardsSQL makes the tenant's embedded cards stale, reaching them
 // from the tenant's documents.
 const resetCardsSQL = `UPDATE document_cards SET embedded_text = NULL

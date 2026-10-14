@@ -13185,8 +13185,29 @@ deferral budget ("Waiting is not failing"). Five minutes is what bounds
 the wait once Ollama answers again, since nothing tells the queue it came
 back, at a cost of at most 12 "job deferred" lines an hour through an
 outage; a deferred job is pending, so the card changes meanwhile join it.
-Input too long and a wrong width are permanent; anything else retries
-through the queue. `POST /v1/documents/reindex-all` makes every card stale
+A wrong width is a verdict for the whole job: the model answers every
+card at its width, so no card is to blame. Anything else retries through
+the queue.
+
+**A card the model can't take is set aside, not the job.** A batch of 32
+cards is one request, and one card the model refuses
+(`embedder.ErrInputTooLong`, with a model whose context is smaller than a
+card and the document prefix: a card is at most `docmeta.MaxCardBytes`,
+1,520 bytes, denser in tokens for CJK text) failed the batch, then the
+job for good, and every later job at the same batch, so every card from
+it on stayed stale. Now `EmbedStaleCards` embeds that batch again a card
+at a time: those the model takes are stored, and each it refuses alone is
+recorded (`DocumentIndex.MarkUnembeddable`, under `PutCardVectors`'
+guard: `embedded_text = text`, `embedded_at` NULL, any vector deleted)
+with one WARN naming the document and the card's length in bytes, and the
+pass goes on. Such a card isn't stale, which needs no schema change and
+keeps the stale index as it is, and it is told apart from an embedded one
+without a join to vec0; it isn't searched by meaning, and is tried again
+when its text changes or `ResetCards` runs. A card at a time rather than
+bisecting: simpler and plainly correct, at most 32 more requests, only
+for a batch that already failed. Any other error from those requests ends
+the pass as before. A wrong width isn't split: it would mark every card
+unembeddable. `POST /v1/documents/reindex-all` makes every card stale
 (`ResetCards`, which queues the job), keeping the old vectors searchable
 until they are embedded again; the drift sampler stays chunks-only.
 `document_cards_vec` is created by `EnsureVectorIndex` at the home's

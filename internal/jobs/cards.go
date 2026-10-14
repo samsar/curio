@@ -35,8 +35,10 @@ const cardsRetryDelay = time.Hour
 const cardsWaitReason = "the embedding model to answer"
 
 // cardsHandler builds the closure that embeds a tenant's stale cards
-// (Indexer.EmbedStaleCards). A card the model can't take, or a vector of
-// the wrong width, fails it permanently. An embed that got no answer
+// (Indexer.EmbedStaleCards). A card the model can't take is the indexer's
+// to set aside, as unembeddable, and the job goes on; a vector of the
+// wrong width is the model's, answering every card at its width, so it
+// fails the job permanently. An embed that got no answer
 // (ollama.ErrUnreachable) is no verdict: the job is deferred, its attempt
 // refunded, for half its age (deferral), and the cards embedded before stay
 // embedded. Any other error is retried through the queue's backoff. A
@@ -53,7 +55,7 @@ func cardsHandler(d Deps) HandlerFunc {
 		switch {
 		case err == nil:
 			return nil
-		case errors.Is(err, embedder.ErrInputTooLong), errors.Is(err, embedder.ErrWrongDimension):
+		case errors.Is(err, embedder.ErrWrongDimension):
 			return fmt.Errorf("%w: cards: %w", ErrPermanent, err)
 		case errors.Is(err, ollama.ErrUnreachable):
 			return &DeferError{Until: start.Add(deferral(start.Sub(job.CreatedAt))), Reason: cardsWaitReason,

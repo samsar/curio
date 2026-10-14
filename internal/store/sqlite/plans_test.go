@@ -581,6 +581,11 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 			first: cardByDoc,
 		},
 		{
+			name:  "MarkUnembeddable mark",
+			query: markCardUnembeddableSQL, args: []any{"text", "doc"},
+			first: cardByDoc,
+		},
+		{
 			// The tenant's documents, each card by its primary key.
 			name:  "ResetCards",
 			query: resetCardsSQL, args: []any{"local"},
@@ -946,15 +951,15 @@ func TestQueryPlans_ChunkVectorDeleteIsPointLookup(t *testing.T) {
 }
 
 // TestQueryPlans_CardVectorWritesArePointLookups: the card delete trigger
-// removes a card's vector by its primary key, as the chunks' does, and
-// PutCardVectors updates one in place by it. vec0 reports an UPDATE's
-// plan with a negative idxNum.
+// and MarkUnembeddable remove a card's vector by its primary key, as the
+// chunks' trigger does, and PutCardVectors updates one in place by it.
+// vec0 reports an UPDATE's plan with a negative idxNum.
 func TestQueryPlans_CardVectorWritesArePointLookups(t *testing.T) {
 	db := newTestDB(t)
 	var trigger string
 	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'trg_document_cards_delete'`).Scan(&trigger))
 	require.Contains(t, trigger, "DELETE FROM document_cards_vec WHERE document_id = old.document_id")
-	plan := queryPlan(t, db, `DELETE FROM document_cards_vec WHERE document_id = ?`, "doc")
+	plan := queryPlan(t, db, dropCardVectorSQL, "doc")
 	assert.Regexp(t, regexp.MustCompile(`SCAN document_cards_vec VIRTUAL TABLE INDEX -?\d+:2`), plan)
 
 	plan = queryPlan(t, db, updateCardVectorSQL, queryVector(t), "doc")

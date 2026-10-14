@@ -284,7 +284,7 @@ document_cards
   document_id     UUID PK FK               -- ON DELETE CASCADE
   text            TEXT NOT NULL            -- the card: title, saved titles, site, author, folders
   embedded_text   TEXT                     -- the text its vector was made from; NULL before
-  embedded_at     TIMESTAMP
+  embedded_at     TIMESTAMP                -- NULL with embedded_text = text: the model couldn't take that text
 ```
 
 - `document_fields_fts` is an external-content FTS5 index over the five
@@ -312,7 +312,11 @@ document_cards
   (`json_each`).
 - A card is stale while `embedded_text IS NOT text`;
   `idx_document_cards_stale (document_id) WHERE embedded_text IS NOT text`
-  holds the stale ones alone, which the cards job pages through. A write
+  holds the stale ones alone, which the cards job pages through. A card
+  whose text the embedding model refuses as too long is recorded with
+  `embedded_text = text` and `embedded_at` NULL, and no vector: not
+  stale, so it holds back no other card, and not searched by meaning
+  until its text changes or a reindex-all makes it stale again. A write
   that changes a card's text queues the tenant's cards job in its own
   transaction, due 10 s later (`sqlite.CardsJobDelay`), so the card
   changes of a burst share one job; it runs about 10 s after the change
