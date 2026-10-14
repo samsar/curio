@@ -13072,15 +13072,15 @@ one with `json_each` and can't split a list a line, a trigger holding no
 CTE; `docmeta` keeps its list a line, and the store encodes the array.
 
 Measured on one machine, back to back with the branch before the votes
-(probes over a library of one host, the p50 of 200 calls; the
-benchmarks in `fields_bench_test.go`):
+(probes over a library of one host, the p50 of 200 calls, the median of
+three runs with the votes; the benchmarks in `fields_bench_test.go`):
 
 | | host of 10 | 350 | 3,000 | 10,000 |
 |---|---|---|---|---|
 | `ApplyFetch` before | 0.19 ms | 0.34 ms | 1.84 ms | 5.97 ms |
-| `ApplyFetch` with the votes | 0.26 ms | 0.24 ms | 0.25 ms | 0.24 ms |
+| `ApplyFetch` with the votes | 0.26 ms | 0.25 ms | 0.25 ms | 0.24 ms |
 | `Ingest` before (the host's last 200 saves) | 0.36 ms | 0.38 ms | 1.91 ms | 6.16 ms |
-| `Ingest` with the votes | 0.43 ms | 0.36 ms | 0.36 ms | 0.38 ms |
+| `Ingest` with the votes | 0.42 ms | 0.36 ms | 0.36 ms | 0.39 ms |
 
 `BenchmarkApplyFetch` (re-fetching the host's documents, so the host keeps
 its size) gives 0.15, 0.73 and 6.53 ms on hosts of 10, 1,000 and 10,000
@@ -13091,16 +13091,16 @@ pages declare one name, two or none, failed 16, 8 and 9 calls with
 "database is locked" (the 5 s busy timeout) before, each write holding the
 lock for its host's read, and none in three runs with the votes. A change
 of name costs 28.7 ms on a host of 1,000 and 157 ms on one of 5,000
-before, 6.6 and 40.6 ms with the votes (`BenchmarkRefreshFields_Rename`,
-4,999 siblings renamed in a transaction rolled back: 149 ms before, 36 ms
-with). `BenchmarkIngest` saves on its hosts every iteration, so it
-measures hosts of thousands: 1.18 ms a save before, 0.54 ms with the
-votes. No write can come within 2× of main's: the derived rows themselves,
-their transaction, FTS writes and card, take a fetch's write on a host of
-ten from about 0.03 ms on main to about 0.2 ms. The target is a cost
-independent of the host's size, which the votes meet (a host of 10,000
-against one of 350: 1.0× for `ApplyFetch` and 1.07× for `Ingest`, against
-17.6× and 16× before).
+before, 6.8 to 8.0 and 35 to 44 ms with the votes
+(`BenchmarkRefreshFields_Rename`, 4,999 siblings renamed in a transaction
+rolled back: 149 ms before, 36 ms with). `BenchmarkIngest` saves on its
+hosts every iteration, so it measures hosts of thousands: 1.18 ms a save
+before, 0.54 ms with the votes. No write can come within 2× of main's: the
+derived rows themselves, their transaction, FTS writes and card, take a
+fetch's write on a host of ten from about 0.03 ms on main to 0.2 to 0.3
+ms. The target is a cost independent of the host's size, which the votes
+meet (a host of 10,000 against one of 350: 1.0× for `ApplyFetch` and 1.08×
+for `Ingest`, against 17.6× and 16× before).
 
 A refresh prepares the statements it runs for every document and host once
 a call (`newFieldsTx`), not once a document: the driver caches no
