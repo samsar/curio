@@ -3780,14 +3780,14 @@ embedded text isn't their text, serves the cards job's keyset pass over
 the stale cards and the startup count of tenants with any, so neither
 reads a fresh card. The fields search is driven from the FTS MATCH, each
 hit's row by rowid and its document by primary key; the card search from
-the vec0 KNN, each document by primary key; a card vector's delete is a
-vec0 point lookup, as a chunk vector's is. The refresh's reads (a
-document's inputs, its bookmarks in their order with no sort) and its
-upserts (by `document_id`, never a scan), the startup scan for fields that
-are missing or of older rules (each document once, its row by the unique
-key), `ResetCards` and `ListByDocuments` (a JSON array of IDs, each
-document's bookmarks by `idx_bookmarks_document`) are pinned. The
-stale-card read and the bookmarks by documents write their tenant
+the vec0 KNN, each document by primary key; a card vector's delete and its
+update in place are vec0 point lookups, as a chunk vector's delete is. The
+refresh's reads (a document's inputs, its bookmarks in their order with no
+sort) and its upserts (by `document_id`, never a scan), the startup scan
+for fields that are missing or of older rules (each document once, its row
+by the unique key), `ResetCards` and `ListByDocuments` (a JSON array of
+IDs, each document's bookmarks by `idx_bookmarks_document`) are pinned.
+The stale-card read and the bookmarks by documents write their tenant
 `+d.tenant_id` and `+tenant_id`, so neither walks a tenant index. See
 "Metadata search: a fields index and a card per document".
 
@@ -13191,6 +13191,22 @@ embedded again; the drift sampler stays chunks-only. `document_cards_vec`
 is created by `EnsureVectorIndex` at the home's width with its delete
 trigger, under the rules `chunks_vec` follows, and a new card vector
 table makes every card stale.
+
+**Card vectors are updated in place.** `PutCardVectors` UPDATEs a card's
+vector in `document_cards_vec` by its primary key, a vec0 point lookup,
+and INSERTs one only when the UPDATE changed no row. sqlite-vec (v0.1.6)
+inserts only into its newest chunk, so a vector deleted and inserted again
+leaves its slot in an older chunk empty for good, and a card is embedded
+again more often than it seems: an ordinary import embeds it at the save
+and again after the fetch changes it, which took 3,000 cards from 3 vec0
+chunks to 6 when re-embedding deleted and inserted, against 3 in place.
+Three reindex-alls (every card made stale, then embedded again) took 7,500
+cards from 8 chunks to 30, 32 to 120 MB, and the card KNN's p50 from 11.7
+to 23.0 ms, since the KNN scans every chunk; in place they stay at 8
+chunks, 32 MB and 11.4 to 12.1 ms. `chunks_vec` leaks the same way on
+every reindex and refetch, which delete a document's chunks with their
+vectors and insert new ones; it is left as is, since the new chunks have
+new IDs and another count, so no vector is there to update in place.
 
 **The cards job runs 10 s after the change that queued it.** It is queued
 `sqlite.CardsJobDelay` (10 s) ahead, and its commit wakes no worker: the

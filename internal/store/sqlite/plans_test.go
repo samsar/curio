@@ -936,17 +936,20 @@ func TestQueryPlans_ChunkVectorDeleteIsPointLookup(t *testing.T) {
 	assert.Regexp(t, regexp.MustCompile(`SCAN chunks_vec VIRTUAL TABLE INDEX \d+:2`), plan)
 }
 
-// TestQueryPlans_CardVectorDeleteIsPointLookup: the card delete trigger,
-// and PutCardVectors replacing a vector, remove it by its primary key, as
-// the chunks' do.
-func TestQueryPlans_CardVectorDeleteIsPointLookup(t *testing.T) {
+// TestQueryPlans_CardVectorWritesArePointLookups: the card delete trigger
+// removes a card's vector by its primary key, as the chunks' does, and
+// PutCardVectors updates one in place by it. vec0 reports an UPDATE's
+// plan with a negative idxNum.
+func TestQueryPlans_CardVectorWritesArePointLookups(t *testing.T) {
 	db := newTestDB(t)
 	var trigger string
 	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'trg_document_cards_delete'`).Scan(&trigger))
 	require.Contains(t, trigger, "DELETE FROM document_cards_vec WHERE document_id = old.document_id")
+	plan := queryPlan(t, db, `DELETE FROM document_cards_vec WHERE document_id = ?`, "doc")
+	assert.Regexp(t, regexp.MustCompile(`SCAN document_cards_vec VIRTUAL TABLE INDEX -?\d+:2`), plan)
 
-	plan := queryPlan(t, db, deleteCardVectorSQL, "doc")
-	assert.Regexp(t, regexp.MustCompile(`SCAN document_cards_vec VIRTUAL TABLE INDEX \d+:2`), plan)
+	plan = queryPlan(t, db, updateCardVectorSQL, queryVector(t), "doc")
+	assert.Regexp(t, regexp.MustCompile(`SCAN document_cards_vec VIRTUAL TABLE INDEX -?\d+:2`), plan)
 }
 
 // TestQueryPlans_SampleChunksReadsVectorsByID: every vector the sample

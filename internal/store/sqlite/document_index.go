@@ -3,6 +3,7 @@ package sqlite
 import (
 	"cmp"
 	"context"
+	"database/sql"
 	"fmt"
 	"math"
 	"slices"
@@ -264,12 +265,16 @@ func (x *DocumentIndex) StaleCards(ctx context.Context, tenantID, after string, 
 
 // The statements of PutCardVectors. A card is marked embedded only while
 // its text is the text embedded, and only then does its vector change:
-// vec0 has no upsert, so the old vector is deleted, a point lookup by
-// primary key, and the new one inserted.
+// vec0 has no upsert, so the vector is updated in place, a point lookup by
+// primary key, and inserted only when the card has none. Deleting it and
+// inserting it again would leak a slot: sqlite-vec (v0.1.6) inserts only
+// into its newest chunk, so the slot freed in an older one is never used
+// again, and every re-embed of a card (a fetch after its save, a
+// reindex-all) would grow the table and every KNN scan of it.
 const (
 	markCardEmbeddedSQL = `UPDATE document_cards SET embedded_text = ?1, embedded_at = ` + sqlNow + `
 	WHERE document_id = ?2 AND text = ?1`
-	deleteCardVectorSQL = `DELETE FROM document_cards_vec WHERE document_id = ?`
+	updateCardVectorSQL = `UPDATE document_cards_vec SET embedding = ? WHERE document_id = ?`
 	insertCardVectorSQL = `INSERT INTO document_cards_vec (document_id, embedding) VALUES (?, ?)`
 )
 
@@ -306,11 +311,8 @@ func (x *DocumentIndex) PutCardVectors(ctx context.Context, cards []store.CardVe
 		if err != nil {
 			return 0, fmt.Errorf("put card vectors: serialize document %s's: %w", c.DocumentID, err)
 		}
-		if _, err := tx.ExecContext(ctx, deleteCardVectorSQL, c.DocumentID); err != nil {
-			return 0, fmt.Errorf("put card vectors: delete document %s's old one: %w", c.DocumentID, err)
-		}
-		if _, err := tx.ExecContext(ctx, insertCardVectorSQL, c.DocumentID, vec); err != nil {
-			return 0, fmt.Errorf("put card vectors: insert document %s's: %w", c.DocumentID, err)
+		if err := putCardVector(ctx, tx, c.DocumentID, vec); err != nil {
+			return 0, fmt.Errorf("put card vectors: document %s: %w", c.DocumentID, err)
 		}
 		written++
 	}
@@ -318,6 +320,26 @@ func (x *DocumentIndex) PutCardVectors(ctx context.Context, cards []store.CardVe
 		return 0, fmt.Errorf("put card vectors: commit: %w", err)
 	}
 	return written, nil
+}
+
+// putCardVector stores vec as document id's card vector: in place of the
+// one it has, else as a new one.
+func putCardVector(ctx context.Context, tx *sql.Tx, id string, vec []byte) error {
+	res, err := tx.ExecContext(ctx, updateCardVectorSQL, vec, id)
+	if err != nil {
+		return fmt.Errorf("update its vector: %w", err)
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update its vector: %w", err)
+	}
+	if updated > 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, insertCardVectorSQL, id, vec); err != nil {
+		return fmt.Errorf("insert its vector: %w", err)
+	}
+	return nil
 }
 
 // resetCardsSQL makes the tenant's embedded cards stale, reaching them

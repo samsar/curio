@@ -5,6 +5,7 @@ import (
 	"slices"
 	"testing"
 
+	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -284,4 +285,99 @@ func TestDocumentIndex_CardVectors(t *testing.T) {
 	theirStale, err := ix.StaleCards(e.ctx, "other", "", 10)
 	require.NoError(t, err)
 	assert.Len(t, theirStale, 1, "another tenant's cards are theirs")
+}
+
+// cardSlot is where vec0 keeps document id's card vector: its rowid, and
+// the chunk and the offset in it.
+type cardSlot struct{ rowid, chunk, offset int64 }
+
+func (e *fieldsEnv) cardSlot(id string) cardSlot {
+	e.t.Helper()
+	var s cardSlot
+	require.NoError(e.t, e.db.QueryRow(`SELECT rowid, chunk_id, chunk_offset FROM document_cards_vec_rowids WHERE id = ?`,
+		id).Scan(&s.rowid, &s.chunk, &s.offset))
+	return s
+}
+
+// embedStaleCards embeds every stale card of the tenant as the cards job
+// would, each with a vector of v.
+func (e *fieldsEnv) embedStaleCards(ix *DocumentIndex, v float32) {
+	e.t.Helper()
+	for after := ""; ; {
+		batch, err := ix.StaleCards(e.ctx, "local", after, 32)
+		require.NoError(e.t, err)
+		if len(batch) == 0 {
+			return
+		}
+		put := make([]store.CardVector, len(batch))
+		for i, c := range batch {
+			put[i] = store.CardVector{DocumentID: c.DocumentID, Text: c.Text, Embedding: fillVec(v)}
+		}
+		written, err := ix.PutCardVectors(e.ctx, put)
+		require.NoError(e.t, err)
+		require.Equal(e.t, len(batch), written)
+		after = batch[len(batch)-1].DocumentID
+	}
+}
+
+// TestDocumentIndex_ReembedKeepsTheVectorSlot: a card without a vector
+// gets one inserted; embedding it again updates that vector in place,
+// under the same vec0 rowid in the same slot, where deleting it and
+// inserting it again gives it a new rowid and, in an older chunk than the
+// newest, leaves its slot empty for good.
+func TestDocumentIndex_ReembedKeepsTheVectorSlot(t *testing.T) {
+	e := newFieldsEnv(t)
+	ix := NewDocumentIndex(e.db, vecDim)
+	id := *e.ingest("https://example.com/a", store.SourceChrome, "A title", "").DocumentID
+	e.embedStaleCards(ix, 0.1)
+	require.Equal(t, 1, countRows(t, e.db, "document_cards_vec"), "a card without a vector gets one")
+	slot := e.cardSlot(id)
+
+	_, err := ix.ResetCards(e.ctx, "local")
+	require.NoError(t, err)
+	e.embedStaleCards(ix, 0.7)
+	assert.Equal(t, slot, e.cardSlot(id), "the vector stays in its slot")
+	assert.Equal(t, 1, countRows(t, e.db, "document_cards_vec"))
+	hits, err := ix.SearchCards(e.ctx, "local", fillVec(0.7), 1, store.SearchFilters{})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.InDelta(t, 1.0, hits[0].Score, 1e-6, "the new vector is the one stored")
+
+	// What PutCardVectors no longer does.
+	vec, err := sqlitevec.SerializeFloat32(fillVec(0.3))
+	require.NoError(t, err)
+	_, err = e.db.Exec(`DELETE FROM document_cards_vec WHERE document_id = ?`, id)
+	require.NoError(t, err)
+	_, err = e.db.Exec(insertCardVectorSQL, id, vec)
+	require.NoError(t, err)
+	assert.NotEqual(t, slot.rowid, e.cardSlot(id).rowid,
+		"a delete and an insert give the vector another rowid, and in an older chunk another slot")
+}
+
+// TestDocumentIndex_ReembedsDontGrowTheVectorTable: re-embedding every
+// card, as two reindex-alls do, keeps document_cards_vec at the chunks
+// its first fill took: with a delete and an insert each, sqlite-vec
+// inserts only into its newest chunk, and 1,100 cards took 2 chunks, then
+// 3, then 4.
+func TestDocumentIndex_ReembedsDontGrowTheVectorTable(t *testing.T) {
+	e := newFieldsEnv(t)
+	ix := NewDocumentIndex(e.db, vecDim)
+	for i := range 1100 {
+		_, err := e.db.Exec(`INSERT INTO documents (id, tenant_id, url) VALUES (?, 'local', ?)`,
+			fmt.Sprintf("doc-%04d", i), fmt.Sprintf("https://example.com/%d", i))
+		require.NoError(t, err)
+	}
+	_, err := EnsureDocumentFields(e.ctx, e.db)
+	require.NoError(t, err)
+	e.embedStaleCards(ix, 0.1)
+	chunks := countRows(t, e.db, "document_cards_vec_chunks")
+	require.Positive(t, chunks)
+
+	for round := range 2 {
+		_, err := ix.ResetCards(e.ctx, "local")
+		require.NoError(t, err)
+		e.embedStaleCards(ix, float32(round+2)/10)
+		assert.Equal(t, chunks, countRows(t, e.db, "document_cards_vec_chunks"), "after re-embedding %d times", round+1)
+		assert.Equal(t, 1100, countRows(t, e.db, "document_cards_vec"))
+	}
 }

@@ -322,7 +322,9 @@ document_cards
   `sqlite.EnsureVectorIndex`, with the trigger that deletes a card's
   vector with its card (`trg_document_cards_delete`), never by a
   migration, which can't know the width. A new card vector table makes
-  every card stale.
+  every card stale. A card embedded again has its vector updated in
+  place, never deleted and inserted: sqlite-vec inserts only into its
+  newest chunk, so a deleted vector's slot in an older one stays empty.
 - `sqlite.EnsureDocumentFields`, at daemon start, checks
   `document_fields_fts` against `document_fields` (FTS5's
   `integrity-check` with rank 1, the form that compares the two) and
