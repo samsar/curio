@@ -13116,13 +13116,53 @@ before the full API is up, derives every document whose row is missing or
 was derived by another `RulesVersion`, whole hosts at a time, up to 1,000
 documents a transaction, so a run cut short keeps what it committed and
 the next resumes; then it queues a cards job for every tenant with stale
-cards. One INFO line, "document fields refreshed" (documents, hosts,
-cards_stale, took_ms); a failure fails the start like a migration's. The
-sketch's SQL backfill would have been a second implementation of the
-rules, and it already disagreed with the Go one (it stripped two root
-labels and made every dot of the host a word, TLDs included). The same
-step applies the next rules change (a version bump) to every home.
-`devtool.OpenCopy` runs it too.
+cards. One INFO line, "document fields refreshed" (rebuilt, documents,
+hosts, cards_stale, took_ms). The sketch's SQL backfill would have been a
+second implementation of the rules, and it already disagreed with the Go
+one (it stripped two root labels and made every dot of the host a word,
+TLDs included). The same step applies the next rules change (a version
+bump) to every home. `devtool.OpenCopy` runs it too.
+
+**The start checks the fields index, and never fails over the fields.**
+`EnsureDocumentFields` first checks `document_fields_fts` against
+`document_fields` (`INSERT INTO document_fields_fts(document_fields_fts,
+rank) VALUES('integrity-check', 1)`): rank 1 is what makes FTS5 compare
+the index with its content table, and without it the check passed an
+inconsistent index on the bundled SQLite 3.53.4, so every test's FTS
+check uses it too. SQLite reports an index that disagrees as corruption
+(`ErrCorrupt`), which the store wraps as
+`sqlite.ErrFieldsIndexInconsistent`; the step then rebuilds the index
+from the table (`'rebuild'`), checks it again, and logs one WARN.
+Inconsistency is no idle risk: a write over a row the index disagrees on
+fails with "database disk image is malformed" (`SQLITE_CORRUPT_VTAB`), a
+document's delete and the refresh's own FTS `'delete'` among them. On the
+owner's copy the check takes 14 to 34 ms (warm, cold) and the rebuild 15
+to 20 ms, cheap enough for every start; `chunks_fts`'s check takes 1.76
+s, so the start leaves it alone. The daemon never fails its start over
+this step, unless a shutdown cut it short: one that did exited 1, and the
+launchd agent's `KeepAlive {SuccessfulExit: false}` restarted it every 10
+s for as long as the fault lasted, so curio served nothing. Now it logs
+one ERROR (what failed, that search may miss documents, that the next
+start retries) and serves. healthz reports what the start did as
+`document_fields` (`checked_at`, `rebuilt`, `error`), a value fixed at
+start that needs no read; `curio status` prints one warning line when it
+failed, and `curio doctor` a `search fields` line: ✓ when the start
+checked them, saying when, and that it rebuilt the index if it did; ✗
+with the error and the fix, a restart (`curio daemon stop`, then any
+command starts the daemon, whose start checks and rebuilds the index).
+There is no on-demand check: the CLI can't open the database, an FTS5
+command takes the write lock, and what such a check finds is fixed by a
+restart, whose start runs it.
+
+**Writes keep their derived rows in one transaction.** A write whose
+derived rows fail fails whole; there is no path that saves the document
+and owes its fields. A derived-row write fails only when the database
+itself does (corruption, I/O, a full disk), since the derivation is pure
+Go over fixed statements; a degraded write would keep writing documents
+into a database known to be damaged, and would need a ledger of owed rows
+whose own writes go through the same index. `chunks` and `chunks_fts` have
+had this contract since migration 008, and the start now repairs the
+fields index in well under 50 ms, so a restart is the fix.
 
 **Cards, staleness and the cards job.** A changed card text queues a
 `cards` job in the transaction that changed it (`EnqueueOnce`: at most one

@@ -867,6 +867,30 @@ one from the content it already has and returns it to `fetched`, and
 search query that long falls back to keyword results with the same reason
 in its warning.
 
+**`database disk image is malformed`** on a save, a fetch or a delete,
+or **`search fields` failing in `curio doctor`** — the full-text index of
+the documents' search fields (`document_fields_fts`) no longer matches
+the fields, or the database itself is damaged. Restart the daemon (`curio
+daemon stop`; the next command starts it): its start checks the index
+against the fields and rebuilds it when they disagree, in well under a
+second, and `curio doctor` then says when it checked and that it rebuilt
+the index. A start that can't check them still serves, but search may
+miss documents; `curio status` warns of it, and `curio doctor`'s `search
+fields` check shows the error. To check by hand, with the daemon stopped
+(`curio daemon stop`), macOS's own `sqlite3` will do:
+
+```
+sqlite3 ~/.curio/curio.db "INSERT INTO document_fields_fts (document_fields_fts, rank) VALUES ('integrity-check', 1)"
+sqlite3 ~/.curio/curio.db "INSERT INTO document_fields_fts (document_fields_fts) VALUES ('rebuild')"
+sqlite3 ~/.curio/curio.db "PRAGMA integrity_check"
+```
+
+The first checks the index (no output when it matches; "database disk
+image is malformed" when it doesn't), the second rebuilds it from the
+fields, and the third checks the database itself, which answers `ok` when
+it is sound. If that one reports damage, keep a copy of the home before
+anything else (`cp -R ~/.curio ~/.curio.damaged`).
+
 **`curio home from an older curio`** — the home was made by a curio from
 before home formats: its vectors came from another embedding model, under
 other rules, and nothing converts them. The daemon refuses to start and

@@ -86,6 +86,9 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 			fmt.Fprintln(w, line)
 		}
 	}
+	if f := health.DocumentFields; f != nil {
+		fmt.Fprint(w, searchFieldsWarning(*f))
+	}
 
 	sctx, scancel := context.WithTimeout(ctx, 1*time.Second)
 	defer scancel()
@@ -149,6 +152,17 @@ func failingWarning(u client.UpstreamHealth) string {
 	}
 	return fmt.Sprintf("warning: %s is failing: no answer since %s; last failure %s; run `curio doctor`\n",
 		u.Name, noAnswerSince(u), u.LastFailureClass)
+}
+
+// searchFieldsWarning is the line status prints when the daemon's start
+// couldn't check or derive the documents' search fields, and empty
+// otherwise: the details are doctor's.
+func searchFieldsWarning(f client.DocumentFields) string {
+	if f.Error == "" {
+		return ""
+	}
+	return fmt.Sprintf("warning: the daemon's start couldn't check the search fields (%s); "+
+		"search may miss documents; run `curio doctor`\n", f.Error)
 }
 
 // homeMismatchWarning warns when the daemon answering at this address serves

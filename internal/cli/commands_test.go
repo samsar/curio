@@ -1026,7 +1026,7 @@ func TestDoctor(t *testing.T) {
 	out, err := w.run(t, "doctor")
 	require.NoError(t, err, out)
 	for _, name := range []string{"machine", "curio home", "config", "ollama", "models", "daemon", "launchd",
-		"embeddings", "interests", "github", "fetcher", "content dir"} {
+		"embeddings", "interests", "search fields", "github", "fetcher", "content dir"} {
 		line, _ := doctorLine(t, out, name)
 		assert.Equal(t, "✓", markerOf(line), line)
 	}
@@ -1162,6 +1162,23 @@ func TestDoctor_Interests(t *testing.T) {
 			assert.Equal(t, tc.hint, hint)
 		})
 	}
+}
+
+// TestDoctor_SearchFields: a daemon whose start couldn't check the
+// search fields fails doctor's check, which says when the start ran and
+// that a restart fixes it.
+func TestDoctor_SearchFields(t *testing.T) {
+	checked := time.Now()
+	w := upWorld(t, func(d *api.Deps) {
+		d.DocumentFields = api.DocumentFields{CheckedAt: checked, Error: "derive document fields: disk I/O error"}
+	})
+	out, err := w.run(t, "doctor")
+	require.Error(t, err)
+	line, hint := doctorLine(t, out, "search fields")
+	assert.Equal(t, fmt.Sprintf("✗ %-22s the daemon's start (%s) couldn't check them: derive document fields: "+
+		"disk I/O error; search may miss documents", "search fields", localTime(checked)), line)
+	assert.Contains(t, hint, "restart the daemon: `curio daemon stop`")
+	assert.Contains(t, out, "1 failure(s), 0 warning(s)")
 }
 
 func TestReindex_HelpNamesDrift(t *testing.T) {

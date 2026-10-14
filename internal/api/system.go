@@ -31,7 +31,9 @@ import (
 // requests an hour, which a library with many github.com pages exceeds.
 // Interests is where automatic rebuilds of the interests stand, the
 // scheduler's last check: interests are not health, so it never changes
-// Status.
+// Status. DocumentFields is what the daemon's start found of the
+// documents' search fields; a start that couldn't check them still
+// serves, so it never changes Status either.
 type Health struct {
 	Status          string            `json:"status"`
 	PID             int               `json:"pid"`
@@ -49,6 +51,18 @@ type Health struct {
 	YouTubeFetcher  string            `json:"youtube_fetcher,omitempty"`
 	GitHubToken     bool              `json:"github_token"`
 	Interests       InterestsState    `json:"interests"`
+	DocumentFields  DocumentFields    `json:"document_fields"`
+}
+
+// DocumentFields is what the daemon's start did to the documents' search
+// fields (sqlite.EnsureDocumentFields), fixed when it started: when it
+// checked them, whether it rebuilt their index, which disagreed with
+// them, and the error that stopped it, if one did. Search may miss
+// documents until a start succeeds; a restart checks them again.
+type DocumentFields struct {
+	CheckedAt time.Time `json:"checked_at"`
+	Rebuilt   bool      `json:"rebuilt"`
+	Error     string    `json:"error,omitempty"`
 }
 
 // EmbeddingDrift says what changed in the build that makes the home's
@@ -242,7 +256,16 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		YouTubeFetcher:  d.YouTubeFetcher,
 		GitHubToken:     d.GitHubToken,
 		Interests:       d.interestsState(),
+		DocumentFields:  d.documentFields(),
 	}, nil
+}
+
+// documentFields is what the daemon's start did to the documents' search
+// fields, its time in UTC.
+func (d Deps) documentFields() DocumentFields {
+	fields := d.DocumentFields
+	fields.CheckedAt = fields.CheckedAt.UTC()
+	return fields
 }
 
 // generationRoles is the roles in use and their models: an empty object,

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
 )
@@ -201,4 +202,64 @@ func TestStatus_Dashboard(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(srv.Home.ConfigPath(), []byte("daemon:\n  ui: false\n"), 0o600))
 	assert.NotContains(t, mustRun(t, srv, "status"), "dashboard:")
+}
+
+// TestStatus_SearchFields: status warns, in one line, when the daemon's
+// start couldn't check the search fields, and says nothing of a start
+// that checked them or rebuilt their index.
+func TestStatus_SearchFields(t *testing.T) {
+	checked := time.Now()
+	for name, tc := range map[string]struct {
+		fields api.DocumentFields
+		want   string
+	}{
+		"checked": {api.DocumentFields{CheckedAt: checked}, ""},
+		"rebuilt": {api.DocumentFields{CheckedAt: checked, Rebuilt: true}, ""},
+		"failed": {api.DocumentFields{CheckedAt: checked, Error: "derive document fields: disk I/O error"},
+			"warning: the daemon's start couldn't check the search fields (derive document fields: disk I/O " +
+				"error); search may miss documents; run `curio doctor`\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.Start(t, func(d *api.Deps) { d.DocumentFields = tc.fields })
+			out := mustRun(t, srv, "status")
+			if tc.want == "" {
+				assert.NotContains(t, out, "search fields")
+				return
+			}
+			assert.Contains(t, out, tc.want)
+			assert.Equal(t, 1, strings.Count(out, "search fields"))
+		})
+	}
+}
+
+// TestSearchFieldsCheck: doctor passes a start that checked the search
+// fields, saying when, and that it rebuilt their index if it did, and
+// fails one that couldn't, with the restart that fixes it.
+func TestSearchFieldsCheck(t *testing.T) {
+	checked := time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC)
+	at := localTime(checked)
+	for name, tc := range map[string]struct {
+		fields               client.DocumentFields
+		status               checkStatus
+		detail, hintContains string
+	}{
+		"checked": {client.DocumentFields{CheckedAt: checked}, statusOK, "checked when the daemon started (" + at + ")", ""},
+		"rebuilt": {client.DocumentFields{CheckedAt: checked, Rebuilt: true}, statusOK,
+			"checked when the daemon started (" + at + "); their index didn't match them, and was rebuilt", ""},
+		"failed": {client.DocumentFields{CheckedAt: checked, Rebuilt: true, Error: "disk I/O error"}, statusFail,
+			"the daemon's start (" + at + ") couldn't check them: disk I/O error; search may miss documents",
+			"`curio daemon stop`, then any curio command starts it again"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, detail, hint := searchFieldsCheck(tc.fields)
+			assert.Equal(t, tc.status, status)
+			assert.Equal(t, tc.detail, detail)
+			if tc.hintContains == "" {
+				assert.Empty(t, hint)
+				return
+			}
+			assert.Contains(t, hint, tc.hintContains)
+			assert.Contains(t, hint, "docs/setup.md")
+		})
+	}
 }

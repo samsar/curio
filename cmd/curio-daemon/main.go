@@ -221,15 +221,10 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 		}
 		return nil, err
 	}
-	// Derives the search fields of the documents a new home, an upgrade or
-	// a change of the derivation's rules left without them, before any
-	// search reads them.
-	fields, err := sqlitestore.EnsureDocumentFields(ctx, db)
+	fields, err := ensureDocumentFields(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("document fields refreshed", "documents", fields.Documents, "hosts", fields.Hosts,
-		"cards_stale", fields.CardsStale, "took_ms", fields.Took.Milliseconds())
 	// sqlite-vec's build flags say whether a released binary has its NEON
 	// distance kernels. Only this log line reads them, so a sqlite-vec that
 	// words its vec_debug() differently costs the line its flags, not the
@@ -245,7 +240,7 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 	syncMarkerSchemaVersion(home, meta, int(schemaVersion))
 	startup.SetInitializing()
 
-	d, err := newDaemon(ctx, cfg, home, meta.EmbeddingDim, db)
+	d, err := newDaemon(ctx, cfg, home, meta.EmbeddingDim, db, fields)
 	if err != nil {
 		return nil, err
 	}
@@ -266,6 +261,35 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 		d.scheduler.Check(ctx)
 	}
 	return d, nil
+}
+
+// ensureDocumentFields makes the documents' search fields right before any
+// search reads them (sqlite.EnsureDocumentFields): it repairs their index
+// when it disagrees with them, and derives the fields a new home, an
+// upgrade or a change of the derivation's rules left missing. It never
+// fails the start but for a shutdown during it: a daemon that can't do
+// this still serves everything but a complete search, where failing would
+// leave launchd restarting it every 10 s for as long as the fault lasts,
+// serving nothing. What it found is reported on healthz, for status and
+// doctor, and the next start tries again.
+func ensureDocumentFields(ctx context.Context, db *sqlitestore.DB) (api.DocumentFields, error) {
+	done, err := sqlitestore.EnsureDocumentFields(ctx, db)
+	fields := api.DocumentFields{CheckedAt: time.Now(), Rebuilt: done.Rebuilt}
+	if done.Rebuilt {
+		slog.Warn("document fields: their search index didn't match them; rebuilt it from them")
+	}
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return api.DocumentFields{}, err
+	case err != nil:
+		slog.Error("document fields: couldn't check or derive the documents' search fields; search may miss "+
+			"documents until a start does, and the next start tries again", "err", err)
+		fields.Error = err.Error()
+		return fields, nil
+	}
+	slog.Info("document fields refreshed", "rebuilt", done.Rebuilt, "documents", done.Documents, "hosts", done.Hosts,
+		"cards_stale", done.CardsStale, "took_ms", done.Took.Milliseconds())
+	return fields, nil
 }
 
 // migrationHooks log each migration and report it through startup, which
@@ -360,9 +384,10 @@ type daemon struct {
 }
 
 // newDaemon builds the stores, clients, engines and pools over db, whose
-// vector index is dim wide.
+// vector index is dim wide; fields is what the start did to the documents'
+// search fields, which healthz reports.
 func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim int,
-	db *sqlitestore.DB) (*daemon, error) {
+	db *sqlitestore.DB, fields api.DocumentFields) (*daemon, error) {
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
 	bms := sqlitestore.NewBookmarks(db)
@@ -481,6 +506,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		KeepAwake:       keeper,
 		YouTubeFetcher:  routed.ytdlp,
 		GitHubToken:     routed.githubToken,
+		DocumentFields:  fields,
 		Log:             slog.Default(),
 	}
 	if scheduler != nil {

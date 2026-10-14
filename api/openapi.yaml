@@ -1197,7 +1197,28 @@ components:
             GitHub allows 60 API requests an hour; with any token, even one
             with no scopes, 5,000.
         interests: { $ref: "#/components/schemas/InterestsState" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests]
+        document_fields: { $ref: "#/components/schemas/DocumentFieldsCheck" }
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields]
+
+    DocumentFieldsCheck:
+      description: >
+        What the daemon's start did to the documents' search fields, the
+        rows the fields, title and cards lists search: it checks their
+        full-text index against them and rebuilds the index when the two
+        disagree, then derives the fields of documents without them. Fixed
+        at start, not a check made for the request; a restart checks again.
+        A start that fails here still serves, and status stays ok, but
+        search may miss documents until a start succeeds.
+      type: object
+      properties:
+        checked_at: { type: string, format: date-time, description: "When the start checked" }
+        rebuilt:
+          type: boolean
+          description: "Whether the index disagreed with the fields and was rebuilt"
+        error:
+          type: string
+          description: "Why the start couldn't check or derive the fields; present only when it couldn't"
+      required: [checked_at, rebuilt]
 
     EmbeddingDrift:
       description: >

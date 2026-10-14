@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	sqlite3 "github.com/mattn/go-sqlite3"
+
 	"github.com/samsar/curio/internal/docmeta"
 	"github.com/samsar/curio/internal/store"
 )
@@ -445,6 +447,9 @@ const maxFieldsBatch = 1000
 
 // FieldsRefresh is what EnsureDocumentFields did.
 type FieldsRefresh struct {
+	// Rebuilt is whether it found the fields index inconsistent with the
+	// fields and rebuilt it.
+	Rebuilt bool
 	// Documents is how many documents' fields it derived, on Hosts hosts.
 	Documents, Hosts int
 	// CardsStale is how many cards, across tenants, are left to embed.
@@ -452,8 +457,25 @@ type FieldsRefresh struct {
 	Took       time.Duration
 }
 
+// ErrFieldsIndexInconsistent is document_fields_fts disagreeing with
+// document_fields, its content table: an entry for text a row no longer
+// holds, or none for text it holds, which a write outside the triggers, or
+// a crash mid-write on a broken disk, can leave. A write over a row it
+// disagrees on fails with "database disk image is malformed"
+// (SQLITE_CORRUPT_VTAB), so EnsureDocumentFields rebuilds the index when
+// its check finds one.
+var ErrFieldsIndexInconsistent = errors.New("the documents' fields index doesn't match their fields")
+
 // The statements of EnsureDocumentFields.
 const (
+	// checkFieldsIndexSQL checks document_fields_fts against its content
+	// table, row by row: rank 1 is what makes FTS5 compare the two; without
+	// it the check reads the index's own structure alone, and passes an
+	// index that disagrees with its rows.
+	checkFieldsIndexSQL = `INSERT INTO document_fields_fts (document_fields_fts, rank) VALUES ('integrity-check', 1)`
+	// rebuildFieldsIndexSQL rebuilds document_fields_fts from its content
+	// table.
+	rebuildFieldsIndexSQL = `INSERT INTO document_fields_fts (document_fields_fts) VALUES ('rebuild')`
 	// unrefreshedSQL lists the documents whose fields are missing or were
 	// derived by other rules than the arg: every document, with its
 	// fields found by primary key.
@@ -469,34 +491,77 @@ const (
 	GROUP BY d.tenant_id`
 )
 
-// EnsureDocumentFields derives the fields and card of every document
-// whose fields are missing or were derived by other rules than
+// EnsureDocumentFields makes the documents' fields right: it checks the
+// fields index against the fields and, when they disagree, rebuilds the
+// index and checks it again; then it derives the fields and card of every
+// document whose fields are missing or were derived by other rules than
 // docmeta.RulesVersion, a host at a time: each transaction holds whole
 // hosts, or up to maxFieldsBatch documents of a larger one, so a run cut
-// short keeps what it committed and the next resumes. Then it queues a
+// short keeps what it committed and the next resumes. Last, it queues a
 // cards job for every tenant with stale cards. A run with nothing to
-// derive writes nothing but those jobs, which queue only when none is
-// pending. The daemon runs it at start, after EnsureVectorIndex: what
-// applies a change of the rules to a home, and derives a new one's rows.
+// rebuild or derive writes nothing but those jobs, which queue only when
+// none is pending. The daemon runs it at start, after EnsureVectorIndex:
+// what repairs the index, applies a change of the rules to a home and
+// derives a new one's rows. On an error it reports what it did before it,
+// whether it rebuilt the index among that.
 func EnsureDocumentFields(ctx context.Context, db *DB) (FieldsRefresh, error) {
 	began := time.Now()
+	var done FieldsRefresh
+	rebuilt, err := ensureFieldsIndex(ctx, db)
+	done.Rebuilt = rebuilt
+	if err != nil {
+		return done, err
+	}
 	batches, docs, hosts, err := unrefreshedBatches(ctx, db)
 	if err != nil {
-		return FieldsRefresh{}, err
+		return done, err
 	}
 	for _, b := range batches {
 		if err := ctx.Err(); err != nil {
-			return FieldsRefresh{}, fmt.Errorf("derive document fields: %w", err)
+			return done, fmt.Errorf("derive document fields: %w", err)
 		}
 		if err := refreshBatch(ctx, db, b); err != nil {
-			return FieldsRefresh{}, fmt.Errorf("derive document fields: %w", err)
+			return done, fmt.Errorf("derive document fields: %w", err)
 		}
 	}
-	stale, err := queueStaleCards(ctx, db)
-	if err != nil {
-		return FieldsRefresh{}, err
+	done.Documents, done.Hosts = docs, hosts
+	if done.CardsStale, err = queueStaleCards(ctx, db); err != nil {
+		return done, err
 	}
-	return FieldsRefresh{Documents: docs, Hosts: hosts, CardsStale: stale, Took: time.Since(began)}, nil
+	done.Took = time.Since(began)
+	return done, nil
+}
+
+// ensureFieldsIndex checks the fields index against the fields and, when
+// they disagree (ErrFieldsIndexInconsistent), rebuilds it from them and
+// checks it again. rebuilt reports whether it rebuilt it.
+func ensureFieldsIndex(ctx context.Context, db *DB) (rebuilt bool, err error) {
+	err = checkFieldsIndex(ctx, db)
+	if !errors.Is(err, ErrFieldsIndexInconsistent) {
+		return false, err
+	}
+	if _, err := db.ExecContext(ctx, rebuildFieldsIndexSQL); err != nil {
+		return false, fmt.Errorf("rebuild the documents' fields index: %w", err)
+	}
+	if err := checkFieldsIndex(ctx, db); err != nil {
+		return true, fmt.Errorf("rebuilt the documents' fields index: %w", err)
+	}
+	return true, nil
+}
+
+// checkFieldsIndex checks the fields index against the fields: an error
+// wrapping ErrFieldsIndexInconsistent when they disagree, which SQLite
+// reports as corruption, and any other when the check couldn't run.
+func checkFieldsIndex(ctx context.Context, db *DB) error {
+	_, err := db.ExecContext(ctx, checkFieldsIndexSQL)
+	var serr sqlite3.Error
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &serr) && serr.Code == sqlite3.ErrCorrupt:
+		return fmt.Errorf("%w: %w", ErrFieldsIndexInconsistent, err)
+	}
+	return fmt.Errorf("check the documents' fields index: %w", err)
 }
 
 // fieldsBatch is documents of one tenant EnsureDocumentFields refreshes in

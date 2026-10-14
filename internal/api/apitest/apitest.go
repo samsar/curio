@@ -172,6 +172,8 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 		InsightEnabled: true,
 		Interests:      scheduler,
 		Gate:           gate,
+		// The new home's fields, checked as the daemon's start checks them.
+		DocumentFields: api.DocumentFields{CheckedAt: time.Now()},
 		TenantID:       TenantID,
 		Log:            quiet,
 	}

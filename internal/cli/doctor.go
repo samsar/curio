@@ -146,8 +146,9 @@ func (r *doctorReport) print(w io.Writer) {
 }
 
 // runOwnChecks adds the checks curio up has no part in: the upstreams
-// fetches depend on and the interests' rebuilds, as the daemon reports
-// them, the fetcher, and whether the content directory is writable. They
+// fetches depend on, the interests' rebuilds and the search fields, as the
+// daemon reports them, the fetcher, and whether the content directory is
+// writable. They
 // read config.yaml, or the defaults when it doesn't load (its own check
 // says why); with no home there is no daemon or content directory to
 // check.
@@ -189,6 +190,11 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 				status, detail, hint := interestsCheck(*s, time.Now())
 				r.add("interests", status, detail, hint)
 			}
+			// What the daemon's start found of the search fields.
+			if f := health.DocumentFields; f != nil {
+				status, detail, hint := searchFieldsCheck(*f)
+				r.add("search fields", status, detail, hint)
+			}
 		}
 	}
 	status, detail, hint := githubCheck(githubToken, configPath)
@@ -213,6 +219,29 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 	if homeErr == nil {
 		checkContentDir(home.ContentDir(), r)
 	}
+}
+
+// searchFieldsFix is what fixes search fields the daemon's start couldn't
+// check: another start, which checks their index against them and
+// rebuilds it when the two disagree.
+const searchFieldsFix = "restart the daemon: `curio daemon stop`, then any curio command starts it again, and its " +
+	"start checks the index and rebuilds it; if that fails too, see \"database disk image is malformed\" under " +
+	"Troubleshooting in docs/setup.md"
+
+// searchFieldsCheck is doctor's check of the documents' search fields as
+// the daemon's start found them. It says when the start checked, so it is
+// never mistaken for a check doctor made.
+func searchFieldsCheck(f client.DocumentFields) (status checkStatus, detail, hint string) {
+	at := localTime(f.CheckedAt)
+	switch {
+	case f.Error != "":
+		return statusFail, fmt.Sprintf("the daemon's start (%s) couldn't check them: %s; search may miss documents",
+			at, f.Error), searchFieldsFix
+	case f.Rebuilt:
+		return statusOK, fmt.Sprintf("checked when the daemon started (%s); their index didn't match them, "+
+			"and was rebuilt", at), ""
+	}
+	return statusOK, fmt.Sprintf("checked when the daemon started (%s)", at), ""
 }
 
 // githubCheck says whether GitHub requests carry a token. Without one

@@ -300,6 +300,9 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		d.Drift = monitor
 		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
 		d.YouTubeFetcher = "/opt/homebrew/bin/yt-dlp"
+		// A start that rebuilt the fields index, then failed.
+		d.DocumentFields = DocumentFields{CheckedAt: time.Now(), Rebuilt: true,
+			Error: "derive document fields: disk I/O error"}
 		// Paused Jina, with every optional field set.
 		d.Upstreams = func() []fetcher.UpstreamHealth {
 			now := time.Now()

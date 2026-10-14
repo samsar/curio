@@ -323,9 +323,14 @@ document_cards
   vector with its card (`trg_document_cards_delete`), never by a
   migration, which can't know the width. A new card vector table makes
   every card stale.
-- `sqlite.EnsureDocumentFields`, at daemon start, derives the rows of the
+- `sqlite.EnsureDocumentFields`, at daemon start, checks
+  `document_fields_fts` against `document_fields` (FTS5's
+  `integrity-check` with rank 1, the form that compares the two) and
+  rebuilds it when they disagree; then it derives the rows of the
   documents without them or derived by older rules, a few hosts per
-  transaction, and queues the cards job where cards are stale.
+  transaction, and queues the cards job where cards are stale. A failure
+  doesn't fail the start: healthz reports it as `document_fields.error`,
+  and the next start tries again.
 
 ### `bookmarks` (reference table)
 

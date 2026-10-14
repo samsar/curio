@@ -1279,6 +1279,104 @@ func TestStart_ChecksTheInterests(t *testing.T) {
 	})
 }
 
+// seedHome migrates home's database and runs seed on it, as a previous
+// daemon would have left it.
+func seedHome(t *testing.T, home *curiohome.Home, seed func(db *sqlitestore.DB)) {
+	t.Helper()
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	_, err = sqlitestore.Migrate(context.Background(), db)
+	require.NoError(t, err)
+	seed(db)
+	require.NoError(t, db.Close())
+}
+
+// startHome runs start on home's database, recording the logs, and
+// returns the daemon and the database it started on.
+func startHome(t *testing.T, home *curiohome.Home) (*daemon, *sqlitestore.DB, *recorder) {
+	t.Helper()
+	cfg, err := config.Load(home.ConfigPath())
+	require.NoError(t, err)
+	meta, err := home.Meta()
+	require.NoError(t, err)
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, db.Close()) })
+	logs := recordLogs(t)
+	d, err := start(context.Background(), cfg, home, meta, db, api.NewStartup())
+	require.NoError(t, err, "the documents' fields never fail the start")
+	return d, db, logs
+}
+
+// at returns the records at level whose message starts with prefix.
+func (r *recorder) at(level slog.Level, prefix string) []slog.Record {
+	var out []slog.Record
+	for _, rec := range r.all() {
+		if rec.Level == level && strings.HasPrefix(rec.Message, prefix) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// TestStart_DocumentFields: a start that can't derive the documents'
+// search fields still starts, logs one ERROR and reports the error on
+// healthz; one that finds their index inconsistent rebuilds it, logs one
+// WARN and reports the rebuild; a sound one reports its check alone.
+func TestStart_DocumentFields(t *testing.T) {
+	t.Run("a refresh that fails", func(t *testing.T) {
+		home := newHome(t, freeLoopbackAddr(t))
+		seedHome(t, home, func(db *sqlitestore.DB) {
+			_, err := db.Exec(`
+				INSERT INTO documents (id, tenant_id, url) VALUES ('doc', 'local', 'https://example.com/a');
+				CREATE TRIGGER t_fail BEFORE INSERT ON document_fields BEGIN SELECT RAISE(ABORT, 'injected'); END;`)
+			require.NoError(t, err)
+		})
+		d, _, logs := startHome(t, home)
+		failed := logs.at(slog.LevelError, "document fields")
+		require.Len(t, failed, 1)
+		assert.Contains(t, failed[0].Message, "search may miss documents")
+		assert.Contains(t, failed[0].Message, "the next start tries again")
+		got := d.apiDeps.DocumentFields
+		assert.Contains(t, got.Error, "injected")
+		assert.False(t, got.CheckedAt.IsZero())
+		assert.Empty(t, logs.messages("document fields refreshed"))
+	})
+	t.Run("an inconsistent index", func(t *testing.T) {
+		home := newHome(t, freeLoopbackAddr(t))
+		seedHome(t, home, func(db *sqlitestore.DB) {
+			_, err := sqlitestore.NewBookmarks(db).Ingest(context.Background(), &store.Bookmark{TenantID: "local",
+				URL: "https://example.com/a", Source: store.SourceChrome, SavedAt: time.Now(), Title: new("Kafka")})
+			require.NoError(t, err)
+			var trigger string
+			require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'trg_document_fields_update'`).
+				Scan(&trigger))
+			for _, q := range []string{`DROP TRIGGER trg_document_fields_update`,
+				`UPDATE document_fields SET title = 'Zookeeper'`, trigger} {
+				_, err := db.Exec(q)
+				require.NoError(t, err)
+			}
+		})
+		d, db, logs := startHome(t, home)
+		assert.Len(t, logs.at(slog.LevelWarn, "document fields"), 1)
+		assert.Empty(t, logs.at(slog.LevelError, "document fields"))
+		assert.Equal(t, api.DocumentFields{CheckedAt: d.apiDeps.DocumentFields.CheckedAt, Rebuilt: true},
+			d.apiDeps.DocumentFields)
+		_, err := db.Exec(`INSERT INTO document_fields_fts (document_fields_fts, rank) VALUES ('integrity-check', 1)`)
+		require.NoError(t, err, "the index matches the fields again")
+		refreshed := logs.messages("document fields refreshed")
+		require.Len(t, refreshed, 1)
+		assert.Equal(t, true, refreshed[0]["rebuilt"])
+	})
+	t.Run("a sound home", func(t *testing.T) {
+		d, _, logs := startHome(t, newHome(t, freeLoopbackAddr(t)))
+		assert.Empty(t, logs.at(slog.LevelWarn, "document fields"))
+		assert.False(t, d.apiDeps.DocumentFields.Rebuilt)
+		assert.Empty(t, d.apiDeps.DocumentFields.Error)
+		assert.False(t, d.apiDeps.DocumentFields.CheckedAt.IsZero())
+	})
+}
+
 // TestHoldReason: a drift the sample verified holds the interests'
 // rebuilds as drifted, one it couldn't verify as perhaps drifted, and no
 // drift holds nothing.

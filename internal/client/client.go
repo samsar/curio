@@ -64,6 +64,18 @@ type Health struct {
 	// Interests is where automatic rebuilds of the interests stand; nil
 	// from a daemon that predates them.
 	Interests *InterestsState `json:"interests,omitempty"`
+	// DocumentFields is what the daemon's start did to the documents'
+	// search fields; nil from a daemon that predates saying so.
+	DocumentFields *DocumentFields `json:"document_fields,omitempty"`
+}
+
+// DocumentFields mirrors api.DocumentFields: when the daemon's start
+// checked the documents' search fields, whether it rebuilt their index,
+// and why it couldn't check or derive them, when it couldn't.
+type DocumentFields struct {
+	CheckedAt time.Time `json:"checked_at"`
+	Rebuilt   bool      `json:"rebuilt"`
+	Error     string    `json:"error,omitempty"`
 }
 
 // EmbeddingDrift mirrors api.EmbeddingDrift: what changed in the build

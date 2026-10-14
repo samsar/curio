@@ -726,6 +726,61 @@ func TestEnsureDocumentFields(t *testing.T) {
 	e.integrityCheck()
 }
 
+// breakFieldsIndex makes the fields index disagree with document id's
+// fields: its title changes with the index's update trigger dropped, which
+// is then put back as it was.
+func (e *fieldsEnv) breakFieldsIndex(id, title string) {
+	e.t.Helper()
+	var trigger string
+	require.NoError(e.t, e.db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'trg_document_fields_update'`).
+		Scan(&trigger))
+	for _, q := range []string{`DROP TRIGGER trg_document_fields_update`,
+		`UPDATE document_fields SET title = '` + title + `' WHERE document_id = '` + id + `'`, trigger} {
+		_, err := e.db.Exec(q)
+		require.NoError(e.t, err)
+	}
+}
+
+// TestEnsureDocumentFields_RebuildsAnInconsistentIndex: an index that
+// disagrees with the fields fails its check as ErrFieldsIndexInconsistent,
+// and a write over the row it disagrees on fails; EnsureDocumentFields
+// rebuilds it, after which it passes the check, searches the fields as
+// they are and takes writes. A consistent index isn't rebuilt.
+func TestEnsureDocumentFields_RebuildsAnInconsistentIndex(t *testing.T) {
+	e := newFieldsEnv(t)
+	id := *e.ingest("https://example.com/a", store.SourceChrome, "Kafka streams", "/Bookmarks Bar/Queues").DocumentID
+	e.ingest("https://example.com/b", store.SourceChrome, "Postgres internals", "")
+	done, err := EnsureDocumentFields(e.ctx, e.db)
+	require.NoError(t, err)
+	assert.False(t, done.Rebuilt, "a consistent index is left alone")
+
+	index := NewDocumentIndex(e.db, vecDim)
+	zookeeper := func() []store.DocumentHit {
+		t.Helper()
+		hits, err := index.SearchFields(e.ctx, "local", `"zookeeper"`, 10, store.SearchFilters{})
+		require.NoError(t, err)
+		return hits
+	}
+	e.breakFieldsIndex(id, "Zookeeper quorum")
+	require.ErrorIs(t, checkFieldsIndex(e.ctx, e.db), ErrFieldsIndexInconsistent)
+	assert.Empty(t, zookeeper(), "the index doesn't hold the title")
+	_, err = e.bms.Ingest(e.ctx, e.bookmark("https://example.com/a", store.SourceSafari, "Another title", ""))
+	require.ErrorContains(t, err, "malformed", "a write over the row fails")
+
+	done, err = EnsureDocumentFields(e.ctx, e.db)
+	require.NoError(t, err)
+	assert.True(t, done.Rebuilt)
+	e.integrityCheck()
+	assert.Len(t, zookeeper(), 1, "the rebuilt index searches the title as stored")
+	e.ingest("https://example.com/a", store.SourceSafari, "Another title", "")
+	assert.Equal(t, "Kafka streams\nAnother title", e.fields(id).BookmarkTitles, "a write over the row succeeds")
+	e.integrityCheck()
+
+	again, err := EnsureDocumentFields(e.ctx, e.db)
+	require.NoError(t, err)
+	assert.False(t, again.Rebuilt)
+}
+
 // TestEnsureDocumentFields_Batches: whole hosts share a transaction up to
 // maxFieldsBatch documents, a larger host is split, and a tenant's
 // documents never share one with another's.
