@@ -40,13 +40,15 @@ type Copy struct {
 	// Width is its vector indexes' width, which its chunks and cards are
 	// read at.
 	Width int
-	// Fields is what deriving its documents' search fields did.
-	Fields    sqlite.FieldsRefresh
-	Documents store.DocumentStore
-	Bookmarks store.BookmarkStore
-	Chunks    store.ChunkStore
-	Index     store.DocumentIndex
-	Insights  store.InsightStore
+	// Fields is what deriving its documents' search fields did, and
+	// SavedDates what classifying its bookmarks' saved dates did.
+	Fields     sqlite.FieldsRefresh
+	SavedDates sqlite.SavedDatesRefresh
+	Documents  store.DocumentStore
+	Bookmarks  store.BookmarkStore
+	Chunks     store.ChunkStore
+	Index      store.DocumentIndex
+	Insights   store.InsightStore
 
 	db *sqlite.DB
 }
@@ -55,8 +57,9 @@ type Copy struct {
 // home's own (ErrLiveHome, ErrHardLinked), and anything that isn't an
 // existing file, before opening anything. Then it does what the daemon
 // does at start, its only writes: migrates it, makes every vector index
-// as wide as its chunks' (sqlite.EnsureVectorIndex), and derives the
-// search fields of the documents without them (sqlite.EnsureDocumentFields).
+// as wide as its chunks' (sqlite.EnsureVectorIndex), derives the search
+// fields of the documents without them (sqlite.EnsureDocumentFields) and
+// classifies its bookmarks' saved dates (sqlite.EnsureSavedDates).
 func OpenCopy(ctx context.Context, path string) (*Copy, error) {
 	if err := checkCopy(path); err != nil {
 		return nil, err
@@ -93,7 +96,12 @@ func migrate(ctx context.Context, path string, db *sqlite.DB) (*Copy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	return &Copy{Path: path, Schema: schema, Width: width, Fields: fields, Documents: sqlite.NewDocuments(db),
+	saved, err := sqlite.EnsureSavedDates(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &Copy{Path: path, Schema: schema, Width: width, Fields: fields, SavedDates: saved,
+		Documents: sqlite.NewDocuments(db),
 		Bookmarks: sqlite.NewBookmarks(db), Chunks: sqlite.NewChunks(db, width),
 		Index: sqlite.NewDocumentIndex(db, width), Insights: sqlite.NewInsights(db), db: db}, nil
 }

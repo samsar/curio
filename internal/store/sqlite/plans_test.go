@@ -203,7 +203,7 @@ func TestQueryPlans(t *testing.T) {
 	bm25Q, bm25Args := bm25Query("local", `"kafka"`, 10, store.SearchFilters{})
 	bm25SourceQ, bm25SourceArgs := bm25Query("local", `"kafka"`, 10,
 		store.SearchFilters{Source: []string{store.SourceChrome}})
-	vecQ, vecArgs := vectorQuery("local", queryVector(t), 10, store.SearchFilters{})
+	vecQ, vecArgs := vectorQuery("local", queryVector(t), overfetchK(800), store.SearchFilters{})
 	getJobQ, getJobArgs := getJobWithDocQuery("local", "job")
 	getDocQ, getDocArgs := getDocumentWithErrorQuery("local", "doc")
 	snippetsQ, snippetsArgs := snippetsQuery(`"kafka"`, []string{"a", "b", "c"})
@@ -462,6 +462,38 @@ func TestQueryPlans(t *testing.T) {
 			avoid: []string{"idx_bookmarks_tenant_"},
 		},
 		{
+			// A tenant's bookmarks, read in saved order from the index
+			// that holds them in it: no sort, whatever their number.
+			name:  "ClassifySavedDates read",
+			query: savedDateRowsSQL, args: []any{"local"},
+			first: "SEARCH bookmarks USING INDEX idx_bookmarks_tenant_saved (tenant_id=?)",
+		},
+		{
+			// One source's the same way, the source checked on each row.
+			name:  "ClassifySavedDates read of a source",
+			query: savedDateSourceRowsSQL, args: []any{"local", store.SourceChrome},
+			first: "SEARCH bookmarks USING INDEX idx_bookmarks_tenant_saved (tenant_id=?)",
+		},
+		{
+			name:  "ClassifySavedDates write",
+			query: setSavedDateSQL, args: []any{store.SavedDateExact, "bookmark"},
+			first: "SEARCH bookmarks USING INDEX sqlite_autoindex_bookmarks_1 (id=?)",
+		},
+		{
+			// The tenant's Safari bookmarks still marked dated, sought
+			// through a tenant index, never a scan of every tenant's.
+			name:  "EnsureSavedDates marks Safari dateless",
+			query: markDatelessSQL, args: []any{"local", store.SourceSafari},
+			first: "SEARCH bookmarks USING INDEX ",
+			want:  []string{"(tenant_id=?"},
+		},
+		{
+			// The tenants in order, from a tenant index alone.
+			name:  "EnsureSavedDates tenants",
+			query: bookmarkTenantsSQL,
+			first: "SCAN bookmarks USING COVERING INDEX idx_bookmarks_tenant_",
+		},
+		{
 			// The foreign-key actions reach the document's rows in each
 			// table by its own index, never a scan of every run's.
 			name:  "document delete reaches its jobs",
@@ -488,7 +520,7 @@ func TestQueryPlans(t *testing.T) {
 		},
 	}
 	for _, tc := range slices.Concat(cases, listPlanCases(t), insightPlanCases(), documentIndexPlanCases(t),
-		voteTriggerPlanCases(t, db)) {
+		voteTriggerPlanCases(t, db), searchFilterPlanCases(t)) {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := queryPlan(t, db, tc.query, tc.args...)
 			assert.True(t, strings.HasPrefix(plan, tc.first), "plan starts with %q:\n%s", tc.first, plan)
@@ -505,6 +537,113 @@ func TestQueryPlans(t *testing.T) {
 	}
 }
 
+// searchFilterPlanCases pin the lists under the filters: the text lists
+// stay driven by their MATCH, each filter one seek of the document's
+// bookmarks or fields, never a walk of a tenant's; a narrowing filter's
+// KNN counts and ranks the rows it leaves from the tenant's documents,
+// each one's chunks or card by its key, and its over-fetch keeps the
+// unfiltered KNN's plan. See docs/decisions.md "Saved dates and search
+// filters".
+func searchFilterPlanCases(t *testing.T) []planCase {
+	after := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	before := after.AddDate(1, 0, 0)
+	saved := store.SearchFilters{SavedAfter: after, SavedBefore: before}
+	published := store.SearchFilters{PublishedAfter: after, PublishedBefore: before, IncludeUndated: true}
+	every := store.SearchFilters{ContentType: []string{"article"}, Host: []string{"example.com"},
+		Source: []string{store.SourceChrome}, Site: []string{"example.com"}, Folder: []string{"/Tech"},
+		SavedAfter: after, SavedBefore: before, PublishedAfter: after, PublishedBefore: before, IncludeUndated: true}
+	const (
+		document   = "SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)"
+		savedSeek  = "SEARCH sb EXISTS USING INDEX idx_bookmarks_document (document_id=? AND saved_at>? AND saved_at<?)"
+		trustSeek  = "SEARCH pb USING INDEX idx_bookmarks_document (document_id=? AND saved_at<?)"
+		folderSeek = "SEARCH fb EXISTS USING INDEX idx_bookmarks_document (document_id=?)"
+		siteSeek   = "SEARCH sf EXISTS USING INDEX sqlite_autoindex_document_fields_1 (document_id=?)"
+		// The tenant's documents, or with predicates that read their rows
+		// (content type, URL, published date), the narrowest tenant index
+		// SQLite takes for them, which reads the same rows.
+		tenantWalk = "SEARCH d USING COVERING INDEX idx_documents_tenant_state_updated (tenant_id=?)"
+		anyTenant  = "INDEX idx_documents_tenant_"
+		exactKNN   = "SCAN v VIRTUAL TABLE INDEX 0:3{___}___[___"
+		chunkSeek  = "SEARCH fc USING INDEX idx_chunks_document (document_id=?)"
+		// The count reads the chunks' keys alone.
+		chunkCount = "SEARCH fc USING COVERING INDEX idx_chunks_document (document_id=?)"
+		cardSeek   = "SEARCH fc USING INDEX sqlite_autoindex_document_cards_1 (document_id=?)"
+	)
+	bookmarkTenants := []string{"idx_bookmarks_tenant_"}
+	// Every filter's seeks, a document's own by its key.
+	everySeek := []string{"SEARCH sb USING INDEX idx_bookmarks_document (document_id=? AND saved_at>? AND saved_at<?)",
+		"SEARCH ub USING INDEX idx_bookmarks_document (document_id=?)", trustSeek,
+		"SEARCH b EXISTS USING INDEX idx_bookmarks_document (document_id=?)", folderSeek, siteSeek, document}
+	var cases []planCase
+	add := func(tc planCase, build func() (string, []any)) {
+		tc.query, tc.args = build()
+		cases = append(cases, tc)
+	}
+	add(planCase{name: "BM25Search by saved window", first: "SCAN chunks_fts VIRTUAL TABLE", want: []string{savedSeek},
+		sorts: true, avoid: bookmarkTenants},
+		func() (string, []any) { return bm25Query("local", `"kafka"`, 800, saved) })
+	add(planCase{name: "BM25Search by published window", first: "SCAN chunks_fts VIRTUAL TABLE",
+		want: []string{trustSeek}, sorts: true, avoid: bookmarkTenants},
+		func() (string, []any) { return bm25Query("local", `"kafka"`, 800, published) })
+	add(planCase{name: "BM25Search by site and folder", first: "SCAN chunks_fts VIRTUAL TABLE",
+		want: []string{folderSeek, siteSeek}, sorts: true, avoid: bookmarkTenants},
+		func() (string, []any) {
+			return bm25Query("local", `"kafka"`, 800, store.SearchFilters{Site: []string{"example.com"},
+				Folder: []string{"/Tech"}})
+		})
+	add(planCase{name: "SearchFields by every filter", first: "SCAN document_fields_fts VIRTUAL TABLE", want: everySeek,
+		sorts: true, avoid: append(bookmarkTenants, anyTenant)},
+		func() (string, []any) { return fieldsQuery("local", `"kafka"`, 200, every) })
+	add(planCase{name: "SearchTitles by every filter", first: "SCAN document_fields_fts VIRTUAL TABLE", want: everySeek,
+		sorts: true, avoid: append(bookmarkTenants, anyTenant)},
+		func() (string, []any) { return titlesQuery("local", `"kafka" AND "retention"`, 200, every) })
+	add(planCase{name: "VectorSearch count", want: []string{tenantWalk, savedSeek, chunkCount},
+		avoid: []string{"SCAN d", "SCAN fc"}},
+		func() (string, []any) { return chunkSet("local", saved).countSQL() })
+	add(planCase{name: "VectorSearch count by every filter", want: []string{anyTenant, chunkCount},
+		avoid: []string{"SCAN d", "SCAN fc"}},
+		func() (string, []any) { return chunkSet("local", every).countSQL() })
+	add(planCase{name: "VectorSearch exact", first: exactKNN,
+		want:  []string{"LIST SUBQUERY", tenantWalk, savedSeek, chunkSeek, "SEARCH c USING INDEX sqlite_autoindex_chunks_1 (id=?)"},
+		sorts: true, avoid: []string{"SCAN chunks", "SCAN d", "SCAN fc"}},
+		func() (string, []any) { return exactVectorQuery(queryVector(t), 800, chunkSet("local", saved)) })
+	add(planCase{name: "VectorSearch exact, its check", want: []string{tenantWalk, savedSeek, chunkSeek},
+		avoid: []string{"SCAN d", "SCAN fc"}},
+		func() (string, []any) { return chunkSet("local", saved).existsSQL() })
+	add(planCase{name: "VectorSearch over the bound", first: "SCAN v VIRTUAL TABLE INDEX 0:3",
+		want:  []string{"SEARCH c USING INDEX sqlite_autoindex_chunks_1 (id=?)", document, savedSeek},
+		sorts: true, avoid: bookmarkTenants},
+		func() (string, []any) { return vectorQuery("local", queryVector(t), vec0MaxK, saved) })
+	// The share of the index a set over the bound is, against every row
+	// the index holds: the chunks' smallest index, and the cards' table,
+	// one row a document.
+	add(planCase{name: "VectorSearch over the bound, the index's rows",
+		first: "SCAN chunks USING COVERING INDEX idx_chunks_document"},
+		func() (string, []any) { return chunkIndexCountSQL, nil })
+	add(planCase{name: "SearchCards over the bound, the index's rows", first: "SCAN document_cards"},
+		func() (string, []any) { return cardIndexCountSQL, nil })
+	add(planCase{name: "SearchCards count", want: []string{tenantWalk, savedSeek, cardSeek},
+		avoid: []string{"SCAN d", "SCAN fc"}},
+		func() (string, []any) { return cardSet("local", saved).countSQL() })
+	add(planCase{name: "SearchCards exact", first: exactKNN,
+		want:  []string{"LIST SUBQUERY", tenantWalk, savedSeek, cardSeek},
+		sorts: true, avoid: []string{"SCAN d", "SCAN fc"}},
+		func() (string, []any) { return exactCardsQuery(queryVector(t), 2000, cardSet("local", saved)) })
+	add(planCase{name: "SearchCards exact, its check", want: []string{tenantWalk, savedSeek, cardSeek},
+		avoid: []string{"SCAN d", "SCAN fc"}},
+		func() (string, []any) { return cardSet("local", saved).existsSQL() })
+	add(planCase{name: "SearchCards over the bound by every filter", first: "SCAN v VIRTUAL TABLE INDEX 0:3",
+		want: []string{document}, sorts: true, avoid: append(bookmarkTenants, anyTenant)},
+		func() (string, []any) { return cardsQuery("local", queryVector(t), vec0MaxK, every) })
+	add(planCase{name: "CountUndated", first: tenantWalk,
+		want: []string{"SEARCH ub USING INDEX idx_bookmarks_document (document_id=?)"}, avoid: []string{"SCAN"}},
+		func() (string, []any) { return undatedQuery("local", saved) })
+	add(planCase{name: "CountUndated by every filter", first: "SEARCH d USING", want: append([]string{anyTenant}, everySeek[:6]...),
+		avoid: append(bookmarkTenants, "SCAN")},
+		func() (string, []any) { return undatedQuery("local", every) })
+	return cases
+}
+
 // documentIndexPlanCases pin the document lists' searches, the cards
 // job's reads and writes, and the statements that keep the fields and
 // cards in step (see "Metadata search: a fields index and a card per
@@ -517,7 +656,7 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 	fieldsSourceQ, fieldsSourceArgs := fieldsQuery("local", `"kafka"`, 200,
 		store.SearchFilters{Source: []string{store.SourceChrome}})
 	titlesQ, titlesArgs := titlesQuery("local", `"kafka" AND "retention"`, 200, store.SearchFilters{})
-	cardsQ, cardsArgs := cardsQuery("local", queryVector(t), 200, store.SearchFilters{})
+	cardsQ, cardsArgs := cardsQuery("local", queryVector(t), overfetchK(200), store.SearchFilters{})
 	const (
 		document     = "SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)"
 		fieldsByDoc  = "SEARCH document_fields USING INDEX sqlite_autoindex_document_fields_1 (document_id=?)"
@@ -1057,4 +1196,59 @@ func TestQueryPlans_SampleChunksReadsVectorsByID(t *testing.T) {
 		assert.Regexp(t, pointLookup, line)
 	}
 	assert.NotRegexp(t, regexp.MustCompile(`VIRTUAL TABLE INDEX \d+:1`), plan)
+}
+
+// TestQueryPlans_EveryFilterCombination: under every combination of the
+// filters' dimensions, the text lists stay driven by their MATCH and the
+// card list's over-fetch by its KNN, never by a walk of the tenant's
+// documents or bookmarks. It guards documentTenantSQL: with the tenant
+// checked on documents' tenant index, SQLite (no ANALYZE) takes two
+// filters on a document's bookmarks to leave few enough documents to walk,
+// searching the fields index once for each.
+func TestQueryPlans_EveryFilterCombination(t *testing.T) {
+	db := newTestDB(t)
+	after := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	before := after.AddDate(1, 0, 0)
+	dimensions := []func(*store.SearchFilters){
+		func(f *store.SearchFilters) { f.ContentType = []string{"article"} },
+		func(f *store.SearchFilters) { f.Host = []string{"example.com"} },
+		func(f *store.SearchFilters) { f.Source = []string{store.SourceChrome} },
+		func(f *store.SearchFilters) { f.Site = []string{"example.com"} },
+		func(f *store.SearchFilters) { f.Folder = []string{"/Tech"} },
+		func(f *store.SearchFilters) { f.SavedAfter, f.SavedBefore = after, before },
+		func(f *store.SearchFilters) { f.PublishedAfter, f.PublishedBefore = after, before },
+		func(f *store.SearchFilters) { f.IncludeUndated = true },
+	}
+	for mask := 1; mask < 1<<len(dimensions); mask++ {
+		var f store.SearchFilters
+		for i, set := range dimensions {
+			if mask&(1<<i) != 0 {
+				set(&f)
+			}
+		}
+		if f.Validate() != nil {
+			continue // include_undated without a date
+		}
+		for _, list := range []struct {
+			name  string
+			first string
+			build func() (string, []any)
+		}{
+			{"BM25Search", "SCAN chunks_fts VIRTUAL TABLE",
+				func() (string, []any) { return bm25Query("local", `"kafka"`, 800, f) }},
+			{"SearchFields", "SCAN document_fields_fts VIRTUAL TABLE",
+				func() (string, []any) { return fieldsQuery("local", `"kafka"`, 200, f) }},
+			{"SearchTitles", "SCAN document_fields_fts VIRTUAL TABLE",
+				func() (string, []any) { return titlesQuery("local", `"kafka" AND "retention"`, 200, f) }},
+			{"SearchCards over-fetch", "SCAN v VIRTUAL TABLE INDEX 0:3",
+				func() (string, []any) { return cardsQuery("local", queryVector(t), vec0MaxK, f) }},
+			{"VectorSearch over-fetch", "SCAN v VIRTUAL TABLE INDEX 0:3",
+				func() (string, []any) { return vectorQuery("local", queryVector(t), vec0MaxK, f) }},
+		} {
+			q, args := list.build()
+			plan := queryPlan(t, db, q, args...)
+			assert.True(t, strings.HasPrefix(plan, list.first), "%s under %+v:\n%s", list.name, f, plan)
+			assert.NotContains(t, plan, "idx_bookmarks_tenant_", "%s under %+v", list.name, f)
+		}
+	}
 }

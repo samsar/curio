@@ -229,15 +229,20 @@ func DocumentLists(d *api.Deps) {
 		search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, TitleWeight: 1, Log: d.Log})
 }
 
-// AddBookmark saves url from source as title in folder through ingest, as
-// an import saves it, and returns the bookmark: its document is the
-// tenant's of url, created pending when there was none.
+// AddBookmark saves url from source as title in folder through ingest,
+// saved now, then classifies the source's saved dates, as an import does,
+// and returns the bookmark: its document is the tenant's of url, created
+// pending when there was none.
 func (s *Server) AddBookmark(t testing.TB, url, source, title, folder string) *store.Bookmark {
 	t.Helper()
+	ctx := context.Background()
 	b := &store.Bookmark{TenantID: TenantID, URL: url, Source: source, SavedAt: time.Now().UTC(),
 		Title: store.NullableString(title), FolderPath: store.NullableString(folder)}
-	if _, err := s.Deps.Bookmarks.Ingest(context.Background(), b); err != nil {
+	if _, err := s.Deps.Bookmarks.Ingest(ctx, b); err != nil {
 		t.Fatalf("save bookmark %s: %v", url, err)
+	}
+	if _, err := s.Deps.Bookmarks.ClassifySavedDates(ctx, TenantID, source); err != nil {
+		t.Fatalf("classify the saved dates of %s: %v", source, err)
 	}
 	return b
 }

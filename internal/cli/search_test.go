@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
@@ -50,4 +51,47 @@ func TestSavedAs(t *testing.T) {
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, savedAs(tc.bookmarks), tc.name)
 	}
+}
+
+// TestSearch_Filters: each filter flag reaches the daemon under its own
+// field, which refuses a value it can't take by that name; a folder whose
+// name holds a comma is one folder; and a date-filtered search says how
+// many documents it couldn't judge, which a search without one doesn't.
+func TestSearch_Filters(t *testing.T) {
+	srv := apitest.Start(t, apitest.DocumentLists)
+	srv.AddBookmark(t, "https://example.com/comma", store.SourceChrome, "Sourdough comma", "/Bookmarks Bar/A,B")
+	srv.AddBookmark(t, "https://example.com/plain", store.SourceChrome, "Sourdough plain", "/Bookmarks Bar/A")
+	srv.AddDocument(t, "https://example.com/undated", store.DocStatePending)
+	srv.AddBookmark(t, "https://example.com/undated", store.SourceSafari, "Sourdough undated", "")
+	_, err := srv.DB.Exec(`UPDATE bookmarks SET saved_date = 'unknown' WHERE source = 'safari'`)
+	require.NoError(t, err)
+
+	for flag, field := range map[string]string{
+		"--saved-after=last week":                                  "saved_after",
+		"--saved-before=2024-13-01":                                "saved_before",
+		"--published-after=2024-01-01T10:00":                       "published_after",
+		"--published-before=yesterday":                             "published_before",
+		"--site=https://example.com":                               "site",
+		"--folder=/":                                               "folder",
+		"--host=" + strings.Repeat("a.example,", 32) + "b.example": "host",
+		"--source=opera":                                           "source",
+		"--type=essay":                                             "content_type",
+		"--include-undated":                                        "include_undated",
+	} {
+		_, err := runCLI(t, srv, "search", "sourdough", flag)
+		require.Error(t, err, flag)
+		assert.Contains(t, err.Error(), "filters."+field+": ", flag)
+	}
+
+	out := mustRun(t, srv, "search", "sourdough", "--folder", "/Bookmarks Bar/A,B")
+	assert.Contains(t, out, "1 results")
+	assert.Contains(t, out, "https://example.com/comma")
+	assert.NotContains(t, out, "no date")
+
+	out = mustRun(t, srv, "search", "sourdough", "--saved-after", "2000-01-01", "--site", "www.example.com")
+	assert.Contains(t, out, "2 results")
+	assert.Contains(t, out, "1 document has no date the date filters can judge; left out (--include-undated keeps them)\n")
+	out = mustRun(t, srv, "search", "sourdough", "--saved-after", "2000-01-01", "--include-undated")
+	assert.Contains(t, out, "3 results")
+	assert.Contains(t, out, "1 document has no date the date filters can judge; kept (--include-undated)\n")
 }

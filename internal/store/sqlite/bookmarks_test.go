@@ -600,3 +600,40 @@ func TestBookmarks_ListDocumentFields(t *testing.T) {
 			"%s: no document, no document fields", order)
 	}
 }
+
+// TestBookmarks_InsertedSavedDate: a dated manual bookmark is inserted
+// exact, its class final, and every other unknown until its source is
+// classified, by Ingest and Create alike; each reads back with its fact
+// and its class.
+func TestBookmarks_InsertedSavedDate(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	for _, tc := range []struct {
+		source   string
+		dateless bool
+		want     store.SavedDate
+	}{
+		{store.SourceManual, false, store.SavedDateExact},
+		{store.SourceManual, true, store.SavedDateUnknown},
+		{store.SourceChrome, false, store.SavedDateUnknown},
+		{store.SourceSafari, true, store.SavedDateUnknown},
+		{store.SourceHTML, false, store.SavedDateUnknown},
+	} {
+		name := fmt.Sprintf("%s-%t", tc.source, tc.dateless)
+		ingested := newIngestBookmark("https://example.com/ingested-"+name, tc.source)
+		ingested.Dateless = tc.dateless
+		_, err := bms.Ingest(ctx, ingested)
+		require.NoError(t, err)
+		created := &store.Bookmark{TenantID: "local", URL: "https://example.com/created-" + name,
+			Source: tc.source, SavedAt: time.Now().UTC(), Dateless: tc.dateless}
+		require.NoError(t, bms.Create(ctx, created))
+		for _, b := range []*store.Bookmark{ingested, created} {
+			assert.Equal(t, tc.want, b.SavedDate, b.URL)
+			got, err := bms.GetByID(ctx, b.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.dateless, got.Dateless, b.URL)
+			assert.Equal(t, tc.want, got.SavedDate, b.URL)
+		}
+	}
+}

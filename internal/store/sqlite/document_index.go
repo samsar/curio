@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -104,7 +105,7 @@ func documentFieldsQuery(rank, match, tenantID string, limit int, filters store.
 	JOIN document_fields f ON f.seq = document_fields_fts.rowid
 	JOIN documents d       ON d.id = f.document_id
 	WHERE document_fields_fts MATCH ?
-	  AND d.tenant_id = ?` + filterSQL + `
+	  AND ` + documentTenantSQL(filters) + filterSQL + `
 	ORDER BY score, f.seq
 	LIMIT ?`
 	args := slices.Concat([]any{match, tenantID}, filterArgs)
@@ -164,26 +165,54 @@ func (x *DocumentIndex) searchDocumentFields(ctx context.Context, q string, args
 }
 
 // cardsQuery builds SearchCards' query: a KNN MATCH on
-// document_cards_vec, then each hit's document by primary key for the
-// tenant and the filters, which sqlite-vec applies after its k cutoff,
-// hence the over-fetch. Like vectorQuery's, its order can have no second
-// key (sqlite-vec refuses one); SearchCards breaks ties.
-func cardsQuery(tenantID string, embedding []byte, limit int, filters store.SearchFilters) (string, []any) {
+// document_cards_vec for the nearest k, then each hit's document by
+// primary key for the tenant and the filters, which sqlite-vec applies
+// after its k cutoff, hence the over-fetch. Like vectorQuery's, its order
+// can have no second key (sqlite-vec refuses one); SearchCards breaks
+// ties.
+func cardsQuery(tenantID string, embedding []byte, k int, filters store.SearchFilters) (string, []any) {
 	filterSQL, filterArgs := buildFilterClause(filters)
 	q := `
 	SELECT v.document_id, v.distance
 	FROM document_cards_vec v
 	JOIN documents d ON d.id = v.document_id
 	WHERE v.embedding MATCH ? AND k = ?
-	  AND d.tenant_id = ?` + filterSQL + `
+	  AND ` + documentTenantSQL(filters) + filterSQL + `
 	ORDER BY v.distance`
-	k := min(limit*10, maxVectorOverfetch)
 	return q, slices.Concat([]any{embedding, k, tenantID}, filterArgs)
+}
+
+// cardSet lists the cards SearchCards may return under filters: the
+// embedded cards of the tenant's documents that pass them. A card is
+// embedded exactly when it has a vector: PutCardVectors sets embedded_at
+// with the vector, MarkUnembeddable clears it with the vector, and a new
+// card vector index clears every card's.
+func cardSet(tenantID string, filters store.SearchFilters) rowSet {
+	filterSQL, filterArgs := buildFilterClause(filters)
+	return rowSet{
+		sql: `SELECT fc.document_id FROM documents d JOIN document_cards fc ON fc.document_id = d.id
+		WHERE fc.embedded_at IS NOT NULL AND d.tenant_id = ?` + filterSQL,
+		args: slices.Concat([]any{tenantID}, filterArgs),
+	}
+}
+
+// exactCardsQuery builds the KNN of the k nearest of set's cards alone,
+// as exactVectorQuery does the chunks'.
+func exactCardsQuery(embedding []byte, k int, set rowSet) (string, []any) {
+	q := `
+	SELECT v.document_id, v.distance
+	FROM document_cards_vec v
+	WHERE v.embedding MATCH ? AND k = ?
+	  AND v.document_id IN (` + set.sql + `)
+	ORDER BY v.distance`
+	return q, slices.Concat([]any{embedding, k}, set.args)
 }
 
 // SearchCards implements store.DocumentIndex. sqlite-vec returns L2
 // distance; a hit's score is 1/(1+distance), higher better, as
-// VectorSearch scores a chunk.
+// VectorSearch scores a chunk. A narrowing filter's cards are read as
+// VectorSearch reads its chunks (see knn.go), falling back to the
+// over-fetch as it does.
 func (x *DocumentIndex) SearchCards(ctx context.Context, tenantID string, embedding []float32, limit int,
 	f store.SearchFilters) ([]store.DocumentHit, error) {
 	if len(embedding) != x.dim {
@@ -196,7 +225,66 @@ func (x *DocumentIndex) SearchCards(ctx context.Context, tenantID string, embedd
 	if err != nil {
 		return nil, fmt.Errorf("serialize query embedding: %w", err)
 	}
-	q, args := cardsQuery(tenantID, serialized, limit, f)
+	plan, err := x.searchCardsQuery(ctx, tenantID, serialized, limit, f)
+	if err != nil {
+		return nil, fmt.Errorf("search cards: %w", err)
+	}
+	if plan.path == knnNone {
+		return nil, nil
+	}
+	hits, err := x.cardHits(ctx, plan.sql, plan.args, limit)
+	if err != nil || len(hits) > 0 || plan.path != knnExact {
+		return hits, err
+	}
+	err = x.db.checkExactKNN(ctx, plan.set, "card")
+	if !errors.Is(err, store.ErrVectorIndexInconsistent) {
+		if err != nil {
+			return nil, fmt.Errorf("search cards: %w", err)
+		}
+		return nil, nil
+	}
+	x.db.warnInconsistent("document_cards_vec", err)
+	k, err := x.db.sizedOverFetchK(ctx, cardIndexCountSQL, overfetchK(limit), plan.n)
+	if err != nil {
+		return nil, fmt.Errorf("search cards: %w", err)
+	}
+	q, args := cardsQuery(tenantID, serialized, k, f)
+	return x.cardHits(ctx, q, args, limit)
+}
+
+// searchCardsQuery plans SearchCards' statement for limit hits, as
+// vectorSearchQuery plans VectorSearch's. The exact KNN reads ten times
+// limit, as the over-fetch does, so that cards at an equal distance past
+// the limit are sorted in by document ID.
+func (x *DocumentIndex) searchCardsQuery(ctx context.Context, tenantID string, embedding []byte, limit int,
+	f store.SearchFilters) (knnQuery, error) {
+	if !f.Narrows() {
+		q, args := cardsQuery(tenantID, embedding, overfetchK(limit), f)
+		return knnQuery{path: knnOverFetch, sql: q, args: args}, nil
+	}
+	set := cardSet(tenantID, f)
+	path, n, err := x.db.chooseKNNPath(ctx, set)
+	if err != nil {
+		return knnQuery{}, err
+	}
+	plan := knnQuery{path: path, set: set, n: n}
+	switch path {
+	case knnNone:
+	case knnOverFetch:
+		k, err := x.db.sizedOverFetchK(ctx, cardIndexCountSQL, overfetchK(limit), n)
+		if err != nil {
+			return knnQuery{}, err
+		}
+		plan.sql, plan.args = cardsQuery(tenantID, embedding, k, f)
+	case knnExact:
+		plan.sql, plan.args = exactCardsQuery(embedding, min(limit*10, vec0MaxK), set)
+	}
+	return plan, nil
+}
+
+// cardHits runs q, a card search's query of documents and distances, and
+// keeps the nearest limit, equal distances by document ID.
+func (x *DocumentIndex) cardHits(ctx context.Context, q string, args []any, limit int) ([]store.DocumentHit, error) {
 	rows, err := x.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search cards: %w", err)
@@ -229,6 +317,32 @@ func (x *DocumentIndex) SearchCards(ctx context.Context, tenantID string, embedd
 		out = append(out, store.DocumentHit{DocumentID: n.id, Score: score})
 	}
 	return out, nil
+}
+
+// undatedQuery builds CountUndated's query: the tenant's documents, of
+// every state, that pass f's other dimensions and its dates with the
+// undated kept, and fail its dates without them. Each date predicate is a
+// seek of the document's bookmarks.
+func undatedQuery(tenantID string, f store.SearchFilters) (string, []any) {
+	otherSQL, otherArgs := buildFilterClause(withoutDates(f))
+	kept, keptArgs := datesPredicate(f, true)
+	judged, judgedArgs := datesPredicate(f, false)
+	q := `SELECT count(*) FROM documents d WHERE d.tenant_id = ?` + otherSQL +
+		` AND (` + kept + `) AND NOT (` + judged + `)`
+	return q, slices.Concat([]any{tenantID}, otherArgs, keptArgs, judgedArgs)
+}
+
+// CountUndated implements store.DocumentIndex.
+func (x *DocumentIndex) CountUndated(ctx context.Context, tenantID string, f store.SearchFilters) (int, error) {
+	if !f.HasDates() {
+		return 0, nil
+	}
+	q, args := undatedQuery(tenantID, f)
+	var n int
+	if err := x.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count undated documents: %w", err)
+	}
+	return n, nil
 }
 
 // staleCardsSQL pages through the tenant's stale cards by document,

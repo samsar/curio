@@ -132,9 +132,16 @@ footer names the address the daemon listens on.
   browsers is listed twice. The time column reads Saved, the line under a
   title adds the browser it was saved in on a wide window (hover it for
   the folder), and a note under the table says why a page can appear
-  twice and why Safari's bookmarks are dated when curio imported them
-  (Safari keeps no save dates). An untitled page is named by that save's
-  own title. The tabs, filters and Load more work as in Last updated, and
+  twice and that undated saves are marked and listed by the time they
+  carry. A save's time says how far it is known: "saved 3 d ago" for an
+  exact date; "saved by Mar 3, 2025" for an upper bound (a folder copied
+  whole, or a save a later import first found); and "date unknown ·
+  imported 2 h ago", when curio imported it, where the time is a
+  browser's bulk import stamp or the source keeps no date (Safari's
+  bookmarks, an HTML export without dates). Hover an inexact time for what
+  it means. On a phone, whose time column folds away, a save's time is a
+  line of its own under the page's address. An untitled page is named by
+  that save's own title. The tabs, filters and Load more work as in Last updated, and
   the tabs still count documents; the line under the table counts saves,
   "Showing 50 of 7,497 saves" with no filter at all, and "Showing 50
   saves" with any.
@@ -155,7 +162,8 @@ footer names the address the daemon listens on.
   a box naming why it failed and what that means, with its **Full
   error** a click away, and for a dead one, that the page is gone. Then
   its text, and beside it related documents, its bookmarks with their
-  folders and tags, and its details: when it was added, updated and
+  folders, tags and save times (marked as the Library's Date saved order
+  marks them), and its details: when it was added, updated and
   fetched (Jina Reader called out), its ID, where its markdown is, and
   the `curio` commands that work for it. Under its facts, a line says
   where the last rebuild of the interests put it: "In Area › Interest", a

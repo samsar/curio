@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"testing"
 
@@ -198,4 +199,44 @@ func TestEnsureVectorIndex_RebuiltTableWorksWithTheStore(t *testing.T) {
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO chunks_vec (chunk_id, embedding) VALUES ('x', ?)`, old)
 	assert.ErrorContains(t, err, "Dimension mismatch")
+}
+
+// TestVec0_KNNBehaviour pins what the KNN lists rely on of sqlite-vec, so
+// an upgrade that changes it fails here: k is at most vec0MaxK, and a KNN
+// whose primary-key IN list names a row with no vector returns no rows
+// and no error, whatever else the list holds (checkExactKNN's trap).
+func TestVec0_KNNBehaviour(t *testing.T) {
+	l := newKNNLib(t)
+	vectors := l.chunked("https://example.com/1", 3, 0)
+	ids := slices.Collect(maps.Keys(vectors))
+	query := queryVectorOf(t, l.query)
+	knn := func(k int, in string, args ...any) (int, error) {
+		q := `SELECT chunk_id FROM chunks_vec WHERE embedding MATCH ? AND k = ?`
+		if in != "" {
+			q += ` AND chunk_id IN (` + in + `)`
+		}
+		rows, err := l.db.Query(q, append([]any{query, k}, args...)...)
+		if err != nil {
+			return 0, err
+		}
+		defer rows.Close()
+		n := 0
+		for rows.Next() {
+			n++
+		}
+		return n, rows.Err()
+	}
+
+	n, err := knn(vec0MaxK, "")
+	require.NoError(t, err)
+	assert.Equal(t, 3, n)
+	_, err = knn(vec0MaxK+1, "")
+	assert.ErrorContains(t, err, "k value in knn query too large")
+
+	n, err = knn(10, "?, ?", ids[0], ids[1])
+	require.NoError(t, err)
+	assert.Equal(t, 2, n, "the listed rows alone")
+	n, err = knn(10, "?, ?, ?", ids[0], ids[1], "no-such-chunk")
+	require.NoError(t, err, "no error")
+	assert.Zero(t, n, "and no rows, though two are listed")
 }

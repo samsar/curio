@@ -83,8 +83,9 @@ func TestOpenCopy_ReadsTheWidth(t *testing.T) {
 
 // TestOpenCopy_BringsTheCopyUpToDate: a copy from before metadata search
 // opens as the daemon would leave it at start: its documents' fields
-// derived and searchable, and a card vector index as wide as its chunks'.
-// Opened again, there is nothing left to derive.
+// derived and searchable, a card vector index as wide as its chunks', and
+// its bookmarks' saved dates classified. Opened again, there is nothing
+// left to derive.
 func TestOpenCopy_BringsTheCopyUpToDate(t *testing.T) {
 	ctx := context.Background()
 	path, _ := newDatabase(t, t.TempDir(), "copy.db", 18)
@@ -95,7 +96,10 @@ func TestOpenCopy_BringsTheCopyUpToDate(t *testing.T) {
 			('d2', 'local', 'https://example.org/b', 'fetched');
 		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path)
 			VALUES ('b1', 'local', 'd1', 'https://example.com/a', 'Consensus in practice', '2026-10-01T00:00:00.000Z',
-				'chrome', '/Bookmarks Bar/Distributed');`)
+				'chrome', '/Bookmarks Bar/Distributed');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, saved_at, source, created_at)
+			VALUES ('b2', 'local', 'd2', 'https://example.org/b', '2026-10-02T00:00:00.000Z', 'safari',
+				'2026-10-02T00:00:01.000Z');`)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -103,6 +107,10 @@ func TestOpenCopy_BringsTheCopyUpToDate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, c.Fields.Documents)
 	assert.Equal(t, 2, c.Fields.CardsStale)
+	assert.Equal(t, 2, c.SavedDates.Bookmarks)
+	assert.Equal(t, 1, c.SavedDates.Changed, "chrome's dated bookmark becomes exact")
+	assert.Equal(t, []int{1, 0, 1}, []int{c.SavedDates.Exact, c.SavedDates.Approx, c.SavedDates.Unknown},
+		"safari's, stored with its import's time, stays unknown")
 	hits, err := c.Index.SearchFields(ctx, store.LocalTenantID, `"distributed"`, 10, store.SearchFilters{})
 	require.NoError(t, err)
 	require.Len(t, hits, 1)
@@ -120,6 +128,7 @@ func TestOpenCopy_BringsTheCopyUpToDate(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, again.Close()) })
 	assert.Zero(t, again.Fields.Documents)
 	assert.Equal(t, 1, again.Fields.CardsStale)
+	assert.Zero(t, again.SavedDates.Changed)
 }
 
 // TestOpenCopy_RefusesAHome: a database beside daemon.pid, or beside the

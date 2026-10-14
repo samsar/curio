@@ -1350,6 +1350,71 @@ func TestMigration019_MetadataSearch(t *testing.T) {
 	require.NoError(t, err, "Up runs again")
 }
 
+// TestMigration020_SavedDates: 020 adds the saved-date columns and their
+// CHECKs, and backfills the fact only the import knew, a Safari or HTML
+// bookmark stored with the import's time, without touching updated_at; no
+// class is computed. Its Down gives 019's schema back byte for byte, and
+// Up runs again.
+func TestMigration020_SavedDates(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 19)
+	_, err := db.Exec(`
+		INSERT INTO bookmarks (id, tenant_id, url, saved_at, source, created_at, updated_at) VALUES
+			('safari-now', 'local', 'https://example.com/1', '2026-10-01T00:00:00.000Z', 'safari',
+			 '2026-10-01T00:00:04.999Z', '2026-10-02T00:00:00.000Z'),
+			('html-now', 'local', 'https://example.com/2', '2026-10-01T00:00:03.000Z', 'html',
+			 '2026-10-01T00:00:00.000Z', '2026-10-02T00:00:00.000Z'),
+			('safari-older', 'local', 'https://example.com/3', '2026-10-01T00:00:00.000Z', 'safari',
+			 '2026-10-01T00:00:10.000Z', '2026-10-02T00:00:00.000Z'),
+			('chrome-now', 'local', 'https://example.com/4', '2026-10-01T00:00:00.000Z', 'chrome',
+			 '2026-10-01T00:00:01.000Z', '2026-10-02T00:00:00.000Z'),
+			('manual-now', 'local', 'https://example.com/5', '2026-10-01T00:00:00.000Z', 'manual',
+			 '2026-10-01T00:00:00.000Z', '2026-10-02T00:00:00.000Z');`)
+	require.NoError(t, err)
+	const rowsQ = `SELECT id, url, saved_at, source, created_at, updated_at FROM bookmarks ORDER BY id`
+	rowsBefore := dumpRows(t, db, rowsQ)
+	schemaBefore := schemaDump(t, db)
+
+	_, err = p.UpTo(ctx, 20)
+	require.NoError(t, err)
+	assert.Equal(t, rowsBefore, dumpRows(t, db, rowsQ), "no saved_at or updated_at changes")
+	assert.Equal(t, [][]any{
+		{"chrome-now", int64(0), "unknown"},
+		{"html-now", int64(1), "unknown"},
+		{"manual-now", int64(0), "unknown"},
+		{"safari-now", int64(1), "unknown"},
+		{"safari-older", int64(0), "unknown"},
+	}, dumpRows(t, db, `SELECT id, dateless, saved_date FROM bookmarks ORDER BY id`),
+		"the fact backfilled, no class computed")
+	for name, update := range map[string]string{
+		"an unknown class":    `UPDATE bookmarks SET saved_date = 'maybe'`,
+		"a dateless of 2":     `UPDATE bookmarks SET dateless = 2`,
+		"a dateless of NULL":  `UPDATE bookmarks SET dateless = NULL`,
+		"a class of NULL":     `UPDATE bookmarks SET saved_date = NULL`,
+		"a class of any case": `UPDATE bookmarks SET saved_date = 'Exact'`,
+	} {
+		_, err := db.Exec(update)
+		assert.ErrorContains(t, err, "constraint failed", name)
+	}
+	for _, class := range store.SavedDates() {
+		_, err := db.Exec(`UPDATE bookmarks SET saved_date = ? WHERE id = 'chrome-now'`, class)
+		assert.NoError(t, err, class)
+	}
+	_, err = db.Exec(`INSERT INTO bookmarks (id, tenant_id, url, saved_at, source)
+		VALUES ('older-daemon', 'local', 'https://example.com/6', '2026-10-03T00:00:00.000Z', 'chrome')`)
+	require.NoError(t, err)
+	assert.Equal(t, [][]any{{int64(0), "unknown"}},
+		dumpRows(t, db, `SELECT dateless, saved_date FROM bookmarks WHERE id = 'older-daemon'`),
+		"a row written without the columns is dated, and claims no date until classified")
+
+	_, err = p.DownTo(ctx, 19)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "019's schema, byte for byte")
+
+	_, err = p.UpTo(ctx, 20)
+	require.NoError(t, err, "Up runs again")
+}
+
 // TestMigration019_FieldsIndexFollowsTheRows: the triggers keep
 // document_fields_fts in step with document_fields through inserts,
 // updates and deletes, and site_name_votes with what the rows contribute;

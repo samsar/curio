@@ -71,18 +71,30 @@ type searchProvenance struct {
 
 // libraryReport counts the judgments, over every query, and those the
 // chunk lists can't return (each variant's groups count those its own
-// lists can't); and what bringing the copy up to date did: how long
-// deriving its fields took, and how many of its cards were embedded, in
-// how long. Those are facts of the run, like its timings: a second run on
-// the same copy derives and embeds nothing.
+// lists can't); the copy's bookmarks by saved-date class, which date
+// filters read; and what bringing the copy up to date did: how long
+// deriving its fields and classifying its saved dates took, and how many
+// of its cards were embedded, in how long. Those are facts of the run,
+// like its timings: a second run on the same copy derives and embeds
+// nothing.
 type libraryReport struct {
 	Judgments    int `json:"judgments"`
 	Missing      int `json:"missing"`
 	Unsearchable int `json:"unsearchable"`
 
+	SavedDates savedDatesReport `json:"saved_dates"`
+
 	FieldsMS      float64 `json:"fields_ms"`
+	SavedDatesMS  float64 `json:"saved_dates_ms"`
 	CardsMS       float64 `json:"cards_ms"`
 	CardsEmbedded int     `json:"cards_embedded"`
+}
+
+// savedDatesReport counts the copy's bookmarks by saved-date class.
+type savedDatesReport struct {
+	Exact   int `json:"exact"`
+	Approx  int `json:"approx"`
+	Unknown int `json:"unknown"`
 }
 
 // variantReport is one variant's run.
@@ -111,13 +123,15 @@ type groupReport struct {
 	Unsearchable int `json:"unsearchable"`
 }
 
-// queryReport is one query's ranking and scores.
+// queryReport is one query's ranking and scores, and the filters it was
+// run with, when it has any.
 type queryReport struct {
-	Index int      `json:"index"`
-	ID    string   `json:"id"`
-	Kind  string   `json:"kind"`
-	Tags  []string `json:"tags"`
-	Query string   `json:"query"`
+	Index   int           `json:"index"`
+	ID      string        `json:"id"`
+	Kind    string        `json:"kind"`
+	Tags    []string      `json:"tags"`
+	Query   string        `json:"query"`
+	Filters *eval.Filters `json:"filters,omitempty"`
 	eval.QueryScore
 	Judgments []judgmentReport   `json:"judgments"`
 	Ranking   []rankedReport     `json:"ranking"`
@@ -158,7 +172,12 @@ func newReport(opts options, cfg config.Config, lib *devtool.Copy, qf queryFile,
 			TitleWeight: cfg.Search.TitleWeight, RRFK: cfg.Search.RRFK, Collapse: cfg.Search.Collapse,
 			EmbedTimeoutSeconds: cfg.Search.EmbedTimeoutSeconds},
 		K: store.MaxSearchK, Variants: names, Baseline: opts.baseline,
-	}, Library: libraryReport{FieldsMS: ms(lib.Fields.Took), CardsMS: ms(cards.took), CardsEmbedded: cards.embedded}}
+	}, Library: libraryReport{
+		SavedDates: savedDatesReport{Exact: lib.SavedDates.Exact, Approx: lib.SavedDates.Approx,
+			Unknown: lib.SavedDates.Unknown},
+		FieldsMS: ms(lib.Fields.Took), SavedDatesMS: ms(lib.SavedDates.Took), CardsMS: ms(cards.took),
+		CardsEmbedded: cards.embedded,
+	}}
 	for _, q := range qf.set.Queries {
 		for _, j := range q.Relevant {
 			rep.Library.Judgments++
@@ -183,8 +202,9 @@ func newQueryReport(i int, q eval.Query, score eval.QueryScore, r ranking, judge
 	if tags == nil {
 		tags = []string{}
 	}
-	qr := queryReport{Index: i, ID: q.ID, Kind: q.Kind, Tags: tags, Query: q.Query, QueryScore: score,
-		Judgments: make([]judgmentReport, 0, len(q.Relevant)), Ranking: make([]rankedReport, 0, len(r.docs)),
+	qr := queryReport{Index: i, ID: q.ID, Kind: q.Kind, Tags: tags, Query: q.Query, Filters: q.Filters,
+		QueryScore: score,
+		Judgments:  make([]judgmentReport, 0, len(q.Relevant)), Ranking: make([]rankedReport, 0, len(r.docs)),
 		TimingsMS: make(map[string]float64, len(r.stages))}
 	rankOf := make(map[string]int, len(r.docs))
 	for pos, d := range r.docs {
@@ -241,6 +261,9 @@ func (r *report) text(b *bytes.Buffer, base *baseline) {
 		r.Library.Unsearchable)
 	fmt.Fprintf(b, "Library: document fields derived in %.0f ms; %d cards embedded in %.1f s\n", r.Library.FieldsMS,
 		r.Library.CardsEmbedded, r.Library.CardsMS/1000)
+	sd := r.Library.SavedDates
+	fmt.Fprintf(b, "Saved dates: %d exact, %d approx, %d unknown, classified in %.0f ms\n", sd.Exact, sd.Approx,
+		sd.Unknown, r.Library.SavedDatesMS)
 	fmt.Fprintf(b, "Searched with %s: %s; k %d; variants %s\n", configName(p.Config), searchSettings(p),
 		p.K, strings.Join(p.Variants, ", "))
 	if base != nil {
@@ -308,8 +331,12 @@ func writeQueries(b *bytes.Buffer, queries []queryReport) {
 		if kind == "" {
 			kind = "-"
 		}
-		rows = append(rows, []string{queryLabel(q.ID, q.Index), kind, score(q.RecallAt10), score(q.RR),
-			score(q.NDCGAt10), highRanks(q.Judgments)})
+		label := queryLabel(q.ID, q.Index)
+		if q.Filters != nil {
+			label += " [filtered]"
+		}
+		rows = append(rows, []string{label, kind, score(q.RecallAt10), score(q.RR), score(q.NDCGAt10),
+			highRanks(q.Judgments)})
 	}
 	table(b, rows)
 }

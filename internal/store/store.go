@@ -25,6 +25,11 @@ var (
 	// ErrNotRunning: a job transition that only applies to a running job
 	// found the job in another status. Nothing was changed.
 	ErrNotRunning = errors.New("store: job is not running")
+	// ErrVectorIndexInconsistent: a vector index lacks the vector of a
+	// chunk or card the store holds as embedded, so a search can't rank
+	// the rows a filter leaves exactly. The KNN lists don't fail with it:
+	// they read their over-fetch instead and warn of it, once.
+	ErrVectorIndexInconsistent = errors.New("store: a vector index is missing vectors")
 )
 
 // MaxEmbeddingDim is the widest embedding the vector index takes: sqlite-vec's
@@ -118,6 +123,14 @@ const (
 	SourceHTML    = "html" // Netscape HTML export, any browser
 )
 
+// Sources returns every bookmark source, in a slice the caller may keep.
+func Sources() []string {
+	return []string{SourceChrome, SourceSafari, SourceFirefox, SourceHTML, SourceManual}
+}
+
+// ValidSource reports whether s is a bookmark source.
+func ValidSource(s string) bool { return slices.Contains(Sources(), s) }
+
 // ExtractionMetaSiteName is the key of an extraction's extraction_meta
 // that holds the site name its page declared, when it declared one. The
 // fetch handler writes it, and the store's derivation of the document's
@@ -207,15 +220,14 @@ func (s DocState) Valid() bool {
 	return false
 }
 
-// Valid reports whether t is one of the ContentType constants.
-func (t ContentType) Valid() bool {
-	switch t {
-	case ContentTypeArticle, ContentTypeRepo, ContentTypeVideo, ContentTypePDF, ContentTypeThread,
-		ContentTypeUnknown:
-		return true
-	}
-	return false
+// ContentTypes returns every ContentType, in a slice the caller may keep.
+func ContentTypes() []ContentType {
+	return []ContentType{ContentTypeArticle, ContentTypeRepo, ContentTypeVideo, ContentTypePDF, ContentTypeThread,
+		ContentTypeUnknown}
 }
+
+// Valid reports whether t is one of the ContentType constants.
+func (t ContentType) Valid() bool { return slices.Contains(ContentTypes(), t) }
 
 // Valid reports whether s is one of the JobStatus constants.
 func (s JobStatus) Valid() bool {
@@ -333,9 +345,54 @@ type Bookmark struct {
 	Source     string
 	FolderPath *string
 	Tags       []string // serialized to JSON in storage
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// Dateless, on input, says the bookmark's source gave no save date,
+	// so SavedAt is the time the import stored it. The zero value is a
+	// dated bookmark.
+	Dateless bool
+	// SavedDate is how far SavedAt can be trusted, read back: the store
+	// derives it from the bookmarks of the bookmark's source
+	// (BookmarkStore.ClassifySavedDates), and ignores it on input.
+	SavedDate SavedDate
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
+
+// SavedDatesClassified is what a classification of saved dates did.
+type SavedDatesClassified struct {
+	// Changed counts the bookmarks whose class it changed.
+	Changed int
+	// Skipped are the IDs of the bookmarks whose stored saved or stored
+	// time doesn't parse: the rule can't place them, so they join no run
+	// and are classified unknown, and the rest are classified without
+	// them.
+	Skipped []string
+}
+
+// SavedDate is how far a bookmark's SavedAt can be trusted as the time it
+// was saved (bookmarks.saved_date).
+type SavedDate string
+
+const (
+	// SavedDateExact: SavedAt is when the bookmark was saved.
+	SavedDateExact SavedDate = "exact"
+	// SavedDateApprox: it was saved at or before SavedAt, which is an
+	// upper bound: a folder copied whole, or a save a later import of the
+	// same browser's bookmarks first found.
+	SavedDateApprox SavedDate = "approx"
+	// SavedDateUnknown: SavedAt says nothing about when it was saved: a
+	// browser's bulk import or sync stamped it, or its source kept no date
+	// and the import stored its own time.
+	SavedDateUnknown SavedDate = "unknown"
+)
+
+// SavedDates returns every SavedDate, best known first, in a slice the
+// caller may keep.
+func SavedDates() []SavedDate {
+	return []SavedDate{SavedDateExact, SavedDateApprox, SavedDateUnknown}
+}
+
+// Valid reports whether d is one of the SavedDate constants.
+func (d SavedDate) Valid() bool { return slices.Contains(SavedDates(), d) }
 
 // Job is a unit of background work.
 type Job struct {
@@ -563,6 +620,16 @@ type BookmarkStore interface {
 	Delete(ctx context.Context, id string) error
 	LinkDocument(ctx context.Context, bookmarkID, documentID string) error
 
+	// ClassifySavedDates derives again how far the SavedAt of each of the
+	// tenant's bookmarks from source can be trusted, from those bookmarks
+	// alone, and writes each class that changed, in one transaction. An
+	// import calls it once its bookmarks are stored, since a bookmark's
+	// class depends on the bookmarks saved around it, and until it has,
+	// they claim no date: Ingest and Create insert every bookmark whose
+	// class other bookmarks could change as unknown. An empty source
+	// classifies every source.
+	ClassifySavedDates(ctx context.Context, tenantID, source string) (SavedDatesClassified, error)
+
 	// TagsForDocument returns the deduplicated set of tags across all
 	// bookmarks (any source) that reference the document. Empty if none.
 	// The indexer uses it to denormalize tags into chunks_fts for boosting.
@@ -691,18 +758,64 @@ type ChunkHit struct {
 	Score      float64
 }
 
-// SearchFilters scopes a search to documents matching all of the set
-// dimensions (values within one dimension are OR'd). An empty filter set
-// matches every document search reads. Every dimension is checked on each
-// hit's document after the search finds it, so a filter narrows the results
-// without changing what the search reads; host is matched against the
-// document URL (there is no host column).
+// MaxFilterValues is the most values one dimension of SearchFilters
+// holds: enough for any question, and few enough that the predicates of
+// every dimension at once stay far inside SQLite's expression depth.
+const MaxFilterValues = 32
+
+// MaxFilterHostBytes is the longest host or site a filter takes, a DNS
+// name's 253 bytes, and MaxFilterFolderBytes the longest folder: far
+// inside the 50,000 bytes SQLite allows a LIKE pattern, which a longer
+// value would pass as a 500 for a client's error.
+const (
+	MaxFilterHostBytes   = 253
+	MaxFilterFolderBytes = 1024
+)
+
+// FilterTimePrecision is how finely the store keeps and compares a
+// filter's times: they are stored as whole milliseconds, so a bound is
+// truncated to one before it is compared.
+const FilterTimePrecision = time.Millisecond
+
+// SearchFilters scopes a search to the documents matching every dimension
+// set; values within one dimension are OR'd. An empty filter set matches
+// every document search reads. The lists read by text (BM25, the fields
+// and the titles) check every dimension on each match; the KNN lists rank
+// the documents a narrowing filter leaves, so a narrow filter still gets
+// their nearest chunks and cards.
+//
+// A bookmark-level dimension (source, folder, the saved window) is
+// checked on the document's bookmarks one dimension at a time: a page
+// saved from Chrome in 2015 and from Safari last week passes source chrome
+// with last week's window.
 type SearchFilters struct {
 	ContentType []string // documents.content_type IN (...)
 	// Host matches documents whose http or https URL has exactly this host,
 	// ASCII case-insensitively as DNS names are. Every character is literal.
 	Host   []string
 	Source []string // EXISTS a bookmark with bookmarks.source IN (...)
+	// Site matches documents on a site, a lowercase registrable domain (an
+	// IP address or a public suffix is its own site), or any subdomain of
+	// it, by their fields' host. Every character is literal.
+	Site []string
+	// Folder matches documents with a bookmark in the folder, a path as
+	// stored with its root ("/Bookmarks Bar/Tech"), or in a folder under
+	// it, by ListBookmarksOpts.FolderPath's rule.
+	Folder []string
+	// SavedAfter and SavedBefore bound when a document was saved, as
+	// [SavedAfter, SavedBefore): a document passes with a bookmark of a
+	// known date (exact, or approx, an upper bound) in the window. A zero
+	// bound leaves its side open; both zero, saved time is no filter.
+	SavedAfter, SavedBefore time.Time
+	// PublishedAfter and PublishedBefore bound when a document was
+	// published, as [PublishedAfter, PublishedBefore): a document passes
+	// with a trusted published date in the window, one at most a day after
+	// its earliest exact save (a later one is a modification date).
+	PublishedAfter, PublishedBefore time.Time
+	// IncludeUndated keeps, besides the documents a date dimension passes,
+	// those it can't judge: no bookmark of a known date for the saved
+	// window, no trusted published date for the published one.
+	IncludeUndated bool
 	// ExcludeDocumentID drops one document from the results. Used by
 	// find-related to exclude the source document; not exposed through
 	// the public search API.
@@ -711,8 +824,80 @@ type SearchFilters struct {
 
 // IsEmpty reports whether no filter dimension is set.
 func (f SearchFilters) IsEmpty() bool {
-	return len(f.ContentType) == 0 && len(f.Host) == 0 && len(f.Source) == 0 &&
-		f.ExcludeDocumentID == ""
+	return !f.Narrows() && f.ExcludeDocumentID == ""
+}
+
+// HasDates reports whether a date dimension is set.
+func (f SearchFilters) HasDates() bool {
+	return f.HasSavedWindow() || f.HasPublishedWindow()
+}
+
+// HasSavedWindow and HasPublishedWindow report whether either bound of
+// their dimension is set.
+func (f SearchFilters) HasSavedWindow() bool {
+	return !f.SavedAfter.IsZero() || !f.SavedBefore.IsZero()
+}
+
+func (f SearchFilters) HasPublishedWindow() bool {
+	return !f.PublishedAfter.IsZero() || !f.PublishedBefore.IsZero()
+}
+
+// Narrows reports whether a dimension other than ExcludeDocumentID is
+// set: one that can leave a small part of the library.
+func (f SearchFilters) Narrows() bool {
+	return len(f.ContentType) > 0 || len(f.Host) > 0 || len(f.Source) > 0 || len(f.Site) > 0 ||
+		len(f.Folder) > 0 || f.HasDates() || f.IncludeUndated
+}
+
+// Validate reports a filter set the store won't take: a list dimension
+// of more than MaxFilterValues values or with an empty one, a host or
+// site longer than MaxFilterHostBytes, a folder longer than
+// MaxFilterFolderBytes or of slashes alone, a window whose start isn't
+// before its end at FilterTimePrecision, or IncludeUndated without a date
+// dimension.
+func (f SearchFilters) Validate() error {
+	for _, d := range []struct {
+		name   string
+		values []string
+		most   int // the longest value, in bytes; 0 for an enum's
+	}{
+		{"content_type", f.ContentType, 0}, {"host", f.Host, MaxFilterHostBytes}, {"source", f.Source, 0},
+		{"site", f.Site, MaxFilterHostBytes}, {"folder", f.Folder, MaxFilterFolderBytes},
+	} {
+		if len(d.values) > MaxFilterValues {
+			return fmt.Errorf("filters.%s: %d values, at most %d", d.name, len(d.values), MaxFilterValues)
+		}
+		for _, v := range d.values {
+			switch {
+			case v == "":
+				return fmt.Errorf("filters.%s: an empty value", d.name)
+			case d.most > 0 && len(v) > d.most:
+				return fmt.Errorf("filters.%s: a value of %d bytes, at most %d", d.name, len(v), d.most)
+			}
+		}
+	}
+	for _, folder := range f.Folder {
+		if strings.Trim(folder, "/") == "" {
+			return fmt.Errorf("filters.folder: %q names no folder", folder)
+		}
+	}
+	if !windowHolds(f.SavedAfter, f.SavedBefore) {
+		return errors.New("filters.saved_after must be before filters.saved_before")
+	}
+	if !windowHolds(f.PublishedAfter, f.PublishedBefore) {
+		return errors.New("filters.published_after must be before filters.published_before")
+	}
+	if f.IncludeUndated && !f.HasDates() {
+		return errors.New("filters.include_undated takes a date filter")
+	}
+	return nil
+}
+
+// windowHolds reports whether [after, before) holds a time the store can
+// keep: either side open, or after before before at FilterTimePrecision.
+func windowHolds(after, before time.Time) bool {
+	return after.IsZero() || before.IsZero() ||
+		after.Truncate(FilterTimePrecision).Before(before.Truncate(FilterTimePrecision))
 }
 
 // ChunkEmbedding is one stored chunk vector, read back from chunks_vec.
@@ -807,12 +992,17 @@ type ChunkStore interface {
 	// snippets, read with no query.
 	Snippets(ctx context.Context, query string, chunkIDs []string) (map[string]string, error)
 
-	// VectorSearch runs an approximate-nearest-neighbor query against
-	// chunks_vec, scoped by filters, and like BM25Search never returns
-	// chunks of failed or dead documents. It over-fetches neighbors, so
-	// excluded chunks nearest the query don't crowd out the hits it
-	// returns. The embedding length must match the schema's vec dimension;
-	// mismatched lengths return an error.
+	// VectorSearch runs a nearest-neighbor query against chunks_vec,
+	// scoped by filters, and like BM25Search never returns chunks of
+	// failed or dead documents. Without a filter that Narrows, it
+	// over-fetches neighbors, so excluded chunks nearest the query don't
+	// crowd out the hits it returns. Under one, it ranks the chunks the
+	// filters leave exactly while they are few enough, and otherwise
+	// over-fetches as many neighbors as their share of the index calls
+	// for; an exact ranking that finds a listed chunk without a vector
+	// (ErrVectorIndexInconsistent) over-fetches instead. The embedding
+	// length must match the schema's vec dimension; mismatched lengths
+	// return an error.
 	VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int, filters SearchFilters) ([]ChunkHit, error)
 
 	// EmbeddingsForDocument reads the stored chunk vectors for a document
@@ -898,10 +1088,19 @@ type DocumentIndex interface {
 	// SearchCards returns at most limit of the tenant's documents whose
 	// card vectors are nearest embedding, scoped by f, nearest first,
 	// equal distances by document ID. Documents of every state are
-	// returned. It over-fetches neighbors, as ChunkStore.VectorSearch
-	// does, so filtered-out cards don't crowd out its hits. embedding
-	// must be the index's width.
+	// returned. It reads neighbors as ChunkStore.VectorSearch does,
+	// over-fetching them or, under a narrowing filter, ranking the
+	// embedded cards it leaves exactly, and over-fetches in its stead the
+	// same way. A card without a vector (never embedded,
+	// or unembeddable) is never returned. embedding must be the index's
+	// width.
 	SearchCards(ctx context.Context, tenantID string, embedding []float32, limit int, f SearchFilters) ([]DocumentHit, error)
+	// CountUndated counts the tenant's documents, of every state, that a
+	// date dimension of f can't judge among those its other dimensions
+	// pass: those f passes with IncludeUndated and fails without it,
+	// whichever f holds. It doesn't depend on a query, so every page of
+	// every search with f has the same count. 0 when f sets no date.
+	CountUndated(ctx context.Context, tenantID string, f SearchFilters) (int, error)
 	// StaleCards returns at most limit of the tenant's stale cards, by
 	// document ID, from the first after after ("" for the start).
 	StaleCards(ctx context.Context, tenantID, after string, limit int) ([]Card, error)

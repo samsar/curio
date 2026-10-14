@@ -225,6 +225,10 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 	if err != nil {
 		return nil, err
 	}
+	saved, err := ensureSavedDates(ctx, db)
+	if err != nil {
+		return nil, err
+	}
 	// sqlite-vec's build flags say whether a released binary has its NEON
 	// distance kernels. Only this log line reads them, so a sqlite-vec that
 	// words its vec_debug() differently costs the line its flags, not the
@@ -240,7 +244,7 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 	syncMarkerSchemaVersion(home, meta, int(schemaVersion))
 	startup.SetInitializing()
 
-	d, err := newDaemon(ctx, cfg, home, meta.EmbeddingDim, db, fields)
+	d, err := newDaemon(ctx, cfg, home, meta.EmbeddingDim, db, started{fields: fields, savedDates: saved})
 	if err != nil {
 		return nil, err
 	}
@@ -291,6 +295,40 @@ func ensureDocumentFields(ctx context.Context, db *sqlitestore.DB) (api.Document
 		"cards_stale", done.CardsStale, "took_ms", done.Took.Milliseconds())
 	return fields, nil
 }
+
+// ensureSavedDates classifies how far every bookmark's saved time can be
+// trusted (sqlite.EnsureSavedDates) before any search filters by it: what
+// applies a change of the rule, finishes an import cut short or a
+// classification that failed, and derives the rows an older daemon wrote,
+// marking its Safari rows dateless first. Like ensureDocumentFields it
+// never fails the start but for a shutdown during it: a date filter then
+// reads the classes the bookmarks have, healthz reports the failure for
+// status and doctor, and the next start tries again.
+func ensureSavedDates(ctx context.Context, db *sqlitestore.DB) (api.SavedDates, error) {
+	done, err := sqlitestore.EnsureSavedDates(ctx, db)
+	saved := api.SavedDates{CheckedAt: time.Now(), Changed: done.Changed}
+	if len(done.Skipped) > 0 {
+		slog.Warn("saved dates: bookmarks whose saved or stored time doesn't parse are classified unknown",
+			"skipped", len(done.Skipped), "ids", done.Skipped[:min(len(done.Skipped), skippedIDsLogged)])
+	}
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return api.SavedDates{}, err
+	case err != nil:
+		slog.Error("saved dates: couldn't classify the bookmarks' saved dates; date filters read the classes "+
+			"they have until a start does, and the next start tries again", "err", err)
+		saved.Error = err.Error()
+		return saved, nil
+	}
+	slog.Info("saved dates classified", "bookmarks", done.Bookmarks, "changed", done.Changed, "exact", done.Exact,
+		"approx", done.Approx, "unknown", done.Unknown, "marked_dateless", done.MarkedDateless,
+		"took_ms", done.Took.Milliseconds())
+	return saved, nil
+}
+
+// skippedIDsLogged caps the IDs the start's log line names of the
+// bookmarks whose times don't parse; the count says how many there are.
+const skippedIDsLogged = 10
 
 // migrationHooks log each migration and report it through startup, which
 // the starting daemon's healthz answer shows. Only a database that already
@@ -376,18 +414,26 @@ func syncMarkerSchemaVersion(home *curiohome.Home, meta curiohome.Meta, schemaVe
 
 // daemon is everything run starts once the database is ready.
 type daemon struct {
-	apiDeps   api.Deps
-	pools     []jobs.Pool
-	drift     *drift.Monitor
-	keeper    *keepawake.Keeper
-	scheduler *insight.Scheduler // nil with insight off
+	apiDeps    api.Deps
+	pools      []jobs.Pool
+	drift      *drift.Monitor
+	keeper     *keepawake.Keeper
+	scheduler  *insight.Scheduler // nil with insight off
+	savedDates *api.SavedDateClassifier
+}
+
+// started is what the start did to the derived rows, which healthz
+// reports: the documents' search fields and the bookmarks' saved dates.
+type started struct {
+	fields     api.DocumentFields
+	savedDates api.SavedDates
 }
 
 // newDaemon builds the stores, clients, engines and pools over db, whose
-// vector index is dim wide; fields is what the start did to the documents'
-// search fields, which healthz reports.
+// vector index is dim wide. Its classifications of an import's saved
+// dates stop when ctx, the daemon's lifetime, ends.
 func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim int,
-	db *sqlitestore.DB, fields api.DocumentFields) (*daemon, error) {
+	db *sqlitestore.DB, done started) (*daemon, error) {
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
 	bms := sqlitestore.NewBookmarks(db)
@@ -485,6 +531,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	// The Jina fallback is the one upstream whose health is tracked.
 	upstreams := func() []fetcher.UpstreamHealth { return []fetcher.UpstreamHealth{native.JinaHealth()} }
 	keeper := newKeeper(gate, queue, pools)
+	savedDates := api.NewSavedDateClassifier(ctx, api.SavedDateOptions{Bookmarks: bms, TenantID: store.LocalTenantID,
+		Start: done.savedDates, Log: slog.Default()})
 
 	apiDeps := api.Deps{
 		Home:            home,
@@ -507,13 +555,15 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		KeepAwake:       keeper,
 		YouTubeFetcher:  routed.ytdlp,
 		GitHubToken:     routed.githubToken,
-		DocumentFields:  fields,
+		DocumentFields:  done.fields,
+		SavedDates:      savedDates,
 		Log:             slog.Default(),
 	}
 	if scheduler != nil {
 		apiDeps.Interests = scheduler
 	}
-	return &daemon{apiDeps: apiDeps, pools: pools, drift: driftMonitor, keeper: keeper, scheduler: scheduler}, nil
+	return &daemon{apiDeps: apiDeps, pools: pools, drift: driftMonitor, keeper: keeper, scheduler: scheduler,
+		savedDates: savedDates}, nil
 }
 
 // driftHold says how the embeddings drifted, as the monitor last reported
@@ -826,9 +876,10 @@ func indexing(queue store.JobStore) func(context.Context) (bool, error) {
 }
 
 // serve runs the worker pools, the embedding drift monitor, the interest
-// scheduler and the keep-awake keeper alongside the API until ctx is
-// cancelled or the API fails, then shuts them down within the documented
-// budget: the keeper releases its hold as its context ends.
+// scheduler, the keep-awake keeper and the retries of the saved-date
+// classifications owed alongside the API until ctx is cancelled or the API
+// fails, then shuts them down within the documented budget: the keeper
+// releases its hold as its context ends.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -836,6 +887,7 @@ func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	var workers sync.WaitGroup
 	workers.Go(func() { d.drift.Run(ctx) })
 	workers.Go(func() { d.keeper.Run(ctx) })
+	workers.Go(func() { d.savedDates.Run(ctx) })
 	if d.scheduler != nil {
 		workers.Go(func() { d.scheduler.Run(ctx) })
 	}

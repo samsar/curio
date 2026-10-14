@@ -253,6 +253,7 @@ func TestRun_TextReport(t *testing.T) {
 	assert.Contains(t, out, "Search evaluation of "+fx.db)
 	assert.Contains(t, out, "4 queries, 12 judgments: 1 missing, 3 the chunk lists can't return")
 	assert.Regexp(t, `\nLibrary: document fields derived in \d+ ms; 24 cards embedded in \d+\.\d s\n`, out)
+	assert.Regexp(t, `\nSaved dates: 2 exact, 0 approx, 0 unknown, classified in \d+ ms\n`, out)
 	assert.Contains(t, out, "variants hybrid, bm25")
 	assert.Contains(t, out, "\nhybrid: the daemon's search")
 	assert.Contains(t, out, "\nbm25: BM25 alone")
@@ -260,7 +261,8 @@ func TestRun_TextReport(t *testing.T) {
 		assert.Contains(t, out, "\n"+label+" ", label)
 	}
 	assert.Contains(t, out, "fields_weight 0, cards_weight 0, title_weight 0, rrf_k 60")
-	for _, stage := range []string{"embed", "bm25", "fields", "titles", "vector", "cards", "fuse", "hydrate", "total"} {
+	for _, stage := range []string{"embed", "bm25", "fields", "titles", "vector", "cards", "undated", "fuse", "hydrate",
+		"total"} {
 		assert.Regexp(t, `\n`+stage+` +\d+\.\d +\d+\.\d\n`, out, stage)
 	}
 	// The grade-2 ranks: hybrid's, then BM25's, where gamma's grade-2
@@ -313,7 +315,7 @@ func TestRun_Deterministic(t *testing.T) {
 		// Facts of the run: the first derives and embeds what the second
 		// finds done.
 		library := rep["library"].(map[string]any)
-		for _, fact := range []string{"fields_ms", "cards_ms", "cards_embedded"} {
+		for _, fact := range []string{"fields_ms", "saved_dates_ms", "cards_ms", "cards_embedded"} {
 			delete(library, fact)
 		}
 		for _, v := range rep["variants"].([]any) {
@@ -352,7 +354,8 @@ func TestRun_Provenance(t *testing.T) {
 	assert.Equal(t, []string{"vector", "hybrid"}, p.Variants, "in the order given")
 	assert.Empty(t, p.Baseline)
 	for _, v := range rep.Variants {
-		for _, stage := range []string{"embed", "bm25", "fields", "titles", "vector", "cards", "fuse", "hydrate", "total"} {
+		for _, stage := range []string{"embed", "bm25", "fields", "titles", "vector", "cards", "undated", "fuse", "hydrate",
+			"total"} {
 			assert.Contains(t, v.LatencyMS, stage, v.Name)
 		}
 	}
@@ -492,4 +495,6 @@ func TestRun_ComparesWithAFormerReport(t *testing.T) {
 		assert.Len(t, deltaRow(label).FindAllString(res.stdout, -1), 3, "%s, in every variant", label)
 	}
 	assert.Equal(t, 3, strings.Count(res.stdout, "nDCG@10: none moved by 0.05 or more"))
+	assert.Equal(t, 3, strings.Count(res.stdout,
+		"\nrankings: 4 of 4 matched queries rank the same documents in the same order as the baseline\n"))
 }

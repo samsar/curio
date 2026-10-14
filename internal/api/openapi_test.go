@@ -195,6 +195,14 @@ func TestOpenAPI_StrictValidation(t *testing.T) {
 	assert.NoError(t, schemas["Stats"].Value.VisitJSON(v, validationOptions...), "declared maps stay open")
 }
 
+// unclassifiable is a bookmark store whose saved-date classifications
+// fail.
+type unclassifiable struct{ store.BookmarkStore }
+
+func (unclassifiable) ClassifySavedDates(context.Context, string, string) (store.SavedDatesClassified, error) {
+	return store.SavedDatesClassified{}, errLocked
+}
+
 // TestOpenAPI_RoutesMatchRouter: every /v1 route is documented and every
 // documented operation is routed. The dashboard's pages are outside the
 // contract; TestDashboard_Routes pins them.
@@ -303,6 +311,12 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		// A start that rebuilt the fields index, then failed.
 		d.DocumentFields = DocumentFields{CheckedAt: time.Now(), Rebuilt: true,
 			Error: "derive document fields: disk I/O error"}
+		// A start that couldn't classify the saved dates, and an import
+		// whose classification failed.
+		d.SavedDates = NewSavedDateClassifier(context.Background(), SavedDateOptions{
+			Bookmarks: unclassifiable{d.Bookmarks}, Log: slog.New(slog.DiscardHandler),
+			Start: SavedDates{CheckedAt: time.Now(), Error: "classify saved dates: disk I/O error"}})
+		d.SavedDates.Classify(store.SourceChrome)
 		// Paused Jina, with every optional field set.
 		d.Upstreams = func() []fetcher.UpstreamHealth {
 			now := time.Now()
@@ -420,6 +434,14 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			http.StatusBadRequest},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka offline"}`), http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"blocked"}`), http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","filters":{`+
+			`"saved_after":"2020-01-01","saved_before":"2030-01-01T00:00:00+01:00",`+
+			`"published_before":"2030-01-01","include_undated":true}}`), http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","filters":{`+
+			`"site":["www.example.com"],"folder":["/Reading"],"source":["chrome"],"content_type":["article"]}}`),
+			http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","filters":{"site":["*"]}}`),
+			http.StatusBadRequest},
 		{"GET /v1/failures", get("/v1/failures"), http.StatusOK},
 
 		{"GET /v1/interests", get("/v1/interests"), http.StatusOK},

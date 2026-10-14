@@ -68,6 +68,18 @@ role: a polled region holding it would announce it on every poll.
 {{- end}}
 
 {{/*
+A bookmark's saved time, a SavedTime, as its saved date says: "saved" and
+when, for an exact date; "saved by" an upper bound; or "date unknown" and
+when curio imported it. An inexact time's title says what it means. In a
+table's time column, its two parts take a line each.
+*/}}
+{{define "saved-time" -}}
+{{if .Exact}}saved {{template "reltime" .At}}
+{{- else}}<span class="saved-time" title="{{.Why}}"><span class="saved-what">{{.What}}</span>
+{{- with .Then}}<span class="saved-sep"> ·</span>{{end}} <span class="saved-when">{{with .Then}}{{.}} {{end}}<time datetime="{{datetime .Shown}}">{{ago .Shown}}</time></span></span>{{end}}
+{{- end}}
+
+{{/*
 A document's name in a list, a DocRef: its title on one line; for an
 untitled one, its bookmark's title, styled as a fallback, or where it
 lives; the whole of any of them on hover. It links to the document's page
@@ -90,8 +102,11 @@ hover.
 <span class="doc-sub"><span class="host" title="{{.Ref.URL}}">{{.Where}}</span>
 {{- with .Source}}<span class="sep wide">·</span><span class="wide"{{with $.Folder}} title="{{.}}"{{end}}>{{.}}</span>{{end}}
 {{- with .ContentType}}<span class="sep narrow">·</span><span class="narrow">{{.}}</span>{{end}}
-{{- if not .When.IsZero}}<span class="sep narrow">·</span><span class="narrow">{{template "reltime" .When}}</span>{{end -}}
+{{- if and (not .Saved) (not .When.IsZero)}}<span class="sep narrow">·</span><span class="narrow">{{template "reltime" .When}}</span>{{end -}}
 </span>
+{{- with .Saved}}
+<span class="doc-saved">{{template "saved-time" .}}</span>
+{{- end}}
 {{- if or .FailureCause .LastError}}
 <span class="doc-error"{{with .LastError}} title="{{.}}"{{end}}>{{with causeLabel .FailureCause}}<span class="err-cause">{{.}}</span> {{end}}{{with shortError .LastError}}<span class="msg">{{.}}</span>{{end}}</span>
 {{- end}}

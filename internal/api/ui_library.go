@@ -124,9 +124,11 @@ func (h pageHandlers) librarySaves(ctx context.Context, r *http.Request) (ui.Lib
 		ContentType: string(opts.ContentType), Host: opts.Host, Folder: opts.FolderPath, Cause: string(opts.Cause),
 		Limit: linkLimit(opts.Limit)}, NextCursor: resp.NextCursor, PageSize: opts.Limit}
 	for _, b := range resp.Items {
+		saved := savedTime(b.SavedAt, b.CreatedAt, b.SavedDate)
 		row := ui.LibraryRow{DocumentID: deref(b.DocumentID), Title: deref(b.DocumentTitle),
 			BookmarkTitle: strings.TrimSpace(deref(b.Title)), URL: b.URL, State: b.DocumentState,
-			ContentType: b.DocumentContentType, When: b.SavedAt, Source: b.Source, Folder: deref(b.FolderPath)}
+			ContentType: b.DocumentContentType, When: b.SavedAt, Saved: &saved, Source: b.Source,
+			Folder: deref(b.FolderPath)}
 		if failureCurrent(store.DocState(b.DocumentState)) {
 			row.LastError, row.FailureCause = b.DocumentLastError, b.DocumentFailureCause
 		}

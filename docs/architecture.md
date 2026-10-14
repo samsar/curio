@@ -55,7 +55,10 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
   the Jina fallback and the content directory, changing nothing
 - `curio add <url>` — manually add a bookmark
 - `curio import <source> [path]` — bulk import from Chrome / Safari / Firefox
-- `curio search <query>` — hybrid search
+- `curio search <query>` — hybrid search, narrowed by content type,
+  source, host, site, folder, and when a page was saved or published
+  (`--saved-after`, `--published-before`, …; `--include-undated` keeps
+  what a date filter can't judge, and the search says how many)
 - `curio ui [--print]` — open the dashboard in the browser (see
   `docs/ui.md`), or print its address
 - `curio status [--follow]` — daemon health, doc counts, job queue depth
@@ -173,8 +176,9 @@ convention) and forwards calls to the daemon over HTTP. Why a sidecar:
 
 MCP tools (implemented):
 
-- `search_bookmarks(query, k, content_type?, source?, host?)` — hybrid search
-  with optional filters
+- `search_bookmarks(query, k, content_type?, source?, host?, site?, folder?, saved_after?, saved_before?,
+  published_after?, published_before?, include_undated?)` — hybrid search with optional filters, and how many
+  documents a date filter couldn't judge
 - `get_document(id)` — fetch a document's metadata + extracted markdown
 - `find_related(id, k)` — find documents similar to a given one (by embedding similarity over its indexed content)
 - `list_interests(limit?, interests?, members?, id?)` — an outline of the interests from the latest rebuild (areas with their largest interests, or interests alone in a small library), or one area or interest by its stable ID
@@ -435,7 +439,18 @@ made for its chunks alone, in one query. `find_related` sizes its pool
 from its k instead, `max(50, 8·k)`.
 
 The keyword lists run beside the semantic ones, each pair concurrently,
-and metadata filters (content type, host, source) apply inside all five.
+and the filters (content type, host, source, site, folder, and the saved
+and published windows) apply inside all five: the text lists check them
+on each match, and a filter that narrows the library makes the two KNN
+lists rank exactly the chunks and cards it leaves, through sqlite-vec's
+primary-key IN constraint, while they number at most 15,000 (a larger
+set filters as many nearest neighbours as its share of the index calls
+for, at most 4,096; so does a set the index is found missing a vector of,
+with one warning). A date filter judges only known dates (a
+bookmark's `saved_date` exact or approx; a published date at most a day
+after the first exact save), and the response counts the documents it
+couldn't judge (`undated`), which `include_undated` keeps. A date alone is
+midnight UTC. See decisions.md "Saved dates and search filters".
 The chunk lists don't return failed or dead documents: they keep the
 chunks of an earlier fetch, which no longer describe what the URL serves.
 The document lists match what a document was saved as (its title, its

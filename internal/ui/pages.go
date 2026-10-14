@@ -823,10 +823,13 @@ type LibraryRow struct {
 	State         string // the document's; empty for a save linked to none
 	ContentType   string
 	When          time.Time // the time column's: when the document was updated, or the page saved
-	Source        string    // the browser a save came from; empty for a document
-	Folder        string    // the folder it was saved in
-	LastError     string
-	FailureCause  string
+	// Saved is, for a save, when it was saved as far as its saved date
+	// says, which the time column shows; nil for a document.
+	Saved        *SavedTime
+	Source       string // the browser a save came from; empty for a document
+	Folder       string // the folder it was saved in
+	LastError    string
+	FailureCause string
 }
 
 // Cell is the row's document cell: its name, where it lives under it,
@@ -834,7 +837,7 @@ type LibraryRow struct {
 func (r LibraryRow) Cell() DocCell {
 	ref := DocRef{ID: r.DocumentID, Title: r.Title, Fallback: r.BookmarkTitle, URL: r.URL}
 	return DocCell{Ref: ref, Where: ref.where(), Source: r.Source, Folder: r.Folder, ContentType: r.ContentType,
-		When: r.When, FailureCause: r.FailureCause, LastError: r.LastError}
+		When: r.When, Saved: r.Saved, FailureCause: r.FailureCause, LastError: r.LastError}
 }
 
 // DocRef names a document in a list (the doc-title partial): by its
@@ -891,10 +894,13 @@ type DocCell struct {
 	Where string // under its name: where it lives
 	// Source is the browser a save came from, and Folder the folder it was
 	// saved in, for a list of saves; a list of documents leaves both empty.
-	Source       string
-	Folder       string
-	ContentType  string    // shown here on a phone, whose table has no Type column
-	When         time.Time // shown here on a phone, whose table has no time column
+	Source      string
+	Folder      string
+	ContentType string    // shown here on a phone, whose table has no Type column
+	When        time.Time // shown here on a phone, whose table has no time column
+	// Saved, for a save, is shown in When's place, as its saved date
+	// says.
+	Saved        *SavedTime
 	FailureCause string
 	LastError    string
 }
@@ -1230,11 +1236,66 @@ type BookmarksPanel struct {
 
 // DocumentBookmark is one bookmark of the document.
 type DocumentBookmark struct {
-	Source  string
-	Folder  string
-	Title   string
-	Tags    []string
-	SavedAt time.Time
+	Source string
+	Folder string
+	Title  string
+	Tags   []string
+	Saved  SavedTime
+}
+
+// SavedTime is when a bookmark was saved, as far as its saved date says
+// (Date, one of store.SavedDate's values): At exactly, by At at the
+// latest, or not at all, when At is an import's or a bulk stamp's and
+// Imported, when curio imported the bookmark, is what a list can say.
+// Lists still order saves by At.
+type SavedTime struct {
+	At       time.Time
+	Imported time.Time
+	Date     string
+}
+
+// Exact reports whether At is when the bookmark was saved. A date outside
+// store.SavedDate's values is no exact one.
+func (s SavedTime) Exact() bool { return s.Date == string(store.SavedDateExact) }
+
+// approx reports whether At is an upper bound of when it was saved.
+func (s SavedTime) approx() bool { return s.Date == string(store.SavedDateApprox) }
+
+// What says what an inexact time is: "saved by" its upper bound, or
+// "date unknown".
+func (s SavedTime) What() string {
+	if s.approx() {
+		return "saved by"
+	}
+	return "date unknown"
+}
+
+// Then is what an unknown date's time is, "imported", and "" for an
+// approximate one, whose time follows What.
+func (s SavedTime) Then() string {
+	if s.approx() {
+		return ""
+	}
+	return "imported"
+}
+
+// Shown is the time an inexact date shows: the upper bound, or when curio
+// imported the bookmark.
+func (s SavedTime) Shown() time.Time {
+	if s.approx() {
+		return s.At
+	}
+	return s.Imported
+}
+
+// Why is an inexact time's title: what the time means.
+func (s SavedTime) Why() string {
+	if s.approx() {
+		return "Saved on or before " + when(s.At) + ": first seen by a later import of the browser's bookmarks, " +
+			"or copied with its folder then"
+	}
+	return "No known save date: its source keeps none, or a browser's bulk import or sync stamped it. curio " +
+		"imported it " + when(s.Imported)
 }
 
 // Interests is a page of the latest rebuild's top-level groups, its areas

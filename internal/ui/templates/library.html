@@ -37,20 +37,20 @@ toolbar names it, with a link that clears it alone.
 <div class="card table-card">
 <div class="table-scroll">
 <table class="data">
-<colgroup><col><col class="c-state"><col class="c-type"><col class="c-when"></colgroup>
+<colgroup><col><col class="c-state"><col class="c-type"><col class="c-when{{if .Filters.Saved}} c-saved{{end}}"></colgroup>
 <thead><tr><th scope="col">Document</th><th scope="col">State</th><th scope="col" class="c-type">Type</th><th scope="col" class="c-when">{{if .Filters.Saved}}Saved{{else}}Updated{{end}}</th></tr></thead>
 <tbody id="rows">
 {{range .Rows}}<tr>
 <td>{{template "doc-cell" .Cell}}</td>
 <td class="state-cell">{{with .State}}{{template "state-badge" .}}{{end}}</td>
 <td class="c-type">{{with .ContentType}}<span class="tag">{{template "icon" (typeIcon .)}}{{.}}</span>{{end}}</td>
-<td class="c-when when">{{template "reltime" .When}}</td>
+<td class="c-when when">{{with .Saved}}{{template "saved-time" .}}{{else}}{{template "reltime" .When}}{{end}}</td>
 </tr>
 {{end}}</tbody>
 </table>
 </div>
 <div class="load-more" id="more">{{with .NextCursor}}<a class="btn" href="{{libraryHref $.Filters .}}" hx-get="{{libraryMoreHref $.Filters . $.ShownThrough}}" hx-target="#rows" hx-select="#rows > tr" hx-swap="beforeend" hx-select-oob="#more,#showing">Load {{$.PageSize}} more</a>{{end}}</div>
-{{if .Filters.Saved}}<p class="table-note">Newest saves first, one row per bookmark: a page saved in two browsers is listed twice. Safari keeps no save dates, so its bookmarks are dated when curio imported them.</p>{{end}}
+{{if .Filters.Saved}}<p class="table-note">Newest saves first, one row per bookmark: a page saved in two browsers is listed twice. A save without a known date, from a source that keeps none or a browser's bulk import, is marked so and listed by the time it carries.</p>{{end}}
 </div>
 {{if .Filters.Saved}}<p class="pager-summary mt-4" id="showing">Showing {{with .OfTotal}}{{num $.ShownThrough}} of {{count . "save" "saves"}}{{else}}{{count .ShownThrough "save" "saves"}}{{end}}.</p>
 {{- else}}<p class="pager-summary mt-4" id="showing">Showing {{with .OfTotal}}{{num $.ShownThrough}} of {{count . "document" "documents"}}{{else}}{{count .ShownThrough "document" "documents"}}{{end}}, most recently updated first.</p>{{end}}

@@ -197,10 +197,14 @@ type movedQuery struct {
 // moveThreshold is how far a query's nDCG@10 must move to be listed.
 const moveThreshold = 0.05
 
-// variantComparison is a variant's change since the baseline.
+// variantComparison is a variant's change since the baseline: its
+// groups' deltas, the queries whose nDCG@10 moved, how many queries were
+// matched with the baseline's, and those of them whose ranking differs.
 type variantComparison struct {
-	groups []groupDelta
-	moved  []movedQuery
+	groups  []groupDelta
+	moved   []movedQuery
+	matched int
+	reorder []string
 }
 
 // compareVariant shows how cur, a variant of this run, changed since the
@@ -229,6 +233,11 @@ func (b *baseline) compareVariant(w *bytes.Buffer, cur variantReport) {
 		rows = append(rows, row)
 	}
 	table(w, rows)
+	fmt.Fprintf(w, "\nrankings: %d of %d matched queries rank the same documents in the same order as the baseline\n",
+		c.matched-len(c.reorder), c.matched)
+	if len(c.reorder) > 0 {
+		fmt.Fprintf(w, "  differ: %s\n", strings.Join(c.reorder, ", "))
+	}
 	if len(c.moved) == 0 {
 		fmt.Fprintf(w, "\nnDCG@10: none moved by %.2f or more\n", moveThreshold)
 		return
@@ -253,8 +262,9 @@ func signed(d *float64) string {
 }
 
 // compareVariants is cur's change since base: its groups' deltas, matched
-// by type and name, current groups first and then the baseline's alone,
-// and the queries, matched by id or by index, whose nDCG@10 moved by
+// by type and name, current groups first and then the baseline's alone;
+// the queries, matched by id or by index, whose ranking differs from the
+// baseline's, in file order; and those whose nDCG@10 moved by
 // moveThreshold or more, largest fall first, ties in file order.
 func compareVariants(cur, base variantReport, byID bool) variantComparison {
 	var c variantComparison
@@ -278,13 +288,26 @@ func compareVariants(cur, base variantReport, byID bool) variantComparison {
 	}
 	for _, q := range cur.Queries {
 		old, ok := matchingQuery(q, base.Queries, byID)
-		if !ok || math.Abs(q.NDCGAt10-old.NDCGAt10) < moveThreshold-1e-9 {
+		if !ok {
+			continue
+		}
+		c.matched++
+		if !sameRanking(q.Ranking, old.Ranking) {
+			c.reorder = append(c.reorder, queryLabel(q.ID, q.Index))
+		}
+		if math.Abs(q.NDCGAt10-old.NDCGAt10) < moveThreshold-1e-9 {
 			continue
 		}
 		c.moved = append(c.moved, movedQuery{label: queryLabel(q.ID, q.Index), old: old.NDCGAt10, new: q.NDCGAt10})
 	}
 	slices.SortStableFunc(c.moved, func(a, b movedQuery) int { return cmp.Compare(a.new-a.old, b.new-b.old) })
 	return c
+}
+
+// sameRanking reports whether two rankings hold the same documents in the
+// same order.
+func sameRanking(a, b []rankedReport) bool {
+	return slices.EqualFunc(a, b, func(x, y rankedReport) bool { return x.DocumentID == y.DocumentID })
 }
 
 // matchingQuery is q's query in the baseline: the one with its id, or at

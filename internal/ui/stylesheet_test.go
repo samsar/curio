@@ -143,9 +143,12 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "hidden", declarations(ruleFor(t, rules, "", "table.data td").body)["overflow"],
 		"a cell's content stays in its column")
 	for col, width := range map[string]string{"col.c-state": "7rem", "col.c-type": "6.5rem", "col.c-when": "7.5rem",
-		"col.c-sim": "9.5rem", "col.c-rank": "3.5rem", "col.c-nearest": "16rem"} {
+		"col.c-saved": "11rem", "col.c-sim": "9.5rem", "col.c-rank": "3.5rem", "col.c-nearest": "16rem"} {
 		assert.Equal(t, width, declarations(ruleFor(t, rules, "", col).body)["width"], col)
 	}
+	// A save's time takes two lines in its column: what it is, then when.
+	assert.Equal(t, "block", declarations(ruleFor(t, rules, "", "table.data td.c-when .saved-what").body)["display"])
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", "table.data td.c-when .saved-sep").body)["display"])
 	const phone = "@media (max-width: 48rem)"
 	for _, folded := range []string{"col.c-type", "col.c-when", "th.c-type", "td.c-type", "th.c-when", "td.c-when",
 		"col.c-nearest", "th.c-nearest", "td.c-nearest"} {
@@ -158,6 +161,9 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "inline", declarations(ruleFor(t, rules, phone, ".doc-sub .narrow").body)["display"])
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, phone, ".doc-sub .wide").body)["display"],
 		"a save's browser shows on wide screens only")
+	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".doc-saved").body)["display"])
+	assert.Equal(t, "block", declarations(ruleFor(t, rules, phone, ".doc-saved").body)["display"],
+		"a save's time takes the folded time column's place on a phone, on a line of its own")
 	fallback := declarations(ruleFor(t, rules, "", ".doc-title.from-bookmark").body)
 	assert.Equal(t, "italic", fallback["font-style"], "a bookmark's title stands in for the document's")
 	assert.NotContains(t, fallback, "font-family", "in the title's own font, unlike an address")

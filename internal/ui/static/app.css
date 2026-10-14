@@ -572,6 +572,11 @@ table.data td.state-cell { padding-top: 0.8rem; }
 col.c-state { width: 7rem; }
 col.c-type { width: 6.5rem; }
 col.c-when { width: 7.5rem; }
+/* A save's time: room for "imported" and a date on one line, under what
+   the time is ("date unknown", "saved by"). */
+col.c-saved { width: 11rem; }
+table.data td.c-when .saved-what, table.data td.c-when .saved-when { display: block; }
+table.data td.c-when .saved-sep { display: none; }
 col.c-sim { width: 9.5rem; }
 /* Room for a four-digit rank, "1,234", and the cell's padding, on a phone too. */
 col.c-rank { width: 3.5rem; }
@@ -600,6 +605,9 @@ a.doc-title:hover { color: var(--accent-text); }
 .doc-sub .host { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
 .doc-sub .sep { color: var(--border-strong); }
 .doc-sub .narrow { display: none; }
+/* A save's time, on a phone a line of its own under where it lives: the
+   table's time column folds away there. */
+.doc-saved { display: none; }
 .doc-error {
   display: block;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -1298,6 +1306,12 @@ td .badge.fit-new { margin-top: var(--s1); }
   col.c-state { width: 5.75rem; }
   .doc-sub .narrow { display: inline; }
   .doc-sub .wide { display: none; }
+  .doc-saved {
+    display: block;
+    margin-top: 0.15rem;
+    color: var(--text-3); font-size: var(--fs-sm);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
 
   /* The interest map: the toolbar stacks, the legend goes, and the panel
      is a sheet over the page's foot, once there is a map: its head alone

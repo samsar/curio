@@ -32,15 +32,41 @@ type Judgment struct {
 // relevant to it. ID, Kind and Tags are optional: an ID names the query in
 // reports and matches it across edits of the file, and the kind and tags
 // group it, each group scored on its own. Note is the file's comment on
-// the query; nothing scores it.
+// the query; nothing scores it. Filters, nil when the query has none, are
+// the search filters it is run with.
 type Query struct {
 	ID       string
 	Kind     string
 	Tags     []string
 	Note     string
 	Query    string
+	Filters  *Filters
 	Relevant []Judgment
 }
+
+// Filters are a query's search filters, under the API's names, as the file
+// writes them: the search checks and resolves them, so this package stays
+// free of it. Dates are their text, as written.
+type Filters struct {
+	SavedAfter      string   `json:"saved_after,omitempty"`
+	SavedBefore     string   `json:"saved_before,omitempty"`
+	PublishedAfter  string   `json:"published_after,omitempty"`
+	PublishedBefore string   `json:"published_before,omitempty"`
+	Site            []string `json:"site,omitempty"`
+	Folder          []string `json:"folder,omitempty"`
+	IncludeUndated  bool     `json:"include_undated,omitempty"`
+}
+
+// The keys of a query's filters mapping.
+const (
+	filterSavedAfter      = "saved_after"
+	filterSavedBefore     = "saved_before"
+	filterPublishedAfter  = "published_after"
+	filterPublishedBefore = "published_before"
+	filterSite            = "site"
+	filterFolder          = "folder"
+	filterIncludeUndated  = "include_undated"
+)
 
 // QuerySet is a collection of judged queries loaded from a qrels YAML file.
 type QuerySet struct {
@@ -194,7 +220,7 @@ func (q Query) ident() string {
 func parseQuery(node *yaml.Node) (Query, error) {
 	node = resolve(node)
 	named := Query{ID: scalarField(node, "id"), Query: scalarField(node, "query")}
-	if err := checkKeys(node, "a query", "id", "kind", "tags", "note", "query", "relevant"); err != nil {
+	if err := checkKeys(node, "a query", "id", "kind", "tags", "note", "query", "filters", "relevant"); err != nil {
 		return named, err
 	}
 	var raw struct {
@@ -203,6 +229,7 @@ func parseQuery(node *yaml.Node) (Query, error) {
 		Tags     []yaml.Node `yaml:"tags"`
 		Note     string      `yaml:"note"`
 		Query    string      `yaml:"query"`
+		Filters  yaml.Node   `yaml:"filters"`
 		Relevant []yaml.Node `yaml:"relevant"`
 	}
 	if err := node.Decode(&raw); err != nil {
@@ -217,6 +244,11 @@ func parseQuery(node *yaml.Node) (Query, error) {
 		return q, err
 	}
 	q.Tags = tags
+	if raw.Filters.Kind != 0 {
+		if q.Filters, err = parseFilters(&raw.Filters); err != nil {
+			return q, err
+		}
+	}
 	// A query with no relevant docs would score 0 on every metric yet
 	// still count toward the mean, silently deflating the aggregate — by
 	// IR convention (and trec_eval) it doesn't belong in the set.
@@ -244,6 +276,94 @@ func parseTags(nodes []yaml.Node) ([]string, error) {
 		if !slices.Contains(out, t) {
 			out = append(out, t)
 		}
+	}
+	return out, nil
+}
+
+// parseFilters reads a query's filters: a mapping of the API's filter
+// names, each at most once, the dates text, site and folder lists of text,
+// and include_undated a boolean. Filters that filter nothing are refused,
+// an empty mapping, an empty value or list, or include_undated false
+// alone: the query would be reported as filtered, and searched without a
+// filter.
+func parseFilters(node *yaml.Node) (*Filters, error) {
+	node = resolve(node)
+	if err := checkKeys(node, "filters", filterSavedAfter, filterSavedBefore, filterPublishedAfter,
+		filterPublishedBefore, filterSite, filterFolder, filterIncludeUndated); err != nil {
+		return nil, err
+	}
+	if len(node.Content) == 0 {
+		return nil, fmt.Errorf("line %d: an empty filters mapping (leave filters out for none)", node.Line)
+	}
+	f := &Filters{}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, val := node.Content[i], resolve(node.Content[i+1])
+		var err error
+		switch key.Value {
+		case filterSavedAfter:
+			f.SavedAfter, err = filterText(key.Value, val)
+		case filterSavedBefore:
+			f.SavedBefore, err = filterText(key.Value, val)
+		case filterPublishedAfter:
+			f.PublishedAfter, err = filterText(key.Value, val)
+		case filterPublishedBefore:
+			f.PublishedBefore, err = filterText(key.Value, val)
+		case filterSite:
+			f.Site, err = filterList(key.Value, val)
+		case filterFolder:
+			f.Folder, err = filterList(key.Value, val)
+		case filterIncludeUndated:
+			if val.Kind != yaml.ScalarNode || val.ShortTag() != "!!bool" {
+				return nil, fmt.Errorf("line %d: %s is true or false", val.Line, key.Value)
+			}
+			err = val.Decode(&f.IncludeUndated)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if f.filtersNothing() {
+		return nil, fmt.Errorf("line %d: filters that filter nothing (leave filters out for none)", node.Line)
+	}
+	return f, nil
+}
+
+// filtersNothing reports whether f sets no filter: include_undated false
+// alone.
+func (f *Filters) filtersNothing() bool {
+	return f.SavedAfter == "" && f.SavedBefore == "" && f.PublishedAfter == "" && f.PublishedBefore == "" &&
+		len(f.Site) == 0 && len(f.Folder) == 0 && !f.IncludeUndated
+}
+
+// filterText reads a filter written as one value: a scalar's text as
+// written, so an unquoted date stays the date the file says. An empty one
+// would filter nothing.
+func filterText(name string, node *yaml.Node) (string, error) {
+	if node.Kind != yaml.ScalarNode || node.ShortTag() == "!!null" {
+		return "", fmt.Errorf("line %d: %s is one value, such as a date", node.Line, name)
+	}
+	if strings.TrimSpace(node.Value) == "" {
+		return "", fmt.Errorf("line %d: %s is empty (leave it out for none)", node.Line, name)
+	}
+	return node.Value, nil
+}
+
+// filterList reads a filter written as a list of values, each its text.
+// An empty list would filter nothing.
+func filterList(name string, node *yaml.Node) ([]string, error) {
+	if node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("line %d: %s is a list", node.Line, name)
+	}
+	if len(node.Content) == 0 {
+		return nil, fmt.Errorf("line %d: %s is an empty list (leave it out for none)", node.Line, name)
+	}
+	out := make([]string, 0, len(node.Content))
+	for _, item := range node.Content {
+		v, err := filterText(name, resolve(item))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
 	}
 	return out, nil
 }

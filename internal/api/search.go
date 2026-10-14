@@ -25,11 +25,25 @@ type SearchRequest struct {
 }
 
 // Filters mirrors the openapi filters block; the search engine applies
-// every dimension.
+// every dimension, as search.FilterRequest reads it.
 type Filters struct {
-	ContentType []string `json:"content_type,omitempty"`
-	Host        []string `json:"host,omitempty"`
-	Source      []string `json:"source,omitempty"`
+	ContentType     []string `json:"content_type,omitempty"`
+	Host            []string `json:"host,omitempty"`
+	Source          []string `json:"source,omitempty"`
+	Site            []string `json:"site,omitempty"`
+	Folder          []string `json:"folder,omitempty"`
+	SavedAfter      string   `json:"saved_after,omitempty"`
+	SavedBefore     string   `json:"saved_before,omitempty"`
+	PublishedAfter  string   `json:"published_after,omitempty"`
+	PublishedBefore string   `json:"published_before,omitempty"`
+	IncludeUndated  bool     `json:"include_undated,omitempty"`
+}
+
+// request is f as the search engine reads it, to resolve.
+func (f Filters) request() search.FilterRequest {
+	return search.FilterRequest{ContentType: f.ContentType, Host: f.Host, Source: f.Source, Site: f.Site,
+		Folder: f.Folder, SavedAfter: f.SavedAfter, SavedBefore: f.SavedBefore, PublishedAfter: f.PublishedAfter,
+		PublishedBefore: f.PublishedBefore, IncludeUndated: f.IncludeUndated}
 }
 
 // SearchHitResponse mirrors the openapi SearchHit schema. MarkdownPath
@@ -57,6 +71,7 @@ type SearchHitBookmark struct {
 	FolderPath string    `json:"folder_path,omitempty"`
 	Source     string    `json:"source"`
 	SavedAt    time.Time `json:"saved_at"`
+	SavedDate  string    `json:"saved_date"`
 }
 
 // ChunkMatchJSON mirrors the openapi schema; pointer scores let us emit
@@ -72,7 +87,8 @@ type ChunkMatchJSON struct {
 // SearchResponse mirrors the openapi SearchResponse schema. Total is how
 // many documents the query's ranking holds, at most store.MaxSearchK, and
 // Capped whether more matched than it ranks. Degraded and Warnings report
-// keyword-only results when semantic search was unavailable.
+// keyword-only results when semantic search was unavailable. Undated, with
+// a date filter alone, is how many documents it couldn't judge.
 type SearchResponse struct {
 	Query      string              `json:"query"`
 	TookMS     int64               `json:"took_ms"`
@@ -82,6 +98,7 @@ type SearchResponse struct {
 	Capped     bool                `json:"capped"`
 	Degraded   bool                `json:"degraded,omitempty"`
 	Warnings   []string            `json:"warnings,omitempty"`
+	Undated    *int                `json:"undated,omitempty"`
 	Items      []SearchHitResponse `json:"items"`
 }
 
@@ -101,7 +118,10 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 // search runs req through the search engine and hydrates its hits. A query,
 // k, offset or filter the engine can't take is a requestError, refused
-// before the query is embedded. Semantic search failing is not an error:
+// before the query is embedded: a filter's names its field
+// (search.FilterError), and a content_type or source outside its set is
+// one, since the engine would match nothing and a typo would read as "no
+// results". Semantic search failing is not an error:
 // the keyword results come back Degraded, with Warnings.
 func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	if req.Query == "" {
@@ -118,8 +138,9 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		return SearchResponse{}, badRequest("offset must be between 0 and %d (offset + k at most %d), got %d",
 			store.MaxSearchK-k, store.MaxSearchK, req.Offset)
 	}
-	if err := validateSearchFilters(req.Filters); err != nil {
-		return SearchResponse{}, err
+	filters, err := req.Filters.request().Resolve()
+	if err != nil {
+		return SearchResponse{}, &requestError{err: err}
 	}
 
 	start := time.Now()
@@ -128,11 +149,7 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		Query:    req.Query,
 		K:        req.K,
 		Offset:   req.Offset,
-		Filters: store.SearchFilters{
-			ContentType: req.Filters.ContentType,
-			Host:        req.Filters.Host,
-			Source:      req.Filters.Source,
-		},
+		Filters:  filters,
 	})
 	if err != nil {
 		return SearchResponse{}, err
@@ -151,25 +168,9 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		Capped:     res.Capped,
 		Degraded:   res.Degraded,
 		Warnings:   res.Warnings,
+		Undated:    res.Undated,
 		Items:      items,
 	}, nil
-}
-
-// validateSearchFilters refuses a content_type or source outside its set, as
-// the lists refuse their filters: the engine would match nothing, and a typo
-// would read as "no results". Hosts are literal input and match as given.
-func validateSearchFilters(f Filters) error {
-	for _, t := range f.ContentType {
-		if !store.ContentType(t).Valid() {
-			return badRequest("filters.content_type %q must be one of: %s", t, contentTypeList)
-		}
-	}
-	for _, s := range f.Source {
-		if !validSource(s) {
-			return badRequest("filters.source %q must be one of: %s", s, sourceList)
-		}
-	}
-	return nil
 }
 
 // searchHitsToResponse maps engine hits to wire hits, populating each
@@ -240,7 +241,7 @@ func (d Deps) savedUnder(ctx context.Context, hits []search.Hit) (map[string][]S
 	for doc, bms := range byDoc {
 		for _, b := range bms {
 			out[doc] = append(out[doc], SearchHitBookmark{Title: strings.TrimSpace(deref(b.Title)),
-				FolderPath: deref(b.FolderPath), Source: b.Source, SavedAt: b.SavedAt})
+				FolderPath: deref(b.FolderPath), Source: b.Source, SavedAt: b.SavedAt, SavedDate: string(b.SavedDate)})
 		}
 	}
 	return out, nil

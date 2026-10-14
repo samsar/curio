@@ -67,6 +67,28 @@ type Health struct {
 	// DocumentFields is what the daemon's start did to the documents'
 	// search fields; nil from a daemon that predates saying so.
 	DocumentFields *DocumentFields `json:"document_fields,omitempty"`
+	// SavedDates is what the daemon's start did to the bookmarks' saved
+	// dates and the sources owed a classification; nil from a daemon that
+	// predates saying so.
+	SavedDates *SavedDates `json:"saved_dates,omitempty"`
+}
+
+// SavedDates mirrors api.SavedDates: when the daemon's start classified
+// every bookmark's saved date, how many classes it changed, why it
+// couldn't, when it couldn't, and the sources whose classification after
+// an import failed, which the daemon retries.
+type SavedDates struct {
+	CheckedAt time.Time            `json:"checked_at"`
+	Changed   int                  `json:"changed"`
+	Error     string               `json:"error,omitempty"`
+	Owed      []OwedClassification `json:"owed,omitempty"`
+}
+
+// OwedClassification mirrors api.OwedClassification.
+type OwedClassification struct {
+	Source string    `json:"source"`
+	Since  time.Time `json:"since"`
+	Error  string    `json:"error"`
 }
 
 // DocumentFields mirrors api.DocumentFields: when the daemon's start
@@ -240,6 +262,7 @@ type Bookmark struct {
 	URL           string    `json:"url"`
 	Title         *string   `json:"title,omitempty"`
 	SavedAt       time.Time `json:"saved_at"`
+	SavedDate     string    `json:"saved_date"` // exact | approx | unknown: how far SavedAt can be trusted
 	Source        string    `json:"source"`
 	FolderPath    *string   `json:"folder_path,omitempty"`
 	Tags          []string  `json:"tags,omitempty"`
@@ -318,7 +341,7 @@ type ImportBookmark struct {
 	Title      string    `json:"title,omitempty"`
 	FolderPath string    `json:"folder_path,omitempty"`
 	Tags       []string  `json:"tags,omitempty"`
-	SavedAt    time.Time `json:"saved_at,omitzero"` // zero when the source has no date; the daemon uses now
+	SavedAt    time.Time `json:"saved_at,omitzero"` // zero when the source has no date: the daemon stores it dateless
 }
 
 // ImportRequest mirrors api.ImportRequest.
@@ -425,11 +448,30 @@ type SearchRequest struct {
 	Filters *SearchFilters `json:"filters,omitempty"`
 }
 
-// SearchFilters scopes a search. Nil/omitted dimensions are not filtered.
+// SearchFilters scopes a search, as api.Filters reads it. Nil/omitted
+// dimensions are not filtered. The values go as written: the daemon
+// checks and normalizes them, and refuses one it can't take naming its
+// field.
 type SearchFilters struct {
 	ContentType []string `json:"content_type,omitempty"`
 	Host        []string `json:"host,omitempty"`
 	Source      []string `json:"source,omitempty"`
+	Site        []string `json:"site,omitempty"`
+	Folder      []string `json:"folder,omitempty"`
+	// The date bounds: a date (YYYY-MM-DD, midnight UTC) or an RFC 3339
+	// date-time with a zone; windows are [after, before).
+	SavedAfter      string `json:"saved_after,omitempty"`
+	SavedBefore     string `json:"saved_before,omitempty"`
+	PublishedAfter  string `json:"published_after,omitempty"`
+	PublishedBefore string `json:"published_before,omitempty"`
+	IncludeUndated  bool   `json:"include_undated,omitempty"`
+}
+
+// IsEmpty reports whether f sets no dimension.
+func (f SearchFilters) IsEmpty() bool {
+	return len(f.ContentType) == 0 && len(f.Host) == 0 && len(f.Source) == 0 && len(f.Site) == 0 &&
+		len(f.Folder) == 0 && f.SavedAfter == "" && f.SavedBefore == "" && f.PublishedAfter == "" &&
+		f.PublishedBefore == "" && !f.IncludeUndated
 }
 
 // SearchHit is the part of api.SearchHitResponse the CLI and MCP read.
@@ -451,6 +493,7 @@ type SearchHitBookmark struct {
 	FolderPath string    `json:"folder_path,omitempty"`
 	Source     string    `json:"source"`
 	SavedAt    time.Time `json:"saved_at"`
+	SavedDate  string    `json:"saved_date"`
 }
 
 // ChunkMatch mirrors api.ChunkMatchJSON.
@@ -695,13 +738,16 @@ func (c *Client) ListJobs(ctx context.Context, opts JobListOpts) (*JobList, erro
 // use. Degraded means semantic search was unavailable and Items are
 // keyword-only; Warnings says why.
 type SearchResponse struct {
-	Query      string      `json:"query"`
-	TookMS     int64       `json:"took_ms"`
-	BM25Hits   int         `json:"bm25_hits"`
-	VectorHits int         `json:"vector_hits"`
-	Degraded   bool        `json:"degraded,omitempty"`
-	Warnings   []string    `json:"warnings,omitempty"`
-	Items      []SearchHit `json:"items"`
+	Query      string   `json:"query"`
+	TookMS     int64    `json:"took_ms"`
+	BM25Hits   int      `json:"bm25_hits"`
+	VectorHits int      `json:"vector_hits"`
+	Degraded   bool     `json:"degraded,omitempty"`
+	Warnings   []string `json:"warnings,omitempty"`
+	// Undated is, for a search with a date filter, how many documents the
+	// filter couldn't judge; nil without one.
+	Undated *int        `json:"undated,omitempty"`
+	Items   []SearchHit `json:"items"`
 }
 
 func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {

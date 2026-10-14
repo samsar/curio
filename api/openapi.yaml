@@ -198,9 +198,10 @@ paths:
             `created` (the default) lists bookmarks newest first by when
             curio added them (`created_at`), which follows imports: an
             import's bookmarks come together. `saved` lists them newest
-            first by when the browser saved them (`saved_at`). Safari keeps
-            no save dates, so its bookmarks carry the time curio imported
-            them. A cursor pages only the order that issued it.
+            first by `saved_at`, the time each carries; `saved_date` says
+            which of those times are no save's (Safari keeps no save dates,
+            so its bookmarks carry the time curio imported them). A cursor
+            pages only the order that issued it.
           schema: { type: string, enum: [created, saved], default: created }
         - in: query
           name: source
@@ -1198,7 +1199,8 @@ components:
             with no scopes, 5,000.
         interests: { $ref: "#/components/schemas/InterestsState" }
         document_fields: { $ref: "#/components/schemas/DocumentFieldsCheck" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields]
+        saved_dates: { $ref: "#/components/schemas/SavedDatesCheck" }
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates]
 
     DocumentFieldsCheck:
       description: >
@@ -1219,6 +1221,37 @@ components:
           type: string
           description: "Why the start couldn't check or derive the fields; present only when it couldn't"
       required: [checked_at, rebuilt]
+
+    SavedDatesCheck:
+      description: >
+        How far the bookmarks' saved times can be trusted (each bookmark's
+        saved_date) is classified from the bookmarks of its source: at
+        every start, for every bookmark, and after each import, for the
+        import's source. Until its source is classified, a bookmark an
+        import stored claims no date (unknown), so a date filter leaves it
+        out and counts it as undated. This is what the start did, fixed
+        when it started, and the sources whose classification after an
+        import failed, which the daemon retries every minute until one
+        succeeds; a restart classifies every bookmark again. Neither
+        changes status.
+      type: object
+      properties:
+        checked_at: { type: string, format: date-time, description: "When the start classified every bookmark" }
+        changed: { type: integer, description: "How many bookmarks' classes the start changed" }
+        error:
+          type: string
+          description: "Why the start couldn't classify them; present only when it couldn't"
+        owed:
+          type: array
+          description: "The sources owed a classification, by source; empty when none is"
+          items:
+            type: object
+            properties:
+              source: { $ref: "#/components/schemas/Source" }
+              since: { type: string, format: date-time, description: "When the first classification that failed ran" }
+              error: { type: string, description: "Why the last one failed" }
+            required: [source, since, error]
+      required: [checked_at, changed, owed]
 
     EmbeddingDrift:
       description: >
@@ -1432,13 +1465,26 @@ components:
 
     # ---------- bookmarks ----------
 
+    SavedDate:
+      type: string
+      enum: [exact, approx, unknown]
+      description: >
+        How far a bookmark's saved_at can be trusted as when it was saved,
+        derived from the bookmarks of its source: exact, it was saved then;
+        approx, it was saved then or before (a folder copied whole, or a
+        save a later import of the same browser's bookmarks first found);
+        unknown, the time says nothing of the save (a browser's bulk import
+        or sync stamped it, or the source kept no date and the import stored
+        its own time).
+
     Bookmark:
       type: object
       properties:
         id:             { type: string, format: uuid }
         url:            { type: string, format: uri }
         title:          { type: string }
-        saved_at:       { type: string, format: date-time }
+        saved_at:       { type: string, format: date-time, description: "When it was saved, as far as saved_date says" }
+        saved_date:     { $ref: "#/components/schemas/SavedDate" }
         source:         { $ref: "#/components/schemas/Source" }
         folder_path:    { type: string }
         tags:           { type: array, items: { type: string } }
@@ -1446,7 +1492,7 @@ components:
         document_state: { $ref: "#/components/schemas/DocState" }
         created_at:     { type: string, format: date-time }
         updated_at:     { type: string, format: date-time }
-      required: [id, url, saved_at, source, created_at, updated_at]
+      required: [id, url, saved_at, saved_date, source, created_at, updated_at]
 
     BookmarkListItem:
       type: object
@@ -1458,7 +1504,8 @@ components:
         id:                     { type: string, format: uuid }
         url:                    { type: string, format: uri }
         title:                  { type: string }
-        saved_at:               { type: string, format: date-time }
+        saved_at:               { type: string, format: date-time, description: "When it was saved, as far as saved_date says" }
+        saved_date:             { $ref: "#/components/schemas/SavedDate" }
         source:                 { $ref: "#/components/schemas/Source" }
         folder_path:            { type: string }
         tags:                   { type: array, items: { type: string } }
@@ -1470,7 +1517,7 @@ components:
         document_last_error:    { type: string, description: "Of the most recent failed job for the document" }
         created_at:             { type: string, format: date-time }
         updated_at:             { type: string, format: date-time }
-      required: [id, url, saved_at, source, created_at, updated_at]
+      required: [id, url, saved_at, saved_date, source, created_at, updated_at]
 
     BookmarkList:
       type: object
@@ -1527,7 +1574,13 @@ components:
         title:       { type: string }
         folder_path: { type: string }
         tags:        { type: array, items: { type: string } }
-        saved_at:    { type: string, format: date-time, description: "Omitted when the source has no date; the daemon uses now" }
+        saved_at:
+          type: string
+          format: date-time
+          description: >
+            When the bookmark was saved. Omitted when the source has no
+            date: the daemon stores the bookmark as saved now, and its
+            saved_date says the time is no save's.
       required: [url]
 
     ImportResult:
@@ -1682,14 +1735,66 @@ components:
         filters:
           type: object
           description: >
-            Every dimension given is applied. Folder and tag filters,
-            per-request RRF weights, collapse strategy and saved-date filters
-            are not implemented; the server config sets the weights and
-            collapse strategy, and sending any of them is a 400.
+            Every dimension given applies, and the values within one are
+            alternatives; each list holds at most 32. A filter the server
+            can't take is a 400 naming it (filters.<field>), before the query
+            is embedded. Tag filters, per-request RRF weights and the
+            collapse strategy are not implemented; the server config sets
+            the weights and collapse strategy, and sending any of them is a
+            400. Dates are a day (YYYY-MM-DD), which is midnight UTC, or an
+            RFC 3339 date-time with a zone (2024-03-01T00:00:00+01:00 for a
+            local day), compared to the millisecond; a window is [after,
+            before), and either bound may be left out. Each bookmark-level filter (source, folder, the saved
+            window) is checked on the document's bookmarks on its own.
           properties:
-            content_type: { type: array, items: { $ref: "#/components/schemas/ContentType" } }
-            host:         { type: array, items: { type: string }, description: "URL hosts, matched exactly and case-insensitively" }
-            source:       { type: array, items: { $ref: "#/components/schemas/Source" } }
+            content_type: { type: array, maxItems: 32, items: { $ref: "#/components/schemas/ContentType" } }
+            host:         { type: array, maxItems: 32, items: { type: string, maxLength: 253 }, description: "URL hosts, matched exactly and case-insensitively" }
+            source:       { type: array, maxItems: 32, items: { $ref: "#/components/schemas/Source" } }
+            site:
+              type: array
+              maxItems: 32
+              items: { type: string, maxLength: 253 }
+              description: >
+                Sites, each a domain such as example.com, without a scheme,
+                path or port. A site is its registrable domain
+                (www.example.com and blog.example.com are example.com), and
+                matches documents on it and on every subdomain of it.
+            folder:
+              type: array
+              maxItems: 32
+              items: { type: string, maxLength: 1024 }
+              description: >
+                Bookmark folders, as stored, the browser's root included
+                ("/Bookmarks Bar/Tech"), matching each folder and every folder
+                under it, case-sensitively, on whole path segments. A missing
+                leading "/" is added and a trailing one dropped; "/" alone is
+                a 400.
+            saved_after:
+              type: string
+              description: >
+                Documents with a bookmark saved at or after this time. Only a
+                bookmark whose saved_date is exact or approx (an upper bound)
+                counts: one with an unknown date is never in a window.
+            saved_before:
+              type: string
+              description: Documents with a bookmark of a known date saved before this time.
+            published_after:
+              type: string
+              description: >
+                Documents published at or after this time. A published date
+                counts only when it is trusted: at most a day after the
+                document's earliest exact save, or of a document with none;
+                a later one is a modification date.
+            published_before:
+              type: string
+              description: Documents with a trusted published date before this time.
+            include_undated:
+              type: boolean
+              description: >
+                Keep, besides the documents the date filters pass, those they
+                can't judge: no bookmark of a known date for the saved window,
+                no trusted published date for the published one. It needs a
+                date filter.
       required: [query]
 
     SearchHit:
@@ -1727,8 +1832,9 @@ components:
         title:       { type: string, description: "The bookmark's title; omitted when it has none" }
         folder_path: { type: string, description: "The folder it was saved in, as the browser named it; omitted for none" }
         source:      { $ref: "#/components/schemas/Source" }
-        saved_at:    { type: string, format: date-time }
-      required: [source, saved_at]
+        saved_at:    { type: string, format: date-time, description: "When it was saved, as far as saved_date says" }
+        saved_date:  { $ref: "#/components/schemas/SavedDate" }
+      required: [source, saved_at, saved_date]
 
     ChunkMatch:
       type: object
@@ -1775,6 +1881,15 @@ components:
             Why the results are degraded, and, when the cards list is
             weighted, that the results are without it; present only when
             there is something to report.
+        undated:
+          type: integer
+          description: >
+            Present exactly when a date filter is set: how many of the
+            library's documents, of any state, the date filters couldn't
+            judge among those the other filters pass (no bookmark of a
+            known date, no trusted published date). They were left out,
+            or kept with include_undated; the count is the same either way,
+            and on every page of every query with these filters.
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }

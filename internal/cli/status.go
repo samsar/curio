@@ -89,6 +89,9 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 	if f := health.DocumentFields; f != nil {
 		fmt.Fprint(w, searchFieldsWarning(*f))
 	}
+	if s := health.SavedDates; s != nil {
+		fmt.Fprint(w, savedDatesWarning(*s))
+	}
 
 	sctx, scancel := context.WithTimeout(ctx, 1*time.Second)
 	defer scancel()
@@ -166,6 +169,36 @@ func searchFieldsWarning(f client.DocumentFields) string {
 	}
 	return fmt.Sprintf("warning: the daemon's start couldn't check the search fields (%s); "+
 		"search may miss documents; run `curio doctor`\n", f.Error)
+}
+
+// savedDatesWarning is what status prints while the daemon's start
+// couldn't classify the bookmarks' saved dates, or an import's source is
+// owed a classification, a line each, and empty otherwise: the details
+// are doctor's.
+func savedDatesWarning(s client.SavedDates) string {
+	var out string
+	if s.Error != "" {
+		out += fmt.Sprintf("warning: the daemon's start couldn't classify the saved dates (%s); "+
+			"date filters may misjudge bookmarks; run `curio doctor`\n", s.Error)
+	}
+	if len(s.Owed) > 0 {
+		out += fmt.Sprintf("warning: the saved dates of the %s bookmarks an import stored aren't classified yet; "+
+			"date filters leave them out until a retry does; run `curio doctor`\n", owedSources(s.Owed))
+	}
+	return out
+}
+
+// owedSources names the sources owed a classification: "chrome", "chrome
+// and safari", "chrome, html and safari".
+func owedSources(owed []client.OwedClassification) string {
+	names := make([]string, len(owed))
+	for i, o := range owed {
+		names[i] = o.Source
+	}
+	if len(names) == 1 {
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 // homeMismatchWarning warns when the daemon answering at this address serves

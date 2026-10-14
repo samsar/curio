@@ -65,13 +65,14 @@ type searcher interface {
 	Search(ctx context.Context, req client.SearchRequest) (*client.SearchResponse, error)
 }
 
-// rankQueries runs every query through search and returns the URLs each one
-// ranked. A degraded (keyword-only) response is an error: scoring it would
-// report BM25 alone as if it were the hybrid pipeline being measured.
+// rankQueries runs every query through search, with its filters, and
+// returns the URLs each one ranked. A degraded (keyword-only) response is
+// an error: scoring it would report BM25 alone as if it were the hybrid
+// pipeline being measured.
 func rankQueries(ctx context.Context, s searcher, qs *eval.QuerySet, k int) ([][]string, error) {
 	ranked := make([][]string, len(qs.Queries))
 	for i, q := range qs.Queries {
-		res, err := s.Search(ctx, client.SearchRequest{Query: q.Query, K: k})
+		res, err := s.Search(ctx, client.SearchRequest{Query: q.Query, K: k, Filters: searchFilters(q.Filters)})
 		if err != nil {
 			return nil, fmt.Errorf("search %q: %w", q.Query, err)
 		}
@@ -86,6 +87,16 @@ func rankQueries(ctx context.Context, s searcher, qs *eval.QuerySet, k int) ([][
 		ranked[i] = urls
 	}
 	return ranked, nil
+}
+
+// searchFilters are a query's filters as the daemon takes them, nil for
+// none; the daemon checks them.
+func searchFilters(f *eval.Filters) *client.SearchFilters {
+	if f == nil {
+		return nil
+	}
+	return &client.SearchFilters{Site: f.Site, Folder: f.Folder, SavedAfter: f.SavedAfter, SavedBefore: f.SavedBefore,
+		PublishedAfter: f.PublishedAfter, PublishedBefore: f.PublishedBefore, IncludeUndated: f.IncludeUndated}
 }
 
 func renderEvalReport(w io.Writer, r eval.Report) error {

@@ -80,15 +80,21 @@ func TestLoadQuerySet_TheExamples(t *testing.T) {
 	qs, err = LoadQuerySet(filepath.Join("..", "..", "docs", "search-eval.example.yaml"))
 	require.NoError(t, err)
 	var grades []int
+	var filtered []*Filters
 	for _, q := range qs.Queries {
 		assert.NotEmpty(t, q.ID)
 		assert.NotEmpty(t, q.Kind)
 		for _, j := range q.Relevant {
 			grades = append(grades, j.Grade)
 		}
+		if q.Filters != nil {
+			filtered = append(filtered, q.Filters)
+		}
 	}
 	assert.Contains(t, grades, 1)
 	assert.Contains(t, grades, MaxGrade)
+	assert.Equal(t, []*Filters{{SavedAfter: "2024-01-01", SavedBefore: "2025-01-01", Site: []string{"example.com"}}},
+		filtered)
 }
 
 func TestParseQuerySet_GradedAndGrouped(t *testing.T) {
@@ -207,4 +213,71 @@ func TestParseQuerySet_Aliases(t *testing.T) {
 	_, err = ParseQuerySet([]byte(data+"  - *q\n"), "set.yaml")
 	require.Error(t, err, "the aliased query repeats the first's id")
 	assert.Contains(t, err.Error(), `queries 0 and 2 have the same id "first"`)
+}
+
+// TestParseQuerySet_Filters: a query's filters are read under the API's
+// names, as written, an unquoted date as its text; a query without them
+// has none.
+func TestParseQuerySet_Filters(t *testing.T) {
+	qs, err := ParseQuerySet([]byte(`
+queries:
+  - id: every
+    query: what I saved about kafka
+    filters:
+      saved_after: 2020-01-01
+      saved_before: "2021-01-01T00:00:00+01:00"
+      published_after: 2019-06-01
+      published_before: 2020-06-01
+      site: [example.com, blog.example.org]
+      folder: ["/Bookmarks Bar/Tech", "/Reading/a,b"]
+      include_undated: true
+    relevant: [https://example.com/a]
+  - id: none
+    query: kafka
+    relevant: [https://example.com/b]
+`), "set.yaml")
+	require.NoError(t, err)
+	assert.Equal(t, &Filters{SavedAfter: "2020-01-01", SavedBefore: "2021-01-01T00:00:00+01:00",
+		PublishedAfter: "2019-06-01", PublishedBefore: "2020-06-01", Site: []string{"example.com", "blog.example.org"},
+		Folder: []string{"/Bookmarks Bar/Tech", "/Reading/a,b"}, IncludeUndated: true}, qs.Queries[0].Filters)
+	assert.Nil(t, qs.Queries[1].Filters)
+}
+
+// TestParseQuerySet_FilterErrors: a filter the format doesn't take names
+// the query and the line.
+func TestParseQuerySet_FilterErrors(t *testing.T) {
+	const head = "queries:\n  - id: first\n    query: fine\n    relevant: [https://example.com/a]\n" +
+		"  - id: second\n    query: q\n    relevant: [https://example.com/b]\n    filters:\n"
+	cases := []struct {
+		name, filters string
+		says          []string
+	}{
+		{"an unknown key", "      saved_since: 2020-01-01\n", []string{"line 9", `unknown key "saved_since"`}},
+		{"a key twice", "      site: [a.example]\n      site: [b.example]\n",
+			[]string{"line 10", `key "site" repeated (first at line 9)`}},
+		{"a list for a date", "      saved_after: [2020-01-01]\n", []string{"line 9", "saved_after is one value"}},
+		{"a null date", "      published_before: ~\n", []string{"line 9", "published_before is one value"}},
+		{"a string for include_undated", "      include_undated: \"yes\"\n",
+			[]string{"line 9", "include_undated is true or false"}},
+		{"a site, not a list", "      site: example.com\n", []string{"line 9", "site is a list"}},
+		{"a folder of lists", "      folder: [[a]]\n", []string{"line 9", "folder is one value"}},
+		{"an empty mapping", "      {}\n", []string{"line 9", "an empty filters mapping"}},
+		{"an empty date", "      saved_after: \"\"\n", []string{"line 9", "saved_after is empty"}},
+		{"a blank date", "      published_before: \" \"\n", []string{"line 9", "published_before is empty"}},
+		{"an empty site list", "      site: []\n", []string{"line 9", "site is an empty list"}},
+		{"an empty folder", "      folder: [\"/A\", \"\"]\n", []string{"line 9", "folder is empty"}},
+		{"include_undated false alone", "      include_undated: false\n",
+			[]string{"line 9", "filters that filter nothing"}},
+		{"a list", "      - site\n", []string{"line 9", "filters is a mapping"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseQuerySet([]byte(head+tc.filters), "set.yaml")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `query 1 (id "second")`)
+			for _, s := range tc.says {
+				assert.Contains(t, err.Error(), s)
+			}
+		})
+	}
 }

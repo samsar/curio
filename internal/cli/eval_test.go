@@ -47,6 +47,25 @@ func TestRankQueries(t *testing.T) {
 		assert.Equal(t, []int{5, 5}, gotK)
 	})
 
+	t.Run("sends a query's filters", func(t *testing.T) {
+		filtered := &eval.QuerySet{Queries: []eval.Query{
+			{Query: "first", Filters: &eval.Filters{SavedAfter: "2020-01-01", SavedBefore: "2021-01-01",
+				PublishedAfter: "2019-01-01", PublishedBefore: "2019-06-01", Site: []string{"example.com"},
+				Folder: []string{"/Bookmarks Bar/a,b"}, IncludeUndated: true}},
+			{Query: "second"},
+		}}
+		var got []*client.SearchFilters
+		s := searchFunc(func(_ context.Context, req client.SearchRequest) (*client.SearchResponse, error) {
+			got = append(got, req.Filters)
+			return &client.SearchResponse{}, nil
+		})
+		_, err := rankQueries(context.Background(), s, filtered, 10)
+		require.NoError(t, err)
+		assert.Equal(t, []*client.SearchFilters{{SavedAfter: "2020-01-01", SavedBefore: "2021-01-01",
+			PublishedAfter: "2019-01-01", PublishedBefore: "2019-06-01", Site: []string{"example.com"},
+			Folder: []string{"/Bookmarks Bar/a,b"}, IncludeUndated: true}, nil}, got)
+	})
+
 	t.Run("refuses a degraded search", func(t *testing.T) {
 		s := searchFunc(func(_ context.Context, req client.SearchRequest) (*client.SearchResponse, error) {
 			res := &client.SearchResponse{Items: hits("https://example.com/a")}

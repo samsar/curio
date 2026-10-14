@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 	_ "time/tzdata" // the daylight-saving tests need zones on any machine
@@ -194,6 +195,40 @@ func TestSearchFilters_IsEmpty(t *testing.T) {
 	} {
 		assert.False(t, f.IsEmpty(), name)
 	}
+}
+
+// TestSearchFilters_Validate: the store refuses what Resolve would,
+// should a caller skip it, and takes the most it allows.
+func TestSearchFilters_Validate(t *testing.T) {
+	day := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		f    store.SearchFilters
+		says string
+	}{
+		"an empty host":            {store.SearchFilters{Host: []string{"example.com", ""}}, "filters.host: an empty value"},
+		"an empty source":          {store.SearchFilters{Source: []string{""}}, "filters.source: an empty value"},
+		"an empty folder":          {store.SearchFilters{Folder: []string{""}}, "filters.folder: an empty value"},
+		"a folder of slashes":      {store.SearchFilters{Folder: []string{"///"}}, `filters.folder: "///" names no folder`},
+		"33 sites":                 {store.SearchFilters{Site: make([]string, 33)}, "filters.site: 33 values, at most 32"},
+		"a host past a DNS name":   {store.SearchFilters{Host: []string{strings.Repeat("h", 254)}}, "filters.host: a value of 254 bytes, at most 253"},
+		"a site past a DNS name":   {store.SearchFilters{Site: []string{strings.Repeat("s", 254)}}, "filters.site: a value of 254 bytes"},
+		"a folder past the most":   {store.SearchFilters{Folder: []string{"/" + strings.Repeat("f", 1024)}}, "filters.folder: a value of 1025 bytes, at most 1024"},
+		"a saved window, equal":    {store.SearchFilters{SavedAfter: day, SavedBefore: day}, "filters.saved_after must be before"},
+		"a saved window, reversed": {store.SearchFilters{SavedAfter: day.Add(time.Hour), SavedBefore: day}, "filters.saved_after must be before"},
+		"a saved window within a millisecond": {store.SearchFilters{SavedAfter: day.Add(100 * time.Microsecond),
+			SavedBefore: day.Add(900 * time.Microsecond)}, "filters.saved_after must be before"},
+		"a published window, equal": {store.SearchFilters{PublishedAfter: day, PublishedBefore: day}, "filters.published_after must be before"},
+		"include_undated alone":     {store.SearchFilters{IncludeUndated: true}, "filters.include_undated takes a date filter"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.ErrorContains(t, tc.f.Validate(), tc.says)
+		})
+	}
+
+	most := store.SearchFilters{Host: []string{strings.Repeat("h", 253)}, Site: []string{strings.Repeat("s", 253)},
+		Folder: []string{"/" + strings.Repeat("f", 1023)}, SavedAfter: day, SavedBefore: day.Add(time.Millisecond),
+		PublishedBefore: day, IncludeUndated: true}
+	assert.NoError(t, most.Validate(), "the longest values and the shortest window")
 }
 
 func TestNullableString(t *testing.T) {

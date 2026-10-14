@@ -141,6 +141,10 @@ func newStartingTestServerUI(t *testing.T, pages UIOptions, options ...func(*Dep
 	for _, opt := range options {
 		opt(&deps)
 	}
+	if deps.SavedDates == nil {
+		deps.SavedDates = NewSavedDateClassifier(context.Background(), SavedDateOptions{Bookmarks: deps.Bookmarks,
+			Log: quiet})
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

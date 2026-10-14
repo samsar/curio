@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/samsar/curio/internal/importer"
@@ -28,7 +30,7 @@ type ImportBookmark struct {
 	Title      string    `json:"title,omitempty"`
 	FolderPath string    `json:"folder_path,omitempty"`
 	Tags       []string  `json:"tags,omitempty"`
-	SavedAt    time.Time `json:"saved_at,omitzero"` // zero (absent) means now
+	SavedAt    time.Time `json:"saved_at,omitzero"` // zero (absent): the source has no date, so it is stored dateless
 }
 
 // ImportResponse summarizes what happened, or for a dry run what would
@@ -56,7 +58,7 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 		d.writeError(w, r, err)
 		return
 	}
-	if !validSource(req.Source) {
+	if !store.ValidSource(req.Source) {
 		writeProblem(w, r, http.StatusBadRequest, "bad request", "source must be one of: "+sourceList)
 		return
 	}
@@ -75,14 +77,27 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
+	abandoned := d.ingest(r.Context(), req, &resp)
+	// The rows stored are there whether the client stayed or not, and
+	// claim no date until their source is classified.
+	if resp.Created > 0 {
+		d.SavedDates.Classify(req.Source)
+	}
+	if abandoned {
+		return
+	}
+	d.writeJSON(w, r, http.StatusOK, resp)
+}
+
+// ingest saves req's bookmarks one by one, counting what it did in resp.
+// It reports whether the client went away first: it then stops writing
+// rows nobody will hear about. Each bookmark committed on its own, so a
+// re-import picks up where this one stopped.
+func (d Deps) ingest(ctx context.Context, req ImportRequest, resp *ImportResponse) (abandoned bool) {
 	for i, in := range req.Bookmarks {
 		if err := ctx.Err(); err != nil {
-			// The client has gone: stop writing rows nobody will hear about.
-			// Each bookmark committed on its own, so a re-import picks up
-			// where this one stopped.
 			d.Log.Info("import abandoned by the client", "processed", i, "total", len(req.Bookmarks), "err", err)
-			return
+			return true
 		}
 		norm, ok := resp.classify(in.URL)
 		if !ok {
@@ -103,8 +118,7 @@ func (d Deps) handleImportBookmarks(w http.ResponseWriter, r *http.Request) {
 			resp.JobsEnqueued++
 		}
 	}
-
-	d.writeJSON(w, r, http.StatusOK, resp)
+	return false
 }
 
 // previewImport answers a dry run: the response the import of req would
@@ -170,15 +184,5 @@ func (r *ImportResponse) appendError(msg string) {
 	r.Errors = append(r.Errors, msg)
 }
 
-// sourceList names the values validSource accepts, for error details.
-const sourceList = "chrome, safari, firefox, html, manual"
-
-// validSource reports whether s is a bookmark source (bookmarks.source).
-func validSource(s string) bool {
-	switch s {
-	case store.SourceChrome, store.SourceSafari, store.SourceFirefox,
-		store.SourceManual, store.SourceHTML:
-		return true
-	}
-	return false
-}
+// sourceList names the bookmark sources, for error details.
+var sourceList = strings.Join(store.Sources(), ", ")
