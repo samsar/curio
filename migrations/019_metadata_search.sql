@@ -9,12 +9,23 @@
 -- titles and folders it was bookmarked under, its site and its author,
 -- each derived in Go (internal/docmeta) and written only by the store's
 -- refresh (internal/store/sqlite/fields.go), never with INSERT OR REPLACE.
--- host, declared_site and title_suffixes are the inputs of the site name
--- agreed across a host, kept per row so agreeing reads only the host's
--- rows; site_name is the name agreed; rules is the docmeta.RulesVersion
+-- host, declared_site and title_suffixes are what the document contributes
+-- to the site name agreed across its host: the name its page declares, and
+-- the distinct title suffixes of its title and bookmark titles, a JSON
+-- array; site_name is the name agreed; rules is the docmeta.RulesVersion
 -- the row was derived by, so a change of the rules re-derives every row at
 -- the next start. seq is the FTS rowid, an INTEGER PRIMARY KEY that VACUUM
 -- keeps, as chunks.seq is (008).
+--
+-- site_name_votes is what agreeing a host's name reads: per tenant and
+-- host, how many of its documents declare each name and how many carry
+-- each title suffix, so a write reads the two leaders of its host, one
+-- indexed seek each, never every row of the host. Triggers on
+-- document_fields keep it equal to what the rows contribute, in the
+-- statement that writes a row, whatever writes it: a cascade delete of a
+-- document withdraws its votes as it removes its row. The suffixes are a
+-- JSON array because a trigger can split one with json_each, and has no
+-- way to split a list a line (a trigger can't hold a CTE).
 --
 -- document_cards is the short text a document is embedded by, its card;
 -- embedded_text is the text its vector in document_cards_vec was made
@@ -24,9 +35,10 @@
 -- together: a migration can't know the width, and a trigger naming a
 -- table that doesn't exist yet fails when it fires.
 --
--- Neither table is filled here. The daemon derives every document's row
--- at start (sqlite.EnsureDocumentFields), through the same code as every
--- later write, and the cards job embeds the cards.
+-- No table is filled here. The daemon derives every document's row at
+-- start (sqlite.EnsureDocumentFields), through the same code as every
+-- later write, the triggers count the rows' votes as they are written,
+-- and the cards job embeds the cards.
 --
 -- Like chunks, the derived tables carry no updated_at.
 
@@ -36,7 +48,8 @@ CREATE TABLE document_fields (
     tenant_id       TEXT    NOT NULL,
     host            TEXT    NOT NULL DEFAULT '',
     declared_site   TEXT    NOT NULL DEFAULT '',
-    title_suffixes  TEXT    NOT NULL DEFAULT '',
+    title_suffixes  TEXT    NOT NULL DEFAULT '[]'
+                            CHECK (json_valid(title_suffixes) AND json_type(title_suffixes) = 'array'),
     site_name       TEXT    NOT NULL DEFAULT '',
     title           TEXT    NOT NULL DEFAULT '',
     bookmark_titles TEXT    NOT NULL DEFAULT '',
@@ -46,9 +59,80 @@ CREATE TABLE document_fields (
     rules           INTEGER NOT NULL
 );
 
--- A host's rows, read to agree its site name on every write of one of
--- them.
-CREATE INDEX idx_document_fields_host ON document_fields(tenant_id, host);
+-- A host's documents by their declared name and the name they hold: those
+-- without a declared name and with another name than the one their host
+-- agrees on are two ranges of it, read on every write to find the
+-- documents to rename, and found only when the agreement changed.
+CREATE INDEX idx_document_fields_site ON document_fields(tenant_id, host, declared_site, site_name);
+
+CREATE TABLE site_name_votes (
+    tenant_id TEXT    NOT NULL,
+    host      TEXT    NOT NULL,
+    kind      TEXT    NOT NULL CHECK (kind IN ('declared', 'suffix')),
+    name      TEXT    NOT NULL,
+    votes     INTEGER NOT NULL CHECK (votes > 0),
+    PRIMARY KEY (tenant_id, host, kind, name)
+) WITHOUT ROWID;
+
+-- A host's names of one kind, the most held first, ties in byte order:
+-- the leader is the first row.
+CREATE INDEX idx_site_name_votes_lead ON site_name_votes(tenant_id, host, kind, votes DESC, name);
+
+-- A row's votes: its declared name, when it has one, and each of its
+-- suffixes, DISTINCT so a document counts once for a suffix whatever its
+-- array holds. A vote row at 1 is deleted rather than decremented, as the
+-- CHECK requires, so a name nobody holds has no row.
+CREATE TRIGGER trg_document_fields_votes_insert AFTER INSERT ON document_fields BEGIN
+    INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
+        SELECT new.tenant_id, new.host, 'declared', new.declared_site, 1 WHERE new.declared_site <> ''
+        ON CONFLICT DO UPDATE SET votes = votes + 1;
+    INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
+        SELECT DISTINCT new.tenant_id, new.host, 'suffix', value, 1 FROM json_each(new.title_suffixes) WHERE true
+        ON CONFLICT DO UPDATE SET votes = votes + 1;
+END;
+
+CREATE TRIGGER trg_document_fields_votes_delete AFTER DELETE ON document_fields BEGIN
+    DELETE FROM site_name_votes
+        WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'declared' AND name = old.declared_site
+          AND votes = 1;
+    UPDATE site_name_votes SET votes = votes - 1
+        WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'declared' AND name = old.declared_site
+          AND votes > 1;
+    DELETE FROM site_name_votes
+        WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'suffix'
+          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND votes = 1;
+    UPDATE site_name_votes SET votes = votes - 1
+        WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'suffix'
+          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND votes > 1;
+END;
+
+-- A move of the votes: the old row's withdrawn, the new row's added. It
+-- fires only when what the row contributes changed, so an upsert that sets
+-- every column, as the refresh's does, moves nothing for a row whose
+-- contribution stayed.
+CREATE TRIGGER trg_document_fields_votes_update
+AFTER UPDATE OF tenant_id, host, declared_site, title_suffixes ON document_fields
+WHEN (old.tenant_id, old.host, old.declared_site, old.title_suffixes)
+     IS NOT (new.tenant_id, new.host, new.declared_site, new.title_suffixes) BEGIN
+    DELETE FROM site_name_votes
+        WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'declared' AND name = old.declared_site
+          AND votes = 1;
+    UPDATE site_name_votes SET votes = votes - 1
+        WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'declared' AND name = old.declared_site
+          AND votes > 1;
+    DELETE FROM site_name_votes
+        WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'suffix'
+          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND votes = 1;
+    UPDATE site_name_votes SET votes = votes - 1
+        WHERE tenant_id = old.tenant_id AND host = old.host AND kind = 'suffix'
+          AND name IN (SELECT value FROM json_each(old.title_suffixes)) AND votes > 1;
+    INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
+        SELECT new.tenant_id, new.host, 'declared', new.declared_site, 1 WHERE new.declared_site <> ''
+        ON CONFLICT DO UPDATE SET votes = votes + 1;
+    INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
+        SELECT DISTINCT new.tenant_id, new.host, 'suffix', value, 1 FROM json_each(new.title_suffixes) WHERE true
+        ON CONFLICT DO UPDATE SET votes = votes + 1;
+END;
 
 CREATE VIRTUAL TABLE document_fields_fts USING fts5 (
     title,
@@ -62,8 +146,10 @@ CREATE VIRTUAL TABLE document_fields_fts USING fts5 (
 );
 
 -- The external-content pattern of chunks_fts (008). The update trigger
--- names the indexed columns alone, so a write of the agreement's inputs,
--- the agreed name or the rules version never re-tokenizes a row.
+-- fires only when a searched column's value changed, not whenever an
+-- UPDATE names one, so a write of the agreement's inputs, the agreed name
+-- or the rules version never re-tokenizes a row, even through an upsert
+-- that sets every column.
 CREATE TRIGGER trg_document_fields_insert AFTER INSERT ON document_fields BEGIN
     INSERT INTO document_fields_fts (rowid, title, bookmark_titles, folders, site, author)
     VALUES (new.seq, new.title, new.bookmark_titles, new.folders, new.site, new.author);
@@ -75,7 +161,9 @@ CREATE TRIGGER trg_document_fields_delete AFTER DELETE ON document_fields BEGIN
 END;
 
 CREATE TRIGGER trg_document_fields_update
-AFTER UPDATE OF title, bookmark_titles, folders, site, author ON document_fields BEGIN
+AFTER UPDATE OF title, bookmark_titles, folders, site, author ON document_fields
+WHEN (old.title, old.bookmark_titles, old.folders, old.site, old.author)
+     IS NOT (new.title, new.bookmark_titles, new.folders, new.site, new.author) BEGIN
     INSERT INTO document_fields_fts (document_fields_fts, rowid, title, bookmark_titles, folders, site, author)
     VALUES ('delete', old.seq, old.title, old.bookmark_titles, old.folders, old.site, old.author);
     INSERT INTO document_fields_fts (rowid, title, bookmark_titles, folders, site, author)
@@ -191,5 +279,6 @@ DROP TABLE IF EXISTS document_cards_vec;
 DROP TABLE document_cards;
 DROP TABLE document_fields_fts;
 DROP TABLE document_fields;
+DROP TABLE site_name_votes;
 
 -- +goose StatementEnd

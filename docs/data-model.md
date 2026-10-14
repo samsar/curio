@@ -241,7 +241,7 @@ home format 2 (see
 The database records neither: migration 012 dropped `schema_meta`, whose
 row claimed nomic-embed-text at 768 for every home.
 
-### `document_fields` and `document_cards` (migration 019)
+### `document_fields`, `site_name_votes` and `document_cards` (migration 019)
 
 What a document is searched by besides its text: its fields, which the
 fields list matches with BM25 and the title list by its `title` and
@@ -264,7 +264,7 @@ document_fields
   tenant_id       TEXT NOT NULL
   host            TEXT NOT NULL            -- the URL's host, without port or "www."
   declared_site   TEXT NOT NULL            -- the site name its page declares, unless generic or the host itself
-  title_suffixes  TEXT NOT NULL            -- the site names its title and bookmark titles end with, one a line
+  title_suffixes  TEXT NOT NULL            -- the site names its title and bookmark titles end with: a JSON array, distinct
   site_name       TEXT NOT NULL            -- its declared name, else the name its host agrees on, else ''
   title           TEXT NOT NULL            -- searched
   bookmark_titles TEXT NOT NULL            -- searched: its bookmarks' distinct titles, one a line
@@ -272,6 +272,13 @@ document_fields
   site            TEXT NOT NULL            -- searched: site_name and the host's words
   author          TEXT NOT NULL            -- searched
   rules           INTEGER NOT NULL         -- the docmeta.RulesVersion it was derived by
+
+site_name_votes                            -- WITHOUT ROWID
+  tenant_id       TEXT NOT NULL            -- PK (tenant_id, host, kind, name)
+  host            TEXT NOT NULL
+  kind            TEXT NOT NULL            -- 'declared' | 'suffix'
+  name            TEXT NOT NULL            -- a declared site name, or a title suffix
+  votes           INTEGER NOT NULL         -- how many of the host's documents hold it, > 0
 
 document_cards
   document_id     UUID PK FK               -- ON DELETE CASCADE
@@ -282,15 +289,27 @@ document_cards
 
 - `document_fields_fts` is an external-content FTS5 index over the five
   searched columns (`content_rowid = seq`, the `chunks_fts` tokenizer),
-  kept in step by triggers. The update trigger names the searched columns
-  alone, so a write of the agreement's inputs, the agreed name or the
-  rules version never re-tokenizes a row.
+  kept in step by triggers. The update trigger fires only when a searched
+  column's value changed, so a write of the agreement's inputs, the agreed
+  name or the rules version never re-tokenizes a row, even through the
+  refresh's upsert, which sets every column.
 - `site_name` is agreed across a host: a document's own declared name,
   else the declared name most of its host's documents hold, else the title
   suffix at least two of them carry, else a short curated table of public
-  sites. `idx_document_fields_host (tenant_id, host)` serves the read of a
-  host's rows each write makes to agree it; a write that changes the name
-  rewrites the host's other rows without a declared name.
+  sites, ties in byte order. `site_name_votes` counts, per host, the
+  documents that declare each name and carry each suffix, and triggers on
+  `document_fields` keep it equal to what the rows contribute (a row's
+  insert adds its declared name and each suffix, its delete withdraws
+  them, deleting a count that reaches 0, and an update that changes them
+  moves them), so no write, a cascade delete included, can leave it
+  behind. A write reads the host's two leaders
+  (`idx_site_name_votes_lead (tenant_id, host, kind, votes DESC, name)`,
+  one seek each) and then the host's rows without a declared name that
+  hold another name, two ranges of `idx_document_fields_site (tenant_id,
+  host, declared_site, site_name)` that are empty unless the name agreed
+  changed; only then are those rows renamed, each one's site and card
+  rewritten. The suffixes are a JSON array so the triggers can split them
+  (`json_each`).
 - A card is stale while `embedded_text IS NOT text`;
   `idx_document_cards_stale (document_id) WHERE embedded_text IS NOT text`
   holds the stale ones alone, which the cards job pages through. A write

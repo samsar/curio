@@ -3767,25 +3767,29 @@ A document's delete still seeks `idx_interest_assignments_document` and
 `idx_interest_placements_document`. See "Interest map: two views of each
 regrouping, drawn when it is built".
 
-**Revised (2026-10-13):** migration 019's tables bring two indexes and
-their pins. `idx_document_fields_host (tenant_id, host)` serves the one
-read of a host's rows each fields refresh makes to agree its site name;
-`idx_document_cards_stale`, a partial index of the cards whose embedded
-text isn't their text, serves the cards job's keyset pass over the stale
-cards and the startup count of tenants with any, so neither reads a
-fresh card. The fields search is driven from the FTS MATCH, each hit's
-row by rowid and its document by primary key; the card search from the
-vec0 KNN, each document by primary key; a card vector's delete is a vec0
-point lookup, as a chunk vector's is. The refresh's reads (a document's
-inputs, its bookmarks in their order with no sort, a sibling by its
-unique key) and its upserts (by `document_id`, never a scan), the
-startup scan for fields that are missing or of older rules (each
-document once, its row by the unique key), `ResetCards` and
-`ListByDocuments` (a JSON array of IDs, each document's bookmarks by
-`idx_bookmarks_document`) are pinned. The stale-card read and the
-bookmarks by documents write their tenant `+d.tenant_id` and
-`+tenant_id`, so neither walks a tenant index. See "Metadata search: a
-fields index and a card per document".
+**Revised (2026-10-13):** migration 019's tables bring three indexes and
+their pins. `idx_site_name_votes_lead (tenant_id, host, kind, votes DESC,
+name)` serves the two seeks a fields refresh makes for a host's leading
+declared name and title suffix, covering, with no sort;
+`idx_document_fields_site (tenant_id, host, declared_site, site_name)`
+serves its read of the host's documents to rename, two ranges around the
+agreed name (a MULTI-INDEX OR), and the rename itself, which walks the
+host's documents without a declared name and runs only on a change of
+name; `idx_document_cards_stale`, a partial index of the cards whose
+embedded text isn't their text, serves the cards job's keyset pass over
+the stale cards and the startup count of tenants with any, so neither
+reads a fresh card. The fields search is driven from the FTS MATCH, each
+hit's row by rowid and its document by primary key; the card search from
+the vec0 KNN, each document by primary key; a card vector's delete is a
+vec0 point lookup, as a chunk vector's is. The refresh's reads (a
+document's inputs, its bookmarks in their order with no sort) and its
+upserts (by `document_id`, never a scan), the startup scan for fields that
+are missing or of older rules (each document once, its row by the unique
+key), `ResetCards` and `ListByDocuments` (a JSON array of IDs, each
+document's bookmarks by `idx_bookmarks_document`) are pinned. The
+stale-card read and the bookmarks by documents write their tenant
+`+d.tenant_id` and `+tenant_id`, so neither walks a tenant index. See
+"Metadata search: a fields index and a card per document".
 
 ---
 
@@ -12967,24 +12971,27 @@ today, such as `stratechery.com` → Stratechery, `hbr.org` → Harvard
 Business Review), else none. Ties go to byte order. The table is general
 and short; growing it to win a query is out of bounds.
 
-**Two tables, not an FTS over documents.** The fields come from three
-tables (the document, its current extraction's meta, its bookmarks) and
-from rules only Go can apply (the public suffix list, root labels, the
-host's agreement). An FTS5 index over `documents` would hold only what a
-documents column holds, and a contentless or view-backed one couldn't be
-kept in step by triggers across bookmarks and extractions. So
-`document_fields` (migration 019) holds one derived row per document, with
-an integer `seq` for the external-content FTS's rowid (`documents` is keyed
-by a UUID) and the agreement's inputs beside the searched text:
-`declared_site` and `title_suffixes` per row, so agreeing a host's name is
-one indexed read of its rows (`idx_document_fields_host`), never its
-documents' titles and bookmarks. The FTS update trigger names the five
-searched columns alone, so writing those inputs, `site_name` or `rules`
-never re-tokenizes a row. `document_cards` holds the card's `text` and the
-`embedded_text` its vector was made from; a card is stale while they
-differ, and `idx_document_cards_stale`, a partial index of exactly those,
-is what the cards job pages through. Neither table carries `updated_at`,
-like `chunks`.
+**Derived tables, not an FTS over documents.** The fields come from
+three tables (the document, its current extraction's meta, its bookmarks)
+and from rules only Go can apply (the public suffix list, root labels,
+the host's agreement). An FTS5 index over `documents` would hold only what
+a documents column holds, and a contentless or view-backed one couldn't
+be kept in step by triggers across bookmarks and extractions. So
+`document_fields` (migration 019) holds one derived row per document,
+with an integer `seq` for the external-content FTS's rowid (`documents` is
+keyed by a UUID) and the agreement's inputs beside the searched text:
+`declared_site` and `title_suffixes` per row, which triggers count per
+host in `site_name_votes` (see "Cost per write"), so agreeing a host's
+name never reads its documents' titles and bookmarks. The FTS update
+trigger fires only when a searched column's value changed (a `WHEN` over
+the five), so writing those inputs, `site_name` or `rules` never
+re-tokenizes a row, although the refresh's upsert sets every column:
+`AFTER UPDATE OF` alone fires for every column an UPDATE's SET names, and
+re-tokenized every row a rules bump rewrote. `document_cards` holds the
+card's `text` and the `embedded_text` its vector was made from; a card is
+stale while they differ, and `idx_document_cards_stale`, a partial index
+of exactly those, is what the cards job pages through. None of the tables
+carries `updated_at`, like `chunks`.
 
 **One writer.** `refreshFields` (`internal/store/sqlite/fields.go`) is the
 only writer of `document_fields` and of `document_cards.text`, and
@@ -13023,13 +13030,85 @@ its top), or need an exception to "every UPDATE sets `updated_at`". The
 raw declared value stays on the extraction, so a change of rules derives
 again from it.
 
-**Cost per write.** One indexed read of the host's rows and Go counting:
-a per-host votes table was considered and isn't needed at curio's scale.
-Measured (`BenchmarkRefreshFields_LargeHost`, `BenchmarkIngest`): a refresh
-on a host of 5,000 documents takes about 3 ms; saving a new page's
-bookmark in a 7,500-document library takes 0.72 to 0.86 ms on a host of
-350 and 0.52 to 0.70 ms on a host of ten, against 0.27 and 0.26 ms before,
-under the 1 ms the design allowed.
+**Cost per write: vote counts, kept by triggers.** A write agrees its
+host's name from `site_name_votes`, one row per tenant, host, kind
+(`declared` or `suffix`) and name, holding how many of the host's
+documents declare that name or carry that suffix. The leader of each kind
+is the first row of `idx_site_name_votes_lead (tenant_id, host, kind,
+votes DESC, name)`, one seek each, ties in byte order as Go's
+(`docmeta.AgreedNameOf` decides from the two leaders, and a property test
+holds it to `AgreedName` over the counts). Then the host's documents
+without a declared name that hold another name are read, two ranges of
+`idx_document_fields_site (tenant_id, host, declared_site, site_name)`
+around the agreed name, empty unless the agreement changed; only then
+does one UPDATE rename them and each one's card is rewritten. The steady
+state so reads a constant number of rows whatever the host's size, every
+plan pinned. A change of the agreed name stays proportional to the
+siblings, which hold the name in their `site` column and their card, and
+it makes every one of those cards stale: indexing the host's name apart
+from each document's `site` would make it constant, but would change
+bm25's columns and the ranking, so it is the known cost. A refreshed
+document whose own vote moves the agreement is written twice, under the
+old name and then renamed, which is rare and cheaper than the arithmetic
+that would avoid it.
+
+Triggers keep the counts, not Go: the counts are then a function of the
+`document_fields` rows that no write can bypass, a cascade delete of a
+document, a test's direct UPDATE or a later writer included, and they
+commit or roll back with the row, as the FTS index does. A Go-kept table
+would need its own delete path and could drift. Each row's insert adds
+its declared name and each distinct suffix, its delete withdraws them
+(deleting a count that reaches 0, which the `votes > 0` CHECK requires),
+and an update that changes what it contributes moves them. A property
+test recounts the votes after any order of the seven writes. A document
+deleted outside the store's writes withdraws its votes at once, and its
+host's other documents keep the name they hold until the host's next
+write, which renames them: the misnamed read runs on every refresh. The
+suffixes are a JSON array (CHECKed to be one) because a trigger can split
+one with `json_each` and can't split a list a line, a trigger holding no
+CTE; `docmeta` keeps its list a line, and the store encodes the array.
+
+Measured on one machine, back to back with the branch before the votes
+(probes over a library of one host, the p50 of 200 calls; the
+benchmarks in `fields_bench_test.go`):
+
+| | host of 10 | 350 | 3,000 | 10,000 |
+|---|---|---|---|---|
+| `ApplyFetch` before | 0.19 ms | 0.34 ms | 1.84 ms | 5.97 ms |
+| `ApplyFetch` with the votes | 0.26 ms | 0.24 ms | 0.25 ms | 0.24 ms |
+| `Ingest` before (the host's last 200 saves) | 0.36 ms | 0.38 ms | 1.91 ms | 6.16 ms |
+| `Ingest` with the votes | 0.43 ms | 0.36 ms | 0.36 ms | 0.38 ms |
+
+`BenchmarkApplyFetch` (re-fetching the host's documents, so the host keeps
+its size) gives 0.15, 0.73 and 6.53 ms on hosts of 10, 1,000 and 10,000
+before, and 0.23, 0.26 and 0.30 ms with the votes; the extra on a host of
+ten is the two leader reads, the misnamed read and the vote triggers.
+Sixteen goroutines fetching every page of a 3,000-document host, whose
+pages declare one name, two or none, failed 16, 8 and 9 calls with
+"database is locked" (the 5 s busy timeout) before, each write holding the
+lock for its host's read, and none in three runs with the votes. A change
+of name costs 28.7 ms on a host of 1,000 and 157 ms on one of 5,000
+before, 6.6 and 40.6 ms with the votes (`BenchmarkRefreshFields_Rename`,
+4,999 siblings renamed in a transaction rolled back: 149 ms before, 36 ms
+with). `BenchmarkIngest` saves on its hosts every iteration, so it
+measures hosts of thousands: 1.18 ms a save before, 0.54 ms with the
+votes. No write can come within 2× of main's: the derived rows themselves,
+their transaction, FTS writes and card, take a fetch's write on a host of
+ten from about 0.03 ms on main to about 0.2 ms. The target is a cost
+independent of the host's size, which the votes meet (a host of 10,000
+against one of 350: 1.0× for `ApplyFetch` and 1.07× for `Ingest`, against
+17.6× and 16× before).
+
+A refresh prepares the statements it runs for every document and host once
+a call (`newFieldsTx`), not once a document: the driver caches no
+statement, and preparing one that writes `document_fields` compiles its
+triggers, so preparing them per document doubled the startup refresh in a
+prototype (0.62 to 1.14 s on the owner's copy). Deriving the copy's 7,557
+documents takes 0.57 to 0.59 s with the votes, against 0.65 to 0.67 s
+before them, and their fields, site names and cards are byte for byte the
+same; the copy's 3,795 vote rows equal a recount. A rules bump that
+changes no output, every row rewritten with the same text, takes 0.22 s
+against 0.62 s: no host read, no re-tokenized row.
 
 **A startup refresh, not a SQL backfill.** Migration 019 creates the
 tables empty. `sqlite.EnsureDocumentFields`, after `EnsureVectorIndex` and

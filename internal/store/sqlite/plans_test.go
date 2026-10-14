@@ -507,8 +507,9 @@ func TestQueryPlans(t *testing.T) {
 // job's reads and writes, and the statements that keep the fields and
 // cards in step (see "Metadata search: a fields index and a card per
 // document"). Each document's derived rows are reached by its keys, and a
-// host's through idx_document_fields_host, so a write costs reads of its
-// own host's rows, never of the library's.
+// host's agreement by the leaders of its votes and two ranges of its rows
+// that hold none unless the agreement changed, so a write's reads don't
+// grow with its host, let alone the library.
 func documentIndexPlanCases(t *testing.T) []planCase {
 	fieldsQ, fieldsArgs := fieldsQuery("local", `"kafka"`, 200, store.SearchFilters{})
 	fieldsSourceQ, fieldsSourceArgs := fieldsQuery("local", `"kafka"`, 200,
@@ -593,19 +594,29 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 			first: "SEARCH bookmarks USING INDEX idx_bookmarks_document (document_id=?)",
 		},
 		{
-			name:  "refreshFields host",
-			query: hostFieldsSQL, args: []any{"local", "example.com"},
-			first: "SEARCH document_fields USING INDEX idx_document_fields_host (tenant_id=? AND host=?)",
+			// One seek: the first row of the host's names of a kind, in the
+			// index's order, whatever the host's size.
+			name:  "refreshFields leader",
+			query: leaderSQL, args: []any{"local", "example.com", voteSuffix},
+			first: "SEARCH site_name_votes USING COVERING INDEX idx_site_name_votes_lead (tenant_id=? AND host=? AND kind=?)",
 		},
 		{
-			name:  "refreshFields sibling",
-			query: siblingFieldsSQL, args: []any{"doc"},
-			first: fieldsByDoc,
+			// Two ranges of the host's undeclared rows, around the agreed
+			// name: empty unless the agreement changed.
+			name:  "refreshFields misnamed",
+			query: misnamedSQL, args: []any{"local", "example.com", "Name"},
+			first: "MULTI-INDEX OR",
+			want: []string{
+				"SEARCH document_fields USING INDEX idx_document_fields_site (tenant_id=? AND host=? AND declared_site=? AND site_name<?)",
+				"SEARCH document_fields USING INDEX idx_document_fields_site (tenant_id=? AND host=? AND declared_site=? AND site_name>?)",
+			},
 		},
 		{
-			name:  "refreshFields site",
-			query: setSiteSQL, args: []any{"Name", "Name host", "doc"},
-			first: fieldsByDoc,
+			// The host's undeclared rows, never the library's: run only on
+			// a change of the agreed name.
+			name:  "refreshFields rename",
+			query: renameSQL, args: []any{"local", "example.com", "Name", "Name example"},
+			first: "SEARCH document_fields USING COVERING INDEX idx_document_fields_site (tenant_id=? AND host=? AND declared_site=?)",
 		},
 		{
 			// An upsert finds its conflict through the unique key it names.

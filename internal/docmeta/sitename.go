@@ -147,7 +147,7 @@ type HostDocument struct {
 // the most of them hold, one being enough; else the title suffix the most
 // of them carry, each counted once, at least two; else the curated name of
 // the host, or of its registrable domain; else "". Ties go to the name
-// first in byte order.
+// first in byte order. It is AgreedNameOf over the leaders it counts.
 func AgreedName(host string, docs []HostDocument) string {
 	declared := map[string]int{}
 	suffixes := map[string]int{}
@@ -161,26 +161,41 @@ func AgreedName(host string, docs []HostDocument) string {
 			suffixes[s]++
 		}
 	}
-	if name := mostHeld(declared, 1); name != "" {
-		return name
+	return AgreedNameOf(host, leader(declared), leader(suffixes))
+}
+
+// Leader is the name of one kind, declared names or title suffixes, held
+// by the most of a host's documents, ties going to the first in byte
+// order, and how many hold it; the zero Leader when none holds any.
+type Leader struct {
+	Name  string
+	Votes int
+}
+
+// AgreedNameOf is the name host agrees on from the leaders of its
+// documents' declared names and title suffixes, as AgreedName counts them
+// or a store that keeps the counts reads them: the declared leader when any
+// document declares a name, else the suffix leader when at least two carry
+// it, else the curated name of the host or of its registrable domain, else
+// "".
+func AgreedNameOf(host string, declared, suffix Leader) string {
+	if declared.Votes >= 1 {
+		return declared.Name
 	}
-	if name := mostHeld(suffixes, 2); name != "" {
-		return name
+	if suffix.Votes >= 2 {
+		return suffix.Name
 	}
 	return curatedName(host)
 }
 
-// mostHeld is the name of counts held by the most documents, at least
-// least of them, ties going to the first in byte order; "" when none is.
-func mostHeld(counts map[string]int, least int) string {
-	best, held := "", 0
+// leader is the name counts holds the most, ties going to the first in
+// byte order.
+func leader(counts map[string]int) Leader {
+	var best Leader
 	for name, n := range counts {
-		if n > held || (n == held && name < best) {
-			best, held = name, n
+		if n > best.Votes || (n == best.Votes && name < best.Name) {
+			best = Leader{Name: name, Votes: n}
 		}
-	}
-	if held < least {
-		return ""
 	}
 	return best
 }

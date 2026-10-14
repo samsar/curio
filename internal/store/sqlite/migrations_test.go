@@ -1305,7 +1305,8 @@ func TestMigration019_MetadataSearch(t *testing.T) {
 	for table, columns := range map[string][]string{
 		"document_fields": {"seq", "document_id", "tenant_id", "host", "declared_site", "title_suffixes", "site_name",
 			"title", "bookmark_titles", "folders", "site", "author", "rules"},
-		"document_cards": {"document_id", "text", "embedded_text", "embedded_at"},
+		"document_cards":  {"document_id", "text", "embedded_text", "embedded_at"},
+		"site_name_votes": {"tenant_id", "host", "kind", "name", "votes"},
 	} {
 		for _, column := range columns {
 			assert.True(t, hasColumn(t, db, table, column), "%s.%s", table, column)
@@ -1313,6 +1314,20 @@ func TestMigration019_MetadataSearch(t *testing.T) {
 	}
 	assert.Empty(t, dumpRows(t, db, `SELECT * FROM document_fields`), "the store derives the rows, not the migration")
 	assert.Empty(t, dumpRows(t, db, `SELECT * FROM document_cards`))
+	assert.Empty(t, dumpRows(t, db, `SELECT * FROM site_name_votes`))
+	for name, insert := range map[string]string{
+		"suffixes a line each": `INSERT INTO document_fields (document_id, tenant_id, title_suffixes, rules)
+			VALUES ('d1', 'local', 'Example', 1)`,
+		"suffixes in an object": `INSERT INTO document_fields (document_id, tenant_id, title_suffixes, rules)
+			VALUES ('d1', 'local', '{"a": "Example"}', 1)`,
+		"a vote of no kind": `INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
+			VALUES ('local', 'example.com', 'title', 'Example', 1)`,
+		"a vote row of no votes": `INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
+			VALUES ('local', 'example.com', 'suffix', 'Example', 0)`,
+	} {
+		_, err := db.Exec(insert)
+		assert.ErrorContains(t, err, "constraint failed", name)
+	}
 	var jobsTable string
 	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'jobs'`).Scan(&jobsTable))
 	assert.True(t, strings.HasPrefix(jobsTable, "CREATE TABLE jobs ("), "jobs keeps the text 019 wrote: %s", jobsTable)
@@ -1337,8 +1352,11 @@ func TestMigration019_MetadataSearch(t *testing.T) {
 
 // TestMigration019_FieldsIndexFollowsTheRows: the triggers keep
 // document_fields_fts in step with document_fields through inserts,
-// updates and deletes, and a write of the columns the index doesn't hold
-// leaves it alone.
+// updates and deletes, and site_name_votes with what the rows contribute;
+// a write that leaves the searched columns' values as they were, even an
+// upsert setting every column as refreshFields writes them, writes no
+// index entry, and one that leaves a row's contribution as it was moves no
+// vote.
 func TestMigration019_FieldsIndexFollowsTheRows(t *testing.T) {
 	ctx := context.Background()
 	db, _ := migratedTo(t, 19)
@@ -1358,6 +1376,13 @@ func TestMigration019_FieldsIndexFollowsTheRows(t *testing.T) {
 		require.NoError(t, conn.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&n))
 		return n
 	}
+	// changes runs q and counts the rows it and its triggers wrote.
+	changes := func(q string, args ...any) int {
+		t.Helper()
+		before := totalChanges()
+		exec(q, args...)
+		return totalChanges() - before
+	}
 	match := func(q string) []string {
 		t.Helper()
 		rows, err := conn.QueryContext(ctx, `SELECT f.document_id FROM document_fields_fts
@@ -1374,9 +1399,15 @@ func TestMigration019_FieldsIndexFollowsTheRows(t *testing.T) {
 		require.NoError(t, rows.Err())
 		return ids
 	}
+	// integrity compares the index with its content table: without rank
+	// 1, FTS5's integrity-check passes an index that disagrees with it.
 	integrity := func() {
 		t.Helper()
-		exec(`INSERT INTO document_fields_fts (document_fields_fts) VALUES ('integrity-check')`)
+		exec(`INSERT INTO document_fields_fts (document_fields_fts, rank) VALUES ('integrity-check', 1)`)
+	}
+	votes := func() [][]any {
+		t.Helper()
+		return dumpRows(t, db, `SELECT host, kind, name, votes FROM site_name_votes ORDER BY host, kind, name`)
 	}
 
 	exec(`INSERT INTO documents (id, tenant_id, url) VALUES ('d1', 'local', 'https://example.com/1'),
@@ -1389,18 +1420,46 @@ func TestMigration019_FieldsIndexFollowsTheRows(t *testing.T) {
 	assert.Equal(t, []string{"d1"}, match("queues"))
 	assert.Equal(t, []string{"d2"}, match("grace"))
 	assert.Equal(t, []string{"d1", "d2"}, match("example"))
+	assert.Empty(t, votes(), "no declared name, no suffix")
 
-	before := totalChanges()
-	for _, set := range []string{"host = 'other.example'", "site_name = 'Example'", "declared_site = 'Example'",
-		"title_suffixes = 'Example'", "rules = 2"} {
-		exec(`UPDATE document_fields SET ` + set + ` WHERE document_id = 'd1'`)
+	for _, tc := range []struct {
+		set   string
+		wrote int
+	}{
+		{"host = 'other.example'", 1},
+		{"site_name = 'Example'", 1},
+		{"declared_site = 'Example'", 1 + 1},
+		// The contribution moves whole: the declared name withdrawn and
+		// added again, beside the two suffixes.
+		{`title_suffixes = '["Example", "Example Blog"]'`, 1 + 4},
+		{"rules = 2", 1},
+	} {
+		assert.Equal(t, tc.wrote, changes(`UPDATE document_fields SET `+tc.set+` WHERE document_id = 'd1'`),
+			"%s: the row and its votes alone; no trigger wrote the index", tc.set)
 	}
-	assert.Equal(t, before+5, totalChanges(), "the rows alone changed: no trigger wrote the index")
 	integrity()
+	assert.Equal(t, [][]any{{"other.example", "declared", "Example", int64(1)},
+		{"other.example", "suffix", "Example", int64(1)}, {"other.example", "suffix", "Example Blog", int64(1)}}, votes())
 
-	before = totalChanges()
-	exec(`UPDATE document_fields SET title = 'Postgres replication', author = 'Edgar' WHERE document_id = 'd1'`)
-	assert.Greater(t, totalChanges(), before+1, "the row, and the index's delete and insert")
+	// The upsert refreshFields writes, setting every column, guarded to
+	// write nothing for a row as stored.
+	upsert := func(rules int, declared, suffixes string) int {
+		t.Helper()
+		return changes(upsertFieldsSQL, "d1", "local", "other.example", declared, suffixes, "Example",
+			"Kafka streams", "Saved kafka notes", "Reading / Queues", "example", "Ada", rules)
+	}
+	assert.Zero(t, upsert(2, "Example", `["Example", "Example Blog"]`), "a row as stored writes nothing")
+	assert.Equal(t, 1, upsert(3, "Example", `["Example", "Example Blog"]`),
+		"a new rules version writes the row alone, no index entry")
+	assert.Equal(t, 1+3+3, upsert(3, "Other", `["Example Blog", "Other"]`),
+		"new contributions with the same text: the row, and its votes moved, three rows withdrawn and three "+
+			"added; no index entry")
+	integrity()
+	assert.Equal(t, [][]any{{"other.example", "declared", "Other", int64(1)},
+		{"other.example", "suffix", "Example Blog", int64(1)}, {"other.example", "suffix", "Other", int64(1)}}, votes())
+
+	assert.Greater(t, changes(`UPDATE document_fields SET title = 'Postgres replication', author = 'Edgar'
+		WHERE document_id = 'd1'`), 1, "the row, and the index's delete and insert")
 	integrity()
 	assert.Empty(t, match("kafka streams"), "the old title is gone")
 	assert.Equal(t, []string{"d1"}, match("kafka"), "the bookmark title still holds it")
@@ -1408,11 +1467,21 @@ func TestMigration019_FieldsIndexFollowsTheRows(t *testing.T) {
 	assert.Equal(t, []string{"d1"}, match("edgar"))
 	assert.Empty(t, match("ada"))
 
+	exec(`UPDATE document_fields SET host = 'example.com', declared_site = 'Example', title_suffixes = '["Example"]'
+		WHERE document_id = 'd2'`)
+	exec(`UPDATE document_fields SET host = 'example.com', declared_site = 'Example', title_suffixes = '["Example"]'
+		WHERE document_id = 'd1'`)
+	assert.Equal(t, [][]any{{"example.com", "declared", "Example", int64(2)},
+		{"example.com", "suffix", "Example", int64(2)}}, votes(), "two documents hold each name")
 	exec(`DELETE FROM documents WHERE id = 'd2'`)
 	integrity()
 	assert.Equal(t, []string{"d1"}, match("postgres"), "the cascade took d2's row and its entry")
 	assert.Empty(t, match("grace"))
 	assert.Empty(t, dumpRows(t, db, `SELECT * FROM document_fields WHERE document_id = 'd2'`))
+	assert.Equal(t, [][]any{{"example.com", "declared", "Example", int64(1)},
+		{"example.com", "suffix", "Example", int64(1)}}, votes(), "and withdrew its votes")
+	exec(`DELETE FROM documents WHERE id = 'd1'`)
+	assert.Empty(t, votes(), "a name nobody holds has no row")
 }
 
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over

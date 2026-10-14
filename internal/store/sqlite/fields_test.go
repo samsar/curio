@@ -1,11 +1,13 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,10 +133,63 @@ func (e *fieldsEnv) rederived() [][]any {
 	return e.derived()
 }
 
+// integrityCheck checks the fields index against document_fields: rank 1
+// makes FTS5 compare the two, where the check without it passes an index
+// that disagrees with its content table.
 func (e *fieldsEnv) integrityCheck() {
 	e.t.Helper()
-	_, err := e.db.Exec(`INSERT INTO document_fields_fts (document_fields_fts) VALUES ('integrity-check')`)
+	_, err := e.db.Exec(`INSERT INTO document_fields_fts (document_fields_fts, rank) VALUES ('integrity-check', 1)`)
 	require.NoError(e.t, err)
+}
+
+// assertVotes asserts site_name_votes holds what the stored rows
+// contribute: for each tenant and host, how many rows declare each name
+// and carry each title suffix, recounted from document_fields.
+func (e *fieldsEnv) assertVotes() {
+	e.t.Helper()
+	recount := dumpRows(e.t, e.db, `SELECT tenant_id, host, kind, name, count(*) FROM (
+		SELECT tenant_id, host, 'declared' AS kind, declared_site AS name FROM document_fields WHERE declared_site <> ''
+		UNION ALL SELECT f.tenant_id, f.host, 'suffix', j.value FROM document_fields f, json_each(f.title_suffixes) j)
+		GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4`)
+	kept := dumpRows(e.t, e.db, `SELECT tenant_id, host, kind, name, votes FROM site_name_votes ORDER BY 1, 2, 3, 4`)
+	assert.Equal(e.t, recount, kept)
+}
+
+// assertAgreedNames asserts every row holds the name docmeta.AgreedName
+// gives its host's stored contributions, or its own declared name: the
+// leaders the store reads in SQL's order are those Go counts in byte
+// order.
+func (e *fieldsEnv) assertAgreedNames() {
+	e.t.Helper()
+	type hostKey struct{ tenantID, host string }
+	type row struct {
+		id, declared, siteName string
+	}
+	rows, err := e.db.Query(`SELECT document_id, tenant_id, host, declared_site, title_suffixes, site_name
+		FROM document_fields`)
+	require.NoError(e.t, err)
+	defer rows.Close()
+	contributions := map[hostKey][]docmeta.HostDocument{}
+	byHost := map[hostKey][]row{}
+	for rows.Next() {
+		var k hostKey
+		var r row
+		var suffixes string
+		require.NoError(e.t, rows.Scan(&r.id, &k.tenantID, &k.host, &r.declared, &suffixes, &r.siteName))
+		var list []string
+		require.NoError(e.t, json.Unmarshal([]byte(suffixes), &list))
+		contributions[k] = append(contributions[k], docmeta.HostDocument{DeclaredSite: r.declared,
+			TitleSuffixes: strings.Join(list, "\n")})
+		byHost[k] = append(byHost[k], r)
+	}
+	require.NoError(e.t, rows.Err())
+	for k, docs := range byHost {
+		agreed := docmeta.AgreedName(k.host, contributions[k])
+		for _, r := range docs {
+			want := cmp.Or(r.declared, agreed)
+			assert.Equal(e.t, want, r.siteName, "document %s of %s", r.id, k.host)
+		}
+	}
 }
 
 // TestRefreshFields_NewDocument: a document saved from a bookmark is
@@ -144,7 +199,7 @@ func TestRefreshFields_NewDocument(t *testing.T) {
 	e := newFieldsEnv(t)
 	first := e.ingest("https://www.example.com/a", store.SourceChrome, "Queues | Example Times", "/Bookmarks Bar/Tech/Queues")
 	id := *first.DocumentID
-	assert.Equal(t, fieldsRow{Host: "example.com", TitleSuffixes: "Example Times",
+	assert.Equal(t, fieldsRow{Host: "example.com", TitleSuffixes: `["Example Times"]`,
 		BookmarkTitles: "Queues | Example Times", Folders: "Tech / Queues", Site: "example",
 		Rules: docmeta.RulesVersion}, e.fields(id))
 	assert.Equal(t, "Queues | Example Times — example.com — Tech / Queues", e.card(id))
@@ -446,6 +501,86 @@ func TestRefreshFields_DeletedDocument(t *testing.T) {
 	assert.Empty(t, hits)
 }
 
+// TestRefreshFields_DocumentDeletedBySQL: a document deleted outside the
+// store's writes withdraws its votes at once, through the triggers; its
+// host's documents keep the name they hold until the host's next write,
+// which gives them the name the documents left agree on.
+func TestRefreshFields_DocumentDeletedBySQL(t *testing.T) {
+	e := newFieldsEnv(t)
+	titles := []string{"Post | Alpha", "Note | Alpha", "Item | Beta", "Thing | Beta", "Other | Beta"}
+	ids := make([]string, 0, len(titles))
+	for i, title := range titles {
+		ids = append(ids, *e.ingest(fmt.Sprintf("https://votes.example/%d", i), store.SourceChrome, title, "").DocumentID)
+	}
+	for _, id := range ids {
+		require.Equal(t, "Beta", e.fields(id).SiteName, "three documents carry Beta")
+	}
+
+	_, err := e.db.Exec(`DELETE FROM documents WHERE id IN (?, ?)`, ids[3], ids[4])
+	require.NoError(t, err)
+	e.assertVotes()
+	assert.Equal(t, [][]any{{"suffix", "Alpha", int64(2)}, {"suffix", "Beta", int64(1)}},
+		dumpRows(t, e.db, `SELECT kind, name, votes FROM site_name_votes WHERE host = 'votes.example' ORDER BY name`),
+		"the deleted documents' votes are withdrawn at once")
+	for _, id := range ids[:3] {
+		assert.Equal(t, "Beta", e.fields(id).SiteName, "the name held until the host's next write")
+	}
+
+	added := *e.ingest("https://votes.example/new", store.SourceChrome, "Plain", "").DocumentID
+	for _, id := range append(ids[:3], added) {
+		assert.Equal(t, "Alpha", e.fields(id).SiteName, "the next write renames the host")
+		assert.Equal(t, "Alpha votes", e.fields(id).Site)
+	}
+	assert.Contains(t, e.card(ids[2]), "Alpha")
+	e.integrityCheck()
+	assert.Equal(t, e.derived(), e.rederived())
+}
+
+// TestRefreshFields_AgreementKeptWritesNoSibling: a write that doesn't
+// change its host's agreement writes its own document's rows alone: the
+// same rows on a host of 3 documents as on one of 60, and none of the
+// siblings'.
+func TestRefreshFields_AgreementKeptWritesNoSibling(t *testing.T) {
+	e := newFieldsEnv(t)
+	e.db.SetCardsJobDelay(time.Hour)
+	// total_changes() counts the rows one connection's statements and
+	// their triggers wrote, so every statement takes the one connection.
+	e.db.SetMaxOpenConns(1)
+	wrote := map[int]int{}
+	for _, size := range []int{3, 60} {
+		host := fmt.Sprintf("size%d.example", size)
+		var ids []string
+		for i := range size {
+			ids = append(ids, *e.ingest(fmt.Sprintf("https://%s/%d", host, i), store.SourceChrome,
+				fmt.Sprintf("Post %d | Host %d", i, size), "").DocumentID)
+		}
+		ext := e.extraction(ids[0], "")
+		siblings := dumpRows(t, e.db, `SELECT f.*, c.text FROM document_fields f
+			JOIN document_cards c ON c.document_id = f.document_id
+			WHERE f.host = ? AND f.document_id <> ? ORDER BY f.document_id`, host, ids[0])
+
+		before := totalChanges(t, e.db)
+		require.NoError(t, e.docs.ApplyFetch(e.ctx, ids[0], store.FetchedMetadata{ExtractionID: ext,
+			ContentType: store.ContentTypeArticle, Title: store.NullableString(fmt.Sprintf("Fetched | Host %d", size))}))
+		wrote[size] = totalChanges(t, e.db) - before
+
+		assert.Equal(t, siblings, dumpRows(t, e.db, `SELECT f.*, c.text FROM document_fields f
+			JOIN document_cards c ON c.document_id = f.document_id
+			WHERE f.host = ? AND f.document_id <> ? ORDER BY f.document_id`, host, ids[0]),
+			"no sibling's row is written")
+		assert.Equal(t, fmt.Sprint("Host ", size), e.fields(ids[0]).SiteName)
+	}
+	assert.Equal(t, wrote[3], wrote[60], "the write's rows don't grow with its host")
+}
+
+// totalChanges is total_changes() on db's connection: db must hold one.
+func totalChanges(t *testing.T, db *DB) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT total_changes()`).Scan(&n))
+	return n
+}
+
 // TestRefreshFields_AnyOrderEndsAsAFullDerivation: whatever writes a
 // library sees, every write that changes an input among them, in whatever
 // order, its derived rows end as a derivation of the final data from
@@ -527,7 +662,10 @@ func TestRefreshFields_AnyOrderEndsAsAFullDerivation(t *testing.T) {
 			require.NoError(t, e.db.QueryRow(`SELECT count(*) FROM documents`).Scan(&docs))
 			require.GreaterOrEqual(t, docs, 30, "a library of at least 30 documents")
 			e.integrityCheck()
+			e.assertVotes()
+			e.assertAgreedNames()
 			assert.Equal(t, e.derived(), e.rederived())
+			e.assertVotes()
 		})
 	}
 }

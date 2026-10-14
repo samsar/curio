@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -27,13 +28,20 @@ import (
 //
 // A document's display site name is agreed across its host: its own
 // declared name, else the name its host's documents agree on
-// (docmeta.AgreedName). Each row keeps what it contributes to that
-// agreement, so agreeing reads only the host's rows, through
-// idx_document_fields_host, and a document whose write changes the name
-// agreed has every sibling without a declared name of its own rewritten.
+// (docmeta.AgreedNameOf). Each row keeps what it contributes to that
+// agreement, and triggers count the contributions of a host's rows in
+// site_name_votes (migration 019), so agreeing reads the host's two
+// leaders, one indexed seek each, whatever the host's size. Once the
+// refreshed rows are written, every host they are on or left is agreed
+// again, and its documents without a declared name that hold another name
+// are renamed: a read of two ranges of idx_document_fields_site that finds
+// none unless the agreement changed. A write so costs the same on a host of
+// ten documents as on one of ten thousand; only a change of the name
+// agreed rewrites the host's siblings, each one's site and card.
 
 // The statements of refreshFields, which runs them in its caller's
-// transaction.
+// transaction, all but the rare rename prepared once per call
+// (newFieldsTx).
 const (
 	// fieldsInputsSQL reads what a document's fields are derived from: its
 	// URL, title and author, the site name its current extraction's page
@@ -52,16 +60,28 @@ const (
 	// in idx_bookmarks_document's order.
 	fieldsBookmarksSQL = `SELECT coalesce(title, ''), coalesce(folder_path, '') FROM bookmarks
 	WHERE document_id = ? ORDER BY saved_at, id`
-	// hostFieldsSQL reads what each of a host's documents contributes to
-	// the name the host agrees on, and the name it has, through
-	// idx_document_fields_host. Its args are the tenant and the host.
-	hostFieldsSQL = `SELECT document_id, declared_site, title_suffixes, site_name FROM document_fields
-	WHERE tenant_id = ? AND host = ?`
-	// siblingFieldsSQL reads the fields a sibling's card is made from.
-	siblingFieldsSQL = `SELECT title_suffixes, title, bookmark_titles, folders, author FROM document_fields
-	WHERE document_id = ?`
+	// leaderSQL reads the name of one kind (voteDeclared, voteSuffix) the
+	// most of a host's documents hold, ties in byte order, and how many
+	// hold it: the first row of idx_site_name_votes_lead. Its args are the
+	// tenant, the host and the kind.
+	leaderSQL = `SELECT name, votes FROM site_name_votes WHERE tenant_id = ? AND host = ? AND kind = ?
+	ORDER BY votes DESC, name LIMIT 1`
+	// misnamedSQL reads the fields a card is made from of a host's
+	// documents without a declared name that hold another name than ?3,
+	// the one the host agrees on. The inequality is written as two ranges,
+	// each a seek of idx_document_fields_site, and they hold no row unless
+	// the agreement changed since the host's rows were written. Its other
+	// args are the tenant and the host.
+	misnamedSQL = `SELECT document_id, title, bookmark_titles, folders, author FROM document_fields
+	WHERE tenant_id = ?1 AND host = ?2 AND declared_site = '' AND (site_name < ?3 OR site_name > ?3)`
+	// renameSQL gives the documents misnamedSQL reads the name ?3 and the
+	// site it is searched by, ?4. It walks the host's documents without a
+	// declared name, and runs only when misnamedSQL found some, so it is
+	// never prepared ahead.
+	renameSQL = `UPDATE document_fields SET site_name = ?3, site = ?4
+	WHERE tenant_id = ?1 AND host = ?2 AND declared_site = '' AND (site_name < ?3 OR site_name > ?3)`
 	// upsertFieldsSQL writes a document's fields, and writes nothing when
-	// they are what is stored: no row change, no index update.
+	// they are what is stored: no row change, no trigger fired.
 	upsertFieldsSQL = `
 	INSERT INTO document_fields (document_id, tenant_id, host, declared_site, title_suffixes, site_name, title,
 		bookmark_titles, folders, site, author, rules)
@@ -76,9 +96,6 @@ const (
 		IS NOT (excluded.tenant_id, excluded.host, excluded.declared_site, excluded.title_suffixes,
 		excluded.site_name, excluded.title, excluded.bookmark_titles, excluded.folders, excluded.site,
 		excluded.author, excluded.rules)`
-	// setSiteSQL gives a sibling the name its host now agrees on. Its args
-	// are the name, the site and the document.
-	setSiteSQL = `UPDATE document_fields SET site_name = ?, site = ? WHERE document_id = ?`
 	// upsertCardSQL writes a document's card text, and writes nothing when
 	// it is what is stored, so an unchanged card stays embedded.
 	upsertCardSQL = `
@@ -87,12 +104,61 @@ const (
 	WHERE text IS NOT excluded.text`
 )
 
+// The kinds of site_name_votes: a host's declared names and its title
+// suffixes.
+const (
+	voteDeclared = "declared"
+	voteSuffix   = "suffix"
+)
+
 // fieldsTx refreshes fields in one transaction.
 type fieldsTx struct {
 	tx       *sql.Tx
 	tenantID string
+	// The statements a refresh runs for every document and every host,
+	// prepared once per refresh (newFieldsTx). Preparing a statement that
+	// writes document_fields compiles its triggers, and the driver caches
+	// no statement, so preparing them once a document doubled the startup
+	// refresh of thousands of documents.
+	inputs, bookmarks, leader, misnamed, upsertFields, upsertCard *sql.Stmt
 	// cardsChanged is set once a card's text changed.
 	cardsChanged bool
+}
+
+// newFieldsTx prepares a refresh of the tenant's fields inside tx. close
+// releases its statements.
+func newFieldsTx(ctx context.Context, tx *sql.Tx, tenantID string) (*fieldsTx, error) {
+	var err error
+	prepare := func(query string) *sql.Stmt {
+		if err != nil {
+			return nil
+		}
+		var st *sql.Stmt
+		st, err = tx.PrepareContext(ctx, query)
+		return st
+	}
+	f := &fieldsTx{tx: tx, tenantID: tenantID}
+	f.inputs = prepare(fieldsInputsSQL)
+	f.bookmarks = prepare(fieldsBookmarksSQL)
+	f.leader = prepare(leaderSQL)
+	f.misnamed = prepare(misnamedSQL)
+	f.upsertFields = prepare(upsertFieldsSQL)
+	f.upsertCard = prepare(upsertCardSQL)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("prepare the refresh's statements: %w", err), f.close())
+	}
+	return f, nil
+}
+
+// close closes the statements prepared.
+func (f *fieldsTx) close() error {
+	var errs []error
+	for _, st := range []*sql.Stmt{f.inputs, f.bookmarks, f.leader, f.misnamed, f.upsertFields, f.upsertCard} {
+		if st != nil {
+			errs = append(errs, st.Close())
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // derivedDoc is a document refreshFields derived.
@@ -101,60 +167,33 @@ type derivedDoc struct {
 	own docmeta.Own
 }
 
-// hostChange is what refreshFields changes on one host: the refreshed
-// documents on it, and those whose stored fields were on it and that are
-// now on another.
-type hostChange struct {
-	on   []derivedDoc
-	left []string
-}
-
-// hostRow is what one of a host's documents contributes to the name the
-// host agrees on, and the name it has.
-type hostRow struct {
-	declared, suffixes, siteName string
-}
-
 // refreshFields derives the fields and cards of the tenant's documents ids
 // again from what they are derived from now, inside tx, the transaction of
-// the write that changed them. It agrees each affected host's site name
-// again, the host a document is on and any it has left, and rewrites the
-// host's other documents that take the agreed name. A document that no
-// longer exists is skipped: its rows went with it. When any card's text
-// changed, it queues the tenant's cards job (queueCards).
-func (d *DB) refreshFields(ctx context.Context, tx *sql.Tx, tenantID string, ids ...string) error {
-	f := &fieldsTx{tx: tx, tenantID: tenantID}
+// the write that changed them. Each document is written under the name its
+// host agrees on; then every host a document is on or has left is agreed
+// again, and its documents that take the agreed name are renamed when it
+// changed. A document that no longer exists is skipped: its rows went with
+// it. When any card's text changed, it queues the tenant's cards job
+// (queueCards).
+func (d *DB) refreshFields(ctx context.Context, tx *sql.Tx, tenantID string, ids ...string) (err error) {
+	f, err := newFieldsTx(ctx, tx, tenantID)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, f.close()) }()
 
-	refreshed := map[string]bool{}
-	changes := map[string]*hostChange{}
-	change := func(host string) *hostChange {
-		if changes[host] == nil {
-			changes[host] = &hostChange{}
-		}
-		return changes[host]
+	on, hosts, err := f.deriveAll(ctx, ids)
+	if err != nil {
+		return err
 	}
-	for _, id := range ids {
-		if refreshed[id] {
-			continue
-		}
-		refreshed[id] = true
-		own, oldHost, ok, err := f.derive(ctx, id)
-		if err != nil {
-			return fmt.Errorf("derive the fields of document %s: %w", id, err)
-		}
-		if !ok {
-			continue
-		}
-		here := change(own.Host)
-		here.on = append(here.on, derivedDoc{id: id, own: own})
-		if oldHost.Valid && oldHost.String != own.Host {
-			before := change(oldHost.String)
-			before.left = append(before.left, id)
+	for _, host := range hosts {
+		if err := f.writeAll(ctx, host, on[host]); err != nil {
+			return fmt.Errorf("write the fields of host %q's documents: %w", host, err)
 		}
 	}
-	for _, host := range slices.Sorted(maps.Keys(changes)) {
-		if err := f.agree(ctx, host, *changes[host], refreshed); err != nil {
-			return fmt.Errorf("agree the site name of host %q: %w", host, err)
+	for _, host := range hosts {
+		if err := f.rename(ctx, host); err != nil {
+			return fmt.Errorf("give host %q's documents the name it agrees on: %w", host, err)
 		}
 	}
 	if !f.cardsChanged {
@@ -163,12 +202,42 @@ func (d *DB) refreshFields(ctx context.Context, tx *sql.Tx, tenantID string, ids
 	return d.queueCards(ctx, tx, tenantID)
 }
 
+// deriveAll derives what each of the documents ids says of itself, once
+// each. on holds them by the host they are on; hosts are every host the
+// refresh changes, those they are on and those whose stored fields they
+// leave, sorted.
+func (f *fieldsTx) deriveAll(ctx context.Context, ids []string) (on map[string][]derivedDoc, hosts []string,
+	err error) {
+	on = map[string][]derivedDoc{}
+	changed := map[string]bool{}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		own, oldHost, ok, err := f.derive(ctx, id)
+		if err != nil {
+			return nil, nil, fmt.Errorf("derive the fields of document %s: %w", id, err)
+		}
+		if !ok {
+			continue
+		}
+		on[own.Host] = append(on[own.Host], derivedDoc{id: id, own: own})
+		changed[own.Host] = true
+		if oldHost.Valid {
+			changed[oldHost.String] = true
+		}
+	}
+	return on, slices.Sorted(maps.Keys(changed)), nil
+}
+
 // derive reads document id's inputs and derives what it says of itself.
 // oldHost is the host its stored fields name, when it has any; ok is
 // false when the tenant has no such document.
 func (f *fieldsTx) derive(ctx context.Context, id string) (own docmeta.Own, oldHost sql.NullString, ok bool, err error) {
 	var d docmeta.Document
-	err = f.tx.QueryRowContext(ctx, fieldsInputsSQL, "$."+store.ExtractionMetaSiteName, id, f.tenantID).
+	err = f.inputs.QueryRowContext(ctx, "$."+store.ExtractionMetaSiteName, id, f.tenantID).
 		Scan(&d.URL, &d.Title, &d.Author, &d.SiteName, &oldHost)
 	if errors.Is(err, sql.ErrNoRows) {
 		return docmeta.Own{}, sql.NullString{}, false, nil
@@ -176,15 +245,15 @@ func (f *fieldsTx) derive(ctx context.Context, id string) (own docmeta.Own, oldH
 	if err != nil {
 		return docmeta.Own{}, sql.NullString{}, false, fmt.Errorf("read the document: %w", err)
 	}
-	if d.Bookmarks, err = f.bookmarks(ctx, id); err != nil {
+	if d.Bookmarks, err = f.readBookmarks(ctx, id); err != nil {
 		return docmeta.Own{}, sql.NullString{}, false, err
 	}
 	return docmeta.Derive(d), oldHost, true, nil
 }
 
-// bookmarks reads document id's bookmarks, oldest saved first.
-func (f *fieldsTx) bookmarks(ctx context.Context, id string) ([]docmeta.Bookmark, error) {
-	rows, err := f.tx.QueryContext(ctx, fieldsBookmarksSQL, id)
+// readBookmarks reads document id's bookmarks, oldest saved first.
+func (f *fieldsTx) readBookmarks(ctx context.Context, id string) ([]docmeta.Bookmark, error) {
+	rows, err := f.bookmarks.QueryContext(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("read the bookmarks: %w", err)
 	}
@@ -203,85 +272,111 @@ func (f *fieldsTx) bookmarks(ctx context.Context, id string) ([]docmeta.Bookmark
 	return out, nil
 }
 
-// agree agrees host's site name over its documents as they are once
-// change is applied, the refreshed documents on it written and those that
-// left it gone, then writes the fields and cards of those on it and
-// rewrites every other document of the host whose name the agreement
-// changed. refreshed holds every document the refresh derives, which agree
-// never renames.
-func (f *fieldsTx) agree(ctx context.Context, host string, change hostChange, refreshed map[string]bool) error {
-	rows, err := f.hostRows(ctx, host)
+// writeAll writes the fields and cards of docs, the refreshed documents on
+// host, under the name the host agrees on before they are written. Their
+// own votes may move it; rename then corrects them.
+func (f *fieldsTx) writeAll(ctx context.Context, host string, docs []derivedDoc) error {
+	if len(docs) == 0 {
+		return nil
+	}
+	agreed, err := f.agreed(ctx, host)
 	if err != nil {
 		return err
 	}
-	for _, id := range change.left {
-		delete(rows, id)
-	}
-	for _, d := range change.on {
-		rows[d.id] = hostRow{declared: d.own.DeclaredSite, suffixes: d.own.TitleSuffixes}
-	}
-	contributions := make([]docmeta.HostDocument, 0, len(rows))
-	for _, r := range rows {
-		contributions = append(contributions, docmeta.HostDocument{DeclaredSite: r.declared, TitleSuffixes: r.suffixes})
-	}
-	agreed := docmeta.AgreedName(host, contributions)
-
-	for _, d := range change.on {
+	for _, d := range docs {
 		if err := f.write(ctx, d.id, d.own.Fields(agreed)); err != nil {
-			return fmt.Errorf("write the fields of document %s: %w", d.id, err)
-		}
-	}
-	for _, id := range slices.Sorted(maps.Keys(rows)) {
-		if r := rows[id]; !refreshed[id] && r.declared == "" && r.siteName != agreed {
-			if err := f.rename(ctx, id, host, agreed); err != nil {
-				return fmt.Errorf("give document %s the name its host agrees on: %w", id, err)
-			}
+			return fmt.Errorf("document %s: %w", d.id, err)
 		}
 	}
 	return nil
 }
 
-// hostRows reads what each of host's documents contributes to its agreed
-// name, by document.
-func (f *fieldsTx) hostRows(ctx context.Context, host string) (map[string]hostRow, error) {
-	rows, err := f.tx.QueryContext(ctx, hostFieldsSQL, f.tenantID, host)
+// agreed is the name host agrees on now, from its leaders.
+func (f *fieldsTx) agreed(ctx context.Context, host string) (string, error) {
+	declared, err := f.readLeader(ctx, host, voteDeclared)
 	if err != nil {
-		return nil, fmt.Errorf("read the host's documents: %w", err)
+		return "", err
+	}
+	suffix, err := f.readLeader(ctx, host, voteSuffix)
+	if err != nil {
+		return "", err
+	}
+	return docmeta.AgreedNameOf(host, declared, suffix), nil
+}
+
+// readLeader reads host's leading name of kind, the zero Leader when none
+// of its documents holds one.
+func (f *fieldsTx) readLeader(ctx context.Context, host, kind string) (docmeta.Leader, error) {
+	var l docmeta.Leader
+	err := f.leader.QueryRowContext(ctx, f.tenantID, host, kind).Scan(&l.Name, &l.Votes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return docmeta.Leader{}, nil
+	}
+	if err != nil {
+		return docmeta.Leader{}, fmt.Errorf("read the leading %s name: %w", kind, err)
+	}
+	return l, nil
+}
+
+// rename gives host's documents without a declared name of their own the
+// name the host agrees on now, when any holds another: their site name and
+// site in one statement, then each one's card. A host whose agreement
+// didn't change has none, and costs the read.
+func (f *fieldsTx) rename(ctx context.Context, host string) error {
+	agreed, err := f.agreed(ctx, host)
+	if err != nil {
+		return err
+	}
+	misnamed, err := f.readMisnamed(ctx, host, agreed)
+	if err != nil {
+		return err
+	}
+	if len(misnamed) == 0 {
+		return nil
+	}
+	// Every document of the host without a declared name is searched by
+	// the same site: the agreed name and the host's words.
+	site := docmeta.Own{Host: host}.Fields(agreed).Site
+	if _, err := f.tx.ExecContext(ctx, renameSQL, f.tenantID, host, agreed, site); err != nil {
+		return fmt.Errorf("write their site: %w", err)
+	}
+	for _, d := range misnamed {
+		if err := f.writeCard(ctx, d.id, d.own.Fields(agreed).Card()); err != nil {
+			return fmt.Errorf("document %s: %w", d.id, err)
+		}
+	}
+	return nil
+}
+
+// readMisnamed reads what the cards of host's documents that take its
+// agreed name and hold another than agreed are made from.
+func (f *fieldsTx) readMisnamed(ctx context.Context, host, agreed string) ([]derivedDoc, error) {
+	rows, err := f.misnamed.QueryContext(ctx, f.tenantID, host, agreed)
+	if err != nil {
+		return nil, fmt.Errorf("read the documents to rename: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]hostRow{}
+	var out []derivedDoc
 	for rows.Next() {
-		var id string
-		var r hostRow
-		if err := rows.Scan(&id, &r.declared, &r.suffixes, &r.siteName); err != nil {
-			return nil, fmt.Errorf("read the host's documents: %w", err)
+		d := derivedDoc{own: docmeta.Own{Host: host}}
+		if err := rows.Scan(&d.id, &d.own.Title, &d.own.BookmarkTitles, &d.own.Folders, &d.own.Author); err != nil {
+			return nil, fmt.Errorf("read the documents to rename: %w", err)
 		}
-		out[id] = r
+		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read the host's documents: %w", err)
+		return nil, fmt.Errorf("read the documents to rename: %w", err)
 	}
 	return out, nil
 }
 
-// rename gives document id, on host and without a declared name of its
-// own, the name its host now agrees on: its site, and its card.
-func (f *fieldsTx) rename(ctx context.Context, id, host, agreed string) error {
-	own := docmeta.Own{Host: host}
-	if err := f.tx.QueryRowContext(ctx, siblingFieldsSQL, id).Scan(&own.TitleSuffixes, &own.Title, &own.BookmarkTitles, &own.Folders,
-		&own.Author); err != nil {
-		return fmt.Errorf("read its fields: %w", err)
-	}
-	fields := own.Fields(agreed)
-	if _, err := f.tx.ExecContext(ctx, setSiteSQL, fields.SiteName, fields.Site, id); err != nil {
-		return fmt.Errorf("write its site: %w", err)
-	}
-	return f.writeCard(ctx, id, fields.Card())
-}
-
 // write stores document id's fields and its card.
 func (f *fieldsTx) write(ctx context.Context, id string, fields docmeta.Fields) error {
-	if _, err := f.tx.ExecContext(ctx, upsertFieldsSQL, id, f.tenantID, fields.Host, fields.DeclaredSite, fields.TitleSuffixes,
+	suffixes, err := suffixesJSON(fields.TitleSuffixes)
+	if err != nil {
+		return err
+	}
+	if _, err := f.upsertFields.ExecContext(ctx, id, f.tenantID, fields.Host, fields.DeclaredSite, suffixes,
 		fields.SiteName, fields.Title, fields.BookmarkTitles, fields.Folders, fields.Site, fields.Author,
 		docmeta.RulesVersion); err != nil {
 		return fmt.Errorf("write its fields: %w", err)
@@ -289,9 +384,24 @@ func (f *fieldsTx) write(ctx context.Context, id string, fields docmeta.Fields) 
 	return f.writeCard(ctx, id, fields.Card())
 }
 
+// suffixesJSON is list, title suffixes one a line as docmeta.Own holds
+// them, as the JSON array document_fields keeps, which the vote triggers
+// split.
+func suffixesJSON(list string) (string, error) {
+	suffixes := []string{}
+	if list != "" {
+		suffixes = strings.Split(list, "\n")
+	}
+	b, err := json.Marshal(suffixes)
+	if err != nil {
+		return "", fmt.Errorf("encode its title suffixes: %w", err)
+	}
+	return string(b), nil
+}
+
 // writeCard stores document id's card text, noting whether it changed.
 func (f *fieldsTx) writeCard(ctx context.Context, id, text string) error {
-	res, err := f.tx.ExecContext(ctx, upsertCardSQL, id, text)
+	res, err := f.upsertCard.ExecContext(ctx, id, text)
 	if err != nil {
 		return fmt.Errorf("write its card: %w", err)
 	}

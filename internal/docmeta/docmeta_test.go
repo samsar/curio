@@ -205,6 +205,82 @@ func TestAgreedName_OrderFree(t *testing.T) {
 	}
 }
 
+// TestAgreedNameOf: the leaders decide as AgreedName's counts do: one
+// declared name is enough, a suffix takes two documents, and the curated
+// name comes last.
+func TestAgreedNameOf(t *testing.T) {
+	cases := []struct {
+		name             string
+		host             string
+		declared, suffix Leader
+		want             string
+	}{
+		{"nothing held", "example.com", Leader{}, Leader{}, ""},
+		{"one declaration", "example.com", Leader{"Declared", 1}, Leader{"Suffix", 9}, "Declared"},
+		{"one suffix is not enough", "example.com", Leader{}, Leader{"Suffix", 1}, ""},
+		{"two suffixes", "example.com", Leader{}, Leader{"Suffix", 2}, "Suffix"},
+		{"the curated name, below the threshold", "stratechery.com", Leader{}, Leader{"Strat", 1}, "Stratechery"},
+		{"the curated name of the registrable domain", "blog.stratechery.com", Leader{}, Leader{}, "Stratechery"},
+		{"a declaration before the curated name", "hbr.org", Leader{"HBR", 1}, Leader{}, "HBR"},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, AgreedNameOf(tc.host, tc.declared, tc.suffix), tc.name)
+	}
+}
+
+// TestAgreedName_IsAgreedNameOfItsLeaders: over random hosts' documents,
+// AgreedName is AgreedNameOf the leaders a store counting votes reads,
+// the most held name first and ties in byte order: what sorting by votes
+// descending, then name, gives.
+func TestAgreedName_IsAgreedNameOfItsLeaders(t *testing.T) {
+	hosts := []string{"example.com", "stratechery.com", "news.ycombinator.com"}
+	names := []string{"", "A", "B", "a", "Beta", "B\u00e9ta", "Zed"}
+	r := rand.New(rand.NewPCG(7, 11))
+	for range 2000 {
+		docs := make([]HostDocument, r.IntN(6))
+		for i := range docs {
+			var suffixes []string
+			for _, n := range names[1:] {
+				if r.IntN(3) == 0 {
+					suffixes = append(suffixes, n)
+				}
+			}
+			r.Shuffle(len(suffixes), func(i, j int) { suffixes[i], suffixes[j] = suffixes[j], suffixes[i] })
+			docs[i] = HostDocument{DeclaredSite: names[r.IntN(len(names))], TitleSuffixes: strings.Join(suffixes, "\n")}
+		}
+		host := hosts[r.IntN(len(hosts))]
+		declared, suffix := countedLeaders(docs)
+		assert.Equal(t, AgreedNameOf(host, declared, suffix), AgreedName(host, docs), "%s %q", host, docs)
+	}
+}
+
+// countedLeaders counts docs' votes as site_name_votes holds them and
+// reads each kind's first by votes descending, then name.
+func countedLeaders(docs []HostDocument) (declared, suffix Leader) {
+	declaredVotes, suffixVotes := map[string]int{}, map[string]int{}
+	for _, d := range docs {
+		if d.DeclaredSite != "" {
+			declaredVotes[d.DeclaredSite]++
+		}
+		for _, s := range lines(d.TitleSuffixes) {
+			suffixVotes[s]++
+		}
+	}
+	first := func(votes map[string]int) Leader {
+		ranked := slices.SortedFunc(maps.Keys(votes), func(a, b string) int {
+			if votes[a] != votes[b] {
+				return votes[b] - votes[a]
+			}
+			return strings.Compare(a, b)
+		})
+		if len(ranked) == 0 {
+			return Leader{}
+		}
+		return Leader{Name: ranked[0], Votes: votes[ranked[0]]}
+	}
+	return first(declaredVotes), first(suffixVotes)
+}
+
 // TestCuratedSiteNames: the table is short, and keyed the way curatedName
 // looks it up.
 func TestCuratedSiteNames(t *testing.T) {
