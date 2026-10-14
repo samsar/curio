@@ -348,9 +348,21 @@ func TestQueryPlans(t *testing.T) {
 			want: []string{"SEARCH documents USING INDEX idx_documents_tenant_cause_updated (tenant_id=? AND failure_cause>?)"},
 		},
 		{
+			// A document's few chunks, sorted by ord.
+			name:  "ReplaceForDocument chunks",
+			query: documentChunksSQL, args: []any{"doc"},
+			first: "SEARCH chunks USING INDEX idx_chunks_document (document_id=?)",
+			sorts: true,
+		},
+		{
+			name:  "ReplaceForDocument update",
+			query: updateChunkSQL, args: unbound(updateChunkSQL),
+			first: "SEARCH chunks USING INTEGER PRIMARY KEY (rowid=?)",
+		},
+		{
 			name:  "ReplaceForDocument delete",
-			query: deleteDocumentChunksSQL, args: []any{"doc"},
-			want: []string{"INDEX idx_chunks_document (document_id=?)"},
+			query: deleteChunksFromSQL, args: []any{"doc", 3},
+			first: "SEARCH chunks USING INDEX idx_chunks_document (document_id=?)",
 		},
 		{
 			// The document predicates, the state exclusion included, are
@@ -389,7 +401,7 @@ func TestQueryPlans(t *testing.T) {
 		},
 		{
 			// A KNN scan of chunks_vec (plan kind 3, see
-			// TestQueryPlans_ChunkVectorDeleteIsPointLookup), then the same
+			// TestQueryPlans_ChunkVectorWritesArePointLookups), then the same
 			// per-hit lookups.
 			name:  "VectorSearch",
 			query: vecQ, args: vecArgs,
@@ -503,6 +515,102 @@ func TestQueryPlans(t *testing.T) {
 				"SEARCH interest_assignments USING COVERING INDEX idx_interest_assignments_document (document_id=?)",
 				"SEARCH interest_placements USING COVERING INDEX idx_interest_placements_document (document_id=?)",
 			},
+		},
+		{
+			// The chunks of an older context version, one covering range,
+			// listed (and bloom-filtered) for the tenant's fetched
+			// documents.
+			name:  "DocumentsToReembed",
+			query: documentsToReembedSQL, args: []any{1, "local", store.DocStateFetched},
+			first: "SEARCH d USING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)",
+			want:  []string{"SEARCH chunks USING COVERING INDEX idx_chunks_context_version (context_version<?)"},
+		},
+		{
+			// The range again, each chunk's document checked against a
+			// list of the fetched ones, never a seek of idx_chunks_document
+			// per document; the distinct documents counted in a b-tree.
+			name:  "CountToReembed",
+			query: countToReembedSQL, args: []any{1, "local", store.DocStateFetched},
+			want: []string{
+				"SEARCH c USING COVERING INDEX idx_chunks_context_version (context_version<?)",
+				"LIST SUBQUERY 1",
+				"SEARCH d USING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)",
+			},
+			avoid: []string{"idx_chunks_document"},
+			sorts: true,
+		},
+		{
+			// The running and the pending index jobs, each status a range
+			// of the claim index, the pending read once for all of them and
+			// the due.
+			name:  "EnqueueReembed queued",
+			query: reembedQueuedSQL,
+			args:  []any{store.JobStatusRunning, store.JobStatusPending, store.JobKindIndex, "now"},
+			want:  []string{"SEARCH jobs USING INDEX idx_jobs_claim (status=? AND kind=?)"},
+			avoid: []string{"SCAN jobs"},
+		},
+		{
+			// The range in order, each chunk's document by its key and its
+			// index jobs, and its re-embeds failed since a time, a seek
+			// each, stopping at the documents it needs; run once for the
+			// documents that never failed (the zero time), and again for
+			// those whose wait is over when that finds too few.
+			name:  "EnqueueReembed next",
+			query: nextToReembedSQL,
+			args: []any{1, "local", store.DocStateFetched, store.JobStatusPending, 2, store.JobKindIndex,
+				store.JobStatusRunning, store.JobStatusFailed, "now"},
+			first: "SEARCH c USING COVERING INDEX idx_chunks_context_version (context_version<?)",
+			want: []string{
+				"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)",
+				"SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)",
+				"SEARCH f USING INDEX idx_jobs_document (document_id=? AND status=? AND updated_at>?)",
+			},
+			// DISTINCT, as the rows go.
+			sorts: true,
+		},
+		{
+			name:  "ReembedFailures",
+			query: reembedFailuresSQL, args: []any{"doc", store.JobStatusFailed, store.JobKindIndex},
+			first: "SEARCH jobs USING INDEX idx_jobs_document (document_id=? AND status=?)",
+		},
+		{
+			// The tenant's documents indexed since, from the first, never a
+			// walk of its documents or of the jobs.
+			name:  "ReembedFailures others indexed",
+			query: othersIndexedSQL, args: []any{"local", "now", "doc"},
+			want:  []string{"SEARCH documents USING INDEX idx_documents_tenant_indexed (tenant_id=? AND indexed_at>?)"},
+			avoid: []string{"SCAN documents"},
+		},
+		{
+			name:  "StaleContext",
+			query: staleContextSQL, args: []any{"doc", 1},
+			want:  []string{"SEARCH chunks USING INDEX idx_chunks_document (document_id=?)"},
+			avoid: []string{"idx_chunks_context_version"},
+		},
+		{
+			name:  "ReplaceIndexed guard",
+			query: indexGuardSQL, args: []any{"doc"},
+			first: "SEARCH documents USING INDEX sqlite_autoindex_documents_1 (id=?)",
+		},
+		{
+			name:  "MarkIndexed",
+			query: markIndexedSQL, args: []any{store.DocStateFetched, 100, "doc", "ext"},
+			first: "SEARCH documents USING INDEX sqlite_autoindex_documents_1 (id=?)",
+		},
+		{
+			name:  "MarkIndexed a re-embed",
+			query: markReembeddedSQL, args: []any{100, "doc", "ext", store.DocStateFetched},
+			first: "SEARCH documents USING INDEX sqlite_autoindex_documents_1 (id=?)",
+		},
+		{
+			name:  "MarkIndexed superseded",
+			query: documentExistsSQL, args: []any{"doc"},
+			want: []string{"SEARCH documents USING COVERING INDEX sqlite_autoindex_documents_1 (id=?)"},
+		},
+		{
+			name:  "KeepEmbedded",
+			query: keepEmbeddedSQL, args: []any{1, "doc"},
+			first: "SEARCH chunks USING INDEX idx_chunks_document (document_id=?)",
 		},
 		{
 			// The pending check seeks the pending jobs of the kind, never a
@@ -725,6 +833,12 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 			name:  "MarkUnembeddable mark",
 			query: markCardUnembeddableSQL, args: []any{"text", "doc"},
 			first: cardByDoc,
+		},
+		{
+			// The document's fields row by its unique key.
+			name:  "Site",
+			query: siteSQL, args: []any{"doc", "local"},
+			first: "SEARCH document_fields USING INDEX sqlite_autoindex_document_fields_1 (document_id=?)",
 		},
 		{
 			// The tenant's documents, each card by its primary key.
@@ -1146,13 +1260,14 @@ func queryVector(t *testing.T) []byte {
 	return v
 }
 
-// TestQueryPlans_ChunkVectorDeleteIsPointLookup: the chunks delete trigger
-// removes a chunk's vector by its primary key. vec0 reports its plan as
+// TestQueryPlans_ChunkVectorWritesArePointLookups: the chunks delete
+// trigger removes a chunk's vector by its primary key, and a re-index
+// updates a kept chunk's vector by it. vec0 reports its plan as
 // "INDEX <idxNum>:<idxStr>", and the first character of idxStr is the plan
 // kind (sqlite-vec v0.1.6): '1' a full scan, '2' a point lookup, '3' KNN.
 // Any other form of the delete, `chunk_id IN (subquery)` included, scans
 // every vector.
-func TestQueryPlans_ChunkVectorDeleteIsPointLookup(t *testing.T) {
+func TestQueryPlans_ChunkVectorWritesArePointLookups(t *testing.T) {
 	db := newTestDB(t)
 	var trigger string
 	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'trg_chunks_delete'`).Scan(&trigger))
@@ -1160,6 +1275,9 @@ func TestQueryPlans_ChunkVectorDeleteIsPointLookup(t *testing.T) {
 
 	plan := queryPlan(t, db, `DELETE FROM chunks_vec WHERE chunk_id = ?`, "chunk")
 	assert.Regexp(t, regexp.MustCompile(`SCAN chunks_vec VIRTUAL TABLE INDEX \d+:2`), plan)
+	plan = queryPlan(t, db, updateChunkVectorSQL, queryVector(t), "chunk")
+	assert.Regexp(t, regexp.MustCompile(`SCAN chunks_vec VIRTUAL TABLE INDEX -?\d+:2`), plan,
+		"a re-index updates each kept chunk's vector in place, by its ID")
 }
 
 // TestQueryPlans_CardVectorWritesArePointLookups: the card delete trigger

@@ -190,6 +190,23 @@ func resizeVectorIndex(ctx context.Context, db *DB, ix vectorIndex, dim int) err
 	return nil
 }
 
+// chunkVectorBlocksSQL counts chunks_vec's vec0 chunks: the blocks of
+// slots its vectors are stored in, a row each in its shadow table.
+const chunkVectorBlocksSQL = `SELECT count(*) FROM chunks_vec_chunks`
+
+// ChunkVectorBlocks is how many vec0 chunks, blocks of 1,024 slots,
+// chunks_vec stores its vectors in. sqlite-vec inserts only into its
+// newest and never reuses a slot freed in an older one, so a re-index
+// that deleted and inserted its chunks again would grow it; one in place
+// leaves it as it was.
+func ChunkVectorBlocks(ctx context.Context, db *DB) (int, error) {
+	var n int
+	if err := db.QueryRowContext(ctx, chunkVectorBlocksSQL).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count chunks_vec's blocks: %w", err)
+	}
+	return n, nil
+}
+
 // VectorIndexWidth is the width chunks_vec was created with, as its
 // CREATE statement declares it, or 0 when there is no chunks_vec.
 func VectorIndexWidth(ctx context.Context, db *DB) (int, error) {

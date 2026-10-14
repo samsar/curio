@@ -42,15 +42,15 @@ func (s *chunkSource) SampleChunks(ctx context.Context, tenantID string, n store
 }
 
 // reembedder is a ChunkEmbedder that answers with embed, recording the
-// texts it was sent.
+// inputs it was sent.
 type reembedder struct {
-	embed func(ctx context.Context, texts []string) ([][]float32, error)
-	sent  [][]string
+	embed func(ctx context.Context, inputs []indexer.EmbedInput) ([][]float32, error)
+	sent  [][]indexer.EmbedInput
 }
 
-func (e *reembedder) EmbedChunks(ctx context.Context, texts []string) ([][]float32, error) {
-	e.sent = append(e.sent, slices.Clone(texts))
-	return e.embed(ctx, texts)
+func (e *reembedder) EmbedChunks(ctx context.Context, inputs []indexer.EmbedInput) ([][]float32, error) {
+	e.sent = append(e.sent, slices.Clone(inputs))
+	return e.embed(ctx, inputs)
 }
 
 // unit is the unit vector along axis of a 4-wide space.
@@ -73,7 +73,8 @@ func scaled(v []float32, by float32) []float32 {
 	return out
 }
 
-// storedSample is n chunks whose stored vectors are unit(0).
+// storedSample is n chunks whose stored vectors are unit(0), every other
+// one embedded with a context.
 func storedSample(n int) []store.SampledChunk {
 	out := make([]store.SampledChunk, n)
 	for i := range out {
@@ -81,15 +82,18 @@ func storedSample(n int) []store.SampledChunk {
 			ChunkID: fmt.Sprintf("c%d", i), DocumentID: fmt.Sprintf("d%d", i),
 			Text: fmt.Sprintf("chunk %d", i), Embedding: unit(0),
 		}
+		if i%2 == 0 {
+			out[i].Context = fmt.Sprintf("Document %d — example.com", i)
+		}
 	}
 	return out
 }
 
 // answering re-embeds each chunk as fresh(i) gives.
 func answering(fresh func(i int) []float32) *reembedder {
-	return &reembedder{embed: func(_ context.Context, texts []string) ([][]float32, error) {
-		out := make([][]float32, len(texts))
-		for i := range texts {
+	return &reembedder{embed: func(_ context.Context, inputs []indexer.EmbedInput) ([][]float32, error) {
+		out := make([][]float32, len(inputs))
+		for i := range inputs {
 			out[i] = fresh(i)
 		}
 		return out, nil
@@ -179,8 +183,9 @@ func TestSampler_Verify(t *testing.T) {
 	})
 }
 
-// TestSampler_SendsTheStoredTexts: the texts re-embedded are the stored
-// ones, unchanged and in order; the indexer adds the document prefix.
+// TestSampler_SendsTheStoredTexts: what is re-embedded is each stored
+// chunk's context and text, unchanged and in order; the indexer adds the
+// document prefix.
 func TestSampler_SendsTheStoredTexts(t *testing.T) {
 	sample := storedSample(5)
 	src := &chunkSource{sample: sample}
@@ -190,7 +195,9 @@ func TestSampler_SendsTheStoredTexts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []store.ChunkSample{{Longest: LongestChunks, Random: RandomChunks}}, src.asked)
 	require.Len(t, emb.sent, 1)
-	assert.Equal(t, []string{"chunk 0", "chunk 1", "chunk 2", "chunk 3", "chunk 4"}, emb.sent[0])
+	assert.Equal(t, []indexer.EmbedInput{{Context: "Document 0 — example.com", Text: "chunk 0"}, {Text: "chunk 1"},
+		{Context: "Document 2 — example.com", Text: "chunk 2"}, {Text: "chunk 3"},
+		{Context: "Document 4 — example.com", Text: "chunk 4"}}, emb.sent[0])
 }
 
 // TestSampler_EmptyLibraryMatches: nothing to sample is a match, without
@@ -264,7 +271,9 @@ func TestSampler_Errors(t *testing.T) {
 		"something unknown": {errors.New("ollama embed: requested 32 embeddings, got 31"), false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			emb := &reembedder{embed: func(context.Context, []string) ([][]float32, error) { return nil, tc.err }}
+			emb := &reembedder{embed: func(context.Context, []indexer.EmbedInput) ([][]float32, error) {
+				return nil, tc.err
+			}}
 			_, err := newTestSampler(t, &chunkSource{sample: storedSample(3)}, emb).Verify(context.Background())
 			require.ErrorIs(t, err, tc.err, "the cause stays in the chain")
 			assert.Equal(t, tc.unverifiable, errors.Is(err, ErrUnverifiable))
@@ -272,7 +281,7 @@ func TestSampler_Errors(t *testing.T) {
 	}
 
 	t.Run("a vector short", func(t *testing.T) {
-		emb := &reembedder{embed: func(context.Context, []string) ([][]float32, error) {
+		emb := &reembedder{embed: func(context.Context, []indexer.EmbedInput) ([][]float32, error) {
 			return [][]float32{unit(0)}, nil
 		}}
 		_, err := newTestSampler(t, &chunkSource{sample: storedSample(3)}, emb).Verify(context.Background())
@@ -293,7 +302,7 @@ func TestSampler_Errors(t *testing.T) {
 // TestSampler_BoundedByItsBatches: a hung embedder gives up within the
 // sample's bound, as a deadline to retry after, not as unverifiable.
 func TestSampler_BoundedByItsBatches(t *testing.T) {
-	emb := &reembedder{embed: func(ctx context.Context, _ []string) ([][]float32, error) {
+	emb := &reembedder{embed: func(ctx context.Context, _ []indexer.EmbedInput) ([][]float32, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}
@@ -308,9 +317,9 @@ func TestSampler_BoundedByItsBatches(t *testing.T) {
 }
 
 // TestSampleBound: each of the sample's batches may take one request's
-// timeout: two batches of 32, two minutes at the default 60 seconds.
+// timeout: eight batches of 8, eight minutes at the default 60 seconds.
 func TestSampleBound(t *testing.T) {
-	assert.Equal(t, 2*time.Minute, sampleBound(time.Minute))
+	assert.Equal(t, 8*time.Minute, sampleBound(time.Minute))
 	_, err := NewSampler(&chunkSource{}, answering(nil), 0)
 	require.Error(t, err)
 }
@@ -340,8 +349,9 @@ func (e *buildEmbedder) Embed(_ context.Context, texts []string) ([][]float32, e
 }
 
 // TestSampler_OverTheIndexedLibrary: over a library the indexer wrote,
-// the build that indexed it re-embeds every sampled chunk bit for bit, and
-// another build changes every one.
+// chunks embedded with their context beside one written before chunk
+// context, the build that indexed it re-embeds every sampled chunk bit for
+// bit, and another build changes every one.
 func TestSampler_OverTheIndexedLibrary(t *testing.T) {
 	ctx := context.Background()
 	db := sqlitetest.NewDB(t)
@@ -351,15 +361,27 @@ func TestSampler_OverTheIndexedLibrary(t *testing.T) {
 	exts := sqlitestore.NewExtractions(db)
 	emb := &buildEmbedder{dim: dim, build: "0.34.4"}
 	idx := indexer.New(chunks, emb, indexer.Options{ChunkSize: 8, DocumentPrefix: "doc: "})
-	for i := range 3 {
-		d := &store.Document{TenantID: store.LocalTenantID, URL: fmt.Sprintf("https://example.com/%d", i),
-			ContentType: store.ContentTypeArticle}
+	for i := range 4 {
+		url := fmt.Sprintf("https://example.com/%d", i)
+		d := &store.Document{TenantID: store.LocalTenantID, URL: url, ContentType: store.ContentTypeArticle}
 		require.NoError(t, docs.Create(ctx, d))
 		e := &store.DocumentExtraction{DocumentID: d.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
 			FetchedAt: time.Now().UTC()}
 		require.NoError(t, exts.Create(ctx, e))
-		require.NoError(t, idx.Index(ctx, indexer.IndexInput{DocumentID: d.ID, ExtractionID: e.ID,
-			Markdown: fmt.Sprintf("Document %d opens here.\n\nIt goes on for a while.\n\nAnd ends.", i)}))
+		require.NoError(t, docs.SetCurrentExtraction(ctx, d.ID, e.ID))
+		md := fmt.Sprintf("# Document %d\n\nIt opens here.\n\n## Then\n\nIt goes on for a while.\n\nAnd ends.", i)
+		if i == 3 {
+			// Embedded before chunk context, its text alone, as a home
+			// upgraded from 2.6 holds it.
+			vectors, err := emb.Embed(ctx, []string{"doc: " + md})
+			require.NoError(t, err)
+			require.NoError(t, chunks.ReplaceForDocument(ctx, d.ID, e.ID, "", nil,
+				[]store.ChunkInput{{Text: md, TokenCount: 1, Embedding: vectors[0]}}))
+		} else {
+			_, err := idx.Index(ctx, indexer.IndexInput{DocumentID: d.ID, ExtractionID: e.ID, Markdown: md,
+				Document: indexer.DocumentContext{URL: url, Title: fmt.Sprint("Title ", i)}})
+			require.NoError(t, err)
+		}
 		require.NoError(t, docs.MarkFetched(ctx, d.ID, 0))
 	}
 	sampler, err := NewSampler(chunks, idx, time.Minute)
@@ -367,13 +389,13 @@ func TestSampler_OverTheIndexedLibrary(t *testing.T) {
 
 	same, err := sampler.Verify(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, Comparison{Sampled: 3, Identical: 3, MinCosine: 1}, same)
+	assert.Equal(t, Comparison{Sampled: 4, Identical: 4, MinCosine: 1}, same)
 
 	emb.build = "0.35.0"
 	changed, err := sampler.Verify(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 3, changed.Sampled)
-	assert.Equal(t, 3, changed.Changed)
+	assert.Equal(t, 4, changed.Sampled)
+	assert.Equal(t, 4, changed.Changed)
 	assert.Zero(t, changed.Identical)
 	assert.Less(t, changed.MinCosine, MinCosine)
 }

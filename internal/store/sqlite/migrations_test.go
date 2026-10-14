@@ -1549,6 +1549,111 @@ func TestMigration019_FieldsIndexFollowsTheRows(t *testing.T) {
 	assert.Empty(t, votes(), "a name nobody holds has no row")
 }
 
+// TestMigration021_ChunkContext: 021 adds each chunk's context and its
+// version, as embedded before chunk context, keeping every chunk and its
+// FTS entry, and its Down gives 020's schema back byte for byte.
+func TestMigration021_ChunkContext(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 20)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, state) VALUES ('d1', 'local', 'https://example.com/1', 'fetched');
+		INSERT INTO document_extractions (id, document_id, fetcher, status) VALUES ('e1', 'd1', 'native', 'ok');
+		INSERT INTO chunks (id, document_id, extraction_id, ord, text, token_count, title, tags) VALUES
+			('c1', 'd1', 'e1', 0, 'kafka streams and queues', 4, 'Queues', ''),
+			('c2', 'd1', 'e1', 1, 'consumer groups', 2, 'Queues', '["broker"]');`)
+	require.NoError(t, err)
+	const chunksQ = `SELECT seq, id, document_id, extraction_id, ord, text, token_count, title, tags FROM chunks
+		ORDER BY seq`
+	chunksBefore := dumpRows(t, db, chunksQ)
+	schemaBefore := schemaDump(t, db)
+	integrity := func() {
+		t.Helper()
+		_, err := db.Exec(`INSERT INTO chunks_fts (chunks_fts, rank) VALUES ('integrity-check', 1)`)
+		require.NoError(t, err)
+	}
+
+	_, err = p.UpTo(ctx, 21)
+	require.NoError(t, err)
+	assert.Equal(t, chunksBefore, dumpRows(t, db, chunksQ), "every chunk kept")
+	assert.Equal(t, [][]any{{"", int64(0)}, {"", int64(0)}},
+		dumpRows(t, db, `SELECT context, context_version FROM chunks ORDER BY seq`),
+		"each embedded before chunk context")
+	integrity()
+
+	_, err = p.DownTo(ctx, 20)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "020's schema, byte for byte")
+	assert.Equal(t, chunksBefore, dumpRows(t, db, chunksQ))
+	integrity()
+
+	_, err = p.UpTo(ctx, 21)
+	require.NoError(t, err, "Up runs again")
+}
+
+// TestMigration021_UpdatesReindexOnlyIndexedValues: an UPDATE of a chunk
+// writes chunks_fts only when its text, title or tags change, and then
+// keeps the index in step with the rows.
+func TestMigration021_UpdatesReindexOnlyIndexedValues(t *testing.T) {
+	ctx := context.Background()
+	db, _ := migratedTo(t, 21)
+	// total_changes() counts the rows a connection's statements and their
+	// triggers wrote, so one connection makes every statement.
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, conn.Close()) })
+	exec := func(q string) {
+		t.Helper()
+		_, err := conn.ExecContext(ctx, q)
+		require.NoError(t, err)
+	}
+	changes := func(q string) int {
+		t.Helper()
+		var before, after int
+		require.NoError(t, conn.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&before))
+		exec(q)
+		require.NoError(t, conn.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&after))
+		return after - before
+	}
+	match := func(q string) []string {
+		t.Helper()
+		rows, err := conn.QueryContext(ctx, `SELECT c.id FROM chunks_fts JOIN chunks c ON c.seq = chunks_fts.rowid
+			WHERE chunks_fts MATCH ? ORDER BY c.id`, q)
+		require.NoError(t, err)
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			require.NoError(t, rows.Scan(&id))
+			ids = append(ids, id)
+		}
+		require.NoError(t, rows.Err())
+		return ids
+	}
+
+	exec(`INSERT INTO documents (id, tenant_id, url, state) VALUES ('d1', 'local', 'https://example.com/1', 'fetched')`)
+	exec(`INSERT INTO document_extractions (id, document_id, fetcher, status) VALUES ('e1', 'd1', 'native', 'ok'),
+		('e2', 'd1', 'native', 'ok')`)
+	exec(`INSERT INTO chunks (id, document_id, extraction_id, ord, text, token_count, title, tags)
+		VALUES ('c1', 'd1', 'e1', 0, 'kafka streams', 2, 'Queues', '["broker"]')`)
+
+	for _, set := range []string{"context = 'Queues — Example — Consumers'", "context_version = 1",
+		"extraction_id = 'e2'", "token_count = 9", "text = text, title = title, tags = tags"} {
+		assert.Equal(t, 1, changes(`UPDATE chunks SET `+set+` WHERE id = 'c1'`),
+			"%s: the row alone; no trigger wrote the index", set)
+	}
+	for _, tc := range []struct{ set, gone, found string }{
+		{"text = 'postgres replication'", "kafka", "postgres"},
+		{"title = 'Databases'", "queues", "databases"},
+		{`tags = '["wal"]'`, "broker", "wal"},
+	} {
+		assert.Greater(t, changes(`UPDATE chunks SET `+tc.set+` WHERE id = 'c1'`), 1,
+			"%s: the row, and the index's delete and insert", tc.set)
+		exec(`INSERT INTO chunks_fts (chunks_fts, rank) VALUES ('integrity-check', 1)`)
+		assert.Empty(t, match(tc.gone), tc.set)
+		assert.Equal(t, []string{"c1"}, match(tc.found), tc.set)
+	}
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `

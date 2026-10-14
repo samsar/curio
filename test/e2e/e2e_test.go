@@ -101,6 +101,13 @@ func (f *fakeOllama) embedded(part string) bool {
 	return slices.ContainsFunc(f.docTexts, func(text string) bool { return strings.Contains(text, part) })
 }
 
+// forget forgets the document texts embedded so far.
+func (f *fakeOllama) forget() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.docTexts = nil
+}
+
 // switchTo makes the fake serve another build: Ollama at version, the
 // model pulled as digest, embedding with salt (empty: the first build's
 // vectors).
@@ -609,6 +616,72 @@ func TestDaemon_RecordsAnUpgradeThatKeepsTheVectors(t *testing.T) {
 	assert.Contains(t, string(log), "the embedding build changed, and a re-embedded sample matches the stored vectors")
 	assert.NotContains(t, string(log), "embeddings drifted")
 	assert.NotContains(t, string(log), "embeddings may have drifted")
+}
+
+// TestDaemon_ReembedsTheChunksAfterAnUpgrade: a library whose chunks were
+// embedded before chunk context, as 2.6 left it, is re-embedded by the
+// next start, each chunk with its context, without failing a document or
+// reporting a drift; a start after it queues nothing more.
+func TestDaemon_ReembedsTheChunksAfterAnUpgrade(t *testing.T) {
+	ctx := context.Background()
+	ollama, ollamaURL := serveOllama(t, digestA, "0.34.4")
+	home, ctl, c := indexedUnder(t, ollama, ollamaURL)
+	db, err := sqlitestore.Open(ctx, home.DBPath())
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE chunks SET context = '', context_version = 0`)
+	require.NoError(t, err)
+	var updatedAt string
+	require.NoError(t, db.QueryRow(`SELECT updated_at FROM documents`).Scan(&updatedAt))
+	require.NoError(t, db.Close())
+	ollama.forget()
+
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+	require.Eventually(t, func() bool {
+		stats, err := c.Stats(ctx)
+		return err == nil && stats.Reembed == nil
+	}, 30*time.Second, 50*time.Millisecond, logTail(home))
+	assert.True(t, ollama.embedded("An Introduction to Zymurgy — 127.0.0.1\n\n"),
+		"the chunks are embedded with their context")
+	docs, err := c.ListDocuments(ctx, client.ListDocumentsOpts{})
+	require.NoError(t, err)
+	require.Len(t, docs.Items, 1)
+	assert.Equal(t, string(store.DocStateFetched), docs.Items[0].State)
+	db, err = sqlitestore.Open(ctx, home.DBPath())
+	require.NoError(t, err)
+	var after string
+	require.NoError(t, db.QueryRow(`SELECT updated_at FROM documents`).Scan(&after))
+	require.NoError(t, db.Close())
+	assert.Equal(t, updatedAt, after, "the re-embed leaves the Library's order alone")
+	health, err := c.Healthz(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, health.EmbeddingDrift, "the re-embed is no drift")
+	assert.Equal(t, 2, indexJobs(t, home), "the first index, and the re-embed")
+	assert.Equal(t, 1, reembedJobs(t, home))
+
+	stopped, err := ctl.Stop(ctx)
+	require.NoError(t, err)
+	require.True(t, stopped)
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+	health, err = c.Healthz(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", health.Status)
+	assert.Equal(t, 2, indexJobs(t, home), "nothing more to re-embed")
+
+	stopped, err = ctl.Stop(ctx)
+	require.NoError(t, err)
+	assert.True(t, stopped)
+}
+
+// reembedJobs counts the re-embed index jobs in home's database.
+func reembedJobs(t *testing.T, home *curiohome.Home) int {
+	t.Helper()
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	defer db.Close()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ? AND json_extract(payload, '$.reembed')`,
+		store.JobKindIndex).Scan(&n))
+	return n
 }
 
 // indexJobs counts the index jobs in home's database, which a running

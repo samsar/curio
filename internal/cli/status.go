@@ -17,6 +17,7 @@ import (
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/setup"
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -92,6 +93,8 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 	if s := health.SavedDates; s != nil {
 		fmt.Fprint(w, savedDatesWarning(*s))
 	}
+	fmt.Fprint(w, embedderHoldWarning(health.EmbedderHold))
+	fmt.Fprint(w, reembedBrakeWarning(health.ReembedBrake))
 
 	sctx, scancel := context.WithTimeout(ctx, 1*time.Second)
 	defer scancel()
@@ -109,6 +112,11 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 		}
 		if stats.CardsStale > 0 {
 			fmt.Fprintf(w, "cards:     %d to embed\n", stats.CardsStale)
+		}
+		if r := stats.Reembed; r != nil {
+			fmt.Fprintf(w, "chunks:    %s in %d of %d documents to re-embed (new chunk context)%s\n",
+				plural(r.Chunks, "chunk"), r.Documents, stats.DocumentsByState[string(store.DocStateFetched)],
+				reembedETA(r))
 		}
 	}
 	printQueue(ctx, w, env.Client)
@@ -186,6 +194,27 @@ func savedDatesWarning(s client.SavedDates) string {
 			"date filters leave them out until a retry does; run `curio doctor`\n", owedSources(s.Owed))
 	}
 	return out
+}
+
+// embedderHoldWarning is the line status prints while the embedding model
+// doesn't answer the daemon, which holds its index and cards jobs until it
+// does, and empty otherwise: the fix is doctor's.
+func embedderHoldWarning(h *client.EmbedderHold) string {
+	if h == nil {
+		return ""
+	}
+	return fmt.Sprintf("warning: the embedding model hasn't answered since %s (%s); index and cards jobs wait for "+
+		"it; run `curio doctor`\n", localTime(h.Since), h.Error)
+}
+
+// reembedBrakeWarning is the line status prints while the re-embed's brake
+// stops it, and empty otherwise: the fix is doctor's.
+func reembedBrakeWarning(b *client.ReembedBrake) string {
+	if b == nil {
+		return ""
+	}
+	return fmt.Sprintf("warning: the re-embed for the new chunk context waits until %s: the re-embeds of %s "+
+		"failed in a row (%s); run `curio doctor`\n", localTime(b.Until), plural(b.Failures, "document"), b.Error)
 }
 
 // owedSources names the sources owed a classification: "chrome", "chrome

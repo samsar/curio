@@ -70,6 +70,8 @@ type Deps struct {
 	GitHubToken     bool                            // the GitHub fetcher sends a token, on healthz
 	DocumentFields  DocumentFields                  // what the daemon's start did to the documents' search fields, on healthz
 	SavedDates      *SavedDateClassifier            // classifies an import's source, owing what fails, on healthz; Ready makes one when nil
+	Reembed         ReembedProgress                 // the re-embed for a new chunk context, whose rate /v1/stats and brake healthz report; nil reports none
+	Hold            EmbedderHoldState               // the hold over the index and cards jobs, on healthz and a document's jobs; nil holds nothing
 	TenantID        string                          // default store.LocalTenantID
 	Log             *slog.Logger
 }

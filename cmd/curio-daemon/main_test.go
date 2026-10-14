@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,6 +33,7 @@ import (
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/drift"
+	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/store"
@@ -306,20 +308,22 @@ func seedLegacyHome(t *testing.T, home *curiohome.Home) (seededJobs, string) {
 	require.NoError(t, err)
 	defer db.Close()
 	seeded := enqueueSeededJobs(t, db)
-	// The document store writes the latest schema; the document goes in as
-	// the home's older one holds it.
-	const docID = "legacy-document"
+	// The document and chunk stores write the latest schema; the document
+	// and its chunk go in as the home's older one holds them.
+	const docID, chunkID = "legacy-document", "legacy-chunk"
 	_, err = db.ExecContext(ctx, `INSERT INTO documents (id, tenant_id, url, state)
 		VALUES (?, 'local', 'https://example.com/a', 'fetched')`, docID)
 	require.NoError(t, err)
 	ext := &store.DocumentExtraction{DocumentID: docID, Fetcher: "test", Status: store.ExtractionStatusOK}
 	require.NoError(t, sqlitestore.NewExtractions(db).Create(ctx, ext))
-	chunks := sqlitestore.NewChunks(db, 768)
-	require.NoError(t, chunks.ReplaceForDocument(ctx, docID, ext.ID, "", nil,
-		[]store.ChunkInput{{Text: "kept", Embedding: make([]float32, 768)}}))
-	var id string
-	require.NoError(t, db.QueryRow(`SELECT id FROM chunks`).Scan(&id))
-	return seeded, id
+	_, err = db.ExecContext(ctx, `INSERT INTO chunks (id, document_id, extraction_id, ord, text)
+		VALUES (?, ?, ?, 0, 'kept')`, chunkID, docID, ext.ID)
+	require.NoError(t, err)
+	vector, err := sqlitevec.SerializeFloat32(make([]float32, 768))
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)`, chunkID, vector)
+	require.NoError(t, err)
+	return seeded, chunkID
 }
 
 // TestRun_SizesTheVectorIndexFromTheHome: the vector index of a new home's
@@ -1374,6 +1378,171 @@ func TestStart_DocumentFields(t *testing.T) {
 		assert.False(t, d.apiDeps.DocumentFields.Rebuilt)
 		assert.Empty(t, d.apiDeps.DocumentFields.Error)
 		assert.False(t, d.apiDeps.DocumentFields.CheckedAt.IsZero())
+	})
+}
+
+// libraryBeforeContext is a home's library as 2.6 left it, each document
+// named by what it is: fetched with chunks embedded before chunk context
+// (two of them, one of whose index job is pending), failed, dead and
+// pending with such chunks, fetched without chunks, and fetched with
+// chunks of the current context. Every card is embedded, so the start's
+// own steps leave the cards as they are.
+type libraryBeforeContext struct {
+	stale, queued, failed, dead, pending, noChunks, current string
+}
+
+func seedLibraryBeforeContext(t *testing.T, home *curiohome.Home) libraryBeforeContext {
+	t.Helper()
+	var lib libraryBeforeContext
+	seedHome(t, home, func(db *sqlitestore.DB) {
+		ctx := context.Background()
+		docs := sqlitestore.NewDocuments(db)
+		exts := sqlitestore.NewExtractions(db)
+		add := func(name string, state store.DocState, version int, chunks bool) string {
+			doc := &store.Document{TenantID: store.LocalTenantID, URL: "https://example.com/" + name}
+			require.NoError(t, docs.Create(ctx, doc))
+			ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK}
+			require.NoError(t, exts.Create(ctx, ext))
+			require.NoError(t, docs.SetCurrentExtraction(ctx, doc.ID, ext.ID))
+			if chunks {
+				// The rows alone: no start step reads a chunk's vector.
+				_, err := db.Exec(`INSERT INTO chunks (id, document_id, extraction_id, ord, text, context_version)
+					VALUES (?, ?, ?, 0, 'text', ?)`, doc.ID+"-chunk", doc.ID, ext.ID, version)
+				require.NoError(t, err)
+			}
+			switch state {
+			case store.DocStateFetched:
+				require.NoError(t, docs.MarkFetched(ctx, doc.ID, 1))
+			case store.DocStateFailed:
+				require.NoError(t, docs.MarkFailed(ctx, doc.ID, store.FailureCauseAntiBot))
+			case store.DocStateDead:
+				require.NoError(t, docs.MarkFailed(ctx, doc.ID, store.FailureCauseDeadLink))
+			case store.DocStatePending:
+			}
+			return doc.ID
+		}
+		lib = libraryBeforeContext{
+			stale:    add("stale", store.DocStateFetched, 0, true),
+			queued:   add("queued", store.DocStateFetched, 0, true),
+			failed:   add("failed", store.DocStateFailed, 0, true),
+			dead:     add("dead", store.DocStateDead, 0, true),
+			pending:  add("pending", store.DocStatePending, 0, true),
+			noChunks: add("no-chunks", store.DocStateFetched, 0, false),
+			current:  add("current", store.DocStateFetched, indexer.ContextVersion, true),
+		}
+		job, err := store.NewDocumentJob(store.LocalTenantID, store.JobKindIndex, lib.queued)
+		require.NoError(t, err)
+		require.NoError(t, sqlitestore.NewJobs(db).Enqueue(ctx, job))
+		// The card index as an earlier start made it, so this start's own
+		// steps leave the cards alone.
+		meta, err := home.Meta()
+		require.NoError(t, err)
+		require.NoError(t, sqlitestore.EnsureVectorIndex(ctx, db, meta.EmbeddingDim))
+		_, err = db.Exec(`UPDATE document_cards SET embedded_text = text, embedded_at = '2026-10-01T00:00:00.000Z';
+			DELETE FROM jobs WHERE kind = 'cards'`)
+		require.NoError(t, err)
+	})
+	return lib
+}
+
+// reembedJobs is, for each document with index jobs, how many and how
+// many of them re-embed it.
+func reembedJobs(t *testing.T, db *sqlitestore.DB) map[string][2]int {
+	t.Helper()
+	rows, err := db.Query(`SELECT document_id, count(*), sum(coalesce(json_extract(payload, '$.reembed'), 0))
+		FROM jobs WHERE kind = 'index' GROUP BY document_id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	out := map[string][2]int{}
+	for rows.Next() {
+		var (
+			id         string
+			n, reembed int
+		)
+		require.NoError(t, rows.Scan(&id, &n, &reembed))
+		out[id] = [2]int{n, reembed}
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// TestStart_BeginsTheChunkContextReembed: a start whose library holds
+// fetched documents whose chunks predate the chunk context owes the
+// interests a fresh rebuild, queues a re-embed job for the first of them
+// an index job doesn't already re-embed, and no more, logs it once, and
+// leaves every other document, the cards and the embedding baseline alone;
+// a second start queues nothing more, the job in flight holding its place;
+// a step that fails logs an ERROR, and a start whose search fields couldn't
+// be checked a WARN, and the daemon starts anyway, with no re-embed.
+func TestStart_BeginsTheChunkContextReembed(t *testing.T) {
+	home := newHome(t, freeLoopbackAddr(t))
+	lib := seedLibraryBeforeContext(t, home)
+	meta, err := home.Meta()
+	require.NoError(t, err)
+	meta.EmbeddingModelDigest, meta.OllamaVersion = "sha256:recorded", "0.34.4"
+	require.NoError(t, home.WriteMeta(meta))
+
+	d, db, logs := startHome(t, home)
+	assert.Equal(t, map[string][2]int{lib.stale: {1, 1}, lib.queued: {1, 0}}, reembedJobs(t, db))
+	assert.True(t, d.reembedding, "serve feeds the rest")
+	began := logs.messages("chunk context: re-embedding the library's chunks")
+	require.Len(t, began, 1)
+	assert.Equal(t, map[string]any{"documents": int64(2), "chunks": int64(2), "queued": int64(1),
+		"in_flight": int64(1), "context_version": int64(indexer.ContextVersion)}, began[0])
+	assert.Equal(t, jobs.ReembedProgress{Active: true, Began: d.reembed.Progress().Began,
+		Of: store.ReembedCount{Documents: 2, Chunks: 2}, Left: store.ReembedCount{Documents: 2, Chunks: 2}},
+		d.reembed.Progress())
+	var owed string
+	require.NoError(t, db.QueryRow(`SELECT fresh_owed FROM insight_state WHERE tenant_id = 'local'`).Scan(&owed))
+	assert.Equal(t, string(store.FreshReindex), owed)
+	var staleCards, cardsJobs int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM document_cards WHERE embedded_text IS NOT text`).Scan(&staleCards))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = 'cards'`).Scan(&cardsJobs))
+	assert.Zero(t, staleCards, "no card made stale")
+	assert.Zero(t, cardsJobs, "no cards job queued")
+	after, err := home.Meta()
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:recorded", after.EmbeddingModelDigest, "the drift baseline is left alone")
+	assert.Equal(t, "0.34.4", after.OllamaVersion)
+
+	d, db, logs = startHome(t, home)
+	assert.Equal(t, map[string][2]int{lib.stale: {1, 1}, lib.queued: {1, 0}}, reembedJobs(t, db),
+		"a second start queues nothing more")
+	assert.True(t, d.reembedding, "both still to re-embed")
+	assert.Equal(t, int64(0), logs.messages("chunk context: re-embedding the library's chunks")[0]["queued"])
+
+	t.Run("a step that fails", func(t *testing.T) {
+		home := newHome(t, freeLoopbackAddr(t))
+		seedLibraryBeforeContext(t, home)
+		seedHome(t, home, func(db *sqlitestore.DB) {
+			_, err := db.Exec(`CREATE TRIGGER t_fail BEFORE INSERT ON jobs WHEN json_extract(new.payload, '$.reembed')
+				BEGIN SELECT RAISE(ABORT, 'injected'); END`)
+			require.NoError(t, err)
+		})
+		d, _, logs := startHome(t, home)
+		require.Len(t, logs.at(slog.LevelError, "chunk context"), 1)
+		assert.False(t, d.reembedding, "nothing to feed")
+	})
+
+	t.Run("search fields that couldn't be checked", func(t *testing.T) {
+		home := newHome(t, freeLoopbackAddr(t))
+		lib := seedLibraryBeforeContext(t, home)
+		seedHome(t, home, func(db *sqlitestore.DB) {
+			_, err := db.Exec(`
+				INSERT INTO documents (id, tenant_id, url) VALUES ('no-fields', 'local', 'https://example.com/nf');
+				CREATE TRIGGER t_fail BEFORE INSERT ON document_fields BEGIN SELECT RAISE(ABORT, 'injected'); END;`)
+			require.NoError(t, err)
+		})
+		d, db, logs := startHome(t, home)
+		require.NotEmpty(t, d.apiDeps.DocumentFields.Error)
+		waits := logs.at(slog.LevelWarn, "chunk context")
+		require.Len(t, waits, 1)
+		assert.Contains(t, waits[0].Message, "the next start begins it")
+		assert.False(t, d.reembedding)
+		assert.Equal(t, map[string][2]int{lib.queued: {1, 0}}, reembedJobs(t, db), "no re-embed queued")
+		var owed int
+		require.NoError(t, db.QueryRow(`SELECT count(*) FROM insight_state WHERE fresh_owed IS NOT NULL`).Scan(&owed))
+		assert.Zero(t, owed, "no fresh rebuild owed")
 	})
 }
 

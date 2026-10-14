@@ -36,16 +36,22 @@ func (f Fields) Card() string {
 			saved = append(saved, t)
 		}
 	}
-	site := f.SiteName
-	if site == "" {
-		site = f.Host
-	}
 	parts := make([]string, 0, cardParts)
-	for _, p := range [cardParts]string{f.Title, strings.Join(saved, " | "), site, f.Author,
+	for _, p := range [cardParts]string{f.Title, strings.Join(saved, " | "), SiteOrHost(f.SiteName, f.Host), f.Author,
 		strings.Join(lines(f.Folders), " | ")} {
 		if p = strings.TrimSpace(textutil.TruncateBytes(collapse(p), maxCardPartBytes)); p != "" {
 			parts = append(parts, p)
 		}
 	}
 	return strings.Join(parts, cardSeparator)
+}
+
+// SiteOrHost is how a document's site is named in the text it is embedded
+// by, its card and its chunks' context: its site name (Fields.SiteName),
+// else its host.
+func SiteOrHost(siteName, host string) string {
+	if siteName != "" {
+		return siteName
+	}
+	return host
 }

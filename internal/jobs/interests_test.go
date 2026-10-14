@@ -198,7 +198,7 @@ func TestPools_NothingToGroupBacksOff(t *testing.T) {
 			added++
 			doc := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/%d", added)}
 			require.NoError(t, deps.Documents.Create(ctx, doc))
-			require.NoError(t, deps.Documents.MarkFetched(ctx, doc.ID, 0))
+			require.NoError(t, sqlitestore.NewDocuments(db).MarkFetched(ctx, doc.ID, 0))
 		}
 	}
 	count := func(c require.TestingT, query string) int {

@@ -3,6 +3,7 @@ package ui
 import (
 	"cmp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,7 +93,22 @@ type CountsPanel struct {
 	ByState   []Count // every document state, in lifecycle order
 	Bookmarks int
 	Jobs      []Count // by status, the statuses with jobs
+	// Reembed is what is left of the re-embed for a new chunk context; nil
+	// when nothing is.
+	Reembed *ReembedLeft
 }
+
+// ReembedLeft is what is left to re-embed for a new chunk context: the
+// fetched documents and their chunks, and, while the re-embed moves, its
+// rate and the time left at it (0 while unknown).
+type ReembedLeft struct {
+	Documents, Chunks int
+	ChunksPerSecond   float64
+	ETA               time.Duration
+}
+
+// Rate is the re-embed's rate, to a tenth of a chunk a second.
+func (r ReembedLeft) Rate() string { return strconv.FormatFloat(r.ChunksPerSecond, 'f', 1, 64) }
 
 // State is how many documents are in state.
 func (p CountsPanel) State(state string) int {
@@ -1068,10 +1084,16 @@ type DocumentJobs struct {
 	Jobs       []JobLine   // queued and running, newest first
 	// AttemptLimit is how many attempts a job gets.
 	AttemptLimit int
-	// Hold is why the queue holds the queued jobs, the gate's reason, or ""
-	// while it is open or unknown.
+	// Hold is why the queued jobs wait: the queue's gate's reason while it
+	// is closed, else HoldEmbedder while the embedder hold holds a queued
+	// index job, or "" while neither holds them or it is unknown.
 	Hold string
 }
+
+// HoldEmbedder is DocumentJobs.Hold while the embedder hold holds a
+// document's queued index job: the hold's reason
+// (jobs.ReasonEmbedderUnreachable).
+const HoldEmbedder = "embedder_unreachable"
 
 // InFlight reports whether a job of the document is queued or running.
 func (j DocumentJobs) InFlight() bool { return len(j.Jobs) > 0 }

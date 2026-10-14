@@ -77,7 +77,7 @@ type Embedding struct {
 	// AutoPull downloads the embedding model via Ollama at startup if it isn't
 	// present locally. Default true. Set false on metered/offline setups.
 	AutoPull bool `yaml:"auto_pull"`
-	// TimeoutSeconds bounds one embed request. The indexer sends at most 32
+	// TimeoutSeconds bounds one embed request. The indexer sends at most 8
 	// chunks per request, so the default of 60 leaves room for CPU-only
 	// Ollama and for requests queued behind the other index workers'.
 	TimeoutSeconds int `yaml:"timeout_seconds"`

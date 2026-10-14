@@ -1200,7 +1200,54 @@ components:
         interests: { $ref: "#/components/schemas/InterestsState" }
         document_fields: { $ref: "#/components/schemas/DocumentFieldsCheck" }
         saved_dates: { $ref: "#/components/schemas/SavedDatesCheck" }
+        embedder_hold: { $ref: "#/components/schemas/EmbedderHold" }
+        reembed_brake: { $ref: "#/components/schemas/ReembedBrake" }
       required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates]
+
+    EmbedderHold:
+      description: >
+        Present only while the daemon holds its index and cards jobs
+        because the embedding model gets no answer (Ollama stopped,
+        restarting, or too wedged to answer within the embedder's timeout).
+        None of those jobs is claimed meanwhile, and none fails: the queue
+        lists them as pending, and a document's page says why they wait.
+        The daemon probes the model 5 seconds after the hold closed, then
+        less often, up to every minute, and opens it at the first answer of
+        any kind. Status stays ok.
+      type: object
+      properties:
+        since: { type: string, format: date-time, description: "When the first embed that got no answer closed the hold" }
+        error: { type: string, description: "The error of the last embed or probe that got no answer" }
+      required: [since, error]
+
+    ReembedBrake:
+      description: >
+        Present only while the re-embed for a new chunk context is stopped:
+        three documents' re-embeds failed in a row, each for the first time,
+        with none re-embedded in between (an embedding model that answers
+        with an error, a model missing, vectors of another width), so no
+        document is queued to re-embed until `until`, 15 minutes after the
+        first such stop, then twice as long each time it stops again, up to
+        4 hours. From `until` one document is queued, one that never failed
+        if any is left, and its failure stops it again; a document
+        re-embedded meanwhile ends the stop at once. A document failing
+        again doesn't count. The documents keep their earlier vectors,
+        searchable, and are re-embedded once the model is fixed. Status
+        stays ok.
+      type: object
+      properties:
+        until: { type: string, format: date-time, description: "When the re-embed queues a document again" }
+        failures: { type: integer, description: "How many documents' re-embeds failed in a row" }
+        documents:
+          type: array
+          maxItems: 5
+          description: >
+            The IDs of the first five of those documents, in the order they
+            failed: `curio docs show <id>` shows one, `curio refetch <id>`
+            fetches it again.
+          items: { type: string }
+        error: { type: string, description: "The last one's error" }
+      required: [until, failures, documents, error]
 
     DocumentFieldsCheck:
       description: >
@@ -1437,6 +1484,30 @@ components:
             since their vector was made, or that have none. The cards job
             embeds them; a backlog that stays with no cards job pending or
             running is one `curio doctor` warns of.
+        reembed:
+          type: object
+          description: >
+            What is left to re-embed for a new chunk context (each chunk is
+            embedded with its document's title and site and its headings):
+            the fetched documents whose chunks were embedded under an older
+            chunk context than this daemon's, which the daemon feeds to its
+            index workers a job at a time. Absent once nothing is left; a
+            re-embed left with no index job pending or running is one `curio
+            doctor` warns of, and one its brake stops is on healthz
+            (reembed_brake).
+          properties:
+            documents: { type: integer, description: "The fetched documents left to re-embed" }
+            chunks:    { type: integer, description: "Their chunks embedded under an older chunk context" }
+            chunks_per_second:
+              type: number
+              description: >
+                The re-embed's rate over its last 10 minutes. Absent until it
+                has been measured, and while the re-embed doesn't move (a
+                paused queue, an embedding model that doesn't answer).
+            eta_seconds:
+              type: integer
+              description: How long the chunks left take at that rate; absent with it.
+          required: [documents, chunks]
       required: [version, bookmarks_total, documents_total, cards_stale]
 
     Metrics:

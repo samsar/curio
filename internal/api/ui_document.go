@@ -106,9 +106,11 @@ func documentPoll(r *http.Request) (string, ui.DocumentBaseline, error) {
 }
 
 // documentJobs reads doc's jobs in flight, queued or running, newest
-// first, and, while one waits, why the queue holds it: the region of its
-// page that its poller refreshes, against the baseline the page showed.
-// The jobs' failure is the region's; the queue's is left out of it.
+// first, and, while one waits, why it is held: the queue closed, else the
+// embedder hold, while it holds a queued index job. It is the region of
+// its page that its poller refreshes, against the baseline the page
+// showed. The jobs' failure is the region's; the queue's is left out of
+// it.
 func (h pageHandlers) documentJobs(r *http.Request, doc *store.Document, baseline, current ui.DocumentBaseline) ui.DocumentJobs {
 	j := ui.DocumentJobs{DocumentID: doc.ID, State: string(doc.State), Baseline: baseline, Current: current,
 		AttemptLimit: h.d.Queue.AttemptLimit()}
@@ -118,12 +120,14 @@ func (h pageHandlers) documentJobs(r *http.Request, doc *store.Document, baselin
 		return j
 	}
 	read := time.Now()
+	queuedIndex := false
 	for _, job := range resp.Items {
 		switch status := store.JobStatus(job.Status); status {
 		case store.JobStatusPending, store.JobStatusRunning:
 			j.Jobs = append(j.Jobs, ui.JobLine{Kind: job.Kind, Running: status == store.JobStatusRunning,
 				Waiting: status == store.JobStatusPending && job.RunAfter.After(read), Attempts: job.Attempts,
 				RunAfter: job.RunAfter, LastError: deref(job.LastError)})
+			queuedIndex = queuedIndex || status == store.JobStatusPending && job.Kind == string(store.JobKindIndex)
 		case store.JobStatusDone, store.JobStatusFailed:
 		}
 	}
@@ -134,6 +138,9 @@ func (h pageHandlers) documentJobs(r *http.Request, doc *store.Document, baselin
 		case queue.State == queueClosed:
 			j.Hold = queue.Reason
 		}
+	}
+	if j.Hold == "" && queuedIndex && h.d.embedderHold() != nil {
+		j.Hold = ui.HoldEmbedder
 	}
 	return j
 }

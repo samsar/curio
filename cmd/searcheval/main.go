@@ -23,6 +23,17 @@
 // run on a copy embeds them all, a few minutes for a large library, and a
 // later one on the same copy none.
 //
+// A copy of a home indexed before chunk context holds chunks embedded from
+// their text alone, which the report counts (documents_to_reembed) and
+// warns of. -reindex re-embeds them first, through the daemon's own index
+// path (jobs.IndexDocument), from the markdown under -content, the content
+// directory of the home the copy is from, which it checks for every
+// document before it embeds anything: an hour or more for a large library,
+// resumable (each document is committed whole), and nothing on a copy
+// re-embedded already.
+//
+//	searcheval -db copy.db -queries my-queries.yaml -reindex -content ~/.curio/content
+//
 // It embeds each query, and the cards, through the Ollama config.yaml
 // names, as the daemon does, and never pulls a model. An Ollama too busy
 // to embed a query within search.embed_timeout_seconds degrades that
@@ -60,6 +71,10 @@ type options struct {
 	json     string
 	baseline string
 	variants []variant
+	// reindex re-embeds the copy's chunks that predate the chunk context
+	// before any query, from the markdown under content.
+	reindex bool
+	content string
 }
 
 // Exit codes.
@@ -106,7 +121,7 @@ func dropQueryText(groups []string, a slog.Attr) slog.Attr {
 func complain(stderr io.Writer, msg string) { _, _ = io.WriteString(stderr, msg) }
 
 const usageLine = "usage: searcheval -db <copy of curio.db> -queries <file> [-config <config.yaml>] [-json <file>] " +
-	"[-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards,titles]\n"
+	"[-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards,titles] [-reindex -content <dir>]\n"
 
 // parseFlags parses args, writing what is wrong and the usage to out on a
 // usage error, and the usage alone for -h.
@@ -123,6 +138,9 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 	fs.StringVar(&opts.json, "json", "", "also write every number to this file, as JSON")
 	fs.StringVar(&opts.baseline, "baseline", "", "a previous run's -json report to compare with")
 	fs.StringVar(&variants, "variants", "hybrid", "the variants to run, in order: "+strings.Join(variantNames(), ", "))
+	fs.BoolVar(&opts.reindex, "reindex", false, "re-embed the copy's chunks that predate the chunk context first, "+
+		"from the markdown under -content")
+	fs.StringVar(&opts.content, "content", "", "the content directory of the home the copy is from (with -reindex)")
 	fs.Usage = func() {
 		out.WriteString(usageLine)
 		fs.PrintDefaults()
@@ -138,6 +156,10 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 		problem = "-queries is required"
 	case fs.NArg() > 0:
 		problem = fmt.Sprintf("unexpected argument %q", fs.Arg(0))
+	case opts.reindex && opts.content == "":
+		problem = "-reindex needs -content, the content directory of the home the copy is from"
+	case opts.content != "" && !opts.reindex:
+		problem = "-content is read only with -reindex"
 	default:
 		opts.variants, problem = parseVariants(variants)
 	}

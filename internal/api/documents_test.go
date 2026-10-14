@@ -400,7 +400,8 @@ func TestGetDocument(t *testing.T) {
 
 	assert.Empty(t, got.FailureCause)
 
-	require.NoError(t, s.deps.Documents.MarkFetched(context.Background(), doc.ID, 1234))
+	require.NoError(t, s.deps.Documents.MarkIndexed(context.Background(), doc.ID,
+		store.IndexGuard{ExtractionID: ext.ID}, 1234))
 	resp = s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + doc.ID})
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
 	assert.Contains(t, resp.body, `"word_count":1234`, "an index's count")

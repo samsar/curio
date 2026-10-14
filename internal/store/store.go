@@ -30,6 +30,11 @@ var (
 	// the rows a filter leaves exactly. The KNN lists don't fail with it:
 	// they read their over-fetch instead and warn of it, once.
 	ErrVectorIndexInconsistent = errors.New("store: a vector index is missing vectors")
+	// ErrSuperseded: an index write found its document moved on since the
+	// index read it (IndexGuard): another extraction is current, a refetch
+	// having overtaken it, or a re-embed's document is no longer fetched.
+	// Nothing was written; the write that moved it on stands.
+	ErrSuperseded = errors.New("store: the document moved on since it was read")
 )
 
 // MaxEmbeddingDim is the widest embedding the vector index takes: sqlite-vec's
@@ -430,14 +435,20 @@ type DocumentStore interface {
 	// becomes cause.State(), dead for a dead link and failed for any other
 	// cause. ErrNotFound if there is no such document.
 	MarkFailed(ctx context.Context, id string, cause FailureCause) error
-	// MarkFetched records that a document was fetched and indexed: its
-	// state becomes fetched, it has no failure cause, its word count is
-	// words, the length of the text whose chunks were indexed, and its
-	// indexed_at, when its vectors were written, is now (the time its
-	// updated_at gets in the same statement). It is the only write of
-	// indexed_at and of word_count. A negative count is an error, and
-	// nothing is written. ErrNotFound if there is no such document.
-	MarkFetched(ctx context.Context, id string, words int) error
+	// MarkIndexed records an index of the document made from
+	// guard.ExtractionID, while that is its current extraction, and, for a
+	// re-embed, while it is fetched; otherwise it writes nothing and
+	// returns ErrSuperseded. Its state becomes fetched, it has no failure
+	// cause, its word count is words, the length of the text whose chunks
+	// were indexed, and its indexed_at, when its vectors were written, is
+	// now (the time its updated_at gets in the same statement). A re-embed
+	// writes word_count and indexed_at alone: its document stays fetched,
+	// and its updated_at, which orders the library's lists, is left as it
+	// was. It is the only write of indexed_at and of word_count, which the
+	// index job makes (the sqlite store's MarkFetched, the same write
+	// unguarded, seeds tests and fixtures). A negative count is an error,
+	// and nothing is written. ErrNotFound if there is no such document.
+	MarkIndexed(ctx context.Context, id string, guard IndexGuard, words int) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
 
 	// ApplyFetch records a successful fetch on a document: it points
@@ -446,7 +457,7 @@ type DocumentStore interface {
 	// with no failure cause, until the index step marks it fetched. A nil
 	// field clears its column: those columns describe the current
 	// extraction, so none may keep a value from an earlier one. word_count
-	// is left alone: MarkFetched writes it, with the chunks it counts.
+	// is left alone: MarkIndexed writes it, with the chunks it counts.
 	// ErrNotFound if there is no such document.
 	ApplyFetch(ctx context.Context, id string, m FetchedMetadata) error
 
@@ -482,13 +493,79 @@ type DocumentStore interface {
 	// documents are absent from the map.
 	CountByState(ctx context.Context, tenantID string) (map[DocState]int, error)
 	// LastIndexedAt is when the tenant last had a document's vectors
-	// written (MarkFetched): the latest indexed_at, of a document fetched
+	// written (MarkIndexed): the latest indexed_at, of a document fetched
 	// now or since refetched. Zero when no document was ever indexed.
 	LastIndexedAt(ctx context.Context, tenantID string) (time.Time, error)
 	// FailureSummary counts the tenant's failed and dead documents by
 	// failure cause, naming for each cause at most topHosts of the hosts
 	// its documents are on.
 	FailureSummary(ctx context.Context, tenantID string, topHosts int) (FailureSummary, error)
+
+	// DocumentsToReembed lists the IDs of the tenant's documents to
+	// re-embed for chunk context version: fetched, with a current
+	// extraction, and holding a chunk embedded under an older version
+	// (chunks.context_version). Failed, dead and pending documents, and
+	// fetched ones without chunks, are never listed. It is derived from the
+	// chunks alone, so it resumes across restarts and is empty once every
+	// fetched document's chunks are current.
+	DocumentsToReembed(ctx context.Context, tenantID string, version int) ([]string, error)
+	// CountToReembed counts what DocumentsToReembed lists, and their
+	// chunks of an older version, through those chunks alone: once the
+	// library is re-embedded, only those of failed, dead and pending
+	// documents.
+	CountToReembed(ctx context.Context, tenantID string, version int) (ReembedCount, error)
+	// EnqueueReembed tops up the tenant's re-embed for version, in one
+	// transaction, within limits: while fewer than limits.InFlight re-embed
+	// index jobs (DocumentJobPayload with Reembed) are running or pending
+	// and due, and fewer than limits.InFlight + limits.Waiting are running
+	// or pending at all, it queues one for each of the next documents
+	// DocumentsToReembed lists that has no index job pending or running and
+	// no re-embed job that failed for good within limits.FailedWait: first
+	// those none of whose re-embeds failed for good, so that a few that
+	// fail for their own reasons are never all the feed tries. It wakes the
+	// index workers once it commits, and returns how many jobs it queued.
+	EnqueueReembed(ctx context.Context, tenantID string, version int, limits ReembedLimits) (int, error)
+	// ReembedFailures reads what the tenant's document's re-embed index
+	// jobs that failed for good say of it.
+	ReembedFailures(ctx context.Context, tenantID, documentID string) (ReembedFailures, error)
+}
+
+// ReembedLimits bound how much of a re-embed for a new chunk context is
+// queued at once (DocumentStore.EnqueueReembed).
+type ReembedLimits struct {
+	// InFlight is how many re-embed jobs may run, or wait to and be due,
+	// at once. A job waiting out a retry or a deferral holds no place in
+	// flight, so a document that keeps failing holds the others back no
+	// longer than its own run.
+	InFlight int
+	// Waiting is how many more may wait out a retry or a deferral besides:
+	// a failure that every document meets, such as an embedding model that
+	// answers with an error, parks this many, not the library.
+	Waiting int
+	// FailedWait is how long after one of a document's re-embed jobs
+	// failed for good no other is queued for it: one that fails at once
+	// (a verdict) would otherwise be queued again at once, and again.
+	FailedWait time.Duration
+}
+
+// ReembedFailures is what a document's re-embed jobs that failed for good
+// say of it.
+type ReembedFailures struct {
+	// Failed is how many there are.
+	Failed int
+	// OthersIndexed is whether another of the tenant's documents was
+	// indexed, its vectors written (indexed_at), after the first of them
+	// failed: the embedding model embedded meanwhile, so the failures are
+	// the document's own.
+	OthersIndexed bool
+}
+
+// ReembedCount is how much of a library is left to re-embed for a new
+// chunk context.
+type ReembedCount struct {
+	// Documents is how many fetched documents hold chunks of an older
+	// context version, and Chunks how many such chunks they hold.
+	Documents, Chunks int
 }
 
 // FailureSummary is how many of a tenant's documents failed, for each
@@ -746,7 +823,15 @@ type Chunk struct {
 type ChunkInput struct {
 	Text       string
 	TokenCount int
-	Embedding  []float32 // length must match the configured embedding.Dim
+	// Context is what Embedding was made from besides Text: the document's
+	// title and site and the headings the chunk sits under, as the indexer
+	// sent them (indexer.Context), without the document prefix. Empty for
+	// a vector made from the text alone.
+	Context string
+	// ContextVersion is the indexer.ContextVersion whose rules built
+	// Context; 0 for a chunk embedded before chunk context.
+	ContextVersion int
+	Embedding      []float32 // length must match the configured embedding.Dim
 }
 
 // ChunkHit is a single search result, surfaced before fusion. Score is
@@ -959,22 +1044,39 @@ type ChunkSample struct {
 	Random  int
 }
 
-// SampledChunk is a chunk ChunkStore.SampleChunks chose: its text exactly
-// as stored (without the document prefix the embedder was sent) and the
-// vector stored for it.
+// SampledChunk is a chunk ChunkStore.SampleChunks chose: its text and
+// context exactly as stored (without the document prefix the embedder was
+// sent) and the vector stored for it.
 type SampledChunk struct {
 	ChunkID    string
 	DocumentID string
 	Text       string
+	Context    string
 	Embedding  []float32
 }
 
 // ChunkStore writes and queries the chunks tables + FTS5 + vec virtual tables.
 type ChunkStore interface {
-	// ReplaceForDocument atomically deletes all existing chunks for the
-	// document and inserts the new set. Idempotent — safe to retry after
-	// crashes or refetches.
+	// ReplaceForDocument atomically replaces the document's chunks with
+	// chunks, by position: the chunk at each position the document had
+	// keeps its ID and seq, and gets the new extraction, text, title,
+	// tags, context and vector in place; positions past the old count are
+	// added, and chunks past the new count deleted, their FTS entries and
+	// vectors with them. In place, never deleted and inserted again,
+	// because sqlite-vec never reuses a deleted vector's slot: every
+	// re-index would grow the vector index, and slow every vector search,
+	// by a slot per chunk. Idempotent — safe to retry after crashes or
+	// refetches.
 	ReplaceForDocument(ctx context.Context, documentID, extractionID, title string, tags []string, chunks []ChunkInput) error
+	// ReplaceIndexed is ReplaceForDocument for an index of the document's
+	// guard.ExtractionID, held to it in the same transaction: it writes
+	// only while that is the document's current extraction, and, for a
+	// re-embed, while the document is fetched, and otherwise writes nothing
+	// and returns ErrSuperseded. The index job writes through it, so an
+	// index that a refetch overtook never replaces the new extraction's
+	// chunks with the old one's.
+	ReplaceIndexed(ctx context.Context, documentID string, guard IndexGuard, title string, tags []string,
+		chunks []ChunkInput) error
 
 	// BM25Search runs FTS5 MATCH against chunk text and returns the top
 	// matches for the given tenant, scoped by filters, best first, equal
@@ -987,9 +1089,10 @@ type ChunkStore interface {
 	// Snippets returns, by chunk ID, the snippet of each of chunkIDs for
 	// query, a MATCH expression as BM25Search takes it: the passage of its
 	// text around the matched terms, each between <em> and </em>. A chunk
-	// the query doesn't match, or that no longer exists, is absent. No IDs,
-	// or a blank query, which BM25Search matches nothing for, is no
-	// snippets, read with no query.
+	// the query doesn't match, or that no longer exists, is absent; a
+	// re-index keeps a chunk's ID at its position, so one retrieved before
+	// it gets its new text's snippet. No IDs, or a blank query, which
+	// BM25Search matches nothing for, is no snippets, read with no query.
 	Snippets(ctx context.Context, query string, chunkIDs []string) (map[string]string, error)
 
 	// VectorSearch runs a nearest-neighbor query against chunks_vec,
@@ -1019,21 +1122,37 @@ type ChunkStore interface {
 	DocumentVectors(ctx context.Context, tenantID string) ([]DocVector, error)
 
 	// SampleChunks returns a sample of the tenant's fetched documents'
-	// chunks, each with its text as stored and its stored vector, at most
-	// one chunk per document, in no particular order. n.Longest documents
-	// are represented by their longest chunk in bytes: those whose longest
-	// chunks are the longest, ties going to the chunk written first (the
-	// lower seq), within a document and between documents. n.Random more
-	// documents are then chosen uniformly among the rest, and one chunk
-	// uniformly from each. A library with fewer documents gives fewer
-	// chunks; one with none, an empty sample. It reads every chunk's
-	// length, one pass over the chunks table.
+	// chunks, each with its text and context as stored and its stored
+	// vector, at most one chunk per document, in no particular order.
+	// n.Longest documents are represented by their longest chunk, by the
+	// bytes embedded besides the document prefix (its text and context):
+	// those whose longest chunks are the longest, ties going to the chunk
+	// written first (the lower seq), within a document and between
+	// documents. n.Random more documents are then chosen uniformly among
+	// the rest, and one chunk uniformly from each. A library with fewer
+	// documents gives fewer chunks; one with none, an empty sample. It
+	// reads every chunk's length, one pass over the chunks table.
 	SampleChunks(ctx context.Context, tenantID string, n ChunkSample) ([]SampledChunk, error)
 
+	// KeepEmbedded records the document's chunks as embedded under context
+	// version, their contexts and vectors as they are: what a re-embed
+	// does for a document it can't re-embed however often it tries (its
+	// markdown gone, a chunk the model can't take even without its
+	// context, or a re-embed that failed for good again and again), so it
+	// isn't queued again. It writes nothing to chunks_fts, and returns how
+	// many chunks it recorded.
+	KeepEmbedded(ctx context.Context, documentID string, version int) (int, error)
+	// StaleContext reports whether any of the document's chunks was
+	// embedded under a context version older than version: whether a
+	// re-embed still has work to do.
+	StaleContext(ctx context.Context, documentID string, version int) (bool, error)
+
 	// GetByIDs returns the chunks with the given IDs, in no particular
-	// order. IDs that match no chunk (a reindex replaced it since it was
-	// retrieved, say) are left out; none matching is an empty result, not
-	// an error.
+	// order. IDs that match no chunk (a re-index that shortened its
+	// document deleted it since it was retrieved, say) are left out; none
+	// matching is an empty result, not an error. A re-index keeps a
+	// chunk's ID at its position, so an ID retrieved before it reads the
+	// chunk now at that position.
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
 }
 
@@ -1119,6 +1238,10 @@ type DocumentIndex interface {
 	// card whose text changed since is left stale. marked counts the
 	// cards recorded.
 	MarkUnembeddable(ctx context.Context, cards []Card) (marked int, err error)
+	// Site is the site of the tenant's document as its fields hold it:
+	// the name its host agreed on or its page declared, and its host.
+	// ErrNotFound when the document has no fields row.
+	Site(ctx context.Context, tenantID, documentID string) (DocumentSite, error)
 	// ResetCards makes every one of the tenant's cards stale, keeping
 	// their vectors searchable until they are embedded again, and queues
 	// a cards job, at most one pending per tenant, in one transaction.
@@ -1126,10 +1249,39 @@ type DocumentIndex interface {
 	ResetCards(ctx context.Context, tenantID string) (int, error)
 }
 
+// DocumentSite is a document's site as its search fields hold it.
+type DocumentSite struct {
+	// Name is the site's name for display (docmeta.Fields.SiteName): the
+	// name its page declares, else the one its host agrees on, else "".
+	Name string
+	// Host is its URL's host as its site is found by (docmeta.Host).
+	Host string
+}
+
+// IndexGuard is what an index of a document was made from, which its
+// writes are held to (ChunkStore.ReplaceIndexed, DocumentStore.MarkIndexed),
+// so that one a refetch or a failure overtook writes nothing.
+type IndexGuard struct {
+	// ExtractionID is the extraction whose markdown was indexed: the
+	// writes happen only while it is the document's current extraction.
+	ExtractionID string
+	// Reembed is a re-embed's index (DocumentJobPayload.Reembed): its
+	// writes happen only while the document is fetched, and it leaves
+	// the document's state and updated_at alone.
+	Reembed bool
+}
+
 // DocumentJobPayload is the payload of a job that works on one document
 // (fetch and index).
 type DocumentJobPayload struct {
 	DocumentID string `json:"document_id"`
+	// Reembed marks an index job the daemon queued to re-embed a fetched
+	// document for a new chunk context (DocumentStore.EnqueueReembed), not
+	// one a fetch or a user queued: one that fails for good leaves the
+	// document as it was, still searchable by its earlier vectors, and the
+	// re-embed queues it again, until a few failures of its own keep those
+	// vectors for good.
+	Reembed bool `json:"reembed,omitempty"`
 }
 
 // NewDocumentJob builds a job of kind for one document, ready to enqueue.

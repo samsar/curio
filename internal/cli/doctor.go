@@ -18,6 +18,7 @@ import (
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/setup"
+	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/textutil"
 )
 
@@ -200,9 +201,24 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 				status, detail, hint := savedDatesCheck(*s)
 				r.add("saved dates", status, detail, hint)
 			}
-			// Whether the cards left to embed have a job to embed them.
-			status, detail, hint := cardsCheckOf(ctx, daemon)
-			r.add("cards", status, detail, hint)
+			// Whether the daemon holds its index and cards jobs for an
+			// embedding model that doesn't answer: only while it does.
+			if h := health.EmbedderHold; h != nil {
+				status, detail, hint := embedderHoldCheck(*h)
+				r.add("index jobs", status, detail, hint)
+			}
+			// Whether what is left to embed has jobs to embed it: the cards,
+			// and the documents to re-embed for the chunk context, which
+			// the re-embed's brake may stop.
+			if stats, err := daemon.Stats(ctx); err != nil {
+				r.add("cards", statusWarn, "couldn't count the cards left to embed: "+err.Error(), "")
+				r.add("chunk context", statusWarn, "couldn't count the documents left to re-embed: "+err.Error(), "")
+			} else {
+				status, detail, hint := cardsCheckOf(ctx, daemon, stats.CardsStale)
+				r.add("cards", status, detail, hint)
+				status, detail, hint = reembedCheckOf(ctx, daemon, stats.Reembed, health.ReembedBrake)
+				r.add("chunk context", status, detail, hint)
+			}
 		}
 	}
 	status, detail, hint := githubCheck(githubToken, configPath)
@@ -283,35 +299,150 @@ func savedDatesCheck(s client.SavedDates) (status checkStatus, detail, hint stri
 	return statusOK, fmt.Sprintf("classified when the daemon started (%s)", at), ""
 }
 
-// cardsCheckOf asks c for the cards left to embed and the cards jobs
-// pending and running, and checks them (cardsCheck).
-func cardsCheckOf(ctx context.Context, c *client.Client) (status checkStatus, detail, hint string) {
-	stats, err := c.Stats(ctx)
-	if err != nil {
-		return statusWarn, "couldn't count the cards left to embed: " + err.Error(), ""
-	}
-	if stats.CardsStale == 0 {
+// cardsCheckOf asks c for the cards jobs pending and running when cards
+// are left to embed (stale), and checks them (cardsCheck).
+func cardsCheckOf(ctx context.Context, c *client.Client, stale int) (status checkStatus, detail, hint string) {
+	if stale == 0 {
 		return cardsCheck(0, nil, nil)
 	}
-	pending, err := cardsJobs(ctx, c, "pending")
+	pending, err := newestJobs(ctx, c, store.JobKindCards, store.JobStatusPending)
 	if err != nil {
 		return statusWarn, "couldn't list the cards jobs: " + err.Error(), ""
 	}
-	running, err := cardsJobs(ctx, c, "running")
+	running, err := newestJobs(ctx, c, store.JobKindCards, store.JobStatusRunning)
 	if err != nil {
 		return statusWarn, "couldn't list the cards jobs: " + err.Error(), ""
 	}
-	return cardsCheck(stats.CardsStale, pending, running)
+	return cardsCheck(stale, pending, running)
 }
 
-// cardsJobs lists the cards jobs of status, the newest alone: a tenant has
-// at most one pending, and one runs at a time.
-func cardsJobs(ctx context.Context, c *client.Client, status string) ([]client.Job, error) {
-	list, err := c.ListJobs(ctx, client.JobListOpts{Kind: "cards", Status: status, Limit: 1})
+// newestJobs lists the jobs of kind in status, the newest alone: whether
+// there are any is what the checks ask (a tenant has at most one cards job
+// pending, and one runs at a time).
+func newestJobs(ctx context.Context, c *client.Client, kind store.JobKind, status store.JobStatus) ([]client.Job,
+	error) {
+	list, err := c.ListJobs(ctx, client.JobListOpts{Kind: string(kind), Status: string(status), Limit: 1})
 	if err != nil {
 		return nil, err
 	}
 	return list.Items, nil
+}
+
+// embedderFix is what makes the embedding model answer the daemon again.
+const embedderFix = "start Ollama, and make sure it serves the embedding model: the ollama and models checks " +
+	"say how, and `curio up` does it; the daemon asks every minute, and its jobs resume at the first answer"
+
+// embedderHoldCheck is doctor's check of the daemon's hold over its index
+// and cards jobs, which it reports only while the embedding model doesn't
+// answer: a warning, since the jobs wait without failing.
+func embedderHoldCheck(h client.EmbedderHold) (status checkStatus, detail, hint string) {
+	return statusWarn, fmt.Sprintf("held since %s: the embedding model doesn't answer (%s); index and cards jobs "+
+		"wait for it, failing nothing", localTime(h.Since), h.Error), embedderFix
+}
+
+// reembedCheckOf asks c whether index jobs are pending or running when
+// documents are left to re-embed for the chunk context (left, nil when
+// none is), and checks them with the re-embed's brake (reembedCheck).
+func reembedCheckOf(ctx context.Context, c *client.Client, left *client.ReembedStats,
+	brake *client.ReembedBrake) (status checkStatus, detail, hint string) {
+	if left == nil {
+		return reembedCheck(nil, false, nil)
+	}
+	if brake != nil {
+		return reembedCheck(left, false, brake)
+	}
+	queued := false
+	for _, status := range []store.JobStatus{store.JobStatusRunning, store.JobStatusPending} {
+		jobs, err := newestJobs(ctx, c, store.JobKindIndex, status)
+		if err != nil {
+			return statusWarn, "couldn't list the index jobs: " + err.Error(), ""
+		}
+		queued = queued || len(jobs) > 0
+	}
+	return reembedCheck(left, queued, nil)
+}
+
+// reembedRestart is how a restart resumes a re-embed that stopped: the
+// daemon's start feeds it again, a document whose re-embed keeps failing
+// for its own reasons keeping its earlier vectors after its third failure.
+const reembedRestart = "restart the daemon (`curio daemon stop`, then any curio command starts it): its start " +
+	"resumes the re-embed, which tries a document that fails on its own up to 3 times, then leaves it its " +
+	"earlier vectors"
+
+// reembedBrakeFix is what lets a re-embed its brake stopped go on.
+const reembedBrakeFix = "check that Ollama runs and serves the embedding model (`ollama list`, `ollama ps`, and " +
+	"Ollama's log): the daemon tries one document again at that time and goes on once one is re-embedded; a " +
+	"restart (`curio daemon stop`, then any curio command starts it) tries at once. `curio docs show <id>` " +
+	"shows one of the documents named, and `curio refetch <id>` fetches it again"
+
+// reembedCheck is doctor's check of what is left to re-embed for the chunk
+// context (nil: nothing), given whether index jobs are queued (pending or
+// running) and the re-embed's brake (nil while it is off): a warning while
+// the brake stops it, which an embedding model fixed lets go on, fine
+// while jobs are queued, which the re-embed is, and a warning when none
+// is, which a restart fixes. A re-embed stops when its start couldn't
+// begin it (the search fields unchecked, or the database failing).
+func reembedCheck(left *client.ReembedStats, queued bool, brake *client.ReembedBrake) (status checkStatus, detail,
+	hint string) {
+	if left == nil {
+		return statusOK, "every document's chunks are embedded with their context", ""
+	}
+	them := "them"
+	if left.Documents == 1 {
+		them = "it"
+	}
+	docs := fmt.Sprintf("%s (%s) to re-embed for the new chunk context%s", plural(left.Documents, "document"),
+		plural(left.Chunks, "chunk"), reembedETA(left))
+	if brake != nil {
+		return statusWarn, fmt.Sprintf("%s; the re-embed waits until %s, the re-embeds of %s having failed in a "+
+			"row%s: %s; until then each keeps its earlier vectors", docs, localTime(brake.Until),
+			plural(brake.Failures, "document"), brakeDocuments(*brake), brake.Error), reembedBrakeFix
+	}
+	if queued {
+		return statusOK, docs + "; index jobs are queued to re-embed " + them, ""
+	}
+	return statusWarn, docs + ", and no index job is queued to re-embed " + them, reembedRestart
+}
+
+// brakeDocuments names the documents whose failures put the re-embed's
+// brake on, as the daemon names them: " (a, b and c)", " (a, b, c, d, e and
+// 2 more)", or "" from a daemon that names none.
+func brakeDocuments(b client.ReembedBrake) string {
+	names := slices.Clone(b.Documents)
+	if len(names) == 0 {
+		return ""
+	}
+	if more := b.Failures - len(names); more > 0 {
+		names = append(names, fmt.Sprintf("%d more", more))
+	}
+	if len(names) == 1 {
+		return " (" + names[0] + ")"
+	}
+	return " (" + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1] + ")"
+}
+
+// reembedETA is how long the re-embed has left at its rate, as status and
+// doctor say it: ", about 20 min left at 10.4 chunks/s", or "" until the
+// daemon has measured it.
+func reembedETA(left *client.ReembedStats) string {
+	if left.ETASeconds <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %s left at %.1f chunks/s", roughly(time.Duration(left.ETASeconds)*time.Second),
+		left.ChunksPerSecond)
+}
+
+// roughly says how long d is, to the minute: "under a minute", "about 20
+// min", "about 1 h 25 min".
+func roughly(d time.Duration) string {
+	d = d.Round(time.Minute)
+	switch {
+	case d < time.Minute:
+		return "under a minute"
+	case d < time.Hour:
+		return fmt.Sprintf("about %d min", int(d/time.Minute))
+	}
+	return fmt.Sprintf("about %d h %d min", int(d/time.Hour), int(d%time.Hour/time.Minute))
 }
 
 // cardsCheck is doctor's check of the cards left to embed, stale of them,

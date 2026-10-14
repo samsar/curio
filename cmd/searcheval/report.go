@@ -29,6 +29,7 @@ type report struct {
 	GeneratedAt time.Time       `json:"generated_at"`
 	Provenance  provenance      `json:"provenance"`
 	Library     libraryReport   `json:"library"`
+	Reindex     *reindexReport  `json:"reindex,omitempty"` // with -reindex
 	Variants    []variantReport `json:"variants"`
 }
 
@@ -76,7 +77,9 @@ type searchProvenance struct {
 // deriving its fields and classifying its saved dates took, and how many
 // of its cards were embedded, in how long. Those are facts of the run,
 // like its timings: a second run on the same copy derives and embeds
-// nothing.
+// nothing. DocumentsToReembed counts the fetched documents whose chunks
+// were embedded before chunk context, as the queries search them: 0 once
+// -reindex has re-embedded them.
 type libraryReport struct {
 	Judgments    int `json:"judgments"`
 	Missing      int `json:"missing"`
@@ -84,10 +87,11 @@ type libraryReport struct {
 
 	SavedDates savedDatesReport `json:"saved_dates"`
 
-	FieldsMS      float64 `json:"fields_ms"`
-	SavedDatesMS  float64 `json:"saved_dates_ms"`
-	CardsMS       float64 `json:"cards_ms"`
-	CardsEmbedded int     `json:"cards_embedded"`
+	FieldsMS           float64 `json:"fields_ms"`
+	SavedDatesMS       float64 `json:"saved_dates_ms"`
+	CardsMS            float64 `json:"cards_ms"`
+	CardsEmbedded      int     `json:"cards_embedded"`
+	DocumentsToReembed int     `json:"documents_to_reembed"`
 }
 
 // savedDatesReport counts the copy's bookmarks by saved-date class.
@@ -259,11 +263,17 @@ func (r *report) text(b *bytes.Buffer, base *baseline) {
 	fmt.Fprintf(b, "Queries: %s (sha256 %s), %d queries, %d judgments: %d missing, %d the chunk lists can't return\n",
 		p.Queries, shortHash(p.QueriesSHA256), r.queryCount(), r.Library.Judgments, r.Library.Missing,
 		r.Library.Unsearchable)
-	fmt.Fprintf(b, "Library: document fields derived in %.0f ms; %d cards embedded in %.1f s\n", r.Library.FieldsMS,
-		r.Library.CardsEmbedded, r.Library.CardsMS/1000)
+	fmt.Fprintf(b, "Library: document fields derived in %.0f ms; %d cards embedded in %.1f s; %d documents to "+
+		"re-embed for the chunk context\n", r.Library.FieldsMS, r.Library.CardsEmbedded, r.Library.CardsMS/1000,
+		r.Library.DocumentsToReembed)
 	sd := r.Library.SavedDates
 	fmt.Fprintf(b, "Saved dates: %d exact, %d approx, %d unknown, classified in %.0f ms\n", sd.Exact, sd.Approx,
 		sd.Unknown, r.Library.SavedDatesMS)
+	if x := r.Reindex; x != nil {
+		fmt.Fprintf(b, "Re-embedded: %d documents, %d chunks in %.1f s (%.1f chunks/s), chunk context v%d; "+
+			"chunks_vec in %d vec0 chunks before, %d after\n", x.Documents, x.Chunks, x.TookMS/1000, x.ChunksPerSecond,
+			x.ContextVersion, x.VectorBlocksBefore, x.VectorBlocksAfter)
+	}
 	fmt.Fprintf(b, "Searched with %s: %s; k %d; variants %s\n", configName(p.Config), searchSettings(p),
 		p.K, strings.Join(p.Variants, ", "))
 	if base != nil {

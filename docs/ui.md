@@ -41,7 +41,8 @@ Status keeps itself current: the library's counts, the queue, its
 progress and the jobs every 2 seconds and right after a change you make,
 and health (which checks Ollama) every 15 seconds; why documents failed
 is read when the page loads. A document's page shows its jobs while one
-is queued, waiting or running: why, if the queue holds them; the attempt
+is queued, waiting or running: why, if the queue holds them, or, for an
+index job, if it waits for the embedding model to answer; the attempt
 a job is on, once it has used one; and for a job that waits for a time,
 when it is due and why on a line of its own, the error a retry follows
 or the rate limit a fetch waits out, whole on hover. Then it offers a
@@ -298,7 +299,11 @@ footer names the address the daemon listens on.
   command that fixes it), or the Jina Reader fallback failing or
   degraded. Then cards for the library (how many documents,
   fetched and bookmarks, and a bar of the documents by state, each state
-  linking to the Library of those), the queue (open or closed and why,
+  linking to the Library of those; while documents are left to re-embed
+  for a new chunk context, as after an upgrade, a line says how many
+  chunks in how many of the fetched ones, and, once the re-embed's rate
+  is measured, about how long it has left at it), the queue (open or
+  closed and why,
   with Pause or Resume, its throttle, keep-awake and schedule controls,
   and each pool's load and the jobs it finished in the last 10 minutes),
   and why documents failed (the five commonest causes as bars, each

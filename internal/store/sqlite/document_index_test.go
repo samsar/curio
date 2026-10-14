@@ -468,3 +468,30 @@ func TestDocumentIndex_MarkUnembeddable(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, marked)
 }
+
+// TestDocumentIndex_Site: a document's site is its fields' name and host;
+// another tenant's document, one without a fields row and an unknown one
+// are not found.
+func TestDocumentIndex_Site(t *testing.T) {
+	e := newFieldsEnv(t)
+	ix := NewDocumentIndex(e.db, vecDim)
+	named := *e.ingest("https://www.example.com/a", store.SourceChrome, "A", "").DocumentID
+	e.fetch(named, "A title", "", "Example Times")
+	plain := *e.ingest("https://blog.example.org/b", store.SourceChrome, "B", "").DocumentID
+
+	site, err := ix.Site(e.ctx, "local", named)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocumentSite{Name: "Example Times", Host: "example.com"}, site)
+	site, err = ix.Site(e.ctx, "local", plain)
+	require.NoError(t, err)
+	assert.Equal(t, store.DocumentSite{Host: "blog.example.org"}, site, "no name: the host alone")
+
+	_, err = ix.Site(e.ctx, "other", named)
+	require.ErrorIs(t, err, store.ErrNotFound, "another tenant's document")
+	_, err = e.db.Exec(`DELETE FROM document_fields WHERE document_id = ?`, plain)
+	require.NoError(t, err)
+	_, err = ix.Site(e.ctx, "local", plain)
+	require.ErrorIs(t, err, store.ErrNotFound, "no fields row")
+	_, err = ix.Site(e.ctx, "local", "no-such-document")
+	require.ErrorIs(t, err, store.ErrNotFound)
+}

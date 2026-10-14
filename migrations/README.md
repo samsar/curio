@@ -22,8 +22,12 @@ table), apply 019 to a schema-18 database, or run 019's Down: 019 renames
 `chunks_vec`'s triggers name a vec0 table (019's Down also drops
 `document_cards_vec`, which needs the module). Each fails with `no such
 module: vec0` and rolls back, leaving the version where it was (checked
-with goose v3.27.0). `make migrate-up` runs the CLI's `up`, so it works
-only for migrations that need no sqlite-vec.
+with goose v3.27.0). It can apply 021 to a schema-20 database, but not
+run 021's Down: its `DROP COLUMN`s make SQLite parse `chunks`' triggers
+again, and `trg_chunks_delete` names `chunks_vec` (checked with goose
+v3.27.0: `no such module: vec0`, rolled back at version 21). `make
+migrate-up` runs the CLI's `up`, so it works only for migrations that need
+no sqlite-vec.
 
 ## Required pragmas
 

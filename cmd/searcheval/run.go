@@ -73,11 +73,27 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 	if err != nil {
 		return err
 	}
+	var reindexed *reindexReport
+	if opts.reindex {
+		if reindexed, err = reindexCopy(ctx, lib, emb, cfg, opts.content, log); err != nil {
+			return err
+		}
+	}
+	toReembed, err := lib.Documents.CountToReembed(ctx, store.LocalTenantID, indexer.ContextVersion)
+	if err != nil {
+		return err
+	}
+	if toReembed.Documents > 0 {
+		log.Warn("measuring vectors from before the chunk context: the copy's chunks were embedded from their text "+
+			"alone; -reindex -content <dir> re-embeds them as the daemon does", "documents_to_reembed",
+			toReembed.Documents, "chunks_to_reembed", toReembed.Chunks)
+	}
 	judged, err := resolveJudgments(ctx, lib.Documents, lib.Chunks, qf.set)
 	if err != nil {
 		return err
 	}
 	rep := newReport(opts, cfg, lib, qf, judged, cards)
+	rep.Library.DocumentsToReembed, rep.Reindex = toReembed.Documents, reindexed
 	log.Info("judgments resolved", "judgments", rep.Library.Judgments, "missing", rep.Library.Missing,
 		"unsearchable_by_chunks", rep.Library.Unsearchable)
 

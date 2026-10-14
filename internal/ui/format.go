@@ -442,6 +442,15 @@ func queueReason(reason string) string {
 	return "Closed"
 }
 
+// jobHold is why a document's queued jobs wait, for people: the embedder
+// hold (HoldEmbedder), or the closed queue's reason (queueReason).
+func jobHold(reason string) string {
+	if reason == HoldEmbedder {
+		return "Waiting for the embedding model to answer"
+	}
+	return "The queue is closed: " + queueReason(reason)
+}
+
 // jobKindLabel is a job's kind for people: what its work is.
 func jobKindLabel(kind string) string {
 	switch store.JobKind(kind) {

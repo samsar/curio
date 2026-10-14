@@ -9,6 +9,8 @@ import (
 
 	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/indexer"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/version"
 )
@@ -36,6 +38,10 @@ import (
 // serves, so it never changes Status either. Nor does SavedDates: what
 // the start did to the bookmarks' saved-date classes, and the sources
 // whose classification after an import failed, which the daemon retries.
+// EmbedderHold is the hold over the index and cards jobs while the
+// embedding model doesn't answer, and ReembedBrake the re-embed's brake
+// while it stops the re-embed: each present only while it holds, and
+// neither changes Status.
 type Health struct {
 	Status          string            `json:"status"`
 	PID             int               `json:"pid"`
@@ -55,6 +61,58 @@ type Health struct {
 	Interests       InterestsState    `json:"interests"`
 	DocumentFields  DocumentFields    `json:"document_fields"`
 	SavedDates      SavedDates        `json:"saved_dates"`
+	EmbedderHold    *EmbedderHold     `json:"embedder_hold,omitempty"`
+	ReembedBrake    *ReembedBrake     `json:"reembed_brake,omitempty"`
+}
+
+// EmbedderHold is the hold over the index and cards jobs while it holds
+// them (jobs.EmbedderHold): since when the embedding model hasn't answered,
+// and the error of the last embed that got no answer. The jobs it holds
+// wait, failing nothing, and resume at the model's first answer.
+type EmbedderHold struct {
+	Since time.Time `json:"since"`
+	Error string    `json:"error"`
+}
+
+// EmbedderHoldState reports the embedder hold; *jobs.EmbedderHold is one.
+type EmbedderHoldState interface {
+	State() jobs.HoldState
+}
+
+// ReembedBrake is the re-embed's brake while it stops the re-embed
+// (jobs.ReembedBrake): until when no document is queued to re-embed, how
+// many documents' re-embeds failed in a row, the first few of them by ID,
+// and the last one's error. They keep their earlier vectors meanwhile.
+type ReembedBrake struct {
+	Until     time.Time `json:"until"`
+	Failures  int       `json:"failures"`
+	Documents []string  `json:"documents"`
+	Error     string    `json:"error"`
+}
+
+// embedderHold is the embedder hold while it holds, or nil.
+func (d Deps) embedderHold() *EmbedderHold {
+	if d.Hold == nil {
+		return nil
+	}
+	st := d.Hold.State()
+	if !st.Held {
+		return nil
+	}
+	return &EmbedderHold{Since: st.Since.UTC(), Error: st.Err}
+}
+
+// reembedBrake is the re-embed's brake while it is on, or nil: never one
+// whose time has passed, which the re-embed turns off when it is read.
+func (d Deps) reembedBrake() *ReembedBrake {
+	if d.Reembed == nil {
+		return nil
+	}
+	b := d.Reembed.Progress().Brake
+	if !b.On() || !time.Now().Before(b.Until) {
+		return nil
+	}
+	return &ReembedBrake{Until: b.Until.UTC(), Failures: b.Failures, Documents: b.Documents, Error: b.Err}
 }
 
 // DocumentFields is what the daemon's start did to the documents' search
@@ -261,6 +319,8 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		Interests:       d.interestsState(),
 		DocumentFields:  d.documentFields(),
 		SavedDates:      d.SavedDates.State(),
+		EmbedderHold:    d.embedderHold(),
+		ReembedBrake:    d.reembedBrake(),
 	}, nil
 }
 
@@ -282,7 +342,9 @@ func (d Deps) generationRoles() map[string]string {
 }
 
 // Stats is the /v1/stats response. CardsStale is how many of the
-// documents' cards are left to embed: the cards job's backlog.
+// documents' cards are left to embed: the cards job's backlog. Reembed is
+// what is left of the re-embed for a new chunk context, absent when
+// nothing is.
 type Stats struct {
 	Version          string         `json:"version"`
 	BookmarksTotal   int            `json:"bookmarks_total"`
@@ -290,6 +352,26 @@ type Stats struct {
 	DocumentsByState map[string]int `json:"documents_by_state,omitempty"`
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
 	CardsStale       int            `json:"cards_stale"`
+	Reembed          *ReembedStats  `json:"reembed,omitempty"`
+}
+
+// ReembedStats is what is left to re-embed for a new chunk context
+// (indexer.ContextVersion): the fetched documents holding chunks embedded
+// under an older one, and those chunks. ChunksPerSecond is the re-embed's
+// rate over its last 10 minutes, and ETASeconds how long the chunks left
+// take at it; both are absent until it has been measured, and while the
+// re-embed doesn't move (a paused queue, an Ollama that doesn't answer).
+type ReembedStats struct {
+	Documents       int     `json:"documents"`
+	Chunks          int     `json:"chunks"`
+	ChunksPerSecond float64 `json:"chunks_per_second,omitempty"`
+	ETASeconds      int64   `json:"eta_seconds,omitempty"`
+}
+
+// ReembedProgress reports how far the re-embed got, and its brake;
+// *jobs.Reembed is one.
+type ReembedProgress interface {
+	Progress() jobs.ReembedProgress
 }
 
 func (d Deps) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -321,6 +403,10 @@ func (d Deps) stats(ctx context.Context) (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
+	reembed, err := d.reembedStats(ctx)
+	if err != nil {
+		return Stats{}, err
+	}
 
 	docsTotal := 0
 	for _, n := range docsByState {
@@ -333,7 +419,25 @@ func (d Deps) stats(ctx context.Context) (Stats, error) {
 		DocumentsByState: stringKeys(docsByState),
 		JobsByStatus:     stringKeys(jobsByStatus),
 		CardsStale:       cardsStale,
+		Reembed:          reembed,
 	}, nil
+}
+
+// reembedStats counts what is left to re-embed, with the re-embed's rate
+// and the time left at it while it runs; nil when nothing is left.
+func (d Deps) reembedStats(ctx context.Context) (*ReembedStats, error) {
+	left, err := d.Documents.CountToReembed(ctx, d.TenantID, indexer.ContextVersion)
+	if err != nil || left.Documents == 0 {
+		return nil, err
+	}
+	out := &ReembedStats{Documents: left.Documents, Chunks: left.Chunks}
+	if d.Reembed != nil {
+		if p := d.Reembed.Progress(); p.Active && p.ChunksPerSecond > 0 {
+			out.ChunksPerSecond = p.ChunksPerSecond
+			out.ETASeconds = int64(p.ETA(left.Chunks) / time.Second)
+		}
+	}
+	return out, nil
 }
 
 // cardsStale counts the cards left to embed; none without a document

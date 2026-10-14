@@ -71,6 +71,29 @@ type Health struct {
 	// dates and the sources owed a classification; nil from a daemon that
 	// predates saying so.
 	SavedDates *SavedDates `json:"saved_dates,omitempty"`
+	// EmbedderHold is the hold over the index and cards jobs while the
+	// embedding model doesn't answer; nil while it doesn't hold them.
+	EmbedderHold *EmbedderHold `json:"embedder_hold,omitempty"`
+	// ReembedBrake is the re-embed's brake while it stops the re-embed;
+	// nil while it doesn't.
+	ReembedBrake *ReembedBrake `json:"reembed_brake,omitempty"`
+}
+
+// EmbedderHold mirrors api.EmbedderHold: since when the embedding model
+// hasn't answered, and the last embed's error.
+type EmbedderHold struct {
+	Since time.Time `json:"since"`
+	Error string    `json:"error"`
+}
+
+// ReembedBrake mirrors api.ReembedBrake: until when the re-embed queues no
+// document, how many documents' re-embeds failed in a row, the first few
+// of them by ID, and the last one's error.
+type ReembedBrake struct {
+	Until     time.Time `json:"until"`
+	Failures  int       `json:"failures"`
+	Documents []string  `json:"documents,omitempty"`
+	Error     string    `json:"error"`
 }
 
 // SavedDates mirrors api.SavedDates: when the daemon's start classified
@@ -208,7 +231,8 @@ func (c *Client) Healthz(ctx context.Context) (*Health, error) {
 }
 
 // Stats mirrors api.Stats. CardsStale is 0 from a daemon that predates
-// counting the cards left to embed.
+// counting the cards left to embed, and Reembed nil from one that predates
+// chunk context.
 type Stats struct {
 	Version          string         `json:"version"`
 	BookmarksTotal   int            `json:"bookmarks_total"`
@@ -216,6 +240,15 @@ type Stats struct {
 	DocumentsByState map[string]int `json:"documents_by_state,omitempty"`
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
 	CardsStale       int            `json:"cards_stale"`
+	Reembed          *ReembedStats  `json:"reembed,omitempty"`
+}
+
+// ReembedStats mirrors api.ReembedStats.
+type ReembedStats struct {
+	Documents       int     `json:"documents"`
+	Chunks          int     `json:"chunks"`
+	ChunksPerSecond float64 `json:"chunks_per_second,omitempty"`
+	ETASeconds      int64   `json:"eta_seconds,omitempty"`
 }
 
 // Metrics mirrors api.MetricsResponse.
