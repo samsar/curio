@@ -352,6 +352,8 @@ bookmarks
   source            TEXT NOT NULL              -- 'chrome' | 'safari' | 'firefox' | 'html' | 'manual'
   folder_path       TEXT                       -- '/Tech/AI/Agents'
   tags              JSON                       -- string array
+  dateless          INTEGER NOT NULL DEFAULT 0 -- 1: the source gave no date, saved_at is the import's time
+  saved_date        TEXT NOT NULL DEFAULT 'unknown' -- 'exact' | 'approx' | 'unknown': how far saved_at is a save's
   created_at, updated_at
   UNIQUE (tenant_id, url, source)              -- one bookmark per (tenant, url, source)
 ```
@@ -363,14 +365,39 @@ only when the document is new. The same URL bookmarked in several browsers
 is one document, fetched once.
 
 `saved_at` is when the browser saved the bookmark, as its importer reads
-it. Safari keeps no save date, so its bookmarks carry the time curio
-imported them; a manual bookmark (`curio add`), or an imported one that
-names no date, carries the time it was added. `created_at` is when curio
-added the row. `GET /v1/bookmarks` lists by `created_at` by default and by
-`saved_at` with `order=saved`, the Library's Date saved order, each
-through its own index (`idx_bookmarks_tenant_created`,
-`idx_bookmarks_tenant_saved`); `idx_bookmarks_document (document_id,
-saved_at, id)` reads one document's bookmarks newest saved first.
+it; a manual bookmark (`curio add`) carries the time it was added.
+`created_at` is when curio added the row. An imported bookmark whose
+source names no date (Safari's, an HTML anchor without `ADD_DATE`, a
+browser entry without `date_added`) is stored `dateless`, with the time
+the import stored it as its `saved_at`: the one fact only the import
+knows, its default and the Go zero value meaning dated, so a writer that
+doesn't name it keeps the meaning `saved_at` always had.
+
+`saved_date` says how far `saved_at` can be trusted, and is derived, from
+the bookmarks of the row's tenant and source alone, by one Go rule
+(`docmeta.SavedDates`): exact, it is when the bookmark was saved; approx,
+the bookmark was saved then or before (a folder copied whole, or a save a
+later import of the same browser's bookmarks first found); unknown, the
+time says nothing of the save (a browser's bulk import or sync stamped
+it, or the source kept no date). The import classifies its source after
+each request, and the daemon every bookmark at each start
+(`sqlite.EnsureSavedDates`, which first marks `dateless` the Safari rows
+an older daemon wrote dated: Safari's bookmarks hold no dates); each
+writes only the classes that changed. A row is inserted unknown until
+its source is classified, except a dated manual bookmark, which is exact
+whatever else its source holds, so a classification that fails leaves no
+row claiming a date; the daemon retries a failed one every minute, and
+healthz reports it (`saved_dates`). A date filter reads it: an unknown
+bookmark is never in a saved window. See decisions.md "Saved dates and
+search filters".
+
+`GET /v1/bookmarks` lists by `created_at` by default and by `saved_at`
+with `order=saved`, the Library's Date saved order, each through its own
+index (`idx_bookmarks_tenant_created`, `idx_bookmarks_tenant_saved`);
+`idx_bookmarks_document (document_id, saved_at, id)` reads one document's
+bookmarks newest saved first, and serves the search filters' seeks of
+them. The classification reads a tenant's bookmarks in saved order
+through `idx_bookmarks_tenant_saved`.
 
 ### Future reference tables (not in v1)
 

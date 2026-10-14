@@ -160,16 +160,30 @@ func TestDocRef(t *testing.T) {
 func TestLibrary_Saved(t *testing.T) {
 	r := newRenderer(t)
 	saved := time.Now().Add(-26 * time.Hour)
+	imported := time.Now().Add(-3 * time.Hour)
+	exact := SavedTime{At: saved, Imported: imported, Date: string(store.SavedDateExact)}
+	unknown := SavedTime{At: saved, Imported: imported, Date: string(store.SavedDateUnknown)}
 	counts := &LibraryCounts{Documents: 7467, Bookmarks: 7497, ByState: map[string]int{"failed": 2150}}
 	lib := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: LibraryFilters{Order: OrderSaved},
 		Counts: counts, PageSize: 50, NextCursor: "c", Rows: []LibraryRow{
 			{DocumentID: "a", Title: "A page", URL: "https://example.com/a", State: "fetched", ContentType: "article",
-				When: saved, Source: "safari", Folder: "/Reading/Web"},
-			{URL: "https://example.com/orphan", BookmarkTitle: "No document", When: saved, Source: "chrome"},
+				When: saved, Saved: &exact, Source: "safari", Folder: "/Reading/Web"},
+			{URL: "https://example.com/orphan", BookmarkTitle: "No document", When: saved, Saved: &unknown,
+				Source: "chrome"},
 		}}
 	out := render(t, r, PageLibrary, lib)
 	assert.Contains(t, out, `<option value="saved" selected>Date saved</option>`)
 	assert.Contains(t, out, `<th scope="col" class="c-when">Saved</th>`)
+	assert.Contains(t, out, `<col class="c-when c-saved">`)
+	assert.Contains(t, out, `<td class="c-when when">saved <time datetime="`+datetime(saved)+`"`, "an exact save")
+	assert.Contains(t, out, `<td class="c-when when"><span class="saved-time" title="No known save date: `+
+		`its source keeps none, or a browser&#39;s bulk import or sync stamped it. curio imported it `+when(imported)+
+		`"><span class="saved-what">date unknown</span><span class="saved-sep"> ·</span> <span class="saved-when">`+
+		`imported <time datetime="`+datetime(imported)+`">3 h ago</time></span></span></td>`,
+		"an unknown one, by when curio imported it")
+	assert.Contains(t, out, `<span class="doc-saved">saved <time`, "a phone's line says the same")
+	assert.Contains(t, out, `<span class="doc-saved"><span class="saved-time"`)
+	assert.NotContains(t, out, `<span class="narrow"><time`, "the save's time alone, not the row's")
 	assert.Contains(t, out, `<span class="sep wide">·</span><span class="wide" title="/Reading/Web">safari</span>`)
 	assert.Contains(t, out, `<span class="sep wide">·</span><span class="wide">chrome</span>`, "no folder, no title")
 	assert.Contains(t, out, `<time datetime="`+datetime(saved)+`"`)
@@ -177,8 +191,8 @@ func TestLibrary_Saved(t *testing.T) {
 	assert.Contains(t, out, `<td class="state-cell"></td>`+"\n"+`<td class="c-type"></td>`, "no document, no state or type")
 	assert.Contains(t, out, `<div class="load-more" id="more"><a class="btn" href="/ui/library?cursor=c&amp;order=saved"`)
 	assert.Equal(t, 1, strings.Count(out, `<p class="table-note">Newest saves first, one row per bookmark: `+
-		`a page saved in two browsers is listed twice. Safari keeps no save dates, so its bookmarks are dated when `+
-		`curio imported them.</p>`))
+		`a page saved in two browsers is listed twice. A save without a known date, from a source that keeps none `+
+		`or a browser's bulk import, is marked so and listed by the time it carries.</p>`))
 	assert.Contains(t, out, `<p class="pager-summary mt-4" id="showing">Showing 2 of 7,497 saves.</p>`)
 	assert.Contains(t, out, `<a href="/ui/library?order=saved&amp;state=failed">Failed <span class="count">2,150</span></a>`,
 		"the tabs keep the order and count documents")

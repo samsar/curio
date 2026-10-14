@@ -630,3 +630,178 @@ func TestImportBookmarks_DryRunValidates(t *testing.T) {
 		assertProblem(t, resp, http.StatusBadRequest)
 	}
 }
+
+// savedDates are the bookmarks' classes, by URL, and from source.
+func (s *testServer) savedDates(t *testing.T, source string) map[string]store.SavedDate {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT url, saved_date FROM bookmarks WHERE source = ?`, source)
+	require.NoError(t, err)
+	defer rows.Close()
+	out := map[string]store.SavedDate{}
+	for rows.Next() {
+		var url string
+		var class store.SavedDate
+		require.NoError(t, rows.Scan(&url, &class))
+		out[url] = class
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// bulkStamped is a browser's bulk import stamp: six bookmarks saved within
+// a second, two to a folder.
+func bulkStamped() []ImportBookmark {
+	saved := time.Date(2024, 5, 1, 10, 0, 0, 0, time.UTC)
+	out := make([]ImportBookmark, 6)
+	for i := range out {
+		out[i] = ImportBookmark{URL: fmt.Sprintf("https://example.com/bulk/%d", i),
+			FolderPath: fmt.Sprintf("/Bookmarks Bar/F%d", i%3), SavedAt: saved.Add(time.Duration(i) * 50 * time.Millisecond)}
+	}
+	return out
+}
+
+// TestImportBookmarks_ClassifiesTheSourceAfterward: a source's saved dates
+// are classified once its bookmarks are stored, so a bulk stamp split
+// across two requests ends as one request leaves it.
+func TestImportBookmarks_ClassifiesTheSourceAfterward(t *testing.T) {
+	whole := newTestServer(t)
+	whole.postImport(t, ImportRequest{Source: store.SourceChrome, Bookmarks: bulkStamped()})
+
+	split := newTestServer(t)
+	split.postImport(t, ImportRequest{Source: store.SourceChrome, Bookmarks: bulkStamped()[:3]})
+	for _, class := range split.savedDates(t, store.SourceChrome) {
+		assert.Equal(t, store.SavedDateExact, class, "three saves are too few for an import")
+	}
+	split.postImport(t, ImportRequest{Source: store.SourceChrome, Bookmarks: bulkStamped()[3:]})
+
+	want := whole.savedDates(t, store.SourceChrome)
+	assert.Len(t, want, 6)
+	for url, class := range want {
+		assert.Equal(t, store.SavedDateUnknown, class, url)
+	}
+	assert.Equal(t, want, split.savedDates(t, store.SourceChrome))
+}
+
+// TestImportBookmarks_DatelessImports: bookmarks whose source gives no
+// date are stored dateless: unknown in the source's first import, and
+// approx when a later import of a browser's bookmarks first finds them;
+// an HTML file's are unknown whenever they come.
+func TestImportBookmarks_DatelessImports(t *testing.T) {
+	for source, later := range map[string]store.SavedDate{
+		store.SourceSafari: store.SavedDateApprox,
+		store.SourceHTML:   store.SavedDateUnknown,
+	} {
+		t.Run(source, func(t *testing.T) {
+			s := newTestServer(t)
+			s.importBookmarks(t, source, "https://example.com/first", "https://example.com/also-first")
+			// The first import ran 11 minutes ago.
+			_, err := s.db.Exec(`UPDATE bookmarks
+				SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ', created_at, '-11 minutes')`)
+			require.NoError(t, err)
+			s.importBookmarks(t, source, "https://example.com/first", "https://example.com/later")
+
+			assert.Equal(t, map[string]store.SavedDate{
+				"https://example.com/first":      store.SavedDateUnknown,
+				"https://example.com/also-first": store.SavedDateUnknown,
+				"https://example.com/later":      later,
+			}, s.savedDates(t, source))
+			assert.Equal(t, 3, s.count(t, "bookmarks WHERE dateless = 1"))
+		})
+	}
+}
+
+// rows are the rows query reads, each its columns as text.
+func (s *testServer) rows(t *testing.T, query string) [][]string {
+	t.Helper()
+	rows, err := s.db.Query(query)
+	require.NoError(t, err)
+	defer rows.Close()
+	cols, err := rows.Columns()
+	require.NoError(t, err)
+	var out [][]string
+	for rows.Next() {
+		row := make([]string, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range row {
+			ptrs[i] = &row[i]
+		}
+		require.NoError(t, rows.Scan(ptrs...))
+		out = append(out, row)
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// TestImportBookmarks_DryRunClassifiesNothing: a dry run writes no class
+// and no updated_at, even where a classification would change one.
+func TestImportBookmarks_DryRunClassifiesNothing(t *testing.T) {
+	s := newTestServer(t)
+	s.postImport(t, ImportRequest{Source: store.SourceChrome, Bookmarks: bulkStamped()})
+	_, err := s.db.Exec(`UPDATE bookmarks SET saved_date = 'exact', updated_at = '2024-01-01T00:00:00.000Z'`)
+	require.NoError(t, err)
+	const rowsQ = `SELECT id, saved_date, updated_at FROM bookmarks ORDER BY id`
+	before := s.rows(t, rowsQ)
+
+	req := ImportRequest{Source: store.SourceChrome, DryRun: true, Bookmarks: bulkStamped()}
+	req.Bookmarks = append(req.Bookmarks, ImportBookmark{URL: "https://example.com/new", SavedAt: time.Now()})
+	got := s.postImport(t, req)
+	assert.Equal(t, 1, got.Created)
+	assert.Equal(t, before, s.rows(t, rowsQ))
+}
+
+// cancelingIngest stores bookmarks through the real store, and cancels
+// the request's context once it has stored after of them, as a client that
+// goes away mid-import does.
+type cancelingIngest struct {
+	store.BookmarkStore
+	after  int
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (c *cancelingIngest) Ingest(ctx context.Context, b *store.Bookmark) (store.IngestResult, error) {
+	res, err := c.BookmarkStore.Ingest(ctx, b)
+	if c.calls++; c.calls == c.after {
+		c.cancel()
+	}
+	return res, err
+}
+
+// TestImportBookmarks_ClassifiesWhenTheClientLeaves: the bookmarks an
+// import stored before its client went away are classified all the same,
+// on a context of the classification's own.
+func TestImportBookmarks_ClassifiesWhenTheClientLeaves(t *testing.T) {
+	s := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := s.deps
+	d.TenantID = store.LocalTenantID
+	d.Bookmarks = &cancelingIngest{BookmarkStore: s.deps.Bookmarks, after: 6, cancel: cancel}
+	bms := append(bulkStamped(), ImportBookmark{URL: "https://example.com/never-stored"})
+	body, err := json.Marshal(ImportRequest{Source: store.SourceChrome, Bookmarks: bms})
+	require.NoError(t, err)
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/bookmarks/import", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	d.handleImportBookmarks(httptest.NewRecorder(), req)
+
+	got := s.savedDates(t, store.SourceChrome)
+	assert.Len(t, got, 6, "the import stopped when its client left")
+	for url, class := range got {
+		assert.Equal(t, store.SavedDateUnknown, class, url)
+	}
+}
+
+// TestCreateBookmark_IsAnExactSave: a manual bookmark is saved now, and
+// its date is exact.
+func TestCreateBookmark_IsAnExactSave(t *testing.T) {
+	s := newTestServer(t)
+	before := time.Now().UTC().Truncate(time.Millisecond)
+	resp, created := s.createBookmark(t, "https://example.com/manual")
+	require.Equal(t, http.StatusCreated, resp.status, resp.body)
+	assert.Equal(t, string(store.SavedDateExact), created.Bookmark.SavedDate)
+	assert.WithinRange(t, created.Bookmark.SavedAt, before, time.Now().UTC())
+	assert.Equal(t, map[string]store.SavedDate{"https://example.com/manual": store.SavedDateExact},
+		s.savedDates(t, store.SourceManual))
+	assert.Zero(t, s.count(t, "bookmarks WHERE dateless = 1"))
+}

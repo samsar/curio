@@ -195,6 +195,11 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 				status, detail, hint := searchFieldsCheck(*f)
 				r.add("search fields", status, detail, hint)
 			}
+			// Whether every bookmark's saved date is classified.
+			if s := health.SavedDates; s != nil {
+				status, detail, hint := savedDatesCheck(*s)
+				r.add("saved dates", status, detail, hint)
+			}
 			// Whether the cards left to embed have a job to embed them.
 			status, detail, hint := cardsCheckOf(ctx, daemon)
 			r.add("cards", status, detail, hint)
@@ -245,6 +250,37 @@ func searchFieldsCheck(f client.DocumentFields) (status checkStatus, detail, hin
 			"and was rebuilt", at), ""
 	}
 	return statusOK, fmt.Sprintf("checked when the daemon started (%s)", at), ""
+}
+
+// savedDatesRestart is how a restart reclassifies every bookmark's saved
+// date: the daemon's start does.
+const savedDatesRestart = "restart the daemon: `curio daemon stop`, then any curio command starts it again, and " +
+	"its start classifies every bookmark"
+
+// savedDatesCheck is doctor's check of the bookmarks' saved-date classes:
+// it fails while the daemon's start couldn't classify them, or an import's
+// source is owed a classification, whose bookmarks claim no date until
+// the daemon's retry, every minute, or a restart classifies them. It says
+// when the start classified, so it is never mistaken for a check doctor
+// made.
+func savedDatesCheck(s client.SavedDates) (status checkStatus, detail, hint string) {
+	at := localTime(s.CheckedAt)
+	switch {
+	case s.Error != "":
+		return statusFail, fmt.Sprintf("the daemon's start (%s) couldn't classify them: %s; date filters read the "+
+			"classes the bookmarks had", at, s.Error), savedDatesRestart
+	case len(s.Owed) > 0:
+		oldest := s.Owed[0]
+		for _, o := range s.Owed[1:] {
+			if o.Since.Before(oldest.Since) {
+				oldest = o
+			}
+		}
+		return statusFail, fmt.Sprintf("the %s bookmarks an import stored aren't classified, failing since %s: %s; "+
+				"date filters leave them out", owedSources(s.Owed), localTime(oldest.Since), oldest.Error),
+			"the daemon retries every minute; or " + savedDatesRestart
+	}
+	return statusOK, fmt.Sprintf("classified when the daemon started (%s)", at), ""
 }
 
 // cardsCheckOf asks c for the cards left to embed and the cards jobs

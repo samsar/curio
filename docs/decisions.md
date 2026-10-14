@@ -148,7 +148,7 @@ when the entry was first committed.
 - 2026-09-29 — [Library: a Date saved order lists saves](#library-a-date-saved-order-lists-saves) (revised)
 - 2026-09-29 — [Dashboard: the Failures tab](#dashboard-the-failures-tab)
 - 2026-09-29 — [Interests page by offset within a run](#interests-page-by-offset-within-a-run) (revised)
-- 2026-09-29 — [Search pages by offset within a fixed-depth pool](#search-pages-by-offset-within-a-fixed-depth-pool)
+- 2026-09-29 — [Search pages by offset within a fixed-depth pool](#search-pages-by-offset-within-a-fixed-depth-pool) (revised)
 - 2026-09-30 — [Waiting is not failing: jobs curio didn't send are deferred](#waiting-is-not-failing-jobs-curio-didnt-send-are-deferred) (revised)
 - 2026-09-30 — [A site's block is not its pages' verdict](#a-sites-block-is-not-its-pages-verdict)
 - 2026-09-30 — [Embedding drift: verified by re-embedding a sample](#embedding-drift-verified-by-re-embedding-a-sample) (revised)
@@ -161,7 +161,8 @@ when the entry was first committed.
 - 2026-10-04 — [Interest map: two views of each regrouping, drawn when it is built](#interest-map-two-views-of-each-regrouping-drawn-when-it-is-built)
 - 2026-10-13 — [Search evaluation: graded, per kind, on a copy, never in the repo](#search-evaluation-graded-per-kind-on-a-copy-never-in-the-repo) (revised)
 - 2026-10-13 — [Model roles: a provider and model per use, inheriting generation's](#model-roles-a-provider-and-model-per-use-inheriting-generations)
-- 2026-10-13 — [Metadata search: a fields index and a card per document](#metadata-search-a-fields-index-and-a-card-per-document)
+- 2026-10-13 — [Metadata search: a fields index and a card per document](#metadata-search-a-fields-index-and-a-card-per-document) (revised)
+- 2026-10-14 — [Saved dates and search filters](#saved-dates-and-search-filters)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -589,9 +590,8 @@ precision. Without this, hybrid search becomes a black box.
 
 **Status: not implemented.** Only the server config sets `weights` and
 `collapse` today, and the request decoder rejects unknown fields, so sending
-them is a 400. `api/openapi.yaml` no longer advertises them (nor the
-`saved_after`/`saved_before` filters). The design below stands for when they
-land.
+them is a 400. `api/openapi.yaml` no longer advertises them. The design
+below stands for when they land.
 
 **Decision:** `weights` (BM25 vs vector RRF mix) and `collapse` (chunk-to-doc
 aggregation) are optional fields in the search request body. Defaults come
@@ -3805,6 +3805,28 @@ and the bookmarks by documents write their tenant `+d.tenant_id` and
 `+tenant_id`, so none walks a tenant index. See "Metadata search: a fields
 index and a card per document".
 
+**Revised (2026-10-14):** migration 020 adds no index. Classifying saved
+dates reads a tenant's bookmarks, or one source's, in saved order through
+`idx_bookmarks_tenant_saved` with no sort, and writes a class by primary
+key; the start lists the tenants from a tenant index. The new filters are
+one seek each: the saved window and the published trust seek
+`idx_bookmarks_document (document_id, saved_at)`, the folder filter
+`idx_bookmarks_document (document_id)`, the site filter the fields row by
+`sqlite_autoindex_document_fields_1`. BM25, the fields and the title
+lists stay driven by their MATCH under every combination of filters (a
+test checks each), the fields and title lists, and the card list's
+over-fetch, writing their tenant `+d.tenant_id` under a narrowing filter
+so SQLite doesn't walk the tenant's documents; with no filter their SQL
+is unchanged. A narrowing filter's counts, exact KNNs and their check,
+and `CountUndated` walk the tenant's documents, by
+`idx_documents_tenant_state_updated` as a covering index, or, when a
+predicate reads the row (the content type, the URL, the published date),
+by the narrowest tenant index, which reads the same rows; each document's
+chunks by `idx_chunks_document`, its card by its key. The exact KNNs are
+pinned as vec0's KNN-rowid-IN plan over a `LIST SUBQUERY`, never a scan
+of `chunks`; the over-fetch at k = 4,096 keeps the unfiltered KNN's plan.
+See "Saved dates and search filters".
+
 ---
 
 ## Chunks: external-content FTS, derived rows kept by triggers
@@ -4099,6 +4121,15 @@ sizes: read as the default, a wrong one would answer the first page for
 another. So they are refused as a filter is, a 400 naming them when they
 aren't a whole number in range (`positionParam`); `limit` and `members`
 keep their defaults. See "Interests page by offset within a run".
+
+**Revised (2026-10-14):** the search's filters are checked by one parser,
+`search.FilterRequest.Resolve`, which the API and searcheval call: the
+content type and source sets, the new dimensions' forms (dates, sites,
+folders), at most 32 values a list and none empty, a window's order, and
+`include_undated` only with a date. A refusal is a `*search.FilterError`
+naming its field, a 400 `filters.<field>` before the query is embedded;
+`filters.host` stays free-form but may not be empty. See "Saved dates and
+search filters".
 
 ---
 
@@ -8532,6 +8563,19 @@ style it as the Library does. Every list that names a document now names
 an untitled one by its bookmark. See "Search pages by offset within a
 fixed-depth pool".
 
+**Revised (2026-10-14):** a save's time shows its saved date: "saved"
+and when for an exact one, "saved by" an upper bound for an approximate
+one, and "date unknown · imported" and when curio imported it for an
+unknown one, each inexact one's title saying what its time means, on the
+Document page's bookmarks and in this order's rows. The order and its
+keyset are unchanged: an undated save is still listed by the `saved_at`
+it carries. The note under the table now says undated saves are marked
+and listed by that time, in place of the one about Safari. The Saved
+column widens to 11rem (`col.c-saved`) and splits an inexact time over
+two lines, and on a phone, whose time column folds away, a save's time
+takes a line of its own under where it lives (`.doc-saved`). See "Saved
+dates and search filters".
+
 ---
 
 ## Dashboard: the Failures tab
@@ -9161,6 +9205,14 @@ bookmark titles and snippets), under the real CSP:
 - A page clicked while a keystroke's search was in flight was dropped,
   and a keystroke right after a page click won: the query typed and its
   first page.
+
+**Revised (2026-10-14):** filters keep the contract. A narrowing filter's
+KNN lists rank the rows it leaves exactly, or over-fetch at k = 4,096
+past a bound, the same path for the same filters on the same data, so
+every page runs the same statements; the pages of a filtered query at
+offsets 0–90 concatenate to its k=100 answer (`TestEngine_FilteredPagesTileTheRanking`).
+A date filter's `undated` count doesn't depend on the query or the page.
+See "Saved dates and search filters".
 
 ---
 
@@ -12848,6 +12900,21 @@ others), and the stages `fields`, `titles` (after `fields`) and `cards`;
 the format stays 1, every change additive, and PR 1's report still loads
 as a baseline (a test loads one; its missing weights read as 0).
 
+**Revised (2026-10-14), filters:** a query takes an optional `filters`
+mapping under the API's names (`saved_after`, `saved_before`,
+`published_after`, `published_before`, `site`, `folder`,
+`include_undated`), as strict as the rest of the format; dates stay the
+text written (yaml.v3 gives an unquoted `2020-01-01`'s text). searcheval
+resolves every query's filters with `search.FilterRequest.Resolve` before
+any query runs, naming a bad one's query by id, never its text, and runs
+every variant with them; `curio eval` sends them. A query's report
+records its filters and the text marks it `[filtered]`; the stages add
+`undated`; the library adds the copy's saved-date counts (`saved_dates`)
+and `saved_dates_ms`, a run fact. A comparison now says, per variant, how
+many matched queries rank exactly the baseline's documents in its order,
+and names the others by id: "no unfiltered ranking changed" is a line of
+the report. The format stays 1. See "Saved dates and search filters".
+
 ---
 
 ## Model roles: a provider and model per use, inheriting generation's
@@ -13589,6 +13656,518 @@ table) is a change in `internal/docmeta` and a `RulesVersion` bump with a
 new golden file; the next start derives every document again and the
 cards job embeds the cards that changed. The weights are config; measure
 any change with `make search-eval` against the last report.
+
+**Revised (2026-10-14):** the card list ranks a narrowing filter's
+embedded cards exactly, through vec0's key-IN constraint, as the vector
+list does its chunks; a card is listed only while `embedded_at` is set,
+which holds exactly while it has a vector. Under a narrowing filter the
+fields, title and card lists check their tenant on the document they
+reach (`+d.tenant_id`): with two filters on a document's bookmarks or
+more, SQLite walked the tenant's documents instead and searched the
+fields index once for each. The filters gain `site` (the fields' host and
+its subdomains) and `folder`. See "Saved dates and search filters".
+
+---
+
+## Saved dates and search filters
+
+**Decision:** every bookmark carries how far its `saved_at` can be
+trusted, `saved_date` (exact, approx or unknown), derived from the
+bookmarks of its tenant and source by one pure Go rule; and a search
+takes filters on when a page was saved and when it was published, on its
+site and on its folder, besides content type, host and source. A filter
+that narrows the library makes both KNN lists rank exactly the rows it
+leaves, through sqlite-vec's primary-key IN constraint, instead of
+filtering a fixed number of nearest neighbours, and a date-filtered
+search says how many documents its dates couldn't judge (`undated`).
+Unfiltered searches run the SQL they ran before, byte for byte.
+
+**Why:** nothing recorded how far a saved time could be trusted. The API
+turned a missing date into the import's own time (Safari's bookmarks, an
+HTML anchor without `ADD_DATE`, a browser entry without `date_added`),
+and a browser's bulk import or sync merge stamps a whole tree within
+milliseconds, which was stored as a real save. On the owner's library
+that is 40% of the bookmarks, so every question about when something was
+saved would have been answered wrong. And a question about a time, a site
+or a folder couldn't be expressed at all; when one could (content type,
+host, source), the KNN lists applied it after sqlite-vec's k cutoff, so a
+narrow filter found almost none of its documents among the nearest
+thousand chunks.
+
+### The saved-date rule
+
+`docmeta.SavedDates` (`internal/docmeta/saveddate.go`, under depguard's
+`docmeta-pure`) classifies rows of any order, a (tenant, source) group at
+a time:
+
+1. A **dateless** row (the source gave no date, so `saved_at` is the
+   import's time) never joins a run. It is unknown for `html` and
+   `manual`, each file or scripted import a collection of its own, so a
+   later one says nothing about when its rows were saved; unknown when no
+   row of its group was stored more than 10 minutes before it (exactly 10
+   minutes counts as the same import), the import that first read the
+   collection; and approx otherwise, for `chrome`, `firefox` and
+   `safari`, whose re-imports read the same collection: saved between the
+   previous import and the one that found it.
+2. A dated **manual** row is exact and never forms runs: five `curio
+   add`s within a second are five saves.
+3. The other dated rows form **runs**: maximal chains in `(saved_at, id)`
+   order whose consecutive times are at most 1 s apart, compared as the
+   whole milliseconds the store keeps, never as `julianday` floats.
+4. A run is **import-shaped** when it has 5 rows or more over 3 folders
+   or more and its largest folder holds less than 4/5 of it (`5·largest <
+   4·size`): a save of all tabs fills one folder.
+5. An import-shaped run is a **folder copy** when one of its folders,
+   neither none nor a browser's root alone (docmeta's root labels,
+   case-insensitive, as a one-segment path), holds every folder of the
+   run, itself or as a prefix ending in `/`. Only the shortest can.
+6. A folder copy is approx (an upper bound: when the folder was copied),
+   any other import-shaped run unknown, everything else exact.
+
+The constants are named in the file (`runGap`, `importMinRows`,
+`importMinFolders`, `importLargestNum/Den`, `sameImport`). The rule is
+outside `RulesVersion`: no derived row is keyed by it, since the store
+derives every class again at every start. A Go prototype gave the same
+class as the research's SQL (`date_rule.sql`) for all 7,589 of the
+owner's bookmarks: chrome 4,411 exact, 61 approx, 873 unknown; safari 0,
+70, 2,169; manual 5, 0, 0.
+
+**A class is a function of the stored rows.** The seed had a class only
+ever fall, exact to approx to unknown. Then the final classes would
+depend on how `importer.Send` split an import into requests of 500 in
+tree order: a first batch holding a folder copy's three subfolders and
+not their parent (6 rows over 3 folders with no common folder) reads as
+unknown, and the next batch's rows of the parent make the run a copy; 2
+rows of a folder plus one of each of three others read as an import's
+stamp, inside a run that is 97% that folder. So a class rises as well as
+falls; the store tests insert 120 synthetic libraries in random batch
+splits and orders and end with exactly the classes one classification of
+the final rows gives, and a test raises a run's earlier rows to exact
+when rows join it in one folder.
+
+**Where it runs.** Migration 020 adds `bookmarks.dateless` (`INTEGER NOT
+NULL DEFAULT 0`, the one fact only the import knows) and
+`bookmarks.saved_date` (`TEXT NOT NULL DEFAULT 'unknown'`, a row nobody
+classified claims no date), both CHECKed. It backfills only the fact, as
+the research approximates it (a Safari or HTML row saved within 5 s of
+when it was stored), leaving `updated_at` alone like 017's backfill, and
+computes no class: SQL in the migration would be a second implementation
+of the rule. Two writers apply it, in Go, inside one `BEGIN IMMEDIATE`
+transaction each, so the read and the writes see one state, and each
+writes only the rows whose class changed, setting their `updated_at`:
+
+- The import handler classifies the request's whole (tenant, source)
+  group after its loop, whether the loop finished or the client left,
+  through `api.SavedDateClassifier`, within 10 s, on a context derived
+  from the daemon's lifetime rather than the request's: the client
+  leaving doesn't stop it, and a shutdown does, so no handler outlives
+  the API's 5 s drain on its account and the database is never closed
+  under it. Dry runs classify nothing. `curio import` and `curio up` both
+  arrive there through `importer.Send`, and `POST /v1/bookmarks` is a
+  dated manual save, exact at insert. A failure (another writer past the
+  busy timeout, the 10 s, a broken statement) is one WARN, the response
+  unchanged, and owes the source a classification, in memory: the daemon
+  retries every owed source each minute (`SavedDateClassifier.Run`, each
+  try bounded the same way, stopping at shutdown) until one succeeds,
+  and so does the source's next import. Classifications run one at a
+  time, so one that ends late never overwrites what a later one found. A
+  classification the shutdown cut short owes nothing and warns nothing:
+  the next start classifies every bookmark.
+- `sqlite.EnsureSavedDates` classifies every tenant and source at every
+  start, after the fields refresh, a tenant a transaction, and logs one
+  INFO `saved dates classified` (bookmarks, changed, exact, approx,
+  unknown, marked_dateless, took_ms). It is the safety net: it applies a
+  change of the rule, finishes what an interrupted or failed
+  classification left, derives again the runs a deleted bookmark split,
+  and classifies the rows an older daemon wrote. Like
+  `ensureDocumentFields` it never fails the start but for a shutdown
+  during it; a failure is one ERROR, and the next start tries again.
+  `devtool.OpenCopy` runs it too.
+
+**Fail closed.** `Ingest` and `Create` insert every bookmark unknown but a
+dated manual one, which is exact whatever else its source holds, so its
+class is final at insert. Inserting every dated row exact,
+provisionally, for the import's classification to correct, fails open:
+one that failed (a busy timeout, its timeout, a shutdown) would leave
+the import's rows claiming exact dates until the next import of the
+source or the next start, which under launchd can be weeks. Unknown
+until classified, they
+are left out of a date window and counted as `undated` meanwhile, which
+is what they are. Tests that store dated rows directly classify their
+source after, as an import does (`apitest`'s `AddBookmark` does).
+
+**Seen.** As the document fields' check is (see "Metadata search"),
+healthz reports `saved_dates`: when the start classified (`checked_at`),
+how many classes it changed, its `error`, and the sources `owed` a
+classification (each with when the first failure ran and the last one's
+error); neither changes `status`. `curio status` prints a warning line
+while the start failed and one while a source is owed, and `curio
+doctor`'s `saved dates` check fails on either, with the fix: the retry
+is automatic, and a restart classifies every bookmark again. The Status
+page shows neither, as it shows no `document_fields`.
+
+**Rows the rule can't read.** A bookmark whose stored `saved_at` or
+`created_at` doesn't parse would fail its tenant's whole classification,
+at every start and import, were it an error. It is set aside: classified
+unknown, joining no run, the rest classified without it, and each run
+that skipped some logs one WARN with their count and the IDs of the
+first 10, never their contents.
+
+**Safari rows an older daemon wrote.** Safari's bookmarks file holds no
+dates (`importer/safari.go` sets no `SavedAt`), so every Safari bookmark
+is dateless, but a 2.6 daemon writing after a downgrade leaves the
+column at its default, and the migration's 5 s backfill ran once. So
+before classifying a tenant, the start sets `dateless = 1` on its Safari
+rows that aren't (`markDatelessSQL`, one UPDATE in the tenant's
+transaction, seeking `idx_bookmarks_tenant_saved` by tenant, its plan
+pinned), counted as `marked_dateless`. The import's classification
+doesn't: a 2.7 import marks its Safari rows itself.
+
+**Why the whole group, not the request's range.** The seed bounded the
+work to the new rows' `saved_at` range ± 1 s. That cuts runs that extend
+past it, and a cut run is misjudged either way (the 97% example above);
+for a first Chrome import a batch's rows span the whole timeline anyway;
+and a correct bound needs a keyset walk out to a gap over 1 s around
+every new row, about 30–45 µs of probes a row, 15–22 ms a request of
+500. The whole group is one ordered read of `idx_bookmarks_tenant_saved`
+and the same code as the start. `BenchmarkClassifySavedDates` (synthetic
+Chrome sources, Apple M4 Max) classifies 5,000 bookmarks in 4.5 ms and
+50,000 in 59 ms; revisit when a source passes about 50,000 bookmarks,
+where an import's 100 requests would add some 6 s.
+
+**Why `dateless`, not `source_dated`.** The seed's column had the other
+polarity. Its Go zero value would have marked every existing `Ingest` and
+`Create` caller's rows dateless (tests and apitest seeds among them), and
+an older daemon writing after a downgrade would have needed `DEFAULT 1`.
+With `dateless` both keep today's meaning, and only the import path sets
+the fact (`api.bookmarkRow`: a zero `SavedAt` is dateless, then saved
+now).
+
+**The 10-minute window's limit.** A first dateless import that lasts
+longer than 10 minutes, or one resumed later, dates its later rows
+approx, as a re-import would. No import of the owner's comes near it.
+
+### Filters
+
+`search.FilterRequest.Resolve` is the one parser and validator, which the
+API and searcheval call; the content type and source enum checks moved
+into it. A refusal is a `*search.FilterError{Field, Reason}`, which the
+API answers 400 naming `filters.<field>`, before the query is embedded.
+`store.SearchFilters.Validate` checks the store's invariants once more in
+`Engine.Search`. Each list dimension holds at most
+`store.MaxFilterValues` (32) values, none empty: 1,000 hosts made SQLite
+refuse the predicate as "Expression tree is too large (maximum depth
+1000)", a 500 for a client's error, and an empty host matched nothing.
+A host or site is at most 253 bytes, a DNS name's most, and a folder at
+most 1 KiB (`store.MaxFilterHostBytes`, `MaxFilterFolderBytes`): a site
+of some 50 KB made SQLite refuse its LIKE pattern as too complex, a 500
+again, and no host or folder comes near either.
+
+- **Saved window** `saved_after`/`saved_before`, `[after, before)`: a
+  document passes with a bookmark whose class is exact or approx and whose
+  `saved_at` is in the window; an unknown bookmark is never in one. One
+  seek of `idx_bookmarks_document (document_id, saved_at)`.
+- **Published window** `published_after`/`published_before`: the
+  document's `published_at` in the window, and trusted. A published date
+  is untrusted when it falls more than a day after the document's
+  earliest exact save, since a page saved before it was published was
+  modified then; one of a document with no exact save is trusted. On the
+  owner's library 100 of 2,478 published dates fall more than a day after
+  the earliest exact save. The rule has one definition, the
+  `untrustedPublished` builder, a `NOT EXISTS` seek of the document's
+  exact bookmarks against `strftime(…, published_at, '-1 day')`.
+- **`include_undated`** keeps, for each date dimension set, the documents
+  it can't judge: no bookmark of a known date, or no trusted published
+  date. It needs a date dimension. A document with a known save outside
+  the window and an unknown one is judged, and left out.
+- **Site**: a domain, normalized to its registrable domain
+  (`urlutil.Site`: `www.example.com` and `blog.example.com` are
+  `example.com`; an IP address or a public suffix is itself; a scheme,
+  path, port, user, wildcard, space or empty label is refused), matching
+  the document's fields' host (`docmeta.Host`: lowercase, no port, no
+  `www.`) or any subdomain of it, never `notexample.com`; `%`, `_` and `\`
+  match only themselves. One seek of the document's fields row.
+- **Folder**: a path as stored, the browser's root included (`/Bookmarks
+  Bar/Tech`), a missing leading `/` added and a trailing one dropped, `/`
+  alone refused; it matches the folder and its subfolders on path
+  segments, case-sensitively, by the documents list's `folderPredicate`
+  (`/Tech` never `/Technology`).
+- **Dates**: a day (`YYYY-MM-DD`) is midnight UTC, any other value an RFC
+  3339 date-time with a zone, converted to UTC, in the years 0001 to
+  9999; a window whose start isn't before its end is refused. A published
+  date given as a day is stored at UTC midnight, so local-midnight bounds
+  would push it into the neighbouring day, and a rule in the daemon's
+  zone would make results depend on hidden state; a client wanting a local
+  day sends date-times with its offset. Bounds are compared as stored
+  text, through `formatTime` (UTC, milliseconds), so `Resolve` truncates
+  each to the millisecond before checking the window
+  (`store.FilterTimePrecision`, which `Validate` compares at too): a
+  window inside one millisecond, which the untruncated check took and
+  which held nothing in SQL, is refused.
+
+Dimensions AND, values within one OR. Each bookmark-level dimension
+(source, folder, the saved window) is checked on the document's
+bookmarks on its own: a page saved in Chrome in 2015 and in Safari last
+week passes `source=chrome` with last week's window. 7,589 bookmarks on
+7,557 documents make the difference negligible, and it keeps every
+predicate one indexed seek.
+
+**Not stored in `document_fields`.** The seed suggested a per-document
+earliest saved date and trusted published date in PR 2a's derived row.
+The saved filter's "a bookmark of a known date in the window" can't be
+answered from one date a document, so the bookmark rows are read anyway,
+one seek; the published trust is one indexed `NOT EXISTS` a document,
+about 2 ms over the library; and storing them would make every
+classification refresh the fields of the documents it touched and bump
+`RulesVersion`, for nothing at query time.
+
+The text lists (BM25, the fields and the titles) check the filters on
+each match as they always did: the MATCH enumerates every match and the
+LIMIT comes after the filter, so they don't starve. With a saved window
+BM25 took 38–51 ms on the owner's library against 45–49 ms unfiltered.
+Under two filters on a document's bookmarks or more, SQLite (no
+ANALYZE) took the tenant's documents to be few enough to walk, searching
+the fields index once for each; under a narrowing filter the fields,
+titles and card lists so check their tenant on the document they reach
+(`+d.tenant_id`, `documentTenantSQL`), which keeps their own index
+driving, and an unfiltered list keeps its SQL. `plans_test.go` pins every
+combination's first row.
+
+### Narrow filters rank exactly: vec0's key-IN constraint
+
+The KNN lists read `k = min(limit·10, 1000)` nearest and filtered them.
+With a saved window that left 0 of the 800 vector hits for last week, 89
+for a calendar year and 15 for a four-month window; even `k = 4,096`,
+sqlite-vec's largest ("k value in knn query too large"), gave only 14,
+729 and 200. The existing filters starved the same way.
+
+Exact distances by point lookup aren't viable: a vec0 point lookup costs
+about 180 µs, so 2,000 documents' 15,265 chunks took 2.5 s. sqlite-vec
+v0.1.6's KNN does take its primary key constrained by IN (plan `SCAN v
+VIRTUAL TABLE INDEX 0:3{___}___[___`, `[` its KNN-rowid-IN kind), scans
+the listed rows alone and returns their exact nearest: the top 800 of
+1,500 random chunks equalled a brute-force Go ranking. Its cost is about
+27 ms plus 2.7 µs a listed ID.
+
+So a filter that narrows (`SearchFilters.Narrows`: any dimension but
+`ExcludeDocumentID`) first counts the IDs the exact path would list
+(`SELECT count(*) FROM (<set>)`, which SQLite flattens into a walk of
+each passing document's chunk keys, `idx_chunks_document` covering: 2–4
+ms over the owner's library, all 40,748 of a broad filter's in 4): the
+chunks of the tenant's searched documents that pass it, or the cards
+whose `embedded_at` is set (a card has a vector exactly then:
+`PutCardVectors` sets both, `MarkUnembeddable` and a new card index clear
+both, `ResetCards` keeps both). None: no KNN, no hits. At most the bound:
+the KNN with `<key> IN (<set>)`, `k = min(limit, 4096)` for chunks and
+`min(limit·10, 4096)` for cards, whose ties are then sorted by document
+ID. More: the old query, at a k sized by the set's share of the index
+(below). Without `Narrows` (no filter, or find-related's exclusion and
+the placer's), the query and k are today's, byte for byte, held by
+tests. The same filters on the same data take the same path, and every
+page runs the same statements, so the fixed-depth paging contract holds.
+The bound is an atomic on the DB, which tests and measurements may set
+between searches (`SetExactKNNMaxIDs`).
+
+**The bound** (`DefaultExactKNNMaxIDs`, on the DB with a test setter)
+counts IDs, not documents: vec0's cost is per listed ID, and a document
+holds from one chunk to more than a hundred. It is the largest round count
+whose exact p50 stays at or under the over-fetch's, measured on the
+owner's library (51,052 chunks, 1024 wide; saved windows widened to list
+each count; 3 query vectors × 5 runs; Apple M4 Max):
+
+| listed chunks | count | exact KNN | over-fetch, k=4096 |
+|---|---|---|---|
+| 514 | 2.0 ms | 30.4 ms | 79.1 ms |
+| 2,038 | 2.8 ms | 36.8 ms | 79.8 ms |
+| 5,004 | 3.3 ms | 46.7 ms | 80.4 ms |
+| 10,000 | 4.1 ms | 61.5 ms | 81.0 ms |
+| 15,004 | 5.1 ms | 77.2 ms | 81.6 ms |
+| 20,000 | 3.9 ms | 91.8 ms | 81.5 ms |
+| 28,546 | 4.0 ms | 123.2 ms | 89.3 ms |
+
+An unfiltered KNN at k = 1,000 took 64 ms. So the bound is 15,000, for
+both lists. The cards, at most one a document, cross over near 2,900
+listed cards (19.7 ms exact against 20.1 ms) and cost 28.7 ms against
+23.4 ms at the 4,546 a broad window lists; the exactness is worth that.
+
+| filter (path) | listed chunks | vector p50 | cards p50 |
+|---|---|---|---|
+| none (over-fetch, k=1000) | 50,938 | 65.1 ms | 11.2 ms |
+| the copy's last 30 days (exact) | 1,054 | 36.5 ms | 10.3 ms |
+| a calendar year (exact) | 7,707 | 57.6 ms | 14.8 ms |
+| a site of 356 documents (exact) | 3,487 | 47.3 ms | 27.3 ms |
+| all but the last year (over-fetch, k=4096) | 27,020 | 85.7 ms | 33.4 ms |
+
+Each is `VectorSearch` at the search's depth of 800 and `SearchCards` at
+200, the count included. The site's cards take longer than its chunks'
+share: the card count reads every card row before the site's seek.
+
+**The over-fetch's k.** A set past the bound is most of the library: the
+dashboard's content type `article`, which search as you type runs on
+every keystroke, leaves 40,748 of 51,052 chunks. Reading the nearest
+4,096 for it cost 20 ms more than the unfiltered search's 1,000, though
+four in five of any 1,000 pass. So the over-fetch reads the unfiltered
+k divided by the set's share of the index, rounded up, at least that k
+and at most 4,096 (`overFetchKFor`): `⌈1000 · total / n⌉`, 1,253 for
+`article`, about as many passing rows as the unfiltered over-fetch holds
+of the library. The index's total is `SELECT count(*) FROM chunks` (a
+chunk has its vector while it exists; a covering scan of
+`idx_chunks_document`, 0.1 ms warm) or the embedded cards' count (a scan
+of the cards, 0.3 ms), counted with each such search: cheaper than
+keeping a cache in step. The set's count runs to its end, since the
+share needs it: 4 ms for `article` against 2 ms capped at the bound.
+Measured on a copy of the owner's library, a build over-fetching at
+4,096 against one sizing k (`VectorSearch` at 800 and `SearchCards` at
+200, the counts included, p50 of 3 stored chunk vectors × 5 runs after a
+warm-up, three rounds alternating the builds; Apple M4 Max):
+
+| filter (path) | vector, k = 4,096 build | vector, sized k build | cards, both |
+|---|---|---|---|
+| none (k = 1,000 in both) | 79.2 ms | 76.5 ms | 13.5 ms |
+| content type `article` (over-fetch, k = 1,253) | 99.3 ms | 85.1 ms | 32.4 ms (exact, 4,731 cards) |
+| the copy's last 30 days (exact in both) | 42.4 ms | 42.6 ms | 12.2 ms |
+
+The unfiltered and exact rows run the same statements in both builds,
+so their difference is the rounds' noise: against its build's
+unfiltered list, `article` cost 20.1 ms more at 4,096 and 8.6 ms more at
+its sized k. The `article` filter's cards are 4,731 of 7,557, under the
+bound, so they take the exact path in both builds, at 32 ms against 13.5
+ms unfiltered; their crossover with a sized over-fetch is unmeasured
+(see "How to revisit").
+
+**The trap, and its guard.** When the IN list names an ID vec0 holds no
+vector for, `vec0_rowid_from_id` returns `SQLITE_EMPTY` and the KNN
+returns no rows and no error, whatever else the list holds (verified in
+the source; `TestVec0_KNNBehaviour` pins it, and k ≤ 4,096, so an upgrade
+that changes either fails there). So when the exact path finds nothing
+though its count was above 0, `SELECT EXISTS (<set>)` runs. False: the
+set changed between the statements, and the empty answer stands. True:
+the index is missing a vector (`store.ErrVectorIndexInconsistent`), and
+the list reads the over-fetch instead, its k sized by the set's count as
+above, which finds the set's rows that have vectors among the nearest it
+reads, and the store logs one WARN for that index, once per process,
+saying `curio reindex --all` embeds them again. Failing the list instead
+would degrade the search to its keyword lists: one missing vector, which
+a damaged index or a hand edit can leave, would cost every
+narrow-filtered search both semantic lists until a reindex, where the
+over-fetch costs a narrow filter only the rows it doesn't reach.
+This WARN is the store's one log line (`DB.SetLog` in tests): the
+fallback hides the problem from its caller, so the store says it.
+
+### `undated`
+
+A date-filtered search answers `undated`: the number of the tenant's
+documents, of any state, that pass the request's filters with
+`include_undated` and fail them without it, among those its other
+filters pass. That is the documents a date dimension couldn't judge,
+left out or kept, the same number either way, and the same on every page
+of every query with these filters. It is one aggregate,
+`DocumentIndex.CountUndated`, run in the keyword errgroup (a failure fails
+the search, as BM25's does) and timed as the `undated` stage: about 8 ms
+for a saved window over the owner's library, where it counts 3,011
+documents. It is absent without a date dimension, the dashboard's search
+included.
+
+**Not the query's pool.** The seed counted the documents the query
+matched in its pool and left out for an unknown date. That needs the
+lists run over the undated documents too: 3,011 of the owner's documents,
+which would push every narrow date filter past the exact path's bound, or
+need a second set of list runs.
+
+### Surfaces
+
+`api/openapi.yaml` describes every dimension with its trust and undated
+semantics, `undated`, and `saved_date` (a `SavedDate` enum) on the
+bookmark, the bookmark list item and a search hit's bookmarks; the
+"not implemented" sentence names only tag filters, per-request weights
+and the collapse strategy. `client.SearchFilters` carries every
+dimension, as typed. `curio search` gains `--saved-after`,
+`--saved-before`, `--published-after`, `--published-before`, `--site`
+(repeatable), `--folder` (repeatable, a `StringArray`: a folder's name may
+hold a comma) and `--include-undated`, and prints one line on `undated`.
+`curio-mcp`'s `search_bookmarks` takes the same fields, described for a
+client model ('in 2020' is after 2020-01-01, before 2021-01-01; 'last
+week' is after the date seven days before today, before tomorrow; a
+local day is a date-time with its offset), and returns `undated` with a
+note. A filter field an older daemon doesn't know still gets its 400
+("unknown field … restart the daemon"). The dashboard shows a save's
+time by its class (see "Library: a Date saved order lists saves").
+
+### Measured on copies of the owner's library
+
+`make search-eval` with the owner's config.yaml, on copies of PR 2a's
+baseline copy (schema 19, its card vectors embedded), so unfiltered
+rankings compare exactly:
+
+- **Unfiltered rankings are unchanged.** All 50 queries rank exactly the
+  documents, in the order, of PR 2a's baseline, every group metric
+  +0.000.
+- **The oracle filters.** A private copy of the query file in which only
+  the five temporal queries and the analytic query carry the filters an
+  ideal reading of their words sets (saved windows all, each named period
+  read inclusively, `include_undated` false). The 44 others rank as
+  before. The temporal kind's R@10 rose from 0.257 to
+  0.495, R@100 from 0.738 to 0.898, nDCG@10 from 0.406 to 0.932 and MRR
+  from 0.516 to 1.000; the analytic query's from 0.000, 0.023, 0.000 and
+  0.037 to 0.008, 0.046, 0.095 and 0.250; all queries' nDCG@10 from 0.655
+  to 0.709. One metric fell: one temporal query's R@100, 0.794 to 0.714.
+  Of its 63 judged documents 2 were saved at a known date outside its
+  window, which it leaves out by definition, and 3 in it are now
+  outranked by other documents in it that the exact vector list reaches
+  and the over-fetch never did; its nDCG@10 rose from 0.511 to 0.737.
+- **Latency**, hybrid total p50, the median of three rounds of the 50
+  queries run back to back: unfiltered 136.7 ms; every query with the
+  copy's last 30 days 113.1 ms (−23.6); with a site of a few hundred
+  documents 145.1 ms (+8.4); with all but the last year, which takes the
+  over-fetch, 163.9 ms (+27.2), at k = 4,096, before the over-fetch was
+  sized by the set's share (above).
+- **After the SRE review's fixes** (fail-closed inserts, the owed
+  retries, the sized over-fetch, the fallback, the caps), on a fresh copy
+  whose cards were embedded anew: all 50 unfiltered queries still rank
+  exactly as PR 2a's baseline does, the saved-date counts are the same,
+  and with the oracle filters the temporal kind is unchanged (nDCG@10
+  0.932, R@100 0.898). 49 of the 50 rank exactly as before; the analytic
+  query ranks the same 100 documents, reordered from rank 6 on, its
+  metrics unchanged: its saved window leaves 26,377 chunks, past the
+  bound, so its vector list now reads the nearest 1,936 instead of 4,096.
+- **The upgrade**, a throwaway daemon on a scratch home holding a copy
+  (its queue paused, both auto-pulls off): migration 020 took 21 ms (68 ms
+  under the measuring harness), and the start classified 7,589 bookmarks
+  in 31 ms, 4,547 of them changed from the migration's unknown, ending
+  exactly at the per-source counts above, with no WARN or ERROR.
+
+### Known limitations
+
+- The document page still shows a published date the filters distrust
+  as "published".
+- In a library far larger than the owner's, a filter past the bound may
+  leave the over-fetch fewer passing chunks among the nearest 4,096 than
+  the list's depth.
+- The sized over-fetch reads, on average, a list's depth of a broad
+  filter's rows; a query whose neighbourhood holds few of them gets a
+  shorter list than the nearest 4,096 would have given.
+- The owed classifications are in memory: a daemon that stops while one
+  is owed leaves it to the next start, which classifies everything.
+- A first dateless import that lasts more than 10 minutes, or one
+  resumed later, dates its later rows approx.
+- A bookmark-level filter of each dimension is met by any of the
+  document's bookmarks, each dimension on its own (above).
+
+**Going back to 2.6.x.** 2.6's goose ignores database version 20, as it
+does 19, so a 2.6 daemon starts on it. Its `Ingest` leaves `dateless` 0
+and `saved_date` 'unknown' on the rows it writes (the columns' defaults);
+2.7's next start classifies those rows, marking its Safari rows dateless
+first, since every Safari bookmark is; a dateless HTML row 2.6 wrote has
+lost that fact and is classified as dated. No config key changes.
+
+**How to revisit:** a change of the rule is a change in
+`internal/docmeta/saveddate.go`; the next start derives every class
+again, writing those that changed. The bound is a constant measured as
+above; measure the exact path against the over-fetch at each count again,
+on a copy, before moving it. The cards share it, and their crossover was
+measured against an over-fetch at 4,096: a bound of their own, measured
+against the sized over-fetch, may take a broad filter's cards off the
+exact path.
 
 ---
 

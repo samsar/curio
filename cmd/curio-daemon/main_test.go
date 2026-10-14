@@ -1377,6 +1377,98 @@ func TestStart_DocumentFields(t *testing.T) {
 	})
 }
 
+// TestStart_SavedDates: the start marks dateless the Safari bookmarks an
+// older daemon wrote dated, classifies every bookmark's saved date and
+// logs one INFO with the counts, reporting when on healthz; a bookmark
+// whose time doesn't parse is one WARN naming its ID; one that can't
+// classify still starts, logging one ERROR and reporting it; and a
+// shutdown during it fails the start, logging nothing.
+func TestStart_SavedDates(t *testing.T) {
+	// Five bookmarks of one bulk stamp, a lone save and a Safari bookmark,
+	// inserted as an older daemon would, with no class and dated.
+	const bookmarks = `INSERT INTO bookmarks (id, tenant_id, url, saved_at, source, folder_path) VALUES
+		('b1', 'local', 'https://example.com/1', '2024-01-01T00:00:00.000Z', 'chrome', '/A'),
+		('b2', 'local', 'https://example.com/2', '2024-01-01T00:00:00.100Z', 'chrome', '/A'),
+		('b3', 'local', 'https://example.com/3', '2024-01-01T00:00:00.200Z', 'chrome', '/B'),
+		('b4', 'local', 'https://example.com/4', '2024-01-01T00:00:00.300Z', 'chrome', '/B'),
+		('b5', 'local', 'https://example.com/5', '2024-01-01T00:00:00.400Z', 'chrome', '/C'),
+		('b6', 'local', 'https://example.com/6', '2025-01-01T00:00:00.000Z', 'chrome', '/A'),
+		('s1', 'local', 'https://example.com/7', '2025-02-01T00:00:00.000Z', 'safari', '/A')`
+	t.Run("a sound home", func(t *testing.T) {
+		home := newHome(t, freeLoopbackAddr(t))
+		seedHome(t, home, func(db *sqlitestore.DB) {
+			_, err := db.Exec(bookmarks)
+			require.NoError(t, err)
+		})
+		d, db, logs := startHome(t, home)
+		classified := logs.messages("saved dates classified")
+		require.Len(t, classified, 1)
+		assert.Equal(t, int64(7), classified[0]["bookmarks"])
+		assert.Equal(t, int64(1), classified[0]["changed"], "the lone save; the stamp was unknown already")
+		assert.Equal(t, []any{int64(1), int64(0), int64(6)},
+			[]any{classified[0]["exact"], classified[0]["approx"], classified[0]["unknown"]})
+		assert.Equal(t, int64(1), classified[0]["marked_dateless"])
+		assert.Contains(t, classified[0], "took_ms")
+		var dateless bool
+		require.NoError(t, db.QueryRow(`SELECT dateless FROM bookmarks WHERE id = 's1'`).Scan(&dateless))
+		assert.True(t, dateless)
+		assert.Empty(t, logs.at(slog.LevelWarn, "saved dates"))
+		state := d.savedDates.State()
+		assert.Equal(t, api.SavedDates{CheckedAt: state.CheckedAt, Changed: 1, Owed: []api.OwedClassification{}}, state)
+		assert.False(t, state.CheckedAt.IsZero())
+		assert.Same(t, d.savedDates, d.apiDeps.SavedDates)
+	})
+	t.Run("a time that doesn't parse", func(t *testing.T) {
+		home := newHome(t, freeLoopbackAddr(t))
+		seedHome(t, home, func(db *sqlitestore.DB) {
+			_, err := db.Exec(bookmarks + `;
+				UPDATE bookmarks SET saved_at = 'sometime in 2024' WHERE id = 'b6'`)
+			require.NoError(t, err)
+		})
+		_, _, logs := startHome(t, home)
+		skipped := logs.at(slog.LevelWarn, "saved dates")
+		require.Len(t, skipped, 1)
+		attrs := map[string]any{}
+		skipped[0].Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.Any()
+			return true
+		})
+		assert.Equal(t, int64(1), attrs["skipped"])
+		assert.Equal(t, []string{"b6"}, attrs["ids"])
+		assert.NotContains(t, fmt.Sprint(attrs), "sometime", "a row's ID alone")
+		assert.Len(t, logs.messages("saved dates classified"), 1)
+	})
+	t.Run("a classification that fails", func(t *testing.T) {
+		home := newHome(t, freeLoopbackAddr(t))
+		seedHome(t, home, func(db *sqlitestore.DB) {
+			_, err := db.Exec(bookmarks + `;
+				CREATE TRIGGER t_fail BEFORE UPDATE OF saved_date ON bookmarks BEGIN SELECT RAISE(ABORT, 'injected'); END;`)
+			require.NoError(t, err)
+		})
+		d, _, logs := startHome(t, home)
+		failed := logs.at(slog.LevelError, "saved dates")
+		require.Len(t, failed, 1)
+		assert.Contains(t, failed[0].Message, "the next start tries again")
+		assert.Empty(t, logs.messages("saved dates classified"))
+		state := d.savedDates.State()
+		assert.Contains(t, state.Error, "injected")
+		assert.False(t, state.CheckedAt.IsZero())
+	})
+	t.Run("a shutdown during it", func(t *testing.T) {
+		db, err := sqlitestore.Open(context.Background(), filepath.Join(t.TempDir(), "curio.db"))
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, db.Close()) })
+		_, err = sqlitestore.Migrate(context.Background(), db)
+		require.NoError(t, err)
+		logs := recordLogs(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err = ensureSavedDates(ctx, db)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Empty(t, logs.at(slog.LevelError, "saved dates"))
+	})
+}
+
 // TestHoldReason: a drift the sample verified holds the interests'
 // rebuilds as drifted, one it couldn't verify as perhaps drifted, and no
 // drift holds nothing.

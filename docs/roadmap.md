@@ -295,6 +295,22 @@ before it:
   never on the first page, is first for 97.7% of such queries and on the
   first page for all (decisions.md "Metadata search: a fields index and a
   card per document").
+- PR 2c, done: real saved dates and filters. Every bookmark's `saved_at`
+  is classified exact, approx or unknown from its source's bookmarks
+  (migration 020; at each start and after each import), so a browser's
+  bulk stamp or an import's own time is no save date: on the owner's
+  library 4,416 exact, 131 approx and 3,042 unknown of 7,589. Search takes
+  saved and published windows (`include_undated` keeps what they can't
+  judge, and the response counts it as `undated`), sites and folders,
+  besides content type, host and source, through the API, `curio search`
+  and MCP, and a narrow filter's KNN lists rank exactly the rows it leaves
+  (sqlite-vec's key-IN constraint, at most 15,000 IDs). The dashboard
+  marks an approximate or unknown save. Query files take per-query
+  filters, and searcheval says which rankings match its baseline. On the
+  owner's copy unfiltered rankings are unchanged, the temporal queries'
+  nDCG@10 under the filters an ideal reading of their words sets rose
+  from 0.406 to 0.932, and a narrow or site filter costs a search no more
+  than 20 ms (decisions.md "Saved dates and search filters").
 
 ## M7 — Hosted mode
 

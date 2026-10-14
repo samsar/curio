@@ -34,9 +34,9 @@ type env struct {
 	log      *slog.Logger
 }
 
-// ranker ranks the library's documents for a query.
+// ranker ranks the library's documents for a query under its filters.
 type ranker interface {
-	rank(ctx context.Context, query string) (ranking, error)
+	rank(ctx context.Context, query string, filters store.SearchFilters) (ranking, error)
 }
 
 // ranking is a query's documents, best first, and how long each stage of
@@ -155,8 +155,9 @@ func newEngineRanker(e env, cfg search.Config) engineRanker {
 // report BM25 alone as the pipeline being measured.
 var errDegraded = errors.New("the search came back keyword-only")
 
-func (r engineRanker) rank(ctx context.Context, query string) (ranking, error) {
-	res, err := r.engine.Search(ctx, search.Request{TenantID: store.LocalTenantID, Query: query, K: store.MaxSearchK})
+func (r engineRanker) rank(ctx context.Context, query string, filters store.SearchFilters) (ranking, error) {
+	res, err := r.engine.Search(ctx, search.Request{TenantID: store.LocalTenantID, Query: query, K: store.MaxSearchK,
+		Filters: filters})
 	if err != nil {
 		return ranking{}, err
 	}
@@ -170,6 +171,7 @@ func (r engineRanker) rank(ctx context.Context, query string) (ranking, error) {
 		{"titles", res.Timings.Titles},
 		{"vector", res.Timings.Vector},
 		{"cards", res.Timings.Cards},
+		{"undated", res.Timings.Undated},
 		{"fuse", res.Timings.Fuse},
 		{"hydrate", res.Timings.Hydrate},
 	}}

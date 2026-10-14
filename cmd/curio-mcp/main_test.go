@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -72,6 +73,11 @@ func fakeDaemon(t *testing.T, lastSearch *atomic.Value) http.Handler {
 			return
 		}
 		lastSearch.Store(req)
+		filters, _ := req["filters"].(map[string]any)
+		if filters["site"] != nil && filters["site"].([]any)[0] == "https://example.com" {
+			problem(t, w, http.StatusBadRequest, `filters.site: "https://example.com" is not a domain`)
+			return
+		}
 		resp := map[string]any{
 			"query": req["query"],
 			"items": []map[string]any{{
@@ -82,6 +88,9 @@ func fakeDaemon(t *testing.T, lastSearch *atomic.Value) http.Handler {
 				"score":   0.42,
 				"matches": []map[string]any{{"chunk_id": "c1", "text": "alpha body", "snippet": "alpha <em>body</em>"}},
 			}},
+		}
+		if filters["saved_after"] != nil {
+			resp["undated"] = 3
 		}
 		switch req["query"] {
 		case "offline":
@@ -641,6 +650,77 @@ func TestMCP_SearchDegraded(t *testing.T) {
 	assert.True(t, out.Degraded)
 	assert.NotEmpty(t, out.Warnings)
 	assert.Len(t, out.Results, 1)
+}
+
+// TestMCP_SearchFilters: every filter field reaches the daemon under the
+// API's name, as given.
+func TestMCP_SearchFilters(t *testing.T) {
+	cs := connectMCP(t)
+	filters := map[string]any{
+		"content_type": []any{"article"}, "source": []any{"chrome"}, "host": []any{"github.com"},
+		"site": []any{"example.com"}, "folder": []any{"/Bookmarks Bar/A,B"},
+		"saved_after": "2024-01-01", "saved_before": "2024-02-01T00:00:00+01:00",
+		"published_after": "2020-01-01", "published_before": "2021-01-01", "include_undated": true,
+	}
+	args := map[string]any{"query": "alpha"}
+	maps.Copy(args, filters)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "search_bookmarks", Arguments: args})
+	require.NoError(t, err)
+	require.False(t, res.IsError, textOf(res))
+	req := cs.lastSearch.Load().(map[string]any)
+	assert.Equal(t, filters, req["filters"])
+
+	_, err = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "search_bookmarks",
+		Arguments: map[string]any{"query": "alpha"}})
+	require.NoError(t, err)
+	assert.NotContains(t, cs.lastSearch.Load().(map[string]any), "filters", "no filter, none sent")
+}
+
+// TestMCP_SearchUndated: a date-filtered search says how many documents
+// it couldn't judge, in the text and the structured output, and whether
+// they were kept; one without a date filter says nothing.
+func TestMCP_SearchUndated(t *testing.T) {
+	cs := connectMCP(t)
+	for include, note := range map[bool]string{
+		false: "Note: 3 documents have no date the date filters can judge; they were left out " +
+			"(include_undated keeps them).\n",
+		true: "Note: 3 documents have no date the date filters can judge; they were kept.\n",
+	} {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "search_bookmarks",
+			Arguments: map[string]any{"query": "alpha", "saved_after": "2024-01-01", "include_undated": include}})
+		require.NoError(t, err)
+		assert.True(t, strings.HasSuffix(textOf(res), note), textOf(res))
+		raw, err := json.Marshal(res.StructuredContent)
+		require.NoError(t, err)
+		var out searchOutput
+		require.NoError(t, json.Unmarshal(raw, &out))
+		require.NotNil(t, out.Undated)
+		assert.Equal(t, 3, *out.Undated)
+	}
+
+	res := search(t, cs.ClientSession)
+	assert.NotContains(t, textOf(res), "no date")
+	raw, err := json.Marshal(res.StructuredContent)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "undated")
+}
+
+// TestMCP_SearchRefusedFilter: a filter the daemon refuses is the tool's
+// error, naming the field.
+func TestMCP_SearchRefusedFilter(t *testing.T) {
+	cs := connectMCP(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "search_bookmarks",
+		Arguments: map[string]any{"query": "alpha", "site": []string{"https://example.com"}}})
+	require.NoError(t, err)
+	assert.True(t, res.IsError)
+	assert.Contains(t, textOf(res), `filters.site: "https://example.com" is not a domain`)
+}
+
+func TestUndatedNote(t *testing.T) {
+	assert.Equal(t, "Note: 1 document has no date the date filters can judge; they were kept.\n",
+		undatedNote(1, true))
+	assert.Equal(t, "Note: 0 documents have no date the date filters can judge; they were left out "+
+		"(include_undated keeps them).\n", undatedNote(0, false))
 }
 
 func TestDegradedNote(t *testing.T) {

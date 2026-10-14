@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"maps"
 	"os"
 	"path/filepath"
@@ -261,6 +263,93 @@ func TestSearchFieldsCheck(t *testing.T) {
 			}
 			assert.Contains(t, hint, tc.hintContains)
 			assert.Contains(t, hint, "docs/setup.md")
+		})
+	}
+}
+
+// failingClassifications is a bookmark store whose saved-date
+// classifications fail.
+type failingClassifications struct{ store.BookmarkStore }
+
+func (failingClassifications) ClassifySavedDates(context.Context, string, string) (store.SavedDatesClassified,
+	error) {
+	return store.SavedDatesClassified{}, errors.New("database is locked")
+}
+
+// TestStatus_SavedDates: status warns, a line each, while the daemon's
+// start couldn't classify the saved dates and while an import's source
+// is owed a classification, and says nothing of a start that classified
+// them.
+func TestStatus_SavedDates(t *testing.T) {
+	checked := time.Now()
+	startFailed := "warning: the daemon's start couldn't classify the saved dates (classify saved dates: disk I/O " +
+		"error); date filters may misjudge bookmarks; run `curio doctor`\n"
+	owed := "warning: the saved dates of the chrome and safari bookmarks an import stored aren't classified yet; " +
+		"date filters leave them out until a retry does; run `curio doctor`\n"
+	for name, tc := range map[string]struct {
+		start api.SavedDates
+		owe   []string
+		want  []string
+	}{
+		"classified": {start: api.SavedDates{CheckedAt: checked}},
+		"start failed": {start: api.SavedDates{CheckedAt: checked, Error: "classify saved dates: disk I/O error"},
+			want: []string{startFailed}},
+		"owed": {start: api.SavedDates{CheckedAt: checked}, owe: []string{"safari", "chrome"}, want: []string{owed}},
+		"both": {start: api.SavedDates{CheckedAt: checked, Error: "classify saved dates: disk I/O error"},
+			owe: []string{"chrome", "safari"}, want: []string{startFailed, owed}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.Start(t, func(d *api.Deps) {
+				d.SavedDates = api.NewSavedDateClassifier(context.Background(), api.SavedDateOptions{
+					Bookmarks: failingClassifications{d.Bookmarks}, Start: tc.start, Log: d.Log})
+				for _, source := range tc.owe {
+					d.SavedDates.Classify(source)
+				}
+			})
+			out := mustRun(t, srv, "status")
+			assert.Equal(t, len(tc.want), strings.Count(out, "warning: "), out)
+			for _, line := range tc.want {
+				assert.Contains(t, out, line)
+			}
+		})
+	}
+}
+
+// TestSavedDatesCheck: doctor passes a start that classified the saved
+// dates, saying when, and fails one that couldn't, with the restart that
+// fixes it, and a source owed a classification, naming the oldest
+// failure, with the retry and the restart.
+func TestSavedDatesCheck(t *testing.T) {
+	checked := time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC)
+	since := checked.Add(time.Hour)
+	at := localTime(checked)
+	for name, tc := range map[string]struct {
+		saved               client.SavedDates
+		status              checkStatus
+		detail, hintContain string
+	}{
+		"classified": {client.SavedDates{CheckedAt: checked, Changed: 12}, statusOK,
+			"classified when the daemon started (" + at + ")", ""},
+		"start failed": {client.SavedDates{CheckedAt: checked, Error: "disk I/O error",
+			Owed: []client.OwedClassification{{Source: "chrome", Since: since, Error: "database is locked"}}},
+			statusFail, "the daemon's start (" + at + ") couldn't classify them: disk I/O error; date filters read " +
+				"the classes the bookmarks had", "`curio daemon stop`, then any curio command starts it again"},
+		"owed": {client.SavedDates{CheckedAt: checked, Owed: []client.OwedClassification{
+			{Source: "chrome", Since: since.Add(time.Minute), Error: "database is locked"},
+			{Source: "html", Since: since, Error: "disk I/O error"}}},
+			statusFail, "the chrome and html bookmarks an import stored aren't classified, failing since " +
+				localTime(since) + ": disk I/O error; date filters leave them out", "the daemon retries every minute"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, detail, hint := savedDatesCheck(tc.saved)
+			assert.Equal(t, tc.status, status)
+			assert.Equal(t, tc.detail, detail)
+			if tc.hintContain == "" {
+				assert.Empty(t, hint)
+				return
+			}
+			assert.Contains(t, hint, tc.hintContain)
+			assert.Contains(t, hint, "its start classifies every bookmark")
 		})
 	}
 }

@@ -151,7 +151,10 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 				{DocumentID: evilQuotes, BookmarkTitle: evilScript, URL: evilURL, Score: 0.8},
 				{DocumentID: "doc", URL: "https://example.com/" + strings.Repeat("y", 700) + evilAttr, Score: 0.7}}},
 			Bookmarks: BookmarksPanel{Bookmarks: []DocumentBookmark{{Source: evilScript, Folder: evilAttr,
-				Title: evilQuotes, Tags: []string{evilScript, evilURL}, SavedAt: at}}},
+				Title: evilQuotes, Tags: []string{evilScript, evilURL}, Saved: savedTimes(at)[0]},
+				{Source: "chrome", Folder: evilScript, Saved: savedTimes(at)[1]},
+				{Source: "safari", Title: evilAttr, Saved: savedTimes(at)[2]},
+				{Source: evilAttr, Saved: savedTimes(at)[3]}}},
 			Jobs: DocumentJobs{DocumentID: evilAttr, State: evilAttr, Baseline: DocumentBaseline{Updated: at,
 				Extraction: evilScript}, Current: DocumentBaseline{Updated: at, Extraction: evilAttr},
 				Jobs: []JobLine{{Kind: evilScript, Running: true, Attempts: 2},
@@ -243,12 +246,14 @@ func sampleVariants(t testing.TB) map[string][]any {
 	panelErr := &PanelError{Message: evilScript, RequestID: evilAttr}
 	row := LibraryRow{DocumentID: evilAttr, Title: evilScript, URL: evilURL, State: evilQuotes, ContentType: evilAttr,
 		When: at}
+	saved := savedTimes(at)
 	saves := []LibraryRow{
 		{DocumentID: evilAttr, BookmarkTitle: evilQuotes + evilScript, URL: evilURL, State: "failed",
-			ContentType: evilAttr, When: at, Source: evilScript, Folder: evilAttr, LastError: evilScript,
-			FailureCause: evilQuotes},
-		{BookmarkTitle: evilAttr, URL: evilURL, When: at, Source: evilAttr, Folder: evilScript},
-		{URL: "https://example.com/" + evilQuotes, When: at, Source: "safari"},
+			ContentType: evilAttr, When: at, Saved: &saved[0], Source: evilScript, Folder: evilAttr,
+			LastError: evilScript, FailureCause: evilQuotes},
+		{BookmarkTitle: evilAttr, URL: evilURL, When: at, Saved: &saved[1], Source: evilAttr, Folder: evilScript},
+		{URL: "https://example.com/" + evilQuotes, When: at, Saved: &saved[2], Source: "safari"},
+		{URL: evilURL, When: at, Saved: &saved[3], Source: evilScript},
 	}
 	counts := &LibraryCounts{Documents: 7467, Bookmarks: 7497, ByState: map[string]int{"fetched": 4498, evilAttr: 2}}
 	return map[string][]any{
@@ -705,6 +710,7 @@ func partialSamples(t testing.TB) map[string][]any {
 		"logo":        {nil},
 		"icons.html":  {nil},
 		"reltime":     {time.Time{}, at},
+		"saved-time":  append(anys(savedTimes(at)), SavedTime{}),
 		"doc-title": {DocRef{ID: evilAttr, Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, URL: evilURL},
 			DocRef{Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, Fallback: evilScript, URL: evilURL},
 			DocRef{Fallback: evilAttr + evilQuotes, URL: evilURL}},
@@ -712,6 +718,8 @@ func partialSamples(t testing.TB) map[string][]any {
 			Source: evilScript, Folder: evilAttr, ContentType: evilAttr, When: at, FailureCause: evilScript,
 			LastError: evilAttr},
 			DocCell{Ref: DocRef{Fallback: evilScript, URL: evilURL}, Source: evilAttr},
+			DocCell{Ref: DocRef{ID: evilAttr, URL: evilURL}, Source: evilScript, When: at, Saved: &SavedTime{At: at,
+				Imported: at, Date: string(store.SavedDateUnknown)}},
 			DocCell{Ref: DocRef{URL: evilURL}}},
 		"library-head": {LibraryHead{Counts: &LibraryCounts{Documents: 3, Bookmarks: 4},
 			Views: LibraryViews{Failed: 2, Counted: true}}, LibraryHead{Views: LibraryViews{OnFailures: true}}},
@@ -1176,4 +1184,25 @@ func focusable(n *html.Node) bool {
 		return true
 	}
 	return hasAttr(n, "tabindex")
+}
+
+// savedTimes are a saved time of each class, then one of a class the
+// store never writes, which reads as unknown.
+func savedTimes(at time.Time) []SavedTime {
+	imported := at.Add(36 * time.Hour)
+	return []SavedTime{
+		{At: at, Imported: imported, Date: string(store.SavedDateExact)},
+		{At: at, Imported: imported, Date: string(store.SavedDateApprox)},
+		{At: at, Imported: imported, Date: string(store.SavedDateUnknown)},
+		{At: at, Imported: imported, Date: evilScript},
+	}
+}
+
+// anys is values as a slice of any.
+func anys[T any](values []T) []any {
+	out := make([]any, len(values))
+	for i, v := range values {
+		out[i] = v
+	}
+	return out
 }

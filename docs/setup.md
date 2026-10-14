@@ -896,6 +896,18 @@ fields, and the third checks the database itself, which answers `ok` when
 it is sound. If that one reports damage, keep a copy of the home before
 anything else (`cp -R ~/.curio ~/.curio.damaged`).
 
+**`saved dates` failing in `curio doctor`** — how far each bookmark's
+saved time can be trusted (exact, approx or unknown) is classified from
+the bookmarks of its source, after each import and at each start. Until
+then the bookmarks an import stored claim no date: a date filter leaves
+them out and counts them as undated. When the classification after an
+import fails (another writer held the database, say), the daemon retries
+it every minute, and `curio status` warns while it is owed; when the
+start's own classification fails, date filters read the classes the
+bookmarks had. Either way, a restart (`curio daemon stop`; the next
+command starts it) classifies every bookmark again, and `curio doctor`
+then says when.
+
 **`curio home from an older curio`** — the home was made by a curio from
 before home formats: its vectors came from another embedding model, under
 other rules, and nothing converts them. The daemon refuses to start and
