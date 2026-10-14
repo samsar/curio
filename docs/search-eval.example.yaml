@@ -19,6 +19,13 @@
 #   tags      optional; each tag is a group of its own, too.
 #   note      optional; a comment on the query, never scored.
 #   query     the text, as you would type it into search.
+#   filters   optional; the search filters the query runs with, under
+#             POST /v1/search's names: saved_after, saved_before,
+#             published_after, published_before (a date, midnight UTC, or
+#             an RFC 3339 date-time with a zone; windows are
+#             [after, before)), site and folder (lists), and
+#             include_undated (true or false). A filter search would
+#             refuse fails the run before any query, named by its id.
 #   relevant  the documents judged relevant, by URL: a URL alone is grade 1
 #             (relevant), {url: ..., grade: 2} is what the query is after.
 #             URLs are normalized as curio stores them, so a URL pasted from
@@ -54,3 +61,16 @@ queries:
     relevant:
       - https://example.com/travel/bakery-map
       - {url: "https://example.com/travel/lisbon-pasteis", grade: 2}
+
+  - id: saved-bread-2024
+    kind: temporal
+    tags: [baking]
+    note: the filters an ideal reading of "in 2024" sets
+    query: bread recipes I saved in 2024
+    filters:
+      saved_after: 2024-01-01
+      saved_before: 2025-01-01
+      site: [example.com]
+    relevant:
+      - {url: "https://example.com/baking/rye-loaf", grade: 2}
+      - https://example.com/baking/levain-basics

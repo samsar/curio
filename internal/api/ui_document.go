@@ -223,7 +223,12 @@ func (h pageHandlers) bookmarksPanel(r *http.Request, id string) ui.BookmarksPan
 	var p ui.BookmarksPanel
 	for _, b := range bms {
 		p.Bookmarks = append(p.Bookmarks, ui.DocumentBookmark{Source: b.Source, Folder: deref(b.FolderPath),
-			Title: deref(b.Title), Tags: b.Tags, SavedAt: b.SavedAt})
+			Title: deref(b.Title), Tags: b.Tags, Saved: savedTime(b.SavedAt, b.CreatedAt, string(b.SavedDate))})
 	}
 	return p
+}
+
+// savedTime is a bookmark's saved time as the pages show it.
+func savedTime(savedAt, createdAt time.Time, savedDate string) ui.SavedTime {
+	return ui.SavedTime{At: savedAt, Imported: createdAt, Date: savedDate}
 }

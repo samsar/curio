@@ -18,6 +18,7 @@ import (
 	"github.com/samsar/curio/internal/eval"
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -38,6 +39,10 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 		return err
 	}
 	qf, err := readQueries(opts.queries)
+	if err != nil {
+		return err
+	}
+	filters, err := resolveFilters(qf.set)
 	if err != nil {
 		return err
 	}
@@ -78,7 +83,7 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 
 	e := env{docs: lib.Documents, chunks: lib.Chunks, index: lib.Index, embedder: emb, cfg: cfg, log: log}
 	for _, v := range opts.variants {
-		vr, err := runVariant(ctx, v, e, qf.set, judged)
+		vr, err := runVariant(ctx, v, e, qf.set, filters, judged)
 		if err != nil {
 			return err
 		}
@@ -143,6 +148,30 @@ func readQueries(path string) (queryFile, error) {
 	}
 	sum := sha256.Sum256(data)
 	return queryFile{path: path, sha256: hex.EncodeToString(sum[:]), set: set}, nil
+}
+
+// resolveFilters resolves every query's filters as the daemon resolves a
+// request's, before any query runs, by index: a filter search would refuse
+// fails the run, naming the query by id, never by its text.
+func resolveFilters(qs *eval.QuerySet) ([]store.SearchFilters, error) {
+	out := make([]store.SearchFilters, len(qs.Queries))
+	for i, q := range qs.Queries {
+		if q.Filters == nil {
+			continue
+		}
+		f, err := filterRequest(*q.Filters).Resolve()
+		if err != nil {
+			return nil, fmt.Errorf("query %s: %w", queryLabel(q.ID, i), err)
+		}
+		out[i] = f
+	}
+	return out, nil
+}
+
+// filterRequest is a query's filters as the search takes them.
+func filterRequest(f eval.Filters) search.FilterRequest {
+	return search.FilterRequest{Site: f.Site, Folder: f.Folder, SavedAfter: f.SavedAfter, SavedBefore: f.SavedBefore,
+		PublishedAfter: f.PublishedAfter, PublishedBefore: f.PublishedBefore, IncludeUndated: f.IncludeUndated}
 }
 
 // pingTimeout bounds asking Ollama whether it has the embedding model.
@@ -305,13 +334,15 @@ func resolve(ctx context.Context, docs store.DocumentStore, chunks store.ChunkSt
 // totalStage is the stage the tool times itself: the whole rank call.
 const totalStage = "total"
 
-// runVariant ranks every query once, in file order, with v, and scores
-// each ranking. A ranking that fails fails the variant, naming the query,
-// except a degraded search, which is ranked again once first: the Ollama
-// the queries embed through may be the daemon's, busy indexing, and one
-// query's embed outlasting the engine's timeout shouldn't throw away the
-// run. The query's timings are its last ranking's.
-func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, judged map[string]resolved) (variantReport, error) {
+// runVariant ranks every query once, in file order, with v and its
+// filters, and scores each ranking. A ranking that fails fails the variant,
+// naming the query, except a degraded search, which is ranked again once
+// first: the Ollama the queries embed through may be the daemon's, busy
+// indexing, and one query's embed outlasting the engine's timeout
+// shouldn't throw away the run. The query's timings are its last
+// ranking's.
+func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, filters []store.SearchFilters,
+	judged map[string]resolved) (variantReport, error) {
 	rk, by := v.build(e), v.reach(e.cfg)
 	e.log.Info("running a variant", "variant", v.name, "queries", len(qs.Queries))
 	began := time.Now()
@@ -320,13 +351,13 @@ func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, judged
 	took := map[string][]time.Duration{}
 	for i, q := range qs.Queries {
 		start := time.Now()
-		r, err := rk.rank(ctx, q.Query)
+		r, err := rk.rank(ctx, q.Query, filters[i])
 		if errors.Is(err, errDegraded) {
 			// Named by id, as the report names queries: never the text.
 			e.log.Warn("a search came back keyword-only; ranking the query again", "variant", v.name,
 				"query_id", queryLabel(q.ID, i), "err", err)
 			start = time.Now()
-			r, err = rk.rank(ctx, q.Query)
+			r, err = rk.rank(ctx, q.Query, filters[i])
 		}
 		total := time.Since(start)
 		if err != nil {

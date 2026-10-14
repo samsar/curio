@@ -75,7 +75,7 @@ so a poll never replaces a button, and only their status announces.
 <div class="card-head"><h2 id="bookmarks">Bookmarks</h2></div>
 {{with .Bookmarks.Err}}<div class="card-body">{{template "panel-error" .}}</div>
 {{else}}{{with .Bookmarks.Bookmarks}}<div class="card-body flush"><ul class="bookmark-list">
-{{range .}}<li><div class="where"><strong>{{.Source}}</strong>{{with .Folder}}{{template "icon" "folder"}}<code>{{.}}</code>{{end}}{{range .Tags}}<span class="tag">{{.}}</span>{{end}}</div><div class="when">saved {{template "reltime" .SavedAt}}</div>{{with .Title}}<div class="title">{{.}}</div>{{end}}</li>
+{{range .}}<li><div class="where"><strong>{{.Source}}</strong>{{with .Folder}}{{template "icon" "folder"}}<code>{{.}}</code>{{end}}{{range .Tags}}<span class="tag">{{.}}</span>{{end}}</div><div class="when">{{template "saved-time" .Saved}}</div>{{with .Title}}<div class="title">{{.}}</div>{{end}}</li>
 {{end}}</ul></div>
 {{else}}<div class="card-body"><p class="empty-inline">No bookmark links here.</p></div>{{end}}{{end}}
 </section>

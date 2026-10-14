@@ -11,10 +11,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sqlitevec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -61,6 +63,16 @@ type DB struct {
 	// cardsJobDelay is how far ahead a write that changed a card queues
 	// the cards job: CardsJobDelay, but in tests (SetCardsJobDelay).
 	cardsJobDelay time.Duration
+	// exactKNNMaxIDs is the most IDs a KNN list ranks exactly under a
+	// narrowing filter: DefaultExactKNNMaxIDs, but in tests and
+	// measurements (SetExactKNNMaxIDs), which may set it between searches.
+	exactKNNMaxIDs atomic.Int64
+	// log receives the store's one warning, of a vector index missing
+	// vectors (knn.go); nil is slog.Default() at the time.
+	log atomic.Pointer[slog.Logger]
+	// inconsistent holds the vector indexes found missing vectors, by
+	// name, so each is warned of once.
+	inconsistent sync.Map
 }
 
 // Open opens (or creates) the SQLite database file at path. ":memory:" is
@@ -85,13 +97,33 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("ping sqlite %q: %w", path, errors.Join(err, db.Close()))
 	}
-	return &DB{DB: db, path: path, enqueued: newEnqueueSignal(), cardsJobDelay: CardsJobDelay}, nil
+	d := &DB{DB: db, path: path, enqueued: newEnqueueSignal(), cardsJobDelay: CardsJobDelay}
+	d.exactKNNMaxIDs.Store(DefaultExactKNNMaxIDs)
+	return d, nil
 }
 
 // SetCardsJobDelay sets how far ahead a write that changed a card queues
 // the cards job, CardsJobDelay until set: tests set 0 to claim it at once,
 // or a window of their own. Call it before the database is shared.
 func (d *DB) SetCardsJobDelay(delay time.Duration) { d.cardsJobDelay = delay }
+
+// SetExactKNNMaxIDs sets the most IDs a KNN list ranks exactly under a
+// narrowing filter, DefaultExactKNNMaxIDs until set: tests and
+// measurements set their own, at any time; a search that has counted its
+// IDs keeps the bound it counted against.
+func (d *DB) SetExactKNNMaxIDs(n int) { d.exactKNNMaxIDs.Store(int64(n)) }
+
+// SetLog sets the logger of the store's one warning, slog.Default() until
+// set; tests record it.
+func (d *DB) SetLog(log *slog.Logger) { d.log.Store(log) }
+
+// logger is the store's logger: SetLog's, or slog.Default().
+func (d *DB) logger() *slog.Logger {
+	if log := d.log.Load(); log != nil {
+		return log
+	}
+	return slog.Default()
+}
 
 // Migrate applies pending migrations from the embedded FS and returns the
 // schema version the database is left at. It is MigrateWithHooks with no

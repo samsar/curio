@@ -69,6 +69,7 @@ type Deps struct {
 	YouTubeFetcher  string                          // the yt-dlp YouTube videos go to, on healthz; empty when they go to the default fetcher
 	GitHubToken     bool                            // the GitHub fetcher sends a token, on healthz
 	DocumentFields  DocumentFields                  // what the daemon's start did to the documents' search fields, on healthz
+	SavedDates      *SavedDateClassifier            // classifies an import's source, owing what fails, on healthz; Ready makes one when nil
 	TenantID        string                          // default store.LocalTenantID
 	Log             *slog.Logger
 }
@@ -137,6 +138,10 @@ func (s *Server) Ready(deps Deps) error {
 	}
 	if deps.TenantID == "" {
 		deps.TenantID = store.LocalTenantID
+	}
+	if deps.SavedDates == nil {
+		deps.SavedDates = NewSavedDateClassifier(context.Background(), SavedDateOptions{Bookmarks: deps.Bookmarks,
+			TenantID: deps.TenantID, Log: deps.Log})
 	}
 	router, err := newRouter(deps, s.origin, s.pages)
 	if err != nil {

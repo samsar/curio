@@ -15,33 +15,30 @@ import (
 
 func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 	var (
-		k           int
-		contentType []string
-		source      []string
-		host        []string
+		k       int
+		filters client.SearchFilters
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Hybrid BM25 + vector search across indexed bookmarks",
-		Args:  cobra.MinimumNArgs(1),
+		Long: "Search the library by its text and by what each page was saved as.\n\n" +
+			"Filters narrow the documents searched; every filter given applies, and the values of a\n" +
+			"repeated one are alternatives. Dates are a day (2024-03-01, midnight UTC) or an RFC 3339\n" +
+			"date-time with its zone (2024-03-01T00:00:00+01:00 for a local day); a window is\n" +
+			"[after, before). A saved date counts only when it is known: a browser's bulk import\n" +
+			"stamp, or a bookmark whose source kept no date, is undated, and so is a published date\n" +
+			"more than a day after the page was first saved. Undated documents are left out of a\n" +
+			"date-filtered search unless --include-undated, and the search says how many there are.",
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			query := strings.Join(args, " ")
-
-			var filters *client.SearchFilters
-			if len(contentType) > 0 || len(source) > 0 || len(host) > 0 {
-				filters = &client.SearchFilters{
-					ContentType: contentType,
-					Host:        host,
-					Source:      source,
-				}
+			req := client.SearchRequest{Query: strings.Join(args, " "), K: k}
+			if !filters.IsEmpty() {
+				req.Filters = &filters
 			}
-
-			res, err := env.Client.Search(cmd.Context(), client.SearchRequest{
-				Query: query, K: k, Filters: filters,
-			})
+			res, err := env.Client.Search(cmd.Context(), req)
 			if err != nil {
 				return err
 			}
@@ -49,14 +46,49 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
 			}
 			renderSearchResults(cmd.OutOrStdout(), res)
+			renderUndated(cmd.OutOrStdout(), res.Undated, filters.IncludeUndated)
 			return nil
 		},
 	}
-	cmd.Flags().IntVarP(&k, "k", "k", 0, "Number of results to return, 1-100 (default: the daemon's search.default_k)")
-	cmd.Flags().StringSliceVar(&contentType, "type", nil, "Filter by content type (article|repo|video|pdf|thread|unknown); repeatable")
-	cmd.Flags().StringSliceVar(&source, "source", nil, "Filter by bookmark source (chrome|safari|firefox|html|manual); repeatable")
-	cmd.Flags().StringSliceVar(&host, "host", nil, "Filter by URL host, e.g. github.com; repeatable")
+	f := cmd.Flags()
+	f.IntVarP(&k, "k", "k", 0, "Number of results to return, 1-100 (default: the daemon's search.default_k)")
+	f.StringSliceVar(&filters.ContentType, "type", nil,
+		"Filter by content type (article|repo|video|pdf|thread|unknown); repeatable")
+	f.StringSliceVar(&filters.Source, "source", nil,
+		"Filter by bookmark source (chrome|safari|firefox|html|manual); repeatable")
+	f.StringSliceVar(&filters.Host, "host", nil, "Filter by URL host, exactly, e.g. github.com; repeatable")
+	f.StringSliceVar(&filters.Site, "site", nil,
+		"Filter by site, a domain and every subdomain of it, e.g. example.com; repeatable")
+	// A folder's name may hold a comma, which a slice flag would split on.
+	f.StringArrayVar(&filters.Folder, "folder", nil,
+		`Filter by bookmark folder and its subfolders, as stored, e.g. "/Bookmarks Bar/Tech"; repeatable`)
+	f.StringVar(&filters.SavedAfter, "saved-after", "", "Saved on or after this date or date-time")
+	f.StringVar(&filters.SavedBefore, "saved-before", "", "Saved before this date or date-time")
+	f.StringVar(&filters.PublishedAfter, "published-after", "", "Published on or after this date or date-time")
+	f.StringVar(&filters.PublishedBefore, "published-before", "", "Published before this date or date-time")
+	f.BoolVar(&filters.IncludeUndated, "include-undated", false,
+		"Keep the documents a date filter can't judge, which it leaves out by default")
 	return cmd
+}
+
+// renderUndated says, for a date-filtered search, how many documents the
+// date filters couldn't judge, and what the search did with them. A search
+// without a date filter has nothing to say.
+func renderUndated(w io.Writer, undated *int, kept bool) {
+	if undated == nil {
+		return
+	}
+	n := *undated
+	documents := "documents have"
+	if n == 1 {
+		documents = "document has"
+	}
+	if kept {
+		fmt.Fprintf(w, "%d %s no date the date filters can judge; kept (--include-undated)\n", n, documents)
+		return
+	}
+	fmt.Fprintf(w, "%d %s no date the date filters can judge; left out (--include-undated keeps them)\n", n,
+		documents)
 }
 
 func renderSearchResults(w io.Writer, res *client.SearchResponse) {

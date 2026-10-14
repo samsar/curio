@@ -123,7 +123,9 @@ func registerTools(s *mcp.Server, d daemon) {
 			"A result without a snippet matched on its bookmark (saved_title, folder); " +
 			"one whose state is dead is a page that is no longer available, and one whose state is failed a page " +
 			"curio couldn't read. " +
-			"Optionally filter by content type, bookmark source, or URL host.",
+			"Optionally filter by content type, bookmark source, URL host, site, bookmark folder, when a page " +
+			"was saved and when it was published. A date-filtered search reports how many documents had no date " +
+			"it could judge (undated): left out unless include_undated.",
 	}, searchHandler(d))
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -169,16 +171,26 @@ type searchOutput struct {
 	// keyword-only; Warnings says why.
 	Degraded bool     `json:"degraded,omitempty"`
 	Warnings []string `json:"warnings,omitempty"`
+	// Undated is, for a date-filtered search, how many documents the date
+	// filters couldn't judge: left out, or kept with include_undated.
+	Undated *int `json:"undated,omitempty"`
 }
 
 // --- search_bookmarks ---
 
 type searchInput struct {
-	Query       string   `json:"query" jsonschema:"natural-language search query"`
-	K           int      `json:"k,omitempty" jsonschema:"max results to return, 1 to 100 (default: the daemon's search.default_k, 10 unless configured)"`
-	ContentType []string `json:"content_type,omitempty" jsonschema:"filter by content type: article, repo, video, pdf, thread, unknown"`
-	Source      []string `json:"source,omitempty" jsonschema:"filter by bookmark source: chrome, safari, firefox, html, manual"`
-	Host        []string `json:"host,omitempty" jsonschema:"filter by URL host, e.g. github.com"`
+	Query           string   `json:"query" jsonschema:"natural-language search query"`
+	K               int      `json:"k,omitempty" jsonschema:"max results to return, 1 to 100 (default: the daemon's search.default_k, 10 unless configured)"`
+	ContentType     []string `json:"content_type,omitempty" jsonschema:"filter by content type: article, repo, video, pdf, thread, unknown"`
+	Source          []string `json:"source,omitempty" jsonschema:"filter by bookmark source: chrome, safari, firefox, html, manual"`
+	Host            []string `json:"host,omitempty" jsonschema:"filter by URL host, exactly, e.g. github.com"`
+	Site            []string `json:"site,omitempty" jsonschema:"filter by site: a domain such as example.com, without a scheme or path, matching it and every subdomain (www.example.com and blog.example.com are example.com)"`
+	Folder          []string `json:"folder,omitempty" jsonschema:"filter by bookmark folder, as stored with the browser's root, e.g. /Bookmarks Bar/Tech, matching it and its subfolders, case-sensitively"`
+	SavedAfter      string   `json:"saved_after,omitempty" jsonschema:"saved on or after this time. Only known save dates count; a browser's bulk import stamp or a source that kept no date is undated. A date YYYY-MM-DD is midnight UTC; for a local day send an RFC 3339 date-time with its offset, e.g. 2024-03-01T00:00:00+01:00. Windows are [after, before): 'in 2020' is saved_after 2020-01-01 and saved_before 2021-01-01; 'last week' is after the date seven days before today and before tomorrow."`
+	SavedBefore     string   `json:"saved_before,omitempty" jsonschema:"saved before this time; see saved_after"`
+	PublishedAfter  string   `json:"published_after,omitempty" jsonschema:"published on or after this time. Use only when the question names publication. A published date more than a day after the page was first saved is a modification date, and undated. Dates as for saved_after: 'published in 2020' is published_after 2020-01-01 and published_before 2021-01-01."`
+	PublishedBefore string   `json:"published_before,omitempty" jsonschema:"published before this time; see published_after"`
+	IncludeUndated  bool     `json:"include_undated,omitempty" jsonschema:"also keep the documents a date filter can't judge, which it leaves out by default; needs a saved_* or published_* filter"`
 }
 
 func searchHandler(d daemon) mcp.ToolHandlerFor[searchInput, searchOutput] {
@@ -186,11 +198,10 @@ func searchHandler(d daemon) mcp.ToolHandlerFor[searchInput, searchOutput] {
 		if strings.TrimSpace(in.Query) == "" {
 			return nil, searchOutput{}, errors.New("query is required")
 		}
-		var filters *client.SearchFilters
-		if len(in.ContentType) > 0 || len(in.Source) > 0 || len(in.Host) > 0 {
-			filters = &client.SearchFilters{ContentType: in.ContentType, Source: in.Source, Host: in.Host}
+		req := client.SearchRequest{Query: in.Query, K: in.K}
+		if filters := in.filters(); !filters.IsEmpty() {
+			req.Filters = &filters
 		}
-		req := client.SearchRequest{Query: in.Query, K: in.K, Filters: filters}
 		res, err := call(ctx, d, func(ctx context.Context) (*client.SearchResponse, error) {
 			return d.client.Search(ctx, req)
 		})
@@ -198,13 +209,37 @@ func searchHandler(d daemon) mcp.ToolHandlerFor[searchInput, searchOutput] {
 			return nil, searchOutput{}, fmt.Errorf("search: %w", err)
 		}
 		out := toSearchOutput(res.Items, "")
-		out.Degraded, out.Warnings = res.Degraded, res.Warnings
+		out.Degraded, out.Warnings, out.Undated = res.Degraded, res.Warnings, res.Undated
 		text := formatHits(in.Query, out.Results)
+		if res.Undated != nil {
+			text += undatedNote(*res.Undated, in.IncludeUndated)
+		}
 		if res.Degraded {
 			text = degradedNote(res.Warnings) + "\n\n" + text
 		}
 		return textResult(text), out, nil
 	}
+}
+
+// filters are in's filters, as the daemon takes them.
+func (in searchInput) filters() client.SearchFilters {
+	return client.SearchFilters{ContentType: in.ContentType, Source: in.Source, Host: in.Host, Site: in.Site,
+		Folder: in.Folder, SavedAfter: in.SavedAfter, SavedBefore: in.SavedBefore, PublishedAfter: in.PublishedAfter,
+		PublishedBefore: in.PublishedBefore, IncludeUndated: in.IncludeUndated}
+}
+
+// undatedNote tells the model how many documents a date filter couldn't
+// judge, and whether they are among the results.
+func undatedNote(n int, kept bool) string {
+	documents := "documents have"
+	if n == 1 {
+		documents = "document has"
+	}
+	if kept {
+		return fmt.Sprintf("Note: %d %s no date the date filters can judge; they were kept.\n", n, documents)
+	}
+	return fmt.Sprintf("Note: %d %s no date the date filters can judge; they were left out "+
+		"(include_undated keeps them).\n", n, documents)
 }
 
 // degradedNote tells the model that the hits are keyword-only. The daemon's

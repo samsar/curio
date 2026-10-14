@@ -88,14 +88,16 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 	}
 
 	var createdAt, updatedAt string
+	savedDate := insertedSavedDate(b)
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path, tags)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path, tags, dateless,
+			saved_date)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (tenant_id, url, source) DO NOTHING
 		RETURNING created_at, updated_at`,
 		id, b.TenantID, docID, b.URL,
 		strPtr(b.Title), formatTime(b.SavedAt), b.Source,
-		strPtr(b.FolderPath), tags,
+		strPtr(b.FolderPath), tags, b.Dateless, savedDate,
 	).Scan(&createdAt, &updatedAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -140,6 +142,7 @@ func (s *Bookmarks) Ingest(ctx context.Context, b *store.Bookmark) (store.Ingest
 
 	b.ID = id
 	b.DocumentID = &docID
+	b.SavedDate = savedDate
 	b.CreatedAt = createdTime
 	b.UpdatedAt = updatedTime
 	return res, nil
@@ -163,14 +166,16 @@ func (s *Bookmarks) Create(ctx context.Context, b *store.Bookmark) error {
 	}
 	defer tx.Rollback()
 	var createdAt, updatedAt string
+	b.SavedDate = insertedSavedDate(b)
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path, tags)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path, tags, dateless,
+			saved_date)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING created_at, updated_at`,
 		b.ID, b.TenantID,
 		strPtr(b.DocumentID), b.URL,
 		strPtr(b.Title), formatTime(b.SavedAt), b.Source,
-		strPtr(b.FolderPath), tagsJSON,
+		strPtr(b.FolderPath), tagsJSON, b.Dateless, b.SavedDate,
 	).Scan(&createdAt, &updatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -193,6 +198,19 @@ func (s *Bookmarks) Create(ctx context.Context, b *store.Bookmark) error {
 		return fmt.Errorf("commit bookmark insert: %w", err)
 	}
 	return nil
+}
+
+// insertedSavedDate is the class a bookmark is inserted with, before its
+// source's bookmarks are classified again. A dated manual bookmark is
+// exact whatever else its source holds, so its class is final at insert;
+// any other claims no date until a classification gives it one, so a
+// classification that fails, or never runs, leaves no bookmark claiming a
+// date the rule would deny it.
+func insertedSavedDate(b *store.Bookmark) store.SavedDate {
+	if b.Source == store.SourceManual && !b.Dateless {
+		return store.SavedDateExact
+	}
+	return store.SavedDateUnknown
 }
 
 // validateBookmark checks the fields every bookmark insert requires.
@@ -500,7 +518,7 @@ func (s *Bookmarks) LinkDocument(ctx context.Context, bookmarkID, documentID str
 
 // bookmarkColumns is the column list scanBookmark expects, in order.
 const bookmarkColumns = `id, tenant_id, document_id, url, title, saved_at, source,
-	folder_path, tags, created_at, updated_at`
+	folder_path, tags, dateless, saved_date, created_at, updated_at`
 
 // scanBookmark scans bookmarkColumns, then any extra columns a query
 // selects after them into extra. A missing row is store.ErrNotFound.
@@ -512,7 +530,7 @@ func scanBookmark(row interface{ Scan(...any) error }, extra ...any) (*store.Boo
 	)
 	err := row.Scan(slices.Concat([]any{
 		&b.ID, &b.TenantID, &docID, &b.URL, &title,
-		&savedAt, &b.Source, &folderPath, &tags,
+		&savedAt, &b.Source, &folderPath, &tags, &b.Dateless, &b.SavedDate,
 		&createdAt, &updatedAt,
 	}, extra)...)
 	if errors.Is(err, sql.ErrNoRows) {

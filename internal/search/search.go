@@ -172,8 +172,10 @@ type Request struct {
 	// documents ranked [Offset, Offset+K). Every search ranks the same pool
 	// whatever K and Offset, so the windows of one query tile one ranking.
 	// 0 <= Offset <= store.MaxSearchK-K.
-	Offset  int
-	Filters store.SearchFilters // content_type / host / source; empty = no filter
+	Offset int
+	// Filters scope the search, as FilterRequest.Resolve gives them; empty
+	// is no filter.
+	Filters store.SearchFilters
 }
 
 // Hit is a single document-level result with its best chunk snippets attached.
@@ -215,6 +217,10 @@ type Result struct {
 	// weighted); Warnings then says why.
 	Degraded bool
 	Warnings []string
+	// Undated is, when the filters set a date, how many of the library's
+	// documents their dates couldn't judge (DocumentIndex.CountUndated):
+	// left out, or with IncludeUndated kept. Nil without a date filter.
+	Undated *int
 	// Timings are how long Search's stages took; Related sets none.
 	Timings Timings
 }
@@ -231,6 +237,7 @@ type Timings struct {
 	Titles  time.Duration // the title list's search
 	Vector  time.Duration // the vector search
 	Cards   time.Duration // the card vectors' search
+	Undated time.Duration // counting the documents a date filter couldn't judge
 	Fuse    time.Duration // RRF, resolving the chunks to their documents, and ranking those with the document lists
 	Hydrate time.Duration // reading the window's documents, their chunks and the snippets
 	Total   time.Duration // the whole search
@@ -273,6 +280,9 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		return nil, fmt.Errorf("search: offset must be between 0 and %d (offset + k at most %d), got %d",
 			store.MaxSearchK-req.K, store.MaxSearchK, req.Offset)
 	}
+	if err := req.Filters.Validate(); err != nil {
+		return nil, fmt.Errorf("search: %w", err)
+	}
 	fanout := e.chunkFanout(store.MaxSearchK)
 
 	// FTS5 has its own MATCH grammar — bare punctuation (commas, slashes,
@@ -288,6 +298,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		fieldHits []store.DocumentHit
 		titleHits []store.DocumentHit
 		semantic  semanticHits
+		undated   *int
 	)
 	// Each list writes its own stages' fields, read only after Wait.
 	var timings Timings
@@ -331,6 +342,20 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 			return nil
 		})
 	}
+	// The count of what a date filter couldn't judge is local SQLite, as
+	// the keyword lists are, and fails the search like them.
+	if req.Filters.HasDates() {
+		g.Go(func() error {
+			start := time.Now()
+			n, err := e.index.CountUndated(gctx, req.TenantID, req.Filters)
+			timings.Undated = time.Since(start)
+			if err != nil {
+				return fmt.Errorf("undated: %w", err)
+			}
+			undated = &n
+			return nil
+		})
+	}
 	// A semantic list weighted 0 would contribute nothing to the ranking,
 	// and reading it would still wait on the embedding model, up to
 	// embedTimeout, and degrade the search when that model is down.
@@ -350,7 +375,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		return nil, err
 	}
 
-	res := &Result{Query: req.Query}
+	res := &Result{Query: req.Query, Undated: undated}
 	lists := [][]RankedItem{toRanked(bm25Hits), toRanked(semantic.chunks)}
 	weights := []float64{e.bm25W, e.vectorW}
 	docLists := []documentList{

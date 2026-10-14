@@ -20,6 +20,7 @@ type BookmarkResponse struct {
 	URL           string    `json:"url"`
 	Title         *string   `json:"title,omitempty"`
 	SavedAt       time.Time `json:"saved_at"`
+	SavedDate     string    `json:"saved_date"`
 	Source        string    `json:"source"`
 	FolderPath    *string   `json:"folder_path,omitempty"`
 	Tags          []string  `json:"tags,omitempty"`
@@ -35,6 +36,7 @@ func bookmarkToResponse(b *store.Bookmark, state string) BookmarkResponse {
 		URL:           b.URL,
 		Title:         b.Title,
 		SavedAt:       b.SavedAt,
+		SavedDate:     string(b.SavedDate),
 		Source:        b.Source,
 		FolderPath:    b.FolderPath,
 		Tags:          b.Tags,
@@ -74,8 +76,9 @@ func (d Deps) handleCreateBookmark(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b := d.bookmarkRow(ImportBookmark{URL: normURL, Title: req.Title, FolderPath: req.FolderPath, Tags: req.Tags},
-		store.SourceManual)
+	// Saved now: a manual bookmark's time is its save's, exact.
+	b := d.bookmarkRow(ImportBookmark{URL: normURL, Title: req.Title, FolderPath: req.FolderPath, Tags: req.Tags,
+		SavedAt: time.Now().UTC()}, store.SourceManual)
 	res, err := d.Bookmarks.Ingest(r.Context(), b)
 	if errors.Is(err, store.ErrConflict) {
 		writeProblem(w, r, http.StatusConflict, "conflict",
@@ -98,10 +101,12 @@ func (d Deps) handleCreateBookmark(w http.ResponseWriter, r *http.Request) {
 
 // bookmarkRow maps a requested bookmark, its URL already normalized, onto the
 // row Ingest saves. An empty title or folder is stored as NULL, and a zero
-// SavedAt means now.
+// SavedAt means the source gave no date: the bookmark is stored dateless,
+// saved now.
 func (d Deps) bookmarkRow(in ImportBookmark, source string) *store.Bookmark {
+	dateless := in.SavedAt.IsZero()
 	savedAt := in.SavedAt
-	if savedAt.IsZero() {
+	if dateless {
 		savedAt = time.Now().UTC()
 	}
 	return &store.Bookmark{
@@ -112,6 +117,7 @@ func (d Deps) bookmarkRow(in ImportBookmark, source string) *store.Bookmark {
 		Source:     source,
 		FolderPath: store.NullableString(in.FolderPath),
 		Tags:       in.Tags,
+		Dateless:   dateless,
 	}
 }
 
@@ -152,7 +158,7 @@ func (d Deps) handleListBookmarks(w http.ResponseWriter, r *http.Request) {
 // filter or cursor the list can't take is a requestError.
 func listBookmarksOpts(r *http.Request) (store.ListBookmarksOpts, error) {
 	source := r.URL.Query().Get("source")
-	if source != "" && !validSource(source) {
+	if source != "" && !store.ValidSource(source) {
 		return store.ListBookmarksOpts{}, badRequest("source %q must be one of: %s", source, sourceList)
 	}
 	order, err := bookmarkOrderParam(r)

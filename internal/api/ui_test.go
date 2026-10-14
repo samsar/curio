@@ -144,7 +144,7 @@ func bookmark(t *testing.T, srv *apitest.Server, url, source, folder string, tag
 }
 
 // save ingests b, a bookmark of the test tenant, saved now unless it says
-// when.
+// when, and classifies its source's saved dates, as an import does.
 func save(t *testing.T, srv *apitest.Server, b store.Bookmark) *store.Bookmark {
 	t.Helper()
 	b.TenantID = apitest.TenantID
@@ -152,6 +152,8 @@ func save(t *testing.T, srv *apitest.Server, b store.Bookmark) *store.Bookmark {
 		b.SavedAt = time.Now().UTC()
 	}
 	_, err := srv.Deps.Bookmarks.Ingest(context.Background(), &b)
+	require.NoError(t, err)
+	_, err = srv.Deps.Bookmarks.ClassifySavedDates(context.Background(), apitest.TenantID, b.Source)
 	require.NoError(t, err)
 	return &b
 }
@@ -1121,8 +1123,9 @@ func TestUI_LibrarySaved(t *testing.T) {
 		"newest saved first, the paper once per save, the save without a document unlinked")
 	assert.Contains(t, body, `<option value="updated">Last updated</option><option value="saved" selected>Date saved</option>`)
 	assert.Contains(t, body, `<th scope="col" class="c-when">Saved</th>`)
+	assert.Contains(t, body, `<col class="c-when c-saved">`)
 	for _, saved := range []time.Duration{time.Hour, 24 * time.Hour, 48 * time.Hour, 72 * time.Hour, 96 * time.Hour} {
-		assert.Contains(t, body, `<td class="c-when when"><time datetime="`+now.Add(-saved).Format(time.RFC3339)+`"`)
+		assert.Contains(t, body, `<td class="c-when when">saved <time datetime="`+now.Add(-saved).Format(time.RFC3339)+`"`)
 	}
 	assert.Contains(t, body, `<a class="doc-title" href="/ui/documents/`+paper.ID+`" title="A paper">A paper</a>`+"\n"+
 		`<span class="doc-sub"><span class="host" title="https://arxiv.example/paper">arxiv.example/paper</span>`+
@@ -1138,7 +1141,8 @@ func TestUI_LibrarySaved(t *testing.T) {
 	assert.Contains(t, body, `<a class="doc-title untitled" href="/ui/documents/`+bare.ID+`" title="https://bare.example/x">`+
 		`bare.example/x</a>`+"\n"+`<span class="doc-sub"><span class="host" title="https://bare.example/x">bare.example</span>`)
 	assert.Equal(t, 1, strings.Count(body, `<p class="table-note">Newest saves first, one row per bookmark: a page saved `+
-		`in two browsers is listed twice. Safari keeps no save dates, so its bookmarks are dated when curio imported them.</p>`))
+		`in two browsers is listed twice. A save without a known date, from a source that keeps none or a browser's `+
+		`bulk import, is marked so and listed by the time it carries.</p>`))
 	assert.Contains(t, body, `<p class="pager-summary mt-4" id="showing">Showing 5 of 5 saves.</p>`)
 	assert.Contains(t, body, `<p class="lede">3 documents from 5 bookmarks.</p>`)
 	assert.Contains(t, body, `<a href="/ui/library?order=saved" aria-current="page">All <span class="count">3</span></a>`)
@@ -1211,7 +1215,9 @@ func assertLibraryTable(t *testing.T, page string, rows int) {
 			}
 		}
 	}
-	assert.Equal(t, []string{"", "c-state", "c-type", "c-when"}, cols)
+	require.Len(t, cols, 4)
+	assert.Equal(t, []string{"", "c-state", "c-type"}, cols[:3])
+	assert.Contains(t, []string{"c-when", "c-when c-saved"}, cols[3], "the time column, a save's wider")
 	require.Len(t, trs, rows)
 	for _, tr := range trs {
 		var cells []string
@@ -1248,6 +1254,49 @@ func attr(n *xhtml.Node, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestUI_SavedDates: a save shows its time as its saved date says, in the
+// Library's Date saved rows and on its document's page: an exact one as
+// saved then, an approximate one as saved by then, and an unknown one as
+// such, by when curio imported it, its title saying why; the rows are
+// still in saved_at's order.
+func TestUI_SavedDates(t *testing.T) {
+	srv := apitest.Start(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	doc := titled(t, srv, "https://site.example/post", "A post", store.DocStateFetched)
+	save(t, srv, store.Bookmark{URL: doc.URL, Source: store.SourceChrome, SavedAt: now.Add(-time.Hour)})
+	save(t, srv, store.Bookmark{URL: doc.URL, Source: store.SourceFirefox, SavedAt: now.Add(-48 * time.Hour)})
+	save(t, srv, store.Bookmark{URL: doc.URL, Source: store.SourceSafari, SavedAt: now.Add(-72 * time.Hour)})
+	imported := now.Add(-3 * time.Hour)
+	_, err := srv.DB.Exec(`UPDATE bookmarks SET saved_date = CASE source WHEN 'firefox' THEN 'approx'
+		WHEN 'safari' THEN 'unknown' ELSE 'exact' END, created_at = ?`, imported.Format("2006-01-02T15:04:05.000Z"))
+	require.NoError(t, err)
+
+	exact := `saved <time datetime="` + now.Add(-time.Hour).Format(time.RFC3339) + `"`
+	approx := `<span class="saved-time" title="Saved on or before ` + now.Add(-48*time.Hour).Local().Format("2006-01-02 15:04") +
+		`: first seen by a later import of the browser&#39;s bookmarks, or copied with its folder then">` +
+		`<span class="saved-what">saved by</span> <span class="saved-when"><time datetime="` +
+		now.Add(-48*time.Hour).Format(time.RFC3339) + `">2 d ago</time></span></span>`
+	unknown := `<span class="saved-time" title="No known save date: its source keeps none, or a browser&#39;s bulk ` +
+		`import or sync stamped it. curio imported it ` + imported.Local().Format("2006-01-02 15:04") + `">` +
+		`<span class="saved-what">date unknown</span><span class="saved-sep"> ·</span> <span class="saved-when">` +
+		`imported <time datetime="` + imported.Format(time.RFC3339) + `">3 h ago</time></span></span>`
+
+	page := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	for _, words := range []string{exact, approx, unknown} {
+		assert.Contains(t, page, `<div class="when">`+words, "the document's bookmarks")
+	}
+	library := getPage(t, srv, "/ui/library?order=saved", http.StatusOK)
+	for _, words := range []string{exact, approx, unknown} {
+		assert.Contains(t, library, `<td class="c-when when">`+words, "the Date saved rows")
+		assert.Contains(t, library, `<span class="doc-saved">`+words, "and their line on a phone")
+	}
+	assert.Less(t, strings.Index(library, exact), strings.Index(library, approx), "newest saved first")
+	assert.Less(t, strings.Index(library, `<td class="c-when when">`+approx),
+		strings.Index(library, `<td class="c-when when">`+unknown), "by saved_at, the unknown one too")
+	assert.NotContains(t, getPage(t, srv, "/ui/library", http.StatusOK), "saved-time",
+		"the Last updated order shows documents' times")
 }
 
 // TestUI_LibraryFailures: a failed or dead row says why under its name,

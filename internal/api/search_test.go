@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/ui"
 )
 
 // embedFunc adapts a function to search.Embedder.
@@ -90,6 +93,8 @@ func TestSearch_HitWithoutMatches(t *testing.T) {
 	_, err := s.deps.Bookmarks.Ingest(ctx, &store.Bookmark{TenantID: "local", URL: dead.URL, Title: &title,
 		FolderPath: &folder, Source: store.SourceChrome, SavedAt: saved})
 	require.NoError(t, err)
+	_, err = s.deps.Bookmarks.ClassifySavedDates(ctx, "local", store.SourceChrome)
+	require.NoError(t, err)
 
 	resp := s.search(t, `{"query":"Kafka retention, explained"}`)
 	require.Equal(t, http.StatusOK, resp.status, resp.body)
@@ -109,7 +114,7 @@ func TestSearch_HitWithoutMatches(t *testing.T) {
 		assert.NotContains(t, raw.Items[i], "matches", "no passage matched")
 		assert.Equal(t, "dead", hit.Document.State)
 		assert.Equal(t, []SearchHitBookmark{{Title: title, FolderPath: folder, Source: store.SourceChrome,
-			SavedAt: saved}}, hit.Bookmarks)
+			SavedAt: saved, SavedDate: string(store.SavedDateExact)}}, hit.Bookmarks)
 	}
 }
 
@@ -300,24 +305,28 @@ func TestSearch_DegradedResponse(t *testing.T) {
 	assert.GreaterOrEqual(t, got.TookMS, int64(20))
 }
 
+// TestSearch_UnsupportedFieldsAreRejected: a field this daemon doesn't
+// know is a 400, and a filter a newer client sends says to restart the
+// daemon.
 func TestSearch_UnsupportedFieldsAreRejected(t *testing.T) {
 	s := newSearchServer(t, okEmbedder(), search.Config{})
 	for _, body := range []string{
 		`{"query":"kafka","weights":{"bm25":2}}`,
 		`{"query":"kafka","collapse":"sum"}`,
-		`{"query":"kafka","filters":{"saved_after":"2024-01-01T00:00:00Z"}}`,
-		`{"query":"kafka","filters":{"folder":"/a"}}`,
-		`{"query":"kafka","filters":{"tag":["t"]}}`,
+		`{"query":"kafka","filters":{"folder":"/a"}}`, // a list
 	} {
 		t.Run(body, func(t *testing.T) {
 			assertProblem(t, s.search(t, body), http.StatusBadRequest)
 		})
 	}
+	p := assertProblem(t, s.search(t, `{"query":"kafka","filters":{"tag":["t"]}}`), http.StatusBadRequest)
+	assert.Contains(t, p.Detail, `unknown field "tag"`)
+	assert.Contains(t, p.Detail, "restart the daemon")
 }
 
-// TestSearch_FiltersValidated: a content_type or source outside its set is
-// a 400 naming the allowed values, refused before the query is embedded,
-// not an empty answer that reads as "nothing matches"; values in the set
+// TestSearch_FiltersValidated: a filter the engine can't take is a 400
+// naming its field, refused before the query is embedded, not an empty
+// answer that reads as "nothing matches" or a 500; filters it takes
 // filter.
 func TestSearch_FiltersValidated(t *testing.T) {
 	var embeds atomic.Int32
@@ -326,24 +335,172 @@ func TestSearch_FiltersValidated(t *testing.T) {
 		return [][]float32{unitVec()}, nil
 	})
 	s := newSearchServer(t, counting, search.Config{})
-	for body, allowed := range map[string]string{
-		`{"query":"kafka","filters":{"content_type":["articles"]}}`: `"articles" must be one of: ` + contentTypeList,
-		`{"query":"kafka","filters":{"source":["chrom"]}}`:          `"chrom" must be one of: ` + sourceList,
+	many := func(n int, format string) string {
+		values := make([]string, n)
+		for i := range values {
+			values[i] = strconv.Quote(fmt.Sprintf(format, i))
+		}
+		return "[" + strings.Join(values, ",") + "]"
+	}
+	for _, tc := range []struct {
+		filters, field, detail string
+	}{
+		{`{"content_type":["articles"]}`, "content_type", `"articles" must be one of: ` + contentTypeList},
+		{`{"source":["chrom"]}`, "source", `"chrom" must be one of: ` + sourceList},
+		{`{"host":[""]}`, "host", "an empty host"},
+		// SQLite refuses the predicates of a thousand hosts as too deep an
+		// expression: the request is refused first.
+		{`{"host":` + many(1000, "h%d.example.com") + `}`, "host", "1000 values, at most 32"},
+		{`{"site":` + many(33, "s%d.example.com") + `}`, "site", "33 values, at most 32"},
+		{`{"site":[""]}`, "site", "an empty site"},
+		{`{"site":["https://example.com"]}`, "site", "is not a domain"},
+		{`{"site":["example.com/blog"]}`, "site", "is not a domain"},
+		{`{"site":["example.com:8080"]}`, "site", "is not a domain"},
+		{`{"site":["*.example.com"]}`, "site", "is not a domain"},
+		{`{"site":["example..com"]}`, "site", "is not a domain"},
+		{`{"folder":["/"]}`, "folder", "names no folder"},
+		{`{"folder":[""]}`, "folder", "names no folder"},
+		{`{"saved_after":"2024-13-01"}`, "saved_after", "is neither a date"},
+		{`{"saved_before":"2024-01-01T09:00:00"}`, "saved_before", "is neither a date"},
+		{`{"published_after":"0000-06-01"}`, "published_after", "outside the years 0001 to 9999"},
+		{`{"saved_after":"2024-02-01","saved_before":"2024-01-01"}`, "saved_after", "must be before saved_before"},
+		{`{"published_after":"2024-01-01","published_before":"2024-01-01"}`, "published_after",
+			"must be before published_before"},
+		{`{"include_undated":true,"site":["example.com"]}`, "include_undated", "takes saved_* or published_*"},
+		// A window that holds less than a millisecond holds no stored time.
+		{`{"saved_after":"2024-01-01T00:00:00.0001Z","saved_before":"2024-01-01T00:00:00.0009Z"}`, "saved_after",
+			"must be before saved_before"},
+		// One past a DNS name, and far past it: SQLite refuses a LIKE
+		// pattern over 50,000 bytes, which was a 500.
+		{`{"site":["` + longName(254) + `"]}`, "site", "a site of 254 bytes; a domain is at most 253"},
+		{`{"site":["` + longName(60_000) + `"]}`, "site", "a site of 60000 bytes"},
+		{`{"host":["` + longName(254) + `"]}`, "host", "a host of 254 bytes; a host name is at most 253"},
+		{`{"host":["` + longName(60_000) + `"]}`, "host", "a host of 60000 bytes"},
+		{`{"folder":["/` + strings.Repeat("f", 1024) + `"]}`, "folder", "a folder of 1025 bytes, at most 1024"},
 	} {
-		t.Run(body, func(t *testing.T) {
-			p := assertProblem(t, s.search(t, body), http.StatusBadRequest)
-			assert.Contains(t, p.Detail, allowed)
+		t.Run(tc.filters, func(t *testing.T) {
+			p := assertProblem(t, s.search(t, `{"query":"kafka","filters":`+tc.filters+`}`), http.StatusBadRequest)
+			assert.Contains(t, p.Detail, "filters."+tc.field+": ")
+			assert.Contains(t, p.Detail, tc.detail)
 		})
 	}
 	assert.Zero(t, embeds.Load(), "a refused filter embeds nothing")
 
-	for _, body := range []string{
-		`{"query":"kafka","filters":{"content_type":["article"]}}`,
-		`{"query":"kafka","filters":{"source":["chrome"]}}`,
+	for _, filters := range []string{
+		`{"content_type":["article"]}`,
+		`{"source":["chrome"]}`,
+		`{"site":["WWW.Example.COM."]}`,
+		`{"folder":["Reading/"]}`,
+		`{"saved_after":"2024-01-01","saved_before":"2024-02-01T00:00:00+01:00","include_undated":true}`,
+		`{"published_before":"2025-01-01"}`,
+		`{"site":["` + longName(253) + `"],"host":["` + longName(253) + `"],"folder":["/` +
+			strings.Repeat("f", 1023) + `"]}`,
+		`{"saved_after":"2024-01-01T00:00:00.0001Z","saved_before":"2024-01-01T00:00:00.0019Z"}`,
+		`{"host":` + many(32, "h%d.example.com") + `,"site":` + many(32, "s%d.example.com") + `,"folder":` +
+			many(32, "/F%d") + `,"source":["chrome"],"saved_after":"2024-01-01","published_after":"2023-01-01"}`,
 	} {
-		resp := s.search(t, body)
+		resp := s.search(t, `{"query":"kafka","filters":`+filters+`}`)
 		assert.Equal(t, http.StatusOK, resp.status, resp.body)
 	}
+}
+
+// longName is a host name of n bytes: labels of 63, the longest DNS
+// takes, ending in .com.
+func longName(n int) string {
+	var b strings.Builder
+	for b.Len()+4 < n {
+		if b.Len() > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(strings.Repeat("a", min(63, n-4-b.Len())))
+	}
+	b.WriteString(".com")
+	return b.String()
+}
+
+// TestSearch_Undated: a search with a date filter says how many documents
+// it couldn't judge, the same on every page and for every query with the
+// filters, whether it kept them or not; one without, the dashboard's
+// included, says nothing.
+func TestSearch_Undated(t *testing.T) {
+	s := newSearchServer(t, okEmbedder(), search.Config{})
+	ids := s.documentIDsByURL(t)
+	require.NoError(t, s.deps.Bookmarks.Create(context.Background(), &store.Bookmark{TenantID: store.LocalTenantID,
+		DocumentID: &ids[0], URL: "https://example.com/kafka/000", Source: store.SourceChrome,
+		SavedAt: time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)}))
+	_, err := s.deps.Bookmarks.ClassifySavedDates(context.Background(), store.LocalTenantID, store.SourceChrome)
+	require.NoError(t, err)
+	undated := func(body string) (*int, int) {
+		t.Helper()
+		resp := s.search(t, body)
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		got := decodeSearch(t, resp)
+		return got.Undated, len(got.Items)
+	}
+	const window = `"saved_after":"2024-01-01","saved_before":"2025-01-01"`
+	for body, items := range map[string]int{
+		`{"query":"kafka","filters":{` + window + `}}`:                                         1,
+		`{"query":"kafka","k":1,"offset":1,"filters":{` + window + `,"include_undated":true}}`: 1,
+		`{"query":"kafka","filters":{` + window + `,"include_undated":true}}`:                  3,
+		`{"query":"partitions","filters":{` + window + `}}`:                                    1,
+	} {
+		n, got := undated(body)
+		require.NotNil(t, n, body)
+		assert.Equal(t, 2, *n, "the two documents without a bookmark: %s", body)
+		assert.Equal(t, items, got, body)
+	}
+	for _, body := range []string{`{"query":"kafka"}`, `{"query":"kafka","filters":{"content_type":["article"]}}`} {
+		resp := s.search(t, body)
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		assert.NotContains(t, resp.body, `"undated"`, body)
+	}
+	d := s.deps
+	d.TenantID = store.LocalTenantID
+	page, err := d.search(context.Background(), SearchRequest{Query: "kafka", K: ui.SearchPageSize,
+		Filters: Filters{ContentType: []string{string(store.ContentTypeArticle)}}})
+	require.NoError(t, err)
+	assert.Nil(t, page.Undated, "the dashboard's search sets no date")
+}
+
+// TestSearch_NarrowHostGetsItsNearestChunks: a host filter whose
+// document's chunk lies past every chunk sqlite-vec's KNN can read (the
+// nearest 4,096) still gets it from the vector list, which only the exact
+// ranking reaches: with the filter's set over the bound, the vector list
+// finds nothing.
+func TestSearch_NarrowHostGetsItsNearestChunks(t *testing.T) {
+	s := newSearchServer(t, okEmbedder(), search.Config{})
+	ctx := context.Background()
+	index := func(url string, vecs [][]float32) {
+		t.Helper()
+		doc := s.seedDocument(t, url, store.DocStateFetched)
+		ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
+			FetchedAt: time.Now().UTC()}
+		require.NoError(t, s.deps.Extractions.Create(ctx, ext))
+		inputs := make([]store.ChunkInput, len(vecs))
+		for i, v := range vecs {
+			inputs[i] = store.ChunkInput{Text: "kafka brokers", Embedding: v}
+		}
+		require.NoError(t, s.deps.Chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, "", nil, inputs))
+	}
+	near := make([][]float32, 4096)
+	for i := range near {
+		near[i] = unitVec()
+	}
+	index("https://near.example/long", near)
+	far := unitVec()
+	far[0], far[2] = 0, 1
+	index("https://far.example/short", [][]float32{far})
+
+	const body = `{"query":"kafka","filters":{"host":["far.example"]}}`
+	got := decodeSearch(t, s.search(t, body))
+	require.Len(t, got.Items, 1)
+	assert.Equal(t, 1, got.VectorHits)
+	require.Len(t, got.Items[0].Matches, 1)
+	assert.NotNil(t, got.Items[0].Matches[0].VectorScore, "the vector list found it")
+
+	s.db.SetExactKNNMaxIDs(0)
+	got = decodeSearch(t, s.search(t, body))
+	assert.Zero(t, got.VectorHits, "the over-fetch's nearest 4,096 are near.example's")
 }
 
 // documentIDsByURL lists the server's document IDs in URL order.

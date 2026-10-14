@@ -33,7 +33,9 @@ import (
 // scheduler's last check: interests are not health, so it never changes
 // Status. DocumentFields is what the daemon's start found of the
 // documents' search fields; a start that couldn't check them still
-// serves, so it never changes Status either.
+// serves, so it never changes Status either. Nor does SavedDates: what
+// the start did to the bookmarks' saved-date classes, and the sources
+// whose classification after an import failed, which the daemon retries.
 type Health struct {
 	Status          string            `json:"status"`
 	PID             int               `json:"pid"`
@@ -52,6 +54,7 @@ type Health struct {
 	GitHubToken     bool              `json:"github_token"`
 	Interests       InterestsState    `json:"interests"`
 	DocumentFields  DocumentFields    `json:"document_fields"`
+	SavedDates      SavedDates        `json:"saved_dates"`
 }
 
 // DocumentFields is what the daemon's start did to the documents' search
@@ -257,6 +260,7 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		GitHubToken:     d.GitHubToken,
 		Interests:       d.interestsState(),
 		DocumentFields:  d.documentFields(),
+		SavedDates:      d.SavedDates.State(),
 	}, nil
 }
 

@@ -262,6 +262,13 @@ func searchedDocArgs(tenantID string) []any {
 // sqlite-vec returns L2 distance (lower = closer). We convert to a 0..1
 // similarity-like score via 1/(1+d). Cheap monotonic transform; rank order
 // is preserved.
+//
+// A filter that doesn't narrow reads the nearest neighbours and filters
+// them (vectorQuery). One that narrows ranks the chunks it leaves
+// exactly (exactVectorQuery) when they are few enough, and otherwise
+// filters as many nearest neighbours as their share of the index calls
+// for (see knn.go). An exact ranking that finds a listed chunk without a
+// vector falls back to that over-fetch, warning once.
 func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []float32, limit int, filters store.SearchFilters) ([]store.ChunkHit, error) {
 	if len(embedding) != s.dim {
 		return nil, fmt.Errorf("vector search: embedding length %d != configured dim %d", len(embedding), s.dim)
@@ -274,8 +281,66 @@ func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []
 	if err != nil {
 		return nil, fmt.Errorf("serialize query embedding: %w", err)
 	}
+	plan, err := s.vectorSearchQuery(ctx, tenantID, serialized, limit, filters)
+	if err != nil {
+		return nil, fmt.Errorf("vector search: %w", err)
+	}
+	if plan.path == knnNone {
+		return nil, nil
+	}
+	hits, err := s.vectorHits(ctx, plan.sql, plan.args, limit)
+	if err != nil || len(hits) > 0 || plan.path != knnExact {
+		return hits, err
+	}
+	err = s.db.checkExactKNN(ctx, plan.set, "chunk")
+	if !errors.Is(err, store.ErrVectorIndexInconsistent) {
+		if err != nil {
+			return nil, fmt.Errorf("vector search: %w", err)
+		}
+		return nil, nil
+	}
+	s.db.warnInconsistent("chunks_vec", err)
+	k, err := s.db.sizedOverFetchK(ctx, chunkIndexCountSQL, overfetchK(limit), plan.n)
+	if err != nil {
+		return nil, fmt.Errorf("vector search: %w", err)
+	}
+	q, args := vectorQuery(tenantID, serialized, k, filters)
+	return s.vectorHits(ctx, q, args, limit)
+}
 
-	q, args := vectorQuery(tenantID, serialized, limit, filters)
+// vectorSearchQuery plans VectorSearch's statement for limit hits: the
+// nearest neighbours filtered by a filter that doesn't narrow, and by one
+// that narrows, the exact KNN of the chunks it leaves while they are few
+// enough, else the nearest their share of the index calls for, filtered.
+func (s *Chunks) vectorSearchQuery(ctx context.Context, tenantID string, embedding []byte, limit int,
+	filters store.SearchFilters) (knnQuery, error) {
+	if !filters.Narrows() {
+		q, args := vectorQuery(tenantID, embedding, overfetchK(limit), filters)
+		return knnQuery{path: knnOverFetch, sql: q, args: args}, nil
+	}
+	set := chunkSet(tenantID, filters)
+	path, n, err := s.db.chooseKNNPath(ctx, set)
+	if err != nil {
+		return knnQuery{}, err
+	}
+	plan := knnQuery{path: path, set: set, n: n}
+	switch path {
+	case knnNone:
+	case knnOverFetch:
+		k, err := s.db.sizedOverFetchK(ctx, chunkIndexCountSQL, overfetchK(limit), n)
+		if err != nil {
+			return knnQuery{}, err
+		}
+		plan.sql, plan.args = vectorQuery(tenantID, embedding, k, filters)
+	case knnExact:
+		plan.sql, plan.args = exactVectorQuery(embedding, min(limit, vec0MaxK), set)
+	}
+	return plan, nil
+}
+
+// vectorHits runs q, a vector search's query of chunks with their
+// documents and distances, nearest first, and keeps the first limit.
+func (s *Chunks) vectorHits(ctx context.Context, q string, args []any, limit int) ([]store.ChunkHit, error) {
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("vector search: %w", err)
@@ -303,8 +368,9 @@ func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []
 	return out, rows.Err()
 }
 
-// vectorQuery builds VectorSearch's query: a KNN MATCH on chunks_vec, then
-// each hit's chunk and document for scoping and filters.
+// vectorQuery builds VectorSearch's query: a KNN MATCH on chunks_vec for
+// the nearest k, then each hit's chunk and document for scoping and
+// filters.
 //
 // Unlike bm25Query's, its order has no tie-break: sqlite-vec refuses a
 // second ORDER BY key on a KNN query ("Only a single 'ORDER BY distance'
@@ -314,9 +380,9 @@ func (s *Chunks) VectorSearch(ctx context.Context, tenantID string, embedding []
 // sqlite-vec applies the k-NN cutoff at the index level BEFORE the
 // document predicates, and every search has one (searchedDocSQL), so a
 // naive k=limit could return almost nothing once they are applied. The
-// query over-fetches neighbors, and VectorSearch keeps the closest limit
+// caller over-fetches neighbors, and VectorSearch keeps the closest limit
 // rows that pass, so the fanout stays consistent.
-func vectorQuery(tenantID string, embedding []byte, limit int, filters store.SearchFilters) (string, []any) {
+func vectorQuery(tenantID string, embedding []byte, k int, filters store.SearchFilters) (string, []any) {
 	filterSQL, filterArgs := buildFilterClause(filters)
 	q := `
 	SELECT v.chunk_id, c.document_id, v.distance
@@ -327,54 +393,35 @@ func vectorQuery(tenantID string, embedding []byte, limit int, filters store.Sea
 	  AND ` + searchedDocSQL + filterSQL + `
 	ORDER BY v.distance`
 
-	k := min(limit*10, maxVectorOverfetch)
 	return q, slices.Concat([]any{embedding, k}, searchedDocArgs(tenantID), filterArgs)
 }
 
-// maxVectorOverfetch caps how many neighbors a vector search reads before
-// its document predicates apply.
-const maxVectorOverfetch = 1000
+// chunkSet lists the chunks VectorSearch may return under filters: those
+// of the tenant's searched documents that pass them, from the tenant's
+// documents in idx_documents_tenant_state_updated, each document's chunks
+// by idx_chunks_document.
+func chunkSet(tenantID string, filters store.SearchFilters) rowSet {
+	filterSQL, filterArgs := buildFilterClause(filters)
+	return rowSet{
+		sql: `SELECT fc.id FROM documents d JOIN chunks fc ON fc.document_id = d.id
+		WHERE ` + searchedDocSQL + filterSQL,
+		args: slices.Concat(searchedDocArgs(tenantID), filterArgs),
+	}
+}
 
-// buildFilterClause builds the AND-prefixed WHERE conditions and bind args to
-// scope a search by content_type / host / source. The caller's query MUST
-// alias the documents table as `d`. Returns ("", nil) for an empty filter.
-func buildFilterClause(f store.SearchFilters) (string, []any) {
-	if f.IsEmpty() {
-		return "", nil
-	}
-	var sb strings.Builder
-	var args []any
-
-	if len(f.ContentType) > 0 {
-		sb.WriteString(" AND d.content_type IN (" + placeholders(len(f.ContentType)) + ")")
-		for _, v := range f.ContentType {
-			args = append(args, v)
-		}
-	}
-	if len(f.Source) > 0 {
-		sb.WriteString(" AND EXISTS (SELECT 1 FROM bookmarks b" +
-			" WHERE b.document_id = d.id AND b.tenant_id = d.tenant_id" +
-			" AND b.source IN (" + placeholders(len(f.Source)) + "))")
-		for _, v := range f.Source {
-			args = append(args, v)
-		}
-	}
-	if len(f.Host) > 0 {
-		conds := make([]string, 0, len(f.Host))
-		for _, h := range f.Host {
-			cond, condArgs := hostPredicate("d.url", h)
-			conds = append(conds, cond)
-			args = append(args, condArgs...)
-		}
-		sb.WriteString(" AND (" + strings.Join(conds, " OR ") + ")")
-	}
-	if f.ExcludeDocumentID != "" {
-		// NOTE: in KNN mode sqlite-vec applies this predicate AFTER the
-		// k cutoff — correctness here depends on vectorQuery's over-fetch.
-		sb.WriteString(" AND d.id != ?")
-		args = append(args, f.ExcludeDocumentID)
-	}
-	return sb.String(), args
+// exactVectorQuery builds the KNN of the k nearest of set's chunks alone:
+// vec0 takes its primary key IN set, and scans the vectors of those rows
+// alone, so the answer is the exact nearest of the set. Every row it
+// returns passes the filters set was built from.
+func exactVectorQuery(embedding []byte, k int, set rowSet) (string, []any) {
+	q := `
+	SELECT v.chunk_id, c.document_id, v.distance
+	FROM chunks_vec v
+	JOIN chunks c ON c.id = v.chunk_id
+	WHERE v.embedding MATCH ? AND k = ?
+	  AND v.chunk_id IN (` + set.sql + `)
+	ORDER BY v.distance`
+	return q, slices.Concat([]any{embedding, k}, set.args)
 }
 
 // hostPredicate is the condition that urlCol, a URL column, is an http or
